@@ -28,7 +28,7 @@
 	"activationEvents": [
 		"onLanguage:markdown",
 		"onCommand:criticmarkup.nextChange",
-		"onCommand:criticmarkup.prevCHange",
+		"onCommand:criticmarkup.prevChange",
 		"onCommand:criticmarkup.test"
 	],
 	"main": "./out/extension.js",
