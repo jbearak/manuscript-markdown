@@ -2,7 +2,7 @@
 
 ## Overview
 
-This is a VS Code extension that adds CriticMarkup support to Visual Studio Code. CriticMarkup is a syntax for marking up proposed changes in text: additions, deletions, substitutions, comments, and highlights. The extension provides syntax highlighting, snippets with keybindings, and navigation commands to cycle through changes.
+This is a VS Code extension that adds CriticMarkup support to Visual Studio Code. CriticMarkup is a syntax for marking up proposed changes in text: additions, deletions, substitutions, comments, and highlights. The extension provides syntax highlighting and snippets with keybindings. Navigation commands are defined in configuration but not currently implemented.
 
 ## Development commands
 
@@ -36,7 +36,7 @@ Notes:
 ### Entry point: `src/extension.ts`
 
 Responsibilities:
-- Activation: fires on `onLanguage:markdown` and on CriticMarkup commands (`criticmarkup.nextChange`, `criticmarkup.prevChange`, `criticmarkup.test`).
+- Activation: fires on `onLanguage:markdown` and on CriticMarkup commands (`criticmarkup.nextChange`, `criticmarkup.prevChange`, `criticmarkup.test`). (Note: Command handlers are not yet implemented in `extension.ts`).
 - Syntax patterns: regexes for the five CriticMarkup types in `patterns`.
 - Decorations: creates theme-aware `TextEditorDecorationType`s for each CriticMarkup kind.
 - Event wiring: updates decorations on editor changes, document edits, and theme switches.
@@ -51,7 +51,7 @@ Related resources:
 - `package.json` — extension metadata, activation events, commands, grammar contribution
 - `syntaxes/criticmarkup.json` — TextMate injection grammar (path referenced in `package.json`)
 
-## Tooling conventions (from AGENTS.md)
+## Tooling conventions
 
 - Use Bun for all scripts and dependency management: `bun install`, `bun run <script>`.
 - Use `bunx vsce package` to build the VSIX.
