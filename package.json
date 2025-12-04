@@ -71,31 +71,31 @@
           {
             "scope": "criticmarkup.addition",
             "settings": {
-              "foreground": "#0969da"
+              "foreground": "gitDecoration.addedResourceForeground"
             }
           },
           {
             "scope": "criticmarkup.deletion",
             "settings": {
-              "foreground": "#d4a72c"
+              "foreground": "gitDecoration.deletedResourceForeground"
             }
           },
           {
             "scope": "criticmarkup.substitution",
             "settings": {
-              "foreground": "#fb8500"
+              "foreground": "gitDecoration.modifiedResourceForeground"
             }
           },
           {
             "scope": "criticmarkup.comment",
             "settings": {
-              "foreground": "#6e7781"
+              "foreground": "descriptionForeground"
             }
           },
           {
             "scope": "criticmarkup.highlight",
             "settings": {
-              "foreground": "#8250df"
+              "foreground": "notificationsInfoIcon.foreground"
             }
           }
         ]
