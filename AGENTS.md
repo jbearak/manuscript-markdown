@@ -135,14 +135,14 @@ Package the extension into a `.vsix` file:
 bunx vsce package
 ```
 
-This creates `vscode-criticmarkup-0.2.0.vsix` in the project root.
+This creates `vscode-criticmarkup-0.3.0.vsix` in the project root.
 
 ### Installing the Extension
 
 Install the packaged extension:
 
 ```sh
-code --install-extension vscode-criticmarkup-0.2.0.vsix
+code --install-extension vscode-criticmarkup-0.3.0.vsix
 ```
 
 Or via VS Code UI:

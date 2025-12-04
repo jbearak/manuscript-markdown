@@ -2,7 +2,7 @@
   "name": "vscode-criticmarkup",
   "displayName": "CriticMarkup for Visual Studio Code",
   "description": "A CriticMarkup extension for Visual Studio Code.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "engines": {
     "vscode": "^1.31.0"
   },
@@ -16,14 +16,14 @@
     "criticmarkup",
     "critic markup"
   ],
-  "publisher": "jloow",
+  "publisher": "jbearak",
   "license": "SEE LICENSE IN LICENSE.txt",
   "bugs": {
-    "url": "https://github.com/jloow/vscode-criticmarkup/issues"
+    "url": "https://github.com/jbearak/vscode-criticmarkup/issues"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/jloow/vscode-criticmarkup.git"
+    "url": "https://github.com/jbearak/vscode-criticmarkup.git"
   },
   "activationEvents": [
     "onLanguage:markdown",
