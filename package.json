@@ -35,15 +35,31 @@
     "commands": [
       {
         "command": "criticmarkup.nextChange",
-        "title": "Next Change",
-        "category": "CriticMarkup"
+        "title": "CriticMarkup: Next Change",
+        "icon": "$(arrow-down)",
+        "enablement": "criticmarkup.hasChanges"
       },
       {
         "command": "criticmarkup.prevChange",
-        "title": "Previous Change",
-        "category": "CriticMarkup"
+        "title": "CriticMarkup: Previous Change",
+        "icon": "$(arrow-up)",
+        "enablement": "criticmarkup.hasChanges"
       }
     ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "criticmarkup.prevChange",
+          "when": "editorLangId == markdown && !isInDiffEditor",
+          "group": "navigation"
+        },
+        {
+          "command": "criticmarkup.nextChange",
+          "when": "editorLangId == markdown && !isInDiffEditor",
+          "group": "navigation"
+        }
+      ]
+    },
     "keybindings": [
       {
         "command": "criticmarkup.nextChange",

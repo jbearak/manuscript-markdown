@@ -120,6 +120,19 @@ function updateDecorations(editor: vscode.TextEditor) {
 	editor.setDecorations(decorationTypes.substitution, decorations.substitution);
 	editor.setDecorations(decorationTypes.comment, decorations.comment);
 	editor.setDecorations(decorationTypes.highlight, decorations.highlight);
+
+	// Update context for button enablement
+	updateNavigationContext(editor);
+}
+
+function updateNavigationContext(editor: vscode.TextEditor) {
+	if (editor.document.languageId !== 'markdown') {
+		vscode.commands.executeCommand('setContext', 'criticmarkup.hasChanges', false);
+		return;
+	}
+
+	const ranges = changes.getAllMatches(editor.document);
+	vscode.commands.executeCommand('setContext', 'criticmarkup.hasChanges', ranges.length > 0);
 }
 
 function updateAllEditors() {

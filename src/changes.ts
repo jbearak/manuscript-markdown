@@ -8,7 +8,7 @@ const patterns = [
 	/\{==([\s\S]+?)==\}/g,
 ];
 
-function getAllMatches(document: vscode.TextDocument): vscode.Range[] {
+export function getAllMatches(document: vscode.TextDocument): vscode.Range[] {
 	const text = document.getText();
 	const ranges: vscode.Range[] = [];
 
