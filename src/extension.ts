@@ -10,11 +10,11 @@ let decorationTypes: {
 } | null = null;
 
 const patterns = {
-	addition: /\{\+\+(.+?)\+\+\}/g,
-	deletion: /\{--(.+?)--\}/g,
-	substitution: /\{~~(.+?)~~\}/g,
-	comment: /\{>>(.+?)<<\}/g,
-	highlight: /\{==(.+?)==\}/g,
+	addition: /\{\+\+([\s\S]+?)\+\+\}/g,
+	deletion: /\{--([\s\S]+?)--\}/g,
+	substitution: /\{\~\~([\s\S]+?)\~\~\}/g,
+	comment: /\{>>([\s\S]+?)<<\}/g,
+	highlight: /\{==([\s\S]+?)==\}/g,
 };
 
 function getThemeColors() {
@@ -90,6 +90,17 @@ function createDecorations() {
 	};
 }
 
+let debounceTimer: NodeJS.Timeout | undefined;
+
+function triggerUpdateDecorations(editor: vscode.TextEditor) {
+	if (debounceTimer) {
+		clearTimeout(debounceTimer);
+	}
+	debounceTimer = setTimeout(() => {
+		updateDecorations(editor);
+	}, 200);
+}
+
 function updateDecorations(editor: vscode.TextEditor) {
 	if (!decorationTypes || editor.document.languageId !== 'markdown') {
 		return;
@@ -106,12 +117,15 @@ function updateDecorations(editor: vscode.TextEditor) {
 		highlight: [],
 	};
 
+	let hasChanges = false;
+
 	for (const [type, pattern] of Object.entries(patterns)) {
 		let match;
 		while ((match = pattern.exec(text)) !== null) {
 			const startPos = editor.document.positionAt(match.index);
 			const endPos = editor.document.positionAt(match.index + match[0].length);
 			decorations[type].push({ range: new vscode.Range(startPos, endPos) });
+			hasChanges = true;
 		}
 	}
 
@@ -121,18 +135,7 @@ function updateDecorations(editor: vscode.TextEditor) {
 	editor.setDecorations(decorationTypes.comment, decorations.comment);
 	editor.setDecorations(decorationTypes.highlight, decorations.highlight);
 
-	// Update context for button enablement
-	updateNavigationContext(editor);
-}
-
-function updateNavigationContext(editor: vscode.TextEditor) {
-	if (editor.document.languageId !== 'markdown') {
-		vscode.commands.executeCommand('setContext', 'criticmarkup.hasChanges', false);
-		return;
-	}
-
-	const ranges = changes.getAllMatches(editor.document);
-	vscode.commands.executeCommand('setContext', 'criticmarkup.hasChanges', ranges.length > 0);
+	vscode.commands.executeCommand('setContext', 'criticmarkup.hasChanges', hasChanges);
 }
 
 function updateAllEditors() {
@@ -162,7 +165,7 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.workspace.onDidChangeTextDocument((event) => {
 			const editor = vscode.window.activeTextEditor;
 			if (editor && event.document === editor.document) {
-				updateDecorations(editor);
+				triggerUpdateDecorations(editor);
 			}
 		})
 	);
