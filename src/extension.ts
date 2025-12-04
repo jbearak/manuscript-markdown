@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as changes from './changes';
 
 let decorationTypes: {
 	addition: vscode.TextEditorDecorationType;
@@ -127,6 +128,13 @@ function updateAllEditors() {
 
 export function activate(context: vscode.ExtensionContext) {
 	createDecorations();
+
+	// Register commands
+	context.subscriptions.push(
+		vscode.commands.registerCommand('criticmarkup.nextChange', () => changes.next()),
+		vscode.commands.registerCommand('criticmarkup.prevChange', () => changes.prev()),
+		vscode.commands.registerCommand('criticmarkup.test', () => console.log('CriticMarkup Test'))
+	);
 
 	// Update decorations when active editor changes
 	context.subscriptions.push(

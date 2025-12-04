@@ -2,7 +2,7 @@
 
 ## Overview
 
-This is a VS Code extension that adds CriticMarkup support to Visual Studio Code. CriticMarkup is a syntax for marking up proposed changes in text: additions, deletions, substitutions, comments, and highlights. The extension provides syntax highlighting and snippets with keybindings. Navigation commands are defined in configuration but not currently implemented.
+This is a VS Code extension that adds CriticMarkup support to Visual Studio Code. CriticMarkup is a syntax for marking up proposed changes in text: additions, deletions, substitutions, comments, and highlights. The extension provides syntax highlighting, snippets with keybindings, and navigation commands to cycle through changes.
 
 ## Development commands
 
@@ -36,7 +36,7 @@ Notes:
 ### Entry point: `src/extension.ts`
 
 Responsibilities:
-- Activation: fires on `onLanguage:markdown` and on CriticMarkup commands (`criticmarkup.nextChange`, `criticmarkup.prevChange`, `criticmarkup.test`). (Note: Command handlers are not yet implemented in `extension.ts`).
+- Activation: fires on `onLanguage:markdown` and on CriticMarkup commands (`criticmarkup.nextChange`, `criticmarkup.prevChange`, `criticmarkup.test`).
 - Syntax patterns: regexes for the five CriticMarkup types in `patterns`.
 - Decorations: creates theme-aware `TextEditorDecorationType`s for each CriticMarkup kind.
 - Event wiring: updates decorations on editor changes, document edits, and theme switches.
