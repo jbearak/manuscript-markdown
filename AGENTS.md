@@ -1,159 +1,58 @@
----
-description: Use Bun instead of Node.js, npm, pnpm, or vite.
-globs: "*.ts, *.tsx, *.html, *.css, *.js, *.jsx, package.json"
-alwaysApply: false
----
+# AGENTS.md
 
-Default to using Bun instead of Node.js.
+## Overview
 
-- Use `bun <file>` instead of `node <file>` or `ts-node <file>`
-- Use `bun test` instead of `jest` or `vitest`
-- Use `bun build <file.html|file.ts|file.css>` instead of `webpack` or `esbuild`
-- Use `bun install` instead of `npm install` or `yarn install` or `pnpm install`
-- Use `bun run <script>` instead of `npm run <script>` or `yarn run <script>` or `pnpm run <script>`
-- Bun automatically loads .env, so don't use dotenv.
+This is a VS Code extension that adds CriticMarkup support to Visual Studio Code. CriticMarkup is a syntax for marking up proposed changes in text: additions, deletions, substitutions, comments, and highlights. The extension provides syntax highlighting, snippets with keybindings, and navigation commands to cycle through changes.
 
-## APIs
+## Development commands
 
-- `Bun.serve()` supports WebSockets, HTTPS, and routes. Don't use `express`.
-- `bun:sqlite` for SQLite. Don't use `better-sqlite3`.
-- `Bun.redis` for Redis. Don't use `ioredis`.
-- `Bun.sql` for Postgres. Don't use `pg` or `postgres.js`.
-- `WebSocket` is built-in. Don't use `ws`.
-- Prefer `Bun.file` over `node:fs`'s readFile/writeFile
-- Bun.$`ls` instead of execa.
-
-## Testing
-
-Use `bun test` to run tests.
-
-```ts#index.test.ts
-import { test, expect } from "bun:test";
-
-test("hello world", () => {
-  expect(1).toBe(1);
-});
-```
-
-## Frontend
-
-Use HTML imports with `Bun.serve()`. Don't use `vite`. HTML imports fully support React, CSS, Tailwind.
-
-Server:
-
-```ts#index.ts
-import index from "./index.html"
-
-Bun.serve({
-  routes: {
-    "/": index,
-    "/api/users/:id": {
-      GET: (req) => {
-        return new Response(JSON.stringify({ id: req.params.id }));
-      },
-    },
-  },
-  // optional websocket support
-  websocket: {
-    open: (ws) => {
-      ws.send("Hello, world!");
-    },
-    message: (ws, message) => {
-      ws.send(message);
-    },
-    close: (ws) => {
-      // handle close
-    }
-  },
-  development: {
-    hmr: true,
-    console: true,
-  }
-})
-```
-
-HTML files can import .tsx, .jsx or .js files directly and Bun's bundler will transpile & bundle automatically. `<link>` tags can point to stylesheets and Bun's CSS bundler will bundle.
-
-```html#index.html
-<html>
-  <body>
-    <h1>Hello, world!</h1>
-    <script type="module" src="./frontend.tsx"></script>
-  </body>
-</html>
-```
-
-With the following `frontend.tsx`:
-
-```tsx#frontend.tsx
-import React from "react";
-
-// import .css files directly and it works
-import './index.css';
-
-import { createRoot } from "react-dom/client";
-
-const root = createRoot(document.body);
-
-export default function Frontend() {
-  return <h1>Hello, world!</h1>;
-}
-
-root.render(<Frontend />);
-```
-
-Then, run index.ts
-
+- Setup dependencies:
 ```sh
-bun --hot ./index.ts
+bun install
 ```
-
-For more information, read the Bun API docs in `node_modules/bun-types/docs/**.md`.
-
-
-## VS Code / Kiro Extension Development
-
-### Building the Extension
-
-Compile TypeScript to JavaScript:
-
+- Compile TypeScript:
 ```sh
 bun run compile
 ```
-
-Watch mode for development:
-
+- Watch during development:
 ```sh
 bun run watch
 ```
-
-### Packaging the Extension
-
-Package the extension into a `.vsix` file:
-
+- Package a `.vsix` for local install or distribution:
 ```sh
 bunx vsce package
 ```
-
-This creates a `.vsix` file in the project root (version number is determined by `package.json`).
-
-### Installing the Extension
-
-Install the packaged extension using the appropriate CLI for your editor:
-
-**For VS Code:**
+- Install the built VSIX in VS Code:
 ```sh
-code --install-extension <extension-name>.vsix
+code --install-extension vscode-criticmarkup-<version>.vsix
 ```
 
-**For Kiro:**
-```sh
-kiro --install-extension <extension-name>.vsix
-```
+Notes:
+- No lint or test scripts are configured in `package.json`.
+- Bun auto-loads `.env` files; no separate dotenv setup is required.
 
-Or via the editor UI:
-1. Open Extensions view (Cmd+Shift+X / Ctrl+Shift+X)
-2. Click "..." menu → "Install from VSIX..."
-3. Select the `.vsix` file
+## Code architecture
 
-After installation, reload the editor to activate the extension.
+### Entry point: `src/extension.ts`
+
+Responsibilities:
+- Activation: fires on `onLanguage:markdown` and on CriticMarkup commands (`criticmarkup.nextChange`, `criticmarkup.prevChange`, `criticmarkup.test`).
+- Syntax patterns: regexes for the five CriticMarkup types in `patterns`.
+- Decorations: creates theme-aware `TextEditorDecorationType`s for each CriticMarkup kind.
+- Event wiring: updates decorations on editor changes, document edits, and theme switches.
+
+Key flows:
+- Theme colors: `getThemeColors()` maps VS Code theme kinds (Light, Dark, HighContrast, HighContrastLight) to stable colors.
+- Decoration lifecycle: `createDecorations()` disposes and recreates decoration types when themes change to avoid leaks.
+- Pattern matching + apply: `updateDecorations()` scans the document text and assigns ranges per pattern, then calls `editor.setDecorations(...)` for each type.
+
+Related resources:
+- `snippets.json` — snippet bodies for CriticMarkup syntax
+- `package.json` — extension metadata, activation events, commands, grammar contribution
+- `syntaxes/criticmarkup.json` — TextMate injection grammar (path referenced in `package.json`)
+
+## Tooling conventions (from AGENTS.md)
+
+- Use Bun for all scripts and dependency management: `bun install`, `bun run <script>`.
+- Use `bunx vsce package` to build the VSIX.
+- Prefer Bun’s defaults (e.g., `.env` auto-loading) where applicable.
