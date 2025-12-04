@@ -1,10 +1,8 @@
 import * as vscode from 'vscode';
-import { settings } from './settings';
 
 export function activate(context: vscode.ExtensionContext) {
-
-	settings();
-
+	// Extension uses semantic token colors defined in package.json
+	// No need to modify user settings
 }
 
 export function deactivate() {}

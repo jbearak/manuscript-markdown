@@ -64,7 +64,43 @@
           "text.html.markdown"
         ]
       }
-    ]
+    ],
+    "configurationDefaults": {
+      "editor.tokenColorCustomizations": {
+        "textMateRules": [
+          {
+            "scope": "criticmarkup.addition",
+            "settings": {
+              "foreground": "#0969da"
+            }
+          },
+          {
+            "scope": "criticmarkup.deletion",
+            "settings": {
+              "foreground": "#d4a72c"
+            }
+          },
+          {
+            "scope": "criticmarkup.substitution",
+            "settings": {
+              "foreground": "#fb8500"
+            }
+          },
+          {
+            "scope": "criticmarkup.comment",
+            "settings": {
+              "foreground": "#6e7781"
+            }
+          },
+          {
+            "scope": "criticmarkup.highlight",
+            "settings": {
+              "foreground": "#8250df"
+            }
+          }
+        ]
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "bun run compile",
