@@ -44,6 +44,18 @@
         "category": "CriticMarkup"
       }
     ],
+    "keybindings": [
+      {
+        "command": "criticmarkup.nextChange",
+        "key": "alt+shift+j",
+        "when": "editorTextFocus && editorLangId == markdown"
+      },
+      {
+        "command": "criticmarkup.prevChange",
+        "key": "alt+shift+k",
+        "when": "editorTextFocus && editorLangId == markdown"
+      }
+    ],
     "snippets": [
       {
         "language": "markdown",
