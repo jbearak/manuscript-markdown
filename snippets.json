@@ -19,8 +19,8 @@
         "body": "{>>$1<<}",
         "description": "Add comment."
     },
-    "Highlight": {
-        "prefix": "Highlight",
+    "Highlight and comment": {
+        "prefix": "Highlight and comment",
         "body": "{==${TM_SELECTED_TEXT:$1}==}{>>$2<<}",
         "description": "Highlight (and comment) text."
     }
