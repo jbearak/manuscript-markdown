@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
 
 // Combined pattern for all CriticMarkup syntax in a single regex
-const combinedPattern = /\{\+\+([\s\S]+?)\+\+\}|\{--([\s\S]+?)--\}|\{\~\~([\s\S]+?)\~\~\}|\{>>([\s\S]+?)<<\}|\{==([\s\S]+?)==\}|\~\~([\s\S]+?)\~\~|<!--([\s\S]+?)-->/g;
+// Using [\s\S]*? to match zero or more characters (including newlines) to support empty patterns
+const combinedPattern = /\{\+\+([\s\S]*?)\+\+\}|\{--([\s\S]*?)--\}|\{\~\~([\s\S]*?)\~\~\}|\{>>([\s\S]*?)<<\}|\{==([\s\S]*?)==\}|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
 
 export function getAllMatches(document: vscode.TextDocument): vscode.Range[] {
 	const text = document.getText();

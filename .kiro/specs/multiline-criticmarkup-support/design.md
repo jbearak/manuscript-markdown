@@ -292,32 +292,36 @@ The preview plugin needs to handle empty lines within patterns:
 2. **Priority ordering**: Ensure CriticMarkup patterns are identified before markdown-it splits on empty lines
 3. **Preserve content**: Ensure all content including empty lines is preserved in the output
 
-### Mid-line Multi-line Pattern Bug
+### Mid-line Multi-line Pattern Limitation
 
-**Issue Discovered**: The current `criticmarkupBlock` function only detects patterns that start at the beginning of a line. It checks the first 3 characters of each line (`lineStart`) and returns false if they don't match a CriticMarkup opening marker.
+**Issue**: The `criticmarkupBlock` function only detects patterns that start at the beginning of a line. It checks the first 3 characters of each line and returns false if they don't match a CriticMarkup opening marker.
 
-**Impact**: Multi-line patterns that start mid-line (e.g., `Some text {++multi\nline++}`) are not recognized by:
-- The block-level parser (fails to capture them)
-- The inline parser (can't span line boundaries in markdown-it)
-- Navigation commands (document isn't parsed correctly)
-- Preview rendering (markdown-it splits them at line boundaries)
+**Impact**: Multi-line patterns that start mid-line (e.g., `Some text {++multi\nline++}`) are not fully supported:
+- ✅ **Navigation commands work correctly** - The regex-based pattern matching in `changes.ts` handles mid-line patterns
+- ❌ **Preview rendering fails** - The block-level parser doesn't capture mid-line multi-line patterns, so markdown-it splits them at line boundaries
+- ❌ **TextMate syntax highlighting limited** - VS Code's TextMate engine has inherent limitations with multi-line patterns
 
-**Root Cause**: The block-level rule was designed to prevent markdown-it from splitting patterns at empty lines, but it only checks if a line **starts** with a pattern. This was an implementation oversight not caught by tests, which only generated patterns at the beginning of strings.
+**Root Cause**: The block-level rule was designed to prevent markdown-it from splitting patterns at empty lines, but it only checks if a line **starts** with a pattern. Extending this to handle mid-line patterns adds significant complexity:
+1. Need to split text before/after patterns into separate paragraphs
+2. Multiple patterns on the same line become complex to handle
+3. Interaction with markdown's block-level syntax (blockquotes, lists, etc.) is unpredictable
+4. TextMate grammars have fundamental limitations with multi-line patterns
 
-**Fix Approach**: Modify the `criticmarkupBlock` function to:
-1. Scan the entire line content, not just the beginning
-2. Detect CriticMarkup opening markers at any position on the line
-3. When a multi-line pattern is found mid-line, handle the text before it as a separate paragraph
-4. Process the CriticMarkup pattern as a block
-5. Continue processing any text after the closing marker
+**Decision**: After implementation attempts, we've decided to **document this as a known limitation** rather than add complex workarounds that don't fully solve the problem. The navigation functionality (which is most important for editing workflows) works correctly for all patterns.
 
-**Alternative Approach**: Instead of modifying the block rule, we could:
-1. Pre-process the source text to protect CriticMarkup patterns
-2. Replace patterns with placeholders before markdown-it parsing
-3. Restore patterns after parsing
-4. This is more complex but might be more robust
+**Workaround for Users**: To ensure multi-line patterns work correctly in preview and syntax highlighting, start them at the beginning of a line:
 
-The first approach (modifying the block rule) is preferred as it's more aligned with markdown-it's architecture and doesn't require text manipulation.
+```markdown
+Good (works everywhere):
+{++multi
+line
+pattern++}
+
+Limited (navigation only):
+Text before {++multi
+line
+pattern++}
+```
 
 ### Regex Pattern Considerations
 

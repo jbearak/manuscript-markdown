@@ -11,27 +11,62 @@
 		"addition": {
 			"begin": "\\{\\+\\+",
 			"end": "\\+\\+\\}",
-			"name": "markup.inserted"
+			"name": "markup.inserted.criticmarkup",
+			"contentName": "markup.inserted",
+			"patterns": [
+				{
+					"match": ".",
+					"name": "markup.inserted"
+				}
+			]
 		},
 		"deletion": {
 			"begin": "\\{--",
 			"end": "--\\}",
-			"name": "markup.deleted"
+			"name": "markup.deleted.criticmarkup",
+			"contentName": "markup.deleted",
+			"patterns": [
+				{
+					"match": ".",
+					"name": "markup.deleted"
+				}
+			]
 		},
 		"substitution": {
 			"begin": "\\{\\~\\~",
 			"end": "\\~\\~\\}",
-			"name": "markup.changed"
+			"name": "markup.changed.criticmarkup",
+			"contentName": "markup.changed",
+			"patterns": [
+				{
+					"match": ".",
+					"name": "markup.changed"
+				}
+			]
 		},
 		"comment": {
 			"begin": "\\{>>",
 			"end": "<<\\}",
-			"name": "entity.name.function"
+			"name": "entity.name.function.criticmarkup",
+			"contentName": "entity.name.function",
+			"patterns": [
+				{
+					"match": ".",
+					"name": "entity.name.function"
+				}
+			]
 		},
 		"highlight": {
 			"begin": "\\{==",
 			"end": "==\\}",
-			"name": "markup.bold"
+			"name": "markup.bold.criticmarkup",
+			"contentName": "markup.bold",
+			"patterns": [
+				{
+					"match": ".",
+					"name": "markup.bold"
+				}
+			]
 		}
 	},
     "scopeName": "criticmarkup.injection"

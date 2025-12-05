@@ -1,5 +1,6 @@
 import type MarkdownIt from 'markdown-it';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
+import type StateBlock from 'markdown-it/lib/rules_block/state_block.mjs';
 
 /**
  * Defines a CriticMarkup pattern configuration
@@ -77,6 +78,94 @@ function addInlineContent(state: StateInline, content: string): void {
       token.children = childToken.children;
     }
   }
+}
+
+/**
+ * Block-level rule that identifies CriticMarkup patterns before paragraph parsing
+ * This prevents markdown-it from splitting patterns at empty lines
+ * 
+ * LIMITATION: Only detects patterns that start at the beginning of a line.
+ * Patterns that start mid-line with multi-line content will not be handled by this rule
+ * and will be split by markdown-it's paragraph parser.
+ * 
+ * @param state - The block parsing state
+ * @param startLine - Starting line number
+ * @param endLine - Ending line number
+ * @param silent - Whether to only check without creating tokens
+ * @returns true if a CriticMarkup block was found and processed
+ */
+function criticmarkupBlock(state: StateBlock, startLine: number, endLine: number, silent: boolean): boolean {
+  const pos = state.bMarks[startLine] + state.tShift[startLine];
+  const max = state.eMarks[startLine];
+  
+  // Quick check: does this line start with a potential CriticMarkup pattern?
+  if (pos + 3 > max) return false;
+  
+  const src = state.src;
+  const lineStart = src.slice(pos, Math.min(pos + 3, max));
+  
+  // Check if this line starts with a CriticMarkup opening marker
+  const patterns = ['{++', '{--', '{~~', '{>>', '{=='];
+  if (!patterns.includes(lineStart)) {
+    return false;
+  }
+  
+  // Determine the closing marker
+  let closeMarker: string;
+  if (lineStart === '{++') closeMarker = '++}';
+  else if (lineStart === '{--') closeMarker = '--}';
+  else if (lineStart === '{~~') closeMarker = '~~}';
+  else if (lineStart === '{>>') closeMarker = '<<}';
+  else if (lineStart === '{==') closeMarker = '==}';
+  else return false;
+  
+  // Search for the closing marker starting from current position
+  const searchStart = pos + 3;
+  let closePos = src.indexOf(closeMarker, searchStart);
+  if (closePos === -1) {
+    return false;
+  }
+  
+  // Check if the pattern contains any newlines (making it multi-line)
+  const patternContent = src.slice(pos, closePos + closeMarker.length);
+  const hasNewline = patternContent.includes('\n');
+  
+  if (!hasNewline) {
+    // Single-line pattern, let the inline parser handle it
+    return false;
+  }
+  
+  // Find which line the closing marker is on
+  const patternEnd = closePos + closeMarker.length;
+  let nextLine = startLine;
+  
+  // Scan through lines to find where the pattern ends
+  while (nextLine < endLine) {
+    const lineEnd = state.eMarks[nextLine];
+    if (lineEnd >= patternEnd) {
+      // The pattern ends on or before this line
+      nextLine++;
+      break;
+    }
+    nextLine++;
+  }
+  
+  if (silent) return true;
+  
+  // Create a paragraph token that contains the entire CriticMarkup pattern
+  const token = state.push('paragraph_open', 'p', 1);
+  token.map = [startLine, nextLine];
+  
+  const contentToken = state.push('inline', '', 0);
+  contentToken.content = patternContent;
+  contentToken.map = [startLine, nextLine];
+  contentToken.children = [];
+  
+  state.push('paragraph_close', 'p', -1);
+  
+  // Advance state.line to skip all lines we've consumed
+  state.line = nextLine;
+  return true;
 }
 
 /**
@@ -224,6 +313,10 @@ function parseCriticMarkup(state: StateInline, silent: boolean): boolean {
  * @param md - The MarkdownIt instance to extend
  */
 export function criticmarkupPlugin(md: MarkdownIt): void {
+  // Register the block-level rule to handle multi-line patterns with empty lines
+  // This must run very early, before heading and paragraph parsing
+  md.block.ruler.before('heading', 'criticmarkup_block', criticmarkupBlock);
+  
   // Register the inline rule for CriticMarkup parsing
   // Run before emphasis and other inline rules to handle CriticMarkup first
   md.inline.ruler.before('emphasis', 'criticmarkup', parseCriticMarkup);

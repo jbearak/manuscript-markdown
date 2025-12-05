@@ -45,7 +45,7 @@ To cycle between changes, use the Command Palette and the commands
 
 CriticMarkup patterns can span multiple lines, including patterns with empty lines within them. This allows you to mark up entire paragraphs or sections.
 
-**Important**: Multi-line patterns must start at the beginning of a line to work correctly. Patterns that start mid-line (after other text on the same line) are not currently supported for multi-line content.
+**Important Limitation**: Multi-line patterns must start at the beginning of a line to work correctly in **preview rendering**. Patterns that start mid-line (after other text on the same line) will not render correctly in the preview. However, **navigation commands** (Next Change/Previous Change) work correctly for all patterns regardless of their position on the line.
 
 **Addition spanning multiple lines:**
 ```
@@ -134,13 +134,15 @@ The syntax highlight colors can be changed by modifying the following
 
 ## Limitations
 
-- **Multi-line patterns must start at beginning of line**: Currently, multi-line CriticMarkup patterns only work correctly when they start at the beginning of a line. Patterns that start mid-line (after other text) will not be recognized correctly for syntax highlighting, navigation, or preview rendering. This is a known limitation of the current implementation.
+- **Multi-line patterns must start at beginning of line**: Multi-line CriticMarkup patterns only work correctly in **preview rendering** when they start at the beginning of a line. Patterns that start mid-line (after other text) will not be recognized correctly for preview rendering. However, **navigation commands work correctly** for all patterns regardless of position. This is a known limitation due to how markdown-it processes block-level content.
 
-- **Performance**: While the extension handles multi-line patterns efficiently for typical documents, very large documents (10,000+ lines) with many complex multi-line patterns may experience slight delays in syntax highlighting or navigation.
+- **TextMate syntax highlighting**: VS Code's TextMate grammar engine has limitations with multi-line pattern highlighting. While the extension attempts to provide syntax highlighting for multi-line patterns, the highlighting may not always extend correctly across all lines, especially for very long patterns or patterns with complex nesting.
 
-- **Nested patterns**: CriticMarkup patterns cannot be nested within each other. If you attempt to nest patterns (e.g., `{++outer {--inner--}++}`), only the outer pattern will be recognized.
+- **Performance**: The extension handles multi-line patterns efficiently for typical documents. Very large documents (10,000+ lines) with many complex multi-line patterns may experience slight delays in syntax highlighting or navigation.
 
-- **Unclosed patterns**: If you start a CriticMarkup pattern but don't close it (e.g., `{++text without closing`), the pattern will not be recognized as valid CriticMarkup. Navigation commands will not find it, and in the preview it will appear as literal text. The syntax highlighting behavior depends on VS Code's TextMate engine and may continue highlighting until it finds a closing marker or reaches an internal limit.
+- **Nested patterns**: CriticMarkup patterns cannot be nested within each other. If you attempt to nest patterns (e.g., `{++outer {--inner--}++}`), only the first complete pattern will be recognized.
+
+- **Unclosed patterns**: If you start a CriticMarkup pattern but don't close it (e.g., `{++text without closing`), the pattern will not be recognized as valid CriticMarkup. Navigation commands will not find it, and in the preview it will appear as literal text.
 
 ## Todo
 
