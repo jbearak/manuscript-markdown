@@ -24,7 +24,7 @@ describe('CriticMarkup CSS Default Colors', () => {
 
   it('should contain blue color for comments', () => {
     expect(cssContent).toContain('.criticmarkup-comment');
-    expect(cssContent).toMatch(/\.criticmarkup-comment[\s\S]*?color:\s*#0000bb/);
+    expect(cssContent).toMatch(/\.criticmarkup-comment[\s\S]*?color:\s*#4a9eff/);
   });
 
   it('should contain purple color for highlights', () => {
@@ -43,7 +43,7 @@ describe('CriticMarkup CSS Default Colors', () => {
     expect(cssContent).toMatch(/\.criticmarkup-substitution[\s\S]*?background-color:\s*rgba\(255,\s*134,\s*0,\s*0\.1\)/);
     
     // Comment background
-    expect(cssContent).toMatch(/\.criticmarkup-comment[\s\S]*?background-color:\s*rgba\(0,\s*0,\s*187,\s*0\.1\)/);
+    expect(cssContent).toMatch(/\.criticmarkup-comment[\s\S]*?background-color:\s*rgba\(74,\s*158,\s*255,\s*0\.15\)/);
     
     // Highlight background (slightly more opaque at 0.2)
     expect(cssContent).toMatch(/\.criticmarkup-highlight[\s\S]*?background-color:\s*rgba\(170,\s*83,\s*169,\s*0\.2\)/);

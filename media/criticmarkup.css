@@ -19,10 +19,10 @@
   background-color: rgba(255, 134, 0, 0.1);
 }
 
-/* Comment - blue with semi-transparent background and italic */
+/* Comment - light blue with semi-transparent background and italic */
 .criticmarkup-comment {
-  color: #0000bb;
-  background-color: rgba(0, 0, 187, 0.1);
+  color: #4a9eff;
+  background-color: rgba(74, 158, 255, 0.15);
   font-style: italic;
 }
 
