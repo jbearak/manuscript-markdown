@@ -338,42 +338,6 @@
         ]
       }
     ],
-    "configurationDefaults": {
-      "editor.tokenColorCustomizations": {
-        "textMateRules": [
-          {
-            "scope": "markup.inserted.criticmarkup",
-            "settings": {
-              "foreground": "#4ec9b0"
-            }
-          },
-          {
-            "scope": "markup.deleted.criticmarkup",
-            "settings": {
-              "foreground": "#f48771"
-            }
-          },
-          {
-            "scope": "markup.changed.criticmarkup",
-            "settings": {
-              "foreground": "#dcdcaa"
-            }
-          },
-          {
-            "scope": "markup.quote.criticmarkup",
-            "settings": {
-              "foreground": "#ce9178"
-            }
-          },
-          {
-            "scope": "markup.highlight.criticmarkup",
-            "settings": {
-              "foreground": "#c586c0"
-            }
-          }
-        ]
-      }
-    },
     "markdown.previewStyles": [
       "./media/criticmarkup.css"
     ],

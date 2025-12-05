@@ -11,27 +11,27 @@
 		"addition": {
 			"begin": "\\{\\+\\+",
 			"end": "\\+\\+\\}",
-			"name": "markup.inserted.criticmarkup"
+			"name": "markup.inserted"
 		},
 		"deletion": {
 			"begin": "\\{--",
 			"end": "--\\}",
-			"name": "markup.deleted.criticmarkup"
+			"name": "markup.deleted"
 		},
 		"substitution": {
 			"begin": "\\{\\~\\~",
 			"end": "\\~\\~\\}",
-			"name": "markup.changed.criticmarkup"
+			"name": "markup.changed"
 		},
 		"comment": {
 			"begin": "\\{>>",
 			"end": "<<\\}",
-			"name": "markup.quote.criticmarkup"
+			"name": "entity.name.function"
 		},
 		"highlight": {
 			"begin": "\\{==",
 			"end": "==\\}",
-			"name": "markup.highlight.criticmarkup"
+			"name": "markup.bold"
 		}
 	},
     "scopeName": "criticmarkup.injection"
