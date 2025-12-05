@@ -14,6 +14,7 @@ Implements support for CriticMarkup in Visual Studio Code.
   substitutions, as well as for commenting and highlighting.
 - Adds grammars and syntax highlighting
 - Cycle through changes in the document
+- Full support for multi-line CriticMarkup patterns
 
 ## Requirements
 
@@ -39,6 +40,64 @@ Use the following key bindings to insert CriticMarkup markup:
 
 To cycle between changes, use the Command Palette and the commands
 `CriticMarkup: Next Change` and `CriticMarkup: Previous Change`.
+
+### Multi-line Support
+
+All CriticMarkup patterns fully support spanning multiple lines, including patterns with empty lines within them. This allows you to mark up entire paragraphs or sections:
+
+**Addition spanning multiple lines:**
+```
+{++
+This is a new paragraph that spans
+multiple lines.
+
+It can even include empty lines between paragraphs.
+++}
+```
+
+**Deletion of multiple paragraphs:**
+```
+{--
+Remove this entire section
+including multiple paragraphs.
+
+This will all be marked as deleted.
+--}
+```
+
+**Multi-line substitution:**
+```
+{~~
+Old text that spans
+multiple lines
+~>
+New replacement text
+that also spans multiple lines
+~~}
+```
+
+**Multi-line comments:**
+```
+{>>
+This is a detailed comment
+that provides extensive feedback
+across multiple lines.
+<<}
+```
+
+**Multi-line highlights:**
+```
+{==
+Highlight this important section
+that spans multiple lines
+for review.
+==}
+```
+
+The extension handles multi-line patterns correctly in:
+- Syntax highlighting in the editor
+- Navigation commands (next/previous change)
+- Markdown preview rendering
 
 ## Extension Settings
 
@@ -70,6 +129,14 @@ The syntax highlight colors can be changed by modifying the following
 
 - The key bindings probably conflict with other key bindings. Please
   let know.
+
+## Limitations
+
+- **Performance**: While the extension handles multi-line patterns efficiently for typical documents, very large documents (10,000+ lines) with many complex multi-line patterns may experience slight delays in syntax highlighting or navigation.
+
+- **Nested patterns**: CriticMarkup patterns cannot be nested within each other. If you attempt to nest patterns (e.g., `{++outer {--inner--}++}`), only the outer pattern will be recognized.
+
+- **Unclosed patterns**: If you start a CriticMarkup pattern but don't close it (e.g., `{++text without closing`), the pattern will not be recognized as valid CriticMarkup. Navigation commands will not find it, and in the preview it will appear as literal text. The syntax highlighting behavior depends on VS Code's TextMate engine and may continue highlighting until it finds a closing marker or reaches an internal limit.
 
 ## Todo
 
