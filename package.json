@@ -385,6 +385,11 @@
           "type": "string",
           "default": "",
           "description": "Author name to use in comments (leave empty to use OS username)"
+        },
+        "criticmarkup.includeTimestampInComments": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include timestamp in comment author attribution (format: username (yyyy-mm-dd hh:mm))"
         }
       }
     }

@@ -59,23 +59,23 @@ export function activate(context: vscode.ExtensionContext) {
 			applyFormatting((text) => formatting.wrapSelection(text, '{==', '==}'))
 		),
 		vscode.commands.registerCommand('criticmarkup.insertComment', () => {
-			const authorName = author.getAuthorName();
+			const authorName = author.getFormattedAuthorName();
 			applyFormatting((text) => formatting.wrapSelection(text, '{>>', '<<}', 3, authorName));
 		}),
 		vscode.commands.registerCommand('criticmarkup.highlightAndComment', () => {
-			const authorName = author.getAuthorName();
+			const authorName = author.getFormattedAuthorName();
 			applyFormatting((text) => formatting.highlightAndComment(text, authorName));
 		}),
 		vscode.commands.registerCommand('criticmarkup.substituteAndComment', () => {
-			const authorName = author.getAuthorName();
+			const authorName = author.getFormattedAuthorName();
 			applyFormatting((text) => formatting.substituteAndComment(text, authorName));
 		}),
 		vscode.commands.registerCommand('criticmarkup.additionAndComment', () => {
-			const authorName = author.getAuthorName();
+			const authorName = author.getFormattedAuthorName();
 			applyFormatting((text) => formatting.additionAndComment(text, authorName));
 		}),
 		vscode.commands.registerCommand('criticmarkup.deletionAndComment', () => {
-			const authorName = author.getAuthorName();
+			const authorName = author.getFormattedAuthorName();
 			applyFormatting((text) => formatting.deletionAndComment(text, authorName));
 		})
 	);

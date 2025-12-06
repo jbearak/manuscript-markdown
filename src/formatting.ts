@@ -24,7 +24,7 @@ export function wrapSelection(
   
   // If this is a comment (prefix is '{>>') and we have an author name, insert it
   if (prefix === '{>>' && authorName) {
-    const authorPrefix = `@${authorName}: `;
+    const authorPrefix = `${authorName}: `;
     newText = prefix + authorPrefix + text + suffix;
     // Adjust cursor offset to account for author prefix length
     if (adjustedCursorOffset !== undefined) {
@@ -125,7 +125,7 @@ export function formatHeading(text: string, level: number): TextTransformation {
  */
 export function highlightAndComment(text: string, authorName?: string | null): TextTransformation {
   const highlighted = `{==${text}==}`;
-  const authorPrefix = authorName ? `@${authorName}: ` : '';
+  const authorPrefix = authorName ? `${authorName}: ` : '';
   const withComment = highlighted + `{>>${authorPrefix}<<}`;
   const cursorOffset = highlighted.length + 3 + authorPrefix.length; // Position after author prefix
   
@@ -163,7 +163,7 @@ export function formatBoldItalic(text: string): TextTransformation {
  */
 export function substituteAndComment(text: string, authorName?: string | null): TextTransformation {
   const substitution = `{~~${text}~>~~}`;
-  const authorPrefix = authorName ? `@${authorName}: ` : '';
+  const authorPrefix = authorName ? `${authorName}: ` : '';
   const withComment = substitution + `{>>${authorPrefix}<<}`;
   const cursorOffset = substitution.length + 3 + authorPrefix.length; // Position after author prefix
   
@@ -181,7 +181,7 @@ export function substituteAndComment(text: string, authorName?: string | null): 
  */
 export function additionAndComment(text: string, authorName?: string | null): TextTransformation {
   const addition = `{++${text}++}`;
-  const authorPrefix = authorName ? `@${authorName}: ` : '';
+  const authorPrefix = authorName ? `${authorName}: ` : '';
   const withComment = addition + `{>>${authorPrefix}<<}`;
   const cursorOffset = addition.length + 3 + authorPrefix.length; // Position after author prefix
   
@@ -199,7 +199,7 @@ export function additionAndComment(text: string, authorName?: string | null): Te
  */
 export function deletionAndComment(text: string, authorName?: string | null): TextTransformation {
   const deletion = `{--${text}--}`;
-  const authorPrefix = authorName ? `@${authorName}: ` : '';
+  const authorPrefix = authorName ? `${authorName}: ` : '';
   const withComment = deletion + `{>>${authorPrefix}<<}`;
   const cursorOffset = deletion.length + 3 + authorPrefix.length; // Position after author prefix
   

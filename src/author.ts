@@ -46,3 +46,38 @@ export function getAuthorName(): string | null {
 		return null;
 	}
 }
+
+/**
+ * Formats the author name with optional timestamp
+ * Returns the formatted string or null if author name is unavailable
+ * Format: "username (yyyy-mm-dd hh:mm)" or just "username" if timestamps disabled
+ */
+export function getFormattedAuthorName(): string | null {
+	const authorName = getAuthorName();
+	if (!authorName) {
+		return null;
+	}
+	
+	try {
+		const config = vscode.workspace.getConfiguration('criticmarkup');
+		const includeTimestamp = config.get<boolean>('includeTimestampInComments', true);
+		
+		if (!includeTimestamp) {
+			return authorName;
+		}
+		
+		// Format timestamp as yyyy-mm-dd hh:mm in local timezone
+		const now = new Date();
+		const year = now.getFullYear();
+		const month = String(now.getMonth() + 1).padStart(2, '0');
+		const day = String(now.getDate()).padStart(2, '0');
+		const hours = String(now.getHours()).padStart(2, '0');
+		const minutes = String(now.getMinutes()).padStart(2, '0');
+		
+		const timestamp = `${year}-${month}-${day} ${hours}:${minutes}`;
+		return `${authorName} (${timestamp})`;
+	} catch (error) {
+		// If timestamp formatting fails, return just the author name
+		return authorName;
+	}
+}
