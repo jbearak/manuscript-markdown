@@ -315,9 +315,15 @@ export function isSeparatorRow(line: string): boolean {
     return false;
   }
   
-  // Each cell (between pipes) must contain at least one hyphen
+  // Each cell (between pipes) must contain at least 3 characters that are hyphens or colons
+  // and at least one must be a hyphen (standard markdown requirement)
   const cells = trimmed.slice(1, -1).split('|');
-  return cells.every(cell => cell.includes('-'));
+  return cells.every(cell => {
+    const trimmedCell = cell.trim();
+    const hyphensAndColons = trimmedCell.match(/[-:]/g);
+    const hyphens = trimmedCell.match(/-/g);
+    return hyphensAndColons && hyphensAndColons.length >= 3 && hyphens && hyphens.length >= 1;
+  });
 }
 
 /**
