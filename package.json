@@ -65,19 +65,19 @@
       },
       {
         "command": "criticmarkup.highlightAndComment",
-        "title": "Highlight and Comment"
+        "title": "Comment and highlight"
       },
       {
         "command": "criticmarkup.substituteAndComment",
-        "title": "Substitute and Comment"
+        "title": "Comment and substitution"
       },
       {
         "command": "criticmarkup.additionAndComment",
-        "title": "Addition and Comment"
+        "title": "Comment and mark as addition"
       },
       {
         "command": "criticmarkup.deletionAndComment",
-        "title": "Deletion and Comment"
+        "title": "Comment and mark as deletion"
       },
       {
         "command": "markdown.formatBold",
