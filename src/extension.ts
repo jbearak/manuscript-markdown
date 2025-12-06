@@ -120,6 +120,13 @@ export function activate(context: vscode.ExtensionContext) {
 		)
 	);
 
+	// Register table formatting commands
+	context.subscriptions.push(
+		vscode.commands.registerCommand('markdown.reflowTable', () => 
+			applyLineBasedFormatting((text) => formatting.reflowTable(text))
+		)
+	);
+
 	// Register heading commands (use line-based formatting)
 	context.subscriptions.push(
 		vscode.commands.registerCommand('markdown.formatHeading1', () => 

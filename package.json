@@ -152,6 +152,10 @@
         "title": "Heading 6"
       },
       {
+        "command": "markdown.reflowTable",
+        "title": "Reflow Table"
+      },
+      {
         "command": "criticmarkup.debugAuthorName",
         "title": "CriticMarkup: Debug Author Name"
       }
@@ -297,6 +301,11 @@
           "command": "markdown.formatQuoteBlock",
           "when": "editorLangId == markdown",
           "group": "2_lists@4"
+        },
+        {
+          "command": "markdown.reflowTable",
+          "when": "editorLangId == markdown",
+          "group": "2_tables@5"
         },
         {
           "submenu": "markdown.heading",

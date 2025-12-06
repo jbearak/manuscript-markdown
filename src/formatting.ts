@@ -24,7 +24,7 @@ export function wrapSelection(
   
   // If this is a comment (prefix is '{>>') and we have an author name, insert it
   if (prefix === '{>>' && authorName) {
-    const authorPrefix = `${authorName}: `;
+    const authorPrefix = `@${authorName}: `;
     newText = prefix + authorPrefix + text + suffix;
     // Adjust cursor offset to account for author prefix length
     if (adjustedCursorOffset !== undefined) {
@@ -125,7 +125,7 @@ export function formatHeading(text: string, level: number): TextTransformation {
  */
 export function highlightAndComment(text: string, authorName?: string | null): TextTransformation {
   const highlighted = `{==${text}==}`;
-  const authorPrefix = authorName ? `${authorName}: ` : '';
+  const authorPrefix = authorName ? `@${authorName}: ` : '';
   const withComment = highlighted + `{>>${authorPrefix}<<}`;
   const cursorOffset = highlighted.length + 3 + authorPrefix.length; // Position after author prefix
   
@@ -163,7 +163,7 @@ export function formatBoldItalic(text: string): TextTransformation {
  */
 export function substituteAndComment(text: string, authorName?: string | null): TextTransformation {
   const substitution = `{~~${text}~>~~}`;
-  const authorPrefix = authorName ? `${authorName}: ` : '';
+  const authorPrefix = authorName ? `@${authorName}: ` : '';
   const withComment = substitution + `{>>${authorPrefix}<<}`;
   const cursorOffset = substitution.length + 3 + authorPrefix.length; // Position after author prefix
   
@@ -181,7 +181,7 @@ export function substituteAndComment(text: string, authorName?: string | null): 
  */
 export function additionAndComment(text: string, authorName?: string | null): TextTransformation {
   const addition = `{++${text}++}`;
-  const authorPrefix = authorName ? `${authorName}: ` : '';
+  const authorPrefix = authorName ? `@${authorName}: ` : '';
   const withComment = addition + `{>>${authorPrefix}<<}`;
   const cursorOffset = addition.length + 3 + authorPrefix.length; // Position after author prefix
   
@@ -199,7 +199,7 @@ export function additionAndComment(text: string, authorName?: string | null): Te
  */
 export function deletionAndComment(text: string, authorName?: string | null): TextTransformation {
   const deletion = `{--${text}--}`;
-  const authorPrefix = authorName ? `${authorName}: ` : '';
+  const authorPrefix = authorName ? `@${authorName}: ` : '';
   const withComment = deletion + `{>>${authorPrefix}<<}`;
   const cursorOffset = deletion.length + 3 + authorPrefix.length; // Position after author prefix
   
@@ -247,4 +247,178 @@ export function formatLink(text: string): TextTransformation {
  */
 export function formatTaskList(text: string): TextTransformation {
   return wrapLines(text, '- [ ] ');
+}
+
+/**
+ * Interface representing a single row in a markdown table
+ */
+export interface TableRow {
+  cells: string[];
+  isSeparator: boolean;
+}
+
+/**
+ * Interface representing a parsed markdown table
+ */
+export interface ParsedTable {
+  rows: TableRow[];
+  columnWidths: number[];
+}
+
+/**
+ * Checks if a line is a valid markdown table row
+ * A valid table row starts and ends with | and contains at least one | separator
+ * @param line - The line to check
+ * @returns true if the line is a valid table row
+ */
+export function isTableRow(line: string): boolean {
+  const trimmed = line.trim();
+  if (trimmed.length === 0) {
+    return false;
+  }
+  
+  // Must start and end with |
+  if (!trimmed.startsWith('|') || !trimmed.endsWith('|')) {
+    return false;
+  }
+  
+  // Must contain at least one | separator (meaning at least 2 | total)
+  const pipeCount = (trimmed.match(/\|/g) || []).length;
+  return pipeCount >= 2;
+}
+
+/**
+ * Checks if a line is a markdown table separator row (header separator)
+ * A separator row contains only pipes, hyphens, colons, and spaces
+ * @param line - The line to check
+ * @returns true if the line is a separator row
+ */
+export function isSeparatorRow(line: string): boolean {
+  const trimmed = line.trim();
+  
+  // Must be a valid table row first
+  if (!isTableRow(trimmed)) {
+    return false;
+  }
+  
+  // Check if content between pipes contains only hyphens, colons, and spaces
+  // Pattern: starts with |, then groups of [spaces, optional colon, hyphens, optional colon, spaces] separated by |, ends with |
+  const separatorPattern = /^\|[\s:|-]+\|$/;
+  if (!separatorPattern.test(trimmed)) {
+    return false;
+  }
+  
+  // Each cell (between pipes) must contain at least one hyphen
+  const cells = trimmed.slice(1, -1).split('|');
+  return cells.every(cell => cell.includes('-'));
+}
+
+/**
+ * Parses markdown table text into structured data
+ * @param text - The table text to parse
+ * @returns ParsedTable object with rows and column widths, or null if not a valid table
+ */
+export function parseTable(text: string): ParsedTable | null {
+  const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+  
+  if (lines.length === 0) {
+    return null;
+  }
+  
+  // Check if all lines are valid table rows
+  if (!lines.every(line => isTableRow(line))) {
+    return null;
+  }
+  
+  // Parse each line into a TableRow
+  const rows: TableRow[] = lines.map(line => {
+    const isSep = isSeparatorRow(line);
+    
+    // Extract cells by splitting on | and removing first/last empty elements
+    const parts = line.split('|');
+    // Trim all cells to get the actual content without padding
+    // This means cell content is defined as the trimmed text between pipes
+    const cells = parts.slice(1, -1).map(cell => cell.trim());
+    
+    return {
+      cells,
+      isSeparator: isSep
+    };
+  });
+  
+  // Calculate column widths (maximum content length for each column)
+  const columnCount = Math.max(...rows.map(row => row.cells.length));
+  const columnWidths: number[] = new Array(columnCount).fill(0);
+  
+  for (const row of rows) {
+    for (let i = 0; i < row.cells.length; i++) {
+      // For separator rows, we don't count the content length
+      // For content rows, use the actual cell content length
+      if (!row.isSeparator) {
+        columnWidths[i] = Math.max(columnWidths[i], row.cells[i].length);
+      }
+    }
+  }
+  
+  return {
+    rows,
+    columnWidths
+  };
+}
+
+/**
+ * Formats a content row with proper padding
+ * @param cells - Array of cell contents
+ * @param columnWidths - Array of column widths for padding
+ * @returns Formatted row string
+ */
+export function formatContentRow(cells: string[], columnWidths: number[]): string {
+  const formattedCells = cells.map((cell, i) => {
+    const width = columnWidths[i] || 0;
+    // Pad the cell to the column width
+    // The cell content should be left-aligned within the column width
+    return cell.padEnd(width, ' ');
+  });
+  return '| ' + formattedCells.join(' | ') + ' |';
+}
+
+/**
+ * Formats a separator row with hyphens
+ * @param columnWidths - Array of column widths
+ * @returns Formatted separator row string
+ */
+export function formatSeparatorRow(columnWidths: number[]): string {
+  // Each separator cell should have at least 3 hyphens (standard markdown)
+  // or match the column width, whichever is greater
+  const cells = columnWidths.map(width => '-'.repeat(Math.max(width, 3)));
+  return '| ' + cells.join(' | ') + ' |';
+}
+
+/**
+ * Reflows a markdown table to ensure proper alignment and consistent spacing
+ * @param text - The table text to reflow
+ * @returns TextTransformation with the reflowed table
+ */
+export function reflowTable(text: string): TextTransformation {
+  const parsed = parseTable(text);
+  
+  if (!parsed) {
+    // Not a valid table, return original text
+    return { newText: text };
+  }
+  
+  const { rows, columnWidths } = parsed;
+  
+  // Format each row
+  const formattedRows = rows.map(row => {
+    if (row.isSeparator) {
+      return formatSeparatorRow(columnWidths);
+    } else {
+      return formatContentRow(row.cells, columnWidths);
+    }
+  });
+  
+  return {
+    newText: formattedRows.join('\n')
+  };
 }
