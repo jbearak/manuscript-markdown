@@ -3,6 +3,7 @@ import * as changes from './changes';
 import * as formatting from './formatting';
 import * as author from './author';
 import { mdmarkupPlugin } from './preview/mdmarkup-plugin';
+import { WordCountController } from './wordcount';
 
 export function activate(context: vscode.ExtensionContext) {
 	// Register existing navigation commands
@@ -115,6 +116,10 @@ export function activate(context: vscode.ExtensionContext) {
 			applyLineBasedFormatting((text) => formatting.formatHeading(text, 6))
 		)
 	);
+
+	// Create and register word count controller
+	const wordCountController = new WordCountController();
+	context.subscriptions.push(wordCountController);
 
 	// Return markdown-it plugin for preview integration
 	return {
