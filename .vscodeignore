@@ -1,0 +1,45 @@
+# Source files (keep only compiled output)
+src/**
+
+# Build artifacts
+.vscode-test/**
+test-*.md
+test-*.js
+test-*.js.map
+out/**/*.test.js
+out/test-*.js
+out/__mocks__/**
+
+# Development dependencies
+node_modules/**
+.venv/**
+venv/**
+.pytest_cache/**
+.hypothesis/**
+
+# Git
+.git/**
+.gitignore
+
+# Documentation (keep README, LICENSE, CHANGELOG)
+AGENTS.md
+ARCHITECTURE.md
+IMPLEMENTATION_SUMMARY.md
+MANUAL_TEST_*.md
+TABLE_REFLOW_IMPLEMENTATION.md
+
+# Config files
+.kiro/**
+.editorconfig
+.eslintrc*
+tsconfig.json
+jsconfig.json
+tslint.json
+out/**/*.map
+
+# Misc
+*.vsix
+example.qmd
+bun.lock
+setup.sh
+media/**/*.test.ts
