@@ -1617,3 +1617,30 @@ addition++}`;
     // Content may or may not be properly styled due to the limitation
   });
 });
+
+// Feature: docx-formatting-conversion, Property 10: Preview ==highlight== rendering
+// Validates: Requirements 9.1, 9.2
+describe('Property 10: Preview ==highlight== rendering', () => {
+  it('should transform ==highlight== patterns into HTML with correct CSS class', () => {
+    fc.assert(
+      fc.property(
+        fc.string({ minLength: 1, maxLength: 50 }).filter(s => !s.includes('=') && !s.includes('{') && !s.includes('}') && hasNoSpecialSyntax(s)),
+        (text) => {
+          const md = new MarkdownIt();
+          md.use(mdmarkupPlugin);
+          
+          const input = `==${text}==`;
+          const output = md.render(input);
+          
+          // Should contain the CSS class
+          expect(output).toContain('mdmarkup-format-highlight');
+          // Should contain the text content (HTML-escaped)
+          expect(output).toContain(escapeHtml(text));
+          // Should use mark tag
+          expect(output).toContain('<mark');
+        }
+      ),
+      { numRuns: 100 }
+    );
+  });
+});

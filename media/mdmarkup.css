@@ -61,3 +61,14 @@
   color: var(--mdmarkup-highlight-color);
   background-color: var(--mdmarkup-highlight-bg);
 }
+
+/* Format Highlight - yellow/amber for ==highlight== patterns */
+.mdmarkup-format-highlight {
+  background-color: #ffeb3b; /* Yellow/amber for light theme */
+}
+
+@media (prefers-color-scheme: dark) {
+  .mdmarkup-format-highlight {
+    background-color: #ffc107; /* Darker amber for dark theme */
+  }
+}

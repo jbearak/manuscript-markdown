@@ -169,6 +169,57 @@ function mdmarkupBlock(state: StateBlock, startLine: number, endLine: number, si
 }
 
 /**
+ * Inline rule for ==highlight== patterns (not CriticMarkup)
+ * @param state - The inline parsing state
+ * @param silent - Whether to only check without creating tokens
+ * @returns true if a pattern was found and processed
+ */
+function parseFormatHighlight(state: StateInline, silent: boolean): boolean {
+  const start = state.pos;
+  const max = state.posMax;
+  const src = state.src;
+
+  // Check if we're at ==
+  if (src.charCodeAt(start) !== 0x3D /* = */ || src.charCodeAt(start + 1) !== 0x3D /* = */) {
+    return false;
+  }
+
+  // Check if preceded by { (to avoid matching CriticMarkup {==...==})
+  if (start > 0 && src.charCodeAt(start - 1) === 0x7B /* { */) {
+    return false;
+  }
+
+  // Find closing ==
+  let pos = start + 2;
+  while (pos < max) {
+    if (src.charCodeAt(pos) === 0x3D /* = */ && pos + 1 < max && src.charCodeAt(pos + 1) === 0x3D /* = */) {
+      // Check if followed by } (to avoid matching CriticMarkup {==...==})
+      if (pos + 2 < max && src.charCodeAt(pos + 2) === 0x7D /* } */) {
+        pos += 2;
+        continue;
+      }
+      
+      // Found closing ==
+      if (!silent) {
+        const content = src.slice(start + 2, pos);
+        const tokenOpen = state.push('mdmarkup_format_highlight_open', 'mark', 1);
+        tokenOpen.attrSet('class', 'mdmarkup-format-highlight');
+        
+        // Add parsed inline content to allow nested Markdown processing
+        addInlineContent(state, content);
+        
+        state.push('mdmarkup_format_highlight_close', 'mark', -1);
+      }
+      state.pos = pos + 2;
+      return true;
+    }
+    pos++;
+  }
+
+  return false;
+}
+
+/**
  * Inline rule function that scans for mdmarkup patterns and creates tokens
  * @param state - The inline parsing state
  * @param silent - Whether to only check without creating tokens
@@ -321,6 +372,10 @@ export function mdmarkupPlugin(md: MarkdownIt): void {
   // Run before emphasis and other inline rules to handle mdmarkup first
   md.inline.ruler.before('emphasis', 'mdmarkup', parsemdmarkup);
   
+  // Register the inline rule for ==highlight== patterns
+  // Run after mdmarkup to avoid conflicts with {==...==}
+  md.inline.ruler.after('mdmarkup', 'mdmarkup_format_highlight', parseFormatHighlight);
+  
   // Register renderers for each mdmarkup token type
   for (const pattern of patterns) {
     md.renderer.rules[`mdmarkup_${pattern.name}_open`] = (tokens, idx) => {
@@ -354,5 +409,16 @@ export function mdmarkupPlugin(md: MarkdownIt): void {
   
   md.renderer.rules['mdmarkup_substitution_new_close'] = () => {
     return '</ins>';
+  };
+  
+  // Renderer for ==highlight== patterns
+  md.renderer.rules['mdmarkup_format_highlight_open'] = (tokens, idx) => {
+    const token = tokens[idx];
+    const className = token.attrGet('class') || 'mdmarkup-format-highlight';
+    return `<mark class="${className}">`;
+  };
+  
+  md.renderer.rules['mdmarkup_format_highlight_close'] = () => {
+    return '</mark>';
   };
 }
