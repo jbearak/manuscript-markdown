@@ -2,7 +2,7 @@
   "name": "mdmarkup",
   "displayName": "Markdown Annotations and Formatting",
   "description": "Markdown formatting and CriticMarkup annotations tools",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "engines": {
     "vscode": "^1.103.2"
   },
