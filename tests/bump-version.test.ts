@@ -101,3 +101,99 @@ test("Feature: version-bump-script, Property 2: Version Calculation Correctness 
     { numRuns: 100 }
   );
 });
+
+test("Feature: version-bump-script, Property 3: Precondition Checks - verify dirty working directory rejection", async () => {
+  const { execSync } = await import("child_process");
+  const { mkdtempSync, writeFileSync, rmSync } = await import("fs");
+  const { join } = await import("path");
+  const { tmpdir } = await import("os");
+  
+  const tempDir = mkdtempSync(join(tmpdir(), "bump-version-test-"));
+  
+  try {
+    // Initialize git repo with package.json
+    execSync("git init", { cwd: tempDir });
+    execSync("git config user.email 'test@example.com'", { cwd: tempDir });
+    execSync("git config user.name 'Test User'", { cwd: tempDir });
+    
+    writeFileSync(join(tempDir, "package.json"), JSON.stringify({ version: "1.0.0" }, null, 2));
+    execSync("git add package.json", { cwd: tempDir });
+    execSync("git commit -m 'Initial commit'", { cwd: tempDir });
+    
+    // Create dirty working directory
+    writeFileSync(join(tempDir, "dirty-file.txt"), "uncommitted changes");
+    
+    // Run script and expect failure
+    const scriptPath = "/Users/jmb/repos/mdmarkup/scripts/bump-version.sh";
+    try {
+      execSync(`bash "${scriptPath}" patch`, { 
+        cwd: tempDir, 
+        encoding: "utf8",
+        stdio: "pipe"
+      });
+      expect.unreachable("Script should have failed");
+    } catch (error: any) {
+      expect(error.status).toBe(1);
+      expect(error.stdout.toString()).toContain("Working directory is not clean");
+    }
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("Feature: version-bump-script, Property 4: Precondition Checks - verify existing tag rejection", async () => {
+  const { execSync } = await import("child_process");
+  const { mkdtempSync, writeFileSync, rmSync } = await import("fs");
+  const { join } = await import("path");
+  const { tmpdir } = await import("os");
+  
+  const tempDir = mkdtempSync(join(tmpdir(), "bump-version-test-"));
+  
+  try {
+    // Initialize git repo with package.json and package-lock.json
+    execSync("git init", { cwd: tempDir });
+    execSync("git config user.email 'test@example.com'", { cwd: tempDir });
+    execSync("git config user.name 'Test User'", { cwd: tempDir });
+    
+    // Create package.json with version 1.0.0
+    writeFileSync(join(tempDir, "package.json"), JSON.stringify({ 
+      name: "test", 
+      version: "1.0.0",
+      private: true 
+    }, null, 2));
+    writeFileSync(join(tempDir, "package-lock.json"), JSON.stringify({ 
+      name: "test",
+      version: "1.0.0", 
+      lockfileVersion: 3,
+      requires: true,
+      packages: {
+        "": {
+          name: "test",
+          version: "1.0.0"
+        }
+      }
+    }, null, 2));
+    
+    execSync("git add .", { cwd: tempDir });
+    execSync("git commit -m 'Initial commit'", { cwd: tempDir });
+    
+    // Create tag that will conflict with explicit version
+    execSync("git tag v2.0.0", { cwd: tempDir });
+    
+    // Run script with explicit version that conflicts with existing tag
+    const scriptPath = "/Users/jmb/repos/mdmarkup/scripts/bump-version.sh";
+    try {
+      execSync(`bash "${scriptPath}" 2.0.0`, { 
+        cwd: tempDir, 
+        encoding: "utf8",
+        stdio: "pipe"
+      });
+      expect.unreachable("Script should have failed");
+    } catch (error: any) {
+      expect(error.status).toBe(1);
+      expect(error.stdout.toString()).toContain("Tag 'v2.0.0' already exists");
+    }
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
