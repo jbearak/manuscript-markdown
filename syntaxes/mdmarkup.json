@@ -5,7 +5,8 @@
         { "include": "#deletion" },
         { "include": "#substitution" },
         { "include": "#comment" },
-        { "include": "#highlight" }
+        { "include": "#highlight" },
+        { "include": "#format_highlight" }
     ],
 	"repository": {
 		"addition": {
@@ -67,6 +68,13 @@
 					"name": "markup.bold"
 				}
 			]
+		},
+		"format_highlight": {
+			"match": "(?<!\\{)==([^=]+)==(?!\\})",
+			"name": "markup.highlight.mdmarkup",
+			"captures": {
+				"1": { "name": "markup.highlight" }
+			}
 		}
 	},
     "scopeName": "mdmarkup.injection"
