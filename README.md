@@ -44,10 +44,8 @@ A word count indicator appears in the status bar, displaying the total word coun
 
 See [Development](docs/development.md).
 
-## Provenance
-
-This project began as a fork of the archived [vscode-criticmarkup](https://github.com/jloow/vscode-criticmarkup) extension by Joel Lööw (2019), which provided CriticMarkup syntax highlighting and snippets. This version represents an architectural rewrite that extends the original with multi-line patterns, live preview, formatting tools, and comprehensive testing.
-
 ## License
 
-[GPLv3](LICENSE.txt)
+Originally forked from [vscode-criticmarkup](https://github.com/jloow/vscode-criticmarkup) by Joel Lööw.
+
+This project is open-source software licensed under [GPLv3](LICENSE.txt).
