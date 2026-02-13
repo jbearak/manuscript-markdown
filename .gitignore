@@ -1,8 +1,21 @@
+# IDE and editor
 .vscode/**
 .vscode-test/**
-out/**
 .vscodeignore
-vsc-extension-quickstart.md
+
+# Build output
+out/**
 **/*.map
-node_modules
 *.vsix
+
+# Dependencies
+node_modules
+
+# OS files
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Documentation (generated)
+vsc-extension-quickstart.md
