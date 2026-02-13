@@ -69,29 +69,9 @@ See [Development Guide](docs/development.md) for building, testing, and contribu
 
 For detailed development guidance including key invariants and learnings, see [AGENTS.md](AGENTS.md).
 
-## About This Fork
+## Provenance
 
-This extension is a major rewrite and expansion of the archived [vscode-criticmarkup](https://github.com/jloow/vscode-criticmarkup) by Joel Lööw (2019).
-
-**Original extension (v0.2.0, 2019)**:
-- Basic syntax highlighting
-- Snippets for markup patterns
-- Navigation commands
-- ~200 lines of TypeScript, no tests
-
-**This fork (v0.9.1, 2025)**:
-- Complete rewrite: ~3,500+ lines of TypeScript with comprehensive tests
-- Renamed to **mdmarkup** to reflect expanded scope
-- **Multi-line pattern support** with empty lines
-- **Live preview rendering** with markdown-it plugin
-- **Author attribution** with automatic timestamps
-- **20+ formatting commands** (bold, lists, headings, tables, etc.)
-- **Smart table reflow** with column alignment
-- **Toolbar and context menus** for easy access
-- **Modern tooling**: Bun, property-based testing (fast-check)
-- **Theme integration**: Uses standard TextMate scopes for automatic adaptation
-
-Small portions of the original remain (snippet descriptions, TextMate grammar patterns), but the vast majority is new code and assets.
+This project began as a fork of the archived [vscode-criticmarkup](https://github.com/jloow/vscode-criticmarkup) extension by Joel Lööw (2019), which provided basic CriticMarkup syntax highlighting and snippets. This version represents a complete architectural rewrite that extends the original with multi-line patterns, live preview, formatting tools, and comprehensive testing.
 
 ## Release History
 
@@ -103,8 +83,7 @@ See [Changelog](docs/CHANGELOG.md) for detailed release notes and version histor
 
 ## Credits
 
-- **Original extension**: Joel Lööw (archived 2019)
-- **Current maintainer**: Jonathan Bearak
+- **Original extension**: Joel Lööw
 - **CriticMarkup specification**: Gabe Weatherhead and Erik Hess
 - **Markdown specification**: John Gruber
 
