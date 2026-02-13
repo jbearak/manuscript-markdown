@@ -90,6 +90,124 @@ const parserOptions = {
   trimValues: false,
 };
 
+export async function parseRelationships(zip: JSZip): Promise<Map<string, string>> {
+  const relationships = new Map<string, string>();
+  const parsed = await readZipXml(zip, 'word/_rels/document.xml.rels');
+  if (!parsed) { return relationships; }
+
+  for (const node of findAllDeep(parsed, 'Relationship')) {
+    const rel = node.Relationship;
+    if (!rel) continue;
+    
+    const id = getAttr(rel, 'Id');
+    const type = getAttr(rel, 'Type');
+    const target = getAttr(rel, 'Target');
+    const targetMode = getAttr(rel, 'TargetMode');
+    
+    if (type.endsWith('/hyperlink') && targetMode === 'External') {
+      relationships.set(id, target);
+    }
+  }
+  
+  return relationships;
+}
+
+export async function parseNumberingDefinitions(zip: JSZip): Promise<Map<string, Map<string, 'bullet' | 'ordered'>>> {
+  const numberingDefs = new Map<string, Map<string, 'bullet' | 'ordered'>>();
+  const parsed = await readZipXml(zip, 'word/numbering.xml');
+  if (!parsed) { return numberingDefs; }
+
+  // Build abstractNumId → levels map
+  const abstractNums = new Map<string, Map<string, 'bullet' | 'ordered'>>();
+  for (const node of findAllDeep(parsed, 'w:abstractNum')) {
+    const abstractNum = node['w:abstractNum'];
+    if (!abstractNum) continue;
+    
+    const abstractNumId = getAttr(abstractNum, 'abstractNumId');
+    const levels = new Map<string, 'bullet' | 'ordered'>();
+    
+    for (const lvlNode of findAllDeep(abstractNum, 'w:lvl')) {
+      const lvl = lvlNode['w:lvl'];
+      if (!lvl) continue;
+      
+      const ilvl = getAttr(lvl, 'ilvl');
+      const numFmtNodes = findAllDeep(lvl, 'w:numFmt');
+      if (numFmtNodes.length > 0) {
+        const numFmt = numFmtNodes[0]['w:numFmt'];
+        const val = getAttr(numFmt, 'val');
+        levels.set(ilvl, val === 'bullet' ? 'bullet' : 'ordered');
+      }
+    }
+    
+    abstractNums.set(abstractNumId, levels);
+  }
+
+  // Resolve numId → abstractNumId
+  for (const node of findAllDeep(parsed, 'w:num')) {
+    const num = node['w:num'];
+    if (!num) continue;
+    
+    const numId = getAttr(num, 'numId');
+    const abstractNumIdNodes = findAllDeep(num, 'w:abstractNumId');
+    if (abstractNumIdNodes.length > 0) {
+      const abstractNumId = getAttr(abstractNumIdNodes[0]['w:abstractNumId'], 'val');
+      const levels = abstractNums.get(abstractNumId);
+      if (levels) {
+        numberingDefs.set(numId, levels);
+      }
+    }
+  }
+  
+  return numberingDefs;
+}
+
+export function parseHeadingLevel(pPrChildren: any[]): number | undefined {
+  const pStyleElement = pPrChildren.find(child => child['w:pStyle'] !== undefined);
+  if (!pStyleElement) return undefined;
+  
+  const val = getAttr(pStyleElement, 'val').toLowerCase();
+  const match = val.match(/^heading(\d)$/);
+  if (match) {
+    const level = parseInt(match[1], 10);
+    return level >= 1 && level <= 6 ? level : undefined;
+  }
+  
+  return undefined;
+}
+
+export function parseListMeta(pPrChildren: any[], numberingDefs: Map<string, Map<string, 'bullet' | 'ordered'>>): ListMeta | undefined {
+  const numPrElement = pPrChildren.find(child => child['w:numPr'] !== undefined);
+  if (!numPrElement) return undefined;
+  
+  const numPr = numPrElement['w:numPr'];
+  if (!Array.isArray(numPr)) return undefined;
+  
+  let numId = '';
+  let ilvl = '';
+  
+  for (const child of numPr) {
+    if (child['w:numId']) {
+      numId = getAttr(child, 'val');
+    }
+    if (child['w:ilvl']) {
+      ilvl = getAttr(child, 'val');
+    }
+  }
+  
+  if (!numId || !ilvl) return undefined;
+  
+  const levels = numberingDefs.get(numId);
+  if (!levels) return undefined;
+  
+  const type = levels.get(ilvl);
+  if (!type) return undefined;
+  
+  return {
+    type,
+    level: parseInt(ilvl, 10)
+  };
+}
+
 async function loadZip(data: Uint8Array): Promise<JSZip> {
   return JSZip.loadAsync(data);
 }
