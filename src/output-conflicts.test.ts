@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'bun:test';
+import fc from 'fast-check';
 import {
 	getOutputBasePath,
 	getOutputConflictMessage,
@@ -36,5 +37,30 @@ describe('output conflict helpers', () => {
 		expect(getOutputBasePath('/tmp/new-name.md')).toBe('/tmp/new-name');
 		expect(getOutputBasePath('/tmp/new-name')).toBe('/tmp/new-name');
 		expect(getOutputBasePath('/tmp/NEW-NAME.MD')).toBe('/tmp/NEW-NAME');
+	});
+
+	it('property: (false, false) is always null; any true input is non-null', () => {
+		fc.assert(
+			fc.property(fc.boolean(), fc.boolean(), (md, bib) => {
+				const result = getOutputConflictScenario(md, bib);
+				if (!md && !bib) {
+					expect(result).toBeNull();
+				} else {
+					expect(result).not.toBeNull();
+				}
+			}),
+			{ numRuns: 100 }
+		);
+	});
+
+	it('property: getOutputBasePath stripping .md is idempotent', () => {
+		fc.assert(
+			fc.property(fc.string(), (path) => {
+				const once = getOutputBasePath(path);
+				const twice = getOutputBasePath(once);
+				expect(twice).toBe(once);
+			}),
+			{ numRuns: 200 }
+		);
 	});
 });
