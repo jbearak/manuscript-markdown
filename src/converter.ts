@@ -517,6 +517,10 @@ export async function extractDocumentContent(
   const parsed = await readZipXml(zip, 'word/document.xml');
   if (!parsed) { return []; }
 
+  // Parse relationships and numbering definitions
+  const relationshipMap = await parseRelationships(zip);
+  const numberingDefs = await parseNumberingDefinitions(zip);
+
   // Build a lookup: instrText index -> ZoteroCitation (in order of appearance)
   let citationIdx = 0;
 
@@ -527,8 +531,9 @@ export async function extractDocumentContent(
   let fieldInstrParts: string[] = [];
   let currentCitation: ZoteroCitation | undefined;
   let citationTextParts: string[] = [];
+  let currentHref: string | undefined;
 
-  function walk(nodes: any[]): void {
+  function walk(nodes: any[], currentFormatting: RunFormatting = DEFAULT_FORMATTING): void {
     for (const node of nodes) {
       for (const key of Object.keys(node)) {
         if (key === ':@') { continue; }
@@ -568,27 +573,66 @@ export async function extractDocumentContent(
           activeComments.add(getAttr(node, 'id'));
         } else if (key === 'w:commentRangeEnd') {
           activeComments.delete(getAttr(node, 'id'));
+        } else if (key === 'w:hyperlink') {
+          const rId = getAttr(node, 'id');
+          const prevHref = currentHref;
+          currentHref = relationshipMap.get(rId);
+          if (Array.isArray(node[key])) { walk(node[key], currentFormatting); }
+          currentHref = prevHref;
+        } else if (key === 'w:r') {
+          // Process run - extract formatting from w:rPr
+          let runFormatting = currentFormatting;
+          const runChildren = Array.isArray(node[key]) ? node[key] : [node[key]];
+          for (const child of runChildren) {
+            if (child['w:rPr']) {
+              const rPrChildren = Array.isArray(child['w:rPr']) ? child['w:rPr'] : [child['w:rPr']];
+              runFormatting = parseRunProperties(rPrChildren);
+              break;
+            }
+          }
+          walk(runChildren, runFormatting);
         } else if (key === 'w:t') {
           const text = nodeText(node['w:t'] || []);
           if (text) {
             if (inCitationField) {
               citationTextParts.push(text);
             } else {
-              content.push({ 
+              const textItem: ContentItem = { 
                 type: 'text', 
                 text, 
                 commentIds: new Set(activeComments),
-                formatting: DEFAULT_FORMATTING
-              });
+                formatting: currentFormatting
+              };
+              if (currentHref) {
+                textItem.href = currentHref;
+              }
+              content.push(textItem);
             }
           }
         } else if (key === 'w:p') {
-          if (content.length > 0 && content[content.length - 1].type !== 'para') {
-            content.push({ type: 'para' });
+          // Process paragraph - extract heading level and list metadata
+          let headingLevel: number | undefined;
+          let listMeta: ListMeta | undefined;
+          
+          const paraChildren = Array.isArray(node[key]) ? node[key] : [node[key]];
+          for (const child of paraChildren) {
+            if (child['w:pPr']) {
+              const pPrChildren = Array.isArray(child['w:pPr']) ? child['w:pPr'] : [child['w:pPr']];
+              headingLevel = parseHeadingLevel(pPrChildren);
+              listMeta = parseListMeta(pPrChildren, numberingDefs);
+              break;
+            }
           }
-          if (Array.isArray(node[key])) { walk(node[key]); }
+          
+          if (content.length > 0 && content[content.length - 1].type !== 'para') {
+            const paraItem: ContentItem = { type: 'para' };
+            if (headingLevel) paraItem.headingLevel = headingLevel;
+            if (listMeta) paraItem.listMeta = listMeta;
+            content.push(paraItem);
+          }
+          walk(paraChildren, currentFormatting);
         } else if (Array.isArray(node[key])) {
-          walk(node[key]);
+          walk(node[key], currentFormatting);
         }
       }
     }
