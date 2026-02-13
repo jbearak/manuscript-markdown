@@ -176,9 +176,9 @@ export function activate(context: vscode.ExtensionContext) {
 					}
 				}
 
-				await vscode.workspace.fs.writeFile(mdUri, Buffer.from(result.markdown, 'utf-8') as any);
+				await vscode.workspace.fs.writeFile(mdUri, new TextEncoder().encode(result.markdown));
 				if (result.bibtex) {
-					await vscode.workspace.fs.writeFile(bibUri, Buffer.from(result.bibtex, 'utf-8') as any);
+					await vscode.workspace.fs.writeFile(bibUri, new TextEncoder().encode(result.bibtex));
 				}
 
 				const mdDoc = await vscode.workspace.openTextDocument(mdUri);

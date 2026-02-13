@@ -50,8 +50,11 @@ const parserOptions = {
   trimValues: false,
 };
 
-async function readDocxXml(data: Uint8Array, path: string): Promise<any[] | null> {
-  const zip = await JSZip.loadAsync(data);
+async function loadZip(data: Uint8Array): Promise<JSZip> {
+  return JSZip.loadAsync(data);
+}
+
+async function readZipXml(zip: JSZip, path: string): Promise<any[] | null> {
   const file = zip.file(path);
   if (!file) { return null; }
   const xml = await file.async('string');
@@ -93,9 +96,10 @@ function nodeText(children: any[]): string {
 
 // Comment extraction
 
-export async function extractComments(data: Uint8Array): Promise<Map<string, Comment>> {
+export async function extractComments(data: Uint8Array | JSZip): Promise<Map<string, Comment>> {
   const comments = new Map<string, Comment>();
-  const parsed = await readDocxXml(data, 'word/comments.xml');
+  const zip = data instanceof JSZip ? data : await loadZip(data);
+  const parsed = await readZipXml(zip, 'word/comments.xml');
   if (!parsed) { return comments; }
 
   for (const node of findAllDeep(parsed, 'w:comment')) {
@@ -112,9 +116,10 @@ export async function extractComments(data: Uint8Array): Promise<Map<string, Com
 
 // Zotero metadata extraction
 
-export async function extractZoteroCitations(data: Uint8Array): Promise<ZoteroCitation[]> {
+export async function extractZoteroCitations(data: Uint8Array | JSZip): Promise<ZoteroCitation[]> {
   const citations: ZoteroCitation[] = [];
-  const parsed = await readDocxXml(data, 'word/document.xml');
+  const zip = data instanceof JSZip ? data : await loadZip(data);
+  const parsed = await readZipXml(zip, 'word/document.xml');
   if (!parsed) { return citations; }
 
   for (const node of findAllDeep(parsed, 'w:instrText')) {
@@ -148,7 +153,10 @@ export async function extractZoteroCitations(data: Uint8Array): Promise<ZoteroCi
       });
 
       citations.push({ plainCitation, items });
-    } catch { /* skip malformed JSON */ }
+    } catch {
+      // Push a placeholder so positional indices stay aligned with ZOTERO_ITEM occurrences
+      citations.push({ plainCitation: '', items: [] });
+    }
   }
   return citations;
 }
@@ -227,11 +235,12 @@ export function citationPandocKeys(
 // Document content extraction
 
 export async function extractDocumentContent(
-  data: Uint8Array,
+  data: Uint8Array | JSZip,
   zoteroCitations: ZoteroCitation[],
   keyMap: Map<string, string>
 ): Promise<ContentItem[]> {
-  const parsed = await readDocxXml(data, 'word/document.xml');
+  const zip = data instanceof JSZip ? data : await loadZip(data);
+  const parsed = await readZipXml(zip, 'word/document.xml');
   if (!parsed) { return []; }
 
   // Build a lookup: instrText index -> ZoteroCitation (in order of appearance)
@@ -368,6 +377,11 @@ export function buildMarkdown(
 
 // BibTeX generation
 
+/** Escape special LaTeX/BibTeX characters in field values. */
+function escapeBibtex(s: string): string {
+  return s.replace(/([&%$#_{}~^\\])/g, '\\$1');
+}
+
 export function generateBibTeX(
   zoteroCitations: ZoteroCitation[],
   keyMap: Map<string, string>
@@ -385,17 +399,17 @@ export function generateBibTeX(
       if (!key) { continue; }
 
       const authorStr = meta.authors
-        .map(a => [a.family, a.given].filter(Boolean).join(', '))
+        .map(a => [a.family, a.given].filter((s): s is string => Boolean(s)).map(escapeBibtex).join(', '))
         .join(' and ');
 
       const entryType = (meta.journal || meta.volume) ? 'article' : 'misc';
       const fields: string[] = [];
       if (authorStr) { fields.push(`  author = {${authorStr}}`); }
-      if (meta.title) { fields.push(`  title = {{${meta.title}}}`); }
-      if (meta.journal) { fields.push(`  journal = {${meta.journal}}`); }
-      if (meta.volume) { fields.push(`  volume = {${meta.volume}}`); }
-      if (meta.pages) { fields.push(`  pages = {${meta.pages}}`); }
-      if (meta.year) { fields.push(`  year = {${meta.year}}`); }
+      if (meta.title) { fields.push(`  title = {{${escapeBibtex(meta.title)}}}`); }
+      if (meta.journal) { fields.push(`  journal = {${escapeBibtex(meta.journal)}}`); }
+      if (meta.volume) { fields.push(`  volume = {${escapeBibtex(meta.volume)}}`); }
+      if (meta.pages) { fields.push(`  pages = {${escapeBibtex(meta.pages)}}`); }
+      if (meta.year) { fields.push(`  year = {${escapeBibtex(meta.year)}}`); }
       if (meta.doi) { fields.push(`  doi = {${meta.doi}}`); }
 
       entries.push(`@${entryType}{${key},\n${fields.join(',\n')},\n}`);
@@ -427,13 +441,14 @@ export async function convertDocx(
   data: Uint8Array,
   format: CitationKeyFormat = 'authorYearTitle'
 ): Promise<ConvertResult> {
+  const zip = await loadZip(data);
   const [comments, zoteroCitations] = await Promise.all([
-    extractComments(data),
-    extractZoteroCitations(data),
+    extractComments(zip),
+    extractZoteroCitations(zip),
   ]);
 
   const keyMap = buildCitationKeyMap(zoteroCitations, format);
-  const docContent = await extractDocumentContent(data, zoteroCitations, keyMap);
+  const docContent = await extractDocumentContent(zip, zoteroCitations, keyMap);
   let markdown = buildMarkdown(docContent, comments);
 
   // Strip Sources section if present

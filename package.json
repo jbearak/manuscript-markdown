@@ -436,15 +436,14 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "clean": "rm -rf out/",
-    "rebuild": "npm run clean && npm run compile",
-    "package": "npm run rebuild && vsce package",
-    "install-local": "npm run package && code --install-extension mdmarkup-0.9.2.vsix --force"
+    "rebuild": "bun run clean && bun run compile",
+    "package": "bun run rebuild && bunx vsce package",
+    "install-local": "bun run package && code --install-extension mdmarkup-0.9.2.vsix --force"
   },
   "devDependencies": {
-    "@types/jszip": "^3.4.1",
-    "@types/markdown-it": "^14.1.2",
+"@types/markdown-it": "^14.1.2",
     "@types/mocha": "^2.2.42",
-    "@types/node": "^10.14.4",
+    "@types/node": "^20.0.0",
     "@types/vscode": "^1.103.2",
     "fast-check": "^4.3.0",
     "tslint": "^5.14.0",

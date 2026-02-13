@@ -43,4 +43,5 @@ bun.lock
 setup.sh
 media/**/*.test.ts
 scripts/**
+test/**
 tests/**
