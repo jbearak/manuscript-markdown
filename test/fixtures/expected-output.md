@@ -3,3 +3,5 @@
 {==The methodology involved collecting data from multiple sources across different regions.==}{>>Bob Editor (2025-01-16 14:00): Can you specify which regions were included?<<}
 
 {==Previous work has established a framework for analysis==}{>>Alice Reviewer (2025-01-17 09:15): This framework reference needs updating.<<}  [@jones2019urban; @smith2020effects]. Further investigation is needed.
+
+Recent developments in energy policy have also been documented  [@davis2021advances].

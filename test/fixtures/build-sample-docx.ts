@@ -63,6 +63,31 @@ const citation2JSON = JSON.stringify({
   ],
 });
 
+// Third citation: will be split across multiple w:instrText elements
+const citation3JSON = JSON.stringify({
+  citationID: 'test3',
+  properties: { formattedCitation: '(Davis 2021)', plainCitation: '(Davis 2021)', noteIndex: 0 },
+  citationItems: [{
+    id: 1003,
+    uris: ['http://zotero.org/users/0/items/CCCC3333'],
+    itemData: {
+      id: 1003, type: 'article-journal',
+      title: 'Advances in renewable energy systems',
+      'container-title': 'Energy Research Letters',
+      author: [{ family: 'Davis', given: 'Eve' }],
+      issued: { 'date-parts': [[2021]] },
+      volume: '3', page: '45-60',
+      DOI: '10.1234/test.2021.003',
+    },
+  }],
+});
+
+// Split the citation3 instrText prefix and JSON across multiple runs
+const citation3Full = ` ADDIN ZOTERO_ITEM CSL_CITATION ${citation3JSON}`;
+const citation3Split1 = citation3Full.slice(0, Math.floor(citation3Full.length / 3));
+const citation3Split2 = citation3Full.slice(Math.floor(citation3Full.length / 3), Math.floor(2 * citation3Full.length / 3));
+const citation3Split3 = citation3Full.slice(Math.floor(2 * citation3Full.length / 3));
+
 function xmlHeader(): string {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`;
 }
@@ -104,6 +129,17 @@ function buildDocumentXml(): string {
     <w:r><w:t>. Further investigation is needed.</w:t></w:r>
   </w:p>
   <w:p>
+    <w:r><w:t xml:space="preserve">Recent developments in energy policy have also been documented </w:t></w:r>
+    <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+    <w:r><w:instrText>${citation3Split1}</w:instrText></w:r>
+    <w:r><w:instrText>${citation3Split2}</w:instrText></w:r>
+    <w:r><w:instrText>${citation3Split3}</w:instrText></w:r>
+    <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+    <w:r><w:t>(Davis 2021)</w:t></w:r>
+    <w:r><w:fldChar w:fldCharType="end"/></w:r>
+    <w:r><w:t>.</w:t></w:r>
+  </w:p>
+  <w:p>
     <w:r><w:t>Sources</w:t></w:r>
   </w:p>
   <w:p>
@@ -111,6 +147,9 @@ function buildDocumentXml(): string {
   </w:p>
   <w:p>
     <w:r><w:t>2. Jones B, Lee C. Urban planning and public health. Review of Studies 5, 100-120 (2019).</w:t></w:r>
+  </w:p>
+  <w:p>
+    <w:r><w:t>3. Davis E. Advances in renewable energy systems. Energy Research Letters 3, 45-60 (2021).</w:t></w:r>
   </w:p>
 </w:body>
 </w:document>`;

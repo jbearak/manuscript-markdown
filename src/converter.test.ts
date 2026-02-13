@@ -32,11 +32,21 @@ describe('extractComments', () => {
 describe('extractZoteroCitations', () => {
   test('extracts Zotero citations in document order', async () => {
     const citations = await extractZoteroCitations(sampleData);
-    expect(citations.length).toBe(2);
+    expect(citations.length).toBe(3);
     expect(citations[0].plainCitation).toBe('(Smith 2020)');
     expect(citations[0].items.length).toBe(1);
     expect(citations[1].plainCitation).toBe('(Jones 2019; Smith 2020)');
     expect(citations[1].items.length).toBe(2);
+    expect(citations[2].plainCitation).toBe('(Davis 2021)');
+    expect(citations[2].items.length).toBe(1);
+  });
+
+  test('extracts split w:instrText across multiple w:r elements', async () => {
+    const citations = await extractZoteroCitations(sampleData);
+    const davis = citations[2];
+    expect(davis.plainCitation).toBe('(Davis 2021)');
+    expect(davis.items[0].title).toBe('Advances in renewable energy systems');
+    expect(davis.items[0].doi).toBe('10.1234/test.2021.003');
   });
 
   test('extracts correct metadata from citation items', async () => {
@@ -53,9 +63,10 @@ describe('buildCitationKeyMap', () => {
   test('generates unique keys and deduplicates by DOI', async () => {
     const citations = await extractZoteroCitations(sampleData);
     const keyMap = buildCitationKeyMap(citations);
-    expect(keyMap.size).toBe(2); // Smith appears twice but same DOI
+    expect(keyMap.size).toBe(3); // Smith appears twice but same DOI
     expect(keyMap.get('doi:10.1234/test.2020.001')).toBe('smith2020effects');
     expect(keyMap.get('doi:10.1234/test.2019.002')).toBe('jones2019urban');
+    expect(keyMap.get('doi:10.1234/test.2021.003')).toBe('davis2021advances');
   });
 
   test('supports authorYear format', async () => {
@@ -63,12 +74,13 @@ describe('buildCitationKeyMap', () => {
     const keyMap = buildCitationKeyMap(citations, 'authorYear');
     expect(keyMap.get('doi:10.1234/test.2020.001')).toBe('smith2020');
     expect(keyMap.get('doi:10.1234/test.2019.002')).toBe('jones2019');
+    expect(keyMap.get('doi:10.1234/test.2021.003')).toBe('davis2021');
   });
 
   test('supports numeric format', async () => {
     const citations = await extractZoteroCitations(sampleData);
     const keyMap = buildCitationKeyMap(citations, 'numeric');
-    expect(keyMap.size).toBe(2);
+    expect(keyMap.size).toBe(3);
   });
 });
 
@@ -121,7 +133,7 @@ describe('extractDocumentContent', () => {
     const content = await extractDocumentContent(sampleData, citations, keyMap);
 
     const citItems = content.filter(c => c.type === 'citation');
-    expect(citItems.length).toBe(2);
+    expect(citItems.length).toBe(3);
     if (citItems[0].type === 'citation') {
       expect(citItems[0].pandocKeys).toContain('smith2020effects');
     }

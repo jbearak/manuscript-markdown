@@ -97,6 +97,47 @@ function nodeText(children: any[]): string {
   return parts.join('');
 }
 
+/**
+ * Walk the parsed XML tree and extract complete field instructions by
+ * accumulating w:instrText fragments between w:fldChar begin and
+ * separate/end markers.  Returns one concatenated instruction string
+ * per complex field, in document order.
+ */
+function extractFieldInstructions(nodes: any[]): string[] {
+  const results: string[] = [];
+  let accumulating = false;
+  let buffer = '';
+
+  function walk(items: any[]): void {
+    for (const node of items) {
+      for (const key of Object.keys(node)) {
+        if (key === ':@') { continue; }
+
+        if (key === 'w:fldChar') {
+          const fldType = getAttr(node, 'fldCharType');
+          if (fldType === 'begin') {
+            accumulating = true;
+            buffer = '';
+          } else if (fldType === 'separate' || fldType === 'end') {
+            if (accumulating) {
+              results.push(buffer);
+              accumulating = false;
+              buffer = '';
+            }
+          }
+        } else if (key === 'w:instrText' && accumulating) {
+          buffer += nodeText(node['w:instrText'] || []);
+        } else if (Array.isArray(node[key])) {
+          walk(node[key]);
+        }
+      }
+    }
+  }
+
+  walk(nodes);
+  return results;
+}
+
 // Comment extraction
 
 export async function extractComments(data: Uint8Array | JSZip): Promise<Map<string, Comment>> {
@@ -125,10 +166,7 @@ export async function extractZoteroCitations(data: Uint8Array | JSZip): Promise<
   const parsed = await readZipXml(zip, 'word/document.xml');
   if (!parsed) { return citations; }
 
-  // NOTE: Split w:instrText across multiple w:r elements (common in
-  // Zotero-generated DOCX) is not yet handled; we only match single-run fields.
-  for (const node of findAllDeep(parsed, 'w:instrText')) {
-    const instrText = nodeText(node['w:instrText'] || []);
+  for (const instrText of extractFieldInstructions(parsed)) {
     if (!instrText.includes('ZOTERO_ITEM')) { continue; }
 
     const jsonStart = instrText.indexOf('{');
@@ -253,30 +291,34 @@ export async function extractDocumentContent(
 
   const content: ContentItem[] = [];
   const activeComments = new Set<string>();
+  let inField = false;
   let inCitationField = false;
+  let fieldInstrParts: string[] = [];
   let currentCitation: ZoteroCitation | undefined;
   let citationTextParts: string[] = [];
 
-  // NOTE: walk relies on key-insertion-order preserved by fast-xml-parser with
-  // preserveOrder: true so that w:instrText, w:fldChar, and w:t are visited in
-  // document order within each node.
   function walk(nodes: any[]): void {
     for (const node of nodes) {
       for (const key of Object.keys(node)) {
         if (key === ':@') { continue; }
 
-        if (key === 'w:instrText') {
-          const text = nodeText(node['w:instrText'] || []);
-          if (text.includes('ZOTERO_ITEM')) {
-            inCitationField = true;
-            currentCitation = zoteroCitations[citationIdx++];
-            citationTextParts = [];
-          }
-        } else if (key === 'w:fldChar') {
+        if (key === 'w:fldChar') {
           const fldType = getAttr(node, 'fldCharType');
-          if (fldType === 'end' && inCitationField) {
-            // Emit the citation
-            if (currentCitation) {
+          if (fldType === 'begin') {
+            inField = true;
+            fieldInstrParts = [];
+            inCitationField = false;
+          } else if (fldType === 'separate') {
+            if (inField) {
+              const instrText = fieldInstrParts.join('');
+              if (instrText.includes('ZOTERO_ITEM')) {
+                inCitationField = true;
+                currentCitation = zoteroCitations[citationIdx++];
+                citationTextParts = [];
+              }
+            }
+          } else if (fldType === 'end') {
+            if (inCitationField && currentCitation) {
               const pandocKeys = citationPandocKeys(currentCitation, keyMap);
               content.push({
                 type: 'citation',
@@ -285,9 +327,12 @@ export async function extractDocumentContent(
                 pandocKeys,
               });
             }
+            inField = false;
             inCitationField = false;
             currentCitation = undefined;
           }
+        } else if (key === 'w:instrText' && inField) {
+          fieldInstrParts.push(nodeText(node['w:instrText'] || []));
         } else if (key === 'w:commentRangeStart') {
           activeComments.add(getAttr(node, 'id'));
         } else if (key === 'w:commentRangeEnd') {
