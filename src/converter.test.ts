@@ -106,11 +106,11 @@ describe('generateCitationKey', () => {
       .toBe('obriensmith2020test');
   });
 
+  // Feature: docx-converter, Property 1: citation key alphanumeric invariant
   test('property: output contains only lowercase alphanumeric chars', () => {
-    const yearArb = fc.string().map(s => s.replace(/[^0-9]/g, ''));
     fc.assert(
       fc.property(
-        fc.string(), yearArb, fc.string(),
+        fc.string(), fc.string(), fc.string(),
         (surname, year, title) => {
           const key = generateCitationKey(surname, year, title);
           expect(key).toMatch(/^[a-z0-9]*$/);
@@ -120,6 +120,7 @@ describe('generateCitationKey', () => {
     );
   });
 
+  // Feature: docx-converter, Property 2: citation key determinism
   test('property: deterministic — same inputs produce same output', () => {
     fc.assert(
       fc.property(
@@ -134,6 +135,7 @@ describe('generateCitationKey', () => {
     );
   });
 
+  // Feature: docx-converter, Property 3: citation key starts with letter given letter surname
   test('property: non-empty surname with letters produces key starting with lowercase letter', () => {
     fc.assert(
       fc.property(
