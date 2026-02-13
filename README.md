@@ -46,9 +46,8 @@ User guides:
 - [Configuration](docs/configuration.md) - All settings and customization options
 - [CriticMarkup Reference](https://github.com/CriticMarkup/CriticMarkup-toolkit) - Markup syntax specification
 
-Development and history:
+Development:
 - [Development Guide](docs/development.md) - Build, test, and contribution guide
-- [Changelog](docs/CHANGELOG.md) - Release history and version notes
 
 See also:
 - [Known Issues and Limitations](#known-issues-and-limitations)
@@ -72,10 +71,6 @@ For detailed development guidance including key invariants and learnings, see [A
 ## Provenance
 
 This project began as a fork of the archived [vscode-criticmarkup](https://github.com/jloow/vscode-criticmarkup) extension by Joel Lööw (2019), which provided basic CriticMarkup syntax highlighting and snippets. This version represents a complete architectural rewrite that extends the original with multi-line patterns, live preview, formatting tools, and comprehensive testing.
-
-## Release History
-
-See [Changelog](docs/CHANGELOG.md) for detailed release notes and version history.
 
 ## License
 
