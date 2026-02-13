@@ -56,3 +56,5 @@ Code (authoritative for behavior):
 - Property tests: Use fast-check with constraints to avoid timeout on large generated strings; prefer shorter bounded generators
 - Multi-line preview rendering: markdown-it requires patterns to start at block level (line beginning); use the block rule, not inline
 - Table parsing: Handle edge cases like cells with pipes in code or quotes; use careful boundary detection
+- VSIX packaging: Do not exclude `node_modules/**` in `.vscodeignore` when runtime deps are imported from `out/*.js`; doing so causes extension activation failure and "command not found" errors in installed builds (even if it works in extension development host)
+- DOCX conversion outputs: Before writing `${base}.md` / `${base}.bib`, detect pre-existing targets and prompt with overwrite/rename/cancel to prevent silent data loss

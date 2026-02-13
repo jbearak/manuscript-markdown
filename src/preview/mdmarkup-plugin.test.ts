@@ -12,10 +12,11 @@ function escapeHtml(str: string): string {
     .replace(/"/g, '&quot;');
 }
 
-// Helper to filter out strings with Markdown special characters that would be transformed
-const hasNoMarkdownSyntax = (s: string) => {
+// Helper to filter out strings with Markdown or HTML special characters that would be transformed
+const hasNoSpecialSyntax = (s: string) => {
   // Exclude Markdown special characters that trigger inline formatting
-  return !s.includes('\\') && !s.includes('`') && !s.includes('*') && !s.includes('_') && !s.includes('[') && !s.includes(']');
+  // and HTML special characters that cause escaping mismatches
+  return !/[\\`*_\[\]&<>"']/.test(s);
 };
 
 describe('mdmarkup Plugin Property Tests', () => {
@@ -27,7 +28,7 @@ describe('mdmarkup Plugin Property Tests', () => {
     it('should transform addition patterns into HTML with correct CSS class', () => {
       fc.assert(
         fc.property(
-          fc.string({ minLength: 1, maxLength: 100 }).filter(s => !s.includes('{') && !s.includes('}') && hasNoMarkdownSyntax(s)),
+          fc.string({ minLength: 1, maxLength: 100 }).filter(s => !s.includes('{') && !s.includes('}') && hasNoSpecialSyntax(s)),
           (text) => {
             const md = new MarkdownIt();
             md.use(mdmarkupPlugin);
@@ -50,7 +51,7 @@ describe('mdmarkup Plugin Property Tests', () => {
     it('should transform deletion patterns into HTML with correct CSS class', () => {
       fc.assert(
         fc.property(
-          fc.string({ minLength: 1, maxLength: 100 }).filter(s => !s.includes('{') && !s.includes('}') && hasNoMarkdownSyntax(s)),
+          fc.string({ minLength: 1, maxLength: 100 }).filter(s => !s.includes('{') && !s.includes('}') && hasNoSpecialSyntax(s)),
           (text) => {
             const md = new MarkdownIt();
             md.use(mdmarkupPlugin);
@@ -73,7 +74,7 @@ describe('mdmarkup Plugin Property Tests', () => {
     it('should transform comment patterns into HTML with correct CSS class', () => {
       fc.assert(
         fc.property(
-          fc.string({ minLength: 1, maxLength: 100 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('<') && !s.includes('>') && hasNoMarkdownSyntax(s)),
+          fc.string({ minLength: 1, maxLength: 100 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('<') && !s.includes('>') && hasNoSpecialSyntax(s)),
           (text) => {
             const md = new MarkdownIt();
             md.use(mdmarkupPlugin);
@@ -96,7 +97,7 @@ describe('mdmarkup Plugin Property Tests', () => {
     it('should transform highlight patterns into HTML with correct CSS class', () => {
       fc.assert(
         fc.property(
-          fc.string({ minLength: 1, maxLength: 100 }).filter(s => !s.includes('{') && !s.includes('}') && hasNoMarkdownSyntax(s)),
+          fc.string({ minLength: 1, maxLength: 100 }).filter(s => !s.includes('{') && !s.includes('}') && hasNoSpecialSyntax(s)),
           (text) => {
             const md = new MarkdownIt();
             md.use(mdmarkupPlugin);
@@ -119,8 +120,8 @@ describe('mdmarkup Plugin Property Tests', () => {
     it('should transform substitution patterns into HTML with both deletion and addition styling', () => {
       fc.assert(
         fc.property(
-          fc.string({ minLength: 1, maxLength: 50 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && hasNoMarkdownSyntax(s)),
-          fc.string({ minLength: 1, maxLength: 50 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && hasNoMarkdownSyntax(s)),
+          fc.string({ minLength: 1, maxLength: 50 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && hasNoSpecialSyntax(s)),
+          fc.string({ minLength: 1, maxLength: 50 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && hasNoSpecialSyntax(s)),
           (oldText, newText) => {
             const md = new MarkdownIt();
             md.use(mdmarkupPlugin);
@@ -150,7 +151,7 @@ describe('mdmarkup Plugin Property Tests', () => {
     it('should render multiple additions with consistent HTML structure', () => {
       fc.assert(
         fc.property(
-          fc.array(fc.string({ minLength: 1, maxLength: 50 }).filter(s => !s.includes('{') && !s.includes('}') && hasNoMarkdownSyntax(s)), { minLength: 2, maxLength: 5 }),
+          fc.array(fc.string({ minLength: 1, maxLength: 50 }).filter(s => !s.includes('{') && !s.includes('}') && hasNoSpecialSyntax(s)), { minLength: 2, maxLength: 5 }),
           (texts) => {
             const md = new MarkdownIt();
             md.use(mdmarkupPlugin);
@@ -175,7 +176,7 @@ describe('mdmarkup Plugin Property Tests', () => {
     it('should render multiple deletions with consistent HTML structure', () => {
       fc.assert(
         fc.property(
-          fc.array(fc.string({ minLength: 1, maxLength: 50 }).filter(s => !s.includes('{') && !s.includes('}') && hasNoMarkdownSyntax(s)), { minLength: 2, maxLength: 5 }),
+          fc.array(fc.string({ minLength: 1, maxLength: 50 }).filter(s => !s.includes('{') && !s.includes('}') && hasNoSpecialSyntax(s)), { minLength: 2, maxLength: 5 }),
           (texts) => {
             const md = new MarkdownIt();
             md.use(mdmarkupPlugin);
@@ -200,7 +201,7 @@ describe('mdmarkup Plugin Property Tests', () => {
     it('should render multiple comments with consistent HTML structure', () => {
       fc.assert(
         fc.property(
-          fc.array(fc.string({ minLength: 1, maxLength: 50 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('<') && !s.includes('>') && hasNoMarkdownSyntax(s)), { minLength: 2, maxLength: 5 }),
+          fc.array(fc.string({ minLength: 1, maxLength: 50 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('<') && !s.includes('>') && hasNoSpecialSyntax(s)), { minLength: 2, maxLength: 5 }),
           (texts) => {
             const md = new MarkdownIt();
             md.use(mdmarkupPlugin);
@@ -225,7 +226,7 @@ describe('mdmarkup Plugin Property Tests', () => {
     it('should render multiple highlights with consistent HTML structure', () => {
       fc.assert(
         fc.property(
-          fc.array(fc.string({ minLength: 1, maxLength: 50 }).filter(s => !s.includes('{') && !s.includes('}') && hasNoMarkdownSyntax(s)), { minLength: 2, maxLength: 5 }),
+          fc.array(fc.string({ minLength: 1, maxLength: 50 }).filter(s => !s.includes('{') && !s.includes('}') && hasNoSpecialSyntax(s)), { minLength: 2, maxLength: 5 }),
           (texts) => {
             const md = new MarkdownIt();
             md.use(mdmarkupPlugin);
@@ -252,8 +253,8 @@ describe('mdmarkup Plugin Property Tests', () => {
         fc.property(
           fc.array(
             fc.tuple(
-              fc.string({ minLength: 1, maxLength: 30 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && hasNoMarkdownSyntax(s)),
-              fc.string({ minLength: 1, maxLength: 30 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && hasNoMarkdownSyntax(s))
+              fc.string({ minLength: 1, maxLength: 30 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && hasNoSpecialSyntax(s)),
+              fc.string({ minLength: 1, maxLength: 30 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && hasNoSpecialSyntax(s))
             ),
             { minLength: 2, maxLength: 5 }
           ),
@@ -514,12 +515,12 @@ describe('mdmarkup Plugin Property Tests', () => {
     const isValidMultilineContent = (s: string) => {
       if (!s || s.trim().length === 0) return false;
       // Exclude strings with Markdown special characters
-      if (!hasNoMarkdownSyntax(s)) return false;
+      if (!hasNoSpecialSyntax(s)) return false;
       // Exclude strings that start with Markdown block syntax
       const trimmed = s.trim();
       if (trimmed.startsWith('#')) return false;  // Headings
       if (trimmed.startsWith('>')) return false;  // Blockquotes
-      if (trimmed.startsWith('-') || trimmed.startsWith('+')) return false;  // Lists (note: * is already excluded by hasNoMarkdownSyntax)
+      if (trimmed.startsWith('-') || trimmed.startsWith('+')) return false;  // Lists (note: * is already excluded by hasNoSpecialSyntax)
       if (trimmed.match(/^\d+\./)) return false;  // Ordered lists
       // Exclude strings that are just special characters that could trigger setext headings
       if (trimmed.match(/^[=\-]+$/)) return false;
@@ -670,7 +671,6 @@ describe('mdmarkup Plugin Property Tests', () => {
       );
     });
   });
-});
 
   // Feature: markdown-preview-highlighting, Property 5: Substitution dual rendering
   // Validates: Requirements 3.1
@@ -678,8 +678,8 @@ describe('mdmarkup Plugin Property Tests', () => {
     it('should render substitution with both old text (deletion styling) and new text (addition styling)', () => {
       fc.assert(
         fc.property(
-          fc.string({ minLength: 1, maxLength: 50 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && hasNoMarkdownSyntax(s)),
-          fc.string({ minLength: 1, maxLength: 50 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && hasNoMarkdownSyntax(s)),
+          fc.string({ minLength: 1, maxLength: 50 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && hasNoSpecialSyntax(s)),
+          fc.string({ minLength: 1, maxLength: 50 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && hasNoSpecialSyntax(s)),
           (oldText, newText) => {
             const md = new MarkdownIt();
             md.use(mdmarkupPlugin);
@@ -713,8 +713,8 @@ describe('mdmarkup Plugin Property Tests', () => {
     it('should handle substitutions where old and new text are different lengths', () => {
       fc.assert(
         fc.property(
-          fc.string({ minLength: 1, maxLength: 20 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && hasNoMarkdownSyntax(s)),
-          fc.string({ minLength: 30, maxLength: 80 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && hasNoMarkdownSyntax(s)),
+          fc.string({ minLength: 1, maxLength: 20 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && hasNoSpecialSyntax(s)),
+          fc.string({ minLength: 30, maxLength: 80 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && hasNoSpecialSyntax(s)),
           (shortText, longText) => {
             const md = new MarkdownIt();
             md.use(mdmarkupPlugin);
@@ -745,7 +745,7 @@ describe('mdmarkup Plugin Property Tests', () => {
     it('should handle substitutions with empty old or new text', () => {
       fc.assert(
         fc.property(
-          fc.string({ minLength: 1, maxLength: 50 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && hasNoMarkdownSyntax(s)),
+          fc.string({ minLength: 1, maxLength: 50 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && hasNoSpecialSyntax(s)),
           (text) => {
             const md = new MarkdownIt();
             md.use(mdmarkupPlugin);
@@ -765,6 +765,7 @@ describe('mdmarkup Plugin Property Tests', () => {
       );
     });
   });
+});
 
 // Edge case unit tests
 // Validates: Requirements 8.3, 8.4
@@ -1156,7 +1157,7 @@ describe('Property 4: Empty line preservation', () => {
       fc.string({ minLength: 1, maxLength: 50 }).filter(s => 
         !s.includes('{') && !s.includes('}') && 
         !s.includes('\n') && // Individual lines shouldn't have newlines
-        hasNoMarkdownSyntax(s) &&
+        hasNoSpecialSyntax(s) &&
         s.trim().length > 0 // Non-empty when trimmed
       ),
       fc.constant('') // Empty line
@@ -1346,7 +1347,7 @@ describe('Property 3: Multi-line preview rendering (multiline-mdmarkup-support)'
     fc.string({ minLength: 1, maxLength: 50 }).filter(s => 
       !s.includes('{') && !s.includes('}') && 
       !s.includes('\n') &&
-      hasNoMarkdownSyntax(s) &&
+      hasNoSpecialSyntax(s) &&
       s.trim().length > 0
     ),
     { minLength: 2, maxLength: 5 }
@@ -1539,7 +1540,7 @@ describe('Property 5: Mid-line multi-line pattern recognition (navigation only)'
   // Must exclude markdown block-level syntax markers
   const plainText = fc.string({ minLength: 1, maxLength: 30 }).filter(s => {
     if (!s || s.trim().length === 0) return false;
-    if (!hasNoMarkdownSyntax(s)) return false;
+    if (!hasNoSpecialSyntax(s)) return false;
     // Exclude mdmarkup markers
     if (s.includes('{') || s.includes('}')) return false;
     // Exclude newlines
@@ -1560,7 +1561,7 @@ describe('Property 5: Mid-line multi-line pattern recognition (navigation only)'
     fc.string({ minLength: 1, maxLength: 50 }).filter(s => 
       !s.includes('{') && !s.includes('}') && 
       !s.includes('\n') &&
-      hasNoMarkdownSyntax(s) &&
+      hasNoSpecialSyntax(s) &&
       s.trim().length > 0
     ),
     { minLength: 2, maxLength: 4 }

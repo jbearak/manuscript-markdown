@@ -4,6 +4,12 @@ import * as formatting from './formatting';
 import * as author from './author';
 import { mdmarkupPlugin } from './preview/mdmarkup-plugin';
 import { WordCountController } from './wordcount';
+import { convertDocx, CitationKeyFormat } from './converter';
+import {
+	getOutputBasePath,
+	getOutputConflictMessage,
+	getOutputConflictScenario,
+} from './output-conflicts';
 
 export function activate(context: vscode.ExtensionContext) {
 	// Register existing navigation commands
@@ -115,6 +121,78 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('mdmarkup.formatHeading6', () => 
 			applyLineBasedFormatting((text) => formatting.formatHeading(text, 6))
 		)
+	);
+
+	// Register DOCX converter command
+	context.subscriptions.push(
+		vscode.commands.registerCommand('mdmarkup.convertDocx', async (uri?: vscode.Uri) => {
+			try {
+				if (!uri) {
+					const files = await vscode.window.showOpenDialog({
+						filters: { 'Word Documents': ['docx'] },
+						canSelectMany: false,
+					});
+					if (!files || files.length === 0) { return; }
+					uri = files[0];
+				}
+				const data = await vscode.workspace.fs.readFile(uri);
+				const format = vscode.workspace.getConfiguration('mdmarkup').get<CitationKeyFormat>('citationKeyFormat', 'authorYearTitle');
+				const result = await convertDocx(new Uint8Array(data), format);
+
+				const basePath = uri.fsPath.replace(/\.docx$/i, '');
+				let mdUri = vscode.Uri.file(basePath + '.md');
+				let bibUri = vscode.Uri.file(basePath + '.bib');
+				const hasBibtex = Boolean(result.bibtex);
+				const mdExists = await fileExists(mdUri);
+				const bibExists = hasBibtex ? await fileExists(bibUri) : false;
+				const conflictScenario = getOutputConflictScenario(mdExists, bibExists);
+
+				if (conflictScenario) {
+					const choice = await vscode.window.showWarningMessage(
+						getOutputConflictMessage(basePath, conflictScenario),
+						{ modal: true },
+						'Overwrite',
+						'Choose New Name',
+						'Cancel'
+					);
+
+					if (!choice || choice === 'Cancel') {
+						return;
+					}
+
+					if (choice === 'Choose New Name') {
+						const selectedUri = await vscode.window.showSaveDialog({
+							defaultUri: mdUri,
+							filters: { 'Markdown': ['md'] },
+							saveLabel: 'Choose output file name'
+						});
+						if (!selectedUri) {
+							return;
+						}
+
+						const selectedBasePath = getOutputBasePath(selectedUri.fsPath);
+						mdUri = vscode.Uri.file(selectedBasePath + '.md');
+						bibUri = vscode.Uri.file(selectedBasePath + '.bib');
+					}
+				}
+
+				await vscode.workspace.fs.writeFile(mdUri, new TextEncoder().encode(result.markdown));
+				if (result.bibtex) {
+					await vscode.workspace.fs.writeFile(bibUri, new TextEncoder().encode(result.bibtex));
+				}
+
+				const mdDoc = await vscode.workspace.openTextDocument(mdUri);
+				await vscode.window.showTextDocument(mdDoc);
+				if (result.bibtex) {
+					const bibDoc = await vscode.workspace.openTextDocument(bibUri);
+					await vscode.window.showTextDocument(bibDoc, vscode.ViewColumn.Beside);
+				}
+
+				vscode.window.showInformationMessage(`Converted to ${mdUri.fsPath}`);
+			} catch (err: any) {
+				vscode.window.showErrorMessage(`DOCX conversion failed: ${err.message}`);
+			}
+		})
 	);
 
 	// Create and register word count controller
@@ -279,3 +357,12 @@ function applyTableFormatting(formatter: (text: string) => formatting.TextTransf
 }
 
 export function deactivate() {}
+
+async function fileExists(uri: vscode.Uri): Promise<boolean> {
+	try {
+		await vscode.workspace.fs.stat(uri);
+		return true;
+	} catch {
+		return false;
+	}
+}

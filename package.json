@@ -29,7 +29,8 @@
     "url": "https://github.com/jbearak/mdmarkup.git"
   },
   "activationEvents": [
-    "onLanguage:markdown"
+    "onLanguage:markdown",
+    "onCommand:mdmarkup.convertDocx"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -153,6 +154,10 @@
       {
         "command": "mdmarkup.reflowTable",
         "title": "Reflow Table"
+      },
+      {
+        "command": "mdmarkup.convertDocx",
+        "title": "Convert DOCX to Markdown"
       }
     ],
     "submenus": [
@@ -351,6 +356,13 @@
           "when": "editorLangId == markdown",
           "group": "1_heading@6"
         }
+      ],
+      "explorer/context": [
+        {
+          "command": "mdmarkup.convertDocx",
+          "when": "resourceExtname == .docx",
+          "group": "navigation"
+        }
       ]
     },
     "keybindings": [
@@ -401,18 +413,37 @@
           "type": "boolean",
           "default": true,
           "description": "Include timestamp in comment author attribution (format: username (yyyy-mm-dd hh:mm))"
+        },
+        "mdmarkup.citationKeyFormat": {
+          "type": "string",
+          "enum": [
+            "authorYearTitle",
+            "authorYear",
+            "numeric"
+          ],
+          "default": "authorYearTitle",
+          "enumDescriptions": [
+            "Author surname + year + first title word (e.g., smith2020effects)",
+            "Author surname + year (e.g., smith2020)",
+            "Sequential numbers (e.g., 1, 2, 3)"
+          ],
+          "description": "Citation key format for DOCX to Markdown conversion"
         }
       }
     }
   },
   "scripts": {
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "clean": "rm -rf out/",
+    "rebuild": "bun run clean && bun run compile",
+    "package": "bun run rebuild && bunx vsce package",
+    "install-local": "bun run package && code --install-extension mdmarkup-0.9.2.vsix --force"
   },
   "devDependencies": {
-    "@types/markdown-it": "^14.1.2",
+"@types/markdown-it": "^14.1.2",
     "@types/mocha": "^2.2.42",
-    "@types/node": "^10.14.4",
+    "@types/node": "^20.0.0",
     "@types/vscode": "^1.103.2",
     "fast-check": "^4.3.0",
     "tslint": "^5.14.0",
@@ -420,6 +451,8 @@
   },
   "private": true,
   "dependencies": {
+    "fast-xml-parser": "^5.3.5",
+    "jszip": "^3.10.1",
     "markdown-it": "^14.1.0"
   }
 }

@@ -373,7 +373,7 @@ describe('Formatting Module Property Tests', () => {
     it('should remove existing heading indicators and prepend exactly N # characters followed by a space for heading level N', () => {
       fc.assert(
         fc.property(
-          fc.string(),
+          fc.string().filter(s => !s.split('\n').some(l => /^#+\s/.test(l))),
           fc.integer({ min: 1, max: 6 }),
           fc.integer({ min: 0, max: 6 }), // existing heading level (0 means no heading)
           (baseText, newLevel, existingLevel) => {

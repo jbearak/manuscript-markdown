@@ -7,6 +7,7 @@
 out/**
 **/*.map
 *.vsix
+test/fixtures/*.js
 
 # Dependencies
 node_modules
