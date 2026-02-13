@@ -11,6 +11,10 @@ out/**
 # Dependencies
 node_modules
 
+# Python virtual environments
+.venv/
+venv/
+
 # OS files
 .DS_Store
 *.swp
