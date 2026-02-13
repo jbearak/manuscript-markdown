@@ -394,13 +394,13 @@ export function buildMarkdown(
     if (item.commentIds.size > 0) {
       let fullText = item.text;
       const commentSet = item.commentIds;
+      const commentKey = [...commentSet].sort().join(',');
       let j = i + 1;
       while (j < content.length) {
         const next = content[j];
         if (next.type !== 'text' || next.commentIds.size !== commentSet.size) { break; }
-        let same = true;
-        for (const id of commentSet) { if (!next.commentIds.has(id)) { same = false; break; } }
-        if (!same) { break; }
+        const nextKey = [...next.commentIds].sort().join(',');
+        if (nextKey !== commentKey) { break; }
         fullText += next.text;
         j++;
       }
