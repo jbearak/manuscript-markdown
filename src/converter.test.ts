@@ -232,6 +232,10 @@ describe('convertDocx (end-to-end)', () => {
     expect(markdown).toMatch(/^# /m);
     expect(markdown).toMatch(/^## /m);
     
+    // Lists: bulleted (- ) and numbered (1. )
+    expect(markdown).toMatch(/^- /m);
+    expect(markdown).toMatch(/^1\. /m);
+    
     // Check that the document contains expected content
     expect(markdown).toContain('bulleted list');
     expect(markdown).toContain('numbered list');
