@@ -516,46 +516,46 @@ describe('isToggleOn', () => {
   });
 
   test('returns true when element present with no val attribute', () => {
-    const children = [{ 'w:b': {} }];
+    const children = [{ 'w:b': [] }];
     expect(isToggleOn(children, 'w:b')).toBe(true);
   });
 
-  test('returns true when val="false" (current implementation bug)', () => {
-    const children = [{ 'w:b': { ':@': { '@_w:val': 'false' } } }];
-    expect(isToggleOn(children, 'w:b')).toBe(true);
+  test('returns false when val="false"', () => {
+    const children = [{ 'w:b': [], ':@': { '@_w:val': 'false' } }];
+    expect(isToggleOn(children, 'w:b')).toBe(false);
   });
 
-  test('returns true when val="0" (current implementation bug)', () => {
-    const children = [{ 'w:b': { ':@': { '@_w:val': '0' } } }];
-    expect(isToggleOn(children, 'w:b')).toBe(true);
+  test('returns false when val="0"', () => {
+    const children = [{ 'w:b': [], ':@': { '@_w:val': '0' } }];
+    expect(isToggleOn(children, 'w:b')).toBe(false);
   });
 
   test('returns true when val="true"', () => {
-    const children = [{ 'w:b': { ':@': { '@_w:val': 'true' } } }];
+    const children = [{ 'w:b': [], ':@': { '@_w:val': 'true' } }];
     expect(isToggleOn(children, 'w:b')).toBe(true);
   });
 
   test('returns true when val="1"', () => {
-    const children = [{ 'w:b': { ':@': { '@_w:val': '1' } } }];
+    const children = [{ 'w:b': [], ':@': { '@_w:val': '1' } }];
     expect(isToggleOn(children, 'w:b')).toBe(true);
   });
 });
 
 describe('highlight detection', () => {
-  test('does not detect highlight via w:shd (current implementation bug)', () => {
-    const children = [{ 'w:shd': { ':@': { '@_w:fill': 'FFFF00' } } }];
+  test('detects highlight via w:shd with non-auto fill', () => {
+    const children = [{ 'w:shd': [], ':@': { '@_w:fill': 'FFFF00' } }];
     const formatting = parseRunProperties(children);
-    expect(formatting.highlight).toBe(false);
+    expect(formatting.highlight).toBe(true);
   });
 
   test('ignores w:shd with auto fill', () => {
-    const children = [{ 'w:shd': { ':@': { '@_w:fill': 'auto' } } }];
+    const children = [{ 'w:shd': [], ':@': { '@_w:fill': 'auto' } }];
     const formatting = parseRunProperties(children);
     expect(formatting.highlight).toBe(false);
   });
 
   test('ignores w:shd with empty fill', () => {
-    const children = [{ 'w:shd': { ':@': { '@_w:fill': '' } } }];
+    const children = [{ 'w:shd': [], ':@': { '@_w:fill': '' } }];
     const formatting = parseRunProperties(children);
     expect(formatting.highlight).toBe(false);
   });
@@ -563,7 +563,7 @@ describe('highlight detection', () => {
 
 describe('parseHeadingLevel', () => {
   test('returns undefined for non-heading pStyle', () => {
-    const children = [{ 'w:pStyle': { ':@': { '@_w:val': 'Normal' } } }];
+    const children = [{ 'w:pStyle': [], ':@': { '@_w:val': 'Normal' } }];
     expect(parseHeadingLevel(children)).toBeUndefined();
   });
 
@@ -571,11 +571,11 @@ describe('parseHeadingLevel', () => {
     expect(parseHeadingLevel([])).toBeUndefined();
   });
 
-  test('returns undefined for heading styles (current implementation bug)', () => {
-    const children1 = [{ 'w:pStyle': { ':@': { '@_w:val': 'Heading1' } } }];
-    expect(parseHeadingLevel(children1)).toBeUndefined();
+  test('returns correct level for heading styles', () => {
+    const children1 = [{ 'w:pStyle': [], ':@': { '@_w:val': 'Heading1' } }];
+    expect(parseHeadingLevel(children1)).toBe(1);
     
-    const children3 = [{ 'w:pStyle': { ':@': { '@_w:val': 'Heading3' } } }];
-    expect(parseHeadingLevel(children3)).toBeUndefined();
+    const children3 = [{ 'w:pStyle': [], ':@': { '@_w:val': 'Heading3' } }];
+    expect(parseHeadingLevel(children3)).toBe(3);
   });
 });
