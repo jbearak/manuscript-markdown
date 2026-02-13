@@ -188,7 +188,7 @@ export function activate(context: vscode.ExtensionContext) {
 					await vscode.window.showTextDocument(bibDoc, vscode.ViewColumn.Beside);
 				}
 
-				vscode.window.showInformationMessage(`Converted to ${basePath}.md`);
+				vscode.window.showInformationMessage(`Converted to ${mdUri.fsPath}`);
 			} catch (err: any) {
 				vscode.window.showErrorMessage(`DOCX conversion failed: ${err.message}`);
 			}
