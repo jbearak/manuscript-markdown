@@ -624,7 +624,13 @@ export async function extractDocumentContent(
             }
           }
           
-          if (content.length > 0 && content[content.length - 1].type !== 'para') {
+          // Push para item if: this is the first paragraph with heading/list metadata,
+          // OR there's content and the last item isn't already a para
+          const needsPara = (headingLevel || listMeta) 
+            ? content.length === 0 || content[content.length - 1].type !== 'para'
+            : content.length > 0 && content[content.length - 1].type !== 'para';
+          
+          if (needsPara) {
             const paraItem: ContentItem = { type: 'para' };
             if (headingLevel) paraItem.headingLevel = headingLevel;
             if (listMeta) paraItem.listMeta = listMeta;
