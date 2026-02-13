@@ -1,6 +1,9 @@
 import JSZip from 'jszip';
 import { XMLParser } from 'fast-xml-parser';
 
+/** Matches a "Sources" heading (with or without leading `#` markers). */
+const SOURCES_HEADING_RE = /^(?:#+\s*)?Sources\s*$/;
+
 // Types
 
 export interface Comment {
@@ -122,6 +125,8 @@ export async function extractZoteroCitations(data: Uint8Array | JSZip): Promise<
   const parsed = await readZipXml(zip, 'word/document.xml');
   if (!parsed) { return citations; }
 
+  // NOTE: Split w:instrText across multiple w:r elements (common in
+  // Zotero-generated DOCX) is not yet handled; we only match single-run fields.
   for (const node of findAllDeep(parsed, 'w:instrText')) {
     const instrText = nodeText(node['w:instrText'] || []);
     if (!instrText.includes('ZOTERO_ITEM')) { continue; }
@@ -252,6 +257,9 @@ export async function extractDocumentContent(
   let currentCitation: ZoteroCitation | undefined;
   let citationTextParts: string[] = [];
 
+  // NOTE: walk relies on key-insertion-order preserved by fast-xml-parser with
+  // preserveOrder: true so that w:instrText, w:fldChar, and w:t are visited in
+  // document order within each node.
   function walk(nodes: any[]): void {
     for (const node of nodes) {
       for (const key of Object.keys(node)) {
@@ -426,7 +434,7 @@ export function parseReferences(markdown: string): string[] {
   const lines = markdown.split('\n');
   let inSources = false;
   for (const line of lines) {
-    if (line.trim() === 'Sources') { inSources = true; continue; }
+    if (SOURCES_HEADING_RE.test(line.trim())) { inSources = true; continue; }
     if (inSources && line.trim()) {
       const match = line.trim().match(/^(\d+)\.(.+)$/);
       if (match) { refs.push(match[2].trim()); }
@@ -453,7 +461,7 @@ export async function convertDocx(
 
   // Strip Sources section if present
   const lines = markdown.split('\n');
-  const sourcesIdx = lines.findIndex(l => l.trim() === 'Sources');
+  const sourcesIdx = lines.findIndex(l => SOURCES_HEADING_RE.test(l.trim()));
   if (sourcesIdx >= 0) {
     markdown = lines.slice(0, sourcesIdx).join('\n').trimEnd();
   }

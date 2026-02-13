@@ -671,7 +671,6 @@ describe('mdmarkup Plugin Property Tests', () => {
       );
     });
   });
-});
 
   // Feature: markdown-preview-highlighting, Property 5: Substitution dual rendering
   // Validates: Requirements 3.1
@@ -766,6 +765,7 @@ describe('mdmarkup Plugin Property Tests', () => {
       );
     });
   });
+});
 
 // Edge case unit tests
 // Validates: Requirements 8.3, 8.4
