@@ -14,10 +14,14 @@ import {
   wrapWithFormatting,
   DEFAULT_FORMATTING,
   RunFormatting,
+  isToggleOn,
+  parseHeadingLevel,
+  parseRunProperties,
 } from './converter';
 
 const fixturesDir = join(__dirname, '..', 'test', 'fixtures');
 const sampleData = new Uint8Array(readFileSync(join(fixturesDir, 'sample.docx')));
+const formattingSampleData = new Uint8Array(readFileSync(join(fixturesDir, 'formatting_sample.docx')));
 const expectedMd = readFileSync(join(fixturesDir, 'expected-output.md'), 'utf-8').trimEnd();
 const expectedBib = readFileSync(join(fixturesDir, 'expected-output.bib'), 'utf-8').trimEnd();
 
@@ -197,6 +201,40 @@ describe('convertDocx (end-to-end)', () => {
   test('produces expected bibtex', async () => {
     const result = await convertDocx(sampleData);
     expect(result.bibtex.trimEnd()).toBe(expectedBib);
+  });
+
+  test('converts formatting_sample.docx with expected formatting markers', async () => {
+    const result = await convertDocx(formattingSampleData);
+    const markdown = result.markdown;
+
+    // Bold: **text**
+    expect(markdown).toMatch(/\*\*[^*]+\*\*/);
+    
+    // Italic: *text*
+    expect(markdown).toMatch(/\*[^*]+\*/);
+    
+    // Underline: <u>text</u>
+    expect(markdown).toMatch(/<u>[^<]+<\/u>/);
+    
+    // Strikethrough: ~~text~~
+    expect(markdown).toMatch(/~~[^~]+~~/);
+    
+    // Highlight: ==text==
+    expect(markdown).toMatch(/==[^=]+==/);
+    
+    // Superscript: <sup>text</sup>
+    expect(markdown).toMatch(/<sup>[^<]+<\/sup>/);
+    
+    // Subscript: <sub>text</sub>
+    expect(markdown).toMatch(/<sub>[^<]+<\/sub>/);
+    
+    // Headings: # Heading 1, ## Heading 2, etc.
+    expect(markdown).toMatch(/^# /m);
+    expect(markdown).toMatch(/^## /m);
+    
+    // Check that the document contains expected content
+    expect(markdown).toContain('bulleted list');
+    expect(markdown).toContain('numbered list');
   });
 
   test('handles empty docx gracefully', async () => {
@@ -469,5 +507,75 @@ describe('buildMarkdown', () => {
       ),
       { numRuns: 100 }
     );
+  });
+});
+
+describe('isToggleOn', () => {
+  test('returns false when element is absent', () => {
+    expect(isToggleOn([], 'w:b')).toBe(false);
+  });
+
+  test('returns true when element present with no val attribute', () => {
+    const children = [{ 'w:b': {} }];
+    expect(isToggleOn(children, 'w:b')).toBe(true);
+  });
+
+  test('returns true when val="false" (current implementation bug)', () => {
+    const children = [{ 'w:b': { ':@': { '@_w:val': 'false' } } }];
+    expect(isToggleOn(children, 'w:b')).toBe(true);
+  });
+
+  test('returns true when val="0" (current implementation bug)', () => {
+    const children = [{ 'w:b': { ':@': { '@_w:val': '0' } } }];
+    expect(isToggleOn(children, 'w:b')).toBe(true);
+  });
+
+  test('returns true when val="true"', () => {
+    const children = [{ 'w:b': { ':@': { '@_w:val': 'true' } } }];
+    expect(isToggleOn(children, 'w:b')).toBe(true);
+  });
+
+  test('returns true when val="1"', () => {
+    const children = [{ 'w:b': { ':@': { '@_w:val': '1' } } }];
+    expect(isToggleOn(children, 'w:b')).toBe(true);
+  });
+});
+
+describe('highlight detection', () => {
+  test('does not detect highlight via w:shd (current implementation bug)', () => {
+    const children = [{ 'w:shd': { ':@': { '@_w:fill': 'FFFF00' } } }];
+    const formatting = parseRunProperties(children);
+    expect(formatting.highlight).toBe(false);
+  });
+
+  test('ignores w:shd with auto fill', () => {
+    const children = [{ 'w:shd': { ':@': { '@_w:fill': 'auto' } } }];
+    const formatting = parseRunProperties(children);
+    expect(formatting.highlight).toBe(false);
+  });
+
+  test('ignores w:shd with empty fill', () => {
+    const children = [{ 'w:shd': { ':@': { '@_w:fill': '' } } }];
+    const formatting = parseRunProperties(children);
+    expect(formatting.highlight).toBe(false);
+  });
+});
+
+describe('parseHeadingLevel', () => {
+  test('returns undefined for non-heading pStyle', () => {
+    const children = [{ 'w:pStyle': { ':@': { '@_w:val': 'Normal' } } }];
+    expect(parseHeadingLevel(children)).toBeUndefined();
+  });
+
+  test('returns undefined when pStyle element is absent', () => {
+    expect(parseHeadingLevel([])).toBeUndefined();
+  });
+
+  test('returns undefined for heading styles (current implementation bug)', () => {
+    const children1 = [{ 'w:pStyle': { ':@': { '@_w:val': 'Heading1' } } }];
+    expect(parseHeadingLevel(children1)).toBeUndefined();
+    
+    const children3 = [{ 'w:pStyle': { ':@': { '@_w:val': 'Heading3' } } }];
+    expect(parseHeadingLevel(children3)).toBeUndefined();
   });
 });
