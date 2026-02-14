@@ -66,7 +66,12 @@ function translateText(children: any[]): string;         // m:t text extraction
 Helper functions:
 
 ```typescript
-function getOmmlAttr(node: any, attr: string): string;  // attribute extraction for m:* namespace
+/**
+ * Extract an attribute from an m:* namespace node.
+ * OMML attributes use @_m:val (not @_w:val like WordprocessingML).
+ * Example: getOmmlAttr(node, 'val') looks for node[':@']['@_m:val']
+ */
+function getOmmlAttr(node: any, attr: string): string;
 function unicodeToLatex(char: string): string;           // Unicode → LaTeX command mapping
 function escapeLatex(text: string): string;              // escape reserved LaTeX chars in text
 function isMultiLetter(text: string): boolean;           // detect multi-letter runs for \mathrm{}
@@ -228,21 +233,39 @@ Parses to:
 }]
 ```
 
+### OMML Attribute Namespace
+
+OMML attributes use the `m:` namespace, not `w:`. With fast-xml-parser's `preserveOrder` + `attributeNamePrefix: '@_'`, OMML attributes appear as `@_m:val` (not `@_w:val`). The `getOmmlAttr` helper must account for this:
+
+```typescript
+function getOmmlAttr(node: any, attr: string): string {
+  return node?.[':@']?.[`@_m:${attr}`] ?? node?.[':@']?.[`@_${attr}`] ?? '';
+}
+```
+
 ### OMML Element → LaTeX Translation Table
 
-| OMML Element | Children | LaTeX Output |
-|---|---|---|
-| `m:f` | `m:num`, `m:den` | `\frac{num}{den}` |
-| `m:sSup` | `m:e`, `m:sup` | `{base}^{sup}` |
-| `m:sSub` | `m:e`, `m:sub` | `{base}_{sub}` |
-| `m:sSubSup` | `m:e`, `m:sub`, `m:sup` | `{base}_{sub}^{sup}` |
-| `m:rad` | `m:deg`, `m:e` | `\sqrt[deg]{e}` or `\sqrt{e}` |
-| `m:nary` | `m:naryPr`, `m:sub`, `m:sup`, `m:e` | `\sum_{sub}^{sup}{e}` |
-| `m:d` | `m:dPr`, `m:e` (one or more) | `(e1, e2, ...)` or `\left(...\right)` |
-| `m:acc` | `m:accPr`, `m:e` | `\hat{e}` etc. |
-| `m:m` | `m:mr` rows, each with `m:e` cells | `\begin{matrix}...\end{matrix}` |
-| `m:func` | `m:fName`, `m:e` | `\sin{e}` or `\operatorname{name}{e}` |
-| `m:r` | `m:rPr`, `m:t` | text content with Unicode mapping |
+| OMML Element | Children / Properties | LaTeX Output | Defaults (per ECMA-376 §22.1) |
+|---|---|---|---|
+| `m:f` | `m:fPr`?, `m:num`, `m:den` | `\frac{num}{den}` | — |
+| `m:sSup` | `m:sSupPr`?, `m:e`, `m:sup` | `{base}^{sup}` | — |
+| `m:sSub` | `m:sSubPr`?, `m:e`, `m:sub` | `{base}_{sub}` | — |
+| `m:sSubSup` | `m:sSubSupPr`?, `m:e`, `m:sub`, `m:sup` | `{base}_{sub}^{sup}` | — |
+| `m:rad` | `m:radPr`? (`m:degHide`), `m:deg`, `m:e` | `\sqrt[deg]{e}` or `\sqrt{e}` | `m:degHide` val="1" → hide degree |
+| `m:nary` | `m:naryPr` (`m:chr`, `m:limLoc`, `m:subHide`, `m:supHide`), `m:sub`, `m:sup`, `m:e` | `\sum_{sub}^{sup}{e}` | `m:chr` default = `∫`; `m:limLoc` `undOvr` → `\limits` |
+| `m:d` | `m:dPr` (`m:begChr`, `m:endChr`, `m:sepChr`), `m:e`+ | `(e1, e2, ...)` | `m:begChr` default = `(`; `m:endChr` default = `)` ; `m:sepChr` default = `|` |
+| `m:acc` | `m:accPr` (`m:chr`), `m:e` | `\hat{e}` etc. | `m:chr` default = `\u0302` (combining circumflex) |
+| `m:m` | `m:mPr`?, `m:mr`+ (each with `m:e`+) | `\begin{matrix}...\end{matrix}` | — |
+| `m:func` | `m:funcPr`?, `m:fName`, `m:e` | `\sin{e}` or `\operatorname{name}{e}` | — |
+| `m:r` | `m:rPr`? (`m:sty`), `w:rPr`?, `m:t` | text content with Unicode mapping | `m:sty` val="p" → plain (use `\mathrm{}`) |
+
+### N-ary Limit Location Handling
+
+The `m:limLoc` element in `m:naryPr` controls limit placement:
+- `subSup` (default for inline): Limits as subscript/superscript → `\sum_{sub}^{sup}`
+- `undOvr`: Limits above/below → `\sum\limits_{sub}^{sup}`
+
+When `m:subHide` val="1", omit the subscript. When `m:supHide` val="1", omit the superscript.
 
 ### ContentItem Extension
 
@@ -265,21 +288,82 @@ function ommlToLatex(children):
   return result.trim()
 
 function translateNode(tag, children):
+  // Known property/control tags that should be silently skipped
+  SKIP_TAGS = {"m:rPr", "m:ctrlPr", "m:fPr", "m:sSupPr", "m:sSubPr",
+               "m:sSubSupPr", "m:radPr", "m:naryPr", "m:dPr", "m:accPr",
+               "m:mPr", "m:funcPr", "w:rPr", "w:bookmarkStart",
+               "w:bookmarkEnd", "w:proofErr"}
+
   switch tag:
     case "m:f":    return translateFraction(children)
     case "m:sSup": return translateSuperscript(children)
     case "m:sSub": return translateSubscript(children)
-    ...
+    case "m:sSubSup": return translateSubSup(children)
+    case "m:rad":  return translateRadical(children)
+    case "m:nary": return translateNary(children)
+    case "m:d":    return translateDelimiter(children)
+    case "m:acc":  return translateAccent(children)
+    case "m:m":    return translateMatrix(children)
+    case "m:func": return translateFunction(children)
     case "m:r":    return translateRun(children)
     case "m:t":    return extractAndMapText(children)
+    case tag in SKIP_TAGS: return ""
     default:
-      if tag starts with "m:" and is not a known property tag:
+      if tag starts with "m:":
         return fallbackPlaceholder(tag, children)
       else:
-        return ""  // skip property/control tags like m:rPr, m:ctrlPr
+        return ""  // skip unknown w:* or other namespace nodes
+
+function translateNary(children):
+  // Extract m:naryPr for operator char, limit location, hide flags
+  pr = findChild(children, "m:naryPr")
+  chr = getOmmlAttr(findChild(pr, "m:chr"), "val") or "∫"  // default per ECMA-376
+  limLoc = getOmmlAttr(findChild(pr, "m:limLoc"), "val") or "subSup"
+  subHide = getOmmlAttr(findChild(pr, "m:subHide"), "val") == "1"
+  supHide = getOmmlAttr(findChild(pr, "m:supHide"), "val") == "1"
+
+  op = NARY_MAP.get(chr) or chr  // map Unicode to LaTeX command
+  limits = limLoc == "undOvr" ? "\\limits" : ""
+  sub = subHide ? "" : "_{" + ommlToLatex(findChild(children, "m:sub")) + "}"
+  sup = supHide ? "" : "^{" + ommlToLatex(findChild(children, "m:sup")) + "}"
+  body = ommlToLatex(findChild(children, "m:e"))
+
+  return op + limits + sub + sup + body
+
+function translateDelimiter(children):
+  pr = findChild(children, "m:dPr")
+  begChr = getOmmlAttr(findChild(pr, "m:begChr"), "val") or "("  // default
+  endChr = getOmmlAttr(findChild(pr, "m:endChr"), "val") or ")"  // default
+  sepChr = getOmmlAttr(findChild(pr, "m:sepChr"), "val") or "|"  // default
+
+  elements = findAllChildren(children, "m:e")
+  inner = elements.map(e => ommlToLatex(e)).join(sepChr)
+  return begChr + inner + endChr
+
+function translateRadical(children):
+  pr = findChild(children, "m:radPr")
+  degHide = getOmmlAttr(findChild(pr, "m:degHide"), "val") == "1"
+  radicand = ommlToLatex(findChild(children, "m:e"))
+  if degHide:
+    return "\\sqrt{" + radicand + "}"
+  else:
+    degree = ommlToLatex(findChild(children, "m:deg"))
+    if degree is empty:
+      return "\\sqrt{" + radicand + "}"
+    return "\\sqrt[" + degree + "]{" + radicand + "}"
+
+function translateRun(children):
+  // Check m:rPr for m:sty (style) — val="p" means plain text
+  pr = findChild(children, "m:rPr")
+  style = getOmmlAttr(findChild(pr, "m:sty"), "val")
+  text = extractText(children)  // from m:t nodes
+  mapped = unicodeToLatex(text)
+  if style == "p" or isMultiLetter(mapped):
+    return "\\mathrm{" + mapped + "}"
+  return mapped
 ```
 
-Each `translate*` function extracts the relevant child elements by tag name, recursively calls `ommlToLatex()` on their children, and composes the LaTeX string.
+Each `translate*` function extracts the relevant child elements by tag name, recursively calls `ommlToLatex()` on their children, and composes the LaTeX string. Property tags (e.g., `m:naryPr`, `m:dPr`) are read for configuration but not recursed into for LaTeX output.
 
 
 ## Correctness Properties
