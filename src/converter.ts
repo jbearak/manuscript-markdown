@@ -746,10 +746,12 @@ export function buildMarkdown(
     if (item.type === 'para') {
       const isCurrentList = item.listMeta !== undefined;
 
-      if (lastListType && isCurrentList && item.listMeta!.type === lastListType) {
-        output.push('\n');
-      } else {
-        output.push('\n\n');
+      if (output.length > 0) {
+        if (lastListType && isCurrentList && item.listMeta!.type === lastListType) {
+          output.push('\n');
+        } else {
+          output.push('\n\n');
+        }
       }
 
       lastListType = isCurrentList ? item.listMeta!.type : undefined;

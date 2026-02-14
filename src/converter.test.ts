@@ -167,6 +167,28 @@ describe('generateCitationKey', () => {
       { numRuns: 200 }
     );
   });
+
+  test('heading-first content does not start with leading blank lines', () => {
+    const content = [
+      { type: 'para' as const, headingLevel: 2 },
+      { type: 'text' as const, text: 'Heading', commentIds: new Set<string>(), formatting: DEFAULT_FORMATTING }
+    ];
+
+    const result = buildMarkdown(content, new Map());
+    expect(result).toBe('## Heading');
+    expect(result.startsWith('\n')).toBe(false);
+  });
+
+  test('list-first content does not start with leading blank lines', () => {
+    const content = [
+      { type: 'para' as const, listMeta: { type: 'bullet' as const, level: 0 } },
+      { type: 'text' as const, text: 'Item', commentIds: new Set<string>(), formatting: DEFAULT_FORMATTING }
+    ];
+
+    const result = buildMarkdown(content, new Map());
+    expect(result).toBe('- Item');
+    expect(result.startsWith('\n')).toBe(false);
+  });
 });
 
 describe('extractDocumentContent', () => {
