@@ -76,3 +76,5 @@ Code (authoritative for behavior):
 - Zotero URI key extraction: The regex `/\/items\/([A-Z0-9]{8})$/` works for all three Zotero URI formats (local, synced, group) since they all end with `/items/{KEY}`
 - Zotero field code `citationItems`: Check both `uris` (array) and `uri` (singular) as fallback since different Zotero versions may use either form
 - Zotero locators belong in Markdown Pandoc citations (`[@key, p. 20]`), not in BibTeX entries, because locators are per-citation-instance, not per-bibliographic-entry
+- Zotero numeric locators: Some Zotero versions/plugins may serialize locators as JSON numbers instead of strings; coerce to string with `String()` during extraction and in `sanitizeLocator()` to prevent silent data loss
+- BibTeX DOI escaping: DOIs can contain underscores and other BibTeX special characters; apply `escapeBibtex()` to DOI field like all other text fields to prevent malformed BibTeX output

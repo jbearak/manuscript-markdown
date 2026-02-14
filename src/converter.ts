@@ -483,9 +483,12 @@ export async function extractZoteroCitations(data: Uint8Array | JSZip): Promise<
           }
         }
 
-        // Extract locator
-        if (item.locator && typeof item.locator === 'string' && item.locator.trim()) {
-          result.locator = item.locator.trim();
+        // Extract locator (coerce to string for numeric locators)
+        if (item.locator) {
+          const loc = String(item.locator).trim();
+          if (loc) {
+            result.locator = loc;
+          }
         }
 
         return result;
@@ -571,8 +574,8 @@ function getSurname(meta: CitationMetadata): string {
 }
 
 /** Strip characters that are significant in Pandoc citation syntax. */
-function sanitizeLocator(locator: string): string {
-  return locator.replace(/[\[\];@]/g, '');
+function sanitizeLocator(locator: string | number): string {
+  return String(locator).replace(/[\[\];@]/g, '');
 }
 
 /** Get pandoc keys for a citation's items */
@@ -988,7 +991,7 @@ export function generateBibTeX(
       if (meta.volume) { fields.push(`  volume = {${escapeBibtex(meta.volume)}}`); }
       if (meta.pages) { fields.push(`  pages = {${escapeBibtex(meta.pages)}}`); }
       if (meta.year) { fields.push(`  year = {${escapeBibtex(meta.year)}}`); }
-      if (meta.doi) { fields.push(`  doi = {${meta.doi}}`); }
+      if (meta.doi) { fields.push(`  doi = {${escapeBibtex(meta.doi)}}`); }
       if (meta.zoteroKey) { fields.push(`  zotero-key = {${meta.zoteroKey}}`); }
       if (meta.zoteroUri) { fields.push(`  zotero-uri = {${escapeBibtex(meta.zoteroUri)}}`); }
 
