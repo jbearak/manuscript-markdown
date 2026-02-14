@@ -190,6 +190,31 @@ describe('extractDocumentContent', () => {
       expect(citItems[0].pandocKeys).toContain('smith2020effects');
     }
   });
+
+  test('inherits paragraph-level run formatting defaults and allows run-level override', async () => {
+    const JSZip = (await import('jszip')).default;
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>');
+    zip.file('_rels/.rels', '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>');
+    zip.file('word/document.xml', `<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:pPr>
+        <w:rPr><w:b/></w:rPr>
+      </w:pPr>
+      <w:r><w:t>Bold </w:t></w:r>
+      <w:r>
+        <w:rPr><w:b w:val="false"/></w:rPr>
+        <w:t>Plain</w:t>
+      </w:r>
+    </w:p>
+  </w:body>
+</w:document>`);
+    const buf = await zip.generateAsync({ type: 'uint8array' });
+    const result = await convertDocx(buf);
+    expect(result.markdown).toBe('**Bold **Plain');
+  });
 });
 
 describe('convertDocx (end-to-end)', () => {
@@ -460,6 +485,60 @@ describe('buildMarkdown', () => {
     expect(result).not.toContain(']');
     expect(result).not.toContain('(');
     expect(result).not.toContain(')');
+  });
+
+  test('href with parentheses is emitted using safe markdown link destination', () => {
+    const content = [{
+      type: 'text' as const,
+      text: 'link',
+      commentIds: new Set<string>(),
+      formatting: DEFAULT_FORMATTING,
+      href: 'https://example.com/a_(b)'
+    }];
+
+    const result = buildMarkdown(content, new Map());
+    expect(result).toBe('[link](<https://example.com/a_(b)>)');
+  });
+
+  test('commented text across differently formatted runs emits one annotation block', () => {
+    const comments = new Map([
+      ['c1', { author: 'Reviewer', text: 'note', date: '2025-01-01T00:00:00Z' }]
+    ]);
+    const content = [
+      {
+        type: 'text' as const,
+        text: 'normal ',
+        commentIds: new Set(['c1']),
+        formatting: DEFAULT_FORMATTING
+      },
+      {
+        type: 'text' as const,
+        text: 'bold',
+        commentIds: new Set(['c1']),
+        formatting: { ...DEFAULT_FORMATTING, bold: true }
+      }
+    ];
+
+    const result = buildMarkdown(content, comments);
+    expect(result).toBe('{==normal **bold**==}{>>Reviewer (2025-01-01T00:00Z): note<<}');
+  });
+
+  test('highlighted commented text does not produce doubled == delimiters', () => {
+    const comments = new Map([
+      ['c1', { author: 'Reviewer', text: 'note', date: '2025-01-01T00:00:00Z' }]
+    ]);
+    const content = [
+      {
+        type: 'text' as const,
+        text: 'highlighted',
+        commentIds: new Set(['c1']),
+        formatting: { ...DEFAULT_FORMATTING, highlight: true }
+      }
+    ];
+
+    const result = buildMarkdown(content, comments);
+    expect(result).toBe('{==highlighted==}{>>Reviewer (2025-01-01T00:00Z): note<<}');
+    expect(result).not.toContain('{====');
   });
 
   test('Property 6: Heading paragraphs produce correct # prefix', () => {

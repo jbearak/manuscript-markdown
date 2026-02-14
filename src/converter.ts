@@ -306,12 +306,30 @@ export function isToggleOn(children: any[], tagName: string): boolean {
 }
 
 /** Parse run properties and return RunFormatting */
-export function parseRunProperties(rPrChildren: any[]): RunFormatting {
-  const formatting: RunFormatting = { ...DEFAULT_FORMATTING };
+export function parseRunProperties(
+  rPrChildren: any[],
+  baseFormatting: RunFormatting = DEFAULT_FORMATTING
+): RunFormatting {
+  const formatting: RunFormatting = { ...baseFormatting };
   
-  formatting.bold = isToggleOn(rPrChildren, 'w:b');
-  formatting.italic = isToggleOn(rPrChildren, 'w:i');
-  formatting.strikethrough = isToggleOn(rPrChildren, 'w:strike');
+  // OOXML toggles: only override inherited value if property is explicitly present.
+  const bElement = rPrChildren.find(child => child['w:b'] !== undefined);
+  if (bElement) {
+    const val = getAttr(bElement, 'val');
+    formatting.bold = !val || val === 'true' || val === '1';
+  }
+  
+  const iElement = rPrChildren.find(child => child['w:i'] !== undefined);
+  if (iElement) {
+    const val = getAttr(iElement, 'val');
+    formatting.italic = !val || val === 'true' || val === '1';
+  }
+  
+  const strikeElement = rPrChildren.find(child => child['w:strike'] !== undefined);
+  if (strikeElement) {
+    const val = getAttr(strikeElement, 'val');
+    formatting.strikethrough = !val || val === 'true' || val === '1';
+  }
   
   // underline: w:u with w:val ≠ "none"
   const uElement = rPrChildren.find(child => child['w:u'] !== undefined);
@@ -333,7 +351,7 @@ export function parseRunProperties(rPrChildren: any[]): RunFormatting {
     }
   }
   
-  // superscript/subscript: w:vertAlign
+  // superscript/subscript: w:vertAlign (explicit value overrides inherited pair)
   const vertAlignElement = rPrChildren.find(child => child['w:vertAlign'] !== undefined);
   if (vertAlignElement) {
     const val = getAttr(vertAlignElement, 'val');
@@ -362,6 +380,10 @@ export function wrapWithFormatting(text: string, fmt: RunFormatting): string {
   if (fmt.bold) result = `**${result}**`;
   
   return result;
+}
+
+function formatHrefForMarkdown(href: string): string {
+  return /[()\s]/.test(href) ? `<${href}>` : href;
 }
 
 // Comment extraction
@@ -585,7 +607,7 @@ export async function extractDocumentContent(
           for (const child of runChildren) {
             if (child['w:rPr']) {
               const rPrChildren = Array.isArray(child['w:rPr']) ? child['w:rPr'] : [child['w:rPr']];
-              runFormatting = parseRunProperties(rPrChildren);
+              runFormatting = parseRunProperties(rPrChildren, currentFormatting);
               break;
             }
           }
@@ -612,6 +634,7 @@ export async function extractDocumentContent(
           // Process paragraph - extract heading level and list metadata
           let headingLevel: number | undefined;
           let listMeta: ListMeta | undefined;
+          let paraFormatting = currentFormatting;
           
           const paraChildren = Array.isArray(node[key]) ? node[key] : [node[key]];
           for (const child of paraChildren) {
@@ -619,6 +642,11 @@ export async function extractDocumentContent(
               const pPrChildren = Array.isArray(child['w:pPr']) ? child['w:pPr'] : [child['w:pPr']];
               headingLevel = parseHeadingLevel(pPrChildren);
               listMeta = parseListMeta(pPrChildren, numberingDefs);
+              const pRPrElement = pPrChildren.find(pprChild => pprChild['w:rPr'] !== undefined);
+              if (pRPrElement) {
+                const pRPrChildren = Array.isArray(pRPrElement['w:rPr']) ? pRPrElement['w:rPr'] : [pRPrElement['w:rPr']];
+                paraFormatting = parseRunProperties(pRPrChildren, currentFormatting);
+              }
               break;
             }
           }
@@ -636,7 +664,7 @@ export async function extractDocumentContent(
             if (listMeta) paraItem.listMeta = listMeta;
             content.push(paraItem);
           }
-          walk(paraChildren, currentFormatting);
+          walk(paraChildren, paraFormatting);
         } else if (Array.isArray(node[key])) {
           walk(node[key], currentFormatting);
         }
@@ -750,10 +778,28 @@ export function buildMarkdown(
       continue;
     }
 
-    // text with comments
+    // text with comments (merge adjacent runs by comment set, even when formatting differs)
     if (item.commentIds.size > 0) {
-      output.push(`{==${wrapWithFormatting(item.text, item.formatting)}==}`);
-      for (const cid of [...item.commentIds].sort()) {
+      const commentSet = item.commentIds;
+      const groupedCommentText: string[] = [];
+      let j = i;
+
+      while (j < mergedContent.length) {
+        const seg = mergedContent[j];
+        if (seg.type !== 'text' || !commentSetsEqual(seg.commentIds, commentSet)) {
+          break;
+        }
+        const fmtForComment: RunFormatting = { ...seg.formatting, highlight: false };
+        let segText = wrapWithFormatting(seg.text, fmtForComment);
+        if (seg.href) {
+          segText = `[${segText}](${formatHrefForMarkdown(seg.href)})`;
+        }
+        groupedCommentText.push(segText);
+        j++;
+      }
+
+      output.push(`{==${groupedCommentText.join('')}==}`);
+      for (const cid of [...commentSet].sort()) {
         const c = comments.get(cid);
         if (!c) { continue; }
         let dateStr = '';
@@ -762,20 +808,20 @@ export function buildMarkdown(
             const dt = new Date(c.date);
             if (!isNaN(dt.getTime())) {
               const pad = (n: number) => String(n).padStart(2, '0');
-              dateStr = ` (${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())} ${pad(dt.getUTCHours())}:${pad(dt.getUTCMinutes())})`;
+              dateStr = ` (${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}T${pad(dt.getUTCHours())}:${pad(dt.getUTCMinutes())}Z)`;
             }
           } catch { dateStr = ` (${c.date})`; }
         }
         output.push(`{>>${c.author}${dateStr}: ${c.text}<<}`);
       }
-      i++;
+      i = j;
       continue;
     }
 
     // regular text with formatting and hyperlinks
     let formattedText = wrapWithFormatting(item.text, item.formatting);
     if (item.href) {
-      formattedText = `[${formattedText}](${item.href})`;
+      formattedText = `[${formattedText}](${formatHrefForMarkdown(item.href)})`;
     }
     output.push(formattedText);
     i++;
