@@ -58,9 +58,9 @@ describe('Command Handler Unit Tests', () => {
 
     it('should handle empty text for substitution with cursor positioning', () => {
       const emptyText = '';
-      const substitution = formatting.wrapSelection(emptyText, '{~~', '~>~~}', 4);
+      const substitution = formatting.wrapSelection(emptyText, '{~~', '~>~~}', 5);
       expect(substitution.newText).toBe('{~~~>~~}');
-      expect(substitution.cursorOffset).toBe(4); // Position after ~>
+      expect(substitution.cursorOffset).toBe(5); // Position after ~>
     });
 
     it('should handle empty lines for line-based operations', () => {
@@ -84,10 +84,10 @@ describe('Command Handler Unit Tests', () => {
   describe('Cursor positioning for interactive commands', () => {
     it('should position cursor correctly for substitution', () => {
       const text = 'old text';
-      const result = formatting.wrapSelection(text, '{~~', '~>~~}', text.length + 4);
+      const result = formatting.wrapSelection(text, '{~~', '~>~~}', text.length + 5);
       
       expect(result.newText).toBe('{~~old text~>~~}');
-      expect(result.cursorOffset).toBe(12); // After "~>" for entering replacement (3 + 8 + 1 = 12)
+      expect(result.cursorOffset).toBe(13); // After "~>" for entering replacement (3 + 8 + 2 = 13)
     });
 
     it('should position cursor correctly for comment insertion', () => {
@@ -177,14 +177,14 @@ describe('Command Handler Unit Tests', () => {
       
       // Simulate processing multiple selections for substitution
       const results = selections.map(text => 
-        formatting.wrapSelection(text, '{~~', '~>~~}', text.length + 4)
+        formatting.wrapSelection(text, '{~~', '~>~~}', text.length + 5)
       );
       
       expect(results[0].newText).toBe('{~~text1~>~~}');
-      expect(results[0].cursorOffset).toBe(9);
+      expect(results[0].cursorOffset).toBe(10);
       
       expect(results[1].newText).toBe('{~~text2~>~~}');
-      expect(results[1].cursorOffset).toBe(9);
+      expect(results[1].cursorOffset).toBe(10);
     });
   });
 

@@ -34,11 +34,10 @@ export const HIGHLIGHT_DECORATION_COLORS: Record<string, { light: string; dark: 
   'black':       { light: 'rgba(0, 0, 0, 0.15)',       dark: 'rgba(0, 0, 0, 0.40)' },
 };
 
-/** Default background for CriticMarkup highlights {==text==} (MS Word comment gray) */
-export const CRITIC_HIGHLIGHT_BG = '#D9D9D9';
-export const CRITIC_HIGHLIGHT_DECORATION = {
-  light: 'rgba(217, 217, 217, 0.50)',
-  dark: 'rgba(217, 217, 217, 0.30)',
+/** Theme-aware background for CriticMarkup highlights and comments */
+export const CRITIC_COMMENT_DECORATION = {
+  light: 'rgba(200, 200, 200, 0.35)',
+  dark: 'rgba(200, 200, 200, 0.20)',
 };
 
 /** All valid color identifiers */
@@ -65,11 +64,11 @@ export function extractHighlightRanges(text: string, defaultColor: string): Map<
     result.get(key)!.push({ start, end });
   };
 
-  // CriticMarkup highlights {==text==}
+  // CriticMarkup highlights {==text==} — content only (skip delimiters)
   const criticRe = /\{==([\s\S]*?)==\}/g;
   let m;
   while ((m = criticRe.exec(text)) !== null) {
-    push('critic', m.index, m.index + m[0].length);
+    push('critic', m.index + 3, m.index + m[0].length - 3);
   }
 
   // Colored highlights ==text=={color} and default highlights ==text==
@@ -78,7 +77,8 @@ export function extractHighlightRanges(text: string, defaultColor: string): Map<
   while ((m = hlRe.exec(text)) !== null) {
     // Skip if this match is inside a CriticMarkup range
     const mEnd = m.index + m[0].length;
-    const insideCritic = (result.get('critic') || []).some(r => r.start <= m!.index && mEnd <= r.end);
+    // Content ranges are offset +3/-3 from full match; expand back to full delimiters for overlap check
+    const insideCritic = (result.get('critic') || []).some(r => (r.start - 3) <= m!.index && mEnd <= (r.end + 3));
     if (insideCritic) { continue; }
 
     const colorId = m[2];
@@ -93,4 +93,98 @@ export function extractHighlightRanges(text: string, defaultColor: string): Map<
   }
 
   return result;
+}
+
+/**
+ * Extract CriticMarkup comment ranges {>>text<<} from document text.
+ * Returns an array of offset ranges.
+ */
+export function extractCommentRanges(text: string): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  const re = /\{>>([\s\S]*?)<<\}/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    ranges.push({ start: m.index + 3, end: m.index + m[0].length - 3 });
+  }
+  return ranges;
+}
+
+/**
+ * Extract CriticMarkup addition content ranges {++text++} (content only, excluding delimiters).
+ */
+export function extractAdditionRanges(text: string): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  const re = /\{\+\+([\s\S]*?)\+\+\}/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const start = m.index + 3;
+    const end = m.index + m[0].length - 3;
+    if (end > start) { ranges.push({ start, end }); }
+  }
+  return ranges;
+}
+
+/**
+ * Extract CriticMarkup deletion content ranges {--text--} (content only, excluding delimiters).
+ */
+export function extractDeletionRanges(text: string): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  const re = /\{--([\s\S]*?)--\}/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const start = m.index + 3;
+    const end = m.index + m[0].length - 3;
+    if (end > start) { ranges.push({ start, end }); }
+  }
+  return ranges;
+}
+
+/**
+ * Extract offset ranges for all CriticMarkup delimiters.
+ * Returns ranges for: {== ==} {>> <<} {++ ++} {-- --} {~~ ~~} ~>
+ */
+export function extractCriticDelimiterRanges(text: string): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+
+  // 3-char opening/closing delimiters
+  const threeCharRe = /\{==|==\}|\{>>|<<\}|\{\+\+|\+\+\}|\{--|--\}|\{~~|~~\}/g;
+  let m;
+  while ((m = threeCharRe.exec(text)) !== null) {
+    ranges.push({ start: m.index, end: m.index + 3 });
+  }
+
+  // 2-char separator ~> inside substitutions (but not standalone)
+  const subRe = /\{~~([\s\S]*?)~~\}/g;
+  while ((m = subRe.exec(text)) !== null) {
+    const arrowIdx = m[0].indexOf('~>');
+    if (arrowIdx !== -1) {
+      // Make sure it's not part of the closing ~~}
+      const absIdx = m.index + arrowIdx;
+      // Verify this ~> is not the ~~ of the closing delimiter
+      if (arrowIdx < m[0].length - 3) {
+        ranges.push({ start: absIdx, end: absIdx + 2 });
+      }
+    }
+  }
+
+  return ranges;
+}
+
+/**
+ * For each {~~old~>new~~}, extract the range of the "new" portion (between ~> and ~~}).
+ */
+export function extractSubstitutionNewRanges(text: string): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  const re = /\{~~([\s\S]*?)~>([\s\S]*?)~~\}/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    // m[1] = old text, m[2] = new text
+    // Position of ~> is m.index + 3 + m[1].length
+    const newStart = m.index + 3 + m[1].length + 2; // skip {~~ + old + ~>
+    const newEnd = m.index + m[0].length - 3; // before ~~}
+    if (newEnd > newStart) {
+      ranges.push({ start: newStart, end: newEnd });
+    }
+  }
+  return ranges;
 }

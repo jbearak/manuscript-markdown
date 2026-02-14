@@ -8,10 +8,6 @@
   --mdmarkup-deletion-bg: rgba(204, 0, 0, 0.1);
   --mdmarkup-substitution-color: #dd6600;
   --mdmarkup-substitution-bg: rgba(221, 102, 0, 0.1);
-  --mdmarkup-comment-color: #0066cc;
-  --mdmarkup-comment-bg: rgba(0, 102, 204, 0.1);
-  --mdmarkup-highlight-color: #9933aa;
-  --mdmarkup-highlight-bg: rgba(153, 51, 170, 0.15);
   --mdmarkup-format-highlight-bg: #ffeb3b;
 }
 
@@ -24,10 +20,6 @@
     --mdmarkup-deletion-bg: rgba(255, 68, 68, 0.15);
     --mdmarkup-substitution-color: #ff9944;
     --mdmarkup-substitution-bg: rgba(255, 153, 68, 0.15);
-    --mdmarkup-comment-color: #5599ff;
-    --mdmarkup-comment-bg: rgba(85, 153, 255, 0.15);
-    --mdmarkup-highlight-color: #cc66dd;
-    --mdmarkup-highlight-bg: rgba(204, 102, 221, 0.2);
     --mdmarkup-format-highlight-bg: #ffc107;
   }
 }
@@ -51,17 +43,17 @@
   background-color: var(--mdmarkup-substitution-bg);
 }
 
-/* Comment - blue with semi-transparent background and italic */
+/* Comment - muted theme foreground with grey background and italic */
 .mdmarkup-comment {
-  color: var(--mdmarkup-comment-color);
-  background-color: var(--mdmarkup-comment-bg);
+  color: var(--vscode-descriptionForeground);
+  background-color: rgba(200, 200, 200, 0.35);
   font-style: italic;
 }
 
-/* Highlight - Comment_Gray for CriticMarkup {==text==} */
+/* Highlight - grey background for CriticMarkup {==text==} */
 .mdmarkup-highlight {
-  color: var(--mdmarkup-highlight-color);
-  background-color: rgba(217, 217, 217, 0.50);
+  color: inherit;
+  background-color: rgba(200, 200, 200, 0.35);
 }
 
 /* Format Highlight - yellow/amber for ==highlight== patterns */
@@ -85,23 +77,25 @@
 .mdmarkup-highlight-gray-25 { background-color: rgba(192, 192, 192, 0.40); }
 .mdmarkup-highlight-black { background-color: rgba(0, 0, 0, 0.15); }
 
-/* Colored Highlight Classes - Dark Theme Overrides */
-@media (prefers-color-scheme: dark) {
-  .mdmarkup-highlight {
-    background-color: rgba(217, 217, 217, 0.30);
-  }
-  .mdmarkup-highlight-yellow { background-color: rgba(255, 255, 0, 0.25); }
-  .mdmarkup-highlight-green { background-color: rgba(0, 255, 0, 0.20); }
-  .mdmarkup-highlight-turquoise { background-color: rgba(0, 255, 255, 0.20); }
-  .mdmarkup-highlight-pink { background-color: rgba(255, 0, 255, 0.20); }
-  .mdmarkup-highlight-blue { background-color: rgba(0, 0, 255, 0.30); }
-  .mdmarkup-highlight-red { background-color: rgba(255, 0, 0, 0.25); }
-  .mdmarkup-highlight-dark-blue { background-color: rgba(0, 0, 128, 0.40); }
-  .mdmarkup-highlight-teal { background-color: rgba(0, 128, 128, 0.35); }
-  .mdmarkup-highlight-violet { background-color: rgba(128, 0, 128, 0.35); }
-  .mdmarkup-highlight-dark-red { background-color: rgba(128, 0, 0, 0.40); }
-  .mdmarkup-highlight-dark-yellow { background-color: rgba(128, 128, 0, 0.35); }
-  .mdmarkup-highlight-gray-50 { background-color: rgba(128, 128, 128, 0.35); }
-  .mdmarkup-highlight-gray-25 { background-color: rgba(192, 192, 192, 0.25); }
-  .mdmarkup-highlight-black { background-color: rgba(0, 0, 0, 0.40); }
+/* Dark Theme Overrides (prefer VS Code theme classes) */
+body.vscode-dark .mdmarkup-comment {
+  background-color: rgba(200, 200, 200, 0.20);
 }
+body.vscode-dark .mdmarkup-highlight {
+  background-color: rgba(200, 200, 200, 0.20);
+}
+body.vscode-dark .mdmarkup-highlight-yellow { background-color: rgba(255, 255, 0, 0.25); }
+body.vscode-dark .mdmarkup-highlight-green { background-color: rgba(0, 255, 0, 0.20); }
+body.vscode-dark .mdmarkup-highlight-turquoise { background-color: rgba(0, 255, 255, 0.20); }
+body.vscode-dark .mdmarkup-highlight-pink { background-color: rgba(255, 0, 255, 0.20); }
+body.vscode-dark .mdmarkup-highlight-blue { background-color: rgba(0, 0, 255, 0.30); }
+body.vscode-dark .mdmarkup-highlight-red { background-color: rgba(255, 0, 0, 0.25); }
+body.vscode-dark .mdmarkup-highlight-dark-blue { background-color: rgba(0, 0, 128, 0.40); }
+body.vscode-dark .mdmarkup-highlight-teal { background-color: rgba(0, 128, 128, 0.35); }
+body.vscode-dark .mdmarkup-highlight-violet { background-color: rgba(128, 0, 128, 0.35); }
+body.vscode-dark .mdmarkup-highlight-dark-red { background-color: rgba(128, 0, 0, 0.40); }
+body.vscode-dark .mdmarkup-highlight-dark-yellow { background-color: rgba(128, 128, 0, 0.35); }
+body.vscode-dark .mdmarkup-highlight-gray-50 { background-color: rgba(128, 128, 128, 0.35); }
+body.vscode-dark .mdmarkup-highlight-gray-25 { background-color: rgba(192, 192, 192, 0.25); }
+body.vscode-dark .mdmarkup-highlight-black { background-color: rgba(0, 0, 0, 0.40); }
+

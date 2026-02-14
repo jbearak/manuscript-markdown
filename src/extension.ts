@@ -13,8 +13,13 @@ import {
 import {
 	VALID_COLOR_IDS,
 	HIGHLIGHT_DECORATION_COLORS,
-	CRITIC_HIGHLIGHT_DECORATION,
+	CRITIC_COMMENT_DECORATION,
 	extractHighlightRanges,
+	extractCommentRanges,
+	extractAdditionRanges,
+	extractDeletionRanges,
+	extractCriticDelimiterRanges,
+	extractSubstitutionNewRanges,
 	setDefaultHighlightColor,
 	getDefaultHighlightColor,
 } from './highlight-colors';
@@ -35,7 +40,7 @@ export function activate(context: vscode.ExtensionContext) {
 			applyFormatting((text) => formatting.wrapSelection(text, '{--', '--}'))
 		),
 		vscode.commands.registerCommand('mdmarkup.markSubstitution', () => 
-			applyFormatting((text) => formatting.wrapSelection(text, '{~~', '~>~~}', text.length + 4))
+			applyFormatting((text) => formatting.wrapSelection(text, '{~~', '~>~~}', text.length + 5))
 		),
 		vscode.commands.registerCommand('mdmarkup.highlight', () => 
 			applyFormatting((text) => formatting.wrapSelection(text, '{==', '==}'))
@@ -239,11 +244,38 @@ export function activate(context: vscode.ExtensionContext) {
 		context.subscriptions.push(decType);
 	}
 	const criticDecType = vscode.window.createTextEditorDecorationType({
-		light: { backgroundColor: CRITIC_HIGHLIGHT_DECORATION.light },
-		dark: { backgroundColor: CRITIC_HIGHLIGHT_DECORATION.dark },
+		light: { backgroundColor: CRITIC_COMMENT_DECORATION.light, color: new vscode.ThemeColor('editor.foreground') },
+		dark: { backgroundColor: CRITIC_COMMENT_DECORATION.dark, color: new vscode.ThemeColor('editor.foreground') },
 	});
 	decorationTypes.set('critic', criticDecType);
 	context.subscriptions.push(criticDecType);
+
+	const commentDecType = vscode.window.createTextEditorDecorationType({
+		light: { backgroundColor: CRITIC_COMMENT_DECORATION.light },
+		dark: { backgroundColor: CRITIC_COMMENT_DECORATION.dark },
+		fontStyle: 'italic',
+	});
+	context.subscriptions.push(commentDecType);
+
+	const delimiterDecType = vscode.window.createTextEditorDecorationType({
+		color: new vscode.ThemeColor('descriptionForeground'),
+	});
+	context.subscriptions.push(delimiterDecType);
+
+	const additionDecType = vscode.window.createTextEditorDecorationType({
+		color: new vscode.ThemeColor('gitDecoration.addedResourceForeground'),
+	});
+	context.subscriptions.push(additionDecType);
+
+	const deletionDecType = vscode.window.createTextEditorDecorationType({
+		textDecoration: 'line-through',
+	});
+	context.subscriptions.push(deletionDecType);
+
+	const substitutionNewDecType = vscode.window.createTextEditorDecorationType({
+		color: new vscode.ThemeColor('gitDecoration.addedResourceForeground'),
+	});
+	context.subscriptions.push(substitutionNewDecType);
 
 	function updateHighlightDecorations(editor: vscode.TextEditor) {
 		if (editor.document.languageId !== 'markdown') { return; }
@@ -263,6 +295,44 @@ export function activate(context: vscode.ExtensionContext) {
 				editor.setDecorations(decType, []);
 			}
 		}
+
+		// Apply comment decorations
+		const commentRanges = extractCommentRanges(text);
+		if (commentRanges.length > 0) {
+			editor.setDecorations(commentDecType, commentRanges.map(r => new vscode.Range(
+				editor.document.positionAt(r.start),
+				editor.document.positionAt(r.end)
+			)));
+		} else {
+			editor.setDecorations(commentDecType, []);
+		}
+
+		// Apply addition/deletion content decorations
+		const additionRanges = extractAdditionRanges(text);
+		editor.setDecorations(additionDecType, additionRanges.map(r => new vscode.Range(
+			editor.document.positionAt(r.start),
+			editor.document.positionAt(r.end)
+		)));
+
+		const deletionRanges = extractDeletionRanges(text);
+		editor.setDecorations(deletionDecType, deletionRanges.map(r => new vscode.Range(
+			editor.document.positionAt(r.start),
+			editor.document.positionAt(r.end)
+		)));
+
+		// Apply muted delimiter decorations
+		const delimiterRanges = extractCriticDelimiterRanges(text);
+		editor.setDecorations(delimiterDecType, delimiterRanges.map(r => new vscode.Range(
+			editor.document.positionAt(r.start),
+			editor.document.positionAt(r.end)
+		)));
+
+		// Apply substitution "new" text decorations
+		const subNewRanges = extractSubstitutionNewRanges(text);
+		editor.setDecorations(substitutionNewDecType, subNewRanges.map(r => new vscode.Range(
+			editor.document.positionAt(r.start),
+			editor.document.positionAt(r.end)
+		)));
 	}
 	let highlightDecorationUpdateTimer: ReturnType<typeof setTimeout> | undefined;
 	function scheduleHighlightDecorationsUpdate(editor: vscode.TextEditor) {

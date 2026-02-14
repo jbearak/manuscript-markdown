@@ -7,7 +7,8 @@
         { "include": "#comment" },
         { "include": "#highlight" },
         { "include": "#colored_format_highlight" },
-        { "include": "#format_highlight" }
+        { "include": "#format_highlight" },
+        { "include": "#citation_list" }
     ],
 	"repository": {
 		"addition": {
@@ -38,23 +39,29 @@
 			"begin": "\\{\\~\\~",
 			"end": "\\~\\~\\}",
 			"name": "markup.changed.mdmarkup",
-			"contentName": "markup.changed",
 			"patterns": [
 				{
+					"begin": "~>",
+					"beginCaptures": { "0": { "name": "punctuation.separator.mdmarkup" } },
+					"end": "(?=~~\\})",
+					"contentName": "markup.inserted",
+					"patterns": [{ "match": ".", "name": "markup.inserted" }]
+				},
+				{
 					"match": ".",
-					"name": "markup.changed"
+					"name": "markup.deleted"
 				}
 			]
 		},
 		"comment": {
 			"begin": "\\{>>",
 			"end": "<<\\}",
-			"name": "entity.name.function.mdmarkup",
-			"contentName": "entity.name.function",
+			"name": "comment.block.mdmarkup",
+			"contentName": "comment.block",
 			"patterns": [
 				{
 					"match": ".",
-					"name": "entity.name.function"
+					"name": "comment.block"
 				}
 			]
 		},
@@ -84,6 +91,27 @@
 			"captures": {
 				"1": { "name": "markup.highlight" }
 			}
+		},
+		"citation_list": {
+			"begin": "\\[(?=\\s*@)",
+			"beginCaptures": {
+				"0": { "name": "punctuation.definition.brackets.begin.mdmarkup" }
+			},
+			"end": "\\]",
+			"endCaptures": {
+				"0": { "name": "punctuation.definition.brackets.end.mdmarkup" }
+			},
+			"name": "meta.citation.mdmarkup",
+			"patterns": [
+				{
+					"match": "@[A-Za-z0-9_:-]+",
+					"name": "support.function.citation.mdmarkup"
+				},
+				{
+					"match": ";",
+					"name": "punctuation.separator.sequence.mdmarkup"
+				}
+			]
 		}
 	},
     "scopeName": "mdmarkup.injection"
