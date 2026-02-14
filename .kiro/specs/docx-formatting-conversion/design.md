@@ -34,6 +34,7 @@ interface RunFormatting {
   underline: boolean;
   strikethrough: boolean;
   highlight: boolean;
+  highlightColor?: string;  // OOXML color name or hex RGB (for future bidirectional conversion)
   superscript: boolean;
   subscript: boolean;
 }
@@ -168,9 +169,45 @@ Three additions for `==text==` formatting highlight (not CriticMarkup):
 | italic | boolean | false | `w:rPr > w:i` (same logic) |
 | underline | boolean | false | `w:rPr > w:u` with `w:val` ≠ `"none"`. OOXML `ST_Underline` defines 18 values (`single`, `words`, `double`, `thick`, `dotted`, `dottedHeavy`, `dash`, `dashedHeavy`, `dashLong`, `dashLongHeavy`, `dotDash`, `dashDotHeavy`, `dotDotDash`, `dashDotDotHeavy`, `wave`, `wavyHeavy`, `wavyDouble`, `none`). A bare `<w:u/>` with no `w:val` defaults to `single`. All non-`"none"` values are treated as underlined. `"words"` (underline non-space characters only) is treated as regular underline for simplicity. |
 | strikethrough | boolean | false | `w:rPr > w:strike` or `w:rPr > w:dstrike` (same logic as bold; `w:strike` and `w:dstrike` are mutually exclusive per ECMA-376 — both map to `~~`) |
-| highlight | boolean | false | `w:rPr > w:highlight` with `w:val` ≠ `"none"`, OR `w:rPr > w:shd` with `w:fill` ≠ `""` and ≠ `"auto"`. `w:highlight` takes priority over `w:shd` per ECMA-376. Note: `w:fill` is of type `ST_HexColor` (union of `"auto"` and 6-digit hex RGB); `"auto"` means application-determined color, effectively no explicit shading. The `w:fill` attribute is required on `w:shd` per schema, so the empty-string check is a defensive guard. Checking `w:fill` alone is a simplification — technically a pattern (`w:val` ≠ `"clear"`) with a non-auto `w:color` could also produce visible shading. |
+| highlight | boolean | false | `w:rPr > w:highlight` with `w:val` ≠ `"none"` (OOXML `ST_HighlightColor` has 17 values: black, blue, cyan, green, magenta, red, yellow, white, darkBlue, darkCyan, darkGreen, darkMagenta, darkRed, darkYellow, darkGray, lightGray, none), OR `w:rPr > w:shd` with `w:fill` ≠ `""` and ≠ `"auto"`. `w:highlight` takes priority over `w:shd` per ECMA-376. Note: `w:fill` is of type `ST_HexColor` (union of `"auto"` and 6-digit hex RGB); `"auto"` means application-determined color, effectively no explicit shading. The `w:fill` attribute is required on `w:shd` per schema, so the empty-string check is a defensive guard. Checking `w:fill` alone is a simplification — technically a pattern (`w:val` ≠ `"clear"`) with a non-auto `w:color` could also produce visible shading. |
+| highlightColor | string \| undefined | undefined | When `highlight` is `true`: from `w:highlight`, the `w:val` color name (one of the 16 `ST_HighlightColor` values below); from `w:shd`, the `w:fill` hex RGB value (e.g. `"FFFF00"`). Stored for future bidirectional conversion. |
 | superscript | boolean | false | `w:rPr > w:vertAlign` with `w:val="superscript"` |
 | subscript | boolean | false | `w:rPr > w:vertAlign` with `w:val="subscript"` |
+
+### Highlight Color Values (ST_HighlightColor)
+
+OOXML `ST_HighlightColor` defines 17 values (16 colors + `none`):
+
+| OOXML Value | Hex Equivalent | OOXML Value | Hex Equivalent |
+|-------------|---------------|-------------|---------------|
+| `yellow` | `#FFFF00` | `green` | `#00FF00` |
+| `cyan` | `#00FFFF` | `magenta` | `#FF00FF` |
+| `blue` | `#0000FF` | `red` | `#FF0000` |
+| `darkBlue` | `#000080` | `darkCyan` | `#008080` |
+| `darkGreen` | `#008000` | `darkMagenta` | `#800080` |
+| `darkRed` | `#800000` | `darkYellow` | `#808000` |
+| `darkGray` | `#808080` | `lightGray` | `#C0C0C0` |
+| `black` | `#000000` | `white` | `#FFFFFF` |
+| `none` | *(no highlight)* | | |
+
+When highlight comes from `w:shd`, the color is an arbitrary 6-digit hex RGB from the `w:fill` attribute (not limited to the 16 named colors above).
+
+### Highlight Color Encoding in Markdown (Future)
+
+To support future bidirectional DOCX↔Markdown conversion, the design reserves a proprietary extension to the `==highlight==` syntax that encodes the highlight color:
+
+**Syntax:** `=={color:VALUE}text==`
+
+- `VALUE` is either an OOXML color name (e.g. `yellow`, `cyan`) or a 6-digit hex RGB (e.g. `FFFF00`).
+- When no color metadata is present, plain `==text==` defaults to `yellow`.
+- The color metadata is placed immediately after the opening `==` delimiter, inside curly braces.
+
+**Examples:**
+- `==highlighted text==` — default yellow highlight
+- `=={color:cyan}highlighted text==` — cyan highlight
+- `=={color:FF8C00}highlighted text==` — custom hex color from `w:shd`
+
+**Current implementation:** The converter currently emits plain `==text==` without color metadata (the `highlightColor` field is stored in `RunFormatting` but not yet rendered). The color-aware syntax, preview rendering, and round-trip parsing will be implemented in a follow-up spec. The `highlightColor` field is included now so the extraction pipeline preserves the information for that future work.
 
 ### Boolean Toggle Detection
 

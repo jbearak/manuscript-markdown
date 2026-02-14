@@ -52,6 +52,26 @@ Extend the mdmarkup converter to handle rich DOCX formatting (bold, italic, unde
     - Test non-heading pStyle produces no # prefix
     - _Requirements: 1.3, 2.3, 3.2, 4.3, 5.2, 9.3, 10.3_
 
+- [ ] 11. Add `highlightColor` field to RunFormatting and extraction pipeline
+  - [ ] 11.1 Add `highlightColor?: string` field to `RunFormatting` interface in `src/converter.ts`
+    - Store the OOXML color name from `w:highlight` `w:val` (e.g. `"yellow"`, `"cyan"`) or the hex RGB from `w:shd` `w:fill` (e.g. `"FFFF00"`)
+    - _Requirements: 5.1, 5.2, 17.1_
+  - [ ] 11.2 Update `parseRunProperties()` to populate `highlightColor` when `highlight` is `true`
+    - From `w:highlight`: use the `w:val` attribute value directly
+    - From `w:shd`: use the `w:fill` attribute value directly
+    - _Requirements: 5.1, 5.2, 17.5_
+  - [ ] 11.3 Update `formattingEquals()` to include `highlightColor` in equality checks
+    - Two runs with the same `highlight: true` but different colors should not merge
+    - _Requirements: 5.3_
+  - [ ]* 11.4 Write unit tests for `highlightColor` extraction
+    - Test `w:highlight` with named color stores the color name
+    - Test `w:shd` with hex fill stores the hex value
+    - Test `formattingEquals` distinguishes different highlight colors
+    - _Requirements: 5.1, 5.2_
+
+- [ ] 12. Checkpoint - Ensure all tests pass
+  - Ensure all tests pass, ask the user if questions arise.
+
 ## Notes
 
 - Each task references specific requirements for traceability
