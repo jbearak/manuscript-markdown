@@ -163,6 +163,14 @@
         "title": "Export to Markdown"
       },
       {
+        "command": "manuscript-markdown.exportToWord",
+        "title": "Export to Word"
+      },
+      {
+        "command": "manuscript-markdown.exportToWordWithTemplate",
+        "title": "Export to Word (with template)"
+      },
+      {
         "command": "manuscript-markdown.formatHighlight_yellow",
         "title": "Yellow"
       },
@@ -231,6 +239,11 @@
         "icon": "$(edit)"
       },
       {
+        "id": "markdown.exportDocx",
+        "label": "Export to Word",
+        "icon": "$(file-binary)"
+      },
+      {
         "id": "markdown.heading",
         "label": "Heading"
       },
@@ -250,6 +263,11 @@
           "submenu": "markdown.annotations",
           "when": "editorLangId == markdown && !isInDiffEditor",
           "group": "navigation@2"
+        },
+        {
+          "submenu": "markdown.exportDocx",
+          "when": "editorLangId == markdown && !isInDiffEditor",
+          "group": "navigation@3"
         }
       ],
       "editor/context": [
@@ -445,6 +463,18 @@
         { "command": "manuscript-markdown.formatHighlight_gray-50", "when": "editorLangId == markdown", "group": "3_color@1" },
         { "command": "manuscript-markdown.formatHighlight_gray-25", "when": "editorLangId == markdown", "group": "3_color@2" },
         { "command": "manuscript-markdown.formatHighlight_black", "when": "editorLangId == markdown", "group": "3_color@3" }
+      ],
+      "markdown.exportDocx": [
+        {
+          "command": "manuscript-markdown.exportToWord",
+          "when": "editorLangId == markdown",
+          "group": "1_export@1"
+        },
+        {
+          "command": "manuscript-markdown.exportToWordWithTemplate",
+          "when": "editorLangId == markdown",
+          "group": "1_export@2"
+        }
       ],
       "explorer/context": [
         {
