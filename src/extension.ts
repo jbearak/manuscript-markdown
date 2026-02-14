@@ -10,6 +10,14 @@ import {
 	getOutputConflictMessage,
 	getOutputConflictScenario,
 } from './output-conflicts';
+import {
+	VALID_COLOR_IDS,
+	HIGHLIGHT_DECORATION_COLORS,
+	CRITIC_HIGHLIGHT_DECORATION,
+	extractHighlightRanges,
+	setDefaultHighlightColor,
+	getDefaultHighlightColor,
+} from './highlight-colors';
 
 export function activate(context: vscode.ExtensionContext) {
 	// Register existing navigation commands
@@ -201,6 +209,104 @@ export function activate(context: vscode.ExtensionContext) {
 	// Create and register word count controller
 	const wordCountController = new WordCountController();
 	context.subscriptions.push(wordCountController);
+
+	// --- Highlight decorations ---
+	// Read and sync default highlight color setting
+	function syncDefaultHighlightColor() {
+		const cfg = vscode.workspace.getConfiguration('mdmarkup');
+		setDefaultHighlightColor(cfg.get<string>('defaultHighlightColor', 'yellow'));
+	}
+	syncDefaultHighlightColor();
+	context.subscriptions.push(
+		vscode.workspace.onDidChangeConfiguration(e => {
+			if (e.affectsConfiguration('mdmarkup.defaultHighlightColor')) {
+				syncDefaultHighlightColor();
+				if (vscode.window.activeTextEditor) {
+					updateHighlightDecorations(vscode.window.activeTextEditor);
+				}
+			}
+		})
+	);
+
+	// Create decoration types for each color + critic
+	const decorationTypes = new Map<string, vscode.TextEditorDecorationType>();
+	for (const [colorId, colors] of Object.entries(HIGHLIGHT_DECORATION_COLORS)) {
+		const decType = vscode.window.createTextEditorDecorationType({
+			light: { backgroundColor: colors.light },
+			dark: { backgroundColor: colors.dark },
+		});
+		decorationTypes.set(colorId, decType);
+		context.subscriptions.push(decType);
+	}
+	const criticDecType = vscode.window.createTextEditorDecorationType({
+		light: { backgroundColor: CRITIC_HIGHLIGHT_DECORATION.light },
+		dark: { backgroundColor: CRITIC_HIGHLIGHT_DECORATION.dark },
+	});
+	decorationTypes.set('critic', criticDecType);
+	context.subscriptions.push(criticDecType);
+
+	function updateHighlightDecorations(editor: vscode.TextEditor) {
+		if (editor.document.languageId !== 'markdown') { return; }
+		const text = editor.document.getText();
+		const defaultColor = getDefaultHighlightColor();
+		const rangeMap = extractHighlightRanges(text, defaultColor);
+
+		// Clear all decoration types, then set those with ranges
+		for (const [key, decType] of decorationTypes) {
+			const ranges = rangeMap.get(key);
+			if (ranges && ranges.length > 0) {
+				editor.setDecorations(decType, ranges.map(r => new vscode.Range(
+					editor.document.positionAt(r.start),
+					editor.document.positionAt(r.end)
+				)));
+			} else {
+				editor.setDecorations(decType, []);
+			}
+		}
+	}
+	let highlightDecorationUpdateTimer: ReturnType<typeof setTimeout> | undefined;
+	function scheduleHighlightDecorationsUpdate(editor: vscode.TextEditor) {
+		if (highlightDecorationUpdateTimer) {
+			clearTimeout(highlightDecorationUpdateTimer);
+		}
+		highlightDecorationUpdateTimer = setTimeout(() => {
+			highlightDecorationUpdateTimer = undefined;
+			updateHighlightDecorations(editor);
+		}, 150);
+	}
+	context.subscriptions.push({
+		dispose: () => {
+			if (highlightDecorationUpdateTimer) {
+				clearTimeout(highlightDecorationUpdateTimer);
+				highlightDecorationUpdateTimer = undefined;
+			}
+		}
+	});
+
+	// Trigger on editor change
+	if (vscode.window.activeTextEditor) {
+		updateHighlightDecorations(vscode.window.activeTextEditor);
+	}
+	context.subscriptions.push(
+		vscode.window.onDidChangeActiveTextEditor(editor => {
+			if (editor) { updateHighlightDecorations(editor); }
+		}),
+		vscode.workspace.onDidChangeTextDocument(e => {
+			const editor = vscode.window.activeTextEditor;
+			if (editor && e.document === editor.document) {
+				scheduleHighlightDecorationsUpdate(editor);
+			}
+		})
+	);
+
+	// Register colored highlight commands
+	for (const colorId of VALID_COLOR_IDS) {
+		context.subscriptions.push(
+			vscode.commands.registerCommand('mdmarkup.formatHighlight_' + colorId, () =>
+				applyFormatting((text) => formatting.wrapColoredHighlight(text, colorId))
+			)
+		);
+	}
 
 	// Return markdown-it plugin for preview integration
 	return {

@@ -162,6 +162,62 @@
       {
         "command": "mdmarkup.convertDocx",
         "title": "Convert DOCX to Markdown"
+      },
+      {
+        "command": "mdmarkup.formatHighlight_yellow",
+        "title": "Yellow"
+      },
+      {
+        "command": "mdmarkup.formatHighlight_green",
+        "title": "Green"
+      },
+      {
+        "command": "mdmarkup.formatHighlight_turquoise",
+        "title": "Turquoise"
+      },
+      {
+        "command": "mdmarkup.formatHighlight_pink",
+        "title": "Pink"
+      },
+      {
+        "command": "mdmarkup.formatHighlight_blue",
+        "title": "Blue"
+      },
+      {
+        "command": "mdmarkup.formatHighlight_red",
+        "title": "Red"
+      },
+      {
+        "command": "mdmarkup.formatHighlight_dark-blue",
+        "title": "Dark Blue"
+      },
+      {
+        "command": "mdmarkup.formatHighlight_teal",
+        "title": "Teal"
+      },
+      {
+        "command": "mdmarkup.formatHighlight_violet",
+        "title": "Violet"
+      },
+      {
+        "command": "mdmarkup.formatHighlight_dark-red",
+        "title": "Dark Red"
+      },
+      {
+        "command": "mdmarkup.formatHighlight_dark-yellow",
+        "title": "Dark Yellow"
+      },
+      {
+        "command": "mdmarkup.formatHighlight_gray-50",
+        "title": "Gray 50%"
+      },
+      {
+        "command": "mdmarkup.formatHighlight_gray-25",
+        "title": "Gray 25%"
+      },
+      {
+        "command": "mdmarkup.formatHighlight_black",
+        "title": "Black"
       }
     ],
     "submenus": [
@@ -178,6 +234,10 @@
       {
         "id": "markdown.heading",
         "label": "Heading"
+      },
+      {
+        "id": "markdown.highlightColor",
+        "label": "Highlight Color"
       }
     ],
     "menus": {
@@ -286,7 +346,12 @@
         {
           "command": "mdmarkup.formatHighlight",
           "when": "editorLangId == markdown",
-          "group": "1_format@6"
+          "group": "1a_highlight@1"
+        },
+        {
+          "submenu": "markdown.highlightColor",
+          "when": "editorLangId == markdown",
+          "group": "1a_highlight@2"
         },
         {
           "command": "mdmarkup.formatInlineCode",
@@ -366,6 +431,22 @@
           "group": "1_heading@6"
         }
       ],
+      "markdown.highlightColor": [
+        { "command": "mdmarkup.formatHighlight_yellow", "when": "editorLangId == markdown", "group": "1_color@1" },
+        { "command": "mdmarkup.formatHighlight_green", "when": "editorLangId == markdown", "group": "1_color@2" },
+        { "command": "mdmarkup.formatHighlight_turquoise", "when": "editorLangId == markdown", "group": "1_color@3" },
+        { "command": "mdmarkup.formatHighlight_pink", "when": "editorLangId == markdown", "group": "1_color@4" },
+        { "command": "mdmarkup.formatHighlight_blue", "when": "editorLangId == markdown", "group": "1_color@5" },
+        { "command": "mdmarkup.formatHighlight_red", "when": "editorLangId == markdown", "group": "1_color@6" },
+        { "command": "mdmarkup.formatHighlight_dark-blue", "when": "editorLangId == markdown", "group": "2_color@1" },
+        { "command": "mdmarkup.formatHighlight_teal", "when": "editorLangId == markdown", "group": "2_color@2" },
+        { "command": "mdmarkup.formatHighlight_violet", "when": "editorLangId == markdown", "group": "2_color@3" },
+        { "command": "mdmarkup.formatHighlight_dark-red", "when": "editorLangId == markdown", "group": "2_color@4" },
+        { "command": "mdmarkup.formatHighlight_dark-yellow", "when": "editorLangId == markdown", "group": "2_color@5" },
+        { "command": "mdmarkup.formatHighlight_gray-50", "when": "editorLangId == markdown", "group": "3_color@1" },
+        { "command": "mdmarkup.formatHighlight_gray-25", "when": "editorLangId == markdown", "group": "3_color@2" },
+        { "command": "mdmarkup.formatHighlight_black", "when": "editorLangId == markdown", "group": "3_color@3" }
+      ],
       "explorer/context": [
         {
           "command": "mdmarkup.convertDocx",
@@ -422,6 +503,12 @@
           "type": "boolean",
           "default": true,
           "description": "Include timestamp in comment author attribution (format: username (yyyy-mm-dd hh:mm))"
+        },
+        "mdmarkup.defaultHighlightColor": {
+          "type": "string",
+          "enum": ["yellow", "green", "turquoise", "pink", "blue", "red", "dark-blue", "teal", "violet", "dark-red", "dark-yellow", "gray-50", "gray-25", "black"],
+          "default": "yellow",
+          "description": "Default background color for ==highlight== formatting when no color is specified"
         },
         "mdmarkup.citationKeyFormat": {
           "type": "string",

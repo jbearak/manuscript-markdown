@@ -3,6 +3,10 @@ export interface TextTransformation {
   cursorOffset?: number; // Optional cursor position relative to start
 }
 
+export function wrapColoredHighlight(text: string, color: string): TextTransformation {
+  return { newText: '==' + text + '=={' + color + '}' };
+}
+
 /**
  * Wraps selected text with prefix and suffix delimiters
  * @param text - The text to wrap

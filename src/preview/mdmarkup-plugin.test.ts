@@ -2,6 +2,7 @@ import { describe, it, expect } from 'bun:test';
 import * as fc from 'fast-check';
 import MarkdownIt from 'markdown-it';
 import { mdmarkupPlugin } from './mdmarkup-plugin';
+import { VALID_COLOR_IDS, setDefaultHighlightColor, getDefaultHighlightColor } from '../highlight-colors';
 
 // Helper function to escape HTML entities like markdown-it does
 function escapeHtml(str: string): string {
@@ -764,6 +765,30 @@ describe('mdmarkup Plugin Property Tests', () => {
         { numRuns: 100 }
       );
     });
+  });
+});
+
+describe('Preview color suffix parsing edge cases', () => {
+  it('should not consume malformed suffix content with spaces', () => {
+    const md = new MarkdownIt();
+    md.use(mdmarkupPlugin);
+
+    const output = md.render('==hello=={see note} world');
+    expect(output).toContain('<mark');
+    expect(output).toContain('hello');
+    expect(output).toContain('{see note} world');
+  });
+
+  it('should consume valid unknown color suffix but fall back styling', () => {
+    const md = new MarkdownIt();
+    md.use(mdmarkupPlugin);
+
+    const output = md.render('==hello=={unknowncolor} world');
+    expect(output).toContain('mdmarkup-format-highlight');
+    expect(output).toContain('<mark');
+    expect(output).toContain('hello');
+    expect(output).toContain(' world');
+    expect(output).not.toContain('{unknowncolor}');
   });
 });
 
@@ -1642,5 +1667,128 @@ describe('Property 10: Preview ==highlight== rendering', () => {
       ),
       { numRuns: 100 }
     );
+  });
+});
+
+// Feature: highlight-colors, Property 2: Preview renders colored highlights with correct color class
+describe('Property 2: Preview renders colored highlights with correct color class', () => {
+  const colorIdGen = fc.constantFrom(...VALID_COLOR_IDS as string[]);
+  const safeText = fc.string({ minLength: 1, maxLength: 50 }).filter(
+    (s: string) => !s.includes('=') && !s.includes('{') && !s.includes('}') && hasNoSpecialSyntax(s)
+  );
+
+  it('should render ==text=={color} with mdmarkup-highlight-{color} class', () => {
+    fc.assert(
+      fc.property(safeText, colorIdGen, (text: string, color: string) => {
+        const md = new MarkdownIt();
+        md.use(mdmarkupPlugin);
+        const output = md.render('==' + text + '=={' + color + '}');
+        expect(output).toContain('mdmarkup-highlight-' + color);
+        expect(output).toContain('<mark');
+        expect(output).toContain(escapeHtml(text));
+      }),
+      { numRuns: 100 }
+    );
+  });
+});
+
+// Feature: highlight-colors, Property 3: Preview renders default format highlights with yellow/amber
+describe('Property 3: Preview renders default highlights with yellow/amber', () => {
+  const safeText = fc.string({ minLength: 1, maxLength: 50 }).filter(
+    (s: string) => !s.includes('=') && !s.includes('{') && !s.includes('}') && hasNoSpecialSyntax(s)
+  );
+
+  it('should render ==text== with mdmarkup-format-highlight class', () => {
+    const originalDefault = getDefaultHighlightColor();
+    try {
+      setDefaultHighlightColor('yellow');
+      fc.assert(
+        fc.property(safeText, (text: string) => {
+          const md = new MarkdownIt();
+          md.use(mdmarkupPlugin);
+          const output = md.render('==' + text + '==');
+          expect(output).toContain('mdmarkup-format-highlight');
+          expect(output).toContain('<mark');
+          expect(output).toContain(escapeHtml(text));
+        }),
+        { numRuns: 100 }
+      );
+    } finally {
+      setDefaultHighlightColor(originalDefault);
+    }
+  });
+});
+
+// Feature: highlight-colors, Property 4: Preview renders CriticMarkup highlights with Comment_Gray
+describe('Property 4: Preview renders CriticMarkup highlights with Comment_Gray', () => {
+  const safeText = fc.string({ minLength: 1, maxLength: 50 }).filter(
+    (s: string) => !s.includes('{') && !s.includes('}') && !s.includes('=') && hasNoSpecialSyntax(s)
+  );
+
+  it('should render {==text==} with mdmarkup-highlight class (not format-highlight)', () => {
+    fc.assert(
+      fc.property(safeText, (text: string) => {
+        const md = new MarkdownIt();
+        md.use(mdmarkupPlugin);
+        const output = md.render('{==' + text + '==}');
+        expect(output).toContain('class="mdmarkup-highlight"');
+        expect(output).not.toContain('mdmarkup-format-highlight');
+        expect(output).toContain('<mark');
+      }),
+      { numRuns: 100 }
+    );
+  });
+});
+
+// Feature: highlight-colors, Property 5: Preview falls back to configured default for unrecognized colors
+describe('Property 5: Preview falls back for unrecognized colors', () => {
+  const safeText = fc.string({ minLength: 1, maxLength: 50 }).filter(
+    (s: string) => !s.includes('=') && !s.includes('{') && !s.includes('}') && hasNoSpecialSyntax(s)
+  );
+  const defaultColorGen = fc.constantFrom(...VALID_COLOR_IDS as string[]);
+  // Generate strings that are NOT valid color IDs while still matching parser color-id shape
+  const invalidColorGen = fc.stringMatching(/^[a-z][a-z0-9-]{1,9}$/).filter(
+    (s: string) => !(VALID_COLOR_IDS as string[]).includes(s)
+  );
+
+  it('should render ==text=={invalid} using configured default color (yellow as second-level fallback)', () => {
+    const originalDefault = getDefaultHighlightColor();
+    try {
+      fc.assert(
+        fc.property(safeText, invalidColorGen, defaultColorGen, (text: string, badColor: string, defaultColor: string) => {
+          setDefaultHighlightColor(defaultColor);
+          const md = new MarkdownIt();
+          md.use(mdmarkupPlugin);
+          const output = md.render('==' + text + '=={' + badColor + '}');
+          expect(output).toContain('mdmarkup-format-highlight');
+          if (defaultColor !== 'yellow') {
+            expect(output).toContain('mdmarkup-highlight-' + defaultColor);
+          }
+          expect(output).toContain('<mark');
+        }),
+        { numRuns: 100 }
+      );
+    } finally {
+      setDefaultHighlightColor(originalDefault);
+    }
+  });
+
+  it('should use yellow/amber fallback when configured default is invalid', () => {
+    const originalDefault = getDefaultHighlightColor();
+    try {
+      setDefaultHighlightColor('not-a-color');
+      fc.assert(
+        fc.property(safeText, invalidColorGen, (text: string, badColor: string) => {
+          const md = new MarkdownIt();
+          md.use(mdmarkupPlugin);
+          const output = md.render('==' + text + '=={' + badColor + '}');
+          expect(output).toContain('mdmarkup-format-highlight');
+          expect(output).not.toContain('mdmarkup-highlight-not-a-color');
+        }),
+        { numRuns: 100 }
+      );
+    } finally {
+      setDefaultHighlightColor(originalDefault);
+    }
   });
 });

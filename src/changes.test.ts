@@ -4,7 +4,7 @@ import * as fc from 'fast-check';
 // We'll test the regex pattern directly since we can't import vscode in tests
 // This is the same pattern used in changes.ts
 // Using [\s\S]*? to match zero or more characters (including newlines) to support empty patterns
-const combinedPattern = /\{\+\+([\s\S]*?)\+\+\}|\{--([\s\S]*?)--\}|\{\~\~([\s\S]*?)\~\~\}|\{>>([\s\S]*?)<<\}|\{==([\s\S]*?)==\}|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
+const combinedPattern = /\{\+\+([\s\S]*?)\+\+\}|\{--([\s\S]*?)--\}|\{\~\~([\s\S]*?)\~\~\}|\{>>([\s\S]*?)<<\}|\{==([\s\S]*?)==\}|(?<!\{)==([^}=]+)==\{[a-z0-9-]+\}|(?<!\{)==([^}=]+)==(?!\})|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
 
 // Helper function to find all pattern matches in text
 function findAllPatterns(text: string): Array<{ start: number; end: number; matched: string }> {
@@ -428,5 +428,73 @@ describe('Multi-line mdmarkup Pattern Recognition', () => {
         { numRuns: 100 }
       );
     });
+  });
+});
+
+// Feature: highlight-colors, Property 7: Navigation regex matches colored highlight patterns
+describe('Property 7: Navigation regex matches colored highlights', () => {
+  const { VALID_COLOR_IDS } = require('./highlight-colors');
+  const colorIdGen = fc.constantFrom(...VALID_COLOR_IDS as string[]);
+  const safeTextGen = fc.string({ minLength: 1, maxLength: 50 }).filter(
+    (s: string) => !s.includes('=') && !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && !s.includes('<')
+  );
+
+  it('should match ==text=={color} as a single match', () => {
+    fc.assert(
+      fc.property(safeTextGen, colorIdGen, (text: string, color: string) => {
+        const doc = '==' + text + '=={' + color + '}';
+        const matches = findAllPatterns(doc);
+        expect(matches.length).toBe(1);
+        expect(matches[0].matched).toBe(doc);
+      }),
+      { numRuns: 100 }
+    );
+  });
+
+  it('should match plain ==text== as a single match', () => {
+    fc.assert(
+      fc.property(safeTextGen, (text: string) => {
+        const doc = '==' + text + '==';
+        const matches = findAllPatterns(doc);
+        expect(matches.length).toBe(1);
+        expect(matches[0].matched).toBe(doc);
+      }),
+      { numRuns: 100 }
+    );
+  });
+});
+
+// Feature: highlight-colors, Property 8: Overlapping pattern filtering with colored highlights
+describe('Property 8: Overlapping pattern filtering with colored highlights', () => {
+  // Helper: filter contained ranges (same logic as changes.ts getAllMatches)
+  function filterContained(ranges: Array<{ start: number; end: number }>): Array<{ start: number; end: number }> {
+    const filtered: Array<{ start: number; end: number }> = [];
+    let lastKept: { start: number; end: number } | undefined;
+    for (const range of ranges) {
+      if (!lastKept || !(lastKept.start <= range.start && range.end <= lastKept.end)) {
+        filtered.push(range);
+        lastKept = range;
+      }
+    }
+    return filtered;
+  }
+
+  it('should not produce duplicate stops for CriticMarkup and colored highlights at different positions', () => {
+    const { VALID_COLOR_IDS } = require('./highlight-colors');
+    const colorIdGen = fc.constantFrom(...VALID_COLOR_IDS as string[]);
+    const safeTextGen = fc.string({ minLength: 1, maxLength: 30 }).filter(
+      (s: string) => !s.includes('=') && !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && !s.includes('<')
+    );
+
+    fc.assert(
+      fc.property(safeTextGen, safeTextGen, colorIdGen, (t1: string, t2: string, color: string) => {
+        const doc = '{==' + t1 + '==} some text ==' + t2 + '=={' + color + '}';
+        const matches = findAllPatterns(doc);
+        const filtered = filterContained(matches);
+        // Both patterns should survive filtering (they don't overlap)
+        expect(filtered.length).toBe(2);
+      }),
+      { numRuns: 100 }
+    );
   });
 });
