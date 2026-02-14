@@ -104,11 +104,13 @@ export const VALID_COLOR_IDS = Object.keys(HIGHLIGHT_COLORS);
 /** Regex fragment matching any valid color id (for use in larger patterns) */
 export const COLOR_ID_PATTERN = VALID_COLOR_IDS.map(c => c.replace('-', '\\-')).join('|');
 
-/** Read the configured default highlight color from VS Code settings */
+/** Module-level default highlight color, updated from VS Code settings */
+let _defaultHighlightColor = 'yellow';
+export function setDefaultHighlightColor(color: string): void {
+  _defaultHighlightColor = VALID_COLOR_IDS.includes(color) ? color : 'yellow';
+}
 export function getDefaultHighlightColor(): string {
-  // This is a pure data helper; the VS Code config read happens in extension.ts
-  // and passes the value in. Defaults to 'yellow'.
-  return 'yellow';
+  return _defaultHighlightColor;
 }
 ```
 

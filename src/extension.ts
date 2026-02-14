@@ -231,15 +231,19 @@ export function activate(context: vscode.ExtensionContext) {
 	// Create decoration types for each color + critic
 	const decorationTypes = new Map<string, vscode.TextEditorDecorationType>();
 	for (const [colorId, colors] of Object.entries(HIGHLIGHT_DECORATION_COLORS)) {
-		decorationTypes.set(colorId, vscode.window.createTextEditorDecorationType({
+		const decType = vscode.window.createTextEditorDecorationType({
 			light: { backgroundColor: colors.light },
 			dark: { backgroundColor: colors.dark },
-		}));
+		});
+		decorationTypes.set(colorId, decType);
+		context.subscriptions.push(decType);
 	}
-	decorationTypes.set('critic', vscode.window.createTextEditorDecorationType({
+	const criticDecType = vscode.window.createTextEditorDecorationType({
 		light: { backgroundColor: CRITIC_HIGHLIGHT_DECORATION.light },
 		dark: { backgroundColor: CRITIC_HIGHLIGHT_DECORATION.dark },
-	}));
+	});
+	decorationTypes.set('critic', criticDecType);
+	context.subscriptions.push(criticDecType);
 
 	function updateHighlightDecorations(editor: vscode.TextEditor) {
 		if (editor.document.languageId !== 'markdown') { return; }

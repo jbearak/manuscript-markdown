@@ -211,13 +211,15 @@ function parseFormatHighlight(state: StateInline, silent: boolean): boolean {
         let hasColorSuffix = false;
         if (pos + 2 < max && src.charCodeAt(pos + 2) === 0x7B /* { */) {
           const closeBrace = src.indexOf('}', pos + 3);
-          if (closeBrace !== -1) {
-            hasColorSuffix = true;
+          if (closeBrace !== -1 && closeBrace <= max) {
             const colorId = src.slice(pos + 3, closeBrace);
-            if (VALID_COLOR_IDS.includes(colorId)) {
-              cssClass = 'mdmarkup-format-highlight mdmarkup-highlight-' + colorId;
+            if (/^[a-z0-9-]+$/.test(colorId)) {
+              hasColorSuffix = true;
+              if (VALID_COLOR_IDS.includes(colorId)) {
+                cssClass = 'mdmarkup-format-highlight mdmarkup-highlight-' + colorId;
+              }
+              endPos = closeBrace + 1;
             }
-            endPos = closeBrace + 1;
           }
         }
         if (!hasColorSuffix && cssClass === 'mdmarkup-format-highlight') {
@@ -239,8 +241,11 @@ function parseFormatHighlight(state: StateInline, silent: boolean): boolean {
         let endPos = pos + 2;
         if (pos + 2 < max && src.charCodeAt(pos + 2) === 0x7B /* { */) {
           const closeBrace = src.indexOf('}', pos + 3);
-          if (closeBrace !== -1) {
-            endPos = closeBrace + 1;
+          if (closeBrace !== -1 && closeBrace <= max) {
+            const colorId = src.slice(pos + 3, closeBrace);
+            if (/^[a-z0-9-]+$/.test(colorId)) {
+              endPos = closeBrace + 1;
+            }
           }
         }
         state.pos = endPos;

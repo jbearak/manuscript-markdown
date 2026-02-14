@@ -767,6 +767,30 @@ describe('mdmarkup Plugin Property Tests', () => {
   });
 });
 
+describe('Preview color suffix parsing edge cases', () => {
+  it('should not consume malformed suffix content with spaces', () => {
+    const md = new MarkdownIt();
+    md.use(mdmarkupPlugin);
+
+    const output = md.render('==hello=={see note} world');
+    expect(output).toContain('<mark');
+    expect(output).toContain('hello');
+    expect(output).toContain('{see note} world');
+  });
+
+  it('should consume valid unknown color suffix but fall back styling', () => {
+    const md = new MarkdownIt();
+    md.use(mdmarkupPlugin);
+
+    const output = md.render('==hello=={unknowncolor} world');
+    expect(output).toContain('mdmarkup-format-highlight');
+    expect(output).toContain('<mark');
+    expect(output).toContain('hello');
+    expect(output).toContain(' world');
+    expect(output).not.toContain('{unknowncolor}');
+  });
+});
+
 // Edge case unit tests
 // Validates: Requirements 8.3, 8.4
 describe('Edge Cases', () => {
