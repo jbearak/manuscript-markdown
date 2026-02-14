@@ -70,7 +70,7 @@
 			]
 		},
 		"format_highlight": {
-			"match": "(?<!\\{)==([^}]+)==(?!\\})",
+			"match": "(?<!\\{)==([^}=]+)==(?!\\})",
 			"name": "markup.highlight.mdmarkup",
 			"captures": {
 				"1": { "name": "markup.highlight" }

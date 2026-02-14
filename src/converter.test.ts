@@ -17,6 +17,7 @@ import {
   isToggleOn,
   parseHeadingLevel,
   parseRunProperties,
+  formatLocalIsoMinute,
 } from './converter';
 
 const fixturesDir = join(__dirname, '..', 'test', 'fixtures');
@@ -25,16 +26,6 @@ const formattingSampleData = new Uint8Array(readFileSync(join(fixturesDir, 'form
 const expectedMd = readFileSync(join(fixturesDir, 'expected-output.md'), 'utf-8').trimEnd();
 const expectedBib = readFileSync(join(fixturesDir, 'expected-output.bib'), 'utf-8').trimEnd();
 
-function formatLocalIsoMinute(ts: string): string {
-  const dt = new Date(ts);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const offsetMinutes = -dt.getTimezoneOffset();
-  const sign = offsetMinutes >= 0 ? '+' : '-';
-  const absOffsetMinutes = Math.abs(offsetMinutes);
-  const offsetHours = Math.floor(absOffsetMinutes / 60);
-  const offsetMins = absOffsetMinutes % 60;
-  return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}${sign}${pad(offsetHours)}:${pad(offsetMins)}`;
-}
 
 describe('extractComments', () => {
   test('extracts all comments with correct metadata', async () => {
@@ -280,6 +271,10 @@ describe('convertDocx (end-to-end)', () => {
     // Check that the document contains expected content
     expect(markdown).toContain('bulleted list');
     expect(markdown).toContain('numbered list');
+    const bulletedLine = markdown.split('\n').find(line => line === '- One');
+    const numberedLine = markdown.split('\n').find(line => line === '1. One');
+    expect(bulletedLine).toBe('- One');
+    expect(numberedLine).toBe('1. One');
   });
 
   test('handles empty docx gracefully', async () => {
@@ -368,27 +363,6 @@ describe('wrapWithFormatting', () => {
     );
   });
 
-  test('heading-first content does not start with leading blank lines', () => {
-    const content = [
-      { type: 'para' as const, headingLevel: 2 },
-      { type: 'text' as const, text: 'Heading', commentIds: new Set<string>(), formatting: DEFAULT_FORMATTING }
-    ];
-
-    const result = buildMarkdown(content, new Map());
-    expect(result).toBe('## Heading');
-    expect(result.startsWith('\n')).toBe(false);
-  });
-
-  test('list-first content does not start with leading blank lines', () => {
-    const content = [
-      { type: 'para' as const, listMeta: { type: 'bullet' as const, level: 0 } },
-      { type: 'text' as const, text: 'Item', commentIds: new Set<string>(), formatting: DEFAULT_FORMATTING }
-    ];
-
-    const result = buildMarkdown(content, new Map());
-    expect(result).toBe('- Item');
-    expect(result.startsWith('\n')).toBe(false);
-  });
 });
 
 describe('buildMarkdown', () => {
@@ -627,7 +601,7 @@ describe('buildMarkdown', () => {
       fc.property(
         fc.array(
           fc.record({
-            type: fc.constant('bullet' as const),
+            type: fc.constantFrom('bullet' as const, 'ordered' as const),
             level: fc.integer({ min: 0, max: 2 }),
             text: fc.string({ minLength: 1, maxLength: 20 })
           }),
@@ -640,11 +614,37 @@ describe('buildMarkdown', () => {
           ]);
           
           const result = buildMarkdown(content, new Map());
+          const hasTypeTransition = items.some((item, idx) => idx > 0 && item.type !== items[idx - 1].type);
+          if (hasTypeTransition) {
+            expect(result).toContain('\n\n');
+          }
           expect(result).not.toContain('\n\n\n'); // No double blank lines
         }
       ),
       { numRuns: 100 }
     );
+  });
+
+  test('heading-first content does not start with leading blank lines', () => {
+    const content = [
+      { type: 'para' as const, headingLevel: 2 },
+      { type: 'text' as const, text: 'Heading', commentIds: new Set<string>(), formatting: DEFAULT_FORMATTING }
+    ];
+
+    const result = buildMarkdown(content, new Map());
+    expect(result).toBe('## Heading');
+    expect(result.startsWith('\n')).toBe(false);
+  });
+
+  test('list-first content does not start with leading blank lines', () => {
+    const content = [
+      { type: 'para' as const, listMeta: { type: 'bullet' as const, level: 0 } },
+      { type: 'text' as const, text: 'Item', commentIds: new Set<string>(), formatting: DEFAULT_FORMATTING }
+    ];
+
+    const result = buildMarkdown(content, new Map());
+    expect(result).toBe('- Item');
+    expect(result.startsWith('\n')).toBe(false);
   });
 });
 

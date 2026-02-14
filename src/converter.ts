@@ -335,6 +335,7 @@ export function parseRunProperties(
   const uElement = rPrChildren.find(child => child['w:u'] !== undefined);
   if (uElement) {
     const val = getAttr(uElement, 'val');
+    // OOXML: bare <w:u/> defaults to single underline; only w:val="none" disables it.
     formatting.underline = val !== 'none';
   }
   
@@ -383,7 +384,7 @@ export function wrapWithFormatting(text: string, fmt: RunFormatting): string {
 }
 
 function formatHrefForMarkdown(href: string): string {
-  return /[()\s]/.test(href) ? `<${href}>` : href;
+  return /[()\[\]\s]/.test(href) ? `<${href}>` : href;
 }
 
 // Comment extraction
@@ -807,19 +808,10 @@ export function buildMarkdown(
         let dateStr = '';
         if (c.date) {
           try {
-            const dt = new Date(c.date);
-            if (!isNaN(dt.getTime())) {
-              const pad = (n: number) => String(n).padStart(2, '0');
-              // Design decision: render comment timestamps in the reader's local time
-              // (with offset) so "when was this comment made?" is immediately understandable
-              // in Markdown output without requiring UTC conversion by the reader.
-              const offsetMinutes = -dt.getTimezoneOffset();
-              const sign = offsetMinutes >= 0 ? '+' : '-';
-              const absOffsetMinutes = Math.abs(offsetMinutes);
-              const offsetHours = Math.floor(absOffsetMinutes / 60);
-              const offsetMins = absOffsetMinutes % 60;
-              dateStr = ` (${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}${sign}${pad(offsetHours)}:${pad(offsetMins)})`;
-            }
+            // Design decision: render comment timestamps in the reader's local time
+            // (with offset) so "when was this comment made?" is immediately understandable
+            // in Markdown output without requiring UTC conversion by the reader.
+            dateStr = ` (${formatLocalIsoMinute(c.date)})`;
           } catch { dateStr = ` (${c.date})`; }
         }
         output.push(`{>>${c.author}${dateStr}: ${c.text}<<}`);
@@ -838,6 +830,20 @@ export function buildMarkdown(
   }
 
   return output.join('');
+}
+
+export function formatLocalIsoMinute(ts: string): string {
+  const dt = new Date(ts);
+  if (isNaN(dt.getTime())) {
+    throw new Error(`Invalid timestamp: ${ts}`);
+  }
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const offsetMinutes = -dt.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? '+' : '-';
+  const absOffsetMinutes = Math.abs(offsetMinutes);
+  const offsetHours = Math.floor(absOffsetMinutes / 60);
+  const offsetMins = absOffsetMinutes % 60;
+  return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}${sign}${pad(offsetHours)}:${pad(offsetMins)}`;
 }
 
 // BibTeX generation
