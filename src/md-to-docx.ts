@@ -725,3 +725,337 @@ function formatRuns(runs: MdRun[]): string {
     }
   }).join('');
 }
+
+// OOXML Generation Layer
+
+export interface MdToDocxOptions {
+  bibtex?: string;
+  authorName?: string;
+  templateDocx?: Uint8Array;
+}
+
+export interface MdToDocxResult {
+  docx: Uint8Array;
+  warnings: string[];
+}
+
+interface DocxGenState {
+  commentId: number;
+  comments: CommentEntry[];
+  relationships: Map<string, string>; // URL -> rId
+  nextRId: number;
+  warnings: string[];
+  hasList: boolean;
+  hasComments: boolean;
+}
+
+interface CommentEntry {
+  id: number;
+  author: string;
+  date: string;
+  text: string;
+}
+
+function contentTypesXml(hasList: boolean, hasComments: boolean): string {
+  let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
+  xml += '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n';
+  xml += '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n';
+  xml += '<Default Extension="xml" ContentType="application/xml"/>\n';
+  xml += '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>\n';
+  xml += '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>\n';
+  if (hasList) {
+    xml += '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>\n';
+  }
+  if (hasComments) {
+    xml += '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>\n';
+  }
+  xml += '</Types>';
+  return xml;
+}
+
+function relsXml(): string {
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>\n' +
+    '</Relationships>';
+}
+
+function stylesXml(): string {
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+    '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">\n' +
+    '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">\n' +
+    '<w:name w:val="Normal"/>\n' +
+    '<w:pPr><w:spacing w:after="200" w:line="276" w:lineRule="auto"/></w:pPr>\n' +
+    '<w:rPr><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr>\n' +
+    '</w:style>\n' +
+    '<w:style w:type="paragraph" w:styleId="Heading1">\n' +
+    '<w:name w:val="heading 1"/>\n' +
+    '<w:basedOn w:val="Normal"/>\n' +
+    '<w:pPr><w:spacing w:before="240" w:after="0"/></w:pPr>\n' +
+    '<w:rPr><w:b/><w:sz w:val="32"/><w:szCs w:val="32"/></w:rPr>\n' +
+    '</w:style>\n' +
+    '<w:style w:type="paragraph" w:styleId="Heading2">\n' +
+    '<w:name w:val="heading 2"/>\n' +
+    '<w:basedOn w:val="Normal"/>\n' +
+    '<w:pPr><w:spacing w:before="200" w:after="0"/></w:pPr>\n' +
+    '<w:rPr><w:b/><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr>\n' +
+    '</w:style>\n' +
+    '<w:style w:type="paragraph" w:styleId="Heading3">\n' +
+    '<w:name w:val="heading 3"/>\n' +
+    '<w:basedOn w:val="Normal"/>\n' +
+    '<w:pPr><w:spacing w:before="200" w:after="0"/></w:pPr>\n' +
+    '<w:rPr><w:b/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>\n' +
+    '</w:style>\n' +
+    '<w:style w:type="paragraph" w:styleId="Heading4">\n' +
+    '<w:name w:val="heading 4"/>\n' +
+    '<w:basedOn w:val="Normal"/>\n' +
+    '<w:rPr><w:b/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr>\n' +
+    '</w:style>\n' +
+    '<w:style w:type="paragraph" w:styleId="Heading5">\n' +
+    '<w:name w:val="heading 5"/>\n' +
+    '<w:basedOn w:val="Normal"/>\n' +
+    '<w:rPr><w:b/><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr>\n' +
+    '</w:style>\n' +
+    '<w:style w:type="paragraph" w:styleId="Heading6">\n' +
+    '<w:name w:val="heading 6"/>\n' +
+    '<w:basedOn w:val="Normal"/>\n' +
+    '<w:rPr><w:b/><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr>\n' +
+    '</w:style>\n' +
+    '<w:style w:type="character" w:styleId="Hyperlink">\n' +
+    '<w:name w:val="Hyperlink"/>\n' +
+    '<w:rPr><w:color w:val="0563C1"/><w:u w:val="single"/></w:rPr>\n' +
+    '</w:style>\n' +
+    '<w:style w:type="paragraph" w:styleId="Quote">\n' +
+    '<w:name w:val="Quote"/>\n' +
+    '<w:basedOn w:val="Normal"/>\n' +
+    '<w:pPr><w:ind w:left="720"/></w:pPr>\n' +
+    '</w:style>\n' +
+    '<w:style w:type="character" w:styleId="CodeChar">\n' +
+    '<w:name w:val="Code Char"/>\n' +
+    '<w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/></w:rPr>\n' +
+    '</w:style>\n' +
+    '<w:style w:type="paragraph" w:styleId="CodeBlock">\n' +
+    '<w:name w:val="Code Block"/>\n' +
+    '<w:basedOn w:val="Normal"/>\n' +
+    '<w:pPr><w:shd w:val="clear" w:color="auto" w:fill="E8E8E8"/></w:pPr>\n' +
+    '<w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/></w:rPr>\n' +
+    '</w:style>\n' +
+    '</w:styles>';
+}
+
+function numberingXml(): string {
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+    '<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">\n' +
+    '<w:abstractNum w:abstractNumId="0">\n' +
+    '<w:multiLevelType w:val="hybridMultilevel"/>\n' +
+    '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl>\n' +
+    '<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl>\n' +
+    '<w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="2160" w:hanging="360"/></w:pPr></w:lvl>\n' +
+    '<w:lvl w:ilvl="3"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="2880" w:hanging="360"/></w:pPr></w:lvl>\n' +
+    '<w:lvl w:ilvl="4"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="3600" w:hanging="360"/></w:pPr></w:lvl>\n' +
+    '<w:lvl w:ilvl="5"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="4320" w:hanging="360"/></w:pPr></w:lvl>\n' +
+    '<w:lvl w:ilvl="6"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="5040" w:hanging="360"/></w:pPr></w:lvl>\n' +
+    '<w:lvl w:ilvl="7"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="5760" w:hanging="360"/></w:pPr></w:lvl>\n' +
+    '<w:lvl w:ilvl="8"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="6480" w:hanging="360"/></w:pPr></w:lvl>\n' +
+    '</w:abstractNum>\n' +
+    '<w:abstractNum w:abstractNumId="1">\n' +
+    '<w:multiLevelType w:val="hybridMultilevel"/>\n' +
+    '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl>\n' +
+    '<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%2."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl>\n' +
+    '<w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%3."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="2160" w:hanging="360"/></w:pPr></w:lvl>\n' +
+    '<w:lvl w:ilvl="3"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%4."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="2880" w:hanging="360"/></w:pPr></w:lvl>\n' +
+    '<w:lvl w:ilvl="4"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%5."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="3600" w:hanging="360"/></w:pPr></w:lvl>\n' +
+    '<w:lvl w:ilvl="5"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%6."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="4320" w:hanging="360"/></w:pPr></w:lvl>\n' +
+    '<w:lvl w:ilvl="6"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%7."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="5040" w:hanging="360"/></w:pPr></w:lvl>\n' +
+    '<w:lvl w:ilvl="7"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%8."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="5760" w:hanging="360"/></w:pPr></w:lvl>\n' +
+    '<w:lvl w:ilvl="8"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%9."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="6480" w:hanging="360"/></w:pPr></w:lvl>\n' +
+    '</w:abstractNum>\n' +
+    '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>\n' +
+    '<w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num>\n' +
+    '</w:numbering>';
+}
+
+function documentRelsXml(relationships: Map<string, string>, hasComments: boolean): string {
+  let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
+  xml += '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n';
+  xml += '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>\n';
+  
+  let rId = 2;
+  xml += '<Relationship Id="rId' + rId + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>\n';
+  rId++;
+  
+  if (hasComments) {
+    xml += '<Relationship Id="rId' + rId + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>\n';
+    rId++;
+  }
+  
+  for (const [url, relId] of relationships) {
+    xml += '<Relationship Id="' + relId + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="' + escapeXml(url) + '" TargetMode="External"/>\n';
+  }
+  
+  xml += '</Relationships>';
+  return xml;
+}
+
+export function generateRPr(run: MdRun): string {
+  const parts: string[] = [];
+  
+  if (run.code) parts.push('<w:rStyle w:val="CodeChar"/>');
+  if (run.bold) parts.push('<w:b/>');
+  if (run.italic) parts.push('<w:i/>');
+  if (run.strikethrough) parts.push('<w:strike/>');
+  if (run.underline) parts.push('<w:u w:val="single"/>');
+  if (run.highlight) {
+    const color = run.highlightColor || 'yellow';
+    parts.push('<w:highlight w:val="' + color + '"/>');
+  }
+  if (run.superscript) parts.push('<w:vertAlign w:val="superscript"/>');
+  else if (run.subscript) parts.push('<w:vertAlign w:val="subscript"/>');
+  
+  return parts.length > 0 ? '<w:rPr>' + parts.join('') + '</w:rPr>' : '';
+}
+
+export function generateRun(text: string, rPr: string): string {
+  return '<w:r>' + rPr + '<w:t xml:space="preserve">' + escapeXml(text) + '</w:t></w:r>';
+}
+
+export function generateParagraph(token: MdToken, state: DocxGenState): string {
+  let pPr = '';
+  
+  switch (token.type) {
+    case 'heading':
+      pPr = '<w:pPr><w:pStyle w:val="Heading' + (token.level || 1) + '"/></w:pPr>';
+      break;
+    case 'list_item':
+      const numId = token.ordered ? '2' : '1';
+      const ilvl = (token.level || 1) - 1;
+      pPr = '<w:pPr><w:numPr><w:ilvl w:val="' + ilvl + '"/><w:numId w:val="' + numId + '"/></w:numPr></w:pPr>';
+      state.hasList = true;
+      break;
+    case 'blockquote':
+      const leftIndent = 720 * (token.level || 1);
+      pPr = '<w:pPr><w:pStyle w:val="Quote"/><w:ind w:left="' + leftIndent + '"/></w:pPr>';
+      break;
+    case 'code_block':
+      pPr = '<w:pPr><w:pStyle w:val="CodeBlock"/></w:pPr>';
+      break;
+    case 'hr':
+      pPr = '<w:pPr><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="auto"/></w:pBdr></w:pPr>';
+      break;
+  }
+  
+  if (token.type === 'code_block') {
+    const lines = (token.runs[0]?.text || '').split('\n');
+    return lines.map(line => '<w:p>' + pPr + generateRun(line, '<w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/></w:rPr>') + '</w:p>').join('');
+  }
+  
+  if (token.type === 'hr') {
+    return '<w:p>' + pPr + '</w:p>';
+  }
+  
+  let runs = '';
+  for (const run of token.runs) {
+    if (run.type === 'text') {
+      const rPr = generateRPr(run);
+      if (run.href) {
+        let rId = state.relationships.get(run.href);
+        if (!rId) {
+          rId = 'rId' + (state.nextRId + 3); // Account for styles, numbering, comments
+          state.relationships.set(run.href, rId);
+          state.nextRId++;
+        }
+        runs += '<w:hyperlink r:id="' + rId + '">' + generateRun(run.text, rPr) + '</w:hyperlink>';
+      } else {
+        runs += generateRun(run.text, rPr);
+      }
+    } else if (run.type === 'softbreak') {
+      runs += '<w:r><w:br/></w:r>';
+    }
+    // Skip critic_*, citation, math runs for now
+  }
+  
+  return '<w:p>' + pPr + runs + '</w:p>';
+}
+
+export function generateTable(token: MdToken, state: DocxGenState): string {
+  if (!token.rows) return '';
+  
+  let xml = '<w:tbl>';
+  xml += '<w:tblPr><w:tblBorders><w:top w:val="single" w:sz="4"/><w:left w:val="single" w:sz="4"/><w:bottom w:val="single" w:sz="4"/><w:right w:val="single" w:sz="4"/><w:insideH w:val="single" w:sz="4"/><w:insideV w:val="single" w:sz="4"/></w:tblBorders><w:tblW w:w="0" w:type="auto"/></w:tblPr>';
+  
+  for (const row of token.rows) {
+    xml += '<w:tr>';
+    for (const cell of row.cells) {
+      xml += '<w:tc><w:p>';
+      for (const run of cell) {
+        if (run.type === 'text') {
+          let rPr = generateRPr(run);
+          if (row.header && !run.bold) {
+            rPr = rPr ? rPr.replace('</w:rPr>', '<w:b/></w:rPr>') : '<w:rPr><w:b/></w:rPr>';
+          }
+          xml += generateRun(run.text, rPr);
+        }
+      }
+      xml += '</w:p></w:tc>';
+    }
+    xml += '</w:tr>';
+  }
+  
+  xml += '</w:tbl>';
+  return xml;
+}
+
+export function generateDocumentXml(tokens: MdToken[], state: DocxGenState): string {
+  let body = '';
+  
+  for (const token of tokens) {
+    if (token.type === 'table') {
+      body += generateTable(token, state);
+    } else {
+      body += generateParagraph(token, state);
+    }
+  }
+  
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+    '<w:document xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wpi="http://schemas.microsoft.com/office/word/2010/wordprocessingInk" xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" mc:Ignorable="w14 wp14">\n' +
+    '<w:body>\n' + body + '\n</w:body>\n' +
+    '</w:document>';
+}
+
+export async function convertMdToDocx(
+  markdown: string,
+  options?: MdToDocxOptions
+): Promise<MdToDocxResult> {
+  // For now, just generate the basic OOXML parts
+  // CriticMarkup, citations, math, and template support will be added in later tasks
+  const tokens = parseMd(markdown);
+  const state: DocxGenState = {
+    commentId: 0,
+    comments: [],
+    relationships: new Map(),
+    nextRId: 1,
+    warnings: [],
+    hasList: false,
+    hasComments: false,
+  };
+  
+  const documentXml = generateDocumentXml(tokens, state);
+  
+  const JSZip = (await import('jszip')).default;
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', contentTypesXml(state.hasList, state.hasComments));
+  zip.file('_rels/.rels', relsXml());
+  zip.file('word/document.xml', documentXml);
+  zip.file('word/styles.xml', stylesXml());
+  if (state.hasList) zip.file('word/numbering.xml', numberingXml());
+  if (state.relationships.size > 0 || state.hasComments) {
+    zip.file('word/_rels/document.xml.rels', documentRelsXml(state.relationships, state.hasComments));
+  }
+  
+  const docx = await zip.generateAsync({ type: 'uint8array' });
+  return { docx, warnings: state.warnings };
+}
+
+function escapeXml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
