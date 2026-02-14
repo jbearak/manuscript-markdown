@@ -20,7 +20,7 @@ export function getOutputConflictMessage(
 	basePath: string,
 	scenario: OutputConflictScenario
 ): string {
-	const name = basePath.split('/').pop()!;
+	const name = basePath.split(/[/\\]/).pop()!;
 	if (scenario === 'both') {
 		return `"${name}.md" and "${name}.bib" already exist in this folder. Replace them or save with a new name?`;
 	}

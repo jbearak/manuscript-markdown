@@ -35,6 +35,12 @@ describe('output conflict helpers', () => {
 		expect(msg).toContain('already exist in this folder');
 	});
 
+	it('extracts filename from Windows-style backslash paths', () => {
+		const msg = getOutputConflictMessage('C:\\Users\\foo\\article', 'md');
+		expect(msg).toContain('"article.md"');
+		expect(msg).not.toContain('C:\\');
+	});
+
 	it('derives base path from a single selected output name', () => {
 		expect(getOutputBasePath('/tmp/new-name.md')).toBe('/tmp/new-name');
 		expect(getOutputBasePath('/tmp/new-name')).toBe('/tmp/new-name');

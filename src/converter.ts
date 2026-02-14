@@ -474,15 +474,15 @@ export async function extractZoteroCitations(data: Uint8Array | JSZip): Promise<
         const uri = Array.isArray(uris) ? uris[0] : uris;
         if (uri) {
           result.zoteroUri = uri;
-          const keyMatch = uri.match(/\/items\/([A-Z0-9]{8})$/);
-          if (keyMatch) {
-            result.zoteroKey = keyMatch[1];
+          const zKey = extractZoteroKey(uri);
+          if (zKey) {
+            result.zoteroKey = zKey;
           }
         }
 
         // Extract locator
         if (item.locator && typeof item.locator === 'string' && item.locator.trim()) {
-          result.locator = item.locator;
+          result.locator = item.locator.trim();
         }
 
         return result;
@@ -495,6 +495,16 @@ export async function extractZoteroCitations(data: Uint8Array | JSZip): Promise<
     }
   }
   return citations;
+}
+
+// Zotero URI key extraction
+
+const ZOTERO_KEY_RE = /\/items\/([A-Z0-9]{8})$/;
+
+/** Extract the 8-character Zotero item key from a Zotero URI, or undefined if it doesn't match. */
+export function extractZoteroKey(uri: string): string | undefined {
+  const m = uri.match(ZOTERO_KEY_RE);
+  return m ? m[1] : undefined;
 }
 
 // Citation key generation
