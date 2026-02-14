@@ -49,7 +49,7 @@ export interface ListMeta {
   level: number; // 0-based indentation level
 }
 
-export const DEFAULT_FORMATTING: RunFormatting = {
+export const DEFAULT_FORMATTING: Readonly<RunFormatting> = Object.freeze({
   bold: false,
   italic: false,
   underline: false,
@@ -57,7 +57,7 @@ export const DEFAULT_FORMATTING: RunFormatting = {
   highlight: false,
   superscript: false,
   subscript: false,
-};
+});
 
 export type ContentItem =
   | {
@@ -623,10 +623,11 @@ export async function extractDocumentContent(
             }
           }
           
-          // Push para item if: this is the first paragraph with heading/list metadata,
-          // OR there's content and the last item isn't already a para
-          const needsPara = (headingLevel || listMeta) 
-            ? content.length === 0 || content[content.length - 1].type !== 'para'
+          // Always push a new para when heading/list metadata is present (so metadata
+          // isn't silently dropped after empty paragraphs).  For plain paragraphs,
+          // push only when the previous item isn't already a para separator.
+          const needsPara = (headingLevel || listMeta)
+            ? true
             : content.length > 0 && content[content.length - 1].type !== 'para';
           
           if (needsPara) {
@@ -709,21 +710,21 @@ export function buildMarkdown(
   const mergedContent = mergeConsecutiveRuns(content);
   const output: string[] = [];
   let i = 0;
-  let lastWasList = false;
+  let lastListType: 'bullet' | 'ordered' | undefined;
 
   while (i < mergedContent.length) {
     const item = mergedContent[i];
 
     if (item.type === 'para') {
       const isCurrentList = item.listMeta !== undefined;
-      
-      if (lastWasList && isCurrentList) {
+
+      if (lastListType && isCurrentList && item.listMeta!.type === lastListType) {
         output.push('\n');
       } else {
         output.push('\n\n');
       }
-      
-      lastWasList = isCurrentList;
+
+      lastListType = isCurrentList ? item.listMeta!.type : undefined;
       
       if (item.headingLevel) {
         output.push('#'.repeat(item.headingLevel) + ' ');
@@ -751,7 +752,7 @@ export function buildMarkdown(
 
     // text with comments
     if (item.commentIds.size > 0) {
-      output.push(`{==${item.text}==}`);
+      output.push(`{==${wrapWithFormatting(item.text, item.formatting)}==}`);
       for (const cid of [...item.commentIds].sort()) {
         const c = comments.get(cid);
         if (!c) { continue; }
