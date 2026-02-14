@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'bun:test';
 import fc from 'fast-check';
 import {
-  ZOTERO_KEY_RE,
   generateBibTeX,
   citationPandocKeys,
   escapeBibtex,
@@ -15,12 +14,15 @@ import type { ZoteroCitation, CitationMetadata } from './converter';
  * Property 1: URI key extraction across all formats
  *
  * For any valid 8-char [A-Z0-9] key and any of the three Zotero URI formats,
- * the regex ZOTERO_KEY_RE extracts exactly that key.
+ * extractZoteroKey() extracts exactly that key.
  *
  * **Validates: Requirements 1.2, 1.3, 1.4, 1.5**
  */
 
+import { extractZoteroKey } from './converter';
+
 const ALPHANUM_UPPER = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+const ALNUM_ALL = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 
 // Generator: single char from [A-Z0-9]
 const keyCharArb = fc.constantFrom(...ALPHANUM_UPPER.split(''));
@@ -31,9 +33,11 @@ const zoteroKeyArb = fc.tuple(
   keyCharArb, keyCharArb, keyCharArb, keyCharArb,
 ).map(chars => chars.join(''));
 
-// Generator: local ID (short alphanumeric string)
-const localIdArb = fc.string({ minLength: 4, maxLength: 12 })
-  .filter(s => /^[a-zA-Z0-9]+$/.test(s));
+// Generator: local ID (short alphanumeric string, constrained to avoid high-rejection filter)
+const localIdArb = fc.array(
+  fc.constantFrom(...ALNUM_ALL.split('')),
+  { minLength: 4, maxLength: 12 },
+).map(chars => chars.join(''));
 
 // Generator: numeric ID
 const numericIdArb = fc.integer({ min: 1, max: 99999999 });
@@ -52,9 +56,8 @@ describe('Feature: zotero-citation-roundtrip, Property 1: URI key extraction acr
   it('extracts the correct key from any valid Zotero URI format', () => {
     fc.assert(
       fc.property(zoteroUriArb, ({ key, uri }) => {
-        const match = uri.match(ZOTERO_KEY_RE);
-        expect(match).not.toBeNull();
-        expect(match![1]).toBe(key);
+        const extracted = extractZoteroKey(uri);
+        expect(extracted).toBe(key);
       }),
       { numRuns: 200 },
     );
@@ -72,25 +75,24 @@ describe('Feature: zotero-citation-roundtrip, Property 1: URI key extraction acr
  * **Validates: Requirements 1.6, 2.1, 2.2, 2.3**
  */
 
-// Generator: Zotero URI with embedded key
-const zoteroUriGen = fc.tuple(
-  zoteroKeyArb,
-  fc.oneof(
-    fc.constant('http://zotero.org/users/local/abc123'),
-    fc.integer({ min: 1, max: 9999999 }).map(id => `http://zotero.org/users/${id}`),
-    fc.integer({ min: 1, max: 9999999 }).map(id => `http://zotero.org/groups/${id}`),
-  ),
-).map(([key, prefix]) => `${prefix}/items/${key}`);
+// Reuse generators from Property 1 (zoteroKeyArb, zoteroUriArb) to avoid duplication
 
 // Generator: CitationMetadata with optional zoteroKey and zoteroUri
 const citationMetaArb = fc.record({
   title: fc.string({ minLength: 1, maxLength: 30 }).filter(s => s.trim().length > 0),
   year: fc.integer({ min: 1900, max: 2099 }).map(String),
+  doi: fc.oneof(
+    fc.constant(''),
+    fc.array(
+      fc.constantFrom(...ALNUM_ALL.split('')),
+      { minLength: 5, maxLength: 20 },
+    ).map(chars => `10.${chars.join('')}`),
+  ),
   hasZoteroKey: fc.boolean(),
   hasZoteroUri: fc.boolean(),
   zoteroKey: zoteroKeyArb,
-  zoteroUri: zoteroUriGen,
-}).map(({ title, year, hasZoteroKey, hasZoteroUri, zoteroKey, zoteroUri }) => {
+  zoteroUri: zoteroUriArb.map(({ uri }) => uri),
+}).map(({ title, year, doi, hasZoteroKey, hasZoteroUri, zoteroKey, zoteroUri }) => {
   const meta: CitationMetadata = {
     authors: [],
     title,
@@ -98,7 +100,7 @@ const citationMetaArb = fc.record({
     journal: '',
     volume: '',
     pages: '',
-    doi: '',
+    doi,
     type: 'article-journal',
     fullItemData: {},
     ...(hasZoteroKey ? { zoteroKey } : {}),
@@ -282,9 +284,13 @@ function hasUnescapedSpecial(output: string): boolean {
   let i = 0;
   while (i < output.length) {
     if (output[i] === '\\') {
-      // This backslash is an escape prefix — skip it and the next char
-      i += 2;
-      continue;
+      if (i + 1 < output.length) {
+        // Escape pair — skip both
+        i += 2;
+        continue;
+      }
+      // Trailing lone backslash — it's unescaped
+      return true;
     }
     if (BIBTEX_SPECIALS.has(output[i])) {
       return true; // Found an unescaped special

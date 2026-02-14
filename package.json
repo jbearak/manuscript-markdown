@@ -29,8 +29,7 @@
     "url": "https://github.com/jbearak/mdmarkup.git"
   },
   "activationEvents": [
-    "onLanguage:markdown",
-    "onCommand:mdmarkup.convertDocx"
+    "onLanguage:markdown"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -161,7 +160,7 @@
       },
       {
         "command": "mdmarkup.convertDocx",
-        "title": "Convert DOCX to Markdown"
+        "title": "Export to Markdown"
       },
       {
         "command": "mdmarkup.formatHighlight_yellow",
@@ -451,7 +450,7 @@
         {
           "command": "mdmarkup.convertDocx",
           "when": "resourceExtname == .docx",
-          "group": "navigation"
+          "group": "9_export"
         }
       ]
     },

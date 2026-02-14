@@ -1133,6 +1133,21 @@ describe('Zotero citation roundtrip', () => {
     expect(bib).not.toContain('zotero-uri');
   });
 
+  test('generateBibTeX escapes DOI with underscores', () => {
+    const citations: ZoteroCitation[] = [{
+      plainCitation: '(Test)',
+      items: [{
+        authors: [{ family: 'Test', given: 'A' }],
+        title: 'Test Title', year: '2020', journal: 'J', volume: '1',
+        pages: '1-2', doi: '10.1/some_thing_test', type: 'article-journal',
+        fullItemData: {},
+      }],
+    }];
+    const keyMap = buildCitationKeyMap(citations);
+    const bib = generateBibTeX(citations, keyMap);
+    expect(bib).toContain('doi = {10.1/some\\_thing\\_test}');
+  });
+
   test('citationPandocKeys includes locator suffix', () => {
     const citation: ZoteroCitation = {
       plainCitation: '(Test)',
@@ -1146,6 +1161,36 @@ describe('Zotero citation roundtrip', () => {
     const keyMap = buildCitationKeyMap([citation]);
     const keys = citationPandocKeys(citation, keyMap);
     expect(keys[0]).toContain(', p. 42');
+  });
+
+  test('citationPandocKeys handles numeric locator', () => {
+    const citation: ZoteroCitation = {
+      plainCitation: '(Test)',
+      items: [{
+        authors: [{ family: 'Test', given: 'A' }],
+        title: 'Test Title', year: '2020', journal: 'J', volume: '1',
+        pages: '1-2', doi: '10.1/test', type: 'article-journal',
+        fullItemData: {}, locator: 15 as any,
+      }],
+    };
+    const keyMap = buildCitationKeyMap([citation]);
+    const keys = citationPandocKeys(citation, keyMap);
+    expect(keys[0]).toContain(', p. 15');
+  });
+
+  test('citationPandocKeys handles locator "0"', () => {
+    const citation: ZoteroCitation = {
+      plainCitation: '(Test)',
+      items: [{
+        authors: [{ family: 'Test', given: 'A' }],
+        title: 'Test Title', year: '2020', journal: 'J', volume: '1',
+        pages: '1-2', doi: '10.1/test', type: 'article-journal',
+        fullItemData: {}, locator: '0',
+      }],
+    };
+    const keyMap = buildCitationKeyMap([citation]);
+    const keys = citationPandocKeys(citation, keyMap);
+    expect(keys[0]).toContain(', p. 0');
   });
 
   test('citationPandocKeys omits locator when absent', () => {

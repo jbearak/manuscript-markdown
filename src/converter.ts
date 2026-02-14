@@ -477,15 +477,18 @@ export async function extractZoteroCitations(data: Uint8Array | JSZip): Promise<
         const uri = Array.isArray(uris) ? uris[0] : uris;
         if (uri) {
           result.zoteroUri = uri;
-          const keyMatch = uri.match(ZOTERO_KEY_RE);
-          if (keyMatch) {
-            result.zoteroKey = keyMatch[1];
+          const zKey = extractZoteroKey(uri);
+          if (zKey) {
+            result.zoteroKey = zKey;
           }
         }
 
-        // Extract locator
-        if (item.locator && typeof item.locator === 'string' && item.locator.trim()) {
-          result.locator = item.locator;
+        // Extract locator (coerce to string for numeric locators)
+        if (item.locator != null) {
+          const loc = String(item.locator).trim();
+          if (loc) {
+            result.locator = loc;
+          }
         }
 
         return result;
@@ -498,6 +501,14 @@ export async function extractZoteroCitations(data: Uint8Array | JSZip): Promise<
     }
   }
   return citations;
+}
+
+// Zotero URI key extraction
+
+/** Extract the 8-character Zotero item key from a Zotero URI, or undefined if it doesn't match. */
+export function extractZoteroKey(uri: string): string | undefined {
+  const m = uri.match(ZOTERO_KEY_RE);
+  return m ? m[1] : undefined;
 }
 
 // Citation key generation
@@ -563,8 +574,8 @@ function getSurname(meta: CitationMetadata): string {
 }
 
 /** Strip characters that are significant in Pandoc citation syntax. */
-function sanitizeLocator(locator: string): string {
-  return locator.replace(/[\[\];@]/g, '');
+function sanitizeLocator(locator: string | number): string {
+  return String(locator).replace(/[\[\];@]/g, '');
 }
 
 /** Get pandoc keys for a citation's items */
@@ -980,7 +991,7 @@ export function generateBibTeX(
       if (meta.volume) { fields.push(`  volume = {${escapeBibtex(meta.volume)}}`); }
       if (meta.pages) { fields.push(`  pages = {${escapeBibtex(meta.pages)}}`); }
       if (meta.year) { fields.push(`  year = {${escapeBibtex(meta.year)}}`); }
-      if (meta.doi) { fields.push(`  doi = {${meta.doi}}`); }
+      if (meta.doi) { fields.push(`  doi = {${escapeBibtex(meta.doi)}}`); }
       if (meta.zoteroKey) { fields.push(`  zotero-key = {${meta.zoteroKey}}`); }
       if (meta.zoteroUri) { fields.push(`  zotero-uri = {${escapeBibtex(meta.zoteroUri)}}`); }
 

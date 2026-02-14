@@ -20,13 +20,14 @@ export function getOutputConflictMessage(
 	basePath: string,
 	scenario: OutputConflictScenario
 ): string {
+	const name = basePath.split(/[/\\]/).pop()!;
 	if (scenario === 'both') {
-		return `Both output files already exist:\n${basePath}.md\n${basePath}.bib\n\nWhat would you like to do?`;
+		return `"${name}.md" and "${name}.bib" already exist in this folder. Replace them or save with a new name?`;
 	}
 	if (scenario === 'md') {
-		return `Output file already exists:\n${basePath}.md\n\nWhat would you like to do?`;
+		return `"${name}.md" already exists in this folder. Replace it or save with a new name?`;
 	}
-	return `Output file already exists:\n${basePath}.bib\n\nWhat would you like to do?`;
+	return `"${name}.bib" already exists in this folder. Replace it or save with a new name?`;
 }
 
 export function getOutputBasePath(selectedPath: string): string {

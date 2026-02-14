@@ -16,21 +16,29 @@ describe('output conflict helpers', () => {
 
 	it('builds a markdown-only conflict message', () => {
 		const msg = getOutputConflictMessage('/tmp/article', 'md');
-		expect(msg).toContain('/tmp/article.md');
-		expect(msg).not.toContain('/tmp/article.bib');
+		expect(msg).toContain('"article.md"');
+		expect(msg).toContain('already exists in this folder');
+		expect(msg).not.toContain('article.bib');
 	});
 
 	it('builds a bib-only conflict message', () => {
 		const msg = getOutputConflictMessage('/tmp/article', 'bib');
-		expect(msg).toContain('/tmp/article.bib');
-		expect(msg).not.toContain('/tmp/article.md');
+		expect(msg).toContain('"article.bib"');
+		expect(msg).toContain('already exists in this folder');
+		expect(msg).not.toContain('article.md');
 	});
 
 	it('builds a both-files conflict message', () => {
 		const msg = getOutputConflictMessage('/tmp/article', 'both');
-		expect(msg).toContain('/tmp/article.md');
-		expect(msg).toContain('/tmp/article.bib');
-		expect(msg).toContain('Both output files already exist');
+		expect(msg).toContain('"article.md"');
+		expect(msg).toContain('"article.bib"');
+		expect(msg).toContain('already exist in this folder');
+	});
+
+	it('extracts filename from Windows-style backslash paths', () => {
+		const msg = getOutputConflictMessage('C:\\Users\\foo\\article', 'md');
+		expect(msg).toContain('"article.md"');
+		expect(msg).not.toContain('C:\\');
 	});
 
 	it('derives base path from a single selected output name', () => {
