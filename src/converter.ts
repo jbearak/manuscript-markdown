@@ -965,6 +965,8 @@ export function generateBibTeX(
       if (meta.pages) { fields.push(`  pages = {${escapeBibtex(meta.pages)}}`); }
       if (meta.year) { fields.push(`  year = {${escapeBibtex(meta.year)}}`); }
       if (meta.doi) { fields.push(`  doi = {${meta.doi}}`); }
+      if (meta.zoteroKey) { fields.push(`  zotero-key = {${meta.zoteroKey}}`); }
+      if (meta.zoteroUri) { fields.push(`  zotero-uri = {${meta.zoteroUri}}`); }
 
       entries.push(`@${entryType}{${key},\n${fields.join(',\n')},\n}`);
     }
