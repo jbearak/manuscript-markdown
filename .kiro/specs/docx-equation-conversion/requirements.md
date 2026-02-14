@@ -14,6 +14,7 @@ This feature adds equation/math support to the existing DOCX-to-Markdown convert
 - **Display_Equation**: A standalone equation on its own line, rendered using `$$...$$` delimiters
 - **LaTeX_Notation**: The mathematical typesetting syntax used to represent equations in Markdown
 - **OMML_Element**: An XML element in the DOCX document representing a math construct (e.g., fractions, superscripts, radicals)
+- **Structural_Equivalence**: Equality of normalized math AST shape (same operators/functions/operand tree), ignoring insignificant whitespace and equivalent delimiter sizing choices
 
 ## Requirements
 
@@ -24,9 +25,10 @@ This feature adds equation/math support to the existing DOCX-to-Markdown convert
 #### Acceptance Criteria
 
 1. WHEN the Converter encounters an `m:oMath` element inside a paragraph, THE Converter SHALL emit the equation as an Inline_Equation wrapped in `$...$` delimiters
-2. WHEN an Inline_Equation appears adjacent to text, THE Converter SHALL preserve surrounding text and spacing so the equation integrates naturally into the sentence
+2. WHEN an Inline_Equation appears adjacent to text, THE Converter SHALL preserve surrounding text and spacing so the equation integrates naturally into the sentence, except where minimal normalization is required for valid Markdown math delimiting
 3. WHEN an Inline_Equation contains only a plain text variable or number, THE Converter SHALL still wrap the content in `$...$` delimiters
 4. WHEN emitting Inline_Equation output, THE Converter SHALL NOT add or remove whitespace inside `$...$` delimiters unless required to produce syntactically valid LaTeX
+5. WHEN inline delimiter emission could produce ambiguous Markdown parsing, THE Converter SHALL prefer unambiguous output while preserving visible text content
 
 ### Requirement 2: Display Equation Conversion
 
@@ -52,15 +54,17 @@ This feature adds equation/math support to the existing DOCX-to-Markdown convert
 4. WHEN the Converter encounters an `m:sSubSup` (sub-superscript) element, THE Converter SHALL emit `base_{subscript}^{superscript}` in LaTeX_Notation
 5. WHEN the Converter encounters an `m:rad` (radical) element with no explicit degree, THE Converter SHALL emit `\sqrt{radicand}` in LaTeX_Notation
 6. WHEN the Converter encounters an `m:rad` (radical) element with an explicit degree, THE Converter SHALL emit `\sqrt[degree]{radicand}` in LaTeX_Notation
-7. WHEN the Converter encounters an `m:nary` (n-ary operator) element, THE Converter SHALL emit the appropriate operator (e.g., `\sum`, `\prod`, `\int`) with subscript and superscript limits in LaTeX_Notation
-8. WHEN the Converter encounters an `m:d` (delimiter/parentheses) element, THE Converter SHALL emit `\left` and `\right` delimiters (e.g., `\left( ... \right)` or `\left[ ... \right]`) to wrap the content, allowing it to scale automatically
-9. WHEN the Converter encounters an `m:acc` (accent) element, THE Converter SHALL emit the corresponding LaTeX accent command (e.g., `\hat`, `\bar`, `\dot`) in LaTeX_Notation
-10. WHEN the Converter encounters an `m:m` (matrix) element, THE Converter SHALL emit a `matrix` environment (e.g., `\begin{matrix} ... \end{matrix}`), relying on the parent `m:d` element to provide any surrounding delimiters (e.g. parentheses or brackets)
-11. WHEN the Converter encounters an `m:func` (function) element, THE Converter SHALL emit the function name (using standard commands like `\sin` for known functions, or `\operatorname{name}` for others) followed by its argument
-12. WHEN the Converter encounters an `m:r` (math run) element containing text, THE Converter SHALL emit the text content. Single-letter variables SHALL be emitted as-is (defaulting to italics in LaTeX), while multi-letter text runs SHALL be wrapped in `\mathrm{...}` unless specific styling properties indicate otherwise
-13. WHEN the Converter encounters nested OMML_Elements, THE Converter SHALL recursively translate each element and compose the LaTeX output correctly
+7. WHEN the Converter encounters an `m:nary` (n-ary operator) element, THE Converter SHALL map known operators to LaTeX commands (e.g., `\sum`, `\prod`, `\int`) and include present lower/upper limits using subscript/superscript in LaTeX_Notation
+8. WHEN the Converter encounters an `m:d` (delimiter/parentheses) element, THE Converter SHALL emit fixed delimiters (e.g., `(` `)` `[` `]`) by default and SHALL use `\left`/`\right` only when fixed delimiters are insufficient to preserve intended visual grouping or semantic structure
+9. WHEN `\left`/`\right` is used, THE Converter SHALL emit matched delimiter pairs and preserve converted inner expression semantics
+10. WHEN the Converter encounters an `m:acc` (accent) element, THE Converter SHALL emit the corresponding LaTeX accent command (e.g., `\hat`, `\bar`, `\dot`) in LaTeX_Notation
+11. WHEN accent type is unknown, THE Converter SHALL apply Requirement 6 fallback behavior
+12. WHEN the Converter encounters an `m:m` (matrix) element, THE Converter SHALL emit a `matrix` environment (e.g., `\begin{matrix} ... \end{matrix}`), relying on the parent `m:d` element to provide any surrounding delimiters (e.g. parentheses or brackets)
+13. WHEN the Converter encounters an `m:func` (function) element, THE Converter SHALL emit standard LaTeX commands for known functions (e.g., `\sin`) and `\operatorname{name}` for unknown function names, followed by its argument
+14. WHEN the Converter encounters an `m:r` (math run) element containing text, THE Converter SHALL emit the text content. Single-letter variables SHALL be emitted as-is (defaulting to italics in LaTeX), while multi-letter text runs SHALL be wrapped in `\mathrm{...}` unless specific styling properties indicate otherwise
+15. WHEN the Converter encounters nested OMML_Elements, THE Converter SHALL recursively translate each element and compose the LaTeX output correctly
 
-### Requirement 3B: Mixed WordprocessingML Content in Math Context
+### Requirement 3A: Mixed WordprocessingML Content in Math Context
 
 **User Story:** As a user converting DOCX files, I want equations to convert correctly even when WordprocessingML (`w:*`) nodes are interleaved with OMML math nodes, so that real-world DOCX math markup is handled robustly.
 
@@ -72,7 +76,7 @@ This feature adds equation/math support to the existing DOCX-to-Markdown convert
 4. WHEN control nodes such as bookmarks, proofing marks, or revision wrappers (`w:bookmarkStart`, `w:bookmarkEnd`, `w:proofErr`, `w:ins`, `w:del`) appear within or adjacent to math content, THE Converter SHALL ignore them for equation semantics and continue conversion
 5. WHEN unsupported mixed-content structures are encountered, THE Converter SHALL apply Requirement 6 fallback behavior without terminating document conversion
 
-### Requirement 3A: Unsupported and Out-of-Scope OMML Constructs
+### Requirement 3B: Unsupported and Out-of-Scope OMML Constructs
 
 **User Story:** As a developer, I want unsupported OMML constructs to be explicitly scoped and handled deterministically, so that behavior is predictable during incremental rollout.
 
@@ -101,6 +105,7 @@ This feature adds equation/math support to the existing DOCX-to-Markdown convert
 1. WHEN emitting LaTeX_Notation, THE Converter SHALL escape or encode characters that would otherwise break LaTeX syntax where appropriate
 2. WHEN fallback plain text is emitted into LaTeX context, THE Converter SHALL escape reserved LaTeX characters as needed to keep output syntactically valid
 3. WHEN emitting Inline_Equation and Display_Equation delimiters, THE Converter SHALL avoid producing ambiguous or unmatched delimiter sequences in surrounding Markdown content
+4. THE Converter SHALL produce deterministic escaping and delimiter output for identical inputs
 
 ### Requirement 5: OMML-to-LaTeX Round Trip Fidelity
 
@@ -108,7 +113,7 @@ This feature adds equation/math support to the existing DOCX-to-Markdown convert
 
 #### Acceptance Criteria
 
-1. FOR generated OMML trees within the supported subset and bounded depth/size, converting to LaTeX and re-parsing the LaTeX SHALL produce a structurally equivalent mathematical expression
+1. FOR generated OMML trees within the supported subset and bounded depth/size, converting to LaTeX and re-parsing the LaTeX SHALL produce a Structural_Equivalence mathematical expression
 2. WHEN the Converter translates an OMML tree to LaTeX, THE Converter SHALL produce syntactically valid LaTeX that contains balanced braces and correct command usage
 3. THE Converter test suite SHALL include property-based or fuzz-style tests over bounded supported OMML inputs to validate structural fidelity invariants
 
@@ -118,7 +123,7 @@ This feature adds equation/math support to the existing DOCX-to-Markdown convert
 
 #### Acceptance Criteria
 
-1. IF the Converter encounters an unrecognized OMML_Element, THEN THE Converter SHALL emit the plain text content of that element wrapped in `\text{[UNSUPPORTED: element_name]}` (or similar) as a visible fallback placeholder
-2. IF the Converter encounters an OMML_Element with missing required children, THEN THE Converter SHALL emit an empty placeholder and continue conversion
+1. IF the Converter encounters an unrecognized OMML_Element, THEN THE Converter SHALL emit a visible fallback placeholder (e.g., `\text{[UNSUPPORTED: element_name]}`) with escaped metadata/text content and continue conversion
+2. IF the Converter encounters an OMML_Element with missing required children, THEN THE Converter SHALL emit a visible fallback placeholder and continue conversion
 3. IF the Converter encounters an empty `m:oMath` or `m:oMathPara` element, THEN THE Converter SHALL skip the element without emitting delimiters
 4. IF fallback behavior is used for an OMML_Element, THEN THE Converter SHALL continue converting subsequent content without throwing a fatal error
