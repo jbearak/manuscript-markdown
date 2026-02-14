@@ -25,6 +25,17 @@ const formattingSampleData = new Uint8Array(readFileSync(join(fixturesDir, 'form
 const expectedMd = readFileSync(join(fixturesDir, 'expected-output.md'), 'utf-8').trimEnd();
 const expectedBib = readFileSync(join(fixturesDir, 'expected-output.bib'), 'utf-8').trimEnd();
 
+function formatLocalIsoMinute(ts: string): string {
+  const dt = new Date(ts);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const offsetMinutes = -dt.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? '+' : '-';
+  const absOffsetMinutes = Math.abs(offsetMinutes);
+  const offsetHours = Math.floor(absOffsetMinutes / 60);
+  const offsetMins = absOffsetMinutes % 60;
+  return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}${sign}${pad(offsetHours)}:${pad(offsetMins)}`;
+}
+
 describe('extractComments', () => {
   test('extracts all comments with correct metadata', async () => {
     const comments = await extractComments(sampleData);
@@ -220,7 +231,11 @@ describe('extractDocumentContent', () => {
 describe('convertDocx (end-to-end)', () => {
   test('produces expected markdown', async () => {
     const result = await convertDocx(sampleData);
-    expect(result.markdown.trimEnd()).toBe(expectedMd);
+    const expectedMdLocal = expectedMd
+      .replace('{{TS1}}', formatLocalIsoMinute('2025-01-15T10:30:00Z'))
+      .replace('{{TS2}}', formatLocalIsoMinute('2025-01-16T14:00:00Z'))
+      .replace('{{TS3}}', formatLocalIsoMinute('2025-01-17T09:15:00Z'));
+    expect(result.markdown.trimEnd()).toBe(expectedMdLocal);
   });
 
   test('produces expected bibtex', async () => {
@@ -520,7 +535,7 @@ describe('buildMarkdown', () => {
     ];
 
     const result = buildMarkdown(content, comments);
-    expect(result).toBe('{==normal **bold**==}{>>Reviewer (2025-01-01T00:00Z): note<<}');
+    expect(result).toBe(`{==normal **bold**==}{>>Reviewer (${formatLocalIsoMinute('2025-01-01T00:00:00Z')}): note<<}`);
   });
 
   test('highlighted commented text does not produce doubled == delimiters', () => {
@@ -537,7 +552,7 @@ describe('buildMarkdown', () => {
     ];
 
     const result = buildMarkdown(content, comments);
-    expect(result).toBe('{==highlighted==}{>>Reviewer (2025-01-01T00:00Z): note<<}');
+    expect(result).toBe(`{==highlighted==}{>>Reviewer (${formatLocalIsoMinute('2025-01-01T00:00:00Z')}): note<<}`);
     expect(result).not.toContain('{====');
   });
 

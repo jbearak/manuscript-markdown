@@ -808,7 +808,15 @@ export function buildMarkdown(
             const dt = new Date(c.date);
             if (!isNaN(dt.getTime())) {
               const pad = (n: number) => String(n).padStart(2, '0');
-              dateStr = ` (${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}T${pad(dt.getUTCHours())}:${pad(dt.getUTCMinutes())}Z)`;
+              // Design decision: render comment timestamps in the reader's local time
+              // (with offset) so "when was this comment made?" is immediately understandable
+              // in Markdown output without requiring UTC conversion by the reader.
+              const offsetMinutes = -dt.getTimezoneOffset();
+              const sign = offsetMinutes >= 0 ? '+' : '-';
+              const absOffsetMinutes = Math.abs(offsetMinutes);
+              const offsetHours = Math.floor(absOffsetMinutes / 60);
+              const offsetMins = absOffsetMinutes % 60;
+              dateStr = ` (${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}${sign}${pad(offsetHours)}:${pad(offsetMins)})`;
             }
           } catch { dateStr = ` (${c.date})`; }
         }
