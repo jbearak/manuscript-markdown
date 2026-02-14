@@ -60,6 +60,18 @@ This feature adds equation/math support to the existing DOCX-to-Markdown convert
 12. WHEN the Converter encounters an `m:r` (math run) element containing text, THE Converter SHALL emit the text content, applying italic formatting for single-letter variables by default
 13. WHEN the Converter encounters nested OMML_Elements, THE Converter SHALL recursively translate each element and compose the LaTeX output correctly
 
+### Requirement 3B: Mixed WordprocessingML Content in Math Context
+
+**User Story:** As a user converting DOCX files, I want equations to convert correctly even when WordprocessingML (`w:*`) nodes are interleaved with OMML math nodes, so that real-world DOCX math markup is handled robustly.
+
+#### Acceptance Criteria
+
+1. WHEN an `m:oMath` or `m:oMathPara` appears inside surrounding `w:*` paragraph/run structure, THE Converter SHALL preserve non-math text flow and convert only the math subtree to LaTeX_Notation
+2. WHEN an `m:r` math run contains text via `m:t` and/or nested `w:r`/`w:t` nodes, THE Converter SHALL extract textual math content in document order before LaTeX mapping
+3. WHEN `w:rPr` formatting nodes are present inside math-related runs, THE Converter SHALL ignore presentational styling that does not change mathematical semantics
+4. WHEN control nodes such as bookmarks, proofing marks, or revision wrappers (`w:bookmarkStart`, `w:bookmarkEnd`, `w:proofErr`, `w:ins`, `w:del`) appear within or adjacent to math content, THE Converter SHALL ignore them for equation semantics and continue conversion
+5. WHEN unsupported mixed-content structures are encountered, THE Converter SHALL apply Requirement 6 fallback behavior without terminating document conversion
+
 ### Requirement 3A: Unsupported and Out-of-Scope OMML Constructs
 
 **User Story:** As a developer, I want unsupported OMML constructs to be explicitly scoped and handled deterministically, so that behavior is predictable during incremental rollout.
