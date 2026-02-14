@@ -23,6 +23,9 @@ export interface CitationMetadata {
   doi: string;
   type: string;
   fullItemData: Record<string, any>;
+  zoteroKey?: string;
+  zoteroUri?: string;
+  locator?: string;
 }
 
 /** Each Zotero field in the document produces one of these. */
@@ -453,7 +456,8 @@ export async function extractZoteroCitations(data: Uint8Array | JSZip): Promise<
         const issued = d.issued ?? {};
         const dateParts = issued['date-parts'] ?? [[]];
         const year = dateParts[0]?.[0] ? String(dateParts[0][0]) : '';
-        return {
+        
+        const result: CitationMetadata = {
           authors: d.author ?? [],
           title: d.title ?? '',
           year,
@@ -464,6 +468,24 @@ export async function extractZoteroCitations(data: Uint8Array | JSZip): Promise<
           type: d.type ?? 'article-journal',
           fullItemData: d,
         };
+
+        // Extract Zotero URI and key
+        const uris = item.uris ?? item.uri ?? [];
+        const uri = Array.isArray(uris) ? uris[0] : uris;
+        if (uri) {
+          const keyMatch = uri.match(/\/items\/([A-Z0-9]{8})$/);
+          if (keyMatch) {
+            result.zoteroKey = keyMatch[1];
+            result.zoteroUri = uri;
+          }
+        }
+
+        // Extract locator
+        if (item.locator && typeof item.locator === 'string' && item.locator.trim()) {
+          result.locator = item.locator;
+        }
+
+        return result;
       });
 
       citations.push({ plainCitation, items });

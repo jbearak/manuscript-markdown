@@ -17,6 +17,7 @@ const citation1JSON = JSON.stringify({
   properties: { formattedCitation: '(Smith 2020)', plainCitation: '(Smith 2020)', noteIndex: 0 },
   citationItems: [{
     id: 1001,
+    locator: '15',
     uris: ['http://zotero.org/users/0/items/AAAA1111'],
     itemData: {
       id: 1001, type: 'article-journal',
@@ -36,6 +37,7 @@ const citation2JSON = JSON.stringify({
   citationItems: [
     {
       id: 1002,
+      locator: '110',
       uris: ['http://zotero.org/users/0/items/BBBB2222'],
       itemData: {
         id: 1002, type: 'article-journal',

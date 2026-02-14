@@ -50,7 +50,7 @@ describe('Property 6: Highlight range extraction', () => {
         const ranges = extractHighlightRanges(doc, 'yellow');
         const criticRanges = ranges.get('critic') || [];
         expect(criticRanges.length).toBe(1);
-        expect(doc.slice(criticRanges[0].start, criticRanges[0].end)).toBe(doc);
+        expect(doc.slice(criticRanges[0].start, criticRanges[0].end)).toBe(text);
       }),
       { numRuns: 100 }
     );
