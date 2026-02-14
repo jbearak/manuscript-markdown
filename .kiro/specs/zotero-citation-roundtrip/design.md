@@ -184,7 +184,7 @@ Error handling is unchanged from the existing converter design:
 - Minimum iterations: 100 per property
 - Each test tagged with: **Feature: zotero-citation-roundtrip, Property {N}: {title}**
 - Use bounded generators to avoid timeouts on large strings (per AGENTS.md learning)
-- `escapeBibtex` is currently not exported; the PBT task must export it first
+- `escapeBibtex` is exported from `converter.ts`
 
 ### Test file
 

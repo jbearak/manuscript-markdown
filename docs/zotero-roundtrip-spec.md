@@ -8,7 +8,7 @@
 
 Zotero stores citations in Word documents using `ADDIN` field codes with the following structure:
 
-```
+```text
 { ADDIN ZOTERO_ITEM CSL_CITATION <JSON_DATA> }
 ```
 
@@ -26,7 +26,7 @@ The JSON data contains:
 ### Bibliography Field Code
 
 Zotero also inserts a bibliography field:
-```
+```text
 { ADDIN ZOTERO_BIBL <JSON_DATA> }
 ```
 
@@ -79,7 +79,7 @@ Field codes are stored in `word/document.xml` as complex fields:
 
 ### Data Flow
 
-```
+```text
 DOCX → Extract → Markdown + BibTeX
                      ↓
                   (Edit)
