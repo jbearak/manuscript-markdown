@@ -12,7 +12,7 @@
       "devDependencies": {
         "@types/markdown-it": "^14.1.2",
         "@types/mocha": "^2.2.42",
-        "@types/node": "^20.0.0",
+        "@types/node": "^22.0.0",
         "@types/vscode": "^1.103.2",
         "fast-check": "^4.3.0",
         "tslint": "^5.14.0",
@@ -33,7 +33,7 @@
 
     "@types/mocha": ["@types/mocha@2.2.48", "", {}, "sha512-nlK/iyETgafGli8Zh9zJVCTicvU3iajSkRwOh3Hhiva598CMqNJ4NcVCGMTGKpGpTYj/9R8RLzS9NAykSSCqGw=="],
 
-    "@types/node": ["@types/node@20.19.33", "", { "dependencies": { "undici-types": "~6.21.0" } }, "sha512-Rs1bVAIdBs5gbTIKza/tgpMuG1k3U/UMJLWecIMxNdJFDMzcM5LOiLVRYh3PilWEYDIeUDv7bpiHPLPsbydGcw=="],
+    "@types/node": ["@types/node@22.19.11", "", { "dependencies": { "undici-types": "~6.21.0" } }, "sha512-BH7YwL6rA93ReqeQS1c4bsPpcfOmJasG+Fkr6Y59q83f9M1WcBRHR2vM+P9eOisYRcN3ujQoiZY8uk5W+1WL8w=="],
 
     "@types/vscode": ["@types/vscode@1.106.1", "", {}, "sha512-R/HV8u2h8CAddSbX8cjpdd7B8/GnE4UjgjpuGuHcbp1xV6yh4OeqU4L1pKjlwujCrSFS0MOpwJAIs/NexMB1fQ=="],
 
