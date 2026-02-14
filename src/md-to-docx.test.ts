@@ -96,7 +96,7 @@ describe('generateRun', () => {
 
   it('escapes XML characters', () => {
     const result = generateRun('<test> & "quotes"', '');
-    expect(result).toBe('<w:r><w:t xml:space="preserve">&lt;test&gt; &amp; "quotes"</w:t></w:r>');
+    expect(result).toBe('<w:r><w:t xml:space="preserve">&lt;test&gt; &amp; &quot;quotes&quot;</w:t></w:r>');
   });
 });
 

@@ -365,26 +365,28 @@ class Parser {
 
   private parseMatrixContent(): string {
     let rows = '';
-    let currentRow = '';
+    let currentCell = '';
+    let currentRowCells = '';
 
     while (this.peek() && !(this.peek()?.type === 'command' && this.peek()?.value === '\\end')) {
       const token = this.consume()!;
       
       if (token.type === 'ampersand') {
-        currentRow += '<m:e>' + currentRow + '</m:e>';
-        currentRow = '';
-      } else if (token.type === 'backslash' && this.peek()?.type === 'backslash') {
-        this.consume(); // consume second backslash
-        currentRow += '<m:e>' + currentRow + '</m:e>';
-        rows += '<m:mr>' + currentRow + '</m:mr>';
-        currentRow = '';
+        currentRowCells += '<m:e>' + currentCell + '</m:e>';
+        currentCell = '';
+      } else if (token.type === 'command' && token.value === '\\\\') {
+        currentRowCells += '<m:e>' + currentCell + '</m:e>';
+        rows += '<m:mr>' + currentRowCells + '</m:mr>';
+        currentCell = '';
+        currentRowCells = '';
       } else {
-        currentRow += this.parseToken(token);
+        currentCell += this.parseToken(token);
       }
     }
 
-    if (currentRow) {
-      rows += '<m:mr><m:e>' + currentRow + '</m:e></m:mr>';
+    if (currentCell || currentRowCells) {
+      currentRowCells += '<m:e>' + currentCell + '</m:e>';
+      rows += '<m:mr>' + currentRowCells + '</m:mr>';
     }
 
     return rows;

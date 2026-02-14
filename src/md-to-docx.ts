@@ -245,7 +245,7 @@ export function parseMd(markdown: string): MdToken[] {
   return convertTokens(tokens);
 }
 
-function convertTokens(tokens: any[]): MdToken[] {
+function convertTokens(tokens: any[], listLevel = 0, blockquoteLevel = 0): MdToken[] {
   const result: MdToken[] = [];
   let i = 0;
   
@@ -275,23 +275,20 @@ function convertTokens(tokens: any[]): MdToken[] {
       case 'bullet_list_open':
       case 'ordered_list_open':
         const listClose = findClosingToken(tokens, i, token.type.replace('_open', '_close'));
-        const listItems = extractListItems(tokens.slice(i + 1, listClose));
-        result.push(...listItems.map(item => ({
-          type: 'list_item' as const,
-          ordered: token.type === 'ordered_list_open',
-          level: 1, // TODO: handle nesting
-          runs: item
-        })));
+        const currentLevel = listLevel + 1;
+        const listItems = extractListItems(tokens.slice(i + 1, listClose), token.type === 'ordered_list_open', currentLevel);
+        result.push(...listItems);
         i = listClose + 1;
         break;
         
       case 'blockquote_open':
         const blockquoteClose = findClosingToken(tokens, i, 'blockquote_close');
-        const blockquoteTokens = convertTokens(tokens.slice(i + 1, blockquoteClose));
+        const bqLevel = blockquoteLevel + 1;
+        const blockquoteTokens = convertTokens(tokens.slice(i + 1, blockquoteClose), 0, bqLevel);
         result.push(...blockquoteTokens.map(t => ({
           ...t,
           type: 'blockquote' as const,
-          level: 1 // TODO: handle nesting
+          level: t.type === 'blockquote' ? t.level : bqLevel
         })));
         i = blockquoteClose + 1;
         break;
@@ -516,14 +513,13 @@ function findClosingToken(tokens: any[], start: number, closeType: string): numb
   return tokens.length;
 }
 
-function extractListItems(tokens: any[]): MdRun[][] {
-  const items: MdRun[][] = [];
+function extractListItems(tokens: any[], ordered: boolean, level: number): MdToken[] {
+  const items: MdToken[] = [];
   let i = 0;
   
   while (i < tokens.length) {
     if (tokens[i].type === 'list_item_open') {
       const closePos = findClosingToken(tokens, i, 'list_item_close');
-      // Find paragraph content within the list item
       const itemTokens = tokens.slice(i + 1, closePos);
       let runs: MdRun[] = [];
       
@@ -533,13 +529,23 @@ function extractListItems(tokens: any[]): MdRun[][] {
           runs = processInlineChildren(itemTokens.slice(j + 1, paragraphClose));
           break;
         } else if (itemTokens[j].type === 'inline') {
-          // Direct inline content
           runs = processInlineChildren([itemTokens[j]]);
           break;
         }
       }
       
-      items.push(runs);
+      items.push({ type: 'list_item', ordered, level, runs });
+      
+      // Extract nested sublists
+      for (let j = 0; j < itemTokens.length; j++) {
+        if (itemTokens[j].type === 'bullet_list_open' || itemTokens[j].type === 'ordered_list_open') {
+          const subClose = findClosingToken(itemTokens, j, itemTokens[j].type.replace('_open', '_close'));
+          const subOrdered = itemTokens[j].type === 'ordered_list_open';
+          items.push(...extractListItems(itemTokens.slice(j + 1, subClose), subOrdered, level + 1));
+          j = subClose;
+        }
+      }
+      
       i = closePos + 1;
     } else {
       i++;
@@ -1199,5 +1205,5 @@ export async function convertMdToDocx(
 }
 
 function escapeXml(text: string): string {
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
