@@ -346,12 +346,15 @@ export function parseRunProperties(
   }
   
   // highlight: w:highlight with w:val ≠ "none", OR w:shd with w:fill ≠ "" and ≠ "auto"
+  // w:highlight takes priority over w:shd per ECMA-376
   const highlightElement = rPrChildren.find(child => child['w:highlight'] !== undefined);
   if (highlightElement) {
     const val = getAttr(highlightElement, 'val');
     formatting.highlight = val !== 'none';
     if (formatting.highlight && val) {
       formatting.highlightColor = val;
+    } else {
+      formatting.highlightColor = undefined;
     }
   } else {
     const shdElement = rPrChildren.find(child => child['w:shd'] !== undefined);
@@ -360,6 +363,8 @@ export function parseRunProperties(
       formatting.highlight = fill !== '' && fill !== 'auto';
       if (formatting.highlight && fill) {
         formatting.highlightColor = fill;
+      } else {
+        formatting.highlightColor = undefined;
       }
     }
   }

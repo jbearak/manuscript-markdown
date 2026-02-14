@@ -731,7 +731,21 @@ describe('highlightColor extraction', () => {
     expect(formatting2.highlightColor).toBe('magenta');
   });
 
-  test('different highlight colors prevent run merging', () => {
+  test('w:highlight with cyan stores cyan', () => {
+    const children = [{ 'w:highlight': [], ':@': { '@_w:val': 'cyan' } }];
+    const formatting = parseRunProperties(children);
+    expect(formatting.highlight).toBe(true);
+    expect(formatting.highlightColor).toBe('cyan');
+  });
+
+  test('w:shd with auto fill does not store highlightColor', () => {
+    const children = [{ 'w:shd': [], ':@': { '@_w:fill': 'auto' } }];
+    const formatting = parseRunProperties(children);
+    expect(formatting.highlight).toBe(false);
+    expect(formatting.highlightColor).toBeUndefined();
+  });
+
+  test('formattingEquals distinguishes different highlight colors via buildMarkdown', () => {
     const content = [
       {
         type: 'text' as const,
