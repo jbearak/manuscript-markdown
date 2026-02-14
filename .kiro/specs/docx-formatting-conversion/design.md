@@ -71,8 +71,8 @@ function parseRelationships(zip: JSZip): Promise<Map<string, string>>;
 /** Parse word/numbering.xml into a Map<numId, Map<ilvl, 'bullet'|'ordered'>> */
 function parseNumberingDefinitions(zip: JSZip): Promise<Map<string, Map<string, 'bullet' | 'ordered'>>>;
 
-/** Extract RunFormatting from a w:rPr node */
-function parseRunProperties(rPrChildren: any[]): RunFormatting;
+/** Extract RunFormatting from a w:rPr node, inheriting from baseFormatting */
+function parseRunProperties(rPrChildren: any[], baseFormatting?: RunFormatting): RunFormatting;
 
 /** Extract heading level from w:pPr > w:pStyle (returns undefined if not a heading) */
 function parseHeadingLevel(pPrChildren: any[]): number | undefined;
@@ -83,6 +83,17 @@ function parseListMeta(
   numberingDefs: Map<string, Map<string, 'bullet' | 'ordered'>>
 ): ListMeta | undefined;
 ```
+
+### Run Formatting Inheritance (w:pPr/w:rPr defaults)
+
+**Key design decision:** Paragraph-level run properties (`w:pPr > w:rPr`) serve as defaults for child runs. `parseRunProperties` accepts a `baseFormatting` parameter that carries these defaults. Run-level `w:rPr` only overrides properties that are *explicitly present* — absent properties inherit the paragraph default rather than resetting to `false`.
+
+This means:
+1. When processing a `w:p`, extract `w:pPr > w:rPr` and parse it into a `RunFormatting` (the paragraph default).
+2. Pass this paragraph default as `baseFormatting` to `parseRunProperties` for each child `w:r`.
+3. Each run starts with `{ ...baseFormatting }` and only overwrites fields for which the run's `w:rPr` contains an explicit element.
+
+> **AGENTS.md learning:** Apply `w:pPr/w:rPr` paragraph defaults to child runs and only override inherited formatting for properties explicitly present in run-level `w:rPr`.
 
 ### Formatting Delimiter Application
 
@@ -101,13 +112,37 @@ A helper function `wrapWithFormatting(text: string, fmt: RunFormatting): string`
 
 When `extractDocumentContent()` encounters a `w:hyperlink` node, it reads the `r:id` attribute, looks it up in the relationship map, and sets `href` on all child text items. In `buildMarkdown()`, text items with `href` are emitted as `[formattedText](url)` — formatting delimiters go inside the link text.
 
+**Markdown-safe URL encoding:** URLs containing parentheses `()`, whitespace, or square brackets `[]` are wrapped in angle brackets to produce `[text](<url>)`. This prevents broken Markdown link parsing.
+
+```typescript
+function formatHrefForMarkdown(href: string): string {
+  return /[()\[\]\s]/.test(href) ? `<${href}>` : href;
+}
+```
+
+> **AGENTS.md learning:** When URLs contain parentheses/whitespace, emit link destinations in angle brackets (`[text](<url>)`) to avoid broken Markdown link parsing. Also wrap destinations containing `[` or `]` in angle brackets, since square brackets in raw destinations can break link parsing in common Markdown parsers.
+
 > **Known limitation — bookmark links:** OOXML hyperlinks can also use a `w:anchor` attribute for internal document links (bookmarks) instead of `r:id`. If both `r:id` and `w:anchor` are present, `r:id` takes precedence per ECMA-376. This converter only resolves external hyperlinks via `r:id`; `w:anchor`-only links are treated as unresolvable (plain text fallback).
+
+### Commented Text Rendering
+
+When text runs fall inside a comment range (`commentIds` is non-empty), `buildMarkdown()` groups adjacent runs by identical `commentIds` — even when their `RunFormatting` differs — and emits a single `{==...==}` CriticMarkup block followed by one annotation sequence.
+
+**Critical detail:** Per-run `highlight` formatting is cleared (set to `false`) inside the comment block to avoid producing `{====...====}` (doubled `==` delimiters). The CriticMarkup `{==...==}` wrapper already provides the highlight semantics, so the inner `==` from `RunFormatting.highlight` would be redundant and produce invalid output.
+
+```typescript
+// Inside the comment grouping loop:
+const fmtForComment: RunFormatting = { ...seg.formatting, highlight: false };
+let segText = wrapWithFormatting(seg.text, fmtForComment);
+```
+
+> **AGENTS.md learning:** Group adjacent text runs by identical `commentIds` even when run formatting differs, emit one `{==...==}` block + one annotation sequence, and clear per-run `highlight` inside that block to avoid `{====...====}` output.
 
 ### Heading and List Handling
 
 `buildMarkdown()` inspects each `para` item:
 - If `headingLevel` is set, prefix the paragraph's text with `#` × level + space.
-- If `listMeta` is set, prefix with the appropriate marker (`- ` or `1. `) indented by level. Consecutive list items suppress the blank line that `para` normally emits.
+- If `listMeta` is set, prefix with the appropriate marker (`- ` or `1. `) indented by level. Consecutive list items of the same type suppress the blank line that `para` normally emits.
 
 > **Known limitation — localized heading style IDs:** Style IDs in `w:pStyle` are defined per-document in `word/styles.xml`. The built-in English heading styles use `Heading1` (or `heading1`). The converter matches case-insensitively against `/^heading(\d)$/`, which handles English documents. Non-English Word versions may use localized style IDs (e.g., German `"Überschrift1"`) that will not match — these are treated as normal paragraphs.
 
@@ -117,8 +152,10 @@ Three additions for `==text==` formatting highlight (not CriticMarkup):
 
 1. **Command**: `mdmarkup.formatHighlight` — calls `wrapSelection(text, '==', '==')`, registered in `extension.ts`.
 2. **Menu**: Added to `markdown.formatting` submenu in `package.json` at `1_format@6` (after underline, before inline code which shifts to `@7`).
-3. **TextMate grammar**: New `format_highlight` pattern in `syntaxes/mdmarkup.json` matching `==…==` but NOT `{==…==}`. Uses a negative lookbehind for `{` and negative lookahead for `}`.
+3. **TextMate grammar**: New `format_highlight` pattern in `syntaxes/mdmarkup.json` matching `==…==` but NOT `{==…==}`. Uses a negative lookbehind for `{` and negative lookahead for `}`. The capture group uses `[^}=]+` to exclude `=` characters, ensuring multiple inline highlights on one line tokenize as separate spans.
 4. **Preview**: New inline rule in `mdmarkup-plugin.ts` that detects `==…==` (when not preceded by `{`) and renders as `<mark class="mdmarkup-format-highlight">`. New CSS class with a yellow/amber background distinct from the purple CriticMarkup highlight.
+
+> **AGENTS.md learning:** TextMate inline highlight regex should exclude `=` inside `==...==` captures (e.g., `[^}=]+`) so multiple inline highlights on one line tokenize as separate spans and stay consistent with preview rendering.
 
 
 ## Data Models
@@ -127,11 +164,11 @@ Three additions for `==text==` formatting highlight (not CriticMarkup):
 
 | Field | Type | Default | OOXML Source |
 |-------|------|---------|-------------|
-| bold | boolean | false | `w:rPr > w:b` (absent or `w:val` not `"false"`/`"0"`) |
+| bold | boolean | false | `w:rPr > w:b` (absent or `w:val` not `"false"`/`"0"`/`"off"`) |
 | italic | boolean | false | `w:rPr > w:i` (same logic) |
 | underline | boolean | false | `w:rPr > w:u` with `w:val` ≠ `"none"`. OOXML `ST_Underline` defines 18 values (`single`, `words`, `double`, `thick`, `dotted`, `dottedHeavy`, `dash`, `dashedHeavy`, `dashLong`, `dashLongHeavy`, `dotDash`, `dashDotHeavy`, `dotDotDash`, `dashDotDotHeavy`, `wave`, `wavyHeavy`, `wavyDouble`, `none`). A bare `<w:u/>` with no `w:val` defaults to `single`. All non-`"none"` values are treated as underlined. `"words"` (underline non-space characters only) is treated as regular underline for simplicity. |
 | strikethrough | boolean | false | `w:rPr > w:strike` or `w:rPr > w:dstrike` (same logic as bold; `w:strike` and `w:dstrike` are mutually exclusive per ECMA-376 — both map to `~~`) |
-| highlight | boolean | false | `w:rPr > w:highlight` with `w:val` ≠ `"none"` (OOXML `ST_HighlightColor` has 17 values: black, blue, cyan, green, magenta, red, yellow, white, darkBlue, darkCyan, darkGreen, darkMagenta, darkRed, darkYellow, darkGray, lightGray, none), OR `w:rPr > w:shd` with `w:fill` ≠ `""` and ≠ `"auto"`. `w:highlight` takes priority over `w:shd` per ECMA-376. Note: `w:fill` is of type `ST_HexColor` (union of `"auto"` and 6-digit hex RGB); `"auto"` means application-determined color, effectively no explicit shading. The `w:fill` attribute is required on `w:shd` per schema, so the empty-string check is a defensive guard. Checking `w:fill` alone is a simplification — technically a pattern (`w:val` ≠ `"clear"`) with a non-auto `w:color` could also produce visible shading. |
+| highlight | boolean | false | `w:rPr > w:highlight` with `w:val` ≠ `"none"`, OR `w:rPr > w:shd` with `w:fill` ≠ `""` and ≠ `"auto"`. `w:highlight` takes priority over `w:shd` per ECMA-376. Note: `w:fill` is of type `ST_HexColor` (union of `"auto"` and 6-digit hex RGB); `"auto"` means application-determined color, effectively no explicit shading. The `w:fill` attribute is required on `w:shd` per schema, so the empty-string check is a defensive guard. Checking `w:fill` alone is a simplification — technically a pattern (`w:val` ≠ `"clear"`) with a non-auto `w:color` could also produce visible shading. |
 | superscript | boolean | false | `w:rPr > w:vertAlign` with `w:val="superscript"` |
 | subscript | boolean | false | `w:rPr > w:vertAlign` with `w:val="subscript"` |
 
@@ -215,7 +252,7 @@ This prevents fragmented output like `**bold**` `**more bold**` → `**bold more
 
 ### Property 4: Hyperlink text items produce Markdown link syntax
 
-*For any* non-empty text string and *for any* non-empty URL string, a text `ContentItem` with `href` set shall cause `buildMarkdown` to produce output matching the pattern `[…](url)` where the URL appears verbatim inside the parentheses.
+*For any* non-empty text string and *for any* non-empty URL string, a text `ContentItem` with `href` set shall cause `buildMarkdown` to produce output matching the pattern `[…](url)` where the URL appears inside the parentheses (possibly wrapped in angle brackets for URLs containing special characters).
 
 **Validates: Requirements 9.1, 9.2**
 
@@ -239,7 +276,7 @@ This prevents fragmented output like `**bold**` `**more bold**` → `**bold more
 
 ### Property 8: Consecutive list items have no blank lines between them
 
-*For any* sequence of two or more consecutive `para` items with `listMeta` set (same or different list types), `buildMarkdown` shall produce output where no blank line appears between adjacent list items.
+*For any* sequence of two or more consecutive `para` items with `listMeta` set (same list type), `buildMarkdown` shall produce output where no blank line appears between adjacent list items. When list type transitions occur, a blank line separates the groups.
 
 **Validates: Requirements 11.3, 12.3**
 
@@ -255,20 +292,24 @@ This prevents fragmented output like `**bold**` `**more bold**` → `**bold more
 
 **Validates: Requirements 16.1**
 
+
 ## Error Handling
 
 | Scenario | Behavior |
 |----------|----------|
-| `w:rPr` absent from a run | All formatting flags default to `false` |
+| `w:rPr` absent from a run | All formatting flags inherit from paragraph-level `w:pPr > w:rPr` defaults (or `false` if no paragraph defaults) |
 | `word/numbering.xml` missing from zip | Numbering definitions map is empty; all `w:numPr` references produce no list metadata |
 | `word/_rels/document.xml.rels` missing | Relationship map is empty; all hyperlinks fall back to plain text (Req 9.3) |
 | `w:hyperlink` with unresolvable `r:id` | Output link text as plain text, no `[](url)` syntax |
+| Hyperlink URL contains `()`, `[]`, or whitespace | URL wrapped in angle brackets: `[text](<url>)` |
 | `w:pStyle` with unrecognized value | Treated as normal paragraph (Req 10.3) |
 | `w:numPr` referencing undefined `numId` | Treated as normal paragraph (no list prefix) |
 | `w:vertAlign` with value other than `"superscript"` or `"subscript"` | Ignored (no sup/sub wrapping) |
 | `w:highlight` with `w:val="none"` | Treated as non-highlighted |
 | `w:u` with `w:val="none"` | Treated as non-underlined |
 | Empty text runs | Skipped — no formatting delimiters emitted for empty strings |
+| Commented text with `highlight` formatting | Per-run `highlight` cleared inside `{==...==}` block to avoid doubled `==` delimiters |
+| Adjacent commented runs with different formatting | Grouped by identical `commentIds` into one `{==...==}` block; formatting applied per-run inside the block |
 
 ## Testing Strategy
 
@@ -276,16 +317,20 @@ This prevents fragmented output like `**bold**` `**more bold**` → `**bold more
 
 Unit tests validate specific examples and edge cases using `bun:test`:
 
-- **Fixture test**: Convert `test/fixtures/formatting_sample.docx` and compare output against an expected markdown string (Req 13.1–13.4)
-- **Toggle detection edge cases**: `isToggleOn` with `w:val="false"`, `w:val="0"`, absent element (Req 1.3, 2.3, 4.3)
-- **Highlight via `w:shd`**: Verify `w:shd` with non-auto fill triggers highlight (Req 5.2)
+- **Fixture test**: Convert `test/fixtures/formatting_sample.docx` and compare output against expected patterns (Req 13.1–13.4)
+- **Toggle detection edge cases**: `isToggleOn` with `w:val="false"`, `w:val="0"`, `w:val="off"`, absent element (Req 1.3, 2.3, 4.3)
+- **Highlight via `w:shd`**: Verify `w:shd` with non-auto fill triggers highlight; `w:shd` with `"auto"` or empty fill does not (Req 5.2)
 - **Unresolvable hyperlink**: Verify plain text fallback when `r:id` is missing (Req 9.3)
+- **Hyperlink URL safety**: Verify URLs with parentheses/brackets/whitespace are wrapped in angle brackets
 - **Non-heading pStyle**: Verify no `#` prefix for unknown styles (Req 10.3)
+- **Commented text grouping**: Verify adjacent runs with different formatting but same `commentIds` produce one `{==...==}` block
+- **Highlighted commented text**: Verify no doubled `==` delimiters when highlighted text is inside a comment range
+- **Paragraph formatting inheritance**: Verify `w:pPr > w:rPr` defaults propagate to child runs and run-level overrides work correctly
 - **TextMate grammar**: Verify the regex does not match `{==text==}` (Req 15.3)
 
 ### Property-Based Tests
 
-Property tests use `fast-check` with minimum 100 iterations per property. Per AGENTS.md guidance, use bounded generators (short strings) to avoid timeouts.
+Property tests use `fast-check` with minimum 100 iterations per property. Per AGENTS.md guidance, use bounded generators (short strings, `maxLength: 50`) to avoid timeouts.
 
 Each property test is tagged with a comment:
 - **Feature: docx-formatting-conversion, Property 1: Formatting wrapping produces correct delimiters**
