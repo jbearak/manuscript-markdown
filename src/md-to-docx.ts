@@ -1,4 +1,6 @@
 import MarkdownIt from 'markdown-it';
+import { generateCitation, generateMathXml } from './md-to-docx-citations';
+import { parseBibtex, BibtexEntry } from './bibtex-parser';
 
 // Types for the parsed token stream
 export interface MdToken {
@@ -164,7 +166,7 @@ function citationRule(state: any, silent: boolean): boolean {
     const keys: string[] = [];
     const locators = new Map<string, string>();
     
-    const parts = content.split(';').map(p => p.trim());
+    const parts = content.split(';').map((p: string) => p.trim());
     for (const part of parts) {
       const commaPos = part.indexOf(',');
       if (commaPos !== -1) {
@@ -728,6 +730,20 @@ function formatRuns(runs: MdRun[]): string {
 
 // OOXML Generation Layer
 
+async function extractTemplateParts(templateDocx: Uint8Array): Promise<Map<string, Uint8Array>> {
+  const JSZip = (await import('jszip')).default;
+  const zip = await JSZip.loadAsync(templateDocx);
+  const parts = new Map<string, Uint8Array>();
+  
+  for (const path of ['word/styles.xml', 'word/theme/theme1.xml', 'word/numbering.xml', 'word/settings.xml']) {
+    const file = zip.file(path);
+    if (file) {
+      parts.set(path, await file.async('uint8array'));
+    }
+  }
+  return parts;
+}
+
 export interface MdToDocxOptions {
   bibtex?: string;
   authorName?: string;
@@ -756,7 +772,7 @@ interface CommentEntry {
   text: string;
 }
 
-function contentTypesXml(hasList: boolean, hasComments: boolean): string {
+function contentTypesXml(hasList: boolean, hasComments: boolean, hasTheme?: boolean, hasSettings?: boolean): string {
   let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
   xml += '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n';
   xml += '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n';
@@ -768,6 +784,12 @@ function contentTypesXml(hasList: boolean, hasComments: boolean): string {
   }
   if (hasComments) {
     xml += '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>\n';
+  }
+  if (hasTheme) {
+    xml += '<Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>\n';
+  }
+  if (hasSettings) {
+    xml += '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>\n';
   }
   xml += '</Types>';
   return xml;
@@ -875,7 +897,7 @@ function numberingXml(): string {
     '</w:numbering>';
 }
 
-function documentRelsXml(relationships: Map<string, string>, hasComments: boolean): string {
+function documentRelsXml(relationships: Map<string, string>, hasComments: boolean, hasTheme?: boolean, hasSettings?: boolean): string {
   let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
   xml += '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n';
   xml += '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>\n';
@@ -886,6 +908,16 @@ function documentRelsXml(relationships: Map<string, string>, hasComments: boolea
   
   if (hasComments) {
     xml += '<Relationship Id="rId' + rId + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>\n';
+    rId++;
+  }
+  
+  if (hasTheme) {
+    xml += '<Relationship Id="rId' + rId + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>\n';
+    rId++;
+  }
+  
+  if (hasSettings) {
+    xml += '<Relationship Id="rId' + rId + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>\n';
     rId++;
   }
   
@@ -919,7 +951,7 @@ export function generateRun(text: string, rPr: string): string {
   return '<w:r>' + rPr + '<w:t xml:space="preserve">' + escapeXml(text) + '</w:t></w:r>';
 }
 
-export function generateParagraph(token: MdToken, state: DocxGenState, options?: MdToDocxOptions): string {
+export function generateParagraph(token: MdToken, state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>): string {
   let pPr = '';
   
   switch (token.type) {
@@ -1005,8 +1037,14 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
         runs += '<w:commentRangeEnd w:id="' + commentId + '"/>';
       }
       runs += '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="' + commentId + '"/></w:r>';
+    } else if (run.type === 'citation') {
+      const result = generateCitation(run, bibEntries || new Map());
+      runs += result.xml;
+      if (result.warning) state.warnings.push(result.warning);
+    } else if (run.type === 'math') {
+      runs += generateMathXml(run.text, !!run.display);
     }
-    // Skip citation, math runs for now
+    // Skip other run types
   }
   
   return '<w:p>' + pPr + runs + '</w:p>';
@@ -1052,14 +1090,14 @@ function commentsXml(comments: CommentEntry[]): string {
   return xml;
 }
 
-export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, options?: MdToDocxOptions): string {
+export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>): string {
   let body = '';
   
   for (const token of tokens) {
     if (token.type === 'table') {
       body += generateTable(token, state);
     } else {
-      body += generateParagraph(token, state, options);
+      body += generateParagraph(token, state, options, bibEntries);
     }
   }
   
@@ -1073,9 +1111,20 @@ export async function convertMdToDocx(
   markdown: string,
   options?: MdToDocxOptions
 ): Promise<MdToDocxResult> {
-  // For now, just generate the basic OOXML parts
-  // CriticMarkup, citations, math, and template support will be added in later tasks
   const tokens = parseMd(markdown);
+  
+  // Parse BibTeX if provided
+  let bibEntries: Map<string, BibtexEntry> | undefined;
+  if (options?.bibtex) {
+    bibEntries = parseBibtex(options.bibtex);
+  }
+  
+  // Extract template parts if provided
+  let templateParts: Map<string, Uint8Array> | undefined;
+  if (options?.templateDocx) {
+    templateParts = await extractTemplateParts(options.templateDocx);
+  }
+  
   const state: DocxGenState = {
     commentId: 0,
     comments: [],
@@ -1086,22 +1135,46 @@ export async function convertMdToDocx(
     hasComments: false,
   };
   
-  const documentXml = generateDocumentXml(tokens, state, options);
+  const documentXml = generateDocumentXml(tokens, state, options, bibEntries);
+  
+  const hasTheme = templateParts?.has('word/theme/theme1.xml');
+  const hasSettings = templateParts?.has('word/settings.xml');
   
   const JSZip = (await import('jszip')).default;
   const zip = new JSZip();
-  zip.file('[Content_Types].xml', contentTypesXml(state.hasList, state.hasComments));
+  zip.file('[Content_Types].xml', contentTypesXml(state.hasList, state.hasComments, hasTheme, hasSettings));
   zip.file('_rels/.rels', relsXml());
   zip.file('word/document.xml', documentXml);
-  zip.file('word/styles.xml', stylesXml());
-  if (state.hasList) {
-    zip.file('word/numbering.xml', numberingXml());
+  
+  // Use template styles if available, otherwise default
+  if (templateParts?.has('word/styles.xml')) {
+    zip.file('word/styles.xml', templateParts.get('word/styles.xml')!);
+  } else {
+    zip.file('word/styles.xml', stylesXml());
   }
+  
+  // Handle numbering - use template as base but ensure bullet/decimal definitions exist
+  if (state.hasList) {
+    if (templateParts?.has('word/numbering.xml')) {
+      zip.file('word/numbering.xml', templateParts.get('word/numbering.xml')!);
+    } else {
+      zip.file('word/numbering.xml', numberingXml());
+    }
+  }
+  
+  // Include template theme and settings if available
+  if (hasTheme) {
+    zip.file('word/theme/theme1.xml', templateParts!.get('word/theme/theme1.xml')!);
+  }
+  if (hasSettings) {
+    zip.file('word/settings.xml', templateParts!.get('word/settings.xml')!);
+  }
+  
   if (state.hasComments) {
     zip.file('word/comments.xml', commentsXml(state.comments));
   }
-  if (state.relationships.size > 0 || state.hasComments) {
-    zip.file('word/_rels/document.xml.rels', documentRelsXml(state.relationships, state.hasComments));
+  if (state.relationships.size > 0 || state.hasComments || hasTheme || hasSettings) {
+    zip.file('word/_rels/document.xml.rels', documentRelsXml(state.relationships, state.hasComments, hasTheme, hasSettings));
   }
   
   const docx = await zip.generateAsync({ type: 'uint8array' });
