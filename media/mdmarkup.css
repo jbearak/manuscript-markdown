@@ -58,13 +58,50 @@
   font-style: italic;
 }
 
-/* Highlight - purple with semi-transparent background */
+/* Highlight - Comment_Gray for CriticMarkup {==text==} */
 .mdmarkup-highlight {
   color: var(--mdmarkup-highlight-color);
-  background-color: var(--mdmarkup-highlight-bg);
+  background-color: rgba(217, 217, 217, 0.50);
 }
 
 /* Format Highlight - yellow/amber for ==highlight== patterns */
 .mdmarkup-format-highlight {
   background-color: var(--mdmarkup-format-highlight-bg);
+}
+
+/* Colored Highlight Classes - Light Theme */
+.mdmarkup-highlight-yellow { background-color: rgba(255, 255, 0, 0.40); }
+.mdmarkup-highlight-green { background-color: rgba(0, 255, 0, 0.30); }
+.mdmarkup-highlight-turquoise { background-color: rgba(0, 255, 255, 0.35); }
+.mdmarkup-highlight-pink { background-color: rgba(255, 0, 255, 0.25); }
+.mdmarkup-highlight-blue { background-color: rgba(0, 0, 255, 0.20); }
+.mdmarkup-highlight-red { background-color: rgba(255, 0, 0, 0.25); }
+.mdmarkup-highlight-dark-blue { background-color: rgba(0, 0, 128, 0.25); }
+.mdmarkup-highlight-teal { background-color: rgba(0, 128, 128, 0.25); }
+.mdmarkup-highlight-violet { background-color: rgba(128, 0, 128, 0.25); }
+.mdmarkup-highlight-dark-red { background-color: rgba(128, 0, 0, 0.25); }
+.mdmarkup-highlight-dark-yellow { background-color: rgba(128, 128, 0, 0.30); }
+.mdmarkup-highlight-gray-50 { background-color: rgba(128, 128, 128, 0.30); }
+.mdmarkup-highlight-gray-25 { background-color: rgba(192, 192, 192, 0.40); }
+.mdmarkup-highlight-black { background-color: rgba(0, 0, 0, 0.15); }
+
+/* Colored Highlight Classes - Dark Theme Overrides */
+@media (prefers-color-scheme: dark) {
+  .mdmarkup-highlight {
+    background-color: rgba(217, 217, 217, 0.30);
+  }
+  .mdmarkup-highlight-yellow { background-color: rgba(255, 255, 0, 0.25); }
+  .mdmarkup-highlight-green { background-color: rgba(0, 255, 0, 0.20); }
+  .mdmarkup-highlight-turquoise { background-color: rgba(0, 255, 255, 0.20); }
+  .mdmarkup-highlight-pink { background-color: rgba(255, 0, 255, 0.20); }
+  .mdmarkup-highlight-blue { background-color: rgba(0, 0, 255, 0.30); }
+  .mdmarkup-highlight-red { background-color: rgba(255, 0, 0, 0.25); }
+  .mdmarkup-highlight-dark-blue { background-color: rgba(0, 0, 128, 0.40); }
+  .mdmarkup-highlight-teal { background-color: rgba(0, 128, 128, 0.35); }
+  .mdmarkup-highlight-violet { background-color: rgba(128, 0, 128, 0.35); }
+  .mdmarkup-highlight-dark-red { background-color: rgba(128, 0, 0, 0.40); }
+  .mdmarkup-highlight-dark-yellow { background-color: rgba(128, 128, 0, 0.35); }
+  .mdmarkup-highlight-gray-50 { background-color: rgba(128, 128, 128, 0.35); }
+  .mdmarkup-highlight-gray-25 { background-color: rgba(192, 192, 192, 0.25); }
+  .mdmarkup-highlight-black { background-color: rgba(0, 0, 0, 0.40); }
 }

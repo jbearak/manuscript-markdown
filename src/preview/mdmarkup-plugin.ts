@@ -1,6 +1,7 @@
 import type MarkdownIt from 'markdown-it';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
 import type StateBlock from 'markdown-it/lib/rules_block/state_block.mjs';
+import { VALID_COLOR_IDS, getDefaultHighlightColor } from '../highlight-colors';
 
 /**
  * Defines a mdmarkup pattern configuration
@@ -203,14 +204,48 @@ function parseFormatHighlight(state: StateInline, silent: boolean): boolean {
       if (!silent) {
         const content = src.slice(start + 2, pos);
         const tokenOpen = state.push('mdmarkup_format_highlight_open', 'mark', 1);
-        tokenOpen.attrSet('class', 'mdmarkup-format-highlight');
+        
+        // Check for optional {color} suffix after closing ==
+        let cssClass = 'mdmarkup-format-highlight';
+        let endPos = pos + 2;
+        if (pos + 2 < max && src.charCodeAt(pos + 2) === 0x7B /* { */) {
+          const closeBrace = src.indexOf('}', pos + 3);
+          if (closeBrace !== -1) {
+            const colorId = src.slice(pos + 3, closeBrace);
+            if (VALID_COLOR_IDS.includes(colorId)) {
+              cssClass = 'mdmarkup-format-highlight mdmarkup-highlight-' + colorId;
+              endPos = closeBrace + 1;
+            } else {
+              // Unrecognized color → fall back to default
+              endPos = closeBrace + 1;
+            }
+          }
+        }
+        if (cssClass === 'mdmarkup-format-highlight') {
+          // Apply configurable default color
+          const defaultColor = getDefaultHighlightColor();
+          if (defaultColor !== 'yellow') {
+            cssClass = 'mdmarkup-format-highlight mdmarkup-highlight-' + defaultColor;
+          }
+        }
+        tokenOpen.attrSet('class', cssClass);
         
         // Add parsed inline content to allow nested Markdown processing
         addInlineContent(state, content);
         
         state.push('mdmarkup_format_highlight_close', 'mark', -1);
+        state.pos = endPos;
+      } else {
+        // In silent mode, still need to advance past {color} suffix
+        let endPos = pos + 2;
+        if (pos + 2 < max && src.charCodeAt(pos + 2) === 0x7B /* { */) {
+          const closeBrace = src.indexOf('}', pos + 3);
+          if (closeBrace !== -1) {
+            endPos = closeBrace + 1;
+          }
+        }
+        state.pos = endPos;
       }
-      state.pos = pos + 2;
       return true;
     }
     pos++;
