@@ -167,8 +167,8 @@ export function activate(context: vscode.ExtensionContext) {
 					const choice = await vscode.window.showWarningMessage(
 						getOutputConflictMessage(basePath, conflictScenario),
 						{ modal: true },
-						'Overwrite',
-						'Choose New Name',
+						'Replace',
+						'New Name',
 						'Cancel'
 					);
 
@@ -176,7 +176,7 @@ export function activate(context: vscode.ExtensionContext) {
 						return;
 					}
 
-					if (choice === 'Choose New Name') {
+					if (choice === 'New Name') {
 						const selectedUri = await vscode.window.showSaveDialog({
 							defaultUri: mdUri,
 							filters: { 'Markdown': ['md'] },
@@ -204,7 +204,7 @@ export function activate(context: vscode.ExtensionContext) {
 					await vscode.window.showTextDocument(bibDoc, vscode.ViewColumn.Beside);
 				}
 
-				vscode.window.showInformationMessage(`Converted to ${mdUri.fsPath}`);
+				vscode.window.showInformationMessage('Exported to Markdown successfully');
 			} catch (err: any) {
 				vscode.window.showErrorMessage(`DOCX conversion failed: ${err.message}`);
 			}
