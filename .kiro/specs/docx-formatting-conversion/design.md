@@ -101,11 +101,15 @@ A helper function `wrapWithFormatting(text: string, fmt: RunFormatting): string`
 
 When `extractDocumentContent()` encounters a `w:hyperlink` node, it reads the `r:id` attribute, looks it up in the relationship map, and sets `href` on all child text items. In `buildMarkdown()`, text items with `href` are emitted as `[formattedText](url)` — formatting delimiters go inside the link text.
 
+> **Known limitation — bookmark links:** OOXML hyperlinks can also use a `w:anchor` attribute for internal document links (bookmarks) instead of `r:id`. If both `r:id` and `w:anchor` are present, `r:id` takes precedence per ECMA-376. This converter only resolves external hyperlinks via `r:id`; `w:anchor`-only links are treated as unresolvable (plain text fallback).
+
 ### Heading and List Handling
 
 `buildMarkdown()` inspects each `para` item:
 - If `headingLevel` is set, prefix the paragraph's text with `#` × level + space.
 - If `listMeta` is set, prefix with the appropriate marker (`- ` or `1. `) indented by level. Consecutive list items suppress the blank line that `para` normally emits.
+
+> **Known limitation — localized heading style IDs:** Style IDs in `w:pStyle` are defined per-document in `word/styles.xml`. The built-in English heading styles use `Heading1` (or `heading1`). The converter matches case-insensitively against `/^heading(\d)$/`, which handles English documents. Non-English Word versions may use localized style IDs (e.g., German `"Überschrift1"`) that will not match — these are treated as normal paragraphs.
 
 ### Editor Highlight Support
 
@@ -125,21 +129,23 @@ Three additions for `==text==` formatting highlight (not CriticMarkup):
 |-------|------|---------|-------------|
 | bold | boolean | false | `w:rPr > w:b` (absent or `w:val` not `"false"`/`"0"`) |
 | italic | boolean | false | `w:rPr > w:i` (same logic) |
-| underline | boolean | false | `w:rPr > w:u` with `w:val` ≠ `"none"` |
-| strikethrough | boolean | false | `w:rPr > w:strike` (same logic as bold) |
-| highlight | boolean | false | `w:rPr > w:highlight` with `w:val` ≠ `"none"`, OR `w:rPr > w:shd` with `w:fill` ≠ `""` and ≠ `"auto"` |
+| underline | boolean | false | `w:rPr > w:u` with `w:val` ≠ `"none"`. OOXML `ST_Underline` defines 18 values (`single`, `words`, `double`, `thick`, `dotted`, `dottedHeavy`, `dash`, `dashedHeavy`, `dashLong`, `dashLongHeavy`, `dotDash`, `dashDotHeavy`, `dotDotDash`, `dashDotDotHeavy`, `wave`, `wavyHeavy`, `wavyDouble`, `none`). A bare `<w:u/>` with no `w:val` defaults to `single`. All non-`"none"` values are treated as underlined. `"words"` (underline non-space characters only) is treated as regular underline for simplicity. |
+| strikethrough | boolean | false | `w:rPr > w:strike` or `w:rPr > w:dstrike` (same logic as bold; `w:strike` and `w:dstrike` are mutually exclusive per ECMA-376 — both map to `~~`) |
+| highlight | boolean | false | `w:rPr > w:highlight` with `w:val` ≠ `"none"` (OOXML `ST_HighlightColor` has 17 values: black, blue, cyan, green, magenta, red, yellow, white, darkBlue, darkCyan, darkGreen, darkMagenta, darkRed, darkYellow, darkGray, lightGray, none), OR `w:rPr > w:shd` with `w:fill` ≠ `""` and ≠ `"auto"`. `w:highlight` takes priority over `w:shd` per ECMA-376. Note: `w:fill` is of type `ST_HexColor` (union of `"auto"` and 6-digit hex RGB); `"auto"` means application-determined color, effectively no explicit shading. The `w:fill` attribute is required on `w:shd` per schema, so the empty-string check is a defensive guard. Checking `w:fill` alone is a simplification — technically a pattern (`w:val` ≠ `"clear"`) with a non-auto `w:color` could also produce visible shading. |
 | superscript | boolean | false | `w:rPr > w:vertAlign` with `w:val="superscript"` |
 | subscript | boolean | false | `w:rPr > w:vertAlign` with `w:val="subscript"` |
 
 ### Boolean Toggle Detection
 
-OOXML uses a toggle pattern for boolean properties like `w:b`, `w:i`, `w:strike`:
+OOXML uses a toggle pattern for boolean properties like `w:b`, `w:i`, `w:strike`. The underlying type is `ST_OnOff`, which defines six valid values: `"true"`, `"false"`, `"on"`, `"off"`, `"1"`, `"0"`:
 - Element present with no `w:val` attribute → `true`
-- Element present with `w:val="true"` or `w:val="1"` → `true`
-- Element present with `w:val="false"` or `w:val="0"` → `false`
+- Element present with `w:val="true"`, `w:val="1"`, or `w:val="on"` → `true`
+- Element present with `w:val="false"`, `w:val="0"`, or `w:val="off"` → `false`
 - Element absent → `false`
 
 Helper: `function isToggleOn(children: any[], tagName: string): boolean`
+
+> **Known simplification — style hierarchy toggle behavior:** In ECMA-376, toggle properties behave differently in style definitions vs direct formatting. Within a style definition, setting a toggle property *inverts* the inherited state (applied→unapplied, unapplied→applied), while setting it to `false` leaves the inherited state unchanged. In direct formatting (run properties), `true`/`false` sets the absolute state. Since this converter reads direct formatting from runs and does not resolve the full OOXML style hierarchy, the simple true/false interpretation is correct for our purposes.
 
 ### Numbering Definitions Map
 
@@ -162,6 +168,8 @@ The XML structure is:
 ```
 
 We first build `abstractNumId → levels`, then resolve `numId → abstractNumId` to produce the final map.
+
+> **Edge case — `w:numFmt="none"`:** OOXML `ST_NumberFormat` has 62 values including `"none"` (no numbering display). The converter treats all non-`"bullet"` values as `'ordered'`, which means `"none"` would produce an ordered list prefix (`1. `). This is acceptable since `w:numFmt` with `val="none"` in a numbering definition is rare.
 
 ### Relationship Map
 

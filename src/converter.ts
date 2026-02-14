@@ -302,7 +302,7 @@ export function isToggleOn(children: any[], tagName: string): boolean {
   
   const val = getAttr(element, 'val');
   if (!val) return true; // present with no w:val attribute → true
-  return val === 'true' || val === '1';
+  return val === 'true' || val === '1' || val === 'on';
 }
 
 /** Parse run properties and return RunFormatting */
@@ -316,19 +316,24 @@ export function parseRunProperties(
   const bElement = rPrChildren.find(child => child['w:b'] !== undefined);
   if (bElement) {
     const val = getAttr(bElement, 'val');
-    formatting.bold = !val || val === 'true' || val === '1';
+    formatting.bold = !val || val === 'true' || val === '1' || val === 'on';
   }
-  
+
   const iElement = rPrChildren.find(child => child['w:i'] !== undefined);
   if (iElement) {
     const val = getAttr(iElement, 'val');
-    formatting.italic = !val || val === 'true' || val === '1';
+    formatting.italic = !val || val === 'true' || val === '1' || val === 'on';
   }
-  
+
+  // strikethrough: w:strike or w:dstrike (double strikethrough) — both map to ~~
   const strikeElement = rPrChildren.find(child => child['w:strike'] !== undefined);
+  const dstrikeElement = rPrChildren.find(child => child['w:dstrike'] !== undefined);
   if (strikeElement) {
     const val = getAttr(strikeElement, 'val');
-    formatting.strikethrough = !val || val === 'true' || val === '1';
+    formatting.strikethrough = !val || val === 'true' || val === '1' || val === 'on';
+  } else if (dstrikeElement) {
+    const val = getAttr(dstrikeElement, 'val');
+    formatting.strikethrough = !val || val === 'true' || val === '1' || val === 'on';
   }
   
   // underline: w:u with w:val ≠ "none"
