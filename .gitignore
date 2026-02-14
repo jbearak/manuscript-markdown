@@ -28,3 +28,6 @@ vsc-extension-quickstart.md
 # Claude
 .claude
 *.docx
+
+# Temp extraction dirs
+*_temp/

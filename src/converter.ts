@@ -473,10 +473,10 @@ export async function extractZoteroCitations(data: Uint8Array | JSZip): Promise<
         const uris = item.uris ?? item.uri ?? [];
         const uri = Array.isArray(uris) ? uris[0] : uris;
         if (uri) {
+          result.zoteroUri = uri;
           const keyMatch = uri.match(/\/items\/([A-Z0-9]{8})$/);
           if (keyMatch) {
             result.zoteroKey = keyMatch[1];
-            result.zoteroUri = uri;
           }
         }
 

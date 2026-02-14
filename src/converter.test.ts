@@ -1097,7 +1097,7 @@ describe('Zotero citation roundtrip', () => {
     const docx = await buildSyntheticDocx(xml);
     const citations = await extractZoteroCitations(docx);
     expect(citations[0].items[0].zoteroKey).toBeUndefined();
-    expect(citations[0].items[0].zoteroUri).toBeUndefined();
+    expect(citations[0].items[0].zoteroUri).toBe('http://zotero.org/bad/path');
   });
 
   test('generateBibTeX emits zotero-key and zotero-uri when present', () => {
@@ -1191,3 +1191,4 @@ describe('Zotero citation roundtrip', () => {
     expect(result.markdown).not.toContain('@davis2021advances, p.');
   });
 });
+
