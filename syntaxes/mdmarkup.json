@@ -38,11 +38,17 @@
 			"begin": "\\{\\~\\~",
 			"end": "\\~\\~\\}",
 			"name": "markup.changed.mdmarkup",
-			"contentName": "markup.changed",
 			"patterns": [
 				{
+					"begin": "~>",
+					"beginCaptures": { "0": { "name": "punctuation.separator.mdmarkup" } },
+					"end": "(?=~~\\})",
+					"contentName": "markup.inserted",
+					"patterns": [{ "match": ".", "name": "markup.inserted" }]
+				},
+				{
 					"match": ".",
-					"name": "markup.changed"
+					"name": "markup.deleted"
 				}
 			]
 		},

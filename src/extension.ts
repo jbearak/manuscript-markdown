@@ -16,6 +16,8 @@ import {
 	CRITIC_COMMENT_DECORATION,
 	extractHighlightRanges,
 	extractCommentRanges,
+	extractCriticDelimiterRanges,
+	extractSubstitutionNewRanges,
 	setDefaultHighlightColor,
 	getDefaultHighlightColor,
 } from './highlight-colors';
@@ -253,6 +255,16 @@ export function activate(context: vscode.ExtensionContext) {
 	});
 	context.subscriptions.push(commentDecType);
 
+	const delimiterDecType = vscode.window.createTextEditorDecorationType({
+		color: new vscode.ThemeColor('descriptionForeground'),
+	});
+	context.subscriptions.push(delimiterDecType);
+
+	const substitutionNewDecType = vscode.window.createTextEditorDecorationType({
+		color: new vscode.ThemeColor('gitDecoration.addedResourceForeground'),
+	});
+	context.subscriptions.push(substitutionNewDecType);
+
 	function updateHighlightDecorations(editor: vscode.TextEditor) {
 		if (editor.document.languageId !== 'markdown') { return; }
 		const text = editor.document.getText();
@@ -282,6 +294,20 @@ export function activate(context: vscode.ExtensionContext) {
 		} else {
 			editor.setDecorations(commentDecType, []);
 		}
+
+		// Apply muted delimiter decorations
+		const delimiterRanges = extractCriticDelimiterRanges(text);
+		editor.setDecorations(delimiterDecType, delimiterRanges.map(r => new vscode.Range(
+			editor.document.positionAt(r.start),
+			editor.document.positionAt(r.end)
+		)));
+
+		// Apply substitution "new" text decorations
+		const subNewRanges = extractSubstitutionNewRanges(text);
+		editor.setDecorations(substitutionNewDecType, subNewRanges.map(r => new vscode.Range(
+			editor.document.positionAt(r.start),
+			editor.document.positionAt(r.end)
+		)));
 	}
 	let highlightDecorationUpdateTimer: ReturnType<typeof setTimeout> | undefined;
 	function scheduleHighlightDecorationsUpdate(editor: vscode.TextEditor) {
