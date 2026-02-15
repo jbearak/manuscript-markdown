@@ -75,6 +75,7 @@ note-type: in-text
 | `csl` | CSL style short name (e.g., `apa`, `chicago-author-date`, `bmj`) or absolute path to a `.csl` file |
 | `locale` | Optional locale override (e.g., `en-US`, `en-GB`). Defaults to the style's own locale. |
 | `note-type` | Optional Zotero note type: `in-text` (default), `footnotes`, or `endnotes`. Legacy numeric values (0, 1, 2) are still accepted. |
+| `timezone` | Local timezone offset (e.g., `+05:00`, `-05:00`). Auto-generated on DOCX import for idempotent date roundtripping. |
 
 #### Bundled CSL styles
 

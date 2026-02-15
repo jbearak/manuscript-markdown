@@ -35,6 +35,7 @@ Install from the [releases page](https://github.com/jbearak/manuscript-markdown/
 - Markdown formatting toolbar (bold, italic, lists, headings, code, links, tables)
 - DOCX to Markdown conversion preserving formatting, comments, and citations
 - Markdown to DOCX export with template support and Zotero field code reconstruction
+- LaTeX equation support (inline and display math, converted to/from Word OMML)
 - Zotero citation roundtrip with BibTeX export
 - CSL citation style support — citations and bibliographies formatted according to any [CSL style](https://citationstyles.org/) (APA, Chicago, BMJ, IEEE, etc.) with 16 bundled styles and on-demand downloading of others
 - Colored highlights with 14 color options
