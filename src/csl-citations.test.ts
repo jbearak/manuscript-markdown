@@ -428,7 +428,7 @@ describe('DOCX→MD→DOCX roundtrip', () => {
     // The bibliography rendered text should not appear in the markdown
     // (it's inside a ZOTERO_BIBL field that we skip)
     // The markdown should contain the citation but not the bibliography text
-    expect(mdResult.markdown).toContain('@');
+    expect(mdResult.markdown).toMatch(/@smith2020effects/);
     // Should not contain "Sources" heading either
     expect(mdResult.markdown).not.toMatch(/^#+\s*Sources/m);
   });
