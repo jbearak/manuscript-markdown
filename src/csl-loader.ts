@@ -87,7 +87,7 @@ export function loadStyle(name: string): string {
  * If the style is not bundled, attempts to download it from the
  * CSL styles distribution repository and caches it locally.
  */
-export async function loadStyleAsync(name: string): Promise<string> {
+export async function loadStyleAsync(name: string, cacheDir?: string): Promise<string> {
   validateStyleName(name);
   // Check memory cache first
   const cached = styleCache.get(name);
@@ -120,12 +120,13 @@ export async function loadStyleAsync(name: string): Promise<string> {
       throw new Error('Downloaded content is not a valid CSL style');
     }
 
-    // Cache to disk for future use
+    // Cache to writable directory (prefer cacheDir over bundled dir which may be read-only)
+    const diskCacheDir = cacheDir ?? BUNDLED_STYLES_DIR;
     try {
-      if (!existsSync(BUNDLED_STYLES_DIR)) {
-        mkdirSync(BUNDLED_STYLES_DIR, { recursive: true });
+      if (!existsSync(diskCacheDir)) {
+        mkdirSync(diskCacheDir, { recursive: true });
       }
-      writeFileSync(bundledPath, xml, 'utf-8');
+      writeFileSync(join(diskCacheDir, name + '.csl'), xml, 'utf-8');
     } catch {
       // Disk caching is best-effort; memory cache still works
     }
