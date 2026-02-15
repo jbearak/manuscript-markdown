@@ -15,41 +15,25 @@
 			"begin": "\\{\\+\\+",
 			"end": "\\+\\+\\}",
 			"name": "markup.inserted.manuscript-markdown",
-			"contentName": "markup.inserted",
-			"patterns": [
-				{
-					"match": ".",
-					"name": "markup.inserted"
-				}
-			]
+			"contentName": "markup.inserted"
 		},
 		"deletion": {
 			"begin": "\\{--",
 			"end": "--\\}",
 			"name": "markup.deleted.manuscript-markdown",
-			"contentName": "markup.deleted",
-			"patterns": [
-				{
-					"match": ".",
-					"name": "markup.deleted"
-				}
-			]
+			"contentName": "markup.deleted"
 		},
 		"substitution": {
 			"begin": "\\{\\~\\~",
 			"end": "\\~\\~\\}",
 			"name": "markup.changed.manuscript-markdown",
+			"contentName": "markup.deleted",
 			"patterns": [
 				{
 					"begin": "~>",
 					"beginCaptures": { "0": { "name": "punctuation.separator.manuscript-markdown" } },
 					"end": "(?=~~\\})",
-					"contentName": "markup.inserted",
-					"patterns": [{ "match": ".", "name": "markup.inserted" }]
-				},
-				{
-					"match": ".",
-					"name": "markup.deleted"
+					"contentName": "markup.inserted"
 				}
 			]
 		},
@@ -57,25 +41,13 @@
 			"begin": "\\{>>",
 			"end": "<<\\}",
 			"name": "comment.block.manuscript-markdown",
-			"contentName": "comment.block",
-			"patterns": [
-				{
-					"match": ".",
-					"name": "comment.block"
-				}
-			]
+			"contentName": "comment.block"
 		},
 		"highlight": {
 			"begin": "\\{==",
 			"end": "==\\}",
 			"name": "markup.bold.manuscript-markdown",
-			"contentName": "markup.bold",
-			"patterns": [
-				{
-					"match": ".",
-					"name": "markup.bold"
-				}
-			]
+			"contentName": "markup.bold"
 		},
 		"colored_format_highlight": {
 			"match": "(?<!\\{)==([^}=]+)==\\{([a-z0-9-]+)\\}",

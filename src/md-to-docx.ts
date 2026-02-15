@@ -94,7 +94,7 @@ function criticMarkupRule(state: any, silent: boolean): boolean {
     }
     
     if (type === 'critic_comment') {
-      const match = content.match(/^(.+?)\s+\(([^)]+)\):\s*(.*)$/);
+      const match = content.match(/^([\s\S]+?)\s+\(([^)]+)\):\s*([\s\S]*)$/);
       if (match) {
         token.author = match[1];
         token.date = match[2];
@@ -241,21 +241,88 @@ function mathRule(state: any, silent: boolean): boolean {
   return true;
 }
 
+// Placeholder used to preserve paragraph breaks inside CriticMarkup spans
+const PARA_PLACEHOLDER = '\u0000PARA\u0000';
+
+/**
+ * Preprocess markdown source: replace \n\n inside CriticMarkup spans with a
+ * placeholder so markdown-it's block parser doesn't split them into separate
+ * paragraphs.
+ */
+export function preprocessCriticMarkup(markdown: string): string {
+  // Fast path: if no CriticMarkup opening markers, return unchanged
+  if (!markdown.includes('{++') && !markdown.includes('{--') &&
+      !markdown.includes('{~~') && !markdown.includes('{>>') &&
+      !markdown.includes('{==')) {
+    return markdown;
+  }
+
+  const markers: Array<{ open: string; close: string }> = [
+    { open: '{++', close: '++}' },
+    { open: '{--', close: '--}' },
+    { open: '{~~', close: '~~}' },
+    { open: '{>>', close: '<<}' },
+    { open: '{==', close: '==}' },
+  ];
+
+  let result = markdown;
+  for (const { open, close } of markers) {
+    let searchFrom = 0;
+    while (true) {
+      const openIdx = result.indexOf(open, searchFrom);
+      if (openIdx === -1) break;
+      const contentStart = openIdx + open.length;
+      const closeIdx = result.indexOf(close, contentStart);
+      if (closeIdx === -1) {
+        searchFrom = contentStart;
+        continue;
+      }
+      const content = result.slice(contentStart, closeIdx);
+      if (content.includes('\n\n')) {
+        const replaced = content.replace(/\n\n/g, PARA_PLACEHOLDER);
+        result = result.slice(0, contentStart) + replaced + result.slice(closeIdx);
+        // Advance past the replaced span
+        searchFrom = contentStart + replaced.length + close.length;
+      } else {
+        searchFrom = closeIdx + close.length;
+      }
+    }
+  }
+  return result;
+}
+
+/** Inline rule that converts the paragraph placeholder back into softbreak tokens. */
+function paraPlaceholderRule(state: any, silent: boolean): boolean {
+  const start = state.pos;
+  if (state.src.charCodeAt(start) !== 0) return false; // \u0000
+  if (!state.src.startsWith(PARA_PLACEHOLDER, start)) return false;
+
+  if (!silent) {
+    // Emit two softbreaks to represent the paragraph break
+    state.push('softbreak', 'br', 0);
+    state.push('softbreak', 'br', 0);
+  }
+  state.pos = start + PARA_PLACEHOLDER.length;
+  return true;
+}
+
 function createMarkdownIt(): MarkdownIt {
   const md = new MarkdownIt({ html: true });
-  
+
+  md.inline.ruler.before('emphasis', 'para_placeholder', paraPlaceholderRule);
   md.inline.ruler.before('emphasis', 'colored_highlight', coloredHighlightRule);
   md.inline.ruler.before('emphasis', 'critic_markup', criticMarkupRule);
   md.inline.ruler.before('emphasis', 'citation', citationRule);
   md.inline.ruler.before('emphasis', 'math', mathRule);
-  
+
   return md;
 }
 
 export function parseMd(markdown: string): MdToken[] {
   const md = createMarkdownIt();
-  const tokens = md.parse(markdown, {});
-  
+  const processed = preprocessCriticMarkup(markdown);
+  const tokens = md.parse(processed, {});
+
   return convertTokens(tokens);
 }
 

@@ -407,15 +407,85 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
   return false;
 }
 
+// Placeholder used to preserve paragraph breaks inside CriticMarkup spans
+const PARA_PLACEHOLDER = '\u0000PARA\u0000';
+
+/**
+ * Preprocess markdown source: replace \n\n inside CriticMarkup spans with a
+ * placeholder so markdown-it's block parser doesn't split them into separate
+ * paragraphs.
+ */
+function preprocessCriticMarkup(markdown: string): string {
+  if (!markdown.includes('{++') && !markdown.includes('{--') &&
+      !markdown.includes('{~~') && !markdown.includes('{>>') &&
+      !markdown.includes('{==')) {
+    return markdown;
+  }
+
+  const markers: Array<{ open: string; close: string }> = [
+    { open: '{++', close: '++}' },
+    { open: '{--', close: '--}' },
+    { open: '{~~', close: '~~}' },
+    { open: '{>>', close: '<<}' },
+    { open: '{==', close: '==}' },
+  ];
+
+  let result = markdown;
+  for (const { open, close } of markers) {
+    let searchFrom = 0;
+    while (true) {
+      const openIdx = result.indexOf(open, searchFrom);
+      if (openIdx === -1) break;
+      const contentStart = openIdx + open.length;
+      const closeIdx = result.indexOf(close, contentStart);
+      if (closeIdx === -1) {
+        searchFrom = contentStart;
+        continue;
+      }
+      const content = result.slice(contentStart, closeIdx);
+      if (content.includes('\n\n')) {
+        const replaced = content.replace(/\n\n/g, PARA_PLACEHOLDER);
+        result = result.slice(0, contentStart) + replaced + result.slice(closeIdx);
+        searchFrom = contentStart + replaced.length + close.length;
+      } else {
+        searchFrom = closeIdx + close.length;
+      }
+    }
+  }
+  return result;
+}
+
+/** Inline rule that converts the paragraph placeholder back into line breaks in the token stream. */
+function paraPlaceholderRule(state: StateInline, silent: boolean): boolean {
+  const start = state.pos;
+  if (state.src.charCodeAt(start) !== 0) return false; // \u0000
+  if (!state.src.startsWith(PARA_PLACEHOLDER, start)) return false;
+
+  if (!silent) {
+    state.push('softbreak', 'br', 0);
+    state.push('softbreak', 'br', 0);
+  }
+  state.pos = start + PARA_PLACEHOLDER.length;
+  return true;
+}
+
 /**
  * Main plugin function that registers Manuscript Markdown parsing with markdown-it
  * @param md - The MarkdownIt instance to extend
  */
 export function manuscriptMarkdownPlugin(md: MarkdownIt): void {
+  // Preprocess source before block parsing to handle multi-paragraph CriticMarkup
+  md.core.ruler.before('normalize', 'manuscript_markdown_preprocess', (state: any) => {
+    state.src = preprocessCriticMarkup(state.src);
+  });
+
   // Register the block-level rule to handle multi-line patterns with empty lines
   // This must run very early, before heading and paragraph parsing
   md.block.ruler.before('heading', 'manuscript_markdown_block', manuscriptMarkdownBlock);
-  
+
+  // Register inline rule for paragraph placeholder (before other inline rules)
+  md.inline.ruler.before('emphasis', 'para_placeholder', paraPlaceholderRule);
+
   // Register the inline rule for Manuscript Markdown parsing
   // Run before emphasis and other inline rules to handle Manuscript Markdown first
   md.inline.ruler.before('emphasis', 'manuscript_markdown', parseManuscriptMarkdown);
