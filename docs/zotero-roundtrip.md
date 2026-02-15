@@ -86,7 +86,7 @@ note-type: in-text
 
 | Field | Description |
 |-------|-------------|
-| `csl` | CSL style short name (e.g., `apa`, `chicago-author-date`, `bmj`) or absolute path to a `.csl` file |
+| `csl` | CSL style short name (e.g., `apa`, `chicago-author-date`, `bmj`) or path to a `.csl` file (relative or absolute) |
 | `locale` | Optional locale override (e.g., `en-US`, `en-GB`). Defaults to the style's own locale. |
 | `note-type` | Optional Zotero note type: `in-text` (default), `footnotes`, or `endnotes`. Legacy numeric values (0, 1, 2) are still accepted. |
 

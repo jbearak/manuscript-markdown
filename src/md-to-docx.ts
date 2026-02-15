@@ -1284,6 +1284,8 @@ export async function convertMdToDocx(
         const resolved = join(options.sourceDir, styleName);
         if (existsSync(resolved)) {
           styleName = resolved;
+        } else {
+          earlyWarnings.push(`Relative CSL file not found: "${resolved}".`);
         }
       } else {
         earlyWarnings.push(`Relative CSL path "${styleName}" cannot be resolved without a source directory.`);
@@ -1295,7 +1297,7 @@ export async function convertMdToDocx(
 
     // 2. Try CSL cache directory (e.g. VS Code global storage)
     if (result.styleNotFound && options?.cslCacheDir) {
-      const cachedPath = join(options.cslCacheDir, styleName + '.csl');
+      const cachedPath = join(options.cslCacheDir, styleName.endsWith('.csl') ? styleName : styleName + '.csl');
       if (existsSync(cachedPath)) {
         result = createCiteprocEngineLocal(bibEntries, cachedPath, frontmatter.locale);
       }
