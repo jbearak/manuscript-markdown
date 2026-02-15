@@ -4,7 +4,7 @@ import { downloadStyle } from './csl-loader';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { parseBibtex, BibtexEntry } from './bibtex-parser';
-import { parseFrontmatter, Frontmatter } from './frontmatter';
+import { parseFrontmatter, Frontmatter, noteTypeToNumber } from './frontmatter';
 import { ZoteroBiblData, zoteroStyleFullId } from './converter';
 
 // Types for the parsed token stream
@@ -1001,7 +1001,7 @@ function zoteroCustomPropsXml(fm: Frontmatter): string {
     },
     prefs: {
       fieldType: 'Field',
-      noteType: fm.noteType || 0,
+      noteType: fm.noteType ? noteTypeToNumber(fm.noteType) : 0,
     },
   });
 

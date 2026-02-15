@@ -1,7 +1,7 @@
 import JSZip from 'jszip';
 import { XMLParser } from 'fast-xml-parser';
 import { ommlToLatex } from './omml';
-import { Frontmatter, serializeFrontmatter } from './frontmatter';
+import { Frontmatter, serializeFrontmatter, noteTypeFromNumber } from './frontmatter';
 
 /** Matches a "Sources" heading (with or without leading `#` markers). */
 const SOURCES_HEADING_RE = /^(?:#+\s*)?Sources\s*$/;
@@ -1163,7 +1163,7 @@ export async function convertDocx(
     const fm: Frontmatter = {
       csl: zoteroStyleShortName(zoteroPrefs.styleId),
       locale: zoteroPrefs.locale,
-      noteType: zoteroPrefs.noteType,
+      noteType: zoteroPrefs.noteType !== undefined ? noteTypeFromNumber(zoteroPrefs.noteType) : undefined,
     };
     const frontmatterStr = serializeFrontmatter(fm);
     if (frontmatterStr) {

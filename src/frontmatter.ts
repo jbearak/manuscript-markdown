@@ -1,7 +1,34 @@
+export type NoteType = 'in-text' | 'footnotes' | 'endnotes';
+
+const NOTE_TYPE_NAMES: Record<string, NoteType> = {
+  'in-text': 'in-text',
+  'footnotes': 'footnotes',
+  'endnotes': 'endnotes',
+  '0': 'in-text',
+  '1': 'footnotes',
+  '2': 'endnotes',
+};
+
+const NOTE_TYPE_TO_NUMBER: Record<NoteType, number> = {
+  'in-text': 0,
+  'footnotes': 1,
+  'endnotes': 2,
+};
+
+export function noteTypeFromNumber(n: number): NoteType {
+  if (n === 1) return 'footnotes';
+  if (n === 2) return 'endnotes';
+  return 'in-text';
+}
+
+export function noteTypeToNumber(nt: NoteType): number {
+  return NOTE_TYPE_TO_NUMBER[nt];
+}
+
 export interface Frontmatter {
   csl?: string;
   locale?: string;
-  noteType?: number;
+  noteType?: NoteType;
 }
 
 /**
@@ -37,8 +64,8 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
         metadata.locale = value;
         break;
       case 'note-type': {
-        const n = parseInt(value, 10);
-        if (!isNaN(n)) metadata.noteType = n;
+        const nt = NOTE_TYPE_NAMES[value];
+        if (nt) metadata.noteType = nt;
         break;
       }
     }
@@ -55,7 +82,7 @@ export function serializeFrontmatter(metadata: Frontmatter): string {
   const lines: string[] = [];
   if (metadata.csl) lines.push(`csl: ${metadata.csl}`);
   if (metadata.locale) lines.push(`locale: ${metadata.locale}`);
-  if (metadata.noteType !== undefined) lines.push(`note-type: ${metadata.noteType}`);
+  if (metadata.noteType) lines.push(`note-type: ${metadata.noteType}`);
   if (lines.length === 0) return '';
   return '---\n' + lines.join('\n') + '\n---\n';
 }

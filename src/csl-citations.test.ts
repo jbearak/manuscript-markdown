@@ -62,12 +62,18 @@ const SAMPLE_BIBTEX = `
 
 describe('parseFrontmatter', () => {
   test('parses CSL, locale, and note-type fields', () => {
-    const input = '---\ncsl: apa\nlocale: en-US\nnote-type: 1\n---\nBody text here.';
+    const input = '---\ncsl: apa\nlocale: en-US\nnote-type: footnotes\n---\nBody text here.';
     const { metadata, body } = parseFrontmatter(input);
     expect(metadata.csl).toBe('apa');
     expect(metadata.locale).toBe('en-US');
-    expect(metadata.noteType).toBe(1);
+    expect(metadata.noteType).toBe('footnotes');
     expect(body).toBe('Body text here.');
+  });
+
+  test('parses legacy numeric note-type values', () => {
+    expect(parseFrontmatter('---\nnote-type: 0\n---\n').metadata.noteType).toBe('in-text');
+    expect(parseFrontmatter('---\nnote-type: 1\n---\n').metadata.noteType).toBe('footnotes');
+    expect(parseFrontmatter('---\nnote-type: 2\n---\n').metadata.noteType).toBe('endnotes');
   });
 
   test('handles missing frontmatter', () => {
@@ -103,8 +109,8 @@ describe('parseFrontmatter', () => {
 
 describe('serializeFrontmatter', () => {
   test('serializes all fields', () => {
-    const result = serializeFrontmatter({ csl: 'apa', locale: 'en-US', noteType: 1 });
-    expect(result).toBe('---\ncsl: apa\nlocale: en-US\nnote-type: 1\n---\n');
+    const result = serializeFrontmatter({ csl: 'apa', locale: 'en-US', noteType: 'footnotes' });
+    expect(result).toBe('---\ncsl: apa\nlocale: en-US\nnote-type: footnotes\n---\n');
   });
 
   test('returns empty string for empty metadata', () => {
