@@ -166,6 +166,33 @@ describe('Word Count Property Tests', () => {
     });
   });
 
+  describe('YAML frontmatter exclusion', () => {
+    it('should not count words in YAML frontmatter', () => {
+      const text = '---\ntitle: My Document\nauthor: Someone\n---\nHello world';
+      expect(countWords(text)).toBe(2);
+    });
+
+    it('should handle document with only frontmatter', () => {
+      const text = '---\ntitle: My Document\n---\n';
+      expect(countWords(text)).toBe(0);
+    });
+
+    it('should handle document with no frontmatter', () => {
+      const text = 'Hello world foo bar';
+      expect(countWords(text)).toBe(4);
+    });
+
+    it('should not strip --- that appears mid-document', () => {
+      const text = 'Hello world\n---\nMore words here';
+      expect(countWords(text)).toBe(6);
+    });
+
+    it('should handle frontmatter with CRLF line endings', () => {
+      const text = '---\r\ntitle: Test\r\n---\r\nHello world';
+      expect(countWords(text)).toBe(2);
+    });
+  });
+
   // Feature: word-count-status-bar, Property 2: Text document detection
   // Validates: Requirements 1.7
   describe('Property 2: Text document detection', () => {

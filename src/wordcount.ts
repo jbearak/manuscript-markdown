@@ -19,12 +19,14 @@ import * as vscode from 'vscode';
  * countWords("hello-world") // returns 1 (hyphenated words count as one)
  */
 export function countWords(text: string): number {
-  const trimmed = text.trim();
-  
+  // Strip YAML frontmatter (--- delimited block at start of document)
+  const stripped = text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '');
+  const trimmed = stripped.trim();
+
   if (trimmed === "") {
     return 0;
   }
-  
+
   return trimmed.split(/\s+/).length;
 }
 
