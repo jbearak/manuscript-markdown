@@ -139,9 +139,70 @@ async function runDocxToMd(options: CliOptions) {
   }
 }
 
+export function deriveMdToDocxPath(inputPath: string, outputPath?: string): string {
+  if (outputPath) return outputPath;
+  const inputDir = path.dirname(inputPath);
+  const inputBase = path.basename(inputPath, '.md');
+  return path.join(inputDir, inputBase + '.docx');
+}
+
+export function resolveAuthor(authorFlag?: string): string {
+  return authorFlag || os.userInfo().username;
+}
+
 async function runMdToDocx(options: CliOptions) {
-  // Placeholder for Task 3
-  console.log('Markdown to DOCX conversion not yet implemented');
+  const { convertMdToDocx } = await import('./md-to-docx');
+  const markdown = fs.readFileSync(options.inputPath, 'utf8');
+
+  // Auto-detect or use specified bib file
+  let bibtex: string | undefined;
+  const bibPath = options.bibPath || path.join(
+    path.dirname(options.inputPath),
+    path.basename(options.inputPath, '.md') + '.bib'
+  );
+  if (options.bibPath) {
+    if (!fs.existsSync(options.bibPath)) {
+      throw new Error(`BibTeX file not found: ${options.bibPath}`);
+    }
+    bibtex = fs.readFileSync(options.bibPath, 'utf8');
+  } else if (fs.existsSync(bibPath)) {
+    bibtex = fs.readFileSync(bibPath, 'utf8');
+  }
+
+  // Read template if specified
+  let templateDocx: Uint8Array | undefined;
+  if (options.templatePath) {
+    if (!fs.existsSync(options.templatePath)) {
+      throw new Error(`Template file not found: ${options.templatePath}`);
+    }
+    templateDocx = new Uint8Array(fs.readFileSync(options.templatePath));
+  }
+
+  const docxPath = deriveMdToDocxPath(options.inputPath, options.outputPath);
+
+  // Check output conflict
+  if (!options.force && fs.existsSync(docxPath)) {
+    throw new Error(`Output file already exists: ${docxPath}\nUse --force to overwrite`);
+  }
+
+  const authorName = resolveAuthor(options.authorName);
+
+  const result = await convertMdToDocx(markdown, {
+    bibtex,
+    authorName,
+    templateDocx,
+    cslCacheDir: options.cslCacheDir,
+    sourceDir: path.dirname(options.inputPath),
+    onStyleNotFound: async () => true,
+    mixedCitationStyle: options.mixedCitationStyle,
+  });
+
+  fs.writeFileSync(docxPath, result.docx);
+  console.log(docxPath);
+
+  for (const warning of result.warnings) {
+    console.error(`Warning: ${warning}`);
+  }
 }
 
 export async function main() {

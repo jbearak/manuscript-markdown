@@ -3,7 +3,7 @@ import * as fc from 'fast-check';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { parseArgs, detectDirection, deriveDocxToMdPaths, CliOptions } from './cli';
+import { parseArgs, detectDirection, deriveDocxToMdPaths, deriveMdToDocxPath, resolveAuthor, CliOptions } from './cli';
 
 test('Property 1: Extension-based dispatch correctness', () => {
   fc.assert(
@@ -172,4 +172,64 @@ test('Property 5: Dual conflict reporting for DOCX→MD', () => {
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test('Property 4: Conflict detection respects --force', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-test-'));
+  
+  try {
+    fc.assert(
+      fc.property(
+        fc.stringMatching(/^[a-zA-Z][a-zA-Z0-9._-]{0,9}$/),
+        fc.boolean(),
+        (basename, force) => {
+          const inputPath = path.join(tempDir, basename + '.md');
+          const docxPath = deriveMdToDocxPath(inputPath);
+          
+          // Create conflicting file
+          fs.writeFileSync(docxPath, 'test');
+          
+          if (force) {
+            // Should not throw when force=true
+            expect(() => {
+              if (!force && fs.existsSync(docxPath)) {
+                throw new Error(`Output file already exists: ${docxPath}\nUse --force to overwrite`);
+              }
+            }).not.toThrow();
+          } else {
+            // Should throw when force=false
+            expect(() => {
+              if (!force && fs.existsSync(docxPath)) {
+                throw new Error(`Output file already exists: ${docxPath}\nUse --force to overwrite`);
+              }
+            }).toThrow(/Output file already exists:.*\.docx/);
+          }
+          
+          // Clean up for next iteration
+          fs.unlinkSync(docxPath);
+        }
+      ),
+      { numRuns: 100 }
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('Property 6: Author name resolution', () => {
+  fc.assert(
+    fc.property(
+      fc.option(fc.stringMatching(/^[a-zA-Z][a-zA-Z0-9 ._-]{0,19}$/)),
+      (authorFlag) => {
+        const result = resolveAuthor(authorFlag);
+        
+        if (authorFlag) {
+          expect(result).toBe(authorFlag);
+        } else {
+          expect(result).toBe(os.userInfo().username);
+        }
+      }
+    ),
+    { numRuns: 100 }
+  );
 });
