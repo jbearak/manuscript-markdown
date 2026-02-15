@@ -99,17 +99,7 @@ export function serializeBibtex(entries: Map<string, BibtexEntry>): string {
         escapedValue = escapeBibtex(value);
       }
       
-      // Title gets double braces for protection, but only if it doesn't already have them
-      if (fieldName === 'title') {
-        // Check if the title already has protective braces
-        if (escapedValue.startsWith('{') && escapedValue.endsWith('}')) {
-          lines.push(`  ${fieldName} = {${escapedValue}},`);
-        } else {
-          lines.push(`  ${fieldName} = {{${escapedValue}}},`);
-        }
-      } else {
-        lines.push(`  ${fieldName} = {${escapedValue}},`);
-      }
+      lines.push(`  ${fieldName} = {${escapedValue}},`);
     }
     
     // Remove trailing comma from last field

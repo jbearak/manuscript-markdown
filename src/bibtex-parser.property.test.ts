@@ -72,22 +72,12 @@ describe('BibTeX Parser Property Tests', () => {
             throw new Error('Key mismatch: ' + reparsedEntry.key + ' vs ' + originalEntry.key);
           }
           
-          // Check all fields are preserved (with special handling for title double braces)
+          // Check all fields are preserved
           for (const [fieldName, fieldValue] of originalEntry.fields) {
             const reparsedValue = reparsedEntry.fields.get(fieldName);
             
-            if (fieldName === 'title') {
-              // Title gets double braces during serialization, so reparsed includes outer braces
-              const expectedValue = fieldValue.startsWith('{') && fieldValue.endsWith('}') 
-                ? fieldValue 
-                : '{' + fieldValue + '}';
-              if (reparsedValue !== expectedValue) {
-                throw new Error('Field value mismatch for ' + key + '.' + fieldName + ': "' + reparsedValue + '" vs "' + expectedValue + '"');
-              }
-            } else {
-              if (reparsedValue !== fieldValue) {
-                throw new Error('Field value mismatch for ' + key + '.' + fieldName + ': "' + reparsedValue + '" vs "' + fieldValue + '"');
-              }
+            if (reparsedValue !== fieldValue) {
+              throw new Error('Field value mismatch for ' + key + '.' + fieldName + ': "' + reparsedValue + '" vs "' + fieldValue + '"');
             }
           }
           

@@ -104,7 +104,7 @@ describe('BibTeX Parser', () => {
     
     const result = serializeBibtex(entries);
     expect(result).toContain('@article{key1,');
-    expect(result).toContain('title = {{Test Title}}');
+    expect(result).toContain('title = {Test Title}');
     expect(result).toContain('author = {John Doe}');
   });
 
@@ -146,8 +146,7 @@ describe('BibTeX Parser', () => {
     
     expect(roundtrip.type).toBe(original.type);
     expect(roundtrip.key).toBe(original.key);
-    // Title gets double braces during serialization, so the reparsed title includes outer braces
-    expect(roundtrip.fields.get('title')).toBe('{' + original.fields.get('title') + '}');
+    expect(roundtrip.fields.get('title')).toBe(original.fields.get('title'));
     expect(roundtrip.fields.get('author')).toBe(original.fields.get('author'));
     expect(roundtrip.fields.get('doi')).toBe(original.fields.get('doi'));
     expect(roundtrip.zoteroKey).toBe(original.zoteroKey);
@@ -168,7 +167,7 @@ describe('BibTeX Parser', () => {
     });
     
     const result = serializeBibtex(entries);
-    expect(result).toContain('title = {{Title \\& More}}');
+    expect(result).toContain('title = {Title \\& More}');
     expect(result).toContain('doi = {10.1000/test_doi}'); // Not escaped
     expect(result).toContain('zotero-key = {ABC_123}'); // Not escaped
   });

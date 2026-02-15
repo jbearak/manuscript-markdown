@@ -166,7 +166,7 @@ function citationRule(state: any, silent: boolean): boolean {
     const keys: string[] = [];
     const locators = new Map<string, string>();
     
-    const parts = content.split(';').map((p: string) => p.trim());
+    const parts = content.split(';').map((p: string) => p.trim().replace(/^@/, ''));
     for (const part of parts) {
       const commaPos = part.indexOf(',');
       if (commaPos !== -1) {
@@ -714,11 +714,11 @@ function formatRuns(runs: MdRun[]): string {
         if (run.keys && run.locators && run.locators.size > 0) {
           const parts = run.keys.map(key => {
             const locator = run.locators!.get(key);
-            return locator ? key + ', ' + locator : key;
+            return locator ? '@' + key + ', ' + locator : '@' + key;
           });
-          return '[@' + parts.join('; ') + ']';
+          return '[' + parts.join('; ') + ']';
         } else if (run.keys) {
-          return '[@' + run.keys.join('; ') + ']';
+          return '[' + run.keys.map(k => '@' + k).join('; ') + ']';
         }
         return '[@' + text + ']';
       case 'math':

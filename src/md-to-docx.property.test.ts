@@ -255,13 +255,14 @@ describe('Feature: md-to-docx-conversion', () => {
               } else if (origRun.type === 'citation') {
                 // Citation text is derived from keys, not original text
                 if (origRun.keys && origRun.locators && origRun.locators.size > 0) {
-                  const parts = origRun.keys.map(key => {
+                  const parts = origRun.keys.map((key, idx) => {
+                    const prefix = idx === 0 ? '' : '@';
                     const locator = origRun.locators!.get(key);
-                    return locator ? key + ', ' + locator : key;
+                    return locator ? prefix + key + ', ' + locator : prefix + key;
                   });
                   expect(reparsedRun.text).toBe(parts.join('; '));
                 } else if (origRun.keys) {
-                  expect(reparsedRun.text).toBe(origRun.keys.join('; '));
+                  expect(reparsedRun.text).toBe(origRun.keys.map((k, i) => i === 0 ? k : '@' + k).join('; '));
                 }
               } else {
                 expect(reparsedRun.text).toBe(origRun.text);
