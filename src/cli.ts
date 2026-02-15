@@ -100,8 +100,8 @@ Options:
 }
 
 function showVersion() {
-  const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
-  console.log(packageJson.version);
+  const { version } = require('../package.json');
+  console.log(version);
 }
 
 export function deriveDocxToMdPaths(inputPath: string, outputPath?: string): { mdPath: string; bibPath: string } {
