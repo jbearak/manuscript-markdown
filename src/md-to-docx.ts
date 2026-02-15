@@ -982,14 +982,17 @@ function fontTableXml(): string {
     '</w:fonts>';
 }
 
-function corePropsXml(): string {
+function corePropsXml(author?: string): string {
   const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
-    '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n' +
-    '<dc:creator>Manuscript Markup</dc:creator>\n' +
-    '<dcterms:created xsi:type="dcterms:W3CDTF">' + now + '</dcterms:created>\n' +
+  let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+    '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n';
+  if (author && author.trim()) {
+    xml += '<dc:creator>' + escapeXml(author) + '</dc:creator>\n';
+  }
+  xml += '<dcterms:created xsi:type="dcterms:W3CDTF">' + now + '</dcterms:created>\n' +
     '<dcterms:modified xsi:type="dcterms:W3CDTF">' + now + '</dcterms:modified>\n' +
     '</cp:coreProperties>';
+  return xml;
 }
 
 function appPropsXml(): string {
@@ -1417,7 +1420,7 @@ export async function convertMdToDocx(
   }
 
   // Document properties
-  zip.file('docProps/core.xml', corePropsXml());
+  zip.file('docProps/core.xml', corePropsXml(frontmatter.author));
   zip.file('docProps/app.xml', appPropsXml());
 
   // Write Zotero document preferences if CSL style specified

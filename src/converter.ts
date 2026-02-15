@@ -1177,6 +1177,17 @@ export function extractTitleLines(content: ContentItem[]): string[] {
   return titles;
 }
 
+/** Extract dc:creator from docProps/core.xml (the document author). */
+export async function extractAuthor(zip: JSZip): Promise<string | undefined> {
+  const parsed = await readZipXml(zip, 'docProps/core.xml');
+  if (!parsed) return undefined;
+  for (const node of findAllDeep(parsed, 'dc:creator')) {
+    const text = nodeText(node['dc:creator']).trim();
+    if (text) return text;
+  }
+  return undefined;
+}
+
 // Main conversion
 
 export async function convertDocx(
@@ -1184,10 +1195,11 @@ export async function convertDocx(
   format: CitationKeyFormat = 'authorYearTitle'
 ): Promise<ConvertResult> {
   const zip = await loadZip(data);
-  const [comments, zoteroCitations, zoteroPrefs] = await Promise.all([
+  const [comments, zoteroCitations, zoteroPrefs, author] = await Promise.all([
     extractComments(zip),
     extractZoteroCitations(zip),
     extractZoteroPrefs(zip),
+    extractAuthor(zip),
   ]);
 
   const keyMap = buildCitationKeyMap(zoteroCitations, format);
@@ -1211,6 +1223,9 @@ export async function convertDocx(
   const fm: Frontmatter = {};
   if (titleLines.length > 0) {
     fm.title = titleLines;
+  }
+  if (author) {
+    fm.author = author;
   }
   if (zoteroPrefs) {
     fm.csl = zoteroStyleShortName(zoteroPrefs.styleId);
