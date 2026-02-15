@@ -274,15 +274,15 @@ export function activate(context: vscode.ExtensionContext) {
 		context.subscriptions.push(decType);
 	}
 	const criticDecType = vscode.window.createTextEditorDecorationType({
-		light: { backgroundColor: CRITIC_COMMENT_DECORATION.light, color: new vscode.ThemeColor('editor.foreground') },
-		dark: { backgroundColor: CRITIC_COMMENT_DECORATION.dark, color: new vscode.ThemeColor('editor.foreground') },
+		light: { backgroundColor: CRITIC_COMMENT_DECORATION.light },
+		dark: { backgroundColor: CRITIC_COMMENT_DECORATION.dark },
 	});
 	decorationTypes.set('critic', criticDecType);
 	context.subscriptions.push(criticDecType);
 
 	const commentDecType = vscode.window.createTextEditorDecorationType({
-		light: { backgroundColor: CRITIC_COMMENT_DECORATION.light },
-		dark: { backgroundColor: CRITIC_COMMENT_DECORATION.dark },
+		light: { backgroundColor: CRITIC_COMMENT_DECORATION.light, color: new vscode.ThemeColor('descriptionForeground') },
+		dark: { backgroundColor: CRITIC_COMMENT_DECORATION.dark, color: new vscode.ThemeColor('descriptionForeground') },
 		fontStyle: 'italic',
 	});
 	context.subscriptions.push(commentDecType);

@@ -1,10 +1,12 @@
 import { describe, it, expect } from 'bun:test';
-import { 
-  generateRPr, 
-  generateRun, 
-  generateParagraph, 
-  generateTable, 
+import {
+  generateRPr,
+  generateRun,
+  generateParagraph,
+  generateTable,
   convertMdToDocx,
+  parseMd,
+  preprocessCriticMarkup,
   type MdRun,
   type MdToken,
   type MdTableRow
@@ -565,5 +567,133 @@ describe('CriticMarkup OOXML generation', () => {
     expect(result).toContain('highlighted text');
     expect(result).not.toContain('<w:ins');
     expect(result).not.toContain('<w:del');
+  });
+});
+
+describe('preprocessCriticMarkup', () => {
+  it('returns unchanged text when no CriticMarkup markers present', () => {
+    const input = 'Hello world\n\nSecond paragraph';
+    expect(preprocessCriticMarkup(input)).toBe(input);
+  });
+
+  it('returns unchanged text for single-line CriticMarkup', () => {
+    const input = 'Some {>>comment<<} here';
+    expect(preprocessCriticMarkup(input)).toBe(input);
+  });
+
+  it('replaces \\n\\n inside a multi-paragraph comment', () => {
+    const input = '{>>para 1\n\npara 2<<}';
+    const result = preprocessCriticMarkup(input);
+    expect(result).not.toContain('\n\n');
+    expect(result).toContain('{>>');
+    expect(result).toContain('<<}');
+  });
+
+  it('replaces \\n\\n inside a multi-paragraph highlight', () => {
+    const input = '{==text\n\nmore text==}';
+    const result = preprocessCriticMarkup(input);
+    expect(result).not.toContain('\n\n');
+  });
+
+  it('replaces \\n\\n inside a multi-paragraph addition', () => {
+    const input = '{++added\n\nmore++}';
+    const result = preprocessCriticMarkup(input);
+    expect(result).not.toContain('\n\n');
+  });
+
+  it('replaces \\n\\n inside a multi-paragraph deletion', () => {
+    const input = '{--deleted\n\nmore--}';
+    const result = preprocessCriticMarkup(input);
+    expect(result).not.toContain('\n\n');
+  });
+
+  it('replaces \\n\\n inside a multi-paragraph substitution', () => {
+    const input = '{~~old\n\ntext~>new\n\ntext~~}';
+    const result = preprocessCriticMarkup(input);
+    expect(result).not.toContain('\n\n');
+  });
+
+  it('handles mid-line multi-paragraph span', () => {
+    const input = 'some text {>>comment\n\npara 2<<} more text';
+    const result = preprocessCriticMarkup(input);
+    expect(result).not.toContain('\n\n');
+    expect(result).toStartWith('some text {>>');
+    expect(result).toEndWith('<<} more text');
+  });
+});
+
+describe('parseMd multi-paragraph CriticMarkup', () => {
+  it('parses multi-paragraph comment as single token', () => {
+    const tokens = parseMd('{>>para 1\n\npara 2<<}');
+    // Should produce a single paragraph (not split across multiple)
+    const commentRuns = tokens.flatMap(t => t.runs).filter(r => r.type === 'critic_comment');
+    expect(commentRuns.length).toBe(1);
+  });
+
+  it('parses multi-paragraph highlight as single token', () => {
+    const tokens = parseMd('{==text\n\nmore text==}');
+    const highlightRuns = tokens.flatMap(t => t.runs).filter(r => r.type === 'critic_highlight');
+    expect(highlightRuns.length).toBe(1);
+  });
+
+  it('parses mid-line multi-paragraph comment', () => {
+    const tokens = parseMd('some text {>>comment\n\npara 2<<} more text');
+    const allRuns = tokens.flatMap(t => t.runs);
+    const commentRuns = allRuns.filter(r => r.type === 'critic_comment');
+    expect(commentRuns.length).toBe(1);
+    const textRuns = allRuns.filter(r => r.type === 'text');
+    expect(textRuns.some(r => r.text.includes('some text'))).toBe(true);
+    expect(textRuns.some(r => r.text.includes('more text'))).toBe(true);
+  });
+
+  it('parses highlight + multi-paragraph comment', () => {
+    const tokens = parseMd('{==highlighted==}{>>para 1\n\npara 2<<}');
+    const allRuns = tokens.flatMap(t => t.runs);
+    const highlightRuns = allRuns.filter(r => r.type === 'critic_highlight');
+    const commentRuns = allRuns.filter(r => r.type === 'critic_comment');
+    expect(highlightRuns.length).toBe(1);
+    expect(commentRuns.length).toBe(1);
+  });
+
+  it('parses multi-paragraph addition', () => {
+    const tokens = parseMd('{++added\n\nmore++}');
+    const addRuns = tokens.flatMap(t => t.runs).filter(r => r.type === 'critic_add');
+    expect(addRuns.length).toBe(1);
+  });
+
+  it('parses multi-paragraph deletion', () => {
+    const tokens = parseMd('{--deleted\n\nmore--}');
+    const delRuns = tokens.flatMap(t => t.runs).filter(r => r.type === 'critic_del');
+    expect(delRuns.length).toBe(1);
+  });
+
+  it('parses multi-paragraph substitution', () => {
+    const tokens = parseMd('{~~old\n\ntext~>new\n\ntext~~}');
+    const subRuns = tokens.flatMap(t => t.runs).filter(r => r.type === 'critic_sub');
+    expect(subRuns.length).toBe(1);
+  });
+
+  it('parses multi-paragraph comment with author attribution', () => {
+    const tokens = parseMd('{>>Alice (2024-01-15T10:00:00Z): para 1\n\npara 2<<}');
+    const commentRuns = tokens.flatMap(t => t.runs).filter(r => r.type === 'critic_comment');
+    expect(commentRuns.length).toBe(1);
+    expect(commentRuns[0].author).toBe('Alice');
+    expect(commentRuns[0].date).toBe('2024-01-15T10:00:00Z');
+  });
+
+  it('does not leak placeholder into comment text', () => {
+    const tokens = parseMd('{>>Alice (2024-01-15T10:00:00Z): para 1\n\npara 2<<}');
+    const commentRuns = tokens.flatMap(t => t.runs).filter(r => r.type === 'critic_comment');
+    expect(commentRuns[0].commentText).not.toContain('\u0000');
+    expect(commentRuns[0].commentText).not.toContain('PARA');
+    expect(commentRuns[0].commentText).toContain('para 1\n\npara 2');
+  });
+
+  it('does not leak placeholder into addition text', () => {
+    const tokens = parseMd('{++added\n\nmore++}');
+    const addRuns = tokens.flatMap(t => t.runs).filter(r => r.type === 'critic_add');
+    expect(addRuns[0].text).not.toContain('\u0000');
+    expect(addRuns[0].text).not.toContain('PARA');
+    expect(addRuns[0].text).toContain('added\n\nmore');
   });
 });

@@ -55,6 +55,9 @@ const COLOR_TO_OOXML: Record<string, string> = {
   'dark-yellow': 'darkYellow', 'gray-50': 'darkGray', 'gray-25': 'lightGray',
 };
 
+import { PARA_PLACEHOLDER, preprocessCriticMarkup } from './critic-markup';
+export { PARA_PLACEHOLDER, preprocessCriticMarkup };
+
 // Custom inline rules
 function criticMarkupRule(state: any, silent: boolean): boolean {
   const start = state.pos;
@@ -79,7 +82,8 @@ function criticMarkupRule(state: any, silent: boolean): boolean {
   if (endPos === -1) return false;
   
   if (!silent) {
-    const content = state.src.slice(start + 3, endPos);
+    // Replace any paragraph placeholders back to real newlines
+    const content = state.src.slice(start + 3, endPos).replaceAll(PARA_PLACEHOLDER, '\n\n');
     const token = state.push('critic_markup', '', 0);
     token.markup = marker;
     token.content = content;
@@ -94,7 +98,7 @@ function criticMarkupRule(state: any, silent: boolean): boolean {
     }
     
     if (type === 'critic_comment') {
-      const match = content.match(/^(.+?)\s+\(([^)]+)\):\s*(.*)$/);
+      const match = content.match(/^([\s\S]+?)\s+\(([^)]+)\):\s*([\s\S]*)$/);
       if (match) {
         token.author = match[1];
         token.date = match[2];
@@ -241,21 +245,38 @@ function mathRule(state: any, silent: boolean): boolean {
   return true;
 }
 
+/** Inline rule that converts the paragraph placeholder back into softbreak tokens. */
+function paraPlaceholderRule(state: any, silent: boolean): boolean {
+  const start = state.pos;
+  if (state.src.charCodeAt(start) !== 0xE000) return false; // \uE000
+  if (!state.src.startsWith(PARA_PLACEHOLDER, start)) return false;
+
+  if (!silent) {
+    // Emit two softbreaks to represent the paragraph break
+    state.push('softbreak', 'br', 0);
+    state.push('softbreak', 'br', 0);
+  }
+  state.pos = start + PARA_PLACEHOLDER.length;
+  return true;
+}
+
 function createMarkdownIt(): MarkdownIt {
   const md = new MarkdownIt({ html: true });
-  
+
+  md.inline.ruler.before('emphasis', 'para_placeholder', paraPlaceholderRule);
   md.inline.ruler.before('emphasis', 'colored_highlight', coloredHighlightRule);
   md.inline.ruler.before('emphasis', 'critic_markup', criticMarkupRule);
   md.inline.ruler.before('emphasis', 'citation', citationRule);
   md.inline.ruler.before('emphasis', 'math', mathRule);
-  
+
   return md;
 }
 
 export function parseMd(markdown: string): MdToken[] {
   const md = createMarkdownIt();
-  const tokens = md.parse(markdown, {});
-  
+  const processed = preprocessCriticMarkup(markdown);
+  const tokens = md.parse(processed, {});
+
   return convertTokens(tokens);
 }
 
@@ -1282,7 +1303,11 @@ function commentsXml(comments: CommentEntry[]): string {
   xml += '<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">';
   for (const c of comments) {
     xml += '<w:comment w:id="' + c.id + '" w:author="' + escapeXml(c.author) + '" w:date="' + escapeXml(c.date) + '">';
-    xml += '<w:p><w:r><w:t>' + escapeXml(c.text) + '</w:t></w:r></w:p>';
+    // Split on \n\n for paragraph breaks within the comment
+    const paragraphs = c.text.split('\n\n');
+    for (const para of paragraphs) {
+      xml += '<w:p><w:r><w:t xml:space="preserve">' + escapeXml(para) + '</w:t></w:r></w:p>';
+    }
     xml += '</w:comment>';
   }
   xml += '</w:comments>';

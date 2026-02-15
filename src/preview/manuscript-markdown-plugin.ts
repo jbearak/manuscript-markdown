@@ -2,6 +2,7 @@ import type MarkdownIt from 'markdown-it';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
 import type StateBlock from 'markdown-it/lib/rules_block/state_block.mjs';
 import { VALID_COLOR_IDS, getDefaultHighlightColor } from '../highlight-colors';
+import { PARA_PLACEHOLDER, preprocessCriticMarkup } from '../critic-markup';
 
 /**
  * Defines a Manuscript Markdown pattern configuration
@@ -407,15 +408,37 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
   return false;
 }
 
+/** Inline rule that converts the paragraph placeholder back into line breaks in the token stream. */
+function paraPlaceholderRule(state: StateInline, silent: boolean): boolean {
+  const start = state.pos;
+  if (state.src.charCodeAt(start) !== 0xE000) return false; // \uE000
+  if (!state.src.startsWith(PARA_PLACEHOLDER, start)) return false;
+
+  if (!silent) {
+    state.push('softbreak', 'br', 0);
+    state.push('softbreak', 'br', 0);
+  }
+  state.pos = start + PARA_PLACEHOLDER.length;
+  return true;
+}
+
 /**
  * Main plugin function that registers Manuscript Markdown parsing with markdown-it
  * @param md - The MarkdownIt instance to extend
  */
 export function manuscriptMarkdownPlugin(md: MarkdownIt): void {
+  // Preprocess source before block parsing to handle multi-paragraph CriticMarkup
+  md.core.ruler.before('normalize', 'manuscript_markdown_preprocess', (state: any) => {
+    state.src = preprocessCriticMarkup(state.src);
+  });
+
   // Register the block-level rule to handle multi-line patterns with empty lines
   // This must run very early, before heading and paragraph parsing
   md.block.ruler.before('heading', 'manuscript_markdown_block', manuscriptMarkdownBlock);
-  
+
+  // Register inline rule for paragraph placeholder (before other inline rules)
+  md.inline.ruler.before('emphasis', 'para_placeholder', paraPlaceholderRule);
+
   // Register the inline rule for Manuscript Markdown parsing
   // Run before emphasis and other inline rules to handle Manuscript Markdown first
   md.inline.ruler.before('emphasis', 'manuscript_markdown', parseManuscriptMarkdown);
