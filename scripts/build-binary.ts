@@ -83,16 +83,22 @@ async function build_binary(target: BuildTarget): Promise<void> {
 
 async function build_all_binaries(): Promise<void> {
     console.log('Building binaries for all platforms...');
+    const failed_targets: string[] = [];
 
     for (const target of TARGETS) {
         try {
             await build_binary(target);
         } catch (error) {
-            console.error(`Skipping ${target.output_name} due to error`);
+            console.error(`Skipping ${target.output_name} due to error:`, error);
+            failed_targets.push(target.output_name);
         }
     }
 
-    console.log('All binaries built.');
+    if (failed_targets.length > 0) {
+        throw new Error(`Failed to build ${failed_targets.length}/${TARGETS.length} targets: ${failed_targets.join(', ')}`);
+    }
+
+    console.log('All binaries built successfully.');
 }
 
 async function build_current_binary(): Promise<void> {
