@@ -485,10 +485,10 @@ export async function extractZoteroPrefs(data: Uint8Array | JSZip): Promise<Zote
 
   // Try JSON parse (dataVersion 4)
   try {
-    const data = JSON.parse(prefString);
-    const styleId: string = data?.style?.styleID ?? '';
-    const locale: string = data?.style?.locale ?? '';
-    const noteType: number | undefined = data?.prefs?.noteType;
+    const prefObj = JSON.parse(prefString);
+    const styleId: string = prefObj?.style?.styleID ?? '';
+    const locale: string = prefObj?.style?.locale ?? '';
+    const noteType: number | undefined = prefObj?.prefs?.noteType;
     if (!styleId) return undefined;
     return {
       styleId,
@@ -753,9 +753,10 @@ export async function extractDocumentContent(
                 inBibliographyField = true;
                 // Extract bibliography JSON payload
                 const jsonStart = instrText.indexOf('{');
-                if (jsonStart >= 0) {
+                const jsonEnd = instrText.lastIndexOf('}');
+                if (jsonStart >= 0 && jsonEnd > jsonStart) {
                   try {
-                    const biblJson = JSON.parse(instrText.slice(jsonStart));
+                    const biblJson = JSON.parse(instrText.slice(jsonStart, jsonEnd + 1));
                     zoteroBiblData = {
                       uncited: biblJson?.uncited,
                       omitted: biblJson?.omitted,
