@@ -308,7 +308,13 @@ export function generateCitation(
 
     // Plain portion
     if (plainKeys.length > 0) {
-      let plainText = generateFallbackText(plainKeys, entries, run.locators);
+      let plainText: string;
+      if (citeprocEngine) {
+        const rendered = renderCitationText(citeprocEngine, plainKeys, run.locators);
+        plainText = rendered || generateFallbackText(plainKeys, entries, run.locators);
+      } else {
+        plainText = generateFallbackText(plainKeys, entries, run.locators);
+      }
       plainText = plainText.replace(/^\(/, '').replace(/\)$/, '');
       parts.push(plainText);
     }
@@ -366,7 +372,13 @@ export function generateCitation(
   // Plain portion — parenthesized text
   if (plainKeys.length > 0) {
     if (xml) xml += '<w:r><w:t xml:space="preserve"> </w:t></w:r>';
-    const plainText = generateFallbackText(plainKeys, entries, run.locators);
+    let plainText: string;
+    if (citeprocEngine) {
+      const rendered = renderCitationText(citeprocEngine, plainKeys, run.locators);
+      plainText = rendered || generateFallbackText(plainKeys, entries, run.locators);
+    } else {
+      plainText = generateFallbackText(plainKeys, entries, run.locators);
+    }
     xml += '<w:r><w:t>' + escapeXml(plainText) + '</w:t></w:r>';
   }
 

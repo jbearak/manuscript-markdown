@@ -1295,6 +1295,8 @@ export async function convertMdToDocx(
         const resolved = join(options.sourceDir, styleName);
         if (existsSync(resolved)) {
           styleName = resolved;
+        } else {
+          earlyWarnings.push(`CSL file "${styleName}" not found in source directory (${options.sourceDir}).`);
         }
       } else {
         earlyWarnings.push(`Relative CSL path "${styleName}" cannot be resolved without a source directory.`);
