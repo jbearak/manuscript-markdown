@@ -138,6 +138,37 @@ describe('generateCitation', () => {
     expect(result.xml).toContain('(Smith in press)');
   });
 
+  it('maps additional BibTeX entry types to CSL types', () => {
+    const typePairs: Array<[string, string]> = [
+      ['incollection', 'chapter'],
+      ['inbook', 'chapter'],
+      ['phdthesis', 'thesis'],
+      ['mastersthesis', 'thesis'],
+      ['techreport', 'report'],
+      ['misc', 'article'],
+    ];
+
+    for (const [bibtexType, cslType] of typePairs) {
+      const key = `k_${bibtexType}`;
+      const entries = new Map<string, BibtexEntry>();
+      entries.set(key, {
+        type: bibtexType,
+        key,
+        fields: new Map([
+          ['author', 'Smith, John'],
+          ['year', '2020'],
+          ['title', 'Sample']
+        ]),
+        zoteroKey: 'ABCD1234',
+        zoteroUri: 'http://zotero.org/users/123/items/ABCD1234'
+      });
+
+      const run = { keys: [key], text: key };
+      const result = generateCitation(run, entries);
+      expect(result.xml).toContain('&quot;type&quot;:&quot;' + cslType + '&quot;');
+    }
+  });
+
   it('returns warning with unknown key', () => {
     const entries = new Map<string, BibtexEntry>();
     const run = { keys: ['unknown'], text: 'unknown' };

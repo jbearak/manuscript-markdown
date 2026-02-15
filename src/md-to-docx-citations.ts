@@ -117,6 +117,12 @@ function mapBibtexTypeToCSL(bibtexType: string): string {
     case 'article': return 'article-journal';
     case 'book': return 'book';
     case 'inproceedings': return 'paper-conference';
+    case 'incollection': return 'chapter';
+    case 'inbook': return 'chapter';
+    case 'phdthesis': return 'thesis';
+    case 'mastersthesis': return 'thesis';
+    case 'techreport': return 'report';
+    case 'misc': return 'article';
     default: return 'article';
   }
 }

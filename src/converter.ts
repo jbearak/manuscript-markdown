@@ -958,7 +958,11 @@ export function formatLocalIsoMinute(ts: string): string {
 
 // BibTeX generation
 
-/** Escape special LaTeX/BibTeX characters in field values. */
+/**
+ * Escape special LaTeX/BibTeX characters in field values.
+ * Note: this converter-side helper escapes normalized metadata directly; parser-side
+ * `src/bibtex-parser.ts` uses an idempotent escape path for round-trip safety.
+ */
 export function escapeBibtex(s: string): string {
   return s.replace(/([&%$#_{}~^\\])/g, '\\$1');
 }

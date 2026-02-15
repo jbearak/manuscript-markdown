@@ -82,3 +82,4 @@ Code (authoritative for behavior):
 - Zotero grouped citations: If any key in a grouped citation lacks Zotero metadata (or is missing), emit plain-text fallback for the whole group and warn to avoid partial CSL field codes that drop keys on Zotero refresh
 - CSL year reconstruction: Only set `issued.date-parts` when BibTeX `year` is fully numeric; never emit `date-parts:[[null]]`
 - BibTeX entry scanning: Quote-state detection must count consecutive preceding backslashes before `\"` to avoid mis-parsing entries containing escaped backslashes and quotes
+- BibTeX scanner literals: When comparing `input[k]` (single character), compare against `'\\'` (or char code), not `'\\\\'` (two-character runtime string), otherwise backslash counts silently stay zero

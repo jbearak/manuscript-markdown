@@ -71,6 +71,7 @@ describe('BibTeX Parser', () => {
     expect(result.has('key1')).toBe(true);
     expect(result.has('key2')).toBe(true);
     expect(result.get('key1')?.fields.get('author')).toBe('Jane Doe');
+    expect(result.get('key2')?.fields.get('title')).toBe('Second Entry');
   });
 
   it('skips malformed entries gracefully', () => {

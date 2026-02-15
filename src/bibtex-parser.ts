@@ -38,7 +38,8 @@ export function parseBibtex(input: string): Map<string, BibtexEntry> {
         if (char === '\"') {
           // Toggle quote state only when preceded by an even number of backslashes.
           let backslashCount = 0;
-          for (let k = j - 1; k >= 0 && input[k] === '\\\\'; k--) {
+          const backslash = '\\';
+          for (let k = j - 1; k >= 0 && input[k] === backslash; k--) {
             backslashCount++;
           }
           if (backslashCount % 2 === 0) {
