@@ -1217,9 +1217,7 @@ export async function convertMdToDocx(
   if (state.hasComments) {
     zip.file('word/comments.xml', commentsXml(state.comments));
   }
-  if (state.relationships.size > 0 || state.hasComments || hasTheme || hasSettings) {
-    zip.file('word/_rels/document.xml.rels', documentRelsXml(state.relationships, state.hasList, state.hasComments, hasTheme, hasSettings));
-  }
+  zip.file('word/_rels/document.xml.rels', documentRelsXml(state.relationships, state.hasList, state.hasComments, hasTheme, hasSettings));
   
   const docx = await zip.generateAsync({ type: 'uint8array' });
   return { docx, warnings: state.warnings };
