@@ -214,17 +214,23 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Register Markdown to DOCX export command
 	context.subscriptions.push(
-		vscode.commands.registerCommand('manuscript-markdown.exportToWord', async () => {
+		vscode.commands.registerCommand('manuscript-markdown.exportToWord', async (uri?: vscode.Uri) => {
 			try {
-				const editor = vscode.window.activeTextEditor;
-				if (!editor || editor.document.languageId !== 'markdown') {
-					vscode.window.showErrorMessage('No active Markdown file');
-					return;
+				let markdown: string;
+				let basePath: string;
+				if (uri) {
+					const data = await vscode.workspace.fs.readFile(uri);
+					markdown = new TextDecoder().decode(data);
+					basePath = uri.fsPath.replace(/\.md$/i, '');
+				} else {
+					const editor = vscode.window.activeTextEditor;
+					if (!editor || editor.document.languageId !== 'markdown') {
+						vscode.window.showErrorMessage('No active Markdown file');
+						return;
+					}
+					markdown = editor.document.getText();
+					basePath = editor.document.uri.fsPath.replace(/\.md$/i, '');
 				}
-				
-				const markdown = editor.document.getText();
-				const mdUri = editor.document.uri;
-				const basePath = mdUri.fsPath.replace(/\.md$/i, '');
 				
 				// Check for companion .bib file
 				let bibtex: string | undefined;
@@ -277,14 +283,8 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Register Markdown to DOCX export with template command
 	context.subscriptions.push(
-		vscode.commands.registerCommand('manuscript-markdown.exportToWordWithTemplate', async () => {
+		vscode.commands.registerCommand('manuscript-markdown.exportToWordWithTemplate', async (uri?: vscode.Uri) => {
 			try {
-				const editor = vscode.window.activeTextEditor;
-				if (!editor || editor.document.languageId !== 'markdown') {
-					vscode.window.showErrorMessage('No active Markdown file');
-					return;
-				}
-				
 				// Prompt for template file
 				const templateFiles = await vscode.window.showOpenDialog({
 					filters: { 'Word Documents': ['docx'] },
@@ -292,13 +292,25 @@ export function activate(context: vscode.ExtensionContext) {
 					openLabel: 'Select template'
 				});
 				if (!templateFiles || templateFiles.length === 0) return;
-				
+
 				const templateData = await vscode.workspace.fs.readFile(templateFiles[0]);
 				const templateDocx = new Uint8Array(templateData);
-				
-				const markdown = editor.document.getText();
-				const mdUri = editor.document.uri;
-				const basePath = mdUri.fsPath.replace(/\.md$/i, '');
+
+				let markdown: string;
+				let basePath: string;
+				if (uri) {
+					const data = await vscode.workspace.fs.readFile(uri);
+					markdown = new TextDecoder().decode(data);
+					basePath = uri.fsPath.replace(/\.md$/i, '');
+				} else {
+					const editor = vscode.window.activeTextEditor;
+					if (!editor || editor.document.languageId !== 'markdown') {
+						vscode.window.showErrorMessage('No active Markdown file');
+						return;
+					}
+					markdown = editor.document.getText();
+					basePath = editor.document.uri.fsPath.replace(/\.md$/i, '');
+				}
 				
 				// Check for companion .bib file
 				let bibtex: string | undefined;

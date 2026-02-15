@@ -481,6 +481,16 @@
           "command": "manuscript-markdown.convertDocx",
           "when": "resourceExtname == .docx",
           "group": "9_export"
+        },
+        {
+          "command": "manuscript-markdown.exportToWord",
+          "when": "resourceExtname == .md",
+          "group": "9_export@1"
+        },
+        {
+          "command": "manuscript-markdown.exportToWordWithTemplate",
+          "when": "resourceExtname == .md",
+          "group": "9_export@2"
         }
       ]
     },
