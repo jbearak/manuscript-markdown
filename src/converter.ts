@@ -1092,6 +1092,14 @@ export function formatLocalIsoMinute(ts: string): string {
   return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}${sign}${pad(offsetHours)}:${pad(offsetMins)}`;
 }
 
+export function getLocalTimezoneOffset(): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const offsetMinutes = -new Date().getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? '+' : '-';
+  const absOffsetMinutes = Math.abs(offsetMinutes);
+  return `${sign}${pad(Math.floor(absOffsetMinutes / 60))}:${pad(absOffsetMinutes % 60)}`;
+}
+
 // BibTeX generation
 
 /**
@@ -1231,6 +1239,11 @@ export async function convertDocx(
     fm.csl = zoteroStyleShortName(zoteroPrefs.styleId);
     fm.locale = zoteroPrefs.locale;
     fm.noteType = zoteroPrefs.noteType !== undefined ? noteTypeFromNumber(zoteroPrefs.noteType) : undefined;
+  }
+  // Store the local timezone so md→docx can reconstruct UTC dates
+  const hasCommentDates = [...comments.values()].some(c => !!c.date);
+  if (hasCommentDates) {
+    fm.timezone = getLocalTimezoneOffset();
   }
   const frontmatterStr = serializeFrontmatter(fm);
   if (frontmatterStr) {

@@ -18,6 +18,7 @@ import {
   parseHeadingLevel,
   parseRunProperties,
   formatLocalIsoMinute,
+  getLocalTimezoneOffset,
   citationPandocKeys,
   ZoteroCitation,
 } from './converter';
@@ -226,6 +227,7 @@ describe('convertDocx (end-to-end)', () => {
   test('produces expected markdown', async () => {
     const result = await convertDocx(sampleData);
     const expectedMdLocal = expectedMd
+      .replace('{{TZ}}', getLocalTimezoneOffset())
       .replace('{{TS1}}', formatLocalIsoMinute('2025-01-15T10:30:00Z'))
       .replace('{{TS2}}', formatLocalIsoMinute('2025-01-16T14:00:00Z'))
       .replace('{{TS3}}', formatLocalIsoMinute('2025-01-17T09:15:00Z'));

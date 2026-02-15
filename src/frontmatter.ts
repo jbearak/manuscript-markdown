@@ -31,6 +31,7 @@ export interface Frontmatter {
   csl?: string;
   locale?: string;
   noteType?: NoteType;
+  timezone?: string;
 }
 
 /**
@@ -77,6 +78,9 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
         if (nt) metadata.noteType = nt;
         break;
       }
+      case 'timezone':
+        if (value) metadata.timezone = value;
+        break;
     }
   }
 
@@ -98,6 +102,7 @@ export function serializeFrontmatter(metadata: Frontmatter): string {
   if (metadata.csl) lines.push(`csl: ${metadata.csl}`);
   if (metadata.locale) lines.push(`locale: ${metadata.locale}`);
   if (metadata.noteType) lines.push(`note-type: ${metadata.noteType}`);
+  if (metadata.timezone) lines.push(`timezone: ${metadata.timezone}`);
   if (lines.length === 0) return '';
   return '---\n' + lines.join('\n') + '\n---\n';
 }
