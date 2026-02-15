@@ -42,10 +42,13 @@ export interface MdRun {
   display?: boolean;        // display math ($$...$$) vs inline ($...$)
 }
 
-const VALID_COLORS = new Set([
-  'yellow', 'green', 'turquoise', 'pink', 'blue', 'red', 'dark-blue', 
-  'teal', 'violet', 'dark-red', 'dark-yellow', 'gray-50', 'gray-25', 'black'
-]);
+// Map Manuscript Markdown color names to OOXML ST_HighlightColor values
+const COLOR_TO_OOXML: Record<string, string> = {
+  'yellow': 'yellow', 'green': 'green', 'blue': 'blue', 'red': 'red', 'black': 'black',
+  'turquoise': 'cyan', 'pink': 'magenta', 'dark-blue': 'darkBlue',
+  'teal': 'darkCyan', 'violet': 'darkMagenta', 'dark-red': 'darkRed',
+  'dark-yellow': 'darkYellow', 'gray-50': 'darkGray', 'gray-25': 'lightGray',
+};
 
 // Custom inline rules
 function criticMarkupRule(state: any, silent: boolean): boolean {
@@ -126,7 +129,7 @@ function coloredHighlightRule(state: any, silent: boolean): boolean {
     const colorEnd = state.src.indexOf('}', afterEnd + 1);
     if (colorEnd !== -1) {
       const color = state.src.slice(afterEnd + 1, colorEnd);
-      if (VALID_COLORS.has(color)) {
+      if (/^[a-z0-9-]+$/.test(color)) {
         if (!silent) {
           const content = state.src.slice(start + 2, endPos);
           const token = state.push('colored_highlight', '', 0);
@@ -960,7 +963,7 @@ export function generateRPr(run: MdRun): string {
   if (run.strikethrough) parts.push('<w:strike/>');
   if (run.underline) parts.push('<w:u w:val="single"/>');
   if (run.highlight) {
-    const color = run.highlightColor || 'yellow';
+    const color = COLOR_TO_OOXML[run.highlightColor || 'yellow'] || 'yellow';
     parts.push('<w:highlight w:val="' + color + '"/>');
   }
   if (run.superscript) parts.push('<w:vertAlign w:val="superscript"/>');
