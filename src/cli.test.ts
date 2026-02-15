@@ -3,7 +3,15 @@ import * as fc from 'fast-check';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { parseArgs, detectDirection, deriveDocxToMdPaths, deriveMdToDocxPath, resolveAuthor, CliOptions } from './cli';
+import {
+  parseArgs,
+  detectDirection,
+  deriveDocxToMdPaths,
+  deriveMdToDocxPath,
+  resolveAuthor,
+  assertNoDocxToMdConflicts,
+  assertNoMdToDocxConflict
+} from './cli';
 
 test('Property 1: Extension-based dispatch correctness', () => {
   fc.assert(
@@ -21,6 +29,18 @@ test('Property 1: Extension-based dispatch correctness', () => {
     ),
     { numRuns: 100 }
   );
+});
+
+test('path derivation strips extension case-insensitively', () => {
+  const derivedDocx = deriveDocxToMdPaths('/tmp/paper.DOCX');
+  expect(derivedDocx.mdPath).toBe('/tmp/paper.md');
+  expect(derivedDocx.bibPath).toBe('/tmp/paper.bib');
+
+  const derivedDocxWithOutput = deriveDocxToMdPaths('/tmp/paper.DOCX', '/tmp/output.MD');
+  expect(derivedDocxWithOutput.mdPath).toBe('/tmp/output.md');
+  expect(derivedDocxWithOutput.bibPath).toBe('/tmp/output.bib');
+
+  expect(deriveMdToDocxPath('/tmp/paper.MD')).toBe('/tmp/paper.docx');
 });
 
 test('Property 2: Argument parser preserves all flag values', () => {
@@ -94,6 +114,22 @@ test('parseArgs throws on invalid mixed citation style', () => {
   expect(() => parseArgs(['node', 'cli.js', 'test.md', '--mixed-citation-style', 'invalid']))
     .toThrow('Invalid mixed citation style "invalid". Use separate or unified');
 });
+test('parseArgs throws when value-taking flags are missing values', () => {
+  const valueFlags = [
+    '--output',
+    '--citation-key-format',
+    '--bib',
+    '--template',
+    '--author',
+    '--mixed-citation-style',
+    '--csl-cache-dir'
+  ];
+
+  for (const flag of valueFlags) {
+    expect(() => parseArgs(['node', 'cli.js', 'test.md', flag])).toThrow(`${flag} requires a value`);
+    expect(() => parseArgs(['node', 'cli.js', 'test.md', flag, '--force'])).toThrow(`${flag} requires a value`);
+  }
+});
 
 test('parseArgs throws when no input specified', () => {
   expect(() => parseArgs(['node', 'cli.js'])).toThrow('No input file specified');
@@ -109,7 +145,7 @@ test('Property 3: Output path derivation with --output override', () => {
         const result = deriveDocxToMdPaths(inputPath, outputPath);
         
         if (outputPath) {
-          const expectedBase = outputPath.replace(/\.md$/, '');
+          const expectedBase = outputPath.replace(/\.md$/i, '');
           expect(result.mdPath).toBe(expectedBase + '.md');
           expect(result.bibPath).toBe(expectedBase + '.bib');
         } else {
@@ -137,30 +173,10 @@ test('Property 5: Dual conflict reporting for DOCX→MD', () => {
           // Create conflicting files
           fs.writeFileSync(mdPath, 'test');
           fs.writeFileSync(bibPath, 'test');
-          
-          const options: CliOptions = {
-            help: false,
-            version: false,
-            inputPath,
-            force: false,
-            citationKeyFormat: 'authorYearTitle',
-            mixedCitationStyle: 'separate',
-            cslCacheDir: ''
-          };
-          
-          expect(() => {
-            const { deriveDocxToMdPaths } = require('./cli');
-            const { mdPath: derivedMd, bibPath: derivedBib } = deriveDocxToMdPaths(inputPath);
-            
-            if (!options.force) {
-              const conflicts: string[] = [];
-              if (fs.existsSync(derivedMd)) conflicts.push(derivedMd);
-              if (fs.existsSync(derivedBib)) conflicts.push(derivedBib);
-              if (conflicts.length > 0) {
-                throw new Error(`Output file(s) already exist: ${conflicts.join(', ')}\nUse --force to overwrite`);
-              }
-            }
-          }).toThrow(/Output file\(s\) already exist:.*\.md.*\.bib/);
+
+          const { mdPath: derivedMd, bibPath: derivedBib } = deriveDocxToMdPaths(inputPath);
+          expect(() => assertNoDocxToMdConflicts(derivedMd, derivedBib, false))
+            .toThrow(/Output file\(s\) already exist:.*\.md.*\.bib/);
           
           // Clean up for next iteration
           fs.unlinkSync(mdPath);
@@ -191,18 +207,11 @@ test('Property 4: Conflict detection respects --force', () => {
           
           if (force) {
             // Should not throw when force=true
-            expect(() => {
-              if (!force && fs.existsSync(docxPath)) {
-                throw new Error(`Output file already exists: ${docxPath}\nUse --force to overwrite`);
-              }
-            }).not.toThrow();
+            expect(() => assertNoMdToDocxConflict(docxPath, force)).not.toThrow();
           } else {
             // Should throw when force=false
-            expect(() => {
-              if (!force && fs.existsSync(docxPath)) {
-                throw new Error(`Output file already exists: ${docxPath}\nUse --force to overwrite`);
-              }
-            }).toThrow(/Output file already exists:.*\.docx/);
+            expect(() => assertNoMdToDocxConflict(docxPath, force))
+              .toThrow(/Output file already exists:.*\.docx/);
           }
           
           // Clean up for next iteration
