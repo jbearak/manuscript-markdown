@@ -6,6 +6,7 @@ import { manuscriptMarkdownPlugin } from './preview/manuscript-markdown-plugin';
 import { WordCountController } from './wordcount';
 import { convertDocx, CitationKeyFormat } from './converter';
 import { convertMdToDocx } from './md-to-docx';
+import * as path from 'path';
 import {
 	getOutputBasePath,
 	getOutputConflictMessage,
@@ -216,7 +217,7 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
 		vscode.commands.registerCommand('manuscript-markdown.exportToWord', async (uri?: vscode.Uri) => {
 			try {
-				await exportMdToDocx(uri);
+				await exportMdToDocx(context, uri);
 			} catch (err: any) {
 				vscode.window.showErrorMessage('Export to Word failed: ' + err.message);
 			}
@@ -237,7 +238,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 				const templateData = await vscode.workspace.fs.readFile(templateFiles[0]);
 				const templateDocx = new Uint8Array(templateData);
-				await exportMdToDocx(uri, templateDocx);
+				await exportMdToDocx(context, uri, templateDocx);
 			} catch (err: any) {
 				vscode.window.showErrorMessage('Export to Word failed: ' + err.message);
 			}
@@ -636,17 +637,27 @@ async function resolveDocxOutputUri(basePath: string): Promise<vscode.Uri | unde
 	return docxUri;
 }
 
-async function exportMdToDocx(uri?: vscode.Uri, templateDocx?: Uint8Array): Promise<void> {
+async function exportMdToDocx(context: vscode.ExtensionContext, uri?: vscode.Uri, templateDocx?: Uint8Array): Promise<void> {
 	const input = await getMdExportInput(uri);
 	if (!input) {
 		return;
 	}
 
 	const authorName = author.getAuthorName();
+	const cslCacheDir = path.join(context.globalStorageUri.fsPath, 'csl-styles');
 	const result = await convertMdToDocx(input.markdown, {
 		bibtex: input.bibtex,
 		authorName: authorName ?? undefined,
-		templateDocx
+		templateDocx,
+		cslCacheDir,
+		onStyleNotFound: async (styleName: string) => {
+			const choice = await vscode.window.showWarningMessage(
+				`CSL style "${styleName}" is not bundled. Would you like to download it from the CSL repository?`,
+				'Download',
+				'Skip'
+			);
+			return choice === 'Download';
+		}
 	});
 
 	const docxUri = await resolveDocxOutputUri(input.basePath);

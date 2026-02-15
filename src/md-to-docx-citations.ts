@@ -1,6 +1,6 @@
 import { BibtexEntry } from './bibtex-parser';
 import { latexToOmml } from './latex-to-omml';
-import { loadStyle, loadLocale } from './csl-loader';
+import { loadStyle, loadStyleAsync, loadLocale } from './csl-loader';
 
 // citeproc is a CommonJS module exporting the CSL namespace
 let CSL: any;
@@ -19,10 +19,15 @@ export function escapeXml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+export interface CreateEngineResult {
+  engine?: any;
+  styleNotFound?: boolean;
+}
+
 /**
  * Create a citeproc CSL.Engine instance from BibTeX entries, a CSL style name,
  * and an optional locale.  Returns undefined if citeproc is not available or
- * the style cannot be loaded.
+ * the style cannot be loaded synchronously (bundled/local only).
  */
 export function createCiteprocEngine(
   entries: Map<string, BibtexEntry>,
@@ -38,6 +43,60 @@ export function createCiteprocEngine(
     return undefined;
   }
 
+  return buildEngine(entries, styleXml, locale);
+}
+
+/**
+ * Try to create a citeproc engine using only bundled/local styles (no download).
+ * Returns `{ engine }` on success, or `{ styleNotFound: true }` if the style
+ * is not available locally.
+ */
+export function createCiteprocEngineLocal(
+  entries: Map<string, BibtexEntry>,
+  styleName: string,
+  locale?: string
+): CreateEngineResult {
+  if (!CSL) return {};
+
+  let styleXml: string;
+  try {
+    styleXml = loadStyle(styleName);
+  } catch {
+    return { styleNotFound: true };
+  }
+
+  const engine = buildEngine(entries, styleXml, locale);
+  return engine ? { engine } : {};
+}
+
+/**
+ * Async version that tries to download the style if not bundled.
+ * Returns `{ engine }` on success, or `{ styleNotFound: true }` if the
+ * style could not be found or downloaded.
+ */
+export async function createCiteprocEngineAsync(
+  entries: Map<string, BibtexEntry>,
+  styleName: string,
+  locale?: string
+): Promise<CreateEngineResult> {
+  if (!CSL) return {};
+
+  let styleXml: string;
+  try {
+    styleXml = await loadStyleAsync(styleName);
+  } catch {
+    return { styleNotFound: true };
+  }
+
+  const engine = buildEngine(entries, styleXml, locale);
+  return engine ? { engine } : {};
+}
+
+function buildEngine(
+  entries: Map<string, BibtexEntry>,
+  styleXml: string,
+  locale?: string
+): any | undefined {
   // Build CSL-JSON item map keyed by citation key
   const items = new Map<string, any>();
   for (const [key, entry] of entries) {

@@ -1,5 +1,8 @@
 import MarkdownIt from 'markdown-it';
-import { escapeXml, generateCitation, generateMathXml, createCiteprocEngine, generateBibliographyXml } from './md-to-docx-citations';
+import { escapeXml, generateCitation, generateMathXml, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml } from './md-to-docx-citations';
+import { downloadStyle } from './csl-loader';
+import { existsSync } from 'fs';
+import { join } from 'path';
 import { parseBibtex, BibtexEntry } from './bibtex-parser';
 import { parseFrontmatter, Frontmatter } from './frontmatter';
 import { ZoteroBiblData, zoteroStyleFullId } from './converter';
@@ -783,6 +786,11 @@ export interface MdToDocxOptions {
   authorName?: string;
   templateDocx?: Uint8Array;
   zoteroBiblData?: ZoteroBiblData;
+  /** Directory for caching downloaded CSL styles (e.g. VS Code global storage). */
+  cslCacheDir?: string;
+  /** Called when a CSL style is not bundled or found locally.
+   *  Return true to attempt downloading from the CSL repository. */
+  onStyleNotFound?: (styleName: string) => Promise<boolean>;
 }
 
 export interface MdToDocxResult {
@@ -1263,8 +1271,47 @@ export async function convertMdToDocx(
 
   // Create citeproc engine if CSL style specified in frontmatter
   let citeprocEngine: any;
+  const earlyWarnings: string[] = [];
   if (frontmatter.csl && bibEntries) {
-    citeprocEngine = createCiteprocEngine(bibEntries, frontmatter.csl, frontmatter.locale);
+    const styleName = frontmatter.csl;
+
+    // 1. Try bundled styles
+    let result = createCiteprocEngineLocal(bibEntries, styleName, frontmatter.locale);
+
+    // 2. Try CSL cache directory (e.g. VS Code global storage)
+    if (result.styleNotFound && options?.cslCacheDir) {
+      const cachedPath = join(options.cslCacheDir, styleName + '.csl');
+      if (existsSync(cachedPath)) {
+        result = createCiteprocEngineLocal(bibEntries, cachedPath, frontmatter.locale);
+      }
+    }
+
+    // 3. Ask user whether to download
+    if (result.styleNotFound) {
+      let shouldDownload = false;
+      if (options?.onStyleNotFound) {
+        shouldDownload = await options.onStyleNotFound(styleName);
+      }
+      if (shouldDownload && options?.cslCacheDir) {
+        try {
+          await downloadStyle(styleName, options.cslCacheDir);
+          const downloadedPath = join(options.cslCacheDir, styleName + '.csl');
+          result = createCiteprocEngineLocal(bibEntries, downloadedPath, frontmatter.locale);
+        } catch {
+          earlyWarnings.push(`CSL style "${styleName}" could not be downloaded. Export completed without CSL citation formatting.`);
+        }
+      } else if (shouldDownload) {
+        // No cslCacheDir — fall back to async download into bundled dir
+        result = await createCiteprocEngineAsync(bibEntries, styleName, frontmatter.locale);
+        if (result.styleNotFound) {
+          earlyWarnings.push(`CSL style "${styleName}" could not be downloaded. Export completed without CSL citation formatting.`);
+        }
+      } else {
+        earlyWarnings.push(`CSL style "${styleName}" is not bundled. Export completed without CSL citation formatting.`);
+      }
+    }
+
+    citeprocEngine = result.engine;
   }
 
   // Extract template parts if provided
@@ -1284,7 +1331,7 @@ export async function convertMdToDocx(
     relationships: new Map(),
     nextRId: 1,
     rIdOffset,
-    warnings: [],
+    warnings: [...earlyWarnings],
     hasList: false,
     hasComments: false,
   };
