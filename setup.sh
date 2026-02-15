@@ -49,6 +49,21 @@ bunx vsce package
 echo -e "${GREEN}✓ VSIX package built${NC}"
 echo ""
 
+# Step 3b: Build CLI binary
+echo "Building CLI binary..."
+if bun build src/cli.ts --compile --outfile dist/manuscript-markdown; then
+  echo -e "${GREEN}✓ CLI binary built${NC}"
+  
+  # Install CLI to ~/bin
+  mkdir -p ~/bin
+  cp dist/manuscript-markdown ~/bin/manuscript-markdown
+  chmod +x ~/bin/manuscript-markdown
+  echo -e "${GREEN}✓ CLI installed to ~/bin/manuscript-markdown${NC}"
+else
+  echo -e "${RED}CLI compilation failed (continuing with extension install)${NC}" >&2
+fi
+echo ""
+
 # Find the newest VSIX file
 VERSION=$(node -p "require('./package.json').version")
 VSIX_FILE="manuscript-markdown-${VERSION}.vsix"
@@ -88,3 +103,10 @@ echo ""
 
 echo "=== Setup Complete ==="
 echo "Extension: $VSIX_FILE"
+if [ -f "$HOME/bin/manuscript-markdown" ]; then
+  echo "CLI: ~/bin/manuscript-markdown"
+  case ":$PATH:" in
+    *":$HOME/bin:"*) ;;
+    *) echo -e "${YELLOW}Note: Add ~/bin to your PATH if not already present${NC}" ;;
+  esac
+fi

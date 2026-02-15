@@ -29,6 +29,15 @@ Install from the [releases page](https://github.com/jbearak/manuscript-markdown/
 - **DOCX Conversion**: Right-click a `.docx` file and select **Export to Markdown**, or use the **Export to Word** submenu to convert Markdown back to DOCX
 - **Navigation**: Use `Alt+Shift+J` / `Alt+Shift+K` to jump between changes
 
+### CLI
+
+A standalone CLI tool is also available for terminal-based conversion. See [CLI Tool](docs/cli.md) for details.
+
+```sh
+manuscript-markdown paper.docx    # DOCX → Markdown
+manuscript-markdown paper.md      # Markdown → DOCX
+```
+
 ## Features
 
 - CriticMarkup annotations with comment attribution and timestamps
@@ -55,6 +64,7 @@ Install from the [releases page](https://github.com/jbearak/manuscript-markdown/
 - [Custom Extensions](docs/custom-extensions.md)
 - [DOCX Converter](docs/converter.md)
 - [Zotero Citation Roundtrip](docs/zotero-roundtrip.md)
+- [CLI Tool](docs/cli.md)
 - [Development Guide](docs/development.md)
 
 ## License
