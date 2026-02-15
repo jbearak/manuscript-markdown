@@ -805,13 +805,15 @@ interface CommentEntry {
   text: string;
 }
 
-function contentTypesXml(hasList: boolean, hasComments: boolean, hasTheme?: boolean, hasSettings?: boolean): string {
+function contentTypesXml(hasList: boolean, hasComments: boolean, hasTheme?: boolean): string {
   let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
   xml += '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n';
   xml += '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n';
   xml += '<Default Extension="xml" ContentType="application/xml"/>\n';
   xml += '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>\n';
   xml += '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>\n';
+  xml += '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>\n';
+  xml += '<Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/>\n';
   if (hasList) {
     xml += '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>\n';
   }
@@ -821,9 +823,8 @@ function contentTypesXml(hasList: boolean, hasComments: boolean, hasTheme?: bool
   if (hasTheme) {
     xml += '<Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>\n';
   }
-  if (hasSettings) {
-    xml += '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>\n';
-  }
+  xml += '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>\n';
+  xml += '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>\n';
   xml += '</Types>';
   return xml;
 }
@@ -832,6 +833,8 @@ function relsXml(): string {
   return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n' +
     '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>\n' +
+    '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>\n' +
+    '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>\n' +
     '</Relationships>';
 }
 
@@ -930,32 +933,69 @@ function numberingXml(): string {
     '</w:numbering>';
 }
 
-function documentRelsXml(relationships: Map<string, string>, hasList: boolean, hasComments: boolean, hasTheme?: boolean, hasSettings?: boolean): string {
+function settingsXml(): string {
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+    '<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="w14 w15">\n' +
+    '<w:compat>\n' +
+    '<w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/>\n' +
+    '</w:compat>\n' +
+    '<w:defaultTabStop w:val="720"/>\n' +
+    '<w:characterSpacingControl w:val="doNotCompress"/>\n' +
+    '</w:settings>';
+}
+
+function fontTableXml(): string {
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+    '<w:fonts xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">\n' +
+    '<w:font w:name="Calibri"><w:panose1 w:val="020F0502020204030204"/><w:charset w:val="00"/><w:family w:val="swiss"/><w:pitch w:val="variable"/></w:font>\n' +
+    '<w:font w:name="Times New Roman"><w:panose1 w:val="02020603050405020304"/><w:charset w:val="00"/><w:family w:val="roman"/><w:pitch w:val="variable"/></w:font>\n' +
+    '<w:font w:name="Courier New"><w:panose1 w:val="02070309020205020404"/><w:charset w:val="00"/><w:family w:val="modern"/><w:pitch w:val="fixed"/></w:font>\n' +
+    '</w:fonts>';
+}
+
+function corePropsXml(): string {
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+    '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n' +
+    '<dc:creator>Manuscript Markup</dc:creator>\n' +
+    '<dcterms:created xsi:type="dcterms:W3CDTF">' + now + '</dcterms:created>\n' +
+    '<dcterms:modified xsi:type="dcterms:W3CDTF">' + now + '</dcterms:modified>\n' +
+    '</cp:coreProperties>';
+}
+
+function appPropsXml(): string {
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+    '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties">\n' +
+    '<Application>Manuscript Markup</Application>\n' +
+    '</Properties>';
+}
+
+function documentRelsXml(relationships: Map<string, string>, hasList: boolean, hasComments: boolean, hasTheme?: boolean): string {
   let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
   xml += '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n';
   xml += '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>\n';
-  
+
   if (hasList) {
     xml += '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>\n';
   }
-  
+
   if (hasComments) {
     xml += '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>\n';
   }
-  
+
   let nextFixed = 4;
   if (hasTheme) {
     xml += '<Relationship Id="rId' + nextFixed + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>\n';
     nextFixed++;
   }
-  if (hasSettings) {
-    xml += '<Relationship Id="rId' + nextFixed + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>\n';
-  }
-  
+  xml += '<Relationship Id="rId' + nextFixed + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>\n';
+  nextFixed++;
+  xml += '<Relationship Id="rId' + nextFixed + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/>\n';
+
   for (const [url, relId] of relationships) {
     xml += '<Relationship Id="' + relId + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="' + escapeXml(url) + '" TargetMode="External"/>\n';
   }
-  
+
   xml += '</Relationships>';
   return xml;
 }
@@ -1151,7 +1191,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   }
   
   return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
-    '<w:document xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wpi="http://schemas.microsoft.com/office/word/2010/wordprocessingInk" xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" mc:Ignorable="w14 wp14">\n' +
+    '<w:document xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wpi="http://schemas.microsoft.com/office/word/2010/wordprocessingInk" xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" mc:Ignorable="w14 w15 wp14">\n' +
     '<w:body>\n' + body + '\n</w:body>\n' +
     '</w:document>';
 }
@@ -1175,11 +1215,10 @@ export async function convertMdToDocx(
   }
   
   const hasTheme = !!templateParts?.has('word/theme/theme1.xml');
-  const hasSettings = !!templateParts?.has('word/settings.xml');
-  
-  // Reserve rId slots: 1=styles, 2=numbering, 3=comments, 4+=theme/settings
-  const rIdOffset = 3 + (hasTheme ? 1 : 0) + (hasSettings ? 1 : 0);
-  
+
+  // Reserve rId slots: 1=styles, 2=numbering, 3=comments, 4+=theme/settings/fontTable
+  const rIdOffset = 3 + (hasTheme ? 1 : 0) + 2; // +2 for settings and fontTable (always present)
+
   const state: DocxGenState = {
     commentId: 0,
     comments: [],
@@ -1190,22 +1229,32 @@ export async function convertMdToDocx(
     hasList: false,
     hasComments: false,
   };
-  
+
   const documentXml = generateDocumentXml(tokens, state, options, bibEntries);
-  
+
   const JSZip = (await import('jszip')).default;
   const zip = new JSZip();
-  zip.file('[Content_Types].xml', contentTypesXml(state.hasList, state.hasComments, hasTheme, hasSettings));
+  zip.file('[Content_Types].xml', contentTypesXml(state.hasList, state.hasComments, hasTheme));
   zip.file('_rels/.rels', relsXml());
   zip.file('word/document.xml', documentXml);
-  
+
   // Use template styles if available, otherwise default
   if (templateParts?.has('word/styles.xml')) {
     zip.file('word/styles.xml', templateParts.get('word/styles.xml')!);
   } else {
     zip.file('word/styles.xml', stylesXml());
   }
-  
+
+  // Always include settings.xml (with compatibilityMode=15) - use template if available
+  if (templateParts?.has('word/settings.xml')) {
+    zip.file('word/settings.xml', templateParts.get('word/settings.xml')!);
+  } else {
+    zip.file('word/settings.xml', settingsXml());
+  }
+
+  // Always include fontTable.xml
+  zip.file('word/fontTable.xml', fontTableXml());
+
   // Handle numbering - use template as base but ensure bullet/decimal definitions exist
   if (state.hasList) {
     if (templateParts?.has('word/numbering.xml')) {
@@ -1214,19 +1263,21 @@ export async function convertMdToDocx(
       zip.file('word/numbering.xml', numberingXml());
     }
   }
-  
-  // Include template theme and settings if available
+
+  // Include template theme if available
   if (hasTheme) {
     zip.file('word/theme/theme1.xml', templateParts!.get('word/theme/theme1.xml')!);
   }
-  if (hasSettings) {
-    zip.file('word/settings.xml', templateParts!.get('word/settings.xml')!);
-  }
-  
+
   if (state.hasComments) {
     zip.file('word/comments.xml', commentsXml(state.comments));
   }
-  zip.file('word/_rels/document.xml.rels', documentRelsXml(state.relationships, state.hasList, state.hasComments, hasTheme, hasSettings));
+
+  // Document properties
+  zip.file('docProps/core.xml', corePropsXml());
+  zip.file('docProps/app.xml', appPropsXml());
+
+  zip.file('word/_rels/document.xml.rels', documentRelsXml(state.relationships, state.hasList, state.hasComments, hasTheme));
   
   const docx = await zip.generateAsync({ type: 'uint8array' });
   return { docx, warnings: state.warnings };
