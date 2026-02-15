@@ -92,7 +92,6 @@ jobs:
             exit 1
           fi
 
-          BUILD_RUN_ID=$(echo "$ARTIFACT_INFO" | jq -r '.run_id')
           echo "Found artifact in build run: $BUILD_RUN_ID"
           gh run download "$BUILD_RUN_ID" --name "$ARTIFACT_NAME"
           echo "Downloaded artifact contents:"
