@@ -80,16 +80,18 @@ Field codes are stored in `word/document.xml` as complex fields:
 ### Data Flow
 
 ```text
-DOCX → Extract → Markdown + BibTeX
+DOCX → Extract → Markdown (with YAML frontmatter) + BibTeX
                      ↓
                   (Edit)
                      ↓
 Markdown + BibTeX → Reconstruct → DOCX
 ```
 
+On extraction, Zotero document preferences (CSL style, locale, note type) are preserved as YAML frontmatter at the top of the Markdown file. On reconstruction, these are used to format citations with citeproc-js and written back to `docProps/custom.xml` as `ZOTERO_PREF_*` properties.
+
 ### File Outputs
 
-1. **`{base}.md`**: Markdown with `[@citationKey]` citations (locators inline)
+1. **`{base}.md`**: Markdown with `[@citationKey]` citations (locators inline), YAML frontmatter with `csl`, `locale`, `note-type`
 2. **`{base}.bib`**: BibTeX with `zotero-key` and `zotero-uri` fields (single source of truth)
 
 ### Extended BibTeX Format
@@ -134,15 +136,19 @@ Markdown + BibTeX → Reconstruct → DOCX
 4. **Update markdown citation output**
    - Emit `[@key, p. 20]` when locator is present
 
-### Phase 2: Reconstruction (md→docx) — Future Work
+### Phase 2: Reconstruction (md→docx)
 
-This phase is out of scope for the current spec but requires:
-- Parse BibTeX `zotero-key` and `zotero-uri` fields
-- Map `[@citationKey]` back to Zotero item keys via BibTeX lookup
-- Parse locators from Pandoc citation syntax
-- Reconstruct `ZOTERO_ITEM` field codes with CSL-JSON from BibTeX metadata
-- Reconstruct `ZOTERO_BIBL` field code
-- Generate DOCX with proper field code XML structure
+Reconstruction is fully implemented:
+
+1. **Citation field codes**: `[@key]` citations are mapped back to Zotero item keys via BibTeX `zotero-key` and `zotero-uri` fields, and reconstructed as `ADDIN ZOTERO_ITEM CSL_CITATION` field codes with full CSL-JSON `itemData`.
+
+2. **CSL-formatted visible text**: When the Markdown frontmatter contains a `csl` field (e.g., `csl: bmj`), [citeproc-js](https://github.com/Juris-M/citeproc-js) renders the citation text according to the style (e.g., `[1]` for numeric, `(Smith 2020)` for author-date). Without a `csl` field, a plain fallback `(Author Year)` is used.
+
+3. **Bibliography**: A `ZOTERO_BIBL` field code is appended at the end of the document with the rendered bibliography.
+
+4. **Document preferences**: The `csl`, `locale`, and `note-type` frontmatter fields are written to `docProps/custom.xml` as `ZOTERO_PREF_*` properties (dataVersion 4 JSON format), so Zotero can recognize and manage the document after export.
+
+5. **Locators**: Pandoc locator syntax (`[@key, p. 20]`) is parsed and included in the citation field code's `locator` and `label` fields.
 
 ## Testing
 

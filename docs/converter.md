@@ -10,6 +10,8 @@ The DOCX converter transforms Microsoft Word documents into Manuscript Markdown 
 - **Comments**: converted to CriticMarkup `{==highlighted text==}{>>author: comment<<}` format
 - **Track changes**: insertions and deletions mapped to CriticMarkup `{++...++}` and `{--...--}`
 - **Citations**: Zotero field codes converted to Pandoc `[@key]` syntax with BibTeX export
+- **Zotero document preferences**: CSL style, locale, and note type extracted and preserved as YAML frontmatter (`csl`, `locale`, `note-type`)
+- **Bibliography fields**: `ZOTERO_BIBL` field codes detected and omitted from Markdown output (bibliography is regenerated on export)
 - **Math**: OMML equations converted to LaTeX (`$inline$` and `$$display$$`)
 - **Hyperlinks**: preserved as Markdown links with proper escaping
 - **Highlights**: colored highlights converted to `==text=={color}` syntax
@@ -52,6 +54,32 @@ The converter also supports exporting Markdown back to DOCX, completing the roun
 
 If a companion `.bib` file exists with the same base name, it is automatically loaded for citation resolution.
 
+### YAML Frontmatter
+
+When the Markdown file includes YAML frontmatter with a `csl` field, the converter uses [citeproc-js](https://github.com/Juris-M/citeproc-js) to format citations and bibliography according to the specified CSL style. This frontmatter is generated automatically when converting from DOCX (if the source document has Zotero preferences), but you can also add or change it manually:
+
+```yaml
+---
+csl: apa
+locale: en-US
+note-type: 0
+---
+```
+
+| Field | Description |
+|-------|-------------|
+| `csl` | CSL style short name (e.g., `apa`, `chicago-author-date`, `bmj`) or absolute path to a `.csl` file |
+| `locale` | Optional locale override (e.g., `en-US`, `en-GB`). Defaults to the style's own locale. |
+| `note-type` | Optional Zotero note type (`0` = in-text, `1` = footnotes, `2` = endnotes). Defaults to `0`. |
+
+#### Bundled CSL styles
+
+The following 16 styles are bundled and available without downloading:
+
+`apa`, `bmj`, `chicago-author-date`, `chicago-fullnote-bibliography`, `chicago-note-bibliography`, `modern-language-association`, `ieee`, `nature`, `cell`, `science`, `american-medical-association`, `american-chemical-society`, `american-political-science-association`, `american-sociological-association`, `vancouver`, `harvard-cite-them-right`
+
+If a style is not bundled, you will be prompted to download it from the [CSL styles repository](https://github.com/citation-style-language/styles-distribution). Downloaded styles are cached in VS Code's global storage for reuse across workspaces.
+
 ### What's Exported
 
 - **Text formatting**: bold, italic, underline, strikethrough, superscript, subscript, highlights (including colored)
@@ -63,7 +91,9 @@ If a companion `.bib` file exists with the same base name, it is automatically l
 - **Tables**: pipe-delimited tables with header formatting and borders
 - **Track changes**: CriticMarkup additions/deletions/substitutions mapped to Word revisions (`w:ins`/`w:del`)
 - **Comments**: CriticMarkup comments mapped to Word comments with author and date
-- **Citations**: Pandoc `[@key]` citations reconstructed as Zotero field codes when BibTeX contains `zotero-key` and `zotero-uri` fields
+- **Citations**: Pandoc `[@key]` citations reconstructed as Zotero field codes when BibTeX contains `zotero-key` and `zotero-uri` fields; visible text formatted by the CSL style if `csl` frontmatter is present
+- **Bibliography**: automatically generated and appended as a `ZOTERO_BIBL` field when a CSL style is specified
+- **Zotero document preferences**: `csl`, `locale`, and `note-type` from frontmatter written to `docProps/custom.xml` as `ZOTERO_PREF_*` properties, so Zotero can manage the document after export
 - **Math**: LaTeX equations converted to OMML (inline and display)
 
 ### Template Support

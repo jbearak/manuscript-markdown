@@ -38,6 +38,7 @@ Download from the [VS Code Marketplace](https://marketplace.visualstudio.com/ite
 - DOCX to Markdown conversion preserving formatting, comments, and citations
 - Markdown to DOCX export with template support and Zotero field code reconstruction
 - Zotero citation roundtrip with BibTeX export
+- CSL citation style support — citations and bibliographies formatted according to any [CSL style](https://citationstyles.org/) (APA, Chicago, BMJ, IEEE, etc.) with 16 bundled styles and on-demand downloading of 10,000+ others
 - Colored highlights with 14 color options
 - Syntax highlighting and Markdown preview rendering
 - Word count in status bar
