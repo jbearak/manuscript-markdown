@@ -51,8 +51,9 @@ describe('getLocalTimezoneOffset', () => {
 
   test('matches formatLocalIsoMinute offset', () => {
     const tz = getLocalTimezoneOffset();
-    const formatted = formatLocalIsoMinute('2024-06-15T12:00:00Z');
-    expect(formatted).toContain(tz);
+    const now = new Date().toISOString();
+    const formatted = formatLocalIsoMinute(now);
+    expect(formatted.slice(-6)).toBe(tz);
   });
 });
 

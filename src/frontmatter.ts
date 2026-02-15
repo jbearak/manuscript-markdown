@@ -79,7 +79,7 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
         break;
       }
       case 'timezone':
-        if (value) metadata.timezone = value;
+        if (value && /^[+-]\d{2}:\d{2}$/.test(value)) metadata.timezone = value;
         break;
     }
   }
