@@ -84,6 +84,19 @@ describe('latexToOmml', () => {
     expect(result).toBe('<m:d><m:dPr><m:begChr m:val="("/><m:endChr m:val=")"/></m:dPr><m:e><m:r><m:t>x</m:t></m:r></m:e></m:d>');
   });
 
+  test('delimiter parsing preserves trailing text after \\right delimiter', () => {
+    const result = latexToOmml('\\left(a\\right)+c');
+    expect(result).toContain('<m:d><m:dPr><m:begChr m:val="("/><m:endChr m:val=")"/></m:dPr>');
+    expect(result).toContain('</m:d><m:r><m:t>+</m:t></m:r><m:r><m:t>c</m:t></m:r>');
+  });
+
+  test('delimiter parsing handles scripts inside delimiters as math scripts', () => {
+    const result = latexToOmml('\\left(x^2\\right)');
+    expect(result).toContain('<m:d>');
+    expect(result).toContain('<m:sSup>');
+    expect(result).not.toContain('<m:t>^</m:t>');
+  });
+
   test('accents', () => {
     const result = latexToOmml('\\hat{x}');
     expect(result).toBe('<m:acc><m:accPr><m:chr m:val="ˆ"/></m:accPr><m:e><m:r><m:t>x</m:t></m:r></m:e></m:acc>');

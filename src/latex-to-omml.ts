@@ -350,7 +350,7 @@ class Parser {
       begChr = leftToken.value.charAt(0);
       const remaining = leftToken.value.slice(1);
       if (remaining) {
-        content = makeRun(remaining);
+        this.tokens.splice(this.pos, 0, { type: 'text', value: remaining, pos: leftToken.pos });
       }
     } else if (leftToken.type === 'command') {
       switch (leftToken.value) {
@@ -364,11 +364,15 @@ class Parser {
     // Parse any additional content until \right
     content += this.parseUntilRight();
     
-    const rightToken = this.consume(); // consume \right
+    this.consume(); // consume \\right
     const delimToken = this.consume();
     let endChr = ')';
     if (delimToken?.type === 'text') {
       endChr = delimToken.value.charAt(0);
+      const remaining = delimToken.value.slice(1);
+      if (remaining) {
+        this.tokens.splice(this.pos, 0, { type: 'text', value: remaining, pos: delimToken.pos });
+      }
     } else if (delimToken?.type === 'command') {
       switch (delimToken.value) {
         case '\\}': endChr = '}'; break;
@@ -382,12 +386,29 @@ class Parser {
   }
 
   private parseUntilRight(): string {
-    let content = '';
+    const atoms: string[] = [];
     while (this.peek() && !(this.peek()?.type === 'command' && this.peek()?.value === '\\right')) {
-      const token = this.consume()!;
-      content += this.parseToken(token);
+      const token = this.peek();
+      if (token?.type === 'caret' || token?.type === 'underscore') {
+        if (atoms.length === 0) {
+          const consumed = this.consume()!;
+          atoms.push(this.parseToken(consumed));
+          continue;
+        }
+        const base = atoms.pop()!;
+        atoms.push(this.parseScriptsForBase(base));
+      } else {
+        const consumed = this.consume()!;
+        if (consumed.type === 'text' && consumed.value.length > 1) {
+          for (const ch of consumed.value) {
+            atoms.push(makeRun(ch));
+          }
+        } else {
+          atoms.push(this.parseToken(consumed));
+        }
+      }
     }
-    return content;
+    return atoms.join('');
   }
 
   private parseEnvironment(): string {
