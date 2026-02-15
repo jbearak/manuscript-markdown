@@ -89,3 +89,4 @@ Code (authoritative for behavior):
 - OMML text extraction: `<m:t>` content is XML-escaped; unescape entities before passing it back through `escapeXmlChars()` to avoid double-escaping (e.g. `&amp;` → `&amp;amp;`)
 - CLI flag parsing: For value-taking flags, validate both missing-next-arg and next-token-is-another-flag (`--...`) before consuming; otherwise `args[++i]` can silently propagate `undefined` into downstream file I/O
 - CLI output path derivation: If extension detection is case-insensitive, derive basenames by stripping `path.extname(inputPath)` (actual-case extension) rather than a hard-coded lowercase suffix to avoid doubled extensions like `.DOCX.md`
+- CLI DOCX→MD conflicts: Preserve the up-front combined `.md` + `.bib` conflict check so when both exist, one error reports both paths (Requirement 3.3) instead of surfacing them in separate runs

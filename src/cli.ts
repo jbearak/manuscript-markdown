@@ -150,15 +150,10 @@ async function runDocxToMd(options: CliOptions) {
   const data = new Uint8Array(fs.readFileSync(options.inputPath));
 
   const { mdPath, bibPath } = deriveDocxToMdPaths(options.inputPath, options.outputPath);
-  // Check markdown output conflict before conversion.
-  assertNoDocxToMdConflicts(mdPath, bibPath, options.force, { checkMd: true, checkBib: false });
+  // Check output conflicts up-front so dual conflicts are reported together.
+  assertNoDocxToMdConflicts(mdPath, bibPath, options.force);
 
   const result = await convertDocx(data, options.citationKeyFormat);
-
-  // Check bib output conflict only when a bib file would be written.
-  if (result.bibtex) {
-    assertNoDocxToMdConflicts(mdPath, bibPath, options.force, { checkMd: false, checkBib: true });
-  }
   fs.writeFileSync(mdPath, result.markdown);
   console.log(mdPath);
 
