@@ -652,7 +652,8 @@ async function exportMdToDocx(context: vscode.ExtensionContext, uri?: vscode.Uri
 		cslCacheDir,
 		onStyleNotFound: async (styleName: string) => {
 			const choice = await vscode.window.showWarningMessage(
-				`CSL style "${styleName}" is not bundled. Would you like to download it from the CSL repository?`,
+				`CSL style "${styleName}" is not bundled. Download it from the CSL repository? Without it, citations will use plain-text fallback formatting.`,
+				{ modal: true },
 				'Download',
 				'Skip'
 			);
