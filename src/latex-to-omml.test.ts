@@ -84,6 +84,12 @@ describe('latexToOmml', () => {
     expect(result).toBe('<m:d><m:dPr><m:begChr m:val="("/><m:endChr m:val=")"/></m:dPr><m:e><m:r><m:t>x</m:t></m:r></m:e></m:d>');
   });
 
+  test('delimiter parsing does not corrupt output when \\right is missing', () => {
+    const result = latexToOmml('\\left(x');
+    expect(result).toBe('<m:r><m:t>(</m:t></m:r><m:r><m:t>x</m:t></m:r>');
+    expect(result).not.toContain('<m:d>');
+  });
+
   test('delimiter parsing preserves trailing text after \\right delimiter', () => {
     const result = latexToOmml('\\left(a\\right)+c');
     expect(result).toContain('<m:d><m:dPr><m:begChr m:val="("/><m:endChr m:val=")"/></m:dPr>');
@@ -120,6 +126,16 @@ describe('latexToOmml', () => {
   test('mathrm', () => {
     const result = latexToOmml('\\mathrm{text}');
     expect(result).toBe('<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>text</m:t></m:r>');
+  });
+
+  test('mathrm does not double-escape XML entities', () => {
+    const result = latexToOmml('\\mathrm{A&B}');
+    expect(result).toBe('<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>A&amp;B</m:t></m:r>');
+  });
+
+  test('operatorname does not double-escape XML entities', () => {
+    const result = latexToOmml('\\operatorname{A&B}{x}');
+    expect(result).toBe('<m:func><m:fName><m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>A&amp;B</m:t></m:r></m:fName><m:e><m:r><m:t>x</m:t></m:r></m:e></m:func>');
   });
 
   test('fallback for unsupported', () => {

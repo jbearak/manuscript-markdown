@@ -63,7 +63,17 @@ const KNOWN_FUNCTIONS = new Set([
 // ---------------------------------------------------------------------------
 
 function escapeXmlChars(text: string): string {
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;');
+}
+
+function unescapeXmlChars(text: string): string {
+  // Keep in sync with escapeXmlChars()
+  // Order matters: unescape &amp; last so we don't accidentally unescape parts of other entities.
+  return text
+    .replace(/&quot;/g, '"')
+    .replace(/&gt;/g, '>')
+    .replace(/&lt;/g, '<')
+    .replace(/&amp;/g, '&');
 }
 
 function makeRun(text: string): string {
@@ -344,7 +354,7 @@ class Parser {
 
     let begChr = '(';
     let content = '';
-    
+
     if (leftToken.type === 'text') {
       // The delimiter and content might be combined in one token like "(x"
       begChr = leftToken.value.charAt(0);
@@ -361,19 +371,31 @@ class Parser {
       }
     }
 
-    // Parse any additional content until \right
+    // Parse any additional content until \\right
     content += this.parseUntilRight();
-    
+
+    const rightCmd = this.peek();
+    if (!(rightCmd?.type === 'command' && rightCmd.value === '\\right')) {
+      // Malformed input (missing \right): fall back to emitting the open delimiter + content.
+      return makeRun(begChr) + content;
+    }
+
     this.consume(); // consume \\right
+
     const delimToken = this.consume();
+    if (!delimToken) {
+      // Malformed input (missing \right delimiter): fall back to emitting the open delimiter + content.
+      return makeRun(begChr) + content;
+    }
+
     let endChr = ')';
-    if (delimToken?.type === 'text') {
+    if (delimToken.type === 'text') {
       endChr = delimToken.value.charAt(0);
       const remaining = delimToken.value.slice(1);
       if (remaining) {
         this.tokens.splice(this.pos, 0, { type: 'text', value: remaining, pos: delimToken.pos });
       }
-    } else if (delimToken?.type === 'command') {
+    } else if (delimToken.type === 'command') {
       switch (delimToken.value) {
         case '\\}': endChr = '}'; break;
         case '\\|': endChr = '|'; break;
@@ -465,10 +487,12 @@ class Parser {
   }
 
   private extractText(omml: string): string {
-    // Simple extraction - just get text between <m:t> tags
+    // Simple extraction - just get text between <m:t> tags.
+    // NOTE: <m:t> content has already been escaped via escapeXmlChars().
     const matches = omml.match(/<m:t>([^<]*)<\/m:t>/g);
     if (matches) {
-      return matches.map(m => m.replace(/<\/?m:t>/g, '')).join('');
+      const escaped = matches.map(m => m.replace(/<\/?m:t>/g, '')).join('');
+      return unescapeXmlChars(escaped);
     }
     return '';
   }
