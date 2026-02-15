@@ -94,8 +94,8 @@ export function serializeBibtex(entries: Map<string, BibtexEntry>): string {
     for (const [fieldName, value] of entry.fields) {
       let escapedValue = value;
       
-      // Don't escape DOIs or zotero-key values
-      if (fieldName !== 'doi' && fieldName !== 'zotero-key') {
+      // Don't escape zotero-key values (alphanumeric identifiers)
+      if (fieldName !== 'zotero-key') {
         escapedValue = escapeBibtex(value);
       }
       

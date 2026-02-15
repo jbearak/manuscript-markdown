@@ -38,7 +38,6 @@ If output files already exist, you'll be prompted to replace, choose a new name,
 
 - **Tables**: Not converted (complex Word table formats don't map cleanly to Markdown)
 - **Images**: Not extracted from DOCX
-- **One-way**: ~~No conversion back from Markdown to DOCX~~ (see Export to Word below)
 - **Footnotes/endnotes**: Not converted
 
 ## Export to Word

@@ -152,7 +152,7 @@ describe('BibTeX Parser', () => {
     expect(roundtrip.zoteroKey).toBe(original.zoteroKey);
   });
 
-  it('escapes special characters except DOI and zotero-key', () => {
+  it('escapes special characters in all fields including DOI', () => {
     const entries = new Map<string, BibtexEntry>();
     const fields = new Map([
       ['title', 'Title & More'],
@@ -168,7 +168,7 @@ describe('BibTeX Parser', () => {
     
     const result = serializeBibtex(entries);
     expect(result).toContain('title = {Title \\& More}');
-    expect(result).toContain('doi = {10.1000/test_doi}'); // Not escaped
-    expect(result).toContain('zotero-key = {ABC_123}'); // Not escaped
+    expect(result).toContain('doi = {10.1000/test\\_doi}'); // DOI escaped per AGENTS.md
+    expect(result).toContain('zotero-key = {ABC_123}'); // Not escaped (alphanumeric identifiers)
   });
 });
