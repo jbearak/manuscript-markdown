@@ -81,18 +81,51 @@ export function extractHighlightRanges(text: string, defaultColor: string): Map<
     const insideCritic = (result.get('critic') || []).some(r => (r.start - 3) <= m!.index && mEnd <= (r.end + 3));
     if (insideCritic) { continue; }
 
+    const contentStart = m.index + 2;
+    const contentEnd = m.index + 2 + m[1].length;
     const colorId = m[2];
     if (colorId && VALID_COLOR_IDS.includes(colorId)) {
-      push(colorId, m.index, mEnd);
+      push(colorId, contentStart, contentEnd);
     } else if (colorId) {
       // Unrecognized color → configured default if valid, else yellow
-      push(resolvedDefaultColor, m.index, mEnd);
+      push(resolvedDefaultColor, contentStart, contentEnd);
     } else {
-      push(resolvedDefaultColor, m.index, mEnd);
+      push(resolvedDefaultColor, contentStart, contentEnd);
     }
   }
 
   return result;
+}
+
+/**
+ * Extract delimiter ranges for format highlights (==text== and ==text=={color}).
+ * Returns ranges for the opening ==, closing ==, and optional {color} suffix.
+ */
+export function extractFormatHighlightDelimiterRanges(text: string): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+
+  // Build critic ranges for overlap guard
+  const criticRe = /\{==([\s\S]*?)==\}/g;
+  const criticFullRanges: Array<{ start: number; end: number }> = [];
+  let m;
+  while ((m = criticRe.exec(text)) !== null) {
+    criticFullRanges.push({ start: m.index, end: m.index + m[0].length });
+  }
+
+  const hlRe = /(?<!\{)==([^}=]+)==(?:\{([a-z0-9-]+)\})?/g;
+  while ((m = hlRe.exec(text)) !== null) {
+    const mEnd = m.index + m[0].length;
+    const insideCritic = criticFullRanges.some(r => r.start <= m!.index && mEnd <= r.end);
+    if (insideCritic) { continue; }
+
+    // Opening ==
+    ranges.push({ start: m.index, end: m.index + 2 });
+    // Closing == and optional {color}
+    const closingStart = m.index + 2 + m[1].length;
+    ranges.push({ start: closingStart, end: mEnd });
+  }
+
+  return ranges;
 }
 
 /**

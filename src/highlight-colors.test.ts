@@ -4,6 +4,7 @@ import { wrapColoredHighlight } from './formatting';
 import {
   VALID_COLOR_IDS,
   extractHighlightRanges,
+  extractFormatHighlightDelimiterRanges,
   setDefaultHighlightColor,
   getDefaultHighlightColor
 } from './highlight-colors';
@@ -37,7 +38,7 @@ describe('Property 6: Highlight range extraction', () => {
         const ranges = extractHighlightRanges(doc, 'yellow');
         const colorRanges = ranges.get(color) || [];
         expect(colorRanges.length).toBe(1);
-        expect(doc.slice(colorRanges[0].start, colorRanges[0].end)).toBe(doc);
+        expect(doc.slice(colorRanges[0].start, colorRanges[0].end)).toBe(text);
       }),
       { numRuns: 100 }
     );
@@ -131,5 +132,48 @@ describe('Property 9: Default highlight color respects configuration', () => {
     } finally {
       setDefaultHighlightColor(originalDefault);
     }
+  });
+});
+
+// Feature: highlight-colors, Property 10: Format highlight delimiter extraction
+describe('Property 10: Format highlight delimiter extraction', () => {
+  it('should extract opening and closing delimiters for colored highlights', () => {
+    fc.assert(
+      fc.property(safeTextGen, colorIdGen, (text, color) => {
+        const doc = '==' + text + '=={' + color + '}';
+        const ranges = extractFormatHighlightDelimiterRanges(doc);
+        expect(ranges.length).toBe(2);
+        // Opening ==
+        expect(doc.slice(ranges[0].start, ranges[0].end)).toBe('==');
+        expect(ranges[0].start).toBe(0);
+        // Closing =={color}
+        expect(doc.slice(ranges[1].start, ranges[1].end)).toBe('=={' + color + '}');
+      }),
+      { numRuns: 100 }
+    );
+  });
+
+  it('should extract opening and closing delimiters for plain highlights', () => {
+    fc.assert(
+      fc.property(safeTextGen, (text) => {
+        const doc = '==' + text + '==';
+        const ranges = extractFormatHighlightDelimiterRanges(doc);
+        expect(ranges.length).toBe(2);
+        expect(doc.slice(ranges[0].start, ranges[0].end)).toBe('==');
+        expect(doc.slice(ranges[1].start, ranges[1].end)).toBe('==');
+      }),
+      { numRuns: 100 }
+    );
+  });
+
+  it('should not extract delimiters inside CriticMarkup', () => {
+    fc.assert(
+      fc.property(safeTextGen, (text) => {
+        const doc = '{==' + text + '==}';
+        const ranges = extractFormatHighlightDelimiterRanges(doc);
+        expect(ranges.length).toBe(0);
+      }),
+      { numRuns: 100 }
+    );
   });
 });

@@ -21,6 +21,7 @@ import {
 	extractAdditionRanges,
 	extractDeletionRanges,
 	extractCriticDelimiterRanges,
+	extractFormatHighlightDelimiterRanges,
 	extractSubstitutionNewRanges,
 	setDefaultHighlightColor,
 	getDefaultHighlightColor,
@@ -351,8 +352,10 @@ export function activate(context: vscode.ExtensionContext) {
 		)));
 
 		// Apply muted delimiter decorations
-		const delimiterRanges = extractCriticDelimiterRanges(text);
-		editor.setDecorations(delimiterDecType, delimiterRanges.map(r => new vscode.Range(
+		const criticDelimiterRanges = extractCriticDelimiterRanges(text);
+		const fmtDelimRanges = extractFormatHighlightDelimiterRanges(text);
+		const allDelimiterRanges = [...criticDelimiterRanges, ...fmtDelimRanges];
+		editor.setDecorations(delimiterDecType, allDelimiterRanges.map(r => new vscode.Range(
 			editor.document.positionAt(r.start),
 			editor.document.positionAt(r.end)
 		)));
