@@ -9,6 +9,8 @@ test-*.js.map
 out/**/*.test.js
 out/test-*.js
 out/__mocks__/**
+.*.bun-build
+bin/**
 
 # Dependencies are required at runtime in packaged extension
 .venv/**
@@ -29,6 +31,9 @@ TABLE_REFLOW_IMPLEMENTATION.md
 
 # Config files
 .kiro/**
+.claude/**
+.vscode/**
+.github/**
 .editorconfig
 .eslintrc*
 tsconfig.json
@@ -38,9 +43,15 @@ out/**/*.map
 
 # Misc
 *.vsix
+*.docx
 example.qmd
 bun.lock
 setup.sh
+revised_temp/**
+full_draft_temp/**
+*_temp/**
+dist/**
+docs/**
 media/**/*.test.ts
 scripts/**
 test/**
