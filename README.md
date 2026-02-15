@@ -18,11 +18,9 @@ A specification, converter, and VS Code extension for roundtrip manuscript editi
 
 ### Installation
 
-Download from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=jbearak.manuscript-markdown) or install locally:
+Install from the [releases page](https://github.com/jbearak/manuscript-markdown/releases), or [build from source](docs/development.md). 
 
-```bash
-./setup.sh
-```
+<!-- Download from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=jbearak.manuscript-markdown), (OpenVSX Registry)[https://open-vsx.org/extension/jbearak/manuscript-markdown], -->
 
 ### Usage
 
