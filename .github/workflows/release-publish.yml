@@ -2,6 +2,9 @@
 name: Release Publish
 
 "on":
+  workflow_run:
+    workflows: [Release Build]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -16,15 +19,22 @@ name: Release Publish
 
 # Serialize by tag so retries/second runs don't collide.
 concurrency:
-  group: release-publish-${{ inputs.tag }}
+  group: release-publish-${{ inputs.tag || github.event.workflow_run.head_branch }}
   cancel-in-progress: false
 
 permissions:
   contents: write
 
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
+
 jobs:
   publish:
     runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
 
     # Configure this Environment in GitHub with required reviewers,
     # and store publish tokens as environment secrets.
@@ -34,12 +44,12 @@ jobs:
       - name: Checkout tag
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Validate tag + version
         shell: bash
         env:
-          THE_TAG: ${{ inputs.tag }}
+          THE_TAG: ${{ env.RELEASE_TAG }}
         run: |
           set -euo pipefail
 
@@ -75,7 +85,7 @@ jobs:
       - name: Download build artifacts
         shell: bash
         env:
-          THE_TAG: ${{ inputs.tag }}
+          THE_TAG: ${{ env.RELEASE_TAG }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
@@ -123,8 +133,8 @@ jobs:
         # Tag v2.5.0 -> commit a06a81a03ee405af7f2048a818ed3f03bbf83c7b
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
         with:
-          tag_name: ${{ inputs.tag }}
-          name: Release ${{ inputs.tag }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Release ${{ env.RELEASE_TAG }}
           draft: false
           prerelease: false
           generate_release_notes: true
