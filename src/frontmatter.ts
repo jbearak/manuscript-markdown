@@ -26,6 +26,7 @@ export function noteTypeToNumber(nt: NoteType): number {
 }
 
 export interface Frontmatter {
+  title?: string[];
   csl?: string;
   locale?: string;
   noteType?: NoteType;
@@ -57,6 +58,10 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
     const key = line.slice(0, colonIdx).trim();
     const value = line.slice(colonIdx + 1).trim().replace(/^["']|["']$/g, '');
     switch (key) {
+      case 'title':
+        if (!metadata.title) metadata.title = [];
+        metadata.title.push(value);
+        break;
       case 'csl':
         metadata.csl = value;
         break;
@@ -80,6 +85,11 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
  */
 export function serializeFrontmatter(metadata: Frontmatter): string {
   const lines: string[] = [];
+  if (metadata.title && metadata.title.length > 0) {
+    for (const t of metadata.title) {
+      lines.push(`title: ${t}`);
+    }
+  }
   if (metadata.csl) lines.push(`csl: ${metadata.csl}`);
   if (metadata.locale) lines.push(`locale: ${metadata.locale}`);
   if (metadata.noteType) lines.push(`note-type: ${metadata.noteType}`);

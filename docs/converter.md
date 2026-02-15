@@ -4,6 +4,7 @@ The DOCX converter transforms Microsoft Word documents into Manuscript Markdown 
 
 ## What's Preserved
 
+- **Title**: Word `Title` paragraph style extracted to `title:` frontmatter (multiple title paragraphs become multiple entries)
 - **Text formatting**: bold, italic, underline, strikethrough, superscript, subscript
 - **Headings**: H1 through H6 from Word heading styles
 - **Lists**: bulleted and numbered lists with nesting
@@ -68,6 +69,7 @@ note-type: in-text
 
 | Field | Description |
 |-------|-------------|
+| `title` | Document title. Multiple `title:` entries create multi-paragraph titles. |
 | `csl` | CSL style short name (e.g., `apa`, `chicago-author-date`, `bmj`) or absolute path to a `.csl` file |
 | `locale` | Optional locale override (e.g., `en-US`, `en-GB`). Defaults to the style's own locale. |
 | `note-type` | Optional Zotero note type: `in-text` (default), `footnotes`, or `endnotes`. Legacy numeric values (0, 1, 2) are still accepted. |
@@ -82,6 +84,7 @@ If a style is not bundled, you will be prompted to download it from the [CSL sty
 
 ### What's Exported
 
+- **Title**: `title:` frontmatter entries rendered as Word Title-styled paragraphs at the beginning of the document
 - **Text formatting**: bold, italic, underline, strikethrough, superscript, subscript, highlights (including colored)
 - **Headings**: H1 through H6 with proper Word heading styles
 - **Lists**: bulleted and numbered lists with nesting

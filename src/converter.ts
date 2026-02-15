@@ -78,6 +78,7 @@ export type ContentItem =
       type: 'para';
       headingLevel?: number;   // 1–6 if heading, undefined otherwise
       listMeta?: ListMeta;     // present if list item
+      isTitle?: boolean;       // true if Word "Title" paragraph style
     }
   | { type: 'math'; latex: string; display: boolean };
 
@@ -181,15 +182,21 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<Map<string,
 export function parseHeadingLevel(pPrChildren: any[]): number | undefined {
   const pStyleElement = pPrChildren.find(child => child['w:pStyle'] !== undefined);
   if (!pStyleElement) return undefined;
-  
+
   const val = getAttr(pStyleElement, 'val').toLowerCase();
   const match = val.match(/^heading(\d)$/);
   if (match) {
     const level = parseInt(match[1], 10);
     return level >= 1 && level <= 6 ? level : undefined;
   }
-  
+
   return undefined;
+}
+
+export function parseTitleStyle(pPrChildren: any[]): boolean {
+  const pStyleElement = pPrChildren.find(child => child['w:pStyle'] !== undefined);
+  if (!pStyleElement) return false;
+  return getAttr(pStyleElement, 'val').toLowerCase() === 'title';
 }
 
 export function parseListMeta(pPrChildren: any[], numberingDefs: Map<string, Map<string, 'bullet' | 'ordered'>>): ListMeta | undefined {
@@ -826,17 +833,19 @@ export async function extractDocumentContent(
             }
           }
         } else if (key === 'w:p') {
-          // Process paragraph - extract heading level and list metadata
+          // Process paragraph - extract heading level, list metadata, and title style
           let headingLevel: number | undefined;
           let listMeta: ListMeta | undefined;
+          let isTitle = false;
           let paraFormatting = currentFormatting;
-          
+
           const paraChildren = Array.isArray(node[key]) ? node[key] : [node[key]];
           for (const child of paraChildren) {
             if (child['w:pPr']) {
               const pPrChildren = Array.isArray(child['w:pPr']) ? child['w:pPr'] : [child['w:pPr']];
               headingLevel = parseHeadingLevel(pPrChildren);
               listMeta = parseListMeta(pPrChildren, numberingDefs);
+              isTitle = parseTitleStyle(pPrChildren);
               const pRPrElement = pPrChildren.find(pprChild => pprChild['w:rPr'] !== undefined);
               if (pRPrElement) {
                 const pRPrChildren = Array.isArray(pRPrElement['w:rPr']) ? pRPrElement['w:rPr'] : [pRPrElement['w:rPr']];
@@ -845,18 +854,19 @@ export async function extractDocumentContent(
               break;
             }
           }
-          
-          // Always push a new para when heading/list metadata is present (so metadata
+
+          // Always push a new para when heading/list/title metadata is present (so metadata
           // isn't silently dropped after empty paragraphs).  For plain paragraphs,
           // push only when the previous item isn't already a para separator.
-          const needsPara = (headingLevel || listMeta)
+          const needsPara = (headingLevel || listMeta || isTitle)
             ? true
             : content.length > 0 && content[content.length - 1].type !== 'para';
-          
+
           if (needsPara) {
             const paraItem: ContentItem = { type: 'para' };
             if (headingLevel) paraItem.headingLevel = headingLevel;
             if (listMeta) paraItem.listMeta = listMeta;
+            if (isTitle) paraItem.isTitle = true;
             content.push(paraItem);
           }
           walk(paraChildren, paraFormatting);
@@ -1132,6 +1142,41 @@ export function generateBibTeX(
   return entries.join('\n\n');
 }
 
+/**
+ * Extract consecutive Title-styled paragraphs from the beginning of the document.
+ * Returns the plain text of each title paragraph. Removes the extracted items
+ * (para markers and their text runs) from the content array in place.
+ */
+export function extractTitleLines(content: ContentItem[]): string[] {
+  const titles: string[] = [];
+  let i = 0;
+
+  while (i < content.length) {
+    const item = content[i];
+    // Skip leading plain para separators (no heading/list/title) that precede the first title
+    if (item.type === 'para' && !item.isTitle && !item.headingLevel && !item.listMeta && titles.length === 0) {
+      i++;
+      continue;
+    }
+    if (item.type !== 'para' || !item.isTitle) break;
+
+    // Collect text runs following this title para marker
+    const startIdx = i;
+    i++;
+    let text = '';
+    while (i < content.length && content[i].type === 'text') {
+      text += (content[i] as { type: 'text'; text: string }).text;
+      i++;
+    }
+    titles.push(text);
+    // Remove extracted items
+    content.splice(startIdx, i - startIdx);
+    i = startIdx;
+  }
+
+  return titles;
+}
+
 // Main conversion
 
 export async function convertDocx(
@@ -1147,6 +1192,10 @@ export async function convertDocx(
 
   const keyMap = buildCitationKeyMap(zoteroCitations, format);
   const { content: docContent, zoteroBiblData } = await extractDocumentContent(zip, zoteroCitations, keyMap);
+
+  // Extract consecutive Title-styled paragraphs from the beginning of the document
+  const titleLines = extractTitleLines(docContent);
+
   let markdown = buildMarkdown(docContent, comments);
 
   // Strip Sources section if present (fallback for docs without ZOTERO_BIBL field codes)
@@ -1158,17 +1207,19 @@ export async function convertDocx(
     }
   }
 
-  // Prepend YAML frontmatter if Zotero prefs were found
+  // Prepend YAML frontmatter if title or Zotero prefs were found
+  const fm: Frontmatter = {};
+  if (titleLines.length > 0) {
+    fm.title = titleLines;
+  }
   if (zoteroPrefs) {
-    const fm: Frontmatter = {
-      csl: zoteroStyleShortName(zoteroPrefs.styleId),
-      locale: zoteroPrefs.locale,
-      noteType: zoteroPrefs.noteType !== undefined ? noteTypeFromNumber(zoteroPrefs.noteType) : undefined,
-    };
-    const frontmatterStr = serializeFrontmatter(fm);
-    if (frontmatterStr) {
-      markdown = frontmatterStr + '\n' + markdown;
-    }
+    fm.csl = zoteroStyleShortName(zoteroPrefs.styleId);
+    fm.locale = zoteroPrefs.locale;
+    fm.noteType = zoteroPrefs.noteType !== undefined ? noteTypeFromNumber(zoteroPrefs.noteType) : undefined;
+  }
+  const frontmatterStr = serializeFrontmatter(fm);
+  if (frontmatterStr) {
+    markdown = frontmatterStr + '\n' + markdown;
   }
 
   const bibtex = generateBibTeX(zoteroCitations, keyMap);

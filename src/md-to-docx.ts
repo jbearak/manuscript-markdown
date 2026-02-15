@@ -918,6 +918,12 @@ function stylesXml(): string {
     '<w:pPr><w:shd w:val="clear" w:color="auto" w:fill="E8E8E8"/></w:pPr>\n' +
     '<w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/></w:rPr>\n' +
     '</w:style>\n' +
+    '<w:style w:type="paragraph" w:styleId="Title">\n' +
+    '<w:name w:val="Title"/>\n' +
+    '<w:basedOn w:val="Normal"/>\n' +
+    '<w:pPr><w:spacing w:before="0" w:after="300"/></w:pPr>\n' +
+    '<w:rPr><w:sz w:val="56"/><w:szCs w:val="56"/></w:rPr>\n' +
+    '</w:style>\n' +
     '</w:styles>';
 }
 
@@ -1235,8 +1241,15 @@ function commentsXml(comments: CommentEntry[]): string {
   return xml;
 }
 
-export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: any): string {
+export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: any, frontmatter?: Frontmatter): string {
   let body = '';
+
+  // Emit title paragraphs from frontmatter before body content
+  if (frontmatter?.title) {
+    for (const line of frontmatter.title) {
+      body += '<w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr>' + generateRun(line, '') + '</w:p>';
+    }
+  }
 
   for (const token of tokens) {
     if (token.type === 'table') {
@@ -1353,7 +1366,7 @@ export async function convertMdToDocx(
     hasComments: false,
   };
 
-  const documentXml = generateDocumentXml(tokens, state, options, bibEntries, citeprocEngine);
+  const documentXml = generateDocumentXml(tokens, state, options, bibEntries, citeprocEngine, frontmatter);
 
   const JSZip = (await import('jszip')).default;
   const zip = new JSZip();

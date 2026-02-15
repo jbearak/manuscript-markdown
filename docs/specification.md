@@ -2,6 +2,27 @@
 
 Manuscript Markdown extends standard Markdown with CriticMarkup annotations, Pandoc citation syntax, and custom extensions for manuscript editing.
 
+## YAML Frontmatter
+
+Manuscript Markdown files may begin with a YAML frontmatter block delimited by `---`. The `title` field stores the document title:
+
+```yaml
+---
+title: My Document Title
+---
+```
+
+Multi-paragraph titles use multiple `title` entries:
+
+```yaml
+---
+title: First Paragraph of Title
+title: Second Paragraph of Title
+---
+```
+
+The frontmatter may also include citation-related fields (`csl`, `locale`, `note-type`). See [DOCX Converter](converter.md) for details.
+
 ## Standard Markdown
 
 Manuscript Markdown supports all [CommonMark](https://commonmark.org/) and [GitHub Flavored Markdown](https://github.github.com/gfm/) syntax:
