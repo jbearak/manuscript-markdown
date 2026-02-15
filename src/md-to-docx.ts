@@ -918,6 +918,12 @@ function stylesXml(): string {
     '<w:pPr><w:shd w:val="clear" w:color="auto" w:fill="E8E8E8"/></w:pPr>\n' +
     '<w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/></w:rPr>\n' +
     '</w:style>\n' +
+    '<w:style w:type="paragraph" w:styleId="Title">\n' +
+    '<w:name w:val="Title"/>\n' +
+    '<w:basedOn w:val="Normal"/>\n' +
+    '<w:pPr><w:spacing w:before="0" w:after="300"/></w:pPr>\n' +
+    '<w:rPr><w:sz w:val="56"/><w:szCs w:val="56"/></w:rPr>\n' +
+    '</w:style>\n' +
     '</w:styles>';
 }
 
