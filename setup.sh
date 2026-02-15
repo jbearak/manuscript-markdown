@@ -51,7 +51,7 @@ echo ""
 
 # Step 3b: Build CLI binary
 echo "Building CLI binary..."
-if bun build src/cli.ts --compile --outfile dist/manuscript-markdown 2>/dev/null; then
+if bun build src/cli.ts --compile --outfile dist/manuscript-markdown; then
   echo -e "${GREEN}✓ CLI binary built${NC}"
   
   # Install CLI to ~/bin
@@ -103,7 +103,7 @@ echo ""
 
 echo "=== Setup Complete ==="
 echo "Extension: $VSIX_FILE"
-if [ -f ~/bin/manuscript-markdown ]; then
+if [ -f "$HOME/bin/manuscript-markdown" ]; then
   echo "CLI: ~/bin/manuscript-markdown"
   case ":$PATH:" in
     *":$HOME/bin:"*) ;;

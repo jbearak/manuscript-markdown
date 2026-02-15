@@ -17,12 +17,9 @@ This builds the CLI binary and installs it to `~/bin/manuscript-markdown`. Ensur
 ```sh
 bun run src/cli.ts <input> [options]
 ```
+### Via npx (not currently supported)
 
-### Via npx
-
-```sh
-npx manuscript-markdown <input> [options]
-```
+`npx manuscript-markdown` is not currently available from npm because this repository/package is private and does not publish a CLI `bin` entry.
 
 ## Usage
 
@@ -50,7 +47,7 @@ Produces `paper.docx`. Automatically loads `paper.bib` if present.
 |------|-----------|-------------|---------|
 | `--help` | both | Show help message | — |
 | `--version` | both | Show version number | — |
-| `--output <path>` | both | Output file path | derived from input |
+| `--output <path>` | both | DOCX→MD: output **base path** (derives `.md` + `.bib`); MD→DOCX: literal output `.docx` path | derived from input |
 | `--force` | both | Overwrite existing output files | `false` |
 | `--citation-key-format <fmt>` | DOCX→MD | Citation key format: `authorYearTitle`, `authorYear`, `numeric` | `authorYearTitle` |
 | `--bib <path>` | MD→DOCX | BibTeX file path | auto-detect |

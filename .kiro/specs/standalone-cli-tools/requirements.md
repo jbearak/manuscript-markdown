@@ -106,7 +106,7 @@ Standalone command-line tools for converting between Markdown and DOCX formats, 
 2. THE `README.md` SHALL include a brief section mentioning the CLI tool with a link to the dedicated CLI documentation file, without duplicating detailed usage information
 3. THE dedicated CLI documentation SHALL include instructions for running the CLI via `setup.sh` (install to `~/bin`), via `bun`, and via `npx`
 
-### Requirement 7: Setup Script Builds and Installs CLI Tool
+### Requirement 8: Setup Script Builds and Installs CLI Tool
 
 **User Story:** As a developer, I want `setup.sh` to build the standalone CLI tool and install it to `~/bin`, so that the CLI is available on my PATH after running the same setup script I use for the extension.
 
