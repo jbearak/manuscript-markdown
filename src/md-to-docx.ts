@@ -812,6 +812,7 @@ interface DocxGenState {
   hasList: boolean;
   hasComments: boolean;
   missingKeys: Set<string>;
+  timezone?: string; // UTC offset from frontmatter (e.g. "-05:00")
 }
 
 interface CommentEntry {
@@ -819,6 +820,44 @@ interface CommentEntry {
   author: string;
   date: string;
   text: string;
+}
+
+/**
+ * Normalize a date string to UTC ISO format for Word XML.
+ * Handles:
+ * - ISO with offset: "2024-01-15T10:30-05:00" → "2024-01-15T15:30:00Z"
+ * - ISO with Z: "2024-01-15T15:30:00Z" → passed through
+ * - Local format without offset: "2024-01-15 10:30" → uses fallbackTz to build UTC
+ * - Already UTC ISO: returned as-is
+ */
+export function normalizeToUtcIso(dateStr: string, fallbackTz?: string): string {
+  if (!dateStr) return stripMillis(new Date().toISOString());
+
+  // If the string already has a timezone offset (+ or - after time, or trailing Z), parse directly
+  const hasOffset = /T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})/.test(dateStr);
+  if (hasOffset) {
+    const dt = new Date(dateStr);
+    if (!isNaN(dt.getTime())) return stripMillis(dt.toISOString());
+  }
+
+  // Local date format like "2024-01-15T10:30" or "2024-01-15 10:30"
+  // Append fallback timezone to interpret correctly
+  const normalized = dateStr.replace(' ', 'T');
+  if (fallbackTz) {
+    const dt = new Date(normalized + fallbackTz);
+    if (!isNaN(dt.getTime())) return stripMillis(dt.toISOString());
+  }
+
+  // Last resort: parse as-is (system local time interpretation)
+  const dt = new Date(normalized);
+  if (!isNaN(dt.getTime())) return stripMillis(dt.toISOString());
+
+  // If nothing works, return the original string
+  return dateStr;
+}
+
+function stripMillis(iso: string): string {
+  return iso.replace(/\.\d{3}Z$/, 'Z');
 }
 
 function contentTypesXml(hasList: boolean, hasComments: boolean, hasTheme?: boolean, hasCustomProps?: boolean): string {
@@ -1145,17 +1184,17 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
       runs += '<w:r><w:br/></w:r>';
     } else if (run.type === 'critic_add') {
       const author = run.author || options?.authorName || 'Unknown';
-      const date = run.date || new Date().toISOString();
+      const date = normalizeToUtcIso(run.date || '', state.timezone);
       const rPr = generateRPr(run);
       runs += '<w:ins w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '" w:date="' + escapeXml(date) + '">' + generateRun(run.text, rPr) + '</w:ins>';
     } else if (run.type === 'critic_del') {
       const author = run.author || options?.authorName || 'Unknown';
-      const date = run.date || new Date().toISOString();
+      const date = normalizeToUtcIso(run.date || '', state.timezone);
       const rPr = generateRPr(run);
       runs += '<w:del w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '" w:date="' + escapeXml(date) + '"><w:r>' + (rPr ? rPr : '') + '<w:delText xml:space="preserve">' + escapeXml(run.text) + '</w:delText></w:r></w:del>';
     } else if (run.type === 'critic_sub') {
       const author = run.author || options?.authorName || 'Unknown';
-      const date = run.date || new Date().toISOString();
+      const date = normalizeToUtcIso(run.date || '', state.timezone);
       const rPr = generateRPr(run);
       runs += '<w:del w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '" w:date="' + escapeXml(date) + '"><w:r>' + (rPr ? rPr : '') + '<w:delText xml:space="preserve">' + escapeXml(run.text) + '</w:delText></w:r></w:del>';
       runs += '<w:ins w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '" w:date="' + escapeXml(date) + '">' + generateRun(run.newText || '', rPr) + '</w:ins>';
@@ -1164,7 +1203,7 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
       if (nextRun?.type === 'critic_comment') {
         const commentId = state.commentId++;
         const author = nextRun.author || options?.authorName || 'Unknown';
-        const date = nextRun.date || new Date().toISOString();
+        const date = normalizeToUtcIso(nextRun.date || '', state.timezone);
         const commentBody = nextRun.commentText || '';
         state.comments.push({ id: commentId, author, date, text: commentBody });
         state.hasComments = true;
@@ -1181,7 +1220,7 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
     } else if (run.type === 'critic_comment') {
       const commentId = state.commentId++;
       const author = run.author || options?.authorName || 'Unknown';
-      const date = run.date || new Date().toISOString();
+      const date = normalizeToUtcIso(run.date || '', state.timezone);
       const commentBody = run.commentText || '';
       
       state.comments.push({ id: commentId, author, date, text: commentBody });
@@ -1379,6 +1418,7 @@ export async function convertMdToDocx(
     hasList: false,
     hasComments: false,
     missingKeys: new Set(),
+    timezone: frontmatter.timezone,
   };
 
   const documentXml = generateDocumentXml(tokens, state, options, bibEntries, citeprocEngine, frontmatter);

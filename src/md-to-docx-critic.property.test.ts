@@ -20,9 +20,9 @@ const createState = () => ({
 const shortText = fc.string({ minLength: 1, maxLength: 20 }).filter(s => /^[a-zA-Z0-9\s]+$/.test(s) && s.trim().length > 0);
 const xmlSafeAuthor = fc.string({ minLength: 1, maxLength: 10 }).filter(s => /^[a-zA-Z0-9]+$/.test(s));
 const isoDate = fc.constantFrom(
-  '2024-01-01T00:00:00.000Z',
-  '2024-06-15T12:30:00.000Z',
-  '2024-12-31T23:59:59.999Z'
+  '2024-01-01T00:00:00Z',
+  '2024-06-15T12:30:00Z',
+  '2024-12-31T23:59:59Z'
 );
 
 describe('CriticMarkup revision elements', () => {

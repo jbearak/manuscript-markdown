@@ -1078,6 +1078,13 @@ export function buildMarkdown(
   return output.join('');
 }
 
+function formatOffsetString(offsetMinutes: number): string {
+  const sign = offsetMinutes >= 0 ? '+' : '-';
+  const abs = Math.abs(offsetMinutes);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+}
+
 export function formatLocalIsoMinute(ts: string): string {
   const dt = new Date(ts);
   if (isNaN(dt.getTime())) {
@@ -1085,11 +1092,11 @@ export function formatLocalIsoMinute(ts: string): string {
   }
   const pad = (n: number) => String(n).padStart(2, '0');
   const offsetMinutes = -dt.getTimezoneOffset();
-  const sign = offsetMinutes >= 0 ? '+' : '-';
-  const absOffsetMinutes = Math.abs(offsetMinutes);
-  const offsetHours = Math.floor(absOffsetMinutes / 60);
-  const offsetMins = absOffsetMinutes % 60;
-  return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}${sign}${pad(offsetHours)}:${pad(offsetMins)}`;
+  return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}${formatOffsetString(offsetMinutes)}`;
+}
+
+export function getLocalTimezoneOffset(): string {
+  return formatOffsetString(-new Date().getTimezoneOffset());
 }
 
 // BibTeX generation
@@ -1231,6 +1238,11 @@ export async function convertDocx(
     fm.csl = zoteroStyleShortName(zoteroPrefs.styleId);
     fm.locale = zoteroPrefs.locale;
     fm.noteType = zoteroPrefs.noteType !== undefined ? noteTypeFromNumber(zoteroPrefs.noteType) : undefined;
+  }
+  // Store the local timezone so md→docx can reconstruct UTC dates
+  const hasCommentDates = [...comments.values()].some(c => !!c.date);
+  if (hasCommentDates) {
+    fm.timezone = getLocalTimezoneOffset();
   }
   const frontmatterStr = serializeFrontmatter(fm);
   if (frontmatterStr) {
