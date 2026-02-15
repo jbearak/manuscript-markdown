@@ -27,6 +27,7 @@ export function noteTypeToNumber(nt: NoteType): number {
 
 export interface Frontmatter {
   title?: string[];
+  author?: string;
   csl?: string;
   locale?: string;
   noteType?: NoteType;
@@ -62,6 +63,9 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
         if (!metadata.title) metadata.title = [];
         metadata.title.push(value);
         break;
+      case 'author':
+        if (value) metadata.author = value;
+        break;
       case 'csl':
         metadata.csl = value;
         break;
@@ -90,6 +94,7 @@ export function serializeFrontmatter(metadata: Frontmatter): string {
       lines.push(`title: ${t}`);
     }
   }
+  if (metadata.author) lines.push(`author: ${metadata.author}`);
   if (metadata.csl) lines.push(`csl: ${metadata.csl}`);
   if (metadata.locale) lines.push(`locale: ${metadata.locale}`);
   if (metadata.noteType) lines.push(`note-type: ${metadata.noteType}`);
