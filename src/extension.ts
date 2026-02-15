@@ -47,11 +47,7 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('manuscript-markdown.highlight', () => 
 			applyFormatting((text) => formatting.wrapSelection(text, '{==', '==}'))
 		),
-		vscode.commands.registerCommand('manuscript-markdown.insertComment', () => {
-			const authorName = author.getFormattedAuthorName();
-			applyFormatting((text) => formatting.wrapSelection(text, '{>>', '<<}', 3, authorName));
-		}),
-		vscode.commands.registerCommand('manuscript-markdown.highlightAndComment', () => {
+		vscode.commands.registerCommand('manuscript-markdown.comment', () => {
 			const authorName = author.getFormattedAuthorName();
 			applyFormatting((text) => formatting.highlightAndComment(text, authorName));
 		}),

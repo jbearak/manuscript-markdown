@@ -59,11 +59,7 @@
         "title": "Highlight"
       },
       {
-        "command": "manuscript-markdown.insertComment",
-        "title": "Comment"
-      },
-      {
-        "command": "manuscript-markdown.highlightAndComment",
+        "command": "manuscript-markdown.comment",
         "title": "Comment"
       },
       {
@@ -284,7 +280,7 @@
       ],
       "markdown.annotations": [
         {
-          "command": "manuscript-markdown.highlightAndComment",
+          "command": "manuscript-markdown.comment",
           "when": "editorLangId == markdown",
           "group": "1_manuscript-markdown@1"
         },
