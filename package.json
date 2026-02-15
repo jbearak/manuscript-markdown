@@ -642,7 +642,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "typecheck": "tsc --noEmit",
-    "clean": "rm -rf out/ bin/",
+    "clean": "rm -rf out/",
     "rebuild": "bun run clean && bun run compile",
     "package": "bun run rebuild && bunx vsce package",
     "build:binary": "bun scripts/build-binary.ts binary",
