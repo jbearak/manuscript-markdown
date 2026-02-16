@@ -145,6 +145,48 @@ describe('DOCX table conversion', () => {
     expect(withoutHeaderMd).not.toContain('<th>');
     expect(withoutHeaderMd).toContain('<td>');
   });
+
+  test('keeps table-cell inline rendering semantically equivalent to body inline rendering', () => {
+    const comments = new Map([
+      ['1', { author: 'Reviewer', text: 'note', date: '2025-01-01T00:00:00Z' }]
+    ]);
+
+    const inlineItems = [
+      { type: 'text', text: 'start ', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
+      { type: 'text', text: 'commented', commentIds: new Set(['1']), formatting: { ...DEFAULT_FORMATTING, highlight: true } },
+      { type: 'text', text: ' link', commentIds: new Set(), formatting: DEFAULT_FORMATTING, href: 'https://example.com/a(b)' },
+      { type: 'citation', text: '(Smith 2020)', commentIds: new Set(), pandocKeys: ['smith2020, p. 20'] },
+      { type: 'math', latex: 'x', display: false },
+      { type: 'text', text: ' end', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
+    ] as any;
+
+    const bodyMarkdown = buildMarkdown(
+      [
+        { type: 'para' },
+        ...inlineItems,
+      ] as any,
+      comments,
+    );
+
+    const tableMarkdown = buildMarkdown(
+      [
+        {
+          type: 'table',
+          rows: [
+            {
+              isHeader: false,
+              cells: [{ paragraphs: [inlineItems as any[]] }],
+            },
+          ],
+        },
+      ] as any,
+      comments,
+    );
+
+    const paraMatch = tableMarkdown.match(/<p>([\s\S]*?)<\/p>/);
+    expect(paraMatch).not.toBeNull();
+    expect(paraMatch?.[1]).toBe(bodyMarkdown);
+  });
 });
 
 describe('extractZoteroCitations', () => {

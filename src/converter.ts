@@ -1051,11 +1051,26 @@ function renderInlineSegment(
   segment: ContentItem[],
   comments: Map<string, Comment>
 ): string {
+  return renderInlineRange(segment, 0, comments).text;
+}
+
+function renderInlineRange(
+  segment: ContentItem[],
+  startIndex: number,
+  comments: Map<string, Comment>,
+  opts?: { stopBeforeDisplayMath?: boolean }
+): { text: string; nextIndex: number } {
   let out = '';
-  let i = 0;
+  let i = startIndex;
 
   while (i < segment.length) {
     const item = segment[i];
+    if (item.type === 'para' || item.type === 'table') {
+      break;
+    }
+    if (opts?.stopBeforeDisplayMath && item.type === 'math' && item.display) {
+      break;
+    }
 
     if (item.type === 'citation') {
       if (item.pandocKeys.length > 0) {
@@ -1121,8 +1136,7 @@ function renderInlineSegment(
     out += formattedText;
     i++;
   }
-
-  return out;
+  return { text: out, nextIndex: i };
 }
 
 function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comment>): string {
@@ -1183,18 +1197,14 @@ export function buildMarkdown(
       continue;
     }
 
-    if (item.type === 'math') {
-      if (item.display) {
-        // Ensure blank line before display math
-        if (output.length > 0 && !output[output.length - 1].endsWith('\n\n')) {
-          output.push('\n\n');
-        }
-        output.push('$$' + '\n' + item.latex + '\n' + '$$');
-        // A display math block breaks list flow; reset list continuation state.
-        lastListType = undefined;
-      } else {
-        output.push('$' + item.latex + '$');
+    if (item.type === 'math' && item.display) {
+      // Ensure blank line before display math
+      if (output.length > 0 && !output[output.length - 1].endsWith('\n\n')) {
+        output.push('\n\n');
       }
+      output.push('$$' + '\n' + item.latex + '\n' + '$$');
+      // A display math block breaks list flow; reset list continuation state.
+      lastListType = undefined;
       i++;
       continue;
     }
@@ -1209,62 +1219,12 @@ export function buildMarkdown(
       continue;
     }
 
-    if (item.type === 'citation') {
-      if (item.pandocKeys.length > 0) {
-        output.push(` [${item.pandocKeys.map(k => `@${k}`).join('; ')}]`);
-      } else {
-        output.push(item.text);
-      }
-      i++;
-      continue;
+    const rendered = renderInlineRange(mergedContent, i, comments, { stopBeforeDisplayMath: true });
+    if (rendered.nextIndex <= i) {
+      throw new Error('Invariant violated: renderInlineRange did not advance index');
     }
-
-    // text with comments (merge adjacent runs by comment set, even when formatting differs)
-    if (item.commentIds.size > 0) {
-      const commentSet = item.commentIds;
-      const groupedCommentText: string[] = [];
-      let j = i;
-
-      while (j < mergedContent.length) {
-        const seg = mergedContent[j];
-        if (seg.type !== 'text' || !commentSetsEqual(seg.commentIds, commentSet)) {
-          break;
-        }
-        const fmtForComment: RunFormatting = { ...seg.formatting, highlight: false };
-        let segText = wrapWithFormatting(seg.text, fmtForComment);
-        if (seg.href) {
-          segText = `[${segText}](${formatHrefForMarkdown(seg.href)})`;
-        }
-        groupedCommentText.push(segText);
-        j++;
-      }
-
-      output.push(`{==${groupedCommentText.join('')}==}`);
-      for (const cid of [...commentSet].sort()) {
-        const c = comments.get(cid);
-        if (!c) { continue; }
-        let dateStr = '';
-        if (c.date) {
-          try {
-            // Design decision: render comment timestamps in the reader's local time
-            // (with offset) so "when was this comment made?" is immediately understandable
-            // in Markdown output without requiring UTC conversion by the reader.
-            dateStr = ` (${formatLocalIsoMinute(c.date)})`;
-          } catch { dateStr = ` (${c.date})`; }
-        }
-        output.push(`{>>${c.author}${dateStr}: ${c.text}<<}`);
-      }
-      i = j;
-      continue;
-    }
-
-    // regular text with formatting and hyperlinks
-    let formattedText = wrapWithFormatting(item.text, item.formatting);
-    if (item.href) {
-      formattedText = `[${formattedText}](${formatHrefForMarkdown(item.href)})`;
-    }
-    output.push(formattedText);
-    i++;
+    output.push(rendered.text);
+    i = rendered.nextIndex;
   }
 
   return output.join('');
