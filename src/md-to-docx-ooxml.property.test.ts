@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'bun:test';
 import fc from 'fast-check';
 import JSZip from 'jszip';
-import { convertMdToDocx, generateRPr, generateRun, generateParagraph, generateTable, MdToken, MdRun } from './md-to-docx';
+import { convertMdToDocx, generateRPr, generateRun, generateParagraph, generateTable, MdToken, MdRun, DocxGenState } from './md-to-docx';
 
 describe('OOXML Generation Properties', () => {
   // Property 3: DOCX archive completeness
@@ -81,7 +81,7 @@ describe('OOXML Generation Properties', () => {
         level, 
         runs: [{ type: 'text', text }] 
       };
-      const state = { commentId: 0, comments: [], relationships: new Map(), nextRId: 1, rIdOffset: 3, warnings: [], hasList: false, hasComments: false };
+      const state = { commentId: 0, comments: [], relationships: new Map(), nextRId: 1, rIdOffset: 3, warnings: [], hasList: false, hasComments: false, missingKeys: new Set<string>() };
       
       const paragraph = generateParagraph(token, state);
       expect(paragraph).toContain('<w:pStyle w:val="Heading' + level + '"/>');
@@ -103,7 +103,7 @@ describe('OOXML Generation Properties', () => {
         level, 
         runs: [{ type: 'text', text }] 
       };
-      const state = { commentId: 0, comments: [], relationships: new Map(), nextRId: 1, rIdOffset: 3, warnings: [], hasList: false, hasComments: false };
+      const state = { commentId: 0, comments: [], relationships: new Map(), nextRId: 1, rIdOffset: 3, warnings: [], hasList: false, hasComments: false, missingKeys: new Set<string>() };
       
       const paragraph = generateParagraph(token, state);
       expect(paragraph).toContain('<w:numPr>');
@@ -160,7 +160,12 @@ describe('OOXML Generation Properties', () => {
         ...rows.map(row => ({ cells: row.map(c => ({ runs: [{ type: 'text' as const, text: c }] })), header: false }))
       ];
       const token: MdToken = { type: 'table', runs: [], rows: tableRows };
-      const table = generateTable(token);
+      const state: DocxGenState = {
+        commentId: 0, comments: [], relationships: new Map(),
+        nextRId: 1, rIdOffset: 5, warnings: [], hasList: false,
+        hasComments: false, missingKeys: new Set()
+      };
+      const table = generateTable(token, state);
       
       // Count rows (header + data)
       const rowMatches = table.match(/<w:tr>/g);
@@ -191,7 +196,7 @@ describe('OOXML Generation Properties', () => {
         level, 
         runs: [{ type: 'text', text }] 
       };
-      const state = { commentId: 0, comments: [], relationships: new Map(), nextRId: 1, rIdOffset: 3, warnings: [], hasList: false, hasComments: false };
+      const state = { commentId: 0, comments: [], relationships: new Map(), nextRId: 1, rIdOffset: 3, warnings: [], hasList: false, hasComments: false, missingKeys: new Set<string>() };
       
       const paragraph = generateParagraph(token, state);
       const expectedIndent = level * 720; // 720 twips per level
@@ -216,7 +221,7 @@ describe('OOXML Generation Properties', () => {
           type: 'code_block', 
           runs: [{ type: 'text', text: code.text }] 
         };
-        const state = { commentId: 0, comments: [], relationships: new Map(), nextRId: 1, rIdOffset: 3, warnings: [], hasList: false, hasComments: false };
+        const state = { commentId: 0, comments: [], relationships: new Map(), nextRId: 1, rIdOffset: 3, warnings: [], hasList: false, hasComments: false, missingKeys: new Set<string>() };
         
         const paragraph = generateParagraph(token, state);
         expect(paragraph).toContain('<w:pStyle w:val="CodeBlock"/>');

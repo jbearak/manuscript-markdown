@@ -9,8 +9,23 @@ import {
   preprocessCriticMarkup,
   type MdRun,
   type MdToken,
-  type MdTableRow
+  type MdTableRow,
+  type DocxGenState
 } from './md-to-docx';
+
+function makeState(): DocxGenState {
+  return {
+    commentId: 0,
+    comments: [],
+    relationships: new Map(),
+    nextRId: 1,
+    rIdOffset: 5,
+    warnings: [],
+    hasList: false,
+    hasComments: false,
+    missingKeys: new Set(),
+  };
+}
 
 describe('generateRPr', () => {
   it('returns empty string for no formatting', () => {
@@ -98,13 +113,17 @@ describe('parseMd HTML tables', () => {
     expect(table?.rows?.[1].cells[1].runs[0].text).toBe('B');
   });
 
-  it('decodes entities and strips nested tags inside HTML table cells', () => {
+  it('decodes entities and preserves inline formatting inside HTML table cells', () => {
     const markdown = '<table><tr><td><strong>A &amp; B</strong><br/>line</td></tr></table>';
     const tokens = parseMd(markdown);
     const table = tokens.find(t => t.type === 'table');
-    const text = table?.rows?.[0].cells[0].runs[0].text;
+    const cellRuns = table?.rows?.[0].cells[0].runs;
 
-    expect(text).toBe('A & B line');
+    // Should produce: bold "A & B", softbreak, plain "line"
+    expect(cellRuns).toHaveLength(3);
+    expect(cellRuns?.[0]).toMatchObject({ type: 'text', text: 'A & B', bold: true });
+    expect(cellRuns?.[1]).toMatchObject({ type: 'softbreak' });
+    expect(cellRuns?.[2]).toMatchObject({ type: 'text', text: 'line' });
   });
 
   it('does not over-decode double-encoded entities inside HTML table cells', () => {
@@ -185,7 +204,8 @@ describe('generateParagraph', () => {
     nextRId: 1, rIdOffset: 3,
     warnings: [],
     hasList: false,
-    hasComments: false
+    hasComments: false,
+    missingKeys: new Set<string>()
   });
 
   it('generates basic paragraph', () => {
@@ -339,7 +359,7 @@ describe('generateTable', () => {
       rows
     };
     
-    const result = generateTable(token);
+    const result = generateTable(token, makeState());
     
     expect(result).toContain('<w:tbl>');
     expect(result).toContain('<w:tblBorders>');
@@ -368,7 +388,7 @@ describe('generateTable', () => {
       rows
     };
     
-    const result = generateTable(token);
+    const result = generateTable(token, makeState());
     
     expect(result).toContain('<w:b/>');
   });
@@ -389,7 +409,7 @@ describe('generateTable', () => {
       rows
     };
     
-    const result = generateTable(token);
+    const result = generateTable(token, makeState());
     
     // Should only have one <w:b/> tag
     const boldMatches = result.match(/<w:b\/>/g);
@@ -413,7 +433,7 @@ describe('generateTable', () => {
       }
     ];
     const token: MdToken = { type: 'table', runs: [], rows };
-    const result = generateTable(token);
+    const result = generateTable(token, makeState());
 
     expect(result).toContain('<w:gridSpan w:val="2"/>');
     expect(result).toContain('<w:tblGrid>');
@@ -438,7 +458,7 @@ describe('generateTable', () => {
       }
     ];
     const token: MdToken = { type: 'table', runs: [], rows };
-    const result = generateTable(token);
+    const result = generateTable(token, makeState());
 
     expect(result).toContain('<w:vMerge w:val="restart"/>');
     expect(result).toContain('<w:vMerge/>');
@@ -464,7 +484,7 @@ describe('generateTable', () => {
       }
     ];
     const token: MdToken = { type: 'table', runs: [], rows };
-    const result = generateTable(token);
+    const result = generateTable(token, makeState());
 
     expect(result).toContain('<w:vMerge w:val="restart"/>');
     expect(result).toContain('<w:gridSpan w:val="2"/>');
@@ -495,7 +515,7 @@ describe('generateTable', () => {
       }
     ];
     const token: MdToken = { type: 'table', runs: [], rows };
-    const result = generateTable(token);
+    const result = generateTable(token, makeState());
 
     // All four cells must be present
     expect(result).toContain('A');
@@ -519,11 +539,182 @@ describe('generateTable', () => {
       }
     ];
     const token: MdToken = { type: 'table', runs: [], rows };
-    const result = generateTable(token);
+    const result = generateTable(token, makeState());
 
     expect(result).not.toContain('<w:tblGrid>');
     expect(result).not.toContain('<w:gridSpan');
     expect(result).not.toContain('<w:vMerge');
+  });
+
+  it('renders hyperlinks in table cells', () => {
+    const state = makeState();
+    const rows: MdTableRow[] = [
+      {
+        header: false,
+        cells: [
+          { runs: [{ type: 'text', text: 'click here', href: 'https://example.com' }] }
+        ]
+      }
+    ];
+    const token: MdToken = { type: 'table', runs: [], rows };
+    const result = generateTable(token, state);
+
+    expect(result).toContain('<w:hyperlink r:id=');
+    expect(result).toContain('click here');
+    expect(state.relationships.has('https://example.com')).toBe(true);
+  });
+
+  it('renders softbreaks in table cells', () => {
+    const rows: MdTableRow[] = [
+      {
+        header: false,
+        cells: [
+          { runs: [
+            { type: 'text', text: 'line1' },
+            { type: 'softbreak', text: '\n' },
+            { type: 'text', text: 'line2' },
+          ] }
+        ]
+      }
+    ];
+    const token: MdToken = { type: 'table', runs: [], rows };
+    const result = generateTable(token, makeState());
+
+    expect(result).toContain('line1');
+    expect(result).toContain('<w:r><w:br/></w:r>');
+    expect(result).toContain('line2');
+  });
+
+  it('renders bold and italic formatting in table cells', () => {
+    const rows: MdTableRow[] = [
+      {
+        header: false,
+        cells: [
+          { runs: [
+            { type: 'text', text: 'bold', bold: true },
+            { type: 'text', text: ' and ' },
+            { type: 'text', text: 'italic', italic: true },
+          ] }
+        ]
+      }
+    ];
+    const token: MdToken = { type: 'table', runs: [], rows };
+    const result = generateTable(token, makeState());
+
+    expect(result).toContain('<w:rPr><w:b/></w:rPr>');
+    expect(result).toContain('bold');
+    expect(result).toContain('<w:rPr><w:i/></w:rPr>');
+    expect(result).toContain('italic');
+  });
+
+  it('renders critic_add runs in table cells', () => {
+    const state = makeState();
+    const rows: MdTableRow[] = [
+      {
+        header: false,
+        cells: [
+          { runs: [{ type: 'critic_add', text: 'inserted', author: 'Tester', date: '2024-01-01T00:00:00Z' }] }
+        ]
+      }
+    ];
+    const token: MdToken = { type: 'table', runs: [], rows };
+    const result = generateTable(token, state, { authorName: 'Default' });
+
+    expect(result).toContain('<w:ins');
+    expect(result).toContain('w:author="Tester"');
+    expect(result).toContain('inserted');
+  });
+
+  it('renders math runs in table cells', () => {
+    const rows: MdTableRow[] = [
+      {
+        header: false,
+        cells: [
+          { runs: [{ type: 'math', text: 'x^2' }] }
+        ]
+      }
+    ];
+    const token: MdToken = { type: 'table', runs: [], rows };
+    const result = generateTable(token, makeState());
+
+    // Math runs produce OMML, check for the math namespace element
+    expect(result).toContain('m:oMath');
+  });
+});
+
+describe('parseHtmlCellRuns via parseMd', () => {
+  it('preserves bold formatting from HTML table cells', () => {
+    const tokens = parseMd('<table><tr><td><b>bold text</b></td></tr></table>');
+    const table = tokens.find(t => t.type === 'table');
+    const runs = table?.rows?.[0].cells[0].runs;
+
+    expect(runs).toHaveLength(1);
+    expect(runs?.[0]).toMatchObject({ type: 'text', text: 'bold text', bold: true });
+  });
+
+  it('preserves italic formatting from HTML table cells', () => {
+    const tokens = parseMd('<table><tr><td><em>italic</em></td></tr></table>');
+    const table = tokens.find(t => t.type === 'table');
+    const runs = table?.rows?.[0].cells[0].runs;
+
+    expect(runs).toHaveLength(1);
+    expect(runs?.[0]).toMatchObject({ type: 'text', text: 'italic', italic: true });
+  });
+
+  it('preserves hyperlinks from HTML table cells', () => {
+    const tokens = parseMd('<table><tr><td><a href="https://example.com">link</a></td></tr></table>');
+    const table = tokens.find(t => t.type === 'table');
+    const runs = table?.rows?.[0].cells[0].runs;
+
+    expect(runs).toHaveLength(1);
+    expect(runs?.[0]).toMatchObject({ type: 'text', text: 'link', href: 'https://example.com' });
+  });
+
+  it('preserves nested formatting (bold + italic) from HTML table cells', () => {
+    const tokens = parseMd('<table><tr><td><strong><em>both</em></strong></td></tr></table>');
+    const table = tokens.find(t => t.type === 'table');
+    const runs = table?.rows?.[0].cells[0].runs;
+
+    expect(runs).toHaveLength(1);
+    expect(runs?.[0]).toMatchObject({ type: 'text', text: 'both', bold: true, italic: true });
+  });
+
+  it('preserves mixed content with plain and formatted text', () => {
+    const tokens = parseMd('<table><tr><td>plain <b>bold</b> plain</td></tr></table>');
+    const table = tokens.find(t => t.type === 'table');
+    const runs = table?.rows?.[0].cells[0].runs;
+
+    expect(runs).toHaveLength(3);
+    expect(runs?.[0]).toMatchObject({ type: 'text', text: 'plain ' });
+    expect(runs?.[1]).toMatchObject({ type: 'text', text: 'bold', bold: true });
+    expect(runs?.[2]).toMatchObject({ type: 'text', text: ' plain' });
+  });
+
+  it('preserves strikethrough from HTML table cells', () => {
+    const tokens = parseMd('<table><tr><td><s>deleted</s></td></tr></table>');
+    const table = tokens.find(t => t.type === 'table');
+    const runs = table?.rows?.[0].cells[0].runs;
+
+    expect(runs).toHaveLength(1);
+    expect(runs?.[0]).toMatchObject({ type: 'text', text: 'deleted', strikethrough: true });
+  });
+
+  it('preserves code formatting from HTML table cells', () => {
+    const tokens = parseMd('<table><tr><td><code>x = 1</code></td></tr></table>');
+    const table = tokens.find(t => t.type === 'table');
+    const runs = table?.rows?.[0].cells[0].runs;
+
+    expect(runs).toHaveLength(1);
+    expect(runs?.[0]).toMatchObject({ type: 'text', text: 'x = 1', code: true });
+  });
+
+  it('preserves superscript and subscript from HTML table cells', () => {
+    const tokens = parseMd('<table><tr><td>H<sub>2</sub>O is x<sup>2</sup></td></tr></table>');
+    const table = tokens.find(t => t.type === 'table');
+    const runs = table?.rows?.[0].cells[0].runs;
+
+    expect(runs?.find(r => r.text === '2' && (r as any).subscript)).toBeTruthy();
+    expect(runs?.find(r => r.text === '2' && (r as any).superscript)).toBeTruthy();
   });
 });
 
@@ -714,7 +905,8 @@ describe('CriticMarkup OOXML generation', () => {
     nextRId: 1, rIdOffset: 3,
     warnings: [],
     hasList: false,
-    hasComments: false
+    hasComments: false,
+    missingKeys: new Set<string>()
   });
 
   it('generates w:ins for additions', () => {
