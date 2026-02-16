@@ -349,6 +349,30 @@ describe('colspan/rowspan roundtrip', () => {
     expect(result.markdown).toContain('rowspan="2"');
     expect(result.markdown).toContain('Big');
   });
+
+  test('indented HTML table roundtrips through DOCX correctly', async () => {
+    const indentedMd = [
+      '<table>',
+      '  <tr>',
+      '    <th>',
+      '      <p>Header</p>',
+      '    </th>',
+      '  </tr>',
+      '  <tr>',
+      '    <td>',
+      '      <p>Data</p>',
+      '    </td>',
+      '  </tr>',
+      '</table>',
+    ].join('\n');
+    const { docx } = await convertMdToDocx(indentedMd);
+    const result = await convertDocx(docx);
+
+    expect(result.markdown).toContain('<th>');
+    expect(result.markdown).toContain('Header');
+    expect(result.markdown).toContain('<td>');
+    expect(result.markdown).toContain('Data');
+  });
 });
 
 describe('Integration: tables.docx fixture', () => {
