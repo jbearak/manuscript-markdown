@@ -1197,18 +1197,14 @@ export function buildMarkdown(
       continue;
     }
 
-    if (item.type === 'math') {
-      if (item.display) {
-        // Ensure blank line before display math
-        if (output.length > 0 && !output[output.length - 1].endsWith('\n\n')) {
-          output.push('\n\n');
-        }
-        output.push('$$' + '\n' + item.latex + '\n' + '$$');
-        // A display math block breaks list flow; reset list continuation state.
-        lastListType = undefined;
-      } else {
-        output.push('$' + item.latex + '$');
+    if (item.type === 'math' && item.display) {
+      // Ensure blank line before display math
+      if (output.length > 0 && !output[output.length - 1].endsWith('\n\n')) {
+        output.push('\n\n');
       }
+      output.push('$$' + '\n' + item.latex + '\n' + '$$');
+      // A display math block breaks list flow; reset list continuation state.
+      lastListType = undefined;
       i++;
       continue;
     }
@@ -1224,12 +1220,11 @@ export function buildMarkdown(
     }
 
     const rendered = renderInlineRange(mergedContent, i, comments, { stopBeforeDisplayMath: true });
-    if (rendered.nextIndex > i) {
-      output.push(rendered.text);
-      i = rendered.nextIndex;
-      continue;
+    if (rendered.nextIndex <= i) {
+      throw new Error('Invariant violated: renderInlineRange did not advance index');
     }
-    i++;
+    output.push(rendered.text);
+    i = rendered.nextIndex;
   }
 
   return output.join('');
