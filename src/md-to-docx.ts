@@ -647,6 +647,8 @@ function extractTableCells(tokens: any[]): MdRun[][] {
 
 function extractHtmlTables(html: string): MdTableRow[][] {
   const tables: MdTableRow[][] = [];
+  // Regex-based extraction intentionally does not support nested <table> blocks.
+  // This converter targets simple manuscript tables (<table>/<tr>/<th>/<td>).
   const tableRegex = /<table\b[^>]*>([\s\S]*?)<\/table>/gi;
   let tableMatch: RegExpExecArray | null;
   while ((tableMatch = tableRegex.exec(html)) !== null) {
@@ -658,6 +660,7 @@ function extractHtmlTables(html: string): MdTableRow[][] {
 
 function extractHtmlTableRows(tableHtml: string): MdTableRow[] {
   const rows: MdTableRow[] = [];
+  // Similarly, nested <tr> structures are out of scope for this lightweight parser.
   const rowRegex = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
   let rowMatch: RegExpExecArray | null;
   while ((rowMatch = rowRegex.exec(tableHtml)) !== null) {
@@ -674,6 +677,7 @@ function extractHtmlTableRows(tableHtml: string): MdTableRow[] {
 
 function extractHtmlTableCells(rowHtml: string): Array<{ text: string; isHeader: boolean }> {
   const cells: Array<{ text: string; isHeader: boolean }> = [];
+  // Nested table-cell tags are not supported; this matches flat <th>/<td> content only.
   const cellRegex = /<(th|td)\b[^>]*>([\s\S]*?)<\/\1>/gi;
   let cellMatch: RegExpExecArray | null;
   while ((cellMatch = cellRegex.exec(rowHtml)) !== null) {
@@ -695,8 +699,8 @@ function normalizeHtmlCellText(cellHtml: string): string {
 
 function decodeHtmlEntities(text: string): string {
   return text
-    .replace(/&#(\d+);/g, (_m, code) => String.fromCharCode(Number(code)))
-    .replace(/&#x([0-9a-fA-F]+);/g, (_m, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_m, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_m, hex) => String.fromCodePoint(parseInt(hex, 16)))
     .replace(/&nbsp;/g, ' ')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')

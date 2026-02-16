@@ -115,6 +115,15 @@ describe('parseMd HTML tables', () => {
 
     expect(text).toBe('&lt;tag&gt;');
   });
+
+  it('decodes decimal and hex numeric entities beyond U+FFFF in HTML table cells', () => {
+    const markdown = '<table><tr><td>&#128512; &#x1F600;</td></tr></table>';
+    const tokens = parseMd(markdown);
+    const table = tokens.find(t => t.type === 'table');
+    const text = table?.rows?.[0].cells[0][0].text;
+
+    expect(text).toBe('😀 😀');
+  });
 });
 
 describe('generateRun', () => {
