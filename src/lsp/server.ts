@@ -54,6 +54,12 @@ interface ResolvedSymbol {
 
 const bibCache = new Map<string, CachedBibData>();
 
+interface OpenDocBibCache {
+	version: number;
+	data: ParsedBibData;
+}
+const openDocBibCache = new Map<string, OpenDocBibCache>();
+
 connection.onInitialize((params: InitializeParams) => {
 	workspaceRootPaths = extractWorkspaceRoots(params);
 
@@ -254,14 +260,23 @@ async function getTextDocument(uri: string, languageId: string): Promise<TextDoc
 function invalidateBibCache(uri: string): void {
 	const fsPath = uriToFsPath(uri);
 	if (fsPath) {
-		bibCache.delete(canonicalizeFsPath(fsPath));
+		const key = canonicalizeFsPath(fsPath);
+		bibCache.delete(key);
+		openDocBibCache.delete(key);
 	}
 }
 
 async function getBibDataForPath(bibPath: string): Promise<ParsedBibData | undefined> {
 	const openDoc = documents.get(fsPathToUri(bibPath));
 	if (openDoc) {
-		return parseBibDataFromText(bibPath, openDoc.getText());
+		const cacheKey = canonicalizeFsPath(bibPath);
+		const cached = openDocBibCache.get(cacheKey);
+		if (cached && cached.version === openDoc.version) {
+			return cached.data;
+		}
+		const data = parseBibDataFromText(bibPath, openDoc.getText());
+		openDocBibCache.set(cacheKey, { version: openDoc.version, data });
+		return data;
 	}
 
 	const cacheKey = canonicalizeFsPath(bibPath);
@@ -306,10 +321,10 @@ async function resolveSymbolAtPosition(uri: string, position: Position): Promise
 			return undefined;
 		}
 		const bibData = await getBibDataForPath(bibPath);
-		const bibDoc = await getTextDocument(uri, 'bibtex');
-		if (!bibData || !bibDoc) {
+		if (!bibData) {
 			return undefined;
 		}
+		const bibDoc = documents.get(uri) ?? TextDocument.create(uri, 'bibtex', 0, bibData.text);
 		const key = findBibKeyAtOffset(bibData, bibDoc.offsetAt(position));
 		if (!key) {
 			return undefined;
@@ -373,7 +388,49 @@ async function findPairedMarkdownUris(bibPath: string): Promise<string[]> {
 		}
 	}
 
+	// 3. Workspace scan: closed .md files whose frontmatter references this bib
+	for (const root of workspaceRootPaths) {
+		const mdPaths = await findMarkdownFilesRecursive(root);
+		for (const mdPath of mdPaths) {
+			const canonical = canonicalizeFsPath(mdPath);
+			if (urisByCanonicalPath.has(canonical)) {
+				continue;
+			}
+			try {
+				const text = await fsp.readFile(mdPath, 'utf8');
+				const mdUri = fsPathToUri(mdPath);
+				const resolved = resolveBibliographyPath(mdUri, text, workspaceRootPaths);
+				if (resolved && pathsEqual(resolved, bibPath)) {
+					urisByCanonicalPath.set(canonical, mdUri);
+				}
+			} catch {
+				// skip unreadable files
+			}
+		}
+	}
+
 	return [...urisByCanonicalPath.values()];
+}
+
+async function findMarkdownFilesRecursive(dir: string): Promise<string[]> {
+	const results: string[] = [];
+	try {
+		const entries = await fsp.readdir(dir, { withFileTypes: true });
+		for (const entry of entries) {
+			if (entry.name.startsWith('.') || entry.name === 'node_modules') {
+				continue;
+			}
+			const fullPath = path.join(dir, entry.name);
+			if (entry.isDirectory()) {
+				results.push(...(await findMarkdownFilesRecursive(fullPath)));
+			} else if (entry.name.endsWith('.md')) {
+				results.push(fullPath);
+			}
+		}
+	} catch {
+		// ignore unreadable directories
+	}
+	return results;
 }
 
 async function findReferencesForKey(key: string, targetBibPath: string): Promise<Location[]> {
