@@ -673,7 +673,7 @@ function extractHtmlTableRows(tableHtml: string): MdTableRow[] {
     if (cells.length > 0) {
       rows.push({
         cells: cells.map(cell => ({
-          runs: [{ type: 'text' as const, text: cell.text }],
+          runs: cell.runs,
           ...(cell.colspan && cell.colspan > 1 ? { colspan: cell.colspan } : {}),
           ...(cell.rowspan && cell.rowspan > 1 ? { rowspan: cell.rowspan } : {}),
         })),
@@ -684,21 +684,21 @@ function extractHtmlTableRows(tableHtml: string): MdTableRow[] {
   return rows;
 }
 
-function extractHtmlTableCells(rowHtml: string): Array<{ text: string; isHeader: boolean; colspan?: number; rowspan?: number }> {
-  const cells: Array<{ text: string; isHeader: boolean; colspan?: number; rowspan?: number }> = [];
+function extractHtmlTableCells(rowHtml: string): Array<{ runs: MdRun[]; isHeader: boolean; colspan?: number; rowspan?: number }> {
+  const cells: Array<{ runs: MdRun[]; isHeader: boolean; colspan?: number; rowspan?: number }> = [];
   // Nested table-cell tags are not supported; this matches flat <th>/<td> content only.
   const cellRegex = /<(th|td)\b([^>]*)>([\s\S]*?)<\/\1>/gi;
   let cellMatch: RegExpExecArray | null;
   while ((cellMatch = cellRegex.exec(rowHtml)) !== null) {
     const isHeader = cellMatch[1].toLowerCase() === 'th';
     const attrs = cellMatch[2];
-    const text = normalizeHtmlCellText(cellMatch[3]);
+    const runs = parseHtmlCellRuns(cellMatch[3]);
     const colspanMatch = attrs.match(/colspan\s*=\s*["']?(\d+)/i);
     const rowspanMatch = attrs.match(/rowspan\s*=\s*["']?(\d+)/i);
     const colspan = colspanMatch ? parseInt(colspanMatch[1], 10) : undefined;
     const rowspan = rowspanMatch ? parseInt(rowspanMatch[1], 10) : undefined;
     cells.push({
-      text,
+      runs,
       isHeader,
       ...(colspan && colspan > 1 ? { colspan } : {}),
       ...(rowspan && rowspan > 1 ? { rowspan } : {}),
@@ -707,13 +707,116 @@ function extractHtmlTableCells(rowHtml: string): Array<{ text: string; isHeader:
   return cells;
 }
 
-function normalizeHtmlCellText(cellHtml: string): string {
-  // Convert line-break-like tags to spaces before stripping remaining tags.
-  let text = cellHtml.replace(/<br\s*\/?>/gi, ' ');
-  text = text.replace(/<\/p>/gi, ' ');
-  text = text.replace(/<[^>]+>/g, '');
-  text = decodeHtmlEntities(text);
-  return text.replace(/\s+/g, ' ').trim();
+function parseHtmlCellRuns(cellHtml: string): MdRun[] {
+  const runs: MdRun[] = [];
+  let bold = false;
+  let italic = false;
+  let underline = false;
+  let strikethrough = false;
+  let code = false;
+  let superscript = false;
+  let subscript = false;
+  let href: string | undefined;
+
+  // Tokenize the HTML into tags and text segments
+  const tagRegex = /<(\/?)(\w+)\b([^>]*)>/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = tagRegex.exec(cellHtml)) !== null) {
+    // Emit any text before this tag
+    if (match.index > lastIndex) {
+      const rawText = cellHtml.slice(lastIndex, match.index);
+      const text = decodeHtmlEntities(rawText).replace(/\s+/g, ' ');
+      if (text) {
+        runs.push({
+          type: 'text', text,
+          ...(bold ? { bold } : {}),
+          ...(italic ? { italic } : {}),
+          ...(underline ? { underline } : {}),
+          ...(strikethrough ? { strikethrough } : {}),
+          ...(code ? { code } : {}),
+          ...(superscript ? { superscript } : {}),
+          ...(subscript ? { subscript } : {}),
+          ...(href ? { href } : {}),
+        });
+      }
+    }
+    lastIndex = match.index + match[0].length;
+
+    const isClose = match[1] === '/';
+    const tag = match[2].toLowerCase();
+    const attrs = match[3];
+
+    if (tag === 'br') {
+      runs.push({ type: 'softbreak', text: '\n' });
+    } else if (tag === 'b' || tag === 'strong') {
+      bold = !isClose;
+    } else if (tag === 'i' || tag === 'em') {
+      italic = !isClose;
+    } else if (tag === 'u') {
+      underline = !isClose;
+    } else if (tag === 's' || tag === 'del' || tag === 'strike') {
+      strikethrough = !isClose;
+    } else if (tag === 'code') {
+      code = !isClose;
+    } else if (tag === 'sup') {
+      superscript = !isClose;
+    } else if (tag === 'sub') {
+      subscript = !isClose;
+    } else if (tag === 'a') {
+      if (!isClose) {
+        const hrefMatch = attrs.match(/href\s*=\s*["']([^"']*)["']/i);
+        href = hrefMatch ? decodeHtmlEntities(hrefMatch[1]) : undefined;
+      } else {
+        href = undefined;
+      }
+    } else if (tag === 'p' && isClose) {
+      // Treat </p> as a soft break to separate paragraphs within a cell
+      runs.push({ type: 'softbreak', text: '\n' });
+    }
+  }
+
+  // Emit any trailing text
+  if (lastIndex < cellHtml.length) {
+    const rawText = cellHtml.slice(lastIndex);
+    const text = decodeHtmlEntities(rawText).replace(/\s+/g, ' ');
+    if (text) {
+      runs.push({
+        type: 'text', text,
+        ...(bold ? { bold } : {}),
+        ...(italic ? { italic } : {}),
+        ...(underline ? { underline } : {}),
+        ...(strikethrough ? { strikethrough } : {}),
+        ...(code ? { code } : {}),
+        ...(superscript ? { superscript } : {}),
+        ...(subscript ? { subscript } : {}),
+        ...(href ? { href } : {}),
+      });
+    }
+  }
+
+  // Trim leading/trailing whitespace from the run sequence
+  if (runs.length > 0) {
+    const first = runs[0];
+    if (first.type === 'text') first.text = first.text.replace(/^\s+/, '');
+    if (first.type === 'text' && !first.text) runs.shift();
+  }
+  if (runs.length > 0) {
+    const last = runs[runs.length - 1];
+    if (last.type === 'softbreak') runs.pop();
+    else if (last.type === 'text') {
+      last.text = last.text.replace(/\s+$/, '');
+      if (!last.text) runs.pop();
+    }
+  }
+
+  // If we ended up with no runs, return a single empty text run
+  if (runs.length === 0) {
+    runs.push({ type: 'text', text: '' });
+  }
+
+  return runs;
 }
 
 function decodeHtmlEntities(text: string): string {
@@ -766,7 +869,7 @@ export interface MdToDocxResult {
   warnings: string[];
 }
 
-interface DocxGenState {
+export interface DocxGenState {
   commentId: number;
   comments: CommentEntry[];
   relationships: Map<string, string>; // URL -> rId
@@ -1093,6 +1196,90 @@ export function generateRun(text: string, rPr: string): string {
   return '<w:r>' + rPr + '<w:t xml:space="preserve">' + escapeXml(text) + '</w:t></w:r>';
 }
 
+export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: any): string {
+  let xml = '';
+  for (let ri = 0; ri < inputRuns.length; ri++) {
+    const run = inputRuns[ri];
+    const nextRun = inputRuns[ri + 1];
+    if (run.type === 'text') {
+      const rPr = generateRPr(run);
+      if (run.href) {
+        let rId = state.relationships.get(run.href);
+        if (!rId) {
+          rId = 'rId' + (state.nextRId + state.rIdOffset);
+          state.relationships.set(run.href, rId);
+          state.nextRId++;
+        }
+        xml += '<w:hyperlink r:id="' + rId + '">' + generateRun(run.text, rPr) + '</w:hyperlink>';
+      } else {
+        xml += generateRun(run.text, rPr);
+      }
+    } else if (run.type === 'softbreak') {
+      xml += '<w:r><w:br/></w:r>';
+    } else if (run.type === 'critic_add') {
+      const author = run.author || options?.authorName || 'Unknown';
+      const date = normalizeToUtcIso(run.date || '', state.timezone);
+      const rPr = generateRPr(run);
+      xml += '<w:ins w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '" w:date="' + escapeXml(date) + '">' + generateRun(run.text, rPr) + '</w:ins>';
+    } else if (run.type === 'critic_del') {
+      const author = run.author || options?.authorName || 'Unknown';
+      const date = normalizeToUtcIso(run.date || '', state.timezone);
+      const rPr = generateRPr(run);
+      xml += '<w:del w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '" w:date="' + escapeXml(date) + '"><w:r>' + (rPr ? rPr : '') + '<w:delText xml:space="preserve">' + escapeXml(run.text) + '</w:delText></w:r></w:del>';
+    } else if (run.type === 'critic_sub') {
+      const author = run.author || options?.authorName || 'Unknown';
+      const date = normalizeToUtcIso(run.date || '', state.timezone);
+      const rPr = generateRPr(run);
+      xml += '<w:del w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '" w:date="' + escapeXml(date) + '"><w:r>' + (rPr ? rPr : '') + '<w:delText xml:space="preserve">' + escapeXml(run.text) + '</w:delText></w:r></w:del>';
+      xml += '<w:ins w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '" w:date="' + escapeXml(date) + '">' + generateRun(run.newText || '', rPr) + '</w:ins>';
+    } else if (run.type === 'critic_highlight') {
+      if (nextRun?.type === 'critic_comment') {
+        const commentId = state.commentId++;
+        const author = nextRun.author || options?.authorName || 'Unknown';
+        const date = normalizeToUtcIso(nextRun.date || '', state.timezone);
+        const commentBody = nextRun.commentText || '';
+        state.comments.push({ id: commentId, author, date, text: commentBody });
+        state.hasComments = true;
+        xml += '<w:commentRangeStart w:id="' + commentId + '"/>';
+        const highlightRun = { ...run, type: 'text' as const, highlight: true };
+        xml += generateRun(run.text, generateRPr(highlightRun));
+        xml += '<w:commentRangeEnd w:id="' + commentId + '"/>';
+        xml += '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="' + commentId + '"/></w:r>';
+        ri++; // skip the comment run
+      } else {
+        const highlightRun = { ...run, type: 'text' as const, highlight: true };
+        xml += generateRun(run.text, generateRPr(highlightRun));
+      }
+    } else if (run.type === 'critic_comment') {
+      const commentId = state.commentId++;
+      const author = run.author || options?.authorName || 'Unknown';
+      const date = normalizeToUtcIso(run.date || '', state.timezone);
+      const commentBody = run.commentText || '';
+
+      state.comments.push({ id: commentId, author, date, text: commentBody });
+      state.hasComments = true;
+
+      if (run.text) {
+        xml += '<w:commentRangeStart w:id="' + commentId + '"/>';
+        const highlightRun = { ...run, type: 'text' as const, highlight: true };
+        xml += generateRun(run.text, generateRPr(highlightRun));
+        xml += '<w:commentRangeEnd w:id="' + commentId + '"/>';
+      }
+      xml += '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="' + commentId + '"/></w:r>';
+    } else if (run.type === 'citation') {
+      const result = generateCitation(run, bibEntries || new Map(), citeprocEngine, options?.mixedCitationStyle);
+      xml += result.xml;
+      if (result.warning) state.warnings.push(result.warning);
+      if (result.missingKeys) {
+        for (const k of result.missingKeys) state.missingKeys.add(k);
+      }
+    } else if (run.type === 'math') {
+      xml += generateMathXml(run.text, !!run.display);
+    }
+  }
+  return xml;
+}
+
 export function generateParagraph(token: MdToken, state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: any): string {
   let pPr = '';
   
@@ -1127,93 +1314,12 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
     return '<w:p>' + pPr + '</w:p>';
   }
   
-  let runs = '';
-  for (let ri = 0; ri < token.runs.length; ri++) {
-    const run = token.runs[ri];
-    const nextRun = token.runs[ri + 1];
-    if (run.type === 'text') {
-      const rPr = generateRPr(run);
-      if (run.href) {
-        let rId = state.relationships.get(run.href);
-        if (!rId) {
-          rId = 'rId' + (state.nextRId + state.rIdOffset);
-          state.relationships.set(run.href, rId);
-          state.nextRId++;
-        }
-        runs += '<w:hyperlink r:id="' + rId + '">' + generateRun(run.text, rPr) + '</w:hyperlink>';
-      } else {
-        runs += generateRun(run.text, rPr);
-      }
-    } else if (run.type === 'softbreak') {
-      runs += '<w:r><w:br/></w:r>';
-    } else if (run.type === 'critic_add') {
-      const author = run.author || options?.authorName || 'Unknown';
-      const date = normalizeToUtcIso(run.date || '', state.timezone);
-      const rPr = generateRPr(run);
-      runs += '<w:ins w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '" w:date="' + escapeXml(date) + '">' + generateRun(run.text, rPr) + '</w:ins>';
-    } else if (run.type === 'critic_del') {
-      const author = run.author || options?.authorName || 'Unknown';
-      const date = normalizeToUtcIso(run.date || '', state.timezone);
-      const rPr = generateRPr(run);
-      runs += '<w:del w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '" w:date="' + escapeXml(date) + '"><w:r>' + (rPr ? rPr : '') + '<w:delText xml:space="preserve">' + escapeXml(run.text) + '</w:delText></w:r></w:del>';
-    } else if (run.type === 'critic_sub') {
-      const author = run.author || options?.authorName || 'Unknown';
-      const date = normalizeToUtcIso(run.date || '', state.timezone);
-      const rPr = generateRPr(run);
-      runs += '<w:del w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '" w:date="' + escapeXml(date) + '"><w:r>' + (rPr ? rPr : '') + '<w:delText xml:space="preserve">' + escapeXml(run.text) + '</w:delText></w:r></w:del>';
-      runs += '<w:ins w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '" w:date="' + escapeXml(date) + '">' + generateRun(run.newText || '', rPr) + '</w:ins>';
-    } else if (run.type === 'critic_highlight') {
-      // Check if next run is a comment anchored to this highlight
-      if (nextRun?.type === 'critic_comment') {
-        const commentId = state.commentId++;
-        const author = nextRun.author || options?.authorName || 'Unknown';
-        const date = normalizeToUtcIso(nextRun.date || '', state.timezone);
-        const commentBody = nextRun.commentText || '';
-        state.comments.push({ id: commentId, author, date, text: commentBody });
-        state.hasComments = true;
-        runs += '<w:commentRangeStart w:id="' + commentId + '"/>';
-        const highlightRun = { ...run, type: 'text' as const, highlight: true };
-        runs += generateRun(run.text, generateRPr(highlightRun));
-        runs += '<w:commentRangeEnd w:id="' + commentId + '"/>';
-        runs += '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="' + commentId + '"/></w:r>';
-        ri++; // skip the comment run
-      } else {
-        const highlightRun = { ...run, type: 'text' as const, highlight: true };
-        runs += generateRun(run.text, generateRPr(highlightRun));
-      }
-    } else if (run.type === 'critic_comment') {
-      const commentId = state.commentId++;
-      const author = run.author || options?.authorName || 'Unknown';
-      const date = normalizeToUtcIso(run.date || '', state.timezone);
-      const commentBody = run.commentText || '';
-      
-      state.comments.push({ id: commentId, author, date, text: commentBody });
-      state.hasComments = true;
-      
-      if (run.text) {
-        runs += '<w:commentRangeStart w:id="' + commentId + '"/>';
-        const highlightRun = { ...run, type: 'text' as const, highlight: true };
-        runs += generateRun(run.text, generateRPr(highlightRun));
-        runs += '<w:commentRangeEnd w:id="' + commentId + '"/>';
-      }
-      runs += '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="' + commentId + '"/></w:r>';
-    } else if (run.type === 'citation') {
-      const result = generateCitation(run, bibEntries || new Map(), citeprocEngine, options?.mixedCitationStyle);
-      runs += result.xml;
-      if (result.warning) state.warnings.push(result.warning);
-      if (result.missingKeys) {
-        for (const k of result.missingKeys) state.missingKeys.add(k);
-      }
-    } else if (run.type === 'math') {
-      runs += generateMathXml(run.text, !!run.display);
-    }
-    // Skip other run types
-  }
-  
+  const runs = generateRuns(token.runs, state, options, bibEntries, citeprocEngine);
+
   return '<w:p>' + pPr + runs + '</w:p>';
 }
 
-export function generateTable(token: MdToken): string {
+export function generateTable(token: MdToken, state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: any): string {
   if (!token.rows) return '';
 
   // Compute total grid columns by simulating grid occupancy (accounts for
@@ -1323,15 +1429,11 @@ export function generateTable(token: MdToken): string {
       }
 
       xml += '<w:tc>' + tcPr + '<w:p>';
-      for (const run of cell.runs) {
-        if (run.type === 'text') {
-          let rPr = generateRPr(run);
-          if (row.header && !run.bold) {
-            rPr = rPr ? rPr.replace('</w:rPr>', '<w:b/></w:rPr>') : '<w:rPr><w:b/></w:rPr>';
-          }
-          xml += generateRun(run.text, rPr);
-        }
-      }
+      // Apply header bold by augmenting runs before rendering
+      const cellRuns = row.header
+        ? cell.runs.map(r => r.type === 'text' && !r.bold ? { ...r, bold: true } : r)
+        : cell.runs;
+      xml += generateRuns(cellRuns, state, options, bibEntries, citeprocEngine);
       xml += '</w:p></w:tc>';
       gridCol += cs;
     }
@@ -1370,7 +1472,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
 
   for (const token of tokens) {
     if (token.type === 'table') {
-      body += generateTable(token);
+      body += generateTable(token, state, options, bibEntries, citeprocEngine);
     } else {
       body += generateParagraph(token, state, options, bibEntries, citeprocEngine);
     }
