@@ -590,6 +590,11 @@
           "default": true,
           "description": "Include timestamp in comment author attribution (format: username (yyyy-mm-dd hh:mm))"
         },
+        "manuscriptMarkdown.enableCitekeyLanguageServer": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable citekey language server features: @ completions, go-to-definition, and find references for citation keys."
+        },
         "manuscriptMarkdown.defaultHighlightColor": {
           "type": "string",
           "enum": [
@@ -640,6 +645,11 @@
             "Sequential numbers (e.g., 1, 2, 3)"
           ],
           "description": "Citation key format for DOCX to Markdown conversion"
+        },
+        "manuscriptMarkdown.citekeyReferencesFromMarkdown": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include markdown usages in Find All References when invoked from a markdown file. Off by default because VS Code's built-in Markdown Language Features extension already reports these; enabling this may produce duplicate entries."
         }
       }
     }
@@ -669,6 +679,9 @@
     "citeproc": "^2.4.63",
     "fast-xml-parser": "^5.3.5",
     "jszip": "^3.10.1",
-    "markdown-it": "^14.1.0"
+    "markdown-it": "^14.1.0",
+    "vscode-languageclient": "^9.0.1",
+    "vscode-languageserver": "^9.0.1",
+    "vscode-languageserver-textdocument": "^1.0.12"
   }
 }
