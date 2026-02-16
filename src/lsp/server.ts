@@ -513,7 +513,7 @@ function getEntryDocumentation(entry: BibtexEntry): string | undefined {
 	if (venue) {
 		parts.push(venue);
 	}
-	return parts.join('\n');
+	return parts.join('\n\n');
 }
 
 /** Split BibTeX author string and flip each "Last, First" to "First Last". */
