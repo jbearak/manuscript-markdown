@@ -74,6 +74,7 @@ export type ContentItem =
       href?: string;           // hyperlink URL if inside w:hyperlink
     }
   | { type: 'citation'; text: string; commentIds: Set<string>; pandocKeys: string[] }
+  | { type: 'table'; rows: TableRow[] }
   | {
       type: 'para';
       headingLevel?: number;   // 1–6 if heading, undefined otherwise
@@ -81,6 +82,12 @@ export type ContentItem =
       isTitle?: boolean;       // true if Word "Title" paragraph style
     }
   | { type: 'math'; latex: string; display: boolean };
+export interface TableRow {
+  cells: TableCell[];
+}
+export interface TableCell {
+  paragraphs: ContentItem[][];
+}
 
 export type CitationKeyFormat = 'authorYearTitle' | 'authorYear' | 'numeric';
 
@@ -709,6 +716,36 @@ export interface DocumentContentResult {
   content: ContentItem[];
   zoteroBiblData?: ZoteroBiblData;
 }
+function splitCellParagraphs(cellContent: ContentItem[]): ContentItem[][] {
+  const paragraphs: ContentItem[][] = [];
+  let current: ContentItem[] = [];
+  let sawPara = false;
+
+  for (const item of cellContent) {
+    if (item.type === 'para') {
+      if (!sawPara) {
+        sawPara = true;
+      } else {
+        paragraphs.push(current);
+        current = [];
+      }
+      continue;
+    }
+    current.push(item);
+  }
+
+  if (sawPara) {
+    paragraphs.push(current);
+  } else if (current.length > 0) {
+    paragraphs.push(current);
+  }
+
+  if (paragraphs.length === 0) {
+    paragraphs.push([]);
+  }
+
+  return paragraphs;
+}
 
 export async function extractDocumentContent(
   data: Uint8Array | JSZip,
@@ -737,7 +774,12 @@ export async function extractDocumentContent(
   let currentHref: string | undefined;
   let zoteroBiblData: ZoteroBiblData | undefined;
 
-  function walk(nodes: any[], currentFormatting: RunFormatting = DEFAULT_FORMATTING): void {
+  function walk(
+    nodes: any[],
+    currentFormatting: RunFormatting = DEFAULT_FORMATTING,
+    target: ContentItem[] = content,
+    inTableCell = false
+  ): void {
     for (const node of nodes) {
       for (const key of Object.keys(node)) {
         if (key === ':@') { continue; }
@@ -776,7 +818,7 @@ export async function extractDocumentContent(
           } else if (fldType === 'end') {
             if (inCitationField && currentCitation) {
               const pandocKeys = citationPandocKeys(currentCitation, keyMap);
-              content.push({
+              target.push({
                 type: 'citation',
                 text: citationTextParts.join(''),
                 commentIds: new Set(activeComments),
@@ -798,8 +840,25 @@ export async function extractDocumentContent(
           const rId = node?.[':@']?.['@_r:id'] ?? getAttr(node, 'id');
           const prevHref = currentHref;
           currentHref = relationshipMap.get(rId);
-          if (Array.isArray(node[key])) { walk(node[key], currentFormatting); }
+          if (Array.isArray(node[key])) { walk(node[key], currentFormatting, target, inTableCell); }
           currentHref = prevHref;
+        } else if (key === 'w:tbl' && !inTableCell) {
+          const tblChildren = Array.isArray(node[key]) ? node[key] : [node[key]];
+          const rows: TableRow[] = [];
+          for (const tr of tblChildren.filter((c: any) => c['w:tr'] !== undefined)) {
+            const trChildren = Array.isArray(tr['w:tr']) ? tr['w:tr'] : [tr['w:tr']];
+            const cells: TableCell[] = [];
+            for (const tc of trChildren.filter((c: any) => c['w:tc'] !== undefined)) {
+              const tcChildren = Array.isArray(tc['w:tc']) ? tc['w:tc'] : [tc['w:tc']];
+              const cellItems: ContentItem[] = [];
+              walk(tcChildren, currentFormatting, cellItems, true);
+              cells.push({ paragraphs: splitCellParagraphs(cellItems) });
+            }
+            rows.push({ cells });
+          }
+          if (rows.length > 0) {
+            target.push({ type: 'table', rows });
+          }
         } else if (key === 'w:r') {
           // Process run - extract formatting from w:rPr
           let runFormatting = currentFormatting;
@@ -811,7 +870,7 @@ export async function extractDocumentContent(
               break;
             }
           }
-          walk(runChildren, runFormatting);
+          walk(runChildren, runFormatting, target, inTableCell);
         } else if (key === 'w:t') {
           const text = nodeText(node['w:t'] || []);
           if (text) {
@@ -829,7 +888,7 @@ export async function extractDocumentContent(
               if (currentHref) {
                 textItem.href = currentHref;
               }
-              content.push(textItem);
+              target.push(textItem);
             }
           }
         } else if (key === 'w:p') {
@@ -858,18 +917,18 @@ export async function extractDocumentContent(
           // Always push a new para when heading/list/title metadata is present (so metadata
           // isn't silently dropped after empty paragraphs).  For plain paragraphs,
           // push only when the previous item isn't already a para separator.
-          const needsPara = (headingLevel || listMeta || isTitle)
+          const needsPara = inTableCell || (headingLevel || listMeta || isTitle)
             ? true
-            : content.length > 0 && content[content.length - 1].type !== 'para';
+            : target.length > 0 && target[target.length - 1].type !== 'para';
 
           if (needsPara) {
             const paraItem: ContentItem = { type: 'para' };
             if (headingLevel) paraItem.headingLevel = headingLevel;
             if (listMeta) paraItem.listMeta = listMeta;
             if (isTitle) paraItem.isTitle = true;
-            content.push(paraItem);
+            target.push(paraItem);
           }
-          walk(paraChildren, paraFormatting);
+          walk(paraChildren, paraFormatting, target, inTableCell);
         } else if (key === 'm:oMathPara') {
           // Display equation — extract m:oMath children from within
           const mathParaChildren = Array.isArray(node[key]) ? node[key] : [node[key]];
@@ -878,10 +937,10 @@ export async function extractDocumentContent(
             try {
               const latex = ommlToLatex(oMathNode['m:oMath']);
               if (latex) {
-                content.push({ type: 'math', latex, display: true });
+                target.push({ type: 'math', latex, display: true });
               }
             } catch {
-              content.push({ type: 'math', latex: '\\text{[EQUATION ERROR]}', display: true });
+              target.push({ type: 'math', latex: '\\\\text{[EQUATION ERROR]}', display: true });
             }
           }
         } else if (key === 'm:oMath') {
@@ -890,13 +949,13 @@ export async function extractDocumentContent(
           try {
             const latex = ommlToLatex(mathChildren);
             if (latex) {
-              content.push({ type: 'math', latex, display: false });
+              target.push({ type: 'math', latex, display: false });
             }
           } catch {
-            content.push({ type: 'math', latex: '\\text{[EQUATION ERROR]}', display: false });
+            target.push({ type: 'math', latex: '\\\\text{[EQUATION ERROR]}', display: false });
           }
         } else if (Array.isArray(node[key])) {
-          walk(node[key], currentFormatting);
+          walk(node[key], currentFormatting, target, inTableCell);
         }
       }
     }
@@ -962,6 +1021,103 @@ function mergeConsecutiveRuns(content: ContentItem[]): ContentItem[] {
   return merged;
 }
 
+function renderInlineSegment(
+  segment: ContentItem[],
+  comments: Map<string, Comment>
+): string {
+  let out = '';
+  let i = 0;
+
+  while (i < segment.length) {
+    const item = segment[i];
+
+    if (item.type === 'citation') {
+      if (item.pandocKeys.length > 0) {
+        out += ' [' + item.pandocKeys.map(k => '@' + k).join('; ') + ']';
+      } else {
+        out += item.text;
+      }
+      i++;
+      continue;
+    }
+
+    if (item.type === 'math') {
+      out += item.display ? '$$' + '\n' + item.latex + '\n' + '$$' : '$' + item.latex + '$';
+      i++;
+      continue;
+    }
+
+    if (item.type !== 'text') {
+      i++;
+      continue;
+    }
+
+    if (item.commentIds.size > 0) {
+      const commentSet = item.commentIds;
+      const groupedCommentText: string[] = [];
+      let j = i;
+
+      while (j < segment.length) {
+        const seg = segment[j];
+        if (seg.type !== 'text' || !commentSetsEqual(seg.commentIds, commentSet)) {
+          break;
+        }
+        const fmtForComment: RunFormatting = { ...seg.formatting, highlight: false };
+        let segText = wrapWithFormatting(seg.text, fmtForComment);
+        if (seg.href) {
+          segText = `[${segText}](${formatHrefForMarkdown(seg.href)})`;
+        }
+        groupedCommentText.push(segText);
+        j++;
+      }
+
+      out += `{==${groupedCommentText.join('')}==}`;
+      for (const cid of [...commentSet].sort()) {
+        const c = comments.get(cid);
+        if (!c) { continue; }
+        let dateStr = '';
+        if (c.date) {
+          try {
+            dateStr = ` (${formatLocalIsoMinute(c.date)})`;
+          } catch { dateStr = ` (${c.date})`; }
+        }
+        out += `{>>${c.author}${dateStr}: ${c.text}<<}`;
+      }
+
+      i = j;
+      continue;
+    }
+
+    let formattedText = wrapWithFormatting(item.text, item.formatting);
+    if (item.href) {
+      formattedText = `[${formattedText}](${formatHrefForMarkdown(item.href)})`;
+    }
+    out += formattedText;
+    i++;
+  }
+
+  return out;
+}
+
+function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comment>): string {
+  const lines: string[] = ['<table>'];
+  for (let rowIdx = 0; rowIdx < table.rows.length; rowIdx++) {
+    const row = table.rows[rowIdx];
+    lines.push('<tr>');
+    for (const cell of row.cells) {
+      const tag = rowIdx === 0 ? 'th' : 'td';
+      lines.push('<' + tag + '>');
+      for (const para of cell.paragraphs) {
+        lines.push('<p>' + renderInlineSegment(mergeConsecutiveRuns(para), comments) + '</p>');
+      }
+      lines.push('</' + tag + '>');
+    }
+    lines.push('</tr>');
+  }
+  lines.push('</table>');
+  return lines.join('\n');
+}
+
 export function buildMarkdown(
   content: ContentItem[],
   comments: Map<string, Comment>,
@@ -1013,6 +1169,16 @@ export function buildMarkdown(
       } else {
         output.push('$' + item.latex + '$');
       }
+      i++;
+      continue;
+    }
+
+    if (item.type === 'table') {
+      if (output.length > 0 && !output[output.length - 1].endsWith('\n\n')) {
+        output.push('\n\n');
+      }
+      output.push(renderHtmlTable(item, comments));
+      lastListType = undefined;
       i++;
       continue;
     }

@@ -17,6 +17,7 @@ The DOCX converter transforms Microsoft Word documents into Manuscript Markdown 
 - **Math**: OMML equations converted to LaTeX (`$inline$` and `$$display$$`)
 - **Hyperlinks**: preserved as Markdown links with proper escaping
 - **Highlights**: colored highlights converted to `==text=={color}` syntax
+- **Tables**: converted to HTML table blocks (`<table>/<tr>/<th>/<td>`) with paragraph-preserving cell content
 
 ## Citation Key Formats
 
@@ -40,7 +41,7 @@ If output files already exist, you'll be prompted to replace, choose a new name,
 
 ## Known Limitations
 
-- **Tables**: Not converted (complex Word table formats don't map cleanly to Markdown)
+- **Complex merged cells** (`gridSpan`/`vMerge`): may be flattened or imperfectly represented
 - **Images**: Not extracted from DOCX
 - **Footnotes/endnotes**: Not converted
 

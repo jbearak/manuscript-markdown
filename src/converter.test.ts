@@ -42,6 +42,90 @@ describe('extractComments', () => {
   });
 });
 
+describe('DOCX table conversion', () => {
+  test('renders DOCX table as HTML table with paragraph boundaries', async () => {
+    const xml = wrapDocumentXml(
+      '<w:tbl>'
+      + '<w:tr>'
+      + '<w:tc><w:p><w:r><w:t>H1</w:t></w:r></w:p></w:tc>'
+      + '<w:tc><w:p><w:r><w:t>H2</w:t></w:r></w:p></w:tc>'
+      + '</w:tr>'
+      + '<w:tr>'
+      + '<w:tc>'
+      + '<w:p><w:r><w:t>first paragraph</w:t></w:r></w:p>'
+      + '<w:p><w:r><w:t>second paragraph</w:t></w:r></w:p>'
+      + '</w:tc>'
+      + '<w:tc><w:p><w:r><w:t>value</w:t></w:r></w:p></w:tc>'
+      + '</w:tr>'
+      + '</w:tbl>'
+    );
+    const buf = await buildSyntheticDocx(xml);
+    const result = await convertDocx(buf);
+
+    expect(result.markdown).toContain('<table>');
+    expect(result.markdown).toContain('<th>');
+    expect(result.markdown).toContain('<td>');
+    expect(result.markdown).toContain('<p>first paragraph</p>');
+    expect(result.markdown).toContain('<p>second paragraph</p>');
+  });
+
+  test('preserves comments, highlights, citations, and math inside table cells', async () => {
+    const cslPayload = JSON.stringify({
+      citationItems: [{
+        id: 1,
+        locator: '20',
+        itemData: {
+          type: 'article-journal',
+          title: 'Cell citation title',
+          DOI: '10.1111/cell.1',
+          author: [{ family: 'Smith', given: 'A' }],
+          issued: { 'date-parts': [[2020]] }
+        }
+      }],
+      properties: { plainCitation: '(Smith 2020)' }
+    });
+
+    const xml = '<?xml version="1.0"?>'
+      + '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+      + ' xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
+      + '<w:body>'
+      + '<w:tbl>'
+      + '<w:tr><w:tc><w:p><w:r><w:t>Header</w:t></w:r></w:p></w:tc></w:tr>'
+      + '<w:tr><w:tc><w:p>'
+      + '<w:commentRangeStart w:id="1"/>'
+      + '<w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>annotated</w:t></w:r>'
+      + '<w:commentRangeEnd w:id="1"/>'
+      + '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+      + '<w:r><w:instrText xml:space="preserve"> ADDIN ZOTERO_ITEM CSL_CITATION ' + cslPayload + '</w:instrText></w:r>'
+      + '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+      + '<w:r><w:t>(Smith 2020)</w:t></w:r>'
+      + '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+      + '<m:oMath><m:r><m:t>x</m:t></m:r></m:oMath>'
+      + '</w:p></w:tc></w:tr>'
+      + '</w:tbl>'
+      + '</w:body>'
+      + '</w:document>';
+
+    const JSZip = (await import('jszip')).default;
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>');
+    zip.file('_rels/.rels', '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>');
+    zip.file('word/document.xml', xml);
+    zip.file('word/comments.xml',
+      '<?xml version="1.0"?>'
+      + '<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+      + '<w:comment w:id="1" w:author="Reviewer" w:date="2025-01-01T00:00:00Z"><w:p><w:r><w:t>note</w:t></w:r></w:p></w:comment>'
+      + '</w:comments>');
+    const buf = await zip.generateAsync({ type: 'uint8array' });
+    const result = await convertDocx(buf);
+
+    expect(result.markdown).toContain('{==annotated==}{>>Reviewer');
+    expect(result.markdown).toContain('@smith2020cell, p. 20');
+    expect(result.markdown).toContain('$x$');
+    expect(result.markdown).toContain('<table>');
+  });
+});
+
 describe('extractZoteroCitations', () => {
   test('extracts Zotero citations in document order', async () => {
     const citations = await extractZoteroCitations(sampleData);
