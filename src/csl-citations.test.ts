@@ -547,7 +547,7 @@ const MIXED_BIBTEX = `
 `;
 
 describe('Mixed citation groups in pipeline', () => {
-  test('mixed group produces field code + plain text in DOCX', async () => {
+  test('mixed group produces single field code for all resolved entries', async () => {
     const md = '---\ncsl: apa\n---\n\nText [@zotEntry; @plainEntry].\n';
     const result = await convertMdToDocx(md, { bibtex: MIXED_BIBTEX });
 
@@ -555,11 +555,11 @@ describe('Mixed citation groups in pipeline', () => {
     const zip = await JSZip.loadAsync(result.docx);
     const docXml = await zip.file('word/document.xml')?.async('string');
 
-    // Should contain Zotero field code for the Zotero entry
+    // Both entries should be in a single field code
     expect(docXml).toContain('ZOTERO_ITEM CSL_CITATION');
     expect(docXml).toContain('ZOT11111');
-    // Should contain plain text for non-Zotero entry
-    expect(docXml).toContain('(Plain, 2021)');
+    // Non-Zotero entry should also be in the field code (via itemData)
+    expect(docXml).toContain('Plain');
   });
 
   test('missing keys appear after bibliography in DOCX', async () => {
@@ -578,7 +578,7 @@ describe('Mixed citation groups in pipeline', () => {
     expect(result.warnings.some(w => w.includes('noSuchKey'))).toBe(true);
   });
 
-  test('unified mode produces single parenthetical in DOCX', async () => {
+  test('mixed group produces single field code regardless of mixedCitationStyle', async () => {
     const md = '---\ncsl: apa\n---\n\nText [@zotEntry; @plainEntry].\n';
     const result = await convertMdToDocx(md, { bibtex: MIXED_BIBTEX, mixedCitationStyle: 'unified' });
 
@@ -586,9 +586,8 @@ describe('Mixed citation groups in pipeline', () => {
     const zip = await JSZip.loadAsync(result.docx);
     const docXml = await zip.file('word/document.xml')?.async('string');
 
-    // Should contain a Zotero field code
+    // All resolved entries share a single field code
     expect(docXml).toContain('ZOTERO_ITEM CSL_CITATION');
-    // The visible text should combine both in one parenthetical
     expect(docXml).toContain('Zotero');
     expect(docXml).toContain('Plain');
   });

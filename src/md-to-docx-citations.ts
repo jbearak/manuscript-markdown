@@ -197,26 +197,22 @@ function resolveVisibleText(
   return generateFallbackText(keys, entries, locators);
 }
 
-function stripOuterDelimiters(text: string): string {
-  return text.replace(/^[(\[]/, '').replace(/[)\]]$/, '');
-}
-
-function buildZoteroFieldCode(
-  zoteroKeys: string[],
+function buildCitationFieldCode(
+  keys: string[],
   entries: Map<string, BibtexEntry>,
   locators: Map<string, string> | undefined,
   citeprocEngine: any | undefined,
   visibleTextOverride?: string
 ): string {
   const citationItems: any[] = [];
-  for (const key of zoteroKeys) {
+  for (const key of keys) {
     const entry = entries.get(key);
     if (!entry) continue;
     const itemData = buildItemData(entry);
-    const citationItem: any = {
-      uris: [entry.zoteroUri],
-      itemData
-    };
+    const citationItem: any = { itemData };
+    if (entry.zoteroUri) {
+      citationItem.uris = [entry.zoteroUri];
+    }
     const locator = locators?.get(key);
     if (locator) {
       const parsed = parseLocator(locator);
@@ -229,7 +225,7 @@ function buildZoteroFieldCode(
   const cslCitation = { citationItems, properties: { noteIndex: 0 } };
   const json = JSON.stringify(cslCitation);
 
-  const visibleText = visibleTextOverride ?? resolveVisibleText(zoteroKeys, entries, locators, citeprocEngine);
+  const visibleText = visibleTextOverride ?? resolveVisibleText(keys, entries, locators, citeprocEngine);
 
   return '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
     '<w:r><w:instrText xml:space="preserve"> ADDIN ZOTERO_ITEM CSL_CITATION ' + escapeXml(json) + ' </w:instrText></w:r>' +
@@ -242,15 +238,13 @@ export function generateCitation(
   run: { keys?: string[]; locators?: Map<string, string>; text: string },
   entries: Map<string, BibtexEntry>,
   citeprocEngine?: any,
-  mixedCitationStyle?: 'separate' | 'unified'
 ): CitationResult {
   if (!run.keys || run.keys.length === 0) {
     return { xml: '<w:r><w:t>[@' + escapeXml(run.text) + ']</w:t></w:r>' };
   }
 
-  // Classify keys into three buckets
-  const zoteroKeys: string[] = [];
-  const plainKeys: string[] = [];
+  // Classify keys into resolved (have bib data) vs missing
+  const resolvedKeys: string[] = [];
   const missingKeys: string[] = [];
   const warnings: string[] = [];
 
@@ -259,29 +253,19 @@ export function generateCitation(
     if (!entry) {
       missingKeys.push(key);
       warnings.push(`Citation key not found: ${key}`);
-    } else if (entry.zoteroKey && entry.zoteroUri) {
-      zoteroKeys.push(key);
     } else {
-      plainKeys.push(key);
+      resolvedKeys.push(key);
     }
   }
 
-  // Pure Zotero — emit field code
-  if (zoteroKeys.length > 0 && plainKeys.length === 0 && missingKeys.length === 0) {
-    const xml = buildZoteroFieldCode(zoteroKeys, entries, run.locators, citeprocEngine);
+  // All resolved — emit field code (works for both Zotero and non-Zotero entries)
+  if (resolvedKeys.length > 0 && missingKeys.length === 0) {
+    const xml = buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine);
     return { xml };
   }
 
-  // Pure non-Zotero (no missing) — emit plain text
-  if (zoteroKeys.length === 0 && missingKeys.length === 0) {
-    const fallbackText = resolveVisibleText(run.keys, entries, run.locators, citeprocEngine);
-    return {
-      xml: '<w:r><w:t>' + escapeXml(fallbackText) + '</w:t></w:r>',
-    };
-  }
-
   // Pure missing — emit @citekey references as plain text
-  if (zoteroKeys.length === 0 && plainKeys.length === 0) {
+  if (resolvedKeys.length === 0) {
     const missingText = '(' + missingKeys.map(k => '@' + k).join('; ') + ')';
     return {
       xml: '<w:r><w:t>' + escapeXml(missingText) + '</w:t></w:r>',
@@ -290,73 +274,16 @@ export function generateCitation(
     };
   }
 
-  // Mixed group — split by mode
-  const style = mixedCitationStyle || 'separate';
-
-  if (style === 'unified') {
-    // Unified mode: combine all portions into one parenthetical
-    const parts: string[] = [];
-
-    // Zotero portion — rendered via citeproc, strip outer delimiters
-    if (zoteroKeys.length > 0) {
-      const zoteroText = resolveVisibleText(zoteroKeys, entries, run.locators, citeprocEngine);
-      parts.push(stripOuterDelimiters(zoteroText));
-    }
-
-    // Plain portion
-    if (plainKeys.length > 0) {
-      const plainText = resolveVisibleText(plainKeys, entries, run.locators, citeprocEngine);
-      parts.push(stripOuterDelimiters(plainText));
-    }
-
-    // Missing keys
-    for (const key of missingKeys) {
-      parts.push('@' + key);
-    }
-
-    const combinedText = '(' + parts.join('; ') + ')';
-
-    // Still emit Zotero field code for the Zotero portion, but with unified visible text
-    let xml: string;
-    if (zoteroKeys.length > 0) {
-      xml = buildZoteroFieldCode(zoteroKeys, entries, run.locators, citeprocEngine, combinedText);
-    } else {
-      xml = '<w:r><w:t>' + escapeXml(combinedText) + '</w:t></w:r>';
-    }
-
-    return {
-      xml,
-      warning: warnings.length > 0 ? warnings.join('; ') : undefined,
-      missingKeys: missingKeys.length > 0 ? missingKeys : undefined
-    };
-  }
-
-  // Separate mode (default): each portion gets its own output
-  let xml = '';
-
-  // Zotero portion — full field code
-  if (zoteroKeys.length > 0) {
-    xml += buildZoteroFieldCode(zoteroKeys, entries, run.locators, citeprocEngine);
-  }
-
-  // Plain portion — parenthesized text
-  if (plainKeys.length > 0) {
-    if (xml) xml += '<w:r><w:t xml:space="preserve"> </w:t></w:r>';
-    const plainText = resolveVisibleText(plainKeys, entries, run.locators, citeprocEngine);
-    xml += '<w:r><w:t>' + escapeXml(plainText) + '</w:t></w:r>';
-  }
-
-  // Missing keys — @citekey inline
-  if (missingKeys.length > 0) {
-    if (xml) xml += '<w:r><w:t xml:space="preserve"> </w:t></w:r>';
-    const missingText = '(' + missingKeys.map(k => '@' + k).join('; ') + ')';
-    xml += '<w:r><w:t>' + escapeXml(missingText) + '</w:t></w:r>';
-  }
+  // Mixed (some resolved, some missing) — resolved get field code, missing get plain text
+  const missingText = '(' + missingKeys.map(k => '@' + k).join('; ') + ')';
+  const xml = buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine) +
+    '<w:r><w:t xml:space="preserve"> </w:t></w:r>' +
+    '<w:r><w:t>' + escapeXml(missingText) + '</w:t></w:r>';
 
   return {
     xml,
-    warning: warnings.length > 0 ? warnings.join('; ') : undefined,
-    missingKeys: missingKeys.length > 0 ? missingKeys : undefined
+    warning: warnings.join('; '),
+    missingKeys
   };
 }
 

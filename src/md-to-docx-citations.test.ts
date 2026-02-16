@@ -27,7 +27,7 @@ describe('generateCitation', () => {
     expect(result.warning).toBeUndefined();
   });
 
-  it('produces plain text without Zotero metadata', () => {
+  it('produces field code without Zotero metadata', () => {
     const entries = new Map<string, BibtexEntry>();
     entries.set('smith2020', {
       type: 'article',
@@ -42,7 +42,10 @@ describe('generateCitation', () => {
     const run = { keys: ['smith2020'], text: 'smith2020' };
     const result = generateCitation(run, entries);
 
-    expect(result.xml).toBe('<w:r><w:t>(Smith 2020)</w:t></w:r>');
+    expect(result.xml).toContain('ZOTERO_ITEM CSL_CITATION');
+    expect(result.xml).toContain('(Smith 2020)');
+    // No uris field for non-Zotero entries
+    expect(result.xml).not.toContain('uris');
     expect(result.warning).toBeUndefined();
   });
 
@@ -95,7 +98,7 @@ describe('generateCitation', () => {
     expect(result.xml).toContain('(Smith 2020; Doe 2021)');
   });
 
-  it('splits mixed Zotero/non-Zotero grouped citations in separate mode', () => {
+  it('emits single field code for mixed Zotero/non-Zotero grouped citations', () => {
     const entries = new Map<string, BibtexEntry>();
     entries.set('smith2020', {
       type: 'article',
@@ -113,11 +116,10 @@ describe('generateCitation', () => {
     const run = { keys: ['smith2020', 'doe2021'], text: 'smith2020; doe2021' };
     const result = generateCitation(run, entries);
 
-    // Zotero portion should be a field code
+    // Both entries should be in a single field code
     expect(result.xml).toContain('ZOTERO_ITEM CSL_CITATION');
     expect(result.xml).toContain('ABCD1234');
-    // Plain portion should be parenthesized text
-    expect(result.xml).toContain('(Doe 2021)');
+    expect(result.xml).toContain('(Smith 2020; Doe 2021)');
     expect(result.warning).toBeUndefined();
   });
 
@@ -140,7 +142,7 @@ describe('generateCitation', () => {
     expect(result.warning).toContain('Citation key not found: missingKey');
   });
 
-  it('splits group with Zotero, plain, and missing keys', () => {
+  it('splits group with resolved and missing keys', () => {
     const entries = new Map<string, BibtexEntry>();
     entries.set('smith2020', {
       type: 'article',
@@ -158,8 +160,10 @@ describe('generateCitation', () => {
     const run = { keys: ['smith2020', 'doe2021', 'noSuchKey'], text: 'smith2020; doe2021; noSuchKey' };
     const result = generateCitation(run, entries);
 
+    // Both resolved entries share a field code
     expect(result.xml).toContain('ZOTERO_ITEM CSL_CITATION');
-    expect(result.xml).toContain('(Doe 2021)');
+    expect(result.xml).toContain('ABCD1234');
+    // Missing key is plain text
     expect(result.xml).toContain('(@noSuchKey)');
     expect(result.missingKeys).toEqual(['noSuchKey']);
   });
@@ -190,7 +194,7 @@ describe('generateCitation', () => {
     expect(result.missingKeys).toBeUndefined();
   });
 
-  it('pure non-Zotero group unchanged', () => {
+  it('pure non-Zotero group emits field code', () => {
     const entries = new Map<string, BibtexEntry>();
     entries.set('smith2020', {
       type: 'article',
@@ -206,12 +210,14 @@ describe('generateCitation', () => {
     const run = { keys: ['smith2020', 'doe2021'], text: 'smith2020; doe2021' };
     const result = generateCitation(run, entries);
 
-    expect(result.xml).toBe('<w:r><w:t>(Smith 2020; Doe 2021)</w:t></w:r>');
-    expect(result.xml).not.toContain('ZOTERO_ITEM');
+    expect(result.xml).toContain('ZOTERO_ITEM CSL_CITATION');
+    expect(result.xml).toContain('(Smith 2020; Doe 2021)');
+    // No uris for non-Zotero entries
+    expect(result.xml).not.toContain('uris');
     expect(result.missingKeys).toBeUndefined();
   });
 
-  it('unified mode wraps mixed group in single parenthetical', () => {
+  it('mixed Zotero/non-Zotero group produces single field code regardless of mode', () => {
     const entries = new Map<string, BibtexEntry>();
     entries.set('smith2020', {
       type: 'article',
@@ -227,9 +233,9 @@ describe('generateCitation', () => {
     });
 
     const run = { keys: ['smith2020', 'doe2021'], text: 'smith2020; doe2021' };
-    const result = generateCitation(run, entries, undefined, 'unified');
+    const result = generateCitation(run, entries);
 
-    // Should be a Zotero field code with combined visible text
+    // All resolved entries share a single field code
     expect(result.xml).toContain('ZOTERO_ITEM CSL_CITATION');
     expect(result.xml).toContain('(Smith 2020; Doe 2021)');
   });

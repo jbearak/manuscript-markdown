@@ -1269,7 +1269,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       }
       xml += '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="' + commentId + '"/></w:r>';
     } else if (run.type === 'citation') {
-      const result = generateCitation(run, bibEntries || new Map(), citeprocEngine, options?.mixedCitationStyle);
+      const result = generateCitation(run, bibEntries || new Map(), citeprocEngine);
       xml += result.xml;
       if (result.warning) state.warnings.push(result.warning);
       if (result.missingKeys) {
