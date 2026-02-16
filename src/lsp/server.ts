@@ -68,29 +68,20 @@ connection.onInitialize((params: InitializeParams) => {
 
 documents.onDidChangeContent((event) => {
 	if (isBibUri(event.document.uri)) {
-		const fsPath = uriToFsPath(event.document.uri);
-		if (fsPath) {
-			bibCache.delete(fsPath);
-		}
+		invalidateBibCache(event.document.uri);
 	}
 });
 
 documents.onDidClose((event) => {
 	if (isBibUri(event.document.uri)) {
-		const fsPath = uriToFsPath(event.document.uri);
-		if (fsPath) {
-			bibCache.delete(fsPath);
-		}
+		invalidateBibCache(event.document.uri);
 	}
 });
 
 connection.onDidChangeWatchedFiles((params: DidChangeWatchedFilesParams) => {
 	for (const change of params.changes) {
 		if (isBibUri(change.uri)) {
-			const fsPath = uriToFsPath(change.uri);
-			if (fsPath) {
-				bibCache.delete(fsPath);
-			}
+			invalidateBibCache(change.uri);
 		}
 	}
 });
@@ -167,8 +158,7 @@ connection.onReferences(async (params: ReferenceParams): Promise<Location[]> => 
 	}
 
 	// From .bib: find paired markdown files and return citation usages
-	const usages = await findReferencesForKey(symbol.key, symbol.bibPath);
-	const locations = dedupeLocations(usages);
+	const locations = await findReferencesForKey(symbol.key, symbol.bibPath);
 	if (params.context.includeDeclaration) {
 		const declaration = await getDefinitionLocationForKey(symbol.key, symbol.bibPath);
 		if (declaration) {
@@ -233,21 +223,29 @@ async function getTextDocument(uri: string, languageId: string): Promise<TextDoc
 	}
 }
 
+function invalidateBibCache(uri: string): void {
+	const fsPath = uriToFsPath(uri);
+	if (fsPath) {
+		bibCache.delete(canonicalizeFsPath(fsPath));
+	}
+}
+
 async function getBibDataForPath(bibPath: string): Promise<ParsedBibData | undefined> {
 	const openDoc = documents.get(fsPathToUri(bibPath));
 	if (openDoc) {
 		return parseBibDataFromText(bibPath, openDoc.getText());
 	}
 
+	const cacheKey = canonicalizeFsPath(bibPath);
 	try {
 		const stat = await fsp.stat(bibPath);
-		const cached = bibCache.get(bibPath);
+		const cached = bibCache.get(cacheKey);
 		if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
 			return cached;
 		}
 		const text = await fsp.readFile(bibPath, 'utf8');
 		const parsed = parseBibDataFromText(bibPath, text);
-		bibCache.set(bibPath, { ...parsed, mtimeMs: stat.mtimeMs, size: stat.size });
+		bibCache.set(cacheKey, { ...parsed, mtimeMs: stat.mtimeMs, size: stat.size });
 		return parsed;
 	} catch {
 		return undefined;
