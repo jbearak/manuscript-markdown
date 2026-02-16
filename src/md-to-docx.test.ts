@@ -381,16 +381,49 @@ describe('generateTable', () => {
         ]
       }
     ];
-    
+
     const token: MdToken = {
       type: 'table',
       runs: [],
       rows
     };
-    
+
     const result = generateTable(token, makeState());
-    
+
     expect(result).toContain('<w:b/>');
+  });
+
+  it('emits tblLook firstRow when table has header rows', () => {
+    const rows: MdTableRow[] = [
+      { header: true, cells: [{ runs: [{ type: 'text', text: 'H' }] }] },
+      { header: false, cells: [{ runs: [{ type: 'text', text: 'D' }] }] }
+    ];
+    const token: MdToken = { type: 'table', runs: [], rows };
+    const result = generateTable(token, makeState());
+    expect(result).toContain('<w:tblLook w:firstRow="1"/>');
+  });
+
+  it('does not emit tblLook firstRow when no header rows', () => {
+    const rows: MdTableRow[] = [
+      { header: false, cells: [{ runs: [{ type: 'text', text: 'D' }] }] }
+    ];
+    const token: MdToken = { type: 'table', runs: [], rows };
+    const result = generateTable(token, makeState());
+    expect(result).not.toContain('<w:tblLook');
+  });
+
+  it('emits tblHeader on header rows', () => {
+    const rows: MdTableRow[] = [
+      { header: true, cells: [{ runs: [{ type: 'text', text: 'H' }] }] },
+      { header: false, cells: [{ runs: [{ type: 'text', text: 'D' }] }] }
+    ];
+    const token: MdToken = { type: 'table', runs: [], rows };
+    const result = generateTable(token, makeState());
+    // Header row should have tblHeader
+    expect(result).toContain('<w:trPr><w:tblHeader/></w:trPr>');
+    // Only one tblHeader (not on the data row)
+    const matches = result.match(/<w:tblHeader\/>/g);
+    expect(matches?.length).toBe(1);
   });
 
   it('preserves existing bold formatting in header cells', () => {
