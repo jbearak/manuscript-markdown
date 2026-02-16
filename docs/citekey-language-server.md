@@ -24,7 +24,7 @@ From a `[@citekey]` in markdown, navigates to the key's declaration in the `.bib
 
 The LSP resolves which `.bib` file a markdown document is paired with using two mechanisms, in order:
 
-1. **Frontmatter `bibliography` field** — e.g. `bibliography: refs/library.bib`. Relative paths resolve from the `.md` file directory, then workspace root. `/`-prefixed paths resolve from workspace root, then as absolute OS paths. The `.bib` extension is added automatically if omitted.
+1. **Frontmatter `bibliography` field** (aliases: `bib`, `bibtex`) — e.g. `bibliography: refs/library.bib`. Relative paths resolve from the `.md` file directory, then workspace root. `/`-prefixed paths resolve from workspace root, then as absolute OS paths. The `.bib` extension is added automatically if omitted.
 2. **Same-basename fallback** — `paper.md` pairs with `paper.bib` in the same directory.
 
 When finding references from a `.bib` file, paired markdown files are discovered via:
