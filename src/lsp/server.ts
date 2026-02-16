@@ -7,8 +7,11 @@ import {
 	createConnection,
 	DefinitionParams,
 	DidChangeWatchedFilesParams,
+	Hover,
+	HoverParams,
 	InitializeParams,
 	Location,
+	MarkupKind,
 	Position,
 	ProposedFeatures,
 	Range,
@@ -61,6 +64,7 @@ connection.onInitialize((params: InitializeParams) => {
 				triggerCharacters: ['@'],
 			},
 			definitionProvider: true,
+			hoverProvider: true,
 			referencesProvider: true,
 		},
 	};
@@ -166,6 +170,30 @@ connection.onReferences(async (params: ReferenceParams): Promise<Location[]> => 
 		}
 	}
 	return dedupeLocations(locations);
+});
+
+connection.onHover(async (params: HoverParams): Promise<Hover | null> => {
+	const symbol = await resolveSymbolAtPosition(params.textDocument.uri, params.position);
+	if (!symbol || !symbol.bibPath) {
+		return null;
+	}
+
+	const bibData = await getBibDataForPath(symbol.bibPath);
+	if (!bibData) {
+		return null;
+	}
+
+	const entry = bibData.entries.get(symbol.key);
+	if (!entry) {
+		return null;
+	}
+
+	return {
+		contents: {
+			kind: MarkupKind.Markdown,
+			value: formatBibEntryHover(entry),
+		},
+	};
 });
 
 documents.listen(connection);
@@ -418,4 +446,36 @@ function getEntryDetail(entry: BibtexEntry): string | undefined {
 
 function getEntryDocumentation(entry: BibtexEntry): string | undefined {
 	return entry.fields.get('title');
+}
+
+function formatBibEntryHover(entry: BibtexEntry): string {
+	const lines: string[] = [];
+
+	const author = entry.fields.get('author');
+	const year = entry.fields.get('year');
+	if (author && year) {
+		lines.push(`**${author}** (${year})`);
+	} else if (author) {
+		lines.push(`**${author}**`);
+	} else if (year) {
+		lines.push(`(${year})`);
+	}
+
+	const title = entry.fields.get('title');
+	if (title) {
+		lines.push(`*${title}*`);
+	}
+
+	const venue = entry.fields.get('journal') ?? entry.fields.get('booktitle');
+	if (venue) {
+		lines.push(venue);
+	}
+
+	if (lines.length === 0) {
+		lines.push(`\`@${entry.type}{${entry.key}}\``);
+	} else {
+		lines.push(`\`@${entry.type}\``);
+	}
+
+	return lines.join('\n\n');
 }
