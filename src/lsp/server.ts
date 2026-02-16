@@ -60,8 +60,17 @@ interface OpenDocBibCache {
 }
 const openDocBibCache = new Map<string, OpenDocBibCache>();
 
+/** Client-provided settings (see `getLspSettings()` in extension.ts). */
+interface LspSettings {
+	citekeyReferencesFromMarkdown?: boolean;
+}
+let settings: LspSettings = {};
+
 connection.onInitialize((params: InitializeParams) => {
 	workspaceRootPaths = extractWorkspaceRoots(params);
+	if (params.initializationOptions) {
+		settings = params.initializationOptions as LspSettings;
+	}
 
 	return {
 		capabilities: {
@@ -74,6 +83,12 @@ connection.onInitialize((params: InitializeParams) => {
 			referencesProvider: true,
 		},
 	};
+});
+
+connection.onDidChangeConfiguration((params) => {
+	if (params.settings) {
+		settings = params.settings as LspSettings;
+	}
 });
 
 documents.onDidChangeContent((event) => {
@@ -159,15 +174,28 @@ connection.onReferences(async (params: ReferenceParams): Promise<Location[]> => 
 		return [];
 	}
 
-	if (symbol.source === 'markdown') {
-		// From markdown: only provide the .bib declaration location.
-		// The built-in Markdown Language Features extension handles
-		// markdown→markdown references, so we avoid duplicating those.
+	if (symbol.source === 'markdown' && !settings.citekeyReferencesFromMarkdown) {
+		// From markdown: only return the .bib declaration location.
+		//
+		// VS Code's built-in "Markdown Language Features" extension already
+		// discovers every other `@citekey` occurrence across open workspace
+		// markdown files (it treats `@`-prefixed words as word-level symbols
+		// and includes them in its own reference results).  Because VS Code
+		// merges results from all providers, returning those same markdown
+		// locations here would produce duplicates in the "Find All References"
+		// panel.  The one thing the built-in extension *cannot* find is the
+		// key's declaration inside the .bib file — so that is the only
+		// location we contribute from this branch.
+		//
+		// Users can override this via the
+		// manuscriptMarkdown.citekeyReferencesFromMarkdown setting if they
+		// prefer our results (e.g. the built-in extension is disabled).
 		const declaration = await getDefinitionLocationForKey(symbol.key, symbol.bibPath);
 		return declaration ? [declaration] : [];
 	}
 
-	// From .bib: find paired markdown files and return citation usages
+	// From .bib (or markdown with the override enabled): find paired
+	// markdown files and return citation usages.
 	const locations = await findReferencesForKey(symbol.key, symbol.bibPath);
 	if (params.context.includeDeclaration) {
 		const declaration = await getDefinitionLocationForKey(symbol.key, symbol.bibPath);

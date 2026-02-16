@@ -645,6 +645,11 @@
             "Sequential numbers (e.g., 1, 2, 3)"
           ],
           "description": "Citation key format for DOCX to Markdown conversion"
+        },
+        "manuscriptMarkdown.citekeyReferencesFromMarkdown": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include markdown usages in Find All References when invoked from a markdown file. Off by default because VS Code's built-in Markdown Language Features extension already reports these; enabling this may produce duplicate entries."
         }
       }
     }

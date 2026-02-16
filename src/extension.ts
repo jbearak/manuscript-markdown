@@ -42,6 +42,14 @@ export function activate(context: vscode.ExtensionContext) {
 			if (e.affectsConfiguration('manuscriptMarkdown.enableCitekeyLanguageServer')) {
 				syncCitekeyLanguageClient(context);
 			}
+			if (
+				e.affectsConfiguration('manuscriptMarkdown.citekeyReferencesFromMarkdown') &&
+				citekeyLanguageClient
+			) {
+				void citekeyLanguageClient.sendNotification('workspace/didChangeConfiguration', {
+					settings: getLspSettings(),
+				});
+			}
 		})
 	);
 	context.subscriptions.push({
@@ -479,6 +487,7 @@ function startCitekeyLanguageClient(context: vscode.ExtensionContext): void {
 			{ scheme: 'untitled', language: 'bibtex' },
 			{ scheme: 'file', pattern: '**/*.bib' },
 		],
+		initializationOptions: getLspSettings(),
 		synchronize: {
 			fileEvents: [markdownWatcher, bibWatcher],
 		},
@@ -491,6 +500,13 @@ function startCitekeyLanguageClient(context: vscode.ExtensionContext): void {
 		clientOptions
 	);
 	void citekeyLanguageClient.start();
+}
+
+function getLspSettings(): Record<string, unknown> {
+	const config = vscode.workspace.getConfiguration('manuscriptMarkdown');
+	return {
+		citekeyReferencesFromMarkdown: config.get<boolean>('citekeyReferencesFromMarkdown', false),
+	};
 }
 
 async function stopCitekeyLanguageClient(): Promise<void> {
