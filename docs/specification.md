@@ -14,6 +14,7 @@ csl: apa
 locale: en-US
 note-type: in-text
 timezone: -05:00
+bibliography: shared/references
 ---
 ```
 
@@ -36,6 +37,7 @@ The frontmatter may also include citation-related fields (`csl`, `locale`, `note
 | `locale` | Locale override for citation formatting (e.g., `en-US`, `en-GB`). Defaults to the style's own locale. |
 | `note-type` | Zotero note type: `in-text` (default), `footnotes`, or `endnotes`. |
 | `timezone` | Local timezone offset (e.g., `+05:00`, `-05:00`). Auto-generated on DOCX import for idempotent date roundtripping. |
+| `bibliography` | Path to a `.bib` file for citation resolution. Aliases: `bib`, `bibtex`. The `.bib` extension is optional. Relative paths resolve from the `.md` file directory, then workspace root. `/`-prefixed paths resolve from workspace root, then as absolute OS paths. Falls back to `{basename}.bib` if not found. |
 
 ## Standard Markdown
 
@@ -64,7 +66,17 @@ Citations reference entries in a companion `.bib` file (see [BibTeX Companion Fi
 
 ### BibTeX Companion File
 
-Citations reference a companion `.bib` file with the same base name as the Markdown file (e.g., `paper.md` uses `paper.bib`). Each entry contains standard BibTeX fields:
+By default, citations reference a companion `.bib` file with the same base name as the Markdown file (e.g., `paper.md` uses `paper.bib`). You can override this by specifying a `bibliography` field in the YAML frontmatter:
+
+```yaml
+---
+bibliography: shared/references.bib
+---
+```
+
+The `.bib` extension is optional (`bibliography: shared/references` also works). Relative paths resolve from the `.md` file directory first, then the workspace root. Paths starting with `/` resolve from the workspace root first, then as absolute OS paths.
+
+Each entry contains standard BibTeX fields:
 
 - `author`, `title`, `journal`/`booktitle`, `year`, `volume`, `number`, `pages`
 - `doi`, `url`, `publisher`, `edition`, `abstract`

@@ -32,6 +32,7 @@ export interface Frontmatter {
   locale?: string;
   noteType?: NoteType;
   timezone?: string;
+  bibliography?: string;
 }
 
 /**
@@ -81,6 +82,11 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
       case 'timezone':
         if (value && /^[+-]\d{2}:\d{2}$/.test(value)) metadata.timezone = value;
         break;
+      case 'bibliography':
+      case 'bib':
+      case 'bibtex':
+        if (value && !metadata.bibliography) metadata.bibliography = value;
+        break;
     }
   }
 
@@ -103,6 +109,18 @@ export function serializeFrontmatter(metadata: Frontmatter): string {
   if (metadata.locale) lines.push(`locale: ${metadata.locale}`);
   if (metadata.noteType) lines.push(`note-type: ${metadata.noteType}`);
   if (metadata.timezone) lines.push(`timezone: ${metadata.timezone}`);
+  if (metadata.bibliography) lines.push(`bibliography: ${metadata.bibliography}`);
   if (lines.length === 0) return '';
   return '---\n' + lines.join('\n') + '\n---\n';
+}
+
+/** Check whether markdown body contains Pandoc-style citations ([@...]) */
+export function hasCitations(markdown: string): boolean {
+  return /\[@[^\]]+\]/.test(markdown);
+}
+
+/** Ensure a bibliography path ends with .bib */
+export function normalizeBibPath(p: string): string {
+  if (!p) return p;
+  return p.endsWith('.bib') ? p : p + '.bib';
 }

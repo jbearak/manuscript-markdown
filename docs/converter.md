@@ -54,7 +54,7 @@ The converter also supports exporting Markdown back to DOCX, completing the roun
 2. Click the **Export to Word** submenu in the editor title bar
 3. Choose **Export to Word** for default styling, or **Export to Word (with template)** to use a template DOCX for fonts, sizes, and spacing
 
-If a companion `.bib` file exists with the same base name, it is automatically loaded for citation resolution.
+If a companion `.bib` file exists with the same base name, it is automatically loaded for citation resolution. You can also specify a custom bibliography path in the YAML frontmatter using the `bibliography` field (see [Specification](specification.md#bibtex-companion-file)).
 
 ### YAML Frontmatter
 
@@ -65,6 +65,7 @@ When the Markdown file includes YAML frontmatter with a `csl` field, the convert
 csl: apa
 locale: en-US
 note-type: in-text
+bibliography: shared/references
 ---
 ```
 
@@ -76,6 +77,7 @@ note-type: in-text
 | `locale` | Optional locale override (e.g., `en-US`, `en-GB`). Defaults to the style's own locale. |
 | `note-type` | Optional Zotero note type: `in-text` (default), `footnotes`, or `endnotes`. Legacy numeric values (0, 1, 2) are still accepted. |
 | `timezone` | Local timezone offset (e.g., `+05:00`, `-05:00`). Auto-generated on DOCX import for idempotent date roundtripping. |
+| `bibliography` | Path to a `.bib` file (`.bib` extension optional). Aliases: `bib`, `bibtex`. See [Specification](specification.md#bibtex-companion-file). |
 
 #### Bundled CSL styles
 

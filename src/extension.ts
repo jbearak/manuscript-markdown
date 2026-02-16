@@ -7,6 +7,7 @@ import { WordCountController } from './wordcount';
 import { convertDocx, CitationKeyFormat } from './converter';
 import { convertMdToDocx } from './md-to-docx';
 import * as path from 'path';
+import { parseFrontmatter, hasCitations, normalizeBibPath } from './frontmatter';
 import {
 	getOutputBasePath,
 	getOutputConflictMessage,
@@ -588,11 +589,52 @@ async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undef
 		basePath = editor.document.uri.fsPath.replace(/\.md$/i, '');
 	}
 
+	const mdDir = path.dirname(basePath);
+	const { metadata } = parseFrontmatter(markdown);
+
 	let bibtex: string | undefined;
-	const bibUri = vscode.Uri.file(basePath + '.bib');
-	if (await fileExists(bibUri)) {
-		const bibData = await vscode.workspace.fs.readFile(bibUri);
-		bibtex = new TextDecoder().decode(bibData);
+	if (metadata.bibliography) {
+		const bibFile = normalizeBibPath(metadata.bibliography);
+		const candidates: vscode.Uri[] = [];
+		if (path.isAbsolute(bibFile)) {
+			const wsFolder = vscode.workspace.workspaceFolders?.[0];
+			if (wsFolder) {
+				candidates.push(vscode.Uri.file(path.join(wsFolder.uri.fsPath, bibFile)));
+			}
+			candidates.push(vscode.Uri.file(bibFile));
+		} else {
+			candidates.push(vscode.Uri.file(path.join(mdDir, bibFile)));
+			const wsFolder = vscode.workspace.workspaceFolders?.[0];
+			if (wsFolder) {
+				candidates.push(vscode.Uri.file(path.join(wsFolder.uri.fsPath, bibFile)));
+			}
+		}
+		for (const c of candidates) {
+			if (await fileExists(c)) {
+				const data = await vscode.workspace.fs.readFile(c);
+				bibtex = new TextDecoder().decode(data);
+				break;
+			}
+		}
+		if (!bibtex) {
+			// Fallback to default {basePath}.bib
+			const defaultBib = vscode.Uri.file(basePath + '.bib');
+			if (await fileExists(defaultBib)) {
+				const data = await vscode.workspace.fs.readFile(defaultBib);
+				bibtex = new TextDecoder().decode(data);
+				if (hasCitations(markdown)) {
+					vscode.window.showWarningMessage(`Bibliography "${metadata.bibliography}" not found; using ${path.basename(basePath)}.bib`);
+				}
+			} else if (hasCitations(markdown)) {
+				vscode.window.showWarningMessage(`Bibliography "${metadata.bibliography}" not found and no default .bib file exists`);
+			}
+		}
+	} else {
+		const bibUri = vscode.Uri.file(basePath + '.bib');
+		if (await fileExists(bibUri)) {
+			const bibData = await vscode.workspace.fs.readFile(bibUri);
+			bibtex = new TextDecoder().decode(bibData);
+		}
 	}
 
 	return { markdown, basePath, bibtex };

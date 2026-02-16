@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { parseFrontmatter, hasCitations, normalizeBibPath } from './frontmatter';
 
 export interface CliOptions {
   help: boolean;
@@ -185,21 +186,51 @@ async function runMdToDocx(options: CliOptions) {
   const { convertMdToDocx } = await import('./md-to-docx');
   const markdown = fs.readFileSync(options.inputPath, 'utf8');
 
-  // Auto-detect or use specified bib file
+  // Resolve bib file: --bib flag > frontmatter bibliography > auto-detect {base}.bib
   let bibtex: string | undefined;
+  const mdDir = path.dirname(options.inputPath);
   const inputExt = path.extname(options.inputPath);
   const inputBase = path.basename(options.inputPath, inputExt);
-  const bibPath = options.bibPath || path.join(
-    path.dirname(options.inputPath),
-    inputBase + '.bib'
-  );
+  const defaultBibPath = path.join(mdDir, inputBase + '.bib');
+
   if (options.bibPath) {
+    // Explicit --bib flag: hard error if missing
     if (!fs.existsSync(options.bibPath)) {
       throw new Error(`BibTeX file not found: ${options.bibPath}`);
     }
     bibtex = fs.readFileSync(options.bibPath, 'utf8');
-  } else if (fs.existsSync(bibPath)) {
-    bibtex = fs.readFileSync(bibPath, 'utf8');
+  } else {
+    const { metadata } = parseFrontmatter(markdown);
+    if (metadata.bibliography) {
+      const bibFile = normalizeBibPath(metadata.bibliography);
+      const candidates: string[] = [];
+      if (path.isAbsolute(bibFile)) {
+        candidates.push(bibFile);
+      } else {
+        candidates.push(path.join(mdDir, bibFile));
+      }
+      let found = false;
+      for (const c of candidates) {
+        if (fs.existsSync(c)) {
+          bibtex = fs.readFileSync(c, 'utf8');
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        // Fallback to default
+        if (fs.existsSync(defaultBibPath)) {
+          bibtex = fs.readFileSync(defaultBibPath, 'utf8');
+          if (hasCitations(markdown)) {
+            console.error(`Warning: Bibliography "${metadata.bibliography}" not found; using ${inputBase}.bib`);
+          }
+        } else if (hasCitations(markdown)) {
+          console.error(`Warning: Bibliography "${metadata.bibliography}" not found and no default .bib file exists`);
+        }
+      }
+    } else if (fs.existsSync(defaultBibPath)) {
+      bibtex = fs.readFileSync(defaultBibPath, 'utf8');
+    }
   }
 
   // Read template if specified
