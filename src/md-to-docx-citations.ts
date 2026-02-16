@@ -238,7 +238,6 @@ export function generateCitation(
   run: { keys?: string[]; locators?: Map<string, string>; text: string },
   entries: Map<string, BibtexEntry>,
   citeprocEngine?: any,
-  _mixedCitationStyle?: 'separate' | 'unified'
 ): CitationResult {
   if (!run.keys || run.keys.length === 0) {
     return { xml: '<w:r><w:t>[@' + escapeXml(run.text) + ']</w:t></w:r>' };
@@ -276,18 +275,15 @@ export function generateCitation(
   }
 
   // Mixed (some resolved, some missing) — resolved get field code, missing get plain text
-  let xml = buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine);
-
-  if (missingKeys.length > 0) {
-    xml += '<w:r><w:t xml:space="preserve"> </w:t></w:r>';
-    const missingText = '(' + missingKeys.map(k => '@' + k).join('; ') + ')';
-    xml += '<w:r><w:t>' + escapeXml(missingText) + '</w:t></w:r>';
-  }
+  const missingText = '(' + missingKeys.map(k => '@' + k).join('; ') + ')';
+  const xml = buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine) +
+    '<w:r><w:t xml:space="preserve"> </w:t></w:r>' +
+    '<w:r><w:t>' + escapeXml(missingText) + '</w:t></w:r>';
 
   return {
     xml,
-    warning: warnings.length > 0 ? warnings.join('; ') : undefined,
-    missingKeys: missingKeys.length > 0 ? missingKeys : undefined
+    warning: warnings.join('; '),
+    missingKeys
   };
 }
 

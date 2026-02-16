@@ -233,7 +233,7 @@ describe('generateCitation', () => {
     });
 
     const run = { keys: ['smith2020', 'doe2021'], text: 'smith2020; doe2021' };
-    const result = generateCitation(run, entries, undefined, 'unified');
+    const result = generateCitation(run, entries);
 
     // All resolved entries share a single field code
     expect(result.xml).toContain('ZOTERO_ITEM CSL_CITATION');
