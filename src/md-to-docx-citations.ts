@@ -293,6 +293,10 @@ export function buildItemData(entry: BibtexEntry): any {
     type: mapBibtexTypeToCSL(entry.type)
   };
 
+  const lowerType = entry.type.toLowerCase();
+  if (lowerType === 'mastersthesis') itemData.genre = "Master's thesis";
+  else if (lowerType === 'phdthesis') itemData.genre = "PhD thesis";
+
   const title = entry.fields.get('title');
   if (title) itemData.title = title;
 

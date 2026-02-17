@@ -176,6 +176,38 @@ describe('buildItemData with additional fields', () => {
     expect(data['container-title']).toBe('Some Journal');
   });
 
+  it('sets genre for mastersthesis entries', () => {
+    const entry: BibtexEntry = {
+      type: 'mastersthesis',
+      key: 'test',
+      fields: new Map([['title', 'My Thesis'], ['year', '2020']]),
+    };
+    const data = buildItemData(entry);
+    expect(data.type).toBe('thesis');
+    expect(data.genre).toBe("Master's thesis");
+  });
+
+  it('sets genre for phdthesis entries', () => {
+    const entry: BibtexEntry = {
+      type: 'phdthesis',
+      key: 'test',
+      fields: new Map([['title', 'My Dissertation'], ['year', '2020']]),
+    };
+    const data = buildItemData(entry);
+    expect(data.type).toBe('thesis');
+    expect(data.genre).toBe('PhD thesis');
+  });
+
+  it('does not set genre for non-thesis entries', () => {
+    const entry: BibtexEntry = {
+      type: 'article',
+      key: 'test',
+      fields: new Map([['title', 'A Paper']]),
+    };
+    const data = buildItemData(entry);
+    expect(data.genre).toBeUndefined();
+  });
+
   it('maps institutional author to CSL literal', () => {
     const entry: BibtexEntry = {
       type: 'article',
