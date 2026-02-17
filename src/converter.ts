@@ -1787,7 +1787,7 @@ export function escapeBibtex(s: string): string {
 }
 
 /** Map CSL type back to the most appropriate BibTeX entry type. */
-export function mapCSLTypeToBibtex(cslType: string): string {
+export function mapCSLTypeToBibtex(cslType: string, genre?: string): string {
   switch (cslType) {
     case 'article-journal':
     case 'article-magazine':
@@ -1800,7 +1800,7 @@ export function mapCSLTypeToBibtex(cslType: string): string {
     case 'paper-conference':
       return 'inproceedings';
     case 'thesis':
-      return 'phdthesis';
+      return genre && /master/i.test(genre) ? 'mastersthesis' : 'phdthesis';
     case 'report':
       return 'techreport';
     default:
@@ -1847,7 +1847,7 @@ export function generateBibTeX(
 
       const authorStr = meta.authors.map(serializeAuthor).join(' and ');
 
-      const entryType = mapCSLTypeToBibtex(meta.type);
+      const entryType = mapCSLTypeToBibtex(meta.type, meta.fullItemData?.genre);
       const fields: string[] = [];
       const alreadyEmitted = new Set<string>();
 
@@ -1882,8 +1882,8 @@ export function generateBibTeX(
         if (alreadyEmitted.has(cslField)) continue;
         if (cslField === 'editor') continue; // handled above
         const val = meta.fullItemData?.[cslField];
-        if (val && typeof val === 'string') {
-          fields.push(`  ${bibtexField} = {${escapeBibtex(val)}}`);
+        if (val != null && (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean')) {
+          fields.push(`  ${bibtexField} = {${escapeBibtex(String(val))}}`);
           alreadyEmitted.add(cslField);
         }
       }

@@ -262,6 +262,25 @@ describe('generateBibTeX with institutional authors and additional fields', () =
     expect(bib).toContain('series = {Lecture Notes}');
   });
 
+  it('emits numeric CSL field values (e.g. edition, issue)', () => {
+    const citations: ZoteroCitation[] = [{
+      plainCitation: '(Test)',
+      items: [{
+        authors: [{ family: 'Test', given: 'A' }],
+        title: 'Test Title', year: '2020', journal: 'J', volume: '1',
+        pages: '', doi: '', type: 'article-journal',
+        fullItemData: {
+          edition: 3,
+          issue: 2,
+        },
+      }],
+    }];
+    const keyMap = buildCitationKeyMap(citations);
+    const bib = generateBibTeX(citations, keyMap);
+    expect(bib).toContain('edition = {3}');
+    expect(bib).toContain('number = {2}');
+  });
+
   it('emits editor from fullItemData', () => {
     const citations: ZoteroCitation[] = [{
       plainCitation: '(Test)',
@@ -342,8 +361,17 @@ describe('mapCSLTypeToBibtex', () => {
     expect(mapCSLTypeToBibtex('paper-conference')).toBe('inproceedings');
   });
 
-  it('maps thesis to phdthesis', () => {
+  it('maps thesis to phdthesis by default', () => {
     expect(mapCSLTypeToBibtex('thesis')).toBe('phdthesis');
+  });
+
+  it('maps thesis with master genre to mastersthesis', () => {
+    expect(mapCSLTypeToBibtex('thesis', "Master's thesis")).toBe('mastersthesis');
+    expect(mapCSLTypeToBibtex('thesis', 'master')).toBe('mastersthesis');
+  });
+
+  it('maps thesis with PhD genre to phdthesis', () => {
+    expect(mapCSLTypeToBibtex('thesis', 'PhD dissertation')).toBe('phdthesis');
   });
 
   it('maps report to techreport', () => {
