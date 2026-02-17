@@ -81,10 +81,21 @@ export function getCslCompletionContext(text: string, offset: number): CslComple
 
 	const lineEnd = cslLine.lineStart + cslLine.trimmedLine.length;
 	if (offset < cslLine.lineStart || offset > lineEnd) return undefined;
+	const rawValue = cslLine.trimmedLine.slice(cslLine.cslPrefixLength);
+	let valueStart = cslLine.lineStart + cslLine.cslPrefixLength;
+	let valueEnd = lineEnd;
 
-	const valueStart = cslLine.lineStart + cslLine.cslPrefixLength;
-	const valueEnd = lineEnd;
-	const prefix = text.slice(valueStart, Math.min(offset, valueEnd)).replace(/^['"]/, '');
+	// Keep surrounding quotes outside the completion replace range.
+	const hasLeadingQuote = rawValue.startsWith('"') || rawValue.startsWith("'");
+	if (hasLeadingQuote) {
+		valueStart += 1;
+		if (rawValue.length > 1 && rawValue.endsWith(rawValue[0])) {
+			valueEnd -= 1;
+		}
+	}
+	if (offset < valueStart || offset > valueEnd) return undefined;
+
+	const prefix = text.slice(valueStart, Math.min(offset, valueEnd));
 
 	return { prefix, valueStart, valueEnd };
 }
@@ -109,10 +120,15 @@ export function getCslFieldInfo(text: string): CslFieldInfo | undefined {
 		unquotedStart = valueStart + 1;
 		unquotedEnd = valueEnd - 1;
 	}
+	const leadingWhitespace = rawValue.match(/^\s*/)?.[0].length ?? 0;
+	const trailingWhitespace = rawValue.match(/\s*$/)?.[0].length ?? 0;
+	const trimmedStart = Math.min(unquotedStart + leadingWhitespace, unquotedEnd);
+	const trimmedEnd = Math.max(trimmedStart, unquotedEnd - trailingWhitespace);
+	const trimmedValue = rawValue.trim();
 
 	return {
-		value: rawValue.trim(),
-		valueStart: unquotedStart,
-		valueEnd: unquotedEnd,
+		value: trimmedValue,
+		valueStart: trimmedStart,
+		valueEnd: trimmedEnd,
 	};
 }

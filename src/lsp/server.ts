@@ -167,7 +167,7 @@ connection.onCompletion(async (params: CompletionParams): Promise<CompletionItem
 		const prefix = cslContext.prefix.toLowerCase();
 		const replaceRange = Range.create(
 			doc.positionAt(cslContext.valueStart),
-			params.position
+			doc.positionAt(cslContext.valueEnd)
 		);
 		const items: CompletionItem[] = [];
 		for (const [id, displayName] of BUNDLED_STYLE_LABELS) {

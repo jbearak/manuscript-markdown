@@ -48,6 +48,12 @@ describe('getCslCompletionContext', () => {
 		const ctx = getCslCompletionContext(text, offset);
 		expect(ctx).toBeUndefined();
 	});
+	test('returns undefined when cursor is in the csl key prefix', () => {
+		const text = '---\ncsl: apa\n---\n';
+		const offset = text.indexOf('csl:') + 2;
+		const ctx = getCslCompletionContext(text, offset);
+		expect(ctx).toBeUndefined();
+	});
 
 	test('returns undefined when no frontmatter exists', () => {
 		const text = 'Just a plain document.\ncsl: apa';
@@ -90,6 +96,16 @@ describe('getCslCompletionContext', () => {
 		const ctx = getCslCompletionContext(text, offset);
 		expect(ctx).toBeDefined();
 		expect(ctx!.prefix).toBe('nature');
+	});
+	test('excludes surrounding quotes from completion prefix and replacement bounds', () => {
+		const text = '---\ncsl: \"chi\"\n---\n';
+		const offset = text.indexOf('chi') + 2;
+		const ctx = getCslCompletionContext(text, offset);
+		expect(ctx).toBeDefined();
+		expect(ctx!.prefix).toBe('ch');
+		expect(text.slice(ctx!.valueStart, ctx!.valueEnd)).toBe('chi');
+		expect(text.charAt(ctx!.valueStart - 1)).toBe('\"');
+		expect(text.charAt(ctx!.valueEnd)).toBe('\"');
 	});
 });
 
@@ -161,6 +177,13 @@ describe('getCslFieldInfo', () => {
 		const info = getCslFieldInfo(text);
 		expect(info).toBeDefined();
 		expect(info!.value).toBe('');
+	});
+	test('returns offsets aligned to the trimmed value', () => {
+		const text = '---\ncsl:   apa  \n---\n';
+		const info = getCslFieldInfo(text);
+		expect(info).toBeDefined();
+		expect(info!.value).toBe('apa');
+		expect(text.slice(info!.valueStart, info!.valueEnd)).toBe('apa');
 	});
 });
 

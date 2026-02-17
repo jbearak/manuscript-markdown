@@ -89,6 +89,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 			const text = editor.document.getText();
 			const styleId = picked.description!;
+			const eol = editor.document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
 
 			await editor.edit(editBuilder => {
 				const fmMatch = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
@@ -100,7 +101,10 @@ export function activate(context: vscode.ExtensionContext) {
 					if (cslLineMatch) {
 						// Replace existing csl: line
 						const lineStart = bodyStart + cslLineMatch.index!;
-						const lineEnd = lineStart + cslLineMatch[0].length;
+						const cslLine = cslLineMatch[0].endsWith('\r')
+							? cslLineMatch[0].slice(0, -1)
+							: cslLineMatch[0];
+						const lineEnd = lineStart + cslLine.length;
 						const range = new vscode.Range(
 							editor.document.positionAt(lineStart),
 							editor.document.positionAt(lineEnd)
@@ -110,11 +114,12 @@ export function activate(context: vscode.ExtensionContext) {
 						// Insert csl: line at end of frontmatter body
 						const insertOffset = bodyStart + fmBody.length;
 						const insertPos = editor.document.positionAt(insertOffset);
-						editBuilder.insert(insertPos, `\ncsl: ${styleId}`);
+						const insertionPrefix = fmBody.length > 0 ? eol : '';
+						editBuilder.insert(insertPos, `${insertionPrefix}csl: ${styleId}`);
 					}
 				} else {
 					// No frontmatter — prepend it
-					editBuilder.insert(new vscode.Position(0, 0), `---\ncsl: ${styleId}\n---\n`);
+					editBuilder.insert(new vscode.Position(0, 0), `---${eol}csl: ${styleId}${eol}---${eol}`);
 				}
 			});
 		})
