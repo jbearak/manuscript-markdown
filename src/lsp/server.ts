@@ -34,6 +34,11 @@ import {
 	scanCitationUsages,
 	uriToFsPath,
 } from './citekey-language';
+import {
+	findCommentIdAtOffset,
+	findRangeTextForId,
+	stripCriticMarkup,
+} from './comment-language';
 
 const connection = createConnection(ProposedFeatures.all);
 const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
@@ -207,27 +212,48 @@ connection.onReferences(async (params: ReferenceParams): Promise<Location[]> => 
 });
 
 connection.onHover(async (params: HoverParams): Promise<Hover | null> => {
+	// 1. Try citekey hover
 	const symbol = await resolveSymbolAtPosition(params.textDocument.uri, params.position);
-	if (!symbol || !symbol.bibPath) {
-		return null;
+	if (symbol?.bibPath) {
+		const bibData = await getBibDataForPath(symbol.bibPath);
+		if (bibData) {
+			const entry = bibData.entries.get(symbol.key);
+			if (entry) {
+				return {
+					contents: {
+						kind: MarkupKind.Markdown,
+						value: formatBibEntryHover(entry),
+					},
+				};
+			}
+		}
 	}
 
-	const bibData = await getBibDataForPath(symbol.bibPath);
-	if (!bibData) {
-		return null;
+	// 2. Try comment hover — show associated text for non-inline comments
+	if (isMarkdownUri(params.textDocument.uri, documents.get(params.textDocument.uri)?.languageId)) {
+		const doc = await getTextDocument(params.textDocument.uri, 'markdown');
+		if (doc) {
+			const text = doc.getText();
+			const offset = doc.offsetAt(params.position);
+			const commentId = findCommentIdAtOffset(text, offset);
+			if (commentId) {
+				const rangeText = findRangeTextForId(text, commentId);
+				if (rangeText) {
+					const stripped = stripCriticMarkup(rangeText);
+					if (stripped) {
+						return {
+							contents: {
+								kind: MarkupKind.Markdown,
+								value: stripped,
+							},
+						};
+					}
+				}
+			}
+		}
 	}
 
-	const entry = bibData.entries.get(symbol.key);
-	if (!entry) {
-		return null;
-	}
-
-	return {
-		contents: {
-			kind: MarkupKind.Markdown,
-			value: formatBibEntryHover(entry),
-		},
-	};
+	return null;
 });
 
 documents.listen(connection);

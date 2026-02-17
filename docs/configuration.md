@@ -23,11 +23,11 @@ All settings are under the `manuscriptMarkdown` namespace in VS Code settings.
 | `citationKeyFormat` | string | `"authorYearTitle"` | Citation key format for DOCX to Markdown conversion. `authorYearTitle` (e.g., smith2020effects), `authorYear` (e.g., smith2020), or `numeric` (e.g., 1, 2, 3) |
 | `mixedCitationStyle` | string | `"separate"` | How to render mixed Zotero/non-Zotero grouped citations. `separate`: each portion gets its own parentheses (clean Zotero refresh). `unified`: one set of parentheses wrapping everything (looks like one group but may desync on Zotero refresh) |
 
-## Citekey Language Server
+## Language Server
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `enableCitekeyLanguageServer` | boolean | `true` | Enable citekey language server features: `@` completions, go-to-definition, and find references for citation keys |
+| `enableCitekeyLanguageServer` | boolean | `true` | Enable language server features: `@` completions, go-to-definition, find references for citation keys, and comment hover |
 | `citekeyReferencesFromMarkdown` | boolean | `false` | Include markdown usages in Find All References when invoked from a markdown file. Off by default because VS Code's built-in Markdown Language Features already reports these; enabling this may produce duplicate entries |
 
 ## DOCX Conversion

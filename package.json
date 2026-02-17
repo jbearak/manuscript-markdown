@@ -593,7 +593,7 @@
         "manuscriptMarkdown.enableCitekeyLanguageServer": {
           "type": "boolean",
           "default": true,
-          "description": "Enable citekey language server features: @ completions, go-to-definition, and find references for citation keys."
+          "description": "Enable language server features: @ completions, go-to-definition, find references for citation keys, and comment hover."
         },
         "manuscriptMarkdown.defaultHighlightColor": {
           "type": "string",

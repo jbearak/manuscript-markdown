@@ -1,6 +1,6 @@
-# Citekey Language Server
+# Language Server
 
-The citekey language server provides IDE features for pandoc-style citations (`[@citekey]`) in markdown files paired with `.bib` files.
+The language server provides IDE features for pandoc-style citations (`[@citekey]`) in markdown files paired with `.bib` files, and hover information for non-inline comments.
 
 ## Capabilities
 
@@ -20,6 +20,10 @@ From a `[@citekey]` in markdown, navigates to the key's declaration in the `.bib
 - **From markdown**: returns the `.bib` declaration location. Markdown-to-markdown references are provided by VS Code's built-in Markdown Language Features extension.
 - **From `.bib`**: finds all `[@citekey]` usages across paired markdown files.
 
+### Comment Hover
+
+When hovering over a non-inline comment body (`{#id>>...<<}`), the server displays the associated text — the content between the matching `{#id}` and `{/id}` range markers. CriticMarkup tags are stripped from the displayed text, and the result is rendered as Markdown.
+
 ## Bib file pairing
 
 The LSP resolves which `.bib` file a markdown document is paired with using two mechanisms, in order:
@@ -37,5 +41,5 @@ No workspace directory tree scanning is performed.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `manuscriptMarkdown.enableCitekeyLanguageServer` | boolean | `true` | Enable/disable all citekey language server features |
+| `manuscriptMarkdown.enableCitekeyLanguageServer` | boolean | `true` | Enable/disable all language server features |
 | `manuscriptMarkdown.citekeyReferencesFromMarkdown` | boolean | `false` | Include markdown usages in Find All References when invoked from a markdown file. Off by default because VS Code's built-in Markdown Language Features already reports these |

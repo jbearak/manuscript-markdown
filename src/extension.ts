@@ -32,21 +32,21 @@ import {
 	setDefaultHighlightColor,
 	getDefaultHighlightColor,
 } from './highlight-colors';
-let citekeyLanguageClient: LanguageClient | undefined;
-let citekeyLanguageClientDisposables: vscode.Disposable[] = [];
+let languageClient: LanguageClient | undefined;
+let languageClientDisposables: vscode.Disposable[] = [];
 
 export function activate(context: vscode.ExtensionContext) {
-	syncCitekeyLanguageClient(context);
+	syncLanguageClient(context);
 	context.subscriptions.push(
 		vscode.workspace.onDidChangeConfiguration((e) => {
 			if (e.affectsConfiguration('manuscriptMarkdown.enableCitekeyLanguageServer')) {
-				syncCitekeyLanguageClient(context);
+				syncLanguageClient(context);
 			}
 			if (
 				e.affectsConfiguration('manuscriptMarkdown.citekeyReferencesFromMarkdown') &&
-				citekeyLanguageClient
+				languageClient
 			) {
-				void citekeyLanguageClient.sendNotification('workspace/didChangeConfiguration', {
+				void languageClient.sendNotification('workspace/didChangeConfiguration', {
 					settings: getLspSettings(),
 				});
 			}
@@ -54,7 +54,7 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 	context.subscriptions.push({
 		dispose: () => {
-			void stopCitekeyLanguageClient();
+			void stopLanguageClient();
 		},
 	});
 	// Register existing navigation commands
@@ -456,22 +456,22 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	};
 }
-function syncCitekeyLanguageClient(context: vscode.ExtensionContext): void {
-	if (isCitekeyLanguageServerEnabled()) {
-		startCitekeyLanguageClient(context);
+function syncLanguageClient(context: vscode.ExtensionContext): void {
+	if (isLanguageServerEnabled()) {
+		startLanguageClient(context);
 		return;
 	}
-	void stopCitekeyLanguageClient();
+	void stopLanguageClient();
 }
 
-function isCitekeyLanguageServerEnabled(): boolean {
+function isLanguageServerEnabled(): boolean {
 	return vscode.workspace
 		.getConfiguration('manuscriptMarkdown')
 		.get<boolean>('enableCitekeyLanguageServer', true);
 }
 
-function startCitekeyLanguageClient(context: vscode.ExtensionContext): void {
-	if (citekeyLanguageClient) {
+function startLanguageClient(context: vscode.ExtensionContext): void {
+	if (languageClient) {
 		return;
 	}
 	const serverModule = context.asAbsolutePath(path.join('out', 'lsp', 'server.js'));
@@ -486,7 +486,7 @@ function startCitekeyLanguageClient(context: vscode.ExtensionContext): void {
 
 	const markdownWatcher = vscode.workspace.createFileSystemWatcher('**/*.md');
 	const bibWatcher = vscode.workspace.createFileSystemWatcher('**/*.bib');
-	citekeyLanguageClientDisposables = [markdownWatcher, bibWatcher];
+	languageClientDisposables = [markdownWatcher, bibWatcher];
 
 	const clientOptions: LanguageClientOptions = {
 		documentSelector: [
@@ -502,13 +502,13 @@ function startCitekeyLanguageClient(context: vscode.ExtensionContext): void {
 		},
 	};
 
-	citekeyLanguageClient = new LanguageClient(
+	languageClient = new LanguageClient(
 		'manuscriptMarkdownCitekeys',
-		'Manuscript Markdown Citekey Language Server',
+		'Manuscript Markdown Language Server',
 		serverOptions,
 		clientOptions
 	);
-	void citekeyLanguageClient.start();
+	void languageClient.start();
 }
 
 function getLspSettings(): Record<string, unknown> {
@@ -518,13 +518,13 @@ function getLspSettings(): Record<string, unknown> {
 	};
 }
 
-async function stopCitekeyLanguageClient(): Promise<void> {
-	for (const disposable of citekeyLanguageClientDisposables) {
+async function stopLanguageClient(): Promise<void> {
+	for (const disposable of languageClientDisposables) {
 		disposable.dispose();
 	}
-	citekeyLanguageClientDisposables = [];
-	const client = citekeyLanguageClient;
-	citekeyLanguageClient = undefined;
+	languageClientDisposables = [];
+	const client = languageClient;
+	languageClient = undefined;
 	if (client) {
 		try {
 			await client.stop();
@@ -836,7 +836,7 @@ async function exportMdToDocx(context: vscode.ExtensionContext, uri?: vscode.Uri
 }
 
 export function deactivate(): Thenable<void> | undefined {
-	return stopCitekeyLanguageClient();
+	return stopLanguageClient();
 }
 
 async function fileExists(uri: vscode.Uri): Promise<boolean> {
