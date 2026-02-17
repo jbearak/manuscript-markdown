@@ -29,7 +29,7 @@ bunx vsce package
 
 ## Development Notes
 
-- **Language**: TypeScript (ES2019 target)
+- **Language**: TypeScript (ES2022 target)
 - **Package manager**: Bun (auto-loads `.env` files, no separate dotenv setup needed)
 - **Testing**: Bun test runner with fast-check for property-based testing
 - **Build tool**: VSCE (VS Code Extension compiler)
