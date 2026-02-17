@@ -513,6 +513,136 @@ describe('buildCitationKeyMap', () => {
     const keyMap = buildCitationKeyMap(citations, 'numeric');
     expect(keyMap.size).toBe(3);
   });
+
+  test('prefers stored citation-key over algorithmic generation', () => {
+    const citations: ZoteroCitation[] = [{
+      plainCitation: '(Smith 2020)',
+      items: [{
+        authors: [{ family: 'Smith', given: 'Alice' }],
+        title: 'Effects of climate on agriculture',
+        year: '2020',
+        journal: 'Journal of Testing',
+        volume: '10',
+        pages: '1-15',
+        doi: '10.1234/test.2020.001',
+        type: 'article-journal',
+        fullItemData: {},
+        citationKey: 'smith2020',   // stored key (shorter than algorithmic "smith2020effects")
+      }],
+    }];
+    const keyMap = buildCitationKeyMap(citations);
+    expect(keyMap.get('doi:10.1234/test.2020.001')).toBe('smith2020');
+  });
+
+  test('falls back to algorithmic key when stored key collides', () => {
+    const citations: ZoteroCitation[] = [{
+      plainCitation: '(Smith 2020; Jones 2019)',
+      items: [
+        {
+          authors: [{ family: 'Smith', given: 'Alice' }],
+          title: 'First paper',
+          year: '2020',
+          journal: '',
+          volume: '',
+          pages: '',
+          doi: '10.1234/a',
+          type: 'article-journal',
+          fullItemData: {},
+          citationKey: 'mykey',
+        },
+        {
+          authors: [{ family: 'Jones', given: 'Bob' }],
+          title: 'Second paper',
+          year: '2019',
+          journal: '',
+          volume: '',
+          pages: '',
+          doi: '10.1234/b',
+          type: 'article-journal',
+          fullItemData: {},
+          citationKey: 'mykey',   // collides with first item
+        },
+      ],
+    }];
+    const keyMap = buildCitationKeyMap(citations);
+    expect(keyMap.get('doi:10.1234/a')).toBe('mykey');
+    // Second item falls through to algorithmic generation
+    expect(keyMap.get('doi:10.1234/b')).toBe('jones2019second');
+  });
+
+  test('numeric format ignores stored citation-key', () => {
+    const citations: ZoteroCitation[] = [{
+      plainCitation: '(1)',
+      items: [{
+        authors: [{ family: 'Smith', given: 'Alice' }],
+        title: 'Test',
+        year: '2020',
+        journal: '',
+        volume: '',
+        pages: '',
+        doi: '10.1234/test',
+        type: 'article-journal',
+        fullItemData: {},
+        citationKey: 'smith2020',
+      }],
+    }];
+    const keyMap = buildCitationKeyMap(citations, 'numeric');
+    expect(keyMap.get('doi:10.1234/test')).toBe('1');
+  });
+});
+
+describe('citekey round-trip preservation', () => {
+  const BIBTEX = `
+@article{smith2020,
+  author = {Smith, Alice},
+  title = {{Effects of climate on agriculture}},
+  journal = {Journal of Testing},
+  volume = {10},
+  pages = {1-15},
+  year = {2020},
+  doi = {10.1234/test.2020.001},
+  zotero-key = {AAAA1111},
+  zotero-uri = {http://zotero.org/users/0/items/AAAA1111},
+}
+
+@article{customKey99,
+  author = {Jones, Bob},
+  title = {{Urban planning and public health}},
+  journal = {Review of Studies},
+  volume = {5},
+  pages = {100-120},
+  year = {2019},
+  doi = {10.1234/test.2019.002},
+  zotero-key = {BBBB2222},
+  zotero-uri = {http://zotero.org/users/0/items/BBBB2222},
+}
+`.trim();
+
+  test('MD→DOCX→MD preserves original citekeys', async () => {
+    const md = 'Some text [@smith2020]. More text [@customKey99].\n';
+    const docxResult = await convertMdToDocx(md, { bibtex: BIBTEX });
+    const mdResult = await convertDocx(docxResult.docx);
+
+    // The original citekeys should be preserved, not regenerated
+    expect(mdResult.markdown).toContain('@smith2020');
+    expect(mdResult.markdown).toContain('@customKey99');
+    // Should NOT contain algorithmically generated keys
+    expect(mdResult.markdown).not.toContain('smith2020effects');
+    expect(mdResult.markdown).not.toContain('jones2019urban');
+  });
+
+  test('citation-key is stored in DOCX field code itemData', async () => {
+    const md = 'Text [@smith2020].\n';
+    const docxResult = await convertMdToDocx(md, { bibtex: BIBTEX });
+
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docxResult.docx);
+    const docXml = await zip.file('word/document.xml')!.async('string');
+
+    // The field code JSON should contain citation-key
+    expect(docXml).toContain('citation-key');
+    expect(docXml).toContain('smith2020');
+  });
 });
 
 describe('generateCitationKey', () => {

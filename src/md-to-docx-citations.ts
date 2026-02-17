@@ -209,6 +209,7 @@ function buildCitationFieldCode(
     const entry = entries.get(key);
     if (!entry) continue;
     const itemData = buildItemData(entry);
+    itemData['citation-key'] = key;        // preserve citekey for round-trip
     const citationItem: any = { itemData };
     if (entry.zoteroUri) {
       citationItem.uris = [entry.zoteroUri];
