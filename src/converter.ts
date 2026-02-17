@@ -1403,6 +1403,20 @@ function renderInlineRangeWithIds(
     }
 
     if (item.type === 'math') {
+      const currentIds = item.commentIds;
+      for (const cid of [...prevCommentIds].sort()) {
+        if (!currentIds.has(cid)) {
+          out += `{/${remap(cid)}}`;
+          collectBody(cid);
+        }
+      }
+      for (const cid of [...currentIds].sort()) {
+        if (!prevCommentIds.has(cid)) {
+          out += `{#${remap(cid)}}`;
+        }
+      }
+      prevCommentIds = new Set(currentIds);
+
       out += item.display ? '$$' + '\n' + item.latex + '\n' + '$$' : '$' + item.latex + '$';
       i++;
       continue;

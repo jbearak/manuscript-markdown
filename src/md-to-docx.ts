@@ -102,15 +102,22 @@ function commentRangeRule(state: any, silent: boolean): boolean {
           token.author = match[1];
           token.date = match[2];
           token.commentText = match[3];
-        } else if (content.trim()) {
-          if (content.includes(':') || content.includes(' ') || /[^a-zA-Z0-9_-]/.test(content)) {
-            token.commentText = content;
+        } else {
+          // Try author: text format (no date parenthetical)
+          const authorMatch = content.match(/^([^:]+):\s*([\s\S]*)$/);
+          if (authorMatch) {
+            token.author = authorMatch[1].trim();
+            token.commentText = authorMatch[2];
+          } else if (content.trim()) {
+            if (content.includes(':') || content.includes(' ') || /[^a-zA-Z0-9_-]/.test(content)) {
+              token.commentText = content;
+            } else {
+              token.author = content;
+              token.commentText = '';
+            }
           } else {
-            token.author = content;
             token.commentText = '';
           }
-        } else {
-          token.commentText = '';
         }
       }
       state.pos = endPos + 3;
@@ -196,19 +203,22 @@ function criticMarkupRule(state: any, silent: boolean): boolean {
         token.author = match[1];
         token.date = match[2];
         token.commentText = match[3];
-      } else if (content.trim()) {
-        // If it contains a colon, treat as comment text
-        // If it looks like a valid author name (alphanumeric, underscore, dash), treat as author
-        // Otherwise, treat as comment text
-        if (content.includes(':') || content.includes(' ') || /[^a-zA-Z0-9_-]/.test(content)) {
-          token.commentText = content;
+      } else {
+        // Try author: text format (no date parenthetical)
+        const authorMatch = content.match(/^([^:]+):\s*([\s\S]*)$/);
+        if (authorMatch) {
+          token.author = authorMatch[1].trim();
+          token.commentText = authorMatch[2];
+        } else if (content.trim()) {
+          if (content.includes(':') || content.includes(' ') || /[^a-zA-Z0-9_-]/.test(content)) {
+            token.commentText = content;
+          } else {
+            token.author = content;
+            token.commentText = '';
+          }
         } else {
-          token.author = content;
           token.commentText = '';
         }
-      } else {
-        // Empty comment
-        token.commentText = '';
       }
     }
   }
@@ -1802,6 +1812,13 @@ export async function convertMdToDocx(
   zip.file('[Content_Types].xml', contentTypesXml(state.hasList, state.hasComments, hasTheme, hasCustomProps));
   zip.file('_rels/.rels', relsXml(hasCustomProps));
   zip.file('word/_rels/document.xml.rels', documentRelsXml(state.relationships, state.hasList, state.hasComments, hasTheme));
+
+  // Check for comment range markers without corresponding bodies
+  for (const [mdId, numericId] of state.commentIdMap) {
+    if (!state.comments.some(c => c.id === numericId)) {
+      state.warnings.push(`Comment range markers {#${mdId}}...{/${mdId}} exist without corresponding body {#${mdId}>>...<<}`);
+    }
+  }
 
   const docx = await zip.generateAsync({ type: 'uint8array' });
   return { docx, warnings: state.warnings };
