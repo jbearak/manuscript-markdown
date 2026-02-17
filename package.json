@@ -64,15 +64,15 @@
       },
       {
         "command": "manuscript-markdown.substituteAndComment",
-        "title": "Comment and substitution"
+        "title": "Comment and Substitution"
       },
       {
         "command": "manuscript-markdown.additionAndComment",
-        "title": "Comment and mark as addition"
+        "title": "Comment and Mark as Addition"
       },
       {
         "command": "manuscript-markdown.deletionAndComment",
-        "title": "Comment and mark as deletion"
+        "title": "Comment and Mark as Deletion"
       },
       {
         "command": "manuscript-markdown.formatBold",
