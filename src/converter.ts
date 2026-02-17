@@ -27,6 +27,7 @@ export interface CitationMetadata {
   zoteroKey?: string;
   zoteroUri?: string;
   locator?: string;
+  citationKey?: string;   // CSL citation-key preserved for round-trip
 }
 
 /** Each Zotero field in the document produces one of these. */
@@ -635,6 +636,11 @@ export async function extractZoteroCitations(data: Uint8Array | JSZip): Promise<
           fullItemData: d,
         };
 
+        // Extract citation-key (CSL standard field) for round-trip preservation
+        if (d['citation-key']) {
+          result.citationKey = d['citation-key'];
+        }
+
         // Extract Zotero URI and key
         const uris = item.uris ?? item.uri ?? [];
         const uri = Array.isArray(uris) ? uris[0] : uris;
@@ -708,6 +714,13 @@ export function buildCitationKeyMap(
 
       if (format === 'numeric') {
         keyMap.set(itemId, String(numericCounter++));
+        continue;
+      }
+
+      // Prefer stored citation-key from round-trip or Zotero
+      if (meta.citationKey && !seen.has(meta.citationKey)) {
+        seen.add(meta.citationKey);
+        keyMap.set(itemId, meta.citationKey);
         continue;
       }
 
