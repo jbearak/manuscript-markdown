@@ -148,8 +148,8 @@ export function highlightAndComment(text: string, authorName?: string | null): T
  * @returns TextTransformation with ID-based comment syntax, cursor positioned in comment
  */
 export function highlightAndCommentWithId(text: string, authorName?: string | null): TextTransformation {
-  // Generate a simple numeric ID (the user can rename it)
-  const id = '1';
+  // Generate a unique ID based on timestamp
+  const id = Date.now().toString(36);
   const rangeStart = `{#${id}}`;
   const rangeEnd = `{/${id}}`;
   const authorPrefix = authorName ? `${authorName}: ` : '';

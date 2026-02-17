@@ -49,18 +49,25 @@ export function preprocessCriticMarkup(markdown: string): string {
   }
 
   // Handle {#id>>...<<} comment bodies with IDs (variable-length open marker)
-  const idCommentRe = /\{#[a-zA-Z0-9_-]+>>/g;
-  let match;
-  while ((match = idCommentRe.exec(result)) !== null) {
-    const contentStart = match.index + match[0].length;
+  let idSearchFrom = 0;
+  while (true) {
+    const idCommentRe = /\{#[a-zA-Z0-9_-]+>>/;
+    const match = idCommentRe.exec(result.slice(idSearchFrom));
+    if (!match) break;
+    const matchIndex = idSearchFrom + match.index;
+    const contentStart = matchIndex + match[0].length;
     const closeIdx = result.indexOf('<<}', contentStart);
-    if (closeIdx === -1) continue;
+    if (closeIdx === -1) {
+      idSearchFrom = contentStart;
+      continue;
+    }
     const content = result.slice(contentStart, closeIdx);
     if (content.includes('\n\n')) {
       const replaced = content.replace(/\n\n/g, PARA_PLACEHOLDER);
       result = result.slice(0, contentStart) + replaced + result.slice(closeIdx);
-      // Reset regex lastIndex to account for string length change
-      idCommentRe.lastIndex = contentStart + replaced.length + 3;
+      idSearchFrom = contentStart + replaced.length + 3;
+    } else {
+      idSearchFrom = closeIdx + 3;
     }
   }
 

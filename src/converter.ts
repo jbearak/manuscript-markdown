@@ -1191,7 +1191,9 @@ function hasOverlappingComments(segment: ContentItem[]): boolean {
     pos++;
   }
   for (const id of prevIds) {
-    ends.set(id, Math.max(ends.get(id) ?? pos, pos));
+    if (!ends.has(id)) {
+      ends.set(id, pos);
+    }
   }
 
   // Check if any pair of comment ranges overlaps
@@ -1236,8 +1238,18 @@ function renderInlineRange(
   let out = '';
   let i = startIndex;
 
-  // Determine if we should use ID-based syntax for this segment
-  const useIds = renderOpts?.alwaysUseCommentIds || hasOverlappingComments(segment.slice(startIndex));
+  // Determine if we should use ID-based syntax for this inline segment only
+  const segmentEnd = (() => {
+    let idx = startIndex;
+    while (idx < segment.length) {
+      const item = segment[idx];
+      if (item.type === 'para' || item.type === 'table') break;
+      if (opts?.stopBeforeDisplayMath && item.type === 'math' && item.display) break;
+      idx++;
+    }
+    return idx;
+  })();
+  const useIds = renderOpts?.alwaysUseCommentIds || hasOverlappingComments(segment.slice(startIndex, segmentEnd));
 
   if (useIds) {
     return renderInlineRangeWithIds(segment, startIndex, comments, opts);

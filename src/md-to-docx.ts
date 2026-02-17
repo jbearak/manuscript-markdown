@@ -1405,24 +1405,28 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       state.hasComments = true;
     } else if (run.type === 'comment_range_end') {
       const mdId = run.commentId || '';
-      let numericId = state.commentIdMap.get(mdId);
+      const numericId = state.commentIdMap.get(mdId);
       if (numericId === undefined) {
-        numericId = state.commentId++;
-        state.commentIdMap.set(mdId, numericId);
+        state.warnings.push(`Unmatched comment range end marker: {/${mdId}}`);
+        continue;
       }
       xml += '<w:commentRangeEnd w:id="' + numericId + '"/>';
       xml += '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="' + numericId + '"/></w:r>';
     } else if (run.type === 'comment_body_with_id') {
       const mdId = run.commentId || '';
-      let numericId = state.commentIdMap.get(mdId);
+      const numericId = state.commentIdMap.get(mdId);
       if (numericId === undefined) {
-        numericId = state.commentId++;
-        state.commentIdMap.set(mdId, numericId);
+        state.warnings.push(`Comment body {#${mdId}>>...<<} has no matching range markers {#${mdId}}...{/${mdId}}`);
+        continue;
       }
-      const author = run.author || options?.authorName || 'Unknown';
-      const date = normalizeToUtcIso(run.date || '', state.timezone);
-      const commentBody = run.commentText || '';
-      state.comments.push({ id: numericId, author, date, text: commentBody });
+      // Only emit the comment entry once per ID (multi-paragraph comments
+      // may produce duplicate body markers in the markdown).
+      if (!state.comments.some(c => c.id === numericId)) {
+        const author = run.author || options?.authorName || 'Unknown';
+        const date = normalizeToUtcIso(run.date || '', state.timezone);
+        const commentBody = run.commentText || '';
+        state.comments.push({ id: numericId, author, date, text: commentBody });
+      }
       state.hasComments = true;
     }
   }
