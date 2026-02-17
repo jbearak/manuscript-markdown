@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { getCslCompletionContext, getCslFieldInfo } from './csl-language';
+import { getCslCompletionContext, getCslFieldInfo, shouldAutoTriggerSuggestFromChanges } from './csl-language';
 import { isCslAvailable } from '../csl-loader';
 
 describe('getCslCompletionContext', () => {
@@ -178,5 +178,31 @@ describe('isCslAvailable', () => {
 
 	test('returns false for empty string', () => {
 		expect(isCslAvailable('')).toBe(false);
+	});
+});
+
+describe('shouldAutoTriggerSuggestFromChanges', () => {
+	test('returns true for single-character insertion', () => {
+		expect(shouldAutoTriggerSuggestFromChanges([
+			{ rangeLength: 0, text: 'a' },
+		])).toBe(true);
+	});
+	test('returns true for single-character backspace', () => {
+		expect(shouldAutoTriggerSuggestFromChanges([
+			{ rangeLength: 1, text: '' },
+		])).toBe(true);
+	});
+	test('returns false for completion acceptance replacement edit', () => {
+		expect(shouldAutoTriggerSuggestFromChanges([
+			{ rangeLength: 3, text: 'apa' },
+		])).toBe(false);
+	});
+	test('returns false for multi-character paste', () => {
+		expect(shouldAutoTriggerSuggestFromChanges([
+			{ rangeLength: 0, text: 'apa' },
+		])).toBe(false);
+	});
+	test('returns false for empty changes', () => {
+		expect(shouldAutoTriggerSuggestFromChanges([])).toBe(false);
 	});
 });

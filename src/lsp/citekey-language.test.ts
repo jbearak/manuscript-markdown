@@ -8,6 +8,7 @@ import {
 	findCitekeyAtOffset,
 	fsPathToUri,
 	getCompletionContextAtOffset,
+	isInsideCitationSegmentAtOffset,
 	parseBibDataFromText,
 	pathsEqual,
 	resolveBibliographyPath,
@@ -100,6 +101,33 @@ describe('getCompletionContextAtOffset', () => {
 		const text = 'email @smi';
 		const offset = text.length;
 		expect(getCompletionContextAtOffset(text, offset)).toBeUndefined();
+	});
+
+	test('returns completion context just before semicolon delimiter in citation list', () => {
+		const text = 'Text [@smith2020; @jones2019]';
+		const semicolonOffset = text.indexOf(';');
+		const ctx = getCompletionContextAtOffset(text, semicolonOffset);
+		expect(ctx).toBeDefined();
+		expect(ctx?.prefix).toBe('smith2020');
+	});
+
+	test('returns undefined immediately after semicolon delimiter in citation list', () => {
+		const text = 'Text [@smith2020; @jones2019]';
+		const semicolonOffset = text.indexOf(';');
+		const ctx = getCompletionContextAtOffset(text, semicolonOffset + 1);
+		expect(ctx).toBeUndefined();
+	});
+});
+describe('isInsideCitationSegmentAtOffset', () => {
+	test('returns true for semicolon delimiter in grouped citation', () => {
+		const text = 'Text [@smith2020; @jones2019]';
+		const semicolonOffset = text.indexOf(';');
+		expect(isInsideCitationSegmentAtOffset(text, semicolonOffset)).toBe(true);
+	});
+	test('returns true for semicolon delimiter after locator text', () => {
+		const text = 'Text [@smith2020, p. 12; @jones2019]';
+		const semicolonOffset = text.indexOf(';');
+		expect(isInsideCitationSegmentAtOffset(text, semicolonOffset)).toBe(true);
 	});
 });
 

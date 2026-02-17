@@ -207,6 +207,7 @@ connection.onCompletion(async (params: CompletionParams): Promise<CompletionItem
 			},
 			filterText: entry.key,
 			sortText: entry.key,
+			commitCharacters: [';', ',', ']'],
 		});
 	}
 

@@ -15,6 +15,8 @@ import { convertMdToDocx } from './md-to-docx';
 import * as path from 'path';
 import { parseFrontmatter, hasCitations, normalizeBibPath } from './frontmatter';
 import { BUNDLED_STYLE_LABELS } from './csl-loader';
+import { getCompletionContextAtOffset } from './lsp/citekey-language';
+import { getCslCompletionContext, shouldAutoTriggerSuggestFromChanges } from './lsp/csl-language';
 import {
 	getOutputBasePath,
 	getOutputConflictMessage,
@@ -468,6 +470,49 @@ export function activate(context: vscode.ExtensionContext) {
 			updateHighlightDecorations(editor);
 		}, 150);
 	}
+	function shouldTriggerLspSuggest(editor: vscode.TextEditor, event: vscode.TextDocumentChangeEvent): boolean {
+		if (editor.document.languageId !== 'markdown') {
+			return false;
+		}
+		if (editor.selections.length !== 1 || !editor.selection.isEmpty) {
+			return false;
+		}
+		if (event.contentChanges.length === 0) {
+			return false;
+		}
+		if (!shouldAutoTriggerSuggestFromChanges(event.contentChanges)) {
+			return false;
+		}
+		const text = editor.document.getText();
+		const offset = editor.document.offsetAt(editor.selection.active);
+		return (
+			getCslCompletionContext(text, offset) !== undefined ||
+			getCompletionContextAtOffset(text, offset) !== undefined
+		);
+	}
+	function shouldHideSuggestOnCitekeySemicolon(
+		editor: vscode.TextEditor,
+		event: vscode.TextDocumentChangeEvent
+	): boolean {
+		if (editor.document.languageId !== 'markdown') {
+			return false;
+		}
+		if (editor.selections.length !== 1 || !editor.selection.isEmpty) {
+			return false;
+		}
+		if (event.contentChanges.length === 0) {
+			return false;
+		}
+		const hasDelimiterChange = event.contentChanges.some(
+			change => change.text.includes(';') || change.text === ' '
+		);
+		if (!hasDelimiterChange) {
+			return false;
+		}
+		const cursor = editor.selection.active;
+		const linePrefix = editor.document.lineAt(cursor.line).text.slice(0, cursor.character);
+		return /\[[^\]\n]*;\s*$/.test(linePrefix) && linePrefix.includes('@');
+	}
 	context.subscriptions.push({
 		dispose: () => {
 			if (highlightDecorationUpdateTimer) {
@@ -489,6 +534,15 @@ export function activate(context: vscode.ExtensionContext) {
 			const editor = vscode.window.activeTextEditor;
 			if (editor && e.document === editor.document) {
 				scheduleHighlightDecorationsUpdate(editor);
+				if (shouldHideSuggestOnCitekeySemicolon(editor, e)) {
+					setTimeout(() => {
+						void vscode.commands.executeCommand('hideSuggestWidget');
+					}, 10);
+					return;
+				}
+				if (shouldTriggerLspSuggest(editor, e)) {
+					void vscode.commands.executeCommand('editor.action.triggerSuggest');
+				}
 			}
 		})
 	);

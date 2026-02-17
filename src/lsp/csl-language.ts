@@ -9,6 +9,10 @@ export interface CslCompletionContext {
 	valueEnd: number;
 }
 
+export interface SuggestTriggerTextChangeLike {
+	rangeLength: number;
+	text: string;
+}
 export interface CslFieldInfo {
 	value: string;
 	valueStart: number;
@@ -16,6 +20,19 @@ export interface CslFieldInfo {
 }
 
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---/;
+
+/**
+ * Returns true only for direct single-character typing/backspace edits.
+ * Used to avoid re-triggering suggestions when completion acceptance replaces text.
+ */
+export function shouldAutoTriggerSuggestFromChanges(changes: readonly SuggestTriggerTextChangeLike[]): boolean {
+	if (changes.length === 0) return false;
+	return changes.every(change => {
+		const singleCharInsert = change.rangeLength === 0 && change.text.length === 1;
+		const singleCharDelete = change.rangeLength === 1 && change.text.length === 0;
+		return singleCharInsert || singleCharDelete;
+	});
+}
 
 /**
  * Detect if the cursor is positioned after `csl:` in YAML frontmatter.
