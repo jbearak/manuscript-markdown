@@ -121,6 +121,7 @@ const parserOptions = {
   attributeNamePrefix: '@_',
   preserveOrder: true,
   trimValues: false,
+  parseTagValue: false,
 };
 
 export async function parseRelationships(zip: JSZip): Promise<Map<string, string>> {
