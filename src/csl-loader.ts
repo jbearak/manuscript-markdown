@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { access } from 'fs/promises';
 import { join, isAbsolute, dirname } from 'path';
 
 const VALID_STYLE_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
@@ -110,6 +111,49 @@ export function isCslAvailable(
     if (existsSync(name)) return true;
     if (options?.sourceDir && !isAbsolute(name)) {
       if (existsSync(join(options.sourceDir, name))) return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Async variant of isCslAvailable that avoids blocking the event loop.
+ */
+export async function isCslAvailableAsync(
+  name: string,
+  options?: { cacheDirs?: string[]; sourceDir?: string }
+): Promise<boolean> {
+  if (!name) return false;
+
+  // Fast in-memory check against known bundled style names
+  if (BUNDLED_STYLES.includes(name)) {
+    return true;
+  }
+
+  const fileExists = async (p: string) => {
+    try { await access(p); return true; } catch { return false; }
+  };
+
+  // Check bundled directory
+  if (await fileExists(join(BUNDLED_STYLES_DIR, name + '.csl'))) {
+    return true;
+  }
+
+  // Check cache directories
+  if (options?.cacheDirs) {
+    for (const dir of options.cacheDirs) {
+      if (await fileExists(join(dir, name + '.csl'))) {
+        return true;
+      }
+    }
+  }
+
+  // Check as file path (absolute or relative to sourceDir)
+  if (isAbsolute(name) || name.endsWith('.csl')) {
+    if (await fileExists(name)) return true;
+    if (options?.sourceDir && !isAbsolute(name)) {
+      if (await fileExists(join(options.sourceDir, name))) return true;
     }
   }
 

@@ -43,7 +43,7 @@ import {
 	stripCriticMarkup,
 } from './comment-language';
 import { getCslCompletionContext, getCslFieldInfo } from './csl-language';
-import { BUNDLED_STYLE_LABELS, isCslAvailable } from '../csl-loader';
+import { BUNDLED_STYLE_LABELS, isCslAvailableAsync } from '../csl-loader';
 
 const connection = createConnection(ProposedFeatures.all);
 const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
@@ -334,7 +334,7 @@ connection.onHover(async (params: HoverParams): Promise<Hover | null> => {
 documents.listen(connection);
 connection.listen();
 
-function validateCslField(doc: TextDocument): void {
+async function validateCslField(doc: TextDocument): Promise<void> {
 	try {
 		const text = doc.getText();
 		const fieldInfo = getCslFieldInfo(text);
@@ -349,7 +349,7 @@ function validateCslField(doc: TextDocument): void {
 			return fsPath ? path.dirname(fsPath) : undefined;
 		})();
 
-		const available = isCslAvailable(fieldInfo.value, {
+		const available = await isCslAvailableAsync(fieldInfo.value, {
 			cacheDirs: settings.cslCacheDirs,
 			sourceDir,
 		});
@@ -367,7 +367,7 @@ function validateCslField(doc: TextDocument): void {
 		let totalMatches = 0;
 		if (userValue) {
 			for (const [id, displayName] of BUNDLED_STYLE_LABELS) {
-				if (id.startsWith(userValue) || displayName.toLowerCase().includes(userValue)) {
+				if (id.toLowerCase().startsWith(userValue) || displayName.toLowerCase().includes(userValue)) {
 					totalMatches++;
 					if (suggestions.length < maxSuggestions) {
 						suggestions.push(id);
@@ -396,8 +396,9 @@ function validateCslField(doc: TextDocument): void {
 		};
 		cslDiagnostics.set(doc.uri, [diagnostic]);
 		publishDiagnostics(doc.uri);
-	} catch {
+	} catch (e) {
 		// Don't let validation errors crash the LSP connection
+		connection.console.error(`Error building CSL suggestions: ${e instanceof Error ? e.stack ?? e.message : e}`);
 	}
 }
 
