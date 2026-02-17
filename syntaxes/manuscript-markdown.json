@@ -41,25 +41,28 @@
 			]
 		},
 		"comment_with_id": {
-			"begin": "\\{#[a-zA-Z0-9_-]+>>",
+			"begin": "(\\{#)([a-zA-Z0-9_-]+)(>>)",
 			"beginCaptures": {
-				"0": { "name": "comment.block.manuscript-markdown" }
+				"1": { "name": "punctuation.definition.tag.begin.manuscript-markdown" },
+				"2": { "name": "entity.name.tag.manuscript-markdown" },
+				"3": { "name": "punctuation.definition.tag.begin.manuscript-markdown" }
 			},
-			"end": "<<\\}",
+			"end": "(<<)(\\})",
 			"endCaptures": {
-				"0": { "name": "comment.block.manuscript-markdown" }
+				"1": { "name": "punctuation.definition.tag.end.manuscript-markdown" },
+				"2": { "name": "punctuation.definition.tag.end.manuscript-markdown" }
 			},
 			"name": "comment.block.manuscript-markdown",
 			"contentName": "comment.block"
 		},
 		"comment": {
-			"begin": "\\{>>",
+			"begin": "(\\{>>)",
 			"beginCaptures": {
-				"0": { "name": "comment.block.manuscript-markdown" }
+				"0": { "name": "punctuation.definition.tag.begin.manuscript-markdown" }
 			},
-			"end": "<<\\}",
+			"end": "(<<\\})",
 			"endCaptures": {
-				"0": { "name": "comment.block.manuscript-markdown" }
+				"0": { "name": "punctuation.definition.tag.end.manuscript-markdown" }
 			},
 			"name": "comment.block.manuscript-markdown",
 			"contentName": "comment.block"
