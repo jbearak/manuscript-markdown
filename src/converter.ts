@@ -1164,12 +1164,13 @@ function renderInlineSegment(
   segment: ContentItem[],
   comments: Map<string, Comment>,
   renderOpts?: { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string> }
-): string {
+): { text: string; deferredComments: string[] } {
   const result = renderInlineRange(segment, 0, comments, undefined, renderOpts);
-  if (result.deferredComments.length > 0) {
-    return result.text + '\n' + result.deferredComments.join('\n');
-  }
-  return result.text;
+  return {
+    // Keep parity with paragraph-level emission behavior.
+    text: result.text.replace(/\n+$/, ''),
+    deferredComments: result.deferredComments,
+  };
 }
 
 /** Check whether any position in the segment has more than one active comment. */
@@ -1464,7 +1465,11 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
       if (cell.rowspan && cell.rowspan > 1) attrs += ' rowspan="' + cell.rowspan + '"';
       lines.push(i2 + '<' + tag + attrs + '>');
       for (const para of cell.paragraphs) {
-        lines.push(i3 + '<p>' + renderInlineSegment(mergeConsecutiveRuns(para), comments, renderOpts) + '</p>');
+        const rendered = renderInlineSegment(mergeConsecutiveRuns(para), comments, renderOpts);
+        lines.push(i3 + '<p>' + rendered.text + '</p>');
+        if (rendered.deferredComments.length > 0) {
+          lines.push(i3 + rendered.deferredComments.join('\n' + i3));
+        }
       }
       lines.push(i2 + '</' + tag + '>');
     }

@@ -288,6 +288,19 @@ describe('Command Handler Unit Tests', () => {
   });
 });
 
+describe('Syntax grammar invariants', () => {
+  it('uses begin/end for comment rule so multi-line comments are tokenized', () => {
+    const grammarPath = path.join(__dirname, '..', 'syntaxes', 'manuscript-markdown.json');
+    const grammar = JSON.parse(fs.readFileSync(grammarPath, 'utf-8'));
+    const commentRule = grammar?.repository?.comment;
+
+    expect(commentRule).toBeDefined();
+    expect(commentRule.begin).toBe('\\{>>');
+    expect(commentRule.end).toBe('<<\\}');
+    expect(commentRule.match).toBeUndefined();
+  });
+});
+
 // Integration tests for markdown-it plugin registration (Requirements 7.1)
 describe('Markdown Preview Integration', () => {
   describe('Plugin registration', () => {

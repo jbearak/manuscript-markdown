@@ -316,6 +316,38 @@ describe('DOCX table conversion', () => {
     expect(paraMatch).not.toBeNull();
     expect(paraMatch?.[1]).toBe(bodyMarkdown);
   });
+
+  test('emits deferred ID comment bodies outside table cell paragraph tags', () => {
+    const comments = new Map([
+      ['1', { author: 'Reviewer', text: 'note', date: '' }],
+    ]);
+    const inlineItems = [
+      { type: 'text', text: 'commented', commentIds: new Set(['1']), formatting: DEFAULT_FORMATTING },
+    ] as any;
+
+    const tableMarkdown = buildMarkdown(
+      [
+        {
+          type: 'table',
+          rows: [
+            {
+              isHeader: false,
+              cells: [{ paragraphs: [inlineItems as any[]] }],
+            },
+          ],
+        },
+      ] as any,
+      comments,
+      { alwaysUseCommentIds: true },
+    );
+
+    const paraMatch = tableMarkdown.match(/<p>([\s\S]*?)<\/p>/);
+    expect(paraMatch).not.toBeNull();
+    expect(paraMatch?.[1]).toBe('{#1}commented{/1}');
+    expect(paraMatch?.[1]).not.toContain('{#1>>');
+    expect(tableMarkdown).toContain('{#1>>Reviewer: note<<}');
+    expect(tableMarkdown).toContain('</p>\n      {#1>>Reviewer: note<<}');
+  });
 });
 
 describe('colspan/rowspan roundtrip', () => {

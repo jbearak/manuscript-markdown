@@ -188,7 +188,11 @@ export function activate(context: vscode.ExtensionContext) {
 				const config = vscode.workspace.getConfiguration('manuscriptMarkdown');
 				const format = config.get<CitationKeyFormat>('citationKeyFormat', 'authorYearTitle');
 				const tableIndentSpaces = config.get<number>('tableIndent', 2);
-				const result = await convertDocx(new Uint8Array(data), format, { tableIndent: ' '.repeat(tableIndentSpaces) });
+				const alwaysUseCommentIds = config.get<boolean>('alwaysUseCommentIds', false);
+				const result = await convertDocx(new Uint8Array(data), format, {
+					tableIndent: ' '.repeat(tableIndentSpaces),
+					alwaysUseCommentIds,
+				});
 
 				const basePath = uri.fsPath.replace(/\.docx$/i, '');
 				let mdUri = vscode.Uri.file(basePath + '.md');
