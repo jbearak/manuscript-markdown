@@ -4,6 +4,7 @@ import { wrapColoredHighlight } from './formatting';
 import {
   VALID_COLOR_IDS,
   extractHighlightRanges,
+  extractCriticDelimiterRanges,
   setDefaultHighlightColor,
   getDefaultHighlightColor
 } from './highlight-colors';
@@ -90,6 +91,30 @@ describe('Property 6: Highlight range extraction', () => {
       }),
       { numRuns: 100 }
     );
+  });
+});
+
+describe('Delimiter extraction for editor decorations', () => {
+  it('skips regular comment delimiters so grammar scopes color them', () => {
+    const text = '{>>note<<}';
+    const delimiters = extractCriticDelimiterRanges(text).map(r => text.slice(r.start, r.end));
+    expect(delimiters).not.toContain('{>>');
+    expect(delimiters).not.toContain('<<}');
+  });
+
+  it('skips ID-comment closing <<} so TextMate tag scope can color it', () => {
+    const text = '{#2>>note<<}';
+    const delimiters = extractCriticDelimiterRanges(text).map(r => text.slice(r.start, r.end));
+
+    expect(delimiters).not.toContain('<<}');
+  });
+
+  it('still extracts non-comment Critic delimiters for muted decoration', () => {
+    const text = '{++add++}';
+    const delimiters = extractCriticDelimiterRanges(text).map(r => text.slice(r.start, r.end));
+
+    expect(delimiters).toContain('{++');
+    expect(delimiters).toContain('++}');
   });
 });
 

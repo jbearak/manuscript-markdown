@@ -102,3 +102,7 @@ Code (authoritative for behavior):
 - Extension DOCX->MD settings parity: Keep `manuscriptMarkdown.alwaysUseCommentIds` wired in both CLI and VS Code command paths; otherwise users get divergent conversion output depending on entrypoint
 - Table HTML emission with ID comments: In `alwaysUseCommentIds` mode, emit deferred `{#id>>...<<}` bodies outside cell `<p>` tags (same as paragraph-level flow) so paragraph content and annotation blocks remain structurally separated
 - TextMate comment grammar for `{>>...<<}`: Use `begin`/`end` (not single-line `match`) to preserve multi-line comment highlighting
+- TextMate comment-with-ID grammar for `{#id>>...<<}`: Use `begin`/`end` with explicit `endCaptures` for `<<` and `}` so closing delimiters keep tag punctuation scope instead of inheriting comment-body scope
+- Delimiter decoration extraction: `extractCriticDelimiterRanges()` must skip comment delimiters (`{>>` and `<<}`), including `{#id>>...<<}` closers, so editor decoration foreground does not override TextMate comment delimiter scopes
+- Comment ID remap coverage: When building 1-indexed markdown comment IDs, collect IDs from both top-level inline content and nested table-cell paragraphs; otherwise table-only comments can leak raw DOCX IDs
+- Mixed overlap consistency: If a comment overlaps with another anywhere in the document, emit that comment consistently with ID syntax across all its occurrences to avoid duplicate body emission from mixed traditional/ID rendering

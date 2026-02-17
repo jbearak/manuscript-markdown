@@ -204,6 +204,72 @@ describe('Overlapping comments: docx-to-md (buildMarkdown)', () => {
     expect(result).toContain('highlighted');
     expect(result).toContain(' both');
   });
+
+  test('table-only comments are remapped to 1-indexed IDs', () => {
+    const comments = new Map([
+      ['47', { author: 'alice', text: 'table note', date: '' }],
+    ]);
+    const content = [
+      {
+        type: 'table' as const,
+        rows: [
+          {
+            isHeader: false,
+            cells: [
+              {
+                paragraphs: [[
+                  {
+                    type: 'text' as const,
+                    text: 'cell text',
+                    commentIds: new Set(['47']),
+                    formatting: DEFAULT_FORMATTING,
+                  },
+                ]],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    const result = buildMarkdown(content as any, comments, { alwaysUseCommentIds: true });
+    expect(result).toContain('{#1}cell text{/1}');
+    expect(result).toContain('{#1>>alice: table note<<}');
+    expect(result).not.toContain('{#47}');
+    expect(result).not.toContain('{/47}');
+    expect(result).not.toContain('{#47>>');
+  });
+
+  test('comment spanning paragraphs uses consistent ID syntax when it overlaps elsewhere', () => {
+    const comments = new Map([
+      ['a', { author: 'alice', text: 'note A', date: '' }],
+      ['b', { author: 'bob', text: 'note B', date: '' }],
+    ]);
+    const content = [
+      { type: 'para' as const },
+      {
+        type: 'text' as const,
+        text: 'p1 ',
+        commentIds: new Set(['a']),
+        formatting: DEFAULT_FORMATTING,
+      },
+      { type: 'para' as const },
+      {
+        type: 'text' as const,
+        text: 'p2',
+        commentIds: new Set(['a', 'b']),
+        formatting: DEFAULT_FORMATTING,
+      },
+    ];
+
+    const result = buildMarkdown(content as any, comments);
+    expect(result).toContain('{#1}p1 {/1}');
+    expect(result).toContain('{#1}{#2}p2{/1}{/2}');
+    expect(result).toContain('{#1>>alice: note A<<}');
+    expect(result).toContain('{#2>>bob: note B<<}');
+    expect(result).not.toContain('{>>alice: note A<<}');
+    expect((result.match(/alice: note A/g) || []).length).toBe(1);
+  });
 });
 
 describe('Overlapping comments: md-to-docx (parseMd)', () => {

@@ -145,11 +145,16 @@ export function extractDeletionRanges(text: string): Array<{ start: number; end:
  */
 export function extractCriticDelimiterRanges(text: string): Array<{ start: number; end: number }> {
   const ranges: Array<{ start: number; end: number }> = [];
+  let m;
 
   // 3-char opening/closing delimiters
   const threeCharRe = /\{==|==\}|\{>>|<<\}|\{\+\+|\+\+\}|\{--|--\}|\{~~|~~\}/g;
-  let m;
   while ((m = threeCharRe.exec(text)) !== null) {
+    // Preserve TextMate delimiter coloring for comment delimiters ({>> ... <<}),
+    // including comment-with-ID closers in {#id>>...<<}.
+    if (m[0] === '{>>' || m[0] === '<<}') {
+      continue;
+    }
     ranges.push({ start: m.index, end: m.index + 3 });
   }
 

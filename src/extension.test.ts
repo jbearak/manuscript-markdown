@@ -295,9 +295,27 @@ describe('Syntax grammar invariants', () => {
     const commentRule = grammar?.repository?.comment;
 
     expect(commentRule).toBeDefined();
-    expect(commentRule.begin).toBe('\\{>>');
-    expect(commentRule.end).toBe('<<\\}');
+    expect(commentRule.begin).toBe('(\\{)(>>)');
+    expect(commentRule.end).toBe('(<<)(\\})');
+    expect(commentRule.beginCaptures?.['1']?.name).toBe('punctuation.definition.tag.begin.manuscript-markdown');
+    expect(commentRule.beginCaptures?.['2']?.name).toBe('punctuation.definition.tag.begin.manuscript-markdown');
+    expect(commentRule.endCaptures?.['1']?.name).toBe('punctuation.definition.tag.end.manuscript-markdown');
+    expect(commentRule.endCaptures?.['2']?.name).toBe('punctuation.definition.tag.end.manuscript-markdown');
     expect(commentRule.match).toBeUndefined();
+  });
+
+  it('uses begin/end captures for comment_with_id so closing <<} is delimiter-scoped', () => {
+    const grammarPath = path.join(__dirname, '..', 'syntaxes', 'manuscript-markdown.json');
+    const grammar = JSON.parse(fs.readFileSync(grammarPath, 'utf-8'));
+    const commentWithIdRule = grammar?.repository?.comment_with_id;
+
+    expect(commentWithIdRule).toBeDefined();
+    expect(commentWithIdRule.begin).toBe('(\\{#)([a-zA-Z0-9_-]+)(>>)');
+    expect(commentWithIdRule.end).toBe('<<\\}');
+    expect(commentWithIdRule.beginCaptures?.['1']?.name).toBe('punctuation.definition.tag.begin.manuscript-markdown');
+    expect(commentWithIdRule.beginCaptures?.['3']?.name).toBe('punctuation.definition.tag.begin.manuscript-markdown');
+    expect(commentWithIdRule.endCaptures?.['0']?.name).toBe('punctuation.definition.tag.end.manuscript-markdown');
+    expect(commentWithIdRule.match).toBeUndefined();
   });
 });
 

@@ -1163,7 +1163,7 @@ function mergeConsecutiveRuns(content: ContentItem[]): ContentItem[] {
 function renderInlineSegment(
   segment: ContentItem[],
   comments: Map<string, Comment>,
-  renderOpts?: { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string> }
+  renderOpts?: { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string> }
 ): { text: string; deferredComments: string[] } {
   const result = renderInlineRange(segment, 0, comments, undefined, renderOpts);
   return {
@@ -1262,17 +1262,22 @@ function renderInlineRange(
   startIndex: number,
   comments: Map<string, Comment>,
   opts?: { stopBeforeDisplayMath?: boolean },
-  renderOpts?: { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string> }
+  renderOpts?: { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string> }
 ): { text: string; nextIndex: number; deferredComments: string[] } {
   let out = '';
   let i = startIndex;
 
   // Determine if we should use ID-based syntax for this inline segment only
   const segmentEnd = computeSegmentEnd(segment, startIndex, opts);
-  const useIds = renderOpts?.alwaysUseCommentIds || hasOverlappingComments(segment.slice(startIndex, segmentEnd));
+  const forceIdCommentIds = renderOpts?.forceIdCommentIds;
+  const hasForcedIdCommentInSegment = !!forceIdCommentIds && [...segment.slice(startIndex, segmentEnd)].some(item => (
+    (item.type === 'text' || item.type === 'citation') &&
+    [...item.commentIds].some(id => forceIdCommentIds.has(id))
+  ));
+  const useIds = renderOpts?.alwaysUseCommentIds || hasForcedIdCommentInSegment || hasOverlappingComments(segment.slice(startIndex, segmentEnd));
 
   if (useIds) {
-    return renderInlineRangeWithIds(segment, startIndex, comments, opts, renderOpts?.commentIdRemap);
+    return renderInlineRangeWithIds(segment, startIndex, comments, opts, renderOpts?.commentIdRemap, renderOpts?.emittedIdCommentBodies);
   }
 
   while (i < segment.length) {
@@ -1347,7 +1352,8 @@ function renderInlineRangeWithIds(
   startIndex: number,
   comments: Map<string, Comment>,
   opts?: { stopBeforeDisplayMath?: boolean },
-  commentIdRemap?: Map<string, string>
+  commentIdRemap?: Map<string, string>,
+  emittedIdCommentBodies?: Set<string>
 ): { text: string; nextIndex: number; deferredComments: string[] } {
   let out = '';
   let i = startIndex;
@@ -1360,9 +1366,11 @@ function renderInlineRangeWithIds(
 
   function collectBody(cid: string): void {
     if (collectedBodies.has(cid)) return;
+    if (emittedIdCommentBodies?.has(cid)) return;
     const c = comments.get(cid);
     if (!c) return;
     collectedBodies.add(cid);
+    emittedIdCommentBodies?.add(cid);
     deferred.push({ remappedId: remap(cid), body: formatCommentBodyWithId(remap(cid), c) });
   }
 
@@ -1450,7 +1458,7 @@ function renderInlineRangeWithIds(
   return { text: out, nextIndex: i, deferredComments: deferred.map(d => d.body) };
 }
 
-function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comment>, indent: string = '  ', renderOpts?: { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string> }): string {
+function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comment>, indent: string = '  ', renderOpts?: { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string> }): string {
   const i1 = indent;  // tr level
   const i2 = indent + indent;  // td/th level
   const i3 = indent + indent + indent;  // content level
@@ -1488,20 +1496,44 @@ export function buildMarkdown(
 
   // Build 1-indexed comment ID remap (order of first appearance in document)
   const commentIdRemap = new Map<string, string>();
+  // Comments that overlap anywhere in the document should use ID syntax
+  // consistently across all their occurrences (including non-overlapping
+  // paragraphs), to avoid mixed-format duplicate comment body emission.
+  const forceIdCommentIds = new Set<string>();
+  const emittedIdCommentBodies = new Set<string>();
   let nextRemapId = 1;
-  for (const item of mergedContent) {
-    if ((item.type === 'text' || item.type === 'citation') && item.commentIds.size > 0) {
-      for (const id of item.commentIds) {
-        if (!commentIdRemap.has(id)) {
-          commentIdRemap.set(id, String(nextRemapId++));
+  function collectCommentMetadata(items: ContentItem[]): void {
+    for (const item of items) {
+      if (item.type === 'text' || item.type === 'citation') {
+        const ids = [...item.commentIds];
+        for (const id of ids) {
+          if (!commentIdRemap.has(id)) {
+            commentIdRemap.set(id, String(nextRemapId++));
+          }
+        }
+        if (ids.length > 1) {
+          for (const id of ids) {
+            forceIdCommentIds.add(id);
+          }
+        }
+      } else if (item.type === 'table') {
+        for (const row of item.rows) {
+          for (const cell of row.cells) {
+            for (const para of cell.paragraphs) {
+              collectCommentMetadata(para);
+            }
+          }
         }
       }
     }
   }
+  collectCommentMetadata(mergedContent);
 
   const renderOpts = {
     alwaysUseCommentIds: options?.alwaysUseCommentIds,
     commentIdRemap,
+    forceIdCommentIds,
+    emittedIdCommentBodies,
   };
 
   const output: string[] = [];
