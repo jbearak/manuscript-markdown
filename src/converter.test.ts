@@ -28,6 +28,7 @@ const fixturesDir = join(__dirname, '..', 'test', 'fixtures');
 const sampleData = new Uint8Array(readFileSync(join(fixturesDir, 'sample.docx')));
 const formattingSampleData = new Uint8Array(readFileSync(join(fixturesDir, 'formatting_sample.docx')));
 const tablesData = new Uint8Array(readFileSync(join(fixturesDir, 'tables.docx')));
+const commentsData = new Uint8Array(readFileSync(join(fixturesDir, 'comments.docx')));
 const expectedMd = readFileSync(join(fixturesDir, 'expected-output.md'), 'utf-8').trimEnd();
 const expectedBib = readFileSync(join(fixturesDir, 'expected-output.bib'), 'utf-8').trimEnd();
 
@@ -1621,6 +1622,106 @@ describe('Zotero citation roundtrip', () => {
     // Davis has no locator
     expect(result.markdown).toContain('@davis2021advances]');
     expect(result.markdown).not.toContain('@davis2021advances, p.');
+  });
+});
+
+describe('Integration: comments.docx fixture', () => {
+  test('converts comments.docx without garbling text', async () => {
+    const result = await convertDocx(commentsData);
+    // The document contains: "This is the first sentence of a paragraph.
+    // This is the second<br>sentence of a paragraph.."
+    // with overlapping comments. Verify text is not garbled.
+    expect(result.markdown).toContain('This is');
+    expect(result.markdown).toContain('the first sentence of a');
+    expect(result.markdown).toContain('paragraph.');
+    expect(result.markdown).toContain('the second\nsentence o');
+    expect(result.markdown).toContain('f a paragraph.');
+    // Must NOT concatenate "second" and "sentence" without a break
+    expect(result.markdown).not.toContain('secondsentence');
+  });
+
+  test('preserves overlapping comment structure with 1-indexed IDs', async () => {
+    const result = await convertDocx(commentsData);
+    // Three overlapping comments → must use ID-based syntax, 1-indexed
+    expect(result.markdown).toContain('{#1}');
+    expect(result.markdown).toContain('{#2}');
+    expect(result.markdown).toContain('{#3}');
+    expect(result.markdown).toContain('{/1}');
+    expect(result.markdown).toContain('{/2}');
+    expect(result.markdown).toContain('{/3}');
+    // Should NOT contain 0-indexed IDs
+    expect(result.markdown).not.toContain('{#0}');
+    expect(result.markdown).not.toContain('{/0}');
+  });
+
+  test('preserves all three comment bodies', async () => {
+    const result = await convertDocx(commentsData);
+    expect(result.markdown).toContain('Merp');
+    expect(result.markdown).toContain('This is comment 1.');
+    expect(result.markdown).toContain('This is comment 2.');
+  });
+
+  test('preserves w:br as line break in markdown', async () => {
+    const result = await convertDocx(commentsData);
+    // The docx has <w:br/> between "second" and "sentence"
+    expect(result.markdown).toContain('second\nsentence');
+  });
+
+  test('idempotent round-trip: docx→md→docx→md→docx→md', async () => {
+    // Pass 1: original docx → md
+    const pass1 = await convertDocx(commentsData);
+
+    // Pass 2: md → docx → md
+    const { docx: docx2 } = await convertMdToDocx(pass1.markdown);
+    const pass2 = await convertDocx(docx2);
+
+    // Pass 3: md → docx → md (should be identical to pass 2)
+    const { docx: docx3 } = await convertMdToDocx(pass2.markdown);
+    const pass3 = await convertDocx(docx3);
+
+    expect(pass2.markdown).toBe(pass3.markdown);
+  });
+});
+
+describe('w:br line break handling', () => {
+  test('w:br without type attribute emits newline', async () => {
+    const xml = wrapDocumentXml(
+      '<w:p><w:r><w:t>before</w:t></w:r><w:r><w:br/><w:t>after</w:t></w:r></w:p>'
+    );
+    const buf = await buildSyntheticDocx(xml);
+    const result = await convertDocx(buf);
+    expect(result.markdown).toContain('before\nafter');
+  });
+
+  test('w:br with type="textWrapping" emits newline', async () => {
+    const xml = wrapDocumentXml(
+      '<w:p><w:r><w:t>a</w:t></w:r><w:r><w:br w:type="textWrapping"/><w:t>b</w:t></w:r></w:p>'
+    );
+    const buf = await buildSyntheticDocx(xml);
+    const result = await convertDocx(buf);
+    expect(result.markdown).toContain('a\nb');
+  });
+
+  test('w:br with type="page" does not emit newline', async () => {
+    const xml = wrapDocumentXml(
+      '<w:p><w:r><w:t>a</w:t></w:r><w:r><w:br w:type="page"/><w:t>b</w:t></w:r></w:p>'
+    );
+    const buf = await buildSyntheticDocx(xml);
+    const result = await convertDocx(buf);
+    expect(result.markdown).not.toContain('a\nb');
+  });
+
+  test('w:br round-trips through md→docx→md', async () => {
+    const xml = wrapDocumentXml(
+      '<w:p><w:r><w:t>line one</w:t></w:r><w:r><w:br/><w:t>line two</w:t></w:r></w:p>'
+    );
+    const buf = await buildSyntheticDocx(xml);
+    const pass1 = await convertDocx(buf);
+    expect(pass1.markdown).toContain('line one\nline two');
+
+    const { docx: docx2 } = await convertMdToDocx(pass1.markdown);
+    const pass2 = await convertDocx(docx2);
+    expect(pass2.markdown).toContain('line one\nline two');
   });
 });
 

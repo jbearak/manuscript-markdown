@@ -53,12 +53,20 @@
 			"contentName": "comment.block"
 		},
 		"comment_range_start": {
-			"match": "\\{#[a-zA-Z0-9_-]+\\}",
-			"name": "punctuation.definition.comment-range.begin.manuscript-markdown"
+			"match": "(\\{#)([a-zA-Z0-9_-]+)(\\})",
+			"captures": {
+				"1": { "name": "punctuation.definition.tag.begin.manuscript-markdown" },
+				"2": { "name": "entity.name.tag.manuscript-markdown" },
+				"3": { "name": "punctuation.definition.tag.end.manuscript-markdown" }
+			}
 		},
 		"comment_range_end": {
-			"match": "\\{/[a-zA-Z0-9_-]+\\}",
-			"name": "punctuation.definition.comment-range.end.manuscript-markdown"
+			"match": "(\\{/)([a-zA-Z0-9_-]+)(\\})",
+			"captures": {
+				"1": { "name": "punctuation.definition.tag.begin.manuscript-markdown" },
+				"2": { "name": "entity.name.tag.manuscript-markdown" },
+				"3": { "name": "punctuation.definition.tag.end.manuscript-markdown" }
+			}
 		},
 		"highlight": {
 			"begin": "\\{==",

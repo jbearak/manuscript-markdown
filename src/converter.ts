@@ -996,6 +996,20 @@ export async function extractDocumentContent(
             }
           }
           walk(runChildren, runFormatting, target, inTableCell);
+        } else if (key === 'w:br') {
+          // Line break within a run (Shift+Enter in Word).
+          // Only emit for default/textWrapping breaks; skip page/column breaks.
+          const brType = getAttr(node, 'type');
+          if (!brType || brType === 'textWrapping') {
+            if (!inBibliographyField && !inCitationField) {
+              target.push({
+                type: 'text',
+                text: '\n',
+                commentIds: new Set(activeComments),
+                formatting: currentFormatting,
+              });
+            }
+          }
         } else if (key === 'w:t') {
           const text = nodeText(node['w:t'] || []);
           if (text) {
@@ -1149,9 +1163,13 @@ function mergeConsecutiveRuns(content: ContentItem[]): ContentItem[] {
 function renderInlineSegment(
   segment: ContentItem[],
   comments: Map<string, Comment>,
-  renderOpts?: { alwaysUseCommentIds?: boolean }
+  renderOpts?: { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string> }
 ): string {
-  return renderInlineRange(segment, 0, comments, undefined, renderOpts).text;
+  const result = renderInlineRange(segment, 0, comments, undefined, renderOpts);
+  if (result.deferredComments.length > 0) {
+    return result.text + '\n' + result.deferredComments.join('\n');
+  }
+  return result.text;
 }
 
 /** Check whether any position in the segment has more than one active comment. */
@@ -1243,8 +1261,8 @@ function renderInlineRange(
   startIndex: number,
   comments: Map<string, Comment>,
   opts?: { stopBeforeDisplayMath?: boolean },
-  renderOpts?: { alwaysUseCommentIds?: boolean }
-): { text: string; nextIndex: number } {
+  renderOpts?: { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string> }
+): { text: string; nextIndex: number; deferredComments: string[] } {
   let out = '';
   let i = startIndex;
 
@@ -1253,7 +1271,7 @@ function renderInlineRange(
   const useIds = renderOpts?.alwaysUseCommentIds || hasOverlappingComments(segment.slice(startIndex, segmentEnd));
 
   if (useIds) {
-    return renderInlineRangeWithIds(segment, startIndex, comments, opts);
+    return renderInlineRangeWithIds(segment, startIndex, comments, opts, renderOpts?.commentIdRemap);
   }
 
   while (i < segment.length) {
@@ -1318,22 +1336,34 @@ function renderInlineRange(
     out += formattedText;
     i++;
   }
-  return { text: out, nextIndex: i };
+  return { text: out, nextIndex: i, deferredComments: [] };
 }
 
-/** Render inline content using ID-based comment syntax ({#id}...{/id}{#id>>...<<}). */
+/** Render inline content using ID-based comment syntax ({#id}...{/id}).
+ *  Comment bodies are deferred (not emitted inline) and returned separately. */
 function renderInlineRangeWithIds(
   segment: ContentItem[],
   startIndex: number,
   comments: Map<string, Comment>,
-  opts?: { stopBeforeDisplayMath?: boolean }
-): { text: string; nextIndex: number } {
+  opts?: { stopBeforeDisplayMath?: boolean },
+  commentIdRemap?: Map<string, string>
+): { text: string; nextIndex: number; deferredComments: string[] } {
   let out = '';
   let i = startIndex;
   let prevCommentIds = new Set<string>();
-  // Track which comment IDs have had their bodies emitted
-  const emittedBodies = new Set<string>();
+  const collectedBodies = new Set<string>();
+  const deferred: Array<{ remappedId: string; body: string }> = [];
   const segmentEnd = computeSegmentEnd(segment, startIndex, opts);
+
+  const remap = (id: string) => commentIdRemap?.get(id) ?? id;
+
+  function collectBody(cid: string): void {
+    if (collectedBodies.has(cid)) return;
+    const c = comments.get(cid);
+    if (!c) return;
+    collectedBodies.add(cid);
+    deferred.push({ remappedId: remap(cid), body: formatCommentBodyWithId(remap(cid), c) });
+  }
 
   while (i < segment.length) {
     const item = segment[i];
@@ -1341,21 +1371,15 @@ function renderInlineRangeWithIds(
 
     if (item.type === 'citation') {
       const currentIds = item.commentIds;
-      // Emit end markers for exited comments
       for (const cid of [...prevCommentIds].sort()) {
         if (!currentIds.has(cid)) {
-          out += `{/${cid}}`;
-          const c = comments.get(cid);
-          if (c && !emittedBodies.has(cid)) {
-            out += formatCommentBodyWithId(cid, c);
-            emittedBodies.add(cid);
-          }
+          out += `{/${remap(cid)}}`;
+          collectBody(cid);
         }
       }
-      // Emit start markers for newly entered comments
       for (const cid of [...currentIds].sort()) {
         if (!prevCommentIds.has(cid)) {
-          out += `{#${cid}}`;
+          out += `{#${remap(cid)}}`;
         }
       }
       prevCommentIds = new Set(currentIds);
@@ -1382,28 +1406,21 @@ function renderInlineRangeWithIds(
 
     const currentIds = item.commentIds;
 
-    // Emit end markers for comments that just ended (before start markers)
     for (const cid of [...prevCommentIds].sort()) {
       if (!currentIds.has(cid)) {
-        out += `{/${cid}}`;
-        const c = comments.get(cid);
-        if (c && !emittedBodies.has(cid)) {
-          out += formatCommentBodyWithId(cid, c);
-          emittedBodies.add(cid);
-        }
+        out += `{/${remap(cid)}}`;
+        collectBody(cid);
       }
     }
 
-    // Emit start markers for newly entered comments
     for (const cid of [...currentIds].sort()) {
       if (!prevCommentIds.has(cid)) {
-        out += `{#${cid}}`;
+        out += `{#${remap(cid)}}`;
       }
     }
 
     prevCommentIds = new Set(currentIds);
 
-    // Render the text content (strip highlight that was only for comment indication)
     const fmtForText: RunFormatting = currentIds.size > 0
       ? { ...item.formatting, highlight: false }
       : item.formatting;
@@ -1417,18 +1434,22 @@ function renderInlineRangeWithIds(
 
   // Close any remaining open comments
   for (const cid of [...prevCommentIds].sort()) {
-    out += `{/${cid}}`;
-    const c = comments.get(cid);
-    if (c && !emittedBodies.has(cid)) {
-      out += formatCommentBodyWithId(cid, c);
-      emittedBodies.add(cid);
-    }
+    out += `{/${remap(cid)}}`;
+    collectBody(cid);
   }
 
-  return { text: out, nextIndex: i };
+  // Sort deferred comments by remapped ID (numeric then lexicographic)
+  deferred.sort((a, b) => {
+    const na = parseInt(a.remappedId, 10);
+    const nb = parseInt(b.remappedId, 10);
+    if (!isNaN(na) && !isNaN(nb)) return na - nb;
+    return a.remappedId.localeCompare(b.remappedId);
+  });
+
+  return { text: out, nextIndex: i, deferredComments: deferred.map(d => d.body) };
 }
 
-function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comment>, indent: string = '  ', renderOpts?: { alwaysUseCommentIds?: boolean }): string {
+function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comment>, indent: string = '  ', renderOpts?: { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string> }): string {
   const i1 = indent;  // tr level
   const i2 = indent + indent;  // td/th level
   const i3 = indent + indent + indent;  // content level
@@ -1459,6 +1480,25 @@ export function buildMarkdown(
   options?: { tableIndent?: string; alwaysUseCommentIds?: boolean },
 ): string {
   const mergedContent = mergeConsecutiveRuns(content);
+
+  // Build 1-indexed comment ID remap (order of first appearance in document)
+  const commentIdRemap = new Map<string, string>();
+  let nextRemapId = 1;
+  for (const item of mergedContent) {
+    if ((item.type === 'text' || item.type === 'citation') && item.commentIds.size > 0) {
+      for (const id of item.commentIds) {
+        if (!commentIdRemap.has(id)) {
+          commentIdRemap.set(id, String(nextRemapId++));
+        }
+      }
+    }
+  }
+
+  const renderOpts = {
+    alwaysUseCommentIds: options?.alwaysUseCommentIds,
+    commentIdRemap,
+  };
+
   const output: string[] = [];
   let i = 0;
   let lastListType: 'bullet' | 'ordered' | undefined;
@@ -1478,17 +1518,17 @@ export function buildMarkdown(
       }
 
       lastListType = isCurrentList ? item.listMeta!.type : undefined;
-      
+
       if (item.headingLevel) {
         output.push('#'.repeat(item.headingLevel) + ' ');
       } else if (item.listMeta) {
-        const indent = item.listMeta.type === 'bullet' 
+        const indent = item.listMeta.type === 'bullet'
           ? ' '.repeat(2 * item.listMeta.level)
           : ' '.repeat(3 * item.listMeta.level);
         const marker = item.listMeta.type === 'bullet' ? '- ' : '1. ';
         output.push(indent + marker);
       }
-      
+
       i++;
       continue;
     }
@@ -1509,17 +1549,24 @@ export function buildMarkdown(
       if (output.length > 0 && !output[output.length - 1].endsWith('\n\n')) {
         output.push('\n\n');
       }
-      output.push(renderHtmlTable(item, comments, options?.tableIndent, { alwaysUseCommentIds: options?.alwaysUseCommentIds }));
+      output.push(renderHtmlTable(item, comments, options?.tableIndent, renderOpts));
       lastListType = undefined;
       i++;
       continue;
     }
 
-    const rendered = renderInlineRange(mergedContent, i, comments, { stopBeforeDisplayMath: true }, { alwaysUseCommentIds: options?.alwaysUseCommentIds });
+    const rendered = renderInlineRange(mergedContent, i, comments, { stopBeforeDisplayMath: true }, renderOpts);
     if (rendered.nextIndex <= i) {
       throw new Error('Invariant violated: renderInlineRange did not advance index');
     }
-    output.push(rendered.text);
+    if (rendered.deferredComments.length > 0) {
+      // Strip trailing newlines (from <w:br/> between comment references in round-tripped DOCX)
+      output.push(rendered.text.replace(/\n+$/, ''));
+      output.push('\n');
+      output.push(rendered.deferredComments.join('\n'));
+    } else {
+      output.push(rendered.text);
+    }
     i = rendered.nextIndex;
   }
 

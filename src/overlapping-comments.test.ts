@@ -68,13 +68,14 @@ describe('Overlapping comments: docx-to-md (buildMarkdown)', () => {
       },
     ];
     const result = buildMarkdown(content, comments);
-    // Should use ID-based syntax
-    expect(result).toContain('{#c1}');
-    expect(result).toContain('{#c2}');
-    expect(result).toContain('{/c1}');
-    expect(result).toContain('{/c2}');
-    expect(result).toContain('{#c1>>alice: comment 1<<}');
-    expect(result).toContain('{#c2>>bob: comment 2<<}');
+    // Should use ID-based syntax (IDs remapped to 1-indexed)
+    expect(result).toContain('{#1}');
+    expect(result).toContain('{#2}');
+    expect(result).toContain('{/1}');
+    expect(result).toContain('{/2}');
+    // Comment bodies deferred after paragraph text
+    expect(result).toContain('{#1>>alice: comment 1<<}');
+    expect(result).toContain('{#2>>bob: comment 2<<}');
     // Should NOT use traditional syntax
     expect(result).not.toContain('{==');
   });
@@ -143,10 +144,11 @@ describe('Overlapping comments: docx-to-md (buildMarkdown)', () => {
       },
     ];
     const result = buildMarkdown(content, comments, { alwaysUseCommentIds: true });
-    expect(result).toContain('{#c1}');
+    // ID "c1" remapped to "1"
+    expect(result).toContain('{#1}');
     expect(result).toContain('hello');
-    expect(result).toContain('{/c1}');
-    expect(result).toContain('{#c1>>alice: note<<}');
+    expect(result).toContain('{/1}');
+    expect(result).toContain('{#1>>alice: note<<}');
     expect(result).not.toContain('{==');
   });
 
@@ -172,8 +174,9 @@ describe('Overlapping comments: docx-to-md (buildMarkdown)', () => {
     const result = buildMarkdown(content, comments);
     const date1 = formatLocalIsoMinute('2024-01-15T14:30:00Z');
     const date2 = formatLocalIsoMinute('2024-01-15T14:31:00Z');
-    expect(result).toContain(`{#c1>>alice (${date1}): note<<}`);
-    expect(result).toContain(`{#c2>>bob (${date2}): reply<<}`);
+    // IDs remapped to 1-indexed
+    expect(result).toContain(`{#1>>alice (${date1}): note<<}`);
+    expect(result).toContain(`{#2>>bob (${date2}): reply<<}`);
   });
 
   test('highlight formatting is stripped in ID-based mode', () => {
