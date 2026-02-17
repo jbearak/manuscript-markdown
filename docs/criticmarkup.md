@@ -79,4 +79,4 @@ The extension provides combined commands that pair annotations with comments:
 
 ## Overlapping Comments
 
-Standard CriticMarkup comments cannot overlap. Manuscript Markdown extends the syntax with ID-based comment ranges that support overlapping, nesting, and shared boundaries. See [Custom Extensions — Overlapping Comments](custom-extensions.md#overlapping-comments) for the full syntax reference.
+Standard CriticMarkup comments cannot overlap. Manuscript Markdown extends the syntax with ID-based comment ranges that support overlapping, nesting, and shared boundaries. See [Manuscript Extensions — Overlapping Comments](specification.md#overlapping-comments) for the full syntax reference.
