@@ -52,7 +52,7 @@
 				"1": { "name": "punctuation.definition.tag.end.manuscript-markdown" },
 				"2": { "name": "punctuation.definition.tag.end.manuscript-markdown" }
 			},
-			"name": "comment.block.manuscript-markdown",
+			"name": "meta.comment.manuscript-markdown",
 			"contentName": "comment.block"
 		},
 		"comment": {
@@ -64,7 +64,7 @@
 			"endCaptures": {
 				"0": { "name": "punctuation.definition.tag.end.manuscript-markdown" }
 			},
-			"name": "comment.block.manuscript-markdown",
+			"name": "meta.comment.manuscript-markdown",
 			"contentName": "comment.block"
 		},
 		"comment_range_start": {
