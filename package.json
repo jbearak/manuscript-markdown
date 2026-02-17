@@ -2,7 +2,7 @@
   "name": "manuscript-markdown",
   "displayName": "Manuscript Markdown",
   "description": "Specification, converter, and VS Code extension for roundtrip manuscript editing between Markdown and MS Word",
-  "version": "0.99.0",
+  "version": "0.99.1",
   "engines": {
     "vscode": "^1.103.2"
   },
@@ -559,10 +559,12 @@
         "path": "./snippets.json"
       }
     ],
-    "languages": [{
-      "id": "markdown",
-      "configuration": "./language-configuration.json"
-    }],
+    "languages": [
+      {
+        "id": "markdown",
+        "configuration": "./language-configuration.json"
+      }
+    ],
     "grammars": [
       {
         "path": "./syntaxes/manuscript-markdown.json",
