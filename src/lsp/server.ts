@@ -195,7 +195,7 @@ connection.onCompletion(async (params: CompletionParams): Promise<CompletionItem
 				sortText: id,
 			});
 		}
-		return { isIncomplete: true, items };
+		return { isIncomplete: items.length > 0, items };
 	}
 
 	const completionContext = getCompletionContextAtOffset(text, offset);
@@ -361,21 +361,28 @@ function validateCslField(doc: TextDocument): void {
 		}
 
 		// Build suggestion list from bundled styles matching the user's input
+		const maxSuggestions = 3;
 		const userValue = fieldInfo.value.toLowerCase();
 		const suggestions: string[] = [];
+		let totalMatches = 0;
 		if (userValue) {
 			for (const [id, displayName] of BUNDLED_STYLE_LABELS) {
 				if (id.startsWith(userValue) || displayName.toLowerCase().includes(userValue)) {
-					suggestions.push(id);
+					totalMatches++;
+					if (suggestions.length < maxSuggestions) {
+						suggestions.push(id);
+					}
 				}
 			}
 		}
 		let message = `CSL style "${fieldInfo.value}" not found.`;
-		if (suggestions.length === 1) {
+		const remaining = totalMatches - suggestions.length;
+		if (suggestions.length === 1 && remaining === 0) {
 			message += ` Did you mean \`${suggestions[0]}\`?`;
-		} else if (suggestions.length > 1) {
-			const last = suggestions.pop()!;
-			message += ` Did you mean ${suggestions.map(s => `\`${s}\``).join(', ')}, or \`${last}\`?`;
+		} else if (suggestions.length > 0) {
+			const quoted = suggestions.map(s => `\`${s}\``);
+			const hint = remaining > 0 ? `, and ${remaining} more` : '';
+			message += ` Did you mean ${quoted.join(', ')}${hint}?`;
 		}
 
 		const diagnostic: Diagnostic = {
