@@ -42,13 +42,25 @@
 		},
 		"comment_with_id": {
 			"begin": "\\{#[a-zA-Z0-9_-]+>>",
+			"beginCaptures": {
+				"0": { "name": "comment.block.manuscript-markdown" }
+			},
 			"end": "<<\\}",
+			"endCaptures": {
+				"0": { "name": "comment.block.manuscript-markdown" }
+			},
 			"name": "comment.block.manuscript-markdown",
 			"contentName": "comment.block"
 		},
 		"comment": {
 			"begin": "\\{>>",
+			"beginCaptures": {
+				"0": { "name": "comment.block.manuscript-markdown" }
+			},
 			"end": "<<\\}",
+			"endCaptures": {
+				"0": { "name": "comment.block.manuscript-markdown" }
+			},
 			"name": "comment.block.manuscript-markdown",
 			"contentName": "comment.block"
 		},
