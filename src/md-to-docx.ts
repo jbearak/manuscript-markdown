@@ -28,7 +28,7 @@ export interface MdTableRow {
 }
 
 export interface MdRun {
-  type: 'text' | 'critic_add' | 'critic_del' | 'critic_sub' | 'critic_highlight' | 'critic_comment' | 'citation' | 'math' | 'softbreak';
+  type: 'text' | 'critic_add' | 'critic_del' | 'critic_sub' | 'critic_highlight' | 'critic_comment' | 'citation' | 'math' | 'softbreak' | 'comment_range_start' | 'comment_range_end' | 'comment_body_with_id';
   text: string;
   bold?: boolean;
   italic?: boolean;
@@ -45,6 +45,7 @@ export interface MdRun {
   author?: string;          // for comments/revisions
   date?: string;            // for comments/revisions
   commentText?: string;     // for critic_comment: the comment body
+  commentId?: string;       // for comment_range_start/end/body_with_id
   // Citation specific
   keys?: string[];          // citation keys for [@key1; @key2]
   locators?: Map<string, string>; // key -> locator for [@key, p. 20]
@@ -64,6 +65,93 @@ import { PARA_PLACEHOLDER, preprocessCriticMarkup } from './critic-markup';
 export { PARA_PLACEHOLDER, preprocessCriticMarkup };
 
 // Custom inline rules
+
+/** Parse {#id}, {/id}, and {#id>>...<<} comment range markers */
+function commentRangeRule(state: any, silent: boolean): boolean {
+  const start = state.pos;
+  const max = state.posMax;
+  const src = state.src;
+
+  if (start >= max || src.charAt(start) !== '{') return false;
+
+  const next = src.charAt(start + 1);
+  if (next === '#') {
+    // Could be {#id} range start or {#id>>...<<} comment body
+    const idStart = start + 2;
+    // Find end of ID: [a-zA-Z0-9_-]+
+    let idEnd = idStart;
+    while (idEnd < max && /[a-zA-Z0-9_-]/.test(src.charAt(idEnd))) idEnd++;
+    if (idEnd === idStart) return false; // empty ID
+
+    const id = src.slice(idStart, idEnd);
+
+    // Check for {#id>>...<<} comment body
+    if (idEnd + 1 < max && src.charAt(idEnd) === '>' && src.charAt(idEnd + 1) === '>') {
+      const endMarker = '<<}';
+      const endPos = src.indexOf(endMarker, idEnd + 2);
+      if (endPos === -1) return false;
+
+      if (!silent) {
+        const content = src.slice(idEnd + 2, endPos).replaceAll(PARA_PLACEHOLDER, '\n\n');
+        const token = state.push('comment_body_with_id', '', 0);
+        token.commentId = id;
+
+        // Parse author (date): text format
+        const match = content.match(/^([\s\S]+?)\s+\(([^)]+)\):\s*([\s\S]*)$/);
+        if (match) {
+          token.author = match[1];
+          token.date = match[2];
+          token.commentText = match[3];
+        } else if (content.trim()) {
+          if (content.includes(':') || content.includes(' ') || /[^a-zA-Z0-9_-]/.test(content)) {
+            token.commentText = content;
+          } else {
+            token.author = content;
+            token.commentText = '';
+          }
+        } else {
+          token.commentText = '';
+        }
+      }
+      state.pos = endPos + 3;
+      return true;
+    }
+
+    // Check for {#id} range start
+    if (idEnd < max && src.charAt(idEnd) === '}') {
+      if (!silent) {
+        const token = state.push('comment_range_start', '', 0);
+        token.commentId = id;
+      }
+      state.pos = idEnd + 1;
+      return true;
+    }
+
+    return false;
+  }
+
+  if (next === '/') {
+    // {/id} range end
+    const idStart = start + 2;
+    let idEnd = idStart;
+    while (idEnd < max && /[a-zA-Z0-9_-]/.test(src.charAt(idEnd))) idEnd++;
+    if (idEnd === idStart) return false;
+
+    if (idEnd < max && src.charAt(idEnd) === '}') {
+      if (!silent) {
+        const token = state.push('comment_range_end', '', 0);
+        token.commentId = src.slice(idStart, idEnd);
+      }
+      state.pos = idEnd + 1;
+      return true;
+    }
+
+    return false;
+  }
+
+  return false;
+}
+
 function criticMarkupRule(state: any, silent: boolean): boolean {
   const start = state.pos;
   const max = state.posMax;
@@ -271,6 +359,7 @@ function createMarkdownIt(): MarkdownIt {
   const md = new MarkdownIt({ html: true });
 
   md.inline.ruler.before('emphasis', 'para_placeholder', paraPlaceholderRule);
+  md.inline.ruler.before('emphasis', 'comment_range', commentRangeRule);
   md.inline.ruler.before('emphasis', 'colored_highlight', coloredHighlightRule);
   md.inline.ruler.before('emphasis', 'critic_markup', criticMarkupRule);
   md.inline.ruler.before('emphasis', 'citation', citationRule);
@@ -552,9 +641,36 @@ function processInlineChildren(tokens: any[]): MdRun[] {
           href: currentHref
         });
         break;
+
+      case 'comment_range_start':
+        runs.push({
+          type: 'comment_range_start',
+          text: '',
+          commentId: token.commentId,
+        });
+        break;
+
+      case 'comment_range_end':
+        runs.push({
+          type: 'comment_range_end',
+          text: '',
+          commentId: token.commentId,
+        });
+        break;
+
+      case 'comment_body_with_id':
+        runs.push({
+          type: 'comment_body_with_id',
+          text: '',
+          commentId: token.commentId,
+          author: token.author,
+          date: token.date,
+          commentText: token.commentText,
+        });
+        break;
     }
   }
-  
+
   return runs;
 }
 
@@ -874,6 +990,7 @@ export interface MdToDocxResult {
 export interface DocxGenState {
   commentId: number;
   comments: CommentEntry[];
+  commentIdMap: Map<string, number>; // markdown ID -> OOXML numeric ID
   relationships: Map<string, string>; // URL -> rId
   nextRId: number;
   rIdOffset: number; // reserved rIds for fixed relationships (styles, numbering, comments, theme, settings)
@@ -1277,6 +1394,36 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       }
     } else if (run.type === 'math') {
       xml += generateMathXml(run.text, !!run.display);
+    } else if (run.type === 'comment_range_start') {
+      const mdId = run.commentId || '';
+      let numericId = state.commentIdMap.get(mdId);
+      if (numericId === undefined) {
+        numericId = state.commentId++;
+        state.commentIdMap.set(mdId, numericId);
+      }
+      xml += '<w:commentRangeStart w:id="' + numericId + '"/>';
+      state.hasComments = true;
+    } else if (run.type === 'comment_range_end') {
+      const mdId = run.commentId || '';
+      let numericId = state.commentIdMap.get(mdId);
+      if (numericId === undefined) {
+        numericId = state.commentId++;
+        state.commentIdMap.set(mdId, numericId);
+      }
+      xml += '<w:commentRangeEnd w:id="' + numericId + '"/>';
+      xml += '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="' + numericId + '"/></w:r>';
+    } else if (run.type === 'comment_body_with_id') {
+      const mdId = run.commentId || '';
+      let numericId = state.commentIdMap.get(mdId);
+      if (numericId === undefined) {
+        numericId = state.commentId++;
+        state.commentIdMap.set(mdId, numericId);
+      }
+      const author = run.author || options?.authorName || 'Unknown';
+      const date = normalizeToUtcIso(run.date || '', state.timezone);
+      const commentBody = run.commentText || '';
+      state.comments.push({ id: numericId, author, date, text: commentBody });
+      state.hasComments = true;
     }
   }
   return xml;
@@ -1589,6 +1736,7 @@ export async function convertMdToDocx(
   const state: DocxGenState = {
     commentId: 0,
     comments: [],
+    commentIdMap: new Map(),
     relationships: new Map(),
     nextRId: 1,
     rIdOffset,

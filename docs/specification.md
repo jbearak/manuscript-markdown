@@ -116,7 +116,8 @@ Five annotation operations for tracking changes. See [CriticMarkup Syntax](criti
 
 ## Custom Extensions
 
-Manuscript Markdown adds colored highlights and comment attribution. See [Custom Extensions](custom-extensions.md) for details.
+Manuscript Markdown adds colored highlights, comment attribution, and overlapping comment ranges. See [Custom Extensions](custom-extensions.md) for details.
 
 - Colored highlights: `==text=={color}`
 - Comment attribution: `{>>author (date): text<<}`
+- Overlapping comments: `{#id}text{/id}{#id>>comment<<}`

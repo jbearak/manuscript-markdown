@@ -4,7 +4,10 @@
         { "include": "#addition" },
         { "include": "#deletion" },
         { "include": "#substitution" },
+        { "include": "#comment_with_id" },
         { "include": "#comment" },
+        { "include": "#comment_range_start" },
+        { "include": "#comment_range_end" },
         { "include": "#highlight" },
         { "include": "#colored_format_highlight" },
         { "include": "#format_highlight" },
@@ -37,11 +40,25 @@
 				}
 			]
 		},
+		"comment_with_id": {
+			"begin": "\\{#[a-zA-Z0-9_-]+>>",
+			"end": "<<\\}",
+			"name": "comment.block.manuscript-markdown",
+			"contentName": "comment.block"
+		},
 		"comment": {
 			"begin": "\\{>>",
 			"end": "<<\\}",
 			"name": "comment.block.manuscript-markdown",
 			"contentName": "comment.block"
+		},
+		"comment_range_start": {
+			"match": "\\{#[a-zA-Z0-9_-]+\\}",
+			"name": "punctuation.definition.comment-range.begin.manuscript-markdown"
+		},
+		"comment_range_end": {
+			"match": "\\{/[a-zA-Z0-9_-]+\\}",
+			"name": "punctuation.definition.comment-range.end.manuscript-markdown"
 		},
 		"highlight": {
 			"begin": "\\{==",

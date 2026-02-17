@@ -17,6 +17,7 @@ function makeState(): DocxGenState {
   return {
     commentId: 0,
     comments: [],
+    commentIdMap: new Map(),
     relationships: new Map(),
     nextRId: 1,
     rIdOffset: 5,
@@ -200,6 +201,7 @@ describe('generateParagraph', () => {
   const createState = () => ({
     commentId: 0,
     comments: [],
+    commentIdMap: new Map<string, number>(),
     relationships: new Map(),
     nextRId: 1, rIdOffset: 3,
     warnings: [],
@@ -934,6 +936,7 @@ describe('CriticMarkup OOXML generation', () => {
   const createState = () => ({
     commentId: 0,
     comments: [] as { id: number; author: string; date: string; text: string }[],
+    commentIdMap: new Map<string, number>(),
     relationships: new Map(),
     nextRId: 1, rIdOffset: 3,
     warnings: [],

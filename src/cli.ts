@@ -16,6 +16,7 @@ export interface CliOptions {
   mixedCitationStyle: 'separate' | 'unified';
   cslCacheDir: string;
   tableIndent: string;
+  alwaysUseCommentIds: boolean;
 }
 
 export function parseArgs(argv: string[]): CliOptions {
@@ -29,6 +30,7 @@ export function parseArgs(argv: string[]): CliOptions {
     mixedCitationStyle: 'separate',
     cslCacheDir: path.join(os.homedir(), '.manuscript-markdown', 'csl-cache'),
     tableIndent: '  ',
+    alwaysUseCommentIds: false,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -69,6 +71,8 @@ export function parseArgs(argv: string[]): CliOptions {
       options.mixedCitationStyle = style as any;
     } else if (arg === '--csl-cache-dir') {
       options.cslCacheDir = requireValue('--csl-cache-dir');
+    } else if (arg === '--always-use-comment-ids') {
+      options.alwaysUseCommentIds = true;
     } else if (arg === '--table-indent') {
       const val = requireValue('--table-indent');
       const n = parseInt(val, 10);
@@ -114,7 +118,8 @@ Options:
   --author <name>                 Author name (MD→DOCX, default: OS username)
   --mixed-citation-style <style>  Mixed citation style: separate, unified (default: separate)
   --csl-cache-dir <path>          CSL style cache directory
-  --table-indent <n>              Spaces per indent level in HTML tables (DOCX→MD, default: 2)`);
+  --table-indent <n>              Spaces per indent level in HTML tables (DOCX→MD, default: 2)
+  --always-use-comment-ids        Always use ID-based comment syntax (DOCX→MD)`);
 }
 
 function showVersion() {
@@ -164,7 +169,7 @@ async function runDocxToMd(options: CliOptions) {
   // Check output conflicts up-front so dual conflicts are reported together.
   assertNoDocxToMdConflicts(mdPath, bibPath, options.force);
 
-  const result = await convertDocx(data, options.citationKeyFormat, { tableIndent: options.tableIndent });
+  const result = await convertDocx(data, options.citationKeyFormat, { tableIndent: options.tableIndent, alwaysUseCommentIds: options.alwaysUseCommentIds });
   fs.writeFileSync(mdPath, result.markdown);
   console.log(mdPath);
 

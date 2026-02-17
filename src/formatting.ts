@@ -141,6 +141,29 @@ export function highlightAndComment(text: string, authorName?: string | null): T
 
 
 /**
+ * Wraps text with ID-based comment syntax: {#id}text{/id}{#id>>author: <<}
+ * Used when alwaysUseCommentIds is enabled.
+ * @param text - The text to comment on
+ * @param authorName - Optional author name to include in comment
+ * @returns TextTransformation with ID-based comment syntax, cursor positioned in comment
+ */
+export function highlightAndCommentWithId(text: string, authorName?: string | null): TextTransformation {
+  // Generate a simple numeric ID (the user can rename it)
+  const id = '1';
+  const rangeStart = `{#${id}}`;
+  const rangeEnd = `{/${id}}`;
+  const authorPrefix = authorName ? `${authorName}: ` : '';
+  const commentBody = `{#${id}>>${authorPrefix}<<}`;
+  const withComment = rangeStart + text + rangeEnd + commentBody;
+  const cursorOffset = rangeStart.length + text.length + rangeEnd.length + `{#${id}>>`.length + authorPrefix.length;
+
+  return {
+    newText: withComment,
+    cursorOffset
+  };
+}
+
+/**
  * Wraps text in a code block with triple backticks
  * @param text - The text to wrap
  * @returns TextTransformation with code block formatting

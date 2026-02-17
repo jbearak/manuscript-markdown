@@ -76,3 +76,7 @@ The extension provides combined commands that pair annotations with comments:
 - **Comment and mark as addition**: `{++text++}{>>comment<<}`
 - **Comment and mark as deletion**: `{--text--}{>>comment<<}`
 - **Comment and substitution**: `{~~old~>new~~}{>>comment<<}`
+
+## Overlapping Comments
+
+Standard CriticMarkup comments cannot overlap. Manuscript Markdown extends the syntax with ID-based comment ranges that support overlapping, nesting, and shared boundaries. See [Custom Extensions — Overlapping Comments](custom-extensions.md#overlapping-comments) for the full syntax reference.

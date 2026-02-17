@@ -1148,19 +1148,100 @@ function mergeConsecutiveRuns(content: ContentItem[]): ContentItem[] {
 
 function renderInlineSegment(
   segment: ContentItem[],
-  comments: Map<string, Comment>
+  comments: Map<string, Comment>,
+  renderOpts?: { alwaysUseCommentIds?: boolean }
 ): string {
-  return renderInlineRange(segment, 0, comments).text;
+  return renderInlineRange(segment, 0, comments, undefined, renderOpts).text;
+}
+
+/** Check whether any position in the segment has more than one active comment. */
+function hasOverlappingComments(segment: ContentItem[]): boolean {
+  const allIds = new Set<string>();
+  for (const item of segment) {
+    if (item.type === 'text' || item.type === 'citation') {
+      for (const id of item.commentIds) allIds.add(id);
+    }
+  }
+  if (allIds.size <= 1) return false;
+
+  // Two or more comment IDs exist — check if their ranges actually overlap
+  // by seeing if any single run is covered by 2+ comments
+  for (const item of segment) {
+    if (item.type === 'text' || item.type === 'citation') {
+      if (item.commentIds.size > 1) return true;
+    }
+  }
+
+  // Even if no single run has 2+, overlapping can occur if comment ranges
+  // interleave across runs. Check via boundary analysis.
+  const starts = new Map<string, number>();
+  const ends = new Map<string, number>();
+  let pos = 0;
+  let prevIds = new Set<string>();
+  for (const item of segment) {
+    if (item.type !== 'text' && item.type !== 'citation') { pos++; continue; }
+    const ids = item.commentIds;
+    for (const id of ids) {
+      if (!prevIds.has(id)) starts.set(id, Math.min(starts.get(id) ?? pos, pos));
+    }
+    for (const id of prevIds) {
+      if (!ids.has(id)) ends.set(id, Math.max(ends.get(id) ?? pos, pos));
+    }
+    prevIds = ids;
+    pos++;
+  }
+  for (const id of prevIds) {
+    ends.set(id, Math.max(ends.get(id) ?? pos, pos));
+  }
+
+  // Check if any pair of comment ranges overlaps
+  const ranges = [...allIds].map(id => ({ id, start: starts.get(id) ?? 0, end: ends.get(id) ?? 0 }));
+  for (let a = 0; a < ranges.length; a++) {
+    for (let b = a + 1; b < ranges.length; b++) {
+      if (ranges[a].start < ranges[b].end && ranges[b].start < ranges[a].end) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function formatCommentBody(_cid: string, c: Comment): string {
+  let dateStr = '';
+  if (c.date) {
+    try {
+      dateStr = ` (${formatLocalIsoMinute(c.date)})`;
+    } catch { dateStr = ` (${c.date})`; }
+  }
+  return `{>>${c.author}${dateStr}: ${c.text}<<}`;
+}
+
+function formatCommentBodyWithId(cid: string, c: Comment): string {
+  let dateStr = '';
+  if (c.date) {
+    try {
+      dateStr = ` (${formatLocalIsoMinute(c.date)})`;
+    } catch { dateStr = ` (${c.date})`; }
+  }
+  return `{#${cid}>>${c.author}${dateStr}: ${c.text}<<}`;
 }
 
 function renderInlineRange(
   segment: ContentItem[],
   startIndex: number,
   comments: Map<string, Comment>,
-  opts?: { stopBeforeDisplayMath?: boolean }
+  opts?: { stopBeforeDisplayMath?: boolean },
+  renderOpts?: { alwaysUseCommentIds?: boolean }
 ): { text: string; nextIndex: number } {
   let out = '';
   let i = startIndex;
+
+  // Determine if we should use ID-based syntax for this segment
+  const useIds = renderOpts?.alwaysUseCommentIds || hasOverlappingComments(segment.slice(startIndex));
+
+  if (useIds) {
+    return renderInlineRangeWithIds(segment, startIndex, comments, opts);
+  }
 
   while (i < segment.length) {
     const item = segment[i];
@@ -1215,13 +1296,7 @@ function renderInlineRange(
       for (const cid of [...commentSet].sort()) {
         const c = comments.get(cid);
         if (!c) { continue; }
-        let dateStr = '';
-        if (c.date) {
-          try {
-            dateStr = ` (${formatLocalIsoMinute(c.date)})`;
-          } catch { dateStr = ` (${c.date})`; }
-        }
-        out += `{>>${c.author}${dateStr}: ${c.text}<<}`;
+        out += formatCommentBody(cid, c);
       }
 
       i = j;
@@ -1238,7 +1313,118 @@ function renderInlineRange(
   return { text: out, nextIndex: i };
 }
 
-function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comment>, indent: string = '  '): string {
+/** Render inline content using ID-based comment syntax ({#id}...{/id}{#id>>...<<}). */
+function renderInlineRangeWithIds(
+  segment: ContentItem[],
+  startIndex: number,
+  comments: Map<string, Comment>,
+  opts?: { stopBeforeDisplayMath?: boolean }
+): { text: string; nextIndex: number } {
+  let out = '';
+  let i = startIndex;
+  let prevCommentIds = new Set<string>();
+  // Track which comment IDs have had their bodies emitted
+  const emittedBodies = new Set<string>();
+
+  while (i < segment.length) {
+    const item = segment[i];
+    if (item.type === 'para' || item.type === 'table') {
+      break;
+    }
+    if (opts?.stopBeforeDisplayMath && item.type === 'math' && item.display) {
+      break;
+    }
+
+    if (item.type === 'citation') {
+      const currentIds = item.commentIds;
+      // Emit end markers for exited comments
+      for (const cid of [...prevCommentIds].sort()) {
+        if (!currentIds.has(cid)) {
+          out += `{/${cid}}`;
+          const c = comments.get(cid);
+          if (c && !emittedBodies.has(cid)) {
+            out += formatCommentBodyWithId(cid, c);
+            emittedBodies.add(cid);
+          }
+        }
+      }
+      // Emit start markers for newly entered comments
+      for (const cid of [...currentIds].sort()) {
+        if (!prevCommentIds.has(cid)) {
+          out += `{#${cid}}`;
+        }
+      }
+      prevCommentIds = new Set(currentIds);
+
+      if (item.pandocKeys.length > 0) {
+        out += ' [' + item.pandocKeys.map(k => '@' + k).join('; ') + ']';
+      } else {
+        out += item.text;
+      }
+      i++;
+      continue;
+    }
+
+    if (item.type === 'math') {
+      out += item.display ? '$$' + '\n' + item.latex + '\n' + '$$' : '$' + item.latex + '$';
+      i++;
+      continue;
+    }
+
+    if (item.type !== 'text') {
+      i++;
+      continue;
+    }
+
+    const currentIds = item.commentIds;
+
+    // Emit end markers for comments that just ended (before start markers)
+    for (const cid of [...prevCommentIds].sort()) {
+      if (!currentIds.has(cid)) {
+        out += `{/${cid}}`;
+        const c = comments.get(cid);
+        if (c && !emittedBodies.has(cid)) {
+          out += formatCommentBodyWithId(cid, c);
+          emittedBodies.add(cid);
+        }
+      }
+    }
+
+    // Emit start markers for newly entered comments
+    for (const cid of [...currentIds].sort()) {
+      if (!prevCommentIds.has(cid)) {
+        out += `{#${cid}}`;
+      }
+    }
+
+    prevCommentIds = new Set(currentIds);
+
+    // Render the text content (strip highlight that was only for comment indication)
+    const fmtForText: RunFormatting = currentIds.size > 0
+      ? { ...item.formatting, highlight: false }
+      : item.formatting;
+    let formattedText = wrapWithFormatting(item.text, fmtForText);
+    if (item.href) {
+      formattedText = `[${formattedText}](${formatHrefForMarkdown(item.href)})`;
+    }
+    out += formattedText;
+    i++;
+  }
+
+  // Close any remaining open comments
+  for (const cid of [...prevCommentIds].sort()) {
+    out += `{/${cid}}`;
+    const c = comments.get(cid);
+    if (c && !emittedBodies.has(cid)) {
+      out += formatCommentBodyWithId(cid, c);
+      emittedBodies.add(cid);
+    }
+  }
+
+  return { text: out, nextIndex: i };
+}
+
+function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comment>, indent: string = '  ', renderOpts?: { alwaysUseCommentIds?: boolean }): string {
   const i1 = indent;  // tr level
   const i2 = indent + indent;  // td/th level
   const i3 = indent + indent + indent;  // content level
@@ -1253,7 +1439,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
       if (cell.rowspan && cell.rowspan > 1) attrs += ' rowspan="' + cell.rowspan + '"';
       lines.push(i2 + '<' + tag + attrs + '>');
       for (const para of cell.paragraphs) {
-        lines.push(i3 + '<p>' + renderInlineSegment(mergeConsecutiveRuns(para), comments) + '</p>');
+        lines.push(i3 + '<p>' + renderInlineSegment(mergeConsecutiveRuns(para), comments, renderOpts) + '</p>');
       }
       lines.push(i2 + '</' + tag + '>');
     }
@@ -1266,7 +1452,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
 export function buildMarkdown(
   content: ContentItem[],
   comments: Map<string, Comment>,
-  options?: { tableIndent?: string },
+  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean },
 ): string {
   const mergedContent = mergeConsecutiveRuns(content);
   const output: string[] = [];
@@ -1319,13 +1505,13 @@ export function buildMarkdown(
       if (output.length > 0 && !output[output.length - 1].endsWith('\n\n')) {
         output.push('\n\n');
       }
-      output.push(renderHtmlTable(item, comments, options?.tableIndent));
+      output.push(renderHtmlTable(item, comments, options?.tableIndent, { alwaysUseCommentIds: options?.alwaysUseCommentIds }));
       lastListType = undefined;
       i++;
       continue;
     }
 
-    const rendered = renderInlineRange(mergedContent, i, comments, { stopBeforeDisplayMath: true });
+    const rendered = renderInlineRange(mergedContent, i, comments, { stopBeforeDisplayMath: true }, { alwaysUseCommentIds: options?.alwaysUseCommentIds });
     if (rendered.nextIndex <= i) {
       throw new Error('Invariant violated: renderInlineRange did not advance index');
     }
@@ -1458,7 +1644,7 @@ export async function extractAuthor(zip: JSZip): Promise<string | undefined> {
 export async function convertDocx(
   data: Uint8Array,
   format: CitationKeyFormat = 'authorYearTitle',
-  options?: { tableIndent?: string },
+  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean },
 ): Promise<ConvertResult> {
   const zip = await loadZip(data);
   const [comments, zoteroCitations, zoteroPrefs, author] = await Promise.all([
@@ -1474,7 +1660,7 @@ export async function convertDocx(
   // Extract consecutive Title-styled paragraphs from the beginning of the document
   const titleLines = extractTitleLines(docContent);
 
-  let markdown = buildMarkdown(docContent, comments, { tableIndent: options?.tableIndent });
+  let markdown = buildMarkdown(docContent, comments, { tableIndent: options?.tableIndent, alwaysUseCommentIds: options?.alwaysUseCommentIds });
 
   // Strip Sources section if present (fallback for docs without ZOTERO_BIBL field codes)
   if (!zoteroBiblData) {

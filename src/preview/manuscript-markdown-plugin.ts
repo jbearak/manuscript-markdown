@@ -365,6 +365,55 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
     }
   }
 
+  // Check for {#id>>...<<} comment body with ID, {#id} range start, or {/id} range end
+  if (src.charCodeAt(start + 1) === 0x23 /* # */) {
+    // Find end of ID: [a-zA-Z0-9_-]+
+    let idEnd = start + 2;
+    while (idEnd < max && /[a-zA-Z0-9_-]/.test(src.charAt(idEnd))) idEnd++;
+    if (idEnd > start + 2) {
+      // Check for {#id>>...<<} comment body with ID
+      if (idEnd + 1 < max && src.charCodeAt(idEnd) === 0x3E /* > */ && src.charCodeAt(idEnd + 1) === 0x3E /* > */) {
+        const endMarker = '<<}';
+        const endPos = src.indexOf(endMarker, idEnd + 2);
+        if (endPos !== -1) {
+          if (!silent) {
+            const content = src.slice(idEnd + 2, endPos);
+            const tokenOpen = state.push('manuscript_markdown_comment_open', 'span', 1);
+            tokenOpen.attrSet('class', 'manuscript-markdown-comment');
+            addInlineContent(state, content);
+            state.push('manuscript_markdown_comment_close', 'span', -1);
+          }
+          state.pos = endPos + endMarker.length;
+          return true;
+        }
+      }
+      // Check for {#id} range start marker
+      if (idEnd < max && src.charCodeAt(idEnd) === 0x7D /* } */) {
+        if (!silent) {
+          // Render as an invisible marker (empty span)
+          const token = state.push('manuscript_markdown_range_marker', 'span', 0);
+          token.attrSet('class', 'manuscript-markdown-range-marker');
+        }
+        state.pos = idEnd + 1;
+        return true;
+      }
+    }
+  }
+
+  // Check for {/id} range end marker
+  if (src.charCodeAt(start + 1) === 0x2F /* / */) {
+    let idEnd = start + 2;
+    while (idEnd < max && /[a-zA-Z0-9_-]/.test(src.charAt(idEnd))) idEnd++;
+    if (idEnd > start + 2 && idEnd < max && src.charCodeAt(idEnd) === 0x7D /* } */) {
+      if (!silent) {
+        const token = state.push('manuscript_markdown_range_marker', 'span', 0);
+        token.attrSet('class', 'manuscript-markdown-range-marker');
+      }
+      state.pos = idEnd + 1;
+      return true;
+    }
+  }
+
   // Check for comment {>>text<<}
   if (src.charCodeAt(start + 1) === 0x3E /* > */ && src.charCodeAt(start + 2) === 0x3E /* > */) {
     const endMarker = '<<}';
@@ -374,10 +423,10 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
         const content = src.slice(start + 3, endPos);
         const tokenOpen = state.push('manuscript_markdown_comment_open', 'span', 1);
         tokenOpen.attrSet('class', 'manuscript-markdown-comment');
-        
+
         // Add parsed inline content to allow nested Markdown processing
         addInlineContent(state, content);
-        
+
         state.push('manuscript_markdown_comment_close', 'span', -1);
       }
       state.pos = endPos + endMarker.length;
@@ -491,5 +540,10 @@ export function manuscriptMarkdownPlugin(md: MarkdownIt): void {
   
   md.renderer.rules['manuscript_markdown_format_highlight_close'] = () => {
     return '</mark>';
+  };
+
+  // Renderer for range markers ({#id} and {/id}) — render as empty string
+  md.renderer.rules['manuscript_markdown_range_marker'] = () => {
+    return '';
   };
 }

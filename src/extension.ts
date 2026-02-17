@@ -79,7 +79,12 @@ export function activate(context: vscode.ExtensionContext) {
 		),
 		vscode.commands.registerCommand('manuscript-markdown.comment', () => {
 			const authorName = author.getFormattedAuthorName();
-			applyFormatting((text) => formatting.highlightAndComment(text, authorName));
+			const useIds = vscode.workspace.getConfiguration('manuscriptMarkdown').get<boolean>('alwaysUseCommentIds', false);
+			if (useIds) {
+				applyFormatting((text) => formatting.highlightAndCommentWithId(text, authorName));
+			} else {
+				applyFormatting((text) => formatting.highlightAndComment(text, authorName));
+			}
 		}),
 		vscode.commands.registerCommand('manuscript-markdown.substituteAndComment', () => {
 			const authorName = author.getFormattedAuthorName();

@@ -12,7 +12,7 @@ export function preprocessCriticMarkup(markdown: string): string {
   // Fast path: if no CriticMarkup opening markers, return unchanged
   if (!markdown.includes('{++') && !markdown.includes('{--') &&
       !markdown.includes('{~~') && !markdown.includes('{>>') &&
-      !markdown.includes('{==')) {
+      !markdown.includes('{==') && !markdown.includes('{#')) {
     return markdown;
   }
 
@@ -47,5 +47,22 @@ export function preprocessCriticMarkup(markdown: string): string {
       }
     }
   }
+
+  // Handle {#id>>...<<} comment bodies with IDs (variable-length open marker)
+  const idCommentRe = /\{#[a-zA-Z0-9_-]+>>/g;
+  let match;
+  while ((match = idCommentRe.exec(result)) !== null) {
+    const contentStart = match.index + match[0].length;
+    const closeIdx = result.indexOf('<<}', contentStart);
+    if (closeIdx === -1) continue;
+    const content = result.slice(contentStart, closeIdx);
+    if (content.includes('\n\n')) {
+      const replaced = content.replace(/\n\n/g, PARA_PLACEHOLDER);
+      result = result.slice(0, contentStart) + replaced + result.slice(closeIdx);
+      // Reset regex lastIndex to account for string length change
+      idCommentRe.lastIndex = contentStart + replaced.length + 3;
+    }
+  }
+
   return result;
 }
