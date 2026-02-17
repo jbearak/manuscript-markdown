@@ -167,6 +167,10 @@
         "title": "Export to Word (with template)"
       },
       {
+        "command": "manuscript-markdown.setCitationStyle",
+        "title": "Set Citation Style"
+      },
+      {
         "command": "manuscript-markdown.formatHighlight_yellow",
         "title": "Yellow"
       },
@@ -521,6 +525,11 @@
           "command": "manuscript-markdown.exportToWordWithTemplate",
           "when": "editorLangId == markdown",
           "group": "1_export@2"
+        },
+        {
+          "command": "manuscript-markdown.setCitationStyle",
+          "when": "editorLangId == markdown",
+          "group": "2_style@1"
         }
       ],
       "explorer/context": [

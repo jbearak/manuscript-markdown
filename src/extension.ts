@@ -14,6 +14,7 @@ import { convertDocx, CitationKeyFormat } from './converter';
 import { convertMdToDocx } from './md-to-docx';
 import * as path from 'path';
 import { parseFrontmatter, hasCitations, normalizeBibPath } from './frontmatter';
+import { BUNDLED_STYLE_LABELS } from './csl-loader';
 import {
 	getOutputBasePath,
 	getOutputConflictMessage,
@@ -34,8 +35,10 @@ import {
 } from './highlight-colors';
 let languageClient: LanguageClient | undefined;
 let languageClientDisposables: vscode.Disposable[] = [];
+let cslCacheDir: string = '';
 
 export function activate(context: vscode.ExtensionContext) {
+	cslCacheDir = path.join(context.globalStorageUri.fsPath, 'csl-styles');
 	syncLanguageClient(context);
 	context.subscriptions.push(
 		vscode.workspace.onDidChangeConfiguration((e) => {
@@ -61,6 +64,56 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
 		vscode.commands.registerCommand('manuscript-markdown.nextChange', () => changes.next()),
 		vscode.commands.registerCommand('manuscript-markdown.prevChange', () => changes.prev())
+	);
+
+	// Register Set Citation Style command
+	context.subscriptions.push(
+		vscode.commands.registerCommand('manuscript-markdown.setCitationStyle', async () => {
+			const items = [...BUNDLED_STYLE_LABELS].map(([id, displayName]) => ({
+				label: displayName,
+				description: id,
+			}));
+			const picked = await vscode.window.showQuickPick(items, {
+				placeHolder: 'Select a citation style',
+				matchOnDescription: true,
+			});
+			if (!picked) return;
+
+			const editor = vscode.window.activeTextEditor;
+			if (!editor || editor.document.languageId !== 'markdown') {
+				vscode.window.showErrorMessage('No active Markdown file');
+				return;
+			}
+
+			const text = editor.document.getText();
+			const styleId = picked.description!;
+
+			await editor.edit(editBuilder => {
+				const fmMatch = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+				if (fmMatch) {
+					const fmBody = fmMatch[1];
+					const cslLineMatch = fmBody.match(/^csl:.*$/m);
+					if (cslLineMatch) {
+						// Replace existing csl: line
+						const lineStart = fmMatch.index! + fmMatch[0].indexOf(fmBody) + cslLineMatch.index!;
+						const lineEnd = lineStart + cslLineMatch[0].length;
+						const range = new vscode.Range(
+							editor.document.positionAt(lineStart),
+							editor.document.positionAt(lineEnd)
+						);
+						editBuilder.replace(range, `csl: ${styleId}`);
+					} else {
+						// Insert csl: line at end of frontmatter
+						const insertOffset = fmMatch.index! + fmMatch[0].indexOf(fmBody) + fmBody.length;
+						const insertPos = editor.document.positionAt(insertOffset);
+						editBuilder.insert(insertPos, `\ncsl: ${styleId}`);
+					}
+				} else {
+					// No frontmatter — prepend it
+					editBuilder.insert(new vscode.Position(0, 0), `---\ncsl: ${styleId}\n---\n`);
+				}
+			});
+		})
 	);
 
 	// Register CriticMarkup annotation commands
@@ -515,6 +568,7 @@ function getLspSettings(): Record<string, unknown> {
 	const config = vscode.workspace.getConfiguration('manuscriptMarkdown');
 	return {
 		citekeyReferencesFromMarkdown: config.get<boolean>('citekeyReferencesFromMarkdown', false),
+		cslCacheDirs: [cslCacheDir],
 	};
 }
 

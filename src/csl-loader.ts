@@ -64,6 +64,69 @@ export const BUNDLED_STYLES = [
 ];
 
 /**
+ * Human-readable display names for each bundled CSL style.
+ */
+export const BUNDLED_STYLE_LABELS: ReadonlyMap<string, string> = new Map([
+  ['apa', 'APA (7th edition)'],
+  ['bmj', 'BMJ'],
+  ['chicago-author-date', 'Chicago (Author-Date)'],
+  ['chicago-fullnote-bibliography', 'Chicago (Full Note)'],
+  ['chicago-note-bibliography', 'Chicago (Note-Bibliography)'],
+  ['modern-language-association', 'MLA (9th edition)'],
+  ['ieee', 'IEEE'],
+  ['nature', 'Nature'],
+  ['cell', 'Cell'],
+  ['science', 'Science'],
+  ['american-medical-association', 'AMA (American Medical Association)'],
+  ['american-chemical-society', 'ACS (American Chemical Society)'],
+  ['american-political-science-association', 'APSA (American Political Science Association)'],
+  ['american-sociological-association', 'ASA (American Sociological Association)'],
+  ['vancouver', 'Vancouver'],
+  ['harvard-cite-them-right', 'Harvard (Cite Them Right)'],
+]);
+
+/**
+ * Lightweight existence check for a CSL style (no XML parsing).
+ * Checks bundled styles list, bundled directory, optional cache directories,
+ * and file paths.
+ */
+export function isCslAvailable(
+  name: string,
+  options?: { cacheDirs?: string[]; sourceDir?: string }
+): boolean {
+  if (!name) return false;
+
+  // Fast in-memory check against known bundled style names
+  if (BUNDLED_STYLES.includes(name)) {
+    return true;
+  }
+
+  // Check bundled directory (for downloaded/cached styles not in the list)
+  if (existsSync(join(BUNDLED_STYLES_DIR, name + '.csl'))) {
+    return true;
+  }
+
+  // Check cache directories
+  if (options?.cacheDirs) {
+    for (const dir of options.cacheDirs) {
+      if (existsSync(join(dir, name + '.csl'))) {
+        return true;
+      }
+    }
+  }
+
+  // Check as file path (absolute or relative to sourceDir)
+  if (isAbsolute(name) || name.endsWith('.csl')) {
+    if (existsSync(name)) return true;
+    if (options?.sourceDir && !isAbsolute(name)) {
+      if (existsSync(join(options.sourceDir, name))) return true;
+    }
+  }
+
+  return false;
+}
+
+/**
  * Load a CSL style XML string by short name or file path (synchronous).
  * - If `name` matches a bundled or previously-downloaded style, loads from disk.
  * - Otherwise, treats `name` as a file path and reads from disk.

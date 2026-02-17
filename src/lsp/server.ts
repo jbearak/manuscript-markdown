@@ -3,9 +3,12 @@ import * as path from 'path';
 import {
 	CompletionItem,
 	CompletionItemKind,
+	CompletionList,
 	CompletionParams,
 	createConnection,
 	DefinitionParams,
+	Diagnostic,
+	DiagnosticSeverity,
 	DidChangeWatchedFilesParams,
 	Hover,
 	HoverParams,
@@ -39,6 +42,8 @@ import {
 	findRangeTextForId,
 	stripCriticMarkup,
 } from './comment-language';
+import { getCslCompletionContext, getCslFieldInfo } from './csl-language';
+import { BUNDLED_STYLE_LABELS, isCslAvailable } from '../csl-loader';
 
 const connection = createConnection(ProposedFeatures.all);
 const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
@@ -68,6 +73,7 @@ const openDocBibCache = new Map<string, OpenDocBibCache>();
 /** Client-provided settings (see `getLspSettings()` in extension.ts). */
 interface LspSettings {
 	citekeyReferencesFromMarkdown?: boolean;
+	cslCacheDirs?: string[];
 }
 let settings: LspSettings = {};
 
@@ -81,7 +87,7 @@ connection.onInitialize((params: InitializeParams) => {
 		capabilities: {
 			textDocumentSync: TextDocumentSyncKind.Incremental,
 			completionProvider: {
-				triggerCharacters: ['@'],
+				triggerCharacters: ['@', ':'],
 			},
 			definitionProvider: true,
 			hoverProvider: true,
@@ -96,15 +102,27 @@ connection.onDidChangeConfiguration((params) => {
 	}
 });
 
+documents.onDidOpen((event) => {
+	if (isMarkdownUri(event.document.uri, event.document.languageId)) {
+		validateCslField(event.document);
+	}
+});
+
 documents.onDidChangeContent((event) => {
 	if (isBibUri(event.document.uri)) {
 		invalidateBibCache(event.document.uri);
+	}
+	if (isMarkdownUri(event.document.uri, event.document.languageId)) {
+		validateCslField(event.document);
 	}
 });
 
 documents.onDidClose((event) => {
 	if (isBibUri(event.document.uri)) {
 		invalidateBibCache(event.document.uri);
+	}
+	if (isMarkdownUri(event.document.uri, event.document.languageId)) {
+		connection.sendDiagnostics({ uri: event.document.uri, diagnostics: [] });
 	}
 });
 
@@ -116,7 +134,7 @@ connection.onDidChangeWatchedFiles((params: DidChangeWatchedFilesParams) => {
 	}
 });
 
-connection.onCompletion(async (params: CompletionParams): Promise<CompletionItem[]> => {
+connection.onCompletion(async (params: CompletionParams): Promise<CompletionItem[] | CompletionList> => {
 	const doc = await getTextDocument(params.textDocument.uri, 'markdown');
 	if (!doc || !isMarkdownUri(doc.uri, doc.languageId)) {
 		return [];
@@ -124,6 +142,36 @@ connection.onCompletion(async (params: CompletionParams): Promise<CompletionItem
 
 	const text = doc.getText();
 	const offset = doc.offsetAt(params.position);
+
+	// Check for CSL completion context first
+	const cslContext = getCslCompletionContext(text, offset);
+	if (cslContext) {
+		const prefix = cslContext.prefix.toLowerCase();
+		const replaceRange = Range.create(
+			doc.positionAt(cslContext.valueStart),
+			params.position
+		);
+		const items: CompletionItem[] = [];
+		for (const [id, displayName] of BUNDLED_STYLE_LABELS) {
+			if (prefix && !id.toLowerCase().startsWith(prefix) &&
+				!displayName.toLowerCase().includes(prefix)) {
+				continue;
+			}
+			items.push({
+				label: id,
+				kind: CompletionItemKind.Value,
+				detail: displayName,
+				textEdit: {
+					range: replaceRange,
+					newText: id,
+				},
+				filterText: id,
+				sortText: id,
+			});
+		}
+		return { isIncomplete: true, items };
+	}
+
 	const completionContext = getCompletionContextAtOffset(text, offset);
 	if (!completionContext) {
 		return [];
@@ -258,6 +306,63 @@ connection.onHover(async (params: HoverParams): Promise<Hover | null> => {
 
 documents.listen(connection);
 connection.listen();
+
+function validateCslField(doc: TextDocument): void {
+	try {
+		const text = doc.getText();
+		const fieldInfo = getCslFieldInfo(text);
+		if (!fieldInfo || !fieldInfo.value) {
+			connection.sendDiagnostics({ uri: doc.uri, diagnostics: [] });
+			return;
+		}
+
+		const sourceDir = (() => {
+			const fsPath = uriToFsPath(doc.uri);
+			return fsPath ? path.dirname(fsPath) : undefined;
+		})();
+
+		const available = isCslAvailable(fieldInfo.value, {
+			cacheDirs: settings.cslCacheDirs,
+			sourceDir,
+		});
+
+		if (available) {
+			connection.sendDiagnostics({ uri: doc.uri, diagnostics: [] });
+			return;
+		}
+
+		// Build suggestion list from bundled styles matching the user's input
+		const userValue = fieldInfo.value.toLowerCase();
+		const suggestions: string[] = [];
+		if (userValue) {
+			for (const [id, displayName] of BUNDLED_STYLE_LABELS) {
+				if (id.startsWith(userValue) || displayName.toLowerCase().includes(userValue)) {
+					suggestions.push(id);
+				}
+			}
+		}
+		let message = `CSL style "${fieldInfo.value}" not found.`;
+		if (suggestions.length === 1) {
+			message += ` Did you mean \`${suggestions[0]}\`?`;
+		} else if (suggestions.length > 1) {
+			const last = suggestions.pop()!;
+			message += ` Did you mean ${suggestions.map(s => `\`${s}\``).join(', ')}, or \`${last}\`?`;
+		}
+
+		const diagnostic: Diagnostic = {
+			severity: DiagnosticSeverity.Warning,
+			range: Range.create(
+				doc.positionAt(fieldInfo.valueStart),
+				doc.positionAt(fieldInfo.valueEnd)
+			),
+			message,
+			source: 'manuscript-markdown',
+		};
+		connection.sendDiagnostics({ uri: doc.uri, diagnostics: [diagnostic] });
+	} catch {
+		// Don't let validation errors crash the LSP connection
+	}
+}
 
 function extractWorkspaceRoots(params: InitializeParams): string[] {
 	const paths = new Set<string>();
