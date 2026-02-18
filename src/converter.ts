@@ -733,7 +733,7 @@ async function extractNotes(
   let fileContext: NoteBodyContext | undefined;
   if (context) {
     const noteCitations = extractZoteroCitationsFromParsed(parsed);
-    const noteKeyMap = buildCitationKeyMap(noteCitations, context.format);
+    const noteKeyMap = buildCitationKeyMap(noteCitations, context.format, new Set(context.keyMap.values()));
     // Merge document-level keyMap with note-specific keys
     const mergedKeyMap = new Map([...noteKeyMap, ...context.keyMap]);
     fileContext = {
@@ -1124,10 +1124,11 @@ export function generateCitationKey(
  */
 export function buildCitationKeyMap(
   allCitations: ZoteroCitation[],
-  format: CitationKeyFormat = 'authorYearTitle'
+  format: CitationKeyFormat = 'authorYearTitle',
+  existingKeys?: Set<string>
 ): Map<string, string> {
   const keyMap = new Map<string, string>(); // itemId -> citationKey
-  const seen = new Set<string>();
+  const seen = new Set<string>(existingKeys);
   let numericCounter = 1;
 
   for (const citation of allCitations) {
@@ -2292,15 +2293,20 @@ export function buildMarkdown(
       if (bodyParts.length === 0) {
         bodyParts.push('');
       }
-      // First line: [^label]: text (trim leading whitespace from note body)
-      output.push(`[^${entry.label}]: ${bodyParts[0].replace(/^\s+/, '')}`);
-      // Continuation paragraphs: indented 4 spaces
+      const indent4 = (s: string) => s.split('\n').map(l => '    ' + l).join('\n');
+      const first = bodyParts[0].replace(/^\s+/, '');
+      if (first.includes('\n')) {
+        // Block form: label on its own line, blank line, then indented body
+        output.push(`[^${entry.label}]:\n\n` + indent4(first));
+      } else {
+        output.push(`[^${entry.label}]: ${first}`);
+      }
       for (let pi = 1; pi < bodyParts.length; pi++) {
-        output.push('\n\n    ' + bodyParts[pi]);
+        output.push('\n\n' + indent4(bodyParts[pi]));
       }
       if (deferredAll.length > 0) {
         output.push('\n');
-        output.push(deferredAll.join('\n'));
+        output.push(deferredAll.map(l => indent4(l)).join('\n'));
       }
     }
   }

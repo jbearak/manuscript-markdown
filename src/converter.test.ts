@@ -1345,18 +1345,6 @@ describe('parseHeadingLevel', () => {
 // Property tests for converter integration (Task 4.3)
 // ---------------------------------------------------------------------------
 
-/**
- * Helper: build a minimal DOCX Uint8Array from raw document.xml content.
- * Reuses the same pattern as existing tests in this file.
- */
-async function buildSyntheticDocx(documentXml: string): Promise<Uint8Array> {
-  const JSZip = (await import('jszip')).default;
-  const zip = new JSZip();
-  zip.file('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>');
-  zip.file('_rels/.rels', '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>');
-  zip.file('word/document.xml', documentXml);
-  return zip.generateAsync({ type: 'uint8array' });
-}
 
 /** Wrap body XML in the standard w:document envelope with both w: and m: namespaces */
 function wrapDocumentXml(bodyContent: string): string {
@@ -1890,7 +1878,7 @@ describe('w:br line break handling', () => {
 });
 
 // Helpers for footnote tests
-async function buildSyntheticDocxWithParts(documentXml: string, extraParts?: Record<string, string>): Promise<Uint8Array> {
+async function buildSyntheticDocx(documentXml: string, extraParts?: Record<string, string>): Promise<Uint8Array> {
   const JSZip = (await import('jszip')).default;
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>');
@@ -1904,26 +1892,17 @@ async function buildSyntheticDocxWithParts(documentXml: string, extraParts?: Rec
   return zip.generateAsync({ type: 'uint8array' });
 }
 
-function wrapFootnotesXml(content: string): string {
+function wrapNotesXml(noteType: 'footnotes' | 'endnotes', content: string): string {
+  const root = 'w:' + noteType;
+  const el = noteType === 'footnotes' ? 'w:footnote' : 'w:endnote';
   return '<?xml version="1.0"?>'
-    + '<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    + '<' + root + ' xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
     + ' xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"'
     + ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-    + '<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>'
-    + '<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>'
+    + '<' + el + ' w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></' + el + '>'
+    + '<' + el + ' w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></' + el + '>'
     + content
-    + '</w:footnotes>';
-}
-
-function wrapEndnotesXml(content: string): string {
-  return '<?xml version="1.0"?>'
-    + '<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
-    + ' xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"'
-    + ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-    + '<w:endnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:endnote>'
-    + '<w:endnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:endnote>'
-    + content
-    + '</w:endnotes>';
+    + '</' + root + '>';
 }
 
 describe('DOCX footnote extraction', () => {
@@ -1932,13 +1911,13 @@ describe('DOCX footnote extraction', () => {
       '<w:p><w:r><w:t>Hello world</w:t></w:r>'
       + '<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:p>'
     );
-    const footnotesXml = wrapFootnotesXml(
+    const footnotesXml = wrapNotesXml('footnotes', 
       '<w:footnote w:id="1">'
       + '<w:p><w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteRef/></w:r>'
       + '<w:r><w:t> This is a footnote.</w:t></w:r></w:p>'
       + '</w:footnote>'
     );
-    const buf = await buildSyntheticDocxWithParts(docXml, { 'word/footnotes.xml': footnotesXml });
+    const buf = await buildSyntheticDocx(docXml, { 'word/footnotes.xml': footnotesXml });
     const result = await convertDocx(buf);
 
     expect(result.markdown).toContain('Hello world[^1]');
@@ -1952,11 +1931,11 @@ describe('DOCX footnote extraction', () => {
       + '<w:r><w:t> second</w:t></w:r>'
       + '<w:r><w:footnoteReference w:id="2"/></w:r></w:p>'
     );
-    const footnotesXml = wrapFootnotesXml(
+    const footnotesXml = wrapNotesXml('footnotes', 
       '<w:footnote w:id="1"><w:p><w:r><w:footnoteRef/></w:r><w:r><w:t> Note one.</w:t></w:r></w:p></w:footnote>'
       + '<w:footnote w:id="2"><w:p><w:r><w:footnoteRef/></w:r><w:r><w:t> Note two.</w:t></w:r></w:p></w:footnote>'
     );
-    const buf = await buildSyntheticDocxWithParts(docXml, { 'word/footnotes.xml': footnotesXml });
+    const buf = await buildSyntheticDocx(docXml, { 'word/footnotes.xml': footnotesXml });
     const result = await convertDocx(buf);
 
     expect(result.markdown).toContain('First[^1] second[^2]');
@@ -1969,10 +1948,10 @@ describe('DOCX footnote extraction', () => {
       '<w:p><w:r><w:t>Text</w:t></w:r>'
       + '<w:r><w:endnoteReference w:id="1"/></w:r></w:p>'
     );
-    const endnotesXml = wrapEndnotesXml(
+    const endnotesXml = wrapNotesXml('endnotes', 
       '<w:endnote w:id="1"><w:p><w:r><w:endnoteRef/></w:r><w:r><w:t> An endnote.</w:t></w:r></w:p></w:endnote>'
     );
-    const buf = await buildSyntheticDocxWithParts(docXml, { 'word/endnotes.xml': endnotesXml });
+    const buf = await buildSyntheticDocx(docXml, { 'word/endnotes.xml': endnotesXml });
     const result = await convertDocx(buf);
 
     expect(result.markdown).toContain('notes: endnotes');
@@ -1985,7 +1964,7 @@ describe('DOCX footnote extraction', () => {
       '<w:p><w:r><w:t>Text</w:t></w:r>'
       + '<w:r><w:footnoteReference w:id="1"/></w:r></w:p>'
     );
-    const footnotesXml = wrapFootnotesXml(
+    const footnotesXml = wrapNotesXml('footnotes', 
       '<w:footnote w:id="1"><w:p><w:r><w:footnoteRef/></w:r>'
       + '<w:r><w:t> Some </w:t></w:r>'
       + '<w:r><w:rPr><w:b/></w:rPr><w:t>bold</w:t></w:r>'
@@ -1994,7 +1973,7 @@ describe('DOCX footnote extraction', () => {
       + '<w:r><w:t> text.</w:t></w:r>'
       + '</w:p></w:footnote>'
     );
-    const buf = await buildSyntheticDocxWithParts(docXml, { 'word/footnotes.xml': footnotesXml });
+    const buf = await buildSyntheticDocx(docXml, { 'word/footnotes.xml': footnotesXml });
     const result = await convertDocx(buf);
 
     expect(result.markdown).toContain('[^1]: Some **bold** and *italic* text.');
@@ -2005,13 +1984,13 @@ describe('DOCX footnote extraction', () => {
       '<w:p><w:r><w:t>Text</w:t></w:r>'
       + '<w:r><w:footnoteReference w:id="1"/></w:r></w:p>'
     );
-    const footnotesXml = wrapFootnotesXml(
+    const footnotesXml = wrapNotesXml('footnotes', 
       '<w:footnote w:id="1">'
       + '<w:p><w:r><w:footnoteRef/></w:r><w:r><w:t> First paragraph.</w:t></w:r></w:p>'
       + '<w:p><w:r><w:t>Second paragraph.</w:t></w:r></w:p>'
       + '</w:footnote>'
     );
-    const buf = await buildSyntheticDocxWithParts(docXml, { 'word/footnotes.xml': footnotesXml });
+    const buf = await buildSyntheticDocx(docXml, { 'word/footnotes.xml': footnotesXml });
     const result = await convertDocx(buf);
 
     expect(result.markdown).toContain('[^1]: First paragraph.');
@@ -2023,10 +2002,10 @@ describe('DOCX footnote extraction', () => {
       '<w:p><w:r><w:t>Text</w:t></w:r>'
       + '<w:r><w:footnoteReference w:id="1"/></w:r></w:p>'
     );
-    const footnotesXml = wrapFootnotesXml(
+    const footnotesXml = wrapNotesXml('footnotes', 
       '<w:footnote w:id="1"><w:p><w:r><w:footnoteRef/></w:r><w:r><w:t> Real note.</w:t></w:r></w:p></w:footnote>'
     );
-    const buf = await buildSyntheticDocxWithParts(docXml, { 'word/footnotes.xml': footnotesXml });
+    const buf = await buildSyntheticDocx(docXml, { 'word/footnotes.xml': footnotesXml });
     const result = await convertDocx(buf);
 
     // Should only have the real note, no separator content
@@ -2051,7 +2030,7 @@ describe('DOCX footnote extraction', () => {
       '<w:p><w:r><w:t>Text</w:t></w:r>'
       + '<w:r><w:footnoteReference w:id="1"/></w:r></w:p>'
     );
-    const footnotesXml = wrapFootnotesXml(
+    const footnotesXml = wrapNotesXml('footnotes', 
       '<w:footnote w:id="1"><w:p><w:r><w:footnoteRef/></w:r><w:r><w:t> A note.</w:t></w:r></w:p></w:footnote>'
     );
     const customXml = '<?xml version="1.0"?>'
@@ -2060,7 +2039,7 @@ describe('DOCX footnote extraction', () => {
       + '<vt:lpwstr>{"1":"my-note"}</vt:lpwstr>'
       + '</property>'
       + '</Properties>';
-    const buf = await buildSyntheticDocxWithParts(docXml, {
+    const buf = await buildSyntheticDocx(docXml, {
       'word/footnotes.xml': footnotesXml,
       'docProps/custom.xml': customXml,
     });
@@ -2075,7 +2054,7 @@ describe('DOCX footnote extraction', () => {
       '<w:p><w:r><w:t>Text</w:t></w:r>'
       + '<w:r><w:footnoteReference w:id="1"/></w:r></w:p>'
     );
-    const footnotesXml = wrapFootnotesXml(
+    const footnotesXml = wrapNotesXml('footnotes', 
       '<w:footnote w:id="1"><w:p><w:r><w:footnoteRef/></w:r>'
       + '<w:r><w:t> See </w:t></w:r>'
       + '<w:hyperlink r:id="rId1"><w:r><w:t>example</w:t></w:r></w:hyperlink>'
@@ -2086,7 +2065,7 @@ describe('DOCX footnote extraction', () => {
       + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
       + '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com" TargetMode="External"/>'
       + '</Relationships>';
-    const buf = await buildSyntheticDocxWithParts(docXml, {
+    const buf = await buildSyntheticDocx(docXml, {
       'word/footnotes.xml': footnotesXml,
       'word/_rels/footnotes.xml.rels': relsXml,
     });
@@ -2100,14 +2079,14 @@ describe('DOCX footnote extraction', () => {
       '<w:p><w:r><w:t>Text</w:t></w:r>'
       + '<w:r><w:footnoteReference w:id="1"/></w:r></w:p>'
     );
-    const footnotesXml = wrapFootnotesXml(
+    const footnotesXml = wrapNotesXml('footnotes', 
       '<w:footnote w:id="1"><w:p><w:r><w:footnoteRef/></w:r>'
       + '<w:r><w:t> Where </w:t></w:r>'
       + '<m:oMath><m:r><m:t>x</m:t></m:r></m:oMath>'
       + '<w:r><w:t> is defined.</w:t></w:r>'
       + '</w:p></w:footnote>'
     );
-    const buf = await buildSyntheticDocxWithParts(docXml, { 'word/footnotes.xml': footnotesXml });
+    const buf = await buildSyntheticDocx(docXml, { 'word/footnotes.xml': footnotesXml });
     const result = await convertDocx(buf);
 
     expect(result.markdown).toContain('[^1]: Where $x$ is defined.');
@@ -2118,7 +2097,7 @@ describe('DOCX footnote extraction', () => {
       '<w:p><w:r><w:t>Text</w:t></w:r>'
       + '<w:r><w:footnoteReference w:id="1"/></w:r></w:p>'
     );
-    const footnotesXml = wrapFootnotesXml(
+    const footnotesXml = wrapNotesXml('footnotes', 
       '<w:footnote w:id="1"><w:p><w:r><w:footnoteRef/></w:r>'
       + '<w:r><w:t> See table:</w:t></w:r></w:p>'
       + '<w:tbl>'
@@ -2127,7 +2106,7 @@ describe('DOCX footnote extraction', () => {
       + '</w:tbl>'
       + '</w:footnote>'
     );
-    const buf = await buildSyntheticDocxWithParts(docXml, { 'word/footnotes.xml': footnotesXml });
+    const buf = await buildSyntheticDocx(docXml, { 'word/footnotes.xml': footnotesXml });
     const result = await convertDocx(buf);
 
     expect(result.markdown).toContain('[^1]: See table:');
@@ -2150,13 +2129,13 @@ describe('DOCX footnote extraction', () => {
           DOI: '10.1234/test',
         },
       }],
-      properties: { formattedCitation: '(Smith 2020)' },
+      properties: { plainCitation: '(Smith 2020)' },
     });
     const docXml = wrapDocumentXml(
       '<w:p><w:r><w:t>Text</w:t></w:r>'
       + '<w:r><w:footnoteReference w:id="1"/></w:r></w:p>'
     );
-    const footnotesXml = wrapFootnotesXml(
+    const footnotesXml = wrapNotesXml('footnotes', 
       '<w:footnote w:id="1"><w:p><w:r><w:footnoteRef/></w:r>'
       + '<w:r><w:t> As noted in </w:t></w:r>'
       + '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
@@ -2167,7 +2146,7 @@ describe('DOCX footnote extraction', () => {
       + '<w:r><w:t>.</w:t></w:r>'
       + '</w:p></w:footnote>'
     );
-    const buf = await buildSyntheticDocxWithParts(docXml, {
+    const buf = await buildSyntheticDocx(docXml, {
       'word/footnotes.xml': footnotesXml,
     });
     const result = await convertDocx(buf);
@@ -2182,13 +2161,13 @@ describe('DOCX footnote extraction', () => {
       + '<w:r><w:footnoteReference w:id="1"/></w:r>'
       + '<w:r><w:endnoteReference w:id="1"/></w:r></w:p>'
     );
-    const footnotesXml = wrapFootnotesXml(
+    const footnotesXml = wrapNotesXml('footnotes', 
       '<w:footnote w:id="1"><w:p><w:r><w:footnoteRef/></w:r><w:r><w:t> A footnote.</w:t></w:r></w:p></w:footnote>'
     );
-    const endnotesXml = wrapEndnotesXml(
+    const endnotesXml = wrapNotesXml('endnotes', 
       '<w:endnote w:id="1"><w:p><w:r><w:endnoteRef/></w:r><w:r><w:t> An endnote.</w:t></w:r></w:p></w:endnote>'
     );
-    const buf = await buildSyntheticDocxWithParts(docXml, {
+    const buf = await buildSyntheticDocx(docXml, {
       'word/footnotes.xml': footnotesXml,
       'word/endnotes.xml': endnotesXml,
     });
@@ -2222,6 +2201,7 @@ describe('DOCX footnote extraction', () => {
 
     expect(md).toContain('[^1]:');
     expect(md).toContain('fn comment');
+    expect(md.indexOf('fn comment')).toBeGreaterThan(md.indexOf('[^1]:'));
   });
 });
 describe('parseBlockquoteLevel', () => {

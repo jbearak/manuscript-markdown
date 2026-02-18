@@ -460,6 +460,11 @@ export function extractFootnoteDefinitions(markdown: string): { cleaned: string;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    // Inside a footnote definition, indented lines are continuation lines (even if they look like fences)
+    if (currentLabel !== undefined && (line.startsWith('    ') || line.startsWith('\t'))) {
+      currentBody.push(line.replace(/^(?:    |\t)/, ''));
+      continue;
+    }
     const fenceMatch = line.match(/^(\s*)(`{3,}|~{3,})/);
     if (fenceMatch) {
       const marker = fenceMatch[2];
@@ -486,11 +491,7 @@ export function extractFootnoteDefinitions(markdown: string): { cleaned: string;
       currentBody = [defMatch[2]];
       continue;
     }
-    // Continuation line: 4-space or tab indent
-    if (currentLabel !== undefined && (line.startsWith('    ') || line.startsWith('\t'))) {
-      currentBody.push(line.replace(/^(?:    |\t)/, ''));
-      continue;
-    }
+
     // Blank line within a multi-paragraph footnote
     if (currentLabel !== undefined && line.trim() === '') {
       // Peek ahead: if next line is indented, this is a paragraph break within the footnote
