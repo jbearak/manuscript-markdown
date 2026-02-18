@@ -14,6 +14,8 @@ A specification, converter, and VS Code extension for roundtrip manuscript editi
 2. A **converter** (DOCX ↔ Markdown)
 3. A **VS Code extension**
 
+**New to VS Code or Markdown?** The [Getting Started guide](docs/intro.md) walks you through everything from installation to your first document — no prior experience with code editors or plain-text tools required.
+
 ## Quick Start
 
 ### Installation
