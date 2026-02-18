@@ -946,6 +946,7 @@ describe('CriticMarkup OOXML generation', () => {
     hasComments: false,
     missingKeys: new Set<string>(),
     replyRanges: [] as Array<{replyId: number; parentId: number}>,
+    nextParaId: 1,
   });
 
   it('generates w:ins for additions', () => {

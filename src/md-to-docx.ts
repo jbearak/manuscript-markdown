@@ -1042,6 +1042,7 @@ export interface DocxGenState {
   missingKeys: Set<string>;
   timezone?: string; // UTC offset from frontmatter (e.g. "-05:00")
   replyRanges: Array<{replyId: number; parentId: number}>;
+  nextParaId: number;
 }
 
 interface CommentEntry {
@@ -1437,7 +1438,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         const author = nextRun.author || options?.authorName || 'Unknown';
         const date = normalizeToUtcIso(nextRun.date || '', state.timezone);
         const commentBody = nextRun.commentText || '';
-        const parentParaId = generateParaId();
+        const parentParaId = generateParaId(state);
         state.comments.push({ id: commentId, author, date, text: commentBody, paraId: parentParaId });
         state.hasComments = true;
         // Generate reply entries
@@ -1445,7 +1446,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         if (nextRun.replies && nextRun.replies.length > 0) {
           for (const reply of nextRun.replies) {
             const replyId = state.commentId++;
-            const replyParaId = generateParaId();
+            const replyParaId = generateParaId(state);
             const replyAuthor = reply.author || options?.authorName || 'Unknown';
             const replyDate = normalizeToUtcIso(reply.date || '', state.timezone);
             state.comments.push({ id: replyId, author: replyAuthor, date: replyDate, text: reply.text, paraId: replyParaId, parentParaId });
@@ -1474,7 +1475,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       const author = run.author || options?.authorName || 'Unknown';
       const date = normalizeToUtcIso(run.date || '', state.timezone);
       const commentBody = run.commentText || '';
-      const parentParaId = generateParaId();
+      const parentParaId = generateParaId(state);
 
       state.comments.push({ id: commentId, author, date, text: commentBody, paraId: parentParaId });
       state.hasComments = true;
@@ -1484,7 +1485,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       if (run.replies && run.replies.length > 0) {
         for (const reply of run.replies) {
           const replyId = state.commentId++;
-          const replyParaId = generateParaId();
+          const replyParaId = generateParaId(state);
           const replyAuthor = reply.author || options?.authorName || 'Unknown';
           const replyDate = normalizeToUtcIso(reply.date || '', state.timezone);
           state.comments.push({ id: replyId, author: replyAuthor, date: replyDate, text: reply.text, paraId: replyParaId, parentParaId });
@@ -1559,7 +1560,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         const author = run.author || options?.authorName || 'Unknown';
         const date = normalizeToUtcIso(run.date || '', state.timezone);
         const commentBody = run.commentText || '';
-        const parentParaId = generateParaId();
+        const parentParaId = generateParaId(state);
         state.comments.push({ id: numericId, author, date, text: commentBody, paraId: parentParaId });
 
         // Generate reply comment entries (reply IDs may have been
@@ -1569,7 +1570,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
           for (let i = 0; i < run.replies.length; i++) {
             const reply = run.replies[i];
             const replyId = i < preAllocated.length ? preAllocated[i].replyId : state.commentId++;
-            const replyParaId = generateParaId();
+            const replyParaId = generateParaId(state);
             const replyAuthor = reply.author || options?.authorName || 'Unknown';
             const replyDate = normalizeToUtcIso(reply.date || '', state.timezone);
             state.comments.push({ id: replyId, author: replyAuthor, date: replyDate, text: reply.text, paraId: replyParaId, parentParaId });
@@ -1754,8 +1755,8 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
   return xml;
 }
 
-function generateParaId(): string {
-  return Math.floor(Math.random() * 0xFFFFFFFF).toString(16).toUpperCase().padStart(8, '0');
+function generateParaId(state: DocxGenState): string {
+  return (state.nextParaId++).toString(16).toUpperCase().padStart(8, '0');
 }
 
 function commentsXml(comments: CommentEntry[]): string {
@@ -1961,6 +1962,7 @@ export async function convertMdToDocx(
     missingKeys: new Set(),
     timezone: frontmatter.timezone,
     replyRanges: [],
+    nextParaId: 1,
   };
 
   const documentXml = generateDocumentXml(tokens, state, options, bibEntries, citeprocEngine, frontmatter);
