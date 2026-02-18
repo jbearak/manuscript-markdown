@@ -51,6 +51,24 @@ export function setDefaultHighlightColor(color: string): void {
 export function getDefaultHighlightColor(): string {
   return _defaultHighlightColor;
 }
+function findMatchingCommentClose(text: string, startPos: number): number {
+  let depth = 1;
+  let pos = startPos;
+  while (pos < text.length && depth > 0) {
+    const nextOpen = text.indexOf('{>>', pos);
+    const nextClose = text.indexOf('<<}', pos);
+    if (nextClose === -1) break;
+    if (nextOpen !== -1 && nextOpen < nextClose) {
+      depth++;
+      pos = nextOpen + 3;
+    } else {
+      depth--;
+      if (depth === 0) return nextClose;
+      pos = nextClose + 3;
+    }
+  }
+  return -1;
+}
 
 /**
  * Extract highlight ranges from document text, grouped by color key.
@@ -224,6 +242,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
     if (!highlights.has(key)) highlights.set(key, []);
     highlights.get(key)!.push({ start: s, end: e });
   };
+  let criticIdx = 0;
 
   const len = text.length;
   let i = 0;
@@ -263,7 +282,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
           i = ci + 3; continue;
         }
       } else if (c2 === 0x3E && c3 === 0x3E) { // {>>
-        const ci = text.indexOf('<<}', i + 3);
+        const ci = findMatchingCommentClose(text, i + 3);
         if (ci !== -1) {
           // Skip comment delimiters (preserves TextMate tag punctuation scopes)
           comments.push({ start: i + 3, end: ci });
@@ -294,10 +313,11 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
               if (/^[a-z0-9-]+$/.test(cand)) { colorId = cand; mEnd = cb + 1; }
             }
           }
-          let inside = false;
-          for (const cr of criticSpans) {
-            if (cr.start <= i && mEnd <= cr.end) { inside = true; break; }
+          while (criticIdx < criticSpans.length && criticSpans[criticIdx].end <= i) {
+            criticIdx++;
           }
+          const inside = criticIdx < criticSpans.length &&
+            criticSpans[criticIdx].start <= i && mEnd <= criticSpans[criticIdx].end;
           if (!inside) {
             pushHl(colorId && VALID_COLOR_IDS.includes(colorId) ? colorId : resolvedDefault, i, mEnd);
           }

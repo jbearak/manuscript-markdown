@@ -105,22 +105,33 @@ export function findUsagesForKey(text: string, key: string): CitekeyUsage[] {
 
 export function findCitekeyAtOffset(text: string, offset: number): string | undefined {
 	if (offset < 0 || offset >= text.length) return undefined;
-
-	// Scan backward to find [ or line start
+	const maxScanDistance = 500;
 	let scanStart = offset;
-	while (scanStart > 0 && text[scanStart - 1] !== '[' && text[scanStart - 1] !== '\n') {
-		scanStart--;
-	}
-	// Include the bracket if found
-	if (scanStart > 0 && text[scanStart - 1] === '[') scanStart--;
-
-	// Scan forward to find ] or line end
 	let scanEnd = offset;
-	while (scanEnd < text.length && text[scanEnd] !== ']' && text[scanEnd] !== '\n') {
-		scanEnd++;
+
+	// Prefer a nearby bracket-bounded scan (can span newlines).
+	const openBracket = text.lastIndexOf('[', offset);
+	const closeBracketBefore = text.lastIndexOf(']', Math.max(0, offset - 1));
+	if (openBracket !== -1 && openBracket > closeBracketBefore && (offset - openBracket) <= maxScanDistance) {
+		const closeBracket = text.indexOf(']', offset);
+		if (closeBracket !== -1 && (closeBracket - offset) <= maxScanDistance) {
+			scanStart = openBracket;
+			scanEnd = closeBracket + 1;
+		}
 	}
-	// Include the bracket if found
-	if (scanEnd < text.length && text[scanEnd] === ']') scanEnd++;
+
+	// Fallback: same-line bounded scan when no nearby bracket segment is found.
+	if (scanStart === offset && scanEnd === offset) {
+		while (scanStart > 0 && text[scanStart - 1] !== '[' && text[scanStart - 1] !== '\n') {
+			scanStart--;
+		}
+		if (scanStart > 0 && text[scanStart - 1] === '[') scanStart--;
+
+		while (scanEnd < text.length && text[scanEnd] !== ']' && text[scanEnd] !== '\n') {
+			scanEnd++;
+		}
+		if (scanEnd < text.length && text[scanEnd] === ']') scanEnd++;
+	}
 
 	const segment = text.slice(scanStart, scanEnd);
 	for (const usage of scanCitationUsages(segment)) {

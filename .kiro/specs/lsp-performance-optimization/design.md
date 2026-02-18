@@ -54,11 +54,15 @@ graph TD
 
 ### 1. Bib Reverse Map (`src/lsp/server.ts`)
 
-A module-level `Map<string, Set<string>>` mapping canonical bib paths to sets of open markdown document URIs.
+Use a reverse map plus a forward map:
+- `Map<string, Set<string>>` mapping canonical bib paths to open markdown document URIs
+- `Map<string, string>` mapping markdown doc URIs to canonical bib paths
 
 ```typescript
 // canonical bib path → set of markdown doc URIs
 const bibReverseMap = new Map<string, Set<string>>();
+// markdown doc URI → canonical bib path
+const docToBibMap = new Map<string, string>();
 
 function updateBibReverseMap(docUri: string, docText: string): void {
   // Remove doc from any existing entries
@@ -71,12 +75,19 @@ function updateBibReverseMap(docUri: string, docText: string): void {
       bibReverseMap.set(canonical, new Set());
     }
     bibReverseMap.get(canonical)!.add(docUri);
+    docToBibMap.set(docUri, canonical);
   }
 }
 
 function removeBibReverseMapEntry(docUri: string): void {
-  for (const [, uris] of bibReverseMap) {
-    uris.delete(docUri);
+  const canonical = docToBibMap.get(docUri);
+  if (!canonical) return;
+  docToBibMap.delete(docUri);
+  const uris = bibReverseMap.get(canonical);
+  if (!uris) return;
+  uris.delete(docUri);
+  if (uris.size === 0) {
+    bibReverseMap.delete(canonical);
   }
 }
 
@@ -124,6 +135,8 @@ async function findPairedMarkdownUris(bibPath: string): Promise<string[]> {
 }
 ```
 
+Scope limitation (intentional): `findPairedMarkdownUris` returns only (1) same-basename `.md` and (2) currently open markdown docs from `getMarkdownUrisForBib(...)`, deduped by `canonicalizeFsPath`. Closed non-matching-basename markdown files are not returned to avoid workspace scans.
+
 ### 3. Targeted Key Scanner (`src/lsp/server.ts`)
 
 Replace `scanCitationUsages(text).filter(u => u.key === key)` with a targeted regex.
@@ -131,12 +144,20 @@ Replace `scanCitationUsages(text).filter(u => u.key === key)` with a targeted re
 ```typescript
 function findUsagesForKey(text: string, key: string): CitekeyUsage[] {
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp(`\\[[^\\]]*@(${escaped})(?=[\\s;,\\]\\)])`, 'g');
+  const segRe = /\\[[^\\]]*@[^\\]]*\\]/g;
+  const keyRe = new RegExp(`@${escaped}(?![A-Za-z0-9_:-])`, 'g');
   const usages: CitekeyUsage[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    const keyStart = m.index + m[0].indexOf('@' + key) + 1;
-    usages.push({ key, keyStart, keyEnd: keyStart + key.length });
+  let segMatch: RegExpExecArray | null;
+  segRe.lastIndex = 0;
+  while ((segMatch = segRe.exec(text)) !== null) {
+    const inner = segMatch[0].slice(1, -1);
+    const segmentOffset = segMatch.index + 1;
+    keyRe.lastIndex = 0;
+    let keyMatch: RegExpExecArray | null;
+    while ((keyMatch = keyRe.exec(inner)) !== null) {
+      const keyStart = segmentOffset + keyMatch.index + 1;
+      usages.push({ key, keyStart, keyEnd: keyStart + key.length });
+    }
   }
   return usages;
 }
@@ -163,7 +184,7 @@ The implementation scans character-by-character, matching opening delimiters `{+
 
 ### 5. Two-Pointer Overlap Check (`src/highlight-colors.ts`)
 
-If the single-pass approach is adopted (Requirement 3), the overlap check becomes inline. But for the standalone `extractHighlightRanges` function (which may still be used in tests or other contexts), replace the `.some()` overlap check with a pointer sweep:
+If the single-pass approach is adopted (Requirement 3), the containment check becomes inline. For the standalone `extractHighlightRanges` function (which may still be used in tests or other contexts), use a pointer sweep that preserves `.some()` containment semantics:
 
 ```typescript
 // Both criticRanges and hlMatches are in scan order (ascending start position)
@@ -175,7 +196,7 @@ for (const hlMatch of hlMatches) {
   while (cPtr < criticRanges.length && criticRanges[cPtr].end + 3 < mStart) {
     cPtr++;
   }
-  // Check overlap with current critic range
+  // Check containment against current critic range
   const insideCritic = cPtr < criticRanges.length &&
     (criticRanges[cPtr].start - 3) <= mStart && mEnd <= (criticRanges[cPtr].end + 3);
   if (insideCritic) continue;
@@ -189,33 +210,35 @@ Replace the full-document `scanCitationUsages` call in `findCitekeyAtOffset` wit
 
 ```typescript
 function findCitekeyAtOffset(text: string, offset: number): string | undefined {
-  // Scan backward to find [ or line start
+  const maxScanDistance = 500;
   let scanStart = offset;
-  while (scanStart > 0 && text[scanStart - 1] !== '[' && text[scanStart - 1] !== '\n') {
-    scanStart--;
-  }
-  // Scan forward to find ] or line end
   let scanEnd = offset;
-  while (scanEnd < text.length && text[scanEnd] !== ']' && text[scanEnd] !== '\n') {
-    scanEnd++;
+  // Prefer nearby bracket-bounded scan (can span newlines)
+  const openBracket = text.lastIndexOf('[', offset);
+  const closeBracketBefore = text.lastIndexOf(']', Math.max(0, offset - 1));
+  if (openBracket !== -1 && openBracket > closeBracketBefore && (offset - openBracket) <= maxScanDistance) {
+    const closeBracket = text.indexOf(']', offset);
+    if (closeBracket !== -1 && (closeBracket - offset) <= maxScanDistance) {
+      scanStart = openBracket;
+      scanEnd = closeBracket + 1;
+    }
   }
-  // Include the brackets if found
-  if (scanStart > 0 && text[scanStart - 1] === '[') scanStart--;
-  if (scanEnd < text.length && text[scanEnd] === ']') scanEnd++;
+  // Fallback to same-line bounded scan
+  if (scanStart === offset && scanEnd === offset) {
+    while (scanStart > 0 && text[scanStart - 1] !== '[' && text[scanStart - 1] !== '\n') scanStart--;
+    if (scanStart > 0 && text[scanStart - 1] === '[') scanStart--;
+    while (scanEnd < text.length && text[scanEnd] !== ']' && text[scanEnd] !== '\n') scanEnd++;
+    if (scanEnd < text.length && text[scanEnd] === ']') scanEnd++;
+  }
 
   const segment = text.slice(scanStart, scanEnd);
-  const segmentOffset = scanStart;
-
-  // Run citation scan on just this segment
   for (const usage of scanCitationUsages(segment)) {
-    const absStart = usage.keyStart + segmentOffset;
-    const absEnd = usage.keyEnd + segmentOffset;
+    const absStart = usage.keyStart + scanStart;
+    const absEnd = usage.keyEnd + scanStart;
     if (offset >= absStart - 1 && offset <= absEnd) {
       return usage.key;
     }
   }
-  // Also check bare citation context
-  // ... (bounded backward scan for @key)
   return undefined;
 }
 ```

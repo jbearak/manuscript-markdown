@@ -83,6 +83,8 @@ const openDocBibCache = new Map<string, OpenDocBibCache>();
 
 // canonical bib path → set of markdown doc URIs
 const bibReverseMap = new Map<string, Set<string>>();
+// markdown doc URI → canonical bib path
+const docToBibMap = new Map<string, string>();
 
 function updateBibReverseMap(docUri: string, docText: string): void {
   removeBibReverseMapEntry(docUri);
@@ -93,12 +95,23 @@ function updateBibReverseMap(docUri: string, docText: string): void {
       bibReverseMap.set(canonical, new Set());
     }
     bibReverseMap.get(canonical)!.add(docUri);
+    docToBibMap.set(docUri, canonical);
   }
 }
 
 function removeBibReverseMapEntry(docUri: string): void {
-  for (const [, uris] of bibReverseMap) {
-    uris.delete(docUri);
+  const canonical = docToBibMap.get(docUri);
+  if (!canonical) {
+    return;
+  }
+  docToBibMap.delete(docUri);
+  const uris = bibReverseMap.get(canonical);
+  if (!uris) {
+    return;
+  }
+  uris.delete(docUri);
+  if (uris.size === 0) {
+    bibReverseMap.delete(canonical);
   }
 }
 

@@ -88,8 +88,8 @@ export function preprocessCriticMarkup(markdown: string): string {
     const segments: string[] = [];
     let lastPos = 0;
     let searchFrom = 0;
+    const idCommentRe = /\{#[a-zA-Z0-9_-]+>>/;
     while (true) {
-      const idCommentRe = /\{#[a-zA-Z0-9_-]+>>/;
       const match = idCommentRe.exec(result.slice(searchFrom));
       if (!match) break;
       const matchIndex = searchFrom + match.index;

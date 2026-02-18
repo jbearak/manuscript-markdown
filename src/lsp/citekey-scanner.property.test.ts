@@ -3,7 +3,7 @@ import fc from 'fast-check';
 import { scanCitationUsages, findUsagesForKey } from './citekey-language';
 
 describe('Property 2: Targeted Key Scanner Equivalence', () => {
-	// Generator for valid citekeys (may include regex-special chars for robustness)
+	// Generator for valid citekeys (CITEKEY_RE alphabet: [A-Za-z0-9_:-]+).
 	const citekeyGen = fc.string({ minLength: 1, maxLength: 20 }).filter(s => /^[A-Za-z0-9_:-]+$/.test(s));
 
 	// Generator for citation segments
@@ -33,20 +33,15 @@ describe('Property 2: Targeted Key Scanner Equivalence', () => {
 		);
 	});
 
-	// Test with regex-special characters in keys
-	test('handles keys with regex-special characters', () => {
-		const specialKeyGen = fc.string({ minLength: 1, maxLength: 15 }).filter(k => /^[A-Za-z0-9_:-]+$/.test(k));
-
-		fc.assert(
-			fc.property(textGen, specialKeyGen, (text, key) => {
-				const expected = scanCitationUsages(text)
-					.filter(u => u.key === key)
-					.map(u => ({ keyStart: u.keyStart, keyEnd: u.keyEnd }));
-				const actual = findUsagesForKey(text, key)
-					.map(u => ({ keyStart: u.keyStart, keyEnd: u.keyEnd }));
-				expect(actual).toEqual(expected);
-			}),
-			{ numRuns: 200 }
-		);
+	test('defensively escapes regex-special lookup keys outside CITEKEY_RE alphabet', () => {
+		const text = '[@aab; @axb; @a-b]';
+		expect(findUsagesForKey(text, 'a+b')).toEqual([]);
+		expect(findUsagesForKey(text, 'a.b')).toEqual([]);
+		const expected = scanCitationUsages(text)
+			.filter(u => u.key === 'a-b')
+			.map(u => ({ keyStart: u.keyStart, keyEnd: u.keyEnd }));
+		const actual = findUsagesForKey(text, 'a-b')
+			.map(u => ({ keyStart: u.keyStart, keyEnd: u.keyEnd }));
+		expect(actual).toEqual(expected);
 	});
 });

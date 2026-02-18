@@ -61,4 +61,14 @@ describe('Property 4: Two-Pointer Overlap Exclusion Equivalence', () => {
       { numRuns: 200 }
     );
   });
+
+  test('cross-boundary format highlights are preserved (containment semantics)', () => {
+    const text = '{==x ==bridge==} ==tail==';
+    const actual = extractHighlightRanges(text, 'yellow');
+    const expected = extractHighlightRangesReference(text, 'yellow');
+    const sortEntries = (m: Map<string, Array<{ start: number; end: number }>>) =>
+      [...m.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    expect(sortEntries(actual)).toEqual(sortEntries(expected));
+    expect((actual.get('yellow') ?? []).length).toBeGreaterThan(0);
+  });
 });

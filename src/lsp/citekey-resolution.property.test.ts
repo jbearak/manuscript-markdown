@@ -22,11 +22,20 @@ describe('Property 5: Local Citekey Resolution Equivalence', () => {
 	const citationSegmentGen = fc.array(citekeyGen, { minLength: 1, maxLength: 4 }).map(
 		keys => `[@${keys.join('; @')}]`
 	);
+	const multilineCitationSegmentGen = fc.array(citekeyGen, { minLength: 2, maxLength: 4 }).map(
+		keys => `[@${keys.join(';\n@')}]`
+	);
 
 	const textGen = fc.array(
-		fc.oneof(citationSegmentGen, fc.string({ maxLength: 40 })),
+		fc.oneof(citationSegmentGen, multilineCitationSegmentGen, fc.string({ maxLength: 40 })),
 		{ minLength: 1, maxLength: 8 }
 	).map(parts => parts.join(' '));
+
+	test('resolves citekeys inside multi-line citation groups', () => {
+		const text = '[@author2022; @smith2023;\n@jones2024]';
+		const offset = text.indexOf('@jones2024') + 2;
+		expect(findCitekeyAtOffset(text, offset)).toBe('jones2024');
+	});
 
 	test('bounded scan matches full-document scan for all offsets', () => {
 		fc.assert(
