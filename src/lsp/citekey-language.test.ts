@@ -97,10 +97,26 @@ describe('getCompletionContextAtOffset', () => {
 		expect(ctx?.prefix).toBe('smi');
 	});
 
-	test('does not return completion context outside citation lists', () => {
-		const text = 'email @smi';
+	test('returns completion context for bare citation after space', () => {
+		const text = 'see @smi';
+		const offset = text.length;
+		const ctx = getCompletionContextAtOffset(text, offset);
+		expect(ctx).toBeDefined();
+		expect(ctx?.prefix).toBe('smi');
+	});
+
+	test('does not return completion context for email address', () => {
+		const text = 'user@domain';
 		const offset = text.length;
 		expect(getCompletionContextAtOffset(text, offset)).toBeUndefined();
+	});
+
+	test('returns completion context for unclosed bracket when ] exists on later line', () => {
+		const text = 'See [@smi\nOther text [@key2]';
+		const offset = text.indexOf('\n'); // end of first line
+		const ctx = getCompletionContextAtOffset(text, offset);
+		expect(ctx).toBeDefined();
+		expect(ctx?.prefix).toBe('smi');
 	});
 
 	test('returns completion context just before semicolon delimiter in citation list', () => {

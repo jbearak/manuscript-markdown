@@ -106,7 +106,7 @@ export function getCompletionContextAtOffset(text: string, offset: number): Comp
 	if (atOffset < 0 || text.charAt(atOffset) !== '@') {
 		return undefined;
 	}
-	if (!isInsideCitationSegmentAtOffset(text, atOffset)) {
+	if (!isInsideCitationSegmentAtOffset(text, atOffset) && !isBareCitationContext(text, atOffset)) {
 		return undefined;
 	}
 
@@ -190,16 +190,24 @@ export function isInsideCitationSegmentAtOffset(text: string, atOffset: number):
 		return false;
 	}
 	const lineEnd = text.indexOf('\n', openBracket + 1);
+	const sameLineEnd = lineEnd !== -1 ? lineEnd : text.length;
 	const closeBracket = text.indexOf(']', openBracket + 1);
-	if (lineEnd !== -1 && closeBracket !== -1 && lineEnd < closeBracket) {
-		return false;
-	}
-	const segmentEnd = closeBracket !== -1 ? closeBracket : (lineEnd !== -1 ? lineEnd : text.length);
+	// Only use ] as segment end if it's on the same line as [
+	const closeBracketOnSameLine = closeBracket !== -1 && closeBracket < sameLineEnd ? closeBracket : -1;
+	const segmentEnd = closeBracketOnSameLine !== -1 ? closeBracketOnSameLine : sameLineEnd;
 	if (atOffset > segmentEnd) {
 		return false;
 	}
 	const inside = text.slice(openBracket + 1, segmentEnd);
 	return inside.includes('@');
+}
+
+/** Bare/inline citation: @key outside brackets (valid Pandoc syntax). */
+function isBareCitationContext(text: string, atOffset: number): boolean {
+	if (atOffset > 0 && /[A-Za-z0-9._]/.test(text.charAt(atOffset - 1))) {
+		return false;
+	}
+	return true;
 }
 
 function isCitekeyChar(ch: string | undefined): boolean {
