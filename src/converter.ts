@@ -95,6 +95,7 @@ interface NoteBodyContext {
   zoteroCitations: ZoteroCitation[];
   keyMap: Map<string, string>;
   numberingDefs: Map<string, Map<string, 'bullet' | 'ordered'>>;
+  format: CitationKeyFormat;
 }
 
 export interface TableRow {
@@ -626,11 +627,11 @@ async function extractNotes(
   // (separate from the document-level citations) and build a file-scoped
   // context with a shared citation counter across all notes in this file.
   let fileContext: NoteBodyContext | undefined;
-  if (context && parsed) {
+  if (context) {
     const noteCitations = extractZoteroCitationsFromParsed(parsed);
-    const noteKeyMap = buildCitationKeyMap(noteCitations, 'authorYearTitle');
+    const noteKeyMap = buildCitationKeyMap(noteCitations, context.format);
     // Merge document-level keyMap with note-specific keys
-    const mergedKeyMap = new Map([...context.keyMap, ...noteKeyMap]);
+    const mergedKeyMap = new Map([...noteKeyMap, ...context.keyMap]);
     fileContext = {
       ...context,
       zoteroCitations: noteCitations,
@@ -1232,15 +1233,19 @@ export function computeRowspans(
 export async function extractDocumentContent(
   data: Uint8Array | JSZip,
   zoteroCitations: ZoteroCitation[],
-  keyMap: Map<string, string>
+  keyMap: Map<string, string>,
+  options?: {
+    numberingDefs?: Map<string, Map<string, 'bullet' | 'ordered'>>;
+    relationshipMap?: Map<string, string>;
+  }
 ): Promise<DocumentContentResult> {
   const zip = data instanceof JSZip ? data : await loadZip(data);
   const parsed = await readZipXml(zip, 'word/document.xml');
   if (!parsed) { return { content: [] }; }
 
   // Parse relationships and numbering definitions
-  const relationshipMap = await parseRelationships(zip);
-  const numberingDefs = await parseNumberingDefinitions(zip);
+  const relationshipMap = options?.relationshipMap ?? await parseRelationships(zip);
+  const numberingDefs = options?.numberingDefs ?? await parseNumberingDefinitions(zip);
 
   // Build a lookup: instrText index -> ZoteroCitation (in order of appearance)
   let citationIdx = 0;
@@ -2400,11 +2405,11 @@ export async function convertDocx(
   // Build note contexts with merged rels (note rels + document rels as fallback)
   const fnRelsMerged = new Map([...docRels, ...fnRels]);
   const enRelsMerged = new Map([...docRels, ...enRels]);
-  const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, zoteroCitations, keyMap, numberingDefs };
-  const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, zoteroCitations, keyMap, numberingDefs };
+  const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, zoteroCitations, keyMap, numberingDefs, format };
+  const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, zoteroCitations, keyMap, numberingDefs, format };
 
   const [{ content: docContent, zoteroBiblData }, footnotes, endnotes] = await Promise.all([
-    extractDocumentContent(zip, zoteroCitations, keyMap),
+    extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, relationshipMap: docRels }),
     extractFootnotes(zip, fnContext),
     extractEndnotes(zip, enContext),
   ]);
@@ -2433,12 +2438,7 @@ export async function convertDocx(
   collectRefs(docContent);
 
   const assignedLabels = new Map<string, string>(); // "kind:noteId" -> label
-  // Pre-collect all mapped labels to avoid collision with auto-generated numeric labels
   const usedLabels = new Set<string>();
-  for (const ref of refOrder) {
-    const mapped = footnoteIdMapping?.get(ref.noteId);
-    if (mapped) usedLabels.add(mapped);
-  }
   for (const ref of refOrder) {
     const key = ref.noteKind + ':' + ref.noteId;
     if (assignedLabels.has(key)) continue;
@@ -2448,7 +2448,12 @@ export async function convertDocx(
     const mappedLabel = footnoteIdMapping?.get(ref.noteId);
     let label: string;
     if (mappedLabel) {
-      label = mappedLabel;
+      if (usedLabels.has(mappedLabel)) {
+        while (usedLabels.has(String(noteCounter))) noteCounter++;
+        label = String(noteCounter++);
+      } else {
+        label = mappedLabel;
+      }
     } else {
       while (usedLabels.has(String(noteCounter))) noteCounter++;
       label = String(noteCounter++);

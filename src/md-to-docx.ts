@@ -416,6 +416,9 @@ export function extractFootnoteDefinitions(markdown: string): { cleaned: string;
   const cleanedLines: string[] = [];
   let currentLabel: string | undefined;
   let currentBody: string[] = [];
+  let inFence = false;
+  let fenceChar = '';
+  let fenceLen = 0;
 
   function finishDefinition() {
     if (currentLabel !== undefined) {
@@ -427,6 +430,25 @@ export function extractFootnoteDefinitions(markdown: string): { cleaned: string;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    const fenceMatch = line.match(/^(\s*)(`{3,}|~{3,})/);
+    if (fenceMatch) {
+      const marker = fenceMatch[2];
+      const markerChar = marker.charAt(0);
+      const markerLen = marker.length;
+      if (!inFence) {
+        inFence = true;
+        fenceChar = markerChar;
+        fenceLen = markerLen;
+      } else if (markerChar === fenceChar && markerLen >= fenceLen) {
+        inFence = false;
+      }
+      cleanedLines.push(line);
+      continue;
+    }
+    if (inFence) {
+      cleanedLines.push(line);
+      continue;
+    }
     const defMatch = line.match(/^\[\^([a-zA-Z0-9_-]+)\]:\s?(.*)/);
     if (defMatch) {
       finishDefinition();
@@ -2021,19 +2043,29 @@ export async function convertMdToDocx(
     const pStyle = state.notesMode === 'endnotes' ? 'EndnoteText' : 'FootnoteText';
     const refStyle = state.notesMode === 'endnotes' ? 'EndnoteReference' : 'FootnoteReference';
     let bodyXml = '';
+    const paragraphPPr = '<w:pPr><w:pStyle w:val="' + pStyle + '"/></w:pPr>';
+    const selfRefRun = '<w:r><w:rPr><w:rStyle w:val="' + refStyle + '"/></w:rPr><' + selfRefTag + '/></w:r>';
     for (let ti = 0; ti < bodyTokens.length; ti++) {
       const t = bodyTokens[ti];
-      const runs = generateRuns(t.runs, state, options, bibEntries, citeprocEngine);
-      const pPr = '<w:pPr><w:pStyle w:val="' + pStyle + '"/></w:pPr>';
       if (ti === 0) {
-        // First paragraph: prepend self-reference
-        bodyXml += '<w:p>' + pPr + '<w:r><w:rPr><w:rStyle w:val="' + refStyle + '"/></w:rPr><' + selfRefTag + '/></w:r>' + runs + '</w:p>';
+        if (t.type === 'table') {
+          bodyXml += '<w:p>' + paragraphPPr + selfRefRun + '</w:p>';
+          bodyXml += generateTable(t, state, options, bibEntries, citeprocEngine);
+        } else {
+          const runs = generateRuns(t.runs, state, options, bibEntries, citeprocEngine);
+          bodyXml += '<w:p>' + paragraphPPr + selfRefRun + runs + '</w:p>';
+        }
       } else {
-        bodyXml += '<w:p>' + pPr + runs + '</w:p>';
+        if (t.type === 'table') {
+          bodyXml += generateTable(t, state, options, bibEntries, citeprocEngine);
+        } else {
+          const runs = generateRuns(t.runs, state, options, bibEntries, citeprocEngine);
+          bodyXml += '<w:p>' + paragraphPPr + runs + '</w:p>';
+        }
       }
     }
     if (bodyTokens.length === 0) {
-      bodyXml = '<w:p><w:pPr><w:pStyle w:val="' + pStyle + '"/></w:pPr><w:r><w:rPr><w:rStyle w:val="' + refStyle + '"/></w:rPr><' + selfRefTag + '/></w:r></w:p>';
+      bodyXml = '<w:p>' + paragraphPPr + selfRefRun + '</w:p>';
     }
     state.footnoteEntries.push({ id: noteId, bodyXml });
   }
