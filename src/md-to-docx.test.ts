@@ -1319,6 +1319,13 @@ describe('Full MD→DOCX footnote generation', () => {
     expect(warnings.some(w => w.includes('[^1]') && w.includes('no matching reference'))).toBe(true);
   });
 
+  it('ignores trailing semicolon in citation group', async () => {
+    const bib = `@article{smith2020,\n  author = {Smith, John},\n  title = {Title},\n  year = {2020},\n}`;
+    const md = 'Text [@smith2020;].';
+    const { warnings } = await convertMdToDocx(md, { bibtex: bib });
+    expect(warnings).toEqual([]);
+  });
+
   it('stores MANUSCRIPT_FOOTNOTE_IDS for named labels', async () => {
     const md = 'Text[^my-note] here.\n\n[^my-note]: Named note.';
     const { docx } = await convertMdToDocx(md);
