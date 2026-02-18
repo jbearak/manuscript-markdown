@@ -4,6 +4,29 @@
 export const PARA_PLACEHOLDER = '\uE000PARA\uE000';
 
 /**
+ * Find the matching close marker for `<<}` accounting for nested `{>>...<<}` pairs.
+ * Returns the index of the matching `<<}` or -1 if not found.
+ */
+export function findMatchingClose(src: string, startPos: number): number {
+  let depth = 1;
+  let pos = startPos;
+  while (pos < src.length && depth > 0) {
+    const nextOpen = src.indexOf('{>>', pos);
+    const nextClose = src.indexOf('<<}', pos);
+    if (nextClose === -1) break;
+    if (nextOpen !== -1 && nextOpen < nextClose) {
+      depth++;
+      pos = nextOpen + 3;
+    } else {
+      depth--;
+      if (depth === 0) return nextClose;
+      pos = nextClose + 3;
+    }
+  }
+  return -1;
+}
+
+/**
  * Preprocess markdown source: replace \n\n inside CriticMarkup spans with a
  * placeholder so markdown-it's block parser doesn't split them into separate
  * paragraphs.
@@ -16,22 +39,28 @@ export function preprocessCriticMarkup(markdown: string): string {
     return markdown;
   }
 
-  const markers: Array<{ open: string; close: string }> = [
+  const markers: Array<{ open: string; close: string; nested?: boolean }> = [
     { open: '{++', close: '++}' },
     { open: '{--', close: '--}' },
     { open: '{~~', close: '~~}' },
-    { open: '{>>', close: '<<}' },
+    { open: '{>>', close: '<<}', nested: true },
     { open: '{==', close: '==}' },
   ];
 
   let result = markdown;
-  for (const { open, close } of markers) {
+  for (const { open, close, nested } of markers) {
     let searchFrom = 0;
     while (true) {
       const openIdx = result.indexOf(open, searchFrom);
       if (openIdx === -1) break;
       const contentStart = openIdx + open.length;
-      const closeIdx = result.indexOf(close, contentStart);
+      let closeIdx: number;
+      if (nested) {
+        // Use depth-aware matching for {>>...<<} which may contain nested replies
+        closeIdx = findMatchingClose(result, contentStart);
+      } else {
+        closeIdx = result.indexOf(close, contentStart);
+      }
       if (closeIdx === -1) {
         searchFrom = contentStart;
         continue;
@@ -56,7 +85,8 @@ export function preprocessCriticMarkup(markdown: string): string {
     if (!match) break;
     const matchIndex = idSearchFrom + match.index;
     const contentStart = matchIndex + match[0].length;
-    const closeIdx = result.indexOf('<<}', contentStart);
+    // Use depth-aware matching for nested replies
+    const closeIdx = findMatchingClose(result, contentStart);
     if (closeIdx === -1) {
       idSearchFrom = contentStart;
       continue;

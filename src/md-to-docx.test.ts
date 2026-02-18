@@ -25,6 +25,7 @@ function makeState(): DocxGenState {
     hasList: false,
     hasComments: false,
     missingKeys: new Set(),
+    replyRanges: [],
   };
 }
 
@@ -207,7 +208,8 @@ describe('generateParagraph', () => {
     warnings: [],
     hasList: false,
     hasComments: false,
-    missingKeys: new Set<string>()
+    missingKeys: new Set<string>(),
+    replyRanges: [] as Array<{replyId: number; parentId: number}>,
   });
 
   it('generates basic paragraph', () => {
@@ -942,7 +944,8 @@ describe('CriticMarkup OOXML generation', () => {
     warnings: [],
     hasList: false,
     hasComments: false,
-    missingKeys: new Set<string>()
+    missingKeys: new Set<string>(),
+    replyRanges: [] as Array<{replyId: number; parentId: number}>,
   });
 
   it('generates w:ins for additions', () => {
@@ -995,12 +998,13 @@ describe('CriticMarkup OOXML generation', () => {
     expect(result).toContain('highlighted text');
     expect(state.hasComments).toBe(true);
     expect(state.comments).toHaveLength(1);
-    expect(state.comments[0]).toEqual({
+    expect(state.comments[0]).toMatchObject({
       id: 0,
       author: 'Alice',
       date: '2024-01-04T00:00:00Z',
       text: 'This is a comment'
     });
+    expect(state.comments[0].paraId).toMatch(/^[0-9A-F]{8}$/);
   });
 
   it('generates zero-width comment for standalone comments', () => {

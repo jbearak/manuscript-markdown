@@ -12,6 +12,14 @@ export interface Comment {
   author: string;
   text: string;
   date: string;
+  paraId?: string;         // w14:paraId from <w:p> in comments.xml
+  replies?: CommentReply[];
+}
+
+export interface CommentReply {
+  author: string;
+  text: string;
+  date: string;
 }
 
 export interface CitationMetadata {
@@ -458,9 +466,66 @@ export async function extractComments(data: Uint8Array | JSZip): Promise<Map<str
     // Collect all w:t text within this comment
     const tNodes = findAllDeep(node['w:comment'] || [], 'w:t');
     const text = tNodes.map(t => nodeText(t['w:t'] || [])).join('');
-    comments.set(id, { author, text, date });
+    // Extract w14:paraId from the first <w:p> child
+    const pNodes = findAllDeep(node['w:comment'] || [], 'w:p');
+    const paraId = pNodes.length > 0 ? (pNodes[0]?.[':@']?.['@_w14:paraId'] ?? undefined) : undefined;
+    comments.set(id, { author, text, date, paraId });
   }
   return comments;
+}
+
+/** Parse word/commentsExtended.xml and return paraId→parentParaId map for reply comments. */
+export async function extractCommentThreads(data: Uint8Array | JSZip): Promise<Map<string, string>> {
+  const threads = new Map<string, string>();
+  const zip = data instanceof JSZip ? data : await loadZip(data);
+  const parsed = await readZipXml(zip, 'word/commentsExtended.xml');
+  if (!parsed) { return threads; }
+
+  for (const node of findAllDeep(parsed, 'w15:commentEx')) {
+    const paraId = node?.[':@']?.['@_w15:paraId'] ?? '';
+    const parentParaId = node?.[':@']?.['@_w15:paraIdParent'] ?? '';
+    if (paraId && parentParaId) {
+      threads.set(paraId, parentParaId);
+    }
+  }
+  return threads;
+}
+
+/**
+ * Group reply comments under their parent as CommentReply entries.
+ * Returns the set of reply comment IDs (to exclude from ranges).
+ */
+export function groupCommentThreads(
+  comments: Map<string, Comment>,
+  threads: Map<string, string>
+): Set<string> {
+  const replyIds = new Set<string>();
+  if (threads.size === 0) return replyIds;
+
+  // Build paraId→commentId lookup
+  const paraIdToCommentId = new Map<string, string>();
+  for (const [id, comment] of comments) {
+    if (comment.paraId) {
+      paraIdToCommentId.set(comment.paraId, id);
+    }
+  }
+
+  // Attach replies to parents
+  for (const [childParaId, parentParaId] of threads) {
+    const childId = paraIdToCommentId.get(childParaId);
+    const parentId = paraIdToCommentId.get(parentParaId);
+    if (!childId || !parentId) continue;
+
+    const parent = comments.get(parentId);
+    const child = comments.get(childId);
+    if (!parent || !child) continue;
+
+    if (!parent.replies) parent.replies = [];
+    parent.replies.push({ author: child.author, text: child.text, date: child.date });
+    replyIds.add(childId);
+  }
+
+  return replyIds;
 }
 
 /** Matches the 8-character Zotero item key at the end of a URI. */
@@ -918,7 +983,8 @@ export function computeRowspans(
 export async function extractDocumentContent(
   data: Uint8Array | JSZip,
   zoteroCitations: ZoteroCitation[],
-  keyMap: Map<string, string>
+  keyMap: Map<string, string>,
+  replyIds?: Set<string>
 ): Promise<DocumentContentResult> {
   const zip = data instanceof JSZip ? data : await loadZip(data);
   const parsed = await readZipXml(zip, 'word/document.xml');
@@ -1001,9 +1067,11 @@ export async function extractDocumentContent(
         } else if (key === 'w:instrText' && inField) {
           fieldInstrParts.push(nodeText(node['w:instrText'] || []));
         } else if (key === 'w:commentRangeStart') {
-          activeComments.add(getAttr(node, 'id'));
+          const id = getAttr(node, 'id');
+          if (!replyIds?.has(id)) activeComments.add(id);
         } else if (key === 'w:commentRangeEnd') {
-          activeComments.delete(getAttr(node, 'id'));
+          const id = getAttr(node, 'id');
+          if (!replyIds?.has(id)) activeComments.delete(id);
         } else if (key === 'w:hyperlink') {
           const rId = node?.[':@']?.['@_r:id'] ?? getAttr(node, 'id');
           const prevHref = currentHref;
@@ -1300,11 +1368,29 @@ function formatDateSuffix(date: string | undefined): string {
 }
 
 function formatCommentBody(_cid: string, c: Comment): string {
-  return `{>>${c.author}${formatDateSuffix(c.date)}: ${c.text}<<}`;
+  let body = `{>>${c.author}${formatDateSuffix(c.date)}: ${c.text}`;
+  if (c.replies && c.replies.length > 0) {
+    for (const reply of c.replies) {
+      body += `\n  {>>${reply.author}${formatDateSuffix(reply.date)}: ${reply.text}<<}`;
+    }
+    body += '\n<<}';
+  } else {
+    body += '<<}';
+  }
+  return body;
 }
 
 function formatCommentBodyWithId(cid: string, c: Comment): string {
-  return `{#${cid}>>${c.author}${formatDateSuffix(c.date)}: ${c.text}<<}`;
+  let body = `{#${cid}>>${c.author}${formatDateSuffix(c.date)}: ${c.text}`;
+  if (c.replies && c.replies.length > 0) {
+    for (const reply of c.replies) {
+      body += `\n  {>>${reply.author}${formatDateSuffix(reply.date)}: ${reply.text}<<}`;
+    }
+    body += '\n<<}';
+  } else {
+    body += '<<}';
+  }
+  return body;
 }
 
 function computeSegmentEnd(
@@ -1961,16 +2047,20 @@ export async function convertDocx(
   options?: { tableIndent?: string; alwaysUseCommentIds?: boolean },
 ): Promise<ConvertResult> {
   const zip = await loadZip(data);
-  const [comments, zoteroCitations, zoteroPrefs, author, commentIdMapping] = await Promise.all([
+  const [comments, zoteroCitations, zoteroPrefs, author, commentIdMapping, threads] = await Promise.all([
     extractComments(zip),
     extractZoteroCitations(zip),
     extractZoteroPrefs(zip),
     extractAuthor(zip),
     extractCommentIdMapping(zip),
+    extractCommentThreads(zip),
   ]);
 
+  // Group reply comments under their parents and get IDs to exclude from ranges
+  const replyIds = groupCommentThreads(comments, threads);
+
   const keyMap = buildCitationKeyMap(zoteroCitations, format);
-  const { content: docContent, zoteroBiblData } = await extractDocumentContent(zip, zoteroCitations, keyMap);
+  const { content: docContent, zoteroBiblData } = await extractDocumentContent(zip, zoteroCitations, keyMap, replyIds);
 
   // Extract consecutive Title-styled paragraphs from the beginning of the document
   const titleLines = extractTitleLines(docContent);

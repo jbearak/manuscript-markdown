@@ -2,7 +2,7 @@ import type MarkdownIt from 'markdown-it';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
 import type StateBlock from 'markdown-it/lib/rules_block/state_block.mjs';
 import { VALID_COLOR_IDS, getDefaultHighlightColor } from '../highlight-colors';
-import { PARA_PLACEHOLDER, preprocessCriticMarkup } from '../critic-markup';
+import { PARA_PLACEHOLDER, preprocessCriticMarkup, findMatchingClose } from '../critic-markup';
 
 /**
  * Defines a Manuscript Markdown pattern configuration
@@ -371,10 +371,9 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
     let idEnd = start + 2;
     while (idEnd < max && /[a-zA-Z0-9_-]/.test(src.charAt(idEnd))) idEnd++;
     if (idEnd > start + 2) {
-      // Check for {#id>>...<<} comment body with ID
+      // Check for {#id>>...<<} comment body with ID (depth-aware for nested replies)
       if (idEnd + 1 < max && src.charCodeAt(idEnd) === 0x3E /* > */ && src.charCodeAt(idEnd + 1) === 0x3E /* > */) {
-        const endMarker = '<<}';
-        const endPos = src.indexOf(endMarker, idEnd + 2);
+        const endPos = findMatchingClose(src, idEnd + 2);
         if (endPos !== -1) {
           if (!silent) {
             const content = src.slice(idEnd + 2, endPos);
@@ -383,7 +382,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
             addInlineContent(state, content);
             state.push('manuscript_markdown_comment_close', 'span', -1);
           }
-          state.pos = endPos + endMarker.length;
+          state.pos = endPos + 3;
           return true;
         }
       }
@@ -414,10 +413,9 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
     }
   }
 
-  // Check for comment {>>text<<}
+  // Check for comment {>>text<<} (depth-aware for nested replies)
   if (src.charCodeAt(start + 1) === 0x3E /* > */ && src.charCodeAt(start + 2) === 0x3E /* > */) {
-    const endMarker = '<<}';
-    const endPos = src.indexOf(endMarker, start + 3);
+    const endPos = findMatchingClose(src, start + 3);
     if (endPos !== -1) {
       if (!silent) {
         const content = src.slice(start + 3, endPos);
@@ -429,7 +427,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
 
         state.push('manuscript_markdown_comment_close', 'span', -1);
       }
-      state.pos = endPos + endMarker.length;
+      state.pos = endPos + 3;
       return true;
     }
   }
