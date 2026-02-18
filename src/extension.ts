@@ -968,10 +968,27 @@ async function exportMdToDocx(context: vscode.ExtensionContext, uri?: vscode.Uri
 
 	await vscode.workspace.fs.writeFile(docxUri, result.docx);
 
-	if (result.warnings.length > 0) {
-		vscode.window.showWarningMessage('Export completed with warnings: ' + result.warnings.join('; '));
+	const filename = docxUri.fsPath.split(/[/\\]/).pop()!;
+	const action = result.warnings.length > 0
+		? await vscode.window.showWarningMessage(
+			`Exported to "${filename}" with warnings: ${result.warnings.join('; ')}`,
+			'Open in Word'
+		)
+		: await vscode.window.showInformationMessage(
+			`Exported to "${filename}"`,
+			'Open in Word'
+		);
+	if (action === 'Open in Word') {
+		try {
+			const opened = await vscode.env.openExternal(docxUri);
+			if (!opened) {
+				vscode.window.showErrorMessage('Failed to open file in external application.');
+			}
+		} catch (err: unknown) {
+			const message = err instanceof Error ? err.message : String(err);
+			vscode.window.showErrorMessage(`Failed to open file: ${message}`);
+		}
 	}
-	vscode.window.showInformationMessage('Exported to ' + docxUri.fsPath.split(/[/\\]/).pop()!);
 }
 
 export function deactivate(): Thenable<void> | undefined {
