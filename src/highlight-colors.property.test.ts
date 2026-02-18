@@ -60,4 +60,12 @@ describe('Property 3: Single-Pass Decoration Extraction Equivalence', () => {
       { numRuns: 200 }
     );
   });
+
+  test('extractAllDecorationRanges preserves format highlights inside additions', () => {
+    const text = '{++added ==highlighted== text++}';
+    const all = extractAllDecorationRanges(text, 'yellow');
+    const expectedHighlights = extractHighlightRanges(text, 'yellow');
+    expect([...all.highlights.entries()].sort((a, b) => a[0].localeCompare(b[0])))
+      .toEqual([...expectedHighlights.entries()].sort((a, b) => a[0].localeCompare(b[0])));
+  });
 });

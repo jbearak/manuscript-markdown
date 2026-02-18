@@ -87,16 +87,22 @@ const bibReverseMap = new Map<string, Set<string>>();
 const docToBibMap = new Map<string, string>();
 
 function updateBibReverseMap(docUri: string, docText: string): void {
-  removeBibReverseMapEntry(docUri);
-  const bibPath = resolveBibliographyPath(docUri, docText, workspaceRootPaths);
-  if (bibPath) {
-    const canonical = canonicalizeFsPath(bibPath);
-    if (!bibReverseMap.has(canonical)) {
-      bibReverseMap.set(canonical, new Set());
-    }
-    bibReverseMap.get(canonical)!.add(docUri);
-    docToBibMap.set(docUri, canonical);
-  }
+	try {
+		const bibPath = resolveBibliographyPath(docUri, docText, workspaceRootPaths);
+		removeBibReverseMapEntry(docUri);
+		if (bibPath) {
+			const canonical = canonicalizeFsPath(bibPath);
+			if (!bibReverseMap.has(canonical)) {
+				bibReverseMap.set(canonical, new Set());
+			}
+			bibReverseMap.get(canonical)!.add(docUri);
+			docToBibMap.set(docUri, canonical);
+		}
+	} catch (error) {
+		connection.console.error(
+			`Error updating bibliography reverse map for ${docUri}: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`
+		);
+	}
 }
 
 function removeBibReverseMapEntry(docUri: string): void {
@@ -538,13 +544,38 @@ async function validateCitekeys(doc: TextDocument): Promise<void> {
 }
 
 function revalidateMarkdownDocsForBib(changedBibPath: string): void {
-  const changedCanonical = canonicalizeFsPath(changedBibPath);
-  for (const docUri of getMarkdownUrisForBib(changedCanonical)) {
-    const doc = documents.get(docUri);
-    if (doc) {
-      validateCitekeys(doc);
-    }
-  }
+	const changedCanonical = canonicalizeFsPath(changedBibPath);
+	const trackedUris = new Set(getMarkdownUrisForBib(changedCanonical));
+
+	for (const docUri of trackedUris) {
+		const doc = documents.get(docUri);
+		if (doc) {
+			validateCitekeys(doc);
+		}
+	}
+
+	// Recover markdown docs that were open before their referenced .bib file existed.
+	for (const doc of documents.all()) {
+		if (!isMarkdownUri(doc.uri, doc.languageId)) {
+			continue;
+		}
+		if (trackedUris.has(doc.uri) || docToBibMap.has(doc.uri)) {
+			continue;
+		}
+		try {
+			const docText = doc.getText();
+			const bibPath = resolveBibliographyPath(doc.uri, docText, workspaceRootPaths);
+			if (!bibPath || canonicalizeFsPath(bibPath) !== changedCanonical) {
+				continue;
+			}
+			updateBibReverseMap(doc.uri, docText);
+			validateCitekeys(doc);
+		} catch (error) {
+			connection.console.error(
+				`Error revalidating markdown doc ${doc.uri} for bibliography ${changedBibPath}: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`
+			);
+		}
+	}
 }
 
 async function getBibDataForPath(bibPath: string): Promise<ParsedBibData | undefined> {

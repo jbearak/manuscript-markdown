@@ -1,3 +1,4 @@
+import { findMatchingClose } from './critic-markup';
 /** Canonical color name → hex value mapping for Word highlight colors */
 export const HIGHLIGHT_COLORS: Record<string, string> = {
   'yellow':      '#FFFF00',
@@ -50,24 +51,6 @@ export function setDefaultHighlightColor(color: string): void {
 }
 export function getDefaultHighlightColor(): string {
   return _defaultHighlightColor;
-}
-function findMatchingCommentClose(text: string, startPos: number): number {
-  let depth = 1;
-  let pos = startPos;
-  while (pos < text.length && depth > 0) {
-    const nextOpen = text.indexOf('{>>', pos);
-    const nextClose = text.indexOf('<<}', pos);
-    if (nextClose === -1) break;
-    if (nextOpen !== -1 && nextOpen < nextClose) {
-      depth++;
-      pos = nextOpen + 3;
-    } else {
-      depth--;
-      if (depth === 0) return nextClose;
-      pos = nextClose + 3;
-    }
-  }
-  return -1;
 }
 
 /**
@@ -230,19 +213,12 @@ export interface AllDecorationRanges {
 
 export function extractAllDecorationRanges(text: string, defaultColor: string): AllDecorationRanges {
   const resolvedDefault = VALID_COLOR_IDS.includes(defaultColor) ? defaultColor : 'yellow';
-  const highlights = new Map<string, Array<{ start: number; end: number }>>();
+  const highlights = extractHighlightRanges(text, resolvedDefault);
   const comments: Array<{ start: number; end: number }> = [];
   const additions: Array<{ start: number; end: number }> = [];
   const deletions: Array<{ start: number; end: number }> = [];
   const delimiters: Array<{ start: number; end: number }> = [];
   const substitutionNew: Array<{ start: number; end: number }> = [];
-  const criticSpans: Array<{ start: number; end: number }> = [];
-
-  const pushHl = (key: string, s: number, e: number) => {
-    if (!highlights.has(key)) highlights.set(key, []);
-    highlights.get(key)!.push({ start: s, end: e });
-  };
-  let criticIdx = 0;
 
   const len = text.length;
   let i = 0;
@@ -282,7 +258,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
           i = ci + 3; continue;
         }
       } else if (c2 === 0x3E && c3 === 0x3E) { // {>>
-        const ci = findMatchingCommentClose(text, i + 3);
+        const ci = findMatchingClose(text, i + 3);
         if (ci !== -1) {
           // Skip comment delimiters (preserves TextMate tag punctuation scopes)
           comments.push({ start: i + 3, end: ci });
@@ -292,36 +268,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
         const ci = text.indexOf('==}', i + 3);
         if (ci !== -1) {
           // Skip highlight delimiters (preserves TextMate tag punctuation scopes)
-          pushHl('critic', i + 3, ci);
-          criticSpans.push({ start: i, end: ci + 3 });
           i = ci + 3; continue;
-        }
-      }
-    }
-
-    if (text.charCodeAt(i) === 0x3D && i + 1 < len && text.charCodeAt(i + 1) === 0x3D) {
-      if (i === 0 || text.charCodeAt(i - 1) !== 0x7B) {
-        let j = i + 2;
-        while (j < len && text.charCodeAt(j) !== 0x7D && text.charCodeAt(j) !== 0x3D) j++;
-        if (j > i + 2 && j + 1 < len && text.charCodeAt(j) === 0x3D && text.charCodeAt(j + 1) === 0x3D) {
-          let mEnd = j + 2;
-          let colorId: string | undefined;
-          if (mEnd < len && text.charCodeAt(mEnd) === 0x7B) {
-            const cb = text.indexOf('}', mEnd + 1);
-            if (cb !== -1) {
-              const cand = text.slice(mEnd + 1, cb);
-              if (/^[a-z0-9-]+$/.test(cand)) { colorId = cand; mEnd = cb + 1; }
-            }
-          }
-          while (criticIdx < criticSpans.length && criticSpans[criticIdx].end <= i) {
-            criticIdx++;
-          }
-          const inside = criticIdx < criticSpans.length &&
-            criticSpans[criticIdx].start <= i && mEnd <= criticSpans[criticIdx].end;
-          if (!inside) {
-            pushHl(colorId && VALID_COLOR_IDS.includes(colorId) ? colorId : resolvedDefault, i, mEnd);
-          }
-          i = mEnd; continue;
         }
       }
     }
