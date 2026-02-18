@@ -84,7 +84,9 @@ export function extractHighlightRanges(text: string, defaultColor: string): Map<
     while (cPtr < criticRanges.length && (criticRanges[cPtr].end + 3) < mStart) {
       cPtr++;
     }
-    // Check if current critic range contains this highlight
+    // Containment check (not overlap): skip ==...== matches that fall entirely
+    // inside a {==...==} span to avoid double-decorating CriticMarkup highlights.
+    // Overlap is unnecessary — the shared == delimiters can't meaningfully straddle.
     const insideCritic = cPtr < criticRanges.length &&
       (criticRanges[cPtr].start - 3) <= mStart && mEnd <= (criticRanges[cPtr].end + 3);
     if (insideCritic) { continue; }
