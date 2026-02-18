@@ -35,3 +35,4 @@ All settings are under the `manuscriptMarkdown` namespace in VS Code settings.
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `tableIndent` | integer | `2` | Number of spaces per indent level for HTML tables in DOCX to Markdown conversion |
+| `blockquoteStyle` | string | `"Quote"` | Word paragraph style for blockquotes on MD→DOCX export: `Quote` or `IntenseQuote` |

@@ -263,3 +263,20 @@ test('Property 6: Author name resolution', () => {
     { numRuns: 100 }
   );
 });
+
+test('--blockquote-style parses valid values', () => {
+  const quoteOpts = parseArgs(['node', 'cli.js', 'file.md', '--blockquote-style', 'Quote']);
+  expect(quoteOpts.blockquoteStyle).toBe('Quote');
+
+  const intenseOpts = parseArgs(['node', 'cli.js', 'file.md', '--blockquote-style', 'IntenseQuote']);
+  expect(intenseOpts.blockquoteStyle).toBe('IntenseQuote');
+});
+
+test('--blockquote-style rejects invalid values', () => {
+  expect(() => parseArgs(['node', 'cli.js', 'file.md', '--blockquote-style', 'Fancy'])).toThrow('Invalid blockquote style');
+});
+
+test('blockquoteStyle defaults to Quote', () => {
+  const opts = parseArgs(['node', 'cli.js', 'file.md']);
+  expect(opts.blockquoteStyle).toBe('Quote');
+});

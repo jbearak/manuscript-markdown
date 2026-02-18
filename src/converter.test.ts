@@ -16,6 +16,7 @@ import {
   RunFormatting,
   isToggleOn,
   parseHeadingLevel,
+  parseBlockquoteLevel,
   parseRunProperties,
   formatLocalIsoMinute,
   getLocalTimezoneOffset,
@@ -1884,6 +1885,71 @@ describe('w:br line break handling', () => {
     const { docx: docx2 } = await convertMdToDocx(pass1.markdown);
     const pass2 = await convertDocx(docx2);
     expect(pass2.markdown).toContain('line one\nline two');
+  });
+});
+
+describe('parseBlockquoteLevel', () => {
+  test('returns 1 for Quote style without explicit indent', () => {
+    const children = [{ 'w:pStyle': [], ':@': { '@_w:val': 'Quote' } }];
+    expect(parseBlockquoteLevel(children)).toBe(1);
+  });
+
+  test('returns 1 for IntenseQuote style (case-insensitive)', () => {
+    const children = [{ 'w:pStyle': [], ':@': { '@_w:val': 'IntenseQuote' } }];
+    expect(parseBlockquoteLevel(children)).toBe(1);
+  });
+
+  test('returns level based on indent', () => {
+    const children = [
+      { 'w:pStyle': [], ':@': { '@_w:val': 'Quote' } },
+      { 'w:ind': [], ':@': { '@_w:left': '1440' } },
+    ];
+    expect(parseBlockquoteLevel(children)).toBe(2);
+  });
+
+  test('returns undefined for non-quote style', () => {
+    const children = [{ 'w:pStyle': [], ':@': { '@_w:val': 'Normal' } }];
+    expect(parseBlockquoteLevel(children)).toBeUndefined();
+  });
+
+  test('returns undefined when pStyle is absent', () => {
+    expect(parseBlockquoteLevel([])).toBeUndefined();
+  });
+});
+
+describe('Blockquote round-trip', () => {
+  test('single blockquote round-trips through md→docx→md', async () => {
+    const md = '> quoted text';
+    const { docx } = await convertMdToDocx(md);
+    const result = await convertDocx(docx);
+    expect(result.markdown).toContain('> quoted text');
+  });
+
+  test('nested blockquote round-trips through md→docx→md', async () => {
+    const md = '> > nested';
+    const { docx } = await convertMdToDocx(md);
+    const result = await convertDocx(docx);
+    expect(result.markdown).toContain('> > nested');
+  });
+
+  test('DOCX with Quote style detected as blockquote', async () => {
+    const xml = wrapDocumentXml(
+      '<w:p><w:pPr><w:pStyle w:val="Quote"/><w:ind w:left="720"/></w:pPr>'
+      + '<w:r><w:t>quoted text</w:t></w:r></w:p>'
+    );
+    const buf = await buildSyntheticDocx(xml);
+    const result = await convertDocx(buf);
+    expect(result.markdown).toContain('> quoted text');
+  });
+
+  test('DOCX with IntenseQuote style detected as blockquote', async () => {
+    const xml = wrapDocumentXml(
+      '<w:p><w:pPr><w:pStyle w:val="IntenseQuote"/><w:ind w:left="720"/></w:pPr>'
+      + '<w:r><w:t>intense</w:t></w:r></w:p>'
+    );
+    const buf = await buildSyntheticDocx(xml);
+    const result = await convertDocx(buf);
+    expect(result.markdown).toContain('> intense');
   });
 });
 

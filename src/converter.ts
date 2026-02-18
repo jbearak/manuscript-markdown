@@ -89,6 +89,7 @@ export type ContentItem =
       headingLevel?: number;   // 1–6 if heading, undefined otherwise
       listMeta?: ListMeta;     // present if list item
       isTitle?: boolean;       // true if Word "Title" paragraph style
+      blockquoteLevel?: number; // 1+ if Quote/IntenseQuote paragraph style
     }
   | { type: 'math'; latex: string; display: boolean; commentIds: Set<string> };
 export interface TableRow {
@@ -217,6 +218,23 @@ export function parseTitleStyle(pPrChildren: any[]): boolean {
   const pStyleElement = pPrChildren.find(child => child['w:pStyle'] !== undefined);
   if (!pStyleElement) return false;
   return getAttr(pStyleElement, 'val').toLowerCase() === 'title';
+}
+
+export function parseBlockquoteLevel(pPrChildren: any[]): number | undefined {
+  const pStyleElement = pPrChildren.find(child => child['w:pStyle'] !== undefined);
+  if (!pStyleElement) return undefined;
+  const val = getAttr(pStyleElement, 'val').toLowerCase();
+  if (val !== 'quote' && val !== 'intensequote') return undefined;
+
+  // Extract left indent to determine nesting level
+  const indElement = pPrChildren.find(child => child['w:ind'] !== undefined);
+  if (indElement) {
+    const left = parseInt(getAttr(indElement, 'left'), 10);
+    if (!isNaN(left) && left > 0) {
+      return Math.max(1, Math.round(left / 720));
+    }
+  }
+  return 1;
 }
 
 export function parseListMeta(pPrChildren: any[], numberingDefs: Map<string, Map<string, 'bullet' | 'ordered'>>): ListMeta | undefined {
@@ -1189,6 +1207,7 @@ export async function extractDocumentContent(
           let headingLevel: number | undefined;
           let listMeta: ListMeta | undefined;
           let isTitle = false;
+          let blockquoteLevel: number | undefined;
           let paraFormatting = currentFormatting;
 
           const paraChildren = Array.isArray(node[key]) ? node[key] : [node[key]];
@@ -1198,6 +1217,7 @@ export async function extractDocumentContent(
               headingLevel = parseHeadingLevel(pPrChildren);
               listMeta = parseListMeta(pPrChildren, numberingDefs);
               isTitle = parseTitleStyle(pPrChildren);
+              blockquoteLevel = parseBlockquoteLevel(pPrChildren);
               const pRPrElement = pPrChildren.find(pprChild => pprChild['w:rPr'] !== undefined);
               if (pRPrElement) {
                 const pRPrChildren = Array.isArray(pRPrElement['w:rPr']) ? pRPrElement['w:rPr'] : [pRPrElement['w:rPr']];
@@ -1207,10 +1227,10 @@ export async function extractDocumentContent(
             }
           }
 
-          // Always push a new para when heading/list/title metadata is present (so metadata
+          // Always push a new para when heading/list/title/blockquote metadata is present (so metadata
           // isn't silently dropped after empty paragraphs).  For plain paragraphs,
           // push only when the previous item isn't already a para separator.
-          const needsPara = inTableCell || (headingLevel || listMeta || isTitle)
+          const needsPara = inTableCell || (headingLevel || listMeta || isTitle || blockquoteLevel)
             ? true
             : target.length > 0 && target[target.length - 1].type !== 'para';
 
@@ -1219,6 +1239,7 @@ export async function extractDocumentContent(
             if (headingLevel) paraItem.headingLevel = headingLevel;
             if (listMeta) paraItem.listMeta = listMeta;
             if (isTitle) paraItem.isTitle = true;
+            if (blockquoteLevel) paraItem.blockquoteLevel = blockquoteLevel;
             target.push(paraItem);
           }
           walk(paraChildren, paraFormatting, target, inTableCell);
@@ -1816,6 +1837,8 @@ export function buildMarkdown(
           : ' '.repeat(3 * item.listMeta.level);
         const marker = item.listMeta.type === 'bullet' ? '- ' : '1. ';
         output.push(indent + marker);
+      } else if (item.blockquoteLevel) {
+        output.push('> '.repeat(item.blockquoteLevel));
       }
 
       i++;

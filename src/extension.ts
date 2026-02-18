@@ -941,6 +941,7 @@ async function exportMdToDocx(context: vscode.ExtensionContext, uri?: vscode.Uri
 	const sourceDir = path.dirname(input.basePath);
 	const config = vscode.workspace.getConfiguration('manuscriptMarkdown');
 	const mixedCitationStyle = config.get<'separate' | 'unified'>('mixedCitationStyle', 'separate');
+	const blockquoteStyle = config.get<'Quote' | 'IntenseQuote'>('blockquoteStyle', 'Quote');
 	const result = await convertMdToDocx(input.markdown, {
 		bibtex: input.bibtex,
 		authorName: authorName ?? undefined,
@@ -948,6 +949,7 @@ async function exportMdToDocx(context: vscode.ExtensionContext, uri?: vscode.Uri
 		cslCacheDir,
 		sourceDir,
 		mixedCitationStyle,
+		blockquoteStyle,
 		onStyleNotFound: async (styleName: string) => {
 			const choice = await vscode.window.showWarningMessage(
 				`CSL style "${styleName}" is not bundled. Download it from the CSL repository? Without it, citations will use plain-text fallback formatting.`,

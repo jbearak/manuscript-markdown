@@ -692,6 +692,15 @@
           ],
           "description": "Citation key format for DOCX to Markdown conversion"
         },
+        "manuscriptMarkdown.blockquoteStyle": {
+          "type": "string",
+          "enum": [
+            "Quote",
+            "IntenseQuote"
+          ],
+          "default": "Quote",
+          "description": "Word paragraph style to use for blockquotes when converting Markdown to DOCX"
+        },
         "manuscriptMarkdown.alwaysUseCommentIds": {
           "type": "boolean",
           "default": false,

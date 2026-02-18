@@ -54,6 +54,7 @@ Produces `paper.docx`. Automatically loads `paper.bib` if present.
 | `--template <path>` | MD→DOCX | Template DOCX for styling | none |
 | `--author <name>` | MD→DOCX | Author name | OS username |
 | `--mixed-citation-style <style>` | MD→DOCX | Mixed citation style: `separate`, `unified` | `separate` |
+| `--blockquote-style <style>` | MD→DOCX | Blockquote paragraph style: `Quote`, `IntenseQuote` | `Quote` |
 | `--csl-cache-dir <path>` | MD→DOCX | CSL style cache directory | `~/.manuscript-markdown/csl-cache` |
 
 ## Examples

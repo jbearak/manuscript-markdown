@@ -18,6 +18,7 @@ The converter supports DOCX → Markdown → DOCX round-tripping. The following 
 - **Math**: OMML equations ↔ LaTeX (`$inline$` and `$$display$$`)
 - **Hyperlinks**: Markdown links ↔ Word hyperlinks (with proper escaping)
 - **Highlights**: colored highlights ↔ `==text=={color}` syntax
+- **Blockquotes**: `> quoted text` ↔ Word Quote/Intense Quote paragraph style (with nesting)
 - **Tables**: DOCX→Markdown import produces HTML tables (`<table>/<tr>/<th>/<td>`) to preserve multi-paragraph cell content; Markdown→DOCX export accepts both HTML tables and pipe-delimited tables (with `colspan` and `rowspan` support)
 
 ## Citation Key Formats
@@ -93,7 +94,7 @@ If a style is not bundled, you will be prompted to download it from the [CSL sty
 
 All [round-trip features](#round-trip-features) are preserved on export. The following additional features are supported:
 
-- **Blockquotes**: indented paragraphs with Quote style
+- **Blockquotes**: indented paragraphs with Quote or Intense Quote style (configurable via `manuscriptMarkdown.blockquoteStyle`)
 - **Code**: inline code with monospace character style, fenced code blocks with shaded paragraph style
 - **Bibliography**: automatically generated and appended as a `ZOTERO_BIBL` field when a CSL style is specified
 - **Mixed citations**: Mixed Zotero/non-Zotero grouped citations are split — Zotero entries become a field code and non-Zotero entries become plain text. The `manuscriptMarkdown.mixedCitationStyle` setting controls rendering: `"separate"` (default) gives each portion its own parentheses for clean Zotero refresh, while `"unified"` wraps everything in one set of parentheses (see [Zotero Round-Trip](zotero-roundtrip.md#mixedcitationstyle-setting)). Missing keys appear inline as `@citekey` with a post-bibliography note.

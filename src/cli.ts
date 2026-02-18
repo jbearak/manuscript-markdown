@@ -17,6 +17,7 @@ export interface CliOptions {
   cslCacheDir: string;
   tableIndent: string;
   alwaysUseCommentIds: boolean;
+  blockquoteStyle: 'Quote' | 'IntenseQuote';
 }
 
 export function parseArgs(argv: string[]): CliOptions {
@@ -31,6 +32,7 @@ export function parseArgs(argv: string[]): CliOptions {
     cslCacheDir: path.join(os.homedir(), '.manuscript-markdown', 'csl-cache'),
     tableIndent: '  ',
     alwaysUseCommentIds: false,
+    blockquoteStyle: 'Quote',
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -80,6 +82,12 @@ export function parseArgs(argv: string[]): CliOptions {
         throw new Error(`Invalid table indent "${val}". Use a non-negative integer`);
       }
       options.tableIndent = ' '.repeat(n);
+    } else if (arg === '--blockquote-style') {
+      const style = requireValue('--blockquote-style');
+      if (!['Quote', 'IntenseQuote'].includes(style)) {
+        throw new Error(`Invalid blockquote style "${style}". Use Quote or IntenseQuote`);
+      }
+      options.blockquoteStyle = style as 'Quote' | 'IntenseQuote';
     } else if (arg.startsWith('--')) {
       throw new Error(`Unknown option "${arg}"`);
     } else if (!options.inputPath) {
@@ -119,7 +127,8 @@ Options:
   --mixed-citation-style <style>  Mixed citation style: separate, unified (default: separate)
   --csl-cache-dir <path>          CSL style cache directory
   --table-indent <n>              Spaces per indent level in HTML tables (DOCX→MD, default: 2)
-  --always-use-comment-ids        Always use ID-based comment syntax (DOCX→MD)`);
+  --always-use-comment-ids        Always use ID-based comment syntax (DOCX→MD)
+  --blockquote-style <style>      Blockquote style: Quote, IntenseQuote (MD→DOCX, default: Quote)`);
 }
 
 function showVersion() {
@@ -271,6 +280,7 @@ async function runMdToDocx(options: CliOptions) {
     sourceDir: path.dirname(options.inputPath),
     onStyleNotFound: async () => true,
     mixedCitationStyle: options.mixedCitationStyle,
+    blockquoteStyle: options.blockquoteStyle,
   });
 
   fs.writeFileSync(docxPath, result.docx);

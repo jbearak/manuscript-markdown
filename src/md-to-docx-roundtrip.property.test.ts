@@ -6,6 +6,7 @@ import { convertDocx } from './converter';
 function extractPlainText(md: string): string {
   return md
     .replace(/^#+\s*/gm, '')           // strip heading markers
+    .replace(/^(> )+/gm, '')          // strip blockquote markers
     .replace(/^[-*]\s+/gm, '')         // strip bullet markers
     .replace(/^\d+\.\s+/gm, '')       // strip ordered list markers
     .replace(/\*\*([^*]+)\*\*/g, '$1') // strip bold
@@ -27,8 +28,9 @@ const headingGen = fc.tuple(fc.integer({ min: 1, max: 3 }), safeText)
 const bulletGen = safeText.map(text => '- ' + text);
 const orderedGen = safeText.map(text => '1. ' + text);
 const boldGen = safeText.map(text => '**' + text + '**');
+const blockquoteGen = safeText.map(text => '> ' + text);
 
-const elementGen = fc.oneof(paragraphGen, headingGen, bulletGen, orderedGen, boldGen);
+const elementGen = fc.oneof(paragraphGen, headingGen, bulletGen, orderedGen, boldGen, blockquoteGen);
 const documentGen = fc.array(elementGen, { minLength: 1, maxLength: 5 })
   .map(elements => elements.join('\n\n'));
 
