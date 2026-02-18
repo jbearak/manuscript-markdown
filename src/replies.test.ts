@@ -290,6 +290,57 @@ describe('preprocessCriticMarkup: nested replies', () => {
   });
 });
 
+describe('Non-ID comment replies (inline {>>...<<})', () => {
+  test('non-ID comment with replies round-trips through MD→DOCX→MD', async () => {
+    const md = `{==some text==}{>>Alice (2024-01-15T14:30-05:00): Parent comment
+  {>>Bob (2024-01-16T10:00-05:00): Reply<<}
+<<}`;
+
+    const { docx } = await convertMdToDocx(md);
+    const zip = await JSZip.loadAsync(docx);
+
+    // comments.xml should have 2 comments (parent + reply)
+    const commentsXml = await zip.file('word/comments.xml')!.async('string');
+    expect((commentsXml.match(/w:comment /g) || []).length).toBe(2);
+
+    // commentsExtended.xml should exist with reply linkage
+    const extFile = zip.file('word/commentsExtended.xml');
+    expect(extFile).not.toBeNull();
+    const extXml = await extFile!.async('string');
+    expect(extXml).toContain('w15:paraIdParent');
+  });
+});
+
+describe('Multi-level reply chain flattening', () => {
+  test('deep reply chains are flattened to root parent', () => {
+    const comments = new Map<string, Comment>([
+      ['0', { author: 'Alice', text: 'Root', date: '', paraId: 'P001' }],
+      ['1', { author: 'Bob', text: 'Reply to root', date: '', paraId: 'P002' }],
+      ['2', { author: 'Carol', text: 'Reply to reply', date: '', paraId: 'P003' }],
+    ]);
+
+    // P002 → P001 (Bob replies to Alice)
+    // P003 → P002 (Carol replies to Bob — deeper chain)
+    const threads = new Map<string, string>([
+      ['P002', 'P001'],
+      ['P003', 'P002'],
+    ]);
+
+    const replyIds = groupCommentThreads(comments, threads);
+
+    // Both Bob and Carol should be reply IDs
+    expect(replyIds.has('1')).toBe(true);
+    expect(replyIds.has('2')).toBe(true);
+
+    // Root comment should have both replies flattened
+    const root = comments.get('0')!;
+    expect(root.replies).toBeDefined();
+    expect(root.replies!.length).toBe(2);
+    expect(root.replies!.some(r => r.text === 'Reply to root')).toBe(true);
+    expect(root.replies!.some(r => r.text === 'Reply to reply')).toBe(true);
+  });
+});
+
 describe('No-reply regression', () => {
   test('comments without replies produce standard format', () => {
     const comments = new Map<string, Comment>([

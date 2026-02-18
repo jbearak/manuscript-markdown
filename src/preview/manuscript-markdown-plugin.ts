@@ -123,7 +123,13 @@ function manuscriptMarkdownBlock(state: StateBlock, startLine: number, endLine: 
   
   // Search for the closing marker starting from current position
   const searchStart = pos + 3;
-  let closePos = src.indexOf(closeMarker, searchStart);
+  let closePos: number;
+  if (lineStart === '{>>') {
+    // Use depth-aware matching so nested {>>...<<} replies don't close early
+    closePos = findMatchingClose(src, searchStart);
+  } else {
+    closePos = src.indexOf(closeMarker, searchStart);
+  }
   if (closePos === -1) {
     return false;
   }

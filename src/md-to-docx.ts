@@ -242,10 +242,14 @@ function criticMarkupRule(state: any, silent: boolean): boolean {
     }
 
     if (type === 'critic_comment') {
-      const parsed = parseCommentContent(content);
+      const { parentText, replies } = extractReplies(content);
+      const parsed = parseCommentContent(parentText);
       token.author = parsed.author;
       token.date = parsed.date;
       token.commentText = parsed.text;
+      if (replies.length > 0) {
+        token.replies = replies;
+      }
     }
   }
 
@@ -621,6 +625,7 @@ function processInlineChildren(tokens: any[]): MdRun[] {
             author: token.author,
             date: token.date,
             commentText: token.commentText,
+            replies: token.replies,
             ...formatStack,
             href: currentHref
           });
@@ -1432,11 +1437,31 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         const author = nextRun.author || options?.authorName || 'Unknown';
         const date = normalizeToUtcIso(nextRun.date || '', state.timezone);
         const commentBody = nextRun.commentText || '';
-        state.comments.push({ id: commentId, author, date, text: commentBody, paraId: generateParaId() });
+        const parentParaId = generateParaId();
+        state.comments.push({ id: commentId, author, date, text: commentBody, paraId: parentParaId });
         state.hasComments = true;
+        // Generate reply entries
+        const replyEntries: Array<{replyId: number}> = [];
+        if (nextRun.replies && nextRun.replies.length > 0) {
+          for (const reply of nextRun.replies) {
+            const replyId = state.commentId++;
+            const replyParaId = generateParaId();
+            const replyAuthor = reply.author || options?.authorName || 'Unknown';
+            const replyDate = normalizeToUtcIso(reply.date || '', state.timezone);
+            state.comments.push({ id: replyId, author: replyAuthor, date: replyDate, text: reply.text, paraId: replyParaId, parentParaId });
+            replyEntries.push({ replyId });
+          }
+        }
         xml += '<w:commentRangeStart w:id="' + commentId + '"/>';
+        for (const re of replyEntries) {
+          xml += '<w:commentRangeStart w:id="' + re.replyId + '"/>';
+        }
         const highlightRun = { ...run, type: 'text' as const, highlight: true };
         xml += generateRun(run.text, generateRPr(highlightRun));
+        for (const re of replyEntries) {
+          xml += '<w:commentRangeEnd w:id="' + re.replyId + '"/>';
+          xml += '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="' + re.replyId + '"/></w:r>';
+        }
         xml += '<w:commentRangeEnd w:id="' + commentId + '"/>';
         xml += '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="' + commentId + '"/></w:r>';
         ri++; // skip the comment run
@@ -1449,14 +1474,35 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       const author = run.author || options?.authorName || 'Unknown';
       const date = normalizeToUtcIso(run.date || '', state.timezone);
       const commentBody = run.commentText || '';
+      const parentParaId = generateParaId();
 
-      state.comments.push({ id: commentId, author, date, text: commentBody, paraId: generateParaId() });
+      state.comments.push({ id: commentId, author, date, text: commentBody, paraId: parentParaId });
       state.hasComments = true;
+
+      // Generate reply entries
+      const replyEntries: Array<{replyId: number}> = [];
+      if (run.replies && run.replies.length > 0) {
+        for (const reply of run.replies) {
+          const replyId = state.commentId++;
+          const replyParaId = generateParaId();
+          const replyAuthor = reply.author || options?.authorName || 'Unknown';
+          const replyDate = normalizeToUtcIso(reply.date || '', state.timezone);
+          state.comments.push({ id: replyId, author: replyAuthor, date: replyDate, text: reply.text, paraId: replyParaId, parentParaId });
+          replyEntries.push({ replyId });
+        }
+      }
 
       if (run.text) {
         xml += '<w:commentRangeStart w:id="' + commentId + '"/>';
+        for (const re of replyEntries) {
+          xml += '<w:commentRangeStart w:id="' + re.replyId + '"/>';
+        }
         const highlightRun = { ...run, type: 'text' as const, highlight: true };
         xml += generateRun(run.text, generateRPr(highlightRun));
+        for (const re of replyEntries) {
+          xml += '<w:commentRangeEnd w:id="' + re.replyId + '"/>';
+          xml += '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="' + re.replyId + '"/></w:r>';
+        }
         xml += '<w:commentRangeEnd w:id="' + commentId + '"/>';
       }
       xml += '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="' + commentId + '"/></w:r>';

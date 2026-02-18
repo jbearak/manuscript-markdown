@@ -468,7 +468,7 @@ export async function extractComments(data: Uint8Array | JSZip): Promise<Map<str
     const text = tNodes.map(t => nodeText(t['w:t'] || [])).join('');
     // Extract w14:paraId from the first <w:p> child
     const pNodes = findAllDeep(node['w:comment'] || [], 'w:p');
-    const paraId = pNodes.length > 0 ? (pNodes[0]?.[':@']?.['@_w14:paraId'] ?? undefined) : undefined;
+    const paraId = pNodes[0]?.[':@']?.['@_w14:paraId'];
     comments.set(id, { author, text, date, paraId });
   }
   return comments;
@@ -510,11 +510,21 @@ export function groupCommentThreads(
     }
   }
 
-  // Attach replies to parents
+  // Attach replies to parents, flattening deeper chains to the root parent.
+  // Word UI only produces flat reply lists, but third-party generators could
+  // create deeper chains (reply-to-reply). We resolve these by walking up
+  // the thread until we find the root (non-reply) comment.
   for (const [childParaId, parentParaId] of threads) {
     const childId = paraIdToCommentId.get(childParaId);
-    const parentId = paraIdToCommentId.get(parentParaId);
-    if (!childId || !parentId) continue;
+    if (!childId) continue;
+
+    // Walk up to the root parent
+    let resolvedParaId = parentParaId;
+    while (threads.has(resolvedParaId)) {
+      resolvedParaId = threads.get(resolvedParaId)!;
+    }
+    const parentId = paraIdToCommentId.get(resolvedParaId);
+    if (!parentId) continue;
 
     const parent = comments.get(parentId);
     const child = comments.get(childId);
