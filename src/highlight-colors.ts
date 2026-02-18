@@ -255,9 +255,7 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
           const content = text.slice(i + 3, ci);
           const cai = content.indexOf('~>');
           if (cai !== -1) {
-            if (cai < content.length - 2) {
-              delimiters.push({ start: i + 3 + cai, end: i + 3 + cai + 2 });
-            }
+            delimiters.push({ start: i + 3 + cai, end: i + 3 + cai + 2 });
             const newStart = i + 3 + cai + 2;
             if (ci > newStart) substitutionNew.push({ start: newStart, end: ci });
           }
