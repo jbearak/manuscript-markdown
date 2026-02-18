@@ -29,6 +29,7 @@ import {
 	ParsedBibData,
 	findBibKeyAtOffset,
 	findCitekeyAtOffset,
+	findUsagesForKey,
 	fsPathToUri,
 	getCompletionContextAtOffset,
 	parseBibDataFromText,
@@ -663,15 +664,13 @@ async function findReferencesForKey(key: string, targetBibPath: string): Promise
 		}
 		const text = doc.getText();
 
-		for (const usage of scanCitationUsages(text)) {
-			if (usage.key === key) {
-				locations.push(
-					Location.create(
-						uri,
-						Range.create(doc.positionAt(usage.keyStart), doc.positionAt(usage.keyEnd))
-					)
-				);
-			}
+		for (const usage of findUsagesForKey(text, key)) {
+			locations.push(
+				Location.create(
+					uri,
+					Range.create(doc.positionAt(usage.keyStart), doc.positionAt(usage.keyEnd))
+				)
+			);
 		}
 	}
 
