@@ -1821,7 +1821,7 @@ export function buildMarkdown(
 
     function scan(itemList: ContentItem[]): void {
       for (const item of itemList) {
-        if (item.type === 'text' || item.type === 'citation') {
+        if ((item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'math') && item.commentIds) {
           const ids = item.commentIds;
           for (const id of ids) {
             if (!prevIds.has(id)) starts.set(id, Math.min(starts.get(id) ?? pos, pos));
