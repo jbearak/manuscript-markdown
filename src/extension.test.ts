@@ -335,6 +335,33 @@ describe('Syntax grammar invariants', () => {
     expect(highlightRule.endCaptures?.['2']?.name).toBe('punctuation.definition.tag.end.manuscript-markdown');
     expect(highlightRule.match).toBeUndefined();
   });
+
+  it('no repository rule contains both while and end (while silently overrides end)', () => {
+    const grammarPath = path.join(__dirname, '..', 'syntaxes', 'manuscript-markdown.json');
+    const grammar = JSON.parse(fs.readFileSync(grammarPath, 'utf-8'));
+    const repo = grammar?.repository ?? {};
+
+    for (const [name, rule] of Object.entries(repo)) {
+      const r = rule as Record<string, unknown>;
+      if (r.while !== undefined && r.end !== undefined) {
+        throw new Error(`Rule "${name}" has both while and end; while silently overrides end in vscode-textmate`);
+      }
+    }
+  });
+
+  it('comment scopes use meta.comment family (not comment.block)', () => {
+    const grammarPath = path.join(__dirname, '..', 'syntaxes', 'manuscript-markdown.json');
+    const grammar = JSON.parse(fs.readFileSync(grammarPath, 'utf-8'));
+
+    const commentRule = grammar?.repository?.comment;
+    expect(commentRule).toBeDefined();
+    expect(commentRule.name).toMatch(/^meta\.comment/);
+    expect(commentRule.contentName).toMatch(/^meta\.comment/);
+
+    const commentWithIdRule = grammar?.repository?.comment_with_id;
+    expect(commentWithIdRule).toBeDefined();
+    expect(commentWithIdRule.contentName).toMatch(/^meta\.comment/);
+  });
 });
 
 // Integration tests for markdown-it plugin registration (Requirements 7.1)
