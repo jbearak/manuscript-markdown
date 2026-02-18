@@ -2108,6 +2108,28 @@ describe('DOCX footnote extraction', () => {
     expect(result.markdown).toContain('[^1]:\n\n    $$\n    \\mathrm{E=mc^2}\n    $$');
   });
 
+  test('footnote body with text then display math does not duplicate equation', async () => {
+    const docXml = wrapDocumentXml(
+      '<w:p><w:r><w:t>Text</w:t></w:r>'
+      + '<w:r><w:footnoteReference w:id="1"/></w:r></w:p>'
+    );
+    const footnotesXml = wrapNotesXml('footnotes',
+      '<w:footnote w:id="1">'
+      + '<w:p><w:r><w:footnoteRef/></w:r><w:r><w:t> Here is an equation:</w:t></w:r></w:p>'
+      + '<m:oMathPara><m:oMath><m:r><m:t>x^2</m:t></m:r></m:oMath></m:oMathPara>'
+      + '</w:footnote>'
+    );
+    const buf = await buildSyntheticDocx(docXml, { 'word/footnotes.xml': footnotesXml });
+    const result = await convertDocx(buf);
+
+    // Should contain exactly one instance of the display math block
+    const displayMathBlock = '$$\n    \\mathrm{x^2}\n    $$';
+    const occurrences = (result.markdown.match(/\$\$[\s\S]*?x\^2[\s\S]*?\$\$/g) || []).length;
+    expect(occurrences).toBe(1);
+    expect(result.markdown).toContain('[^1]: Here is an equation:');
+    expect(result.markdown).toContain(displayMathBlock);
+  });
+
   test('footnote body with table produces HTML table', async () => {
     const docXml = wrapDocumentXml(
       '<w:p><w:r><w:t>Text</w:t></w:r>'

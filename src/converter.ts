@@ -2269,7 +2269,7 @@ export function buildMarkdown(
         const item = bodyMerged[bi];
         if (item.type === 'para') {
           if (bi > partStart) {
-            const part = renderInlineRange(bodyMerged, partStart, comments, undefined, renderOpts);
+            const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, renderOpts);
             bodyParts.push(part.text);
             deferredAll.push(...part.deferredComments);
           }
@@ -2277,7 +2277,7 @@ export function buildMarkdown(
         } else if (item.type === 'math' && item.display) {
           // Flush preceding inline content and keep display math as its own block part.
           if (bi > partStart) {
-            const part = renderInlineRange(bodyMerged, partStart, comments, undefined, renderOpts);
+            const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, renderOpts);
             bodyParts.push(part.text);
             deferredAll.push(...part.deferredComments);
           }
@@ -2286,7 +2286,7 @@ export function buildMarkdown(
         } else if (item.type === 'table') {
           // Flush preceding inline content
           if (bi > partStart) {
-            const part = renderInlineRange(bodyMerged, partStart, comments, undefined, renderOpts);
+            const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, renderOpts);
             bodyParts.push(part.text);
             deferredAll.push(...part.deferredComments);
           }
@@ -2295,7 +2295,7 @@ export function buildMarkdown(
         }
       }
       if (partStart < bodyMerged.length) {
-        const part = renderInlineRange(bodyMerged, partStart, comments, undefined, renderOpts);
+        const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, renderOpts);
         bodyParts.push(part.text);
         deferredAll.push(...part.deferredComments);
       }
