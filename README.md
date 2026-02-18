@@ -59,6 +59,7 @@ manuscript-markdown paper.md      # Markdown → DOCX
 
 ## Documentation
 
+- [Getting Started](docs/intro.md)
 - [Specification Overview](docs/specification.md)
 - [CriticMarkup Syntax](docs/criticmarkup.md)
 - [Language Server](docs/language-server.md)
