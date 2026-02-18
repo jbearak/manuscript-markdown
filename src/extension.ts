@@ -977,7 +977,15 @@ async function exportMdToDocx(context: vscode.ExtensionContext, uri?: vscode.Uri
 		'Open in Word'
 	);
 	if (action === 'Open in Word') {
-		await vscode.env.openExternal(docxUri);
+		try {
+			const opened = await vscode.env.openExternal(docxUri);
+			if (!opened) {
+				vscode.window.showErrorMessage('Failed to open file in external application.');
+			}
+		} catch (err: unknown) {
+			const message = err instanceof Error ? err.message : String(err);
+			vscode.window.showErrorMessage(`Failed to open file: ${message}`);
+		}
 	}
 }
 
