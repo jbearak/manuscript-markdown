@@ -662,6 +662,18 @@ async function extractNotes(
   return notes;
 }
 
+/**
+ * Parse footnote/endnote body content from OOXML.
+ * 
+ * V1 limitations: Only handles basic text formatting (w:t, w:br, w:p, w:r).
+ * Silently drops:
+ * - w:hyperlink (requires relationshipMap for href resolution)
+ * - m:oMath/m:oMathPara (requires ommlToLatex for math conversion)
+ * - w:fldChar (requires field state tracking)
+ * - w:tbl (requires table/cell parsing functions)
+ * 
+ * Full support would require refactoring to accept additional context parameters.
+ */
 function parseNoteBody(noteChildren: any[], tagName: string): ContentItem[] {
   const content: ContentItem[] = [];
   // Determine self-ref tag: w:footnoteRef or w:endnoteRef
@@ -2222,6 +2234,15 @@ export async function convertDocx(
     for (const item of items) {
       if (item.type === 'footnote_ref') {
         refOrder.push({ noteId: item.noteId, noteKind: item.noteKind });
+      } else if (item.type === 'table') {
+        // Recursively collect refs from table cells
+        for (const row of item.rows) {
+          for (const cell of row.cells) {
+            for (const para of cell.paragraphs) {
+              collectRefs(para);
+            }
+          }
+        }
       }
     }
   }
@@ -2237,7 +2258,6 @@ export async function convertDocx(
     // Check footnote ID mapping for named labels
     const mappedLabel = footnoteIdMapping?.get(ref.noteId);
     const label = mappedLabel || String(noteCounter++);
-    if (!mappedLabel) noteCounter; // already incremented
     assignedLabels.set(key, label);
     notesMap.set(key, { label, body: body.content, noteKind: ref.noteKind });
   }

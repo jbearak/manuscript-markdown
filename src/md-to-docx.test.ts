@@ -1217,7 +1217,9 @@ describe('Footnote parsing', () => {
 
   it('does not parse [^label]: as a footnote reference', () => {
     // Definition lines are stripped by extractFootnoteDefinitions, not parsed as refs
-    const tokens = parseMd('Some text with a definition marker but not as ref');
+    const input = 'Some text.\n\n[^1]: This is a definition.';
+    const { cleaned } = extractFootnoteDefinitions(input);
+    const tokens = parseMd(cleaned);
     const runs = tokens.flatMap(t => t.runs);
     const fnRef = runs.find(r => r.type === 'footnote_ref');
     expect(fnRef).toBeUndefined();
