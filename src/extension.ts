@@ -136,9 +136,6 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('manuscript-markdown.markSubstitution', () => 
 			applyFormatting((text) => formatting.wrapSelection(text, '{~~', '~>~~}', text.length + 5))
 		),
-		vscode.commands.registerCommand('manuscript-markdown.highlight', () => 
-			applyFormatting((text) => formatting.wrapSelection(text, '{==', '==}'))
-		),
 		vscode.commands.registerCommand('manuscript-markdown.comment', () => {
 			const authorName = author.getFormattedAuthorName();
 			const useIds = vscode.workspace.getConfiguration('manuscriptMarkdown').get<boolean>('alwaysUseCommentIds', false);
@@ -934,6 +931,15 @@ async function exportMdToDocx(context: vscode.ExtensionContext, uri?: vscode.Uri
 	const input = await getMdExportInput(uri);
 	if (!input) {
 		return;
+	}
+
+	// Auto-use existing .docx as style template when no explicit template is provided
+	if (!templateDocx) {
+		const existingDocxUri = vscode.Uri.file(input.basePath + '.docx');
+		if (await fileExists(existingDocxUri)) {
+			const data = await vscode.workspace.fs.readFile(existingDocxUri);
+			templateDocx = new Uint8Array(data);
+		}
 	}
 
 	const authorName = author.getAuthorName();

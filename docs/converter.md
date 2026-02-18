@@ -56,7 +56,7 @@ The converter also supports exporting Markdown back to DOCX, completing the roun
 
 1. Open a Markdown file in VS Code
 2. Click the **Export to Word** submenu in the editor title bar
-3. Choose **Export to Word** for default styling, or **Export to Word (with template)** to use a template DOCX for fonts, sizes, and spacing
+3. Choose **Export to Word** for default styling, or **Export to Word with Template** to use a template DOCX for fonts, sizes, and spacing
 
 If a companion `.bib` file exists with the same base name, it is automatically loaded for citation resolution. You can also specify a custom bibliography path in the YAML frontmatter using the `bibliography` field (see [Specification](specification.md#bibtex-companion-file)).
 
@@ -106,7 +106,7 @@ All [round-trip features](#round-trip-features) are preserved on export. The fol
 
 ### Template Support
 
-When using **Export to Word (with template)**, the converter extracts styling parts from the template:
+When using **Export to Word with Template**, the converter extracts styling parts from the template:
 
 - `word/styles.xml` — heading fonts, body text formatting, spacing
 - `word/theme/theme1.xml` — theme colors and fonts

@@ -55,10 +55,6 @@
         "title": "Substitution"
       },
       {
-        "command": "manuscript-markdown.highlight",
-        "title": "Highlight"
-      },
-      {
         "command": "manuscript-markdown.comment",
         "title": "Comment"
       },
@@ -168,7 +164,7 @@
       },
       {
         "command": "manuscript-markdown.exportToWordWithTemplate",
-        "title": "Export to Word (with template)"
+        "title": "Export to Word with Template"
       },
       {
         "command": "manuscript-markdown.setCitationStyle",
