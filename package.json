@@ -159,6 +159,10 @@
         "title": "Export to Markdown"
       },
       {
+        "command": "manuscript-markdown.openInWord",
+        "title": "Open in Word"
+      },
+      {
         "command": "manuscript-markdown.exportToWord",
         "title": "Export to Word"
       },
@@ -537,6 +541,11 @@
           "command": "manuscript-markdown.convertDocx",
           "when": "resourceExtname == .docx",
           "group": "9_export"
+        },
+        {
+          "command": "manuscript-markdown.openInWord",
+          "when": "resourceExtname == .docx && !remoteName",
+          "group": "9_export@1"
         },
         {
           "command": "manuscript-markdown.exportToWord",

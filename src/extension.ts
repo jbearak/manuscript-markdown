@@ -234,6 +234,17 @@ export function activate(context: vscode.ExtensionContext) {
 		)
 	);
 
+	// Register Open in Word command
+	context.subscriptions.push(
+		vscode.commands.registerCommand('manuscript-markdown.openInWord', async (uri?: vscode.Uri) => {
+			if (!uri) { return; }
+			const opened = await vscode.env.openExternal(uri);
+			if (!opened) {
+				vscode.window.showErrorMessage('Failed to open file in external application.');
+			}
+		})
+	);
+
 	// Register DOCX converter command
 	context.subscriptions.push(
 		vscode.commands.registerCommand('manuscript-markdown.convertDocx', async (uri?: vscode.Uri) => {
