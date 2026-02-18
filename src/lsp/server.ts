@@ -80,6 +80,31 @@ interface OpenDocBibCache {
 }
 const openDocBibCache = new Map<string, OpenDocBibCache>();
 
+// canonical bib path → set of markdown doc URIs
+const bibReverseMap = new Map<string, Set<string>>();
+
+function updateBibReverseMap(docUri: string, docText: string): void {
+  removeBibReverseMapEntry(docUri);
+  const bibPath = resolveBibliographyPath(docUri, docText, workspaceRootPaths);
+  if (bibPath) {
+    const canonical = canonicalizeFsPath(bibPath);
+    if (!bibReverseMap.has(canonical)) {
+      bibReverseMap.set(canonical, new Set());
+    }
+    bibReverseMap.get(canonical)!.add(docUri);
+  }
+}
+
+function removeBibReverseMapEntry(docUri: string): void {
+  for (const [, uris] of bibReverseMap) {
+    uris.delete(docUri);
+  }
+}
+
+function getMarkdownUrisForBib(canonicalBibPath: string): Set<string> {
+  return bibReverseMap.get(canonicalBibPath) ?? new Set();
+}
+
 /** Client-provided settings (see `getLspSettings()` in extension.ts). */
 interface LspSettings {
 	citekeyReferencesFromMarkdown?: boolean;
@@ -114,6 +139,7 @@ connection.onDidChangeConfiguration((params) => {
 
 documents.onDidOpen((event) => {
 	if (isMarkdownUri(event.document.uri, event.document.languageId)) {
+		updateBibReverseMap(event.document.uri, event.document.getText());
 		validateCitekeys(event.document);
 		validateCslField(event.document);
 	}
@@ -128,6 +154,7 @@ documents.onDidChangeContent((event) => {
 		}
 	}
 	if (isMarkdownUri(event.document.uri, event.document.languageId)) {
+		updateBibReverseMap(event.document.uri, event.document.getText());
 		validateCitekeys(event.document);
 		validateCslField(event.document);
 	}
@@ -142,6 +169,7 @@ documents.onDidClose((event) => {
 		}
 	}
 	if (isMarkdownUri(event.document.uri, event.document.languageId)) {
+		removeBibReverseMapEntry(event.document.uri);
 		citekeyDiagnostics.delete(event.document.uri);
 		cslDiagnostics.delete(event.document.uri);
 		connection.sendDiagnostics({ uri: event.document.uri, diagnostics: [] });
@@ -496,16 +524,13 @@ async function validateCitekeys(doc: TextDocument): Promise<void> {
 }
 
 function revalidateMarkdownDocsForBib(changedBibPath: string): void {
-	const changedCanonical = canonicalizeFsPath(changedBibPath);
-	for (const doc of documents.all()) {
-		if (!isMarkdownUri(doc.uri, doc.languageId)) {
-			continue;
-		}
-		const resolved = resolveBibliographyPath(doc.uri, doc.getText(), workspaceRootPaths);
-		if (resolved && canonicalizeFsPath(resolved) === changedCanonical) {
-			validateCitekeys(doc);
-		}
-	}
+  const changedCanonical = canonicalizeFsPath(changedBibPath);
+  for (const docUri of getMarkdownUrisForBib(changedCanonical)) {
+    const doc = documents.get(docUri);
+    if (doc) {
+      validateCitekeys(doc);
+    }
+  }
 }
 
 async function getBibDataForPath(bibPath: string): Promise<ParsedBibData | undefined> {
@@ -599,81 +624,33 @@ async function getDefinitionLocationForKey(key: string, bibPath: string): Promis
 }
 
 async function findPairedMarkdownUris(bibPath: string): Promise<string[]> {
-	const urisByCanonicalPath = new Map<string, string>();
+  const urisByCanonicalPath = new Map<string, string>();
 
-	// 1. Same-basename: paper.bib → paper.md
-	const dir = path.dirname(bibPath);
-	const base = path.basename(bibPath, path.extname(bibPath));
-	const sameBaseMd = path.join(dir, base + '.md');
-	try {
-		await fsp.stat(sameBaseMd);
-		const canonical = canonicalizeFsPath(sameBaseMd);
-		urisByCanonicalPath.set(canonical, fsPathToUri(sameBaseMd));
-	} catch {
-		// file doesn't exist
-	}
+  // 1. Same-basename: paper.bib → paper.md
+  const dir = path.dirname(bibPath);
+  const base = path.basename(bibPath, path.extname(bibPath));
+  const sameBaseMd = path.join(dir, base + '.md');
+  try {
+    await fsp.stat(sameBaseMd);
+    const canonical = canonicalizeFsPath(sameBaseMd);
+    urisByCanonicalPath.set(canonical, fsPathToUri(sameBaseMd));
+  } catch { /* file doesn't exist */ }
 
-	// 2. Open docs whose frontmatter bibliography resolves to this bib
-	for (const doc of documents.all()) {
-		if (doc.languageId !== 'markdown') {
-			continue;
-		}
-		const resolved = resolveBibliographyPath(doc.uri, doc.getText(), workspaceRootPaths);
-		if (resolved && pathsEqual(resolved, bibPath)) {
-			const fsPath = uriToFsPath(doc.uri);
-			if (fsPath) {
-				const canonical = canonicalizeFsPath(fsPath);
-				if (!urisByCanonicalPath.has(canonical)) {
-					urisByCanonicalPath.set(canonical, doc.uri);
-				}
-			}
-		}
-	}
+  // 2. Open docs from reverse map
+  const bibCanonical = canonicalizeFsPath(bibPath);
+  for (const docUri of getMarkdownUrisForBib(bibCanonical)) {
+    const fsPath = uriToFsPath(docUri);
+    if (fsPath) {
+      const canonical = canonicalizeFsPath(fsPath);
+      if (!urisByCanonicalPath.has(canonical)) {
+        urisByCanonicalPath.set(canonical, docUri);
+      }
+    }
+  }
 
-	// 3. Workspace scan: closed .md files whose frontmatter references this bib
-	for (const root of workspaceRootPaths) {
-		const mdPaths = await findMarkdownFilesRecursive(root);
-		for (const mdPath of mdPaths) {
-			const canonical = canonicalizeFsPath(mdPath);
-			if (urisByCanonicalPath.has(canonical)) {
-				continue;
-			}
-			try {
-				const text = await fsp.readFile(mdPath, 'utf8');
-				const mdUri = fsPathToUri(mdPath);
-				const resolved = resolveBibliographyPath(mdUri, text, workspaceRootPaths);
-				if (resolved && pathsEqual(resolved, bibPath)) {
-					urisByCanonicalPath.set(canonical, mdUri);
-				}
-			} catch {
-				// skip unreadable files
-			}
-		}
-	}
-
-	return [...urisByCanonicalPath.values()];
+  return [...urisByCanonicalPath.values()];
 }
 
-async function findMarkdownFilesRecursive(dir: string): Promise<string[]> {
-	const results: string[] = [];
-	try {
-		const entries = await fsp.readdir(dir, { withFileTypes: true });
-		for (const entry of entries) {
-			if (entry.name.startsWith('.') || entry.name === 'node_modules') {
-				continue;
-			}
-			const fullPath = path.join(dir, entry.name);
-			if (entry.isDirectory()) {
-				results.push(...(await findMarkdownFilesRecursive(fullPath)));
-			} else if (entry.name.endsWith('.md')) {
-				results.push(fullPath);
-			}
-		}
-	} catch {
-		// ignore unreadable directories
-	}
-	return results;
-}
 
 async function findReferencesForKey(key: string, targetBibPath: string): Promise<Location[]> {
 	const markdownUris = await findPairedMarkdownUris(targetBibPath);
@@ -816,3 +793,5 @@ function formatBibEntryHover(entry: BibtexEntry): string {
 
 	return lines.join('\n\n');
 }
+
+export { updateBibReverseMap as _updateBibReverseMap, removeBibReverseMapEntry as _removeBibReverseMapEntry, getMarkdownUrisForBib as _getMarkdownUrisForBib, bibReverseMap as _bibReverseMap };
