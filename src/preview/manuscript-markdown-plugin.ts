@@ -104,27 +104,26 @@ function manuscriptMarkdownBlock(state: StateBlock, startLine: number, endLine: 
   if (pos + 3 > max) return false;
   
   const src = state.src;
-  const lineStart = src.slice(pos, Math.min(pos + 3, max));
   
-  // Check if this line starts with a Manuscript Markdown opening marker
-  const patterns = ['{++', '{--', '{~~', '{>>', '{=='];
-  if (!patterns.includes(lineStart)) {
-    return false;
-  }
+  // Quick check: first char must be {
+  if (src.charCodeAt(pos) !== 0x7B /* { */) return false;
   
-  // Determine the closing marker
+  const ch2 = src.charCodeAt(pos + 1);
+  const ch3 = src.charCodeAt(pos + 2);
+  
   let closeMarker: string;
-  if (lineStart === '{++') closeMarker = '++}';
-  else if (lineStart === '{--') closeMarker = '--}';
-  else if (lineStart === '{~~') closeMarker = '~~}';
-  else if (lineStart === '{>>') closeMarker = '<<}';
-  else if (lineStart === '{==') closeMarker = '==}';
+  let isNested = false;
+  if (ch2 === 0x2B /* + */ && ch3 === 0x2B /* + */) closeMarker = '++}';
+  else if (ch2 === 0x2D /* - */ && ch3 === 0x2D /* - */) closeMarker = '--}';
+  else if (ch2 === 0x7E /* ~ */ && ch3 === 0x7E /* ~ */) closeMarker = '~~}';
+  else if (ch2 === 0x3E /* > */ && ch3 === 0x3E /* > */) { closeMarker = '<<}'; isNested = true; }
+  else if (ch2 === 0x3D /* = */ && ch3 === 0x3D /* = */) closeMarker = '==}';
   else return false;
   
   // Search for the closing marker starting from current position
   const searchStart = pos + 3;
   let closePos: number;
-  if (lineStart === '{>>') {
+  if (isNested) {
     // Use depth-aware matching so nested {>>...<<} replies don't close early
     closePos = findMatchingClose(src, searchStart);
   } else {
@@ -294,7 +293,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
   if (src.charCodeAt(start + 1) === 0x2B /* + */ && src.charCodeAt(start + 2) === 0x2B /* + */) {
     const endMarker = '++}';
     const endPos = src.indexOf(endMarker, start + 3);
-    if (endPos !== -1) {
+    if (endPos !== -1 && endPos + 2 <= max) {
       if (!silent) {
         const content = src.slice(start + 3, endPos);
         const tokenOpen = state.push('manuscript_markdown_addition_open', 'ins', 1);
@@ -314,7 +313,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
   if (src.charCodeAt(start + 1) === 0x2D /* - */ && src.charCodeAt(start + 2) === 0x2D /* - */) {
     const endMarker = '--}';
     const endPos = src.indexOf(endMarker, start + 3);
-    if (endPos !== -1) {
+    if (endPos !== -1 && endPos + 2 <= max) {
       if (!silent) {
         const content = src.slice(start + 3, endPos);
         const tokenOpen = state.push('manuscript_markdown_deletion_open', 'del', 1);
@@ -334,7 +333,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
   if (src.charCodeAt(start + 1) === 0x7E /* ~ */ && src.charCodeAt(start + 2) === 0x7E /* ~ */) {
     const endMarker = '~~}';
     const endPos = src.indexOf(endMarker, start + 3);
-    if (endPos !== -1) {
+    if (endPos !== -1 && endPos + 2 <= max) {
       const fullContent = src.slice(start + 3, endPos);
       const separatorPos = fullContent.indexOf('~>');
       if (separatorPos !== -1) {
@@ -380,7 +379,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
       // Check for {#id>>...<<} comment body with ID (depth-aware for nested replies)
       if (idEnd + 1 < max && src.charCodeAt(idEnd) === 0x3E /* > */ && src.charCodeAt(idEnd + 1) === 0x3E /* > */) {
         const endPos = findMatchingClose(src, idEnd + 2);
-        if (endPos !== -1) {
+        if (endPos !== -1 && endPos + 2 <= max) {
           if (!silent) {
             const content = src.slice(idEnd + 2, endPos);
             const tokenOpen = state.push('manuscript_markdown_comment_open', 'span', 1);
@@ -422,7 +421,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
   // Check for comment {>>text<<} (depth-aware for nested replies)
   if (src.charCodeAt(start + 1) === 0x3E /* > */ && src.charCodeAt(start + 2) === 0x3E /* > */) {
     const endPos = findMatchingClose(src, start + 3);
-    if (endPos !== -1) {
+    if (endPos !== -1 && endPos + 2 <= max) {
       if (!silent) {
         const content = src.slice(start + 3, endPos);
         const tokenOpen = state.push('manuscript_markdown_comment_open', 'span', 1);
@@ -442,7 +441,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
   if (src.charCodeAt(start + 1) === 0x3D /* = */ && src.charCodeAt(start + 2) === 0x3D /* = */) {
     const endMarker = '==}';
     const endPos = src.indexOf(endMarker, start + 3);
-    if (endPos !== -1) {
+    if (endPos !== -1 && endPos + 2 <= max) {
       if (!silent) {
         const content = src.slice(start + 3, endPos);
         const tokenOpen = state.push('manuscript_markdown_highlight_open', 'mark', 1);
