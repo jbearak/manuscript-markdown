@@ -343,7 +343,7 @@ function citationRule(state: any, silent: boolean): boolean {
     const keys: string[] = [];
     const locators = new Map<string, string>();
     
-    const parts = content.split(';').map((p: string) => p.trim().replace(/^@/, ''));
+    const parts = content.split(';').map((p: string) => p.trim().replace(/^@/, '')).filter(Boolean);
     for (const part of parts) {
       const commaPos = part.indexOf(',');
       if (commaPos !== -1) {
