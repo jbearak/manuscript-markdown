@@ -312,7 +312,7 @@ describe('Syntax grammar invariants', () => {
     const commentWithIdRule = grammar?.repository?.comment_with_id;
 
     expect(commentWithIdRule).toBeDefined();
-    expect(commentWithIdRule.begin).toBe('(\\{#)([a-zA-Z0-9_-]+)(>>)');
+    expect(commentWithIdRule.begin).toBe('(\\{#)([a-zA-Z0-9_-]++)(>>)');
     expect(commentWithIdRule.end).toBe('<<\\}');
     expect(commentWithIdRule.beginCaptures?.['1']?.name).toBe('punctuation.definition.tag.begin.manuscript-markdown');
     expect(commentWithIdRule.beginCaptures?.['3']?.name).toBe('punctuation.definition.tag.begin.manuscript-markdown');

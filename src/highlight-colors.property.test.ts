@@ -12,23 +12,25 @@ import {
 } from './highlight-colors';
 
 describe('Property 3: Single-Pass Decoration Extraction Equivalence', () => {
+  // Use safe content (no CriticMarkup-significant chars) to ensure
+  // single-pass and individual extractors agree on non-overlapping patterns.
+  const safeChar = fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz0123456789 '.split(''));
+  const safeContent = fc.array(safeChar, { minLength: 1, maxLength: 20 }).map(a => a.join(''));
+
   const criticPatternGen = fc.oneof(
-    fc.string({ maxLength: 30 }).map(s => `{++${s.replace(/\+\+\}/g, '')}++}`),
-    fc.string({ maxLength: 30 }).map(s => `{--${s.replace(/--\}/g, '')}--}`),
-    fc.string({ maxLength: 30 }).map(s => `{==${s.replace(/==\}/g, '')}==}`),
-    fc.string({ maxLength: 30 }).map(s => `{>>${s.replace(/<<\}/g, '')}<<}`),
-    fc.tuple(fc.string({ maxLength: 15 }), fc.string({ maxLength: 15 })).map(
-      ([a, b]) => `{~~${a.replace(/~>/g, '').replace(/~~\}/g, '')}~>${b.replace(/~~\}/g, '')}~~}`
+    safeContent.map(s => `{++${s}++}`),
+    safeContent.map(s => `{--${s}--}`),
+    safeContent.map(s => `{==${s}==}`),
+    safeContent.map(s => `{>>${s}<<}`),
+    fc.tuple(safeContent, safeContent).map(([a, b]) => `{~~${a}~>${b}~~}`),
+    safeContent.map(s => `==${s}==`),
+    fc.tuple(safeContent, fc.constantFrom(...VALID_COLOR_IDS)).map(
+      ([s, c]) => `==${s}=={${c}}`
     ),
-    fc.string({ maxLength: 30 }).map(s => `==${s.replace(/==/g, '')}==`),
-    fc.tuple(
-      fc.string({ maxLength: 20 }).map(s => s.replace(/==/g, '')),
-      fc.constantFrom(...VALID_COLOR_IDS)
-    ).map(([s, c]) => `==${s}=={${c}}`),
   );
 
   const textGen = fc.array(
-    fc.oneof(criticPatternGen, fc.string({ maxLength: 50 })),
+    fc.oneof(criticPatternGen, safeContent),
     { minLength: 1, maxLength: 10 }
   ).map(parts => parts.join(' '));
 

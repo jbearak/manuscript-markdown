@@ -293,7 +293,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
   if (src.charCodeAt(start + 1) === 0x2B /* + */ && src.charCodeAt(start + 2) === 0x2B /* + */) {
     const endMarker = '++}';
     const endPos = src.indexOf(endMarker, start + 3);
-    if (endPos !== -1 && endPos + 2 <= max) {
+    if (endPos !== -1 && endPos + 3 <= max) {
       if (!silent) {
         const content = src.slice(start + 3, endPos);
         const tokenOpen = state.push('manuscript_markdown_addition_open', 'ins', 1);
@@ -313,7 +313,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
   if (src.charCodeAt(start + 1) === 0x2D /* - */ && src.charCodeAt(start + 2) === 0x2D /* - */) {
     const endMarker = '--}';
     const endPos = src.indexOf(endMarker, start + 3);
-    if (endPos !== -1 && endPos + 2 <= max) {
+    if (endPos !== -1 && endPos + 3 <= max) {
       if (!silent) {
         const content = src.slice(start + 3, endPos);
         const tokenOpen = state.push('manuscript_markdown_deletion_open', 'del', 1);
@@ -333,7 +333,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
   if (src.charCodeAt(start + 1) === 0x7E /* ~ */ && src.charCodeAt(start + 2) === 0x7E /* ~ */) {
     const endMarker = '~~}';
     const endPos = src.indexOf(endMarker, start + 3);
-    if (endPos !== -1 && endPos + 2 <= max) {
+    if (endPos !== -1 && endPos + 3 <= max) {
       const fullContent = src.slice(start + 3, endPos);
       const separatorPos = fullContent.indexOf('~>');
       if (separatorPos !== -1) {
@@ -379,7 +379,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
       // Check for {#id>>...<<} comment body with ID (depth-aware for nested replies)
       if (idEnd + 1 < max && src.charCodeAt(idEnd) === 0x3E /* > */ && src.charCodeAt(idEnd + 1) === 0x3E /* > */) {
         const endPos = findMatchingClose(src, idEnd + 2);
-        if (endPos !== -1 && endPos + 2 <= max) {
+        if (endPos !== -1 && endPos + 3 <= max) {
           if (!silent) {
             const content = src.slice(idEnd + 2, endPos);
             const tokenOpen = state.push('manuscript_markdown_comment_open', 'span', 1);
@@ -421,7 +421,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
   // Check for comment {>>text<<} (depth-aware for nested replies)
   if (src.charCodeAt(start + 1) === 0x3E /* > */ && src.charCodeAt(start + 2) === 0x3E /* > */) {
     const endPos = findMatchingClose(src, start + 3);
-    if (endPos !== -1 && endPos + 2 <= max) {
+    if (endPos !== -1 && endPos + 3 <= max) {
       if (!silent) {
         const content = src.slice(start + 3, endPos);
         const tokenOpen = state.push('manuscript_markdown_comment_open', 'span', 1);
@@ -441,7 +441,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
   if (src.charCodeAt(start + 1) === 0x3D /* = */ && src.charCodeAt(start + 2) === 0x3D /* = */) {
     const endMarker = '==}';
     const endPos = src.indexOf(endMarker, start + 3);
-    if (endPos !== -1 && endPos + 2 <= max) {
+    if (endPos !== -1 && endPos + 3 <= max) {
       if (!silent) {
         const content = src.slice(start + 3, endPos);
         const tokenOpen = state.push('manuscript_markdown_highlight_open', 'mark', 1);

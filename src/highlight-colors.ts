@@ -211,12 +211,95 @@ export interface AllDecorationRanges {
 }
 
 export function extractAllDecorationRanges(text: string, defaultColor: string): AllDecorationRanges {
+  const resolvedDefault = VALID_COLOR_IDS.includes(defaultColor) ? defaultColor : 'yellow';
+  const highlights = new Map<string, Array<{ start: number; end: number }>>();
+  const comments: Array<{ start: number; end: number }> = [];
+  const additions: Array<{ start: number; end: number }> = [];
+  const deletions: Array<{ start: number; end: number }> = [];
+  const substitutionNew: Array<{ start: number; end: number }> = [];
+  const criticSpans: Array<{ start: number; end: number }> = [];
+
+  const pushHl = (key: string, s: number, e: number) => {
+    if (!highlights.has(key)) highlights.set(key, []);
+    highlights.get(key)!.push({ start: s, end: e });
+  };
+
+  const len = text.length;
+  let i = 0;
+  while (i < len) {
+    if (text.charCodeAt(i) === 0x7B && i + 2 < len) {
+      const c2 = text.charCodeAt(i + 1);
+      const c3 = text.charCodeAt(i + 2);
+
+      if (c2 === 0x2B && c3 === 0x2B) { // {++
+        const ci = text.indexOf('++}', i + 3);
+        if (ci !== -1) {
+          if (ci > i + 3) additions.push({ start: i + 3, end: ci });
+          i = ci + 3; continue;
+        }
+      } else if (c2 === 0x2D && c3 === 0x2D) { // {--
+        const ci = text.indexOf('--}', i + 3);
+        if (ci !== -1) {
+          if (ci > i + 3) deletions.push({ start: i + 3, end: ci });
+          i = ci + 3; continue;
+        }
+      } else if (c2 === 0x7E && c3 === 0x7E) { // {~~
+        const ci = text.indexOf('~~}', i + 3);
+        if (ci !== -1) {
+          const content = text.slice(i + 3, ci);
+          const cai = content.indexOf('~>');
+          if (cai !== -1) {
+            const newStart = i + 3 + cai + 2;
+            if (ci > newStart) substitutionNew.push({ start: newStart, end: ci });
+          }
+          i = ci + 3; continue;
+        }
+      } else if (c2 === 0x3E && c3 === 0x3E) { // {>>
+        const ci = text.indexOf('<<}', i + 3);
+        if (ci !== -1) {
+          comments.push({ start: i + 3, end: ci });
+          i = ci + 3; continue;
+        }
+      } else if (c2 === 0x3D && c3 === 0x3D) { // {==
+        const ci = text.indexOf('==}', i + 3);
+        if (ci !== -1) {
+          pushHl('critic', i + 3, ci);
+          criticSpans.push({ start: i, end: ci + 3 });
+          i = ci + 3; continue;
+        }
+      }
+    }
+
+    if (text.charCodeAt(i) === 0x3D && i + 1 < len && text.charCodeAt(i + 1) === 0x3D) {
+      if (i === 0 || text.charCodeAt(i - 1) !== 0x7B) {
+        let j = i + 2;
+        while (j < len && text.charCodeAt(j) !== 0x7D && text.charCodeAt(j) !== 0x3D) j++;
+        if (j > i + 2 && j + 1 < len && text.charCodeAt(j) === 0x3D && text.charCodeAt(j + 1) === 0x3D) {
+          let mEnd = j + 2;
+          let colorId: string | undefined;
+          if (mEnd < len && text.charCodeAt(mEnd) === 0x7B) {
+            const cb = text.indexOf('}', mEnd + 1);
+            if (cb !== -1) {
+              const cand = text.slice(mEnd + 1, cb);
+              if (/^[a-z0-9-]+$/.test(cand)) { colorId = cand; mEnd = cb + 1; }
+            }
+          }
+          let inside = false;
+          for (const cr of criticSpans) {
+            if (cr.start <= i && mEnd <= cr.end) { inside = true; break; }
+          }
+          if (!inside) {
+            pushHl(colorId && VALID_COLOR_IDS.includes(colorId) ? colorId : resolvedDefault, i, mEnd);
+          }
+          i = mEnd; continue;
+        }
+      }
+    }
+    i++;
+  }
+
   return {
-    highlights: extractHighlightRanges(text, defaultColor),
-    comments: extractCommentRanges(text),
-    additions: extractAdditionRanges(text),
-    deletions: extractDeletionRanges(text),
+    highlights, comments, additions, deletions, substitutionNew,
     delimiters: extractCriticDelimiterRanges(text),
-    substitutionNew: extractSubstitutionNewRanges(text),
   };
 }
