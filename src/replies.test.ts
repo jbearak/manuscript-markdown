@@ -181,6 +181,33 @@ describe('Comment reply threads: MD→DOCX', () => {
     expect(commentsXml).toContain('w14:paraId');
   });
 
+  test('emits reply range markers in document.xml', async () => {
+    const md = `This is {#1}some text{/1}
+
+{#1>>Alice (2024-01-15T14:30-05:00): Parent comment
+  {>>Bob (2024-01-16T10:00-05:00): First reply<<}
+  {>>Carol (2024-01-17T09:00-05:00): Second reply<<}
+<<}`;
+
+    const result = await convertMdToDocx(md);
+    const zip = await JSZip.loadAsync(result.docx);
+    const docXml = await zip.file('word/document.xml')!.async('string');
+
+    // Parent comment (id=0) should have range markers
+    expect(docXml).toContain('w:commentRangeStart w:id="0"');
+    expect(docXml).toContain('w:commentRangeEnd w:id="0"');
+
+    // Reply comments should also have range markers duplicated alongside parent
+    expect(docXml).toContain('w:commentRangeStart w:id="1"');
+    expect(docXml).toContain('w:commentRangeEnd w:id="1"');
+    expect(docXml).toContain('w:commentRangeStart w:id="2"');
+    expect(docXml).toContain('w:commentRangeEnd w:id="2"');
+
+    // Reply range ends should include commentReference elements
+    expect(docXml).toContain('w:commentReference w:id="1"');
+    expect(docXml).toContain('w:commentReference w:id="2"');
+  });
+
   test('parses markdown without replies (no commentsExtended.xml)', async () => {
     const md = `This is {#1}some text{/1}
 

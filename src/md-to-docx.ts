@@ -1516,15 +1516,20 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         const parentParaId = generateParaId();
         state.comments.push({ id: numericId, author, date, text: commentBody, paraId: parentParaId });
 
-        // Generate reply comment entries
+        // Generate reply comment entries (reply IDs may have been
+        // pre-allocated by the pre-scan in generateDocumentXml)
         if (run.replies && run.replies.length > 0) {
-          for (const reply of run.replies) {
-            const replyId = state.commentId++;
+          const preAllocated = state.replyRanges.filter(rr => rr.parentId === numericId);
+          for (let i = 0; i < run.replies.length; i++) {
+            const reply = run.replies[i];
+            const replyId = i < preAllocated.length ? preAllocated[i].replyId : state.commentId++;
             const replyParaId = generateParaId();
             const replyAuthor = reply.author || options?.authorName || 'Unknown';
             const replyDate = normalizeToUtcIso(reply.date || '', state.timezone);
             state.comments.push({ id: replyId, author: replyAuthor, date: replyDate, text: reply.text, paraId: replyParaId, parentParaId });
-            state.replyRanges.push({ replyId, parentId: numericId });
+            if (i >= preAllocated.length) {
+              state.replyRanges.push({ replyId, parentId: numericId });
+            }
           }
         }
       }
@@ -1741,6 +1746,31 @@ function commentsExtendedXml(comments: CommentEntry[]): string {
 
 export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: any, frontmatter?: Frontmatter): string {
   let body = '';
+
+  // Pre-scan: assign comment IDs and discover reply relationships so that
+  // replyRanges is populated before range start/end markers are emitted.
+  // Without this, replyRanges would be empty when comment_range_start is
+  // processed because comment_body_with_id (which populates replyRanges)
+  // always appears after the range markers in the token stream.
+  for (const token of tokens) {
+    for (const run of token.runs) {
+      if (run.type === 'comment_range_start') {
+        const mdId = run.commentId || '';
+        if (!state.commentIdMap.has(mdId)) {
+          state.commentIdMap.set(mdId, state.commentId++);
+        }
+      } else if (run.type === 'comment_body_with_id' && run.replies && run.replies.length > 0) {
+        const mdId = run.commentId || '';
+        const numericId = state.commentIdMap.get(mdId);
+        if (numericId !== undefined && !state.replyRanges.some(rr => rr.parentId === numericId)) {
+          for (const _reply of run.replies) {
+            const replyId = state.commentId++;
+            state.replyRanges.push({ replyId, parentId: numericId });
+          }
+        }
+      }
+    }
+  }
 
   // Emit title paragraphs from frontmatter before body content
   if (frontmatter?.title) {
