@@ -455,6 +455,9 @@ function convertTokens(tokens: any[], listLevel = 0, blockquoteLevel = 0): MdTok
       case 'blockquote_open':
         const blockquoteClose = findClosingToken(tokens, i, 'blockquote_close');
         const bqLevel = blockquoteLevel + 1;
+        // Intentionally reset listLevel inside blockquotes.
+        // In Markdown, `> - item` starts a new list context within the quote,
+        // so numbering/indentation should not inherit from outer lists.
         const blockquoteTokens = convertTokens(tokens.slice(i + 1, blockquoteClose), 0, bqLevel);
         result.push(...blockquoteTokens.map(t => ({
           ...t,

@@ -1196,6 +1196,25 @@ describe('parseMd multi-paragraph CriticMarkup', () => {
   });
 });
 
+describe('parseMd list levels with blockquotes', () => {
+  it('resets list level inside blockquote and preserves quote level', () => {
+    const tokens = parseMd('- outer item\n> - quoted item');
+    expect(tokens).toHaveLength(2);
+
+    expect(tokens[0]).toMatchObject({
+      type: 'list_item',
+      level: 1,
+      ordered: false,
+    });
+
+    expect(tokens[1]).toMatchObject({
+      type: 'blockquote',
+      level: 1,
+      ordered: false,
+    });
+  });
+});
+
 describe('generateParagraph blockquoteStyle option', () => {
   it('uses Quote style by default', () => {
     const token: MdToken = { type: 'blockquote', level: 1, runs: [{ type: 'text', text: 'hello' }] };
