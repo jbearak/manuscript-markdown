@@ -934,11 +934,13 @@ async function exportMdToDocx(context: vscode.ExtensionContext, uri?: vscode.Uri
 	}
 
 	// Auto-use existing .docx as style template when no explicit template is provided
+	let usedAutoTemplate = false;
 	if (!templateDocx) {
 		const existingDocxUri = vscode.Uri.file(input.basePath + '.docx');
 		if (await fileExists(existingDocxUri)) {
 			const data = await vscode.workspace.fs.readFile(existingDocxUri);
 			templateDocx = new Uint8Array(data);
+			usedAutoTemplate = true;
 		}
 	}
 
@@ -975,13 +977,16 @@ async function exportMdToDocx(context: vscode.ExtensionContext, uri?: vscode.Uri
 	await vscode.workspace.fs.writeFile(docxUri, result.docx);
 
 	const filename = docxUri.fsPath.split(/[/\\]/).pop()!;
+	const templateNote = usedAutoTemplate
+		? ' Styles from the existing .docx were preserved; delete it and re-export to start fresh.'
+		: '';
 	const action = result.warnings.length > 0
 		? await vscode.window.showWarningMessage(
-			`Exported to "${filename}" with warnings: ${result.warnings.join('; ')}`,
+			`Exported to "${filename}" with warnings: ${result.warnings.join('; ')}${templateNote}`,
 			'Open in Word'
 		)
 		: await vscode.window.showInformationMessage(
-			`Exported to "${filename}"`,
+			`Exported to "${filename}".${templateNote}`,
 			'Open in Word'
 		);
 	if (action === 'Open in Word') {

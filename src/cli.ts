@@ -12,6 +12,7 @@ export interface CliOptions {
   citationKeyFormat: 'authorYearTitle' | 'authorYear' | 'numeric';
   bibPath?: string;
   templatePath?: string;
+  noTemplate: boolean;
   authorName?: string;
   mixedCitationStyle: 'separate' | 'unified';
   cslCacheDir: string;
@@ -31,6 +32,7 @@ export function parseArgs(argv: string[]): CliOptions {
     mixedCitationStyle: 'separate',
     cslCacheDir: path.join(os.homedir(), '.manuscript-markdown', 'csl-cache'),
     tableIndent: '  ',
+    noTemplate: false,
     alwaysUseCommentIds: false,
     blockquoteStyle: 'Quote',
   };
@@ -63,6 +65,8 @@ export function parseArgs(argv: string[]): CliOptions {
       options.bibPath = requireValue('--bib');
     } else if (arg === '--template') {
       options.templatePath = requireValue('--template');
+    } else if (arg === '--no-template') {
+      options.noTemplate = true;
     } else if (arg === '--author') {
       options.authorName = requireValue('--author');
     } else if (arg === '--mixed-citation-style') {
@@ -123,6 +127,7 @@ Options:
   --citation-key-format <fmt>     Citation key format: authorYearTitle, authorYear, numeric (default: authorYearTitle)
   --bib <path>                    BibTeX file path (MD→DOCX)
   --template <path>               Template DOCX file (MD→DOCX)
+  --no-template                   Disable auto-reuse of existing DOCX styles (MD→DOCX)
   --author <name>                 Author name (MD→DOCX, default: OS username)
   --mixed-citation-style <style>  Mixed citation style: separate, unified (default: separate)
   --csl-cache-dir <path>          CSL style cache directory
@@ -257,16 +262,17 @@ async function runMdToDocx(options: CliOptions) {
     }
   }
 
-  // Read template if specified
+  // Read template: explicit --template, or auto-reuse existing .docx at output path
   let templateDocx: Uint8Array | undefined;
+  const docxPath = deriveMdToDocxPath(options.inputPath, options.outputPath);
   if (options.templatePath) {
     if (!fs.existsSync(options.templatePath)) {
       throw new Error(`Template file not found: ${options.templatePath}`);
     }
     templateDocx = new Uint8Array(fs.readFileSync(options.templatePath));
+  } else if (!options.noTemplate && fs.existsSync(docxPath)) {
+    templateDocx = new Uint8Array(fs.readFileSync(docxPath));
   }
-
-  const docxPath = deriveMdToDocxPath(options.inputPath, options.outputPath);
   // Check output conflict
   assertNoMdToDocxConflict(docxPath, options.force);
 

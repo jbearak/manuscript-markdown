@@ -130,6 +130,16 @@ test('parseArgs throws on invalid --table-indent', () => {
     .toThrow('Invalid table indent "abc". Use a non-negative integer');
 });
 
+test('parseArgs defaults noTemplate to false', () => {
+  const result = parseArgs(['node', 'cli.js', 'test.md']);
+  expect(result.noTemplate).toBe(false);
+});
+
+test('parseArgs parses --no-template', () => {
+  const result = parseArgs(['node', 'cli.js', 'test.md', '--no-template']);
+  expect(result.noTemplate).toBe(true);
+});
+
 test('parseArgs throws on invalid mixed citation style', () => {
   expect(() => parseArgs(['node', 'cli.js', 'test.md', '--mixed-citation-style', 'invalid']))
     .toThrow('Invalid mixed citation style "invalid". Use separate or unified');

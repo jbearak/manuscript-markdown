@@ -51,7 +51,8 @@ Produces `paper.docx`. Automatically loads `paper.bib` if present.
 | `--force` | both | Overwrite existing output files | `false` |
 | `--citation-key-format <fmt>` | DOCX→MD | Citation key format: `authorYearTitle`, `authorYear`, `numeric` | `authorYearTitle` |
 | `--bib <path>` | MD→DOCX | BibTeX file path | auto-detect |
-| `--template <path>` | MD→DOCX | Template DOCX for styling | none |
+| `--template <path>` | MD→DOCX | Template DOCX for styling | auto-reuse existing `.docx` |
+| `--no-template` | MD→DOCX | Disable auto-reuse of existing DOCX styles | `false` |
 | `--author <name>` | MD→DOCX | Author name | OS username |
 | `--mixed-citation-style <style>` | MD→DOCX | Mixed citation style: `separate`, `unified` | `separate` |
 | `--blockquote-style <style>` | MD→DOCX | Blockquote paragraph style: `Quote`, `IntenseQuote` | `Quote` |
