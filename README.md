@@ -1,6 +1,6 @@
 # Manuscript Markdown
 
-A specification, converter, and VS Code extension for roundtrip manuscript editing between [Markdown](https://daringfireball.net/projects/markdown/) and Microsoft Word, with [Zotero](https://www.zotero.org/) citations and [LaTeX](https://www.latex-project.org/) equations support.
+A specification, converter, and VS Code extension for roundtrip manuscript editing between [Markdown](https://daringfireball.net/projects/markdown/) and Microsoft Word. Preserves change tracking, comments, tables, [LaTeX](https://www.latex-project.org/) equations, and citations in both directions, including [Zotero](https://www.zotero.org/) bibliographic data.
 
 ## Background
 
