@@ -109,7 +109,7 @@ function extractReplies(content: string): { parentText: string; replies: Array<{
     const innerStart = openIdx + 3;
     const closeIdx = findMatchingClose(content, innerStart);
     if (closeIdx === -1) break;
-    const replyContent = content.slice(innerStart, closeIdx).replaceAll(PARA_PLACEHOLDER, '\n\n');
+    const replyContent = content.slice(innerStart, closeIdx);
     const parsed = parseCommentContent(replyContent);
     replies.push(parsed);
     pos = closeIdx + 3;
