@@ -111,6 +111,12 @@ describe('getCompletionContextAtOffset', () => {
 		expect(getCompletionContextAtOffset(text, offset)).toBeUndefined();
 	});
 
+	test('does not return completion context for hyphenated email address', () => {
+		const text = 'first-last@domain';
+		const offset = text.length;
+		expect(getCompletionContextAtOffset(text, offset)).toBeUndefined();
+	});
+
 	test('returns completion context for unclosed bracket when ] exists on later line', () => {
 		const text = 'See [@smi\nOther text [@key2]';
 		const offset = text.indexOf('\n'); // end of first line

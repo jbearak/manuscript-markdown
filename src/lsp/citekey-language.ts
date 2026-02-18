@@ -204,7 +204,7 @@ export function isInsideCitationSegmentAtOffset(text: string, atOffset: number):
 
 /** Bare/inline citation: @key outside brackets (valid Pandoc syntax). */
 function isBareCitationContext(text: string, atOffset: number): boolean {
-	if (atOffset > 0 && /[A-Za-z0-9._]/.test(text.charAt(atOffset - 1))) {
+	if (atOffset > 0 && /[A-Za-z0-9._\-\/+=]/.test(text.charAt(atOffset - 1))) {
 		return false;
 	}
 	return true;
