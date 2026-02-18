@@ -541,7 +541,10 @@ export async function extractZoteroPrefs(data: Uint8Array | JSZip): Promise<Zote
   }
 }
 
-export async function extractCommentIdMapping(data: Uint8Array | JSZip): Promise<Map<string, string> | null> {
+async function extractIdMappingFromCustomXml(
+  data: Uint8Array | JSZip,
+  propPrefix: string,
+): Promise<Map<string, string> | null> {
   const zip = data instanceof JSZip ? data : await loadZip(data);
   const parsed = await readZipXml(zip, 'docProps/custom.xml');
   if (!parsed) return null;
@@ -550,11 +553,11 @@ export async function extractCommentIdMapping(data: Uint8Array | JSZip): Promise
   const propertyNodes = findAllDeep(parsed, 'property');
   for (const propNode of propertyNodes) {
     const name: string = propNode?.[':@']?.['@_name'] ?? getAttr(propNode, 'name');
-    if (!name.startsWith('MANUSCRIPT_COMMENT_IDS')) continue;
+    if (!name.startsWith(propPrefix)) continue;
 
     let idx = 1;
-    if (name !== 'MANUSCRIPT_COMMENT_IDS') {
-      const chunkMatch = name.match(/^MANUSCRIPT_COMMENT_IDS_(\d+)$/);
+    if (name !== propPrefix) {
+      const chunkMatch = name.match(new RegExp('^' + propPrefix + '_(\\d+)$'));
       if (!chunkMatch) continue;
       idx = parseInt(chunkMatch[1], 10);
       if (isNaN(idx)) continue;
@@ -587,53 +590,14 @@ export async function extractCommentIdMapping(data: Uint8Array | JSZip): Promise
     return null;
   }
 }
+
+export async function extractCommentIdMapping(data: Uint8Array | JSZip): Promise<Map<string, string> | null> {
+  return extractIdMappingFromCustomXml(data, 'MANUSCRIPT_COMMENT_IDS');
+}
 // Footnote/endnote extraction
 
 export async function extractFootnoteIdMapping(data: Uint8Array | JSZip): Promise<Map<string, string> | null> {
-  const zip = data instanceof JSZip ? data : await loadZip(data);
-  const parsed = await readZipXml(zip, 'docProps/custom.xml');
-  if (!parsed) return null;
-
-  const parts: Array<{ index: number; value: string }> = [];
-  const propertyNodes = findAllDeep(parsed, 'property');
-  for (const propNode of propertyNodes) {
-    const name: string = propNode?.[':@']?.['@_name'] ?? getAttr(propNode, 'name');
-    if (!name.startsWith('MANUSCRIPT_FOOTNOTE_IDS')) continue;
-
-    let idx = 1;
-    if (name !== 'MANUSCRIPT_FOOTNOTE_IDS') {
-      const chunkMatch = name.match(/^MANUSCRIPT_FOOTNOTE_IDS_(\d+)$/);
-      if (!chunkMatch) continue;
-      idx = parseInt(chunkMatch[1], 10);
-      if (isNaN(idx)) continue;
-    }
-
-    const children = propNode['property'];
-    if (!Array.isArray(children)) continue;
-    for (const child of children) {
-      if (child['vt:lpwstr'] !== undefined) {
-        const val = nodeText(child['vt:lpwstr'] || []);
-        parts.push({ index: idx, value: val });
-      }
-    }
-  }
-
-  if (parts.length === 0) return null;
-
-  parts.sort((a, b) => a.index - b.index);
-  const mappingJson = parts.map(p => p.value).join('');
-  try {
-    const parsedJson = JSON.parse(mappingJson);
-    if (!parsedJson || typeof parsedJson !== 'object') return null;
-    const mapping = new Map<string, string>();
-    for (const [numericId, originalId] of Object.entries(parsedJson)) {
-      if (typeof originalId !== 'string' || !originalId) continue;
-      mapping.set(String(numericId), originalId);
-    }
-    return mapping.size > 0 ? mapping : null;
-  } catch {
-    return null;
-  }
+  return extractIdMappingFromCustomXml(data, 'MANUSCRIPT_FOOTNOTE_IDS');
 }
 
 async function extractNotes(
@@ -1685,6 +1649,19 @@ function renderInlineRangeWithIds(
     }
 
     if (item.type === 'footnote_ref') {
+      const currentIds = item.commentIds;
+      for (const cid of [...prevCommentIds].sort()) {
+        if (!currentIds.has(cid)) {
+          out += `{/${remap(cid)}}`;
+          collectBody(cid);
+        }
+      }
+      for (const cid of [...currentIds].sort()) {
+        if (!prevCommentIds.has(cid)) {
+          out += `{#${remap(cid)}}`;
+        }
+      }
+      prevCommentIds = new Set(currentIds);
       const noteKey = item.noteKind + ':' + item.noteId;
       const label = noteLabels?.get(noteKey) ?? item.noteId;
       out += `[^${label}]`;
@@ -2249,15 +2226,27 @@ export async function convertDocx(
   collectRefs(docContent);
 
   const assignedLabels = new Map<string, string>(); // "kind:noteId" -> label
+  // Pre-collect all mapped labels to avoid collision with auto-generated numeric labels
+  const usedLabels = new Set<string>();
+  for (const ref of refOrder) {
+    const mapped = footnoteIdMapping?.get(ref.noteId);
+    if (mapped) usedLabels.add(mapped);
+  }
   for (const ref of refOrder) {
     const key = ref.noteKind + ':' + ref.noteId;
     if (assignedLabels.has(key)) continue;
     const source = ref.noteKind === 'footnote' ? footnotes : endnotes;
     const body = source.get(ref.noteId);
     if (!body) continue;
-    // Check footnote ID mapping for named labels
     const mappedLabel = footnoteIdMapping?.get(ref.noteId);
-    const label = mappedLabel || String(noteCounter++);
+    let label: string;
+    if (mappedLabel) {
+      label = mappedLabel;
+    } else {
+      while (usedLabels.has(String(noteCounter))) noteCounter++;
+      label = String(noteCounter++);
+    }
+    usedLabels.add(label);
     assignedLabels.set(key, label);
     notesMap.set(key, { label, body: body.content, noteKind: ref.noteKind });
   }

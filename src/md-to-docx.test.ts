@@ -1333,7 +1333,9 @@ describe('Full MD→DOCX footnote generation', () => {
 
     const JSZip = (await import('jszip')).default;
     const zip = await JSZip.loadAsync(docx);
-    const customXml = await zip.file('docProps/custom.xml')!.async('string');
+    const customFile = zip.file('docProps/custom.xml');
+    expect(customFile).not.toBeNull();
+    const customXml = await customFile!.async('string');
     expect(customXml).toContain('MANUSCRIPT_FOOTNOTE_IDS');
     expect(customXml).toContain('my-note');
   });
