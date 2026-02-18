@@ -289,11 +289,10 @@ export function activate(context: vscode.ExtensionContext) {
 						getOutputConflictMessage(basePath, conflictScenario),
 						{ modal: true },
 						'Replace',
-						'New Name',
-						'Cancel'
+						'New Name'
 					);
 
-					if (!choice || choice === 'Cancel') {
+					if (!choice) {
 						return;
 					}
 
@@ -904,11 +903,10 @@ async function resolveDocxOutputUri(basePath: string): Promise<vscode.Uri | unde
 		'\"' + name + '.docx\" already exists. Replace it or save with a new name?',
 		{ modal: true },
 		'Replace',
-		'New Name',
-		'Cancel'
+		'New Name'
 	);
 
-	if (!choice || choice === 'Cancel') {
+	if (!choice) {
 		return undefined;
 	}
 
