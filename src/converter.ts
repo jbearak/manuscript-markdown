@@ -473,9 +473,7 @@ export function parseRunProperties(
   const rStyleElement = rPrChildren.find(child => child['w:rStyle'] !== undefined);
   if (rStyleElement) {
     const val = getAttr(rStyleElement, 'val');
-    if (val && val.toLowerCase() === 'codechar') {
-      formatting.code = true;
-    }
+    formatting.code = !!(val && val.toLowerCase() === 'codechar');
   }
 
   return formatting;

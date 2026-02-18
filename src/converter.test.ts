@@ -2454,6 +2454,13 @@ describe('Inline code import (CodeChar detection)', () => {
     expect(formatting.code).toBe(false);
   });
 
+  test('parseRunProperties resets inherited code when rStyle is non-CodeChar', () => {
+    const base = { ...DEFAULT_FORMATTING, code: true };
+    const children = [{ 'w:rStyle': [], ':@': { '@_w:val': 'Emphasis' } }];
+    const formatting = parseRunProperties(children, base);
+    expect(formatting.code).toBe(false);
+  });
+
   test('wrapWithFormatting wraps text with backticks when code is true', () => {
     const fmt = { ...DEFAULT_FORMATTING, code: true };
     expect(wrapWithFormatting('hello', fmt)).toBe('`hello`');
