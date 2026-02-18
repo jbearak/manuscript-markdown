@@ -518,9 +518,12 @@ export function groupCommentThreads(
     const childId = paraIdToCommentId.get(childParaId);
     if (!childId) continue;
 
-    // Walk up to the root parent
+    // Walk up to the root parent (with cycle detection for malformed DOCX)
     let resolvedParaId = parentParaId;
+    const visited = new Set<string>();
     while (threads.has(resolvedParaId)) {
+      if (visited.has(resolvedParaId)) break;
+      visited.add(resolvedParaId);
       resolvedParaId = threads.get(resolvedParaId)!;
     }
     const parentId = paraIdToCommentId.get(resolvedParaId);
