@@ -14,7 +14,10 @@ import {
 describe('Property 3: Single-Pass Decoration Extraction Equivalence', () => {
   // Use safe content (no CriticMarkup-significant chars) to ensure
   // single-pass and individual extractors agree on non-overlapping patterns.
-  const safeChar = fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz0123456789 '.split(''));
+  // Equivalence holds only for non-nested inputs: extractAllDecorationRanges
+  // supports nested comment depth via findMatchingClose, while the individual
+  // extractCommentRanges uses a non-greedy regex that does not.
+  const safeChar = fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz0123456789 \n'.split(''));
   const safeContent = fc.array(safeChar, { minLength: 1, maxLength: 20 }).map(a => a.join(''));
 
   const criticPatternGen = fc.oneof(
