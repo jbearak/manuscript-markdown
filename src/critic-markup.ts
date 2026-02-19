@@ -49,6 +49,8 @@ export function preprocessCriticMarkup(markdown: string): string {
 
   let result = markdown;
   for (const { open, close, nested } of markers) {
+    const segments: string[] = [];
+    let lastPos = 0;
     let searchFrom = 0;
     while (true) {
       const openIdx = result.indexOf(open, searchFrom);
@@ -67,37 +69,50 @@ export function preprocessCriticMarkup(markdown: string): string {
       }
       const content = result.slice(contentStart, closeIdx);
       if (content.includes('\n\n')) {
-        const replaced = content.replace(/\n\n/g, PARA_PLACEHOLDER);
-        result = result.slice(0, contentStart) + replaced + result.slice(closeIdx);
-        // Advance past the replaced span
-        searchFrom = contentStart + replaced.length + close.length;
+        segments.push(result.slice(lastPos, contentStart));
+        segments.push(content.replace(/\n\n/g, PARA_PLACEHOLDER));
+        lastPos = closeIdx;
+        searchFrom = closeIdx + close.length;
       } else {
         searchFrom = closeIdx + close.length;
       }
     }
+    if (segments.length > 0) {
+      segments.push(result.slice(lastPos));
+      result = segments.join('');
+    }
   }
 
   // Handle {#id>>...<<} comment bodies with IDs (variable-length open marker)
-  let idSearchFrom = 0;
-  while (true) {
+  {
+    const segments: string[] = [];
+    let lastPos = 0;
+    let searchFrom = 0;
     const idCommentRe = /\{#[a-zA-Z0-9_-]+>>/;
-    const match = idCommentRe.exec(result.slice(idSearchFrom));
-    if (!match) break;
-    const matchIndex = idSearchFrom + match.index;
-    const contentStart = matchIndex + match[0].length;
-    // Use depth-aware matching for nested replies
-    const closeIdx = findMatchingClose(result, contentStart);
-    if (closeIdx === -1) {
-      idSearchFrom = contentStart;
-      continue;
+    while (true) {
+      const match = idCommentRe.exec(result.slice(searchFrom));
+      if (!match) break;
+      const matchIndex = searchFrom + match.index;
+      const contentStart = matchIndex + match[0].length;
+      // Use depth-aware matching for nested replies
+      const closeIdx = findMatchingClose(result, contentStart);
+      if (closeIdx === -1) {
+        searchFrom = contentStart;
+        continue;
+      }
+      const content = result.slice(contentStart, closeIdx);
+      if (content.includes('\n\n')) {
+        segments.push(result.slice(lastPos, contentStart));
+        segments.push(content.replace(/\n\n/g, PARA_PLACEHOLDER));
+        lastPos = closeIdx;
+        searchFrom = closeIdx + 3;
+      } else {
+        searchFrom = closeIdx + 3;
+      }
     }
-    const content = result.slice(contentStart, closeIdx);
-    if (content.includes('\n\n')) {
-      const replaced = content.replace(/\n\n/g, PARA_PLACEHOLDER);
-      result = result.slice(0, contentStart) + replaced + result.slice(closeIdx);
-      idSearchFrom = contentStart + replaced.length + 3;
-    } else {
-      idSearchFrom = closeIdx + 3;
+    if (segments.length > 0) {
+      segments.push(result.slice(lastPos));
+      result = segments.join('');
     }
   }
 

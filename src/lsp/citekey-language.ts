@@ -83,9 +83,61 @@ export function scanCitationUsages(text: string): CitekeyUsage[] {
 	return usages;
 }
 
+export function findUsagesForKey(text: string, key: string): CitekeyUsage[] {
+	const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	const segRe = /\[[^\]]*@[^\]]*\]/g;
+	const keyRe = new RegExp(`@${escaped}(?![A-Za-z0-9_:-])`, 'g');
+	const usages: CitekeyUsage[] = [];
+	let segMatch: RegExpExecArray | null;
+	segRe.lastIndex = 0;
+	while ((segMatch = segRe.exec(text)) !== null) {
+		const inner = segMatch[0].slice(1, -1);
+		const segmentOffset = segMatch.index + 1;
+		keyRe.lastIndex = 0;
+		let keyMatch: RegExpExecArray | null;
+		while ((keyMatch = keyRe.exec(inner)) !== null) {
+			const keyStart = segmentOffset + keyMatch.index + 1;
+			usages.push({ key, keyStart, keyEnd: keyStart + key.length });
+		}
+	}
+	return usages;
+}
+
 export function findCitekeyAtOffset(text: string, offset: number): string | undefined {
-	for (const usage of scanCitationUsages(text)) {
-		if (offset >= usage.keyStart - 1 && offset <= usage.keyEnd) {
+	if (offset < 0 || offset >= text.length) return undefined;
+	const maxScanDistance = 500;
+	let scanStart = offset;
+	let scanEnd = offset;
+
+	// Prefer a nearby bracket-bounded scan (can span newlines).
+	const openBracket = text.lastIndexOf('[', offset);
+	const closeBracketBefore = text.lastIndexOf(']', Math.max(0, offset - 1));
+	if (openBracket !== -1 && openBracket > closeBracketBefore && (offset - openBracket) <= maxScanDistance) {
+		const closeBracket = text.indexOf(']', offset);
+		if (closeBracket !== -1 && (closeBracket - offset) <= maxScanDistance) {
+			scanStart = openBracket;
+			scanEnd = closeBracket + 1;
+		}
+	}
+
+	// Fallback: same-line bounded scan when no nearby bracket segment is found.
+	if (scanStart === offset && scanEnd === offset) {
+		while (scanStart > 0 && text[scanStart - 1] !== '[' && text[scanStart - 1] !== '\n') {
+			scanStart--;
+		}
+		if (scanStart > 0 && text[scanStart - 1] === '[') scanStart--;
+
+		while (scanEnd < text.length && text[scanEnd] !== ']' && text[scanEnd] !== '\n') {
+			scanEnd++;
+		}
+		if (scanEnd < text.length && text[scanEnd] === ']') scanEnd++;
+	}
+
+	const segment = text.slice(scanStart, scanEnd);
+	for (const usage of scanCitationUsages(segment)) {
+		const absStart = usage.keyStart + scanStart;
+		const absEnd = usage.keyEnd + scanStart;
+		if (offset >= absStart - 1 && offset <= absEnd) {
 			return usage.key;
 		}
 	}

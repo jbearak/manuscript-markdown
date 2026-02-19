@@ -26,12 +26,7 @@ import {
 	VALID_COLOR_IDS,
 	HIGHLIGHT_DECORATION_COLORS,
 	CRITIC_COMMENT_DECORATION,
-	extractHighlightRanges,
-	extractCommentRanges,
-	extractAdditionRanges,
-	extractDeletionRanges,
-	extractCriticDelimiterRanges,
-	extractSubstitutionNewRanges,
+	extractAllDecorationRanges,
 	setDefaultHighlightColor,
 	getDefaultHighlightColor,
 } from './highlight-colors';
@@ -433,11 +428,11 @@ export function activate(context: vscode.ExtensionContext) {
 		if (editor.document.languageId !== 'markdown') { return; }
 		const text = editor.document.getText();
 		const defaultColor = getDefaultHighlightColor();
-		const rangeMap = extractHighlightRanges(text, defaultColor);
+		const all = extractAllDecorationRanges(text, defaultColor);
 
 		// Clear all decoration types, then set those with ranges
 		for (const [key, decType] of decorationTypes) {
-			const ranges = rangeMap.get(key);
+			const ranges = all.highlights.get(key);
 			if (ranges && ranges.length > 0) {
 				editor.setDecorations(decType, ranges.map(r => new vscode.Range(
 					editor.document.positionAt(r.start),
@@ -449,9 +444,8 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 
 		// Apply comment decorations
-		const commentRanges = extractCommentRanges(text);
-		if (commentRanges.length > 0) {
-			editor.setDecorations(commentDecType, commentRanges.map(r => new vscode.Range(
+		if (all.comments.length > 0) {
+			editor.setDecorations(commentDecType, all.comments.map(r => new vscode.Range(
 				editor.document.positionAt(r.start),
 				editor.document.positionAt(r.end)
 			)));
@@ -460,28 +454,24 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 
 		// Apply addition/deletion content decorations
-		const additionRanges = extractAdditionRanges(text);
-		editor.setDecorations(additionDecType, additionRanges.map(r => new vscode.Range(
+		editor.setDecorations(additionDecType, all.additions.map(r => new vscode.Range(
 			editor.document.positionAt(r.start),
 			editor.document.positionAt(r.end)
 		)));
 
-		const deletionRanges = extractDeletionRanges(text);
-		editor.setDecorations(deletionDecType, deletionRanges.map(r => new vscode.Range(
+		editor.setDecorations(deletionDecType, all.deletions.map(r => new vscode.Range(
 			editor.document.positionAt(r.start),
 			editor.document.positionAt(r.end)
 		)));
 
 		// Apply muted delimiter decorations
-		const delimiterRanges = extractCriticDelimiterRanges(text);
-		editor.setDecorations(delimiterDecType, delimiterRanges.map(r => new vscode.Range(
+		editor.setDecorations(delimiterDecType, all.delimiters.map(r => new vscode.Range(
 			editor.document.positionAt(r.start),
 			editor.document.positionAt(r.end)
 		)));
 
 		// Apply substitution "new" text decorations
-		const subNewRanges = extractSubstitutionNewRanges(text);
-		editor.setDecorations(substitutionNewDecType, subNewRanges.map(r => new vscode.Range(
+		editor.setDecorations(substitutionNewDecType, all.substitutionNew.map(r => new vscode.Range(
 			editor.document.positionAt(r.start),
 			editor.document.positionAt(r.end)
 		)));

@@ -1894,6 +1894,8 @@ function renderInlineRange(
         if (seg.type !== 'text' || !commentSetsEqual(seg.commentIds, commentSet)) {
           break;
         }
+        // Suppress highlights inside {==...==}: the CriticMarkup delimiters
+        // already represent a highlighted region, so ==...== would double-decorate.
         const fmtForComment: RunFormatting = { ...seg.formatting, highlight: false };
         let segText = wrapWithFormatting(seg.text, fmtForComment);
         if (seg.href) {
@@ -2045,10 +2047,11 @@ function renderInlineRangeWithIds(
 
     prevCommentIds = new Set(currentIds);
 
-    const fmtForText: RunFormatting = currentIds.size > 0
-      ? { ...item.formatting, highlight: false }
-      : item.formatting;
-    let formattedText = wrapWithFormatting(item.text, fmtForText);
+    // Unlike CriticMarkup inline syntax where {==...==} already represents the
+    // comment-region highlight (so we suppress ==...== to avoid doubling),
+    // ID-based {#id}...{/id} tags carry no highlight semantics — preserve
+    // user-applied highlights so ==...== can span across comment boundaries.
+    let formattedText = wrapWithFormatting(item.text, item.formatting);
     if (item.href) {
       formattedText = `[${formattedText}](${formatHrefForMarkdown(item.href)})`;
     }

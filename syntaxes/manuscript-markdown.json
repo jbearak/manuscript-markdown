@@ -1,19 +1,19 @@
 {
-    "injectionSelector": "L:text.html.markdown",
+    "injectionSelector": "L:text.html.markdown -string -meta.embedded -markup.inline.raw -markup.fenced_code",
     "patterns": [
+        { "include": "#citation_list" },
+        { "include": "#footnote_ref" },
+        { "include": "#footnote_def" },
+        { "include": "#colored_format_highlight" },
+        { "include": "#format_highlight" },
         { "include": "#addition" },
         { "include": "#deletion" },
         { "include": "#substitution" },
+        { "include": "#highlight" },
         { "include": "#comment_with_id" },
         { "include": "#comment" },
         { "include": "#comment_range_start" },
-        { "include": "#comment_range_end" },
-        { "include": "#highlight" },
-        { "include": "#colored_format_highlight" },
-        { "include": "#format_highlight" },
-        { "include": "#citation_list" },
-        { "include": "#footnote_def" },
-        { "include": "#footnote_ref" }
+        { "include": "#comment_range_end" }
     ],
 	"repository": {
 		"addition": {
@@ -43,7 +43,7 @@
 			]
 		},
 		"comment_with_id": {
-			"begin": "(\\{#)([a-zA-Z0-9_-]+)(>>)",
+			"begin": "(\\{#)([a-zA-Z0-9_-]++)(>>)",
 			"beginCaptures": {
 				"1": { "name": "punctuation.definition.tag.begin.manuscript-markdown" },
 				"2": { "name": "entity.name.tag.manuscript-markdown" },
@@ -70,7 +70,7 @@
 			"contentName": "meta.comment"
 		},
 		"comment_range_start": {
-			"match": "(\\{#)([a-zA-Z0-9_-]+)(\\})",
+			"match": "(\\{#)([a-zA-Z0-9_-]++)(\\})",
 			"captures": {
 				"1": { "name": "punctuation.definition.tag.begin.manuscript-markdown" },
 				"2": { "name": "entity.name.tag.manuscript-markdown" },
@@ -78,7 +78,7 @@
 			}
 		},
 		"comment_range_end": {
-			"match": "(\\{/)([a-zA-Z0-9_-]+)(\\})",
+			"match": "(\\{/)([a-zA-Z0-9_-]++)(\\})",
 			"captures": {
 				"1": { "name": "punctuation.definition.tag.begin.manuscript-markdown" },
 				"2": { "name": "entity.name.tag.manuscript-markdown" },
@@ -100,7 +100,7 @@
 			"contentName": "markup.bold"
 		},
 		"colored_format_highlight": {
-			"match": "(?<!\\{)==([^}=]+)==\\{([a-z0-9-]+)\\}",
+			"match": "(?<!\\{)==([^}=]++)==\\{([a-z0-9-]++)\\}",
 			"name": "markup.highlight.colored.manuscript-markdown",
 			"captures": {
 				"1": { "name": "markup.highlight" },
@@ -108,14 +108,14 @@
 			}
 		},
 		"format_highlight": {
-			"match": "(?<!\\{)==([^}=]+)==(?!\\})",
+			"match": "(?<!\\{)==([^}=]++)==(?!\\})",
 			"name": "markup.highlight.manuscript-markdown",
 			"captures": {
 				"1": { "name": "markup.highlight" }
 			}
 		},
 		"footnote_ref": {
-			"match": "(\\[\\^)([a-zA-Z0-9_-]+)(\\])(?!:)",
+			"match": "(\\[\\^)([a-zA-Z0-9_-]++)(\\])(?!:)",
 			"captures": {
 				"1": { "name": "punctuation.definition.footnote.begin.manuscript-markdown" },
 				"2": { "name": "entity.name.footnote.manuscript-markdown" },
@@ -123,7 +123,7 @@
 			}
 		},
 		"footnote_def": {
-			"match": "^(\\[\\^)([a-zA-Z0-9_-]+)(\\]:)",
+			"match": "^(\\[\\^)([a-zA-Z0-9_-]++)(\\]:)",
 			"captures": {
 				"1": { "name": "punctuation.definition.footnote.begin.manuscript-markdown" },
 				"2": { "name": "entity.name.footnote.manuscript-markdown" },
@@ -142,7 +142,7 @@
 			"name": "meta.citation.manuscript-markdown",
 			"patterns": [
 				{
-					"match": "@[A-Za-z0-9_:-]+",
+					"match": "@[A-Za-z0-9_:-]++",
 					"name": "support.function.citation.manuscript-markdown"
 				},
 				{
