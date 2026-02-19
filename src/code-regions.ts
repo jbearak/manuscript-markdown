@@ -40,14 +40,20 @@ export function computeCodeRegions(text: string): CodeRegion[] {
 	}
 
 	// 2. Inline code spans (CommonMark §6.1) — only outside fenced blocks
-	const isInsideFence = (pos: number): boolean =>
-		regions.some(r => pos >= r.start && pos < r.end);
+	// Fenced regions are added left-to-right so we can early-exit the scan.
+	const findContainingRegion = (pos: number): CodeRegion | null => {
+		for (const r of regions) {
+			if (pos < r.start) break;
+			if (pos < r.end) return r;
+		}
+		return null;
+	};
 
 	let i = 0;
 	while (i < text.length) {
-		if (isInsideFence(i)) {
-			const r = regions.find(r => i >= r.start && i < r.end)!;
-			i = r.end;
+		const fence = findContainingRegion(i);
+		if (fence) {
+			i = fence.end;
 			continue;
 		}
 		if (text[i] === '`') {
@@ -57,9 +63,9 @@ export function computeCodeRegions(text: string): CodeRegion[] {
 			let found = false;
 			let j = i;
 			while (j < text.length) {
-				if (isInsideFence(j)) {
-					const r = regions.find(r => j >= r.start && j < r.end)!;
-					j = r.end;
+				const innerFence = findContainingRegion(j);
+				if (innerFence) {
+					j = innerFence.end;
 					continue;
 				}
 				if (text[j] === '`') {
