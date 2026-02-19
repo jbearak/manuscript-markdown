@@ -182,7 +182,7 @@ describe('Overlapping comments: docx-to-md (buildMarkdown)', () => {
     expect(result).toContain(`{#2>>bob (${date2}): reply<<}`);
   });
 
-  test('highlight formatting is stripped in ID-based mode', () => {
+  test('highlight formatting is preserved in ID-based mode', () => {
     const comments = new Map([
       ['c1', { author: 'alice', text: 'note', date: '' }],
       ['c2', { author: 'bob', text: 'reply', date: '' }],
@@ -202,10 +202,25 @@ describe('Overlapping comments: docx-to-md (buildMarkdown)', () => {
       },
     ];
     const result = buildMarkdown(content, comments);
-    // In ID mode, highlight should be stripped (it was just for Word's comment indication)
-    expect(result).not.toContain('{==');
-    expect(result).toContain('highlighted');
-    expect(result).toContain(' both');
+    expect(result).toContain('==highlighted==');
+    expect(result).toContain('== both==');
+  });
+
+  test('highlighted text inside non-overlapping comment produces {====text====}', () => {
+    const comments = new Map([
+      ['c1', { author: 'alice', text: 'note', date: '' }],
+    ]);
+    const content = [
+      {
+        type: 'text' as const,
+        text: 'text',
+        commentIds: new Set(['c1']),
+        formatting: { ...DEFAULT_FORMATTING, highlight: true },
+      },
+    ];
+    const result = buildMarkdown(content, comments);
+    expect(result).toContain('{====text====}');
+    expect(result).toContain('{>>alice: note<<}');
   });
 
   test('table-only comments are remapped to 1-indexed IDs', () => {
