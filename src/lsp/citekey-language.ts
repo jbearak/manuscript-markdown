@@ -260,10 +260,14 @@ export function resolveBibliographyPath(
 	const candidates: string[] = [];
 	if (metadata.bibliography) {
 		const bibFile = normalizeBibPath(metadata.bibliography);
-		if (path.isAbsolute(bibFile)) {
+		const isRootRelative = bibFile.startsWith('/');
+		if (isRootRelative) {
+			const rel = bibFile.slice(1);
 			for (const workspaceRoot of workspaceRootPaths) {
-				candidates.push(path.join(workspaceRoot, bibFile));
+				candidates.push(path.join(workspaceRoot, rel));
 			}
+			candidates.push(bibFile);
+		} else if (path.isAbsolute(bibFile)) {
 			candidates.push(bibFile);
 		} else {
 			candidates.push(path.join(markdownDir, bibFile));
@@ -297,10 +301,14 @@ export async function resolveBibliographyPathAsync(
 	const candidates: string[] = [];
 	if (fm.bibliography) {
 		const bibFile = normalizeBibPath(fm.bibliography);
-		if (path.isAbsolute(bibFile)) {
+		const isRootRelative = bibFile.startsWith('/');
+		if (isRootRelative) {
+			const rel = bibFile.slice(1);
 			for (const workspaceRoot of workspaceRootPaths) {
-				candidates.push(path.join(workspaceRoot, bibFile));
+				candidates.push(path.join(workspaceRoot, rel));
 			}
+			candidates.push(bibFile);
+		} else if (path.isAbsolute(bibFile)) {
 			candidates.push(bibFile);
 		} else {
 			candidates.push(path.join(markdownDir, bibFile));
