@@ -202,7 +202,9 @@ documents.onDidChangeContent((event) => {
 		const fsPath = uriToFsPath(event.document.uri);
 		if (fsPath) {
 			invalidateCanonicalCache(fsPath);
-			revalidateMarkdownDocsForBib(fsPath);
+			revalidateMarkdownDocsForBib(fsPath).catch(e =>
+				connection.console.error(`revalidateMarkdownDocsForBib error: ${e instanceof Error ? e.message : String(e)}`)
+			);
 		}
 	}
 	if (isMarkdownUri(event.document.uri, event.document.languageId)) {
@@ -215,7 +217,9 @@ documents.onDidClose((event) => {
 		invalidateBibCache(event.document.uri);
 		const fsPath = uriToFsPath(event.document.uri);
 		if (fsPath) {
-			revalidateMarkdownDocsForBib(fsPath);
+			revalidateMarkdownDocsForBib(fsPath).catch(e =>
+				connection.console.error(`revalidateMarkdownDocsForBib error: ${e instanceof Error ? e.message : String(e)}`)
+			);
 		}
 	}
 	if (isMarkdownUri(event.document.uri, event.document.languageId)) {
@@ -238,7 +242,9 @@ connection.onDidChangeWatchedFiles((params: DidChangeWatchedFilesParams) => {
 			const fsPath = uriToFsPath(change.uri);
 			if (fsPath) {
 				invalidateCanonicalCache(fsPath);
-				revalidateMarkdownDocsForBib(fsPath);
+				revalidateMarkdownDocsForBib(fsPath).catch(e =>
+					connection.console.error(`revalidateMarkdownDocsForBib error: ${e instanceof Error ? e.message : String(e)}`)
+				);
 			}
 		}
 	}
