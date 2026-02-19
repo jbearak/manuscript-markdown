@@ -362,6 +362,44 @@ describe('Overlapping comments: md-to-docx (parseMd)', () => {
     expect(starts.length).toBe(2);
     expect(ends.length).toBe(2);
   });
+
+  test('{====text====} parses as critic_highlight with highlight=true', () => {
+    const tokens = parseMd('{====text====}{>>alice: note<<}');
+    const runs = tokens[0]?.runs;
+    expect(runs).toBeDefined();
+    const hl = runs!.find(r => r.type === 'critic_highlight' && r.text === 'text');
+    expect(hl).toBeDefined();
+    expect(hl!.highlight).toBe(true);
+  });
+
+  test('{====text=={green}==} parses as critic_highlight with highlight and color', () => {
+    const tokens = parseMd('{====text=={green}==}{>>alice: note<<}');
+    const runs = tokens[0]?.runs;
+    expect(runs).toBeDefined();
+    const hl = runs!.find(r => r.type === 'critic_highlight' && r.text === 'text');
+    expect(hl).toBeDefined();
+    expect(hl!.highlight).toBe(true);
+    expect(hl!.highlightColor).toBe('green');
+  });
+
+  test('=={==text==}== parses as critic_highlight with highlight=true', () => {
+    const tokens = parseMd('=={==text==}==');
+    const runs = tokens[0]?.runs;
+    expect(runs).toBeDefined();
+    const hl = runs!.find(r => r.type === 'critic_highlight' && r.text === 'text');
+    expect(hl).toBeDefined();
+    expect(hl!.highlight).toBe(true);
+  });
+
+  test('=={==text==}=={green} parses as critic_highlight with highlight and color', () => {
+    const tokens = parseMd('=={==text==}=={green}');
+    const runs = tokens[0]?.runs;
+    expect(runs).toBeDefined();
+    const hl = runs!.find(r => r.type === 'critic_highlight' && r.text === 'text');
+    expect(hl).toBeDefined();
+    expect(hl!.highlight).toBe(true);
+    expect(hl!.highlightColor).toBe('green');
+  });
 });
 
 describe('Overlapping comments: OOXML generation', () => {
@@ -504,6 +542,20 @@ describe('Overlapping comments: round-trip', () => {
     expect(customXml).toBeDefined();
     expect(customXml || '').toContain('MANUSCRIPT_COMMENT_IDS_1');
     expect(customXml || '').toContain('&quot;0&quot;:&quot;intro-note&quot;');
+  });
+
+  test('{====text====} round-trips with highlighted text in comment', async () => {
+    const md = '{====text====}{>>alice: note<<}';
+    const { docx } = await convertMdToDocx(md, { authorName: 'test' });
+    const roundtrip = await convertDocx(docx);
+    expect(roundtrip.markdown).toContain('{====text====}');
+  });
+
+  test('=={==text==}== round-trips as highlighted text', async () => {
+    const md = '=={==text==}==';
+    const { docx } = await convertMdToDocx(md, { authorName: 'test' });
+    const roundtrip = await convertDocx(docx);
+    expect(roundtrip.markdown).toContain('==text==');
   });
 });
 

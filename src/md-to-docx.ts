@@ -258,13 +258,38 @@ function criticMarkupRule(state: any, silent: boolean): boolean {
   return true;
 }
 
+function findClosingHighlightMarker(src: string, from: number, max: number): number {
+  let depth = 0;
+  let pos = from;
+  while (pos < max - 1) {
+    if (src[pos] === '=' && src[pos + 1] === '=') {
+      // Opening {== increases depth
+      if (pos > 0 && src[pos - 1] === '{') {
+        depth++;
+        pos += 2;
+        continue;
+      }
+      // Closing ==} decreases depth (only if inside a {== block)
+      if (depth > 0 && pos + 2 < max && src[pos + 2] === '}') {
+        depth--;
+        pos += 3;
+        continue;
+      }
+      // At depth 0, this is the closing ==
+      if (depth === 0) return pos;
+    }
+    pos++;
+  }
+  return -1;
+}
+
 function coloredHighlightRule(state: any, silent: boolean): boolean {
   const start = state.pos;
   const max = state.posMax;
   
   if (start + 2 >= max || state.src.slice(start, start + 2) !== '==') return false;
   
-  const endPos = state.src.indexOf('==', start + 2);
+  const endPos = findClosingHighlightMarker(state.src, start + 2, max);
   if (endPos === -1) return false;
   
   const afterEnd = endPos + 2;
@@ -733,37 +758,63 @@ function processInlineChildren(tokens: any[]): MdRun[] {
             href: currentHref
           });
         } else {
+          let text = token.content;
+          let innerHighlight: boolean | undefined;
+          let innerColor: string | undefined;
+
+          const coloredMatch = text.match(/^==([\s\S]*)==\{([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\}$/);
+          const plainMatch = !coloredMatch && text.match(/^==([\s\S]*)==$/);
+
+          if (coloredMatch) {
+            text = coloredMatch[1];
+            innerHighlight = true;
+            innerColor = coloredMatch[2];
+          } else if (plainMatch) {
+            text = plainMatch[1];
+            innerHighlight = true;
+          }
+
           runs.push({
             type: token.criticType,
-            text: token.content,
+            text,
             author: token.author,
             date: token.date,
+            highlight: innerHighlight,
+            highlightColor: innerColor,
             ...formatStack,
             href: currentHref
           });
         }
         break;
         
-      case 'colored_highlight':
+      case 'colored_highlight': {
+        let text = token.content;
+        const criticMatch = text.match(/^\{==([\s\S]*)==\}$/);
+        if (criticMatch) text = criticMatch[1];
         runs.push({
           type: 'critic_highlight',
-          text: token.content,
+          text,
           highlight: true,
           highlightColor: token.color,
           ...formatStack,
           href: currentHref
         });
         break;
-        
-      case 'plain_highlight':
+      }
+
+      case 'plain_highlight': {
+        let text = token.content;
+        const criticMatch = text.match(/^\{==([\s\S]*)==\}$/);
+        if (criticMatch) text = criticMatch[1];
         runs.push({
           type: 'critic_highlight',
-          text: token.content,
+          text,
           highlight: true,
           ...formatStack,
           href: currentHref
         });
         break;
+      }
         
       case 'citation':
         runs.push({
