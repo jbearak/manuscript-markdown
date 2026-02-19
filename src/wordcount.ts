@@ -81,11 +81,9 @@ export class WordCountController {
           })
         );
 
-        // Register onDidChangeTextEditorSelection listener
-        // Skip update for cursor-only movement; debounce for non-empty selections
+        // Register onDidChangeTextEditorSelection listener (debounced)
         this.disposables.push(
-          vscode.window.onDidChangeTextEditorSelection((e) => {
-            if (e.selections.every(s => s.isEmpty)) return;
+          vscode.window.onDidChangeTextEditorSelection(() => {
             this.scheduleUpdate();
           })
         );
