@@ -1,4 +1,5 @@
 import { findMatchingClose } from './critic-markup';
+import { computeCodeRegions, isInsideCodeRegion } from './code-regions';
 /** Canonical color name → hex value mapping for Word highlight colors */
 export const HIGHLIGHT_COLORS: Record<string, string> = {
   'yellow':      '#FFFF00',
@@ -395,9 +396,20 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
     }
   };
 
+  const codeRegions = computeCodeRegions(text);
+  let crIdx = 0; // index into codeRegions for fast skipping
+
   const len = text.length;
   let i = 0;
   while (i < len) {
+    // Skip code regions
+    while (crIdx < codeRegions.length && codeRegions[crIdx].end <= i) crIdx++;
+    if (crIdx < codeRegions.length && i >= codeRegions[crIdx].start) {
+      i = codeRegions[crIdx].end;
+      crIdx++;
+      continue;
+    }
+
     if (text.charCodeAt(i) === 0x7B && i + 2 < len) {
       const c2 = text.charCodeAt(i + 1);
       const c3 = text.charCodeAt(i + 2);

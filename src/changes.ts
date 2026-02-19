@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { computeCodeRegions, overlapsCodeRegion } from './code-regions';
 
 // Combined pattern for all Manuscript Markdown syntax in a single regex
 // Using [\s\S]*? to match zero or more characters (including newlines) to support empty patterns
@@ -20,14 +21,20 @@ export function getAllMatches(document: vscode.TextDocument): vscode.Range[] {
 	}
 
 	const text = document.getText();
-	const ranges: vscode.Range[] = [];
+	const codeRegions = computeCodeRegions(text);
+	const rawRanges: Array<{ range: vscode.Range; offset: number; length: number }> = [];
 
 	let match;
 	while ((match = combinedPattern.exec(text)) !== null) {
 		const startPos = document.positionAt(match.index);
 		const endPos = document.positionAt(match.index + match[0].length);
-		ranges.push(new vscode.Range(startPos, endPos));
+		rawRanges.push({ range: new vscode.Range(startPos, endPos), offset: match.index, length: match[0].length });
 	}
+
+	// Filter out matches inside code regions
+	const ranges = rawRanges
+		.filter(r => !overlapsCodeRegion(r.offset, r.offset + r.length, codeRegions))
+		.map(r => r.range);
 
 	// Ranges are already in document order from single-pass regex
 	// Filter out contained ranges (O(N) pass)

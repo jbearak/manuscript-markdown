@@ -3,6 +3,7 @@ import * as fsp from 'fs/promises';
 import * as path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { BibtexEntry, parseBibtex } from '../bibtex-parser';
+import { computeCodeRegions, overlapsCodeRegion } from '../code-regions';
 import { Frontmatter, normalizeBibPath, parseFrontmatter } from '../frontmatter';
 
 const CITATION_SEGMENT_RE = /\[[^\]]*@[^\]]*]/g;
@@ -122,10 +123,15 @@ export function pathsEqual(a: string, b: string): boolean {
 
 export function scanCitationUsages(text: string): CitekeyUsage[] {
 	const usages: CitekeyUsage[] = [];
+	const codeRegions = computeCodeRegions(text);
 	let citationMatch: RegExpExecArray | null;
 
 	CITATION_SEGMENT_RE.lastIndex = 0;
 	while ((citationMatch = CITATION_SEGMENT_RE.exec(text)) !== null) {
+		// Skip citation segments that overlap code regions
+		if (overlapsCodeRegion(citationMatch.index, citationMatch.index + citationMatch[0].length, codeRegions)) {
+			continue;
+		}
 		const segment = citationMatch[0];
 		const segmentOffset = citationMatch.index + 1;
 		const inner = segment.slice(1, -1);

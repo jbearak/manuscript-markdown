@@ -187,16 +187,21 @@ const combinedPattern =
 	/\{\+\+([\s\S]*?)\+\+\}|\{--([\s\S]*?)--\}|\{\~\~([\s\S]*?)\~\~\}|\{#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|\{>>([\s\S]*?)<<\}|\{#[a-zA-Z0-9_-]+\}|\{\/[a-zA-Z0-9_-]+\}|\{==([\s\S]*?)==\}|(?<!\{)==([^}=]+)==\{[a-z0-9-]+\}|(?<!\{)==([^}=]+)==(?!\})|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
 
 function scanNavigation(text: string): Array<{ start: number; end: number }> {
+	const codeRegions = computeCodeRegionsForTest(text);
 	const re = new RegExp(combinedPattern.source, combinedPattern.flags);
 	const matches: Array<{ start: number; end: number }> = [];
 	let m: RegExpExecArray | null;
 	while ((m = re.exec(text)) !== null) {
 		matches.push({ start: m.index, end: m.index + m[0].length });
 	}
+	// Filter out matches inside code regions
+	const nonCodeMatches = matches.filter(
+		match => !overlapsCodeRegion(match.start, match.end, codeRegions)
+	);
 	// Filter contained ranges (same as production)
 	const filtered: Array<{ start: number; end: number }> = [];
 	let lastKept: { start: number; end: number } | undefined;
-	for (const o of matches) {
+	for (const o of nonCodeMatches) {
 		if (!lastKept || !(lastKept.start <= o.start && o.end <= lastKept.end)) {
 			filtered.push(o);
 			lastKept = o;
