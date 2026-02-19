@@ -634,9 +634,9 @@ async function revalidateMarkdownDocsForBib(changedBibPath: string): Promise<voi
 }
 
 async function getBibDataForPath(bibPath: string): Promise<ParsedBibData | undefined> {
+	const cacheKey = await canonicalizeFsPathAsync(bibPath);
 	const openDoc = documents.get(fsPathToUri(bibPath));
 	if (openDoc) {
-		const cacheKey = canonicalizeFsPath(bibPath);
 		const cached = openDocBibCache.get(cacheKey);
 		if (cached && cached.version === openDoc.version) {
 			return cached.data;
@@ -646,7 +646,6 @@ async function getBibDataForPath(bibPath: string): Promise<ParsedBibData | undef
 		return data;
 	}
 
-	const cacheKey = canonicalizeFsPath(bibPath);
 	try {
 		const stat = await fsp.stat(bibPath);
 		const cached = bibCache.get(cacheKey);
