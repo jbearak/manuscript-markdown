@@ -106,11 +106,17 @@ function scheduleValidation(uri: string): void {
 
 /** Run all validation steps with a single shared frontmatter parse. */
 async function runValidationPipeline(doc: TextDocument): Promise<void> {
-	const text = doc.getText();
-	const { metadata } = parseFrontmatter(text);
-	await updateBibReverseMap(doc.uri, text, metadata);
-	await validateCitekeys(doc, metadata);
-	await validateCslField(doc, metadata);
+	try {
+		const text = doc.getText();
+		const { metadata } = parseFrontmatter(text);
+		await updateBibReverseMap(doc.uri, text, metadata);
+		await validateCitekeys(doc, metadata);
+		await validateCslField(doc, metadata);
+	} catch (error) {
+		connection.console.error(
+			`Validation pipeline error for ${doc.uri}: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`
+		);
+	}
 }
 
 async function updateBibReverseMap(docUri: string, docText: string, metadata?: Frontmatter): Promise<void> {
