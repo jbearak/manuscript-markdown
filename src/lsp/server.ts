@@ -611,12 +611,13 @@ async function revalidateMarkdownDocsForBib(changedBibPath: string): Promise<voi
 		}
 		try {
 			const docText = doc.getText();
-			const bibPath = await resolveBibliographyPathAsync(doc.uri, docText, workspaceRootPaths);
+			const { metadata } = parseFrontmatter(docText);
+			const bibPath = await resolveBibliographyPathAsync(doc.uri, docText, workspaceRootPaths, metadata);
 			if (!bibPath || await canonicalizeFsPathAsync(bibPath) !== changedCanonical) {
 				continue;
 			}
-			await updateBibReverseMap(doc.uri, docText);
-			await validateCitekeys(doc);
+			await updateBibReverseMap(doc.uri, docText, metadata);
+			await validateCitekeys(doc, metadata);
 		} catch (error) {
 			connection.console.error(
 				`Error revalidating markdown doc ${doc.uri} for bibliography ${changedBibPath}: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`
