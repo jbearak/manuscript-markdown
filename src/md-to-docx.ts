@@ -476,6 +476,14 @@ function createCriticInnerMarkdownIt(): MarkdownIt {
   return md;
 }
 
+let _cachedCriticInnerMd: MarkdownIt | undefined;
+function getCriticInnerMarkdownIt(): MarkdownIt {
+  if (!_cachedCriticInnerMd) {
+    _cachedCriticInnerMd = createCriticInnerMarkdownIt();
+  }
+  return _cachedCriticInnerMd;
+}
+
 function toTextRunFromInner(run: MdRun, overrides?: Partial<MdRun>): MdRun {
   return {
     type: 'text',
@@ -530,7 +538,7 @@ function normalizeCriticInnerRuns(runs: MdRun[]): MdRun[] {
 
 function parseCriticInnerRuns(content: string): MdRun[] {
   if (!content) return [];
-  const md = createCriticInnerMarkdownIt();
+  const md = getCriticInnerMarkdownIt();
   const tokens = md.parseInline(content, {});
   return normalizeCriticInnerRuns(convertInlineTokens(tokens));
 }
@@ -822,9 +830,11 @@ function processInlineChildren(tokens: any[]): MdRun[] {
             href: currentHref
           });
         } else if (token.criticType === 'critic_comment') {
+          const commentAnchorText = '';
           runs.push({
             type: 'critic_comment',
-            text: '',
+            text: commentAnchorText,
+            innerRuns: parseCriticInnerRuns(commentAnchorText),
             author: token.author,
             date: token.date,
             commentText: token.commentText,
@@ -1945,8 +1955,16 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         for (const re of replyEntries) {
           xml += '<w:commentRangeStart w:id="' + re.replyId + '"/>';
         }
-        const highlightRun = { ...run, type: 'text' as const, highlight: true };
-        xml += generateRun(run.text, generateRPr(highlightRun));
+        xml += generateInlineCriticContent(
+          run.innerRuns,
+          run.text,
+          run,
+          state,
+          options,
+          bibEntries,
+          citeprocEngine,
+          { highlight: true }
+        );
         for (const re of replyEntries) {
           xml += '<w:commentRangeEnd w:id="' + re.replyId + '"/>';
           xml += '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="' + re.replyId + '"/></w:r>';
