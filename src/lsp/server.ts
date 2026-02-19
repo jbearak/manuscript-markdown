@@ -108,7 +108,7 @@ function scheduleValidation(uri: string): void {
 async function runValidationPipeline(doc: TextDocument): Promise<void> {
 	const text = doc.getText();
 	const { metadata } = parseFrontmatter(text);
-	updateBibReverseMap(doc.uri, text, metadata);
+	await updateBibReverseMap(doc.uri, text, metadata);
 	await validateCitekeys(doc, metadata);
 	await validateCslField(doc, metadata);
 }
