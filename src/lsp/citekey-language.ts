@@ -4,7 +4,7 @@ import * as path from 'path';
 import { promisify } from 'util';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { BibtexEntry, parseBibtex } from '../bibtex-parser';
-import { computeCodeRegions, isInsideCodeRegion, overlapsCodeRegion } from '../code-regions';
+import { computeCodeRegions, isInsideCodeRegion, type CodeRegion } from '../code-regions';
 import { Frontmatter, normalizeBibPath, parseFrontmatter } from '../frontmatter';
 
 // --- Implementation notes ---
@@ -19,6 +19,18 @@ const realpathNativeAsync = promisify(fs.realpath.native);
 
 const CITATION_SEGMENT_RE = /\[[^\]]*@[^\]]*]/g;
 const CITEKEY_RE = /@([A-Za-z0-9_:-]+)/g;
+
+/** Replace all characters inside code regions with spaces, preserving offsets. */
+function blankCodeRegions(text: string, regions: CodeRegion[]): string {
+	if (regions.length === 0) return text;
+	const chars = text.split('');
+	for (const r of regions) {
+		for (let i = r.start; i < r.end && i < chars.length; i++) {
+			chars[i] = ' ';
+		}
+	}
+	return chars.join('');
+}
 
 export class LruCache<K, V> {
 	private map = new Map<K, V>();
@@ -136,14 +148,15 @@ export function pathsEqual(a: string, b: string): boolean {
 export function scanCitationUsages(text: string): CitekeyUsage[] {
 	const usages: CitekeyUsage[] = [];
 	const codeRegions = computeCodeRegions(text);
+
+	// Neutralize code regions so the bracket regex can't start matching from
+	// inside a code span (e.g. `[ ` [@a] — the `[` inside backticks must not
+	// anchor a bracket group that extends past the code span).
+	const scanText = blankCodeRegions(text, codeRegions);
 	let citationMatch: RegExpExecArray | null;
 
 	CITATION_SEGMENT_RE.lastIndex = 0;
-	while ((citationMatch = CITATION_SEGMENT_RE.exec(text)) !== null) {
-		// Skip citation segments that overlap code regions
-		if (overlapsCodeRegion(citationMatch.index, citationMatch.index + citationMatch[0].length, codeRegions)) {
-			continue;
-		}
+	while ((citationMatch = CITATION_SEGMENT_RE.exec(scanText)) !== null) {
 		const segment = citationMatch[0];
 		const segmentOffset = citationMatch.index + 1;
 		const inner = segment.slice(1, -1);
@@ -168,13 +181,11 @@ export function findUsagesForKey(text: string, key: string): CitekeyUsage[] {
 	const segRe = /\[[^\]]*@[^\]]*\]/g;
 	const keyRe = new RegExp(`@${escaped}(?![A-Za-z0-9_:-])`, 'g');
 	const codeRegions = computeCodeRegions(text);
+	const scanText = blankCodeRegions(text, codeRegions);
 	const usages: CitekeyUsage[] = [];
 	let segMatch: RegExpExecArray | null;
 	segRe.lastIndex = 0;
-	while ((segMatch = segRe.exec(text)) !== null) {
-		if (overlapsCodeRegion(segMatch.index, segMatch.index + segMatch[0].length, codeRegions)) {
-			continue;
-		}
+	while ((segMatch = segRe.exec(scanText)) !== null) {
 		const inner = segMatch[0].slice(1, -1);
 		const segmentOffset = segMatch.index + 1;
 		keyRe.lastIndex = 0;

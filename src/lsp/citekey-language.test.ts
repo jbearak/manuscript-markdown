@@ -257,4 +257,17 @@ describe('code-region filtering', () => {
 		const offset = text.indexOf('@key') + 1;
 		expect(findCitekeyAtOffset(text, offset)).toBe('key');
 	});
+
+	test('scanCitationUsages finds citation when code span contains [ that could anchor greedy match', () => {
+		const text = '`[ ` [@a]';
+		const usages = scanCitationUsages(text);
+		expect(usages).toHaveLength(1);
+		expect(usages[0].key).toBe('a');
+	});
+
+	test('findCitekeyAtOffset finds citation after code span with bracket', () => {
+		const text = '`[ ` [@a]';
+		const offset = text.indexOf('@a') + 1;
+		expect(findCitekeyAtOffset(text, offset)).toBe('a');
+	});
 });
