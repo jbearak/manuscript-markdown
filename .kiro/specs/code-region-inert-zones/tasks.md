@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. Write bug condition exploration test
+- [x] 1. Write bug condition exploration test
   - **Property 1: Fault Condition** - Code Region Inertness
   - **CRITICAL**: This test MUST FAIL on unfixed code — failure confirms the bug exists
   - **DO NOT attempt to fix the test or the code when it fails**
@@ -152,28 +152,28 @@
     - Test comment outside code — expect unchanged
     - _Requirements: 2.6, 2.7, 2.8, 2.9, 3.5_
 
-- [ ] 8. Verify preview rendering and MD→DOCX converter (no changes expected)
-  - [ ] 8.1 Verify markdown-it preview plugin handles code regions correctly
+- [x] 8. Verify preview rendering and MD→DOCX converter (no changes expected)
+  - [x] 8.1 Verify markdown-it preview plugin handles code regions correctly
     - Confirm that markdown-it's built-in `backtick` rule consumes inline code content before custom `parseManuscriptMarkdown` and `parseFormatHighlight` rules fire
     - Confirm that fenced code blocks are handled at block level and content is never passed to inline rules
     - Write a verification test: render `` `{++added++}` `` through markdown-it with the plugin — expect `<code>{++added++}</code>` (literal text, not `<ins>`)
     - If edge cases are found, add guards; otherwise document that no changes are needed
     - _Requirements: 2.11, 3.1_
 
-  - [ ] 8.2 Verify MD→DOCX converter handles code regions correctly
+  - [x] 8.2 Verify MD→DOCX converter handles code regions correctly
     - Confirm that `processInlineChildren` in `src/md-to-docx.ts` handles `code_inline` tokens by creating `{ type: 'text', code: true }` runs without CriticMarkup interpretation
     - Confirm that `convertTokens` handles `fence` tokens at block level with plain text runs
     - Write a verification test if feasible; otherwise document that markdown-it's token architecture provides sufficient protection
     - _Requirements: 2.5, 3.4_
 
-- [ ] 9. Add documentation for comment boundary expansion
-  - [ ] 9.1 Add section to `docs/converter.md` about comment boundary expansion
+- [x] 9. Add documentation for comment boundary expansion
+  - [x] 9.1 Add section to `docs/converter.md` about comment boundary expansion
     - Document under "Known Limitations" that comments anchored inside code runs are expanded to surround the code span
     - Explain that CriticMarkup cannot appear inside code regions, so this is an intentional lossy transformation
     - Provide examples of the three expansion cases (fully inside, end inside, start inside)
     - _Requirements: 2.7, 2.8, 2.9_
 
-- [ ] 10. Verify bug condition exploration test now passes
+- [x] 10. Verify bug condition exploration test now passes
   - **Property 1: Expected Behavior** - Code Region Inertness
   - **IMPORTANT**: Re-run the SAME test from task 1 — do NOT write a new test
   - The test from task 1 encodes the expected behavior: no decoration/navigation/LSP ranges overlap code regions
@@ -182,7 +182,7 @@
   - **EXPECTED OUTCOME**: Test PASSES (confirms bug is fixed)
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.10_
 
-- [ ] 11. Verify preservation tests still pass
+- [x] 11. Verify preservation tests still pass
   - **Property 2: Preservation** - Non-Code-Region Behavior Unchanged
   - **IMPORTANT**: Re-run the SAME tests from task 2 — do NOT write new tests
   - Run preservation property tests from step 2
@@ -190,7 +190,7 @@
   - Confirm all tests still pass after fix (no regressions)
   - _Requirements: 3.1, 3.2, 3.3, 3.6, 3.7_
 
-- [ ] 12. Checkpoint — Ensure all tests pass
+- [x] 12. Checkpoint — Ensure all tests pass
   - Run full test suite with `bun test`
   - Ensure all existing property tests still pass (especially `highlight-colors.property.test.ts`, `changes.property.test.ts`, `converter.property.test.ts`)
   - Ensure new code-region property tests pass (both fault condition and preservation)

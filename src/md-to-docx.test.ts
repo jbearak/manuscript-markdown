@@ -1556,3 +1556,107 @@ describe('Code block separator between consecutive blocks', () => {
     expect(docXml).toContain('<w:p/>');
   });
 });
+
+// Feature: code-region-inert-zones, Task 8.2: Verify MD→DOCX converter handles code regions correctly
+// Confirms that processInlineChildren handles code_inline tokens as { type: 'text', code: true } runs
+// without CriticMarkup interpretation, and convertTokens handles fence tokens at block level with plain text.
+// No code changes needed — markdown-it's token architecture provides sufficient protection.
+describe('Code region inertness in MD→DOCX', () => {
+  it('parses inline code with CriticMarkup addition as plain code run', () => {
+    const tokens = parseMd('`{++added++}`');
+    expect(tokens.length).toBe(1);
+    const runs = tokens[0].runs;
+    const codeRun = runs.find(r => r.code === true);
+    expect(codeRun).toBeDefined();
+    expect(codeRun!.text).toBe('{++added++}');
+    expect(codeRun!.type).toBe('text');
+    // No critic_add runs should exist
+    expect(runs.filter(r => r.type === 'critic_add')).toHaveLength(0);
+  });
+
+  it('parses inline code with CriticMarkup deletion as plain code run', () => {
+    const tokens = parseMd('`{--deleted--}`');
+    const runs = tokens[0].runs;
+    const codeRun = runs.find(r => r.code === true);
+    expect(codeRun).toBeDefined();
+    expect(codeRun!.text).toBe('{--deleted--}');
+    expect(runs.filter(r => r.type === 'critic_del')).toHaveLength(0);
+  });
+
+  it('parses inline code with CriticMarkup highlight as plain code run', () => {
+    const tokens = parseMd('`{==highlighted==}`');
+    const runs = tokens[0].runs;
+    const codeRun = runs.find(r => r.code === true);
+    expect(codeRun).toBeDefined();
+    expect(codeRun!.text).toBe('{==highlighted==}');
+    expect(runs.filter(r => r.type === 'critic_highlight')).toHaveLength(0);
+  });
+
+  it('parses inline code with CriticMarkup comment as plain code run', () => {
+    const tokens = parseMd('`{>>comment<<}`');
+    const runs = tokens[0].runs;
+    const codeRun = runs.find(r => r.code === true);
+    expect(codeRun).toBeDefined();
+    expect(codeRun!.text).toBe('{>>comment<<}');
+    expect(runs.filter(r => r.type === 'critic_comment')).toHaveLength(0);
+  });
+
+  it('parses inline code with CriticMarkup substitution as plain code run', () => {
+    const tokens = parseMd('`{~~old~>new~~}`');
+    const runs = tokens[0].runs;
+    const codeRun = runs.find(r => r.code === true);
+    expect(codeRun).toBeDefined();
+    expect(codeRun!.text).toBe('{~~old~>new~~}');
+    expect(runs.filter(r => r.type === 'critic_sub')).toHaveLength(0);
+  });
+
+  it('parses inline code with format highlight as plain code run', () => {
+    const tokens = parseMd('`==highlighted==`');
+    const runs = tokens[0].runs;
+    const codeRun = runs.find(r => r.code === true);
+    expect(codeRun).toBeDefined();
+    expect(codeRun!.text).toBe('==highlighted==');
+    expect(runs.filter(r => r.type === 'critic_highlight')).toHaveLength(0);
+  });
+
+  it('parses inline code with citation as plain code run', () => {
+    const tokens = parseMd('`[@smith2020]`');
+    const runs = tokens[0].runs;
+    const codeRun = runs.find(r => r.code === true);
+    expect(codeRun).toBeDefined();
+    expect(codeRun!.text).toBe('[@smith2020]');
+    expect(runs.filter(r => r.type === 'citation')).toHaveLength(0);
+  });
+
+  it('parses fenced code block with CriticMarkup as plain text code_block token', () => {
+    const tokens = parseMd('```\n{++added++}\n{--deleted--}\n{==highlighted==}\n```');
+    const codeBlock = tokens.find(t => t.type === 'code_block');
+    expect(codeBlock).toBeDefined();
+    expect(codeBlock!.runs.length).toBe(1);
+    expect(codeBlock!.runs[0].type).toBe('text');
+    expect(codeBlock!.runs[0].text).toContain('{++added++}');
+    expect(codeBlock!.runs[0].text).toContain('{--deleted--}');
+    expect(codeBlock!.runs[0].text).toContain('{==highlighted==}');
+  });
+
+  it('parses fenced code block with language tag as plain text', () => {
+    const tokens = parseMd('```python\n{++added++}\nprint("hello")\n```');
+    const codeBlock = tokens.find(t => t.type === 'code_block');
+    expect(codeBlock).toBeDefined();
+    expect(codeBlock!.language).toBe('python');
+    expect(codeBlock!.runs[0].text).toContain('{++added++}');
+  });
+
+  it('still parses CriticMarkup outside inline code', () => {
+    const tokens = parseMd('Before `code` {++after++}');
+    const runs = tokens[0].runs;
+    // Should have a code run for the inline code
+    const codeRun = runs.find(r => r.code === true);
+    expect(codeRun).toBeDefined();
+    expect(codeRun!.text).toBe('code');
+    // Should have a critic_add run for the CriticMarkup outside code
+    const addRun = runs.find(r => r.type === 'critic_add');
+    expect(addRun).toBeDefined();
+    expect(addRun!.text).toBe('after');
+  });
+});
