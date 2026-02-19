@@ -323,12 +323,77 @@ export interface AllDecorationRanges {
 
 export function extractAllDecorationRanges(text: string, defaultColor: string): AllDecorationRanges {
   const resolvedDefault = VALID_COLOR_IDS.includes(defaultColor) ? defaultColor : 'yellow';
-  const highlights = extractHighlightRanges(text, resolvedDefault);
+  const highlights = new Map<string, Array<{ start: number; end: number }>>();
   const comments: Array<{ start: number; end: number }> = [];
   const additions: Array<{ start: number; end: number }> = [];
   const deletions: Array<{ start: number; end: number }> = [];
   const delimiters: Array<{ start: number; end: number }> = [];
   const substitutionNew: Array<{ start: number; end: number }> = [];
+
+  const pushHighlight = (key: string, start: number, end: number) => {
+    if (!highlights.has(key)) highlights.set(key, []);
+    highlights.get(key)!.push({ start, end });
+  };
+
+  /**
+   * Scan a region of text for format highlights ==...== and ==...=={color}.
+   * This is called on CriticMarkup span content to detect nested format highlights.
+   * The region is [regionStart, regionEnd) in the original text.
+   */
+  const scanFormatHighlights = (regionStart: number, regionEnd: number) => {
+    let j = regionStart;
+    while (j < regionEnd - 3) { // need at least ==X== (4 chars from j)
+      // Look for == that is NOT preceded by { at j-1 in the original text
+      if (text.charCodeAt(j) === 0x3D && j + 1 < regionEnd && text.charCodeAt(j + 1) === 0x3D) {
+        // Check negative lookbehind: not preceded by {
+        if (j > 0 && text.charCodeAt(j - 1) === 0x7B) {
+          j++;
+          continue;
+        }
+        // Scan forward for content matching [^}=]+ then closing ==
+        const contentStart = j + 2;
+        let k = contentStart;
+        while (k < regionEnd) {
+          const ch = text.charCodeAt(k);
+          if (ch === 0x7D || ch === 0x3D) break; // } or =
+          k++;
+        }
+        // k now points to first } or = or regionEnd
+        // Need at least 1 char of content and closing ==
+        if (k > contentStart && k + 1 < regionEnd &&
+            text.charCodeAt(k) === 0x3D && text.charCodeAt(k + 1) === 0x3D) {
+          // Found closing ==. Check for optional {color} suffix
+          const closeEnd = k + 2;
+          let matchEnd = closeEnd;
+          let colorId: string | undefined;
+          if (closeEnd < regionEnd && text.charCodeAt(closeEnd) === 0x7B) { // {
+            // Try to parse color suffix {color}
+            const braceStart = closeEnd + 1;
+            let b = braceStart;
+            while (b < regionEnd && text.charCodeAt(b) !== 0x7D) b++; // find }
+            if (b < regionEnd) {
+              const candidate = text.slice(braceStart, b);
+              if (/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(candidate)) {
+                colorId = candidate;
+                matchEnd = b + 1;
+              }
+            }
+          }
+          if (colorId && VALID_COLOR_IDS.includes(colorId)) {
+            pushHighlight(colorId, j, matchEnd);
+          } else {
+            pushHighlight(resolvedDefault, j, matchEnd);
+          }
+          j = matchEnd;
+          continue;
+        }
+        // No valid closing == found, advance past the opening ==
+        j = contentStart;
+        continue;
+      }
+      j++;
+    }
+  };
 
   const len = text.length;
   let i = 0;
@@ -343,6 +408,8 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
           delimiters.push({ start: i, end: i + 3 });
           if (ci > i + 3) additions.push({ start: i + 3, end: ci });
           delimiters.push({ start: ci, end: ci + 3 });
+          // Scan content for nested format highlights
+          scanFormatHighlights(i + 3, ci);
           i = ci + 3; continue;
         }
       } else if (c2 === 0x2D && c3 === 0x2D) { // {--
@@ -351,6 +418,8 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
           delimiters.push({ start: i, end: i + 3 });
           if (ci > i + 3) deletions.push({ start: i + 3, end: ci });
           delimiters.push({ start: ci, end: ci + 3 });
+          // Scan content for nested format highlights
+          scanFormatHighlights(i + 3, ci);
           i = ci + 3; continue;
         }
       } else if (c2 === 0x7E && c3 === 0x7E) { // {~~
@@ -365,6 +434,8 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
             if (ci > newStart) substitutionNew.push({ start: newStart, end: ci });
           }
           delimiters.push({ start: ci, end: ci + 3 });
+          // Scan content for nested format highlights
+          scanFormatHighlights(i + 3, ci);
           i = ci + 3; continue;
         }
       } else if (c2 === 0x3E && c3 === 0x3E) { // {>>
@@ -372,16 +443,163 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
         if (ci !== -1) {
           // Skip comment delimiters (preserves TextMate tag punctuation scopes)
           comments.push({ start: i + 3, end: ci });
+          // Scan content for nested format highlights
+          scanFormatHighlights(i + 3, ci);
           i = ci + 3; continue;
         }
       } else if (c2 === 0x3D && c3 === 0x3D) { // {==
         const ci = text.indexOf('==}', i + 3);
         if (ci !== -1) {
-          // Skip highlight delimiters (preserves TextMate tag punctuation scopes)
+          // Record critic highlight content range (skip delimiters for TextMate scopes)
+          pushHighlight('critic', i + 3, ci);
+          // Scan content for nested format highlights
+          scanFormatHighlights(i + 3, ci);
           i = ci + 3; continue;
         }
       }
     }
+
+    // Detect format highlights ==...== and ==...=={color} outside CriticMarkup.
+    // Must replicate the masking approach: CriticMarkup delimiters ({== ==} {>> <<} etc.)
+    // are treated as transparent (as if replaced with spaces), so format highlights can
+    // span across CriticMarkup spans.
+    if (text.charCodeAt(i) === 0x3D && i + 1 < len && text.charCodeAt(i + 1) === 0x3D) {
+      // Check negative lookbehind: not preceded by {
+      if (i === 0 || text.charCodeAt(i - 1) !== 0x7B) {
+        // Scan forward for content, skipping CriticMarkup delimiters.
+        // In the masked approach, delimiters become spaces (which pass [^}=]+).
+        // Here we skip over them and check that non-delimiter chars match [^}=]+.
+        // When we skip CriticMarkup spans, we also fully process them (record their
+        // ranges, delimiters, and nested format highlights) since the main loop will
+        // jump past the entire format highlight match.
+        //
+        // Snapshot array lengths so we can roll back any CriticMarkup ranges pushed
+        // during the scan if no valid closing == is found.
+        const snapComments = comments.length;
+        const snapAdditions = additions.length;
+        const snapDeletions = deletions.length;
+        const snapDelimiters = delimiters.length;
+        const snapSubNew = substitutionNew.length;
+        const snapHighlightSizes = new Map<string, number>();
+        for (const [key, arr] of highlights) snapHighlightSizes.set(key, arr.length);
+
+        const contentStart = i + 2;
+        let k = contentStart;
+        let hasContent = false; // at least 1 non-delimiter char
+        let found = false;
+        while (k < len) {
+          // Check for CriticMarkup opening delimiters — process and skip entire spans
+          if (text.charCodeAt(k) === 0x7B && k + 2 < len) {
+            const d2 = text.charCodeAt(k + 1);
+            const d3 = text.charCodeAt(k + 2);
+            if (d2 === 0x3D && d3 === 0x3D) { // {==
+              const ci = text.indexOf('==}', k + 3);
+              if (ci !== -1) {
+                pushHighlight('critic', k + 3, ci);
+                scanFormatHighlights(k + 3, ci);
+                hasContent = true; k = ci + 3; continue;
+              }
+            } else if (d2 === 0x3E && d3 === 0x3E) { // {>>
+              const ci = findMatchingClose(text, k + 3);
+              if (ci !== -1) {
+                comments.push({ start: k + 3, end: ci });
+                scanFormatHighlights(k + 3, ci);
+                hasContent = true; k = ci + 3; continue;
+              }
+            } else if (d2 === 0x2B && d3 === 0x2B) { // {++
+              const ci = text.indexOf('++}', k + 3);
+              if (ci !== -1) {
+                delimiters.push({ start: k, end: k + 3 });
+                if (ci > k + 3) additions.push({ start: k + 3, end: ci });
+                delimiters.push({ start: ci, end: ci + 3 });
+                scanFormatHighlights(k + 3, ci);
+                hasContent = true; k = ci + 3; continue;
+              }
+            } else if (d2 === 0x2D && d3 === 0x2D) { // {--
+              const ci = text.indexOf('--}', k + 3);
+              if (ci !== -1) {
+                delimiters.push({ start: k, end: k + 3 });
+                if (ci > k + 3) deletions.push({ start: k + 3, end: ci });
+                delimiters.push({ start: ci, end: ci + 3 });
+                scanFormatHighlights(k + 3, ci);
+                hasContent = true; k = ci + 3; continue;
+              }
+            } else if (d2 === 0x7E && d3 === 0x7E) { // {~~
+              const ci = text.indexOf('~~}', k + 3);
+              if (ci !== -1) {
+                delimiters.push({ start: k, end: k + 3 });
+                const subContent = text.slice(k + 3, ci);
+                const cai = subContent.indexOf('~>');
+                if (cai !== -1) {
+                  delimiters.push({ start: k + 3 + cai, end: k + 3 + cai + 2 });
+                  const newStart = k + 3 + cai + 2;
+                  if (ci > newStart) substitutionNew.push({ start: newStart, end: ci });
+                }
+                delimiters.push({ start: ci, end: ci + 3 });
+                scanFormatHighlights(k + 3, ci);
+                hasContent = true; k = ci + 3; continue;
+              }
+            }
+          }
+          const ch = text.charCodeAt(k);
+          if (ch === 0x3D) { // =
+            // Check for closing ==
+            if (k + 1 < len && text.charCodeAt(k + 1) === 0x3D) {
+              if (hasContent) { found = true; }
+              break;
+            }
+            // Lone = breaks the [^}=]+ pattern
+            break;
+          }
+          if (ch === 0x7D) break; // } breaks the [^}=]+ pattern
+          hasContent = true;
+          k++;
+        }
+        if (found) {
+          const closeEnd = k + 2;
+          let matchEnd = closeEnd;
+          let colorId: string | undefined;
+          if (closeEnd < len && text.charCodeAt(closeEnd) === 0x7B) { // {
+            const braceStart = closeEnd + 1;
+            let b = braceStart;
+            while (b < len && text.charCodeAt(b) !== 0x7D) b++; // find }
+            if (b < len) {
+              const candidate = text.slice(braceStart, b);
+              if (/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(candidate)) {
+                colorId = candidate;
+                matchEnd = b + 1;
+              }
+            }
+          }
+          if (colorId && VALID_COLOR_IDS.includes(colorId)) {
+            pushHighlight(colorId, i, matchEnd);
+          } else {
+            pushHighlight(resolvedDefault, i, matchEnd);
+          }
+          i = matchEnd;
+          continue;
+        }
+        // No valid closing == found. Roll back any CriticMarkup ranges that were
+        // pushed during this scan — the main loop will re-encounter and process
+        // those spans normally when it reaches them.
+        comments.length = snapComments;
+        additions.length = snapAdditions;
+        deletions.length = snapDeletions;
+        delimiters.length = snapDelimiters;
+        substitutionNew.length = snapSubNew;
+        for (const [key, arr] of highlights) {
+          const snap = snapHighlightSizes.get(key);
+          if (snap !== undefined) arr.length = snap;
+          // Keys added during the scan (not in snapshot) must be removed entirely
+        }
+        for (const key of [...highlights.keys()]) {
+          if (!snapHighlightSizes.has(key)) highlights.delete(key);
+        }
+        i = contentStart;
+        continue;
+      }
+    }
+
     i++;
   }
 

@@ -30,6 +30,7 @@ import {
 	setDefaultHighlightColor,
 	getDefaultHighlightColor,
 } from './highlight-colors';
+import { computeCodeRegions, overlapsCodeRegion } from './code-regions';
 let languageClient: LanguageClient | undefined;
 let languageClientDisposables: vscode.Disposable[] = [];
 let cslCacheDir: string = '';
@@ -429,6 +430,29 @@ export function activate(context: vscode.ExtensionContext) {
 		const text = editor.document.getText();
 		const defaultColor = getDefaultHighlightColor();
 		const all = extractAllDecorationRanges(text, defaultColor);
+
+		// Filter out any decoration ranges that fall inside code regions (inline code
+		// spans or fenced code blocks). This is done at the call site so that
+		// extractAllDecorationRanges remains code-region-agnostic and preserves parity
+		// with the standalone extraction functions (extractHighlightRanges, etc.).
+		const codeRegions = computeCodeRegions(text);
+		if (codeRegions.length > 0) {
+			const keep = (r: { start: number; end: number }) =>
+				!overlapsCodeRegion(r.start, r.end, codeRegions);
+			for (const [key, ranges] of all.highlights) {
+				const filtered = ranges.filter(keep);
+				if (filtered.length === 0) {
+					all.highlights.delete(key);
+				} else if (filtered.length !== ranges.length) {
+					all.highlights.set(key, filtered);
+				}
+			}
+			all.comments.splice(0, all.comments.length, ...all.comments.filter(keep));
+			all.additions.splice(0, all.additions.length, ...all.additions.filter(keep));
+			all.deletions.splice(0, all.deletions.length, ...all.deletions.filter(keep));
+			all.delimiters.splice(0, all.delimiters.length, ...all.delimiters.filter(keep));
+			all.substitutionNew.splice(0, all.substitutionNew.length, ...all.substitutionNew.filter(keep));
+		}
 
 		// Clear all decoration types, then set those with ranges
 		for (const [key, decType] of decorationTypes) {

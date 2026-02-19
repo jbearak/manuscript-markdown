@@ -1792,3 +1792,119 @@ describe('Property 5: Preview falls back for unrecognized colors', () => {
     }
   });
 });
+
+// Feature: code-region-inert-zones, Task 8.1: Verify preview plugin handles code regions correctly
+// Confirms markdown-it's built-in backtick rule consumes inline code content before custom rules fire,
+// and fenced code blocks are handled at block level with content never passed to inline rules.
+// No code changes needed — markdown-it's architecture provides sufficient protection.
+describe('Code region inertness in preview', () => {
+  it('renders inline code with CriticMarkup addition as literal text', () => {
+    const md = new MarkdownIt();
+    md.use(manuscriptMarkdownPlugin);
+    const output = md.render('`{++added++}`');
+    expect(output).toContain('<code>{++added++}</code>');
+    expect(output).not.toContain('<ins');
+    expect(output).not.toContain('manuscript-markdown-addition');
+  });
+
+  it('renders inline code with CriticMarkup deletion as literal text', () => {
+    const md = new MarkdownIt();
+    md.use(manuscriptMarkdownPlugin);
+    const output = md.render('`{--deleted--}`');
+    expect(output).toContain('<code>{--deleted--}</code>');
+    expect(output).not.toContain('<del');
+    expect(output).not.toContain('manuscript-markdown-deletion');
+  });
+
+  it('renders inline code with CriticMarkup substitution as literal text', () => {
+    const md = new MarkdownIt();
+    md.use(manuscriptMarkdownPlugin);
+    const output = md.render('`{~~old~>new~~}`');
+    expect(output).toContain('<code>{~~old~&gt;new~~}</code>');
+    expect(output).not.toContain('manuscript-markdown-substitution');
+  });
+
+  it('renders inline code with CriticMarkup comment as literal text', () => {
+    const md = new MarkdownIt();
+    md.use(manuscriptMarkdownPlugin);
+    const output = md.render('`{>>comment<<}`');
+    expect(output).toContain('<code>{&gt;&gt;comment&lt;&lt;}</code>');
+    expect(output).not.toContain('manuscript-markdown-comment');
+  });
+
+  it('renders inline code with CriticMarkup highlight as literal text', () => {
+    const md = new MarkdownIt();
+    md.use(manuscriptMarkdownPlugin);
+    const output = md.render('`{==highlighted==}`');
+    expect(output).toContain('<code>{==highlighted==}</code>');
+    expect(output).not.toContain('manuscript-markdown-highlight');
+  });
+
+  it('renders inline code with format highlight as literal text', () => {
+    const md = new MarkdownIt();
+    md.use(manuscriptMarkdownPlugin);
+    const output = md.render('`==highlighted==`');
+    expect(output).toContain('<code>==highlighted==</code>');
+    expect(output).not.toContain('<mark');
+    expect(output).not.toContain('manuscript-markdown-format-highlight');
+  });
+
+  it('renders inline code with colored highlight as literal text', () => {
+    const md = new MarkdownIt();
+    md.use(manuscriptMarkdownPlugin);
+    const output = md.render('`==text=={red}`');
+    expect(output).toContain('<code>==text=={red}</code>');
+    expect(output).not.toContain('<mark');
+  });
+
+  it('renders inline code with citation as literal text', () => {
+    const md = new MarkdownIt();
+    md.use(manuscriptMarkdownPlugin);
+    const output = md.render('`[@smith2020]`');
+    expect(output).toContain('<code>[@smith2020]</code>');
+  });
+
+  it('renders fenced code block with CriticMarkup as literal text', () => {
+    const md = new MarkdownIt();
+    md.use(manuscriptMarkdownPlugin);
+    const output = md.render('```\n{++added++}\n{--deleted--}\n{==highlighted==}\n==format==\n```');
+    expect(output).toContain('<code>');
+    expect(output).toContain('{++added++}');
+    expect(output).toContain('{--deleted--}');
+    expect(output).toContain('{==highlighted==}');
+    expect(output).toContain('==format==');
+    expect(output).not.toContain('<ins');
+    expect(output).not.toContain('<del');
+    expect(output).not.toContain('<mark');
+    expect(output).not.toContain('manuscript-markdown');
+  });
+
+  it('renders fenced code block with language tag as literal text', () => {
+    const md = new MarkdownIt();
+    md.use(manuscriptMarkdownPlugin);
+    const output = md.render('```markdown\n{++added++}\n```');
+    expect(output).toContain('{++added++}');
+    expect(output).not.toContain('<ins');
+    expect(output).not.toContain('manuscript-markdown');
+  });
+
+  it('still processes CriticMarkup outside inline code', () => {
+    const md = new MarkdownIt();
+    md.use(manuscriptMarkdownPlugin);
+    const output = md.render('Before `code` {++after++}');
+    // The inline code should be literal
+    expect(output).toContain('<code>code</code>');
+    // The CriticMarkup outside code should be processed
+    expect(output).toContain('manuscript-markdown-addition');
+    expect(output).toContain('<ins');
+  });
+
+  it('still processes CriticMarkup surrounding a code span', () => {
+    const md = new MarkdownIt();
+    md.use(manuscriptMarkdownPlugin);
+    // CriticMarkup delimiters are outside the code span — should be treated as live markup
+    const output = md.render('{==`code`==}');
+    expect(output).toContain('<code>code</code>');
+    expect(output).toContain('manuscript-markdown-highlight');
+  });
+});

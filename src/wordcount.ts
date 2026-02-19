@@ -61,6 +61,8 @@ export function isTextDocument(document: { languageId: string }): boolean {
 export class WordCountController {
   private statusBarItem: vscode.StatusBarItem;
   private disposables: vscode.Disposable[];
+  private debounceTimer: ReturnType<typeof setTimeout> | undefined;
+  private static readonly DEBOUNCE_MS = 500;
 
   constructor() {
         // Create status bar item with left alignment and priority 100
@@ -79,17 +81,17 @@ export class WordCountController {
           })
         );
 
-        // Register onDidChangeTextEditorSelection listener
+        // Register onDidChangeTextEditorSelection listener (debounced)
         this.disposables.push(
           vscode.window.onDidChangeTextEditorSelection(() => {
-            this.updateWordCount();
+            this.scheduleUpdate();
           })
         );
 
-        // Register onDidChangeTextDocument listener
+        // Register onDidChangeTextDocument listener (debounced)
         this.disposables.push(
           vscode.workspace.onDidChangeTextDocument(() => {
-            this.updateWordCount();
+            this.scheduleUpdate();
           })
         );
 
@@ -98,9 +100,26 @@ export class WordCountController {
       }
 
   /**
+   * Schedules a debounced word count update.
+   * Cancels any existing pending timer and sets a new one.
+   */
+  private scheduleUpdate(): void {
+    if (this.debounceTimer) clearTimeout(this.debounceTimer);
+    this.debounceTimer = setTimeout(() => {
+      this.debounceTimer = undefined;
+      this.updateWordCount();
+    }, WordCountController.DEBOUNCE_MS);
+  }
+
+
+  /**
    * Disposes all resources used by the controller.
    */
   dispose(): void {
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+      this.debounceTimer = undefined;
+    }
     this.statusBarItem.dispose();
     this.disposables.forEach(d => { d.dispose(); });
   }

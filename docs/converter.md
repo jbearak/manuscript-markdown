@@ -48,6 +48,42 @@ If output files already exist, you'll be prompted to replace, choose a new name,
 - **Complex nested tables**: nested `<table>` elements inside cells are not supported
 - **Images**: Not extracted from DOCX
 
+### Comment Boundary Expansion in Code Runs
+
+CriticMarkup syntax cannot appear inside code regions (inline code spans or fenced code blocks) — code content is always literal text. When a DOCX document contains a comment anchored to text inside a code-styled run, the converter expands the comment boundaries so that the CriticMarkup annotation falls outside the code span. This is an intentional lossy transformation: the comment's precise anchoring within the code text is lost, but the comment itself is preserved.
+
+Three cases are handled:
+
+**Comment fully inside a code run**
+
+The comment boundaries are expanded to surround the entire code span.
+
+DOCX: code run `calculateTotal` with comment "rename this" anchored to `Total`
+
+```markdown
+{==`calculateTotal`==}{>>rename this<<}
+```
+
+**Comment ending inside a code run**
+
+The comment end marker is moved to after the closing backtick.
+
+DOCX: comment starts before the code run and ends inside it
+
+```markdown
+{==some text `calculateTotal`==}{>>review this section<<}
+```
+
+**Comment starting inside a code run**
+
+The comment start marker is moved to before the opening backtick.
+
+DOCX: comment starts inside the code run and ends after it
+
+```markdown
+{==`calculateTotal` and related logic==}{>>needs refactoring<<}
+```
+
 ## Export to Word
 
 The converter also supports exporting Markdown back to DOCX, completing the round-trip workflow: DOCX → Markdown (edit) → DOCX (submit).

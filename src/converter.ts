@@ -503,6 +503,7 @@ export function wrapWithFormatting(text: string, fmt: RunFormatting): string {
     const hasLeadingTrailingSpaces = result.startsWith(' ') && result.endsWith(' ') && result.trim().length > 0;
     const needsPadding = result.startsWith('`') || result.endsWith('`') || hasLeadingTrailingSpaces;
     result = needsPadding ? `${fence} ${result} ${fence}` : `${fence}${result}${fence}`;
+    return result;
   }
 
   // If both superscript and subscript are true, superscript takes precedence

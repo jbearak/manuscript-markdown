@@ -1,11 +1,54 @@
 import * as fs from 'fs';
+import * as fsp from 'fs/promises';
 import * as path from 'path';
+import { promisify } from 'util';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { BibtexEntry, parseBibtex } from '../bibtex-parser';
-import { normalizeBibPath, parseFrontmatter } from '../frontmatter';
+import { computeCodeRegions, isInsideCodeRegion, overlapsCodeRegion } from '../code-regions';
+import { Frontmatter, normalizeBibPath, parseFrontmatter } from '../frontmatter';
+
+const realpathNativeAsync = promisify(fs.realpath.native);
 
 const CITATION_SEGMENT_RE = /\[[^\]]*@[^\]]*]/g;
 const CITEKEY_RE = /@([A-Za-z0-9_:-]+)/g;
+
+export class LruCache<K, V> {
+	private map = new Map<K, V>();
+	constructor(private maxSize: number) {}
+
+	get size(): number {
+		return this.map.size;
+	}
+
+	get(key: K): V | undefined {
+		const v = this.map.get(key);
+		if (v !== undefined) {
+			this.map.delete(key);
+			this.map.set(key, v);
+		}
+		return v;
+	}
+
+	set(key: K, value: V): void {
+		this.map.delete(key);
+		this.map.set(key, value);
+		if (this.map.size > this.maxSize) {
+			const first = this.map.keys().next().value;
+			if (first !== undefined) this.map.delete(first);
+		}
+	}
+
+	delete(key: K): void {
+		this.map.delete(key);
+	}
+
+	clear(): void {
+		this.map.clear();
+	}
+}
+
+export const canonicalCache = new LruCache<string, string>(256);
+
 
 export interface CitekeyUsage {
 	key: string;
@@ -54,16 +97,45 @@ export function canonicalizeFsPath(fsPath: string): string {
 	return value;
 }
 
+export async function canonicalizeFsPathAsync(fsPath: string): Promise<string> {
+	const resolvedPath = path.resolve(fsPath);
+	const cached = canonicalCache.get(resolvedPath);
+	if (cached !== undefined) return cached;
+	let value = resolvedPath;
+	try {
+		value = await realpathNativeAsync(value);
+	} catch {
+		// keep resolved path when realpath cannot be resolved
+	}
+	value = path.normalize(value);
+	if (process.platform === 'win32' || process.platform === 'darwin') {
+		value = value.toLowerCase();
+	}
+	canonicalCache.set(resolvedPath, value);
+	return value;
+}
+
+export function invalidateCanonicalCache(fsPath: string): void {
+	canonicalCache.delete(path.resolve(fsPath));
+}
+
+
+
 export function pathsEqual(a: string, b: string): boolean {
 	return canonicalizeFsPath(a) === canonicalizeFsPath(b);
 }
 
 export function scanCitationUsages(text: string): CitekeyUsage[] {
 	const usages: CitekeyUsage[] = [];
+	const codeRegions = computeCodeRegions(text);
 	let citationMatch: RegExpExecArray | null;
 
 	CITATION_SEGMENT_RE.lastIndex = 0;
 	while ((citationMatch = CITATION_SEGMENT_RE.exec(text)) !== null) {
+		// Skip citation segments that overlap code regions
+		if (overlapsCodeRegion(citationMatch.index, citationMatch.index + citationMatch[0].length, codeRegions)) {
+			continue;
+		}
 		const segment = citationMatch[0];
 		const segmentOffset = citationMatch.index + 1;
 		const inner = segment.slice(1, -1);
@@ -87,10 +159,14 @@ export function findUsagesForKey(text: string, key: string): CitekeyUsage[] {
 	const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 	const segRe = /\[[^\]]*@[^\]]*\]/g;
 	const keyRe = new RegExp(`@${escaped}(?![A-Za-z0-9_:-])`, 'g');
+	const codeRegions = computeCodeRegions(text);
 	const usages: CitekeyUsage[] = [];
 	let segMatch: RegExpExecArray | null;
 	segRe.lastIndex = 0;
 	while ((segMatch = segRe.exec(text)) !== null) {
+		if (overlapsCodeRegion(segMatch.index, segMatch.index + segMatch[0].length, codeRegions)) {
+			continue;
+		}
 		const inner = segMatch[0].slice(1, -1);
 		const segmentOffset = segMatch.index + 1;
 		keyRe.lastIndex = 0;
@@ -105,6 +181,8 @@ export function findUsagesForKey(text: string, key: string): CitekeyUsage[] {
 
 export function findCitekeyAtOffset(text: string, offset: number): string | undefined {
 	if (offset < 0 || offset >= text.length) return undefined;
+	const codeRegions = computeCodeRegions(text);
+	if (isInsideCodeRegion(offset, codeRegions)) return undefined;
 	const maxScanDistance = 500;
 	let scanStart = offset;
 	let scanEnd = offset;
@@ -149,6 +227,11 @@ export function getCompletionContextAtOffset(text: string, offset: number): Comp
 		return undefined;
 	}
 
+	const codeRegions = computeCodeRegions(text);
+	if (isInsideCodeRegion(offset, codeRegions)) {
+		return undefined;
+	}
+
 	let replaceStart = offset;
 	while (replaceStart > 0 && isCitekeyChar(text.charAt(replaceStart - 1))) {
 		replaceStart--;
@@ -186,10 +269,14 @@ export function resolveBibliographyPath(
 	const candidates: string[] = [];
 	if (metadata.bibliography) {
 		const bibFile = normalizeBibPath(metadata.bibliography);
-		if (path.isAbsolute(bibFile)) {
+		const isRootRelative = bibFile.startsWith('/');
+		if (isRootRelative) {
+			const rel = bibFile.slice(1);
 			for (const workspaceRoot of workspaceRootPaths) {
-				candidates.push(path.join(workspaceRoot, bibFile));
+				candidates.push(path.join(workspaceRoot, rel));
 			}
+			candidates.push(bibFile);
+		} else if (path.isAbsolute(bibFile)) {
 			candidates.push(bibFile);
 		} else {
 			candidates.push(path.join(markdownDir, bibFile));
@@ -204,6 +291,51 @@ export function resolveBibliographyPath(
 	const uniqueCandidates = [...new Set(candidates)];
 	return uniqueCandidates.find(isExistingFile);
 }
+
+export async function resolveBibliographyPathAsync(
+	markdownUri: string,
+	markdownText: string,
+	workspaceRootPaths: string[],
+	metadata?: Frontmatter
+): Promise<string | undefined> {
+	const markdownPath = uriToFsPath(markdownUri);
+	if (!markdownPath) {
+		return undefined;
+	}
+
+	const basePath = markdownPath.replace(/\.md$/i, '');
+	const markdownDir = path.dirname(basePath);
+	const fm = metadata ?? parseFrontmatter(markdownText).metadata;
+
+	const candidates: string[] = [];
+	if (fm.bibliography) {
+		const bibFile = normalizeBibPath(fm.bibliography);
+		const isRootRelative = bibFile.startsWith('/');
+		if (isRootRelative) {
+			const rel = bibFile.slice(1);
+			for (const workspaceRoot of workspaceRootPaths) {
+				candidates.push(path.join(workspaceRoot, rel));
+			}
+			candidates.push(bibFile);
+		} else if (path.isAbsolute(bibFile)) {
+			candidates.push(bibFile);
+		} else {
+			candidates.push(path.join(markdownDir, bibFile));
+			for (const workspaceRoot of workspaceRootPaths) {
+				candidates.push(path.join(workspaceRoot, bibFile));
+			}
+		}
+	}
+
+	candidates.push(basePath + '.bib');
+
+	const uniqueCandidates = [...new Set(candidates)];
+	for (const c of uniqueCandidates) {
+		if (await isExistingFileAsync(c)) return c;
+	}
+	return undefined;
+}
+
 
 export function parseBibDataFromText(filePath: string, text: string): ParsedBibData {
 	const entries = parseBibtex(text);
@@ -273,3 +405,12 @@ function isExistingFile(filePath: string): boolean {
 		return false;
 	}
 }
+
+async function isExistingFileAsync(filePath: string): Promise<boolean> {
+	try {
+		return (await fsp.stat(filePath)).isFile();
+	} catch {
+		return false;
+	}
+}
+

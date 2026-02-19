@@ -216,3 +216,45 @@ describe('parseBibDataFromText / findBibKeyAtOffset', () => {
 		expect(parsed.keyOffsets.get('book')).toBe(text.indexOf('{book') + 1);
 	});
 });
+
+
+describe('code-region filtering', () => {
+	test('scanCitationUsages returns no usages for citation inside inline code', () => {
+		const text = 'Some text `[@smith2020]` more text';
+		const usages = scanCitationUsages(text);
+		expect(usages).toEqual([]);
+	});
+
+	test('scanCitationUsages returns usage for citation outside code', () => {
+		const text = 'See [@smith2020] for details.';
+		const usages = scanCitationUsages(text);
+		expect(usages).toHaveLength(1);
+		expect(usages[0].key).toBe('smith2020');
+	});
+
+	test('scanCitationUsages returns only outside usages when citations are both inside and outside code', () => {
+		const text = '`[@inside]` some text [@outside]';
+		const usages = scanCitationUsages(text);
+		expect(usages).toHaveLength(1);
+		expect(usages[0].key).toBe('outside');
+	});
+
+	test('scanCitationUsages returns no usages for citation inside fenced code block', () => {
+		const text = '```\n[@smith2020]\n```';
+		const usages = scanCitationUsages(text);
+		expect(usages).toEqual([]);
+	});
+
+	test('findCitekeyAtOffset returns undefined for position inside inline code', () => {
+		const text = 'Some `@key` here';
+		// offset pointing to 'k' in @key inside backticks
+		const offset = text.indexOf('@key') + 1;
+		expect(findCitekeyAtOffset(text, offset)).toBeUndefined();
+	});
+
+	test('findCitekeyAtOffset returns key for position outside code', () => {
+		const text = 'See [@key] here';
+		const offset = text.indexOf('@key') + 1;
+		expect(findCitekeyAtOffset(text, offset)).toBe('key');
+	});
+});

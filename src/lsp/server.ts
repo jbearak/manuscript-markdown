@@ -26,15 +26,18 @@ import { TextDocument } from 'vscode-languageserver-textdocument';
 import { BibtexEntry } from '../bibtex-parser';
 import {
 	canonicalizeFsPath,
+	canonicalizeFsPathAsync,
 	ParsedBibData,
 	findBibKeyAtOffset,
 	findCitekeyAtOffset,
 	findUsagesForKey,
 	fsPathToUri,
 	getCompletionContextAtOffset,
+	invalidateCanonicalCache,
 	parseBibDataFromText,
 	pathsEqual,
 	resolveBibliographyPath,
+	resolveBibliographyPathAsync,
 	scanCitationUsages,
 	uriToFsPath,
 } from './citekey-language';
@@ -44,6 +47,7 @@ import {
 	stripCriticMarkup,
 } from './comment-language';
 import { getCslCompletionContext, getCslFieldInfo } from './csl-language';
+import { type Frontmatter, parseFrontmatter } from '../frontmatter';
 import { BUNDLED_STYLE_LABELS, isCslAvailableAsync } from '../csl-loader';
 
 const connection = createConnection(ProposedFeatures.all);
@@ -86,12 +90,45 @@ const bibReverseMap = new Map<string, Set<string>>();
 // markdown doc URI → canonical bib path
 const docToBibMap = new Map<string, string>();
 
-function updateBibReverseMap(docUri: string, docText: string): void {
+// --- Debounced validation infrastructure ---
+const validationTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const VALIDATION_DEBOUNCE_MS = 300;
+
+function scheduleValidation(uri: string): void {
+	const existing = validationTimers.get(uri);
+	if (existing) clearTimeout(existing);
+	validationTimers.set(uri, setTimeout(() => {
+		validationTimers.delete(uri);
+		const doc = documents.get(uri);
+		if (doc) {
+			runValidationPipeline(doc).catch(e =>
+				connection.console.error(`Scheduled validation error for ${uri}: ${e instanceof Error ? e.message : String(e)}`)
+			);
+		}
+	}, VALIDATION_DEBOUNCE_MS));
+}
+
+/** Run all validation steps with a single shared frontmatter parse. */
+async function runValidationPipeline(doc: TextDocument): Promise<void> {
 	try {
-		const bibPath = resolveBibliographyPath(docUri, docText, workspaceRootPaths);
+		const text = doc.getText();
+		const { metadata } = parseFrontmatter(text);
+		await updateBibReverseMap(doc.uri, text, metadata);
+		await validateCitekeys(doc, metadata);
+		await validateCslField(doc);
+	} catch (error) {
+		connection.console.error(
+			`Validation pipeline error for ${doc.uri}: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`
+		);
+	}
+}
+
+async function updateBibReverseMap(docUri: string, docText: string, metadata?: Frontmatter): Promise<void> {
+	try {
+		const bibPath = await resolveBibliographyPathAsync(docUri, docText, workspaceRootPaths, metadata);
 		removeBibReverseMapEntry(docUri);
 		if (bibPath) {
-			const canonical = canonicalizeFsPath(bibPath);
+			const canonical = await canonicalizeFsPathAsync(bibPath);
 			if (!bibReverseMap.has(canonical)) {
 				bibReverseMap.set(canonical, new Set());
 			}
@@ -159,9 +196,9 @@ connection.onDidChangeConfiguration((params) => {
 
 documents.onDidOpen((event) => {
 	if (isMarkdownUri(event.document.uri, event.document.languageId)) {
-		updateBibReverseMap(event.document.uri, event.document.getText());
-		validateCitekeys(event.document);
-		validateCslField(event.document);
+		runValidationPipeline(event.document).catch(e =>
+			connection.console.error(`Validation error on open for ${event.document.uri}: ${e instanceof Error ? e.message : String(e)}`)
+		);
 	}
 });
 
@@ -170,13 +207,14 @@ documents.onDidChangeContent((event) => {
 		invalidateBibCache(event.document.uri);
 		const fsPath = uriToFsPath(event.document.uri);
 		if (fsPath) {
-			revalidateMarkdownDocsForBib(fsPath);
+			invalidateCanonicalCache(fsPath);
+			revalidateMarkdownDocsForBib(fsPath).catch(e =>
+				connection.console.error(`revalidateMarkdownDocsForBib error: ${e instanceof Error ? e.message : String(e)}`)
+			);
 		}
 	}
 	if (isMarkdownUri(event.document.uri, event.document.languageId)) {
-		updateBibReverseMap(event.document.uri, event.document.getText());
-		validateCitekeys(event.document);
-		validateCslField(event.document);
+		scheduleValidation(event.document.uri);
 	}
 });
 
@@ -185,10 +223,17 @@ documents.onDidClose((event) => {
 		invalidateBibCache(event.document.uri);
 		const fsPath = uriToFsPath(event.document.uri);
 		if (fsPath) {
-			revalidateMarkdownDocsForBib(fsPath);
+			revalidateMarkdownDocsForBib(fsPath).catch(e =>
+				connection.console.error(`revalidateMarkdownDocsForBib error: ${e instanceof Error ? e.message : String(e)}`)
+			);
 		}
 	}
 	if (isMarkdownUri(event.document.uri, event.document.languageId)) {
+		const pending = validationTimers.get(event.document.uri);
+		if (pending) {
+			clearTimeout(pending);
+			validationTimers.delete(event.document.uri);
+		}
 		removeBibReverseMapEntry(event.document.uri);
 		citekeyDiagnostics.delete(event.document.uri);
 		cslDiagnostics.delete(event.document.uri);
@@ -202,10 +247,18 @@ connection.onDidChangeWatchedFiles((params: DidChangeWatchedFilesParams) => {
 			invalidateBibCache(change.uri);
 			const fsPath = uriToFsPath(change.uri);
 			if (fsPath) {
-				revalidateMarkdownDocsForBib(fsPath);
+				invalidateCanonicalCache(fsPath);
+				revalidateMarkdownDocsForBib(fsPath).catch(e =>
+					connection.console.error(`revalidateMarkdownDocsForBib error: ${e instanceof Error ? e.message : String(e)}`)
+				);
 			}
 		}
 	}
+});
+
+connection.onShutdown(() => {
+	for (const timer of validationTimers.values()) clearTimeout(timer);
+	validationTimers.clear();
 });
 
 connection.onCompletion(async (params: CompletionParams): Promise<CompletionItem[] | CompletionList> => {
@@ -251,7 +304,7 @@ connection.onCompletion(async (params: CompletionParams): Promise<CompletionItem
 		return [];
 	}
 
-	const bibPath = resolveBibliographyPath(doc.uri, text, workspaceRootPaths);
+	const bibPath = await resolveBibliographyPathAsync(doc.uri, text, workspaceRootPaths);
 	if (!bibPath) {
 		return [];
 	}
@@ -511,9 +564,9 @@ function invalidateBibCache(uri: string): void {
 	}
 }
 
-async function validateCitekeys(doc: TextDocument): Promise<void> {
+async function validateCitekeys(doc: TextDocument, metadata?: Frontmatter): Promise<void> {
 	const text = doc.getText();
-	const bibPath = resolveBibliographyPath(doc.uri, text, workspaceRootPaths);
+	const bibPath = await resolveBibliographyPathAsync(doc.uri, text, workspaceRootPaths, metadata);
 	if (!bibPath) {
 		citekeyDiagnostics.set(doc.uri, []);
 		publishDiagnostics(doc.uri);
@@ -543,14 +596,15 @@ async function validateCitekeys(doc: TextDocument): Promise<void> {
 	publishDiagnostics(doc.uri);
 }
 
-function revalidateMarkdownDocsForBib(changedBibPath: string): void {
-	const changedCanonical = canonicalizeFsPath(changedBibPath);
+async function revalidateMarkdownDocsForBib(changedBibPath: string): Promise<void> {
+	const changedCanonical = await canonicalizeFsPathAsync(changedBibPath);
 	const trackedUris = new Set(getMarkdownUrisForBib(changedCanonical));
 
 	for (const docUri of trackedUris) {
 		const doc = documents.get(docUri);
 		if (doc) {
-			validateCitekeys(doc);
+			const { metadata } = parseFrontmatter(doc.getText());
+			await validateCitekeys(doc, metadata);
 		}
 	}
 
@@ -564,12 +618,13 @@ function revalidateMarkdownDocsForBib(changedBibPath: string): void {
 		}
 		try {
 			const docText = doc.getText();
-			const bibPath = resolveBibliographyPath(doc.uri, docText, workspaceRootPaths);
-			if (!bibPath || canonicalizeFsPath(bibPath) !== changedCanonical) {
+			const { metadata } = parseFrontmatter(docText);
+			const bibPath = await resolveBibliographyPathAsync(doc.uri, docText, workspaceRootPaths, metadata);
+			if (!bibPath || await canonicalizeFsPathAsync(bibPath) !== changedCanonical) {
 				continue;
 			}
-			updateBibReverseMap(doc.uri, docText);
-			validateCitekeys(doc);
+			await updateBibReverseMap(doc.uri, docText, metadata);
+			await validateCitekeys(doc, metadata);
 		} catch (error) {
 			connection.console.error(
 				`Error revalidating markdown doc ${doc.uri} for bibliography ${changedBibPath}: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`
@@ -579,9 +634,9 @@ function revalidateMarkdownDocsForBib(changedBibPath: string): void {
 }
 
 async function getBibDataForPath(bibPath: string): Promise<ParsedBibData | undefined> {
+	const cacheKey = await canonicalizeFsPathAsync(bibPath);
 	const openDoc = documents.get(fsPathToUri(bibPath));
 	if (openDoc) {
-		const cacheKey = canonicalizeFsPath(bibPath);
 		const cached = openDocBibCache.get(cacheKey);
 		if (cached && cached.version === openDoc.version) {
 			return cached.data;
@@ -591,7 +646,6 @@ async function getBibDataForPath(bibPath: string): Promise<ParsedBibData | undef
 		return data;
 	}
 
-	const cacheKey = canonicalizeFsPath(bibPath);
 	try {
 		const stat = await fsp.stat(bibPath);
 		const cached = bibCache.get(cacheKey);
@@ -618,7 +672,7 @@ async function resolveSymbolAtPosition(uri: string, position: Position): Promise
 		if (!key) {
 			return undefined;
 		}
-		const bibPath = resolveBibliographyPath(doc.uri, text, workspaceRootPaths);
+		const bibPath = await resolveBibliographyPathAsync(doc.uri, text, workspaceRootPaths);
 		return {
 			key,
 			source: 'markdown',
@@ -677,16 +731,16 @@ async function findPairedMarkdownUris(bibPath: string): Promise<string[]> {
   const sameBaseMd = path.join(dir, base + '.md');
   try {
     await fsp.stat(sameBaseMd);
-    const canonical = canonicalizeFsPath(sameBaseMd);
+    const canonical = await canonicalizeFsPathAsync(sameBaseMd);
     urisByCanonicalPath.set(canonical, fsPathToUri(sameBaseMd));
   } catch { /* file doesn't exist */ }
 
   // 2. Open docs from reverse map
-  const bibCanonical = canonicalizeFsPath(bibPath);
+  const bibCanonical = await canonicalizeFsPathAsync(bibPath);
   for (const docUri of getMarkdownUrisForBib(bibCanonical)) {
     const fsPath = uriToFsPath(docUri);
     if (fsPath) {
-      const canonical = canonicalizeFsPath(fsPath);
+      const canonical = await canonicalizeFsPathAsync(fsPath);
       if (!urisByCanonicalPath.has(canonical)) {
         urisByCanonicalPath.set(canonical, docUri);
       }
@@ -837,4 +891,13 @@ function formatBibEntryHover(entry: BibtexEntry): string {
 	return lines.join('\n\n');
 }
 
-export { updateBibReverseMap as _updateBibReverseMap, removeBibReverseMapEntry as _removeBibReverseMapEntry, getMarkdownUrisForBib as _getMarkdownUrisForBib, bibReverseMap as _bibReverseMap };
+export {
+	updateBibReverseMap as _updateBibReverseMap,
+	removeBibReverseMapEntry as _removeBibReverseMapEntry,
+	getMarkdownUrisForBib as _getMarkdownUrisForBib,
+	bibReverseMap as _bibReverseMap,
+	scheduleValidation as _scheduleValidation,
+	VALIDATION_DEBOUNCE_MS as _VALIDATION_DEBOUNCE_MS,
+	validationTimers as _validationTimers,
+	runValidationPipeline as _runValidationPipeline,
+};

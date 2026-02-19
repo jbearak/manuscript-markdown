@@ -896,7 +896,14 @@ describe('wrapWithFormatting', () => {
         (text, fmt) => {
           const result = wrapWithFormatting(text, fmt);
 
-          // Check nesting order: bold (outermost) → italic → strikethrough → underline → highlight → super/subscript → code (innermost)
+          // When code is true, all other formatting is stripped — only backtick fence
+          if (fmt.code) {
+            expect(result).toMatch(/^`/);
+            expect(result).toMatch(/`$/);
+            return;
+          }
+
+          // Check nesting order: bold (outermost) → italic → strikethrough → underline → highlight → super/subscript
           const patterns = [];
           if (fmt.bold) patterns.push('\\*\\*');
           if (fmt.italic) patterns.push('\\*');
@@ -909,7 +916,6 @@ describe('wrapWithFormatting', () => {
           } else if (fmt.subscript) {
             patterns.push('<sub>');
           }
-          if (fmt.code) patterns.push('`');
           
           // Build expected opening pattern
           const openPattern = patterns.join('');
@@ -1020,6 +1026,13 @@ describe('buildMarkdown', () => {
           expect(linkMatch).toBeTruthy();
           
           const linkText = linkMatch![1];
+
+          // When code is true, all other formatting is stripped — only backticks
+          if (formatting.code) {
+            expect(linkText).toContain('`');
+            return;
+          }
+
           const activeFormats = Object.entries(formatting).filter(([_, active]) => active);
           for (const [format] of activeFormats) {
             let delimiter = '';
@@ -1383,6 +1396,41 @@ describe('wrapWithFormatting colored highlights', () => {
   test('hex yellow (FFFF00) produces plain ==text==', () => {
     expect(wrapWithFormatting('hello', { ...DEFAULT_FORMATTING, highlight: true, highlightColor: 'FFFF00' }))
       .toBe('==hello==');
+  });
+});
+
+describe('code run formatting stripping', () => {
+  test('code + bold produces only backtick-fenced text', () => {
+    expect(wrapWithFormatting('text', { ...DEFAULT_FORMATTING, code: true, bold: true }))
+      .toBe('`text`');
+  });
+
+  test('code + highlight produces only backtick-fenced text', () => {
+    expect(wrapWithFormatting('text', { ...DEFAULT_FORMATTING, code: true, highlight: true }))
+      .toBe('`text`');
+  });
+
+  test('code + italic + strikethrough produces only backtick-fenced text', () => {
+    expect(wrapWithFormatting('text', { ...DEFAULT_FORMATTING, code: true, italic: true, strikethrough: true }))
+      .toBe('`text`');
+  });
+
+  test('code + superscript produces only backtick-fenced text', () => {
+    expect(wrapWithFormatting('text', { ...DEFAULT_FORMATTING, code: true, superscript: true }))
+      .toBe('`text`');
+  });
+
+  test('non-code bold still produces **text**', () => {
+    expect(wrapWithFormatting('text', { ...DEFAULT_FORMATTING, code: false, bold: true }))
+      .toBe('**text**');
+  });
+
+  test('code + all formatting flags produces only backtick-fenced text', () => {
+    const fmt: RunFormatting = {
+      bold: true, italic: true, underline: true, strikethrough: true,
+      highlight: true, superscript: true, subscript: true, code: true,
+    };
+    expect(wrapWithFormatting('text', fmt)).toBe('`text`');
   });
 });
 
@@ -2589,14 +2637,14 @@ describe('Inline code import (CodeChar detection)', () => {
     expect(wrapWithFormatting('   ', fmt)).toBe('`   `');
   });
 
-  test('wrapWithFormatting applies code inside bold', () => {
+  test('wrapWithFormatting strips bold when code is true', () => {
     const fmt = { ...DEFAULT_FORMATTING, code: true, bold: true };
-    expect(wrapWithFormatting('hello', fmt)).toBe('**`hello`**');
+    expect(wrapWithFormatting('hello', fmt)).toBe('`hello`');
   });
 
-  test('wrapWithFormatting applies code inside italic', () => {
+  test('wrapWithFormatting strips italic when code is true', () => {
     const fmt = { ...DEFAULT_FORMATTING, code: true, italic: true };
-    expect(wrapWithFormatting('hello', fmt)).toBe('*`hello`*');
+    expect(wrapWithFormatting('hello', fmt)).toBe('`hello`');
   });
 });
 
@@ -2608,18 +2656,20 @@ describe('Inline code round-trip', () => {
     expect(result.markdown.trim()).toBe('Some `inline code` here');
   });
 
-  test('bold inline code survives round-trip', async () => {
+  test('bold inline code strips bold on round-trip', async () => {
     const md = '**`bold code`**';
     const docxResult = await convertMdToDocx(md);
     const result = await convertDocx(docxResult.docx);
-    expect(result.markdown.trim()).toBe('**`bold code`**');
+    // Code runs strip all non-code formatting (bold is incidental in DOCX)
+    expect(result.markdown.trim()).toBe('`bold code`');
   });
 
-  test('italic inline code survives round-trip', async () => {
+  test('italic inline code strips italic on round-trip', async () => {
     const md = '*`italic code`*';
     const docxResult = await convertMdToDocx(md);
     const result = await convertDocx(docxResult.docx);
-    expect(result.markdown.trim()).toBe('*`italic code`*');
+    // Code runs strip all non-code formatting (italic is incidental in DOCX)
+    expect(result.markdown.trim()).toBe('`italic code`');
   });
 
   test('inline code containing backticks round-trips correctly', async () => {

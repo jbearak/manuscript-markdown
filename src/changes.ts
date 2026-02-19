@@ -1,20 +1,40 @@
 import * as vscode from 'vscode';
+import { computeCodeRegions, overlapsCodeRegion } from './code-regions';
 
 // Combined pattern for all Manuscript Markdown syntax in a single regex
 // Using [\s\S]*? to match zero or more characters (including newlines) to support empty patterns
 // Colored format highlights ==text=={color} must come before plain ==text== to match greedily
 const combinedPattern = /\{\+\+([\s\S]*?)\+\+\}|\{--([\s\S]*?)--\}|\{\~\~([\s\S]*?)\~\~\}|\{#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|\{>>([\s\S]*?)<<\}|\{#[a-zA-Z0-9_-]+\}|\{\/[a-zA-Z0-9_-]+\}|\{==([\s\S]*?)==\}|(?<!\{)==([^}=]+)==\{[a-z0-9-]+\}|(?<!\{)==([^}=]+)==(?!\})|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
 
+// Version-keyed cache for navigation match results (single-document cache)
+let cachedUri: string | undefined;
+let cachedVersion: number | undefined;
+let cachedRanges: vscode.Range[] | undefined;
+
 export function getAllMatches(document: vscode.TextDocument): vscode.Range[] {
+	const uri = document.uri.toString();
+	const version = document.version;
+
+	// Return cached ranges when (uri, version) matches
+	if (cachedUri === uri && cachedVersion === version && cachedRanges) {
+		return cachedRanges;
+	}
+
 	const text = document.getText();
-	const ranges: vscode.Range[] = [];
+	const codeRegions = computeCodeRegions(text);
+	const rawRanges: Array<{ range: vscode.Range; offset: number; length: number }> = [];
 
 	let match;
 	while ((match = combinedPattern.exec(text)) !== null) {
 		const startPos = document.positionAt(match.index);
 		const endPos = document.positionAt(match.index + match[0].length);
-		ranges.push(new vscode.Range(startPos, endPos));
+		rawRanges.push({ range: new vscode.Range(startPos, endPos), offset: match.index, length: match[0].length });
 	}
+
+	// Filter out matches inside code regions
+	const ranges = rawRanges
+		.filter(r => !overlapsCodeRegion(r.offset, r.offset + r.length, codeRegions))
+		.map(r => r.range);
 
 	// Ranges are already in document order from single-pass regex
 	// Filter out contained ranges (O(N) pass)
@@ -27,7 +47,11 @@ export function getAllMatches(document: vscode.TextDocument): vscode.Range[] {
 			lastKept = range;
 		}
 	}
-	
+
+	// Cache results for this document version
+	cachedUri = uri;
+	cachedVersion = version;
+	cachedRanges = filteredRanges;
 	return filteredRanges;
 }
 
