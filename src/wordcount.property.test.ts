@@ -90,22 +90,21 @@ describe('Property 4: Word count debounce consolidates rapid text changes', () =
 	}, 10_000);
 });
 
-// Feature: lsp-performance-phase2, Property 5: Empty selections skip word count update
+// Feature: lsp-performance-phase2, Property 5: Selection changes trigger debounced word count update
 
 // **Validates: Requirements 4.4, 4.5**
 
 /**
  * Test-local model of the selection-aware logic from WordCountController:
- *   - If every selection is empty (cursor-only movement) → skip entirely
- *   - If at least one selection is non-empty → scheduleUpdate (debounced)
+ *   - All selection changes (empty or non-empty) → scheduleUpdate (debounced)
+ *   - This ensures the status bar resets to full-document count when a selection is cleared
  */
 function createSelectionAwareDebouncer(delayMs: number) {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let callCount = 0;
 	return {
-		handleSelectionChange(selections: Array<{ isEmpty: boolean }>): void {
-			if (selections.every(s => s.isEmpty)) return; // skip cursor-only
-			// scheduleUpdate
+		handleSelectionChange(_selections: Array<{ isEmpty: boolean }>): void {
+			// scheduleUpdate (always, even for empty selections)
 			if (timer) clearTimeout(timer);
 			timer = setTimeout(() => {
 				timer = undefined;
@@ -118,41 +117,30 @@ function createSelectionAwareDebouncer(delayMs: number) {
 	};
 }
 
-describe('Property 5: Empty selections skip word count update', () => {
+describe('Property 5: Selection changes trigger debounced word count update', () => {
 	const DEBOUNCE_MS = 5;
 
 	// Generator: a single selection as { isEmpty: boolean }
 	const selectionGen = fc.boolean().map(isEmpty => ({ isEmpty }));
 	const selectionsGen = fc.array(selectionGen, { minLength: 1, maxLength: 10 });
 
-	test('empty-only selections never trigger update; non-empty selections trigger exactly one debounced update', async () => {
+	test('all selection changes trigger exactly one debounced update', async () => {
 		await fc.assert(
 			fc.asyncProperty(
 				selectionsGen,
 				async (selections) => {
 					const debouncer = createSelectionAwareDebouncer(DEBOUNCE_MS);
-					const allEmpty = selections.every(s => s.isEmpty);
 
 					debouncer.handleSelectionChange(selections);
 
-					if (allEmpty) {
-						// Should not schedule anything
-						expect(debouncer.pending).toBe(false);
-						expect(debouncer.callCount).toBe(0);
+					// Should have a pending timer
+					expect(debouncer.pending).toBe(true);
+					expect(debouncer.callCount).toBe(0);
 
-						// Even after waiting, still zero
-						await new Promise(resolve => setTimeout(resolve, DEBOUNCE_MS + 20));
-						expect(debouncer.callCount).toBe(0);
-					} else {
-						// Should have a pending timer
-						expect(debouncer.pending).toBe(true);
-						expect(debouncer.callCount).toBe(0);
-
-						// After debounce fires, exactly one update
-						await new Promise(resolve => setTimeout(resolve, DEBOUNCE_MS + 20));
-						expect(debouncer.callCount).toBe(1);
-						expect(debouncer.pending).toBe(false);
-					}
+					// After debounce fires, exactly one update
+					await new Promise(resolve => setTimeout(resolve, DEBOUNCE_MS + 20));
+					expect(debouncer.callCount).toBe(1);
+					expect(debouncer.pending).toBe(false);
 
 					debouncer.reset();
 				}
@@ -161,7 +149,7 @@ describe('Property 5: Empty selections skip word count update', () => {
 		);
 	}, 30_000);
 
-	test('multiple consecutive empty-only selection events never accumulate updates', async () => {
+	test('multiple consecutive empty-only selection events debounce into one update', async () => {
 		await fc.assert(
 			fc.asyncProperty(
 				fc.integer({ min: 1, max: 20 }),
@@ -173,11 +161,11 @@ describe('Property 5: Empty selections skip word count update', () => {
 						debouncer.handleSelectionChange([{ isEmpty: true }]);
 					}
 
-					expect(debouncer.pending).toBe(false);
+					expect(debouncer.pending).toBe(true);
 					expect(debouncer.callCount).toBe(0);
 
 					await new Promise(resolve => setTimeout(resolve, DEBOUNCE_MS + 20));
-					expect(debouncer.callCount).toBe(0);
+					expect(debouncer.callCount).toBe(1);
 
 					debouncer.reset();
 				}

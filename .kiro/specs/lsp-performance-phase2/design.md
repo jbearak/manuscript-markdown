@@ -261,9 +261,8 @@ vscode.window.onDidChangeActiveTextEditor(() => {
   this.updateWordCount();
 });
 
-// onDidChangeTextEditorSelection → skip if empty, debounce if non-empty
-vscode.window.onDidChangeTextEditorSelection((e) => {
-  if (e.selections.every(s => s.isEmpty)) return; // cursor-only, skip
+// onDidChangeTextEditorSelection (debounced)
+vscode.window.onDidChangeTextEditorSelection(() => {
   this.scheduleUpdate();
 });
 

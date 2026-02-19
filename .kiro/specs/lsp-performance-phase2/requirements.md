@@ -61,7 +61,7 @@ Second round of performance optimizations for the Manuscript Markdown VS Code ex
 2. WHEN a subsequent text change arrives before the debounce interval elapses, THE Word_Count_Controller SHALL cancel the pending update and restart the debounce timer.
 3. WHEN `onDidChangeActiveTextEditor` fires, THE Word_Count_Controller SHALL update the word count immediately without debounce, since the user switched to a different file.
 4. WHEN `onDidChangeTextEditorSelection` fires and the selection is non-empty, THE Word_Count_Controller SHALL delay the `updateWordCount()` call by the same debounce interval, since selection-based word count is informational and not latency-sensitive.
-5. WHEN `onDidChangeTextEditorSelection` fires and all selections are empty (cursor movement only), THE Word_Count_Controller SHALL skip the update entirely, since the whole-document word count has not changed.
+5. WHEN `onDidChangeTextEditorSelection` fires and all selections are empty (cursor movement only), THE Word_Count_Controller SHALL schedule a debounced update so the status bar resets to the full-document word count when a selection is cleared.
 
 ### Requirement 5: Cached Navigation Match Results
 
