@@ -1220,6 +1220,8 @@ export interface DocxGenState {
   footnoteLabelToId: Map<string, number>;
   notesMode: 'footnotes' | 'endnotes';
   missingKeys: Set<string>;
+  citationIds: Set<string>;
+  citationItemIds: Map<string, number>;
   timezone?: string; // UTC offset from frontmatter (e.g. "-05:00")
   replyRanges: Array<{replyId: number; parentId: number}>;
   nextParaId: number;
@@ -1795,7 +1797,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         state.hasFootnotes = true;
       }
     } else if (run.type === 'citation') {
-      const result = generateCitation(run, bibEntries || new Map(), citeprocEngine);
+      const result = generateCitation(run, bibEntries || new Map(), citeprocEngine, state.citationIds, state.citationItemIds);
       xml += result.xml;
       if (result.warning) state.warnings.push(result.warning);
       if (result.missingKeys) {
@@ -2296,6 +2298,8 @@ export async function convertMdToDocx(
     footnoteLabelToId: new Map(),
     notesMode,
     missingKeys: new Set(),
+    citationIds: new Set(),
+    citationItemIds: new Map(),
     timezone: frontmatter.timezone,
     replyRanges: [],
     nextParaId: 1,

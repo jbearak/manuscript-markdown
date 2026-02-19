@@ -184,6 +184,27 @@ export function generateMissingKeysXml(missingKeys: string[]): string {
   ).join('');
 }
 
+/**
+ * Generate a random 8-character alphanumeric citation ID.
+ * Zotero requires each citation in the document to carry a unique random ID
+ * so it can track and update individual citations during "Add/Edit Citation"
+ * round-trips.  A deterministic ID (e.g. hash of keys) would collide when the
+ * same source is cited more than once.
+ */
+export function generateCitationId(usedIds?: Set<string>): string {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  for (;;) {
+    let id = '';
+    for (let i = 0; i < 8; i++) {
+      id += chars[Math.floor(Math.random() * chars.length)];
+    }
+    if (!usedIds || !usedIds.has(id)) {
+      usedIds?.add(id);
+      return id;
+    }
+  }
+}
+
 function resolveVisibleText(
   keys: string[],
   entries: Map<string, BibtexEntry>,
@@ -202,15 +223,31 @@ function buildCitationFieldCode(
   entries: Map<string, BibtexEntry>,
   locators: Map<string, string> | undefined,
   citeprocEngine: any | undefined,
-  visibleTextOverride?: string
+  visibleTextOverride?: string,
+  usedCitationIds?: Set<string>,
+  itemIdMap?: Map<string, number>
 ): string {
+  // Resolve visible text first so we can populate properties (Defect 2)
+  const visibleText = visibleTextOverride ?? resolveVisibleText(keys, entries, locators, citeprocEngine);
+
   const citationItems: any[] = [];
   for (const key of keys) {
     const entry = entries.get(key);
     if (!entry) continue;
     const itemData = buildItemData(entry);
     itemData['citation-key'] = key;        // preserve citekey for round-trip
-    const citationItem: any = { itemData };
+
+    // Defect 4: assign stable numeric id via itemIdMap
+    if (itemIdMap) {
+      let numericId = itemIdMap.get(key);
+      if (numericId === undefined) {
+        numericId = itemIdMap.size + 1;
+        itemIdMap.set(key, numericId);
+      }
+      itemData.id = numericId;
+    }
+
+    const citationItem: any = { id: itemData.id, itemData };
     if (entry.zoteroUri) {
       citationItem.uris = [entry.zoteroUri];
     }
@@ -223,10 +260,18 @@ function buildCitationFieldCode(
     citationItems.push(citationItem);
   }
 
-  const cslCitation = { citationItems, properties: { noteIndex: 0 } };
+  // Defect 3: key ordering — citationID, properties, citationItems, schema
+  const cslCitation = {
+    citationID: generateCitationId(usedCitationIds),                    // Defect 1
+    properties: {
+      formattedCitation: visibleText,                                   // Defect 2
+      plainCitation: visibleText,                                       // Defect 2
+      noteIndex: 0,
+    },
+    citationItems,
+    schema: 'https://github.com/citation-style-language/schema/raw/master/csl-citation.json',
+  };
   const json = JSON.stringify(cslCitation);
-
-  const visibleText = visibleTextOverride ?? resolveVisibleText(keys, entries, locators, citeprocEngine);
 
   return '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
     '<w:r><w:instrText xml:space="preserve"> ADDIN ZOTERO_ITEM CSL_CITATION ' + escapeXml(json) + ' </w:instrText></w:r>' +
@@ -239,6 +284,8 @@ export function generateCitation(
   run: { keys?: string[]; locators?: Map<string, string>; text: string },
   entries: Map<string, BibtexEntry>,
   citeprocEngine?: any,
+  usedCitationIds?: Set<string>,
+  itemIdMap?: Map<string, number>
 ): CitationResult {
   if (!run.keys || run.keys.length === 0) {
     return { xml: '<w:r><w:t>[@' + escapeXml(run.text) + ']</w:t></w:r>' };
@@ -261,7 +308,7 @@ export function generateCitation(
 
   // All resolved — emit field code (works for both Zotero and non-Zotero entries)
   if (resolvedKeys.length > 0 && missingKeys.length === 0) {
-    const xml = buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine);
+    const xml = buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine, undefined, usedCitationIds, itemIdMap);
     return { xml };
   }
 
@@ -277,7 +324,7 @@ export function generateCitation(
 
   // Mixed (some resolved, some missing) — resolved get field code, missing get plain text
   const missingText = '(' + missingKeys.map(k => '@' + k).join('; ') + ')';
-  const xml = buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine) +
+  const xml = buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine, undefined, usedCitationIds, itemIdMap) +
     '<w:r><w:t xml:space="preserve"> </w:t></w:r>' +
     '<w:r><w:t>' + escapeXml(missingText) + '</w:t></w:r>';
 

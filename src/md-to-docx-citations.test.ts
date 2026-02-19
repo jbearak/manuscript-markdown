@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { generateCitation, generateMathXml, escapeXml, generateMissingKeysXml } from './md-to-docx-citations';
+import { generateCitation, generateCitationId, generateMathXml, escapeXml, generateMissingKeysXml } from './md-to-docx-citations';
 import { BibtexEntry } from './bibtex-parser';
 
 describe('generateCitation', () => {
@@ -18,13 +18,39 @@ describe('generateCitation', () => {
       zoteroUri: 'http://zotero.org/users/123/items/ABCD1234'
     });
 
+    const usedIds = new Set<string>();
+    const itemIdMap = new Map<string, number>();
     const run = { keys: ['smith2020'], text: 'smith2020' };
-    const result = generateCitation(run, entries);
+    const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
 
     expect(result.xml).toContain('ZOTERO_ITEM CSL_CITATION');
     expect(result.xml).toContain('http://zotero.org/users/123/items/ABCD1234');
     expect(result.xml).toContain('(Smith 2020)');
     expect(result.warning).toBeUndefined();
+
+    // Extract JSON from the field code to verify structure
+    const jsonMatch = result.xml.match(/CSL_CITATION (.+?) <\/w:instrText>/);
+    expect(jsonMatch).toBeTruthy();
+    const decoded = jsonMatch![1].replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+    const csl = JSON.parse(decoded);
+
+    // Defect 1: citationID is a random alphanumeric string
+    expect(csl.citationID).toMatch(/^[a-z0-9]{8}$/);
+
+    // Defect 2: formattedCitation and plainCitation in properties
+    expect(csl.properties.formattedCitation).toBe('(Smith 2020)');
+    expect(csl.properties.plainCitation).toBe('(Smith 2020)');
+
+    // Defect 3: key order — citationID, properties, citationItems, schema
+    const keys = Object.keys(csl);
+    expect(keys).toEqual(['citationID', 'properties', 'citationItems', 'schema']);
+
+    // Defect 3: schema URL present
+    expect(csl.schema).toBe('https://github.com/citation-style-language/schema/raw/master/csl-citation.json');
+
+    // Defect 4: outer id on citationItem matches itemData.id
+    expect(csl.citationItems[0].id).toBe(csl.citationItems[0].itemData.id);
+    expect(typeof csl.citationItems[0].id).toBe('number');
   });
 
   it('produces field code without Zotero metadata', () => {
@@ -39,8 +65,10 @@ describe('generateCitation', () => {
       ])
     });
 
+    const usedIds = new Set<string>();
+    const itemIdMap = new Map<string, number>();
     const run = { keys: ['smith2020'], text: 'smith2020' };
-    const result = generateCitation(run, entries);
+    const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
 
     expect(result.xml).toContain('ZOTERO_ITEM CSL_CITATION');
     expect(result.xml).toContain('(Smith 2020)');
@@ -62,10 +90,12 @@ describe('generateCitation', () => {
       zoteroUri: 'http://zotero.org/users/123/items/ABCD1234'
     });
 
+    const usedIds = new Set<string>();
+    const itemIdMap = new Map<string, number>();
     const locators = new Map<string, string>();
     locators.set('smith2020', 'p. 20');
     const run = { keys: ['smith2020'], locators, text: 'smith2020, p. 20' };
-    const result = generateCitation(run, entries);
+    const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
 
     expect(result.xml).toContain('&quot;locator&quot;:&quot;20&quot;');
     expect(result.xml).toContain('&quot;label&quot;:&quot;page&quot;');
@@ -89,13 +119,24 @@ describe('generateCitation', () => {
       zoteroUri: 'http://zotero.org/users/123/items/EFGH5678'
     });
 
+    const usedIds = new Set<string>();
+    const itemIdMap = new Map<string, number>();
     const run = { keys: ['smith2020', 'doe2021'], text: 'smith2020; doe2021' };
-    const result = generateCitation(run, entries);
+    const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
 
     expect(result.xml).toContain('ZOTERO_ITEM CSL_CITATION');
     expect(result.xml).toContain('ABCD1234');
     expect(result.xml).toContain('EFGH5678');
     expect(result.xml).toContain('(Smith 2020; Doe 2021)');
+
+    // Verify both citationItems have distinct numeric IDs
+    const jsonMatch = result.xml.match(/CSL_CITATION (.+?) <\/w:instrText>/);
+    const decoded = jsonMatch![1].replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+    const csl = JSON.parse(decoded);
+    expect(csl.citationItems.length).toBe(2);
+    expect(csl.citationItems[0].id).toBe(csl.citationItems[0].itemData.id);
+    expect(csl.citationItems[1].id).toBe(csl.citationItems[1].itemData.id);
+    expect(csl.citationItems[0].id).not.toBe(csl.citationItems[1].id);
   });
 
   it('emits single field code for mixed Zotero/non-Zotero grouped citations', () => {
@@ -113,8 +154,10 @@ describe('generateCitation', () => {
       fields: new Map([['author', 'Doe, Jane'], ['year', '2021']])
     });
 
+    const usedIds = new Set<string>();
+    const itemIdMap = new Map<string, number>();
     const run = { keys: ['smith2020', 'doe2021'], text: 'smith2020; doe2021' };
-    const result = generateCitation(run, entries);
+    const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
 
     // Both entries should be in a single field code
     expect(result.xml).toContain('ZOTERO_ITEM CSL_CITATION');
@@ -133,8 +176,10 @@ describe('generateCitation', () => {
       zoteroUri: 'http://zotero.org/users/123/items/ABCD1234'
     });
 
+    const usedIds = new Set<string>();
+    const itemIdMap = new Map<string, number>();
     const run = { keys: ['smith2020', 'missingKey'], text: 'smith2020; missingKey' };
-    const result = generateCitation(run, entries);
+    const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
 
     expect(result.xml).toContain('ZOTERO_ITEM CSL_CITATION');
     expect(result.xml).toContain('(@missingKey)');
@@ -157,8 +202,10 @@ describe('generateCitation', () => {
       fields: new Map([['author', 'Doe, Jane'], ['year', '2021']])
     });
 
+    const usedIds = new Set<string>();
+    const itemIdMap = new Map<string, number>();
     const run = { keys: ['smith2020', 'doe2021', 'noSuchKey'], text: 'smith2020; doe2021; noSuchKey' };
-    const result = generateCitation(run, entries);
+    const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
 
     // Both resolved entries share a field code
     expect(result.xml).toContain('ZOTERO_ITEM CSL_CITATION');
@@ -185,8 +232,10 @@ describe('generateCitation', () => {
       zoteroUri: 'http://zotero.org/users/123/items/EFGH5678'
     });
 
+    const usedIds = new Set<string>();
+    const itemIdMap = new Map<string, number>();
     const run = { keys: ['smith2020', 'doe2021'], text: 'smith2020; doe2021' };
-    const result = generateCitation(run, entries);
+    const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
 
     expect(result.xml).toContain('ZOTERO_ITEM CSL_CITATION');
     expect(result.xml).toContain('ABCD1234');
@@ -207,8 +256,10 @@ describe('generateCitation', () => {
       fields: new Map([['author', 'Doe, Jane'], ['year', '2021']])
     });
 
+    const usedIds = new Set<string>();
+    const itemIdMap = new Map<string, number>();
     const run = { keys: ['smith2020', 'doe2021'], text: 'smith2020; doe2021' };
-    const result = generateCitation(run, entries);
+    const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
 
     expect(result.xml).toContain('ZOTERO_ITEM CSL_CITATION');
     expect(result.xml).toContain('(Smith 2020; Doe 2021)');
@@ -232,8 +283,10 @@ describe('generateCitation', () => {
       fields: new Map([['author', 'Doe, Jane'], ['year', '2021']])
     });
 
+    const usedIds = new Set<string>();
+    const itemIdMap = new Map<string, number>();
     const run = { keys: ['smith2020', 'doe2021'], text: 'smith2020; doe2021' };
-    const result = generateCitation(run, entries);
+    const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
 
     // All resolved entries share a single field code
     expect(result.xml).toContain('ZOTERO_ITEM CSL_CITATION');
@@ -253,8 +306,10 @@ describe('generateCitation', () => {
       zoteroUri: 'http://zotero.org/users/123/items/ABCD1234'
     });
 
+    const usedIds = new Set<string>();
+    const itemIdMap = new Map<string, number>();
     const run = { keys: ['smithInPress'], text: 'smithInPress' };
-    const result = generateCitation(run, entries);
+    const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
 
     expect(result.xml).toContain('ZOTERO_ITEM CSL_CITATION');
     expect(result.xml).not.toContain('date-parts');
@@ -271,6 +326,8 @@ describe('generateCitation', () => {
       ['misc', 'article'],
     ];
 
+    const usedIds = new Set<string>();
+    const itemIdMap = new Map<string, number>();
     for (const [bibtexType, cslType] of typePairs) {
       const key = `k_${bibtexType}`;
       const entries = new Map<string, BibtexEntry>();
@@ -287,7 +344,7 @@ describe('generateCitation', () => {
       });
 
       const run = { keys: [key], text: key };
-      const result = generateCitation(run, entries);
+      const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
       expect(result.xml).toContain('&quot;type&quot;:&quot;' + cslType + '&quot;');
     }
   });
@@ -300,6 +357,83 @@ describe('generateCitation', () => {
     expect(result.xml).toBe('<w:r><w:t>(@unknown)</w:t></w:r>');
     expect(result.warning).toBe('Citation key not found: unknown');
     expect(result.missingKeys).toEqual(['unknown']);
+  });
+
+  it('generates unique citationIDs across multiple calls with shared set', () => {
+    const entries = new Map<string, BibtexEntry>();
+    entries.set('smith2020', {
+      type: 'article',
+      key: 'smith2020',
+      fields: new Map([['author', 'Smith, John'], ['year', '2020']])
+    });
+
+    const usedIds = new Set<string>();
+    const itemIdMap = new Map<string, number>();
+    const ids: string[] = [];
+
+    for (let i = 0; i < 10; i++) {
+      const run = { keys: ['smith2020'], text: 'smith2020' };
+      const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
+      const jsonMatch = result.xml.match(/CSL_CITATION (.+?) <\/w:instrText>/);
+      const decoded = jsonMatch![1].replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+      const csl = JSON.parse(decoded);
+      ids.push(csl.citationID);
+    }
+
+    // All IDs should be unique
+    expect(new Set(ids).size).toBe(10);
+    // All IDs should be 8-char alphanumeric
+    for (const id of ids) {
+      expect(id).toMatch(/^[a-z0-9]{8}$/);
+    }
+  });
+
+  it('reuses stable numeric item IDs for the same citation key', () => {
+    const entries = new Map<string, BibtexEntry>();
+    entries.set('smith2020', {
+      type: 'article',
+      key: 'smith2020',
+      fields: new Map([['author', 'Smith, John'], ['year', '2020']])
+    });
+
+    const usedIds = new Set<string>();
+    const itemIdMap = new Map<string, number>();
+
+    // Call twice with same key
+    const run1 = { keys: ['smith2020'], text: 'smith2020' };
+    const result1 = generateCitation(run1, entries, undefined, usedIds, itemIdMap);
+    const run2 = { keys: ['smith2020'], text: 'smith2020' };
+    const result2 = generateCitation(run2, entries, undefined, usedIds, itemIdMap);
+
+    const extract = (xml: string) => {
+      const m = xml.match(/CSL_CITATION (.+?) <\/w:instrText>/);
+      return JSON.parse(m![1].replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>'));
+    };
+
+    const csl1 = extract(result1.xml);
+    const csl2 = extract(result2.xml);
+
+    // Same key should get the same numeric ID
+    expect(csl1.citationItems[0].id).toBe(csl2.citationItems[0].id);
+    // But citationIDs should differ
+    expect(csl1.citationID).not.toBe(csl2.citationID);
+  });
+});
+
+describe('generateCitationId', () => {
+  it('generates 8-character alphanumeric strings', () => {
+    for (let i = 0; i < 20; i++) {
+      const id = generateCitationId();
+      expect(id).toMatch(/^[a-z0-9]{8}$/);
+    }
+  });
+
+  it('avoids collisions with used IDs set', () => {
+    const used = new Set<string>();
+    for (let i = 0; i < 50; i++) {
+      generateCitationId(used);
+    }
+    expect(used.size).toBe(50);
   });
 });
 

@@ -278,7 +278,9 @@ describe('generateCitation with citeproc', () => {
       text: 'smith2020effects',
     };
 
-    const result = generateCitation(run, entries, engine);
+    const usedIds = new Set<string>();
+    const itemIdMap = new Map<string, number>();
+    const result = generateCitation(run, entries, engine, usedIds, itemIdMap);
     expect(result.xml).toContain('ZOTERO_ITEM');
     expect(result.xml).toContain('Smith');
     expect(result.xml).toContain('2020');
@@ -293,7 +295,9 @@ describe('generateCitation with citeproc', () => {
       text: 'smith2020effects',
     };
 
-    const result = generateCitation(run, entries);
+    const usedIds = new Set<string>();
+    const itemIdMap = new Map<string, number>();
+    const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
     expect(result.xml).toContain('ZOTERO_ITEM');
     expect(result.xml).toContain('Smith');
   });
