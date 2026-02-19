@@ -1041,6 +1041,42 @@ describe('CriticMarkup OOXML generation', () => {
     expect(result).not.toContain('<w:ins');
     expect(result).not.toContain('<w:del');
   });
+
+  it('renders recursive formatting inside critic additions', () => {
+    const token = parseMd('{++**bold** and *italic*++}')[0];
+    const state = createState();
+    const result = generateParagraph(token, state, { authorName: 'Default' });
+    expect(result).toContain('<w:ins');
+    expect(result).toContain('<w:b/>');
+    expect(result).toContain('<w:i/>');
+    expect(result).not.toContain('**bold**');
+    expect(result).not.toContain('*italic*');
+  });
+
+  it('renders recursive formatting inside critic substitutions', () => {
+    const token = parseMd('{~~**old**~>*new*~~}')[0];
+    const state = createState();
+    const result = generateParagraph(token, state, { authorName: 'Default' });
+    expect(result).toContain('<w:del');
+    expect(result).toContain('<w:ins');
+    expect(result).toContain('<w:b/>');
+    expect(result).toContain('<w:i/>');
+    expect(result).not.toContain('**old**');
+    expect(result).not.toContain('*new*');
+  });
+
+  it('renders recursive formatting in critic highlight with attached comment', () => {
+    const token = parseMd('{==**bold** ==highlighted== text==}{>>comment<<}')[0];
+    const state = createState();
+    const result = generateParagraph(token, state, { authorName: 'Default' });
+    expect(result).toContain('<w:commentRangeStart w:id="0"/>');
+    expect(result).toContain('<w:commentRangeEnd w:id="0"/>');
+    expect(result).toContain('<w:commentReference w:id="0"/>');
+    expect(result).toContain('<w:b/>');
+    expect(result).toContain('<w:highlight w:val="yellow"/>');
+    expect(result).not.toContain('**bold**');
+    expect(result).not.toContain('==highlighted==');
+  });
 });
 
 describe('preprocessCriticMarkup', () => {
@@ -1180,6 +1216,41 @@ describe('parseMd multi-paragraph CriticMarkup', () => {
     expect(addRuns[0].text).not.toContain('\u0000');
     expect(addRuns[0].text).not.toContain('PARA');
     expect(addRuns[0].text).toContain('added\n\nmore');
+  });
+
+  it('parses recursive formatting inside critic additions', () => {
+    const tokens = parseMd('{++**bold** and *italic*++}');
+    const addRun = tokens.flatMap(t => t.runs).find(r => r.type === 'critic_add');
+    expect(addRun).toBeDefined();
+    expect(addRun?.innerRuns?.some(r => r.type === 'text' && r.bold && r.text === 'bold')).toBe(true);
+    expect(addRun?.innerRuns?.some(r => r.type === 'text' && r.italic && r.text === 'italic')).toBe(true);
+  });
+
+  it('parses recursive formatting inside critic deletions with nested highlights', () => {
+    const tokens = parseMd('{--*italic* and ==highlight==--}');
+    const delRun = tokens.flatMap(t => t.runs).find(r => r.type === 'critic_del');
+    expect(delRun).toBeDefined();
+    expect(delRun?.innerRuns?.some(r => r.type === 'text' && r.italic && r.text === 'italic')).toBe(true);
+    expect(delRun?.innerRuns?.some(r => r.type === 'text' && r.highlight && r.text === 'highlight')).toBe(true);
+  });
+
+  it('parses recursive formatting on both sides of critic substitutions', () => {
+    const tokens = parseMd('{~~**old**~>*new*~~}');
+    const subRun = tokens.flatMap(t => t.runs).find(r => r.type === 'critic_sub');
+    expect(subRun).toBeDefined();
+    expect(subRun?.oldRuns?.some(r => r.type === 'text' && r.bold && r.text === 'old')).toBe(true);
+    expect(subRun?.newRuns?.some(r => r.type === 'text' && r.italic && r.text === 'new')).toBe(true);
+  });
+
+  it('parses recursive formatting in critic highlight with attached comment', () => {
+    const tokens = parseMd('{==**bold** ==highlighted== text==}{>>comment<<}');
+    const runs = tokens.flatMap(t => t.runs);
+    const highlightRun = runs.find(r => r.type === 'critic_highlight');
+    const commentRun = runs.find(r => r.type === 'critic_comment');
+    expect(highlightRun).toBeDefined();
+    expect(commentRun).toBeDefined();
+    expect(highlightRun?.innerRuns?.some(r => r.type === 'text' && r.bold && r.text === 'bold')).toBe(true);
+    expect(highlightRun?.innerRuns?.some(r => r.type === 'text' && r.highlight && r.text === 'highlighted')).toBe(true);
   });
 });
 

@@ -42,6 +42,9 @@ export interface MdRun {
   href?: string;            // hyperlink URL
   // CriticMarkup specific
   newText?: string;         // for substitutions: {~~old~>new~~}
+  innerRuns?: MdRun[];      // parsed inner formatting for critic_add/del/highlight
+  oldRuns?: MdRun[];        // parsed old-side formatting for critic_sub
+  newRuns?: MdRun[];        // parsed new-side formatting for critic_sub
   author?: string;          // for comments/revisions
   date?: string;            // for comments/revisions
   commentText?: string;     // for critic_comment: the comment body
@@ -464,6 +467,74 @@ function createMarkdownIt(): MarkdownIt {
   return md;
 }
 
+/** Create a markdown-it instance for parsing inner formatting within CriticMarkup payloads. */
+function createCriticInnerMarkdownIt(): MarkdownIt {
+  const md = createMarkdownIt();
+  // Inner parsing should recurse into regular inline formatting, but not into
+  // other top-level custom syntaxes that carry separate document semantics.
+  md.inline.ruler.disable(['comment_range', 'critic_markup', 'footnote_ref', 'citation', 'math']);
+  return md;
+}
+
+function toTextRunFromInner(run: MdRun, overrides?: Partial<MdRun>): MdRun {
+  return {
+    type: 'text',
+    text: run.text,
+    bold: run.bold,
+    italic: run.italic,
+    underline: run.underline,
+    strikethrough: run.strikethrough,
+    highlight: run.highlight,
+    highlightColor: run.highlightColor,
+    superscript: run.superscript,
+    subscript: run.subscript,
+    code: run.code,
+    href: run.href,
+    ...overrides,
+  };
+}
+
+function normalizeCriticInnerRuns(runs: MdRun[]): MdRun[] {
+  const normalized: MdRun[] = [];
+  for (const run of runs) {
+    if (run.type === 'softbreak') {
+      normalized.push({ type: 'softbreak', text: '\n' });
+      continue;
+    }
+
+    if (run.type === 'text') {
+      normalized.push(toTextRunFromInner(run));
+      continue;
+    }
+
+    // Plain/colored `==...==` highlights inside Critic payloads should be
+    // preserved as text runs with highlight flags.
+    if (run.type === 'critic_highlight') {
+      if (run.text) {
+        normalized.push(toTextRunFromInner(run, {
+          highlight: true,
+          highlightColor: run.highlightColor,
+        }));
+      }
+      continue;
+    }
+
+    // Fallback: if any unsupported run type appears, preserve its textual
+    // content so we do not silently drop user text.
+    if (run.text) {
+      normalized.push(toTextRunFromInner(run));
+    }
+  }
+  return normalized;
+}
+
+function parseCriticInnerRuns(content: string): MdRun[] {
+  if (!content) return [];
+  const md = createCriticInnerMarkdownIt();
+  const tokens = md.parseInline(content, {});
+  return normalizeCriticInnerRuns(convertInlineTokens(tokens));
+}
+
 /** Extract footnote definitions from the markdown source and return cleaned markdown. */
 export function extractFootnoteDefinitions(markdown: string): { cleaned: string; definitions: Map<string, string> } {
   const definitions = new Map<string, string>();
@@ -739,10 +810,14 @@ function processInlineChildren(tokens: any[]): MdRun[] {
         
       case 'critic_markup':
         if (token.criticType === 'critic_sub') {
+          const oldText = token.oldText || '';
+          const newText = token.newText || '';
           runs.push({
             type: 'critic_sub',
-            text: token.oldText || '',
-            newText: token.newText || '',
+            text: oldText,
+            newText,
+            oldRuns: parseCriticInnerRuns(oldText),
+            newRuns: parseCriticInnerRuns(newText),
             ...formatStack,
             href: currentHref
           });
@@ -781,6 +856,7 @@ function processInlineChildren(tokens: any[]): MdRun[] {
           runs.push({
             type: token.criticType,
             text,
+            innerRuns: parseCriticInnerRuns(text),
             author: token.author,
             date: token.date,
             highlight: innerHighlight,
@@ -1671,6 +1747,85 @@ export function generateRun(text: string, rPr: string): string {
   return '<w:r>' + rPr + '<w:t xml:space="preserve">' + escapeXml(text) + '</w:t></w:r>';
 }
 
+function mergeRunFormatting(inner: MdRun, outer: MdRun, forced: Partial<MdRun> = {}): MdRun {
+  const merged: MdRun = { ...inner, type: 'text', text: inner.text };
+
+  merged.code = inner.code || outer.code || forced.code ? true : undefined;
+  merged.bold = inner.bold || outer.bold || forced.bold ? true : undefined;
+  merged.italic = inner.italic || outer.italic || forced.italic ? true : undefined;
+  merged.underline = inner.underline || outer.underline || forced.underline ? true : undefined;
+  merged.strikethrough = inner.strikethrough || outer.strikethrough || forced.strikethrough ? true : undefined;
+  merged.superscript = inner.superscript || outer.superscript || forced.superscript ? true : undefined;
+  merged.subscript = inner.subscript || outer.subscript || forced.subscript ? true : undefined;
+
+  const hasHighlight = !!inner.highlight || !!outer.highlight || !!forced.highlight;
+  merged.highlight = hasHighlight ? true : undefined;
+  merged.highlightColor = hasHighlight
+    ? (inner.highlightColor || outer.highlightColor || forced.highlightColor)
+    : undefined;
+
+  merged.href = inner.href || outer.href || forced.href;
+  return merged;
+}
+
+function formatCriticInnerRuns(runs: MdRun[] | undefined, outer: MdRun, forced: Partial<MdRun> = {}): MdRun[] | undefined {
+  if (!runs || runs.length === 0) return undefined;
+  const formatted: MdRun[] = [];
+  for (const run of runs) {
+    if (run.type === 'softbreak') {
+      formatted.push(run);
+      continue;
+    }
+    if (run.type !== 'text') continue;
+    formatted.push(mergeRunFormatting(run, outer, forced));
+  }
+  return formatted;
+}
+
+function generateInlineCriticContent(
+  runs: MdRun[] | undefined,
+  fallbackText: string,
+  outer: MdRun,
+  state: DocxGenState,
+  options?: MdToDocxOptions,
+  bibEntries?: Map<string, BibtexEntry>,
+  citeprocEngine?: any,
+  forced: Partial<MdRun> = {}
+): string {
+  const formattedRuns = formatCriticInnerRuns(runs, outer, forced);
+  if (formattedRuns && formattedRuns.length > 0) {
+    return generateRuns(formattedRuns, state, options, bibEntries, citeprocEngine);
+  }
+  const fallbackRun = mergeRunFormatting({ type: 'text', text: fallbackText }, outer, forced);
+  return generateRun(fallbackText, generateRPr(fallbackRun));
+}
+
+function generateDeletedCriticContent(
+  runs: MdRun[] | undefined,
+  fallbackText: string,
+  outer: MdRun,
+  forced: Partial<MdRun> = {}
+): string {
+  const formattedRuns = formatCriticInnerRuns(runs, outer, forced);
+  if (!formattedRuns || formattedRuns.length === 0) {
+    const fallbackRun = mergeRunFormatting({ type: 'text', text: fallbackText }, outer, forced);
+    const rPr = generateRPr(fallbackRun);
+    return '<w:r>' + (rPr ? rPr : '') + '<w:delText xml:space="preserve">' + escapeXml(fallbackText) + '</w:delText></w:r>';
+  }
+
+  let xml = '';
+  for (const run of formattedRuns) {
+    if (run.type === 'softbreak') {
+      xml += '<w:r><w:br/></w:r>';
+      continue;
+    }
+    if (run.type !== 'text' || !run.text) continue;
+    const rPr = generateRPr(run);
+    xml += '<w:r>' + (rPr ? rPr : '') + '<w:delText xml:space="preserve">' + escapeXml(run.text) + '</w:delText></w:r>';
+  }
+  return xml;
+}
+
 export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: any): string {
   let xml = '';
   for (let ri = 0; ri < inputRuns.length; ri++) {
@@ -1694,19 +1849,20 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
     } else if (run.type === 'critic_add') {
       const author = run.author || options?.authorName || 'Unknown';
       const date = normalizeToUtcIso(run.date || '', state.timezone);
-      const rPr = generateRPr(run);
-      xml += '<w:ins w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '" w:date="' + escapeXml(date) + '">' + generateRun(run.text, rPr) + '</w:ins>';
+      const contentXml = generateInlineCriticContent(run.innerRuns, run.text, run, state, options, bibEntries, citeprocEngine);
+      xml += '<w:ins w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '" w:date="' + escapeXml(date) + '">' + contentXml + '</w:ins>';
     } else if (run.type === 'critic_del') {
       const author = run.author || options?.authorName || 'Unknown';
       const date = normalizeToUtcIso(run.date || '', state.timezone);
-      const rPr = generateRPr(run);
-      xml += '<w:del w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '" w:date="' + escapeXml(date) + '"><w:r>' + (rPr ? rPr : '') + '<w:delText xml:space="preserve">' + escapeXml(run.text) + '</w:delText></w:r></w:del>';
+      const deletedXml = generateDeletedCriticContent(run.innerRuns, run.text, run);
+      xml += '<w:del w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '" w:date="' + escapeXml(date) + '">' + deletedXml + '</w:del>';
     } else if (run.type === 'critic_sub') {
       const author = run.author || options?.authorName || 'Unknown';
       const date = normalizeToUtcIso(run.date || '', state.timezone);
-      const rPr = generateRPr(run);
-      xml += '<w:del w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '" w:date="' + escapeXml(date) + '"><w:r>' + (rPr ? rPr : '') + '<w:delText xml:space="preserve">' + escapeXml(run.text) + '</w:delText></w:r></w:del>';
-      xml += '<w:ins w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '" w:date="' + escapeXml(date) + '">' + generateRun(run.newText || '', rPr) + '</w:ins>';
+      const deletedXml = generateDeletedCriticContent(run.oldRuns, run.text, run);
+      const insertedXml = generateInlineCriticContent(run.newRuns, run.newText || '', run, state, options, bibEntries, citeprocEngine);
+      xml += '<w:del w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '" w:date="' + escapeXml(date) + '">' + deletedXml + '</w:del>';
+      xml += '<w:ins w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '" w:date="' + escapeXml(date) + '">' + insertedXml + '</w:ins>';
     } else if (run.type === 'critic_highlight') {
       if (nextRun?.type === 'critic_comment') {
         const commentId = state.commentId++;
@@ -1732,8 +1888,16 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         for (const re of replyEntries) {
           xml += '<w:commentRangeStart w:id="' + re.replyId + '"/>';
         }
-        const highlightRun = { ...run, type: 'text' as const, highlight: true };
-        xml += generateRun(run.text, generateRPr(highlightRun));
+        xml += generateInlineCriticContent(
+          run.innerRuns,
+          run.text,
+          run,
+          state,
+          options,
+          bibEntries,
+          citeprocEngine,
+          { highlight: true, highlightColor: run.highlightColor }
+        );
         for (const re of replyEntries) {
           xml += '<w:commentRangeEnd w:id="' + re.replyId + '"/>';
           xml += '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="' + re.replyId + '"/></w:r>';
@@ -1742,8 +1906,16 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         xml += '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="' + commentId + '"/></w:r>';
         ri++; // skip the comment run
       } else {
-        const highlightRun = { ...run, type: 'text' as const, highlight: true };
-        xml += generateRun(run.text, generateRPr(highlightRun));
+        xml += generateInlineCriticContent(
+          run.innerRuns,
+          run.text,
+          run,
+          state,
+          options,
+          bibEntries,
+          citeprocEngine,
+          { highlight: true, highlightColor: run.highlightColor }
+        );
       }
     } else if (run.type === 'critic_comment') {
       const commentId = state.commentId++;
