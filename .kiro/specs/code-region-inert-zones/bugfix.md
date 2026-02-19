@@ -2,7 +2,7 @@
 
 ## Introduction
 
-CriticMarkup syntax (`{++`, `{--`, `{~~`, `{==`, `{>>`, `<<}`, etc.) and Manuscript Markdown extensions (format highlights `==text==`, `==text=={color}`, citations `[@key]`) are being parsed, decorated, and acted upon inside code regions — both inline code (backtick spans) and fenced code blocks (triple-backtick blocks). Code regions are inert zones in Markdown: their content is literal text and no markup syntax should be interpreted within them. This bug affects five subsystems: editor decorations, navigation, the preview renderer, the MD→DOCX converter, the DOCX→MD converter, and the language server (LSP).
+CriticMarkup syntax (`{++`, `{--`, `{~~`, `{==`, `{>>`, `<<}`, etc.) and Manuscript Markdown extensions (format highlights `==text==`, `==text=={color}`, citations `[@key]`) are being parsed, decorated, and acted upon inside code regions — both inline code (backtick spans) and fenced code blocks (triple-backtick blocks). Code regions are inert zones in Markdown: their content is literal text and no markup syntax should be interpreted within them. This bug affects six subsystems: editor decorations, navigation, the preview renderer, the MD→DOCX converter, the DOCX→MD converter, and the language server (LSP).
 
 ## Bug Analysis
 
