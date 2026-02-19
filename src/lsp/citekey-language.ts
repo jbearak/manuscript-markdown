@@ -1,11 +1,50 @@
 import * as fs from 'fs';
+import * as fsp from 'fs/promises';
 import * as path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { BibtexEntry, parseBibtex } from '../bibtex-parser';
-import { normalizeBibPath, parseFrontmatter } from '../frontmatter';
+import { Frontmatter, normalizeBibPath, parseFrontmatter } from '../frontmatter';
 
 const CITATION_SEGMENT_RE = /\[[^\]]*@[^\]]*]/g;
 const CITEKEY_RE = /@([A-Za-z0-9_:-]+)/g;
+
+export class LruCache<K, V> {
+	private map = new Map<K, V>();
+	constructor(private maxSize: number) {}
+
+	get size(): number {
+		return this.map.size;
+	}
+
+	get(key: K): V | undefined {
+		const v = this.map.get(key);
+		if (v !== undefined) {
+			this.map.delete(key);
+			this.map.set(key, v);
+		}
+		return v;
+	}
+
+	set(key: K, value: V): void {
+		this.map.delete(key);
+		this.map.set(key, value);
+		if (this.map.size > this.maxSize) {
+			const first = this.map.keys().next().value;
+			if (first !== undefined) this.map.delete(first);
+		}
+	}
+
+	delete(key: K): void {
+		this.map.delete(key);
+	}
+
+	clear(): void {
+		this.map.clear();
+	}
+}
+
+export const canonicalCache = new LruCache<string, string>(256);
+
 
 export interface CitekeyUsage {
 	key: string;
@@ -53,6 +92,29 @@ export function canonicalizeFsPath(fsPath: string): string {
 	}
 	return value;
 }
+
+export async function canonicalizeFsPathAsync(fsPath: string): Promise<string> {
+	let value = path.resolve(fsPath);
+	const cached = canonicalCache.get(value);
+	if (cached !== undefined) return cached;
+	try {
+		value = await fsp.realpath(value);
+	} catch {
+		// keep resolved path when realpath cannot be resolved
+	}
+	value = path.normalize(value);
+	if (process.platform === 'win32' || process.platform === 'darwin') {
+		value = value.toLowerCase();
+	}
+	canonicalCache.set(path.resolve(fsPath), value);
+	return value;
+}
+
+export function invalidateCanonicalCache(fsPath: string): void {
+	canonicalCache.delete(path.resolve(fsPath));
+}
+
+
 
 export function pathsEqual(a: string, b: string): boolean {
 	return canonicalizeFsPath(a) === canonicalizeFsPath(b);
@@ -205,6 +267,47 @@ export function resolveBibliographyPath(
 	return uniqueCandidates.find(isExistingFile);
 }
 
+export async function resolveBibliographyPathAsync(
+	markdownUri: string,
+	markdownText: string,
+	workspaceRootPaths: string[],
+	metadata?: Frontmatter
+): Promise<string | undefined> {
+	const markdownPath = uriToFsPath(markdownUri);
+	if (!markdownPath) {
+		return undefined;
+	}
+
+	const basePath = markdownPath.replace(/\.md$/i, '');
+	const markdownDir = path.dirname(basePath);
+	const fm = metadata ?? parseFrontmatter(markdownText).metadata;
+
+	const candidates: string[] = [];
+	if (fm.bibliography) {
+		const bibFile = normalizeBibPath(fm.bibliography);
+		if (path.isAbsolute(bibFile)) {
+			for (const workspaceRoot of workspaceRootPaths) {
+				candidates.push(path.join(workspaceRoot, bibFile));
+			}
+			candidates.push(bibFile);
+		} else {
+			candidates.push(path.join(markdownDir, bibFile));
+			for (const workspaceRoot of workspaceRootPaths) {
+				candidates.push(path.join(workspaceRoot, bibFile));
+			}
+		}
+	}
+
+	candidates.push(basePath + '.bib');
+
+	const uniqueCandidates = [...new Set(candidates)];
+	for (const c of uniqueCandidates) {
+		if (await isExistingFileAsync(c)) return c;
+	}
+	return undefined;
+}
+
+
 export function parseBibDataFromText(filePath: string, text: string): ParsedBibData {
 	const entries = parseBibtex(text);
 	const keyOffsets = new Map<string, number>();
@@ -273,3 +376,12 @@ function isExistingFile(filePath: string): boolean {
 		return false;
 	}
 }
+
+async function isExistingFileAsync(filePath: string): Promise<boolean> {
+	try {
+		return (await fsp.stat(filePath)).isFile();
+	} catch {
+		return false;
+	}
+}
+

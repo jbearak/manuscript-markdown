@@ -5,7 +5,20 @@ import * as vscode from 'vscode';
 // Colored format highlights ==text=={color} must come before plain ==text== to match greedily
 const combinedPattern = /\{\+\+([\s\S]*?)\+\+\}|\{--([\s\S]*?)--\}|\{\~\~([\s\S]*?)\~\~\}|\{#[a-zA-Z0-9_-]+>>([\s\S]*?)<<\}|\{>>([\s\S]*?)<<\}|\{#[a-zA-Z0-9_-]+\}|\{\/[a-zA-Z0-9_-]+\}|\{==([\s\S]*?)==\}|(?<!\{)==([^}=]+)==\{[a-z0-9-]+\}|(?<!\{)==([^}=]+)==(?!\})|\~\~([\s\S]*?)\~\~|<!--([\s\S]*?)-->/g;
 
+// Version-keyed cache for navigation match results (single-document cache)
+let cachedUri: string | undefined;
+let cachedVersion: number | undefined;
+let cachedRanges: vscode.Range[] | undefined;
+
 export function getAllMatches(document: vscode.TextDocument): vscode.Range[] {
+	const uri = document.uri.toString();
+	const version = document.version;
+
+	// Return cached ranges when (uri, version) matches
+	if (cachedUri === uri && cachedVersion === version && cachedRanges) {
+		return cachedRanges;
+	}
+
 	const text = document.getText();
 	const ranges: vscode.Range[] = [];
 
@@ -27,7 +40,11 @@ export function getAllMatches(document: vscode.TextDocument): vscode.Range[] {
 			lastKept = range;
 		}
 	}
-	
+
+	// Cache results for this document version
+	cachedUri = uri;
+	cachedVersion = version;
+	cachedRanges = filteredRanges;
 	return filteredRanges;
 }
 
