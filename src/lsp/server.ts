@@ -585,7 +585,7 @@ async function revalidateMarkdownDocsForBib(changedBibPath: string): Promise<voi
 	for (const docUri of trackedUris) {
 		const doc = documents.get(docUri);
 		if (doc) {
-			validateCitekeys(doc);
+			await validateCitekeys(doc);
 		}
 	}
 
@@ -604,7 +604,7 @@ async function revalidateMarkdownDocsForBib(changedBibPath: string): Promise<voi
 				continue;
 			}
 			await updateBibReverseMap(doc.uri, docText);
-			validateCitekeys(doc);
+			await validateCitekeys(doc);
 		} catch (error) {
 			connection.console.error(
 				`Error revalidating markdown doc ${doc.uri} for bibliography ${changedBibPath}: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`
