@@ -223,6 +223,11 @@ export function getCompletionContextAtOffset(text: string, offset: number): Comp
 		return undefined;
 	}
 
+	const codeRegions = computeCodeRegions(text);
+	if (isInsideCodeRegion(offset, codeRegions)) {
+		return undefined;
+	}
+
 	let replaceStart = offset;
 	while (replaceStart > 0 && isCitekeyChar(text.charAt(replaceStart - 1))) {
 		replaceStart--;
