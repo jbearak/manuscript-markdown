@@ -1113,6 +1113,29 @@ describe('buildMarkdown', () => {
     expect(result).not.toContain('{====');
   });
 
+  test('highlight spanning into a comment region is preserved with ID-based syntax', () => {
+    // In Word, a highlight can start before and end within a commented-on region.
+    // With ID-based syntax ({#id}...{/id}), the tags carry no highlight semantics,
+    // so the user-applied highlight must be preserved on both sides of the boundary.
+    const comments = new Map([
+      ['c1', { author: 'Reviewer', text: 'good point', date: '2025-01-01T00:00:00Z' }]
+    ]);
+    const content: any[] = [
+      { type: 'para' },
+      { type: 'text', text: 'before ', commentIds: new Set<string>(), formatting: { ...DEFAULT_FORMATTING, highlight: true } },
+      { type: 'text', text: 'overlap', commentIds: new Set(['c1']), formatting: { ...DEFAULT_FORMATTING, highlight: true } },
+      { type: 'text', text: ' after', commentIds: new Set(['c1']), formatting: DEFAULT_FORMATTING },
+    ];
+
+    const result = buildMarkdown(content, comments, { alwaysUseCommentIds: true });
+    // The highlight wraps both runs that have it, producing two ==...== regions
+    expect(result).toContain('==before ==');
+    expect(result).toContain('==overlap==');
+    // Comment boundary markers are present
+    expect(result).toContain('{#1}');
+    expect(result).toContain('{/1}');
+  });
+
   test('Property 6: Heading paragraphs produce correct # prefix', () => {
     fc.assert(
       fc.property(

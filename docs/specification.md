@@ -185,9 +185,38 @@ Standard Markdown highlight syntax with an optional color suffix:
 
 #### Distinction from CriticMarkup Highlights
 
-- `{==text==}` is a **CriticMarkup highlight** (rendered with grey background)
-- `==text==` is a **format highlight** (rendered with the configured default color)
+- `{==text==}` is a **CriticMarkup highlight** (rendered with grey background) — denotes a commented-on region
+- `==text==` is a **format highlight** (rendered with the configured default color) — denotes colored text
 - The `{color}` suffix is unambiguous because CriticMarkup uses `{` *before* `==`, not after
+
+#### Nesting with CriticMarkup
+
+Format highlights and CriticMarkup can nest in both directions:
+
+**Format highlight inside a critic highlight** — a highlighted word within a commented-on sentence:
+
+```markdown
+{==sentence with ==highlighted== word==}{>>comment<<}
+```
+
+**Critic highlight inside a format highlight** — a commented phrase within highlighted text:
+
+```markdown
+==text with {==commented==}{>>comment<<} word.==
+```
+
+**Other CriticMarkup inside a format highlight** — additions, deletions, comments, and substitutions can appear within `==...==`:
+
+```markdown
+==text {++added++} more==
+==text {>>note<<} more==
+```
+
+**Highlight spanning a comment boundary (ID-based syntax)** — when a highlight starts before and ends within a commented-on region, the converter produces separate `==...==` regions on each side of the `{#id}` boundary:
+
+```markdown
+==before =={#1}==overlap== after{/1}
+```
 
 #### Configuration
 
