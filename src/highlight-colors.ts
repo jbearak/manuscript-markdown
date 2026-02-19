@@ -214,7 +214,7 @@ export function extractHighlightRanges(text: string, defaultColor: string): Map<
   // Colored highlights ==text=={color} and default highlights ==text==
   // Run on masked text so `=` and `}` in CriticMarkup delimiters don't block matches
   const masked = maskCriticDelimiters(text);
-  const hlRe = /(?<!\{)==([^}=]+)==(?:\{([a-z0-9-]+)\})?/g;
+  const hlRe = /(?<!\{)==([^}=]+)==(?:\{([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\})?/g;
   while ((m = hlRe.exec(masked)) !== null) {
     const mStart = m.index;
     const mEnd = mStart + m[0].length;

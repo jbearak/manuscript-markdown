@@ -16,7 +16,7 @@ function extractHighlightRangesReference(text: string, defaultColor: string): Ma
     push('critic', m.index + 3, m.index + m[0].length - 3);
   }
   const masked = maskCriticDelimiters(text);
-  const hlRe = /(?<!\{)==([^}=]+)==(?:\{([a-z0-9-]+)\})?/g;
+  const hlRe = /(?<!\{)==([^}=]+)==(?:\{([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\})?/g;
   while ((m = hlRe.exec(masked)) !== null) {
     const mEnd = m.index + m[0].length;
     const colorId = m[2];
