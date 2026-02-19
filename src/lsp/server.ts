@@ -724,16 +724,16 @@ async function findPairedMarkdownUris(bibPath: string): Promise<string[]> {
   const sameBaseMd = path.join(dir, base + '.md');
   try {
     await fsp.stat(sameBaseMd);
-    const canonical = canonicalizeFsPath(sameBaseMd);
+    const canonical = await canonicalizeFsPathAsync(sameBaseMd);
     urisByCanonicalPath.set(canonical, fsPathToUri(sameBaseMd));
   } catch { /* file doesn't exist */ }
 
   // 2. Open docs from reverse map
-  const bibCanonical = canonicalizeFsPath(bibPath);
+  const bibCanonical = await canonicalizeFsPathAsync(bibPath);
   for (const docUri of getMarkdownUrisForBib(bibCanonical)) {
     const fsPath = uriToFsPath(docUri);
     if (fsPath) {
-      const canonical = canonicalizeFsPath(fsPath);
+      const canonical = await canonicalizeFsPathAsync(fsPath);
       if (!urisByCanonicalPath.has(canonical)) {
         urisByCanonicalPath.set(canonical, docUri);
       }
