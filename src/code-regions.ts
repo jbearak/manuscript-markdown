@@ -29,7 +29,8 @@ export function computeCodeRegions(text: string): CodeRegion[] {
 
 		if (!openFence) {
 			openFence = { char: fenceChar, count: fenceCount, start: fenceMatch.index };
-		} else if (fenceChar === openFence.char && fenceCount >= openFence.count) {
+		} else if (fenceChar === openFence.char && fenceCount >= openFence.count
+		&& fenceMatch[0].slice(fenceCount).trim() === '') {
 			regions.push({ start: openFence.start, end: fenceMatch.index + fenceMatch[0].length });
 			openFence = null;
 		}
