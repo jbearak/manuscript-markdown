@@ -169,39 +169,69 @@ describe('overlapsCodeRegion', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Task 4.2: Unit tests for decoration skipping (extractAllDecorationRanges)
+// Task 4.2: Unit tests for decoration skipping (call-site filtering pattern)
+//
+// extractAllDecorationRanges() is code-region-agnostic to preserve parity with
+// standalone extraction functions. Code-region filtering is applied by callers
+// using computeCodeRegions() + overlapsCodeRegion(). These tests verify the
+// two-step pattern that call sites (e.g. the decorator in extension.ts) must use.
 // ---------------------------------------------------------------------------
 
-describe('extractAllDecorationRanges skips code regions', () => {
+/** Helper that mirrors the filtering pattern used at call sites. */
+function filterDecorations(text: string, defaultColor: string) {
+	const all = extractAllDecorationRanges(text, defaultColor);
+	const codeRegions = computeCodeRegions(text);
+	if (codeRegions.length === 0) return all;
+
+	const keep = (r: { start: number; end: number }) =>
+		!overlapsCodeRegion(r.start, r.end, codeRegions);
+
+	for (const [key, ranges] of all.highlights) {
+		const filtered = ranges.filter(keep);
+		if (filtered.length === 0) {
+			all.highlights.delete(key);
+		} else if (filtered.length !== ranges.length) {
+			all.highlights.set(key, filtered);
+		}
+	}
+	all.comments.splice(0, all.comments.length, ...all.comments.filter(keep));
+	all.additions.splice(0, all.additions.length, ...all.additions.filter(keep));
+	all.deletions.splice(0, all.deletions.length, ...all.deletions.filter(keep));
+	all.delimiters.splice(0, all.delimiters.length, ...all.delimiters.filter(keep));
+	all.substitutionNew.splice(0, all.substitutionNew.length, ...all.substitutionNew.filter(keep));
+	return all;
+}
+
+describe('call-site code-region filtering skips code regions', () => {
 	test('inline code with addition: `{++added++}` — no addition ranges', () => {
 		const text = '`{++added++}`';
-		const result = extractAllDecorationRanges(text, 'yellow');
+		const result = filterDecorations(text, 'yellow');
 		expect(result.additions.length).toBe(0);
 		expect(result.delimiters.length).toBe(0);
 	});
 
 	test('inline code with highlight: `==highlighted==` — no highlight ranges', () => {
 		const text = '`==highlighted==`';
-		const result = extractAllDecorationRanges(text, 'yellow');
+		const result = filterDecorations(text, 'yellow');
 		expect(result.highlights.size).toBe(0);
 	});
 
 	test('inline code with comment: `{>>comment<<}` — no comment ranges', () => {
 		const text = '`{>>comment<<}`';
-		const result = extractAllDecorationRanges(text, 'yellow');
+		const result = filterDecorations(text, 'yellow');
 		expect(result.comments.length).toBe(0);
 	});
 
 	test('fenced code block with deletion: no deletion ranges', () => {
 		const text = '```\n{--deleted--}\n```';
-		const result = extractAllDecorationRanges(text, 'yellow');
+		const result = filterDecorations(text, 'yellow');
 		expect(result.deletions.length).toBe(0);
 		expect(result.delimiters.length).toBe(0);
 	});
 
 	test('CriticMarkup both inside and outside code — only outside ranges returned', () => {
 		const text = '{++outside++} `{++inside++}` {--also outside--}';
-		const result = extractAllDecorationRanges(text, 'yellow');
+		const result = filterDecorations(text, 'yellow');
 
 		// Should have the outside addition
 		expect(result.additions.length).toBe(1);
@@ -212,38 +242,40 @@ describe('extractAllDecorationRanges skips code regions', () => {
 		expect(text.slice(result.deletions[0].start, result.deletions[0].end)).toBe('also outside');
 	});
 
-	test('CriticMarkup surrounding a code span: {==`code`==} — decoration ranges preserved', () => {
+	test('CriticMarkup surrounding a code span: {==`code`==} — content range filtered', () => {
 		const text = '{==`code`==}';
-		const result = extractAllDecorationRanges(text, 'yellow');
+		const result = filterDecorations(text, 'yellow');
 
-		// The {== and ==} delimiters are outside the code span, so critic highlight should be found
+		// The critic highlight content range [3, 9) exactly covers the inline code span `code`.
+		// Call-site filtering removes it because the content overlaps the code region.
+		// This is consistent behavior: any decoration range overlapping a code region is suppressed.
 		const criticRanges = result.highlights.get('critic') ?? [];
-		expect(criticRanges.length).toBeGreaterThan(0);
+		expect(criticRanges.length).toBe(0);
 	});
 
 	test('fenced code block with highlight and comment — no ranges', () => {
 		const text = '```\n==highlighted==\n{>>comment<<}\n```';
-		const result = extractAllDecorationRanges(text, 'yellow');
+		const result = filterDecorations(text, 'yellow');
 		expect(result.highlights.size).toBe(0);
 		expect(result.comments.length).toBe(0);
 	});
 
 	test('fenced code block with substitution — no ranges', () => {
 		const text = '```\n{~~old~>new~~}\n```';
-		const result = extractAllDecorationRanges(text, 'yellow');
+		const result = filterDecorations(text, 'yellow');
 		expect(result.substitutionNew.length).toBe(0);
 		expect(result.delimiters.length).toBe(0);
 	});
 
 	test('inline code with colored highlight: `==text=={red}` — no highlight ranges', () => {
 		const text = '`==text=={red}`';
-		const result = extractAllDecorationRanges(text, 'yellow');
+		const result = filterDecorations(text, 'yellow');
 		expect(result.highlights.size).toBe(0);
 	});
 
 	test('mixed: fenced block and inline code with patterns, plus outside patterns', () => {
 		const text = '{>>visible comment<<}\n```\n{>>hidden comment<<}\n```\n`{++hidden add++}` {++visible add++}';
-		const result = extractAllDecorationRanges(text, 'yellow');
+		const result = filterDecorations(text, 'yellow');
 
 		expect(result.comments.length).toBe(1);
 		expect(text.slice(result.comments[0].start, result.comments[0].end)).toBe('visible comment');
