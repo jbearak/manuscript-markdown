@@ -216,6 +216,10 @@ function parseFormatHighlight(state: StateInline, silent: boolean): boolean {
         const tokenOpen = state.push('manuscript_markdown_format_highlight_open', 'mark', 1);
         
         // Check for optional {color} suffix after closing ==
+        // Implementation note: Only treat {…} as a color suffix when the closing } is within
+        // parse bounds and the identifier matches [a-z0-9](?:[a-z0-9-]*[a-z0-9])? (no
+        // leading/trailing -); otherwise keep as literal text so adjacent CriticMarkup
+        // (e.g. {--…--}) is not swallowed as a color suffix.
         let cssClass = 'manuscript-markdown-format-highlight';
         let endPos = pos + 2;
         let hasColorSuffix = false;
@@ -223,7 +227,7 @@ function parseFormatHighlight(state: StateInline, silent: boolean): boolean {
           const closeBrace = src.indexOf('}', pos + 3);
           if (closeBrace !== -1 && closeBrace < max) {
             const colorId = src.slice(pos + 3, closeBrace);
-            if (/^[a-z0-9-]+$/.test(colorId)) {
+            if (/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(colorId)) {
               hasColorSuffix = true;
               if (VALID_COLOR_IDS.includes(colorId)) {
                 cssClass = 'manuscript-markdown-format-highlight manuscript-markdown-highlight-' + colorId;
@@ -258,7 +262,7 @@ function parseFormatHighlight(state: StateInline, silent: boolean): boolean {
           const closeBrace = src.indexOf('}', pos + 3);
           if (closeBrace !== -1 && closeBrace < max) {
             const colorId = src.slice(pos + 3, closeBrace);
-            if (/^[a-z0-9-]+$/.test(colorId)) {
+            if (/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(colorId)) {
               endPos = closeBrace + 1;
             }
           }

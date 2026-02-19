@@ -13,6 +13,7 @@ out/__mocks__/**
 bin/**
 
 # Dependencies are required at runtime in packaged extension
+# Do NOT exclude node_modules/** — runtime deps are imported from out/*.js
 .venv/**
 venv/**
 .pytest_cache/**

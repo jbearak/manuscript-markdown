@@ -31,6 +31,20 @@ import {
 	getDefaultHighlightColor,
 } from './highlight-colors';
 import { computeCodeRegions, overlapsCodeRegion } from './code-regions';
+
+// --- Implementation notes ---
+// - Editor decorations: use light/dark sub-properties for theme-aware backgrounds
+// - DOCX→MD settings parity: keep alwaysUseCommentIds wired in both CLI and VS Code paths
+// - CSL auto-suggest retriggering: trigger only on single-character typing/backspace,
+//   not on completion acceptance
+// - Citekey auto-suggest retriggering: same gate; retrigger when cursor stays in [@… context
+// - Citekey delimiter UX: dismiss suggest widget on ; (+ space) in grouped citation context
+// - setCitationStyle EOL safety: use TextDocument.eol; don't replace trailing \r on CRLF docs
+// - TextMate comment grammar: {>>…<<} uses begin/end (not single-line match) for multi-line
+// - TextMate comment-with-ID grammar: {#id>>…<<} uses begin/end with explicit endCaptures
+// - CriticMarkup auto-closing pairs: custom autoClosingPairs in language-configuration.json
+//   replace (not merge with) built-in pairs; include single-char { → }
+
 let languageClient: LanguageClient | undefined;
 let languageClientDisposables: vscode.Disposable[] = [];
 let cslCacheDir: string = '';

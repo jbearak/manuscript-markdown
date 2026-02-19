@@ -44,6 +44,9 @@ export function detect_platform(): PlatformInfo | undefined {
     return { platform, arch, binary_name };
 }
 
+// Implementation note: Keep target list aligned with targets downloadable in
+// pinned Bun. bun-windows-aarch64 is unavailable on Bun 1.3.9, so including
+// Windows ARM64 would cause deterministic CI release-build failures.
 const TARGETS: BuildTarget[] = [
     { platform: 'darwin', arch: 'arm64', output_name: 'manuscript-markdown-darwin-arm64' },
     { platform: 'darwin', arch: 'x64', output_name: 'manuscript-markdown-darwin-x64' },

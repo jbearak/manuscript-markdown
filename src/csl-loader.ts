@@ -1,3 +1,7 @@
+// Implementation note — resolution order for isCslAvailable / isCslAvailableAsync:
+// bundled style names → bundled directory → cache directories → file path
+// (with sourceDir fallback for relative .csl paths). loadStyle/loadStyleAsync
+// follow the same cascade but do not accept a sourceDir option.
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { access } from 'fs/promises';
 import { join, isAbsolute, dirname } from 'path';

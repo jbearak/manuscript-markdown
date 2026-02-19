@@ -7,6 +7,14 @@ import { parseBibtex, BibtexEntry } from './bibtex-parser';
 import { parseFrontmatter, Frontmatter, noteTypeToNumber } from './frontmatter';
 import { ZoteroBiblData, zoteroStyleFullId } from './converter';
 
+// --- Implementation notes ---
+// - decodeHtmlEntities(): decode &amp; after other named entities to avoid over-decoding
+// - Numeric entities: use String.fromCodePoint() not String.fromCharCode() for
+//   supplementary-plane chars
+// - CriticMarkup recursive formatting: parse inner payloads with markdown-it
+//   (Critic/comment/citation/math/footnote rules disabled); carry structured
+//   inner runs on MdRun (innerRuns / oldRuns / newRuns)
+
 // Types for the parsed token stream
 export interface MdToken {
   type: 'paragraph' | 'heading' | 'list_item' | 'blockquote' | 'code_block' | 'table' | 'hr';

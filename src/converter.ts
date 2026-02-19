@@ -5,6 +5,49 @@ import { resolveMarkdownColor } from './highlight-colors';
 import { wrapColoredHighlight } from './formatting';
 import { Frontmatter, NotesMode, serializeFrontmatter, noteTypeFromNumber } from './frontmatter';
 
+// --- Implementation notes ---
+// Table parsing:
+// - Handle pipes in code/quotes; careful boundary detection
+// - Prefer HTML table output; preserve in-cell semantics
+// - Table HTML with ID comments: emit deferred bodies outside <p> tags
+//
+// Commented text:
+// - Group adjacent runs by identical commentIds even when formatting differs
+// - Comment ID remap: collect IDs from top-level and nested table-cell paragraphs
+// - Cross-paragraph overlap detection: global via detectGlobalOverlaps() during
+//   buildMarkdown metadata collection, not per-segment
+// - Non-numeric comment ID roundtrip: persist mapping in docProps/custom.xml under
+//   MANUSCRIPT_COMMENT_IDS[_N]
+//
+// Run formatting:
+// - Apply w:pPr/w:rPr defaults; only override for explicit run-level w:rPr
+//
+// Hyperlinks:
+// - Wrap URLs with parens, whitespace, [, or ] in angle brackets
+//
+// Zotero:
+// - URI key extraction: /\/items\/([A-Z0-9]{8})$/ works for all three URI formats
+// - citationItems: check both uris (array) and uri (singular)
+// - Locators: belong in Pandoc citations ([@key, p. 20]), not BibTeX entries
+// - Numeric locators: coerce to string with String() during extraction
+// - Grouped citations: mixed groups split; configurable via mixedCitationStyle
+//
+// CSL:
+// - Year: only set issued.date-parts when year is fully numeric; never emit [[null]]
+//
+// Citations:
+// - buildCitationKeyMap: accepts existingKeys?: Set<string> to prevent cross-scope ambiguity
+//
+// Footnotes:
+// - Multi-line indent: use block form when bodyParts[0] is multi-line; indent all
+//   continuation lines
+// - Fence detection: check for continuation lines before fence markers when currentLabel
+//   is defined
+// - Display math: treat item.type === 'math' && item.display as its own body part
+// - stopBeforeDisplayMath: body/footnote renderInlineRange calls must pass
+//   { stopBeforeDisplayMath: true }; table-cell calls (via renderInlineSegment)
+//   intentionally omit this since display math doesn't split table cells
+
 /** Matches a "Sources" heading (with or without leading `#` markers). */
 const SOURCES_HEADING_RE = /^(?:#+\s*)?Sources\s*$/;
 

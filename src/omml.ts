@@ -1,4 +1,7 @@
 // src/omml.ts — OMML-to-LaTeX translation module
+// Implementation note: fast-xml-parser (with processEntities: true, the default)
+// automatically unescapes XML entities in <m:t> text content, so parsed strings
+// already contain literal characters (e.g. &amp; → &).
 
 // ---------------------------------------------------------------------------
 // Mapping tables

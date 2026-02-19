@@ -3,6 +3,11 @@ import * as os from 'os';
 import * as path from 'path';
 import { parseFrontmatter, hasCitations, normalizeBibPath } from './frontmatter';
 
+// --- Implementation notes ---
+// - Flag parsing: validate missing-next-arg and next-token-is-flag before consuming args[++i]
+// - Output path: strip path.extname(inputPath) (actual-case) rather than hard-coded lowercase suffix
+// - DOCX→MD conflicts: preserve combined .md + .bib conflict check for single error report
+
 export interface CliOptions {
   help: boolean;
   version: boolean;

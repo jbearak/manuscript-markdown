@@ -490,7 +490,8 @@ export function formatSeparatorRow(columnWidths: number[], alignments?: ColumnAl
 }
 
 /**
- * Reflows a markdown table to ensure proper alignment and consistent spacing
+ * Reflows a markdown table to ensure proper alignment and consistent spacing.
+ * Implementation note: Preserve existing alignment/padding; only reflow when explicitly requested.
  * @param text - The table text to reflow
  * @returns TextTransformation with the reflowed table
  */

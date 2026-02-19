@@ -1,3 +1,5 @@
+// Implementation note: Before writing ${base}.md / ${base}.bib, detect pre-existing
+// targets and prompt with overwrite/rename/cancel to prevent silent data loss.
 export type OutputConflictScenario = 'md' | 'bib' | 'both';
 
 export function getOutputConflictScenario(

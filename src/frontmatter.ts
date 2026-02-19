@@ -92,6 +92,9 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
       case 'timezone':
         if (value && /^[+-]\d{2}:\d{2}$/.test(value)) metadata.timezone = value;
         break;
+      // Implementation note: accepts bibliography / bib / bibtex (first match wins).
+      // Normalize with normalizeBibPath(); resolution order: relative to .md dir →
+      // workspace root → fallback {basename}.bib. CLI --bib takes precedence.
       case 'bibliography':
       case 'bib':
       case 'bibtex':

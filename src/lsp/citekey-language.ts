@@ -7,6 +7,14 @@ import { BibtexEntry, parseBibtex } from '../bibtex-parser';
 import { computeCodeRegions, isInsideCodeRegion, overlapsCodeRegion } from '../code-regions';
 import { Frontmatter, normalizeBibPath, parseFrontmatter } from '../frontmatter';
 
+// --- Implementation notes ---
+// - BibTeX key offsets: locate keys starting after opening `{`, not first substring match
+//   in whole header
+// - Local scan bounds: findCitekeyAtOffset() must not stop at newlines inside bracketed
+//   citations; use nearest unclosed `[` and matching `]` for multi-line grouped citations
+// - Bib reverse-map recovery: on .bib create/change, recheck open markdown docs not yet
+//   in docToBibMap and backfill
+
 const realpathNativeAsync = promisify(fs.realpath.native);
 
 const CITATION_SEGMENT_RE = /\[[^\]]*@[^\]]*]/g;

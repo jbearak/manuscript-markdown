@@ -1,4 +1,12 @@
 // src/latex-to-omml.ts — LaTeX-to-OMML translation module
+//
+// --- Implementation notes ---
+// - Script binding: ^/_ applies to nearest preceding atom, not the whole expression;
+//   attach body scripts inside n-ary <m:e> for \sum/\int
+// - Delimiter parsing (\left...\right): if right-delimiter token is combined text like
+//   )+c, re-insert trailing text into token stream after consuming the delimiter
+// - Delimiter inner parsing: script operators inside \left...\right must use
+//   script-binding logic, not literal text runs
 
 // ---------------------------------------------------------------------------
 // Reverse mapping tables from omml.ts

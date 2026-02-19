@@ -24,6 +24,18 @@ import {
 } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { BibtexEntry } from '../bibtex-parser';
+
+// --- Implementation notes ---
+// - References from markdown — intentional asymmetry: return only .bib declaration
+//   from .md (VS Code built-in finds @citekey occurrences); return full set from .bib.
+//   Do not "fix" this; users can enable manuscriptMarkdown.citekeyReferencesFromMarkdown
+// - References dedupe: by canonical filesystem path (realpath + normalized case) plus
+//   range, not raw URI
+// - References request coalescing: coalesce near-identical back-to-back requests
+//   differing only by includeDeclaration
+// - Completion triggers: keep triggerCharacters narrow (@, :); broad triggers cause
+//   noisy popups
+
 import {
 	canonicalizeFsPath,
 	canonicalizeFsPathAsync,

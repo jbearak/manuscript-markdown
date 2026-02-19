@@ -72,6 +72,10 @@ export function shouldAutoTriggerSuggestFromChanges(changes: readonly SuggestTri
 /**
  * Detect if the cursor is positioned after `csl:` in YAML frontmatter.
  * Returns context for completions, or undefined if not in a CSL value position.
+ *
+ * Implementation note: returns valueStart/valueEnd for the full editable value
+ * (excluding surrounding quotes) and returns undefined when cursor is in the
+ * `csl:` key prefix, so LSP textEdit.range is never inverted.
  */
 export function getCslCompletionContext(text: string, offset: number): CslCompletionContext | undefined {
 	const cslLine = findCslLine(text);

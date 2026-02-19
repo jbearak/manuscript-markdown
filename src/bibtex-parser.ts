@@ -1,3 +1,8 @@
+// --- Implementation notes ---
+// - Verbatim fields: DOI, URL, ISBN, ISSN must not be LaTeX-escaped (see VERBATIM_BIBTEX_FIELDS)
+// - Entry scanning: count consecutive preceding backslashes before `"` to detect quote-state correctly
+// - Scanner literals: compare input[k] against '\\' (one char), not '\\\\' (two-char runtime string)
+
 export interface BibtexEntry {
   type: string;
   key: string;
