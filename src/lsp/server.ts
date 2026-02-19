@@ -603,7 +603,8 @@ async function revalidateMarkdownDocsForBib(changedBibPath: string): Promise<voi
 	for (const docUri of trackedUris) {
 		const doc = documents.get(docUri);
 		if (doc) {
-			await validateCitekeys(doc);
+			const { metadata } = parseFrontmatter(doc.getText());
+			await validateCitekeys(doc, metadata);
 		}
 	}
 
