@@ -1386,6 +1386,40 @@ describe('wrapWithFormatting colored highlights', () => {
   });
 });
 
+describe('colored highlight round-trip', () => {
+  test('DOCX with green highlight → MD → DOCX → MD preserves ==text=={green}', async () => {
+    const xml = wrapDocumentXml(
+      '<w:p><w:r><w:rPr><w:highlight w:val="green"/></w:rPr><w:t>green text</w:t></w:r></w:p>'
+    );
+    const buf = await buildSyntheticDocx(xml);
+    const pass1 = await convertDocx(buf);
+    expect(pass1.markdown).toContain('==green text=={green}');
+
+    const { docx: docx2 } = await convertMdToDocx(pass1.markdown);
+    const pass2 = await convertDocx(docx2);
+    expect(pass2.markdown).toContain('==green text=={green}');
+  });
+
+  test('DOCX with cyan highlight → MD produces ==text=={turquoise}', async () => {
+    const xml = wrapDocumentXml(
+      '<w:p><w:r><w:rPr><w:highlight w:val="cyan"/></w:rPr><w:t>cyan text</w:t></w:r></w:p>'
+    );
+    const buf = await buildSyntheticDocx(xml);
+    const result = await convertDocx(buf);
+    expect(result.markdown).toContain('==cyan text=={turquoise}');
+  });
+
+  test('DOCX with yellow highlight → MD produces plain ==text==', async () => {
+    const xml = wrapDocumentXml(
+      '<w:p><w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>yellow text</w:t></w:r></w:p>'
+    );
+    const buf = await buildSyntheticDocx(xml);
+    const result = await convertDocx(buf);
+    expect(result.markdown).toContain('==yellow text==');
+    expect(result.markdown).not.toContain('==yellow text=={');
+  });
+});
+
 describe('parseHeadingLevel', () => {
   test('returns undefined for non-heading pStyle', () => {
     const children = [{ 'w:pStyle': [], ':@': { '@_w:val': 'Normal' } }];
