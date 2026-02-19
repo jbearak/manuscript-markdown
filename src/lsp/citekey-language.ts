@@ -98,9 +98,10 @@ export function canonicalizeFsPath(fsPath: string): string {
 }
 
 export async function canonicalizeFsPathAsync(fsPath: string): Promise<string> {
-	let value = path.resolve(fsPath);
-	const cached = canonicalCache.get(value);
+	const resolvedPath = path.resolve(fsPath);
+	const cached = canonicalCache.get(resolvedPath);
 	if (cached !== undefined) return cached;
+	let value = resolvedPath;
 	try {
 		value = await realpathNativeAsync(value);
 	} catch {
@@ -110,7 +111,7 @@ export async function canonicalizeFsPathAsync(fsPath: string): Promise<string> {
 	if (process.platform === 'win32' || process.platform === 'darwin') {
 		value = value.toLowerCase();
 	}
-	canonicalCache.set(path.resolve(fsPath), value);
+	canonicalCache.set(resolvedPath, value);
 	return value;
 }
 
