@@ -445,8 +445,8 @@ const BIB_FIELD_LINK_RE = /^\s*(doi|isbn|issn)\s*=\s*[{"]\s*([^}"]+?)\s*[}"]/i;
 
 // DOIs: digits, letters, dots, slashes, hyphens, underscores, colons, semicolons, parens
 const VALID_DOI_RE = /^10\.\d{4,}[/.][A-Za-z0-9./_\-:;()]+$/;
-// ISBNs: digits and hyphens (ISBN-10 or ISBN-13)
-const VALID_ISBN_RE = /^[\d-]{10,17}[\dXx]?$/;
+// ISBNs: digits and hyphens (ISBN-10 or ISBN-13), check digit may be X
+const VALID_ISBN_RE = /^[\d-]{9,17}[\dXx]$/;
 // ISSNs: 4 digits, hyphen, 3 digits, check digit (digit or X)
 const VALID_ISSN_RE = /^\d{4}-?\d{3}[\dXx]$/;
 

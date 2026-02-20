@@ -236,20 +236,20 @@ describe('findBibFieldLinkAtLine', () => {
 	});
 
 	test('detects ISBN with brace delimiters', () => {
-		const result = findBibFieldLinkAtLine('  isbn = {978-0-123456-78-9},');
+		const result = findBibFieldLinkAtLine('  isbn = {978-0-306-40615-7},');
 		expect(result).toBeDefined();
 		expect(result!.fieldName).toBe('isbn');
-		expect(result!.value).toBe('978-0-123456-78-9');
-		expect(result!.url).toBe('https://search.worldcat.org/isbn/978-0-123456-78-9');
+		expect(result!.value).toBe('978-0-306-40615-7');
+		expect(result!.url).toBe('https://search.worldcat.org/isbn/978-0-306-40615-7');
 		expect(result!.label).toBe('Look up ISBN');
 	});
 
 	test('detects ISSN with brace delimiters', () => {
-		const result = findBibFieldLinkAtLine('  issn = {1234-5678},');
+		const result = findBibFieldLinkAtLine('  issn = {0028-0836},');
 		expect(result).toBeDefined();
 		expect(result!.fieldName).toBe('issn');
-		expect(result!.value).toBe('1234-5678');
-		expect(result!.url).toBe('https://portal.issn.org/resource/ISSN/1234-5678');
+		expect(result!.value).toBe('0028-0836');
+		expect(result!.url).toBe('https://portal.issn.org/resource/ISSN/0028-0836');
 		expect(result!.label).toBe('Look up ISSN');
 	});
 
@@ -304,10 +304,17 @@ describe('findBibFieldLinkAtLine', () => {
 	});
 
 	test('accepts ISSN without hyphen', () => {
-		const result = findBibFieldLinkAtLine('  issn = {12345678},');
+		const result = findBibFieldLinkAtLine('  issn = {00280836},');
 		expect(result).toBeDefined();
 		expect(result!.invalid).toBeUndefined();
-		expect(result!.url).toBe('https://portal.issn.org/resource/ISSN/12345678');
+		expect(result!.url).toBe('https://portal.issn.org/resource/ISSN/00280836');
+	});
+
+	test('accepts unhyphenated ISBN-10 with X check digit', () => {
+		const result = findBibFieldLinkAtLine('  isbn = {030640615X},');
+		expect(result).toBeDefined();
+		expect(result!.invalid).toBeUndefined();
+		expect(result!.url).toBe('https://search.worldcat.org/isbn/030640615X');
 	});
 
 	test('handles doubly-braced DOI value', () => {
