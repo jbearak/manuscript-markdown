@@ -429,7 +429,7 @@ connection.onHover(async (params: HoverParams): Promise<Hover | null> => {
 				return {
 					contents: {
 						kind: MarkupKind.Markdown,
-						value: `[${link.label}](${link.url})`,
+						value: link.invalid ? link.label : `[${link.label}](${link.url})`,
 					},
 				};
 			}

@@ -271,6 +271,50 @@ describe('findBibFieldLinkAtLine', () => {
 	test('returns undefined for entry header lines', () => {
 		expect(findBibFieldLinkAtLine('@article{smith2020,')).toBeUndefined();
 	});
+
+	test('returns invalid for malformed DOI', () => {
+		const result = findBibFieldLinkAtLine('  doi = {not-a-doi},');
+		expect(result).toBeDefined();
+		expect(result!.invalid).toBe(true);
+		expect(result!.url).toBeUndefined();
+		expect(result!.label).toContain('Invalid DOI');
+	});
+
+	test('returns invalid for DOI with Markdown-breaking characters', () => {
+		const result = findBibFieldLinkAtLine('  doi = {10.1234/x)(evil},');
+		expect(result).toBeDefined();
+		expect(result!.invalid).toBe(true);
+	});
+
+	test('returns invalid for malformed ISBN', () => {
+		const result = findBibFieldLinkAtLine('  isbn = {abc-not-isbn},');
+		expect(result).toBeDefined();
+		expect(result!.invalid).toBe(true);
+		expect(result!.url).toBeUndefined();
+		expect(result!.label).toContain('Invalid ISBN');
+	});
+
+	test('returns invalid for malformed ISSN', () => {
+		const result = findBibFieldLinkAtLine('  issn = {not-an-issn},');
+		expect(result).toBeDefined();
+		expect(result!.invalid).toBe(true);
+		expect(result!.url).toBeUndefined();
+		expect(result!.label).toContain('Invalid ISSN');
+	});
+
+	test('accepts ISSN without hyphen', () => {
+		const result = findBibFieldLinkAtLine('  issn = {12345678},');
+		expect(result).toBeDefined();
+		expect(result!.invalid).toBeUndefined();
+		expect(result!.url).toBe('https://portal.issn.org/resource/ISSN/12345678');
+	});
+
+	test('accepts ISBN-10', () => {
+		const result = findBibFieldLinkAtLine('  isbn = {0-306-40615-2},');
+		expect(result).toBeDefined();
+		expect(result!.invalid).toBeUndefined();
+		expect(result!.url).toBe('https://search.worldcat.org/isbn/0-306-40615-2');
+	});
 });
 
 describe('code-region filtering', () => {

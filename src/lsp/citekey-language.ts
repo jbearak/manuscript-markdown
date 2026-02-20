@@ -436,11 +436,19 @@ async function isExistingFileAsync(filePath: string): Promise<boolean> {
 export interface BibFieldLink {
 	fieldName: string;
 	value: string;
-	url: string;
+	url?: string;
 	label: string;
+	invalid?: boolean;
 }
 
 const BIB_FIELD_LINK_RE = /^\s*(doi|isbn|issn)\s*=\s*[{"]\s*([^}"]+?)\s*[}"]/i;
+
+// DOIs: digits, letters, dots, slashes, hyphens, underscores, colons, semicolons
+const VALID_DOI_RE = /^10\.\d{4,}[/.][A-Za-z0-9./_\-:;]+$/;
+// ISBNs: digits and hyphens (ISBN-10 or ISBN-13)
+const VALID_ISBN_RE = /^[\d-]{10,17}[\dXx]?$/;
+// ISSNs: 4 digits, hyphen, 3 digits, check digit (digit or X)
+const VALID_ISSN_RE = /^\d{4}-?\d{3}[\dXx]$/;
 
 export function findBibFieldLinkAtLine(lineText: string): BibFieldLink | undefined {
 	const match = BIB_FIELD_LINK_RE.exec(lineText);
@@ -452,10 +460,19 @@ export function findBibFieldLinkAtLine(lineText: string): BibFieldLink | undefin
 
 	switch (fieldName) {
 		case 'doi':
+			if (!VALID_DOI_RE.test(value)) {
+				return { fieldName, value, label: `Invalid DOI: ${value}`, invalid: true };
+			}
 			return { fieldName, value, url: `https://doi.org/${value}`, label: 'Access via DOI' };
 		case 'isbn':
+			if (!VALID_ISBN_RE.test(value)) {
+				return { fieldName, value, label: `Invalid ISBN: ${value}`, invalid: true };
+			}
 			return { fieldName, value, url: `https://search.worldcat.org/isbn/${value}`, label: 'Look up ISBN' };
 		case 'issn':
+			if (!VALID_ISSN_RE.test(value)) {
+				return { fieldName, value, label: `Invalid ISSN: ${value}`, invalid: true };
+			}
 			return { fieldName, value, url: `https://portal.issn.org/resource/ISSN/${value}`, label: 'Look up ISSN' };
 		default:
 			return undefined;
