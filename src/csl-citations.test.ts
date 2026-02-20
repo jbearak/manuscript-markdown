@@ -279,7 +279,7 @@ describe('generateCitation with citeproc', () => {
     };
 
     const usedIds = new Set<string>();
-    const itemIdMap = new Map<string, number>();
+    const itemIdMap = new Map<string, string | number>();
     const result = generateCitation(run, entries, engine, usedIds, itemIdMap);
     expect(result.xml).toContain('ZOTERO_ITEM');
     expect(result.xml).toContain('Smith');
@@ -296,7 +296,7 @@ describe('generateCitation with citeproc', () => {
     };
 
     const usedIds = new Set<string>();
-    const itemIdMap = new Map<string, number>();
+    const itemIdMap = new Map<string, string | number>();
     const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
     expect(result.xml).toContain('ZOTERO_ITEM');
     expect(result.xml).toContain('Smith');

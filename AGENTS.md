@@ -28,4 +28,6 @@ Code: `src/changes.ts` (navigation), `src/formatting.ts`, `src/preview/manuscrip
 - Property tests: use fast-check with short bounded generators to avoid timeouts.
 - TextMate grammar: complex multi-line patterns have limitations; focus on correctness in code, not perfect highlighting.
 
+- Zotero citation field codes: non-Zotero entries need both a string `id` (the citation key) and a synthetic `uris` array (`['http://zotero.org/users/local/embedded/items/' + key]`). Without `uris`, Zotero's `loadItemData()` crashes on `citationItem.uris.length`. The synthetic URI makes Zotero take the URI resolution path, fail to find the item, and gracefully fall back to embedded `itemData`. Large random numeric IDs do NOT work — Zotero errors on refresh.
+
 Per-module learnings live as comments in the corresponding source files.

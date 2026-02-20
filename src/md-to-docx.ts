@@ -1315,7 +1315,7 @@ export interface DocxGenState {
   notesMode: 'footnotes' | 'endnotes';
   missingKeys: Set<string>;
   citationIds: Set<string>;
-  citationItemIds: Map<string, number>;
+  citationItemIds: Map<string, string | number>;
   timezone?: string; // UTC offset from frontmatter (e.g. "-05:00")
   replyRanges: Array<{replyId: number; parentId: number}>;
   nextParaId: number;
