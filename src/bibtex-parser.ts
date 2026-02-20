@@ -23,7 +23,7 @@ const VERBATIM_BIBTEX_FIELDS: ReadonlySet<string> = new Set([
  *  string and is stripped. Otherwise the string is returned unchanged.
  *  Examples:
  *    '{My Title}'        → 'My Title'   (single wrapping pair — strip)
- *    '{The {RNA} Paradox}' → '{The {RNA} Paradox}' (depth reaches 0 before last char — keep)
+ *    '{The {RNA} Paradox}' → 'The {RNA} Paradox' (single wrapping pair — strip, inner group preserved)
  *    '{a}{b}'            → '{a}{b}'     (two separate groups — keep)
  *    '{}'                → ''           (empty pair — strip)
  */

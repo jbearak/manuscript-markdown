@@ -210,11 +210,11 @@ describe('double-brace fix', () => {
   });
 
   describe('stripOuterBraces edge cases', () => {
-    it('{{}} (empty double-brace) → empty string', () => {
+    it('{} (empty brace pair) → empty string', () => {
       expect(stripOuterBraces('{}')).toBe('');
     });
 
-    it('{{a}} → "a"', () => {
+    it('{a} → "a"', () => {
       expect(stripOuterBraces('{a}')).toBe('a');
     });
 

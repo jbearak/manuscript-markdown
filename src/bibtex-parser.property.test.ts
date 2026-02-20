@@ -29,11 +29,11 @@ describe('BibTeX Parser Property Tests', () => {
   });
 
   /**
-   * Property 2 (Preservation): For any string s that does not start with { or end with },
+   * Property 3 (Preservation): For any string s that contains no braces, quotes, or backslashes,
    * parsing @article{k, title = {s}} yields s unchanged (single-brace path unaffected).
    * Validates: Requirements 3.1, 3.4
    */
-  it('Property 2 (Preservation): single-braced field value is unchanged', () => {
+  it('Property 3 (Preservation): single-braced field value is unchanged', () => {
     const safeSingleBraceString = fc.string({ minLength: 1, maxLength: 40 })
       .filter(s =>
         !s.includes('}') && !s.includes('"') && !s.includes('{') && !s.includes('\\')
