@@ -398,14 +398,7 @@ class Parser {
 
       // Tags and labels (silently consumed)
       case '\\tag': {
-        // Handle \tag* variant
-        if (this.peek()?.type === 'text' && this.peek()?.value.startsWith('*')) {
-          const starToken = this.consume()!;
-          const remaining = starToken.value.slice(1);
-          if (remaining) {
-            this.tokens.splice(this.pos, 0, { type: 'text', value: remaining, pos: starToken.pos });
-          }
-        }
+        this.consumeStarVariant();
         this.parseGroup();
         return '';
       }
@@ -554,6 +547,17 @@ class Parser {
     }
 
     return '<m:d><m:dPr><m:begChr m:val="' + escapeXmlChars(begChr) + '"/><m:endChr m:val="' + escapeXmlChars(endChr) + '"/></m:dPr><m:e>' + content + '</m:e></m:d>';
+  }
+
+  /** Consume a `*` prefix from the next text token (for `\tag*` variants). */
+  private consumeStarVariant(): void {
+    if (this.peek()?.type === 'text' && this.peek()?.value.startsWith('*')) {
+      const starToken = this.consume()!;
+      const rest = starToken.value.slice(1);
+      if (rest) {
+        this.tokens.splice(this.pos, 0, { type: 'text', value: rest, pos: starToken.pos });
+      }
+    }
   }
 
   /**
@@ -729,14 +733,7 @@ class Parser {
         }
         if (token.type === 'command' && (token.value === '\\tag' || token.value === '\\label')) {
           this.consume();
-          // Handle \tag* variant
-          if (token.value === '\\tag' && this.peek()?.type === 'text' && this.peek()?.value.startsWith('*')) {
-            const starToken = this.consume()!;
-            const rest = starToken.value.slice(1);
-            if (rest) {
-              this.tokens.splice(this.pos, 0, { type: 'text', value: rest, pos: starToken.pos });
-            }
-          }
+          if (token.value === '\\tag') this.consumeStarVariant();
           this.parseGroup(); // consume argument, emit nothing
           return true;
         }
