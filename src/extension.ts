@@ -855,8 +855,15 @@ async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undef
 	let markdown: string;
 	let basePath: string;
 	if (uri) {
-		const data = await vscode.workspace.fs.readFile(uri);
-		markdown = new TextDecoder().decode(data);
+		const openDoc = vscode.workspace.textDocuments.find(
+			doc => doc.uri.toString() === uri.toString()
+		);
+		if (openDoc) {
+			markdown = openDoc.getText();
+		} else {
+			const data = await vscode.workspace.fs.readFile(uri);
+			markdown = new TextDecoder().decode(data);
+		}
 		basePath = uri.fsPath.replace(/\.md$/i, '');
 	} else {
 		const editor = vscode.window.activeTextEditor;
