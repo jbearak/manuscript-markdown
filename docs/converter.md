@@ -159,11 +159,10 @@ bibliography: shared/references
 | `locale` | Optional locale override (e.g., `en-US`, `en-GB`). Defaults to the style's own locale. |
 | `zotero-notes` | Optional Zotero note type: `in-text` (default), `footnotes`, or `endnotes`. Legacy alias: `note-type`. Legacy numeric values (0, 1, 2) are still accepted. |
 | `notes` | Controls footnote/endnote generation: `footnotes` (default) or `endnotes`. Auto-detected on DOCX import. |
-
-> **`zotero-notes` vs `notes`:** These fields are independent. `zotero-notes` controls how Zotero citations render (in-text, footnotes, or endnotes) and is stored in `ZOTERO_PREF_*` document properties for Zotero to read. `notes` controls whether the document's own footnote/endnote references are placed at the bottom of each page (footnotes) or collected at the end (endnotes). For example, a document can use `zotero-notes: in-text` for citations while using `notes: endnotes` for its own notes.
-
 | `timezone` | Local timezone offset (e.g., `+05:00`, `-05:00`). Auto-generated on DOCX import for idempotent date roundtripping. |
 | `bibliography` | Path to a `.bib` file (`.bib` extension optional). Aliases: `bib`, `bibtex`. See [Specification](specification.md#bibtex-companion-file). |
+
+> **`zotero-notes` vs `notes`:** These fields are independent. `zotero-notes` controls how Zotero citations render (in-text, footnotes, or endnotes) and is stored in `ZOTERO_PREF_*` document properties for Zotero to read. `notes` controls whether the document's own footnote/endnote references are placed at the bottom of each page (footnotes) or collected at the end (endnotes). For example, a document can use `zotero-notes: in-text` for citations while using `notes: endnotes` for its own notes.
 
 #### Bundled CSL styles
 
