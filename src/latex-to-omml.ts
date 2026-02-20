@@ -316,6 +316,9 @@ class Parser {
       }
 
       case '\\operatorname': {
+        // Intentionally consumes a following group as the function argument,
+        // mirroring KNOWN_FUNCTIONS (e.g. \sin{x}) for round-trip fidelity
+        // with the OMML→LaTeX direction which emits \operatorname{name}{arg}.
         const name = this.parseGroup();
         const funcArg = this.parseGroup();
         return '<m:func><m:fName>' + makeStyledRun(this.extractText(name)) + '</m:fName><m:e>' + funcArg + '</m:e></m:func>';
@@ -616,35 +619,16 @@ class Parser {
         return '<m:m>' + content + '</m:m>';
       }
 
-      case 'pmatrix': {
-        const content = this.parseMatrixContent();
-        this.consumeEnd(envName);
-        return '<m:d><m:dPr><m:begChr m:val="("/><m:endChr m:val=")"/></m:dPr><m:e><m:m>' + content + '</m:m></m:e></m:d>';
-      }
-
-      case 'bmatrix': {
-        const content = this.parseMatrixContent();
-        this.consumeEnd(envName);
-        return '<m:d><m:dPr><m:begChr m:val="["/><m:endChr m:val="]"/></m:dPr><m:e><m:m>' + content + '</m:m></m:e></m:d>';
-      }
-
-      case 'Bmatrix': {
-        const content = this.parseMatrixContent();
-        this.consumeEnd(envName);
-        return '<m:d><m:dPr><m:begChr m:val="{"/><m:endChr m:val="}"/></m:dPr><m:e><m:m>' + content + '</m:m></m:e></m:d>';
-      }
-
-      case 'vmatrix': {
-        const content = this.parseMatrixContent();
-        this.consumeEnd(envName);
-        return '<m:d><m:dPr><m:begChr m:val="|"/><m:endChr m:val="|"/></m:dPr><m:e><m:m>' + content + '</m:m></m:e></m:d>';
-      }
-
-      case 'Vmatrix': {
-        const content = this.parseMatrixContent();
-        this.consumeEnd(envName);
-        return '<m:d><m:dPr><m:begChr m:val="\u2016"/><m:endChr m:val="\u2016"/></m:dPr><m:e><m:m>' + content + '</m:m></m:e></m:d>';
-      }
+      case 'pmatrix':
+        return this.parseDelimitedMatrix(envName, '(', ')');
+      case 'bmatrix':
+        return this.parseDelimitedMatrix(envName, '[', ']');
+      case 'Bmatrix':
+        return this.parseDelimitedMatrix(envName, '{', '}');
+      case 'vmatrix':
+        return this.parseDelimitedMatrix(envName, '|', '|');
+      case 'Vmatrix':
+        return this.parseDelimitedMatrix(envName, '\u2016', '\u2016');
 
       case 'cases': {
         const content = this.parseEqArrayContent();
@@ -690,6 +674,12 @@ class Parser {
       default:
         return makeRun('\\begin{' + envName + '}');
     }
+  }
+
+  private parseDelimitedMatrix(envName: string, begChr: string, endChr: string): string {
+    const content = this.parseMatrixContent();
+    this.consumeEnd(envName);
+    return '<m:d><m:dPr><m:begChr m:val="' + escapeXmlChars(begChr) + '"/><m:endChr m:val="' + escapeXmlChars(endChr) + '"/></m:dPr><m:e><m:m>' + content + '</m:m></m:e></m:d>';
   }
 
   private parseMatrixContent(): string {
