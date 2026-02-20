@@ -21,7 +21,20 @@ export function escapeXml(text: string): string {
 }
 
 function stripHtmlTags(html: string): string {
-  return html.replace(/<[^>]+>/g, '');
+  return decodeHtmlEntities(html.replace(/<[^>]+>/g, ''));
+}
+
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&#(\d+);/g, (_m, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_m, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&nbsp;/g, '\u00A0')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
 }
 
 /**
@@ -38,12 +51,13 @@ export function htmlToOoxmlRuns(html: string): string {
   let bold = false;
   let sup = false;
   let sub = false;
-  let smallCaps = false;
+  let smallCapsDepth = 0;
+  let spanDepth = 0;
 
   while (pos < html.length) {
     if (html[pos] === '<') {
       if (currentText) {
-        runs.push({ text: currentText, italic, bold, sup, sub, smallCaps });
+        runs.push({ text: currentText, italic, bold, sup, sub, smallCaps: smallCapsDepth > 0 });
         currentText = '';
       }
 
@@ -63,8 +77,14 @@ export function htmlToOoxmlRuns(html: string): string {
       else if (tag === '/sup') sup = false;
       else if (tag === 'sub') sub = true;
       else if (tag === '/sub') sub = false;
-      else if (tag.startsWith('span') && tag.includes('small-caps')) smallCaps = true;
-      else if (tag === '/span') smallCaps = false;
+      else if (tag.startsWith('span')) {
+        spanDepth++;
+        if (tag.includes('small-caps')) smallCapsDepth = spanDepth;
+      }
+      else if (tag === '/span') {
+        if (spanDepth === smallCapsDepth) smallCapsDepth = 0;
+        spanDepth = Math.max(0, spanDepth - 1);
+      }
 
       pos = tagEnd + 1;
     } else {
@@ -74,7 +94,7 @@ export function htmlToOoxmlRuns(html: string): string {
   }
 
   if (currentText) {
-    runs.push({ text: currentText, italic, bold, sup, sub, smallCaps });
+    runs.push({ text: currentText, italic, bold, sup, sub, smallCaps: smallCapsDepth > 0 });
   }
 
   return runs.map(run => {
@@ -86,7 +106,7 @@ export function htmlToOoxmlRuns(html: string): string {
     if (run.smallCaps) rPr.push('<w:smallCaps/>');
 
     const rPrXml = rPr.length > 0 ? '<w:rPr>' + rPr.join('') + '</w:rPr>' : '';
-    return '<w:r>' + rPrXml + '<w:t xml:space="preserve">' + escapeXml(run.text) + '</w:t></w:r>';
+    return '<w:r>' + rPrXml + '<w:t xml:space="preserve">' + escapeXml(decodeHtmlEntities(run.text)) + '</w:t></w:r>';
   }).join('');
 }
 

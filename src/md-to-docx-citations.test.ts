@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { generateCitation, generateCitationId, generateMathXml, escapeXml, generateMissingKeysXml } from './md-to-docx-citations';
+import { generateCitation, generateCitationId, generateMathXml, escapeXml, generateMissingKeysXml, htmlToOoxmlRuns } from './md-to-docx-citations';
 import { BibtexEntry } from './bibtex-parser';
 
 describe('generateCitation', () => {
@@ -475,5 +475,68 @@ describe('escapeXml', () => {
   it('escapes XML special characters', () => {
     expect(escapeXml('&<>"')).toBe('&amp;&lt;&gt;&quot;');
     expect(escapeXml('normal text')).toBe('normal text');
+  });
+});
+
+describe('htmlToOoxmlRuns', () => {
+  it('passes through plain text', () => {
+    const result = htmlToOoxmlRuns('hello world');
+    expect(result).toBe('<w:r><w:t xml:space="preserve">hello world</w:t></w:r>');
+  });
+
+  it('applies italic and bold formatting', () => {
+    const result = htmlToOoxmlRuns('<i>italic</i> and <b>bold</b>');
+    expect(result).toContain('<w:rPr><w:i/></w:rPr>');
+    expect(result).toContain('<w:t xml:space="preserve">italic</w:t>');
+    expect(result).toContain('<w:rPr><w:b/></w:rPr>');
+    expect(result).toContain('<w:t xml:space="preserve">bold</w:t>');
+  });
+
+  it('decodes HTML entities without double-encoding', () => {
+    // citeproc outputs &amp; for &, &#x2013; for en-dash
+    const result = htmlToOoxmlRuns('Smith &amp; Jones, 2020&#x2013;2021');
+    expect(result).toContain('Smith &amp; Jones, 2020\u20132021');
+    // Must NOT contain double-encoded &amp;amp;
+    expect(result).not.toContain('&amp;amp;');
+  });
+
+  it('decodes &nbsp; as non-breaking space', () => {
+    const result = htmlToOoxmlRuns('a&nbsp;b');
+    expect(result).toContain('a\u00A0b');
+  });
+
+  it('decodes numeric character references', () => {
+    // &#8211; is en-dash, &#39; is apostrophe
+    const result = htmlToOoxmlRuns('2020&#8211;2021 it&#39;s');
+    expect(result).toContain('2020\u20132021');
+    expect(result).toContain("it's");
+  });
+
+  it('handles nested nocase span inside small-caps span', () => {
+    // small-caps wraps nocase: closing nocase should not clear small-caps
+    const html = '<span style="font-variant:small-caps;">BEFORE<span class="nocase">inner</span>AFTER</span>';
+    const result = htmlToOoxmlRuns(html);
+    // All three text segments should have smallCaps
+    expect(result).toContain('<w:smallCaps/>');
+    // "AFTER" must still have smallCaps
+    const afterMatch = result.match(/<w:r>(<w:rPr>.*?<\/w:rPr>)?<w:t xml:space="preserve">AFTER<\/w:t><\/w:r>/);
+    expect(afterMatch).toBeTruthy();
+    expect(afterMatch![0]).toContain('<w:smallCaps/>');
+  });
+
+  it('clears small-caps when its own span closes', () => {
+    const html = '<span style="font-variant:small-caps;">caps</span>normal';
+    const result = htmlToOoxmlRuns(html);
+    // "normal" should NOT have smallCaps
+    const normalMatch = result.match(/<w:r>(<w:rPr>.*?<\/w:rPr>)?<w:t xml:space="preserve">normal<\/w:t><\/w:r>/);
+    expect(normalMatch).toBeTruthy();
+    expect(normalMatch![0]).not.toContain('<w:smallCaps/>');
+  });
+
+  it('handles mixed superscript and italic', () => {
+    const result = htmlToOoxmlRuns('<sup><i>text</i></sup>');
+    expect(result).toContain('<w:i/>');
+    expect(result).toContain('<w:vertAlign w:val="superscript"/>');
+    expect(result).toContain('<w:t xml:space="preserve">text</w:t>');
   });
 });
