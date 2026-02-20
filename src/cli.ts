@@ -19,7 +19,6 @@ export interface CliOptions {
   templatePath?: string;
   noTemplate: boolean;
   authorName?: string;
-  mixedCitationStyle: 'separate' | 'unified';
   cslCacheDir: string;
   tableIndent: string;
   alwaysUseCommentIds: boolean;
@@ -34,7 +33,6 @@ export function parseArgs(argv: string[]): CliOptions {
     inputPath: '',
     force: false,
     citationKeyFormat: 'authorYearTitle',
-    mixedCitationStyle: 'separate',
     cslCacheDir: path.join(os.homedir(), '.manuscript-markdown', 'csl-cache'),
     tableIndent: '  ',
     noTemplate: false,
@@ -74,12 +72,6 @@ export function parseArgs(argv: string[]): CliOptions {
       options.noTemplate = true;
     } else if (arg === '--author') {
       options.authorName = requireValue('--author');
-    } else if (arg === '--mixed-citation-style') {
-      const style = requireValue('--mixed-citation-style');
-      if (!['separate', 'unified'].includes(style)) {
-        throw new Error(`Invalid mixed citation style "${style}". Use separate or unified`);
-      }
-      options.mixedCitationStyle = style as any;
     } else if (arg === '--csl-cache-dir') {
       options.cslCacheDir = requireValue('--csl-cache-dir');
     } else if (arg === '--always-use-comment-ids') {
@@ -134,7 +126,6 @@ Options:
   --template <path>               Template DOCX file (MD→DOCX)
   --no-template                   Disable auto-reuse of existing DOCX styles (MD→DOCX)
   --author <name>                 Author name (MD→DOCX, default: OS username)
-  --mixed-citation-style <style>  Mixed citation style: separate, unified (default: separate)
   --csl-cache-dir <path>          CSL style cache directory
   --table-indent <n>              Spaces per indent level in HTML tables (DOCX→MD, default: 2)
   --always-use-comment-ids        Always use ID-based comment syntax (DOCX→MD)
@@ -290,7 +281,6 @@ async function runMdToDocx(options: CliOptions) {
     cslCacheDir: options.cslCacheDir,
     sourceDir: path.dirname(options.inputPath),
     onStyleNotFound: async () => true,
-    mixedCitationStyle: options.mixedCitationStyle,
     blockquoteStyle: options.blockquoteStyle,
   });
 

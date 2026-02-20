@@ -53,8 +53,7 @@ test('Property 2: Argument parser preserves all flag values', () => {
       fc.option(fc.stringMatching(/^[a-zA-Z][a-zA-Z0-9._-]{0,9}$/)),
       fc.option(fc.stringMatching(/^[a-zA-Z][a-zA-Z0-9._-]{0,9}$/)),
       fc.option(fc.stringMatching(/^[a-zA-Z][a-zA-Z0-9 ._-]{0,9}$/)),
-      fc.constantFrom('separate', 'unified'),
-      (inputPath, outputPath, force, citationKeyFormat, bibPath, templatePath, authorName, mixedCitationStyle) => {
+      (inputPath, outputPath, force, citationKeyFormat, bibPath, templatePath, authorName) => {
         const args = ['node', 'cli.js', inputPath];
         
         if (outputPath) {
@@ -73,7 +72,6 @@ test('Property 2: Argument parser preserves all flag values', () => {
         if (authorName) {
           args.push('--author', authorName);
         }
-        args.push('--mixed-citation-style', mixedCitationStyle);
 
         const result = parseArgs(args);
 
@@ -84,7 +82,6 @@ test('Property 2: Argument parser preserves all flag values', () => {
         expect(result.bibPath).toBe(bibPath || undefined);
         expect(result.templatePath).toBe(templatePath || undefined);
         expect(result.authorName).toBe(authorName || undefined);
-        expect(result.mixedCitationStyle).toBe(mixedCitationStyle);
       }
     ),
     { numRuns: 100 }
@@ -97,12 +94,13 @@ test('parseArgs handles defaults correctly', () => {
   expect(result.inputPath).toBe('test.md');
   expect(result.force).toBe(false);
   expect(result.citationKeyFormat).toBe('authorYearTitle');
-  expect(result.mixedCitationStyle).toBe('separate');
   expect(result.cslCacheDir).toMatch(/.manuscript-markdown\/csl-cache$/);
 });
 
 test('parseArgs throws on unknown flags', () => {
   expect(() => parseArgs(['node', 'cli.js', '--unknown'])).toThrow('Unknown option "--unknown"');
+  expect(() => parseArgs(['node', 'cli.js', 'test.md', '--mixed-citation-style', 'unified']))
+    .toThrow('Unknown option "--mixed-citation-style"');
 });
 
 test('parseArgs throws on invalid citation key format', () => {
@@ -140,10 +138,6 @@ test('parseArgs parses --no-template', () => {
   expect(result.noTemplate).toBe(true);
 });
 
-test('parseArgs throws on invalid mixed citation style', () => {
-  expect(() => parseArgs(['node', 'cli.js', 'test.md', '--mixed-citation-style', 'invalid']))
-    .toThrow('Invalid mixed citation style "invalid". Use separate or unified');
-});
 test('parseArgs throws when value-taking flags are missing values', () => {
   const valueFlags = [
     '--output',
@@ -151,7 +145,6 @@ test('parseArgs throws when value-taking flags are missing values', () => {
     '--bib',
     '--template',
     '--author',
-    '--mixed-citation-style',
     '--csl-cache-dir',
     '--table-indent'
   ];

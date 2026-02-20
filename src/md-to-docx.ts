@@ -1281,8 +1281,6 @@ export interface MdToDocxOptions {
   /** Called when a CSL style is not bundled or found locally.
    *  Return true to attempt downloading from the CSL repository. */
   onStyleNotFound?: (styleName: string) => Promise<boolean>;
-  /** How to render mixed Zotero/non-Zotero grouped citations. */
-  mixedCitationStyle?: 'separate' | 'unified';
   /** Word paragraph style to use for blockquotes. */
   blockquoteStyle?: 'Quote' | 'IntenseQuote';
 }

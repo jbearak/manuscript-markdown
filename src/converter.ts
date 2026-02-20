@@ -30,7 +30,7 @@ import { Frontmatter, NotesMode, serializeFrontmatter, noteTypeFromNumber } from
 // - citationItems: check both uris (array) and uri (singular)
 // - Locators: belong in Pandoc citations ([@key, p. 20]), not BibTeX entries
 // - Numeric locators: coerce to string with String() during extraction
-// - Grouped citations: mixed groups split; configurable via mixedCitationStyle
+// - Grouped citations: mixed groups always produce unified output
 //
 // CSL:
 // - Year: only set issued.date-parts when year is fully numeric; never emit [[null]]

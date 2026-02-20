@@ -564,6 +564,7 @@ describe('Mixed citation groups in pipeline', () => {
     expect(docXml).toContain('ZOT11111');
     // Non-Zotero entry should also be in the field code (via itemData)
     expect(docXml).toContain('Plain');
+    expect(docXml).toContain('Zotero');
   });
 
   test('missing keys appear after bibliography in DOCX', async () => {
@@ -582,17 +583,4 @@ describe('Mixed citation groups in pipeline', () => {
     expect(result.warnings.some(w => w.includes('noSuchKey'))).toBe(true);
   });
 
-  test('mixed group produces single field code regardless of mixedCitationStyle', async () => {
-    const md = '---\ncsl: apa\n---\n\nText [@zotEntry; @plainEntry].\n';
-    const result = await convertMdToDocx(md, { bibtex: MIXED_BIBTEX, mixedCitationStyle: 'unified' });
-
-    const JSZip = (await import('jszip')).default;
-    const zip = await JSZip.loadAsync(result.docx);
-    const docXml = await zip.file('word/document.xml')?.async('string');
-
-    // All resolved entries share a single field code
-    expect(docXml).toContain('ZOTERO_ITEM CSL_CITATION');
-    expect(docXml).toContain('Zotero');
-    expect(docXml).toContain('Plain');
-  });
 });

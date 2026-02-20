@@ -21,7 +21,6 @@ All settings are under the `manuscriptMarkdown` namespace in VS Code settings.
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `citationKeyFormat` | string | `"authorYearTitle"` | Citation key format for DOCX to Markdown conversion. `authorYearTitle` (e.g., smith2020effects), `authorYear` (e.g., smith2020), or `numeric` (e.g., 1, 2, 3) |
-| `mixedCitationStyle` | string | `"separate"` | How to render mixed Zotero/non-Zotero grouped citations. `separate`: each portion gets its own parentheses (clean Zotero refresh). `unified`: one set of parentheses wrapping everything (looks like one group but may desync on Zotero refresh) |
 
 ## Language Server
 

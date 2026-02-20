@@ -142,16 +142,7 @@ After opening the exported DOCX in Word, Zotero's plugin can refresh citations, 
 When a BibTeX file contains both Zotero-linked entries (with `zotero-key` and `zotero-uri` fields) and plain entries (without Zotero metadata), the converter handles them differently:
 
 - **Standalone citations**: A `[@zoteroEntry]` becomes a Zotero field code. A `[@plainEntry]` becomes plain formatted text.
-- **Grouped citations**: If a group like `[@zoteroEntry; @plainEntry]` mixes Zotero and non-Zotero entries, the converter splits the group — Zotero entries become a field code and non-Zotero entries become separate plain formatted text. This preserves Zotero field code data for entries that have it.
-
-### `mixedCitationStyle` setting
-
-The `manuscriptMarkdown.mixedCitationStyle` setting controls how mixed groups are rendered:
-
-| Value | Output | Zotero refresh |
-|-------|--------|----------------|
-| `separate` (default) | Each portion gets its own parentheses: `(Smith 2020) (Doe 2021)` | Clean — Zotero only refreshes its own field code |
-| `unified` | One set of parentheses wrapping everything: `(Smith 2020; Doe 2021)` | May desync — Zotero refresh overwrites the entire visible text |
+- **Grouped citations**: If a group like `[@zoteroEntry; @plainEntry]` mixes Zotero and non-Zotero entries, the converter always produces unified output — a single set of parentheses wrapping all entries. Non-Zotero entries use synthetic URIs so Zotero gracefully falls back to embedded item data on refresh.
 
 ### Missing citation keys
 

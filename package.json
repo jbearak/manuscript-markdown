@@ -662,15 +662,6 @@
           "default": "yellow",
           "description": "Default background color for ==highlight== formatting when no color is specified"
         },
-        "manuscriptMarkdown.mixedCitationStyle": {
-          "type": "string",
-          "enum": [
-            "separate",
-            "unified"
-          ],
-          "default": "separate",
-          "description": "How to render mixed Zotero/non-Zotero grouped citations. 'separate': each portion gets its own parentheses (clean Zotero refresh). 'unified': one set of parentheses wrapping everything (looks like one group but may desync on Zotero refresh)."
-        },
         "manuscriptMarkdown.tableIndent": {
           "type": "integer",
           "default": 2,
