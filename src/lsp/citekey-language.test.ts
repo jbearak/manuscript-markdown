@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
 	canonicalizeFsPath,
+	findBibFieldLinkAtLine,
 	findBibKeyAtOffset,
 	findCitekeyAtOffset,
 	fsPathToUri,
@@ -217,6 +218,120 @@ describe('parseBibDataFromText / findBibKeyAtOffset', () => {
 	});
 });
 
+
+describe('findBibFieldLinkAtLine', () => {
+	test('detects DOI with brace delimiters', () => {
+		const result = findBibFieldLinkAtLine('  doi = {10.1234/test},');
+		expect(result).toBeDefined();
+		expect(result!.fieldName).toBe('doi');
+		expect(result!.value).toBe('10.1234/test');
+		expect(result!.url).toBe('https://doi.org/10.1234/test');
+		expect(result!.label).toBe('Access via DOI');
+	});
+
+	test('detects DOI with quote delimiters', () => {
+		const result = findBibFieldLinkAtLine('  doi = "10.1234/test",');
+		expect(result).toBeDefined();
+		expect(result!.url).toBe('https://doi.org/10.1234/test');
+	});
+
+	test('detects ISBN with brace delimiters', () => {
+		const result = findBibFieldLinkAtLine('  isbn = {978-0-306-40615-7},');
+		expect(result).toBeDefined();
+		expect(result!.fieldName).toBe('isbn');
+		expect(result!.value).toBe('978-0-306-40615-7');
+		expect(result!.url).toBe('https://search.worldcat.org/isbn/978-0-306-40615-7');
+		expect(result!.label).toBe('Look up ISBN');
+	});
+
+	test('detects ISSN with brace delimiters', () => {
+		const result = findBibFieldLinkAtLine('  issn = {0028-0836},');
+		expect(result).toBeDefined();
+		expect(result!.fieldName).toBe('issn');
+		expect(result!.value).toBe('0028-0836');
+		expect(result!.url).toBe('https://portal.issn.org/resource/ISSN/0028-0836');
+		expect(result!.label).toBe('Look up ISSN');
+	});
+
+	test('is case-insensitive for field name', () => {
+		const result = findBibFieldLinkAtLine('  DOI = {10.1234/test},');
+		expect(result).toBeDefined();
+		expect(result!.fieldName).toBe('doi');
+	});
+
+	test('returns undefined for empty value', () => {
+		expect(findBibFieldLinkAtLine('  doi = {},')).toBeUndefined();
+	});
+
+	test('returns undefined for non-link fields', () => {
+		expect(findBibFieldLinkAtLine('  title = {Some Title},')).toBeUndefined();
+		expect(findBibFieldLinkAtLine('  author = {Smith, John},')).toBeUndefined();
+	});
+
+	test('returns undefined for entry header lines', () => {
+		expect(findBibFieldLinkAtLine('@article{smith2020,')).toBeUndefined();
+	});
+
+	test('returns invalid for malformed DOI', () => {
+		const result = findBibFieldLinkAtLine('  doi = {not-a-doi},');
+		expect(result).toBeDefined();
+		expect(result!.invalid).toBe(true);
+		expect(result!.url).toBeUndefined();
+		expect(result!.label).toContain('Invalid DOI');
+	});
+
+	test('accepts DOI with parentheses and percent-encodes them in URL', () => {
+		const result = findBibFieldLinkAtLine('  doi = {10.1002/(SICI)1097-0258},');
+		expect(result).toBeDefined();
+		expect(result!.invalid).toBeUndefined();
+		expect(result!.url).toBe('https://doi.org/10.1002/%28SICI%291097-0258');
+	});
+
+	test('returns invalid for malformed ISBN', () => {
+		const result = findBibFieldLinkAtLine('  isbn = {abc-not-isbn},');
+		expect(result).toBeDefined();
+		expect(result!.invalid).toBe(true);
+		expect(result!.url).toBeUndefined();
+		expect(result!.label).toContain('Invalid ISBN');
+	});
+
+	test('returns invalid for malformed ISSN', () => {
+		const result = findBibFieldLinkAtLine('  issn = {not-an-issn},');
+		expect(result).toBeDefined();
+		expect(result!.invalid).toBe(true);
+		expect(result!.url).toBeUndefined();
+		expect(result!.label).toContain('Invalid ISSN');
+	});
+
+	test('accepts ISSN without hyphen', () => {
+		const result = findBibFieldLinkAtLine('  issn = {00280836},');
+		expect(result).toBeDefined();
+		expect(result!.invalid).toBeUndefined();
+		expect(result!.url).toBe('https://portal.issn.org/resource/ISSN/00280836');
+	});
+
+	test('accepts unhyphenated ISBN-10 with X check digit', () => {
+		const result = findBibFieldLinkAtLine('  isbn = {030640615X},');
+		expect(result).toBeDefined();
+		expect(result!.invalid).toBeUndefined();
+		expect(result!.url).toBe('https://search.worldcat.org/isbn/030640615X');
+	});
+
+	test('handles doubly-braced DOI value', () => {
+		const result = findBibFieldLinkAtLine('  doi = {{10.1234/test}},');
+		expect(result).toBeDefined();
+		expect(result!.invalid).toBeUndefined();
+		expect(result!.value).toBe('10.1234/test');
+		expect(result!.url).toBe('https://doi.org/10.1234/test');
+	});
+
+	test('accepts ISBN-10', () => {
+		const result = findBibFieldLinkAtLine('  isbn = {0-306-40615-2},');
+		expect(result).toBeDefined();
+		expect(result!.invalid).toBeUndefined();
+		expect(result!.url).toBe('https://search.worldcat.org/isbn/0-306-40615-2');
+	});
+});
 
 describe('code-region filtering', () => {
 	test('scanCitationUsages returns no usages for citation inside inline code', () => {

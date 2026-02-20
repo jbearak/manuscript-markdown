@@ -29,7 +29,8 @@
     "url": "https://github.com/jbearak/manuscript-markdown.git"
   },
   "activationEvents": [
-    "onLanguage:markdown"
+    "onLanguage:markdown",
+    "onLanguage:bibtex"
   ],
   "main": "./out/extension.js",
   "contributes": {

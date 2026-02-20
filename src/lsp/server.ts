@@ -40,6 +40,7 @@ import {
 	canonicalizeFsPath,
 	canonicalizeFsPathAsync,
 	ParsedBibData,
+	findBibFieldLinkAtLine,
 	findBibKeyAtOffset,
 	findCitekeyAtOffset,
 	findUsagesForKey,
@@ -417,7 +418,25 @@ connection.onHover(async (params: HoverParams): Promise<Hover | null> => {
 		}
 	}
 
-	// 2. Try comment hover — show associated text for non-inline comments
+	// 2. Try DOI/ISBN/ISSN field link hover in .bib files
+	if (isBibUri(params.textDocument.uri)) {
+		const doc = documents.get(params.textDocument.uri);
+		if (doc) {
+			const line = params.position.line;
+			const lineText = doc.getText(Range.create(line, 0, line + 1, 0));
+			const link = findBibFieldLinkAtLine(lineText);
+			if (link) {
+				return {
+					contents: {
+						kind: MarkupKind.Markdown,
+						value: link.invalid ? link.label : `[${link.label}](${link.url})`,
+					},
+				};
+			}
+		}
+	}
+
+	// 3. Try comment hover — show associated text for non-inline comments
 	if (isMarkdownUri(params.textDocument.uri, documents.get(params.textDocument.uri)?.languageId)) {
 		const doc = await getTextDocument(params.textDocument.uri, 'markdown');
 		if (doc) {
