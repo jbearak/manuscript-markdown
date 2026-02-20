@@ -906,18 +906,17 @@ describe('Edge Cases', () => {
       expect(output).toContain('<ins');
     });
 
-    it('should render empty comment pattern as empty styled element', () => {
+    it('should remove empty comment pattern silently', () => {
       const md = new MarkdownIt();
       md.use(manuscriptMarkdownPlugin);
-      
+
       const input = '{>><<}';
       const output = md.render(input);
-      
-      // Should contain the CSS class
-      expect(output).toContain('manuscript-markdown-comment');
-      // Should contain the span tag
-      expect(output).toContain('<span');
-      expect(output).toContain('</span>');
+
+      // Empty comment should be removed entirely — no indicator, no comment span
+      expect(output).not.toContain('manuscript-markdown-comment');
+      expect(output).not.toContain('data-comment');
+      expect(output).toBe('<p></p>\n');
     });
 
     it('should render empty highlight pattern as empty styled element', () => {
@@ -1906,5 +1905,158 @@ describe('Code region inertness in preview', () => {
     const output = md.render('{==`code`==}');
     expect(output).toContain('<code>code</code>');
     expect(output).toContain('manuscript-markdown-highlight');
+  });
+});
+
+// Feature: hide-comments-in-md-preview — Comment association and tooltip data-comment attributes
+describe('Comment association in preview', () => {
+
+  describe('Standalone comments', () => {
+    it('should render standalone comment as indicator with data-comment', () => {
+      const md = new MarkdownIt();
+      md.use(manuscriptMarkdownPlugin);
+      const output = md.render('{>>note<<}');
+      expect(output).toContain('manuscript-markdown-comment-indicator');
+      expect(output).toContain('data-comment="note"');
+      // Should NOT contain visible comment text as rendered content
+      expect(output).not.toMatch(/>note</);
+    });
+
+    it('should render standalone comment with special chars escaped in data-comment', () => {
+      const md = new MarkdownIt();
+      md.use(manuscriptMarkdownPlugin);
+      const output = md.render('{>>a "quote" & <tag><<}');
+      expect(output).toContain('manuscript-markdown-comment-indicator');
+      expect(output).toContain('data-comment="a &quot;quote&quot; &amp; &lt;tag&gt;"');
+    });
+
+    it('should render multiple standalone comments as separate indicators', () => {
+      const md = new MarkdownIt();
+      md.use(manuscriptMarkdownPlugin);
+      const output = md.render('{>>first<<} {>>second<<}');
+      const indicatorCount = (output.match(/manuscript-markdown-comment-indicator/g) || []).length;
+      expect(indicatorCount).toBe(2);
+      expect(output).toContain('data-comment="first"');
+      expect(output).toContain('data-comment="second"');
+    });
+  });
+
+  describe('Adjacent comment association', () => {
+    it('should associate comment with preceding highlight via data-comment', () => {
+      const md = new MarkdownIt();
+      md.use(manuscriptMarkdownPlugin);
+      const output = md.render('{==text==}{>>comment<<}');
+      expect(output).toContain('manuscript-markdown-highlight');
+      expect(output).toContain('data-comment="comment"');
+      // Should NOT contain a separate comment indicator
+      expect(output).not.toContain('manuscript-markdown-comment-indicator');
+      // Comment text should not appear as visible rendered content
+      expect(output).not.toMatch(/>comment</);
+    });
+
+    it('should associate comment with preceding addition via data-comment', () => {
+      const md = new MarkdownIt();
+      md.use(manuscriptMarkdownPlugin);
+      const output = md.render('{++added++}{>>why<<}');
+      expect(output).toContain('manuscript-markdown-addition');
+      expect(output).toContain('data-comment="why"');
+      expect(output).not.toContain('manuscript-markdown-comment-indicator');
+    });
+
+    it('should associate comment with preceding deletion via data-comment', () => {
+      const md = new MarkdownIt();
+      md.use(manuscriptMarkdownPlugin);
+      const output = md.render('{--removed--}{>>reason<<}');
+      expect(output).toContain('manuscript-markdown-deletion');
+      expect(output).toContain('data-comment="reason"');
+      expect(output).not.toContain('manuscript-markdown-comment-indicator');
+    });
+
+    it('should associate comment with preceding substitution via data-comment', () => {
+      const md = new MarkdownIt();
+      md.use(manuscriptMarkdownPlugin);
+      const output = md.render('{~~old~>new~~}{>>reason<<}');
+      expect(output).toContain('manuscript-markdown-substitution');
+      expect(output).toContain('data-comment="reason"');
+      expect(output).not.toContain('manuscript-markdown-comment-indicator');
+    });
+
+    it('should associate comment with preceding format highlight via data-comment', () => {
+      const md = new MarkdownIt();
+      md.use(manuscriptMarkdownPlugin);
+      const output = md.render('==text=={>>note<<}');
+      expect(output).toContain('manuscript-markdown-format-highlight');
+      expect(output).toContain('data-comment="note"');
+      expect(output).not.toContain('manuscript-markdown-comment-indicator');
+    });
+
+    it('should concatenate multiple sequential comments with newline separator', () => {
+      const md = new MarkdownIt();
+      md.use(manuscriptMarkdownPlugin);
+      const output = md.render('{==text==}{>>first<<}{>>second<<}');
+      expect(output).toContain('manuscript-markdown-highlight');
+      // Both comments should be on the same element, joined by newline
+      expect(output).toContain('data-comment="first\nsecond"');
+      expect(output).not.toContain('manuscript-markdown-comment-indicator');
+    });
+  });
+
+  describe('ID-based comment ranges', () => {
+    it('should create comment range span with data-comment for ID-based comments', () => {
+      const md = new MarkdownIt();
+      md.use(manuscriptMarkdownPlugin);
+      const output = md.render('{#1}text{/1}{#1>>comment<<}');
+      expect(output).toContain('manuscript-markdown-comment-range');
+      expect(output).toContain('data-comment="comment"');
+      expect(output).toContain('>text</span>');
+    });
+
+    it('should leave range markers without matching comment as empty renders', () => {
+      const md = new MarkdownIt();
+      md.use(manuscriptMarkdownPlugin);
+      const output = md.render('{#1}text{/1}');
+      // No matching comment — range markers render as empty string
+      expect(output).not.toContain('manuscript-markdown-comment-range');
+      expect(output).toContain('text');
+    });
+
+    it('should handle multiple ID-based ranges independently', () => {
+      const md = new MarkdownIt();
+      md.use(manuscriptMarkdownPlugin);
+      const output = md.render('{#a}alpha{/a}{#b}beta{/b}{#a>>note-a<<}{#b>>note-b<<}');
+      expect(output).toContain('data-comment="note-a"');
+      expect(output).toContain('data-comment="note-b"');
+    });
+  });
+
+  describe('Empty and edge cases', () => {
+    it('should remove empty comment silently with no indicator', () => {
+      const md = new MarkdownIt();
+      md.use(manuscriptMarkdownPlugin);
+      const output = md.render('text{>><<}more');
+      expect(output).not.toContain('manuscript-markdown-comment');
+      expect(output).not.toContain('data-comment');
+      expect(output).toContain('textmore');
+    });
+
+    it('should not affect text surrounding associated comments', () => {
+      const md = new MarkdownIt();
+      md.use(manuscriptMarkdownPlugin);
+      const output = md.render('before {==text==}{>>note<<} after');
+      expect(output).toContain('before');
+      expect(output).toContain('after');
+      expect(output).toContain('text');
+      expect(output).toContain('data-comment="note"');
+    });
+
+    it('should handle comment after highlight in a list item', () => {
+      const md = new MarkdownIt();
+      md.use(manuscriptMarkdownPlugin);
+      const output = md.render('- Item {==text==}{>>note<<}');
+      expect(output).toContain('<ul>');
+      expect(output).toContain('manuscript-markdown-highlight');
+      expect(output).toContain('data-comment="note"');
+      expect(output).not.toContain('manuscript-markdown-comment-indicator');
+    });
   });
 });

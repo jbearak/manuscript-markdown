@@ -4,6 +4,15 @@ import type StateBlock from 'markdown-it/lib/rules_block/state_block.mjs';
 import { VALID_COLOR_IDS, getDefaultHighlightColor } from '../highlight-colors';
 import { PARA_PLACEHOLDER, preprocessCriticMarkup, findMatchingClose } from '../critic-markup';
 
+/** Escape HTML special characters for use in attribute values */
+function escapeHtmlAttr(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 /**
  * Defines a Manuscript Markdown pattern configuration
  */
@@ -385,9 +394,11 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
         const endPos = findMatchingClose(src, idEnd + 2);
         if (endPos !== -1 && endPos + 3 <= max) {
           if (!silent) {
+            const id = src.slice(start + 2, idEnd);
             const content = src.slice(idEnd + 2, endPos);
             const tokenOpen = state.push('manuscript_markdown_comment_open', 'span', 1);
             tokenOpen.attrSet('class', 'manuscript-markdown-comment');
+            tokenOpen.meta = { id, commentText: content };
             addInlineContent(state, content);
             state.push('manuscript_markdown_comment_close', 'span', -1);
           }
@@ -398,9 +409,10 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
       // Check for {#id} range start marker
       if (idEnd < max && src.charCodeAt(idEnd) === 0x7D /* } */) {
         if (!silent) {
-          // Render as an invisible marker (empty span)
+          const id = src.slice(start + 2, idEnd);
           const token = state.push('manuscript_markdown_range_marker', 'span', 0);
           token.attrSet('class', 'manuscript-markdown-range-marker');
+          token.meta = { id, type: 'start' };
         }
         state.pos = idEnd + 1;
         return true;
@@ -414,8 +426,10 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
     while (idEnd < max && /[a-zA-Z0-9_-]/.test(src.charAt(idEnd))) idEnd++;
     if (idEnd > start + 2 && idEnd < max && src.charCodeAt(idEnd) === 0x7D /* } */) {
       if (!silent) {
+        const id = src.slice(start + 2, idEnd);
         const token = state.push('manuscript_markdown_range_marker', 'span', 0);
         token.attrSet('class', 'manuscript-markdown-range-marker');
+        token.meta = { id, type: 'end' };
       }
       state.pos = idEnd + 1;
       return true;
@@ -430,6 +444,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
         const content = src.slice(start + 3, endPos);
         const tokenOpen = state.push('manuscript_markdown_comment_open', 'span', 1);
         tokenOpen.attrSet('class', 'manuscript-markdown-comment');
+        tokenOpen.meta = { commentText: content };
 
         // Add parsed inline content to allow nested Markdown processing
         addInlineContent(state, content);
@@ -462,6 +477,139 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
   }
 
   return false;
+}
+
+/** Check if a token type is a CriticMarkup or format highlight close token */
+function isCriticMarkupClose(type: string): boolean {
+  return type === 'manuscript_markdown_highlight_close' ||
+    type === 'manuscript_markdown_addition_close' ||
+    type === 'manuscript_markdown_deletion_close' ||
+    type === 'manuscript_markdown_substitution_close' ||
+    type === 'manuscript_markdown_format_highlight_close';
+}
+
+/** Find the index of the matching open token in an array, searching backwards from closeIdx */
+function findMatchingOpenIdx(tokens: any[], closeIdx: number): number {
+  const closeType = tokens[closeIdx].type;
+  const openType = closeType.replace('_close', '_open');
+  let depth = 1;
+  for (let i = closeIdx - 1; i >= 0; i--) {
+    if (tokens[i].type === closeType) depth++;
+    if (tokens[i].type === openType) {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Core rule that associates comment tokens with their annotated elements.
+ * Runs after inline parsing to post-process the token stream.
+ *
+ * Pass 1: Build a map of comment ID → comment text
+ * Pass 2: Transform range markers ({#id}/{/id}) into comment range open/close tokens
+ * Pass 3: Process inline comments — associate with preceding CriticMarkup elements or create indicators
+ */
+function associateCommentsRule(state: any): void {
+  // Pass 1: Build comment ID → text map from all inline tokens
+  const commentIdMap = new Map<string, string>();
+  for (const blockToken of state.tokens) {
+    if (blockToken.type !== 'inline' || !blockToken.children) continue;
+    for (const child of blockToken.children) {
+      if (child.type === 'manuscript_markdown_comment_open' && child.meta?.id && child.meta?.commentText) {
+        commentIdMap.set(child.meta.id, child.meta.commentText);
+      }
+    }
+  }
+
+  // Pass 2: Transform range markers with matching comments into comment range open/close
+  for (const blockToken of state.tokens) {
+    if (blockToken.type !== 'inline' || !blockToken.children) continue;
+    for (const child of blockToken.children) {
+      if (child.type === 'manuscript_markdown_range_marker' && child.meta?.id) {
+        const commentText = commentIdMap.get(child.meta.id);
+        if (commentText !== undefined) {
+          if (child.meta.type === 'start') {
+            child.type = 'manuscript_markdown_comment_range_open';
+            child.tag = 'span';
+            child.nesting = 1;
+            child.attrSet('class', 'manuscript-markdown-comment-range');
+            child.attrSet('data-comment', commentText);
+          } else if (child.meta.type === 'end') {
+            child.type = 'manuscript_markdown_comment_range_close';
+            child.tag = 'span';
+            child.nesting = -1;
+          }
+        }
+      }
+    }
+  }
+
+  // Pass 3: Process inline comments — associate with preceding elements or create indicators
+  for (const blockToken of state.tokens) {
+    if (blockToken.type !== 'inline' || !blockToken.children) continue;
+
+    const children = blockToken.children;
+    const newChildren: any[] = [];
+    let i = 0;
+
+    while (i < children.length) {
+      if (children[i].type === 'manuscript_markdown_comment_open') {
+        const commentText: string = children[i].meta?.commentText || '';
+        const commentId: string | undefined = children[i].meta?.id;
+
+        // Find matching comment_close (tracking nesting for nested comments)
+        let closeIdx = i + 1;
+        let depth = 1;
+        while (closeIdx < children.length) {
+          if (children[closeIdx].type === 'manuscript_markdown_comment_open') depth++;
+          if (children[closeIdx].type === 'manuscript_markdown_comment_close') {
+            depth--;
+            if (depth === 0) break;
+          }
+          closeIdx++;
+        }
+
+        // Empty comment — remove silently
+        if (commentText.length === 0) {
+          i = closeIdx + 1;
+          continue;
+        }
+
+        // ID-based comment — already handled by Pass 2, just remove tokens
+        if (commentId) {
+          i = closeIdx + 1;
+          continue;
+        }
+
+        // Check for adjacent CriticMarkup close token
+        const prevToken = newChildren.length > 0 ? newChildren[newChildren.length - 1] : null;
+        if (prevToken && isCriticMarkupClose(prevToken.type)) {
+          const openIdx = findMatchingOpenIdx(newChildren, newChildren.length - 1);
+          if (openIdx !== -1) {
+            const openToken = newChildren[openIdx];
+            const existing = openToken.attrGet('data-comment');
+            openToken.attrSet('data-comment', existing ? existing + '\n' + commentText : commentText);
+            i = closeIdx + 1;
+            continue;
+          }
+        }
+
+        // Standalone comment — create indicator token
+        const indicator = new state.Token('manuscript_markdown_comment_indicator', 'span', 0);
+        indicator.attrSet('data-comment', commentText);
+        newChildren.push(indicator);
+        i = closeIdx + 1;
+        continue;
+      }
+
+      newChildren.push(children[i]);
+      i++;
+    }
+
+    blockToken.children = newChildren;
+  }
 }
 
 /** Inline rule that converts the paragraph placeholder back into line breaks in the token stream. */
@@ -502,13 +650,22 @@ export function manuscriptMarkdownPlugin(md: MarkdownIt): void {
   // Register the inline rule for ==highlight== patterns
   // Run after Manuscript Markdown to avoid conflicts with {==...==}
   md.inline.ruler.after('manuscript_markdown', 'manuscript_markdown_format_highlight', parseFormatHighlight);
-  
+
+  // Register core rule to associate comments with annotated elements
+  // Runs after inline parsing to post-process the token stream
+  md.core.ruler.after('inline', 'manuscript_markdown_associate_comments', associateCommentsRule);
+
   // Register renderers for each Manuscript Markdown token type
   for (const pattern of patterns) {
     md.renderer.rules[`manuscript_markdown_${pattern.name}_open`] = (tokens, idx) => {
       const token = tokens[idx];
       const className = token.attrGet('class') || pattern.cssClass;
-      return `<${pattern.htmlTag} class="${className}">`;
+      const dataComment = token.attrGet('data-comment');
+      let attrs = `class="${className}"`;
+      if (dataComment) {
+        attrs += ` data-comment="${escapeHtmlAttr(dataComment)}"`;
+      }
+      return `<${pattern.htmlTag} ${attrs}>`;
     };
     
     md.renderer.rules[`manuscript_markdown_${pattern.name}_close`] = (tokens, idx) => {
@@ -542,15 +699,43 @@ export function manuscriptMarkdownPlugin(md: MarkdownIt): void {
   md.renderer.rules['manuscript_markdown_format_highlight_open'] = (tokens, idx) => {
     const token = tokens[idx];
     const className = token.attrGet('class') || 'manuscript-markdown-format-highlight';
-    return `<mark class="${className}">`;
+    const dataComment = token.attrGet('data-comment');
+    let attrs = `class="${className}"`;
+    if (dataComment) {
+      attrs += ` data-comment="${escapeHtmlAttr(dataComment)}"`;
+    }
+    return `<mark ${attrs}>`;
   };
   
   md.renderer.rules['manuscript_markdown_format_highlight_close'] = () => {
     return '</mark>';
   };
 
-  // Renderer for range markers ({#id} and {/id}) — render as empty string
+  // Renderer for range markers ({#id} and {/id}) without matching comments — render as empty string
   md.renderer.rules['manuscript_markdown_range_marker'] = () => {
     return '';
+  };
+
+  // Renderers for ID-based comment ranges (range markers with matching comments)
+  md.renderer.rules['manuscript_markdown_comment_range_open'] = (tokens, idx) => {
+    const token = tokens[idx];
+    const className = token.attrGet('class') || 'manuscript-markdown-comment-range';
+    const dataComment = token.attrGet('data-comment');
+    let attrs = `class="${className}"`;
+    if (dataComment) {
+      attrs += ` data-comment="${escapeHtmlAttr(dataComment)}"`;
+    }
+    return `<span ${attrs}>`;
+  };
+
+  md.renderer.rules['manuscript_markdown_comment_range_close'] = () => {
+    return '</span>';
+  };
+
+  // Renderer for standalone comment indicators (comments not associated with annotated text)
+  md.renderer.rules['manuscript_markdown_comment_indicator'] = (tokens, idx) => {
+    const token = tokens[idx];
+    const dataComment = token.attrGet('data-comment') || '';
+    return `<span class="manuscript-markdown-comment-indicator" data-comment="${escapeHtmlAttr(dataComment)}"></span>`;
   };
 }
