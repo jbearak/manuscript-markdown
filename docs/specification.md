@@ -126,14 +126,7 @@ Manuscript Markdown supports LaTeX math notation, which is converted to and from
 - **Inline math**: `$...$` — renders within the text flow
 - **Display math**: `$$...$$` — renders as a centered block equation
 
-Supported LaTeX elements include:
-
-- Fractions (`\frac{a}{b}`), roots (`\sqrt{x}`, `\sqrt[n]{x}`)
-- Greek letters (`\alpha`, `\beta`, `\Gamma`, etc.)
-- Operators and relations (`\sum`, `\int`, `\leq`, `\geq`, `\neq`, etc.)
-- Matrices (`\begin{matrix}...\end{matrix}`)
-- Accents and decorations (`\hat{x}`, `\bar{x}`, `\vec{x}`, etc.)
-- Subscripts and superscripts (`x_i`, `x^2`)
+Supported LaTeX elements include fractions, roots, Greek letters, operators, matrices, accents, subscripts, superscripts, delimiters, and amsmath environments. See [LaTeX Equations](latex-equations.md) for the full syntax reference and [DOCX Converter](converter.md#latex-equations) for converter details.
 
 ## CriticMarkup
 
