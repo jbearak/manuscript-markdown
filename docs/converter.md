@@ -23,6 +23,48 @@ The converter supports DOCX → Markdown → DOCX round-tripping. The following 
 - **Code blocks**: fenced code blocks (`` ``` ``) ↔ Word "Code Block" paragraph style. Language annotations (e.g., `` ```stata ``) preserved via `MANUSCRIPT_CODE_BLOCK_LANGS` custom property. Inline code (`` `text` ``) uses the `CodeChar` character style (Consolas font, same as code blocks).
 - **Footnotes/endnotes**: `[^label]` references and `[^label]: text` definitions ↔ Word footnotes/endnotes. Named labels preserved via `MANUSCRIPT_FOOTNOTE_IDS` custom property. See [Specification](specification.md#footnotes).
 
+## LaTeX Equations
+
+The converter translates between LaTeX math notation in Markdown and Microsoft Word's OMML (Office Math Markup Language) equation format. Conversion is bidirectional: DOCX import translates OMML to LaTeX, and Markdown export translates LaTeX back to OMML. See [LaTeX Equations](latex-equations.md) for the full syntax reference.
+
+### DOCX to Markdown (OMML to LaTeX)
+
+When importing a Word document, the converter reads `m:oMath` and `m:oMathPara` XML elements from the DOCX and translates each OMML construct into the corresponding LaTeX command. Inline equations become `$...$` and display (paragraph-level) equations become `$$...$$`.
+
+The OMML-to-LaTeX translator (`src/omml.ts`) walks the parsed XML tree and dispatches each element type to a specialized translator function — fractions become `\frac{}{}`, superscripts become `^{}`, matrices become `\begin{matrix}...\end{matrix}`, and so on.
+
+### Markdown to DOCX (LaTeX to OMML)
+
+When exporting to Word, the converter tokenizes the LaTeX string, parses it into a sequence of atoms with proper operator precedence (script binding, grouping, n-ary operators), and emits the corresponding OMML XML.
+
+The LaTeX-to-OMML translator (`src/latex-to-omml.ts`) uses a recursive-descent parser that handles:
+
+- **Script binding**: `^` and `_` attach to the nearest preceding atom, not the whole expression
+- **Multi-character splitting**: consecutive letters like `abc` are split into individual math runs (`a`, `b`, `c`) to match Word's italicized-variable convention
+- **Delimiter parsing**: `\left...\right` pairs with proper handling of invisible delimiters (`.`)
+- **Environment parsing**: `\begin{...}...\end{...}` blocks for matrices, alignment, and cases
+
+### Round-Trip Behavior
+
+The converter aims for **semantic fidelity** rather than syntactic identity. A round trip (DOCX → Markdown → DOCX) preserves the mathematical meaning and visual appearance of equations, but the LaTeX source may differ from what a human would write by hand. Specific behaviors:
+
+- **Multi-letter variables**: OMML renders each letter as a separate italic run. On import, consecutive single-letter runs produce individual variables (e.g., `abc` stays as three separate italic letters `a`, `b`, `c`). Multi-letter runs with upright styling import as `\mathrm{...}`.
+- **Fraction variants**: `\dfrac`, `\tfrac`, and `\cfrac` all produce the same OMML fraction element. On re-import, they all become `\frac`.
+- **Binomial variants**: `\dbinom` and `\tbinom` produce the same OMML as `\binom`. On re-import, they become `\binom`.
+- **Environment selection**: On OMML-to-LaTeX import, equation arrays with `&` markers become `aligned` environments; those without become `gathered`. The original environment name (`align*`, `multline`, etc.) is not preserved since OMML does not store it.
+- **Unsupported elements**: OMML constructs with no LaTeX equivalent produce a visible `\text{[UNSUPPORTED: element] content}` placeholder.
+
+### Architecture
+
+The converter is implemented in two modules:
+
+| File | Direction | Entry point |
+|------|-----------|-------------|
+| `src/latex-to-omml.ts` | LaTeX → OMML | `latexToOmml(latex: string): string` |
+| `src/omml.ts` | OMML → LaTeX | `ommlToLatex(children: any[]): string` |
+
+Both modules use their own mapping tables (Unicode ↔ LaTeX, accent characters, n-ary operators) that are kept in sync. The LaTeX-to-OMML direction uses a tokenizer and recursive-descent parser; the OMML-to-LaTeX direction walks the parsed XML tree using fast-xml-parser.
+
 ## Citation Key Formats
 
 Configurable via `manuscriptMarkdown.citationKeyFormat`:
@@ -117,11 +159,10 @@ bibliography: shared/references
 | `locale` | Optional locale override (e.g., `en-US`, `en-GB`). Defaults to the style's own locale. |
 | `zotero-notes` | Optional Zotero note type: `in-text` (default), `footnotes`, or `endnotes`. Legacy alias: `note-type`. Legacy numeric values (0, 1, 2) are still accepted. |
 | `notes` | Controls footnote/endnote generation: `footnotes` (default) or `endnotes`. Auto-detected on DOCX import. |
-
-> **`zotero-notes` vs `notes`:** These fields are independent. `zotero-notes` controls how Zotero citations render (in-text, footnotes, or endnotes) and is stored in `ZOTERO_PREF_*` document properties for Zotero to read. `notes` controls whether the document's own footnote/endnote references are placed at the bottom of each page (footnotes) or collected at the end (endnotes). For example, a document can use `zotero-notes: in-text` for citations while using `notes: endnotes` for its own notes.
-
 | `timezone` | Local timezone offset (e.g., `+05:00`, `-05:00`). Auto-generated on DOCX import for idempotent date roundtripping. |
 | `bibliography` | Path to a `.bib` file (`.bib` extension optional). Aliases: `bib`, `bibtex`. See [Specification](specification.md#bibtex-companion-file). |
+
+> **`zotero-notes` vs `notes`:** These fields are independent. `zotero-notes` controls how Zotero citations render (in-text, footnotes, or endnotes) and is stored in `ZOTERO_PREF_*` document properties for Zotero to read. `notes` controls whether the document's own footnote/endnote references are placed at the bottom of each page (footnotes) or collected at the end (endnotes). For example, a document can use `zotero-notes: in-text` for citations while using `notes: endnotes` for its own notes.
 
 #### Bundled CSL styles
 

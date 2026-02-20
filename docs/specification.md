@@ -126,14 +126,7 @@ Manuscript Markdown supports LaTeX math notation, which is converted to and from
 - **Inline math**: `$...$` — renders within the text flow
 - **Display math**: `$$...$$` — renders as a centered block equation
 
-Supported LaTeX elements include:
-
-- Fractions (`\frac{a}{b}`), roots (`\sqrt{x}`, `\sqrt[n]{x}`)
-- Greek letters (`\alpha`, `\beta`, `\Gamma`, etc.)
-- Operators and relations (`\sum`, `\int`, `\leq`, `\geq`, `\neq`, etc.)
-- Matrices (`\begin{matrix}...\end{matrix}`)
-- Accents and decorations (`\hat{x}`, `\bar{x}`, `\vec{x}`, etc.)
-- Subscripts and superscripts (`x_i`, `x^2`)
+Supported LaTeX elements include fractions, roots, Greek letters, operators, matrices, accents, subscripts, superscripts, delimiters, and amsmath environments. See [LaTeX Equations](latex-equations.md) for the full syntax reference and [DOCX Converter](converter.md#latex-equations) for converter details.
 
 ## CriticMarkup
 
@@ -145,8 +138,8 @@ Five annotation operations for tracking changes. See [CriticMarkup Syntax](criti
 - Comment: `{>>text<<}`
 - Highlight: `{==text==}`
 
-[!NOTE]
-We use CriticMarkup's `{==text==}` highlight syntax to denote text associated with a comment. To colorize text without commenting on it, see [color highlights](#color-highlights) below.
+> [!NOTE]
+> We use CriticMarkup's `{==text==}` highlight syntax to denote text associated with a comment. To colorize text without commenting on it, see [color highlights](#color-highlights) below.
 
 ## Manuscript Extensions
 

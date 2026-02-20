@@ -65,6 +65,7 @@ manuscript-markdown paper.md      # Markdown → DOCX
 - [CriticMarkup Syntax](docs/criticmarkup.md)
 - [Language Server](docs/language-server.md)
 - [DOCX Converter](docs/converter.md)
+- [LaTeX Equations](docs/latex-equations.md)
 - [Zotero Citation Roundtrip](docs/zotero-roundtrip.md)
 - [Configuration](docs/configuration.md)
 - [User Interface](docs/ui.md)
