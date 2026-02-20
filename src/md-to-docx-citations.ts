@@ -20,6 +20,96 @@ export function escapeXml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+function stripHtmlTags(html: string): string {
+  return decodeHtmlEntities(html.replace(/<[^>]+>/g, ''));
+}
+
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&#(\d+);/g, (_m, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_m, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&nbsp;/g, '\u00A0')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+/**
+ * Convert citeproc HTML output (e.g. `<i>1</i>`) to OOXML runs with
+ * proper formatting.  Handles `<i>`, `<b>`, `<sup>`, `<sub>`, and
+ * `<span style="...small-caps...">`.
+ */
+export function htmlToOoxmlRuns(html: string): string {
+  const runs: { text: string; italic: boolean; bold: boolean; sup: boolean; sub: boolean; smallCaps: boolean }[] = [];
+
+  let pos = 0;
+  let currentText = '';
+  let italic = false;
+  let bold = false;
+  let sup = false;
+  let sub = false;
+  let smallCapsDepth = 0;
+  let spanDepth = 0;
+
+  while (pos < html.length) {
+    if (html[pos] === '<') {
+      if (currentText) {
+        runs.push({ text: currentText, italic, bold, sup, sub, smallCaps: smallCapsDepth > 0 });
+        currentText = '';
+      }
+
+      const tagEnd = html.indexOf('>', pos);
+      if (tagEnd === -1) {
+        currentText += html.slice(pos);
+        break;
+      }
+
+      const tag = html.slice(pos + 1, tagEnd).trim();
+
+      if (tag === 'i') italic = true;
+      else if (tag === '/i') italic = false;
+      else if (tag === 'b') bold = true;
+      else if (tag === '/b') bold = false;
+      else if (tag === 'sup') sup = true;
+      else if (tag === '/sup') sup = false;
+      else if (tag === 'sub') sub = true;
+      else if (tag === '/sub') sub = false;
+      else if (tag.startsWith('span')) {
+        spanDepth++;
+        if (tag.includes('small-caps')) smallCapsDepth = spanDepth;
+      }
+      else if (tag === '/span') {
+        if (spanDepth === smallCapsDepth) smallCapsDepth = 0;
+        spanDepth = Math.max(0, spanDepth - 1);
+      }
+
+      pos = tagEnd + 1;
+    } else {
+      currentText += html[pos];
+      pos++;
+    }
+  }
+
+  if (currentText) {
+    runs.push({ text: currentText, italic, bold, sup, sub, smallCaps: smallCapsDepth > 0 });
+  }
+
+  return runs.map(run => {
+    const rPr: string[] = [];
+    if (run.italic) rPr.push('<w:i/>');
+    if (run.bold) rPr.push('<w:b/>');
+    if (run.sup) rPr.push('<w:vertAlign w:val="superscript"/>');
+    if (run.sub) rPr.push('<w:vertAlign w:val="subscript"/>');
+    if (run.smallCaps) rPr.push('<w:smallCaps/>');
+
+    const rPrXml = rPr.length > 0 ? '<w:rPr>' + rPr.join('') + '</w:rPr>' : '';
+    return '<w:r>' + rPrXml + '<w:t xml:space="preserve">' + escapeXml(decodeHtmlEntities(run.text)) + '</w:t></w:r>';
+  }).join('');
+}
+
 export interface CreateEngineResult {
   engine?: any;
   styleNotFound?: boolean;
@@ -265,7 +355,7 @@ function buildCitationFieldCode(
     citationID: generateCitationId(usedCitationIds),                    // Defect 1
     properties: {
       formattedCitation: visibleText,                                   // Defect 2
-      plainCitation: visibleText,                                       // Defect 2
+      plainCitation: stripHtmlTags(visibleText),                        // Defect 2
       noteIndex: 0,
     },
     citationItems,
@@ -276,7 +366,7 @@ function buildCitationFieldCode(
   return '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
     '<w:r><w:instrText xml:space="preserve"> ADDIN ZOTERO_ITEM CSL_CITATION ' + escapeXml(json) + ' </w:instrText></w:r>' +
     '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
-    '<w:r><w:t>' + escapeXml(visibleText) + '</w:t></w:r>' +
+    htmlToOoxmlRuns(visibleText) +
     '<w:r><w:fldChar w:fldCharType="end"/></w:r>';
 }
 
@@ -524,18 +614,15 @@ export function generateBibliographyXml(
   });
 
   const bib = renderBibliography(citeprocEngine);
-  let bibText = '';
-  if (bib && bib.entries.length > 0) {
-    // Strip HTML tags from bibliography entries for plain text display
-    bibText = bib.entries.map(e => e.replace(/<[^>]+>/g, '').trim()).join('\n');
-  }
 
-  // Generate bibliography paragraphs
+  // Generate bibliography paragraphs with proper formatting
   let bibParagraphs = '';
-  if (bibText) {
-    const lines = bibText.split('\n').filter(l => l.trim());
-    for (const line of lines) {
-      bibParagraphs += '<w:p><w:r><w:t xml:space="preserve">' + escapeXml(line) + '</w:t></w:r></w:p>';
+  if (bib && bib.entries.length > 0) {
+    for (const entry of bib.entries) {
+      const trimmed = entry.trim();
+      if (trimmed) {
+        bibParagraphs += '<w:p>' + htmlToOoxmlRuns(trimmed) + '</w:p>';
+      }
     }
   }
 
