@@ -24,7 +24,13 @@
     'border: 1px solid var(--vscode-editorHoverWidget-border, #454545)',
     'box-shadow: 0 2px 8px rgba(0,0,0,0.2)',
   ].join(';');
-  document.body.appendChild(tooltip);
+  if (document.body) {
+    document.body.appendChild(tooltip);
+  } else {
+    document.addEventListener('DOMContentLoaded', function () {
+      document.body.appendChild(tooltip);
+    });
+  }
 
   /** Collect data-comment values from the element and all ancestors (innermost first) */
   function collectComments(el) {
