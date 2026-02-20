@@ -315,7 +315,7 @@ function buildCitationFieldCode(
   citeprocEngine: any | undefined,
   visibleTextOverride?: string,
   usedCitationIds?: Set<string>,
-  itemIdMap?: Map<string, number>
+  itemIdMap?: Map<string, string | number>
 ): string {
   // Resolve visible text first so we can populate properties (Defect 2)
   const visibleText = visibleTextOverride ?? resolveVisibleText(keys, entries, locators, citeprocEngine);
@@ -327,19 +327,32 @@ function buildCitationFieldCode(
     const itemData = buildItemData(entry);
     itemData['citation-key'] = key;        // preserve citekey for round-trip
 
-    // Defect 4: assign stable numeric id via itemIdMap
+    // Defect 4: assign stable id via itemIdMap
+    // Non-Zotero entries use the citation key string as the ID so it
+    // cannot collide with any Zotero library item (Zotero uses numeric
+    // IDs internally). Zotero-linked entries keep sequential numeric IDs
+    // since Zotero resolves them by URI, not numeric ID.
     if (itemIdMap) {
-      let numericId = itemIdMap.get(key);
-      if (numericId === undefined) {
-        numericId = itemIdMap.size + 1;
-        itemIdMap.set(key, numericId);
+      let itemId = itemIdMap.get(key);
+      if (itemId === undefined) {
+        if (entry.zoteroUri) {
+          itemId = itemIdMap.size + 1;
+        } else {
+          itemId = key;
+        }
+        itemIdMap.set(key, itemId);
       }
-      itemData.id = numericId;
+      itemData.id = itemId;
     }
 
     const citationItem: any = { id: itemData.id, itemData };
     if (entry.zoteroUri) {
       citationItem.uris = [entry.zoteroUri];
+    } else {
+      // Synthetic URI so Zotero's loadItemData() takes the URI resolution
+      // path, fails to find the item, and falls back to embedded itemData.
+      // Without uris, Zotero crashes iterating citationItem.uris.length.
+      citationItem.uris = ['http://zotero.org/users/local/embedded/items/' + key];
     }
     const locator = locators?.get(key);
     if (locator) {
@@ -375,7 +388,7 @@ export function generateCitation(
   entries: Map<string, BibtexEntry>,
   citeprocEngine?: any,
   usedCitationIds?: Set<string>,
-  itemIdMap?: Map<string, number>
+  itemIdMap?: Map<string, string | number>
 ): CitationResult {
   if (!run.keys || run.keys.length === 0) {
     return { xml: '<w:r><w:t>[@' + escapeXml(run.text) + ']</w:t></w:r>' };

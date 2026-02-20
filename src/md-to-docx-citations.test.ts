@@ -19,7 +19,7 @@ describe('generateCitation', () => {
     });
 
     const usedIds = new Set<string>();
-    const itemIdMap = new Map<string, number>();
+    const itemIdMap = new Map<string, string | number>();
     const run = { keys: ['smith2020'], text: 'smith2020' };
     const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
 
@@ -66,14 +66,14 @@ describe('generateCitation', () => {
     });
 
     const usedIds = new Set<string>();
-    const itemIdMap = new Map<string, number>();
+    const itemIdMap = new Map<string, string | number>();
     const run = { keys: ['smith2020'], text: 'smith2020' };
     const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
 
     expect(result.xml).toContain('ZOTERO_ITEM CSL_CITATION');
     expect(result.xml).toContain('(Smith 2020)');
-    // No uris field for non-Zotero entries
-    expect(result.xml).not.toContain('uris');
+    // Non-Zotero entries get synthetic uris so Zotero falls back to embedded itemData
+    expect(result.xml).toContain('http://zotero.org/users/local/embedded/items/smith2020');
     expect(result.warning).toBeUndefined();
   });
 
@@ -91,7 +91,7 @@ describe('generateCitation', () => {
     });
 
     const usedIds = new Set<string>();
-    const itemIdMap = new Map<string, number>();
+    const itemIdMap = new Map<string, string | number>();
     const locators = new Map<string, string>();
     locators.set('smith2020', 'p. 20');
     const run = { keys: ['smith2020'], locators, text: 'smith2020, p. 20' };
@@ -120,7 +120,7 @@ describe('generateCitation', () => {
     });
 
     const usedIds = new Set<string>();
-    const itemIdMap = new Map<string, number>();
+    const itemIdMap = new Map<string, string | number>();
     const run = { keys: ['smith2020', 'doe2021'], text: 'smith2020; doe2021' };
     const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
 
@@ -155,7 +155,7 @@ describe('generateCitation', () => {
     });
 
     const usedIds = new Set<string>();
-    const itemIdMap = new Map<string, number>();
+    const itemIdMap = new Map<string, string | number>();
     const run = { keys: ['smith2020', 'doe2021'], text: 'smith2020; doe2021' };
     const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
 
@@ -177,7 +177,7 @@ describe('generateCitation', () => {
     });
 
     const usedIds = new Set<string>();
-    const itemIdMap = new Map<string, number>();
+    const itemIdMap = new Map<string, string | number>();
     const run = { keys: ['smith2020', 'missingKey'], text: 'smith2020; missingKey' };
     const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
 
@@ -203,7 +203,7 @@ describe('generateCitation', () => {
     });
 
     const usedIds = new Set<string>();
-    const itemIdMap = new Map<string, number>();
+    const itemIdMap = new Map<string, string | number>();
     const run = { keys: ['smith2020', 'doe2021', 'noSuchKey'], text: 'smith2020; doe2021; noSuchKey' };
     const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
 
@@ -233,7 +233,7 @@ describe('generateCitation', () => {
     });
 
     const usedIds = new Set<string>();
-    const itemIdMap = new Map<string, number>();
+    const itemIdMap = new Map<string, string | number>();
     const run = { keys: ['smith2020', 'doe2021'], text: 'smith2020; doe2021' };
     const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
 
@@ -257,14 +257,15 @@ describe('generateCitation', () => {
     });
 
     const usedIds = new Set<string>();
-    const itemIdMap = new Map<string, number>();
+    const itemIdMap = new Map<string, string | number>();
     const run = { keys: ['smith2020', 'doe2021'], text: 'smith2020; doe2021' };
     const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
 
     expect(result.xml).toContain('ZOTERO_ITEM CSL_CITATION');
     expect(result.xml).toContain('(Smith 2020; Doe 2021)');
-    // No uris for non-Zotero entries
-    expect(result.xml).not.toContain('uris');
+    // Non-Zotero entries get synthetic uris for Zotero compatibility
+    expect(result.xml).toContain('http://zotero.org/users/local/embedded/items/smith2020');
+    expect(result.xml).toContain('http://zotero.org/users/local/embedded/items/doe2021');
     expect(result.missingKeys).toBeUndefined();
   });
 
@@ -284,7 +285,7 @@ describe('generateCitation', () => {
     });
 
     const usedIds = new Set<string>();
-    const itemIdMap = new Map<string, number>();
+    const itemIdMap = new Map<string, string | number>();
     const run = { keys: ['smith2020', 'doe2021'], text: 'smith2020; doe2021' };
     const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
 
@@ -307,7 +308,7 @@ describe('generateCitation', () => {
     });
 
     const usedIds = new Set<string>();
-    const itemIdMap = new Map<string, number>();
+    const itemIdMap = new Map<string, string | number>();
     const run = { keys: ['smithInPress'], text: 'smithInPress' };
     const result = generateCitation(run, entries, undefined, usedIds, itemIdMap);
 
@@ -327,7 +328,7 @@ describe('generateCitation', () => {
     ];
 
     const usedIds = new Set<string>();
-    const itemIdMap = new Map<string, number>();
+    const itemIdMap = new Map<string, string | number>();
     for (const [bibtexType, cslType] of typePairs) {
       const key = `k_${bibtexType}`;
       const entries = new Map<string, BibtexEntry>();
@@ -368,7 +369,7 @@ describe('generateCitation', () => {
     });
 
     const usedIds = new Set<string>();
-    const itemIdMap = new Map<string, number>();
+    const itemIdMap = new Map<string, string | number>();
     const ids: string[] = [];
 
     for (let i = 0; i < 10; i++) {
@@ -397,7 +398,7 @@ describe('generateCitation', () => {
     });
 
     const usedIds = new Set<string>();
-    const itemIdMap = new Map<string, number>();
+    const itemIdMap = new Map<string, string | number>();
 
     // Call twice with same key
     const run1 = { keys: ['smith2020'], text: 'smith2020' };

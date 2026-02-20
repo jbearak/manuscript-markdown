@@ -6,7 +6,7 @@ import { BibtexEntry } from './bibtex-parser';
 describe('Property Tests: citation field code reconstruction', () => {
   it('Property 10: Citations with Zotero metadata produce valid field codes', () => {
     const usedIds = new Set<string>();
-    const itemIdMap = new Map<string, number>();
+    const itemIdMap = new Map<string, string | number>();
     fc.assert(
       fc.property(
         fc.record({
@@ -65,7 +65,7 @@ describe('Property Tests: citation field code reconstruction', () => {
 
   it('Property 11: Citations without Zotero metadata produce field codes with itemData', () => {
     const usedIds = new Set<string>();
-    const itemIdMap = new Map<string, number>();
+    const itemIdMap = new Map<string, string | number>();
     fc.assert(
       fc.property(
         fc.record({
@@ -97,8 +97,8 @@ describe('Property Tests: citation field code reconstruction', () => {
           // Property: itemData is present
           expect(result.xml).toContain('itemData');
 
-          // Property: No uris field for non-Zotero entries
-          expect(result.xml).not.toContain('uris');
+          // Property: Non-Zotero entries get synthetic uris for Zotero compatibility
+          expect(result.xml).toContain('http://zotero.org/users/local/embedded/items/' + key);
 
           // Property: Locators are included when present
           if (hasLocator) {
