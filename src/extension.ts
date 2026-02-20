@@ -1008,16 +1008,13 @@ async function exportMdToDocx(context: vscode.ExtensionContext, uri?: vscode.Uri
 	await vscode.workspace.fs.writeFile(docxUri, result.docx);
 
 	const filename = docxUri.fsPath.split(/[/\\]/).pop()!;
-	const templateNote = usedAutoTemplate
-		? ' Styles from the existing .docx were preserved; delete it and re-export to start fresh.'
-		: '';
 	const action = result.warnings.length > 0
 		? await vscode.window.showWarningMessage(
-			`Exported to "${filename}" with warnings: ${result.warnings.join('; ')}${templateNote}`,
+			`Exported to "${filename}" with warnings: ${result.warnings.join('; ')}`,
 			'Open in Word'
 		)
 		: await vscode.window.showInformationMessage(
-			`Exported to "${filename}".${templateNote}`,
+			`Exported to "${filename}".`,
 			'Open in Word'
 		);
 	if (action === 'Open in Word') {
