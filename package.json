@@ -614,6 +614,9 @@
     "markdown.previewStyles": [
       "./media/manuscript-markdown.css"
     ],
+    "markdown.previewScripts": [
+      "./media/manuscript-markdown-preview.js"
+    ],
     "markdown.markdownItPlugins": true,
     "configuration": {
       "title": "Manuscript Markdown",

@@ -43,11 +43,31 @@
   background-color: var(--manuscript-markdown-substitution-bg);
 }
 
-/* Comment - muted theme foreground with grey background and italic */
+/* Comment — hide fallback comment text not associated by the core rule */
 .manuscript-markdown-comment {
-  color: var(--vscode-descriptionForeground);
-  background-color: rgba(200, 200, 200, 0.35);
-  font-style: italic;
+  display: none;
+}
+
+/* Comment indicator for standalone comments (not associated with annotated text) */
+.manuscript-markdown-comment-indicator {
+  cursor: help;
+}
+.manuscript-markdown-comment-indicator::after {
+  content: "\1F4AC";
+  font-size: 0.7em;
+  vertical-align: super;
+  opacity: 0.6;
+}
+
+/* ID-based comment range */
+.manuscript-markdown-comment-range {
+  cursor: help;
+  border-bottom: 1px dotted var(--vscode-descriptionForeground);
+}
+
+/* Hover cursor on any element with a comment tooltip */
+[data-comment] {
+  cursor: help;
 }
 
 /* Highlight - grey background for CriticMarkup {==text==} */
@@ -78,8 +98,8 @@
 .manuscript-markdown-highlight-black { background-color: rgba(0, 0, 0, 0.15); }
 
 /* Dark Theme Overrides (prefer VS Code theme classes) */
-body.vscode-dark .manuscript-markdown-comment {
-  background-color: rgba(200, 200, 200, 0.20);
+body.vscode-dark .manuscript-markdown-comment-range {
+  border-bottom-color: var(--vscode-descriptionForeground);
 }
 body.vscode-dark .manuscript-markdown-highlight {
   background-color: rgba(200, 200, 200, 0.20);
