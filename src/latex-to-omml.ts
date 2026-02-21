@@ -643,6 +643,8 @@ class Parser {
           for (const ch of consumed.value) {
             atoms.push(makeRun(ch));
           }
+        } else if ((consumed.type === 'comment' || consumed.type === 'line_continuation') && atoms.length > 0) {
+          atoms[atoms.length - 1] += this.parseToken(consumed);
         } else {
           atoms.push(this.parseToken(consumed));
         }

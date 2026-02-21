@@ -137,7 +137,12 @@ describe('Property 1: Fault Condition — LaTeX % Comments Appear as Visible Tex
         const commentTexts: string[] = [];
         for (const line of input.split('\n')) {
           for (let i = 0; i < line.length; i++) {
-            if (line[i] === '%' && (i === 0 || line[i - 1] !== '\\')) {
+            if (line[i] === '%') {
+              let backslashes = 0;
+              let j = i - 1;
+              while (j >= 0 && line[j] === '\\') { backslashes++; j--; }
+              if (backslashes % 2 !== 0) continue; // odd = escaped
+
               // The comment is everything from % onward on this line
               const commentPart = line.slice(i);
               commentTexts.push(commentPart);

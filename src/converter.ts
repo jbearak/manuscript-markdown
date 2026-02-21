@@ -1959,7 +1959,16 @@ function renderInlineRange(
 
     // html_comment: emit the raw <!-- ... --> syntax directly
     if (item.type === 'html_comment') {
-      out += item.text;
+      if (item.commentIds.size > 0) {
+        out += `{==${item.text}==}`;
+        for (const cid of [...item.commentIds].sort()) {
+          const c = comments.get(cid);
+          if (!c) { continue; }
+          out += formatCommentBody(cid, c);
+        }
+      } else {
+        out += item.text;
+      }
       i++;
       continue;
     }

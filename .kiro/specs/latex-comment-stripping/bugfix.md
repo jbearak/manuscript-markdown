@@ -28,7 +28,7 @@ The fix must strip comments from the visible OMML output and embed them as non-v
 
 2.5 WHEN the LaTeX equation reference documentation (`docs/latex-equations.md`) is consulted THEN it SHALL contain a section documenting `%` comments — explaining that `%` starts a line comment in LaTeX and everything after it to the end of the line is ignored by the LaTeX engine
 
-2.6 WHEN the LaTeX equation reference documentation (`docs/latex-equations.md`) documents `%` comments THEN it SHALL also explain the roundtrip behavior: when LaTeX `%` comments are used inside display math, they are preserved (but invisible) in the exported Word `.docx`, and restored on re-import back to markdown
+2.6 WHEN the LaTeX equation reference documentation (`docs/latex-equations.md`) documents `%` comments THEN it SHALL also explain the roundtrip behavior: when LaTeX `%` comments are used inside display math, they are preserved (but invisible) in the exported Word `.docx`, and restored on re-import back to Markdown
 
 2.7 WHEN the converter documentation (`docs/converter.md`) is consulted THEN it SHALL contain documentation explaining how LaTeX `%` comments are handled during export and import — specifically that comments are stripped from visible OMML output, embedded as non-visible elements within the OMML structure, and restored as LaTeX `%` comments on re-import from DOCX to markdown
 

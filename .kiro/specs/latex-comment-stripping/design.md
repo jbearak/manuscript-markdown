@@ -21,14 +21,20 @@ LaTeX `%` comments are passed through as literal text in OMML output because `to
 The bug manifests when a LaTeX equation string contains an unescaped `%` character. The `tokenize()` function's "regular text" branch collects all characters that are not `\`, `{`, `}`, `^`, `_`, or `&` — which includes `%` and everything after it on the line. This text token is then emitted as a visible `<m:r><m:t>...</m:t></m:r>` run in the OMML output.
 
 **Formal Specification:**
-```
+```text
 FUNCTION isBugCondition(input)
   INPUT: input of type string (LaTeX equation source)
   OUTPUT: boolean
 
   FOR each character ch at position i in input:
-    IF ch == '%' AND (i == 0 OR input[i-1] != '\\'):
-      RETURN true
+    IF ch == '%':
+      count := 0
+      j := i - 1
+      WHILE j >= 0 AND input[j] == '\\':
+        count := count + 1
+        j := j - 1
+      IF count is even:   // 0 backslashes = unescaped, 2 = double-escaped, etc.
+        RETURN true
   RETURN false
 END FUNCTION
 ```
@@ -156,7 +162,7 @@ The testing strategy follows a two-phase approach: first, surface counterexample
 **Goal**: Verify that for all inputs where the bug condition holds, the fixed function produces the expected behavior.
 
 **Pseudocode:**
-```
+```text
 FOR ALL input WHERE isBugCondition(input) DO
   result := latexToOmml_fixed(input)
   ASSERT no visible m:t element contains unescaped % or comment text
@@ -170,7 +176,7 @@ END FOR
 **Goal**: Verify that for all inputs where the bug condition does NOT hold, the fixed function produces the same result as the original function.
 
 **Pseudocode:**
-```
+```text
 FOR ALL input WHERE NOT isBugCondition(input) DO
   ASSERT latexToOmml_original(input) = latexToOmml_fixed(input)
 END FOR

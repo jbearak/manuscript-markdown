@@ -267,7 +267,7 @@ Escaped `\%` produces a literal percent sign and is not treated as a comment:
 
 ### Roundtrip behavior
 
-When a LaTeX equation containing `%` comments is exported to Word `.docx`, the comments are stripped from the visible equation but preserved as hidden elements within the OMML structure. They are invisible in Word. On re-import from `.docx` back to markdown, the comments are restored at their original positions — including any whitespace before the `%`, so vertically aligned comments stay aligned after roundtrip.
+When a LaTeX equation containing `%` comments is exported to Word `.docx`, the comments are stripped from the visible equation but preserved as hidden elements within the OMML structure. They are invisible in Word. On re-import from `.docx` back to Markdown, the comments are restored at their original positions — including any whitespace before the `%`, so vertically aligned comments stay aligned after roundtrip.
 
 ## Binomial Coefficients
 

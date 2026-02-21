@@ -701,7 +701,7 @@ function convertTokens(tokens: any[], listLevel = 0, blockquoteLevel = 0): MdTok
       
       case 'html_block': {
         const htmlContent = token.content || '';
-        if (/^<!--[\s\S]*?-->/.test(htmlContent.trim())) {
+        if (/^<!--[\s\S]*?-->\s*$/.test(htmlContent.trim())) {
           result.push({
             type: 'paragraph',
             runs: [{ type: 'html_comment' as const, text: htmlContent.replace(/\n$/, '') }]
