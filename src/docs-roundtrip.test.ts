@@ -7,14 +7,17 @@ import { convertDocx } from './converter';
 const repoRoot = join(__dirname, '..');
 
 /**
- * Extract text outside fenced code blocks. Content inside ``` or ~~~ fences
- * is excluded because code examples may contain syntax that doesn't
- * round-trip as prose. Implements CommonMark fence semantics: a closing fence
- * must use the same character and be at least as long as the opening fence.
+ * Walk lines of markdown, calling `onClose` when a fenced code block pair
+ * closes and `onOutside` for each line outside any fence. Implements
+ * CommonMark fence semantics: closing fence must use the same character,
+ * be at least as long, and have no info string (only trailing whitespace).
  */
-function stripFencedCodeBlocks(md: string): string {
+function iterateFences(
+  md: string,
+  onClose: () => void,
+  onOutside: (line: string) => void,
+): void {
   const lines = md.split('\n');
-  const result: string[] = [];
   let fenceChar: string | null = null;
   let fenceLen = 0;
   for (const line of lines) {
@@ -32,14 +35,28 @@ function stripFencedCodeBlocks(md: string): string {
       // Closing fence: same char, at least as long, no info string
       if (char === fenceChar && len >= fenceLen && /^\s*$/.test(trailing)) {
         fenceChar = null;
+        onClose();
         continue;
       }
     }
     if (fenceChar === null) {
-      result.push(line);
+      onOutside(line);
     }
   }
+}
+
+/** Extract text outside fenced code blocks. */
+function stripFencedCodeBlocks(md: string): string {
+  const result: string[] = [];
+  iterateFences(md, () => {}, line => result.push(line));
   return result.join('\n');
+}
+
+/** Count fenced code blocks. */
+function countCodeBlocks(md: string): number {
+  let count = 0;
+  iterateFences(md, () => count++, () => {});
+  return count;
 }
 
 /** Strip markdown/HTML formatting to extract plain text words. */
@@ -57,9 +74,9 @@ function extractPlainText(md: string): string {
     .replace(/\{\+\+/g, ' ').replace(/\+\+\}/g, ' ')
     .replace(/\{--/g, ' ').replace(/--\}/g, ' ')
     .replace(/\{~~/g, ' ').replace(/~~\}/g, ' ')
-    // Strip ID-based comment/range markers
-    .replace(/\{#\w+>>[\s\S]*?<<\}/g, ' ')
-    .replace(/\{#\w+\}|\{\/\w+\}/g, ' ')
+    // Strip ID-based comment/range markers (IDs may contain hyphens)
+    .replace(/\{#[\w-]+>>[\s\S]*?<<\}/g, ' ')
+    .replace(/\{#[\w-]+\}|\{\/[\w-]+\}/g, ' ')
     // Strip markdown structure markers
     .replace(/^#+\s*/gm, '')
     .replace(/^(> )+/gm, '')
@@ -92,30 +109,6 @@ function uniqueWords(text: string): Set<string> {
 /** Count headings outside fenced code blocks. */
 function countHeadings(md: string): number {
   return (stripFencedCodeBlocks(md).match(/^#+\s/gm) || []).length;
-}
-
-/** Count fenced code blocks using fence-aware parsing. */
-function countCodeBlocks(md: string): number {
-  const lines = md.split('\n');
-  let count = 0;
-  let fenceChar: string | null = null;
-  let fenceLen = 0;
-  for (const line of lines) {
-    const match = line.match(/^(`{3,}|~{3,})(.*)/);
-    if (match) {
-      const char = match[1][0];
-      const len = match[1].length;
-      const trailing = match[2];
-      if (fenceChar === null) {
-        fenceChar = char;
-        fenceLen = len;
-      } else if (char === fenceChar && len >= fenceLen && /^\s*$/.test(trailing)) {
-        fenceChar = null;
-        count++;
-      }
-    }
-  }
-  return count;
 }
 
 interface Fixture {
