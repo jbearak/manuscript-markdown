@@ -342,7 +342,7 @@ function translateRun(children: any[]): string {
       const afterPct = payload.slice(pctIdx + 1);
       // Line-continuation: nothing between % and \n (or just \n)
       if (afterPct === '\n') {
-        return '%\n';
+        return whitespace + '%\n';
       }
       // Regular comment: restore {whitespace}%{comment_text}\n
       return whitespace + '%' + afterPct + '\n';

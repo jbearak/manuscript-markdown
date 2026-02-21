@@ -22,7 +22,7 @@ The fix must strip comments from the visible OMML output and embed them as non-v
 
 2.2 WHEN a multi-line LaTeX equation contains `%` comments on one or more lines (e.g., vertically aligned comments like `x^2          % superscript` / `x_i          % subscript`) THEN the system SHALL strip all comment text from the visible OMML conversion so no comment content appears in the exported Word document, AND SHALL embed each comment as a non-visible inline element at its respective position within the OMML structure, with each marker storing the preceding whitespace (spaces/tabs) between the equation content and the `%` character
 
-2.3 WHEN a LaTeX equation contains a `%` at the end of a line used as a line-continuation marker THEN the system SHALL strip the `%` and the newline from the visible OMML (joining the lines without extra whitespace), AND SHALL embed a non-visible inline marker at that position so the line-continuation `%` is restored on roundtrip
+2.3 WHEN a LaTeX equation contains a `%` at the end of a line used as a line-continuation marker THEN the system SHALL strip the `%` and the newline from the visible OMML (joining the lines without extra whitespace), AND SHALL embed a non-visible inline marker at that position so the line-continuation `%` is restored on roundtrip. The preceding whitespace (spaces/tabs between equation content and the `%`) SHALL be stored in the non-visible marker and restored on roundtrip.
 
 2.4 WHEN a DOCX file containing OMML with embedded non-visible comment elements is re-imported to markdown THEN the system SHALL extract the hidden comment elements and restore them as LaTeX `%` comments at their original positions in the equation source, including restoring the original whitespace (spaces/tabs) before the `%` character so that vertically aligned comments remain aligned after roundtrip
 
@@ -44,4 +44,4 @@ The fix must strip comments from the visible OMML output and embed them as non-v
 
 3.5 WHEN a user edits parts of an OMML equation in Word that are unrelated to a hidden comment element THEN the hidden comment element SHALL CONTINUE TO be present in the OMML and SHALL be restored on re-import
 
-3.6 WHEN a LaTeX equation with vertically aligned `%` comments (e.g., varying amounts of whitespace before `%` on each line) is roundtripped through MD → DOCX → MD THEN the system SHALL CONTINUE TO preserve the exact whitespace (spaces/tabs) preceding each `%` so that vertical alignment of comments is maintained
+3.6 WHEN a LaTeX equation with vertically aligned `%` comments (e.g., varying amounts of whitespace before `%` on each line) is roundtripped through MD → DOCX → MD THEN the system SHALL preserve the exact whitespace (spaces/tabs) preceding each `%` so that vertical alignment of comments is maintained

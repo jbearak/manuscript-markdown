@@ -13,9 +13,8 @@ import { parseMd, type MdRun } from './md-to-docx';
  */
 function runsContainComment(runs: MdRun[], commentText: string): boolean {
   return runs.some(r =>
-    r.text.includes(commentText) ||
-    r.text.includes('<!--') ||
-    r.type === 'html_comment'
+    r.text.includes(commentText) &&
+    (r.text.includes('<!--') || r.type === 'html_comment')
   );
 }
 
@@ -93,6 +92,7 @@ describe('Property 1: Fault Condition — HTML Comments Dropped During MD → DO
   test('multiple inline HTML comments must all be preserved', () => {
     fc.assert(
       fc.property(shortAlphaNum, shortAlphaNum, (c1, c2) => {
+        fc.pre(c1 !== c2);
         const md = 'A <!-- ' + c1 + ' --> B <!-- ' + c2 + ' --> C';
         const tokens = parseMd(md);
 

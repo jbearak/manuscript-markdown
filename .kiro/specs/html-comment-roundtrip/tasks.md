@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [~] 1. Write bug condition exploration test
+- [x] 1. Write bug condition exploration test
   - **Property 1: Fault Condition** - HTML Comments Dropped During MD → DOCX Conversion
   - **CRITICAL**: This test MUST FAIL on unfixed code - failure confirms the bug exists
   - **DO NOT attempt to fix the test or the code when it fails**

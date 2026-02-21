@@ -92,19 +92,13 @@ Property 1: Fault Condition - HTML Comments Preserved Through Roundtrip
 
 _For any_ Markdown input containing one or more HTML comments (`<!-- ... -->`) outside of inert zones (LaTeX math, code regions, CriticMarkup), the fixed MD → DOCX conversion SHALL encode each comment as an invisible (vanish-styled) `w:r` run with a `\u200B` prefix in the DOCX output, and the fixed DOCX → MD re-import SHALL detect these hidden runs and restore the original `<!-- ... -->` syntax at the correct position, producing output identical to the input for the comment portions.
 
-**Validates: Requirements 2.1, 2.2, 2.3, 2.4, 2.5**
-
 Property 2: Preservation - Non-Comment Content Unchanged
 
 _For any_ Markdown input that does NOT contain HTML comments outside inert zones (including inputs with no HTML comments at all, inputs with HTML formatting tags, inputs with HTML tables, inputs with `<!-- -->` inside LaTeX/code/CriticMarkup), the fixed code SHALL produce exactly the same DOCX output and re-imported Markdown as the original code, preserving all existing functionality.
 
-**Validates: Requirements 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7**
-
 Property 3: Inert Zone Exclusion - Comments Inside Inert Zones Are Literal Text
 
 _For any_ Markdown input where `<!-- -->` appears inside a LaTeX math region, code region, or CriticMarkup region, the fixed code SHALL NOT treat the `<!-- -->` as an HTML comment and SHALL pass it through as literal text within that region, identical to current behavior.
-
-**Validates: Requirements 2.6, 2.7, 2.8**
 
 ## Fix Implementation
 

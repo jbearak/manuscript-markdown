@@ -34,12 +34,6 @@ HTML comment delimiters must NOT be processed (interpreted) inside inert zones: 
 
 2.5 WHEN an HTML comment contains multi-line content THEN the system SHALL preserve the full content (including internal newlines) through the roundtrip
 
-2.6 WHEN an HTML comment appears inside a LaTeX math region (`$...$` or `$$...$$`) THEN the system SHALL NOT treat `<!-- -->` as an HTML comment — it SHALL pass through as literal text within the equation
-
-2.7 WHEN an HTML comment appears inside a code region (inline code spans or fenced code blocks) THEN the system SHALL NOT treat `<!-- -->` as an HTML comment — it SHALL pass through as literal code content
-
-2.8 WHEN an HTML comment appears inside a CriticMarkup region (e.g., `{>> <!-- note --> <<}`, `{++ <!-- added --> ++}`, `{-- <!-- deleted --> --}`, `{== <!-- highlighted --> ==}`, `{~~ <!-- old --> ~> <!-- new --> ~~}`) THEN the system SHALL NOT treat `<!-- -->` as an HTML comment — it SHALL pass through as plain text within the CriticMarkup content
-
 ### Unchanged Behavior (Regression Prevention)
 
 3.1 WHEN a Markdown document contains no HTML comments THEN the system SHALL CONTINUE TO convert to DOCX and re-import identically to current behavior
@@ -55,3 +49,9 @@ HTML comment delimiters must NOT be processed (interpreted) inside inert zones: 
 3.6 WHEN a Markdown document contains code blocks or inline code that does not contain `<!-- -->` THEN the system SHALL CONTINUE TO convert them to code-styled content in the DOCX as it does today
 
 3.7 WHEN a user edits visible text in Word that is adjacent to a hidden HTML comment run THEN the hidden run SHALL CONTINUE TO be present in the DOCX XML and SHALL be restored on re-import
+
+3.8 WHEN an HTML comment appears inside a LaTeX math region (`$...$` or `$$...$$`) THEN the system SHALL NOT treat `<!-- -->` as an HTML comment — it SHALL pass through as literal text within the equation
+
+3.9 WHEN an HTML comment appears inside a code region (inline code spans or fenced code blocks) THEN the system SHALL NOT treat `<!-- -->` as an HTML comment — it SHALL pass through as literal code content
+
+3.10 WHEN an HTML comment appears inside a CriticMarkup region (e.g., `{>> <!-- note --> <<}`, `{++ <!-- added --> ++}`, `{-- <!-- deleted --> --}`, `{== <!-- highlighted --> ==}`, `{~~ <!-- old --> ~> <!-- new --> ~~}`) THEN the system SHALL NOT treat `<!-- -->` as an HTML comment — it SHALL pass through as plain text within the CriticMarkup content

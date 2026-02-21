@@ -100,7 +100,7 @@ describe('Property 2: Preservation — Non-Comment HTML Tags and Existing Behavi
         const para = tokens1.find(t => t.type === 'paragraph');
         expect(para).toBeDefined();
         // The paragraph should contain the text
-        const allText = para!.runs.map(r => r.text).join('');
+        const allText = para!.runs.filter(r => r.type === 'text').map(r => r.text).join('');
         expect(allText).toContain(text);
       }),
       { numRuns: 30, verbose: true }

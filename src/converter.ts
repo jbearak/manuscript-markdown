@@ -1920,7 +1920,7 @@ function renderInlineRange(
   const segmentEnd = computeSegmentEnd(segment, startIndex, opts);
   const forceIdCommentIds = renderOpts?.forceIdCommentIds;
   const hasForcedIdCommentInSegment = !!forceIdCommentIds && [...segment.slice(startIndex, segmentEnd)].some(item => (
-    (item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'math') &&
+    (item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'math' || item.type === 'html_comment') &&
     item.commentIds && [...item.commentIds].some(id => forceIdCommentIds.has(id))
   ));
   const useIds = renderOpts?.alwaysUseCommentIds || hasForcedIdCommentInSegment || hasOverlappingComments(segment.slice(startIndex, segmentEnd));

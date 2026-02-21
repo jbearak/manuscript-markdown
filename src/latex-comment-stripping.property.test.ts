@@ -13,8 +13,16 @@ import { latexToOmml } from './latex-to-omml';
  */
 function isBugCondition(input: string): boolean {
   for (let i = 0; i < input.length; i++) {
-    if (input[i] === '%' && (i === 0 || input[i - 1] !== '\\')) {
-      return true;
+    if (input[i] === '%') {
+      let backslashCount = 0;
+      let j = i - 1;
+      while (j >= 0 && input[j] === '\\') {
+        backslashCount++;
+        j--;
+      }
+      if (backslashCount % 2 === 0) {
+        return true;
+      }
     }
   }
   return false;

@@ -10,7 +10,7 @@
     - `latexToOmml('x^2 % superscript')` — assert no visible `m:t` element contains `% superscript` or `superscript`
     - `latexToOmml('x^2          % superscript\nx_i          % subscript')` — assert neither comment appears in any visible `m:t`
     - `latexToOmml('x + y%\n+ z')` — assert `%` is not visible and lines are joined
-  - Property: for all LaTeX inputs containing an unescaped `%` (isBugCondition returns true), `latexToOmml(input)` SHALL produce OMML where no comment text appears in any visible `m:t` element, and each comment is embedded as a non-visible inline element storing the comment text and preceding whitespace
+  - Property: for all LaTeX inputs containing an unescaped `%` (isBugCondition returns true), `latexToOmml(input)` SHALL produce OMML where no comment text appears in any visible `m:t` element, and each comment is embedded as a non-visible inline element storing the comment text and preceding whitespace. `isBugCondition(input)` returns true when the input contains at least one `%` character not preceded by an odd number of backslashes.
   - The test assertions should match the Expected Behavior Properties from design (Property 1: Fault Condition — Comments Stripped and Embedded)
   - Run test on UNFIXED code
   - **EXPECTED OUTCOME**: Test FAILS (this is correct — it proves the bug exists: `%` and comment text appear as literal visible text in OMML)
