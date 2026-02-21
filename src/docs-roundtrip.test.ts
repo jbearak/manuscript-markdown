@@ -27,7 +27,8 @@ function iterateFences(
       const len = match[1].length;
       const trailing = match[2];
       if (fenceChar === null) {
-        // Opening fence (info string allowed)
+        // Per CommonMark §4.5, backtick fences must not have backticks in info string
+        if (char === '`' && trailing.includes('`')) continue;
         fenceChar = char;
         fenceLen = len;
         continue;
@@ -88,6 +89,8 @@ function extractPlainText(md: string): string {
     .replace(/\*(.+?)\*/g, '$1')
     .replace(/~~(.+?)~~/g, '$1')
     .replace(/`([^`]+)`/g, '$1')
+    // Strip images entirely (alt text is visual metadata, not prose)
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '')
     // Strip links, HTML, citations, footnotes
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/<[^>]+>/g, ' ')
@@ -114,7 +117,7 @@ function countHeadings(md: string): number {
 
 /** Count list items (unordered and ordered) outside fenced code blocks. */
 function countListItems(md: string): number {
-  return (stripFencedCodeBlocks(md).match(/^[-*]\s|^\d+\.\s/gm) || []).length;
+  return (stripFencedCodeBlocks(md).match(/^[-*+]\s|^\d+\.\s/gm) || []).length;
 }
 
 interface Fixture {
@@ -146,7 +149,8 @@ const fixtures: Fixture[] = [
   { path: 'README.md' },
   {
     path: 'AGENTS.md',
-    // Indented code blocks (4-space indent) are not recognized by the converter
+    // Words from AGENTS.md "Quick commands" section (indented code blocks, lines 21-25)
+    // that are lost during round-trip because the converter doesn't recognize 4-space fences.
     skipWords: new Set(['bun', 'install', 'setup', 'run', 'compile', 'watch', 'test', 'package', 'rebuild', 'bundle']),
     skipCodeBlockCount: true,
   },
