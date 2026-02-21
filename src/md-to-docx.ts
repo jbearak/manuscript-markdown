@@ -1333,6 +1333,7 @@ export interface DocxGenState {
   codeBlockIndex: number;
   codeBlockLanguages: Map<number, string>;
   citedKeys: Set<string>;
+  codeFont: string;
 }
 
 interface CommentEntry {
@@ -1448,6 +1449,8 @@ const DEFAULT_HEADING_SIZES_HP: Record<string, number> = {
   EndnoteText: 20,
 };
 const DEFAULT_CODE_BLOCK_HP = 20;
+// Uniform padding (horizontal indent + vertical spacing) for code blocks, in twips (~8pt / 0.11in)
+const CODE_BLOCK_INSET_TWIPS = 160;
 
 export interface FontOverrides {
   bodyFont?: string;
@@ -1752,7 +1755,7 @@ export function stylesXml(overrides?: FontOverrides): string {
     '<w:style w:type="paragraph" w:styleId="CodeBlock">\n' +
     '<w:name w:val="Code Block"/>\n' +
     '<w:basedOn w:val="Normal"/>\n' +
-    '<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/><w:shd w:val="clear" w:color="auto" w:fill="F6F8FA"/></w:pPr>\n' +
+    '<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/><w:ind w:left="' + CODE_BLOCK_INSET_TWIPS + '" w:right="' + CODE_BLOCK_INSET_TWIPS + '"/><w:shd w:val="clear" w:color="auto" w:fill="F6F8FA"/></w:pPr>\n' +
     codeBlockRpr +
     '</w:style>\n' +
     '<w:style w:type="paragraph" w:styleId="Title">\n' +
@@ -2383,7 +2386,19 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
   
   if (token.type === 'code_block') {
     const lines = (token.runs[0]?.text || '').replace(/\n$/, '').split('\n');
-    return lines.map(line => '<w:p>' + pPr + generateRun(line, '<w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/></w:rPr>') + '</w:p>').join('');
+    const rpr = '<w:rPr><w:rFonts w:ascii="' + escapeXml(state.codeFont) + '" w:hAnsi="' + escapeXml(state.codeFont) + '"/></w:rPr>';
+    const inset = CODE_BLOCK_INSET_TWIPS;
+    return lines.map((line, i) => {
+      let linePPr = pPr;
+      if (lines.length === 1) {
+        linePPr = '<w:pPr><w:pStyle w:val="CodeBlock"/><w:spacing w:before="' + inset + '" w:after="' + inset + '" w:line="240" w:lineRule="auto"/></w:pPr>';
+      } else if (i === 0) {
+        linePPr = '<w:pPr><w:pStyle w:val="CodeBlock"/><w:spacing w:before="' + inset + '" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>';
+      } else if (i === lines.length - 1) {
+        linePPr = '<w:pPr><w:pStyle w:val="CodeBlock"/><w:spacing w:before="0" w:after="' + inset + '" w:line="240" w:lineRule="auto"/></w:pPr>';
+      }
+      return '<w:p>' + linePPr + generateRun(line, rpr) + '</w:p>';
+    }).join('');
   }
   
   if (token.type === 'hr') {
@@ -2789,6 +2804,7 @@ export async function convertMdToDocx(
     codeBlockIndex: 0,
     codeBlockLanguages: new Map(),
     citedKeys: new Set(),
+    codeFont: fontOverrides?.codeFont || 'Consolas',
   };
 
   // Pre-scan footnote definitions for citation keys so the bibliography

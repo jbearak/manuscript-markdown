@@ -196,8 +196,8 @@ describe('OOXML Generation Properties', () => {
         level, 
         runs: [{ type: 'text', text }] 
       };
-      const state = { commentId: 0, comments: [], relationships: new Map(), nextRId: 1, rIdOffset: 3, warnings: [], hasList: false, hasComments: false, missingKeys: new Set<string>() };
-      
+      const state = { commentId: 0, comments: [], relationships: new Map(), nextRId: 1, rIdOffset: 3, warnings: [], hasList: false, hasComments: false, missingKeys: new Set<string>(), codeFont: 'Consolas' };
+
       const paragraph = generateParagraph(token, state);
       const expectedIndent = level * 720; // 720 twips per level
       expect(paragraph).toContain('<w:ind w:left="' + expectedIndent + '"/>');
@@ -221,8 +221,8 @@ describe('OOXML Generation Properties', () => {
           type: 'code_block', 
           runs: [{ type: 'text', text: code.text }] 
         };
-        const state = { commentId: 0, comments: [], relationships: new Map(), nextRId: 1, rIdOffset: 3, warnings: [], hasList: false, hasComments: false, missingKeys: new Set<string>() };
-        
+        const state = { commentId: 0, comments: [], relationships: new Map(), nextRId: 1, rIdOffset: 3, warnings: [], hasList: false, hasComments: false, missingKeys: new Set<string>(), codeFont: 'Consolas' };
+
         const paragraph = generateParagraph(token, state);
         expect(paragraph).toContain('<w:pStyle w:val="CodeBlock"/>');
       }
