@@ -8,9 +8,10 @@ const repoRoot = join(__dirname, '..');
 
 /**
  * Walk lines of markdown, calling `onClose` when a fenced code block pair
- * closes and `onOutside` for each line outside any fence. Implements
- * CommonMark fence semantics: closing fence must use the same character,
- * be at least as long, and have no info string (only trailing whitespace).
+ * closes and `onOutside` for each line outside any code block. Handles both
+ * fenced code blocks (CommonMark §4.5) and indented code blocks (§4.4).
+ * Fenced: closing fence must use the same character, be at least as long,
+ * and have no info string. Indented: 4+ leading spaces after a blank line.
  */
 function iterateFences(
   md: string,
@@ -20,17 +21,19 @@ function iterateFences(
   const lines = md.split('\n');
   let fenceChar: string | null = null;
   let fenceLen = 0;
+  let inIndentedBlock = false;
+  let prevBlank = true; // start of document counts as blank
   for (const line of lines) {
     const match = line.match(/^ {0,3}(`{3,}|~{3,})(.*)/);
     if (match) {
       const char = match[1][0];
       const len = match[1].length;
       const trailing = match[2];
-      if (fenceChar === null) {
+      if (fenceChar === null && !(char === '`' && trailing.includes('`'))) {
         // Per CommonMark §4.5, backtick fences must not have backticks in info string
-        if (char === '`' && trailing.includes('`')) continue;
         fenceChar = char;
         fenceLen = len;
+        inIndentedBlock = false;
         continue;
       }
       // Closing fence: same char, at least as long, no info string
@@ -41,7 +44,21 @@ function iterateFences(
       }
     }
     if (fenceChar === null) {
-      onOutside(line);
+      const isBlank = /^\s*$/.test(line);
+      const isIndented = !isBlank && /^ {4,}/.test(line);
+      if (inIndentedBlock) {
+        if (!isIndented && !isBlank) {
+          inIndentedBlock = false;
+          onOutside(line);
+        }
+        // else: still in indented code block, skip
+      } else if (prevBlank && isIndented) {
+        inIndentedBlock = true;
+        // skip — indented code block line
+      } else {
+        onOutside(line);
+      }
+      prevBlank = isBlank;
     }
   }
 }
@@ -81,7 +98,7 @@ function extractPlainText(md: string): string {
     // Strip markdown structure markers
     .replace(/^#+\s*/gm, '')
     .replace(/^(> )+/gm, '')
-    .replace(/^[-*]\s+/gm, '')
+    .replace(/^[-*+]\s+/gm, '')
     .replace(/^\d+\.\s+/gm, '')
     // Strip inline formatting (longest delimiter first so *** matches before **)
     .replace(/\*\*\*(.+?)\*\*\*/g, '$1')
@@ -123,10 +140,6 @@ function countListItems(md: string): number {
 interface Fixture {
   path: string;
   bibtex?: string;
-  /** Words to exclude from the round-trip comparison (known lossy content). */
-  skipWords?: Set<string>;
-  /** Skip the code block count check (e.g. indented code blocks don't round-trip). */
-  skipCodeBlockCount?: boolean;
 }
 
 const sampleBib = readFileSync(join(repoRoot, 'sample.bib'), 'utf-8');
@@ -147,13 +160,7 @@ const fixtures: Fixture[] = [
   // root files
   { path: 'sample.md', bibtex: sampleBib },
   { path: 'README.md' },
-  {
-    path: 'AGENTS.md',
-    // Words from AGENTS.md "Quick commands" section (indented code blocks, lines 21-25)
-    // that are lost during round-trip because the converter doesn't recognize 4-space fences.
-    skipWords: new Set(['bun', 'install', 'setup', 'run', 'compile', 'watch', 'test', 'package', 'rebuild', 'bundle']),
-    skipCodeBlockCount: true,
-  },
+  { path: 'AGENTS.md' },
 ];
 
 it('covers all docs/ files', () => {
@@ -198,9 +205,8 @@ describe('docs round-trip: md -> docx -> md', () => {
       const roundTrippedWords = uniqueWords(extractPlainText(roundTrippedMd));
 
       const missingWords: string[] = [];
-      const skipWords = fixture.skipWords || new Set<string>();
       for (const word of originalWords) {
-        if (!roundTrippedWords.has(word) && !skipWords.has(word)) {
+        if (!roundTrippedWords.has(word)) {
           missingWords.push(word);
         }
       }
@@ -209,9 +215,7 @@ describe('docs round-trip: md -> docx -> md', () => {
       // --- Structural preservation ---
       expect(countHeadings(roundTrippedMd)).toBe(countHeadings(originalMd));
 
-      if (!fixture.skipCodeBlockCount) {
-        expect(countCodeBlocks(roundTrippedMd)).toBe(countCodeBlocks(originalMd));
-      }
+      expect(countCodeBlocks(roundTrippedMd)).toBe(countCodeBlocks(originalMd));
 
       // List nesting and continuation lines may merge during round-trip,
       // so we allow up to 50% loss rather than requiring an exact count.
