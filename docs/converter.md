@@ -22,6 +22,7 @@ The converter supports DOCX → Markdown → DOCX round-tripping. The following 
 - **Tables**: DOCX→Markdown import produces HTML tables (`<table>/<tr>/<th>/<td>`) to preserve multi-paragraph cell content; Markdown→DOCX export accepts both HTML tables and pipe-delimited tables (with `colspan` and `rowspan` support)
 - **Code blocks**: fenced code blocks (`` ``` ``) ↔ Word "Code Block" paragraph style. Language annotations (e.g., `` ```stata ``) preserved via `MANUSCRIPT_CODE_BLOCK_LANGS` custom property. Inline code (`` `text` ``) uses the `CodeChar` character style (Consolas font, same as code blocks).
 - **Footnotes/endnotes**: `[^label]` references and `[^label]: text` definitions ↔ Word footnotes/endnotes. Named labels preserved via `MANUSCRIPT_FOOTNOTE_IDS` custom property. See [Specification](specification.md#footnotes).
+- **HTML comments**: `<!-- ... -->` comments (both inline and block-level) are preserved as invisible runs in the DOCX and restored on re-import. See [HTML Comments](#html-comments) below.
 
 ## LaTeX Equations
 
@@ -70,6 +71,28 @@ The converter is implemented in two modules:
 | `src/omml.ts` | OMML → LaTeX | `ommlToLatex(children: any[]): string` |
 
 Both modules use their own mapping tables (Unicode ↔ LaTeX, accent characters, n-ary operators) that are kept in sync. The LaTeX-to-OMML direction uses a tokenizer and recursive-descent parser; the OMML-to-LaTeX direction walks the parsed XML tree using fast-xml-parser.
+
+## HTML Comments
+
+HTML comments (`<!-- ... -->`) are preserved through the DOCX round trip. Both inline comments (e.g., `text <!-- note --> more text`) and block-level comments (standalone `<!-- TODO -->` on their own line) are supported.
+
+### Markdown to DOCX
+
+During export, HTML comments are encoded as invisible runs in the Word document XML:
+
+```xml
+<w:r><w:rPr><w:vanish/></w:rPr><w:t xml:space="preserve">​<!-- comment --></w:t></w:r>
+```
+
+The `<w:vanish/>` run property makes the text invisible in Word's UI, and a zero-width space (`U+200B`) prefix marks the run as a comment carrier. The comment text (including `<!-- -->` delimiters) is preserved exactly, with special characters XML-escaped.
+
+### DOCX to Markdown
+
+During import, the converter detects vanish-styled runs whose text starts with `U+200B` followed by `<!--`. These are emitted as `html_comment` content items and rendered back as raw `<!-- ... -->` syntax. If a Word user annotated the region containing the hidden comment, the associated Word comment is preserved using CriticMarkup or ID-based syntax.
+
+### Inert Zones
+
+HTML comment delimiters inside code spans, fenced code blocks, LaTeX math, or CriticMarkup regions are treated as literal text by the Markdown parser and are not affected by this mechanism.
 
 ## Citation Key Formats
 
