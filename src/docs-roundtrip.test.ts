@@ -184,6 +184,9 @@ describe('docs round-trip: md -> docx -> md', () => {
       // --- Bibtex preservation ---
       if (fixture.bibtex) {
         expect(mdResult.bibtex.length).toBeGreaterThan(0);
+        const originalEntries = (fixture.bibtex.match(/^@\w+\{/gm) || []).length;
+        const roundTrippedEntries = (mdResult.bibtex.match(/^@\w+\{/gm) || []).length;
+        expect(roundTrippedEntries).toBe(originalEntries);
       }
 
       // --- Word preservation ---
@@ -206,6 +209,8 @@ describe('docs round-trip: md -> docx -> md', () => {
         expect(countCodeBlocks(roundTrippedMd)).toBe(countCodeBlocks(originalMd));
       }
 
+      // List nesting and continuation lines may merge during round-trip,
+      // so we allow up to 50% loss rather than requiring an exact count.
       const originalListCount = countListItems(originalMd);
       if (originalListCount > 0) {
         expect(countListItems(roundTrippedMd)).toBeGreaterThanOrEqual(
