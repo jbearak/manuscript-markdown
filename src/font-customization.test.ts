@@ -163,14 +163,34 @@ describe('Font customization unit tests', () => {
         '</w:styles>';
       const bytes = new TextEncoder().encode(templateXml);
 
-      // Overrides with only bodyFont set — Normal is a body style so it WILL be modified
-      // Use an override that targets no styles present in the template
-      const emptyOverrides: FontOverrides = {
+      // Override with only codeFont set — Normal is not a code style, so it won't be modified
+      const codeFontOnlyOverrides: FontOverrides = {
         codeFont: 'Courier',
       };
-      const result = applyFontOverridesToTemplate(bytes, emptyOverrides);
+      const result = applyFontOverridesToTemplate(bytes, codeFontOnlyOverrides);
       // Normal is not a code style, so codeFont doesn't affect it → template unchanged
       expect(result).toBe(templateXml);
+    });
+
+    it('modifies the style-level rPr, not the one nested inside pPr', () => {
+      const templateXml =
+        '<?xml version="1.0"?>' +
+        '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+        '<w:style w:type="paragraph" w:styleId="Normal">' +
+        '<w:pPr><w:keepNext/><w:rPr><w:b/></w:rPr></w:pPr>' +
+        '<w:rPr><w:rFonts w:ascii="Times" w:hAnsi="Times"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>' +
+        '</w:style>' +
+        '</w:styles>';
+      const bytes = new TextEncoder().encode(templateXml);
+      const overrides: FontOverrides = { bodyFont: 'Georgia', bodySizeHp: 28 };
+      const result = applyFontOverridesToTemplate(bytes, overrides);
+      // pPr-level rPr must be untouched
+      expect(result).toContain('<w:pPr><w:keepNext/><w:rPr><w:b/></w:rPr></w:pPr>');
+      // Style-level rPr must have the new font and size (old font removed)
+      expect(result).toContain('<w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/>');
+      expect(result).not.toContain('w:ascii="Times"');
+      expect(result).toContain('<w:sz w:val="28"/>');
+      expect(result).toContain('<w:szCs w:val="28"/>');
     });
   });
 

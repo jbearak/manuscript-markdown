@@ -3,6 +3,45 @@ import { describe, it } from 'bun:test';
 import * as fc from 'fast-check';
 import { parseFrontmatter } from './frontmatter';
 
+// --- Shared XML extraction helpers ---
+
+function extractStyleBlock(xml: string, styleId: string): string | null {
+  const openPattern = '<w:style ';
+  let searchFrom = 0;
+  while (true) {
+    const idx = xml.indexOf(openPattern, searchFrom);
+    if (idx === -1) return null;
+    const closeTag = xml.indexOf('</w:style>', idx);
+    if (closeTag === -1) return null;
+    const block = xml.substring(idx, closeTag + '</w:style>'.length);
+    const idAttr = 'w:styleId="' + styleId + '"';
+    if (block.includes(idAttr)) {
+      return block;
+    }
+    searchFrom = closeTag + '</w:style>'.length;
+  }
+}
+
+function extractSzVal(block: string): number | null {
+  const prefix = '<w:sz w:val="';
+  const idx = block.indexOf(prefix);
+  if (idx === -1) return null;
+  const start = idx + prefix.length;
+  const end = block.indexOf('"', start);
+  if (end === -1) return null;
+  return Number(block.substring(start, end));
+}
+
+function extractRFontsAscii(block: string): string | null {
+  const prefix = 'w:ascii="';
+  const idx = block.indexOf(prefix);
+  if (idx === -1) return null;
+  const start = idx + prefix.length;
+  const end = block.indexOf('"', start);
+  if (end === -1) return null;
+  return block.substring(start, end);
+}
+
 /**
  * Property 1: Font string field parsing
  *
@@ -163,16 +202,6 @@ describe('Font Customization Property Tests', () => {
  * Validates: Requirements 1.5, 1.6
  */
 describe('Property 3: Non-numeric size rejection', () => {
-  // Generator for strings that are NOT finite positive numbers and are YAML-safe.
-  // Avoids colons, newlines, hash characters, and leading/trailing quotes.
-  const yamlSafeFilter = (s: string) =>
-    !s.includes(':') &&
-    !s.includes('\n') &&
-    !s.includes('\r') &&
-    !s.includes('#') &&
-    !/^["']/.test(s) &&
-    !/["']$/.test(s);
-
   // Generator for strings that parseFloat does NOT parse to a finite positive number.
   // Note: parseFloat("0.5px") === 0.5 which IS a valid positive number, so strings
   // like "12px" are actually accepted by the parser. We must filter to only keep
@@ -538,29 +567,6 @@ describe('Property 5: Body font application to non-code styles', () => {
   // Code styles that should NOT receive the body font
   const codeStyles = ['CodeChar', 'CodeBlock'];
 
-  /**
-   * Helper: extract the content of a <w:style> block by styleId from the XML string.
-   * Returns the full block including the opening and closing tags, or null if not found.
-   */
-  function extractStyleBlock(xml: string, styleId: string): string | null {
-    // Find the opening tag with the matching styleId
-    const openPattern = '<w:style ';
-    let searchFrom = 0;
-    while (true) {
-      const idx = xml.indexOf(openPattern, searchFrom);
-      if (idx === -1) return null;
-      const closeTag = xml.indexOf('</w:style>', idx);
-      if (closeTag === -1) return null;
-      const block = xml.substring(idx, closeTag + '</w:style>'.length);
-      // Check if this block has the right styleId
-      const idAttr = 'w:styleId="' + styleId + '"';
-      if (block.includes(idAttr)) {
-        return block;
-      }
-      searchFrom = closeTag + '</w:style>'.length;
-    }
-  }
-
   it('Property 5a: body font appears in all non-code styles', () => {
     fc.assert(
       fc.property(xmlSafeFontNameArb, (fontName) => {
@@ -669,26 +675,6 @@ describe('Property 6: Code font application to code styles', () => {
     'EndnoteText',
   ];
 
-  /**
-   * Helper: extract the content of a <w:style> block by styleId from the XML string.
-   */
-  function extractStyleBlock(xml: string, styleId: string): string | null {
-    const openPattern = '<w:style ';
-    let searchFrom = 0;
-    while (true) {
-      const idx = xml.indexOf(openPattern, searchFrom);
-      if (idx === -1) return null;
-      const closeTag = xml.indexOf('</w:style>', idx);
-      if (closeTag === -1) return null;
-      const block = xml.substring(idx, closeTag + '</w:style>'.length);
-      const idAttr = 'w:styleId="' + styleId + '"';
-      if (block.includes(idAttr)) {
-        return block;
-      }
-      searchFrom = closeTag + '</w:style>'.length;
-    }
-  }
-
   it('Property 6a: code font appears in CodeChar and CodeBlock styles', () => {
     fc.assert(
       fc.property(xmlSafeFontNameArb, (fontName) => {
@@ -777,37 +763,6 @@ describe('Property 7: Size and heading proportional scaling', () => {
   /**
    * Helper: extract the content of a <w:style> block by styleId from the XML string.
    */
-  function extractStyleBlock(xml: string, styleId: string): string | null {
-    const openPattern = '<w:style ';
-    let searchFrom = 0;
-    while (true) {
-      const idx = xml.indexOf(openPattern, searchFrom);
-      if (idx === -1) return null;
-      const closeTag = xml.indexOf('</w:style>', idx);
-      if (closeTag === -1) return null;
-      const block = xml.substring(idx, closeTag + '</w:style>'.length);
-      const idAttr = 'w:styleId="' + styleId + '"';
-      if (block.includes(idAttr)) {
-        return block;
-      }
-      searchFrom = closeTag + '</w:style>'.length;
-    }
-  }
-
-  /**
-   * Helper: extract the w:sz val attribute from a style block.
-   * Looks for <w:sz w:val="N"/> and returns N as a number, or null if not found.
-   */
-  function extractSzVal(block: string): number | null {
-    const prefix = '<w:sz w:val="';
-    const idx = block.indexOf(prefix);
-    if (idx === -1) return null;
-    const start = idx + prefix.length;
-    const end = block.indexOf('"', start);
-    if (end === -1) return null;
-    return Number(block.substring(start, end));
-  }
-
   it('Property 7a: Normal style w:sz equals fontSize * 2 (half-points)', () => {
     fc.assert(
       fc.property(fontSizeArb, (fontSize) => {
@@ -960,9 +915,7 @@ describe('Property 7: Size and heading proportional scaling', () => {
 import { applyFontOverridesToTemplate } from './md-to-docx';
 
 describe('Property 8: Template font override application', () => {
-  // Generator for font names safe for XML and regex replacement.
-  // Excludes $ because applyFontOverridesToTemplate uses String.replace() internally
-  // and $ is special in replacement strings (see AGENTS.md cross-cutting learnings).
+  // Generator for font names safe for XML (no < > & " characters)
   const xmlSafeFontNameArb = fc
     .string({ minLength: 1, maxLength: 20 })
     .filter(
@@ -974,8 +927,7 @@ describe('Property 8: Template font override application', () => {
         !s.includes('<') &&
         !s.includes('>') &&
         !s.includes('&') &&
-        !s.includes('"') &&
-        !s.includes('$')
+        !s.includes('"')
     );
 
   const fontSizeArb = fc.double({ min: 0.5, max: 72, noNaN: true });
@@ -1026,49 +978,6 @@ describe('Property 8: Template font override application', () => {
   /**
    * Helper: extract the content of a <w:style> block by styleId from the XML string.
    */
-  function extractStyleBlock(xml: string, styleId: string): string | null {
-    const openPattern = '<w:style ';
-    let searchFrom = 0;
-    while (true) {
-      const idx = xml.indexOf(openPattern, searchFrom);
-      if (idx === -1) return null;
-      const closeTag = xml.indexOf('</w:style>', idx);
-      if (closeTag === -1) return null;
-      const block = xml.substring(idx, closeTag + '</w:style>'.length);
-      const idAttr = 'w:styleId="' + styleId + '"';
-      if (block.includes(idAttr)) {
-        return block;
-      }
-      searchFrom = closeTag + '</w:style>'.length;
-    }
-  }
-
-  /**
-   * Helper: extract the w:sz val attribute from a style block.
-   */
-  function extractSzVal(block: string): number | null {
-    const prefix = '<w:sz w:val="';
-    const idx = block.indexOf(prefix);
-    if (idx === -1) return null;
-    const start = idx + prefix.length;
-    const end = block.indexOf('"', start);
-    if (end === -1) return null;
-    return Number(block.substring(start, end));
-  }
-
-  /**
-   * Helper: extract the w:rFonts w:ascii attribute from a style block.
-   */
-  function extractRFontsAscii(block: string): string | null {
-    const prefix = 'w:ascii="';
-    const idx = block.indexOf(prefix);
-    if (idx === -1) return null;
-    const start = idx + prefix.length;
-    const end = block.indexOf('"', start);
-    if (end === -1) return null;
-    return block.substring(start, end);
-  }
-
   // Non-code styles present in the template
   const nonCodeStylesInTemplate = ['Normal', 'Heading1'];
   // Code styles present in the template
@@ -1204,7 +1113,7 @@ describe('Property 8: Template font override application', () => {
   it('Property 8d: codeSizeHp override sets size in CodeBlock template style', () => {
     fc.assert(
       fc.property(fontSizeArb, (codeFontSize) => {
-        const overrides: FontOverrides = { codeSizeHp: codeFontSize * 2 };
+        const overrides: FontOverrides = { codeSizeHp: Math.round(codeFontSize * 2) };
         const result = applyFontOverridesToTemplate(toBytes(templateStylesXml), overrides);
 
         const block = extractStyleBlock(result, 'CodeBlock');
@@ -1212,7 +1121,7 @@ describe('Property 8: Template font override application', () => {
           throw new Error('CodeBlock style block not found');
         }
         const szVal = extractSzVal(block);
-        const expected = codeFontSize * 2;
+        const expected = Math.round(codeFontSize * 2);
         if (szVal !== expected) {
           throw new Error(
             'CodeBlock w:sz: expected ' + expected + ' but got ' + szVal

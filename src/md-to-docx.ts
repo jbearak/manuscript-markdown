@@ -1461,16 +1461,16 @@ export interface FontOverrides {
 }
 
 export function resolveFontOverrides(fm: Frontmatter): FontOverrides | undefined {
-  const hasAnyField = fm.font !== undefined || fm.codeFont !== undefined ||
+  const hasAnyField = !!fm.font || !!fm.codeFont ||
     fm.fontSize !== undefined || fm.codeFontSize !== undefined;
   if (!hasAnyField) return undefined;
 
   const overrides: FontOverrides = {};
 
-  if (fm.font !== undefined) {
+  if (fm.font) {
     overrides.bodyFont = fm.font;
   }
-  if (fm.codeFont !== undefined) {
+  if (fm.codeFont) {
     overrides.codeFont = fm.codeFont;
   }
 
@@ -1569,9 +1569,12 @@ export function applyFontOverridesToTemplate(
       ? '<w:szCs w:val="' + sizeHp + '"/>'
       : undefined;
 
-    // Check if the style already has a <w:rPr> section
+    // Skip past any <w:pPr>...</w:pPr> block so we match the style-level
+    // <w:rPr>, not one nested inside paragraph properties.
+    const pPrClose = innerContent.indexOf('</w:pPr>');
+    const rPrSearchStart = pPrClose !== -1 ? pPrClose + '</w:pPr>'.length : 0;
     const rPrRegex = /(<w:rPr\b[^>]*>)([\s\S]*?)(<\/w:rPr>)/;
-    const rPrMatch = rPrRegex.exec(innerContent);
+    const rPrMatch = rPrRegex.exec(innerContent.slice(rPrSearchStart));
 
     if (rPrMatch) {
       // Modify existing <w:rPr> content
@@ -1605,7 +1608,9 @@ export function applyFontOverridesToTemplate(
       }
 
       const newRPr = rPrMatch[1] + rPrContent + rPrMatch[3];
-      innerContent = innerContent.replace(rPrRegex, () => newRPr);
+      const matchStart = rPrSearchStart + rPrMatch.index;
+      const matchEnd = matchStart + rPrMatch[0].length;
+      innerContent = innerContent.slice(0, matchStart) + newRPr + innerContent.slice(matchEnd);
     } else {
       // No <w:rPr> section — insert one
       let rPrContent = '';
@@ -1663,7 +1668,7 @@ export function stylesXml(overrides?: FontOverrides): string {
   // CodeBlock: code font + code size (default 20hp)
   const codeBlockSz = overrides?.codeSizeHp
     ? szPair(overrides.codeSizeHp)
-    : szPair(20);
+    : szPair(DEFAULT_CODE_BLOCK_HP);
   const codeBlockRpr = '<w:rPr>' + codeFontStr + codeBlockSz + '</w:rPr>\n';
 
   // Title: body font + title size from heading map or default 56hp
