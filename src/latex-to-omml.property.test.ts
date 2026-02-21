@@ -5,13 +5,7 @@ import * as fc from 'fast-check';
 import { XMLParser } from 'fast-xml-parser';
 import { latexToOmml } from './latex-to-omml';
 import { ommlToLatex } from './omml';
-
-const parserOptions = {
-  ignoreAttributes: false,
-  attributeNamePrefix: '@_',
-  preserveOrder: true,
-  trimValues: false,
-};
+import { parserOptions } from './test-omml-helpers';
 
 function normalizeLatex(latex: string): string {
   return latex

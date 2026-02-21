@@ -2,6 +2,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { latexToOmml } from './latex-to-omml';
+import { roundTrip } from './test-omml-helpers';
 
 describe('latexToOmml', () => {
   test('empty input', () => {
@@ -418,5 +419,58 @@ describe('latexToOmml', () => {
     expect(result).toContain('<m:func>');
     expect(result).toContain('foo');
     expect(result).toContain('<m:e></m:e>');
+  });
+
+  // --- Equation alignment round-trip tests ---
+
+  describe('alignment round-trip', () => {
+    test('aligned with & markers round-trips to aligned (not gathered)', () => {
+      const result = roundTrip('\\begin{aligned}a + b &= c\\\\x &= y + z\\end{aligned}');
+      expect(result).toContain('\\begin{aligned}');
+      expect(result).toContain('\\end{aligned}');
+      expect(result).toContain('&');
+    });
+
+    test('& alignment markers survive round-trip in each row', () => {
+      const result = roundTrip('\\begin{aligned}a &= b\\\\c &= d\\end{aligned}');
+      const rows = result.replace(/.*\\begin\{aligned\}\s*/, '').replace(/\s*\\end\{aligned\}.*/, '').split('\\\\');
+      expect(rows.length).toBe(2);
+      for (const row of rows) {
+        expect(row).toContain('&');
+      }
+    });
+
+    test('multi-column alignment preserves all & markers', () => {
+      const result = roundTrip('\\begin{aligned}a &= b & c &= d\\\\e &= f & g &= h\\end{aligned}');
+      expect(result).toContain('\\begin{aligned}');
+      // Each row should have multiple & markers
+      const rows = result.replace(/.*\\begin\{aligned\}\s*/, '').replace(/\s*\\end\{aligned\}.*/, '').split('\\\\');
+      expect(rows.length).toBe(2);
+      for (const row of rows) {
+        const ampCount = (row.match(/&/g) || []).length;
+        expect(ampCount).toBe(3);
+      }
+    });
+
+    test('cases environment round-trips with & markers', () => {
+      const result = roundTrip('\\begin{cases}x+1 & x > 0\\\\0 & x \\leq 0\\end{cases}');
+      expect(result).toContain('\\begin{cases}');
+      expect(result).toContain('\\end{cases}');
+      expect(result).toContain('&');
+    });
+
+    test('gathered (no &) stays as gathered', () => {
+      const result = roundTrip('\\begin{gathered}a + b = c\\\\x = y + z\\end{gathered}');
+      expect(result).toContain('\\begin{gathered}');
+      expect(result).toContain('\\end{gathered}');
+      expect(result).not.toContain('&');
+    });
+
+    test('align environment round-trips as aligned', () => {
+      const result = roundTrip('\\begin{align}a &= b\\\\c &= d\\end{align}');
+      expect(result).toContain('\\begin{aligned}');
+      expect(result).toContain('\\end{aligned}');
+      expect(result).toContain('&');
+    });
   });
 });
