@@ -950,9 +950,7 @@ describe('Property 7: Size and heading proportional scaling', () => {
 import { applyFontOverridesToTemplate } from './md-to-docx';
 
 describe('Property 8: Template font override application', () => {
-  // Generator for font names safe for XML and regex replacement.
-  // Excludes $ because applyFontOverridesToTemplate uses String.replace() internally
-  // and $ is special in replacement strings (see AGENTS.md cross-cutting learnings).
+  // Generator for font names safe for XML (no < > & " characters)
   const xmlSafeFontNameArb = fc
     .string({ minLength: 1, maxLength: 20 })
     .filter(
@@ -964,8 +962,7 @@ describe('Property 8: Template font override application', () => {
         !s.includes('<') &&
         !s.includes('>') &&
         !s.includes('&') &&
-        !s.includes('"') &&
-        !s.includes('$')
+        !s.includes('"')
     );
 
   const fontSizeArb = fc.double({ min: 0.5, max: 72, noNaN: true });
