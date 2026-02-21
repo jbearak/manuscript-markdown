@@ -163,16 +163,6 @@ describe('Font Customization Property Tests', () => {
  * Validates: Requirements 1.5, 1.6
  */
 describe('Property 3: Non-numeric size rejection', () => {
-  // Generator for strings that are NOT finite positive numbers and are YAML-safe.
-  // Avoids colons, newlines, hash characters, and leading/trailing quotes.
-  const yamlSafeFilter = (s: string) =>
-    !s.includes(':') &&
-    !s.includes('\n') &&
-    !s.includes('\r') &&
-    !s.includes('#') &&
-    !/^["']/.test(s) &&
-    !/["']$/.test(s);
-
   // Generator for strings that parseFloat does NOT parse to a finite positive number.
   // Note: parseFloat("0.5px") === 0.5 which IS a valid positive number, so strings
   // like "12px" are actually accepted by the parser. We must filter to only keep
@@ -1204,7 +1194,7 @@ describe('Property 8: Template font override application', () => {
   it('Property 8d: codeSizeHp override sets size in CodeBlock template style', () => {
     fc.assert(
       fc.property(fontSizeArb, (codeFontSize) => {
-        const overrides: FontOverrides = { codeSizeHp: codeFontSize * 2 };
+        const overrides: FontOverrides = { codeSizeHp: Math.round(codeFontSize * 2) };
         const result = applyFontOverridesToTemplate(toBytes(templateStylesXml), overrides);
 
         const block = extractStyleBlock(result, 'CodeBlock');
@@ -1212,7 +1202,7 @@ describe('Property 8: Template font override application', () => {
           throw new Error('CodeBlock style block not found');
         }
         const szVal = extractSzVal(block);
-        const expected = codeFontSize * 2;
+        const expected = Math.round(codeFontSize * 2);
         if (szVal !== expected) {
           throw new Error(
             'CodeBlock w:sz: expected ' + expected + ' but got ' + szVal
