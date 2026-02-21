@@ -18,7 +18,7 @@
         "@types/mocha": "^2.2.42",
         "@types/node": "^22.0.0",
         "@types/vscode": "^1.103.2",
-        "fast-check": "^4.3.0",
+        "fast-check": "^4.5.3",
         "tslint": "^5.14.0",
         "typescript": "^5.9.3",
       },
@@ -73,7 +73,7 @@
 
     "esprima": ["esprima@4.0.1", "", { "bin": { "esparse": "./bin/esparse.js", "esvalidate": "./bin/esvalidate.js" } }, "sha512-eGuFFw7Upda+g4p+QHvnW0RyTX/SVeJBDM/gCtMARO0cLuT2HcEKnTPvhjV6aGeqrCB/sbNop0Kszm0jsaWU4A=="],
 
-    "fast-check": ["fast-check@4.3.0", "", { "dependencies": { "pure-rand": "^7.0.0" } }, "sha512-JVw/DJSxVKl8uhCb7GrwanT9VWsCIdBkK3WpP37B/Au4pyaspriSjtrY2ApbSFwTg3ViPfniT13n75PhzE7VEQ=="],
+    "fast-check": ["fast-check@4.5.3", "", { "dependencies": { "pure-rand": "^7.0.0" } }, "sha512-IE9csY7lnhxBnA8g/WI5eg/hygA6MGWJMSNfFRrBlXUciADEhS1EDB0SIsMSvzubzIlOBbVITSsypCsW717poA=="],
 
     "fast-xml-parser": ["fast-xml-parser@5.3.5", "", { "dependencies": { "strnum": "^2.1.2" }, "bin": { "fxparser": "src/cli/cli.js" } }, "sha512-JeaA2Vm9ffQKp9VjvfzObuMCjUYAp5WDYhRYL5LrBPY/jUDlUtOvDfot0vKSkB9tuX885BDHjtw4fZadD95wnA=="],
 

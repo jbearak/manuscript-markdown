@@ -39,6 +39,21 @@ The frontmatter may also include citation-related fields (`csl`, `locale`, `zote
 | `notes` | Controls footnote/endnote OOXML generation: `footnotes` (default) or `endnotes`. See [Footnotes](#footnotes). |
 | `timezone` | Local timezone offset (e.g., `+05:00`, `-05:00`). Auto-generated on DOCX import for idempotent date roundtripping. |
 | `bibliography` | Path to a `.bib` file for citation resolution. Aliases: `bib`, `bibtex`. The `.bib` extension is optional. Relative paths resolve from the `.md` file directory, then workspace root. `/`-prefixed paths resolve from workspace root, then as absolute OS paths. Falls back to `{basename}.bib` if not found. |
+| `font` | Body font family for non-code styles. No default (uses rendering application's default). |
+| `code-font` | Monospace font family for code styles. Default: Consolas. |
+| `font-size` | Body font size in points. Default: 11. |
+| `code-font-size` | Code font size in points. Default: 10. When `font-size` is specified without `code-font-size`, the code font size is automatically set to 1pt less than the body font size, preserving the default size difference. |
+
+#### Font Customization Example
+
+```yaml
+---
+font: Georgia
+code-font: Fira Code
+font-size: 12
+code-font-size: 10
+---
+```
 
 ## Standard Markdown
 

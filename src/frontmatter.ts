@@ -36,6 +36,10 @@ export interface Frontmatter {
   notes?: NotesMode;
   timezone?: string;
   bibliography?: string;
+  font?: string;
+  codeFont?: string;
+  fontSize?: number;
+  codeFontSize?: number;
 }
 
 /**
@@ -100,6 +104,22 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
       case 'bibtex':
         if (value && !metadata.bibliography) metadata.bibliography = value;
         break;
+      case 'font':
+        if (value) metadata.font = value;
+        break;
+      case 'code-font':
+        if (value) metadata.codeFont = value;
+        break;
+      case 'font-size': {
+        const n = parseFloat(value);
+        if (isFinite(n) && n > 0) metadata.fontSize = n;
+        break;
+      }
+      case 'code-font-size': {
+        const n = parseFloat(value);
+        if (isFinite(n) && n > 0) metadata.codeFontSize = n;
+        break;
+      }
     }
   }
 
@@ -124,6 +144,10 @@ export function serializeFrontmatter(metadata: Frontmatter): string {
   if (metadata.notes === 'endnotes') lines.push(`notes: endnotes`);
   if (metadata.timezone) lines.push(`timezone: ${metadata.timezone}`);
   if (metadata.bibliography) lines.push(`bibliography: ${metadata.bibliography}`);
+  if (metadata.font) lines.push('font: ' + metadata.font);
+  if (metadata.codeFont) lines.push('code-font: ' + metadata.codeFont);
+  if (metadata.fontSize !== undefined) lines.push('font-size: ' + metadata.fontSize);
+  if (metadata.codeFontSize !== undefined) lines.push('code-font-size: ' + metadata.codeFontSize);
   if (lines.length === 0) return '';
   return '---\n' + lines.join('\n') + '\n---\n';
 }

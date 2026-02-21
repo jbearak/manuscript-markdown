@@ -1429,46 +1429,303 @@ function relsXml(hasCustomProps?: boolean): string {
   return xml;
 }
 
-function stylesXml(): string {
+// --- Font override resolution ---
+// Default sizes in half-points for OOXML styles.
+// Implementation note: bodySizeHp default (22hp = 11pt) is the scaling base
+// for proportional heading computation.
+const DEFAULT_BODY_HP = 22;
+const DEFAULT_HEADING_SIZES_HP: Record<string, number> = {
+  Heading1: 32,
+  Heading2: 26,
+  Heading3: 24,
+  Heading4: 22,
+  Heading5: 20,
+  Heading6: 18,
+  Title: 56,
+  FootnoteText: 20,
+  EndnoteText: 20,
+};
+const DEFAULT_CODE_BLOCK_HP = 20;
+
+export interface FontOverrides {
+  bodyFont?: string;
+  codeFont?: string;
+  bodySizeHp?: number;
+  codeSizeHp?: number;
+  headingSizesHp?: Map<string, number>;
+}
+
+export function resolveFontOverrides(fm: Frontmatter): FontOverrides | undefined {
+  const hasAnyField = fm.font !== undefined || fm.codeFont !== undefined ||
+    fm.fontSize !== undefined || fm.codeFontSize !== undefined;
+  if (!hasAnyField) return undefined;
+
+  const overrides: FontOverrides = {};
+
+  if (fm.font !== undefined) {
+    overrides.bodyFont = fm.font;
+  }
+  if (fm.codeFont !== undefined) {
+    overrides.codeFont = fm.codeFont;
+  }
+
+  if (fm.fontSize !== undefined) {
+    const bodySizeHp = fm.fontSize * 2;
+    overrides.bodySizeHp = bodySizeHp;
+
+    // Proportional heading scaling: preserve ratio relative to default 11pt body
+    const headingSizesHp = new Map<string, number>();
+    for (const [styleId, defaultHp] of Object.entries(DEFAULT_HEADING_SIZES_HP)) {
+      headingSizesHp.set(styleId, Math.round(defaultHp / DEFAULT_BODY_HP * bodySizeHp));
+    }
+    overrides.headingSizesHp = headingSizesHp;
+
+    // Code-font-size inference: body - 2hp (1pt), clamped to minimum 1hp
+    if (fm.codeFontSize === undefined) {
+      overrides.codeSizeHp = Math.max(1, bodySizeHp - 2);
+    }
+  }
+
+  if (fm.codeFontSize !== undefined) {
+    overrides.codeSizeHp = fm.codeFontSize * 2;
+  }
+
+  return overrides;
+}
+
+// --- Template font override application ---
+// Style IDs that receive body font/size overrides
+const BODY_STYLE_IDS = new Set([
+  'Normal', 'Heading1', 'Heading2', 'Heading3', 'Heading4', 'Heading5', 'Heading6',
+  'Title', 'Quote', 'IntenseQuote', 'FootnoteText', 'EndnoteText',
+]);
+// Style IDs that receive code font/size overrides
+const CODE_STYLE_IDS = new Set(['CodeChar', 'CodeBlock']);
+
+/**
+ * Apply font overrides to a template's word/styles.xml content.
+ * Decodes the raw bytes, finds <w:style> elements by w:styleId,
+ * and inserts/replaces w:rFonts and w:sz/w:szCs in each matching
+ * style's <w:rPr> section. Styles not present in the template are
+ * silently skipped.
+ */
+export function applyFontOverridesToTemplate(
+  stylesXmlBytes: Uint8Array,
+  overrides: FontOverrides
+): string {
+  let xml = new TextDecoder('utf-8').decode(stylesXmlBytes);
+
+  // Collect all style IDs we want to modify
+  const allTargetIds = new Set([...BODY_STYLE_IDS, ...CODE_STYLE_IDS]);
+
+  for (const styleId of allTargetIds) {
+    // Find the <w:style ...w:styleId="ID"...> ... </w:style> block
+    const styleRegex = new RegExp(
+      '(<w:style\\b[^>]*\\bw:styleId="' + styleId + '"[^>]*>)([\\s\\S]*?)(</w:style>)'
+    );
+    const styleMatch = styleRegex.exec(xml);
+    if (!styleMatch) continue; // style not in template — skip silently
+
+    const openTag = styleMatch[1];
+    let innerContent = styleMatch[2];
+    const closeTag = styleMatch[3];
+
+    const isCodeStyle = CODE_STYLE_IDS.has(styleId);
+    const font = isCodeStyle ? overrides.codeFont : overrides.bodyFont;
+
+    // Determine the size for this style
+    let sizeHp: number | undefined;
+    if (isCodeStyle) {
+      // CodeChar gets no size override (character style); CodeBlock gets codeSizeHp
+      if (styleId === 'CodeBlock') {
+        sizeHp = overrides.codeSizeHp;
+      }
+    } else {
+      // Check headingSizesHp map first (headings, Title, FootnoteText, EndnoteText)
+      if (overrides.headingSizesHp && overrides.headingSizesHp.has(styleId)) {
+        sizeHp = overrides.headingSizesHp.get(styleId);
+      } else if (styleId === 'Normal') {
+        sizeHp = overrides.bodySizeHp;
+      }
+      // Quote and IntenseQuote inherit size from Normal — no explicit size override
+    }
+
+    // Nothing to do for this style
+    if (font === undefined && sizeHp === undefined) continue;
+
+    // Build the replacement fragments
+    const rFontsEl = font !== undefined
+      ? '<w:rFonts w:ascii="' + font + '" w:hAnsi="' + font + '"/>'
+      : undefined;
+    const szEl = sizeHp !== undefined
+      ? '<w:sz w:val="' + sizeHp + '"/>'
+      : undefined;
+    const szCsEl = sizeHp !== undefined
+      ? '<w:szCs w:val="' + sizeHp + '"/>'
+      : undefined;
+
+    // Check if the style already has a <w:rPr> section
+    const rPrRegex = /(<w:rPr\b[^>]*>)([\s\S]*?)(<\/w:rPr>)/;
+    const rPrMatch = rPrRegex.exec(innerContent);
+
+    if (rPrMatch) {
+      // Modify existing <w:rPr> content
+      let rPrContent = rPrMatch[2];
+
+      if (rFontsEl !== undefined) {
+        // Replace existing w:rFonts or insert at start of rPr content
+        if (/<w:rFonts\b[^/]*\/>/.test(rPrContent)) {
+          rPrContent = rPrContent.replace(/<w:rFonts\b[^/]*\/>/, rFontsEl);
+        } else {
+          rPrContent = rFontsEl + rPrContent;
+        }
+      }
+
+      if (szEl !== undefined) {
+        // Replace existing w:sz or append
+        if (/<w:sz\b[^/]*\/>/.test(rPrContent)) {
+          rPrContent = rPrContent.replace(/<w:sz\b[^/]*\/>/, szEl);
+        } else {
+          rPrContent = rPrContent + szEl;
+        }
+      }
+
+      if (szCsEl !== undefined) {
+        // Replace existing w:szCs or append
+        if (/<w:szCs\b[^/]*\/>/.test(rPrContent)) {
+          rPrContent = rPrContent.replace(/<w:szCs\b[^/]*\/>/, szCsEl);
+        } else {
+          rPrContent = rPrContent + szCsEl;
+        }
+      }
+
+      const newRPr = rPrMatch[1] + rPrContent + rPrMatch[3];
+      innerContent = innerContent.replace(rPrRegex, newRPr);
+    } else {
+      // No <w:rPr> section — insert one
+      let rPrContent = '';
+      if (rFontsEl !== undefined) rPrContent += rFontsEl;
+      if (szEl !== undefined) rPrContent += szEl;
+      if (szCsEl !== undefined) rPrContent += szCsEl;
+      // Insert <w:rPr> before the closing </w:style> (at end of inner content)
+      innerContent = innerContent + '<w:rPr>' + rPrContent + '</w:rPr>';
+    }
+
+    xml = xml.replace(styleMatch[0], openTag + innerContent + closeTag);
+  }
+
+  return xml;
+}
+
+
+
+export function stylesXml(overrides?: FontOverrides): string {
+  // Helper: build w:rFonts element for a given font name
+  function rFonts(font: string): string {
+    return '<w:rFonts w:ascii="' + font + '" w:hAnsi="' + font + '"/>';
+  }
+
+  // Helper: build w:sz + w:szCs elements for a given half-point size
+  function szPair(hp: number): string {
+    return '<w:sz w:val="' + hp + '"/><w:szCs w:val="' + hp + '"/>';
+  }
+
+  // Resolve body font rFonts string (empty if no override)
+  const bodyFontStr = overrides?.bodyFont ? rFonts(overrides.bodyFont) : '';
+  const codeFontStr = overrides?.codeFont
+    ? rFonts(overrides.codeFont)
+    : rFonts('Consolas');
+
+  // Normal style: body font + body size (default 22hp)
+  const normalSz = overrides?.bodySizeHp
+    ? szPair(overrides.bodySizeHp)
+    : szPair(22);
+  const normalRpr = '<w:rPr>' + bodyFontStr + normalSz + '</w:rPr>\n';
+
+  // Heading helper: body font + heading size from map or default
+  function headingRpr(styleId: string, defaultHp: number, extraBefore?: string): string {
+    const font = bodyFontStr;
+    const extra = extraBefore || '';
+    const sz = overrides?.headingSizesHp?.has(styleId)
+      ? szPair(overrides.headingSizesHp.get(styleId)!)
+      : szPair(defaultHp);
+    return '<w:rPr>' + extra + font + sz + '</w:rPr>\n';
+  }
+
+  // CodeChar: code font only (no size override for character style)
+  const codeCharRpr = '<w:rPr>' + codeFontStr + '</w:rPr>\n';
+
+  // CodeBlock: code font + code size (default 20hp)
+  const codeBlockSz = overrides?.codeSizeHp
+    ? szPair(overrides.codeSizeHp)
+    : szPair(20);
+  const codeBlockRpr = '<w:rPr>' + codeFontStr + codeBlockSz + '</w:rPr>\n';
+
+  // Title: body font + title size from heading map or default 56hp
+  const titleSz = overrides?.headingSizesHp?.has('Title')
+    ? szPair(overrides.headingSizesHp.get('Title')!)
+    : szPair(56);
+  const titleRpr = '<w:rPr>' + bodyFontStr + titleSz + '</w:rPr>\n';
+
+  // FootnoteText: body font + size from heading map or default 20hp
+  const footnoteSz = overrides?.headingSizesHp?.has('FootnoteText')
+    ? szPair(overrides.headingSizesHp.get('FootnoteText')!)
+    : szPair(20);
+  const footnoteRpr = '<w:rPr>' + bodyFontStr + footnoteSz + '</w:rPr>\n';
+
+  // EndnoteText: body font + size from heading map or default 20hp
+  const endnoteSz = overrides?.headingSizesHp?.has('EndnoteText')
+    ? szPair(overrides.headingSizesHp.get('EndnoteText')!)
+    : szPair(20);
+  const endnoteRpr = '<w:rPr>' + bodyFontStr + endnoteSz + '</w:rPr>\n';
+
+  // Quote: body font only (no explicit size — inherits from Normal)
+  const quoteRpr = bodyFontStr
+    ? '<w:rPr>' + bodyFontStr + '</w:rPr>\n'
+    : '';
+
+  // IntenseQuote: body font + existing italic/color
+  const intenseQuoteRpr = '<w:rPr><w:i/><w:color w:val="4472C4"/>' + bodyFontStr + '</w:rPr>\n';
+
   return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
     '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">\n' +
     '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">\n' +
     '<w:name w:val="Normal"/>\n' +
     '<w:pPr><w:spacing w:after="200" w:line="276" w:lineRule="auto"/></w:pPr>\n' +
-    '<w:rPr><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr>\n' +
+    normalRpr +
     '</w:style>\n' +
     '<w:style w:type="paragraph" w:styleId="Heading1">\n' +
     '<w:name w:val="heading 1"/>\n' +
     '<w:basedOn w:val="Normal"/>\n' +
     '<w:pPr><w:spacing w:before="240" w:after="0"/></w:pPr>\n' +
-    '<w:rPr><w:b/><w:sz w:val="32"/><w:szCs w:val="32"/></w:rPr>\n' +
+    headingRpr('Heading1', 32, '<w:b/>') +
     '</w:style>\n' +
     '<w:style w:type="paragraph" w:styleId="Heading2">\n' +
     '<w:name w:val="heading 2"/>\n' +
     '<w:basedOn w:val="Normal"/>\n' +
     '<w:pPr><w:spacing w:before="200" w:after="0"/></w:pPr>\n' +
-    '<w:rPr><w:b/><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr>\n' +
+    headingRpr('Heading2', 26, '<w:b/>') +
     '</w:style>\n' +
     '<w:style w:type="paragraph" w:styleId="Heading3">\n' +
     '<w:name w:val="heading 3"/>\n' +
     '<w:basedOn w:val="Normal"/>\n' +
     '<w:pPr><w:spacing w:before="200" w:after="0"/></w:pPr>\n' +
-    '<w:rPr><w:b/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>\n' +
+    headingRpr('Heading3', 24, '<w:b/>') +
     '</w:style>\n' +
     '<w:style w:type="paragraph" w:styleId="Heading4">\n' +
     '<w:name w:val="heading 4"/>\n' +
     '<w:basedOn w:val="Normal"/>\n' +
-    '<w:rPr><w:b/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr>\n' +
+    headingRpr('Heading4', 22, '<w:b/>') +
     '</w:style>\n' +
     '<w:style w:type="paragraph" w:styleId="Heading5">\n' +
     '<w:name w:val="heading 5"/>\n' +
     '<w:basedOn w:val="Normal"/>\n' +
-    '<w:rPr><w:b/><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr>\n' +
+    headingRpr('Heading5', 20, '<w:b/>') +
     '</w:style>\n' +
     '<w:style w:type="paragraph" w:styleId="Heading6">\n' +
     '<w:name w:val="heading 6"/>\n' +
     '<w:basedOn w:val="Normal"/>\n' +
-    '<w:rPr><w:b/><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr>\n' +
+    headingRpr('Heading6', 18, '<w:b/>') +
     '</w:style>\n' +
     '<w:style w:type="character" w:styleId="Hyperlink">\n' +
     '<w:name w:val="Hyperlink"/>\n' +
@@ -1478,33 +1735,34 @@ function stylesXml(): string {
     '<w:name w:val="Quote"/>\n' +
     '<w:basedOn w:val="Normal"/>\n' +
     '<w:pPr><w:ind w:left="720"/></w:pPr>\n' +
+    (quoteRpr ? quoteRpr : '') +
     '</w:style>\n' +
     '<w:style w:type="paragraph" w:styleId="IntenseQuote">\n' +
     '<w:name w:val="Intense Quote"/>\n' +
     '<w:basedOn w:val="Normal"/>\n' +
     '<w:pPr><w:pBdr><w:left w:val="single" w:sz="18" w:space="4" w:color="4472C4"/></w:pBdr><w:ind w:left="720"/></w:pPr>\n' +
-    '<w:rPr><w:i/><w:color w:val="4472C4"/></w:rPr>\n' +
+    intenseQuoteRpr +
     '</w:style>\n' +
     '<w:style w:type="character" w:styleId="CodeChar">\n' +
     '<w:name w:val="Code Char"/>\n' +
-    '<w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/></w:rPr>\n' +
+    codeCharRpr +
     '</w:style>\n' +
     '<w:style w:type="paragraph" w:styleId="CodeBlock">\n' +
     '<w:name w:val="Code Block"/>\n' +
     '<w:basedOn w:val="Normal"/>\n' +
     '<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/><w:shd w:val="clear" w:color="auto" w:fill="F6F8FA"/></w:pPr>\n' +
-    '<w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr>\n' +
+    codeBlockRpr +
     '</w:style>\n' +
     '<w:style w:type="paragraph" w:styleId="Title">\n' +
     '<w:name w:val="Title"/>\n' +
     '<w:basedOn w:val="Normal"/>\n' +
     '<w:pPr><w:spacing w:before="0" w:after="300"/></w:pPr>\n' +
-    '<w:rPr><w:sz w:val="56"/><w:szCs w:val="56"/></w:rPr>\n' +
+    titleRpr +
     '</w:style>\n' +
     '<w:style w:type="paragraph" w:styleId="FootnoteText">\n' +
     '<w:name w:val="footnote text"/>\n' +
     '<w:basedOn w:val="Normal"/>\n' +
-    '<w:rPr><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr>\n' +
+    footnoteRpr +
     '</w:style>\n' +
     '<w:style w:type="character" w:styleId="FootnoteReference">\n' +
     '<w:name w:val="footnote reference"/>\n' +
@@ -1513,7 +1771,7 @@ function stylesXml(): string {
     '<w:style w:type="paragraph" w:styleId="EndnoteText">\n' +
     '<w:name w:val="endnote text"/>\n' +
     '<w:basedOn w:val="Normal"/>\n' +
-    '<w:rPr><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr>\n' +
+    endnoteRpr +
     '</w:style>\n' +
     '<w:style w:type="character" w:styleId="EndnoteReference">\n' +
     '<w:name w:val="endnote reference"/>\n' +
@@ -1521,6 +1779,7 @@ function stylesXml(): string {
     '</w:style>\n' +
     '</w:styles>';
 }
+
 
 function numberingXml(): string {
   return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
@@ -2418,6 +2677,7 @@ export async function convertMdToDocx(
 ): Promise<MdToDocxResult> {
   // Parse frontmatter for CSL style and other metadata
   const { metadata: frontmatter, body } = parseFrontmatter(markdown);
+  const fontOverrides = resolveFontOverrides(frontmatter);
   // Extract footnote definitions before markdown parsing
   const { cleaned: bodyWithoutFootnotes, definitions: footnoteDefs } = extractFootnoteDefinitions(body);
   const tokens = parseMd(bodyWithoutFootnotes);
@@ -2614,11 +2874,17 @@ export async function convertMdToDocx(
   const zip = new JSZip();
   zip.file('word/document.xml', documentXml);
 
-  // Use template styles if available, otherwise default
-  if (templateParts?.has('word/styles.xml')) {
+  // Use template styles if available, otherwise default; apply font overrides when present
+  if (templateParts?.has('word/styles.xml') && fontOverrides) {
+    const mutated = applyFontOverridesToTemplate(
+      templateParts.get('word/styles.xml')!,
+      fontOverrides
+    );
+    zip.file('word/styles.xml', mutated);
+  } else if (templateParts?.has('word/styles.xml')) {
     zip.file('word/styles.xml', templateParts.get('word/styles.xml')!);
   } else {
-    zip.file('word/styles.xml', stylesXml());
+    zip.file('word/styles.xml', stylesXml(fontOverrides));
   }
 
   // Always use generated settings.xml to guarantee compatibilityMode >= 15
