@@ -318,6 +318,31 @@ describe('generateParagraph', () => {
     );
   });
 
+  it('generates two-line code block with first and last spacing', () => {
+    const token: MdToken = {
+      type: 'code_block',
+      runs: [{ type: 'text', text: 'first\nsecond' }]
+    };
+    const state = createState();
+    const result = generateParagraph(token, state);
+    expect(result).toBe(
+      '<w:p><w:pPr><w:pStyle w:val="CodeBlock"/><w:spacing w:before="160" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/></w:rPr><w:t xml:space="preserve">first</w:t></w:r></w:p>' +
+      '<w:p><w:pPr><w:pStyle w:val="CodeBlock"/><w:spacing w:before="0" w:after="160" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/></w:rPr><w:t xml:space="preserve">second</w:t></w:r></w:p>'
+    );
+  });
+
+  it('generates empty code block with before and after spacing', () => {
+    const token: MdToken = {
+      type: 'code_block',
+      runs: [{ type: 'text', text: '' }]
+    };
+    const state = createState();
+    const result = generateParagraph(token, state);
+    expect(result).toBe(
+      '<w:p><w:pPr><w:pStyle w:val="CodeBlock"/><w:spacing w:before="160" w:after="160" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/></w:rPr><w:t xml:space="preserve"></w:t></w:r></w:p>'
+    );
+  });
+
   it('generates horizontal rule', () => {
     const token: MdToken = {
       type: 'hr',
