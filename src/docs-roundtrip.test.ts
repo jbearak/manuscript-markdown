@@ -9,18 +9,32 @@ const repoRoot = join(__dirname, '..');
 /**
  * Extract text outside fenced code blocks. Content inside ``` or ~~~ fences
  * is excluded because code examples may contain syntax that doesn't
- * round-trip as prose.
+ * round-trip as prose. Implements CommonMark fence semantics: a closing fence
+ * must use the same character and be at least as long as the opening fence.
  */
 function stripFencedCodeBlocks(md: string): string {
   const lines = md.split('\n');
   const result: string[] = [];
-  let inFence = false;
+  let fenceChar: string | null = null;
+  let fenceLen = 0;
   for (const line of lines) {
-    if (/^(?:```|~~~)/.test(line)) {
-      inFence = !inFence;
-      continue;
+    const match = line.match(/^(`{3,}|~{3,})/);
+    if (match) {
+      const char = match[1][0];
+      const len = match[1].length;
+      if (fenceChar === null) {
+        // Opening fence
+        fenceChar = char;
+        fenceLen = len;
+        continue;
+      }
+      if (char === fenceChar && len >= fenceLen) {
+        // Closing fence (same char, at least as long)
+        fenceChar = null;
+        continue;
+      }
     }
-    if (!inFence) {
+    if (fenceChar === null) {
       result.push(line);
     }
   }
@@ -79,9 +93,27 @@ function countHeadings(md: string): number {
   return (stripFencedCodeBlocks(md).match(/^#+\s/gm) || []).length;
 }
 
-/** Count fenced code block pairs (open+close = 1 block). */
+/** Count fenced code blocks using fence-aware parsing. */
 function countCodeBlocks(md: string): number {
-  return Math.floor((md.match(/^(?:```|~~~)/gm) || []).length / 2);
+  const lines = md.split('\n');
+  let count = 0;
+  let fenceChar: string | null = null;
+  let fenceLen = 0;
+  for (const line of lines) {
+    const match = line.match(/^(`{3,}|~{3,})/);
+    if (match) {
+      const char = match[1][0];
+      const len = match[1].length;
+      if (fenceChar === null) {
+        fenceChar = char;
+        fenceLen = len;
+      } else if (char === fenceChar && len >= fenceLen) {
+        fenceChar = null;
+        count++;
+      }
+    }
+  }
+  return count;
 }
 
 interface Fixture {
@@ -156,10 +188,10 @@ describe('docs round-trip: md -> docx -> md', () => {
         expect(countCodeBlocks(roundTrippedMd)).toBe(countCodeBlocks(originalMd));
       }
 
-      const originalHasLists = /^[-*]\s|^\d+\.\s/m.test(originalMd);
+      const listPattern = /^[-*]\s|^\d+\.\s/m;
+      const originalHasLists = listPattern.test(stripFencedCodeBlocks(originalMd));
       if (originalHasLists) {
-        const roundTrippedHasLists = /^[-*]\s|^\d+\.\s/m.test(roundTrippedMd);
-        expect(roundTrippedHasLists).toBe(true);
+        expect(listPattern.test(stripFencedCodeBlocks(roundTrippedMd))).toBe(true);
       }
     }, 30_000);
   }
