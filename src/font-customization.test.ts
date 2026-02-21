@@ -186,8 +186,9 @@ describe('Font customization unit tests', () => {
       const result = applyFontOverridesToTemplate(bytes, overrides);
       // pPr-level rPr must be untouched
       expect(result).toContain('<w:pPr><w:keepNext/><w:rPr><w:b/></w:rPr></w:pPr>');
-      // Style-level rPr must have the new font and size
+      // Style-level rPr must have the new font and size (old font removed)
       expect(result).toContain('<w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/>');
+      expect(result).not.toContain('w:ascii="Times"');
       expect(result).toContain('<w:sz w:val="28"/>');
       expect(result).toContain('<w:szCs w:val="28"/>');
     });

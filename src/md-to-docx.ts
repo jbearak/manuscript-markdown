@@ -1461,7 +1461,7 @@ export interface FontOverrides {
 }
 
 export function resolveFontOverrides(fm: Frontmatter): FontOverrides | undefined {
-  const hasAnyField = fm.font !== undefined || fm.codeFont !== undefined ||
+  const hasAnyField = !!fm.font || !!fm.codeFont ||
     fm.fontSize !== undefined || fm.codeFontSize !== undefined;
   if (!hasAnyField) return undefined;
 
