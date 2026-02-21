@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { convertMdToDocx } from './md-to-docx';
 import { convertDocx } from './converter';
@@ -21,7 +21,7 @@ function iterateFences(
   let fenceChar: string | null = null;
   let fenceLen = 0;
   for (const line of lines) {
-    const match = line.match(/^(`{3,}|~{3,})(.*)/);
+    const match = line.match(/^ {0,3}(`{3,}|~{3,})(.*)/);
     if (match) {
       const char = match[1][0];
       const len = match[1].length;
@@ -63,7 +63,7 @@ function countCodeBlocks(md: string): number {
 function extractPlainText(md: string): string {
   return stripFencedCodeBlocks(md)
     // Strip YAML frontmatter only at the very start of the file (no /m flag)
-    .replace(/^---\n[\s\S]*?\n---\n?/, '')
+    .replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '')
     // Strip table separator lines and pipe delimiters
     .replace(/^\|[-| :]+\|$/gm, '')
     .replace(/\|/g, ' ')
@@ -82,10 +82,11 @@ function extractPlainText(md: string): string {
     .replace(/^(> )+/gm, '')
     .replace(/^[-*]\s+/gm, '')
     .replace(/^\d+\.\s+/gm, '')
-    // Strip inline formatting
-    .replace(/\*\*([^*]+)\*\*/g, '$1')
-    .replace(/\*([^*]+)\*/g, '$1')
-    .replace(/~~([^~]+)~~/g, '$1')
+    // Strip inline formatting (longest delimiter first so *** matches before **)
+    .replace(/\*\*\*(.+?)\*\*\*/g, '$1')
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/\*(.+?)\*/g, '$1')
+    .replace(/~~(.+?)~~/g, '$1')
     .replace(/`([^`]+)`/g, '$1')
     // Strip links, HTML, citations, footnotes
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
@@ -109,6 +110,11 @@ function uniqueWords(text: string): Set<string> {
 /** Count headings outside fenced code blocks. */
 function countHeadings(md: string): number {
   return (stripFencedCodeBlocks(md).match(/^#+\s/gm) || []).length;
+}
+
+/** Count list items (unordered and ordered) outside fenced code blocks. */
+function countListItems(md: string): number {
+  return (stripFencedCodeBlocks(md).match(/^[-*]\s|^\d+\.\s/gm) || []).length;
 }
 
 interface Fixture {
@@ -146,6 +152,18 @@ const fixtures: Fixture[] = [
   },
 ];
 
+it('covers all docs/ files', () => {
+  const docFiles = readdirSync(join(repoRoot, 'docs'))
+    .filter(f => f.endsWith('.md'))
+    .sort();
+  const fixtureDocs = fixtures
+    .map(f => f.path)
+    .filter(p => p.startsWith('docs/'))
+    .map(p => p.replace(/^docs\//, ''))
+    .sort();
+  expect(fixtureDocs).toEqual(docFiles);
+});
+
 describe('docs round-trip: md -> docx -> md', () => {
   for (const fixture of fixtures) {
     it(`round-trips ${fixture.path}`, async () => {
@@ -162,6 +180,11 @@ describe('docs round-trip: md -> docx -> md', () => {
       // docx -> md
       const mdResult = await convertDocx(docxResult.docx);
       const roundTrippedMd = mdResult.markdown;
+
+      // --- Bibtex preservation ---
+      if (fixture.bibtex) {
+        expect(mdResult.bibtex.length).toBeGreaterThan(0);
+      }
 
       // --- Word preservation ---
       const originalWords = uniqueWords(extractPlainText(originalMd));
@@ -183,10 +206,11 @@ describe('docs round-trip: md -> docx -> md', () => {
         expect(countCodeBlocks(roundTrippedMd)).toBe(countCodeBlocks(originalMd));
       }
 
-      const listPattern = /^[-*]\s|^\d+\.\s/m;
-      const originalHasLists = listPattern.test(stripFencedCodeBlocks(originalMd));
-      if (originalHasLists) {
-        expect(listPattern.test(stripFencedCodeBlocks(roundTrippedMd))).toBe(true);
+      const originalListCount = countListItems(originalMd);
+      if (originalListCount > 0) {
+        expect(countListItems(roundTrippedMd)).toBeGreaterThanOrEqual(
+          Math.ceil(originalListCount * 0.5),
+        );
       }
     }, 30_000);
   }
