@@ -69,13 +69,7 @@ describe('Property 1: Fault Condition — HTML Comments Dropped During MD → DO
         expect(tokens.length).toBeGreaterThan(0);
 
         // At least one token should have a run referencing the comment
-        const hasComment = tokens.some(t =>
-          t.runs.some(r =>
-            r.text.includes(c) ||
-            r.text.includes('<!--') ||
-            r.type === 'html_comment'
-          )
-        );
+        const hasComment = tokens.some(t => runsContainComment(t.runs, c));
         expect(hasComment).toBe(true);
       }),
       { numRuns: 20, verbose: true }
