@@ -163,12 +163,11 @@ describe('Font customization unit tests', () => {
         '</w:styles>';
       const bytes = new TextEncoder().encode(templateXml);
 
-      // Overrides with only bodyFont set — Normal is a body style so it WILL be modified
-      // Use an override that targets no styles present in the template
-      const emptyOverrides: FontOverrides = {
+      // Override with only codeFont set — Normal is not a code style, so it won't be modified
+      const codeFontOnlyOverrides: FontOverrides = {
         codeFont: 'Courier',
       };
-      const result = applyFontOverridesToTemplate(bytes, emptyOverrides);
+      const result = applyFontOverridesToTemplate(bytes, codeFontOnlyOverrides);
       // Normal is not a code style, so codeFont doesn't affect it → template unchanged
       expect(result).toBe(templateXml);
     });

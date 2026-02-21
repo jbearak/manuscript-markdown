@@ -1464,10 +1464,10 @@ export function resolveFontOverrides(fm: Frontmatter): FontOverrides | undefined
 
   const overrides: FontOverrides = {};
 
-  if (fm.font !== undefined) {
+  if (fm.font) {
     overrides.bodyFont = fm.font;
   }
-  if (fm.codeFont !== undefined) {
+  if (fm.codeFont) {
     overrides.codeFont = fm.codeFont;
   }
 
