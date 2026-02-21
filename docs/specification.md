@@ -125,6 +125,9 @@ Manuscript Markdown supports LaTeX math notation, which is converted to and from
 
 - **Inline math**: `$...$` — renders within the text flow
 - **Display math**: `$$...$$` — renders as a centered block equation
+- **Bare environments**: `\begin{align}...\end{align}` — treated as `$$\begin{align}...\end{align}$$`
+
+Bare environments are recognized for all supported amsmath display-math environments (`equation`, `align`, `gather`, `cases`, matrices, etc.). On round-trip through DOCX, bare environments are converted to the `$$`-wrapped form.
 
 Supported LaTeX elements include fractions, roots, Greek letters, operators, matrices, accents, subscripts, superscripts, delimiters, and amsmath environments. See [LaTeX Equations](latex-equations.md) for the full syntax reference and [DOCX Converter](converter.md#latex-equations) for converter details.
 

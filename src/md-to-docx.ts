@@ -75,6 +75,7 @@ const COLOR_TO_OOXML: Record<string, string> = {
 };
 
 import { PARA_PLACEHOLDER, preprocessCriticMarkup, findMatchingClose } from './critic-markup';
+import { wrapBareLatexEnvironments } from './latex-env-preprocess';
 export { PARA_PLACEHOLDER, preprocessCriticMarkup };
 
 // Custom inline rules
@@ -622,7 +623,8 @@ export function extractFootnoteDefinitions(markdown: string): { cleaned: string;
 
 export function parseMd(markdown: string): MdToken[] {
   const md = createMarkdownIt();
-  const processed = preprocessCriticMarkup(markdown);
+  const wrapped = wrapBareLatexEnvironments(markdown);
+  const processed = preprocessCriticMarkup(wrapped);
   const tokens = md.parse(processed, {});
 
   return convertTokens(tokens);

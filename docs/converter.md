@@ -15,7 +15,7 @@ The converter supports DOCX → Markdown → DOCX round-tripping. The following 
 - **Track changes**: CriticMarkup `{++...++}` and `{--...--}` ↔ Word revisions (`w:ins`/`w:del`)
 - **Citations**: Zotero field codes ↔ Pandoc `[@key]` syntax with BibTeX export. On import, `ZOTERO_BIBL` field codes are detected and omitted (bibliography is regenerated on export). On export, bibliography is automatically generated and appended as a `ZOTERO_BIBL` field when a CSL style is specified. Mixed Zotero/non-Zotero grouped citations always produce unified output — a single set of parentheses wrapping all entries (see [Zotero Round-Trip](zotero-roundtrip.md#mixed-citations)). Missing keys appear inline as `@citekey` with a post-bibliography note.
 - **Zotero document preferences**: CSL style, locale, and note type round-tripped between YAML frontmatter (`csl`, `locale`, `zotero-notes`) and `docProps/custom.xml` (`ZOTERO_PREF_*` properties)
-- **Math**: OMML equations ↔ LaTeX (`$inline$` and `$$display$$`)
+- **Math**: OMML equations ↔ LaTeX (`$inline$`, `$$display$$`, and bare `\begin{env}...\end{env}`)
 - **Hyperlinks**: Markdown links ↔ Word hyperlinks (with proper escaping)
 - **Highlights**: colored highlights ↔ `==text=={color}` syntax
 - **Blockquotes**: `> quoted text` ↔ Word Quote/Intense Quote paragraph style (with nesting)
@@ -26,7 +26,7 @@ The converter supports DOCX → Markdown → DOCX round-tripping. The following 
 
 ## LaTeX Equations
 
-The converter translates between LaTeX math notation in Markdown and Microsoft Word's OMML (Office Math Markup Language) equation format. Conversion is bidirectional: DOCX import translates OMML to LaTeX, and Markdown export translates LaTeX back to OMML. See [LaTeX Equations](latex-equations.md) for the full syntax reference.
+The converter translates between LaTeX math notation in Markdown and Microsoft Word's OMML (Office Math Markup Language) equation format. Conversion is bidirectional: DOCX import translates OMML to LaTeX, and Markdown export translates LaTeX back to OMML. Bare `\begin{env}...\end{env}` blocks (without `$$` wrappers) are preprocessed into `$$\begin{env}...\end{env}$$` before parsing, so the existing math pipeline handles them transparently. See [LaTeX Equations](latex-equations.md) for the full syntax reference.
 
 ### DOCX to Markdown (OMML to LaTeX)
 
@@ -54,6 +54,7 @@ The converter aims for **semantic fidelity** rather than syntactic identity. A r
 - **Binomial variants**: `\dbinom` and `\tbinom` produce the same OMML as `\binom`. On re-import, they become `\binom`.
 - **Environment selection**: On OMML-to-LaTeX import, equation arrays with `&` markers become `aligned` environments; those without become `gathered`. The original environment name (`align*`, `multline`, etc.) is not preserved since OMML does not store it.
 - **Unsupported elements**: OMML constructs with no LaTeX equivalent produce a visible `\text{[UNSUPPORTED: element] content}` placeholder.
+- **Bare environments**: `\begin{env}...\end{env}` (without `$$` wrappers) round-trips as `$$\begin{env}...\end{env}$$`.
 
 ### Comment Handling
 

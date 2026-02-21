@@ -8,6 +8,7 @@ Wrap equations in dollar signs:
 
 - **Inline**: `$E = mc^2$` — renders within the text flow
 - **Display**: `$$E = mc^2$$` — renders as a centered block equation
+- **Bare environments**: `\begin{align}...\end{align}` — treated as `$$\begin{align}...\end{align}$$`
 
 ## Quick Examples
 
@@ -211,6 +212,32 @@ The converter supports standard amsmath environments for multi-line equations:
 These environments are converted to OMML equation arrays on export. On re-import, the original environment name is not preserved: arrays with `&` markers become `aligned`, those without become `gathered`.
 
 Within these environments, `\tag{...}`, `\tag*{...}`, `\label{...}`, `\notag`, and `\nonumber` are consumed silently (OMML has no equivalent). `\intertext{...}` and `\shortintertext{...}` are emitted as plain text. `\shoveleft{...}` and `\shoveright{...}` emit their inner content.
+
+### Bare Environments
+
+You can write display-math environments without `$$` wrappers:
+
+```latex
+\begin{align}
+  a &= b \\
+  c &= d
+\end{align}
+```
+
+This is treated as an alias for:
+
+```latex
+$$
+\begin{align}
+  a &= b \\
+  c &= d
+\end{align}
+$$
+```
+
+All environments listed in the table above are recognized as bare environments, plus the matrix variants (`matrix`, `smallmatrix`, `pmatrix`, `bmatrix`, `Bmatrix`, `vmatrix`, `Vmatrix`). Bare environments are not recognized inside code blocks, HTML comments, CriticMarkup spans, or existing `$$` blocks.
+
+On round-trip through DOCX, bare environments are converted to the `$$`-wrapped form.
 
 ### Aligned equations (with `&` alignment points)
 

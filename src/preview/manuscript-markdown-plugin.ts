@@ -3,6 +3,7 @@ import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
 import type StateBlock from 'markdown-it/lib/rules_block/state_block.mjs';
 import { VALID_COLOR_IDS, getDefaultHighlightColor } from '../highlight-colors';
 import { PARA_PLACEHOLDER, preprocessCriticMarkup, findMatchingClose } from '../critic-markup';
+import { wrapBareLatexEnvironments } from '../latex-env-preprocess';
 
 /** Escape HTML special characters for use in attribute values */
 function escapeHtmlAttr(str: string): string {
@@ -633,7 +634,7 @@ function paraPlaceholderRule(state: StateInline, silent: boolean): boolean {
 export function manuscriptMarkdownPlugin(md: MarkdownIt): void {
   // Preprocess source before block parsing to handle multi-paragraph CriticMarkup
   md.core.ruler.before('normalize', 'manuscript_markdown_preprocess', (state: any) => {
-    state.src = preprocessCriticMarkup(state.src);
+    state.src = preprocessCriticMarkup(wrapBareLatexEnvironments(state.src));
   });
 
   // Register the block-level rule to handle multi-line patterns with empty lines
