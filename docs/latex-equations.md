@@ -265,6 +265,24 @@ Escaped `\%` produces a literal percent sign and is not treated as a comment:
 50\% discount   % renders: 50% discount
 ```
 
+### Line continuation
+
+A `%` at the end of a line acts as a **line continuation**: it suppresses the newline and any leading whitespace on the following line, joining the two source lines as if no break existed. This lets you split a long equation across multiple source lines for readability without introducing unwanted spaces in the rendered output:
+
+```latex
+% Without continuation — the newline produces a space between y and +z:
+x + y
++ z          % renders: x + y + z  (note the extra space)
+
+% With continuation — joined without extra space:
+x + y%
++ z          % renders: x + y+ z
+```
+
+This is standard LaTeX behavior: because `%` starts a comment, everything from the `%` through the end of the line (including the newline itself) is consumed, and the next line's content follows immediately.
+
+**Line continuation vs. `\\` (line break):** These serve opposite purposes. `%` at end-of-line joins two source lines into one logical line (removing a break), while `\\` creates a visible line break within multi-line environments like `align*`, `gather*`, and `cases` (adding a break). In other words, `%` is for splitting long input across source lines without affecting the equation; `\\` is for splitting the equation itself across display lines.
+
 ### Roundtrip behavior
 
 When a LaTeX equation containing `%` comments is exported to Word `.docx`, the comments are stripped from the visible equation but preserved as hidden elements within the OMML structure. They are invisible in Word. On re-import from `.docx` back to Markdown, the comments are restored at their original positions — including any whitespace before the `%`, so vertically aligned comments stay aligned after roundtrip.
