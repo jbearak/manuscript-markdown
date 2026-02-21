@@ -237,5 +237,18 @@ describe('Font customization unit tests', () => {
       const codeChar = extractStyleBlock(stylesContent, 'CodeChar')!;
       expect(extractRFontsAscii(codeChar)).toBe('Fira Code');
     });
+
+    it('applies code-font override to code block run properties in document body', async () => {
+      const markdown = '---\ncode-font: Fira Code\n---\n\n```\nhello\n```';
+      const result = await convertMdToDocx(markdown);
+
+      const JSZip = (await import('jszip')).default;
+      const zip = await JSZip.loadAsync(result.docx);
+      const docContent = await zip.file('word/document.xml')!.async('string');
+
+      expect(docContent).toContain('w:ascii="Fira Code"');
+      expect(docContent).toContain('w:hAnsi="Fira Code"');
+      expect(docContent).not.toContain('w:ascii="Consolas"');
+    });
   });
 });

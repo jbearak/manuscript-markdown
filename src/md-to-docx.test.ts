@@ -37,6 +37,7 @@ function makeState(): DocxGenState {
     nextParaId: 1,
     codeBlockIndex: 0,
     codeBlockLanguages: new Map(),
+    codeFont: 'Consolas',
   };
 }
 

@@ -1333,6 +1333,7 @@ export interface DocxGenState {
   codeBlockIndex: number;
   codeBlockLanguages: Map<number, string>;
   citedKeys: Set<string>;
+  codeFont: string;
 }
 
 interface CommentEntry {
@@ -2385,7 +2386,7 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
   
   if (token.type === 'code_block') {
     const lines = (token.runs[0]?.text || '').replace(/\n$/, '').split('\n');
-    const rpr = '<w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/></w:rPr>';
+    const rpr = '<w:rPr><w:rFonts w:ascii="' + escapeXml(state.codeFont) + '" w:hAnsi="' + escapeXml(state.codeFont) + '"/></w:rPr>';
     const inset = CODE_BLOCK_INSET_TWIPS;
     return lines.map((line, i) => {
       let linePPr = pPr;
@@ -2803,6 +2804,7 @@ export async function convertMdToDocx(
     codeBlockIndex: 0,
     codeBlockLanguages: new Map(),
     citedKeys: new Set(),
+    codeFont: fontOverrides?.codeFont || 'Consolas',
   };
 
   // Pre-scan footnote definitions for citation keys so the bibliography
