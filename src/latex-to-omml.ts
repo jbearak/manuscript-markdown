@@ -645,7 +645,14 @@ class Parser {
             atoms.push(makeRun(ch));
           }
         } else if (consumed.type === 'comment' || consumed.type === 'line_continuation') {
-          atoms.push(this.parseToken(consumed));
+          // Append to the preceding atom so comment runs are never selected
+          // as bases for script binding (^ / _).
+          const commentXml = this.parseToken(consumed);
+          if (atoms.length > 0) {
+            atoms[atoms.length - 1] += commentXml;
+          } else {
+            atoms.push(commentXml);
+          }
         } else {
           atoms.push(this.parseToken(consumed));
         }

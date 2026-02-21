@@ -1,5 +1,7 @@
 # Implementation Plan
 
+> Requirement numbers (e.g., 1.1, 2.3, 3.5) refer to [bugfix.md](./bugfix.md).
+
 - [x] 1. Write bug condition exploration test
   - **Property 1: Fault Condition** - HTML Comments Dropped During MD → DOCX Conversion
   - **CRITICAL**: This test MUST FAIL on unfixed code - failure confirms the bug exists
@@ -76,9 +78,9 @@
     - _Requirements: 2.3, 2.5, 3.4_
 
   - [x] 3.5 Restore HTML comments in markdown output during DOCX → MD conversion
-    - When rendering text content items, detect the `\u200B`-prefixed HTML comment pattern and emit the raw `<!-- ... -->` syntax
-    - Alternatively, add an `'html_comment'` content item type to `ContentItem` for cleaner separation
-    - Ensure multi-line comment content (including internal newlines) is preserved
+    - Added a dedicated `'html_comment'` content item type to the `ContentItem` union (with `text` and `commentIds` fields) for clean type-safe separation
+    - In both CriticMarkup and ID-based markdown renderers, `html_comment` items emit the raw `<!-- ... -->` syntax directly
+    - Multi-line comment content (including internal newlines) is preserved
     - _Bug_Condition: DOCX → MD path has no logic to restore HTML comments from hidden runs_
     - _Expected_Behavior: Re-imported markdown contains the original `<!-- ... -->` at the correct position_
     - _Preservation: All other content item rendering must remain unchanged_

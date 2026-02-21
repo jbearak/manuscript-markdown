@@ -44,6 +44,13 @@ describe('latexToOmml', () => {
     expect(result).not.toContain('<m:sSup><m:e><m:r><m:t>a+b</m:t></m:r></m:e>');
   });
 
+  test('scripts skip comment atoms and bind to the preceding real atom', () => {
+    // % comment followed by a superscript — ^ should bind to x, not the comment
+    const result = latexToOmml('x % note\n^2');
+    expect(result).toContain('<m:sSup><m:e><m:r><m:t>x</m:t></m:r>');
+    expect(result).toContain('<m:sup><m:r><m:t>2</m:t></m:r></m:sup>');
+  });
+
   test('subscripts', () => {
     const result = latexToOmml('x_{i}');
     expect(result).toBe('<m:sSub><m:e><m:r><m:t>x</m:t></m:r></m:e><m:sub><m:r><m:t>i</m:t></m:r></m:sub></m:sSub>');
