@@ -6,7 +6,8 @@ Treat this as a living document. When you fix a subtle bug, add a comment in the
 
 User-facing: `README.md`, `docs/`
 Extension: `src/extension.ts` (entry point), `src/changes.ts` (navigation), `src/formatting.ts` (text transformations), `src/preview/manuscript-markdown-plugin.ts` (preview), `syntaxes/manuscript-markdown.json` (syntax highlighting)
-Conversion: `src/converter.ts` (docx → md), `src/md-to-docx.ts` (md → docx), `src/lsp/server.ts` (language server)
+Conversion: `src/converter.ts` (docx → md), `src/md-to-docx.ts` (md → docx)
+LSP: `src/lsp/server.ts` (language server — diagnostics, completions)
 
 ## Key invariants
 
