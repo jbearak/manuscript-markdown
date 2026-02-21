@@ -171,6 +171,26 @@ describe('Font customization unit tests', () => {
       // Normal is not a code style, so codeFont doesn't affect it → template unchanged
       expect(result).toBe(templateXml);
     });
+
+    it('modifies the style-level rPr, not the one nested inside pPr', () => {
+      const templateXml =
+        '<?xml version="1.0"?>' +
+        '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+        '<w:style w:type="paragraph" w:styleId="Normal">' +
+        '<w:pPr><w:keepNext/><w:rPr><w:b/></w:rPr></w:pPr>' +
+        '<w:rPr><w:rFonts w:ascii="Times" w:hAnsi="Times"/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr>' +
+        '</w:style>' +
+        '</w:styles>';
+      const bytes = new TextEncoder().encode(templateXml);
+      const overrides: FontOverrides = { bodyFont: 'Georgia', bodySizeHp: 28 };
+      const result = applyFontOverridesToTemplate(bytes, overrides);
+      // pPr-level rPr must be untouched
+      expect(result).toContain('<w:pPr><w:keepNext/><w:rPr><w:b/></w:rPr></w:pPr>');
+      // Style-level rPr must have the new font and size
+      expect(result).toContain('<w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/>');
+      expect(result).toContain('<w:sz w:val="28"/>');
+      expect(result).toContain('<w:szCs w:val="28"/>');
+    });
   });
 
   // ---------------------------------------------------------------
