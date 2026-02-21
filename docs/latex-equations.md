@@ -248,6 +248,27 @@ f(x) = \begin{cases}
 \end{multline*}
 ```
 
+## Comments
+
+In LaTeX, `%` starts a line comment — everything from `%` to the end of the line is ignored by the LaTeX engine. Comments are useful for annotating equations without affecting the rendered output:
+
+```latex
+x^2          % superscript
+x_i          % subscript
+x + y%       % line continuation (suppresses newline whitespace)
++ z
+```
+
+Escaped `\%` produces a literal percent sign and is not treated as a comment:
+
+```latex
+50\% discount   % renders: 50% discount
+```
+
+### Roundtrip behavior
+
+When a LaTeX equation containing `%` comments is exported to Word `.docx`, the comments are stripped from the visible equation but preserved as hidden elements within the OMML structure. They are invisible in Word. On re-import from `.docx` back to markdown, the comments are restored at their original positions — including any whitespace before the `%`, so vertically aligned comments stay aligned after roundtrip.
+
 ## Binomial Coefficients
 
 ```latex

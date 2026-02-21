@@ -333,12 +333,31 @@ function translateRun(children: any[]): string {
   const text = extractText(children);
   if (!text) return '';
 
+  // Detect hidden comment runs: text starts with \u200B (zero-width space)
+  if (text.charAt(0) === '\u200B') {
+    const payload = text.slice(1); // remove \u200B prefix
+    const pctIdx = payload.indexOf('%');
+    if (pctIdx !== -1) {
+      const whitespace = payload.slice(0, pctIdx);
+      const afterPct = payload.slice(pctIdx + 1);
+      // Line-continuation: nothing between % and \n (or just \n)
+      if (afterPct === '\n') {
+        return '%\n';
+      }
+      // Regular comment: restore {whitespace}%{comment_text}\n
+      return whitespace + '%' + afterPct + '\n';
+    }
+    // Fallback: if no % found, return payload as-is (shouldn't happen for well-formed hidden runs)
+    return payload;
+  }
+
   const mapped = unicodeToLatex(text);
   if (style === 'p' || isMultiLetter(mapped)) {
     return `\\mathrm{${mapped}}`;
   }
   return mapped;
 }
+
 
 // ---------------------------------------------------------------------------
 // Construct translator stubs (to be fully implemented in Tasks 2.1-2.3)

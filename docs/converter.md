@@ -54,6 +54,12 @@ The converter aims for **semantic fidelity** rather than syntactic identity. A r
 - **Environment selection**: On OMML-to-LaTeX import, equation arrays with `&` markers become `aligned` environments; those without become `gathered`. The original environment name (`align*`, `multline`, etc.) is not preserved since OMML does not store it.
 - **Unsupported elements**: OMML constructs with no LaTeX equivalent produce a visible `\text{[UNSUPPORTED: element] content}` placeholder.
 
+### Comment Handling
+
+LaTeX `%` comments are preserved through the export/import round trip. During Markdown-to-DOCX export, the converter strips comment text from the visible OMML output so it does not appear in the Word equation. Each comment is embedded as a non-visible element within the OMML structure at the position where the comment occurred, storing both the comment text and the preceding whitespace. On DOCX-to-Markdown re-import, the converter detects these hidden elements and restores them as LaTeX `%` comments with their original whitespace, so vertically aligned comments remain aligned after a round trip.
+
+Line-continuation `%` (a `%` at end-of-line used to suppress newline whitespace) is handled the same way: stripped from visible output, embedded as a hidden marker, and restored on re-import. Escaped `\%` is unaffected and continues to render as a literal `%` symbol.
+
 ### Architecture
 
 The converter is implemented in two modules:
