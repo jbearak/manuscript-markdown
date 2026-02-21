@@ -36,7 +36,7 @@ export interface MdTableRow {
 }
 
 export interface MdRun {
-  type: 'text' | 'critic_add' | 'critic_del' | 'critic_sub' | 'critic_highlight' | 'critic_comment' | 'citation' | 'math' | 'softbreak' | 'comment_range_start' | 'comment_range_end' | 'comment_body_with_id' | 'footnote_ref';
+  type: 'text' | 'critic_add' | 'critic_del' | 'critic_sub' | 'critic_highlight' | 'critic_comment' | 'citation' | 'math' | 'softbreak' | 'comment_range_start' | 'comment_range_end' | 'comment_body_with_id' | 'footnote_ref' | 'html_comment';
   text: string;
   bold?: boolean;
   italic?: boolean;
@@ -700,14 +700,22 @@ function convertTokens(tokens: any[], listLevel = 0, blockquoteLevel = 0): MdTok
         break;
       
       case 'html_block': {
-        const htmlTables = extractHtmlTables(token.content || '');
-        for (const rows of htmlTables) {
-          if (rows.length > 0) {
-            result.push({
-              type: 'table',
-              runs: [],
-              rows
-            });
+        const htmlContent = token.content || '';
+        if (/^<!--[\s\S]*?-->/.test(htmlContent.trim())) {
+          result.push({
+            type: 'paragraph',
+            runs: [{ type: 'html_comment' as const, text: htmlContent.replace(/\n$/, '') }]
+          });
+        } else {
+          const htmlTables = extractHtmlTables(htmlContent);
+          for (const rows of htmlTables) {
+            if (rows.length > 0) {
+              result.push({
+                type: 'table',
+                runs: [],
+                rows
+              });
+            }
           }
         }
         i++;
@@ -814,15 +822,18 @@ function processInlineChildren(tokens: any[]): MdRun[] {
         currentHref = undefined;
         break;
         
-      case 'html_inline':
+      case 'html_inline': {
         const html = token.content;
-        if (html === '<u>') formatStack.underline = true;
+        if (html.startsWith('<!--')) {
+          runs.push({ type: 'html_comment', text: html });
+        } else if (html === '<u>') formatStack.underline = true;
         else if (html === '</u>') delete formatStack.underline;
         else if (html === '<sup>') formatStack.superscript = true;
         else if (html === '</sup>') delete formatStack.superscript;
         else if (html === '<sub>') formatStack.subscript = true;
         else if (html === '</sub>') delete formatStack.subscript;
         break;
+      }
         
       case 'critic_markup':
         if (token.criticType === 'critic_sub') {
@@ -2072,6 +2083,8 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         }
       }
       state.hasComments = true;
+    } else if (run.type === 'html_comment') {
+      xml += '<w:r><w:rPr><w:vanish/></w:rPr><w:t xml:space="preserve">' + '\u200B' + escapeXml(run.text) + '</w:t></w:r>';
     }
   }
   return xml;

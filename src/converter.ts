@@ -140,7 +140,8 @@ export type ContentItem =
       isCodeBlock?: boolean;   // true if Word "Code Block" paragraph style
     }
   | { type: 'math'; latex: string; display: boolean; commentIds: Set<string> }
-  | { type: 'footnote_ref'; noteId: string; noteKind: 'footnote' | 'endnote'; commentIds: Set<string> };
+  | { type: 'footnote_ref'; noteId: string; noteKind: 'footnote' | 'endnote'; commentIds: Set<string> }
+  | { type: 'html_comment'; text: string; commentIds: Set<string> };
 export interface FootnoteBody {
   id: string;
   content: ContentItem[];
@@ -1583,13 +1584,37 @@ export async function extractDocumentContent(
           // Process run - extract formatting from w:rPr
           let runFormatting = currentFormatting;
           const runChildren = Array.isArray(node[key]) ? node[key] : [node[key]];
+          let rPrChildren: any[] | undefined;
           for (const child of runChildren) {
             if (child['w:rPr']) {
-              const rPrChildren = Array.isArray(child['w:rPr']) ? child['w:rPr'] : [child['w:rPr']];
+              rPrChildren = Array.isArray(child['w:rPr']) ? child['w:rPr'] : [child['w:rPr']];
               runFormatting = parseRunProperties(rPrChildren, currentFormatting);
               break;
             }
           }
+
+          // Detect vanish runs carrying HTML comments (encoded with \u200B prefix).
+          // LaTeX OMML hidden runs and other vanish runs without the prefix fall through.
+          const hasVanish = rPrChildren?.some((c: any) => c['w:vanish'] !== undefined) ?? false;
+          if (hasVanish) {
+            // Collect text from w:t elements in this run
+            let runText = '';
+            for (const child of runChildren) {
+              if (child['w:t'] !== undefined) {
+                runText += nodeText(child['w:t'] || []);
+              }
+            }
+            if (runText.startsWith('\u200B') && runText.substring(1).trimStart().startsWith('<!--')) {
+              const payload = runText.substring(1);
+              target.push({
+                type: 'html_comment',
+                text: payload,
+                commentIds: new Set(activeComments),
+              });
+              continue; // skip normal walk for this run
+            }
+          }
+
           walk(runChildren, runFormatting, target, inTableCell);
         } else if (key === 'w:br') {
           // Line break within a run (Shift+Enter in Word).
@@ -1782,7 +1807,7 @@ function renderInlineSegment(
 function hasOverlappingComments(segment: ContentItem[]): boolean {
   const allIds = new Set<string>();
   for (const item of segment) {
-    if ((item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'math') && item.commentIds) {
+    if ((item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'math' || item.type === 'html_comment') && item.commentIds) {
       for (const id of item.commentIds) allIds.add(id);
     }
   }
@@ -1791,7 +1816,7 @@ function hasOverlappingComments(segment: ContentItem[]): boolean {
   // Two or more comment IDs exist — check if their ranges actually overlap
   // by seeing if any single run is covered by 2+ comments
   for (const item of segment) {
-    if ((item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'math') && item.commentIds) {
+    if ((item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'math' || item.type === 'html_comment') && item.commentIds) {
       if (item.commentIds.size > 1) return true;
     }
   }
@@ -1803,7 +1828,7 @@ function hasOverlappingComments(segment: ContentItem[]): boolean {
   let pos = 0;
   let prevIds = new Set<string>();
   for (const item of segment) {
-    if (item.type !== 'text' && item.type !== 'citation' && item.type !== 'footnote_ref' && item.type !== 'math') { pos++; continue; }
+    if (item.type !== 'text' && item.type !== 'citation' && item.type !== 'footnote_ref' && item.type !== 'math' && item.type !== 'html_comment') { pos++; continue; }
     if (!item.commentIds) { pos++; continue; }
     const ids = item.commentIds;
     for (const id of ids) {
@@ -1928,6 +1953,13 @@ function renderInlineRange(
       const noteKey = item.noteKind + ':' + item.noteId;
       const label = renderOpts?.noteLabels?.get(noteKey) ?? item.noteId;
       out += `[^${label}]`;
+      i++;
+      continue;
+    }
+
+    // html_comment: emit the raw <!-- ... --> syntax directly
+    if (item.type === 'html_comment') {
+      out += item.text;
       i++;
       continue;
     }
@@ -2075,6 +2107,26 @@ function renderInlineRangeWithIds(
       continue;
     }
 
+    // html_comment: emit raw <!-- ... --> with comment ID tracking
+    if (item.type === 'html_comment') {
+      const currentIds = item.commentIds;
+      for (const cid of [...prevCommentIds].sort()) {
+        if (!currentIds.has(cid)) {
+          out += `{/${remap(cid)}}`;
+          collectBody(cid);
+        }
+      }
+      for (const cid of [...currentIds].sort()) {
+        if (!prevCommentIds.has(cid)) {
+          out += `{#${remap(cid)}}`;
+        }
+      }
+      prevCommentIds = new Set(currentIds);
+      out += item.text;
+      i++;
+      continue;
+    }
+
     if (item.type !== 'text') {
       i++;
       continue;
@@ -2186,7 +2238,7 @@ export function buildMarkdown(
   }
   function collectCommentMetadata(items: ContentItem[]): void {
     for (const item of items) {
-      if (item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'math') {
+      if (item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'math' || item.type === 'html_comment') {
         if (item.commentIds) {
           const ids = [...item.commentIds];
           for (const id of ids) {
@@ -2222,7 +2274,7 @@ export function buildMarkdown(
 
     function scan(itemList: ContentItem[]): void {
       for (const item of itemList) {
-        if ((item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'math') && item.commentIds) {
+        if ((item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'math' || item.type === 'html_comment') && item.commentIds) {
           const ids = item.commentIds;
           for (const id of ids) {
             if (!prevIds.has(id)) starts.set(id, Math.min(starts.get(id) ?? pos, pos));
