@@ -39,6 +39,7 @@ function iterateFences(
       // Closing fence: same char, at least as long, no info string
       if (char === fenceChar && len >= fenceLen && /^\s*$/.test(trailing)) {
         fenceChar = null;
+        prevBlank = false; // closing fence is not a blank line
         onClose();
         continue;
       }
@@ -227,4 +228,36 @@ describe('docs round-trip: md -> docx -> md', () => {
       }
     }, 30_000);
   }
+});
+
+describe('iterateFences / stripFencedCodeBlocks', () => {
+  it('does not swallow indented text after a fenced code block', () => {
+    const md = [
+      'Some text',
+      '',
+      '```python',
+      'code',
+      '```',
+      '    indented after fence',
+      'more text',
+    ].join('\n');
+    const stripped = stripFencedCodeBlocks(md);
+    expect(stripped).toContain('indented after fence');
+    expect(stripped).toContain('more text');
+    expect(stripped).not.toContain('code');
+  });
+
+  it('still detects real indented code blocks', () => {
+    const md = [
+      'Paragraph',
+      '',
+      '    indented code',
+      '    more code',
+      '',
+      'After',
+    ].join('\n');
+    const stripped = stripFencedCodeBlocks(md);
+    expect(stripped).not.toContain('indented code');
+    expect(stripped).toContain('After');
+  });
 });
