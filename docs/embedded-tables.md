@@ -104,9 +104,22 @@ To embed it in your document with a smaller font:
 
 This renders as a normal table in both the preview and Word output. If you update the CSV file, the table updates automatically the next time you preview or export.
 
-## Changing Column Widths
+## Formatting Embedded Tables
 
-Use `table-col-widths` immediately before the embed directive to set widths for that embedded table:
+Embedded tables use the same table settings as inline tables. Place per-table directives immediately before the embed comment to override formatting for that embedded table:
+
+```markdown
+<!-- table-font-size: 9 -->
+<!-- table-font: Helvetica -->
+<!-- table-col-widths: 2 1 1 1 -->
+<!-- embed: data/results.csv -->
+```
+
+Available per-table directives for embeds are `table-font-size`, `table-font`, `table-orientation`, and `table-col-widths`. See the [Tables](specification.md#tables) section of the Specification for the full directive reference.
+
+### Column widths
+
+Use `table-col-widths` to set widths for an embedded table:
 
 ```markdown
 <!-- table-col-widths: 3 1 1 1 -->
@@ -122,40 +135,20 @@ The values are ratios, not fixed measurements. In the example above, the first c
 
 If there are fewer width values than columns, the last value repeats. For example, `3 1` on a four-column table is treated as `3 1 1 1`.
 
-## Using Table Directives with Embeds
+### Document-wide defaults
 
-Document-wide table defaults set in [frontmatter](specification.md#yaml-frontmatter) (`table-font`, `table-font-size`, `table-col-widths`, `table-borders`) apply to embedded tables automatically — no per-table directive needed. To override a default for a specific embed, place a directive before the embed comment, the same way you would before an inline table:
+Document-wide table defaults set in [frontmatter](specification.md#yaml-frontmatter) apply to embedded tables automatically, with no per-table directive needed:
 
-```markdown
-<!-- table-font-size: 9 -->
-<!-- table-font: Helvetica -->
-<!-- table-col-widths: 2 1 1 1 -->
-<!-- embed: data/results.csv -->
+```yaml
+---
+table-font: Helvetica
+table-font-size: 9
+table-col-widths: 2 1 1 1
+table-borders: horizontal
+---
 ```
 
-Available directives: `table-font-size`, `table-font`, `table-orientation`, `table-col-widths`. The last of these takes space-separated ratios (e.g. `2 1 1 1`); if there are fewer values than columns, the last value repeats — so `2 1` is equivalent to `2 1 1 1` for a four-column table. See the [Tables](specification.md#tables) section of the Specification for details on each directive.
-
-## Round-Trip Behavior
-
-When you export to Word, embed directives are expanded into full tables — the resulting DOCX contains the actual table data, not a reference to an external file. The original directive is preserved internally so that re-importing the DOCX recovers the embed reference rather than inlining the table as Markdown.
-
-If the external file changes between export and re-import, the next export picks up the updated data. The embedded file is always the source of truth.
-
-## Errors and Diagnostics
-
-If something goes wrong with an embed, you'll see feedback in two places: an error message rendered in the preview (in place of the table) and a diagnostic in the editor's Problems panel.
-
-| Condition | Severity | Message |
-|-----------|----------|---------|
-| File not found | Error | `could not embed <path> — file not found` |
-| Malformed CSV or corrupt XLSX | Error | `could not embed <path> — parse error` |
-| Sheet not found (XLSX) | Error | `sheet '<name>' not found in <path>` |
-| Named range not found (XLSX) | Error | `range '<name>' not found in <path>` |
-| Invalid parameter syntax | Error | `invalid embed parameter: <detail>` |
-| File produces no table rows | Warning | `<path> produced an empty table` |
-| Embedded .md has non-table content | Info | `non-table content in <path> was ignored` |
-| .dta file exceeds size limit | Error | `.dta file exceeds maximum size (<limit>)` |
-| Unsupported .dta format version | Error | `unsupported .dta format` |
+Per-table directives placed before the embed comment override frontmatter defaults. `table-borders` is frontmatter-only; the other settings shown above can be overridden per table.
 
 ## Page Orientation and Isolation
 
@@ -228,6 +221,24 @@ Note: All values are population-weighted. Source: 2024 Census Bureau estimates.
 
 See [Specification: Custom Styles](specification.md#custom-styles) for the frontmatter syntax and available properties.
 
-## Frontmatter Defaults
+## Round-Trip Behavior
 
-Document-level table settings from YAML frontmatter — `table-font`, `table-font-size`, `table-col-widths`, `table-borders` — apply to embedded tables the same way they apply to inline tables. Per-table directives placed before the embed comment override frontmatter defaults.
+When you export to Word, embed directives are expanded into full tables — the resulting DOCX contains the actual table data, not a reference to an external file. The original directive is preserved internally so that re-importing the DOCX recovers the embed reference rather than inlining the table as Markdown.
+
+If the external file changes between export and re-import, the next export picks up the updated data. The embedded file is always the source of truth.
+
+## Errors and Diagnostics
+
+If something goes wrong with an embed, you'll see feedback in two places: an error message rendered in the preview (in place of the table) and a diagnostic in the editor's Problems panel.
+
+| Condition | Severity | Message |
+|-----------|----------|---------|
+| File not found | Error | `could not embed <path> — file not found` |
+| Malformed CSV or corrupt XLSX | Error | `could not embed <path> — parse error` |
+| Sheet not found (XLSX) | Error | `sheet '<name>' not found in <path>` |
+| Named range not found (XLSX) | Error | `range '<name>' not found in <path>` |
+| Invalid parameter syntax | Error | `invalid embed parameter: <detail>` |
+| File produces no table rows | Warning | `<path> produced an empty table` |
+| Embedded .md has non-table content | Info | `non-table content in <path> was ignored` |
+| .dta file exceeds size limit | Error | `.dta file exceeds maximum size (<limit>)` |
+| Unsupported .dta format version | Error | `unsupported .dta format` |
