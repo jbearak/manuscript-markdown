@@ -194,7 +194,7 @@ See [Specification: Page Orientation Sections](specification.md#page-orientation
 
 ## Custom Styles for Table Titles and Notes
 
-If your document defines custom styles in the frontmatter, you can apply them to table titles and notes using `<!-- style: name -->` / `<!-- /style -->` fencing. Style directives work anywhere in the document — the example below happens to use them inside an orientation fence, but they are equally valid outside one:
+If your document defines custom styles in the frontmatter, you can apply them to table titles and notes using `<!-- style: name -->` / `<!-- /style -->` fencing. Style directives are independent of orientation fences: use them inside a `portrait` or `landscape` fence when a table is isolated, or directly in the normal document flow as shown below:
 
 ```markdown
 <!-- style: table-title -->
