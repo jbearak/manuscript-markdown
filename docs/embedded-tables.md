@@ -104,6 +104,24 @@ To embed it in your document with a smaller font:
 
 This renders as a normal table in both the preview and Word output. If you update the CSV file, the table updates automatically the next time you preview or export.
 
+## Changing Column Widths
+
+Use `table-col-widths` immediately before the embed directive to set widths for that embedded table:
+
+```markdown
+<!-- table-col-widths: 3 1 1 1 -->
+<!-- embed: data/results.csv -->
+```
+
+The values are ratios, not fixed measurements. In the example above, the first column gets three times as much width as each other column. Use `equal` to force equal-width columns, or `auto` to restore Word's default automatic sizing for a table that would otherwise inherit a document-wide default:
+
+```markdown
+<!-- table-col-widths: equal -->
+<!-- embed: data/results.csv -->
+```
+
+If there are fewer width values than columns, the last value repeats. For example, `3 1` on a four-column table is treated as `3 1 1 1`.
+
 ## Using Table Directives with Embeds
 
 Document-wide table defaults set in [frontmatter](specification.md#yaml-frontmatter) (`table-font`, `table-font-size`, `table-col-widths`, `table-borders`) apply to embedded tables automatically — no per-table directive needed. To override a default for a specific embed, place a directive before the embed comment, the same way you would before an inline table:
