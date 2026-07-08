@@ -194,7 +194,7 @@ See [Specification: Page Orientation Sections](specification.md#page-orientation
 
 ## Custom Styles for Table Titles and Notes
 
-If your document defines custom styles in the frontmatter, you can apply them to table titles and notes using `<!-- style: name -->` / `<!-- /style -->` fencing. Style directives are independent of orientation fences: use them inside a `portrait` or `landscape` fence when a table is isolated, or directly in the normal document flow as shown below:
+If your document defines [custom styles](specification.md#custom-styles) in [YAML frontmatter](specification.md#yaml-frontmatter), you can apply them to table titles and notes using `<!-- style: name -->` / `<!-- /style -->` fencing. [Style directives](specification.md#block-directive-syntax) are independent of orientation fences: use them inside a `portrait` or `landscape` fence when a table is isolated, or directly in the normal document flow as shown below:
 
 ```markdown
 <!-- style: table-title -->
@@ -208,7 +208,7 @@ Note: All values are population-weighted. Source: 2024 Census Bureau estimates.
 <!-- /style -->
 ```
 
-This requires defining the styles in your frontmatter — see [Specification: Custom Styles](specification.md#custom-styles) for syntax and available properties.
+See [Specification: Custom Styles](specification.md#custom-styles) for the frontmatter syntax and available properties.
 
 ## Frontmatter Defaults
 
