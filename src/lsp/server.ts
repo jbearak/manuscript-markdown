@@ -73,6 +73,8 @@ import {
 } from './comment-language';
 import { computeBibEntryRanges } from './bib-entry-ranges';
 import { type Frontmatter, parseFrontmatter, maskFrontmatter } from '../frontmatter';
+import { formatTableNumbers, validateTableNumberFormat } from '../table-number-format';
+import { preprocessGridTables } from '../grid-table-preprocess';
 import { BUNDLED_STYLE_LABELS, isCslAvailableAsync } from '../csl-loader';
 import {
 	getFrontmatterLocation,
@@ -105,6 +107,7 @@ const citekeyDiagnostics = new Map<string, Diagnostic[]>();
 const frontmatterDiagnostics = new Map<string, Diagnostic[]>();
 const orientationDiagnostics = new Map<string, Diagnostic[]>();
 const embedDiagnostics = new Map<string, Diagnostic[]>();
+const tableNumberDiagnostics = new Map<string, Diagnostic[]>();
 
 const severityMap: Record<string, DiagnosticSeverity> = {
 	'error': DiagnosticSeverity.Error,
@@ -117,7 +120,8 @@ function publishDiagnostics(uri: string): void {
 	const frontmatter = frontmatterDiagnostics.get(uri) ?? [];
 	const orientation = orientationDiagnostics.get(uri) ?? [];
 	const embed = embedDiagnostics.get(uri) ?? [];
-	connection.sendDiagnostics({ uri, diagnostics: [...citekey, ...frontmatter, ...orientation, ...embed] });
+	const tableNumbers = tableNumberDiagnostics.get(uri) ?? [];
+	connection.sendDiagnostics({ uri, diagnostics: [...citekey, ...frontmatter, ...orientation, ...embed, ...tableNumbers] });
 }
 
 interface OpenDocBibCache {
@@ -158,6 +162,7 @@ async function runValidationPipeline(doc: TextDocument): Promise<void> {
 		await validateCitekeys(doc, metadata);
 		await validateFrontmatterDiags(doc);
 		validateOrientationDirectives(doc);
+		validateTableNumbers(doc);
 		await validateEmbedDirectives(doc);
 	} catch (error) {
 		connection.console.error(
@@ -681,6 +686,151 @@ function validateOrientationDirectives(doc: TextDocument): void {
 
 	orientationDiagnostics.set(doc.uri, diagnostics);
 	publishDiagnostics(doc.uri);
+}
+
+function validateTableNumbers(doc: TextDocument): void {
+	const text = doc.getText();
+	const { metadata } = parseFrontmatter(text);
+	const result = formatTableNumbers(preprocessGridTables(maskFrontmatter(text)), {
+		digits: metadata.tableDigits,
+		decimalMark: metadata.tableDecimalMark,
+		digitGrouping: metadata.tableDigitGrouping,
+	});
+	const documentFormatError = validateTableNumberFormat({
+		digits: metadata.tableDigits,
+		decimalMark: metadata.tableDecimalMark,
+		digitGrouping: metadata.tableDigitGrouping,
+	});
+	const diagnostics = result.warnings.filter(message => message !== documentFormatError).flatMap(message => {
+		const ambiguous = message.match(/^Ambiguous numeric table cell left unchanged: (.+)$/);
+		const ranges = ambiguous ? findTableCellOccurrences(text, ambiguous[1]) : findTableFormatWarningRanges(text, message, {
+			decimalMark: metadata.tableDecimalMark,
+			digitGrouping: metadata.tableDigitGrouping,
+		});
+		return ranges.map(range => ({
+			severity: DiagnosticSeverity.Warning,
+			range: Range.create(doc.positionAt(range.start), doc.positionAt(range.end)),
+			message,
+			source: 'manuscript-markdown',
+		}));
+	});
+	tableNumberDiagnostics.set(doc.uri, diagnostics);
+	publishDiagnostics(doc.uri);
+}
+
+function findTableFormatWarningRanges(text: string, message: string,
+	documentFormat: { decimalMark?: string; digitGrouping?: string }): Array<{ start: number; end: number }> {
+	const collision = message.includes(' comma cannot be combined') ? ['comma', 'comma']
+		: message.includes(' point cannot be combined') ? ['point', 'period'] : undefined;
+	if (!collision) return [{ start: 0, end: Math.min(text.length, text.indexOf('\n') >= 0 ? text.indexOf('\n') : text.length) }];
+	type Setting = { value: string; start: number; end: number };
+	const lines = text.split('\n');
+	const ranges: Array<{ start: number; end: number }> = [];
+	let decimal: Setting | undefined;
+	let grouping: Setting | undefined;
+	let offset = 0;
+	let inFrontmatter = lines[0]?.trim() === '---';
+	for (let index = 0; index < lines.length; index++) {
+		const line = lines[index];
+		if (inFrontmatter) {
+			if (index > 0 && line.trim() === '---') inFrontmatter = false;
+			offset += line.length + 1;
+			continue;
+		}
+		const directive = line.match(/^\s*<!--\s*table-(decimal-mark|digit-grouping):\s*([^\s]+)\s*-->\s*$/i);
+		if (directive) {
+			const valueStart = offset + line.indexOf(directive[2]);
+			const setting = { value: directive[2].toLowerCase(), start: valueStart, end: valueStart + directive[2].length };
+			if (directive[1].toLowerCase() === 'decimal-mark') decimal = setting;
+			else grouping = setting;
+			offset += line.length + 1;
+			continue;
+		}
+		const withoutComments = line.replace(/<!--.*?-->/g, match => ' '.repeat(match.length));
+		const tableMatch = withoutComments.match(/<table\b((?:"[^"]*"|'[^']*'|[^'">])*)>/i);
+		let inlineDecimal: Setting | undefined;
+		let inlineGrouping: Setting | undefined;
+		if (tableMatch) {
+			const attrs = tableMatch[1];
+			const attrOffset = offset + withoutComments.indexOf(tableMatch[0]) + tableMatch[0].indexOf(attrs);
+			const decimalMatch = attrs.match(/data-decimal-mark\s*=\s*["']?([^\s"'>]+)/i);
+			const groupingMatch = attrs.match(/data-digit-grouping\s*=\s*["']?([^\s"'>]+)/i);
+			if (decimalMatch) inlineDecimal = { value: decimalMatch[1].toLowerCase(), start: attrOffset + (decimalMatch.index ?? 0), end: attrOffset + (decimalMatch.index ?? 0) + decimalMatch[0].length };
+			if (groupingMatch) inlineGrouping = { value: groupingMatch[1].toLowerCase(), start: attrOffset + (groupingMatch.index ?? 0), end: attrOffset + (groupingMatch.index ?? 0) + groupingMatch[0].length };
+		}
+		const pipeTable = line.includes('|') && /^\s*\|?\s*:?-{3,}/.test(lines[index + 1] ?? '');
+		const gridTable = line.includes('MANUSCRIPT_GRID_TABLE:') || /^\s*\+(?:[-=:]+\+)+\s*$/.test(line);
+		if (tableMatch || pipeTable || gridTable) {
+			const effectiveDecimal = inlineDecimal ?? decimal;
+			const effectiveGrouping = inlineGrouping ?? grouping;
+			const decimalValue = effectiveDecimal?.value ?? documentFormat.decimalMark;
+			const groupingValue = effectiveGrouping?.value ?? documentFormat.digitGrouping;
+			if (decimalValue === collision[0] && groupingValue === collision[1]) {
+				if (effectiveDecimal) ranges.push({ start: effectiveDecimal.start, end: effectiveDecimal.end });
+				if (effectiveGrouping) ranges.push({ start: effectiveGrouping.start, end: effectiveGrouping.end });
+			}
+			decimal = undefined;
+			grouping = undefined;
+		} else if (line.trim() && !/^\s*<!--/.test(line)) {
+			decimal = undefined;
+			grouping = undefined;
+		}
+		offset += line.length + 1;
+	}
+	if (ranges.length === 0) {
+		const tableRe = /<table\b((?:"[^"]*"|'[^']*'|[^'">])*)>/gi;
+		for (const table of text.matchAll(tableRe)) {
+			const attrs = table[1];
+			const decimalMatch = attrs.match(new RegExp('data-decimal-mark\\s*=\\s*["\\\']?' + collision[0], 'i'));
+			const groupingMatch = attrs.match(new RegExp('data-digit-grouping\\s*=\\s*["\\\']?' + collision[1], 'i'));
+			const base = table.index + table[0].indexOf(attrs);
+			if (decimalMatch) ranges.push({ start: base + (decimalMatch.index ?? 0), end: base + (decimalMatch.index ?? 0) + decimalMatch[0].length });
+			if (groupingMatch) ranges.push({ start: base + (groupingMatch.index ?? 0), end: base + (groupingMatch.index ?? 0) + groupingMatch[0].length });
+			if (ranges.length > 0) break;
+		}
+	}
+	return ranges.length > 0 ? ranges : [{ start: 0, end: Math.min(text.length, text.indexOf('\n') >= 0 ? text.indexOf('\n') : text.length) }];
+}
+
+function findTableCellOccurrences(text: string, value: string): Array<{ start: number; end: number }> {
+	const ranges: Array<{ start: number; end: number }> = [];
+	const lines = text.split('\n');
+	const codeRegions = computeCodeRegions(text);
+	let searchFrom = 0;
+	while (searchFrom <= text.length - value.length) {
+		const start = text.indexOf(value, searchFrom);
+		if (start < 0) break;
+		const lineStart = text.lastIndexOf('\n', start - 1) + 1;
+		const lineEndMatch = text.indexOf('\n', start);
+		const lineEnd = lineEndMatch < 0 ? text.length : lineEndMatch;
+		const line = text.slice(lineStart, lineEnd);
+		const lineIndex = text.slice(0, lineStart).split('\n').length - 1;
+		const before = text.slice(0, start).toLowerCase();
+		const openCell = Math.max(before.lastIndexOf('<td'), before.lastIndexOf('<th'));
+		const closedCell = Math.max(before.lastIndexOf('</td>'), before.lastIndexOf('</th>'));
+		const pipeTable = line.includes('|') && lines.some((candidate, index) => Math.abs(index - lineIndex) <= 2
+			&& /^\s*\|?\s*:?-{3,}/.test(candidate));
+		const gridTable = line.includes('|') && ((lines[lineIndex - 1] ?? '').trimStart().startsWith('+')
+			|| (lines[lineIndex + 1] ?? '').trimStart().startsWith('+'));
+		if (!overlapsCodeRegion(start, start + value.length, codeRegions) && (pipeTable || gridTable || openCell > closedCell)) {
+			ranges.push({ start, end: start + value.length });
+		}
+		searchFrom = start + Math.max(1, value.length);
+	}
+	if (ranges.length === 0) {
+		const cellRe = /<(td|th)\b[^>]*>([\s\S]*?)<\/\1>/gi;
+		let cellMatch: RegExpExecArray | null;
+		while ((cellMatch = cellRe.exec(text)) !== null) {
+			const visible = cellMatch[2].replace(/<[^>]*>/g, '')
+				.replace(/&#(\d+);/g, (_match, code) => String.fromCodePoint(Number(code)))
+				.replace(/&#x([0-9a-f]+);/gi, (_match, code) => String.fromCodePoint(parseInt(code, 16)))
+				.replace(/&nbsp;/gi, '\u00a0').replace(/&middot;/gi, '\u00b7');
+			if (visible.includes(value) && !overlapsCodeRegion(cellMatch.index, cellRe.lastIndex, codeRegions)) {
+				ranges.push({ start: cellMatch.index, end: cellRe.lastIndex });
+			}
+		}
+	}
+	return ranges;
 }
 
 async function validateEmbedDirectives(doc: TextDocument): Promise<void> {

@@ -220,6 +220,153 @@ describe('parseXlsx', () => {
     expect(meta.rows[2].cells[0].runs[0].text).toBe('3.14');
   });
 
+  it('preserves Excel display text and typed numeric metadata', () => {
+    const ws = XLSX.utils.aoa_to_sheet([['Value', 'Percent'], [12.345, 0.12345]]);
+    ws.A2.z = '#,##0.00';
+    ws.B2.z = '0.00%';
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+    const bytes = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+    const meta = parseXlsx(new Uint8Array(bytes));
+    expect(meta.rows[1].cells[0].runs[0].text).toBe('12.35');
+    expect(meta.rows[1].cells[0].source).toMatchObject({ kind: 'number', rawValue: 12.345, sourceFormat: '#,##0.00' });
+    expect(meta.rows[1].cells[1].runs[0].text).toBe('12.35%');
+    expect(meta.rows[1].cells[1].source).toMatchObject({ kind: 'percent', rawValue: 0.12345 });
+  });
+
+	it('classifies multi-part zero masks as identifiers', () => {
+    const ws = XLSX.utils.aoa_to_sheet([['ID'], [123456789]]);
+    ws.A2.z = '000-00-0000';
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+    const meta = parseXlsx(new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' })));
+    expect(meta.rows[1].cells[0].source?.kind).toBe('identifier');
+    expect(meta.rows[1].cells[0].source?.rawValue).toBeUndefined();
+  });
+
+	it('classifies active multi-section zero-padding masks as identifiers', () => {
+		const ws = XLSX.utils.aoa_to_sheet([['ID'], [12]]);
+		ws.A2.z = '0000;[Red]-0000';
+		const wb = XLSX.utils.book_new();
+		XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+		const meta = parseXlsx(new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' })));
+		expect(meta.rows[1].cells[0].source?.kind).toBe('identifier');
+	});
+
+	it('classifies the standard integer zero format as numeric', () => {
+		const ws = XLSX.utils.aoa_to_sheet([['Value'], [12]]);
+		ws.A2.z = '0';
+		const wb = XLSX.utils.book_new();
+		XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+		const meta = parseXlsx(new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' })));
+		expect(meta.rows[1].cells[0].source).toMatchObject({ kind: 'number', rawValue: 12, sourceFormat: '0' });
+	});
+
+	it('classifies Unicode currency formats as currency', () => {
+		const ws = XLSX.utils.aoa_to_sheet([['Value'], [12]]);
+		ws.A2.z = '₹#,##0.00';
+		const wb = XLSX.utils.book_new();
+		XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+		const meta = parseXlsx(new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' })));
+		expect(meta.rows[1].cells[0].source?.kind).toBe('currency');
+	});
+
+	it('does not classify Excel color directives as currency', () => {
+		const ws = XLSX.utils.aoa_to_sheet([['Value'], [0]]);
+		ws.A2.z = '[RED]0.00;[RED]-0.00;[RED]-';
+		const wb = XLSX.utils.book_new();
+		XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+		const meta = parseXlsx(new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' })));
+		expect(meta.rows[1].cells[0].source?.kind).toBe('number');
+	});
+
+	it('ignores quoted percent, scientific, and unit literals', () => {
+		const ws = XLSX.utils.aoa_to_sheet([['Percent literal', 'Scientific literal', 'Unit'], [0.1234, 12, 3]]);
+		ws.A2.z = '0.00"%"';
+		ws.B2.z = '0"E+00"';
+		ws.C2.z = '0.00 "kg"';
+		const wb = XLSX.utils.book_new();
+		XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+		const meta = parseXlsx(new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' })));
+		for (const cell of meta.rows[1].cells) expect(cell.source?.kind).toBe('number');
+	});
+
+	it('classifies semantics from the active numeric format section', () => {
+		const ws = XLSX.utils.aoa_to_sheet([['Positive', 'Negative'], [0.123, -0.123]]);
+		ws.A2.z = '0.0;0.0%';
+		ws.B2.z = '0.0;0.0%';
+		const wb = XLSX.utils.book_new();
+		XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+		const meta = parseXlsx(new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' })));
+		expect(meta.rows[1].cells[0].source?.kind).toBe('number');
+		expect(meta.rows[1].cells[1].source?.kind).toBe('percent');
+	});
+
+	it('supports leading-decimal conditional thresholds', () => {
+		const ws = XLSX.utils.aoa_to_sheet([['Value'], [0.25]]);
+		ws.A2.z = '[>.5]0.0;0.0%';
+		const wb = XLSX.utils.book_new();
+		XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+		const meta = parseXlsx(new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' })));
+		expect(meta.rows[1].cells[0].source?.kind).toBe('percent');
+	});
+
+	it('detects dates only from the active numeric format section', () => {
+		const ws = XLSX.utils.aoa_to_sheet([['Value'], [2]]);
+		ws.A2.z = '[>=1]0.0;mm-dd';
+		const wb = XLSX.utils.book_new();
+		XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+		const meta = parseXlsx(new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' })));
+		expect(meta.rows[1].cells[0].source).toMatchObject({ kind: 'number', rawValue: 2 });
+	});
+
+	it('protects zero placeholders backed by date formats', () => {
+		const ws = XLSX.utils.aoa_to_sheet([['Date'], [0]]);
+		ws.A2.z = 'mm-dd-yyyy;mm-dd-yyyy;-';
+		const wb = XLSX.utils.book_new();
+		XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+		const meta = parseXlsx(new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' })));
+		expect(meta.rows[1].cells[0].source?.kind).toBe('date');
+	});
+
+	it('protects elapsed-time bracket formats', () => {
+		const ws = XLSX.utils.aoa_to_sheet([['Hours', 'Minutes', 'Seconds'], [1.5, 1.5, 1.5]]);
+		ws.A2.z = '[h]'; ws.B2.z = '[m]'; ws.C2.z = '[s]';
+		const wb = XLSX.utils.book_new();
+		XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+		const meta = parseXlsx(new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' })));
+		for (const cell of meta.rows[1].cells) expect(cell.source?.kind).toBe('date');
+	});
+
+	it('protects active conditional elapsed-time sections at zero', () => {
+		const ws = XLSX.utils.aoa_to_sheet([['Minutes'], [0]]);
+		ws.A2.z = '[>=1]0.0;[m]';
+		const wb = XLSX.utils.book_new();
+		XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+		const meta = parseXlsx(new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' })));
+		expect(meta.rows[1].cells[0].source?.kind).toBe('date');
+	});
+
+	it('classifies phone-style zero masks as identifiers', () => {
+		const ws = XLSX.utils.aoa_to_sheet([['Phone'], [1234567890]]);
+		ws.A2.z = '(000) 000-0000';
+		const wb = XLSX.utils.book_new();
+		XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+		const meta = parseXlsx(new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' })));
+		expect(meta.rows[1].cells[0].source?.kind).toBe('identifier');
+	});
+
+	it('classifies zero placeholders from the positive semantic section', () => {
+		const ws = XLSX.utils.aoa_to_sheet([['Currency', 'Percent'], [0, 0]]);
+		ws.A2.z = '$0.00;($0.00);-';
+		ws.B2.z = '0.0%;(0.0%);-';
+		const wb = XLSX.utils.book_new();
+		XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+		const meta = parseXlsx(new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' })));
+		expect(meta.rows[1].cells[0].source?.kind).toBe('currency');
+		expect(meta.rows[1].cells[1].source?.kind).toBe('percent');
+	});
+
   it('preserves raw cell content (escaping deferred to renderRuns)', () => {
     const data = [
       ['Header'],

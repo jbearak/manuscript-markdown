@@ -9,6 +9,7 @@ import { LineMap } from './line-map';
 import { preprocessEmbedsWithMap, type EmbedResolver, type EmbedOptions } from '../embed-preprocess';
 import { isGfmDisallowedRawHtml, escapeHtmlText, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from '../gfm';
 import { parseFrontmatter, type ColorScheme, type CustomStyleDef } from '../frontmatter';
+import { formatTableNumbers } from '../table-number-format';
 import { getDefaultColorScheme } from '../alert-colors';
 
 /** Escape HTML special characters for use in attribute values */
@@ -1033,10 +1034,16 @@ export function manuscriptMarkdownPlugin(md: MarkdownIt): void {
       ? preprocessEmbedsWithMap(state.src, embedResolver, docPath, embedOptions)
       : { output: state.src, map: LineMap.identity() };
     const r1 = preprocessGridTablesWithMap(r0.output);
-    const r2 = wrapBareLatexEnvironmentsWithMap(r1.output);
+    const numberResult = formatTableNumbers(r1.output, {
+      digits: metadata.tableDigits,
+      decimalMark: metadata.tableDecimalMark,
+      digitGrouping: metadata.tableDigitGrouping,
+    });
+    const rNumber = { output: numberResult.output, map: LineMap.identity() };
+    const r2 = wrapBareLatexEnvironmentsWithMap(rNumber.output);
     const r3 = preprocessCriticMarkupWithMap(r2.output);
     state.src = r3.output;
-    state.env.lineMap = LineMap.chain(LineMap.chain(LineMap.chain(r0.map, r1.map), r2.map), r3.map);
+    state.env.lineMap = LineMap.chain(LineMap.chain(LineMap.chain(LineMap.chain(r0.map, r1.map), rNumber.map), r2.map), r3.map);
   });
 
   // Inject <style> block for header-font-style and custom styles preview

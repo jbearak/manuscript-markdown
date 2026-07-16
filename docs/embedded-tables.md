@@ -57,7 +57,7 @@ Embed tables from another markdown file:
 <!-- embed: shared/standard-table.md -->
 ```
 
-Only table content (pipe tables, grid tables, HTML tables) and table directives (`table-font-size`, `table-font`, `table-orientation`, `table-col-widths`) are included from the embedded file. Non-table content is silently ignored, with an informational diagnostic in the editor. Cell content is rendered as plain Markdown only — Manuscript-specific syntax such as CriticMarkup, citations, and math is not processed within embedded `.md` tables.
+Only table content (pipe tables, grid tables, HTML tables) and table directives (`table-font-size`, `table-font`, `table-orientation`, `table-col-widths`, `table-digits`, `table-decimal-mark`, `table-digit-grouping`) are included from the embedded file. Non-table content is silently ignored, with an informational diagnostic in the editor. Cell content is rendered as plain Markdown only — Manuscript-specific syntax such as CriticMarkup, citations, and math is not processed within embedded `.md` tables.
 
 ### Stata dataset (.dta)
 
@@ -112,10 +112,12 @@ Embedded tables use the same table settings as inline tables. Place per-table di
 <!-- table-font-size: 9 -->
 <!-- table-font: Helvetica -->
 <!-- table-col-widths: 2 1 1 1 -->
+<!-- table-digits: 2 -->
+<!-- table-decimal-mark: midpoint -->
 <!-- embed: data/results.csv -->
 ```
 
-Available per-table directives for embeds are `table-font-size`, `table-font`, `table-orientation`, and `table-col-widths`. See the [Tables](specification.md#tables) section of the Specification for the full directive reference.
+Available per-table directives for embeds are `table-font-size`, `table-font`, `table-orientation`, `table-col-widths`, `table-digits`, `table-decimal-mark`, and `table-digit-grouping`. See the [Tables](specification.md#tables) section of the Specification for the full directive reference.
 
 ### Column widths
 
@@ -145,6 +147,9 @@ table-font: Helvetica
 table-font-size: 9
 table-col-widths: 2 1 1 1
 table-borders: horizontal
+table-digits: source
+table-decimal-mark: midpoint
+table-digit-grouping: thin-space
 ---
 ```
 

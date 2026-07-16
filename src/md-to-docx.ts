@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from 'fs';
 import { isAbsolute, join, resolve } from 'path';
 import { parseBibtex, BibtexEntry } from './bibtex-parser';
 import { parseFrontmatter, maskFrontmatter, Frontmatter, noteTypeToNumber, type ColorScheme, type CustomStyleDef, parseColWidths, expandColWidths, colWidthsToPct } from './frontmatter';
+import { formatTableNumbers, parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping, type TableDigits, type TableDecimalMark, type TableDigitGrouping } from './table-number-format';
 import { alertColorsByScheme, getDefaultColorScheme } from './alert-colors';
 import { ZoteroBiblData, zoteroStyleFullId } from './converter';
 import { isGfmDisallowedRawHtml, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from './gfm';
@@ -107,6 +108,9 @@ export interface MdToken {
   portraitClose?: true;     // sentinel: end of portrait section
   tableOrientation?: 'landscape' | 'portrait'; // table-only orientation from data-orientation
   tableColWidths?: number[] | 'equal' | 'auto'; // per-table column width ratios
+  tableDigits?: TableDigits;
+  tableDecimalMark?: TableDecimalMark;
+  tableDigitGrouping?: TableDigitGrouping;
   gridSourceColWidths?: number[]; // column char-widths inferred from +---+---+ source; persisted for round-trip fidelity and Word Online layout
   bibliographyMarker?: true;  // sentinel: <!-- references --> / <!-- bibliography --> placement marker
   customStyleOpen?: string;   // sentinel: start of custom style block (style name)
@@ -1200,6 +1204,13 @@ export function tableColWidthsProps(colWidths: Map<number, string>, defaultColWi
   return chunkCustomProps('MANUSCRIPT_TABLE_COL_WIDTHS_', JSON.stringify(mapping));
 }
 
+function tableNumberFormatProps(prefix: string, values: Map<number, string>): CustomPropEntry[] {
+  if (values.size === 0) return [];
+  const mapping: Record<string, string> = {};
+  for (const [idx, value] of values) mapping[String(idx)] = value;
+  return chunkCustomProps(prefix, JSON.stringify(mapping));
+}
+
 export function landscapeTableProps(landscapeTables: Set<number>): CustomPropEntry[] {
   if (landscapeTables.size === 0) return [];
   const mapping: Record<string, string> = {};
@@ -1297,7 +1308,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
   // grid-table placeholders which inflates the gaps computed from markdown-it
   // token maps.  Using the original source gives correct values.
   {
-    const origLines = markdown.split('\n');
+    const origLines = (originalText ?? markdown).split('\n');
     let searchFrom = 0; // track position to handle duplicate comment text
     for (const tok of result) {
       if (tok.type !== 'paragraph' || tok.runs.length !== 1 || tok.runs[0].type !== 'html_comment') continue;
@@ -1442,6 +1453,34 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
         if (warnings) warnings.push('Invalid <!-- table-col-widths: ' + cwMatch[1] + ' --> directive ignored.');
       }
     }
+  }
+
+  // Transfer numeric-format directives independently so explicit `source`
+  // values can cancel document-level defaults and survive DOCX round trips.
+  for (let i = result.length - 1; i >= 0; i--) {
+    if (result[i].type !== 'paragraph' || result[i].runs.length !== 1 || result[i].runs[0].type !== 'html_comment') continue;
+    const text = result[i].runs[0].text.trim();
+    const match = text.match(/^<!--\s*table-(digits|decimal-mark|digit-grouping):\s*(.+?)\s*-->$/i);
+    if (!match) continue;
+    let target = i + 1;
+    while (target < result.length && result[target].type === 'paragraph'
+        && result[target].runs.length === 1 && result[target].runs[0].type === 'html_comment') target++;
+    if (target >= result.length || result[target].type !== 'table') continue;
+    const key = match[1].toLowerCase();
+    const raw = match[2];
+    let valid = false;
+    if (key === 'digits') {
+      const value = parseTableDigits(raw);
+      if (value !== undefined) { result[target].tableDigits = value; valid = true; }
+    } else if (key === 'decimal-mark') {
+      const value = parseTableDecimalMark(raw);
+      if (value !== undefined) { result[target].tableDecimalMark = value; valid = true; }
+    } else {
+      const value = parseTableDigitGrouping(raw);
+      if (value !== undefined) { result[target].tableDigitGrouping = value; valid = true; }
+    }
+    if (valid) result.splice(i, 1);
+    else if (warnings) warnings.push('Invalid ' + text + ' directive ignored.');
   }
 
   // Pre-scan: warn on unclosed/orphaned/nested/crossed orientation directives with line numbers.
@@ -2070,6 +2109,9 @@ function convertTokens(tokens: any[], listLevel = 0, blockquoteLevel = 0, warnin
                 if (meta.font) tableToken.tableFont = meta.font;
                 if (meta.orientation) tableToken.tableOrientation = meta.orientation;
                 if (meta.colWidths) tableToken.tableColWidths = meta.colWidths;
+                if (meta.digits !== undefined) tableToken.tableDigits = meta.digits;
+                if (meta.decimalMark) tableToken.tableDecimalMark = meta.decimalMark;
+                if (meta.digitGrouping) tableToken.tableDigitGrouping = meta.digitGrouping;
                 if (meta.embedIdx !== undefined) tableToken.embedIdx = meta.embedIdx;
                 result.push(tableToken);
               }
@@ -2822,6 +2864,9 @@ export interface DocxGenState {
   tableFontSizes: Map<number, number>; // table index -> per-table font size (pt)
   tableFonts: Map<number, string>;     // table index -> per-table font name
   tableColWidths: Map<number, string>; // table index -> serialized col widths (e.g. "2 1 1" or "equal")
+  tableDigits: Map<number, string>;
+  tableDecimalMarks: Map<number, string>;
+  tableDigitGroupings: Map<number, string>;
   fontOverrides?: FontOverrides;       // document-level font overrides for table default resolution
   listIndent: 'tab' | 'spaces'; // indentation style for nested list items
   consecutiveReplyParaIds: Set<string>; // parent paraIds whose replies were in consecutive format
@@ -5968,6 +6013,9 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
           : token.tableColWidths.join(' ');
         state.tableColWidths.set(state.tableIndex, val);
       }
+      if (token.tableDigits !== undefined) state.tableDigits.set(state.tableIndex, String(token.tableDigits));
+      if (token.tableDecimalMark) state.tableDecimalMarks.set(state.tableIndex, token.tableDecimalMark);
+      if (token.tableDigitGrouping) state.tableDigitGroupings.set(state.tableIndex, token.tableDigitGrouping);
       // Table-only landscape: wrap with section breaks (skip if already in fence-based landscape)
       if (token.tableOrientation === 'landscape' && !state.inLandscapeSection && !state.inPortraitSection) {
         state.landscapeTables.add(state.tableIndex);
@@ -6102,6 +6150,25 @@ export async function convertMdToDocx(
     }
   }
 
+  // Numeric table formatting runs on the shared HTML/pipe/grid representation so
+  // preview and DOCX export apply exactly the same transformations.
+  bodyForParsing = preprocessGridTables(bodyForParsing);
+  const numberResult = formatTableNumbers(bodyForParsing, {
+    digits: frontmatter.tableDigits,
+    decimalMark: frontmatter.tableDecimalMark,
+    digitGrouping: frontmatter.tableDigitGrouping,
+  });
+  bodyForParsing = numberResult.output;
+  parseWarnings.push(...numberResult.warnings);
+	for (const [label, noteBody] of footnoteDefs) {
+		const noteNumberResult = formatTableNumbers(preprocessGridTables(noteBody), {
+			digits: frontmatter.tableDigits,
+			decimalMark: frontmatter.tableDecimalMark,
+			digitGrouping: frontmatter.tableDigitGrouping,
+		});
+		footnoteDefs.set(label, noteNumberResult.output);
+		parseWarnings.push(...noteNumberResult.warnings);
+	}
   const tokens = parseMd(bodyForParsing, parseWarnings, frontmatter.breaks ?? false, maskFrontmatter(markdown));
 
   // Compute inter-blockquote-group gap metadata from the original markdown
@@ -6281,6 +6348,9 @@ export async function convertMdToDocx(
     tableFontSizes: new Map(),
     tableFonts: new Map(),
     tableColWidths: new Map(),
+    tableDigits: new Map(),
+    tableDecimalMarks: new Map(),
+    tableDigitGroupings: new Map(),
     pipeTableAligned: new Map(),
     gridSourceColWidths: new Map(),
     fontOverrides,
@@ -6436,6 +6506,9 @@ export async function convertMdToDocx(
               : t.tableColWidths.join(' ');
             state.tableColWidths.set(state.tableIndex, val);
           }
+          if (t.tableDigits !== undefined) state.tableDigits.set(state.tableIndex, String(t.tableDigits));
+          if (t.tableDecimalMark) state.tableDecimalMarks.set(state.tableIndex, t.tableDecimalMark);
+          if (t.tableDigitGrouping) state.tableDigitGroupings.set(state.tableIndex, t.tableDigitGrouping);
           bodyXml += '<w:p>' + paragraphPPr + selfRefRun + '</w:p>';
           bodyXml += generateTable(t, state, options, bibEntries, citeprocEngine);
           if (t.embedIdx !== undefined && t.embedIdx < state.embedDirectives.length) {
@@ -6459,6 +6532,9 @@ export async function convertMdToDocx(
               : t.tableColWidths.join(' ');
             state.tableColWidths.set(state.tableIndex, val);
           }
+          if (t.tableDigits !== undefined) state.tableDigits.set(state.tableIndex, String(t.tableDigits));
+          if (t.tableDecimalMark) state.tableDecimalMarks.set(state.tableIndex, t.tableDecimalMark);
+          if (t.tableDigitGrouping) state.tableDigitGroupings.set(state.tableIndex, t.tableDigitGrouping);
           bodyXml += generateTable(t, state, options, bibEntries, citeprocEngine);
           if (t.embedIdx !== undefined && t.embedIdx < state.embedDirectives.length) {
             state.embedDirectiveMap.set(state.tableIndex, t.embedIdx + '\t' + state.embedDirectives[t.embedIdx]);
@@ -6668,6 +6744,9 @@ export async function convertMdToDocx(
     ? (typeof fontOverrides.tableColWidths === 'string' ? fontOverrides.tableColWidths : fontOverrides.tableColWidths.join(' '))
     : undefined;
   customProps.push(...tableColWidthsProps(state.tableColWidths, defaultColWidthsStr));
+  customProps.push(...tableNumberFormatProps('MANUSCRIPT_TABLE_DIGITS_', state.tableDigits));
+  customProps.push(...tableNumberFormatProps('MANUSCRIPT_TABLE_DECIMAL_MARKS_', state.tableDecimalMarks));
+  customProps.push(...tableNumberFormatProps('MANUSCRIPT_TABLE_DIGIT_GROUPINGS_', state.tableDigitGroupings));
   if (frontmatter.tableColWidths) {
     customProps.push({ name: 'MANUSCRIPT_DEFAULT_TABLE_COL_WIDTHS', value: defaultColWidthsStr! });
   }
@@ -6688,6 +6767,9 @@ export async function convertMdToDocx(
   if (frontmatter.tableBorders) {
     customProps.push({ name: 'MANUSCRIPT_TABLE_BORDERS', value: frontmatter.tableBorders });
   }
+  if (frontmatter.tableDigits !== undefined) customProps.push({ name: 'MANUSCRIPT_DEFAULT_TABLE_DIGITS', value: String(frontmatter.tableDigits) });
+  if (frontmatter.tableDecimalMark) customProps.push({ name: 'MANUSCRIPT_DEFAULT_TABLE_DECIMAL_MARK', value: frontmatter.tableDecimalMark });
+  if (frontmatter.tableDigitGrouping) customProps.push({ name: 'MANUSCRIPT_DEFAULT_TABLE_DIGIT_GROUPING', value: frontmatter.tableDigitGrouping });
   if (frontmatter.styles && Object.keys(frontmatter.styles).length > 0) {
     customProps.push(...chunkCustomProps('MANUSCRIPT_CUSTOM_STYLES_', JSON.stringify(frontmatter.styles)));
   }

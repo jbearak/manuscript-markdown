@@ -2264,6 +2264,16 @@ describe('Full MD→DOCX footnote generation', () => {
     expect(footnotesXml).toContain('A footnote.');
   });
 
+	it('formats tables in note definitions with document numeric defaults', async () => {
+		const md = '---\ntable-digits: 1\ntable-decimal-mark: midpoint\n---\n\nSee note[^1].\n\n[^1]: <table><tr><td>12.34</td></tr></table>';
+		const { docx } = await convertMdToDocx(md);
+		const JSZip = (await import('jszip')).default;
+		const zip = await JSZip.loadAsync(docx);
+		const footnotesXml = await zip.file('word/footnotes.xml')!.async('string');
+		expect(footnotesXml).toContain('12\u00b73');
+		expect(footnotesXml).not.toContain('12.34');
+	});
+
   it('endnote mode via notes: endnotes frontmatter', async () => {
     const md = '---\nnotes: endnotes\n---\n\nHello[^1] world.\n\n[^1]: An endnote.';
     const { docx, warnings } = await convertMdToDocx(md);

@@ -123,7 +123,7 @@ export function parseDta(
   const variables = metadata.variables;
   const headerCount = directive.headers;
 
-  let headerRows: string[][];
+  let headerRows: FormattedCell[][];
   let bodyStartIdx: number;
 
   if (headerCount !== undefined) {
@@ -141,13 +141,13 @@ export function parseDta(
   } else {
     // Default: variable names as header
     headerRows = [
-      variables.map(v => escapeHtml(v.name))
+      variables.map(v => ({ html: escapeHtml(v.name), kind: 'text' }))
     ];
     bodyStartIdx = 0;
   }
 
   // Build body rows
-  const bodyRows: string[][] = [];
+  const bodyRows: FormattedCell[][] = [];
   for (let r = bodyStartIdx; r < rows.length; r++) {
     bodyRows.push(
       rows[r].map((cell, c) =>
@@ -165,7 +165,7 @@ export function parseDta(
     for (const row of headerRows) {
       parts.push('<tr>');
       for (const cell of row) {
-        parts.push('<th>' + cell + '</th>');
+        parts.push('<th' + sourceAttrs(cell) + '>' + cell.html + '</th>');
       }
       parts.push('</tr>');
     }
@@ -177,7 +177,7 @@ export function parseDta(
     for (const row of bodyRows) {
       parts.push('<tr>');
       for (const cell of row) {
-        parts.push('<td>' + cell + '</td>');
+        parts.push('<td' + sourceAttrs(cell) + '>' + cell.html + '</td>');
       }
       parts.push('</tr>');
     }
@@ -188,11 +188,26 @@ export function parseDta(
   return parts.join('');
 }
 
+interface FormattedCell {
+  html: string;
+  kind: 'text' | 'number' | 'scientific' | 'date' | 'time' | 'label' | 'missing';
+  rawValue?: number;
+  sourceFormat?: string;
+}
+
+function sourceAttrs(cell: FormattedCell): string {
+  if (cell.kind === 'text') return '';
+  let attrs = ' data-mm-kind="' + cell.kind + '"';
+  if (cell.rawValue !== undefined) attrs += ' data-mm-raw="' + cell.rawValue + '"';
+  if (cell.sourceFormat) attrs += ' data-mm-format="' + escapeHtml(cell.sourceFormat) + '"';
+  return attrs;
+}
+
 function formatCell(
   cell: RowCell,
   variable: VariableInfo,
   valueLabelTables: Map<string, Map<number, string>>
-): string {
+): FormattedCell {
   const labelTable = variable.value_label_name
     ? valueLabelTables.get(variable.value_label_name)
     : undefined;
@@ -209,15 +224,14 @@ function formatCell(
     } else {
       display = cell.missing_type;
     }
-    return '<span class="mm-missing-value">'
-      + escapeHtml(display) + '</span>';
+    return { html: '<span class="mm-missing-value">' + escapeHtml(display) + '</span>', kind: 'missing' };
   }
 
   // Value label lookup (numeric values only)
   if (typeof cell === 'number' && labelTable) {
     const label = labelTable.get(cell);
     if (label !== undefined) {
-      return escapeHtml(label);
+      return { html: escapeHtml(label), kind: 'label' };
     }
   }
 
@@ -226,9 +240,17 @@ function formatCell(
     const formatted = apply_display_format(
       cell, variable.format
     );
-    return escapeHtml(formatted ?? String(cell));
+    const display = formatted ?? String(cell);
+    const kind = /^%t/i.test(variable.format) ? (/%tc/i.test(variable.format) ? 'time' : 'date')
+      : /e/i.test(variable.format) ? 'scientific' : 'number';
+    return {
+      html: escapeHtml(display),
+      kind,
+      ...(kind === 'number' || kind === 'scientific' ? { rawValue: cell } : {}),
+      sourceFormat: variable.format,
+    };
   }
 
   // String values
-  return escapeHtml(String(cell));
+  return { html: escapeHtml(String(cell)), kind: 'text' };
 }
