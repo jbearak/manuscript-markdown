@@ -1,4 +1,14 @@
 import { decodeNumericHtmlEntity } from './html-entities';
+import {
+  parseHtmlTableCellSourceKind,
+  parseTableDigits,
+  parseTableDecimalMark,
+  parseTableDigitGrouping,
+  type HtmlTableCellSourceKind,
+  type TableDigits,
+  type TableDecimalMark,
+  type TableDigitGrouping,
+} from './table-metadata';
 
 export interface HtmlTableRun {
   type: 'text' | 'softbreak' | 'hardbreak';
@@ -21,7 +31,7 @@ export interface HtmlTableCell {
 }
 
 export interface HtmlTableCellSource {
-  kind: 'text' | 'number' | 'percent' | 'scientific' | 'currency' | 'date' | 'time' | 'boolean' | 'identifier' | 'label' | 'missing';
+  kind: HtmlTableCellSourceKind;
   display: string;
   rawValue?: number;
   sourceFormat?: string;
@@ -39,9 +49,9 @@ export interface HtmlTableMeta {
   orientation?: 'landscape' | 'portrait'; // from data-orientation attribute
   colWidths?: number[] | 'equal' | 'auto'; // from data-col-widths attribute
   embedIdx?: number;   // from data-embed-idx attribute (set by embed preprocessing)
-  digits?: import('./table-number-format').TableDigits;
-  decimalMark?: import('./table-number-format').TableDecimalMark;
-  digitGrouping?: import('./table-number-format').TableDigitGrouping;
+  digits?: TableDigits;
+  decimalMark?: TableDecimalMark;
+  digitGrouping?: TableDigitGrouping;
 }
 
 /** Parse data-col-widths attribute value (inline to avoid circular dependency with frontmatter.ts). */
@@ -105,21 +115,17 @@ export function extractHtmlTables(html: string): HtmlTableMeta[] {
       }
       const digitsMatch = attrs.match(/data-digits\s*=\s*["']?([^\s"'>]+)["']?/i);
       if (digitsMatch) {
-        const raw = digitsMatch[1].toLowerCase();
-        const numeric = Number(raw);
-        const parsed = raw === 'source' ? 'source' : /^\d+$/.test(raw) && Number.isSafeInteger(numeric) && numeric <= 1000 ? numeric : undefined;
+        const parsed = parseTableDigits(digitsMatch[1]);
         if (parsed !== undefined) meta.digits = parsed;
       }
       const decimalMatch = attrs.match(/data-decimal-mark\s*=\s*["']?([^\s"'>]+)["']?/i);
       if (decimalMatch) {
-        const raw = decimalMatch[1].toLowerCase();
-        const parsed = raw === 'source' || raw === 'point' || raw === 'comma' || raw === 'midpoint' ? raw : undefined;
+        const parsed = parseTableDecimalMark(decimalMatch[1]);
         if (parsed) meta.decimalMark = parsed;
       }
       const groupingMatch = attrs.match(/data-digit-grouping\s*=\s*["']?([^\s"'>]+)["']?/i);
       if (groupingMatch) {
-        const raw = groupingMatch[1].toLowerCase();
-        const parsed = raw === 'source' || raw === 'none' || raw === 'comma' || raw === 'period' || raw === 'space' || raw === 'thin-space' ? raw : undefined;
+        const parsed = parseTableDigitGrouping(groupingMatch[1]);
         if (parsed) meta.digitGrouping = parsed;
       }
       tables.push(meta);
@@ -164,9 +170,7 @@ function extractHtmlTableCells(rowHtml: string): Array<{ runs: HtmlTableRun[]; i
     const rowspanMatch = attrs.match(/rowspan\s*=\s*["']?(\d+)/i);
     const colspan = colspanMatch ? parseInt(colspanMatch[1], 10) : undefined;
     const rowspan = rowspanMatch ? parseInt(rowspanMatch[1], 10) : undefined;
-    const kindRaw = extractAttr(attrs, 'data-mm-kind');
-    const validKinds: HtmlTableCellSource['kind'][] = ['text', 'number', 'percent', 'scientific', 'currency', 'date', 'time', 'boolean', 'identifier', 'label', 'missing'];
-    const kind = validKinds.includes(kindRaw as HtmlTableCellSource['kind']) ? kindRaw as HtmlTableCellSource['kind'] : undefined;
+    const kind = parseHtmlTableCellSourceKind(extractAttr(attrs, 'data-mm-kind'));
     const rawValueText = extractAttr(attrs, 'data-mm-raw');
     const rawValue = rawValueText !== undefined ? Number(rawValueText) : undefined;
     const sourceFormat = extractAttr(attrs, 'data-mm-format');

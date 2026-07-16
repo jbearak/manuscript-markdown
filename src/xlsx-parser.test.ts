@@ -234,6 +234,42 @@ describe('parseXlsx', () => {
     expect(meta.rows[1].cells[1].source).toMatchObject({ kind: 'percent', rawValue: 0.12345 });
   });
 
+  it('classifies boolean and scientific cells', () => {
+    const ws = XLSX.utils.aoa_to_sheet([['Flag', 'Value'], [true, 12345]]);
+    ws.B2.z = '0.00E+00';
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+    const meta = parseXlsx(new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' })));
+    expect(meta.rows[1].cells[0].source?.kind).toBe('boolean');
+    expect(meta.rows[1].cells[1].source).toMatchObject({ kind: 'scientific', rawValue: 12345 });
+  });
+
+  it('preserves cell-kind precedence for overlapping formats', () => {
+    const ws = XLSX.utils.aoa_to_sheet([
+      ['Boolean', 'Date', 'Percent', 'Scientific', 'Currency', 'Identifier', 'Number'],
+      [true, 2, 0.12, 1234, 12, 12, 12],
+    ]);
+    ws.A2.z = '0.00';
+    ws.B2.z = 'mm-dd%';
+    ws.C2.z = '0.00E+00%';
+    ws.D2.z = '$0.00E+00';
+    ws.E2.z = '$0000';
+    ws.F2.z = '0000';
+    ws.G2.z = '0';
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+    const meta = parseXlsx(new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' })));
+    expect(meta.rows[1].cells.map(cell => cell.source?.kind)).toEqual([
+      'boolean',
+      'date',
+      'percent',
+      'scientific',
+      'currency',
+      'identifier',
+      'number',
+    ]);
+  });
+
 	it('classifies multi-part zero masks as identifiers', () => {
     const ws = XLSX.utils.aoa_to_sheet([['ID'], [123456789]]);
     ws.A2.z = '000-00-0000';

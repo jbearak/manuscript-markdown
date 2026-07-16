@@ -1,11 +1,43 @@
 import * as XLSX from '@e965/xlsx';
-import type { HtmlTableMeta, HtmlTableRow, HtmlTableCell, HtmlTableRun } from './html-table-parser';
+import type { HtmlTableMeta, HtmlTableRow, HtmlTableCell, HtmlTableRun, HtmlTableCellSource } from './html-table-parser';
 import { isCurrencySourceFormat, selectExcelFormatSection, stripExcelFormatLiterals } from './table-number-format';
 
 export interface XlsxParseOptions {
   sheet?: string;   // sheet name or 1-based index
   range?: string;   // cell range (A1:F20) or named range
   headers?: number; // number of header rows (default 1)
+}
+
+function classifyXlsxCellKind(cell: XLSX.CellObject, sourceFormat: string | undefined): HtmlTableCellSource['kind'] {
+  if (cell.t === 'b') return 'boolean';
+
+  const activeFormat = sourceFormat && typeof cell.v === 'number'
+    ? selectExcelFormatSection(sourceFormat, cell.v)
+    : sourceFormat ?? '';
+  let semanticSourceFormat = activeFormat;
+  let semanticFormat = stripExcelFormatLiterals(semanticSourceFormat);
+  let semanticValue = typeof cell.v === 'number' ? cell.v : 1;
+  const activeIsDate = Boolean(activeFormat && (XLSX.SSF as any).is_date?.(activeFormat));
+
+  // A placeholder-only zero section retains the positive section's semantics.
+  if (cell.v === 0 && !activeIsDate && !/[0#?]/.test(semanticFormat) && sourceFormat) {
+    semanticValue = 1;
+    semanticSourceFormat = selectExcelFormatSection(sourceFormat, semanticValue);
+    semanticFormat = stripExcelFormatLiterals(semanticSourceFormat);
+  }
+
+  if (cell.t === 'd' || (cell.t === 'n' && semanticSourceFormat && Boolean((XLSX.SSF as any).is_date?.(semanticSourceFormat)))) {
+    return 'date';
+  }
+  if (cell.t !== 'n') return 'text';
+  if (sourceFormat && /%/.test(semanticFormat)) return 'percent';
+  if (sourceFormat && /[Ee][+-]?0+/.test(semanticFormat)) return 'scientific';
+  if (sourceFormat && isCurrencySourceFormat(sourceFormat, semanticValue)) return 'currency';
+  if (sourceFormat) {
+    const mask = semanticFormat.trim().replace(/[()]/g, '').replace(/^[+-]+|[+-]+$/g, '');
+    if (/^0{2,}$/.test(mask) || /^0+(?:[- /]0+)+$/.test(mask)) return 'identifier';
+  }
+  return 'number';
 }
 
 /**
@@ -67,29 +99,7 @@ export function parseXlsx(data: Uint8Array, options?: XlsxParseOptions): HtmlTab
 
       if (cell) {
         const sourceFormat = typeof cell.z === 'string' ? cell.z : undefined;
-		const activeFormat = sourceFormat && typeof cell.v === 'number' ? selectExcelFormatSection(sourceFormat, cell.v) : sourceFormat ?? '';
-		let semanticSourceFormat = activeFormat;
-		let semanticFormat = stripExcelFormatLiterals(semanticSourceFormat);
-		let semanticValue = typeof cell.v === 'number' ? cell.v : 1;
-		const activeIsDate = Boolean(activeFormat && (XLSX.SSF as any).is_date?.(activeFormat));
-		if (cell.v === 0 && !activeIsDate && !/[0#?]/.test(semanticFormat) && sourceFormat) {
-			semanticValue = 1;
-			semanticSourceFormat = selectExcelFormatSection(sourceFormat, semanticValue);
-			semanticFormat = stripExcelFormatLiterals(semanticSourceFormat);
-		}
-        let kind: NonNullable<HtmlTableCell['source']>['kind'] = 'text';
-        if (cell.t === 'b') kind = 'boolean';
-		else if (cell.t === 'd' || (cell.t === 'n' && semanticSourceFormat && Boolean((XLSX.SSF as any).is_date?.(semanticSourceFormat)))) kind = 'date';
-        else if (cell.t === 'n') {
-			if (sourceFormat && /%/.test(semanticFormat)) kind = 'percent';
-			else if (sourceFormat && /[Ee][+-]?0+/.test(semanticFormat)) kind = 'scientific';
-			else if (sourceFormat && isCurrencySourceFormat(sourceFormat, semanticValue)) kind = 'currency';
-			else if (sourceFormat && (() => {
-				const mask = semanticFormat.trim().replace(/[()]/g, '').replace(/^[+-]+|[+-]+$/g, '');
-				return /^0{2,}$/.test(mask) || /^0+(?:[- /]0+)+$/.test(mask);
-			})()) kind = 'identifier';
-          else kind = 'number';
-        }
+        const kind = classifyXlsxCellKind(cell, sourceFormat);
         tableCell.source = {
           kind,
           display: text,

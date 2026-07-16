@@ -14,7 +14,7 @@ import { pixelsToEmu, isSupportedImageFormat, getImageContentType, readImageDime
 import { preprocessGridTables, GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData } from './grid-table-preprocess';
 import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
-import { extractHtmlTables, type HtmlTableRow, type HtmlTableRun, type HtmlTableMeta } from './html-table-parser';
+import { extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
 export { preprocessGridTables } from './grid-table-preprocess';
 export { extractHtmlTables } from './html-table-parser';
 
@@ -2901,6 +2901,25 @@ export interface DocxGenState {
   listBlockIndex: number;          // counter for list blocks (consecutive groups of list_items)
   embedDirectiveMap: Map<number, string>; // table index → original embed directive text
   embedDirectives: string[]; // ordered list of embed directive texts from preprocessing
+}
+
+function recordTableMetadata(token: MdToken, state: DocxGenState): void {
+  const tableIndex = state.tableIndex;
+
+  if (token.sourceFormat) state.tableFormats.set(tableIndex, token.sourceFormat);
+  if (token.pipeAligned) state.pipeTableAligned.set(tableIndex, true);
+  if (token.gridSourceColWidths) state.gridSourceColWidths.set(tableIndex, token.gridSourceColWidths);
+  if (token.tableFontSize !== undefined) state.tableFontSizes.set(tableIndex, token.tableFontSize);
+  if (token.tableFont) state.tableFonts.set(tableIndex, token.tableFont);
+  if (token.tableColWidths) {
+    const value = token.tableColWidths === 'equal' ? 'equal'
+      : token.tableColWidths === 'auto' ? 'auto'
+      : token.tableColWidths.join(' ');
+    state.tableColWidths.set(tableIndex, value);
+  }
+  if (token.tableDigits !== undefined) state.tableDigits.set(tableIndex, String(token.tableDigits));
+  if (token.tableDecimalMark) state.tableDecimalMarks.set(tableIndex, token.tableDecimalMark);
+  if (token.tableDigitGrouping) state.tableDigitGroupings.set(tableIndex, token.tableDigitGrouping);
 }
 
 interface CommentEntry {
@@ -5992,30 +6011,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       state.listBlockIndex++;
     }
     if (token.type === 'table') {
-      if (token.sourceFormat) {
-        state.tableFormats.set(state.tableIndex, token.sourceFormat);
-      }
-      if (token.pipeAligned) {
-        state.pipeTableAligned.set(state.tableIndex, true);
-      }
-      if (token.gridSourceColWidths) {
-        state.gridSourceColWidths.set(state.tableIndex, token.gridSourceColWidths);
-      }
-      if (token.tableFontSize !== undefined) {
-        state.tableFontSizes.set(state.tableIndex, token.tableFontSize);
-      }
-      if (token.tableFont) {
-        state.tableFonts.set(state.tableIndex, token.tableFont);
-      }
-      if (token.tableColWidths) {
-        const val = token.tableColWidths === 'equal' ? 'equal'
-          : token.tableColWidths === 'auto' ? 'auto'
-          : token.tableColWidths.join(' ');
-        state.tableColWidths.set(state.tableIndex, val);
-      }
-      if (token.tableDigits !== undefined) state.tableDigits.set(state.tableIndex, String(token.tableDigits));
-      if (token.tableDecimalMark) state.tableDecimalMarks.set(state.tableIndex, token.tableDecimalMark);
-      if (token.tableDigitGrouping) state.tableDigitGroupings.set(state.tableIndex, token.tableDigitGrouping);
+      recordTableMetadata(token, state);
       // Table-only landscape: wrap with section breaks (skip if already in fence-based landscape)
       if (token.tableOrientation === 'landscape' && !state.inLandscapeSection && !state.inPortraitSection) {
         state.landscapeTables.add(state.tableIndex);
@@ -6495,20 +6491,7 @@ export async function convertMdToDocx(
       if (isFirstContent) {
         isFirstContent = false;
         if (t.type === 'table') {
-          if (t.sourceFormat) state.tableFormats.set(state.tableIndex, t.sourceFormat);
-          if (t.pipeAligned) state.pipeTableAligned.set(state.tableIndex, true);
-          if (t.gridSourceColWidths) state.gridSourceColWidths.set(state.tableIndex, t.gridSourceColWidths);
-          if (t.tableFontSize !== undefined) state.tableFontSizes.set(state.tableIndex, t.tableFontSize);
-          if (t.tableFont) state.tableFonts.set(state.tableIndex, t.tableFont);
-          if (t.tableColWidths) {
-            const val = t.tableColWidths === 'equal' ? 'equal'
-              : t.tableColWidths === 'auto' ? 'auto'
-              : t.tableColWidths.join(' ');
-            state.tableColWidths.set(state.tableIndex, val);
-          }
-          if (t.tableDigits !== undefined) state.tableDigits.set(state.tableIndex, String(t.tableDigits));
-          if (t.tableDecimalMark) state.tableDecimalMarks.set(state.tableIndex, t.tableDecimalMark);
-          if (t.tableDigitGrouping) state.tableDigitGroupings.set(state.tableIndex, t.tableDigitGrouping);
+          recordTableMetadata(t, state);
           bodyXml += '<w:p>' + paragraphPPr + selfRefRun + '</w:p>';
           bodyXml += generateTable(t, state, options, bibEntries, citeprocEngine);
           if (t.embedIdx !== undefined && t.embedIdx < state.embedDirectives.length) {
@@ -6521,20 +6504,7 @@ export async function convertMdToDocx(
         }
       } else {
         if (t.type === 'table') {
-          if (t.sourceFormat) state.tableFormats.set(state.tableIndex, t.sourceFormat);
-          if (t.pipeAligned) state.pipeTableAligned.set(state.tableIndex, true);
-          if (t.gridSourceColWidths) state.gridSourceColWidths.set(state.tableIndex, t.gridSourceColWidths);
-          if (t.tableFontSize !== undefined) state.tableFontSizes.set(state.tableIndex, t.tableFontSize);
-          if (t.tableFont) state.tableFonts.set(state.tableIndex, t.tableFont);
-          if (t.tableColWidths) {
-            const val = t.tableColWidths === 'equal' ? 'equal'
-              : t.tableColWidths === 'auto' ? 'auto'
-              : t.tableColWidths.join(' ');
-            state.tableColWidths.set(state.tableIndex, val);
-          }
-          if (t.tableDigits !== undefined) state.tableDigits.set(state.tableIndex, String(t.tableDigits));
-          if (t.tableDecimalMark) state.tableDecimalMarks.set(state.tableIndex, t.tableDecimalMark);
-          if (t.tableDigitGrouping) state.tableDigitGroupings.set(state.tableIndex, t.tableDigitGrouping);
+          recordTableMetadata(t, state);
           bodyXml += generateTable(t, state, options, bibEntries, citeprocEngine);
           if (t.embedIdx !== undefined && t.embedIdx < state.embedDirectives.length) {
             state.embedDirectiveMap.set(state.tableIndex, t.embedIdx + '\t' + state.embedDirectives[t.embedIdx]);
