@@ -2,16 +2,28 @@ import { GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData } from './grid-table-
 import { extractHtmlTables, type HtmlTableCellSource } from './html-table-parser';
 import { computeCodeRegions } from './code-regions';
 import { decodeNumericHtmlEntity } from './html-entities';
+import {
+  MAX_TABLE_DIGITS,
+  parseHtmlTableCellSourceKind,
+  parseTableDigits,
+  parseTableDecimalMark,
+  parseTableDigitGrouping,
+  type TableDigits,
+  type TableDecimalMark,
+  type TableDigitGrouping,
+  type TableNumberFormat,
+} from './table-metadata';
 
-export type TableDigits = number | 'source';
-export type TableDecimalMark = 'source' | 'point' | 'comma' | 'midpoint';
-export type TableDigitGrouping = 'source' | 'none' | 'comma' | 'period' | 'space' | 'thin-space';
-
-export interface TableNumberFormat {
-  digits?: TableDigits;
-  decimalMark?: TableDecimalMark;
-  digitGrouping?: TableDigitGrouping;
-}
+export {
+  MAX_TABLE_DIGITS,
+  parseTableDigits,
+  parseTableDecimalMark,
+  parseTableDigitGrouping,
+  type TableDigits,
+  type TableDecimalMark,
+  type TableDigitGrouping,
+  type TableNumberFormat,
+} from './table-metadata';
 
 export interface TableNumberFormatResult {
   output: string;
@@ -29,31 +41,6 @@ const DIRECTIVE_RE = /^\s*<!--\s*table-(digits|decimal-mark|digit-grouping):\s*(
 const NUMERIC_TOKEN_RE = /[+-]?(?:\d{1,3}(?:[ ,.\u00a0\u202f]\d{3})+(?!\d)|\d+)(?:[.,\u00b7]\d+)?(?:[eE][+-]?\d+)?(?:[ \u00a0\u202f]?%)?/g;
 const ALLOWED_REMAINDER_RE = /^[\s()[\]{}$\u00a3\u20ac\u00a5+\-\u2013\u2014\u00b1,;:/]*$/;
 const CURRENCY_CODE_RE = /\b(?:USD|EUR|GBP|JPY|CHF|CAD|AUD|NZD|CNY|RMB|INR|KRW|RUB|BRL|MXN|ZAR|SEK|NOK|DKK|PLN|CZK|HUF|TRY|ILS|AED|SAR|SGD|HKD|TWD|THB)\b/;
-// Formatting expands each cell by this value, so an explicit bound prevents a
-// malformed document setting from allocating an unbounded output string.
-export const MAX_TABLE_DIGITS = 1000;
-
-export function parseTableDigits(raw: string): TableDigits | undefined {
-  const value = raw.trim().toLowerCase();
-  if (value === 'source') return 'source';
-  if (/^\d+$/.test(value)) {
-    const parsed = Number(value);
-    if (Number.isSafeInteger(parsed) && parsed <= MAX_TABLE_DIGITS) return parsed;
-  }
-  return undefined;
-}
-
-export function parseTableDecimalMark(raw: string): TableDecimalMark | undefined {
-  const value = raw.trim().toLowerCase();
-  return value === 'source' || value === 'point' || value === 'comma' || value === 'midpoint'
-    ? value : undefined;
-}
-
-export function parseTableDigitGrouping(raw: string): TableDigitGrouping | undefined {
-  const value = raw.trim().toLowerCase();
-  return value === 'source' || value === 'none' || value === 'comma' || value === 'period'
-    || value === 'space' || value === 'thin-space' ? value : undefined;
-}
 
 export function validateTableNumberFormat(format: TableNumberFormat): string | undefined {
   if (typeof format.digits === 'number' && (!Number.isInteger(format.digits) || format.digits < 0 || format.digits > MAX_TABLE_DIGITS)) {
@@ -509,9 +496,8 @@ function parseHtmlCellSource(openingTag: string): HtmlTableCellSource | undefine
 		const match = openingTag.match(new RegExp('\\b' + name + '\\s*=\\s*(?:"([^"]*)"|\\\'([^\\\']*)\\\'|([^\\s>]+))', 'i'));
 		return match ? decodeHtmlText(match[1] ?? match[2] ?? match[3]) : undefined;
 	};
-	const kind = attr('data-mm-kind') as HtmlTableCellSource['kind'] | undefined;
-	const valid = ['text', 'number', 'percent', 'scientific', 'currency', 'date', 'time', 'boolean', 'identifier', 'label', 'missing'];
-	if (!kind || !valid.includes(kind)) return undefined;
+	const kind = parseHtmlTableCellSourceKind(attr('data-mm-kind'));
+	if (!kind) return undefined;
 	const rawText = attr('data-mm-raw');
 	const rawValue = rawText === undefined ? undefined : Number(rawText);
 	return { kind, display: '', ...(rawValue !== undefined && Number.isFinite(rawValue) ? { rawValue } : {}),

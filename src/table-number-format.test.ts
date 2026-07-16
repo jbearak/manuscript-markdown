@@ -111,6 +111,11 @@ describe('table number formatting', () => {
     expect(formatTableNumbers('<table data-digits=1><tr><td>12.34</td></tr></table>', { digits: 3 }).output).toContain('12.3');
   });
 
+  test('applies all HTML table number-format attributes together', () => {
+    const html = '<table data-digits="2" data-decimal-mark="midpoint" data-digit-grouping="thin-space"><tr><td>1234.5</td></tr></table>';
+    expect(formatTableNumbers(html, {}).output).toContain('>1 234·50<');
+  });
+
   test('uses typed source format to disambiguate grouping-only changes', () => {
     const html = '<table><tr><td data-mm-kind="number" data-mm-raw="1234" data-mm-format="#,##0">1,234</td></tr></table>';
     expect(formatTableNumbers(html, { digitGrouping: 'none' }).output).toContain('>1234<');
