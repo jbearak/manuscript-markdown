@@ -1475,3 +1475,31 @@ describe('Embed preview document resolution', () => {
     expect(html).not.toContain('Evan');
   });
 });
+
+describe('Table numeric formatting preview', () => {
+  it('applies document defaults and per-table source cancellation', () => {
+    const input = [
+      '---', 'table-digits: 2', 'table-decimal-mark: midpoint', '---', '',
+      '| Value |', '| --- |', '| 12.3 |', '',
+      '<!-- table-digits: source -->', '| Value |', '| --- |', '| 4.50 |',
+    ].join('\n');
+    const html = renderWithPlugin(input);
+    expect(html).toContain('12\u00b730');
+    expect(html).toContain('4\u00b750');
+  });
+
+  it('honors HTML table data attributes', () => {
+    const html = renderWithPlugin('<table data-digits="1" data-decimal-mark="comma"><tr><td>12.34</td></tr></table>');
+    expect(html).toContain('12,3');
+  });
+
+  it('formats embedded CSV and honors per-table overrides', () => {
+    const resolver = makeEmbedResolver({ '/doc/data.csv': 'Value\n12.30' });
+    const input = [
+      '---', 'table-digits: 1', 'table-decimal-mark: midpoint', '---', '',
+      '<!-- table-digits: source -->', '<!-- embed: data.csv -->',
+    ].join('\n');
+    const html = renderWithEmbedSetup(input, resolver, { currentDocument: { fsPath: '/doc/file.md' } });
+    expect(html).toContain('12\u00b730');
+  });
+});

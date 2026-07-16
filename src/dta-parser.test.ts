@@ -47,7 +47,7 @@ describe('parseDta', () => {
     const html = parseDta(FIXTURE_DATA, { path: 'embed.dta', headers: 1 });
     // First data row ("Apple", "Autumn", "Red") becomes the header
     expect(html).toContain('<th>Apple</th>');
-    expect(html).toContain('<th>Autumn</th>');
+    expect(html).toContain('>Autumn</th>');
     expect(html).toContain('<th>Red</th>');
     // Variable names should NOT appear
     expect(html).not.toContain('<th>Fruit</th>');

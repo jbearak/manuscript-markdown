@@ -1,5 +1,6 @@
 import * as XLSX from '@e965/xlsx';
 import type { HtmlTableMeta, HtmlTableRow, HtmlTableCell, HtmlTableRun } from './html-table-parser';
+import { isCurrencySourceFormat, selectExcelFormatSection, stripExcelFormatLiterals } from './table-number-format';
 
 export interface XlsxParseOptions {
   sheet?: string;   // sheet name or 1-based index
@@ -15,7 +16,7 @@ export interface XlsxParseOptions {
  * Merged cells produce colspan/rowspan on the top-left cell.
  */
 export function parseXlsx(data: Uint8Array, options?: XlsxParseOptions): HtmlTableMeta {
-  const wb = XLSX.read(data, { type: 'array' });
+	const wb = XLSX.read(data, { type: 'array', cellNF: true, cellDates: false });
   const headerCount = options?.headers ?? 1;
 
   // --- Sheet resolution ---
@@ -60,9 +61,42 @@ export function parseXlsx(data: Uint8Array, options?: XlsxParseOptions): HtmlTab
       if (coveredCells.has(cellRef)) continue;
 
       const cell = ws[cellRef];
-      const text = cell ? String(cell.v ?? '') : '';
+      const text = cell ? (cell.w ?? XLSX.utils.format_cell(cell) ?? String(cell.v ?? '')) : '';
       const runs: HtmlTableRun[] = [{ type: 'text', text }];
       const tableCell: HtmlTableCell = { runs };
+
+      if (cell) {
+        const sourceFormat = typeof cell.z === 'string' ? cell.z : undefined;
+		const activeFormat = sourceFormat && typeof cell.v === 'number' ? selectExcelFormatSection(sourceFormat, cell.v) : sourceFormat ?? '';
+		let semanticSourceFormat = activeFormat;
+		let semanticFormat = stripExcelFormatLiterals(semanticSourceFormat);
+		let semanticValue = typeof cell.v === 'number' ? cell.v : 1;
+		const activeIsDate = Boolean(activeFormat && (XLSX.SSF as any).is_date?.(activeFormat));
+		if (cell.v === 0 && !activeIsDate && !/[0#?]/.test(semanticFormat) && sourceFormat) {
+			semanticValue = 1;
+			semanticSourceFormat = selectExcelFormatSection(sourceFormat, semanticValue);
+			semanticFormat = stripExcelFormatLiterals(semanticSourceFormat);
+		}
+        let kind: NonNullable<HtmlTableCell['source']>['kind'] = 'text';
+        if (cell.t === 'b') kind = 'boolean';
+		else if (cell.t === 'd' || (cell.t === 'n' && semanticSourceFormat && Boolean((XLSX.SSF as any).is_date?.(semanticSourceFormat)))) kind = 'date';
+        else if (cell.t === 'n') {
+			if (sourceFormat && /%/.test(semanticFormat)) kind = 'percent';
+			else if (sourceFormat && /[Ee][+-]?0+/.test(semanticFormat)) kind = 'scientific';
+			else if (sourceFormat && isCurrencySourceFormat(sourceFormat, semanticValue)) kind = 'currency';
+			else if (sourceFormat && (() => {
+				const mask = semanticFormat.trim().replace(/[()]/g, '').replace(/^[+-]+|[+-]+$/g, '');
+				return /^0{2,}$/.test(mask) || /^0+(?:[- /]0+)+$/.test(mask);
+			})()) kind = 'identifier';
+          else kind = 'number';
+        }
+        tableCell.source = {
+          kind,
+          display: text,
+          ...(typeof cell.v === 'number' && kind !== 'date' && kind !== 'identifier' ? { rawValue: cell.v } : {}),
+          ...(sourceFormat ? { sourceFormat } : {}),
+        };
+      }
 
       const mergeInfo = mergeMap.get(cellRef);
       if (mergeInfo) {

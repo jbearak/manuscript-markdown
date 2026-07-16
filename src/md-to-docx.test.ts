@@ -416,6 +416,25 @@ describe('parseMd HTML tables', () => {
 });
 
 describe('parseMd table-col-widths directive', () => {
+  it('keeps the closest duplicate numeric-format directive', () => {
+    const markdown = [
+      '<!-- table-digits: 1 -->', '<!-- table-digits: 3 -->',
+      '<!-- table-decimal-mark: comma -->', '<!-- table-decimal-mark: midpoint -->',
+      '<!-- table-digit-grouping: comma -->', '<!-- table-digit-grouping: thin-space -->',
+      '| V |', '| --- |', '| 1234.5678 |',
+    ].join('\n');
+    const table = parseMd(markdown).find(token => token.type === 'table');
+    expect(table?.tableDigits).toBe(3);
+    expect(table?.tableDecimalMark).toBe('midpoint');
+    expect(table?.tableDigitGrouping).toBe('thin-space');
+  });
+
+  it('reports an invalid numeric-format directive once during conversion', async () => {
+    const markdown = '<!-- table-digits: nope -->\n| V |\n| --- |\n| 12.34 |';
+    const result = await convertMdToDocx(markdown);
+    expect(result.warnings.filter(warning => warning.includes('table-digits: nope'))).toHaveLength(1);
+  });
+
   it('transfers <!-- table-col-widths --> directive to table token', () => {
     const md = '<!-- table-col-widths: 2 1 1 -->\n\n| A | B | C |\n|---|---|---|\n| 1 | 2 | 3 |';
     const tokens = parseMd(md);
@@ -2263,6 +2282,16 @@ describe('Full MD→DOCX footnote generation', () => {
     expect(footnotesXml).toContain('w:footnoteRef');
     expect(footnotesXml).toContain('A footnote.');
   });
+
+	it('formats tables in note definitions with document numeric defaults', async () => {
+		const md = '---\ntable-digits: 1\ntable-decimal-mark: midpoint\n---\n\nSee note[^1].\n\n[^1]: <table><tr><td>12.34</td></tr></table>';
+		const { docx } = await convertMdToDocx(md);
+		const JSZip = (await import('jszip')).default;
+		const zip = await JSZip.loadAsync(docx);
+		const footnotesXml = await zip.file('word/footnotes.xml')!.async('string');
+		expect(footnotesXml).toContain('12\u00b73');
+		expect(footnotesXml).not.toContain('12.34');
+	});
 
   it('endnote mode via notes: endnotes frontmatter', async () => {
     const md = '---\nnotes: endnotes\n---\n\nHello[^1] world.\n\n[^1]: An endnote.';

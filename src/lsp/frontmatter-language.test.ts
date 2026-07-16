@@ -23,6 +23,7 @@ describe('schema completeness', () => {
 		'header-font', 'header-font-size', 'header-font-style',
 		'title-font', 'title-font-size', 'title-font-style',
 		'table-font', 'table-font-size', 'table-col-widths', 'table-borders',
+		'table-digits', 'table-decimal-mark', 'table-digit-grouping',
 		'code-background-color', 'code-font-color', 'code-block-inset',
 		'pipe-table-max-line-width', 'grid-table-max-line-width',
 		'blockquote-style', 'colors', 'styles', 'breaks',
@@ -455,6 +456,14 @@ describe('validateFrontmatter', () => {
 		expect(diags.length).toBe(1);
 		expect(diags[0].severity).toBe('error');
 		expect(diags[0].message).toContain('horizontal');
+	});
+
+	test('validates numeric table settings and separator collisions', async () => {
+		const valid = await validateFrontmatter('---\ntable-digits: 0\ntable-decimal-mark: midpoint\ntable-digit-grouping: thin-space\n---\n', stubCallbacks);
+		expect(valid).toEqual([]);
+		const invalid = await validateFrontmatter('---\ntable-digits: 1001\ntable-decimal-mark: comma\ntable-digit-grouping: comma\n---\n', stubCallbacks);
+		expect(invalid.some(d => d.message.includes('0 to 1000'))).toBe(true);
+		expect(invalid.some(d => d.message.includes('same character'))).toBe(true);
 	});
 
 	test('invalid timezone format produces error', async () => {
