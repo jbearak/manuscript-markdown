@@ -2717,6 +2717,17 @@ const DEFAULT_MARGINS = 'w:top="1440" w:right="1440" w:bottom="1440" w:left="144
 
 interface PageSize { w: number; h: number }
 
+/** Return the writable width of the current section in CSS pixels (96 px/in). */
+function pageContentWidthPx(state: DocxGenState): number {
+  const pgSz = parseTemplatePgSz(state.templateSectPr);
+  const margins = parseTemplateMargins(state.templateSectPr);
+  const left = parseInt(margins.match(/w:left="(\d+)"/)?.[1] ?? '1440', 10);
+  const right = parseInt(margins.match(/w:right="(\d+)"/)?.[1] ?? '1440', 10);
+  const pageWidthTwips = state.inLandscapeSection ? pgSz.h : pgSz.w;
+  // 1 inch = 1440 twips = 96 CSS pixels.
+  return Math.max(1, (pageWidthTwips - left - right) / 15);
+}
+
 /** Parse w:pgSz from a sectPr XML string, defaulting to US Letter portrait. */
 export function parseTemplatePgSz(sectPrXml: string | undefined): PageSize {
   if (!sectPrXml) return { w: DEFAULT_PAGE_W, h: DEFAULT_PAGE_H };
@@ -5056,6 +5067,15 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
           if (!width) width = 100;
           if (!height) height = 100;
         }
+      }
+      // Word does not automatically constrain an inline drawing to the page.
+      // Downscale oversized images to the current section's writable width while
+      // preserving their aspect ratio; never enlarge smaller authored images.
+      const maxWidth = pageContentWidthPx(state);
+      if (width > maxWidth) {
+        const scale = maxWidth / width;
+        width = maxWidth;
+        height *= scale;
       }
       const cx = pixelsToEmu(width);
       const cy = pixelsToEmu(height);
