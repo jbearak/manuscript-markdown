@@ -240,7 +240,7 @@ describe('image-roundtrip properties', () => {
 
     await fc.assert(
       fc.asyncProperty(
-        fc.integer({ min: 1, max: 5000 }),
+        fc.integer({ min: 1, max: 624 }),
         fc.integer({ min: 1, max: 5000 }),
         async (w, h) => {
           const { dir, cleanup } = setupTempImage();
@@ -261,6 +261,46 @@ describe('image-roundtrip properties', () => {
       ),
       { numRuns: 20 }
     );
+  });
+
+  it('autofits an oversized image to the page text width and preserves its aspect ratio', async () => {
+    const { convertMdToDocx } = await import('./md-to-docx');
+    const JSZip = (await import('jszip')).default;
+
+    const { dir, cleanup } = setupTempImage();
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      fs.writeFileSync(path.join(dir, 'wide.svg'), '<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600"></svg>');
+      const md = '![wide figure](wide.svg)';
+      const { docx } = await convertMdToDocx(md, { sourceDir: dir });
+      const zip = await JSZip.loadAsync(docx);
+      const documentXml = await zip.file('word/document.xml')!.async('string');
+
+      // US Letter with 1-inch margins has 6.5 inches = 624 px of writable width.
+      expect(documentXml).toContain('<wp:extent cx="5943600" cy="2971800"/>');
+      expect(documentXml).toContain('<a:ext cx="5943600" cy="2971800"/>');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('uses the wider writable width inside a landscape section', async () => {
+    const { convertMdToDocx } = await import('./md-to-docx');
+    const JSZip = (await import('jszip')).default;
+
+    const { dir, cleanup } = setupTempImage();
+    try {
+      const md = '<!-- landscape -->\n\n![wide figure](test.png){width=1200 height=600}\n\n<!-- /landscape -->';
+      const { docx } = await convertMdToDocx(md, { sourceDir: dir });
+      const zip = await JSZip.loadAsync(docx);
+      const documentXml = await zip.file('word/document.xml')!.async('string');
+
+      // Landscape Letter with 1-inch margins has 9 inches = 864 px of writable width.
+      expect(documentXml).toContain('<wp:extent cx="8229600" cy="4114800"/>');
+    } finally {
+      cleanup();
+    }
   });
 
   // Feature: image-roundtrip, Property 3: Alt text roundtrip
