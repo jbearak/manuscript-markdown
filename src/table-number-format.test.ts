@@ -350,7 +350,9 @@ describe('table number formatting', () => {
     const invalid = '<table><tr><td>&#1114112;</td><td>&#xD800;</td><td>&#999999999999;</td></tr></table>';
     expect(() => formatTableNumbers(invalid, { digits: 1 })).not.toThrow();
 
-    const digits = '1'.repeat(70_000);
+    // This exceeds the 1,000,000-cell diff-matrix cap without making the
+    // regression depend on runner speed or a per-test timeout.
+    const digits = '1'.repeat(2_000);
     const html = '<table><tr><td>' + digits + '</td></tr></table>';
     const result = formatTableNumbers(html, { digitGrouping: 'comma' });
     expect(result.output.length).toBeGreaterThan(html.length);
