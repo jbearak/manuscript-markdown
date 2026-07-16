@@ -1,6 +1,7 @@
 import { GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData } from './grid-table-preprocess';
 import { extractHtmlTables, type HtmlTableCellSource } from './html-table-parser';
 import { computeCodeRegions } from './code-regions';
+import { decodeNumericHtmlEntity } from './html-entities';
 
 export type TableDigits = number | 'source';
 export type TableDecimalMark = 'source' | 'point' | 'comma' | 'midpoint';
@@ -15,6 +16,13 @@ export interface TableNumberFormat {
 export interface TableNumberFormatResult {
   output: string;
   warnings: string[];
+  warningDetails: TableNumberFormatWarning[];
+}
+
+export interface TableNumberFormatWarning {
+  message: string;
+  start: number;
+  end: number;
 }
 
 const DIRECTIVE_RE = /^\s*<!--\s*table-(digits|decimal-mark|digit-grouping):\s*(.+?)\s*-->\s*$/i;
@@ -60,12 +68,23 @@ export function validateTableNumberFormat(format: TableNumberFormat): string | u
   return undefined;
 }
 
-function parseDirective(line: string): Partial<TableNumberFormat> | undefined {
+interface ParsedTableNumberDirective {
+  format?: Partial<TableNumberFormat>;
+  error?: string;
+}
+
+function parseDirective(line: string): ParsedTableNumberDirective | undefined {
   const match = line.match(DIRECTIVE_RE);
   if (!match) return undefined;
-  if (match[1].toLowerCase() === 'digits') return { digits: parseTableDigits(match[2]) };
-  if (match[1].toLowerCase() === 'decimal-mark') return { decimalMark: parseTableDecimalMark(match[2]) };
-  return { digitGrouping: parseTableDigitGrouping(match[2]) };
+  const key = match[1].toLowerCase();
+  const raw = match[2];
+  const value = key === 'digits' ? parseTableDigits(raw)
+    : key === 'decimal-mark' ? parseTableDecimalMark(raw)
+    : parseTableDigitGrouping(raw);
+  if (value === undefined) return { error: 'Invalid ' + line.trim() + ' directive ignored.' };
+  if (key === 'digits') return { format: { digits: value as TableDigits } };
+  if (key === 'decimal-mark') return { format: { decimalMark: value as TableDecimalMark } };
+  return { format: { digitGrouping: value as TableDigitGrouping } };
 }
 
 function mergeFormat(documentFormat: TableNumberFormat, tableFormat: Partial<TableNumberFormat>): TableNumberFormat {
@@ -237,7 +256,26 @@ function groupInteger(integer: string, separator: string): string {
   return integer.replace(/\B(?=(\d{3})+(?!\d))/g, separator);
 }
 
-function formatParsed(parts: NumericParts, format: TableNumberFormat): string {
+function hasSeparatorCollision(parts: NumericParts, format: TableNumberFormat): boolean {
+  let integer = parts.integer;
+  let fraction = parts.fraction;
+  if (typeof format.digits === 'number') {
+    const rounded = roundDecimal(integer, fraction, format.digits);
+    integer = rounded.integer;
+    fraction = rounded.fraction;
+  }
+  const resolvedGrouping = groupingCharacter(format.digitGrouping) ?? parts.grouping;
+  const resolvedDecimal = (decimalCharacter(format.decimalMark) ?? parts.decimal)
+    || (fraction && typeof format.digits === 'number' ? '.' : '');
+  return integer.length > 3 && fraction.length > 0
+    && !!resolvedGrouping && !!resolvedDecimal && resolvedGrouping === resolvedDecimal;
+}
+
+function formatParsed(parts: NumericParts, format: TableNumberFormat, warnings?: string[], original?: string): string {
+  if (original !== undefined && hasSeparatorCollision(parts, format)) {
+    warnings?.push('Conflicting decimal and grouping separators left unchanged: ' + original);
+    return original;
+  }
   let integer = parts.integer;
   let fraction = parts.fraction;
   if (typeof format.digits === 'number') {
@@ -278,7 +316,7 @@ function formatTextCell(text: string, format: TableNumberFormat, warnings: strin
       return text;
     }
     if (parsed.integer.length > 1 && parsed.integer.startsWith('0')) return text;
-    output += formatParsed(parsed, format);
+    output += formatParsed(parsed, format, warnings, match[0]);
     cursor = index + match[0].length;
   }
   return output + text.slice(cursor);
@@ -298,6 +336,12 @@ function formatTypedCell(sourceMeta: HtmlTableCellSource | undefined, display: s
 		const placeholder = plainDisplay.match(/^\s*(?:(?:\p{Sc}|[A-Z]{3})\s*)?[-\u2013\u2014](?:\s*(?:\p{Sc}|[A-Z]{3}))?(?:\s*%)?\s*$/u);
 		if (placeholder) {
 			const rounded = roundDecimal('0', '', format.digits);
+			const zeroParts: NumericParts = { sign: '', integer: rounded.integer, fraction: rounded.fraction,
+				exponent: '', percent: '', decimal: '.', grouping: '' };
+			if (hasSeparatorCollision(zeroParts, format)) {
+				warnings.push('Conflicting decimal and grouping separators left unchanged: ' + plainDisplay);
+				return display;
+			}
 			const sourceFormat = sourceMeta?.sourceFormat ?? '';
 			const displayCurrency = plainDisplay.match(/\p{Sc}|[A-Z]{3}/u)?.[0];
 			const formatCurrency = currencyAffixFromFormat(sourceFormat, rawNumber) || currencyAffixFromFormat(sourceFormat, 1);
@@ -321,7 +365,7 @@ function formatTypedCell(sourceMeta: HtmlTableCellSource | undefined, display: s
 			const percent = kind === 'percent' ? (plainDisplay.match(/[ \u00a0\u202f]?%/)?.[0] ?? '%') : '';
 			const exponent = kind === 'scientific' ? 'E+0' : '';
 			const number = formatParsed({ sign: '', integer: rounded.integer, fraction: rounded.fraction,
-				exponent, percent, decimal: '.', grouping: '' }, { ...format, digits: 'source' });
+				exponent, percent, decimal: '.', grouping: '' }, { ...format, digits: 'source' }, warnings);
 			const currencySpacing = currencyIsSuffix
 				? displaySuffixSpacing ?? formatSuffixSpacing ?? ''
 				: displayPrefixSpacing ?? formatPrefixSpacing ?? '';
@@ -348,7 +392,7 @@ function formatTypedCell(sourceMeta: HtmlTableCellSource | undefined, display: s
 				|| (scaledRaw < 0 && hasExcelNegativeSection(sourceMeta?.sourceFormat ?? ''));
 			const displayedSign = fraction[0].startsWith('-') ? '-' : fraction[0].startsWith('+') ? '+' : '';
 			const replacement = formatParsed({ sign: displayedSign || (scaledRaw < 0 && !sourceEncodesNegative ? '-' : ''), integer: rounded.integer,
-				fraction: rounded.fraction, exponent: '', percent: '', decimal: '.', grouping: '' }, { ...format, digits: 'source' });
+				fraction: rounded.fraction, exponent: '', percent: '', decimal: '.', grouping: '' }, { ...format, digits: 'source' }, warnings, fraction[0]);
 			const start = fraction.index ?? 0;
 			return plainDisplay.slice(0, start) + replacement + plainDisplay.slice(start + fraction[0].length);
 		}
@@ -373,7 +417,7 @@ function formatTypedCell(sourceMeta: HtmlTableCellSource | undefined, display: s
     }
   }
   if (!source) return display;
-  if (typeof format.digits !== 'number') return plainDisplay.replace(tokenMatch![0], formatParsed(source, format));
+  if (typeof format.digits !== 'number') return plainDisplay.replace(tokenMatch![0], formatParsed(source, format, warnings, tokenMatch![0]));
   let scaled = rawNumber;
   if (kind === 'percent') scaled *= 100;
 	scaled /= excelSourceScale(sourceMeta?.sourceFormat ?? '', rawNumber);
@@ -393,11 +437,11 @@ function formatTypedCell(sourceMeta: HtmlTableCellSource | undefined, display: s
       rounded = { integer: normalized[0], fraction: normalized.slice(1).padEnd(format.digits, '0').slice(0, format.digits) };
     }
 		replacement = formatParsed({ sign: replacementSign, integer: rounded.integer, fraction: rounded.fraction,
-			exponent: 'E' + (exponent >= 0 ? '+' : '') + exponent, percent: source.percent, decimal: source.decimal || '.', grouping: source.grouping }, { ...format, digits: 'source' });
+			exponent: 'E' + (exponent >= 0 ? '+' : '') + exponent, percent: source.percent, decimal: source.decimal || '.', grouping: source.grouping }, { ...format, digits: 'source' }, warnings, tokenMatch![0]);
   } else {
     const sourceParts = numberToDecimalParts(scaled);
     const rounded = roundDecimal(sourceParts.integer, sourceParts.fraction, format.digits);
-		replacement = formatParsed({ sign: replacementSign, integer: rounded.integer, fraction: rounded.fraction, exponent: '', percent: source.percent, decimal: source.decimal || '.', grouping: source.grouping }, { ...format, digits: 'source' });
+		replacement = formatParsed({ sign: replacementSign, integer: rounded.integer, fraction: rounded.fraction, exponent: '', percent: source.percent, decimal: source.decimal || '.', grouping: source.grouping }, { ...format, digits: 'source' }, warnings, tokenMatch![0]);
   }
   return plainDisplay.replace(tokenMatch![0], replacement);
 }
@@ -648,6 +692,16 @@ function findHtmlElementRanges(tokens: HtmlSourceToken[], names: Set<string>): A
 }
 
 function diffCharacterEdits(before: string, after: string): Array<{ start: number; deleteCount: number; insert: string }> {
+	const matrixCells = (before.length + 1) * (after.length + 1);
+	if (before.length > 0xffff || after.length > 0xffff || matrixCells > 1_000_000) {
+		let prefix = 0;
+		while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix++;
+		let suffix = 0;
+		while (suffix < before.length - prefix && suffix < after.length - prefix
+				&& before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) suffix++;
+		return [{ start: prefix, deleteCount: before.length - prefix - suffix,
+			insert: after.slice(prefix, after.length - suffix) }];
+	}
 	const lengths = Array.from({ length: before.length + 1 }, () => new Uint16Array(after.length + 1));
 	for (let i = before.length - 1; i >= 0; i--) {
 		for (let j = after.length - 1; j >= 0; j--) {
@@ -679,8 +733,8 @@ function diffCharacterEdits(before: string, after: string): Array<{ start: numbe
 }
 
 function decodeHtmlText(raw: string): string {
-	return raw.replace(/&#(\d+);/g, (_m, code) => String.fromCodePoint(Number(code)))
-		.replace(/&#x([0-9a-f]+);/gi, (_m, code) => String.fromCodePoint(parseInt(code, 16)))
+	return raw.replace(/&#(\d+);/g, (entity, code) => decodeNumericHtmlEntity(entity, code, 10))
+		.replace(/&#x([0-9a-f]+);/gi, (entity, code) => decodeNumericHtmlEntity(entity, code, 16))
 		.replace(/&nbsp;/gi, '\u00a0').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"')
 		.replace(/&#39;|&apos;/gi, "'").replace(/&amp;/gi, '&');
 }
@@ -784,6 +838,7 @@ function formatGridPlaceholder(line: string, format: TableNumberFormat, warnings
 /** Apply document and per-table numeric formatting without modifying any embedded source file. */
 export function formatTableNumbers(markdown: string, documentFormat: TableNumberFormat = {}): TableNumberFormatResult {
   const warnings: string[] = [];
+  const warningDetails: TableNumberFormatWarning[] = [];
   const documentError = validateTableNumberFormat(documentFormat);
   if (documentError) warnings.push(documentError);
   const lines = markdown.split('\n');
@@ -791,9 +846,13 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 	const inertRegions = [...codeRegions, ...computeHtmlInertRegions(markdown, codeRegions)];
 	const lineOffsets: number[] = [];
 	let nextLineOffset = 0;
-	for (const line of lines) { lineOffsets.push(nextLineOffset); nextLineOffset += line.length + 1; }
+  for (const line of lines) { lineOffsets.push(nextLineOffset); nextLineOffset += line.length + 1; }
+  const recordWarnings = (from: number, start: number, end: number) => {
+    for (const message of warnings.slice(from)) warningDetails.push({ message, start, end });
+  };
   const output: string[] = [];
   let pending: Partial<TableNumberFormat> = {};
+  let pendingInvalid = false;
   let i = 0;
   let fenceChar: '`' | '~' | undefined;
   let fenceLength = 0;
@@ -805,16 +864,31 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
       else if (char === fenceChar && fence[1].length >= fenceLength) { fenceChar = undefined; fenceLength = 0; }
       output.push(lines[i++]);
       pending = {};
+      pendingInvalid = false;
       continue;
     }
     if (fenceChar || /^ {4}/.test(lines[i])) {
       output.push(lines[i++]);
       pending = {};
+      pendingInvalid = false;
       continue;
     }
-    const directive = parseDirective(lines[i]);
+    const currentLineStart = lineOffsets[i];
+    const currentLineEnd = currentLineStart + lines[i].length;
+    // A standalone directive/placeholder is itself an HTML comment. Only an
+    // enclosing inert region (a fence, outer comment, or raw-text element)
+    // should suppress it.
+    const lineIsEnclosedInert = inertRegions.some(region => currentLineStart < region.end && currentLineEnd > region.start
+      && (region.start < currentLineStart || region.end > currentLineEnd));
+    const directive = lineIsEnclosedInert ? undefined : parseDirective(lines[i]);
     if (directive) {
-      pending = { ...pending, ...directive };
+      if (directive.error) {
+        warnings.push(directive.error);
+        warningDetails.push({ message: directive.error, start: lineOffsets[i], end: lineOffsets[i] + lines[i].length });
+        pendingInvalid = true;
+      } else {
+        pending = { ...pending, ...directive.format };
+      }
       output.push(lines[i]);
       i++;
       continue;
@@ -833,6 +907,8 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 		const opensHtmlTable = lineTokens.some(token => token.tag && token.name === 'table' && !token.closing)
 				|| /^\s*<table\b/i.test(detectionLine);
 		if (opensHtmlTable) {
+      const tableStart = lineOffsets[i];
+      const warningsBefore = warnings.length;
       const block: string[] = [];
 			let tableDepth = 0;
 			let foundOpening = false;
@@ -847,13 +923,22 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 					}
 				}
 			} while (i < lines.length && (!foundOpening || tableDepth > 0));
-      output.push(formatHtmlTable(block.join('\n'), error ? {} : format, warnings));
+      const tableBlock = block.join('\n');
+      output.push(pendingInvalid || error ? tableBlock : formatHtmlTable(tableBlock, format, warnings));
+      if (error) warningDetails.push({ message: error, start: tableStart, end: tableStart + tableBlock.length });
+      recordWarnings(warningsBefore, tableStart, tableStart + tableBlock.length);
       pending = {};
+      pendingInvalid = false;
       continue;
     }
-		if (lines[i].includes(GRID_TABLE_PLACEHOLDER_PREFIX)) {
-      output.push(formatGridPlaceholder(lines[i], error ? {} : format, warnings));
+		if (lines[i].includes(GRID_TABLE_PLACEHOLDER_PREFIX) && !lineIsEnclosedInert) {
+      const warningsBefore = warnings.length;
+      const tableStart = lineOffsets[i];
+      output.push(formatGridPlaceholder(lines[i], pendingInvalid || error ? {} : format, warnings));
+      if (error) warningDetails.push({ message: error, start: tableStart, end: tableStart + lines[i].length });
+      recordWarnings(warningsBefore, tableStart, tableStart + lines[i].length);
       pending = {};
+      pendingInvalid = false;
       i++;
       continue;
     }
@@ -867,18 +952,24 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 			}
 		}
 		if (i + 1 < lines.length && detectionLine.includes('|') && isPipeSeparator(nextDetectionLine)) {
-      output.push(formatPipeRow(lines[i], error ? {} : format, warnings));
+      const tableStart = lineOffsets[i];
+      const warningsBefore = warnings.length;
+      output.push(formatPipeRow(lines[i], pendingInvalid || error ? {} : format, warnings));
       output.push(lines[i + 1]);
       i += 2;
 			while (i < lines.length && lines[i].includes('|') && lines[i].trim() !== '') {
-				output.push(formatPipeRow(lines[i++], error ? {} : format, warnings));
+				output.push(formatPipeRow(lines[i++], pendingInvalid || error ? {} : format, warnings));
 			}
+      const tableEnd = lineOffsets[i - 1] + lines[i - 1].length;
+      if (error) warningDetails.push({ message: error, start: tableStart, end: tableEnd });
+      recordWarnings(warningsBefore, tableStart, tableEnd);
       pending = {};
+      pendingInvalid = false;
       continue;
     }
     output.push(lines[i]);
-    if (lines[i].trim() && !/^\s*<!--/.test(lines[i])) pending = {};
+    if (lines[i].trim() && !/^\s*<!--/.test(lines[i])) { pending = {}; pendingInvalid = false; }
     i++;
   }
-  return { output: output.join('\n'), warnings: [...new Set(warnings)] };
+  return { output: output.join('\n'), warnings: [...new Set(warnings)], warningDetails };
 }

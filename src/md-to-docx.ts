@@ -1471,13 +1471,13 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
     let valid = false;
     if (key === 'digits') {
       const value = parseTableDigits(raw);
-      if (value !== undefined) { result[target].tableDigits = value; valid = true; }
+      if (value !== undefined) { if (result[target].tableDigits === undefined) result[target].tableDigits = value; valid = true; }
     } else if (key === 'decimal-mark') {
       const value = parseTableDecimalMark(raw);
-      if (value !== undefined) { result[target].tableDecimalMark = value; valid = true; }
+      if (value !== undefined) { if (result[target].tableDecimalMark === undefined) result[target].tableDecimalMark = value; valid = true; }
     } else {
       const value = parseTableDigitGrouping(raw);
-      if (value !== undefined) { result[target].tableDigitGrouping = value; valid = true; }
+      if (value !== undefined) { if (result[target].tableDigitGrouping === undefined) result[target].tableDigitGrouping = value; valid = true; }
     }
     if (valid) result.splice(i, 1);
     else if (warnings) warnings.push('Invalid ' + text + ' directive ignored.');
@@ -6831,5 +6831,5 @@ export async function convertMdToDocx(
   // DEFLATE compression prevents Word from marking the file as modified on open.
   // Word re-compresses STORE-d (uncompressed) entries and sets the dirty flag.
   const docx = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE', compressionOptions: { level: 6 } });
-  return { docx, warnings: state.warnings };
+  return { docx, warnings: [...new Set(state.warnings)] };
 }

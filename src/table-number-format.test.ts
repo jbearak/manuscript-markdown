@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { formatTableNumbers, validateTableNumberFormat } from './table-number-format';
-import { preprocessGridTables } from './grid-table-preprocess';
+import { preprocessGridTables, preprocessGridTablesWithSourceMap } from './grid-table-preprocess';
 import { parseFrontmatter, serializeFrontmatter } from './frontmatter';
 import { convertMdToDocx } from './md-to-docx';
 import { convertDocx } from './converter';
@@ -303,6 +303,96 @@ describe('table number formatting', () => {
   test('rejects identical decimal and grouping characters', () => {
     expect(validateTableNumberFormat({ decimalMark: 'point', digitGrouping: 'period' })).toBeTruthy();
     expect(validateTableNumberFormat({ decimalMark: 'comma', digitGrouping: 'comma' })).toBeTruthy();
+  });
+
+  test('rejects invalid per-table directives instead of inheriting defaults', () => {
+    const pipe = '<!-- table-digits: nope -->\n| V |\n| --- |\n| 12.34 |';
+    const pipeResult = formatTableNumbers(pipe, { digits: 1 });
+    expect(pipeResult.output).toBe(pipe);
+    expect(pipeResult.warnings).toContain('Invalid <!-- table-digits: nope --> directive ignored.');
+
+    const html = '<!-- table-decimal-mark: invalid -->\n<table data-digits="1"><tr><td>12.34</td></tr></table>';
+    const htmlResult = formatTableNumbers(html, { digits: 2 });
+    expect(htmlResult.output).toBe(html);
+    expect(htmlResult.warnings[0]).toContain('table-decimal-mark');
+  });
+
+  test('leaves source-separator collisions unchanged and warns', () => {
+    const point = '| V |\n| --- |\n| 1,234.56 |';
+    const pointResult = formatTableNumbers(point, { decimalMark: 'source', digitGrouping: 'period' });
+    expect(pointResult.output).toBe(point);
+    expect(pointResult.warnings[0]).toContain('Conflicting decimal and grouping separators');
+
+    const comma = '| V |\n| --- |\n| 1.234,56 |';
+    const commaResult = formatTableNumbers(comma, { decimalMark: 'point', digitGrouping: 'source' });
+    expect(commaResult.output).toBe(comma);
+    expect(commaResult.warnings[0]).toContain('Conflicting decimal and grouping separators');
+
+    const short = '| V |\n| --- |\n| 12.34 |';
+    const shortResult = formatTableNumbers(short, { digits: 1, decimalMark: 'source', digitGrouping: 'period' });
+    expect(shortResult.output).toContain('| 12.3 |');
+    expect(shortResult.warnings).toEqual([]);
+
+    const integer = formatTableNumbers(point, { digits: 0, decimalMark: 'source', digitGrouping: 'period' });
+    expect(integer.output).toContain('| 1.235 |');
+    expect(integer.warnings).toEqual([]);
+
+    for (const decimalMark of ['source', undefined] as const) {
+      const paddedInteger = '| V |\n| --- |\n| 1234 |';
+      const paddedResult = formatTableNumbers(paddedInteger, { digits: 2, decimalMark, digitGrouping: 'period' });
+      expect(paddedResult.output).toBe(paddedInteger);
+      expect(paddedResult.warnings[0]).toContain('Conflicting decimal and grouping separators');
+      expect(paddedResult.warningDetails).toHaveLength(1);
+    }
+  });
+
+  test('handles malformed numeric entities and very long numeric tokens safely', () => {
+    const invalid = '<table><tr><td>&#1114112;</td><td>&#xD800;</td><td>&#999999999999;</td></tr></table>';
+    expect(() => formatTableNumbers(invalid, { digits: 1 })).not.toThrow();
+
+    const digits = '1'.repeat(70_000);
+    const html = '<table><tr><td>' + digits + '</td></tr></table>';
+    const result = formatTableNumbers(html, { digitGrouping: 'comma' });
+    expect(result.output.length).toBeGreaterThan(html.length);
+    expect(result.output).toContain(',');
+  });
+
+  test('returns table-scoped warning ranges and grid placeholder source mappings', () => {
+    const input = '```\n| V |\n| --- |\n| 1,2,3 |\n```\n\n| V |\n| --- |\n| 1,2,3 |';
+    const result = formatTableNumbers(input, { digits: 2 });
+    expect(result.warningDetails).toHaveLength(1);
+    expect(result.warningDetails[0].start).toBe(input.lastIndexOf('| V |'));
+    expect(input.slice(result.warningDetails[0].start, result.warningDetails[0].end)).toContain('1,2,3');
+
+    const grid = '+-----+\n| 1,2,3 |\n+-----+';
+    const mapped = preprocessGridTablesWithSourceMap(grid);
+    expect(mapped.sourceMap).toHaveLength(1);
+    expect(mapped.sourceMap[0].sourceStart).toBe(0);
+    expect(mapped.sourceMap[0].sourceEnd).toBe(grid.length);
+    expect(mapped.output.slice(mapped.sourceMap[0].outputStart, mapped.sourceMap[0].outputEnd))
+      .toStartWith('<!-- MANUSCRIPT_GRID_TABLE:');
+
+    const duplicate = '```\n' + mapped.output + '\n```\n' + grid;
+    const duplicateMap = preprocessGridTablesWithSourceMap(duplicate);
+    expect(duplicateMap.sourceMap).toHaveLength(1);
+    expect(duplicateMap.sourceMap[0].sourceStart).toBe(duplicate.lastIndexOf(grid));
+    expect(duplicateMap.sourceMap[0].outputStart).toBeGreaterThan(duplicateMap.output.indexOf(mapped.output));
+  });
+
+  test('does not report directives or preprocessed grids in inert regions', () => {
+    const invalidDirective = '<script>\n<!-- table-digits: nope -->\n</script>';
+    expect(formatTableNumbers(invalidDirective, { digits: 1 }).warningDetails).toEqual([]);
+
+    for (const input of [
+      '<!--\n+-------+\n| 1,2,3 |\n+-------+\n-->',
+      '<script>\n+-------+\n| 1,2,3 |\n+-------+\n</script>',
+    ]) {
+      const result = formatTableNumbers(preprocessGridTables(input), { digits: 2 });
+      expect(result.warningDetails).toEqual([]);
+    }
+
+    const indented = '    +-------+\n    | 1,2,3 |\n    +-------+';
+    expect(preprocessGridTables(indented)).toBe(indented);
   });
 
   test('does not format table-like content in code blocks', () => {

@@ -416,6 +416,25 @@ describe('parseMd HTML tables', () => {
 });
 
 describe('parseMd table-col-widths directive', () => {
+  it('keeps the closest duplicate numeric-format directive', () => {
+    const markdown = [
+      '<!-- table-digits: 1 -->', '<!-- table-digits: 3 -->',
+      '<!-- table-decimal-mark: comma -->', '<!-- table-decimal-mark: midpoint -->',
+      '<!-- table-digit-grouping: comma -->', '<!-- table-digit-grouping: thin-space -->',
+      '| V |', '| --- |', '| 1234.5678 |',
+    ].join('\n');
+    const table = parseMd(markdown).find(token => token.type === 'table');
+    expect(table?.tableDigits).toBe(3);
+    expect(table?.tableDecimalMark).toBe('midpoint');
+    expect(table?.tableDigitGrouping).toBe('thin-space');
+  });
+
+  it('reports an invalid numeric-format directive once during conversion', async () => {
+    const markdown = '<!-- table-digits: nope -->\n| V |\n| --- |\n| 12.34 |';
+    const result = await convertMdToDocx(markdown);
+    expect(result.warnings.filter(warning => warning.includes('table-digits: nope'))).toHaveLength(1);
+  });
+
   it('transfers <!-- table-col-widths --> directive to table token', () => {
     const md = '<!-- table-col-widths: 2 1 1 -->\n\n| A | B | C |\n|---|---|---|\n| 1 | 2 | 3 |';
     const tokens = parseMd(md);

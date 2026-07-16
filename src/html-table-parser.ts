@@ -1,3 +1,5 @@
+import { decodeNumericHtmlEntity } from './html-entities';
+
 export interface HtmlTableRun {
   type: 'text' | 'softbreak' | 'hardbreak';
   text: string;
@@ -303,8 +305,8 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
 
 function decodeHtmlEntities(text: string): string {
   return text
-    .replace(/&#(\d+);/g, (_m, code) => String.fromCodePoint(Number(code)))
-    .replace(/&#x([0-9a-fA-F]+);/g, (_m, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (entity, code) => decodeNumericHtmlEntity(entity, code, 10))
+    .replace(/&#x([0-9a-fA-F]+);/g, (entity, hex) => decodeNumericHtmlEntity(entity, hex, 16))
     .replace(/&nbsp;/g, ' ')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
