@@ -54,7 +54,7 @@ For GitHub-style typed callouts:
 
 ### 5. Tables
 
-Create tables using standard Markdown syntax. For complex tables (merged cells), you can use HTML tables, which are fully supported and preserved during conversion.
+Manuscript Markdown supports three inline table formats—pipe tables, Pandoc grid tables, and HTML tables—as well as tables embedded from external files (`.xlsx`, `.csv`, `.tsv`, `.md`, and `.dta`). Use pipe tables for simple data:
 
 ```markdown
 | Feature | Support |
@@ -63,6 +63,20 @@ Create tables using standard Markdown syntax. For complex tables (merged cells),
 | Code    | Yes     |
 ```
 
+Pandoc grid tables support multi-line cells:
+
+```markdown
++----------+----------+
+| Feature  | Notes    |
++==========+==========+
+| Tables   | Supports |
+|          | multiple |
+|          | lines    |
++----------+----------+
+```
+
+Grid tables do not support merged cells (`colspan` or `rowspan`). For inline tables, use HTML when cells must span columns or rows; HTML tables are fully supported and preserved during Word conversion. Merged cells in embedded `.xlsx` files are also preserved. See the [Tables specification](../specification.md#tables) for examples of all three inline formats.
+
 When your data lives in an external file, embed it instead of copying it into your document:
 
 ```markdown
@@ -70,7 +84,20 @@ When your data lives in an external file, embed it instead of copying it into yo
 <!-- embed: data/metrics.csv -->
 ```
 
-This embeds the CSV as a table, with all the same formatting and export support as an inline table. Supported formats: `.csv`, `.tsv`, `.xlsx`, and `.md`. See [Embedded Tables](../embedded-tables.md) for the full syntax reference.
+This embeds the external data as a table, with all the same formatting and export support as an inline table. Supported formats are `.csv`, `.tsv`, `.xlsx`, `.dta`, and `.md`. Stata embeds use variable names as headers by default and preserve value labels and display formats.
+
+You can customize an embedded table by placing directives immediately before it:
+
+```markdown
+<!-- table-font-size: 9 -->
+<!-- table-col-widths: 2 1 1 -->
+<!-- table-digits: 2 -->
+<!-- table-decimal-mark: comma -->
+<!-- table-digit-grouping: thin-space -->
+<!-- embed: data/results.dta -->
+```
+
+`table-digits` controls the number of digits after the decimal mark; `table-decimal-mark` accepts `source`, `point`, `comma`, or `midpoint`; and `table-digit-grouping` accepts `source`, `none`, `comma`, `period`, `space`, or `thin-space`. Put the same settings in YAML frontmatter to use them as document-wide defaults. See [Embedded Tables](../embedded-tables.md) for file-specific options and the [Tables specification](../specification.md#tables) for the complete formatting reference.
 
 ## Tips
 
