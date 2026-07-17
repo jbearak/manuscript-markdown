@@ -449,6 +449,8 @@ export interface TableNumberFormatScanStats {
 	sourceEditPasses: number;
 	sourceEditsApplied: number;
 	sourceCharactersCopied: number;
+	htmlTagCharactersVisited: number;
+	malformedTagRecoveries: number;
 }
 
 interface SourceRange {
@@ -580,6 +582,40 @@ function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats): { tok
 			break;
 		}
 		if (tagStart > cursor) tokens.push({ raw: html.slice(cursor, tagStart), tag: false, start: cursor, end: tagStart });
+		if (html.startsWith('<![CDATA[', tagStart)) {
+			const closeStart = html.indexOf(']]>', tagStart + 9);
+			const end = closeStart < 0 ? html.length : closeStart + 3;
+			tokens.push({ raw: html.slice(tagStart, end), tag: true, start: tagStart, end });
+			inertRegions.push({ start: tagStart, end });
+			if (stats) stats.htmlTagCharactersVisited += end - tagStart;
+			cursor = end;
+			continue;
+		}
+		if (html.startsWith('<?', tagStart)) {
+			const closeStart = html.indexOf('?>', tagStart + 2);
+			const end = closeStart < 0 ? html.length : closeStart + 2;
+			tokens.push({ raw: html.slice(tagStart, end), tag: true, start: tagStart, end });
+			inertRegions.push({ start: tagStart, end });
+			if (stats) stats.htmlTagCharactersVisited += end - tagStart;
+			cursor = end;
+			continue;
+		}
+		if (html[tagStart + 1] === '!' && /[A-Za-z]/.test(html[tagStart + 2] ?? '')) {
+			let quote = '';
+			let end = tagStart + 3;
+			for (; end < html.length; end++) {
+				if (stats) stats.htmlTagCharactersVisited++;
+				const char = html[end];
+				if (quote) {
+					if (char === quote) quote = '';
+				} else if (char === '"' || char === "'") quote = char;
+				else if (char === '>') { end++; break; }
+			}
+			tokens.push({ raw: html.slice(tagStart, end), tag: true, start: tagStart, end });
+			inertRegions.push({ start: tagStart, end });
+			cursor = end;
+			continue;
+		}
 		if (html.startsWith('<!--', tagStart)) {
 			const commentEnd = html.indexOf('-->', tagStart + 4);
 			const end = commentEnd < 0 ? html.length : commentEnd + 3;
@@ -590,19 +626,26 @@ function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats): { tok
 		}
 		let quote = '';
 		let end = tagStart + 1;
+		let malformedRestart: number | undefined;
 		for (; end < html.length; end++) {
+			if (stats) stats.htmlTagCharactersVisited++;
 			const char = html[end];
 			if (quote) {
 				if (char === quote) quote = '';
 			} else if (char === '"' || char === "'") quote = char;
+			else if (char === '<') { malformedRestart = end; break; }
 			else if (char === '>') { end++; break; }
 		}
-		if (end > html.length || html[end - 1] !== '>') {
-			const lineEnd = html.indexOf('\n', tagStart);
-			const textEnd = lineEnd < 0 ? html.length : lineEnd;
-			tokens.push({ raw: html.slice(tagStart, textEnd), tag: false, start: tagStart, end: textEnd });
-			cursor = textEnd;
+		if (malformedRestart !== undefined) {
+			tokens.push({ raw: html.slice(tagStart, malformedRestart), tag: false, start: tagStart, end: malformedRestart });
+			if (stats) stats.malformedTagRecoveries++;
+			cursor = malformedRestart;
 			continue;
+		}
+		if (end > html.length || html[end - 1] !== '>') {
+			tokens.push({ raw: html.slice(tagStart), tag: false, start: tagStart, end: html.length });
+			if (stats) stats.malformedTagRecoveries++;
+			break;
 		}
 		const raw = html.slice(tagStart, end);
 		let inner = raw.slice(1, -1).trim();
@@ -676,7 +719,30 @@ function buildHtmlStructuralIndex(markdown: string, codeRegions: SourceRange[], 
 		tableByOpenToken.set(table.openTokenIndex, table);
 		parentStack.push(table);
 	}
-	for (const cell of cellRanges) tableByOpenToken.get(cell.ownerTableOpenTokenIndex ?? -1)?.cells.push(cell);
+	const cellsByOwner = new Map<IndexedHtmlTable, HtmlElementRange[]>();
+	for (const cell of cellRanges) {
+		const owner = tableByOpenToken.get(cell.ownerTableOpenTokenIndex ?? -1);
+		if (!owner || cell.start < owner.contentStart || cell.end > owner.contentEnd) continue;
+		const owned = cellsByOwner.get(owner) ?? [];
+		owned.push(cell);
+		cellsByOwner.set(owner, owned);
+	}
+	for (const [owner, owned] of cellsByOwner) {
+		owned.sort((a, b) => a.start - b.start || a.end - b.end);
+		let group: HtmlElementRange[] = [];
+		let groupEnd = -1;
+		const flush = () => {
+			if (group.length === 1) owner.cells.push(group[0]);
+			group = [];
+			groupEnd = -1;
+		};
+		for (const cell of owned) {
+			if (group.length > 0 && cell.start >= groupEnd) flush();
+			group.push(cell);
+			groupEnd = Math.max(groupEnd, cell.end);
+		}
+		flush();
+	}
 	const tokenLines = new Array(scanned.tokens.length).fill(0) as number[];
 	let tokenLine = 0;
 	for (let index = 0; index < scanned.tokens.length; index++) {
@@ -770,6 +836,7 @@ function htmlVisibleSegments(source: string, index: HtmlStructuralIndex, ownerTa
 	let text = '';
 	let pieces: HtmlVisiblePiece[] = [];
 	let inertDepth = 0;
+	const inertCounts = new Map<string, number>();
 	const flush = () => {
 		if (text) segments.push({ text, pieces });
 		text = '';
@@ -794,7 +861,18 @@ function htmlVisibleSegments(source: string, index: HtmlStructuralIndex, ownerTa
 		if (token.end <= cell.contentStart || token.start >= cell.contentEnd) continue;
 		if (token.tag) {
 			if (token.name && HTML_NUMERIC_BOUNDARIES.has(token.name)) flush();
-			if (!token.selfClosing && token.name && HTML_NUMERIC_INERT.has(token.name)) inertDepth += token.closing ? -1 : 1;
+			if (!token.selfClosing && token.name && HTML_NUMERIC_INERT.has(token.name)) {
+				const active = inertCounts.get(token.name) ?? 0;
+				if (token.closing) {
+					if (active > 0) {
+						inertCounts.set(token.name, active - 1);
+						inertDepth--;
+					}
+				} else {
+					inertCounts.set(token.name, active + 1);
+					inertDepth++;
+				}
+			}
 			continue;
 		}
 		const start = Math.max(token.start, cell.contentStart);
@@ -1258,7 +1336,11 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 			output.push(formatPipeRow(lines[i], pendingInvalid || error ? {} : format, warnings));
 			output.push(lines[i + 1]);
 			i += 2;
-			while (i < lines.length && lines[i].includes('|') && lines[i].trim() !== '') {
+			while (i < lines.length && lines[i].trim() !== '') {
+				if (/^ {4}/.test(lines[i])) break;
+				const rowStart = lineOffsets[i];
+				const rowDetection = maskedSourceRange(markdown, rowStart, rowStart + lines[i].length, inertRegions);
+				if (!rowDetection.includes('|')) break;
 				output.push(formatPipeRow(lines[i++], pendingInvalid || error ? {} : format, warnings));
 			}
 			const tableEnd = lineOffsets[i - 1] + lines[i - 1].length;
