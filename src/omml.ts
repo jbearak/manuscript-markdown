@@ -24,7 +24,11 @@ function isXmlNode(value: unknown): value is XmlNode {
 /** Normalize a preserve-order element value to its child-node array. */
 export function asXmlNodes(value: unknown): XmlNode[] {
   if (Array.isArray(value)) {
-    return value.filter(isXmlNode);
+    // Fast path: preserve-order parser output is arrays of element nodes, so
+    // the near-universal case is "already all nodes" — return the original
+    // reference and skip allocating a filtered copy. Fall back to filter() only
+    // when a non-node element (primitive/text-only) is actually present.
+    return value.every(isXmlNode) ? (value as XmlNode[]) : value.filter(isXmlNode);
   }
   return isXmlNode(value) ? [value] : [];
 }

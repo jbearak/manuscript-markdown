@@ -4830,18 +4830,6 @@ export function buildMarkdown(
         isPlainEmptyParagraph(item) &&
         !paragraphHasContent(mergedContent, i)
       ) {
-        let prevStructuralIdx = i - 1;
-        while (prevStructuralIdx >= 0) {
-          const prevItem = mergedContent[prevStructuralIdx];
-          if (
-            prevItem.type !== 'para'
-            || !isPlainEmptyParagraph(prevItem)
-            || paragraphHasContent(mergedContent, prevStructuralIdx)
-          ) {
-            break;
-          }
-          prevStructuralIdx--;
-        }
         let nextStructuralIdx = i + 1;
         while (nextStructuralIdx < mergedContent.length) {
           const nextItem = mergedContent[nextStructuralIdx];
