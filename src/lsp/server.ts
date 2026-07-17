@@ -60,8 +60,6 @@ import {
 	getCompletionContextAtOffset,
 	invalidateCanonicalCache,
 	parseBibDataFromText,
-	pathsEqual,
-	resolveBibliographyPath,
 	resolveBibliographyPathAsync,
 	scanCitationUsages,
 	uriToFsPath,
@@ -73,6 +71,8 @@ import {
 } from './comment-language';
 import { computeBibEntryRanges } from './bib-entry-ranges';
 import { type Frontmatter, parseFrontmatter, maskFrontmatter } from '../frontmatter';
+import { formatTableNumbers, validateTableNumberFormat } from '../table-number-format';
+import { preprocessGridTablesWithSourceMap } from '../grid-table-preprocess';
 import { BUNDLED_STYLE_LABELS, isCslAvailableAsync } from '../csl-loader';
 import {
 	getFrontmatterLocation,
@@ -105,6 +105,7 @@ const citekeyDiagnostics = new Map<string, Diagnostic[]>();
 const frontmatterDiagnostics = new Map<string, Diagnostic[]>();
 const orientationDiagnostics = new Map<string, Diagnostic[]>();
 const embedDiagnostics = new Map<string, Diagnostic[]>();
+const tableNumberDiagnostics = new Map<string, Diagnostic[]>();
 
 const severityMap: Record<string, DiagnosticSeverity> = {
 	'error': DiagnosticSeverity.Error,
@@ -117,7 +118,8 @@ function publishDiagnostics(uri: string): void {
 	const frontmatter = frontmatterDiagnostics.get(uri) ?? [];
 	const orientation = orientationDiagnostics.get(uri) ?? [];
 	const embed = embedDiagnostics.get(uri) ?? [];
-	connection.sendDiagnostics({ uri, diagnostics: [...citekey, ...frontmatter, ...orientation, ...embed] });
+	const tableNumbers = tableNumberDiagnostics.get(uri) ?? [];
+	connection.sendDiagnostics({ uri, diagnostics: [...citekey, ...frontmatter, ...orientation, ...embed, ...tableNumbers] });
 }
 
 interface OpenDocBibCache {
@@ -158,6 +160,7 @@ async function runValidationPipeline(doc: TextDocument): Promise<void> {
 		await validateCitekeys(doc, metadata);
 		await validateFrontmatterDiags(doc);
 		validateOrientationDirectives(doc);
+		validateTableNumbers(doc);
 		await validateEmbedDirectives(doc);
 	} catch (error) {
 		connection.console.error(
@@ -602,11 +605,9 @@ async function validateFrontmatterDiags(doc: TextDocument): Promise<void> {
 			cslSuggestions: (prefix) => {
 				const lower = prefix.toLowerCase();
 				const suggestions: string[] = [];
-				let totalMatches = 0;
 				if (lower) {
 					for (const [id, displayName] of BUNDLED_STYLE_LABELS) {
 						if (id.toLowerCase().startsWith(lower) || displayName.toLowerCase().includes(lower)) {
-							totalMatches++;
 							if (suggestions.length < maxCslSuggestions) suggestions.push(id);
 						}
 					}
@@ -683,6 +684,40 @@ function validateOrientationDirectives(doc: TextDocument): void {
 	publishDiagnostics(doc.uri);
 }
 
+function validateTableNumbers(doc: TextDocument): void {
+	const text = doc.getText();
+	const { metadata } = parseFrontmatter(text);
+	const masked = maskFrontmatter(text);
+	const documentFormat = {
+		digits: metadata.tableDigits,
+		decimalMark: metadata.tableDecimalMark,
+		digitGrouping: metadata.tableDigitGrouping,
+	};
+	const documentFormatError = validateTableNumberFormat(documentFormat);
+	const directResult = formatTableNumbers(masked, documentFormat);
+	const gridInput = preprocessGridTablesWithSourceMap(masked);
+	const gridResult = formatTableNumbers(gridInput.output, documentFormat);
+	const gridWarnings = gridResult.warningDetails.flatMap(warning => {
+		const mapping = gridInput.sourceMap.find(entry => warning.start >= entry.outputStart && warning.end <= entry.outputEnd);
+		return mapping ? [{ message: warning.message, start: mapping.sourceStart, end: mapping.sourceEnd }] : [];
+	});
+	const seen = new Set<string>();
+	const diagnostics = [...directResult.warningDetails, ...gridWarnings].flatMap(warning => {
+		if (warning.message === documentFormatError) return [];
+		const key = warning.message + '\0' + warning.start + '\0' + warning.end;
+		if (seen.has(key)) return [];
+		seen.add(key);
+		return [{
+			severity: DiagnosticSeverity.Warning,
+			range: Range.create(doc.positionAt(warning.start), doc.positionAt(warning.end)),
+			message: warning.message,
+			source: 'manuscript-markdown',
+		}];
+	});
+	tableNumberDiagnostics.set(doc.uri, diagnostics);
+	publishDiagnostics(doc.uri);
+}
+
 async function validateEmbedDirectives(doc: TextDocument): Promise<void> {
 	const text = doc.getText();
 	const lines = text.split('\n');
@@ -749,7 +784,10 @@ async function validateEmbedDirectives(doc: TextDocument): Promise<void> {
 								if (directive.range && !/^[A-Z]+\d+:[A-Z]+\d+$/i.test(directive.range.replace(/\$/g, ''))) {
 									// Check if it's a named range
 									const names = wb.Workbook?.Names;
-									if (!names || !names.find((n: any) => n.Name === directive.range)) {
+									const hasNamedRange = Array.isArray(names) && names.some((name: unknown) =>
+										typeof name === 'object' && name !== null && 'Name' in name && name.Name === directive.range
+									);
+									if (!hasNamedRange) {
 										diagnostics.push({
 											severity: DiagnosticSeverity.Error,
 											range: Range.create(doc.positionAt(lineStart), doc.positionAt(lineEnd)),

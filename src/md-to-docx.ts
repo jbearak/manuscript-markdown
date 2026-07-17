@@ -1,10 +1,13 @@
 import MarkdownIt from 'markdown-it';
-import { escapeXml, escapeXmlText, generateCitation, generateMathXml, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml } from './md-to-docx-citations';
+import type Token from 'markdown-it/lib/token.mjs';
+import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
+import { escapeXml, escapeXmlText, generateCitation, generateMathXml, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, type CiteprocEngine } from './md-to-docx-citations';
 import { downloadStyle } from './csl-loader';
 import { existsSync, readFileSync } from 'fs';
 import { isAbsolute, join, resolve } from 'path';
 import { parseBibtex, BibtexEntry } from './bibtex-parser';
 import { parseFrontmatter, maskFrontmatter, Frontmatter, noteTypeToNumber, type ColorScheme, type CustomStyleDef, parseColWidths, expandColWidths, colWidthsToPct } from './frontmatter';
+import { formatTableNumbers, parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping, type TableDigits, type TableDecimalMark, type TableDigitGrouping } from './table-number-format';
 import { alertColorsByScheme, getDefaultColorScheme } from './alert-colors';
 import { ZoteroBiblData, zoteroStyleFullId } from './converter';
 import { isGfmDisallowedRawHtml, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from './gfm';
@@ -13,7 +16,7 @@ import { pixelsToEmu, isSupportedImageFormat, getImageContentType, readImageDime
 import { preprocessGridTables, GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData } from './grid-table-preprocess';
 import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
-import { extractHtmlTables, type HtmlTableRow, type HtmlTableRun, type HtmlTableMeta } from './html-table-parser';
+import { extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
 export { preprocessGridTables } from './grid-table-preprocess';
 export { extractHtmlTables } from './html-table-parser';
 
@@ -107,6 +110,9 @@ export interface MdToken {
   portraitClose?: true;     // sentinel: end of portrait section
   tableOrientation?: 'landscape' | 'portrait'; // table-only orientation from data-orientation
   tableColWidths?: number[] | 'equal' | 'auto'; // per-table column width ratios
+  tableDigits?: TableDigits;
+  tableDecimalMark?: TableDecimalMark;
+  tableDigitGrouping?: TableDigitGrouping;
   gridSourceColWidths?: number[]; // column char-widths inferred from +---+---+ source; persisted for round-trip fidelity and Word Online layout
   bibliographyMarker?: true;  // sentinel: <!-- references --> / <!-- bibliography --> placement marker
   customStyleOpen?: string;   // sentinel: start of custom style block (style name)
@@ -229,6 +235,29 @@ export { PARA_PLACEHOLDER, preprocessCriticMarkup };
 
 // Custom inline rules
 
+type CriticTokenType = 'critic_add' | 'critic_del' | 'critic_sub' | 'critic_highlight' | 'critic_comment';
+
+interface ManuscriptToken extends Token {
+  criticType?: CriticTokenType;
+  oldText?: string;
+  newText?: string;
+  author?: string;
+  date?: string;
+  commentText?: string;
+  replies?: Array<{ author?: string; date?: string; text: string }>;
+  commentId?: string;
+  color?: string;
+  keys?: string[];
+  locators?: Map<string, string>;
+  suppressAuthorKeys?: Set<string>;
+  display?: boolean;
+  footnoteLabel?: string;
+}
+
+function pushManuscriptToken(state: StateInline, type: string, tag: string, nesting: 1 | 0 | -1): ManuscriptToken {
+  return state.push(type, tag, nesting) as ManuscriptToken;
+}
+
 /** Parse author/date/text from comment content string.
  *
  * Uses `@Author (Date) | text` / `@Author | text` syntax.
@@ -291,7 +320,7 @@ function extractReplies(content: string): { parentText: string; replies: Array<{
 }
 
 /** Parse {#id}, {/id}, and {#id>>...<<} comment range markers */
-function commentRangeRule(state: any, silent: boolean): boolean {
+function commentRangeRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   const max = state.posMax;
   const src = state.src;
@@ -317,7 +346,7 @@ function commentRangeRule(state: any, silent: boolean): boolean {
 
       if (!silent) {
         const rawContent = src.slice(idEnd + 2, endPos).replaceAll(PARA_PLACEHOLDER, '\n\n');
-        const token = state.push('comment_body_with_id', '', 0);
+        const token = pushManuscriptToken(state, 'comment_body_with_id', '', 0);
         token.commentId = id;
 
         // Check for nested replies
@@ -337,7 +366,7 @@ function commentRangeRule(state: any, silent: boolean): boolean {
     // Check for {#id} range start
     if (idEnd < max && src.charAt(idEnd) === '}') {
       if (!silent) {
-        const token = state.push('comment_range_start', '', 0);
+        const token = pushManuscriptToken(state, 'comment_range_start', '', 0);
         token.commentId = id;
       }
       state.pos = idEnd + 1;
@@ -356,7 +385,7 @@ function commentRangeRule(state: any, silent: boolean): boolean {
 
     if (idEnd < max && src.charAt(idEnd) === '}') {
       if (!silent) {
-        const token = state.push('comment_range_end', '', 0);
+        const token = pushManuscriptToken(state, 'comment_range_end', '', 0);
         token.commentId = src.slice(idStart, idEnd);
       }
       state.pos = idEnd + 1;
@@ -369,7 +398,7 @@ function commentRangeRule(state: any, silent: boolean): boolean {
   return false;
 }
 
-function criticMarkupRule(state: any, silent: boolean): boolean {
+function criticMarkupRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   const max = state.posMax;
 
@@ -377,7 +406,7 @@ function criticMarkupRule(state: any, silent: boolean): boolean {
 
   const marker = state.src.slice(start, start + 3);
   let endMarker: string;
-  let type: string;
+  let type: CriticTokenType;
 
   switch (marker) {
     case '{++': endMarker = '++}'; type = 'critic_add'; break;
@@ -400,7 +429,7 @@ function criticMarkupRule(state: any, silent: boolean): boolean {
   if (!silent) {
     // Replace any paragraph placeholders back to real newlines
     const content = state.src.slice(start + 3, endPos).replaceAll(PARA_PLACEHOLDER, '\n\n');
-    const token = state.push('critic_markup', '', 0);
+    const token = pushManuscriptToken(state, 'critic_markup', '', 0);
     token.markup = marker;
     token.content = content;
     token.criticType = type;
@@ -454,7 +483,7 @@ function findClosingHighlightMarker(src: string, from: number, max: number): num
   return -1;
 }
 
-function coloredHighlightRule(state: any, silent: boolean): boolean {
+function coloredHighlightRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   const max = state.posMax;
   
@@ -473,7 +502,7 @@ function coloredHighlightRule(state: any, silent: boolean): boolean {
       if (/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(color)) {
         if (!silent) {
           const content = state.src.slice(start + 2, endPos);
-          const token = state.push('colored_highlight', '', 0);
+          const token = pushManuscriptToken(state, 'colored_highlight', '', 0);
           token.content = content;
           token.color = color;
         }
@@ -486,14 +515,14 @@ function coloredHighlightRule(state: any, silent: boolean): boolean {
   // Plain highlight
   if (!silent) {
     const content = state.src.slice(start + 2, endPos);
-    const token = state.push('plain_highlight', '', 0);
+    const token = pushManuscriptToken(state, 'plain_highlight', '', 0);
     token.content = content;
   }
   state.pos = endPos + 2;
   return true;
 }
 
-function footnoteRefRule(state: any, silent: boolean): boolean {
+function footnoteRefRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   const max = state.posMax;
   const src = state.src;
@@ -515,14 +544,14 @@ function footnoteRefRule(state: any, silent: boolean): boolean {
   // stripped by extractFootnoteDefinitions() before parseMd() is called.
 
   if (!silent) {
-    const token = state.push('footnote_ref', '', 0);
+    const token = pushManuscriptToken(state, 'footnote_ref', '', 0);
     token.footnoteLabel = label;
   }
   state.pos = end + 1;
   return true;
 }
 
-function citationRule(state: any, silent: boolean): boolean {
+function citationRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   const max = state.posMax;
 
@@ -537,7 +566,7 @@ function citationRule(state: any, silent: boolean): boolean {
 
   if (!silent) {
     const rawContent = state.src.slice(contentStart, endPos);
-    const token = state.push('citation', '', 0);
+    const token = pushManuscriptToken(state, 'citation', '', 0);
     // Preserve original content for fallback rendering
     token.content = isSuppressed ? '-@' + rawContent : rawContent;
 
@@ -584,7 +613,7 @@ function citationRule(state: any, silent: boolean): boolean {
   return true;
 }
 
-function mathRule(state: any, silent: boolean): boolean {
+function mathRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   const max = state.posMax;
   
@@ -597,7 +626,7 @@ function mathRule(state: any, silent: boolean): boolean {
     
     if (!silent) {
       const content = state.src.slice(start + 2, endPos);
-      const token = state.push('math', '', 0);
+      const token = pushManuscriptToken(state, 'math', '', 0);
       token.content = content;
       token.display = true;
     }
@@ -622,7 +651,7 @@ function mathRule(state: any, silent: boolean): boolean {
   
   if (!silent) {
     const content = state.src.slice(start + 1, endPos);
-    const token = state.push('math', '', 0);
+    const token = pushManuscriptToken(state, 'math', '', 0);
     token.content = content;
     // Don't set display for inline math - leave it undefined
   }
@@ -631,15 +660,15 @@ function mathRule(state: any, silent: boolean): boolean {
 }
 
 /** Inline rule that converts the paragraph placeholder back into softbreak tokens. */
-function paraPlaceholderRule(state: any, silent: boolean): boolean {
+function paraPlaceholderRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   if (state.src.charCodeAt(start) !== 0xE000) return false; // \uE000
   if (!state.src.startsWith(PARA_PLACEHOLDER, start)) return false;
 
   if (!silent) {
     // Emit two softbreaks to represent the paragraph break
-    state.push('softbreak', 'br', 0);
-    state.push('softbreak', 'br', 0);
+    pushManuscriptToken(state, 'softbreak', 'br', 0);
+    pushManuscriptToken(state, 'softbreak', 'br', 0);
   }
   state.pos = start + PARA_PLACEHOLDER.length;
   return true;
@@ -777,7 +806,7 @@ export function extractFootnoteDefinitions(markdown: string): { cleaned: string;
     const line = lines[i];
     // Inside a footnote definition, indented lines are continuation lines (even if they look like fences)
     if (currentLabel !== undefined && (line.startsWith('    ') || line.startsWith('\t'))) {
-      currentBody.push(line.replace(/^(?:    |\t)/, ''));
+      currentBody.push(line.replace(/^(?: {4}|\t)/, ''));
       continue;
     }
     const fenceMatch = line.match(/^(\s*)(`{3,}|~{3,})/);
@@ -1200,6 +1229,13 @@ export function tableColWidthsProps(colWidths: Map<number, string>, defaultColWi
   return chunkCustomProps('MANUSCRIPT_TABLE_COL_WIDTHS_', JSON.stringify(mapping));
 }
 
+function tableNumberFormatProps(prefix: string, values: Map<number, string>): CustomPropEntry[] {
+  if (values.size === 0) return [];
+  const mapping: Record<string, string> = {};
+  for (const [idx, value] of values) mapping[String(idx)] = value;
+  return chunkCustomProps(prefix, JSON.stringify(mapping));
+}
+
 export function landscapeTableProps(landscapeTables: Set<number>): CustomPropEntry[] {
   if (landscapeTables.size === 0) return [];
   const mapping: Record<string, string> = {};
@@ -1297,7 +1333,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
   // grid-table placeholders which inflates the gaps computed from markdown-it
   // token maps.  Using the original source gives correct values.
   {
-    const origLines = markdown.split('\n');
+    const origLines = (originalText ?? markdown).split('\n');
     let searchFrom = 0; // track position to handle duplicate comment text
     for (const tok of result) {
       if (tok.type !== 'paragraph' || tok.runs.length !== 1 || tok.runs[0].type !== 'html_comment') continue;
@@ -1442,6 +1478,34 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
         if (warnings) warnings.push('Invalid <!-- table-col-widths: ' + cwMatch[1] + ' --> directive ignored.');
       }
     }
+  }
+
+  // Transfer numeric-format directives independently so explicit `source`
+  // values can cancel document-level defaults and survive DOCX round trips.
+  for (let i = result.length - 1; i >= 0; i--) {
+    if (result[i].type !== 'paragraph' || result[i].runs.length !== 1 || result[i].runs[0].type !== 'html_comment') continue;
+    const text = result[i].runs[0].text.trim();
+    const match = text.match(/^<!--\s*table-(digits|decimal-mark|digit-grouping):\s*(.+?)\s*-->$/i);
+    if (!match) continue;
+    let target = i + 1;
+    while (target < result.length && result[target].type === 'paragraph'
+        && result[target].runs.length === 1 && result[target].runs[0].type === 'html_comment') target++;
+    if (target >= result.length || result[target].type !== 'table') continue;
+    const key = match[1].toLowerCase();
+    const raw = match[2];
+    let valid = false;
+    if (key === 'digits') {
+      const value = parseTableDigits(raw);
+      if (value !== undefined) { if (result[target].tableDigits === undefined) result[target].tableDigits = value; valid = true; }
+    } else if (key === 'decimal-mark') {
+      const value = parseTableDecimalMark(raw);
+      if (value !== undefined) { if (result[target].tableDecimalMark === undefined) result[target].tableDecimalMark = value; valid = true; }
+    } else {
+      const value = parseTableDigitGrouping(raw);
+      if (value !== undefined) { if (result[target].tableDigitGrouping === undefined) result[target].tableDigitGrouping = value; valid = true; }
+    }
+    if (valid) result.splice(i, 1);
+    else if (warnings) warnings.push('Invalid ' + text + ' directive ignored.');
   }
 
   // Pre-scan: warn on unclosed/orphaned/nested/crossed orientation directives with line numbers.
@@ -1846,7 +1910,7 @@ function annotateBlockquoteAlert(tokens: MdToken[], level: number): MdToken[] {
   return result;
 }
 
-function convertTokens(tokens: any[], listLevel = 0, blockquoteLevel = 0, warnings?: string[], sourceLines?: string[]): MdToken[] {
+function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel = 0, warnings?: string[], sourceLines?: string[]): MdToken[] {
   const result: MdToken[] = [];
   let i = 0;
   
@@ -1879,7 +1943,8 @@ function convertTokens(tokens: any[], listLevel = 0, blockquoteLevel = 0, warnin
       case 'ordered_list_open': {
         const listClose = findClosingToken(tokens, i, token.type.replace('_open', '_close'));
         const currentLevel = listLevel + 1;
-        const listStart = token.attrGet?.('start') ? parseInt(token.attrGet('start'), 10) : undefined;
+        const startAttr = token.attrGet('start');
+        const listStart = startAttr ? parseInt(startAttr, 10) : undefined;
         const listItems = extractListItems(tokens.slice(i + 1, listClose), token.type === 'ordered_list_open', currentLevel, warnings, listStart, sourceLines);
         result.push(...listItems);
         i = listClose + 1;
@@ -2000,8 +2065,9 @@ function convertTokens(tokens: any[], listLevel = 0, blockquoteLevel = 0, warnin
           // Find previous token's end line — scan backwards through markdown-it tokens
           let prevEnd = 0;
           for (let pi = i - 1; pi >= 0; pi--) {
-            if (tokens[pi].map) {
-              prevEnd = tokens[pi].map[1];
+            const previousMap = tokens[pi].map;
+            if (previousMap) {
+              prevEnd = previousMap[1];
               break;
             }
           }
@@ -2010,8 +2076,9 @@ function convertTokens(tokens: any[], listLevel = 0, blockquoteLevel = 0, warnin
           const thisEnd = token.map?.[1] ?? 0;
           let nextStart = thisEnd;
           for (let ni = i + 1; ni < tokens.length; ni++) {
-            if (tokens[ni].map) {
-              nextStart = tokens[ni].map[0];
+            const followingMap = tokens[ni].map;
+            if (followingMap) {
+              nextStart = followingMap[0];
               break;
             }
           }
@@ -2070,6 +2137,9 @@ function convertTokens(tokens: any[], listLevel = 0, blockquoteLevel = 0, warnin
                 if (meta.font) tableToken.tableFont = meta.font;
                 if (meta.orientation) tableToken.tableOrientation = meta.orientation;
                 if (meta.colWidths) tableToken.tableColWidths = meta.colWidths;
+                if (meta.digits !== undefined) tableToken.tableDigits = meta.digits;
+                if (meta.decimalMark) tableToken.tableDecimalMark = meta.decimalMark;
+                if (meta.digitGrouping) tableToken.tableDigitGrouping = meta.digitGrouping;
                 if (meta.embedIdx !== undefined) tableToken.embedIdx = meta.embedIdx;
                 result.push(tableToken);
               }
@@ -2104,7 +2174,7 @@ function convertTokens(tokens: any[], listLevel = 0, blockquoteLevel = 0, warnin
   return result;
 }
 
-function convertInlineTokens(tokens: any[]): MdRun[] {
+function convertInlineTokens(tokens: ManuscriptToken[]): MdRun[] {
   const runs: MdRun[] = [];
   
   for (const token of tokens) {
@@ -2121,9 +2191,9 @@ function convertInlineTokens(tokens: any[]): MdRun[] {
   return runs;
 }
 
-function processInlineChildren(tokens: any[]): MdRun[] {
+function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
   const runs: MdRun[] = [];
-  const formatStack: any = {};
+  const formatStack: Partial<Pick<MdRun, 'bold' | 'italic' | 'underline' | 'strikethrough' | 'superscript' | 'subscript'>> = {};
   let currentHref: string | undefined;
   
   for (let ti = 0; ti < tokens.length; ti++) {
@@ -2186,7 +2256,7 @@ function processInlineChildren(tokens: any[]): MdRun[] {
         break;
         
       case 'link_open':
-        currentHref = token.attrGet('href');
+        currentHref = token.attrGet('href') ?? undefined;
         break;
       case 'link_close':
         currentHref = undefined;
@@ -2241,8 +2311,10 @@ function processInlineChildren(tokens: any[]): MdRun[] {
         break;
       }
         
-      case 'critic_markup':
-        if (token.criticType === 'critic_sub') {
+      case 'critic_markup': {
+        const criticType = token.criticType;
+        if (!criticType) break;
+        if (criticType === 'critic_sub') {
           const oldText = token.oldText || '';
           const newText = token.newText || '';
           runs.push({
@@ -2254,7 +2326,7 @@ function processInlineChildren(tokens: any[]): MdRun[] {
             ...formatStack,
             href: currentHref
           });
-        } else if (token.criticType === 'critic_comment') {
+        } else if (criticType === 'critic_comment') {
           const commentAnchorText = '';
           runs.push({
             type: 'critic_comment',
@@ -2274,7 +2346,7 @@ function processInlineChildren(tokens: any[]): MdRun[] {
 
           // Only strip inner ==...== from critic_highlight — not critic_add/critic_del
           // where literal == characters in added/deleted text would be misinterpreted.
-          if (token.criticType === 'critic_highlight') {
+          if (criticType === 'critic_highlight') {
             const coloredMatch = text.match(/^==([\s\S]*)==\{([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\}$/);
             const plainMatch = !coloredMatch && text.match(/^==([\s\S]*)==$/);
 
@@ -2289,7 +2361,7 @@ function processInlineChildren(tokens: any[]): MdRun[] {
           }
 
           runs.push({
-            type: token.criticType,
+            type: criticType,
             text,
             innerRuns: parseCriticInnerRuns(text),
             author: token.author,
@@ -2301,7 +2373,8 @@ function processInlineChildren(tokens: any[]): MdRun[] {
           });
         }
         break;
-        
+      }
+
       case 'colored_highlight': {
         let text = token.content;
         const criticMatch = text.match(/^\{==([\s\S]*)==\}$/);
@@ -2392,7 +2465,7 @@ function processInlineChildren(tokens: any[]): MdRun[] {
 
       case 'image': {
         const src = token.attrGet?.('src') || '';
-        const alt = token.children?.map((c: any) => c.content || '').join('') || '';
+        const alt = token.children?.map(child => child.content || '').join('') || '';
         let width: number | undefined;
         let height: number | undefined;
         // Look ahead for {width=N height=N} attribute syntax
@@ -2429,7 +2502,7 @@ function processInlineChildren(tokens: any[]): MdRun[] {
   return runs;
 }
 
-function findClosingToken(tokens: any[], start: number, closeType: string): number {
+function findClosingToken(tokens: ManuscriptToken[], start: number, closeType: string): number {
   let depth = 1;
   for (let i = start + 1; i < tokens.length; i++) {
     if (tokens[i].type === tokens[start].type) depth++;
@@ -2449,7 +2522,7 @@ const DROPPED_LIST_BLOCK_TYPES = new Set([
   'fence', 'code_block', 'html_block', 'blockquote_open', 'table_open',
 ]);
 
-function extractListItems(tokens: any[], ordered: boolean, level: number, warnings?: string[], startNumber?: number, sourceLines?: string[]): MdToken[] {
+function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: number, warnings?: string[], startNumber?: number, sourceLines?: string[]): MdToken[] {
   const items: MdToken[] = [];
   let i = 0;
   let itemOrdinal = 0;
@@ -2496,7 +2569,8 @@ function extractListItems(tokens: any[], ordered: boolean, level: number, warnin
         } else if (itemTokens[j].type === 'bullet_list_open' || itemTokens[j].type === 'ordered_list_open') {
           const subClose = findClosingToken(itemTokens, j, itemTokens[j].type.replace('_open', '_close'));
           const subOrdered = itemTokens[j].type === 'ordered_list_open';
-          const subStart = itemTokens[j].attrGet?.('start') ? parseInt(itemTokens[j].attrGet('start'), 10) : undefined;
+          const subStartAttr = itemTokens[j].attrGet('start');
+          const subStart = subStartAttr ? parseInt(subStartAttr, 10) : undefined;
           childSegments.push({
             startIndex: itemTokens[j].map?.[0] ?? j,
             order: childSegmentOrder++,
@@ -2565,7 +2639,7 @@ function extractTaskListItem(runs: MdRun[]): { checked: boolean; runs: MdRun[] }
   return { checked: parsed.checked, runs: updatedRuns };
 }
 
-function extractTableData(tokens: any[]): MdTableRow[] {
+function extractTableData(tokens: ManuscriptToken[]): MdTableRow[] {
   const rows: MdTableRow[] = [];
   let i = 0;
   let isHeader = true;
@@ -2585,7 +2659,7 @@ function extractTableData(tokens: any[]): MdTableRow[] {
   return rows;
 }
 
-function extractTableCells(tokens: any[]): MdTableCell[] {
+function extractTableCells(tokens: ManuscriptToken[]): MdTableCell[] {
   const cells: MdTableCell[] = [];
   let i = 0;
 
@@ -2717,6 +2791,17 @@ const DEFAULT_MARGINS = 'w:top="1440" w:right="1440" w:bottom="1440" w:left="144
 
 interface PageSize { w: number; h: number }
 
+/** Return the writable width of the current section in CSS pixels (96 px/in). */
+function pageContentWidthPx(state: DocxGenState): number {
+  const pgSz = parseTemplatePgSz(state.templateSectPr);
+  const margins = parseTemplateMargins(state.templateSectPr);
+  const left = parseInt(margins.match(/w:left="(\d+)"/)?.[1] ?? '1440', 10);
+  const right = parseInt(margins.match(/w:right="(\d+)"/)?.[1] ?? '1440', 10);
+  const pageWidthTwips = state.inLandscapeSection ? pgSz.h : pgSz.w;
+  // 1 inch = 1440 twips = 96 CSS pixels.
+  return Math.max(1, (pageWidthTwips - left - right) / 15);
+}
+
 /** Parse w:pgSz from a sectPr XML string, defaulting to US Letter portrait. */
 export function parseTemplatePgSz(sectPrXml: string | undefined): PageSize {
   if (!sectPrXml) return { w: DEFAULT_PAGE_W, h: DEFAULT_PAGE_H };
@@ -2811,6 +2896,9 @@ export interface DocxGenState {
   tableFontSizes: Map<number, number>; // table index -> per-table font size (pt)
   tableFonts: Map<number, string>;     // table index -> per-table font name
   tableColWidths: Map<number, string>; // table index -> serialized col widths (e.g. "2 1 1" or "equal")
+  tableDigits: Map<number, string>;
+  tableDecimalMarks: Map<number, string>;
+  tableDigitGroupings: Map<number, string>;
   fontOverrides?: FontOverrides;       // document-level font overrides for table default resolution
   listIndent: 'tab' | 'spaces'; // indentation style for nested list items
   consecutiveReplyParaIds: Set<string>; // parent paraIds whose replies were in consecutive format
@@ -2845,6 +2933,25 @@ export interface DocxGenState {
   listBlockIndex: number;          // counter for list blocks (consecutive groups of list_items)
   embedDirectiveMap: Map<number, string>; // table index → original embed directive text
   embedDirectives: string[]; // ordered list of embed directive texts from preprocessing
+}
+
+function recordTableMetadata(token: MdToken, state: DocxGenState): void {
+  const tableIndex = state.tableIndex;
+
+  if (token.sourceFormat) state.tableFormats.set(tableIndex, token.sourceFormat);
+  if (token.pipeAligned) state.pipeTableAligned.set(tableIndex, true);
+  if (token.gridSourceColWidths) state.gridSourceColWidths.set(tableIndex, token.gridSourceColWidths);
+  if (token.tableFontSize !== undefined) state.tableFontSizes.set(tableIndex, token.tableFontSize);
+  if (token.tableFont) state.tableFonts.set(tableIndex, token.tableFont);
+  if (token.tableColWidths) {
+    const value = token.tableColWidths === 'equal' ? 'equal'
+      : token.tableColWidths === 'auto' ? 'auto'
+      : token.tableColWidths.join(' ');
+    state.tableColWidths.set(tableIndex, value);
+  }
+  if (token.tableDigits !== undefined) state.tableDigits.set(tableIndex, String(token.tableDigits));
+  if (token.tableDecimalMark) state.tableDecimalMarks.set(tableIndex, token.tableDecimalMark);
+  if (token.tableDigitGrouping) state.tableDigitGroupings.set(tableIndex, token.tableDigitGrouping);
 }
 
 interface CommentEntry {
@@ -4611,7 +4718,7 @@ function generateInlineCriticContent(
   state: DocxGenState,
   options?: MdToDocxOptions,
   bibEntries?: Map<string, BibtexEntry>,
-  citeprocEngine?: any,
+  citeprocEngine?: CiteprocEngine,
   forced: Partial<MdRun> = {}
 ): string {
   const formattedRuns = formatCriticInnerRuns(runs, outer, forced);
@@ -4674,7 +4781,7 @@ function generateDeletedCriticContent(
   return xml;
 }
 
-export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: any): string {
+export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine): string {
   let xml = '';
   for (let ri = 0; ri < inputRuns.length; ri++) {
     const run = inputRuns[ri];
@@ -5010,11 +5117,14 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
           let fileData: Uint8Array;
           try {
             fileData = new Uint8Array(readFileSync(absPath));
-          } catch (err: any) {
-            if (err?.code === 'ENOENT') {
+          } catch (err: unknown) {
+            const errorCode = err && typeof err === 'object' && 'code' in err ? err.code : undefined;
+            const candidateMessage = err && typeof err === 'object' && 'message' in err ? err.message : undefined;
+            const errorMessage = typeof candidateMessage === 'string' && candidateMessage ? candidateMessage : String(err);
+            if (errorCode === 'ENOENT') {
               state.warnings.push(IMAGE_WARNINGS.notFound(src));
             } else {
-              state.warnings.push(IMAGE_WARNINGS.readError(src, err?.message || String(err)));
+              state.warnings.push(IMAGE_WARNINGS.readError(src, errorMessage));
             }
             continue;
           }
@@ -5057,6 +5167,15 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
           if (!height) height = 100;
         }
       }
+      // Word does not automatically constrain an inline drawing to the page.
+      // Downscale oversized images to the current section's writable width while
+      // preserving their aspect ratio; never enlarge smaller authored images.
+      const maxWidth = pageContentWidthPx(state);
+      if (width > maxWidth) {
+        const scale = maxWidth / width;
+        width = maxWidth;
+        height *= scale;
+      }
       const cx = pixelsToEmu(width);
       const cy = pixelsToEmu(height);
       const docPrId = state.nextImageDocPrId++;
@@ -5078,7 +5197,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
   return xml;
 }
 
-export function generateParagraph(token: MdToken, state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: any): string {
+export function generateParagraph(token: MdToken, state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine): string {
   let pPr = '';
 
   // Apply custom style when inside a <!-- style: X --> block (only for plain paragraphs)
@@ -5237,7 +5356,7 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
   return xml;
 }
 
-export function generateTable(token: MdToken, state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: any): string {
+export function generateTable(token: MdToken, state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine): string {
   if (!token.rows) return '';
 
   // Resolve effective table font/size: per-table token > document-level overrides
@@ -5250,7 +5369,7 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
   // Always suppress paragraph spacing-after inside table cells (pPrDefault sets after="160"
   // which creates asymmetric vertical padding — cell margin alone should control inset).
   const spacingZero = '<w:spacing w:after="0"/>';
-  let tablePPr = '';
+  let tablePPr: string;
   let tableRunRPr = '';
   if (effectiveTableSizeHp || effectiveTableFont) {
     const hasDocLevelStyle = !!(fo?.tableSizeHp || fo?.tableFont);
@@ -5689,7 +5808,7 @@ function peopleXml(comments: CommentEntry[]): string {
   return xml;
 }
 
-export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: any, frontmatter?: Frontmatter): string {
+export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine, frontmatter?: Frontmatter): string {
   let body = '';
   const separatorParagraph = '<w:p><w:pPr><w:spacing w:after=\"0\"/></w:pPr></w:p>';
 
@@ -5708,7 +5827,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       const mdId = run.commentId || '';
       const numericId = state.commentIdMap.get(mdId);
       if (numericId !== undefined && !state.replyRanges.some(rr => rr.parentId === numericId)) {
-        for (const _reply of run.replies) {
+        for (let replyIndex = 0; replyIndex < run.replies.length; replyIndex++) {
           const replyId = state.commentId++;
           state.replyRanges.push({ replyId, parentId: numericId });
         }
@@ -5927,27 +6046,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       state.listBlockIndex++;
     }
     if (token.type === 'table') {
-      if (token.sourceFormat) {
-        state.tableFormats.set(state.tableIndex, token.sourceFormat);
-      }
-      if (token.pipeAligned) {
-        state.pipeTableAligned.set(state.tableIndex, true);
-      }
-      if (token.gridSourceColWidths) {
-        state.gridSourceColWidths.set(state.tableIndex, token.gridSourceColWidths);
-      }
-      if (token.tableFontSize !== undefined) {
-        state.tableFontSizes.set(state.tableIndex, token.tableFontSize);
-      }
-      if (token.tableFont) {
-        state.tableFonts.set(state.tableIndex, token.tableFont);
-      }
-      if (token.tableColWidths) {
-        const val = token.tableColWidths === 'equal' ? 'equal'
-          : token.tableColWidths === 'auto' ? 'auto'
-          : token.tableColWidths.join(' ');
-        state.tableColWidths.set(state.tableIndex, val);
-      }
+      recordTableMetadata(token, state);
       // Table-only landscape: wrap with section breaks (skip if already in fence-based landscape)
       if (token.tableOrientation === 'landscape' && !state.inLandscapeSection && !state.inPortraitSection) {
         state.landscapeTables.add(state.tableIndex);
@@ -6082,6 +6181,25 @@ export async function convertMdToDocx(
     }
   }
 
+  // Numeric table formatting runs on the shared HTML/pipe/grid representation so
+  // preview and DOCX export apply exactly the same transformations.
+  bodyForParsing = preprocessGridTables(bodyForParsing);
+  const numberResult = formatTableNumbers(bodyForParsing, {
+    digits: frontmatter.tableDigits,
+    decimalMark: frontmatter.tableDecimalMark,
+    digitGrouping: frontmatter.tableDigitGrouping,
+  });
+  bodyForParsing = numberResult.output;
+  parseWarnings.push(...numberResult.warnings);
+	for (const [label, noteBody] of footnoteDefs) {
+		const noteNumberResult = formatTableNumbers(preprocessGridTables(noteBody), {
+			digits: frontmatter.tableDigits,
+			decimalMark: frontmatter.tableDecimalMark,
+			digitGrouping: frontmatter.tableDigitGrouping,
+		});
+		footnoteDefs.set(label, noteNumberResult.output);
+		parseWarnings.push(...noteNumberResult.warnings);
+	}
   const tokens = parseMd(bodyForParsing, parseWarnings, frontmatter.breaks ?? false, maskFrontmatter(markdown));
 
   // Compute inter-blockquote-group gap metadata from the original markdown
@@ -6100,7 +6218,7 @@ export async function convertMdToDocx(
   }
 
   // Create citeproc engine if CSL style specified in frontmatter
-  let citeprocEngine: any;
+  let citeprocEngine: CiteprocEngine | undefined;
   const earlyWarnings: string[] = [...parseWarnings];
 
   // Detect custom style name collisions (e.g. 'my-heading' and 'my_heading' both → MsCustomMyHeading)
@@ -6261,6 +6379,9 @@ export async function convertMdToDocx(
     tableFontSizes: new Map(),
     tableFonts: new Map(),
     tableColWidths: new Map(),
+    tableDigits: new Map(),
+    tableDecimalMarks: new Map(),
+    tableDigitGroupings: new Map(),
     pipeTableAligned: new Map(),
     gridSourceColWidths: new Map(),
     fontOverrides,
@@ -6405,17 +6526,7 @@ export async function convertMdToDocx(
       if (isFirstContent) {
         isFirstContent = false;
         if (t.type === 'table') {
-          if (t.sourceFormat) state.tableFormats.set(state.tableIndex, t.sourceFormat);
-          if (t.pipeAligned) state.pipeTableAligned.set(state.tableIndex, true);
-          if (t.gridSourceColWidths) state.gridSourceColWidths.set(state.tableIndex, t.gridSourceColWidths);
-          if (t.tableFontSize !== undefined) state.tableFontSizes.set(state.tableIndex, t.tableFontSize);
-          if (t.tableFont) state.tableFonts.set(state.tableIndex, t.tableFont);
-          if (t.tableColWidths) {
-            const val = t.tableColWidths === 'equal' ? 'equal'
-              : t.tableColWidths === 'auto' ? 'auto'
-              : t.tableColWidths.join(' ');
-            state.tableColWidths.set(state.tableIndex, val);
-          }
+          recordTableMetadata(t, state);
           bodyXml += '<w:p>' + paragraphPPr + selfRefRun + '</w:p>';
           bodyXml += generateTable(t, state, options, bibEntries, citeprocEngine);
           if (t.embedIdx !== undefined && t.embedIdx < state.embedDirectives.length) {
@@ -6428,17 +6539,7 @@ export async function convertMdToDocx(
         }
       } else {
         if (t.type === 'table') {
-          if (t.sourceFormat) state.tableFormats.set(state.tableIndex, t.sourceFormat);
-          if (t.pipeAligned) state.pipeTableAligned.set(state.tableIndex, true);
-          if (t.gridSourceColWidths) state.gridSourceColWidths.set(state.tableIndex, t.gridSourceColWidths);
-          if (t.tableFontSize !== undefined) state.tableFontSizes.set(state.tableIndex, t.tableFontSize);
-          if (t.tableFont) state.tableFonts.set(state.tableIndex, t.tableFont);
-          if (t.tableColWidths) {
-            const val = t.tableColWidths === 'equal' ? 'equal'
-              : t.tableColWidths === 'auto' ? 'auto'
-              : t.tableColWidths.join(' ');
-            state.tableColWidths.set(state.tableIndex, val);
-          }
+          recordTableMetadata(t, state);
           bodyXml += generateTable(t, state, options, bibEntries, citeprocEngine);
           if (t.embedIdx !== undefined && t.embedIdx < state.embedDirectives.length) {
             state.embedDirectiveMap.set(state.tableIndex, t.embedIdx + '\t' + state.embedDirectives[t.embedIdx]);
@@ -6648,6 +6749,9 @@ export async function convertMdToDocx(
     ? (typeof fontOverrides.tableColWidths === 'string' ? fontOverrides.tableColWidths : fontOverrides.tableColWidths.join(' '))
     : undefined;
   customProps.push(...tableColWidthsProps(state.tableColWidths, defaultColWidthsStr));
+  customProps.push(...tableNumberFormatProps('MANUSCRIPT_TABLE_DIGITS_', state.tableDigits));
+  customProps.push(...tableNumberFormatProps('MANUSCRIPT_TABLE_DECIMAL_MARKS_', state.tableDecimalMarks));
+  customProps.push(...tableNumberFormatProps('MANUSCRIPT_TABLE_DIGIT_GROUPINGS_', state.tableDigitGroupings));
   if (frontmatter.tableColWidths) {
     customProps.push({ name: 'MANUSCRIPT_DEFAULT_TABLE_COL_WIDTHS', value: defaultColWidthsStr! });
   }
@@ -6668,6 +6772,9 @@ export async function convertMdToDocx(
   if (frontmatter.tableBorders) {
     customProps.push({ name: 'MANUSCRIPT_TABLE_BORDERS', value: frontmatter.tableBorders });
   }
+  if (frontmatter.tableDigits !== undefined) customProps.push({ name: 'MANUSCRIPT_DEFAULT_TABLE_DIGITS', value: String(frontmatter.tableDigits) });
+  if (frontmatter.tableDecimalMark) customProps.push({ name: 'MANUSCRIPT_DEFAULT_TABLE_DECIMAL_MARK', value: frontmatter.tableDecimalMark });
+  if (frontmatter.tableDigitGrouping) customProps.push({ name: 'MANUSCRIPT_DEFAULT_TABLE_DIGIT_GROUPING', value: frontmatter.tableDigitGrouping });
   if (frontmatter.styles && Object.keys(frontmatter.styles).length > 0) {
     customProps.push(...chunkCustomProps('MANUSCRIPT_CUSTOM_STYLES_', JSON.stringify(frontmatter.styles)));
   }
@@ -6729,5 +6836,5 @@ export async function convertMdToDocx(
   // DEFLATE compression prevents Word from marking the file as modified on open.
   // Word re-compresses STORE-d (uncompressed) entries and sets the dirty flag.
   const docx = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE', compressionOptions: { level: 6 } });
-  return { docx, warnings: state.warnings };
+  return { docx, warnings: [...new Set(state.warnings)] };
 }

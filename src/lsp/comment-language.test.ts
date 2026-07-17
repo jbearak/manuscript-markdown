@@ -110,6 +110,16 @@ describe('stripCriticMarkup', () => {
 		expect(stripCriticMarkup('{#1>>alice: note<<}')).toBe('');
 	});
 
+	test('preserves an unmatched opener while stripping a later complete comment', () => {
+		const input = 'before {>>unmatched {>>remove me<<} after';
+		expect(stripCriticMarkup(input)).toBe('before {>>unmatched  after');
+	});
+
+	test('strips valid nested comments as one complete block', () => {
+		const input = 'before {>>outer {>>inner<<} outer<<} after';
+		expect(stripCriticMarkup(input)).toBe('before  after');
+	});
+
 	test('strips {#id} and {/id} markers', () => {
 		expect(stripCriticMarkup('{#1}text{/1}')).toBe('text');
 	});

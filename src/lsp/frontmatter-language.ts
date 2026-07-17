@@ -7,6 +7,7 @@
  */
 
 import { normalizeFontStyle, parseColWidths } from '../frontmatter';
+import { MAX_TABLE_DIGITS } from '../table-number-format';
 import { getCslFieldInfo } from './csl-language';
 import { BUNDLED_STYLE_LABELS } from '../csl-loader';
 
@@ -19,6 +20,7 @@ type FieldKind =
 	| 'boolean'          // breaks, bibliography-hanging-indent
 	| 'enum'             // blockquote-style, colors, table-borders, notes, zotero-notes
 	| 'number'           // font-size, code-font-size, etc.
+	| 'digits'           // source or a non-negative integer
 	| 'font'             // font, code-font, table-font
 	| 'code-font'        // code-font specifically (mono fonts)
 	| 'font-style'       // header-font-style, title-font-style
@@ -116,6 +118,15 @@ const TABLE_BORDERS_VALUES: readonly EnumValue[] = [
 	{ value: 'none', description: 'No table borders' },
 ];
 
+const TABLE_DECIMAL_MARK_VALUES: readonly EnumValue[] = [
+	{ value: 'source' }, { value: 'point' }, { value: 'comma' }, { value: 'midpoint' },
+];
+
+const TABLE_DIGIT_GROUPING_VALUES: readonly EnumValue[] = [
+	{ value: 'source' }, { value: 'none' }, { value: 'comma' }, { value: 'period' },
+	{ value: 'space' }, { value: 'thin-space' },
+];
+
 const BLOCKQUOTE_STYLE_VALUES: readonly EnumValue[] = [
 	{ value: 'Quote', description: 'Word "Quote" paragraph style' },
 	{ value: 'IntenseQuote', description: 'Word "Intense Quote" paragraph style' },
@@ -204,6 +215,12 @@ export const FRONTMATTER_SCHEMA: readonly FieldDef[] = [
 		description: 'Column width ratios for tables.\n\n**Accepted values:** `equal`, `auto`, space/comma-separated ratios (e.g. `2 1 1`), or `[2, 1, 1]` inline array.' },
 	{ key: 'table-borders', kind: 'enum', enumValues: TABLE_BORDERS_VALUES,
 		description: 'Border style applied to all tables.\n\n**Accepted values:** `horizontal`, `solid`, `none`.' },
+	{ key: 'table-digits', kind: 'digits',
+		description: 'Digits after the decimal mark in table numbers.\n\n**Accepted values:** `source` or an integer from 0 to 1000.' },
+	{ key: 'table-decimal-mark', kind: 'enum', enumValues: TABLE_DECIMAL_MARK_VALUES,
+		description: 'Decimal mark for table numbers.\n\n**Accepted values:** `source`, `point`, `comma`, `midpoint`.' },
+	{ key: 'table-digit-grouping', kind: 'enum', enumValues: TABLE_DIGIT_GROUPING_VALUES,
+		description: 'Digit grouping for table numbers.\n\n**Accepted values:** `source`, `none`, `comma`, `period`, `space`, `thin-space`.' },
 	{ key: 'code-background-color', kind: 'color-hex', aliases: ['code-background'], enumValues: COLOR_HEX_SPECIAL_VALUES,
 		description: 'Background color for code blocks.\n\n**Accepted values:** 6-digit hex without `#` (e.g. `F0F0F0`), `none`, or `transparent`.' },
 	{ key: 'code-font-color', kind: 'color-hex-only', aliases: ['code-color'],
@@ -837,6 +854,8 @@ function getValueCompletions(location: FrontmatterLocation, platform: string, ca
 			return makeValueItems(BOOLEAN_VALUES);
 		case 'enum':
 			return makeValueItems(def.enumValues ?? []);
+		case 'digits':
+			return makeValueItems([{ value: 'source' }]);
 		case 'font':
 			return makeValueItems(getBodyFonts(platform).map(f => ({ value: f })));
 		case 'code-font':
@@ -1071,6 +1090,20 @@ export async function validateFrontmatter(
 	}
 
 	// Async validations: CSL and bibliography file existence
+	const decimalLine = seenCanonical.get('table-decimal-mark');
+	const groupingLine = seenCanonical.get('table-digit-grouping');
+	if (decimalLine && groupingLine) {
+		const decimal = decimalLine.rawValue.toLowerCase();
+		const grouping = groupingLine.rawValue.toLowerCase();
+		if ((decimal === 'point' && grouping === 'period') || (decimal === 'comma' && grouping === 'comma')) {
+			diagnostics.push({
+				message: 'Decimal mark and digit grouping cannot use the same character.',
+				severity: 'error', start: groupingLine.valueStart, end: groupingLine.valueEnd,
+			});
+		}
+	}
+
+	// Async validations: CSL and bibliography file existence
 	await validateCsl(text, callbacks, diagnostics);
 	await validateBibPath(parsed, callbacks, diagnostics);
 
@@ -1112,6 +1145,12 @@ function validateValue(def: FieldDef, line: FmLine): FrontmatterDiagnostic | und
 			}
 			break;
 		}
+
+		case 'digits':
+			if (value.toLowerCase() !== 'source' && (!/^\d+$/.test(value) || Number(value) > MAX_TABLE_DIGITS)) {
+				return { message: 'Expected `source` or an integer from 0 to ' + MAX_TABLE_DIGITS + '.', severity: 'error', start: line.valueStart, end: line.valueEnd };
+			}
+			break;
 
 		case 'timezone':
 			if (!/^[+-]\d{2}:\d{2}$/.test(value)) {

@@ -57,7 +57,7 @@ Embed tables from another markdown file:
 <!-- embed: shared/standard-table.md -->
 ```
 
-Only table content (pipe tables, grid tables, HTML tables) and table directives (`table-font-size`, `table-font`, `table-orientation`, `table-col-widths`) are included from the embedded file. Non-table content is silently ignored, with an informational diagnostic in the editor. Cell content is rendered as plain Markdown only — Manuscript-specific syntax such as CriticMarkup, citations, and math is not processed within embedded `.md` tables.
+Only table content (pipe tables, grid tables, HTML tables) and table directives (`table-font-size`, `table-font`, `table-orientation`, `table-col-widths`, `table-digits`, `table-decimal-mark`, `table-digit-grouping`) are included from the embedded file. Non-table content is silently ignored, with an informational diagnostic in the editor. Cell content is rendered as plain Markdown only — Manuscript-specific syntax such as CriticMarkup, citations, and math is not processed within embedded `.md` tables.
 
 ### Stata dataset (.dta)
 
@@ -104,40 +104,56 @@ To embed it in your document with a smaller font:
 
 This renders as a normal table in both the preview and Word output. If you update the CSV file, the table updates automatically the next time you preview or export.
 
-## Using Table Directives with Embeds
+## Formatting Embedded Tables
 
-Document-wide table defaults set in [frontmatter](specification.md#yaml-frontmatter) (`table-font`, `table-font-size`, `table-col-widths`, `table-borders`) apply to embedded tables automatically — no per-table directive needed. To override a default for a specific embed, place a directive before the embed comment, the same way you would before an inline table:
+Embedded tables use the same table settings as inline tables. Place per-table directives immediately before the embed comment to override formatting for that embedded table:
 
 ```markdown
 <!-- table-font-size: 9 -->
 <!-- table-font: Helvetica -->
 <!-- table-col-widths: 2 1 1 1 -->
+<!-- table-digits: 2 -->
+<!-- table-decimal-mark: midpoint -->
 <!-- embed: data/results.csv -->
 ```
 
-Available directives: `table-font-size`, `table-font`, `table-orientation`, `table-col-widths`. The last of these takes space-separated ratios (e.g. `2 1 1 1`); if there are fewer values than columns, the last value repeats — so `2 1` is equivalent to `2 1 1 1` for a four-column table. See the [Tables](specification.md#tables) section of the Specification for details on each directive.
+Available per-table directives for embeds are `table-font-size`, `table-font`, `table-orientation`, `table-col-widths`, `table-digits`, `table-decimal-mark`, and `table-digit-grouping`. See the [Tables](specification.md#tables) section of the Specification for the full directive reference.
 
-## Round-Trip Behavior
+### Column widths
 
-When you export to Word, embed directives are expanded into full tables — the resulting DOCX contains the actual table data, not a reference to an external file. The original directive is preserved internally so that re-importing the DOCX recovers the embed reference rather than inlining the table as Markdown.
+Use `table-col-widths` to set widths for an embedded table:
 
-If the external file changes between export and re-import, the next export picks up the updated data. The embedded file is always the source of truth.
+```markdown
+<!-- table-col-widths: 3 1 1 1 -->
+<!-- embed: data/results.csv -->
+```
 
-## Errors and Diagnostics
+The values are ratios, not fixed measurements. In the example above, the first column gets three times as much width as each other column. Use `equal` to force equal-width columns, or `auto` to restore Word's default automatic sizing for a table that would otherwise inherit a document-wide default:
 
-If something goes wrong with an embed, you'll see feedback in two places: an error message rendered in the preview (in place of the table) and a diagnostic in the editor's Problems panel.
+```markdown
+<!-- table-col-widths: equal -->
+<!-- embed: data/results.csv -->
+```
 
-| Condition | Severity | Message |
-|-----------|----------|---------|
-| File not found | Error | `could not embed <path> — file not found` |
-| Malformed CSV or corrupt XLSX | Error | `could not embed <path> — parse error` |
-| Sheet not found (XLSX) | Error | `sheet '<name>' not found in <path>` |
-| Named range not found (XLSX) | Error | `range '<name>' not found in <path>` |
-| Invalid parameter syntax | Error | `invalid embed parameter: <detail>` |
-| File produces no table rows | Warning | `<path> produced an empty table` |
-| Embedded .md has non-table content | Info | `non-table content in <path> was ignored` |
-| .dta file exceeds size limit | Error | `.dta file exceeds maximum size (<limit>)` |
-| Unsupported .dta format version | Error | `unsupported .dta format` |
+If there are fewer width values than columns, the last value repeats. For example, `3 1` on a four-column table is treated as `3 1 1 1`.
+
+### Document-wide defaults
+
+Document-wide table defaults set in [frontmatter](specification.md#yaml-frontmatter) apply to embedded tables automatically, with no per-table directive needed:
+
+```yaml
+---
+table-font: Helvetica
+table-font-size: 9
+table-col-widths: 2 1 1 1
+table-borders: horizontal
+table-digits: source
+table-decimal-mark: midpoint
+table-digit-grouping: thin-space
+---
+```
+
+Per-table directives placed before the embed comment override frontmatter defaults. `table-borders` is frontmatter-only; the other settings shown above can be overridden per table.
 
 ## Page Orientation and Isolation
 
@@ -194,7 +210,7 @@ See [Specification: Page Orientation Sections](specification.md#page-orientation
 
 ## Custom Styles for Table Titles and Notes
 
-If your document defines custom styles in the frontmatter, you can apply them to table titles and notes using `<!-- style: name -->` / `<!-- /style -->` fencing. Style directives work anywhere in the document — the example below happens to use them inside an orientation fence, but they are equally valid outside one:
+If your document defines [custom styles](specification.md#custom-styles) in [YAML frontmatter](specification.md#yaml-frontmatter), you can apply them to table titles and notes using `<!-- style: name -->` / `<!-- /style -->` fencing. [Style directives](specification.md#block-directive-syntax) are independent of orientation fences: use them inside a `portrait` or `landscape` fence when a table is isolated, or directly in the normal document flow as shown below:
 
 ```markdown
 <!-- style: table-title -->
@@ -208,8 +224,26 @@ Note: All values are population-weighted. Source: 2024 Census Bureau estimates.
 <!-- /style -->
 ```
 
-This requires defining the styles in your frontmatter — see [Specification: Custom Styles](specification.md#custom-styles) for syntax and available properties.
+See [Specification: Custom Styles](specification.md#custom-styles) for the frontmatter syntax and available properties.
 
-## Frontmatter Defaults
+## Round-Trip Behavior
 
-Document-level table settings from YAML frontmatter — `table-font`, `table-font-size`, `table-col-widths`, `table-borders` — apply to embedded tables the same way they apply to inline tables. Per-table directives placed before the embed comment override frontmatter defaults.
+When you export to Word, embed directives are expanded into full tables — the resulting DOCX contains the actual table data, not a reference to an external file. The original directive is preserved internally so that re-importing the DOCX recovers the embed reference rather than inlining the table as Markdown.
+
+If the external file changes between export and re-import, the next export picks up the updated data. The embedded file is always the source of truth.
+
+## Errors and Diagnostics
+
+If something goes wrong with an embed, you'll see feedback in two places: an error message rendered in the preview (in place of the table) and a diagnostic in the editor's Problems panel.
+
+| Condition | Severity | Message |
+|-----------|----------|---------|
+| File not found | Error | `could not embed <path> — file not found` |
+| Malformed CSV or corrupt XLSX | Error | `could not embed <path> — parse error` |
+| Sheet not found (XLSX) | Error | `sheet '<name>' not found in <path>` |
+| Named range not found (XLSX) | Error | `range '<name>' not found in <path>` |
+| Invalid parameter syntax | Error | `invalid embed parameter: <detail>` |
+| File produces no table rows | Warning | `<path> produced an empty table` |
+| Embedded .md has non-table content | Info | `non-table content in <path> was ignored` |
+| .dta file exceeds size limit | Error | `.dta file exceeds maximum size (<limit>)` |
+| Unsupported .dta format version | Error | `unsupported .dta format` |

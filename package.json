@@ -2,7 +2,7 @@
   "name": "manuscript-markdown",
   "displayName": "Manuscript Markdown",
   "description": "Specification, converter, and VS Code extension for roundtrip manuscript and documentation editing between Markdown and Word",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "engines": {
     "vscode": "^1.103.2"
   },
@@ -786,7 +786,7 @@
     }
   },
   "scripts": {
-    "lint": "eslint src/",
+    "lint": "eslint src/ --max-warnings 0",
     "compile": "node esbuild.mjs && bun run copy-csl",
     "copy-csl": "rm -rf out/csl-styles out/csl-locales && cp -R src/csl-styles out/csl-styles && cp -R src/csl-locales out/csl-locales",
     "watch": "node esbuild.mjs --watch",

@@ -8,6 +8,18 @@ export interface GridTableData {
   colWidths?: number[]; // inner character widths of each column, derived from +---+---+ separators
 }
 
+export interface GridTableSourceMapEntry {
+  outputStart: number;
+  outputEnd: number;
+  sourceStart: number;
+  sourceEnd: number;
+}
+
+export interface GridTablePreprocessResult {
+  output: string;
+  sourceMap: GridTableSourceMapEntry[];
+}
+
 /**
  * Detect Pandoc-style grid tables in markdown and replace them with
  * HTML-comment placeholders carrying JSON-encoded table data.
@@ -15,8 +27,17 @@ export interface GridTableData {
  * don't confuse the parser.
  */
 export function preprocessGridTables(markdown: string): string {
+  return preprocessGridTablesWithSourceMap(markdown).output;
+}
+
+/** Preprocess grid tables and retain placeholder-to-source ranges for diagnostics. */
+export function preprocessGridTablesWithSourceMap(markdown: string): GridTablePreprocessResult {
   const lines = markdown.split('\n');
+  const lineOffsets: number[] = [];
+  let inputOffset = 0;
+  for (const line of lines) { lineOffsets.push(inputOffset); inputOffset += line.length + 1; }
   const result: string[] = [];
+  const replacements: Array<{ resultIndex: number; sourceStart: number; sourceEnd: number }> = [];
   let i = 0;
   let fenceChar: '`' | '~' | null = null;
   let fenceLen = 0;
@@ -43,7 +64,7 @@ export function preprocessGridTables(markdown: string): string {
       i++;
       continue;
     }
-    if (GRID_TABLE_SEPARATOR_RE.test(lines[i].trim())) {
+    if (GRID_TABLE_SEPARATOR_RE.test(lines[i].trim()) && !/^(?: {4}|\t)/.test(lines[i])) {
       // Potential grid table start — collect all lines until we leave the table
       const tableLines: string[] = [];
       const start = i;
@@ -70,7 +91,14 @@ export function preprocessGridTables(markdown: string): string {
           if (result.length > 0 && result[result.length - 1].trim() !== '') {
             result.push('');
           }
-          result.push(GRID_TABLE_PLACEHOLDER_PREFIX + encoded + ' -->');
+          const placeholder = GRID_TABLE_PLACEHOLDER_PREFIX + encoded + ' -->';
+          const resultIndex = result.length;
+          result.push(placeholder);
+          replacements.push({
+            resultIndex,
+            sourceStart: lineOffsets[start],
+            sourceEnd: lineOffsets[start] + tableLines.join('\n').length,
+          });
           result.push('');
           continue;
         }
@@ -86,7 +114,17 @@ export function preprocessGridTables(markdown: string): string {
     }
   }
 
-  return result.join('\n');
+  const output = result.join('\n');
+  const sourceMap: GridTableSourceMapEntry[] = [];
+  const outputLineOffsets: number[] = [];
+  let outputOffset = 0;
+  for (const line of result) { outputLineOffsets.push(outputOffset); outputOffset += line.length + 1; }
+  for (const replacement of replacements) {
+    const outputStart = outputLineOffsets[replacement.resultIndex];
+    const outputEnd = outputStart + result[replacement.resultIndex].length;
+    sourceMap.push({ outputStart, outputEnd, sourceStart: replacement.sourceStart, sourceEnd: replacement.sourceEnd });
+  }
+  return { output, sourceMap };
 }
 
 /**

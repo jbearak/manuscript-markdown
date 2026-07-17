@@ -47,6 +47,9 @@ The frontmatter may also include citation-related fields (`csl`, `locale`, `zote
 | `table-font-size` | Table font size in points. When `font-size` is specified without `table-font-size`, the table font size is automatically set to 2pt less than the body font size. |
 | `table-col-widths` | Column width ratios for tables. Accepts space-separated (`2 1 1`), comma-separated (`2,1,1`), array (`[2, 1, 1]`), `equal`, or `auto`. Last value repeats for tables with more columns. Default: `auto` (Word auto-sizing). |
 | `table-borders` | Table border style: `horizontal` (gray row separators, default), `solid` (all borders), or `none`. |
+| `table-digits` | Digits after the decimal mark in table numbers: `source` or an integer from 0 to 1000. The safety limit bounds generated document size and prevents a precision setting from exhausting memory. |
+| `table-decimal-mark` | Table decimal mark: `source`, `point`, `comma`, or `midpoint`. |
+| `table-digit-grouping` | Table digit grouping: `source`, `none`, `comma`, `period`, `space`, or `thin-space`. |
 | `header-font` | Heading font family. Accepts a single value or a comma-separated list for per-level control (H1–H6). Falls back to `font` if not set. |
 | `header-font-size` | Heading font sizes in points. Accepts a single value or a comma-separated list. Overrides proportional scaling from `font-size`. |
 | `header-font-style` | Heading font styles. Default: `bold`. See [valid font style values](#heading-and-title-font-configuration) below. |
@@ -131,7 +134,7 @@ code-font-size: 10
 
 ### Tables
 
-Manuscript Markdown provides four per-table directives and one frontmatter-only property for controlling table appearance. Set document-wide defaults in frontmatter, then override individual tables as needed.
+Manuscript Markdown provides per-table directives and document defaults for controlling table appearance and numeric display.
 
 | Setting | Frontmatter | Comment directive | `data-` attribute | Notes |
 |---------|:-----------:|:-----------------:|:-----------------:|-------|
@@ -140,10 +143,25 @@ Manuscript Markdown provides four per-table directives and one frontmatter-only 
 | `table-col-widths` | ✓ | ✓ | `data-col-widths` | `auto`, `equal`, or ratios |
 | `table-orientation` | — | ✓ | `data-orientation` | Per-table only; see [Page Orientation Sections](#page-orientation-sections) |
 | `table-borders` | ✓ | — | — | Frontmatter only |
+| `table-digits` | ✓ | ✓ | `data-digits` | Digits after the decimal mark |
+| `table-decimal-mark` | ✓ | ✓ | `data-decimal-mark` | `source`, point, comma, or midpoint |
+| `table-digit-grouping` | ✓ | ✓ | `data-digit-grouping` | Three-digit groups; spaces are nonbreaking |
 
 Per-table directives override frontmatter defaults for that table only. For pipe and grid tables, place an HTML comment before the table (`<!-- table-font-size: 9 -->`). For HTML tables, use `data-` attributes on the `<table>` element (`data-font-size="9"`). Multiple directives can precede the same table.
 
 Priority (highest to lowest): per-table override → frontmatter default → built-in default.
+
+#### Numeric Table Formatting
+
+The three numeric settings inherit independently. An omitted per-table property inherits the document value; an explicit `source` cancels that inherited property and preserves the source display. `table-digits: N` rounds or pads numeric values to exactly N decimal places. Separator-only changes preserve source precision and trailing zeroes, so `12.30%` becomes `12·30%`, not `12·3%`.
+
+```markdown
+<!-- table-digits: 2 -->
+<!-- table-decimal-mark: midpoint -->
+<!-- table-digit-grouping: thin-space -->
+```
+
+Excel cells use Excel's displayed value and number format by default; Stata cells use their display format. Percent, currency, and scientific semantics are retained. Value labels, missing values, dates, Booleans, and identifiers are not treated as ordinary numbers. Markdown and CSV/TSV cells are formatted only when the whole cell matches a strict numeric or statistical grammar; ambiguous punctuation is left unchanged. Decimal and grouping settings that use the same character are invalid.
 
 #### Table Font Configuration
 

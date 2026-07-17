@@ -181,6 +181,12 @@ function cellAttrs(cell: { colspan?: number; rowspan?: number }): string {
   let attrs = '';
   if (cell.colspan && cell.colspan > 1) attrs += ' colspan="' + cell.colspan + '"';
   if (cell.rowspan && cell.rowspan > 1) attrs += ' rowspan="' + cell.rowspan + '"';
+  const source = (cell as import('./html-table-parser').HtmlTableCell).source;
+  if (source) {
+    attrs += ' data-mm-kind="' + escapeHtml(source.kind) + '"';
+    if (source.rawValue !== undefined) attrs += ' data-mm-raw="' + source.rawValue + '"';
+    if (source.sourceFormat) attrs += ' data-mm-format="' + escapeHtml(source.sourceFormat) + '"';
+  }
   return attrs;
 }
 
@@ -200,7 +206,7 @@ function renderRuns(runs: HtmlTableRun[]): string {
 // Embed preprocessing
 // ---------------------------------------------------------------------------
 
-const TABLE_DIRECTIVE_RE = /^<!--\s*table-(font-size|font|orientation|col-widths):\s*.+?\s*-->$/;
+const TABLE_DIRECTIVE_RE = /^<!--\s*table-(font-size|font|orientation|col-widths|digits|decimal-mark|digit-grouping):\s*.+?\s*-->$/;
 
 /**
  * Preprocess embed directives in markdown source.
@@ -508,7 +514,7 @@ function tableContentToHtml(tableContent: string): string | null {
   }
 
   // Run through grid table preprocessor (converts grid tables to placeholders)
-  let processed = preprocessGridTables(tableContent);
+  const processed = preprocessGridTables(tableContent);
 
   // Check if a grid table placeholder was generated
   const placeholderMatch = processed.match(new RegExp(GRID_TABLE_PLACEHOLDER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '([A-Za-z0-9+/=]+)\\s*-->'));

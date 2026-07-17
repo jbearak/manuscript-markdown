@@ -45,7 +45,7 @@ export function getAuthorName(): string | null {
 		
 		// Priority 4: All methods failed, return null
 		return null;
-	} catch (error) {
+	} catch {
 		// Fail fast - any error results in null
 		return null;
 	}
@@ -80,7 +80,7 @@ export function getFormattedAuthorName(): string | null {
 		
 		const timestamp = `${year}-${month}-${day} ${hours}:${minutes}`;
 		return `${authorName} (${timestamp})`;
-	} catch (error) {
+	} catch {
 		// If timestamp formatting fails, return just the author name
 		return authorName;
 	}

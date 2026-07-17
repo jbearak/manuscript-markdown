@@ -1,3 +1,15 @@
+import { decodeNumericHtmlEntity } from './html-entities';
+import {
+  parseHtmlTableCellSourceKind,
+  parseTableDigits,
+  parseTableDecimalMark,
+  parseTableDigitGrouping,
+  type HtmlTableCellSourceKind,
+  type TableDigits,
+  type TableDecimalMark,
+  type TableDigitGrouping,
+} from './table-metadata';
+
 export interface HtmlTableRun {
   type: 'text' | 'softbreak' | 'hardbreak';
   text: string;
@@ -15,6 +27,14 @@ export interface HtmlTableCell {
   runs: HtmlTableRun[];
   colspan?: number;
   rowspan?: number;
+  source?: HtmlTableCellSource;
+}
+
+export interface HtmlTableCellSource {
+  kind: HtmlTableCellSourceKind;
+  display: string;
+  rawValue?: number;
+  sourceFormat?: string;
 }
 
 export interface HtmlTableRow {
@@ -29,6 +49,9 @@ export interface HtmlTableMeta {
   orientation?: 'landscape' | 'portrait'; // from data-orientation attribute
   colWidths?: number[] | 'equal' | 'auto'; // from data-col-widths attribute
   embedIdx?: number;   // from data-embed-idx attribute (set by embed preprocessing)
+  digits?: TableDigits;
+  decimalMark?: TableDecimalMark;
+  digitGrouping?: TableDigitGrouping;
 }
 
 /** Parse data-col-widths attribute value (inline to avoid circular dependency with frontmatter.ts). */
@@ -50,7 +73,7 @@ export function extractHtmlTables(html: string): HtmlTableMeta[] {
   const tables: HtmlTableMeta[] = [];
   // Regex-based extraction intentionally does not support nested <table> blocks.
   // This parser targets simple manuscript tables (<table>/<tr>/<th>/<td>).
-  const tableRegex = /<table\b([^>]*)>([\s\S]*?)<\/table>/gi;
+	const tableRegex = /<table\b((?:"[^"]*"|'[^']*'|[^'">])*)>([\s\S]*?)<\/table>/gi;
   let tableMatch: RegExpExecArray | null;
   while ((tableMatch = tableRegex.exec(html)) !== null) {
     const attrs = tableMatch[1];
@@ -90,6 +113,21 @@ export function extractHtmlTables(html: string): HtmlTableMeta[] {
         const idx = parseInt(embedIdxMatch[1], 10);
         if (Number.isFinite(idx)) meta.embedIdx = idx;
       }
+      const digitsMatch = attrs.match(/data-digits\s*=\s*["']?([^\s"'>]+)["']?/i);
+      if (digitsMatch) {
+        const parsed = parseTableDigits(digitsMatch[1]);
+        if (parsed !== undefined) meta.digits = parsed;
+      }
+      const decimalMatch = attrs.match(/data-decimal-mark\s*=\s*["']?([^\s"'>]+)["']?/i);
+      if (decimalMatch) {
+        const parsed = parseTableDecimalMark(decimalMatch[1]);
+        if (parsed) meta.decimalMark = parsed;
+      }
+      const groupingMatch = attrs.match(/data-digit-grouping\s*=\s*["']?([^\s"'>]+)["']?/i);
+      if (groupingMatch) {
+        const parsed = parseTableDigitGrouping(groupingMatch[1]);
+        if (parsed) meta.digitGrouping = parsed;
+      }
       tables.push(meta);
     }
   }
@@ -99,7 +137,7 @@ export function extractHtmlTables(html: string): HtmlTableMeta[] {
 function extractHtmlTableRows(tableHtml: string): HtmlTableRow[] {
   const rows: HtmlTableRow[] = [];
   // Similarly, nested <tr> structures are out of scope for this lightweight parser.
-  const rowRegex = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
+	const rowRegex = /<tr\b(?:"[^"]*"|'[^']*'|[^'">])*?>([\s\S]*?)<\/tr>/gi;
   let rowMatch: RegExpExecArray | null;
   while ((rowMatch = rowRegex.exec(tableHtml)) !== null) {
     const cells = extractHtmlTableCells(rowMatch[1]);
@@ -108,6 +146,7 @@ function extractHtmlTableRows(tableHtml: string): HtmlTableRow[] {
       rows.push({
         cells: cells.map(cell => ({
           runs: cell.runs,
+          ...(cell.source ? { source: cell.source } : {}),
           ...(cell.colspan && cell.colspan > 1 ? { colspan: cell.colspan } : {}),
           ...(cell.rowspan && cell.rowspan > 1 ? { rowspan: cell.rowspan } : {}),
         })),
@@ -118,10 +157,10 @@ function extractHtmlTableRows(tableHtml: string): HtmlTableRow[] {
   return rows;
 }
 
-function extractHtmlTableCells(rowHtml: string): Array<{ runs: HtmlTableRun[]; isHeader: boolean; colspan?: number; rowspan?: number }> {
-  const cells: Array<{ runs: HtmlTableRun[]; isHeader: boolean; colspan?: number; rowspan?: number }> = [];
+function extractHtmlTableCells(rowHtml: string): Array<{ runs: HtmlTableRun[]; isHeader: boolean; colspan?: number; rowspan?: number; source?: HtmlTableCellSource }> {
+  const cells: Array<{ runs: HtmlTableRun[]; isHeader: boolean; colspan?: number; rowspan?: number; source?: HtmlTableCellSource }> = [];
   // Nested table-cell tags are not supported; this matches flat <th>/<td> content only.
-  const cellRegex = /<(th|td)\b([^>]*)>([\s\S]*?)<\/\1>/gi;
+	const cellRegex = /<(th|td)\b((?:"[^"]*"|'[^']*'|[^'">])*)>([\s\S]*?)<\/\1>/gi;
   let cellMatch: RegExpExecArray | null;
   while ((cellMatch = cellRegex.exec(rowHtml)) !== null) {
     const isHeader = cellMatch[1].toLowerCase() === 'th';
@@ -131,14 +170,25 @@ function extractHtmlTableCells(rowHtml: string): Array<{ runs: HtmlTableRun[]; i
     const rowspanMatch = attrs.match(/rowspan\s*=\s*["']?(\d+)/i);
     const colspan = colspanMatch ? parseInt(colspanMatch[1], 10) : undefined;
     const rowspan = rowspanMatch ? parseInt(rowspanMatch[1], 10) : undefined;
+    const kind = parseHtmlTableCellSourceKind(extractAttr(attrs, 'data-mm-kind'));
+    const rawValueText = extractAttr(attrs, 'data-mm-raw');
+    const rawValue = rawValueText !== undefined ? Number(rawValueText) : undefined;
+    const sourceFormat = extractAttr(attrs, 'data-mm-format');
     cells.push({
       runs,
       isHeader,
       ...(colspan && colspan > 1 ? { colspan } : {}),
       ...(rowspan && rowspan > 1 ? { rowspan } : {}),
+      ...(kind ? { source: { kind, display: runs.map(run => run.text).join(''), ...(rawValue !== undefined && Number.isFinite(rawValue) ? { rawValue } : {}), ...(sourceFormat ? { sourceFormat } : {}) } } : {}),
     });
   }
   return cells;
+}
+
+function extractAttr(attrs: string, name: string): string | undefined {
+  const match = attrs.match(new RegExp('\\b' + name + '\\s*=\\s*(?:"([^"]*)"|\'([^\']*)\'|([^\\s>]+))', 'i'));
+  const value = match ? match[1] ?? match[2] ?? match[3] : undefined;
+  return value === undefined ? undefined : decodeHtmlEntities(value);
 }
 
 function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
@@ -162,7 +212,7 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
     if (match.index > lastIndex) {
       const rawText = cellHtml.slice(lastIndex, match.index);
       const decoded = decodeHtmlEntities(rawText);
-      const text = code ? decoded : decoded.replace(/\s+/g, ' ');
+			const text = code ? decoded : decoded.replace(/[ \t\r\n]+/g, ' ');
       if (text) {
         runs.push({
           type: 'text', text,
@@ -216,7 +266,7 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
   if (lastIndex < cellHtml.length) {
     const rawText = cellHtml.slice(lastIndex);
     const decoded = decodeHtmlEntities(rawText);
-    const text = code ? decoded : decoded.replace(/\s+/g, ' ');
+		const text = code ? decoded : decoded.replace(/[ \t\r\n]+/g, ' ');
     if (text) {
       runs.push({
         type: 'text', text,
@@ -259,8 +309,8 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
 
 function decodeHtmlEntities(text: string): string {
   return text
-    .replace(/&#(\d+);/g, (_m, code) => String.fromCodePoint(Number(code)))
-    .replace(/&#x([0-9a-fA-F]+);/g, (_m, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (entity, code) => decodeNumericHtmlEntity(entity, code, 10))
+    .replace(/&#x([0-9a-fA-F]+);/g, (entity, hex) => decodeNumericHtmlEntity(entity, hex, 16))
     .replace(/&nbsp;/g, ' ')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')

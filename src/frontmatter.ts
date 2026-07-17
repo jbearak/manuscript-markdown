@@ -1,5 +1,16 @@
 export type NoteType = 'in-text' | 'footnotes' | 'endnotes';
 
+import {
+  parseTableDigits,
+  parseTableDecimalMark,
+  parseTableDigitGrouping,
+  type TableDigits,
+  type TableDecimalMark,
+  type TableDigitGrouping,
+} from './table-number-format';
+
+export type { TableDigits, TableDecimalMark, TableDigitGrouping } from './table-number-format';
+
 const NOTE_TYPE_NAMES: Record<string, NoteType> = {
   'in-text': 'in-text',
   'footnotes': 'footnotes',
@@ -122,6 +133,9 @@ export interface Frontmatter {
   tableFontSize?: number;
   tableColWidths?: number[] | 'equal' | 'auto';
   tableBorders?: 'horizontal' | 'solid' | 'none';
+  tableDigits?: TableDigits;
+  tableDecimalMark?: TableDecimalMark;
+  tableDigitGrouping?: TableDigitGrouping;
   blockquoteStyle?: BlockquoteStyle;
   colors?: ColorScheme;
   styles?: Record<string, CustomStyleDef>;
@@ -183,7 +197,7 @@ export function colWidthsToPct(ratios: number[]): number[] {
   const raw = ratios.map(r => r / total * 5000);
   // Largest-remainder rounding to ensure exact sum of 5000
   const widths = raw.map(v => Math.floor(v));
-  let remaining = 5000 - widths.reduce((a, b) => a + b, 0);
+  const remaining = 5000 - widths.reduce((a, b) => a + b, 0);
   const byRemainder = raw
     .map((v, i) => ({ i, frac: v - widths[i] }))
     .sort((a, b) => b.frac - a.frac);
@@ -424,6 +438,21 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
         if (v === 'horizontal' || v === 'solid' || v === 'none') metadata.tableBorders = v;
         break;
       }
+      case 'table-digits': {
+        const parsed = parseTableDigits(value);
+        if (parsed !== undefined) metadata.tableDigits = parsed;
+        break;
+      }
+      case 'table-decimal-mark': {
+        const parsed = parseTableDecimalMark(value);
+        if (parsed !== undefined) metadata.tableDecimalMark = parsed;
+        break;
+      }
+      case 'table-digit-grouping': {
+        const parsed = parseTableDigitGrouping(value);
+        if (parsed !== undefined) metadata.tableDigitGrouping = parsed;
+        break;
+      }
       case 'blockquote-style': {
         const style = normalizeBlockquoteStyle(value);
         if (style) metadata.blockquoteStyle = style;
@@ -515,6 +544,9 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
     'table-font-size': () => { if (metadata.tableFontSize !== undefined) lines.push('table-font-size: ' + metadata.tableFontSize); },
     'table-col-widths': () => { if (metadata.tableColWidths) lines.push('table-col-widths: ' + (typeof metadata.tableColWidths === 'string' ? metadata.tableColWidths : metadata.tableColWidths.join(' '))); },
     'table-borders': () => { if (metadata.tableBorders) lines.push('table-borders: ' + metadata.tableBorders); },
+    'table-digits': () => { if (metadata.tableDigits !== undefined) lines.push('table-digits: ' + metadata.tableDigits); },
+    'table-decimal-mark': () => { if (metadata.tableDecimalMark) lines.push('table-decimal-mark: ' + metadata.tableDecimalMark); },
+    'table-digit-grouping': () => { if (metadata.tableDigitGrouping) lines.push('table-digit-grouping: ' + metadata.tableDigitGrouping); },
     'code-background-color': () => { if (metadata.codeBackgroundColor) lines.push('code-background-color: ' + metadata.codeBackgroundColor); },
     'code-background': () => emitters['code-background-color'](),
     'code-font-color': () => { if (metadata.codeFontColor) lines.push('code-font-color: ' + metadata.codeFontColor); },
@@ -550,6 +582,7 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
     'header-font', 'header-font-size', 'header-font-style',
     'title-font', 'title-font-size', 'title-font-style',
     'table-font', 'table-font-size', 'table-col-widths', 'table-borders',
+    'table-digits', 'table-decimal-mark', 'table-digit-grouping',
     'code-background-color', 'code-font-color', 'code-block-inset',
     'pipe-table-max-line-width', 'grid-table-max-line-width',
     'blockquote-style', 'colors', 'styles', 'breaks',

@@ -8,7 +8,7 @@ import {
 import * as changes from './changes';
 import * as formatting from './formatting';
 import * as author from './author';
-import { manuscriptMarkdownPlugin } from './preview/manuscript-markdown-plugin';
+import { manuscriptMarkdownPlugin, type ManuscriptMarkdownIt } from './preview/manuscript-markdown-plugin';
 import { WordCountController } from './wordcount';
 import { convertDocx, CitationKeyFormat } from './converter';
 import { convertMdToDocx } from './md-to-docx';
@@ -61,7 +61,7 @@ import { findEmbedPathRanges } from './embed-link-provider';
 let languageClient: LanguageClient | undefined;
 let languageClientDisposables: vscode.Disposable[] = [];
 let cslCacheDir: string = '';
-let previewMd: any;
+let previewMd: ManuscriptMarkdownIt | undefined;
 
 // Embed resolver for reading external files referenced by embed directives.
 // Shared by both the preview plugin and md-to-docx conversion.
@@ -485,7 +485,6 @@ export function activate(context: vscode.ExtensionContext) {
 				const basePath = uri.fsPath.replace(/\.docx$/i, '');
 				const existingMdUri = vscode.Uri.file(basePath + '.md');
 				let preferredBibliographyPath: string | undefined;
-				let resolvedBibliographyUri: vscode.Uri | undefined;
 				let existingBibtex: string | undefined;
 				if (await fileExists(existingMdUri)) {
 					const existingMarkdown = new TextDecoder().decode(await vscode.workspace.fs.readFile(existingMdUri));
@@ -494,7 +493,6 @@ export function activate(context: vscode.ExtensionContext) {
 						const resolved = await readBibliographyFromFrontmatterPath(metadata.bibliography, path.dirname(existingMdUri.fsPath));
 						if (resolved) {
 							preferredBibliographyPath = metadata.bibliography;
-							resolvedBibliographyUri = resolved.uri;
 							existingBibtex = resolved.bibtex;
 						}
 					}
@@ -614,8 +612,9 @@ export function activate(context: vscode.ExtensionContext) {
 				}
 
 				vscode.window.showInformationMessage('Exported to Markdown successfully');
-			} catch (err: any) {
-				vscode.window.showErrorMessage(`DOCX conversion failed: ${err.message}`);
+			} catch (err: unknown) {
+				const message = err instanceof Error ? err.message : String(err);
+				vscode.window.showErrorMessage(`DOCX conversion failed: ${message}`);
 			}
 		})
 	);
@@ -625,8 +624,9 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('manuscript-markdown.exportToWord', async (uri?: vscode.Uri) => {
 			try {
 				await exportMdToDocx(uri);
-			} catch (err: any) {
-				vscode.window.showErrorMessage('Export to Word failed: ' + err.message);
+			} catch (err: unknown) {
+				const message = err instanceof Error ? err.message : String(err);
+				vscode.window.showErrorMessage('Export to Word failed: ' + message);
 			}
 		})
 	);
@@ -646,8 +646,9 @@ export function activate(context: vscode.ExtensionContext) {
 				const templateData = await vscode.workspace.fs.readFile(templateFiles[0]);
 				const templateDocx = new Uint8Array(templateData);
 				await exportMdToDocx(uri, templateDocx);
-			} catch (err: any) {
-				vscode.window.showErrorMessage('Export to Word failed: ' + err.message);
+			} catch (err: unknown) {
+				const message = err instanceof Error ? err.message : String(err);
+				vscode.window.showErrorMessage('Export to Word failed: ' + message);
 			}
 		})
 	);
@@ -980,7 +981,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Return markdown-it plugin for preview integration
 	return {
-		extendMarkdownIt(md: any) {
+		extendMarkdownIt(md: ManuscriptMarkdownIt) {
 			previewMd = md;
 			md.manuscriptColors = getConfiguredColorScheme();
 			md.manuscriptEmbedResolver = embedResolver;

@@ -1346,6 +1346,33 @@ describe('extractZoteroCitations', () => {
     expect(smith.doi).toBe('10.1234/test.2020.001');
     expect(smith.authors[0].family).toBe('Smith');
   });
+
+  test('ignores empty author records before a valid author', async () => {
+    const cslPayload = JSON.stringify({
+      citationItems: [{
+        itemData: {
+          type: 'article-journal',
+          title: 'Useful Study',
+          author: [{}, { family: 'Smith', given: 'Alice' }],
+          issued: { 'date-parts': [[2020]] },
+        },
+      }],
+      properties: { plainCitation: '(Smith 2020)' },
+    });
+    const xml = wrapDocumentXml(
+      '<w:p>'
+      + '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+      + '<w:r><w:instrText> ADDIN ZOTERO_ITEM CSL_CITATION '
+      + cslPayload
+      + '</w:instrText></w:r>'
+      + '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+      + '</w:p>'
+    );
+    const citations = await extractZoteroCitations(await buildSyntheticDocx(xml));
+
+    expect(citations[0].items[0].authors).toEqual([{ family: 'Smith', given: 'Alice' }]);
+    expect([...buildCitationKeyMap(citations).values()]).toEqual(['smith2020useful']);
+  });
 });
 
 describe('buildCitationKeyMap', () => {

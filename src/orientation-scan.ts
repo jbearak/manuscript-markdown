@@ -43,7 +43,7 @@ function isStandaloneDirective(text: string, matchStart: number, matchEnd: numbe
   if (/\S/.test(before) || /\S/.test(after)) return false;
 
   // Reject indented code blocks: 4+ spaces or tab at start of line
-  if (/^(\t|    )/.test(before)) return false;
+  if (/^(\t| {4})/.test(before)) return false;
 
   return true;
 }

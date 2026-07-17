@@ -731,6 +731,14 @@ describe('Font customization unit tests', () => {
       expect(converted.markdown).toContain('table-col-widths: 3 1');
     });
 
+    it('round-trips col-widths directive on a later footnote table', async () => {
+      const markdown = 'Text[^fn1]\n\n[^fn1]: Intro paragraph.\n\n    <!-- table-col-widths: 2 1 -->\n\n    | A | B |\n    |---|---|\n    | 1 | 2 |';
+      const result = await convertMdToDocx(markdown);
+      const { convertDocx } = await import('./converter');
+      const converted = await convertDocx(result.docx);
+      expect(converted.markdown).toContain('table-col-widths: 2 1');
+    });
+
     it('directive before table inside landscape fence does not hoist past sentinel', async () => {
       const markdown = '<!-- landscape -->\n\n<!-- table-col-widths: 3 1 -->\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n<!-- /landscape -->';
       const result = await convertMdToDocx(markdown);
