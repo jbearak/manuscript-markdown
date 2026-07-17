@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { formatTableNumbers, validateTableNumberFormat } from './table-number-format';
+import { applyTableNumberSourceEdits, formatTableNumbers, validateTableNumberFormat } from './table-number-format';
 import { preprocessGridTables, preprocessGridTablesWithSourceMap } from './grid-table-preprocess';
 import { parseFrontmatter, serializeFrontmatter } from './frontmatter';
 import { convertMdToDocx } from './md-to-docx';
@@ -154,10 +154,10 @@ describe('table number formatting', () => {
     expect(output.split('\n')).toHaveLength(html.split('\n').length);
   });
 
-	test('handles greater-than characters inside quoted HTML attributes', () => {
-		const html = '<table title="a > b" data-digits="1"><tr><td title="c > d" data-mm-kind="number" data-mm-raw="12.36">12.34</td></tr></table>';
+	test('handles angle brackets inside quoted HTML attributes', () => {
+		const html = '<table title="a < b > c" data-digits="1"><tr><td title="c > d < e" data-mm-kind="number" data-mm-raw="12.36">12.34</td></tr></table>';
 		expect(formatTableNumbers(html, {}).output)
-			.toBe('<table title="a > b" data-digits="1"><tr><td title="c > d" data-mm-kind="number" data-mm-raw="12.36">12.4</td></tr></table>');
+			.toBe('<table title="a < b > c" data-digits="1"><tr><td title="c > d < e" data-mm-kind="number" data-mm-raw="12.36">12.4</td></tr></table>');
 	});
 
   test('preserves and formats multiple HTML tables on one line', () => {
@@ -184,6 +184,14 @@ describe('table number formatting', () => {
 		expect(output).toContain('<strong>12.30</strong> / <em>12.30</em>');
 	});
 
+	test('keeps inserted typed negative signs in the numeric inline run', () => {
+		const html = '<table><tr><td data-mm-kind="currency" data-mm-raw="-12.34">'
+			+ '<span>$</span><strong>12.34</strong></td></tr></table>';
+		expect(formatTableNumbers(html, { digits: 1 }).output)
+			.toBe('<table><tr><td data-mm-kind="currency" data-mm-raw="-12.34">'
+				+ '<span>$</span><strong>-12.3</strong></td></tr></table>');
+	});
+
 	test('does not join numbers across HTML break or block boundaries', () => {
 		const breaks = '<table><tr><td>12<br>34</td><td><p>12</p>34</td><td><h1>12</h1><h2>34</h2></td></tr></table>';
 		const output = formatTableNumbers(breaks, { digits: 2, digitGrouping: 'comma' }).output;
@@ -192,7 +200,8 @@ describe('table number formatting', () => {
 	});
 
 	test('does not format numeric-looking content in inert HTML elements', () => {
-		for (const tag of ['script', 'style', 'textarea', 'template', 'pre', 'sup', 'sub']) {
+		for (const tag of ['script', 'style', 'textarea', 'template', 'title', 'xmp', 'iframe', 'noembed', 'noframes',
+			'plaintext', 'pre', 'sup', 'sub']) {
 			const html = '<table><tr><td><' + tag + '>[12.34]</' + tag + '></td></tr></table>';
 			expect(formatTableNumbers(html, { digits: 1 }).output).toBe(html);
 		}
@@ -204,6 +213,91 @@ describe('table number formatting', () => {
 			const markdown = prefix + '\n\n| V |\n| --- |\n| 12.30 |';
 			expect(formatTableNumbers(markdown, { decimalMark: 'midpoint' }).output).toContain('| 12\u00b730 |');
 		}
+	});
+
+	test('keeps CDATA, processing instructions, and declarations inert', () => {
+		const payload = [
+			'<!-- table-digits: nope -->',
+			'| Value |',
+			'| --- |',
+			'| 12.34 |',
+			'<table><tr><td>56.78</td></tr></table>',
+		].join('\n');
+		const complete = [
+			'<![CDATA[\n' + payload + '\n]]>',
+			'<?target\n' + payload + '\n?>',
+			'<!DECL "' + payload + '">',
+		];
+		for (const inert of complete) {
+			const valid = '| Real |\n| --- |\n| 90.12 |';
+			const result = formatTableNumbers(inert + '\n' + valid, { digits: 1 });
+			expect(result.output).toStartWith(inert);
+			expect(result.output).toEndWith('| 90.1 |');
+			expect(result.warnings).toEqual([]);
+		}
+		for (const inert of [
+			'<![CDATA[\n' + payload,
+			'<?target\n' + payload,
+			'<!DECL "' + payload,
+		]) {
+			const result = formatTableNumbers(inert, { digits: 1 });
+			expect(result.output).toBe(inert);
+			expect(result.warnings).toEqual([]);
+		}
+	});
+
+	test('does not consume inert constructs as pipe-table continuation rows', () => {
+		const table = '| Value |\n| --- |\n| 1.23 |';
+		const complete = [
+			'<![CDATA[ | 12.34 | ]]>',
+			'<?target | 12.34 | ?>',
+			'<!DECL "| 12.34 |">',
+			'<!-- | 12.34 | -->',
+			'<script>| 12.34 |</script>',
+		];
+		for (const inert of complete) {
+			const result = formatTableNumbers(table + '\n' + inert, { digits: 1 });
+			expect(result.output).toBe('| Value |\n| --- |\n| 1.2 |\n' + inert);
+			expect(result.warnings).toEqual([]);
+		}
+		for (const inert of [
+			'<![CDATA[ | 12.34 |',
+			'<?target | 12.34 |',
+			'<!DECL "| 12.34 |',
+			'<!-- | 12.34 |',
+			'<script>| 12.34 |',
+		]) {
+			const result = formatTableNumbers(table + '\n' + inert, { digits: 1 });
+			expect(result.output).toBe('| Value |\n| --- |\n| 1.2 |\n' + inert);
+			expect(result.warnings).toEqual([]);
+		}
+	});
+
+	test('does not consume four-space-indented code as a pipe continuation row', () => {
+		const input = '| Value |\n| --- |\n| 1.23 |\n    | 12.34 |';
+		expect(formatTableNumbers(input, { digits: 1 }).output)
+			.toBe('| Value |\n| --- |\n| 1.2 |\n    | 12.34 |');
+	});
+
+	test('does not underflow numeric inert depth on unmatched closing tags', () => {
+		const html = '<table><tr><td></code>12.34</td><td><code>56.78</code>90.12</td></tr></table>';
+		expect(formatTableNumbers(html, { digits: 1 }).output)
+			.toBe('<table><tr><td></code>12.3</td><td><code>56.78</code>90.1</td></tr></table>');
+	});
+
+	test('matches numeric inert closing tags by name', () => {
+		const html = '<table><tr>'
+			+ '<td><code>hidden</pre>12.34</code>56.78</td>'
+			+ '<td><pre>hidden</sub>12.34</pre>56.78</td>'
+			+ '<td></code>12.34</pre>56.78</td>'
+			+ '<td></pre>12.34</sub>56.78</td>'
+			+ '</tr></table>';
+		expect(formatTableNumbers(html, { digits: 1 }).output).toBe('<table><tr>'
+			+ '<td><code>hidden</pre>12.34</code>56.8</td>'
+			+ '<td><pre>hidden</sub>12.34</pre>56.8</td>'
+			+ '<td></code>12.3</pre>56.8</td>'
+			+ '<td></pre>12.3</sub>56.8</td>'
+			+ '</tr></table>');
 	});
 
 	test('does not parse table markup inside raw-text HTML elements', () => {
@@ -223,11 +317,62 @@ describe('table number formatting', () => {
 		expect(prefixOutput).toContain('</script>12.34');
 	});
 
+	test('treats every GFM literal HTML element as structurally inert', () => {
+		for (const tag of ['title', 'xmp', 'iframe', 'noembed', 'noframes']) {
+			const inert = '<' + tag + '>\n`code`\n| Value |\n| --- |\n| 99.99 |\n'
+				+ '<table><tr><td>88.88</td></tr></table>\n</' + tag + '>';
+			const valid = '<table><tr><td>12.34</td></tr></table>';
+			const output = formatTableNumbers(inert + '\n' + valid, { digits: 1 }).output;
+			expect(output).toStartWith(inert);
+			expect(output).toEndWith('<table><tr><td>12.3</td></tr></table>');
+		}
+		for (const tag of ['title', 'xmp', 'iframe', 'noembed', 'noframes', 'plaintext']) {
+			const selfClosing = '<' + tag + '/><table><tr><td>12.34</td></tr></table>';
+			expect(formatTableNumbers(selfClosing, { digits: 1 }).output)
+				.toBe('<' + tag + '/><table><tr><td>12.3</td></tr></table>');
+			const inCell = '<table><tr><td><' + tag + '/>12.34</td></tr></table>';
+			expect(formatTableNumbers(inCell, { digits: 1 }).output)
+				.toBe('<table><tr><td><' + tag + '/>12.3</td></tr></table>');
+		}
+		const plaintext = '<plaintext>\n`code`\n| Value |\n| --- |\n| 99.99 |\n'
+			+ '<table><tr><td>88.88</td></tr></table>\n</plaintext>\n'
+			+ '<table><tr><td>12.34</td></tr></table>';
+		expect(formatTableNumbers(plaintext, { digits: 1 }).output).toBe(plaintext);
+	});
+
 	test('continues formatting pipe rows that contain inline code', () => {
 		const markdown = '| V | Note |\n| --- | --- |\n| 12.34 | `x` |\n| 56.78 | ok |';
 		const output = formatTableNumbers(markdown, { digits: 1 }).output;
 		expect(output).toContain('| 12.3 | `x` |');
 		expect(output).toContain('| 56.8 | ok |');
+	});
+
+	test('ignores fenced HTML table and cell tags inside a multiline table', () => {
+		const fenced = [
+			'<table>',
+			'<tr><td>',
+			'```html',
+			'</td></tr></table>',
+			'<table><tr><td>99.99</td></tr></table>',
+			'<td>88.88</td>',
+			'```',
+			'12.34',
+			'</td></tr>',
+			'</table>',
+		].join('\n');
+		const output = formatTableNumbers(fenced, { digits: 1 }).output;
+		expect(output).toContain('```html\n</td></tr></table>\n<table><tr><td>99.99</td></tr></table>\n<td>88.88</td>\n```');
+		expect(output).toContain('```\n12.3\n</td></tr>');
+	});
+
+	test('ignores inline-code HTML tags inside a multiline table cell', () => {
+		const markdown = [
+			'<table>',
+			'<tr><td>`</td></tr></table><table><tr><td>99.99</td></tr></table><td>88.88</td>` 12.34</td></tr>',
+			'</table>',
+		].join('\n');
+		const output = formatTableNumbers(markdown, { digits: 1 }).output;
+		expect(output).toContain('`</td></tr></table><table><tr><td>99.99</td></tr></table><td>88.88</td>` 12.3');
 	});
 
 	test('formats typed accounting zero placeholders', () => {
@@ -264,6 +409,62 @@ describe('table number formatting', () => {
 		expect(multilineOutput).toContain('<td>6.8</td>');
 		const multilineOpening = '<table\n data-digits="1"><tr><td>12.34</td></tr></table>';
 		expect(formatTableNumbers(multilineOpening, { digits: 2 }).output).toContain('<td>12.3</td>');
+	});
+
+	test('rejects malformed overlapping and out-of-owner cell ranges', () => {
+		const overlapping = '<table><tr><td>1.23<td>4.56</td></td></tr></table>';
+		expect(formatTableNumbers(overlapping, { digits: 1 }).output).toBe(overlapping);
+
+		const outsideOwner = '<table><tr><td>12.34</table></td></tr>';
+		expect(formatTableNumbers(outsideOwner, { digits: 1 }).output).toBe(outsideOwner);
+
+		const balanced = '<table><tr><td>1.23</td><td>4.56</td></tr></table>';
+		expect(formatTableNumbers(balanced, { digits: 1 }).output)
+			.toBe('<table><tr><td>1.2</td><td>4.6</td></tr></table>');
+	});
+
+	test('recovers from a table opener missing its closing angle bracket', () => {
+		const input = '<table\nmalformed source\n\n| Value |\n| --- |\n| 12.34 |';
+		expect(formatTableNumbers(input, { digits: 1 }).output)
+			.toBe('<table\nmalformed source\n\n| Value |\n| --- |\n| 12.3 |');
+	});
+
+	test('restarts malformed tag recovery at the next unquoted opener', () => {
+		const input = '<table broken <table><tr><td>12.34</td></tr></table>';
+		expect(formatTableNumbers(input, { digits: 1 }).output)
+			.toBe('<table broken <table><tr><td>12.3</td></tr></table>');
+	});
+
+	test('recovers from an unclosed HTML table before a valid pipe table', () => {
+		const input = '<table><tr><td>99.99</td></tr>\n\n| Value |\n| --- |\n| 12.34 |';
+		expect(formatTableNumbers(input, { digits: 1 }).output)
+			.toBe('<table><tr><td>99.99</td></tr>\n\n| Value |\n| --- |\n| 12.3 |');
+	});
+
+	test('formats complete same-line tables beside an unclosed sibling', () => {
+		const completeFirst = '<table><tr><td>1.23</td></tr></table><table><tr><td>4.56</td></tr>';
+		expect(formatTableNumbers(completeFirst, { digits: 1 }).output)
+			.toBe('<table><tr><td>1.2</td></tr></table><table><tr><td>4.56</td></tr>');
+
+		const completeLast = '<table><tr><td>1.23</td></tr><table><tr><td>4.56</td></tr></table>';
+		expect(formatTableNumbers(completeLast, { digits: 1 }).output)
+			.toBe('<table><tr><td>1.23</td></tr><table><tr><td>4.6</td></tr></table>');
+	});
+
+	test('recovers complete multiline tables beside unclosed siblings', () => {
+		const unclosedFirst = '<table><tr><td>broken</td></tr><table>\n<tr><td>1.23</td></tr>\n</table>';
+		expect(formatTableNumbers(unclosedFirst, { digits: 1 }).output)
+			.toBe('<table><tr><td>broken</td></tr><table>\n<tr><td>1.2</td></tr>\n</table>');
+
+		const unclosedLast = '<table>\n<tr><td>1.23</td></tr>\n</table><table><tr><td>broken</td></tr>';
+		expect(formatTableNumbers(unclosedLast, { digits: 1 }).output)
+			.toBe('<table>\n<tr><td>1.2</td></tr>\n</table><table><tr><td>broken</td></tr>');
+	});
+
+	test('collects a multiline outer table with a complete nested table on its opening line', () => {
+		const input = '<!-- table-digits: 1 -->\n<table><tr><td><table><tr><td>1.23</td></tr></table></td>\n<td>4.56</td></tr></table>';
+		expect(formatTableNumbers(input, {}).output)
+			.toBe('<!-- table-digits: 1 -->\n<table><tr><td><table><tr><td>1.2</td></tr></table></td>\n<td>4.6</td></tr></table>');
 	});
 
 	test('preserves nonbreaking HTML source while formatting grouped values', () => {
@@ -362,6 +563,140 @@ describe('table number formatting', () => {
     const result = formatTableNumbers(html, { digitGrouping: 'comma' });
     expect(result.output.length).toBeGreaterThan(html.length);
     expect(result.output).toContain(',');
+  });
+
+  test('preserves declared ordering for multiple insertions at one source offset', () => {
+    expect(applyTableNumberSourceEdits('value', [
+      { start: 0, end: 0, insert: 'A' },
+      { start: 0, end: 0, insert: 'B' },
+    ])).toBe('ABvalue');
+  });
+
+  test('performs one structural scan for an arbitrarily long unclosed table candidate', () => {
+    const input = '<table><tr><td>99.99</td></tr>\n'
+      + Array.from({ length: 4_000 }, (_, index) => 'malformed row ' + index).join('\n')
+      + '\n\n| Value |\n| --- |\n| 12.34 |';
+    const stats = { structuralScans: 0, structuralCharacters: 0, structuralTokens: 0, completedTables: 0,
+      tableRangeVisits: 0, decodedPiecesMapped: 0, decodedRawCharactersMapped: 0,
+      tableFormatVisits: 0, visibleTokenVisits: 0, visiblePieceSearches: 0, visiblePieceVisits: 0,
+      sourceEditPasses: 0, sourceEditsApplied: 0, sourceCharactersCopied: 0,
+      htmlTagCharactersVisited: 0, malformedTagRecoveries: 0 };
+    const result = formatTableNumbers(input, { digits: 1 }, stats);
+    expect(result.output).toEndWith('| 12.3 |');
+    expect(stats.structuralScans).toBe(1);
+    expect(stats.structuralCharacters).toBe(input.length);
+    expect(stats.completedTables).toBe(0);
+  });
+
+  test('recovers repeated malformed tags with linear tokenizer work', () => {
+    const malformedCount = 2_000;
+    const valid = '<table title="a < b"><tr><td>12.34</td></tr></table>';
+    const input = '<table broken '.repeat(malformedCount) + valid;
+    const stats = { structuralScans: 0, structuralCharacters: 0, structuralTokens: 0, completedTables: 0,
+      tableRangeVisits: 0, decodedPiecesMapped: 0, decodedRawCharactersMapped: 0,
+      tableFormatVisits: 0, visibleTokenVisits: 0, visiblePieceSearches: 0, visiblePieceVisits: 0,
+      sourceEditPasses: 0, sourceEditsApplied: 0, sourceCharactersCopied: 0,
+      htmlTagCharactersVisited: 0, malformedTagRecoveries: 0 };
+    const result = formatTableNumbers(input, { digits: 1 }, stats);
+    expect(result.output).toEndWith('<table title="a < b"><tr><td>12.3</td></tr></table>');
+    expect(stats.structuralScans).toBe(1);
+    expect(stats.malformedTagRecoveries).toBe(malformedCount);
+    expect(stats.htmlTagCharactersVisited).toBeLessThanOrEqual(input.length);
+  });
+
+  test('formats complete HTML tables without a fixed line limit', () => {
+    const rows = Array.from({ length: 5_000 }, (_, index) => '<tr><td>' + index + '.25</td></tr>');
+    const input = '<table>\n' + rows.join('\n') + '\n</table>';
+    const stats = { structuralScans: 0, structuralCharacters: 0, structuralTokens: 0, completedTables: 0,
+      tableRangeVisits: 0, decodedPiecesMapped: 0, decodedRawCharactersMapped: 0,
+      tableFormatVisits: 0, visibleTokenVisits: 0, visiblePieceSearches: 0, visiblePieceVisits: 0,
+      sourceEditPasses: 0, sourceEditsApplied: 0, sourceCharactersCopied: 0,
+      htmlTagCharactersVisited: 0, malformedTagRecoveries: 0 };
+    const result = formatTableNumbers(input, { digits: 1 }, stats);
+    expect(result.output).toContain('<tr><td>0.3</td></tr>');
+    expect(result.output).toContain('<tr><td>4999.3</td></tr>');
+    expect(stats).toMatchObject({ structuralScans: 1, structuralCharacters: input.length, completedTables: 1 });
+  });
+
+  test('selects many independent HTML tables without rescanning the global table list', () => {
+    const tableCount = 2_048;
+    const input = Array.from({ length: tableCount }, () => '<table><tr><td>1.25</td></tr></table>').join('\n');
+    const stats = { structuralScans: 0, structuralCharacters: 0, structuralTokens: 0, completedTables: 0,
+      tableRangeVisits: 0, decodedPiecesMapped: 0, decodedRawCharactersMapped: 0,
+      tableFormatVisits: 0, visibleTokenVisits: 0, visiblePieceSearches: 0, visiblePieceVisits: 0,
+      sourceEditPasses: 0, sourceEditsApplied: 0, sourceCharactersCopied: 0,
+      htmlTagCharactersVisited: 0, malformedTagRecoveries: 0 };
+    const result = formatTableNumbers(input, { digits: 1 }, stats);
+    expect(result.output.match(/<td>1\.3<\/td>/g)).toHaveLength(tableCount);
+    expect(stats.completedTables).toBe(tableCount);
+    expect(stats.tableRangeVisits).toBe(tableCount);
+  });
+
+  test('maps decoded offsets once for many numeric edits in one visible piece', () => {
+    const tokenCount = 1_500;
+    const content = Array.from({ length: tokenCount }, () => '1.25').join(' / ');
+    const input = '<table><tr><td>' + content + '</td></tr></table>';
+    const stats = { structuralScans: 0, structuralCharacters: 0, structuralTokens: 0, completedTables: 0,
+      tableRangeVisits: 0, decodedPiecesMapped: 0, decodedRawCharactersMapped: 0,
+      tableFormatVisits: 0, visibleTokenVisits: 0, visiblePieceSearches: 0, visiblePieceVisits: 0,
+      sourceEditPasses: 0, sourceEditsApplied: 0, sourceCharactersCopied: 0,
+      htmlTagCharactersVisited: 0, malformedTagRecoveries: 0 };
+    const result = formatTableNumbers(input, { digits: 1 }, stats);
+    expect(result.output.match(/1\.3/g)).toHaveLength(tokenCount);
+    expect(stats.decodedPiecesMapped).toBe(1);
+    expect(stats.decodedRawCharactersMapped).toBe(content.length);
+    expect(stats.sourceEditPasses).toBe(1);
+    expect(stats.sourceEditsApplied).toBeGreaterThanOrEqual(tokenCount);
+    expect(stats.sourceCharactersCopied).toBeLessThanOrEqual(input.length);
+  });
+
+  test('formats deeply nested tables with iterative linear token traversal', () => {
+    const depth = 2_000;
+    const input = '<table><tr><td>1.25'.repeat(depth) + '</td></tr></table>'.repeat(depth);
+    const stats = { structuralScans: 0, structuralCharacters: 0, structuralTokens: 0, completedTables: 0,
+      tableRangeVisits: 0, decodedPiecesMapped: 0, decodedRawCharactersMapped: 0,
+      tableFormatVisits: 0, visibleTokenVisits: 0, visiblePieceSearches: 0, visiblePieceVisits: 0,
+      sourceEditPasses: 0, sourceEditsApplied: 0, sourceCharactersCopied: 0,
+      htmlTagCharactersVisited: 0, malformedTagRecoveries: 0 };
+    const result = formatTableNumbers(input, { digits: 1 }, stats);
+    expect(result.output.match(/1\.3/g)).toHaveLength(depth);
+    expect(stats.tableFormatVisits).toBe(depth);
+    expect(stats.visibleTokenVisits).toBeLessThanOrEqual(depth * 2);
+  });
+
+  test('indexes visible pieces for numeric edits split across many inline runs', () => {
+    const tokenCount = 1_500;
+    const content = Array.from({ length: tokenCount }, () => '<span>1.25</span>').join(' / ');
+    const input = '<table><tr><td>' + content + '</td></tr></table>';
+    const stats = { structuralScans: 0, structuralCharacters: 0, structuralTokens: 0, completedTables: 0,
+      tableRangeVisits: 0, decodedPiecesMapped: 0, decodedRawCharactersMapped: 0,
+      tableFormatVisits: 0, visibleTokenVisits: 0, visiblePieceSearches: 0, visiblePieceVisits: 0,
+      sourceEditPasses: 0, sourceEditsApplied: 0, sourceCharactersCopied: 0,
+      htmlTagCharactersVisited: 0, malformedTagRecoveries: 0 };
+    const result = formatTableNumbers(input, { decimalMark: 'midpoint' }, stats);
+    expect(result.output.match(/1·25/g)).toHaveLength(tokenCount);
+    expect(stats.visiblePieceSearches).toBe(tokenCount);
+    expect(stats.visiblePieceVisits).toBeLessThanOrEqual(tokenCount * 2);
+  });
+
+  test('scopes HTML warnings to exact same-line and malformed sibling tables', () => {
+    const first = '<table><tr><td>1,2,3</td></tr></table>';
+    const second = '<table><tr><td>4,5,6</td></tr></table>';
+    const siblings = first + ' x ' + second;
+    const siblingDetails = formatTableNumbers(siblings, { digits: 2 }).warningDetails;
+    expect(siblingDetails).toEqual([
+      { message: 'Ambiguous numeric table cell left unchanged: 4,5,6', start: first.length + 3, end: siblings.length },
+      { message: 'Ambiguous numeric table cell left unchanged: 1,2,3', start: 0, end: first.length },
+    ]);
+
+    const malformedPrefix = '<table><tr><td>broken</td></tr>';
+    const complete = '<table>\n<tr><td>1,2,3</td></tr>\n</table>';
+    const malformed = malformedPrefix + complete;
+    expect(formatTableNumbers(malformed, { digits: 2 }).warningDetails).toEqual([{
+      message: 'Ambiguous numeric table cell left unchanged: 1,2,3',
+      start: malformedPrefix.length,
+      end: malformed.length,
+    }]);
   });
 
   test('returns table-scoped warning ranges and grid placeholder source mappings', () => {

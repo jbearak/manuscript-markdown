@@ -8,6 +8,16 @@ export interface XlsxParseOptions {
   headers?: number; // number of header rows (default 1)
 }
 
+interface SpreadsheetFormatApi {
+  is_date?: (format: string) => boolean;
+}
+
+const spreadsheetFormatApi = XLSX.SSF as unknown as SpreadsheetFormatApi;
+
+function isDateFormat(format: string): boolean {
+  return spreadsheetFormatApi.is_date?.(format) ?? false;
+}
+
 function classifyXlsxCellKind(cell: XLSX.CellObject, sourceFormat: string | undefined): HtmlTableCellSource['kind'] {
   if (cell.t === 'b') return 'boolean';
 
@@ -17,7 +27,7 @@ function classifyXlsxCellKind(cell: XLSX.CellObject, sourceFormat: string | unde
   let semanticSourceFormat = activeFormat;
   let semanticFormat = stripExcelFormatLiterals(semanticSourceFormat);
   let semanticValue = typeof cell.v === 'number' ? cell.v : 1;
-  const activeIsDate = Boolean(activeFormat && (XLSX.SSF as any).is_date?.(activeFormat));
+  const activeIsDate = Boolean(activeFormat && isDateFormat(activeFormat));
 
   // A placeholder-only zero section retains the positive section's semantics.
   if (cell.v === 0 && !activeIsDate && !/[0#?]/.test(semanticFormat) && sourceFormat) {
@@ -26,7 +36,7 @@ function classifyXlsxCellKind(cell: XLSX.CellObject, sourceFormat: string | unde
     semanticFormat = stripExcelFormatLiterals(semanticSourceFormat);
   }
 
-  if (cell.t === 'd' || (cell.t === 'n' && semanticSourceFormat && Boolean((XLSX.SSF as any).is_date?.(semanticSourceFormat)))) {
+  if (cell.t === 'd' || (cell.t === 'n' && semanticSourceFormat && isDateFormat(semanticSourceFormat))) {
     return 'date';
   }
   if (cell.t !== 'n') return 'text';

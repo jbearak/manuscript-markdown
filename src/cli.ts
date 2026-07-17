@@ -73,7 +73,7 @@ export function parseArgs(argv: string[]): CliOptions {
       if (!['authorYearTitle', 'authorYear', 'numeric'].includes(format)) {
         throw new Error(`Invalid citation key format "${format}". Use authorYearTitle, authorYear, or numeric`);
       }
-      options.citationKeyFormat = format as any;
+      options.citationKeyFormat = format as CliOptions['citationKeyFormat'];
     } else if (arg === '--bib') {
       options.bibPath = requireValue('--bib');
     } else if (arg === '--template') {

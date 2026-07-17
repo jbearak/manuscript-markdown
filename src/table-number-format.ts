@@ -1,7 +1,8 @@
 import { GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData } from './grid-table-preprocess';
-import { extractHtmlTables, type HtmlTableCellSource } from './html-table-parser';
+import type { HtmlTableCellSource } from './html-table-parser';
 import { computeCodeRegions } from './code-regions';
 import { decodeNumericHtmlEntity } from './html-entities';
+import { isGfmDisallowedRawHtml } from './gfm';
 import {
   MAX_TABLE_DIGITS,
   parseHtmlTableCellSourceKind,
@@ -433,62 +434,645 @@ function formatTypedCell(sourceMeta: HtmlTableCellSource | undefined, display: s
   return plainDisplay.replace(tokenMatch![0], replacement);
 }
 
-function formatHtmlTable(html: string, format: TableNumberFormat, warnings: string[]): string {
-	const allTables = findHtmlElementRanges(scanHtmlSource(html), new Set(['table']));
-	const tables = allTables.filter(table => !allTables.some(other => other !== table && other.start < table.start && other.end > table.end));
-	let output = html;
-	for (let index = tables.length - 1; index >= 0; index--) {
-		const table = tables[index];
-		output = output.slice(0, table.start) + formatHtmlTableTree(output.slice(table.start, table.end), format, warnings) + output.slice(table.end);
-	}
-	return output;
+export interface TableNumberFormatScanStats {
+	structuralScans: number;
+	structuralCharacters: number;
+	structuralTokens: number;
+	completedTables: number;
+	tableRangeVisits: number;
+	decodedPiecesMapped: number;
+	decodedRawCharactersMapped: number;
+	tableFormatVisits: number;
+	visibleTokenVisits: number;
+	visiblePieceSearches: number;
+	visiblePieceVisits: number;
+	sourceEditPasses: number;
+	sourceEditsApplied: number;
+	sourceCharactersCopied: number;
+	htmlTagCharactersVisited: number;
+	malformedTagRecoveries: number;
 }
 
-function formatHtmlTableTree(tableHtml: string, format: TableNumberFormat, warnings: string[]): string {
-	const tables = findHtmlElementRanges(scanHtmlSource(tableHtml), new Set(['table']));
-	const nested = tables.filter(table => table.start > 0);
-	let output = tableHtml;
-	for (let index = nested.length - 1; index >= 0; index--) {
-		const table = nested[index];
-		if (nested.some(other => other !== table && other.start < table.start && other.end > table.end)) continue;
-		output = output.slice(0, table.start) + formatHtmlTableTree(output.slice(table.start, table.end), format, warnings) + output.slice(table.end);
-	}
-	return formatSingleHtmlTable(output, format, warnings);
+interface SourceRange {
+	start: number;
+	end: number;
 }
 
-function formatSingleHtmlTable(html: string, format: TableNumberFormat, warnings: string[]): string {
-  const meta = extractHtmlTables(html)[0];
-  if (!meta) return html;
-  const tableFormat: Partial<TableNumberFormat> = { digits: meta.digits, decimalMark: meta.decimalMark, digitGrouping: meta.digitGrouping };
-  const effective = mergeFormat(format, tableFormat);
-  if (effective.digits === undefined && effective.decimalMark === undefined && effective.digitGrouping === undefined) return html;
-  const error = validateTableNumberFormat(effective);
-  if (error) {
-    warnings.push(error);
-    return html;
-  }
-	const sourceTokens = scanHtmlSource(html);
-	const nestedTables = findHtmlElementRanges(sourceTokens, new Set(['table'])).filter(table => table.start > 0);
-	const ranges = findHtmlElementRanges(sourceTokens, new Set(['td', 'th']))
-		.filter(cell => !nestedTables.some(table => cell.start >= table.start && cell.end <= table.end));
-	let output = html;
-	for (let cellIndex = ranges.length - 1; cellIndex >= 0; cellIndex--) {
-		const range = ranges[cellIndex];
-		const opening = sourceTokens.find(token => token.start === range.start);
-		const source = opening ? parseHtmlCellSource(opening.raw) : undefined;
-		const content = output.slice(range.contentStart, range.contentEnd);
-		const segments = htmlVisibleSegments(content);
-		let changed = content;
+interface HtmlSourceToken {
+	raw: string;
+	tag: boolean;
+	name?: string;
+	closing?: boolean;
+	selfClosing?: boolean;
+	start: number;
+	end: number;
+}
+
+interface HtmlElementRange extends SourceRange {
+	contentStart: number;
+	contentEnd: number;
+	openTokenIndex: number;
+	closeTokenIndex: number;
+}
+
+interface IndexedHtmlTable extends HtmlElementRange {
+	parent?: IndexedHtmlTable;
+	children: IndexedHtmlTable[];
+	cells: HtmlElementRange[];
+}
+
+interface HtmlStructuralIndex {
+	tokens: HtmlSourceToken[];
+	tables: IndexedHtmlTable[];
+	tableByOpenToken: Map<number, IndexedHtmlTable>;
+	stats?: TableNumberFormatScanStats;
+	inertRegions: SourceRange[];
+	openTableLines: Set<number>;
+	recoveryEndByStartLine: Array<number | undefined>;
+	collectionEndByLine: Array<number | undefined>;
+}
+
+interface HtmlVisiblePiece {
+	sourceStart: number;
+	sourceEnd: number;
+	decodedStart: number;
+	decodedEnd: number;
+	decodedToRaw: Uint32Array;
+}
+
+interface HtmlVisibleSegment {
+	text: string;
+	pieces: HtmlVisiblePiece[];
+}
+
+interface SourceEdit {
+	start: number;
+	end: number;
+	insert: string;
+}
+
+function mergeSourceRanges(ranges: SourceRange[]): SourceRange[] {
+	const sorted = [...ranges].sort((a, b) => a.start - b.start || a.end - b.end);
+	const merged: SourceRange[] = [];
+	for (const range of sorted) {
+		const previous = merged[merged.length - 1];
+		if (previous && range.start < previous.end) previous.end = Math.max(previous.end, range.end);
+		else merged.push({ ...range });
+	}
+	return merged;
+}
+
+function maskSourceRanges(source: string, ranges: SourceRange[]): string {
+	if (ranges.length === 0) return source;
+	const parts: string[] = [];
+	let cursor = 0;
+	for (const range of ranges) {
+		if (range.end <= cursor) continue;
+		const start = Math.max(cursor, range.start);
+		parts.push(source.slice(cursor, start));
+		parts.push(source.slice(start, range.end).replace(/[^\r\n]/g, ' '));
+		cursor = range.end;
+	}
+	parts.push(source.slice(cursor));
+	return parts.join('');
+}
+
+function isHtmlRawTextName(name: string): boolean {
+	return name === 'template' || isGfmDisallowedRawHtml('<' + name + '>');
+}
+
+function scanHtmlSource(html: string, stats?: TableNumberFormatScanStats): { tokens: HtmlSourceToken[]; inertRegions: SourceRange[] } {
+	if (stats) {
+		stats.structuralScans++;
+		stats.structuralCharacters += html.length;
+	}
+	const tokens: HtmlSourceToken[] = [];
+	const inertRegions: SourceRange[] = [];
+	const lowerHtml = html.toLowerCase();
+	let cursor = 0;
+	let rawTextName: string | undefined;
+	let rawTextStart: number | undefined;
+	let closingRawTextName: string | undefined;
+	while (cursor < html.length) {
+		if (rawTextName) {
+			if (rawTextName === 'plaintext') {
+				tokens.push({ raw: html.slice(cursor), tag: false, start: cursor, end: html.length });
+				inertRegions.push({ start: rawTextStart ?? cursor, end: html.length });
+				break;
+			}
+			let closeStart = lowerHtml.indexOf('</' + rawTextName, cursor);
+			while (closeStart >= 0) {
+				const boundary = lowerHtml[closeStart + rawTextName.length + 2] ?? '';
+				if (!boundary || /[\s/>]/.test(boundary)) break;
+				closeStart = lowerHtml.indexOf('</' + rawTextName, closeStart + rawTextName.length + 2);
+			}
+			if (closeStart < 0) {
+				tokens.push({ raw: html.slice(cursor), tag: false, start: cursor, end: html.length });
+				inertRegions.push({ start: rawTextStart ?? cursor, end: html.length });
+				break;
+			}
+			if (closeStart > cursor) tokens.push({ raw: html.slice(cursor, closeStart), tag: false, start: cursor, end: closeStart });
+			cursor = closeStart;
+			closingRawTextName = rawTextName;
+			rawTextName = undefined;
+		}
+		const tagStart = html.indexOf('<', cursor);
+		if (tagStart < 0) {
+			tokens.push({ raw: html.slice(cursor), tag: false, start: cursor, end: html.length });
+			break;
+		}
+		if (tagStart > cursor) tokens.push({ raw: html.slice(cursor, tagStart), tag: false, start: cursor, end: tagStart });
+		if (html.startsWith('<![CDATA[', tagStart)) {
+			const closeStart = html.indexOf(']]>', tagStart + 9);
+			const end = closeStart < 0 ? html.length : closeStart + 3;
+			tokens.push({ raw: html.slice(tagStart, end), tag: true, start: tagStart, end });
+			inertRegions.push({ start: tagStart, end });
+			if (stats) stats.htmlTagCharactersVisited += end - tagStart;
+			cursor = end;
+			continue;
+		}
+		if (html.startsWith('<?', tagStart)) {
+			const closeStart = html.indexOf('?>', tagStart + 2);
+			const end = closeStart < 0 ? html.length : closeStart + 2;
+			tokens.push({ raw: html.slice(tagStart, end), tag: true, start: tagStart, end });
+			inertRegions.push({ start: tagStart, end });
+			if (stats) stats.htmlTagCharactersVisited += end - tagStart;
+			cursor = end;
+			continue;
+		}
+		if (html[tagStart + 1] === '!' && /[A-Za-z]/.test(html[tagStart + 2] ?? '')) {
+			let quote = '';
+			let end = tagStart + 3;
+			for (; end < html.length; end++) {
+				if (stats) stats.htmlTagCharactersVisited++;
+				const char = html[end];
+				if (quote) {
+					if (char === quote) quote = '';
+				} else if (char === '"' || char === "'") quote = char;
+				else if (char === '>') { end++; break; }
+			}
+			tokens.push({ raw: html.slice(tagStart, end), tag: true, start: tagStart, end });
+			inertRegions.push({ start: tagStart, end });
+			cursor = end;
+			continue;
+		}
+		if (html.startsWith('<!--', tagStart)) {
+			const commentEnd = html.indexOf('-->', tagStart + 4);
+			const end = commentEnd < 0 ? html.length : commentEnd + 3;
+			tokens.push({ raw: html.slice(tagStart, end), tag: true, start: tagStart, end });
+			inertRegions.push({ start: tagStart, end });
+			cursor = end;
+			continue;
+		}
+		let quote = '';
+		let end = tagStart + 1;
+		let malformedRestart: number | undefined;
+		for (; end < html.length; end++) {
+			if (stats) stats.htmlTagCharactersVisited++;
+			const char = html[end];
+			if (quote) {
+				if (char === quote) quote = '';
+			} else if (char === '"' || char === "'") quote = char;
+			else if (char === '<') { malformedRestart = end; break; }
+			else if (char === '>') { end++; break; }
+		}
+		if (malformedRestart !== undefined) {
+			tokens.push({ raw: html.slice(tagStart, malformedRestart), tag: false, start: tagStart, end: malformedRestart });
+			if (stats) stats.malformedTagRecoveries++;
+			cursor = malformedRestart;
+			continue;
+		}
+		if (end > html.length || html[end - 1] !== '>') {
+			tokens.push({ raw: html.slice(tagStart), tag: false, start: tagStart, end: html.length });
+			if (stats) stats.malformedTagRecoveries++;
+			break;
+		}
+		const raw = html.slice(tagStart, end);
+		let inner = raw.slice(1, -1).trim();
+		const closing = inner.startsWith('/');
+		if (closing) inner = inner.slice(1).trimStart();
+		let nameEnd = 0;
+		while (nameEnd < inner.length && /[A-Za-z0-9:-]/.test(inner[nameEnd])) nameEnd++;
+		const name = inner.slice(0, nameEnd).toLowerCase() || undefined;
+		tokens.push({ raw, tag: true, name, closing, selfClosing: /\/\s*>$/.test(raw), start: tagStart, end });
+		if (closing && name && name === closingRawTextName && rawTextStart !== undefined) {
+			inertRegions.push({ start: rawTextStart, end });
+			rawTextStart = undefined;
+			closingRawTextName = undefined;
+		}
+		if (!closing && !/\/\s*>$/.test(raw) && name && isHtmlRawTextName(name)) {
+			rawTextName = name;
+			rawTextStart = tagStart;
+		}
+		cursor = end;
+	}
+	if (stats) stats.structuralTokens += tokens.length;
+	return { tokens, inertRegions };
+}
+
+interface OwnedHtmlCellRange extends HtmlElementRange {
+	ownerTableOpenTokenIndex?: number;
+}
+
+function buildHtmlStructuralIndex(markdown: string, codeRegions: SourceRange[], lineOffsets: number[], stats?: TableNumberFormatScanStats): HtmlStructuralIndex {
+	const masked = maskSourceRanges(markdown, codeRegions);
+	const scanned = scanHtmlSource(masked, stats);
+	const tableStack: Array<{ token: HtmlSourceToken; index: number }> = [];
+	const cellStacks = new Map<string, Array<{ token: HtmlSourceToken; index: number; ownerTableOpenTokenIndex?: number }>>();
+	const tableRanges: HtmlElementRange[] = [];
+	const cellRanges: OwnedHtmlCellRange[] = [];
+	for (let index = 0; index < scanned.tokens.length; index++) {
+		const token = scanned.tokens[index];
+		if (token.selfClosing || !token.name) continue;
+		if (token.name === 'table') {
+			if (!token.closing) tableStack.push({ token, index });
+			else {
+				const open = tableStack.pop();
+				if (open) tableRanges.push({ start: open.token.start, end: token.end, contentStart: open.token.end,
+					contentEnd: token.start, openTokenIndex: open.index, closeTokenIndex: index });
+			}
+			continue;
+		}
+		if (token.name !== 'td' && token.name !== 'th') continue;
+		const stack = cellStacks.get(token.name) ?? [];
+		if (!token.closing) {
+			stack.push({ token, index, ownerTableOpenTokenIndex: tableStack[tableStack.length - 1]?.index });
+			cellStacks.set(token.name, stack);
+		} else {
+			const open = stack.pop();
+			if (open) cellRanges.push({ start: open.token.start, end: token.end, contentStart: open.token.end,
+				contentEnd: token.start, openTokenIndex: open.index, closeTokenIndex: index,
+				ownerTableOpenTokenIndex: open.ownerTableOpenTokenIndex });
+		}
+	}
+	tableRanges.sort((a, b) => a.start - b.start || b.end - a.end);
+	const tables: IndexedHtmlTable[] = tableRanges.map(range => ({ ...range, children: [], cells: [] }));
+	const tableByOpenToken = new Map<number, IndexedHtmlTable>();
+	const parentStack: IndexedHtmlTable[] = [];
+	for (const table of tables) {
+		while (parentStack.length > 0 && table.start >= parentStack[parentStack.length - 1].end) parentStack.pop();
+		const parent = parentStack[parentStack.length - 1];
+		if (parent && table.end <= parent.end) {
+			table.parent = parent;
+			parent.children.push(table);
+		}
+		tableByOpenToken.set(table.openTokenIndex, table);
+		parentStack.push(table);
+	}
+	const cellsByOwner = new Map<IndexedHtmlTable, HtmlElementRange[]>();
+	for (const cell of cellRanges) {
+		const owner = tableByOpenToken.get(cell.ownerTableOpenTokenIndex ?? -1);
+		if (!owner || cell.start < owner.contentStart || cell.end > owner.contentEnd) continue;
+		const owned = cellsByOwner.get(owner) ?? [];
+		owned.push(cell);
+		cellsByOwner.set(owner, owned);
+	}
+	for (const [owner, owned] of cellsByOwner) {
+		owned.sort((a, b) => a.start - b.start || a.end - b.end);
+		let group: HtmlElementRange[] = [];
+		let groupEnd = -1;
+		const flush = () => {
+			if (group.length === 1) owner.cells.push(group[0]);
+			group = [];
+			groupEnd = -1;
+		};
+		for (const cell of owned) {
+			if (group.length > 0 && cell.start >= groupEnd) flush();
+			group.push(cell);
+			groupEnd = Math.max(groupEnd, cell.end);
+		}
+		flush();
+	}
+	const tokenLines = new Array(scanned.tokens.length).fill(0) as number[];
+	let tokenLine = 0;
+	for (let index = 0; index < scanned.tokens.length; index++) {
+		while (tokenLine + 1 < lineOffsets.length && lineOffsets[tokenLine + 1] <= scanned.tokens[index].start) tokenLine++;
+		tokenLines[index] = tokenLine;
+	}
+	const openTableLines = new Set<number>();
+	const recoveryEndByStartLine = new Array(lineOffsets.length).fill(undefined) as Array<number | undefined>;
+	const lineDelta = new Array(lineOffsets.length).fill(0) as number[];
+	for (let index = 0; index < scanned.tokens.length; index++) {
+		const token = scanned.tokens[index];
+		if (token.name !== 'table') continue;
+		const line = tokenLines[index];
+		if (!token.closing) openTableLines.add(line);
+		if (!token.selfClosing) lineDelta[line] += token.closing ? -1 : 1;
+	}
+	for (const table of tables) {
+		const startLine = tokenLines[table.openTokenIndex];
+		const endBoundary = tokenLines[table.closeTokenIndex] + 1;
+		recoveryEndByStartLine[startLine] = Math.max(recoveryEndByStartLine[startLine] ?? 0, endBoundary);
+	}
+	const prefix = new Array(lineOffsets.length + 1).fill(0) as number[];
+	for (let line = 0; line < lineDelta.length; line++) prefix[line + 1] = prefix[line] + lineDelta[line];
+	const boundaryEnd = new Array(prefix.length).fill(undefined) as Array<number | undefined>;
+	const stack: number[] = [];
+	for (let boundary = 0; boundary < prefix.length; boundary++) {
+		while (stack.length > 0 && prefix[boundary] <= prefix[stack[stack.length - 1]]) {
+			boundaryEnd[stack.pop()!] = boundary;
+		}
+		stack.push(boundary);
+	}
+	const collectionEndByLine = lineOffsets.map((_, line) => {
+		const boundary = boundaryEnd[line];
+		return boundary !== undefined && boundary > line ? boundary : undefined;
+	});
+	if (stats) stats.completedTables += tables.length;
+	return { tokens: scanned.tokens, tables, tableByOpenToken, stats, inertRegions: scanned.inertRegions,
+		openTableLines, recoveryEndByStartLine, collectionEndByLine };
+}
+
+function parseHtmlTableFormat(openingTag: string): Partial<TableNumberFormat> {
+	const attr = (name: string): string | undefined => {
+		const match = openingTag.match(new RegExp('\\b' + name + '\\s*=\\s*(?:"([^"]*)"|\\\'([^\\\']*)\\\'|([^\\s>]+))', 'i'));
+		return match ? decodeHtmlText(match[1] ?? match[2] ?? match[3]) : undefined;
+	};
+	return {
+		digits: parseTableDigits(attr('data-digits') ?? ''),
+		decimalMark: parseTableDecimalMark(attr('data-decimal-mark') ?? ''),
+		digitGrouping: parseTableDigitGrouping(attr('data-digit-grouping') ?? ''),
+	};
+}
+
+const HTML_NUMERIC_BOUNDARIES = new Set(['address', 'article', 'aside', 'blockquote', 'br', 'code', 'div', 'dl', 'fieldset',
+	'figure', 'footer', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'hr', 'iframe', 'li', 'main', 'nav',
+	'noembed', 'noframes', 'ol', 'p', 'plaintext', 'pre', 'script', 'section', 'style', 'sub', 'sup', 'table',
+	'template', 'textarea', 'title', 'ul', 'xmp']);
+const HTML_NUMERIC_INERT = new Set(['code', 'iframe', 'noembed', 'noframes', 'plaintext', 'pre', 'script', 'style',
+	'sub', 'sup', 'table', 'template', 'textarea', 'title', 'xmp']);
+
+function firstOverlappingRange(ranges: SourceRange[], start: number): number {
+	let low = 0;
+	let high = ranges.length;
+	while (low < high) {
+		const middle = (low + high) >>> 1;
+		if (ranges[middle].end <= start) low = middle + 1;
+		else high = middle;
+	}
+	return low;
+}
+
+function decodeHtmlTextWithOffsets(raw: string, stats?: TableNumberFormatScanStats): { decoded: string; decodedToRaw: Uint32Array } {
+	const offsets = [0];
+	let decoded = '';
+	const tokenRe = /&(?:#\d+|#x[0-9a-f]+|nbsp|lt|gt|quot|apos|amp);|[\s\S]/gi;
+	let match: RegExpExecArray | null;
+	while ((match = tokenRe.exec(raw)) !== null) {
+		const value = decodeHtmlText(match[0]);
+		decoded += value;
+		for (let index = 0; index < value.length; index++) offsets.push(tokenRe.lastIndex);
+	}
+	if (stats) {
+		stats.decodedPiecesMapped++;
+		stats.decodedRawCharactersMapped += raw.length;
+	}
+	return { decoded, decodedToRaw: Uint32Array.from(offsets) };
+}
+
+function htmlVisibleSegments(source: string, index: HtmlStructuralIndex, ownerTable: IndexedHtmlTable,
+	cell: HtmlElementRange, codeRegions: SourceRange[]): HtmlVisibleSegment[] {
+	const segments: HtmlVisibleSegment[] = [];
+	let text = '';
+	let pieces: HtmlVisiblePiece[] = [];
+	let inertDepth = 0;
+	const inertCounts = new Map<string, number>();
+	const flush = () => {
+		if (text) segments.push({ text, pieces });
+		text = '';
+		pieces = [];
+	};
+	const append = (start: number, end: number) => {
+		if (end <= start) return;
+		const mapped = decodeHtmlTextWithOffsets(source.slice(start, end), index.stats);
+		pieces.push({ sourceStart: start, sourceEnd: end, decodedStart: text.length,
+			decodedEnd: text.length + mapped.decoded.length, decodedToRaw: mapped.decodedToRaw });
+		text += mapped.decoded;
+	};
+	for (let tokenIndex = cell.openTokenIndex + 1; tokenIndex < cell.closeTokenIndex; tokenIndex++) {
+		if (index.stats) index.stats.visibleTokenVisits++;
+		const nestedTable = index.tableByOpenToken.get(tokenIndex);
+		if (nestedTable?.parent === ownerTable && nestedTable.end <= cell.contentEnd) {
+			flush();
+			tokenIndex = nestedTable.closeTokenIndex;
+			continue;
+		}
+		const token = index.tokens[tokenIndex];
+		if (token.end <= cell.contentStart || token.start >= cell.contentEnd) continue;
+		if (token.tag) {
+			if (token.name && HTML_NUMERIC_BOUNDARIES.has(token.name)) flush();
+			if (!token.selfClosing && token.name && HTML_NUMERIC_INERT.has(token.name)) {
+				const active = inertCounts.get(token.name) ?? 0;
+				if (token.closing) {
+					if (active > 0) {
+						inertCounts.set(token.name, active - 1);
+						inertDepth--;
+					}
+				} else {
+					inertCounts.set(token.name, active + 1);
+					inertDepth++;
+				}
+			}
+			continue;
+		}
+		const start = Math.max(token.start, cell.contentStart);
+		const end = Math.min(token.end, cell.contentEnd);
+		let cursor = start;
+		let rangeIndex = firstOverlappingRange(codeRegions, start);
+		while (rangeIndex < codeRegions.length && codeRegions[rangeIndex].start < end) {
+			const range = codeRegions[rangeIndex];
+			if (inertDepth === 0) append(cursor, Math.min(end, range.start));
+			flush();
+			cursor = Math.max(cursor, Math.min(end, range.end));
+			rangeIndex++;
+		}
+		if (inertDepth === 0) append(cursor, end);
+	}
+	flush();
+	return segments;
+}
+
+function visibleRangeEdits(segment: HtmlVisibleSegment, start: number, end: number, replacement: string,
+	stats?: TableNumberFormatScanStats, insertionAffinity: 'left' | 'right' = 'left'): SourceEdit[] {
+	if (stats) stats.visiblePieceSearches++;
+	let low = 0;
+	let high = segment.pieces.length;
+	while (low < high) {
+		const middle = (low + high) >>> 1;
+		const endsBefore = insertionAffinity === 'right' && start === end
+			? segment.pieces[middle].decodedEnd <= start : segment.pieces[middle].decodedEnd < start;
+		if (endsBefore) low = middle + 1;
+		else high = middle;
+	}
+	const affected: Array<{ piece: HtmlVisiblePiece; start: number; end: number }> = [];
+	for (let pieceIndex = low; pieceIndex < segment.pieces.length; pieceIndex++) {
+		const piece = segment.pieces[pieceIndex];
+		if (piece.decodedStart > end || (piece.decodedStart === end && start !== end)) break;
+		if (stats) stats.visiblePieceVisits++;
+		const localStart = Math.max(0, start - piece.decodedStart);
+		const localEnd = Math.min(piece.decodedEnd - piece.decodedStart, end - piece.decodedStart);
+		if (localEnd > localStart || (start === end && start >= piece.decodedStart && start <= piece.decodedEnd)) {
+			affected.push({ piece, start: localStart, end: localEnd });
+			if (start === end) break;
+		}
+	}
+	const edits: SourceEdit[] = [];
+	let replacementOffset = 0;
+	for (let index = 0; index < affected.length; index++) {
+		const item = affected[index];
+		const oldLength = item.end - item.start;
+		const take = index === affected.length - 1 ? replacement.length - replacementOffset
+			: Math.min(oldLength, replacement.length - replacementOffset);
+		const rawStart = item.piece.decodedToRaw[item.start];
+		const rawEnd = item.piece.decodedToRaw[item.end];
+		edits.push({ start: item.piece.sourceStart + rawStart, end: item.piece.sourceStart + rawEnd,
+			insert: encodeHtmlText(replacement.slice(replacementOffset, replacementOffset + take)) });
+		replacementOffset += take;
+	}
+	return edits;
+}
+
+function planHtmlVisibleChange(segment: HtmlVisibleSegment, formatted: string,
+	stats?: TableNumberFormatScanStats): SourceEdit[] {
+	const visible = segment.text;
+	const beforeTokens = [...visible.matchAll(NUMERIC_TOKEN_RE)];
+	const afterTokens = [...formatted.matchAll(NUMERIC_TOKEN_RE)];
+	const edits: SourceEdit[] = [];
+	if (beforeTokens.length === afterTokens.length
+		&& visible.replace(NUMERIC_TOKEN_RE, '') === formatted.replace(NUMERIC_TOKEN_RE, '')) {
+		for (let index = beforeTokens.length - 1; index >= 0; index--) {
+			const beforeToken = beforeTokens[index];
+			const afterToken = afterTokens[index][0];
+			if (beforeToken[0] === afterToken) continue;
+			for (const edit of diffCharacterEdits(beforeToken[0], afterToken)) {
+				const start = (beforeToken.index ?? 0) + edit.start;
+				const affinity = edit.deleteCount === 0 && edit.start === 0 ? 'right' : 'left';
+				edits.push(...visibleRangeEdits(segment, start, start + edit.deleteCount, edit.insert, stats, affinity));
+			}
+		}
+		return edits;
+	}
+	let prefix = 0;
+	while (prefix < visible.length && prefix < formatted.length && visible[prefix] === formatted[prefix]) prefix++;
+	let suffix = 0;
+	while (suffix < visible.length - prefix && suffix < formatted.length - prefix
+		&& visible[visible.length - 1 - suffix] === formatted[formatted.length - 1 - suffix]) suffix++;
+	return visibleRangeEdits(segment, prefix, visible.length - suffix,
+		formatted.slice(prefix, formatted.length - suffix), stats);
+}
+
+function applySourceEdits(source: string, rangeStart: number, rangeEnd: number, edits: SourceEdit[],
+	stats?: TableNumberFormatScanStats): string {
+	if (edits.length === 0) return source.slice(rangeStart, rangeEnd);
+	if (stats) {
+		stats.sourceEditPasses++;
+		stats.sourceEditsApplied += edits.length;
+	}
+	const ordered = edits.map((edit, order) => ({ edit, order }))
+		.sort((a, b) => a.edit.start - b.edit.start || a.order - b.order);
+	const chunks: string[] = [];
+	let cursor = rangeStart;
+	for (let index = 0; index < ordered.length;) {
+		const groupStart = ordered[index].edit.start;
+		const unchanged = source.slice(cursor, groupStart);
+		chunks.push(unchanged);
+		if (stats) stats.sourceCharactersCopied += unchanged.length;
+		let groupEnd = groupStart;
+		do {
+			const edit = ordered[index++].edit;
+			chunks.push(edit.insert);
+			groupEnd = Math.max(groupEnd, edit.end);
+		} while (index < ordered.length && ordered[index].edit.start === groupStart);
+		cursor = groupEnd;
+	}
+	const suffix = source.slice(cursor, rangeEnd);
+	chunks.push(suffix);
+	if (stats) stats.sourceCharactersCopied += suffix.length;
+	return chunks.join('');
+}
+
+/** Apply source-coordinate edits in their declared order; exported for deterministic regression coverage. */
+export function applyTableNumberSourceEdits(source: string, edits: SourceEdit[]): string {
+	return applySourceEdits(source, 0, source.length, edits);
+}
+
+function indexedTablesInRange(index: HtmlStructuralIndex, start: number, end: number): IndexedHtmlTable[] {
+	let low = 0;
+	let high = index.tables.length;
+	while (low < high) {
+		const middle = (low + high) >>> 1;
+		if (index.tables[middle].start < start) low = middle + 1;
+		else high = middle;
+	}
+	const selected: IndexedHtmlTable[] = [];
+	for (let tableIndex = low; tableIndex < index.tables.length; tableIndex++) {
+		const table = index.tables[tableIndex];
+		if (table.start >= end) break;
+		if (index.stats) index.stats.tableRangeVisits++;
+		if (table.end <= end) selected.push(table);
+	}
+	return selected;
+}
+
+function rootTablesInRange(index: HtmlStructuralIndex, start: number, end: number): IndexedHtmlTable[] {
+	return indexedTablesInRange(index, start, end)
+		.filter(table => !table.parent || table.parent.start < start || table.parent.end > end);
+}
+
+function formatSingleIndexedTable(table: IndexedHtmlTable, source: string, baseFormat: TableNumberFormat,
+	index: HtmlStructuralIndex, codeRegions: SourceRange[], warnings: string[], warningDetails: TableNumberFormatWarning[],
+	edits: SourceEdit[]): void {
+	if (index.stats) index.stats.tableFormatVisits++;
+	const warningsBefore = warnings.length;
+	const recordTableWarnings = () => {
+		for (const message of warnings.slice(warningsBefore)) {
+			warningDetails.push({ message, start: table.start, end: table.end });
+		}
+	};
+	const opening = index.tokens[table.openTokenIndex];
+	const effective = mergeFormat(baseFormat, parseHtmlTableFormat(source.slice(opening.start, opening.end)));
+	if (effective.digits === undefined && effective.decimalMark === undefined && effective.digitGrouping === undefined) return;
+	const error = validateTableNumberFormat(effective);
+	if (error) {
+		warnings.push(error);
+		recordTableWarnings();
+		return;
+	}
+	for (let cellIndex = table.cells.length - 1; cellIndex >= 0; cellIndex--) {
+		const cell = table.cells[cellIndex];
+		const cellOpening = index.tokens[cell.openTokenIndex];
+		const cellSource = parseHtmlCellSource(source.slice(cellOpening.start, cellOpening.end));
+		const segments = htmlVisibleSegments(source, index, table, cell, codeRegions);
 		for (let segmentIndex = segments.length - 1; segmentIndex >= 0; segmentIndex--) {
 			const segment = segments[segmentIndex];
-			const formatted = segments.length === 1
-				? formatTypedCell(source, segment.text, effective, warnings)
+			const formatted = segments.length === 1 ? formatTypedCell(cellSource, segment.text, effective, warnings)
 				: formatTextCell(segment.text, effective, warnings);
-			if (formatted !== segment.text) changed = applyHtmlVisibleChange(changed, segment.text, formatted, segment.start);
+			if (formatted !== segment.text) edits.push(...planHtmlVisibleChange(segment, formatted, index.stats));
 		}
-		output = output.slice(0, range.contentStart) + changed + output.slice(range.contentEnd);
 	}
-	return output;
+	recordTableWarnings();
+}
+
+function formatIndexedHtmlRange(source: string, start: number, end: number, format: TableNumberFormat,
+	index: HtmlStructuralIndex, codeRegions: SourceRange[], warnings: string[],
+	warningDetails: TableNumberFormatWarning[]): string {
+	const roots = rootTablesInRange(index, start, end);
+	const edits: SourceEdit[] = [];
+	for (let rootIndex = roots.length - 1; rootIndex >= 0; rootIndex--) {
+		const stack: Array<{ table: IndexedHtmlTable; visited: boolean }> = [{ table: roots[rootIndex], visited: false }];
+		while (stack.length > 0) {
+			const item = stack.pop()!;
+			if (item.visited) {
+				formatSingleIndexedTable(item.table, source, format, index, codeRegions, warnings, warningDetails, edits);
+				continue;
+			}
+			stack.push({ table: item.table, visited: true });
+			for (let childIndex = 0; childIndex < item.table.children.length; childIndex++) {
+				stack.push({ table: item.table.children[childIndex], visited: false });
+			}
+		}
+	}
+	return applySourceEdits(source, start, end, edits, index.stats);
 }
 
 function parseHtmlCellSource(openingTag: string): HtmlTableCellSource | undefined {
@@ -502,179 +1086,6 @@ function parseHtmlCellSource(openingTag: string): HtmlTableCellSource | undefine
 	const rawValue = rawText === undefined ? undefined : Number(rawText);
 	return { kind, display: '', ...(rawValue !== undefined && Number.isFinite(rawValue) ? { rawValue } : {}),
 		...(attr('data-mm-format') ? { sourceFormat: attr('data-mm-format') } : {}) };
-}
-
-const HTML_NUMERIC_BOUNDARIES = new Set(['address', 'article', 'aside', 'blockquote', 'br', 'code', 'div', 'dl', 'fieldset',
-	'figure', 'footer', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header', 'hr', 'li', 'main', 'nav', 'ol', 'p', 'pre',
-	'script', 'section', 'style', 'sub', 'sup', 'table', 'template', 'textarea', 'ul']);
-const HTML_NUMERIC_INERT = new Set(['code', 'pre', 'script', 'style', 'sub', 'sup', 'table', 'template', 'textarea']);
-
-function htmlVisibleSegments(html: string): Array<{ start: number; text: string }> {
-	const segments: Array<{ start: number; text: string }> = [];
-	let visibleOffset = 0;
-	let segmentStart = 0;
-	let text = '';
-	let inertDepth = 0;
-	const flush = () => {
-		if (text) segments.push({ start: segmentStart, text });
-		text = '';
-		segmentStart = visibleOffset;
-	};
-	for (const token of scanHtmlSource(html)) {
-		if (token.tag) {
-			if (token.name && HTML_NUMERIC_BOUNDARIES.has(token.name)) flush();
-			if (token.name && HTML_NUMERIC_INERT.has(token.name)) inertDepth += token.closing ? -1 : 1;
-			continue;
-		}
-		const decoded = decodeHtmlText(token.raw);
-		if (inertDepth === 0) {
-			if (!text) segmentStart = visibleOffset;
-			text += decoded;
-		}
-		visibleOffset += decoded.length;
-	}
-	flush();
-	return segments;
-}
-
-function applyHtmlVisibleChange(content: string, visible: string, formatted: string, baseOffset: number): string {
-	const beforeTokens = [...visible.matchAll(NUMERIC_TOKEN_RE)];
-	const afterTokens = [...formatted.matchAll(NUMERIC_TOKEN_RE)];
-	let changed = content;
-	if (beforeTokens.length === afterTokens.length
-		&& visible.replace(NUMERIC_TOKEN_RE, '') === formatted.replace(NUMERIC_TOKEN_RE, '')) {
-		for (let index = beforeTokens.length - 1; index >= 0; index--) {
-			const beforeToken = beforeTokens[index];
-			const afterToken = afterTokens[index][0];
-			if (beforeToken[0] === afterToken) continue;
-			const edits = diffCharacterEdits(beforeToken[0], afterToken);
-			for (let editIndex = edits.length - 1; editIndex >= 0; editIndex--) {
-				const edit = edits[editIndex];
-				const start = baseOffset + (beforeToken.index ?? 0) + edit.start;
-				changed = replaceHtmlVisibleRange(changed, start, start + edit.deleteCount, edit.insert);
-			}
-		}
-		return changed;
-	}
-	let prefix = 0;
-	while (prefix < visible.length && prefix < formatted.length && visible[prefix] === formatted[prefix]) prefix++;
-	let suffix = 0;
-	while (suffix < visible.length - prefix && suffix < formatted.length - prefix
-		&& visible[visible.length - 1 - suffix] === formatted[formatted.length - 1 - suffix]) suffix++;
-	return replaceHtmlVisibleRange(changed, baseOffset + prefix, baseOffset + visible.length - suffix,
-		formatted.slice(prefix, formatted.length - suffix));
-}
-
-interface HtmlSourceToken {
-	raw: string;
-	tag: boolean;
-	name?: string;
-	closing?: boolean;
-	selfClosing?: boolean;
-	start: number;
-	end: number;
-}
-
-function scanHtmlSource(html: string): HtmlSourceToken[] {
-	const tokens: HtmlSourceToken[] = [];
-	let cursor = 0;
-	let rawTextName: string | undefined;
-	while (cursor < html.length) {
-		if (rawTextName) {
-			const lowerHtml = html.toLowerCase();
-			let closeStart = lowerHtml.indexOf('</' + rawTextName, cursor);
-			while (closeStart >= 0) {
-				const boundary = lowerHtml[closeStart + rawTextName.length + 2] ?? '';
-				if (!boundary || /[\s/>]/.test(boundary)) break;
-				closeStart = lowerHtml.indexOf('</' + rawTextName, closeStart + rawTextName.length + 2);
-			}
-			if (closeStart < 0) {
-				tokens.push({ raw: html.slice(cursor), tag: false, start: cursor, end: html.length });
-				break;
-			}
-			if (closeStart > cursor) tokens.push({ raw: html.slice(cursor, closeStart), tag: false, start: cursor, end: closeStart });
-			cursor = closeStart;
-			rawTextName = undefined;
-		}
-		const tagStart = html.indexOf('<', cursor);
-		if (tagStart < 0) {
-			tokens.push({ raw: html.slice(cursor), tag: false, start: cursor, end: html.length });
-			break;
-		}
-		if (tagStart > cursor) tokens.push({ raw: html.slice(cursor, tagStart), tag: false, start: cursor, end: tagStart });
-		if (html.startsWith('<!--', tagStart)) {
-			const commentEnd = html.indexOf('-->', tagStart + 4);
-			const end = commentEnd < 0 ? html.length : commentEnd + 3;
-			tokens.push({ raw: html.slice(tagStart, end), tag: true, start: tagStart, end });
-			cursor = end;
-			continue;
-		}
-		let quote = '';
-		let end = tagStart + 1;
-		for (; end < html.length; end++) {
-			const char = html[end];
-			if (quote) {
-				if (char === quote) quote = '';
-			} else if (char === '"' || char === "'") quote = char;
-			else if (char === '>') { end++; break; }
-		}
-		if (end > html.length || html[end - 1] !== '>') {
-			tokens.push({ raw: html.slice(tagStart), tag: false, start: tagStart, end: html.length });
-			break;
-		}
-		const raw = html.slice(tagStart, end);
-		let inner = raw.slice(1, -1).trim();
-		const closing = inner.startsWith('/');
-		if (closing) inner = inner.slice(1).trimStart();
-		let nameEnd = 0;
-		while (nameEnd < inner.length && /[A-Za-z0-9:-]/.test(inner[nameEnd])) nameEnd++;
-		const name = inner.slice(0, nameEnd).toLowerCase() || undefined;
-		tokens.push({ raw, tag: true, name, closing, selfClosing: /\/\s*>$/.test(raw), start: tagStart, end });
-		if (!closing && name && ['script', 'style', 'template', 'textarea'].includes(name)) rawTextName = name;
-		cursor = end;
-	}
-	return tokens;
-}
-
-function computeHtmlInertRegions(html: string, codeRegions: Array<{ start: number; end: number }>): Array<{ start: number; end: number }> {
-	let masked = '';
-	let cursor = 0;
-	for (const region of codeRegions) {
-		masked += html.slice(cursor, region.start) + ' '.repeat(region.end - region.start);
-		cursor = region.end;
-	}
-	masked += html.slice(cursor);
-	const regions: Array<{ start: number; end: number }> = [];
-	const rawStarts = new Map<string, number>();
-	for (const token of scanHtmlSource(masked)) {
-		if (token.tag && token.raw.startsWith('<!--')) regions.push({ start: token.start, end: token.end });
-		if (!token.name || !['script', 'style', 'template', 'textarea'].includes(token.name)) continue;
-		if (!token.closing) rawStarts.set(token.name, token.start);
-		else {
-			const start = rawStarts.get(token.name);
-			if (start !== undefined) regions.push({ start, end: token.end });
-			rawStarts.delete(token.name);
-		}
-	}
-	for (const start of rawStarts.values()) regions.push({ start, end: html.length });
-	return regions;
-}
-
-function findHtmlElementRanges(tokens: HtmlSourceToken[], names: Set<string>): Array<{ start: number; end: number; contentStart: number; contentEnd: number }> {
-	const stacks = new Map<string, HtmlSourceToken[]>();
-	const ranges: Array<{ start: number; end: number; contentStart: number; contentEnd: number }> = [];
-	for (const token of tokens) {
-		if (!token.name || !names.has(token.name) || token.selfClosing) continue;
-		const stack = stacks.get(token.name) ?? [];
-		if (!token.closing) {
-			stack.push(token);
-			stacks.set(token.name, stack);
-		} else {
-			const open = stack.pop();
-			if (open) ranges.push({ start: open.start, end: token.end, contentStart: open.end, contentEnd: token.start });
-		}
-	}
-	return ranges.sort((a, b) => a.start - b.start);
 }
 
 function diffCharacterEdits(before: string, after: string): Array<{ start: number; deleteCount: number; insert: string }> {
@@ -725,53 +1136,8 @@ function decodeHtmlText(raw: string): string {
 		.replace(/&#39;|&apos;/gi, "'").replace(/&amp;/gi, '&');
 }
 
-function rawOffsetAtDecodedOffset(raw: string, target: number): number {
-	if (target <= 0) return 0;
-	let decodedLength = 0;
-	const tokenRe = /&(?:#\d+|#x[0-9a-f]+|nbsp|lt|gt|quot|apos|amp);|[\s\S]/gi;
-	let match: RegExpExecArray | null;
-	while ((match = tokenRe.exec(raw)) !== null) {
-		decodedLength += decodeHtmlText(match[0]).length;
-		if (decodedLength >= target) return tokenRe.lastIndex;
-	}
-	return raw.length;
-}
-
 function encodeHtmlText(value: string): string {
 	return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-function replaceDecodedRange(raw: string, start: number, end: number, replacement: string): string {
-	const rawStart = rawOffsetAtDecodedOffset(raw, start);
-	const rawEnd = rawOffsetAtDecodedOffset(raw, end);
-	return raw.slice(0, rawStart) + encodeHtmlText(replacement) + raw.slice(rawEnd);
-}
-
-function replaceHtmlVisibleRange(html: string, startOffset: number, endOffset: number, replacement: string): string {
-	const tokens = scanHtmlSource(html);
-	let visibleOffset = 0;
-	const affected: Array<{ index: number; start: number; end: number }> = [];
-	for (let index = 0; index < tokens.length; index++) {
-		if (tokens[index].tag) continue;
-		const length = decodeHtmlText(tokens[index].raw).length;
-		const start = Math.max(0, startOffset - visibleOffset);
-		const end = Math.min(length, endOffset - visibleOffset);
-		if (end > start || (startOffset === endOffset && startOffset >= visibleOffset && startOffset <= visibleOffset + length)) {
-			affected.push({ index, start, end });
-			if (startOffset === endOffset) break;
-		}
-		visibleOffset += length;
-	}
-	let replacementOffset = 0;
-	for (let i = 0; i < affected.length; i++) {
-		const item = affected[i];
-		const oldLength = item.end - item.start;
-		const take = i === affected.length - 1 ? replacement.length - replacementOffset : Math.min(oldLength, replacement.length - replacementOffset);
-		const part = replacement.slice(replacementOffset, replacementOffset + take);
-		tokens[item.index].raw = replaceDecodedRange(tokens[item.index].raw, item.start, item.end, part);
-		replacementOffset += take;
-	}
-	return tokens.map(token => token.raw).join('');
 }
 
 function splitPipeRow(line: string): { prefix: string; cells: string[]; suffix: string } | undefined {
@@ -821,141 +1187,172 @@ function formatGridPlaceholder(line: string, format: TableNumberFormat, warnings
   }
 }
 
+function maskedSourceRange(source: string, start: number, end: number, ranges: SourceRange[]): string {
+	let output = '';
+	let cursor = start;
+	let index = firstOverlappingRange(ranges, start);
+	while (index < ranges.length && ranges[index].start < end) {
+		const range = ranges[index];
+		const overlapStart = Math.max(cursor, range.start);
+		const overlapEnd = Math.min(end, range.end);
+		output += source.slice(cursor, overlapStart);
+		output += source.slice(overlapStart, overlapEnd).replace(/[^\r\n]/g, ' ');
+		cursor = Math.max(cursor, overlapEnd);
+		index++;
+	}
+	return output + source.slice(cursor, end);
+}
+
+function isRangeEnclosed(start: number, end: number, ranges: SourceRange[]): boolean {
+	let index = firstOverlappingRange(ranges, start);
+	while (index < ranges.length && ranges[index].start < end) {
+		const range = ranges[index];
+		if (start < range.end && end > range.start && (range.start < start || range.end > end)) return true;
+		index++;
+	}
+	return false;
+}
+
 /** Apply document and per-table numeric formatting without modifying any embedded source file. */
-export function formatTableNumbers(markdown: string, documentFormat: TableNumberFormat = {}): TableNumberFormatResult {
-  const warnings: string[] = [];
-  const warningDetails: TableNumberFormatWarning[] = [];
-  const documentError = validateTableNumberFormat(documentFormat);
-  if (documentError) warnings.push(documentError);
-  const lines = markdown.split('\n');
-	const codeRegions = computeCodeRegions(markdown);
-	const inertRegions = [...codeRegions, ...computeHtmlInertRegions(markdown, codeRegions)];
+export function formatTableNumbers(markdown: string, documentFormat: TableNumberFormat = {},
+	scanStats?: TableNumberFormatScanStats): TableNumberFormatResult {
+	const warnings: string[] = [];
+	const warningDetails: TableNumberFormatWarning[] = [];
+	const documentError = validateTableNumberFormat(documentFormat);
+	if (documentError) warnings.push(documentError);
+	const lines = markdown.split('\n');
 	const lineOffsets: number[] = [];
 	let nextLineOffset = 0;
-  for (const line of lines) { lineOffsets.push(nextLineOffset); nextLineOffset += line.length + 1; }
-  const recordWarnings = (from: number, start: number, end: number) => {
-    for (const message of warnings.slice(from)) warningDetails.push({ message, start, end });
-  };
-  const output: string[] = [];
-  let pending: Partial<TableNumberFormat> = {};
-  let pendingInvalid = false;
-  let i = 0;
-  let fenceChar: '`' | '~' | undefined;
-  let fenceLength = 0;
-  while (i < lines.length) {
-    const fence = lines[i].match(/^ {0,3}([`~]{3,})/);
-    if (fence) {
-      const char = fence[1][0] as '`' | '~';
-      if (!fenceChar) { fenceChar = char; fenceLength = fence[1].length; }
-      else if (char === fenceChar && fence[1].length >= fenceLength) { fenceChar = undefined; fenceLength = 0; }
-      output.push(lines[i++]);
-      pending = {};
-      pendingInvalid = false;
-      continue;
-    }
-    if (fenceChar || /^ {4}/.test(lines[i])) {
-      output.push(lines[i++]);
-      pending = {};
-      pendingInvalid = false;
-      continue;
-    }
-    const currentLineStart = lineOffsets[i];
-    const currentLineEnd = currentLineStart + lines[i].length;
-    // A standalone directive/placeholder is itself an HTML comment. Only an
-    // enclosing inert region (a fence, outer comment, or raw-text element)
-    // should suppress it.
-    const lineIsEnclosedInert = inertRegions.some(region => currentLineStart < region.end && currentLineEnd > region.start
-      && (region.start < currentLineStart || region.end > currentLineEnd));
-    const directive = lineIsEnclosedInert ? undefined : parseDirective(lines[i]);
-    if (directive) {
-      if (directive.error) {
-        warnings.push(directive.error);
-        warningDetails.push({ message: directive.error, start: lineOffsets[i], end: lineOffsets[i] + lines[i].length });
-        pendingInvalid = true;
-      } else {
-        pending = { ...pending, ...directive.format };
-      }
-      output.push(lines[i]);
-      i++;
-      continue;
-    }
-    const format = mergeFormat(documentFormat, pending);
-    const error = validateTableNumberFormat(format);
-    if (error) warnings.push(error);
-		let detectionLine = lines[i];
-		const lineStart = lineOffsets[i];
-		for (const region of inertRegions) {
-			const start = Math.max(0, region.start - lineStart);
-			const end = Math.min(detectionLine.length, region.end - lineStart);
-			if (end > start) detectionLine = detectionLine.slice(0, start) + ' '.repeat(end - start) + detectionLine.slice(end);
+	for (const line of lines) { lineOffsets.push(nextLineOffset); nextLineOffset += line.length + 1; }
+	const codeRegions = computeCodeRegions(markdown);
+	const structuralIndex = buildHtmlStructuralIndex(markdown, codeRegions, lineOffsets, scanStats);
+	const inertRegions = mergeSourceRanges([...codeRegions, ...structuralIndex.inertRegions]);
+	const recordWarnings = (from: number, start: number, end: number) => {
+		for (const message of warnings.slice(from)) warningDetails.push({ message, start, end });
+	};
+	const recordHtmlError = (message: string, start: number, end: number) => {
+		for (const table of rootTablesInRange(structuralIndex, start, end)) {
+			warningDetails.push({ message, start: table.start, end: table.end });
 		}
-		const lineTokens = scanHtmlSource(detectionLine);
-		const opensHtmlTable = lineTokens.some(token => token.tag && token.name === 'table' && !token.closing)
-				|| /^\s*<table\b/i.test(detectionLine);
+	};
+	const output: string[] = [];
+	let pending: Partial<TableNumberFormat> = {};
+	let pendingInvalid = false;
+	let i = 0;
+	let fenceChar: '`' | '~' | undefined;
+	let fenceLength = 0;
+	while (i < lines.length) {
+		const fence = lines[i].match(/^ {0,3}([`~]{3,})/);
+		if (fence) {
+			const char = fence[1][0] as '`' | '~';
+			if (!fenceChar) { fenceChar = char; fenceLength = fence[1].length; }
+			else if (char === fenceChar && fence[1].length >= fenceLength) { fenceChar = undefined; fenceLength = 0; }
+			output.push(lines[i++]);
+			pending = {};
+			pendingInvalid = false;
+			continue;
+		}
+		if (fenceChar || /^ {4}/.test(lines[i])) {
+			output.push(lines[i++]);
+			pending = {};
+			pendingInvalid = false;
+			continue;
+		}
+		const currentLineStart = lineOffsets[i];
+		const currentLineEnd = currentLineStart + lines[i].length;
+		// A standalone directive/placeholder is itself an HTML comment. Only an
+		// enclosing inert region (a fence, outer comment, or raw-text element)
+		// should suppress it.
+		const lineIsEnclosedInert = isRangeEnclosed(currentLineStart, currentLineEnd, inertRegions);
+		const directive = lineIsEnclosedInert ? undefined : parseDirective(lines[i]);
+		if (directive) {
+			if (directive.error) {
+				warnings.push(directive.error);
+				warningDetails.push({ message: directive.error, start: lineOffsets[i], end: lineOffsets[i] + lines[i].length });
+				pendingInvalid = true;
+			} else {
+				pending = { ...pending, ...directive.format };
+			}
+			output.push(lines[i]);
+			i++;
+			continue;
+		}
+		const format = mergeFormat(documentFormat, pending);
+		const error = validateTableNumberFormat(format);
+		if (error) warnings.push(error);
+		const detectionLine = maskedSourceRange(markdown, currentLineStart, currentLineEnd, inertRegions);
+		const opensHtmlTable = structuralIndex.openTableLines.has(i) || /^\s*<table\b/i.test(detectionLine);
 		if (opensHtmlTable) {
-      const tableStart = lineOffsets[i];
-      const warningsBefore = warnings.length;
-      const block: string[] = [];
-			let tableDepth = 0;
-			let foundOpening = false;
-			do {
-				block.push(lines[i++]);
-				tableDepth = 0;
-				foundOpening = false;
-				for (const token of scanHtmlSource(block.join('\n'))) {
-					if (token.tag && token.name === 'table' && !token.selfClosing) {
-						if (!token.closing) foundOpening = true;
-						tableDepth += token.closing ? -1 : 1;
-					}
-				}
-			} while (i < lines.length && (!foundOpening || tableDepth > 0));
-      const tableBlock = block.join('\n');
-      output.push(pendingInvalid || error ? tableBlock : formatHtmlTable(tableBlock, format, warnings));
-      if (error) warningDetails.push({ message: error, start: tableStart, end: tableStart + tableBlock.length });
-      recordWarnings(warningsBefore, tableStart, tableStart + tableBlock.length);
-      pending = {};
-      pendingInvalid = false;
-      continue;
-    }
+			const candidateEnd = structuralIndex.openTableLines.has(i) ? structuralIndex.collectionEndByLine[i] : undefined;
+			if (candidateEnd !== undefined) {
+				const tableStart = lineOffsets[i];
+				const lastLine = candidateEnd - 1;
+				const tableEnd = lineOffsets[lastLine] + lines[lastLine].length;
+				output.push(pendingInvalid || error ? markdown.slice(tableStart, tableEnd)
+					: formatIndexedHtmlRange(markdown, tableStart, tableEnd, format, structuralIndex, codeRegions,
+						warnings, warningDetails));
+				if (error) recordHtmlError(error, tableStart, tableEnd);
+				i = candidateEnd;
+				pending = {};
+				pendingInvalid = false;
+				continue;
+			}
+			// If collection reaches EOF without balancing, commit only complete
+			// tables that begin on this line and leave unmatched siblings untouched.
+			const recoveryEnd = structuralIndex.recoveryEndByStartLine[i];
+			if (recoveryEnd !== undefined) {
+				const tableStart = lineOffsets[i];
+				const lastLine = recoveryEnd - 1;
+				const tableEnd = lineOffsets[lastLine] + lines[lastLine].length;
+				output.push(pendingInvalid || error ? markdown.slice(tableStart, tableEnd)
+					: formatIndexedHtmlRange(markdown, tableStart, tableEnd, format, structuralIndex, codeRegions,
+						warnings, warningDetails));
+				if (error) recordHtmlError(error, tableStart, tableEnd);
+				i = recoveryEnd;
+				pending = {};
+				pendingInvalid = false;
+				continue;
+			}
+		}
 		if (lines[i].includes(GRID_TABLE_PLACEHOLDER_PREFIX) && !lineIsEnclosedInert) {
-      const warningsBefore = warnings.length;
-      const tableStart = lineOffsets[i];
-      output.push(formatGridPlaceholder(lines[i], pendingInvalid || error ? {} : format, warnings));
-      if (error) warningDetails.push({ message: error, start: tableStart, end: tableStart + lines[i].length });
-      recordWarnings(warningsBefore, tableStart, tableStart + lines[i].length);
-      pending = {};
-      pendingInvalid = false;
-      i++;
-      continue;
-    }
+			const warningsBefore = warnings.length;
+			const tableStart = lineOffsets[i];
+			output.push(formatGridPlaceholder(lines[i], pendingInvalid || error ? {} : format, warnings));
+			if (error) warningDetails.push({ message: error, start: tableStart, end: tableStart + lines[i].length });
+			recordWarnings(warningsBefore, tableStart, tableStart + lines[i].length);
+			pending = {};
+			pendingInvalid = false;
+			i++;
+			continue;
+		}
 		let nextDetectionLine = lines[i + 1] ?? '';
 		if (i + 1 < lines.length) {
 			const nextStart = lineOffsets[i + 1];
-			for (const region of inertRegions) {
-				const start = Math.max(0, region.start - nextStart);
-				const end = Math.min(nextDetectionLine.length, region.end - nextStart);
-				if (end > start) nextDetectionLine = nextDetectionLine.slice(0, start) + ' '.repeat(end - start) + nextDetectionLine.slice(end);
-			}
+			nextDetectionLine = maskedSourceRange(markdown, nextStart, nextStart + nextDetectionLine.length, inertRegions);
 		}
 		if (i + 1 < lines.length && detectionLine.includes('|') && isPipeSeparator(nextDetectionLine)) {
-      const tableStart = lineOffsets[i];
-      const warningsBefore = warnings.length;
-      output.push(formatPipeRow(lines[i], pendingInvalid || error ? {} : format, warnings));
-      output.push(lines[i + 1]);
-      i += 2;
-			while (i < lines.length && lines[i].includes('|') && lines[i].trim() !== '') {
+			const tableStart = lineOffsets[i];
+			const warningsBefore = warnings.length;
+			output.push(formatPipeRow(lines[i], pendingInvalid || error ? {} : format, warnings));
+			output.push(lines[i + 1]);
+			i += 2;
+			while (i < lines.length && lines[i].trim() !== '') {
+				if (/^ {4}/.test(lines[i])) break;
+				const rowStart = lineOffsets[i];
+				const rowDetection = maskedSourceRange(markdown, rowStart, rowStart + lines[i].length, inertRegions);
+				if (!rowDetection.includes('|')) break;
 				output.push(formatPipeRow(lines[i++], pendingInvalid || error ? {} : format, warnings));
 			}
-      const tableEnd = lineOffsets[i - 1] + lines[i - 1].length;
-      if (error) warningDetails.push({ message: error, start: tableStart, end: tableEnd });
-      recordWarnings(warningsBefore, tableStart, tableEnd);
-      pending = {};
-      pendingInvalid = false;
-      continue;
-    }
-    output.push(lines[i]);
-    if (lines[i].trim() && !/^\s*<!--/.test(lines[i])) { pending = {}; pendingInvalid = false; }
-    i++;
-  }
-  return { output: output.join('\n'), warnings: [...new Set(warnings)], warningDetails };
+			const tableEnd = lineOffsets[i - 1] + lines[i - 1].length;
+			if (error) warningDetails.push({ message: error, start: tableStart, end: tableEnd });
+			recordWarnings(warningsBefore, tableStart, tableEnd);
+			pending = {};
+			pendingInvalid = false;
+			continue;
+		}
+		output.push(lines[i]);
+		if (lines[i].trim() && !/^\s*<!--/.test(lines[i])) { pending = {}; pendingInvalid = false; }
+		i++;
+	}
+	return { output: output.join('\n'), warnings: [...new Set(warnings)], warningDetails };
 }

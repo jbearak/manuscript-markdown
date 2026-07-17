@@ -786,7 +786,7 @@
     }
   },
   "scripts": {
-    "lint": "eslint src/",
+    "lint": "eslint src/ --max-warnings 0",
     "compile": "node esbuild.mjs && bun run copy-csl",
     "copy-csl": "rm -rf out/csl-styles out/csl-locales && cp -R src/csl-styles out/csl-styles && cp -R src/csl-locales out/csl-locales",
     "watch": "node esbuild.mjs --watch",

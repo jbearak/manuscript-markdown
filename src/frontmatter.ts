@@ -197,7 +197,7 @@ export function colWidthsToPct(ratios: number[]): number[] {
   const raw = ratios.map(r => r / total * 5000);
   // Largest-remainder rounding to ensure exact sum of 5000
   const widths = raw.map(v => Math.floor(v));
-  let remaining = 5000 - widths.reduce((a, b) => a + b, 0);
+  const remaining = 5000 - widths.reduce((a, b) => a + b, 0);
   const byRemainder = raw
     .map((v, i) => ({ i, frac: v - widths[i] }))
     .sort((a, b) => b.frac - a.frac);

@@ -1,5 +1,6 @@
 import MarkdownIt from 'markdown-it';
-import { manuscriptMarkdownPlugin } from './preview/manuscript-markdown-plugin';
+import { manuscriptMarkdownPlugin, type ManuscriptMarkdownIt } from './preview/manuscript-markdown-plugin';
+import type { ColorScheme } from './frontmatter';
 
 /** Escape HTML entities the same way markdown-it does. */
 export function escapeHtml(str: string): string {
@@ -23,9 +24,9 @@ export const hasNoSpecialSyntax = (s: string) => {
 /** Create a MarkdownIt instance with the Manuscript Markdown plugin and render input.
  *  Pass colorScheme to override the module-level default (e.g. 'github' to suppress the
  *  color marker span in tests that don't care about color scheme behavior). */
-export function renderWithPlugin(input: string, colorScheme?: string): string {
-  const md = new MarkdownIt({ html: true });
-  if (colorScheme !== undefined) (md as any).manuscriptColors = colorScheme;
+export function renderWithPlugin(input: string, colorScheme?: ColorScheme): string {
+  const md: ManuscriptMarkdownIt = new MarkdownIt({ html: true });
+  if (colorScheme !== undefined) md.manuscriptColors = colorScheme;
   md.use(manuscriptMarkdownPlugin);
   return md.render(input);
 }

@@ -841,7 +841,7 @@ class Parser {
     ).join('');
   }
 
-  private consumeEnd(envName: string): void {
+  private consumeEnd(_envName: string): void {
     // Consume \end
     if (this.peek()?.type === 'command' && this.peek()?.value === '\\end') {
       this.consume();

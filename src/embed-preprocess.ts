@@ -514,7 +514,7 @@ function tableContentToHtml(tableContent: string): string | null {
   }
 
   // Run through grid table preprocessor (converts grid tables to placeholders)
-  let processed = preprocessGridTables(tableContent);
+  const processed = preprocessGridTables(tableContent);
 
   // Check if a grid table placeholder was generated
   const placeholderMatch = processed.match(new RegExp(GRID_TABLE_PLACEHOLDER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '([A-Za-z0-9+/=]+)\\s*-->'));

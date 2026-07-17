@@ -198,7 +198,7 @@ async function maybeBisectChangedParts(
       });
     } finally {
       if (!keepWordCopies && fileExists(variantPath)) {
-        try { unlinkSync(variantPath); } catch {}
+        try { unlinkSync(variantPath); } catch { /* Best-effort temporary-file cleanup. */ }
       }
     }
   }
@@ -298,7 +298,9 @@ async function analyzeMarkdown(
           if (fileExists(cleanupPath)) {
             unlinkSync(cleanupPath);
           }
-        } catch {}
+        } catch {
+          // Best-effort cleanup; preserve the diagnostic result if removal fails.
+        }
       }
     }
   }

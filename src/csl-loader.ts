@@ -242,7 +242,7 @@ export async function loadStyleAsync(name: string, cacheDir?: string): Promise<s
     styleCache.set(name, xml);
     return xml;
   } catch (e) {
-    throw new Error(`CSL style "${name}" not found locally and could not be downloaded from ${url}: ${e}`);
+    throw new Error(`CSL style "${name}" not found locally and could not be downloaded from ${url}`, { cause: e });
   }
 }
 

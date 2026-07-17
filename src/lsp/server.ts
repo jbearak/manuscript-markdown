@@ -60,8 +60,6 @@ import {
 	getCompletionContextAtOffset,
 	invalidateCanonicalCache,
 	parseBibDataFromText,
-	pathsEqual,
-	resolveBibliographyPath,
 	resolveBibliographyPathAsync,
 	scanCitationUsages,
 	uriToFsPath,
@@ -607,11 +605,9 @@ async function validateFrontmatterDiags(doc: TextDocument): Promise<void> {
 			cslSuggestions: (prefix) => {
 				const lower = prefix.toLowerCase();
 				const suggestions: string[] = [];
-				let totalMatches = 0;
 				if (lower) {
 					for (const [id, displayName] of BUNDLED_STYLE_LABELS) {
 						if (id.toLowerCase().startsWith(lower) || displayName.toLowerCase().includes(lower)) {
-							totalMatches++;
 							if (suggestions.length < maxCslSuggestions) suggestions.push(id);
 						}
 					}
@@ -788,7 +784,10 @@ async function validateEmbedDirectives(doc: TextDocument): Promise<void> {
 								if (directive.range && !/^[A-Z]+\d+:[A-Z]+\d+$/i.test(directive.range.replace(/\$/g, ''))) {
 									// Check if it's a named range
 									const names = wb.Workbook?.Names;
-									if (!names || !names.find((n: any) => n.Name === directive.range)) {
+									const hasNamedRange = Array.isArray(names) && names.some((name: unknown) =>
+										typeof name === 'object' && name !== null && 'Name' in name && name.Name === directive.range
+									);
+									if (!hasNamedRange) {
 										diagnostics.push({
 											severity: DiagnosticSeverity.Error,
 											range: Range.create(doc.positionAt(lineStart), doc.positionAt(lineEnd)),

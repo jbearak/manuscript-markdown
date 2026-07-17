@@ -27,10 +27,18 @@ jobs:
               - 'package.json'
               - 'bun.lock'
               - 'esbuild.mjs'
+              - 'eslint.config.mjs'
               - 'tsconfig*.json'
               - 'src/**'
               - 'scripts/**'
               - 'test/**'
+              - '.vscodeignore'
+              - 'language-configuration.json'
+              - 'snippets.json'
+              - 'syntaxes/**'
+              - 'media/**'
+              - '.github/actions/setup/**'
+              - '.github/workflows/ci.yml'
 
             binaries:
               - 'src/**'
@@ -38,9 +46,11 @@ jobs:
               - 'bun.lock'
               - 'esbuild.mjs'
               - 'scripts/build-binary.ts'
+              - '.github/actions/setup/**'
+              - '.github/workflows/ci.yml'
 
   verify:
-    name: Verify (typecheck + tests)
+    name: Verify (lint + typecheck + tests)
     needs: changes
     if: needs.changes.outputs.source == 'true'
     runs-on: ubuntu-latest
@@ -48,6 +58,8 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Setup
         uses: ./.github/actions/setup
+      - name: Lint
+        run: bun run lint
       - name: Typecheck
         run: bun run typecheck
       - name: Tests

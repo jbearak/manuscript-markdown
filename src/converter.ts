@@ -1,6 +1,6 @@
 import JSZip from 'jszip';
 import { XMLParser } from 'fast-xml-parser';
-import { ommlToLatex } from './omml';
+import { asXmlNodes, ommlToLatex, type XmlNode } from './omml';
 import { resolveMarkdownColor } from './highlight-colors';
 import { Frontmatter, NotesMode, serializeFrontmatter, noteTypeFromNumber, parseColWidths, type CustomStyleDef } from './frontmatter';
 import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType } from './gfm';
@@ -133,7 +133,7 @@ export interface CitationMetadata {
   pages: string;
   doi: string;
   type: string;
-  fullItemData: Record<string, any>;
+  fullItemData: Record<string, unknown>;
   zoteroKey?: string;
   zoteroUri?: string;
   locator?: string;
@@ -313,9 +313,9 @@ export interface ZoteroDocPrefs {
 }
 
 export interface ZoteroBiblData {
-  uncited?: any[];
-  omitted?: any[];
-  custom?: any[];
+  uncited?: unknown[];
+  omitted?: unknown[];
+  custom?: unknown[];
 }
 
 export interface ConvertResult {
@@ -327,6 +327,27 @@ export interface ConvertResult {
 }
 
 // XML helpers
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function stringField(record: Record<string, unknown>, key: string): string {
+  const value = record[key];
+  return value === undefined || value === null ? '' : String(value);
+}
+
+function parseCslAuthors(value: unknown): CitationMetadata['authors'] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap(author => {
+    if (!isRecord(author)) return [];
+    const parsed: CitationMetadata['authors'][number] = {};
+    if (typeof author.family === 'string' && author.family.trim()) parsed.family = author.family;
+    if (typeof author.given === 'string' && author.given.trim()) parsed.given = author.given;
+    if (typeof author.literal === 'string' && author.literal.trim()) parsed.literal = author.literal;
+    return Object.keys(parsed).length > 0 ? [parsed] : [];
+  });
+}
 
 const parserOptions = {
   ignoreAttributes: false,
@@ -412,15 +433,15 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
   // Build abstractNumId → levels map
   const abstractNums = new Map<string, Map<string, NumberingLevelDef>>();
   for (const node of findAllDeep(parsed, 'w:abstractNum')) {
-    const abstractNum = node['w:abstractNum'];
-    if (!abstractNum) continue;
+    const abstractNum = asXmlNodes(node['w:abstractNum']);
+    if (abstractNum.length === 0) continue;
 
     const abstractNumId = getAttr(node, 'abstractNumId');
     const levels = new Map<string, NumberingLevelDef>();
 
     for (const lvlNode of findAllDeep(abstractNum, 'w:lvl')) {
-      const lvl = lvlNode['w:lvl'];
-      if (!lvl) continue;
+      const lvl = asXmlNodes(lvlNode['w:lvl']);
+      if (lvl.length === 0) continue;
 
       const ilvl = getAttr(lvlNode, 'ilvl');
       const numFmtNodes = findAllDeep(lvl, 'w:numFmt');
@@ -439,8 +460,8 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
 
   // Resolve numId → abstractNumId, and read lvlOverride/startOverride
   for (const node of findAllDeep(parsed, 'w:num')) {
-    const num = node['w:num'];
-    if (!num) continue;
+    const num = asXmlNodes(node['w:num']);
+    if (num.length === 0) continue;
 
     const numId = getAttr(node, 'numId');
     const abstractNumIdNodes = findAllDeep(num, 'w:abstractNumId');
@@ -455,8 +476,8 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
     // Read w:lvlOverride → w:startOverride
     for (const lvlOverrideNode of findAllDeep(num, 'w:lvlOverride')) {
       const ilvl = getAttr(lvlOverrideNode, 'ilvl');
-      const lvlOverride = lvlOverrideNode['w:lvlOverride'];
-      if (!lvlOverride) continue;
+      const lvlOverride = asXmlNodes(lvlOverrideNode['w:lvlOverride']);
+      if (lvlOverride.length === 0) continue;
       for (const startNode of findAllDeep(lvlOverride, 'w:startOverride')) {
         const startVal = parseInt(getAttr(startNode, 'val'), 10);
         if (!isNaN(startVal) && startVal !== 1) {
@@ -470,7 +491,7 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
   return { defs: numberingDefs, startOverrides };
 }
 
-export function parseHeadingLevel(pPrChildren: any[]): number | undefined {
+export function parseHeadingLevel(pPrChildren: XmlNode[]): number | undefined {
   const pStyleElement = pPrChildren.find(child => child['w:pStyle'] !== undefined);
   if (!pStyleElement) return undefined;
 
@@ -485,7 +506,7 @@ export function parseHeadingLevel(pPrChildren: any[]): number | undefined {
 }
 
 /** Detect a custom style (MsCustomXxx) and return the user-facing name, or undefined. */
-export function parseCustomStyleName(pPrChildren: any[], knownStyles?: Record<string, CustomStyleDef>): string | undefined {
+export function parseCustomStyleName(pPrChildren: XmlNode[], knownStyles?: Record<string, CustomStyleDef>): string | undefined {
   const pStyleElement = pPrChildren.find(child => child['w:pStyle'] !== undefined);
   if (!pStyleElement) return undefined;
   const val = getAttr(pStyleElement, 'val');
@@ -501,20 +522,20 @@ export function parseCustomStyleName(pPrChildren: any[], knownStyles?: Record<st
   return suffix.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase();
 }
 
-export function parseTitleStyle(pPrChildren: any[]): boolean {
+export function parseTitleStyle(pPrChildren: XmlNode[]): boolean {
   const pStyleElement = pPrChildren.find(child => child['w:pStyle'] !== undefined);
   if (!pStyleElement) return false;
   return getAttr(pStyleElement, 'val').toLowerCase() === 'title';
 }
 
-function parseParagraphLeftIndentTwips(pPrChildren: any[]): number | undefined {
+function parseParagraphLeftIndentTwips(pPrChildren: XmlNode[]): number | undefined {
   const indElement = pPrChildren.find(child => child['w:ind'] !== undefined);
   if (!indElement) return undefined;
   const left = parseInt(getAttr(indElement, 'left'), 10);
   return !isNaN(left) && left > 0 ? left : undefined;
 }
 
-function parseBlockquoteInfo(pPrChildren: any[]): { level?: number; indentUnitTwips?: 240 | 720 } {
+function parseBlockquoteInfo(pPrChildren: XmlNode[]): { level?: number; indentUnitTwips?: 240 | 720 } {
   const pStyleElement = pPrChildren.find(child => child['w:pStyle'] !== undefined);
   if (!pStyleElement) return {};
   const val = getAttr(pStyleElement, 'val').toLowerCase();
@@ -533,7 +554,7 @@ function parseBlockquoteInfo(pPrChildren: any[]): { level?: number; indentUnitTw
   return { level: 1, indentUnitTwips };
 }
 
-export function parseBlockquoteLevel(pPrChildren: any[]): number | undefined {
+export function parseBlockquoteLevel(pPrChildren: XmlNode[]): number | undefined {
   const info = parseBlockquoteInfo(pPrChildren);
   if (info.level !== undefined) {
     return info.level;
@@ -541,20 +562,20 @@ export function parseBlockquoteLevel(pPrChildren: any[]): number | undefined {
   return undefined;
 }
 
-export function parseAlertType(pPrChildren: any[]): GfmAlertType | undefined {
+export function parseAlertType(pPrChildren: XmlNode[]): GfmAlertType | undefined {
   const pStyleElement = pPrChildren.find(child => child['w:pStyle'] !== undefined);
   if (!pStyleElement) return undefined;
   const val = getAttr(pStyleElement, 'val').toLowerCase();
   return ALERT_STYLE_TO_TYPE[val];
 }
 
-export function parseCodeBlockStyle(pPrChildren: any[]): boolean {
+export function parseCodeBlockStyle(pPrChildren: XmlNode[]): boolean {
   const pStyleElement = pPrChildren.find(child => child['w:pStyle'] !== undefined);
   if (!pStyleElement) return false;
   return getAttr(pStyleElement, 'val').toLowerCase() === 'codeblock';
 }
 
-export function parseListMeta(pPrChildren: any[], numberingDefs: NumberingDefs, numberingStartOverrides?: NumberingStartOverrides): ListMeta | undefined {
+export function parseListMeta(pPrChildren: XmlNode[], numberingDefs: NumberingDefs, numberingStartOverrides?: NumberingStartOverrides): ListMeta | undefined {
   const numPrElement = pPrChildren.find(child => child['w:numPr'] !== undefined);
   if (!numPrElement) return undefined;
 
@@ -596,16 +617,17 @@ async function loadZip(data: Uint8Array): Promise<JSZip> {
   return JSZip.loadAsync(data);
 }
 
-async function readZipXml(zip: JSZip, path: string): Promise<any[] | null> {
+async function readZipXml(zip: JSZip, path: string): Promise<XmlNode[] | null> {
   const file = zip.file(path);
   if (!file) { return null; }
   const xml = await file.async('string');
-  return new XMLParser(parserOptions).parse(xml);
+  const parsed: unknown = new XMLParser(parserOptions).parse(xml);
+  return asXmlNodes(parsed);
 }
 
-function findAllDeep(nodes: any[], tagName: string, depth = 0, maxDepth = 50): any[] {
+function findAllDeep(nodes: XmlNode[], tagName: string, depth = 0, maxDepth = 50): XmlNode[] {
   if (depth >= maxDepth) { return []; }
-  const results: any[] = [];
+  const results: XmlNode[] = [];
   for (const node of nodes) {
     if (node[tagName] !== undefined) { results.push(node); }
     for (const key of Object.keys(node)) {
@@ -617,12 +639,13 @@ function findAllDeep(nodes: any[], tagName: string, depth = 0, maxDepth = 50): a
   return results;
 }
 
-function getAttr(node: any, attr: string): string {
-  return node?.[':@']?.[`@_w:${attr}`] ?? node?.[':@']?.[`@_${attr}`] ?? '';
+function getAttr(node: XmlNode | undefined, attr: string): string {
+  const value = node?.[':@']?.[`@_w:${attr}`] ?? node?.[':@']?.[`@_${attr}`];
+  return value === undefined ? '' : String(value);
 }
 
 /** Extract text from a node's children (handles #text in preserveOrder mode) */
-function nodeText(children: any[]): string {
+function nodeText(children: XmlNode[]): string {
   if (!Array.isArray(children)) { return ''; }
   const parts: string[] = [];
   for (const c of children) {
@@ -643,12 +666,12 @@ function nodeText(children: any[]): string {
  * separate/end markers.  Returns one concatenated instruction string
  * per complex field, in document order.
  */
-function extractFieldInstructions(nodes: any[]): string[] {
+function extractFieldInstructions(nodes: XmlNode[]): string[] {
   const results: string[] = [];
   let accumulating = false;
   let buffer = '';
 
-  function walk(items: any[]): void {
+  function walk(items: XmlNode[]): void {
     for (const node of items) {
       for (const key of Object.keys(node)) {
         if (key === ':@') { continue; }
@@ -666,7 +689,7 @@ function extractFieldInstructions(nodes: any[]): string[] {
             }
           }
         } else if (key === 'w:instrText' && accumulating) {
-          buffer += nodeText(node['w:instrText'] || []);
+          buffer += nodeText(asXmlNodes(node['w:instrText']));
         } else if (Array.isArray(node[key])) {
           walk(node[key]);
         }
@@ -681,7 +704,7 @@ function extractFieldInstructions(nodes: any[]): string[] {
 // Formatting helpers
 
 /** Detect OOXML boolean toggle pattern */
-export function isToggleOn(children: any[], tagName: string): boolean {
+export function isToggleOn(children: XmlNode[], tagName: string): boolean {
   const element = children.find(child => child[tagName] !== undefined);
   if (!element) return false;
   
@@ -692,7 +715,7 @@ export function isToggleOn(children: any[], tagName: string): boolean {
 
 /** Parse run properties and return RunFormatting */
 export function parseRunProperties(
-  rPrChildren: any[],
+  rPrChildren: XmlNode[],
   baseFormatting: RunFormatting = DEFAULT_FORMATTING
 ): RunFormatting {
   const formatting: RunFormatting = { ...baseFormatting };
@@ -849,12 +872,12 @@ export async function extractComments(data: Uint8Array | JSZip): Promise<Map<str
     const author = getAttr(node, 'author');
     const date = getAttr(node, 'date') || '';
     // Collect all w:t text within this comment
-    const tNodes = findAllDeep(node['w:comment'] || [], 'w:t');
-    const text = tNodes.map(t => nodeText(t['w:t'] || [])).join('');
+    const tNodes = findAllDeep(asXmlNodes(node['w:comment']), 'w:t');
+    const text = tNodes.map(t => nodeText(asXmlNodes(t['w:t']))).join('');
     // Extract w14:paraId from the last comment paragraph. md-to-docx emits
     // paraId on the last <w:p> (per commentsExtended linking expectations),
     // but keep a first-paragraph fallback for third-party documents.
-    const pNodes = findAllDeep(node['w:comment'] || [], 'w:p');
+    const pNodes = findAllDeep(asXmlNodes(node['w:comment']), 'w:p');
     let paraId: string | undefined;
     for (let i = pNodes.length - 1; i >= 0; i--) {
       const candidate = pNodes[i]?.[':@']?.['@_w14:paraId'];
@@ -974,7 +997,7 @@ export async function extractZoteroPrefs(data: Uint8Array | JSZip): Promise<Zote
 
     for (const child of children) {
       if (child['vt:lpwstr'] !== undefined) {
-        const val = nodeText(child['vt:lpwstr'] || []);
+        const val = nodeText(asXmlNodes(child['vt:lpwstr']));
         prefParts.push({ index: idx, value: val });
       }
     }
@@ -1057,7 +1080,7 @@ async function extractChunkedCustomProp(data: Uint8Array | JSZip, propPrefix: st
     if (!Array.isArray(children)) continue;
     for (const child of children) {
       if (child['vt:lpwstr'] !== undefined) {
-        const val = nodeText(child['vt:lpwstr'] || []);
+        const val = nodeText(asXmlNodes(child['vt:lpwstr']));
         parts.push({ index: idx, value: val });
       }
     }
@@ -1180,7 +1203,7 @@ export async function extractDefaultTableColWidths(data: Uint8Array | JSZip): Pr
     if (!Array.isArray(children)) continue;
     for (const child of children) {
       if (child?.['vt:lpwstr'] !== undefined) {
-        const raw = nodeText(child['vt:lpwstr'] || []).trim();
+        const raw = nodeText(asXmlNodes(child['vt:lpwstr'])).trim();
         return raw || null;
       }
     }
@@ -1271,7 +1294,7 @@ export async function extractListIndent(data: Uint8Array | JSZip): Promise<'tab'
     if (!Array.isArray(children)) continue;
     for (const child of children) {
       if (child['vt:lpwstr'] !== undefined) {
-        const raw = nodeText(child['vt:lpwstr'] || []).trim();
+        const raw = nodeText(asXmlNodes(child['vt:lpwstr'])).trim();
         if (raw === 'tab') return 'tab';
       }
     }
@@ -1292,7 +1315,7 @@ export async function extractConsecutiveReplyParaIds(data: Uint8Array | JSZip): 
     if (!Array.isArray(children)) continue;
     for (const child of children) {
       if (child['vt:lpwstr'] !== undefined) {
-        const raw = nodeText(child['vt:lpwstr'] || []).trim();
+        const raw = nodeText(asXmlNodes(child['vt:lpwstr'])).trim();
         if (raw) return new Set(raw.split(',').map(id => id.trim()).filter(Boolean));
       }
     }
@@ -1313,7 +1336,7 @@ export async function extractFrontmatterBlankLines(data: Uint8Array | JSZip): Pr
     if (!Array.isArray(children)) continue;
     for (const child of children) {
       if (child['vt:lpwstr'] !== undefined) {
-        const raw = nodeText(child['vt:lpwstr'] || []).trim();
+        const raw = nodeText(asXmlNodes(child['vt:lpwstr'])).trim();
         const n = parseInt(raw, 10);
         if (!isNaN(n) && n >= 0) return n;
       }
@@ -1395,7 +1418,7 @@ export async function extractTableBorders(data: Uint8Array | JSZip): Promise<'ho
     if (!Array.isArray(children)) return null;
     for (const child of children) {
       if (child?.['vt:lpwstr'] !== undefined) {
-        const val = nodeText(child['vt:lpwstr'] || []).trim();
+        const val = nodeText(asXmlNodes(child['vt:lpwstr'])).trim();
         if (val === 'horizontal' || val === 'solid' || val === 'none') return val;
         return null;
       }
@@ -1433,7 +1456,7 @@ export async function extractBibliographyPath(data: Uint8Array | JSZip): Promise
     if (!Array.isArray(children)) continue;
     for (const child of children) {
       if (child['vt:lpwstr'] !== undefined) {
-        const raw = nodeText(child['vt:lpwstr'] || []);
+        const raw = nodeText(asXmlNodes(child['vt:lpwstr']));
         return raw.trim().length > 0 ? raw : null;
       }
     }
@@ -1454,7 +1477,7 @@ export async function extractPipeTableMaxLineWidth(data: Uint8Array | JSZip): Pr
     if (!Array.isArray(children)) continue;
     for (const child of children) {
       if (child['vt:lpwstr'] !== undefined) {
-        const raw = nodeText(child['vt:lpwstr'] || []).trim();
+        const raw = nodeText(asXmlNodes(child['vt:lpwstr'])).trim();
         if (!/^\d+$/.test(raw)) continue;
         return parseInt(raw, 10);
       }
@@ -1476,7 +1499,7 @@ export async function extractGridTableMaxLineWidth(data: Uint8Array | JSZip): Pr
     if (!Array.isArray(children)) continue;
     for (const child of children) {
       if (child['vt:lpwstr'] !== undefined) {
-        const raw = nodeText(child['vt:lpwstr'] || []).trim();
+        const raw = nodeText(asXmlNodes(child['vt:lpwstr'])).trim();
         if (!/^\d+$/.test(raw)) continue;
         return parseInt(raw, 10);
       }
@@ -1497,7 +1520,7 @@ async function extractStringCustomProp(data: Uint8Array | JSZip, propName: strin
     if (!Array.isArray(children)) continue;
     for (const child of children) {
       if (child['vt:lpwstr'] !== undefined) {
-        const raw = nodeText(child['vt:lpwstr'] || []).trim();
+        const raw = nodeText(asXmlNodes(child['vt:lpwstr'])).trim();
         return raw.length > 0 ? raw : null;
       }
     }
@@ -1655,7 +1678,7 @@ async function extractNotes(
  * Without context, only basic text formatting is parsed.
  */
 function parseNoteBody(
-  noteChildren: any[],
+  noteChildren: XmlNode[],
   tagName: string,
   context?: NoteBodyContext,
   citationCounter?: { idx: number },
@@ -1675,7 +1698,7 @@ function parseNoteBody(
   let currentHref: string | undefined;
 
   function walkNoteBody(
-    nodes: any[],
+    nodes: XmlNode[],
     currentFormatting: RunFormatting = DEFAULT_FORMATTING,
     target: ContentItem[] = content,
     inTableCell = false,
@@ -1724,7 +1747,7 @@ function parseNoteBody(
             currentCitation = undefined;
           }
         } else if (key === 'w:instrText' && inField && context) {
-          fieldInstrParts.push(nodeText(node['w:instrText'] || []));
+          fieldInstrParts.push(nodeText(asXmlNodes(node['w:instrText'])));
 
         // --- Hyperlinks ---
         } else if (key === 'w:hyperlink' && context) {
@@ -1736,25 +1759,25 @@ function parseNoteBody(
 
         // --- Tables ---
         } else if (key === 'w:tbl' && context && !inTableCell) {
-          const tblChildren = Array.isArray(node[key]) ? node[key] : [node[key]];
+          const tblChildren = asXmlNodes(node[key]);
           const rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue' }> }> = [];
           const firstRowHeaderByLook = tableHasFirstRowHeader(tblChildren);
-          for (const tr of tblChildren.filter((c: any) => c['w:tr'] !== undefined)) {
-            const trChildren = Array.isArray(tr['w:tr']) ? tr['w:tr'] : [tr['w:tr']];
+          for (const tr of tblChildren.filter((c) => c['w:tr'] !== undefined)) {
+            const trChildren = asXmlNodes(tr['w:tr']);
             const cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue' }> = [];
-            for (const tc of trChildren.filter((c: any) => c['w:tc'] !== undefined)) {
-              const tcChildren = Array.isArray(tc['w:tc']) ? tc['w:tc'] : [tc['w:tc']];
+            for (const tc of trChildren.filter((c) => c['w:tc'] !== undefined)) {
+              const tcChildren = asXmlNodes(tc['w:tc']);
               let colspan = 1;
               let vMergeType: 'restart' | 'continue' | undefined;
-              const tcPrNode = tcChildren.find((c: any) => c['w:tcPr'] !== undefined);
+              const tcPrNode = tcChildren.find((c) => c['w:tcPr'] !== undefined);
               if (tcPrNode) {
-                const tcPrChildren = Array.isArray(tcPrNode['w:tcPr']) ? tcPrNode['w:tcPr'] : [tcPrNode['w:tcPr']];
-                const gridSpanNode = tcPrChildren.find((c: any) => c['w:gridSpan'] !== undefined);
+                const tcPrChildren = asXmlNodes(tcPrNode['w:tcPr']);
+                const gridSpanNode = tcPrChildren.find((c) => c['w:gridSpan'] !== undefined);
                 if (gridSpanNode) {
                   const val = parseInt(getAttr(gridSpanNode, 'val'), 10);
                   if (val > 1) colspan = val;
                 }
-                const vMergeNode = tcPrChildren.find((c: any) => c['w:vMerge'] !== undefined);
+                const vMergeNode = tcPrChildren.find((c) => c['w:vMerge'] !== undefined);
                 if (vMergeNode) {
                   const val = getAttr(vMergeNode, 'val');
                   vMergeType = val === 'restart' ? 'restart' : 'continue';
@@ -1776,11 +1799,11 @@ function parseNoteBody(
 
         // --- Math ---
         } else if (key === 'm:oMathPara' && context) {
-          const mathParaChildren = Array.isArray(node[key]) ? node[key] : [node[key]];
-          const oMathNodes = mathParaChildren.filter((c: any) => c['m:oMath'] !== undefined);
+          const mathParaChildren = asXmlNodes(node[key]);
+          const oMathNodes = mathParaChildren.filter((c) => c['m:oMath'] !== undefined);
           for (const oMathNode of oMathNodes) {
             try {
-              const latex = ommlToLatex(oMathNode['m:oMath']);
+              const latex = ommlToLatex(asXmlNodes(oMathNode['m:oMath']));
               if (latex) {
                 target.push({ type: 'math', latex, display: true, commentIds: new Set(), ...(currentRevision ? { revision: currentRevision } : {}) });
               }
@@ -1789,7 +1812,7 @@ function parseNoteBody(
             }
           }
         } else if (key === 'm:oMath' && context) {
-          const mathChildren = Array.isArray(node[key]) ? node[key] : [node[key]];
+          const mathChildren = asXmlNodes(node[key]);
           try {
             const latex = ommlToLatex(mathChildren);
             if (latex) {
@@ -1801,7 +1824,7 @@ function parseNoteBody(
 
         // --- Basic text elements (always handled) ---
         } else if (key === 'w:t' || key === 'w:delText') {
-          const text = nodeText(node[key] || []);
+          const text = nodeText(asXmlNodes(node[key]));
           if (text) {
             if (inCitationField && context) {
               citationTextParts.push(text);
@@ -1831,14 +1854,14 @@ function parseNoteBody(
             });
           }
         } else if (key === 'w:p') {
-          const paraChildren = Array.isArray(node[key]) ? node[key] : [node[key]];
+          const paraChildren = asXmlNodes(node[key]);
           let paraFormatting = currentFormatting;
           for (const child of paraChildren) {
             if (child['w:pPr']) {
-              const pPrChildren = Array.isArray(child['w:pPr']) ? child['w:pPr'] : [child['w:pPr']];
-              const pRPrElement = pPrChildren.find((c: any) => c['w:rPr'] !== undefined);
+              const pPrChildren = asXmlNodes(child['w:pPr']);
+              const pRPrElement = pPrChildren.find((c) => c['w:rPr'] !== undefined);
               if (pRPrElement) {
-                const pRPrChildren = Array.isArray(pRPrElement['w:rPr']) ? pRPrElement['w:rPr'] : [pRPrElement['w:rPr']];
+                const pRPrChildren = asXmlNodes(pRPrElement['w:rPr']);
                 paraFormatting = parseRunProperties(pRPrChildren, currentFormatting);
               }
               break;
@@ -1854,10 +1877,10 @@ function parseNoteBody(
           walkNoteBody(paraChildren, paraFormatting, target, inTableCell, currentRevision);
         } else if (key === 'w:r') {
           let runFormatting = currentFormatting;
-          const runChildren = Array.isArray(node[key]) ? node[key] : [node[key]];
+          const runChildren = asXmlNodes(node[key]);
           for (const child of runChildren) {
             if (child['w:rPr']) {
-              const rPrChildren = Array.isArray(child['w:rPr']) ? child['w:rPr'] : [child['w:rPr']];
+              const rPrChildren = asXmlNodes(child['w:rPr']);
               runFormatting = parseRunProperties(rPrChildren, currentFormatting);
               break;
             }
@@ -1901,7 +1924,7 @@ export function zoteroStyleFullId(shortName: string): string {
 // Zotero metadata extraction
 
 /** Extract Zotero citations from an already-parsed XML tree. */
-function extractZoteroCitationsFromParsed(parsed: any[]): ZoteroCitation[] {
+function extractZoteroCitationsFromParsed(parsed: XmlNode[]): ZoteroCitation[] {
   return extractZoteroCitationsFromInstructions(extractFieldInstructions(parsed));
 }
 
@@ -1917,25 +1940,30 @@ function extractZoteroCitationsFromInstructions(instructions: string[]): ZoteroC
     }
 
     try {
-      const cslData = JSON.parse(instrText.slice(jsonStart));
-      const plainCitation: string = cslData?.properties?.plainCitation ?? '';
-      const cslItems: any[] = cslData?.citationItems ?? [];
+      const parsedData: unknown = JSON.parse(instrText.slice(jsonStart));
+      if (!isRecord(parsedData)) throw new Error('Invalid Zotero citation payload');
+      const properties = isRecord(parsedData.properties) ? parsedData.properties : {};
+      const plainCitation = stringField(properties, 'plainCitation');
+      const cslItems = Array.isArray(parsedData.citationItems)
+        ? parsedData.citationItems.filter(isRecord)
+        : [];
 
-      const items: CitationMetadata[] = cslItems.map((item: any) => {
-        const d = item.itemData ?? {};
-        const issued = d.issued ?? {};
-        const dateParts = issued['date-parts'] ?? [[]];
-        const year = dateParts[0]?.[0] ? String(dateParts[0][0]) : '';
+      const items: CitationMetadata[] = cslItems.map(item => {
+        const d = isRecord(item.itemData) ? item.itemData : {};
+        const issued = isRecord(d.issued) ? d.issued : {};
+        const dateParts = Array.isArray(issued['date-parts']) ? issued['date-parts'] : [];
+        const firstDatePart = Array.isArray(dateParts[0]) ? dateParts[0][0] : undefined;
+        const year = firstDatePart ? String(firstDatePart) : '';
 
         const result: CitationMetadata = {
-          authors: d.author ?? [],
-          title: d.title ?? '',
+          authors: parseCslAuthors(d.author),
+          title: stringField(d, 'title'),
           year,
-          journal: d['container-title'] ?? '',
-          volume: d.volume ?? '',
-          pages: d.page ?? '',
-          doi: d.DOI ?? '',
-          type: d.type ?? 'article-journal',
+          journal: stringField(d, 'container-title'),
+          volume: stringField(d, 'volume'),
+          pages: stringField(d, 'page'),
+          doi: stringField(d, 'DOI'),
+          type: stringField(d, 'type') || 'article-journal',
           fullItemData: d,
         };
 
@@ -1949,7 +1977,8 @@ function extractZoteroCitationsFromInstructions(instructions: string[]): ZoteroC
 
         // Extract Zotero URI and key
         const uris = item.uris ?? item.uri ?? [];
-        const uri = Array.isArray(uris) ? uris[0] : uris;
+        const uriValue = Array.isArray(uris) ? uris[0] : uris;
+        const uri = uriValue == null ? '' : String(uriValue);
         if (uri) {
           result.zoteroUri = uri;
           const zKey = extractZoteroKey(uri);
@@ -2067,7 +2096,8 @@ function getSurname(meta: CitationMetadata): string {
     if (first.literal) return first.literal;
     if (first.family) return first.family;
   }
-  return meta.fullItemData.publisher || meta.journal || 'unknown';
+  const publisher = meta.fullItemData.publisher;
+  return (typeof publisher === 'string' && publisher) || meta.journal || 'unknown';
 }
 
 /** Strip characters that are significant in Pandoc citation syntax. */
@@ -2139,21 +2169,21 @@ function splitCellParagraphs(cellContent: ContentItem[]): ContentItem[][] {
   return paragraphs;
 }
 
-function tableHasFirstRowHeader(tblChildren: any[]): boolean {
-  const tblPrNode = tblChildren.find((c: any) => c['w:tblPr'] !== undefined);
+function tableHasFirstRowHeader(tblChildren: XmlNode[]): boolean {
+  const tblPrNode = tblChildren.find((c) => c['w:tblPr'] !== undefined);
   if (!tblPrNode) return false;
-  const tblPrChildren = Array.isArray(tblPrNode['w:tblPr']) ? tblPrNode['w:tblPr'] : [tblPrNode['w:tblPr']];
-  const tblLookNode = tblPrChildren.find((c: any) => c['w:tblLook'] !== undefined);
+  const tblPrChildren = asXmlNodes(tblPrNode['w:tblPr']);
+  const tblLookNode = tblPrChildren.find((c) => c['w:tblLook'] !== undefined);
   if (!tblLookNode) return false;
   const firstRow = getAttr(tblLookNode, 'firstRow');
   return firstRow === '1' || firstRow === 'true' || firstRow === 'on';
 }
 
-function rowHasHeaderProp(trChildren: any[]): boolean {
-  const trPrNode = trChildren.find((c: any) => c['w:trPr'] !== undefined);
+function rowHasHeaderProp(trChildren: XmlNode[]): boolean {
+  const trPrNode = trChildren.find((c) => c['w:trPr'] !== undefined);
   if (!trPrNode) return false;
-  const trPrChildren = Array.isArray(trPrNode['w:trPr']) ? trPrNode['w:trPr'] : [trPrNode['w:trPr']];
-  const tblHeaderNode = trPrChildren.find((c: any) => c['w:tblHeader'] !== undefined);
+  const trPrChildren = asXmlNodes(trPrNode['w:trPr']);
+  const tblHeaderNode = trPrChildren.find((c) => c['w:tblHeader'] !== undefined);
   if (!tblHeaderNode) return false;
   const val = getAttr(tblHeaderNode, 'val');
   if (!val) return true;
@@ -2295,7 +2325,7 @@ export async function extractDocumentContent(
   const portraitBreakOrdinals = options?.portraitBreakOrdinals;
 
   function walk(
-    nodes: any[],
+    nodes: XmlNode[],
     currentFormatting: RunFormatting = DEFAULT_FORMATTING,
     target: ContentItem[] = content,
     inTableCell = false,
@@ -2387,7 +2417,7 @@ export async function extractDocumentContent(
             currentCitation = undefined;
           }
         } else if (key === 'w:instrText' && inField) {
-          fieldInstrParts.push(nodeText(node['w:instrText'] || []));
+          fieldInstrParts.push(nodeText(asXmlNodes(node['w:instrText'])));
         } else if (key in REVISION_ELEMENTS) {
           const author = getAttr(node, 'author');
           const date = getAttr(node, 'date');
@@ -2438,26 +2468,26 @@ export async function extractDocumentContent(
           if (Array.isArray(node[key])) { walk(node[key], currentFormatting, target, inTableCell, currentRevision); }
           currentHref = prevHref;
         } else if (key === 'w:tbl' && !inTableCell) {
-          const tblChildren = Array.isArray(node[key]) ? node[key] : [node[key]];
+          const tblChildren = asXmlNodes(node[key]);
           const rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue' }> }> = [];
           const firstRowHeaderByLook = tableHasFirstRowHeader(tblChildren);
-          for (const tr of tblChildren.filter((c: any) => c['w:tr'] !== undefined)) {
-            const trChildren = Array.isArray(tr['w:tr']) ? tr['w:tr'] : [tr['w:tr']];
+          for (const tr of tblChildren.filter((c) => c['w:tr'] !== undefined)) {
+            const trChildren = asXmlNodes(tr['w:tr']);
             const cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue' }> = [];
-            for (const tc of trChildren.filter((c: any) => c['w:tc'] !== undefined)) {
-              const tcChildren = Array.isArray(tc['w:tc']) ? tc['w:tc'] : [tc['w:tc']];
+            for (const tc of trChildren.filter((c) => c['w:tc'] !== undefined)) {
+              const tcChildren = asXmlNodes(tc['w:tc']);
               // Parse cell properties
               let colspan = 1;
               let vMergeType: 'restart' | 'continue' | undefined;
-              const tcPrNode = tcChildren.find((c: any) => c['w:tcPr'] !== undefined);
+              const tcPrNode = tcChildren.find((c) => c['w:tcPr'] !== undefined);
               if (tcPrNode) {
-                const tcPrChildren = Array.isArray(tcPrNode['w:tcPr']) ? tcPrNode['w:tcPr'] : [tcPrNode['w:tcPr']];
-                const gridSpanNode = tcPrChildren.find((c: any) => c['w:gridSpan'] !== undefined);
+                const tcPrChildren = asXmlNodes(tcPrNode['w:tcPr']);
+                const gridSpanNode = tcPrChildren.find((c) => c['w:gridSpan'] !== undefined);
                 if (gridSpanNode) {
                   const val = parseInt(getAttr(gridSpanNode, 'val'), 10);
                   if (val > 1) colspan = val;
                 }
-                const vMergeNode = tcPrChildren.find((c: any) => c['w:vMerge'] !== undefined);
+                const vMergeNode = tcPrChildren.find((c) => c['w:vMerge'] !== undefined);
                 if (vMergeNode) {
                   const val = getAttr(vMergeNode, 'val');
                   vMergeType = val === 'restart' ? 'restart' : 'continue';
@@ -2479,11 +2509,11 @@ export async function extractDocumentContent(
         } else if (key === 'w:r') {
           // Process run - extract formatting from w:rPr
           let runFormatting = currentFormatting;
-          const runChildren = Array.isArray(node[key]) ? node[key] : [node[key]];
-          let rPrChildren: any[] | undefined;
+          const runChildren = asXmlNodes(node[key]);
+          let rPrChildren: XmlNode[] | undefined;
           for (const child of runChildren) {
             if (child['w:rPr']) {
-              rPrChildren = Array.isArray(child['w:rPr']) ? child['w:rPr'] : [child['w:rPr']];
+              rPrChildren = asXmlNodes(child['w:rPr']);
               runFormatting = parseRunProperties(rPrChildren, currentFormatting);
               break;
             }
@@ -2491,16 +2521,16 @@ export async function extractDocumentContent(
 
           // Detect vanish runs carrying HTML comments (encoded with \u200B prefix).
           // LaTeX OMML hidden runs and other vanish runs without the prefix fall through.
-          const hasVanish = rPrChildren?.some((c: any) => c['w:vanish'] !== undefined) ?? false;
+          const hasVanish = rPrChildren?.some((c) => c['w:vanish'] !== undefined) ?? false;
           if (hasVanish) {
             // Collect text from w:t/w:delText elements in this run and preserve
             // explicit break elements so multiline hidden payloads survive.
             let runText = '';
             for (const child of runChildren) {
               if (child['w:t'] !== undefined) {
-                runText += nodeText(child['w:t'] || []);
+                runText += nodeText(asXmlNodes(child['w:t']));
               } else if (child['w:delText'] !== undefined) {
-                runText += nodeText(child['w:delText'] || []);
+                runText += nodeText(asXmlNodes(child['w:delText']));
               } else if (child['w:br'] !== undefined || child['w:cr'] !== undefined) {
                 runText += '\n';
               }
@@ -2554,7 +2584,7 @@ export async function extractDocumentContent(
             }
           }
         } else if (key === 'w:t' || key === 'w:delText') {
-          const text = nodeText(node[key] || []);
+          const text = nodeText(asXmlNodes(node[key]));
           if (text) {
             if (inBibliographyField || inNoterefField) {
               // Skip display text inside ZOTERO_BIBL / NOTEREF fields
@@ -2589,25 +2619,25 @@ export async function extractDocumentContent(
           let isSpacerParagraph = false;
           let isSectionBreakHandled = false;
 
-          const paraChildren = Array.isArray(node[key]) ? node[key] : [node[key]];
+          const paraChildren = asXmlNodes(node[key]);
           for (const child of paraChildren) {
             if (child['w:pPr']) {
-              const pPrChildren = Array.isArray(child['w:pPr']) ? child['w:pPr'] : [child['w:pPr']];
+              const pPrChildren = asXmlNodes(child['w:pPr']);
 
               // Detect and skip spacer paragraphs: exact-height empty <w:p>
               // with inline left border and no pStyle, generated by
               // alertFirst/alertLast in md→docx for visual padding.
               // Signature: no pStyle, w:spacing line="1" lineRule="exact",
               // w:pBdr with w:left border.
-              const hasPStyle = pPrChildren.some((c: any) => c['w:pStyle'] !== undefined);
+              const hasPStyle = pPrChildren.some((c) => c['w:pStyle'] !== undefined);
               if (!hasPStyle) {
-                const spacingNode = pPrChildren.find((c: any) => c['w:spacing'] !== undefined);
-                const pBdrNode = pPrChildren.find((c: any) => c['w:pBdr'] !== undefined);
+                const spacingNode = pPrChildren.find((c) => c['w:spacing'] !== undefined);
+                const pBdrNode = pPrChildren.find((c) => c['w:pBdr'] !== undefined);
                 if (spacingNode && pBdrNode) {
                   const lineVal = getAttr(spacingNode, 'line');
                   const lineRule = getAttr(spacingNode, 'lineRule');
-                  const pBdrChildren = Array.isArray(pBdrNode['w:pBdr']) ? pBdrNode['w:pBdr'] : [pBdrNode['w:pBdr']];
-                  const hasLeftBorder = pBdrChildren.some((c: any) => c['w:left'] !== undefined);
+                  const pBdrChildren = asXmlNodes(pBdrNode['w:pBdr']);
+                  const hasLeftBorder = pBdrChildren.some((c) => c['w:left'] !== undefined);
                   if (lineVal === '1' && lineRule === 'exact' && hasLeftBorder) {
                     isSpacerParagraph = true;
                     break;
@@ -2616,11 +2646,11 @@ export async function extractDocumentContent(
               }
 
               // Detect section break (w:sectPr inside w:pPr)
-              const sectPrNode = pPrChildren.find((c: any) => c['w:sectPr'] !== undefined);
+              const sectPrNode = pPrChildren.find((c) => c['w:sectPr'] !== undefined);
               if (sectPrNode && !inTableCell) {
                 const currentOrdinal = sectionBreakOrdinal++;
-                const sectPrChildren = Array.isArray(sectPrNode['w:sectPr']) ? sectPrNode['w:sectPr'] : [sectPrNode['w:sectPr']];
-                const pgSzNode = sectPrChildren.find((c: any) => c['w:pgSz'] !== undefined);
+                const sectPrChildren = asXmlNodes(sectPrNode['w:sectPr']);
+                const pgSzNode = sectPrChildren.find((c) => c['w:pgSz'] !== undefined);
                 let isLandscapeSect = false;
                 if (pgSzNode) {
                   const orient = getAttr(pgSzNode, 'orient');
@@ -2653,7 +2683,7 @@ export async function extractDocumentContent(
                 // and skip this paragraph (it's typically an empty section-break carrier)
                 sectionStartIndex = target.length;
                 // Check if paragraph has any content runs (not just sectPr)
-                const hasContent = paraChildren.some((c: any) => c['w:r'] !== undefined || c['w:hyperlink'] !== undefined);
+                const hasContent = paraChildren.some((c) => c['w:r'] !== undefined || c['w:hyperlink'] !== undefined);
                 if (!hasContent) {
                   isSectionBreakHandled = true;
                   break;
@@ -2672,7 +2702,7 @@ export async function extractDocumentContent(
               paragraphLeftIndentTwips = parseParagraphLeftIndentTwips(pPrChildren);
               const pRPrElement = pPrChildren.find(pprChild => pprChild['w:rPr'] !== undefined);
               if (pRPrElement) {
-                const pRPrChildren = Array.isArray(pRPrElement['w:rPr']) ? pRPrElement['w:rPr'] : [pRPrElement['w:rPr']];
+                const pRPrChildren = asXmlNodes(pRPrElement['w:rPr']);
                 paraFormatting = parseRunProperties(pRPrChildren, currentFormatting);
               }
               break;
@@ -2782,11 +2812,11 @@ export async function extractDocumentContent(
           }
         } else if (key === 'm:oMathPara') {
           // Display equation — extract m:oMath children from within
-          const mathParaChildren = Array.isArray(node[key]) ? node[key] : [node[key]];
-          const oMathNodes = mathParaChildren.filter((c: any) => c['m:oMath'] !== undefined);
+          const mathParaChildren = asXmlNodes(node[key]);
+          const oMathNodes = mathParaChildren.filter((c) => c['m:oMath'] !== undefined);
           for (const oMathNode of oMathNodes) {
             try {
-              const latex = ommlToLatex(oMathNode['m:oMath']);
+              const latex = ommlToLatex(asXmlNodes(oMathNode['m:oMath']));
               if (latex) {
                 target.push({ type: 'math', latex, display: true, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
               }
@@ -2796,7 +2826,7 @@ export async function extractDocumentContent(
           }
         } else if (key === 'm:oMath') {
           // Inline equation
-          const mathChildren = Array.isArray(node[key]) ? node[key] : [node[key]];
+          const mathChildren = asXmlNodes(node[key]);
           try {
             const latex = ommlToLatex(mathChildren);
             if (latex) {
@@ -2807,11 +2837,11 @@ export async function extractDocumentContent(
           }
         } else if (key === 'w:drawing') {
           // Image extraction from <w:drawing> containing <wp:inline> or <wp:anchor>
-          const drawingChildren = Array.isArray(node[key]) ? node[key] : [node[key]];
+          const drawingChildren = asXmlNodes(node[key]);
           for (const child of drawingChildren) {
             const inlineOrAnchor = child['wp:inline'] || child['wp:anchor'];
             if (!inlineOrAnchor) continue;
-            const elements = Array.isArray(inlineOrAnchor) ? inlineOrAnchor : [inlineOrAnchor];
+            const elements = asXmlNodes(inlineOrAnchor);
             // Extract extent, docPr, and blip from the inline/anchor element
             let cx = 0, cy = 0, alt = '', docPrName = '', blipRId = '';
             for (const el of elements) {
@@ -2861,7 +2891,7 @@ export async function extractDocumentContent(
     }
   }
 
-  walk(Array.isArray(parsed) ? parsed : [parsed]);
+  walk(parsed);
   return { content, zoteroBiblData, imageEntries: imageEntries.length > 0 ? imageEntries : undefined };
 }
 
@@ -3190,7 +3220,7 @@ function renderInlineRange(
     }
 
     if (item.type === 'citation') {
-      let citeText = '';
+      let citeText: string;
       if (item.pandocKeys.length > 0) {
         const citeSep = out.endsWith(' ') ? '' : ' ';
         citeText = citeSep + '[' + item.pandocKeys.map(k => k.startsWith('-') ? '-@' + k.slice(1) : '@' + k).join('; ') + ']';
@@ -3222,7 +3252,7 @@ function renderInlineRange(
 
     if (item.type === 'image') {
       const syntax = renderOpts?.imageFormatMapping?.get(item.rId) || 'md';
-      let imgText = '';
+      let imgText: string;
       if (syntax === 'html') {
         imgText = '<img src="' + escapeHtmlAttr(item.src) + '" alt="' + escapeHtmlAttr(item.alt) + '"';
         if (item.widthPx > 0) imgText += ' width="' + item.widthPx + '"';
@@ -3450,7 +3480,7 @@ function renderInlineRangeWithIds(
       }
       prevCommentIds = new Set(currentIds);
 
-      let citeText = '';
+      let citeText: string;
       if (item.pandocKeys.length > 0) {
         const citeSep = out.endsWith(' ') ? '' : ' ';
         citeText = citeSep + '[' + item.pandocKeys.map(k => k.startsWith('-') ? '-@' + k.slice(1) : '@' + k).join('; ') + ']';
@@ -3520,7 +3550,7 @@ function renderInlineRangeWithIds(
       }
       prevCommentIds = new Set(currentIds);
       const syntax = imageFormatMapping?.get(item.rId) || 'md';
-      let imgText = '';
+      let imgText: string;
       if (syntax === 'html') {
         imgText = '<img src="' + escapeHtmlAttr(item.src) + '" alt="' + escapeHtmlAttr(item.alt) + '"';
         if (item.widthPx > 0) imgText += ' width="' + item.widthPx + '"';
@@ -4800,18 +4830,6 @@ export function buildMarkdown(
         isPlainEmptyParagraph(item) &&
         !paragraphHasContent(mergedContent, i)
       ) {
-        let prevStructuralIdx = i - 1;
-        while (prevStructuralIdx >= 0) {
-          const prevItem = mergedContent[prevStructuralIdx];
-          if (
-            prevItem.type !== 'para'
-            || !isPlainEmptyParagraph(prevItem)
-            || paragraphHasContent(mergedContent, prevStructuralIdx)
-          ) {
-            break;
-          }
-          prevStructuralIdx--;
-        }
         let nextStructuralIdx = i + 1;
         while (nextStructuralIdx < mergedContent.length) {
           const nextItem = mergedContent[nextStructuralIdx];
@@ -4825,11 +4843,7 @@ export function buildMarkdown(
           nextStructuralIdx++;
         }
 
-        const prevCandidate = prevStructuralIdx >= 0 ? mergedContent[prevStructuralIdx] : undefined;
         const nextCandidate = nextStructuralIdx < mergedContent.length ? mergedContent[nextStructuralIdx] : undefined;
-        const prevPara = prevCandidate?.type === 'para'
-          ? prevCandidate
-          : undefined;
         const nextPara = nextCandidate?.type === 'para'
           ? nextCandidate
           : undefined;
@@ -5772,7 +5786,8 @@ export function generateBibTeX(
 
       const authorStr = meta.authors.map(serializeAuthor).join(' and ');
 
-      const entryType = mapCSLTypeToBibtex(meta.type, meta.fullItemData?.genre);
+      const genre = meta.fullItemData.genre;
+      const entryType = mapCSLTypeToBibtex(meta.type, typeof genre === 'string' ? genre : undefined);
       const fields: string[] = [];
       const alreadyEmitted = new Set<string>();
 
@@ -5900,7 +5915,7 @@ export async function extractAuthor(zip: JSZip): Promise<string | undefined> {
   const parsed = await readZipXml(zip, 'docProps/core.xml');
   if (!parsed) return undefined;
   for (const node of findAllDeep(parsed, 'dc:creator')) {
-    const text = nodeText(node['dc:creator']).trim();
+    const text = nodeText(asXmlNodes(node['dc:creator'])).trim();
     if (text) return text;
   }
   return undefined;
