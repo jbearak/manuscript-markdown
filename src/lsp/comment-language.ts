@@ -39,46 +39,28 @@ export function findRangeTextForId(text: string, id: string): string | undefined
 }
 
 /**
- * Remove all depth-aware `{>>...<<}` comment blocks (including nested replies) from text.
+ * Remove complete plain and ID-based comment blocks, including nested replies.
+ * Unmatched openers are preserved without preventing later complete blocks from being removed.
  */
 function stripCommentBlocks(text: string): string {
 	let result = text;
-	// Repeatedly strip from innermost outward
-	while (true) {
-		// Find {>> that has no nested {>> before its <<}
-		const idx = result.indexOf('{>>');
-		if (idx === -1) break;
-		const contentStart = idx + 3;
-		const closeIdx = findMatchingClose(result, contentStart);
-		if (closeIdx === -1) break;
-		result = result.slice(0, idx) + result.slice(closeIdx + 3);
+	const openRe = /\{(?:>>|#[a-zA-Z0-9_-]+>>)/g;
+	let match: RegExpExecArray | null;
+	while ((match = openRe.exec(result)) !== null) {
+		const closeIdx = findMatchingClose(result, match.index + match[0].length);
+		if (closeIdx === -1) continue;
+		result = result.slice(0, match.index) + result.slice(closeIdx + 3);
+		openRe.lastIndex = match.index;
 	}
 	return result;
 }
 
 /**
  * Strip all CriticMarkup tags from text.
- * Comment bodies are removed entirely; other delimiters are unwrapped (content kept).
+ * Complete comment bodies are removed entirely; other delimiters are unwrapped (content kept).
  */
 export function stripCriticMarkup(text: string): string {
-	let result = text;
-	// Remove ID-based comment bodies (depth-aware for nested replies)
-	const idOpenRe = /\{#[a-zA-Z0-9_-]+>>/g;
-	let m: RegExpExecArray | null;
-	// Process from end to start to preserve indices
-	const spans: Array<{start: number; end: number}> = [];
-	while ((m = idOpenRe.exec(result)) !== null) {
-		const contentStart = m.index + m[0].length;
-		const closeIdx = findMatchingClose(result, contentStart);
-		if (closeIdx !== -1) {
-			spans.push({ start: m.index, end: closeIdx + 3 });
-		}
-	}
-	for (let i = spans.length - 1; i >= 0; i--) {
-		result = result.slice(0, spans[i].start) + result.slice(spans[i].end);
-	}
-	// Remove inline comment bodies (depth-aware)
-	result = stripCommentBlocks(result);
+	let result = stripCommentBlocks(text);
 	// Remove ID range markers
 	result = result.replace(/\{#[a-zA-Z0-9_-]+\}/g, '');
 	result = result.replace(/\{\/[a-zA-Z0-9_-]+\}/g, '');

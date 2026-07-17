@@ -266,6 +266,34 @@ describe('table number formatting', () => {
 		expect(formatTableNumbers(multilineOpening, { digits: 2 }).output).toContain('<td>12.3</td>');
 	});
 
+	test('recovers from a table opener missing its closing angle bracket', () => {
+		const input = '<table\nmalformed source\n\n| Value |\n| --- |\n| 12.34 |';
+		expect(formatTableNumbers(input, { digits: 1 }).output)
+			.toBe('<table\nmalformed source\n\n| Value |\n| --- |\n| 12.3 |');
+	});
+
+	test('recovers from an unclosed HTML table before a valid pipe table', () => {
+		const input = '<table><tr><td>99.99</td></tr>\n\n| Value |\n| --- |\n| 12.34 |';
+		expect(formatTableNumbers(input, { digits: 1 }).output)
+			.toBe('<table><tr><td>99.99</td></tr>\n\n| Value |\n| --- |\n| 12.3 |');
+	});
+
+	test('formats complete same-line tables beside an unclosed sibling', () => {
+		const completeFirst = '<table><tr><td>1.23</td></tr></table><table><tr><td>4.56</td></tr>';
+		expect(formatTableNumbers(completeFirst, { digits: 1 }).output)
+			.toBe('<table><tr><td>1.2</td></tr></table><table><tr><td>4.56</td></tr>');
+
+		const completeLast = '<table><tr><td>1.23</td></tr><table><tr><td>4.56</td></tr></table>';
+		expect(formatTableNumbers(completeLast, { digits: 1 }).output)
+			.toBe('<table><tr><td>1.23</td></tr><table><tr><td>4.6</td></tr></table>');
+	});
+
+	test('collects a multiline outer table with a complete nested table on its opening line', () => {
+		const input = '<!-- table-digits: 1 -->\n<table><tr><td><table><tr><td>1.23</td></tr></table></td>\n<td>4.56</td></tr></table>';
+		expect(formatTableNumbers(input, {}).output)
+			.toBe('<!-- table-digits: 1 -->\n<table><tr><td><table><tr><td>1.2</td></tr></table></td>\n<td>4.6</td></tr></table>');
+	});
+
 	test('preserves nonbreaking HTML source while formatting grouped values', () => {
 		const entity = '<table><tr><td>1&nbsp;234.50&nbsp;$</td></tr></table>';
 		const entityOutput = formatTableNumbers(entity, { digits: 1, decimalMark: 'midpoint' }).output;

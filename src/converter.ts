@@ -342,10 +342,10 @@ function parseCslAuthors(value: unknown): CitationMetadata['authors'] {
   return value.flatMap(author => {
     if (!isRecord(author)) return [];
     const parsed: CitationMetadata['authors'][number] = {};
-    if (typeof author.family === 'string') parsed.family = author.family;
-    if (typeof author.given === 'string') parsed.given = author.given;
-    if (typeof author.literal === 'string') parsed.literal = author.literal;
-    return [parsed];
+    if (typeof author.family === 'string' && author.family.trim()) parsed.family = author.family;
+    if (typeof author.given === 'string' && author.given.trim()) parsed.given = author.given;
+    if (typeof author.literal === 'string' && author.literal.trim()) parsed.literal = author.literal;
+    return Object.keys(parsed).length > 0 ? [parsed] : [];
   });
 }
 

@@ -893,13 +893,12 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 		const opensHtmlTable = lineTokens.some(token => token.tag && token.name === 'table' && !token.closing)
 				|| /^\s*<table\b/i.test(detectionLine);
 		if (opensHtmlTable) {
-      const tableStart = lineOffsets[i];
-      const warningsBefore = warnings.length;
-      const block: string[] = [];
+			const block: string[] = [];
+			let candidateEnd = i;
 			let tableDepth: number;
 			let foundOpening: boolean;
 			do {
-				block.push(lines[i++]);
+				block.push(lines[candidateEnd++]);
 				tableDepth = 0;
 				foundOpening = false;
 				for (const token of scanHtmlSource(block.join('\n'))) {
@@ -908,15 +907,35 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
 						tableDepth += token.closing ? -1 : 1;
 					}
 				}
-			} while (i < lines.length && (!foundOpening || tableDepth > 0));
-      const tableBlock = block.join('\n');
-      output.push(pendingInvalid || error ? tableBlock : formatHtmlTable(tableBlock, format, warnings));
-      if (error) warningDetails.push({ message: error, start: tableStart, end: tableStart + tableBlock.length });
-      recordWarnings(warningsBefore, tableStart, tableStart + tableBlock.length);
-      pending = {};
-      pendingInvalid = false;
-      continue;
-    }
+			} while (candidateEnd < lines.length && (!foundOpening || tableDepth > 0));
+			// Commit collection only after finding a complete table. A malformed
+			// or unterminated candidate must not consume otherwise valid later tables.
+			if (foundOpening && tableDepth <= 0) {
+				const tableStart = lineOffsets[i];
+				const warningsBefore = warnings.length;
+				const tableBlock = block.join('\n');
+				output.push(pendingInvalid || error ? tableBlock : formatHtmlTable(tableBlock, format, warnings));
+				if (error) warningDetails.push({ message: error, start: tableStart, end: tableStart + tableBlock.length });
+				recordWarnings(warningsBefore, tableStart, tableStart + tableBlock.length);
+				i = candidateEnd;
+				pending = {};
+				pendingInvalid = false;
+				continue;
+			}
+			// If collection reaches EOF without balancing, format only complete
+			// same-line siblings and leave the malformed table source untouched.
+			if (findHtmlElementRanges(lineTokens, new Set(['table'])).length > 0) {
+				const tableStart = lineOffsets[i];
+				const warningsBefore = warnings.length;
+				output.push(pendingInvalid || error ? lines[i] : formatHtmlTable(lines[i], format, warnings));
+				if (error) warningDetails.push({ message: error, start: tableStart, end: tableStart + lines[i].length });
+				recordWarnings(warningsBefore, tableStart, tableStart + lines[i].length);
+				i++;
+				pending = {};
+				pendingInvalid = false;
+				continue;
+			}
+		}
 		if (lines[i].includes(GRID_TABLE_PLACEHOLDER_PREFIX) && !lineIsEnclosedInert) {
       const warningsBefore = warnings.length;
       const tableStart = lineOffsets[i];
