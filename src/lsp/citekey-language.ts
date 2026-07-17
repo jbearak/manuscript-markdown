@@ -578,7 +578,7 @@ export function parseFileFieldValue(rawValue: string): BibFileEntry[] {
 
 		const parts = splitOnUnescaped(trimmed, ':');
 		let description = '';
-		let filePath = '';
+		let filePath: string;
 		let fileType = '';
 
 		if (parts.length >= 3) {

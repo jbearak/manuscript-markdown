@@ -44,9 +44,7 @@ export function findRangeTextForId(text: string, id: string): string | undefined
 function stripCommentBlocks(text: string): string {
 	let result = text;
 	// Repeatedly strip from innermost outward
-	let changed = true;
-	while (changed) {
-		changed = false;
+	while (true) {
 		// Find {>> that has no nested {>> before its <<}
 		const idx = result.indexOf('{>>');
 		if (idx === -1) break;
@@ -54,7 +52,6 @@ function stripCommentBlocks(text: string): string {
 		const closeIdx = findMatchingClose(result, contentStart);
 		if (closeIdx === -1) break;
 		result = result.slice(0, idx) + result.slice(closeIdx + 3);
-		changed = true;
 	}
 	return result;
 }

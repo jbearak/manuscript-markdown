@@ -1,6 +1,8 @@
 import type MarkdownIt from 'markdown-it';
+import type StateCore from 'markdown-it/lib/rules_core/state_core.mjs';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
 import type StateBlock from 'markdown-it/lib/rules_block/state_block.mjs';
+import type Token from 'markdown-it/lib/token.mjs';
 import { VALID_COLOR_IDS, getDefaultHighlightColor } from '../highlight-colors';
 import { PARA_PLACEHOLDER, findMatchingClose } from '../critic-markup';
 import { GRID_TABLE_PLACEHOLDER_PREFIX } from '../grid-table-preprocess';
@@ -8,9 +10,27 @@ import { preprocessGridTablesWithMap, wrapBareLatexEnvironmentsWithMap, preproce
 import { LineMap } from './line-map';
 import { preprocessEmbedsWithMap, type EmbedResolver, type EmbedOptions } from '../embed-preprocess';
 import { isGfmDisallowedRawHtml, escapeHtmlText, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from '../gfm';
-import { parseFrontmatter, type ColorScheme, type CustomStyleDef } from '../frontmatter';
+import { parseFrontmatter, type ColorScheme } from '../frontmatter';
 import { formatTableNumbers } from '../table-number-format';
 import { getDefaultColorScheme } from '../alert-colors';
+
+export interface ManuscriptMarkdownIt extends MarkdownIt {
+  manuscriptColors?: ColorScheme;
+  manuscriptEmbedResolver?: EmbedResolver;
+  manuscriptEmbedOptions?: EmbedOptions;
+  manuscriptDocumentPath?: string;
+  manuscriptGetDocumentPath?: (src: string) => string | undefined;
+}
+
+interface PreviewEnvironment {
+  colorScheme?: ColorScheme;
+  currentDocument?: string | { fsPath?: unknown };
+  lineMap?: LineMap;
+}
+
+function getPreviewEnvironment(state: StateCore): PreviewEnvironment {
+  return state.env as PreviewEnvironment;
+}
 
 /** Escape HTML special characters for use in attribute values */
 function escapeHtmlAttr(str: string): string {
@@ -35,7 +55,6 @@ function alertOcticonSvg(type: GfmAlertType): string {
     case 'caution':
       return '<svg ' + common + '><path d="M4.47.22A.749.749 0 0 1 5 0h6c.199 0 .389.079.53.22l4.25 4.25c.141.14.22.331.22.53v6a.749.749 0 0 1-.22.53l-4.25 4.25A.749.749 0 0 1 11 16H5a.749.749 0 0 1-.53-.22L.22 11.53A.749.749 0 0 1 0 11V5c0-.199.079-.389.22-.53Zm.84 1.28L1.5 5.31v5.38l3.81 3.81h5.38l3.81-3.81V5.31L10.69 1.5ZM8 4a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 8 4Zm0 8a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"/></svg>';
     default: {
-      const _exhaustive: never = type;
       return '';
     }
   }
@@ -43,7 +62,7 @@ function alertOcticonSvg(type: GfmAlertType): string {
 
 interface AlertHit { inlineIdx: number; paraOpenIdx: number; type: GfmAlertType; rest: string }
 
-function alertBlockquoteRule(state: any): void {
+function alertBlockquoteRule(state: StateCore): void {
   const tokens = state.tokens;
   let i = 0;
   while (i < tokens.length) {
@@ -64,8 +83,9 @@ function alertBlockquoteRule(state: any): void {
     // (merged blockquotes without blank lines), split it into separate
     // paragraph_open/inline/paragraph_close groups within the blockquote.
     for (let j = i + 1; j < closeIdx; j++) {
-      if (tokens[j].type !== 'inline' || !tokens[j].children) continue;
-      const children = tokens[j].children;
+      const inlineToken = tokens[j];
+      const children = inlineToken.children;
+      if (inlineToken.type !== 'inline' || !children) continue;
       // Find all child indices that are alert markers
       const markerChildIndices: number[] = [];
       for (let c = 0; c < children.length; c++) {
@@ -75,7 +95,7 @@ function alertBlockquoteRule(state: any): void {
       }
       if (markerChildIndices.length === 0) continue;
       // Single marker that IS the first text child — no split needed
-      const firstTextChildIdx = children.findIndex((c: any) => c.type === 'text' && c.content.length > 0);
+      const firstTextChildIdx = children.findIndex(c => c.type === 'text' && c.content.length > 0);
       if (markerChildIndices.length === 1 && markerChildIndices[0] === firstTextChildIdx) continue;
 
       // Find the paragraph_open and paragraph_close around this inline
@@ -85,7 +105,7 @@ function alertBlockquoteRule(state: any): void {
       while (pCloseIdx < closeIdx && tokens[pCloseIdx].type !== 'paragraph_close') pCloseIdx++;
 
       // Build replacement tokens: one paragraph group per marker segment
-      const replacement: any[] = [];
+      const replacement: Token[] = [];
       // Content before first marker (plain blockquote paragraph)
       if (markerChildIndices[0] > 0) {
         let preChildren = children.slice(0, markerChildIndices[0]);
@@ -96,7 +116,7 @@ function alertBlockquoteRule(state: any): void {
           replacement.push(pOpen);
           const inlineTok = new state.Token('inline', '', 0);
           inlineTok.children = preChildren;
-          inlineTok.content = preChildren.map((c: any) => c.content || '').join('');
+          inlineTok.content = preChildren.map(c => c.content || '').join('');
           replacement.push(inlineTok);
           replacement.push(new state.Token('paragraph_close', 'p', -1));
         }
@@ -113,7 +133,7 @@ function alertBlockquoteRule(state: any): void {
           replacement.push(pOpen);
           const inlineTok = new state.Token('inline', '', 0);
           inlineTok.children = segChildren;
-          inlineTok.content = segChildren.map((c: any) => c.content || '').join('');
+          inlineTok.content = segChildren.map(c => c.content || '').join('');
           replacement.push(inlineTok);
           replacement.push(new state.Token('paragraph_close', 'p', -1));
         }
@@ -131,11 +151,12 @@ function alertBlockquoteRule(state: any): void {
     const hits: AlertHit[] = [];
     let nestedDepth = 0;
     for (let j = i + 1; j < closeIdx; j++) {
-      if (tokens[j].type === 'blockquote_open') { nestedDepth++; continue; }
-      if (tokens[j].type === 'blockquote_close') { nestedDepth--; continue; }
+      const token = tokens[j];
+      if (token.type === 'blockquote_open') { nestedDepth++; continue; }
+      if (token.type === 'blockquote_close') { nestedDepth--; continue; }
       if (nestedDepth > 0) continue;
-      if (tokens[j].type !== 'inline' || !tokens[j].children) continue;
-      const firstText = tokens[j].children.find((child: any) => child.type === 'text' && child.content.length > 0);
+      if (token.type !== 'inline' || !token.children) continue;
+      const firstText = token.children.find(child => child.type === 'text' && child.content.length > 0);
       if (!firstText) continue;
       const parsed = parseGfmAlertMarker(firstText.content);
       if (!parsed) continue;
@@ -149,7 +170,8 @@ function alertBlockquoteRule(state: any): void {
     // Strip marker text from all hits
     for (const hit of hits) {
       const children = tokens[hit.inlineIdx].children;
-      const firstText = children.find((child: any) => child.type === 'text' && child.content.length > 0);
+      if (!children) continue;
+      const firstText = children.find(child => child.type === 'text' && child.content.length > 0);
       if (firstText) firstText.content = hit.rest;
     }
 
@@ -170,7 +192,7 @@ function alertBlockquoteRule(state: any): void {
     // Map all hit paraOpenIdx to offsets within inner (subtract i+1)
     const allOffsets = hits.map(h => h.paraOpenIdx - (i + 1));
 
-    const rebuilt: any[] = [];
+    const rebuilt: Token[] = [];
 
     // Content before the first alert marker becomes a plain blockquote
     if (allOffsets[0] > 0) {
@@ -210,11 +232,11 @@ function alertBlockquoteRule(state: any): void {
   }
 }
 
-function autolinkLiteralsRule(state: any): void {
+function autolinkLiteralsRule(state: StateCore): void {
   const urlPattern = /https?:\/\/[^\s<]+/g;
   for (const blockToken of state.tokens) {
     if (blockToken.type !== 'inline' || !blockToken.children) continue;
-    const nextChildren: any[] = [];
+    const nextChildren: Token[] = [];
     let insideLink = false;
     for (const child of blockToken.children) {
       if (child.type === 'link_open') {
@@ -267,7 +289,7 @@ function autolinkLiteralsRule(state: any): void {
 }
 
 /** Core rule: detect GFM task list markers at list item starts and mark list_item_open tokens. */
-function taskListRule(state: any): void {
+function taskListRule(state: StateCore): void {
   const stack: number[] = [];
   for (let i = 0; i < state.tokens.length; i++) {
     const token = state.tokens[i];
@@ -284,7 +306,7 @@ function taskListRule(state: any): void {
     const listItemOpen = state.tokens[stack[stack.length - 1]];
     if (listItemOpen.meta?.taskChecked !== undefined) continue;
 
-    const firstText = token.children.find((child: any) => child.type === 'text' && child.content.length > 0);
+    const firstText = token.children.find(child => child.type === 'text' && child.content.length > 0);
     if (!firstText) continue;
     const parsed = parseTaskListMarker(firstText.content);
     if (!parsed) continue;
@@ -353,7 +375,7 @@ function addInlineContent(state: StateInline, content: string): void {
   }
   
   // Parse the content to get child tokens
-  const childTokens: any[] = [];
+  const childTokens: Token[] = [];
   state.md.inline.parse(content, state.md, state.env, childTokens);
   
   // Add each child token to the state
@@ -773,7 +795,7 @@ function isCriticMarkupClose(type: string): boolean {
 }
 
 /** Find the index of the matching open token in an array, searching backwards from closeIdx */
-function findMatchingOpenIdx(tokens: any[], closeIdx: number): number {
+function findMatchingOpenIdx(tokens: Token[], closeIdx: number): number {
   const closeType = tokens[closeIdx].type;
   const openType = closeType.replace('_close', '_open');
   let depth = 1;
@@ -795,7 +817,7 @@ function findMatchingOpenIdx(tokens: any[], closeIdx: number): number {
  * Pass 2: Transform range markers ({#id}/{/id}) into comment range open/close tokens
  * Pass 3: Process inline comments — associate with preceding CriticMarkup elements or create indicators
  */
-function associateCommentsRule(state: any): void {
+function associateCommentsRule(state: StateCore): void {
   // Pass 1: Build comment ID → text map from all inline tokens
   const commentIdMap = new Map<string, string>();
   for (const blockToken of state.tokens) {
@@ -835,7 +857,7 @@ function associateCommentsRule(state: any): void {
     if (blockToken.type !== 'inline' || !blockToken.children) continue;
 
     const children = blockToken.children;
-    const newChildren: any[] = [];
+    const newChildren: Token[] = [];
     let i = 0;
 
     while (i < children.length) {
@@ -984,8 +1006,8 @@ function gridTableBlockRule(state: StateBlock, startLine: number, endLine: numbe
   return true;
 }
 
-function getEmbedDocumentPath(md: MarkdownIt, state: any): string | undefined {
-  const env = state.env;
+function getEmbedDocumentPath(md: ManuscriptMarkdownIt, state: StateCore): string | undefined {
+  const env = getPreviewEnvironment(state);
   const currentDocument = env?.currentDocument;
   if (currentDocument && typeof currentDocument === 'object' && typeof currentDocument.fsPath === 'string') {
     return currentDocument.fsPath;
@@ -996,12 +1018,12 @@ function getEmbedDocumentPath(md: MarkdownIt, state: any): string | undefined {
 
   // Once a preview instance has latched onto a document, keep using that base
   // path instead of re-scanning open editors by source text on every render.
-  const fallbackPath = (md as any).manuscriptDocumentPath;
+  const fallbackPath = md.manuscriptDocumentPath;
   if (typeof fallbackPath === 'string' && fallbackPath.length > 0) {
     return fallbackPath;
   }
 
-  const getDocPath = (md as any).manuscriptGetDocumentPath;
+  const getDocPath = md.manuscriptGetDocumentPath;
   if (typeof getDocPath === 'function') {
     const resolved = getDocPath(state.src);
     if (typeof resolved === 'string' && resolved.length > 0) {
@@ -1016,19 +1038,20 @@ function getEmbedDocumentPath(md: MarkdownIt, state: any): string | undefined {
  * Main plugin function that registers Manuscript Markdown parsing with markdown-it
  * @param md - The MarkdownIt instance to extend
  */
-export function manuscriptMarkdownPlugin(md: MarkdownIt): void {
+export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
   // Preprocess source before block parsing to handle multi-paragraph CriticMarkup
-  md.core.ruler.before('normalize', 'manuscript_markdown_preprocess', (state: any) => {
+  md.core.ruler.before('normalize', 'manuscript_markdown_preprocess', (state: StateCore) => {
     // Parse frontmatter to extract color scheme before preprocessing.
     // Priority: frontmatter > md.manuscriptColors (set by extension) > module-level default
     const { metadata } = parseFrontmatter(state.src);
-    const defaultScheme: ColorScheme = (md as any).manuscriptColors || getDefaultColorScheme();
-    state.env.colorScheme = metadata.colors || defaultScheme;
+    const defaultScheme = md.manuscriptColors ?? getDefaultColorScheme();
+    const env = getPreviewEnvironment(state);
+    env.colorScheme = metadata.colors || defaultScheme;
     md.set({ breaks: metadata.breaks ?? false });
     // Embed preprocessing runs first so embedded .md files with grid tables get
     // processed by the subsequent grid table preprocessor.
-    const embedResolver: EmbedResolver | undefined = (md as any).manuscriptEmbedResolver;
-    const embedOptions: EmbedOptions | undefined = (md as any).manuscriptEmbedOptions;
+    const embedResolver = md.manuscriptEmbedResolver;
+    const embedOptions = md.manuscriptEmbedOptions;
     const docPath = getEmbedDocumentPath(md, state);
     const r0 = (embedResolver && docPath)
       ? preprocessEmbedsWithMap(state.src, embedResolver, docPath, embedOptions)
@@ -1043,11 +1066,11 @@ export function manuscriptMarkdownPlugin(md: MarkdownIt): void {
     const r2 = wrapBareLatexEnvironmentsWithMap(rNumber.output);
     const r3 = preprocessCriticMarkupWithMap(r2.output);
     state.src = r3.output;
-    state.env.lineMap = LineMap.chain(LineMap.chain(LineMap.chain(LineMap.chain(r0.map, r1.map), rNumber.map), r2.map), r3.map);
+    env.lineMap = LineMap.chain(LineMap.chain(LineMap.chain(LineMap.chain(r0.map, r1.map), rNumber.map), r2.map), r3.map);
   });
 
   // Inject <style> block for header-font-style and custom styles preview
-  md.core.ruler.push('manuscript_header_font_style', (state: any) => {
+  md.core.ruler.push('manuscript_header_font_style', (state: StateCore) => {
     const { metadata } = parseFrontmatter(state.src);
     let css = '';
     // Header font style CSS (gated on headerFontStyle being set)
@@ -1104,29 +1127,26 @@ export function manuscriptMarkdownPlugin(md: MarkdownIt): void {
   });
 
   // Inject <style> block for table-borders preview
-  md.core.ruler.push('manuscript_table_borders', (state: any) => {
+  md.core.ruler.push('manuscript_table_borders', (state: StateCore) => {
     const { metadata } = parseFrontmatter(state.src);
     const borders = metadata.tableBorders ?? 'horizontal';
-    let css = '';
-    if (borders === 'none') {
-      css = 'table { border-collapse: collapse; }\n'
-        + 'table th, table td { border: none; }\n';
-    } else if (borders === 'solid') {
-      css = 'table { border-collapse: collapse; }\n'
-        + 'table th, table td { border: 1px solid var(--vscode-editor-foreground, currentColor); }\n';
-    } else {
-      // 'horizontal': light separators between body rows, stronger header underline, no vertical borders
-      css = 'table { border-collapse: collapse; }\n'
-        + 'table th, table td { border: none; border-bottom: 1px solid color-mix(in srgb, var(--vscode-editor-foreground, currentColor) 25%, transparent); padding: 6px 8px; }\n'
-        + 'table thead th { border-bottom: 1px solid var(--vscode-editor-foreground, currentColor); }\n';
-    }
+    const css = borders === 'none'
+      ? 'table { border-collapse: collapse; }\n'
+        + 'table th, table td { border: none; }\n'
+      : borders === 'solid'
+        ? 'table { border-collapse: collapse; }\n'
+          + 'table th, table td { border: 1px solid var(--vscode-editor-foreground, currentColor); }\n'
+        // 'horizontal': light separators between body rows, stronger header underline, no vertical borders
+        : 'table { border-collapse: collapse; }\n'
+          + 'table th, table td { border: none; border-bottom: 1px solid color-mix(in srgb, var(--vscode-editor-foreground, currentColor) 25%, transparent); padding: 6px 8px; }\n'
+          + 'table thead th { border-bottom: 1px solid var(--vscode-editor-foreground, currentColor); }\n';
     const token = new state.Token('manuscript_style', '', 0);
     token.content = '<style>\n' + css + '</style>\n';
     state.tokens.unshift(token);
   });
 
   // Inject <style> block for missing-value colorization in embedded .dta tables
-  md.core.ruler.push('manuscript_missing_value_style', (state: any) => {
+  md.core.ruler.push('manuscript_missing_value_style', (state: StateCore) => {
     const token = new state.Token('manuscript_style', '', 0);
     token.content = '<style>\n.mm-missing-value { color: var(--vscode-editorError-foreground); }\n</style>\n';
     state.tokens.unshift(token);
@@ -1160,7 +1180,7 @@ export function manuscriptMarkdownPlugin(md: MarkdownIt): void {
   md.core.ruler.after('manuscript_markdown_task_list', 'manuscript_markdown_alert_blockquote', alertBlockquoteRule);
 
   // Core rule: wrap <!-- style: X -->...<!-- /style --> blocks in <div class="ms-custom-style ms-custom-style-{name}">
-  md.core.ruler.after('manuscript_markdown_alert_blockquote', 'manuscript_custom_style_wrap', (state: any) => {
+  md.core.ruler.after('manuscript_markdown_alert_blockquote', 'manuscript_custom_style_wrap', (state: StateCore) => {
     const tokens = state.tokens;
     const OPEN_RE = /^<!--\s*style:\s*(.+?)\s*-->\s*$/i;
     const CLOSE_RE = /^<!--\s*\/style\s*-->\s*$/i;
@@ -1204,8 +1224,8 @@ export function manuscriptMarkdownPlugin(md: MarkdownIt): void {
   // overrides our blockquote_open renderer and doesn't include our color class).
   // Keep in sync with ColorScheme in frontmatter.ts and CSS in manuscript-markdown.css.
   const ALLOWED_PREVIEW_SCHEMES = new Set<ColorScheme>(['guttmacher']);
-  md.core.ruler.push('manuscript_color_scheme_marker', (state: any) => {
-    const scheme: ColorScheme | undefined = state.env.colorScheme;
+  md.core.ruler.push('manuscript_color_scheme_marker', (state: StateCore) => {
+    const scheme = getPreviewEnvironment(state).colorScheme;
     if (scheme && ALLOWED_PREVIEW_SCHEMES.has(scheme)) {
       const token = new state.Token('html_block', '', 0);
       token.content = '<span data-manuscript-color-scheme="' + scheme + '" style="display:none"></span>\n';
@@ -1216,8 +1236,8 @@ export function manuscriptMarkdownPlugin(md: MarkdownIt): void {
   // Remap token .map values from preprocessed line numbers back to original
   // source line numbers so VS Code's data-line scroll sync attributes are correct.
   // Must run after all other core rules that create or modify tokens.
-  md.core.ruler.push('manuscript_scroll_sync_remap', (state: any) => {
-    const lineMap: LineMap | undefined = state.env.lineMap;
+  md.core.ruler.push('manuscript_scroll_sync_remap', (state: StateCore) => {
+    const lineMap = getPreviewEnvironment(state).lineMap;
     if (!lineMap || lineMap.isIdentity) return;
     for (const token of state.tokens) {
       if (token.map) {
@@ -1350,7 +1370,8 @@ export function manuscriptMarkdownPlugin(md: MarkdownIt): void {
     }
     const dataLine = token.map ? ' data-line="' + token.map[0] + '"' : '';
     const title = token.meta?.gfmAlertTitle || gfmAlertTitle(alertType);
-    const schemeClass = env.colorScheme && ALLOWED_PREVIEW_SCHEMES.has(env.colorScheme) ? ' color-scheme-' + env.colorScheme : '';
+    const colorScheme = (env as PreviewEnvironment).colorScheme;
+    const schemeClass = colorScheme && ALLOWED_PREVIEW_SCHEMES.has(colorScheme) ? ' color-scheme-' + colorScheme : '';
     return '<blockquote' + dataLine + ' class="markdown-alert markdown-alert-' + alertType + schemeClass + '"><p class="markdown-alert-title">' + alertOcticonSvg(alertType) + ' ' + escapeHtmlText(title) + '</p>\n';
   };
 

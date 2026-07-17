@@ -4,6 +4,32 @@
 // already contain literal characters (e.g. &amp; → &).
 
 // ---------------------------------------------------------------------------
+// fast-xml-parser preserve-order structures
+// ---------------------------------------------------------------------------
+
+export type XmlScalar = string;
+export type XmlAttributes = Record<string, XmlScalar | undefined>;
+export type XmlValue = XmlScalar | XmlAttributes | XmlNode[];
+
+/** Recursive shape produced by fast-xml-parser with preserveOrder enabled. */
+export interface XmlNode {
+  ':@'?: XmlAttributes;
+  [key: string]: XmlValue | undefined;
+}
+
+function isXmlNode(value: unknown): value is XmlNode {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Normalize a preserve-order element value to its child-node array. */
+export function asXmlNodes(value: unknown): XmlNode[] {
+  if (Array.isArray(value)) {
+    return value.filter(isXmlNode);
+  }
+  return isXmlNode(value) ? [value] : [];
+}
+
+// ---------------------------------------------------------------------------
 // Mapping tables
 // ---------------------------------------------------------------------------
 
@@ -84,8 +110,9 @@ const SKIP_TAGS = new Set([
  * Extract an attribute from an m:* namespace node.
  * OMML attributes use @_m:val (not @_w:val like WordprocessingML).
  */
-export function getOmmlAttr(node: any, attr: string): string {
-  return node?.[':@']?.[`@_m:${attr}`] ?? node?.[':@']?.[`@_${attr}`] ?? '';
+export function getOmmlAttr(node: XmlNode | undefined, attr: string): string {
+  const value = node?.[':@']?.[`@_m:${attr}`] ?? node?.[':@']?.[`@_${attr}`];
+  return value === undefined ? '' : String(value);
 }
 
 /** Reserved LaTeX characters that need escaping in plain text context. */
@@ -157,14 +184,14 @@ export function isMultiLetter(text: string): boolean {
  * Extract text content from m:t children.
  * m:t nodes contain #text children with the actual text.
  */
-function extractText(children: any[]): string {
+function extractText(children: XmlNode[]): string {
   if (!Array.isArray(children)) return '';
   let text = '';
   for (const child of children) {
     if (child['#text'] !== undefined) {
       text += String(child['#text']);
     } else if (child['m:t']) {
-      text += extractText(child['m:t']);
+      text += extractText(asXmlNodes(child['m:t']));
     }
   }
   return text;
@@ -174,7 +201,7 @@ function extractText(children: any[]): string {
  * Recursively extract all text content from an OMML subtree.
  * Used by fallbackPlaceholder to provide context in error output.
  */
-function extractAllText(children: any[]): string {
+function extractAllText(children: XmlNode[]): string {
   if (!Array.isArray(children)) return '';
   let text = '';
   for (const child of children) {
@@ -196,11 +223,11 @@ function extractAllText(children: any[]): string {
  * Find the first child element with the given tag name.
  * Returns the child's children array, or an empty array if not found.
  */
-function findChild(children: any[], tag: string): any[] {
+function findChild(children: XmlNode[], tag: string): XmlNode[] {
   if (!Array.isArray(children)) return [];
   for (const child of children) {
     if (child[tag] !== undefined) {
-      return Array.isArray(child[tag]) ? child[tag] : [child[tag]];
+      return asXmlNodes(child[tag]);
     }
   }
   return [];
@@ -211,7 +238,7 @@ function findChild(children: any[], tag: string): any[] {
  * Unlike findChild which returns the tag's children array, this returns the node itself
  * so that getOmmlAttr can read its attributes.
  */
-function findChildNode(children: any[], tag: string): any | undefined {
+function findChildNode(children: XmlNode[], tag: string): XmlNode | undefined {
   if (!Array.isArray(children)) return undefined;
   for (const child of children) {
     if (child[tag] !== undefined) return child;
@@ -224,12 +251,12 @@ function findChildNode(children: any[], tag: string): any | undefined {
  * Returns an array of children arrays — one per matching node.
  * Used by translateDelimiter to collect multiple m:e elements.
  */
-function findAllChildren(children: any[], tag: string): any[][] {
+function findAllChildren(children: XmlNode[], tag: string): XmlNode[][] {
   if (!Array.isArray(children)) return [];
-  const results: any[][] = [];
+  const results: XmlNode[][] = [];
   for (const child of children) {
     if (child[tag] !== undefined) {
-      results.push(Array.isArray(child[tag]) ? child[tag] : [child[tag]]);
+      results.push(asXmlNodes(child[tag]));
     }
   }
   return results;
@@ -239,7 +266,7 @@ function findAllChildren(children: any[], tag: string): any[][] {
  * Check if the children array contains only the given tag as meaningful content.
  * Ignores :@ attributes and SKIP_TAGS entries.
  */
-function isSoleContent(children: any[], tag: string): boolean {
+function isSoleContent(children: XmlNode[], tag: string): boolean {
   if (!Array.isArray(children)) return false;
   let tagFound = false;
   for (const child of children) {
@@ -269,7 +296,7 @@ function getMatrixEnvName(begChr: string, endChr: string): string | null {
 /**
  * Check if a fraction's children indicate a noBar type (used for binomial).
  */
-function isNoBarFraction(fracChildren: any[]): boolean {
+function isNoBarFraction(fracChildren: XmlNode[]): boolean {
   const pr = findChild(fracChildren, 'm:fPr');
   const typeNode = findChildNode(pr, 'm:type');
   return typeNode !== undefined && getOmmlAttr(typeNode, 'val') === 'noBar';
@@ -278,7 +305,7 @@ function isNoBarFraction(fracChildren: any[]): boolean {
 /**
  * Translate matrix content with a specific environment name.
  */
-function translateMatrixAsEnv(matrixChildren: any[], envName: string): string {
+function translateMatrixAsEnv(matrixChildren: XmlNode[], envName: string): string {
   const rows = findAllChildren(matrixChildren, 'm:mr');
   const rowStrings: string[] = [];
   for (const rowChildren of rows) {
@@ -297,7 +324,7 @@ function translateMatrixAsEnv(matrixChildren: any[], envName: string): string {
  * Emit a visible fallback placeholder for unsupported or malformed elements.
  * Includes escaped text content for context when available.
  */
-function fallbackPlaceholder(tag: string, children: any[]): string {
+function fallbackPlaceholder(tag: string, children: XmlNode[]): string {
   const name = tag.replace('m:', '');
   const textContent = extractAllText(children);
   const escaped = escapeLatex(textContent);
@@ -314,7 +341,7 @@ function fallbackPlaceholder(tag: string, children: any[]): string {
  * Extracts text from m:t children, applies unicodeToLatex mapping.
  * Multi-letter runs are wrapped in \mathrm{} unless already a LaTeX command.
  */
-function translateRun(children: any[]): string {
+function translateRun(children: XmlNode[]): string {
   if (!Array.isArray(children)) return '';
 
   // Check m:rPr for m:sty style and m:scr script
@@ -378,7 +405,7 @@ function translateRun(children: any[]): string {
  * Extracts m:num and m:den children, emits \frac{numerator}{denominator}.
  * Falls back to placeholder if required children are missing.
  */
-function translateFraction(children: any[]): string {
+function translateFraction(children: XmlNode[]): string {
   const num = findChild(children, 'm:num');
   const den = findChild(children, 'm:den');
   if (num.length === 0 && den.length === 0) {
@@ -408,7 +435,7 @@ function scriptArg(latex: string): string {
  * Extracts m:e (base) and m:sup, emits {base}^{sup}.
  * Falls back to placeholder if required children are missing.
  */
-function translateSuperscript(children: any[]): string {
+function translateSuperscript(children: XmlNode[]): string {
   const base = findChild(children, 'm:e');
   const sup = findChild(children, 'm:sup');
   if (base.length === 0 || sup.length === 0) {
@@ -424,7 +451,7 @@ function translateSuperscript(children: any[]): string {
  * Extracts m:e (base) and m:sub, emits {base}_{sub}.
  * Falls back to placeholder if required children are missing.
  */
-function translateSubscript(children: any[]): string {
+function translateSubscript(children: XmlNode[]): string {
   const base = findChild(children, 'm:e');
   const sub = findChild(children, 'm:sub');
   if (base.length === 0 || sub.length === 0) {
@@ -440,7 +467,7 @@ function translateSubscript(children: any[]): string {
  * Extracts m:e (base), m:sub, and m:sup, emits {base}_{sub}^{sup}.
  * Falls back to placeholder if required children are missing.
  */
-function translateSubSup(children: any[]): string {
+function translateSubSup(children: XmlNode[]): string {
   const base = findChild(children, 'm:e');
   const sub = findChild(children, 'm:sub');
   const sup = findChild(children, 'm:sup');
@@ -458,7 +485,7 @@ function translateSubSup(children: any[]): string {
  * Reads m:radPr for m:degHide. If degree is hidden or empty, emits \sqrt{radicand}.
  * Otherwise emits \sqrt[degree]{radicand}.
  */
-function translateRadical(children: any[]): string {
+function translateRadical(children: XmlNode[]): string {
   const pr = findChild(children, 'm:radPr');
   const degHideNode = findChildNode(pr, 'm:degHide');
   const degHide = getOmmlAttr(degHideNode, 'val') === '1';
@@ -482,7 +509,7 @@ function translateRadical(children: any[]): string {
  * Reads m:naryPr for m:chr (default ∫), m:limLoc (default subSup),
  * m:subHide, m:supHide. Emits operator with limits and body.
  */
-function translateNary(children: any[]): string {
+function translateNary(children: XmlNode[]): string {
   const pr = findChild(children, 'm:naryPr');
 
   // Read operator character (default ∫ per ECMA-376)
@@ -520,7 +547,7 @@ function translateNary(children: any[]): string {
  * Reads m:dPr for m:begChr (default '('), m:endChr (default ')'),
  * m:sepChr (default '|'). Collects all m:e children and joins with separator.
  */
-function translateDelimiter(children: any[]): string {
+function translateDelimiter(children: XmlNode[]): string {
   const pr = findChild(children, 'm:dPr');
 
   const begChrNode = findChildNode(pr, 'm:begChr');
@@ -582,7 +609,7 @@ function translateDelimiter(children: any[]): string {
 }
 
 
-function translateAccent(children: any[]): string {
+function translateAccent(children: XmlNode[]): string {
   // Read m:accPr for the accent character
   const pr = findChild(children, 'm:accPr');
   const chrNode = findChildNode(pr, 'm:chr');
@@ -600,7 +627,7 @@ function translateAccent(children: any[]): string {
 }
 
 
-function translateMatrix(children: any[]): string {
+function translateMatrix(children: XmlNode[]): string {
   // Find all m:mr (matrix row) children
   const rows = findAllChildren(children, 'm:mr');
   const rowStrings: string[] = [];
@@ -614,7 +641,7 @@ function translateMatrix(children: any[]): string {
 }
 
 
-function translateFunction(children: any[]): string {
+function translateFunction(children: XmlNode[]): string {
   // Extract function name from m:fName
   const fNameChildren = findChild(children, 'm:fName');
   let name = ommlToLatex(fNameChildren);
@@ -643,7 +670,7 @@ function translateFunction(children: any[]): string {
  * Translate an m:eqArr (equation array) element to LaTeX.
  * Detects & alignment markers to choose between aligned and gathered.
  */
-function translateEqArray(children: any[]): string {
+function translateEqArray(children: XmlNode[]): string {
   const rows = findAllChildren(children, 'm:e');
   const rowStrings: string[] = [];
   let hasAlignment = false;
@@ -663,7 +690,7 @@ function translateEqArray(children: any[]): string {
  * Translate an m:borderBox element to LaTeX.
  * Emits \boxed{content}.
  */
-function translateBorderBox(children: any[]): string {
+function translateBorderBox(children: XmlNode[]): string {
   const content = ommlToLatex(findChild(children, 'm:e'));
   return `\\boxed{${content}}`;
 }
@@ -673,7 +700,7 @@ function translateBorderBox(children: any[]): string {
  * Translate an m:limLow (lower limit) element to LaTeX.
  * Emits \underset{lim}{base}.
  */
-function translateLimLow(children: any[]): string {
+function translateLimLow(children: XmlNode[]): string {
   const base = ommlToLatex(findChild(children, 'm:e'));
   const lim = ommlToLatex(findChild(children, 'm:lim'));
   return `\\underset{${lim}}{${base}}`;
@@ -684,7 +711,7 @@ function translateLimLow(children: any[]): string {
  * Translate an m:limUpp (upper limit) element to LaTeX.
  * Emits \overset{lim}{base}.
  */
-function translateLimUpp(children: any[]): string {
+function translateLimUpp(children: XmlNode[]): string {
   const base = ommlToLatex(findChild(children, 'm:e'));
   const lim = ommlToLatex(findChild(children, 'm:lim'));
   return `\\overset{${lim}}{${base}}`;
@@ -695,7 +722,7 @@ function translateLimUpp(children: any[]): string {
  * Translate an m:bar element to LaTeX.
  * Checks m:barPr/m:pos for position: bot → \underline, default → \overline.
  */
-function translateBar(children: any[]): string {
+function translateBar(children: XmlNode[]): string {
   const pr = findChild(children, 'm:barPr');
   const posNode = findChildNode(pr, 'm:pos');
   const pos = getOmmlAttr(posNode, 'val');
@@ -711,7 +738,7 @@ function translateBar(children: any[]): string {
  * Translate an m:groupChr element to LaTeX.
  * Checks chr and pos to determine overbrace vs underbrace.
  */
-function translateGroupChr(children: any[]): string {
+function translateGroupChr(children: XmlNode[]): string {
   const pr = findChild(children, 'm:groupChrPr');
   const chrNode = findChildNode(pr, 'm:chr');
   const chr = chrNode ? getOmmlAttr(chrNode, 'val') : '\u23DE';
@@ -731,12 +758,12 @@ function translateGroupChr(children: any[]): string {
 // ---------------------------------------------------------------------------
 
 /** Dispatch a single parsed node to the appropriate translator. */
-function translateNode(node: any): string {
+function translateNode(node: XmlNode): string {
   let result = '';
   for (const key of Object.keys(node)) {
     if (key === ':@') continue;
 
-    const children = node[key];
+    const children = asXmlNodes(node[key]);
 
     switch (key) {
       case 'm:f':         result += translateFraction(children); break;
@@ -781,7 +808,7 @@ function translateNode(node: any): string {
  * @param children - The child nodes of an m:oMath or m:oMathPara element
  * @returns LaTeX string (without delimiters)
  */
-export function ommlToLatex(children: any[]): string {
+export function ommlToLatex(children: XmlNode[]): string {
   if (!Array.isArray(children)) return '';
   let result = '';
   for (const child of children) {

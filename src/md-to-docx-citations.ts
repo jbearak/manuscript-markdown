@@ -2,10 +2,71 @@ import { BibtexEntry } from './bibtex-parser';
 import { latexToOmml } from './latex-to-omml';
 import { loadStyle, loadStyleAsync, loadLocale } from './csl-loader';
 
+export interface CiteprocName {
+  family?: string;
+  given?: string;
+  literal?: string;
+}
+
+export interface CiteprocItemData {
+  id?: string | number;
+  type: string;
+  genre?: string;
+  title?: string;
+  author?: CiteprocName[];
+  editor?: CiteprocName[];
+  issued?: { 'date-parts': number[][] };
+  'container-title'?: string;
+  volume?: string;
+  page?: string;
+  DOI?: string;
+  publisher?: string;
+  'publisher-place'?: string;
+  URL?: string;
+  ISBN?: string;
+  ISSN?: string;
+  issue?: string;
+  edition?: string;
+  abstract?: string;
+  note?: string;
+  'collection-title'?: string;
+  'citation-key'?: string;
+  'x-institution'?: string;
+}
+
+interface CiteprocCitationItem {
+  id?: string | number;
+  locator?: string;
+  label?: string;
+  'suppress-author'?: boolean;
+  itemData?: CiteprocItemData;
+  uris?: string[];
+}
+
+interface CiteprocBibliographyMeta {
+  bibstart?: string;
+  bibend?: string;
+}
+
+export interface CiteprocEngine {
+  makeCitationCluster(items: CiteprocCitationItem[]): string;
+  makeBibliography(): [CiteprocBibliographyMeta, string[]] | false | null;
+  updateItems(ids: string[]): unknown;
+}
+
+interface CiteprocSystem {
+  retrieveLocale(lang: string): string;
+  retrieveItem(id: string): CiteprocItemData | undefined;
+}
+
+interface CiteprocNamespace {
+  Engine: new (system: CiteprocSystem, styleXml: string, locale: string) => CiteprocEngine;
+}
+
 // citeproc is a CommonJS module exporting the CSL namespace
-let CSL: any;
+let CSL: CiteprocNamespace | undefined;
 try {
-  CSL = require('citeproc');
+  CSL = require('citeproc') as CiteprocNamespace;
 } catch {
   // citeproc not available — fallback rendering will be used
 }
@@ -122,7 +183,7 @@ export function htmlToOoxmlRuns(html: string, extraRPr?: string): string {
 }
 
 export interface CreateEngineResult {
-  engine?: any;
+  engine?: CiteprocEngine;
   styleNotFound?: boolean;
 }
 
@@ -135,7 +196,7 @@ export function createCiteprocEngine(
   entries: Map<string, BibtexEntry>,
   styleName: string,
   locale?: string
-): any | undefined {
+): CiteprocEngine | undefined {
   if (!CSL) return undefined;
 
   let styleXml: string;
@@ -198,9 +259,12 @@ function buildEngine(
   entries: Map<string, BibtexEntry>,
   styleXml: string,
   locale?: string
-): any | undefined {
+): CiteprocEngine | undefined {
+  const citeproc = CSL;
+  if (!citeproc) return undefined;
+
   // Build CSL-JSON item map keyed by citation key
-  const items = new Map<string, any>();
+  const items = new Map<string, CiteprocItemData>();
   for (const [key, entry] of entries) {
     const itemData = buildItemData(entry);
     itemData.id = key;
@@ -215,7 +279,7 @@ function buildEngine(
   };
 
   try {
-    const engine = new CSL.Engine(sys, styleXml, locale || 'en-US');
+    const engine = new citeproc.Engine(sys, styleXml, locale || 'en-US');
     return engine;
   } catch {
     return undefined;
@@ -227,7 +291,7 @@ function buildEngine(
  * Returns the formatted citation text, or undefined if rendering fails.
  */
 export function renderCitationText(
-  engine: any,
+  engine: CiteprocEngine,
   keys: string[],
   locators?: Map<string, string>,
   suppressAuthorKeys?: Set<string>
@@ -236,7 +300,7 @@ export function renderCitationText(
 
   try {
     const rawList = keys.map(key => {
-      const item: any = { id: key };
+      const item: CiteprocCitationItem = { id: key };
       const locator = locators?.get(key);
       if (locator) {
         const parsed = parseLocator(locator);
@@ -260,7 +324,7 @@ export function renderCitationText(
  * Returns an array of formatted bibliography entry strings (HTML-ish),
  * or undefined if rendering fails.
  */
-export function renderBibliography(engine: any): { bibStart: string; bibEnd: string; entries: string[] } | undefined {
+export function renderBibliography(engine: CiteprocEngine): { bibStart: string; bibEnd: string; entries: string[] } | undefined {
   if (!engine || !CSL) return undefined;
 
   try {
@@ -312,7 +376,7 @@ function resolveVisibleText(
   keys: string[],
   entries: Map<string, BibtexEntry>,
   locators: Map<string, string> | undefined,
-  citeprocEngine: any | undefined,
+  citeprocEngine: CiteprocEngine | undefined,
   suppressAuthorKeys?: Set<string>
 ): string {
   if (citeprocEngine) {
@@ -326,7 +390,7 @@ function buildCitationFieldCode(
   keys: string[],
   entries: Map<string, BibtexEntry>,
   locators: Map<string, string> | undefined,
-  citeprocEngine: any | undefined,
+  citeprocEngine: CiteprocEngine | undefined,
   visibleTextOverride?: string,
   usedCitationIds?: Set<string>,
   itemIdMap?: Map<string, string | number>,
@@ -339,7 +403,7 @@ function buildCitationFieldCode(
   // while the CSL item has suppress-author set to true.
   const visibleText = visibleTextOverride ?? resolveVisibleText(keys, entries, locators, citeprocEngine, suppressAuthorKeys);
 
-  const citationItems: any[] = [];
+  const citationItems: CiteprocCitationItem[] = [];
   for (const key of keys) {
     const entry = entries.get(key);
     if (!entry) continue;
@@ -364,7 +428,7 @@ function buildCitationFieldCode(
       itemData.id = itemId;
     }
 
-    const citationItem: any = { id: itemData.id, itemData };
+    const citationItem: CiteprocCitationItem = { id: itemData.id, itemData };
     if (suppressAuthorKeys?.has(key)) {
       citationItem['suppress-author'] = true;
     }
@@ -408,7 +472,7 @@ function buildCitationFieldCode(
 export function generateCitation(
   run: { keys?: string[]; locators?: Map<string, string>; text: string; suppressAuthorKeys?: Set<string> },
   entries: Map<string, BibtexEntry>,
-  citeprocEngine?: any,
+  citeprocEngine?: CiteprocEngine,
   usedCitationIds?: Set<string>,
   itemIdMap?: Map<string, string | number>,
   extraRPr?: string
@@ -462,8 +526,8 @@ export function generateCitation(
   };
 }
 
-export function buildItemData(entry: BibtexEntry): any {
-  const itemData: any = {
+export function buildItemData(entry: BibtexEntry): CiteprocItemData {
+  const itemData: CiteprocItemData = {
     type: mapBibtexTypeToCSL(entry.type)
   };
 
@@ -580,7 +644,7 @@ export function splitAuthorString(authorString: string): string[] {
   return result.filter(s => s.length > 0);
 }
 
-export function parseAuthors(authorString: string): any[] {
+export function parseAuthors(authorString: string): CiteprocName[] {
   const authors = splitAuthorString(authorString);
   return authors.map(author => {
     // Institutional/corporate author: wrapped in braces (after BibTeX parser
@@ -624,7 +688,7 @@ export function generateFallbackText(keys: string[], entries: Map<string, Bibtex
     const year = entry.fields.get('year');
     const keySuppressed = suppressAuthorKeys?.has(key);
 
-    let text = '';
+    let text: string;
     if (!keySuppressed && author) {
       const firstAuthor = splitAuthorString(author)[0] || author.trim();
       if (firstAuthor.startsWith('{') && firstAuthor.endsWith('}')) {
@@ -658,8 +722,8 @@ export function generateFallbackText(keys: string[], entries: Map<string, Bibtex
  * Generate OOXML for a ZOTERO_BIBL field code with rendered bibliography.
  */
 export function generateBibliographyXml(
-  citeprocEngine: any,
-  biblData?: { uncited?: any[]; omitted?: any[]; custom?: any[] },
+  citeprocEngine: CiteprocEngine,
+  biblData?: { uncited?: unknown[]; omitted?: unknown[]; custom?: unknown[] },
   hangingIndent?: boolean
 ): string {
   const biblPayload = JSON.stringify({

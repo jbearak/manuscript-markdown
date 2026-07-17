@@ -196,8 +196,8 @@ function diffStrings(a: string, b: string, label: string, tempDir: string): stri
     '--label', 'word/' + label,
     tmpA, tmpB,
   ], { encoding: 'utf-8' });
-  try { unlinkSync(tmpA); } catch {}
-  try { unlinkSync(tmpB); } catch {}
+  try { unlinkSync(tmpA); } catch { /* Best-effort temporary-file cleanup. */ }
+  try { unlinkSync(tmpB); } catch { /* Best-effort temporary-file cleanup. */ }
   return result.stdout || null;
 }
 

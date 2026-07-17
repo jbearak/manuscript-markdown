@@ -896,8 +896,8 @@ export function formatTableNumbers(markdown: string, documentFormat: TableNumber
       const tableStart = lineOffsets[i];
       const warningsBefore = warnings.length;
       const block: string[] = [];
-			let tableDepth = 0;
-			let foundOpening = false;
+			let tableDepth: number;
+			let foundOpening: boolean;
 			do {
 				block.push(lines[i++]);
 				tableDepth = 0;

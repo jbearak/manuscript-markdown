@@ -1,5 +1,7 @@
 import MarkdownIt from 'markdown-it';
-import { escapeXml, escapeXmlText, generateCitation, generateMathXml, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml } from './md-to-docx-citations';
+import type Token from 'markdown-it/lib/token.mjs';
+import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
+import { escapeXml, escapeXmlText, generateCitation, generateMathXml, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, type CiteprocEngine } from './md-to-docx-citations';
 import { downloadStyle } from './csl-loader';
 import { existsSync, readFileSync } from 'fs';
 import { isAbsolute, join, resolve } from 'path';
@@ -233,6 +235,29 @@ export { PARA_PLACEHOLDER, preprocessCriticMarkup };
 
 // Custom inline rules
 
+type CriticTokenType = 'critic_add' | 'critic_del' | 'critic_sub' | 'critic_highlight' | 'critic_comment';
+
+interface ManuscriptToken extends Token {
+  criticType?: CriticTokenType;
+  oldText?: string;
+  newText?: string;
+  author?: string;
+  date?: string;
+  commentText?: string;
+  replies?: Array<{ author?: string; date?: string; text: string }>;
+  commentId?: string;
+  color?: string;
+  keys?: string[];
+  locators?: Map<string, string>;
+  suppressAuthorKeys?: Set<string>;
+  display?: boolean;
+  footnoteLabel?: string;
+}
+
+function pushManuscriptToken(state: StateInline, type: string, tag: string, nesting: 1 | 0 | -1): ManuscriptToken {
+  return state.push(type, tag, nesting) as ManuscriptToken;
+}
+
 /** Parse author/date/text from comment content string.
  *
  * Uses `@Author (Date) | text` / `@Author | text` syntax.
@@ -295,7 +320,7 @@ function extractReplies(content: string): { parentText: string; replies: Array<{
 }
 
 /** Parse {#id}, {/id}, and {#id>>...<<} comment range markers */
-function commentRangeRule(state: any, silent: boolean): boolean {
+function commentRangeRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   const max = state.posMax;
   const src = state.src;
@@ -321,7 +346,7 @@ function commentRangeRule(state: any, silent: boolean): boolean {
 
       if (!silent) {
         const rawContent = src.slice(idEnd + 2, endPos).replaceAll(PARA_PLACEHOLDER, '\n\n');
-        const token = state.push('comment_body_with_id', '', 0);
+        const token = pushManuscriptToken(state, 'comment_body_with_id', '', 0);
         token.commentId = id;
 
         // Check for nested replies
@@ -341,7 +366,7 @@ function commentRangeRule(state: any, silent: boolean): boolean {
     // Check for {#id} range start
     if (idEnd < max && src.charAt(idEnd) === '}') {
       if (!silent) {
-        const token = state.push('comment_range_start', '', 0);
+        const token = pushManuscriptToken(state, 'comment_range_start', '', 0);
         token.commentId = id;
       }
       state.pos = idEnd + 1;
@@ -360,7 +385,7 @@ function commentRangeRule(state: any, silent: boolean): boolean {
 
     if (idEnd < max && src.charAt(idEnd) === '}') {
       if (!silent) {
-        const token = state.push('comment_range_end', '', 0);
+        const token = pushManuscriptToken(state, 'comment_range_end', '', 0);
         token.commentId = src.slice(idStart, idEnd);
       }
       state.pos = idEnd + 1;
@@ -373,7 +398,7 @@ function commentRangeRule(state: any, silent: boolean): boolean {
   return false;
 }
 
-function criticMarkupRule(state: any, silent: boolean): boolean {
+function criticMarkupRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   const max = state.posMax;
 
@@ -381,7 +406,7 @@ function criticMarkupRule(state: any, silent: boolean): boolean {
 
   const marker = state.src.slice(start, start + 3);
   let endMarker: string;
-  let type: string;
+  let type: CriticTokenType;
 
   switch (marker) {
     case '{++': endMarker = '++}'; type = 'critic_add'; break;
@@ -404,7 +429,7 @@ function criticMarkupRule(state: any, silent: boolean): boolean {
   if (!silent) {
     // Replace any paragraph placeholders back to real newlines
     const content = state.src.slice(start + 3, endPos).replaceAll(PARA_PLACEHOLDER, '\n\n');
-    const token = state.push('critic_markup', '', 0);
+    const token = pushManuscriptToken(state, 'critic_markup', '', 0);
     token.markup = marker;
     token.content = content;
     token.criticType = type;
@@ -458,7 +483,7 @@ function findClosingHighlightMarker(src: string, from: number, max: number): num
   return -1;
 }
 
-function coloredHighlightRule(state: any, silent: boolean): boolean {
+function coloredHighlightRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   const max = state.posMax;
   
@@ -477,7 +502,7 @@ function coloredHighlightRule(state: any, silent: boolean): boolean {
       if (/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(color)) {
         if (!silent) {
           const content = state.src.slice(start + 2, endPos);
-          const token = state.push('colored_highlight', '', 0);
+          const token = pushManuscriptToken(state, 'colored_highlight', '', 0);
           token.content = content;
           token.color = color;
         }
@@ -490,14 +515,14 @@ function coloredHighlightRule(state: any, silent: boolean): boolean {
   // Plain highlight
   if (!silent) {
     const content = state.src.slice(start + 2, endPos);
-    const token = state.push('plain_highlight', '', 0);
+    const token = pushManuscriptToken(state, 'plain_highlight', '', 0);
     token.content = content;
   }
   state.pos = endPos + 2;
   return true;
 }
 
-function footnoteRefRule(state: any, silent: boolean): boolean {
+function footnoteRefRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   const max = state.posMax;
   const src = state.src;
@@ -519,14 +544,14 @@ function footnoteRefRule(state: any, silent: boolean): boolean {
   // stripped by extractFootnoteDefinitions() before parseMd() is called.
 
   if (!silent) {
-    const token = state.push('footnote_ref', '', 0);
+    const token = pushManuscriptToken(state, 'footnote_ref', '', 0);
     token.footnoteLabel = label;
   }
   state.pos = end + 1;
   return true;
 }
 
-function citationRule(state: any, silent: boolean): boolean {
+function citationRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   const max = state.posMax;
 
@@ -541,7 +566,7 @@ function citationRule(state: any, silent: boolean): boolean {
 
   if (!silent) {
     const rawContent = state.src.slice(contentStart, endPos);
-    const token = state.push('citation', '', 0);
+    const token = pushManuscriptToken(state, 'citation', '', 0);
     // Preserve original content for fallback rendering
     token.content = isSuppressed ? '-@' + rawContent : rawContent;
 
@@ -588,7 +613,7 @@ function citationRule(state: any, silent: boolean): boolean {
   return true;
 }
 
-function mathRule(state: any, silent: boolean): boolean {
+function mathRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   const max = state.posMax;
   
@@ -601,7 +626,7 @@ function mathRule(state: any, silent: boolean): boolean {
     
     if (!silent) {
       const content = state.src.slice(start + 2, endPos);
-      const token = state.push('math', '', 0);
+      const token = pushManuscriptToken(state, 'math', '', 0);
       token.content = content;
       token.display = true;
     }
@@ -626,7 +651,7 @@ function mathRule(state: any, silent: boolean): boolean {
   
   if (!silent) {
     const content = state.src.slice(start + 1, endPos);
-    const token = state.push('math', '', 0);
+    const token = pushManuscriptToken(state, 'math', '', 0);
     token.content = content;
     // Don't set display for inline math - leave it undefined
   }
@@ -635,15 +660,15 @@ function mathRule(state: any, silent: boolean): boolean {
 }
 
 /** Inline rule that converts the paragraph placeholder back into softbreak tokens. */
-function paraPlaceholderRule(state: any, silent: boolean): boolean {
+function paraPlaceholderRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   if (state.src.charCodeAt(start) !== 0xE000) return false; // \uE000
   if (!state.src.startsWith(PARA_PLACEHOLDER, start)) return false;
 
   if (!silent) {
     // Emit two softbreaks to represent the paragraph break
-    state.push('softbreak', 'br', 0);
-    state.push('softbreak', 'br', 0);
+    pushManuscriptToken(state, 'softbreak', 'br', 0);
+    pushManuscriptToken(state, 'softbreak', 'br', 0);
   }
   state.pos = start + PARA_PLACEHOLDER.length;
   return true;
@@ -781,7 +806,7 @@ export function extractFootnoteDefinitions(markdown: string): { cleaned: string;
     const line = lines[i];
     // Inside a footnote definition, indented lines are continuation lines (even if they look like fences)
     if (currentLabel !== undefined && (line.startsWith('    ') || line.startsWith('\t'))) {
-      currentBody.push(line.replace(/^(?:    |\t)/, ''));
+      currentBody.push(line.replace(/^(?: {4}|\t)/, ''));
       continue;
     }
     const fenceMatch = line.match(/^(\s*)(`{3,}|~{3,})/);
@@ -1885,7 +1910,7 @@ function annotateBlockquoteAlert(tokens: MdToken[], level: number): MdToken[] {
   return result;
 }
 
-function convertTokens(tokens: any[], listLevel = 0, blockquoteLevel = 0, warnings?: string[], sourceLines?: string[]): MdToken[] {
+function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel = 0, warnings?: string[], sourceLines?: string[]): MdToken[] {
   const result: MdToken[] = [];
   let i = 0;
   
@@ -1918,7 +1943,8 @@ function convertTokens(tokens: any[], listLevel = 0, blockquoteLevel = 0, warnin
       case 'ordered_list_open': {
         const listClose = findClosingToken(tokens, i, token.type.replace('_open', '_close'));
         const currentLevel = listLevel + 1;
-        const listStart = token.attrGet?.('start') ? parseInt(token.attrGet('start'), 10) : undefined;
+        const startAttr = token.attrGet('start');
+        const listStart = startAttr ? parseInt(startAttr, 10) : undefined;
         const listItems = extractListItems(tokens.slice(i + 1, listClose), token.type === 'ordered_list_open', currentLevel, warnings, listStart, sourceLines);
         result.push(...listItems);
         i = listClose + 1;
@@ -2039,8 +2065,9 @@ function convertTokens(tokens: any[], listLevel = 0, blockquoteLevel = 0, warnin
           // Find previous token's end line — scan backwards through markdown-it tokens
           let prevEnd = 0;
           for (let pi = i - 1; pi >= 0; pi--) {
-            if (tokens[pi].map) {
-              prevEnd = tokens[pi].map[1];
+            const previousMap = tokens[pi].map;
+            if (previousMap) {
+              prevEnd = previousMap[1];
               break;
             }
           }
@@ -2049,8 +2076,9 @@ function convertTokens(tokens: any[], listLevel = 0, blockquoteLevel = 0, warnin
           const thisEnd = token.map?.[1] ?? 0;
           let nextStart = thisEnd;
           for (let ni = i + 1; ni < tokens.length; ni++) {
-            if (tokens[ni].map) {
-              nextStart = tokens[ni].map[0];
+            const followingMap = tokens[ni].map;
+            if (followingMap) {
+              nextStart = followingMap[0];
               break;
             }
           }
@@ -2146,7 +2174,7 @@ function convertTokens(tokens: any[], listLevel = 0, blockquoteLevel = 0, warnin
   return result;
 }
 
-function convertInlineTokens(tokens: any[]): MdRun[] {
+function convertInlineTokens(tokens: ManuscriptToken[]): MdRun[] {
   const runs: MdRun[] = [];
   
   for (const token of tokens) {
@@ -2163,9 +2191,9 @@ function convertInlineTokens(tokens: any[]): MdRun[] {
   return runs;
 }
 
-function processInlineChildren(tokens: any[]): MdRun[] {
+function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
   const runs: MdRun[] = [];
-  const formatStack: any = {};
+  const formatStack: Partial<Pick<MdRun, 'bold' | 'italic' | 'underline' | 'strikethrough' | 'superscript' | 'subscript'>> = {};
   let currentHref: string | undefined;
   
   for (let ti = 0; ti < tokens.length; ti++) {
@@ -2228,7 +2256,7 @@ function processInlineChildren(tokens: any[]): MdRun[] {
         break;
         
       case 'link_open':
-        currentHref = token.attrGet('href');
+        currentHref = token.attrGet('href') ?? undefined;
         break;
       case 'link_close':
         currentHref = undefined;
@@ -2283,8 +2311,10 @@ function processInlineChildren(tokens: any[]): MdRun[] {
         break;
       }
         
-      case 'critic_markup':
-        if (token.criticType === 'critic_sub') {
+      case 'critic_markup': {
+        const criticType = token.criticType;
+        if (!criticType) break;
+        if (criticType === 'critic_sub') {
           const oldText = token.oldText || '';
           const newText = token.newText || '';
           runs.push({
@@ -2296,7 +2326,7 @@ function processInlineChildren(tokens: any[]): MdRun[] {
             ...formatStack,
             href: currentHref
           });
-        } else if (token.criticType === 'critic_comment') {
+        } else if (criticType === 'critic_comment') {
           const commentAnchorText = '';
           runs.push({
             type: 'critic_comment',
@@ -2316,7 +2346,7 @@ function processInlineChildren(tokens: any[]): MdRun[] {
 
           // Only strip inner ==...== from critic_highlight — not critic_add/critic_del
           // where literal == characters in added/deleted text would be misinterpreted.
-          if (token.criticType === 'critic_highlight') {
+          if (criticType === 'critic_highlight') {
             const coloredMatch = text.match(/^==([\s\S]*)==\{([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\}$/);
             const plainMatch = !coloredMatch && text.match(/^==([\s\S]*)==$/);
 
@@ -2331,7 +2361,7 @@ function processInlineChildren(tokens: any[]): MdRun[] {
           }
 
           runs.push({
-            type: token.criticType,
+            type: criticType,
             text,
             innerRuns: parseCriticInnerRuns(text),
             author: token.author,
@@ -2343,7 +2373,8 @@ function processInlineChildren(tokens: any[]): MdRun[] {
           });
         }
         break;
-        
+      }
+
       case 'colored_highlight': {
         let text = token.content;
         const criticMatch = text.match(/^\{==([\s\S]*)==\}$/);
@@ -2434,7 +2465,7 @@ function processInlineChildren(tokens: any[]): MdRun[] {
 
       case 'image': {
         const src = token.attrGet?.('src') || '';
-        const alt = token.children?.map((c: any) => c.content || '').join('') || '';
+        const alt = token.children?.map(child => child.content || '').join('') || '';
         let width: number | undefined;
         let height: number | undefined;
         // Look ahead for {width=N height=N} attribute syntax
@@ -2471,7 +2502,7 @@ function processInlineChildren(tokens: any[]): MdRun[] {
   return runs;
 }
 
-function findClosingToken(tokens: any[], start: number, closeType: string): number {
+function findClosingToken(tokens: ManuscriptToken[], start: number, closeType: string): number {
   let depth = 1;
   for (let i = start + 1; i < tokens.length; i++) {
     if (tokens[i].type === tokens[start].type) depth++;
@@ -2491,7 +2522,7 @@ const DROPPED_LIST_BLOCK_TYPES = new Set([
   'fence', 'code_block', 'html_block', 'blockquote_open', 'table_open',
 ]);
 
-function extractListItems(tokens: any[], ordered: boolean, level: number, warnings?: string[], startNumber?: number, sourceLines?: string[]): MdToken[] {
+function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: number, warnings?: string[], startNumber?: number, sourceLines?: string[]): MdToken[] {
   const items: MdToken[] = [];
   let i = 0;
   let itemOrdinal = 0;
@@ -2538,7 +2569,8 @@ function extractListItems(tokens: any[], ordered: boolean, level: number, warnin
         } else if (itemTokens[j].type === 'bullet_list_open' || itemTokens[j].type === 'ordered_list_open') {
           const subClose = findClosingToken(itemTokens, j, itemTokens[j].type.replace('_open', '_close'));
           const subOrdered = itemTokens[j].type === 'ordered_list_open';
-          const subStart = itemTokens[j].attrGet?.('start') ? parseInt(itemTokens[j].attrGet('start'), 10) : undefined;
+          const subStartAttr = itemTokens[j].attrGet('start');
+          const subStart = subStartAttr ? parseInt(subStartAttr, 10) : undefined;
           childSegments.push({
             startIndex: itemTokens[j].map?.[0] ?? j,
             order: childSegmentOrder++,
@@ -2607,7 +2639,7 @@ function extractTaskListItem(runs: MdRun[]): { checked: boolean; runs: MdRun[] }
   return { checked: parsed.checked, runs: updatedRuns };
 }
 
-function extractTableData(tokens: any[]): MdTableRow[] {
+function extractTableData(tokens: ManuscriptToken[]): MdTableRow[] {
   const rows: MdTableRow[] = [];
   let i = 0;
   let isHeader = true;
@@ -2627,7 +2659,7 @@ function extractTableData(tokens: any[]): MdTableRow[] {
   return rows;
 }
 
-function extractTableCells(tokens: any[]): MdTableCell[] {
+function extractTableCells(tokens: ManuscriptToken[]): MdTableCell[] {
   const cells: MdTableCell[] = [];
   let i = 0;
 
@@ -4686,7 +4718,7 @@ function generateInlineCriticContent(
   state: DocxGenState,
   options?: MdToDocxOptions,
   bibEntries?: Map<string, BibtexEntry>,
-  citeprocEngine?: any,
+  citeprocEngine?: CiteprocEngine,
   forced: Partial<MdRun> = {}
 ): string {
   const formattedRuns = formatCriticInnerRuns(runs, outer, forced);
@@ -4749,7 +4781,7 @@ function generateDeletedCriticContent(
   return xml;
 }
 
-export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: any): string {
+export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine): string {
   let xml = '';
   for (let ri = 0; ri < inputRuns.length; ri++) {
     const run = inputRuns[ri];
@@ -5085,11 +5117,14 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
           let fileData: Uint8Array;
           try {
             fileData = new Uint8Array(readFileSync(absPath));
-          } catch (err: any) {
-            if (err?.code === 'ENOENT') {
+          } catch (err: unknown) {
+            const errorCode = err && typeof err === 'object' && 'code' in err ? err.code : undefined;
+            const candidateMessage = err && typeof err === 'object' && 'message' in err ? err.message : undefined;
+            const errorMessage = typeof candidateMessage === 'string' && candidateMessage ? candidateMessage : String(err);
+            if (errorCode === 'ENOENT') {
               state.warnings.push(IMAGE_WARNINGS.notFound(src));
             } else {
-              state.warnings.push(IMAGE_WARNINGS.readError(src, err?.message || String(err)));
+              state.warnings.push(IMAGE_WARNINGS.readError(src, errorMessage));
             }
             continue;
           }
@@ -5162,7 +5197,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
   return xml;
 }
 
-export function generateParagraph(token: MdToken, state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: any): string {
+export function generateParagraph(token: MdToken, state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine): string {
   let pPr = '';
 
   // Apply custom style when inside a <!-- style: X --> block (only for plain paragraphs)
@@ -5321,7 +5356,7 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
   return xml;
 }
 
-export function generateTable(token: MdToken, state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: any): string {
+export function generateTable(token: MdToken, state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine): string {
   if (!token.rows) return '';
 
   // Resolve effective table font/size: per-table token > document-level overrides
@@ -5334,7 +5369,7 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
   // Always suppress paragraph spacing-after inside table cells (pPrDefault sets after="160"
   // which creates asymmetric vertical padding — cell margin alone should control inset).
   const spacingZero = '<w:spacing w:after="0"/>';
-  let tablePPr = '';
+  let tablePPr: string;
   let tableRunRPr = '';
   if (effectiveTableSizeHp || effectiveTableFont) {
     const hasDocLevelStyle = !!(fo?.tableSizeHp || fo?.tableFont);
@@ -5773,7 +5808,7 @@ function peopleXml(comments: CommentEntry[]): string {
   return xml;
 }
 
-export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: any, frontmatter?: Frontmatter): string {
+export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine, frontmatter?: Frontmatter): string {
   let body = '';
   const separatorParagraph = '<w:p><w:pPr><w:spacing w:after=\"0\"/></w:pPr></w:p>';
 
@@ -5792,7 +5827,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       const mdId = run.commentId || '';
       const numericId = state.commentIdMap.get(mdId);
       if (numericId !== undefined && !state.replyRanges.some(rr => rr.parentId === numericId)) {
-        for (const _reply of run.replies) {
+        for (let replyIndex = 0; replyIndex < run.replies.length; replyIndex++) {
           const replyId = state.commentId++;
           state.replyRanges.push({ replyId, parentId: numericId });
         }
@@ -6183,7 +6218,7 @@ export async function convertMdToDocx(
   }
 
   // Create citeproc engine if CSL style specified in frontmatter
-  let citeprocEngine: any;
+  let citeprocEngine: CiteprocEngine | undefined;
   const earlyWarnings: string[] = [...parseWarnings];
 
   // Detect custom style name collisions (e.g. 'my-heading' and 'my_heading' both → MsCustomMyHeading)
