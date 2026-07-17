@@ -24,6 +24,14 @@ File paths are resolved relative to the markdown file containing the directive. 
 
 ## File Types
 
+| Format | What is embedded |
+|--------|------------------|
+| `.xlsx` | A worksheet, cell range, or named range; merged cells are preserved |
+| `.csv` | Comma-separated rows, with configurable header rows |
+| `.tsv` | Tab-separated rows, with configurable header rows |
+| `.md` | Pipe, Pandoc grid, and HTML tables from another Markdown file |
+| `.dta` | A Stata dataset with variable names, value labels, display formats, and missing values |
+
 ### CSV and TSV
 
 Embed a comma-separated or tab-separated file:
@@ -48,6 +56,7 @@ Embed a sheet (or part of a sheet) from an Excel workbook:
 - **Sheet selection**: by name or 1-based index. If omitted, uses the first sheet.
 - **Range**: a cell reference like `A1:D10`, or a named range defined in the workbook. If omitted, the bounding rectangle of all non-empty cells is used.
 - **Merged cells**: preserved as `colspan`/`rowspan` in the output.
+- **Number formats**: displayed values and Excel number-format semantics are preserved.
 
 ### Markdown
 
@@ -57,7 +66,7 @@ Embed tables from another markdown file:
 <!-- embed: shared/standard-table.md -->
 ```
 
-Only table content (pipe tables, grid tables, HTML tables) and table directives (`table-font-size`, `table-font`, `table-orientation`, `table-col-widths`, `table-digits`, `table-decimal-mark`, `table-digit-grouping`) are included from the embedded file. Non-table content is silently ignored, with an informational diagnostic in the editor. Cell content is rendered as plain Markdown only — Manuscript-specific syntax such as CriticMarkup, citations, and math is not processed within embedded `.md` tables.
+Only table content (pipe tables, Pandoc grid tables, HTML tables) and table directives (`table-font-size`, `table-font`, `table-orientation`, `table-col-widths`, `table-digits`, `table-decimal-mark`, `table-digit-grouping`) are included from the embedded file. Grid tables support multi-line cells but not merged cells; use an HTML table with `colspan` or `rowspan` for spans. Non-table content is silently ignored, with an informational diagnostic in the editor. Cell content is rendered as plain Markdown only — Manuscript-specific syntax such as CriticMarkup, citations, and math is not processed within embedded `.md` tables.
 
 ### Stata dataset (.dta)
 
@@ -136,6 +145,27 @@ The values are ratios, not fixed measurements. In the example above, the first c
 ```
 
 If there are fewer width values than columns, the last value repeats. For example, `3 1` on a four-column table is treated as `3 1 1 1`.
+
+### Numeric formatting
+
+Use the three numeric directives independently or together:
+
+```markdown
+<!-- table-digits: 2 -->
+<!-- table-decimal-mark: comma -->
+<!-- table-digit-grouping: thin-space -->
+<!-- embed: data/results.dta -->
+```
+
+| Directive | Accepted values | Effect |
+|-----------|-----------------|--------|
+| `table-digits` | `source` or an integer from 0 to 1000 | Rounds or pads numbers to exactly that many digits after the decimal mark |
+| `table-decimal-mark` | `source`, `point`, `comma`, `midpoint` | Chooses the decimal character |
+| `table-digit-grouping` | `source`, `none`, `comma`, `period`, `space`, `thin-space` | Chooses the separator between three-digit groups |
+
+An omitted directive inherits its document-wide frontmatter value. Setting a per-table directive to `source` cancels that inherited setting and preserves the source display for that property. Decimal and grouping settings cannot use the same character.
+
+Excel cells use their displayed value and number format; Stata cells use their display format. Percent, currency, and scientific notation are retained. Value labels, missing values, dates, Booleans, and identifiers are not reformatted as ordinary numbers. CSV, TSV, and Markdown cells are reformatted only when the entire cell is unambiguously numeric or statistical.
 
 ### Document-wide defaults
 
