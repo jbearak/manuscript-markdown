@@ -185,6 +185,154 @@
         "title": "Set Citation Style"
       },
       {
+        "command": "manuscript-markdown.setFrontmatter.title",
+        "title": "Title"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.author",
+        "title": "Author"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.timezone",
+        "title": "Timezone"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.breaks",
+        "title": "Hard Line Breaks"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.font",
+        "title": "Body Font"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.font-size",
+        "title": "Body Font Size"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.line-spacing",
+        "title": "Line Spacing"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.paragraph-indent",
+        "title": "Paragraph Indent"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.header-font",
+        "title": "Heading Font"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.header-font-size",
+        "title": "Heading Font Size"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.header-font-style",
+        "title": "Heading Font Style"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.title-font",
+        "title": "Title Font"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.title-font-size",
+        "title": "Title Font Size"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.title-font-style",
+        "title": "Title Font Style"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.blockquote-style",
+        "title": "Blockquote Style"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.colors",
+        "title": "Color Scheme"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.styles",
+        "title": "Custom Styles"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.table-font",
+        "title": "Table Font"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.table-font-size",
+        "title": "Table Font Size"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.table-col-widths",
+        "title": "Column Widths"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.table-borders",
+        "title": "Borders"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.table-digits",
+        "title": "Decimal Digits"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.table-decimal-mark",
+        "title": "Decimal Mark"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.table-digit-grouping",
+        "title": "Digit Grouping"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.pipe-table-max-line-width",
+        "title": "Pipe Table Maximum Line Width"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.grid-table-max-line-width",
+        "title": "Grid Table Maximum Line Width"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.bibliography",
+        "title": "Bibliography File"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.csl",
+        "title": "Citation Style"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.locale",
+        "title": "Citation Locale"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.zotero-notes",
+        "title": "Zotero Citation Placement"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.notes",
+        "title": "Footnotes or Endnotes"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.bibliography-hanging-indent",
+        "title": "Bibliography Hanging Indent"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.code-font",
+        "title": "Code Font"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.code-font-size",
+        "title": "Code Font Size"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.code-background-color",
+        "title": "Background Color"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.code-font-color",
+        "title": "Font Color"
+      },
+      {
+        "command": "manuscript-markdown.setFrontmatter.code-block-inset",
+        "title": "Block Inset"
+      },
+      {
         "command": "manuscript-markdown.formatHighlight_yellow",
         "title": "Yellow"
       },
@@ -256,6 +404,26 @@
         "id": "markdown.exportDocx",
         "label": "Export to Word",
         "icon": "$(file-binary)"
+      },
+      {
+        "id": "markdown.frontmatter.document",
+        "label": "Document"
+      },
+      {
+        "id": "markdown.frontmatter.typography",
+        "label": "Typography"
+      },
+      {
+        "id": "markdown.frontmatter.tables",
+        "label": "Tables"
+      },
+      {
+        "id": "markdown.frontmatter.citations",
+        "label": "Citations & Notes"
+      },
+      {
+        "id": "markdown.frontmatter.code",
+        "label": "Code Blocks"
       },
       {
         "id": "markdown.heading",
@@ -578,9 +746,224 @@
           "group": "1_export@2"
         },
         {
-          "command": "manuscript-markdown.setCitationStyle",
+          "submenu": "markdown.frontmatter.document",
           "when": "editorLangId == markdown",
-          "group": "2_style@1"
+          "group": "2_settings@1"
+        },
+        {
+          "submenu": "markdown.frontmatter.typography",
+          "when": "editorLangId == markdown",
+          "group": "2_settings@2"
+        },
+        {
+          "submenu": "markdown.frontmatter.tables",
+          "when": "editorLangId == markdown",
+          "group": "2_settings@3"
+        },
+        {
+          "submenu": "markdown.frontmatter.citations",
+          "when": "editorLangId == markdown",
+          "group": "2_settings@4"
+        },
+        {
+          "submenu": "markdown.frontmatter.code",
+          "when": "editorLangId == markdown",
+          "group": "2_settings@5"
+        }
+      ],
+      "markdown.frontmatter.document": [
+        {
+          "command": "manuscript-markdown.setFrontmatter.title",
+          "when": "editorLangId == markdown",
+          "group": "1_settings@1"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.author",
+          "when": "editorLangId == markdown",
+          "group": "1_settings@2"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.timezone",
+          "when": "editorLangId == markdown",
+          "group": "1_settings@3"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.breaks",
+          "when": "editorLangId == markdown",
+          "group": "1_settings@4"
+        }
+      ],
+      "markdown.frontmatter.typography": [
+        {
+          "command": "manuscript-markdown.setFrontmatter.font",
+          "when": "editorLangId == markdown",
+          "group": "1_body@1"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.font-size",
+          "when": "editorLangId == markdown",
+          "group": "1_body@2"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.line-spacing",
+          "when": "editorLangId == markdown",
+          "group": "1_body@3"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.paragraph-indent",
+          "when": "editorLangId == markdown",
+          "group": "1_body@4"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.header-font",
+          "when": "editorLangId == markdown",
+          "group": "2_headings@1"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.header-font-size",
+          "when": "editorLangId == markdown",
+          "group": "2_headings@2"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.header-font-style",
+          "when": "editorLangId == markdown",
+          "group": "2_headings@3"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.title-font",
+          "when": "editorLangId == markdown",
+          "group": "3_title@1"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.title-font-size",
+          "when": "editorLangId == markdown",
+          "group": "3_title@2"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.title-font-style",
+          "when": "editorLangId == markdown",
+          "group": "3_title@3"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.blockquote-style",
+          "when": "editorLangId == markdown",
+          "group": "4_other@1"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.colors",
+          "when": "editorLangId == markdown",
+          "group": "4_other@2"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.styles",
+          "when": "editorLangId == markdown",
+          "group": "4_other@3"
+        }
+      ],
+      "markdown.frontmatter.tables": [
+        {
+          "command": "manuscript-markdown.setFrontmatter.table-font",
+          "when": "editorLangId == markdown",
+          "group": "1_appearance@1"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.table-font-size",
+          "when": "editorLangId == markdown",
+          "group": "1_appearance@2"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.table-col-widths",
+          "when": "editorLangId == markdown",
+          "group": "1_appearance@3"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.table-borders",
+          "when": "editorLangId == markdown",
+          "group": "1_appearance@4"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.table-digits",
+          "when": "editorLangId == markdown",
+          "group": "2_numbers@1"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.table-decimal-mark",
+          "when": "editorLangId == markdown",
+          "group": "2_numbers@2"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.table-digit-grouping",
+          "when": "editorLangId == markdown",
+          "group": "2_numbers@3"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.pipe-table-max-line-width",
+          "when": "editorLangId == markdown",
+          "group": "3_source@1"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.grid-table-max-line-width",
+          "when": "editorLangId == markdown",
+          "group": "3_source@2"
+        }
+      ],
+      "markdown.frontmatter.citations": [
+        {
+          "command": "manuscript-markdown.setFrontmatter.bibliography",
+          "when": "editorLangId == markdown",
+          "group": "1_citations@1"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.csl",
+          "when": "editorLangId == markdown",
+          "group": "1_citations@2"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.locale",
+          "when": "editorLangId == markdown",
+          "group": "1_citations@3"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.zotero-notes",
+          "when": "editorLangId == markdown",
+          "group": "2_notes@1"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.notes",
+          "when": "editorLangId == markdown",
+          "group": "2_notes@2"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.bibliography-hanging-indent",
+          "when": "editorLangId == markdown",
+          "group": "2_notes@3"
+        }
+      ],
+      "markdown.frontmatter.code": [
+        {
+          "command": "manuscript-markdown.setFrontmatter.code-font",
+          "when": "editorLangId == markdown",
+          "group": "1_settings@1"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.code-font-size",
+          "when": "editorLangId == markdown",
+          "group": "1_settings@2"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.code-background-color",
+          "when": "editorLangId == markdown",
+          "group": "1_settings@3"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.code-font-color",
+          "when": "editorLangId == markdown",
+          "group": "1_settings@4"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.code-block-inset",
+          "when": "editorLangId == markdown",
+          "group": "1_settings@5"
         }
       ],
       "docx.actions": [

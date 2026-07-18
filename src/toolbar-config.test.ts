@@ -2,6 +2,7 @@ import { describe, it, expect } from 'bun:test';
 import * as fc from 'fast-check';
 import * as fs from 'fs';
 import * as path from 'path';
+import { FRONTMATTER_MENU_SETTINGS, frontmatterSettingCommand } from './frontmatter-settings';
 
 describe('Toolbar Configuration Property-Based Tests', () => {
   
@@ -170,6 +171,48 @@ describe('Toolbar Configuration Property-Based Tests', () => {
         ),
         { numRuns: 100 }
       );
+    });
+  });
+
+  describe('Export to Word menu', () => {
+    it('groups every YAML frontmatter setting into submenus', () => {
+      const packageJson = loadPackageJson();
+      const commands = packageJson.contributes?.commands || [];
+      const exportMenu = packageJson.contributes?.menus?.['markdown.exportDocx'] || [];
+      const menuIds: Record<string, string> = {
+        document: 'markdown.frontmatter.document',
+        typography: 'markdown.frontmatter.typography',
+        tables: 'markdown.frontmatter.tables',
+        citations: 'markdown.frontmatter.citations',
+        code: 'markdown.frontmatter.code',
+      };
+
+      expect(
+        exportMenu.filter((entry: any) => entry.submenu?.startsWith('markdown.frontmatter.'))
+          .map((entry: any) => entry.submenu)
+      ).toEqual(Object.values(menuIds));
+
+      for (const setting of FRONTMATTER_MENU_SETTINGS) {
+        const commandId = frontmatterSettingCommand(setting.key);
+        const command = commands.find((entry: any) => entry.command === commandId);
+        const submenu = packageJson.contributes?.menus?.[menuIds[setting.group]] || [];
+        const menuEntry = submenu.find((entry: any) => entry.command === commandId);
+
+        expect(command?.title).toBe(setting.label);
+        expect(menuEntry?.when).toBe('editorLangId == markdown');
+      }
+
+      const allSettingEntries = Object.values(menuIds).flatMap(
+        menuId => packageJson.contributes?.menus?.[menuId] || []
+      );
+      expect(allSettingEntries.length).toBe(FRONTMATTER_MENU_SETTINGS.length);
+
+      expect(
+        commands.some((entry: any) => entry.command === 'manuscript-markdown.setCitationStyle')
+      ).toBe(true);
+      expect(
+        exportMenu.some((entry: any) => entry.command === 'manuscript-markdown.setCitationStyle')
+      ).toBe(false);
     });
   });
 });
