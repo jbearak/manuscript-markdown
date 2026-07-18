@@ -638,7 +638,10 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 	// and calls parseFrontmatterLines() without this opt-in.
 	const parsed = parseFrontmatterLines(text, true);
 	if (!parsed) return outside;
-	if (offset < parsed.fmStart || offset > parsed.fmEnd) return outside;
+	if (
+		offset < parsed.fmStart ||
+		(parsed.closed ? offset >= parsed.fmEnd : offset > parsed.fmEnd)
+	) return outside;
 
 	// Collect all declared keys (canonical)
 	const declaredKeys = new Set<string>();
@@ -666,8 +669,12 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 
 		const value = text.slice(line.valueStart, line.valueEnd);
 		const relativeOffset = offset - line.valueStart;
+		const trimmedEnd = value.trimEnd().length;
 		const contentStart = value.startsWith('[') ? 1 : 0;
-		const contentEnd = value.endsWith(']') ? value.length - 1 : value.length;
+		const contentEnd =
+			value.startsWith('[') && value[trimmedEnd - 1] === ']'
+				? trimmedEnd - 1
+				: value.length;
 		if (relativeOffset < contentStart || relativeOffset > contentEnd) {
 			return { start: line.valueStart, end: line.valueEnd, suppress: true };
 		}
@@ -955,7 +962,12 @@ function getKeyCompletions(location: FrontmatterLocation, schema: readonly Field
 		items.push({
 			label: def.key,
 			detail: def.description.split('\n')[0], // First line only
-			insertText: def.key + (location.valueStart > location.keyEnd ? '' : ': '),
+			insertText: def.key + (
+				location.valueStart > location.keyEnd ||
+				location.valueEnd > location.valueStart
+					? ''
+					: ': '
+			),
 			kind: 'property',
 			filterText: def.key,
 			sortText: def.key,

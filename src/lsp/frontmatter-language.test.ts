@@ -165,6 +165,20 @@ describe('getFrontmatterLocation', () => {
 		expect(loc.kind).toBe('outside');
 	});
 
+	test('returns outside at the offset immediately after the closing delimiter', () => {
+		const text = '---\nfont: Georgia\n---\nBody text.';
+		const loc = getFrontmatterLocation(text, text.indexOf('\nBody'));
+		expect(loc.kind).toBe('outside');
+		expect(loc.inFrontmatter).toBe(false);
+	});
+
+	test('returns outside at the offset immediately after a CRLF closing delimiter', () => {
+		const text = '---\r\nfont: Georgia\r\n---\r\nBody text.';
+		const loc = getFrontmatterLocation(text, text.indexOf('\r\nBody'));
+		expect(loc.kind).toBe('outside');
+		expect(loc.inFrontmatter).toBe(false);
+	});
+
 	test('returns outside after an empty closed frontmatter block', () => {
 		const text = '---\n---\nText [@smith]';
 		const loc = getFrontmatterLocation(text, text.indexOf('@smith'));
@@ -309,10 +323,34 @@ describe('getFrontmatterCompletionItems', () => {
 		expect(applyCompletion(text, loc, 'table-borders')).toBe('---\ntable-borders: old\n---\n');
 	});
 
+	test('key completion from leading indentation preserves an existing colon', () => {
+		const text = '---\n  tab: old\n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf('  tab') + 1);
+		expect(applyCompletion(text, loc, 'table-borders')).toBe('---\n  table-borders: old\n---\n');
+	});
+
+	test('styles key completion from leading indentation preserves an existing colon', () => {
+		const text = '---\nstyles:\n  Quote:\n    fon: old\n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf('    fon') + 2);
+		expect(applyCompletion(text, loc, 'font')).toBe('---\nstyles:\n  Quote:\n    font: old\n---\n');
+	});
+
 	test('array value completion replaces only the active item', () => {
 		const text = '---\nheader-font: [Georgia, Pal]\n---\n';
 		const loc = getFrontmatterLocation(text, text.indexOf('Pal') + 'Pal'.length);
 		expect(applyCompletion(text, loc, 'Palatino')).toBe('---\nheader-font: [Georgia, Palatino]\n---\n');
+	});
+
+	test('array value completion preserves a closing bracket before trailing whitespace', () => {
+		const text = '---\nheader-font: [Georgia, Pal]   \n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf('Pal') + 'Pal'.length);
+		expect(applyCompletion(text, loc, 'Palatino')).toBe('---\nheader-font: [Georgia, Palatino]   \n---\n');
+	});
+
+	test('array completions are suppressed in trailing whitespace after the closing bracket', () => {
+		const text = '---\nheader-font: [Georgia, Pal]   \n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf(']') + 2);
+		expect(getFrontmatterCompletionItems(loc, 'darwin')).toEqual([]);
 	});
 
 	test('bare comma-separated value completion replaces only the active item', () => {
