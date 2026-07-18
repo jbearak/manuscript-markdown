@@ -284,17 +284,17 @@
         {
           "submenu": "markdown.formatting",
           "when": "editorLangId == markdown && !isInDiffEditor",
-          "group": "navigation@1"
+          "group": "navigation@100"
         },
         {
           "submenu": "markdown.annotations",
           "when": "editorLangId == markdown && !isInDiffEditor",
-          "group": "navigation@2"
+          "group": "navigation@101"
         },
         {
           "submenu": "markdown.exportDocx",
           "when": "editorLangId == markdown && !isInDiffEditor",
-          "group": "navigation@3"
+          "group": "navigation@102"
         },
         {
           "submenu": "docx.actions",
