@@ -26,7 +26,7 @@ All settings are under the `manuscriptMarkdown` namespace in VS Code settings.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `enableCitekeyLanguageServer` | boolean | `true` | Enable language server features: `@` completions, go-to-definition, find references for citation keys, and comment hover |
+| `enableCitekeyLanguageServer` | boolean | `true` | Enable language server features: YAML frontmatter completions, hover, and diagnostics; `@` completions; citation go-to-definition and references; and comment hover |
 | `citekeyReferencesFromMarkdown` | boolean | `false` | Include markdown usages in Find All References when invoked from a markdown file. Off by default because VS Code's built-in Markdown Language Features already reports these; enabling this may produce duplicate entries |
 
 ## DOCX Conversion
