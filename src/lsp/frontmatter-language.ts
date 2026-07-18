@@ -491,6 +491,12 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 		const trimmed = line.trimStart();
 		const colonIdx = trimmed.indexOf(':');
 
+		// YAML comments do not establish mapping depth or leave a styles block.
+		if (trimmed.startsWith('#')) {
+			pos += rawLine.length + 1;
+			continue;
+		}
+
 		if (colonIdx >= 0) {
 			const key = trimmed.slice(0, colonIdx).trim();
 			const afterColon = trimmed.slice(colonIdx + 1);
@@ -824,7 +830,11 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 	// Find which line context we're in by checking proximity
 	const lineStart = text.lastIndexOf('\n', offset - 1) + 1;
 	const lineEnd = text.indexOf('\n', offset);
-	const actualEnd = lineEnd === -1 ? text.length : lineEnd;
+	const rawEnd = lineEnd === -1 ? text.length : lineEnd;
+	const actualEnd =
+		rawEnd > lineStart && text[rawEnd - 1] === '\r'
+			? rawEnd - 1
+			: rawEnd;
 	const lineText = text.slice(lineStart, actualEnd);
 	const trimmed = lineText.trimStart();
 	const indent = lineText.length - trimmed.length;
@@ -862,12 +872,15 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 	// Check if we're in the styles block based on surrounding lines
 	let inStyles = false;
 	let styleName: string | undefined;
+	let stylesBlockStart = -1;
 	for (const line of parsed.lines) {
 		if (line.keyStart > offset) break;
 		if (line.key === 'styles' && line.indent === 0) {
 			inStyles = true;
+			stylesBlockStart = line.keyStart;
 		} else if (line.indent === 0 && line.key !== 'styles') {
 			inStyles = false;
+			stylesBlockStart = -1;
 		}
 		if (inStyles && line.styleName) {
 			styleName = line.styleName;
@@ -876,6 +889,22 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 
 	if (inStyles && indent > 0) {
 		// Inside styles block
+		const parsedStyleName =
+			[...parsed.lines].reverse().find(line =>
+				line.inStylesBlock &&
+				line.stylesDepth === 1 &&
+				line.keyStart > stylesBlockStart &&
+				line.keyStart < offset
+			);
+		if (!parsedStyleName || indent <= parsedStyleName.indent) {
+			return {
+				kind: 'styles-name', key: trimmed,
+				keyStart: lineStart + indent, keyEnd: actualEnd,
+				valueStart: actualEnd, valueEnd: actualEnd,
+				styleName, declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
+				fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
+			};
+		}
 		if (trimmed.includes(':')) {
 			// Has a colon — sub-property in progress
 			const colonIdx = trimmed.indexOf(':');

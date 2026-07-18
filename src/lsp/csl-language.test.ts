@@ -210,6 +210,13 @@ describe('shouldAutoTriggerSuggestFromChanges', () => {
 			{ rangeLength: 0, text: 'a' },
 		])).toBe(true);
 	});
+	test('returns true for LF, CRLF, and auto-indented Enter insertions', () => {
+		for (const text of ['\n', '\r\n', '\n  ', '\r\n\t']) {
+			expect(shouldAutoTriggerSuggestFromChanges([
+				{ rangeLength: 0, text },
+			])).toBe(true);
+		}
+	});
 	test('returns true for single-character backspace', () => {
 		expect(shouldAutoTriggerSuggestFromChanges([
 			{ rangeLength: 1, text: '' },
@@ -223,6 +230,11 @@ describe('shouldAutoTriggerSuggestFromChanges', () => {
 	test('returns false for multi-character paste', () => {
 		expect(shouldAutoTriggerSuggestFromChanges([
 			{ rangeLength: 0, text: 'apa' },
+		])).toBe(false);
+	});
+	test('returns false for a line break followed by non-indentation text', () => {
+		expect(shouldAutoTriggerSuggestFromChanges([
+			{ rangeLength: 0, text: '\ntext' },
 		])).toBe(false);
 	});
 	test('returns false for empty changes', () => {

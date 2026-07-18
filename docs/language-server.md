@@ -43,7 +43,7 @@ The language server provides autocomplete, hover, and diagnostics inside YAML fr
 
 ### Key Autocomplete
 
-Typing in a frontmatter block offers all recognized keys, filtering out keys already declared in the block. Suggestions are available while the block is still being written, before its closing `---` delimiter is added.
+Starting a new line or typing in a frontmatter block automatically offers all recognized keys, filtering out keys already declared in the block. Suggestions are available while the block is still being written, before its closing `---` delimiter is added.
 
 ### Value Autocomplete
 
@@ -55,7 +55,7 @@ Known keys offer contextual value completions:
 - **CSL styles** — bundled style names plus any previously downloaded styles
 - **Font styles** — combinable parts like `bold`, `italic`, `smallcaps`
 
-Accepting a key completion automatically opens its known value choices when the key has generated suggestions. You can also invoke completions manually while the cursor is in an existing value.
+Typing `:` after a known key automatically opens its value choices, and the list keeps filtering as you type the value. Accepting a key completion also opens the same choices when the key has generated suggestions. You can still invoke completions manually with **Ctrl+Space**.
 
 For comma-separated and inline-array font fields, accepting a suggestion replaces only the item under the cursor.
 
