@@ -174,7 +174,7 @@ export const FRONTMATTER_SCHEMA: readonly FieldDef[] = [
 	{ key: 'title', kind: 'free-text', allowsMultiple: true,
 		description: 'Document title. Repeat the key for subtitle lines.\n\n**Accepted values:** Any string. Multiple `title:` lines are allowed.' },
 	{ key: 'author', kind: 'free-text',
-		description: 'Author name(s).\n\n**Accepted values:** Any string.' },
+		description: 'Document author name(s), copied verbatim to Word’s Author property—not BibTeX or Zotero metadata. Put all names in one value, for example: author: Kathryn Janeway, Benjamin Sisko, and Jean-Luc Picard.\n\n**Accepted values:** Any string.' },
 	{ key: 'csl', kind: 'csl',
 		description: 'Citation Style Language style for bibliography formatting.\n\n**Accepted values:** A style name (e.g. `apa`, `chicago-author-date`, `nature`) or a path to a `.csl` file. Non-bundled style names are downloaded automatically.' },
 	{ key: 'locale', kind: 'free-text',
