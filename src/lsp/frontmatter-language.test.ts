@@ -265,6 +265,13 @@ describe('getFrontmatterLocation', () => {
 		expect(loc.kind).toBe('styles-key');
 	});
 
+	test('styles block: nearest style-name indentation determines blank line depth', () => {
+		const text = '---\nstyles:\n  FirstStyle:\n SecondStyle:\n  \n---\n';
+		const offset = text.indexOf('  \n---') + 2;
+		const loc = getFrontmatterLocation(text, offset);
+		expect(loc.kind).toBe('styles-key');
+	});
+
 	test('styles block: sub-property key position', () => {
 		const text = '---\nstyles:\n  MyQuote:\n    font: Georgia\n---\n';
 		const loc = getFrontmatterLocation(text, text.indexOf('    font') + 4 + 2);

@@ -890,7 +890,7 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 	if (inStyles && indent > 0) {
 		// Inside styles block
 		const parsedStyleName =
-			parsed.lines.find(line =>
+			[...parsed.lines].reverse().find(line =>
 				line.inStylesBlock &&
 				line.stylesDepth === 1 &&
 				line.keyStart > stylesBlockStart &&
