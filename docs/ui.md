@@ -114,7 +114,7 @@ Annotation and change-tracking commands — the Markdown equivalent of tracked c
 
 ### Export to Word
 
-> Look for the **binary-file icon** (codicon `file-binary`) in the editor toolbar.
+> Look for the **text-file icon** (codicon `file-text`) in the editor toolbar.
 
 Export and document-setting commands. See [Converter](converter.md) for details on the conversion process.
 
@@ -142,7 +142,7 @@ When a `.docx` file is open in the editor, one dropdown menu appears in the tool
 
 ### Word Document
 
-> Look for the **binary-file icon** (codicon `file-binary`) in the editor toolbar.
+> Look for the **text-file icon** (codicon `file-text`) in the editor toolbar.
 
 | Item | Condition | Command |
 |------|-----------|---------|

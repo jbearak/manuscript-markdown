@@ -174,7 +174,7 @@
       {
         "command": "manuscript-markdown.exportToWord",
         "title": "Export to Word",
-        "icon": "$(file-binary)"
+        "icon": "$(file-text)"
       },
       {
         "command": "manuscript-markdown.exportToWordWithTemplate",
@@ -403,7 +403,7 @@
       {
         "id": "markdown.exportDocx",
         "label": "Export to Word",
-        "icon": "$(file-binary)"
+        "icon": "$(file-text)"
       },
       {
         "id": "markdown.frontmatter.document",
@@ -440,7 +440,7 @@
       {
         "id": "docx.actions",
         "label": "Word Document",
-        "icon": "$(file-binary)"
+        "icon": "$(file-text)"
       },
       {
         "id": "markdown.highlight",
