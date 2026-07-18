@@ -17,8 +17,7 @@ import * as path from 'path';
 import { parseFrontmatter, hasCitations, normalizeColorScheme, type ColorScheme } from './frontmatter';
 import type { EmbedResolver } from './embed-preprocess';
 import { BUNDLED_STYLE_LABELS } from './csl-loader';
-import { getCompletionContextAtOffset } from './lsp/citekey-language';
-import { getCslCompletionContext, shouldAutoTriggerSuggestFromChanges } from './lsp/csl-language';
+import { shouldAutoTriggerLspSuggest } from './lsp/auto-suggest';
 import {
 	getOutputBasePath,
 	getOutputConflictMessage,
@@ -49,6 +48,8 @@ import { findEmbedPathRanges } from './embed-link-provider';
 // - CSL auto-suggest retriggering: trigger only on single-character typing/backspace,
 //   not on completion acceptance
 // - Citekey auto-suggest retriggering: same gate; retrigger when cursor stays in [@… context
+// - Frontmatter auto-suggest: also allow Enter/auto-indent, but trigger only when
+//   the cursor context has actual key or generated-value completion items
 // - Citekey delimiter UX: dismiss suggest widget on ; (+ space) in grouped citation context
 // - setCitationStyle EOL safety: use TextDocument.eol; don't replace trailing \r on CRLF docs
 // - TextMate grammar: multi-line patterns are limited; favor correctness in code over
@@ -871,15 +872,15 @@ export function activate(context: vscode.ExtensionContext) {
 		if (event.contentChanges.length === 0) {
 			return false;
 		}
-		if (!shouldAutoTriggerSuggestFromChanges(event.contentChanges)) {
-			return false;
-		}
 		const text = editor.document.getText();
 		const offset = editor.document.offsetAt(editor.selection.active);
-		return (
-			getCslCompletionContext(text, offset) !== undefined ||
-			getCompletionContextAtOffset(text, offset) !== undefined
-		);
+		return shouldAutoTriggerLspSuggest({
+			enabled: languageClient !== undefined,
+			text,
+			offset,
+			platform: process.platform,
+			changes: event.contentChanges,
+		});
 	}
 	function shouldHideSuggestOnCitekeySemicolon(
 		editor: vscode.TextEditor,

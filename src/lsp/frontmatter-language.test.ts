@@ -234,6 +234,37 @@ describe('getFrontmatterLocation', () => {
 		expect(loc.kind).toBe('styles-name');
 	});
 
+	test('styles block: blank style name lines stay at the name level', () => {
+		for (const text of [
+			'---\nstyles:\n  \n---\n',
+			'---\nstyles:\n    \n---\n',
+			'---\nstyles:\n  # Pick a style name\n    \n---\n',
+			'---\nstyles:\n  # Note: choose a style\n    \n---\n',
+			'---\nstyles:\n  MyQuote:\n    font: Georgia\n  \n---\n',
+			'---\r\nstyles:\r\n  \r\n---\r\n',
+			'---\r\nstyles:\r\n  MyQuote:\r\n    font: Georgia\r\n  \r\n---\r\n',
+		]) {
+			const marker = text.includes('\r\n') ? '\r\n---' : '\n---';
+			const offset = text.lastIndexOf(marker);
+			const loc = getFrontmatterLocation(text, offset);
+			expect(loc.kind).toBe('styles-name');
+		}
+	});
+
+	test('styles block: future style names do not establish indentation', () => {
+		const text = '---\nstyles:\n      \n  FutureStyle:\n---\n';
+		const offset = text.indexOf('      \n') + 6;
+		const loc = getFrontmatterLocation(text, offset);
+		expect(loc.kind).toBe('styles-name');
+	});
+
+	test('styles block: custom style-name indentation establishes deeper properties', () => {
+		const text = '---\nstyles:\n    MyQuote:\n      \n---\n';
+		const offset = text.indexOf('      \n') + 6;
+		const loc = getFrontmatterLocation(text, offset);
+		expect(loc.kind).toBe('styles-key');
+	});
+
 	test('styles block: sub-property key position', () => {
 		const text = '---\nstyles:\n  MyQuote:\n    font: Georgia\n---\n';
 		const loc = getFrontmatterLocation(text, text.indexOf('    font') + 4 + 2);

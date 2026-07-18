@@ -57,15 +57,19 @@ function findCslLine(text: string): CslLineMatch | undefined {
 }
 
 /**
- * Returns true only for direct single-character typing/backspace edits.
+ * Returns true only for direct single-character typing/backspace edits or an
+ * inserted line break with optional editor-generated indentation.
  * Used to avoid re-triggering suggestions when completion acceptance replaces text.
  */
 export function shouldAutoTriggerSuggestFromChanges(changes: readonly SuggestTriggerTextChangeLike[]): boolean {
 	if (changes.length === 0) return false;
 	return changes.every(change => {
 		const singleCharInsert = change.rangeLength === 0 && change.text.length === 1;
+		const lineBreakInsert =
+			change.rangeLength === 0 &&
+			/^(?:\r\n|\n|\r)[ \t]*$/.test(change.text);
 		const singleCharDelete = change.rangeLength === 1 && change.text.length === 0;
-		return singleCharInsert || singleCharDelete;
+		return singleCharInsert || lineBreakInsert || singleCharDelete;
 	});
 }
 

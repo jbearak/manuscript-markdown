@@ -39,8 +39,9 @@ import { BibtexEntry } from '../bibtex-parser';
 //   range, not raw URI
 // - References request coalescing: coalesce near-identical back-to-back requests
 //   differing only by includeDeclaration
-// - Completion triggers: keep triggerCharacters narrow (@, :); broad triggers cause
-//   noisy popups
+// - Completion triggers: keep LSP triggerCharacters narrow (@). The VS Code
+//   client explicitly triggers frontmatter suggestions only where actual items
+//   exist, including after :, avoiding duplicate requests and prose popups.
 
 import {
 	canonicalizeFsPath,
@@ -226,7 +227,7 @@ connection.onInitialize((params: InitializeParams) => {
 		capabilities: {
 			textDocumentSync: TextDocumentSyncKind.Incremental,
 			completionProvider: {
-				triggerCharacters: ['@', ':'],
+				triggerCharacters: ['@'],
 			},
 			definitionProvider: true,
 			documentSymbolProvider: true,
