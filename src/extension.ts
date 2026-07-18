@@ -41,6 +41,11 @@ import {
 	resolveBibliographyWritePathForOutput,
 } from './bibliography-paths';
 import { findEmbedPathRanges } from './embed-link-provider';
+import {
+	FRONTMATTER_MENU_SETTINGS,
+	frontmatterSettingCommand,
+	getFrontmatterSettingEdit,
+} from './frontmatter-settings';
 
 // --- Implementation notes ---
 // - Editor decorations: use light/dark sub-properties for theme-aware backgrounds
@@ -331,6 +336,34 @@ export function activate(context: vscode.ExtensionContext) {
 			});
 		})
 	);
+
+	for (const setting of FRONTMATTER_MENU_SETTINGS) {
+		context.subscriptions.push(
+			vscode.commands.registerCommand(frontmatterSettingCommand(setting.key), async () => {
+				const editor = vscode.window.activeTextEditor;
+				if (!editor || editor.document.languageId !== 'markdown') {
+					vscode.window.showErrorMessage('No active Markdown file');
+					return;
+				}
+
+				const eol = editor.document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
+				const edit = getFrontmatterSettingEdit(editor.document.getText(), eol, setting.key);
+				if (edit.text) {
+					const insertPosition = editor.document.positionAt(edit.offset);
+					const applied = await editor.edit(editBuilder => {
+						editBuilder.insert(insertPosition, edit.text);
+					});
+					if (!applied) return;
+				}
+
+				const start = editor.document.positionAt(edit.selectionStart);
+				const end = editor.document.positionAt(edit.selectionEnd);
+				editor.selection = new vscode.Selection(start, end);
+				editor.revealRange(new vscode.Range(start, end));
+				await vscode.commands.executeCommand('editor.action.triggerSuggest');
+			})
+		);
+	}
 
 	// Register CriticMarkup annotation commands
 	context.subscriptions.push(
