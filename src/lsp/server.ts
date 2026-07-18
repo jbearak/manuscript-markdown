@@ -80,6 +80,7 @@ import {
 	getFrontmatterHover,
 	validateFrontmatter as validateFrontmatterFields,
 } from './frontmatter-language';
+import { toLspFrontmatterCompletionItem } from './frontmatter-completion-adapter';
 
 const connection = createConnection(ProposedFeatures.all);
 const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
@@ -338,23 +339,22 @@ connection.onCompletion(async (params: CompletionParams): Promise<CompletionItem
 	// Frontmatter completions (keys, values, CSL, styles sub-props)
 	const fmLocation = getFrontmatterLocation(text, offset);
 	if (fmLocation.inFrontmatter && fmLocation.kind !== 'outside') {
-		const cachedCslStyles = await getCachedCslStyleNames();
-		const fmItems = getFrontmatterCompletionItems(fmLocation, process.platform, cachedCslStyles);
-		if (fmItems.length > 0) {
-			const isKey = fmLocation.kind === 'key' || fmLocation.kind === 'styles-key';
-			const replaceRange = isKey
-				? Range.create(doc.positionAt(fmLocation.keyStart), doc.positionAt(fmLocation.keyEnd))
-				: Range.create(doc.positionAt(fmLocation.valueStart), doc.positionAt(fmLocation.valueEnd));
-			const isCsl = fmItems.some(i => i.isIncomplete);
-			const items: CompletionItem[] = fmItems.map(item => ({
-				label: item.label,
-				kind: item.kind === 'property' ? CompletionItemKind.Property : CompletionItemKind.Value,
-				detail: item.detail,
-				textEdit: { range: replaceRange, newText: item.insertText },
-				filterText: item.filterText,
-				sortText: item.sortText,
-			}));
-			if (isCsl) return { isIncomplete: true, items };
+			const cachedCslStyles = await getCachedCslStyleNames();
+			const fmItems = getFrontmatterCompletionItems(fmLocation, process.platform, cachedCslStyles);
+			if (fmItems.length > 0) {
+				const isKey = fmLocation.kind === 'key' || fmLocation.kind === 'styles-key';
+				const isCsl = fmItems.some(i => i.isIncomplete);
+				const replaceStart = isKey ? fmLocation.keyStart : fmLocation.valueStart;
+				const defaultReplaceEnd = isKey ? fmLocation.keyEnd : fmLocation.valueEnd;
+				const items = fmItems.map(item => {
+					const replaceEnd = item.replacementEnd ?? defaultReplaceEnd;
+					const replaceRange = Range.create(
+						doc.positionAt(replaceStart),
+						doc.positionAt(replaceEnd),
+					);
+					return toLspFrontmatterCompletionItem(item, replaceRange);
+				});
+				if (isCsl) return { isIncomplete: true, items };
 			return items;
 		}
 		if (fmLocation.frontmatterClosed) return [];

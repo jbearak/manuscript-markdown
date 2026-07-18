@@ -443,6 +443,8 @@ interface FmLine {
 	valueStart: number;
 	/** Character offset of the value end (before \r\n) */
 	valueEnd: number;
+	/** Matching quote pair stripped from the value completion range */
+	valueQuote?: '"' | "'";
 	/** Indentation level (number of leading spaces) */
 	indent: number;
 	/** Whether this line is inside the styles: block */
@@ -504,11 +506,13 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 			const leadingSpaces = afterColonStr.match(/^\s*/)?.[0].length ?? 0;
 			let valueStart = colonOffset + 1 + leadingSpaces;
 			let valueEnd = lineStart + line.length;
+			let valueQuote: '"' | "'" | undefined;
 
 			// Strip quotes from value range (not just the string)
 			const rawValueSlice = text.slice(valueStart, valueEnd);
 			if ((rawValueSlice.startsWith('"') && rawValueSlice.endsWith('"')) ||
 				(rawValueSlice.startsWith("'") && rawValueSlice.endsWith("'"))) {
+				valueQuote = rawValueSlice[0] as '"' | "'";
 				valueStart += 1;
 				valueEnd -= 1;
 			}
@@ -550,6 +554,7 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 				keyEnd,
 				valueStart,
 				valueEnd,
+				valueQuote,
 				indent,
 				inStylesBlock: lineInStylesBlock,
 				styleName: lineStyleName,
@@ -617,6 +622,10 @@ export interface FrontmatterLocation {
 	/** Formatting consumed by an array-item replacement range */
 	completionPrefix?: string;
 	completionSuffix?: string;
+	/** Formatting before a key when completion was requested inside indentation */
+	keyCompletionPrefix?: string;
+	/** Matching quote pair stripped from the current value range */
+	valueQuote?: '"' | "'";
 	/** Frontmatter body start offset (first line after opening ---) */
 	fmBodyStart?: number;
 	/** Frontmatter end offset (past closing ---) */
@@ -763,6 +772,7 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 						kind: 'styles-key', key: line.key,
 						keyStart: line.keyStart, keyEnd: line.keyEnd,
 						valueStart: line.valueStart, valueEnd: line.valueEnd,
+						valueQuote: line.valueQuote,
 						styleName: line.styleName, declaredKeys,
 						currentKeyHasOtherDeclaration: currentKeyHasOtherDeclaration(line),
 						inFrontmatter: true, frontmatterClosed: parsed.closed,
@@ -789,6 +799,7 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 					kind: 'key', key: line.key,
 					keyStart: line.keyStart, keyEnd: line.keyEnd,
 					valueStart: line.valueStart, valueEnd: line.valueEnd,
+					valueQuote: line.valueQuote,
 					declaredKeys,
 					currentKeyHasOtherDeclaration: currentKeyHasOtherDeclaration(line),
 					inFrontmatter: true, frontmatterClosed: parsed.closed,
@@ -817,6 +828,36 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 	const lineText = text.slice(lineStart, actualEnd);
 	const trimmed = lineText.trimStart();
 	const indent = lineText.length - trimmed.length;
+	const fallbackKeyRange = (actualKeyStart: number): {
+		keyStart: number;
+		keyCompletionPrefix?: string;
+	} => offset < actualKeyStart
+		? {
+			keyStart: offset,
+			keyCompletionPrefix: text.slice(offset, actualKeyStart),
+		}
+		: { keyStart: actualKeyStart };
+	const fallbackValueRange = (
+		actualKeyStart: number,
+		colonIdx: number,
+	): { valueStart: number; valueEnd: number; valueQuote?: '"' | "'" } => {
+		const colonOffset = actualKeyStart + colonIdx;
+		const afterColon = text.slice(colonOffset + 1, actualEnd);
+		const leadingSpaces = afterColon.match(/^\s*/)?.[0].length ?? 0;
+		let valueStart = colonOffset + 1 + leadingSpaces;
+		let valueEnd = actualEnd;
+		let valueQuote: '"' | "'" | undefined;
+		const rawValue = text.slice(valueStart, valueEnd);
+		if (
+			(rawValue.startsWith('"') && rawValue.endsWith('"')) ||
+			(rawValue.startsWith("'") && rawValue.endsWith("'"))
+		) {
+			valueQuote = rawValue[0] as '"' | "'";
+			valueStart++;
+			valueEnd--;
+		}
+		return { valueStart, valueEnd, valueQuote };
+	};
 
 	// Check if we're in the styles block based on surrounding lines
 	let inStyles = false;
@@ -839,29 +880,34 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 			// Has a colon — sub-property in progress
 			const colonIdx = trimmed.indexOf(':');
 			const key = trimmed.slice(0, colonIdx).trim();
-			const keyStart = lineStart + indent;
-			if (offset <= keyStart + key.length) {
+			const actualKeyStart = lineStart + indent;
+			const { keyStart, keyCompletionPrefix } = fallbackKeyRange(actualKeyStart);
+			const { valueStart, valueEnd, valueQuote } = fallbackValueRange(actualKeyStart, colonIdx);
+			if (offset <= actualKeyStart + key.length) {
 				return {
 					kind: 'styles-key', key,
-					keyStart, keyEnd: keyStart + key.length,
-					valueStart: keyStart + key.length, valueEnd: actualEnd,
+					keyStart, keyEnd: actualKeyStart + key.length,
+					valueStart, valueEnd, valueQuote, keyCompletionPrefix,
 					styleName, declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
 					fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 				};
 			}
 			return {
 				kind: 'styles-value', key,
-				keyStart, keyEnd: keyStart + key.length,
-				valueStart: keyStart + key.length, valueEnd: actualEnd,
+				keyStart, keyEnd: actualKeyStart + key.length,
+				valueStart, valueEnd, valueQuote, keyCompletionPrefix,
 				styleName, declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
 				fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 			};
 		}
 		// No colon — key being typed
+		const actualKeyStart = lineStart + indent;
+		const { keyStart, keyCompletionPrefix } = fallbackKeyRange(actualKeyStart);
 		return {
 			kind: 'styles-key', key: trimmed,
-			keyStart: lineStart + indent, keyEnd: lineStart + indent + trimmed.length,
+			keyStart, keyEnd: actualKeyStart + trimmed.length,
 			valueStart: actualEnd, valueEnd: actualEnd,
+			keyCompletionPrefix,
 			styleName, declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
 			fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 		};
@@ -871,30 +917,35 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 	if (trimmed.includes(':')) {
 		const colonIdx = trimmed.indexOf(':');
 		const key = trimmed.slice(0, colonIdx).trim();
-		const keyStart = lineStart + indent;
-		if (offset <= keyStart + key.length) {
+		const actualKeyStart = lineStart + indent;
+		const { keyStart, keyCompletionPrefix } = fallbackKeyRange(actualKeyStart);
+		const { valueStart, valueEnd, valueQuote } = fallbackValueRange(actualKeyStart, colonIdx);
+		if (offset <= actualKeyStart + key.length) {
 			return {
 				kind: 'key', key,
-				keyStart, keyEnd: keyStart + key.length,
-				valueStart: keyStart + key.length, valueEnd: actualEnd,
+				keyStart, keyEnd: actualKeyStart + key.length,
+				valueStart, valueEnd, valueQuote, keyCompletionPrefix,
 				declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
 				fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 			};
 		}
 		return {
 			kind: 'value', key,
-			keyStart, keyEnd: keyStart + key.length,
-			valueStart: keyStart + key.length, valueEnd: actualEnd,
+			keyStart, keyEnd: actualKeyStart + key.length,
+			valueStart, valueEnd, valueQuote, keyCompletionPrefix,
 			declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
 			fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 		};
 	}
 
 	// Bare text or empty line — key position
+	const actualKeyStart = lineStart + indent;
+	const { keyStart, keyCompletionPrefix } = fallbackKeyRange(actualKeyStart);
 	return {
 		kind: 'key', key: trimmed,
-		keyStart: lineStart + indent, keyEnd: lineStart + indent + trimmed.length,
+		keyStart, keyEnd: actualKeyStart + trimmed.length,
 		valueStart: actualEnd, valueEnd: actualEnd,
+		keyCompletionPrefix,
 		declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
 		fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 	};
@@ -911,6 +962,10 @@ export interface FrontmatterCompletionItem {
 	kind: 'property' | 'value';
 	filterText: string;
 	sortText: string;
+	/** Ask the VS Code client to open value suggestions after inserting this property. */
+	triggerValueCompletions?: boolean;
+	/** Absolute end offset when a property edit must also replace an empty separator/value. */
+	replacementEnd?: number;
 	isIncomplete?: boolean; // for CSL (large list)
 }
 
@@ -959,21 +1014,58 @@ function getKeyCompletions(location: FrontmatterLocation, schema: readonly Field
 			continue;
 		}
 		if (prefix && !def.key.startsWith(prefix)) continue;
+		const hasPopulatedValue = location.valueEnd > location.valueStart;
+		const hasExistingSeparator = location.valueStart > location.keyEnd || hasPopulatedValue;
+		const replacesEmptyQuotedValue = !!location.valueQuote && !hasPopulatedValue;
+		const replacesEmptySeparator =
+			!location.valueQuote &&
+			location.valueStart > location.keyEnd &&
+			!hasPopulatedValue;
+		const rewritesEmptyValue = replacesEmptySeparator || replacesEmptyQuotedValue;
+		const writesSeparator = !hasExistingSeparator || rewritesEmptyValue;
+		const separator = replacesEmptyQuotedValue
+			? ': ' + location.valueQuote
+			: ': ';
 		items.push({
 			label: def.key,
 			detail: def.description.split('\n')[0], // First line only
-			insertText: def.key + (
-				location.valueStart > location.keyEnd ||
-				location.valueEnd > location.valueStart
-					? ''
-					: ': '
-			),
+			insertText:
+				(location.keyCompletionPrefix ?? '') +
+				def.key +
+				(writesSeparator ? separator : ''),
 			kind: 'property',
 			filterText: def.key,
 			sortText: def.key,
+			triggerValueCompletions: writesSeparator && hasGeneratedValueCompletions(def),
+			replacementEnd: rewritesEmptyValue ? location.valueEnd : undefined,
 		});
 	}
 	return items;
+}
+
+/**
+ * Keep this predicate in lockstep with getValueCompletions().
+ * It controls whether accepting a property completion immediately opens the
+ * corresponding value suggestions.
+ */
+function hasGeneratedValueCompletions(def: FieldDef): boolean {
+	switch (def.kind) {
+		case 'boolean':
+		case 'digits':
+		case 'font':
+		case 'code-font':
+		case 'font-style':
+		case 'line-spacing':
+		case 'paragraph-indent':
+		case 'col-widths':
+		case 'color-hex':
+		case 'csl':
+			return true;
+		case 'enum':
+			return (def.enumValues?.length ?? 0) > 0;
+		default:
+			return false;
+	}
 }
 
 function getValueCompletions(location: FrontmatterLocation, platform: string, cachedCslStyles?: string[]): FrontmatterCompletionItem[] {

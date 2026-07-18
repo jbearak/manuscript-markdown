@@ -55,6 +55,8 @@ Known keys offer contextual value completions:
 - **CSL styles** — bundled style names plus any previously downloaded styles
 - **Font styles** — combinable parts like `bold`, `italic`, `smallcaps`
 
+Accepting a key completion automatically opens its known value choices when the key has generated suggestions. You can also invoke completions manually while the cursor is in an existing value.
+
 For comma-separated and inline-array font fields, accepting a suggestion replaces only the item under the cursor.
 
 ### Hover
