@@ -266,7 +266,9 @@ describe('getFrontmatterCompletionItems', () => {
 		const item = getFrontmatterCompletionItems(loc, 'darwin').find(candidate => candidate.label === label);
 		expect(item).toBeDefined();
 		const start = item!.kind === 'property' ? loc.keyStart : loc.valueStart;
-		const end = item!.kind === 'property' ? loc.keyEnd : loc.valueEnd;
+		const end = item!.kind === 'property'
+			? (item!.replacementEnd ?? loc.keyEnd)
+			: loc.valueEnd;
 		return text.slice(0, start) + item!.insertText + text.slice(end);
 	}
 
@@ -296,6 +298,84 @@ describe('getFrontmatterCompletionItems', () => {
 		const loc = getFrontmatterLocation(text, text.length);
 		expect(loc.inFrontmatter).toBe(true);
 		expect(applyCompletion(text, loc, 'table-borders')).toBe('---\ntable-borders: ');
+	});
+
+	test('enum key completion requests its value suggestions after inserting the separator', () => {
+		const text = '---\ntab';
+		const loc = getFrontmatterLocation(text, text.length);
+		const item = getFrontmatterCompletionItems(loc, 'darwin')
+			.find(candidate => candidate.label === 'table-borders');
+		expect(item?.insertText).toBe('table-borders: ');
+		expect(item?.triggerValueCompletions).toBe(true);
+	});
+
+	test('key completion with an existing colon does not reopen suggestions at the key', () => {
+		const text = '---\ntab: old\n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf('tab') + 'tab'.length);
+		const item = getFrontmatterCompletionItems(loc, 'darwin')
+			.find(candidate => candidate.label === 'table-borders');
+		expect(item?.insertText).toBe('table-borders');
+		expect(item?.triggerValueCompletions).toBe(false);
+	});
+
+	test('key completion replaces an empty existing separator and requests values', () => {
+		for (const text of [
+			'---\ntab:\n---\n',
+			'---\ntab:   \n---\n',
+			'---\r\ntab:\r\n---\r\n',
+			'---\r\ntab:   \r\n---\r\n',
+		]) {
+			const loc = getFrontmatterLocation(text, text.indexOf('tab') + 'tab'.length);
+			const item = getFrontmatterCompletionItems(loc, 'darwin')
+				.find(candidate => candidate.label === 'table-borders');
+			expect(item?.insertText).toBe('table-borders: ');
+			expect(item?.triggerValueCompletions).toBe(true);
+			expect(item?.replacementEnd).toBe(loc.valueEnd);
+			const eol = text.includes('\r\n') ? '\r\n' : '\n';
+			expect(applyCompletion(text, loc, 'table-borders')).toBe(
+				'---' + eol + 'table-borders: ' + eol + '---' + eol,
+			);
+		}
+	});
+
+	test('key completion from indentation chains values for an empty existing separator', () => {
+		const text = '---\n  tab:   \n---\n';
+		const offset = text.indexOf('  tab') + 1;
+		const loc = getFrontmatterLocation(text, offset);
+		const item = getFrontmatterCompletionItems(loc, 'darwin')
+			.find(candidate => candidate.label === 'table-borders');
+		expect(loc.keyStart).toBe(offset);
+		expect(loc.keyEnd).toBeGreaterThanOrEqual(offset);
+		expect(item?.triggerValueCompletions).toBe(true);
+		expect(applyCompletion(text, loc, 'table-borders')).toBe('---\n  table-borders: \n---\n');
+	});
+
+	test('key completion preserves empty quote pairs and requests values inside them', () => {
+		for (const quote of ['"', "'"] as const) {
+			for (const eol of ['\n', '\r\n']) {
+				const text = '---' + eol + 'tab: ' + quote + quote + eol + '---' + eol;
+				const loc = getFrontmatterLocation(text, text.indexOf('tab') + 'tab'.length);
+				const item = getFrontmatterCompletionItems(loc, 'darwin')
+					.find(candidate => candidate.label === 'table-borders');
+				expect(loc.valueQuote).toBe(quote);
+				expect(item?.insertText).toBe('table-borders: ' + quote);
+				expect(item?.triggerValueCompletions).toBe(true);
+				expect(item?.replacementEnd).toBe(loc.valueEnd);
+				expect(applyCompletion(text, loc, 'table-borders')).toBe(
+					'---' + eol + 'table-borders: ' + quote + quote + eol + '---' + eol,
+				);
+			}
+		}
+	});
+
+	test('keys without generated values do not request another suggestion list', () => {
+		for (const key of ['author', 'font-size', 'timezone', 'bibliography', 'code-font-color', 'styles']) {
+			const text = '---\n' + key;
+			const loc = getFrontmatterLocation(text, text.length);
+			const item = getFrontmatterCompletionItems(loc, 'darwin')
+				.find(candidate => candidate.label === key);
+			expect(item?.triggerValueCompletions).toBe(false);
+		}
 	});
 
 	test('key completion works in an unclosed CRLF frontmatter block', () => {
@@ -333,6 +413,33 @@ describe('getFrontmatterCompletionItems', () => {
 		const text = '---\nstyles:\n  Quote:\n    fon: old\n---\n';
 		const loc = getFrontmatterLocation(text, text.indexOf('    fon') + 2);
 		expect(applyCompletion(text, loc, 'font')).toBe('---\nstyles:\n  Quote:\n    font: old\n---\n');
+	});
+
+	test('styles key completion chains values for an empty existing separator', () => {
+		const text = '---\nstyles:\n  Quote:\n    fon:   \n---\n';
+		const offset = text.indexOf('    fon') + 2;
+		const loc = getFrontmatterLocation(text, offset);
+		const item = getFrontmatterCompletionItems(loc, 'darwin')
+			.find(candidate => candidate.label === 'font');
+		expect(loc.keyStart).toBe(offset);
+		expect(loc.keyEnd).toBeGreaterThanOrEqual(offset);
+		expect(item?.triggerValueCompletions).toBe(true);
+		expect(applyCompletion(text, loc, 'font')).toBe('---\nstyles:\n  Quote:\n    font: \n---\n');
+	});
+
+	test('styles key completion preserves empty quote pairs and requests values inside them', () => {
+		for (const quote of ['"', "'"] as const) {
+			const text = '---\nstyles:\n  Quote:\n    fon: ' + quote + quote + '\n---\n';
+			const offset = text.indexOf('    fon') + 2;
+			const loc = getFrontmatterLocation(text, offset);
+			const item = getFrontmatterCompletionItems(loc, 'darwin')
+				.find(candidate => candidate.label === 'font');
+			expect(loc.valueQuote).toBe(quote);
+			expect(item?.triggerValueCompletions).toBe(true);
+			expect(applyCompletion(text, loc, 'font')).toBe(
+				'---\nstyles:\n  Quote:\n    font: ' + quote + quote + '\n---\n',
+			);
+		}
 	});
 
 	test('array value completion replaces only the active item', () => {
@@ -513,6 +620,17 @@ describe('getFrontmatterCompletionItems', () => {
 		expect(items.some(i => i.label === 'font')).toBe(true);
 		expect(items.some(i => i.label === 'font-size')).toBe(true);
 		expect(items.some(i => i.label === 'spacing-before')).toBe(true);
+	});
+
+	test('styles keys request value suggestions only when the sub-property has them', () => {
+		const text = '---\nstyles:\n  MyQuote:\n    \n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf('    \n') + 4);
+		const items = getFrontmatterCompletionItems(loc, 'darwin');
+		expect(items.find(item => item.label === 'font')?.triggerValueCompletions).toBe(true);
+		expect(items.find(item => item.label === 'font-style')?.triggerValueCompletions).toBe(true);
+		expect(items.find(item => item.label === 'paragraph-indent')?.triggerValueCompletions).toBe(true);
+		expect(items.find(item => item.label === 'font-size')?.triggerValueCompletions).toBe(false);
+		expect(items.find(item => item.label === 'spacing-before')?.triggerValueCompletions).toBe(false);
 	});
 
 	test('no completions outside frontmatter', () => {
