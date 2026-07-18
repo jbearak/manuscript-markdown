@@ -24,10 +24,11 @@ describe('Toolbar Configuration Property-Based Tests', () => {
       if (entry.command && entry.command.startsWith('manuscript-markdown.')) {
         return true;
       }
-      // Check if it's a markdown submenu (annotations or formatting)
+      // Check if it's one of the Markdown toolbar submenus
       if (entry.submenu && (
         entry.submenu === 'markdown.annotations' ||
-        entry.submenu === 'markdown.formatting'
+        entry.submenu === 'markdown.formatting' ||
+        entry.submenu === 'markdown.exportDocx'
       )) {
         return true;
       }
@@ -71,15 +72,17 @@ describe('Toolbar Configuration Property-Based Tests', () => {
       const packageJson = loadPackageJson();
       const toolbarEntries = getManuscriptMarkdownToolbarEntries(packageJson);
       
-      // Should have exactly 2 entries: 2 submenus (prevChange and nextChange are in the annotations submenu)
-      expect(toolbarEntries.length).toBe(2);
+      // Should have exactly 3 entries: formatting, annotations, and Word export
+      expect(toolbarEntries.length).toBe(3);
       
       // Find each expected entry
       const formattingSubmenu = toolbarEntries.find((e: any) => e.submenu === 'markdown.formatting');
       const annotationsSubmenu = toolbarEntries.find((e: any) => e.submenu === 'markdown.annotations');
+      const exportSubmenu = toolbarEntries.find((e: any) => e.submenu === 'markdown.exportDocx');
       
       expect(formattingSubmenu).toBeDefined();
       expect(annotationsSubmenu).toBeDefined();
+      expect(exportSubmenu).toBeDefined();
       
       // Verify when clauses
       const expectedWhen = 'editorLangId == markdown && !isInDiffEditor';
@@ -92,8 +95,8 @@ describe('Toolbar Configuration Property-Based Tests', () => {
    * Feature: editor-toolbar-buttons, Property 2: Button grouping and ordering
    * Validates: Requirements 3.1, 3.2
    * 
-   * For the two Manuscript Markdown toolbar buttons (formatting submenu, annotations submenu),
-   * they should be in the navigation group and ordered as: formatting (@1), annotations (@2)
+   * The three Manuscript Markdown toolbar buttons should occupy a contiguous, high-order
+   * block in the navigation group so built-in Markdown actions do not interleave with them.
    */
   describe('Property 2: Button grouping and ordering', () => {
     it('should validate navigation group and ordering for all Manuscript Markdown toolbar entries', () => {
@@ -109,12 +112,14 @@ describe('Toolbar Configuration Property-Based Tests', () => {
               expect(entry.group).toMatch(/^navigation@\d+$/);
             }
             
-            // Verify specific ordering
+            // Verify specific contiguous ordering
             const formattingSubmenu = toolbarEntries.find((e: any) => e.submenu === 'markdown.formatting');
             const annotationsSubmenu = toolbarEntries.find((e: any) => e.submenu === 'markdown.annotations');
+            const exportSubmenu = toolbarEntries.find((e: any) => e.submenu === 'markdown.exportDocx');
             
-            expect(formattingSubmenu?.group).toBe('navigation@1');
-            expect(annotationsSubmenu?.group).toBe('navigation@2');
+            expect(formattingSubmenu?.group).toBe('navigation@100');
+            expect(annotationsSubmenu?.group).toBe('navigation@101');
+            expect(exportSubmenu?.group).toBe('navigation@102');
             
             return true;
           }
@@ -127,16 +132,19 @@ describe('Toolbar Configuration Property-Based Tests', () => {
       const packageJson = loadPackageJson();
       const editorTitleMenu = packageJson.contributes?.menus?.['editor/title'] || [];
       
-      // Find indices of our two entries
+      // Find indices of our three entries
       const formattingIndex = editorTitleMenu.findIndex((e: any) => e.submenu === 'markdown.formatting');
       const annotationsIndex = editorTitleMenu.findIndex((e: any) => e.submenu === 'markdown.annotations');
+      const exportIndex = editorTitleMenu.findIndex((e: any) => e.submenu === 'markdown.exportDocx');
       
-      // Both should be found
+      // All three should be found
       expect(formattingIndex).toBeGreaterThanOrEqual(0);
       expect(annotationsIndex).toBeGreaterThanOrEqual(0);
+      expect(exportIndex).toBeGreaterThanOrEqual(0);
       
       // Verify they appear in order (array order should match logical order)
       expect(formattingIndex).toBeLessThan(annotationsIndex);
+      expect(annotationsIndex).toBeLessThan(exportIndex);
     });
 
     it('should verify all buttons are in the same navigation group', () => {
