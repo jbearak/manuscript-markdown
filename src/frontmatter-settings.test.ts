@@ -66,12 +66,57 @@ describe('getFrontmatterSettingEdit', () => {
 		});
 	});
 
-	test('adds the selected setting to unfinished frontmatter', () => {
+	test('recognizes frontmatter after a UTF-8 BOM', () => {
+		expect(getFrontmatterSettingEdit('\uFEFF---\nfont: Georgia\n---\nBody', '\n', 'font')).toEqual({
+			offset: 11,
+			text: '',
+			selectionStart: 11,
+			selectionEnd: 18,
+		});
+	});
+
+	test('recognizes frontmatter after leading blank lines', () => {
+		expect(getFrontmatterSettingEdit('\n\n---\ntitle: Draft\n---\nBody', '\n', 'font')).toEqual({
+			offset: 19,
+			text: 'font: \n',
+			selectionStart: 25,
+			selectionEnd: 25,
+		});
+	});
+
+	test('matches parser handling of opening delimiters with trailing whitespace', () => {
+		expect(getFrontmatterSettingEdit('---   \nfont: Georgia\n---\nBody', '\n', 'font')).toEqual({
+			offset: 13,
+			text: '',
+			selectionStart: 13,
+			selectionEnd: 20,
+		});
+	});
+
+	test('matches parser handling of opening delimiters longer than three hyphens', () => {
+		expect(getFrontmatterSettingEdit('----\nfont: Georgia\n---\nBody', '\n', 'font')).toEqual({
+			offset: 11,
+			text: '',
+			selectionStart: 11,
+			selectionEnd: 18,
+		});
+	});
+
+	test('creates frontmatter before a leading thematic break', () => {
+		expect(getFrontmatterSettingEdit('---\nOpening paragraph.\n', '\n', 'font')).toEqual({
+			offset: 0,
+			text: '---\nfont: \n---\n',
+			selectionStart: 10,
+			selectionEnd: 10,
+		});
+	});
+
+	test('creates closed frontmatter before an unfinished delimiter block', () => {
 		expect(getFrontmatterSettingEdit('---\nfont: Georgia', '\n', 'colors')).toEqual({
-			offset: 17,
-			text: '\ncolors: ',
-			selectionStart: 26,
-			selectionEnd: 26,
+			offset: 0,
+			text: '---\ncolors: \n---\n',
+			selectionStart: 12,
+			selectionEnd: 12,
 		});
 	});
 });

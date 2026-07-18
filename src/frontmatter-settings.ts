@@ -70,6 +70,16 @@ function escapeRegex(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function newFrontmatterEdit(eol: '\n' | '\r\n', key: string): FrontmatterSettingEdit {
+	const prefix = '---' + eol + key + ': ';
+	return {
+		offset: 0,
+		text: prefix + eol + '---' + eol,
+		selectionStart: prefix.length,
+		selectionEnd: prefix.length,
+	};
+}
+
 /**
  * Locate an existing setting value or prepare an insertion for a missing one.
  * Existing frontmatter content and key aliases are preserved.
@@ -79,20 +89,20 @@ export function getFrontmatterSettingEdit(
 	eol: '\n' | '\r\n',
 	key: string,
 ): FrontmatterSettingEdit {
-	const openingDelimiter = /^---(?:\r?\n|$)/.exec(markdown);
-	if (!openingDelimiter) {
-		const prefix = '---' + eol + key + ': ';
-		return {
-			offset: 0,
-			text: prefix + eol + '---' + eol,
-			selectionStart: prefix.length,
-			selectionEnd: prefix.length,
-		};
+	// Match parseFrontmatter's treatment of leading whitespace and UTF-8 BOMs.
+	const openingOffset = markdown.length - markdown.trimStart().length;
+	const trimmed = markdown.slice(openingOffset);
+	if (!trimmed.startsWith('---')) {
+		return newFrontmatterEdit(eol, key);
 	}
 
-	const bodyStart = openingDelimiter[0].length;
-	const closingMatch = /^---[ \t]*(?:\r?$)/m.exec(markdown.slice(bodyStart));
-	const bodyEnd = closingMatch ? bodyStart + closingMatch.index : markdown.length;
+	const bodyStart = openingOffset + 3;
+	const closingMatch = /\n---(?:\r?\n|$)/.exec(markdown.slice(bodyStart));
+	if (!closingMatch) {
+		// Without a closing delimiter, the converter treats the text as Markdown.
+		return newFrontmatterEdit(eol, key);
+	}
+	const bodyEnd = bodyStart + closingMatch.index + 1;
 	const names = [key, ...(FRONTMATTER_ALIASES[key] ?? [])].map(escapeRegex);
 	const settingPattern = new RegExp('^(?:' + names.join('|') + '):([ \\t]*)(.*?)(\\r?)$', 'm');
 	const settingMatch = settingPattern.exec(markdown.slice(bodyStart, bodyEnd));
@@ -109,25 +119,13 @@ export function getFrontmatterSettingEdit(
 		};
 	}
 
-	if (closingMatch) {
-		const closingOffset = bodyEnd;
-		const hasBlankLine = markdown.slice(0, closingOffset).endsWith(eol + eol);
-		const offset = hasBlankLine ? closingOffset - eol.length : closingOffset;
-		const text = key + ': ' + eol;
-		const cursor = offset + key.length + 2;
-		return {
-			offset,
-			text,
-			selectionStart: cursor,
-			selectionEnd: cursor,
-		};
-	}
-
-	const prefix = markdown.endsWith(eol) ? '' : eol;
-	const text = prefix + key + ': ';
-	const cursor = markdown.length + text.length;
+	const closingOffset = bodyEnd;
+	const hasBlankLine = markdown.slice(0, closingOffset).endsWith(eol + eol);
+	const offset = hasBlankLine ? closingOffset - eol.length : closingOffset;
+	const text = key + ': ' + eol;
+	const cursor = offset + key.length + 2;
 	return {
-		offset: markdown.length,
+		offset,
 		text,
 		selectionStart: cursor,
 		selectionEnd: cursor,
