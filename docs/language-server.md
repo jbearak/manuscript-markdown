@@ -43,7 +43,7 @@ The language server provides autocomplete, hover, and diagnostics inside YAML fr
 
 ### Key Autocomplete
 
-Typing in a frontmatter block offers all recognized keys, filtering out keys already declared in the block.
+Typing in a frontmatter block offers all recognized keys, filtering out keys already declared in the block. Suggestions are available while the block is still being written, before its closing `---` delimiter is added.
 
 ### Value Autocomplete
 
@@ -53,7 +53,9 @@ Known keys offer contextual value completions:
 - **Enums** — accepted values for the key (e.g., `single`, `1.5`, `double` for `line-spacing`)
 - **Fonts** — platform-appropriate font suggestions (monospace fonts for `code-font`)
 - **CSL styles** — bundled style names plus any previously downloaded styles
-- **Font styles** — combinable parts like `bold`, `italic`, `small-caps`
+- **Font styles** — combinable parts like `bold`, `italic`, `smallcaps`
+
+For comma-separated and inline-array font fields, accepting a suggestion replaces only the item under the cursor.
 
 ### Hover
 

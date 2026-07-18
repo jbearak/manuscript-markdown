@@ -176,7 +176,7 @@ export const FRONTMATTER_SCHEMA: readonly FieldDef[] = [
 	{ key: 'author', kind: 'free-text',
 		description: 'Author name(s).\n\n**Accepted values:** Any string.' },
 	{ key: 'csl', kind: 'csl',
-		description: 'Citation Style Language style for bibliography formatting.\n\n**Accepted values:** A style name (e.g. `apa`, `chicago-author-date`, `nature`), a path to a `.csl` file, or a URL. Non-bundled styles are downloaded automatically.' },
+		description: 'Citation Style Language style for bibliography formatting.\n\n**Accepted values:** A style name (e.g. `apa`, `chicago-author-date`, `nature`) or a path to a `.csl` file. Non-bundled style names are downloaded automatically.' },
 	{ key: 'locale', kind: 'free-text',
 		description: 'BCP 47 locale tag for citation language.\n\n**Accepted values:** Any valid BCP 47 locale tag (e.g. `en-US`, `de-DE`).' },
 	{ key: 'zotero-notes', kind: 'enum', aliases: ['note-type'], enumValues: ZOTERO_NOTES_VALUES,
@@ -226,7 +226,7 @@ export const FRONTMATTER_SCHEMA: readonly FieldDef[] = [
 	{ key: 'code-font-color', kind: 'color-hex-only', aliases: ['code-color'],
 		description: 'Text color for code blocks.\n\n**Accepted values:** 6-digit hex without `#` (e.g. `333333`).' },
 	{ key: 'code-block-inset', kind: 'number',
-		description: 'Left-indent applied to code blocks, in points.\n\n**Accepted values:** Positive integer.' },
+		description: 'Code-block shading border width, in eighths of a point.\n\n**Accepted values:** Positive integer.' },
 	{ key: 'pipe-table-max-line-width', kind: 'number',
 		description: 'Maximum source line width for pipe tables before switching to HTML. `0` always uses HTML.\n\n**Accepted values:** Non-negative integer.' },
 	{ key: 'grid-table-max-line-width', kind: 'number',
@@ -234,7 +234,7 @@ export const FRONTMATTER_SCHEMA: readonly FieldDef[] = [
 	{ key: 'blockquote-style', kind: 'enum', enumValues: BLOCKQUOTE_STYLE_VALUES,
 		description: 'Paragraph style applied to blockquotes.\n\n**Accepted values:** `Quote`, `IntenseQuote`, `GitHub` (case-insensitive).' },
 	{ key: 'colors', kind: 'enum', enumValues: COLORS_VALUES,
-		description: 'Named color scheme for syntax-highlighted code.\n\n**Accepted values:** `github`, `guttmacher`.' },
+		description: 'Named color scheme for alert/callout borders.\n\n**Accepted values:** `github`, `guttmacher`.' },
 	{ key: 'styles', kind: 'styles-block',
 		description: 'Named custom paragraph styles. Each sub-key is a style name; under it, set `font`, `font-size`, `font-style`, `spacing-before`, `spacing-after`, `paragraph-indent`.\n\n**Accepted values:** Nested YAML block.' },
 	{ key: 'breaks', kind: 'boolean', enumValues: BOOLEAN_VALUES,
@@ -428,7 +428,7 @@ function findStylesTypoSuggestions(unknownKey: string): string[] {
 // Frontmatter line scanner (offset-aware)
 // ---------------------------------------------------------------------------
 
-const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---/;
+const FRONTMATTER_RE = /^---\r?\n(?:([\s\S]*?)\r?\n)?---(?=\r?\n|$)/;
 
 interface FmLine {
 	/** Raw key name (left of colon) */
@@ -458,19 +458,21 @@ interface ParsedFrontmatter {
 	fmStart: number;   // offset of opening ---
 	fmEnd: number;     // offset past closing ---
 	bodyStart: number;  // offset of first line after opening ---
+	closed: boolean;
 }
 
-function parseFrontmatterLines(text: string): ParsedFrontmatter | undefined {
+function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFrontmatter | undefined {
 	const fmMatch = FRONTMATTER_RE.exec(text);
-	if (!fmMatch) return undefined;
+	const unclosedMatch = allowUnclosed && !fmMatch ? /^---\r?\n/.exec(text) : undefined;
+	if (!fmMatch && !unclosedMatch) return undefined;
 
-	const fmStart = fmMatch.index;
-	const fmEnd = fmStart + fmMatch[0].length;
+	const fmStart = 0;
+	const fmEnd = fmMatch ? fmMatch[0].length : text.length;
 	const firstNewline = text.indexOf('\n', fmStart);
 	if (firstNewline === -1) return undefined;
 	const bodyStart = firstNewline + 1;
 
-	const fmBody = fmMatch[1];
+	const fmBody = fmMatch ? (fmMatch[1] ?? '') : text.slice(bodyStart);
 	const rawLines = fmBody.split('\n');
 	const lines: FmLine[] = [];
 
@@ -585,7 +587,7 @@ function parseFrontmatterLines(text: string): ParsedFrontmatter | undefined {
 		pos += rawLine.length + 1; // +1 for \n
 	}
 
-	return { lines, fmStart, fmEnd, bodyStart };
+	return { lines, fmStart, fmEnd, bodyStart, closed: !!fmMatch };
 }
 
 // ---------------------------------------------------------------------------
@@ -604,8 +606,17 @@ export interface FrontmatterLocation {
 	styleName?: string;
 	/** Keys already declared in this frontmatter (canonical names) */
 	declaredKeys: Set<string>;
+	/** Whether the key under the cursor is also declared on another line */
+	currentKeyHasOtherDeclaration?: boolean;
 	/** Whether cursor is inside frontmatter at all */
 	inFrontmatter: boolean;
+	/** Whether a closing frontmatter delimiter is present */
+	frontmatterClosed: boolean;
+	/** Whether completion should be suppressed at punctuation outside an array item */
+	suppressCompletions?: boolean;
+	/** Formatting consumed by an array-item replacement range */
+	completionPrefix?: string;
+	completionSuffix?: string;
 	/** Frontmatter body start offset (first line after opening ---) */
 	fmBodyStart?: number;
 	/** Frontmatter end offset (past closing ---) */
@@ -618,20 +629,114 @@ export interface FrontmatterLocation {
 export function getFrontmatterLocation(text: string, offset: number): FrontmatterLocation {
 	const outside: FrontmatterLocation = {
 		kind: 'outside', key: '', keyStart: 0, keyEnd: 0,
-		valueStart: 0, valueEnd: 0, declaredKeys: new Set(), inFrontmatter: false,
+		valueStart: 0, valueEnd: 0, declaredKeys: new Set(),
+		inFrontmatter: false, frontmatterClosed: false,
 	};
 
-	const parsed = parseFrontmatterLines(text);
+	// Completion and hover should work while the user is still authoring the
+	// block, before the closing delimiter exists. Validation remains stricter
+	// and calls parseFrontmatterLines() without this opt-in.
+	const parsed = parseFrontmatterLines(text, true);
 	if (!parsed) return outside;
-	if (offset < parsed.fmStart || offset > parsed.fmEnd) return outside;
+	if (
+		offset < parsed.fmStart ||
+		(parsed.closed ? offset >= parsed.fmEnd : offset > parsed.fmEnd)
+	) return outside;
 
 	// Collect all declared keys (canonical)
 	const declaredKeys = new Set<string>();
+	const declaredKeyCounts = new Map<string, number>();
 	for (const line of parsed.lines) {
 		if (!line.inStylesBlock || line.indent === 0) {
-			declaredKeys.add(resolveCanonical(line.key));
+			const canonical = resolveCanonical(line.key);
+			declaredKeys.add(canonical);
+			declaredKeyCounts.set(canonical, (declaredKeyCounts.get(canonical) ?? 0) + 1);
 		}
 	}
+
+	const currentKeyHasOtherDeclaration = (line: FmLine): boolean => {
+		const canonical = resolveCanonical(line.key);
+		return (declaredKeyCounts.get(canonical) ?? 0) > 1;
+	};
+
+	const completionValueRange = (
+		line: FmLine,
+	): { start: number; end: number; suppress?: boolean; prefix?: string; suffix?: string } => {
+		const def = line.inStylesBlock ? STYLES_SUB_MAP.get(line.key) : lookupDef(line.key);
+		if (!def?.arrayField || offset < line.valueStart || offset > line.valueEnd) {
+			return { start: line.valueStart, end: line.valueEnd };
+		}
+
+		const value = text.slice(line.valueStart, line.valueEnd);
+		const relativeOffset = offset - line.valueStart;
+		const trimmedEnd = value.trimEnd().length;
+		const contentStart = value.startsWith('[') ? 1 : 0;
+		const contentEnd =
+			value.startsWith('[') && value[trimmedEnd - 1] === ']'
+				? trimmedEnd - 1
+				: value.length;
+		if (relativeOffset < contentStart || relativeOffset > contentEnd) {
+			return { start: line.valueStart, end: line.valueEnd, suppress: true };
+		}
+
+		const commas: number[] = [];
+		let quote: '"' | "'" | undefined;
+		let escaped = false;
+		for (let i = contentStart; i < contentEnd; i++) {
+			const char = value[i];
+			if (quote === '"') {
+				if (escaped) {
+					escaped = false;
+				} else if (char === '\\') {
+					escaped = true;
+				} else if (char === quote) {
+					quote = undefined;
+				}
+				continue;
+			}
+			if (quote === "'") {
+				if (char === quote) {
+					if (value[i + 1] === quote) {
+						i++;
+					} else {
+						quote = undefined;
+					}
+				}
+				continue;
+			}
+			if (char === '"' || char === "'") {
+				quote = char;
+			} else if (char === ',') {
+				commas.push(i);
+			}
+		}
+
+		const previousComma = [...commas].reverse().find(index => index < relativeOffset) ?? -1;
+		const nextComma = commas.find(index => index >= relativeOffset) ?? contentEnd;
+		const start = Math.max(previousComma + 1, contentStart);
+		const end = nextComma;
+		let itemStart = start;
+		let itemEnd = end;
+		while (itemStart < itemEnd && /\s/.test(value[itemStart])) itemStart++;
+		while (itemEnd > itemStart && /\s/.test(value[itemEnd - 1])) itemEnd--;
+
+		let prefix = value.slice(start, itemStart);
+		let suffix = value.slice(itemEnd, end);
+		if (
+			itemEnd - itemStart >= 2 &&
+			(value[itemStart] === '"' || value[itemStart] === "'") &&
+			value[itemEnd - 1] === value[itemStart]
+		) {
+			prefix += value[itemStart];
+			suffix = value[itemEnd - 1] + suffix;
+		}
+		return {
+			start: line.valueStart + start,
+			end: line.valueStart + end,
+			prefix,
+			suffix,
+		};
+	};
 
 	// Find which line the offset falls on
 	// If offset is before any content line (on the --- delimiter), treat as key position on first line area
@@ -648,7 +753,7 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 						kind: 'styles-name', key: line.key,
 						keyStart: line.keyStart, keyEnd: line.keyEnd,
 						valueStart: line.valueStart, valueEnd: line.valueEnd,
-						declaredKeys, inFrontmatter: true,
+						declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
 						fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 					};
 				}
@@ -658,15 +763,22 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 						kind: 'styles-key', key: line.key,
 						keyStart: line.keyStart, keyEnd: line.keyEnd,
 						valueStart: line.valueStart, valueEnd: line.valueEnd,
-						styleName: line.styleName, declaredKeys, inFrontmatter: true,
+						styleName: line.styleName, declaredKeys,
+						currentKeyHasOtherDeclaration: currentKeyHasOtherDeclaration(line),
+						inFrontmatter: true, frontmatterClosed: parsed.closed,
 						fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 					};
 				}
+				const valueRange = completionValueRange(line);
 				return {
 					kind: 'styles-value', key: line.key,
 					keyStart: line.keyStart, keyEnd: line.keyEnd,
-					valueStart: line.valueStart, valueEnd: line.valueEnd,
-					styleName: line.styleName, declaredKeys, inFrontmatter: true,
+					valueStart: valueRange.start, valueEnd: valueRange.end,
+					styleName: line.styleName, declaredKeys,
+					inFrontmatter: true, frontmatterClosed: parsed.closed,
+					suppressCompletions: valueRange.suppress,
+					completionPrefix: valueRange.prefix,
+					completionSuffix: valueRange.suffix,
 					fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 				};
 			}
@@ -677,15 +789,21 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 					kind: 'key', key: line.key,
 					keyStart: line.keyStart, keyEnd: line.keyEnd,
 					valueStart: line.valueStart, valueEnd: line.valueEnd,
-					declaredKeys, inFrontmatter: true,
+					declaredKeys,
+					currentKeyHasOtherDeclaration: currentKeyHasOtherDeclaration(line),
+					inFrontmatter: true, frontmatterClosed: parsed.closed,
 					fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 				};
 			}
+			const valueRange = completionValueRange(line);
 			return {
 				kind: 'value', key: line.key,
 				keyStart: line.keyStart, keyEnd: line.keyEnd,
-				valueStart: line.valueStart, valueEnd: line.valueEnd,
-				declaredKeys, inFrontmatter: true,
+				valueStart: valueRange.start, valueEnd: valueRange.end,
+				declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
+				suppressCompletions: valueRange.suppress,
+				completionPrefix: valueRange.prefix,
+				completionSuffix: valueRange.suffix,
 				fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 			};
 		}
@@ -727,7 +845,7 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 					kind: 'styles-key', key,
 					keyStart, keyEnd: keyStart + key.length,
 					valueStart: keyStart + key.length, valueEnd: actualEnd,
-					styleName, declaredKeys, inFrontmatter: true,
+					styleName, declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
 					fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 				};
 			}
@@ -735,7 +853,7 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 				kind: 'styles-value', key,
 				keyStart, keyEnd: keyStart + key.length,
 				valueStart: keyStart + key.length, valueEnd: actualEnd,
-				styleName, declaredKeys, inFrontmatter: true,
+				styleName, declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
 				fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 			};
 		}
@@ -744,7 +862,7 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 			kind: 'styles-key', key: trimmed,
 			keyStart: lineStart + indent, keyEnd: lineStart + indent + trimmed.length,
 			valueStart: actualEnd, valueEnd: actualEnd,
-			styleName, declaredKeys, inFrontmatter: true,
+			styleName, declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
 			fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 		};
 	}
@@ -759,7 +877,7 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 				kind: 'key', key,
 				keyStart, keyEnd: keyStart + key.length,
 				valueStart: keyStart + key.length, valueEnd: actualEnd,
-				declaredKeys, inFrontmatter: true,
+				declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
 				fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 			};
 		}
@@ -767,7 +885,7 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 			kind: 'value', key,
 			keyStart, keyEnd: keyStart + key.length,
 			valueStart: keyStart + key.length, valueEnd: actualEnd,
-			declaredKeys, inFrontmatter: true,
+			declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
 			fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 		};
 	}
@@ -777,7 +895,7 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 		kind: 'key', key: trimmed,
 		keyStart: lineStart + indent, keyEnd: lineStart + indent + trimmed.length,
 		valueStart: actualEnd, valueEnd: actualEnd,
-		declaredKeys, inFrontmatter: true,
+		declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
 		fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 	};
 }
@@ -801,7 +919,12 @@ export function getFrontmatterCompletionItems(
 	platform: string,
 	cachedCslStyles?: string[],
 ): FrontmatterCompletionItem[] {
-	if (!location.inFrontmatter || location.kind === 'outside' || location.kind === 'styles-name') {
+	if (
+		!location.inFrontmatter ||
+		location.kind === 'outside' ||
+		location.kind === 'styles-name' ||
+		location.suppressCompletions
+	) {
 		return [];
 	}
 
@@ -814,7 +937,12 @@ export function getFrontmatterCompletionItems(
 	}
 
 	if (location.kind === 'value' || location.kind === 'styles-value') {
-		return getValueCompletions(location, platform, cachedCslStyles);
+		const items = getValueCompletions(location, platform, cachedCslStyles);
+		if (!location.completionPrefix && !location.completionSuffix) return items;
+		return items.map(item => ({
+			...item,
+			insertText: (location.completionPrefix ?? '') + item.insertText + (location.completionSuffix ?? ''),
+		}));
 	}
 
 	return [];
@@ -826,14 +954,20 @@ function getKeyCompletions(location: FrontmatterLocation, schema: readonly Field
 
 	for (const def of schema) {
 		// Skip already-declared keys (only for top-level, not styles sub-props)
-		if (schema === FRONTMATTER_SCHEMA && location.declaredKeys.has(def.key) && !def.allowsMultiple) {
+		const editingThisKey = resolveCanonical(location.key) === def.key && !location.currentKeyHasOtherDeclaration;
+		if (schema === FRONTMATTER_SCHEMA && location.declaredKeys.has(def.key) && !def.allowsMultiple && !editingThisKey) {
 			continue;
 		}
 		if (prefix && !def.key.startsWith(prefix)) continue;
 		items.push({
 			label: def.key,
 			detail: def.description.split('\n')[0], // First line only
-			insertText: def.key + ': ',
+			insertText: def.key + (
+				location.valueStart > location.keyEnd ||
+				location.valueEnd > location.valueStart
+					? ''
+					: ': '
+			),
 			kind: 'property',
 			filterText: def.key,
 			sortText: def.key,

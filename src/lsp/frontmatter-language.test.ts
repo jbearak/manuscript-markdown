@@ -165,6 +165,34 @@ describe('getFrontmatterLocation', () => {
 		expect(loc.kind).toBe('outside');
 	});
 
+	test('returns outside at the offset immediately after the closing delimiter', () => {
+		const text = '---\nfont: Georgia\n---\nBody text.';
+		const loc = getFrontmatterLocation(text, text.indexOf('\nBody'));
+		expect(loc.kind).toBe('outside');
+		expect(loc.inFrontmatter).toBe(false);
+	});
+
+	test('returns outside at the offset immediately after a CRLF closing delimiter', () => {
+		const text = '---\r\nfont: Georgia\r\n---\r\nBody text.';
+		const loc = getFrontmatterLocation(text, text.indexOf('\r\nBody'));
+		expect(loc.kind).toBe('outside');
+		expect(loc.inFrontmatter).toBe(false);
+	});
+
+	test('returns outside after an empty closed frontmatter block', () => {
+		const text = '---\n---\nText [@smith]';
+		const loc = getFrontmatterLocation(text, text.indexOf('@smith'));
+		expect(loc.kind).toBe('outside');
+		expect(loc.inFrontmatter).toBe(false);
+	});
+
+	test('returns outside after an empty closed CRLF frontmatter block', () => {
+		const text = '---\r\n---\r\nText [@smith]';
+		const loc = getFrontmatterLocation(text, text.indexOf('@smith'));
+		expect(loc.kind).toBe('outside');
+		expect(loc.inFrontmatter).toBe(false);
+	});
+
 	test('key position when cursor is on key name', () => {
 		const text = '---\nfont: Georgia\n---\n';
 		const loc = getFrontmatterLocation(text, text.indexOf('font') + 2);
@@ -234,6 +262,14 @@ describe('getFrontmatterLocation', () => {
 // ---------------------------------------------------------------------------
 
 describe('getFrontmatterCompletionItems', () => {
+	function applyCompletion(text: string, loc: ReturnType<typeof getFrontmatterLocation>, label: string): string {
+		const item = getFrontmatterCompletionItems(loc, 'darwin').find(candidate => candidate.label === label);
+		expect(item).toBeDefined();
+		const start = item!.kind === 'property' ? loc.keyStart : loc.valueStart;
+		const end = item!.kind === 'property' ? loc.keyEnd : loc.valueEnd;
+		return text.slice(0, start) + item!.insertText + text.slice(end);
+	}
+
 	test('key completions include all schema keys minus already declared', () => {
 		const text = '---\nfont: Georgia\n\n---\n';
 		const loc = getFrontmatterLocation(text, text.indexOf('\n\n') + 1);
@@ -253,6 +289,153 @@ describe('getFrontmatterCompletionItems', () => {
 			expect(item.label.startsWith('tab')).toBe(true);
 		}
 		expect(items.length).toBeGreaterThan(0);
+	});
+
+	test('key completion works before the closing frontmatter delimiter is typed', () => {
+		const text = '---\ntab';
+		const loc = getFrontmatterLocation(text, text.length);
+		expect(loc.inFrontmatter).toBe(true);
+		expect(applyCompletion(text, loc, 'table-borders')).toBe('---\ntable-borders: ');
+	});
+
+	test('key completion works in an unclosed CRLF frontmatter block', () => {
+		const text = '---\r\ntab';
+		const loc = getFrontmatterLocation(text, text.length);
+		expect(applyCompletion(text, loc, 'table-borders')).toBe('---\r\ntable-borders: ');
+	});
+
+	test('exact partial key can complete itself with a colon', () => {
+		const text = '---\nfont\n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf('font') + 'font'.length);
+		expect(applyCompletion(text, loc, 'font')).toBe('---\nfont: \n---\n');
+	});
+
+	test('exact key remains suppressed when it is already declared elsewhere', () => {
+		const text = '---\nfont: Georgia\nfont\n---\n';
+		const loc = getFrontmatterLocation(text, text.lastIndexOf('font') + 'font'.length);
+		const items = getFrontmatterCompletionItems(loc, 'darwin');
+		expect(items.find(item => item.label === 'font')).toBeUndefined();
+	});
+
+	test('key completion preserves an existing colon', () => {
+		const text = '---\ntab: old\n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf('tab') + 'tab'.length);
+		expect(applyCompletion(text, loc, 'table-borders')).toBe('---\ntable-borders: old\n---\n');
+	});
+
+	test('key completion from leading indentation preserves an existing colon', () => {
+		const text = '---\n  tab: old\n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf('  tab') + 1);
+		expect(applyCompletion(text, loc, 'table-borders')).toBe('---\n  table-borders: old\n---\n');
+	});
+
+	test('styles key completion from leading indentation preserves an existing colon', () => {
+		const text = '---\nstyles:\n  Quote:\n    fon: old\n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf('    fon') + 2);
+		expect(applyCompletion(text, loc, 'font')).toBe('---\nstyles:\n  Quote:\n    font: old\n---\n');
+	});
+
+	test('array value completion replaces only the active item', () => {
+		const text = '---\nheader-font: [Georgia, Pal]\n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf('Pal') + 'Pal'.length);
+		expect(applyCompletion(text, loc, 'Palatino')).toBe('---\nheader-font: [Georgia, Palatino]\n---\n');
+	});
+
+	test('array value completion preserves a closing bracket before trailing whitespace', () => {
+		const text = '---\nheader-font: [Georgia, Pal]   \n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf('Pal') + 'Pal'.length);
+		expect(applyCompletion(text, loc, 'Palatino')).toBe('---\nheader-font: [Georgia, Palatino]   \n---\n');
+	});
+
+	test('array completions are suppressed in trailing whitespace after the closing bracket', () => {
+		const text = '---\nheader-font: [Georgia, Pal]   \n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf(']') + 2);
+		expect(getFrontmatterCompletionItems(loc, 'darwin')).toEqual([]);
+	});
+
+	test('bare comma-separated value completion replaces only the active item', () => {
+		const text = '---\ntitle-font: Georgia, Pal\n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf('Pal') + 'Pal'.length);
+		expect(applyCompletion(text, loc, 'Palatino')).toBe('---\ntitle-font: Georgia, Palatino\n---\n');
+	});
+
+	test('array value completion fills an empty item without removing brackets', () => {
+		const text = '---\nheader-font: [Georgia, ]\n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf(']'));
+		expect(applyCompletion(text, loc, 'Palatino')).toBe('---\nheader-font: [Georgia, Palatino]\n---\n');
+	});
+
+	test('array value completion preserves surrounding quotes', () => {
+		const text = '---\nheader-font: \"[Georgia, Pal]\"\n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf('Pal') + 'Pal'.length);
+		expect(applyCompletion(text, loc, 'Palatino')).toBe('---\nheader-font: \"[Georgia, Palatino]\"\n---\n');
+	});
+
+	test('array value completion ignores commas inside quoted items', () => {
+		const text = '---\nheader-font: [\"Times, New Roman\", Palatino]\n---\n';
+		const offset = text.indexOf('New Roman') + 'New'.length;
+		const loc = getFrontmatterLocation(text, offset);
+		expect(applyCompletion(text, loc, 'Georgia')).toBe('---\nheader-font: [\"Georgia\", Palatino]\n---\n');
+	});
+
+	test('array value completion preserves quotes around an individual item', () => {
+		const text = '---\nheader-font: [Georgia, \"Pal\"]\n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf('Pal') + 'Pal'.length);
+		expect(applyCompletion(text, loc, 'Palatino')).toBe('---\nheader-font: [Georgia, \"Palatino\"]\n---\n');
+	});
+
+	test('array value completion preserves spacing when invoked directly after a comma', () => {
+		const text = '---\nheader-font: [Georgia, Pal]\n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf(',') + 1);
+		expect(applyCompletion(text, loc, 'Palatino')).toBe('---\nheader-font: [Georgia, Palatino]\n---\n');
+	});
+
+	test('array value completion preserves item quotes at cursor boundaries', () => {
+		for (const quote of ['"', "'"]) {
+			const text = '---\nheader-font: [Georgia, ' + quote + 'Pal' + quote + ']\n---\n';
+			for (const offset of [text.indexOf(quote), text.lastIndexOf(quote) + 1]) {
+				const loc = getFrontmatterLocation(text, offset);
+				expect(applyCompletion(text, loc, 'Palatino')).toBe(
+					'---\nheader-font: [Georgia, ' + quote + 'Palatino' + quote + ']\n---\n',
+				);
+			}
+		}
+	});
+
+	test('array value completion handles an empty first bare item', () => {
+		const text = '---\nheader-font: , Georgia\n---\n';
+		const offset = text.indexOf(',');
+		const loc = getFrontmatterLocation(text, offset);
+		expect(loc.valueStart).toBeLessThanOrEqual(offset);
+		expect(loc.valueEnd).toBeGreaterThanOrEqual(offset);
+		expect(applyCompletion(text, loc, 'Baskerville')).toBe('---\nheader-font: Baskerville, Georgia\n---\n');
+	});
+
+	test('array completion ranges always contain the cursor in surrounding whitespace', () => {
+		const cases = [
+			{ text: '---\nheader-font: [Georgia,   Pal]\n---\n', marker: ', ' },
+			{ text: '---\nheader-font: [Georgia, Pal ]\n---\n', marker: 'Pal ' },
+			{ text: '---\nheader-font: [Georgia,  ]\n---\n', marker: ', ' },
+		];
+		for (const testCase of cases) {
+			const offset = testCase.text.indexOf(testCase.marker) + testCase.marker.length;
+			const loc = getFrontmatterLocation(testCase.text, offset);
+			expect(loc.valueStart).toBeLessThanOrEqual(offset);
+			expect(loc.valueEnd).toBeGreaterThanOrEqual(offset);
+		}
+	});
+
+	test('array completions are suppressed after the closing bracket', () => {
+		const text = '---\nheader-font: [Georgia, Palatino]\n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf(']') + 1);
+		expect(getFrontmatterCompletionItems(loc, 'darwin')).toEqual([]);
+	});
+
+	test('unfinished frontmatter with no YAML suggestions can fall through to body completions', () => {
+		const text = '---\n\nBody [@smi';
+		const loc = getFrontmatterLocation(text, text.length);
+		expect(loc.frontmatterClosed).toBe(false);
+		expect(getFrontmatterCompletionItems(loc, 'darwin')).toEqual([]);
 	});
 
 	test('value completions for boolean field', () => {
