@@ -227,6 +227,11 @@ class Parser {
   }
 
   private parseGroup(): string {
+    // Skip whitespace-only text tokens so arguments split across lines
+    // (e.g. \frac{num}\n{den}) still bind to the command.
+    while (this.peek()?.type === 'text' && this.peek()!.value.trim() === '') {
+      this.consume();
+    }
     const token = this.peek();
     if (token?.type === 'lbrace') {
       this.consume(); // consume '{'
@@ -451,14 +456,29 @@ class Parser {
       }
 
       // \overbrace{} and \underbrace{}
+      // A directly following script (^ for overbrace, _ for underbrace) is the
+      // brace label: emit m:limUpp/m:limLow so Word renders it above/below the
+      // brace instead of as an inline super/subscript.
       case '\\overbrace': {
         const obContent = this.parseGroup();
-        return '<m:groupChr><m:groupChrPr><m:chr m:val="\u23DE"/><m:pos m:val="top"/></m:groupChrPr><m:e>' + obContent + '</m:e></m:groupChr>';
+        const groupChr = '<m:groupChr><m:groupChrPr><m:chr m:val="\u23DE"/><m:pos m:val="top"/></m:groupChrPr><m:e>' + obContent + '</m:e></m:groupChr>';
+        if (this.peek()?.type === 'caret') {
+          this.consume();
+          const label = this.parseGroup();
+          return '<m:limUpp><m:e>' + groupChr + '</m:e><m:lim>' + label + '</m:lim></m:limUpp>';
+        }
+        return groupChr;
       }
 
       case '\\underbrace': {
         const ubContent = this.parseGroup();
-        return '<m:groupChr><m:groupChrPr><m:chr m:val="\u23DF"/><m:pos m:val="bot"/></m:groupChrPr><m:e>' + ubContent + '</m:e></m:groupChr>';
+        const groupChr = '<m:groupChr><m:groupChrPr><m:chr m:val="\u23DF"/><m:pos m:val="bot"/></m:groupChrPr><m:e>' + ubContent + '</m:e></m:groupChr>';
+        if (this.peek()?.type === 'underscore') {
+          this.consume();
+          const label = this.parseGroup();
+          return '<m:limLow><m:e>' + groupChr + '</m:e><m:lim>' + label + '</m:lim></m:limLow>';
+        }
+        return groupChr;
       }
 
       // Tags and labels (silently consumed)
