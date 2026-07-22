@@ -396,7 +396,9 @@ function translateRun(children: XmlNode[]): string {
   if (style === 'p') {
     // \mathrm{} collapses interior spaces when re-rendered by LaTeX/KaTeX;
     // plain-style runs containing whitespace must round-trip as \text{}.
-    if (/\s/.test(mapped)) {
+    // Test the original text, not `mapped` — unicodeToLatex inserts synthetic
+    // separator spaces after commands (αx → \alpha x) that are not prose.
+    if (/\s/.test(text)) {
       return '\\text{' + mapped + '}';
     }
     return '\\mathrm{' + mapped + '}';
@@ -719,7 +721,7 @@ function braceGroupContent(eChildren: XmlNode[], chr: string, pos: string): stri
   const actualChr = chrNode ? getOmmlAttr(chrNode, 'val') : '⏞';
   const posNode = findChildNode(pr, 'm:pos');
   const actualPos = getOmmlAttr(posNode, 'val') || 'top';
-  if (actualChr !== chr && actualPos !== pos) return null;
+  if (actualChr !== chr || actualPos !== pos) return null;
   return ommlToLatex(findChild(groupChildren, 'm:e'));
 }
 

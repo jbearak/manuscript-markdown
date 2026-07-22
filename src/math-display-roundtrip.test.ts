@@ -4,7 +4,9 @@ import { join } from 'node:path';
 import { convertMdToDocx } from './md-to-docx';
 import { convertDocx } from './converter';
 import { latexToOmml } from './latex-to-omml';
-import { roundTrip } from './test-omml-helpers';
+import { ommlToLatex } from './omml';
+import { roundTrip, parserOptions } from './test-omml-helpers';
+import { XMLParser } from 'fast-xml-parser';
 
 const repoRoot = join(__dirname, '..');
 
@@ -63,6 +65,15 @@ describe('latexToOmml: multi-line arguments and labeled braces', () => {
     expect(omml).toContain('<m:sSup>');
     expect(omml).not.toContain('<m:limLow>');
   });
+
+  it('recognizes the brace label across whitespace before the script operator', () => {
+    const under = latexToOmml('\\underbrace{x} _{a}');
+    expect(under).toContain('<m:limLow>');
+    expect(under).not.toContain('<m:sSub>');
+    const over = latexToOmml('\\overbrace{x}\n^{a}');
+    expect(over).toContain('<m:limUpp>');
+    expect(over).not.toContain('<m:sSup>');
+  });
 });
 
 describe('ommlToLatex: labeled braces and \\text{} preservation', () => {
@@ -99,6 +110,32 @@ describe('ommlToLatex: labeled braces and \\text{} preservation', () => {
   it('still recognizes known functions whose name is a \\text run', () => {
     const latex = roundTrip('\\sin{x}');
     expect(latex).toBe('\\sin{x}');
+  });
+
+  it('does not emit \\text{} for synthetic command-separator spaces (αx)', () => {
+    // unicodeToLatex maps αx → "\alpha x"; that space is a command
+    // delimiter, not prose whitespace, so \mathrm{} must be kept.
+    const omml =
+      '<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>αx</m:t></m:r>';
+    const parsed = new XMLParser(parserOptions).parse('<m:oMath>' + omml + '</m:oMath>');
+    expect(ommlToLatex(parsed[0]['m:oMath'])).toBe('\\mathrm{\\alpha x}');
+  });
+
+  it('does not rewrite limLow/limUpp as braces when chr or pos mismatches', () => {
+    const parse = (xml: string) => {
+      const parsed = new XMLParser(parserOptions).parse('<m:oMath>' + xml + '</m:oMath>');
+      return ommlToLatex(parsed[0]['m:oMath']);
+    };
+    // Underbrace chr but top position: not a labeled underbrace
+    const mismatchedPos =
+      '<m:limLow><m:e><m:groupChr><m:groupChrPr><m:chr m:val="⏟"/><m:pos m:val="top"/></m:groupChrPr>' +
+      '<m:e><m:r><m:t>x</m:t></m:r></m:e></m:groupChr></m:e><m:lim><m:r><m:t>n</m:t></m:r></m:lim></m:limLow>';
+    expect(parse(mismatchedPos)).toBe('\\underset{n}{\\underbrace{x}}');
+    // Bottom position but non-brace character: not a labeled overbrace
+    const mismatchedChr =
+      '<m:limUpp><m:e><m:groupChr><m:groupChrPr><m:chr m:val="⏜"/><m:pos m:val="top"/></m:groupChrPr>' +
+      '<m:e><m:r><m:t>x</m:t></m:r></m:e></m:groupChr></m:e><m:lim><m:r><m:t>a</m:t></m:r></m:lim></m:limUpp>';
+    expect(parse(mismatchedChr)).toContain('\\overset{a}{');
   });
 });
 
