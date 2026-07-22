@@ -31,10 +31,6 @@ jobs:
       (github.event.workflow_run.conclusion == 'success' &&
        startsWith(github.event.workflow_run.head_branch, 'v'))
 
-    # Configure this Environment in GitHub with required reviewers,
-    # and store publish tokens as environment secrets.
-    environment: release
-
     steps:
       - name: Checkout tag
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
