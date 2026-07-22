@@ -394,6 +394,13 @@ function translateRun(children: XmlNode[]): string {
     return '\\mathcal{' + mapped + '}';
   }
   if (style === 'p') {
+    // \mathrm{} collapses interior spaces when re-rendered by LaTeX/KaTeX;
+    // plain-style runs containing whitespace must round-trip as \text{}.
+    // Test the original text, not `mapped` — unicodeToLatex inserts synthetic
+    // separator spaces after commands (αx → \alpha x) that are not prose.
+    if (/\s/.test(text)) {
+      return '\\text{' + mapped + '}';
+    }
     return '\\mathrm{' + mapped + '}';
   }
   return mapped;
@@ -650,8 +657,8 @@ function translateFunction(children: XmlNode[]): string {
   const fNameChildren = findChild(children, 'm:fName');
   let name = ommlToLatex(fNameChildren);
 
-  // Strip \mathrm{} wrapping that translateRun may have added
-  const mathrm = /^\\mathrm\{(.+)\}$/.exec(name);
+  // Strip \mathrm{} / \text{} wrapping that translateRun may have added
+  const mathrm = /^\\(?:mathrm|text)\{(.+)\}$/.exec(name);
   if (mathrm) {
     name = mathrm[1];
   }
@@ -701,23 +708,53 @@ function translateBorderBox(children: XmlNode[]): string {
 
 
 /**
+ * If the element children consist solely of an m:groupChr with the given
+ * brace character/position, return its inner content's LaTeX; otherwise null.
+ * Used to reconstruct \underbrace{x}_{label} / \overbrace{x}^{label} from
+ * the m:limLow/m:limUpp wrapping that latexToOmml emits for labeled braces.
+ */
+function braceGroupContent(eChildren: XmlNode[], chr: string, pos: string): string | null {
+  const groupChildren = findChild(eChildren, 'm:groupChr');
+  if (groupChildren.length === 0 || !isSoleContent(eChildren, 'm:groupChr')) return null;
+  const pr = findChild(groupChildren, 'm:groupChrPr');
+  const chrNode = findChildNode(pr, 'm:chr');
+  const actualChr = chrNode ? getOmmlAttr(chrNode, 'val') : '⏞';
+  const posNode = findChildNode(pr, 'm:pos');
+  const actualPos = getOmmlAttr(posNode, 'val') || 'top';
+  if (actualChr !== chr || actualPos !== pos) return null;
+  return ommlToLatex(findChild(groupChildren, 'm:e'));
+}
+
+/**
  * Translate an m:limLow (lower limit) element to LaTeX.
- * Emits \underset{lim}{base}.
+ * Emits \underbrace{base}_{lim} when the base is an underbrace group,
+ * otherwise \underset{lim}{base}.
  */
 function translateLimLow(children: XmlNode[]): string {
-  const base = ommlToLatex(findChild(children, 'm:e'));
+  const eChildren = findChild(children, 'm:e');
   const lim = ommlToLatex(findChild(children, 'm:lim'));
+  const braceContent = braceGroupContent(eChildren, '⏟', 'bot');
+  if (braceContent !== null) {
+    return `\\underbrace{${braceContent}}_{${lim}}`;
+  }
+  const base = ommlToLatex(eChildren);
   return `\\underset{${lim}}{${base}}`;
 }
 
 
 /**
  * Translate an m:limUpp (upper limit) element to LaTeX.
- * Emits \overset{lim}{base}.
+ * Emits \overbrace{base}^{lim} when the base is an overbrace group,
+ * otherwise \overset{lim}{base}.
  */
 function translateLimUpp(children: XmlNode[]): string {
-  const base = ommlToLatex(findChild(children, 'm:e'));
+  const eChildren = findChild(children, 'm:e');
   const lim = ommlToLatex(findChild(children, 'm:lim'));
+  const braceContent = braceGroupContent(eChildren, '⏞', 'top');
+  if (braceContent !== null) {
+    return `\\overbrace{${braceContent}}^{${lim}}`;
+  }
+  const base = ommlToLatex(eChildren);
   return `\\overset{${lim}}{${base}}`;
 }
 
