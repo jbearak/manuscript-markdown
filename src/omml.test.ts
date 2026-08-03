@@ -40,6 +40,7 @@ const KNOWN_UNICODE_LATEX: [string, string][] = [
   ['⇒', '\\Rightarrow'], ['⇐', '\\Leftarrow'], ['↔', '\\leftrightarrow'],
   ['∀', '\\forall'], ['∃', '\\exists'], ['¬', '\\neg'],
   ['∧', '\\land'], ['∨', '\\lor'], ['⊕', '\\oplus'], ['⊗', '\\otimes'],
+  ['∣', '\\mid'],
   ['·', '\\cdot'], ['…', '\\ldots'], ['⋯', '\\cdots'],
 ];
 
@@ -186,6 +187,20 @@ describe('Feature: docx-equation-conversion, Property 11: Math run text handling
         const result = ommlToLatex([node]);
         return !result.includes('\\mathrm{') && result === text;
       }),
+      { numRuns: 100 },
+    );
+  });
+
+  it('alphabetic command at a run boundary gets a separator space before a letter', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(...KNOWN_UNICODE_LATEX.filter(([, cmd]) => /[A-Za-z]$/.test(cmd))),
+        asciiLetter,
+        ([ch, cmd], letter) => {
+          const result = ommlToLatex([makeRun(ch), makeRun(letter)]);
+          return result === cmd + ' ' + letter;
+        },
+      ),
       { numRuns: 100 },
     );
   });

@@ -58,6 +58,7 @@ const UNICODE_LATEX_MAP: Map<string, string> = new Map([
   ['⇒', '\\Rightarrow'], ['⇐', '\\Leftarrow'], ['↔', '\\leftrightarrow'],
   ['∀', '\\forall'], ['∃', '\\exists'], ['¬', '\\neg'],
   ['∧', '\\land'], ['∨', '\\lor'], ['⊕', '\\oplus'], ['⊗', '\\otimes'],
+  ['∣', '\\mid'],
   ['·', '\\cdot'], ['…', '\\ldots'], ['⋯', '\\cdots'],
   ['⋱', '\\ddots'], ['⋮', '\\vdots'],
 ]);
@@ -798,6 +799,20 @@ function translateGroupChr(children: XmlNode[]): string {
 // Node dispatch
 // ---------------------------------------------------------------------------
 
+/**
+ * Append a LaTeX chunk to accumulated output, inserting a separator space when
+ * the boundary would merge an alphabetic command with a following letter
+ * (e.g. run "∣" + run "m" must become "\mid m", not "\midm"). This is the
+ * cross-run counterpart of the guard inside unicodeToLatex(), which can only
+ * see letters within a single run.
+ */
+function appendLatex(acc: string, chunk: string): string {
+  if (chunk && /\\[A-Za-z]+$/.test(acc) && /^[A-Za-z]/.test(chunk)) {
+    return acc + ' ' + chunk;
+  }
+  return acc + chunk;
+}
+
 /** Dispatch a single parsed node to the appropriate translator. */
 function translateNode(node: XmlNode): string {
   let result = '';
@@ -823,8 +838,8 @@ function translateNode(node: XmlNode): string {
       case 'm:limUpp':    result += translateLimUpp(children); break;
       case 'm:bar':       result += translateBar(children); break;
       case 'm:groupChr':  result += translateGroupChr(children); break;
-      case 'm:r':         result += translateRun(children); break;
-      case 'm:t':         result += extractText(children); break;
+      case 'm:r':         result = appendLatex(result, translateRun(children)); break;
+      case 'm:t':         result = appendLatex(result, extractText(children)); break;
       default:
         if (SKIP_TAGS.has(key)) {
           // Silently skip property/control tags
@@ -853,7 +868,7 @@ export function ommlToLatex(children: XmlNode[]): string {
   if (!Array.isArray(children)) return '';
   let result = '';
   for (const child of children) {
-    result += translateNode(child);
+    result = appendLatex(result, translateNode(child));
   }
   return result.trim();
 }

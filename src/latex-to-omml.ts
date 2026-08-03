@@ -33,6 +33,7 @@ const LATEX_UNICODE_MAP: Map<string, string> = new Map([
   ['\\Rightarrow', '⇒'], ['\\Leftarrow', '⇐'], ['\\leftrightarrow', '↔'],
   ['\\forall', '∀'], ['\\exists', '∃'], ['\\neg', '¬'],
   ['\\land', '∧'], ['\\lor', '∨'], ['\\oplus', '⊕'], ['\\otimes', '⊗'],
+  ['\\mid', '∣'],
   ['\\cdot', '·'], ['\\ldots', '…'], ['\\cdots', '⋯'],
   ['\\dots', '…'], ['\\dotsc', '…'], ['\\dotsb', '…'], ['\\dotsm', '…'], ['\\dotsi', '…'],
   ['\\ddots', '⋱'], ['\\vdots', '⋮'],
