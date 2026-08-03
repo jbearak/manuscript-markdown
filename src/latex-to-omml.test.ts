@@ -26,6 +26,13 @@ describe('latexToOmml', () => {
     expect(result3).toBe('<m:r><m:t>Γ</m:t></m:r>');
   });
 
+  test('\\mid renders as divides bar and round-trips', () => {
+    const result = latexToOmml('p_{w \\mid m,y}');
+    expect(result).toContain('∣');
+    expect(result).not.toContain('\\mid');
+    expect(roundTrip('a \\mid b')).toBe('a \\mid b');
+  });
+
   test('fractions', () => {
     const result = latexToOmml('\\frac{a}{b}');
     expect(result).toBe('<m:f><m:num><m:r><m:t>a</m:t></m:r></m:num><m:den><m:r><m:t>b</m:t></m:r></m:den></m:f>');
