@@ -60,9 +60,10 @@ The frontmatter may also include citation-related fields (`csl`, `locale`, `zote
 | `code-font-color` | Code block and inline code text color. A 6-digit hex value (e.g., `2E2E2E`). Default: `2E2E2E`. Alias: `code-color`. |
 | `code-block-inset` | Border width for code blocks in shading mode, in eighths of a point (`w:sz`). A positive integer. Default: `48`. Does not affect inline code. |
 | `blockquote-style` | Word paragraph style for blockquotes: `Quote`, `IntenseQuote`, or `GitHub` (gray left border bar). Case-insensitive. Default: `GitHub`. Overrides the VS Code setting. |
+| `callout-labels` | Whether alert callouts show their type label (for example, **Note** or **Warning**) in preview and DOCX output. Accepts only `true` or `false`. Default: `true`. When `false`, the label row is hidden while the callout body, type, colors, border, and other styling are preserved. |
+| `colors` | Named color scheme for alert callouts: `github` or `guttmacher`. |
 | `pipe-table-max-line-width` | Maximum line width for pipe tables in DOCX→MD conversion. Tables wider than this fall back to HTML. `0` disables pipe tables entirely. Default: `120`. Overrides the VS Code `pipeTableMaxLineWidth` setting but is itself overridden by the CLI `--pipe-table-max-line-width` flag. |
 | `grid-table-max-line-width` | Maximum source line width for grid tables. Tables wider than this fall back to HTML. Default: inherited from `pipe-table-max-line-width`. |
-| `colors` | Named color scheme for syntax-highlighted code blocks: `github` or `guttmacher`. |
 | `breaks` | When `true`, bare newlines within a paragraph are treated as hard line breaks (`<w:br/>`) in DOCX output. When `false` (default), bare newlines are soft breaks rendered as spaces — use a trailing `\` for an explicit hard line break. See [Line Breaks](#line-breaks). |
 | `line-spacing` | Line spacing for body text: `single`, `1.5`, `double`, or a numeric multiplier (e.g., `1.8`). When set to a non-single value (other than the default 1.15), inter-paragraph spacing is removed and first-line paragraph indentation is automatically enabled (see [Line Spacing and Paragraph Indent](#line-spacing-and-paragraph-indent)). |
 | `paragraph-indent` | First-line paragraph indentation in inches (e.g., `0.5`, `0.3`). Auto-enabled at 0.5 inches when `line-spacing` is non-single. Set to `none` to disable auto-indent while keeping line spacing. |
@@ -518,7 +519,7 @@ The `breaks: true` frontmatter setting changes the default behavior so that bare
 - **Task list items** are parsed semantically as checkbox list items, not only plain text prefixes.
 - **Disallowed raw HTML** follows the GitHub extension set (`title`, `textarea`, `style`, `xmp`, `iframe`, `noembed`, `noframes`, `script`, `plaintext`) and is treated as literal text in preview/conversion paths.
 - **Intentional HTML exceptions**: HTML comments (`<!-- ... -->`) and supported inline HTML formatting tags used by this project (for example `<u>`, `<sup>`, `<sub>`) remain supported.
-- **Alerts** use GitHub's blockquote-based syntax with `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, and `> [!CAUTION]` markers on the first line. Alert content follows on subsequent `>` lines. Alerts are displayed with colored left borders and type-specific header icons in preview and are preserved through DOCX round-trip.
+- **Alerts** use GitHub's blockquote-based syntax with `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, and `> [!CAUTION]` markers on the first line. Alert content follows on subsequent `>` lines. Alerts are displayed with colored left borders and type-specific header icons in preview and are preserved through DOCX round-trip. Type labels are shown by default; set `callout-labels: false` in frontmatter to hide the label row in both preview and DOCX output without removing the callout's body, type, colors, border, or other styling. An explicit `true` or `false` value round-trips through DOCX via the `MANUSCRIPT_CALLOUT_LABELS` custom property.
 
 ## Tables
 

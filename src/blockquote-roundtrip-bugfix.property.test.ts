@@ -163,6 +163,32 @@ describe('Property 1: Fault Condition — Blockquote Roundtrip Fidelity', () => 
    * should be preserved. On unfixed code, markdown-it merges them or a spurious
    * blank line appears.
    */
+  test('adjacent same-type zero-gap alerts remain distinct with labels disabled', async () => {
+    await fc.assert(
+      fc.asyncProperty(alertTypeArb, shortBody, shortBody, async (type, body1, body2) => {
+        const md = '> [!' + type + ']\n> ' + body1 + '\n> [!' + type + ']\n> ' + body2;
+        const { docx } = await convertMdToDocx(md, { calloutLabels: false });
+        const { markdown } = await convertDocx(docx);
+        const result = stripFrontmatter(markdown);
+
+        const resultGroups = extractBlockquoteGroups(result);
+        expect(resultGroups).toHaveLength(2);
+        expect((result.match(new RegExp('> \\[!' + type + '\\]', 'g')) || [])).toHaveLength(2);
+        expect(countBlankLinesBetweenGroups(result, 0)).toBe(0);
+      }),
+      { numRuns: 10, verbose: true },
+    );
+  }, { timeout: 30000 });
+
+  test('adjacent nested same-type alerts keep zero-gap grouping with labels disabled', async () => {
+    const md = '> [!NOTE]\n> outer\n> > [!TIP]\n> > n1\n> > [!TIP]\n> > n2';
+    const { docx } = await convertMdToDocx(md, { calloutLabels: false });
+    const { markdown } = await convertDocx(docx);
+    const result = stripFrontmatter(markdown);
+
+    expect(result.trim()).toBe(md);
+  });
+
   test('two alerts separated by zero blank lines preserves adjacency', async () => {
     await fc.assert(
       fc.asyncProperty(alertTypeArb, alertTypeArb, shortBody, shortBody, async (type1, type2, body1, body2) => {

@@ -465,6 +465,49 @@ describe('iterateFences / stripFencedCodeBlocks', () => {
 });
 
 describe('alerts integration: md -> docx -> md', () => {
+  it('restores explicit callout-labels frontmatter values', async () => {
+    for (const calloutLabels of [true, false]) {
+      const md = [
+        '---',
+        'callout-labels: ' + calloutLabels,
+        '---',
+        '',
+        '> [!NOTE]',
+        '> Useful information.',
+      ].join('\n');
+      const { docx } = await convertMdToDocx(md);
+      const rt = await convertDocx(docx);
+      expect(rt.markdown).toContain('callout-labels: ' + calloutLabels);
+      expect(rt.markdown).toContain('> [!NOTE]\n> Useful information.');
+    }
+  });
+
+  it('preserves label-like body text when generated labels are disabled', async () => {
+    const cases = [
+      ['NOTE', 'Note: retain this text'],
+      ['TIP', 'Tip: retain this text'],
+      ['IMPORTANT', 'Important: retain this text'],
+      ['WARNING', 'Warning: retain this text'],
+      ['CAUTION', 'Caution: retain this text'],
+      ['NOTE', '※ Note: retain this text'],
+      ['TIP', '**Tip:** retain this text'],
+    ] as const;
+
+    for (const [type, body] of cases) {
+      const md = [
+        '---',
+        'callout-labels: false',
+        '---',
+        '',
+        '> [!' + type + ']',
+        '> ' + body,
+      ].join('\n');
+      const { docx } = await convertMdToDocx(md);
+      const rt = await convertDocx(docx);
+      expect(rt.markdown).toContain('> [!' + type + ']\n> ' + body);
+    }
+  });
+
   it('round-trips mixed alert blocks with canonical markers', async () => {
     const md = [
       '# Alerts',

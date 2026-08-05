@@ -23,6 +23,7 @@ export interface ManuscriptMarkdownIt extends MarkdownIt {
 }
 
 interface PreviewEnvironment {
+  calloutLabels?: boolean;
   colorScheme?: ColorScheme;
   currentDocument?: string | { fsPath?: unknown };
   lineMap?: LineMap;
@@ -167,12 +168,43 @@ function alertBlockquoteRule(state: StateCore): void {
 
     if (hits.length === 0) { i++; continue; }
 
-    // Strip marker text from all hits
+    // Strip marker text from all hits. When the generated title is hidden,
+    // also remove the source-line separator so breaks mode does not render
+    // an empty first row before the authored body.
+    const hidesAlertLabels = getPreviewEnvironment(state).calloutLabels === false;
     for (const hit of hits) {
       const children = tokens[hit.inlineIdx].children;
       if (!children) continue;
-      const firstText = children.find(child => child.type === 'text' && child.content.length > 0);
-      if (firstText) firstText.content = hit.rest;
+      const firstTextIdx = children.findIndex(child => child.type === 'text' && child.content.length > 0);
+      if (firstTextIdx === -1) continue;
+      children[firstTextIdx].content = hit.rest;
+      if (hidesAlertLabels && hit.rest.length === 0) {
+        let separatorIndex = firstTextIdx + 1;
+        while (
+          (children[separatorIndex]?.type === 'html_inline'
+            && /^<!--[\s\S]*-->$/.test(children[separatorIndex].content.trim()))
+          || (children[separatorIndex]?.type === 'text'
+            && children[separatorIndex].content.trim().length === 0)
+        ) {
+          separatorIndex++;
+        }
+        const separator = children[separatorIndex];
+        if (separator?.type === 'softbreak' || separator?.type === 'hardbreak') {
+          children.splice(separatorIndex, 1);
+        }
+        const markerParagraphIsEmpty = children.every(child =>
+          (child.type === 'text' && child.content.trim().length === 0)
+          || (child.type === 'html_inline'
+            && /^<!--[\s\S]*-->$/.test(child.content.trim()))
+        );
+        if (markerParagraphIsEmpty) {
+          tokens[hit.paraOpenIdx].hidden = true;
+          const paragraphClose = tokens[hit.inlineIdx + 1];
+          if (paragraphClose?.type === 'paragraph_close') {
+            paragraphClose.hidden = true;
+          }
+        }
+      }
     }
 
     if (hits.length === 1) {
@@ -1046,6 +1078,7 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
     const { metadata } = parseFrontmatter(state.src);
     const defaultScheme = md.manuscriptColors ?? getDefaultColorScheme();
     const env = getPreviewEnvironment(state);
+    env.calloutLabels = metadata.calloutLabels ?? true;
     env.colorScheme = metadata.colors || defaultScheme;
     md.set({ breaks: metadata.breaks ?? false });
     // Embed preprocessing runs first so embedded .md files with grid tables get
@@ -1233,6 +1266,15 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
     }
   });
 
+  // VS Code's built-in GFM renderer may replace our blockquote renderer, so use
+  // a trusted, narrowly-scoped style token as a fallback when labels are disabled.
+  md.core.ruler.push('manuscript_callout_labels_style', (state: StateCore) => {
+    if (getPreviewEnvironment(state).calloutLabels !== false) return;
+    const token = new state.Token('manuscript_style', '', 0);
+    token.content = '<style>\n.markdown-alert > .markdown-alert-title { display: none !important; }\n</style>\n';
+    state.tokens.unshift(token);
+  });
+
   // Remap token .map values from preprocessed line numbers back to original
   // source line numbers so VS Code's data-line scroll sync attributes are correct.
   // Must run after all other core rules that create or modify tokens.
@@ -1369,10 +1411,13 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
       return self.renderToken(tokens, idx, options);
     }
     const dataLine = token.map ? ' data-line="' + token.map[0] + '"' : '';
-    const title = token.meta?.gfmAlertTitle || gfmAlertTitle(alertType);
-    const colorScheme = (env as PreviewEnvironment).colorScheme;
+    const previewEnv = env as PreviewEnvironment;
+    const colorScheme = previewEnv.colorScheme;
     const schemeClass = colorScheme && ALLOWED_PREVIEW_SCHEMES.has(colorScheme) ? ' color-scheme-' + colorScheme : '';
-    return '<blockquote' + dataLine + ' class="markdown-alert markdown-alert-' + alertType + schemeClass + '"><p class="markdown-alert-title">' + alertOcticonSvg(alertType) + ' ' + escapeHtmlText(title) + '</p>\n';
+    const blockquote = '<blockquote' + dataLine + ' class="markdown-alert markdown-alert-' + alertType + schemeClass + '">';
+    if (previewEnv.calloutLabels === false) return blockquote + '\n';
+    const title = token.meta?.gfmAlertTitle || gfmAlertTitle(alertType);
+    return blockquote + '<p class="markdown-alert-title">' + alertOcticonSvg(alertType) + ' ' + escapeHtmlText(title) + '</p>\n';
   };
 
 }

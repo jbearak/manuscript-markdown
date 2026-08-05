@@ -28,6 +28,7 @@ import {
   extractBibKeyOrder,
   extractBibData,
   extractBibliographyPath,
+  extractCalloutLabels,
 } from './converter';
 import { convertMdToDocx } from './md-to-docx';
 
@@ -98,6 +99,30 @@ describe('DOCX table conversion', () => {
     expect(result.markdown).toContain('<td>');
     expect(result.markdown).toContain('<p>first paragraph</p>');
     expect(result.markdown).toContain('<p>second paragraph</p>');
+  });
+
+  test('ignores generated callout spacer paragraphs inside table cells', async () => {
+    const { docx } = await convertMdToDocx('| H |\n| --- |\n| x |');
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docx);
+    const spacer = '<w:p><w:pPr><w:pBdr><w:left w:val="single" w:sz="24" w:space="6" w:color="007EB5"/></w:pBdr>'
+      + '<w:spacing w:after="0" w:line="1" w:lineRule="exact"/><w:ind w:left="240"/></w:pPr></w:p>';
+    let cellIndex = 0;
+    const documentXml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', documentXml.replace(/<w:tc>/g, match => {
+      cellIndex++;
+      return cellIndex === 2 ? match + spacer : match;
+    }));
+    const modifiedDocx = await zip.generateAsync({ type: 'uint8array' });
+    const result = await convertDocx(modifiedDocx, 'authorYearTitle', {
+      pipeTableMaxLineWidth: 0,
+      gridTableMaxLineWidth: 0,
+    });
+
+    expect(result.markdown).toContain('| H |');
+    expect(result.markdown).toContain('| x |');
+    expect(result.markdown).not.toContain('<table>');
+    expect(result.markdown).not.toContain('<p></p>');
   });
 
   test('renders DOCX table with multi-paragraph cell as grid table', async () => {
@@ -3652,6 +3677,29 @@ describe('parseAlertType', () => {
 });
 
 describe('Blockquote round-trip', () => {
+  test('extracts string-valued callout labels robustly and returns null when omitted', async () => {
+    const { docx: explicitDocx } = await convertMdToDocx('> [!NOTE]\n> Body', { calloutLabels: false });
+    expect(await extractCalloutLabels(explicitDocx)).toBe(false);
+
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(explicitDocx);
+    const customXml = await zip.file('docProps/custom.xml')!.async('string');
+    zip.file('docProps/custom.xml', customXml.replace('<vt:lpwstr>false</vt:lpwstr>', '<vt:lpwstr> TRUE </vt:lpwstr>'));
+    const normalizedDocx = await zip.generateAsync({ type: 'uint8array' });
+    expect(await extractCalloutLabels(normalizedDocx)).toBe(true);
+
+    const { docx: omittedDocx } = await convertMdToDocx('> [!NOTE]\n> Body');
+    expect(await extractCalloutLabels(omittedDocx)).toBeNull();
+  });
+
+  test('restores explicit false callout-labels frontmatter', async () => {
+    const md = '---\ncallout-labels: false\n---\n\n> [!NOTE]\n> Body';
+    const { docx } = await convertMdToDocx(md);
+    const result = await convertDocx(docx);
+    expect(result.markdown).toContain('callout-labels: false');
+    expect(result.markdown).toContain('> [!NOTE]\n> Body');
+  });
+
   test('single blockquote round-trips through md→docx→md', async () => {
     const md = '> quoted text';
     const { docx } = await convertMdToDocx(md);
@@ -3721,6 +3769,16 @@ describe('Blockquote round-trip', () => {
     const xml = wrapDocumentXml(
       '<w:p><w:pPr><w:pStyle w:val="GitHubTip"/><w:ind w:left="240"/></w:pPr>'
       + '<w:r><w:rPr><w:b/></w:rPr><w:t>◈ Tip </w:t></w:r>'
+      + '<w:r><w:t>Helpful advice</w:t></w:r></w:p>'
+    );
+    const buf = await buildSyntheticDocx(xml);
+    const result = await convertDocx(buf);
+    expect(result.markdown).toContain('> [!TIP]\n> Helpful advice');
+  });
+
+  test('DOCX alert style without a visible prefix reconstructs canonical alert syntax', async () => {
+    const xml = wrapDocumentXml(
+      '<w:p><w:pPr><w:pStyle w:val="GitHubTip"/><w:ind w:left="240"/></w:pPr>'
       + '<w:r><w:t>Helpful advice</w:t></w:r></w:p>'
     );
     const buf = await buildSyntheticDocx(xml);
