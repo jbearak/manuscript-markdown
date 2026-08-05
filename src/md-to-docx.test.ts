@@ -74,6 +74,9 @@ function makeState(): DocxGenState {
     tableFontSizes: new Map(),
     tableFonts: new Map(),
     tableColWidths: new Map(),
+    tableDigits: new Map(),
+    tableDecimalMarks: new Map(),
+    tableDigitGroupings: new Map(),
     tableRunRPrExtra: '',
     landscapeTables: new Set(),
     portraitTables: new Set(),
@@ -730,6 +733,51 @@ describe('generateParagraph', () => {
     expect(result).toContain('⛒ Caution');
     expect(result).toContain('<w:br/>');
     expect(result).toContain('Watch out');
+  });
+
+  it('includes generated alert labels by default', () => {
+    const token: MdToken = {
+      type: 'blockquote',
+      level: 1,
+      alertType: 'note',
+      alertLead: true,
+      runs: [{ type: 'text', text: 'Content' }]
+    };
+    const result = generateParagraph(token, createState());
+    expect(result).toContain('※ Note');
+    expect(result).toContain('<w:r><w:br/></w:r>');
+  });
+
+  it('includes generated alert labels when explicitly enabled', () => {
+    const token: MdToken = {
+      type: 'blockquote',
+      level: 1,
+      alertType: 'note',
+      alertLead: true,
+      runs: [{ type: 'text', text: 'Content' }]
+    };
+    const result = generateParagraph(token, createState(), { calloutLabels: true });
+    expect(result).toContain('※ Note');
+    expect(result).toContain('<w:r><w:br/></w:r>');
+  });
+
+  it('omits only the generated alert label and following break when disabled', () => {
+    const token: MdToken = {
+      type: 'blockquote',
+      level: 1,
+      alertType: 'note',
+      alertLead: true,
+      alertFirst: true,
+      alertLast: true,
+      runs: [{ type: 'text', text: 'Content' }]
+    };
+    const result = generateParagraph(token, createState(), { calloutLabels: false, colors: 'github' });
+    expect(result).not.toContain('※ Note');
+    expect(result).not.toContain('<w:br/>');
+    expect(result).toContain('w:pStyle w:val="GitHubNote"');
+    expect(result).toContain('w:color="' + GITHUB_ALERT_COLORS.note + '"');
+    expect(result.match(/w:line="1" w:lineRule="exact"/g)).toHaveLength(2);
+    expect(result).toContain('Content');
   });
 
   it('generates bold colored alert title prefix', () => {
@@ -2703,6 +2751,55 @@ describe('generateParagraph blockquoteStyle option', () => {
     const state = makeState();
     const xml = generateParagraph(token, state, { blockquoteStyle: 'Quote' });
     expect(xml).toContain('w:ind w:left="1440"');
+  });
+});
+
+describe('callout-labels DOCX export', () => {
+  const alertMd = '> [!NOTE]\n> Useful information.';
+
+  it('uses frontmatter over the programmatic option', async () => {
+    const md = '---\ncallout-labels: false\n---\n\n' + alertMd;
+    const { docx } = await convertMdToDocx(md, { calloutLabels: true });
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docx);
+    const docXml = await zip.file('word/document.xml')!.async('string');
+    expect(docXml).not.toContain('※ Note');
+    expect(docXml).not.toContain('<w:br/>');
+    expect(docXml).toContain('w:pStyle w:val="GitHubNote"');
+  });
+
+  it('removes the marker line break when labels are hidden in breaks mode', async () => {
+    const md = '---\ncallout-labels: false\nbreaks: true\n---\n\n' + alertMd;
+    const { docx } = await convertMdToDocx(md);
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docx);
+    const docXml = await zip.file('word/document.xml')!.async('string');
+    expect(docXml).not.toContain('<w:br/>');
+    expect(docXml).toContain('Useful information.');
+
+    const { convertDocx } = await import('./converter');
+    const result = await convertDocx(docx);
+    expect(result.markdown).toContain('> [!NOTE]\n> Useful information.');
+    expect(result.markdown).not.toContain('> \\\nUseful information.');
+  });
+
+  it('stores every explicit true or false as a string custom property', async () => {
+    const JSZip = (await import('jszip')).default;
+    for (const calloutLabels of [true, false]) {
+      const { docx } = await convertMdToDocx(alertMd, { calloutLabels });
+      const zip = await JSZip.loadAsync(docx);
+      const customXml = await zip.file('docProps/custom.xml')!.async('string');
+      expect(customXml).toContain('name="MANUSCRIPT_CALLOUT_LABELS"');
+      expect(customXml).toContain('<vt:lpwstr>' + String(calloutLabels) + '</vt:lpwstr>');
+    }
+  });
+
+  it('omits the custom property when neither source is explicit', async () => {
+    const { docx } = await convertMdToDocx(alertMd);
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docx);
+    const customXml = await zip.file('docProps/custom.xml')!.async('string');
+    expect(customXml).not.toContain('MANUSCRIPT_CALLOUT_LABELS');
   });
 });
 

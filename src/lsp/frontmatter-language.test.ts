@@ -26,7 +26,7 @@ describe('schema completeness', () => {
 		'table-digits', 'table-decimal-mark', 'table-digit-grouping',
 		'code-background-color', 'code-font-color', 'code-block-inset',
 		'pipe-table-max-line-width', 'grid-table-max-line-width',
-		'blockquote-style', 'colors', 'styles', 'breaks',
+		'blockquote-style', 'callout-labels', 'colors', 'styles', 'breaks',
 		'line-spacing', 'paragraph-indent', 'bibliography-hanging-indent',
 	];
 
@@ -583,8 +583,8 @@ describe('getFrontmatterCompletionItems', () => {
 		expect(getFrontmatterCompletionItems(loc, 'darwin')).toEqual([]);
 	});
 
-	test('value completions for boolean field', () => {
-		const text = '---\nbreaks: \n---\n';
+	test('value completions for callout-labels', () => {
+		const text = '---\ncallout-labels: \n---\n';
 		const loc = getFrontmatterLocation(text, text.indexOf(': ') + 2);
 		const items = getFrontmatterCompletionItems(loc, 'darwin');
 		expect(items.map(i => i.label)).toEqual(['true', 'false']);
@@ -708,6 +708,16 @@ describe('getFrontmatterHover', () => {
 		expect(hover!.markdown).toContain('Body text font family');
 	});
 
+	test('hover on callout-labels documents default and preserved styling', () => {
+		const text = '---\ncallout-labels: false\n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf('callout-labels') + 3);
+		const hover = getFrontmatterHover(loc);
+		expect(hover).toBeDefined();
+		expect(hover!.markdown).toContain('**callout-labels**');
+		expect(hover!.markdown).toContain('Default: `true`');
+		expect(hover!.markdown).toContain('styling is preserved');
+	});
+
 	test('hover shows aliases', () => {
 		const text = '---\nbibliography: refs.bib\n---\n';
 		const loc = getFrontmatterLocation(text, text.indexOf('bibliography') + 3);
@@ -775,13 +785,13 @@ const stubCallbacks: FrontmatterValidationCallbacks = {
 
 describe('validateFrontmatter', () => {
 	test('valid frontmatter produces no diagnostics', async () => {
-		const text = '---\nfont: Georgia\nfont-size: 12\nbreaks: true\n---\n';
+		const text = '---\nfont: Georgia\nfont-size: 12\nbreaks: true\ncallout-labels: false\n---\n';
 		const diags = await validateFrontmatter(text, stubCallbacks);
 		expect(diags).toEqual([]);
 	});
 
-	test('invalid boolean value produces error', async () => {
-		const text = '---\nbreaks: maybe\n---\n';
+	test('invalid callout-labels value produces error', async () => {
+		const text = '---\ncallout-labels: maybe\n---\n';
 		const diags = await validateFrontmatter(text, stubCallbacks);
 		expect(diags.length).toBe(1);
 		expect(diags[0].severity).toBe('error');

@@ -262,6 +262,7 @@ export type ContentItem =
       alertType?: GfmAlertType; // present for GitHub alert styles
       isCodeBlock?: boolean;   // true if Word "Code Block" paragraph style
       blockquoteGroupIndex?: number; // sequential group index from md→docx gap metadata
+      isBlockquoteSpacer?: boolean; // generated visual spacer; retained only as an import grouping boundary
       customStyleName?: string;      // user-defined custom style name (from MsCustomXxx pStyle)
       paragraphLeftIndentTwips?: number; // raw OOXML left indent for structural inference
       blockquoteIndentUnitTwips?: 240 | 720; // base indent unit for blockquote styles
@@ -1540,6 +1541,15 @@ export async function extractBibliographyHangingIndent(data: Uint8Array | JSZip)
   return extractStringCustomProp(data, 'MANUSCRIPT_BIBLIOGRAPHY_HANGING_INDENT');
 }
 
+export async function extractCalloutLabels(data: Uint8Array | JSZip): Promise<boolean | null> {
+  const raw = await extractStringCustomProp(data, 'MANUSCRIPT_CALLOUT_LABELS');
+  if (raw === null) return null;
+  const normalized = raw.toLowerCase();
+  if (normalized === 'true') return true;
+  if (normalized === 'false') return false;
+  return null;
+}
+
 export async function extractDefaultTableDigits(data: Uint8Array | JSZip): Promise<string | null> {
   return extractStringCustomProp(data, 'MANUSCRIPT_DEFAULT_TABLE_DIGITS');
 }
@@ -2708,8 +2718,15 @@ export async function extractDocumentContent(
               break;
             }
           }
-          if (isSpacerParagraph || isSectionBreakHandled) {
-            continue; // skip spacer paragraph entirely
+          if (isSpacerParagraph) {
+            // Keep a structural-only boundary so adjacent same-type alerts remain
+            // separate even when generated labels are disabled. Table cells cannot
+            // contain alert groups, and their nested content bypasses top-level cleanup.
+            if (!inTableCell) target.push({ type: 'para', isBlockquoteSpacer: true });
+            continue;
+          }
+          if (isSectionBreakHandled) {
+            continue;
           }
 
           // Skip paragraphs inside bibliography field — text is already suppressed,
@@ -2731,6 +2748,7 @@ export async function extractDocumentContent(
             prevItem.headingLevel !== undefined ||
             prevItem.listMeta !== undefined ||
             prevItem.isTitle === true ||
+            prevItem.isBlockquoteSpacer === true ||
             prevItem.blockquoteLevel !== undefined ||
             prevItem.isCodeBlock === true ||
             prevItem.customStyleName !== undefined
@@ -4391,7 +4409,11 @@ function deriveBlockquoteSpacingFromStructure(content: ContentItem[]): {
   derivedBlockquotePreContentBlankLines: Map<number, number>;
   derivedBlockquotePostContentBlankLines: Map<number, number>;
 } {
-  const structuralItems = content.flatMap((item, index) => isStructuralBoundaryItem(item) ? [{ item, index }] : []);
+  const structuralItems = content.flatMap((item, index) =>
+    isStructuralBoundaryItem(item) && !(item.type === 'para' && item.isBlockquoteSpacer)
+      ? [{ item, index }]
+      : []
+  );
   const groups: Array<{ groupIndex: number; startPos: number; endPos: number }> = [];
 
   for (let pos = 0; pos < structuralItems.length; pos++) {
@@ -4499,6 +4521,12 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
     const item = content[i];
 
     if (item.type === 'para') {
+      if (item.isBlockquoteSpacer) {
+        currentBlockquoteGroupIndex = undefined;
+        lastBlockquoteLevel = undefined;
+        lastBlockquoteType = undefined;
+        continue;
+      }
       if (item.listMeta) {
         clearListContextsFromLevel(listContexts, item.listMeta.level + 1);
         for (const level of [...listTypesByLevel.keys()]) {
@@ -4581,7 +4609,7 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
 export function buildMarkdown(
   content: ContentItem[],
   comments: Map<string, Comment>,
-  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, { label: string; body: ContentItem[]; noteKind: 'footnote' | 'endnote' }>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null },
+  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, { label: string; body: ContentItem[]; noteKind: 'footnote' | 'endnote' }>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null },
 ): string {
   const mergedContent = mergeConsecutiveRuns(content);
 
@@ -4826,6 +4854,10 @@ export function buildMarkdown(
     }
 
     if (item.type === 'para') {
+      if (item.isBlockquoteSpacer) {
+        i++;
+        continue;
+      }
       if (
         isPlainEmptyParagraph(item) &&
         !paragraphHasContent(mergedContent, i)
@@ -5520,10 +5552,16 @@ export function buildMarkdown(
     let strippedAlertLeadHadHardBreak = false;
     let textOut = rendered.text;
     if (pendingAlertPrefixStrip) {
-      textOut = stripAlertLeadPrefix(rendered.text, pendingAlertPrefixStrip);
-      const removedLen = rendered.text.length - textOut.length;
-      if (removedLen > 0 && rendered.text.slice(0, removedLen).includes('\n')) {
-        strippedAlertLeadHadHardBreak = true;
+      if (options?.calloutLabels === false) {
+        // Marker-only alerts retain one parser-introduced leading space when the
+        // generated label/break is absent; remove only that known artifact.
+        if (textOut.startsWith(' ')) textOut = textOut.slice(1);
+      } else {
+        textOut = stripAlertLeadPrefix(rendered.text, pendingAlertPrefixStrip);
+        const removedLen = rendered.text.length - textOut.length;
+        if (removedLen > 0 && rendered.text.slice(0, removedLen).includes('\n')) {
+          strippedAlertLeadHadHardBreak = true;
+        }
       }
     }
     if (pendingAlertInlinePrefixForHardBreak !== undefined && (textOut.startsWith('\n') || textOut.startsWith('\\\n') || strippedAlertLeadHadHardBreak)) {
@@ -6211,6 +6249,7 @@ export async function convertDocx(
     storedLineSpacing,
     storedParagraphIndent,
     storedBibHangingIndent,
+    storedCalloutLabels,
     storedIndentOverrides,
     storedListIndentOverrides,
     embedDirectiveMapping,
@@ -6265,6 +6304,7 @@ export async function convertDocx(
     storedLineSpacing: extractLineSpacing(zip),
     storedParagraphIndent: extractParagraphIndent(zip),
     storedBibHangingIndent: extractBibliographyHangingIndent(zip),
+    storedCalloutLabels: extractCalloutLabels(zip),
     storedIndentOverrides: extractIndentOverrides(zip),
     storedListIndentOverrides: extractListIndentOverrides(zip),
     embedDirectiveMapping: extractEmbedDirectiveMapping(zip),
@@ -6330,6 +6370,12 @@ export async function convertDocx(
     derivedBlockquotePreContentBlankLines,
     derivedBlockquotePostContentBlankLines,
   } = annotateStructuralParagraphMetadata(docContent);
+  // Spacer markers have served their sole purpose as grouping boundaries; remove
+  // them before all later structural scans and Markdown rendering.
+  for (let i = docContent.length - 1; i >= 0; i--) {
+    const item = docContent[i];
+    if (item.type === 'para' && item.isBlockquoteSpacer) docContent.splice(i, 1);
+  }
 
   // Post-process: apply per-paragraph indent overrides from custom properties.
   // Uses the same body-paragraph counting as md-to-docx generation: count
@@ -6510,6 +6556,7 @@ export async function convertDocx(
     blockquotePreContentBlankLines: blockquotePreContentBlankLineMapping ?? derivedBlockquotePreContentBlankLines,
     blockquotePostContentBlankLines: blockquotePostContentBlankLineMapping ?? derivedBlockquotePostContentBlankLines,
     blockquoteAlertInlineByGroup: blockquoteAlertStyleMapping,
+    calloutLabels: storedCalloutLabels,
     imageFormatMapping,
     noteImageFormatMapping,
     tableFormatMapping,
@@ -6645,6 +6692,9 @@ export async function convertDocx(
     const bhi = storedBibHangingIndent.toLowerCase();
     if (bhi === 'true') fm.bibliographyHangingIndent = true;
     else if (bhi === 'false') fm.bibliographyHangingIndent = false;
+  }
+  if (storedCalloutLabels !== null) {
+    fm.calloutLabels = storedCalloutLabels;
   }
   const frontmatterStr = serializeFrontmatter(fm, storedFieldOrder ?? undefined);
   if (frontmatterStr) {

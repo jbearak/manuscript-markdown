@@ -53,6 +53,61 @@ describe('Manuscript Markdown Plugin Property Tests', () => {
       expect(html).not.toContain('[!NOTE]');
     });
 
+    it('omits alert title rows and injects the scoped fallback style when callout-labels is false', () => {
+      const html = renderWithPlugin(
+        '---\ncallout-labels: false\n---\n\n' +
+        '> [!NOTE]\n> Useful information.'
+      );
+      expect(html).toContain('markdown-alert markdown-alert-note');
+      expect(html).toContain('Useful information.');
+      expect(html).not.toContain('<p class="markdown-alert-title">');
+      expect(html).not.toContain('octicon markdown-alert-icon');
+      expect(html).toContain('.markdown-alert > .markdown-alert-title { display: none !important; }');
+      expect(html).not.toContain('[!NOTE]');
+    });
+
+    it('removes the marker line break when labels are hidden in breaks mode', () => {
+      const html = renderWithPlugin(
+        '---\ncallout-labels: false\nbreaks: true\n---\n\n' +
+        '> [!NOTE]\n> Useful information.'
+      );
+      expect(html).toContain('<p>Useful information.</p>');
+      expect(html).not.toContain('<p><br>');
+    });
+
+    it('keeps alert labels enabled when callout-labels is true or omitted', () => {
+      const explicit = renderWithPlugin('---\ncallout-labels: true\n---\n\n> [!TIP]\n> Explicit.');
+      const omitted = renderWithPlugin('> [!TIP]\n> Default.');
+      for (const html of [explicit, omitted]) {
+        expect(html).toContain('<p class="markdown-alert-title">');
+        expect(html).toContain('octicon markdown-alert-icon');
+        expect(html).not.toContain('.markdown-alert > .markdown-alert-title { display: none !important; }');
+      }
+    });
+
+    it('preserves alert colors, classes, and bodies when callout labels are disabled', () => {
+      const html = renderWithPlugin(
+        '---\ncallout-labels: false\ncolors: guttmacher\n---\n\n' +
+        '> [!WARNING]\n> Colored warning.'
+      );
+      expect(html).toContain('markdown-alert-warning color-scheme-guttmacher');
+      expect(html).toContain('Colored warning.');
+      expect(html).not.toContain('<p class="markdown-alert-title">');
+    });
+
+    it('omits title rows for multiple adjacent alerts when callout labels are disabled', () => {
+      const html = renderWithPlugin(
+        '---\ncallout-labels: false\n---\n\n' +
+        '> [!NOTE]\n> A note.\n> [!WARNING]\n> A warning.\n> [!TIP]\n> A tip.'
+      );
+      expect((html.match(/class="markdown-alert markdown-alert-/g) || []).length).toBe(3);
+      expect(html).toContain('A note.');
+      expect(html).toContain('A warning.');
+      expect(html).toContain('A tip.');
+      expect(html).not.toContain('<p class="markdown-alert-title">');
+      expect(html).not.toContain('octicon markdown-alert-icon');
+    });
+
     it('renders all alert variants with per-type classes and title case labels', () => {
       const html = renderWithPlugin(
         '> [!TIP]\n> tip text\n\n' +

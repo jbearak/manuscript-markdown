@@ -21,6 +21,7 @@ export const FRONTMATTER_MENU_SETTINGS: readonly FrontmatterMenuSetting[] = [
 	{ key: 'title-font-size', label: 'Title Font Size', group: 'typography' },
 	{ key: 'title-font-style', label: 'Title Font Style', group: 'typography' },
 	{ key: 'blockquote-style', label: 'Blockquote Style', group: 'typography' },
+	{ key: 'callout-labels', label: 'Callout Labels', group: 'typography' },
 	{ key: 'colors', label: 'Color Scheme', group: 'typography' },
 	{ key: 'styles', label: 'Custom Styles', group: 'typography' },
 

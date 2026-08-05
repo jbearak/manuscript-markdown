@@ -137,6 +137,7 @@ export interface Frontmatter {
   tableDecimalMark?: TableDecimalMark;
   tableDigitGrouping?: TableDigitGrouping;
   blockquoteStyle?: BlockquoteStyle;
+  calloutLabels?: boolean;
   colors?: ColorScheme;
   styles?: Record<string, CustomStyleDef>;
   breaks?: boolean;
@@ -458,6 +459,10 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
         if (style) metadata.blockquoteStyle = style;
         break;
       }
+      case 'callout-labels':
+        if (value === 'true') metadata.calloutLabels = true;
+        else if (value === 'false') metadata.calloutLabels = false;
+        break;
       case 'colors': {
         const scheme = normalizeColorScheme(value);
         if (scheme) metadata.colors = scheme;
@@ -555,6 +560,7 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
     'pipe-table-max-line-width': () => { if (metadata.pipeTableMaxLineWidth !== undefined) lines.push('pipe-table-max-line-width: ' + metadata.pipeTableMaxLineWidth); },
     'grid-table-max-line-width': () => { if (metadata.gridTableMaxLineWidth !== undefined) lines.push('grid-table-max-line-width: ' + metadata.gridTableMaxLineWidth); },
     'blockquote-style': () => { if (metadata.blockquoteStyle) lines.push('blockquote-style: ' + metadata.blockquoteStyle); },
+    'callout-labels': () => { if (metadata.calloutLabels !== undefined) lines.push('callout-labels: ' + metadata.calloutLabels); },
     'colors': () => { if (metadata.colors) lines.push('colors: ' + metadata.colors); },
     'styles': () => {
       if (!metadata.styles || Object.keys(metadata.styles).length === 0) return;
@@ -585,7 +591,7 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
     'table-digits', 'table-decimal-mark', 'table-digit-grouping',
     'code-background-color', 'code-font-color', 'code-block-inset',
     'pipe-table-max-line-width', 'grid-table-max-line-width',
-    'blockquote-style', 'colors', 'styles', 'breaks',
+    'blockquote-style', 'callout-labels', 'colors', 'styles', 'breaks',
     'line-spacing', 'paragraph-indent', 'bibliography-hanging-indent',
   ];
 

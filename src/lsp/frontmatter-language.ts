@@ -17,7 +17,7 @@ import { BUNDLED_STYLE_LABELS } from '../csl-loader';
 
 type FieldKind =
 	| 'free-text'        // title, author, locale — no value completions, no validation
-	| 'boolean'          // breaks, bibliography-hanging-indent
+	| 'boolean'          // callout-labels, breaks, bibliography-hanging-indent
 	| 'enum'             // blockquote-style, colors, table-borders, notes, zotero-notes
 	| 'number'           // font-size, code-font-size, etc.
 	| 'digits'           // source or a non-negative integer
@@ -233,6 +233,8 @@ export const FRONTMATTER_SCHEMA: readonly FieldDef[] = [
 		description: 'Maximum source line width for grid tables.\n\n**Accepted values:** Non-negative integer.' },
 	{ key: 'blockquote-style', kind: 'enum', enumValues: BLOCKQUOTE_STYLE_VALUES,
 		description: 'Paragraph style applied to blockquotes.\n\n**Accepted values:** `Quote`, `IntenseQuote`, `GitHub` (case-insensitive).' },
+	{ key: 'callout-labels', kind: 'boolean', enumValues: BOOLEAN_VALUES,
+		description: 'Whether alert callouts show their type label in preview and DOCX output. Callout styling is preserved when labels are hidden. Default: `true`.\n\n**Accepted values:** `true`, `false`.' },
 	{ key: 'colors', kind: 'enum', enumValues: COLORS_VALUES,
 		description: 'Named color scheme for alert/callout borders.\n\n**Accepted values:** `github`, `guttmacher`.' },
 	{ key: 'styles', kind: 'styles-block',

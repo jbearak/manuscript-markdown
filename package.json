@@ -245,6 +245,10 @@
         "title": "Blockquote Style"
       },
       {
+        "command": "manuscript-markdown.setFrontmatter.callout-labels",
+        "title": "Callout Labels"
+      },
+      {
         "command": "manuscript-markdown.setFrontmatter.colors",
         "title": "Color Scheme"
       },
@@ -850,14 +854,19 @@
           "group": "4_other@1"
         },
         {
-          "command": "manuscript-markdown.setFrontmatter.colors",
+          "command": "manuscript-markdown.setFrontmatter.callout-labels",
           "when": "editorLangId == markdown",
           "group": "4_other@2"
         },
         {
-          "command": "manuscript-markdown.setFrontmatter.styles",
+          "command": "manuscript-markdown.setFrontmatter.colors",
           "when": "editorLangId == markdown",
           "group": "4_other@3"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.styles",
+          "when": "editorLangId == markdown",
+          "group": "4_other@4"
         }
       ],
       "markdown.frontmatter.tables": [
