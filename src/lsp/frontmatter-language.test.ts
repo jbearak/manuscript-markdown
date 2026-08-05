@@ -583,6 +583,13 @@ describe('getFrontmatterCompletionItems', () => {
 		expect(getFrontmatterCompletionItems(loc, 'darwin')).toEqual([]);
 	});
 
+	test('value completions for boolean field', () => {
+		const text = '---\nbreaks: \n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf(': ') + 2);
+		const items = getFrontmatterCompletionItems(loc, 'darwin');
+		expect(items.map(i => i.label)).toEqual(['true', 'false']);
+	});
+
 	test('value completions for callout-labels', () => {
 		const text = '---\ncallout-labels: \n---\n';
 		const loc = getFrontmatterLocation(text, text.indexOf(': ') + 2);
@@ -788,6 +795,15 @@ describe('validateFrontmatter', () => {
 		const text = '---\nfont: Georgia\nfont-size: 12\nbreaks: true\ncallout-labels: false\n---\n';
 		const diags = await validateFrontmatter(text, stubCallbacks);
 		expect(diags).toEqual([]);
+	});
+
+	test('invalid boolean value produces error', async () => {
+		const text = '---\nbreaks: maybe\n---\n';
+		const diags = await validateFrontmatter(text, stubCallbacks);
+		expect(diags.length).toBe(1);
+		expect(diags[0].severity).toBe('error');
+		expect(diags[0].message).toContain('true');
+		expect(diags[0].message).toContain('false');
 	});
 
 	test('invalid callout-labels value produces error', async () => {

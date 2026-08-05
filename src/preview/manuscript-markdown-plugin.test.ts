@@ -69,10 +69,23 @@ describe('Manuscript Markdown Plugin Property Tests', () => {
     it('removes the marker line break when labels are hidden in breaks mode', () => {
       const html = renderWithPlugin(
         '---\ncallout-labels: false\nbreaks: true\n---\n\n' +
-        '> [!NOTE]\n> Useful information.'
+        '> [!NOTE] <!--a--> <!--b-->\n> Useful information.'
       );
-      expect(html).toContain('<p>Useful information.</p>');
-      expect(html).not.toContain('<p><br>');
+      expect(html).toContain('<!--a--> <!--b-->');
+      expect(html).toContain('Useful information.');
+      const alertHtml = html.slice(html.indexOf('<blockquote'));
+      expect(alertHtml).not.toContain('<br>');
+    });
+
+    it('removes an empty marker paragraph before block content', () => {
+      const html = renderWithPlugin(
+        '---\ncallout-labels: false\n---\n\n> [!NOTE] <!--a--> <!--b-->\n> - item'
+      );
+      const alertHtml = html.slice(html.indexOf('<blockquote'));
+      expect(alertHtml).toContain('<!--a--> <!--b-->');
+      expect(alertHtml).toContain('<li>item</li>');
+      expect(alertHtml).not.toContain('<p><!--a--> <!--b--></p>');
+      expect(alertHtml).not.toContain('<p></p>');
     });
 
     it('keeps alert labels enabled when callout-labels is true or omitted', () => {

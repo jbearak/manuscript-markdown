@@ -5494,8 +5494,10 @@ export function buildMarkdown(
       continue;
     }
 
-    // Track HTML comment paragraph index for gap metadata and emit separator
-    if (item.type === 'html_comment') {
+    // Track standalone HTML comment paragraphs for gap metadata and emit their
+    // separator. A leading comment in an alert paragraph is inline content;
+    // pendingAlertPrefixStrip means its blockquote prefix was already emitted.
+    if (item.type === 'html_comment' && !pendingAlertPrefixStrip) {
       if (output.length > 0) {
         if (incomingSep !== null) {
           output.push(incomingSep);

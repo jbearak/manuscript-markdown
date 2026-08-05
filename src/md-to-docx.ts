@@ -90,6 +90,7 @@ export interface MdToken {
   taskChecked?: boolean;    // for GFM task list items
   alertType?: GfmAlertType; // for GFM alerts in blockquotes
   alertLead?: boolean;      // first blockquote paragraph carrying alert header
+  alertHasBodyParagraph?: boolean; // another same-level alert paragraph carries block content
   alertFirst?: boolean;     // first paragraph in an alert block (for spacing)
   alertLast?: boolean;      // last paragraph in an alert block (for spacing)
   blockquoteGroupIndex?: number; // sequential index of the blockquote group this token belongs to
@@ -873,7 +874,30 @@ function annotateBlockquoteBoundaries(tokens: MdToken[]): void {
       i++;
     }
     tokens[start].alertFirst = true;
+    tokens[start].alertHasBodyParagraph = i - start > 1;
     tokens[i - 1].alertLast = true;
+  }
+}
+
+function isNonRenderingAlertLeadRun(run: MdRun): boolean {
+  return run.type === 'html_comment'
+    || (run.type === 'text' && run.text.trim().length === 0);
+}
+
+function moveHiddenAlertLeadComments(tokens: MdToken[]): void {
+  for (let i = 0; i + 1 < tokens.length; i++) {
+    const lead = tokens[i];
+    if (
+      !lead.alertLead
+      || !lead.alertHasBodyParagraph
+      || lead.runs.length === 0
+      || !lead.runs.every(isNonRenderingAlertLeadRun)
+    ) {
+      continue;
+    }
+    const body = tokens[i + 1];
+    body.runs = [...lead.runs, ...body.runs];
+    lead.runs = [];
   }
 }
 
@@ -5322,10 +5346,21 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
   
   const alertColorMap = alertColorsByScheme(options?.colors ?? getDefaultColorScheme());
   const hidesAlertLabel = token.type === 'blockquote' && token.alertType && token.alertLead && options?.calloutLabels === false;
-  const firstRun = token.runs[0];
-  const paragraphRuns = hidesAlertLabel && (firstRun?.type === 'softbreak' || firstRun?.type === 'hardbreak')
-    ? token.runs.slice(1)
-    : token.runs;
+  let paragraphRuns = token.runs;
+  if (hidesAlertLabel) {
+    let separatorIndex = 0;
+    while (
+      paragraphRuns[separatorIndex]?.type === 'html_comment'
+      || (paragraphRuns[separatorIndex]?.type === 'text'
+        && paragraphRuns[separatorIndex].text.trim().length === 0)
+    ) {
+      separatorIndex++;
+    }
+    const separator = paragraphRuns[separatorIndex];
+    if (separator?.type === 'softbreak' || separator?.type === 'hardbreak') {
+      paragraphRuns = [...paragraphRuns.slice(0, separatorIndex), ...paragraphRuns.slice(separatorIndex + 1)];
+    }
+  }
   const runs = generateRuns(paragraphRuns, state, options, bibEntries, citeprocEngine);
   const taskPrefix = token.type === 'list_item' && token.taskChecked !== undefined
     ? generateRun(token.taskChecked ? '☒ ' : '☐ ', '')
@@ -5335,7 +5370,28 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
       + '<w:r><w:br/></w:r>'
     : '';
 
-  let xml = '<w:p>' + pPr + alertPrefix + taskPrefix + runs + '</w:p>';
+  const visuallyEmptyHiddenAlertLead = hidesAlertLabel
+    && paragraphRuns.every(isNonRenderingAlertLeadRun);
+  const omitEmptyAlertLead = visuallyEmptyHiddenAlertLead
+    && paragraphRuns.length === 0
+    && token.alertHasBodyParagraph;
+  if (visuallyEmptyHiddenAlertLead && !omitEmptyAlertLead) {
+    const collapsedSpacing = '<w:spacing w:after="0" w:line="1" w:lineRule="exact"/>';
+    if (pPr.includes('<w:spacing ')) {
+      pPr = pPr.replace(/<w:spacing\b[^>]*\/>/, collapsedSpacing);
+    } else if (pPr.includes('<w:ind ')) {
+      pPr = pPr.replace('<w:ind ', collapsedSpacing + '<w:ind ');
+    } else {
+      pPr = pPr.replace('</w:pPr>', collapsedSpacing + '</w:pPr>');
+    }
+    pPr = pPr.replace(
+      '</w:pPr>',
+      '<w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr></w:pPr>'
+    );
+  }
+  let xml = omitEmptyAlertLead
+    ? ''
+    : '<w:p>' + pPr + alertPrefix + taskPrefix + runs + '</w:p>';
 
   // Blockquote spacer paragraphs: exact-height empty paragraphs with an
   // inline left border (no pStyle, so the converter ignores them).  The left
@@ -6493,6 +6549,9 @@ export async function convertMdToDocx(
   const resolvedOptions = options
     ? { ...options, blockquoteStyle: effectiveBlockquoteStyle, colors: effectiveColors, calloutLabels: effectiveCalloutLabels }
     : { blockquoteStyle: effectiveBlockquoteStyle, colors: effectiveColors, calloutLabels: effectiveCalloutLabels };
+  if (!effectiveCalloutLabels) {
+    moveHiddenAlertLeadComments(tokens);
+  }
 
   const documentXml = generateDocumentXml(tokens, state, resolvedOptions, bibEntries, citeprocEngine, frontmatter);
 

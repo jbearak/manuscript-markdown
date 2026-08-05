@@ -178,9 +178,32 @@ function alertBlockquoteRule(state: StateCore): void {
       const firstTextIdx = children.findIndex(child => child.type === 'text' && child.content.length > 0);
       if (firstTextIdx === -1) continue;
       children[firstTextIdx].content = hit.rest;
-      const next = children[firstTextIdx + 1];
-      if (hidesAlertLabels && hit.rest.length === 0 && (next?.type === 'softbreak' || next?.type === 'hardbreak')) {
-        children.splice(firstTextIdx + 1, 1);
+      if (hidesAlertLabels && hit.rest.length === 0) {
+        let separatorIndex = firstTextIdx + 1;
+        while (
+          (children[separatorIndex]?.type === 'html_inline'
+            && /^<!--[\s\S]*-->$/.test(children[separatorIndex].content.trim()))
+          || (children[separatorIndex]?.type === 'text'
+            && children[separatorIndex].content.trim().length === 0)
+        ) {
+          separatorIndex++;
+        }
+        const separator = children[separatorIndex];
+        if (separator?.type === 'softbreak' || separator?.type === 'hardbreak') {
+          children.splice(separatorIndex, 1);
+        }
+        const markerParagraphIsEmpty = children.every(child =>
+          (child.type === 'text' && child.content.trim().length === 0)
+          || (child.type === 'html_inline'
+            && /^<!--[\s\S]*-->$/.test(child.content.trim()))
+        );
+        if (markerParagraphIsEmpty) {
+          tokens[hit.paraOpenIdx].hidden = true;
+          const paragraphClose = tokens[hit.inlineIdx + 1];
+          if (paragraphClose?.type === 'paragraph_close') {
+            paragraphClose.hidden = true;
+          }
+        }
       }
     }
 

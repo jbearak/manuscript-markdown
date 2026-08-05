@@ -2768,19 +2768,63 @@ describe('callout-labels DOCX export', () => {
     expect(docXml).toContain('w:pStyle w:val="GitHubNote"');
   });
 
-  it('removes the marker line break when labels are hidden in breaks mode', async () => {
-    const md = '---\ncallout-labels: false\nbreaks: true\n---\n\n' + alertMd;
+  it('removes the marker line break after hidden comments when labels are hidden', async () => {
+    const md = '---\ncallout-labels: false\nbreaks: true\n---\n\n> [!NOTE] <!--a--> <!--b-->\n> Useful information.';
     const { docx } = await convertMdToDocx(md);
     const JSZip = (await import('jszip')).default;
     const zip = await JSZip.loadAsync(docx);
     const docXml = await zip.file('word/document.xml')!.async('string');
     expect(docXml).not.toContain('<w:br/>');
+    expect(docXml).toContain('&lt;!--a--&gt;');
+    expect(docXml).toContain('&lt;!--b--&gt;');
     expect(docXml).toContain('Useful information.');
 
     const { convertDocx } = await import('./converter');
     const result = await convertDocx(docx);
-    expect(result.markdown).toContain('> [!NOTE]\n> Useful information.');
-    expect(result.markdown).not.toContain('> \\\nUseful information.');
+    expect(result.markdown)
+      .toContain('> [!NOTE] <!--a--> <!--b-->Useful information.');
+    expect(result.markdown).not.toContain('\n\n<!--a-->');
+  });
+
+  it('omits the empty marker paragraph before block content', async () => {
+    const md = '---\ncallout-labels: false\n---\n\n> [!NOTE]\n> - item';
+    const { docx } = await convertMdToDocx(md);
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docx);
+    const docXml = await zip.file('word/document.xml')!.async('string');
+    expect(docXml.match(/w:pStyle w:val="GitHubNote"/g)).toHaveLength(1);
+    expect(docXml).toContain('<w:t>item</w:t>');
+  });
+
+  it('moves marker-line comments into block content without a blank lead', async () => {
+    const md = '---\ncallout-labels: false\n---\n\n> [!NOTE] <!--a--> <!--b-->\n> - item';
+    const { docx } = await convertMdToDocx(md);
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docx);
+    const docXml = await zip.file('word/document.xml')!.async('string');
+    expect(docXml.match(/w:pStyle w:val="GitHubNote"/g)).toHaveLength(1);
+    expect(docXml).toContain('&lt;!--a--&gt;');
+    expect(docXml).toContain('&lt;!--b--&gt;');
+
+    const { convertDocx } = await import('./converter');
+    const result = await convertDocx(docx);
+    expect(result.markdown).toContain('> [!NOTE] <!--a--> <!--b-->item');
+    expect(result.markdown).not.toContain('\n\n<!--a-->');
+  });
+
+  it('retains a collapsed structural lead for alerts without a same-level body', async () => {
+    const md = '---\ncallout-labels: false\n---\n\n> [!NOTE]\n> > nested';
+    const { docx } = await convertMdToDocx(md);
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docx);
+    const docXml = await zip.file('word/document.xml')!.async('string');
+    expect(docXml).toContain('w:pStyle w:val="GitHubNote"');
+    expect(docXml).toContain('w:line="1" w:lineRule="exact"');
+
+    const { convertDocx } = await import('./converter');
+    const result = await convertDocx(docx);
+    expect(result.markdown).toContain('> [!NOTE]');
+    expect(result.markdown).toContain('> > nested');
   });
 
   it('stores every explicit true or false as a string custom property', async () => {
