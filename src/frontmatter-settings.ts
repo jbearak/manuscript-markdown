@@ -1,3 +1,5 @@
+import { isTopLevelFrontmatterMappingLine, yamlValueBeforeComment } from './citekey';
+
 export interface FrontmatterMenuSetting {
 	key: string;
 	label: string;
@@ -36,6 +38,7 @@ export const FRONTMATTER_MENU_SETTINGS: readonly FrontmatterMenuSetting[] = [
 	{ key: 'grid-table-max-line-width', label: 'Grid Table Maximum Line Width', group: 'tables' },
 
 	{ key: 'bibliography', label: 'Bibliography File', group: 'citations' },
+	{ key: 'nocite', label: 'Uncited Bibliography Entries', group: 'citations' },
 	{ key: 'csl', label: 'Citation Style', group: 'citations' },
 	{ key: 'locale', label: 'Citation Locale', group: 'citations' },
 	{ key: 'zotero-notes', label: 'Zotero Citation Placement', group: 'citations' },
@@ -81,6 +84,38 @@ function newFrontmatterEdit(eol: '\n' | '\r\n', key: string): FrontmatterSetting
 	};
 }
 
+function multilineNociteSelectionEnd(
+	markdown: string,
+	bodyEnd: number,
+	lineOffset: number,
+	selectionStart: number,
+	firstValue: string,
+): number {
+	const semanticFirstValue = yamlValueBeforeComment(firstValue).trim();
+	const blockScalar = /^[|>][0-9+-]*$/.test(semanticFirstValue);
+	if (semanticFirstValue.length > 0 && !blockScalar) return selectionStart + firstValue.length;
+
+	let selectionEnd = selectionStart + firstValue.length;
+	let nextLineStart = markdown.indexOf('\n', lineOffset);
+	if (nextLineStart === -1 || nextLineStart >= bodyEnd) return selectionEnd;
+	nextLineStart++;
+
+	while (nextLineStart < bodyEnd) {
+		const newline = markdown.indexOf('\n', nextLineStart);
+		const rawLineEnd = newline === -1 || newline > bodyEnd ? bodyEnd : newline;
+		const lineEnd = rawLineEnd > nextLineStart && markdown[rawLineEnd - 1] === '\r'
+			? rawLineEnd - 1
+			: rawLineEnd;
+		const line = markdown.slice(nextLineStart, lineEnd);
+		if (blockScalar && line.trim().length > 0 && !/^[ \t]/.test(line)) break;
+		if (!blockScalar && isTopLevelFrontmatterMappingLine(line)) break;
+		selectionEnd = lineEnd;
+		if (newline === -1 || newline >= bodyEnd) break;
+		nextLineStart = newline + 1;
+	}
+	return selectionEnd;
+}
+
 /**
  * Locate an existing setting value or prepare an insertion for a missing one.
  * Existing frontmatter content and key aliases are preserved.
@@ -105,18 +140,21 @@ export function getFrontmatterSettingEdit(
 	}
 	const bodyEnd = bodyStart + closingMatch.index + 1;
 	const names = [key, ...(FRONTMATTER_ALIASES[key] ?? [])].map(escapeRegex);
-	const settingPattern = new RegExp('^(?:' + names.join('|') + '):([ \\t]*)(.*?)(\\r?)$', 'm');
+	const settingPattern = new RegExp('^(?:' + names.join('|') + ')[ \\t]*:([ \\t]*)(.*?)(\\r?)$', 'm');
 	const settingMatch = settingPattern.exec(markdown.slice(bodyStart, bodyEnd));
 
 	if (settingMatch) {
 		const lineOffset = bodyStart + settingMatch.index;
 		const colonOffset = markdown.indexOf(':', lineOffset);
 		const selectionStart = colonOffset + 1 + settingMatch[1].length;
+		const selectionEnd = key === 'nocite'
+			? multilineNociteSelectionEnd(markdown, bodyEnd, lineOffset, selectionStart, settingMatch[2])
+			: selectionStart + settingMatch[2].length;
 		return {
 			offset: selectionStart,
 			text: '',
 			selectionStart,
-			selectionEnd: selectionStart + settingMatch[2].length,
+			selectionEnd,
 		};
 	}
 

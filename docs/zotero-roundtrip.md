@@ -11,7 +11,7 @@ The converter preserves Zotero citation identity through the entire cycle:
     │
     ▼
   Export to Markdown
-    ├── article.md    (text + [@citations] + YAML frontmatter)
+    ├── article.md    (text + citation syntax + YAML frontmatter)
     └── article.bib   (BibTeX with Zotero identity fields)
     │
     ▼
@@ -25,7 +25,7 @@ The converter preserves Zotero citation identity through the entire cycle:
 
 At each step:
 
-1. **DOCX → Markdown**: Zotero field codes are parsed. Each citation's item key and URI are saved to BibTeX. Citation text becomes `[@key]` syntax. Document preferences (CSL style, locale, Zotero note type) become YAML frontmatter.
+1. **DOCX → Markdown**: Zotero field codes are parsed. Each citation's item key and URI are saved to BibTeX. Citation text becomes parenthetical (`[@key]`), narrative (`@key`), or suppress-author (`[-@key]`) syntax when it can be represented safely. Document preferences (CSL style, locale, Zotero note type) become YAML frontmatter.
 2. **Editing**: You work with standard Pandoc citation syntax in Markdown. The BibTeX file holds the Zotero metadata alongside the bibliographic data.
 3. **Markdown → DOCX**: Citations are reconstructed as Zotero `ADDIN ZOTERO_ITEM` field codes. The CSL style formats visible citation text and bibliography. Document preferences are written back so Zotero recognizes the file.
 
@@ -35,7 +35,9 @@ Citations use [Pandoc citation syntax](https://pandoc.org/chunkedhtml-demo/8.20-
 
 | Syntax | Meaning |
 |--------|---------|
-| `[@smith2020]` | Single citation |
+| `@smith2020` | Author-in-text or narrative citation |
+| `[@smith2020]` | Parenthetical citation |
+| `[-@smith2020]` | Parenthetical citation with the author suppressed |
 | `[@smith2020; @jones2021]` | Grouped citation (one Zotero field) |
 | `[@smith2020, p. 20]` | Citation with page locator |
 | `[@smith2020, pp. 20-25]` | Citation with page range |
@@ -43,6 +45,12 @@ Citations use [Pandoc citation syntax](https://pandoc.org/chunkedhtml-demo/8.20-
 **Grouped citations**: Semicolons group multiple references into a single Zotero field code. When Zotero manages the exported document, it treats `[@smith2020; @jones2021]` as one citation cluster — the same as if you had inserted both references together in Word.
 
 **Locators**: Page numbers and other locators are written in the Markdown citation, not in the BibTeX file. This matches how Zotero handles them — a locator belongs to a specific citation instance, not to the bibliographic entry itself. Supported locator terms follow Pandoc conventions: `p.`, `pp.`, `ch.`, `sec.`, `vol.`, etc.
+
+### Narrative citation fields
+
+A resolved bare `@key` exports as a single Zotero citation field with composite mode, allowing compatible author-date styles to render text such as `Smith (2020)`. If the CSL style cannot safely render a composite citation, as with numeric styles, the converter writes the author as literal text followed by an ordinary suppress-author Zotero field. The visible result is preserved, but that fallback is not a lossless composite round-trip.
+
+On DOCX import, a composite field becomes bare `@key` only when it contains exactly one citation item with no locator, suppress-author flag, prefix, suffix, infix, author-only mode, or other unsupported item mode. Grouped or decorated composite fields fall back to their visible Word field result rather than producing incorrect narrative syntax.
 
 ## BibTeX and Zotero Identity
 
@@ -89,8 +97,17 @@ zotero-notes: in-text
 | `csl` | CSL style short name (e.g., `apa`, `chicago-author-date`, `bmj`) or path to a `.csl` file (relative or absolute) |
 | `locale` | Optional locale override (e.g., `en-US`, `en-GB`). Defaults to the style's own locale. |
 | `zotero-notes` | Optional Zotero note type: `in-text` (default), `footnotes`, or `endnotes`. Legacy alias: `note-type`. Legacy numeric values (0, 1, 2) are still accepted. |
+| `nocite` | Manually authored bibliography-only keys; `@*` includes all available entries. This is not inferred from Zotero's existing `uncited` metadata. |
 
 You can also add or modify this frontmatter manually. The `csl` field is required for CSL-formatted citation output — without it, citations use a plain-text `(Author Year)` fallback.
+
+### Uncited bibliography entries
+
+`nocite` is bibliography-only: it adds no `ZOTERO_ITEM CSL_CITATION` fields. Explicit missing keys warn and stay invisible; `@*` includes all available entries. Visible citations are registered first, explicit `nocite` keys next, and wildcard-only entries last, so bibliography-only entries do not renumber visible citations.
+
+For `nocite` entries with real Zotero item URIs, the exporter records those URIs in the `ZOTERO_BIBL` field's `uncited` metadata and merges carried-through `uncited`, `omitted`, and `custom` arrays. This prior metadata is preserved only when a caller passes the imported `zoteroBiblData` back to the exporter; the current extension and CLI do not store it in Markdown for a later separate export.
+
+A local-only BibTeX entry without a Zotero URI still appears in the initially rendered bibliography, but it cannot be added to Zotero's `uncited` metadata and has no in-text field carrying embedded item data. A later Zotero refresh may therefore be unable to reconstruct that bibliography-only entry.
 
 ## CSL Citation Styles
 
@@ -133,7 +150,7 @@ When you export back to DOCX with a `csl` field in frontmatter, the converter pr
 
 - **Document preferences**: The `csl`, `locale`, and `zotero-notes` values are written to `docProps/custom.xml` as `ZOTERO_PREF_*` properties (Zotero's dataVersion 4 format). This tells the Zotero Word plugin which citation style and settings the document uses.
 - **Citation field codes**: Each citation becomes an `ADDIN ZOTERO_ITEM CSL_CITATION` field code containing full CSL-JSON item data, item URIs, and any locators — the same structure Zotero itself writes.
-- **Bibliography field**: A `ZOTERO_BIBL` field code is appended at the end of the document with the rendered bibliography.
+- **Bibliography field**: A `ZOTERO_BIBL` field code is appended at the end of the document with the rendered bibliography and, when available, real Zotero URIs for bibliography-only `nocite` entries in its `uncited` metadata.
 
 After opening the exported DOCX in Word, Zotero's plugin can refresh citations, change the citation style, or add new references as usual.
 

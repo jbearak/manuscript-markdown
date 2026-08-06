@@ -19,7 +19,7 @@ describe('schema completeness', () => {
 	// All canonical keys from parseFrontmatter's switch in frontmatter.ts
 	const EXPECTED_KEYS = [
 		'title', 'author', 'csl', 'locale', 'zotero-notes', 'notes', 'timezone',
-		'bibliography', 'font', 'code-font', 'font-size', 'code-font-size',
+		'bibliography', 'nocite', 'font', 'code-font', 'font-size', 'code-font-size',
 		'header-font', 'header-font-size', 'header-font-style',
 		'title-font', 'title-font-size', 'title-font-style',
 		'table-font', 'table-font-size', 'table-col-widths', 'table-borders',
@@ -723,6 +723,17 @@ describe('getFrontmatterHover', () => {
 		expect(hover!.markdown).toContain('**callout-labels**');
 		expect(hover!.markdown).toContain('Default: `true`');
 		expect(hover!.markdown).toContain('styling is preserved');
+	});
+
+	test('hover on nocite documents implemented DOCX bibliography inclusion', () => {
+		const text = "---\nnocite: '@smith'\n---\n";
+		const loc = getFrontmatterLocation(text, text.indexOf('nocite') + 3);
+		const hover = getFrontmatterHover(loc);
+		expect(hover).toBeDefined();
+		expect(hover!.markdown).toContain('DOCX bibliography');
+		expect(hover!.markdown).toContain('without creating an in-text citation');
+		expect(hover!.markdown).toContain('`@*`');
+		expect(hover!.markdown).not.toContain('not implemented');
 	});
 
 	test('hover shows aliases', () => {

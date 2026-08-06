@@ -6,7 +6,7 @@
  * because YAML frontmatter is embedded inside a Markdown document.
  */
 
-import { getCompletionContextAtOffset } from './citekey-language';
+import { getBoundedCitationCompletionContextAtOffset } from '../citation-scanner';
 import {
 	getCslCompletionContext,
 	shouldAutoTriggerSuggestFromChanges,
@@ -34,7 +34,7 @@ export function shouldAutoTriggerLspSuggest(context: AutoSuggestContext): boolea
 	}
 	if (
 		getCslCompletionContext(context.text, context.offset) !== undefined ||
-		getCompletionContextAtOffset(context.text, context.offset) !== undefined
+		getBoundedCitationCompletionContextAtOffset(context.text, context.offset) !== undefined
 	) {
 		return true;
 	}
@@ -85,11 +85,11 @@ function assessUnfinishedFrontmatter(
 	const hasTopLevelMapping =
 		precedingLines.some(isTopLevelMapping) ||
 		isTopLevelMapping(currentLine);
-	const hasBodyLikeContent = precedingLines.some(line => {
+	const hasBodyLikeContent = !hasTopLevelMapping && precedingLines.some(line => {
 		const trimmed = line.trim();
 		if (trimmed.length === 0) return false;
-		if (/^[ \t]/.test(line)) return !hasTopLevelMapping;
-		if (trimmed.startsWith('#')) return !hasTopLevelMapping;
+		if (/^[ \t]/.test(line)) return true;
+		if (trimmed.startsWith('#')) return true;
 		return !mappingPattern.test(trimmed);
 	});
 	return { currentLine, hasTopLevelMapping, hasBodyLikeContent };

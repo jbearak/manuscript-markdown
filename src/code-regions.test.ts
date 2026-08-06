@@ -65,6 +65,70 @@ describe('computeCodeRegions', () => {
 		expect(text.slice(regions[0].start, regions[0].end)).toBe('~~~python\nprint("hi")\n~~~');
 	});
 
+	test('recognizes fences indented by up to three spaces', () => {
+		for (const indent of ['', ' ', '  ', '   ']) {
+			const text = 'before\n' + indent + '```md\n@hidden\n' + indent + '```\nafter';
+			const regions = computeCodeRegions(text);
+			expect(regions).toHaveLength(1);
+			expect(text.slice(regions[0].start, regions[0].end)).toContain('@hidden');
+		}
+	});
+
+	test('recognizes fenced blocks inside list containers', () => {
+		for (const marker of ['- ', '1. ']) {
+			const indent = ' '.repeat(marker.length);
+			const text = marker + '```md\n' + indent + '@hidden\n' + indent + '```\n@live';
+			const regions = computeCodeRegions(text);
+			expect(regions).toHaveLength(1);
+			expect(text.slice(regions[0].start, regions[0].end)).toContain('@hidden');
+			expect(regions[0].end).toBeLessThan(text.indexOf('@live'));
+		}
+	});
+
+	test('recognizes fenced blocks inside nested list and blockquote containers', () => {
+		for (const text of [
+			'- - ```md\n    @hidden\n    ```\n@live',
+			'> ```md\n> @hidden\n> ```\n@live',
+			'> - ```md\n>   @hidden\n>   ```\n@live',
+		]) {
+			const regions = computeCodeRegions(text);
+			expect(regions).toHaveLength(1);
+			expect(text.slice(regions[0].start, regions[0].end)).toContain('@hidden');
+			expect(regions[0].end).toBeLessThan(text.indexOf('@live'));
+		}
+	});
+
+	test('distinguishes indented code from paragraph and list continuations', () => {
+		const code = 'Before\n\n    code';
+		expect(computeCodeRegions(code).map(r => code.slice(r.start, r.end))).toEqual(['    code']);
+		const blockquoteCode = '>     code';
+		expect(computeCodeRegions(blockquoteCode).map(r => blockquoteCode.slice(r.start, r.end))).toEqual(['>     code']);
+		const blockquoteAfterProse = 'prose\n>     code';
+		expect(computeCodeRegions(blockquoteAfterProse).map(r => blockquoteAfterProse.slice(r.start, r.end))).toEqual(['>     code']);
+
+		const paragraph = 'Before\n    continuation';
+		expect(computeCodeRegions(paragraph)).toEqual([]);
+
+		const list = '- item\n\n    continuation';
+		expect(computeCodeRegions(list)).toEqual([]);
+
+		const listCode = '- item\n\n      code';
+		expect(computeCodeRegions(listCode).map(r => listCode.slice(r.start, r.end))).toEqual(['      code']);
+
+		const sibling = '- first\n- second\n\n    continuation';
+		expect(computeCodeRegions(sibling)).toEqual([]);
+		const orderedSibling = '9. first\n10. second\n\n    continuation';
+		expect(computeCodeRegions(orderedSibling)).toEqual([]);
+	});
+
+	test('returns sorted non-overlapping regions', () => {
+		const regions = computeCodeRegions('`one`\n\n    two\n\n  ```\nthree\n  ```');
+		for (let i = 1; i < regions.length; i++) {
+			expect(regions[i - 1].start).toBeLessThan(regions[i].start);
+			expect(regions[i - 1].end).toBeLessThanOrEqual(regions[i].start);
+		}
+	});
+
 	test('mixed: document with both inline code and fenced blocks', () => {
 		const text = 'text `inline` more\n```\nfenced\n```\nend';
 		const regions = computeCodeRegions(text);

@@ -48,8 +48,23 @@ interface CiteprocBibliographyMeta {
   bibend?: string;
 }
 
+interface CiteprocCitation {
+  citationID?: string;
+  citationItems: CiteprocCitationItem[];
+  properties: {
+    noteIndex: number;
+    mode?: 'composite';
+  };
+}
+
 export interface CiteprocEngine {
   makeCitationCluster(items: CiteprocCitationItem[]): string;
+  previewCitationCluster(
+    citation: CiteprocCitation,
+    citationsPre: Array<[string, number]>,
+    citationsPost: Array<[string, number]>,
+    outputFormat: string,
+  ): string;
   makeBibliography(): [CiteprocBibliographyMeta, string[]] | false | null;
   updateItems(ids: string[]): unknown;
 }
@@ -71,10 +86,17 @@ try {
   // citeproc not available — fallback rendering will be used
 }
 
+export interface NarrativeCitationOrigin {
+  citationId: string;
+  citationKey: string;
+  literalPrefix: string;
+}
+
 export interface CitationResult {
   xml: string;
   warning?: string;
   missingKeys?: string[];
+  narrativeOrigin?: NarrativeCitationOrigin;
 }
 
 export function escapeXml(text: string): string {
@@ -294,7 +316,8 @@ export function renderCitationText(
   engine: CiteprocEngine,
   keys: string[],
   locators?: Map<string, string>,
-  suppressAuthorKeys?: Set<string>
+  suppressAuthorKeys?: Set<string>,
+  mode?: 'composite',
 ): string | undefined {
   if (!engine || !CSL) return undefined;
 
@@ -313,6 +336,12 @@ export function renderCitationText(
       return item;
     });
 
+    if (mode === 'composite') {
+      return engine.previewCitationCluster({
+        citationItems: rawList,
+        properties: { noteIndex: 0, mode },
+      }, [], [], 'html');
+    }
     return engine.makeCitationCluster(rawList) as string;
   } catch {
     return undefined;
@@ -377,13 +406,22 @@ function resolveVisibleText(
   entries: Map<string, BibtexEntry>,
   locators: Map<string, string> | undefined,
   citeprocEngine: CiteprocEngine | undefined,
-  suppressAuthorKeys?: Set<string>
+  suppressAuthorKeys?: Set<string>,
+  narrative?: boolean,
 ): string {
   if (citeprocEngine) {
-    const rendered = renderCitationText(citeprocEngine, keys, locators, suppressAuthorKeys);
+    const rendered = renderCitationText(
+      citeprocEngine,
+      keys,
+      locators,
+      suppressAuthorKeys,
+      narrative ? 'composite' : undefined,
+    );
     if (rendered) return rendered;
   }
-  return generateFallbackText(keys, entries, locators, suppressAuthorKeys);
+  return narrative
+    ? generateNarrativeFallbackText(keys[0], entries, locators?.get(keys[0]))
+    : generateFallbackText(keys, entries, locators, suppressAuthorKeys);
 }
 
 function buildCitationFieldCode(
@@ -395,13 +433,36 @@ function buildCitationFieldCode(
   usedCitationIds?: Set<string>,
   itemIdMap?: Map<string, string | number>,
   suppressAuthorKeys?: Set<string>,
-  extraRPr?: string
-): string {
-  // Resolve visible text first so we can populate properties (Defect 2)
-  // Note: visibleTextOverride bypasses suppressAuthorKeys processing — callers
-  // should not provide both, as the override text would include the author
-  // while the CSL item has suppress-author set to true.
-  const visibleText = visibleTextOverride ?? resolveVisibleText(keys, entries, locators, citeprocEngine, suppressAuthorKeys);
+  extraRPr?: string,
+  narrative?: boolean,
+): CitationResult {
+  // Resolve visible text first so we can populate properties (Defect 2).
+  // Composite mode is preferred, but citeproc emits [NO_PRINTED_FORM] for
+  // styles whose citation layout cannot render an author-only component (for
+  // example, numeric styles). In that case use a literal author followed by a
+  // normal suppress-author field rather than storing a composite field that
+  // Zotero would refresh to an error placeholder.
+  let fieldNarrative = narrative ?? false;
+  let fieldSuppressAuthorKeys = suppressAuthorKeys;
+  let literalAuthorPrefix = '';
+  let visibleText: string;
+  if (visibleTextOverride !== undefined) {
+    visibleText = visibleTextOverride;
+  } else if (fieldNarrative) {
+    const compositeText = citeprocEngine
+      ? renderCitationText(citeprocEngine, keys, locators, suppressAuthorKeys, 'composite')
+      : undefined;
+    if (compositeText && !/\[(?:NO_PRINTED_FORM|CSL STYLE ERROR:)/.test(compositeText)) {
+      visibleText = compositeText;
+    } else {
+      fieldNarrative = false;
+      fieldSuppressAuthorKeys = new Set([...(suppressAuthorKeys ?? []), ...keys]);
+      literalAuthorPrefix = generateNarrativeAuthorText(keys[0], entries) + ' ';
+      visibleText = resolveVisibleText(keys, entries, locators, citeprocEngine, fieldSuppressAuthorKeys);
+    }
+  } else {
+    visibleText = resolveVisibleText(keys, entries, locators, citeprocEngine, suppressAuthorKeys);
+  }
 
   const citationItems: CiteprocCitationItem[] = [];
   for (const key of keys) {
@@ -429,7 +490,7 @@ function buildCitationFieldCode(
     }
 
     const citationItem: CiteprocCitationItem = { id: itemData.id, itemData };
-    if (suppressAuthorKeys?.has(key)) {
+    if (fieldSuppressAuthorKeys?.has(key)) {
       citationItem['suppress-author'] = true;
     }
     if (entry.zoteroUri) {
@@ -450,27 +511,34 @@ function buildCitationFieldCode(
   }
 
   // Defect 3: key ordering — citationID, properties, citationItems, schema
+  const citationId = generateCitationId(usedCitationIds);
   const cslCitation = {
-    citationID: generateCitationId(usedCitationIds),                    // Defect 1
+    citationID: citationId,                                             // Defect 1
     properties: {
       formattedCitation: visibleText,                                   // Defect 2
       plainCitation: stripHtmlTags(visibleText),                        // Defect 2
       noteIndex: 0,
+      ...(fieldNarrative ? { mode: 'composite' as const } : {}),
     },
     citationItems,
     schema: 'https://github.com/citation-style-language/schema/raw/master/csl-citation.json',
   };
   const json = JSON.stringify(cslCitation);
 
-  return '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+  const xml = (literalAuthorPrefix ? htmlToOoxmlRuns(literalAuthorPrefix, extraRPr) : '') +
+    '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
     '<w:r><w:instrText xml:space="preserve"> ADDIN ZOTERO_ITEM CSL_CITATION ' + escapeXml(json) + ' </w:instrText></w:r>' +
     '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
     htmlToOoxmlRuns(visibleText, extraRPr) +
     '<w:r><w:fldChar w:fldCharType="end"/></w:r>';
+  const narrativeOrigin = narrative && literalAuthorPrefix && keys.length === 1
+    ? { citationId, citationKey: keys[0], literalPrefix: literalAuthorPrefix }
+    : undefined;
+  return { xml, ...(narrativeOrigin ? { narrativeOrigin } : {}) };
 }
 
 export function generateCitation(
-  run: { keys?: string[]; locators?: Map<string, string>; text: string; suppressAuthorKeys?: Set<string> },
+  run: { keys?: string[]; locators?: Map<string, string>; text: string; suppressAuthorKeys?: Set<string>; narrative?: boolean },
   entries: Map<string, BibtexEntry>,
   citeprocEngine?: CiteprocEngine,
   usedCitationIds?: Set<string>,
@@ -499,13 +567,15 @@ export function generateCitation(
 
   // All resolved — emit field code (works for both Zotero and non-Zotero entries)
   if (resolvedKeys.length > 0 && missingKeys.length === 0) {
-    const xml = buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine, undefined, usedCitationIds, itemIdMap, run.suppressAuthorKeys, extraRPr);
-    return { xml };
+    return buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine, undefined, usedCitationIds, itemIdMap, run.suppressAuthorKeys, extraRPr, run.narrative);
   }
 
-  // Pure missing — emit @citekey references as plain text, preserving bracket format
+  const missingText = run.narrative
+    ? '@' + missingKeys[0]
+    : '[' + missingKeys.map(k => (run.suppressAuthorKeys?.has(k) ? '-@' : '@') + k).join('; ') + ']';
+
+  // Pure missing — emit @citekey references as plain text, preserving authored form.
   if (resolvedKeys.length === 0) {
-    const missingText = '[' + missingKeys.map(k => (run.suppressAuthorKeys?.has(k) ? '-@' : '@') + k).join('; ') + ']';
     return {
       xml: '<w:r>' + rPrOpen + '<w:t>' + escapeXml(missingText) + '</w:t></w:r>',
       warning: warnings.length > 0 ? warnings.join('; ') : undefined,
@@ -514,15 +584,16 @@ export function generateCitation(
   }
 
   // Mixed (some resolved, some missing) — resolved get field code, missing get plain text
-  const missingText = '[' + missingKeys.map(k => (run.suppressAuthorKeys?.has(k) ? '-@' : '@') + k).join('; ') + ']';
-  const xml = buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine, undefined, usedCitationIds, itemIdMap, run.suppressAuthorKeys, extraRPr) +
+  const field = buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine, undefined, usedCitationIds, itemIdMap, run.suppressAuthorKeys, extraRPr, run.narrative);
+  const xml = field.xml +
     '<w:r>' + rPrOpen + '<w:t xml:space="preserve"> </w:t></w:r>' +
     '<w:r>' + rPrOpen + '<w:t>' + escapeXml(missingText) + '</w:t></w:r>';
 
   return {
     xml,
     warning: warnings.join('; '),
-    missingKeys
+    missingKeys,
+    ...(field.narrativeOrigin ? { narrativeOrigin: field.narrativeOrigin } : {}),
   };
 }
 
@@ -679,6 +750,42 @@ function parseLocator(locator: string): { locator: string; label: string } {
   return { locator: trimmed, label: 'page' };
 }
 
+export function generateNarrativeAuthorText(
+  key: string,
+  entries: Map<string, BibtexEntry>,
+): string {
+  const entry = entries.get(key);
+  if (!entry) return '@' + key;
+
+  const author = entry.fields.get('author');
+  const institution = entry.fields.get('institution');
+  if (!author) return institution || key;
+
+  const firstAuthor = splitAuthorString(author)[0] || author.trim();
+  if (firstAuthor.startsWith('{') && firstAuthor.endsWith('}')) {
+    return firstAuthor.slice(1, -1);
+  }
+  const commaPos = firstAuthor.indexOf(',');
+  return commaPos !== -1
+    ? firstAuthor.slice(0, commaPos).trim()
+    : firstAuthor.split(' ').pop() || firstAuthor;
+}
+
+export function generateNarrativeFallbackText(
+  key: string,
+  entries: Map<string, BibtexEntry>,
+  locator?: string,
+): string {
+  const entry = entries.get(key);
+  if (!entry) return '@' + key;
+
+  const name = generateNarrativeAuthorText(key, entries);
+  const year = entry.fields.get('year');
+  let text = name + (year ? ' (' + year + ')' : '');
+  if (locator) text += ', ' + locator;
+  return text;
+}
+
 export function generateFallbackText(keys: string[], entries: Map<string, BibtexEntry>, locators?: Map<string, string>, suppressAuthorKeys?: Set<string>): string {
   const parts = keys.map(key => {
     const entry = entries.get(key);
@@ -716,6 +823,45 @@ export function generateFallbackText(keys: string[], entries: Map<string, Bibtex
   });
 
   return '(' + parts.join('; ') + ')';
+}
+
+function deduplicateUnknown(values: unknown): unknown[] {
+  const result: unknown[] = [];
+  const seen = new Set<string>();
+  for (const value of Array.isArray(values) ? values : []) {
+    let key: string;
+    try {
+      key = typeof value + ':' + JSON.stringify(value);
+    } catch {
+      key = typeof value + ':' + String(value);
+    }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(value);
+  }
+  return result;
+}
+
+function uncitedUri(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value) && typeof value[0] === 'string') return value[0];
+  return undefined;
+}
+
+export function mergeZoteroBibliographyData(
+  biblData: { uncited?: unknown[]; omitted?: unknown[]; custom?: unknown[] } | undefined,
+  nociteUris: readonly string[],
+): { uncited: unknown[]; omitted: unknown[]; custom: unknown[] } {
+  const uncited = deduplicateUnknown(biblData?.uncited);
+  const omitted = deduplicateUnknown(biblData?.omitted);
+  const custom = deduplicateUnknown(biblData?.custom);
+  const seenUris = new Set(uncited.map(uncitedUri).filter((uri): uri is string => uri !== undefined));
+  for (const uri of nociteUris) {
+    if (seenUris.has(uri)) continue;
+    seenUris.add(uri);
+    uncited.push([uri]);
+  }
+  return { uncited, omitted, custom };
 }
 
 /**

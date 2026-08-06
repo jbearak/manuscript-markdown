@@ -53,6 +53,7 @@ function makeState(): DocxGenState {
     codeShadingMode: false,
     citationIds: new Set(),
     citedKeys: new Set(),
+    bibliographyKeys: [],
     citationItemIds: new Map(),
     blockquoteGaps: new Map(),
     blockquotePostContentBlankLines: new Map(),
@@ -4342,5 +4343,63 @@ describe('per-paragraph indent overrides', () => {
     // Zero gap (no blank line) before the sentinel must be preserved
     expect(result.markdown).toContain('Paragraph text.\n<!-- style: caption -->');
     expect(result.markdown).not.toContain('Paragraph text.\n\n<!-- style: caption -->');
+  });
+});
+
+describe('parseMd bare narrative citations', () => {
+  const citationRuns = (markdown: string) => {
+    const found: MdRun[] = [];
+    const collect = (runs: MdRun[]) => {
+      for (const run of runs) {
+        if (run.type === 'citation') found.push(run);
+        if (run.innerRuns) collect(run.innerRuns);
+        if (run.oldRuns) collect(run.oldRuns);
+        if (run.newRuns) collect(run.newRuns);
+      }
+    };
+    for (const token of parseMd(markdown)) collect(token.runs);
+    return found;
+  };
+
+  it('distinguishes bare, bracketed, and suppress-author forms', () => {
+    const runs = citationRuns('@alpha [@beta] [-@gamma]');
+    expect(runs.map(run => run.keys)).toEqual([['alpha'], ['beta'], ['gamma']]);
+    expect(runs.map(run => run.narrative ?? false)).toEqual([true, false, false]);
+    expect(runs[2].suppressAuthorKeys).toEqual(new Set(['gamma']));
+    expect(citationRuns('[@alpha; ordinary text; @beta]').map(run => run.keys)).toEqual([
+      ['alpha', 'beta'],
+    ]);
+  });
+
+  it('recognizes citations in visible link labels but not destinations', () => {
+    const runs = citationRuns(
+      '[linked @label](https://example.com/@destination "@title") '
+      + '[@citation-label](https://example.com/other)',
+    );
+    expect(runs.map(run => run.keys)).toEqual([['label'], ['citation-label']]);
+    expect(runs.every(run => run.narrative)).toBe(true);
+  });
+
+  it('excludes code, escapes, URIs, emails, and unsupported brackets', () => {
+    const markdown = '`@code` \\@escaped https://example.com/@uri mailto:@mail '
+      + '"quoted"@example.com δοκιμή@example.org [see @prefix]';
+    expect(citationRuns(markdown)).toHaveLength(0);
+  });
+
+  it('parses live CriticMarkup payloads but preserves deleted and old citations as text', () => {
+    const tokens = parseMd(
+      '{++@added++} {--@deleted--} {~~@old~>@new~~} '
+      + '{==@highlighted==} {>>@Reviewer | @comment<<}',
+    );
+    const runs = tokens.flatMap(token => token.runs);
+    expect(citationRuns(
+      '{++@added++} {--@deleted--} {~~@old~>@new~~} '
+      + '{==@highlighted==} {>>@Reviewer | @comment<<}',
+    ).map(run => run.keys)).toEqual([['added'], ['new'], ['highlighted']]);
+
+    const deletion = runs.find(run => run.type === 'critic_del');
+    const substitution = runs.find(run => run.type === 'critic_sub');
+    expect(deletion?.innerRuns).toContainEqual(expect.objectContaining({ type: 'text', text: '@deleted' }));
+    expect(substitution?.oldRuns).toContainEqual(expect.objectContaining({ type: 'text', text: '@old' }));
   });
 });

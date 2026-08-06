@@ -107,9 +107,13 @@ describe('shouldAutoTriggerLspSuggest frontmatter policy', () => {
 		}
 	});
 
-	test('keeps unfinished-frontmatter popup after comments when a mapping establishes YAML', () => {
-		const text = '---\n# Document metadata\ntitle: Draft\n\n';
-		expect(shouldTrigger(text, text.length, '\n')).toBe(true);
+	test('keeps unfinished-frontmatter popup through EOF once a mapping establishes YAML', () => {
+		for (const text of [
+			'---\n# Document metadata\ntitle: Draft\n\n',
+			'---\ntitle: Draft\nmalformed prose still in YAML\n\n',
+		]) {
+			expect(shouldTrigger(text, text.length, '\n')).toBe(true);
+		}
 	});
 
 	test('does not trigger values for unknown or free-text settings', () => {
@@ -185,8 +189,59 @@ describe('shouldAutoTriggerLspSuggest existing contexts', () => {
 	});
 
 	test('preserves citekey auto-suggest', () => {
-		const text = 'See [@s]';
-		expect(shouldTrigger(text, text.indexOf('s') + 1, 's')).toBe(true);
+		for (const text of ['See [@s', 'See [-@s']) {
+			expect(shouldTrigger(text, text.length, 's')).toBe(true);
+		}
+	});
+
+	test('treats unmatched ordinary brackets as bare completion contexts', () => {
+		expect(shouldTrigger('See [ordinary @s')).toBe(true);
+		expect(shouldTrigger('See [ordinary @s]', 'See [ordinary @s'.length, 's')).toBe(false);
+	});
+
+	test('uses a bounded lexical citation window without weakening common exclusions', () => {
+		for (const text of [
+			'`[@s]`',
+			'[label](@s)',
+			'[discussion @s]',
+			'person@example.com',
+			'café@example.com',
+			'café@example.com',
+			'é@s',
+			'é@s',
+			'\\@s',
+		]) {
+			const offset = text.indexOf('@') + 2;
+			expect(shouldTrigger(text, offset, text[offset - 1])).toBe(false);
+		}
+
+		const text = ('ordinary prose\n'.repeat(100_000)) + 'See [@s]';
+		const offset = text.length - 1;
+		const started = performance.now();
+		expect(shouldTrigger(text, offset, 's')).toBe(true);
+		expect(performance.now() - started).toBeLessThan(250);
+	});
+
+	test('auto-suggests citekeys in closed and provisional nocite values', () => {
+		for (const scalar of [
+			"---\nnocite: '@s'\n---\n",
+			"---\ntitle: Draft\nnocite: '@s'",
+		]) {
+			expect(shouldTrigger(scalar, scalar.lastIndexOf("'"), 's')).toBe(true);
+		}
+		const block = '---\nnocite: |\n  @s\n---\n';
+		expect(shouldTrigger(block, block.indexOf('\n---'), 's')).toBe(true);
+		for (const other of [
+			"---\ntitle: '@s'\n---\n",
+			"---\ntitle: '@s'",
+		]) {
+			expect(shouldTrigger(other, other.lastIndexOf("'"), 's')).toBe(false);
+		}
+	});
+
+	test('keeps citation auto-suggest in thematic-break bodies without a mapping', () => {
+		const text = '---\nBody prose @s';
+		expect(shouldTrigger(text, text.length, 's')).toBe(true);
 	});
 
 	test('preserves CSL value auto-suggest', () => {

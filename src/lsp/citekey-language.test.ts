@@ -56,6 +56,20 @@ describe('scanCitationUsages', () => {
 		const offsets = usages.map((u) => u.keyStart);
 		expect(new Set(offsets).size).toBe(3);
 	});
+
+	test('shares bare and nocite recognition with all LSP consumers', () => {
+		const text = "---\nnocite: '[@uncited]'\n---\nSee @narrative and [-@suppressed].";
+		expect(scanCitationUsages(text).map((u) => u.key)).toEqual(['uncited', 'narrative', 'suppressed']);
+		expect(findCitekeyAtOffset(text, text.indexOf('@uncited'))).toBe('uncited');
+		expect(findCitekeyAtOffset(text, text.indexOf('@narrative'))).toBe('narrative');
+	});
+
+	test('shares provisional frontmatter semantics across diagnostics and symbol consumers', () => {
+		const text = "---\ntitle: '@hidden'\nnocite: '[@uncited; @*]'";
+		expect(scanCitationUsages(text).map((usage) => usage.key)).toEqual(['uncited']);
+		expect(findCitekeyAtOffset(text, text.indexOf('@hidden'))).toBeUndefined();
+		expect(findCitekeyAtOffset(text, text.indexOf('@uncited'))).toBe('uncited');
+	});
 });
 
 describe('path canonicalization', () => {
@@ -116,16 +130,52 @@ describe('getCompletionContextAtOffset', () => {
 		expect(ctx?.prefix).toBe('smi');
 	});
 
-	test('does not return completion context for email address', () => {
-		const text = 'user@domain';
-		const offset = text.length;
-		expect(getCompletionContextAtOffset(text, offset)).toBeUndefined();
+	test('treats a citation after an unmatched ordinary bracket as bare', () => {
+		const text = 'see [ordinary @smi';
+		const ctx = getCompletionContextAtOffset(text, text.length);
+		expect(ctx?.form).toBe('bare');
+		expect(ctx?.prefix).toBe('smi');
 	});
 
-	test('does not return completion context when letter directly precedes @', () => {
-		const text = 'first-last@domain';
-		const offset = text.length;
-		expect(getCompletionContextAtOffset(text, offset)).toBeUndefined();
+	test('suppresses completion inside a balanced ordinary bracket', () => {
+		const text = 'see [ordinary @smi]';
+		expect(getCompletionContextAtOffset(text, text.indexOf(']'))).toBeUndefined();
+	});
+
+	test('keeps bracket completion for unfinished author-suppressed citations', () => {
+		const text = 'see [-@smi';
+		const ctx = getCompletionContextAtOffset(text, text.length);
+		expect(ctx?.form).toBe('bracket');
+		expect(ctx?.prefix).toBe('smi');
+	});
+
+	test('returns completion context in closed and provisional nocite values only', () => {
+		for (const scalar of [
+			"---\nnocite: '@smi'\n---\n",
+			"---\ntitle: Draft\nnocite: '@smi'",
+		]) {
+			expect(getCompletionContextAtOffset(scalar, scalar.lastIndexOf("'"))?.form).toBe('nocite');
+		}
+		const block = '---\nnocite: |\n  @smi\n---\n';
+		expect(getCompletionContextAtOffset(block, block.indexOf('\n---'))?.form).toBe('nocite');
+		for (const other of [
+			"---\ntitle: '@smi'\n---\n",
+			"---\ntitle: '@smi'",
+		]) {
+			expect(getCompletionContextAtOffset(other, other.lastIndexOf("'"))).toBeUndefined();
+		}
+	});
+
+	test('does not return completion context for NFC or NFD email addresses', () => {
+		for (const text of ['user@domain', 'café@domain', 'café@domain']) {
+			expect(getCompletionContextAtOffset(text, text.length)).toBeUndefined();
+		}
+	});
+
+	test('does not return completion context when a letter or mark directly precedes @', () => {
+		for (const text of ['first-last@domain', 'é@domain', 'é@domain']) {
+			expect(getCompletionContextAtOffset(text, text.length)).toBeUndefined();
+		}
 	});
 
 	test('does not return completion context when hyphen directly precedes @', () => {

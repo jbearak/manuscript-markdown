@@ -3161,6 +3161,34 @@ function wrapNotesXml(noteType: 'footnotes' | 'endnotes', content: string): stri
     + '</' + root + '>';
 }
 
+function syntheticCitationPayload(
+  title: string,
+  doi: string,
+  family: string,
+  year: number,
+): string {
+  return JSON.stringify({
+    citationItems: [{
+      itemData: {
+        type: 'article-journal',
+        title,
+        DOI: doi,
+        author: [{ family, given: 'Test' }],
+        issued: { 'date-parts': [[year]] },
+      },
+    }],
+    properties: { plainCitation: '(' + family + ' ' + year + ')' },
+  });
+}
+
+function syntheticCitationField(payload: string, visibleText: string): string {
+  return '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+    + '<w:r><w:instrText xml:space="preserve"> ADDIN ZOTERO_ITEM CSL_CITATION ' + payload + '</w:instrText></w:r>'
+    + '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+    + '<w:r><w:t>' + visibleText + '</w:t></w:r>'
+    + '<w:r><w:fldChar w:fldCharType="end"/></w:r>';
+}
+
 describe('DOCX footnote extraction', () => {
   test('extracts footnote references and definitions from DOCX', async () => {
     const docXml = wrapDocumentXml(
@@ -3447,6 +3475,72 @@ describe('DOCX footnote extraction', () => {
 
     expect(result.markdown).toContain('[^1]:');
     expect(result.markdown).toContain('@smith2020test');
+    expect(result.bibtex).toContain('@article{smith2020test,');
+    expect(result.bibtex).toContain('title = {{Test Article}}');
+  });
+
+  test('endnote-only Zotero itemData contributes the emitted citekey to BibTeX', async () => {
+    const payload = syntheticCitationPayload('Endnote Article', '10.1234/endnote', 'Jones', 2021);
+    const docXml = wrapDocumentXml(
+      '<w:p><w:r><w:t>Text</w:t></w:r>'
+      + '<w:r><w:endnoteReference w:id="1"/></w:r></w:p>'
+    );
+    const endnotesXml = wrapNotesXml('endnotes',
+      '<w:endnote w:id="1"><w:p><w:r><w:endnoteRef/></w:r>'
+      + syntheticCitationField(payload, '(Jones 2021)')
+      + '</w:p></w:endnote>'
+    );
+    const result = await convertDocx(await buildSyntheticDocx(docXml, {
+      'word/endnotes.xml': endnotesXml,
+    }));
+
+    expect(result.markdown).toContain('@jones2021endnote');
+    expect(result.bibtex).toContain('@article{jones2021endnote,');
+    expect(result.bibtex).toContain('doi = {10.1234/endnote}');
+  });
+
+  test('body and note citations share one BibTeX aggregation and citekey map', async () => {
+    const bodyPayload = syntheticCitationPayload('Body Study', '10.1234/body', 'Adams', 2020);
+    const notePayload = syntheticCitationPayload('Note Study', '10.1234/note', 'Baker', 2021);
+    const docXml = wrapDocumentXml(
+      '<w:p>' + syntheticCitationField(bodyPayload, '(Adams 2020)')
+      + '<w:r><w:footnoteReference w:id="1"/></w:r></w:p>'
+    );
+    const footnotesXml = wrapNotesXml('footnotes',
+      '<w:footnote w:id="1"><w:p><w:r><w:footnoteRef/></w:r>'
+      + syntheticCitationField(notePayload, '(Baker 2021)')
+      + '</w:p></w:footnote>'
+    );
+    const result = await convertDocx(await buildSyntheticDocx(docXml, {
+      'word/footnotes.xml': footnotesXml,
+    }));
+
+    expect(result.markdown).toContain('@adams2020body');
+    expect(result.markdown).toContain('@baker2021note');
+    expect(result.bibtex).toContain('@article{adams2020body,');
+    expect(result.bibtex).toContain('@article{baker2021note,');
+  });
+
+  test('body and note citekey collisions resolve identically in Markdown and BibTeX', async () => {
+    const bodyPayload = syntheticCitationPayload('Shared Body', '10.1234/shared-body', 'Smith', 2020);
+    const notePayload = syntheticCitationPayload('Shared Note', '10.1234/shared-note', 'Smith', 2020);
+    const docXml = wrapDocumentXml(
+      '<w:p>' + syntheticCitationField(bodyPayload, '(Smith 2020)')
+      + '<w:r><w:footnoteReference w:id="1"/></w:r></w:p>'
+    );
+    const footnotesXml = wrapNotesXml('footnotes',
+      '<w:footnote w:id="1"><w:p><w:r><w:footnoteRef/></w:r>'
+      + syntheticCitationField(notePayload, '(Smith 2020)')
+      + '</w:p></w:footnote>'
+    );
+    const result = await convertDocx(await buildSyntheticDocx(docXml, {
+      'word/footnotes.xml': footnotesXml,
+    }));
+
+    expect(result.markdown).toContain('@smith2020shared');
+    expect(result.markdown).toContain('@smith2020shared2');
+    expect(result.bibtex).toContain('@article{smith2020shared,');
+    expect(result.bibtex).toContain('@article{smith2020shared2,');
   });
 
   test('mixed footnotes + endnotes does not set notes: endnotes in frontmatter', async () => {

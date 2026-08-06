@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'bun:test';
 import { generateCitation, generateCitationId, generateMathXml, escapeXml, generateMissingKeysXml, htmlToOoxmlRuns, generateFallbackText } from './md-to-docx-citations';
 import { BibtexEntry } from './bibtex-parser';
+import { scanCitationDocument } from './citation-scanner';
 import { parseMd, type MdRun } from './md-to-docx';
 
 /** Extract and parse the CSL_CITATION JSON from a Zotero field code XML string. */
@@ -640,6 +641,96 @@ describe('parseMd per-item suppress-author', () => {
     }
     return undefined;
   }
+
+  it('uses the shared escape-aware balanced bracket context for bare citations', () => {
+    for (const markdown of ['\\[literal @alpha', '[unmatched @alpha']) {
+      const run = findCitationRun(parseMd(markdown));
+      expect(run?.keys).toEqual(['alpha']);
+      expect(run?.narrative).toBe(true);
+    }
+    expect(findCitationRun(parseMd('[ordinary @hidden]'))).toBeUndefined();
+    const nested = findCitationRun(parseMd('[discussion [@alpha]]'));
+    expect(nested?.keys).toEqual(['alpha']);
+    expect(nested?.narrative).not.toBe(true);
+  });
+
+  it('ignores inert Markdown brackets when classifying bare citations', () => {
+    for (const markdown of [
+      '`[` then @alpha ]',
+      'Before <!-- [ --> then @alpha ]',
+      '<span data-value="[">text</span> then @alpha ]',
+      '[label](<https://example.test/[>) then @alpha ]',
+    ]) {
+      const run = findCitationRun(parseMd(markdown));
+      expect(run?.keys).toEqual(['alpha']);
+      expect(run?.narrative).toBe(true);
+    }
+
+    for (const markdown of [
+      '[ordinary `]` then @hidden]',
+      '[ordinary <!-- ] --> then @hidden]',
+      '[ordinary <span data-value="]">text</span> then @hidden]',
+    ]) {
+      expect(findCitationRun(parseMd(markdown))).toBeUndefined();
+    }
+  });
+
+  it('exports bare citations in resolved shortcut-reference labels', () => {
+    const markdown = 'See [work by @alpha].\n\n[work by @alpha]: https://example.test';
+    const run = findCitationRun(parseMd(markdown));
+    expect(run?.keys).toEqual(['alpha']);
+    expect(run?.narrative).toBe(true);
+    expect(run?.href).toBe('https://example.test');
+  });
+
+  it('keeps scanner and exporter reference-definition validity in parity', () => {
+    const reference = 'See [work by @alpha][target].\n\n';
+    const cases = [
+      { definition: '[target]: https://example.test "A title"', expected: ['alpha'] },
+      { definition: '[target]:\n  https://example.test\n  "A multiline definition"', expected: ['alpha'] },
+      { definition: '[target]:', expected: [] },
+      { definition: '[target]: https://example.test "A title" trailing garbage', expected: [] },
+      { definition: '[target]: <https://example.test', expected: [] },
+      { definition: '[target]: https://example.test/(unclosed', expected: [] },
+      { definition: '[target]: javascript:alert(1)', expected: [] },
+      { definition: '[target]: file:///tmp/manuscript.md', expected: [] },
+    ];
+
+    for (const { definition, expected } of cases) {
+      const markdown = reference + definition;
+      const scannerKeys = scanCitationDocument(markdown).usages.map(usage => usage.key);
+      const exporterKeys = findCitationRun(parseMd(markdown))?.keys ?? [];
+      expect(scannerKeys).toEqual(expected);
+      expect(exporterKeys).toEqual(scannerKeys);
+    }
+  });
+
+  it('preserves links whose labels begin with citation syntax', () => {
+    const shortcut = findCitationRun(parseMd('See [@alpha].\n\n[@alpha]: https://example.test'));
+    expect(shortcut?.keys).toEqual(['alpha']);
+    expect(shortcut?.narrative).toBe(true);
+    expect(shortcut?.href).toBe('https://example.test');
+
+    const nested = findCitationRun(parseMd('See [@alpha [note]](https://example.test)'));
+    expect(nested?.keys).toEqual(['alpha']);
+    expect(nested?.narrative).toBe(true);
+    expect(nested?.href).toBe('https://example.test');
+  });
+
+  it('does not export bare citations attached to Unicode letters, marks, or numbers', () => {
+    for (const markdown of [
+      'α@_beta',
+      '𐐀@deseret',
+      '٣@arabic',
+      '𝟙@astral_number',
+      'é@precomposed',
+      'é@decomposed',
+      'café@example.com',
+      'café@example.com',
+    ]) {
+      expect(findCitationRun(parseMd(markdown))).toBeUndefined();
+    }
+  });
 
   it('[-@smith; @jones] produces suppressAuthorKeys with smith only', () => {
     const tokens = parseMd('[-@smith2020; @doe2021]');

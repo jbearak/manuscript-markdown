@@ -25,6 +25,7 @@ csl: apa
 
 - `title`: The title of your paper.
 - `csl`: The citation style to use (e.g., `apa`, `ieee`, `nature`). You can use any style from the [CSL repository](https://github.com/citation-style-language/styles).
+- `nocite`: Bibliography entries to include without in-text citations; use `@*` for all available entries.
 - `line-spacing`: Line spacing (`single`, `1.5`, `double`). Any non-`single` value other than the default 1.15 causes paragraphs to be automatically indented instead of separated by space — the standard academic manuscript format. Related keys: `paragraph-indent` (override the indent size in inches) and `bibliography-hanging-indent` (hanging indent for bibliography entries). See [Specification](../specification.md#line-spacing-and-paragraph-indent) for details.
 - Text style customization: see [Configuration](../configuration.md) for options like fonts and spacing.
 
@@ -34,13 +35,14 @@ Citations use standard [BibTeX](https://www.bibtex.org/) format, so you don't ne
 
 ### Inserting Citations
 
-You can insert citations using the standard Pandoc syntax:
+You can insert citations using standard Pandoc syntax:
 
-- `[@smith2020]` -> (Smith, 2020)
-- `[@smith2020; @jones2021]` -> (Smith, 2020; Jones, 2021)
-- `[-@smith2020]` -> (2020)
+- `@smith2020` -> Smith (2020), an author-in-text or narrative citation
+- `[@smith2020]` -> (Smith, 2020), a parenthetical citation
+- `[@smith2020; @jones2021]` -> (Smith, 2020; Jones, 2021), a citation cluster
+- `[-@smith2020]` -> (2020), with the author suppressed
 
-When you export to Word, these are converted to active Zotero citations.
+When you export to Word, these are converted to active Zotero citations. The Markdown preview continues to show the source syntax; CSL rendering is applied during Word export. Escape a literal handle as `\@username`; citation recognition also avoids structural locations such as code, HTML markup and comments, link destinations, and reference definitions.
 
 ### Managing the Bibliography
 
@@ -51,6 +53,18 @@ When you import a Word document that contains a bibliography, the converter auto
 bibliography: /path/to/my/references.bib
 ---
 ```
+
+Use top-level `nocite` to add references to the bibliography without creating an in-text citation:
+
+```yaml
+---
+nocite:
+  - @smith2020
+  - @jones2021
+---
+```
+
+Use `nocite: @*` to include every available bibliography entry. Missing explicit keys produce a warning; the wildcard includes all available entries without missing-key warnings. See the [specification](../specification.md#nocite) for every supported YAML form.
 
 ## Equations
 

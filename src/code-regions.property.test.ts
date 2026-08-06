@@ -6,6 +6,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import fc from 'fast-check';
+import { computeCodeRegions } from './code-regions';
 import { extractAllDecorationRanges } from './highlight-colors';
 import { scanCitationUsages } from './lsp/citekey-language';
 
@@ -459,5 +460,45 @@ describe('Property 2: Preservation — Non-Code-Region Behavior Unchanged', () =
 			}),
 			{ numRuns: 300 }
 		);
+	});
+});
+
+// These cases are generated from CommonMark structure rather than a second
+// implementation of the production scanner, so they catch shared-oracle bugs.
+describe('Property 3: CommonMark code structure', () => {
+	const citekey = fc.string({
+		unit: fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz0123456789_-'.split('')),
+		minLength: 1,
+		maxLength: 20,
+	});
+
+	test('0-3-space fences hide inner citations and preserve following prose', () => {
+		fc.assert(fc.property(
+			fc.integer({ min: 0, max: 3 }),
+			citekey,
+			citekey,
+			(indent, hidden, live) => {
+				const spaces = ' '.repeat(indent);
+				const text = spaces + '```md\n@' + hidden + '\n' + spaces + '```\n@' + live;
+				expect(scanCitationUsages(text).map(usage => usage.key)).toEqual([live]);
+			},
+		), { numRuns: 200 });
+	});
+
+	test('list continuations stay visible while top-level indented code stays inert', () => {
+		fc.assert(fc.property(citekey, key => {
+			expect(scanCitationUsages('- item\n\n    @' + key).map(usage => usage.key)).toEqual([key]);
+			expect(scanCitationUsages('paragraph\n\n    @' + key)).toEqual([]);
+		}), { numRuns: 200 });
+	});
+
+	test('production ranges are sorted and non-overlapping', () => {
+		fc.assert(fc.property(documentWithCodeRegions, text => {
+			const regions = computeCodeRegions(text);
+			for (let i = 1; i < regions.length; i++) {
+				expect(regions[i - 1].start).toBeLessThan(regions[i].start);
+				expect(regions[i - 1].end).toBeLessThanOrEqual(regions[i].start);
+			}
+		}), { numRuns: 300 });
 	});
 });

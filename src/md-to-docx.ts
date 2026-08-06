@@ -1,7 +1,7 @@
 import MarkdownIt from 'markdown-it';
 import type Token from 'markdown-it/lib/token.mjs';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
-import { escapeXml, escapeXmlText, generateCitation, generateMathXml, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, type CiteprocEngine } from './md-to-docx-citations';
+import { escapeXml, escapeXmlText, generateCitation, generateMathXml, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, mergeZoteroBibliographyData, type CiteprocEngine, type NarrativeCitationOrigin } from './md-to-docx-citations';
 import { downloadStyle } from './csl-loader';
 import { existsSync, readFileSync } from 'fs';
 import { isAbsolute, join, resolve } from 'path';
@@ -17,6 +17,13 @@ import { preprocessGridTables, GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData
 import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
 import { extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
+import { parseBracketCitationItems, readMarkdownCitekey } from './citekey';
+import {
+  analyzeCitationDocument,
+  findCitationAtOffset,
+  isBoundaryValidBareCitation,
+  type CitationDocumentAnalysis,
+} from './citation-scanner';
 export { preprocessGridTables } from './grid-table-preprocess';
 export { extractHtmlTables } from './html-table-parser';
 
@@ -29,9 +36,10 @@ const IMAGE_DIMENSION_ATTR_RE = '(\\d+(?:\\.\\d+)?|\\.\\d+)\\s*(px|in|cm|mm|pt|p
 // - decodeHtmlEntities(): decode &amp; after other named entities to avoid over-decoding
 // - Numeric entities: use String.fromCodePoint() not String.fromCharCode() for
 //   supplementary-plane chars
-// - CriticMarkup recursive formatting: parse inner payloads with markdown-it
-//   (Critic/comment/citation/math/footnote rules disabled); carry structured
-//   inner runs on MdRun (innerRuns / oldRuns / newRuns)
+// - CriticMarkup recursive formatting: parse inner payloads with markdown-it;
+//   live additions/highlights/new substitution sides may contain citations,
+//   while deleted/old sides preserve citation syntax as text. Structured inner
+//   runs live on MdRun (innerRuns / oldRuns / newRuns).
 //
 // --- Word dirty-flag prevention ---
 // The following invariants prevent Word from marking generated .docx files as
@@ -160,6 +168,7 @@ export interface MdRun {
   keys?: string[];          // citation keys for [@key1; @key2]
   locators?: Map<string, string>; // key -> locator for [@key, p. 20]
   suppressAuthorKeys?: Set<string>; // per-key suppress-author: Set of keys with [-@key] form
+  narrative?: boolean;       // bare @key author-in-text form
   // Math specific
   display?: boolean;        // display math ($$...$$) vs inline ($...$)
   // Image specific
@@ -251,6 +260,7 @@ interface ManuscriptToken extends Token {
   keys?: string[];
   locators?: Map<string, string>;
   suppressAuthorKeys?: Set<string>;
+  narrative?: boolean;
   display?: boolean;
   footnoteLabel?: string;
 }
@@ -556,6 +566,46 @@ function citationRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   const max = state.posMax;
 
+  // Bare @key is Pandoc's author-in-text form. Reuse the shared semantic
+  // analysis so inert Markdown brackets cannot change exporter behavior.
+  const citationState = state as StateInline & {
+    linkLevel?: number;
+    manuscriptCitationAnalysis?: CitationDocumentAnalysis;
+  };
+  if (state.src.charAt(start) === '@') {
+    citationState.manuscriptCitationAnalysis ??= analyzeCitationDocument(state.src);
+    const analysis = citationState.manuscriptCitationAnalysis;
+    const usage = findCitationAtOffset(state.src, start, analysis);
+    let key: string | undefined;
+    let end: number | undefined;
+    if (usage?.atStart === start && usage.form === 'bare') {
+      key = usage.key;
+      end = usage.keyEnd;
+    } else if ((citationState.linkLevel ?? 0) > 0) {
+      // Shortcut-reference definitions can live in another block and are not in
+      // state.src. Markdown-it has already resolved the link; only fall back for
+      // an @ directly in that outer label, not in a nested ordinary bracket.
+      const bracket = analysis.brackets.balancedContexts.get(start);
+      const parsed = bracket?.end === max + 1 && isBoundaryValidBareCitation(state.src, start)
+        ? readMarkdownCitekey(state.src, start + 1)
+        : undefined;
+      if (parsed) {
+        key = parsed.key;
+        end = parsed.end;
+      }
+    }
+    if (key !== undefined && end !== undefined && end <= max) {
+      if (!silent) {
+        const token = pushManuscriptToken(state, 'citation', '', 0);
+        token.content = key;
+        token.keys = [key];
+        token.narrative = true;
+      }
+      state.pos = end;
+      return true;
+    }
+  }
+
   // Match [@key] or [-@key] (Pandoc suppress-author form)
   const isNormal = start + 2 < max && state.src.slice(start, start + 2) === '[@';
   const isSuppressed = !isNormal && start + 3 < max && state.src.slice(start, start + 3) === '[-@';
@@ -564,6 +614,10 @@ function citationRule(state: StateInline, silent: boolean): boolean {
   const contentStart = isSuppressed ? start + 3 : start + 2;
   const endPos = state.src.indexOf(']', contentStart);
   if (endPos === -1) return false;
+  // A citation-looking Markdown link is still a link. Yield to markdown-it's
+  // link rule; the label is parsed recursively and its visible @key is handled
+  // by the bare-citation branch above, while the destination remains inert.
+  if (state.src[endPos + 1] === '(' || state.src[endPos + 1] === '[') return false;
 
   if (!silent) {
     const rawContent = state.src.slice(contentStart, endPos);
@@ -575,34 +629,10 @@ function citationRule(state: StateInline, silent: boolean): boolean {
     const locators = new Map<string, string>();
     const suppressAuthorKeys = new Set<string>();
 
-    // Split raw content by `;` and check each part for -@ prefix BEFORE stripping
-    const rawParts = rawContent.split(';').map((p: string) => p.trim()).filter(Boolean);
-    for (let i = 0; i < rawParts.length; i++) {
-      let raw = rawParts[i];
-      let suppressed: boolean;
-      if (i === 0) {
-        // First part: the `[-@` or `[@` prefix was already consumed by the outer match,
-        // so `isSuppressed` tells us whether this item is suppressed.
-        suppressed = isSuppressed;
-        raw = raw.replace(/^@/, '').trim();
-      } else {
-        // Subsequent parts: check for `-@` prefix to determine per-item suppress
-        suppressed = raw.startsWith('-@');
-        raw = raw.replace(/^-?@/, '').trim();
-      }
-      if (!raw) continue;
-
-      const commaPos = raw.indexOf(',');
-      if (commaPos !== -1) {
-        const key = raw.slice(0, commaPos).trim();
-        const locator = raw.slice(commaPos + 1).trim();
-        keys.push(key);
-        locators.set(key, locator);
-        if (suppressed) suppressAuthorKeys.add(key);
-      } else {
-        keys.push(raw);
-        if (suppressed) suppressAuthorKeys.add(raw);
-      }
+    for (const item of parseBracketCitationItems(state.src, start, endPos + 1)) {
+      keys.push(item.key);
+      if (item.locator !== undefined) locators.set(item.key, item.locator);
+      if (item.suppressAuthor) suppressAuthorKeys.add(item.key);
     }
 
     token.keys = keys;
@@ -683,27 +713,33 @@ function createMarkdownIt(): MarkdownIt {
   md.inline.ruler.before('emphasis', 'colored_highlight', coloredHighlightRule);
   md.inline.ruler.before('emphasis', 'critic_markup', criticMarkupRule);
   md.inline.ruler.before('emphasis', 'footnote_ref', footnoteRefRule);
-  md.inline.ruler.before('emphasis', 'citation', citationRule);
+  md.inline.ruler.after('link', 'citation', citationRule);
   md.inline.ruler.before('emphasis', 'math', mathRule);
 
   return md;
 }
 
 /** Create a markdown-it instance for parsing inner formatting within CriticMarkup payloads. */
-function createCriticInnerMarkdownIt(): MarkdownIt {
+function createCriticInnerMarkdownIt(citations: boolean): MarkdownIt {
   const md = createMarkdownIt();
-  // Inner parsing should recurse into regular inline formatting, but not into
-  // other top-level custom syntaxes that carry separate document semantics.
-  md.inline.ruler.disable(['comment_range', 'footnote_ref', 'citation']);
+  // Inserted/highlighted payloads can safely contain live citation fields.
+  // Deleted/old payloads cannot: Word complex fields inside w:del are not
+  // reliable, so those runs preserve authored citation syntax as deleted text.
+  md.inline.ruler.disable(citations
+    ? ['comment_range', 'footnote_ref']
+    : ['comment_range', 'footnote_ref', 'citation']);
   return md;
 }
 
-let _cachedCriticInnerMd: MarkdownIt | undefined;
-function getCriticInnerMarkdownIt(): MarkdownIt {
-  if (!_cachedCriticInnerMd) {
-    _cachedCriticInnerMd = createCriticInnerMarkdownIt();
+let _cachedActiveCriticInnerMd: MarkdownIt | undefined;
+let _cachedDeletedCriticInnerMd: MarkdownIt | undefined;
+function getCriticInnerMarkdownIt(citations: boolean): MarkdownIt {
+  if (citations) {
+    if (!_cachedActiveCriticInnerMd) _cachedActiveCriticInnerMd = createCriticInnerMarkdownIt(true);
+    return _cachedActiveCriticInnerMd;
   }
-  return _cachedCriticInnerMd;
+  if (!_cachedDeletedCriticInnerMd) _cachedDeletedCriticInnerMd = createCriticInnerMarkdownIt(false);
+  return _cachedDeletedCriticInnerMd;
 }
 
 function toTextRunFromInner(run: MdRun, overrides?: Partial<MdRun>): MdRun {
@@ -749,7 +785,7 @@ function normalizeCriticInnerRuns(runs: MdRun[]): MdRun[] {
       continue;
     }
 
-    if (run.type === 'math') {
+    if (run.type === 'math' || run.type === 'citation') {
       normalized.push(run);
       continue;
     }
@@ -770,9 +806,9 @@ function normalizeCriticInnerRuns(runs: MdRun[]): MdRun[] {
   return normalized;
 }
 
-function parseCriticInnerRuns(content: string): MdRun[] {
+function parseCriticInnerRuns(content: string, citations: boolean): MdRun[] {
   if (!content) return [];
-  const md = getCriticInnerMarkdownIt();
+  const md = getCriticInnerMarkdownIt(citations);
   const tokens = md.parseInline(content, {});
   return normalizeCriticInnerRuns(convertInlineTokens(tokens));
 }
@@ -2345,8 +2381,8 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
             type: 'critic_sub',
             text: oldText,
             newText,
-            oldRuns: parseCriticInnerRuns(oldText),
-            newRuns: parseCriticInnerRuns(newText),
+            oldRuns: parseCriticInnerRuns(oldText, false),
+            newRuns: parseCriticInnerRuns(newText, true),
             ...formatStack,
             href: currentHref
           });
@@ -2355,7 +2391,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
           runs.push({
             type: 'critic_comment',
             text: commentAnchorText,
-            innerRuns: parseCriticInnerRuns(commentAnchorText),
+            innerRuns: parseCriticInnerRuns(commentAnchorText, false),
             author: token.author,
             date: token.date,
             commentText: token.commentText,
@@ -2387,7 +2423,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
           runs.push({
             type: criticType,
             text,
-            innerRuns: parseCriticInnerRuns(text),
+            innerRuns: parseCriticInnerRuns(text, criticType !== 'critic_del'),
             author: token.author,
             date: token.date,
             highlight: innerHighlight,
@@ -2435,6 +2471,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
           keys: token.keys,
           locators: token.locators,
           suppressAuthorKeys: token.suppressAuthorKeys || undefined,
+          narrative: token.narrative,
           ...formatStack,
           href: currentHref
         });
@@ -2896,12 +2933,14 @@ export interface DocxGenState {
   missingKeys: Set<string>;
   citationIds: Set<string>;
   citationItemIds: Map<string, string | number>;
+  narrativeCitationOrigins: Map<string, NarrativeCitationOrigin>;
   timezone?: string; // UTC offset from frontmatter (e.g. "-05:00")
   replyRanges: Array<{replyId: number; parentId: number}>;
   nextParaId: number;
   codeBlockIndex: number;
   codeBlockLanguages: Map<number, string>;
   citedKeys: Set<string>;
+  bibliographyKeys: string[];
   codeFont: string;
   codeShadingMode: boolean;
   blockquoteGaps: Map<number, number>; // gap (blank-line count) after each blockquote group, keyed by group index
@@ -4292,14 +4331,43 @@ interface CustomPropEntry {
 
 /** Chunk a string value into numbered custom properties: PREFIX_1, PREFIX_2, … */
 function chunkCustomProps(prefix: string, data: string, chunkSize = 240): CustomPropEntry[] {
+  if (!Number.isInteger(chunkSize) || chunkSize < 2) {
+    throw new Error('Custom-property chunk size must be an integer of at least 2');
+  }
   const props: CustomPropEntry[] = [];
-  for (let i = 0; i < data.length; i += chunkSize) {
+  let start = 0;
+  while (start < data.length) {
+    let end = Math.min(start + chunkSize, data.length);
+    // String offsets are UTF-16 code units. Never divide a supplementary-plane
+    // code point between properties because each chunk is encoded into XML
+    // independently and lone surrogates are replaced during UTF-8 encoding.
+    if (end < data.length
+        && end > start
+        && /[\uD800-\uDBFF]/.test(data[end - 1])
+        && /[\uDC00-\uDFFF]/.test(data[end])) {
+      end--;
+    }
     props.push({
       name: prefix + (props.length + 1),
-      value: data.slice(i, i + chunkSize),
+      value: data.slice(start, end),
     });
+    start = end;
   }
   return props;
+}
+
+/** Replace characters forbidden in XML 1.0 while preserving all valid text. */
+function sanitizeCustomPropertyText(value: string): string {
+  let sanitized = '';
+  for (const char of value) {
+    const codePoint = char.codePointAt(0)!;
+    const valid = codePoint === 0x09 || codePoint === 0x0A || codePoint === 0x0D
+      || (codePoint >= 0x20 && codePoint <= 0xD7FF)
+      || (codePoint >= 0xE000 && codePoint <= 0xFFFD)
+      || (codePoint >= 0x10000 && codePoint <= 0x10FFFF);
+    sanitized += valid ? char : '�';
+  }
+  return sanitized;
 }
 
 function customPropsXml(properties: CustomPropEntry[]): string {
@@ -4311,7 +4379,8 @@ function customPropsXml(properties: CustomPropEntry[]): string {
     // Use minimal escaping for text content: only <, >, & need escaping.
     // escapeXml() also escapes " as &quot; which is valid but causes Word to
     // decode it on open and mark the document as modified.
-    xml += '<vt:lpwstr>' + properties[i].value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</vt:lpwstr>';
+    const value = sanitizeCustomPropertyText(properties[i].value);
+    xml += '<vt:lpwstr>' + value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</vt:lpwstr>';
     xml += '</property>\n';
   }
   xml += '</Properties>';
@@ -4335,16 +4404,7 @@ function zoteroCustomProps(fm: Frontmatter): CustomPropEntry[] {
     },
   });
 
-  // Chunk the pref string into ZOTERO_PREF_1, ZOTERO_PREF_2, etc. (max 240 chars each)
-  const CHUNK_SIZE = 240;
-  const props: CustomPropEntry[] = [];
-  for (let i = 0; i < prefData.length; i += CHUNK_SIZE) {
-    props.push({
-      name: 'ZOTERO_PREF_' + (props.length + 1),
-      value: prefData.slice(i, i + CHUNK_SIZE),
-    });
-  }
-  return props;
+  return chunkCustomProps('ZOTERO_PREF_', prefData);
 }
 
 function commentIdMappingProps(commentIdMap: Map<string, number>): CustomPropEntry[] {
@@ -4468,6 +4528,23 @@ function frontmatterBlankLineProps(count: number): CustomPropEntry[] {
 function frontmatterFieldOrderProps(order: string[]): CustomPropEntry[] {
   if (order.length === 0) return [];
   return chunkCustomProps('MANUSCRIPT_FRONTMATTER_FIELD_ORDER_', JSON.stringify(order));
+}
+
+function nociteProps(fm: Frontmatter): CustomPropEntry[] {
+  if (!fm.nocite) return [];
+  return chunkCustomProps('MANUSCRIPT_NOCITE_', JSON.stringify(fm.nocite));
+}
+
+function narrativeCitationOriginProps(origins: Map<string, NarrativeCitationOrigin>): CustomPropEntry[] {
+  if (origins.size === 0) return [];
+  const storedOrigins: Record<string, { key: string; prefix: string }> = {};
+  for (const [citationId, origin] of origins) {
+    storedOrigins[citationId] = { key: origin.citationKey, prefix: origin.literalPrefix };
+  }
+  return chunkCustomProps('MANUSCRIPT_NARRATIVE_CITATION_ORIGINS_', JSON.stringify({
+    v: 1,
+    origins: storedOrigins,
+  }));
 }
 
 function bibKeyOrderProps(bibEntries: Map<string, BibtexEntry> | undefined): CustomPropEntry[] {
@@ -4691,7 +4768,7 @@ function generateHiddenHtmlCommentRun(text: string): string {
 }
 
 function mergeRunFormatting(inner: MdRun, outer: MdRun, forced: Partial<MdRun> = {}): MdRun {
-  const merged: MdRun = { ...inner, type: 'text', text: inner.text };
+  const merged: MdRun = { ...inner };
 
   merged.code = inner.code || outer.code || forced.code ? true : undefined;
   merged.bold = inner.bold || outer.bold || forced.bold ? true : undefined;
@@ -4721,6 +4798,10 @@ function formatCriticInnerRuns(runs: MdRun[] | undefined, outer: MdRun, forced: 
     }
     if (run.type === 'math') {
       formatted.push(run);
+      continue;
+    }
+    if (run.type === 'citation') {
+      formatted.push(mergeRunFormatting(run, outer, forced));
       continue;
     }
     if (run.type === 'critic_add' || run.type === 'critic_del' || run.type === 'critic_sub' || run.type === 'critic_comment' || run.type === 'critic_highlight') {
@@ -4807,6 +4888,26 @@ function generateDeletedCriticContent(
   return xml;
 }
 
+function hyperlinkRelationshipId(href: string, state: DocxGenState): string {
+  if (state.inNoteBody) {
+    let rId = state.noteRelationships.get(href);
+    if (!rId) {
+      rId = 'rId' + state.noteNextRId;
+      state.noteRelationships.set(href, rId);
+      state.noteNextRId++;
+    }
+    return rId;
+  }
+
+  let rId = state.relationships.get(href);
+  if (!rId) {
+    rId = 'rId' + (state.nextRId + state.rIdOffset);
+    state.relationships.set(href, rId);
+    state.nextRId++;
+  }
+  return rId;
+}
+
 export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine): string {
   let xml = '';
   for (let ri = 0; ri < inputRuns.length; ri++) {
@@ -4815,22 +4916,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
     if (run.type === 'text') {
       const rPr = generateRPr(run, state.tableRunRPrExtra || undefined);
       if (run.href) {
-        let rId: string | undefined;
-        if (state.inNoteBody) {
-          rId = state.noteRelationships.get(run.href);
-          if (!rId) {
-            rId = 'rId' + state.noteNextRId;
-            state.noteRelationships.set(run.href, rId);
-            state.noteNextRId++;
-          }
-        } else {
-          rId = state.relationships.get(run.href);
-          if (!rId) {
-            rId = 'rId' + (state.nextRId + state.rIdOffset);
-            state.relationships.set(run.href, rId);
-            state.nextRId++;
-          }
-        }
+        const rId = hyperlinkRelationshipId(run.href, state);
         xml += '<w:hyperlink r:id="' + rId + '">' + generateRun(run.text, rPr) + '</w:hyperlink>';
       } else {
         xml += generateRun(run.text, rPr);
@@ -5039,7 +5125,12 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       }
     } else if (run.type === 'citation') {
       const result = generateCitation(run, bibEntries || new Map(), citeprocEngine, state.citationIds, state.citationItemIds, state.tableRunRPrExtra || undefined);
-      xml += result.xml;
+      xml += run.href
+        ? '<w:hyperlink r:id="' + hyperlinkRelationshipId(run.href, state) + '">' + result.xml + '</w:hyperlink>'
+        : result.xml;
+      if (result.narrativeOrigin) {
+        state.narrativeCitationOrigins.set(result.narrativeOrigin.citationId, result.narrativeOrigin);
+      }
       if (result.warning) state.warnings.push(result.warning);
       if (result.missingKeys) {
         for (const k of result.missingKeys) state.missingKeys.add(k);
@@ -6160,12 +6251,6 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     prevToken = token;
   }
 
-  // Register only the actually-cited keys so makeBibliography() outputs
-  // only entries that were referenced in the markdown.
-  if (citeprocEngine) {
-    citeprocEngine.updateItems([...state.citedKeys]);
-  }
-
   // Generate bibliography + missing-keys XML, then place at marker or append at end.
   // Uses split/join (not replace) to avoid $-corruption in replacement strings.
   const hasBiblMarker = body.includes(BIBL_PLACEHOLDER);
@@ -6412,6 +6497,7 @@ export async function convertMdToDocx(
     missingKeys: new Set(),
     citationIds: new Set(),
     citationItemIds: new Map(),
+    narrativeCitationOrigins: new Map(),
     timezone: frontmatter.timezone,
     replyRanges: [],
     // Start document paraIds at a high offset to avoid collisions with template-
@@ -6423,6 +6509,7 @@ export async function convertMdToDocx(
     codeBlockIndex: 0,
     codeBlockLanguages: new Map(),
     citedKeys: new Set(),
+    bibliographyKeys: [],
     codeFont: fontOverrides?.codeFont || 'Consolas',
     codeShadingMode: !isInsetMode,
     blockquoteGaps: blockquoteGaps,
@@ -6513,9 +6600,13 @@ export async function convertMdToDocx(
           const bodyText = footnoteDefs.get(run.footnoteLabel);
           if (bodyText) collectCitedKeys(parseMd(bodyText));
         }
-        if (run.innerRuns) collectFromRuns(run.innerRuns);
-        if (run.oldRuns) collectFromRuns(run.oldRuns);
-        if (run.newRuns) collectFromRuns(run.newRuns);
+        // Only live CriticMarkup payloads contribute citation fields and CSL
+        // numbering. Deleted/old text and comment bodies preserve citation
+        // syntax literally rather than creating active Word fields.
+        if ((run.type === 'critic_add' || run.type === 'critic_highlight') && run.innerRuns) {
+          collectFromRuns(run.innerRuns);
+        }
+        if (run.type === 'critic_sub' && run.newRuns) collectFromRuns(run.newRuns);
       }
     };
     const collectCitedKeys = (tokenList: MdToken[]) => {
@@ -6533,11 +6624,38 @@ export async function convertMdToDocx(
     collectCitedKeys(tokens);
   }
 
-  // Register only cited keys with citeproc so citation numbers reflect
-  // document order (not bib-file order) for numeric styles.
-  if (citeprocEngine && state.citedKeys.size > 0) {
-    citeprocEngine.updateItems([...state.citedKeys]);
+  // Bibliography membership order is part of the numeric-style contract:
+  // visible first-use order, explicit nocite authored order, then wildcard
+  // remainder in BibTeX map order. A Set preserves the first occurrence.
+  const bibliographyKeys = new Set(state.citedKeys);
+  const missingNociteKeys = new Set<string>();
+  for (const key of frontmatter.nocite?.keys ?? []) {
+    if (bibEntries?.has(key)) bibliographyKeys.add(key);
+    else missingNociteKeys.add(key);
   }
+  if (frontmatter.nocite?.wildcard && bibEntries) {
+    for (const key of bibEntries.keys()) bibliographyKeys.add(key);
+  }
+  state.bibliographyKeys = [...bibliographyKeys];
+  for (const key of missingNociteKeys) {
+    state.warnings.push(`Citation key not found: ${key}`);
+  }
+
+  // Register the complete bibliography set once, with visible citations first,
+  // so nocite entries cannot renumber citations that appear in the document.
+  if (citeprocEngine && state.bibliographyKeys.length > 0) {
+    citeprocEngine.updateItems(state.bibliographyKeys);
+  }
+
+  const nociteUris: string[] = [];
+  if (bibEntries) {
+    for (const key of state.bibliographyKeys) {
+      if (state.citedKeys.has(key)) continue;
+      const uri = bibEntries.get(key)?.zoteroUri;
+      if (uri && /\/items\/[A-Z0-9]{8}$/.test(uri)) nociteUris.push(uri);
+    }
+  }
+  const effectiveZoteroBiblData = mergeZoteroBibliographyData(options?.zoteroBiblData, nociteUris);
 
   // Resolve effective blockquote style: frontmatter > options > default
   const effectiveBlockquoteStyle = frontmatter.blockquoteStyle ?? options?.blockquoteStyle ?? 'GitHub';
@@ -6547,8 +6665,8 @@ export async function convertMdToDocx(
   const explicitCalloutLabels = frontmatter.calloutLabels ?? options?.calloutLabels;
   const effectiveCalloutLabels = explicitCalloutLabels ?? true;
   const resolvedOptions = options
-    ? { ...options, blockquoteStyle: effectiveBlockquoteStyle, colors: effectiveColors, calloutLabels: effectiveCalloutLabels }
-    : { blockquoteStyle: effectiveBlockquoteStyle, colors: effectiveColors, calloutLabels: effectiveCalloutLabels };
+    ? { ...options, blockquoteStyle: effectiveBlockquoteStyle, colors: effectiveColors, calloutLabels: effectiveCalloutLabels, zoteroBiblData: effectiveZoteroBiblData }
+    : { blockquoteStyle: effectiveBlockquoteStyle, colors: effectiveColors, calloutLabels: effectiveCalloutLabels, zoteroBiblData: effectiveZoteroBiblData };
   if (!effectiveCalloutLabels) {
     moveHiddenAlertLeadComments(tokens);
   }
@@ -6852,6 +6970,8 @@ export async function convertMdToDocx(
   }
   customProps.push(...frontmatterBlankLineProps(frontmatterBlankLines));
   customProps.push(...frontmatterFieldOrderProps(fieldOrder));
+  customProps.push(...nociteProps(frontmatter));
+  customProps.push(...narrativeCitationOriginProps(state.narrativeCitationOrigins));
   customProps.push(...bibKeyOrderProps(bibEntries));
   customProps.push(...bibDataProps(options?.bibtex));
   customProps.push(...bibliographyPathProps(frontmatter));

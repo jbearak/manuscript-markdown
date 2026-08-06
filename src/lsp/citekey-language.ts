@@ -4,7 +4,16 @@ import * as path from 'path';
 import { promisify } from 'util';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { BibtexEntry, parseBibtex, stripOuterBraces } from '../bibtex-parser';
-import { computeCodeRegions, isInsideCodeRegion, type CodeRegion } from '../code-regions';
+import {
+	analyzeCitationDocument,
+	findCitationAtOffset,
+	getCitationCompletionContextAtOffset,
+	isInsideCitationSegmentAtOffset as scannerIsInsideCitationSegmentAtOffset,
+	scanCitationDocument,
+	type CitationCompletionContext,
+	type CitationDocumentAnalysis,
+	type CitationUsage,
+} from '../citation-scanner';
 import { Frontmatter, normalizeBibPath, parseFrontmatter } from '../frontmatter';
 
 // --- Implementation notes ---
@@ -16,21 +25,6 @@ import { Frontmatter, normalizeBibPath, parseFrontmatter } from '../frontmatter'
 //   in docToBibMap and backfill
 
 const realpathNativeAsync = promisify(fs.realpath.native);
-
-const CITATION_SEGMENT_RE = /\[[^\]]*@[^\]]*]/g;
-const CITEKEY_RE = /@([A-Za-z0-9_:-]+)/g;
-
-/** Replace all characters inside code regions with spaces, preserving offsets. */
-function blankCodeRegions(text: string, regions: CodeRegion[]): string {
-	if (regions.length === 0) return text;
-	const chars = text.split('');
-	for (const r of regions) {
-		for (let i = r.start; i < r.end && i < chars.length; i++) {
-			chars[i] = ' ';
-		}
-	}
-	return chars.join('');
-}
 
 export class LruCache<K, V> {
 	private map = new Map<K, V>();
@@ -69,18 +63,34 @@ export class LruCache<K, V> {
 
 export const canonicalCache = new LruCache<string, string>(256);
 
-
-export interface CitekeyUsage {
-	key: string;
-	keyStart: number;
-	keyEnd: number;
+interface CachedCitationAnalysis {
+	version: number;
+	analysis: CitationDocumentAnalysis;
 }
 
-export interface CompletionContextAtOffset {
-	prefix: string;
-	replaceStart: number;
-	atOffset: number;
+/** Per-open-document citation analysis keyed by the LSP document version. */
+export class CitationAnalysisCache {
+	private readonly entries = new Map<string, CachedCitationAnalysis>();
+
+	get(uri: string, version: number, text: string): CitationDocumentAnalysis {
+		const cached = this.entries.get(uri);
+		if (cached?.version === version) return cached.analysis;
+		const analysis = analyzeCitationDocument(text);
+		this.entries.set(uri, { version, analysis });
+		return analysis;
+	}
+
+	delete(uri: string): void {
+		this.entries.delete(uri);
+	}
+
+	clear(): void {
+		this.entries.clear();
+	}
 }
+
+export type CitekeyUsage = CitationUsage;
+export type CompletionContextAtOffset = CitationCompletionContext;
 
 export interface ParsedBibData {
 	filePath: string;
@@ -145,141 +155,35 @@ export function pathsEqual(a: string, b: string): boolean {
 	return canonicalizeFsPath(a) === canonicalizeFsPath(b);
 }
 
-export function scanCitationUsages(text: string): CitekeyUsage[] {
-	const usages: CitekeyUsage[] = [];
-	const codeRegions = computeCodeRegions(text);
-
-	// Neutralize code regions so the bracket regex can't start matching from
-	// inside a code span (e.g. `[ ` [@a] — the `[` inside backticks must not
-	// anchor a bracket group that extends past the code span).
-	const scanText = blankCodeRegions(text, codeRegions);
-	let citationMatch: RegExpExecArray | null;
-
-	CITATION_SEGMENT_RE.lastIndex = 0;
-	while ((citationMatch = CITATION_SEGMENT_RE.exec(scanText)) !== null) {
-		const segment = citationMatch[0];
-		const segmentOffset = citationMatch.index + 1;
-		const inner = segment.slice(1, -1);
-		let keyMatch: RegExpExecArray | null;
-		CITEKEY_RE.lastIndex = 0;
-		while ((keyMatch = CITEKEY_RE.exec(inner)) !== null) {
-			const key = keyMatch[1];
-			const keyStart = segmentOffset + keyMatch.index + 1;
-			usages.push({
-				key,
-				keyStart,
-				keyEnd: keyStart + key.length,
-			});
-		}
-	}
-
-	return usages;
+export function scanCitationUsages(
+	text: string,
+	analysis?: CitationDocumentAnalysis,
+): CitekeyUsage[] {
+	return scanCitationDocument(text, undefined, analysis).usages;
 }
 
-export function findUsagesForKey(text: string, key: string): CitekeyUsage[] {
-	const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-	const segRe = /\[[^\]]*@[^\]]*\]/g;
-	const keyRe = new RegExp(`@${escaped}(?![A-Za-z0-9_:-])`, 'g');
-	const codeRegions = computeCodeRegions(text);
-	const scanText = blankCodeRegions(text, codeRegions);
-	const usages: CitekeyUsage[] = [];
-	let segMatch: RegExpExecArray | null;
-	segRe.lastIndex = 0;
-	while ((segMatch = segRe.exec(scanText)) !== null) {
-		const inner = segMatch[0].slice(1, -1);
-		const segmentOffset = segMatch.index + 1;
-		keyRe.lastIndex = 0;
-		let keyMatch: RegExpExecArray | null;
-		while ((keyMatch = keyRe.exec(inner)) !== null) {
-			const keyStart = segmentOffset + keyMatch.index + 1;
-			usages.push({ key, keyStart, keyEnd: keyStart + key.length });
-		}
-	}
-	return usages;
+export function findUsagesForKey(
+	text: string,
+	key: string,
+	analysis?: CitationDocumentAnalysis,
+): CitekeyUsage[] {
+	return scanCitationDocument(text, key, analysis).usages;
 }
 
-export function findCitekeyAtOffset(text: string, offset: number): string | undefined {
-	if (offset < 0 || offset >= text.length) return undefined;
-	const codeRegions = computeCodeRegions(text);
-	if (isInsideCodeRegion(offset, codeRegions)) return undefined;
-	const maxScanDistance = 500;
-	let scanStart = offset;
-	let scanEnd = offset;
-
-	// Prefer a nearby bracket-bounded scan (can span newlines).
-	// Walk backward past unclosed '[' to find the outermost one, since
-	// the citation regex [^\]]*@[^\]]*] can match inner '[' characters.
-	let openBracket = text.lastIndexOf('[', offset);
-	while (openBracket > 0) {
-		const prevOpen = text.lastIndexOf('[', openBracket - 1);
-		const prevClose = text.lastIndexOf(']', openBracket - 1);
-		if (prevOpen !== -1 && prevOpen > prevClose && (offset - prevOpen) <= maxScanDistance) {
-			openBracket = prevOpen;
-		} else {
-			break;
-		}
-	}
-	const closeBracketBefore = text.lastIndexOf(']', Math.max(0, offset - 1));
-	if (openBracket !== -1 && openBracket > closeBracketBefore && (offset - openBracket) <= maxScanDistance) {
-		const closeBracket = text.indexOf(']', offset);
-		if (closeBracket !== -1 && (closeBracket - offset) <= maxScanDistance) {
-			scanStart = openBracket;
-			scanEnd = closeBracket + 1;
-		}
-	}
-
-	// Fallback: same-line bounded scan when no nearby bracket segment is found.
-	if (scanStart === offset && scanEnd === offset) {
-		while (scanStart > 0 && text[scanStart - 1] !== '[' && text[scanStart - 1] !== '\n') {
-			scanStart--;
-		}
-		if (scanStart > 0 && text[scanStart - 1] === '[') scanStart--;
-
-		while (scanEnd < text.length && text[scanEnd] !== ']' && text[scanEnd] !== '\n') {
-			scanEnd++;
-		}
-		if (scanEnd < text.length && text[scanEnd] === ']') scanEnd++;
-	}
-
-	const segment = text.slice(scanStart, scanEnd);
-	for (const usage of scanCitationUsages(segment)) {
-		const absStart = usage.keyStart + scanStart;
-		const absEnd = usage.keyEnd + scanStart;
-		if (offset >= absStart - 1 && offset <= absEnd) {
-			return usage.key;
-		}
-	}
-	return undefined;
+export function findCitekeyAtOffset(
+	text: string,
+	offset: number,
+	analysis?: CitationDocumentAnalysis,
+): string | undefined {
+	return findCitationAtOffset(text, offset, analysis)?.key;
 }
 
-export function getCompletionContextAtOffset(text: string, offset: number): CompletionContextAtOffset | undefined {
-	if (offset < 0 || offset > text.length) {
-		return undefined;
-	}
-
-	const codeRegions = computeCodeRegions(text);
-	if (isInsideCodeRegion(offset, codeRegions)) {
-		return undefined;
-	}
-
-	let replaceStart = offset;
-	while (replaceStart > 0 && isCitekeyChar(text.charAt(replaceStart - 1))) {
-		replaceStart--;
-	}
-
-	const atOffset = replaceStart - 1;
-	if (atOffset < 0 || text.charAt(atOffset) !== '@') {
-		return undefined;
-	}
-	if (!isInsideCitationSegmentAtOffset(text, atOffset) && !isBareCitationContext(text, atOffset)) {
-		return undefined;
-	}
-
-	return {
-		prefix: text.slice(replaceStart, offset),
-		replaceStart,
-		atOffset,
-	};
+export function getCompletionContextAtOffset(
+	text: string,
+	offset: number,
+	analysis?: CitationDocumentAnalysis,
+): CompletionContextAtOffset | undefined {
+	return getCitationCompletionContextAtOffset(text, offset, analysis);
 }
 
 export function resolveBibliographyPath(
@@ -394,38 +298,12 @@ export function findBibKeyAtOffset(parsedBib: ParsedBibData, offset: number): st
 	}
 	return undefined;
 }
-export function isInsideCitationSegmentAtOffset(text: string, atOffset: number): boolean {
-	const openBracket = text.lastIndexOf('[', atOffset);
-	if (openBracket === -1) {
-		return false;
-	}
-	const closedBefore = text.lastIndexOf(']', atOffset);
-	if (closedBefore > openBracket) {
-		return false;
-	}
-	const lineEnd = text.indexOf('\n', openBracket + 1);
-	const sameLineEnd = lineEnd !== -1 ? lineEnd : text.length;
-	const closeBracket = text.indexOf(']', openBracket + 1);
-	// Only use ] as segment end if it's on the same line as [
-	const closeBracketOnSameLine = closeBracket !== -1 && closeBracket < sameLineEnd ? closeBracket : -1;
-	const segmentEnd = closeBracketOnSameLine !== -1 ? closeBracketOnSameLine : sameLineEnd;
-	if (atOffset > segmentEnd) {
-		return false;
-	}
-	const inside = text.slice(openBracket + 1, segmentEnd);
-	return inside.includes('@');
-}
-
-/** Bare/inline citation: @key outside brackets (valid Pandoc syntax). */
-function isBareCitationContext(text: string, atOffset: number): boolean {
-	if (atOffset > 0 && /[A-Za-z0-9._\-\/+=`]/.test(text.charAt(atOffset - 1))) {
-		return false;
-	}
-	return true;
-}
-
-function isCitekeyChar(ch: string | undefined): boolean {
-	return ch !== undefined && /^[A-Za-z0-9_:-]$/.test(ch);
+export function isInsideCitationSegmentAtOffset(
+	text: string,
+	atOffset: number,
+	analysis?: CitationDocumentAnalysis,
+): boolean {
+	return scannerIsInsideCitationSegmentAtOffset(text, atOffset, analysis);
 }
 
 function isExistingFile(filePath: string): boolean {

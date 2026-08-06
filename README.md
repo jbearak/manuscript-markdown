@@ -54,14 +54,14 @@ manuscript-markdown paper.md      # Markdown → DOCX
 
 ### Academic Writing
 
-- **Citations**: Full Zotero roundtrip with BibTeX export and field code reconstruction
-- **Bibliographies**: Format citations according to any [CSL style](https://citationstyles.org/) (APA, Chicago, BMJ, IEEE, etc.); bundles the same 16 styles that ship with Zotero and downloads others as needed
+- **Citations**: Pandoc-style parenthetical (`[@key]`), narrative (`@key`), and suppress-author (`[-@key]`) citations with full Zotero roundtrip
+- **Bibliographies**: Format citations according to any [CSL style](https://citationstyles.org/) (APA, Chicago, BMJ, IEEE, etc.); include uncited entries with frontmatter `nocite`; bundles the same 16 styles that ship with Zotero and downloads others as needed
 - **Equations**: LaTeX equation support (inline and display math), automatically converted to/from Word OMML
 
 ### Formatting & Authoring
 
 - **Rich Text Support**: Markdown formatting toolbar for bold, italic, lists, headings, code, links, and tables
-- **Preview**: Real-time syntax highlighting and Markdown preview rendering
+- **Preview**: Real-time syntax highlighting and Markdown preview rendering; citations remain visible as source syntax rather than CSL-rendered text
 - **Embedded Tables**: Embed tables from external .csv, .tsv, .xlsx, .dta, and .md files with a [single directive](docs/embedded-tables.md)
 
 ### Document Conversion

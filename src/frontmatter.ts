@@ -8,8 +8,16 @@ import {
   type TableDecimalMark,
   type TableDigitGrouping,
 } from './table-number-format';
+import {
+  isCitekey,
+  isTopLevelFrontmatterMappingLine,
+  parseNociteRaw,
+  type NociteValue,
+  yamlValueBeforeComment,
+} from './citekey';
 
 export type { TableDigits, TableDecimalMark, TableDigitGrouping } from './table-number-format';
+export type { NociteValue } from './citekey';
 
 const NOTE_TYPE_NAMES: Record<string, NoteType> = {
   'in-text': 'in-text',
@@ -114,6 +122,7 @@ export interface Frontmatter {
   notes?: NotesMode;
   timezone?: string;
   bibliography?: string;
+  nocite?: NociteValue;
   font?: string;
   codeFont?: string;
   fontSize?: number;
@@ -146,7 +155,19 @@ export interface Frontmatter {
   bibliographyHangingIndent?: boolean;
 }
 
-function frontmatterBodyStartOffset(markdown: string): number | undefined {
+export interface FrontmatterBounds {
+  /** Start of the opening delimiter, after any accepted leading whitespace/BOM. */
+  start: number;
+  /** Offset immediately after the three opening hyphens. */
+  contentStart: number;
+  /** Offset of the newline immediately before the closing delimiter. */
+  contentEnd: number;
+  /** Offset immediately after the closing delimiter line and its newline, if present. */
+  bodyStart: number;
+}
+
+/** Locate the same permissive frontmatter block accepted by parseFrontmatter(). */
+export function findFrontmatterBounds(markdown: string): FrontmatterBounds | undefined {
   const leadingTrimmedLength = markdown.length - markdown.trimStart().length;
   const trimmed = markdown.slice(leadingTrimmedLength);
   if (!trimmed.startsWith('---')) return undefined;
@@ -156,14 +177,45 @@ function frontmatterBodyStartOffset(markdown: string): number | undefined {
   const endIdx = endMatch.index! + 3;
   const afterDelimiter = trimmed.slice(endIdx + 4);
   const consumedLeadingNewline = afterDelimiter.match(/^\r?\n/)?.[0].length ?? 0;
-  return leadingTrimmedLength + endIdx + 4 + consumedLeadingNewline;
+  return {
+    start: leadingTrimmedLength,
+    contentStart: leadingTrimmedLength + 3,
+    contentEnd: leadingTrimmedLength + endIdx,
+    bodyStart: leadingTrimmedLength + endIdx + 4 + consumedLeadingNewline,
+  };
+}
+
+/**
+ * Locate frontmatter for citation-language features. An unclosed opening block is
+ * provisional YAML only after a top-level mapping makes it unambiguous; until
+ * then the opening delimiter retains ordinary thematic-break semantics.
+ */
+export function findCitationFrontmatterBounds(markdown: string): FrontmatterBounds | undefined {
+  const closed = findFrontmatterBounds(markdown);
+  if (closed) return closed;
+
+  const leadingTrimmedLength = markdown.length - markdown.trimStart().length;
+  const trimmed = markdown.slice(leadingTrimmedLength);
+  const opener = /^---(?:\r?\n|$)/.exec(trimmed);
+  if (!opener || opener[0].length === 3) return undefined;
+  const contentStart = leadingTrimmedLength + 3;
+  const hasTopLevelMapping = markdown.slice(contentStart).split('\n').some(rawLine =>
+    isTopLevelFrontmatterMappingLine(rawLine.replace(/\r$/, ''))
+  );
+  if (!hasTopLevelMapping) return undefined;
+  return {
+    start: leadingTrimmedLength,
+    contentStart,
+    contentEnd: markdown.length,
+    bodyStart: markdown.length,
+  };
 }
 
 /** Replace YAML frontmatter characters with spaces while preserving length and newlines. */
 export function maskFrontmatter(markdown: string): string {
-  const bodyStart = frontmatterBodyStartOffset(markdown);
-  if (bodyStart === undefined) return markdown;
-  return markdown.slice(0, bodyStart).replace(/[^\r\n]/g, ' ') + markdown.slice(bodyStart);
+  const bounds = findFrontmatterBounds(markdown);
+  if (!bounds) return markdown;
+  return markdown.slice(0, bounds.bodyStart).replace(/[^\r\n]/g, ' ') + markdown.slice(bounds.bodyStart);
 }
 
 /** Parse a col-widths value: "2 1 1", "2,1,1", "[2, 1, 1]", "equal", "auto". */
@@ -179,6 +231,32 @@ export function parseColWidths(raw: string): number[] | 'equal' | 'auto' | undef
   const nums = parts.map(s => Number(s));
   if (nums.some(n => !Number.isFinite(n) || n <= 0)) return undefined;
   return nums;
+}
+
+function readRawNociteValue(
+  lines: string[],
+  startIndex: number,
+  colonIndex: number,
+): { value: NociteValue; lastLineIndex: number } {
+  const firstLine = lines[startIndex].replace(/\r$/, '').slice(colonIndex + 1).trimStart();
+  const parts = [firstLine];
+  let lastLineIndex = startIndex;
+  const semanticFirstLine = yamlValueBeforeComment(firstLine).trim();
+  const blockScalar = /^[|>][0-9+-]*$/.test(semanticFirstLine);
+  const multiline = semanticFirstLine.length === 0 || blockScalar;
+
+  if (multiline) {
+    while (lastLineIndex + 1 < lines.length) {
+      const next = lines[lastLineIndex + 1].replace(/\r$/, '');
+      if (blockScalar && next.trim().length > 0 && !/^[ \t]/.test(next)) break;
+      if (!blockScalar && isTopLevelFrontmatterMappingLine(next)) break;
+      parts.push(next);
+      lastLineIndex++;
+    }
+  }
+
+  const raw = parts.join('\n');
+  return { value: { ...parseNociteRaw(raw), raw }, lastLineIndex };
 }
 
 /** Expand ratios to match numCols by repeating the last value. */
@@ -211,17 +289,13 @@ export function colWidthsToPct(ratios: number[]): number[] {
  * Returns the parsed metadata and the remaining body text.
  */
 export function parseFrontmatter(markdown: string): { metadata: Frontmatter; body: string; fieldOrder: string[] } {
-  const bodyStart = frontmatterBodyStartOffset(markdown);
-  if (bodyStart === undefined) {
+  const bounds = findFrontmatterBounds(markdown);
+  if (!bounds) {
     return { metadata: {}, body: markdown, fieldOrder: [] };
   }
-  const trimmed = markdown.trimStart();
 
-  const endMatch = trimmed.substring(3).match(/\n---(?:\r?\n|$)/)!;
-  const endIdx = endMatch.index! + 3;
-
-  const yamlBlock = trimmed.slice(3, endIdx).trim();
-  const body = markdown.slice(bodyStart);
+  const yamlBlock = markdown.slice(bounds.contentStart, bounds.contentEnd).trimStart();
+  const body = markdown.slice(bounds.bodyStart);
 
   const metadata: Frontmatter = {};
   const fieldOrder: string[] = [];
@@ -236,6 +310,13 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
     if (!seenFields.has(key)) {
       seenFields.add(key);
       fieldOrder.push(key);
+    }
+
+    if (key === 'nocite' && line.length === line.trimStart().length) {
+      const parsed = readRawNociteValue(yamlLines, lineIdx, colonIdx);
+      metadata.nocite = parsed.value;
+      lineIdx = parsed.lastLineIndex;
+      continue;
     }
 
     // Handle nested `styles:` block specially
@@ -521,6 +602,20 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
     if (arr.length === 1) lines.push(key + ': ' + arr[0]);
     else lines.push(key + ': [' + arr.join(', ') + ']');
   };
+  const emitNocite = () => {
+    const nocite = metadata.nocite;
+    if (!nocite) return;
+    if (nocite.raw !== undefined) {
+      const rawLines = nocite.raw.split('\n');
+      lines.push('nocite:' + (rawLines[0] ? ' ' + rawLines[0] : ''));
+      lines.push(...rawLines.slice(1));
+      return;
+    }
+    const values = nocite.keys.filter(isCitekey).map(key => '@' + key);
+    if (nocite.wildcard) values.push('@*');
+    if (values.length === 1) lines.push("nocite: '" + values[0] + "'");
+    else if (values.length > 1) lines.push("nocite: '[" + values.join('; ') + "]'");
+  };
 
   // Map from YAML key name to emission function
   const emitters: Record<string, () => void> = {
@@ -535,6 +630,7 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
     'bibliography': () => { if (metadata.bibliography) lines.push(`bibliography: ${metadata.bibliography}`); },
     'bib': () => emitters['bibliography'](),
     'bibtex': () => emitters['bibliography'](),
+    'nocite': emitNocite,
     'font': () => { if (metadata.font) lines.push('font: ' + metadata.font); },
     'code-font': () => { if (metadata.codeFont) lines.push('code-font: ' + metadata.codeFont); },
     'font-size': () => { if (metadata.fontSize !== undefined) lines.push('font-size: ' + metadata.fontSize); },
@@ -584,7 +680,7 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
   // Default emission order (backward compatible)
   const defaultOrder = [
     'title', 'author', 'csl', 'locale', 'zotero-notes', 'notes', 'timezone',
-    'bibliography', 'font', 'code-font', 'font-size', 'code-font-size',
+    'bibliography', 'nocite', 'font', 'code-font', 'font-size', 'code-font-size',
     'header-font', 'header-font-size', 'header-font-style',
     'title-font', 'title-font-size', 'title-font-style',
     'table-font', 'table-font-size', 'table-col-widths', 'table-borders',
@@ -637,11 +733,6 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
 
   if (lines.length === 0) return '';
   return '---\n' + lines.join('\n') + '\n---\n';
-}
-
-/** Check whether markdown body contains Pandoc-style citations ([@...]) */
-export function hasCitations(markdown: string): boolean {
-  return /\[@[^\]]+\]/.test(markdown);
 }
 
 /** Ensure a bibliography path ends with .bib */

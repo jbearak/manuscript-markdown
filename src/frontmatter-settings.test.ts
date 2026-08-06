@@ -57,6 +57,20 @@ describe('getFrontmatterSettingEdit', () => {
 		});
 	});
 
+	test('selects an entire multiline nocite value without consuming the next setting', () => {
+		for (const markdown of [
+			'---\nnocite: # entries\n  - "@org:paper"\n  - @beta\ncsl: apa\n---\n',
+			'---\nnocite : # entries\n  - "@org:paper"\n  - @beta\ncsl: apa\n---\n',
+			'---\nnocite: |+ # entries\n  @alpha\n  @beta\ncsl: apa\n---\n',
+		]) {
+			const edit = getFrontmatterSettingEdit(markdown, '\n', 'nocite');
+			expect(edit.text).toBe('');
+			expect(markdown.slice(edit.selectionStart, edit.selectionEnd)).toMatch(/^# entries|^\|\+ # entries/);
+			expect(markdown.slice(edit.selectionStart, edit.selectionEnd)).toContain('@beta');
+			expect(markdown.slice(edit.selectionStart, edit.selectionEnd)).not.toContain('csl:');
+		}
+	});
+
 	test('recognizes an existing alias without rewriting it', () => {
 		expect(getFrontmatterSettingEdit('---\nbib: sources.bib\n---\n', '\n', 'bibliography')).toEqual({
 			offset: 9,

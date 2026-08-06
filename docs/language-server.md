@@ -1,24 +1,34 @@
 # Language Server
 
-The language server provides IDE features for pandoc-style citations (`[@citekey]`) in markdown files paired with `.bib` files, and hover information for non-inline comments.
+The language server provides IDE features for Pandoc-style parenthetical (`[@citekey]`), narrative (`@citekey`), suppress-author (`[-@citekey]`), and frontmatter `nocite` keys in Markdown files paired with `.bib` files, plus hover information for non-inline comments.
 
 ## Capabilities
 
 ### Completion (`@` trigger)
 
-In a markdown file, typing `[@` inside brackets triggers autocomplete from the paired `.bib` file. Completions show:
+Typing `@` in body prose, a bracketed citation cluster, or a supported top-level `nocite` value offers keys from the paired `.bib` file. Completions show:
 - **Label**: the citekey (e.g. `smith2020`)
 - **Detail**: author and year
 - **Documentation**: title
 
+For `nocite`, completion works in scalar, bracket-cluster, block-scalar, and list forms. At an empty `nocite` prefix, completion also offers `*` for the bibliography-wide `@*` wildcard.
+
 ### Go to Definition
 
-From a `[@citekey]` in markdown, navigates to the key's declaration in the `.bib` file.
+From a body citation or explicit `nocite` key in Markdown, navigates to the key's declaration in the `.bib` file.
 
 ### Find References
 
-- **From markdown**: returns the `.bib` declaration location. Markdown-to-markdown references are provided by VS Code's built-in Markdown Language Features extension.
-- **From `.bib`**: finds all `[@citekey]` usages across paired markdown files.
+- **From Markdown**: returns the `.bib` declaration location. With `manuscriptMarkdown.citekeyReferencesFromMarkdown` enabled, it also returns body and explicit `nocite` usages across paired Markdown files. When disabled, only the declaration is returned by this server; VS Code's built-in Markdown Language Features may separately report body usages.
+- **From `.bib`**: finds all parenthetical, narrative, suppress-author, and explicit `nocite` usages across paired Markdown files.
+
+### Recognition Boundaries
+
+Citation intelligence ignores ordinary frontmatter outside `nocite`, code spans and blocks, HTML comments and tag markup, Markdown link destinations, reference-definition lines, URI-like text, and CriticMarkup attribution prefixes. Escape a literal handle as `\@username`. Body `@*` and body `-@key` are not citation usages; use `nocite: @*` and bracketed `[-@key]` respectively.
+
+### Citation Hover and Diagnostics
+
+Hovering over a body citation or explicit `nocite` key shows the matching bibliography entry. When the paired bibliography is available, unresolved explicit keys receive a warning diagnostic in both locations. `@*` includes all available entries and is not diagnosed as a missing key.
 
 ### Comment Hover
 

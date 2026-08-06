@@ -14,7 +14,7 @@ The converter supports DOCX → Markdown → DOCX round-tripping. The following 
 - **Task lists**: `- [ ]` / `- [x]` parsed as semantic task items in Markdown and exported to deterministic DOCX list output with checkbox prefixes (`☐`/`☒`)
 - **Comments**: non-overlapping comments use CriticMarkup `{==highlighted text==}{>>@author | comment<<}` format; overlapping comments use non-inline ID-based syntax (`{#1}highlighted text{/1}{#1>>@alice | comment<<}`) — see [Specification](specification.md#overlapping-comments)
 - **Track changes**: CriticMarkup `{++...++}` and `{--...--}` ↔ Word revisions (`w:ins`/`w:del`)
-- **Citations**: Zotero field codes ↔ Pandoc `[@key]` syntax with BibTeX export. On import, `ZOTERO_BIBL` field codes are detected and omitted (bibliography is regenerated on export). On export, bibliography is automatically generated and appended as a `ZOTERO_BIBL` field when a CSL style is specified. Mixed Zotero/non-Zotero grouped citations always produce unified output — a single set of parentheses wrapping all entries (see [Zotero Round-Trip](zotero-roundtrip.md#mixed-citations)). Missing keys appear inline as `@citekey` with a post-bibliography note.
+- **Citations**: Zotero field codes ↔ Pandoc parenthetical (`[@key]`), narrative (`@key`), and suppress-author (`[-@key]`) syntax with BibTeX export. On import, `ZOTERO_BIBL` field codes are detected and omitted (bibliography is regenerated on export). On export, bibliography is automatically generated and appended as a `ZOTERO_BIBL` field when a CSL style is specified. Mixed Zotero/non-Zotero grouped citations always produce unified output — a single set of parentheses wrapping all entries (see [Zotero Round-Trip](zotero-roundtrip.md#mixed-citations)). Missing body-citation keys appear inline as `@citekey` with a post-bibliography note; missing `nocite` keys warn without producing visible text.
 - **Zotero document preferences**: CSL style, locale, and note type round-tripped between YAML frontmatter (`csl`, `locale`, `zotero-notes`) and `docProps/custom.xml` (`ZOTERO_PREF_*` properties)
 - **Math**: OMML equations ↔ LaTeX (`$inline$`, `$$display$$`, and bare `\begin{env}...\end{env}`)
 - **Hyperlinks**: Markdown links ↔ Word hyperlinks (with proper escaping)
@@ -143,7 +143,7 @@ Configurable via `manuscriptMarkdown.citationKeyFormat`:
 |--------|---------|-------------|
 | `authorYearTitle` (default) | `smith2020effects` | Author surname + year + first title word |
 | `authorYear` | `smith2020` | Author surname + year |
-| `numeric` | `1`, `2`, `3` | Sequential numbers |
+| `numeric` | `1`, `2`, `3` | Sequential numbers in extracted citation-item order; stored citation keys are ignored |
 
 ## Usage
 
@@ -160,6 +160,7 @@ If output files already exist, you'll be prompted to replace, choose a new name,
 - **Complex nested tables**: nested `<table>` elements inside cells are not supported
 - **Task-list round-trip normalization**: task list items are exported with deterministic checkbox prefixes in DOCX output; exact original marker spelling (`[x]` vs `[X]`) is not preserved
 - **Disallowed raw HTML handling**: disallowed tags from the GitHub Flavored Markdown extension set (`title`, `textarea`, `style`, `xmp`, `iframe`, `noembed`, `noframes`, `script`, `plaintext`) are treated as literal text rather than executable/rendered HTML in parsing/preview paths
+- **Local-only uncited Zotero entries**: a `nocite` entry without a real Zotero URI renders in the initially exported bibliography, but Zotero cannot reconstruct it from `uncited` metadata during a later refresh because no in-text field carries embedded item data
 
 ### Comment Boundary Expansion in Code Runs
 
@@ -219,6 +220,7 @@ csl: apa
 locale: en-US
 zotero-notes: in-text
 bibliography: shared/references
+nocite: "[@background2020; @methods2019]"
 ---
 ```
 
@@ -232,11 +234,14 @@ bibliography: shared/references
 | `notes` | Controls footnote/endnote generation: `footnotes` (default) or `endnotes`. Auto-detected on DOCX import. |
 | `timezone` | Local timezone offset (e.g., `+05:00`, `-05:00`). Auto-generated on DOCX import for idempotent date roundtripping. |
 | `bibliography` | Path to a `.bib` file (`.bib` extension optional). Aliases: `bib`, `bibtex`. See [Specification](specification.md#bibtex-companion-file). |
+| `nocite` | Bibliography-only citation keys. Accepts scalar, bracket-cluster, block-scalar, and list forms, or `@*` for all available entries. No in-text citation fields are emitted. See [Specification](specification.md#nocite). |
 | `line-spacing` | Line spacing for body text: `single`, `1.5`, `double`, or a numeric multiplier. See [Specification](specification.md#line-spacing-and-paragraph-indent). |
 | `paragraph-indent` | First-line paragraph indentation in inches (e.g., `0.5`). Set to `none` to disable. See [Specification](specification.md#line-spacing-and-paragraph-indent). |
 | `bibliography-hanging-indent` | When `true` (default), bibliography entries use a hanging indent. Set to `false` to disable. |
 
 > **`zotero-notes` vs `notes`:** These fields are independent. `zotero-notes` controls how Zotero citations render (in-text, footnotes, or endnotes) and is stored in `ZOTERO_PREF_*` document properties for Zotero to read. `notes` controls whether the document's own footnote/endnote references are placed at the bottom of each page (footnotes) or collected at the end (endnotes). For example, a document can use `zotero-notes: in-text` for citations while using `notes: endnotes` for its own notes.
+>
+> **`nocite` ordering:** Resolved visible citations use first-use document order; a citation in a footnote or endnote is ordered where its reference first appears. Explicit `nocite` keys follow in authored order, and `@*` adds any remaining entries in bibliography-file order. Because `nocite` emits no in-text fields, it does not consume or change visible citation numbers in numeric styles.
 
 #### Bundled CSL styles
 

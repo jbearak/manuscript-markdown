@@ -39,6 +39,7 @@ The frontmatter may also include citation-related fields (`csl`, `locale`, `zote
 | `notes` | Controls footnote/endnote OOXML generation: `footnotes` (default) or `endnotes`. See [Footnotes](#footnotes). |
 | `timezone` | Local timezone offset (e.g., `+05:00`, `-05:00`). Auto-generated on DOCX import for idempotent date roundtripping. |
 | `bibliography` | Path to a `.bib` file for citation resolution. Aliases: `bib`, `bibtex`. The `.bib` extension is optional. Relative paths resolve from the `.md` file directory, then workspace root. `/`-prefixed paths resolve from workspace root, then as absolute OS paths. Falls back to `{basename}.bib` if not found. |
+| `nocite` | Bibliography-only citation keys. Accepts scalar, bracket-cluster, block-scalar, and list forms, or `@*` for all available entries. See [Nocite](#nocite). |
 | `font` | Body font family for non-code styles. No default (uses rendering application's default). |
 | `code-font` | Monospace font family for code styles. Default: Consolas. |
 | `font-size` | Body font size in points. Default: 11. |
@@ -607,12 +608,42 @@ Tables can also be embedded from external `.csv`, `.tsv`, `.xlsx`, and `.md` fil
 
 Manuscript Markdown uses [Pandoc citation syntax](https://pandoc.org/MANUAL.html#citations) with BibTeX keys:
 
-- Single citation: `[@smith2020]`
+- Author-in-text or narrative citation: `@smith2020`
+- Parenthetical citation: `[@smith2020]`
 - With locator: `[@smith2020, p. 20]`
 - Multiple citations: `[@smith2020; @jones2021]`
 - Suppress author: `[-@smith2020]`
 
-Citations reference entries in a companion `.bib` file (see [BibTeX Companion File](#bibtex-companion-file) below).
+Citations reference entries in a companion `.bib` file (see [BibTeX Companion File](#bibtex-companion-file) below). The Markdown preview highlights and displays this source syntax; CSL-rendered citation text is generated during DOCX export.
+
+Bare citations are recognized in prose, not in ordinary YAML frontmatter, code spans or blocks, HTML comments or tag markup, Markdown link destinations, reference-definition lines, URI-like text, or CriticMarkup attribution prefixes. Escape a literal handle as `\@username`. A leading hyphen suppresses the author only inside brackets, and `@*` is reserved for `nocite` rather than body text.
+
+### Nocite
+
+A top-level `nocite` frontmatter field adds bibliography entries without creating in-text citation fields. Nested `nocite` mappings are ignored. The following forms are supported:
+
+```yaml
+# Bare, single-quoted, or double-quoted scalar
+nocite: @smith2020
+
+# Bracket cluster, quoted or unquoted
+nocite: [@smith2020; @jones2021]
+
+# Literal block scalar (use > for folded form)
+nocite: |
+  @smith2020
+  @jones2021
+
+# YAML list
+nocite:
+  - @smith2020
+  - @jones2021
+
+# Every available bibliography entry
+nocite: @*
+```
+
+These are alternatives; use one `nocite` field per frontmatter block. Explicit missing keys produce export and editor warnings but no visible citation text. `@*` includes every available bibliography entry and does not produce missing-key warnings. On DOCX export, resolved visible citations are registered in first-use document order, explicit `nocite` keys follow in authored order, and wildcard-only entries follow in bibliography-file order. A citation in a footnote or endnote is ordered where its reference first appears. `nocite` does not consume or change visible citation numbers in numeric styles. The authored scalar, block, or list form is preserved through DOCX round-trips.
 
 ### BibTeX Companion File
 

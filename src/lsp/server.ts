@@ -46,6 +46,7 @@ import { BibtexEntry } from '../bibtex-parser';
 import {
 	canonicalizeFsPath,
 	canonicalizeFsPathAsync,
+	CitationAnalysisCache,
 	ParsedBibData,
 	fileEntryDisplayName,
 	findBibFieldLinkAtLine,
@@ -101,6 +102,7 @@ interface ResolvedSymbol {
 }
 
 const bibCache = new Map<string, CachedBibData>();
+const citationAnalysisCache = new CitationAnalysisCache();
 
 /** Per-source diagnostic maps so validators don't overwrite each other. */
 const citekeyDiagnostics = new Map<string, Diagnostic[]>();
@@ -138,6 +140,10 @@ const docToBibMap = new Map<string, string>();
 // --- Debounced validation infrastructure ---
 const validationTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const VALIDATION_DEBOUNCE_MS = 300;
+
+function getCitationAnalysis(doc: TextDocument) {
+	return citationAnalysisCache.get(doc.uri, doc.version, doc.getText());
+}
 
 function scheduleValidation(uri: string): void {
 	const existing = validationTimers.get(uri);
@@ -284,6 +290,7 @@ documents.onDidClose((event) => {
 			validationTimers.delete(event.document.uri);
 		}
 		removeBibReverseMapEntry(event.document.uri);
+		citationAnalysisCache.delete(event.document.uri);
 		citekeyDiagnostics.delete(event.document.uri);
 		frontmatterDiagnostics.delete(event.document.uri);
 		orientationDiagnostics.delete(event.document.uri);
@@ -326,6 +333,7 @@ connection.onDidChangeWatchedFiles((params: DidChangeWatchedFilesParams) => {
 connection.onShutdown(() => {
 	for (const timer of validationTimers.values()) clearTimeout(timer);
 	validationTimers.clear();
+	citationAnalysisCache.clear();
 });
 
 connection.onCompletion(async (params: CompletionParams): Promise<CompletionItem[] | CompletionList> => {
@@ -336,10 +344,14 @@ connection.onCompletion(async (params: CompletionParams): Promise<CompletionItem
 
 	const text = doc.getText();
 	const offset = doc.offsetAt(params.position);
+	const citationAnalysis = getCitationAnalysis(doc);
 
-	// Frontmatter completions (keys, values, CSL, styles sub-props)
+	const completionContext = getCompletionContextAtOffset(text, offset, citationAnalysis);
+
+	// Frontmatter completions (keys, values, CSL, styles sub-props). A valid
+	// nocite citation context takes precedence so bibliography keys work there.
 	const fmLocation = getFrontmatterLocation(text, offset);
-	if (fmLocation.inFrontmatter && fmLocation.kind !== 'outside') {
+	if (!completionContext && fmLocation.inFrontmatter && fmLocation.kind !== 'outside') {
 			const cachedCslStyles = await getCachedCslStyleNames();
 			const fmItems = getFrontmatterCompletionItems(fmLocation, process.platform, cachedCslStyles);
 			if (fmItems.length > 0) {
@@ -361,26 +373,31 @@ connection.onCompletion(async (params: CompletionParams): Promise<CompletionItem
 		if (fmLocation.frontmatterClosed) return [];
 	}
 
-	const completionContext = getCompletionContextAtOffset(text, offset);
 	if (!completionContext) {
-		return [];
-	}
-
-	const bibPath = await resolveBibliographyPathAsync(doc.uri, text, workspaceRootPaths);
-	if (!bibPath) {
-		return [];
-	}
-
-	const bibData = await getBibDataForPath(bibPath);
-	if (!bibData) {
 		return [];
 	}
 
 	const prefix = completionContext.prefix.toLowerCase();
 	const replaceRange = Range.create(doc.positionAt(completionContext.replaceStart), params.position);
-	const sortedEntries = [...bibData.entries.values()].sort((a, b) => a.key.localeCompare(b.key));
 	const items: CompletionItem[] = [];
+	if (completionContext.form === 'nocite' && prefix.length === 0) {
+		items.push({
+			label: '*',
+			kind: CompletionItemKind.Keyword,
+			detail: 'Include all bibliography entries',
+			textEdit: { range: replaceRange, newText: '*' },
+			filterText: '*',
+			sortText: '0-wildcard',
+		});
+	}
 
+	const bibPath = await resolveBibliographyPathAsync(doc.uri, text, workspaceRootPaths);
+	if (!bibPath) return items;
+
+	const bibData = await getBibDataForPath(bibPath);
+	if (!bibData) return items;
+
+	const sortedEntries = [...bibData.entries.values()].sort((a, b) => a.key.localeCompare(b.key));
 	for (const entry of sortedEntries) {
 		if (prefix && !entry.key.toLowerCase().startsWith(prefix)) {
 			continue;
@@ -457,7 +474,9 @@ connection.onHover(async (params: HoverParams): Promise<Hover | null> => {
 			const fmText = fmDoc.getText();
 			const fmOffset = fmDoc.offsetAt(params.position);
 			const fmLocation = getFrontmatterLocation(fmText, fmOffset);
-			const fmHover = getFrontmatterHover(fmLocation);
+			const fmHover = findCitekeyAtOffset(fmText, fmOffset, getCitationAnalysis(fmDoc))
+				? undefined
+				: getFrontmatterHover(fmLocation);
 			if (fmHover) {
 				return {
 					contents: {
@@ -933,11 +952,11 @@ async function validateCitekeys(doc: TextDocument, metadata?: Frontmatter): Prom
 	}
 
 	const diagnostics: Diagnostic[] = [];
-	for (const usage of scanCitationUsages(text)) {
+	for (const usage of scanCitationUsages(text, getCitationAnalysis(doc))) {
 		if (!bibData.entries.has(usage.key)) {
 			diagnostics.push({
 				severity: DiagnosticSeverity.Warning,
-				range: Range.create(doc.positionAt(usage.keyStart - 1), doc.positionAt(usage.keyEnd)),
+				range: Range.create(doc.positionAt(usage.atStart), doc.positionAt(usage.keyEnd)),
 				message: `Citation key "@${usage.key}" not found in bibliography.`,
 				source: 'manuscript-markdown',
 			});
@@ -1020,7 +1039,7 @@ async function resolveSymbolAtPosition(uri: string, position: Position): Promise
 			return undefined;
 		}
 		const text = doc.getText();
-		const key = findCitekeyAtOffset(text, doc.offsetAt(position));
+		const key = findCitekeyAtOffset(text, doc.offsetAt(position), getCitationAnalysis(doc));
 		if (!key) {
 			return undefined;
 		}
@@ -1113,8 +1132,9 @@ async function findReferencesForKey(key: string, targetBibPath: string): Promise
 			continue;
 		}
 		const text = doc.getText();
+		const analysis = documents.get(uri) ? getCitationAnalysis(doc) : undefined;
 
-		for (const usage of findUsagesForKey(text, key)) {
+		for (const usage of findUsagesForKey(text, key, analysis)) {
 			locations.push(
 				Location.create(
 					uri,

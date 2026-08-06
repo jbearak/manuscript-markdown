@@ -2,7 +2,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import fc from 'fast-check';
-import { LruCache } from './citekey-language';
+import { CitationAnalysisCache, LruCache, findCitekeyAtOffset, getCompletionContextAtOffset } from './citekey-language';
 
 // **Validates: Requirements 2.3**
 
@@ -109,5 +109,34 @@ describe('Property 2: LRU cache returns correct canonical paths', () => {
 
 		// Latest entries should be present
 		expect(cache.get('/path/to/file-299')).toBe('/resolved/file-299');
+	});
+});
+
+describe('versioned citation analysis cache', () => {
+	test('reuses one analysis for repeated point queries at the same document version', () => {
+		const cache = new CitationAnalysisCache();
+		const uri = 'file:///paper.md';
+		const text = ('Prose without citations.\n'.repeat(10_000)) + 'See [@alpha].';
+		const offset = text.indexOf('@alpha') + 2;
+		const first = cache.get(uri, 7, text);
+		const started = performance.now();
+		for (let i = 0; i < 1_000; i++) {
+			const reused = cache.get(uri, 7, text);
+			expect(reused).toBe(first);
+			expect(findCitekeyAtOffset(text, offset, reused)).toBe('alpha');
+			expect(getCompletionContextAtOffset(text, offset, reused)?.prefix).toBe('a');
+		}
+		expect(performance.now() - started).toBeLessThan(500);
+	});
+
+	test('rebuilds when the document version changes and releases closed documents', () => {
+		const cache = new CitationAnalysisCache();
+		const uri = 'file:///paper.md';
+		const first = cache.get(uri, 1, 'See @alpha');
+		const second = cache.get(uri, 2, 'See @beta');
+		expect(second).not.toBe(first);
+		expect(findCitekeyAtOffset(second.text, second.text.indexOf('@beta'), second)).toBe('beta');
+		cache.delete(uri);
+		expect(cache.get(uri, 2, 'See @beta')).not.toBe(second);
 	});
 });

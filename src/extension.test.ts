@@ -334,6 +334,122 @@ describe('Syntax grammar invariants', () => {
     expect(highlightRule.match).toBeUndefined();
   });
 
+  it('highlights supported bracket citations and boundary-safe bare citations', () => {
+    const grammarPath = path.join(__dirname, '..', 'syntaxes', 'manuscript-markdown.json');
+    const grammar = JSON.parse(fs.readFileSync(grammarPath, 'utf-8'));
+    expect(grammar.patterns.slice(0, 4)).toEqual([
+      { include: '#email_address' },
+      { include: '#citation_list' },
+      { include: '#noncitation_bracket' },
+      { include: '#bare_citation' },
+    ]);
+    expect(grammar.repository.citation_list.begin).toBe('\\[(?=-?@[A-Za-z0-9_:-])');
+    const citationListBegin = new RegExp(grammar.repository.citation_list.begin);
+    expect(citationListBegin.test('[@smith2020]')).toBe(true);
+    expect(citationListBegin.test('[-@smith2020]')).toBe(true);
+    expect(citationListBegin.test('[see -@smith2020]')).toBe(false);
+    expect(citationListBegin.test('[ordinary link label]')).toBe(false);
+    expect(citationListBegin.test('[contact user@example.com]')).toBe(false);
+    expect(citationListBegin.test('[user@example.com]')).toBe(false);
+    expect(grammar.repository.bare_citation.match).toBe('(?<![\\p{L}\\p{M}\\p{N}._:\\-/+\\x3d`\\\\])@[A-Za-z0-9_:-]++');
+    expect(grammar.repository.bare_citation.name).toBe('support.function.citation.manuscript-markdown');
+    const bareCitation = new RegExp(grammar.repository.bare_citation.match.replace('++', '+'), 'u');
+    expect(bareCitation.test('@alpha')).toBe(true);
+    expect(bareCitation.test('α@_beta')).toBe(false);
+    expect(bareCitation.test('é@precomposed')).toBe(false);
+    expect(bareCitation.test('é@decomposed')).toBe(false);
+    expect(grammar.repository.citation_list.patterns[0].match).toBe('(?<![\\p{L}\\p{M}\\p{N}._/+\\x3d`\\\\])@[A-Za-z0-9_:-]++');
+    const citationListKey = new RegExp(grammar.repository.citation_list.patterns[0].match.replace('++', '+'), 'u');
+    expect(citationListKey.test('@alpha')).toBe(true);
+    expect(citationListKey.test('é@decomposed')).toBe(false);
+    expect(citationListKey.test('user@example.com')).toBe(false);
+    expect(citationListKey.test('\\@escaped')).toBe(false);
+    const emailAddress = new RegExp(grammar.repository.email_address.match, 'u');
+    expect(emailAddress.test('"quoted local"@example.com')).toBe(true);
+    expect(emailAddress.test('δοκιμή@παράδειγμα.δοκιμή')).toBe(true);
+    expect(emailAddress.test('𐐀@example.dev')).toBe(true);
+    expect(emailAddress.test('café@example.com')).toBe(true);
+    expect(emailAddress.test('café@example.com')).toBe(true);
+    expect(emailAddress.test('cafe@examplé.com')).toBe(true);
+    expect(emailAddress.test('“@citation”')).toBe(false);
+    const noncitationBracket = new RegExp(grammar.repository.noncitation_bracket.begin);
+    expect(noncitationBracket.test('[see @unsupported]')).toBe(true);
+    expect(noncitationBracket.test('[discussion [@key]]')).toBe(true);
+    expect(noncitationBracket.test('[See @label](https://example.test)')).toBe(false);
+    expect(noncitationBracket.test('[^note]')).toBe(false);
+    expect(grammar.repository.noncitation_bracket.patterns).toEqual([
+      { include: '#citation_list' },
+      { include: '#noncitation_bracket' },
+    ]);
+    expect(grammar.injectionSelector).toContain('-comment');
+    expect(grammar.injectionSelector).toContain('-meta.embedded');
+    expect(grammar.injectionSelector).toContain('-meta.tag');
+    expect(grammar.injectionSelector).toContain('-markup.underline.link');
+    expect(grammar.injectionSelector).toContain('-constant.other.reference.link');
+    expect(grammar.repository.comment.patterns).toEqual([
+      { include: '#critic_attribution' },
+      { include: '#email_address' },
+      { include: '#citation_list' },
+      { include: '#noncitation_bracket' },
+      { include: '#bare_citation' },
+    ]);
+    expect(grammar.repository.comment_with_id.patterns).toEqual(grammar.repository.comment.patterns);
+    expect(grammar.repository.critic_attribution.match).toBe('\\G\\s*@[^|\\r\\n]*\\|');
+  });
+
+  it('registers a frontmatter-only nocite injection grammar', () => {
+    const grammarPath = path.join(__dirname, '..', 'syntaxes', 'manuscript-markdown-frontmatter.json');
+    const grammar = JSON.parse(fs.readFileSync(grammarPath, 'utf-8'));
+    expect(grammar.injectionSelector).toBe('L:meta.embedded.block.frontmatter');
+    expect(grammar.patterns.slice(0, 3)).toEqual([
+      { include: '#nocite_block' },
+      { include: '#nocite_multiline' },
+      { include: '#nocite_inline' },
+    ]);
+    expect(grammar.repository.citation_key.match).toBe('(?<![\\p{L}\\p{M}\\p{N}._/+\\x3d`\\\\])@(\\*(?![A-Za-z0-9_:-])|[A-Za-z0-9_:-]++)');
+    expect(grammar.repository.email_address.match).toContain('\\p{L}');
+    const nociteKey = new RegExp(grammar.repository.citation_key.match.replace('++', '+'), 'u');
+    expect(nociteKey.test('@alpha')).toBe(true);
+    expect(nociteKey.test('\\@escaped')).toBe(false);
+    expect(nociteKey.test('person@example.com')).toBe(false);
+    expect(nociteKey.test('name@*suffix')).toBe(false);
+    expect(nociteKey.test('α@_beta')).toBe(false);
+    expect(nociteKey.test('é@precomposed')).toBe(false);
+    expect(nociteKey.test('é@decomposed')).toBe(false);
+    const nociteEmail = new RegExp(grammar.repository.email_address.match, 'u');
+    expect(nociteEmail.test('café@example.com')).toBe(true);
+    expect(nociteEmail.test('café@example.com')).toBe(true);
+    expect(nociteEmail.test('cafe@examplé.com')).toBe(true);
+    expect(grammar.repository.yaml_comment.begin).toBe('(?<!\\S)#');
+    expect(grammar.repository.single_quoted_value.end).toContain('(?:,|\\]|#.*|$)');
+    expect(grammar.repository.single_quoted_value.patterns).toContainEqual({
+      match: "''",
+      name: 'constant.character.escape.yaml',
+    });
+    expect(grammar.repository.single_quoted_value.patterns).toContainEqual({ include: '#citation_key' });
+    expect(grammar.repository.double_quoted_value.end).toContain('(?:,|\\]|#.*|$)');
+    expect(grammar.repository.double_quoted_value.end).toContain('(?<!\\\\)');
+    expect(grammar.repository.double_quoted_value.patterns).toContainEqual({
+      match: '\\\\.',
+      name: 'constant.character.escape.yaml',
+    });
+    expect(grammar.repository.double_quoted_value.patterns).toContainEqual({ include: '#citation_key' });
+    expect(grammar.repository.nocite_inline.patterns).toEqual([{ include: '#nocite_yaml_value' }]);
+    expect(grammar.repository.nocite_multiline.patterns).toEqual([{ include: '#nocite_yaml_value' }]);
+    expect(grammar.repository.nocite_block.patterns).toEqual([
+      { include: '#email_address' },
+      { include: '#citation_key' },
+    ]);
+    expect(grammar.repository.nocite_multiline.end).toContain('[^\\s#-][^:]*:');
+
+    const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
+    expect(packageJson.contributes.grammars).toContainEqual({
+      path: './syntaxes/manuscript-markdown-frontmatter.json',
+      scopeName: 'manuscript-markdown.frontmatter.injection',
+      injectTo: ['text.html.markdown'],
+    });
+  });
+
   it('no repository rule contains both while and end (while silently overrides end)', () => {
     const grammarPath = path.join(__dirname, '..', 'syntaxes', 'manuscript-markdown.json');
     const grammar = JSON.parse(fs.readFileSync(grammarPath, 'utf-8'));

@@ -187,6 +187,8 @@ export const FRONTMATTER_SCHEMA: readonly FieldDef[] = [
 		description: 'UTC offset applied when rendering date fields.\n\n**Accepted values:** `+HH:MM` or `-HH:MM` format (e.g. `+05:30`, `-05:00`).' },
 	{ key: 'bibliography', kind: 'bib-path', aliases: ['bib', 'bibtex'],
 		description: 'Path to the BibTeX bibliography file.\n\n**Accepted values:** Relative or absolute path to a `.bib` file.' },
+	{ key: 'nocite', kind: 'free-text',
+		description: 'Citation keys that are included in the DOCX bibliography without creating an in-text citation. Citekey completion, hover, definition, references, and diagnostics work here.\n\n**Accepted values:** A bare or quoted `@key`, a bracket cluster, a literal/folded block scalar, a YAML list, or `@*` to include all available bibliography entries.' },
 	{ key: 'font', kind: 'font',
 		description: 'Body text font family.\n\n**Accepted values:** Font family name (e.g. `Georgia`, `Times New Roman`).' },
 	{ key: 'code-font', kind: 'code-font',

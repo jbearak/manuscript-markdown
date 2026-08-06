@@ -1,7 +1,10 @@
 {
-    "injectionSelector": "L:text.html.markdown -string -meta.embedded -markup.inline.raw -markup.fenced_code",
+    "injectionSelector": "L:text.html.markdown -comment -meta.embedded -meta.tag -markup.inline.raw -markup.fenced_code -markup.underline.link -constant.other.reference.link",
     "patterns": [
+        { "include": "#email_address" },
         { "include": "#citation_list" },
+        { "include": "#noncitation_bracket" },
+        { "include": "#bare_citation" },
         { "include": "#footnote_ref" },
         { "include": "#footnote_def" },
         { "include": "#colored_format_highlight" },
@@ -54,7 +57,14 @@
 			"endCaptures": {
 				"0": { "name": "punctuation.definition.tag.end.manuscript-markdown" }
 			},
-			"contentName": "meta.comment.manuscript-markdown"
+			"contentName": "meta.comment.manuscript-markdown",
+			"patterns": [
+				{ "include": "#critic_attribution" },
+				{ "include": "#email_address" },
+				{ "include": "#citation_list" },
+				{ "include": "#noncitation_bracket" },
+				{ "include": "#bare_citation" }
+			]
 		},
 		"comment": {
 			"begin": "(\\{)(>>)",
@@ -68,7 +78,18 @@
 				"2": { "name": "punctuation.definition.tag.end.manuscript-markdown" }
 			},
 			"name": "meta.comment.manuscript-markdown",
-			"contentName": "meta.comment"
+			"contentName": "meta.comment",
+			"patterns": [
+				{ "include": "#critic_attribution" },
+				{ "include": "#email_address" },
+				{ "include": "#citation_list" },
+				{ "include": "#noncitation_bracket" },
+				{ "include": "#bare_citation" }
+			]
+		},
+		"critic_attribution": {
+			"match": "\\G\\s*@[^|\\r\\n]*\\|",
+			"name": "meta.comment.attribution.manuscript-markdown"
 		},
 		"comment_range_start": {
 			"match": "(\\{#)([a-zA-Z0-9_-]++)(\\})",
@@ -135,8 +156,25 @@
 			"match": "\\\\$",
 			"name": "constant.character.escape.manuscript-markdown"
 		},
+		"email_address": {
+			"match": "(?:(?:\"(?:[^\"\\\\]|\\\\.)+\")|(?=[\\p{L}\\p{M}\\p{N}.!#$%&'*+/=?^_`{|}~-]*[\\p{L}\\p{N}])[\\p{L}\\p{M}\\p{N}.!#$%&'*+/=?^_`{|}~-]+)@[\\p{L}\\p{N}](?:[\\p{L}\\p{M}\\p{N}.-]*[\\p{L}\\p{M}\\p{N}])?",
+			"name": "meta.email.manuscript-markdown"
+		},
+		"noncitation_bracket": {
+			"begin": "\\[(?=[^\\]\\n]*\\])(?!\\^)(?!-?@)(?![^\\]\\n]*\\](?:\\(|\\[))",
+			"end": "\\]",
+			"name": "meta.embedded.noncitation-bracket.manuscript-markdown",
+			"patterns": [
+				{ "include": "#citation_list" },
+				{ "include": "#noncitation_bracket" }
+			]
+		},
+		"bare_citation": {
+			"match": "(?<![\\p{L}\\p{M}\\p{N}._:\\-/+\\x3d`\\\\])@[A-Za-z0-9_:-]++",
+			"name": "support.function.citation.manuscript-markdown"
+		},
 		"citation_list": {
-			"begin": "\\[(?=\\s*@)",
+			"begin": "\\[(?=-?@[A-Za-z0-9_:-])",
 			"beginCaptures": {
 				"0": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" }
 			},
@@ -147,7 +185,7 @@
 			"name": "meta.citation.manuscript-markdown",
 			"patterns": [
 				{
-					"match": "@[A-Za-z0-9_:-]++",
+					"match": "(?<![\\p{L}\\p{M}\\p{N}._/+\\x3d`\\\\])@[A-Za-z0-9_:-]++",
 					"name": "support.function.citation.manuscript-markdown"
 				},
 				{

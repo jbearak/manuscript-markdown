@@ -268,7 +268,7 @@ describe('Code Block Styling Round-Trip Tests', () => {
       notesMode: 'footnotes', missingKeys: new Set(),
       citationIds: new Set(), citationItemIds: new Map(),
       replyRanges: [], nextParaId: 1, codeBlockIndex: 0,
-      codeBlockLanguages: new Map(), citedKeys: new Set(),
+      codeBlockLanguages: new Map(), citedKeys: new Set(), bibliographyKeys: [],
       codeFont: 'Consolas', codeShadingMode,
     };
   }

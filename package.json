@@ -297,6 +297,10 @@
         "title": "Bibliography File"
       },
       {
+        "command": "manuscript-markdown.setFrontmatter.nocite",
+        "title": "Uncited Bibliography Entries"
+      },
+      {
         "command": "manuscript-markdown.setFrontmatter.csl",
         "title": "Citation Style"
       },
@@ -923,14 +927,19 @@
           "group": "1_citations@1"
         },
         {
-          "command": "manuscript-markdown.setFrontmatter.csl",
+          "command": "manuscript-markdown.setFrontmatter.nocite",
           "when": "editorLangId == markdown",
           "group": "1_citations@2"
         },
         {
-          "command": "manuscript-markdown.setFrontmatter.locale",
+          "command": "manuscript-markdown.setFrontmatter.csl",
           "when": "editorLangId == markdown",
           "group": "1_citations@3"
+        },
+        {
+          "command": "manuscript-markdown.setFrontmatter.locale",
+          "when": "editorLangId == markdown",
+          "group": "1_citations@4"
         },
         {
           "command": "manuscript-markdown.setFrontmatter.zotero-notes",
@@ -1038,6 +1047,13 @@
       {
         "path": "./syntaxes/manuscript-markdown.json",
         "scopeName": "manuscript-markdown.injection",
+        "injectTo": [
+          "text.html.markdown"
+        ]
+      },
+      {
+        "path": "./syntaxes/manuscript-markdown-frontmatter.json",
+        "scopeName": "manuscript-markdown.frontmatter.injection",
         "injectTo": [
           "text.html.markdown"
         ]

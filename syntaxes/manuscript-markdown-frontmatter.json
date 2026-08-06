@@ -1,0 +1,90 @@
+{
+  "scopeName": "manuscript-markdown.frontmatter.injection",
+  "injectionSelector": "L:meta.embedded.block.frontmatter",
+  "patterns": [
+    { "include": "#nocite_block" },
+    { "include": "#nocite_multiline" },
+    { "include": "#nocite_inline" }
+  ],
+  "repository": {
+    "email_address": {
+      "match": "(?:(?:\"(?:[^\"\\\\]|\\\\.)+\")|(?=[\\p{L}\\p{M}\\p{N}.!#$%&'*+/=?^_`{|}~-]*[\\p{L}\\p{N}])[\\p{L}\\p{M}\\p{N}.!#$%&'*+/=?^_`{|}~-]+)@[\\p{L}\\p{N}](?:[\\p{L}\\p{M}\\p{N}.-]*[\\p{L}\\p{M}\\p{N}])?",
+      "name": "meta.email.manuscript-markdown"
+    },
+    "citation_key": {
+      "match": "(?<![\\p{L}\\p{M}\\p{N}._/+\\x3d`\\\\])@(\\*(?![A-Za-z0-9_:-])|[A-Za-z0-9_:-]++)",
+      "name": "support.function.citation.manuscript-markdown"
+    },
+    "yaml_comment": {
+      "begin": "(?<!\\S)#",
+      "end": "$",
+      "name": "comment.line.number-sign.yaml"
+    },
+    "single_quoted_value": {
+      "begin": "'",
+      "end": "'(?=\\s*(?:,|\\]|#.*|$))",
+      "name": "string.quoted.single.yaml",
+      "patterns": [
+        { "match": "''", "name": "constant.character.escape.yaml" },
+        { "include": "#email_address" },
+        { "include": "#citation_key" }
+      ]
+    },
+    "double_quoted_value": {
+      "begin": "\"",
+      "end": "(?<!\\\\)\"(?=\\s*(?:,|\\]|#.*|$))",
+      "name": "string.quoted.double.yaml",
+      "patterns": [
+        { "match": "\\\\.", "name": "constant.character.escape.yaml" },
+        { "include": "#email_address" },
+        { "include": "#citation_key" }
+      ]
+    },
+    "nocite_yaml_value": {
+      "patterns": [
+        { "include": "#single_quoted_value" },
+        { "include": "#double_quoted_value" },
+        { "include": "#yaml_comment" },
+        { "include": "#email_address" },
+        { "include": "#citation_key" }
+      ]
+    },
+    "nocite_inline": {
+      "begin": "^(nocite)(\\s*:)(?=\\s*(?![|>][0-9+-]*\\s*(?:#.*)?$)\\S)",
+      "beginCaptures": {
+        "1": { "name": "entity.name.tag.yaml" },
+        "2": { "name": "punctuation.separator.key-value.mapping.yaml" }
+      },
+      "end": "$",
+      "name": "meta.nocite.manuscript-markdown",
+      "patterns": [
+        { "include": "#nocite_yaml_value" }
+      ]
+    },
+    "nocite_multiline": {
+      "begin": "^(nocite)(\\s*:)\\s*(?:#.*)?$",
+      "beginCaptures": {
+        "1": { "name": "entity.name.tag.yaml" },
+        "2": { "name": "punctuation.separator.key-value.mapping.yaml" }
+      },
+      "end": "(?=^[^\\s#-][^:]*:)",
+      "name": "meta.nocite.manuscript-markdown",
+      "patterns": [
+        { "include": "#nocite_yaml_value" }
+      ]
+    },
+    "nocite_block": {
+      "begin": "^(nocite)(\\s*:)\\s*[|>][0-9+-]*\\s*(?:#.*)?$",
+      "beginCaptures": {
+        "1": { "name": "entity.name.tag.yaml" },
+        "2": { "name": "punctuation.separator.key-value.mapping.yaml" }
+      },
+      "end": "(?=^(?:[^\\s#-][^:]*:|#))",
+      "name": "meta.nocite.manuscript-markdown",
+      "patterns": [
+        { "include": "#email_address" },
+        { "include": "#citation_key" }
+      ]
+    }
+  }
+}

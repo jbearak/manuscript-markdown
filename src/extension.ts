@@ -14,7 +14,8 @@ import { convertDocx, CitationKeyFormat } from './converter';
 import { convertMdToDocx } from './md-to-docx';
 import * as fs from 'fs';
 import * as path from 'path';
-import { parseFrontmatter, hasCitations, normalizeColorScheme, type ColorScheme } from './frontmatter';
+import { parseFrontmatter, normalizeColorScheme, type ColorScheme } from './frontmatter';
+import { hasBibliographyDemand } from './citation-scanner';
 import type { EmbedResolver } from './embed-preprocess';
 import { BUNDLED_STYLE_LABELS } from './csl-loader';
 import { shouldAutoTriggerLspSuggest } from './lsp/auto-suggest';
@@ -52,7 +53,7 @@ import {
 // - DOCX→MD settings parity: keep alwaysUseCommentIds wired in both CLI and VS Code paths
 // - CSL auto-suggest retriggering: trigger only on single-character typing/backspace,
 //   not on completion acceptance
-// - Citekey auto-suggest retriggering: same gate; retrigger when cursor stays in [@… context
+// - Citekey auto-suggest retriggering: same gate; retrigger while the cursor stays in a citation context
 // - Frontmatter auto-suggest: also allow Enter/auto-indent, but trigger only when
 //   the cursor context has actual key or generated-value completion items
 // - Citekey delimiter UX: dismiss suggest widget on ; (+ space) in grouped citation context
@@ -1400,10 +1401,10 @@ async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undef
 			if (await fileExists(defaultBib)) {
 				const data = await vscode.workspace.fs.readFile(defaultBib);
 				bibtex = new TextDecoder().decode(data);
-				if (hasCitations(markdown)) {
+				if (hasBibliographyDemand(markdown)) {
 					vscode.window.showWarningMessage(`Bibliography "${metadata.bibliography}" not found; using ${path.basename(basePath)}.bib`);
 				}
-			} else if (hasCitations(markdown)) {
+			} else if (hasBibliographyDemand(markdown)) {
 				vscode.window.showWarningMessage(`Bibliography "${metadata.bibliography}" not found and no default .bib file exists`);
 			}
 		}

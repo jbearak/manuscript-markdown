@@ -1,7 +1,8 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { parseFrontmatter, hasCitations, normalizeBibPath, normalizeBlockquoteStyle, normalizeColorScheme, type ColorScheme, type BlockquoteStyle } from './frontmatter';
+import { parseFrontmatter, normalizeBibPath, normalizeBlockquoteStyle, normalizeColorScheme, type ColorScheme, type BlockquoteStyle } from './frontmatter';
+import { hasBibliographyDemand } from './citation-scanner';
 
 // --- Implementation notes ---
 // - Flag parsing: validate missing-next-arg and next-token-is-flag before consuming args[++i]
@@ -297,10 +298,10 @@ async function runMdToDocx(options: CliOptions) {
         // Fallback to default
         if (fs.existsSync(defaultBibPath)) {
           bibtex = fs.readFileSync(defaultBibPath, 'utf8');
-          if (hasCitations(markdown)) {
+          if (hasBibliographyDemand(markdown)) {
             console.error(`Warning: Bibliography "${metadata.bibliography}" not found; using ${inputBase}.bib`);
           }
-        } else if (hasCitations(markdown)) {
+        } else if (hasBibliographyDemand(markdown)) {
           console.error(`Warning: Bibliography "${metadata.bibliography}" not found and no default .bib file exists`);
         }
       }
