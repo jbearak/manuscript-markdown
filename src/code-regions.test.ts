@@ -4,6 +4,7 @@
 import { describe, test, expect } from 'bun:test';
 import {
 	computeCodeRegions,
+	computeMarkdownInlineBlocks,
 	isInsideCodeRegion,
 	overlapsCodeRegion,
 } from './code-regions';
@@ -12,6 +13,69 @@ import { extractAllDecorationRanges } from './highlight-colors';
 // ---------------------------------------------------------------------------
 // Task 3.2: Unit tests for computeCodeRegions() and isInsideCodeRegion()
 // ---------------------------------------------------------------------------
+
+describe('computeMarkdownInlineBlocks', () => {
+	test('returns exact parser-derived ranges for every inline-bearing block', () => {
+		const text = [
+			'Paragraph',
+			'continued',
+			'',
+			'# Heading',
+			'',
+			'- first',
+			'- second',
+			'',
+			'```',
+			'code',
+			'```',
+			'',
+			'> quote one',
+			'>',
+			'> quote two',
+		].join('\n');
+		const blocks = computeMarkdownInlineBlocks(text);
+		expect(blocks.map(block => block.id)).toEqual([0, 1, 2, 3, 4, 5]);
+		expect(blocks.map(block => text.slice(block.start, block.end))).toEqual([
+			'Paragraph\ncontinued',
+			'# Heading',
+			'- first',
+			'- second',
+			'> quote one',
+			'> quote two',
+		]);
+	});
+
+	test('returns exact ranges for GFM table cells including escaped pipes', () => {
+		const text = [
+			'| A \\| B | C |',
+			'| --- | --- |',
+			'| `x` | [y](@z) |',
+		].join('\n');
+		const blocks = computeMarkdownInlineBlocks(text);
+		expect(blocks.map(block => block.id)).toEqual([0, 1, 2, 3]);
+		expect(blocks.map(block => text.slice(block.start, block.end))).toEqual([
+			'A \\| B',
+			'C',
+			'`x`',
+			'[y](@z)',
+		]);
+
+		const blockquote = '> \\| A | B\n> --- | ---';
+		expect(computeMarkdownInlineBlocks(blockquote).map(block => blockquote.slice(block.start, block.end))).toEqual([
+			'\\| A',
+			'B',
+		]);
+	});
+
+	test('retains distinct zero-length ranges for duplicate empty table cells', () => {
+		const text = '|   |   |\n| --- | --- |';
+		const blocks = computeMarkdownInlineBlocks(text);
+		expect(blocks.map(block => block.id)).toEqual([0, 1]);
+		expect(blocks).toHaveLength(2);
+		expect(blocks.every(block => block.start === block.end)).toBe(true);
+		expect(blocks[0].start).toBeLessThan(blocks[1].start);
+	});
+});
 
 describe('computeCodeRegions', () => {
 	test('inline code: `code` returns region covering backticks and content', () => {
@@ -28,6 +92,32 @@ describe('computeCodeRegions', () => {
 		const regions = computeCodeRegions(text);
 		expect(regions.length).toBe(1);
 		expect(text.slice(regions[0].start, regions[0].end)).toBe('``code``');
+	});
+
+	test('honors CommonMark backslash escapes for code-span delimiters', () => {
+		for (const slashCount of [1, 3]) {
+			const text = '\\'.repeat(slashCount) + '`literal @visible`';
+			expect(computeCodeRegions(text)).toEqual([]);
+		}
+		for (const slashCount of [2, 4]) {
+			const text = '\\'.repeat(slashCount) + '`@hidden`';
+			expect(computeCodeRegions(text).map(region => text.slice(region.start, region.end)))
+				.toEqual(['`@hidden`']);
+		}
+	});
+
+	test('starts a shorter delimiter run after an escaped first backtick', () => {
+		const text = '\\``@hidden`';
+		expect(computeCodeRegions(text).map(region => text.slice(region.start, region.end)))
+			.toEqual(['`@hidden`']);
+	});
+
+	test('allows a matching code-span closer after a literal backslash', () => {
+		for (const delimiter of ['`', '``']) {
+			const text = delimiter + '@hidden\\' + delimiter;
+			expect(computeCodeRegions(text).map(region => text.slice(region.start, region.end)))
+				.toEqual([text]);
+		}
 	});
 
 	test('inline code containing CriticMarkup: `{++added++}`', () => {
@@ -121,8 +211,94 @@ describe('computeCodeRegions', () => {
 		expect(computeCodeRegions(orderedSibling)).toEqual([]);
 	});
 
+	test('coalesces consecutive indented-code lines but keeps separate blocks', () => {
+		const text = 'Before\n\n    one\n    two\n\nAfter\n\n    three';
+		expect(computeCodeRegions(text).map(region => text.slice(region.start, region.end))).toEqual([
+			'    one\n    two\n',
+			'    three',
+		]);
+	});
+
+	test('does not pair inline backticks across blank-line paragraph boundaries', () => {
+		expect(computeCodeRegions('`a\n\nprose @key\n\nb`')).toEqual([]);
+		for (const blank of ['>', '> ', '> >']) {
+			expect(computeCodeRegions('> `a\n' + blank + '\n> prose @key\n> b`')).toEqual([]);
+		}
+		const text = '`a\n\nprose `@key`\n\nb`';
+		expect(computeCodeRegions(text).map(region => text.slice(region.start, region.end))).toEqual(['`@key`']);
+	});
+
+	test('does not pair inline backticks across CommonMark block interruptions', () => {
+		for (const interruption of ['# Heading', '---', '- list item', '1. ordered item']) {
+			const text = '`open\n' + interruption + '\nprose @visible\nclose`';
+			expect(computeCodeRegions(text)).toEqual([]);
+		}
+
+		const fenced = '`open\n```\nfenced\n```\nprose @visible\nclose`';
+		expect(computeCodeRegions(fenced).map(region => fenced.slice(region.start, region.end))).toEqual([
+			'```\nfenced\n```',
+		]);
+	});
+
+	test('derives list-contained paragraph boundaries from active containers', () => {
+		for (const text of [
+			'1. first `open\n2. second @visible close`',
+			'1. first `open\n2.\n3. third @visible close`',
+			'- # `open\n  prose @visible close`',
+			'- prose `open\n    # Heading\n  after @visible close`',
+			'- prose `open\n    ---\n  after @visible close`',
+			'10. outer\n    - nested\n\n    resumed `open\n    # Heading\n    after @visible close`',
+			'10. outer\n    - nested\n\n    resumed `open\n    ***\n    after @visible close`',
+		]) {
+			expect(computeCodeRegions(text)).toEqual([]);
+		}
+
+		for (const fenced of [
+			'- prose `open\n    ```\n    fenced\n    ```\n  after @visible close`',
+			'10. outer\n    - nested\n\n    resumed `open\n    ```\n    fenced\n    ```\n    after @visible close`',
+		]) {
+			expect(computeCodeRegions(fenced).map(region => fenced.slice(region.start, region.end))).toEqual([
+				'    ```\n    fenced\n    ```',
+			]);
+		}
+	});
+
+	test('does not create list state from non-interrupting ordered markers', () => {
+		for (const text of [
+			'prose `open\n2. still the same paragraph\n3. @hidden close`',
+			'prose `open\n1.\nafter @hidden close`',
+		]) {
+			expect(computeCodeRegions(text).map(region => text.slice(region.start, region.end))).toEqual([
+				text.slice(text.indexOf('`')),
+			]);
+		}
+		for (const marker of ['01. item', '01) item']) {
+			expect(computeCodeRegions('prose `open\n' + marker + '\nafter @visible close`')).toEqual([]);
+		}
+	});
+
+	test('handles dedented and ambiguous blocks inside lists', () => {
+		for (const block of ['# Heading', '***']) {
+			const text = '10. outer\n    - nested `open\n    ' + block + '\n    after @visible close`';
+			expect(computeCodeRegions(text)).toEqual([]);
+		}
+		const fenced = '10. outer\n    - nested `open\n    ```\n    fenced\n    ```\n    after @visible close`';
+		expect(computeCodeRegions(fenced).map(region => fenced.slice(region.start, region.end))).toEqual([
+			'    ```\n    fenced\n    ```',
+		]);
+
+		const thematic = '- prose\n  - - -\n  ~~~\n  @hidden\n  ~~~';
+		expect(computeCodeRegions(thematic).map(region => thematic.slice(region.start, region.end))).toEqual([
+			'  ~~~\n  @hidden\n  ~~~',
+		]);
+		expect(computeCodeRegions('-     @hidden').map(region => '-     @hidden'.slice(region.start, region.end))).toEqual([
+			'-     @hidden',
+		]);
+	});
+
 	test('returns sorted non-overlapping regions', () => {
 		const regions = computeCodeRegions('`one`\n\n    two\n\n  ```\nthree\n  ```');
+		expect(regions).toHaveLength(3);
 		for (let i = 1; i < regions.length; i++) {
 			expect(regions[i - 1].start).toBeLessThan(regions[i].start);
 			expect(regions[i - 1].end).toBeLessThanOrEqual(regions[i].start);
@@ -135,6 +311,17 @@ describe('computeCodeRegions', () => {
 		expect(regions.length).toBe(2);
 		expect(text.slice(regions[0].start, regions[0].end)).toBe('`inline`');
 		expect(text.slice(regions[1].start, regions[1].end)).toBe('```\nfenced\n```');
+	});
+
+	test('recognizes inline code inside raw HTML blocks and GFM table cells', () => {
+		for (const text of [
+			'<table>\n<tr><td>`99.99` 12.34</td></tr>\n</table>',
+			'| Value |\n| --- |\n| `99.99` 12.34 |',
+		]) {
+			expect(computeCodeRegions(text).map(region => text.slice(region.start, region.end))).toEqual([
+				'`99.99`',
+			]);
+		}
 	});
 
 	test('empty code span: `` `` (backticks with space)', () => {

@@ -194,6 +194,12 @@ describe('shouldAutoTriggerLspSuggest existing contexts', () => {
 		}
 	});
 
+	test('ignores a later colon while suggesting a provisional body citation', () => {
+		const text = '---\nNote: prose\nBody cites @s: details';
+		const offset = text.indexOf('@s') + 2;
+		expect(shouldTrigger(text, offset, 's')).toBe(true);
+	});
+
 	test('treats unmatched ordinary brackets as bare completion contexts', () => {
 		expect(shouldTrigger('See [ordinary @s')).toBe(true);
 		expect(shouldTrigger('See [ordinary @s]', 'See [ordinary @s'.length, 's')).toBe(false);
@@ -215,11 +221,68 @@ describe('shouldAutoTriggerLspSuggest existing contexts', () => {
 			expect(shouldTrigger(text, offset, text[offset - 1])).toBe(false);
 		}
 
+		const largePrefix = 'ordinary prose\n'.repeat(2_000);
+		for (const suffix of ['\\@s', 'person@s', '`@s`', '[label](@s)']) {
+			const largeExcluded = largePrefix + suffix;
+			const excludedOffset = largeExcluded.indexOf('@s') + 2;
+			expect(shouldTrigger(largeExcluded, excludedOffset, 's')).toBe(false);
+		}
+
 		const text = ('ordinary prose\n'.repeat(100_000)) + 'See [@s]';
 		const offset = text.length - 1;
 		const started = performance.now();
 		expect(shouldTrigger(text, offset, 's')).toBe(true);
 		expect(performance.now() - started).toBeLessThan(250);
+	});
+
+	test('uses actual context at exact large-document window boundaries', () => {
+		const windowSize = 16_384;
+		const backtick = String.fromCharCode(96);
+		const prefix = 'ordinary prose\n'.repeat(2_000);
+		const atBoundary = (
+			opening: string,
+			beforeAt: string,
+			afterAt: string,
+		): string => {
+			const padding = windowSize - opening.length - beforeAt.length - 2;
+			return opening + 'x'.repeat(padding) + beforeAt + '@s' + afterAt;
+		};
+		const code = atBoundary(backtick, ' ', backtick);
+		const link = atBoundary('[', '](', ')');
+		const cases = [
+			{ predecessor: 'x', structure: code, expected: false },
+			{ predecessor: '\\', structure: code, expected: true },
+			{ predecessor: '\\'.repeat(2), structure: code, expected: false },
+			{ predecessor: 'x', structure: link, expected: false },
+			{ predecessor: '\\', structure: link, expected: true },
+			{ predecessor: '\\'.repeat(2), structure: link, expected: false },
+			{
+				predecessor: '\\',
+				structure: atBoundary(backtick, ' \\', backtick),
+				expected: false,
+			},
+			{
+				predecessor: '\\',
+				structure: atBoundary(backtick, ' person', backtick),
+				expected: false,
+			},
+			{
+				predecessor: '\\',
+				structure: atBoundary('[', backtick, backtick + ']'),
+				expected: false,
+			},
+			{
+				predecessor: '\\',
+				structure: atBoundary('[', '[label](', ')]'),
+				expected: false,
+			},
+		];
+		for (const { predecessor, structure, expected } of cases) {
+			const text = prefix + predecessor + structure;
+			const offset = text.lastIndexOf('@s') + 2;
+			expect(offset - windowSize).toBe(prefix.length + predecessor.length);
+			expect(shouldTrigger(text, offset, 's')).toBe(expected);
+		}
 	});
 
 	test('auto-suggests citekeys in closed and provisional nocite values', () => {
@@ -241,6 +304,11 @@ describe('shouldAutoTriggerLspSuggest existing contexts', () => {
 
 	test('keeps citation auto-suggest in thematic-break bodies without a mapping', () => {
 		const text = '---\nBody prose @s';
+		expect(shouldTrigger(text, text.length, 's')).toBe(true);
+	});
+
+	test('keeps citation auto-suggest in no-blank-line body prose after a mapping-like line', () => {
+		const text = '---\nNote: prose\nBody cites @s';
 		expect(shouldTrigger(text, text.length, 's')).toBe(true);
 	});
 

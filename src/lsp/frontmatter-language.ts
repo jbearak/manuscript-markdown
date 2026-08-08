@@ -6,7 +6,12 @@
  * and typo detection. No LSP types — returns offsets; server converts.
  */
 
-import { normalizeFontStyle, parseColWidths } from '../frontmatter';
+import {
+	findFrontmatterBounds,
+	findFrontmatterOpeningBounds,
+	normalizeFontStyle,
+	parseColWidths,
+} from '../frontmatter';
 import { MAX_TABLE_DIGITS } from '../table-number-format';
 import { getCslFieldInfo } from './csl-language';
 import { BUNDLED_STYLE_LABELS } from '../csl-loader';
@@ -432,8 +437,6 @@ function findStylesTypoSuggestions(unknownKey: string): string[] {
 // Frontmatter line scanner (offset-aware)
 // ---------------------------------------------------------------------------
 
-const FRONTMATTER_RE = /^---\r?\n(?:([\s\S]*?)\r?\n)?---(?=\r?\n|$)/;
-
 interface FmLine {
 	/** Raw key name (left of colon) */
 	key: string;
@@ -468,17 +471,16 @@ interface ParsedFrontmatter {
 }
 
 function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFrontmatter | undefined {
-	const fmMatch = FRONTMATTER_RE.exec(text);
-	const unclosedMatch = allowUnclosed && !fmMatch ? /^---\r?\n/.exec(text) : undefined;
-	if (!fmMatch && !unclosedMatch) return undefined;
+	const bounds = findFrontmatterBounds(text);
+	const opening = findFrontmatterOpeningBounds(text);
+	if (!opening || (!bounds && !allowUnclosed) || (!bounds && opening.bodyStart === opening.contentStart)) {
+		return undefined;
+	}
 
-	const fmStart = 0;
-	const fmEnd = fmMatch ? fmMatch[0].length : text.length;
-	const firstNewline = text.indexOf('\n', fmStart);
-	if (firstNewline === -1) return undefined;
-	const bodyStart = firstNewline + 1;
-
-	const fmBody = fmMatch ? (fmMatch[1] ?? '') : text.slice(bodyStart);
+	const fmStart = opening.start;
+	const fmEnd = bounds ? bounds.contentEnd + 4 : text.length;
+	const bodyStart = opening.bodyStart;
+	const fmBody = text.slice(bodyStart, bounds?.contentEnd ?? text.length);
 	const rawLines = fmBody.split('\n');
 	const lines: FmLine[] = [];
 
@@ -602,7 +604,7 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 		pos += rawLine.length + 1; // +1 for \n
 	}
 
-	return { lines, fmStart, fmEnd, bodyStart, closed: !!fmMatch };
+	return { lines, fmStart, fmEnd, bodyStart, closed: bounds !== undefined };
 }
 
 // ---------------------------------------------------------------------------

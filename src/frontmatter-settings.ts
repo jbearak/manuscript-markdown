@@ -1,4 +1,4 @@
-import { isTopLevelFrontmatterMappingLine, yamlValueBeforeComment } from './citekey';
+import { isNociteContinuationLine, nociteValueMode } from './citekey';
 
 export interface FrontmatterMenuSetting {
 	key: string;
@@ -91,9 +91,8 @@ function multilineNociteSelectionEnd(
 	selectionStart: number,
 	firstValue: string,
 ): number {
-	const semanticFirstValue = yamlValueBeforeComment(firstValue).trim();
-	const blockScalar = /^[|>][0-9+-]*$/.test(semanticFirstValue);
-	if (semanticFirstValue.length > 0 && !blockScalar) return selectionStart + firstValue.length;
+	const mode = nociteValueMode(firstValue);
+	if (mode === 'single-line') return selectionStart + firstValue.length;
 
 	let selectionEnd = selectionStart + firstValue.length;
 	let nextLineStart = markdown.indexOf('\n', lineOffset);
@@ -107,8 +106,7 @@ function multilineNociteSelectionEnd(
 			? rawLineEnd - 1
 			: rawLineEnd;
 		const line = markdown.slice(nextLineStart, lineEnd);
-		if (blockScalar && line.trim().length > 0 && !/^[ \t]/.test(line)) break;
-		if (!blockScalar && isTopLevelFrontmatterMappingLine(line)) break;
+		if (!isNociteContinuationLine(mode, line)) break;
 		selectionEnd = lineEnd;
 		if (newline === -1 || newline >= bodyEnd) break;
 		nextLineStart = newline + 1;
@@ -145,7 +143,7 @@ export function getFrontmatterSettingEdit(
 
 	if (settingMatch) {
 		const lineOffset = bodyStart + settingMatch.index;
-		const colonOffset = markdown.indexOf(':', lineOffset);
+		const colonOffset = lineOffset + settingMatch[0].indexOf(':');
 		const selectionStart = colonOffset + 1 + settingMatch[1].length;
 		const selectionEnd = key === 'nocite'
 			? multilineNociteSelectionEnd(markdown, bodyEnd, lineOffset, selectionStart, settingMatch[2])

@@ -1,4 +1,5 @@
 import { describe, test, expect } from 'bun:test';
+import { findFrontmatterBounds, parseFrontmatter } from '../frontmatter';
 import {
 	damerauLevenshtein,
 	findTypoSuggestions,
@@ -163,6 +164,44 @@ describe('getFrontmatterLocation', () => {
 		const text = '---\nfont: Georgia\n---\n\nBody text.';
 		const loc = getFrontmatterLocation(text, text.indexOf('Body'));
 		expect(loc.kind).toBe('outside');
+	});
+
+	test('matches canonical closed bounds after BOM, leading trivia, and opener whitespace', () => {
+		for (const prefix of ['﻿', '\n  \n', '﻿\r\n \t\r\n']) {
+			const text = prefix + '--- \t\r\nfont: Georgia\r\n---\r\nBody';
+			const bounds = findFrontmatterBounds(text);
+			expect(bounds).toBeDefined();
+			expect(parseFrontmatter(text).metadata.font).toBe('Georgia');
+			const valueOffset = text.indexOf('Georgia') + 3;
+			const loc = getFrontmatterLocation(text, valueOffset);
+			expect(loc).toMatchObject({
+				kind: 'value',
+				key: 'font',
+				keyStart: text.indexOf('font'),
+				valueStart: text.indexOf('Georgia'),
+				inFrontmatter: true,
+				frontmatterClosed: true,
+			});
+			expect(loc.fmBodyStart).toBe(text.indexOf('font'));
+			expect(getFrontmatterLocation(text, bounds!.bodyStart).kind).toBe('outside');
+		}
+	});
+
+	test('keeps aligned absolute offsets for unfinished canonical openers', () => {
+		for (const prefix of ['﻿', '\n  \n', '﻿\r\n \t\r\n']) {
+			const text = prefix + '--- \t\r\nfont: Geo';
+			const loc = getFrontmatterLocation(text, text.length);
+			expect(loc).toMatchObject({
+				kind: 'value',
+				key: 'font',
+				keyStart: text.indexOf('font'),
+				valueStart: text.indexOf('Geo'),
+				valueEnd: text.length,
+				inFrontmatter: true,
+				frontmatterClosed: false,
+			});
+			expect(loc.fmBodyStart).toBe(text.indexOf('font'));
+		}
 	});
 
 	test('returns outside at the offset immediately after the closing delimiter', () => {

@@ -250,11 +250,11 @@ describe("Property 7: Serialization format correctness", () => {
           const fm: Frontmatter = { headerFont: fonts };
           const yaml = serializeFrontmatter(fm);
           if (fonts.length === 1) {
-            expect(yaml).toContain("header-font: " + fonts[0]);
-            expect(yaml).not.toContain("[");
+            expect(yaml).not.toContain("header-font: [");
           } else {
-            expect(yaml).toContain("header-font: [" + fonts.join(", ") + "]");
+            expect(yaml).toContain("header-font: [");
           }
+          expect(parseFrontmatter(yaml).metadata.headerFont).toEqual(fonts);
         },
       ),
       { numRuns: 100 },
@@ -284,9 +284,8 @@ describe("Property 7: Serialization format correctness", () => {
         (titles) => {
           const fm: Frontmatter = { title: titles };
           const yaml = serializeFrontmatter(fm);
-          for (const t of titles) {
-            expect(yaml).toContain("title: " + t);
-          }
+          expect(yaml.match(/^title:/gm)).toHaveLength(titles.length);
+          expect(parseFrontmatter(yaml).metadata.title).toEqual(titles);
           // Should NOT use bracketed format for title
           expect(yaml).not.toMatch(/title: \[/);
         },

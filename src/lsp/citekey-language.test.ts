@@ -64,11 +64,12 @@ describe('scanCitationUsages', () => {
 		expect(findCitekeyAtOffset(text, text.indexOf('@narrative'))).toBe('narrative');
 	});
 
-	test('shares provisional frontmatter semantics across diagnostics and symbol consumers', () => {
-		const text = "---\ntitle: '@hidden'\nnocite: '[@uncited; @*]'";
-		expect(scanCitationUsages(text).map((usage) => usage.key)).toEqual(['uncited']);
-		expect(findCitekeyAtOffset(text, text.indexOf('@hidden'))).toBeUndefined();
+	test('does not use provisional frontmatter to hide document-wide symbol usages', () => {
+		const text = "---\ntitle: '@title_text'\nnocite: '[@uncited; @*]'\nBody cites @body";
+		expect(scanCitationUsages(text).map((usage) => usage.key)).toEqual(['title_text', 'uncited', 'body']);
+		expect(findCitekeyAtOffset(text, text.indexOf('@title_text'))).toBe('title_text');
 		expect(findCitekeyAtOffset(text, text.indexOf('@uncited'))).toBe('uncited');
+		expect(findCitekeyAtOffset(text, text.indexOf('@body'))).toBe('body');
 	});
 });
 
@@ -127,6 +128,14 @@ describe('getCompletionContextAtOffset', () => {
 		const offset = text.length;
 		const ctx = getCompletionContextAtOffset(text, offset);
 		expect(ctx).toBeDefined();
+		expect(ctx?.prefix).toBe('smi');
+	});
+
+	test('ignores a colon after a body citation in provisional frontmatter', () => {
+		const text = '---\nNote: prose\nBody cites @smi: details';
+		const offset = text.indexOf('@smi') + '@smi'.length;
+		const ctx = getCompletionContextAtOffset(text, offset);
+		expect(ctx?.form).toBe('bare');
 		expect(ctx?.prefix).toBe('smi');
 	});
 

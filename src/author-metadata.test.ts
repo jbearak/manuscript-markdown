@@ -57,6 +57,25 @@ describe('serializeFrontmatter with author', () => {
     const result = serializeFrontmatter({ csl: 'apa' });
     expect(result).not.toContain('author');
   });
+
+  it('quotes and decodes YAML-significant author strings without creating fields', () => {
+    const values = [
+      ' leading and trailing ',
+      'Eve\nbibliography: injected.bib\n---\ntitle: Injected',
+      '# hash-prefixed',
+      'true',
+      'Colon: value # comment',
+      'Quote " and slash \\ and apostrophe \'',
+      'Unicode line' + String.fromCodePoint(0x2028) + 'separator',
+    ];
+    for (const author of values) {
+      const serialized = serializeFrontmatter({ author });
+      expect(parseFrontmatter(serialized).metadata).toEqual({ author });
+      expect(serialized).not.toContain('\nbibliography: injected.bib');
+      expect(serialized).not.toContain('\ntitle: Injected');
+      expect(serialized.match(/^author:/gm)).toHaveLength(1);
+    }
+  });
 });
 
 // --- extractAuthor from DOCX ---
@@ -120,6 +139,30 @@ describe('author md→docx→md round-trip', () => {
     const zip = await JSZip.loadAsync(docxResult.docx);
     const coreXml = await zip.file('docProps/core.xml')!.async('string');
     expect(coreXml).not.toContain('dc:creator');
+  });
+
+  it('safely imports external DOCX authors containing YAML injection text', async () => {
+    const malicious = 'Eve\nbibliography: injected.bib\n---\ntitle: Injected # comment " \\';
+    const seed = await convertMdToDocx('---\nauthor: Seed\n---\n\nBody.');
+    const zip = await JSZip.loadAsync(seed.docx);
+    const coreXml = await zip.file('docProps/core.xml')!.async('string');
+    const escaped = malicious
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    zip.file('docProps/core.xml', coreXml.replace(
+      /<dc:creator>[\s\S]*?<\/dc:creator>/,
+      '<dc:creator>' + escaped + '</dc:creator>',
+    ));
+
+    const externalDocx = await zip.generateAsync({ type: 'nodebuffer' });
+    const converted = await convertDocx(externalDocx);
+    const parsed = parseFrontmatter(converted.markdown);
+    expect(parsed.metadata.author).toBe(malicious);
+    expect(parsed.metadata.bibliography).toBeUndefined();
+    expect(parsed.metadata.title).toBeUndefined();
+    expect(converted.markdown).not.toContain('\nbibliography: injected.bib');
+    expect(converted.markdown).not.toContain('\ntitle: Injected');
   });
 
   it('XML-escapes author with special characters', async () => {

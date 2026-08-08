@@ -457,7 +457,7 @@ function buildCitationFieldCode(
     } else {
       fieldNarrative = false;
       fieldSuppressAuthorKeys = new Set([...(suppressAuthorKeys ?? []), ...keys]);
-      literalAuthorPrefix = generateNarrativeAuthorText(keys[0], entries) + ' ';
+      literalAuthorPrefix = generateNarrativeAuthorText(keys[0], entries).replace(/\s+/g, ' ').trim() + ' ';
       visibleText = resolveVisibleText(keys, entries, locators, citeprocEngine, fieldSuppressAuthorKeys);
     }
   } else {
@@ -750,6 +750,17 @@ function parseLocator(locator: string): { locator: string; label: string } {
   return { locator: trimmed, label: 'page' };
 }
 
+function displayAuthorName(author: string): string {
+  const firstAuthor = splitAuthorString(author)[0] || author.trim();
+  if (firstAuthor.startsWith('{') && firstAuthor.endsWith('}')) {
+    return firstAuthor.slice(1, -1);
+  }
+  const commaPos = firstAuthor.indexOf(',');
+  return commaPos !== -1
+    ? firstAuthor.slice(0, commaPos).trim()
+    : firstAuthor.split(' ').pop() || firstAuthor;
+}
+
 export function generateNarrativeAuthorText(
   key: string,
   entries: Map<string, BibtexEntry>,
@@ -760,15 +771,7 @@ export function generateNarrativeAuthorText(
   const author = entry.fields.get('author');
   const institution = entry.fields.get('institution');
   if (!author) return institution || key;
-
-  const firstAuthor = splitAuthorString(author)[0] || author.trim();
-  if (firstAuthor.startsWith('{') && firstAuthor.endsWith('}')) {
-    return firstAuthor.slice(1, -1);
-  }
-  const commaPos = firstAuthor.indexOf(',');
-  return commaPos !== -1
-    ? firstAuthor.slice(0, commaPos).trim()
-    : firstAuthor.split(' ').pop() || firstAuthor;
+  return displayAuthorName(author);
 }
 
 export function generateNarrativeFallbackText(
@@ -797,14 +800,7 @@ export function generateFallbackText(keys: string[], entries: Map<string, Bibtex
 
     let text: string;
     if (!keySuppressed && author) {
-      const firstAuthor = splitAuthorString(author)[0] || author.trim();
-      if (firstAuthor.startsWith('{') && firstAuthor.endsWith('}')) {
-        // Institutional author — use the full name
-        text = firstAuthor.slice(1, -1);
-      } else {
-        const commaPos = firstAuthor.indexOf(',');
-        text = commaPos !== -1 ? firstAuthor.slice(0, commaPos).trim() : firstAuthor.split(' ').pop() || firstAuthor;
-      }
+      text = displayAuthorName(author);
     } else if (keySuppressed) {
       // suppress-author: year only, no author name
       text = '';

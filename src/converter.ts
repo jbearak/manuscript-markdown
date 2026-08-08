@@ -2,13 +2,21 @@ import JSZip from 'jszip';
 import { XMLParser } from 'fast-xml-parser';
 import { asXmlNodes, ommlToLatex, type XmlNode } from './omml';
 import { resolveMarkdownColor } from './highlight-colors';
-import { Frontmatter, NotesMode, serializeFrontmatter, noteTypeFromNumber, parseColWidths, type CustomStyleDef } from './frontmatter';
+import {
+  Frontmatter,
+  NotesMode,
+  serializeFrontmatter,
+  noteTypeFromNumber,
+  normalizeNociteRawForYaml,
+  parseColWidths,
+  type CustomStyleDef,
+} from './frontmatter';
 import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType } from './gfm';
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
 import { parseBibtex, mergeBibtex } from './bibtex-parser';
 import { customStyleId } from './md-to-docx';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
-import { isCitekey, parseNociteRaw, type NociteValue } from './citekey';
+import { isCitekey, type NociteValue } from './citekey';
 import { isBoundaryValidBareCitation } from './citation-scanner';
 
 // --- Implementation notes ---
@@ -1260,7 +1268,7 @@ export async function extractCustomStyles(data: Uint8Array | JSZip): Promise<Rec
     const parsed = JSON.parse(json);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
     // Validate structure
-    const result: Record<string, CustomStyleDef> = {};
+    const result = new Map<string, CustomStyleDef>();
     for (const [name, def] of Object.entries(parsed)) {
       if (!def || typeof def !== 'object') continue;
       const d = def as Record<string, unknown>;
@@ -1272,9 +1280,9 @@ export async function extractCustomStyles(data: Uint8Array | JSZip): Promise<Rec
       if (typeof d.spacingAfter === 'number') styleDef.spacingAfter = d.spacingAfter;
       if (d.paragraphIndent === 'none' || d.paragraphIndent === 0) styleDef.paragraphIndent = 'none';
       else if (typeof d.paragraphIndent === 'number' && d.paragraphIndent > 0) styleDef.paragraphIndent = d.paragraphIndent;
-      result[name] = styleDef;
+      result.set(name, styleDef);
     }
-    return Object.keys(result).length > 0 ? result : null;
+    return result.size > 0 ? Object.fromEntries(result) : null;
   } catch {
     return null;
   }
@@ -1404,17 +1412,9 @@ export async function extractNocite(data: Uint8Array | JSZip): Promise<NociteVal
     };
     if (parsed.raw !== undefined) {
       if (typeof parsed.raw !== 'string') return null;
-      const rawLines = parsed.raw.split('\n');
-      const blockScalar = /^[|>][0-9+-]*(?:\s+#.*)?\s*$/.test(rawLines[0].trim());
-      const unsafeContinuation = rawLines.slice(1).some(line => {
-        if (line.length === 0 || /^[ \t]/.test(line)) return false;
-        if (blockScalar) return true;
-        return !/^(?:-(?:[ \t]+|$)|#)/.test(line);
-      });
-      if (unsafeContinuation) return null;
-      const semantic = parseNociteRaw(parsed.raw);
-      if (semantic.wildcard !== value.wildcard || semantic.keys.join('\n') !== value.keys.join('\n')) return null;
-      value.raw = parsed.raw;
+      const raw = normalizeNociteRawForYaml(parsed.raw, value);
+      if (raw === undefined) return null;
+      value.raw = raw;
     }
     return value;
   } catch {
@@ -1430,7 +1430,7 @@ export async function extractNarrativeCitationOrigins(data: Uint8Array | JSZip):
     if (!isRecord(parsed) || parsed.v !== 1 || !isRecord(parsed.origins)) return null;
     const origins = new Map<string, NarrativeCitationOrigin>();
     for (const [citationId, rawOrigin] of Object.entries(parsed.origins)) {
-      if (!/^[a-z0-9]{8}$/.test(citationId) || !isRecord(rawOrigin)) return null;
+      if (!/^[a-z0-9]{8}$/.test(citationId) || !isRecord(rawOrigin)) continue;
       const citationKey = rawOrigin.key;
       const literalPrefix = rawOrigin.prefix;
       const hasControlCharacter = typeof literalPrefix === 'string'
@@ -1442,7 +1442,7 @@ export async function extractNarrativeCitationOrigins(data: Uint8Array | JSZip):
           || typeof literalPrefix !== 'string' || literalPrefix.length < 2
           || literalPrefix.length > 1000 || !literalPrefix.endsWith(' ')
           || hasControlCharacter) {
-        return null;
+        continue;
       }
       origins.set(citationId, { citationKey, literalPrefix });
     }
@@ -3148,7 +3148,7 @@ function citationMarkdown(
     return (needsSeparator ? ' ' : '') + bare;
   }
 
-  const separator = precedingText.endsWith(' ') ? '' : ' ';
+  const separator = precedingText.length === 0 || precedingText.endsWith(' ') ? '' : ' ';
   return separator + '[' + item.pandocKeys
     .map(key => key.startsWith('-') ? '-@' + key.slice(1) : '@' + key)
     .join('; ') + ']';

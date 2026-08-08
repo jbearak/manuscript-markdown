@@ -28,7 +28,7 @@ describe('frontmatter timezone field', () => {
 
   test('serializeFrontmatter includes timezone', () => {
     const result = serializeFrontmatter({ timezone: '-05:00' });
-    expect(result).toBe('---\ntimezone: -05:00\n---\n');
+    expect(result).toBe('---\ntimezone: "-05:00"\n---\n');
   });
 
   test('serializeFrontmatter omits timezone when absent', () => {
@@ -38,7 +38,7 @@ describe('frontmatter timezone field', () => {
 
   test('serializeFrontmatter preserves timezone with other fields', () => {
     const result = serializeFrontmatter({ csl: 'apa', locale: 'en-US', timezone: '+01:00' });
-    expect(result).toContain('timezone: +01:00');
+    expect(result).toContain('timezone: "+01:00"');
     expect(result).toContain('csl: apa');
   });
 });

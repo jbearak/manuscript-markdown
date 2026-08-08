@@ -29,6 +29,7 @@ import {
   extractBibData,
   extractBibliographyPath,
   extractCalloutLabels,
+  extractNarrativeCitationOrigins,
 } from './converter';
 import { convertMdToDocx } from './md-to-docx';
 
@@ -400,6 +401,14 @@ describe('DOCX table conversion', () => {
     const paraMatch = tableMarkdown.match(/<p>([\s\S]*?)<\/p>/);
     expect(paraMatch).not.toBeNull();
     expect(paraMatch?.[1]).toBe(bodyMarkdown);
+  });
+
+  test('does not add a leading space before a paragraph-start bracket citation', () => {
+    const markdown = buildMarkdown([
+      { type: 'para' },
+      { type: 'citation', text: '(Smith 2020)', commentIds: new Set(), pandocKeys: ['smith2020'] },
+    ] as any, new Map());
+    expect(markdown).toBe('[@smith2020]');
   });
 
   test('emits deferred ID comment bodies outside table cell paragraph tags', () => {
@@ -2782,6 +2791,30 @@ describe('Zotero citation roundtrip', () => {
     expect(citations[0].items[0].zoteroKey).toBe('LLLL1111');
     expect(citations[0].items[1].zoteroKey).toBe('SSSS2222');
     expect(citations[0].items[2].zoteroKey).toBe('GGGG3333');
+  });
+
+  test('keeps valid narrative origins when sibling metadata entries are invalid', async () => {
+    const originsJson = JSON.stringify({
+      v: 1,
+      origins: {
+        abcdef12: { key: 'smith2020', prefix: 'Smith ' },
+        invalid_id: { key: 'jones2021', prefix: 'Jones ' },
+        deadbeef: { key: 'bad key', prefix: 'Bad ' },
+        feedface: { key: 'jones2021', prefix: 'Control\n' },
+      },
+    });
+    const customXml = '<?xml version="1.0"?>'
+      + '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
+      + '<property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="2" name="MANUSCRIPT_NARRATIVE_CITATION_ORIGINS_1">'
+      + '<vt:lpwstr>' + originsJson + '</vt:lpwstr>'
+      + '</property></Properties>';
+    const origins = await extractNarrativeCitationOrigins(await buildSyntheticDocx(
+      wrapDocumentXml('<w:p/>'),
+      { 'docProps/custom.xml': customXml },
+    ));
+    expect(origins).toEqual(new Map([
+      ['abcdef12', { citationKey: 'smith2020', literalPrefix: 'Smith ' }],
+    ]));
   });
 
   test('handles missing uris gracefully', async () => {

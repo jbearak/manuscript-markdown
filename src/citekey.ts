@@ -199,6 +199,22 @@ export function isTopLevelFrontmatterMappingLine(line: string): boolean {
 	return /^[^\s#-][^:]*:/.test(line);
 }
 
+export type NociteValueMode = 'single-line' | 'flow-multiline' | 'block-scalar';
+
+/** Classify whether a nocite value may continue onto following YAML lines. */
+export function nociteValueMode(firstValue: string): NociteValueMode {
+	const semanticFirstValue = yamlValueBeforeComment(firstValue).trim();
+	if (/^[|>][0-9+-]*$/.test(semanticFirstValue)) return 'block-scalar';
+	return semanticFirstValue.length === 0 ? 'flow-multiline' : 'single-line';
+}
+
+/** Apply the shared termination rule for multiline nocite YAML values. */
+export function isNociteContinuationLine(mode: NociteValueMode, line: string): boolean {
+	if (mode === 'single-line') return false;
+	if (mode === 'block-scalar') return line.trim().length === 0 || /^[ \t]/.test(line);
+	return !isTopLevelFrontmatterMappingLine(line);
+}
+
 export interface NociteToken {
 	atStart: number;
 	end: number;

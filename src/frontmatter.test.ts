@@ -114,6 +114,157 @@ describe('nocite frontmatter', () => {
       wildcard: true,
     });
   });
+
+  it('does not preserve raw line breaks that could inject top-level fields', () => {
+    const lineBreaks = [
+      '\r',
+      String.fromCodePoint(0x85),
+      String.fromCodePoint(0x2028),
+      String.fromCodePoint(0x2029),
+    ];
+    for (const lineBreak of lineBreaks) {
+      for (const indentation of ['', '  ']) {
+        const serialized = serializeFrontmatter({
+          nocite: {
+            keys: ['alpha'],
+            wildcard: false,
+            raw: '@alpha' + lineBreak + indentation + 'bibliography: injected.bib',
+          },
+        });
+        expect(serialized).toContain("nocite: '@alpha'");
+        expect(serialized).not.toContain('bibliography: injected.bib');
+        expect(parseFrontmatter(serialized).metadata.nocite).toMatchObject({
+          keys: ['alpha'],
+          wildcard: false,
+        });
+      }
+    }
+  });
+
+  it('does not preserve raw YAML document delimiters', () => {
+    for (const delimiter of ['---', '... # document end']) {
+      const serialized = serializeFrontmatter({
+        nocite: {
+          keys: ['alpha'],
+          wildcard: false,
+          raw: '\n- @alpha\n' + delimiter + '\n# Injected heading',
+        },
+      });
+      expect(serialized).toContain("nocite: '@alpha'");
+      expect(serialized).not.toContain('Injected heading');
+      expect(parseFrontmatter(serialized).body).toBe('');
+    }
+  });
+});
+
+describe('frontmatter string scalar safety', () => {
+  it('quotes decoded title newlines without creating top-level fields', () => {
+    const markdown = [
+      '---',
+      'title: "Safe\\nbibliography: injected.bib"',
+      'bibliography: actual.bib',
+      '---',
+      '',
+    ].join('\n');
+    const parsed = parseFrontmatter(markdown);
+    expect(parsed.metadata.title).toEqual(['Safe\nbibliography: injected.bib']);
+    expect(parsed.metadata.bibliography).toBe('actual.bib');
+
+    const serialized = serializeFrontmatter(parsed.metadata, parsed.fieldOrder);
+    expect(serialized).not.toContain('\nbibliography: injected.bib');
+    expect(serialized.match(/^bibliography:/gm)).toHaveLength(1);
+    expect(parseFrontmatter(serialized).metadata).toEqual(parsed.metadata);
+  });
+
+  it('keeps escaped bracket-shaped titles as scalar values', () => {
+    const markdown = '---\ntitle: "\\u005bMain, Subtitle\\u005d"\n---\n';
+    const parsed = parseFrontmatter(markdown);
+    expect(parsed.metadata.title).toEqual(['[Main, Subtitle]']);
+    expect(parseFrontmatter(serializeFrontmatter(parsed.metadata)).metadata).toEqual(parsed.metadata);
+  });
+
+  it('replaces XML-illegal decoded controls before conversion', () => {
+    const parsed = parseFrontmatter('---\ntitle: "Bad\\u0000Value"\n---\n');
+    expect(parsed.metadata.title).toEqual(['Bad�Value']);
+    const serialized = serializeFrontmatter(parsed.metadata);
+    expect(serialized).not.toContain(String.fromCodePoint(0));
+    expect(parseFrontmatter(serialized).metadata).toEqual(parsed.metadata);
+  });
+
+  it('quotes terminal colons and sanitized flow/key punctuation', () => {
+    const invalid = String.fromCodePoint(0);
+    const metadata = {
+      title: ['Introduction:'],
+      headerFont: ['Font,' + invalid + 'One'],
+      styles: {
+        ['style:' + invalid + 'name']: { font: 'Arial' },
+      },
+    };
+    const serialized = serializeFrontmatter(metadata);
+    const reparsed = parseFrontmatter(serialized).metadata;
+    expect(reparsed.title).toEqual(['Introduction:']);
+    expect(reparsed.headerFont).toEqual(['Font,�One']);
+    expect(Object.prototype.hasOwnProperty.call(reparsed.styles, 'style:�name')).toBe(true);
+  });
+
+  it('quotes strings that YAML schemas implicitly resolve as non-strings', () => {
+    const metadata = {
+      title: ['0x10', '.5', '2024-01-01', 'y', 'N'],
+      styles: {
+        '<<': { font: '0o10' },
+      },
+    };
+    const serialized = serializeFrontmatter(metadata);
+
+    expect(serialized).toContain('title: "0x10"');
+    expect(serialized).toContain('title: ".5"');
+    expect(serialized).toContain('title: "2024-01-01"');
+    expect(serialized).toContain('title: "y"');
+    expect(serialized).toContain('title: "N"');
+    expect(serialized).toContain('  "<<":');
+    expect(serialized).toContain('    font: "0o10"');
+    expect(parseFrontmatter(serialized).metadata).toEqual(metadata);
+  });
+
+  it('ignores prototype-named field-order entries', () => {
+    const serialized = serializeFrontmatter(
+      { title: ['Safe'], csl: 'apa' },
+      ['__proto__', 'constructor', 'toString', 'title', 'csl'],
+    );
+
+    expect(serialized).toContain('title: Safe');
+    expect(serialized).toContain('csl: apa');
+    expect(parseFrontmatter(serialized).metadata).toEqual({ title: ['Safe'], csl: 'apa' });
+  });
+
+  it('treats decoded custom-style names as own keys', () => {
+    const markdown = '---\nstyles:\n  "__proto__":\n    font: Polluted\n---\n';
+    const parsed = parseFrontmatter(markdown);
+    expect(({} as { font?: string }).font).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(parsed.metadata.styles, '__proto__')).toBe(true);
+    expect(parsed.metadata.styles?.['__proto__'].font).toBe('Polluted');
+  });
+
+  it('round-trips YAML-significant scalar, array, path, and custom-style strings', () => {
+    const metadata = {
+      title: ['Colon: value # comment'],
+      csl: '# local style',
+      bibliography: 'references: archive #1.bib',
+      font: 'Control ' + String.fromCodePoint(0x80),
+      headerFont: ['Font, One', '[Font Two]', 'Font:', "O'Brien Sans"],
+      titleFont: ['Font, Single'],
+      styles: {
+        'sidebar: highlighted': { font: 'Font: Name #1' },
+      },
+    };
+    const serialized = serializeFrontmatter(metadata);
+    const reparsed = parseFrontmatter(serialized).metadata;
+
+    expect(reparsed).toEqual(metadata);
+    expect(serialized.match(/^title:/gm)).toHaveLength(1);
+    expect(serialized.match(/^bibliography:/gm)).toHaveLength(1);
+    expect(serialized).not.toContain('\narchive #1.bib');
+  });
 });
 
 describe('frontmatter bounds', () => {

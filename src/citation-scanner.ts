@@ -1,18 +1,27 @@
 import MarkdownIt from 'markdown-it';
-import { computeCodeRegions } from './code-regions';
-import { findCitationFrontmatterBounds } from './frontmatter';
+import {
+	computeCodeRegions,
+	computeMarkdownInlineBlocks,
+	computeMarkdownParsedBlocks,
+	type MarkdownInlineBlock,
+} from './code-regions';
+import {
+	findCitationFrontmatterBounds,
+	findFrontmatterBounds,
+	type FrontmatterBounds,
+} from './frontmatter';
 import {
 	isBoundaryValidNociteToken,
 	isCitekeyChar,
 	isEmailSeparatorAt,
 	isEscaped,
-	isTopLevelFrontmatterMappingLine,
+	isNociteContinuationLine,
+	nociteValueMode,
 	parseBracketCitationItems,
 	previousCodePoint,
 	readMarkdownCitekey,
 	scanNociteTokens,
 	type BracketCitationItem,
-	yamlValueBeforeComment,
 } from './citekey';
 
 export type CitationForm = 'bracket' | 'bare' | 'nocite';
@@ -65,8 +74,10 @@ export interface CitationDocumentAnalysis {
 	usages: readonly CitationUsage[];
 	hasNociteWildcard: boolean;
 	excludedRanges: readonly CitationOffsetRange[];
+	citationMarkupRanges: readonly CitationOffsetRange[];
 	referenceLabels: ReadonlySet<string>;
 	inlineLinkLabels: ReadonlySet<string>;
+	visibleLinkLabels: ReadonlySet<string>;
 	brackets: CitationBracketAnalysis;
 	bracketItems: ReadonlyMap<number, BracketCitationItem>;
 	nociteRegions: readonly CitationOffsetRange[];
@@ -137,45 +148,102 @@ function maskRanges(text: string, ranges: readonly OffsetRange[]): string {
 	return chars.join('');
 }
 
-function computeHtmlCommentRegions(text: string): OffsetRange[] {
+function indexOfWithin(
+	text: string,
+	needle: string,
+	start: number,
+	end: number,
+): number {
+	const lastStart = Math.min(end, text.length) - needle.length;
+	for (let cursor = Math.max(0, start); cursor <= lastStart; cursor++) {
+		if (text.startsWith(needle, cursor)) return cursor;
+	}
+	return -1;
+}
+
+function computeHtmlCommentRegions(
+	text: string,
+	inlineBlocks: readonly OffsetRange[],
+	htmlBlocks: readonly OffsetRange[],
+): OffsetRange[] {
 	const regions: OffsetRange[] = [];
-	let cursor = 0;
-	while (cursor < text.length) {
-		const start = text.indexOf('<!--', cursor);
-		if (start === -1) break;
-		const close = text.indexOf('-->', start + 4);
-		const end = close === -1 ? text.length : close + 3;
-		regions.push({ start, end });
-		cursor = end;
+	const parserBlocks = [
+		...inlineBlocks.map(range => ({ ...range, rawHtml: false })),
+		...htmlBlocks.map(range => ({ ...range, rawHtml: true })),
+	].sort((a, b) => a.start - b.start || a.end - b.end);
+	for (const block of parserBlocks) {
+		let cursor = block.start;
+		while (cursor < block.end) {
+			const start = indexOfWithin(text, '<!--', cursor, block.end);
+			if (start === -1) break;
+			const close = indexOfWithin(text, '-->', start + 4, block.end);
+			if (close !== -1) {
+				const end = close + 3;
+				regions.push({ start, end });
+				cursor = end;
+				continue;
+			}
+			// An unclosed inline candidate is literal text and cannot consume a later
+			// Markdown block. An unclosed parser-recognized raw HTML comment remains
+			// inert through that HTML block (which may itself extend to EOF).
+			if (block.rawHtml) regions.push({ start, end: block.end });
+			break;
+		}
 	}
 	return regions;
 }
 
-function computeHtmlTagRegions(text: string): OffsetRange[] {
+function computeHtmlTagRegions(
+	text: string,
+	parserBlocks: readonly OffsetRange[],
+): OffsetRange[] {
+	if (!text.includes('<')) return [];
 	const regions: OffsetRange[] = [];
-	for (let start = 0; start < text.length - 1; start++) {
-		if (text[start] !== '<' || !/[A-Za-z/!?]/.test(text[start + 1])) continue;
-		// Once no raw closer remains, no later tag-like opener can succeed either.
-		if (text.indexOf('>', start + 1) === -1) break;
-		let quote: '"' | "'" | undefined;
-		let cursor = start + 1;
-		let closed = false;
-		for (; cursor < text.length; cursor++) {
+
+	// Compute quote-state endings backwards, but retain them only for plausible
+	// `<...` candidates. This preserves linear recovery from malformed openers
+	// without allocating three dense indexes for an otherwise ordinary block.
+	for (const block of parserBlocks) {
+		let candidateCount = 0;
+		for (let cursor = block.start; cursor < block.end - 1; cursor++) {
+			if (text[cursor] === '<' && /[A-Za-z/!?]/.test(text[cursor + 1])) candidateCount++;
+		}
+		if (candidateCount === 0) continue;
+
+		const candidateEnds = new Int32Array(candidateCount).fill(-1);
+		let candidateIndex = candidateCount - 1;
+		let unquotedEnd = -1;
+		let singleQuotedEnd = -1;
+		let doubleQuotedEnd = -1;
+		for (let cursor = block.end - 1; cursor >= block.start; cursor--) {
+			const nextUnquotedEnd = unquotedEnd;
+			const nextSingleQuotedEnd = singleQuotedEnd;
+			const nextDoubleQuotedEnd = doubleQuotedEnd;
 			const char = text[cursor];
-			if (quote) {
-				if (char === quote) quote = undefined;
-				continue;
-			}
-			if (char === '"' || char === "'") quote = char;
-			else if (char === '>') {
-				cursor++;
-				closed = true;
-				break;
+			unquotedEnd = char === '>'
+				? cursor + 1
+				: char === "'"
+					? nextSingleQuotedEnd
+					: char === '"'
+						? nextDoubleQuotedEnd
+						: nextUnquotedEnd;
+			singleQuotedEnd = char === "'" ? nextUnquotedEnd : nextSingleQuotedEnd;
+			doubleQuotedEnd = char === '"' ? nextUnquotedEnd : nextDoubleQuotedEnd;
+			const start = cursor - 1;
+			if (start >= block.start && text[start] === '<' && /[A-Za-z/!?]/.test(char)) {
+				candidateEnds[candidateIndex--] = unquotedEnd;
 			}
 		}
-		if (!closed) continue;
-		regions.push({ start, end: cursor });
-		start = Math.max(start, cursor - 1);
+
+		candidateIndex = 0;
+		let consumedThrough = block.start;
+		for (let start = block.start; start < block.end - 1; start++) {
+			if (text[start] !== '<' || !/[A-Za-z/!?]/.test(text[start + 1])) continue;
+			const end = candidateEnds[candidateIndex++];
+			if (start < consumedThrough || end === -1) continue;
+			regions.push({ start, end });
+			consumedThrough = end;
+		}
 	}
 	return regions;
 }
@@ -190,166 +258,42 @@ function isRawDestinationBreak(char: string, escaped = false): boolean {
 }
 
 function isValidInlineLinkContent(text: string, start: number, end: number): boolean {
-	let cursor = start;
-	while (cursor < end && isLinkSpace(text[cursor])) cursor++;
-	if (cursor === end) return true;
-
-	if (text[cursor] === '<') {
-		cursor++;
-		let closed = false;
-		for (; cursor < end;) {
-			const char = text[cursor];
-			if (char === '\n' || char === '\r' || char === '<') return false;
-			if (char === '>') {
-				cursor++;
-				closed = true;
-				break;
-			}
-			cursor += char === '\\' && cursor + 1 < end ? 2 : 1;
-		}
-		if (!closed) return false;
-	} else {
-		const destinationStart = cursor;
-		let depth = 0;
-		for (; cursor < end;) {
-			const char = text[cursor];
-			if (isRawDestinationBreak(char)) break;
-			if (char === '\\' && cursor + 1 < end) {
-				if (text[cursor + 1] === ' ') break;
-				cursor += 2;
-				continue;
-			}
-			if (char === '(' && ++depth > 32) return false;
-			if (char === ')') {
-				if (depth === 0) return false;
-				depth--;
-			}
-			cursor++;
-		}
-		if (cursor === destinationStart || depth !== 0) return false;
-	}
-
-	while (cursor < end && isLinkSpace(text[cursor])) cursor++;
-	if (cursor === end) return true;
-	const opener = text[cursor];
-	const closer = opener === '(' ? ')' : opener;
-	if (opener !== '"' && opener !== "'" && opener !== '(') return false;
-	cursor++;
-	let escaped = false;
-	for (; cursor < end; cursor++) {
-		const char = text[cursor];
-		if (escaped) escaped = false;
-		else if (char === '\\') escaped = true;
-		else if (char === closer) {
-			cursor++;
-			break;
-		}
-	}
-	while (cursor < end && isLinkSpace(text[cursor])) cursor++;
-	return cursor === end;
+	return parseInlineLinkContentEnd(text, start, end, false) === end;
 }
 
-function isBlankLineBoundary(text: string, newline: number): boolean {
-	let cursor = newline + 1;
-	while (cursor < text.length && /[ \t\r]/.test(text[cursor])) cursor++;
-	return cursor >= text.length || text[cursor] === '\n';
-}
-
-function indexRawParenthesisClosers(text: string): {
-	closes: ReadonlyMap<number, number>;
-	balancedToRawEnd: readonly boolean[];
-	nextRawEnd: readonly number[];
-	nextNonSpace: readonly number[];
-	nextBlockBreak: readonly number[];
-} {
-	const closes = new Map<number, number>();
-	const stack: number[] = [];
+function lastRawParenthesisCloser(
+	text: string,
+	block: MarkdownInlineBlock,
+): number {
+	let lastClose = -1;
 	let escaped = false;
-	for (let cursor = 0; cursor < text.length; cursor++) {
+	for (let cursor = block.start; cursor < block.end; cursor++) {
 		const char = text[cursor];
-		if (char === '\n') {
-			if (isBlankLineBoundary(text, cursor)) stack.length = 0;
-			escaped = false;
-			continue;
-		}
 		if (escaped) {
 			escaped = false;
 			continue;
 		}
-		if (char === '\\') {
-			escaped = true;
-			continue;
-		}
-		if (char === '(') stack.push(cursor);
-		else if (char === ')' && stack.length > 0) closes.set(stack.pop()!, cursor);
+		if (char === '\\') escaped = true;
+		else if (char === ')') lastClose = cursor;
 	}
-
-	const rawEscapedAt = new Uint8Array(text.length);
-	escaped = false;
-	for (let cursor = 0; cursor < text.length; cursor++) {
-		if (escaped) {
-			rawEscapedAt[cursor] = 1;
-			escaped = false;
-		} else if (text[cursor] === '\\') {
-			escaped = true;
-		}
-	}
-
-	const balancedToRawEnd = new Array<boolean>(text.length + 1).fill(false);
-	for (let tokenStart = 0; tokenStart < text.length;) {
-		while (tokenStart < text.length
-			&& isRawDestinationBreak(text[tokenStart], rawEscapedAt[tokenStart] !== 0)) tokenStart++;
-		if (tokenStart >= text.length) break;
-		let tokenEnd = tokenStart;
-		while (tokenEnd < text.length
-			&& !isRawDestinationBreak(text[tokenEnd], rawEscapedAt[tokenEnd] !== 0)) tokenEnd++;
-		const prefixDepth = new Array<number>(tokenEnd - tokenStart + 1).fill(0);
-		for (let cursor = tokenStart; cursor < tokenEnd; cursor++) {
-			let depth = prefixDepth[cursor - tokenStart];
-			if (!rawEscapedAt[cursor]) {
-				if (text[cursor] === '(') depth++;
-				else if (text[cursor] === ')') depth--;
-			}
-			prefixDepth[cursor - tokenStart + 1] = depth;
-		}
-		const finalDepth = prefixDepth[prefixDepth.length - 1];
-		let minimumDepth = finalDepth;
-		for (let cursor = tokenEnd - 1; cursor >= tokenStart; cursor--) {
-			minimumDepth = Math.min(minimumDepth, prefixDepth[cursor - tokenStart + 1]);
-			const startDepth = prefixDepth[cursor - tokenStart];
-			balancedToRawEnd[cursor] = finalDepth === startDepth && minimumDepth >= startDepth;
-		}
-		tokenStart = tokenEnd;
-	}
-
-	const nextRawEnd = new Array<number>(text.length + 1).fill(text.length);
-	const nextNonSpace = new Array<number>(text.length + 1).fill(text.length);
-	const nextBlockBreak = new Array<number>(text.length + 1).fill(text.length);
-	let rawEnd = text.length;
-	let nonSpace = text.length;
-	let blockBreak = text.length;
-	for (let cursor = text.length - 1; cursor >= 0; cursor--) {
-		const char = text[cursor];
-		if (isRawDestinationBreak(char, rawEscapedAt[cursor] !== 0)) rawEnd = cursor;
-		if (!isLinkSpace(char)) nonSpace = cursor;
-		if (char === '\n' && isBlankLineBoundary(text, cursor)) blockBreak = cursor;
-		nextRawEnd[cursor] = rawEnd;
-		nextNonSpace[cursor] = nonSpace;
-		nextBlockBreak[cursor] = blockBreak;
-	}
-	return { closes, balancedToRawEnd, nextRawEnd, nextNonSpace, nextBlockBreak };
+	return lastClose;
 }
 
 /**
- * Parse one inline-link destination using the same structural rules as
- * isValidInlineLinkContent(), returning the outer closing parenthesis. Fail at
- * the first impossible delimiter so repeated malformed candidates stay linear.
+ * Parse the strict inline-link destination/title grammar once for both complete
+ * content validation and outer-parenthesis end discovery. Fail at the first
+ * impossible delimiter so repeated malformed candidates stay linear.
  */
-function parseInlineLinkDestinationEnd(text: string, start: number, max: number): number | undefined {
+function parseInlineLinkContentEnd(
+	text: string,
+	start: number,
+	max: number,
+	hasOuterClosingParenthesis: boolean,
+): number | undefined {
 	let cursor = start;
 	while (cursor < max && isLinkSpace(text[cursor])) cursor++;
-	if (cursor >= max) return undefined;
-	if (text[cursor] === ')') return cursor;
+	if (cursor >= max) return hasOuterClosingParenthesis ? undefined : cursor;
+	if (hasOuterClosingParenthesis && text[cursor] === ')') return cursor;
 
 	if (text[cursor] === '<') {
 		cursor++;
@@ -378,7 +322,10 @@ function parseInlineLinkDestinationEnd(text: string, start: number, max: number)
 			}
 			if (char === '(' && ++depth > 32) return undefined;
 			if (char === ')') {
-				if (depth === 0) break;
+				if (depth === 0) {
+					if (!hasOuterClosingParenthesis) return undefined;
+					break;
+				}
 				depth--;
 			}
 			cursor++;
@@ -386,10 +333,12 @@ function parseInlineLinkDestinationEnd(text: string, start: number, max: number)
 		if (cursor === destinationStart || depth !== 0) return undefined;
 	}
 
-	if (text[cursor] === ')') return cursor;
+	if (hasOuterClosingParenthesis && text[cursor] === ')') return cursor;
+	if (!hasOuterClosingParenthesis && cursor === max) return cursor;
 	const whitespaceStart = cursor;
 	while (cursor < max && isLinkSpace(text[cursor])) cursor++;
-	if (text[cursor] === ')') return cursor;
+	if (hasOuterClosingParenthesis && text[cursor] === ')') return cursor;
+	if (!hasOuterClosingParenthesis && cursor === max) return cursor;
 	if (cursor >= max || cursor === whitespaceStart) return undefined;
 
 	const opener = text[cursor];
@@ -412,73 +361,68 @@ function parseInlineLinkDestinationEnd(text: string, start: number, max: number)
 	}
 	if (!titleClosed) return undefined;
 	while (cursor < max && isLinkSpace(text[cursor])) cursor++;
-	return text[cursor] === ')' ? cursor : undefined;
+	if (hasOuterClosingParenthesis) return text[cursor] === ')' ? cursor : undefined;
+	return cursor === max ? cursor : undefined;
 }
 
-function computeLinkDestinationRegions(text: string): {
+function parseInlineLinkDestinationEnd(text: string, start: number, max: number): number | undefined {
+	return parseInlineLinkContentEnd(text, start, max, true);
+}
+
+function computeLinkDestinationRegions(
+	text: string,
+	inlineBlocks: readonly MarkdownInlineBlock[],
+): {
 	destinations: OffsetRange[];
 	labels: Set<string>;
 } {
 	const destinations: OffsetRange[] = [];
 	const labels = new Set<string>();
-	const labelStack: number[] = [];
-	const rawParens = indexRawParenthesisClosers(text);
-	for (let i = 0; i < text.length; i++) {
-		const char = text[i];
-		if (char !== '[' && char !== ']') continue;
-		if (isEscaped(text, i)) continue;
-		if (char === '[') {
-			labelStack.push(i);
-			continue;
-		}
-		if (labelStack.length === 0) continue;
-		const labelStart = labelStack.pop()!;
-
-		if (text[i + 1] === '[') {
-			let cursor = i + 2;
-			while (cursor < text.length && text[cursor] !== '\n') {
-				if (text[cursor] === ']' && !isEscaped(text, cursor)) break;
-				cursor++;
-			}
-			if (text[cursor] === ']') {
-				destinations.push({ start: i + 2, end: cursor });
-				i = cursor;
-			}
-			continue;
-		}
-		if (text[i + 1] !== '(') continue;
-
-		const openParen = i + 1;
-		const start = i + 2;
-		const max = rawParens.nextBlockBreak[openParen];
-		let contentStart = start;
-		while (contentStart < max && isLinkSpace(text[contentStart])) contentStart++;
-		if (text[contentStart] !== '<') {
-			const outerClose = rawParens.closes.get(openParen);
-			const rawEnd = rawParens.nextRawEnd[contentStart];
-			if (outerClose === undefined || rawEnd < outerClose) {
-				const title = rawParens.nextNonSpace[rawEnd];
-				const titleOpener = text[title];
-				const possibleTitle = title === outerClose
-					|| titleOpener === '"'
-					|| titleOpener === "'"
-					|| (titleOpener === '(' && outerClose !== undefined);
-				if (contentStart >= rawEnd
-					|| rawEnd >= max
-					|| !rawParens.balancedToRawEnd[contentStart]
-					|| !possibleTitle) {
-					continue;
-				}
-			} else if (outerClose >= max) {
+	if (!text.includes('](') && !text.includes('][')) return { destinations, labels };
+	for (const block of inlineBlocks) {
+		const labelStack: number[] = [];
+		let lastRawClose: number | undefined;
+		for (let i = block.start; i < block.end; i++) {
+			const char = text[i];
+			if (char !== '[' && char !== ']') continue;
+			if (isEscaped(text, i)) continue;
+			if (char === '[') {
+				labelStack.push(i);
 				continue;
 			}
-		}
+			if (labelStack.length === 0) continue;
+			const labelStart = labelStack.pop()!;
 
-		const cursor = parseInlineLinkDestinationEnd(text, start, max);
-		if (cursor !== undefined) {
-			destinations.push({ start, end: cursor });
-			labels.add(labelStart + ':' + (i + 1));
-			i = cursor;
+			if (text[i + 1] === '[') {
+				let cursor = i + 2;
+				while (cursor < block.end && text[cursor] !== '\n') {
+					if (text[cursor] === ']' && !isEscaped(text, cursor)) break;
+					cursor++;
+				}
+				if (cursor < block.end && text[cursor] === ']') {
+					destinations.push({ start: i + 2, end: cursor });
+					i = cursor;
+				}
+				continue;
+			}
+			if (text[i + 1] !== '(' || i + 1 >= block.end) continue;
+
+			const openParen = i + 1;
+			const start = i + 2;
+			const max = block.end;
+			lastRawClose ??= lastRawParenthesisCloser(text, block);
+			if (openParen >= lastRawClose) continue;
+
+			// The parser's raw-destination nesting limit bounds overlapping malformed
+			// candidates, while one scalar last-closer summary rejects candidates that
+			// cannot possibly close. This keeps repeated malformed input linear without
+			// dense per-character indexes for a block containing one ordinary link.
+			const cursor = parseInlineLinkDestinationEnd(text, start, max);
+			if (cursor !== undefined) {
+				destinations.push({ start, end: cursor });
+				labels.add(labelStart + ':' + (i + 1));
+				i = cursor;
+			}
 		}
 	}
 	return { destinations, labels };
@@ -623,32 +567,39 @@ function computeUriRegions(text: string): OffsetRange[] {
 	return regions;
 }
 
-export function analyzeCitationBrackets(text: string): CitationBracketAnalysis {
+export function analyzeCitationBrackets(
+	text: string,
+	inlineBlocks: readonly MarkdownInlineBlock[] = computeMarkdownInlineBlocks(text),
+): CitationBracketAnalysis {
 	const closes = new Map<number, number>();
-	const stack: number[] = [];
-	for (let i = 0; i < text.length; i++) {
-		const char = text[i];
-		if (char !== '[' && char !== ']') continue;
-		if (isEscaped(text, i)) continue;
-		if (char === '[') stack.push(i);
-		else if (stack.length > 0) closes.set(stack.pop()!, i + 1);
+	for (const block of inlineBlocks) {
+		const stack: number[] = [];
+		for (let i = block.start; i < block.end; i++) {
+			const char = text[i];
+			if (char !== '[' && char !== ']') continue;
+			if (isEscaped(text, i)) continue;
+			if (char === '[') stack.push(i);
+			else if (stack.length > 0) closes.set(stack.pop()!, i + 1);
+		}
 	}
 
 	const contexts = new Map<number, OffsetRange>();
 	const balancedContexts = new Map<number, OffsetRange>();
-	stack.length = 0;
-	for (let i = 0; i < text.length; i++) {
-		const char = text[i];
-		if (char !== '[' && char !== ']' && char !== '@') continue;
-		if (isEscaped(text, i)) continue;
-		if (char === '[') stack.push(i);
-		else if (char === ']' && stack.length > 0) stack.pop();
-		else if (char === '@' && stack.length > 0) {
-			const start = stack[stack.length - 1];
-			const end = closes.get(start);
-			const context = { start, end: end ?? text.length };
-			contexts.set(i, context);
-			if (end !== undefined) balancedContexts.set(i, context);
+	for (const block of inlineBlocks) {
+		const stack: number[] = [];
+		for (let i = block.start; i < block.end; i++) {
+			const char = text[i];
+			if (char !== '[' && char !== ']' && char !== '@') continue;
+			if (isEscaped(text, i)) continue;
+			if (char === '[') stack.push(i);
+			else if (char === ']' && stack.length > 0) stack.pop();
+			else if (char === '@' && stack.length > 0) {
+				const start = stack[stack.length - 1];
+				const end = closes.get(start);
+				const context = { start, end: end ?? block.end };
+				contexts.set(i, context);
+				if (end !== undefined) balancedContexts.set(i, context);
+			}
 		}
 	}
 	const balancedRanges = [...closes].map(([start, end]) => ({ start, end }))
@@ -693,11 +644,70 @@ function isCitationItemMarkerAt(
 	text: string,
 	bracket: OffsetRange,
 	atOffset: number,
+	markupRanges: readonly OffsetRange[] = [],
 ): boolean {
-	const separator = text.lastIndexOf(';', atOffset);
-	let start = Math.max(bracket.start + 1, separator + 1);
-	while (start < atOffset && /\s/.test(text[start])) start++;
+	let separator = bracket.start;
+	for (let cursor = atOffset - 1; cursor > bracket.start;) {
+		const markup = rangeContaining(cursor, markupRanges);
+		if (markup) {
+			cursor = markup.start - 1;
+			continue;
+		}
+		if (text[cursor] === ';') {
+			separator = cursor;
+			break;
+		}
+		cursor--;
+	}
+
+	let start = separator + 1;
+	while (start < atOffset) {
+		const markup = rangeContaining(start, markupRanges);
+		if (markup) {
+			start = markup.end;
+			continue;
+		}
+		if (!/\s/.test(text[start])) break;
+		start++;
+	}
 	return atOffset === start || (text[start] === '-' && atOffset === start + 1);
+}
+
+function parseBracketCitationItemsIgnoringMarkup(
+	text: string,
+	bracket: OffsetRange,
+	markupRanges: readonly OffsetRange[],
+): BracketCitationItem[] {
+	let low = 0;
+	let high = markupRanges.length;
+	while (low < high) {
+		const mid = (low + high) >>> 1;
+		if (markupRanges[mid].end <= bracket.start) low = mid + 1;
+		else high = mid;
+	}
+	const localMarkup: OffsetRange[] = [];
+	for (let index = low; index < markupRanges.length; index++) {
+		const range = markupRanges[index];
+		if (range.start >= bracket.end) break;
+		localMarkup.push({
+			start: Math.max(range.start, bracket.start) - bracket.start,
+			end: Math.min(range.end, bracket.end) - bracket.start,
+		});
+	}
+	if (localMarkup.length === 0) {
+		return parseBracketCitationItems(text, bracket.start, bracket.end);
+	}
+
+	const localText = maskRanges(text.slice(bracket.start, bracket.end), localMarkup);
+	return parseBracketCitationItems(localText, 0, localText.length).map(item => ({
+		...item,
+		atStart: item.atStart + bracket.start,
+		keyEnd: item.keyEnd + bracket.start,
+	}));
+}
+
+function rangeIdentity(range: OffsetRange): string {
+	return range.start + ':' + range.end;
 }
 
 function isVisibleLinkLabel(
@@ -747,8 +757,10 @@ function yamlCommentStart(text: string, start: number, end: number): number {
 	return end;
 }
 
-function collectNociteRegions(text: string): NociteRegion[] {
-	const bounds = findCitationFrontmatterBounds(text);
+function collectNociteRegions(
+	text: string,
+	bounds: FrontmatterBounds | undefined = findFrontmatterBounds(text),
+): NociteRegion[] {
 	if (!bounds) return [];
 	const regions: NociteRegion[] = [];
 	let lineStart = bounds.contentStart;
@@ -771,10 +783,9 @@ function collectNociteRegions(text: string): NociteRegion[] {
 		let valueStart = colon + 1;
 		while (valueStart < lineEnd && /[ \t]/.test(text[valueStart])) valueStart++;
 		const firstValue = text.slice(valueStart, lineEnd);
-		const semanticFirstValue = yamlValueBeforeComment(firstValue).trim();
-		const blockScalar = /^[|>][0-9+-]*$/.test(semanticFirstValue);
-		const multiline = semanticFirstValue.length === 0 || blockScalar;
-		if (!multiline) {
+		const mode = nociteValueMode(firstValue);
+		const blockScalar = mode === 'block-scalar';
+		if (mode === 'single-line') {
 			regions.push({ start: valueStart, end: yamlCommentStart(text, valueStart, lineEnd), blockScalar: false });
 			lineStart = newline === -1 ? bounds.contentEnd : newline + 1;
 			continue;
@@ -786,9 +797,7 @@ function collectNociteRegions(text: string): NociteRegion[] {
 			const nextRawEnd = nextNewline === -1 || nextNewline > bounds.contentEnd ? bounds.contentEnd : nextNewline;
 			const nextEnd = nextRawEnd > continuationStart && text[nextRawEnd - 1] === '\r' ? nextRawEnd - 1 : nextRawEnd;
 			const nextLine = text.slice(continuationStart, nextEnd);
-			const nextLineIsIndented = /^[ \t]/.test(nextLine);
-			if (blockScalar && nextLine.trim().length > 0 && !nextLineIsIndented) break;
-			if (!blockScalar && isTopLevelFrontmatterMappingLine(nextLine)) break;
+			if (!isNociteContinuationLine(mode, nextLine)) break;
 			const contentStart = continuationStart + (nextLine.match(/^[ \t]*/)?.[0].length ?? 0);
 			const contentEnd = blockScalar ? nextEnd : yamlCommentStart(text, contentStart, nextEnd);
 			regions.push({ start: contentStart, end: contentEnd, blockScalar });
@@ -801,25 +810,42 @@ function collectNociteRegions(text: string): NociteRegion[] {
 
 function bodyExcludedRanges(text: string): {
 	ranges: OffsetRange[];
+	citationMarkupRanges: OffsetRange[];
 	frontmatter?: OffsetRange;
 	referenceLabels: Set<string>;
 	inlineLinkLabels: Set<string>;
+	citationBlocks: MarkdownInlineBlock[];
 } {
-	const bounds = findCitationFrontmatterBounds(text);
+	const bounds = findFrontmatterBounds(text);
 	const frontmatter = bounds ? { start: bounds.start, end: bounds.bodyStart } : undefined;
 
-	// Frontmatter is always inert. For code, HTML comments, and HTML tags, the
-	// earliest valid opener wins; nested-looking delimiters cannot seed a later
-	// scanner and consume otherwise-visible prose.
+	// Only closed frontmatter is globally authoritative. Parser-derived blocks
+	// are computed once from the structurally equivalent masked source. Raw HTML
+	// blocks are citation-aware because their visible text remains document content,
+	// while tag/comment ranges are masked before inline links and brackets are
+	// interpreted. Every delimiter scan remains local to one parser block. Code
+	// parsing keeps raw HTML disabled so backticks inside HTML table cells retain
+	// their established meaning.
 	const primaryInput = frontmatter ? maskRanges(text, [frontmatter]) : text;
+	const parsedBlocks = computeMarkdownParsedBlocks(primaryInput);
+	const citationBlocks = [...parsedBlocks.inlineBlocks, ...parsedBlocks.htmlBlocks]
+		.sort((a, b) => a.start - b.start || a.end - b.end)
+		.map((range, id) => ({ id, start: range.start, end: range.end }));
+	const citationMarkupRanges = selectOutermostRanges([
+		...computeHtmlCommentRegions(
+			primaryInput,
+			parsedBlocks.inlineBlocks,
+			parsedBlocks.htmlBlocks,
+		),
+		...computeHtmlTagRegions(primaryInput, citationBlocks),
+	]);
 	let structural = selectOutermostRanges([
 		...computeCodeRegions(primaryInput),
-		...computeHtmlCommentRegions(primaryInput),
-		...computeHtmlTagRegions(primaryInput),
+		...citationMarkupRanges,
 		...(frontmatter ? [frontmatter] : []),
 	]);
 	let structuralInput = maskRanges(text, structural);
-	const links = computeLinkDestinationRegions(structuralInput);
+	const links = computeLinkDestinationRegions(structuralInput, citationBlocks);
 	structural = mergeRanges([...structural, ...links.destinations]);
 
 	structuralInput = maskRanges(text, structural);
@@ -833,7 +859,14 @@ function bodyExcludedRanges(text: string): {
 
 	structuralInput = maskRanges(text, structural);
 	const ranges = mergeRanges([...structural, ...computeUriRegions(structuralInput)]);
-	return { ranges, frontmatter, referenceLabels, inlineLinkLabels: links.labels };
+	return {
+		ranges,
+		citationMarkupRanges,
+		frontmatter,
+		referenceLabels,
+		inlineLinkLabels: links.labels,
+		citationBlocks,
+	};
 }
 
 function isValidBodyCandidate(text: string, atOffset: number, bracketed: boolean): boolean {
@@ -874,15 +907,31 @@ function scanNociteRegion(
 }
 
 export function analyzeCitationDocument(text: string): CitationDocumentAnalysis {
-	const { ranges: excludedRanges, referenceLabels, inlineLinkLabels } = bodyExcludedRanges(text);
-	const brackets = analyzeCitationBrackets(maskRanges(text, excludedRanges));
+	const {
+		ranges: excludedRanges,
+		citationMarkupRanges,
+		referenceLabels,
+		inlineLinkLabels,
+		citationBlocks,
+	} = bodyExcludedRanges(text);
+	const bracketInput = maskRanges(text, excludedRanges);
+	const brackets = analyzeCitationBrackets(bracketInput, citationBlocks);
 	const bracketItems = new Map<number, BracketCitationItem>();
 	const parsedBrackets = new Set<string>();
+	const visibleLinkLabels = new Set<string>();
 	for (const bracket of brackets.balancedContexts.values()) {
-		const identity = bracket.start + ':' + bracket.end;
-		if (parsedBrackets.has(identity) || isVisibleLinkLabel(text, bracket, referenceLabels, inlineLinkLabels)) continue;
+		const identity = rangeIdentity(bracket);
+		if (parsedBrackets.has(identity)) continue;
 		parsedBrackets.add(identity);
-		for (const item of parseBracketCitationItems(text, bracket.start, bracket.end)) {
+		if (isVisibleLinkLabel(text, bracket, referenceLabels, inlineLinkLabels)) {
+			visibleLinkLabels.add(identity);
+			continue;
+		}
+		for (const item of parseBracketCitationItemsIgnoringMarkup(
+			text,
+			bracket,
+			citationMarkupRanges,
+		)) {
 			bracketItems.set(item.atStart, item);
 		}
 	}
@@ -897,7 +946,7 @@ export function analyzeCitationDocument(text: string): CitationDocumentAnalysis 
 		if (!parsed) continue;
 
 		const bracket = brackets.balancedContexts.get(cursor);
-		const linkLabel = bracket !== undefined && isVisibleLinkLabel(text, bracket, referenceLabels, inlineLinkLabels);
+		const linkLabel = bracket !== undefined && visibleLinkLabels.has(rangeIdentity(bracket));
 		const bracketItem = bracketItems.get(cursor);
 		const bracketed = bracketItem !== undefined;
 		if (bracket && !bracketed && !linkLabel) continue;
@@ -926,8 +975,10 @@ export function analyzeCitationDocument(text: string): CitationDocumentAnalysis 
 		usages,
 		hasNociteWildcard,
 		excludedRanges,
+		citationMarkupRanges,
 		referenceLabels,
 		inlineLinkLabels,
+		visibleLinkLabels,
 		brackets,
 		bracketItems,
 		nociteRegions,
@@ -979,7 +1030,58 @@ export function isInsideCitationSegmentAtOffset(
 	const bracket = findBalancedBracketContainingOffset(atOffset, resolved.brackets);
 	return bracket !== undefined
 		&& isSupportedCitationBracket(text, bracket)
-		&& !isVisibleLinkLabel(text, bracket, resolved.referenceLabels, resolved.inlineLinkLabels);
+		&& !resolved.visibleLinkLabels.has(rangeIdentity(bracket));
+}
+
+type ProvisionalFrontmatterCompletion =
+	| { kind: 'nocite'; region: OffsetRange }
+	| { kind: 'suppress' };
+
+/**
+ * Classify only the active cursor line in an unclosed frontmatter-looking
+ * prefix. The prefix is too ambiguous to hide the rest of the document, but a
+ * user editing a top-level field still expects YAML-aware completion behavior.
+ */
+function provisionalFrontmatterCompletionAt(
+	text: string,
+	atOffset: number,
+): ProvisionalFrontmatterCompletion | undefined {
+	if (findFrontmatterBounds(text)) return undefined;
+	const bounds = findCitationFrontmatterBounds(text);
+	if (!bounds || atOffset < bounds.contentStart || atOffset >= bounds.contentEnd) return undefined;
+
+	const nociteRegion = collectNociteRegions(text, bounds)
+		.find(region => atOffset >= region.start && atOffset < region.end);
+	if (nociteRegion) return { kind: 'nocite', region: nociteRegion };
+
+	const lineStart = text.lastIndexOf('\n', Math.max(bounds.contentStart, atOffset - 1)) + 1;
+	const nextNewline = text.indexOf('\n', atOffset);
+	const rawLineEnd = nextNewline === -1 ? text.length : nextNewline;
+	const lineEnd = rawLineEnd > lineStart && text[rawLineEnd - 1] === '\r'
+		? rawLineEnd - 1
+		: rawLineEnd;
+	const line = text.slice(lineStart, lineEnd);
+	const lineBeforeCitation = text.slice(lineStart, atOffset);
+	const topLevelMapping = !/^[ \t]/.test(lineBeforeCitation)
+		&& /^[^\s:#][^:]*\s*:/.test(lineBeforeCitation);
+	if (topLevelMapping) return { kind: 'suppress' };
+
+	// Indented lines belong locally to the nearest uninterrupted top-level YAML
+	// field. Valid nocite continuations were handled above; all other fields are
+	// general YAML and suppress citekey completion at this cursor only.
+	if (/^[ \t]+\S/.test(line)) {
+		let previousEnd = lineStart > 0 ? lineStart - 1 : 0;
+		while (previousEnd > bounds.contentStart) {
+			const previousStart = text.lastIndexOf('\n', previousEnd - 1) + 1;
+			const previous = text.slice(previousStart, previousEnd).replace(/\r$/, '');
+			if (previous.trim().length === 0) break;
+			if (!/^[ \t]/.test(previous) && /^[^\s:#][^:]*\s*:/.test(previous)) {
+				return { kind: 'suppress' };
+			}
+			previousEnd = previousStart > 0 ? previousStart - 1 : 0;
+		}
+	}
+	return undefined;
 }
 
 export function getCitationCompletionContextAtOffset(
@@ -993,6 +1095,13 @@ export function getCitationCompletionContextAtOffset(
 	const atOffset = replaceStart - 1;
 	if (atOffset < 0 || text[atOffset] !== '@') return undefined;
 
+	const provisional = provisionalFrontmatterCompletionAt(text, atOffset);
+	if (provisional?.kind === 'suppress') return undefined;
+	if (provisional?.kind === 'nocite') {
+		if (!isBoundaryValidNociteToken(text, atOffset, provisional.region.start)) return undefined;
+		return { prefix: text.slice(replaceStart, offset), replaceStart, atOffset, form: 'nocite' };
+	}
+
 	const resolved = analysisFor(text, analysis);
 	const nociteRegion = resolved.nociteRegions.find(region => atOffset >= region.start && atOffset < region.end);
 	if (nociteRegion) {
@@ -1002,11 +1111,11 @@ export function getCitationCompletionContextAtOffset(
 
 	if (rangeContaining(atOffset, resolved.excludedRanges)) return undefined;
 	const bracket = findBracketContext(resolved.brackets, atOffset, false);
-	const linkLabel = bracket !== undefined && isVisibleLinkLabel(text, bracket, resolved.referenceLabels, resolved.inlineLinkLabels);
+	const linkLabel = bracket !== undefined && resolved.visibleLinkLabels.has(rangeIdentity(bracket));
 	const bracketed = bracket !== undefined
 		&& !linkLabel
 		&& isSupportedCitationBracket(text, bracket)
-		&& isCitationItemMarkerAt(text, bracket, atOffset);
+		&& isCitationItemMarkerAt(text, bracket, atOffset, resolved.citationMarkupRanges);
 	const balancedBracket = resolved.brackets.balancedContexts.has(atOffset);
 	if (balancedBracket && !bracketed) return undefined;
 	if (bracketed ? !isValidBodyCandidate(text, atOffset, true) : !isBoundaryValidBareCitation(text, atOffset)) return undefined;
@@ -1018,29 +1127,300 @@ export function getCitationCompletionContextAtOffset(
 	};
 }
 
+export interface BoundedCitationCompletionMetrics {
+	windowStart: number;
+	windowEnd: number;
+	analyzedLength: number;
+}
+
+function localEscapeParityDiffersFromSource(
+	text: string,
+	windowStart: number,
+	window: string,
+	localDelimiter: number,
+	maxWindow: number,
+): boolean {
+	let localRunStart = localDelimiter;
+	while (localRunStart > 0 && window[localRunStart - 1] === '\\') localRunStart--;
+	if (localRunStart > 0 || windowStart === 0 || text[windowStart - 1] !== '\\') return false;
+
+	let outsideSlashes = 0;
+	let cursor = windowStart;
+	while (cursor > 0 && text[cursor - 1] === '\\' && outsideSlashes < maxWindow) {
+		cursor--;
+		outsideSlashes++;
+	}
+	// If the fixed lookbehind ended inside the run, parity is still ambiguous and
+	// the bounded retry is the only safe conservative classification.
+	return (cursor > 0 && text[cursor - 1] === '\\') || outsideSlashes % 2 === 1;
+}
+
+function localCodeExclusionMayDependOnLeftContext(
+	text: string,
+	windowStart: number,
+	window: string,
+	localDelimiter: number,
+	maxWindow: number,
+): boolean {
+	let runStart = localDelimiter;
+	while (runStart > 0 && window[runStart - 1] === '`') runStart--;
+	if (localEscapeParityDiffersFromSource(text, windowStart, window, runStart, maxWindow)) {
+		return true;
+	}
+	if (runStart === 0 && windowStart > 0 && text[windowStart - 1] === '`') return true;
+
+	let runEnd = localDelimiter;
+	while (runEnd < window.length && window[runEnd] === '`') runEnd++;
+	if (
+		localDelimiter === 0 &&
+		runEnd >= 3 &&
+		windowStart > 0 &&
+		text[windowStart - 1] !== '\n' &&
+		text[windowStart - 1] !== '\r'
+	) {
+		return true;
+	}
+
+	const openerLength = runEnd - localDelimiter;
+	const lookbehindStart = Math.max(0, windowStart - maxWindow);
+	if (lookbehindStart > 0 && text[lookbehindStart] === '`' && text[lookbehindStart - 1] === '`') {
+		return true;
+	}
+	for (let cursor = lookbehindStart; cursor < windowStart;) {
+		if (text[cursor] !== '`') {
+			cursor++;
+			continue;
+		}
+		const candidateStart = cursor;
+		while (cursor < windowStart && text[cursor] === '`') cursor++;
+		if (cursor - candidateStart === openerLength) return true;
+	}
+	return false;
+}
+
+function inlineLinkLabelForDestination(
+	analysis: CitationDocumentAnalysis,
+	destinationStart: number,
+): number | undefined {
+	for (const identity of analysis.inlineLinkLabels) {
+		const separator = identity.indexOf(':');
+		if (separator === -1) continue;
+		const labelStart = Number(identity.slice(0, separator));
+		const labelEnd = Number(identity.slice(separator + 1));
+		if (Number.isInteger(labelStart) && labelEnd + 1 === destinationStart) return labelStart;
+	}
+	return undefined;
+}
+
+function quotedEmailMayDependOnLeftContext(
+	text: string,
+	windowStart: number,
+	window: string,
+	atOffset: number,
+	maxWindow: number,
+): boolean {
+	if (window[atOffset - 1] !== '"') return false;
+	if (localEscapeParityDiffersFromSource(text, windowStart, window, atOffset - 1, maxWindow)) {
+		return true;
+	}
+	for (let cursor = atOffset - 2; cursor >= 0 && window[cursor] !== '\n' && window[cursor] !== '\r'; cursor--) {
+		if (window[cursor] !== '"' || isEscaped(window, cursor)) continue;
+		return localEscapeParityDiffersFromSource(text, windowStart, window, cursor, maxWindow);
+	}
+	return false;
+}
+
+function boundedRejectionNeedsLeftContext(
+	text: string,
+	windowStart: number,
+	window: string,
+	localOffset: number,
+	analysis: CitationDocumentAnalysis,
+	maxWindow: number,
+): boolean {
+	let replaceStart = localOffset;
+	while (replaceStart > 0 && isCitekeyChar(window[replaceStart - 1])) replaceStart--;
+	if (replaceStart === 0) return windowStart > 0 && text[windowStart - 1] === '@';
+	const atOffset = replaceStart - 1;
+	if (window[atOffset] !== '@') return false;
+
+	const provisional = provisionalFrontmatterCompletionAt(window, atOffset);
+	if (provisional?.kind === 'suppress') return true;
+	const nociteRegion = provisional?.kind === 'nocite'
+		? provisional.region
+		: analysis.nociteRegions.find(region => atOffset >= region.start && atOffset < region.end);
+	if (nociteRegion) {
+		if (isEscaped(window, atOffset)) {
+			return localEscapeParityDiffersFromSource(
+				text, windowStart, window, atOffset, maxWindow,
+			);
+		}
+		if (isEmailSeparatorAt(window, atOffset)) {
+			return quotedEmailMayDependOnLeftContext(
+				text, windowStart, window, atOffset, maxWindow,
+			);
+		}
+		return false;
+	}
+
+	const excluded = rangeContaining(atOffset, analysis.excludedRanges);
+	if (excluded) {
+		const labelStart = inlineLinkLabelForDestination(analysis, excluded.start);
+		if (labelStart !== undefined) {
+			return localEscapeParityDiffersFromSource(
+				text, windowStart, window, labelStart, maxWindow,
+			);
+		}
+		if (window[excluded.start] === '`') {
+			return localEscapeParityDiffersFromSource(
+				text, windowStart, window, excluded.start, maxWindow,
+			) || localCodeExclusionMayDependOnLeftContext(
+				text, windowStart, window, excluded.start, maxWindow,
+			);
+		}
+		return excluded.start === 0;
+	}
+
+	const bracket = findBracketContext(analysis.brackets, atOffset, false);
+	const linkLabel = bracket !== undefined && analysis.visibleLinkLabels.has(rangeIdentity(bracket));
+	const bracketed = bracket !== undefined
+		&& !linkLabel
+		&& isSupportedCitationBracket(window, bracket)
+		&& isCitationItemMarkerAt(window, bracket, atOffset, analysis.citationMarkupRanges);
+	if (analysis.brackets.balancedContexts.has(atOffset) && !bracketed) {
+		return bracket !== undefined && localEscapeParityDiffersFromSource(
+			text, windowStart, window, bracket.start, maxWindow,
+		);
+	}
+	if (isEscaped(window, atOffset)) {
+		return localEscapeParityDiffersFromSource(
+			text, windowStart, window, atOffset, maxWindow,
+		);
+	}
+	if (isEmailSeparatorAt(window, atOffset)) {
+		return quotedEmailMayDependOnLeftContext(
+			text, windowStart, window, atOffset, maxWindow,
+		);
+	}
+	const possibleBracketStart = atOffset - 2;
+	if (
+		possibleBracketStart >= 0 &&
+		window.startsWith('[-@', possibleBracketStart) &&
+		isEscaped(window, possibleBracketStart)
+	) {
+		return localEscapeParityDiffersFromSource(
+			text, windowStart, window, possibleBracketStart, maxWindow,
+		);
+	}
+	return atOffset === 1
+		&& window[0] === '-'
+		&& windowStart > 0
+		&& text[windowStart - 1] === '[';
+}
+
+/**
+ * Conservatively classify citation-like text for the extension's automatic
+ * suggestion trigger without analyzing the full document. The language server
+ * performs the authoritative whole-document analysis before returning items, so
+ * truncating an open code span, link, or frontmatter block may only cause an
+ * extra popup request, never an incorrect completion result.
+ */
 export function getBoundedCitationCompletionContextAtOffset(
 	text: string,
 	offset: number,
 	maxWindow = 16_384,
+	metrics?: BoundedCitationCompletionMetrics,
 ): CitationCompletionContext | undefined {
 	if (offset < 0 || offset > text.length || maxWindow < 1) return undefined;
-	const frontmatter = findCitationFrontmatterBounds(text);
-	if (frontmatter && offset >= frontmatter.start && offset <= frontmatter.contentEnd) {
-		return getCitationCompletionContextAtOffset(text, offset);
-	}
-	let start = Math.max(0, offset - maxWindow);
-	if (start > 0) {
-		const nextLine = text.indexOf('\n', start);
-		start = nextLine === -1 || nextLine >= offset ? offset : nextLine + 1;
-	}
+	const start = Math.max(0, offset - maxWindow);
 	const end = Math.min(text.length, offset + maxWindow);
+	if (metrics) {
+		metrics.windowStart = start;
+		metrics.windowEnd = end;
+		metrics.analyzedLength = end - start;
+	}
 	const window = text.slice(start, end);
-	const local = getCitationCompletionContextAtOffset(window, offset - start);
-	if (!local) return undefined;
+	const localOffset = offset - start;
+	const analysis = analyzeCitationDocument(window);
+	const local = getCitationCompletionContextAtOffset(window, localOffset, analysis);
+	if (local) {
+		return {
+			...local,
+			replaceStart: local.replaceStart + start,
+			atOffset: local.atOffset + start,
+		};
+	}
+	if (
+		start === 0 ||
+		!boundedRejectionNeedsLeftContext(text, start, window, localOffset, analysis, maxWindow)
+	) {
+		return undefined;
+	}
+
+	// Restore one more fixed-width window of real source context only when syntax
+	// touching the left edge can account for the local rejection. This reaches
+	// earlier inline delimiters as well as escape runs without ever parsing the
+	// full document.
+	const contextStart = Math.max(0, start - maxWindow);
+	const boundaryRun = contextStart > 0
+		&& text[contextStart] === text[contextStart - 1]
+		&& (text[contextStart] === '\\' || text[contextStart] === '`')
+		? text[contextStart]
+		: undefined;
+	const unresolvedBoundaryRun = boundaryRun !== undefined;
+
+	const contextWindow = text.slice(contextStart, end);
+	if (metrics) metrics.analyzedLength += contextWindow.length;
+	const contextOffset = offset - contextStart;
+	const contextAnalysis = analyzeCitationDocument(contextWindow);
+	const restored = getCitationCompletionContextAtOffset(
+		contextWindow,
+		contextOffset,
+		contextAnalysis,
+	);
+	if (restored) {
+		return {
+			...restored,
+			replaceStart: restored.replaceStart + contextStart,
+			atOffset: restored.atOffset + contextStart,
+		};
+	}
+	if (!unresolvedBoundaryRun) return undefined;
+
+	// The lookbehind limit ended inside a delimiter run. Analyze one bounded
+	// alternative that represents the other possible interpretation instead of
+	// trusting arbitrary truncated parity/count. The language server still makes
+	// the authoritative full-document decision before returning completion items.
+	if (boundaryRun === '\\') {
+		const alternateWindow = '\\' + contextWindow;
+		if (metrics) metrics.analyzedLength += alternateWindow.length;
+		const alternate = getCitationCompletionContextAtOffset(
+			alternateWindow,
+			contextOffset + 1,
+			analyzeCitationDocument(alternateWindow),
+		);
+		if (!alternate) return undefined;
+		return {
+			...alternate,
+			replaceStart: alternate.replaceStart - 1 + contextStart,
+			atOffset: alternate.atOffset - 1 + contextStart,
+		};
+	}
+
+	let runEnd = 0;
+	while (runEnd < contextWindow.length && contextWindow[runEnd] === '`') runEnd++;
+	const alternateWindow = ' '.repeat(runEnd) + contextWindow.slice(runEnd);
+	if (metrics) metrics.analyzedLength += alternateWindow.length;
+	const alternate = getCitationCompletionContextAtOffset(
+		alternateWindow,
+		contextOffset,
+		analyzeCitationDocument(alternateWindow),
+	);
+	if (!alternate) return undefined;
 	return {
-		...local,
-		replaceStart: local.replaceStart + start,
-		atOffset: local.atOffset + start,
+		...alternate,
+		replaceStart: alternate.replaceStart + contextStart,
+		atOffset: alternate.atOffset + contextStart,
 	};
 }
 

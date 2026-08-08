@@ -350,8 +350,11 @@ connection.onCompletion(async (params: CompletionParams): Promise<CompletionItem
 
 	// Frontmatter completions (keys, values, CSL, styles sub-props). A valid
 	// nocite citation context takes precedence so bibliography keys work there.
-	const fmLocation = getFrontmatterLocation(text, offset);
-	if (!completionContext && fmLocation.inFrontmatter && fmLocation.kind !== 'outside') {
+	// Defer frontmatter parsing until citation analysis says it is needed; this
+	// avoids a second whole-document structural pass for ordinary @ completions.
+	if (!completionContext) {
+		const fmLocation = getFrontmatterLocation(text, offset);
+		if (fmLocation.inFrontmatter && fmLocation.kind !== 'outside') {
 			const cachedCslStyles = await getCachedCslStyleNames();
 			const fmItems = getFrontmatterCompletionItems(fmLocation, process.platform, cachedCslStyles);
 			if (fmItems.length > 0) {
@@ -368,12 +371,10 @@ connection.onCompletion(async (params: CompletionParams): Promise<CompletionItem
 					return toLspFrontmatterCompletionItem(item, replaceRange);
 				});
 				if (isCsl) return { isIncomplete: true, items };
-			return items;
+				return items;
+			}
+			if (fmLocation.frontmatterClosed) return [];
 		}
-		if (fmLocation.frontmatterClosed) return [];
-	}
-
-	if (!completionContext) {
 		return [];
 	}
 

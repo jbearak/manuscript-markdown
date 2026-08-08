@@ -203,4 +203,31 @@ describe('Title roundtrip', () => {
     expect(metadata.csl).toBeDefined();
     expect(body).toContain('Introduction');
   });
+
+  it('MD→DOCX→MD safely preserves an escaped title newline', async () => {
+    const md = '---\ntitle: "Safe\\nbibliography: injected.bib"\nbibliography: actual.bib\n---\n\nBody paragraph.';
+    const { docx } = await convertMdToDocx(md);
+    const result = await convertDocx(docx);
+    const { metadata } = parseFrontmatter(result.markdown);
+
+    expect(metadata.title).toEqual(['Safe\nbibliography: injected.bib']);
+    expect(metadata.bibliography).toBe('actual.bib');
+    expect(result.markdown).not.toContain('\nbibliography: injected.bib');
+    expect(result.markdown.match(/^bibliography:/gm)).toHaveLength(1);
+  });
+
+  it('MD→DOCX→MD keeps an escaped bracket-shaped title scalar', async () => {
+    const md = '---\ntitle: "\\u005bMain, Subtitle\\u005d"\n---\n\nBody paragraph.';
+    const { docx } = await convertMdToDocx(md);
+    const result = await convertDocx(docx);
+    expect(parseFrontmatter(result.markdown).metadata.title).toEqual(['[Main, Subtitle]']);
+  });
+
+  it('MD→DOCX→MD sanitizes XML-illegal decoded title controls', async () => {
+    const md = '---\ntitle: "Bad\\u0000Value"\n---\n\nBody paragraph.';
+    const { docx } = await convertMdToDocx(md);
+    const result = await convertDocx(docx);
+    expect(parseFrontmatter(result.markdown).metadata.title).toEqual(['Bad�Value']);
+    expect(result.markdown).not.toContain(String.fromCodePoint(0));
+  });
 });

@@ -10,14 +10,106 @@ import {
 } from './table-number-format';
 import {
   isCitekey,
+  isNociteContinuationLine,
   isTopLevelFrontmatterMappingLine,
+  nociteValueMode,
   parseNociteRaw,
   type NociteValue,
-  yamlValueBeforeComment,
 } from './citekey';
 
 export type { TableDigits, TableDecimalMark, TableDigitGrouping } from './table-number-format';
 export type { NociteValue } from './citekey';
+
+// Quote strings that YAML 1.1 or 1.2 schemas can implicitly resolve as non-strings.
+// Pandoc and other frontmatter consumers do not all use the same schema.
+const YAML_PLAIN_RESERVED_RE = /^(?:~|null|true|false|yes|no|on|off|y|n|[-+]?(?:\.inf|\.nan|0b[01_]+|0o[0-7_]+|0x[\da-f_]+|(?:\d[\d_]*)(?::[0-5]?\d)+(?:\.\d*)?|(?:\d[\d_]*)?(?:\.\d[\d_]*|\.(?:[\d_]+)?)(?:e[-+]?\d+)?|\d[\d_]*(?:e[-+]?\d+)?|\d[\d_]*)|\d{4}-\d{1,2}-\d{1,2}(?:(?:[Tt]|[ \t]+).*)?)$/i;
+
+function replaceInvalidXmlCharacters(value: string): string {
+  return [...value].map(char => {
+    const code = char.codePointAt(0)!;
+    const valid = code === 0x09 || code === 0x0A || code === 0x0D
+      || (code >= 0x20 && code <= 0xD7FF)
+      || (code >= 0xE000 && code <= 0xFFFD)
+      || (code >= 0x10000 && code <= 0x10FFFF);
+    return valid ? char : '�';
+  }).join('');
+}
+
+/** Decode the quoted scalar forms emitted by serializeYamlStringScalar(). */
+export function parseYamlStringScalar(raw: string): string {
+  const value = raw.trim();
+  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (typeof parsed === 'string') return replaceInvalidXmlCharacters(parsed);
+    } catch {
+      return replaceInvalidXmlCharacters(value.slice(1, -1));
+    }
+  }
+  if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
+    return replaceInvalidXmlCharacters(value.slice(1, -1).replace(/''/g, "'"));
+  }
+  return replaceInvalidXmlCharacters(value);
+}
+
+/** Serialize a string as a safe YAML plain or JSON-compatible quoted scalar. */
+export function serializeYamlStringScalar(value: string): string {
+  value = replaceInvalidXmlCharacters(value);
+  const hasControlOrYamlLineBreak = [...value].some(char => {
+    const code = char.codePointAt(0)!;
+    return code <= 0x1F || (code >= 0x7F && code <= 0x9F) || code === 0x2028 || code === 0x2029;
+  });
+  const safePlain = value.length > 0
+    && value === value.trim()
+    && !hasControlOrYamlLineBreak
+    && !/^[\-?:,\[\]{}#&*!|>'"%@`]/.test(value)
+    && !/:(?:\s|$)|[ \t]#/.test(value)
+    && !YAML_PLAIN_RESERVED_RE.test(value);
+  if (safePlain) return value;
+  const yamlControlOrLineBreak = new RegExp('[\\u007f-\\u009f\\u2028\\u2029]', 'g');
+  return JSON.stringify(value).replace(yamlControlOrLineBreak, char =>
+    '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0'));
+}
+
+function serializeYamlFlowStringScalar(value: string): string {
+  const sanitized = replaceInvalidXmlCharacters(value);
+  const scalar = serializeYamlStringScalar(sanitized);
+  return scalar === sanitized && /[:,\[\]{}]/.test(sanitized) ? JSON.stringify(sanitized) : scalar;
+}
+
+function serializeYamlMappingKey(value: string): string {
+  const sanitized = replaceInvalidXmlCharacters(value);
+  const scalar = serializeYamlStringScalar(sanitized);
+  return scalar === sanitized && (sanitized.includes(':') || sanitized === '<<')
+    ? JSON.stringify(sanitized)
+    : scalar;
+}
+
+function findYamlMappingColon(line: string): number {
+  let quote: '"' | "'" | undefined;
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (quote === '"') {
+      if (char === '\\') {
+        i++;
+      } else if (char === '"') {
+        quote = undefined;
+      }
+      continue;
+    }
+    if (quote === "'") {
+      if (char === "'" && line[i + 1] === "'") {
+        i++;
+      } else if (char === "'") {
+        quote = undefined;
+      }
+      continue;
+    }
+    if ((char === '"' || char === "'") && line.slice(0, i).trim().length === 0) quote = char;
+    else if (char === ':') return i;
+  }
+  return -1;
+}
 
 const NOTE_TYPE_NAMES: Record<string, NoteType> = {
   'in-text': 'in-text',
@@ -58,10 +150,38 @@ export interface CustomStyleDef {
 
 /** Parse a value that may be a YAML inline array `[v1, v2, ...]` or bare comma-separated values. */
 export function parseInlineArray(value: string): string[] {
-  let inner = value;
+  let inner = value.trim();
   if (inner.startsWith('[') && inner.endsWith(']')) inner = inner.slice(1, -1);
-  if (!inner.includes(',')) return [inner.trim()].filter(s => s.length > 0);
-  return inner.split(',').map(s => s.trim()).filter(s => s.length > 0);
+
+  const parts: string[] = [];
+  let start = 0;
+  let quote: '"' | "'" | undefined;
+  for (let i = 0; i < inner.length; i++) {
+    const char = inner[i];
+    if (quote === '"') {
+      if (char === '\\') {
+        i++;
+      } else if (char === '"') {
+        quote = undefined;
+      }
+      continue;
+    }
+    if (quote === "'") {
+      if (char === "'" && inner[i + 1] === "'") {
+        i++;
+      } else if (char === "'") {
+        quote = undefined;
+      }
+      continue;
+    }
+    if ((char === '"' || char === "'") && inner.slice(start, i).trim().length === 0) quote = char;
+    else if (char === ',') {
+      parts.push(inner.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(inner.slice(start));
+  return parts.map(parseYamlStringScalar).filter(s => s.length > 0);
 }
 
 // Design rationale: A single combined header-font-style field was chosen over
@@ -155,6 +275,15 @@ export interface Frontmatter {
   bibliographyHangingIndent?: boolean;
 }
 
+export interface FrontmatterOpeningBounds {
+  /** Start of the opening delimiter, after any accepted leading whitespace/BOM. */
+  start: number;
+  /** Offset immediately after the three opening hyphens. */
+  contentStart: number;
+  /** First offset after the opening delimiter line. */
+  bodyStart: number;
+}
+
 export interface FrontmatterBounds {
   /** Start of the opening delimiter, after any accepted leading whitespace/BOM. */
   start: number;
@@ -166,11 +295,23 @@ export interface FrontmatterBounds {
   bodyStart: number;
 }
 
+/** Locate an opening delimiter using parseFrontmatter's accepted leading trivia. */
+export function findFrontmatterOpeningBounds(markdown: string): FrontmatterOpeningBounds | undefined {
+  const start = markdown.length - markdown.trimStart().length;
+  const opener = /^---[ \t]*(?:\r?\n|$)/.exec(markdown.slice(start));
+  if (!opener) return undefined;
+  return {
+    start,
+    contentStart: start + 3,
+    bodyStart: start + opener[0].length,
+  };
+}
+
 /** Locate the same permissive frontmatter block accepted by parseFrontmatter(). */
 export function findFrontmatterBounds(markdown: string): FrontmatterBounds | undefined {
-  const leadingTrimmedLength = markdown.length - markdown.trimStart().length;
-  const trimmed = markdown.slice(leadingTrimmedLength);
-  if (!trimmed.startsWith('---')) return undefined;
+  const opening = findFrontmatterOpeningBounds(markdown);
+  if (!opening) return undefined;
+  const trimmed = markdown.slice(opening.start);
 
   const endMatch = trimmed.substring(3).match(/\n---(?:\r?\n|$)/);
   if (!endMatch) return undefined;
@@ -178,33 +319,49 @@ export function findFrontmatterBounds(markdown: string): FrontmatterBounds | und
   const afterDelimiter = trimmed.slice(endIdx + 4);
   const consumedLeadingNewline = afterDelimiter.match(/^\r?\n/)?.[0].length ?? 0;
   return {
-    start: leadingTrimmedLength,
-    contentStart: leadingTrimmedLength + 3,
-    contentEnd: leadingTrimmedLength + endIdx,
-    bodyStart: leadingTrimmedLength + endIdx + 4 + consumedLeadingNewline,
+    start: opening.start,
+    contentStart: opening.contentStart,
+    contentEnd: opening.start + endIdx,
+    bodyStart: opening.start + endIdx + 4 + consumedLeadingNewline,
   };
 }
 
 /**
- * Locate frontmatter for citation-language features. An unclosed opening block is
- * provisional YAML only after a top-level mapping makes it unambiguous; until
- * then the opening delimiter retains ordinary thematic-break semantics.
+ * Locate a provisional unclosed frontmatter prefix for cursor-local editing
+ * features. These bounds are inherently ambiguous and must never be used to
+ * suppress whole-document scanning or diagnostics; only a closed block from
+ * findFrontmatterBounds() is globally authoritative.
  */
 export function findCitationFrontmatterBounds(markdown: string): FrontmatterBounds | undefined {
   const closed = findFrontmatterBounds(markdown);
   if (closed) return closed;
 
-  const leadingTrimmedLength = markdown.length - markdown.trimStart().length;
-  const trimmed = markdown.slice(leadingTrimmedLength);
-  const opener = /^---(?:\r?\n|$)/.exec(trimmed);
-  if (!opener || opener[0].length === 3) return undefined;
-  const contentStart = leadingTrimmedLength + 3;
-  const hasTopLevelMapping = markdown.slice(contentStart).split('\n').some(rawLine =>
-    isTopLevelFrontmatterMappingLine(rawLine.replace(/\r$/, ''))
-  );
+  const opening = findFrontmatterOpeningBounds(markdown);
+  if (!opening || opening.bodyStart === opening.contentStart) return undefined;
+  const contentStart = opening.contentStart;
+  let hasTopLevelMapping = false;
+  let lineStart = opening.bodyStart;
+  while (lineStart < markdown.length) {
+    const newline = markdown.indexOf('\n', lineStart);
+    const rawEnd = newline === -1 ? markdown.length : newline;
+    const lineEnd = rawEnd > lineStart && markdown[rawEnd - 1] === '\r' ? rawEnd - 1 : rawEnd;
+    const line = markdown.slice(lineStart, lineEnd);
+    if (line.trim().length === 0) {
+      if (!hasTopLevelMapping) return undefined;
+      return {
+        start: opening.start,
+        contentStart,
+        contentEnd: lineStart,
+        bodyStart: newline === -1 ? markdown.length : newline + 1,
+      };
+    }
+    if (isTopLevelFrontmatterMappingLine(line)) hasTopLevelMapping = true;
+    if (newline === -1) break;
+    lineStart = newline + 1;
+  }
   if (!hasTopLevelMapping) return undefined;
   return {
-    start: leadingTrimmedLength,
+    start: opening.start,
     contentStart,
     contentEnd: markdown.length,
     bodyStart: markdown.length,
@@ -233,6 +390,35 @@ export function parseColWidths(raw: string): number[] | 'equal' | 'auto' | undef
   return nums;
 }
 
+export function normalizeNociteRawForYaml(raw: string, value: NociteValue): string | undefined {
+  let normalized = '';
+  for (let i = 0; i < raw.length; i++) {
+    const code = raw.charCodeAt(i);
+    if (code === 0x0D) {
+      if (raw.charCodeAt(i + 1) === 0x0A) i++;
+      normalized += '\n';
+    } else if (code === 0x85 || code === 0x2028 || code === 0x2029) {
+      normalized += '\n';
+    } else {
+      normalized += raw[i];
+    }
+  }
+
+  const rawLines = normalized.split('\n');
+  const mode = nociteValueMode(rawLines[0]);
+  const unsafeContinuation = rawLines.slice(1).some(line =>
+    /^(?:---|\.\.\.)(?:[ \t]*(?:#.*)?)?$/.test(line)
+    || !isNociteContinuationLine(mode, line));
+  if (unsafeContinuation) return undefined;
+
+  const semantic = parseNociteRaw(normalized);
+  const keys = value.keys.filter(isCitekey);
+  if (semantic.wildcard !== value.wildcard || semantic.keys.join('\n') !== keys.join('\n')) {
+    return undefined;
+  }
+  return normalized;
+}
+
 function readRawNociteValue(
   lines: string[],
   startIndex: number,
@@ -241,18 +427,12 @@ function readRawNociteValue(
   const firstLine = lines[startIndex].replace(/\r$/, '').slice(colonIndex + 1).trimStart();
   const parts = [firstLine];
   let lastLineIndex = startIndex;
-  const semanticFirstLine = yamlValueBeforeComment(firstLine).trim();
-  const blockScalar = /^[|>][0-9+-]*$/.test(semanticFirstLine);
-  const multiline = semanticFirstLine.length === 0 || blockScalar;
-
-  if (multiline) {
-    while (lastLineIndex + 1 < lines.length) {
-      const next = lines[lastLineIndex + 1].replace(/\r$/, '');
-      if (blockScalar && next.trim().length > 0 && !/^[ \t]/.test(next)) break;
-      if (!blockScalar && isTopLevelFrontmatterMappingLine(next)) break;
-      parts.push(next);
-      lastLineIndex++;
-    }
+  const mode = nociteValueMode(firstLine);
+  while (lastLineIndex + 1 < lines.length) {
+    const next = lines[lastLineIndex + 1].replace(/\r$/, '');
+    if (!isNociteContinuationLine(mode, next)) break;
+    parts.push(next);
+    lastLineIndex++;
   }
 
   const raw = parts.join('\n');
@@ -300,13 +480,15 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
   const metadata: Frontmatter = {};
   const fieldOrder: string[] = [];
   const seenFields = new Set<string>();
+  const rawTitleValues: string[] = [];
   const yamlLines = yamlBlock.split('\n');
   for (let lineIdx = 0; lineIdx < yamlLines.length; lineIdx++) {
     const line = yamlLines[lineIdx];
-    const colonIdx = line.indexOf(':');
+    const colonIdx = findYamlMappingColon(line);
     if (colonIdx < 0) continue;
     const key = line.slice(0, colonIdx).trim();
-    const value = line.slice(colonIdx + 1).trim().replace(/^["']|["']$/g, '');
+    const rawValue = line.slice(colonIdx + 1);
+    const value = parseYamlStringScalar(rawValue);
     if (!seenFields.has(key)) {
       seenFields.add(key);
       fieldOrder.push(key);
@@ -321,7 +503,7 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
 
     // Handle nested `styles:` block specially
     if (key === 'styles') {
-      const styles: Record<string, CustomStyleDef> = {};
+      const styles = new Map<string, CustomStyleDef>();
       let currentName: string | undefined;
       let nameIndent = -1; // indent of the first style-name line (auto-detected)
       // Scan subsequent indented lines
@@ -333,19 +515,19 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
         const trimmed = nextLine.trimStart();
         if (!trimmed) continue; // skip blank lines within the block
         const indent = nextLine.length - trimmed.length;
-        const innerColon = trimmed.indexOf(':');
+        const innerColon = findYamlMappingColon(trimmed);
         if (innerColon < 0) continue;
-        const innerKey = trimmed.slice(0, innerColon).trim();
-        const innerVal = trimmed.slice(innerColon + 1).trim().replace(/^["']|["']$/g, '');
+        const innerKey = parseYamlStringScalar(trimmed.slice(0, innerColon));
+        const innerVal = parseYamlStringScalar(trimmed.slice(innerColon + 1));
         // Auto-detect the style-name indent level from the first indented line
         if (nameIndent < 0) nameIndent = indent;
         if (indent <= nameIndent) {
           // Style name level
           currentName = innerKey;
-          if (!styles[currentName]) styles[currentName] = {};
+          if (!styles.has(currentName)) styles.set(currentName, {});
         } else if (currentName) {
           // Property level (4-space indent)
-          const def = styles[currentName];
+          const def = styles.get(currentName)!;
           switch (innerKey) {
             case 'font':
               if (innerVal) def.font = innerVal;
@@ -383,7 +565,7 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
           }
         }
       }
-      if (Object.keys(styles).length > 0) metadata.styles = styles;
+      if (styles.size > 0) metadata.styles = Object.fromEntries(styles);
       continue;
     }
 
@@ -391,6 +573,7 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
       case 'title':
         if (!metadata.title) metadata.title = [];
         metadata.title.push(value);
+        rawTitleValues.push(rawValue.trim());
         break;
       case 'author':
         if (value) metadata.author = value;
@@ -441,28 +624,28 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
         break;
       }
       case 'header-font':
-        if (value) metadata.headerFont = parseInlineArray(value);
+        if (value) metadata.headerFont = parseInlineArray(rawValue);
         break;
       case 'header-font-size': {
-        const arr = parseInlineArray(value).map(s => parseFloat(s)).filter(n => isFinite(n) && n > 0);
+        const arr = parseInlineArray(rawValue).map(s => parseFloat(s)).filter(n => isFinite(n) && n > 0);
         if (arr.length > 0) metadata.headerFontSize = arr;
         break;
       }
       case 'header-font-style': {
-        const arr = parseInlineArray(value).map(s => normalizeFontStyle(s)).filter((s): s is string => s !== undefined);
+        const arr = parseInlineArray(rawValue).map(s => normalizeFontStyle(s)).filter((s): s is string => s !== undefined);
         if (arr.length > 0) metadata.headerFontStyle = arr;
         break;
       }
       case 'title-font':
-        if (value) metadata.titleFont = parseInlineArray(value);
+        if (value) metadata.titleFont = parseInlineArray(rawValue);
         break;
       case 'title-font-size': {
-        const arr = parseInlineArray(value).map(s => parseFloat(s)).filter(n => isFinite(n) && n > 0);
+        const arr = parseInlineArray(rawValue).map(s => parseFloat(s)).filter(n => isFinite(n) && n > 0);
         if (arr.length > 0) metadata.titleFontSize = arr;
         break;
       }
       case 'title-font-style': {
-        const arr = parseInlineArray(value).map(s => normalizeFontStyle(s)).filter((s): s is string => s !== undefined);
+        const arr = parseInlineArray(rawValue).map(s => normalizeFontStyle(s)).filter((s): s is string => s !== undefined);
         if (arr.length > 0) metadata.titleFontStyle = arr;
         break;
       }
@@ -580,11 +763,12 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
     }
   }
 
-  // Title inline array: if exactly one title entry looks like [v1, v2, ...], expand it
+  // Title inline array: expand only when the authored YAML syntax was an array.
+  // A quoted scalar may decode to bracket-delimited text and must remain one title.
   if (metadata.title && metadata.title.length === 1) {
-    const t = metadata.title[0];
-    if (t.startsWith('[') && t.endsWith(']')) {
-      metadata.title = parseInlineArray(t);
+    const rawTitle = rawTitleValues[0];
+    if (rawTitle.startsWith('[') && rawTitle.endsWith(']')) {
+      metadata.title = parseInlineArray(rawTitle);
     }
   }
 
@@ -597,19 +781,30 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
  */
 export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[]): string {
   const lines: string[] = [];
+  const emitString = (key: string, value: string | undefined) => {
+    if (value) lines.push(key + ': ' + serializeYamlStringScalar(value));
+  };
   const emitArr = (key: string, arr: (string | number)[] | undefined) => {
     if (!arr || arr.length === 0) return;
-    if (arr.length === 1) lines.push(key + ': ' + arr[0]);
-    else lines.push(key + ': [' + arr.join(', ') + ']');
+    if (arr.length === 1) {
+      const value = arr[0];
+      lines.push(key + ': ' + (typeof value === 'string' ? serializeYamlFlowStringScalar(value) : value));
+      return;
+    }
+    const values = arr.map(value => typeof value === 'string' ? serializeYamlFlowStringScalar(value) : value);
+    lines.push(key + ': [' + values.join(', ') + ']');
   };
   const emitNocite = () => {
     const nocite = metadata.nocite;
     if (!nocite) return;
     if (nocite.raw !== undefined) {
-      const rawLines = nocite.raw.split('\n');
-      lines.push('nocite:' + (rawLines[0] ? ' ' + rawLines[0] : ''));
-      lines.push(...rawLines.slice(1));
-      return;
+      const raw = normalizeNociteRawForYaml(nocite.raw, nocite);
+      if (raw !== undefined) {
+        const rawLines = raw.split('\n');
+        lines.push('nocite:' + (rawLines[0] ? ' ' + rawLines[0] : ''));
+        lines.push(...rawLines.slice(1));
+        return;
+      }
     }
     const values = nocite.keys.filter(isCitekey).map(key => '@' + key);
     if (nocite.wildcard) values.push('@*');
@@ -619,20 +814,20 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
 
   // Map from YAML key name to emission function
   const emitters: Record<string, () => void> = {
-    'title': () => { if (metadata.title && metadata.title.length > 0) { for (const t of metadata.title) lines.push(`title: ${t}`); } },
-    'author': () => { if (metadata.author) lines.push(`author: ${metadata.author}`); },
-    'csl': () => { if (metadata.csl) lines.push(`csl: ${metadata.csl}`); },
-    'locale': () => { if (metadata.locale) lines.push(`locale: ${metadata.locale}`); },
-    'zotero-notes': () => { if (metadata.zoteroNotes) lines.push(`zotero-notes: ${metadata.zoteroNotes}`); },
+    'title': () => { if (metadata.title && metadata.title.length > 0) { for (const t of metadata.title) lines.push('title: ' + serializeYamlStringScalar(t)); } },
+    'author': () => emitString('author', metadata.author),
+    'csl': () => emitString('csl', metadata.csl),
+    'locale': () => emitString('locale', metadata.locale),
+    'zotero-notes': () => emitString('zotero-notes', metadata.zoteroNotes),
     'note-type': () => emitters['zotero-notes'](),
-    'notes': () => { if (metadata.notes) lines.push(`notes: ${metadata.notes}`); },
-    'timezone': () => { if (metadata.timezone) lines.push(`timezone: ${metadata.timezone}`); },
-    'bibliography': () => { if (metadata.bibliography) lines.push(`bibliography: ${metadata.bibliography}`); },
+    'notes': () => emitString('notes', metadata.notes),
+    'timezone': () => emitString('timezone', metadata.timezone),
+    'bibliography': () => emitString('bibliography', metadata.bibliography),
     'bib': () => emitters['bibliography'](),
     'bibtex': () => emitters['bibliography'](),
     'nocite': emitNocite,
-    'font': () => { if (metadata.font) lines.push('font: ' + metadata.font); },
-    'code-font': () => { if (metadata.codeFont) lines.push('code-font: ' + metadata.codeFont); },
+    'font': () => emitString('font', metadata.font),
+    'code-font': () => emitString('code-font', metadata.codeFont),
     'font-size': () => { if (metadata.fontSize !== undefined) lines.push('font-size: ' + metadata.fontSize); },
     'code-font-size': () => { if (metadata.codeFontSize !== undefined) lines.push('code-font-size: ' + metadata.codeFontSize); },
     'header-font': () => emitArr('header-font', metadata.headerFont),
@@ -641,39 +836,51 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
     'title-font': () => emitArr('title-font', metadata.titleFont),
     'title-font-size': () => emitArr('title-font-size', metadata.titleFontSize),
     'title-font-style': () => emitArr('title-font-style', metadata.titleFontStyle),
-    'table-font': () => { if (metadata.tableFont) lines.push('table-font: ' + metadata.tableFont); },
+    'table-font': () => emitString('table-font', metadata.tableFont),
     'table-font-size': () => { if (metadata.tableFontSize !== undefined) lines.push('table-font-size: ' + metadata.tableFontSize); },
-    'table-col-widths': () => { if (metadata.tableColWidths) lines.push('table-col-widths: ' + (typeof metadata.tableColWidths === 'string' ? metadata.tableColWidths : metadata.tableColWidths.join(' '))); },
-    'table-borders': () => { if (metadata.tableBorders) lines.push('table-borders: ' + metadata.tableBorders); },
-    'table-digits': () => { if (metadata.tableDigits !== undefined) lines.push('table-digits: ' + metadata.tableDigits); },
-    'table-decimal-mark': () => { if (metadata.tableDecimalMark) lines.push('table-decimal-mark: ' + metadata.tableDecimalMark); },
-    'table-digit-grouping': () => { if (metadata.tableDigitGrouping) lines.push('table-digit-grouping: ' + metadata.tableDigitGrouping); },
-    'code-background-color': () => { if (metadata.codeBackgroundColor) lines.push('code-background-color: ' + metadata.codeBackgroundColor); },
+    'table-col-widths': () => {
+      if (typeof metadata.tableColWidths === 'string') emitString('table-col-widths', metadata.tableColWidths);
+      else if (metadata.tableColWidths) lines.push('table-col-widths: ' + metadata.tableColWidths.join(' '));
+    },
+    'table-borders': () => emitString('table-borders', metadata.tableBorders),
+    'table-digits': () => {
+      if (typeof metadata.tableDigits === 'string') emitString('table-digits', metadata.tableDigits);
+      else if (metadata.tableDigits !== undefined) lines.push('table-digits: ' + metadata.tableDigits);
+    },
+    'table-decimal-mark': () => emitString('table-decimal-mark', metadata.tableDecimalMark),
+    'table-digit-grouping': () => emitString('table-digit-grouping', metadata.tableDigitGrouping),
+    'code-background-color': () => emitString('code-background-color', metadata.codeBackgroundColor),
     'code-background': () => emitters['code-background-color'](),
-    'code-font-color': () => { if (metadata.codeFontColor) lines.push('code-font-color: ' + metadata.codeFontColor); },
+    'code-font-color': () => emitString('code-font-color', metadata.codeFontColor),
     'code-color': () => emitters['code-font-color'](),
     'code-block-inset': () => { if (metadata.codeBlockInset !== undefined) lines.push('code-block-inset: ' + metadata.codeBlockInset); },
     'pipe-table-max-line-width': () => { if (metadata.pipeTableMaxLineWidth !== undefined) lines.push('pipe-table-max-line-width: ' + metadata.pipeTableMaxLineWidth); },
     'grid-table-max-line-width': () => { if (metadata.gridTableMaxLineWidth !== undefined) lines.push('grid-table-max-line-width: ' + metadata.gridTableMaxLineWidth); },
-    'blockquote-style': () => { if (metadata.blockquoteStyle) lines.push('blockquote-style: ' + metadata.blockquoteStyle); },
+    'blockquote-style': () => emitString('blockquote-style', metadata.blockquoteStyle),
     'callout-labels': () => { if (metadata.calloutLabels !== undefined) lines.push('callout-labels: ' + metadata.calloutLabels); },
-    'colors': () => { if (metadata.colors) lines.push('colors: ' + metadata.colors); },
+    'colors': () => emitString('colors', metadata.colors),
     'styles': () => {
       if (!metadata.styles || Object.keys(metadata.styles).length === 0) return;
       lines.push('styles:');
       for (const [name, def] of Object.entries(metadata.styles)) {
-        lines.push('  ' + name + ':');
-        if (def.font) lines.push('    font: ' + def.font);
+        lines.push('  ' + serializeYamlMappingKey(name) + ':');
+        if (def.font) lines.push('    font: ' + serializeYamlStringScalar(def.font));
         if (def.fontSize !== undefined) lines.push('    font-size: ' + def.fontSize);
-        if (def.fontStyle) lines.push('    font-style: ' + def.fontStyle);
+        if (def.fontStyle) lines.push('    font-style: ' + serializeYamlStringScalar(def.fontStyle));
         if (def.spacingBefore !== undefined) lines.push('    spacing-before: ' + def.spacingBefore);
         if (def.spacingAfter !== undefined) lines.push('    spacing-after: ' + def.spacingAfter);
         if (def.paragraphIndent !== undefined) lines.push('    paragraph-indent: ' + def.paragraphIndent);
       }
     },
     'breaks': () => { if (metadata.breaks !== undefined) lines.push('breaks: ' + metadata.breaks); },
-    'line-spacing': () => { if (metadata.lineSpacing !== undefined) lines.push('line-spacing: ' + metadata.lineSpacing); },
-    'paragraph-indent': () => { if (metadata.paragraphIndent !== undefined) lines.push('paragraph-indent: ' + metadata.paragraphIndent); },
+    'line-spacing': () => {
+      if (typeof metadata.lineSpacing === 'string') emitString('line-spacing', metadata.lineSpacing);
+      else if (metadata.lineSpacing !== undefined) lines.push('line-spacing: ' + metadata.lineSpacing);
+    },
+    'paragraph-indent': () => {
+      if (typeof metadata.paragraphIndent === 'string') emitString('paragraph-indent', metadata.paragraphIndent);
+      else if (metadata.paragraphIndent !== undefined) lines.push('paragraph-indent: ' + metadata.paragraphIndent);
+    },
     'bibliography-hanging-indent': () => { if (metadata.bibliographyHangingIndent !== undefined) lines.push('bibliography-hanging-indent: ' + metadata.bibliographyHangingIndent); },
   };
 
@@ -705,21 +912,23 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
     canonicalToAliases[canonical].push(alias);
   }
 
+  const getOwn = <T>(record: Record<string, T>, key: string): T | undefined =>
+    Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined;
   const order = fieldOrder && fieldOrder.length > 0 ? fieldOrder : defaultOrder;
   const emitted = new Set<string>();
 
   for (const key of order) {
     if (emitted.has(key)) continue;
     emitted.add(key);
-    const canonical = aliasToCanonical[key];
+    const canonical = getOwn(aliasToCanonical, key);
     if (canonical) {
       emitted.add(canonical);
-      const siblingAliases = canonicalToAliases[canonical];
+      const siblingAliases = getOwn(canonicalToAliases, canonical);
       if (siblingAliases) for (const a of siblingAliases) emitted.add(a);
     }
-    const aliases = canonicalToAliases[key];
+    const aliases = getOwn(canonicalToAliases, key);
     if (aliases) for (const a of aliases) emitted.add(a);
-    const emitter = emitters[key];
+    const emitter = getOwn(emitters, key);
     if (emitter) emitter();
   }
 
@@ -727,7 +936,7 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
   for (const key of defaultOrder) {
     if (emitted.has(key)) continue;
     emitted.add(key);
-    const emitter = emitters[key];
+    const emitter = getOwn(emitters, key);
     if (emitter) emitter();
   }
 

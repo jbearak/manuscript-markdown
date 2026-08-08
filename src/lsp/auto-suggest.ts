@@ -33,8 +33,8 @@ export function shouldAutoTriggerLspSuggest(context: AutoSuggestContext): boolea
 		return false;
 	}
 	if (
-		getCslCompletionContext(context.text, context.offset) !== undefined ||
-		getBoundedCitationCompletionContextAtOffset(context.text, context.offset) !== undefined
+		getBoundedCitationCompletionContextAtOffset(context.text, context.offset) !== undefined ||
+		getCslCompletionContext(context.text, context.offset) !== undefined
 	) {
 		return true;
 	}

@@ -500,6 +500,24 @@ describe('Custom Styles — Round-Trip', () => {
     expect(metadata.styles!['sidebar']).toEqual(originalStyles['sidebar']);
   });
 
+  it('preserves protected custom-style keys through DOCX round-trip', async () => {
+    const md = [
+      '---',
+      'styles:',
+      '  "__proto__":',
+      '    font: Georgia',
+      '---',
+      '',
+      'Body.',
+    ].join('\n');
+    const { docx } = await convertMdToDocx(md);
+    const result = await convertDocx(docx);
+    const { metadata } = parseFrontmatter(result.markdown);
+    expect(({} as { font?: string }).font).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(metadata.styles, '__proto__')).toBe(true);
+    expect(metadata.styles?.['__proto__'].font).toBe('Georgia');
+  });
+
   it('falls back to styles.xml custom style extraction when custom properties are absent', async () => {
     const md = [
       '---',
