@@ -55,7 +55,7 @@ manuscript-markdown paper.md      # Markdown → DOCX
 ### Academic Writing
 
 - **Citations**: Pandoc-style parenthetical (`[@key]`), narrative (`@key`), and suppress-author (`[-@key]`) citations with full Zotero roundtrip
-- **Bibliographies**: Format citations according to any [CSL style](https://citationstyles.org/) (APA, Chicago, BMJ, IEEE, etc.); include uncited entries with frontmatter `nocite`; bundles the same 16 styles that ship with Zotero and downloads others as needed
+- **Bibliographies**: Format citations according to any [CSL style](https://citationstyles.org/) (APA, Chicago, BMJ, IEEE, etc.); bundles the same 16 styles that ship with Zotero and downloads others as needed
 - **Equations**: LaTeX equation support (inline and display math), automatically converted to/from Word OMML
 
 ### Formatting & Authoring
