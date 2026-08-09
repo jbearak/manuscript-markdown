@@ -125,14 +125,14 @@ Export and document-setting commands. See [Converter](converter.md) for details 
 | Settings | **Document** — title, author, timezone, and hard line breaks |
 | | **Typography** — body, heading, and title typography; paragraph layout; blockquotes; callout labels; colors; and custom styles |
 | | **Tables** — fonts, widths, borders, number formatting, and source line-width limits |
-| | **Citations & Notes** — bibliography and uncited entries, CSL style, locale, citation placement, notes, and bibliography indentation |
+| | **Citations & Notes** — bibliography, CSL style, locale, citation placement, notes, and bibliography indentation |
 | | **Code Blocks** — font, size, colors, and inset |
 
 > **Export to Word** converts the Markdown file to `.docx`. If a `.docx` with the same name already exists, its paragraph and formatting styles are automatically reused as a template — so fonts, spacing, and colors you previously set in Word are preserved.
 >
 > **Export to Word with Template** first opens a file picker so you can choose any `.docx` file whose paragraph formatting styles (fonts, sizes, spacing, colors) will be applied to the exported document.
 >
-> Each settings submenu contains one item per supported YAML frontmatter field. Choosing an item inserts that field if it is missing, or selects its current value if it already exists. Available values are shown automatically when the field has predefined choices. If no frontmatter exists, a block is created automatically. **Citations & Notes → Uncited Bibliography Entries** inserts or selects the complete `nocite` value, including multiline lists and block scalars. **Typography → Callout Labels** inserts or selects `callout-labels`; labels default to `true`, and setting the field to `false` hides callout type labels in preview and DOCX output while preserving callout styling.
+> Each settings submenu contains items for commonly edited YAML frontmatter fields. Choosing an item inserts that field if it is missing, or selects its current value if it already exists. Available values are shown automatically when the field has predefined choices. If no frontmatter exists, a block is created automatically. **Typography → Callout Labels** inserts or selects `callout-labels`; labels default to `true`, and setting the field to `false` hides callout type labels in preview and DOCX output while preserving callout styling.
 
 ---
 

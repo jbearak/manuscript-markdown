@@ -1,6 +1,8 @@
 import { describe, it } from 'bun:test';
 import * as fc from 'fast-check';
-import { wrapSelection, wrapLines, wrapLinesNumbered, formatHeading, highlightAndComment, wrapCodeBlock, substituteAndComment, additionAndComment, deletionAndComment, reflowTable, compactTable, parseTable, isTableRow } from './formatting';
+import { wrapSelection, wrapLines, wrapLinesNumbered, formatHeading, highlightAndComment, wrapCodeBlock, substituteAndComment, additionAndComment, deletionAndComment, reflowTable, compactTable, parseTable, isTableRow, findTableRangeAtOffset } from './formatting';
+import { scanCitationDocument } from './citation-scanner';
+import { preprocessGridTables } from './grid-table-preprocess';
 
 describe('Formatting Module Property Tests', () => {
   
@@ -1432,6 +1434,96 @@ describe('HTML table support for Expand/Compact Table', () => {
     if (reflowed.newText !== mixed) throw new Error('Expected reflowTable to preserve mixed selection');
     if (compacted.newText !== mixed) throw new Error('Expected compactTable to preserve mixed selection');
   });
+  it('finds table-specific cursor ranges without adjacent prose', () => {
+    const cases = [
+      {
+        text: 'Intro prose\n| A | B |\n| --- | --- |\n| 1 | 2 |\nOutro prose',
+        cursor: '1 | 2',
+        expected: '| A | B |\n| --- | --- |\n| 1 | 2 |',
+      },
+      {
+        text: 'Intro\n+---+\n| H |\n+===+\n\n| long body |\n+----------------+\nOutro',
+        cursor: 'long body',
+        expected: '+---+\n| H |\n+===+\n\n| long body |\n+----------------+',
+      },
+      {
+        text: 'Intro\n<table>\n<tr><th>H</th></tr>\n\n<tr><td>A</td></tr>\n</table>\nOutro',
+        cursor: '<td>A',
+        expected: '<table>\n<tr><th>H</th></tr>\n\n<tr><td>A</td></tr>\n</table>',
+      },
+    ];
+    for (const { text, cursor, expected } of cases) {
+      const range = findTableRangeAtOffset(text, text.indexOf(cursor));
+      if (!range || text.slice(range.start, range.end) !== expected) {
+        throw new Error('Unexpected table range for ' + cursor + ': ' + JSON.stringify(range));
+      }
+    }
+    for (const { text, cursor } of [
+      {
+        text: '| H |\n| --- |\n| `code` |',
+        cursor: 'H',
+      },
+      {
+        text: '<table><tr><th>H</th></tr><tr><td>`code`</td></tr></table>',
+        cursor: '<th>H',
+      },
+    ]) {
+      const range = findTableRangeAtOffset(text, text.indexOf(cursor));
+      if (!range || text.slice(range.start, range.end) !== text) {
+        throw new Error('Inline code inside a table must not hide its range');
+      }
+    }
+    const fenced = '```md\n| A |\n| --- |\n```';
+    if (findTableRangeAtOffset(fenced, fenced.indexOf('| A |'))) {
+      throw new Error('Fenced table text must not be selected');
+    }
+  });
+
+  it('handles adjacent tables, boundaries, nesting, and CRLF ranges', () => {
+    const firstGrid = '+---+\n| A |\n+---+';
+    const secondGrid = '+---+\n| B |\n+---+';
+    const adjacent = firstGrid + '\n\n' + secondGrid;
+    for (const { cursor, expected } of [
+      { cursor: adjacent.indexOf('| A |'), expected: firstGrid },
+      { cursor: adjacent.indexOf('| B |'), expected: secondGrid },
+    ]) {
+      const range = findTableRangeAtOffset(adjacent, cursor);
+      if (!range || adjacent.slice(range.start, range.end) !== expected) {
+        throw new Error('Adjacent grid table range crossed a boundary');
+      }
+    }
+    if (findTableRangeAtOffset(adjacent, firstGrid.length + 1)) {
+      throw new Error('Blank line between grid tables must not select either table');
+    }
+
+    const pipe = '| A |\n| --- |\n| 1 |';
+    const pipeAtEnd = findTableRangeAtOffset(pipe, pipe.length);
+    if (!pipeAtEnd || pipe.slice(pipeAtEnd.start, pipeAtEnd.end) !== pipe) {
+      throw new Error('Cursor at table line end should select the table');
+    }
+
+    const html = '<table><tr><td>A</td></tr></table>';
+    const followed = html + 'after';
+    if (findTableRangeAtOffset(followed, html.length)) {
+      throw new Error('Cursor after an inline HTML table must not select it');
+    }
+
+    const nested = '<table><tr><td>before'
+      + '<table><tr><td>inner</td></tr></table>'
+      + 'after</td></tr></table>';
+    const nestedRange = findTableRangeAtOffset(nested, nested.indexOf('inner'));
+    if (!nestedRange || nested.slice(nestedRange.start, nestedRange.end) !== nested) {
+      throw new Error('Nested HTML table cursor should select the complete outer table');
+    }
+
+    const crlf = 'Intro\r\n| A |\r\n| --- |\r\n| 1 |\r\nOutro';
+    const crlfExpected = '| A |\r\n| --- |\r\n| 1 |';
+    const crlfRange = findTableRangeAtOffset(crlf, crlf.indexOf('| 1 |'));
+    if (!crlfRange || crlf.slice(crlfRange.start, crlfRange.end) !== crlfExpected) {
+      throw new Error('CRLF table range did not preserve source boundaries');
+    }
+  });
+
   it('simple HTML → expanded pipe table', () => {
     const html = '<table><tr><th>Name</th><th>Age</th></tr><tr><td>Alice</td><td>30</td></tr></table>';
     const result = reflowTable(html);
@@ -1448,6 +1540,182 @@ describe('HTML table support for Expand/Compact Table', () => {
     const result = compactTable(html);
     if (!result.newText.includes('| Name |')) throw new Error('Expected compact header');
     if (!result.newText.includes('| --- |')) throw new Error('Expected minimal separator');
+  });
+
+  it('uses one grid header boundary for multiple leading HTML header rows', () => {
+    const html = '<table>'
+      + '<tr><th>Header 1</th></tr>'
+      + '<tr><th>Header 2</th></tr>'
+      + '<tr><td>Body 1</td></tr>'
+      + '<tr><th>Later header tag</th></tr>'
+      + '<tr><td>Body 2</td></tr>'
+      + '</table>';
+    for (const transform of [reflowTable, compactTable]) {
+      const result = transform(html).newText;
+      if (!result.startsWith('+') || !result.includes('+======')) {
+        throw new Error('Expected one grid table with a header boundary, got: ' + result);
+      }
+      for (const value of [
+        'Header 1', 'Header 2', 'Body 1', 'Later header tag', 'Body 2',
+      ]) {
+        if (!result.includes(value)) {
+          throw new Error('Missing ' + value + ' from grid table: ' + result);
+        }
+      }
+
+      const preprocessed = preprocessGridTables(result);
+      const encoded = /<!-- MANUSCRIPT_GRID_TABLE:([^ ]+) -->/.exec(preprocessed)?.[1];
+      if (!encoded) throw new Error('Generated grid table did not preprocess: ' + result);
+      const parsed = JSON.parse(Buffer.from(encoded, 'base64').toString()) as {
+        rows: Array<{ header: boolean }>;
+      };
+      const headerFlags = parsed.rows.map(row => row.header);
+      if (JSON.stringify(headerFlags) !== JSON.stringify([
+        true, true, false, false, false,
+      ])) {
+        throw new Error('Later header tag changed grid header flags: ' + headerFlags);
+      }
+    }
+  });
+
+  it('ignores structural closers inside raw text and comments', () => {
+    const html = '<table><tr><th>H</th></tr><tr><td>'
+      + '<script>"</td></tr></table>"</script>'
+      + '<!-- </td></tr></table> -->after'
+      + '</td></tr></table>';
+    for (const transform of [reflowTable, compactTable]) {
+      const result = transform(html).newText;
+      if (!result.includes('"&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;"after')) {
+        throw new Error('Expected full structurally scanned cell, got: ' + result);
+      }
+    }
+  });
+
+  it('escapes entity-authored citation and angle syntax on output', () => {
+    const html = '<table><tr><th>H</th></tr><tr>'
+      + '<td>&#64;smith</td>'
+      + '<td>[@jones, &lt;em&gt;x&lt;/em&gt;]</td>'
+      + '</tr></table>';
+    for (const transform of [reflowTable, compactTable]) {
+      const result = transform(html).newText;
+      if (!result.includes('\\@smith')) {
+        throw new Error('Expected entity-authored @ to stay escaped, got: ' + result);
+      }
+      if (!result.includes('[@jones, &lt;em&gt;x&lt;/em&gt;]')) {
+        throw new Error('Expected entity-authored angles to stay literal, got: ' + result);
+      }
+      if (result.includes('[@smith]') || result.includes('<em>x</em>')) {
+        throw new Error('Entity-authored syntax became active: ' + result);
+      }
+    }
+  });
+
+  it('keeps GFM-disallowed raw HTML text literal during formatting', () => {
+    const rawText = '<em>@hidden</em><!-- note -->';
+    const expected = '&lt;em&gt;\\@hidden&lt;/em&gt;&lt;!-- note --&gt;';
+    for (const tag of [
+      'title', 'textarea', 'style', 'xmp', 'iframe',
+      'noembed', 'noframes', 'script', 'plaintext',
+    ]) {
+      const html = '<table><tr><th>H</th></tr><tr><td><' + tag + '>'
+        + rawText + '</' + tag + '></td></tr></table>';
+      for (const transform of [reflowTable, compactTable]) {
+        const result = transform(html).newText;
+        if (scanCitationDocument(result).usages.length > 0) {
+          throw new Error('Raw HTML text became a citation: ' + result);
+        }
+        if (!result.includes(expected)) {
+          throw new Error('Expected raw HTML syntax to stay literal, got: ' + result);
+        }
+        if (result.includes('<em>') || result.includes('<!-- note -->')) {
+          throw new Error('Raw HTML text became active markup: ' + result);
+        }
+      }
+    }
+  });
+
+  it('keeps entity-derived at-signs literal across backslash parity', () => {
+    for (let backslashes = 0; backslashes <= 3; backslashes++) {
+      const html = '<table><tr><th>H</th></tr><tr><td>'
+        + '\\'.repeat(backslashes) + '&#64;hidden</td></tr></table>';
+      const expected = '\\'.repeat(backslashes * 2 + 1) + '@hidden';
+      for (const transform of [reflowTable, compactTable]) {
+        const result = transform(html).newText;
+        if (!result.includes(expected)) {
+          throw new Error('Expected literal backslash parity ' + expected + ', got: ' + result);
+        }
+        if (scanCitationDocument(result).usages.length > 0) {
+          throw new Error('Entity-authored @ became a citation: ' + result);
+        }
+      }
+    }
+  });
+
+  it('keeps data-embed-idx cells citation-literal during formatting', () => {
+    const html = '<table data-embed-idx="0"><tr><th>H</th></tr>'
+      + '<tr><td>@smith [@jones]</td></tr></table>';
+    for (const transform of [reflowTable, compactTable]) {
+      const result = transform(html).newText;
+      if (!result.includes('\\@smith [\\@jones]')) {
+        throw new Error('Expected embedded citations to stay escaped, got: ' + result);
+      }
+    }
+  });
+
+  it('HTML citations retain narrative, bracketed, and suppress-author syntax', () => {
+    const html = '<table><tr><th>Citations</th></tr><tr><td>@alpha [@beta] [-@gamma]</td></tr></table>';
+    for (const transform of [reflowTable, compactTable]) {
+      const result = transform(html);
+      for (const citation of ['@alpha', '[@beta]', '[-@gamma]']) {
+        if (!result.newText.includes(citation)) {
+          throw new Error('Expected ' + citation + ' in converted table, got: ' + result.newText);
+        }
+      }
+    }
+  });
+
+  it('canonicalizes formatting boundaries inside atomic HTML citations', () => {
+    const cases = [
+      {
+        html: '<table><tr><th>Citation</th></tr><tr><td><em>[@alpha</em>; @beta]</td></tr></table>',
+        expected: '*[@alpha; @beta]*',
+      },
+      {
+        html: '<table><tr><th>Citation</th></tr><tr><td>[@alpha; <em>@beta] inside</em></td></tr></table>',
+        expected: '[@alpha; @beta]* inside*',
+      },
+      {
+        html: '<table><tr><th>Citation</th></tr><tr><td>[<em>-@alpha</em>]</td></tr></table>',
+        expected: '[-@alpha]',
+      },
+      {
+        html: '<table><tr><th>Citation</th></tr><tr><td><em>before [@alpha] after</em></td></tr></table>',
+        expected: '*before [@alpha] after*',
+      },
+      {
+        html: '<table><tr><th>Citation</th></tr><tr><td>[@alpha&#59; @beta]</td></tr></table>',
+        expected: '[@alpha; @beta]',
+      },
+      {
+        html: '<table><tr><th>Citation</th></tr><tr><td><em>[@alpha; <em>@beta] inner</em> outer</em></td></tr></table>',
+        expected: '*[@alpha; @beta] inner outer*',
+      },
+      {
+        html: '<table><tr><th>Citation</th></tr><tr><td>[@smith, &lt;em&gt;x&lt;/em&gt;]</td></tr></table>',
+        expected: '[@smith, &lt;em&gt;x&lt;/em&gt;]',
+      },
+    ];
+    for (const transform of [reflowTable, compactTable]) {
+      for (const { html, expected } of cases) {
+        const result = transform(html);
+        if (!result.newText.includes(expected)) {
+          throw new Error('Expected ' + expected + ' in converted table, got: ' + result.newText);
+        }
+        if (result.newText.includes('<em>') || result.newText.includes('</em>')) {
+          throw new Error('Expected internal citation tags to be canonicalized, got: ' + result.newText);
+        }
+      }
+    }
   });
 
   it('HTML with bold, italic, code → markdown formatting in cells', () => {

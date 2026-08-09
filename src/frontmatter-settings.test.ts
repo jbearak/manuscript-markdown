@@ -57,6 +57,21 @@ describe('getFrontmatterSettingEdit', () => {
 		});
 	});
 
+	test('finds and inserts settings at a consistently indented logical root', () => {
+		const existing = '---\n  font: Georgia\n  title: Draft\n---\n';
+		const edit = getFrontmatterSettingEdit(existing, '\n', 'font');
+		expect(existing.slice(edit.selectionStart, edit.selectionEnd)).toBe('Georgia');
+		expect(edit.text).toBe('');
+
+		const missing = '---\n  title: Draft\n---\n';
+		const insertion = getFrontmatterSettingEdit(missing, '\n', 'font');
+		const applied = missing.slice(0, insertion.offset)
+			+ insertion.text
+			+ missing.slice(insertion.offset);
+		expect(applied).toBe('---\n  title: Draft\n  font: \n---\n');
+		expect(insertion.selectionStart).toBe(applied.indexOf('\n---'));
+	});
+
 	test('selects an entire multiline nocite value without consuming the next setting', () => {
 		for (const markdown of [
 			'---\nnocite: # entries\n  - "@org:paper"\n  - @beta\ncsl: apa\n---\n',
@@ -71,6 +86,36 @@ describe('getFrontmatterSettingEdit', () => {
 		}
 	});
 
+	test('stops a multiline flow nocite selection at the root collection close', () => {
+		const markdown = '---\nnocite: [\n  @alpha\n]\n@beta\n---\n';
+		const edit = getFrontmatterSettingEdit(markdown, '\n', 'nocite');
+		expect(markdown.slice(edit.selectionStart, edit.selectionEnd)).toBe('[\n  @alpha\n]');
+	});
+
+	test('bounds multiline nocite selection at malformed YAML recovery points', () => {
+		for (const { markdown, expected } of [
+			{
+				markdown: '---\nnocite: [\n  @alpha\n] @beta\n---\n',
+				expected: '[\n  @alpha\n]',
+			},
+			{
+				markdown: '---\nnocite: [\n  @alpha\n}\ntitle: @hidden\n---\n',
+				expected: '[\n  @alpha\n}',
+			},
+			{
+				markdown: '---\nnocite:\n-custom: @outside\n---\n',
+				expected: '',
+			},
+			{
+				markdown: '---\nnocite: [\n  @alpha\n-custom: @outside\n---\n',
+				expected: '[\n  @alpha',
+			},
+		]) {
+			const edit = getFrontmatterSettingEdit(markdown, '\n', 'nocite');
+			expect(markdown.slice(edit.selectionStart, edit.selectionEnd)).toBe(expected);
+		}
+	});
+
 	test('recognizes an existing alias without rewriting it', () => {
 		expect(getFrontmatterSettingEdit('---\nbib: sources.bib\n---\n', '\n', 'bibliography')).toEqual({
 			offset: 9,
@@ -78,6 +123,42 @@ describe('getFrontmatterSettingEdit', () => {
 			selectionStart: 9,
 			selectionEnd: 20,
 		});
+	});
+
+	test('recognizes supported quoted logical-root keys and aliases', () => {
+		for (const { markdown, key, expected } of [
+			{
+				markdown: '---\n"font": Georgia\n---\n',
+				key: 'font',
+				expected: 'Georgia',
+			},
+			{
+				markdown: "---\n  'font': Georgia\n---\n",
+				key: 'font',
+				expected: 'Georgia',
+			},
+			{
+				markdown: '---\n"f\\u006fnt": Georgia\n---\n',
+				key: 'font',
+				expected: 'Georgia',
+			},
+			{
+				markdown: '---\n"b\\u0069b": sources.bib\n---\n',
+				key: 'bibliography',
+				expected: 'sources.bib',
+			},
+		]) {
+			const edit = getFrontmatterSettingEdit(markdown, '\n', key);
+			expect(edit.text).toBe('');
+			expect(markdown.slice(edit.selectionStart, edit.selectionEnd)).toBe(expected);
+		}
+	});
+
+	test('does not treat nested quoted keys as logical-root settings', () => {
+		const markdown = '---\nstyles:\n  "font": Georgia\n---\n';
+		const edit = getFrontmatterSettingEdit(markdown, '\n', 'font');
+		const applied = markdown.slice(0, edit.offset) + edit.text + markdown.slice(edit.offset);
+		expect(applied).toBe('---\nstyles:\n  "font": Georgia\nfont: \n---\n');
 	});
 
 	test('recognizes frontmatter after a UTF-8 BOM', () => {
@@ -107,12 +188,40 @@ describe('getFrontmatterSettingEdit', () => {
 		});
 	});
 
-	test('matches parser handling of opening delimiters longer than three hyphens', () => {
-		expect(getFrontmatterSettingEdit('----\nfont: Georgia\n---\nBody', '\n', 'font')).toEqual({
-			offset: 11,
+	test('recognizes canonical closers and delimiter whitespace without duplicating frontmatter', () => {
+		const existing = '---   \nfont: Georgia\n...  \nBody';
+		expect(getFrontmatterSettingEdit(existing, '\n', 'font')).toEqual({
+			offset: 13,
 			text: '',
-			selectionStart: 11,
-			selectionEnd: 18,
+			selectionStart: 13,
+			selectionEnd: 20,
+		});
+
+		for (const { markdown, eol, expected } of [
+			{
+				markdown: '---   \ntitle: Draft\n...  \nBody',
+				eol: '\n' as const,
+				expected: '---   \ntitle: Draft\nfont: \n...  \nBody',
+			},
+			{
+				markdown: '---\r\ntitle: Draft\r\n---  \r\nBody',
+				eol: '\r\n' as const,
+				expected: '---\r\ntitle: Draft\r\nfont: \r\n---  \r\nBody',
+			},
+		]) {
+			const edit = getFrontmatterSettingEdit(markdown, eol, 'font');
+			const applied = markdown.slice(0, edit.offset) + edit.text + markdown.slice(edit.offset);
+			expect(applied).toBe(expected);
+			expect(edit.offset).toBeGreaterThan(0);
+		}
+	});
+
+	test('does not treat longer thematic breaks as frontmatter openers', () => {
+		expect(getFrontmatterSettingEdit('----\nfont: Georgia\n---\nBody', '\n', 'font')).toEqual({
+			offset: 0,
+			text: '---\nfont: \n---\n',
+			selectionStart: 10,
+			selectionEnd: 10,
 		});
 	});
 

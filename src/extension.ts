@@ -1263,7 +1263,7 @@ function applyLineBasedFormatting(formatter: (text: string) => formatting.TextTr
 /**
  * Helper function to apply table formatting
  * If text is selected: applies to all selected lines
- * If no selection: detects table boundaries by looking for empty lines above and below
+ * If no selection: applies only to the pipe, grid, or HTML table at the cursor
  * @param formatter - Function that takes text and returns a TextTransformation
  */
 function applyTableFormatting(formatter: (text: string) => formatting.TextTransformation): void {
@@ -1274,47 +1274,26 @@ function applyTableFormatting(formatter: (text: string) => formatting.TextTransf
 
 	editor.edit(editBuilder => {
 		for (const selection of editor.selections) {
-			let startLine: number;
-			let endLine: number;
-
+			let formattingRange: vscode.Range;
 			if (selection.isEmpty) {
-				// No selection - detect table boundaries
-				const cursorLine = selection.active.line;
-				
-				// Find start of table (look upward for empty line or document start)
-				startLine = cursorLine;
-				while (startLine > 0) {
-					const lineText = editor.document.lineAt(startLine - 1).text.trim();
-					if (lineText === '') {
-						break;
-					}
-					startLine--;
-				}
-				
-				// Find end of table (look downward for empty line or document end)
-				endLine = cursorLine;
-				const lastLine = editor.document.lineCount - 1;
-				while (endLine < lastLine) {
-					const lineText = editor.document.lineAt(endLine + 1).text.trim();
-					if (lineText === '') {
-						break;
-					}
-					endLine++;
-				}
+				const documentText = editor.document.getText();
+				const cursorOffset = editor.document.offsetAt(selection.active);
+				const tableRange = formatting.findTableRangeAtOffset(documentText, cursorOffset);
+				if (!tableRange) continue;
+				formattingRange = new vscode.Range(
+					editor.document.positionAt(tableRange.start),
+					editor.document.positionAt(tableRange.end),
+				);
 			} else {
-				// Text is selected - expand to full lines
-				startLine = selection.start.line;
-				endLine = selection.end.line;
+				formattingRange = new vscode.Range(
+					editor.document.lineAt(selection.start.line).range.start,
+					editor.document.lineAt(selection.end.line).range.end,
+				);
 			}
 
-			const fullLineRange = new vscode.Range(
-				editor.document.lineAt(startLine).range.start,
-				editor.document.lineAt(endLine).range.end
-			);
-			
-			const text = editor.document.getText(fullLineRange);
+			const text = editor.document.getText(formattingRange);
 			const transformation = formatter(text);
-			editBuilder.replace(fullLineRange, transformation.newText);
+			editBuilder.replace(formattingRange, transformation.newText);
 		}
 	});
 }

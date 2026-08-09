@@ -17,9 +17,13 @@ function getLeadingRawHtmlTagName(html: string): string | undefined {
   return match[1].toLowerCase();
 }
 
+export function isGfmDisallowedRawHtmlTagName(tagName: string): boolean {
+  return DISALLOWED_RAW_HTML_TAGS.has(tagName.toLowerCase());
+}
+
 export function isGfmDisallowedRawHtml(html: string): boolean {
   const tagName = getLeadingRawHtmlTagName(html);
-  return !!tagName && DISALLOWED_RAW_HTML_TAGS.has(tagName);
+  return !!tagName && isGfmDisallowedRawHtmlTagName(tagName);
 }
 
 export function escapeHtmlText(text: string): string {

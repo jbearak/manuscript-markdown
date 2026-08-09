@@ -1,26 +1,36 @@
 import MarkdownIt from 'markdown-it';
+import { isGfmDisallowedRawHtmlTagName } from './gfm';
 import {
 	computeCodeRegions,
 	computeMarkdownInlineBlocks,
 	computeMarkdownParsedBlocks,
+	isBlankMarkdownContainerLine,
 	type MarkdownInlineBlock,
 } from './code-regions';
 import {
 	findCitationFrontmatterBounds,
 	findFrontmatterBounds,
+	findFrontmatterOpeningBounds,
+	findFrontmatterRootIndent,
+	findYamlMappingColon,
+	MAX_PROVISIONAL_FRONTMATTER_LOOKAHEAD,
+	parseYamlStringScalar,
 	type FrontmatterBounds,
 } from './frontmatter';
 import {
+	createNociteContinuationState,
+	decodeNociteYamlText,
 	isBoundaryValidNociteToken,
 	isCitekeyChar,
 	isEmailSeparatorAt,
 	isEscaped,
 	isNociteContinuationLine,
-	nociteValueMode,
-	parseBracketCitationItems,
+	isTopLevelFrontmatterMappingLine,
+	parseBracketCitationRemainder,
 	previousCodePoint,
 	readMarkdownCitekey,
 	scanNociteTokens,
+	yamlCommentStart,
 	type BracketCitationItem,
 } from './citekey';
 
@@ -47,6 +57,14 @@ export interface CitationCompletionContext {
 	form: CitationForm;
 }
 
+export interface CitationUsageGroup {
+	start: number;
+	end: number;
+	form: 'bracket' | 'bare';
+	usages: readonly CitationUsage[];
+	items: readonly BracketCitationItem[];
+}
+
 export interface CitationOffsetRange {
 	start: number;
 	end: number;
@@ -54,9 +72,11 @@ export interface CitationOffsetRange {
 
 type OffsetRange = CitationOffsetRange;
 
-interface NociteRegion extends OffsetRange {
+export interface CitationNociteRegion extends OffsetRange {
 	blockScalar: boolean;
 }
+
+type NociteRegion = CitationNociteRegion;
 
 export interface CitationBracketAnalysis {
 	/** Every @ offset inside an escape-aware bracket stack, closed or unfinished. */
@@ -77,15 +97,35 @@ export interface CitationDocumentAnalysis {
 	citationMarkupRanges: readonly CitationOffsetRange[];
 	referenceLabels: ReadonlySet<string>;
 	inlineLinkLabels: ReadonlySet<string>;
+	referenceLinkLabels: ReadonlyMap<string, string>;
 	visibleLinkLabels: ReadonlySet<string>;
+	imageLabels: ReadonlySet<string>;
+	imageLabelRanges: readonly CitationOffsetRange[];
+	frontmatterBounds?: FrontmatterBounds;
+	citationBlocks: readonly MarkdownInlineBlock[];
 	brackets: CitationBracketAnalysis;
 	bracketItems: ReadonlyMap<number, BracketCitationItem>;
-	nociteRegions: readonly CitationOffsetRange[];
+	nociteRegions: readonly CitationNociteRegion[];
 }
 
 const BARE_LEFT_EXCLUSION_RE = /[\p{L}\p{M}\p{N}._:\-\/+\x3d`]/u;
 const BODY_LEFT_EXCLUSION_RE = /[\p{L}\p{M}\p{N}._\/+\x3d`]/u;
 const referenceMarkdownIt = new MarkdownIt({ html: true, linkify: true });
+
+// Keep these element-tag productions aligned with markdown-it/lib/common/html_re.mjs.
+// Scanner candidates must satisfy the same CommonMark HTML grammar before their
+// contents become citation-inert.
+const COMMONMARK_HTML_ATTRIBUTE_NAME = '[A-Za-z_:][A-Za-z0-9:._-]*';
+const COMMONMARK_HTML_UNQUOTED_VALUE = '[^"\'=<>`\\x00-\\x20]+';
+const COMMONMARK_HTML_ATTRIBUTE_VALUE = '(?:' + COMMONMARK_HTML_UNQUOTED_VALUE
+	+ '|\'[^\']*\'|"[^"]*")';
+const COMMONMARK_HTML_ATTRIBUTE = '(?:\\s+' + COMMONMARK_HTML_ATTRIBUTE_NAME
+	+ '(?:\\s*=\\s*' + COMMONMARK_HTML_ATTRIBUTE_VALUE + ')?)';
+const COMMONMARK_HTML_ELEMENT_TAG_RE = new RegExp(
+	'^(?:<[A-Za-z][A-Za-z0-9\\-]*' + COMMONMARK_HTML_ATTRIBUTE
+	+ '*\\s*\\/?>|<\\/[A-Za-z][A-Za-z0-9\\-]*\\s*>)$',
+);
+const HTML_ENTITY_CANDIDATE_RE = /&(?:#[xX][0-9A-Fa-f]{1,8}|#[0-9]{1,8}|[A-Za-z][A-Za-z0-9]{1,31});/y;
 
 function mergeRanges(ranges: OffsetRange[]): OffsetRange[] {
 	if (ranges.length === 0) return [];
@@ -139,13 +179,15 @@ function lineRanges(text: string): OffsetRange[] {
 
 function maskRanges(text: string, ranges: readonly OffsetRange[]): string {
 	if (ranges.length === 0) return text;
-	const chars = text.split('');
-	for (const range of ranges) {
-		for (let i = range.start; i < range.end; i++) {
-			if (chars[i] !== '\n' && chars[i] !== '\r') chars[i] = ' ';
-		}
+	const parts: string[] = [];
+	let cursor = 0;
+	for (const range of mergeRanges([...ranges])) {
+		if (range.start > cursor) parts.push(text.slice(cursor, range.start));
+		parts.push(text.slice(range.start, range.end).replace(/[^\r\n]/g, ' '));
+		cursor = Math.max(cursor, range.end);
 	}
-	return chars.join('');
+	if (cursor < text.length) parts.push(text.slice(cursor));
+	return parts.join('');
 }
 
 function indexOfWithin(
@@ -176,6 +218,10 @@ function computeHtmlCommentRegions(
 		while (cursor < block.end) {
 			const start = indexOfWithin(text, '<!--', cursor, block.end);
 			if (start === -1) break;
+			if (isEscaped(text, start)) {
+				cursor = start + 1;
+				continue;
+			}
 			const close = indexOfWithin(text, '-->', start + 4, block.end);
 			if (close !== -1) {
 				const end = close + 3;
@@ -193,7 +239,14 @@ function computeHtmlCommentRegions(
 	return regions;
 }
 
-function computeHtmlTagRegions(
+function isHtmlTagCandidateAt(text: string, start: number, end: number): boolean {
+	return start < end - 1
+		&& text[start] === '<'
+		&& /[A-Za-z/!?]/.test(text[start + 1])
+		&& !isEscaped(text, start);
+}
+
+export function computeHtmlTagRegions(
 	text: string,
 	parserBlocks: readonly OffsetRange[],
 ): OffsetRange[] {
@@ -206,7 +259,7 @@ function computeHtmlTagRegions(
 	for (const block of parserBlocks) {
 		let candidateCount = 0;
 		for (let cursor = block.start; cursor < block.end - 1; cursor++) {
-			if (text[cursor] === '<' && /[A-Za-z/!?]/.test(text[cursor + 1])) candidateCount++;
+			if (isHtmlTagCandidateAt(text, cursor, block.end)) candidateCount++;
 		}
 		if (candidateCount === 0) continue;
 
@@ -230,7 +283,7 @@ function computeHtmlTagRegions(
 			singleQuotedEnd = char === "'" ? nextUnquotedEnd : nextSingleQuotedEnd;
 			doubleQuotedEnd = char === '"' ? nextUnquotedEnd : nextDoubleQuotedEnd;
 			const start = cursor - 1;
-			if (start >= block.start && text[start] === '<' && /[A-Za-z/!?]/.test(char)) {
+			if (start >= block.start && isHtmlTagCandidateAt(text, start, block.end)) {
 				candidateEnds[candidateIndex--] = unquotedEnd;
 			}
 		}
@@ -238,11 +291,87 @@ function computeHtmlTagRegions(
 		candidateIndex = 0;
 		let consumedThrough = block.start;
 		for (let start = block.start; start < block.end - 1; start++) {
-			if (text[start] !== '<' || !/[A-Za-z/!?]/.test(text[start + 1])) continue;
+			if (!isHtmlTagCandidateAt(text, start, block.end)) continue;
 			const end = candidateEnds[candidateIndex++];
-			if (start < consumedThrough || end === -1) continue;
+			if (
+				start < consumedThrough
+				|| end === -1
+				|| !COMMONMARK_HTML_ELEMENT_TAG_RE.test(text.slice(start, end))
+			) continue;
 			regions.push({ start, end });
 			consumedThrough = end;
+		}
+	}
+	return regions;
+}
+
+interface HtmlElementTag {
+	name: string;
+	closing: boolean;
+	range: OffsetRange;
+}
+
+function parseHtmlElementTag(text: string, range: OffsetRange): HtmlElementTag | undefined {
+	const source = text.slice(range.start, range.end);
+	const match = /^<(\/)?([A-Za-z][A-Za-z0-9-]*)(?=[\s/>])/.exec(source);
+	if (!match) return undefined;
+	return {
+		name: match[2].toLowerCase(),
+		closing: match[1] !== undefined,
+		range,
+	};
+}
+
+function findRawHtmlCloser(
+	text: string,
+	name: string,
+	start: number,
+	end: number,
+): OffsetRange | undefined {
+	const closer = new RegExp('<\\/' + name + '\\s*>', 'ig');
+	closer.lastIndex = start;
+	while (closer.lastIndex < end) {
+		const match = closer.exec(text);
+		if (!match || match.index >= end) return undefined;
+		const range = { start: match.index, end: match.index + match[0].length };
+		if (range.end <= end && COMMONMARK_HTML_ELEMENT_TAG_RE.test(match[0])) return range;
+	}
+	return undefined;
+}
+
+function computeHtmlCitationInertContentRegions(
+	text: string,
+	parserBlocks: readonly OffsetRange[],
+	tagRanges: readonly OffsetRange[],
+): OffsetRange[] {
+	const isCitationInertElement = (name: string): boolean =>
+		name === 'code' || isGfmDisallowedRawHtmlTagName(name);
+	const tags = tagRanges
+		.map(range => parseHtmlElementTag(text, range))
+		.filter((tag): tag is HtmlElementTag => tag !== undefined);
+	const regions: OffsetRange[] = [];
+	let tagIndex = 0;
+	for (const block of parserBlocks) {
+		while (tagIndex < tags.length && tags[tagIndex].range.end <= block.start) tagIndex++;
+		let cursor = tagIndex;
+		while (cursor < tags.length && tags[cursor].range.start < block.end) {
+			const opener = tags[cursor];
+			if (opener.closing || !isCitationInertElement(opener.name)) {
+				cursor++;
+				continue;
+			}
+
+			// Raw-text contents are not parsed as nested tags. Scan the source directly
+			// for the first matching valid closer so quote-like fake tags cannot hide it.
+			const close = opener.name === 'plaintext'
+				? undefined
+				: findRawHtmlCloser(text, opener.name, opener.range.end, block.end);
+			const contentEnd = close?.start ?? block.end;
+			if (contentEnd > opener.range.end) {
+				regions.push({ start: opener.range.end, end: contentEnd });
+			}
+			const consumedEnd = close?.end ?? block.end;
+			while (cursor < tags.length && tags[cursor].range.start < consumedEnd) cursor++;
 		}
 	}
 	return regions;
@@ -255,6 +384,20 @@ function isLinkSpace(char: string): boolean {
 function isRawDestinationBreak(char: string, escaped = false): boolean {
 	const code = char.charCodeAt(0);
 	return code === 0x20 || (!escaped && (code < 0x20 || code === 0x7F));
+}
+
+function hasAcceptedMarkdownDestination(
+	text: string,
+	start: number,
+	max: number,
+	allowEmptyBeforeClose: boolean,
+): boolean {
+	let cursor = start;
+	while (cursor < max && isLinkSpace(text[cursor])) cursor++;
+	if (allowEmptyBeforeClose && text[cursor] === ')') return true;
+	const destination = referenceMarkdownIt.helpers.parseLinkDestination(text, cursor, max);
+	if (!destination.ok) return false;
+	return referenceMarkdownIt.validateLink(referenceMarkdownIt.normalizeLink(destination.str));
 }
 
 function isValidInlineLinkContent(text: string, start: number, end: number): boolean {
@@ -375,10 +518,14 @@ function computeLinkDestinationRegions(
 ): {
 	destinations: OffsetRange[];
 	labels: Set<string>;
+	referenceLabelsByRange: Map<string, string>;
 } {
 	const destinations: OffsetRange[] = [];
 	const labels = new Set<string>();
-	if (!text.includes('](') && !text.includes('][')) return { destinations, labels };
+	const referenceLabelsByRange = new Map<string, string>();
+	if (!text.includes('](') && !text.includes('][')) {
+		return { destinations, labels, referenceLabelsByRange };
+	}
 	for (const block of inlineBlocks) {
 		const labelStack: number[] = [];
 		let lastRawClose: number | undefined;
@@ -401,6 +548,10 @@ function computeLinkDestinationRegions(
 				}
 				if (cursor < block.end && text[cursor] === ']') {
 					destinations.push({ start: i + 2, end: cursor });
+					referenceLabelsByRange.set(
+						labelStart + ':' + (i + 1),
+						text.slice(i + 2, cursor),
+					);
 					i = cursor;
 				}
 				continue;
@@ -418,21 +569,24 @@ function computeLinkDestinationRegions(
 			// cannot possibly close. This keeps repeated malformed input linear without
 			// dense per-character indexes for a block containing one ordinary link.
 			const cursor = parseInlineLinkDestinationEnd(text, start, max);
-			if (cursor !== undefined) {
+			if (
+				cursor !== undefined
+				&& hasAcceptedMarkdownDestination(text, start, max, true)
+			) {
 				destinations.push({ start, end: cursor });
 				labels.add(labelStart + ':' + (i + 1));
 				i = cursor;
 			}
 		}
 	}
-	return { destinations, labels };
+	return { destinations, labels, referenceLabelsByRange };
 }
 
 function normalizeReferenceLabel(label: string): string {
 	return referenceMarkdownIt.utils.normalizeReference(label);
 }
 
-function computeReferenceDefinitionLabels(candidateText: string, markdown: string): Set<string> {
+function computeReferenceDefinitionLabels(candidateText: string): Set<string> {
 	const candidates = new Set<string>();
 	for (const line of lineRanges(candidateText)) {
 		const content = candidateText.slice(line.start, line.end).replace(/\r?\n$/, '');
@@ -441,12 +595,12 @@ function computeReferenceDefinitionLabels(candidateText: string, markdown: strin
 	}
 	if (candidates.size === 0) return candidates;
 
-	// Parse the original Markdown once so angle destinations and all destination/
-	// title semantics stay identical to Markdown-it. Intersecting with candidates
-	// found in the structurally masked text preserves the scanner's existing root-
-	// definition scope and keeps footnote definitions available for citation scans.
+	// Parse the structurally masked Markdown once so definitions inside frontmatter,
+	// code, and other inert regions cannot validate a body reference. Intersecting
+	// parser results with root-level candidates keeps destination/title semantics
+	// identical to Markdown-it while preserving the scanner's definition scope.
 	const environment: { references?: Record<string, unknown> } = {};
-	referenceMarkdownIt.parse(markdown, environment);
+	referenceMarkdownIt.parse(candidateText, environment);
 	const references = environment.references;
 	if (!references) return new Set();
 	return new Set([...candidates].filter(label => Object.hasOwn(references, label)));
@@ -455,6 +609,7 @@ function computeReferenceDefinitionLabels(candidateText: string, markdown: strin
 function isReferenceDestinationLine(line: string): boolean {
 	const contentStart = line.match(/^[ \t]*/)?.[0].length ?? 0;
 	return line.slice(contentStart).trim().length > 0
+		&& hasAcceptedMarkdownDestination(line, contentStart, line.length, false)
 		&& isValidInlineLinkContent(line, contentStart, line.length);
 }
 
@@ -469,17 +624,28 @@ function computeReferenceDefinitionRegions(text: string): OffsetRange[] {
 		if (!definition) continue;
 		let end = line.end;
 		let nextIndex = i + 1;
-		if (content.slice(definition[0].length).trim().length === 0) {
+		const inlineDestinationStart = definition[0].length;
+		let hasDestination = content.slice(inlineDestinationStart).trim().length > 0
+			&& hasAcceptedMarkdownDestination(
+				content,
+				inlineDestinationStart,
+				content.length,
+				false,
+			)
+			&& isValidInlineLinkContent(content, inlineDestinationStart, content.length);
+		if (!hasDestination && content.slice(inlineDestinationStart).trim().length === 0) {
 			const destination = lines[nextIndex];
 			if (destination) {
 				const destinationText = text.slice(destination.start, destination.end).replace(/\r?\n$/, '');
 				if (isReferenceDestinationLine(destinationText) && !titleLine.test(destinationText)) {
+					hasDestination = true;
 					end = destination.end;
 					i = nextIndex;
 					nextIndex++;
 				}
 			}
 		}
+		if (!hasDestination) continue;
 		const title = lines[nextIndex];
 		if (title) {
 			const titleText = text.slice(title.start, title.end).replace(/\r?\n$/, '');
@@ -555,6 +721,31 @@ function computeCriticAttributionRegions(text: string): OffsetRange[] {
 		}
 	}
 	return regions;
+}
+
+function computeCriticDeletionCloserOffsets(
+	text: string,
+	inlineBlocks: readonly OffsetRange[],
+): ReadonlySet<number> {
+	const closers = new Set<number>();
+	for (const block of inlineBlocks) {
+		let depth = 0;
+		for (let cursor = block.start; cursor < block.end;) {
+			if (text.startsWith('{--', cursor) && !isEscaped(text, cursor)) {
+				depth++;
+				cursor += 3;
+				continue;
+			}
+			if (depth > 0 && text.startsWith('--}', cursor) && !isEscaped(text, cursor)) {
+				closers.add(cursor);
+				depth--;
+				cursor += 3;
+				continue;
+			}
+			cursor++;
+		}
+	}
+	return closers;
 }
 
 function computeUriRegions(text: string): OffsetRange[] {
@@ -673,37 +864,272 @@ function isCitationItemMarkerAt(
 	return atOffset === start || (text[start] === '-' && atOffset === start + 1);
 }
 
+interface BracketProjection {
+	text: string;
+	sourceStarts: number[];
+	sourceEnds: number[];
+	/** True only for characters authored directly rather than decoded from an entity. */
+	authored: boolean[];
+}
+
+function projectVisibleBracketSource(
+	text: string,
+	bracket: OffsetRange,
+	markupRanges: readonly OffsetRange[],
+): BracketProjection {
+	let visible = '';
+	const sourceStarts: number[] = [];
+	const sourceEnds: number[] = [];
+	const authored: boolean[] = [];
+	const append = (value: string, start: number, end: number, isAuthored: boolean) => {
+		visible += value;
+		for (let index = 0; index < value.length; index++) {
+			sourceStarts.push(start);
+			sourceEnds.push(end);
+			authored.push(isAuthored);
+		}
+	};
+
+	let markupIndex = 0;
+	while (
+		markupIndex < markupRanges.length
+		&& markupRanges[markupIndex].end <= bracket.start
+	) markupIndex++;
+	for (let cursor = bracket.start; cursor < bracket.end;) {
+		while (
+			markupIndex < markupRanges.length
+			&& markupRanges[markupIndex].end <= cursor
+		) markupIndex++;
+		const markup = markupRanges[markupIndex];
+		if (markup && markup.start < bracket.end && cursor >= markup.start) {
+			cursor = Math.min(markup.end, bracket.end);
+			continue;
+		}
+
+		if (text[cursor] === '&') {
+			HTML_ENTITY_CANDIDATE_RE.lastIndex = cursor;
+			const match = HTML_ENTITY_CANDIDATE_RE.exec(text);
+			if (match && match.index === cursor && cursor + match[0].length <= bracket.end) {
+				const decoded = referenceMarkdownIt.utils.unescapeAll(match[0]);
+				if (decoded !== match[0]) {
+					append(decoded, cursor, cursor + match[0].length, false);
+					cursor += match[0].length;
+					continue;
+				}
+			}
+		}
+		append(text[cursor], cursor, cursor + 1, true);
+		cursor++;
+	}
+	return { text: visible, sourceStarts, sourceEnds, authored };
+}
+
+function projectedBracketSegmentRanges(projection: BracketProjection): OffsetRange[] {
+	const ranges: OffsetRange[] = [];
+	let start = 1;
+	for (let cursor = 1; cursor < projection.text.length; cursor++) {
+		const atEnd = cursor === projection.text.length - 1;
+		if (!atEnd && !(projection.text[cursor] === ';' && projection.authored[cursor])) continue;
+		let left = start;
+		let right = cursor;
+		while (left < right && /\s/.test(projection.text[left])) left++;
+		while (right > left && /\s/.test(projection.text[right - 1])) right--;
+		if (left < right) ranges.push({ start: left, end: right });
+		start = cursor + 1;
+	}
+	return ranges;
+}
+
+function parseProjectedBracketItems(projection: BracketProjection): BracketCitationItem[] {
+	if (projection.text[0] !== '[' || projection.text.at(-1) !== ']') return [];
+	const items: BracketCitationItem[] = [];
+	for (const segment of projectedBracketSegmentRanges(projection)) {
+		let marker = segment.start;
+		let suppressAuthor = false;
+		if (
+			projection.text[marker] === '-'
+			&& projection.authored[marker]
+			&& projection.text[marker + 1] === '@'
+			&& projection.authored[marker + 1]
+		) {
+			suppressAuthor = true;
+			marker++;
+		}
+		if (projection.text[marker] !== '@' || !projection.authored[marker]) continue;
+
+		let keyEnd = marker + 1;
+		let contiguous = true;
+		while (keyEnd < segment.end && isCitekeyChar(projection.text[keyEnd])) {
+			if (
+				!projection.authored[keyEnd]
+				|| (keyEnd > marker + 1
+					&& projection.sourceStarts[keyEnd] !== projection.sourceEnds[keyEnd - 1])
+			) contiguous = false;
+			keyEnd++;
+		}
+		if (keyEnd === marker + 1 || !contiguous) continue;
+
+		let remainderStart = keyEnd;
+		while (remainderStart < segment.end && /\s/.test(projection.text[remainderStart])) {
+			remainderStart++;
+		}
+		if (remainderStart < segment.end && !projection.authored[remainderStart]) continue;
+		const key = projection.text.slice(marker + 1, keyEnd);
+		const metadata = parseBracketCitationRemainder(
+			key,
+			projection.text.slice(keyEnd, segment.end),
+		);
+		if (!metadata) continue;
+		items.push({
+			key,
+			atStart: projection.sourceStarts[marker],
+			keyEnd: projection.sourceEnds[keyEnd - 1],
+			suppressAuthor,
+			...metadata,
+		});
+	}
+	return items;
+}
+
+function citationBracketSegmentCountIgnoringMarkup(
+	text: string,
+	bracket: OffsetRange,
+	markupRanges: readonly OffsetRange[],
+): number {
+	return projectedBracketSegmentRanges(
+		projectVisibleBracketSource(text, bracket, markupRanges),
+	).length;
+}
+
 function parseBracketCitationItemsIgnoringMarkup(
 	text: string,
 	bracket: OffsetRange,
 	markupRanges: readonly OffsetRange[],
 ): BracketCitationItem[] {
-	let low = 0;
-	let high = markupRanges.length;
-	while (low < high) {
-		const mid = (low + high) >>> 1;
-		if (markupRanges[mid].end <= bracket.start) low = mid + 1;
-		else high = mid;
-	}
-	const localMarkup: OffsetRange[] = [];
-	for (let index = low; index < markupRanges.length; index++) {
-		const range = markupRanges[index];
-		if (range.start >= bracket.end) break;
-		localMarkup.push({
-			start: Math.max(range.start, bracket.start) - bracket.start,
-			end: Math.min(range.end, bracket.end) - bracket.start,
-		});
-	}
-	if (localMarkup.length === 0) {
-		return parseBracketCitationItems(text, bracket.start, bracket.end);
+	return parseProjectedBracketItems(projectVisibleBracketSource(text, bracket, markupRanges));
+}
+
+function parseNestedBracketCitationItemIgnoringMarkup(
+	text: string,
+	bracket: OffsetRange,
+	atOffset: number,
+	markupRanges: readonly OffsetRange[],
+): BracketCitationItem | undefined {
+	let separator = bracket.start;
+	for (let cursor = atOffset - 1; cursor > bracket.start;) {
+		const markup = rangeContaining(cursor, markupRanges);
+		if (markup) {
+			cursor = markup.start - 1;
+			continue;
+		}
+		if (text[cursor] === ';') {
+			separator = cursor;
+			break;
+		}
+		cursor--;
 	}
 
-	const localText = maskRanges(text.slice(bracket.start, bracket.end), localMarkup);
-	return parseBracketCitationItems(localText, 0, localText.length).map(item => ({
-		...item,
-		atStart: item.atStart + bracket.start,
-		keyEnd: item.keyEnd + bracket.start,
-	}));
+	let segmentEnd = bracket.end - 1;
+	for (let cursor = atOffset + 1; cursor < bracket.end - 1;) {
+		const markup = rangeContaining(cursor, markupRanges);
+		if (markup) {
+			cursor = markup.end;
+			continue;
+		}
+		if (text[cursor] === ';') {
+			segmentEnd = cursor;
+			break;
+		}
+		cursor++;
+	}
+
+	let visible = '';
+	const sourceStarts: number[] = [];
+	const sourceEnds: number[] = [];
+	for (let cursor = separator + 1; cursor < segmentEnd;) {
+		const markup = rangeContaining(cursor, markupRanges);
+		if (markup) {
+			cursor = markup.end;
+			continue;
+		}
+		visible += text[cursor];
+		sourceStarts.push(cursor);
+		sourceEnds.push(cursor + 1);
+		cursor++;
+	}
+
+	let left = 0;
+	let right = visible.length;
+	if (separator !== bracket.start) {
+		while (left < right && /\s/.test(visible[left])) left++;
+	}
+	while (right > left && /\s/.test(visible[right - 1])) right--;
+	let suppressAuthor = false;
+	let visibleAt = left;
+	if (visible[visibleAt] === '-' && visible[visibleAt + 1] === '@') {
+		suppressAuthor = true;
+		visibleAt++;
+	}
+	if (visible[visibleAt] !== '@' || sourceStarts[visibleAt] !== atOffset) return undefined;
+	const parsed = readMarkdownCitekey(visible, visibleAt + 1);
+	if (!parsed || parsed.end > right) return undefined;
+	for (let index = visibleAt + 2; index < parsed.end; index++) {
+		if (sourceStarts[index] !== sourceEnds[index - 1]) return undefined;
+	}
+	const metadata = parseBracketCitationRemainder(
+		parsed.key,
+		visible.slice(parsed.end, right),
+	);
+	if (!metadata) return undefined;
+	return {
+		key: parsed.key,
+		atStart: atOffset,
+		keyEnd: sourceEnds[parsed.end - 1],
+		suppressAuthor,
+		...metadata,
+	};
+}
+
+function parseNestedBracketCitationItemsIgnoringMarkup(
+	text: string,
+	bracket: OffsetRange,
+	atOffsets: readonly number[],
+	markupRanges: readonly OffsetRange[],
+): BracketCitationItem[] {
+	const sortedOffsets = [...atOffsets].sort((left, right) => left - right);
+	const items: BracketCitationItem[] = [];
+	let markerIndex = 0;
+	let segmentStart = bracket.start + 1;
+	const processSegment = (segmentEnd: number) => {
+		while (markerIndex < sortedOffsets.length && sortedOffsets[markerIndex] < segmentStart) {
+			markerIndex++;
+		}
+		if (markerIndex < sortedOffsets.length && sortedOffsets[markerIndex] < segmentEnd) {
+			const item = parseNestedBracketCitationItemIgnoringMarkup(
+				text,
+				bracket,
+				sortedOffsets[markerIndex],
+				markupRanges,
+			);
+			if (item) items.push(item);
+		}
+		while (markerIndex < sortedOffsets.length && sortedOffsets[markerIndex] < segmentEnd) {
+			markerIndex++;
+		}
+	};
+
+	for (let cursor = bracket.start + 1; cursor < bracket.end - 1; cursor++) {
+		const markup = rangeContaining(cursor, markupRanges);
+		if (markup) {
+			cursor = markup.end - 1;
+			continue;
+		}
+		if (text[cursor] !== ';') continue;
+		processSegment(cursor);
+		segmentStart = cursor + 1;
+	}
+	processSegment(bracket.end - 1);
+	return items;
 }
 
 function rangeIdentity(range: OffsetRange): string {
@@ -718,43 +1144,40 @@ function isVisibleLinkLabel(
 ): boolean {
 	if (bracket.end > text.length || text[bracket.end - 1] !== ']') return false;
 	if (inlineLinkLabels.has(bracket.start + ':' + bracket.end)) return true;
-	const ownLabel = text.slice(bracket.start + 1, bracket.end - 1);
+	if (referenceLabels.size === 0) return false;
 	if (text[bracket.end] === '[') {
 		let cursor = bracket.end + 1;
 		while (cursor < text.length && text[cursor] !== '\n') {
 			if (text[cursor] === ']' && !isEscaped(text, cursor)) {
 				const explicitLabel = text.slice(bracket.end + 1, cursor);
-				return referenceLabels.has(normalizeReferenceLabel(explicitLabel || ownLabel));
+				const label = explicitLabel || text.slice(bracket.start + 1, bracket.end - 1);
+				return referenceLabels.has(normalizeReferenceLabel(label));
 			}
 			cursor++;
 		}
 		return false;
 	}
+	const ownLabel = text.slice(bracket.start + 1, bracket.end - 1);
 	return referenceLabels.has(normalizeReferenceLabel(ownLabel));
 }
 
-function yamlCommentStart(text: string, start: number, end: number): number {
-	let quote: '"' | "'" | undefined;
-	let escaped = false;
-	for (let i = start; i < end; i++) {
-		const char = text[i];
-		if (quote === '"') {
-			if (escaped) escaped = false;
-			else if (char === '\\') escaped = true;
-			else if (char === quote) quote = undefined;
-			continue;
-		}
-		if (quote === "'") {
-			if (char === quote) {
-				if (text[i + 1] === quote) i++;
-				else quote = undefined;
-			}
-			continue;
-		}
-		if (char === '"' || char === "'") quote = char;
-		else if (char === '#' && (i === start || /\s/.test(text[i - 1]))) return i;
-	}
-	return end;
+function isImageLabel(text: string, bracket: OffsetRange): boolean {
+	const marker = bracket.start - 1;
+	return marker >= 0 && text[marker] === '!' && !isEscaped(text, marker);
+}
+
+function isResolvedNestedImageLabel(
+	bracket: OffsetRange,
+	inlineLinkLabels: ReadonlySet<string>,
+	referenceLinkLabels: ReadonlyMap<string, string>,
+	referenceLabels: ReadonlySet<string>,
+): boolean {
+	const identity = rangeIdentity(bracket);
+	if (inlineLinkLabels.has(identity)) return true;
+	const explicitLabel = referenceLinkLabels.get(identity);
+	return explicitLabel !== undefined
+		&& explicitLabel.length > 0
+		&& referenceLabels.has(normalizeReferenceLabel(explicitLabel));
 }
 
 function collectNociteRegions(
@@ -763,6 +1186,7 @@ function collectNociteRegions(
 ): NociteRegion[] {
 	if (!bounds) return [];
 	const regions: NociteRegion[] = [];
+	const rootIndent = findFrontmatterRootIndent(text, bounds.contentEnd);
 	let lineStart = bounds.contentStart;
 	while (lineStart < bounds.contentEnd) {
 		if (text[lineStart] === '\r' || text[lineStart] === '\n') {
@@ -773,35 +1197,64 @@ function collectNociteRegions(
 		const rawEnd = newline === -1 || newline > bounds.contentEnd ? bounds.contentEnd : newline;
 		const lineEnd = rawEnd > lineStart && text[rawEnd - 1] === '\r' ? rawEnd - 1 : rawEnd;
 		const line = text.slice(lineStart, lineEnd);
-		const match = /^nocite\s*:/.exec(line);
-		if (!match) {
+		const physicalIndent = line.length - line.trimStart().length;
+		const logicalLine = physicalIndent === rootIndent
+			? line.slice(rootIndent)
+			: '';
+		const logicalColon = findYamlMappingColon(logicalLine);
+		if (
+			logicalColon < 0
+			|| parseYamlStringScalar(logicalLine.slice(0, logicalColon)) !== 'nocite'
+		) {
 			lineStart = newline === -1 ? bounds.contentEnd : newline + 1;
 			continue;
 		}
 
-		const colon = lineStart + match[0].lastIndexOf(':');
+		// YAML mappings use the last duplicate key as the effective value. Discard
+		// every earlier nocite declaration before collecting this declaration's ranges.
+		regions.length = 0;
+		const colon = lineStart + rootIndent + logicalColon;
 		let valueStart = colon + 1;
 		while (valueStart < lineEnd && /[ \t]/.test(text[valueStart])) valueStart++;
 		const firstValue = text.slice(valueStart, lineEnd);
-		const mode = nociteValueMode(firstValue);
-		const blockScalar = mode === 'block-scalar';
-		if (mode === 'single-line') {
-			regions.push({ start: valueStart, end: yamlCommentStart(text, valueStart, lineEnd), blockScalar: false });
+		const continuation = createNociteContinuationState(firstValue);
+		const blockScalar = continuation.mode === 'block-scalar';
+		if (continuation.mode === 'single-line') {
+			const rootFlowEnd = continuation.rootFlowCloseOffset === undefined
+				? lineEnd
+				: valueStart + continuation.rootFlowCloseOffset;
+			regions.push({ start: valueStart, end: yamlCommentStart(text, valueStart, rootFlowEnd), blockScalar: false });
 			lineStart = newline === -1 ? bounds.contentEnd : newline + 1;
 			continue;
 		}
 
 		let continuationStart = newline === -1 ? bounds.contentEnd : newline + 1;
+		// The opening line is semantically part of the value even when the very
+		// first continuation is a logical-root mapping and must be rejected.
+		let flowEnd = lineEnd;
 		while (continuationStart < bounds.contentEnd) {
 			const nextNewline = text.indexOf('\n', continuationStart);
 			const nextRawEnd = nextNewline === -1 || nextNewline > bounds.contentEnd ? bounds.contentEnd : nextNewline;
 			const nextEnd = nextRawEnd > continuationStart && text[nextRawEnd - 1] === '\r' ? nextRawEnd - 1 : nextRawEnd;
 			const nextLine = text.slice(continuationStart, nextEnd);
-			if (!isNociteContinuationLine(mode, nextLine)) break;
-			const contentStart = continuationStart + (nextLine.match(/^[ \t]*/)?.[0].length ?? 0);
-			const contentEnd = blockScalar ? nextEnd : yamlCommentStart(text, contentStart, nextEnd);
-			regions.push({ start: contentStart, end: contentEnd, blockScalar });
+			const nextIndent = nextLine.length - nextLine.trimStart().length;
+			const logicalStart = Math.min(rootIndent, nextIndent);
+			const logicalNextLine = nextLine.slice(logicalStart);
+			if (!isNociteContinuationLine(continuation, logicalNextLine)) break;
+			if (blockScalar) {
+				regions.push({
+					start: continuationStart + nextIndent,
+					end: nextEnd,
+					blockScalar: true,
+				});
+			} else {
+				flowEnd = continuationStart + logicalStart
+					+ (continuation.rootFlowCloseOffset ?? logicalNextLine.length);
+			}
 			continuationStart = nextNewline === -1 ? bounds.contentEnd : nextNewline + 1;
+		}
+		if (!blockScalar) {
+			regions.push({ start: valueStart, end: flowEnd, blockScalar: false });
 		}
 		lineStart = Math.max(continuationStart, newline === -1 ? bounds.contentEnd : newline + 1);
 	}
@@ -812,32 +1265,39 @@ function bodyExcludedRanges(text: string): {
 	ranges: OffsetRange[];
 	citationMarkupRanges: OffsetRange[];
 	frontmatter?: OffsetRange;
+	frontmatterBounds?: FrontmatterBounds;
 	referenceLabels: Set<string>;
 	inlineLinkLabels: Set<string>;
+	referenceLinkLabels: ReadonlyMap<string, string>;
 	citationBlocks: MarkdownInlineBlock[];
 } {
 	const bounds = findFrontmatterBounds(text);
 	const frontmatter = bounds ? { start: bounds.start, end: bounds.bodyStart } : undefined;
 
 	// Only closed frontmatter is globally authoritative. Parser-derived blocks
-	// are computed once from the structurally equivalent masked source. Raw HTML
-	// blocks are citation-aware because their visible text remains document content,
-	// while tag/comment ranges are masked before inline links and brackets are
-	// interpreted. Every delimiter scan remains local to one parser block. Code
-	// parsing keeps raw HTML disabled so backticks inside HTML table cells retain
-	// their established meaning.
+	// are computed once from the structurally equivalent masked source. Ordinary
+	// raw-HTML text remains citation-aware, while tags, comments, and script/style/
+	// code contents are masked before inline links and brackets are interpreted.
+	// Every delimiter scan remains local to one parser block. Code parsing keeps raw
+	// HTML disabled so backticks inside HTML table cells retain their established meaning.
 	const primaryInput = frontmatter ? maskRanges(text, [frontmatter]) : text;
 	const parsedBlocks = computeMarkdownParsedBlocks(primaryInput);
 	const citationBlocks = [...parsedBlocks.inlineBlocks, ...parsedBlocks.htmlBlocks]
 		.sort((a, b) => a.start - b.start || a.end - b.end)
 		.map((range, id) => ({ id, start: range.start, end: range.end }));
+	const htmlTagRegions = computeHtmlTagRegions(primaryInput, citationBlocks);
 	const citationMarkupRanges = selectOutermostRanges([
 		...computeHtmlCommentRegions(
 			primaryInput,
 			parsedBlocks.inlineBlocks,
 			parsedBlocks.htmlBlocks,
 		),
-		...computeHtmlTagRegions(primaryInput, citationBlocks),
+		...htmlTagRegions,
+		...computeHtmlCitationInertContentRegions(
+			primaryInput,
+			citationBlocks,
+			htmlTagRegions,
+		),
 	]);
 	let structural = selectOutermostRanges([
 		...computeCodeRegions(primaryInput),
@@ -849,7 +1309,7 @@ function bodyExcludedRanges(text: string): {
 	structural = mergeRanges([...structural, ...links.destinations]);
 
 	structuralInput = maskRanges(text, structural);
-	const referenceLabels = computeReferenceDefinitionLabels(structuralInput, text);
+	const referenceLabels = computeReferenceDefinitionLabels(structuralInput);
 	const definitions = computeReferenceDefinitionRegions(structuralInput);
 	structural = mergeRanges([...structural, ...definitions]);
 
@@ -863,10 +1323,28 @@ function bodyExcludedRanges(text: string): {
 		ranges,
 		citationMarkupRanges,
 		frontmatter,
+		frontmatterBounds: bounds,
 		referenceLabels,
 		inlineLinkLabels: links.labels,
+		referenceLinkLabels: links.referenceLabelsByRange,
 		citationBlocks,
 	};
+}
+
+function citekeyContinuesAcrossMarkup(
+	text: string,
+	keyEnd: number,
+	markupRanges: readonly OffsetRange[],
+): boolean {
+	let cursor = keyEnd;
+	let skippedMarkup = false;
+	while (true) {
+		const markup = rangeContaining(cursor, markupRanges);
+		if (!markup || markup.start !== cursor) break;
+		skippedMarkup = true;
+		cursor = markup.end;
+	}
+	return skippedMarkup && isCitekeyChar(text[cursor]);
 }
 
 function isValidBodyCandidate(text: string, atOffset: number, bracketed: boolean): boolean {
@@ -884,21 +1362,27 @@ export function isBoundaryValidBareCitation(text: string, atOffset: number): boo
 
 function scanNociteRegion(
 	text: string,
-	region: OffsetRange,
+	region: NociteRegion,
 ): { usages: CitationUsage[]; wildcard: boolean } {
 	const usages: CitationUsage[] = [];
 	let wildcard = false;
-	for (const token of scanNociteTokens(text, region.start, region.end)) {
+	const source = text.slice(region.start, region.end);
+	const decoded = region.blockScalar ? undefined : decodeNociteYamlText(source);
+	const scanText = decoded?.text ?? source;
+	for (const token of scanNociteTokens(scanText)) {
 		if (token.wildcard) {
 			wildcard = true;
 			continue;
 		}
 		if (token.key === undefined) continue;
+		const atStart = region.start + (decoded?.sourceStarts[token.atStart] ?? token.atStart);
+		const keyStart = region.start + (decoded?.sourceStarts[token.atStart + 1] ?? token.atStart + 1);
+		const keyEnd = region.start + (decoded?.sourceEnds[token.end - 1] ?? token.end);
 		usages.push({
 			key: token.key,
-			atStart: token.atStart,
-			keyStart: token.atStart + 1,
-			keyEnd: token.end,
+			atStart,
+			keyStart,
+			keyEnd,
 			form: 'nocite',
 			suppressAuthor: false,
 		});
@@ -910,21 +1394,51 @@ export function analyzeCitationDocument(text: string): CitationDocumentAnalysis 
 	const {
 		ranges: excludedRanges,
 		citationMarkupRanges,
+		frontmatterBounds,
 		referenceLabels,
 		inlineLinkLabels,
+		referenceLinkLabels,
 		citationBlocks,
 	} = bodyExcludedRanges(text);
 	const bracketInput = maskRanges(text, excludedRanges);
 	const brackets = analyzeCitationBrackets(bracketInput, citationBlocks);
+	const criticDeletionCloserOffsets = computeCriticDeletionCloserOffsets(
+		bracketInput,
+		citationBlocks,
+	);
 	const bracketItems = new Map<number, BracketCitationItem>();
-	const parsedBrackets = new Set<string>();
 	const visibleLinkLabels = new Set<string>();
-	for (const bracket of brackets.balancedContexts.values()) {
+	const imageLabels = new Set<string>();
+	const rawImageLabelRanges: OffsetRange[] = [];
+	const citationBrackets = new Map<string, {
+		bracket: OffsetRange;
+		atOffsets: number[];
+	}>();
+	for (const [atOffset, bracket] of brackets.balancedContexts) {
 		const identity = rangeIdentity(bracket);
-		if (parsedBrackets.has(identity)) continue;
-		parsedBrackets.add(identity);
+		const candidate = citationBrackets.get(identity);
+		if (candidate) candidate.atOffsets.push(atOffset);
+		else citationBrackets.set(identity, { bracket, atOffsets: [atOffset] });
+	}
+	for (const { bracket, atOffsets } of citationBrackets.values()) {
+		const identity = rangeIdentity(bracket);
 		if (isVisibleLinkLabel(text, bracket, referenceLabels, inlineLinkLabels)) {
 			visibleLinkLabels.add(identity);
+			if (isImageLabel(text, bracket)) {
+				imageLabels.add(identity);
+				rawImageLabelRanges.push(bracket);
+			}
+			continue;
+		}
+		if (hasNestedBalancedBracket(bracket, brackets.balancedRanges)) {
+			// Parse each directly owned semicolon segment once. Rebuilding the same
+			// nested bracket suffix for every @ marker is quadratic on malformed input.
+			for (const item of parseNestedBracketCitationItemsIgnoringMarkup(
+				text,
+				bracket,
+				atOffsets,
+				citationMarkupRanges,
+			)) bracketItems.set(item.atStart, item);
 			continue;
 		}
 		for (const item of parseBracketCitationItemsIgnoringMarkup(
@@ -935,6 +1449,24 @@ export function analyzeCitationDocument(text: string): CitationDocumentAnalysis 
 			bracketItems.set(item.atStart, item);
 		}
 	}
+	// A nested citation belongs to its innermost bracket, so inspect only
+	// syntactic image-label candidates when looking for an enclosing alt label.
+	for (const bracket of brackets.balancedRanges) {
+		if (!isImageLabel(text, bracket)) continue;
+		const identity = rangeIdentity(bracket);
+		if (
+			imageLabels.has(identity) ||
+			!isResolvedNestedImageLabel(
+				bracket,
+				inlineLinkLabels,
+				referenceLinkLabels,
+				referenceLabels,
+			)
+		) continue;
+		imageLabels.add(identity);
+		rawImageLabelRanges.push(bracket);
+	}
+	const imageLabelRanges = selectOutermostRanges(rawImageLabelRanges);
 
 	const usages: CitationUsage[] = [];
 	let excludedIndex = 0;
@@ -942,15 +1474,35 @@ export function analyzeCitationDocument(text: string): CitationDocumentAnalysis 
 		while (excludedIndex < excludedRanges.length && cursor >= excludedRanges[excludedIndex].end) excludedIndex++;
 		if (text[cursor] !== '@') continue;
 		if (excludedIndex < excludedRanges.length && cursor >= excludedRanges[excludedIndex].start) continue;
-		const parsed = readMarkdownCitekey(text, cursor + 1);
-		if (!parsed) continue;
+		const parsed = readMarkdownCitekey(
+			text,
+			cursor + 1,
+			criticDeletionCloserOffsets,
+		);
+		if (
+			!parsed
+			|| citekeyContinuesAcrossMarkup(text, parsed.end, citationMarkupRanges)
+		) continue;
 
 		const bracket = brackets.balancedContexts.get(cursor);
-		const linkLabel = bracket !== undefined && visibleLinkLabels.has(rangeIdentity(bracket));
+		const identity = bracket === undefined ? undefined : rangeIdentity(bracket);
+		if (rangeContaining(cursor, imageLabelRanges)) continue;
+		const linkLabel = identity !== undefined && visibleLinkLabels.has(identity);
 		const bracketItem = bracketItems.get(cursor);
+		if (
+			bracketItem
+			&& (bracketItem.key !== parsed.key || bracketItem.keyEnd !== parsed.end)
+		) continue;
 		const bracketed = bracketItem !== undefined;
 		if (bracket && !bracketed && !linkLabel) continue;
-		if (bracketed ? !isValidBodyCandidate(text, cursor, true) : !isBoundaryValidBareCitation(text, cursor)) continue;
+		const compactCriticDeletion = criticDeletionCloserOffsets.has(parsed.end)
+			&& cursor >= 3
+			&& text.startsWith('{--', cursor - 3);
+		if (
+			bracketed
+				? !isValidBodyCandidate(text, cursor, true)
+				: !isBoundaryValidBareCitation(text, cursor) && !compactCriticDeletion
+		) continue;
 		usages.push({
 			key: parsed.key,
 			atStart: cursor,
@@ -978,7 +1530,12 @@ export function analyzeCitationDocument(text: string): CitationDocumentAnalysis 
 		citationMarkupRanges,
 		referenceLabels,
 		inlineLinkLabels,
+		referenceLinkLabels,
 		visibleLinkLabels,
+		imageLabels,
+		imageLabelRanges,
+		frontmatterBounds,
+		citationBlocks,
 		brackets,
 		bracketItems,
 		nociteRegions,
@@ -987,6 +1544,93 @@ export function analyzeCitationDocument(text: string): CitationDocumentAnalysis 
 
 function analysisFor(text: string, analysis?: CitationDocumentAnalysis): CitationDocumentAnalysis {
 	return analysis ?? analyzeCitationDocument(text);
+}
+
+function hasNestedBalancedBracket(
+	bracket: OffsetRange,
+	ranges: readonly OffsetRange[],
+): boolean {
+	let low = 0;
+	let high = ranges.length;
+	while (low < high) {
+		const mid = (low + high) >>> 1;
+		if (ranges[mid].start <= bracket.start) low = mid + 1;
+		else high = mid;
+	}
+	return low < ranges.length
+		&& ranges[low].start < bracket.end
+		&& ranges[low].end < bracket.end;
+}
+
+/** Group visible citation usages into the source spans an exporter replaces. */
+export function groupCitationUsages(
+	text: string,
+	analysis?: CitationDocumentAnalysis,
+): CitationUsageGroup[] {
+	const resolved = analysisFor(text, analysis);
+	const groups: CitationUsageGroup[] = [];
+	const bracketGroups = new Map<number, {
+		end: number;
+		usages: CitationUsage[];
+	}>();
+	for (const usage of resolved.usages) {
+		if (usage.form === 'nocite') continue;
+		if (usage.form === 'bare') {
+			const unfinishedBracket = resolved.brackets.contexts.get(usage.atStart);
+			if (
+				unfinishedBracket
+				&& !resolved.brackets.balancedContexts.has(usage.atStart)
+				&& isSupportedCitationBracket(text, unfinishedBracket)
+			) continue;
+			groups.push({
+				start: usage.atStart,
+				end: usage.keyEnd,
+				form: 'bare',
+				usages: [usage],
+				items: [],
+			});
+			continue;
+		}
+
+		const context = resolved.brackets.balancedContexts.get(usage.atStart);
+		if (!context) continue;
+		const group = bracketGroups.get(context.start);
+		if (group) group.usages.push(usage);
+		else bracketGroups.set(context.start, { end: context.end, usages: [usage] });
+	}
+	for (const [start, group] of bracketGroups) {
+		const bracket = { start, end: group.end };
+		const items = group.usages.flatMap(usage => {
+			const item = resolved.bracketItems.get(usage.atStart);
+			return item
+				&& item.key === usage.key
+				&& item.atStart === usage.atStart
+				&& item.keyEnd === usage.keyEnd
+				? [item]
+				: [];
+		});
+		const hasNestedBracket = hasNestedBalancedBracket(
+			bracket,
+			resolved.brackets.balancedRanges,
+		);
+		// Export only clusters whose complete source span is understood. Falling
+		// back to literal text is preferable to consuming unsupported prefixes,
+		// empty segments, or nested citation markup that cannot be reconstructed.
+		if (hasNestedBracket) continue;
+		const segmentCount = citationBracketSegmentCountIgnoringMarkup(
+			text,
+			bracket,
+			resolved.citationMarkupRanges,
+		);
+		if (items.length !== segmentCount) continue;
+		groups.push({
+			...bracket,
+			form: 'bracket',
+			usages: group.usages,
+			items,
+		});
+	}
+	return groups.sort((left, right) => left.start - right.start);
 }
 
 export function scanCitationDocument(
@@ -1027,14 +1671,33 @@ export function isInsideCitationSegmentAtOffset(
 	analysis?: CitationDocumentAnalysis,
 ): boolean {
 	const resolved = analysisFor(text, analysis);
+	if (rangeContaining(atOffset, resolved.imageLabelRanges)) return false;
 	const bracket = findBalancedBracketContainingOffset(atOffset, resolved.brackets);
 	return bracket !== undefined
 		&& isSupportedCitationBracket(text, bracket)
 		&& !resolved.visibleLinkLabels.has(rangeIdentity(bracket));
 }
 
+function isBoundaryValidNociteSourceMarker(
+	text: string,
+	atOffset: number,
+	region: NociteRegion,
+): boolean {
+	if (region.blockScalar) {
+		return isBoundaryValidNociteToken(text, atOffset, region.start);
+	}
+	const sourceOffset = atOffset - region.start;
+	const decoded = decodeNociteYamlText(text.slice(region.start, region.end));
+	const decodedAt = decoded.sourceStarts.findIndex((start, index) =>
+		start === sourceOffset
+		&& decoded.sourceEnds[index] === sourceOffset + 1
+		&& decoded.text[index] === '@',
+	);
+	return decodedAt >= 0 && isBoundaryValidNociteToken(decoded.text, decodedAt);
+}
+
 type ProvisionalFrontmatterCompletion =
-	| { kind: 'nocite'; region: OffsetRange }
+	| { kind: 'nocite'; region: NociteRegion }
 	| { kind: 'suppress' };
 
 /**
@@ -1046,8 +1709,14 @@ function provisionalFrontmatterCompletionAt(
 	text: string,
 	atOffset: number,
 ): ProvisionalFrontmatterCompletion | undefined {
-	if (findFrontmatterBounds(text)) return undefined;
-	const bounds = findCitationFrontmatterBounds(text);
+	const opening = findFrontmatterOpeningBounds(text);
+	if (!opening) return undefined;
+	const provisionalEnd = Math.min(
+		text.length,
+		opening.bodyStart + MAX_PROVISIONAL_FRONTMATTER_LOOKAHEAD,
+	);
+	if (atOffset >= provisionalEnd && provisionalEnd < text.length) return undefined;
+	const bounds = findCitationFrontmatterBounds(text, provisionalEnd);
 	if (!bounds || atOffset < bounds.contentStart || atOffset >= bounds.contentEnd) return undefined;
 
 	const nociteRegion = collectNociteRegions(text, bounds)
@@ -1062,20 +1731,27 @@ function provisionalFrontmatterCompletionAt(
 		: rawLineEnd;
 	const line = text.slice(lineStart, lineEnd);
 	const lineBeforeCitation = text.slice(lineStart, atOffset);
-	const topLevelMapping = !/^[ \t]/.test(lineBeforeCitation)
-		&& /^[^\s:#][^:]*\s*:/.test(lineBeforeCitation);
+	const rootIndent = findFrontmatterRootIndent(text, bounds.contentEnd);
+	const logicalLine = (value: string): string =>
+		value.slice(0, rootIndent).trim().length === 0
+			? value.slice(rootIndent)
+			: value;
+	const topLevelMapping = isTopLevelFrontmatterMappingLine(
+		logicalLine(lineBeforeCitation),
+	);
 	if (topLevelMapping) return { kind: 'suppress' };
 
-	// Indented lines belong locally to the nearest uninterrupted top-level YAML
-	// field. Valid nocite continuations were handled above; all other fields are
-	// general YAML and suppress citekey completion at this cursor only.
-	if (/^[ \t]+\S/.test(line)) {
+	// Lines deeper than the logical root belong locally to the nearest
+	// uninterrupted root-level YAML field. Valid nocite continuations were
+	// handled above; all other fields suppress citekey completion at this cursor.
+	const physicalIndent = line.length - line.trimStart().length;
+	if (physicalIndent > rootIndent && line.trim().length > 0) {
 		let previousEnd = lineStart > 0 ? lineStart - 1 : 0;
 		while (previousEnd > bounds.contentStart) {
 			const previousStart = text.lastIndexOf('\n', previousEnd - 1) + 1;
 			const previous = text.slice(previousStart, previousEnd).replace(/\r$/, '');
 			if (previous.trim().length === 0) break;
-			if (!/^[ \t]/.test(previous) && /^[^\s:#][^:]*\s*:/.test(previous)) {
+			if (isTopLevelFrontmatterMappingLine(logicalLine(previous))) {
 				return { kind: 'suppress' };
 			}
 			previousEnd = previousStart > 0 ? previousStart - 1 : 0;
@@ -1098,18 +1774,21 @@ export function getCitationCompletionContextAtOffset(
 	const provisional = provisionalFrontmatterCompletionAt(text, atOffset);
 	if (provisional?.kind === 'suppress') return undefined;
 	if (provisional?.kind === 'nocite') {
-		if (!isBoundaryValidNociteToken(text, atOffset, provisional.region.start)) return undefined;
+		if (!isBoundaryValidNociteSourceMarker(text, atOffset, provisional.region)) return undefined;
 		return { prefix: text.slice(replaceStart, offset), replaceStart, atOffset, form: 'nocite' };
 	}
 
 	const resolved = analysisFor(text, analysis);
 	const nociteRegion = resolved.nociteRegions.find(region => atOffset >= region.start && atOffset < region.end);
 	if (nociteRegion) {
-		if (!isBoundaryValidNociteToken(text, atOffset, nociteRegion.start)) return undefined;
+		if (!isBoundaryValidNociteSourceMarker(text, atOffset, nociteRegion)) return undefined;
 		return { prefix: text.slice(replaceStart, offset), replaceStart, atOffset, form: 'nocite' };
 	}
 
-	if (rangeContaining(atOffset, resolved.excludedRanges)) return undefined;
+	if (
+		rangeContaining(atOffset, resolved.excludedRanges) ||
+		rangeContaining(atOffset, resolved.imageLabelRanges)
+	) return undefined;
 	const bracket = findBracketContext(resolved.brackets, atOffset, false);
 	const linkLabel = bracket !== undefined && resolved.visibleLinkLabels.has(rangeIdentity(bracket));
 	const bracketed = bracket !== undefined
@@ -1118,6 +1797,7 @@ export function getCitationCompletionContextAtOffset(
 		&& isCitationItemMarkerAt(text, bracket, atOffset, resolved.citationMarkupRanges);
 	const balancedBracket = resolved.brackets.balancedContexts.has(atOffset);
 	if (balancedBracket && !bracketed) return undefined;
+	if (citekeyContinuesAcrossMarkup(text, offset, resolved.citationMarkupRanges)) return undefined;
 	if (bracketed ? !isValidBodyCandidate(text, atOffset, true) : !isBoundaryValidBareCitation(text, atOffset)) return undefined;
 	return {
 		prefix: text.slice(replaceStart, offset),
@@ -1130,6 +1810,7 @@ export function getCitationCompletionContextAtOffset(
 export interface BoundedCitationCompletionMetrics {
 	windowStart: number;
 	windowEnd: number;
+	/** Total source length parsed across the primary and restored-context passes. */
 	analyzedLength: number;
 }
 
@@ -1155,12 +1836,32 @@ function localEscapeParityDiffersFromSource(
 	return (cursor > 0 && text[cursor - 1] === '\\') || outsideSlashes % 2 === 1;
 }
 
+function boundedInlineLookbehindStart(
+	text: string,
+	windowStart: number,
+	maxWindow: number,
+): number {
+	const lowerBound = Math.max(0, windowStart - maxWindow * 2);
+	const boundedPrefix = text.slice(lowerBound, windowStart);
+	let lineEnd = boundedPrefix.length;
+	if (lineEnd > 0 && boundedPrefix[lineEnd - 1] === '\n') lineEnd--;
+	while (lineEnd >= 0) {
+		const newline = boundedPrefix.lastIndexOf('\n', lineEnd - 1);
+		const line = boundedPrefix.slice(newline + 1, lineEnd).replace(/\r$/, '');
+		if (isBlankMarkdownContainerLine(line)) return lowerBound + lineEnd + 1;
+		if (newline === -1) break;
+		lineEnd = newline;
+	}
+	return lowerBound;
+}
+
 function localCodeExclusionMayDependOnLeftContext(
 	text: string,
 	windowStart: number,
 	window: string,
 	localDelimiter: number,
 	maxWindow: number,
+	analysis: CitationDocumentAnalysis,
 ): boolean {
 	let runStart = localDelimiter;
 	while (runStart > 0 && window[runStart - 1] === '`') runStart--;
@@ -1182,7 +1883,10 @@ function localCodeExclusionMayDependOnLeftContext(
 	}
 
 	const openerLength = runEnd - localDelimiter;
-	const lookbehindStart = Math.max(0, windowStart - maxWindow);
+	const localBlock = rangeContaining(localDelimiter, analysis.citationBlocks);
+	const lookbehindStart = localBlock?.start === 0
+		? boundedInlineLookbehindStart(text, windowStart, maxWindow)
+		: windowStart;
 	if (lookbehindStart > 0 && text[lookbehindStart] === '`' && text[lookbehindStart - 1] === '`') {
 		return true;
 	}
@@ -1198,16 +1902,24 @@ function localCodeExclusionMayDependOnLeftContext(
 	return false;
 }
 
-function inlineLinkLabelForDestination(
+function linkLabelForDestination(
 	analysis: CitationDocumentAnalysis,
 	destinationStart: number,
 ): number | undefined {
-	for (const identity of analysis.inlineLinkLabels) {
-		const separator = identity.indexOf(':');
-		if (separator === -1) continue;
-		const labelStart = Number(identity.slice(0, separator));
-		const labelEnd = Number(identity.slice(separator + 1));
-		if (Number.isInteger(labelStart) && labelEnd + 1 === destinationStart) return labelStart;
+	const labelIdentities: readonly Iterable<string>[] = [
+		analysis.inlineLinkLabels,
+		analysis.referenceLinkLabels.keys(),
+	];
+	for (const identities of labelIdentities) {
+		for (const identity of identities) {
+			const separator = identity.indexOf(':');
+			if (separator === -1) continue;
+			const labelStart = Number(identity.slice(0, separator));
+			const labelEnd = Number(identity.slice(separator + 1));
+			if (Number.isInteger(labelStart) && labelEnd + 1 === destinationStart) {
+				return labelStart;
+			}
+		}
 	}
 	return undefined;
 }
@@ -1263,9 +1975,17 @@ function boundedRejectionNeedsLeftContext(
 		return false;
 	}
 
+	const imageLabel = rangeContaining(atOffset, analysis.imageLabelRanges);
+	if (imageLabel) {
+		const marker = imageLabel.start - 1;
+		return marker >= 0 && localEscapeParityDiffersFromSource(
+			text, windowStart, window, marker, maxWindow,
+		);
+	}
+
 	const excluded = rangeContaining(atOffset, analysis.excludedRanges);
 	if (excluded) {
-		const labelStart = inlineLinkLabelForDestination(analysis, excluded.start);
+		const labelStart = linkLabelForDestination(analysis, excluded.start);
 		if (labelStart !== undefined) {
 			return localEscapeParityDiffersFromSource(
 				text, windowStart, window, labelStart, maxWindow,
@@ -1275,7 +1995,7 @@ function boundedRejectionNeedsLeftContext(
 			return localEscapeParityDiffersFromSource(
 				text, windowStart, window, excluded.start, maxWindow,
 			) || localCodeExclusionMayDependOnLeftContext(
-				text, windowStart, window, excluded.start, maxWindow,
+				text, windowStart, window, excluded.start, maxWindow, analysis,
 			);
 		}
 		return excluded.start === 0;
@@ -1361,7 +2081,7 @@ export function getBoundedCitationCompletionContextAtOffset(
 	// touching the left edge can account for the local rejection. This reaches
 	// earlier inline delimiters as well as escape runs without ever parsing the
 	// full document.
-	const contextStart = Math.max(0, start - maxWindow);
+	const contextStart = Math.max(0, start - maxWindow * 2);
 	const boundaryRun = contextStart > 0
 		&& text[contextStart] === text[contextStart - 1]
 		&& (text[contextStart] === '\\' || text[contextStart] === '`')

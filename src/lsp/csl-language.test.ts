@@ -97,6 +97,22 @@ describe('getCslCompletionContext', () => {
 		expect(ctx).toBeDefined();
 		expect(ctx!.prefix).toBe('nature');
 	});
+	test('uses canonical frontmatter bounds and root indentation', () => {
+		for (const text of [
+			'﻿--- \t\r\n  csl: nature\r\n...\t\r\nBody',
+			'\n \n---\n\tcsl: nature\n---  \nBody',
+		]) {
+			const offset = text.indexOf('nature') + 'nature'.length;
+			const ctx = getCslCompletionContext(text, offset);
+			expect(ctx).toMatchObject({ prefix: 'nature' });
+			expect(getCslCompletionContext(text, text.indexOf('Body'))).toBeUndefined();
+			expect(getCslFieldInfo(text)).toMatchObject({
+				value: 'nature',
+				valueStart: text.indexOf('nature'),
+			});
+		}
+	});
+
 	test('excludes surrounding quotes from completion prefix and replacement bounds', () => {
 		const text = '---\ncsl: \"chi\"\n---\n';
 		const offset = text.indexOf('chi') + 2;

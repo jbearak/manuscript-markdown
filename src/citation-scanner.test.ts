@@ -5,6 +5,7 @@ import {
 	findCitationAtOffset,
 	getBoundedCitationCompletionContextAtOffset,
 	getCitationCompletionContextAtOffset,
+	groupCitationUsages,
 	hasBibliographyDemand,
 	scanCitationDocument,
 } from './citation-scanner';
@@ -29,10 +30,34 @@ describe('citation document scanner', () => {
 		expect(keys('[@alpha, text mentioning @beta]')).toEqual(['alpha']);
 	});
 
+	test('groups only complete non-overlapping exporter-supported clusters', () => {
+		expect(groupCitationUsages('[@alpha; see @beta]')).toEqual([]);
+		expect(groupCitationUsages('[@alpha; ordinary text; @beta]')).toEqual([]);
+		expect(groupCitationUsages('[@al<em></em>pha, p. 2]')).toEqual([]);
+		expect(groupCitationUsages('[@alpha')).toEqual([]);
+		expect(scanCitationDocument('[@alpha').usages).toMatchObject([{
+			key: 'alpha',
+			form: 'bare',
+		}]);
+		expect(
+			groupCitationUsages('[@alpha;]')
+				.map(group => group.usages.map(usage => usage.key)),
+		).toEqual([['alpha']]);
+
+		const nested = '[@alpha, see [@beta]]';
+		expect(groupCitationUsages(nested).map(group => ({
+			text: nested.slice(group.start, group.end),
+			keys: group.usages.map(usage => usage.key),
+		}))).toEqual([
+			{ text: '[@beta]', keys: ['beta'] },
+		]);
+	});
+
 	test('uses escape-aware balanced bracket contexts', () => {
 		expect(keys('\\[literal opener then @escaped_open')).toEqual(['escaped_open']);
 		expect(keys('[unmatched opener then @unmatched_open')).toEqual(['unmatched_open']);
 		expect(keys('[ordinary @hidden] then @visible')).toEqual(['visible']);
+		expect(keys('[ordinary text\n @hidden] then @visible')).toEqual(['visible']);
 		expect(keys('[discussion [@nested]]')).toEqual(['nested']);
 		expect(keys('[outer [ordinary] @hidden]')).toEqual([]);
 		expect(keys('`[` then @visible ]')).toEqual(['visible']);
@@ -48,6 +73,7 @@ describe('citation document scanner', () => {
 			'nocite: >-\n  @alpha\n  @beta',
 			'nocite:\n- @alpha\n- "@beta"',
 			'nocite:\n  - @alpha\n  - "@beta"',
+			'nocite: [\n  @alpha,\n  @beta\n]',
 		];
 		for (const form of forms) {
 			const text = '---\n' + form + '\n---\nBody';
@@ -59,6 +85,124 @@ describe('citation document scanner', () => {
 		expect(wildcard.usages).toEqual([]);
 		expect(wildcard.hasNociteWildcard).toBe(true);
 		expect(hasBibliographyDemand("---\nnocite: '@*'\n---\nBody")).toBe(true);
+	});
+
+	test('ends multiline flow nocite at its root close while retaining nested quote state', () => {
+		const closed = [
+			'---',
+			'nocite: [',
+			'  @alpha',
+			']',
+			'@beta',
+			'---',
+		].join('\n');
+		expect(keys(closed)).toEqual(['alpha']);
+
+		const nestedQuoted = [
+			'---',
+			'nocite: [',
+			'  "@alpha',
+			'  ] still quoted",',
+			'  { nested: [@beta] }',
+			']',
+			'@gamma',
+			'---',
+		].join('\n');
+		expect(keys(nestedQuoted)).toEqual(['alpha', 'beta']);
+	});
+
+	test('recovers multiline nocite at same-line, mismatched, and dash-mapping boundaries', () => {
+		const cases = [
+			{
+				text: ['---', 'nocite: [', '  @alpha', '] @beta', '---'].join('\n'),
+				expected: ['alpha'],
+			},
+			{
+				text: ['---', 'nocite: [', '  @alpha', '}', 'title: @hidden', '---'].join('\n'),
+				expected: ['alpha'],
+			},
+			{
+				text: ['---', 'nocite:', '-custom: @outside', '---'].join('\n'),
+				expected: [],
+			},
+			{
+				text: ['---', 'nocite: [', '  @alpha', '-custom: @outside', '---'].join('\n'),
+				expected: ['alpha'],
+			},
+		];
+		for (const { text, expected } of cases) expect(keys(text)).toEqual(expected);
+	});
+
+	test('recovers malformed flow nocite at outer closers and logical-root mappings', () => {
+			const cases = [
+				['nocite: [\n { note: @a\n]\ntitle: @outside', ['a']],
+				['nocite: [\n @a\ntitle: @outside', ['a']],
+				['nocite: [@a\n-custom: @outside', ['a']],
+			] as const;
+			for (const [yaml, expected] of cases) {
+				const text = '---\n' + yaml + '\n---\n';
+				expect(keys(text)).toEqual(expected);
+				expect(scanCitationDocument(text).hasNociteWildcard).toBe(false);
+			}
+		});
+
+		test('uses only the last duplicate root nocite declaration', () => {
+			const explicitLast = '---\nnocite: "@*"\nnocite: @last\n---\n';
+			expect(keys(explicitLast)).toEqual(['last']);
+			expect(scanCitationDocument(explicitLast).hasNociteWildcard).toBe(false);
+			expect(hasBibliographyDemand(explicitLast)).toBe(true);
+
+			const wildcardLast = '---\nnocite: @first\nnocite: "@*"\n---\n';
+			expect(keys(wildcardLast)).toEqual([]);
+			expect(scanCitationDocument(wildcardLast).hasNociteWildcard).toBe(true);
+			expect(hasBibliographyDemand(wildcardLast)).toBe(true);
+		});
+
+		test('recognizes nocite at a consistently indented YAML root only', () => {
+		const text = [
+			'---',
+			'  settings:',
+			'    nocite: @nested',
+			'  nocite: [@alpha; @beta]',
+			'---',
+			'Body',
+		].join('\n');
+		expect(keys(text)).toEqual(['alpha', 'beta']);
+
+		const multiline = [
+			'---',
+			'  nocite:',
+			'    - @alpha',
+			'  title: @not-nocite',
+			'---',
+		].join('\n');
+		expect(keys(multiline)).toEqual(['alpha']);
+
+		const block = [
+			'---',
+			'  nocite: |',
+			'    @alpha',
+			'  title: @not-nocite',
+			'---',
+		].join('\n');
+		expect(keys(block)).toEqual(['alpha']);
+
+		const compactTerminator = [
+			'---',
+			'nocite:',
+			'  - @alpha',
+			'title:Draft @hidden',
+			'---',
+		].join('\n');
+		expect(keys(compactTerminator)).toEqual(['alpha']);
+
+		const malformedBlock = [
+			'---',
+			'nocite: |++',
+			'  @hidden',
+			'---',
+		].join('\n');
+		expect(keys(malformedBlock)).toEqual([]);
 	});
 
 	test('uses only closed frontmatter as a whole-document citation exclusion', () => {
@@ -88,8 +232,19 @@ describe('citation document scanner', () => {
 		expect(getCitationCompletionContextAtOffset(wildcard, wildcard.length)).toMatchObject({
 			prefix: '', form: 'nocite',
 		});
+		const indented = '---\n  nocite: @';
+		expect(getCitationCompletionContextAtOffset(indented, indented.length)).toMatchObject({
+			prefix: '', form: 'nocite',
+		});
 		const title = "---\ntitle: '@alp";
 		expect(getCitationCompletionContextAtOffset(title, title.length)).toBeUndefined();
+		const indentedTitle = '---\n  title: @smi';
+		expect(
+			getCitationCompletionContextAtOffset(
+				indentedTitle,
+				indentedTitle.length,
+			),
+		).toBeUndefined();
 	});
 
 	test('preserves thematic-break body semantics until a mapping establishes frontmatter', () => {
@@ -111,6 +266,20 @@ describe('citation document scanner', () => {
 		]) {
 			expect(keys(text)).toEqual([text.endsWith(': details') ? 'visible:' : 'visible']);
 			const offset = text.indexOf('@visible') + '@visible'.length;
+			expect(getCitationCompletionContextAtOffset(text, offset)?.form).toBe('bare');
+			expect(getBoundedCitationCompletionContextAtOffset(text, offset)?.form).toBe('bare');
+		}
+	});
+
+	test('does not treat URL or comment colons as provisional YAML mappings', () => {
+		for (const text of [
+			'---\nhttps://example.com discusses @visible',
+			'---\nhttps://example.com # source: @visible',
+			'---\nBody discussion at 12:30 cites @visible',
+			'---\nSee https://example.test:8080 and cite @visible',
+		]) {
+			const offset = text.length;
+			expect(keys(text)).toEqual(['visible']);
 			expect(getCitationCompletionContextAtOffset(text, offset)?.form).toBe('bare');
 			expect(getBoundedCitationCompletionContextAtOffset(text, offset)?.form).toBe('bare');
 		}
@@ -144,6 +313,138 @@ describe('citation document scanner', () => {
 		expect(keys(block)).toEqual(['alpha']);
 	});
 
+	test('recognizes quoted logical-root nocite mapping keys', () => {
+		for (const key of ['"nocite"', "'nocite'", '"no\\u0063ite"']) {
+			const text = [
+				'---',
+				key + ': @alpha',
+				'---',
+			].join('\n');
+			const usages = scanCitationDocument(text).usages;
+			expect(usages.map(usage => usage.key)).toEqual(['alpha']);
+			expect(usages[0].atStart).toBe(text.indexOf('@alpha'));
+		}
+	});
+
+	test('keeps plain apostrophes from hiding nocite comments or quote boundaries', () => {
+		const hiddenComment = [
+			'---',
+			"nocite: author's note # @hidden",
+			'---',
+		].join('\n');
+		expect(keys(hiddenComment)).toEqual([]);
+		expect(keys([
+			'---',
+			'nocite: note:"draft # @active',
+			'---',
+		].join('\n'))).toEqual([]);
+
+		for (const text of [
+			['---', "nocite: [author's note, \"\\\\@escaped\", @active]", '---'].join('\n'),
+			['---', 'nocite:', "  - author's note", '  - "\\\\@escaped"', '  - @active', '---'].join('\n'),
+		]) {
+			const usages = scanCitationDocument(text).usages;
+			expect(usages.map(usage => usage.key)).toEqual(['active']);
+			expect(usages[0].atStart).toBe(text.lastIndexOf('@active'));
+		}
+	});
+
+	test('keeps YAML nocite citekeys ending before CriticMarkup-like text intact', () => {
+		expect(keys('---\nnocite: "@smith--}"\n---\n')).toEqual(['smith--']);
+	});
+
+	test('trims CriticMarkup closers only in structural deletion contexts', () => {
+		expect(keys('@smith--}.')).toEqual(['smith--']);
+		expect(keys('[@smith--}]')).toEqual(['smith--']);
+		expect(keys('{--@smith--}')).toEqual(['smith']);
+	});
+
+	test('bounds provisional nocite completion to the shared lookahead', () => {
+		const text = '---\ntitle: Draft\n' + 'plain text '.repeat(2_000) + '\nnocite: @alp';
+		const context = getCitationCompletionContextAtOffset(text, text.length);
+		expect(context?.form).toBe('bare');
+		expect(context?.prefix).toBe('alp');
+	});
+
+	test('applies odd/even backslash escaping to body and nocite citations', () => {
+		for (let slashCount = 1; slashCount <= 4; slashCount++) {
+			const slashes = '\\'.repeat(slashCount);
+			const expected = slashCount % 2 === 0 ? ['key'] : [];
+			expect(keys(slashes + '@key')).toEqual(expected);
+			expect(keys("---\nnocite: '" + slashes + "@key'\n---\n")).toEqual(expected);
+		}
+	});
+
+	test('recognizes nocite keys after escaped suppress-author hyphens', () => {
+		for (let slashCount = 0; slashCount <= 4; slashCount++) {
+			const marker = '\\'.repeat(slashCount) + '-@key';
+			expect(keys('---\nnocite: ' + marker + '\n---\n')).toEqual(['key']);
+			expect(keys('---\nnocite: x' + marker + '\n---\n')).toEqual([]);
+		}
+	});
+
+	test('decodes double-quoted YAML quoting without synthesizing citation text', () => {
+		const escaped = '---\nnocite: "\\\\@escaped"\n---\n';
+		const active = '---\nnocite: "\\\\\\\\@active"\n---\n';
+		const encoded = '---\nnocite: "\\u0040decoded @al\\u0070ha"\n---\n';
+		const encodedBoundary = '---\nnocite: "\\t@alpha"\n---\n';
+		const quotedEmail = '---\nnocite: "\\\"quoted.local\\\"@example.com"\n---\n';
+		const adjacentQuotes = '---\nnocite: "\\\"quoted\\\"\\\"@example.com"\n---\n';
+		const escapedInteriorQuote = '---\nnocite: "'
+			+ '\\' + '"quoted' + '\\'.repeat(3) + '"local'
+			+ '\\' + '"@example.com"\n---\n';
+		const literalQuote = '---\nnocite: "prefix\\\"@smith"\n---\n';
+		const malformedSuffix = '---\nnocite: "@alpha"suffix\n---\n';
+		const multilineEscaped = [
+			'---',
+			'nocite:',
+			'  - "note',
+			'    \\\\@hidden"',
+			'  - @active',
+			'---',
+		].join('\n');
+		expect(keys(escaped)).toEqual([]);
+		expect(keys(active)).toEqual(['active']);
+		expect(keys(encoded)).toEqual(['al']);
+		expect(keys(encodedBoundary)).toEqual([]);
+		expect(keys(quotedEmail)).toEqual([]);
+		expect(keys(adjacentQuotes)).toEqual(['example']);
+		expect(keys(escapedInteriorQuote)).toEqual([]);
+		expect(keys(literalQuote)).toEqual(['smith']);
+		expect(keys(malformedSuffix)).toEqual(['alpha']);
+		expect(keys(multilineEscaped)).toEqual(['active']);
+		const activeUsage = analyzeCitationDocument(multilineEscaped).usages[0];
+		expect(activeUsage.atStart).toBe(multilineEscaped.indexOf('@active'));
+		for (let slashCount = 0; slashCount <= 8; slashCount++) {
+			const text = '---\nnocite: "' + '\\'.repeat(slashCount) + '@key"\n---\n';
+			expect(keys(text)).toEqual(slashCount % 4 === 0 ? ['key'] : []);
+		}
+		for (const openingSlashes of [1, 3, 5, 7]) {
+			for (const closingSlashes of [1, 3, 5, 7]) {
+				const text = '---\nnocite: "'
+					+ '\\'.repeat(openingSlashes) + '"quoted.local'
+					+ '\\'.repeat(closingSlashes) + '"@example.com"\n---\n';
+				const quoted = openingSlashes % 4 === 1 && closingSlashes % 4 === 1;
+				expect(keys(text)).toEqual(quoted ? [] : ['example']);
+			}
+		}
+
+		const usage = analyzeCitationDocument(encoded).usages[0];
+		const literalAt = encoded.indexOf('@al');
+		expect(usage).toMatchObject({
+			key: 'al',
+			atStart: literalAt,
+			keyStart: literalAt + 1,
+		});
+		expect(encoded.slice(usage.atStart, usage.keyEnd)).toBe('@al');
+		expect(findCitationAtOffset(encoded, literalAt + 2)).toEqual(usage);
+
+		const escapedCursor = escaped.indexOf('escaped') + 'escaped'.length;
+		const activeCursor = active.indexOf('active') + 'active'.length;
+		expect(getCitationCompletionContextAtOffset(escaped, escapedCursor)).toBeUndefined();
+		expect(getCitationCompletionContextAtOffset(active, activeCursor)?.form).toBe('nocite');
+	});
+
 	test('applies citation boundaries and escaping to every nocite form', () => {
 		const invalid = [
 			'person@example.com',
@@ -154,7 +455,11 @@ describe('citation document scanner', () => {
 			'é@smith',
 			'é@smith',
 			'\\@escaped',
+			'prefix:@colon',
+			'prefix-@hyphen',
+			'--@double-hyphen',
 			'name@*suffix',
+			'@**',
 			'δοκιμή@*',
 		];
 		const forms = [
@@ -230,9 +535,40 @@ describe('citation document scanner', () => {
 		expect(keys('<span data-value="<!--">body</span> @live')).toEqual(['live']);
 	});
 
+	test('keeps citations visible inside malformed pseudo-tags', () => {
+		for (const text of ["<x 'orphan' @smith>", '<x @smith>']) {
+			expect(keys(text)).toEqual(['smith']);
+		}
+		expect(keys('<x title="@hidden">@visible</x>')).toEqual(['visible']);
+	});
+
+	test('uses raw-text semantics for citation-inert HTML elements', () => {
+		for (const tag of ['script', 'style', 'code']) {
+			const text = '<' + tag + '>@hidden</' + tag + '>\n\n@visible';
+			expect(keys(text)).toEqual(['visible']);
+		}
+		expect(keys('<script>@hidden</ script> @still-hidden</script> @visible'))
+			.toEqual(['visible']);
+		expect(keys('<script>@hidden</script nope> @still-hidden</script> @visible'))
+			.toEqual(['visible']);
+		expect(keys('<script><x "orphan </script> @visible"> @after'))
+			.toEqual(['visible', 'after']);
+		for (const tag of [
+			'title', 'textarea', 'style', 'xmp', 'iframe', 'noembed', 'noframes', 'script',
+		]) {
+			expect(keys('<' + tag + '>@hidden</' + tag + '> @visible')).toEqual(['visible']);
+		}
+		expect(keys('<plaintext>@hidden</plaintext> @still-hidden')).toEqual([]);
+	});
+
 	test('scans footnote bodies but not ordinary reference definitions', () => {
 		expect(keys('[^note]: See @footnote.')).toEqual(['footnote']);
 		expect(keys('[reference]: @destination')).toEqual([]);
+	});
+
+	test('keeps malformed reference-definition-looking text visible', () => {
+		expect(keys('[@alpha]:')).toEqual(['alpha']);
+		expect(keys('[@alpha]: <unclosed')).toEqual(['alpha']);
 	});
 
 	test('only activates full-reference labels for valid Markdown definitions', () => {
@@ -260,6 +596,17 @@ describe('citation document scanner', () => {
 
 		expect(keys('See [work by @hidden][^note].\n\n[^note]: /url\n[^body]: See @footnote.'))
 			.toEqual(['footnote']);
+
+		const frontmatterDefinition = [
+			'---',
+			'[foo]: /frontmatter-destination',
+			'---',
+			'',
+			'[discussion @hidden][foo]',
+			'',
+			'[foo]:',
+		].join('\n');
+		expect(keys(frontmatterDefinition)).toEqual([]);
 	});
 
 	test('excludes destinations while scanning bare citations in visible link labels', () => {
@@ -290,8 +637,33 @@ describe('citation document scanner', () => {
 		expect(keys('[label](not a valid destination @live)')).toEqual(['live']);
 		expect(keys('[see @hidden](not a valid destination) @live')).toEqual(['live']);
 		expect(keys('[see @hidden][missing] @live')).toEqual(['live']);
+		expect(scanCitationDocument('[@alpha](javascript:alert(1))').usages)
+			.toMatchObject([{ key: 'alpha', form: 'bracket' }]);
+		expect(scanCitationDocument('![@alpha](javascript:alert(1))').usages)
+			.toMatchObject([{ key: 'alpha', form: 'bracket' }]);
 		expect(keys('[see @linked][known] @live\n\n[known]: /url')).toEqual(['linked', 'live']);
 		expect(keys('Ordinary punctuation ]( followed by @live')).toEqual(['live']);
+	});
+
+	test('excludes citations in Markdown image alt labels', () => {
+		const text = [
+			'![@inline](inline.png)',
+			'![@full][figure]',
+			'![@collapsed][]',
+			'![@shortcut]',
+			'![see [@nested-inline]](nested-inline.png)',
+			'![see [@nested-full]][nested-figure]',
+			'\\![@visible-link](linked.png)',
+			'Body cites @body.',
+			'',
+			'[figure]: full.png',
+			'[@collapsed]: collapsed.png',
+			'[@shortcut]: shortcut.png',
+			'[nested-figure]: nested-full.png',
+		].join('\n');
+		expect(keys(text)).toEqual(['visible-link', 'body']);
+		expect(hasBibliographyDemand('![@image](figure.png)')).toBe(false);
+		expect(hasBibliographyDemand('![see [@image]](figure.png)')).toBe(false);
 	});
 
 	test('does not pair link labels and destinations across Markdown inline blocks', () => {
@@ -349,6 +721,56 @@ describe('citation document scanner', () => {
 			});
 		}
 		expect(keys('<div>[@smith]</div>')).toEqual(['smith']);
+	});
+
+	test('removes HTML markup rather than adding spaces to locators', () => {
+		const text = '<div>[@alpha, p. <em>2</em> and <!-- note -->3]</div>';
+		const [group] = groupCitationUsages(text);
+		expect(group.items).toEqual([{
+			key: 'alpha',
+			atStart: text.indexOf('@alpha'),
+			keyEnd: text.indexOf('@alpha') + '@alpha'.length,
+			suppressAuthor: false,
+			locator: 'p. 2 and 3',
+		}]);
+	});
+
+	test('does not create partial usages from markup-split citekeys', () => {
+		for (const text of ['[@sm<em></em>ith]', '@al<em></em>pha']) {
+			const markupStart = text.indexOf('<em>');
+			expect(analyzeCitationDocument(text).usages).toEqual([]);
+			expect(groupCitationUsages(text)).toEqual([]);
+			expect(getCitationCompletionContextAtOffset(text, markupStart)).toBeUndefined();
+			expect(findCitationAtOffset(text, markupStart - 1)).toBeUndefined();
+		}
+	});
+
+	test('decodes visible raw-HTML locator entities without activating entity markers', () => {
+		const text = '<div>[@alpha, p.&nbsp;20 &amp; &#64; q &#x3C;x&#x3E;]</div>';
+		const [group] = groupCitationUsages(text);
+		expect(group.items).toEqual([{
+			key: 'alpha',
+			atStart: text.indexOf('@alpha'),
+			keyEnd: text.indexOf('@alpha') + '@alpha'.length,
+			suppressAuthor: false,
+			locator: 'p. 20 & @ q <x>',
+		}]);
+		expect(keys('<div>[@alpha; &#64;not-a-citation]</div>')).toEqual(['alpha']);
+		expect(groupCitationUsages('<div>[@alpha; &#64;not-a-citation]</div>')).toEqual([]);
+	});
+
+	test('treats escaped HTML openers as visible citation text', () => {
+		for (let slashCount = 1; slashCount <= 4; slashCount++) {
+			const slashes = '\\'.repeat(slashCount);
+			const expectedTagKeys = slashCount % 2 === 1
+				? ['attribute', 'body']
+				: ['body'];
+			expect(keys(slashes + '<span title="@attribute">@body</span>')).toEqual(expectedTagKeys);
+			const expectedCommentKeys = slashCount % 2 === 1
+				? ['comment', 'after']
+				: ['after'];
+			expect(keys(slashes + '<!-- @comment --> @after')).toEqual(expectedCommentKeys);
+		}
 	});
 
 	test('does not pair raw HTML delimiters across parser blocks', () => {
@@ -466,6 +888,8 @@ describe('citation document scanner', () => {
 			{ text: '\\'.repeat(3) + backtick + ' @s' + backtick, boundary: 1, expected: 's' },
 			{ text: '\\'.repeat(4) + backtick + ' @s' + backtick, boundary: 2 },
 			{ text: '\\[abc](@s)', boundary: 1, expected: 's' },
+			{ text: '\\[abc][@s]', boundary: 1, expected: 's' },
+			{ text: '\\'.repeat(2) + '[abc][@s]', boundary: 2 },
 			{ text: 'x' + backtick + ' @s' + backtick, boundary: 1 },
 			{ text: 'x[label](@s)', boundary: 1 },
 			{ text: '\\' + backtick + 'x \\@s' + backtick, boundary: 1 },
@@ -482,6 +906,13 @@ describe('citation document scanner', () => {
 		}
 	});
 
+	test('restores escape parity for image markers at the bounded window edge', () => {
+		const text = '\\![' + 'a'.repeat(16_378) + ' [@s]](x)';
+		const cursor = text.indexOf('@s') + 2;
+		expect(getCitationCompletionContextAtOffset(text, cursor)?.prefix).toBe('s');
+		expect(getBoundedCitationCompletionContextAtOffset(text, cursor)?.prefix).toBe('s');
+	});
+
 	test('preserves fully local exclusions after a truncated large-document prefix', () => {
 		const prefix = 'ordinary prose '.repeat(20);
 		for (const suffix of ['\\@s', 'person@s', '`@s`', '[label](@s)']) {
@@ -496,10 +927,12 @@ describe('citation document scanner', () => {
 		for (const suffix of ['\\@s', 'person@s', '`@s`', '[label](@s)']) {
 			const text = prefix + suffix;
 			const cursor = text.lastIndexOf('@s') + 2;
-			const metrics = { windowStart: -1, windowEnd: -1, analyzedLength: -1 };
-			expect(getBoundedCitationCompletionContextAtOffset(text, cursor, 16, metrics))
-				.toBeUndefined();
-			expect(metrics.analyzedLength).toBe(metrics.windowEnd - metrics.windowStart);
+			for (const maxWindow of [16, cursor - prefix.length]) {
+				const metrics = { windowStart: -1, windowEnd: -1, analyzedLength: -1 };
+				expect(getBoundedCitationCompletionContextAtOffset(text, cursor, maxWindow, metrics))
+					.toBeUndefined();
+				expect(metrics.analyzedLength).toBe(metrics.windowEnd - metrics.windowStart);
+			}
 		}
 
 		const plain = prefix + 'x'.repeat(20);
@@ -524,6 +957,16 @@ describe('citation document scanner', () => {
 			.toBe('\\'.repeat(2) + backtick);
 		expect(codeMetrics.analyzedLength)
 			.toBeGreaterThan(codeMetrics.windowEnd - codeMetrics.windowStart);
+
+		const truncatedPairing = backtick + 'x'.repeat(129) + backtick + ' @s ' + backtick;
+		const truncatedPairingCursor = truncatedPairing.indexOf('@s') + 2;
+		expect(getCitationCompletionContextAtOffset(truncatedPairing, truncatedPairingCursor)?.prefix)
+			.toBe('s');
+		expect(getBoundedCitationCompletionContextAtOffset(
+			truncatedPairing,
+			truncatedPairingCursor,
+			64,
+		)?.prefix).toBe('s');
 
 		const splitBacktickRun = prefix + '``x @s`';
 		const splitBacktickCursor = splitBacktickRun.lastIndexOf('@s') + 2;
@@ -561,15 +1004,17 @@ describe('citation document scanner', () => {
 		)?.form).toBe('bracket');
 
 		for (const slashCount of [1, 3]) {
-			const suffix = '\\'.repeat(slashCount) + '[label](@s)';
-			const text = prefix + suffix;
-			const cursor = text.lastIndexOf('@s') + 2;
-			const maxWindow = cursor - prefix.length - 1;
-			const metrics = { windowStart: -1, windowEnd: -1, analyzedLength: -1 };
-			expect(getBoundedCitationCompletionContextAtOffset(text, cursor, maxWindow, metrics)?.prefix)
-				.toBe('s');
-			expect(metrics.windowStart).toBe(prefix.length + 1);
-			expect(metrics.analyzedLength).toBeGreaterThan(metrics.windowEnd - metrics.windowStart);
+			for (const destination of ['(@s)', '[@s]']) {
+				const suffix = '\\'.repeat(slashCount) + '[label]' + destination;
+				const text = prefix + suffix;
+				const cursor = text.lastIndexOf('@s') + 2;
+				const maxWindow = cursor - prefix.length - 1;
+				const metrics = { windowStart: -1, windowEnd: -1, analyzedLength: -1 };
+				expect(getBoundedCitationCompletionContextAtOffset(text, cursor, maxWindow, metrics)?.prefix)
+					.toBe('s');
+				expect(metrics.windowStart).toBe(prefix.length + 1);
+				expect(metrics.analyzedLength).toBeGreaterThan(metrics.windowEnd - metrics.windowStart);
+			}
 		}
 
 		const unresolvedRun = prefix + '\\'.repeat(7) + '[x](@s)';
@@ -592,6 +1037,7 @@ describe('citation document scanner', () => {
 		const structures = [
 			backtick + 'x'.repeat(58) + ' @s' + backtick,
 			'[label](@s)',
+			'[label][@s]',
 		];
 		for (const predecessor of ['x', '\\'.repeat(2)]) {
 			for (const structure of structures) {
@@ -605,6 +1051,20 @@ describe('citation document scanner', () => {
 				expect(metrics.analyzedLength).toBe(metrics.windowEnd - metrics.windowStart);
 			}
 		}
+	});
+
+	test('does not retry code delimiters from a preceding Markdown paragraph', () => {
+		const prefix = 'large prefix '.repeat(10_000);
+		const backtick = String.fromCharCode(96);
+		const previousParagraph = backtick + 'old' + backtick + '\n\n';
+		const currentParagraph = 'x'.repeat(61) + backtick + '@s' + backtick;
+		const text = prefix + previousParagraph + currentParagraph;
+		const cursor = text.lastIndexOf('@s') + 2;
+		const metrics = { windowStart: -1, windowEnd: -1, analyzedLength: -1 };
+		expect(getBoundedCitationCompletionContextAtOffset(text, cursor, 64, metrics))
+			.toBeUndefined();
+		expect(metrics.windowStart).toBe(prefix.length + previousParagraph.length);
+		expect(metrics.analyzedLength).toBe(metrics.windowEnd - metrics.windowStart);
 	});
 
 	test('keeps restored-context analysis bounded independently of document size', () => {
@@ -860,11 +1320,70 @@ describe('citation document scanner', () => {
 		}
 	});
 
+	test('scans repeated YAML quote candidates without rescanning line prefixes', () => {
+		const repeated = '- "value" '.repeat(100_000);
+		const text = '---\nnocite: ' + repeated + '# @hidden\n---\n@live';
+		const started = performance.now();
+		expect(keys(text)).toEqual(['live']);
+		expect(performance.now() - started).toBeLessThan(2000);
+	});
+
 	test('scans one large citation cluster in linear time', () => {
 		const itemCount = 20_000;
 		const text = '[' + Array.from({ length: itemCount }, () => '@alpha').join('; ') + ']';
 		const started = performance.now();
 		expect(scanCitationDocument(text).usages).toHaveLength(itemCount);
+		expect(performance.now() - started).toBeLessThan(2000);
+	});
+
+	test('scans deeply nested bracket and image-like candidates without quadratic label slicing', () => {
+		const depth = 20_000;
+		for (const text of [
+			'['.repeat(depth) + 'ordinary' + ']'.repeat(depth) + ' @live',
+			'!['.repeat(depth) + 'ordinary' + ']'.repeat(depth) + '(figure.png) @live',
+		]) {
+			const started = performance.now();
+			expect(keys(text)).toEqual(['live']);
+			expect(performance.now() - started).toBeLessThan(2000);
+		}
+	});
+
+	test('analyzes and groups deeply nested citation-like clusters without reparsing ancestors', () => {
+		const depth = 10_000;
+		const text = '[@alpha; '.repeat(depth) + '@beta' + ']'.repeat(depth);
+		const started = performance.now();
+		const analysis = analyzeCitationDocument(text);
+		const groups = groupCitationUsages(text, analysis);
+		expect(groups).toHaveLength(1);
+		expect(text.slice(groups[0].start, groups[0].end)).toBe('[@alpha; @beta]');
+		expect(performance.now() - started).toBeLessThan(2000);
+	});
+
+	test('groups many independent citation clusters without quadratic nesting scans', () => {
+		const clusterCount = 10_000;
+		const text = '[@alpha] '.repeat(clusterCount);
+		const analysis = analyzeCitationDocument(text);
+		const started = performance.now();
+		expect(groupCitationUsages(text, analysis)).toHaveLength(clusterCount);
+		expect(performance.now() - started).toBeLessThan(2000);
+	});
+
+	test('does not rebuild one nested bracket segment for every owned marker', () => {
+		const markerCount = 20_000;
+		const text = '[' + '@a '.repeat(markerCount) + '[@nested]]';
+		const started = performance.now();
+		const analysis = analyzeCitationDocument(text);
+		expect(analysis.usages.map(usage => usage.key)).toEqual(['nested']);
+		expect(groupCitationUsages(text, analysis)).toHaveLength(1);
+		expect(performance.now() - started).toBeLessThan(2000);
+	});
+
+	test('scans large block-scalar nocite values without dense identity maps', () => {
+		const text = '---\nnocite: |\n  ' + 'plain @alpha\n  '.repeat(50_000) + '@omega\n---\n';
+		const started = performance.now();
+		const analysis = analyzeCitationDocument(text);
+		expect(analysis.usages).toHaveLength(50_001);
+		expect(analysis.usages.at(-1)?.key).toBe('omega');
 		expect(performance.now() - started).toBeLessThan(2000);
 	});
 

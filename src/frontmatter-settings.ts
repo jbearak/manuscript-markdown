@@ -1,9 +1,17 @@
-import { isNociteContinuationLine, nociteValueMode } from './citekey';
+import { createNociteContinuationState, isNociteContinuationLine } from './citekey';
+import {
+	findFrontmatterBounds,
+	findFrontmatterOpeningBounds,
+	findFrontmatterRootIndent,
+	findYamlMappingColon,
+	parseYamlStringScalar,
+} from './frontmatter';
 
 export interface FrontmatterMenuSetting {
 	key: string;
 	label: string;
 	group: 'document' | 'typography' | 'tables' | 'citations' | 'code';
+	showInToolbar?: boolean;
 }
 
 export const FRONTMATTER_MENU_SETTINGS: readonly FrontmatterMenuSetting[] = [
@@ -38,7 +46,7 @@ export const FRONTMATTER_MENU_SETTINGS: readonly FrontmatterMenuSetting[] = [
 	{ key: 'grid-table-max-line-width', label: 'Grid Table Maximum Line Width', group: 'tables' },
 
 	{ key: 'bibliography', label: 'Bibliography File', group: 'citations' },
-	{ key: 'nocite', label: 'Uncited Bibliography Entries', group: 'citations' },
+	{ key: 'nocite', label: 'Uncited Bibliography Entries', group: 'citations', showInToolbar: false },
 	{ key: 'csl', label: 'Citation Style', group: 'citations' },
 	{ key: 'locale', label: 'Citation Locale', group: 'citations' },
 	{ key: 'zotero-notes', label: 'Zotero Citation Placement', group: 'citations' },
@@ -70,10 +78,6 @@ export interface FrontmatterSettingEdit {
 	selectionEnd: number;
 }
 
-function escapeRegex(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 function newFrontmatterEdit(eol: '\n' | '\r\n', key: string): FrontmatterSettingEdit {
 	const prefix = '---' + eol + key + ': ';
 	return {
@@ -90,11 +94,13 @@ function multilineNociteSelectionEnd(
 	lineOffset: number,
 	selectionStart: number,
 	firstValue: string,
+	rootIndent: number,
 ): number {
-	const mode = nociteValueMode(firstValue);
-	if (mode === 'single-line') return selectionStart + firstValue.length;
+	const continuation = createNociteContinuationState(firstValue);
+	const firstValueEnd = continuation.rootFlowCloseOffset ?? firstValue.length;
+	if (continuation.mode === 'single-line') return selectionStart + firstValueEnd;
 
-	let selectionEnd = selectionStart + firstValue.length;
+	let selectionEnd = selectionStart + firstValueEnd;
 	let nextLineStart = markdown.indexOf('\n', lineOffset);
 	if (nextLineStart === -1 || nextLineStart >= bodyEnd) return selectionEnd;
 	nextLineStart++;
@@ -106,12 +112,87 @@ function multilineNociteSelectionEnd(
 			? rawLineEnd - 1
 			: rawLineEnd;
 		const line = markdown.slice(nextLineStart, lineEnd);
-		if (!isNociteContinuationLine(mode, line)) break;
-		selectionEnd = lineEnd;
+		const physicalIndent = line.length - line.trimStart().length;
+		const logicalStart = Math.min(rootIndent, physicalIndent);
+		const logicalLine = line.slice(logicalStart);
+		if (!isNociteContinuationLine(continuation, logicalLine)) break;
+		selectionEnd = continuation.rootFlowCloseOffset === undefined
+			? lineEnd
+			: nextLineStart + logicalStart + continuation.rootFlowCloseOffset;
 		if (newline === -1 || newline >= bodyEnd) break;
 		nextLineStart = newline + 1;
 	}
 	return selectionEnd;
+}
+
+function frontmatterRootIndentText(
+	markdown: string,
+	bodyStart: number,
+	bodyEnd: number,
+	rootIndent: number,
+): string {
+	if (rootIndent === 0) return '';
+	let lineStart = bodyStart;
+	while (lineStart < bodyEnd) {
+		const newline = markdown.indexOf('\n', lineStart);
+		const rawEnd = newline === -1 || newline > bodyEnd ? bodyEnd : newline;
+		const lineEnd = rawEnd > lineStart && markdown[rawEnd - 1] === '\r'
+			? rawEnd - 1
+			: rawEnd;
+		const line = markdown.slice(lineStart, lineEnd);
+		const trimmed = line.trimStart();
+		const indent = line.length - trimmed.length;
+		if (indent === rootIndent && findYamlMappingColon(trimmed) >= 0) {
+			return line.slice(0, rootIndent);
+		}
+		if (newline === -1 || newline >= bodyEnd) break;
+		lineStart = newline + 1;
+	}
+	return ' '.repeat(rootIndent);
+}
+
+interface FrontmatterSettingLine {
+	lineOffset: number;
+	selectionStart: number;
+	value: string;
+}
+
+function findFrontmatterSettingLine(
+	markdown: string,
+	bodyStart: number,
+	bodyEnd: number,
+	rootIndent: number,
+	names: ReadonlySet<string>,
+): FrontmatterSettingLine | undefined {
+	let lineStart = bodyStart;
+	while (lineStart < bodyEnd) {
+		const newline = markdown.indexOf('\n', lineStart);
+		const rawEnd = newline === -1 || newline > bodyEnd ? bodyEnd : newline;
+		const lineEnd = rawEnd > lineStart && markdown[rawEnd - 1] === '\r'
+			? rawEnd - 1
+			: rawEnd;
+		const line = markdown.slice(lineStart, lineEnd);
+		const trimmed = line.trimStart();
+		const indent = line.length - trimmed.length;
+		if (indent === rootIndent) {
+			const colon = findYamlMappingColon(trimmed);
+			if (
+				colon >= 0
+				&& names.has(parseYamlStringScalar(trimmed.slice(0, colon)))
+			) {
+				const afterColon = trimmed.slice(colon + 1);
+				const leadingWhitespace = afterColon.match(/^[ \t]*/)?.[0].length ?? 0;
+				return {
+					lineOffset: lineStart,
+					selectionStart: lineStart + rootIndent + colon + 1 + leadingWhitespace,
+					value: afterColon.slice(leadingWhitespace),
+				};
+			}
+		}
+		if (newline === -1 || newline >= bodyEnd) break;
+		lineStart = newline + 1;
+	}
+	return undefined;
 }
 
 /**
@@ -123,31 +204,39 @@ export function getFrontmatterSettingEdit(
 	eol: '\n' | '\r\n',
 	key: string,
 ): FrontmatterSettingEdit {
-	// Match parseFrontmatter's treatment of leading whitespace and UTF-8 BOMs.
-	const openingOffset = markdown.length - markdown.trimStart().length;
-	const trimmed = markdown.slice(openingOffset);
-	if (!trimmed.startsWith('---')) {
-		return newFrontmatterEdit(eol, key);
-	}
+	const bounds = findFrontmatterBounds(markdown);
+	if (!bounds) return newFrontmatterEdit(eol, key);
+	const bodyStart = findFrontmatterOpeningBounds(markdown)!.bodyStart;
+	const bodyEnd = bounds.contentEnd;
+	const closingOffset = bounds.contentEnd + 1;
+	const rootIndent = findFrontmatterRootIndent(markdown, bodyEnd);
+	const rootIndentText = frontmatterRootIndentText(
+		markdown,
+		bodyStart,
+		bodyEnd,
+		rootIndent,
+	);
+	const names = new Set([key, ...(FRONTMATTER_ALIASES[key] ?? [])]);
+	const settingLine = findFrontmatterSettingLine(
+		markdown,
+		bodyStart,
+		bodyEnd,
+		rootIndent,
+		names,
+	);
 
-	const bodyStart = openingOffset + 3;
-	const closingMatch = /\n---(?:\r?\n|$)/.exec(markdown.slice(bodyStart));
-	if (!closingMatch) {
-		// Without a closing delimiter, the converter treats the text as Markdown.
-		return newFrontmatterEdit(eol, key);
-	}
-	const bodyEnd = bodyStart + closingMatch.index + 1;
-	const names = [key, ...(FRONTMATTER_ALIASES[key] ?? [])].map(escapeRegex);
-	const settingPattern = new RegExp('^(?:' + names.join('|') + ')[ \\t]*:([ \\t]*)(.*?)(\\r?)$', 'm');
-	const settingMatch = settingPattern.exec(markdown.slice(bodyStart, bodyEnd));
-
-	if (settingMatch) {
-		const lineOffset = bodyStart + settingMatch.index;
-		const colonOffset = lineOffset + settingMatch[0].indexOf(':');
-		const selectionStart = colonOffset + 1 + settingMatch[1].length;
+	if (settingLine) {
+		const selectionStart = settingLine.selectionStart;
 		const selectionEnd = key === 'nocite'
-			? multilineNociteSelectionEnd(markdown, bodyEnd, lineOffset, selectionStart, settingMatch[2])
-			: selectionStart + settingMatch[2].length;
+			? multilineNociteSelectionEnd(
+				markdown,
+				bodyEnd,
+				settingLine.lineOffset,
+				selectionStart,
+				settingLine.value,
+				rootIndent,
+			)
+			: selectionStart + settingLine.value.length;
 		return {
 			offset: selectionStart,
 			text: '',
@@ -156,11 +245,10 @@ export function getFrontmatterSettingEdit(
 		};
 	}
 
-	const closingOffset = bodyEnd;
 	const hasBlankLine = markdown.slice(0, closingOffset).endsWith(eol + eol);
 	const offset = hasBlankLine ? closingOffset - eol.length : closingOffset;
-	const text = key + ': ' + eol;
-	const cursor = offset + key.length + 2;
+	const text = rootIndentText + key + ': ' + eol;
+	const cursor = offset + rootIndentText.length + key.length + 2;
 	return {
 		offset,
 		text,

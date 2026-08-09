@@ -1,25 +1,174 @@
 {
-    "injectionSelector": "L:text.html.markdown -comment -meta.embedded -meta.tag -markup.inline.raw -markup.fenced_code -markup.underline.link -constant.other.reference.link",
+    "injectionSelector": "L:text.html.markdown -comment -meta.embedded -meta.tag -meta.citation.manuscript-markdown -meta.paragraph.manuscript-markdown -markup.inline.raw -markup.raw.block -markup.fenced_code -markup.underline.link -constant.other.reference.link, R:meta.paragraph.manuscript-markdown -comment -meta.embedded -meta.tag -meta.citation.manuscript-markdown -markup.inline.raw -markup.raw.block -markup.fenced_code -markup.underline.link -constant.other.reference.link",
     "patterns": [
-        { "include": "#email_address" },
-        { "include": "#citation_list" },
-        { "include": "#noncitation_bracket" },
-        { "include": "#bare_citation" },
-        { "include": "#footnote_ref" },
-        { "include": "#footnote_def" },
-        { "include": "#colored_format_highlight" },
-        { "include": "#format_highlight" },
-        { "include": "#addition" },
-        { "include": "#deletion" },
-        { "include": "#substitution" },
-        { "include": "#highlight" },
-        { "include": "#comment_with_id" },
-        { "include": "#comment" },
-        { "include": "#comment_range_start" },
-        { "include": "#comment_range_end" },
-        { "include": "#trailing_backslash_break" }
+        { "include": "#citation_paragraph" },
+        { "include": "#citation_container_paragraph" },
+        { "include": "#bare_citation_paragraph" },
+        { "include": "#footnote_ref_paragraph" },
+        { "include": "#footnote_def_paragraph" },
+        { "include": "#manuscript_inline" }
     ],
 	"repository": {
+		"manuscript_inline": {
+			"patterns": [
+				{ "include": "#raw_text_element" },
+				{ "include": "#plaintext_element" },
+				{ "include": "#email_address" },
+				{ "include": "#citation_list" },
+				{ "include": "#noncitation_bracket" },
+				{ "include": "#multiline_noncitation_bracket" },
+				{ "include": "#bare_citation" },
+				{ "include": "#footnote_ref" },
+				{ "include": "#footnote_def" },
+				{ "include": "#colored_format_highlight" },
+				{ "include": "#format_highlight" },
+				{ "include": "#addition" },
+				{ "include": "#deletion" },
+				{ "include": "#substitution" },
+				{ "include": "#highlight" },
+				{ "include": "#comment_with_id" },
+				{ "include": "#comment" },
+				{ "include": "#comment_range_start" },
+				{ "include": "#comment_range_end" },
+				{ "include": "#trailing_backslash_break" }
+			]
+		},
+		"host_paragraph_tail": {
+			"begin": "\\G",
+			"while": "(^|\\G)((?=\\s*[-=]{3,}\\s*$)|[ ]{4,}(?=[^ \\t\\n]))",
+			"patterns": [
+				{ "include": "#manuscript_inline" },
+				{ "include": "text.html.markdown#inline" },
+				{ "include": "text.html.derivative" },
+				{ "include": "text.html.markdown#heading-setext" }
+			]
+		},
+		"citation_host_paragraph_tail": {
+			"begin": "(?<=\\])",
+			"end": "(?=^)",
+			"patterns": [
+				{ "include": "#host_paragraph_tail" }
+			]
+		},
+		"citation_indented_paragraph_tail": {
+			"begin": "^[ ]{4,}(?=[^ \\t\\n])",
+			"end": "(?=^)",
+			"patterns": [
+				{ "include": "#host_paragraph_tail" }
+			]
+		},
+		"footnote_definition_tail": {
+			"begin": "\\G",
+			"while": "(^|\\G)[ ]{4,}(?=[^ \\t\\n])",
+			"patterns": [
+				{ "include": "#manuscript_inline" },
+				{ "include": "text.html.markdown#inline" },
+				{ "include": "text.html.derivative" }
+			]
+		},
+		"citation_paragraph": {
+			"begin": "^[ ]{0,3}(?!\\[[^\\]\\r\\n]+?\\][ \\t]*:[ \\t]*(?:<(?:(?:\\\\[<>]|[^<>\\r\\n])*)>|(?!(?i:javascript|file):)(?<citation_definition_url>(?>[^\\s()]+)|\\(\\g<citation_definition_url>*\\))+)[ \\t]*(?:(?:\\().+?\\)|\".+?\"|'.+?')?\\s*$)(?:(?<![!\\\\])(\\[)|(?<!\\\\)((?:\\\\\\\\)+)(\\[)|(?<!\\\\)((?:\\\\\\\\)*\\\\!)(\\[))(?=-?@[A-Za-z0-9_:-]++(?=(?:[^\\]\\r\\n]*\\]|[^@\\]\\r\\n]*$)))(?!(?<citation_link_square>[^\\[\\]\\\\\\r\\n]|\\\\[^\\r\\n]|\\[\\g<citation_link_square>*+\\])*+\\](?:\\([ \\t]*(?!(?i:(?:javascript|file):|<(?:javascript|file):))(?:<(?:(?:\\\\[<>]|[^<>\\r\\n])*)>|(?<citation_link_url>(?>[^\\s()]+)|\\(\\g<citation_link_url>*\\))*)[ \\t]*(?:\\([^()]*\\)|\"[^\"]*\"|'[^']*')?\\s*\\)|\\[[^\\]\\r\\n]*+\\]))(-?)(@[A-Za-z0-9_:-]++)",
+			"beginCaptures": {
+				"0": { "name": "meta.citation.manuscript-markdown" },
+				"2": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" },
+				"3": { "name": "constant.character.escape.markdown" },
+				"4": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" },
+				"5": { "name": "constant.character.escape.markdown" },
+				"6": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" },
+				"10": { "name": "support.function.citation.manuscript-markdown" }
+			},
+			"end": "(?=^)",
+			"name": "meta.paragraph.markdown meta.paragraph.manuscript-markdown",
+			"patterns": [
+				{
+					"begin": "\\G",
+					"end": "(?:(?<!\\\\)(\\])|(?<!\\\\)(?:\\\\\\\\)+(\\]))|(?=^(?:[ ]{0,3}(?:#{1,6}(?:[ \\t]|$)|(?:[-+*]|[0-9]+[.)])[ \\t]+|(?:(?:\\*[ \\t]*){3,}|(?:_[ \\t]*){3,}|(?:-[ \\t]*){3,})$|>[ \\t]?|`{3,}|~{3,}|<!--|</?[A-Za-z]|\\||\\[[^\\]\\r\\n]+\\]:[ \\t]*\\S)|(?!(?:[ ]{4,}(?=[^ \t\n])|[^\\[\r\n]*\\]))))",
+					"endCaptures": {
+						"1": { "name": "punctuation.definition.brackets.end.manuscript-markdown" },
+						"2": { "name": "punctuation.definition.brackets.end.manuscript-markdown" }
+					},
+					"name": "meta.citation.manuscript-markdown",
+					"patterns": [
+						{ "include": "#citation_indented_paragraph_tail" },
+						{ "include": "#nested_citation_list" },
+						{ "include": "#nested_noncitation_bracket" },
+						{ "include": "#citation_list_content" }
+					]
+				},
+				{ "include": "#citation_host_paragraph_tail" }
+			]
+		},
+		"citation_container_paragraph": {
+			"begin": "\\G(?:(?<=[-+*][ \\t])|(?<=[-+*][ \\t][ \\t])|(?<=[-+*][ \\t][ \\t][ \\t])|(?<=[-+*][ \\t][ \\t][ \\t][ \\t])|(?<=[.)][ \\t])|(?<=[.)][ \\t][ \\t])|(?<=[.)][ \\t][ \\t][ \\t])|(?<=[.)][ \\t][ \\t][ \\t][ \\t]))(?!\\[[^\\]\\r\\n]+?\\][ \\t]*:[ \\t]*(?:<(?:(?:\\\\[<>]|[^<>\\r\\n])*)>|(?!(?i:javascript|file):)(?<citation_definition_url>(?>[^\\s()]+)|\\(\\g<citation_definition_url>*\\))+)[ \\t]*(?:(?:\\().+?\\)|\".+?\"|'.+?')?\\s*$)(?:(?<![!\\\\])(\\[)|(?<!\\\\)((?:\\\\\\\\)+)(\\[)|(?<!\\\\)((?:\\\\\\\\)*\\\\!)(\\[))(?=-?@[A-Za-z0-9_:-]++(?=(?:[^\\]\\r\\n]*\\]|[^@\\]\\r\\n]*$)))(?!(?<citation_container_link_square>[^\\[\\]\\\\\\r\\n]|\\\\[^\\r\\n]|\\[\\g<citation_container_link_square>*+\\])*+\\](?:\\([ \\t]*(?!(?i:(?:javascript|file):|<(?:javascript|file):))(?:<(?:(?:\\\\[<>]|[^<>\\r\\n])*)>|(?<citation_container_link_url>(?>[^\\s()]+)|\\(\\g<citation_container_link_url>*\\))*)[ \\t]*(?:\\([^()]*\\)|\"[^\"]*\"|'[^']*')?\\s*\\)|\\[[^\\]\\r\\n]*+\\]))(-?)(@[A-Za-z0-9_:-]++)(?=(?:[^\\]\\r\\n]*\\]|[^@\\]\\r\\n]*$))",
+			"beginCaptures": {
+				"0": { "name": "meta.citation.manuscript-markdown" },
+				"2": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" },
+				"3": { "name": "constant.character.escape.markdown" },
+				"4": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" },
+				"5": { "name": "constant.character.escape.markdown" },
+				"6": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" },
+				"10": { "name": "support.function.citation.manuscript-markdown" }
+			},
+			"while": "(^|\\G)(?!\\s*$|[ ]{0,3}(?:#{1,6}(?:[ \\t]|$)|(?:[-+*]|[0-9]+[.)])[ \\t]+|(?:(?:\\*[ \\t]*){3,}|(?:_[ \\t]*){3,}|(?:-[ \\t]*){3,})$|>[ \\t]?|`{3,}|~{3,}))",
+			"name": "meta.paragraph.markdown meta.paragraph.manuscript-markdown",
+			"patterns": [
+				{
+					"begin": "\\G",
+					"end": "(?:(?<!\\\\)(\\])|(?<!\\\\)(?:\\\\\\\\)+(\\]))|(?=^(?:[ ]{0,3}(?:#{1,6}(?:[ \\t]|$)|(?:[-+*]|[0-9]+[.)])[ \\t]+|(?:(?:\\*[ \\t]*){3,}|(?:_[ \\t]*){3,}|(?:-[ \\t]*){3,})$|>[ \\t]?|`{3,}|~{3,}|<!--|</?[A-Za-z]|\\||\\[[^\\]\\r\\n]+\\]:[ \\t]*\\S)|(?!(?:[ ]{4,}(?=[^ \t\n])|[^\\[\r\n]*\\]))))",
+					"endCaptures": {
+						"1": { "name": "punctuation.definition.brackets.end.manuscript-markdown" },
+						"2": { "name": "punctuation.definition.brackets.end.manuscript-markdown" }
+					},
+					"name": "meta.citation.manuscript-markdown",
+					"patterns": [
+						{ "include": "#citation_indented_paragraph_tail" },
+						{ "include": "#nested_citation_list" },
+						{ "include": "#nested_noncitation_bracket" },
+						{ "include": "#citation_list_content" }
+					]
+				},
+				{ "include": "#citation_host_paragraph_tail" }
+			]
+		},
+		"bare_citation_paragraph": {
+			"begin": "^[ ]{0,3}(?:(?<![\\p{L}\\p{M}\\p{N}._:\\-/+\\x3d`@\\\\])(@[A-Za-z0-9_:-]++)(?!@)|(?<!\\\\)((?:\\\\\\\\)+)(@[A-Za-z0-9_:-]++)(?!@))",
+			"beginCaptures": {
+				"1": { "name": "support.function.citation.manuscript-markdown" },
+				"2": { "name": "constant.character.escape.markdown" },
+				"3": { "name": "support.function.citation.manuscript-markdown" }
+			},
+			"end": "(?=^)",
+			"name": "meta.paragraph.markdown meta.paragraph.manuscript-markdown",
+			"patterns": [
+				{ "include": "#host_paragraph_tail" }
+			]
+		},
+		"footnote_ref_paragraph": {
+			"begin": "^[ ]{0,3}(\\[\\^)([a-zA-Z0-9_-]++)(\\])(?!:)",
+			"beginCaptures": {
+				"1": { "name": "punctuation.definition.footnote.begin.manuscript-markdown" },
+				"2": { "name": "entity.name.footnote.manuscript-markdown" },
+				"3": { "name": "punctuation.definition.footnote.end.manuscript-markdown" }
+			},
+			"end": "(?=^)",
+			"name": "meta.paragraph.markdown meta.paragraph.manuscript-markdown",
+			"patterns": [
+				{ "include": "#host_paragraph_tail" }
+			]
+		},
+		"footnote_def_paragraph": {
+			"begin": "^[ ]{0,3}(\\[\\^)([a-zA-Z0-9_-]++)(\\]:)",
+			"beginCaptures": {
+				"1": { "name": "punctuation.definition.footnote.begin.manuscript-markdown" },
+				"2": { "name": "entity.name.footnote.manuscript-markdown" },
+				"3": { "name": "punctuation.definition.footnote.end.manuscript-markdown" }
+			},
+			"end": "(?=^)",
+			"name": "meta.paragraph.markdown meta.paragraph.manuscript-markdown",
+			"patterns": [
+				{ "include": "#footnote_definition_tail" }
+			]
+		},
 		"addition": {
 			"begin": "\\{\\+\\+",
 			"end": "\\+\\+\\}",
@@ -60,10 +209,7 @@
 			"contentName": "meta.comment.manuscript-markdown",
 			"patterns": [
 				{ "include": "#critic_attribution" },
-				{ "include": "#email_address" },
-				{ "include": "#citation_list" },
-				{ "include": "#noncitation_bracket" },
-				{ "include": "#bare_citation" }
+				{ "include": "#comment_inline" }
 			]
 		},
 		"comment": {
@@ -81,10 +227,30 @@
 			"contentName": "meta.comment",
 			"patterns": [
 				{ "include": "#critic_attribution" },
+				{ "include": "#comment_inline" }
+			]
+		},
+		"comment_inline": {
+			"patterns": [
+				{ "include": "#raw_text_element" },
+				{ "include": "#plaintext_element" },
 				{ "include": "#email_address" },
 				{ "include": "#citation_list" },
 				{ "include": "#noncitation_bracket" },
-				{ "include": "#bare_citation" }
+				{ "include": "#multiline_noncitation_bracket" },
+				{ "include": "#bare_citation" },
+				{ "include": "#footnote_ref" },
+				{ "include": "#colored_format_highlight" },
+				{ "include": "#format_highlight" },
+				{ "include": "#addition" },
+				{ "include": "#deletion" },
+				{ "include": "#substitution" },
+				{ "include": "#highlight" },
+				{ "include": "#comment_range_start" },
+				{ "include": "#comment_range_end" },
+				{ "include": "#trailing_backslash_break" },
+				{ "include": "text.html.markdown#inline" },
+				{ "include": "text.html.derivative" }
 			]
 		},
 		"critic_attribution": {
@@ -156,42 +322,226 @@
 			"match": "\\\\$",
 			"name": "constant.character.escape.manuscript-markdown"
 		},
+		"raw_text_element": {
+			"begin": "(?i)(<)(?:code|title|textarea|style|xmp|iframe|noembed|noframes|script)(?=[\\s>])(?:\\s+(?:[^\\s=/>]+)(?:\\s*=\\s*(?:[^\\s\\\"'=<>`]+|'[^']*'|\\\"[^\\\"]*\\\"))?)*\\s*(/?>)",
+			"beginCaptures": {
+				"1": { "name": "punctuation.definition.tag.begin.html" },
+				"2": { "name": "punctuation.definition.tag.end.html" }
+			},
+			"end": "(?i)(</)(?:code|title|textarea|style|xmp|iframe|noembed|noframes|script)\\s*(>)",
+			"endCaptures": {
+				"1": { "name": "punctuation.definition.tag.begin.html" },
+				"2": { "name": "punctuation.definition.tag.end.html" }
+			},
+			"name": "meta.embedded.raw-text.manuscript-markdown"
+		},
+		"plaintext_element": {
+			"begin": "(?i)(<)plaintext(?=[\\s>])(?:\\s+(?:[^\\s=/>]+)(?:\\s*=\\s*(?:[^\\s\\\"'=<>`]+|'[^']*'|\\\"[^\\\"]*\\\"))?)*\\s*(/?>)",
+			"beginCaptures": {
+				"1": { "name": "punctuation.definition.tag.begin.html" },
+				"2": { "name": "punctuation.definition.tag.end.html" }
+			},
+			"end": "(?=\\z)",
+			"name": "meta.embedded.raw-text.manuscript-markdown"
+		},
 		"email_address": {
-			"match": "(?:(?:\"(?:[^\"\\\\]|\\\\.)+\")|(?=[\\p{L}\\p{M}\\p{N}.!#$%&'*+/=?^_`{|}~-]*[\\p{L}\\p{N}])[\\p{L}\\p{M}\\p{N}.!#$%&'*+/=?^_`{|}~-]+)@[\\p{L}\\p{N}](?:[\\p{L}\\p{M}\\p{N}.-]*[\\p{L}\\p{M}\\p{N}])?",
+			"match": "(?:(?:\"(?:[^\"\\\\]|\\\\.)+\")|(?=[\\p{L}\\p{M}\\p{N}.!#$%&'*+/=?^_`{|}~-]*[\\p{L}\\p{N}])[\\p{L}\\p{M}\\p{N}.!#$%&'*+/=?^_`{|}~-]+)@[\\p{L}\\p{N}](?:[\\p{L}\\p{M}\\p{N}-]*[\\p{L}\\p{M}\\p{N}])?(?:\\.[\\p{L}\\p{N}](?:[\\p{L}\\p{M}\\p{N}-]*[\\p{L}\\p{M}\\p{N}])?)*(?:\\.+(?![\\p{L}\\p{M}\\p{N}.-]))?(?![\\p{L}\\p{M}\\p{N}.-])",
 			"name": "meta.email.manuscript-markdown"
 		},
-		"noncitation_bracket": {
-			"begin": "\\[(?=[^\\]\\n]*\\])(?!\\^)(?!-?@)(?![^\\]\\n]*\\](?:\\(|\\[))",
-			"end": "\\]",
-			"name": "meta.embedded.noncitation-bracket.manuscript-markdown",
+		"nested_citation_list": {
+			"begin": "(?:(?<![!\\\\])(\\[)|(?<!\\\\)((?:\\\\\\\\)+)(\\[)|(?<!\\\\)((?:\\\\\\\\)*\\\\!)(\\[))(?=-?@[A-Za-z0-9_:-]++(?=(?:[^\\]\\r\\n]*\\]|[^@\\]\\r\\n]*$)))",
+			"beginCaptures": {
+				"1": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" },
+				"2": { "name": "constant.character.escape.markdown" },
+				"3": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" },
+				"4": { "name": "constant.character.escape.markdown" },
+				"5": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" }
+			},
+			"end": "(?:(?<!\\\\)(\\])|(?<!\\\\)(?:\\\\\\\\)+(\\]))|(?=^(?:[ ]{0,3}(?:#{1,6}(?:[ \\t]|$)|(?:[-+*]|[0-9]+[.)])[ \\t]+|(?:(?:\\*[ \\t]*){3,}|(?:_[ \\t]*){3,}|(?:-[ \\t]*){3,})$|>[ \\t]?|`{3,}|~{3,}|<!--|</?[A-Za-z]|\\||\\[[^\\]\\r\\n]+\\]:[ \\t]*\\S)|(?!(?:[ ]{4,}(?=[^ \t\n])|[^\\[\r\n]*\\]))))",
+			"endCaptures": {
+				"1": { "name": "punctuation.definition.brackets.end.manuscript-markdown" },
+				"2": { "name": "punctuation.definition.brackets.end.manuscript-markdown" }
+			},
 			"patterns": [
-				{ "include": "#citation_list" },
-				{ "include": "#noncitation_bracket" }
+				{ "include": "#citation_indented_paragraph_tail" },
+				{ "include": "#nested_citation_list" },
+				{ "include": "#nested_noncitation_bracket" },
+				{ "include": "#citation_list_content" }
 			]
 		},
-		"bare_citation": {
-			"match": "(?<![\\p{L}\\p{M}\\p{N}._:\\-/+\\x3d`\\\\])@[A-Za-z0-9_:-]++",
-			"name": "support.function.citation.manuscript-markdown"
+		"ordinary_bracket_inline": {
+			"patterns": [
+				{ "include": "#raw_text_element" },
+				{ "include": "#plaintext_element" },
+				{ "include": "#nested_citation_list" },
+				{ "include": "#unclosed_noncitation_bracket_tail" },
+				{ "include": "#nested_noncitation_bracket" },
+				{ "include": "#footnote_ref" },
+				{ "include": "#colored_format_highlight" },
+				{ "include": "#format_highlight" },
+				{ "include": "#addition" },
+				{ "include": "#deletion" },
+				{ "include": "#substitution" },
+				{ "include": "#highlight" },
+				{ "include": "#comment_with_id_noncitation" },
+				{ "include": "#comment_noncitation" },
+				{ "include": "#comment_range_start" },
+				{ "include": "#comment_range_end" },
+				{ "include": "#trailing_backslash_break" },
+				{ "include": "text.html.markdown#inline" },
+				{ "include": "text.html.derivative" },
+				{ "include": "#ordinary_bracket_content" }
+			]
 		},
-		"citation_list": {
-			"begin": "\\[(?=-?@[A-Za-z0-9_:-])",
+		"unclosed_noncitation_bracket_tail": {
+			"match": "(?<!\\\\)\\[(?![^\\]\\r\\n]*\\])[^\\r\\n]*+$"
+		},
+		"comment_with_id_noncitation": {
+			"begin": "(\\{#)([a-zA-Z0-9_-]++)(>>)",
 			"beginCaptures": {
-				"0": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" }
+				"1": { "name": "punctuation.definition.tag.begin.manuscript-markdown" },
+				"2": { "name": "entity.name.tag.manuscript-markdown" },
+				"3": { "name": "punctuation.definition.tag.begin.manuscript-markdown" }
 			},
-			"end": "\\]",
+			"end": "<<\\}",
 			"endCaptures": {
-				"0": { "name": "punctuation.definition.brackets.end.manuscript-markdown" }
+				"0": { "name": "punctuation.definition.tag.end.manuscript-markdown" }
 			},
-			"name": "meta.citation.manuscript-markdown",
+			"contentName": "meta.comment.manuscript-markdown"
+		},
+		"comment_noncitation": {
+			"begin": "(\\{)(>>)",
+			"beginCaptures": {
+				"1": { "name": "punctuation.definition.tag.begin.manuscript-markdown" },
+				"2": { "name": "punctuation.definition.tag.begin.manuscript-markdown" }
+			},
+			"end": "(<<)(\\})",
+			"endCaptures": {
+				"1": { "name": "punctuation.definition.tag.end.manuscript-markdown" },
+				"2": { "name": "punctuation.definition.tag.end.manuscript-markdown" }
+			},
+			"name": "meta.comment.manuscript-markdown",
+			"contentName": "meta.comment"
+		},
+		"nested_noncitation_bracket": {
+			"begin": "(?:(?<!\\\\)(\\[)|(?<!\\\\)((?:\\\\\\\\)+)(\\[))(?!\\^)(?!-?@)",
+			"beginCaptures": {
+				"1": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" },
+				"2": { "name": "constant.character.escape.markdown" },
+				"3": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" }
+			},
+			"end": "(?:(?<!\\\\)(\\])|(?<!\\\\)(?:\\\\\\\\)+(\\]))|(?=^(?:[ ]{0,3}(?:#{1,6}(?:[ \\t]|$)|(?:[-+*]|[0-9]+[.)])[ \\t]+|(?:(?:\\*[ \\t]*){3,}|(?:_[ \\t]*){3,}|(?:-[ \\t]*){3,})$|>[ \\t]?|`{3,}|~{3,}|<!--|</?[A-Za-z]|\\||\\[[^\\]\\r\\n]+\\]:[ \\t]*\\S)|(?!(?:[^\\r\\n]*\\]))(?:[ \\t]*$|[^ \\t\\r\\n]|\\t|[ ]{1,3}(?:<!--|</?[A-Za-z]|\\||\\[[^\\]\\r\\n]+\\]:[ \\t]*\\S))))",
+			"endCaptures": {
+				"1": { "name": "punctuation.definition.brackets.end.manuscript-markdown" },
+				"2": { "name": "punctuation.definition.brackets.end.manuscript-markdown" }
+			},
+			"patterns": [
+				{ "include": "#ordinary_bracket_inline" }
+			]
+		},
+		"ordinary_bracket_content": {
+			"match": "(?:[^\\[\\]\\\\]++|\\\\[^\\r\\n])++"
+		},
+		"noncitation_bracket": {
+			"begin": "(?!(?=^)\\[[^\\]\\r\\n]+?\\][ \\t]*:[ \\t]*(?:<(?:(?:\\\\[<>]|[^<>\\r\\n])*)>|(?!(?i:javascript|file):)(?<citation_definition_url>(?>[^\\s()]+)|\\(\\g<citation_definition_url>*\\))+)[ \\t]*(?:(?:\\().+?\\)|\".+?\"|'.+?')?\\s*$)(?:(?<!\\\\)(\\[)|(?<!\\\\)((?:\\\\\\\\)+)(\\[))(?=(?:[^\\[\\]\\\\\\r\\n]|\\\\[^\\r\\n]|\\[)*\\])(?!\\^)(?!-?@)(?!(?:[^\\[\\]\\\\\\r\\n]|\\\\[^\\r\\n]|\\[)*\\](?:\\([ \\t]*(?!(?i:(?:javascript|file):|<(?:javascript|file):))(?:<(?:(?:\\\\[<>]|[^<>\\r\\n])*)>|(?<noncitation_shallow_url>(?>[^\\s()]+)|\\(\\g<noncitation_shallow_url>*\\))*)[ \\t]*(?:\\([^()]*\\)|\"[^\"]*\"|'[^']*')?\\s*\\)|\\[[^\\]\\r\\n]*+\\]))(?!(?<noncitation_square>[^\\[\\]\\\\\\r\\n]|\\\\[^\\r\\n]|\\[\\g<noncitation_square>*+\\])*+\\](?:\\([ \\t]*(?!(?i:(?:javascript|file):|<(?:javascript|file):))(?:<(?:(?:\\\\[<>]|[^<>\\r\\n])*)>|(?<noncitation_url>(?>[^\\s()]+)|\\(\\g<noncitation_url>*\\))*)[ \\t]*(?:\\([^()]*\\)|\"[^\"]*\"|'[^']*')?\\s*\\)|\\[[^\\]\\r\\n]*+\\]))",
+			"beginCaptures": {
+				"2": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" },
+				"3": { "name": "constant.character.escape.markdown" },
+				"4": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" }
+			},
+			"end": "(?:(?<!\\\\)(\\])|(?<!\\\\)(?:\\\\\\\\)+(\\]))|(?=^(?:[ ]{0,3}(?:#{1,6}(?:[ \\t]|$)|(?:[-+*]|[0-9]+[.)])[ \\t]+|(?:(?:\\*[ \\t]*){3,}|(?:_[ \\t]*){3,}|(?:-[ \\t]*){3,})$|>[ \\t]?|`{3,}|~{3,}|<!--|</?[A-Za-z]|\\||\\[[^\\]\\r\\n]+\\]:[ \\t]*\\S)|(?!(?:[^\\r\\n]*\\]))(?:[ \\t]*$|[^ \\t\\r\\n]|\\t|[ ]{1,3}(?:<!--|</?[A-Za-z]|\\||\\[[^\\]\\r\\n]+\\]:[ \\t]*\\S))))",
+			"endCaptures": {
+				"1": { "name": "punctuation.definition.brackets.end.manuscript-markdown" },
+				"2": { "name": "punctuation.definition.brackets.end.manuscript-markdown" }
+			},
+			"name": "meta.embedded.noncitation-bracket.manuscript-markdown",
+			"patterns": [
+				{ "include": "#ordinary_bracket_inline" }
+			]
+		},
+		"multiline_noncitation_bracket": {
+			"begin": "(?:(?<!\\\\)(\\[)|(?<!\\\\)((?:\\\\\\\\)+)(\\[))(?!\\^)(?!-?@)(?=(?:[^\\[\\]\\\\\\r\\n]|\\\\[^\\r\\n]|\\[)*\\\\?$)",
+			"beginCaptures": {
+				"1": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" },
+				"2": { "name": "constant.character.escape.markdown" },
+				"3": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" }
+			},
+			"end": "(?:(?<!\\\\)(\\])|(?<!\\\\)(?:\\\\\\\\)+(\\]))|(?=^(?:[ ]{0,3}(?:#{1,6}(?:[ \\t]|$)|(?:[-+*]|[0-9]+[.)])[ \\t]+|(?:(?:\\*[ \\t]*){3,}|(?:_[ \\t]*){3,}|(?:-[ \\t]*){3,})$|>[ \\t]?|`{3,}|~{3,}|<!--|</?[A-Za-z]|\\||\\[[^\\]\\r\\n]+\\]:[ \\t]*\\S)|(?!(?:[^\\r\\n]*\\]))(?:[ \\t]*$|[^ \\t\\r\\n]|\\t|[ ]{1,3}(?:<!--|</?[A-Za-z]|\\||\\[[^\\]\\r\\n]+\\]:[ \\t]*\\S))))",
+			"endCaptures": {
+				"1": { "name": "punctuation.definition.brackets.end.manuscript-markdown" },
+				"2": { "name": "punctuation.definition.brackets.end.manuscript-markdown" }
+			},
+			"name": "meta.embedded.noncitation-bracket.manuscript-markdown",
+			"patterns": [
+				{ "include": "#ordinary_bracket_inline" }
+			]
+		},
+		"citation_list_content": {
 			"patterns": [
 				{
-					"match": "(?<![\\p{L}\\p{M}\\p{N}._/+\\x3d`\\\\])@[A-Za-z0-9_:-]++",
-					"name": "support.function.citation.manuscript-markdown"
+					"begin": "(;)(?=[ \\t]*(?:(?:<!--(?:[^-]|-(?!->))*-->|<[^>\\r\\n]*>)[ \\t]*)*(?:<!--[^\\r\\n]*)?$)",
+					"beginCaptures": {
+						"1": { "name": "punctuation.separator.sequence.manuscript-markdown" }
+					},
+					"end": "(?:(?:^|\\G)[ \\t]*|(?<=-->)[ \\t]*)(?:(?:<[^>\\r\\n]*>)[ \\t]*)*-?(@[A-Za-z0-9_:-]++)|(?=^(?![ \\t]*(?:(?:<!--(?:[^-]|-(?!->))*-->|<[^>\\r\\n]*>)[ \\t]*)+$))",
+					"endCaptures": {
+						"1": { "name": "support.function.citation.manuscript-markdown" }
+					},
+					"name": "meta.citation-item-continuation.manuscript-markdown",
+					"patterns": [
+						{
+							"begin": "<!--",
+							"end": "-->|(?=^[ \\t]*(?:$|#{1,6}(?:[ \\t]|$)|(?:[-+*]|[0-9]+[.)])[ \\t]+|(?:(?:\\*[ \\t]*){3,}|(?:_[ \\t]*){3,}|(?:-[ \\t]*){3,})$|>[ \\t]?|`{3,}|~{3,}))",
+							"name": "comment.block.html"
+						}
+					]
+				},
+				{
+					"match": "\\G[ \\t]*-?(@[A-Za-z0-9_:-]++)",
+					"captures": {
+						"1": { "name": "support.function.citation.manuscript-markdown" }
+					}
+				},
+				{
+					"match": "(?<=;)[ \\t]*(?:(?:<!--(?:[^-]|-(?!->))*-->|<[^>\\r\\n]*>)[ \\t]*)*-?(@[A-Za-z0-9_:-]++)",
+					"captures": {
+						"1": { "name": "support.function.citation.manuscript-markdown" }
+					}
 				},
 				{
 					"match": ";",
 					"name": "punctuation.separator.sequence.manuscript-markdown"
 				}
+		]
+		},
+		"bare_citation": {
+			"match": "(?:(?<![\\p{L}\\p{M}\\p{N}._:\\-/+\\x3d`@\\\\])(@[A-Za-z0-9_:-]++)(?!@)|(?<!\\\\)((?:\\\\\\\\)+)(@[A-Za-z0-9_:-]++)(?!@))",
+			"captures": {
+				"1": { "name": "support.function.citation.manuscript-markdown" },
+				"2": { "name": "constant.character.escape.markdown" },
+				"3": { "name": "support.function.citation.manuscript-markdown" }
+			}
+		},
+		"citation_list": {
+			"begin": "(?!(?=^)\\[[^\\]\\r\\n]+?\\][ \\t]*:[ \\t]*(?:<(?:(?:\\\\[<>]|[^<>\\r\\n])*)>|(?!(?i:javascript|file):)(?<citation_definition_url>(?>[^\\s()]+)|\\(\\g<citation_definition_url>*\\))+)[ \\t]*(?:(?:\\().+?\\)|\".+?\"|'.+?')?\\s*$)(?:(?<![!\\\\])(\\[)|(?<!\\\\)((?:\\\\\\\\)+)(\\[)|(?<!\\\\)((?:\\\\\\\\)*\\\\!)(\\[))(?=-?@[A-Za-z0-9_:-]++(?=(?:[^\\]\\r\\n]*\\]|[^@\\]\\r\\n]*$)))(?!(?<citation_link_square>[^\\[\\]\\\\\\r\\n]|\\\\[^\\r\\n]|\\[\\g<citation_link_square>*+\\])*+\\](?:\\([ \\t]*(?!(?i:(?:javascript|file):|<(?:javascript|file):))(?:<(?:(?:\\\\[<>]|[^<>\\r\\n])*)>|(?<citation_link_url>(?>[^\\s()]+)|\\(\\g<citation_link_url>*\\))*)[ \\t]*(?:\\([^()]*\\)|\"[^\"]*\"|'[^']*')?\\s*\\)|\\[[^\\]\\r\\n]*+\\]))",
+			"beginCaptures": {
+				"2": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" },
+				"3": { "name": "constant.character.escape.markdown" },
+				"4": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" },
+				"5": { "name": "constant.character.escape.markdown" },
+				"6": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" }
+			},
+			"end": "(?:(?<!\\\\)(\\])|(?<!\\\\)(?:\\\\\\\\)+(\\]))|(?=^(?:[ ]{0,3}(?:#{1,6}(?:[ \\t]|$)|(?:[-+*]|[0-9]+[.)])[ \\t]+|(?:(?:\\*[ \\t]*){3,}|(?:_[ \\t]*){3,}|(?:-[ \\t]*){3,})$|>[ \\t]?|`{3,}|~{3,}|<!--|</?[A-Za-z]|\\||\\[[^\\]\\r\\n]+\\]:[ \\t]*\\S)|(?!(?:[ ]{4,}(?=[^ \t\n])|[^\\[\r\n]*\\]))))",
+			"endCaptures": {
+				"1": { "name": "punctuation.definition.brackets.end.manuscript-markdown" },
+				"2": { "name": "punctuation.definition.brackets.end.manuscript-markdown" }
+			},
+			"name": "meta.citation.manuscript-markdown",
+			"patterns": [
+				{ "include": "#citation_indented_paragraph_tail" },
+				{ "include": "#nested_citation_list" },
+				{ "include": "#nested_noncitation_bracket" },
+				{ "include": "#citation_list_content" }
 			]
 		}
 	},

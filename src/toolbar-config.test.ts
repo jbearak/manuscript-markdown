@@ -175,7 +175,7 @@ describe('Toolbar Configuration Property-Based Tests', () => {
   });
 
   describe('Export to Word menu', () => {
-    it('groups every YAML frontmatter setting into submenus', () => {
+    it('groups common YAML frontmatter settings into submenus', () => {
       const packageJson = loadPackageJson();
       const commands = packageJson.contributes?.commands || [];
       const exportMenu = packageJson.contributes?.menus?.['markdown.exportDocx'] || [];
@@ -199,13 +199,16 @@ describe('Toolbar Configuration Property-Based Tests', () => {
         const menuEntry = submenu.find((entry: any) => entry.command === commandId);
 
         expect(command?.title).toBe(setting.label);
-        expect(menuEntry?.when).toBe('editorLangId == markdown');
+        if (setting.showInToolbar === false) expect(menuEntry).toBeUndefined();
+        else expect(menuEntry?.when).toBe('editorLangId == markdown');
       }
 
       const allSettingEntries = Object.values(menuIds).flatMap(
         menuId => packageJson.contributes?.menus?.[menuId] || []
       );
-      expect(allSettingEntries.length).toBe(FRONTMATTER_MENU_SETTINGS.length);
+      expect(allSettingEntries.length).toBe(
+        FRONTMATTER_MENU_SETTINGS.filter(setting => setting.showInToolbar !== false).length
+      );
 
       expect(
         commands.some((entry: any) => entry.command === 'manuscript-markdown.setCitationStyle')

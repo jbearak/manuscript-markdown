@@ -166,24 +166,27 @@ describe('getFrontmatterLocation', () => {
 		expect(loc.kind).toBe('outside');
 	});
 
-	test('matches canonical closed bounds after BOM, leading trivia, and opener whitespace', () => {
+	test('matches canonical closed bounds after BOM, leading trivia, and delimiter whitespace', () => {
 		for (const prefix of ['﻿', '\n  \n', '﻿\r\n \t\r\n']) {
-			const text = prefix + '--- \t\r\nfont: Georgia\r\n---\r\nBody';
-			const bounds = findFrontmatterBounds(text);
-			expect(bounds).toBeDefined();
-			expect(parseFrontmatter(text).metadata.font).toBe('Georgia');
-			const valueOffset = text.indexOf('Georgia') + 3;
-			const loc = getFrontmatterLocation(text, valueOffset);
-			expect(loc).toMatchObject({
-				kind: 'value',
-				key: 'font',
-				keyStart: text.indexOf('font'),
-				valueStart: text.indexOf('Georgia'),
-				inFrontmatter: true,
-				frontmatterClosed: true,
-			});
-			expect(loc.fmBodyStart).toBe(text.indexOf('font'));
-			expect(getFrontmatterLocation(text, bounds!.bodyStart).kind).toBe('outside');
+			for (const closer of ['---\r\n', '--- \t\r\n', '...\t\r\n']) {
+				const text = prefix + '--- \t\r\nfont: Georgia\r\n' + closer + 'Body';
+				const bounds = findFrontmatterBounds(text);
+				expect(bounds).toBeDefined();
+				expect(parseFrontmatter(text).metadata.font).toBe('Georgia');
+				const valueOffset = text.indexOf('Georgia') + 3;
+				const loc = getFrontmatterLocation(text, valueOffset);
+				expect(loc).toMatchObject({
+					kind: 'value',
+					key: 'font',
+					keyStart: text.indexOf('font'),
+					valueStart: text.indexOf('Georgia'),
+					inFrontmatter: true,
+					frontmatterClosed: true,
+					fmEnd: bounds!.bodyStart - 2,
+				});
+				expect(loc.fmBodyStart).toBe(text.indexOf('font'));
+				expect(getFrontmatterLocation(text, bounds!.bodyStart).kind).toBe('outside');
+			}
 		}
 	});
 
@@ -202,6 +205,47 @@ describe('getFrontmatterLocation', () => {
 			});
 			expect(loc.fmBodyStart).toBe(text.indexOf('font'));
 		}
+	});
+
+	test('rejects EOF-only unclosed frontmatter openers', () => {
+		for (const text of ['---', '--- ', '--- \t', '\n--- \t']) {
+			const loc = getFrontmatterLocation(text, text.length);
+			expect(loc.kind).toBe('outside');
+			expect(loc.inFrontmatter).toBe(false);
+		}
+	});
+
+	test('bounds cursor-local parsing for large unclosed frontmatter candidates', () => {
+		const prefix = '---\nfont: Georgia\n';
+		const text = prefix + 'body text\n'.repeat(200_000);
+		const offset = text.indexOf('Georgia') + 3;
+		const loc = getFrontmatterLocation(text, offset);
+		expect(loc.kind).toBe('value');
+		expect(loc.frontmatterClosed).toBe(false);
+		expect(loc.fmEnd).toBeLessThanOrEqual(16_388);
+	});
+
+	test('uses authoritative bounds for closed frontmatter beyond provisional lookahead', () => {
+		const text = '---\nabstract: |\n'
+			+ '  long content\n'.repeat(2_000)
+			+ 'font: Georgia\n---\nBody';
+		const bounds = findFrontmatterBounds(text);
+		const offset = text.indexOf('Georgia') + 3;
+		const loc = getFrontmatterLocation(text, offset, bounds);
+		expect(loc).toMatchObject({
+			kind: 'value',
+			key: 'font',
+			inFrontmatter: true,
+			frontmatterClosed: true,
+		});
+	});
+
+	test('treats far-down cursors after unmatched openers as document text', () => {
+		const prefix = '---\nfont: Georgia\n';
+		const text = prefix + 'body text\n'.repeat(200_000);
+		const loc = getFrontmatterLocation(text, text.length - 1);
+		expect(loc.kind).toBe('outside');
+		expect(loc.inFrontmatter).toBe(false);
 	});
 
 	test('returns outside at the offset immediately after the closing delimiter', () => {
@@ -257,6 +301,81 @@ describe('getFrontmatterLocation', () => {
 		const text = '---\nbib: refs.bib\n---\n';
 		const loc = getFrontmatterLocation(text, text.indexOf('bib'));
 		expect(loc.declaredKeys.has('bibliography')).toBe(true);
+	});
+
+	test('treats nested custom YAML as completion-inert', () => {
+		for (const parent of ['custom:', 'custom: # metadata', 'custom: |']) {
+			const text = [
+				'---',
+				parent,
+				'  font: Custom value',
+				'  csl: ap',
+				'font: Georgia',
+				'---',
+			].join('\n');
+			for (const marker of ['Custom value', 'csl: ap']) {
+				const loc = getFrontmatterLocation(text, text.indexOf(marker) + marker.length);
+				expect(loc.kind).toBe('outside');
+				expect(loc.inFrontmatter).toBe(true);
+				expect(getFrontmatterCompletionItems(loc, 'darwin')).toEqual([]);
+				expect(getFrontmatterHover(loc)).toBeUndefined();
+			}
+			const topLevel = getFrontmatterLocation(text, text.lastIndexOf('Georgia') + 3);
+			expect(topLevel.kind).toBe('value');
+			expect(topLevel.key).toBe('font');
+			expect(topLevel.declaredKeys.has('font')).toBe(true);
+		}
+	});
+
+	test('uses logical indentation for consistently indented root mappings', () => {
+		const text = [
+			'---',
+			'  custom:',
+			'    breaks: maybe',
+			'  font: Georgia',
+			'  styles:',
+			'    Quote:',
+			'      font: Baskerville',
+			'---',
+		].join('\n');
+
+		const nested = getFrontmatterLocation(text, text.indexOf('maybe') + 3);
+		expect(nested.kind).toBe('outside');
+		expect(nested.inFrontmatter).toBe(true);
+
+		const root = getFrontmatterLocation(text, text.indexOf('Georgia') + 3);
+		expect(root).toMatchObject({ kind: 'value', key: 'font' });
+
+		const style = getFrontmatterLocation(text, text.indexOf('Baskerville') + 3);
+		expect(style).toMatchObject({
+			kind: 'styles-value',
+			key: 'font',
+			styleName: 'Quote',
+		});
+	});
+
+	test('keeps blank lines inside generic block scalars completion-inert', () => {
+		for (const indicator of ['|', '>-', '|2+']) {
+			const text = [
+				'---',
+				'abstract: ' + indicator,
+				'  First paragraph.',
+				'',
+				'  Second paragraph.',
+				'font: Georgia',
+				'---',
+			].join('\n');
+			const blankOffset = text.indexOf('\n\n') + 1;
+			const loc = getFrontmatterLocation(text, blankOffset);
+			expect(loc.kind).toBe('outside');
+			expect(loc.inFrontmatter).toBe(true);
+			expect(getFrontmatterCompletionItems(loc, 'darwin')).toEqual([]);
+			expect(getFrontmatterHover(loc)).toBeUndefined();
+
+			const topLevel = getFrontmatterLocation(text, text.indexOf('Georgia') + 3);
+			expect(topLevel.kind).toBe('value');
+			expect(topLevel.key).toBe('font');
+		}
 	});
 
 	test('handles empty line in frontmatter as key position', () => {
@@ -360,6 +479,14 @@ describe('getFrontmatterCompletionItems', () => {
 		expect(items.find(i => i.label === 'title')).toBeDefined();
 	});
 
+	test('nested known-looking keys do not suppress top-level completions', () => {
+		const text = '---\ncustom:\n  font: Custom value\nfo\n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf('\nfo') + 3);
+		expect(loc.kind).toBe('key');
+		expect(loc.declaredKeys.has('font')).toBe(false);
+		expect(getFrontmatterCompletionItems(loc, 'darwin').some(item => item.label === 'font')).toBe(true);
+	});
+
 	test('key completions filter by prefix', () => {
 		const text = '---\ntab\n---\n';
 		const loc = getFrontmatterLocation(text, text.indexOf('tab') + 3);
@@ -455,6 +582,16 @@ describe('getFrontmatterCompletionItems', () => {
 		}
 	});
 
+	test('top-level completion on an empty line preserves authored root indentation', () => {
+		for (const indent of ['  ', '\t']) {
+			const text = '---\n' + indent + 'font: Georgia\n\n---\n';
+			const loc = getFrontmatterLocation(text, text.indexOf('\n\n') + 1);
+			expect(applyCompletion(text, loc, 'author')).toBe(
+				'---\n' + indent + 'font: Georgia\n' + indent + 'author: \n---\n',
+			);
+		}
+	});
+
 	test('key completion works in an unclosed CRLF frontmatter block', () => {
 		const text = '---\r\ntab';
 		const loc = getFrontmatterLocation(text, text.length);
@@ -529,6 +666,29 @@ describe('getFrontmatterCompletionItems', () => {
 		const text = '---\nheader-font: [Georgia, Pal]   \n---\n';
 		const loc = getFrontmatterLocation(text, text.indexOf('Pal') + 'Pal'.length);
 		expect(applyCompletion(text, loc, 'Palatino')).toBe('---\nheader-font: [Georgia, Palatino]   \n---\n');
+	});
+
+	test('value completion preserves inline comments and outer quotes', () => {
+		for (const testCase of [
+			{
+				text: '---\nfont: Geo # keep this explanation\n---\n',
+				expected: '---\nfont: Georgia # keep this explanation\n---\n',
+			},
+			{
+				text: '---\nfont: "Geo" # keep this explanation\n---\n',
+				expected: '---\nfont: "Georgia" # keep this explanation\n---\n',
+			},
+			{
+				text: '---\nheader-font: [Arial, Geo] # heading fonts\n---\n',
+				expected: '---\nheader-font: [Arial, Georgia] # heading fonts\n---\n',
+			},
+		]) {
+			const loc = getFrontmatterLocation(
+				testCase.text,
+				testCase.text.indexOf('Geo') + 'Geo'.length,
+			);
+			expect(applyCompletion(testCase.text, loc, 'Georgia')).toBe(testCase.expected);
+		}
 	});
 
 	test('array completions are suppressed in trailing whitespace after the closing bracket', () => {
@@ -706,6 +866,84 @@ describe('getFrontmatterCompletionItems', () => {
 		expect(items.some(i => i.label === 'spacing-before')).toBe(true);
 	});
 
+	test('styles sub-property completions honor an indented YAML root', () => {
+		const text = '---\n  styles:\n    MyQuote:\n      \n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf('      \n') + 6);
+		expect(loc.kind).toBe('styles-key');
+		const items = getFrontmatterCompletionItems(loc, 'darwin');
+		expect(items.some(item => item.label === 'font')).toBe(true);
+		expect(items.some(item => item.label === 'spacing-before')).toBe(true);
+	});
+
+	test('styles sub-property completions suppress keys declared in the current style', () => {
+		const text = [
+			'---',
+			'styles:',
+			'  First:',
+			'    font: Georgia',
+			'    ',
+			'  Second:',
+			'    font-size: 12',
+			'    ',
+			'---',
+		].join('\n');
+
+		const firstOffset = text.indexOf('    \n') + 4;
+		const firstItems = getFrontmatterCompletionItems(
+			getFrontmatterLocation(text, firstOffset),
+			'darwin',
+		);
+		expect(firstItems.some(item => item.label === 'font')).toBe(false);
+		expect(firstItems.some(item => item.label === 'font-size')).toBe(true);
+
+		const secondOffset = text.lastIndexOf('    \n') + 4;
+		const secondItems = getFrontmatterCompletionItems(
+			getFrontmatterLocation(text, secondOffset),
+			'darwin',
+		);
+		expect(secondItems.some(item => item.label === 'font')).toBe(true);
+		expect(secondItems.some(item => item.label === 'font-size')).toBe(false);
+	});
+
+	test('quoted style names with colons retain independent property sets', async () => {
+		const text = [
+			'---',
+			'styles:',
+			'  "sidebar: one":',
+			'    font: Georgia',
+			'    ',
+			'  "sidebar: two":',
+			'    font-size: 12',
+			'    ',
+			'---',
+		].join('\n');
+
+		const firstOffset = text.indexOf('    \n') + 4;
+		const firstLoc = getFrontmatterLocation(text, firstOffset);
+		expect(firstLoc.styleName).toBe('sidebar: one');
+		const firstItems = getFrontmatterCompletionItems(firstLoc, 'darwin');
+		expect(firstItems.some(item => item.label === 'font')).toBe(false);
+		expect(firstItems.some(item => item.label === 'font-size')).toBe(true);
+
+		const secondOffset = text.lastIndexOf('    \n') + 4;
+		const secondLoc = getFrontmatterLocation(text, secondOffset);
+		expect(secondLoc.styleName).toBe('sidebar: two');
+		const secondItems = getFrontmatterCompletionItems(secondLoc, 'darwin');
+		expect(secondItems.some(item => item.label === 'font')).toBe(true);
+		expect(secondItems.some(item => item.label === 'font-size')).toBe(false);
+
+		const duplicates = (await validateFrontmatter(text, stubCallbacks))
+			.filter(diag => diag.message.includes('Duplicate custom style property'));
+		expect(duplicates).toEqual([]);
+	});
+
+	test('editing a sole styles sub-property keeps its completion available', () => {
+		const text = '---\nstyles:\n  Quote:\n    font: Georgia\n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf('font') + 4);
+		const items = getFrontmatterCompletionItems(loc, 'darwin');
+		expect(items.some(item => item.label === 'font')).toBe(true);
+	});
+
 	test('styles keys request value suggestions only when the sub-property has them', () => {
 		const text = '---\nstyles:\n  MyQuote:\n    \n---\n';
 		const loc = getFrontmatterLocation(text, text.indexOf('    \n') + 4);
@@ -752,6 +990,13 @@ describe('getFrontmatterHover', () => {
 		expect(hover).toBeDefined();
 		expect(hover!.markdown).toContain('**font**');
 		expect(hover!.markdown).toContain('Body text font family');
+	});
+
+	test('hover recognizes keys at an indented YAML root', () => {
+		const text = '---\n  font: Georgia\n---\n';
+		const loc = getFrontmatterLocation(text, text.indexOf('font') + 2);
+		const hover = getFrontmatterHover(loc);
+		expect(hover?.markdown).toContain('**font**');
 	});
 
 	test('hover on callout-labels documents default and preserved styling', () => {
@@ -856,6 +1101,29 @@ describe('validateFrontmatter', () => {
 		expect(diags[0].message).toContain('false');
 	});
 
+	test('validates an indented YAML root without validating nested generic mappings', async () => {
+		const text = [
+			'---',
+			'  custom:',
+			'    breaks: maybe',
+			'  breaks: maybe',
+			'---',
+		].join('\n');
+		const diags = await validateFrontmatter(text, stubCallbacks);
+		expect(diags).toHaveLength(1);
+		expect(diags[0].start).toBe(text.lastIndexOf('maybe'));
+		expect(diags[0].message).toContain('true');
+	});
+
+	test('does not validate known-looking keys nested under custom mappings', async () => {
+		const text = '---\ncustom:\n  breaks: maybe\n  fontt: value\n  csl: nonexistent\n---\n';
+		const diags = await validateFrontmatter(text, {
+			...stubCallbacks,
+			isCslAvailable: async () => false,
+		});
+		expect(diags).toEqual([]);
+	});
+
 	test('invalid callout-labels value produces error', async () => {
 		const text = '---\ncallout-labels: maybe\n---\n';
 		const diags = await validateFrontmatter(text, stubCallbacks);
@@ -937,6 +1205,18 @@ describe('validateFrontmatter', () => {
 		expect(diags).toEqual([]);
 	});
 
+	test('quoted inline font-style arrays pass for heading and title fields', async () => {
+		for (const key of ['header-font-style', 'title-font-style']) {
+			const text = '---\n' + key + ': ["bold", "italic"]\n---\n';
+			expect(parseFrontmatter(text).metadata).toMatchObject(
+				key === 'header-font-style'
+					? { headerFontStyle: ['bold', 'italic'] }
+					: { titleFontStyle: ['bold', 'italic'] },
+			);
+			expect(await validateFrontmatter(text, stubCallbacks)).toEqual([]);
+		}
+	});
+
 	test('bare comma-separated font-style array passes', async () => {
 		const text = '---\nheader-font-style: bold-italic, bold, normal\n---\n';
 		const diags = await validateFrontmatter(text, stubCallbacks);
@@ -995,10 +1275,71 @@ describe('validateFrontmatter', () => {
 	});
 
 	test('array number field with invalid element produces error', async () => {
-		const text = '---\nheader-font-size: [24, abc, 16]\n---\n';
-		const diags = await validateFrontmatter(text, stubCallbacks);
-		expect(diags.length).toBe(1);
-		expect(diags[0].severity).toBe('error');
+		for (const value of ['[24, abc, 16]', '[24, 0]', '[]']) {
+			const text = '---\nheader-font-size: ' + value + '\n---\n';
+			const diags = await validateFrontmatter(text, stubCallbacks);
+			expect(diags.length).toBe(1);
+			expect(diags[0].severity).toBe('error');
+		}
+	});
+
+	test('diagnoses quoted bracket-shaped numeric scalars that the parser ignores', async () => {
+		for (const key of ['header-font-size', 'title-font-size']) {
+			const text = '---\n' + key + ': "[24, 20]"\n---\n';
+			const metadata = parseFrontmatter(text).metadata;
+			expect(key === 'header-font-size' ? metadata.headerFontSize : metadata.titleFontSize)
+				.toBeUndefined();
+			const diagnostics = await validateFrontmatter(text, stubCallbacks);
+			expect(diagnostics).toHaveLength(1);
+			expect(diagnostics[0].severity).toBe('error');
+		}
+	});
+
+	test('numeric diagnostics enforce parser positivity and integer constraints', async () => {
+		for (const field of [
+			'font-size: 0',
+			'code-font-size: 0',
+			'table-font-size: 0',
+			'code-block-inset: 0',
+			'code-block-inset: 1.5',
+			'code-block-inset: 01',
+			'pipe-table-max-line-width: 80.5',
+			'pipe-table-max-line-width: +80',
+			'grid-table-max-line-width: 80.5',
+			'grid-table-max-line-width: 8e1',
+			'font-size: 12pt',
+			'header-font-size: [24pt, 20]',
+		]) {
+			const diags = await validateFrontmatter('---\n' + field + '\n---\n', stubCallbacks);
+			expect(diags).toHaveLength(1);
+			expect(diags[0].severity).toBe('error');
+		}
+	});
+
+	test('numeric diagnostics accept valid zero and positive values', async () => {
+		for (const field of [
+			'font-size: 0.5',
+			'code-block-inset: 1',
+			'pipe-table-max-line-width: 0',
+			'grid-table-max-line-width: 80',
+			'styles:\n  Quote:\n    spacing-before: 0',
+			'font-size: 12 # points',
+			'header-font-size: [24, 20] # points',
+			'styles:\n  Quote:\n    spacing-before: 6 # points',
+		]) {
+			const diags = await validateFrontmatter('---\n' + field + '\n---\n', stubCallbacks);
+			expect(diags).toEqual([]);
+		}
+	});
+
+	test('quoted hash characters are not treated as comments', async () => {
+		for (const field of [
+			'font: "Font #1" # preferred font',
+			'styles:\n  Quote:\n    font: "Style #1" # preferred font',
+		]) {
+			const diags = await validateFrontmatter('---\n' + field + '\n---\n', stubCallbacks);
+			expect(diags).toEqual([]);
+		}
 	});
 
 	test('duplicate key produces warning', async () => {
@@ -1007,6 +1348,25 @@ describe('validateFrontmatter', () => {
 		expect(diags.length).toBe(1);
 		expect(diags[0].severity).toBe('warning');
 		expect(diags[0].message).toContain('Duplicate');
+	});
+
+	test('duplicate custom style property produces a scoped warning', async () => {
+		const text = [
+			'---',
+			'styles:',
+			'  Quote:',
+			'    font: Georgia',
+			'    font: Arial',
+			'  Aside:',
+			'    font: Arial',
+			'---',
+		].join('\n');
+		const diags = await validateFrontmatter(text, stubCallbacks);
+		const duplicates = diags.filter(diag => diag.message.includes('Duplicate custom style property'));
+		expect(duplicates).toHaveLength(1);
+		expect(duplicates[0].severity).toBe('warning');
+		expect(duplicates[0].message).toContain('`Quote`');
+		expect(duplicates[0].start).toBe(text.indexOf('font: Arial'));
 	});
 
 	test('duplicate title does NOT produce warning', async () => {
@@ -1083,6 +1443,37 @@ describe('validateFrontmatter', () => {
 		expect(cslDiag).toBeDefined();
 		expect(cslDiag!.severity).toBe('warning');
 		expect(cslDiag!.message).toContain('nature');
+	});
+
+	test('CSL validation uses canonical frontmatter bounds', async () => {
+		for (const text of [
+			'﻿---\ncsl: nonexistent-style\n---\n',
+			'\n \n---   \ncsl: nonexistent-style\n---\n',
+			'--- \t\r\ncsl: nonexistent-style\r\n---\r\n',
+		]) {
+			const diags = await validateFrontmatter(text, {
+				...stubCallbacks,
+				isCslAvailable: async () => false,
+			});
+			const cslDiag = diags.find(d => d.message.includes('CSL'));
+			expect(cslDiag).toBeDefined();
+			expect(cslDiag?.start).toBe(text.indexOf('nonexistent-style'));
+		}
+	});
+
+	test('CSL validation checks the last effective duplicate', async () => {
+		const calls: string[] = [];
+		const text = '---\ncsl: apa\ncsl: nonexistent-style\n---\n';
+		const diags = await validateFrontmatter(text, {
+			...stubCallbacks,
+			isCslAvailable: async name => {
+				calls.push(name);
+				return false;
+			},
+		});
+		expect(calls).toEqual(['nonexistent-style']);
+		const cslDiag = diags.find(diag => diag.message.includes('CSL'));
+		expect(cslDiag?.start).toBe(text.indexOf('nonexistent-style'));
 	});
 
 	test('bibliography file not found produces warning', async () => {

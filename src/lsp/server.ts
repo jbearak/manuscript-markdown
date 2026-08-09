@@ -59,7 +59,6 @@ import {
 	getAccessLinksForEntry,
 	getFileEntriesForEntry,
 	resolveFileEntryPath,
-	getCompletionContextAtOffset,
 	invalidateCanonicalCache,
 	parseBibDataFromText,
 	resolveBibliographyPathAsync,
@@ -83,6 +82,7 @@ import {
 	validateFrontmatter as validateFrontmatterFields,
 } from './frontmatter-language';
 import { toLspFrontmatterCompletionItem } from './frontmatter-completion-adapter';
+import { getCompletionRoutingAtOffset } from './completion-routing';
 
 const connection = createConnection(ProposedFeatures.all);
 const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
@@ -344,16 +344,15 @@ connection.onCompletion(async (params: CompletionParams): Promise<CompletionItem
 
 	const text = doc.getText();
 	const offset = doc.offsetAt(params.position);
-	const citationAnalysis = getCitationAnalysis(doc);
+	const {
+		frontmatterLocation: fmLocation,
+		citationContext: completionContext,
+	} = getCompletionRoutingAtOffset(text, offset, () => getCitationAnalysis(doc));
 
-	const completionContext = getCompletionContextAtOffset(text, offset, citationAnalysis);
-
-	// Frontmatter completions (keys, values, CSL, styles sub-props). A valid
-	// nocite citation context takes precedence so bibliography keys work there.
-	// Defer frontmatter parsing until citation analysis says it is needed; this
-	// avoids a second whole-document structural pass for ordinary @ completions.
+	// Frontmatter completions (keys, values, CSL, styles sub-props) are routed
+	// before whole-document citation analysis. A valid nocite citation context
+	// still takes precedence so bibliography keys work there.
 	if (!completionContext) {
-		const fmLocation = getFrontmatterLocation(text, offset);
 		if (fmLocation.inFrontmatter && fmLocation.kind !== 'outside') {
 			const cachedCslStyles = await getCachedCslStyleNames();
 			const fmItems = getFrontmatterCompletionItems(fmLocation, process.platform, cachedCslStyles);
@@ -474,8 +473,13 @@ connection.onHover(async (params: HoverParams): Promise<Hover | null> => {
 		if (fmDoc) {
 			const fmText = fmDoc.getText();
 			const fmOffset = fmDoc.offsetAt(params.position);
-			const fmLocation = getFrontmatterLocation(fmText, fmOffset);
-			const fmHover = findCitekeyAtOffset(fmText, fmOffset, getCitationAnalysis(fmDoc))
+			const citationAnalysis = getCitationAnalysis(fmDoc);
+			const fmLocation = getFrontmatterLocation(
+				fmText,
+				fmOffset,
+				citationAnalysis.frontmatterBounds,
+			);
+			const fmHover = findCitekeyAtOffset(fmText, fmOffset, citationAnalysis)
 				? undefined
 				: getFrontmatterHover(fmLocation);
 			if (fmHover) {

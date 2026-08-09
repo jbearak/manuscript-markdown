@@ -9,11 +9,19 @@
 import {
 	findFrontmatterBounds,
 	findFrontmatterOpeningBounds,
+	findFrontmatterRootIndent,
+	findYamlMappingColon,
+	MAX_PROVISIONAL_FRONTMATTER_LOOKAHEAD,
 	normalizeFontStyle,
 	parseColWidths,
+	parseFrontmatterNumber,
+	parseFrontmatterNumberArray,
+	parseInlineArray,
+	parseYamlStringScalar,
+	type FrontmatterBounds,
 } from '../frontmatter';
+import { yamlCommentStart } from '../citekey';
 import { MAX_TABLE_DIGITS } from '../table-number-format';
-import { getCslFieldInfo } from './csl-language';
 import { BUNDLED_STYLE_LABELS } from '../csl-loader';
 
 // ---------------------------------------------------------------------------
@@ -53,6 +61,12 @@ interface FieldDef {
 	allowsMultiple?: boolean;
 	/** Whether the value is a YAML inline array */
 	arrayField?: boolean;
+	/** For numeric fields, the smallest accepted value. */
+	minimum?: number;
+	/** Whether a numeric minimum is exclusive. */
+	exclusiveMinimum?: boolean;
+	/** Whether numeric values must be integers. */
+	integer?: boolean;
 }
 
 interface EnumValue {
@@ -198,25 +212,25 @@ export const FRONTMATTER_SCHEMA: readonly FieldDef[] = [
 		description: 'Body text font family.\n\n**Accepted values:** Font family name (e.g. `Georgia`, `Times New Roman`).' },
 	{ key: 'code-font', kind: 'code-font',
 		description: 'Monospace font for code blocks and inline code.\n\n**Accepted values:** Monospace font family name (e.g. `Fira Code`, `Consolas`).' },
-	{ key: 'font-size', kind: 'number',
+	{ key: 'font-size', kind: 'number', minimum: 0, exclusiveMinimum: true,
 		description: 'Body text font size in points.\n\n**Accepted values:** Positive number (e.g. `12`).' },
-	{ key: 'code-font-size', kind: 'number',
+	{ key: 'code-font-size', kind: 'number', minimum: 0, exclusiveMinimum: true,
 		description: 'Font size for code blocks and inline code, in points.\n\n**Accepted values:** Positive number (e.g. `10`).' },
 	{ key: 'header-font', kind: 'font', arrayField: true,
 		description: 'Font family for heading levels H1\u2013H6. Accepts a single font or an inline array.\n\n**Accepted values:** Font name, or `[H1font, H2font, ...]`.' },
-	{ key: 'header-font-size', kind: 'number', arrayField: true,
+	{ key: 'header-font-size', kind: 'number', arrayField: true, minimum: 0, exclusiveMinimum: true,
 		description: 'Font size(s) for headings in points.\n\n**Accepted values:** Positive number, or `[24, 20, 16, ...]`.' },
 	{ key: 'header-font-style', kind: 'font-style', arrayField: true,
 		description: 'Font style(s) for headings.\n\n**Accepted values:** `bold`, `italic`, `underline`, `smallcaps`, `allcaps`, `center`, `normal` \u2014 combine with `-` (e.g. `bold-italic`). `smallcaps` and `allcaps` are mutually exclusive.' },
 	{ key: 'title-font', kind: 'font', arrayField: true,
 		description: 'Font family for the document title block.\n\n**Accepted values:** Font name, or inline array for per-title-line overrides.' },
-	{ key: 'title-font-size', kind: 'number', arrayField: true,
+	{ key: 'title-font-size', kind: 'number', arrayField: true, minimum: 0, exclusiveMinimum: true,
 		description: 'Font size(s) for the title block in points.\n\n**Accepted values:** Positive number, or `[28, 24]`.' },
 	{ key: 'title-font-style', kind: 'font-style', arrayField: true,
 		description: 'Font style for the title block.\n\n**Accepted values:** `bold`, `italic`, `underline`, `smallcaps`, `allcaps`, `center`, `normal` \u2014 combine with `-` (e.g. `bold-italic`). `smallcaps` and `allcaps` are mutually exclusive.' },
 	{ key: 'table-font', kind: 'font',
 		description: 'Font family for table cell content.\n\n**Accepted values:** Font family name.' },
-	{ key: 'table-font-size', kind: 'number',
+	{ key: 'table-font-size', kind: 'number', minimum: 0, exclusiveMinimum: true,
 		description: 'Font size for table cell content in points.\n\n**Accepted values:** Positive number.' },
 	{ key: 'table-col-widths', kind: 'col-widths', enumValues: COL_WIDTHS_VALUES,
 		description: 'Column width ratios for tables.\n\n**Accepted values:** `equal`, `auto`, space/comma-separated ratios (e.g. `2 1 1`), or `[2, 1, 1]` inline array.' },
@@ -232,11 +246,11 @@ export const FRONTMATTER_SCHEMA: readonly FieldDef[] = [
 		description: 'Background color for code blocks.\n\n**Accepted values:** 6-digit hex without `#` (e.g. `F0F0F0`), `none`, or `transparent`.' },
 	{ key: 'code-font-color', kind: 'color-hex-only', aliases: ['code-color'],
 		description: 'Text color for code blocks.\n\n**Accepted values:** 6-digit hex without `#` (e.g. `333333`).' },
-	{ key: 'code-block-inset', kind: 'number',
+	{ key: 'code-block-inset', kind: 'number', minimum: 0, exclusiveMinimum: true, integer: true,
 		description: 'Code-block shading border width, in eighths of a point.\n\n**Accepted values:** Positive integer.' },
-	{ key: 'pipe-table-max-line-width', kind: 'number',
+	{ key: 'pipe-table-max-line-width', kind: 'number', minimum: 0, integer: true,
 		description: 'Maximum source line width for pipe tables before switching to HTML. `0` always uses HTML.\n\n**Accepted values:** Non-negative integer.' },
-	{ key: 'grid-table-max-line-width', kind: 'number',
+	{ key: 'grid-table-max-line-width', kind: 'number', minimum: 0, integer: true,
 		description: 'Maximum source line width for grid tables.\n\n**Accepted values:** Non-negative integer.' },
 	{ key: 'blockquote-style', kind: 'enum', enumValues: BLOCKQUOTE_STYLE_VALUES,
 		description: 'Paragraph style applied to blockquotes.\n\n**Accepted values:** `Quote`, `IntenseQuote`, `GitHub` (case-insensitive).' },
@@ -259,13 +273,13 @@ export const FRONTMATTER_SCHEMA: readonly FieldDef[] = [
 export const STYLES_SUB_PROPS: readonly FieldDef[] = [
 	{ key: 'font', kind: 'font',
 		description: 'Font family for this style.\n\n**Accepted values:** Font family name.' },
-	{ key: 'font-size', kind: 'number',
+	{ key: 'font-size', kind: 'number', minimum: 0, exclusiveMinimum: true,
 		description: 'Font size in points.\n\n**Accepted values:** Positive number.' },
 	{ key: 'font-style', kind: 'font-style',
 		description: 'Font style.\n\n**Accepted values:** `bold`, `italic`, `underline`, `smallcaps`, `allcaps`, `center`, `normal` \u2014 combine with `-` (e.g. `bold-italic`).' },
-	{ key: 'spacing-before', kind: 'number',
+	{ key: 'spacing-before', kind: 'number', minimum: 0,
 		description: 'Space before paragraph in points.\n\n**Accepted values:** Non-negative number.' },
-	{ key: 'spacing-after', kind: 'number',
+	{ key: 'spacing-after', kind: 'number', minimum: 0,
 		description: 'Space after paragraph in points.\n\n**Accepted values:** Non-negative number.' },
 	{ key: 'paragraph-indent', kind: 'paragraph-indent', enumValues: PARAGRAPH_INDENT_VALUES,
 		description: 'First-line indent in inches, or `none` for explicit zero.\n\n**Accepted values:** Non-negative number or `none`.' },
@@ -304,6 +318,10 @@ function resolveCanonical(key: string): string {
 
 function lookupDef(key: string): FieldDef | undefined {
 	return SCHEMA_MAP.get(resolveCanonical(key));
+}
+
+export function isKnownFrontmatterKey(key: string): boolean {
+	return ALL_KNOWN_KEYS.has(key);
 }
 
 /** Check if a lowercased key matches a known key or alias (case mismatch). Returns the canonical key. */
@@ -442,14 +460,20 @@ interface FmLine {
 	key: string;
 	/** Trimmed value string (right of colon, stripped of quotes) */
 	rawValue: string;
+	/** Semantic authored value, retaining scalar and inline-array quotes. */
+	authoredValue: string;
 	/** Character offset of the key text start */
 	keyStart: number;
 	/** Character offset past the key text end */
 	keyEnd: number;
 	/** Character offset of the value start (first non-space after colon) */
 	valueStart: number;
-	/** Character offset of the value end (before \r\n) */
+	/** Character offset of the semantic value end, excluding comments and trailing whitespace */
 	valueEnd: number;
+	/** Character offset where a trailing YAML comment starts, or the physical line end */
+	semanticEnd: number;
+	/** Character offset of the physical line end, before \r\n */
+	lineEnd: number;
 	/** Matching quote pair stripped from the value completion range */
 	valueQuote?: '"' | "'";
 	/** Indentation level (number of leading spaces) */
@@ -467,20 +491,60 @@ interface ParsedFrontmatter {
 	fmStart: number;   // offset of opening ---
 	fmEnd: number;     // offset past closing ---
 	bodyStart: number;  // offset of first line after opening ---
+	rootIndent: number;
 	closed: boolean;
 }
 
-function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFrontmatter | undefined {
-	const bounds = findFrontmatterBounds(text);
+function isBlockScalarIndicator(value: string): boolean {
+	return /^[|>](?:(?:[1-9][+-]?|[+-][1-9]?)?)(?:[ \t]+#.*)?$/.test(value);
+}
+
+function isNestedUnderGenericTopLevelMapping(
+	lines: readonly FmLine[],
+	offset: number,
+	indent: number,
+): boolean {
+	if (
+		indent === 0 &&
+		lines.some(line =>
+			line.indent === 0 && line.keyStart === offset
+		)
+	) return false;
+
+	let topLevel: FmLine | undefined;
+	for (const line of lines) {
+		if (line.keyStart >= offset) break;
+		if (line.indent === 0) topLevel = line;
+	}
+	if (!topLevel || topLevel.key === 'styles') return false;
+	return indent > 0 || isBlockScalarIndicator(topLevel.rawValue);
+}
+
+function parseFrontmatterLines(
+	text: string,
+	allowUnclosed = false,
+	authoritativeBounds?: FrontmatterBounds,
+): ParsedFrontmatter | undefined {
+	const bounds = authoritativeBounds ?? findFrontmatterBounds(text);
 	const opening = findFrontmatterOpeningBounds(text);
-	if (!opening || (!bounds && !allowUnclosed) || (!bounds && opening.bodyStart === opening.contentStart)) {
+	if (
+		!opening ||
+		(!bounds && !allowUnclosed) ||
+		(!bounds && text.charCodeAt(opening.bodyStart - 1) !== 0x0A)
+	) {
 		return undefined;
 	}
 
 	const fmStart = opening.start;
-	const fmEnd = bounds ? bounds.contentEnd + 4 : text.length;
+	let fmEnd = bounds ? bounds.bodyStart : text.length;
+	if (bounds && text[fmEnd - 1] === '\n') {
+		fmEnd--;
+		if (text[fmEnd - 1] === '\r') fmEnd--;
+	}
 	const bodyStart = opening.bodyStart;
-	const fmBody = text.slice(bodyStart, bounds?.contentEnd ?? text.length);
+	const contentEnd = bounds?.contentEnd ?? text.length;
+	const fmBody = text.slice(bodyStart, contentEnd);
+	const rootIndent = findFrontmatterRootIndent(text, contentEnd);
 	const rawLines = fmBody.split('\n');
 	const lines: FmLine[] = [];
 
@@ -492,10 +556,12 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 	for (const rawLine of rawLines) {
 		const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
 		const lineStart = pos;
+		const lineEnd = lineStart + line.length;
 
-		const indent = line.length - line.trimStart().length;
+		const physicalIndent = line.length - line.trimStart().length;
+		const indent = Math.max(0, physicalIndent - rootIndent);
 		const trimmed = line.trimStart();
-		const colonIdx = trimmed.indexOf(':');
+		const colonIdx = findYamlMappingColon(trimmed);
 
 		// YAML comments do not establish mapping depth or leave a styles block.
 		if (trimmed.startsWith('#')) {
@@ -504,20 +570,25 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 		}
 
 		if (colonIdx >= 0) {
-			const key = trimmed.slice(0, colonIdx).trim();
+			const rawKey = trimmed.slice(0, colonIdx).trim();
+			const key = parseYamlStringScalar(rawKey);
 			const afterColon = trimmed.slice(colonIdx + 1);
-			const valueRaw = afterColon.trim().replace(/^["']|["']$/g, '');
+			const commentStart = yamlCommentStart(afterColon);
+			const semanticAfterColon = afterColon.slice(0, commentStart);
+			const valueRaw = parseYamlStringScalar(semanticAfterColon);
 
 			// Compute offsets: keyStart is position of first non-space char
-			const keyStart = lineStart + indent;
-			const keyEnd = keyStart + key.length;
+			const keyStart = lineStart + physicalIndent;
+			const keyEnd = keyStart + rawKey.length;
 
-			// valueStart: offset of first non-space char after colon
+			// Keep completion edits inside the semantic scalar so trailing comments
+			// and their surrounding whitespace remain authored source.
 			const colonOffset = keyStart + colonIdx;
-			const afterColonStr = text.slice(colonOffset + 1, lineStart + line.length);
-			const leadingSpaces = afterColonStr.match(/^\s*/)?.[0].length ?? 0;
+			const leadingSpaces = semanticAfterColon.match(/^[ \t]*/)?.[0].length ?? 0;
 			let valueStart = colonOffset + 1 + leadingSpaces;
-			let valueEnd = lineStart + line.length;
+			const semanticEnd = colonOffset + 1 + commentStart;
+			let valueEnd = semanticEnd;
+			while (valueEnd > valueStart && /[ \t]/.test(text[valueEnd - 1])) valueEnd--;
 			let valueQuote: '"' | "'" | undefined;
 
 			// Strip quotes from value range (not just the string)
@@ -562,10 +633,13 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 			lines.push({
 				key,
 				rawValue: valueRaw,
+				authoredValue: semanticAfterColon.trim(),
 				keyStart,
 				keyEnd,
 				valueStart,
 				valueEnd,
+				semanticEnd,
+				lineEnd,
 				valueQuote,
 				indent,
 				inStylesBlock: lineInStylesBlock,
@@ -574,7 +648,7 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 			});
 		} else if (trimmed.length > 0) {
 			// Non-empty line without colon — track as a key-in-progress
-			const keyStart = lineStart + indent;
+			const keyStart = lineStart + physicalIndent;
 			const keyEnd = lineStart + line.length;
 
 			let lineInStylesBlock = false;
@@ -590,10 +664,13 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 			lines.push({
 				key: trimmed,
 				rawValue: '',
+				authoredValue: '',
 				keyStart,
 				keyEnd,
 				valueStart: keyEnd,
 				valueEnd: keyEnd,
+				semanticEnd: lineEnd,
+				lineEnd,
 				indent,
 				inStylesBlock: lineInStylesBlock,
 				styleName: lineInStylesBlock && stylesDepth === 2 ? currentStyleName : undefined,
@@ -604,7 +681,14 @@ function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFront
 		pos += rawLine.length + 1; // +1 for \n
 	}
 
-	return { lines, fmStart, fmEnd, bodyStart, closed: bounds !== undefined };
+	return {
+		lines,
+		fmStart,
+		fmEnd,
+		bodyStart,
+		rootIndent,
+		closed: bounds !== undefined,
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -623,6 +707,8 @@ export interface FrontmatterLocation {
 	styleName?: string;
 	/** Keys already declared in this frontmatter (canonical names) */
 	declaredKeys: Set<string>;
+	/** Sub-properties already declared for the current custom style. */
+	declaredStyleKeys?: Set<string>;
 	/** Whether the key under the cursor is also declared on another line */
 	currentKeyHasOtherDeclaration?: boolean;
 	/** Whether cursor is inside frontmatter at all */
@@ -647,7 +733,11 @@ export interface FrontmatterLocation {
 /**
  * Locate the frontmatter context at the given offset.
  */
-export function getFrontmatterLocation(text: string, offset: number): FrontmatterLocation {
+export function getFrontmatterLocation(
+	text: string,
+	offset: number,
+	authoritativeBounds?: FrontmatterBounds,
+): FrontmatterLocation {
 	const outside: FrontmatterLocation = {
 		kind: 'outside', key: '', keyStart: 0, keyEnd: 0,
 		valueStart: 0, valueEnd: 0, declaredKeys: new Set(),
@@ -655,9 +745,23 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 	};
 
 	// Completion and hover should work while the user is still authoring the
-	// block, before the closing delimiter exists. Validation remains stricter
-	// and calls parseFrontmatterLines() without this opt-in.
-	const parsed = parseFrontmatterLines(text, true);
+	// block, before the closing delimiter exists. Search only the bounded prefix:
+	// a cursor far below an unmatched opener is ordinary document text.
+	const opening = findFrontmatterOpeningBounds(text);
+	if (!opening) return outside;
+	const parseEnd = authoritativeBounds
+		? text.length
+		: Math.min(
+			text.length,
+			opening.bodyStart + MAX_PROVISIONAL_FRONTMATTER_LOOKAHEAD,
+		);
+	if (!authoritativeBounds && offset >= parseEnd && parseEnd < text.length) return outside;
+	const locationText = parseEnd < text.length ? text.slice(0, parseEnd) : text;
+	const parsed = parseFrontmatterLines(
+		locationText,
+		true,
+		authoritativeBounds,
+	);
 	if (!parsed) return outside;
 	if (
 		offset < parsed.fmStart ||
@@ -668,7 +772,7 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 	const declaredKeys = new Set<string>();
 	const declaredKeyCounts = new Map<string, number>();
 	for (const line of parsed.lines) {
-		if (!line.inStylesBlock || line.indent === 0) {
+		if (line.indent === 0) {
 			const canonical = resolveCanonical(line.key);
 			declaredKeys.add(canonical);
 			declaredKeyCounts.set(canonical, (declaredKeyCounts.get(canonical) ?? 0) + 1);
@@ -680,12 +784,31 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 		return (declaredKeyCounts.get(canonical) ?? 0) > 1;
 	};
 
+	const styleKeyCounts = new Map<string, Map<string, number>>();
+	for (const line of parsed.lines) {
+		if (line.stylesDepth !== 2 || !line.styleName) continue;
+		let counts = styleKeyCounts.get(line.styleName);
+		if (!counts) {
+			counts = new Map();
+			styleKeyCounts.set(line.styleName, counts);
+		}
+		counts.set(line.key, (counts.get(line.key) ?? 0) + 1);
+	}
+	const declaredStyleKeys = (styleName: string | undefined): Set<string> =>
+		new Set(styleName ? styleKeyCounts.get(styleName)?.keys() : []);
+	const currentStyleKeyHasOtherDeclaration = (line: FmLine): boolean =>
+		!!line.styleName && (styleKeyCounts.get(line.styleName)?.get(line.key) ?? 0) > 1;
+
 	const completionValueRange = (
 		line: FmLine,
 	): { start: number; end: number; suppress?: boolean; prefix?: string; suffix?: string } => {
 		const def = line.inStylesBlock ? STYLES_SUB_MAP.get(line.key) : lookupDef(line.key);
-		if (!def?.arrayField || offset < line.valueStart || offset > line.valueEnd) {
-			return { start: line.valueStart, end: line.valueEnd };
+		if (!def?.arrayField || offset < line.valueStart) {
+			return {
+				start: line.valueStart,
+				end: line.valueEnd,
+				suppress: offset > line.semanticEnd,
+			};
 		}
 
 		const value = text.slice(line.valueStart, line.valueEnd);
@@ -762,7 +885,17 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 	// Find which line the offset falls on
 	// If offset is before any content line (on the --- delimiter), treat as key position on first line area
 	for (const line of parsed.lines) {
-		if (offset >= line.keyStart && offset <= line.valueEnd) {
+		if (offset >= line.keyStart && offset <= line.lineEnd) {
+			if (isNestedUnderGenericTopLevelMapping(parsed.lines, line.keyStart, line.indent)) {
+				return {
+					kind: 'outside', key: line.key,
+					keyStart: line.keyStart, keyEnd: line.keyEnd,
+					valueStart: line.valueStart, valueEnd: line.valueEnd,
+					declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
+					fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
+				};
+			}
+
 			// Determine if cursor is in key or value position
 			// The colon separates them; if line has no colon, it's in key position
 			const colonOffset = line.keyEnd; // key ends at colon position
@@ -786,7 +919,8 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 						valueStart: line.valueStart, valueEnd: line.valueEnd,
 						valueQuote: line.valueQuote,
 						styleName: line.styleName, declaredKeys,
-						currentKeyHasOtherDeclaration: currentKeyHasOtherDeclaration(line),
+						declaredStyleKeys: declaredStyleKeys(line.styleName),
+						currentKeyHasOtherDeclaration: currentStyleKeyHasOtherDeclaration(line),
 						inFrontmatter: true, frontmatterClosed: parsed.closed,
 						fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 					};
@@ -797,6 +931,7 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 					keyStart: line.keyStart, keyEnd: line.keyEnd,
 					valueStart: valueRange.start, valueEnd: valueRange.end,
 					styleName: line.styleName, declaredKeys,
+					declaredStyleKeys: declaredStyleKeys(line.styleName),
 					inFrontmatter: true, frontmatterClosed: parsed.closed,
 					suppressCompletions: valueRange.suppress,
 					completionPrefix: valueRange.prefix,
@@ -843,7 +978,17 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 			: rawEnd;
 	const lineText = text.slice(lineStart, actualEnd);
 	const trimmed = lineText.trimStart();
-	const indent = lineText.length - trimmed.length;
+	const sourceIndent = lineText.length - trimmed.length;
+	const indent = Math.max(0, sourceIndent - parsed.rootIndent);
+	const sourceKeyStart = lineStart + sourceIndent;
+	const authoredRootIndent = parsed.rootIndent > 0
+		? (() => {
+			const rootLine = parsed.lines.find(line => line.indent === 0);
+			return rootLine
+				? text.slice(rootLine.keyStart - parsed.rootIndent, rootLine.keyStart)
+				: '';
+		})()
+		: '';
 	const fallbackKeyRange = (actualKeyStart: number): {
 		keyStart: number;
 		keyCompletionPrefix?: string;
@@ -905,17 +1050,18 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 		if (!parsedStyleName || indent <= parsedStyleName.indent) {
 			return {
 				kind: 'styles-name', key: trimmed,
-				keyStart: lineStart + indent, keyEnd: actualEnd,
+				keyStart: sourceKeyStart, keyEnd: actualEnd,
 				valueStart: actualEnd, valueEnd: actualEnd,
-				styleName, declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
+				styleName, declaredKeys, declaredStyleKeys: declaredStyleKeys(styleName), inFrontmatter: true, frontmatterClosed: parsed.closed,
 				fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 			};
 		}
+		styleName = parsedStyleName.key;
 		if (trimmed.includes(':')) {
 			// Has a colon — sub-property in progress
 			const colonIdx = trimmed.indexOf(':');
 			const key = trimmed.slice(0, colonIdx).trim();
-			const actualKeyStart = lineStart + indent;
+			const actualKeyStart = sourceKeyStart;
 			const { keyStart, keyCompletionPrefix } = fallbackKeyRange(actualKeyStart);
 			const { valueStart, valueEnd, valueQuote } = fallbackValueRange(actualKeyStart, colonIdx);
 			if (offset <= actualKeyStart + key.length) {
@@ -923,7 +1069,7 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 					kind: 'styles-key', key,
 					keyStart, keyEnd: actualKeyStart + key.length,
 					valueStart, valueEnd, valueQuote, keyCompletionPrefix,
-					styleName, declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
+					styleName, declaredKeys, declaredStyleKeys: declaredStyleKeys(styleName), inFrontmatter: true, frontmatterClosed: parsed.closed,
 					fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 				};
 			}
@@ -931,19 +1077,29 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 				kind: 'styles-value', key,
 				keyStart, keyEnd: actualKeyStart + key.length,
 				valueStart, valueEnd, valueQuote, keyCompletionPrefix,
-				styleName, declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
+				styleName, declaredKeys, declaredStyleKeys: declaredStyleKeys(styleName), inFrontmatter: true, frontmatterClosed: parsed.closed,
 				fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 			};
 		}
 		// No colon — key being typed
-		const actualKeyStart = lineStart + indent;
+		const actualKeyStart = sourceKeyStart;
 		const { keyStart, keyCompletionPrefix } = fallbackKeyRange(actualKeyStart);
 		return {
 			kind: 'styles-key', key: trimmed,
 			keyStart, keyEnd: actualKeyStart + trimmed.length,
 			valueStart: actualEnd, valueEnd: actualEnd,
 			keyCompletionPrefix,
-			styleName, declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
+			styleName, declaredKeys, declaredStyleKeys: declaredStyleKeys(styleName), inFrontmatter: true, frontmatterClosed: parsed.closed,
+			fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
+		};
+	}
+
+	if (isNestedUnderGenericTopLevelMapping(parsed.lines, sourceKeyStart, indent)) {
+		return {
+			kind: 'outside', key: trimmed,
+			keyStart: sourceKeyStart, keyEnd: actualEnd,
+			valueStart: actualEnd, valueEnd: actualEnd,
+			declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
 			fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 		};
 	}
@@ -952,7 +1108,7 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 	if (trimmed.includes(':')) {
 		const colonIdx = trimmed.indexOf(':');
 		const key = trimmed.slice(0, colonIdx).trim();
-		const actualKeyStart = lineStart + indent;
+		const actualKeyStart = sourceKeyStart;
 		const { keyStart, keyCompletionPrefix } = fallbackKeyRange(actualKeyStart);
 		const { valueStart, valueEnd, valueQuote } = fallbackValueRange(actualKeyStart, colonIdx);
 		if (offset <= actualKeyStart + key.length) {
@@ -974,13 +1130,14 @@ export function getFrontmatterLocation(text: string, offset: number): Frontmatte
 	}
 
 	// Bare text or empty line — key position
-	const actualKeyStart = lineStart + indent;
+	const actualKeyStart = sourceKeyStart;
 	const { keyStart, keyCompletionPrefix } = fallbackKeyRange(actualKeyStart);
 	return {
 		kind: 'key', key: trimmed,
 		keyStart, keyEnd: actualKeyStart + trimmed.length,
 		valueStart: actualEnd, valueEnd: actualEnd,
-		keyCompletionPrefix,
+		keyCompletionPrefix: keyCompletionPrefix
+			?? (lineText.length === 0 ? authoredRootIndent : undefined),
 		declaredKeys, inFrontmatter: true, frontmatterClosed: parsed.closed,
 		fmBodyStart: parsed.bodyStart, fmEnd: parsed.fmEnd,
 	};
@@ -1043,11 +1200,12 @@ function getKeyCompletions(location: FrontmatterLocation, schema: readonly Field
 	const items: FrontmatterCompletionItem[] = [];
 
 	for (const def of schema) {
-		// Skip already-declared keys (only for top-level, not styles sub-props)
+		// Skip keys already declared in the current mapping, except the declaration being edited.
 		const editingThisKey = resolveCanonical(location.key) === def.key && !location.currentKeyHasOtherDeclaration;
-		if (schema === FRONTMATTER_SCHEMA && location.declaredKeys.has(def.key) && !def.allowsMultiple && !editingThisKey) {
-			continue;
-		}
+		const alreadyDeclared = schema === FRONTMATTER_SCHEMA
+			? location.declaredKeys.has(def.key)
+			: location.declaredStyleKeys?.has(def.key) === true;
+		if (alreadyDeclared && !def.allowsMultiple && !editingThisKey) continue;
 		if (prefix && !def.key.startsWith(prefix)) continue;
 		const hasPopulatedValue = location.valueEnd > location.valueStart;
 		const hasExistingSeparator = location.valueStart > location.keyEnd || hasPopulatedValue;
@@ -1263,6 +1421,7 @@ export async function validateFrontmatter(
 
 	const diagnostics: FrontmatterDiagnostic[] = [];
 	const seenCanonical = new Map<string, FmLine>(); // canonical → first occurrence
+	const seenStyleKeys = new Map<string, Set<string>>();
 
 	for (const line of parsed.lines) {
 		// Skip styles sub-properties for duplicate/typo detection at top level
@@ -1271,6 +1430,21 @@ export async function validateFrontmatter(
 			if (line.stylesDepth === 2) {
 				const subDef = STYLES_SUB_MAP.get(line.key);
 				if (subDef) {
+					if (line.styleName) {
+						let seen = seenStyleKeys.get(line.styleName);
+						if (!seen) {
+							seen = new Set();
+							seenStyleKeys.set(line.styleName, seen);
+						}
+						if (seen.has(line.key)) {
+							diagnostics.push({
+								message: 'Duplicate custom style property `' + line.key + '` in `' + line.styleName + '`.',
+								severity: 'warning', start: line.keyStart, end: line.keyEnd,
+							});
+						} else {
+							seen.add(line.key);
+						}
+					}
 					const valueDiag = validateValue(subDef, line);
 					if (valueDiag) diagnostics.push(valueDiag);
 				} else {
@@ -1298,6 +1472,7 @@ export async function validateFrontmatter(
 			}
 			continue;
 		}
+		if (line.indent > 0) continue;
 
 		const canonical = resolveCanonical(line.key);
 		const def = lookupDef(line.key);
@@ -1365,10 +1540,20 @@ export async function validateFrontmatter(
 	}
 
 	// Async validations: CSL and bibliography file existence
-	await validateCsl(text, callbacks, diagnostics);
+	await validateCsl(parsed, callbacks, diagnostics);
 	await validateBibPath(parsed, callbacks, diagnostics);
 
 	return diagnostics;
+}
+
+function numericExpectation(def: FieldDef, plural: boolean): string {
+	const noun = def.integer
+		? (plural ? 'integers' : 'integer')
+		: (plural ? 'numbers' : 'number');
+	if (def.minimum === 0) {
+		return (def.exclusiveMinimum ? 'positive ' : 'non-negative ') + noun;
+	}
+	return noun;
 }
 
 function validateValue(def: FieldDef, line: FmLine): FrontmatterDiagnostic | undefined {
@@ -1393,16 +1578,20 @@ function validateValue(def: FieldDef, line: FmLine): FrontmatterDiagnostic | und
 		}
 
 		case 'number': {
-			if (def.arrayField) {
-				const parts = value.startsWith('[') ? value.slice(1, value.endsWith(']') ? -1 : undefined).split(',') : value.split(',');
-				if (parts.some(p => p.trim() !== '' && (!isFinite(parseFloat(p.trim())) || parseFloat(p.trim()) < 0))) {
-					return { message: 'Expected non-negative numbers.', severity: 'error', start: line.valueStart, end: line.valueEnd };
-				}
-			} else {
-				const n = parseFloat(value);
-				if (!isFinite(n) || n < 0) {
-					return { message: 'Expected a non-negative number.', severity: 'error', start: line.valueStart, end: line.valueEnd };
-				}
+			const constraints = {
+				minimum: def.minimum,
+				exclusiveMinimum: def.exclusiveMinimum,
+				integer: def.integer,
+			};
+			const valid = def.arrayField
+				? parseFrontmatterNumberArray(line.authoredValue, constraints) !== undefined
+				: parseFrontmatterNumber(value, constraints) !== undefined;
+			if (!valid) {
+				return {
+					message: 'Expected ' + (def.arrayField ? '' : 'a ') +
+						numericExpectation(def, def.arrayField === true) + '.',
+					severity: 'error', start: line.valueStart, end: line.valueEnd,
+				};
 			}
 			break;
 		}
@@ -1433,12 +1622,9 @@ function validateValue(def: FieldDef, line: FmLine): FrontmatterDiagnostic | und
 
 		case 'font-style': {
 			if (def.arrayField) {
-				// Validate each element of inline array
-				const parts = value.startsWith('[') ? value.slice(1, value.endsWith(']') ? -1 : undefined).split(',') : value.split(',');
-				for (const part of parts) {
-					const trimmed = part.trim();
-					if (trimmed && !normalizeFontStyle(trimmed)) {
-						return { message: 'Invalid font style `' + trimmed + '`. Use `bold`, `italic`, `underline`, `smallcaps`, `allcaps`, `center`, `normal`, combined with `-`.', severity: 'error', start: line.valueStart, end: line.valueEnd };
+				for (const part of parseInlineArray(line.authoredValue)) {
+					if (!normalizeFontStyle(part)) {
+						return { message: 'Invalid font style `' + part + '`. Use `bold`, `italic`, `underline`, `smallcaps`, `allcaps`, `center`, `normal`, combined with `-`.', severity: 'error', start: line.valueStart, end: line.valueEnd };
 					}
 				}
 			} else {
@@ -1452,8 +1638,8 @@ function validateValue(def: FieldDef, line: FmLine): FrontmatterDiagnostic | und
 		case 'line-spacing': {
 			const lower = value.toLowerCase();
 			if (lower !== 'single' && lower !== '1.5' && lower !== 'double') {
-				const n = parseFloat(value);
-				if (!isFinite(n) || n <= 0) {
+				const n = parseFrontmatterNumber(value, { minimum: 0, exclusiveMinimum: true });
+				if (n === undefined) {
 					return { message: 'Expected `single`, `1.5`, `double`, or a positive number.', severity: 'error', start: line.valueStart, end: line.valueEnd };
 				}
 			}
@@ -1463,8 +1649,8 @@ function validateValue(def: FieldDef, line: FmLine): FrontmatterDiagnostic | und
 		case 'paragraph-indent': {
 			const lower = value.toLowerCase();
 			if (lower !== 'none') {
-				const n = parseFloat(value);
-				if (!isFinite(n) || n < 0) {
+				const n = parseFrontmatterNumber(value, { minimum: 0 });
+				if (n === undefined) {
 					return { message: 'Expected a non-negative number (inches) or `none`.', severity: 'error', start: line.valueStart, end: line.valueEnd };
 				}
 			}
@@ -1486,22 +1672,25 @@ function validateValue(def: FieldDef, line: FmLine): FrontmatterDiagnostic | und
 }
 
 async function validateCsl(
-	text: string,
+	parsed: ParsedFrontmatter,
 	callbacks: FrontmatterValidationCallbacks,
 	diagnostics: FrontmatterDiagnostic[],
 ): Promise<void> {
-	const fieldInfo = getCslFieldInfo(text);
-	if (!fieldInfo || !fieldInfo.value) return;
+	const cslLines = parsed.lines.filter(candidate =>
+		candidate.indent === 0 && resolveCanonical(candidate.key) === 'csl'
+	);
+	const line = cslLines[cslLines.length - 1];
+	if (!line?.rawValue) return;
 
-	const available = await callbacks.isCslAvailable(fieldInfo.value, {
+	const available = await callbacks.isCslAvailable(line.rawValue, {
 		cacheDirs: callbacks.cslCacheDirs,
 		sourceDir: callbacks.sourceDir,
 	});
 
 	if (available) return;
 
-	const suggestions = callbacks.cslSuggestions(fieldInfo.value);
-	let message = 'CSL style "' + fieldInfo.value + '" not found locally.';
+	const suggestions = callbacks.cslSuggestions(line.rawValue);
+	let message = 'CSL style "' + line.rawValue + '" not found locally.';
 	if (suggestions.length === 1) {
 		message += ' Did you mean `' + suggestions[0] + '`?';
 	} else if (suggestions.length > 0) {
@@ -1512,8 +1701,8 @@ async function validateCsl(
 	diagnostics.push({
 		message,
 		severity: 'warning',
-		start: fieldInfo.valueStart,
-		end: fieldInfo.valueEnd,
+		start: line.valueStart,
+		end: line.valueEnd,
 	});
 }
 
@@ -1526,7 +1715,7 @@ async function validateBibPath(
 
 	// Find the bibliography line
 	for (const line of parsed.lines) {
-		if (line.inStylesBlock) continue;
+		if (line.inStylesBlock || line.indent > 0) continue;
 		const canonical = resolveCanonical(line.key);
 		if (canonical !== 'bibliography') continue;
 		if (!line.rawValue) continue;

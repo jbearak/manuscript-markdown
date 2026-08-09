@@ -1,8 +1,134 @@
-import { extractHtmlTables, type HtmlTableRun } from './html-table-parser';
+import {
+  extractHtmlTableRanges,
+  extractStandaloneHtmlTable,
+  type HtmlTableRun,
+} from './html-table-parser';
+import {
+  computeCodeRegions,
+  type CodeRegion,
+} from './code-regions';
 
 export interface TextTransformation {
   newText: string;
   cursorOffset?: number; // Optional cursor position relative to start
+}
+
+export function findTableRangeAtOffset(
+  text: string,
+  offset: number,
+): CodeRegion | undefined {
+  const lines: Array<CodeRegion & { contentEnd: number; text: string }> = [];
+  for (let start = 0; start <= text.length;) {
+    const newline = text.indexOf('\n', start);
+    const end = newline < 0 ? text.length : newline + 1;
+    const contentEnd = newline < 0
+      ? text.length
+      : newline > start && text[newline - 1] === '\r'
+        ? newline - 1
+        : newline;
+    lines.push({ start, end, contentEnd, text: text.slice(start, contentEnd) });
+    if (newline < 0) break;
+    start = newline + 1;
+  }
+  const cursorLine = lines.findIndex(line => (
+    line.start <= offset
+    && (offset < line.end || (line.end === text.length && offset === text.length))
+  ));
+  if (cursorLine < 0) return undefined;
+  const containsOffset = (range: CodeRegion): boolean => (
+    range.start <= offset
+    && (
+      offset < range.end
+      || (
+        offset === range.end
+        && (
+          range.end === text.length
+          || text[range.end] === '\r'
+          || text[range.end] === '\n'
+        )
+      )
+    )
+  );
+
+  const candidates: CodeRegion[] = [];
+  if (isTableRow(lines[cursorLine].text)) {
+    let startLine = cursorLine;
+    let endLine = cursorLine;
+    while (startLine > 0 && isTableRow(lines[startLine - 1].text)) startLine--;
+    while (endLine + 1 < lines.length && isTableRow(lines[endLine + 1].text)) endLine++;
+    const range = { start: lines[startLine].start, end: lines[endLine].contentEnd };
+    const table = parseTable(text.slice(range.start, range.end));
+    if (table?.rows.some(row => row.isSeparator)) candidates.push(range);
+  }
+
+  const gridLine = (line: string): boolean => {
+    const trimmed = line.trim();
+    return !trimmed || !!parseGridBorderSegments(trimmed) || /^\|.*\|$/.test(trimmed);
+  };
+  if (gridLine(lines[cursorLine].text)) {
+    let regionStart = cursorLine;
+    let regionEnd = cursorLine;
+    while (regionStart > 0 && gridLine(lines[regionStart - 1].text)) regionStart--;
+    while (regionEnd + 1 < lines.length && gridLine(lines[regionEnd + 1].text)) regionEnd++;
+
+    let startLine: number | undefined;
+    let columnCount = 0;
+    let expectsRow = true;
+    const gridCandidates: CodeRegion[] = [];
+    for (let line = regionStart; line <= regionEnd; line++) {
+      const trimmed = lines[line].text.trim();
+      if (!trimmed) continue;
+
+      const border = parseGridBorderSegments(trimmed);
+      if (border) {
+        if (
+          startLine === undefined
+          || expectsRow
+          || border.length !== columnCount
+        ) {
+          startLine = line;
+          columnCount = border.length;
+          expectsRow = true;
+        } else {
+          gridCandidates.push({
+            start: lines[startLine].start,
+            end: lines[line].contentEnd,
+          });
+          expectsRow = true;
+        }
+        continue;
+      }
+
+      const row = parseGridRow(trimmed);
+      if (
+        startLine !== undefined
+        && expectsRow
+        && row?.length === columnCount
+      ) {
+        expectsRow = false;
+      } else {
+        startLine = undefined;
+        columnCount = 0;
+        expectsRow = true;
+      }
+    }
+    gridCandidates.sort((a, b) => (b.end - b.start) - (a.end - a.start));
+    const gridRange = gridCandidates.find(range => (
+      containsOffset(range)
+    ));
+    if (gridRange) candidates.push(gridRange);
+  }
+
+  const codeRegions = computeCodeRegions(text);
+  candidates.push(...extractHtmlTableRanges(text));
+  return candidates
+    .filter(range => (
+      containsOffset(range)
+      && !codeRegions.some(code => (
+        code.start <= range.start && range.end <= code.end
+      ))
+    ))
+    .sort((a, b) => (a.end - a.start) - (b.end - b.start))[0];
 }
 
 export function wrapColoredHighlight(text: string, color: string): TextTransformation {
@@ -616,40 +742,97 @@ function formatGridContentRow(cells: string[], columnWidths: number[], pad: bool
 }
 
 function runsToMarkdown(runs: HtmlTableRun[]): string {
-  let result = '';
-  for (const run of runs) {
-    if (run.type === 'softbreak') {
-      result += '\n';
-      continue;
+  const literalText = (run: HtmlTableRun): string => {
+    if (run.code || !run.literalCharacters?.length) return run.text;
+    const literalByOffset = new Map(
+      run.literalCharacters.map(item => [item.offset, item.value]),
+    );
+    let text = '';
+    for (let offset = 0; offset < run.text.length;) {
+      if (run.text[offset] === '\\') {
+        let end = offset + 1;
+        while (run.text[end] === '\\') end++;
+        if (literalByOffset.get(end) === '@') {
+          text += '\\'.repeat((end - offset) * 2 + 1) + '@';
+          offset = end + 1;
+          continue;
+        }
+      }
+      const literal = literalByOffset.get(offset);
+      if (literal === '@') text += '\\@';
+      else if (literal === '<') text += '&lt;';
+      else if (literal === '>') text += '&gt;';
+      else text += run.text[offset];
+      offset++;
     }
-    if (run.type === 'hardbreak') {
-      // Grid table cells treat bare newlines as hard breaks, so no backslash needed.
-      result += '\n';
-      continue;
-    }
-    if (run.type !== 'text') {
-      result += run.text;
-      continue;
-    }
-    let t = run.text;
+    return text;
+  };
+  const sourceText = (run: HtmlTableRun): string => {
+    const text = literalText(run);
+    return run.type === 'citation'
+      ? run.narrative
+        ? '@' + text
+        : run.text.startsWith('-@')
+          ? '[' + text + ']'
+          : '[@' + text + ']'
+      : text;
+  };
+  const sameFormatting = (a: HtmlTableRun, b: HtmlTableRun): boolean =>
+    !!a.bold === !!b.bold
+    && !!a.italic === !!b.italic
+    && !!a.strikethrough === !!b.strikethrough
+    && !!a.underline === !!b.underline
+    && !!a.superscript === !!b.superscript
+    && !!a.subscript === !!b.subscript
+    && !!a.code === !!b.code
+    && a.href === b.href;
+  const wrap = (text: string, run: HtmlTableRun): string => {
     if (run.code) {
       // Subtle bug guard: a fixed `` fence breaks content like ``test``.
-      const backtickRuns = t.match(/`+/g) ?? [];
+      const backtickRuns = text.match(/`+/g) ?? [];
       const maxBacktickRun = backtickRuns.reduce((max, runText) => Math.max(max, runText.length), 0);
       const fence = '`'.repeat(maxBacktickRun + 1);
-      const needsPadding = t.startsWith('`') || t.endsWith('`');
-      const codeSpan = needsPadding ? fence + ' ' + t + ' ' + fence : fence + t + fence;
-      result += run.href ? '[' + codeSpan + '](' + formatHrefForMarkdown(run.href) + ')' : codeSpan;
+      const needsPadding = text.startsWith('`') || text.endsWith('`');
+      const codeSpan = needsPadding
+        ? fence + ' ' + text + ' ' + fence
+        : fence + text + fence;
+      return run.href
+        ? '[' + codeSpan + '](' + formatHrefForMarkdown(run.href) + ')'
+        : codeSpan;
+    }
+    let wrapped = text;
+    if (run.bold) wrapped = '**' + wrapped + '**';
+    if (run.italic) wrapped = '*' + wrapped + '*';
+    if (run.strikethrough) wrapped = '~~' + wrapped + '~~';
+    if (run.underline) wrapped = '[' + wrapped + ']{.underline}';
+    if (run.superscript) wrapped = '<sup>' + wrapped + '</sup>';
+    if (run.subscript) wrapped = '<sub>' + wrapped + '</sub>';
+    if (run.href) wrapped = '[' + wrapped + '](' + formatHrefForMarkdown(run.href) + ')';
+    return wrapped;
+  };
+
+  let result = '';
+  for (let index = 0; index < runs.length;) {
+    const run = runs[index];
+    if (run.type === 'softbreak' || run.type === 'hardbreak') {
+      // Grid table cells treat bare newlines as hard breaks, so no backslash needed.
+      result += '\n';
+      index++;
       continue;
     }
-    if (run.bold) t = '**' + t + '**';
-    if (run.italic) t = '*' + t + '*';
-    if (run.strikethrough) t = '~~' + t + '~~';
-    if (run.underline) t = '[' + t + ']{.underline}';
-    if (run.superscript) t = '<sup>' + t + '</sup>';
-    if (run.subscript) t = '<sub>' + t + '</sub>';
-    if (run.href) t = '[' + t + '](' + formatHrefForMarkdown(run.href) + ')';
-    result += t;
+
+    let text = sourceText(run);
+    let next = index + 1;
+    while (
+      next < runs.length
+      && (runs[next].type === 'text' || runs[next].type === 'citation')
+      && sameFormatting(run, runs[next])
+    ) {
+      text += sourceText(runs[next]);
+      next++;
+    }
+    result += wrap(text, run);
+    index = next;
   }
   return result;
 }
@@ -667,12 +850,10 @@ function escapePipesForMarkdownTableCell(text: string): string {
 }
 
 function convertHtmlTable(text: string, pad: boolean): string | null {
-  const trimmed = text.trim();
-  if (!/^<table\b[\s\S]*<\/table>$/i.test(trimmed)) return null;
-  const tables = extractHtmlTables(trimmed);
-  // Subtle bug guard: mixed text/table selections must remain unchanged.
-  if (tables.length !== 1) return null;
-  const rows = tables[0].rows;
+  const table = extractStandaloneHtmlTable(text);
+  // Mixed text/table selections and structurally unclosed tables stay unchanged.
+  if (!table) return null;
+  const rows = table.rows;
 
   // Reject colspan/rowspan
   for (const row of rows) {
@@ -687,13 +868,27 @@ function convertHtmlTable(text: string, pad: boolean): string | null {
     header: row.header,
   }));
 
-  // Check if any cell contains newlines → grid table
-  const hasMultiLine = mdRows.some(row => row.cells.some(c => c.includes('\n')));
+  // Only a contiguous leading run of HTML header rows can be represented as a
+  // table header. Later <th> rows retain their source position as body rows.
+  let leadingHeaderRows = 0;
+  while (
+    leadingHeaderRows < mdRows.length
+    && mdRows[leadingHeaderRows].header
+  ) leadingHeaderRows++;
+  const normalizedRows = mdRows.map((row, index) => ({
+    ...row,
+    header: index < leadingHeaderRows,
+  }));
 
-  if (hasMultiLine) {
-    return buildGridTable(mdRows, pad);
+  // Pipe tables can represent only one header row immediately before their
+  // delimiter. Use a grid table when the HTML has richer row structure.
+  const hasMultiLine = normalizedRows.some(row => (
+    row.cells.some(cell => cell.includes('\n'))
+  ));
+  if (hasMultiLine || leadingHeaderRows > 1) {
+    return buildGridTable(normalizedRows, pad);
   }
-  return buildPipeTable(mdRows, pad);
+  return buildPipeTable(normalizedRows, pad);
 }
 
 function buildPipeTable(mdRows: { cells: string[]; header: boolean }[], pad: boolean): string {

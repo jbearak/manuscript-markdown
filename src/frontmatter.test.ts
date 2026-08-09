@@ -22,6 +22,145 @@ describe('callout-labels frontmatter', () => {
   });
 });
 
+describe('top-level frontmatter mappings', () => {
+  it('ignores known-looking keys nested under generic mappings', () => {
+    const parsed = parseFrontmatter([
+      '---',
+      'custom:',
+      '  bibliography: hidden.bib',
+      '  font-size: 99',
+      'bibliography: refs.bib',
+      'font-size: 12',
+      '---',
+      '',
+    ].join('\n'));
+    expect(parsed.metadata.bibliography).toBe('refs.bib');
+    expect(parsed.metadata.fontSize).toBe(12);
+  });
+
+  it('ignores mapping-looking text inside generic block scalars', () => {
+    const parsed = parseFrontmatter([
+      '---',
+      'font-size: 12',
+      'abstract: |',
+      '  font-size: 99',
+      '  bibliography: hidden.bib',
+      '---',
+      '',
+    ].join('\n'));
+    expect(parsed.metadata.fontSize).toBe(12);
+    expect(parsed.metadata.bibliography).toBeUndefined();
+  });
+
+  it('applies strict numeric parsing consistently', () => {
+    const invalid = parseFrontmatter([
+      '---',
+      'font-size: 12pt',
+      'header-font-size: [24pt, 20]',
+      'code-block-inset: 01',
+      'pipe-table-max-line-width: +80',
+      'grid-table-max-line-width: 8e1',
+      '---',
+      '',
+    ].join('\n')).metadata;
+    expect(invalid.fontSize).toBeUndefined();
+    expect(invalid.headerFontSize).toBeUndefined();
+    expect(invalid.codeBlockInset).toBeUndefined();
+    expect(invalid.pipeTableMaxLineWidth).toBeUndefined();
+    expect(invalid.gridTableMaxLineWidth).toBeUndefined();
+
+    const valid = parseFrontmatter([
+      '---',
+      'font-size: 1.2e1',
+      'header-font-size: [24, 20]',
+      'code-block-inset: 1',
+      'pipe-table-max-line-width: 0',
+      'grid-table-max-line-width: 80',
+      '---',
+      '',
+    ].join('\n')).metadata;
+    expect(valid.fontSize).toBe(12);
+    expect(valid.headerFontSize).toEqual([24, 20]);
+    expect(valid.codeBlockInset).toBe(1);
+    expect(valid.pipeTableMaxLineWidth).toBe(0);
+    expect(valid.gridTableMaxLineWidth).toBe(80);
+  });
+
+  it('strips inline comments without changing quoted hash characters', () => {
+    const metadata = parseFrontmatter([
+      '---',
+      'font-size: 12 # points',
+      'font: "Font #1" # preferred font',
+      'styles:',
+      '  pullquote:',
+      '    spacing-before: 6 # points',
+      '    font: "Style #1" # preferred font',
+      '---',
+      '',
+    ].join('\n')).metadata;
+
+    expect(metadata.fontSize).toBe(12);
+    expect(metadata.font).toBe('Font #1');
+    expect(metadata.styles?.pullquote).toMatchObject({
+      spacingBefore: 6,
+      font: 'Style #1',
+    });
+  });
+
+  it('treats apostrophes in plain scalars as content before comments', () => {
+    const metadata = parseFrontmatter([
+      '---',
+      "author: O'Brien # editor",
+      "font: O'Brien Sans # preferred font",
+      "nocite: author's note # @hidden",
+      '---',
+      '',
+    ].join('\n')).metadata;
+
+    expect(metadata.author).toBe("O'Brien");
+    expect(metadata.font).toBe("O'Brien Sans");
+    expect(metadata.nocite).toMatchObject({ keys: [], wildcard: false });
+  });
+
+  it('parses consistently indented root mappings without treating nested fields as root fields', () => {
+    const metadata = parseFrontmatter([
+      '---',
+      '  font: Georgia',
+      '  custom:',
+      '    bibliography: hidden.bib',
+      '  bibliography: refs.bib',
+      '---',
+      '',
+    ].join('\n')).metadata;
+
+    expect(metadata.font).toBe('Georgia');
+    expect(metadata.bibliography).toBe('refs.bib');
+  });
+
+  it('parses commented inline arrays from their semantic value', () => {
+    const metadata = parseFrontmatter([
+      '---',
+      'title: [Main, Subtitle] # title lines',
+      'header-font: [Georgia, Arial] # heading fonts',
+      'header-font-size: [24, 20] # points',
+      'header-font-style: [bold, italic] # styles',
+      'title-font: [Aptos, Arial] # title fonts',
+      'title-font-size: [30, 24] # points',
+      'title-font-style: [bold, normal] # styles',
+      '---',
+      '',
+    ].join('\n')).metadata;
+
+    expect(metadata.title).toEqual(['Main', 'Subtitle']);
+    expect(metadata.headerFont).toEqual(['Georgia', 'Arial']);
+    expect(metadata.headerFontSize).toEqual([24, 20]);
+    expect(metadata.headerFontStyle).toEqual(['bold', 'italic']);
+    expect(metadata.titleFont).toEqual(['Aptos', 'Arial']);
+    expect(metadata.titleFontSize).toEqual([30, 24]);
+    expect(metadata.titleFontStyle).toEqual(['bold', 'normal']);
+  });
+});
+
 describe('nocite frontmatter', () => {
   it('preserves authored scalar, cluster, block scalar, and list forms', () => {
     const values = [
@@ -30,6 +169,7 @@ describe('nocite frontmatter', () => {
       '|\n  @alpha\n  @beta',
       '>-\n  @alpha\n  @beta',
       '\n- @alpha\n- "@beta"',
+      '[\n  @alpha,\n  @beta\n]',
     ];
     for (const raw of values) {
       const markdown = '---\nnocite:' + (raw.startsWith('\n') ? raw : ' ' + raw) + '\ncsl: apa\n---\nBody';
@@ -40,6 +180,130 @@ describe('nocite frontmatter', () => {
       expect(serialized).toContain('nocite:' + (raw.startsWith('\n') ? raw : ' ' + raw));
       expect(serialized).toContain('csl: apa');
     }
+  });
+
+  it('ends multiline flow nocite at the root collection close', () => {
+    const parsed = parseFrontmatter([
+      '---',
+      'nocite: [',
+      '  @alpha',
+      ']',
+      '@beta',
+      '---',
+      '',
+    ].join('\n'));
+    expect(parsed.metadata.nocite).toEqual({
+      keys: ['alpha'],
+      wildcard: false,
+      raw: '[\n  @alpha\n]',
+    });
+  });
+
+  it('stops multiline flow nocite at same-line and mismatched root closers', () => {
+    const sameLine = parseFrontmatter([
+      '---',
+      'nocite: [',
+      '  @alpha',
+      '] @beta',
+      '---',
+      '',
+    ].join('\n')).metadata.nocite;
+    expect(sameLine).toEqual({
+      keys: ['alpha'],
+      wildcard: false,
+      raw: '[\n  @alpha\n]',
+    });
+
+    const mismatched = parseFrontmatter([
+      '---',
+      'nocite: [',
+      '  @alpha',
+      '}',
+      'title: @hidden',
+      '---',
+      '',
+    ].join('\n')).metadata.nocite;
+    expect(mismatched).toEqual({
+      keys: ['alpha'],
+      wildcard: false,
+      raw: '[\n  @alpha\n}',
+    });
+  });
+
+  it('ends empty and flow nocite continuations at dash-prefixed root mappings', () => {
+    for (const value of ['', '[\n  @alpha']) {
+      const parsed = parseFrontmatter([
+        '---',
+        'nocite: ' + value,
+        '-custom: @outside',
+        '---',
+        '',
+      ].join('\n')).metadata.nocite;
+      expect(parsed?.keys).toEqual(value ? ['alpha'] : []);
+      expect(parsed?.raw).not.toContain('@outside');
+    }
+  });
+
+  it('recovers malformed flow nocite at outer closers and logical-root mappings', () => {
+    const cases = [
+      ['nocite: [\n { note: @a\n]\ntitle: @outside', '[\n { note: @a\n]'],
+      ['nocite: [\n @a\ntitle: @outside', '[\n @a'],
+      ['nocite: [@a\n-custom: @outside', '[@a'],
+    ] as const;
+    for (const [yaml, expectedRaw] of cases) {
+      const nocite = parseFrontmatter('---\n' + yaml + '\n---\n').metadata.nocite;
+      expect(nocite?.keys).toEqual(['a']);
+      expect(nocite?.wildcard).toBe(false);
+      expect(nocite?.raw).toBe(expectedRaw);
+      expect(nocite?.raw).not.toContain('@outside');
+    }
+  });
+
+  it('preserves whitespace and comments after valid flow closers', () => {
+    for (const raw of ['[@alpha] # keep', '[\n  @alpha\n] # keep']) {
+      const parsed = parseFrontmatter('---\nnocite: ' + raw + '\n---\n');
+      expect(parsed.metadata.nocite).toEqual({
+        keys: ['alpha'],
+        wildcard: false,
+        raw,
+      });
+      expect(serializeFrontmatter(parsed.metadata, parsed.fieldOrder))
+        .toContain('nocite: ' + raw);
+    }
+  });
+
+  it('uses the last duplicate nocite value during parse and serialization', () => {
+    const parsed = parseFrontmatter([
+      '---',
+      'nocite: "@*"',
+      'nocite: @last',
+      '---',
+      '',
+    ].join('\n'));
+    expect(parsed.metadata.nocite).toEqual({
+      keys: ['last'], wildcard: false, raw: '@last',
+    });
+    const serialized = serializeFrontmatter(parsed.metadata, parsed.fieldOrder);
+    expect(serialized).toContain('nocite: @last');
+    expect(serialized).not.toContain('@*');
+  });
+
+  it('retains multiline flow quote and nested collection state', () => {
+    const parsed = parseFrontmatter([
+      '---',
+      'nocite: [',
+      '  "@alpha',
+      '  ] still quoted",',
+      '  { nested: [@beta] }',
+      ']',
+      '@gamma',
+      '---',
+      '',
+    ].join('\n'));
+    expect(parsed.metadata.nocite?.keys).toEqual(['alpha', 'beta']);
+    expect(parsed.metadata.nocite?.raw).toBe(
+      '[\n  "@alpha\n  ] still quoted",\n  { nested: [@beta] }\n]',
+    );
   });
 
   it('handles comments and colon-bearing keys in multiline lists', () => {
@@ -70,6 +334,69 @@ describe('nocite frontmatter', () => {
       .toContain('nocite: |+ # @not-a-key\n  @alpha\n\n\n---\n');
   });
 
+  it('does not preserve malformed block-scalar indicators', () => {
+    const parsed = parseFrontmatter([
+      '---',
+      'nocite: |++',
+      '  @hidden',
+      'csl: apa',
+      '---',
+      '',
+    ].join('\n'));
+    expect(parsed.metadata.nocite).toEqual({
+      keys: [],
+      wildcard: false,
+      raw: '|++',
+    });
+    const serialized = serializeFrontmatter(
+      parsed.metadata,
+      parsed.fieldOrder,
+    );
+    expect(serialized).not.toContain('nocite:');
+    expect(serialized).toContain('csl: apa');
+  });
+
+  it('decodes YAML quoting without synthesizing nocite tokens', () => {
+    const escaped = parseFrontmatter('---\nnocite: "\\\\@escaped"\n---\n');
+    const active = parseFrontmatter('---\nnocite: "\\\\\\\\@active"\n---\n');
+    const encoded = parseFrontmatter('---\nnocite: "\\u0040decoded @al\\u0070ha"\n---\n');
+    const encodedBoundary = parseFrontmatter('---\nnocite: "\\t@alpha"\n---\n');
+    const multilineEscaped = parseFrontmatter([
+      '---',
+      'nocite:',
+      '  - "note',
+      '    \\\\@hidden"',
+      '  - @active',
+      '---',
+      '',
+    ].join('\n'));
+    expect(escaped.metadata.nocite?.keys).toEqual([]);
+    expect(active.metadata.nocite?.keys).toEqual(['active']);
+    expect(encoded.metadata.nocite?.keys).toEqual(['al']);
+    expect(encodedBoundary.metadata.nocite?.keys).toEqual([]);
+    expect(multilineEscaped.metadata.nocite?.keys).toEqual(['active']);
+  });
+
+  it('resets nocite quote decoding across plain apostrophes and list items', () => {
+    const inline = parseFrontmatter([
+      '---',
+      "nocite: [author's note, \"\\\\@escaped\"]",
+      '---',
+      '',
+    ].join('\n'));
+    const multiline = parseFrontmatter([
+      '---',
+      'nocite:',
+      "  - author's note",
+      '  - "\\\\@escaped"',
+      '---',
+      '',
+    ].join('\n'));
+
+    expect(inline.metadata.nocite?.keys).toEqual([]);
+    expect(multiline.metadata.nocite?.keys).toEqual([]);
+  });
+
   it('uses citation boundaries and escaping across nocite YAML forms', () => {
     const invalid = [
       'person@example.com',
@@ -81,6 +408,7 @@ describe('nocite frontmatter', () => {
       'é@smith',
       '\\@escaped',
       'name@*suffix',
+      '@**',
       'δοκιμή@*',
     ];
     const forms = [
@@ -269,7 +597,12 @@ describe('frontmatter string scalar safety', () => {
 
 describe('frontmatter bounds', () => {
   it('preserves exact body offsets for LF and CRLF', () => {
-    for (const markdown of ['---\ntitle: Test\n---\nBody', '---\r\ntitle: Test\r\n---\r\nBody']) {
+    for (const markdown of [
+      '---\ntitle: Test\n---\nBody',
+      '---\r\ntitle: Test\r\n---\r\nBody',
+      '---\ntitle: Test\n---  \nBody',
+      '---\ntitle: Test\n...\t\nBody',
+    ]) {
       const bounds = findFrontmatterBounds(markdown);
       expect(bounds).toBeDefined();
       expect(markdown.slice(bounds?.bodyStart)).toBe('Body');

@@ -7,6 +7,7 @@ const CITEKEY_RE = new RegExp('^' + CITEKEY_PATTERN_SOURCE + '$');
 const EMAIL_LOCAL_ATOM_RE = /^[\p{L}\p{M}\p{N}.!#$%&'*+\/=?^_`{|}~-]$/u;
 const EMAIL_DOMAIN_START_RE = /^[\p{L}\p{N}]$/u;
 const EMAIL_DOMAIN_CHAR_RE = /^[\p{L}\p{M}\p{N}.-]$/u;
+const NOCITE_LEFT_EXCLUSION_RE = /[\p{L}\p{M}\p{N}._:\-\/+\x3d`]/u;
 
 export function isCitekeyChar(ch: string | undefined): boolean {
 	return ch !== undefined && CITEKEY_CHAR_RE.test(ch);
@@ -23,15 +24,19 @@ export function readCitekey(text: string, start: number): { key: string; end: nu
 	return { key: text.slice(start, end), end };
 }
 
-/** Read a citekey from Markdown, excluding an adjacent Critic deletion closer. */
+/** Read a citekey from Markdown, excluding a structurally verified Critic deletion closer. */
 export function readMarkdownCitekey(
 	text: string,
 	start: number,
+	criticDeletionCloserOffsets?: ReadonlySet<number>,
 ): { key: string; end: number } | undefined {
 	const parsed = readCitekey(text, start);
 	if (!parsed) return undefined;
-	const end = parsed.key.endsWith('--') && text[parsed.end] === '}'
-		? parsed.end - 2
+	const closerStart = parsed.end - 2;
+	const end = parsed.key.endsWith('--')
+		&& text[parsed.end] === '}'
+		&& criticDeletionCloserOffsets?.has(closerStart)
+		? closerStart
 		: parsed.end;
 	if (end === start) return undefined;
 	return { key: text.slice(start, end), end };
@@ -106,12 +111,27 @@ export function isEmailSeparatorAt(text: string, atOffset: number): boolean {
 		&& /[\p{L}\p{N}]/u.test(local);
 }
 
-export interface BracketCitationItem {
+export interface CitationOccurrenceMetadata {
 	key: string;
-	atStart: number;
-	keyEnd: number;
 	suppressAuthor: boolean;
 	locator?: string;
+}
+
+export interface BracketCitationItem extends CitationOccurrenceMetadata {
+	atStart: number;
+	keyEnd: number;
+}
+
+/** Parse the text after a bracket-citation key, preserving a literal `--}` key boundary. */
+export function parseBracketCitationRemainder(
+	key: string,
+	remainder: string,
+): { locator?: string } | undefined {
+	const trimmed = remainder.trim();
+	if (!trimmed || (key.endsWith('--') && trimmed === '}')) return {};
+	if (!trimmed.startsWith(',')) return undefined;
+	const locator = trimmed.slice(1).trim();
+	return locator ? { locator } : {};
 }
 
 /** Parse the exporter-supported `[@...]` / `[-@...]` citation-list subset. */
@@ -142,16 +162,17 @@ export function parseBracketCitationItems(
 		if (text[atStart] === '@' && (itemIndex === 0 || atStart === left || suppressAuthor)) {
 			const parsed = readMarkdownCitekey(text, atStart + 1);
 			if (parsed && parsed.end <= right) {
-				const remainder = text.slice(parsed.end, right).trim();
-				if (!remainder || remainder.startsWith(',')) {
+				const metadata = parseBracketCitationRemainder(
+					parsed.key,
+					text.slice(parsed.end, right),
+				);
+				if (metadata) {
 					items.push({
 						key: parsed.key,
 						atStart,
 						keyEnd: parsed.end,
 						suppressAuthor,
-						...(remainder.startsWith(',')
-							? { locator: remainder.slice(1).trim() }
-							: {}),
+						...metadata,
 					});
 				}
 			}
@@ -171,11 +192,53 @@ export interface NociteValue {
 	raw?: string;
 }
 
-export function yamlValueBeforeComment(value: string): string {
+function isYamlHorizontalSpace(char: string | undefined): boolean {
+	return char === ' ' || char === '\t';
+}
+
+function yamlLineFirstNonWhitespaceBefore(
+	text: string,
+	start: number,
+	end: number,
+): Int32Array {
+	const firstBefore = new Int32Array(end - start).fill(-1);
+	let first = -1;
+	for (let offset = start; offset < end; offset++) {
+		firstBefore[offset - start] = first;
+		const char = text[offset];
+		if (char === '\n' || char === '\r') first = -1;
+		else if (first === -1 && !isYamlHorizontalSpace(char)) first = offset;
+	}
+	return firstBefore;
+}
+
+function canStartYamlQuotedScalar(
+	text: string,
+	offset: number,
+	start: number,
+	flowDepth: number,
+	lineFirstNonWhitespace: number,
+): boolean {
+	let previous = offset - 1;
+	while (previous >= start && isYamlHorizontalSpace(text[previous])) previous--;
+	if (previous < start || text[previous] === '\n' || text[previous] === '\r') return true;
+	const separator = text[previous];
+	if (separator === '[' || separator === '{') return true;
+	if (separator === ',') return flowDepth > 0;
+	if (separator === ':') return flowDepth > 0 || previous + 1 < offset;
+	if (separator === '?') return previous + 1 < offset;
+	if (separator !== '-' || previous + 1 === offset) return false;
+	return lineFirstNonWhitespace === previous;
+}
+
+/** Locate a YAML inline comment without treating quotes inside plain scalars as delimiters. */
+export function yamlCommentStart(text: string, start = 0, end = text.length): number {
 	let quote: '"' | "'" | undefined;
 	let escaped = false;
-	for (let i = 0; i < value.length; i++) {
-		const char = value[i];
+	let flowDepth = 0;
+	const lineFirstNonWhitespace = yamlLineFirstNonWhitespaceBefore(text, start, end);
+	for (let i = start; i < end; i++) {
+		const char = text[i];
 		if (quote === '"') {
 			if (escaped) escaped = false;
 			else if (char === '\\') escaped = true;
@@ -184,34 +247,195 @@ export function yamlValueBeforeComment(value: string): string {
 		}
 		if (quote === "'") {
 			if (char === quote) {
-				if (value[i + 1] === quote) i++;
+				if (text[i + 1] === quote) i++;
 				else quote = undefined;
 			}
 			continue;
 		}
-		if (char === '"' || char === "'") quote = char;
-		else if (char === '#' && (i === 0 || /\s/.test(value[i - 1]))) return value.slice(0, i);
+		if (
+			(char === '"' || char === "'")
+			&& canStartYamlQuotedScalar(
+				text,
+				i,
+				start,
+				flowDepth,
+				lineFirstNonWhitespace[i - start],
+			)
+		) {
+			quote = char;
+		} else if (char === '[' || char === '{') {
+			flowDepth++;
+		} else if ((char === ']' || char === '}') && flowDepth > 0) {
+			flowDepth--;
+		} else if (char === '#' && (i === start || isYamlHorizontalSpace(text[i - 1]))) {
+			return i;
+		}
 	}
-	return value;
+	return end;
 }
 
+export function yamlValueBeforeComment(value: string): string {
+	return value.slice(0, yamlCommentStart(value));
+}
+
+const COMPACT_URI_SCHEME_RE = /^(?:data|doi|file|ftp|ftps|http|https|mailto|tel|urn)$/i;
+
 export function isTopLevelFrontmatterMappingLine(line: string): boolean {
-	return /^[^\s#-][^:]*:/.test(line);
+	if (/^(?:[\s#]|-(?:$|[ \t]))/.test(line)) return false;
+	let quote: '"' | "'" | undefined;
+	let flowDepth = 0;
+	const lineFirstNonWhitespace = yamlLineFirstNonWhitespaceBefore(line, 0, line.length);
+	for (let i = 0; i < line.length; i++) {
+		const char = line[i];
+		if (quote === '"') {
+			if (char === '\\') i++;
+			else if (char === quote) quote = undefined;
+			continue;
+		}
+		if (quote === "'") {
+			if (char === quote && line[i + 1] === quote) i++;
+			else if (char === quote) quote = undefined;
+			continue;
+		}
+		if (
+			(char === '"' || char === "'")
+			&& canStartYamlQuotedScalar(line, i, 0, flowDepth, lineFirstNonWhitespace[i])
+		) {
+			quote = char;
+		} else if (char === '[' || char === '{') {
+			flowDepth++;
+		} else if ((char === ']' || char === '}') && flowDepth > 0) {
+			flowDepth--;
+		} else if (char === '#' && (i === 0 || isYamlHorizontalSpace(line[i - 1]))) {
+			return false;
+		} else if (char === ':' && flowDepth === 0) {
+			const next = line[i + 1];
+			if (next === undefined || isYamlHorizontalSpace(next)) return true;
+			const compactKey = line.slice(0, i);
+			if (
+				/^[A-Za-z_][A-Za-z0-9_-]*$/.test(compactKey) &&
+				!COMPACT_URI_SCHEME_RE.test(compactKey)
+			) {
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 export type NociteValueMode = 'single-line' | 'flow-multiline' | 'block-scalar';
 
+export interface NociteContinuationState {
+	mode: NociteValueMode;
+	rootFlow: boolean;
+	flowClosers: Array<']' | '}'>;
+	quote?: '"' | "'";
+	escaped: boolean;
+	rootFlowClosed: boolean;
+	/** Exclusive offset of a matching or recovery root closer on the last line read. */
+	rootFlowCloseOffset?: number;
+}
+
+function advanceNociteFlowState(state: NociteContinuationState, line: string): void {
+	state.rootFlowCloseOffset = undefined;
+	const lineFirstNonWhitespace = yamlLineFirstNonWhitespaceBefore(line, 0, line.length);
+	for (let i = 0; i < line.length; i++) {
+		const char = line[i];
+		if (state.quote === '"') {
+			if (state.escaped) state.escaped = false;
+			else if (char === '\\') state.escaped = true;
+			else if (char === state.quote) state.quote = undefined;
+			continue;
+		}
+		if (state.quote === "'") {
+			if (char === state.quote && line[i + 1] === state.quote) i++;
+			else if (char === state.quote) state.quote = undefined;
+			continue;
+		}
+		if (char === '#' && (i === 0 || isYamlHorizontalSpace(line[i - 1]))) break;
+		if (
+			(char === '"' || char === "'")
+			&& canStartYamlQuotedScalar(
+				line,
+				i,
+				0,
+				state.flowClosers.length,
+				lineFirstNonWhitespace[i],
+			)
+		) {
+			state.quote = char;
+		} else if (char === '[') {
+			state.flowClosers.push(']');
+		} else if (char === '{') {
+			state.flowClosers.push('}');
+		} else if (char === state.flowClosers[state.flowClosers.length - 1]) {
+			state.flowClosers.pop();
+			if (state.rootFlow && state.flowClosers.length === 0) {
+				state.rootFlowClosed = true;
+				state.rootFlowCloseOffset = i + 1;
+				break;
+			}
+		} else if (
+			state.rootFlow
+			&& (char === ']' || char === '}')
+			&& (
+				state.flowClosers.length === 1
+				|| char === state.flowClosers[0]
+			)
+		) {
+			// A root closer is a safe recovery boundary even when malformed nested
+			// collections left stale frames above it. Likewise, a mismatched closer
+			// at root depth must not let nocite consume later root fields.
+			state.flowClosers.length = 0;
+			state.rootFlowClosed = true;
+			state.rootFlowCloseOffset = i + 1;
+			break;
+		}
+	}
+}
+
+/** Create the state shared by all physical-line consumers of one nocite value. */
+export function createNociteContinuationState(firstValue: string): NociteContinuationState {
+	const semanticFirstValue = yamlValueBeforeComment(firstValue).trim();
+	const blockScalar = /^[|>](?:[1-9][+-]?|[+-][1-9]?)?$/.test(semanticFirstValue);
+	const rootFlow = semanticFirstValue.startsWith('[') || semanticFirstValue.startsWith('{');
+	const state: NociteContinuationState = {
+		mode: blockScalar
+			? 'block-scalar'
+			: semanticFirstValue.length === 0 || rootFlow
+				? 'flow-multiline'
+				: 'single-line',
+		rootFlow,
+		flowClosers: [],
+		escaped: false,
+		rootFlowClosed: false,
+	};
+	if (rootFlow) {
+		advanceNociteFlowState(state, firstValue);
+		if (state.rootFlowClosed) state.mode = 'single-line';
+	}
+	return state;
+}
+
 /** Classify whether a nocite value may continue onto following YAML lines. */
 export function nociteValueMode(firstValue: string): NociteValueMode {
-	const semanticFirstValue = yamlValueBeforeComment(firstValue).trim();
-	if (/^[|>][0-9+-]*$/.test(semanticFirstValue)) return 'block-scalar';
-	return semanticFirstValue.length === 0 ? 'flow-multiline' : 'single-line';
+	return createNociteContinuationState(firstValue).mode;
 }
 
 /** Apply the shared termination rule for multiline nocite YAML values. */
-export function isNociteContinuationLine(mode: NociteValueMode, line: string): boolean {
+export function isNociteContinuationLine(
+	modeOrState: NociteValueMode | NociteContinuationState,
+	line: string,
+): boolean {
+	const mode = typeof modeOrState === 'string' ? modeOrState : modeOrState.mode;
 	if (mode === 'single-line') return false;
 	if (mode === 'block-scalar') return line.trim().length === 0 || /^[ \t]/.test(line);
+	if (typeof modeOrState !== 'string' && modeOrState.rootFlow) {
+		if (modeOrState.rootFlowClosed) return false;
+		if (isTopLevelFrontmatterMappingLine(line)) return false;
+		advanceNociteFlowState(modeOrState, line);
+		return true;
+	}
 	return !isTopLevelFrontmatterMappingLine(line);
 }
 
@@ -222,13 +446,146 @@ export interface NociteToken {
 	wildcard: boolean;
 }
 
+export interface DecodedNociteYamlText {
+	text: string;
+	/** Source start/end offsets for each UTF-16 code unit in `text`. */
+	sourceStarts: readonly number[];
+	sourceEnds: readonly number[];
+}
+
+/**
+ * Decode only YAML quoting syntax that changes literal citation lexing.
+ *
+ * TextMate operates on source text, so character-producing escapes such as
+ * `\\u0040` deliberately remain raw instead of synthesizing an invisible `@` or
+ * citekey character. Backslash pairs and escaped quote delimiters are decoded so
+ * scanner escaping, quoted-local emails, and source highlighting stay aligned.
+ */
+export function decodeNociteYamlText(text: string): DecodedNociteYamlText {
+	let decoded = '';
+	const sourceStarts: number[] = [];
+	const sourceEnds: number[] = [];
+	const append = (value: string, start: number, end: number) => {
+		decoded += value;
+		for (let i = 0; i < value.length; i++) {
+			sourceStarts.push(start);
+			sourceEnds.push(end);
+		}
+	};
+
+	let flowDepth = 0;
+	const lineFirstNonWhitespace = yamlLineFirstNonWhitespaceBefore(text, 0, text.length);
+	for (let i = 0; i < text.length; i++) {
+		const char = text[i];
+		if (
+			char === '#'
+			&& (i === 0 || isYamlHorizontalSpace(text[i - 1]))
+		) {
+			const newline = text.indexOf('\n', i + 1);
+			if (newline === -1) break;
+			append('\n', newline, newline + 1);
+			i = newline;
+			continue;
+		}
+		if (
+			(char !== '"' && char !== "'")
+			|| !canStartYamlQuotedScalar(text, i, 0, flowDepth, lineFirstNonWhitespace[i])
+		) {
+			append(char, i, i + 1);
+			if (char === '[' || char === '{') flowDepth++;
+			else if ((char === ']' || char === '}') && flowDepth > 0) flowDepth--;
+			continue;
+		}
+		if (char === "'") {
+			append(char, i, i + 1);
+			let contentEnd = text.length - 1;
+			for (let cursor = i + 1; cursor < text.length; cursor++) {
+				append(text[cursor], cursor, cursor + 1);
+				if (text[cursor] !== "'") continue;
+				if (text[cursor + 1] === "'") {
+					cursor++;
+					append("'", cursor, cursor + 1);
+					continue;
+				}
+				contentEnd = cursor;
+				break;
+			}
+			i = contentEnd;
+			continue;
+		}
+
+		const contentStart = i + 1;
+		let contentEnd = text.length;
+		for (let cursor = contentStart; cursor < text.length; cursor++) {
+			if (text[cursor] === '\\') cursor++;
+			else if (text[cursor] === '"') {
+				contentEnd = cursor;
+				break;
+			}
+		}
+		// Keep malformed quoted-local emails intact, but otherwise retain scalar
+		// boundaries as spaces so adjacent text cannot extend a decoded citekey.
+		const preserveDelimiters = text[contentEnd + 1] === '@';
+		append(preserveDelimiters ? '"' : ' ', i, i + 1);
+
+		for (let cursor = contentStart; cursor < contentEnd; cursor++) {
+			if (text[cursor] !== '\\') {
+				append(text[cursor], cursor, cursor + 1);
+				continue;
+			}
+
+			const runStart = cursor;
+			while (cursor < contentEnd && text[cursor] === '\\') cursor++;
+			const runLength = cursor - runStart;
+			const pairEnd = runStart + runLength - (runLength % 2);
+			if (runLength % 2 === 0) {
+				for (let pairStart = runStart; pairStart < pairEnd; pairStart += 2) {
+					append('\\', pairStart, pairStart + 2);
+				}
+				cursor--;
+				continue;
+			}
+			if (cursor < contentEnd && text[cursor] === '"') {
+				for (let pairStart = runStart; pairStart < pairEnd; pairStart += 2) {
+					append('\\', pairStart, pairStart + 2);
+				}
+				append('"', pairEnd, cursor + 1);
+				continue;
+			}
+
+			// Preserve unsupported and malformed escape runs atomically. This keeps
+			// the source backslash parity used by the grammar instead of partially
+			// decoding a run and accidentally activating the following marker.
+			for (let raw = runStart; raw < cursor; raw++) {
+				append('\\', raw, raw + 1);
+			}
+			cursor--;
+		}
+		if (contentEnd < text.length) {
+			append(preserveDelimiters ? '"' : ' ', contentEnd, contentEnd + 1);
+		}
+		i = contentEnd;
+	}
+	return { text: decoded, sourceStarts, sourceEnds };
+}
+
 /** Shared lexical boundary check for a nocite `@` marker. */
 export function isBoundaryValidNociteToken(text: string, atOffset: number, regionStart = 0): boolean {
 	if (text[atOffset] !== '@' || isEscaped(text, atOffset) || isEmailSeparatorAt(text, atOffset)) return false;
 	const previous = atOffset > regionStart ? previousCodePoint(text, atOffset) : undefined;
-	return previous === undefined
-		|| previous.start < regionStart
-		|| !/[\p{L}\p{M}\p{N}._\/+\x3d`]/u.test(previous.value);
+	if (previous === undefined || previous.start < regionStart) return true;
+	if (previous.value !== '-') return !NOCITE_LEFT_EXCLUSION_RE.test(previous.value);
+
+	// Pandoc accepts suppress-author `-@key` in nocite clusters, but the hyphen
+	// must itself begin a token rather than being attached to prose or a path.
+	let boundaryStart = previous.start;
+	while (boundaryStart > regionStart && text[boundaryStart - 1] === '\\') {
+		boundaryStart--;
+	}
+	const beforeHyphen = previousCodePoint(text, boundaryStart);
+	return beforeHyphen === undefined
+		|| beforeHyphen.start < regionStart
+		|| !NOCITE_LEFT_EXCLUSION_RE.test(beforeHyphen.value);
 }
 
 /**
@@ -245,13 +602,13 @@ export function scanNociteTokens(
 		if (!isBoundaryValidNociteToken(text, cursor, start)) continue;
 
 		if (text[cursor + 1] === '*') {
-			if (isCitekeyChar(text[cursor + 2])) continue;
+			if (text[cursor + 2] === '*' || isCitekeyChar(text[cursor + 2])) continue;
 			tokens.push({ atStart: cursor, end: cursor + 2, wildcard: true });
 			cursor++;
 			continue;
 		}
 
-		const parsed = readMarkdownCitekey(text, cursor + 1);
+		const parsed = readCitekey(text, cursor + 1);
 		if (!parsed || parsed.end > end) continue;
 		tokens.push({
 			atStart: cursor,
@@ -270,10 +627,10 @@ export function parseNociteRaw(raw: string): Pick<NociteValue, 'keys' | 'wildcar
 	let wildcard = false;
 	const lines = raw.split('\n');
 	const firstValue = yamlValueBeforeComment(lines[0] ?? '').trim();
-	const blockScalar = /^[|>][0-9+-]*$/.test(firstValue);
+	const blockScalar = /^[|>](?:[1-9][+-]?|[+-][1-9]?)?$/.test(firstValue);
 	const scanText = blockScalar
 		? lines.slice(1).join('\n')
-		: lines.map(yamlValueBeforeComment).join('\n');
+		: decodeNociteYamlText(lines.join('\n')).text;
 
 	for (const token of scanNociteTokens(scanText)) {
 		if (token.wildcard) wildcard = true;

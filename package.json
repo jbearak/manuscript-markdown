@@ -927,19 +927,14 @@
           "group": "1_citations@1"
         },
         {
-          "command": "manuscript-markdown.setFrontmatter.nocite",
+          "command": "manuscript-markdown.setFrontmatter.csl",
           "when": "editorLangId == markdown",
           "group": "1_citations@2"
         },
         {
-          "command": "manuscript-markdown.setFrontmatter.csl",
-          "when": "editorLangId == markdown",
-          "group": "1_citations@3"
-        },
-        {
           "command": "manuscript-markdown.setFrontmatter.locale",
           "when": "editorLangId == markdown",
-          "group": "1_citations@4"
+          "group": "1_citations@3"
         },
         {
           "command": "manuscript-markdown.setFrontmatter.zotero-notes",
@@ -1220,7 +1215,9 @@
     "eslint": "^10.2.0",
     "fast-check": "^4.5.3",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.58.0"
+    "typescript-eslint": "^8.58.0",
+    "vscode-oniguruma": "^2.0.1",
+    "vscode-textmate": "^9.3.2"
   },
   "private": true,
   "dependencies": {

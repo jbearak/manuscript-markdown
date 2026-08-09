@@ -64,6 +64,56 @@ describe('scanCitationUsages', () => {
 		expect(findCitekeyAtOffset(text, text.indexOf('@narrative'))).toBe('narrative');
 	});
 
+	test('recognizes quoted nocite mapping keys', () => {
+		for (const key of ['"nocite"', "'nocite'", '"no\\u0063ite"']) {
+			const text = '---\n' + key + ': @alpha\n---\n';
+			expect(scanCitationUsages(text).map(usage => usage.key)).toEqual(['alpha']);
+			expect(findCitekeyAtOffset(text, text.indexOf('@alpha'))).toBe('alpha');
+			expect(
+				getCompletionContextAtOffset(text, text.indexOf('@alpha') + 4)?.form,
+			).toBe('nocite');
+		}
+	});
+
+	test('keeps escaped suppress-author boundaries aligned', () => {
+		for (let slashCount = 0; slashCount <= 4; slashCount++) {
+			const marker = '\\'.repeat(slashCount) + '-@alpha';
+			const active = '---\nnocite: ' + marker + '\n---\n';
+			expect(scanCitationUsages(active).map(usage => usage.key)).toEqual(['alpha']);
+			expect(
+				getCompletionContextAtOffset(active, active.indexOf('@alpha') + 6)?.form,
+			).toBe('nocite');
+
+			const attached = '---\nnocite: x' + marker + '\n---\n';
+			expect(scanCitationUsages(attached)).toEqual([]);
+			expect(
+				getCompletionContextAtOffset(attached, attached.indexOf('@alpha') + 6),
+			).toBeUndefined();
+		}
+	});
+
+	test('preserves multiline nocite quote and escape state', () => {
+		const text = [
+			'---',
+			'nocite:',
+			'  - "note',
+			'    \\\\@hidden"',
+			'  - @active',
+			'---',
+		].join('\n');
+		expect(scanCitationUsages(text).map(usage => usage.key)).toEqual(['active']);
+		expect(findCitekeyAtOffset(text, text.indexOf('@hidden'))).toBeUndefined();
+		expect(findCitekeyAtOffset(text, text.indexOf('@active'))).toBe('active');
+	});
+
+	test('excludes Markdown image alt labels from LSP citation usages', () => {
+		const text = '![@image](figure.png) ![see [@nested]](nested.png) and @body';
+		expect(scanCitationUsages(text).map(usage => usage.key)).toEqual(['body']);
+		expect(findCitekeyAtOffset(text, text.indexOf('@image'))).toBeUndefined();
+		expect(findCitekeyAtOffset(text, text.indexOf('@nested'))).toBeUndefined();
+		expect(findCitekeyAtOffset(text, text.indexOf('@body'))).toBe('body');
+	});
+
 	test('does not use provisional frontmatter to hide document-wide symbol usages', () => {
 		const text = "---\ntitle: '@title_text'\nnocite: '[@uncited; @*]'\nBody cites @body";
 		expect(scanCitationUsages(text).map((usage) => usage.key)).toEqual(['title_text', 'uncited', 'body']);
@@ -151,6 +201,15 @@ describe('getCompletionContextAtOffset', () => {
 		expect(getCompletionContextAtOffset(text, text.indexOf(']'))).toBeUndefined();
 	});
 
+	test('suppresses completion inside Markdown image alt labels', () => {
+		for (const text of [
+			'![@smi](figure.png)',
+			'![see [@smi]](figure.png)',
+		]) {
+			expect(getCompletionContextAtOffset(text, text.indexOf(']'))).toBeUndefined();
+		}
+	});
+
 	test('keeps bracket completion for unfinished author-suppressed citations', () => {
 		const text = 'see [-@smi';
 		const ctx = getCompletionContextAtOffset(text, text.length);
@@ -224,6 +283,10 @@ describe('isInsideCitationSegmentAtOffset', () => {
 		const text = 'Text [@smith2020, p. 12; @jones2019]';
 		const semicolonOffset = text.indexOf(';');
 		expect(isInsideCitationSegmentAtOffset(text, semicolonOffset)).toBe(true);
+	});
+	test('returns false inside nested Markdown image alt labels', () => {
+		const text = '![see [@smith2020; @jones2019]](figure.png)';
+		expect(isInsideCitationSegmentAtOffset(text, text.indexOf(';'))).toBe(false);
 	});
 });
 

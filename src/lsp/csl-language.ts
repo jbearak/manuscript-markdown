@@ -3,6 +3,12 @@
  * Follows the pattern of citekey-language.ts and comment-language.ts.
  */
 
+import {
+	findFrontmatterBounds,
+	findFrontmatterOpeningBounds,
+	findFrontmatterRootIndent,
+} from '../frontmatter';
+
 export interface CslCompletionContext {
 	prefix: string;
 	valueStart: number;
@@ -19,8 +25,6 @@ export interface CslFieldInfo {
 	valueEnd: number;
 }
 
-const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---/;
-
 interface CslLineMatch {
 	lineStart: number;
 	trimmedLine: string;
@@ -33,25 +37,31 @@ interface CslLineMatch {
  * Find the `csl:` line in YAML frontmatter and return its position info.
  */
 function findCslLine(text: string): CslLineMatch | undefined {
-	const fmMatch = FRONTMATTER_RE.exec(text);
-	if (!fmMatch) return undefined;
+	const bounds = findFrontmatterBounds(text);
+	const opening = findFrontmatterOpeningBounds(text);
+	if (!bounds || !opening) return undefined;
 
-	const fmStart = fmMatch.index;
-	const fmEnd = fmStart + fmMatch[0].length;
-	const firstNewline = text.indexOf('\n', fmStart);
-	if (firstNewline === -1) return undefined;
-	const bodyStart = firstNewline + 1;
-
-	const fmBody = fmMatch[1];
+	const fmStart = bounds.start;
+	const fmEnd = bounds.bodyStart;
+	const rootIndent = findFrontmatterRootIndent(text, bounds.contentEnd);
+	const fmBody = text.slice(opening.bodyStart, bounds.contentEnd);
 	const lines = fmBody.split(/\n/);
-	let pos = bodyStart;
-	for (const line of lines) {
-		const trimmedLine = line.endsWith('\r') ? line.slice(0, -1) : line;
-		const cslMatch = trimmedLine.match(/^csl:[ \t]*/);
+	let pos = opening.bodyStart;
+	for (const rawLine of lines) {
+		const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+		const hasRootIndent = line.slice(0, rootIndent).trim().length === 0;
+		const logicalLine = hasRootIndent ? line.slice(rootIndent) : line;
+		const cslMatch = logicalLine.match(/^csl:[ \t]*/);
 		if (cslMatch) {
-			return { lineStart: pos, trimmedLine, cslPrefixLength: cslMatch[0].length, fmStart, fmEnd };
+			return {
+				lineStart: pos + (hasRootIndent ? rootIndent : 0),
+				trimmedLine: logicalLine,
+				cslPrefixLength: cslMatch[0].length,
+				fmStart,
+				fmEnd,
+			};
 		}
-		pos += line.length + 1;
+		pos += rawLine.length + 1;
 	}
 	return undefined;
 }

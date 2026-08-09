@@ -17,12 +17,14 @@ import { preprocessGridTables, GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData
 import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
 import { extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
-import { parseBracketCitationItems, readMarkdownCitekey } from './citekey';
+import { readMarkdownCitekey, type CitationOccurrenceMetadata } from './citekey';
 import {
   analyzeCitationDocument,
   findCitationAtOffset,
+  groupCitationUsages,
   isBoundaryValidBareCitation,
   type CitationDocumentAnalysis,
+  type CitationUsageGroup,
 } from './citation-scanner';
 export { preprocessGridTables } from './grid-table-preprocess';
 export { extractHtmlTables } from './html-table-parser';
@@ -167,7 +169,9 @@ export interface MdRun {
   // Citation specific
   keys?: string[];          // citation keys for [@key1; @key2]
   locators?: Map<string, string>; // key -> locator for [@key, p. 20]
-  suppressAuthorKeys?: Set<string>; // per-key suppress-author: Set of keys with [-@key] form
+  suppressAuthorKeys?: Set<string>; // legacy per-key suppress-author metadata
+  citationItems?: CitationOccurrenceMetadata[]; // canonical per-occurrence citation metadata
+  citationSource?: string;    // exact authored source span for literal missing-key fallback
   narrative?: boolean;       // bare @key author-in-text form
   // Math specific
   display?: boolean;        // display math ($$...$$) vs inline ($...$)
@@ -179,12 +183,61 @@ export interface MdRun {
   imageSyntax?: 'md' | 'html';
 }
 
+function citationAwareSourceRuns(source: string): MdRun[] | undefined {
+  const groups = groupCitationUsages(source);
+  if (groups.length === 0) return undefined;
+
+  const runs: MdRun[] = [];
+  let cursor = 0;
+  for (const group of groups) {
+    if (group.start > cursor) {
+      runs.push({ type: 'text', text: source.slice(cursor, group.start) });
+    }
+    const locators = new Map<string, string>();
+    const suppressAuthorKeys = new Set<string>();
+    for (const item of group.items) {
+      if (item.locator !== undefined) locators.set(item.key, item.locator);
+      if (item.suppressAuthor) suppressAuthorKeys.add(item.key);
+    }
+    const keys = group.usages.map(usage => usage.key);
+    const citationItems = group.form === 'bracket'
+      ? group.items.map(item => ({
+          key: item.key,
+          suppressAuthor: item.suppressAuthor,
+          ...(item.locator !== undefined ? { locator: item.locator } : {}),
+        }))
+      : undefined;
+    const text = group.form === 'bare'
+      ? source.slice(group.usages[0].keyStart, group.usages[0].keyEnd)
+      : group.items.map((item, index) => {
+          const marker = item.suppressAuthor ? '-@' : index === 0 ? '' : '@';
+          return marker + item.key
+            + (item.locator !== undefined ? ', ' + item.locator : '');
+        }).join('; ');
+    runs.push({
+      type: 'citation',
+      text,
+      keys,
+      citationSource: source.slice(group.start, group.end),
+      ...(locators.size > 0 ? { locators } : {}),
+      ...(suppressAuthorKeys.size > 0 ? { suppressAuthorKeys } : {}),
+      ...(citationItems ? { citationItems } : {}),
+      ...(group.form === 'bare' ? { narrative: true } : {}),
+    });
+    cursor = group.end;
+  }
+  if (cursor < source.length) {
+    runs.push({ type: 'text', text: source.slice(cursor) });
+  }
+  return runs;
+}
+
 function mapHtmlTableRunToMdRun(run: HtmlTableRun): MdRun {
   if (run.type === 'softbreak') {
     return { type: 'hardbreak', text: '\n' };
   }
   return {
-    type: 'text',
+    type: run.type === 'citation' ? 'citation' : 'text',
     text: run.text,
     ...(run.bold ? { bold: true } : {}),
     ...(run.italic ? { italic: true } : {}),
@@ -194,6 +247,11 @@ function mapHtmlTableRunToMdRun(run: HtmlTableRun): MdRun {
     ...(run.superscript ? { superscript: true } : {}),
     ...(run.subscript ? { subscript: true } : {}),
     ...(run.href ? { href: run.href } : {}),
+    ...(run.keys ? { keys: run.keys } : {}),
+    ...(run.locators ? { locators: run.locators } : {}),
+    ...(run.suppressAuthorKeys ? { suppressAuthorKeys: run.suppressAuthorKeys } : {}),
+    ...(run.citationItems ? { citationItems: run.citationItems } : {}),
+    ...(run.narrative ? { narrative: true } : {}),
   };
 }
 
@@ -260,6 +318,7 @@ interface ManuscriptToken extends Token {
   keys?: string[];
   locators?: Map<string, string>;
   suppressAuthorKeys?: Set<string>;
+  citationItems?: CitationOccurrenceMetadata[];
   narrative?: boolean;
   display?: boolean;
   footnoteLabel?: string;
@@ -571,6 +630,7 @@ function citationRule(state: StateInline, silent: boolean): boolean {
   const citationState = state as StateInline & {
     linkLevel?: number;
     manuscriptCitationAnalysis?: CitationDocumentAnalysis;
+    manuscriptCitationGroups?: Map<number, CitationUsageGroup>;
   };
   if (state.src.charAt(start) === '@') {
     citationState.manuscriptCitationAnalysis ??= analyzeCitationDocument(state.src);
@@ -579,8 +639,17 @@ function citationRule(state: StateInline, silent: boolean): boolean {
     let key: string | undefined;
     let end: number | undefined;
     if (usage?.atStart === start && usage.form === 'bare') {
-      key = usage.key;
-      end = usage.keyEnd;
+      const unfinishedBracket = analysis.brackets.contexts.get(start);
+      const insideUnfinishedCitation = unfinishedBracket
+        && !analysis.brackets.balancedContexts.has(start)
+        && (
+          state.src.startsWith('[@', unfinishedBracket.start)
+          || state.src.startsWith('[-@', unfinishedBracket.start)
+        );
+      if (!insideUnfinishedCitation) {
+        key = usage.key;
+        end = usage.keyEnd;
+      }
     } else if ((citationState.linkLevel ?? 0) > 0) {
       // Shortcut-reference definitions can live in another block and are not in
       // state.src. Markdown-it has already resolved the link; only fall back for
@@ -611,13 +680,27 @@ function citationRule(state: StateInline, silent: boolean): boolean {
   const isSuppressed = !isNormal && start + 3 < max && state.src.slice(start, start + 3) === '[-@';
   if (!isNormal && !isSuppressed) return false;
 
+  citationState.manuscriptCitationAnalysis ??= analyzeCitationDocument(state.src);
+  const analysis = citationState.manuscriptCitationAnalysis;
+  const bracketEnd = analysis.brackets.closingOffsets.get(start);
+  if (bracketEnd === undefined || bracketEnd > max) return false;
+  const endPos = bracketEnd - 1;
   const contentStart = isSuppressed ? start + 3 : start + 2;
-  const endPos = state.src.indexOf(']', contentStart);
-  if (endPos === -1) return false;
-  // A citation-looking Markdown link is still a link. Yield to markdown-it's
-  // link rule; the label is parsed recursively and its visible @key is handled
-  // by the bare-citation branch above, while the destination remains inert.
-  if (state.src[endPos + 1] === '(' || state.src[endPos + 1] === '[') return false;
+  // A citation-looking Markdown link is still a link only when Markdown-it
+  // accepted its destination/reference. Rejected syntax remains literal citation
+  // markup and must not inherit link-label or image-alt exclusion semantics.
+  if (
+    (state.src[bracketEnd] === '(' || state.src[bracketEnd] === '[')
+    && analysis.visibleLinkLabels.has(start + ':' + bracketEnd)
+  ) return false;
+
+  citationState.manuscriptCitationGroups ??= new Map<number, CitationUsageGroup>(
+    groupCitationUsages(state.src, analysis)
+      .map(group => [group.start, group]),
+  );
+  const group = citationState.manuscriptCitationGroups.get(start);
+  if (!group || group.form !== 'bracket' || group.end !== bracketEnd) return false;
+  const items = group.items;
 
   if (!silent) {
     const rawContent = state.src.slice(contentStart, endPos);
@@ -629,7 +712,7 @@ function citationRule(state: StateInline, silent: boolean): boolean {
     const locators = new Map<string, string>();
     const suppressAuthorKeys = new Set<string>();
 
-    for (const item of parseBracketCitationItems(state.src, start, endPos + 1)) {
+    for (const item of items) {
       keys.push(item.key);
       if (item.locator !== undefined) locators.set(item.key, item.locator);
       if (item.suppressAuthor) suppressAuthorKeys.add(item.key);
@@ -638,9 +721,16 @@ function citationRule(state: StateInline, silent: boolean): boolean {
     token.keys = keys;
     token.locators = locators;
     token.suppressAuthorKeys = suppressAuthorKeys.size > 0 ? suppressAuthorKeys : undefined;
+    token.citationItems = new Set(keys).size < keys.length
+      ? items.map(item => ({
+          key: item.key,
+          suppressAuthor: item.suppressAuthor,
+          ...(item.locator !== undefined ? { locator: item.locator } : {}),
+        }))
+      : undefined;
   }
 
-  state.pos = endPos + 1;
+  state.pos = bracketEnd;
   return true;
 }
 
@@ -2150,9 +2240,10 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
             runs: [{ type: 'html_comment' as const, text: htmlContent.replace(/\n$/, '') }]
           });
         } else if (isGfmDisallowedRawHtml(htmlContent)) {
+          const source = htmlContent.replace(/\n$/, '');
           result.push({
             type: 'paragraph',
-            runs: [{ type: 'text', text: htmlContent.replace(/\n$/, '') }]
+            runs: [{ type: 'text', text: source }]
           });
         } else if (/^<img\s/i.test(htmlContent.trim())) {
           const srcMatch = htmlContent.match(/src\s*=\s*["']([^"']+)["']/);
@@ -2205,11 +2296,13 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
               }
             }
           } else {
-            // Preserve non-table raw HTML blocks as literal text so user content
-            // like <tag> is not silently dropped during MD→DOCX parsing.
+            // Preserve non-table raw HTML blocks as literal text while replacing
+            // scanner-visible citations with active fields.
+            const source = htmlContent.replace(/\n$/, '');
             result.push({
               type: 'paragraph',
-              runs: [{ type: 'text', text: htmlContent.replace(/\n$/, '') }]
+              runs: citationAwareSourceRuns(source)
+                ?? [{ type: 'text', text: source }]
             });
           }
         }
@@ -2471,6 +2564,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
           keys: token.keys,
           locators: token.locators,
           suppressAuthorKeys: token.suppressAuthorKeys || undefined,
+          citationItems: token.citationItems,
           narrative: token.narrative,
           ...formatStack,
           href: currentHref
@@ -4701,7 +4795,7 @@ function noteRelsXml(
   return xml;
 }
 
-export function generateRPr(run: MdRun, extraRPr?: string): string {
+function generateRPrContents(run: MdRun, extraRPr?: string): string {
   const parts: string[] = [];
 
   if (run.code) parts.push('<w:rStyle w:val="CodeChar"/>');
@@ -4717,7 +4811,12 @@ export function generateRPr(run: MdRun, extraRPr?: string): string {
   else if (run.subscript) parts.push('<w:vertAlign w:val="subscript"/>');
   if (extraRPr) parts.push(extraRPr);
 
-  return parts.length > 0 ? '<w:rPr>' + parts.join('') + '</w:rPr>' : '';
+  return parts.join('');
+}
+
+export function generateRPr(run: MdRun, extraRPr?: string): string {
+  const contents = generateRPrContents(run, extraRPr);
+  return contents ? '<w:rPr>' + contents + '</w:rPr>' : '';
 }
 
 // Wrap text in <w:t>, adding xml:space="preserve" only when the text has
@@ -5124,7 +5223,8 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         }
       }
     } else if (run.type === 'citation') {
-      const result = generateCitation(run, bibEntries || new Map(), citeprocEngine, state.citationIds, state.citationItemIds, state.tableRunRPrExtra || undefined);
+      const citationRPr = generateRPrContents(run, state.tableRunRPrExtra || undefined);
+      const result = generateCitation(run, bibEntries || new Map(), citeprocEngine, state.citationIds, state.citationItemIds, citationRPr || undefined);
       xml += run.href
         ? '<w:hyperlink r:id="' + hyperlinkRelationshipId(run.href, state) + '">' + result.xml + '</w:hyperlink>'
         : result.xml;
@@ -5780,7 +5880,9 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
       // Auto-bold header cells to match Word's default table header styling.
       // Word applies bold to header rows via table styles; we reproduce that here.
       const cellRuns = row.header
-        ? cell.runs.map(r => r.type === 'text' && !r.bold ? { ...r, bold: true } : r)
+        ? cell.runs.map(r => (r.type === 'text' || r.type === 'citation') && !r.bold
+          ? { ...r, bold: true }
+          : r)
         : cell.runs;
       xml += generateRuns(cellRuns, state, options, bibEntries, citeprocEngine);
       xml += '</w:p></w:tc>';

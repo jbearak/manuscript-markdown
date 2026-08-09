@@ -1,6 +1,10 @@
+import MarkdownIt from 'markdown-it';
 import { BibtexEntry } from './bibtex-parser';
+import { parseBracketCitationItems, type CitationOccurrenceMetadata } from './citekey';
 import { latexToOmml } from './latex-to-omml';
 import { loadStyle, loadStyleAsync, loadLocale } from './csl-loader';
+
+const markdownUtils = new MarkdownIt().utils;
 
 export interface CiteprocName {
   family?: string;
@@ -127,10 +131,68 @@ function decodeHtmlEntities(text: string): string {
     .replace(/&amp;/g, '&');
 }
 
+// CT_RPr child order from the WordprocessingML schema. Word rewrites runs
+// whose properties are out of sequence, which marks an otherwise clean DOCX dirty.
+const RUN_PROPERTY_ORDER = [
+  'rStyle', 'rFonts', 'b', 'bCs', 'i', 'iCs', 'caps', 'smallCaps',
+  'strike', 'dstrike', 'outline', 'shadow', 'emboss', 'imprint', 'noProof',
+  'snapToGrid', 'vanish', 'webHidden', 'color', 'spacing', 'w', 'kern',
+  'position', 'sz', 'szCs', 'highlight', 'u', 'effect', 'bdr', 'shd',
+  'fitText', 'vertAlign', 'rtl', 'cs', 'em', 'lang', 'eastAsianLayout',
+  'specVanish', 'oMath', 'rPrChange',
+] as const;
+const RUN_PROPERTY_RANK = new Map<string, number>(
+  RUN_PROPERTY_ORDER.map((name, index) => [name, index]),
+);
+
+function mergeRunPropertyContents(
+  citeprocProperties: readonly string[],
+  extraRPr?: string,
+): string {
+  const firstSeen = new Map<string, number>();
+  const properties = new Map<string, string>();
+  const add = (xml: string) => {
+    const name = /^<w:([A-Za-z][A-Za-z0-9]*)\b/.exec(xml)?.[1];
+    if (!name) return;
+    if (!properties.has(name)) firstSeen.set(name, firstSeen.size);
+    // Authored properties are added last and override citeproc properties with
+    // the same CT_RPr child name.
+    properties.set(name, xml);
+  };
+  for (const property of citeprocProperties) add(property);
+  if (extraRPr) {
+    const propertyPattern = /<w:[A-Za-z][A-Za-z0-9]*\b[^>]*\/>/g;
+    let match: RegExpExecArray | null;
+    while ((match = propertyPattern.exec(extraRPr)) !== null) add(match[0]);
+  }
+  return [...properties]
+    .sort(([left], [right]) => {
+      const leftRank = RUN_PROPERTY_RANK.get(left) ?? Number.MAX_SAFE_INTEGER;
+      const rightRank = RUN_PROPERTY_RANK.get(right) ?? Number.MAX_SAFE_INTEGER;
+      return leftRank - rightRank
+        || (firstSeen.get(left) ?? 0) - (firstSeen.get(right) ?? 0);
+    })
+    .map(([, xml]) => xml)
+    .join('');
+}
+
+function plainTextToOoxmlRun(text: string, extraRPr?: string): string {
+  if (!text) return '';
+  const rPr = mergeRunPropertyContents([], extraRPr);
+  const rPrXml = rPr ? '<w:rPr>' + rPr + '</w:rPr>' : '';
+  const escaped = escapeXmlText(text);
+  const needsPreserve = escaped[0] === ' ' || escaped[escaped.length - 1] === ' ';
+  const wt = needsPreserve
+    ? '<w:t xml:space="preserve">' + escaped + '</w:t>'
+    : '<w:t>' + escaped + '</w:t>';
+  return '<w:r>' + rPrXml + wt + '</w:r>';
+}
+
 /**
- * Convert citeproc HTML output (e.g. `<i>1</i>`) to OOXML runs with
- * proper formatting.  Handles `<i>`, `<b>`, `<sup>`, `<sub>`, and
- * `<span style="...small-caps...">`.
+ * Convert trusted citeproc HTML output (e.g. `<i>1</i>`) to OOXML runs with
+ * proper formatting. Handles `<i>`, `<b>`, `<sup>`, `<sub>`, and
+ * `<span style="...small-caps...">`. Plain fallback or user-derived text must
+ * use plainTextToOoxmlRun so literal tag-shaped text is not interpreted here.
  */
 export function htmlToOoxmlRuns(html: string, extraRPr?: string): string {
   const runs: { text: string; italic: boolean; bold: boolean; sup: boolean; sub: boolean; smallCaps: boolean }[] = [];
@@ -188,15 +250,15 @@ export function htmlToOoxmlRuns(html: string, extraRPr?: string): string {
   }
 
   return runs.map(run => {
-    const rPr: string[] = [];
-    if (run.italic) rPr.push('<w:i/>');
-    if (run.bold) rPr.push('<w:b/>');
-    if (run.sup) rPr.push('<w:vertAlign w:val="superscript"/>');
-    if (run.sub) rPr.push('<w:vertAlign w:val="subscript"/>');
-    if (run.smallCaps) rPr.push('<w:smallCaps/>');
-    if (extraRPr) rPr.push(extraRPr);
+    const citeprocProperties: string[] = [];
+    if (run.italic) citeprocProperties.push('<w:i/>');
+    if (run.bold) citeprocProperties.push('<w:b/>');
+    if (run.sup) citeprocProperties.push('<w:vertAlign w:val="superscript"/>');
+    if (run.sub) citeprocProperties.push('<w:vertAlign w:val="subscript"/>');
+    if (run.smallCaps) citeprocProperties.push('<w:smallCaps/>');
+    const rPr = mergeRunPropertyContents(citeprocProperties, extraRPr);
 
-    const rPrXml = rPr.length > 0 ? '<w:rPr>' + rPr.join('') + '</w:rPr>' : '';
+    const rPrXml = rPr ? '<w:rPr>' + rPr + '</w:rPr>' : '';
     const escaped = escapeXmlText(decodeHtmlEntities(run.text));
     const needsPreserve = escaped.length > 0 && (escaped[0] === ' ' || escaped[escaped.length - 1] === ' ');
     const wt = needsPreserve ? '<w:t xml:space="preserve">' + escaped + '</w:t>' : '<w:t>' + escaped + '</w:t>';
@@ -312,25 +374,28 @@ function buildEngine(
  * Use a citeproc engine to render a citation cluster for the given keys/locators.
  * Returns the formatted citation text, or undefined if rendering fails.
  */
-export function renderCitationText(
+interface CitationOccurrence {
+  key: string;
+  locator?: string;
+  suppressAuthor: boolean;
+}
+
+function renderCitationOccurrences(
   engine: CiteprocEngine,
-  keys: string[],
-  locators?: Map<string, string>,
-  suppressAuthorKeys?: Set<string>,
+  occurrences: readonly CitationOccurrence[],
   mode?: 'composite',
 ): string | undefined {
   if (!engine || !CSL) return undefined;
 
   try {
-    const rawList = keys.map(key => {
-      const item: CiteprocCitationItem = { id: key };
-      const locator = locators?.get(key);
-      if (locator) {
-        const parsed = parseLocator(locator);
+    const rawList = occurrences.map(occurrence => {
+      const item: CiteprocCitationItem = { id: occurrence.key };
+      if (occurrence.locator) {
+        const parsed = parseLocator(occurrence.locator);
         item.locator = parsed.locator;
         item.label = parsed.label;
       }
-      if (suppressAuthorKeys?.has(key)) {
+      if (occurrence.suppressAuthor) {
         item['suppress-author'] = true;
       }
       return item;
@@ -346,6 +411,24 @@ export function renderCitationText(
   } catch {
     return undefined;
   }
+}
+
+export function renderCitationText(
+  engine: CiteprocEngine,
+  keys: string[],
+  locators?: Map<string, string>,
+  suppressAuthorKeys?: Set<string>,
+  mode?: 'composite',
+): string | undefined {
+  return renderCitationOccurrences(
+    engine,
+    keys.map(key => ({
+      key,
+      locator: locators?.get(key),
+      suppressAuthor: suppressAuthorKeys?.has(key) ?? false,
+    })),
+    mode,
+  );
 }
 
 /**
@@ -401,41 +484,73 @@ export function generateCitationId(usedIds?: Set<string>): string {
   }
 }
 
-function resolveVisibleText(
-  keys: string[],
+function generateFallbackTextForOccurrences(
+  occurrences: readonly CitationOccurrence[],
   entries: Map<string, BibtexEntry>,
-  locators: Map<string, string> | undefined,
-  citeprocEngine: CiteprocEngine | undefined,
-  suppressAuthorKeys?: Set<string>,
-  narrative?: boolean,
 ): string {
+  const parts = occurrences.map(occurrence => {
+    const entry = entries.get(occurrence.key);
+    if (!entry) return occurrence.key;
+
+    const author = entry.fields.get('author');
+    const year = entry.fields.get('year');
+    let text: string;
+    if (!occurrence.suppressAuthor && author) {
+      text = displayAuthorName(author);
+    } else if (occurrence.suppressAuthor) {
+      text = '';
+    } else {
+      text = entry.fields.get('institution') || occurrence.key;
+    }
+    if (year) text += (text ? ' ' : '') + year;
+    if (occurrence.locator) text += ', ' + markdownUtils.unescapeMd(occurrence.locator);
+    return text;
+  });
+  return '(' + parts.join('; ') + ')';
+}
+
+interface ResolvedCitationText {
+  text: string;
+  trustedHtml: boolean;
+}
+
+function resolveVisibleText(
+  occurrences: readonly CitationOccurrence[],
+  entries: Map<string, BibtexEntry>,
+  citeprocEngine: CiteprocEngine | undefined,
+  narrative?: boolean,
+): ResolvedCitationText {
   if (citeprocEngine) {
-    const rendered = renderCitationText(
+    const rendered = renderCitationOccurrences(
       citeprocEngine,
-      keys,
-      locators,
-      suppressAuthorKeys,
+      occurrences,
       narrative ? 'composite' : undefined,
     );
-    if (rendered) return rendered;
+    if (rendered) return { text: rendered, trustedHtml: true };
   }
-  return narrative
-    ? generateNarrativeFallbackText(keys[0], entries, locators?.get(keys[0]))
-    : generateFallbackText(keys, entries, locators, suppressAuthorKeys);
+  return {
+    text: narrative
+      ? generateNarrativeFallbackText(
+          occurrences[0].key,
+          entries,
+          occurrences[0].locator,
+        )
+      : generateFallbackTextForOccurrences(occurrences, entries),
+    trustedHtml: false,
+  };
 }
 
 function buildCitationFieldCode(
-  keys: string[],
+  occurrences: readonly CitationOccurrence[],
   entries: Map<string, BibtexEntry>,
-  locators: Map<string, string> | undefined,
   citeprocEngine: CiteprocEngine | undefined,
   visibleTextOverride?: string,
   usedCitationIds?: Set<string>,
   itemIdMap?: Map<string, string | number>,
-  suppressAuthorKeys?: Set<string>,
   extraRPr?: string,
   narrative?: boolean,
 ): CitationResult {
+  const keys = occurrences.map(occurrence => occurrence.key);
   // Resolve visible text first so we can populate properties (Defect 2).
   // Composite mode is preferred, but citeproc emits [NO_PRINTED_FORM] for
   // styles whose citation layout cannot render an author-only component (for
@@ -443,29 +558,34 @@ function buildCitationFieldCode(
   // normal suppress-author field rather than storing a composite field that
   // Zotero would refresh to an error placeholder.
   let fieldNarrative = narrative ?? false;
-  let fieldSuppressAuthorKeys = suppressAuthorKeys;
+  let fieldOccurrences = [...occurrences];
   let literalAuthorPrefix = '';
-  let visibleText: string;
+  let visible: ResolvedCitationText;
   if (visibleTextOverride !== undefined) {
-    visibleText = visibleTextOverride;
+    visible = { text: visibleTextOverride, trustedHtml: false };
   } else if (fieldNarrative) {
     const compositeText = citeprocEngine
-      ? renderCitationText(citeprocEngine, keys, locators, suppressAuthorKeys, 'composite')
+      ? renderCitationOccurrences(citeprocEngine, occurrences, 'composite')
       : undefined;
     if (compositeText && !/\[(?:NO_PRINTED_FORM|CSL STYLE ERROR:)/.test(compositeText)) {
-      visibleText = compositeText;
+      visible = { text: compositeText, trustedHtml: true };
     } else {
       fieldNarrative = false;
-      fieldSuppressAuthorKeys = new Set([...(suppressAuthorKeys ?? []), ...keys]);
+      fieldOccurrences = occurrences.map(occurrence => ({
+        ...occurrence,
+        suppressAuthor: true,
+      }));
       literalAuthorPrefix = generateNarrativeAuthorText(keys[0], entries).replace(/\s+/g, ' ').trim() + ' ';
-      visibleText = resolveVisibleText(keys, entries, locators, citeprocEngine, fieldSuppressAuthorKeys);
+      visible = resolveVisibleText(fieldOccurrences, entries, citeprocEngine);
     }
   } else {
-    visibleText = resolveVisibleText(keys, entries, locators, citeprocEngine, suppressAuthorKeys);
+    visible = resolveVisibleText(occurrences, entries, citeprocEngine);
   }
+  const visibleText = visible.text;
 
   const citationItems: CiteprocCitationItem[] = [];
-  for (const key of keys) {
+  for (const occurrence of fieldOccurrences) {
+    const key = occurrence.key;
     const entry = entries.get(key);
     if (!entry) continue;
     const itemData = buildItemData(entry);
@@ -490,7 +610,7 @@ function buildCitationFieldCode(
     }
 
     const citationItem: CiteprocCitationItem = { id: itemData.id, itemData };
-    if (fieldSuppressAuthorKeys?.has(key)) {
+    if (occurrence.suppressAuthor) {
       citationItem['suppress-author'] = true;
     }
     if (entry.zoteroUri) {
@@ -501,9 +621,8 @@ function buildCitationFieldCode(
       // embedded/local URI shape to force graceful fallback to embedded itemData.
       citationItem.uris = ['http://zotero.org/users/local/embedded/items/' + key];
     }
-    const locator = locators?.get(key);
-    if (locator) {
-      const parsed = parseLocator(locator);
+    if (occurrence.locator) {
+      const parsed = parseLocator(occurrence.locator);
       citationItem.locator = parsed.locator;
       citationItem.label = parsed.label;
     }
@@ -516,7 +635,7 @@ function buildCitationFieldCode(
     citationID: citationId,                                             // Defect 1
     properties: {
       formattedCitation: visibleText,                                   // Defect 2
-      plainCitation: stripHtmlTags(visibleText),                        // Defect 2
+      plainCitation: visible.trustedHtml ? stripHtmlTags(visibleText) : visibleText, // Defect 2
       noteIndex: 0,
       ...(fieldNarrative ? { mode: 'composite' as const } : {}),
     },
@@ -525,11 +644,14 @@ function buildCitationFieldCode(
   };
   const json = JSON.stringify(cslCitation);
 
-  const xml = (literalAuthorPrefix ? htmlToOoxmlRuns(literalAuthorPrefix, extraRPr) : '') +
+  const visibleRuns = visible.trustedHtml
+    ? htmlToOoxmlRuns(visibleText, extraRPr)
+    : plainTextToOoxmlRun(visibleText, extraRPr);
+  const xml = plainTextToOoxmlRun(literalAuthorPrefix, extraRPr) +
     '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
     '<w:r><w:instrText xml:space="preserve"> ADDIN ZOTERO_ITEM CSL_CITATION ' + escapeXml(json) + ' </w:instrText></w:r>' +
     '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
-    htmlToOoxmlRuns(visibleText, extraRPr) +
+    visibleRuns +
     '<w:r><w:fldChar w:fldCharType="end"/></w:r>';
   const narrativeOrigin = narrative && literalAuthorPrefix && keys.length === 1
     ? { citationId, citationKey: keys[0], literalPrefix: literalAuthorPrefix }
@@ -537,63 +659,141 @@ function buildCitationFieldCode(
   return { xml, ...(narrativeOrigin ? { narrativeOrigin } : {}) };
 }
 
+function citationOccurrencesForRun(
+  run: {
+    keys: string[];
+    locators?: Map<string, string>;
+    text: string;
+    suppressAuthorKeys?: Set<string>;
+    citationItems?: readonly CitationOccurrenceMetadata[];
+    narrative?: boolean;
+  },
+): CitationOccurrence[] {
+  if (
+    run.citationItems?.length === run.keys.length
+    && run.citationItems.every((item, index) => item.key === run.keys[index])
+  ) {
+    return run.citationItems.map(item => ({ ...item }));
+  }
+  if (!run.narrative) {
+    const source = run.text.startsWith('-@')
+      ? '[' + run.text + ']'
+      : '[@' + run.text + ']';
+    const parsed = parseBracketCitationItems(source, 0, source.length);
+    if (
+      parsed.length === run.keys.length
+      && parsed.every((item, index) => item.key === run.keys[index])
+    ) {
+      const useLegacyMetadata = new Set(run.keys).size === run.keys.length;
+      return parsed.map(item => ({
+        key: item.key,
+        locator: useLegacyMetadata
+          ? run.locators?.get(item.key) ?? item.locator
+          : item.locator,
+        suppressAuthor: item.suppressAuthor
+          || (
+            useLegacyMetadata
+            && (run.suppressAuthorKeys?.has(item.key) ?? false)
+          ),
+      }));
+    }
+  }
+  return run.keys.map(key => ({
+    key,
+    locator: run.locators?.get(key),
+    suppressAuthor: run.suppressAuthorKeys?.has(key) ?? false,
+  }));
+}
+
+function citationOccurrenceText(occurrence: CitationOccurrence): string {
+  return (occurrence.suppressAuthor ? '-@' : '@')
+    + occurrence.key
+    + (occurrence.locator ? ', ' + occurrence.locator : '');
+}
+
 export function generateCitation(
-  run: { keys?: string[]; locators?: Map<string, string>; text: string; suppressAuthorKeys?: Set<string>; narrative?: boolean },
+  run: { keys?: string[]; locators?: Map<string, string>; text: string; suppressAuthorKeys?: Set<string>; citationItems?: readonly CitationOccurrenceMetadata[]; citationSource?: string; narrative?: boolean },
   entries: Map<string, BibtexEntry>,
   citeprocEngine?: CiteprocEngine,
   usedCitationIds?: Set<string>,
   itemIdMap?: Map<string, string | number>,
   extraRPr?: string
 ): CitationResult {
-  const rPrOpen = extraRPr ? '<w:rPr>' + extraRPr + '</w:rPr>' : '';
   if (!run.keys || run.keys.length === 0) {
-    return { xml: '<w:r>' + rPrOpen + '<w:t>[@' + escapeXml(run.text) + ']</w:t></w:r>' };
+    return { xml: plainTextToOoxmlRun('[@' + run.text + ']', extraRPr) };
   }
 
-  // Classify keys into resolved (have bib data) vs missing
-  const resolvedKeys: string[] = [];
-  const missingKeys: string[] = [];
-  const warnings: string[] = [];
+  const occurrences = citationOccurrencesForRun({ ...run, keys: run.keys });
+  const missing = occurrences.filter(occurrence => !entries.has(occurrence.key));
+  const warnings = missing.map(
+    occurrence => `Citation key not found: ${occurrence.key}`,
+  );
+  const missingKeys = missing.map(occurrence => occurrence.key);
 
-  for (const key of run.keys) {
-    const entry = entries.get(key);
-    if (!entry) {
-      missingKeys.push(key);
-      warnings.push(`Citation key not found: ${key}`);
-    } else {
-      resolvedKeys.push(key);
-    }
+  if (missing.length === 0) {
+    return buildCitationFieldCode(
+      occurrences,
+      entries,
+      citeprocEngine,
+      undefined,
+      usedCitationIds,
+      itemIdMap,
+      extraRPr,
+      run.narrative,
+    );
   }
 
-  // All resolved — emit field code (works for both Zotero and non-Zotero entries)
-  if (resolvedKeys.length > 0 && missingKeys.length === 0) {
-    return buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine, undefined, usedCitationIds, itemIdMap, run.suppressAuthorKeys, extraRPr, run.narrative);
-  }
-
-  const missingText = run.narrative
-    ? '@' + missingKeys[0]
-    : '[' + missingKeys.map(k => (run.suppressAuthorKeys?.has(k) ? '-@' : '@') + k).join('; ') + ']';
-
-  // Pure missing — emit @citekey references as plain text, preserving authored form.
-  if (resolvedKeys.length === 0) {
+  if (missing.length === occurrences.length) {
+    const missingText = !run.narrative && run.citationSource !== undefined
+      ? run.citationSource
+      : run.narrative
+        ? '@' + run.text
+        : '[' + (run.text.startsWith('-@') ? run.text : '@' + run.text) + ']';
     return {
-      xml: '<w:r>' + rPrOpen + '<w:t>' + escapeXml(missingText) + '</w:t></w:r>',
-      warning: warnings.length > 0 ? warnings.join('; ') : undefined,
-      missingKeys
+      xml: plainTextToOoxmlRun(missingText, extraRPr),
+      warning: warnings.join('; '),
+      missingKeys,
     };
   }
 
-  // Mixed (some resolved, some missing) — resolved get field code, missing get plain text
-  const field = buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine, undefined, usedCitationIds, itemIdMap, run.suppressAuthorKeys, extraRPr, run.narrative);
-  const xml = field.xml +
-    '<w:r>' + rPrOpen + '<w:t xml:space="preserve"> </w:t></w:r>' +
-    '<w:r>' + rPrOpen + '<w:t>' + escapeXml(missingText) + '</w:t></w:r>';
+  const segments: Array<{
+    resolved: boolean;
+    occurrences: CitationOccurrence[];
+  }> = [];
+  for (const occurrence of occurrences) {
+    const resolved = entries.has(occurrence.key);
+    const previous = segments[segments.length - 1];
+    if (previous?.resolved === resolved) previous.occurrences.push(occurrence);
+    else segments.push({ resolved, occurrences: [occurrence] });
+  }
+
+  let narrativeOrigin: NarrativeCitationOrigin | undefined;
+  const parts = segments.map(segment => {
+    if (!segment.resolved) {
+      return plainTextToOoxmlRun(
+        '[' + segment.occurrences.map(citationOccurrenceText).join('; ') + ']',
+        extraRPr,
+      );
+    }
+    const field = buildCitationFieldCode(
+      segment.occurrences,
+      entries,
+      citeprocEngine,
+      undefined,
+      usedCitationIds,
+      itemIdMap,
+      extraRPr,
+      false,
+    );
+    narrativeOrigin ??= field.narrativeOrigin;
+    return field.xml;
+  });
 
   return {
-    xml,
+    xml: parts.join(plainTextToOoxmlRun(' ', extraRPr)),
     warning: warnings.join('; '),
     missingKeys,
-    ...(field.narrativeOrigin ? { narrativeOrigin: field.narrativeOrigin } : {}),
+    ...(narrativeOrigin ? { narrativeOrigin } : {}),
   };
 }
 
@@ -740,7 +940,7 @@ export function parseAuthors(authorString: string): CiteprocName[] {
 }
 
 function parseLocator(locator: string): { locator: string; label: string } {
-  const trimmed = locator.trim();
+  const trimmed = markdownUtils.unescapeMd(locator).trim();
   if (trimmed.startsWith('p.') || trimmed.startsWith('pp.')) {
     const pageMatch = trimmed.match(/^pp?\.\s*(.+)$/);
     if (pageMatch) {
@@ -785,7 +985,7 @@ export function generateNarrativeFallbackText(
   const name = generateNarrativeAuthorText(key, entries);
   const year = entry.fields.get('year');
   let text = name + (year ? ' (' + year + ')' : '');
-  if (locator) text += ', ' + locator;
+  if (locator) text += ', ' + markdownUtils.unescapeMd(locator);
   return text;
 }
 
@@ -813,7 +1013,7 @@ export function generateFallbackText(keys: string[], entries: Map<string, Bibtex
     if (year) text += (text ? ' ' : '') + year;
 
     const locator = locators?.get(key);
-    if (locator) text += ', ' + locator;
+    if (locator) text += ', ' + markdownUtils.unescapeMd(locator);
 
     return text;
   });

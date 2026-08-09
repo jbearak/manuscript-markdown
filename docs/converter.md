@@ -143,7 +143,7 @@ Configurable via `manuscriptMarkdown.citationKeyFormat`:
 |--------|---------|-------------|
 | `authorYearTitle` (default) | `smith2020effects` | Author surname + year + first title word |
 | `authorYear` | `smith2020` | Author surname + year |
-| `numeric` | `1`, `2`, `3` | Sequential numbers in extracted citation-item order; stored citation keys are ignored |
+| `numeric` | `1`, `2`, `3` | Assigns new sequential keys in citation-item order, replacing any citation keys embedded in the DOCX |
 
 ## Usage
 

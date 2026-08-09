@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { generateCitation, generateCitationId, generateMathXml, escapeXml, generateMissingKeysXml, htmlToOoxmlRuns, generateFallbackText } from './md-to-docx-citations';
+import { generateCitation, generateCitationId, generateMathXml, escapeXml, generateMissingKeysXml, htmlToOoxmlRuns, generateFallbackText, type CiteprocEngine } from './md-to-docx-citations';
 import { BibtexEntry } from './bibtex-parser';
 import { scanCitationDocument } from './citation-scanner';
 import { parseMd, type MdRun } from './md-to-docx';
@@ -8,7 +8,7 @@ import { parseMd, type MdRun } from './md-to-docx';
 function extractCsl(xml: string) {
   const m = xml.match(/CSL_CITATION (.+?) <\/w:instrText>/);
   if (!m) return undefined;
-  return JSON.parse(m[1].replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>'));
+  return JSON.parse(m[1].replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'));
 }
 
 describe('generateCitation', () => {
@@ -109,6 +109,162 @@ describe('generateCitation', () => {
     expect(result.xml).toContain('(Smith 2020, p. 20)');
   });
 
+  it('unescapes Markdown punctuation in locator metadata', () => {
+    const entries = new Map<string, BibtexEntry>();
+    entries.set('smith2020', {
+      type: 'article',
+      key: 'smith2020',
+      fields: new Map([
+        ['author', 'Smith, John'],
+        ['year', '2020'],
+      ]),
+    });
+
+    const result = generateCitation({
+      keys: ['smith2020'],
+      text: 'smith2020, p. A\\|B',
+      locators: new Map([['smith2020', 'p. A\\|B']]),
+    }, entries);
+    expect(extractCsl(result.xml).citationItems[0]).toMatchObject({
+      locator: 'A|B',
+      label: 'page',
+    });
+    expect(result.xml).toContain('(Smith 2020, p. A|B)');
+  });
+
+  it('keeps per-occurrence metadata for repeated citation keys', () => {
+    const entries = new Map<string, BibtexEntry>();
+    entries.set('smith2020', {
+      type: 'article',
+      key: 'smith2020',
+      fields: new Map([
+        ['author', 'Smith, John'],
+        ['year', '2020'],
+      ]),
+    });
+
+    const run = {
+      keys: ['smith2020', 'smith2020'],
+      text: 'smith2020, p. 1; <em>-@smith2020, p. 2</em>',
+      locators: new Map([['smith2020', 'p. 2']]),
+      suppressAuthorKeys: new Set(['smith2020']),
+      citationItems: [
+        { key: 'smith2020', locator: 'p. 1', suppressAuthor: false },
+        { key: 'smith2020', locator: 'p. 2', suppressAuthor: true },
+      ],
+    };
+    const result = generateCitation(run, entries);
+    const csl = extractCsl(result.xml);
+
+    expect(csl.citationItems).toHaveLength(2);
+    expect(csl.citationItems[0]).toMatchObject({
+      locator: '1',
+      label: 'page',
+    });
+    expect(csl.citationItems[0]['suppress-author']).toBeUndefined();
+    expect(csl.citationItems[1]).toMatchObject({
+      locator: '2',
+      label: 'page',
+      'suppress-author': true,
+    });
+    expect(csl.properties.formattedCitation).toBe(
+      '(Smith 2020, p. 1; 2020, p. 2)',
+    );
+  });
+
+  it('prefers scanner-cleaned locator metadata over raw Markdown markup', () => {
+    const entries = new Map<string, BibtexEntry>([[
+      'smith2020',
+      {
+        type: 'article',
+        key: 'smith2020',
+        fields: new Map([
+          ['author', 'Smith, John'],
+          ['year', '2020'],
+        ]),
+      },
+    ]]);
+    const result = generateCitation({
+      keys: ['smith2020'],
+      text: 'smith2020, p. <em>2</em> and <!-- note -->3',
+      locators: new Map([['smith2020', 'p. 2 and 3']]),
+    }, entries);
+    expect(extractCsl(result.xml).citationItems[0]).toMatchObject({
+      locator: '2 and 3',
+      label: 'page',
+    });
+  });
+
+  it('keeps entity-derived tag and comment shapes literal in citeproc output', () => {
+    const entries = new Map<string, BibtexEntry>([[
+      'smith2020',
+      {
+        type: 'article',
+        key: 'smith2020',
+        fields: new Map([
+          ['author', 'Smith, John'],
+          ['year', '2020'],
+        ]),
+      },
+    ]]);
+    const rendered = '(Smith 2020, &lt;em&gt;2&lt;/em&gt; &lt;!-- note --&gt;)';
+    const engine: CiteprocEngine = {
+      makeCitationCluster: () => rendered,
+      previewCitationCluster: () => rendered,
+      makeBibliography: () => false,
+      updateItems: () => undefined,
+    };
+    const result = generateCitation({
+      keys: ['smith2020'],
+      text: 'smith2020',
+    }, entries, engine);
+    const csl = extractCsl(result.xml);
+    const visibleResult = result.xml
+      .split('<w:r><w:fldChar w:fldCharType="separate"/></w:r>')[1]
+      .split('<w:r><w:fldChar w:fldCharType="end"/></w:r>')[0];
+
+    expect(csl.properties.formattedCitation).toBe(rendered);
+    expect(csl.properties.plainCitation).toBe(
+      '(Smith 2020, <em>2</em> <!-- note -->)',
+    );
+    expect(visibleResult).toContain(
+      '<w:t>(Smith 2020, &lt;em&gt;2&lt;/em&gt; &lt;!-- note --&gt;)</w:t>',
+    );
+    expect(visibleResult).not.toContain('<w:i/>');
+  });
+
+  it('keeps literal tag and comment shapes in plain fallback text', () => {
+    const entries = new Map<string, BibtexEntry>([[
+      'smith2020',
+      {
+        type: 'article',
+        key: 'smith2020',
+        fields: new Map([
+          ['author', 'Smith, John'],
+          ['year', '2020'],
+        ]),
+      },
+    ]]);
+    const locator = 'p. <em>2</em> <!-- note -->';
+    const visibleText = '(Smith 2020, ' + locator + ')';
+    const result = generateCitation({
+      keys: ['smith2020'],
+      text: 'smith2020, ' + locator,
+      locators: new Map([['smith2020', locator]]),
+    }, entries);
+    const csl = extractCsl(result.xml);
+    const visibleResult = result.xml
+      .split('<w:r><w:fldChar w:fldCharType="separate"/></w:r>')[1]
+      .split('<w:r><w:fldChar w:fldCharType="end"/></w:r>')[0];
+
+    expect(csl.properties.formattedCitation).toBe(visibleText);
+    expect(csl.properties.plainCitation).toBe(visibleText);
+    expect(visibleResult).toContain(
+      '<w:t>(Smith 2020, p. &lt;em&gt;2&lt;/em&gt; &lt;!-- note --&gt;)</w:t>',
+    );
+    expect(visibleResult).not.toContain('<w:i/>');
+  });
+
   it('produces single field code with multiple keys', () => {
     const entries = new Map<string, BibtexEntry>();
     entries.set('smith2020', {
@@ -190,6 +346,30 @@ describe('generateCitation', () => {
     expect(result.xml).toContain('[@missingKey]');
     expect(result.missingKeys).toEqual(['missingKey']);
     expect(result.warning).toContain('Citation key not found: missingKey');
+  });
+
+  it('preserves authored order when a missing item precedes a resolved item', () => {
+    const entries = new Map<string, BibtexEntry>([[
+      'smith2020',
+      {
+        type: 'article',
+        key: 'smith2020',
+        fields: new Map([['author', 'Smith, John'], ['year', '2020']]),
+      },
+    ]]);
+    const result = generateCitation({
+      keys: ['missingKey', 'smith2020'],
+      text: 'missingKey; @smith2020',
+      citationItems: [
+        { key: 'missingKey', suppressAuthor: false },
+        { key: 'smith2020', suppressAuthor: false },
+      ],
+    }, entries);
+
+    expect(result.xml.indexOf('<w:t>[@missingKey]</w:t>')).toBeLessThan(
+      result.xml.indexOf('ZOTERO_ITEM CSL_CITATION'),
+    );
+    expect(result.missingKeys).toEqual(['missingKey']);
   });
 
   it('splits group with resolved and missing keys', () => {
@@ -365,6 +545,63 @@ describe('generateCitation', () => {
     expect(result.missingKeys).toEqual(['unknown']);
   });
 
+  it('uses the exact authored source for markup-split all-missing fallback', () => {
+    for (const [citationSource, suppressAuthor] of [
+      ['[<em>@missing</em>]', false],
+      ['[<em>-@missing</em>]', true],
+      ['[-<em>@missing</em>]', true],
+    ] as const) {
+      const result = generateCitation({
+        keys: ['missing'],
+        text: suppressAuthor ? '-@missing' : 'missing',
+        citationItems: [{ key: 'missing', suppressAuthor }],
+        citationSource,
+      }, new Map());
+      expect(result.xml).toBe(
+        '<w:r><w:t>' + escapeXml(citationSource) + '</w:t></w:r>',
+      );
+      expect(result.xml).not.toContain('[@em&gt;');
+    }
+  });
+
+  it('preserves locators in missing citation text', () => {
+    const pureMissing = generateCitation({
+      keys: ['missing'],
+      text: 'missing, p. 7',
+      locators: new Map([['missing', 'p. 7']]),
+    }, new Map());
+    expect(pureMissing.xml).toBe(
+      '<w:r><w:t>[@missing, p. 7]</w:t></w:r>',
+    );
+
+    const quotedMissing = generateCitation({
+      keys: ['absent'],
+      text: 'absent, "chapter 1"',
+    }, new Map());
+    expect(quotedMissing.xml).toBe(
+      '<w:r><w:t>[@absent, "chapter 1"]</w:t></w:r>',
+    );
+    expect(quotedMissing.xml).not.toContain('&quot;');
+
+    const entries = new Map<string, BibtexEntry>([[
+      'smith2020',
+      {
+        type: 'article',
+        key: 'smith2020',
+        fields: new Map([
+          ['author', 'Smith, John'],
+          ['year', '2020'],
+        ]),
+      },
+    ]]);
+    const mixed = generateCitation({
+      keys: ['smith2020', 'missing'],
+      text: 'smith2020, p. 1; -@missing, p. 7',
+    }, entries);
+    expect(mixed.xml).toContain('[-@missing, p. 7]');
+    expect(mixed.missingKeys).toEqual(['missing']);
+  });
+
   it('generates unique citationIDs across multiple calls with shared set', () => {
     const entries = new Map<string, BibtexEntry>();
     entries.set('smith2020', {
@@ -538,6 +775,50 @@ describe('htmlToOoxmlRuns', () => {
     expect(result).toContain('<w:vertAlign w:val="superscript"/>');
     expect(result).toContain('<w:t>text</w:t>');
   });
+
+  it('deduplicates authored and citeproc run properties', () => {
+    const result = htmlToOoxmlRuns(
+      '<i>text</i>',
+      '<w:i/><w:b/>',
+    );
+    expect(result.match(/<w:i\/>/g)).toHaveLength(1);
+    expect(result).toContain('<w:b/>');
+  });
+
+  it('lets authored run properties override citeproc properties', () => {
+    const result = htmlToOoxmlRuns(
+      '<sup>text</sup>',
+      '<w:vertAlign w:val="subscript"/>',
+    );
+    expect(result).not.toContain('w:val="superscript"');
+    expect(result.match(/<w:vertAlign\b/g)).toHaveLength(1);
+    expect(result).toContain('<w:vertAlign w:val="subscript"/>');
+  });
+
+  it('serializes merged run properties in canonical CT_RPr order', () => {
+    const result = htmlToOoxmlRuns(
+      '<i><sup>text</sup></i>',
+      '<w:shd w:val="clear"/>'
+        + '<w:sz w:val="20"/>'
+        + '<w:color w:val="112233"/>'
+        + '<w:vertAlign w:val="subscript"/>'
+        + '<w:i w:val="0"/>'
+        + '<w:rFonts w:ascii="Aptos"/>'
+        + '<w:b/>',
+    );
+
+    expect(result).toBe(
+      '<w:r><w:rPr>'
+        + '<w:rFonts w:ascii="Aptos"/>'
+        + '<w:b/>'
+        + '<w:i w:val="0"/>'
+        + '<w:color w:val="112233"/>'
+        + '<w:sz w:val="20"/>'
+        + '<w:shd w:val="clear"/>'
+        + '<w:vertAlign w:val="subscript"/>'
+        + '</w:rPr><w:t>text</w:t></w:r>',
+    );
+  });
 });
 
 describe('per-item suppress-author', () => {
@@ -702,6 +983,27 @@ describe('parseMd per-item suppress-author', () => {
       const exporterKeys = findCitationRun(parseMd(markdown))?.keys ?? [];
       expect(scannerKeys).toEqual(expected);
       expect(exporterKeys).toEqual(scannerKeys);
+    }
+  });
+
+  it('exports visible citation syntax from malformed definitions and rejected links', () => {
+    for (const markdown of [
+      '[@alpha]:',
+      '[@alpha]: <unclosed',
+      '[@alpha](javascript:alert(1))',
+      '![@alpha](javascript:alert(1))',
+    ]) {
+      const scannerKeys = scanCitationDocument(markdown).usages.map(usage => usage.key);
+      const exporterKeys = findCitationRun(parseMd(markdown))?.keys ?? [];
+      expect(scannerKeys).toEqual(['alpha']);
+      expect(exporterKeys).toEqual(scannerKeys);
+    }
+  });
+
+  it('keeps HTML script, style, and code contents citation-inert', () => {
+    for (const tag of ['script', 'style', 'code']) {
+      const markdown = '<' + tag + '>@hidden</' + tag + '>\n\n@visible';
+      expect(findCitationRun(parseMd(markdown))?.keys).toEqual(['visible']);
     }
   });
 

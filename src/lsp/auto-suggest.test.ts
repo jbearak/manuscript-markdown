@@ -27,6 +27,12 @@ describe('shouldAutoTriggerLspSuggest frontmatter policy', () => {
 		expect(shouldTrigger('---\n', 4, '\n')).toBe(true);
 	});
 
+	test('does not treat an EOF thematic break as unfinished frontmatter', () => {
+		for (const text of ['---', '--- ', '--- \t', '\n--- \t']) {
+			expect(shouldTrigger(text)).toBe(false);
+		}
+	});
+
 	test('lets an unfinished first-line list filter without retriggering', () => {
 		expect(shouldTrigger('---\nt', 5, 't')).toBe(false);
 		expect(shouldTrigger('---\ntitl', 8, 'l')).toBe(false);
@@ -107,12 +113,114 @@ describe('shouldAutoTriggerLspSuggest frontmatter policy', () => {
 		}
 	});
 
-	test('keeps unfinished-frontmatter popup through EOF once a mapping establishes YAML', () => {
+	test('does not let a later mapping reclassify preceding body prose', () => {
+		for (const prefix of ['Introduction\n\n', '  indented prose\n', 'https://example.com\n']) {
+			const text = '---\n' + prefix + 'colors:';
+			expect(shouldTrigger(text, text.length, ':')).toBe(false);
+		}
+	});
+
+	test('does not treat time or URL-port colons as provisional mappings', () => {
+		for (const text of [
+			'---\nBody discussion at 12:30 cites @s',
+			'---\nSee https://example.test:8080 and cite @s',
+		]) {
+			expect(shouldTrigger(text, text.length, 's')).toBe(true);
+		}
+	});
+
+	test('bounds unresolved thematic-break checks in large documents', () => {
+		for (const text of [
+			'---\nBody paragraph.\n' + 'more prose\n'.repeat(20_000) + 'x',
+			'---\ntitle: The Story\n' + 'more prose\n'.repeat(20_000) + 'x',
+			'---\nbib: refs.bib\n' + 'more prose\n'.repeat(20_000) + 'x',
+			'---\n' + '# Heading\n'.repeat(20_000) + 'x',
+			'---\n' + 'Speaker: prose\n'.repeat(20_000) + 'x',
+		]) {
+			const started = performance.now();
+			expect(shouldTrigger(text, text.length, 'x')).toBe(false);
+			expect(performance.now() - started).toBeLessThan(250);
+		}
+	});
+
+	test('keeps unfinished-frontmatter popup through EOF once a known mapping establishes YAML', () => {
 		for (const text of [
 			'---\n# Document metadata\ntitle: Draft\n\n',
+			'---\nbib: refs.bib\n\n',
 			'---\ntitle: Draft\nmalformed prose still in YAML\n\n',
+			'---\ndate: 2026-08-08\ntitle: Draft\n\n',
+			'---\r\ndate: 2026-08-08\r\ntitle: Draft\r\n\r\n',
 		]) {
-			expect(shouldTrigger(text, text.length, '\n')).toBe(true);
+			expect(shouldTrigger(text, text.length, text.includes('\r\n') ? '\r\n' : '\n')).toBe(true);
+		}
+	});
+
+	test('recognizes known mappings at a consistently indented root', () => {
+		const text = '---\n  font: Georgia\n  aut';
+		expect(shouldTrigger(text, text.length, 't')).toBe(true);
+	});
+
+	test('recognizes quoted known mappings in unfinished frontmatter', () => {
+		for (const text of [
+			'---\n"font": Geo',
+			"---\n'font': Geo",
+			'---\n"f\\u006fnt": Geo',
+		]) {
+			expect(shouldTrigger(text)).toBe(true);
+		}
+	});
+
+	test('lets a known key establish YAML after custom mappings', () => {
+		for (const eol of ['\n', '\r\n']) {
+			for (const { lines, changeText } of [
+				{
+					lines: ['---', 'custom:', '  nested: value', 'table-borders:'],
+					changeText: ':',
+				},
+				{
+					lines: ['---', 'custom/path: value', 'csl: ap'],
+					changeText: 'p',
+				},
+			]) {
+				const text = lines.join(eol);
+				expect(shouldTrigger(text, text.length, changeText)).toBe(true);
+			}
+		}
+	});
+
+	test('does not let an unknown prose label establish unfinished frontmatter', () => {
+		for (const eol of ['\n', '\r\n']) {
+			const text = ['---', 'Note: prose', 'Body paragraph.', ''].join(eol);
+			expect(shouldTrigger(text, text.length, eol)).toBe(false);
+		}
+	});
+
+	test('uses a closing delimiter to disambiguate comments and custom mappings', () => {
+		const cases = [
+			{
+				text: '---\n# Document metadata\n\n---\n',
+				marker: '# Document metadata\n',
+				changeText: '\n',
+			},
+			{
+				text: '---\ndate: 2026-08-08\ncolors:\n---\n',
+				marker: 'colors:',
+				changeText: ':',
+			},
+			{
+				text: '---\nabstract:\n  text: Draft abstract\ntable-borders:\n---\n',
+				marker: 'table-borders:',
+				changeText: ':',
+			},
+			{
+				text: '---\ncustom/path: value\ncsl: ap\n---\n',
+				marker: 'csl: ap',
+				changeText: 'p',
+			},
+		];
+		for (const { text, marker, changeText } of cases) {
+			const offset = text.indexOf(marker) + marker.length;
+			expect(shouldTrigger(text, offset, changeText)).toBe(true);
 		}
 	});
 

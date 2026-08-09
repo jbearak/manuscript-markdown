@@ -9,11 +9,12 @@ import {
   type TableDigitGrouping,
 } from './table-number-format';
 import {
+  createNociteContinuationState,
   isCitekey,
   isNociteContinuationLine,
   isTopLevelFrontmatterMappingLine,
-  nociteValueMode,
   parseNociteRaw,
+  yamlValueBeforeComment,
   type NociteValue,
 } from './citekey';
 
@@ -85,7 +86,7 @@ function serializeYamlMappingKey(value: string): string {
     : scalar;
 }
 
-function findYamlMappingColon(line: string): number {
+export function findYamlMappingColon(line: string): number {
   let quote: '"' | "'" | undefined;
   for (let i = 0; i < line.length; i++) {
     const char = line[i];
@@ -184,6 +185,45 @@ export function parseInlineArray(value: string): string[] {
   return parts.map(parseYamlStringScalar).filter(s => s.length > 0);
 }
 
+export interface FrontmatterNumberConstraints {
+  minimum?: number;
+  exclusiveMinimum?: boolean;
+  integer?: boolean;
+}
+
+/** Parse a complete decimal scalar using the same constraints as frontmatter diagnostics. */
+export function parseFrontmatterNumber(
+  value: string,
+  constraints: FrontmatterNumberConstraints = {},
+): number | undefined {
+  const trimmed = value.trim();
+  const pattern = constraints.integer
+    ? /^-?(?:0|[1-9]\d*)$/
+    : /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+  if (!pattern.test(trimmed)) return undefined;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed)) return undefined;
+  if (constraints.integer && !Number.isInteger(parsed)) return undefined;
+  if (constraints.minimum !== undefined) {
+    const outsideRange = constraints.exclusiveMinimum
+      ? parsed <= constraints.minimum
+      : parsed < constraints.minimum;
+    if (outsideRange) return undefined;
+  }
+  return parsed;
+}
+
+/** Parse every non-empty item in a numeric scalar or inline array. */
+export function parseFrontmatterNumberArray(
+  value: string,
+  constraints: FrontmatterNumberConstraints = {},
+): number[] | undefined {
+  const parts = parseInlineArray(value);
+  if (parts.length === 0) return undefined;
+  const parsed = parts.map(part => parseFrontmatterNumber(part, constraints));
+  return parsed.some(item => item === undefined) ? undefined : parsed as number[];
+}
+
 // Design rationale: A single combined header-font-style field was chosen over
 // separate CSS-style fields (font-style, font-weight, font-decoration) because:
 // 1. One field is simpler for authors than three separate fields.
@@ -275,6 +315,8 @@ export interface Frontmatter {
   bibliographyHangingIndent?: boolean;
 }
 
+export const MAX_PROVISIONAL_FRONTMATTER_LOOKAHEAD = 16_384;
+
 export interface FrontmatterOpeningBounds {
   /** Start of the opening delimiter, after any accepted leading whitespace/BOM. */
   start: number;
@@ -307,22 +349,38 @@ export function findFrontmatterOpeningBounds(markdown: string): FrontmatterOpeni
   };
 }
 
+/** Find the logical root indentation shared by frontmatter consumers. */
+export function findFrontmatterRootIndent(
+  markdown: string,
+  contentEnd = markdown.length,
+): number {
+  const opening = findFrontmatterOpeningBounds(markdown);
+  if (!opening) return 0;
+  let rootIndent = Number.POSITIVE_INFINITY;
+  const lines = markdown.slice(opening.bodyStart, contentEnd).split('\n');
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/\r$/, '');
+    const trimmed = line.trimStart();
+    if (!trimmed || trimmed.startsWith('#') || findYamlMappingColon(trimmed) < 0) continue;
+    rootIndent = Math.min(rootIndent, line.length - trimmed.length);
+  }
+  return Number.isFinite(rootIndent) ? rootIndent : 0;
+}
+
 /** Locate the same permissive frontmatter block accepted by parseFrontmatter(). */
 export function findFrontmatterBounds(markdown: string): FrontmatterBounds | undefined {
   const opening = findFrontmatterOpeningBounds(markdown);
   if (!opening) return undefined;
   const trimmed = markdown.slice(opening.start);
 
-  const endMatch = trimmed.substring(3).match(/\n---(?:\r?\n|$)/);
+  const endMatch = trimmed.substring(3).match(/\n(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/);
   if (!endMatch) return undefined;
-  const endIdx = endMatch.index! + 3;
-  const afterDelimiter = trimmed.slice(endIdx + 4);
-  const consumedLeadingNewline = afterDelimiter.match(/^\r?\n/)?.[0].length ?? 0;
+  const contentEnd = opening.start + 3 + endMatch.index!;
   return {
     start: opening.start,
     contentStart: opening.contentStart,
-    contentEnd: opening.start + endIdx,
-    bodyStart: opening.start + endIdx + 4 + consumedLeadingNewline,
+    contentEnd,
+    bodyStart: contentEnd + endMatch[0].length,
   };
 }
 
@@ -332,18 +390,25 @@ export function findFrontmatterBounds(markdown: string): FrontmatterBounds | und
  * suppress whole-document scanning or diagnostics; only a closed block from
  * findFrontmatterBounds() is globally authoritative.
  */
-export function findCitationFrontmatterBounds(markdown: string): FrontmatterBounds | undefined {
-  const closed = findFrontmatterBounds(markdown);
+export function findCitationFrontmatterBounds(
+  markdown: string,
+  maxEnd = markdown.length,
+): FrontmatterBounds | undefined {
+  const limit = Math.min(markdown.length, maxEnd);
+  const bounded = limit < markdown.length ? markdown.slice(0, limit) : markdown;
+  const closed = findFrontmatterBounds(bounded);
   if (closed) return closed;
 
-  const opening = findFrontmatterOpeningBounds(markdown);
+  const opening = findFrontmatterOpeningBounds(bounded);
   if (!opening || opening.bodyStart === opening.contentStart) return undefined;
   const contentStart = opening.contentStart;
+  const rootIndent = findFrontmatterRootIndent(bounded, limit);
   let hasTopLevelMapping = false;
   let lineStart = opening.bodyStart;
-  while (lineStart < markdown.length) {
-    const newline = markdown.indexOf('\n', lineStart);
-    const rawEnd = newline === -1 ? markdown.length : newline;
+  while (lineStart < limit) {
+    const candidate = markdown.indexOf('\n', lineStart);
+    const newline = candidate === -1 || candidate >= limit ? -1 : candidate;
+    const rawEnd = newline === -1 ? limit : newline;
     const lineEnd = rawEnd > lineStart && markdown[rawEnd - 1] === '\r' ? rawEnd - 1 : rawEnd;
     const line = markdown.slice(lineStart, lineEnd);
     if (line.trim().length === 0) {
@@ -352,10 +417,14 @@ export function findCitationFrontmatterBounds(markdown: string): FrontmatterBoun
         start: opening.start,
         contentStart,
         contentEnd: lineStart,
-        bodyStart: newline === -1 ? markdown.length : newline + 1,
+        bodyStart: newline === -1 ? limit : newline + 1,
       };
     }
-    if (isTopLevelFrontmatterMappingLine(line)) hasTopLevelMapping = true;
+    const physicalIndent = line.length - line.trimStart().length;
+    const logicalLine = physicalIndent === rootIndent
+      ? line.slice(rootIndent)
+      : '';
+    if (isTopLevelFrontmatterMappingLine(logicalLine)) hasTopLevelMapping = true;
     if (newline === -1) break;
     lineStart = newline + 1;
   }
@@ -363,8 +432,8 @@ export function findCitationFrontmatterBounds(markdown: string): FrontmatterBoun
   return {
     start: opening.start,
     contentStart,
-    contentEnd: markdown.length,
-    bodyStart: markdown.length,
+    contentEnd: limit,
+    bodyStart: limit,
   };
 }
 
@@ -405,11 +474,16 @@ export function normalizeNociteRawForYaml(raw: string, value: NociteValue): stri
   }
 
   const rawLines = normalized.split('\n');
-  const mode = nociteValueMode(rawLines[0]);
-  const unsafeContinuation = rawLines.slice(1).some(line =>
-    /^(?:---|\.\.\.)(?:[ \t]*(?:#.*)?)?$/.test(line)
-    || !isNociteContinuationLine(mode, line));
-  if (unsafeContinuation) return undefined;
+  const continuation = createNociteContinuationState(rawLines[0]);
+  if (continuation.mode !== 'block-scalar' && /^[|>]/.test(rawLines[0].trim())) {
+    return undefined;
+  }
+  for (const line of rawLines.slice(1)) {
+    if (
+      /^(?:---|\.\.\.)(?:[ \t]*(?:#.*)?)?$/.test(line)
+      || !isNociteContinuationLine(continuation, line)
+    ) return undefined;
+  }
 
   const semantic = parseNociteRaw(normalized);
   const keys = value.keys.filter(isCitekey);
@@ -419,19 +493,25 @@ export function normalizeNociteRawForYaml(raw: string, value: NociteValue): stri
   return normalized;
 }
 
+function nociteRawLineThroughFlowClose(line: string, closeOffset: number | undefined): string {
+  if (closeOffset === undefined) return line;
+  const suffix = line.slice(closeOffset);
+  return /^[ \t]*(?:#.*)?$/.test(suffix) ? line : line.slice(0, closeOffset);
+}
+
 function readRawNociteValue(
   lines: string[],
   startIndex: number,
   colonIndex: number,
 ): { value: NociteValue; lastLineIndex: number } {
   const firstLine = lines[startIndex].replace(/\r$/, '').slice(colonIndex + 1).trimStart();
-  const parts = [firstLine];
+  const continuation = createNociteContinuationState(firstLine);
+  const parts = [nociteRawLineThroughFlowClose(firstLine, continuation.rootFlowCloseOffset)];
   let lastLineIndex = startIndex;
-  const mode = nociteValueMode(firstLine);
   while (lastLineIndex + 1 < lines.length) {
     const next = lines[lastLineIndex + 1].replace(/\r$/, '');
-    if (!isNociteContinuationLine(mode, next)) break;
-    parts.push(next);
+    if (!isNociteContinuationLine(continuation, next)) break;
+    parts.push(nociteRawLineThroughFlowClose(next, continuation.rootFlowCloseOffset));
     lastLineIndex++;
   }
 
@@ -474,21 +554,29 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
     return { metadata: {}, body: markdown, fieldOrder: [] };
   }
 
-  const yamlBlock = markdown.slice(bounds.contentStart, bounds.contentEnd).trimStart();
+  const opening = findFrontmatterOpeningBounds(markdown)!;
+  const yamlBlock = markdown.slice(opening.bodyStart, bounds.contentEnd);
   const body = markdown.slice(bounds.bodyStart);
 
   const metadata: Frontmatter = {};
   const fieldOrder: string[] = [];
   const seenFields = new Set<string>();
   const rawTitleValues: string[] = [];
-  const yamlLines = yamlBlock.split('\n');
+  const authoredYamlLines = yamlBlock.split('\n');
+  const rootIndent = findFrontmatterRootIndent(markdown, bounds.contentEnd);
+  const yamlLines = rootIndent > 0
+    ? authoredYamlLines.map(line =>
+      line.slice(0, rootIndent).trim().length === 0 ? line.slice(rootIndent) : line)
+    : authoredYamlLines;
   for (let lineIdx = 0; lineIdx < yamlLines.length; lineIdx++) {
     const line = yamlLines[lineIdx];
+    if (/^[ \t]/.test(line)) continue;
     const colonIdx = findYamlMappingColon(line);
     if (colonIdx < 0) continue;
-    const key = line.slice(0, colonIdx).trim();
+    const key = parseYamlStringScalar(line.slice(0, colonIdx));
     const rawValue = line.slice(colonIdx + 1);
-    const value = parseYamlStringScalar(rawValue);
+    const semanticRawValue = yamlValueBeforeComment(rawValue);
+    const value = parseYamlStringScalar(semanticRawValue);
     if (!seenFields.has(key)) {
       seenFields.add(key);
       fieldOrder.push(key);
@@ -518,7 +606,9 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
         const innerColon = findYamlMappingColon(trimmed);
         if (innerColon < 0) continue;
         const innerKey = parseYamlStringScalar(trimmed.slice(0, innerColon));
-        const innerVal = parseYamlStringScalar(trimmed.slice(innerColon + 1));
+        const innerVal = parseYamlStringScalar(
+          yamlValueBeforeComment(trimmed.slice(innerColon + 1)),
+        );
         // Auto-detect the style-name indent level from the first indented line
         if (nameIndent < 0) nameIndent = indent;
         if (indent <= nameIndent) {
@@ -533,8 +623,8 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
               if (innerVal) def.font = innerVal;
               break;
             case 'font-size': {
-              const n = parseFloat(innerVal);
-              if (isFinite(n) && n > 0) def.fontSize = n;
+              const n = parseFrontmatterNumber(innerVal, { minimum: 0, exclusiveMinimum: true });
+              if (n !== undefined) def.fontSize = n;
               break;
             }
             case 'font-style': {
@@ -543,13 +633,13 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
               break;
             }
             case 'spacing-before': {
-              const n = parseFloat(innerVal);
-              if (isFinite(n) && n >= 0) def.spacingBefore = n;
+              const n = parseFrontmatterNumber(innerVal, { minimum: 0 });
+              if (n !== undefined) def.spacingBefore = n;
               break;
             }
             case 'spacing-after': {
-              const n = parseFloat(innerVal);
-              if (isFinite(n) && n >= 0) def.spacingAfter = n;
+              const n = parseFrontmatterNumber(innerVal, { minimum: 0 });
+              if (n !== undefined) def.spacingAfter = n;
               break;
             }
             case 'paragraph-indent': {
@@ -557,8 +647,8 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
               if (lower === 'none') {
                 def.paragraphIndent = 'none';
               } else {
-                const n = parseFloat(innerVal);
-                if (isFinite(n) && n >= 0) def.paragraphIndent = n;
+                const n = parseFrontmatterNumber(innerVal, { minimum: 0 });
+                if (n !== undefined) def.paragraphIndent = n;
               }
               break;
             }
@@ -573,7 +663,7 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
       case 'title':
         if (!metadata.title) metadata.title = [];
         metadata.title.push(value);
-        rawTitleValues.push(rawValue.trim());
+        rawTitleValues.push(semanticRawValue.trim());
         break;
       case 'author':
         if (value) metadata.author = value;
@@ -614,38 +704,38 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
         if (value) metadata.codeFont = value;
         break;
       case 'font-size': {
-        const n = parseFloat(value);
-        if (isFinite(n) && n > 0) metadata.fontSize = n;
+        const n = parseFrontmatterNumber(value, { minimum: 0, exclusiveMinimum: true });
+        if (n !== undefined) metadata.fontSize = n;
         break;
       }
       case 'code-font-size': {
-        const n = parseFloat(value);
-        if (isFinite(n) && n > 0) metadata.codeFontSize = n;
+        const n = parseFrontmatterNumber(value, { minimum: 0, exclusiveMinimum: true });
+        if (n !== undefined) metadata.codeFontSize = n;
         break;
       }
       case 'header-font':
-        if (value) metadata.headerFont = parseInlineArray(rawValue);
+        if (value) metadata.headerFont = parseInlineArray(semanticRawValue);
         break;
       case 'header-font-size': {
-        const arr = parseInlineArray(rawValue).map(s => parseFloat(s)).filter(n => isFinite(n) && n > 0);
-        if (arr.length > 0) metadata.headerFontSize = arr;
+        const arr = parseFrontmatterNumberArray(semanticRawValue, { minimum: 0, exclusiveMinimum: true });
+        if (arr) metadata.headerFontSize = arr;
         break;
       }
       case 'header-font-style': {
-        const arr = parseInlineArray(rawValue).map(s => normalizeFontStyle(s)).filter((s): s is string => s !== undefined);
+        const arr = parseInlineArray(semanticRawValue).map(s => normalizeFontStyle(s)).filter((s): s is string => s !== undefined);
         if (arr.length > 0) metadata.headerFontStyle = arr;
         break;
       }
       case 'title-font':
-        if (value) metadata.titleFont = parseInlineArray(rawValue);
+        if (value) metadata.titleFont = parseInlineArray(semanticRawValue);
         break;
       case 'title-font-size': {
-        const arr = parseInlineArray(rawValue).map(s => parseFloat(s)).filter(n => isFinite(n) && n > 0);
-        if (arr.length > 0) metadata.titleFontSize = arr;
+        const arr = parseFrontmatterNumberArray(semanticRawValue, { minimum: 0, exclusiveMinimum: true });
+        if (arr) metadata.titleFontSize = arr;
         break;
       }
       case 'title-font-style': {
-        const arr = parseInlineArray(rawValue).map(s => normalizeFontStyle(s)).filter((s): s is string => s !== undefined);
+        const arr = parseInlineArray(semanticRawValue).map(s => normalizeFontStyle(s)).filter((s): s is string => s !== undefined);
         if (arr.length > 0) metadata.titleFontStyle = arr;
         break;
       }
@@ -664,33 +754,27 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
         break;
       }
       case 'code-block-inset': {
-        const n = parseInt(value, 10);
-        if (Number.isInteger(n) && n > 0 && value.trim() === String(n)) {
-          metadata.codeBlockInset = n;
-        }
+        const n = parseFrontmatterNumber(value, { minimum: 0, exclusiveMinimum: true, integer: true });
+        if (n !== undefined) metadata.codeBlockInset = n;
         break;
       }
       case 'table-font':
         if (value) metadata.tableFont = value;
         break;
       case 'table-font-size': {
-        const n = parseFloat(value);
-        if (isFinite(n) && n > 0) metadata.tableFontSize = n;
+        const n = parseFrontmatterNumber(value, { minimum: 0, exclusiveMinimum: true });
+        if (n !== undefined) metadata.tableFontSize = n;
         break;
       }
       // 0 = disable pipe tables (always HTML); positive = max line width
       case 'pipe-table-max-line-width': {
-        const n = parseInt(value, 10);
-        if (Number.isInteger(n) && n >= 0 && value.trim() === String(n)) {
-          metadata.pipeTableMaxLineWidth = n;
-        }
+        const n = parseFrontmatterNumber(value, { minimum: 0, integer: true });
+        if (n !== undefined) metadata.pipeTableMaxLineWidth = n;
         break;
       }
       case 'grid-table-max-line-width': {
-        const n = parseInt(value, 10);
-        if (Number.isInteger(n) && n >= 0 && value.trim() === String(n)) {
-          metadata.gridTableMaxLineWidth = n;
-        }
+        const n = parseFrontmatterNumber(value, { minimum: 0, integer: true });
+        if (n !== undefined) metadata.gridTableMaxLineWidth = n;
         break;
       }
       case 'table-col-widths': {
@@ -741,8 +825,8 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
         if (lower === 'single' || lower === '1.5' || lower === 'double') {
           metadata.lineSpacing = lower;
         } else {
-          const n = parseFloat(value);
-          if (isFinite(n) && n > 0) metadata.lineSpacing = n;
+          const n = parseFrontmatterNumber(value, { minimum: 0, exclusiveMinimum: true });
+          if (n !== undefined) metadata.lineSpacing = n;
         }
         break;
       }
@@ -751,8 +835,8 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
         if (lower === 'none') {
           metadata.paragraphIndent = 'none';
         } else {
-          const n = parseFloat(value);
-          if (isFinite(n) && n >= 0) metadata.paragraphIndent = n;
+          const n = parseFrontmatterNumber(value, { minimum: 0 });
+          if (n !== undefined) metadata.paragraphIndent = n;
         }
         break;
       }

@@ -23,8 +23,21 @@ import JSZip from 'jszip';
 
 async function readDocxPart(docx: Uint8Array | JSZip, partPath: string): Promise<string> {
   const zip = docx instanceof JSZip ? docx : await JSZip.loadAsync(docx);
-  return await zip.file(partPath)?.async('string') ?? '';
+  const part = zip.file(partPath);
+  if (!part) throw new Error(`Missing DOCX part: ${partPath}`);
+  return part.async('string');
 }
+
+describe('DOCX test helpers', () => {
+  test('fails loudly when a required part is missing', async () => {
+    try {
+      await readDocxPart(new JSZip(), 'word/document.xml');
+      throw new Error('Expected readDocxPart to reject');
+    } catch (error) {
+      expect(error).toEqual(new Error('Missing DOCX part: word/document.xml'));
+    }
+  });
+});
 
 function decodeXmlText(text: string): string {
   return text
@@ -385,7 +398,6 @@ describe('MD→DOCX with CSL frontmatter', () => {
     const result = await convertMdToDocx(md, { bibtex: SAMPLE_BIBTEX });
 
     const customXml = await readDocxPart(result.docx, 'docProps/custom.xml');
-    expect(customXml).toBeDefined();
     expect(customXml).toContain('ZOTERO_PREF_1');
     expect(customXml).toContain('http://www.zotero.org/styles/apa');
   });
@@ -675,6 +687,8 @@ describe('Bibliography marker placement', () => {
 
     const biblIdx = docXml.indexOf('ZOTERO_BIBL');
     const moreIdx = docXml.indexOf('More text');
+    expect(biblIdx).toBeGreaterThan(-1);
+    expect(moreIdx).toBeGreaterThan(-1);
     expect(biblIdx).toBeGreaterThan(moreIdx);
   });
 
@@ -690,6 +704,8 @@ describe('Bibliography marker placement', () => {
     // Bibliography should be between main and supplementary text
     const biblIdx = docXml.indexOf('ZOTERO_BIBL');
     const suppIdx = docXml.indexOf('Supplementary');
+    expect(biblIdx).toBeGreaterThan(-1);
+    expect(suppIdx).toBeGreaterThan(-1);
     expect(biblIdx).toBeLessThan(suppIdx);
   });
 
@@ -703,6 +719,9 @@ describe('Bibliography marker placement', () => {
     const markerIdx = mdResult.markdown.indexOf('<!-- references -->');
     const mainIdx = mdResult.markdown.indexOf('Main text');
     const suppIdx = mdResult.markdown.indexOf('Supplementary material');
+    expect(mainIdx).toBeGreaterThan(-1);
+    expect(markerIdx).toBeGreaterThan(-1);
+    expect(suppIdx).toBeGreaterThan(-1);
     expect(markerIdx).toBeGreaterThan(mainIdx);
     expect(markerIdx).toBeLessThan(suppIdx);
   });
@@ -765,6 +784,42 @@ describe('Bibliography marker placement', () => {
 
     expect(first.properties.plainCitation).toBe('(1)');
     expect(second.properties.plainCitation).toBe('(2)');
+  });
+
+  test('numeric bracket citations retain document order around a narrative preview', async () => {
+    const bibtex = `
+@article{alpha2020, author={Alpha, A.}, title={Alpha paper}, journal={J}, year={2020}}
+@article{beta2020, author={Beta, B.}, title={Beta paper}, journal={J}, year={2020}}
+@article{gamma2020, author={Gamma, G.}, title={Gamma paper}, journal={J}, year={2020}}
+`;
+    const md = '---\ncsl: science\n---\n\n'
+      + 'First [@gamma2020], narrative @alpha2020, final [@beta2020].\n';
+    const exported = await convertMdToDocx(md, { bibtex });
+    const documentXml = await readDocxPart(exported.docx, 'word/document.xml');
+    const payloads = [...documentXml.matchAll(
+      /CSL_CITATION\s+(.*?)\s*<\/w:instrText>/g,
+    )].map(match => JSON.parse(decodeXmlText(match[1])));
+
+    expect(payloads).toHaveLength(3);
+    expect(payloads.map(payload => payload.properties.plainCitation)).toEqual([
+      '(1)',
+      '(2)',
+      '(3)',
+    ]);
+    expect(payloads.map(payload => payload.properties.mode)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    expect(payloads[0].citationItems[0]['suppress-author']).toBeUndefined();
+    expect(payloads[1].citationItems[0]['suppress-author']).toBe(true);
+    expect(payloads[2].citationItems[0]['suppress-author']).toBeUndefined();
+    expect(documentXml).toContain('Alpha');
+
+    const imported = await convertDocx(exported.docx);
+    expect(imported.markdown).toContain(
+      'First [@gamma2020], narrative @alpha2020, final [@beta2020].',
+    );
   });
 
   test('footnote citations are numbered at the point of the footnote reference, not after body', async () => {
@@ -836,6 +891,42 @@ describe('Bare narrative citations', () => {
     const imported = await convertDocx(exported.docx);
     expect(imported.markdown).toContain('Smith agrees with @smith2020effects.');
     expect(imported.markdown).not.toContain('[@smith2020effects]');
+  });
+
+  test('preserves a literal angle-bracket narrative author in plainCitation and round-trip', async () => {
+    const bibtex = '@article{lab2020, author={{Research <Lab>}}, title={Study}, year={2020}}';
+    const exported = await convertMdToDocx(
+      '---\ncsl: apa\n---\n\n@lab2020\n',
+      { bibtex },
+    );
+    const documentXml = await readDocxPart(exported.docx, 'word/document.xml');
+    const field = documentXml.match(/CSL_CITATION\s+(.*?)\s*<\/w:instrText>/);
+    expect(field).not.toBeNull();
+    const payload = JSON.parse(decodeXmlText(field![1]));
+    expect(payload.properties.plainCitation).toBe('Research <Lab> (2020)');
+    const visibleResult = documentXml.match(
+      /<w:r><w:fldChar w:fldCharType="separate"\/><\/w:r>([\s\S]*?)<w:r><w:fldChar w:fldCharType="end"\/><\/w:r>/,
+    );
+    expect(visibleResult?.[1]).toContain(
+      '<w:t>Research &lt;Lab&gt; (2020)</w:t>',
+    );
+
+    const imported = await convertDocx(exported.docx);
+    expect(imported.markdown).toContain('@lab2020');
+    expect(imported.bibtex).toContain('Research <Lab>');
+  });
+
+  test('preserves a literal angle-bracket narrative author in plain fallback text', async () => {
+    const bibtex = '@article{lab2020, author={{Research <Lab>}}, title={Study}, year={2020}}';
+    const exported = await convertMdToDocx('@lab2020\n', { bibtex });
+    const documentXml = await readDocxPart(exported.docx, 'word/document.xml');
+    expect(documentXml).toContain(
+      '<w:t xml:space="preserve">Research &lt;Lab&gt; </w:t>',
+    );
+
+    const imported = await convertDocx(exported.docx);
+    expect(imported.markdown).toBe('@lab2020\n');
+    expect(imported.bibtex).toContain('Research <Lab>');
   });
 
   test('round-trips bare citations at paragraph start and after opening punctuation', async () => {
@@ -918,11 +1009,14 @@ describe('Bare narrative citations', () => {
     const documentXml = await readDocxPart(zip, 'word/document.xml');
     const commentsXml = await readDocxPart(zip, 'word/comments.xml');
     expect(documentXml.match(/ZOTERO_ITEM CSL_CITATION/g)).toHaveLength(3);
-    for (const deletion of documentXml.match(/<w:del\b[\s\S]*?<\/w:del>/g) ?? []) {
+    const deletions = documentXml.match(/<w:del\b[\s\S]*?<\/w:del>/g) ?? [];
+    expect(deletions).toHaveLength(2);
+    for (const deletion of deletions) {
       expect(deletion).not.toContain('ZOTERO_ITEM CSL_CITATION');
     }
     expect(documentXml).toContain('<w:delText>@jones2019urban</w:delText>');
     expect(documentXml).toContain('<w:delText>@davis2021advances</w:delText>');
+    expect(commentsXml).toContain('@smith2020effects');
     expect(commentsXml).not.toContain('ZOTERO_ITEM CSL_CITATION');
   });
 
@@ -933,13 +1027,17 @@ describe('Bare narrative citations', () => {
     const field = documentXml.match(/CSL_CITATION\s+(.*?)\s*<\/w:instrText>/);
     expect(field).not.toBeNull();
     const payload = JSON.parse(decodeXmlText(field![1]));
+    expect(payload.citationItems).toHaveLength(1);
     payload.citationItems.push({ ...payload.citationItems[0] });
+    expect(payload.citationItems).toHaveLength(2);
     const encoded = JSON.stringify(payload)
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
-    zip.file('word/document.xml', documentXml.replace(field![1], encoded));
+    const modified = documentXml.replace(field![1], encoded);
+    expect(modified).not.toBe(documentXml);
+    zip.file('word/document.xml', modified);
     const docx = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
     const imported = await convertDocx(docx);
     expect(imported.markdown).toContain('Smith (2020)');
@@ -1080,8 +1178,7 @@ describe('Bare narrative citations', () => {
   test('unsupported decorated composite fields fall back to visible text', async () => {
     const exported = await convertMdToDocx('---\ncsl: apa\n---\n\n@smith2020effects\n', { bibtex: SAMPLE_BIBTEX });
     const zip = await JSZip.loadAsync(exported.docx);
-    const documentFile = zip.file('word/document.xml');
-    const documentXml = await documentFile?.async('string') ?? '';
+    const documentXml = await readDocxPart(zip, 'word/document.xml');
     const modified = documentXml.replace(
       '&quot;noteIndex&quot;:0,&quot;mode&quot;:&quot;composite&quot;',
       '&quot;noteIndex&quot;:0,&quot;mode&quot;:&quot;composite&quot;,&quot;infix&quot;:&quot; says &quot;',
@@ -1246,15 +1343,22 @@ describe('nocite DOCX behavior', () => {
     const exported = await convertMdToDocx('---\ncsl: apa\n---\n\nText [@smith2020effects].\n', { bibtex: SAMPLE_BIBTEX });
     const zip = await JSZip.loadAsync(exported.docx);
     const documentXml = await readDocxPart(zip, 'word/document.xml');
-    const malformed = documentXml
-      .replace('&quot;uncited&quot;:[]', '&quot;uncited&quot;:{}')
-      .replace('&quot;omitted&quot;:[]', '&quot;omitted&quot;:&quot;bad&quot;');
-    expect(malformed).not.toBe(documentXml);
+    const malformedUncited = documentXml.replace(
+      '&quot;uncited&quot;:[]',
+      '&quot;uncited&quot;:{}',
+    );
+    expect(malformedUncited).not.toBe(documentXml);
+    const malformed = malformedUncited.replace(
+      '&quot;omitted&quot;:[]',
+      '&quot;omitted&quot;:&quot;bad&quot;',
+    );
+    expect(malformed).not.toBe(malformedUncited);
     zip.file('word/document.xml', malformed);
     const docx = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
     const imported = await convertDocx(docx);
-    expect(imported.zoteroBiblData?.uncited).toBeUndefined();
-    expect(imported.zoteroBiblData?.omitted).toBeUndefined();
+    expect(imported.zoteroBiblData).toBeDefined();
+    expect(imported.zoteroBiblData!.uncited).toBeUndefined();
+    expect(imported.zoteroBiblData!.omitted).toBeUndefined();
     const reexported = await convertMdToDocx(imported.markdown, {
       bibtex: imported.bibtex,
       zoteroBiblData: imported.zoteroBiblData,
@@ -1327,12 +1431,13 @@ describe('nocite DOCX behavior', () => {
   test('ignores corrupt nocite custom-property metadata safely', async () => {
     const exported = await convertMdToDocx('---\ncsl: apa\nnocite: [@jones2019urban]\n---\n\nText.\n', { bibtex: SAMPLE_BIBTEX });
     const zip = await JSZip.loadAsync(exported.docx);
-    const customFile = zip.file('docProps/custom.xml');
-    const customXml = await customFile?.async('string') ?? '';
-    zip.file('docProps/custom.xml', customXml.replace(
+    const customXml = await readDocxPart(zip, 'docProps/custom.xml');
+    const modified = customXml.replace(
       /(name="MANUSCRIPT_NOCITE_1"[^>]*><vt:lpwstr>)[\s\S]*?(<\/vt:lpwstr>)/,
       '$1{broken$2',
-    ));
+    );
+    expect(modified).not.toBe(customXml);
+    zip.file('docProps/custom.xml', modified);
     const docx = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
     const imported = await convertDocx(docx);
     expect(imported.markdown).not.toContain('nocite:');

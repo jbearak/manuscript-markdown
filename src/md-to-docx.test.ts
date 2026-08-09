@@ -23,6 +23,7 @@ import {
   type DocxGenState
 } from './md-to-docx';
 import { type GfmAlertType } from './gfm';
+import { type BibtexEntry } from './bibtex-parser';
 import { parseFrontmatter, serializeFrontmatter, parseColWidths, expandColWidths, colWidthsToPct } from './frontmatter';
 import { alertColorsByScheme, setDefaultColorScheme, getDefaultColorScheme, GITHUB_ALERT_COLORS, GUTTMACHER_ALERT_COLORS } from './alert-colors';
 
@@ -278,10 +279,15 @@ describe('GFM support in Markdown→DOCX parser', () => {
   });
 
   it('escapes GFM-disallowed raw HTML tags into literal text runs', () => {
-    const tokens = parseMd('<script>alert(1)</script>');
-    expect(tokens).toHaveLength(1);
-    expect(tokens[0].type).toBe('paragraph');
-    expect(tokens[0].runs[0]).toMatchObject({ type: 'text', text: '<script>alert(1)</script>' });
+    for (const source of [
+      '<script>alert(1)</script>',
+      '<script>@smith</script>',
+    ]) {
+      const tokens = parseMd(source);
+      expect(tokens).toHaveLength(1);
+      expect(tokens[0].type).toBe('paragraph');
+      expect(tokens[0].runs).toEqual([{ type: 'text', text: source }]);
+    }
   });
 
   it('preserves inline HTML-like text tokens as literal text runs', () => {
@@ -1615,6 +1621,24 @@ describe('parseHtmlCellRuns via parseMd', () => {
     expect(runs?.[0]).toMatchObject({ type: 'text', text: 'x = 1', code: true });
   });
 
+  it('keeps citation-like text inside HTML code elements literal', () => {
+    const tokens = parseMd('<table><tr><td><code>@smith</code></td></tr></table>');
+    const runs = tokens.find(t => t.type === 'table')?.rows?.[0].cells[0].runs;
+    expect(runs).toEqual([{ type: 'text', text: '@smith', code: true }]);
+  });
+
+  it('keeps data-embed-idx HTML table citations as literal text runs', () => {
+    const tokens = parseMd(
+      '<table data-embed-idx="0"><tr><td>@smith [@jones]</td></tr></table>',
+    );
+    const table = tokens.find(token => token.type === 'table');
+    expect(table?.embedIdx).toBe(0);
+    expect(table?.rows?.[0].cells[0].runs).toEqual([{
+      type: 'text',
+      text: '@smith [@jones]',
+    }]);
+  });
+
   it('preserves superscript and subscript from HTML table cells', () => {
     const tokens = parseMd('<table><tr><td>H<sub>2</sub>O is x<sup>2</sup></td></tr></table>');
     const table = tokens.find(t => t.type === 'table');
@@ -1769,6 +1793,90 @@ console.log('code');
     expect(document).toContain('H2');
     expect(document).toContain('A');
     expect(document).toContain('B');
+  });
+
+  it('uses scanner-visible locator text when exporting Markdown tables', () => {
+    const entries = new Map<string, BibtexEntry>([[
+      'smith2020',
+      {
+        type: 'article',
+        key: 'smith2020',
+        fields: new Map([
+          ['author', 'Smith, John'],
+          ['year', '2020'],
+        ]),
+      },
+    ]]);
+    const table = parseMd([
+      '| Reference |',
+      '| --- |',
+      '| [@smith2020, p. <em>2</em> and <!-- note -->3] |',
+    ].join('\n'))[0];
+    const xml = generateTable(table, makeState(), undefined, entries);
+    expect(xml).toContain('&quot;locator&quot;:&quot;2 and 3&quot;');
+    expect(xml).not.toContain('&lt;em&gt;2&lt;/em&gt;');
+    expect(xml).not.toContain('&lt;!-- note --&gt;');
+  });
+
+  it('preserves HTML table citation occurrence metadata during export', () => {
+    const entries = new Map<string, BibtexEntry>([[
+      'smith2020',
+      {
+        type: 'article',
+        key: 'smith2020',
+        fields: new Map([
+          ['author', 'Smith, John'],
+          ['year', '2020'],
+        ]),
+      },
+    ]]);
+    const repeated = parseMd(
+      '<table><tr><td>'
+      + '[@smith2020, p. 1; <em>-@smith2020, p. 2</em>]'
+      + '</td></tr></table>',
+    )[0];
+    const repeatedXml = generateTable(
+      repeated,
+      makeState(),
+      undefined,
+      entries,
+    );
+    expect(repeatedXml).toContain('&quot;locator&quot;:&quot;1&quot;');
+    expect(repeatedXml).toContain('&quot;locator&quot;:&quot;2&quot;');
+    expect(repeatedXml).toContain('&quot;suppress-author&quot;:true');
+
+    const missing = parseMd(
+      '<table><tr><td>[@missing, p. 7]</td></tr></table>',
+    )[0];
+    expect(
+      generateTable(missing, makeState()),
+    ).toContain('[@missing, p. 7]');
+  });
+
+  it('applies automatic header bolding to HTML table citations', () => {
+    const table = parseMd(
+      '<table><tr><th>[@smith2020]</th></tr></table>',
+    )[0];
+    const entries = new Map<string, BibtexEntry>([[
+      'smith2020',
+      {
+        type: 'article',
+        key: 'smith2020',
+        fields: new Map([
+          ['author', 'Smith, John'],
+          ['year', '2020'],
+        ]),
+      },
+    ]]);
+    const xml = generateTable(
+      table,
+      makeState(),
+      undefined,
+      entries,
+    );
+    expect(xml).toContain(
+      '<w:rPr><w:b/></w:rPr><w:t>(Smith 2020)</w:t>',
+    );
   });
 
   it('exports HTML tables with thead/tbody structure', async () => {
@@ -2294,6 +2402,32 @@ describe('extractFootnoteDefinitions', () => {
   });
 });
 
+describe('Citation OOXML generation', () => {
+  it('applies citation run and table formatting to field runs', () => {
+    const state = makeState();
+    state.tableRunRPrExtra = '<w:sz w:val="20"/>';
+    const entries = new Map<string, BibtexEntry>([[
+      'smith2020',
+      {
+        type: 'article',
+        key: 'smith2020',
+        fields: new Map([
+          ['author', 'Smith, John'],
+          ['year', '2020'],
+        ]),
+      },
+    ]]);
+    const xml = generateRuns([{
+      type: 'citation',
+      text: 'smith2020',
+      keys: ['smith2020'],
+      italic: true,
+      underline: true,
+    }], state, undefined, entries);
+    expect(xml).toContain('<w:rPr><w:i/><w:sz w:val="20"/><w:u w:val="single"/></w:rPr>');
+  });
+});
+
 describe('Footnote OOXML generation', () => {
   it('generateRuns emits footnoteReference for footnote_ref runs', () => {
     const state = makeState();
@@ -2378,8 +2512,12 @@ describe('Full MD→DOCX footnote generation', () => {
   it('ignores trailing semicolon in citation group', async () => {
     const bib = `@article{smith2020,\n  author = {Smith, John},\n  title = {Title},\n  year = {2020},\n}`;
     const md = 'Text [@smith2020;].';
-    const { warnings } = await convertMdToDocx(md, { bibtex: bib });
+    const { docx, warnings } = await convertMdToDocx(md, { bibtex: bib });
     expect(warnings).toEqual([]);
+    const Zip = (await import('jszip')).default;
+    const zip = await Zip.loadAsync(docx);
+    const documentXml = await zip.file('word/document.xml')!.async('string');
+    expect(documentXml).toContain('ZOTERO_ITEM CSL_CITATION');
   });
 
   it('stores MANUSCRIPT_FOOTNOTE_IDS for named labels', async () => {
@@ -4357,7 +4495,12 @@ describe('parseMd bare narrative citations', () => {
         if (run.newRuns) collect(run.newRuns);
       }
     };
-    for (const token of parseMd(markdown)) collect(token.runs);
+    for (const token of parseMd(markdown)) {
+      collect(token.runs);
+      for (const row of token.rows ?? []) {
+        for (const cell of row.cells) collect(cell.runs);
+      }
+    }
     return found;
   };
 
@@ -4366,9 +4509,139 @@ describe('parseMd bare narrative citations', () => {
     expect(runs.map(run => run.keys)).toEqual([['alpha'], ['beta'], ['gamma']]);
     expect(runs.map(run => run.narrative ?? false)).toEqual([true, false, false]);
     expect(runs[2].suppressAuthorKeys).toEqual(new Set(['gamma']));
-    expect(citationRuns('[@alpha; ordinary text; @beta]').map(run => run.keys)).toEqual([
+  });
+
+  it('uses scanner-balanced brackets and markup-aware citation items', () => {
+    const runs = citationRuns(
+      '[@smith, pp. 1\\]–2] [@alpha; <!-- note --> @beta]',
+    );
+    expect(runs.map(run => run.keys)).toEqual([
+      ['smith'],
       ['alpha', 'beta'],
     ]);
+    expect(runs[0].locators?.get('smith')).toBe('pp. 1\\]–2');
+
+    const [markupLocator] = citationRuns(
+      '<div>[@gamma, p. <em>2</em> and <!-- note -->3]</div>',
+    );
+    expect(markupLocator.locators?.get('gamma')).toBe('p. 2 and 3');
+
+    const [repeated] = citationRuns(
+      '[@smith, p. 1; <em>-@smith, p. 2</em>]',
+    );
+    expect(repeated.citationItems).toEqual([
+      { key: 'smith', locator: 'p. 1', suppressAuthor: false },
+      { key: 'smith', locator: 'p. 2', suppressAuthor: true },
+    ]);
+  });
+
+  it('preserves unsupported and nested citation cluster source', () => {
+    const unsupported = '[@alpha; see @beta]';
+    const unsupportedRuns = parseMd(unsupported)[0].runs;
+    expect(citationRuns(unsupported)).toEqual([]);
+    expect(unsupportedRuns.map(run => run.text).join('')).toBe(unsupported);
+
+    for (const literal of [
+      '[@alpha',
+      '[@al<em></em>pha, p. 2]',
+    ]) {
+      expect(citationRuns(literal)).toEqual([]);
+      expect(
+        parseMd(literal)[0].runs.map(run => run.text).join(''),
+      ).toBe(literal);
+    }
+
+    const rawHtml = '<div>' + unsupported + '</div>';
+    expect(citationRuns(rawHtml)).toEqual([]);
+    expect(parseMd(rawHtml)[0].runs.map(run => run.text).join('')).toBe(rawHtml);
+
+    const table = parseMd(
+      '<table><tr><td>' + unsupported + '</td></tr></table>',
+    )[0];
+    expect(table.rows?.[0].cells[0].runs).toEqual([
+      { type: 'text', text: unsupported },
+    ]);
+
+    const nested = parseMd('[@alpha, see [@beta]]')[0].runs;
+    expect(nested.map(run => run.type)).toEqual(['text', 'citation', 'text']);
+    expect(nested[0].text).toBe('[@alpha, see ');
+    expect(nested[1].keys).toEqual(['beta']);
+    expect(nested[2].text).toBe(']');
+  });
+
+  it('converts scanner-visible citations in raw HTML blocks', () => {
+    const runs = citationRuns(
+      '<div title="@attribute">@bare and '
+      + '[@first; <!-- @comment --> @second]</div>',
+    );
+    expect(runs.map(run => run.keys)).toEqual([
+      ['bare'],
+      ['first', 'second'],
+    ]);
+    expect(runs.map(run => run.narrative ?? false)).toEqual([true, false]);
+  });
+
+  it('preserves exact markup-split all-missing fallbacks in raw HTML', async () => {
+    const markdown = '<div>[<em>@missing</em>] '
+      + '[<em>-@suppressed</em>] [-<em>@split</em>]</div>';
+    const runs = citationRuns(markdown);
+    expect(runs.map(run => run.text)).toEqual([
+      'missing',
+      '-@suppressed',
+      '-@split',
+    ]);
+    expect(runs.map(run => run.citationSource)).toEqual([
+      '[<em>@missing</em>]',
+      '[<em>-@suppressed</em>]',
+      '[-<em>@split</em>]',
+    ]);
+    expect(runs.map(run => run.citationItems)).toEqual([
+      [{ key: 'missing', suppressAuthor: false }],
+      [{ key: 'suppressed', suppressAuthor: true }],
+      [{ key: 'split', suppressAuthor: true }],
+    ]);
+
+    const exported = await convertMdToDocx(markdown);
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(exported.docx);
+    const documentXml = await zip.files['word/document.xml'].async('string');
+    expect(documentXml).toContain('[&lt;em&gt;@missing&lt;/em&gt;]');
+    expect(documentXml).toContain('[&lt;em&gt;-@suppressed&lt;/em&gt;]');
+    expect(documentXml).toContain('[-&lt;em&gt;@split&lt;/em&gt;]');
+    expect(documentXml).not.toContain('[@em&gt;');
+  });
+
+  it('converts citations spanning markup in HTML table cells', () => {
+    const runs = citationRuns(
+      '<table><tr><td>[@first; '
+      + '<span title="@attribute">@second</span>]'
+      + '</td><td>@bare &#64;entity</td></tr></table>',
+    );
+    expect(runs.map(run => run.keys)).toEqual([
+      ['first', 'second'],
+      ['bare'],
+    ]);
+    expect(runs.map(run => run.narrative ?? false)).toEqual([false, true]);
+  });
+
+  it('keeps HTML table formatting state aligned across atomic citation groups', () => {
+    const closingInside = parseMd(
+      '<table><tr><td><em>[@alpha</em>; @beta] after</td></tr></table>',
+    )[0].rows?.[0].cells[0].runs ?? [];
+    const closingCitation = closingInside.find(run => run.type === 'citation');
+    const afterClose = closingInside.find(run => run.type === 'text' && run.text.includes('after'));
+    expect(closingCitation?.italic).toBe(true);
+    expect(afterClose?.italic).toBeUndefined();
+
+    const openingInside = parseMd(
+      '<table><tr><td>[@alpha; <em>@beta] inside</em> after</td></tr></table>',
+    )[0].rows?.[0].cells[0].runs ?? [];
+    const openingCitation = openingInside.find(run => run.type === 'citation');
+    const inside = openingInside.find(run => run.type === 'text' && run.text.includes('inside'));
+    const afterOpening = openingInside.find(run => run.type === 'text' && run.text.includes('after'));
+    expect(openingCitation?.italic).toBeUndefined();
+    expect(inside?.italic).toBe(true);
+    expect(afterOpening?.italic).toBeUndefined();
   });
 
   it('recognizes citations in visible link labels but not destinations', () => {
@@ -4378,6 +4651,16 @@ describe('parseMd bare narrative citations', () => {
     );
     expect(runs.map(run => run.keys)).toEqual([['label'], ['citation-label']]);
     expect(runs.every(run => run.narrative)).toBe(true);
+  });
+
+  it('keeps Markdown image alt text citation-inert', () => {
+    const markdown = '![@image](figure.png) and @body';
+    expect(citationRuns(markdown).map(run => run.keys)).toEqual([['body']]);
+    const image = parseMd(markdown)[0].runs.find(run => run.type === 'image');
+    expect(image).toMatchObject({
+      imageSrc: 'figure.png',
+      imageAlt: 'image',
+    });
   });
 
   it('excludes code, escapes, URIs, emails, and unsupported brackets', () => {
