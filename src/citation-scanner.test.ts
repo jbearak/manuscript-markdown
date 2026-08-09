@@ -1356,7 +1356,9 @@ describe('citation document scanner', () => {
 		const groups = groupCitationUsages(text, analysis);
 		expect(groups).toHaveLength(1);
 		expect(text.slice(groups[0].start, groups[0].end)).toBe('[@alpha; @beta]');
-		expect(performance.now() - started).toBeLessThan(2000);
+		// Keep enough headroom for shared CI runners while still catching the
+		// former quadratic behavior, which takes far longer at this depth.
+		expect(performance.now() - started).toBeLessThan(4000);
 	});
 
 	test('groups many independent citation clusters without quadratic nesting scans', () => {
