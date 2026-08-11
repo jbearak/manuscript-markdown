@@ -16,6 +16,19 @@ export interface EmbedPathRange {
   endCol: number;
 }
 
+export interface EmbedSheetRange {
+  /** The workbook path from the embed directive */
+  path: string;
+  /** The decoded worksheet name */
+  sheetName: string;
+  /** 0-based line number */
+  line: number;
+  /** Start column (inclusive) of the worksheet name, excluding quotes */
+  startCol: number;
+  /** End column (exclusive) of the worksheet name, excluding quotes */
+  endCol: number;
+}
+
 /**
  * Regex to locate the path token (first non-whitespace token after `embed:`)
  * inside a validated embed directive line.  Captures:
@@ -63,4 +76,145 @@ export function findEmbedPathRanges(text: string): EmbedPathRange[] {
   }
 
   return results;
+}
+
+interface SourceToken {
+  value: string;
+  start: number;
+  end: number;
+  /** Source ranges for quoted portions, excluding their quote characters. */
+  quotedParts: Array<{ start: number; end: number }>;
+}
+
+/**
+ * Tokenize a directive body while retaining source locations. This mirrors the
+ * embed parser's space-delimited, quote-aware grammar, but rejects an
+ * unterminated quoted value so malformed directives do not become links.
+ */
+function tokenizeWithRanges(body: string, bodyStart: number): SourceToken[] | null {
+  const tokens: SourceToken[] = [];
+  let i = 0;
+
+  while (i < body.length) {
+    while (i < body.length && body[i] === ' ') i++;
+    if (i >= body.length) break;
+
+    const start = i;
+    let value = '';
+    const quotedParts: Array<{ start: number; end: number }> = [];
+
+    while (i < body.length && body[i] !== ' ') {
+      if (body[i] === '"' || body[i] === "'") {
+        const quote = body[i];
+        i++;
+        const quotedStart = i;
+        while (i < body.length && body[i] !== quote) {
+          value += body[i];
+          i++;
+        }
+        if (i >= body.length) return null;
+        quotedParts.push({
+          start: bodyStart + quotedStart,
+          end: bodyStart + i,
+        });
+        i++;
+      } else {
+        value += body[i];
+        i++;
+      }
+    }
+
+    if (value) {
+      tokens.push({ value, start: bodyStart + start, end: bodyStart + i, quotedParts });
+    }
+  }
+
+  return tokens;
+}
+
+/**
+ * Scan document text and return source ranges for worksheet names in embed
+ * directives. Only the value text is ranged, so quotes remain ordinary text.
+ */
+export function findEmbedSheetRanges(text: string): EmbedSheetRange[] {
+  const results: EmbedSheetRange[] = [];
+  const codeRegions = computeCodeRegions(text);
+  const lines = text.split('\n');
+
+  let offset = 0;
+  for (let lineNumber = 0; lineNumber < lines.length; lineNumber++) {
+    const line = lines[lineNumber];
+    const lineEnd = offset + line.length;
+
+    if (!overlapsCodeRegion(offset, lineEnd, codeRegions)) {
+      const directive = parseEmbedDirective(line.trim());
+      const prefix = /<!--\s*embed:\s*/.exec(line);
+      const close = line.lastIndexOf('-->');
+
+      if (directive?.path && /\.xlsx$/i.test(directive.path) && prefix?.index !== undefined && close >= 0) {
+        const bodyStart = prefix.index + prefix[0].length;
+        const bodyEnd = close;
+        const body = line.slice(bodyStart, bodyEnd).trimEnd();
+        const tokens = tokenizeWithRanges(body, bodyStart);
+
+        // tokens[0] is the workbook path; remaining tokens are parameters.
+        for (const token of tokens?.slice(1) ?? []) {
+          const equalIndex = token.value.indexOf('=');
+          if (equalIndex <= 0 || token.value.slice(0, equalIndex).toLowerCase() !== 'sheet') {
+            continue;
+          }
+
+          const sheetName = token.value.slice(equalIndex + 1);
+          // Numeric selectors are 1-based worksheet indexes in embed syntax,
+          // while Table Viewer's public command resolves exact sheet names.
+          if (!sheetName || /^\d+$/.test(sheetName)) continue;
+
+          const source = line.slice(token.start, token.end);
+          const sourceEqualIndex = source.indexOf('=');
+          if (sourceEqualIndex < 0) continue;
+
+          const valueStart = token.start + sourceEqualIndex + 1;
+          const quotedValue = token.quotedParts.find((part) => part.start === valueStart + 1);
+          // Quotes are supported only when they wrap the whole value, matching
+          // the documented sheet="Sheet Name" form. Reject ambiguous partial
+          // quoting instead of producing a misleading source range.
+          if (
+            token.quotedParts.length > 0 &&
+            (!quotedValue || token.quotedParts.length !== 1 || quotedValue.end !== token.end - 1)
+          ) {
+            continue;
+          }
+          const startCol = quotedValue?.start ?? valueStart;
+          const endCol = quotedValue?.end ?? token.end;
+          if (startCol >= endCol) continue;
+
+          results.push({
+            path: directive.path,
+            sheetName,
+            line: lineNumber,
+            startCol,
+            endCol,
+          });
+        }
+      }
+    }
+
+    offset = lineEnd + 1;
+  }
+
+  return results;
+}
+
+/** Apply the extension-availability policy used by the document-link provider. */
+export function findAvailableEmbedSheetRanges(
+  text: string,
+  tableViewerAvailable: boolean,
+): EmbedSheetRange[] {
+  return tableViewerAvailable ? findEmbedSheetRanges(text) : [];
+}
+
+/** Build a command URI whose payload is exactly one open-at-sheet argument. */
+export function buildOpenWorksheetCommandUri(uri: string, sheetName: string): string {
+  const args = [{ uri, sheetName }];
+  return 'command:tableViewer.openWorkbookAtSheet?' + encodeURIComponent(JSON.stringify(args));
 }
