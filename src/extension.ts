@@ -40,7 +40,11 @@ import {
 	bibliographyCandidatePaths,
 	resolveBibliographyWritePathForOutput,
 } from './bibliography-paths';
-import { findEmbedPathRanges } from './embed-link-provider';
+import {
+	buildOpenWorksheetCommandUri,
+	findAvailableEmbedSheetRanges,
+	findEmbedPathRanges,
+} from './embed-link-provider';
 import {
 	FRONTMATTER_MENU_SETTINGS,
 	frontmatterSettingCommand,
@@ -236,15 +240,26 @@ export function activate(context: vscode.ExtensionContext) {
 			{ scheme: 'file', language: 'markdown' },
 			{
 				provideDocumentLinks(document: vscode.TextDocument): vscode.DocumentLink[] {
-					const ranges = findEmbedPathRanges(document.getText());
+					const text = document.getText();
+					const ranges = findEmbedPathRanges(text);
 					const docDir = path.dirname(document.uri.fsPath);
-					return ranges.map((r) => {
+					const pathLinks = ranges.map((r) => {
 						const range = new vscode.Range(r.line, r.startCol, r.line, r.endCol);
 						const absPath = path.resolve(docDir, r.path);
 						const link = new vscode.DocumentLink(range, vscode.Uri.file(absPath));
 						link.tooltip = absPath;
 						return link;
 					});
+					const tableViewerAvailable = vscode.extensions.getExtension('jbearak.table-viewer') !== undefined;
+					const sheetLinks = findAvailableEmbedSheetRanges(text, tableViewerAvailable).map((r) => {
+						const range = new vscode.Range(r.line, r.startCol, r.line, r.endCol);
+						const workbookUri = vscode.Uri.file(path.resolve(docDir, r.path));
+						const target = buildOpenWorksheetCommandUri(workbookUri.toString(), r.sheetName);
+						const link = new vscode.DocumentLink(range, vscode.Uri.parse(target));
+						link.tooltip = 'Open worksheet ' + r.sheetName;
+						return link;
+					});
+					return [...pathLinks, ...sheetLinks];
 				},
 			}
 		)
