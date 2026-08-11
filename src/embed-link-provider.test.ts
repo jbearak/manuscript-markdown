@@ -151,6 +151,20 @@ describe('findEmbedSheetRanges', () => {
     expect(findEmbedSheetRanges('<!-- embed: book.xlsx sheet="2" -->')).toEqual([]);
   });
 
+  it('links each named selector as the literal worksheet reference it contains', () => {
+    const named = '<!-- embed: book.xlsx sheet=First sheet="Second Sheet" -->';
+    const namedRanges = findEmbedSheetRanges(named);
+    expect(namedRanges.map((range) => range.sheetName)).toEqual(['First', 'Second Sheet']);
+    expect(namedRanges.map((range) => named.slice(range.startCol, range.endCol)))
+      .toEqual(['First', 'Second Sheet']);
+
+    const endingNumeric = '<!-- embed: book.xlsx sheet=First sheet=2 -->';
+    const numericRanges = findEmbedSheetRanges(endingNumeric);
+    expect(numericRanges.map((range) => range.sheetName)).toEqual(['First']);
+    expect(endingNumeric.slice(numericRanges[0].startCol, numericRanges[0].endCol))
+      .toBe('First');
+  });
+
   it('only links sheet names for XLSX embeds, case-insensitively', () => {
     expect(findEmbedSheetRanges('<!-- embed: data.csv sheet="Summary" -->')).toEqual([]);
     expect(findEmbedSheetRanges('<!-- embed: book.xls sheet="Summary" -->')).toEqual([]);
