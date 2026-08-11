@@ -8,6 +8,8 @@ import { computeCodeRegions, overlapsCodeRegion } from './code-regions';
 export interface EmbedPathRange {
   /** The unquoted file path */
   path: string;
+  /** The directive's effective last-value-wins worksheet selector, when present. */
+  sheet?: string;
   /** 0-based line number */
   line: number;
   /** Start column (inclusive) of the path text within the line */
@@ -66,7 +68,13 @@ export function findEmbedPathRanges(text: string): EmbedPathRange[] {
             // occurrence, which is the actual path position.
             const startCol = m.index! + m[0].lastIndexOf(pathText);
             const endCol = startCol + pathText.length;
-            results.push({ path: directive.path, line: i, startCol, endCol });
+            results.push({
+              path: directive.path,
+              sheet: directive.sheet,
+              line: i,
+              startCol,
+              endCol,
+            });
           }
         }
       }
@@ -217,4 +225,16 @@ export function findAvailableEmbedSheetRanges(
 export function buildOpenWorksheetCommandUri(uri: string, sheetName: string): string {
   const args = [{ uri, sheetName }];
   return 'command:tableViewer.openWorkbookAtSheet?' + encodeURIComponent(JSON.stringify(args));
+}
+
+/** Build the filepath link target, using the directive's effective worksheet when possible. */
+export function buildEmbedPathTargetUri(
+  workbookUri: string,
+  embedPath: string,
+  effectiveSheet: string | undefined,
+  tableViewerAvailable: boolean,
+): string {
+  return tableViewerAvailable && effectiveSheet && /\.xlsx$/i.test(embedPath)
+    ? buildOpenWorksheetCommandUri(workbookUri, effectiveSheet)
+    : workbookUri;
 }

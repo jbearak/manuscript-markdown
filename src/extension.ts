@@ -41,6 +41,7 @@ import {
 	resolveBibliographyWritePathForOutput,
 } from './bibliography-paths';
 import {
+	buildEmbedPathTargetUri,
 	buildOpenWorksheetCommandUri,
 	findAvailableEmbedSheetRanges,
 	findEmbedPathRanges,
@@ -243,14 +244,23 @@ export function activate(context: vscode.ExtensionContext) {
 					const text = document.getText();
 					const ranges = findEmbedPathRanges(text);
 					const docDir = path.dirname(document.uri.fsPath);
+					const tableViewerAvailable = vscode.extensions.getExtension('jbearak.table-viewer') !== undefined;
 					const pathLinks = ranges.map((r) => {
 						const range = new vscode.Range(r.line, r.startCol, r.line, r.endCol);
 						const absPath = path.resolve(docDir, r.path);
-						const link = new vscode.DocumentLink(range, vscode.Uri.file(absPath));
-						link.tooltip = absPath;
+						const workbookUri = vscode.Uri.file(absPath);
+						const target = buildEmbedPathTargetUri(
+							workbookUri.toString(),
+							r.path,
+							r.sheet,
+							tableViewerAvailable,
+						);
+						const link = new vscode.DocumentLink(range, vscode.Uri.parse(target));
+						link.tooltip = r.sheet && target !== workbookUri.toString()
+							? absPath + ' — worksheet ' + r.sheet
+							: absPath;
 						return link;
 					});
-					const tableViewerAvailable = vscode.extensions.getExtension('jbearak.table-viewer') !== undefined;
 					const sheetLinks = findAvailableEmbedSheetRanges(text, tableViewerAvailable).map((r) => {
 						const range = new vscode.Range(r.line, r.startCol, r.line, r.endCol);
 						const workbookUri = vscode.Uri.file(path.resolve(docDir, r.path));
