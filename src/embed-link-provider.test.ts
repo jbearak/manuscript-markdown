@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'bun:test';
 import {
+  buildEmbedPathTargetUri,
   buildOpenWorksheetCommandUri,
   findAvailableEmbedSheetRanges,
   findEmbedPathRanges,
@@ -36,7 +37,17 @@ describe('findEmbedPathRanges', () => {
     const ranges = findEmbedPathRanges(text);
     expect(ranges).toHaveLength(1);
     expect(ranges[0].path).toBe('data/results.xlsx');
+    expect(ranges[0].sheet).toBe('Demographics');
     expect(text.slice(ranges[0].startCol, ranges[0].endCol)).toBe('data/results.xlsx');
+  });
+
+  it('carries the effective last worksheet selector for filepath navigation', () => {
+    expect(findEmbedPathRanges(
+      '<!-- embed: book.xlsx sheet=First sheet="Second Sheet" -->',
+    )[0].sheet).toBe('Second Sheet');
+    expect(findEmbedPathRanges(
+      '<!-- embed: book.xlsx sheet=First sheet=2 -->',
+    )[0].sheet).toBe('2');
   });
 
   it('finds multiple directives across lines', () => {
@@ -201,6 +212,28 @@ describe('buildOpenWorksheetCommandUri', () => {
 
     expect(command).toBe('command:tableViewer.openWorkbookAtSheet');
     expect(JSON.parse(decodeURIComponent(query))).toEqual([{ uri, sheetName }]);
+  });
+});
+
+describe('buildEmbedPathTargetUri', () => {
+  const workbookUri = 'file:///tmp/book.xlsx';
+
+  it('opens the effective named or numeric XLSX worksheet through Table Viewer', () => {
+    for (const sheet of ['Second Sheet', '2']) {
+      const target = buildEmbedPathTargetUri(workbookUri, 'book.xlsx', sheet, true);
+      const [command, query] = target.split('?');
+      expect(command).toBe('command:tableViewer.openWorkbookAtSheet');
+      expect(JSON.parse(decodeURIComponent(query))).toEqual([{ uri: workbookUri, sheetName: sheet }]);
+    }
+  });
+
+  it('preserves the ordinary file target without an effective supported worksheet', () => {
+    expect(buildEmbedPathTargetUri(workbookUri, 'book.xlsx', undefined, true))
+      .toBe(workbookUri);
+    expect(buildEmbedPathTargetUri(workbookUri, 'book.xlsx', 'Summary', false))
+      .toBe(workbookUri);
+    expect(buildEmbedPathTargetUri('file:///tmp/data.csv', 'data.csv', 'Summary', true))
+      .toBe('file:///tmp/data.csv');
   });
 });
 
