@@ -2221,6 +2221,79 @@ describe('Nested critic runs in deletions and formatting propagation', () => {
   });
 });
 
+describe('Citations inside CriticMarkup', () => {
+  const bib = '@article{smith2020, author={Smith, John}, title={Title}, journal={J}, year={2020}}\n' +
+    '@article{jones2021, author={Jones, Ann}, title={Other}, journal={J}, year={2021}}';
+
+  const getDocumentXml = async (md: string) => {
+    const { docx } = await convertMdToDocx(md, { bibtex: bib });
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docx);
+    return zip.file('word/document.xml')!.async('text');
+  };
+
+  it('parseMd produces citation runs inside critic innerRuns', () => {
+    const tokens = parseMd('{++Added [@smith2020]++}');
+    const add = tokens.flatMap(t => t.runs).find(r => r.type === 'critic_add');
+    expect(add).toBeDefined();
+    const citation = add!.innerRuns!.find(r => r.type === 'citation');
+    expect(citation).toBeDefined();
+    expect(citation!.keys).toEqual(['smith2020']);
+  });
+
+  it('parseMd produces citation runs on both sides of a substitution', () => {
+    const tokens = parseMd('{~~Old [@smith2020]~>New [@jones2021]~~}');
+    const sub = tokens.flatMap(t => t.runs).find(r => r.type === 'critic_sub');
+    expect(sub).toBeDefined();
+    expect(sub!.oldRuns!.find(r => r.type === 'citation')?.keys).toEqual(['smith2020']);
+    expect(sub!.newRuns!.find(r => r.type === 'citation')?.keys).toEqual(['jones2021']);
+  });
+
+  it('exports a Zotero field inside w:ins for citations in additions', async () => {
+    const doc = await getDocumentXml('This is an example {++with a citation [@smith2020]++}.');
+    const insMatch = doc.match(/<w:ins[^>]*>([\s\S]*?)<\/w:ins>/);
+    expect(insMatch).toBeTruthy();
+    expect(insMatch![1]).toContain('ADDIN ZOTERO_ITEM CSL_CITATION');
+    expect(insMatch![1]).toContain('smith2020');
+  });
+
+  it('exports the new-side citation of a substitution as a field and the old side as literal deleted text', async () => {
+    const doc = await getDocumentXml('{~~Old [@smith2020]~>New [@jones2021]~~}');
+    const delMatch = doc.match(/<w:del[^>]*>([\s\S]*?)<\/w:del>/);
+    const insMatch = doc.match(/<w:ins[^>]*>([\s\S]*?)<\/w:ins>/);
+    expect(delMatch).toBeTruthy();
+    expect(insMatch).toBeTruthy();
+    // Old side: literal syntax as deleted text, no field
+    expect(delMatch![1]).toContain('<w:delText>[@smith2020]</w:delText>');
+    expect(delMatch![1]).not.toContain('ZOTERO_ITEM');
+    // New side: live field
+    expect(insMatch![1]).toContain('ADDIN ZOTERO_ITEM CSL_CITATION');
+    expect(insMatch![1]).toContain('jones2021');
+  });
+
+  it('renders citations in deletions as literal deleted text without a field', async () => {
+    const doc = await getDocumentXml('{--Removed [@smith2020]--}');
+    const delMatch = doc.match(/<w:del[^>]*>([\s\S]*?)<\/w:del>/);
+    expect(delMatch).toBeTruthy();
+    expect(delMatch![1]).toContain('<w:delText>[@smith2020]</w:delText>');
+    expect(doc).not.toContain('ZOTERO_ITEM');
+  });
+
+  it('includes added citations in the bibliography but not deleted-only ones', async () => {
+    const md = '---\ncsl: apa\n---\n{++Added [@smith2020]++} and {--removed [@jones2021]--}\n';
+    const doc = await getDocumentXml(md);
+    expect(doc).toContain('ZOTERO_BIBL');
+    const biblMatch = doc.match(/ZOTERO_BIBL([\s\S]*)/);
+    expect(biblMatch![1]).toContain('Smith');
+    expect(biblMatch![1]).not.toContain('Jones');
+  });
+
+  it('does not warn about missing keys for resolvable citations inside additions', async () => {
+    const { warnings } = await convertMdToDocx('{++Added [@smith2020]++}', { bibtex: bib });
+    expect(warnings).toEqual([]);
+  });
+});
+
 describe('Footnote parsing', () => {
   it('parseMd produces footnote_ref runs for [^1]', () => {
     const tokens = parseMd('Hello[^1] world');
