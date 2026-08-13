@@ -694,7 +694,10 @@ function createCriticInnerMarkdownIt(): MarkdownIt {
   const md = createMarkdownIt();
   // Inner parsing should recurse into regular inline formatting, but not into
   // other top-level custom syntaxes that carry separate document semantics.
-  md.inline.ruler.disable(['comment_range', 'footnote_ref', 'citation']);
+  // Citations stay enabled: inserted/new-side citations become Zotero fields,
+  // deleted/old-side ones render as literal deleted text (see
+  // generateDeletedCriticContent).
+  md.inline.ruler.disable(['comment_range', 'footnote_ref']);
   return md;
 }
 
@@ -749,7 +752,7 @@ function normalizeCriticInnerRuns(runs: MdRun[]): MdRun[] {
       continue;
     }
 
-    if (run.type === 'math') {
+    if (run.type === 'math' || run.type === 'citation') {
       normalized.push(run);
       continue;
     }
@@ -4719,7 +4722,9 @@ function formatCriticInnerRuns(runs: MdRun[] | undefined, outer: MdRun, forced: 
       formatted.push(run);
       continue;
     }
-    if (run.type === 'math') {
+    if (run.type === 'math' || run.type === 'citation') {
+      // Citation visible text comes from the field result (CSL/fallback), so
+      // outer formatting is not merged in — same as citations outside CriticMarkup.
       formatted.push(run);
       continue;
     }
@@ -4798,6 +4803,16 @@ function generateDeletedCriticContent(
       if (run.type === 'critic_highlight' && run.text) {
         xml += generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr);
       }
+      continue;
+    }
+    if (run.type === 'citation') {
+      // A live Zotero field inside <w:del> is unsafe (Word serializes deleted
+      // field instructions as w:delInstrText, and Zotero may refresh deleted
+      // fields), so deleted citations keep their literal source syntax.
+      const literal = run.text.startsWith('-@') ? '[' + run.text + ']' : '[@' + run.text + ']';
+      const merged = mergeRunFormatting({ type: 'text', text: literal }, outer, forced);
+      const rPr = generateRPr(merged, extraRPr);
+      xml += '<w:r>' + (rPr ? rPr : '') + delText(literal) + '</w:r>';
       continue;
     }
     if (run.type !== 'text' || !run.text) continue;
@@ -6513,8 +6528,10 @@ export async function convertMdToDocx(
           const bodyText = footnoteDefs.get(run.footnoteLabel);
           if (bodyText) collectCitedKeys(parseMd(bodyText));
         }
-        if (run.innerRuns) collectFromRuns(run.innerRuns);
-        if (run.oldRuns) collectFromRuns(run.oldRuns);
+        // Deleted CriticMarkup content ({--...--} innerRuns, {~~old~>...~~}
+        // oldRuns) renders citations as literal deleted text, not fields —
+        // don't register those keys with citeproc or the bibliography.
+        if (run.innerRuns && run.type !== 'critic_del') collectFromRuns(run.innerRuns);
         if (run.newRuns) collectFromRuns(run.newRuns);
       }
     };
