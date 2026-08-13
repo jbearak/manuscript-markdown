@@ -251,11 +251,11 @@ Buttons: **Replace** · **New Name** · **Cancel**
 
 Choosing **New Name** opens a save-as dialog.
 
-When the export finishes, a notification appears in the bottom-right corner with an **Open in Word** button (since `.docx` files aren't opened directly in the editor).
+When the export finishes, a notification appears in the bottom-right corner. In a local workspace it has an **Open in Word** button. In a remote workspace (such as SSH, Codespaces, or a dev container), it has a **Show in Explorer** button when the generated DOCX is inside an open workspace folder. For other remote locations, the button is **Copy Path**.
 
-**Success** — `Exported to "<filename>"` with an **Open in Word** button.
+**Success** — `Exported to "<filename>"` with the appropriate post-export action.
 
-**Success with warnings** — `Exported to "<filename>" with warnings: <warnings>` with an **Open in Word** button.
+**Success with warnings** — `Exported to "<filename>" with warnings: <warnings>` with the appropriate post-export action.
 
 **Error** — `"Export to Word failed: <error>"`
 
@@ -267,12 +267,14 @@ Behaves the same as [Export to Word](#export-to-word-md--docx), but first shows 
 
 ---
 
-### Open in Word
+### Post-Export Action
 
 | Scenario | Message |
 |----------|---------|
-| OS could not open | `"Failed to open file in external application."` |
-| Other error | `"Failed to open file: <error>"` |
+| Local OS could not open the DOCX | `"Failed to open file in external application."` |
+| Other local open error | `"Failed to open file: <error>"` |
+| Remote Explorer reveal error | `"Failed to show exported file in Explorer: <error>. The file path was copied instead."` |
+| Remote reveal and path-copy error | `"Failed to show exported file in Explorer: <error>. Failed to copy its path: <clipboard error>"` |
 
 ---
 
