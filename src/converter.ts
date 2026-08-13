@@ -268,6 +268,7 @@ export type ContentItem =
       blockquoteIndentUnitTwips?: 240 | 720; // base indent unit for blockquote styles
       emptyParagraphCount?: number; // count of collapsed consecutive empty paragraphs
       indentOverride?: 'indent' | 'no-indent'; // per-paragraph indent override for round-trip
+      paraMarkRevision?: RevisionInfo; // w:ins/w:del on the paragraph mark (pPr > rPr) — whole paragraph inserted/deleted
     }
   | { type: 'math'; latex: string; display: boolean; commentIds: Set<string>; revision?: RevisionInfo }
   | { type: 'footnote_ref'; noteId: string; noteKind: 'footnote' | 'endnote'; commentIds: Set<string>; revision?: RevisionInfo }
@@ -2628,6 +2629,7 @@ export async function extractDocumentContent(
           let paraFormatting = currentFormatting;
           let isSpacerParagraph = false;
           let isSectionBreakHandled = false;
+          let paraMarkRevision: RevisionInfo | undefined;
 
           const paraChildren = asXmlNodes(node[key]);
           for (const child of paraChildren) {
@@ -2714,6 +2716,19 @@ export async function extractDocumentContent(
               if (pRPrElement) {
                 const pRPrChildren = asXmlNodes(pRPrElement['w:rPr']);
                 paraFormatting = parseRunProperties(pRPrChildren, currentFormatting);
+                // Paragraph-mark revision (w:ins/w:del inside pPr > rPr):
+                // the whole paragraph was inserted/deleted as a unit.
+                for (const rPrChild of pRPrChildren) {
+                  const revKey = Object.keys(rPrChild).find(k => k in REVISION_ELEMENTS);
+                  if (revKey) {
+                    paraMarkRevision = {
+                      type: REVISION_ELEMENTS[revKey],
+                      author: getAttr(rPrChild, 'author'),
+                      date: getAttr(rPrChild, 'date'),
+                    };
+                    break;
+                  }
+                }
               }
               break;
             }
@@ -2769,6 +2784,7 @@ export async function extractDocumentContent(
             if (isCodeBlock) paraItem.isCodeBlock = true;
             if (customStyle) paraItem.customStyleName = customStyle;
             if (paragraphLeftIndentTwips !== undefined) paraItem.paragraphLeftIndentTwips = paragraphLeftIndentTwips;
+            if (paraMarkRevision && headingLevel) paraItem.paraMarkRevision = paraMarkRevision;
             target.push(paraItem);
           }
           walk(paraChildren, paraFormatting, target, inTableCell, currentRevision);
@@ -4772,6 +4788,10 @@ export function buildMarkdown(
   // marker-only form (`> [!TYPE]\n> ...`) so callout/paragraph boundaries stay
   // stable on DOCX -> MD conversion.
   let pendingAlertInlinePrefixForHardBreak: string | undefined;
+  // Heading whose paragraph mark is inserted/deleted (whole-paragraph track
+  // change): the `### ` marker must be re-inserted inside the leading Critic
+  // span ({++### heading++}) rather than emitted before it.
+  let pendingHeadingCriticMarker: string | undefined;
   let lastBlockquoteGroupIndex: number | undefined;
   let pendingPostContentGroupIndex: number | undefined;
   // Track previous blockquote type to detect group boundaries when gap
@@ -5158,7 +5178,14 @@ export function buildMarkdown(
         lastAlertParagraphKey = undefined;
         pendingAlertPrefixStrip = undefined;
         pendingAlertInlinePrefixForHardBreak = undefined;
-        output.push('#'.repeat(item.headingLevel) + ' ');
+        if (item.paraMarkRevision) {
+          // Whole-paragraph insertion/deletion (paragraph mark carries
+          // w:ins/w:del): the heading marker belongs inside the Critic span
+          // ({++### heading++}), so defer it to the rendered inline text.
+          pendingHeadingCriticMarker = '#'.repeat(item.headingLevel) + ' ';
+        } else {
+          output.push('#'.repeat(item.headingLevel) + ' ');
+        }
       } else if (item.listMeta) {
         lastAlertParagraphKey = undefined;
         pendingAlertPrefixStrip = undefined;
@@ -5582,6 +5609,19 @@ export function buildMarkdown(
     }
     pendingAlertPrefixStrip = undefined;
     pendingAlertInlinePrefixForHardBreak = undefined;
+    if (pendingHeadingCriticMarker !== undefined) {
+      // Re-insert the heading marker inside the leading Critic span so the
+      // whole-paragraph form {++### heading++} round-trips. If the inline
+      // content doesn't start with a Critic addition/deletion (unexpected),
+      // fall back to a plain heading prefix.
+      const openMatch = /^\{(\+\+|--)/.exec(textOut);
+      if (openMatch) {
+        textOut = textOut.slice(0, openMatch[0].length) + pendingHeadingCriticMarker + textOut.slice(openMatch[0].length);
+      } else {
+        textOut = pendingHeadingCriticMarker + textOut;
+      }
+      pendingHeadingCriticMarker = undefined;
+    }
     if (rendered.deferredComments.length > 0) {
       // Strip trailing newlines (from <w:br/> between comment references in round-tripped DOCX)
       output.push(textOut.replace(/(\\?\n)+$/, ''));
