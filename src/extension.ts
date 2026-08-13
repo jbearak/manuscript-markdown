@@ -51,6 +51,7 @@ import {
 	frontmatterSettingCommand,
 	getFrontmatterSettingEdit,
 } from './frontmatter-settings';
+import { getPostExportAction } from './post-export-action';
 
 // --- Implementation notes ---
 // - Editor decorations: use light/dark sub-properties for theme-aware backgrounds
@@ -1346,6 +1347,7 @@ function applyTableFormatting(formatter: (text: string) => formatting.TextTransf
 interface MdExportInput {
 	markdown: string;
 	basePath: string;
+	sourceUri: vscode.Uri;
 	bibtex?: string;
 }
 
@@ -1378,8 +1380,9 @@ async function resolveBibliographyWriteUriForOutput(bibliography: string, mdDir:
 
 async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undefined> {
 	let markdown: string;
-	let basePath: string;
+	let sourceUri: vscode.Uri;
 	if (uri && uri.scheme !== 'webview-panel') {
+		sourceUri = uri;
 		const openDoc = vscode.workspace.textDocuments.find(
 			doc => doc.uri.toString() === uri.toString()
 		);
@@ -1389,7 +1392,6 @@ async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undef
 			const data = await vscode.workspace.fs.readFile(uri);
 			markdown = new TextDecoder().decode(data);
 		}
-		basePath = uri.fsPath.replace(/\.md$/i, '');
 	} else {
 		// Try active text editor, then visible editors, then the active preview tab
 		const editor = vscode.window.activeTextEditor?.document.languageId === 'markdown'
@@ -1397,7 +1399,7 @@ async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undef
 			: vscode.window.visibleTextEditors.find(e => e.document.languageId === 'markdown');
 		if (editor) {
 			markdown = editor.document.getText();
-			basePath = editor.document.uri.fsPath.replace(/\.md$/i, '');
+			sourceUri = editor.document.uri;
 		} else {
 			// Full-screen preview: no visible editor, find the markdown document
 			const mdDoc = vscode.workspace.textDocuments.find(
@@ -1408,10 +1410,11 @@ async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undef
 				return undefined;
 			}
 			markdown = mdDoc.getText();
-			basePath = mdDoc.uri.fsPath.replace(/\.md$/i, '');
+			sourceUri = mdDoc.uri;
 		}
 	}
 
+	const basePath = getOutputBasePath(sourceUri.fsPath);
 	const mdDir = path.dirname(basePath);
 	const { metadata } = parseFrontmatter(markdown);
 
@@ -1440,7 +1443,12 @@ async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undef
 		}
 	}
 
-	return { markdown, basePath, bibtex };
+	return { markdown, basePath, sourceUri, bibtex };
+}
+
+interface DocxOutputCandidate {
+	basePath: string;
+	uri: vscode.Uri;
 }
 
 interface DocxOutputResolution {
@@ -1449,8 +1457,22 @@ interface DocxOutputResolution {
 	writeThrough: boolean;
 }
 
-async function resolveDocxOutputUri(basePath: string): Promise<DocxOutputResolution | undefined> {
-	let docxUri = vscode.Uri.file(basePath + '.docx');
+function docxUriForSource(sourceUri: vscode.Uri): vscode.Uri {
+	if (sourceUri.scheme === 'file' || sourceUri.scheme === 'vscode-remote') {
+		return sourceUri.with({
+			path: getOutputBasePath(sourceUri.path) + '.docx',
+			query: '',
+			fragment: '',
+		});
+	}
+	return vscode.Uri.file(getOutputBasePath(sourceUri.fsPath) + '.docx');
+}
+
+async function resolveDocxOutputUri(
+	candidate: DocxOutputCandidate
+): Promise<DocxOutputResolution | undefined> {
+	const { basePath } = candidate;
+	let docxUri = candidate.uri;
 	const docxExists = await fileExists(docxUri);
 	const docxIsSymlink = await isSymlink(docxUri.fsPath);
 	if (!docxExists && !docxIsSymlink) {
@@ -1511,16 +1533,16 @@ async function exportMdToDocx(uri?: vscode.Uri, templateDocx?: Uint8Array): Prom
 		return;
 	}
 
+	const initialDocxUri = docxUriForSource(input.sourceUri);
+	const initialDocxExists = await fileExists(initialDocxUri);
+
 	// Auto-use existing .docx as style template when no explicit template is provided
-	if (!templateDocx) {
-		const existingDocxUri = vscode.Uri.file(input.basePath + '.docx');
-		if (await fileExists(existingDocxUri)) {
-			try {
-				templateDocx = new Uint8Array(await readDocxFile(existingDocxUri));
-			} catch {
-				// readDocxFile failed (user cancelled the sandbox dialog, or IO error) — abort export
-				return;
-			}
+	if (!templateDocx && initialDocxExists) {
+		try {
+			templateDocx = new Uint8Array(await readDocxFile(initialDocxUri));
+		} catch {
+			// readDocxFile failed (user cancelled the sandbox dialog, or IO error) — abort export
+			return;
 		}
 	}
 
@@ -1553,7 +1575,10 @@ async function exportMdToDocx(uri?: vscode.Uri, templateDocx?: Uint8Array): Prom
 		}
 	});
 
-	const docxOutput = await resolveDocxOutputUri(input.basePath);
+	const docxOutput = await resolveDocxOutputUri({
+		basePath: input.basePath,
+		uri: initialDocxUri,
+	});
 	if (!docxOutput) {
 		return;
 	}
@@ -1573,26 +1598,55 @@ async function exportMdToDocx(uri?: vscode.Uri, templateDocx?: Uint8Array): Prom
 	}
 	const docxUri = docxOutput.uri;
 
-	const filename = docxUri.fsPath.split(/[/\\]/).pop()!;
-	const action = result.warnings.length > 0
+	await showPostExportNotification(docxUri, result.warnings);
+}
+
+async function showPostExportNotification(docxUri: vscode.Uri, warnings: string[]): Promise<void> {
+	const filename = path.basename(docxUri.fsPath);
+	const postExportAction = getPostExportAction(
+		vscode.env.remoteName,
+		vscode.workspace.getWorkspaceFolder(docxUri) !== undefined
+	);
+	const action = warnings.length > 0
 		? await vscode.window.showWarningMessage(
-			`Exported to "${filename}" with warnings: ${result.warnings.join('; ')}`,
-			'Open in Word'
+			`Exported to "${filename}" with warnings: ${warnings.join('; ')}`,
+			postExportAction.label
 		)
 		: await vscode.window.showInformationMessage(
 			`Exported to "${filename}".`,
-			'Open in Word'
+			postExportAction.label
 		);
-	if (action === 'Open in Word') {
-		try {
-			const opened = await vscode.env.openExternal(docxUri);
-			if (!opened) {
-				vscode.window.showErrorMessage('Failed to open file in external application.');
+	if (action !== postExportAction.label) {
+		return;
+	}
+
+	switch (postExportAction.kind) {
+		case 'revealInExplorer':
+			try {
+				await vscode.commands.executeCommand('revealInExplorer', docxUri);
+			} catch (err: unknown) {
+				const message = err instanceof Error ? err.message : String(err);
+				try {
+					await vscode.env.clipboard.writeText(docxUri.fsPath);
+					vscode.window.showErrorMessage(
+						`Failed to show exported file in Explorer: ${message}. The file path was copied instead.`
+					);
+				} catch (clipboardErr: unknown) {
+					const clipboardMessage = clipboardErr instanceof Error
+						? clipboardErr.message
+						: String(clipboardErr);
+					vscode.window.showErrorMessage(
+						`Failed to show exported file in Explorer: ${message}. Failed to copy its path: ${clipboardMessage}`
+					);
+				}
 			}
-		} catch (err: unknown) {
-			const message = err instanceof Error ? err.message : String(err);
-			vscode.window.showErrorMessage(`Failed to open file: ${message}`);
-		}
+			return;
+		case 'copyPath':
+			await vscode.env.clipboard.writeText(docxUri.fsPath);
+			return;
+		case 'openExternal':
+			await vscode.commands.executeCommand('manuscript-markdown.openInWord', docxUri);
+			return;
 	}
 }
 

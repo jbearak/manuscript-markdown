@@ -174,6 +174,24 @@ describe('Toolbar Configuration Property-Based Tests', () => {
     });
   });
 
+  describe('DOCX actions in remote workspaces', () => {
+    it('hides Open in Word from DOCX menus when a remote host is active', () => {
+      const packageJson = loadPackageJson();
+      const expectedWhen = 'resourceExtname == .docx && !remoteName';
+      const menuIds = ['docx.actions', 'explorer/context'];
+
+      for (const menuId of menuIds) {
+        const entries = packageJson.contributes?.menus?.[menuId] || [];
+        const openInWord = entries.find(
+          (entry: any) => entry.command === 'manuscript-markdown.openInWord'
+        );
+
+        expect(openInWord).toBeDefined();
+        expect(openInWord.when).toBe(expectedWhen);
+      }
+    });
+  });
+
   describe('Export to Word menu', () => {
     it('groups every YAML frontmatter setting into submenus', () => {
       const packageJson = loadPackageJson();
