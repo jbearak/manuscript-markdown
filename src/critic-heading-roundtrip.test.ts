@@ -127,6 +127,23 @@ describe('headings inside CriticMarkup spans', () => {
     }
   });
 
+  it('empty revised heading paragraph does not leak its marker into the next paragraph', async () => {
+    // Simulate Word state where the inserted heading paragraph has no runs
+    // left (only the paragraph-mark w:ins survives): strip the inserted run
+    // from a generated docx. The deferred marker must serialize as its own
+    // {++### ++} span instead of prefixing the following body paragraph.
+    const { docx } = await convertMdToDocx('{++### h++}\n\nbody text\n');
+    const zip = await JSZip.loadAsync(docx);
+    let doc = await zip.file('word/document.xml')!.async('string');
+    doc = doc.replace(/<w:ins w:id="\d+"[^>]*><w:r><w:t>h<\/w:t><\/w:r><\/w:ins>/, '');
+    expect(doc).toContain('<w:pStyle w:val="Heading3"/><w:rPr><w:ins'); // paragraph-mark revision still present
+    zip.file('word/document.xml', doc);
+    const edited = await zip.generateAsync({ type: 'uint8array' });
+    const rt = await convertDocx(edited);
+    const body = stripFrontmatter(rt.markdown);
+    expect(body).toBe('{++### ++}\n\nbody text\n');
+  });
+
   it('formatted payload keeps heading style and reaches a round-trip fixed point', async () => {
     const md = '{++### **bold** heading++}\n';
     const once = await roundTrip(md);

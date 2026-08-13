@@ -4790,8 +4790,17 @@ export function buildMarkdown(
   let pendingAlertInlinePrefixForHardBreak: string | undefined;
   // Heading whose paragraph mark is inserted/deleted (whole-paragraph track
   // change): the `### ` marker must be re-inserted inside the leading Critic
-  // span ({++### heading++}) rather than emitted before it.
-  let pendingHeadingCriticMarker: string | undefined;
+  // span ({++### heading++}) rather than emitted before it. revType is kept
+  // so a heading with no inline content (empty inserted paragraph) can still
+  // be serialized as its own {++### ++} / {--### --} span instead of leaking
+  // the marker into the next paragraph.
+  let pendingHeadingCriticMarker: { marker: string; revType: 'addition' | 'deletion' } | undefined;
+  const flushPendingHeadingCriticMarker = () => {
+    if (pendingHeadingCriticMarker === undefined) return;
+    const { marker, revType } = pendingHeadingCriticMarker;
+    output.push(revType === 'addition' ? '{++' + marker + '++}' : '{--' + marker + '--}');
+    pendingHeadingCriticMarker = undefined;
+  };
   let lastBlockquoteGroupIndex: number | undefined;
   let pendingPostContentGroupIndex: number | undefined;
   // Track previous blockquote type to detect group boundaries when gap
@@ -4874,6 +4883,10 @@ export function buildMarkdown(
     }
 
     if (item.type === 'para') {
+      // A pending heading marker still unconsumed here means the revised
+      // heading paragraph had no inline content — serialize it as its own
+      // empty span before starting the next paragraph.
+      flushPendingHeadingCriticMarker();
       if (item.isBlockquoteSpacer) {
         i++;
         continue;
@@ -5182,7 +5195,10 @@ export function buildMarkdown(
           // Whole-paragraph insertion/deletion (paragraph mark carries
           // w:ins/w:del): the heading marker belongs inside the Critic span
           // ({++### heading++}), so defer it to the rendered inline text.
-          pendingHeadingCriticMarker = '#'.repeat(item.headingLevel) + ' ';
+          pendingHeadingCriticMarker = {
+            marker: '#'.repeat(item.headingLevel) + ' ',
+            revType: item.paraMarkRevision.type,
+          };
         } else {
           output.push('#'.repeat(item.headingLevel) + ' ');
         }
@@ -5445,6 +5461,7 @@ export function buildMarkdown(
     }
 
     if (item.type === 'table') {
+      flushPendingHeadingCriticMarker();
       if (incomingSep !== null) {
         output.push(incomingSep);
       } else if (output.length > 0 && !output[output.length - 1].endsWith('\n\n')) {
@@ -5616,9 +5633,9 @@ export function buildMarkdown(
       // fall back to a plain heading prefix.
       const openMatch = /^\{(\+\+|--)/.exec(textOut);
       if (openMatch) {
-        textOut = textOut.slice(0, openMatch[0].length) + pendingHeadingCriticMarker + textOut.slice(openMatch[0].length);
+        textOut = textOut.slice(0, openMatch[0].length) + pendingHeadingCriticMarker.marker + textOut.slice(openMatch[0].length);
       } else {
-        textOut = pendingHeadingCriticMarker + textOut;
+        textOut = pendingHeadingCriticMarker.marker + textOut;
       }
       pendingHeadingCriticMarker = undefined;
     }
@@ -5632,6 +5649,8 @@ export function buildMarkdown(
     }
     i = rendered.nextIndex;
   }
+  // Trailing empty revised heading: serialize its deferred marker.
+  flushPendingHeadingCriticMarker();
 
   // Append footnote definitions
   if (options?.notes) {
