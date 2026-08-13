@@ -115,6 +115,7 @@ export interface MdToken {
   tableDecimalMark?: TableDecimalMark;
   tableDigitGrouping?: TableDigitGrouping;
   gridSourceColWidths?: number[]; // column char-widths inferred from +---+---+ source; persisted for round-trip fidelity and Word Online layout
+  criticParaMark?: 'addition' | 'deletion'; // heading promoted from a full-paragraph {++### ...++} / {--### ...--} span; emit paragraph-mark revision
   bibliographyMarker?: true;  // sentinel: <!-- references --> / <!-- bibliography --> placement marker
   customStyleOpen?: string;   // sentinel: start of custom style block (style name)
   customStyleClose?: true;    // sentinel: end of custom style block
@@ -1937,6 +1938,56 @@ function annotateBlockquoteAlert(tokens: MdToken[], level: number): MdToken[] {
   return result;
 }
 
+const ATX_CRITIC_HEADING_RE = /^(#{1,6}) /;
+
+/**
+ * Promote a paragraph consisting solely of a full-paragraph {++### ...++} or
+ * {--### ...--} span whose payload starts with an ATX heading marker into a
+ * heading token. The heading carries criticParaMark so the generator emits a
+ * paragraph-mark <w:ins>/<w:del> (Word's representation of a wholly
+ * inserted/deleted heading paragraph); the converter uses that mark to
+ * reconstruct the {++### ...++} form instead of ### {++...++}.
+ * Substitutions ({~~...~>...~~}) are not promoted — old and new sides could
+ * carry different heading levels, which one Word paragraph cannot express.
+ */
+function promoteCriticHeadingParagraph(runs: MdRun[]): MdToken | undefined {
+  if (runs.length === 0) return undefined;
+  const kind = runs[0].type;
+  if (kind !== 'critic_add' && kind !== 'critic_del') return undefined;
+  // Every run must be the same critic kind with matching author/date, so the
+  // whole paragraph is one insertion/deletion (formatted payloads round-trip
+  // from Word as several adjacent spans: {++### ++}{++**bold**++}...).
+  if (!runs.every(r => r.type === kind && r.author === runs[0].author && r.date === runs[0].date)) return undefined;
+  const run = runs[0];
+  if (!run.text || run.text.includes('\n')) return undefined;
+  const m = ATX_CRITIC_HEADING_RE.exec(run.text);
+  if (!m) return undefined;
+  const prefix = m[0];
+  const remainder = run.text.slice(prefix.length);
+  if (!remainder.trim() && runs.length === 1) return undefined;
+  let innerRuns = run.innerRuns;
+  if (innerRuns && innerRuns.length > 0) {
+    const first = innerRuns[0];
+    // The literal marker must sit at the start of the first inner text run;
+    // otherwise (unexpected inner structure) leave the paragraph untouched.
+    if (first.type !== 'text' || !(first.text || '').startsWith(prefix)) return undefined;
+    const strippedText = (first.text || '').slice(prefix.length);
+    innerRuns = strippedText
+      ? [{ ...first, text: strippedText }, ...innerRuns.slice(1)]
+      : innerRuns.slice(1);
+  }
+  const promotedFirst: MdRun = { ...run, text: remainder, ...(innerRuns ? { innerRuns } : {}) };
+  const promotedRuns = remainder || innerRuns === undefined || innerRuns.length > 0
+    ? [promotedFirst, ...runs.slice(1)]
+    : runs.slice(1);
+  return {
+    type: 'heading',
+    level: m[1].length,
+    criticParaMark: kind === 'critic_add' ? 'addition' : 'deletion',
+    runs: promotedRuns,
+  };
+}
+
 function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel = 0, warnings?: string[], sourceLines?: string[]): MdToken[] {
   const result: MdToken[] = [];
   let i = 0;
@@ -1958,10 +2009,13 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
 
       case 'paragraph_open': {
         const paragraphClose = findClosingToken(tokens, i, 'paragraph_close');
-        result.push({
-          type: 'paragraph',
-          runs: convertInlineTokens(tokens.slice(i + 1, paragraphClose))
-        });
+        const paraRuns = convertInlineTokens(tokens.slice(i + 1, paragraphClose));
+        // Only promote at top level: nested contexts (blockquotes, lists) remap
+        // token types and would clobber the heading level.
+        const promoted = listLevel === 0 && blockquoteLevel === 0
+          ? promoteCriticHeadingParagraph(paraRuns)
+          : undefined;
+        result.push(promoted ?? { type: 'paragraph', runs: paraRuns });
         i = paragraphClose + 1;
         break;
       }
@@ -5258,9 +5312,24 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
   }
 
   switch (token.type) {
-    case 'heading':
-      pPr = '<w:pPr><w:pStyle w:val="Heading' + (token.level || 1) + '"/></w:pPr>';
+    case 'heading': {
+      // Paragraph-mark revision for headings promoted from full-paragraph
+      // {++### ...++} / {--### ...--} spans. Marking the paragraph mark as
+      // inserted/deleted is how Word represents a wholly added/removed
+      // paragraph, and it lets the converter reconstruct the original
+      // {++### ...++} form (marker inside the Critic span) on round-trip.
+      let paraMarkRPr = '';
+      if (token.criticParaMark) {
+        const run = token.runs[0];
+        const author = run?.author || options?.authorName || 'Unknown';
+        const date = normalizeToUtcIso(run?.date || '', state.timezone);
+        const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
+        const el = token.criticParaMark === 'addition' ? 'w:ins' : 'w:del';
+        paraMarkRPr = '<w:rPr><' + el + ' w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '/></w:rPr>';
+      }
+      pPr = '<w:pPr><w:pStyle w:val="Heading' + (token.level || 1) + '"/>' + paraMarkRPr + '</w:pPr>';
       break;
+    }
     case 'list_item':
       if (token.taskChecked !== undefined) {
         const leftIndent = 720 * (token.level || 1);
