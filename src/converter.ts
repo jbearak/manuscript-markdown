@@ -8,6 +8,7 @@ import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './ima
 import { parseBibtex, mergeBibtex } from './bibtex-parser';
 import { customStyleId } from './md-to-docx';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
+import { publicStyleNameForZoteroId, zoteroStyleIdForName } from './csl-loader';
 
 // --- Implementation notes ---
 // Table parsing:
@@ -976,8 +977,6 @@ export const ZOTERO_KEY_RE = /\/items\/([A-Z0-9]{8})$/;
 
 // Zotero document preferences extraction
 
-const ZOTERO_STYLE_PREFIX = 'http://www.zotero.org/styles/';
-
 export async function extractZoteroPrefs(data: Uint8Array | JSZip): Promise<ZoteroDocPrefs | undefined> {
   const zip = data instanceof JSZip ? data : await loadZip(data);
   const parsed = await readZipXml(zip, 'docProps/custom.xml');
@@ -1916,20 +1915,14 @@ async function extractEndnotes(zip: JSZip, context?: NoteBodyContext): Promise<M
   return extractNotes(zip, 'word/endnotes.xml', 'w:endnote', context);
 }
 
-/** Strip the Zotero styles URL prefix to get a short style name. */
+/** Strip the Zotero styles URL prefix and map canonical IDs to public aliases. */
 export function zoteroStyleShortName(styleId: string): string {
-  if (styleId.startsWith(ZOTERO_STYLE_PREFIX)) {
-    return styleId.slice(ZOTERO_STYLE_PREFIX.length);
-  }
-  return styleId;
+  return publicStyleNameForZoteroId(styleId);
 }
 
-/** Build the full Zotero style URL from a short name. */
+/** Build the canonical Zotero style URL from a public style name. */
 export function zoteroStyleFullId(shortName: string): string {
-  if (shortName.startsWith('http://') || shortName.startsWith('https://')) {
-    return shortName;
-  }
-  return ZOTERO_STYLE_PREFIX + shortName;
+  return zoteroStyleIdForName(shortName);
 }
 
 // Zotero metadata extraction

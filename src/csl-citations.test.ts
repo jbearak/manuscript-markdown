@@ -8,7 +8,13 @@ import {
   generateBibliographyXml,
   buildItemData,
 } from './md-to-docx-citations';
-import { loadStyle, loadLocale, BUNDLED_STYLES } from './csl-loader';
+import {
+  loadStyle,
+  loadLocale,
+  isCslAvailable,
+  registerBundledCslAssets,
+  BUNDLED_STYLES,
+} from './csl-loader';
 import {
   zoteroStyleShortName,
   zoteroStyleFullId,
@@ -19,6 +25,10 @@ import { convertDocx } from './converter';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+
+function decodeXmlEntities(value: string): string {
+  return value.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+}
 
 // Sample BibTeX for testing
 const SAMPLE_BIBTEX = `
@@ -151,6 +161,39 @@ describe('CSL Loader', () => {
     }
   });
 
+  test('loads both NLM variants through public aliases with upstream metadata intact', () => {
+    expect(BUNDLED_STYLES).toContain('nlm');
+    expect(BUNDLED_STYLES).toContain('nlm-brackets');
+
+    const standardXml = loadStyle('nlm');
+    expect(standardXml).toContain('<title>NLM/Vancouver: Citing Medicine 2nd edition (citation-sequence)</title>');
+    expect(standardXml).toContain('<id>http://www.zotero.org/styles/nlm-citation-sequence</id>');
+    expect(standardXml).toContain('http://creativecommons.org/licenses/by-sa/3.0/');
+    expect(standardXml).toContain('<layout delimiter="," prefix="(" suffix=")">');
+
+    const bracketsXml = loadStyle('nlm-brackets');
+    expect(bracketsXml).toContain('<title>NLM/Vancouver: Citing Medicine 2nd edition (citation-sequence, brackets)</title>');
+    expect(bracketsXml).toContain('<id>http://www.zotero.org/styles/nlm-citation-sequence-brackets</id>');
+    expect(bracketsXml).toContain('http://creativecommons.org/licenses/by-sa/3.0/');
+    expect(bracketsXml).toContain('<layout delimiter="," prefix="[" suffix="]">');
+  });
+
+  test('loads styles and locales from registered native assets', () => {
+    const styleXml = '<?xml version="1.0"?><style xmlns="http://purl.org/net/xbiblio/csl"></style>';
+    const localeXml = '<?xml version="1.0"?><locale xmlns="http://purl.org/net/xbiblio/csl"></locale>';
+    registerBundledCslAssets({
+      styles: new Map([['embedded-test', styleXml]]),
+      locales: new Map([['zz-ZZ', localeXml]]),
+    });
+    try {
+      expect(isCslAvailable('embedded-test')).toBe(true);
+      expect(loadStyle('embedded-test')).toBe(styleXml);
+      expect(loadLocale('zz-ZZ')).toBe(localeXml);
+    } finally {
+      registerBundledCslAssets(undefined);
+    }
+  });
+
   test('loads en-US locale', () => {
     const xml = loadLocale('en-US');
     expect(xml).toContain('<locale');
@@ -186,6 +229,20 @@ describe('Zotero style name helpers', () => {
 
   test('zoteroStyleFullId passes through full URLs', () => {
     expect(zoteroStyleFullId('http://www.zotero.org/styles/apa')).toBe('http://www.zotero.org/styles/apa');
+  });
+
+  test('maps both NLM public aliases to and from canonical Zotero IDs', () => {
+    const standard = 'http://www.zotero.org/styles/nlm-citation-sequence';
+    const brackets = 'http://www.zotero.org/styles/nlm-citation-sequence-brackets';
+    expect(zoteroStyleFullId('nlm')).toBe(standard);
+    expect(zoteroStyleShortName(standard)).toBe('nlm');
+    expect(zoteroStyleFullId('nlm-brackets')).toBe(brackets);
+    expect(zoteroStyleShortName(brackets)).toBe('nlm-brackets');
+  });
+
+  test('keeps Vancouver separate from the NLM alias', () => {
+    expect(zoteroStyleFullId('vancouver')).toBe('http://www.zotero.org/styles/vancouver');
+    expect(zoteroStyleShortName('http://www.zotero.org/styles/vancouver')).toBe('vancouver');
   });
 });
 
@@ -254,6 +311,28 @@ describe('renderCitationText', () => {
     expect(text).toBeDefined();
     // IEEE uses [1] style numeric citations
     expect(text).toMatch(/\[?\d+\]?/);
+  });
+
+  test('renders the standard and bracketed NLM citation-sequence variants', () => {
+    const entries = parseBibtex(SAMPLE_BIBTEX);
+    const standard = createCiteprocEngine(entries, 'nlm');
+    const brackets = createCiteprocEngine(entries, 'nlm-brackets');
+    standard.updateItems(['jones2019urban', 'smith2020effects']);
+    brackets.updateItems(['jones2019urban', 'smith2020effects']);
+
+    expect(renderCitationText(standard, ['jones2019urban'])).toBe('(1)');
+    expect(renderCitationText(standard, ['smith2020effects'])).toBe('(2)');
+    expect(renderCitationText(brackets, ['jones2019urban'])).toBe('[1]');
+    expect(renderCitationText(brackets, ['smith2020effects'])).toBe('[2]');
+    expect(renderCitationText(brackets, ['jones2019urban', 'smith2020effects'])).toBe('[1,2]');
+  });
+
+  test('keeps Vancouver parenthesized numeric citations', () => {
+    const entries = parseBibtex(SAMPLE_BIBTEX);
+    const engine = createCiteprocEngine(entries, 'vancouver');
+    engine.updateItems(['smith2020effects']);
+
+    expect(renderCitationText(engine, ['smith2020effects'])).toBe('(1)');
   });
 });
 
@@ -737,6 +816,49 @@ describe('Bibliography marker placement', () => {
     expect(mdResult.markdown).toContain('<!-- references -->');
   });
 
+  test('standard NLM round-trips through its canonical Zotero ID', async () => {
+    const md = '---\ncsl: nlm\n---\n\nCitation [@smith2020effects].\n';
+    const docxResult = await convertMdToDocx(md, { bibtex: SAMPLE_BIBTEX });
+
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docxResult.docx);
+    const docXml = await zip.file('word/document.xml')?.async('string') ?? '';
+    const customXml = await zip.file('docProps/custom.xml')?.async('string') ?? '';
+    const field = docXml.match(/CSL_CITATION\s+(.*?)\s*<\/w:instrText>/);
+
+    expect(field).not.toBeNull();
+    expect(JSON.parse(decodeXmlEntities(field![1])).properties.plainCitation).toBe('(1)');
+    expect(customXml).toContain('http://www.zotero.org/styles/nlm-citation-sequence');
+    expect(customXml).not.toContain('nlm-citation-sequence-brackets');
+
+    const roundTrip = await convertDocx(docxResult.docx);
+    expect(roundTrip.markdown).toContain('csl: nlm');
+  });
+
+  test('NLM brackets works offline through Markdown-to-DOCX with cited-only bibliography', async () => {
+    const md = '---\ncsl: nlm-brackets\n---\n\nFirst [@davis2021advances], then [@smith2020effects].\n';
+    const docxResult = await convertMdToDocx(md, { bibtex: SAMPLE_BIBTEX });
+    expect(docxResult.warnings).toEqual([]);
+
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docxResult.docx);
+    const docXml = await zip.file('word/document.xml')?.async('string') ?? '';
+    const customXml = await zip.file('docProps/custom.xml')?.async('string') ?? '';
+    const fieldCodes = [...docXml.matchAll(/CSL_CITATION\s+(.*?)\s*<\/w:instrText>/g)];
+
+    expect(fieldCodes.length).toBe(2);
+    expect(JSON.parse(decodeXmlEntities(fieldCodes[0][1])).properties.plainCitation).toBe('[1]');
+    expect(JSON.parse(decodeXmlEntities(fieldCodes[1][1])).properties.plainCitation).toBe('[2]');
+    expect(customXml).toContain('http://www.zotero.org/styles/nlm-citation-sequence-brackets');
+    expect(docXml).toContain('ZOTERO_BIBL');
+    expect(docXml).toContain('Advances in renewable energy systems');
+    expect(docXml).toContain('Effects of climate on agriculture');
+    expect(docXml).not.toContain('Urban planning and public health');
+
+    const roundTrip = await convertDocx(docxResult.docx);
+    expect(roundTrip.markdown).toContain('csl: nlm-brackets');
+  });
+
   test('numeric CSL style assigns citation numbers by document order, not bib-file order', async () => {
     // Bib file has entries in alphabetical order: alpha, beta, gamma
     const bibtex = `
@@ -775,9 +897,8 @@ describe('Bibliography marker placement', () => {
     const fieldCodes = [...docXml.matchAll(/CSL_CITATION\s+(.*?)\s*<\/w:instrText>/g)];
     expect(fieldCodes.length).toBe(2);
 
-    const decode = (s: string) => s.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-    const first = JSON.parse(decode(fieldCodes[0][1]));
-    const second = JSON.parse(decode(fieldCodes[1][1]));
+    const first = JSON.parse(decodeXmlEntities(fieldCodes[0][1]));
+    const second = JSON.parse(decodeXmlEntities(fieldCodes[1][1]));
 
     expect(first.properties.plainCitation).toBe('(1)');
     expect(second.properties.plainCitation).toBe('(2)');
@@ -810,16 +931,14 @@ describe('Bibliography marker placement', () => {
     const footnotesXml = await zip.file('word/footnotes.xml')?.async('string') ?? '';
     const docXml = await zip.file('word/document.xml')?.async('string') ?? '';
 
-    const decode = (s: string) => s.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-
     const fnFields = [...footnotesXml.matchAll(/CSL_CITATION\s+(.*?)\s*<\/w:instrText>/g)];
     const bodyFields = [...docXml.matchAll(/CSL_CITATION\s+(.*?)\s*<\/w:instrText>/g)];
 
     expect(fnFields.length).toBe(1);
     expect(bodyFields.length).toBe(1);
 
-    const fnCitation = JSON.parse(decode(fnFields[0][1]));
-    const bodyCitation = JSON.parse(decode(bodyFields[0][1]));
+    const fnCitation = JSON.parse(decodeXmlEntities(fnFields[0][1]));
+    const bodyCitation = JSON.parse(decodeXmlEntities(bodyFields[0][1]));
 
     // @alpha2020 in footnote should be (1) since footnote ref comes first in body
     expect(fnCitation.properties.plainCitation).toBe('(1)');

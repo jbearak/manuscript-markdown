@@ -46,10 +46,33 @@ const CSL_LOCALES_URL = 'https://raw.githubusercontent.com/citation-style-langua
 const styleCache = new Map<string, string>();
 const localeCache = new Map<string, string>();
 
+const ZOTERO_STYLE_PREFIX = 'http://www.zotero.org/styles/';
+
+interface BundledStyleEntry {
+  name: string;
+  label: string;
+  fileName?: string;
+  zoteroId?: string;
+}
+
+export interface BundledCslAssets {
+  styles: ReadonlyMap<string, string>;
+  locales: ReadonlyMap<string, string>;
+}
+
+let embeddedAssets: BundledCslAssets | undefined;
+
+/** Register assets embedded by the standalone native CLI build. */
+export function registerBundledCslAssets(assets: BundledCslAssets | undefined): void {
+  embeddedAssets = assets;
+  styleCache.clear();
+  localeCache.clear();
+}
+
 /**
- * Single source of truth for bundled CSL styles (name + display label).
+ * Single source of truth for bundled CSL styles and their public aliases.
  */
-const BUNDLED_STYLE_ENTRIES: ReadonlyArray<{ name: string; label: string }> = [
+const BUNDLED_STYLE_ENTRIES: ReadonlyArray<BundledStyleEntry> = [
   { name: 'apa', label: 'APA (7th edition)' },
   { name: 'bmj', label: 'BMJ' },
   { name: 'chicago-author-date', label: 'Chicago (Author-Date)' },
@@ -65,8 +88,47 @@ const BUNDLED_STYLE_ENTRIES: ReadonlyArray<{ name: string; label: string }> = [
   { name: 'american-political-science-association', label: 'APSA (American Political Science Association)' },
   { name: 'american-sociological-association', label: 'ASA (American Sociological Association)' },
   { name: 'vancouver', label: 'Vancouver' },
+  {
+    name: 'nlm',
+    label: 'NLM/Vancouver (Citing Medicine)',
+    fileName: 'nlm-citation-sequence',
+    zoteroId: ZOTERO_STYLE_PREFIX + 'nlm-citation-sequence',
+  },
+  {
+    name: 'nlm-brackets',
+    label: 'NLM/Vancouver (Citing Medicine, brackets)',
+    fileName: 'nlm-citation-sequence-brackets',
+    zoteroId: ZOTERO_STYLE_PREFIX + 'nlm-citation-sequence-brackets',
+  },
   { name: 'harvard-cite-them-right', label: 'Harvard (Cite Them Right)' },
 ];
+
+const BUNDLED_STYLE_BY_NAME = new Map(BUNDLED_STYLE_ENTRIES.map(entry => [entry.name, entry] as const));
+const BUNDLED_STYLE_BY_ZOTERO_ID = new Map(
+  BUNDLED_STYLE_ENTRIES.map(entry => [entry.zoteroId ?? ZOTERO_STYLE_PREFIX + entry.name, entry] as const)
+);
+
+function bundledStyleFileName(name: string): string {
+  return BUNDLED_STYLE_BY_NAME.get(name)?.fileName ?? name;
+}
+
+export function resolveCslCachePath(cacheDir: string, name: string): string {
+  const fileName = name.endsWith('.csl') ? name : bundledStyleFileName(name) + '.csl';
+  return join(cacheDir, fileName);
+}
+
+export function zoteroStyleIdForName(name: string): string {
+  if (name.startsWith('http://') || name.startsWith('https://')) return name;
+  const entry = BUNDLED_STYLE_BY_NAME.get(name);
+  return entry?.zoteroId ?? ZOTERO_STYLE_PREFIX + name;
+}
+
+export function publicStyleNameForZoteroId(styleId: string): string {
+  const entry = BUNDLED_STYLE_BY_ZOTERO_ID.get(styleId);
+  if (entry) return entry.name;
+  if (styleId.startsWith(ZOTERO_STYLE_PREFIX)) return styleId.slice(ZOTERO_STYLE_PREFIX.length);
+  return styleId;
+}
 
 /**
  * List of bundled CSL style short names.
@@ -96,15 +158,16 @@ export function isCslAvailable(
     return true;
   }
 
-  // Check bundled directory (for downloaded/cached styles not in the list)
-  if (existsSync(join(BUNDLED_STYLES_DIR, name + '.csl'))) {
+  // Check bundled directory or native-binary embedded assets.
+  const fileName = bundledStyleFileName(name);
+  if (embeddedAssets?.styles.has(fileName) || existsSync(join(BUNDLED_STYLES_DIR, fileName + '.csl'))) {
     return true;
   }
 
   // Check cache directories
   if (options?.cacheDirs) {
     for (const dir of options.cacheDirs) {
-      if (existsSync(join(dir, name + '.csl'))) {
+      if (existsSync(join(dir, bundledStyleFileName(name) + '.csl'))) {
         return true;
       }
     }
@@ -139,15 +202,16 @@ export async function isCslAvailableAsync(
     try { await access(p); return true; } catch { return false; }
   };
 
-  // Check bundled directory
-  if (await fileExists(join(BUNDLED_STYLES_DIR, name + '.csl'))) {
+  // Check bundled directory or native-binary embedded assets.
+  const fileName = bundledStyleFileName(name);
+  if (embeddedAssets?.styles.has(fileName) || await fileExists(join(BUNDLED_STYLES_DIR, fileName + '.csl'))) {
     return true;
   }
 
   // Check cache directories
   if (options?.cacheDirs) {
     for (const dir of options.cacheDirs) {
-      if (await fileExists(join(dir, name + '.csl'))) {
+      if (await fileExists(join(dir, bundledStyleFileName(name) + '.csl'))) {
         return true;
       }
     }
@@ -176,9 +240,13 @@ export function loadStyle(name: string): string {
   if (cached) return cached;
 
   let xml: string;
-  // Try reading from the bundled directory (covers both listed and previously-downloaded styles)
-  const bundledPath = join(BUNDLED_STYLES_DIR, name + '.csl');
-  if (existsSync(bundledPath)) {
+  // Native binaries use embedded assets; source and extension builds use the bundled directory.
+  const fileName = bundledStyleFileName(name);
+  const bundledPath = join(BUNDLED_STYLES_DIR, fileName + '.csl');
+  const embedded = embeddedAssets?.styles.get(fileName);
+  if (embedded) {
+    xml = embedded;
+  } else if (existsSync(bundledPath)) {
     xml = readFileSync(bundledPath, 'utf-8');
   } else if (isAbsolute(name) || name.endsWith('.csl')) {
     xml = readFileSync(name, 'utf-8');
@@ -202,7 +270,13 @@ export async function loadStyleAsync(name: string, cacheDir?: string): Promise<s
   if (cached) return cached;
 
   // Try loading from disk (bundled or previously-downloaded)
-  const bundledPath = join(BUNDLED_STYLES_DIR, name + '.csl');
+  const fileName = bundledStyleFileName(name);
+  const bundledPath = join(BUNDLED_STYLES_DIR, fileName + '.csl');
+  const embedded = embeddedAssets?.styles.get(fileName);
+  if (embedded) {
+    styleCache.set(name, embedded);
+    return embedded;
+  }
   if (existsSync(bundledPath)) {
     const xml = readFileSync(bundledPath, 'utf-8');
     styleCache.set(name, xml);
@@ -217,7 +291,7 @@ export async function loadStyleAsync(name: string, cacheDir?: string): Promise<s
   }
 
   // Try downloading from the CSL repository
-  const url = CSL_STYLES_URL + (name.endsWith('.csl') ? name.slice(0, -4) : name) + '.csl';
+  const url = CSL_STYLES_URL + fileName + '.csl';
   try {
     const response = await fetch(url);
     if (!response.ok) {
@@ -234,7 +308,7 @@ export async function loadStyleAsync(name: string, cacheDir?: string): Promise<s
       if (!existsSync(diskCacheDir)) {
         mkdirSync(diskCacheDir, { recursive: true });
       }
-      writeFileSync(join(diskCacheDir, name + '.csl'), xml, 'utf-8');
+      writeFileSync(join(diskCacheDir, fileName + '.csl'), xml, 'utf-8');
     } catch {
       // Disk caching is best-effort; memory cache still works
     }
@@ -252,7 +326,8 @@ export async function loadStyleAsync(name: string, cacheDir?: string): Promise<s
  */
 export async function downloadStyle(name: string, targetDir: string): Promise<string> {
   validateStyleName(name);
-  const url = CSL_STYLES_URL + (name.endsWith('.csl') ? name.slice(0, -4) : name) + '.csl';
+  const fileName = bundledStyleFileName(name.endsWith('.csl') ? name.slice(0, -4) : name);
+  const url = CSL_STYLES_URL + fileName + '.csl';
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
@@ -266,7 +341,7 @@ export async function downloadStyle(name: string, targetDir: string): Promise<st
   if (!existsSync(targetDir)) {
     mkdirSync(targetDir, { recursive: true });
   }
-  writeFileSync(join(targetDir, name.endsWith('.csl') ? name : name + '.csl'), xml, 'utf-8');
+  writeFileSync(join(targetDir, fileName + '.csl'), xml, 'utf-8');
 
   // Also cache in memory
   styleCache.set(name, xml);
@@ -284,6 +359,11 @@ export function loadLocale(lang: string): string {
 
   const filename = `locales-${lang}.xml`;
   const localePath = join(BUNDLED_LOCALES_DIR, filename);
+  const embedded = embeddedAssets?.locales.get(lang);
+  if (embedded) {
+    localeCache.set(lang, embedded);
+    return embedded;
+  }
   if (existsSync(localePath)) {
     const xml = readFileSync(localePath, 'utf-8');
     localeCache.set(lang, xml);
@@ -307,6 +387,11 @@ export async function loadLocaleAsync(lang: string): Promise<string> {
 
   const filename = `locales-${lang}.xml`;
   const localePath = join(BUNDLED_LOCALES_DIR, filename);
+  const embedded = embeddedAssets?.locales.get(lang);
+  if (embedded) {
+    localeCache.set(lang, embedded);
+    return embedded;
+  }
   if (existsSync(localePath)) {
     const xml = readFileSync(localePath, 'utf-8');
     localeCache.set(lang, xml);

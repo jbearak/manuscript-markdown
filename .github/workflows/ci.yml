@@ -88,7 +88,13 @@ jobs:
           ls -la "$vsix"
 
           # Verify required bundled files are present and non-trivial
-          for f in extension/out/extension.js extension/out/server.js; do
+          for f in \
+            extension/out/extension.js \
+            extension/out/server.js \
+            extension/out/csl-styles/nlm-citation-sequence.csl \
+            extension/out/csl-styles/nlm-citation-sequence-brackets.csl \
+            extension/out/csl-styles/vancouver.csl \
+            extension/out/csl-locales/locales-en-US.xml; do
             size=$(unzip -l "$vsix" "$f" 2>/dev/null | awk -v target="$f" '$NF == target { print $1; exit }')
             if [ -z "$size" ] || [ "$size" -lt 1000 ]; then
               echo "ERROR: $f missing or too small (${size:-0} bytes)"
@@ -164,3 +170,45 @@ jobs:
           chmod +x "$BINARY" 2>/dev/null || true
           "$BINARY" --version
           "$BINARY" --help
+
+          # Prove bundled CSL assets are embedded in the standalone executable.
+          WORK_DIR="${RUNNER_TEMP}/manuscript-markdown-offline"
+          rm -rf "$WORK_DIR"
+          mkdir -p "$WORK_DIR"
+          ISOLATED_BINARY="$WORK_DIR/manuscript-markdown${EXT}"
+          cp "$BINARY" "$ISOLATED_BINARY"
+          chmod +x "$ISOLATED_BINARY" 2>/dev/null || true
+          cat > "$WORK_DIR/paper.md" <<'EOF'
+          ---
+          csl: nlm-brackets
+          ---
+
+          Offline citation [@cited2024].
+          EOF
+          cat > "$WORK_DIR/paper.bib" <<'EOF'
+          @article{cited2024,
+            author = {Cited, Alice},
+            title = {Embedded NLM Style Test},
+            journal = {Journal of Tests},
+            year = {2024}
+          }
+          @article{uncited2023,
+            author = {Uncited, Bob},
+            title = {This Entry Must Not Appear},
+            journal = {Journal of Tests},
+            year = {2023}
+          }
+          EOF
+          "$ISOLATED_BINARY" "$WORK_DIR/paper.md" --force
+          DOCX_PATH="$WORK_DIR/paper.docx" bun -e '
+            import JSZip from "jszip";
+            const bytes = await Bun.file(process.env.DOCX_PATH).arrayBuffer();
+            const zip = await JSZip.loadAsync(bytes);
+            const documentXml = await zip.file("word/document.xml").async("string");
+            const customXml = await zip.file("docProps/custom.xml").async("string");
+            if (!documentXml.includes("[1]")) throw new Error("NLM citation is not bracketed");
+            if (!documentXml.includes("ZOTERO_BIBL")) throw new Error("Bibliography field missing");
+            if (!documentXml.includes("Embedded NLM Style Test")) throw new Error("Cited entry missing");
+            if (documentXml.includes("This Entry Must Not Appear")) throw new Error("Uncited entry included");
+            if (!customXml.includes("nlm-citation-sequence-brackets")) throw new Error("Canonical NLM style ID missing");
+          '
