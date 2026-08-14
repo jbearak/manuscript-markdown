@@ -685,12 +685,17 @@ describe('getFrontmatterCompletionItems', () => {
 		expect(items).toEqual([]);
 	});
 
-	test('CSL value completions return items', () => {
+	test('CSL value completions return canonical bundled styles', () => {
 		const text = '---\ncsl: \n---\n';
 		const loc = getFrontmatterLocation(text, text.indexOf(': ') + 2);
 		const items = getFrontmatterCompletionItems(loc, 'darwin');
-		expect(items.length).toBeGreaterThan(0);
-		expect(items.some(i => i.label === 'apa')).toBe(true);
+		const labels = new Set(items.map(item => item.label));
+		expect(labels.size).toBeGreaterThan(0);
+		expect(labels.has('apa')).toBe(true);
+		expect(labels.has('chicago-notes-bibliography')).toBe(true);
+		expect(labels.has('chicago-shortened-notes-bibliography')).toBe(true);
+		expect(labels.has('chicago-fullnote-bibliography')).toBe(false);
+		expect(labels.has('chicago-note-bibliography')).toBe(false);
 	});
 
 	test('title key completion available even when already declared (allowsMultiple)', () => {

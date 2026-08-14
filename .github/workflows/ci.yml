@@ -91,6 +91,11 @@ jobs:
           for f in \
             extension/out/extension.js \
             extension/out/server.js \
+            extension/out/csl-styles/bmj.csl \
+            extension/out/csl-styles/chicago-author-date.csl \
+            extension/out/csl-styles/chicago-notes-bibliography.csl \
+            extension/out/csl-styles/chicago-shortened-notes-bibliography.csl \
+            extension/out/csl-styles/nature.csl \
             extension/out/csl-styles/nlm-citation-sequence.csl \
             extension/out/csl-styles/nlm-citation-sequence-brackets.csl \
             extension/out/csl-styles/vancouver.csl \
@@ -101,6 +106,16 @@ jobs:
               exit 1
             fi
             echo "OK: $f ($size bytes)"
+          done
+
+          # Legacy Chicago identifiers are runtime aliases, not packaged assets.
+          for f in \
+            extension/out/csl-styles/chicago-fullnote-bibliography.csl \
+            extension/out/csl-styles/chicago-note-bibliography.csl; do
+            if unzip -l "$vsix" "$f" 2>/dev/null | grep -q "$f"; then
+              echo "ERROR: obsolete CSL asset present: $f"
+              exit 1
+            fi
           done
 
           # Verify node_modules did NOT leak into the VSIX
@@ -212,3 +227,33 @@ jobs:
             if (documentXml.includes("This Entry Must Not Appear")) throw new Error("Uncited entry included");
             if (!customXml.includes("nlm-citation-sequence-brackets")) throw new Error("Canonical NLM style ID missing");
           '
+
+          # Prove hidden legacy identifiers resolve to embedded Chicago 18 assets.
+          verify_chicago_alias() {
+            local stem="$1"
+            local alias="$2"
+            local canonical="$3"
+            cat > "$WORK_DIR/$stem.md" <<EOF
+          ---
+          csl: $alias
+          ---
+
+          Offline Chicago citation [@cited2024].
+          EOF
+            cp "$WORK_DIR/paper.bib" "$WORK_DIR/$stem.bib"
+            "$ISOLATED_BINARY" "$WORK_DIR/$stem.md" --force
+            DOCX_PATH="$WORK_DIR/$stem.docx" LEGACY_STYLE="$alias" CANONICAL_STYLE="$canonical" bun -e '
+              import JSZip from "jszip";
+              const bytes = await Bun.file(process.env.DOCX_PATH).arrayBuffer();
+              const zip = await JSZip.loadAsync(bytes);
+              const documentXml = await zip.file("word/document.xml").async("string");
+              const customXml = await zip.file("docProps/custom.xml").async("string");
+              if (!documentXml.includes("ZOTERO_BIBL")) throw new Error("Chicago bibliography field missing");
+              if (!documentXml.includes("Embedded NLM Style Test")) throw new Error("Chicago cited entry missing");
+              if (!customXml.includes(process.env.CANONICAL_STYLE)) throw new Error("Canonical Chicago style ID missing");
+              if (customXml.includes(process.env.LEGACY_STYLE)) throw new Error("Legacy Chicago style ID persisted");
+            '
+          }
+
+          verify_chicago_alias chicago chicago-fullnote-bibliography chicago-notes-bibliography
+          verify_chicago_alias chicago-shortened chicago-note-bibliography chicago-shortened-notes-bibliography

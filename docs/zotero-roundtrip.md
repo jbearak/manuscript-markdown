@@ -98,7 +98,9 @@ You can also add or modify this frontmatter manually. The `csl` field is require
 
 These 18 styles are available without downloading:
 
-`apa`, `bmj`, `chicago-author-date`, `chicago-fullnote-bibliography`, `chicago-note-bibliography`, `modern-language-association`, `ieee`, `nature`, `cell`, `science`, `american-medical-association`, `american-chemical-society`, `american-political-science-association`, `american-sociological-association`, `vancouver`, `nlm`, `nlm-brackets`, `harvard-cite-them-right`
+`apa`, `bmj`, `chicago-author-date`, `chicago-notes-bibliography`, `chicago-shortened-notes-bibliography`, `modern-language-association`, `ieee`, `nature`, `cell`, `science`, `american-medical-association`, `american-chemical-society`, `american-political-science-association`, `american-sociological-association`, `vancouver`, `nlm`, `nlm-brackets`, `harvard-cite-them-right`
+
+The Chicago note styles use the Chicago Manual of Style 18th-edition identifiers. Existing documents may continue to use `chicago-fullnote-bibliography` (mapped to `chicago-notes-bibliography`) or `chicago-note-bibliography` (mapped to `chicago-shortened-notes-bibliography`). These legacy identifiers remain accepted but are not shown in selectors or completions. A DOCX roundtrip normalizes them to the corresponding Chicago 18 identifier.
 
 ### Style resolution
 
