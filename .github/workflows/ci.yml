@@ -91,6 +91,7 @@ jobs:
           for f in \
             extension/out/extension.js \
             extension/out/server.js \
+            extension/out/csl-styles/nlm-citation-sequence.csl \
             extension/out/csl-styles/nlm-citation-sequence-brackets.csl \
             extension/out/csl-styles/vancouver.csl \
             extension/out/csl-locales/locales-en-US.xml; do
@@ -179,7 +180,7 @@ jobs:
           chmod +x "$ISOLATED_BINARY" 2>/dev/null || true
           cat > "$WORK_DIR/paper.md" <<'EOF'
           ---
-          csl: nlm
+          csl: nlm-brackets
           ---
 
           Offline citation [@cited2024].

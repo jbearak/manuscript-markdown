@@ -90,6 +90,12 @@ const BUNDLED_STYLE_ENTRIES: ReadonlyArray<BundledStyleEntry> = [
   { name: 'vancouver', label: 'Vancouver' },
   {
     name: 'nlm',
+    label: 'NLM/Vancouver (Citing Medicine)',
+    fileName: 'nlm-citation-sequence',
+    zoteroId: ZOTERO_STYLE_PREFIX + 'nlm-citation-sequence',
+  },
+  {
+    name: 'nlm-brackets',
     label: 'NLM/Vancouver (Citing Medicine, brackets)',
     fileName: 'nlm-citation-sequence-brackets',
     zoteroId: ZOTERO_STYLE_PREFIX + 'nlm-citation-sequence-brackets',

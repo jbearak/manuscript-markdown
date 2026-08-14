@@ -96,9 +96,9 @@ You can also add or modify this frontmatter manually. The `csl` field is require
 
 ### Bundled styles
 
-These 17 styles are available without downloading:
+These 18 styles are available without downloading:
 
-`apa`, `bmj`, `chicago-author-date`, `chicago-fullnote-bibliography`, `chicago-note-bibliography`, `modern-language-association`, `ieee`, `nature`, `cell`, `science`, `american-medical-association`, `american-chemical-society`, `american-political-science-association`, `american-sociological-association`, `vancouver`, `nlm`, `harvard-cite-them-right`
+`apa`, `bmj`, `chicago-author-date`, `chicago-fullnote-bibliography`, `chicago-note-bibliography`, `modern-language-association`, `ieee`, `nature`, `cell`, `science`, `american-medical-association`, `american-chemical-society`, `american-political-science-association`, `american-sociological-association`, `vancouver`, `nlm`, `nlm-brackets`, `harvard-cite-them-right`
 
 ### Style resolution
 

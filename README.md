@@ -55,7 +55,7 @@ manuscript-markdown paper.md      # Markdown → DOCX
 ### Academic Writing
 
 - **Citations**: Full Zotero roundtrip with BibTeX export and field code reconstruction
-- **Bibliographies**: Format citations according to any [CSL style](https://citationstyles.org/) (APA, Chicago, BMJ, IEEE, etc.); bundles 17 common styles for offline use and downloads others as needed
+- **Bibliographies**: Format citations according to any [CSL style](https://citationstyles.org/) (APA, Chicago, BMJ, IEEE, etc.); bundles 18 common styles for offline use and downloads others as needed
 - **Equations**: LaTeX equation support (inline and display math), automatically converted to/from Word OMML
 
 ### Formatting & Authoring
