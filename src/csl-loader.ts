@@ -108,8 +108,13 @@ const BUNDLED_STYLE_BY_ZOTERO_ID = new Map(
   BUNDLED_STYLE_ENTRIES.map(entry => [entry.zoteroId ?? ZOTERO_STYLE_PREFIX + entry.name, entry] as const)
 );
 
-export function bundledStyleFileName(name: string): string {
+function bundledStyleFileName(name: string): string {
   return BUNDLED_STYLE_BY_NAME.get(name)?.fileName ?? name;
+}
+
+export function resolveCslCachePath(cacheDir: string, name: string): string {
+  const fileName = name.endsWith('.csl') ? name : bundledStyleFileName(name) + '.csl';
+  return join(cacheDir, fileName);
 }
 
 export function zoteroStyleIdForName(name: string): string {
@@ -155,7 +160,7 @@ export function isCslAvailable(
 
   // Check bundled directory or native-binary embedded assets.
   const fileName = bundledStyleFileName(name);
-  if (existsSync(join(BUNDLED_STYLES_DIR, fileName + '.csl')) || embeddedAssets?.styles.has(fileName)) {
+  if (embeddedAssets?.styles.has(fileName) || existsSync(join(BUNDLED_STYLES_DIR, fileName + '.csl'))) {
     return true;
   }
 
@@ -199,7 +204,7 @@ export async function isCslAvailableAsync(
 
   // Check bundled directory or native-binary embedded assets.
   const fileName = bundledStyleFileName(name);
-  if (await fileExists(join(BUNDLED_STYLES_DIR, fileName + '.csl')) || embeddedAssets?.styles.has(fileName)) {
+  if (embeddedAssets?.styles.has(fileName) || await fileExists(join(BUNDLED_STYLES_DIR, fileName + '.csl'))) {
     return true;
   }
 
@@ -235,13 +240,14 @@ export function loadStyle(name: string): string {
   if (cached) return cached;
 
   let xml: string;
-  // Try reading from the bundled directory (covers both listed and previously-downloaded styles)
+  // Native binaries use embedded assets; source and extension builds use the bundled directory.
   const fileName = bundledStyleFileName(name);
   const bundledPath = join(BUNDLED_STYLES_DIR, fileName + '.csl');
-  if (existsSync(bundledPath)) {
+  const embedded = embeddedAssets?.styles.get(fileName);
+  if (embedded) {
+    xml = embedded;
+  } else if (existsSync(bundledPath)) {
     xml = readFileSync(bundledPath, 'utf-8');
-  } else if (embeddedAssets?.styles.has(fileName)) {
-    xml = embeddedAssets.styles.get(fileName)!;
   } else if (isAbsolute(name) || name.endsWith('.csl')) {
     xml = readFileSync(name, 'utf-8');
   } else {
@@ -266,15 +272,15 @@ export async function loadStyleAsync(name: string, cacheDir?: string): Promise<s
   // Try loading from disk (bundled or previously-downloaded)
   const fileName = bundledStyleFileName(name);
   const bundledPath = join(BUNDLED_STYLES_DIR, fileName + '.csl');
-  if (existsSync(bundledPath)) {
-    const xml = readFileSync(bundledPath, 'utf-8');
-    styleCache.set(name, xml);
-    return xml;
-  }
   const embedded = embeddedAssets?.styles.get(fileName);
   if (embedded) {
     styleCache.set(name, embedded);
     return embedded;
+  }
+  if (existsSync(bundledPath)) {
+    const xml = readFileSync(bundledPath, 'utf-8');
+    styleCache.set(name, xml);
+    return xml;
   }
 
   // If it's an absolute path or .csl file path, read directly
@@ -353,15 +359,15 @@ export function loadLocale(lang: string): string {
 
   const filename = `locales-${lang}.xml`;
   const localePath = join(BUNDLED_LOCALES_DIR, filename);
-  if (existsSync(localePath)) {
-    const xml = readFileSync(localePath, 'utf-8');
-    localeCache.set(lang, xml);
-    return xml;
-  }
   const embedded = embeddedAssets?.locales.get(lang);
   if (embedded) {
     localeCache.set(lang, embedded);
     return embedded;
+  }
+  if (existsSync(localePath)) {
+    const xml = readFileSync(localePath, 'utf-8');
+    localeCache.set(lang, xml);
+    return xml;
   }
 
   // Fall back to en-US
@@ -381,15 +387,15 @@ export async function loadLocaleAsync(lang: string): Promise<string> {
 
   const filename = `locales-${lang}.xml`;
   const localePath = join(BUNDLED_LOCALES_DIR, filename);
-  if (existsSync(localePath)) {
-    const xml = readFileSync(localePath, 'utf-8');
-    localeCache.set(lang, xml);
-    return xml;
-  }
   const embedded = embeddedAssets?.locales.get(lang);
   if (embedded) {
     localeCache.set(lang, embedded);
     return embedded;
+  }
+  if (existsSync(localePath)) {
+    const xml = readFileSync(localePath, 'utf-8');
+    localeCache.set(lang, xml);
+    return xml;
   }
 
   // Try downloading

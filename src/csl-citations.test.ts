@@ -26,6 +26,10 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
+function decodeXmlEntities(value: string): string {
+  return value.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+}
+
 // Sample BibTeX for testing
 const SAMPLE_BIBTEX = `
 @article{smith2020effects,
@@ -820,11 +824,10 @@ describe('Bibliography marker placement', () => {
     const zip = await JSZip.loadAsync(docxResult.docx);
     const docXml = await zip.file('word/document.xml')?.async('string') ?? '';
     const customXml = await zip.file('docProps/custom.xml')?.async('string') ?? '';
-    const decode = (s: string) => s.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
     const field = docXml.match(/CSL_CITATION\s+(.*?)\s*<\/w:instrText>/);
 
     expect(field).not.toBeNull();
-    expect(JSON.parse(decode(field![1])).properties.plainCitation).toBe('(1)');
+    expect(JSON.parse(decodeXmlEntities(field![1])).properties.plainCitation).toBe('(1)');
     expect(customXml).toContain('http://www.zotero.org/styles/nlm-citation-sequence');
     expect(customXml).not.toContain('nlm-citation-sequence-brackets');
 
@@ -841,12 +844,11 @@ describe('Bibliography marker placement', () => {
     const zip = await JSZip.loadAsync(docxResult.docx);
     const docXml = await zip.file('word/document.xml')?.async('string') ?? '';
     const customXml = await zip.file('docProps/custom.xml')?.async('string') ?? '';
-    const decode = (s: string) => s.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
     const fieldCodes = [...docXml.matchAll(/CSL_CITATION\s+(.*?)\s*<\/w:instrText>/g)];
 
     expect(fieldCodes.length).toBe(2);
-    expect(JSON.parse(decode(fieldCodes[0][1])).properties.plainCitation).toBe('[1]');
-    expect(JSON.parse(decode(fieldCodes[1][1])).properties.plainCitation).toBe('[2]');
+    expect(JSON.parse(decodeXmlEntities(fieldCodes[0][1])).properties.plainCitation).toBe('[1]');
+    expect(JSON.parse(decodeXmlEntities(fieldCodes[1][1])).properties.plainCitation).toBe('[2]');
     expect(customXml).toContain('http://www.zotero.org/styles/nlm-citation-sequence-brackets');
     expect(docXml).toContain('ZOTERO_BIBL');
     expect(docXml).toContain('Advances in renewable energy systems');
@@ -895,9 +897,8 @@ describe('Bibliography marker placement', () => {
     const fieldCodes = [...docXml.matchAll(/CSL_CITATION\s+(.*?)\s*<\/w:instrText>/g)];
     expect(fieldCodes.length).toBe(2);
 
-    const decode = (s: string) => s.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-    const first = JSON.parse(decode(fieldCodes[0][1]));
-    const second = JSON.parse(decode(fieldCodes[1][1]));
+    const first = JSON.parse(decodeXmlEntities(fieldCodes[0][1]));
+    const second = JSON.parse(decodeXmlEntities(fieldCodes[1][1]));
 
     expect(first.properties.plainCitation).toBe('(1)');
     expect(second.properties.plainCitation).toBe('(2)');
@@ -930,16 +931,14 @@ describe('Bibliography marker placement', () => {
     const footnotesXml = await zip.file('word/footnotes.xml')?.async('string') ?? '';
     const docXml = await zip.file('word/document.xml')?.async('string') ?? '';
 
-    const decode = (s: string) => s.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-
     const fnFields = [...footnotesXml.matchAll(/CSL_CITATION\s+(.*?)\s*<\/w:instrText>/g)];
     const bodyFields = [...docXml.matchAll(/CSL_CITATION\s+(.*?)\s*<\/w:instrText>/g)];
 
     expect(fnFields.length).toBe(1);
     expect(bodyFields.length).toBe(1);
 
-    const fnCitation = JSON.parse(decode(fnFields[0][1]));
-    const bodyCitation = JSON.parse(decode(bodyFields[0][1]));
+    const fnCitation = JSON.parse(decodeXmlEntities(fnFields[0][1]));
+    const bodyCitation = JSON.parse(decodeXmlEntities(bodyFields[0][1]));
 
     // @alpha2020 in footnote should be (1) since footnote ref comes first in body
     expect(fnCitation.properties.plainCitation).toBe('(1)');

@@ -2,7 +2,7 @@ import MarkdownIt from 'markdown-it';
 import type Token from 'markdown-it/lib/token.mjs';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
 import { escapeXml, escapeXmlText, generateCitation, generateMathXml, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, type CiteprocEngine } from './md-to-docx-citations';
-import { bundledStyleFileName, downloadStyle } from './csl-loader';
+import { downloadStyle, resolveCslCachePath } from './csl-loader';
 import { existsSync, readFileSync } from 'fs';
 import { isAbsolute, join, resolve } from 'path';
 import { parseBibtex, BibtexEntry } from './bibtex-parser';
@@ -6409,12 +6409,10 @@ export async function convertMdToDocx(
     let result = createCiteprocEngineLocal(bibEntries, styleName, frontmatter.locale);
 
     // 2. Try CSL cache directory (e.g. VS Code global storage)
-    if (result.styleNotFound && options?.cslCacheDir) {
-      const cachedFileName = styleName.endsWith('.csl') ? styleName : bundledStyleFileName(styleName) + '.csl';
-      const cachedPath = join(options.cslCacheDir, cachedFileName);
-      if (existsSync(cachedPath)) {
-        result = createCiteprocEngineLocal(bibEntries, cachedPath, frontmatter.locale);
-      }
+    const cslCacheDir = options?.cslCacheDir;
+    const cachedStylePath = cslCacheDir ? resolveCslCachePath(cslCacheDir, styleName) : undefined;
+    if (result.styleNotFound && cachedStylePath && existsSync(cachedStylePath)) {
+      result = createCiteprocEngineLocal(bibEntries, cachedStylePath, frontmatter.locale);
     }
 
     // 3. Ask user whether to download
@@ -6423,12 +6421,10 @@ export async function convertMdToDocx(
       if (options?.onStyleNotFound) {
         shouldDownload = await options.onStyleNotFound(styleName);
       }
-      if (shouldDownload && options?.cslCacheDir) {
+      if (shouldDownload && cslCacheDir && cachedStylePath) {
         try {
-          await downloadStyle(styleName, options.cslCacheDir);
-          const downloadedFileName = styleName.endsWith('.csl') ? styleName : bundledStyleFileName(styleName) + '.csl';
-          const downloadedPath = join(options.cslCacheDir, downloadedFileName);
-          result = createCiteprocEngineLocal(bibEntries, downloadedPath, frontmatter.locale);
+          await downloadStyle(styleName, cslCacheDir);
+          result = createCiteprocEngineLocal(bibEntries, cachedStylePath, frontmatter.locale);
         } catch {
           earlyWarnings.push(`CSL style "${styleName}" could not be downloaded. Export completed without CSL citation formatting.`);
         }
