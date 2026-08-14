@@ -2,7 +2,7 @@ import MarkdownIt from 'markdown-it';
 import type Token from 'markdown-it/lib/token.mjs';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
 import { escapeXml, escapeXmlText, generateCitation, generateMathXml, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, type CiteprocEngine } from './md-to-docx-citations';
-import { downloadStyle } from './csl-loader';
+import { bundledStyleFileName, downloadStyle } from './csl-loader';
 import { existsSync, readFileSync } from 'fs';
 import { isAbsolute, join, resolve } from 'path';
 import { parseBibtex, BibtexEntry } from './bibtex-parser';
@@ -6410,7 +6410,8 @@ export async function convertMdToDocx(
 
     // 2. Try CSL cache directory (e.g. VS Code global storage)
     if (result.styleNotFound && options?.cslCacheDir) {
-      const cachedPath = join(options.cslCacheDir, styleName.endsWith('.csl') ? styleName : styleName + '.csl');
+      const cachedFileName = styleName.endsWith('.csl') ? styleName : bundledStyleFileName(styleName) + '.csl';
+      const cachedPath = join(options.cslCacheDir, cachedFileName);
       if (existsSync(cachedPath)) {
         result = createCiteprocEngineLocal(bibEntries, cachedPath, frontmatter.locale);
       }
@@ -6425,7 +6426,8 @@ export async function convertMdToDocx(
       if (shouldDownload && options?.cslCacheDir) {
         try {
           await downloadStyle(styleName, options.cslCacheDir);
-          const downloadedPath = join(options.cslCacheDir, styleName.endsWith('.csl') ? styleName : styleName + '.csl');
+          const downloadedFileName = styleName.endsWith('.csl') ? styleName : bundledStyleFileName(styleName) + '.csl';
+          const downloadedPath = join(options.cslCacheDir, downloadedFileName);
           result = createCiteprocEngineLocal(bibEntries, downloadedPath, frontmatter.locale);
         } catch {
           earlyWarnings.push(`CSL style "${styleName}" could not be downloaded. Export completed without CSL citation formatting.`);

@@ -56,7 +56,11 @@ const TARGETS: BuildTarget[] = [
 ];
 
 const PATHS = {
-    entry: 'src/cli.ts',
+    styles: 'src/csl-styles',
+    locales: 'src/csl-locales',
+    generated: 'out/native-generated',
+    generatedAssets: 'out/native-generated/csl-assets.ts',
+    generatedEntry: 'out/native-generated/native-cli.ts',
     bin: 'bin',
 };
 
@@ -64,6 +68,60 @@ function ensure_dir(dir_path: string): void {
     if (!fs.existsSync(dir_path)) {
         fs.mkdirSync(dir_path, { recursive: true });
     }
+}
+
+function generated_import_path(asset_path: string): string {
+    let relative = path.relative(PATHS.generated, asset_path).split(path.sep).join('/');
+    if (!relative.startsWith('.')) relative = './' + relative;
+    return relative;
+}
+
+function generate_native_entry(): void {
+    fs.rmSync(PATHS.generated, { recursive: true, force: true });
+    ensure_dir(PATHS.generated);
+
+    const styles = fs.readdirSync(PATHS.styles)
+        .filter(file => file.endsWith('.csl'))
+        .sort();
+    const locales = fs.readdirSync(PATHS.locales)
+        .filter(file => file.endsWith('.xml'))
+        .sort();
+
+    const lines: string[] = [];
+    styles.forEach((file, index) => {
+        lines.push(`import style${index} from ${JSON.stringify(generated_import_path(path.join(PATHS.styles, file)))} with { type: 'text' };`);
+    });
+    locales.forEach((file, index) => {
+        lines.push(`import locale${index} from ${JSON.stringify(generated_import_path(path.join(PATHS.locales, file)))} with { type: 'text' };`);
+    });
+    lines.push('');
+    lines.push('export const bundledStyles = new Map<string, string>([');
+    styles.forEach((file, index) => {
+        lines.push(`  [${JSON.stringify(path.basename(file, '.csl'))}, style${index}],`);
+    });
+    lines.push(']);');
+    lines.push('');
+    lines.push('export const bundledLocales = new Map<string, string>([');
+    locales.forEach((file, index) => {
+        lines.push(`  [${JSON.stringify(path.basename(file, '.xml').replace(/^locales-/, ''))}, locale${index}],`);
+    });
+    lines.push(']);');
+    lines.push('');
+    fs.writeFileSync(PATHS.generatedAssets, lines.join('\n'));
+
+    fs.writeFileSync(PATHS.generatedEntry, [
+        "import { registerBundledCslAssets } from '../../src/csl-loader';",
+        "import { main } from '../../src/cli';",
+        "import { bundledStyles, bundledLocales } from './csl-assets';",
+        '',
+        'registerBundledCslAssets({ styles: bundledStyles, locales: bundledLocales });',
+        '',
+        'main().catch(error => {',
+        "  console.error(error instanceof Error ? error.message : String(error));",
+        '  process.exit(1);',
+        '});',
+        '',
+    ].join('\n'));
 }
 
 async function build_binary(target: BuildTarget): Promise<void> {
@@ -75,7 +133,7 @@ async function build_binary(target: BuildTarget): Promise<void> {
     const bun_target = `bun-${target.platform}-${target.arch}`;
 
     try {
-        await $`bun build ${PATHS.entry} --compile --target=${bun_target} --outfile=${output_path} --minify`;
+        await $`bun build ${PATHS.generatedEntry} --compile --target=${bun_target} --outfile=${output_path} --minify`;
         console.log(`Binary created: ${output_path}`);
     } catch (error) {
         console.error(`Failed to build ${target.output_name}:`, error);
@@ -137,23 +195,26 @@ Examples:
 async function main(): Promise<void> {
     const command = process.argv[2];
 
-    switch (command) {
-        case 'binary':
+    if (command === '--help' || command === '-h') {
+        print_usage();
+        return;
+    }
+    if (command !== 'binary' && command !== 'current') {
+        if (command) console.error(`Unknown command: ${command}`);
+        print_usage();
+        process.exitCode = 1;
+        return;
+    }
+
+    generate_native_entry();
+    try {
+        if (command === 'binary') {
             await build_all_binaries();
-            break;
-        case 'current':
+        } else {
             await build_current_binary();
-            break;
-        case '--help':
-        case '-h':
-            print_usage();
-            break;
-        default:
-            if (command) {
-                console.error(`Unknown command: ${command}`);
-            }
-            print_usage();
-            process.exit(1);
+        }
+    } finally {
+        fs.rmSync(PATHS.generated, { recursive: true, force: true });
     }
 }
 
