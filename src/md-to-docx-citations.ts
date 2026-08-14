@@ -16,7 +16,9 @@ export interface CiteprocItemData {
   author?: CiteprocName[];
   editor?: CiteprocName[];
   issued?: { 'date-parts': number[][] };
+  accessed?: { 'date-parts': number[][] };
   'container-title'?: string;
+  'container-title-short'?: string;
   volume?: string;
   page?: string;
   DOI?: string;
@@ -558,7 +560,11 @@ export function buildItemData(entry: BibtexEntry): CiteprocItemData {
   }
 
   const journal = entry.fields.get('journal');
-  if (journal) itemData['container-title'] = journal;
+  const containerTitle = entry.fields.get('container-title');
+  if (journal || containerTitle) itemData['container-title'] = journal ?? containerTitle;
+
+  const containerTitleShort = entry.fields.get('container-title-short');
+  if (containerTitleShort) itemData['container-title-short'] = containerTitleShort;
 
   const volume = entry.fields.get('volume');
   if (volume) itemData.volume = volume;
@@ -582,6 +588,18 @@ export function buildItemData(entry: BibtexEntry): CiteprocItemData {
   const url = entry.fields.get('url');
   if (url) itemData.URL = url;
 
+  const accessed = entry.fields.get('accessed');
+  const accessedMatch = accessed?.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (accessedMatch) {
+    itemData.accessed = {
+      'date-parts': [[
+        parseInt(accessedMatch[1], 10),
+        parseInt(accessedMatch[2], 10),
+        parseInt(accessedMatch[3], 10),
+      ]],
+    };
+  }
+
   const isbn = entry.fields.get('isbn');
   if (isbn) itemData.ISBN = isbn;
 
@@ -594,9 +612,9 @@ export function buildItemData(entry: BibtexEntry): CiteprocItemData {
   const edition = entry.fields.get('edition');
   if (edition) itemData.edition = edition;
 
-  // booktitle → container-title, but only if journal didn't already set it
+  // booktitle → container-title, but only if no explicit container was set
   const booktitle = entry.fields.get('booktitle');
-  if (booktitle && !journal) itemData['container-title'] = booktitle;
+  if (booktitle && !itemData['container-title']) itemData['container-title'] = booktitle;
 
   const abstract_ = entry.fields.get('abstract');
   if (abstract_) itemData.abstract = abstract_;
@@ -621,6 +639,7 @@ function mapBibtexTypeToCSL(bibtexType: string): string {
     case 'mastersthesis': return 'thesis';
     case 'techreport': return 'report';
     case 'misc': return 'article';
+    case 'webpage': return 'webpage';
     default: return 'article';
   }
 }

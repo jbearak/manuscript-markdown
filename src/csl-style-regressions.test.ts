@@ -51,6 +51,17 @@ const REPRESENTATIVE_BIBTEX = `
 }
 `;
 
+const WEBPAGE_BIBTEX = `
+@webpage{webpage2025,
+  title = {Understanding Coastal Change},
+  container-title = {Example Research Council Evidence Portal},
+  container-title-short = {ERC Evidence},
+  year = {2025},
+  url = {https://example.org/coastal-change},
+  accessed = {2026-08-14}
+}
+`;
+
 function normalizeEntry(entry: string): string {
   return entry.trim().replace(/\n\s*/g, '');
 }
@@ -63,6 +74,17 @@ function renderStyle(style: string): { citation: string | undefined; entries: st
   return {
     citation: renderCitationText(engine!, ['article2024']),
     entries: renderBibliography(engine!)!.entries.map(normalizeEntry),
+  };
+}
+
+function renderWebpage(style: string): { citation: string | undefined; entry: string } {
+  const entries = parseBibtex(WEBPAGE_BIBTEX);
+  const engine = createCiteprocEngine(entries, style);
+  expect(engine).toBeDefined();
+  engine!.updateItems(['webpage2025']);
+  return {
+    citation: renderCitationText(engine!, ['webpage2025']),
+    entry: normalizeEntry(renderBibliography(engine!)!.entries[0]),
   };
 }
 
@@ -171,6 +193,12 @@ describe('refreshed CSL rendering', () => {
     ]);
   });
 
+  test('BMJ renders webpage access dates', () => {
+    const rendered = renderWebpage('bmj');
+    expect(rendered.citation).toBe('[1]');
+    expect(rendered.entry).toContain('https://example.org/coastal-change (accessed 14 August 2026)');
+  });
+
   test('Chicago author-date renders representative citations and bibliography entries', () => {
     const rendered = renderStyle('chicago-author-date');
     expect(rendered.citation).toBe('(Rivera and Chen 2024)');
@@ -179,6 +207,12 @@ describe('refreshed CSL rendering', () => {
       '<div class="csl-entry">Morgan, Elise. 2021. <i>The Very Long History of Example Scholarship</i>. 2nd ed. Example University Press.</div>',
       '<div class="csl-entry">Rivera, Ana, and Bo Chen. 2024. “Climate Signals in Coastal Systems.” <i>Journal of Synthetic Research</i> 12 (3): 101–19. https://doi.org/10.1234/example.2024.1.</div>',
     ]);
+  });
+
+  test('Chicago author-date uses webpage short and full container titles', () => {
+    const rendered = renderWebpage('chicago-author-date');
+    expect(rendered.citation).toBe('(ERC Evidence 2025)');
+    expect(rendered.entry).toContain('ERC Evidence (Example Research Council Evidence Portal). 2025.');
   });
 
   test('Chicago notes renders full notes and bibliography entries', () => {
