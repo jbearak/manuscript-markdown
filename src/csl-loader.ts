@@ -53,6 +53,7 @@ interface BundledStyleEntry {
   label: string;
   fileName?: string;
   zoteroId?: string;
+  aliases?: readonly string[];
 }
 
 export interface BundledCslAssets {
@@ -75,9 +76,17 @@ export function registerBundledCslAssets(assets: BundledCslAssets | undefined): 
 const BUNDLED_STYLE_ENTRIES: ReadonlyArray<BundledStyleEntry> = [
   { name: 'apa', label: 'APA (7th edition)' },
   { name: 'bmj', label: 'BMJ' },
-  { name: 'chicago-author-date', label: 'Chicago (Author-Date)' },
-  { name: 'chicago-fullnote-bibliography', label: 'Chicago (Full Note)' },
-  { name: 'chicago-note-bibliography', label: 'Chicago (Note-Bibliography)' },
+  { name: 'chicago-author-date', label: 'Chicago (Author-Date, 18th edition)' },
+  {
+    name: 'chicago-notes-bibliography',
+    label: 'Chicago (Notes and Bibliography, 18th edition)',
+    aliases: ['chicago-fullnote-bibliography'],
+  },
+  {
+    name: 'chicago-shortened-notes-bibliography',
+    label: 'Chicago (Shortened Notes and Bibliography, 18th edition)',
+    aliases: ['chicago-note-bibliography'],
+  },
   { name: 'modern-language-association', label: 'MLA (9th edition)' },
   { name: 'ieee', label: 'IEEE' },
   { name: 'nature', label: 'Nature' },
@@ -103,13 +112,24 @@ const BUNDLED_STYLE_ENTRIES: ReadonlyArray<BundledStyleEntry> = [
   { name: 'harvard-cite-them-right', label: 'Harvard (Cite Them Right)' },
 ];
 
-const BUNDLED_STYLE_BY_NAME = new Map(BUNDLED_STYLE_ENTRIES.map(entry => [entry.name, entry] as const));
-const BUNDLED_STYLE_BY_ZOTERO_ID = new Map(
-  BUNDLED_STYLE_ENTRIES.map(entry => [entry.zoteroId ?? ZOTERO_STYLE_PREFIX + entry.name, entry] as const)
-);
+const BUNDLED_STYLE_BY_NAME = new Map<string, BundledStyleEntry>();
+const BUNDLED_STYLE_BY_ZOTERO_ID = new Map<string, BundledStyleEntry>();
+for (const entry of BUNDLED_STYLE_ENTRIES) {
+  BUNDLED_STYLE_BY_NAME.set(entry.name, entry);
+  BUNDLED_STYLE_BY_ZOTERO_ID.set(entry.zoteroId ?? ZOTERO_STYLE_PREFIX + entry.name, entry);
+  for (const alias of entry.aliases ?? []) {
+    BUNDLED_STYLE_BY_NAME.set(alias, entry);
+    BUNDLED_STYLE_BY_ZOTERO_ID.set(ZOTERO_STYLE_PREFIX + alias, entry);
+  }
+}
 
 function bundledStyleFileName(name: string): string {
-  return BUNDLED_STYLE_BY_NAME.get(name)?.fileName ?? name;
+  const entry = BUNDLED_STYLE_BY_NAME.get(name);
+  return entry?.fileName ?? entry?.name ?? name;
+}
+
+function styleCacheKey(name: string): string {
+  return BUNDLED_STYLE_BY_NAME.has(name) ? bundledStyleFileName(name) : name;
 }
 
 export function resolveCslCachePath(cacheDir: string, name: string): string {
@@ -120,7 +140,7 @@ export function resolveCslCachePath(cacheDir: string, name: string): string {
 export function zoteroStyleIdForName(name: string): string {
   if (name.startsWith('http://') || name.startsWith('https://')) return name;
   const entry = BUNDLED_STYLE_BY_NAME.get(name);
-  return entry?.zoteroId ?? ZOTERO_STYLE_PREFIX + name;
+  return entry?.zoteroId ?? ZOTERO_STYLE_PREFIX + (entry?.name ?? name);
 }
 
 export function publicStyleNameForZoteroId(styleId: string): string {
@@ -154,7 +174,7 @@ export function isCslAvailable(
   if (!name) return false;
 
   // Fast in-memory check against known bundled style names
-  if (BUNDLED_STYLES.includes(name)) {
+  if (BUNDLED_STYLE_BY_NAME.has(name)) {
     return true;
   }
 
@@ -194,7 +214,7 @@ export async function isCslAvailableAsync(
   if (!name) return false;
 
   // Fast in-memory check against known bundled style names
-  if (BUNDLED_STYLES.includes(name)) {
+  if (BUNDLED_STYLE_BY_NAME.has(name)) {
     return true;
   }
 
@@ -236,7 +256,7 @@ export async function isCslAvailableAsync(
  */
 export function loadStyle(name: string): string {
   validateStyleName(name);
-  const cached = styleCache.get(name);
+  const cached = styleCache.get(styleCacheKey(name));
   if (cached) return cached;
 
   let xml: string;
@@ -254,7 +274,7 @@ export function loadStyle(name: string): string {
     throw new Error(`CSL style not found: ${name}. Use loadStyleAsync() to download from the CSL repository.`);
   }
 
-  styleCache.set(name, xml);
+  styleCache.set(styleCacheKey(name), xml);
   return xml;
 }
 
@@ -266,7 +286,7 @@ export function loadStyle(name: string): string {
 export async function loadStyleAsync(name: string, cacheDir?: string): Promise<string> {
   validateStyleName(name);
   // Check memory cache first
-  const cached = styleCache.get(name);
+  const cached = styleCache.get(styleCacheKey(name));
   if (cached) return cached;
 
   // Try loading from disk (bundled or previously-downloaded)
@@ -274,19 +294,19 @@ export async function loadStyleAsync(name: string, cacheDir?: string): Promise<s
   const bundledPath = join(BUNDLED_STYLES_DIR, fileName + '.csl');
   const embedded = embeddedAssets?.styles.get(fileName);
   if (embedded) {
-    styleCache.set(name, embedded);
+    styleCache.set(styleCacheKey(name), embedded);
     return embedded;
   }
   if (existsSync(bundledPath)) {
     const xml = readFileSync(bundledPath, 'utf-8');
-    styleCache.set(name, xml);
+    styleCache.set(styleCacheKey(name), xml);
     return xml;
   }
 
   // If it's an absolute path or .csl file path, read directly
   if (isAbsolute(name) || name.endsWith('.csl')) {
     const xml = readFileSync(name, 'utf-8');
-    styleCache.set(name, xml);
+    styleCache.set(styleCacheKey(name), xml);
     return xml;
   }
 
@@ -313,7 +333,7 @@ export async function loadStyleAsync(name: string, cacheDir?: string): Promise<s
       // Disk caching is best-effort; memory cache still works
     }
 
-    styleCache.set(name, xml);
+    styleCache.set(styleCacheKey(name), xml);
     return xml;
   } catch (e) {
     throw new Error(`CSL style "${name}" not found locally and could not be downloaded from ${url}`, { cause: e });
@@ -344,7 +364,7 @@ export async function downloadStyle(name: string, targetDir: string): Promise<st
   writeFileSync(join(targetDir, fileName + '.csl'), xml, 'utf-8');
 
   // Also cache in memory
-  styleCache.set(name, xml);
+  styleCache.set(styleCacheKey(name), xml);
   return xml;
 }
 
