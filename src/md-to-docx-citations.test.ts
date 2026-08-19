@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'bun:test';
 import { generateCitation, generateCitationId, generateMathXml, escapeXml, generateMissingKeysXml, htmlToOoxmlRuns, generateFallbackText } from './md-to-docx-citations';
-import { BibtexEntry } from './bibtex-parser';
+import { BibtexEntry, parseBibtex } from './bibtex-parser';
 import { parseMd, type MdRun } from './md-to-docx';
 
 /** Extract and parse the CSL_CITATION JSON from a Zotero field code XML string. */
@@ -57,6 +57,33 @@ describe('generateCitation', () => {
     // Defect 4: outer id on citationItem matches itemData.id
     expect(csl.citationItems[0].id).toBe(csl.citationItems[0].itemData.id);
     expect(typeof csl.citationItems[0].id).toBe('number');
+  });
+
+  it('embeds decoded TeX accents while preserving opaque citation metadata', () => {
+    const entries = parseBibtex(String.raw`@article{muller2024,
+  author = {M{\"u}ller, Jane},
+  title = {{\"U}ber Caf\'{e} research},
+  year = {2024},
+  doi = {10.1000/M{\"u}ller\_id},
+  zotero-key = {AB\_CD},
+  zotero-uri = {http://zotero.org/groups/1/items/AB\_CD#frag}
+}`);
+    const result = generateCitation(
+      { keys: ['muller2024'], text: 'muller2024' },
+      entries,
+      undefined,
+      new Set<string>(),
+      new Map<string, string | number>(),
+    );
+
+    const csl = extractCsl(result.xml);
+    expect(csl.citationItems[0].itemData.author).toEqual([
+      { family: 'Müller', given: 'Jane' },
+    ]);
+    expect(csl.citationItems[0].itemData.title).toBe('Über Café research');
+    expect(csl.citationItems[0].itemData.DOI).toBe(String.raw`10.1000/M{\"u}ller\_id`);
+    expect(csl.citationItems[0].uris[0]).toBe(String.raw`http://zotero.org/groups/1/items/AB\_CD#frag`);
+    expect(csl.properties.plainCitation).toBe('(Müller 2024)');
   });
 
   it('produces field code without Zotero metadata', () => {
