@@ -11,10 +11,6 @@ import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from
 import { publicStyleNameForZoteroId, zoteroStyleIdForName } from './csl-loader';
 import { extractZoteroKey } from './zotero-link';
 
-// Zotero item identity lives in `zotero-link.ts` with the rest of the Zotero
-// domain; re-exported here because it was published from this module first.
-export { ZOTERO_KEY_RE, extractZoteroKey } from './zotero-link';
-
 // --- Implementation notes ---
 // Table parsing:
 // - Handle pipes in code/quotes; careful boundary detection

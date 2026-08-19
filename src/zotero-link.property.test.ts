@@ -12,19 +12,15 @@ import * as fc from 'fast-check';
 import {
   createZoteroLinkPlan,
   normalizeDoi,
+  ZOTERO_ITEM_KEY_RE,
   type ZoteroCatalogItem,
 } from './zotero-link';
-import { parseBibtex } from './bibtex-parser';
+import { parseBibtex, parseBibtexWithRaw } from './bibtex-parser';
+import { GROUP_URI_BASE, zoteroItem } from './zotero-link.fixtures';
 
-const GROUP_URI_BASE = 'http://zotero.org/groups/2295646/items/';
-
-/** An 8-character Zotero item key. */
-const itemKeyArb = fc
-  .array(fc.constantFrom(...'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'.split('')), {
-    minLength: 8,
-    maxLength: 8,
-  })
-  .map(chars => chars.join(''));
+/** An 8-character Zotero item key, generated from the production grammar so
+ *  the two cannot drift apart. */
+const itemKeyArb = fc.stringMatching(ZOTERO_ITEM_KEY_RE);
 
 /** A citation key: no comma, brace or whitespace, so it survives a .bib header. */
 const citeKeyArb = fc
@@ -83,18 +79,23 @@ function itemsForArb(entries: readonly GeneratedEntry[]): fc.Arbitrary<ZoteroCat
       withDoi
         .map((entry, i) => ({ entry, include: mask[i], key: keys[i] }))
         .filter(x => x.include)
-        .map(x => ({ key: x.key, uri: GROUP_URI_BASE + x.key, doi: x.entry.doi })),
+        .map(x => zoteroItem(x.key, { doi: x.entry.doi })),
     );
 }
 
-/** Split a .bib into the source text of each entry, so an untouched entry can
- *  be compared byte-for-byte against the plan's output. */
+/** The source text of each entry, so an untouched entry can be compared
+ *  byte-for-byte against the plan's output.  Delimited by the parser rather
+ *  than by splitting on `\n@`, which would cut an entry in half the moment a
+ *  field value contained one. */
 function entryTexts(text: string): string[] {
-  return text
-    .split(/\n(?=@)/)
-    .map(s => s.trim())
-    .filter(s => s.length > 0);
+  return parseBibtexWithRaw(text).ranges.map(r => text.slice(r.start, r.end));
 }
+
+/** The pairing every property needs: a .bib plus a catalog covering an
+ *  arbitrary subset of its DOIs. */
+const bibAndItemsArb = bibArb.chain(bib =>
+  itemsForArb(bib.entries).map(items => ({ bib, items })),
+);
 
 /** The same entry with a comma terminating its last field — the one byte a
  *  splice is allowed to add outside the inserted lines.  Inserted at the end
@@ -110,7 +111,7 @@ describe('Property 1: byte preservation', () => {
   it('changes only the entries it links, and only by adding field lines', () => {
     fc.assert(
       fc.property(
-        bibArb.chain(bib => itemsForArb(bib.entries).map(items => ({ bib, items }))),
+        bibAndItemsArb,
         ({ bib, items }) => {
           const plan = createZoteroLinkPlan(bib.text, items);
           expect(plan.blocked).toBeUndefined();
@@ -164,7 +165,7 @@ describe('Property 2: idempotency', () => {
   it('rerunning over the plan output changes nothing further', () => {
     fc.assert(
       fc.property(
-        bibArb.chain(bib => itemsForArb(bib.entries).map(items => ({ bib, items }))),
+        bibAndItemsArb,
         ({ bib, items }) => {
           const first = createZoteroLinkPlan(bib.text, items);
           const second = createZoteroLinkPlan(first.updatedText, items);
@@ -185,7 +186,7 @@ describe('Property 2: idempotency', () => {
   it('a linked entry parses back to the item it was linked to', () => {
     fc.assert(
       fc.property(
-        bibArb.chain(bib => itemsForArb(bib.entries).map(items => ({ bib, items }))),
+        bibAndItemsArb,
         ({ bib, items }) => {
           const plan = createZoteroLinkPlan(bib.text, items);
           const reparsed = parseBibtex(plan.updatedText);
@@ -267,7 +268,7 @@ describe('Property 4: one decision per entry', () => {
   it('reports every entry exactly once, in source order', () => {
     fc.assert(
       fc.property(
-        bibArb.chain(bib => itemsForArb(bib.entries).map(items => ({ bib, items }))),
+        bibAndItemsArb,
         ({ bib, items }) => {
           const plan = createZoteroLinkPlan(bib.text, items);
           expect(plan.decisions.map(d => d.entry.key)).toEqual(bib.entries.map(e => e.key));

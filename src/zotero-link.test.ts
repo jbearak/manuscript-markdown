@@ -5,22 +5,29 @@ import {
   normalizeIsbns,
   normalizePmid,
   extractZoteroKey,
-  type ZoteroCatalogItem,
   type ZoteroLinkDecision,
 } from './zotero-link';
 import { parseBibtex } from './bibtex-parser';
+import { GROUP_URI_BASE as GROUP, zoteroItem as item } from './zotero-link.fixtures';
 
-const GROUP = 'http://zotero.org/groups/2295646/items/';
-
-function item(key: string, extra: Partial<ZoteroCatalogItem> = {}): ZoteroCatalogItem {
-  return { key, uri: GROUP + key, ...extra };
-}
 
 /** The single decision for an entry, by citation key. */
 function decisionFor(decisions: readonly ZoteroLinkDecision[], key: string): ZoteroLinkDecision {
   const found = decisions.filter(d => d.entry.key === key);
   expect(found.length).toBe(1);
   return found[0];
+}
+
+/** The single decision for an entry, asserted to have `outcome` and narrowed to
+ *  it, so a test can read the fields that outcome carries. */
+function decisionWithOutcome<O extends ZoteroLinkDecision['outcome']>(
+  decisions: readonly ZoteroLinkDecision[],
+  key: string,
+  outcome: O,
+): Extract<ZoteroLinkDecision, { outcome: O }> {
+  const decision = decisionFor(decisions, key);
+  expect(decision.outcome).toBe(outcome);
+  return decision as Extract<ZoteroLinkDecision, { outcome: O }>;
 }
 
 describe('normalizeDoi', () => {
@@ -95,9 +102,7 @@ describe('matching tiers', () => {
   it('links on an exact citation key', () => {
     const bib = '@article{Smith2020,\n  title = {A Study}\n}\n';
     const plan = createZoteroLinkPlan(bib, [item('ABCD1234', { citationKey: 'Smith2020' })]);
-    const d = decisionFor(plan.decisions, 'Smith2020');
-    expect(d.outcome).toBe('update');
-    if (d.outcome !== 'update') throw new Error('unreachable');
+    const d = decisionWithOutcome(plan.decisions, 'Smith2020', 'update');
     expect(d.tier).toBe('citation-key');
     expect(d.target.key).toBe('ABCD1234');
     expect(plan.updatedText).toContain('zotero-key = {ABCD1234}');
@@ -121,9 +126,7 @@ describe('matching tiers', () => {
   it('links on DOI regardless of case', () => {
     const bib = '@article{k1,\n  doi = {10.1000/ABC}\n}\n';
     const plan = createZoteroLinkPlan(bib, [item('ABCD1234', { doi: 'https://doi.org/10.1000/abc' })]);
-    const d = decisionFor(plan.decisions, 'k1');
-    expect(d.outcome).toBe('update');
-    if (d.outcome !== 'update') throw new Error('unreachable');
+    const d = decisionWithOutcome(plan.decisions, 'k1', 'update');
     expect(d.tier).toBe('doi');
   });
 
@@ -136,9 +139,7 @@ describe('matching tiers', () => {
   it('links on ISBN', () => {
     const bib = '@book{k1,\n  isbn = {978-0-306-40615-7}\n}\n';
     const plan = createZoteroLinkPlan(bib, [item('ABCD1234', { isbn: '9780306406157' })]);
-    const d = decisionFor(plan.decisions, 'k1');
-    expect(d.outcome).toBe('update');
-    if (d.outcome !== 'update') throw new Error('unreachable');
+    const d = decisionWithOutcome(plan.decisions, 'k1', 'update');
     expect(d.tier).toBe('isbn-pmid');
     expect(d.evidence).toEqual(['isbn']);
   });
@@ -162,9 +163,7 @@ describe('matching tiers', () => {
     const plan = createZoteroLinkPlan(bib, [
       item('ABCD1234', { isbn: '9780306406157', extra: 'PMID: 12345678' }),
     ]);
-    const d = decisionFor(plan.decisions, 'k1');
-    expect(d.outcome).toBe('update');
-    if (d.outcome !== 'update') throw new Error('unreachable');
+    const d = decisionWithOutcome(plan.decisions, 'k1', 'update');
     expect([...d.evidence].sort()).toEqual(['isbn', 'pmid']);
   });
 
@@ -174,18 +173,14 @@ describe('matching tiers', () => {
       item('AAAAAAAA', { citationKey: 'Smith2020' }),
       item('BBBBBBBB', { doi: '10.1000/other' }),
     ]);
-    const d = decisionFor(plan.decisions, 'Smith2020');
-    expect(d.outcome).toBe('update');
-    if (d.outcome !== 'update') throw new Error('unreachable');
+    const d = decisionWithOutcome(plan.decisions, 'Smith2020', 'update');
     expect(d.target.key).toBe('AAAAAAAA');
   });
 
   it('never matches on title, author or year', () => {
     const bib = '@article{k1,\n  title = {The Very Same Title},\n  author = {Jane Doe},\n  year = {2020}\n}\n';
     const plan = createZoteroLinkPlan(bib, [item('ABCD1234', { title: 'The Very Same Title' })]);
-    const d = decisionFor(plan.decisions, 'k1');
-    expect(d.outcome).toBe('unmatched');
-    if (d.outcome !== 'unmatched') throw new Error('unreachable');
+    const d = decisionWithOutcome(plan.decisions, 'k1', 'unmatched');
     expect(d.reason).toBe('no-identifiers');
     expect(plan.changed).toBe(false);
   });
@@ -193,9 +188,7 @@ describe('matching tiers', () => {
   it('separates "no identifier" from "no match" in the unmatched reason', () => {
     const bib = '@article{k1,\n  doi = {10.1000/nowhere}\n}\n';
     const plan = createZoteroLinkPlan(bib, []);
-    const d = decisionFor(plan.decisions, 'k1');
-    expect(d.outcome).toBe('unmatched');
-    if (d.outcome !== 'unmatched') throw new Error('unreachable');
+    const d = decisionWithOutcome(plan.decisions, 'k1', 'unmatched');
     expect(d.reason).toBe('no-exact-match');
   });
 });
@@ -207,9 +200,7 @@ describe('ambiguity', () => {
       item('AAAAAAAA', { doi: '10.1000/abc' }),
       item('BBBBBBBB', { doi: '10.1000/ABC' }),
     ]);
-    const d = decisionFor(plan.decisions, 'k1');
-    expect(d.outcome).toBe('ambiguous');
-    if (d.outcome !== 'ambiguous') throw new Error('unreachable');
+    const d = decisionWithOutcome(plan.decisions, 'k1', 'ambiguous');
     expect(d.candidates.map(c => c.key)).toEqual(['AAAAAAAA', 'BBBBBBBB']);
     expect(plan.updatedText).toBe(bib);
   });
@@ -221,9 +212,7 @@ describe('ambiguity', () => {
       item('BBBBBBBB', { doi: '10.1000/abc' }),
       item('CCCCCCCC', { isbn: '9780306406157' }),
     ]);
-    const d = decisionFor(plan.decisions, 'k1');
-    expect(d.outcome).toBe('ambiguous');
-    if (d.outcome !== 'ambiguous') throw new Error('unreachable');
+    const d = decisionWithOutcome(plan.decisions, 'k1', 'ambiguous');
     expect(d.tier).toBe('doi');
   });
 
@@ -257,9 +246,7 @@ describe('existing Zotero identity', () => {
     const uri = 'http://zotero.org/users/2417153/items/ABCD1234';
     const bib = '@article{k1,\n  zotero-uri = {' + uri + '}\n}\n';
     const plan = createZoteroLinkPlan(bib, []);
-    const d = decisionFor(plan.decisions, 'k1');
-    expect(d.outcome).toBe('update');
-    if (d.outcome !== 'update') throw new Error('unreachable');
+    const d = decisionWithOutcome(plan.decisions, 'k1', 'update');
     expect(d.additions).toEqual([{ name: 'zotero-key', value: 'ABCD1234' }]);
     expect(plan.updatedText).toContain('zotero-uri = {' + uri + '}');
     expect(plan.updatedText).toContain('zotero-key = {ABCD1234}');
@@ -274,18 +261,14 @@ describe('existing Zotero identity', () => {
   it('fills in the URI for a key found in the selected library', () => {
     const bib = '@article{k1,\n  zotero-key = {ABCD1234}\n}\n';
     const plan = createZoteroLinkPlan(bib, [item('ABCD1234')]);
-    const d = decisionFor(plan.decisions, 'k1');
-    expect(d.outcome).toBe('update');
-    if (d.outcome !== 'update') throw new Error('unreachable');
+    const d = decisionWithOutcome(plan.decisions, 'k1', 'update');
     expect(d.additions).toEqual([{ name: 'zotero-uri', value: GROUP + 'ABCD1234' }]);
   });
 
   it('reports a key absent from the selected library instead of matching lower', () => {
     const bib = '@article{k1,\n  zotero-key = {ZZZZZZZZ},\n  doi = {10.1000/abc}\n}\n';
     const plan = createZoteroLinkPlan(bib, [item('ABCD1234', { doi: '10.1000/abc' })]);
-    const d = decisionFor(plan.decisions, 'k1');
-    expect(d.outcome).toBe('conflict');
-    if (d.outcome !== 'conflict') throw new Error('unreachable');
+    const d = decisionWithOutcome(plan.decisions, 'k1', 'conflict');
     expect(d.reason).toBe('unknown-zotero-key');
     expect(plan.changed).toBe(false);
   });
@@ -294,18 +277,14 @@ describe('existing Zotero identity', () => {
     const bib =
       '@article{k1,\n  zotero-key = {ZZZZZZZZ},\n  zotero-uri = {' + GROUP + 'ABCD1234}\n}\n';
     const plan = createZoteroLinkPlan(bib, []);
-    const d = decisionFor(plan.decisions, 'k1');
-    expect(d.outcome).toBe('conflict');
-    if (d.outcome !== 'conflict') throw new Error('unreachable');
+    const d = decisionWithOutcome(plan.decisions, 'k1', 'conflict');
     expect(d.reason).toBe('zotero-key-uri-mismatch');
   });
 
   it('reports a malformed URI rather than replacing it', () => {
     const bib = '@article{k1,\n  zotero-uri = {not a uri},\n  doi = {10.1000/abc}\n}\n';
     const plan = createZoteroLinkPlan(bib, [item('ABCD1234', { doi: '10.1000/abc' })]);
-    const d = decisionFor(plan.decisions, 'k1');
-    expect(d.outcome).toBe('conflict');
-    if (d.outcome !== 'conflict') throw new Error('unreachable');
+    const d = decisionWithOutcome(plan.decisions, 'k1', 'conflict');
     expect(d.reason).toBe('invalid-zotero-uri');
     expect(plan.updatedText).toBe(bib);
   });
@@ -313,18 +292,14 @@ describe('existing Zotero identity', () => {
   it('treats an empty Zotero field as broken, not absent', () => {
     const bib = '@article{k1,\n  zotero-key = {},\n  doi = {10.1000/abc}\n}\n';
     const plan = createZoteroLinkPlan(bib, [item('ABCD1234', { doi: '10.1000/abc' })]);
-    const d = decisionFor(plan.decisions, 'k1');
-    expect(d.outcome).toBe('conflict');
-    if (d.outcome !== 'conflict') throw new Error('unreachable');
+    const d = decisionWithOutcome(plan.decisions, 'k1', 'conflict');
     expect(d.reason).toBe('invalid-zotero-key');
   });
 
   it('reports a lowercase item key as malformed', () => {
     const bib = '@article{k1,\n  zotero-key = {abcd1234}\n}\n';
     const plan = createZoteroLinkPlan(bib, [item('ABCD1234')]);
-    const d = decisionFor(plan.decisions, 'k1');
-    expect(d.outcome).toBe('conflict');
-    if (d.outcome !== 'conflict') throw new Error('unreachable');
+    const d = decisionWithOutcome(plan.decisions, 'k1', 'conflict');
     expect(d.reason).toBe('invalid-zotero-key');
   });
 

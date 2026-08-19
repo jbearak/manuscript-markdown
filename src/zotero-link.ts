@@ -29,6 +29,8 @@ import {
   parseBibtexWithRaw,
   findDuplicateBibtexKeys,
   spliceFieldsIntoEntry,
+  detectBibtexFieldIndent,
+  formatBibtexFieldLine,
   detectEntryEol,
   detectBibtexEol,
   stripOuterBraces,
@@ -42,18 +44,25 @@ import {
 // Zotero identity
 // ---------------------------------------------------------------------------
 
-/** Matches the 8-character Zotero item key at the end of a URI. */
-export const ZOTERO_KEY_RE = /\/items\/([A-Z0-9]{8})$/;
+/** The shape of a Zotero item key: 8 uppercase alphanumerics.  Written once
+ *  and composed into the regexes below, so the three cannot drift apart. */
+const ITEM_KEY_PATTERN = '[A-Z0-9]{8}';
 
-/** A Zotero item key on its own: 8 characters of uppercase base-32-ish. */
-export const ZOTERO_ITEM_KEY_RE = /^[A-Z0-9]{8}$/;
+/** Matches the 8-character Zotero item key at the end of a URI. */
+export const ZOTERO_KEY_RE = new RegExp('/items/(' + ITEM_KEY_PATTERN + ')$');
+
+/** A Zotero item key on its own. */
+export const ZOTERO_ITEM_KEY_RE = new RegExp('^' + ITEM_KEY_PATTERN + '$');
 
 /** A full Zotero identity URI, as Word stores it in `ADDIN ZOTERO_ITEM` field
  *  codes.  Group URIs name a server-assigned group id and resolve for every
  *  member; personal URIs name one user's numeric id, or `local/<slug>` for a
  *  library that has never synced, and resolve only for that user. */
-const ZOTERO_URI_RE =
-  /^https?:\/\/zotero\.org\/(?:users\/(?:\d+|local\/[A-Za-z0-9]+)|groups\/\d+)\/items\/([A-Z0-9]{8})$/;
+const ZOTERO_URI_RE = new RegExp(
+  '^https?://zotero\\.org/(?:users/(?:\\d+|local/[A-Za-z0-9]+)|groups/\\d+)/items/(' +
+    ITEM_KEY_PATTERN +
+    ')$',
+);
 
 /** Extract the 8-character Zotero item key from a Zotero URI, or undefined if
  *  it doesn't match.  Deliberately lenient — it accepts any URI ending in
@@ -271,18 +280,32 @@ export function normalizePmid(value: string | undefined): string | undefined {
   return /^\d{1,9}$/.test(raw) ? raw : undefined;
 }
 
-// Zotero's `Extra` field is the documented home for identifiers the item type
-// has no field for.  Each is a whole line of the form `Name: value`; matching
-// only whole lines keeps a number mentioned in a note from being read as an
-// identifier.  Non-global regexes: `exec` on a global one is stateful.
-const EXTRA_DOI_RE = /^[ \t]*doi[ \t]*:[ \t]*(\S.*?)[ \t]*$/im;
-const EXTRA_PMID_RE = /^[ \t]*pmid[ \t]*:[ \t]*(\d+)[ \t]*$/im;
-const EXTRA_CITATION_KEY_RE = /^[ \t]*citation key[ \t]*:[ \t]*(\S+)[ \t]*$/im;
+/** The identifiers Zotero's free-text `Extra` field can carry. */
+interface ZoteroExtraFields {
+  readonly citationKey?: string;
+  readonly doi?: string;
+  readonly pmid?: string;
+}
 
-function matchExtraLine(extra: string | undefined, re: RegExp): string | undefined {
-  if (!extra) return undefined;
-  const m = re.exec(extra);
-  return m ? m[1] : undefined;
+/** `Extra` is the documented home for identifiers an item type has no field
+ *  for.  Each is a whole line of the form `Name: value`, so the whole field is
+ *  read line by line: a number mentioned mid-sentence in a note is prose, and
+ *  reading it as a PMID would invent an identifier the user never entered. */
+function parseZoteroExtra(extra: string | undefined): ZoteroExtraFields {
+  if (!extra || !extra.includes(':')) return {};
+  const fields: { citationKey?: string; doi?: string; pmid?: string } = {};
+  for (const line of extra.split('\n')) {
+    const colon = line.indexOf(':');
+    if (colon === -1) continue;
+    const name = line.slice(0, colon).trim().toLowerCase();
+    const value = line.slice(colon + 1).trim();
+    if (!value) continue;
+    // First occurrence wins, matching how Zotero reads its own Extra lines.
+    if (name === 'citation key') fields.citationKey ??= value;
+    else if (name === 'doi') fields.doi ??= value;
+    else if (name === 'pmid') fields.pmid ??= value;
+  }
+  return fields;
 }
 
 // ---------------------------------------------------------------------------
@@ -314,7 +337,7 @@ function addToIndex(
   else map.set(key, [item]);
 }
 
-export function buildZoteroCatalogIndex(items: readonly ZoteroCatalogItem[]): ZoteroCatalogIndex {
+function buildZoteroCatalogIndex(items: readonly ZoteroCatalogItem[]): ZoteroCatalogIndex {
   const index: ZoteroCatalogIndex = {
     byItemKey: new Map(),
     byCitationKey: new Map(),
@@ -323,19 +346,12 @@ export function buildZoteroCatalogIndex(items: readonly ZoteroCatalogItem[]): Zo
     byPmid: new Map(),
   };
   for (const item of items) {
+    const extra = parseZoteroExtra(item.extra);
     addToIndex(index.byItemKey, item.key, item);
-    addToIndex(
-      index.byCitationKey,
-      item.citationKey ?? matchExtraLine(item.extra, EXTRA_CITATION_KEY_RE),
-      item,
-    );
-    addToIndex(
-      index.byDoi,
-      normalizeDoi(item.doi) ?? normalizeDoi(matchExtraLine(item.extra, EXTRA_DOI_RE)),
-      item,
-    );
+    addToIndex(index.byCitationKey, item.citationKey ?? extra.citationKey, item);
+    addToIndex(index.byDoi, normalizeDoi(item.doi) ?? normalizeDoi(extra.doi), item);
     for (const isbn of normalizeIsbns(item.isbn)) addToIndex(index.byIsbn, isbn, item);
-    addToIndex(index.byPmid, normalizePmid(matchExtraLine(item.extra, EXTRA_PMID_RE)), item);
+    addToIndex(index.byPmid, normalizePmid(extra.pmid), item);
   }
   return index;
 }
@@ -444,7 +460,8 @@ function decideExistingIdentity(
  *  to both is one match with two pieces of evidence, not a match that shadows
  *  a second. */
 function findIdentifierCandidates(
-  fields: ReadonlyMap<string, string>,
+  isbns: readonly string[],
+  pmid: string | undefined,
   index: ZoteroCatalogIndex,
 ): { candidates: ZoteroCatalogItem[]; evidence: ZoteroMatchEvidence[] } {
   const found = new Map<string, ZoteroCatalogItem>();
@@ -457,10 +474,7 @@ function findIdentifierCandidates(
     }
   };
 
-  for (const isbn of normalizeIsbns(fields.get('isbn'))) {
-    collect(index.byIsbn.get(isbn) ?? [], 'isbn');
-  }
-  const pmid = normalizePmid(fields.get('pmid'));
+  for (const isbn of isbns) collect(index.byIsbn.get(isbn) ?? [], 'isbn');
   if (pmid) collect(index.byPmid.get(pmid) ?? [], 'pmid');
 
   return { candidates: [...found.values()], evidence: [...evidence] };
@@ -506,7 +520,7 @@ function decideEntry(
   const isbns = normalizeIsbns(fields.get('isbn'));
   const pmid = normalizePmid(fields.get('pmid'));
   if (isbns.length > 0 || pmid) {
-    const { candidates, evidence } = findIdentifierCandidates(fields, index);
+    const { candidates, evidence } = findIdentifierCandidates(isbns, pmid, index);
     const byIdentifier = resolveCandidates(range, 'isbn-pmid', evidence, candidates, bothFields);
     if (byIdentifier) return byIdentifier;
   }
@@ -524,16 +538,6 @@ function decideEntry(
 // ---------------------------------------------------------------------------
 // Rewriting
 // ---------------------------------------------------------------------------
-
-/** Indentation of the entry's existing fields, so inserted lines sit with
- *  them.  Two spaces matches this codebase's generated BibTeX, and is the
- *  fallback for an entry written on one line. */
-const FIELD_LINE_RE = /\n([ \t]+)[A-Za-z][\w-]*[ \t]*=/;
-
-function detectFieldIndent(rawEntry: string): string {
-  const m = FIELD_LINE_RE.exec(rawEntry);
-  return m ? m[1] : '  ';
-}
 
 /** Splice each update's fields into its entry.
  *
@@ -555,8 +559,8 @@ function applyUpdates(text: string, decisions: readonly ZoteroLinkDecision[]): s
   for (let i = updates.length - 1; i >= 0; i--) {
     const { entry, additions } = updates[i];
     const rawEntry = text.slice(entry.start, entry.end);
-    const indent = detectFieldIndent(rawEntry);
-    const lines = additions.map(a => indent + a.name + ' = {' + a.value + '},');
+    const indent = detectBibtexFieldIndent(rawEntry);
+    const lines = additions.map(a => formatBibtexFieldLine(a.name, a.value, indent));
     const spliced = spliceFieldsIntoEntry(
       rawEntry,
       lines,

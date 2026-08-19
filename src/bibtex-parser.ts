@@ -859,6 +859,26 @@ export function extractRawField(rawEntry: string, fieldName: string): string | n
   return rawEntry.slice(lineStart, end);
 }
 
+/** Indentation of an entry's existing field lines, so an inserted field sits
+ *  with them rather than announcing itself.  Two spaces — this codebase's
+ *  generated BibTeX — is the fallback for an entry written on one line. */
+const FIELD_LINE_RE = /\n([ \t]+)[A-Za-z][\w-]*[ \t]*=/;
+
+export function detectBibtexFieldIndent(rawEntry: string): string {
+  const m = FIELD_LINE_RE.exec(rawEntry);
+  return m ? m[1] : '  ';
+}
+
+/** One `  name = {value},` line, in the form `spliceFieldsIntoEntry` expects.
+ *
+ *  The value is written verbatim: every caller passes an identifier that must
+ *  survive byte-for-byte (a DOI, a Zotero URI, a copied field value), and
+ *  escaping one would corrupt it.  A value containing an unbalanced brace
+ *  would produce invalid BibTeX, so callers must not pass free text. */
+export function formatBibtexFieldLine(name: string, value: string, indent = '  '): string {
+  return indent + name + ' = {' + value + '},';
+}
+
 /** Splice additional raw field lines into a produced entry's raw text,
  *  inserting them before the closing `}`. Ensures a trailing comma on the
  *  last existing field so the result remains valid BibTeX.
@@ -986,7 +1006,7 @@ export function mergeBibtex(existing: string, produced: string): string {
         const escapedValue = VERBATIM_BIBTEX_FIELDS.has(fName)
           ? value
           : escapeBibtex(value);
-        fieldTexts.push('  ' + fName + ' = {' + escapedValue + '},');
+        fieldTexts.push(formatBibtexFieldLine(fName, escapedValue));
       }
 
       // Keep each entry internally consistent: a mixed-ending file must not
