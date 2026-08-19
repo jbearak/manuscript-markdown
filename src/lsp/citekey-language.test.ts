@@ -226,6 +226,31 @@ describe('parseBibDataFromText / findBibKeyAtOffset', () => {
 		const parsed = parseBibDataFromText('/tmp/test.bib', text);
 		expect(parsed.keyOffsets.get('book')).toBe(text.indexOf('{book') + 1);
 	});
+
+	test('does not record an offset for an @type{key, inside a field value', () => {
+		// `ref1` is prose inside a note, not a declaration — jumping to it would
+		// land the user in the middle of another entry's field.
+		const text = '@article{key1,\n  note = {see @book{ref1, p.5}},\n  year = {2020}\n}\n';
+		const parsed = parseBibDataFromText('/tmp/test.bib', text);
+		expect(parsed.keyOffsets.has('key1')).toBe(true);
+		expect(parsed.keyOffsets.has('ref1')).toBe(false);
+	});
+
+	test('does not record an offset for an entry with no closing brace', () => {
+		// The entry never parses, so there is no declaration to navigate to.
+		const text = '@article{broken,\n  title = {no close brace';
+		const parsed = parseBibDataFromText('/tmp/test.bib', text);
+		expect(parsed.entries.size).toBe(0);
+		expect(parsed.keyOffsets.has('broken')).toBe(false);
+	});
+
+	test('keeps the first declaration when a key is repeated', () => {
+		const text = '@article{dup, doi = {10.1/a}}\n@article{dup, doi = {10.2/b}}\n';
+		const parsed = parseBibDataFromText('/tmp/test.bib', text);
+		expect(parsed.keyOffsets.get('dup')).toBe(text.indexOf('{dup') + 1);
+		// Both occurrences remain visible via ranges, even though entries collapses.
+		expect(parsed.ranges).toHaveLength(2);
+	});
 });
 
 

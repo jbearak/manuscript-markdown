@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { parseBibtex, parseBibtexWithRaw, duplicateBibtexKeys, detectBibtexEol, serializeBibtex, stripOuterBraces, mergeBibtex, extractRawField, spliceFieldsIntoEntry, BibtexEntry } from './bibtex-parser';
+import { parseBibtex, parseBibtexWithRaw, findDuplicateBibtexKeys, detectBibtexEol, serializeBibtex, stripOuterBraces, mergeBibtex, extractRawField, spliceFieldsIntoEntry, BibtexEntry } from './bibtex-parser';
 
 describe('BibTeX Parser', () => {
   it('parses basic entry', () => {
@@ -488,18 +488,110 @@ describe('parseBibtexWithRaw source ranges', () => {
     expect(ranges).toHaveLength(2);
     expect(input.slice(ranges[0].start, ranges[0].end)).toContain('10.1/a');
     expect(input.slice(ranges[1].start, ranges[1].end)).toContain('10.2/b');
-    expect(duplicateBibtexKeys(ranges).has('dup')).toBe(true);
+    expect(findDuplicateBibtexKeys(ranges).has('dup')).toBe(true);
   });
 
   it('reports no duplicates for distinct keys', () => {
     const { ranges } = parseBibtexWithRaw('@article{a,\n  year = {2020}\n}\n\n@book{b,\n  year = {2021}\n}');
-    expect(duplicateBibtexKeys(ranges).size).toBe(0);
+    expect(findDuplicateBibtexKeys(ranges).size).toBe(0);
   });
 
   it('treats case-different keys as distinct, matching parseBibtex', () => {
     const { parsed, ranges } = parseBibtexWithRaw('@article{Smith,\n  year = {2020}\n}\n\n@article{smith,\n  year = {2021}\n}');
     expect(parsed.size).toBe(2);
-    expect(duplicateBibtexKeys(ranges).size).toBe(0);
+    expect(findDuplicateBibtexKeys(ranges).size).toBe(0);
+  });
+
+  it('omits an entry whose closing brace is never found', () => {
+    // There is no trustworthy end offset for an unclosed entry, so it must not
+    // appear at all — a caller splicing into a guessed range would corrupt the
+    // rest of the file.  The following well-formed entry still gets a range.
+    const input = '@article{broken,\n  title = {no close brace\n\n@article{good,\n  year = {2021}\n}';
+    const { ranges } = parseBibtexWithRaw(input);
+
+    expect(ranges.map(r => r.key)).toEqual(['good']);
+    expect(input.slice(ranges[0].start, ranges[0].end)).toBe('@article{good,\n  year = {2021}\n}');
+  });
+
+  it('returns no ranges for input with no entries', () => {
+    expect(parseBibtexWithRaw('').ranges).toEqual([]);
+    expect(parseBibtexWithRaw('% just a comment\n\nsome prose\n').ranges).toEqual([]);
+  });
+
+  // The following cases came from the LSP's own entry scanner, which these
+  // ranges replaced.  They guard the boundary detection that document symbols
+  // and go-to-definition depend on.
+  it('spans exactly one entry when several are present', () => {
+    const input = '@article{alpha2020,\n  year = {2020}\n}\n\n@book{beta2021,\n  year = {2021}\n}';
+    const { ranges } = parseBibtexWithRaw(input);
+    expect(ranges.map(r => r.key)).toEqual(['alpha2020', 'beta2021']);
+    expect(input.slice(ranges[0].start, ranges[0].end)).toBe('@article{alpha2020,\n  year = {2020}\n}');
+    expect(input.slice(ranges[1].start, ranges[1].end)).toBe('@book{beta2021,\n  year = {2021}\n}');
+  });
+
+  it('counts nested braces in field values', () => {
+    const input = '@article{nested2020,\n  title = {{Nested {Braces} Here}},\n  year = {2020}\n}';
+    const { ranges } = parseBibtexWithRaw(input);
+    expect(ranges).toHaveLength(1);
+    expect(ranges[0].end).toBe(input.length);
+  });
+
+  it('treats braces and quotes inside values as literal text', () => {
+    // A " inside {...} is an ordinary character in BibTeX, and a } inside "..."
+    // must not close the entry — an odd number of quotes must not desync either.
+    for (const input of [
+      '@article{quoted, title = "A {Title} Here", year = {2020}}',
+      '@article{braced, title = {say "hi" and "bye"}, year = {2020}}',
+      '@article{oddquote, title = {say "hi" there"}, year = {2020}}',
+    ]) {
+      const { ranges } = parseBibtexWithRaw(input);
+      expect(ranges).toHaveLength(1);
+      expect(ranges[0].end).toBe(input.length);
+    }
+  });
+
+  it('ignores an @type{key, pattern inside a field value', () => {
+    const input = '@article{first2020,\n  note = {see @book{ref1, p.5}},\n  year = {2020}\n}\n\n@book{second2021,\n  year = {2021}\n}';
+    const { ranges } = parseBibtexWithRaw(input);
+    // `ref1` is a reference in prose, not a declaration.
+    expect(ranges.map(r => r.key)).toEqual(['first2020', 'second2021']);
+    expect(ranges[1].start).toBeGreaterThanOrEqual(ranges[0].end);
+  });
+
+  it('brackets the citation key even when it spells the entry type', () => {
+    const input = '@article{article,\n  year = {2020}\n}';
+    const { ranges } = parseBibtexWithRaw(input);
+    expect(input.slice(ranges[0].keyStart, ranges[0].keyEnd)).toBe('article');
+    // Must point past the opening brace, not at the type name.
+    expect(ranges[0].keyStart).toBe(input.indexOf('{') + 1);
+  });
+
+  it('brackets a key containing punctuation', () => {
+    const input = '@inproceedings{conf-key2021,\n  year = {2021}\n}';
+    const { ranges } = parseBibtexWithRaw(input);
+    expect(input.slice(ranges[0].keyStart, ranges[0].keyEnd)).toBe('conf-key2021');
+  });
+});
+
+describe('detectBibtexEol', () => {
+  it('reports the dominant ending', () => {
+    expect(detectBibtexEol('@article{a,\n  year = {2020}\n}')).toBe('\n');
+    expect(detectBibtexEol('@article{a,\r\n  year = {2020}\r\n}')).toBe('\r\n');
+  });
+
+  it('defaults to LF when the text has no newline at all', () => {
+    expect(detectBibtexEol('@article{a, year = {2020}}')).toBe('\n');
+    expect(detectBibtexEol('')).toBe('\n');
+  });
+
+  it('resolves a CRLF/bare-LF tie to CRLF', () => {
+    // One CRLF and one bare LF: a file that is half CRLF is being written by a
+    // CRLF tool, so matching it is the less surprising choice.
+    expect(detectBibtexEol('a\r\nb\nc')).toBe('\r\n');
+  });
+
+  it('does not let a lone CRLF outvote a majority of LF lines', () => {
+    expect(detectBibtexEol('a\nb\nc\nd\r\ne')).toBe('\n');
   });
 });
 

@@ -105,35 +105,47 @@ export type BibtexEol = '\n' | '\r\n';
 /** Dominant line ending of `text`, for callers that have no better source.
  *  Prefer passing the document's own convention (e.g. `TextDocument.eol`)
  *  when it is known: a single-line entry carries no newline of its own, and
- *  a CRLF inside one field does not make the whole file CRLF. */
+ *  a CRLF inside one field does not make the whole file CRLF.
+ *
+ *  Boundary policy: text with no newline at all is LF, and a tie between CRLF
+ *  and bare-LF endings resolves to CRLF — a file that is half CRLF is being
+ *  written by a CRLF tool, and matching it is the less surprising choice. */
 export function detectBibtexEol(text: string): BibtexEol {
   const crlfCount = text.split('\r\n').length - 1;
   const lfCount = text.split('\n').length - 1;
   return crlfCount > 0 && crlfCount * 2 >= lfCount ? '\r\n' : '\n';
 }
 
-/** Half-open `[start, end)` offsets of one entry occurrence within the input. */
+/** Half-open `[start, end)` offsets of one entry occurrence within the input.
+ *  Offsets are UTF-16 code units, matching `TextDocument.positionAt`.
+ *  `keyStart`/`keyEnd` bracket the citation key itself, for callers that need
+ *  to point at the declaration rather than the whole entry. */
 export interface BibtexSourceRange {
   key: string;
   start: number;
   end: number;
+  keyStart: number;
+  keyEnd: number;
 }
 
 export interface ParsedBibtexWithRaw {
   parsed: Map<string, BibtexEntry>;
   raw: Map<string, string>;
-  /** Every entry occurrence in source order, including repeated citation keys.
-   *  `parsed`/`raw` are keyed by citation key and so keep only the last
-   *  occurrence; this array is the complete picture.  Callers editing by
-   *  offset must use it — splicing a repeated key via `raw` would be
-   *  ambiguous.  Use `duplicateBibtexKeys()` to detect repeats. */
+  /** Every successfully delimited entry occurrence, in source order, including
+   *  repeated citation keys.  `parsed`/`raw` are keyed by citation key and so
+   *  keep only the last occurrence; this array is the complete picture.
+   *  Callers editing by offset must use it — splicing a repeated key via `raw`
+   *  would be ambiguous.  Use `findDuplicateBibtexKeys()` to detect repeats.
+   *
+   *  An entry whose closing brace is never found is omitted entirely: there is
+   *  no trustworthy end offset for it, so no caller should be editing it. */
   ranges: BibtexSourceRange[];
 }
 
 /** Citation keys that occur more than once.  Entries with a duplicated key
  *  cannot be edited by offset unambiguously, so callers should leave them
  *  alone rather than guess which occurrence was meant. */
-export function duplicateBibtexKeys(ranges: readonly BibtexSourceRange[]): Set<string> {
+export function findDuplicateBibtexKeys(ranges: readonly BibtexSourceRange[]): Set<string> {
   const seen = new Set<string>();
   const duplicates = new Set<string>();
   for (const range of ranges) {
@@ -182,7 +194,10 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
 
     // Raw entry text (preserves original formatting)
     raw.set(key, input.slice(entryStart, endPos + 1));
-    ranges.push({ key, start: entryStart, end: endPos + 1 });
+    // Locate the key after the opening brace, so a key that also spells the
+    // entry type (`@article{article,`) still points at the key.
+    const keyStart = entryStart + match[0].lastIndexOf(key);
+    ranges.push({ key, start: entryStart, end: endPos + 1, keyStart, keyEnd: keyStart + key.length });
 
     // Parsed entry
     try {
@@ -300,9 +315,11 @@ export function extractRawField(rawEntry: string, fieldName: string): string | n
  *  inserting them before the closing `}`. Ensures a trailing comma on the
  *  last existing field so the result remains valid BibTeX.
  *
- *  Line endings: inserted lines follow the entry's own convention.  Emitting
- *  bare LF into a CRLF entry would leave mixed endings, which surfaces as
- *  whole-file diff noise on Windows checkouts. */
+ *  Line endings: inserted lines use `eol`, which defaults to whatever
+ *  `producedRaw` itself uses.  Pass the enclosing document's convention when
+ *  it is known — a single-line entry carries no newline to infer from.
+ *  Emitting bare LF into a CRLF entry would leave mixed endings, which
+ *  surfaces as whole-file diff noise on Windows checkouts. */
 export function spliceFieldsIntoEntry(
   producedRaw: string,
   fieldTexts: string[],
