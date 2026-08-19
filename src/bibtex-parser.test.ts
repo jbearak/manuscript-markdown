@@ -963,6 +963,16 @@ describe('entries inside % comments', () => {
     expect(ranges.map((r) => r.key)).toEqual(['a', 'real']);
   });
 
+  it('does not let a % inside a keyless construct comment out what follows', () => {
+    // The `%` sits inside `@book{...}`'s balanced body, which is that
+    // construct's content, not ignored text — so it comments out nothing after
+    // the construct ends. Found by fuzzing.
+    const text = '@book{x@@% @book{nested, t={1}}} @book{real, t = {y}}';
+    const { ranges } = parseBibtexWithRaw(text);
+    expect(ranges.map((r) => r.key)).toEqual(['real']);
+    expect(ranges[0].trusted).toBe(true);
+  });
+
   it('leaves a % inside an @comment body alone', () => {
     const { ranges } = parseBibtexWithRaw('@comment{% @a{fake, t={1}}}\n@book{real, t = {R}}');
     expect(ranges.map((r) => r.key)).toEqual(['real']);
@@ -985,6 +995,23 @@ describe('parseBibtexWithRaw constructEnds', () => {
   it('records nothing for a construct it could not delimit', () => {
     const { constructEnds } = parseBibtexWithRaw('@article{k, t = {unclosed');
     expect(constructEnds).toEqual([]);
+  });
+
+  it('records nothing found after sync is lost, balanced or not', () => {
+    // `fake` is internally balanced but may well be sitting inside `bad`'s
+    // unclosed field value, so it marks no known top-level position.
+    const { constructEnds, ranges } = parseBibtexWithRaw(
+      '@article{bad, title = {x\n@book{fake, t = {y}}\n',
+    );
+    expect(ranges.map((r) => r.trusted)).toEqual([false]);
+    expect(constructEnds).toEqual([]);
+  });
+
+  it('keeps ends recorded before sync was lost', () => {
+    const text = '@article{ok, t = {T}}\n@article{bad, title = {x\n@book{fake, t = {y}}\n';
+    const { constructEnds } = parseBibtexWithRaw(text);
+    expect(constructEnds).toEqual([21]);
+    expect(text[constructEnds[0] - 1]).toBe('}');
   });
 });
 
@@ -1078,6 +1105,19 @@ describe('detectBibtexEol tie boundary', () => {
     // The forward pass finds nothing, so the gap before the first construct is
     // the only anchor left.
     expect(detectBibtexEol('\r\n@article{k, note = {a\nb}}')).toBe('\r\n');
+  });
+
+  it('does not anchor on a construct recovered after sync loss', () => {
+    // Two leading top-level CRLFs against two bare LFs inside `bad`'s unclosed
+    // field value. `fake` is balanced but not known to be top-level, so the LF
+    // after it is payload — the leading gap is the only real anchor.
+    const text = '\r\n\r\n@article{bad, title = {x\n@book{fake, t = {y}}\n';
+    expect(detectBibtexEol(text)).toBe('\r\n');
+  });
+
+  it('still anchors on constructs recorded before sync was lost', () => {
+    const text = '@article{ok, t = {T}}\r\n@article{bad, title = {x\n';
+    expect(detectBibtexEol(text)).toBe('\r\n');
   });
 
   it('ignores untrusted ranges when sampling the boundary', () => {

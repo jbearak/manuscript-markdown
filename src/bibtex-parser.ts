@@ -348,16 +348,22 @@ export interface ParsedBibtexWithRaw {
    *  the file.  Byte-level editing must refuse the whole document when this is
    *  false rather than trusting the prefix. */
   rangesTrusted: boolean;
-  /** End offset of every top-level construct the scanner consumed cleanly, in
-   *  source order — pseudo-entries and keyless headers included, not just the
-   *  ones that became `ranges`.
+  /** End offset of every top-level construct the scanner consumed cleanly
+   *  while in sync, in source order — pseudo-entries and keyless headers
+   *  included, not just the ones that became `ranges`.
    *
    *  These are boundaries, not entries: they say where the scanner was last
    *  certain it stood outside every construct.  Only `detectBibtexEol` uses
    *  them, to find a newline in the ignored text after a construct.  A
    *  `@comment` is not something a caller may edit or navigate to, so it never
    *  appears in `ranges`; but the newline after it is as structural as any
-   *  other, and without a boundary here the tie-break cannot see it. */
+   *  other, and without a boundary here the tie-break cannot see it.
+   *
+   *  Nothing found after sync is lost appears here, even when it is perfectly
+   *  balanced.  Balanced is not the same as top-level: a recovered
+   *  `@book{...}` may be sitting inside the unclosed field value that lost
+   *  sync in the first place, and then the newline after it is that field's
+   *  payload, not the document's layout. */
   constructEnds: number[];
 }
 
@@ -473,7 +479,7 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
       } else {
         pos = close + 1;
         requireLineStart = false;
-        constructEnds.push(pos);
+        if (synced) constructEnds.push(pos);
       }
       continue;
     }
@@ -492,7 +498,7 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
       } else {
         pos = close + 1;
         requireLineStart = false;
-        constructEnds.push(pos);
+        if (synced) constructEnds.push(pos);
       }
       continue;
     }
@@ -509,7 +515,7 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
     }
     pos = endPos + 1;
     requireLineStart = false;
-    constructEnds.push(pos);
+    if (synced) constructEnds.push(pos);
 
     // Raw entry text (preserves original formatting)
     raw.set(key, input.slice(entryStart, endPos + 1));
