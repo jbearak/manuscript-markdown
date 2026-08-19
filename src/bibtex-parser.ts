@@ -157,6 +157,10 @@ function isInLineComment(input: string, gapStart: number, pos: number): boolean 
   return false;
 }
 
+/** Hoisted so the type-name loop below does not re-dispatch a literal regex
+ *  once per character.  Non-global: `test` on a global regex is stateful. */
+const WORD_CHAR = /\w/;
+
 /** True if a construct header — `@type{` or `@type(` — starts at `pos` and is
  *  complete before the end of the line.
  *
@@ -172,7 +176,7 @@ function isInLineComment(input: string, gapStart: number, pos: number): boolean 
 function isConstructHeaderAt(text: string, pos: number): boolean {
   if (text[pos] !== '@') return false;
   let i = pos + 1;
-  while (i < text.length && /\w/.test(text[i])) i++;
+  while (i < text.length && WORD_CHAR.test(text[i])) i++;
   if (i === pos + 1) return false;
   while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i++;
   return text[i] === '{' || text[i] === '(';
@@ -275,8 +279,15 @@ export function detectEntryEol(entryText: string): BibtexEol | null {
  *  the only answer that cannot introduce a stray `\r` into a file that had
  *  none. */
 export function detectBibtexEol(text: string): BibtexEol {
-  const crlfCount = text.split('\r\n').length - 1;
-  const bareLfCount = (text.split('\n').length - 1) - crlfCount;
+  // Counted in one pass rather than via `split`, which would allocate an array
+  // of every line in the document just to take its length.
+  let crlfCount = 0;
+  let bareLfCount = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== '\n') continue;
+    if (i > 0 && text[i - 1] === '\r') crlfCount++;
+    else bareLfCount++;
+  }
   if (crlfCount !== bareLfCount) return crlfCount > bareLfCount ? '\r\n' : '\n';
   if (crlfCount === 0) return '\n';
 
@@ -285,7 +296,7 @@ export function detectBibtexEol(text: string): BibtexEol {
   // not a bare regex — a regex happily matches `@book{fake,` sitting inside an
   // `@comment` body and would then read that comment's line ending as the
   // document's.  Only reached on a tie, so the extra scan is rare.
-  const { ranges, constructEnds } = parseBibtexWithRaw(text);
+  const { ranges, constructEnds } = scanBibtex(text);
   // Every construct the scanner finished, entries and pseudo-entries alike —
   // a `@comment` never becomes a range, but the newline after it is just as
   // structural, and the forward scan stops at its header either way.
@@ -348,22 +359,28 @@ export interface ParsedBibtexWithRaw {
    *  the file.  Byte-level editing must refuse the whole document when this is
    *  false rather than trusting the prefix. */
   rangesTrusted: boolean;
-  /** End offset of every top-level construct the scanner consumed cleanly
-   *  while in sync, in source order — pseudo-entries and keyless headers
-   *  included, not just the ones that became `ranges`.
-   *
-   *  These are boundaries, not entries: they say where the scanner was last
-   *  certain it stood outside every construct.  Only `detectBibtexEol` uses
-   *  them, to find a newline in the ignored text after a construct.  A
-   *  `@comment` is not something a caller may edit or navigate to, so it never
-   *  appears in `ranges`; but the newline after it is as structural as any
-   *  other, and without a boundary here the tie-break cannot see it.
-   *
-   *  Nothing found after sync is lost appears here, even when it is perfectly
-   *  balanced.  Balanced is not the same as top-level: a recovered
-   *  `@book{...}` may be sitting inside the unclosed field value that lost
-   *  sync in the first place, and then the newline after it is that field's
-   *  payload, not the document's layout. */
+}
+
+/** `ParsedBibtexWithRaw` plus the scanner's internal construct boundaries.
+ *
+ *  `constructEnds` holds the end offset of every top-level construct the
+ *  scanner consumed cleanly while in sync, in source order — pseudo-entries
+ *  and keyless headers included, not just the ones that became `ranges`.
+ *
+ *  These are boundaries, not entries: they say where the scanner was last
+ *  certain it stood outside every construct.  Only `detectBibtexEol` uses
+ *  them, to find a newline in the ignored text after a construct.  A
+ *  `@comment` is not something a caller may edit or navigate to, so it never
+ *  appears in `ranges`; but the newline after it is as structural as any
+ *  other, and without a boundary here the tie-break cannot see it.  They stay
+ *  off the public result so no caller can mistake them for entries.
+ *
+ *  Nothing found after sync is lost appears here, even when it is perfectly
+ *  balanced.  Balanced is not the same as top-level: a recovered
+ *  `@book{...}` may be sitting inside the unclosed field value that lost sync
+ *  in the first place, and then the newline after it is that field's payload,
+ *  not the document's layout. */
+interface ScannedBibtex extends ParsedBibtexWithRaw {
   constructEnds: number[];
 }
 
@@ -401,6 +418,12 @@ function isAtLineStart(input: string, pos: number): boolean {
  *  texts in a single pass over the entry boundaries.  parseBibtex delegates
  *  here; mergeBibtex uses both the parsed and raw maps directly. */
 export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
+  return scanBibtex(input);
+}
+
+/** The scan itself.  Separate from `parseBibtexWithRaw` only so the construct
+ *  boundaries stay off the public result — see `ScannedBibtex`. */
+function scanBibtex(input: string): ScannedBibtex {
   const parsed = new Map<string, BibtexEntry>();
   const raw = new Map<string, string>();
   const ranges: BibtexSourceRange[] = [];
@@ -652,9 +675,12 @@ export function extractRawField(rawEntry: string, fieldName: string): string | n
 export function spliceFieldsIntoEntry(
   producedRaw: string,
   fieldTexts: string[],
-  eol: BibtexEol = detectEntryEol(producedRaw) ?? '\n',
+  eolArg?: BibtexEol,
 ): string {
+  // Resolved after the no-op guard: detecting an EOL costs a scan of the
+  // entry, and a splice with nothing to add returns the input untouched.
   if (fieldTexts.length === 0) return producedRaw;
+  const eol = eolArg ?? detectEntryEol(producedRaw) ?? '\n';
 
   // `producedRaw` is an exact parsed entry range, so its final character is the
   // authoritative closer — a paren-delimited entry must be closed with `)`.
@@ -700,8 +726,11 @@ export function mergeBibtex(existing: string, produced: string): string {
   if (!produced || produced.trim().length === 0) return existing;
 
   // Fallback only, for entries too short to carry a newline of their own —
-  // an entry that does have one is authoritative about its own layout.
-  const producedEol = detectBibtexEol(produced);
+  // an entry that does have one is authoritative about its own layout.  Most
+  // merges never need it, and on a tie `detectBibtexEol` re-scans the whole
+  // document, so resolve it at most once and only on demand.
+  let producedEolCache: BibtexEol | null = null;
+  const producedEol = () => (producedEolCache ??= detectBibtexEol(produced));
   const existingResult = parseBibtexWithRaw(existing);
   const producedResult = parseBibtexWithRaw(produced);
   const existingParsed = existingResult.parsed;
@@ -768,7 +797,7 @@ export function mergeBibtex(existing: string, produced: string): string {
       // have its minority-convention entries rewritten to the majority one.
       // Only a newline at the entry's own level counts — one buried in a field
       // value is payload and says nothing about the entry's layout.
-      const entryEol = detectEntryEol(producedText) ?? producedEol;
+      const entryEol = detectEntryEol(producedText) ?? producedEol();
       result.push(spliceFieldsIntoEntry(producedText, fieldTexts, entryEol));
     }
   }

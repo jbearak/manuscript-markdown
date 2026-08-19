@@ -923,6 +923,25 @@ describe('paren-delimited entries', () => {
   });
 });
 
+describe('delimiting entries that contain blank lines', () => {
+  // converter.ts filters newly generated entries by key before appending them
+  // to a stored .bib. It used to split that text on blank lines, which cuts an
+  // entry in half as soon as a field value contains one — `abstract` and
+  // `note` come through from Zotero verbatim and routinely do. The half
+  // without the header was then dropped as keyless, appending truncated
+  // BibTeX. The parser delimits by structure, so the blank line is payload.
+  it('keeps an entry whole when a field value contains a blank line', () => {
+    const entryA = '@article{keyA,\n  abstract = {First para.\n\n  Second para.},\n  year = {2020}\n}';
+    const entryB = '@book{keyB,\n  title = {T}\n}';
+    const generated = entryA + '\n\n' + entryB;
+
+    const { ranges } = parseBibtexWithRaw(generated);
+    expect(ranges.map((r) => r.key)).toEqual(['keyA', 'keyB']);
+    expect(generated.slice(ranges[0].start, ranges[0].end)).toBe(entryA);
+    expect(generated.slice(ranges[1].start, ranges[1].end)).toBe(entryB);
+  });
+});
+
 describe('entries inside % comments', () => {
   // BibTeX ignores the rest of a line after `%`, so an entry-shaped run of
   // characters there is prose. Reporting it would hand out a range that a
@@ -980,11 +999,18 @@ describe('entries inside % comments', () => {
 });
 
 describe('parseBibtexWithRaw constructEnds', () => {
+  // `constructEnds` is deliberately off the public result type — only
+  // `detectBibtexEol` consumes it, and a caller could mistake it for entries.
+  // These tests pin the boundary rules directly rather than only through the
+  // line-ending behavior they drive, so reach it by an explicit cast.
+  const scan = (text: string) =>
+    parseBibtexWithRaw(text) as ReturnType<typeof parseBibtexWithRaw> & { constructEnds: number[] };
+
   // Boundaries, not entries: they mark where the scanner last stood outside
   // every construct, including the pseudo-entries that never become ranges.
   it('records an end for every cleanly consumed construct', () => {
     const text = '@comment{x}@article{k, t = {T}}@string(y = {z})';
-    const { constructEnds, ranges } = parseBibtexWithRaw(text);
+    const { constructEnds, ranges } = scan(text);
     expect(ranges.map((r) => r.key)).toEqual(['k']);
     expect(constructEnds).toEqual([11, 31, 47]);
     for (const end of constructEnds) {
@@ -993,14 +1019,14 @@ describe('parseBibtexWithRaw constructEnds', () => {
   });
 
   it('records nothing for a construct it could not delimit', () => {
-    const { constructEnds } = parseBibtexWithRaw('@article{k, t = {unclosed');
+    const { constructEnds } = scan('@article{k, t = {unclosed');
     expect(constructEnds).toEqual([]);
   });
 
   it('records nothing found after sync is lost, balanced or not', () => {
     // `fake` is internally balanced but may well be sitting inside `bad`'s
     // unclosed field value, so it marks no known top-level position.
-    const { constructEnds, ranges } = parseBibtexWithRaw(
+    const { constructEnds, ranges } = scan(
       '@article{bad, title = {x\n@book{fake, t = {y}}\n',
     );
     expect(ranges.map((r) => r.trusted)).toEqual([false]);
@@ -1009,7 +1035,7 @@ describe('parseBibtexWithRaw constructEnds', () => {
 
   it('keeps ends recorded before sync was lost', () => {
     const text = '@article{ok, t = {T}}\n@article{bad, title = {x\n@book{fake, t = {y}}\n';
-    const { constructEnds } = parseBibtexWithRaw(text);
+    const { constructEnds } = scan(text);
     expect(constructEnds).toEqual([21]);
     expect(text[constructEnds[0] - 1]).toBe('}');
   });
