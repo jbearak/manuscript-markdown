@@ -244,6 +244,17 @@ describe('parseBibDataFromText / findBibKeyAtOffset', () => {
 		expect(parsed.keyOffsets.has('broken')).toBe(false);
 	});
 
+	test('still locates an entry recovered after a malformed one', () => {
+		// A user mid-edit with a brace temporarily missing must not lose
+		// go-to-definition on every entry below the damage. The parser marks
+		// these ranges untrusted for mutation, but navigation still uses them.
+		const text = '@article{broken,\n  title = {unterminated\n\n@article{good,\n  year = {2021}\n}';
+		const parsed = parseBibDataFromText('/tmp/test.bib', text);
+		expect(parsed.entries.has('good')).toBe(true);
+		expect(parsed.keyOffsets.get('good')).toBe(text.lastIndexOf('{good') + 1);
+		expect(parsed.ranges.every(r => !r.trusted)).toBe(true);
+	});
+
 	test('keeps the first declaration when a key is repeated', () => {
 		const text = '@article{dup, doi = {10.1/a}}\n@article{dup, doi = {10.2/b}}\n';
 		const parsed = parseBibDataFromText('/tmp/test.bib', text);

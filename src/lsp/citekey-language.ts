@@ -87,7 +87,11 @@ export interface ParsedBibData {
 	text: string;
 	entries: Map<string, BibtexEntry>;
 	/** Every delimited entry occurrence, in source order — see
-	 *  `BibtexSourceRange`. Repeated keys appear once per occurrence. */
+	 *  `BibtexSourceRange`. Repeated keys appear once per occurrence.
+	 *  Navigation deliberately uses all of these, including ones marked
+	 *  `trusted: false`: while a user is mid-edit with a brace temporarily
+	 *  missing, a best-effort location still beats no location at all. Only
+	 *  byte-level mutation needs to filter on `trusted`. */
 	ranges: BibtexSourceRange[];
 	/** First declaration offset of each citation key, derived from `ranges`. */
 	keyOffsets: Map<string, number>;

@@ -552,30 +552,73 @@ describe('parseBibtexWithRaw source ranges', () => {
     expect(parseBibtexWithRaw(input).ranges).toEqual([]);
   });
 
-  it('still parses entries recovered after an unterminated one, without ranging them', () => {
+  it('marks entries recovered after an unterminated one as untrusted', () => {
     // Recovery is a heuristic: once the scanner has lost sync it cannot tell a
     // real entry from an entry-shaped field value indented on its own line.
-    // `parsed` keeps the best-effort result, but `ranges` — which callers
-    // splice into — must not trade on a guess.
+    // Navigation still wants the location, so the range is reported — but
+    // flagged, because splicing into a guess would corrupt the file.
     const input = '@article{broken,\n  title = {no close brace\n\n@article{good,\n  year = {2021}\n}';
-    const { parsed, ranges } = parseBibtexWithRaw(input);
+    const { parsed, ranges, rangesTrusted } = parseBibtexWithRaw(input);
     expect([...parsed.keys()]).toEqual(['good']);
-    expect(ranges).toEqual([]);
+    expect(ranges.map(r => r.key)).toEqual(['good']);
+    expect(ranges[0].trusted).toBe(false);
+    expect(rangesTrusted).toBe(false);
   });
 
-  it('never reports a range for an entry nested in an unterminated one', () => {
-    // The mirror case that makes the above necessary: `fake` is indented on
-    // its own line inside broken's note value, and is lexically identical to
-    // a recovered entry.  Ranging either one would corrupt the file.
+  it('marks an entry nested in an unterminated one as untrusted', () => {
+    // The mirror case that makes the flag necessary: `fake` is indented on its
+    // own line inside broken's note value, and is lexically identical to a
+    // recovered entry. Neither may be spliced into.
     const input = '@article{broken,\n  note = {\n    @book{fake, doi = {10.1/not-real}}';
-    expect(parseBibtexWithRaw(input).ranges).toEqual([]);
+    const { ranges, rangesTrusted } = parseBibtexWithRaw(input);
+    expect(ranges.every(r => !r.trusted)).toBe(true);
+    expect(rangesTrusted).toBe(false);
   });
 
   it('reports no range for an entry inside a malformed-header construct', () => {
     // `@article{` opens but its header has no citation key, so its body is
-    // that construct's data — not a place to splice fields into.
+    // that construct's data — consumed whole, never scanned into.
     const input = '@article{not a valid header\n  note = {@book{fake, doi = {10.1/not-real}}}\n}';
     expect(parseBibtexWithRaw(input).ranges).toEqual([]);
+  });
+
+  it('keeps a recovered occurrence from silently aliasing a trusted range', () => {
+    // parsed/raw keep only the last occurrence, so the recovered second `dup`
+    // replaces the value behind the first — trusted — range. If the recovered
+    // occurrence were dropped from ranges, a caller could match the second
+    // entry's DOI and splice into the first. Reporting both keeps the
+    // ambiguity visible to findDuplicateBibtexKeys.
+    const input = '@article{dup, doi = {10.1/a}}\n\n@article{broken,\n  title = {unterminated\n\n@article{dup, doi = {10.2/b}}';
+    const { parsed, ranges, rangesTrusted } = parseBibtexWithRaw(input);
+
+    expect(parsed.get('dup')?.fields.get('doi')).toBe('10.2/b');
+    expect(ranges.filter(r => r.key === 'dup').map(r => r.trusted)).toEqual([true, false]);
+    expect(findDuplicateBibtexKeys(ranges).has('dup')).toBe(true);
+    expect(rangesTrusted).toBe(false);
+  });
+
+  it('marks every range trusted in a well-formed file', () => {
+    const input = '@string{j = "J"}\n@article{a, year = {2020}}\n@comment{aside}\n@book{b, year = {2021}}';
+    const { ranges, rangesTrusted } = parseBibtexWithRaw(input);
+    expect(ranges.map(r => r.key)).toEqual(['a', 'b']);
+    expect(ranges.every(r => r.trusted)).toBe(true);
+    expect(rangesTrusted).toBe(true);
+  });
+
+  it('handles parenthesized entries and declarations', () => {
+    // BibTeX accepts either delimiter. Skipping the paren form would both miss
+    // real entries and leave a paren @comment's contents exposed as entries.
+    const entry = '@article(smith2020,\n  doi = {10.1/x}\n)';
+    const { parsed, ranges } = parseBibtexWithRaw(entry);
+    expect(ranges.map(r => r.key)).toEqual(['smith2020']);
+    expect(entry.slice(ranges[0].start, ranges[0].end)).toBe(entry);
+    expect(parsed.get('smith2020')?.fields.get('doi')).toBe('10.1/x');
+
+    // Braces inside a paren entry's field values still balance independently.
+    expect(parseBibtexWithRaw('@article(k, title = {a (b) c}, y = {1})').parsed.get('k')?.fields.get('title'))
+      .toBe('a (b) c');
+
+    expect(parseBibtexWithRaw('@comment(text:\n  @article{fake, doi = {10.1/no}}\n)').ranges).toEqual([]);
   });
 
   it('does not let a stray quote in a comment expose its contents', () => {
@@ -683,6 +726,13 @@ describe('detectBibtexEol', () => {
     // header — that one is always structural.
     expect(detectBibtexEol('@article{k,\r\n  note = {a\nb}}')).toBe('\r\n');
     expect(detectBibtexEol('@article{k,\n  note = {a\r\nb}}')).toBe('\n');
+  });
+
+  it('does not break a tie on a header inside a pseudo-entry', () => {
+    // A bare regex matches `@book{fake,` inside the comment and would read
+    // that comment's bare LF as the document's convention. The real structural
+    // newline is the CRLF between the two top-level constructs.
+    expect(detectBibtexEol('@comment{see @book{fake,\ntext}}\r\n@article{k, title = {T}}')).toBe('\r\n');
   });
 
   it('falls back to the first newline when there is no header to consult', () => {

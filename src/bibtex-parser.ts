@@ -67,7 +67,8 @@ function unescapeBibtex(s: string): string {
  *  brace-delimited value, so the net depth change is zero and the result is
  *  the same.  extractRawField needs escape-awareness because it scans a
  *  single field value where `\{` must not alter depth. */
-function findEntryEnd(input: string, startPos: number): number {
+function findEntryEnd(input: string, startPos: number, closer: '}' | ')' = '}'): number {
+  const opener = closer === ')' ? '(' : '{';
   let braceCount = 1;
   let inQuotes = false;
   // Brace depth *within* the current quoted value.  BibTeX lets a `{`…`}` group
@@ -98,9 +99,11 @@ function findEntryEnd(input: string, startPos: number): number {
       if (char === '{') quoteDepth++;
       else if (char === '}' && quoteDepth > 0) quoteDepth--;
     } else {
-      if (char === '{') {
+      // A paren-delimited entry still nests its field values with braces, so
+      // count both: `@article(k, title = {a (b) c})` closes at the final `)`.
+      if (char === opener || char === '{') {
         braceCount++;
-      } else if (char === '}') {
+      } else if (char === closer || (closer === ')' && char === '}')) {
         braceCount--;
         if (braceCount === 0) {
           return j;
@@ -112,16 +115,17 @@ function findEntryEnd(input: string, startPos: number): number {
   return -1;
 }
 
-/** Find the closing `}` of an `@comment` body, counting braces only.  A comment
- *  is arbitrary prose, so an apostrophe or a lone `"` in it is ordinary text —
- *  applying field-value quote semantics here would swallow the closing brace
- *  and make a balanced comment look unterminated.
- *  Returns the index of the closing `}`, or -1 if unmatched. */
-function findCommentEnd(input: string, startPos: number): number {
-  let braceCount = 1;
+/** Find the closing delimiter of an `@comment` body, counting delimiters only.
+ *  A comment is arbitrary prose, so an apostrophe or a lone `"` in it is
+ *  ordinary text — applying field-value quote semantics here would swallow the
+ *  closing delimiter and make a balanced comment look unterminated.
+ *  Returns the index of the closing delimiter, or -1 if unmatched. */
+function findCommentEnd(input: string, startPos: number, closer: '}' | ')' = '}'): number {
+  const opener = closer === ')' ? '(' : '{';
+  let depth = 1;
   for (let j = startPos; j < input.length; j++) {
-    if (input[j] === '{') braceCount++;
-    else if (input[j] === '}' && --braceCount === 0) return j;
+    if (input[j] === opener) depth++;
+    else if (input[j] === closer && --depth === 0) return j;
   }
   return -1;
 }
@@ -144,9 +148,22 @@ export function detectBibtexEol(text: string): BibtexEol {
   if (crlfCount !== bareLfCount) return crlfCount > bareLfCount ? '\r\n' : '\n';
   if (crlfCount === 0) return '\n';
 
-  // Tie: defer to the first newline that follows a `@type{key,` header.
-  const header = /@\w+\s*\{[^,\s]+\s*,/.exec(text);
-  const firstLf = text.indexOf('\n', header ? header.index + header[0].length : 0);
+  // Tie: find a newline that is provably *between* top-level constructs
+  // rather than inside one.  Entry boundaries have to come from the scanner,
+  // not a bare regex — a regex happily matches `@book{fake,` sitting inside an
+  // `@comment` body and would then read that comment's line ending as the
+  // document's.  Only reached on a tie, so the extra scan is rare.
+  const { ranges } = parseBibtexWithRaw(text);
+  for (const range of ranges) {
+    // The newline closest to each boundary, on whichever side has one: an
+    // entry may be the last thing in the text, or the first.
+    const after = text.indexOf('\n', range.end);
+    if (after !== -1) return text[after - 1] === '\r' ? '\r\n' : '\n';
+    const before = text.lastIndexOf('\n', range.start);
+    if (before > 0) return text[before - 1] === '\r' ? '\r\n' : '\n';
+  }
+  // No entry to anchor on — the first newline is the best signal left.
+  const firstLf = text.indexOf('\n');
   return firstLf > 0 && text[firstLf - 1] === '\r' ? '\r\n' : '\n';
 }
 
@@ -160,20 +177,35 @@ export interface BibtexSourceRange {
   end: number;
   keyStart: number;
   keyEnd: number;
+  /** True if the scanner reached this entry from the top level with sync
+   *  intact.  A false range was recovered after the scanner lost its place, so
+   *  it may actually sit inside another entry's field value — fine to navigate
+   *  to, never safe to splice into. */
+  trusted: boolean;
 }
 
 export interface ParsedBibtexWithRaw {
   parsed: Map<string, BibtexEntry>;
   raw: Map<string, string>;
-  /** Every successfully delimited entry occurrence, in source order, including
+  /** Every entry occurrence the scanner located, in source order, including
    *  repeated citation keys.  `parsed`/`raw` are keyed by citation key and so
    *  keep only the last occurrence; this array is the complete picture.
-   *  Callers editing by offset must use it — splicing a repeated key via `raw`
-   *  would be ambiguous.  Use `findDuplicateBibtexKeys()` to detect repeats.
    *
-   *  An entry whose closing brace is never found is omitted entirely: there is
-   *  no trustworthy end offset for it, so no caller should be editing it. */
+   *  Navigation (go-to-definition, document symbols) should use all of these.
+   *  Mutation must use only the ones with `trusted: true`, and only when
+   *  `rangesTrusted` is also true — see those fields.
+   *
+   *  An entry whose closing delimiter is never found is omitted entirely:
+   *  there is no end offset for it at all. */
   ranges: BibtexSourceRange[];
+  /** False if anything in the document defeated the scanner — an undelimited
+   *  entry, an unterminated declaration, an unparseable header.  After that
+   *  point `parsed`/`raw` keep recovering entries heuristically, and a
+   *  recovered occurrence can silently replace the `parsed`/`raw` value behind
+   *  an earlier trusted range, so its key no longer identifies one place in
+   *  the file.  Byte-level editing must refuse the whole document when this is
+   *  false rather than trusting the prefix. */
+  rangesTrusted: boolean;
 }
 
 /** Citation keys that occur more than once.  Entries with a duplicated key
@@ -217,7 +249,9 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
   // Scan sequentially rather than pre-collecting every `@type{key,` match:
   // only a scan that has consumed everything before a given `@` knows whether
   // that `@` is at the top level or buried in someone's field value.
-  const headerRe = /@(\w+)\s*\{/g;
+  // BibTeX accepts either delimiter around an entry body, and skipping the
+  // paren form would leave a paren `@comment`'s contents exposed as entries.
+  const headerRe = /@(\w+)\s*([{(])/g;
   const keyRe = /\s*([^,\s]+)\s*,/y;
 
   let pos = 0;
@@ -227,11 +261,9 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
   // but it is a heuristic: an entry-shaped value indented on its own line is
   // lexically indistinguishable from a real entry at that point.
   let requireLineStart = false;
-  // `ranges` is the offset-editing API, so it may not trade on a heuristic —
-  // splicing into a guessed boundary corrupts the file.  Once sync is lost we
-  // keep recovering entries for `parsed`/`raw` but stop emitting ranges, so
-  // every range reported is one the scanner actually delimited from the top
-  // level.  Ranges are therefore a subset of `parsed`, never a superset.
+  // Ranges found after sync is lost are still reported — navigation wants
+  // them — but marked untrusted, because a recovered `@book{...}` may really
+  // be sitting inside another entry's field value.
   let synced = true;
 
   // author/editor use inner {Name} braces as a semantic signal for
@@ -252,6 +284,7 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
     const entryStart = match.index;
     const afterBrace = entryStart + match[0].length;
     const type = match[1];
+    const closer: '}' | ')' = match[2] === '(' ? ')' : '}';
 
     if (requireLineStart && !isAtLineStart(input, entryStart)) {
       pos = afterBrace;
@@ -261,10 +294,10 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
     const lowerType = type.toLowerCase();
     if (PSEUDO_ENTRY_TYPES.has(lowerType)) {
       // A comment's body is prose: a stray `"` in it is ordinary text, not the
-      // start of a quoted value, so count braces only.
+      // start of a quoted value, so count delimiters only.
       const close = lowerType === 'comment'
-        ? findCommentEnd(input, afterBrace)
-        : findEntryEnd(input, afterBrace);
+        ? findCommentEnd(input, afterBrace, closer)
+        : findEntryEnd(input, afterBrace, closer);
       if (close === -1) {
         // Unterminated declaration — fall back to line-start recovery.
         pos = afterBrace;
@@ -283,7 +316,7 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
       // `@type{` opened but the header has no citation key.  Consume its
       // balanced body rather than scanning into it — the `@book{...}` sitting
       // in a field of a malformed entry is that entry's data, not an entry.
-      const close = findEntryEnd(input, afterBrace);
+      const close = findEntryEnd(input, afterBrace, closer);
       if (close === -1) {
         pos = afterBrace;
         requireLineStart = true;
@@ -298,7 +331,7 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
     const key = keyMatch[1];
     const startPos = afterBrace + keyMatch[0].length;
 
-    const endPos = findEntryEnd(input, startPos);
+    const endPos = findEntryEnd(input, startPos, closer);
     if (endPos === -1) {
       pos = startPos;
       requireLineStart = true;
@@ -310,12 +343,14 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
 
     // Raw entry text (preserves original formatting)
     raw.set(key, input.slice(entryStart, endPos + 1));
-    if (synced) {
-      // Search for the key after the opening brace, so a key that also spells
-      // the entry type (`@article{article,`) still points at the key.
-      const keyStart = afterBrace + keyMatch[0].indexOf(key);
-      ranges.push({ key, start: entryStart, end: endPos + 1, keyStart, keyEnd: keyStart + key.length });
-    }
+    // Search for the key after the opening delimiter, so a key that also
+    // spells the entry type (`@article{article,`) still points at the key.
+    const keyStart = afterBrace + keyMatch[0].indexOf(key);
+    ranges.push({
+      key, start: entryStart, end: endPos + 1,
+      keyStart, keyEnd: keyStart + key.length,
+      trusted: synced,
+    });
 
     // Parsed entry
     try {
@@ -345,7 +380,7 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
     }
   }
 
-  return { parsed, raw, ranges };
+  return { parsed, raw, ranges, rangesTrusted: synced };
 }
 
 export function parseBibtex(input: string): Map<string, BibtexEntry> {
