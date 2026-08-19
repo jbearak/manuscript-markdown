@@ -9,6 +9,11 @@ import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from '
 import { customStyleId } from './md-to-docx';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { publicStyleNameForZoteroId, zoteroStyleIdForName } from './csl-loader';
+import { extractZoteroKey } from './zotero-link';
+
+// Zotero item identity lives in `zotero-link.ts` with the rest of the Zotero
+// domain; re-exported here because it was published from this module first.
+export { ZOTERO_KEY_RE, extractZoteroKey } from './zotero-link';
 
 // --- Implementation notes ---
 // Table parsing:
@@ -971,9 +976,6 @@ export function groupCommentThreads(
 
   return replyIds;
 }
-
-/** Matches the 8-character Zotero item key at the end of a URI. */
-export const ZOTERO_KEY_RE = /\/items\/([A-Z0-9]{8})$/;
 
 // Zotero document preferences extraction
 
@@ -2021,14 +2023,6 @@ export async function extractZoteroCitations(data: Uint8Array | JSZip): Promise<
   const parsed = await readZipXml(zip, 'word/document.xml');
   if (!parsed) { return []; }
   return extractZoteroCitationsFromParsed(parsed);
-}
-
-// Zotero URI key extraction
-
-/** Extract the 8-character Zotero item key from a Zotero URI, or undefined if it doesn't match. */
-export function extractZoteroKey(uri: string): string | undefined {
-  const m = uri.match(ZOTERO_KEY_RE);
-  return m ? m[1] : undefined;
 }
 
 // Citation key generation

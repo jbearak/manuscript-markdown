@@ -237,7 +237,10 @@ function decodeBibtexFieldValue(
   return decodeBibtexText(semanticValue);
 }
 
-function unescapeBibtexPunctuation(s: string): string {
+/** Undo the punctuation escapes BibTeX requires — `\&`, `\%`, `\$`, `\#`,
+ *  `\_`, `\{`, `\}`, `\\`.  Exported for callers comparing a verbatim field's
+ *  stored bytes (`doi`, `isbn`) against a plain identifier. */
+export function unescapeBibtexPunctuation(s: string): string {
   return s.replace(/\\([&%$#_{}\\])/g, '$1');
 }
 
