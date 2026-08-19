@@ -138,15 +138,43 @@ function findCommentEnd(input: string, startPos: number, closer: '}' | ')' = '}'
 
 export type BibtexEol = '\n' | '\r\n';
 
-/** True if a construct header — `@type{` or `@type(` — starts at `pos`.
+/** True if `pos` sits after a `%` on its line, within the stretch of top-level
+ *  ignored text starting at `gapStart`.  BibTeX ignores the rest of a line
+ *  after `%`, so an entry-shaped run of characters there is prose.
+ *
+ *  The search stops at `gapStart` rather than at the previous newline: only the
+ *  gap is known to be ignored text, and walking back past it would read a `%`
+ *  out of a preceding entry's field value — `note = {50% off}` on the same line
+ *  would then comment out a real entry that follows it.
+ *
+ *  `scanForwardForNewline` encodes this same rule from the other direction. */
+function isInLineComment(input: string, gapStart: number, pos: number): boolean {
+  for (let i = pos - 1; i >= gapStart; i--) {
+    const ch = input[i];
+    if (ch === '\n') return false;
+    if (ch === '%') return true;
+  }
+  return false;
+}
+
+/** True if a construct header — `@type{` or `@type(` — starts at `pos` and is
+ *  complete before the end of the line.
+ *
  *  A bare `@` is not one: it turns up in email addresses and prose, and
- *  treating it as a boundary cuts a scan short in text BibTeX ignores. */
+ *  treating it as a boundary cuts a scan short in text BibTeX ignores.
+ *
+ *  The scanner's own `/@(\w+)\s*([{(])/` accepts a newline between the type and
+ *  the delimiter, and `@book\n{k, …}` really is one entry.  This predicate
+ *  deliberately does not, because its only caller uses it to stop *before* a
+ *  newline: looking across one to answer `true` would suppress the very
+ *  newline the caller exists to find.  Where they disagree the caller stops one
+ *  character later, at the newline, which is the answer it wanted anyway. */
 function isConstructHeaderAt(text: string, pos: number): boolean {
   if (text[pos] !== '@') return false;
   let i = pos + 1;
   while (i < text.length && /\w/.test(text[i])) i++;
   if (i === pos + 1) return false;
-  while (i < text.length && /\s/.test(text[i])) i++;
+  while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i++;
   return text[i] === '{' || text[i] === '(';
 }
 
@@ -396,6 +424,18 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
     const afterBrace = entryStart + match[0].length;
     const type = match[1];
     const closer: '}' | ')' = match[2] === '(' ? ')' : '}';
+
+    // `% @article{fake, …}` is prose, not an entry.  Reporting it would offer
+    // a range that splicing could write into, editing the user's commented-out
+    // text — and since only the first line carries the `%`, a multi-line splice
+    // would push part of it back out of the comment and into the document.
+    if (isInLineComment(input, pos, entryStart)) {
+      // Resume past the comment line rather than at the next `@`, which may
+      // well be further along in the same comment.
+      const lineEnd = input.indexOf('\n', entryStart);
+      pos = lineEnd === -1 ? input.length : lineEnd + 1;
+      continue;
+    }
 
     if (requireLineStart && !isAtLineStart(input, entryStart)) {
       pos = afterBrace;

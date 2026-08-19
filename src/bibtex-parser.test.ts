@@ -923,6 +923,52 @@ describe('paren-delimited entries', () => {
   });
 });
 
+describe('entries inside % comments', () => {
+  // BibTeX ignores the rest of a line after `%`, so an entry-shaped run of
+  // characters there is prose. Reporting it would hand out a range that a
+  // splice could write into — and since only the first line carries the `%`,
+  // a multi-line splice would push part of it back out of the comment.
+  it('does not report an entry commented out with %', () => {
+    const { parsed, ranges } = parseBibtexWithRaw('% @article{fake, t = {T}}\n@book{real, t = {R}}');
+    expect(ranges.map((r) => r.key)).toEqual(['real']);
+    expect([...parsed.keys()]).toEqual(['real']);
+  });
+
+  it('skips the whole comment line, not just the first header on it', () => {
+    const text = '@a{one, t={1}} % note @b{fake, t={2}} @c{alsofake, t={3}}\n@d{two, t={4}}';
+    const { ranges } = parseBibtexWithRaw(text);
+    expect(ranges.map((r) => r.key)).toEqual(['one', 'two']);
+  });
+
+  it('handles consecutive comment lines', () => {
+    const { ranges } = parseBibtexWithRaw('% @a{x, t={1}}\n% @b{y, t={2}}\n@book{real, t = {R}}');
+    expect(ranges.map((r) => r.key)).toEqual(['real']);
+  });
+
+  it('handles a comment that ends the text without a newline', () => {
+    const { ranges } = parseBibtexWithRaw('@book{real, t = {R}}\n% @a{fake, t={1}}');
+    expect(ranges.map((r) => r.key)).toEqual(['real']);
+  });
+
+  it('does not let a % inside a field value comment out a later entry', () => {
+    // `50% off` is field payload. The comment search stops at the start of the
+    // gap, so it never reads that `%` out of the preceding entry.
+    const { ranges } = parseBibtexWithRaw('@article{a, note = {50% off}} @book{real, t = {R}}');
+    expect(ranges.map((r) => r.key)).toEqual(['a', 'real']);
+  });
+
+  it('does not let a % inside a field value comment out an adjacent entry', () => {
+    // Same, with no whitespace at all between the two entries.
+    const { ranges } = parseBibtexWithRaw('@article{a, note = {50% off}}@book{real, t = {R}}');
+    expect(ranges.map((r) => r.key)).toEqual(['a', 'real']);
+  });
+
+  it('leaves a % inside an @comment body alone', () => {
+    const { ranges } = parseBibtexWithRaw('@comment{% @a{fake, t={1}}}\n@book{real, t = {R}}');
+    expect(ranges.map((r) => r.key)).toEqual(['real']);
+  });
+});
+
 describe('detectBibtexEol tie boundary', () => {
   // On a tie the sampled newline must come from the gap *between* constructs.
   // Reaching for the next newline anywhere after an entry lands inside the
@@ -964,6 +1010,14 @@ describe('detectBibtexEol tie boundary', () => {
       const text = '@article{k, note = {a\nb}}' + comment + '\r\n';
       expect(detectBibtexEol(text)).toBe('\r\n');
     }
+  });
+
+  it('does not skip a newline the header guard looked across', () => {
+    // `@book\r\n{b, …}` is a real header — the scanner accepts a newline before
+    // the delimiter — but that newline is structural and is exactly what the
+    // tie needs. The guard must not answer `true` from across it.
+    const text = '@article{a, note = {x\ny}}@book\r\n{b, title = {T}}';
+    expect(detectBibtexEol(text)).toBe('\r\n');
   });
 
   it('does not treat a construct header inside a comment as a boundary', () => {
