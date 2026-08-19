@@ -950,10 +950,34 @@ describe('detectBibtexEol tie boundary', () => {
 
   it('stops the gap scan at the next entry rather than reading into it', () => {
     // A genuine tie with no structural newline anywhere: each entry hides one
-    // in a field value and the gap between them has none. Without the `@`
+    // in a field value and the gap between them has none. Without the header
     // guard the forward scan would run into `b` and answer with its CRLF.
     const text = '@article{a, note = {x\ny}}   @book{b, t = {A\r\nB}}';
     expect(detectBibtexEol(text)).toBe('\n');
+  });
+
+  it('walks past delimiters and stray @ signs in a trailing comment', () => {
+    // A `}`, `)` or `@` out here is a character in ignored text, not a
+    // boundary. Stopping on one hides the structural newline behind it and
+    // leaves only a field's interior newline to fall back on.
+    for (const comment of ['% stray } here', '% stray ) here', '% ask a@b.com']) {
+      const text = '@article{k, note = {a\nb}}' + comment + '\r\n';
+      expect(detectBibtexEol(text)).toBe('\r\n');
+    }
+  });
+
+  it('does not treat a construct header inside a comment as a boundary', () => {
+    // `@book{` is prose once a `%` has opened a comment, so the scan continues
+    // to the real line ending rather than stopping short.
+    const text = '@article{k, note = {a\nb}}% see @book{other}\r\n';
+    expect(detectBibtexEol(text)).toBe('\r\n');
+  });
+
+  it('requires a real header, not a bare @, to stop the scan', () => {
+    // `@ ` with no type name is prose. The tie must resolve from the CRLF
+    // after it, not from the field's LF.
+    const text = '@article{k, note = {a\nb}} @ \r\n';
+    expect(detectBibtexEol(text)).toBe('\r\n');
   });
 
   it('ignores untrusted ranges when sampling the boundary', () => {

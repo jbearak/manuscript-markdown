@@ -138,17 +138,48 @@ function findCommentEnd(input: string, startPos: number, closer: '}' | ')' = '}'
 
 export type BibtexEol = '\n' | '\r\n';
 
-/** Line ending of the first newline reached from `from` in the `step`
- *  direction, or null if the scan leaves ignored text first.
+/** True if a construct header — `@type{` or `@type(` — starts at `pos`.
+ *  A bare `@` is not one: it turns up in email addresses and prose, and
+ *  treating it as a boundary cuts a scan short in text BibTeX ignores. */
+function isConstructHeaderAt(text: string, pos: number): boolean {
+  if (text[pos] !== '@') return false;
+  let i = pos + 1;
+  while (i < text.length && /\w/.test(text[i])) i++;
+  if (i === pos + 1) return false;
+  while (i < text.length && /\s/.test(text[i])) i++;
+  return text[i] === '{' || text[i] === '(';
+}
+
+/** Line ending of the first newline after `from`, or null if the next
+ *  construct starts first.
  *
  *  Everything between two top-level constructs is text BibTeX ignores — blank
  *  lines, prose, `%` comment lines — and a newline anywhere in it is the
- *  document's own.  Restricting the walk to whitespace would stop dead at a
- *  trailing `%` comment and never reach the structural newline behind it.
- *  The walk ends at `@`, which begins the next construct, and at a closing
- *  delimiter, which means the scan has backed into one. */
-function scanIgnoredTextForNewline(text: string, from: number, step: 1 | -1): BibtexEol | null {
-  for (let i = from; i >= 0 && i < text.length; i += step) {
+ *  document's own.  So the walk runs through all of it: a `}` or `)` out here
+ *  is a character in a comment, not a delimiter, and stopping on one hides the
+ *  structural newline behind it.  Only a real construct header ends the scan,
+ *  and not even that inside a `%` comment, where it is just more prose. */
+function scanForwardForNewline(text: string, from: number): BibtexEol | null {
+  let inComment = false;
+  for (let i = from; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '\n') return text[i - 1] === '\r' ? '\r\n' : '\n';
+    if (ch === '%') inComment = true;
+    else if (!inComment && isConstructHeaderAt(text, i)) return null;
+  }
+  return null;
+}
+
+/** Line ending of the first newline before `from`, or null if the scan reaches
+ *  non-ignored text first.
+ *
+ *  Only sound ahead of the *first* construct, so unlike the forward walk this
+ *  one cannot know whether an `@` or a closing delimiter it meets is prose or
+ *  the tail of a construct it has backed into — a `%` earlier on the line
+ *  would decide it, and that is not knowable from here.  It stops at all of
+ *  them and answers null. */
+function scanBackwardForNewline(text: string, from: number): BibtexEol | null {
+  for (let i = from; i >= 0; i--) {
     const ch = text[i];
     if (ch === '\n') return text[i - 1] === '\r' ? '\r\n' : '\n';
     if (ch === '@' || ch === '}' || ch === ')') return null;
@@ -233,13 +264,13 @@ export function detectBibtexEol(text: string): BibtexEol {
     // Walk only the ignored text touching the boundary.  Jumping to the next
     // newline *anywhere* after the entry would happily land inside the
     // following construct and report its interior line ending as the file's.
-    const after = scanIgnoredTextForNewline(text, range.end, 1);
+    const after = scanForwardForNewline(text, range.end);
     if (after !== null) return after;
     // Scanning backwards is only sound before the first construct: further in,
     // the preceding construct's interior is in the way, and its gap was already
     // covered by that construct's own forward scan.
     if (i > 0) continue;
-    const before = scanIgnoredTextForNewline(text, range.start - 1, -1);
+    const before = scanBackwardForNewline(text, range.start - 1);
     if (before !== null) return before;
   }
   // No entry to anchor on — the first newline is the best signal left.
