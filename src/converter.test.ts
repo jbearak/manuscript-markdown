@@ -30,6 +30,7 @@ import {
   extractBibliographyPath,
   extractCalloutLabels,
 } from './converter';
+import { parseBibtex } from './bibtex-parser';
 import { convertMdToDocx } from './md-to-docx';
 
 const fixturesDir = join(__dirname, '..', 'test', 'fixtures');
@@ -2828,13 +2829,32 @@ describe('Zotero citation roundtrip', () => {
         title: 'Test Title', year: '2020', journal: 'J', volume: '1',
         pages: '1-2', doi: '10.1/test', type: 'article-journal',
         fullItemData: {}, zoteroKey: 'ABCD1234',
-        zoteroUri: 'http://zotero.org/users/0/items/ABCD1234',
+        zoteroUri: 'http://zotero.org/users/0/items/AB_CD%23#fragment~1',
       }],
     }];
     const keyMap = buildCitationKeyMap(citations);
     const bib = generateBibTeX(citations, keyMap);
     expect(bib).toContain('zotero-key = {ABCD1234}');
-    expect(bib).toContain('zotero-uri = {http://zotero.org/users/0/items/ABCD1234}');
+    expect(bib).toContain('zotero-uri = {http://zotero.org/users/0/items/AB_CD%23#fragment~1}');
+  });
+
+  test('generateBibTeX emits TeX-safe literal tilde and circumflex commands', () => {
+    const title = 'A ~B ^C and ~ B ^ C';
+    const citations: ZoteroCitation[] = [{
+      plainCitation: '(Test)',
+      items: [{
+        authors: [{ family: 'Test', given: 'A' }],
+        title, year: '2020', journal: 'J', volume: '1',
+        pages: '1-2', doi: '', type: 'article-journal', fullItemData: {},
+      }],
+    }];
+    const keyMap = buildCitationKeyMap(citations);
+    const bib = generateBibTeX(citations, keyMap);
+
+    expect(bib).toContain(
+      String.raw`title = {{A \textasciitilde{}B \textasciicircum{}C and \textasciitilde{} B \textasciicircum{} C}}`
+    );
+    expect([...parseBibtex(bib).values()][0]?.fields.get('title')).toBe(title);
   });
 
   test('generateBibTeX omits zotero fields when absent', () => {
@@ -4597,6 +4617,20 @@ describe('extractBibData', () => {
     const { docx } = await convertMdToDocx('Text [@special1].', { bibtex: bib });
     const result = await extractBibData(docx);
     expect(result).toBe(bib);
+  });
+
+  test('TeX accents in stored .bib source survive DOCX round-trip exactly', async () => {
+    const bib = String.raw`@article{muller2024,
+  author = {M{\"u}ller, Jane},
+  title = {Caf\'{e} research},
+  year = {2024},
+}`;
+    const { docx } = await convertMdToDocx('Text [@muller2024].', { bibtex: bib });
+    const stored = await extractBibData(docx);
+    expect(stored).toBe(bib);
+
+    const roundTrip = await convertDocx(docx);
+    expect(roundTrip.bibtex).toBe(bib);
   });
 });
 

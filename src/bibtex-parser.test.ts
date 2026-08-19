@@ -253,12 +253,112 @@ describe('double-brace fix', () => {
     });
   });
 
-  it('LaTeX escape: {Caf\\\'\\{e\\}} parses without brace corruption', () => {
-    // unescapeBibtex handles \& \% \$ etc. but not accent sequences like \'.
-    // The important thing is that the partial inner brace {e} does NOT trigger
-    // double-brace stripping (braceValue is "Caf\'{e}", which does not start with '{').
+  it('decodes a braced LaTeX accent without corrupting surrounding braces', () => {
     const result = parseBibtex("@article{k, title = {Caf\\'{e}}}");
-    expect(result.get('k')?.fields.get('title')).toBe("Caf\\'{e}");
+    expect(result.get('k')?.fields.get('title')).toBe('Café');
+  });
+});
+
+describe('BibTeX TeX accent decoding', () => {
+  it('decodes equivalent umlaut spellings in creator names', () => {
+    const spellings = [
+      String.raw`M\"uller`,
+      String.raw`M\"{u}ller`,
+      String.raw`M{\"u}ller`,
+    ];
+
+    for (const [index, spelling] of spellings.entries()) {
+      const entries = parseBibtex('@article{k' + index + ', author = {' + spelling + ', Jane}}');
+      expect(entries.get('k' + index)?.fields.get('author')).toBe('Müller, Jane');
+    }
+  });
+
+  it('decodes the standard BibTeX text accents and dotless letter operands', () => {
+    const cases: Array<[string, string]> = [
+      ["\\`a", 'à'],
+      [String.raw`\'e`, 'é'],
+      [String.raw`\^o`, 'ô'],
+      [String.raw`\"u`, 'ü'],
+      [String.raw`\~n`, 'ñ'],
+      [String.raw`\=a`, 'ā'],
+      [String.raw`\.z`, 'ż'],
+      [String.raw`\u{g}`, 'ğ'],
+      [String.raw`\v{S}`, 'Š'],
+      [String.raw`\H{o}`, 'ő'],
+      [String.raw`\c{c}`, 'ç'],
+      [String.raw`\k{a}`, 'ą'],
+      [String.raw`\d{s}`, 'ṣ'],
+      [String.raw`\b{d}`, 'ḏ'],
+      [String.raw`\r{a}`, 'å'],
+      [String.raw`\t{oo}`, 'o͡o'],
+      [String.raw`\'{\i}`, 'í'],
+      [String.raw`\^{\j}`, 'ĵ'],
+    ];
+
+    for (const [index, [source, expected]] of cases.entries()) {
+      const entries = parseBibtex('@article{k' + index + ', title = {' + source + '}}');
+      expect(entries.get('k' + index)?.fields.get('title')).toBe(expected.normalize('NFC'));
+    }
+  });
+
+  it('preserves structural braces while consuming accent-owned braces', () => {
+    const input = String.raw`@article{k,
+  title = {{The {RNA} response by M{\"u}ller and {\"U}ber}},
+  author = {{M{\"u}ller Institute and Research}}
+}`;
+    const entry = parseBibtex(input).get('k')!;
+
+    expect(entry.fields.get('title')).toBe('The {RNA} response by Müller and Über');
+    expect(entry.fields.get('author')).toBe('{Müller Institute and Research}');
+  });
+
+  it('preserves unknown and malformed TeX commands', () => {
+    const value = String.raw`\LaTeX \unknown{Text} \"{} \"{ue}`;
+    const entry = parseBibtex('@article{k, title = {' + value + '}}').get('k')!;
+    expect(entry.fields.get('title')).toBe(value);
+  });
+
+  it('leaves identifier, path, and Zotero fields exactly unchanged', () => {
+    const input = String.raw`@article{k,
+  doi = {10.1000/M{\"u}ller\_x},
+  url = {https://example.test/M{\"u}ller?q=a\_b#frag~1},
+  isbn = {978\_M{\"u}ller},
+  issn = {1234\_5678},
+  file = {C\:\\Papers\\M{\"u}ller\;paper.pdf},
+  zotero-key = {AB\_CD},
+  zotero-uri = {http://zotero.org/groups/1/items/M{\"u}ller\_x#frag}
+}`;
+    const entry = parseBibtex(input).get('k')!;
+
+    expect(entry.fields.get('doi')).toBe(String.raw`10.1000/M{\"u}ller\_x`);
+    expect(entry.fields.get('url')).toBe(String.raw`https://example.test/M{\"u}ller?q=a\_b#frag~1`);
+    expect(entry.fields.get('isbn')).toBe(String.raw`978\_M{\"u}ller`);
+    expect(entry.fields.get('issn')).toBe(String.raw`1234\_5678`);
+    expect(entry.fields.get('file')).toBe(String.raw`C\:\\Papers\\M{\"u}ller\;paper.pdf`);
+    expect(entry.zoteroKey).toBe(String.raw`AB\_CD`);
+    expect(entry.zoteroUri).toBe(String.raw`http://zotero.org/groups/1/items/M{\"u}ller\_x#frag`);
+  });
+
+  it('normalizes semantic text to NFC but does not normalize opaque fields', () => {
+    const decomposed = 'Café';
+    const input = '@article{k, title = {' + decomposed + '}, doi = {' + decomposed + '}}';
+    const entry = parseBibtex(input).get('k')!;
+
+    expect(entry.fields.get('title')).toBe('Café');
+    expect(entry.fields.get('doi')).toBe(decomposed);
+  });
+
+  it('round-trips literal tilde and circumflex characters without treating them as accents', () => {
+    const entries = new Map<string, BibtexEntry>([[
+      'k',
+      { type: 'article', key: 'k', fields: new Map([['title', 'A ~ B ^ C']]) },
+    ]]);
+
+    const serialized = serializeBibtex(entries);
+    expect(serialized).toContain(
+      String.raw`title = {A \textasciitilde{} B \textasciicircum{} C}`
+    );
+    expect(parseBibtex(serialized).get('k')?.fields.get('title')).toBe('A ~ B ^ C');
   });
 });
 

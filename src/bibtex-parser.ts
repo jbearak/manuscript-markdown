@@ -1,7 +1,9 @@
 // --- Implementation notes ---
-// - Verbatim fields: DOI, URL, ISBN, ISSN must not be LaTeX-escaped (see VERBATIM_BIBTEX_FIELDS)
-// - Entry scanning: count consecutive preceding backslashes before `"` to detect quote-state correctly
-// - Scanner literals: compare input[k] against '\\' (one char), not '\\\\' (two-char runtime string)
+// - Verbatim fields bypass brace stripping, TeX decoding, NFC normalization, and serialization escaping.
+// - TeX decoding is intentionally limited to standard text accents; unknown commands remain literal.
+// - Non-command braces remain intact; braces owned by recognized accent expressions are consumed.
+// - Entry scanning: count consecutive preceding backslashes before `"` to detect quote-state correctly.
+// - Scanner literals: compare input[k] against '\\' (one char), not '\\\\' (two-char runtime string).
 
 export interface BibtexEntry {
   type: string;
@@ -11,11 +13,12 @@ export interface BibtexEntry {
   zoteroUri?: string;
 }
 
-/** BibTeX fields whose values are verbatim identifiers (URLs, DOIs, etc.)
- *  that must not be LaTeX-escaped. */
+/** BibTeX fields whose payloads are opaque identifiers or paths. */
 const VERBATIM_BIBTEX_FIELDS: ReadonlySet<string> = new Set([
-  'doi', 'url', 'isbn', 'issn', 'file',
+  'doi', 'url', 'isbn', 'issn', 'file', 'zotero-key', 'zotero-uri',
 ]);
+
+const AUTHOR_FIELDS: ReadonlySet<string> = new Set(['author', 'editor']);
 
 /** Strip a single outer brace pair if it wraps the entire string.
  *  Scans left-to-right with a depth counter starting at 1 (after the opening '{').
@@ -47,13 +50,208 @@ export function stripOuterBraces(s: string): string {
   return s.slice(1, -1);
 }
 
-function escapeBibtex(s: string): string {
-  // Unescape first to avoid double-escaping on round-trips (idempotent)
-  return unescapeBibtex(s).replace(/([&%$#_{}~^\\])/g, '\\$1');
+interface DecodedCommand {
+  value: string;
+  nextIndex: number;
 }
 
-function unescapeBibtex(s: string): string {
-  return s.replace(/\\([&%$#_{}~^\\])/g, '$1');
+interface AccentBase {
+  value: string;
+  nextIndex: number;
+}
+
+const BIBTEX_ACCENT_MARKS: Readonly<Record<string, string>> = Object.freeze({
+  '`': '̀',
+  "'": '́',
+  '^': '̂',
+  '~': '̃',
+  '=': '̄',
+  'u': '̆',
+  '.': '̇',
+  '"': '̈',
+  'r': '̊',
+  'H': '̋',
+  'v': '̌',
+  'd': '̣',
+  'c': '̧',
+  'k': '̨',
+  'b': '̱',
+});
+
+const BIBTEX_LITERAL_COMMANDS: ReadonlyArray<readonly [string, string]> = [
+  ['\\textasciitilde{}', '~'],
+  ['\\textasciicircum{}', '^'],
+];
+
+const BIBTEX_SIMPLE_ESCAPES: Readonly<Record<string, string>> = Object.freeze({
+  '&': '&',
+  '%': '%',
+  '$': '$',
+  '#': '#',
+  '_': '_',
+  '{': '{',
+  '}': '}',
+  '\\': '\\',
+});
+
+function isAsciiLetter(char: string): boolean {
+  return /^[A-Za-z]$/.test(char);
+}
+
+function readUnicodeLetter(input: string, index: number): AccentBase | undefined {
+  if (index >= input.length) return undefined;
+  const codePoint = input.codePointAt(index);
+  if (codePoint === undefined) return undefined;
+  const value = String.fromCodePoint(codePoint);
+  if (!/^\p{L}$/u.test(value)) return undefined;
+  return { value, nextIndex: index + value.length };
+}
+
+function readAccentBase(input: string, index: number): AccentBase | undefined {
+  if (input[index] === '\\' && (input[index + 1] === 'i' || input[index + 1] === 'j')) {
+    const commandEnd = index + 2;
+    if (!isAsciiLetter(input[commandEnd] ?? '')) {
+      return { value: input[index + 1], nextIndex: commandEnd };
+    }
+  }
+  return readUnicodeLetter(input, index);
+}
+
+function readAccentTarget(input: string, index: number): AccentBase | undefined {
+  if (input[index] !== '{') return readAccentBase(input, index);
+
+  const base = readAccentBase(input, index + 1);
+  if (!base || input[base.nextIndex] !== '}') return undefined;
+  return { value: base.value, nextIndex: base.nextIndex + 1 };
+}
+
+function tryDecodeLiteralCommandAt(input: string, slashIndex: number): DecodedCommand | undefined {
+  for (const [source, value] of BIBTEX_LITERAL_COMMANDS) {
+    if (input.startsWith(source, slashIndex)) {
+      return { value, nextIndex: slashIndex + source.length };
+    }
+  }
+  return undefined;
+}
+
+function tryDecodeTieAccent(input: string, targetIndex: number): DecodedCommand | undefined {
+  if (input[targetIndex] !== '{') return undefined;
+  const first = readUnicodeLetter(input, targetIndex + 1);
+  if (!first) return undefined;
+  const second = readUnicodeLetter(input, first.nextIndex);
+  if (!second || input[second.nextIndex] !== '}') return undefined;
+  return {
+    value: (first.value + '͡' + second.value).normalize('NFC'),
+    nextIndex: second.nextIndex + 1,
+  };
+}
+
+/** Decode one supported accent command beginning at slashIndex.  Recognition is
+ *  transactional: malformed or unsupported commands consume nothing. */
+function tryDecodeAccentAt(input: string, slashIndex: number): DecodedCommand | undefined {
+  if (input[slashIndex] !== '\\' || slashIndex + 1 >= input.length) return undefined;
+
+  const commandStart = slashIndex + 1;
+  let commandEnd = commandStart + 1;
+  if (isAsciiLetter(input[commandStart])) {
+    while (commandEnd < input.length && isAsciiLetter(input[commandEnd])) commandEnd++;
+  }
+
+  const command = input.slice(commandStart, commandEnd);
+  const combiningMark = BIBTEX_ACCENT_MARKS[command];
+  if (!combiningMark && command !== 't') return undefined;
+
+  let targetIndex = commandEnd;
+  if (isAsciiLetter(input[commandStart])) {
+    while (targetIndex < input.length && /\s/.test(input[targetIndex])) targetIndex++;
+  }
+
+  if (command === 't') return tryDecodeTieAccent(input, targetIndex);
+
+  const target = readAccentTarget(input, targetIndex);
+  if (!target) return undefined;
+  return {
+    value: (target.value + combiningMark).normalize('NFC'),
+    nextIndex: target.nextIndex,
+  };
+}
+
+/** Decode standard BibTeX/TeX text accents while retaining every brace that is
+ *  not proven to belong solely to a recognized accent expression. */
+function decodeBibtexText(input: string): string {
+  let output = '';
+  let index = 0;
+
+  while (index < input.length) {
+    if (input[index] === '{') {
+      const grouped = tryDecodeAccentAt(input, index + 1);
+      if (grouped && input[grouped.nextIndex] === '}') {
+        output += grouped.value;
+        index = grouped.nextIndex + 1;
+        continue;
+      }
+    }
+
+    if (input[index] === '\\') {
+      const literal = tryDecodeLiteralCommandAt(input, index);
+      if (literal) {
+        output += literal.value;
+        index = literal.nextIndex;
+        continue;
+      }
+
+      const accent = tryDecodeAccentAt(input, index);
+      if (accent) {
+        output += accent.value;
+        index = accent.nextIndex;
+        continue;
+      }
+
+      const escaped = BIBTEX_SIMPLE_ESCAPES[input[index + 1]];
+      if (escaped !== undefined) {
+        output += escaped;
+        index += 2;
+        continue;
+      }
+    }
+
+    output += input[index];
+    index++;
+  }
+
+  return output.normalize('NFC');
+}
+
+function decodeBibtexFieldValue(
+  fieldName: string,
+  value: string,
+  braceDelimited: boolean,
+): string {
+  if (VERBATIM_BIBTEX_FIELDS.has(fieldName)) return value;
+
+  const semanticValue = braceDelimited && !AUTHOR_FIELDS.has(fieldName)
+    ? stripOuterBraces(value)
+    : value;
+  return decodeBibtexText(semanticValue);
+}
+
+function unescapeBibtexPunctuation(s: string): string {
+  return s.replace(/\\([&%$#_{}\\])/g, '$1');
+}
+
+/** Escape semantic text for BibTeX while keeping literal tilde and circumflex
+ *  distinct from their accent-command spellings. */
+export function escapeBibtexText(s: string): string {
+  return s.replace(/([&%$#_{}~^\\])/g, char => {
+    if (char === '~') return '\\textasciitilde{}';
+    if (char === '^') return '\\textasciicircum{}';
+    return '\\' + char;
+  });
+}
+
+function escapeBibtex(s: string): string {
+  // Unescape punctuation first to avoid double-escaping on semantic round-trips.
+  return escapeBibtexText(unescapeBibtexPunctuation(s));
 }
 
 /** Find the closing `}` of a BibTeX entry body, handling nested braces and
@@ -115,11 +313,6 @@ function parseBibtexWithRaw(input: string): { parsed: Map<string, BibtexEntry>; 
   // that reference other entries).
   let lastEntryEnd = 0;
 
-  // author/editor use inner {Name} braces as a semantic signal for
-  // institutional/literal names (Req 2.3), so do NOT strip outer braces
-  // for those fields — only strip for non-name fields (title, journal, etc.)
-  const AUTHOR_FIELDS = new Set(['author', 'editor']);
-
   // NOTE: This regex handles nested braces only up to a small fixed depth
   // and backslash escapes within quoted strings (e.g. \").
   // If we need arbitrary nesting, replace with a balanced-brace field parser.
@@ -149,9 +342,8 @@ function parseBibtexWithRaw(input: string): { parsed: Map<string, BibtexEntry>; 
       while ((fieldMatch = fieldRegex.exec(fieldsStr)) !== null) {
         const [, fieldName, braceValue, quoteValue, bareValue] = fieldMatch;
         const lowerField = fieldName.toLowerCase();
-        const value = (braceValue !== undefined
-          ? unescapeBibtex(AUTHOR_FIELDS.has(lowerField) ? braceValue : stripOuterBraces(braceValue))
-          : unescapeBibtex(quoteValue ?? bareValue ?? ''));
+        const rawValue = braceValue ?? quoteValue ?? bareValue ?? '';
+        const value = decodeBibtexFieldValue(lowerField, rawValue, braceValue !== undefined);
         fields.set(lowerField, value);
       }
 
@@ -183,8 +375,7 @@ export function serializeBibtex(entries: Map<string, BibtexEntry>): string {
     for (const [fieldName, value] of entry.fields) {
       let escapedValue = value;
 
-      // Don't escape verbatim identifier fields or zotero-key
-      if (fieldName !== 'zotero-key' && !VERBATIM_BIBTEX_FIELDS.has(fieldName)) {
+      if (!VERBATIM_BIBTEX_FIELDS.has(fieldName)) {
         escapedValue = escapeBibtex(value);
       }
 
@@ -347,7 +538,7 @@ export function mergeBibtex(existing: string, produced: string): string {
         }
         // Fallback: re-serialize with escapeBibtex + single braces
         const value = existingEntry.fields.get(fName) ?? '';
-        const escapedValue = VERBATIM_BIBTEX_FIELDS.has(fName) || fName === 'zotero-key'
+        const escapedValue = VERBATIM_BIBTEX_FIELDS.has(fName)
           ? value
           : escapeBibtex(value);
         fieldTexts.push('  ' + fName + ' = {' + escapedValue + '},');

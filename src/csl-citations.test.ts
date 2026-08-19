@@ -835,6 +835,40 @@ describe('Bibliography marker placement', () => {
     expect(roundTrip.markdown).toContain('csl: nlm');
   });
 
+  test('TeX accents become Unicode in Zotero metadata and the rendered bibliography', async () => {
+    const bibtex = String.raw`@article{muller2024,
+  author = {M{\"u}ller, Jane},
+  title = {{\"U}ber Caf\'{e} research},
+  journal = {Journal of Testing},
+  year = {2024},
+  doi = {10.1000/test_245}
+}`;
+    const md = '---\ncsl: nlm\n---\n\nCitation [@muller2024].\n';
+    const docxResult = await convertMdToDocx(md, { bibtex });
+
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docxResult.docx);
+    const docXml = await zip.file('word/document.xml')?.async('string') ?? '';
+    const field = docXml.match(/CSL_CITATION\s+(.*?)\s*<\/w:instrText>/);
+
+    expect(field).not.toBeNull();
+    const citation = JSON.parse(decodeXmlEntities(field![1]));
+    expect(citation.citationItems[0].itemData.author).toEqual([
+      { family: 'Müller', given: 'Jane' },
+    ]);
+    expect(citation.citationItems[0].itemData.title).toBe('Über Café research');
+
+    const bibliographyStart = docXml.indexOf('ZOTERO_BIBL');
+    expect(bibliographyStart).toBeGreaterThanOrEqual(0);
+    const bibliographyXml = docXml.slice(bibliographyStart);
+    expect(bibliographyXml).toContain('Müller');
+    expect(bibliographyXml).toContain('Über Café research');
+    expect(bibliographyXml).not.toContain(String.raw`M{\"u}ller`);
+    expect(bibliographyXml).not.toContain(String.raw`{\"U}`);
+    expect(bibliographyXml).not.toContain('{Ü}');
+    expect(bibliographyXml).not.toContain(String.raw`Caf\'{e}`);
+  });
+
   test('NLM brackets works offline through Markdown-to-DOCX with cited-only bibliography', async () => {
     const md = '---\ncsl: nlm-brackets\n---\n\nFirst [@davis2021advances], then [@smith2020effects].\n';
     const docxResult = await convertMdToDocx(md, { bibtex: SAMPLE_BIBTEX });

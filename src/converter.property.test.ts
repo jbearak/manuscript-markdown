@@ -266,36 +266,38 @@ describe('Feature: zotero-citation-roundtrip, Property 4: Citation grouping pres
  * Feature: zotero-citation-roundtrip
  * Property 5: BibTeX special character escaping
  *
- * For any input string, the output of escapeBibtex() contains no unescaped
- * occurrences of the BibTeX special characters & % $ # _ { } ~ ^ \.
- * Every special character in the output is preceded by a backslash.
+ * For any input string, escapeBibtex() leaves no raw BibTeX special characters.
+ * Literal tilde and circumflex use complete text-safe commands rather than
+ * accent-command spellings.
  *
  * **Validates: Requirements 2.4**
  */
 
 const BIBTEX_SPECIALS = new Set('&%$#_{}~^\\'.split(''));
+const BIBTEX_LITERAL_COMMANDS = [
+  '\\textasciitilde{}',
+  '\\textasciicircum{}',
+];
 
-/**
- * Scan output character-by-character. A backslash followed by any character
- * is treated as an escape pair (skip both). Any special character found
- * outside an escape pair is unescaped.
- */
 function hasUnescapedSpecial(output: string): boolean {
-  let i = 0;
-  while (i < output.length) {
-    if (output[i] === '\\') {
-      if (i + 1 < output.length) {
-        // Escape pair — skip both
-        i += 2;
-        continue;
-      }
-      // Trailing lone backslash — it's unescaped
-      return true;
+  let index = 0;
+  while (index < output.length) {
+    const literalCommand = BIBTEX_LITERAL_COMMANDS.find(command =>
+      output.startsWith(command, index)
+    );
+    if (literalCommand) {
+      index += literalCommand.length;
+      continue;
     }
-    if (BIBTEX_SPECIALS.has(output[i])) {
-      return true; // Found an unescaped special
+
+    if (output[index] === '\\') {
+      if (index + 1 >= output.length) return true;
+      index += 2;
+      continue;
     }
-    i++;
+
+    if (BIBTEX_SPECIALS.has(output[index])) return true;
+    index++;
   }
   return false;
 }
@@ -332,10 +334,7 @@ describe('Feature: zotero-citation-roundtrip, Property 5: BibTeX special charact
   it('escapeBibtex output contains no unescaped BibTeX special characters', () => {
     fc.assert(
       fc.property(bibtexInputArb, (input) => {
-        const output = escapeBibtex(input);
-
-        // No unescaped special character should remain in the output
-        expect(hasUnescapedSpecial(output)).toBe(false);
+        expect(hasUnescapedSpecial(escapeBibtex(input))).toBe(false);
       }),
       { numRuns: 200 },
     );

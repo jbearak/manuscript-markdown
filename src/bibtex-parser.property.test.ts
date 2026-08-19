@@ -19,8 +19,9 @@ describe('BibTeX Parser Property Tests', () => {
         const bibtex = '@article{k, title = {{' + s + '}}}';
         const result = parseBibtex(bibtex);
         const stored = result.get('k')?.fields.get('title');
-        if (stored !== s) {
-          throw new Error('Expected "' + s + '" but got "' + stored + '"');
+        const expected = s.normalize('NFC');
+        if (stored !== expected) {
+          throw new Error('Expected "' + expected + '" but got "' + stored + '"');
         }
         return true;
       }),
@@ -44,8 +45,9 @@ describe('BibTeX Parser Property Tests', () => {
         const bibtex = '@article{k, title = {' + s + '}}';
         const result = parseBibtex(bibtex);
         const stored = result.get('k')?.fields.get('title');
-        if (stored !== s) {
-          throw new Error('Expected "' + s + '" but got "' + stored + '"');
+        const expected = s.normalize('NFC');
+        if (stored !== expected) {
+          throw new Error('Expected "' + expected + '" but got "' + stored + '"');
         }
         return true;
       }),
@@ -59,11 +61,14 @@ describe('BibTeX Parser Property Tests', () => {
       key: fc.string({ minLength: 1, maxLength: 20 }).filter(s => /^[a-zA-Z0-9_-]+$/.test(s)),
       fields: fc.dictionary(
         fc.constantFrom('title', 'author', 'journal', 'year', 'volume', 'pages', 'doi'),
-        fc.string({ minLength: 1, maxLength: 30 }).filter(s => 
+        fc.string({ minLength: 1, maxLength: 30 }).filter(s =>
           !s.includes('}') && !s.includes('"') && !s.includes('{') && !s.includes('\\')
         ),
         { minKeys: 1, maxKeys: 5 }
-      ).map(obj => new Map(Object.entries(obj))),
+      ).map(obj => new Map(Object.entries(obj).map(([fieldName, value]) => [
+        fieldName,
+        fieldName === 'doi' ? value : value.normalize('NFC'),
+      ]))),
       zoteroKey: fc.option(fc.string({ minLength: 1, maxLength: 10 }).filter(s => 
         !s.includes('}') && !s.includes('"') && !s.includes('{') && !s.includes('\\')
       )),
