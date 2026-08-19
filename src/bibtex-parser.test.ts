@@ -318,6 +318,12 @@ describe('BibTeX TeX accent decoding', () => {
     expect(entry.fields.get('title')).toBe(value);
   });
 
+  it('preserves unsupported commands that match Object prototype properties', () => {
+    const value = String.raw`\constructor{u} \toString{u} \hasOwnProperty{u}`;
+    const entry = parseBibtex('@article{k, title = {' + value + '}}').get('k')!;
+    expect(entry.fields.get('title')).toBe(value);
+  });
+
   it('leaves identifier, path, and Zotero fields exactly unchanged', () => {
     const input = String.raw`@article{k,
   doi = {10.1000/M{\"u}ller\_x},

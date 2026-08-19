@@ -165,8 +165,10 @@ function tryDecodeAccentAt(input: string, slashIndex: number): DecodedCommand | 
 
   if (command === 't') return tryDecodeTieAccent(input, targetIndex);
 
+  if (!Object.prototype.hasOwnProperty.call(BIBTEX_ACCENT_MARKS, command)) {
+    return undefined;
+  }
   const combiningMark = BIBTEX_ACCENT_MARKS[command];
-  if (!combiningMark) return undefined;
 
   const target = readAccentTarget(input, targetIndex);
   if (!target) return undefined;
