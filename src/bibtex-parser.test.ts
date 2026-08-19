@@ -262,6 +262,28 @@ describe('double-brace fix', () => {
   });
 });
 
+describe('mergeBibtex line endings', () => {
+  it('splices each entry using its own line ending, not the file majority', () => {
+    // A mixed-ending file must not have its minority-convention entries
+    // rewritten to the majority one: `k` is all-LF and must stay that way
+    // even though the CRLF entry makes CRLF dominant overall.
+    const existing = '@article{k,\n  title = {T},\n  note = {keep}\n}';
+    const produced = '@article{other,\r\n  title = {O}\r\n}\r\n\r\n@article{k,\n  title = {T}\n}';
+    const merged = mergeBibtex(existing, produced);
+
+    expect(merged).toContain('@article{k,\n  title = {T},\n  note = {keep}\n}');
+    expect(merged).toContain('@article{other,\r\n  title = {O}\r\n}');
+  });
+
+  it('falls back to the document convention for a single-line entry', () => {
+    // A one-line entry carries no newline to infer from, so the surrounding
+    // document decides.
+    const existing = '@article{k, title = {T}, note = {keep}}';
+    const produced = '@article{first,\r\n  year = {2020}\r\n}\r\n\r\n@article{k, title = {T}}';
+    expect(mergeBibtex(existing, produced)).toContain('@article{k, title = {T},\r\n  note = {keep}\r\n}');
+  });
+});
+
 describe('mergeBibtex', () => {
   it('preserves existing-only entries verbatim', () => {
     const existing = '@article{onlyExisting,\n  title = {{Only Existing}},\n  year = {2020}\n}';
@@ -502,6 +524,40 @@ describe('parseBibtexWithRaw source ranges', () => {
     expect(findDuplicateBibtexKeys(ranges).size).toBe(0);
   });
 
+  it('reports no entry for citation-like text inside a pseudo-entry', () => {
+    // @string/@comment/@preamble bodies are arbitrary text. An @article quoted
+    // inside one is data, and splicing fields into it would corrupt the
+    // declaration — so it must not be reported as an addressable entry.
+    for (const input of [
+      '@string{snippet = "@article{fake, doi = {10.1/x}}"}',
+      '@comment{note, @article{fake, doi = {10.1/x}}}',
+      '@preamble{"@article{fake, doi = {10.1/x}}"}',
+    ]) {
+      const { parsed, ranges } = parseBibtexWithRaw(input);
+      expect(ranges).toEqual([]);
+      expect(parsed.size).toBe(0);
+    }
+  });
+
+  it('still finds real entries surrounding a pseudo-entry', () => {
+    const input = '@string{jgl = "Journal"}\n@article{real, year = {2020}}\n@comment{aside}\n@book{alsoreal, year = {2021}}';
+    const { ranges } = parseBibtexWithRaw(input);
+    expect(ranges.map(r => r.key)).toEqual(['real', 'alsoreal']);
+  });
+
+  it('does not report an entry nested inside an unterminated one', () => {
+    // `broken` never closes, so everything after it is inside its field value.
+    // A range for `fake` would point into that value, not at a real entry.
+    const input = '@article{broken,\n  note = {see @book{fake, year = {2020}}';
+    expect(parseBibtexWithRaw(input).ranges).toEqual([]);
+  });
+
+  it('recovers at the next line-leading entry after an unterminated one', () => {
+    const input = '@article{broken,\n  title = {no close brace\n\n@article{good,\n  year = {2021}\n}';
+    const { ranges } = parseBibtexWithRaw(input);
+    expect(ranges.map(r => r.key)).toEqual(['good']);
+  });
+
   it('omits an entry whose closing brace is never found', () => {
     // There is no trustworthy end offset for an unclosed entry, so it must not
     // appear at all — a caller splicing into a guessed range would corrupt the
@@ -584,14 +640,51 @@ describe('detectBibtexEol', () => {
     expect(detectBibtexEol('')).toBe('\n');
   });
 
-  it('resolves a CRLF/bare-LF tie to CRLF', () => {
-    // One CRLF and one bare LF: a file that is half CRLF is being written by a
-    // CRLF tool, so matching it is the less surprising choice.
-    expect(detectBibtexEol('a\r\nb\nc')).toBe('\r\n');
+  it('resolves a CRLF/bare-LF tie to LF', () => {
+    // LF is the only answer that cannot introduce a stray \r into a file that
+    // had none, so a tie is not enough to switch the file to CRLF.
+    expect(detectBibtexEol('a\r\nb\nc')).toBe('\n');
   });
 
   it('does not let a lone CRLF outvote a majority of LF lines', () => {
     expect(detectBibtexEol('a\nb\nc\nd\r\ne')).toBe('\n');
+  });
+
+  it('does not let a CRLF inside one field decide the entry layout', () => {
+    // The structural newline after the header is LF; the only CRLF is inside
+    // the note value. Counting bare LF separately keeps the entry on LF.
+    const raw = '@article{k,\n  note = {a\r\nb}}';
+    expect(detectBibtexEol(raw)).toBe('\n');
+    expect(spliceFieldsIntoEntry(raw, ['  zotero-key = {K},'])).toBe(
+      '@article{k,\n  note = {a\r\nb},\n  zotero-key = {K}\n}',
+    );
+  });
+});
+
+describe('spliceFieldsIntoEntry whitespace preservation', () => {
+  // Adding a field must not double as a reformat: any byte the splice did not
+  // need to touch has to survive, or linking produces spurious diff noise.
+  it('keeps a blank line the author left before the closing brace', () => {
+    const raw = '@article{k,\n  title = {T},\n\n}';
+    expect(spliceFieldsIntoEntry(raw, ['  zotero-key = {ABCD},'])).toBe(
+      '@article{k,\n  title = {T},\n\n  zotero-key = {ABCD}\n}',
+    );
+  });
+
+  it('keeps trailing spaces after an already-comma-terminated field', () => {
+    const raw = '@article{k,\n  title = {T},   \n}';
+    expect(spliceFieldsIntoEntry(raw, ['  zotero-key = {ABCD},'])).toBe(
+      '@article{k,\n  title = {T},   \n  zotero-key = {ABCD}\n}',
+    );
+  });
+
+  it('trims only when the comma must follow the last field token', () => {
+    // No comma yet, so the comma has to land right after `{T}` — the newline
+    // between it and the brace is necessarily rewritten.
+    const raw = '@article{k,\n  title = {T}\n}';
+    expect(spliceFieldsIntoEntry(raw, ['  zotero-key = {ABCD},'])).toBe(
+      '@article{k,\n  title = {T},\n  zotero-key = {ABCD}\n}',
+    );
   });
 });
 

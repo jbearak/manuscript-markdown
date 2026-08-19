@@ -104,16 +104,17 @@ export type BibtexEol = '\n' | '\r\n';
 
 /** Dominant line ending of `text`, for callers that have no better source.
  *  Prefer passing the document's own convention (e.g. `TextDocument.eol`)
- *  when it is known: a single-line entry carries no newline of its own, and
- *  a CRLF inside one field does not make the whole file CRLF.
+ *  when it is known: a single-line entry carries no newline of its own.
  *
- *  Boundary policy: text with no newline at all is LF, and a tie between CRLF
- *  and bare-LF endings resolves to CRLF — a file that is half CRLF is being
- *  written by a CRLF tool, and matching it is the less surprising choice. */
+ *  CRLF must strictly outnumber bare LF to win.  This function cannot tell a
+ *  structural newline from one inside a field value, so a lone CRLF in a
+ *  `note` must not outvote the entry's own LF layout.  Ties and newline-free
+ *  text both fall to LF, which is the ending that can never introduce a stray
+ *  `\r` into a file that had none. */
 export function detectBibtexEol(text: string): BibtexEol {
   const crlfCount = text.split('\r\n').length - 1;
-  const lfCount = text.split('\n').length - 1;
-  return crlfCount > 0 && crlfCount * 2 >= lfCount ? '\r\n' : '\n';
+  const bareLfCount = (text.split('\n').length - 1) - crlfCount;
+  return crlfCount > bareLfCount ? '\r\n' : '\n';
 }
 
 /** Half-open `[start, end)` offsets of one entry occurrence within the input.
@@ -155,6 +156,23 @@ export function findDuplicateBibtexKeys(ranges: readonly BibtexSourceRange[]): S
   return duplicates;
 }
 
+/** `@string`, `@comment`, and `@preamble` are declarations, not bibliography
+ *  entries.  Their bodies are skipped wholesale: BibTeX allows arbitrary text
+ *  inside them, so an `@article{...}` quoted in a `@string` is data, not an
+ *  entry, and reporting an editable range for it would let a caller splice
+ *  fields into the middle of a string definition. */
+const PSEUDO_ENTRY_TYPES: ReadonlySet<string> = new Set(['string', 'comment', 'preamble']);
+
+/** True if only spaces/tabs separate `pos` from the start of its line. */
+function isAtLineStart(input: string, pos: number): boolean {
+  for (let i = pos - 1; i >= 0; i--) {
+    const c = input[i];
+    if (c === '\n') return true;
+    if (c !== ' ' && c !== '\t' && c !== '\r') return false;
+  }
+  return true;
+}
+
 /** Parse BibTeX input, returning both the structured entries and raw entry
  *  texts in a single pass over the entry boundaries.  parseBibtex delegates
  *  here; mergeBibtex uses both the parsed and raw maps directly. */
@@ -163,13 +181,18 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
   const raw = new Map<string, string>();
   const ranges: BibtexSourceRange[] = [];
 
-  // Find entry boundaries more carefully
-  const entryMatches = [...input.matchAll(/@(\w+)\s*\{\s*([^,\s]+)\s*,/g)];
+  // Scan sequentially rather than pre-collecting every `@type{key,` match:
+  // only a scan that has consumed everything before a given `@` knows whether
+  // that `@` is at the top level or buried in someone's field value.
+  const headerRe = /@(\w+)\s*\{/g;
+  const keyRe = /\s*([^,\s]+)\s*,/y;
 
-  // Track the end of the last successfully parsed entry so we can skip
-  // spurious @type{key, matches inside field values (e.g. note fields
-  // that reference other entries).
-  let lastEntryEnd = 0;
+  let pos = 0;
+  // After an entry we could not delimit, we no longer know where we are, so
+  // only an `@` that opens a line is trusted to be a real entry.  Without this
+  // an `@book{ref,` inside the unterminated entry's own field value would be
+  // mistaken for the next entry.
+  let requireLineStart = false;
 
   // author/editor use inner {Name} braces as a semantic signal for
   // institutional/literal names (Req 2.3), so do NOT strip outer braces
@@ -181,22 +204,58 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
   // If we need arbitrary nesting, replace with a balanced-brace field parser.
   const fieldRegex = /(\w+(?:-\w+)*)\s*=\s*(?:\{((?:[^{}]|\{(?:[^{}]|\{[^}]*\})*\})*)\}|"((?:\\.|[^"\\])*)"|(\w+))/g;
 
-  for (const match of entryMatches) {
-    if (match.index! < lastEntryEnd) continue;
+  while (pos < input.length) {
+    headerRe.lastIndex = pos;
+    const match = headerRe.exec(input);
+    if (!match) break;
 
-    const [, type, key] = match;
-    const entryStart = match.index!;
-    const startPos = entryStart + match[0].length;
+    const entryStart = match.index;
+    const afterBrace = entryStart + match[0].length;
+    const type = match[1];
+
+    if (requireLineStart && !isAtLineStart(input, entryStart)) {
+      pos = afterBrace;
+      continue;
+    }
+
+    if (PSEUDO_ENTRY_TYPES.has(type.toLowerCase())) {
+      const close = findEntryEnd(input, afterBrace);
+      if (close === -1) {
+        // Unterminated declaration — fall back to line-start recovery.
+        pos = afterBrace;
+        requireLineStart = true;
+      } else {
+        pos = close + 1;
+        requireLineStart = false;
+      }
+      continue;
+    }
+
+    keyRe.lastIndex = afterBrace;
+    const keyMatch = keyRe.exec(input);
+    if (!keyMatch) {
+      // `@type{` with no citation key — not an entry we can address.
+      pos = afterBrace;
+      continue;
+    }
+
+    const key = keyMatch[1];
+    const startPos = afterBrace + keyMatch[0].length;
 
     const endPos = findEntryEnd(input, startPos);
-    lastEntryEnd = (endPos === -1 ? startPos : endPos) + 1;
-    if (endPos === -1) continue;
+    if (endPos === -1) {
+      pos = startPos;
+      requireLineStart = true;
+      continue;
+    }
+    pos = endPos + 1;
+    requireLineStart = false;
 
     // Raw entry text (preserves original formatting)
     raw.set(key, input.slice(entryStart, endPos + 1));
-    // Locate the key after the opening brace, so a key that also spells the
-    // entry type (`@article{article,`) still points at the key.
-    const keyStart = entryStart + match[0].lastIndexOf(key);
+    // Search for the key after the opening brace, so a key that also spells
+    // the entry type (`@article{article,`) still points at the key.
+    const keyStart = afterBrace + keyMatch[0].indexOf(key);
     ranges.push({ key, start: entryStart, end: endPos + 1, keyStart, keyEnd: keyStart + key.length });
 
     // Parsed entry
@@ -330,11 +389,17 @@ export function spliceFieldsIntoEntry(
   const closingPos = producedRaw.lastIndexOf('}');
   if (closingPos === -1) return producedRaw;
 
-  const trimmed = producedRaw.slice(0, closingPos).trimEnd();
+  const head = producedRaw.slice(0, closingPos);
+  const trimmed = head.trimEnd();
 
   // Ensure trailing comma on the last existing field so the splice stays valid.
+  // Trim only when the comma has to go immediately after the last field token;
+  // otherwise keep the original whitespace, so a blank line the user left
+  // before the closing brace is not silently swallowed by adding a field.
   const needsComma = trimmed.length > 0 && !trimmed.endsWith(',') && !trimmed.endsWith('{');
-  const before = trimmed + (needsComma ? ',' : '') + eol;
+  const before = needsComma
+    ? trimmed + ',' + eol
+    : head + (head.endsWith('\n') ? '' : eol);
 
   // Strip trailing comma from last spliced field for consistency with serializeBibtex
   const lastIdx = fieldTexts.length - 1;
@@ -357,8 +422,8 @@ export function mergeBibtex(existing: string, produced: string): string {
   if (!existing || existing.trim().length === 0) return produced;
   if (!produced || produced.trim().length === 0) return existing;
 
-  // Splice using the produced document's convention, not each entry's own
-  // text: a single-line entry carries no newline to infer from.
+  // Fallback only, for entries too short to carry a newline of their own —
+  // an entry that does have one is authoritative about its own layout.
   const producedEol = detectBibtexEol(produced);
   const existingResult = parseBibtexWithRaw(existing);
   const producedResult = parseBibtexWithRaw(produced);
@@ -422,7 +487,10 @@ export function mergeBibtex(existing: string, produced: string): string {
         fieldTexts.push('  ' + fName + ' = {' + escapedValue + '},');
       }
 
-      result.push(spliceFieldsIntoEntry(producedText, fieldTexts, producedEol));
+      // Keep each entry internally consistent: a mixed-ending file must not
+      // have its minority-convention entries rewritten to the majority one.
+      const entryEol = producedText.includes('\n') ? detectBibtexEol(producedText) : producedEol;
+      result.push(spliceFieldsIntoEntry(producedText, fieldTexts, entryEol));
     }
   }
 
