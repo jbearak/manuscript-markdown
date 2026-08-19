@@ -820,3 +820,85 @@ describe('spliceFieldsIntoEntry line endings', () => {
     expect(out).toContain('line one\r\n  line two');
   });
 });
+
+describe('paren-delimited entries', () => {
+  // BibTeX accepts `@type(...)` as well as `@type{...}`, but only braces
+  // delimit *field values*. A paren inside a braced value is ordinary text
+  // with no obligation to balance, so the two depths must be tracked apart.
+  it('does not let an unmatched ( inside a field value swallow the entry', () => {
+    const input = '@article(k, title = {Analysis (Part I}, year = {2020})\n\n@book{b, title = {T}}';
+    const { parsed, ranges } = parseBibtexWithRaw(input);
+    expect([...parsed.keys()]).toEqual(['k', 'b']);
+    expect(input.slice(ranges[0].start, ranges[0].end)).toBe(
+      '@article(k, title = {Analysis (Part I}, year = {2020})',
+    );
+  });
+
+  it('does not let an unmatched ) inside a field value truncate the entry', () => {
+    const input = '@article(k, title = {Analysis ) Part}, year = {2020})';
+    const { ranges } = parseBibtexWithRaw(input);
+    expect(input.slice(ranges[0].start, ranges[0].end)).toBe(input);
+  });
+
+  it('closes a paren entry on its own delimiter, not a field brace', () => {
+    const input = '@article(k, title = {x}) @book(j, title = {y})';
+    const { ranges } = parseBibtexWithRaw(input);
+    expect(ranges.map((r) => input.slice(r.start, r.end))).toEqual([
+      '@article(k, title = {x})',
+      '@book(j, title = {y})',
+    ]);
+  });
+
+  it('splices into a paren entry without rewriting its closer', () => {
+    // Deriving the closer from lastIndexOf('}') would emit `}` here and leave
+    // an entry that no longer parses.
+    const raw = '@article(k,\n  title = {T}\n)';
+    expect(spliceFieldsIntoEntry(raw, ['  zotero-key = {ABCD},'])).toBe(
+      '@article(k,\n  title = {T},\n  zotero-key = {ABCD}\n)',
+    );
+  });
+
+  it('splices into a paren entry whose last field is already comma-terminated', () => {
+    const raw = '@article(k,\n  title = {T},\n)';
+    expect(spliceFieldsIntoEntry(raw, ['  zotero-key = {ABCD},'])).toBe(
+      '@article(k,\n  title = {T},\n  zotero-key = {ABCD}\n)',
+    );
+  });
+
+  it('leaves text alone when it does not end in a closing delimiter', () => {
+    // Callers always pass an exact parsed range, so this is defence in depth:
+    // with no delimiter to preserve there is no safe place to splice.
+    const raw = '@article{k, title = T';
+    expect(spliceFieldsIntoEntry(raw, ['  zotero-key = {ABCD},'])).toBe(raw);
+  });
+});
+
+describe('detectBibtexEol tie boundary', () => {
+  // On a tie the sampled newline must come from the gap *between* constructs.
+  // Reaching for the next newline anywhere after an entry lands inside the
+  // following one and reports its interior ending as the document's.
+  it('samples the gap after an entry, not the next entry interior', () => {
+    const text = '@article{a,\r\n  note = {x\ny}\r\n}\r\n\r\n@book{b,\r\n  title = {T}\r\n}';
+    expect(detectBibtexEol(text)).toBe('\r\n');
+  });
+
+  it('is symmetric for the mirror-image LF document', () => {
+    const text = '@article{a,\n  note = {x\r\ny}\n}\n\n@book{b,\n  title = {T}\n}';
+    expect(detectBibtexEol(text)).toBe('\n');
+  });
+
+  it('falls back to the leading gap when the entry ends the text', () => {
+    const text = '\r\n@article{a,\r\n  note = {x\ny}}';
+    expect(detectBibtexEol(text)).toBe('\r\n');
+  });
+
+  it('ignores untrusted ranges when sampling the boundary', () => {
+    // `bad` is never closed, so `good` is only recovered at a line start and
+    // may well sit inside `bad`'s field value. The LF preceding it is not
+    // inter-construct whitespace, and must not outvote the document's CRLF.
+    const text = '@article{bad,\r\n  title = {unclosed\n@book{good, t = {y}}';
+    const { ranges } = parseBibtexWithRaw(text);
+    expect(ranges.map((r) => r.trusted)).toEqual([false]);
+    expect(detectBibtexEol(text)).toBe('\r\n');
+  });
+});

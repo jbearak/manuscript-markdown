@@ -68,22 +68,29 @@ function unescapeBibtex(s: string): string {
  *  the same.  extractRawField needs escape-awareness because it scans a
  *  single field value where `\{` must not alter depth. */
 function findEntryEnd(input: string, startPos: number, closer: '}' | ')' = '}'): number {
-  const opener = closer === ')' ? '(' : '{';
-  let braceCount = 1;
+  // Field values are always brace-delimited, whatever encloses the entry, so
+  // brace depth is tracked on its own.  For a paren entry the two are genuinely
+  // independent: a `(` or `)` inside `title = {Analysis (Part I}` is ordinary
+  // text with no obligation to balance, and folding it into one counter both
+  // swallows valid entries and truncates others at the wrong place.
+  let braceDepth = 0;
+  // Only meaningful for a paren entry; a brace entry closes on braceDepth.
+  let parenDepth = 1;
   let inQuotes = false;
   // Brace depth *within* the current quoted value.  BibTeX lets a `{`…`}` group
   // protect a literal `"` inside a quoted string, so a quote only ends the
   // string when it sits at depth 0 of that string.  This depth is kept apart
-  // from braceCount because braces inside a quoted value do not change the
-  // entry's own nesting — `title = "a } brace"` must not close the entry.
+  // because braces inside a quoted value do not change the entry's own
+  // nesting — `title = "a } brace"` must not close the entry.
   let quoteDepth = 0;
+  const atTopLevel = () => (closer === ')' ? parenDepth === 1 && braceDepth === 0 : braceDepth === 0);
 
-  for (let j = startPos; j < input.length && braceCount > 0; j++) {
+  for (let j = startPos; j < input.length; j++) {
     const char = input[j];
 
-    if (char === '"' && (inQuotes ? quoteDepth === 0 : braceCount === 1)) {
-      // Only toggle quote state at brace depth 1 (top-level field values).
-      // Inside {…}-delimited values, " is a literal character in BibTeX.
+    if (char === '"' && (inQuotes ? quoteDepth === 0 : atTopLevel())) {
+      // Only toggle quote state at the entry's top level (field values live
+      // there).  Inside {…}-delimited values, " is a literal character.
       let backslashCount = 0;
       const backslash = '\\';
       for (let k = j - 1; k >= 0 && input[k] === backslash; k--) {
@@ -98,17 +105,16 @@ function findEntryEnd(input: string, startPos: number, closer: '}' | ')' = '}'):
       // value drive the depth negative.
       if (char === '{') quoteDepth++;
       else if (char === '}' && quoteDepth > 0) quoteDepth--;
-    } else {
-      // A paren-delimited entry still nests its field values with braces, so
-      // count both: `@article(k, title = {a (b) c})` closes at the final `)`.
-      if (char === opener || char === '{') {
-        braceCount++;
-      } else if (char === closer || (closer === ')' && char === '}')) {
-        braceCount--;
-        if (braceCount === 0) {
-          return j;
-        }
-      }
+    } else if (char === '{') {
+      braceDepth++;
+    } else if (char === '}') {
+      if (closer === '}' && braceDepth === 0) return j;
+      if (braceDepth > 0) braceDepth--;
+    } else if (closer === ')' && braceDepth === 0) {
+      // Parens only count outside a braced value, where they really are the
+      // entry's own delimiters.
+      if (char === '(') parenDepth++;
+      else if (char === ')' && --parenDepth === 0) return j;
     }
   }
 
@@ -132,6 +138,19 @@ function findCommentEnd(input: string, startPos: number, closer: '}' | ')' = '}'
 
 export type BibtexEol = '\n' | '\r\n';
 
+/** Follow whitespace from `from` in the `step` direction, returning the line
+ *  ending of the first newline reached, or null if non-whitespace (or the edge
+ *  of the text) comes first.  This samples a line ending from the gap *between*
+ *  two top-level constructs, where it is unambiguously the document's own. */
+function scanWhitespaceForNewline(text: string, from: number, step: 1 | -1): BibtexEol | null {
+  for (let i = from; i >= 0 && i < text.length; i += step) {
+    const ch = text[i];
+    if (ch === '\n') return text[i - 1] === '\r' ? '\r\n' : '\n';
+    if (ch !== ' ' && ch !== '\t' && ch !== '\r') return null;
+  }
+  return null;
+}
+
 /** Dominant line ending of `text`, for callers that have no better source.
  *  Prefer passing the document's own convention (e.g. `TextDocument.eol`)
  *  when it is known: a single-line entry carries no newline of its own.
@@ -139,9 +158,10 @@ export type BibtexEol = '\n' | '\r\n';
  *  A majority vote alone cannot separate a structural newline from one inside
  *  a field value — `note = {a\r\nb}` in an LF entry and `note = {a\nb}` in a
  *  CRLF entry are mirror images that tie at one each.  So when the counts tie,
- *  the first newline *after the entry header* breaks it: that one is always
- *  structural.  Text with no newline at all is LF, the only answer that cannot
- *  introduce a stray `\r` into a file that had none. */
+ *  a newline drawn from the whitespace gap beside a trusted entry breaks it:
+ *  that one is structural by construction.  Text with no newline at all is LF,
+ *  the only answer that cannot introduce a stray `\r` into a file that had
+ *  none. */
 export function detectBibtexEol(text: string): BibtexEol {
   const crlfCount = text.split('\r\n').length - 1;
   const bareLfCount = (text.split('\n').length - 1) - crlfCount;
@@ -155,12 +175,14 @@ export function detectBibtexEol(text: string): BibtexEol {
   // document's.  Only reached on a tie, so the extra scan is rare.
   const { ranges } = parseBibtexWithRaw(text);
   for (const range of ranges) {
-    // The newline closest to each boundary, on whichever side has one: an
-    // entry may be the last thing in the text, or the first.
-    const after = text.indexOf('\n', range.end);
-    if (after !== -1) return text[after - 1] === '\r' ? '\r\n' : '\n';
-    const before = text.lastIndexOf('\n', range.start);
-    if (before > 0) return text[before - 1] === '\r' ? '\r\n' : '\n';
+    if (!range.trusted) continue;
+    // Walk only through the whitespace touching the boundary.  Jumping to the
+    // next newline *anywhere* after the entry would happily land inside the
+    // following construct and report its interior line ending as the file's.
+    const after = scanWhitespaceForNewline(text, range.end, 1);
+    if (after !== null) return after;
+    const before = scanWhitespaceForNewline(text, range.start - 1, -1);
+    if (before !== null) return before;
   }
   // No entry to anchor on — the first newline is the best signal left.
   const firstLf = text.indexOf('\n');
@@ -480,8 +502,13 @@ export function spliceFieldsIntoEntry(
 ): string {
   if (fieldTexts.length === 0) return producedRaw;
 
-  const closingPos = producedRaw.lastIndexOf('}');
-  if (closingPos === -1) return producedRaw;
+  // `producedRaw` is an exact parsed entry range, so its final character is the
+  // authoritative closer — a paren-delimited entry must be closed with `)`.
+  // Falling back to `lastIndexOf('}')` here would rewrite `@article(k, ...)`
+  // into something that no longer parses.
+  const closingPos = producedRaw.length - 1;
+  const closer = producedRaw[closingPos];
+  if (closer !== '}' && closer !== ')') return producedRaw;
 
   const head = producedRaw.slice(0, closingPos);
   const trimmed = head.trimEnd();
@@ -490,7 +517,9 @@ export function spliceFieldsIntoEntry(
   // Trim only when the comma has to go immediately after the last field token;
   // otherwise keep the original whitespace, so a blank line the user left
   // before the closing brace is not silently swallowed by adding a field.
-  const needsComma = trimmed.length > 0 && !trimmed.endsWith(',') && !trimmed.endsWith('{');
+  const opener = closer === ')' ? '(' : '{';
+  const needsComma =
+    trimmed.length > 0 && !trimmed.endsWith(',') && !trimmed.endsWith(opener);
   const before = needsComma
     ? trimmed + ',' + eol
     : head + (head.endsWith('\n') ? '' : eol);
@@ -502,7 +531,7 @@ export function spliceFieldsIntoEntry(
     return i === lastIdx ? t.replace(/,$/, '') : t;
   });
 
-  return before + cleaned.join(eol) + eol + '}';
+  return before + cleaned.join(eol) + eol + closer;
 }
 
 /** Merge an existing .bib (from disk) with a produced .bib (from conversion).
