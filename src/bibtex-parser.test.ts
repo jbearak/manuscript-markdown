@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { parseBibtex, parseBibtexWithRaw, findDuplicateBibtexKeys, detectBibtexEol, serializeBibtex, stripOuterBraces, mergeBibtex, extractRawField, spliceFieldsIntoEntry, BibtexEntry } from './bibtex-parser';
+import { parseBibtex, parseBibtexWithRaw, findDuplicateBibtexKeys, detectBibtexEol, detectEntryEol, serializeBibtex, stripOuterBraces, mergeBibtex, extractRawField, spliceFieldsIntoEntry, BibtexEntry } from './bibtex-parser';
 
 describe('BibTeX Parser', () => {
   it('parses basic entry', () => {
@@ -774,13 +774,63 @@ describe('spliceFieldsIntoEntry whitespace preservation', () => {
     );
   });
 
-  it('trims only when the comma must follow the last field token', () => {
-    // No comma yet, so the comma has to land right after `{T}` — the newline
-    // between it and the brace is necessarily rewritten.
+  it('inserts the comma after the last field token without reflowing', () => {
+    // No comma yet, so one has to land right after `{T}` — but inserting a
+    // character before the following newline does not require removing it.
     const raw = '@article{k,\n  title = {T}\n}';
     expect(spliceFieldsIntoEntry(raw, ['  zotero-key = {ABCD},'])).toBe(
       '@article{k,\n  title = {T},\n  zotero-key = {ABCD}\n}',
     );
+  });
+
+  it('keeps whitespace the comma insertion had to step over', () => {
+    // The trailing spaces and the blank line are unrelated bytes: the comma
+    // goes in front of them, and they survive verbatim.
+    const raw = '@article{k,\n  title = {T}   \n\n}';
+    expect(spliceFieldsIntoEntry(raw, ['  zotero-key = {ABCD},'])).toBe(
+      '@article{k,\n  title = {T},   \n\n  zotero-key = {ABCD}\n}',
+    );
+  });
+});
+
+describe('detectEntryEol', () => {
+  // Distinguishes an entry's own layout from bytes inside its field values.
+  it('reports null when every newline is inside a field value', () => {
+    expect(detectEntryEol('@article{k, title = {T}, note = {a\nb}}')).toBe(null);
+  });
+
+  it('ignores a newline inside a quoted value', () => {
+    expect(detectEntryEol('@article{k, note = "a\nb"}')).toBe(null);
+  });
+
+  it('reports the newline that separates fields', () => {
+    expect(detectEntryEol('@article{k,\n  note = {a\r\nb}\n}')).toBe('\n');
+  });
+
+  it('reports CRLF for a CRLF-laid-out entry', () => {
+    expect(detectEntryEol('@article{k,\r\n  note = {a\nb}\r\n}')).toBe('\r\n');
+  });
+
+  it('counts a newline in the header, before the opening delimiter', () => {
+    expect(detectEntryEol('@article\r\n{k, title = {T}}')).toBe('\r\n');
+  });
+
+  it('handles paren entries the same way', () => {
+    expect(detectEntryEol('@article(k, note = {a\nb})')).toBe(null);
+    expect(detectEntryEol('@article(k,\r\n  note = {x}\r\n)')).toBe('\r\n');
+  });
+});
+
+describe('mergeBibtex entry line endings', () => {
+  it('does not let a newline inside a field value pick the splice EOL', () => {
+    // `note`'s bare LF is payload. The entry is structurally single-line, so
+    // the restored field must follow the document's CRLF convention.
+    const existing = '@article{k,\r\n  title = {T},\r\n  extra = {keep}\r\n}';
+    const produced = '@book{x, title = {X}}\r\n\r\n@article{k, title = {T}, note = {a\nb}}';
+    const merged = mergeBibtex(existing, produced);
+    expect(merged).toContain('\r\n  extra = {keep}\r\n}');
+    // The payload newline itself is untouched.
+    expect(merged).toContain('note = {a\nb}');
   });
 });
 
@@ -890,6 +940,20 @@ describe('detectBibtexEol tie boundary', () => {
   it('falls back to the leading gap when the entry ends the text', () => {
     const text = '\r\n@article{a,\r\n  note = {x\ny}}';
     expect(detectBibtexEol(text)).toBe('\r\n');
+  });
+
+  it('reaches the structural newline behind a top-level % comment', () => {
+    // One bare LF inside a field, one CRLF outside the entry: a tie. Stopping
+    // the gap scan at the `%` would leave only the field's LF to fall back on.
+    expect(detectBibtexEol('@article{k, note = {a\nb}}% trailing comment\r\n')).toBe('\r\n');
+  });
+
+  it('stops the gap scan at the next entry rather than reading into it', () => {
+    // A genuine tie with no structural newline anywhere: each entry hides one
+    // in a field value and the gap between them has none. Without the `@`
+    // guard the forward scan would run into `b` and answer with its CRLF.
+    const text = '@article{a, note = {x\ny}}   @book{b, t = {A\r\nB}}';
+    expect(detectBibtexEol(text)).toBe('\n');
   });
 
   it('ignores untrusted ranges when sampling the boundary', () => {

@@ -138,16 +138,69 @@ function findCommentEnd(input: string, startPos: number, closer: '}' | ')' = '}'
 
 export type BibtexEol = '\n' | '\r\n';
 
-/** Follow whitespace from `from` in the `step` direction, returning the line
- *  ending of the first newline reached, or null if non-whitespace (or the edge
- *  of the text) comes first.  This samples a line ending from the gap *between*
- *  two top-level constructs, where it is unambiguously the document's own. */
-function scanWhitespaceForNewline(text: string, from: number, step: 1 | -1): BibtexEol | null {
+/** Line ending of the first newline reached from `from` in the `step`
+ *  direction, or null if the scan leaves ignored text first.
+ *
+ *  Everything between two top-level constructs is text BibTeX ignores — blank
+ *  lines, prose, `%` comment lines — and a newline anywhere in it is the
+ *  document's own.  Restricting the walk to whitespace would stop dead at a
+ *  trailing `%` comment and never reach the structural newline behind it.
+ *  The walk ends at `@`, which begins the next construct, and at a closing
+ *  delimiter, which means the scan has backed into one. */
+function scanIgnoredTextForNewline(text: string, from: number, step: 1 | -1): BibtexEol | null {
   for (let i = from; i >= 0 && i < text.length; i += step) {
     const ch = text[i];
     if (ch === '\n') return text[i - 1] === '\r' ? '\r\n' : '\n';
-    if (ch !== ' ' && ch !== '\t' && ch !== '\r') return null;
+    if (ch === '@' || ch === '}' || ch === ')') return null;
   }
+  return null;
+}
+
+/** Line ending of the first newline in `entryText` that sits at the entry's own
+ *  lexical level — outside every brace-delimited and quoted field value — or
+ *  null when the entry is structurally single-line.
+ *
+ *  A newline inside a field value is payload, not layout: `note = {a\nb}` says
+ *  nothing about how the file separates its lines, and letting it speak for the
+ *  entry drops LF structure into a CRLF document. */
+export function detectEntryEol(entryText: string): BibtexEol | null {
+  // Field-value brace depth; 0 is the entry's own level.
+  let braceDepth = 0;
+  let started = false;
+  let inQuotes = false;
+  let quoteDepth = 0;
+
+  for (let i = 0; i < entryText.length; i++) {
+    const ch = entryText[i];
+
+    if (!started) {
+      // The header is at the entry's level too: `@article\n{k, ...}` counts.
+      if (ch === '\n') return entryText[i - 1] === '\r' ? '\r\n' : '\n';
+      if (ch === '{' || ch === '(') started = true;
+      continue;
+    }
+
+    if (ch === '"' && (inQuotes ? quoteDepth === 0 : braceDepth === 0)) {
+      let backslashCount = 0;
+      const backslash = '\\';
+      for (let k = i - 1; k >= 0 && entryText[k] === backslash; k--) backslashCount++;
+      if (backslashCount % 2 === 0) {
+        inQuotes = !inQuotes;
+        quoteDepth = 0;
+      }
+    } else if (inQuotes) {
+      if (ch === '{') quoteDepth++;
+      else if (ch === '}' && quoteDepth > 0) quoteDepth--;
+    } else if (ch === '{') {
+      braceDepth++;
+    } else if (ch === '}') {
+      // At depth 0 this is the entry's own closer, which ends the scan anyway.
+      if (braceDepth > 0) braceDepth--;
+    } else if (ch === '\n' && braceDepth === 0) {
+      return entryText[i - 1] === '\r' ? '\r\n' : '\n';
+    }
+  }
+
   return null;
 }
 
@@ -174,14 +227,19 @@ export function detectBibtexEol(text: string): BibtexEol {
   // `@comment` body and would then read that comment's line ending as the
   // document's.  Only reached on a tie, so the extra scan is rare.
   const { ranges } = parseBibtexWithRaw(text);
-  for (const range of ranges) {
+  for (let i = 0; i < ranges.length; i++) {
+    const range = ranges[i];
     if (!range.trusted) continue;
-    // Walk only through the whitespace touching the boundary.  Jumping to the
-    // next newline *anywhere* after the entry would happily land inside the
+    // Walk only the ignored text touching the boundary.  Jumping to the next
+    // newline *anywhere* after the entry would happily land inside the
     // following construct and report its interior line ending as the file's.
-    const after = scanWhitespaceForNewline(text, range.end, 1);
+    const after = scanIgnoredTextForNewline(text, range.end, 1);
     if (after !== null) return after;
-    const before = scanWhitespaceForNewline(text, range.start - 1, -1);
+    // Scanning backwards is only sound before the first construct: further in,
+    // the preceding construct's interior is in the way, and its gap was already
+    // covered by that construct's own forward scan.
+    if (i > 0) continue;
+    const before = scanIgnoredTextForNewline(text, range.start - 1, -1);
     if (before !== null) return before;
   }
   // No entry to anchor on — the first newline is the best signal left.
@@ -498,7 +556,7 @@ export function extractRawField(rawEntry: string, fieldName: string): string | n
 export function spliceFieldsIntoEntry(
   producedRaw: string,
   fieldTexts: string[],
-  eol: BibtexEol = detectBibtexEol(producedRaw),
+  eol: BibtexEol = detectEntryEol(producedRaw) ?? '\n',
 ): string {
   if (fieldTexts.length === 0) return producedRaw;
 
@@ -513,16 +571,16 @@ export function spliceFieldsIntoEntry(
   const head = producedRaw.slice(0, closingPos);
   const trimmed = head.trimEnd();
 
-  // Ensure trailing comma on the last existing field so the splice stays valid.
-  // Trim only when the comma has to go immediately after the last field token;
-  // otherwise keep the original whitespace, so a blank line the user left
-  // before the closing brace is not silently swallowed by adding a field.
+  // Ensure a trailing comma on the last existing field so the splice stays
+  // valid.  The comma is *inserted* after the last field token rather than
+  // appended after a trim: whitespace the author left before the closer is
+  // unrelated to the edit, and deleting it turns adding a field into a
+  // reformat.
   const opener = closer === ')' ? '(' : '{';
   const needsComma =
     trimmed.length > 0 && !trimmed.endsWith(',') && !trimmed.endsWith(opener);
-  const before = needsComma
-    ? trimmed + ',' + eol
-    : head + (head.endsWith('\n') ? '' : eol);
+  const body = needsComma ? trimmed + ',' + head.slice(trimmed.length) : head;
+  const before = body + (body.endsWith('\n') ? '' : eol);
 
   // Strip trailing comma from last spliced field for consistency with serializeBibtex
   const lastIdx = fieldTexts.length - 1;
@@ -612,7 +670,9 @@ export function mergeBibtex(existing: string, produced: string): string {
 
       // Keep each entry internally consistent: a mixed-ending file must not
       // have its minority-convention entries rewritten to the majority one.
-      const entryEol = producedText.includes('\n') ? detectBibtexEol(producedText) : producedEol;
+      // Only a newline at the entry's own level counts — one buried in a field
+      // value is payload and says nothing about the entry's layout.
+      const entryEol = detectEntryEol(producedText) ?? producedEol;
       result.push(spliceFieldsIntoEntry(producedText, fieldTexts, entryEol));
     }
   }
