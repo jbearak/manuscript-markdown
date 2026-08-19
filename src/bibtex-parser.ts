@@ -100,12 +100,56 @@ function findEntryEnd(input: string, startPos: number): number {
   return -1;
 }
 
+export type BibtexEol = '\n' | '\r\n';
+
+/** Dominant line ending of `text`, for callers that have no better source.
+ *  Prefer passing the document's own convention (e.g. `TextDocument.eol`)
+ *  when it is known: a single-line entry carries no newline of its own, and
+ *  a CRLF inside one field does not make the whole file CRLF. */
+export function detectBibtexEol(text: string): BibtexEol {
+  const crlfCount = text.split('\r\n').length - 1;
+  const lfCount = text.split('\n').length - 1;
+  return crlfCount > 0 && crlfCount * 2 >= lfCount ? '\r\n' : '\n';
+}
+
+/** Half-open `[start, end)` offsets of one entry occurrence within the input. */
+export interface BibtexSourceRange {
+  key: string;
+  start: number;
+  end: number;
+}
+
+export interface ParsedBibtexWithRaw {
+  parsed: Map<string, BibtexEntry>;
+  raw: Map<string, string>;
+  /** Every entry occurrence in source order, including repeated citation keys.
+   *  `parsed`/`raw` are keyed by citation key and so keep only the last
+   *  occurrence; this array is the complete picture.  Callers editing by
+   *  offset must use it — splicing a repeated key via `raw` would be
+   *  ambiguous.  Use `duplicateBibtexKeys()` to detect repeats. */
+  ranges: BibtexSourceRange[];
+}
+
+/** Citation keys that occur more than once.  Entries with a duplicated key
+ *  cannot be edited by offset unambiguously, so callers should leave them
+ *  alone rather than guess which occurrence was meant. */
+export function duplicateBibtexKeys(ranges: readonly BibtexSourceRange[]): Set<string> {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const range of ranges) {
+    if (seen.has(range.key)) duplicates.add(range.key);
+    else seen.add(range.key);
+  }
+  return duplicates;
+}
+
 /** Parse BibTeX input, returning both the structured entries and raw entry
  *  texts in a single pass over the entry boundaries.  parseBibtex delegates
  *  here; mergeBibtex uses both the parsed and raw maps directly. */
-function parseBibtexWithRaw(input: string): { parsed: Map<string, BibtexEntry>; raw: Map<string, string> } {
+export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
   const parsed = new Map<string, BibtexEntry>();
   const raw = new Map<string, string>();
+  const ranges: BibtexSourceRange[] = [];
 
   // Find entry boundaries more carefully
   const entryMatches = [...input.matchAll(/@(\w+)\s*\{\s*([^,\s]+)\s*,/g)];
@@ -138,6 +182,7 @@ function parseBibtexWithRaw(input: string): { parsed: Map<string, BibtexEntry>; 
 
     // Raw entry text (preserves original formatting)
     raw.set(key, input.slice(entryStart, endPos + 1));
+    ranges.push({ key, start: entryStart, end: endPos + 1 });
 
     // Parsed entry
     try {
@@ -167,7 +212,7 @@ function parseBibtexWithRaw(input: string): { parsed: Map<string, BibtexEntry>; 
     }
   }
 
-  return { parsed, raw };
+  return { parsed, raw, ranges };
 }
 
 export function parseBibtex(input: string): Map<string, BibtexEntry> {
@@ -253,22 +298,26 @@ export function extractRawField(rawEntry: string, fieldName: string): string | n
 
 /** Splice additional raw field lines into a produced entry's raw text,
  *  inserting them before the closing `}`. Ensures a trailing comma on the
- *  last existing field so the result remains valid BibTeX. */
-export function spliceFieldsIntoEntry(producedRaw: string, fieldTexts: string[]): string {
+ *  last existing field so the result remains valid BibTeX.
+ *
+ *  Line endings: inserted lines follow the entry's own convention.  Emitting
+ *  bare LF into a CRLF entry would leave mixed endings, which surfaces as
+ *  whole-file diff noise on Windows checkouts. */
+export function spliceFieldsIntoEntry(
+  producedRaw: string,
+  fieldTexts: string[],
+  eol: BibtexEol = detectBibtexEol(producedRaw),
+): string {
   if (fieldTexts.length === 0) return producedRaw;
 
   const closingPos = producedRaw.lastIndexOf('}');
   if (closingPos === -1) return producedRaw;
 
-  let before = producedRaw.slice(0, closingPos);
-  const trimmed = before.trimEnd();
+  const trimmed = producedRaw.slice(0, closingPos).trimEnd();
 
-  // Ensure trailing comma on last produced field
-  if (trimmed.length > 0 && !trimmed.endsWith(',') && !trimmed.endsWith('{')) {
-    before = trimmed + ',\n';
-  } else if (!before.endsWith('\n')) {
-    before += '\n';
-  }
+  // Ensure trailing comma on the last existing field so the splice stays valid.
+  const needsComma = trimmed.length > 0 && !trimmed.endsWith(',') && !trimmed.endsWith('{');
+  const before = trimmed + (needsComma ? ',' : '') + eol;
 
   // Strip trailing comma from last spliced field for consistency with serializeBibtex
   const lastIdx = fieldTexts.length - 1;
@@ -277,7 +326,7 @@ export function spliceFieldsIntoEntry(producedRaw: string, fieldTexts: string[])
     return i === lastIdx ? t.replace(/,$/, '') : t;
   });
 
-  return before + cleaned.join('\n') + '\n}';
+  return before + cleaned.join(eol) + eol + '}';
 }
 
 /** Merge an existing .bib (from disk) with a produced .bib (from conversion).
@@ -291,6 +340,9 @@ export function mergeBibtex(existing: string, produced: string): string {
   if (!existing || existing.trim().length === 0) return produced;
   if (!produced || produced.trim().length === 0) return existing;
 
+  // Splice using the produced document's convention, not each entry's own
+  // text: a single-line entry carries no newline to infer from.
+  const producedEol = detectBibtexEol(produced);
   const existingResult = parseBibtexWithRaw(existing);
   const producedResult = parseBibtexWithRaw(produced);
   const existingParsed = existingResult.parsed;
@@ -353,7 +405,7 @@ export function mergeBibtex(existing: string, produced: string): string {
         fieldTexts.push('  ' + fName + ' = {' + escapedValue + '},');
       }
 
-      result.push(spliceFieldsIntoEntry(producedText, fieldTexts));
+      result.push(spliceFieldsIntoEntry(producedText, fieldTexts, producedEol));
     }
   }
 

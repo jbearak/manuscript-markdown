@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { parseBibtex, serializeBibtex, stripOuterBraces, mergeBibtex, extractRawField, spliceFieldsIntoEntry, BibtexEntry } from './bibtex-parser';
+import { parseBibtex, parseBibtexWithRaw, duplicateBibtexKeys, detectBibtexEol, serializeBibtex, stripOuterBraces, mergeBibtex, extractRawField, spliceFieldsIntoEntry, BibtexEntry } from './bibtex-parser';
 
 describe('BibTeX Parser', () => {
   it('parses basic entry', () => {
@@ -437,5 +437,105 @@ describe('parseBibtex via parseBibtexWithRaw parity', () => {
 
     // Spurious @article{ref inside note must not appear
     expect(result.has('ref')).toBe(false);
+  });
+});
+
+describe('parseBibtexWithRaw source ranges', () => {
+  // Source ranges let callers splice edits into the original text by offset
+  // instead of re-finding raw substrings, which is ambiguous when two
+  // entries share a citation key.
+  it('reports ranges that slice back to the exact raw entry text', () => {
+    const input = [
+      '% leading comment',
+      '',
+      '@article{smith2020,',
+      '  title = {{First}},',
+      '  doi = {10.1/a}',
+      '}',
+      '',
+      '@book{jones2021,',
+      '  title = {{Second}}',
+      '}',
+      '',
+      '% trailing comment',
+    ].join('\n');
+
+    const { raw, ranges } = parseBibtexWithRaw(input);
+
+    for (const range of ranges) {
+      expect(input.slice(range.start, range.end)).toBe(raw.get(range.key));
+    }
+    expect(ranges.map(r => r.key)).toEqual(['smith2020', 'jones2021']);
+    expect(input.slice(ranges[0].start)).toStartWith('@article{smith2020,');
+    expect(input.slice(ranges[1].start)).toStartWith('@book{jones2021,');
+  });
+
+  it('reports ranges in ascending, non-overlapping order', () => {
+    const input = '@article{a,\n  year = {2020}\n}\n\n@book{b,\n  year = {2021}\n}';
+    const { ranges } = parseBibtexWithRaw(input);
+    for (let i = 1; i < ranges.length; i++) {
+      expect(ranges[i - 1].end).toBeLessThanOrEqual(ranges[i].start);
+    }
+  });
+
+  it('flags duplicate citation keys so callers can refuse to edit them', () => {
+    const input = '@article{dup,\n  doi = {10.1/a}\n}\n\n@article{dup,\n  doi = {10.2/b}\n}';
+    const { parsed, ranges } = parseBibtexWithRaw(input);
+
+    // The parsed map collapses to one entry — that is exactly why ranges
+    // keeps both occurrences and the duplicate must be reported.
+    expect(parsed.size).toBe(1);
+    expect(ranges).toHaveLength(2);
+    expect(input.slice(ranges[0].start, ranges[0].end)).toContain('10.1/a');
+    expect(input.slice(ranges[1].start, ranges[1].end)).toContain('10.2/b');
+    expect(duplicateBibtexKeys(ranges).has('dup')).toBe(true);
+  });
+
+  it('reports no duplicates for distinct keys', () => {
+    const { ranges } = parseBibtexWithRaw('@article{a,\n  year = {2020}\n}\n\n@book{b,\n  year = {2021}\n}');
+    expect(duplicateBibtexKeys(ranges).size).toBe(0);
+  });
+
+  it('treats case-different keys as distinct, matching parseBibtex', () => {
+    const { parsed, ranges } = parseBibtexWithRaw('@article{Smith,\n  year = {2020}\n}\n\n@article{smith,\n  year = {2021}\n}');
+    expect(parsed.size).toBe(2);
+    expect(duplicateBibtexKeys(ranges).size).toBe(0);
+  });
+});
+
+describe('spliceFieldsIntoEntry line endings', () => {
+  // A CRLF .bib must stay CRLF: mixed endings show up as whole-file diff
+  // noise on Windows checkouts.
+  it('uses CRLF for inserted fields when the entry uses CRLF', () => {
+    const raw = '@article{smith2020,\r\n  author = {Smith, J},\r\n  doi = {10.1/x}\r\n}';
+    const out = spliceFieldsIntoEntry(raw, ['  zotero-key = {ABCD1234},', '  zotero-uri = {http://zotero.org/groups/1/items/ABCD1234},']);
+
+    expect(out).not.toMatch(/[^\r]\n/);
+    expect(out).toContain('\r\n  zotero-key = {ABCD1234},\r\n');
+    expect(out).toContain('\r\n  zotero-uri = {http://zotero.org/groups/1/items/ABCD1234}\r\n}');
+  });
+
+  it('keeps LF entries on LF', () => {
+    const raw = '@article{smith2020,\n  doi = {10.1/x}\n}';
+    const out = spliceFieldsIntoEntry(raw, ['  zotero-key = {ABCD1234},']);
+    expect(out).not.toContain('\r');
+    expect(out).toContain('\n  zotero-key = {ABCD1234}\n}');
+  });
+
+  it('uses the caller-supplied EOL for a single-line entry that has none', () => {
+    // A one-line entry in a CRLF file carries no newline to infer from, so the
+    // caller's document convention has to win.
+    const raw = '@article{smith2020, doi = {10.1/x}}';
+    const out = spliceFieldsIntoEntry(raw, ['  zotero-key = {ABCD1234},'], '\r\n');
+    expect(out).not.toMatch(/[^\r]\n/);
+    expect(out).toContain('\r\n  zotero-key = {ABCD1234}\r\n}');
+  });
+
+  it('does not let one CRLF field make an otherwise-LF entry CRLF', () => {
+    const raw = '@article{smith2020,\n  note = {line one\r\n  line two},\n  doi = {10.1/x}\n}';
+    const out = spliceFieldsIntoEntry(raw, ['  zotero-key = {ABCD1234},'], detectBibtexEol(raw));
+    expect(out).toContain('\n  zotero-key = {ABCD1234}\n}');
+    // The pre-existing CRLF inside the note field must survive untouched.
+    expect(out).toContain('line one\r\n  line two');
   });
 });
