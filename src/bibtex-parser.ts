@@ -285,20 +285,23 @@ export function detectBibtexEol(text: string): BibtexEol {
   // not a bare regex — a regex happily matches `@book{fake,` sitting inside an
   // `@comment` body and would then read that comment's line ending as the
   // document's.  Only reached on a tie, so the extra scan is rare.
-  const { ranges } = parseBibtexWithRaw(text);
-  for (let i = 0; i < ranges.length; i++) {
-    const range = ranges[i];
-    if (!range.trusted) continue;
+  const { ranges, constructEnds } = parseBibtexWithRaw(text);
+  // Every construct the scanner finished, entries and pseudo-entries alike —
+  // a `@comment` never becomes a range, but the newline after it is just as
+  // structural, and the forward scan stops at its header either way.
+  for (const end of constructEnds) {
     // Walk only the ignored text touching the boundary.  Jumping to the next
-    // newline *anywhere* after the entry would happily land inside the
-    // following construct and report its interior line ending as the file's.
-    const after = scanForwardForNewline(text, range.end);
+    // newline *anywhere* after the construct would happily land inside the
+    // following one and report its interior line ending as the file's.
+    const after = scanForwardForNewline(text, end);
     if (after !== null) return after;
-    // Scanning backwards is only sound before the first construct: further in,
-    // the preceding construct's interior is in the way, and its gap was already
-    // covered by that construct's own forward scan.
-    if (i > 0) continue;
-    const before = scanBackwardForNewline(text, range.start - 1);
+  }
+  // Nothing after any construct, so try the gap before the first one.  Only
+  // that gap: further in, the preceding construct's interior is in the way,
+  // and every later gap was already covered by the forward pass above.
+  const first = ranges.length > 0 ? ranges[0] : null;
+  if (first !== null && first.trusted) {
+    const before = scanBackwardForNewline(text, first.start - 1);
     if (before !== null) return before;
   }
   // No entry to anchor on — the first newline is the best signal left.
@@ -345,6 +348,17 @@ export interface ParsedBibtexWithRaw {
    *  the file.  Byte-level editing must refuse the whole document when this is
    *  false rather than trusting the prefix. */
   rangesTrusted: boolean;
+  /** End offset of every top-level construct the scanner consumed cleanly, in
+   *  source order — pseudo-entries and keyless headers included, not just the
+   *  ones that became `ranges`.
+   *
+   *  These are boundaries, not entries: they say where the scanner was last
+   *  certain it stood outside every construct.  Only `detectBibtexEol` uses
+   *  them, to find a newline in the ignored text after a construct.  A
+   *  `@comment` is not something a caller may edit or navigate to, so it never
+   *  appears in `ranges`; but the newline after it is as structural as any
+   *  other, and without a boundary here the tie-break cannot see it. */
+  constructEnds: number[];
 }
 
 /** Citation keys that occur more than once.  Entries with a duplicated key
@@ -400,6 +414,8 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
   // but it is a heuristic: an entry-shaped value indented on its own line is
   // lexically indistinguishable from a real entry at that point.
   let requireLineStart = false;
+  // Boundaries for the EOL tie-break; see `ParsedBibtexWithRaw.constructEnds`.
+  const constructEnds: number[] = [];
   // Ranges found after sync is lost are still reported — navigation wants
   // them — but marked untrusted, because a recovered `@book{...}` may really
   // be sitting inside another entry's field value.
@@ -457,6 +473,7 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
       } else {
         pos = close + 1;
         requireLineStart = false;
+        constructEnds.push(pos);
       }
       continue;
     }
@@ -475,6 +492,7 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
       } else {
         pos = close + 1;
         requireLineStart = false;
+        constructEnds.push(pos);
       }
       continue;
     }
@@ -491,6 +509,7 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
     }
     pos = endPos + 1;
     requireLineStart = false;
+    constructEnds.push(pos);
 
     // Raw entry text (preserves original formatting)
     raw.set(key, input.slice(entryStart, endPos + 1));
@@ -531,7 +550,7 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
     }
   }
 
-  return { parsed, raw, ranges, rangesTrusted: synced };
+  return { parsed, raw, ranges, rangesTrusted: synced, constructEnds };
 }
 
 export function parseBibtex(input: string): Map<string, BibtexEntry> {

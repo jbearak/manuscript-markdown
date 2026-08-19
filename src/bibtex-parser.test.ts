@@ -969,6 +969,25 @@ describe('entries inside % comments', () => {
   });
 });
 
+describe('parseBibtexWithRaw constructEnds', () => {
+  // Boundaries, not entries: they mark where the scanner last stood outside
+  // every construct, including the pseudo-entries that never become ranges.
+  it('records an end for every cleanly consumed construct', () => {
+    const text = '@comment{x}@article{k, t = {T}}@string(y = {z})';
+    const { constructEnds, ranges } = parseBibtexWithRaw(text);
+    expect(ranges.map((r) => r.key)).toEqual(['k']);
+    expect(constructEnds).toEqual([11, 31, 47]);
+    for (const end of constructEnds) {
+      expect(text[end - 1] === '}' || text[end - 1] === ')').toBe(true);
+    }
+  });
+
+  it('records nothing for a construct it could not delimit', () => {
+    const { constructEnds } = parseBibtexWithRaw('@article{k, t = {unclosed');
+    expect(constructEnds).toEqual([]);
+  });
+});
+
 describe('detectBibtexEol tie boundary', () => {
   // On a tie the sampled newline must come from the gap *between* constructs.
   // Reaching for the next newline anywhere after an entry lands inside the
@@ -1032,6 +1051,33 @@ describe('detectBibtexEol tie boundary', () => {
     // after it, not from the field's LF.
     const text = '@article{k, note = {a\nb}} @ \r\n';
     expect(detectBibtexEol(text)).toBe('\r\n');
+  });
+
+  it('anchors on a pseudo-entry that ends the text', () => {
+    // `@comment` never becomes a range, but the newline after it is as
+    // structural as any other. Without a boundary there, the tie falls back to
+    // the payload LF inside `note`.
+    expect(detectBibtexEol('@article{k, note = {a\nb}}@comment{aside}\r\n')).toBe('\r\n');
+  });
+
+  it('anchors on a pseudo-entry sitting between two entries', () => {
+    const text = '@article{k, note = {a\nb}}@comment{aside}\r\n@book{b, title = {T}}';
+    expect(detectBibtexEol(text)).toBe('\r\n');
+  });
+
+  it('anchors on @string and @preamble too', () => {
+    expect(detectBibtexEol('@article{k, note = {a\nb}}@string(x = {y})\r\n')).toBe('\r\n');
+    expect(detectBibtexEol('@article{k, note = {a\nb}}@preamble{"x"}\r\n')).toBe('\r\n');
+  });
+
+  it('anchors on a keyless header the scanner consumed', () => {
+    expect(detectBibtexEol('@article{}\r\n@book{k, note = {a\nb}}')).toBe('\r\n');
+  });
+
+  it('still samples the leading gap when nothing follows any construct', () => {
+    // The forward pass finds nothing, so the gap before the first construct is
+    // the only anchor left.
+    expect(detectBibtexEol('\r\n@article{k, note = {a\nb}}')).toBe('\r\n');
   });
 
   it('ignores untrusted ranges when sampling the boundary', () => {
