@@ -5,7 +5,7 @@ import { resolveMarkdownColor } from './highlight-colors';
 import { Frontmatter, NotesMode, serializeFrontmatter, noteTypeFromNumber, parseColWidths, type CustomStyleDef } from './frontmatter';
 import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType } from './gfm';
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
-import { parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
+import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
 import { customStyleId } from './md-to-docx';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { publicStyleNameForZoteroId, zoteroStyleIdForName } from './csl-loader';
@@ -5799,13 +5799,9 @@ export function getLocalTimezoneOffset(): string {
 
 // BibTeX generation
 
-/**
- * Escape special LaTeX/BibTeX characters in field values.
- * Note: this converter-side helper escapes normalized metadata directly; parser-side
- * `src/bibtex-parser.ts` uses an idempotent escape path for round-trip safety.
- */
+/** Escape normalized metadata directly using the shared BibTeX text policy. */
 export function escapeBibtex(s: string): string {
-  return s.replace(/([&%$#_{}~^\\])/g, '\\$1');
+  return escapeBibtexText(s);
 }
 
 /** Map CSL type back to the most appropriate BibTeX entry type. */
@@ -5938,7 +5934,7 @@ export function generateBibTeX(
       }
 
       if (meta.zoteroKey) { fields.push(`  zotero-key = {${meta.zoteroKey}}`); }
-      if (meta.zoteroUri) { fields.push(`  zotero-uri = {${escapeBibtex(meta.zoteroUri)}}`); }
+      if (meta.zoteroUri) { fields.push(`  zotero-uri = {${meta.zoteroUri}}`); }
 
       const entryStr = `@${entryType}{${key},\n${fields.join(',\n')},\n}`;
       entries.push(entryStr);
