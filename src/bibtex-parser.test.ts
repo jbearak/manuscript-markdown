@@ -552,17 +552,54 @@ describe('parseBibtexWithRaw source ranges', () => {
     expect(parseBibtexWithRaw(input).ranges).toEqual([]);
   });
 
-  it('recovers at the next line-leading entry after an unterminated one', () => {
+  it('still parses entries recovered after an unterminated one, without ranging them', () => {
+    // Recovery is a heuristic: once the scanner has lost sync it cannot tell a
+    // real entry from an entry-shaped field value indented on its own line.
+    // `parsed` keeps the best-effort result, but `ranges` — which callers
+    // splice into — must not trade on a guess.
     const input = '@article{broken,\n  title = {no close brace\n\n@article{good,\n  year = {2021}\n}';
+    const { parsed, ranges } = parseBibtexWithRaw(input);
+    expect([...parsed.keys()]).toEqual(['good']);
+    expect(ranges).toEqual([]);
+  });
+
+  it('never reports a range for an entry nested in an unterminated one', () => {
+    // The mirror case that makes the above necessary: `fake` is indented on
+    // its own line inside broken's note value, and is lexically identical to
+    // a recovered entry.  Ranging either one would corrupt the file.
+    const input = '@article{broken,\n  note = {\n    @book{fake, doi = {10.1/not-real}}';
+    expect(parseBibtexWithRaw(input).ranges).toEqual([]);
+  });
+
+  it('reports no range for an entry inside a malformed-header construct', () => {
+    // `@article{` opens but its header has no citation key, so its body is
+    // that construct's data — not a place to splice fields into.
+    const input = '@article{not a valid header\n  note = {@book{fake, doi = {10.1/not-real}}}\n}';
+    expect(parseBibtexWithRaw(input).ranges).toEqual([]);
+  });
+
+  it('does not let a stray quote in a comment expose its contents', () => {
+    // A comment is prose: the lone `"` is ordinary text, and must not put the
+    // scanner into quote mode and swallow the comment's closing brace.
+    const input = '@comment{He wrote "\n  @article{fake, doi = {10.1/not-real}}\n}';
+    expect(parseBibtexWithRaw(input).ranges).toEqual([]);
+  });
+
+  it('spans the whole entry when a quote is brace-protected', () => {
+    // BibTeX lets `{"}` protect a literal quote inside a quoted value. Ending
+    // the entry at the protective group would report a truncated range and
+    // splice fields into the middle of the title.
+    const input = '@article{k, title = "A {"}quoted{"} word", year = {2020}}';
     const { ranges } = parseBibtexWithRaw(input);
-    expect(ranges.map(r => r.key)).toEqual(['good']);
+    expect(ranges).toHaveLength(1);
+    expect(input.slice(ranges[0].start, ranges[0].end)).toBe(input);
   });
 
   it('omits an entry whose closing brace is never found', () => {
     // There is no trustworthy end offset for an unclosed entry, so it must not
     // appear at all — a caller splicing into a guessed range would corrupt the
-    // rest of the file.  The following well-formed entry still gets a range.
-    const input = '@article{broken,\n  title = {no close brace\n\n@article{good,\n  year = {2021}\n}';
+    // rest of the file.  Entries *before* it are already delimited and stay.
+    const input = '@article{good,\n  year = {2021}\n}\n\n@article{broken,\n  title = {no close brace';
     const { ranges } = parseBibtexWithRaw(input);
 
     expect(ranges.map(r => r.key)).toEqual(['good']);
@@ -640,10 +677,19 @@ describe('detectBibtexEol', () => {
     expect(detectBibtexEol('')).toBe('\n');
   });
 
-  it('resolves a CRLF/bare-LF tie to LF', () => {
-    // LF is the only answer that cannot introduce a stray \r into a file that
-    // had none, so a tie is not enough to switch the file to CRLF.
-    expect(detectBibtexEol('a\r\nb\nc')).toBe('\n');
+  it('breaks a tie on the newline after the entry header', () => {
+    // Counts alone cannot separate a structural newline from one inside a
+    // field value, so the tie-break looks at the newline that follows the
+    // header — that one is always structural.
+    expect(detectBibtexEol('@article{k,\r\n  note = {a\nb}}')).toBe('\r\n');
+    expect(detectBibtexEol('@article{k,\n  note = {a\r\nb}}')).toBe('\n');
+  });
+
+  it('falls back to the first newline when there is no header to consult', () => {
+    // Bare text with no entry: nothing marks a structural newline, so the
+    // first one is the best available signal.
+    expect(detectBibtexEol('a\r\nb\nc')).toBe('\r\n');
+    expect(detectBibtexEol('a\nb\r\nc')).toBe('\n');
   });
 
   it('does not let a lone CRLF outvote a majority of LF lines', () => {

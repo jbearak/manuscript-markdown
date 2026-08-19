@@ -70,13 +70,19 @@ function unescapeBibtex(s: string): string {
 function findEntryEnd(input: string, startPos: number): number {
   let braceCount = 1;
   let inQuotes = false;
+  // Brace depth *within* the current quoted value.  BibTeX lets a `{`…`}` group
+  // protect a literal `"` inside a quoted string, so a quote only ends the
+  // string when it sits at depth 0 of that string.  This depth is kept apart
+  // from braceCount because braces inside a quoted value do not change the
+  // entry's own nesting — `title = "a } brace"` must not close the entry.
+  let quoteDepth = 0;
 
   for (let j = startPos; j < input.length && braceCount > 0; j++) {
     const char = input[j];
 
-    // Only toggle quote state at brace depth 1 (top-level field values).
-    // Inside {…}-delimited values, " is a literal character in BibTeX.
-    if (char === '"' && braceCount === 1) {
+    if (char === '"' && (inQuotes ? quoteDepth === 0 : braceCount === 1)) {
+      // Only toggle quote state at brace depth 1 (top-level field values).
+      // Inside {…}-delimited values, " is a literal character in BibTeX.
       let backslashCount = 0;
       const backslash = '\\';
       for (let k = j - 1; k >= 0 && input[k] === backslash; k--) {
@@ -84,8 +90,14 @@ function findEntryEnd(input: string, startPos: number): number {
       }
       if (backslashCount % 2 === 0) {
         inQuotes = !inQuotes;
+        quoteDepth = 0;
       }
-    } else if (!inQuotes) {
+    } else if (inQuotes) {
+      // Track protective groups, but never let an unbalanced `}` in a quoted
+      // value drive the depth negative.
+      if (char === '{') quoteDepth++;
+      else if (char === '}' && quoteDepth > 0) quoteDepth--;
+    } else {
       if (char === '{') {
         braceCount++;
       } else if (char === '}') {
@@ -100,21 +112,42 @@ function findEntryEnd(input: string, startPos: number): number {
   return -1;
 }
 
+/** Find the closing `}` of an `@comment` body, counting braces only.  A comment
+ *  is arbitrary prose, so an apostrophe or a lone `"` in it is ordinary text —
+ *  applying field-value quote semantics here would swallow the closing brace
+ *  and make a balanced comment look unterminated.
+ *  Returns the index of the closing `}`, or -1 if unmatched. */
+function findCommentEnd(input: string, startPos: number): number {
+  let braceCount = 1;
+  for (let j = startPos; j < input.length; j++) {
+    if (input[j] === '{') braceCount++;
+    else if (input[j] === '}' && --braceCount === 0) return j;
+  }
+  return -1;
+}
+
 export type BibtexEol = '\n' | '\r\n';
 
 /** Dominant line ending of `text`, for callers that have no better source.
  *  Prefer passing the document's own convention (e.g. `TextDocument.eol`)
  *  when it is known: a single-line entry carries no newline of its own.
  *
- *  CRLF must strictly outnumber bare LF to win.  This function cannot tell a
- *  structural newline from one inside a field value, so a lone CRLF in a
- *  `note` must not outvote the entry's own LF layout.  Ties and newline-free
- *  text both fall to LF, which is the ending that can never introduce a stray
- *  `\r` into a file that had none. */
+ *  A majority vote alone cannot separate a structural newline from one inside
+ *  a field value — `note = {a\r\nb}` in an LF entry and `note = {a\nb}` in a
+ *  CRLF entry are mirror images that tie at one each.  So when the counts tie,
+ *  the first newline *after the entry header* breaks it: that one is always
+ *  structural.  Text with no newline at all is LF, the only answer that cannot
+ *  introduce a stray `\r` into a file that had none. */
 export function detectBibtexEol(text: string): BibtexEol {
   const crlfCount = text.split('\r\n').length - 1;
   const bareLfCount = (text.split('\n').length - 1) - crlfCount;
-  return crlfCount > bareLfCount ? '\r\n' : '\n';
+  if (crlfCount !== bareLfCount) return crlfCount > bareLfCount ? '\r\n' : '\n';
+  if (crlfCount === 0) return '\n';
+
+  // Tie: defer to the first newline that follows a `@type{key,` header.
+  const header = /@\w+\s*\{[^,\s]+\s*,/.exec(text);
+  const firstLf = text.indexOf('\n', header ? header.index + header[0].length : 0);
+  return firstLf > 0 && text[firstLf - 1] === '\r' ? '\r\n' : '\n';
 }
 
 /** Half-open `[start, end)` offsets of one entry occurrence within the input.
@@ -188,11 +221,18 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
   const keyRe = /\s*([^,\s]+)\s*,/y;
 
   let pos = 0;
-  // After an entry we could not delimit, we no longer know where we are, so
-  // only an `@` that opens a line is trusted to be a real entry.  Without this
-  // an `@book{ref,` inside the unterminated entry's own field value would be
-  // mistaken for the next entry.
+  // After a construct we could not delimit, we no longer know whether we are
+  // at the top level or inside somebody's field value, so only an `@` that
+  // opens a line is trusted to be the next entry.  That recovers `parsed`,
+  // but it is a heuristic: an entry-shaped value indented on its own line is
+  // lexically indistinguishable from a real entry at that point.
   let requireLineStart = false;
+  // `ranges` is the offset-editing API, so it may not trade on a heuristic —
+  // splicing into a guessed boundary corrupts the file.  Once sync is lost we
+  // keep recovering entries for `parsed`/`raw` but stop emitting ranges, so
+  // every range reported is one the scanner actually delimited from the top
+  // level.  Ranges are therefore a subset of `parsed`, never a superset.
+  let synced = true;
 
   // author/editor use inner {Name} braces as a semantic signal for
   // institutional/literal names (Req 2.3), so do NOT strip outer braces
@@ -218,12 +258,18 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
       continue;
     }
 
-    if (PSEUDO_ENTRY_TYPES.has(type.toLowerCase())) {
-      const close = findEntryEnd(input, afterBrace);
+    const lowerType = type.toLowerCase();
+    if (PSEUDO_ENTRY_TYPES.has(lowerType)) {
+      // A comment's body is prose: a stray `"` in it is ordinary text, not the
+      // start of a quoted value, so count braces only.
+      const close = lowerType === 'comment'
+        ? findCommentEnd(input, afterBrace)
+        : findEntryEnd(input, afterBrace);
       if (close === -1) {
         // Unterminated declaration — fall back to line-start recovery.
         pos = afterBrace;
         requireLineStart = true;
+        synced = false;
       } else {
         pos = close + 1;
         requireLineStart = false;
@@ -234,8 +280,18 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
     keyRe.lastIndex = afterBrace;
     const keyMatch = keyRe.exec(input);
     if (!keyMatch) {
-      // `@type{` with no citation key — not an entry we can address.
-      pos = afterBrace;
+      // `@type{` opened but the header has no citation key.  Consume its
+      // balanced body rather than scanning into it — the `@book{...}` sitting
+      // in a field of a malformed entry is that entry's data, not an entry.
+      const close = findEntryEnd(input, afterBrace);
+      if (close === -1) {
+        pos = afterBrace;
+        requireLineStart = true;
+        synced = false;
+      } else {
+        pos = close + 1;
+        requireLineStart = false;
+      }
       continue;
     }
 
@@ -246,6 +302,7 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
     if (endPos === -1) {
       pos = startPos;
       requireLineStart = true;
+      synced = false;
       continue;
     }
     pos = endPos + 1;
@@ -253,10 +310,12 @@ export function parseBibtexWithRaw(input: string): ParsedBibtexWithRaw {
 
     // Raw entry text (preserves original formatting)
     raw.set(key, input.slice(entryStart, endPos + 1));
-    // Search for the key after the opening brace, so a key that also spells
-    // the entry type (`@article{article,`) still points at the key.
-    const keyStart = afterBrace + keyMatch[0].indexOf(key);
-    ranges.push({ key, start: entryStart, end: endPos + 1, keyStart, keyEnd: keyStart + key.length });
+    if (synced) {
+      // Search for the key after the opening brace, so a key that also spells
+      // the entry type (`@article{article,`) still points at the key.
+      const keyStart = afterBrace + keyMatch[0].indexOf(key);
+      ranges.push({ key, start: entryStart, end: endPos + 1, keyStart, keyEnd: keyStart + key.length });
+    }
 
     // Parsed entry
     try {
