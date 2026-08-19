@@ -158,15 +158,15 @@ function tryDecodeAccentAt(input: string, slashIndex: number): DecodedCommand | 
   }
 
   const command = input.slice(commandStart, commandEnd);
-  const combiningMark = BIBTEX_ACCENT_MARKS[command];
-  if (!combiningMark && command !== 't') return undefined;
-
   let targetIndex = commandEnd;
   if (isAsciiLetter(input[commandStart])) {
     while (targetIndex < input.length && /\s/.test(input[targetIndex])) targetIndex++;
   }
 
   if (command === 't') return tryDecodeTieAccent(input, targetIndex);
+
+  const combiningMark = BIBTEX_ACCENT_MARKS[command];
+  if (!combiningMark) return undefined;
 
   const target = readAccentTarget(input, targetIndex);
   if (!target) return undefined;
