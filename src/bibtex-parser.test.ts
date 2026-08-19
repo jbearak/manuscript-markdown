@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { parseBibtex, parseBibtexWithRaw, findDuplicateBibtexKeys, detectBibtexEol, detectEntryEol, serializeBibtex, stripOuterBraces, mergeBibtex, extractRawField, spliceFieldsIntoEntry, BibtexEntry } from './bibtex-parser';
+import { parseBibtex, parseBibtexWithRaw, scanBibtexEntryBody, findDuplicateBibtexKeys, detectBibtexEol, detectEntryEol, serializeBibtex, stripOuterBraces, mergeBibtex, extractRawField, spliceFieldsIntoEntry, BibtexEntry } from './bibtex-parser';
 
 describe('BibTeX Parser', () => {
   it('parses basic entry', () => {
@@ -1260,5 +1260,62 @@ describe('detectBibtexEol tie boundary', () => {
     const { ranges } = parseBibtexWithRaw(text);
     expect(ranges.map((r) => r.trusted)).toEqual([false]);
     expect(detectBibtexEol(text)).toBe('\r\n');
+  });
+});
+
+
+describe('scanBibtexEntryBody', () => {
+  const scan = (raw: string) => scanBibtexEntryBody(raw);
+
+  it('lists field names in source order, including repeats', () => {
+    const raw = '@article{k,\n  title = {T},\n  doi = {10.1/a},\n  doi = {10.1/b}\n}';
+    expect(scan(raw).fieldNames).toEqual(['title', 'doi', 'doi']);
+  });
+
+  it('does not mistake a bare value for a field name', () => {
+    // `jan` is a value here, not a field: no `=` follows it.
+    expect(scan('@article{k,\n  month = jan,\n  year = {2020}\n}').fieldNames)
+      .toEqual(['month', 'year']);
+  });
+
+  it('reports a percent at the entry own level', () => {
+    expect(scan('@article{k,\n  doi = {10.1/a} % note\n}').hasTopLevelComment).toBe(true);
+    expect(scan('@article{k,\n%  doi = {10.1/a}\n}').hasTopLevelComment).toBe(true);
+  });
+
+  it('does not report a percent inside a field value', () => {
+    expect(scan('@article{k,\n  note = {50% off}\n}').hasTopLevelComment).toBe(false);
+    expect(scan('@article{k,\n  note = "50% off"\n}').hasTopLevelComment).toBe(false);
+    expect(scan('@article{k,\n  note = {50\\% off}\n}').hasTopLevelComment).toBe(false);
+  });
+
+  it('does not report an escaped percent at the top level', () => {
+    expect(scan('@article{k,\n  title = {T} \\% x\n}').hasTopLevelComment).toBe(false);
+  });
+
+  it('reports concatenation at the entry own level only', () => {
+    expect(scan('@article{k,\n  doi = "10.1/" # "a"\n}').hasConcatenation).toBe(true);
+    expect(scan('@article{k,\n  note = {issue #3}\n}').hasConcatenation).toBe(false);
+    expect(scan('@article{k,\n  note = "issue #3"\n}').hasConcatenation).toBe(false);
+  });
+
+  it('reads a paren-delimited entry', () => {
+    const raw = '@article(k,\n  doi = {10.1/a} % note\n)';
+    expect(scan(raw).fieldNames).toEqual(['doi']);
+    expect(scan(raw).hasTopLevelComment).toBe(true);
+  });
+
+  it('treats a brace-protected quote inside a quoted value as data', () => {
+    const raw = '@article{k,\n  title = "a {"} b",\n  doi = {10.1/a}\n}';
+    expect(scan(raw).fieldNames).toEqual(['title', 'doi']);
+    expect(scan(raw).hasTopLevelComment).toBe(false);
+  });
+
+  it('returns nothing for text that is not an entry', () => {
+    expect(scan('not an entry')).toEqual({
+      hasTopLevelComment: false,
+      hasConcatenation: false,
+      fieldNames: [],
+    });
   });
 });

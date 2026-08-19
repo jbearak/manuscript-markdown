@@ -29,6 +29,8 @@ import {
   parseBibtexWithRaw,
   findDuplicateBibtexKeys,
   spliceFieldsIntoEntry,
+  scanBibtexEntryBody,
+  extractRawField,
   detectBibtexFieldIndent,
   formatBibtexFieldLine,
   detectEntryEol,
@@ -57,12 +59,25 @@ export const ZOTERO_ITEM_KEY_RE = new RegExp('^' + ITEM_KEY_PATTERN + '$');
 /** A full Zotero identity URI, as Word stores it in `ADDIN ZOTERO_ITEM` field
  *  codes.  Group URIs name a server-assigned group id and resolve for every
  *  member; personal URIs name one user's numeric id, or `local/<slug>` for a
- *  library that has never synced, and resolve only for that user. */
+ *  library that has never synced, and resolve only for that user.
+ *
+ *  Library ids are `[1-9]\d*`: `users/0` is the Local API's "whoever is logged
+ *  in" placeholder, not an identity, and a URI carrying it names no library at
+ *  all. */
 const ZOTERO_URI_RE = new RegExp(
-  '^https?://zotero\\.org/(?:users/(?:\\d+|local/[A-Za-z0-9]+)|groups/\\d+)/items/(' +
+  '^https?://zotero\\.org/(?:users/(?:[1-9]\\d*|local/[A-Za-z0-9]+)|groups/[1-9]\\d*)/items/(' +
     ITEM_KEY_PATTERN +
     ')$',
 );
+
+/** The local-library slug this extension writes when a BibTeX entry has no
+ *  Zotero identity at all, so that Word's citation field still carries a
+ *  syntactically valid `uris` array (see `md-to-docx-citations.ts`).  It is a
+ *  placeholder meaning "use the embedded metadata", so reading one back as
+ *  identity would launder our own generated filler into a Zotero link. */
+const EMBEDDED_LOCAL_SLUG = 'embedded';
+
+const LOCAL_SLUG_RE = /^https?:\/\/zotero\.org\/users\/local\/([A-Za-z0-9]+)\//;
 
 /** Extract the 8-character Zotero item key from a Zotero URI, or undefined if
  *  it doesn't match.  Deliberately lenient — it accepts any URI ending in
@@ -79,7 +94,10 @@ export function extractZoteroKey(uri: string): string | undefined {
  *  stored `zotero-uri` as authoritative. */
 function parseZoteroUri(uri: string): string | undefined {
   const m = ZOTERO_URI_RE.exec(uri);
-  return m ? m[1] : undefined;
+  if (!m) return undefined;
+  const local = LOCAL_SLUG_RE.exec(uri);
+  if (local && local[1] === EMBEDDED_LOCAL_SLUG) return undefined;
+  return m[1];
 }
 
 // ---------------------------------------------------------------------------
@@ -149,7 +167,15 @@ export type ZoteroLinkConflictReason =
    *  most often the entry belongs to a different library. */
   | 'unknown-zotero-key'
   /** The scanner could not vouch for this entry's boundaries. */
-  | 'entry-not-editable';
+  | 'entry-not-editable'
+  /** A `%` sits outside every field value, so where the entry's live text ends
+   *  depends on which BibTeX implementation reads it. */
+  | 'ambiguous-comment'
+  /** A field value is a `#` concatenation, which the field parser reads only
+   *  the first atom of. */
+  | 'concatenated-field'
+  /** An identifier field appears more than once with different values. */
+  | 'duplicate-field';
 
 export type ZoteroLinkUnmatchedReason =
   /** The entry carries a DOI, ISBN or PMID, and no Zotero item has it. */
@@ -267,8 +293,12 @@ export function normalizeIsbns(value: string | undefined): string[] {
   const raw = plainFieldValue(value);
   if (!raw) return [];
   const isbns: string[] = [];
-  for (const part of raw.split(/[,;\s]+/)) {
-    const compact = part.replace(/-/g, '').toUpperCase();
+  // Split on the separators that divide *ISBNs*, not on every space: the
+  // registration-group separator inside one ISBN is written as a space as
+  // often as a hyphen (`978 0 306 40615 7`), and splitting there would leave
+  // five fragments, none of them an ISBN.
+  for (const part of raw.split(/[,;\n]+/)) {
+    const compact = part.replace(/[-\s]/g, '').toUpperCase();
     if (/^\d{9}[\dX]$/.test(compact) || /^\d{13}$/.test(compact)) isbns.push(compact);
   }
   return isbns;
@@ -480,9 +510,43 @@ function findIdentifierCandidates(
   return { candidates: [...found.values()], evidence: [...evidence] };
 }
 
+/** Identifier fields whose value decides a match, so a repeat with a different
+ *  value is a contradiction rather than clutter. */
+const IDENTIFIER_FIELDS = ['doi', 'isbn', 'pmid', 'zotero-key', 'zotero-uri'] as const;
+
+/** The first identifier field written twice with values that disagree.
+ *
+ *  `parseBibtex` keeps the last occurrence, so without this check the entry
+ *  would link on whichever value happened to come last — a coin flip the user
+ *  never sees.  A repeat with the *same* value is harmless and stays quiet. */
+function findContradictingField(
+  rawEntry: string,
+  fieldNames: readonly string[],
+): string | undefined {
+  for (const name of IDENTIFIER_FIELDS) {
+    if (fieldNames.filter(n => n === name).length < 2) continue;
+    const values = new Set<string>();
+    // Read each occurrence's own text: the parsed map has already collapsed
+    // them to one.
+    let searchFrom = 0;
+    for (const occurrence of fieldNames) {
+      if (occurrence !== name) continue;
+      const raw = extractRawField(rawEntry.slice(searchFrom), name);
+      if (raw === null) break;
+      const at = rawEntry.indexOf(raw, searchFrom);
+      searchFrom = at === -1 ? searchFrom + raw.length : at + raw.length;
+      const eq = raw.indexOf('=');
+      values.add(plainFieldValue(raw.slice(eq + 1).replace(/,$/, '').trim()));
+    }
+    if (values.size > 1) return name;
+  }
+  return undefined;
+}
+
 function decideEntry(
   range: BibtexSourceRange,
   entry: BibtexEntry | undefined,
+  rawEntry: string,
   index: ZoteroCatalogIndex,
   duplicateKeys: ReadonlySet<string>,
 ): ZoteroLinkDecision {
@@ -492,6 +556,16 @@ function decideEntry(
   if (!range.trusted) return conflict(range, 'entry-not-editable');
   if (duplicateKeys.has(range.key)) return conflict(range, 'duplicate-bibtex-key', range.key);
   if (!entry) return conflict(range, 'entry-not-editable');
+
+  // What the field parser reports is only trustworthy when the entry's own
+  // lexical level holds no surprises.  Each of these makes the parsed value a
+  // guess about text that different BibTeX tools read differently, and this
+  // command writes bytes into that text.
+  const body = scanBibtexEntryBody(rawEntry);
+  if (body.hasTopLevelComment) return conflict(range, 'ambiguous-comment');
+  if (body.hasConcatenation) return conflict(range, 'concatenated-field');
+  const contradicting = findContradictingField(rawEntry, body.fieldNames);
+  if (contradicting) return conflict(range, 'duplicate-field', contradicting);
 
   const fields = entry.fields;
   const existing = decideExistingIdentity(range, fields, index);
@@ -633,7 +707,13 @@ export function createZoteroLinkPlan(
   const index = buildZoteroCatalogIndex(items);
   const duplicateKeys = findDuplicateBibtexKeys(ranges);
   const decisions = ranges.map(range =>
-    decideEntry(range, parsed.get(range.key), index, duplicateKeys),
+    decideEntry(
+      range,
+      parsed.get(range.key),
+      bibliographyText.slice(range.start, range.end),
+      index,
+      duplicateKeys,
+    ),
   );
   const updatedText = applyUpdates(bibliographyText, decisions);
 

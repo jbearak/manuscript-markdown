@@ -65,6 +65,13 @@ describe('normalizeIsbns', () => {
     expect(normalizeIsbns('080442957x')).toEqual(['080442957X']);
   });
 
+  it('accepts space-grouped ISBNs', () => {
+    // The registration-group separator is written as a space as often as a
+    // hyphen, so a space is not an ISBN boundary.
+    expect(normalizeIsbns('978 0 306 40615 7')).toEqual(['9780306406157']);
+    expect(normalizeIsbns('0 306 40615 2')).toEqual(['0306406152']);
+  });
+
   it('reads several ISBNs from one field', () => {
     expect(normalizeIsbns('9780306406157, 0306406152')).toEqual(['9780306406157', '0306406152']);
     expect(normalizeIsbns('9780306406157; 0306406152')).toEqual(['9780306406157', '0306406152']);
@@ -258,6 +265,25 @@ describe('existing Zotero identity', () => {
     expect(decisionFor(createZoteroLinkPlan(bib, []).decisions, 'k1').outcome).toBe('update');
   });
 
+  it('rejects the embedded-metadata placeholder this extension writes', () => {
+    // md-to-docx-citations emits `users/local/embedded/items/<key>` for entries
+    // with no Zotero identity, so Word's uris array is well-formed.  Reading it
+    // back as identity would launder our own filler into a Zotero link.
+    const uri = 'http://zotero.org/users/local/embedded/items/ABCD1234';
+    const bib = '@article{k1,\n  zotero-uri = {' + uri + '}\n}\n';
+    const plan = createZoteroLinkPlan(bib, []);
+    expect(decisionWithOutcome(plan.decisions, 'k1', 'conflict').reason).toBe('invalid-zotero-uri');
+    expect(plan.updatedText).toBe(bib);
+  });
+
+  it('rejects the /users/0/ placeholder, which names no library', () => {
+    // `users/0` is the Local API's "whoever is logged in" stand-in, not an id.
+    const uri = 'http://zotero.org/users/0/items/ABCD1234';
+    const bib = '@article{k1,\n  zotero-uri = {' + uri + '}\n}\n';
+    const plan = createZoteroLinkPlan(bib, []);
+    expect(decisionWithOutcome(plan.decisions, 'k1', 'conflict').reason).toBe('invalid-zotero-uri');
+  });
+
   it('fills in the URI for a key found in the selected library', () => {
     const bib = '@article{k1,\n  zotero-key = {ABCD1234}\n}\n';
     const plan = createZoteroLinkPlan(bib, [item('ABCD1234')]);
@@ -310,6 +336,70 @@ describe('existing Zotero identity', () => {
       { key: 'ABCD1234', uri: 'http://zotero.org/groups/999/items/ABCD1234' },
     ]);
     expect(decisionFor(plan.decisions, 'k1').outcome).toBe('ambiguous');
+  });
+});
+
+describe('entries whose own text is ambiguous', () => {
+  const matching = [item('ABCD1234', { doi: '10.1000/abc' })];
+
+  it('refuses an entry with a % outside every field value', () => {
+    // Classic bibtex ignores `%` inside an entry; biber and JabRef end the
+    // line at it.  The bytes after it are live text to one tool and a comment
+    // to another, and this command writes into them.
+    const bib = '@article{k1,\n  doi = {10.1000/abc} % trailing note\n}\n';
+    const d = decisionWithOutcome(createZoteroLinkPlan(bib, matching).decisions, 'k1', 'conflict');
+    expect(d.reason).toBe('ambiguous-comment');
+    expect(createZoteroLinkPlan(bib, matching).updatedText).toBe(bib);
+  });
+
+  it('does not link on an identifier that is commented out', () => {
+    const bib = '@article{k1,\n  title = {T},\n%  doi = {10.1000/abc}\n}\n';
+    const plan = createZoteroLinkPlan(bib, matching);
+    expect(decisionWithOutcome(plan.decisions, 'k1', 'conflict').reason).toBe('ambiguous-comment');
+    expect(plan.updatedText).toBe(bib);
+  });
+
+  it('treats a percent inside a field value as data, not a comment', () => {
+    for (const note of ['{50% off}', '"50% off"', '{50\\% off}']) {
+      const bib = '@article{k1,\n  note = ' + note + ',\n  doi = {10.1000/abc}\n}\n';
+      expect(createZoteroLinkPlan(bib, matching).summary.updates).toBe(1);
+    }
+  });
+
+  it('refuses a concatenated field value', () => {
+    // `parseBibtex` reads only the first atom, so `"10.1000/abc" # "def"` looks
+    // like a match for 10.1000/abc when the real DOI is 10.1000/abcdef.
+    const bib = '@article{k1,\n  doi = "10.1000/abc" # "def"\n}\n';
+    const plan = createZoteroLinkPlan(bib, matching);
+    expect(decisionWithOutcome(plan.decisions, 'k1', 'conflict').reason).toBe('concatenated-field');
+    expect(plan.updatedText).toBe(bib);
+  });
+
+  it('treats a hash inside a field value as data', () => {
+    const bib = '@article{k1,\n  note = {issue #3},\n  doi = {10.1000/abc}\n}\n';
+    expect(createZoteroLinkPlan(bib, matching).summary.updates).toBe(1);
+  });
+
+  it('refuses an identifier field written twice with different values', () => {
+    // The parser keeps the last occurrence, so without this the entry would
+    // link on whichever value came last.
+    const bib = '@article{k1,\n  doi = {10.1000/first},\n  doi = {10.1000/second}\n}\n';
+    const plan = createZoteroLinkPlan(bib, [
+      item('AAAAAAAA', { doi: '10.1000/first' }),
+      item('BBBBBBBB', { doi: '10.1000/second' }),
+    ]);
+    expect(decisionWithOutcome(plan.decisions, 'k1', 'conflict').reason).toBe('duplicate-field');
+    expect(plan.updatedText).toBe(bib);
+  });
+
+  it('allows a repeated identifier field whose values agree', () => {
+    const bib = '@article{k1,\n  doi = {10.1000/abc},\n  doi = {10.1000/abc}\n}\n';
+    expect(createZoteroLinkPlan(bib, matching).summary.updates).toBe(1);
+  });
+
+  it('allows a repeated field that decides nothing', () => {
+    const bib = '@article{k1,\n  note = {a},\n  note = {b},\n  doi = {10.1000/abc}\n}\n';
+    expect(createZoteroLinkPlan(bib, matching).summary.updates).toBe(1);
   });
 });
 
