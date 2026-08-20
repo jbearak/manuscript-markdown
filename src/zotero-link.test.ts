@@ -78,6 +78,19 @@ describe('normalizeIsbns', () => {
     expect(normalizeIsbns('9780306406157\n0306406152')).toEqual(['9780306406157', '0306406152']);
   });
 
+  it('reads a space-grouped ISBN alongside a plain one', () => {
+    // One field, both conventions at once: the grouped ISBN's leading tokens
+    // are not ISBNs on their own, so the longest run has to win.
+    expect(normalizeIsbns('978 0 306 40615 7 0306406152')).toEqual([
+      '9780306406157',
+      '0306406152',
+    ]);
+    expect(normalizeIsbns('0306406152 978 0 306 40615 7')).toEqual([
+      '0306406152',
+      '9780306406157',
+    ]);
+  });
+
   it('reads a whitespace-separated pair as two ISBNs', () => {
     // Only the digits distinguish this from a single space-grouped ISBN: read
     // whole first, then fall back to the individual tokens.
@@ -440,6 +453,44 @@ describe('entries whose own text is ambiguous', () => {
     const decision = decisionWithOutcome(plan.decisions, 'k1', 'conflict');
     expect(decision.reason).toBe('symbolic-field');
     expect(decision.detail).toBe('zotero-key');
+    expect(plan.updatedText).toBe(bib);
+  });
+
+  it('does not match on an identifier that is inside another value', () => {
+    // `{"}` protects a literal quote, so the whole run is one note.  The field
+    // regex, which does not track that, recovers a `doi` the entry does not
+    // have at its own level; matching must follow the walk, not the regex.
+    const bib = '@article{k1,\n  note = "a {"} doi = {10.1000/abc} b"\n}\n';
+    const plan = createZoteroLinkPlan(bib, matching);
+    expect(decisionWithOutcome(plan.decisions, 'k1', 'unmatched').reason).toBe('no-identifiers');
+    expect(plan.updatedText).toBe(bib);
+  });
+
+  it('refuses an entry whose escaped braces cross', () => {
+    // `\}` … `\{` closes in one place for biber and another for classic
+    // bibtex: one note to the first, a note plus a DOI field to the second.
+    const bib = '@article{k1,\n  note = {x \\} doi = {10.1000/abc}, \\{ y}\n}\n';
+    const plan = createZoteroLinkPlan(bib, [...matching, item('EEEEEEEE', { citationKey: 'k1' })]);
+    expect(decisionWithOutcome(plan.decisions, 'k1', 'conflict').reason).toBe('entry-not-editable');
+    expect(plan.updatedText).toBe(bib);
+  });
+
+  it('refuses a quoted value holding an unmatched closing brace', () => {
+    // BibTeX itself reports unbalanced braces here, so the value has no end
+    // every reader agrees on.
+    const bib = '@article{k1, note = "a } b"}\n';
+    const plan = createZoteroLinkPlan(bib, [item('EEEEEEEE', { citationKey: 'k1' })]);
+    expect(decisionWithOutcome(plan.decisions, 'k1', 'conflict').reason).toBe('entry-not-editable');
+    expect(plan.updatedText).toBe(bib);
+  });
+
+  it('reports ambiguity when one ISBN field names two different items', () => {
+    const bib = '@article{k1,\n  isbn = {978 0 306 40615 7 0306406152}\n}\n';
+    const plan = createZoteroLinkPlan(bib, [
+      item('AAAAAAAA', { isbn: '9780306406157' }),
+      item('BBBBBBBB', { isbn: '0306406152' }),
+    ]);
+    expect(decisionWithOutcome(plan.decisions, 'k1', 'ambiguous').candidates.length).toBe(2);
     expect(plan.updatedText).toBe(bib);
   });
 

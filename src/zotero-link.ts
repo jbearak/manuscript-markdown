@@ -296,19 +296,50 @@ export function normalizeIsbns(value: string | undefined): string[] {
   const raw = plainFieldValue(value);
   if (!raw) return [];
   const isbns: string[] = [];
-  const addIfIsbn = (compact: string): boolean => {
-    if (!/^\d{9}[\dX]$/.test(compact) && !/^\d{13}$/.test(compact)) return false;
-    isbns.push(compact);
-    return true;
-  };
+  const isIsbn = (compact: string): boolean =>
+    /^\d{9}[\dX]$/.test(compact) || /^\d{13}$/.test(compact);
+
   // A space between ISBN digits is ambiguous: it separates the registration
   // groups *within* one ISBN (`978 0 306 40615 7`) as often as it separates
-  // two ISBNs (`9780306406157 0306406152`).  Only the digits decide, so read
-  // each comma/semicolon/newline-delimited part whole first, and fall back to
-  // its whitespace-separated tokens when the whole is not ISBN-shaped.
+  // two of them (`9780306406157 0306406152`), and one field can mix both
+  // (`978 0 306 40615 7 0306406152`).  Only the digits decide.
+  //
+  // A token that is an ISBN by itself is taken as one and never absorbed into
+  // a longer run: joining it to its neighbour is what would turn
+  // `0306406152 978 …` into the 13-digit fiction `0306406152978`.  Only the
+  // tokens between such anchors are joined, since a grouped ISBN's leading
+  // tokens are not ISBNs on their own.
+  const compactOf = (tokens: readonly string[]) =>
+    tokens.join('').replace(/-/g, '').toUpperCase();
   for (const part of raw.split(/[,;\n]+/)) {
-    if (addIfIsbn(part.replace(/[-\s]/g, '').toUpperCase())) continue;
-    for (const token of part.split(/\s+/)) addIfIsbn(token.replace(/-/g, '').toUpperCase());
+    let run: string[] = [];
+    const flushRun = () => {
+      while (run.length >= 2) {
+        let matched = 0;
+        for (let take = run.length; take >= 2; take--) {
+          const compact = compactOf(run.slice(0, take));
+          if (isIsbn(compact)) {
+            isbns.push(compact);
+            matched = take;
+            break;
+          }
+        }
+        if (matched === 0) break;
+        run = run.slice(matched);
+      }
+      run = [];
+    };
+    for (const token of part.split(/\s+/)) {
+      if (token.length === 0) continue;
+      const alone = compactOf([token]);
+      if (isIsbn(alone)) {
+        flushRun();
+        isbns.push(alone);
+      } else {
+        run.push(token);
+      }
+    }
+    flushRun();
   }
   return isbns;
 }
@@ -588,7 +619,13 @@ function decideEntry(
   const symbolic = findSymbolicIdentifier(body.fields);
   if (symbolic) return conflict(range, 'symbolic-field', symbolic);
 
-  const fields = entry.fields;
+  // Match on the values the lexical walk read, not the ones the field regex
+  // recovered.  The regex is a recognizer: it finds `name = {value}` anywhere,
+  // including inside another value it did not realize it was in, so it can
+  // report an identifier the entry does not actually carry at its own level.
+  // Only the walk knows which is which, and only its reading is the one this
+  // command's edits are measured against.
+  const fields = new Map(body.fields.map(f => [f.name, f.value]));
   const existing = decideExistingIdentity(range, fields, index);
   if (existing) return existing;
 

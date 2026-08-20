@@ -949,18 +949,14 @@ export function scanBibtexEntryBody(rawEntry: string): BibtexEntryBodyScan {
     return backslashes % 2 === 1;
   };
 
-  /** Consume a `{…}` value from `at`, returning the offset just past its
-   *  closing brace, or -1 if it does not close within the body.
-   *
-   *  Escaped braces are not structural here.  Implementations disagree about
-   *  that — classic bibtex counts every brace, biber and JabRef honour the
-   *  escape — and this walk exists to detect exactly such disagreement: when
-   *  the two readings differ, the value swallows the range's own closing brace
-   *  and `unbalanced` says so, which is the answer either way. */
-  const skipBraced = (at: number): number => {
+  /** End of the `{…}` value at `at` under one reading of escapes, or -1 if it
+   *  does not close within the body.  `honourEscapes` distinguishes the two
+   *  readings in the wild: biber and JabRef treat `\{` and `\}` as literal
+   *  text, classic bibtex counts every brace. */
+  const braceEnd = (at: number, honourEscapes: boolean): number => {
     let depth = 0;
     for (let k = at; k < end; k++) {
-      if (rawEntry[k] === '\\') {
+      if (honourEscapes && rawEntry[k] === '\\') {
         k++;
         continue;
       }
@@ -970,8 +966,23 @@ export function scanBibtexEntryBody(rawEntry: string): BibtexEntryBodyScan {
     return -1;
   };
 
+  /** Consume a `{…}` value from `at`, returning the offset just past its
+   *  closing brace, or -1 if the two readings of it disagree.
+   *
+   *  Both are computed, because a value that ends in a different place
+   *  depending on the reader is a value whose text cannot be edited by offset:
+   *  `note = {x \} doi = {10.1/a}, \{ y}` is one note to biber and a note plus
+   *  a DOI field to classic bibtex, and linking on that DOI would assert an
+   *  identifier the file does not unambiguously carry. */
+  const skipBraced = (at: number): number => {
+    const escaped = braceEnd(at, true);
+    return escaped === braceEnd(at, false) ? escaped : -1;
+  };
+
   /** Consume a `"…"` value from `at`.  A `{…}` group inside protects a literal
-   *  quote, so its braces belong to the value, not to the entry. */
+   *  quote, so its braces belong to the value, not to the entry — but a `}`
+   *  with no `{` open is unbalanced to every reader, and BibTeX itself reports
+   *  it, so the value has no agreed end. */
   const skipQuoted = (at: number): number => {
     let depth = 0;
     for (let k = at + 1; k < end; k++) {
@@ -980,8 +991,10 @@ export function scanBibtexEntryBody(rawEntry: string): BibtexEntryBodyScan {
         continue;
       }
       if (rawEntry[k] === '{') depth++;
-      else if (rawEntry[k] === '}' && depth > 0) depth--;
-      else if (rawEntry[k] === '"' && depth === 0) return k + 1;
+      else if (rawEntry[k] === '}') {
+        if (depth === 0) return -1;
+        depth--;
+      } else if (rawEntry[k] === '"' && depth === 0) return k + 1;
     }
     return -1;
   };
