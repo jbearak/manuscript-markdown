@@ -89,6 +89,15 @@ describe('normalizeIsbns', () => {
     ]);
   });
 
+  it('keeps a check-invalid ISBN that shares a field with a valid one', () => {
+    // A mistyped ISBN must not lose its match because something valid sits
+    // beside it, and the separator between them must not change the answer.
+    const typo = '9780306406158';
+    expect(normalizeIsbns(typo + ' 0306406152')).toEqual([typo, '0306406152']);
+    expect(normalizeIsbns(typo + ', 0306406152')).toEqual([typo, '0306406152']);
+    expect(normalizeIsbns('0306406152 ' + typo)).toEqual(['0306406152', typo]);
+  });
+
   it('accepts an unambiguous value whose check digit disagrees', () => {
     // A mistyped ISBN recorded the same way in Zotero and in the .bib still
     // identifies the same work.  There is no split to resolve here, so the

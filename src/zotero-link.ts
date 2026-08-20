@@ -442,14 +442,21 @@ export function normalizeIsbns(value: string | undefined): string[] {
       isbns.push(...whole);
       continue;
     }
-    // The run holds something that is not part of any ISBN — a label, a stray
-    // word.  Take the ISBNs that do stand on their own and skip the rest.
+    // No split covers the whole run: it holds a label, a stray word, or an
+    // ISBN whose check digit does not agree.  Take the values that stand on
+    // their own and skip the rest.
+    //
+    // A single token that is ISBN-shaped is taken even when its check digit
+    // disagrees, for the same reason a lone value is: one mistyped ISBN in a
+    // field must not cost the others their match, nor cost itself one against
+    // the same typo in Zotero.  A *joined* run still needs its check digit,
+    // since joining is where a boundary gets invented.
     for (let start = 0; start < tokens.length; ) {
       let matched = 0;
       for (let take = 1; start + take <= tokens.length; take++) {
         const compact = compactOf(tokens.slice(start, start + take));
         if (compact.replace(/[^0-9X]/gi, '').length > 13) break;
-        if (isValidIsbn(compact)) {
+        if (take === 1 ? isIsbnShaped(compact) : isValidIsbn(compact)) {
           isbns.push(compact);
           matched = take;
           break;
