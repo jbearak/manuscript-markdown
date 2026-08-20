@@ -53,7 +53,8 @@ import {
 	getFrontmatterSettingEdit,
 } from './frontmatter-settings';
 import { getPostExportAction } from './post-export-action';
-import { createZoteroLinkPlan } from './zotero-link';
+import { createZoteroLinkPlan, type ZoteroLinkPlan } from './zotero-link';
+import { detectBibtexEol } from './bibtex-parser';
 import {
 	listZoteroGroups,
 	fetchZoteroCatalog,
@@ -61,6 +62,7 @@ import {
 	type ZoteroLibraryScope,
 } from './zotero-local-api';
 import {
+	buildUnmatchedBibliography,
 	buildZoteroLibraryPickItems,
 	describeZoteroLocalApiError,
 	formatZoteroLinkConfirmation,
@@ -1841,7 +1843,8 @@ async function linkBibliographyToLibrary(
 	const summary = plan.summary;
 	if (!plan.changed) {
 		logReport();
-		await showZoteroLinkResult(formatZoteroLinkNoChanges(summary, bibName));
+		const unmatched = await writeUnmatchedBibliography(bibUri, bibText, plan.decisions, libraryLabel);
+		await showZoteroLinkResult(formatZoteroLinkNoChanges(summary, bibName) + unmatched.note, unmatched.uri);
 		return;
 	}
 
@@ -1875,9 +1878,46 @@ async function linkBibliographyToLibrary(
 	await writeFileThroughSymlink(bibUri, new TextEncoder().encode(plan.updatedText));
 
 	logReport();
+	const unmatched = await writeUnmatchedBibliography(bibUri, bibText, plan.decisions, libraryLabel);
 	await showZoteroLinkResult(
-		`Linked ${summary.updates} of ${summary.totalEntries} entries in "${bibName}" to Zotero.`
+		`Linked ${summary.updates} of ${summary.totalEntries} entries in "${bibName}" to Zotero.` +
+		unmatched.note,
+		unmatched.uri
 	);
+}
+
+/** Write `<name>-unmatched.bib` beside the bibliography so the user can
+ *  import the leftover entries into Zotero and run the command again.  The
+ *  file is regenerated on every run and removed once nothing is unmatched,
+ *  so a stale copy never misleads a second round trip.  Returns a sentence
+ *  to append to the completion message (empty when nothing was written)
+ *  and the written file's URI for an Open button. */
+async function writeUnmatchedBibliography(
+	bibUri: vscode.Uri,
+	bibText: string,
+	decisions: ZoteroLinkPlan['decisions'],
+	libraryLabel: string
+): Promise<{ note: string; uri?: vscode.Uri }> {
+	const unmatchedUri = vscode.Uri.file(
+		bibUri.fsPath.replace(/\.bib$/i, '') + '-unmatched.bib'
+	);
+	const content = buildUnmatchedBibliography(bibText, decisions, libraryLabel, detectBibtexEol(bibText));
+	if (content === undefined) {
+		try {
+			await vscode.workspace.fs.delete(unmatchedUri);
+		} catch {
+			// Nothing to delete — the usual case.
+		}
+		return { note: '' };
+	}
+	await vscode.workspace.fs.writeFile(unmatchedUri, new TextEncoder().encode(content));
+	const unmatchedCount = decisions.filter(d => d.outcome === 'unmatched').length;
+	return {
+		note:
+			` ${unmatchedCount} unmatched ${unmatchedCount === 1 ? 'entry was' : 'entries were'} exported to ` +
+			`"${path.basename(unmatchedUri.fsPath)}" — import it into Zotero, then run this command again.`,
+		uri: unmatchedUri,
+	};
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -1889,11 +1929,15 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 }
 
 /** A completion notification with a "Show Details" action that opens the
- *  per-entry report in the output channel. */
-async function showZoteroLinkResult(message: string): Promise<void> {
-	const action = await vscode.window.showInformationMessage(message, 'Show Details');
+ *  per-entry report in the output channel, plus an "Open Unmatched" action
+ *  when an unmatched export was written. */
+async function showZoteroLinkResult(message: string, unmatchedUri?: vscode.Uri): Promise<void> {
+	const actions = unmatchedUri ? ['Open Unmatched', 'Show Details'] : ['Show Details'];
+	const action = await vscode.window.showInformationMessage(message, ...actions);
 	if (action === 'Show Details') {
 		getZoteroLinkOutputChannel().show();
+	} else if (action === 'Open Unmatched' && unmatchedUri) {
+		await vscode.commands.executeCommand('vscode.open', unmatchedUri);
 	}
 }
 

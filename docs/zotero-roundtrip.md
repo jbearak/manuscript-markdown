@@ -80,6 +80,8 @@ The **Link Bibliography to Zotero** command (Command Palette) adds those fields 
 
 Zotero must be running on the same machine, with *Settings → Advanced → Miscellaneous → "Allow other applications on this computer to communicate with Zotero"* checked.
 
+**Unmatched entries round trip.** Entries the command cannot match are exported to `<name>-unmatched.bib` beside the bibliography, each with a comment naming the reason. Import that file into Zotero (*File → Import*), then run the command again: the imported items now carry the same identifiers, so they match. The file is regenerated on every run and removed once everything is linked.
+
 **Choose a group library for shared manuscripts.** Group URIs (`http://zotero.org/groups/…`) resolve for every member of the group. My Library URIs (`http://zotero.org/users/<your-id>/…`) resolve only for your own Zotero account — a collaborator's Word falls back to the embedded metadata and stops refreshing those citations, with no visible error. This is how Zotero addresses personal libraries, not a limitation of this extension.
 
 See [UI reference](ui.md#link-bibliography-to-zotero) for the full flow and messages.

@@ -306,6 +306,7 @@ Available from the Command Palette. Adds `zotero-key` / `zotero-uri` fields to B
 4. Matches entries by exact identifiers only (existing Zotero identity, Better BibTeX citation key, DOI, ISBN/PMID) — never by title or author.
 5. Shows a confirmation modal stating how many entries will gain links and how many are left unchanged (already linked, ambiguous, conflicts, unmatched). Selecting My Library adds a warning that personal links stop refreshing for collaborators — a property of Zotero's personal libraries, not of this extension — and suggests a group library for shared manuscripts.
 6. On confirmation, writes only the new fields; every other byte of the file is unchanged. If the file changed on disk while the modal was open, nothing is written.
+7. Exports any unmatched entries to `<name>-unmatched.bib` beside the bibliography, each prefixed with a `%` comment naming why it did not match, so they can be imported into Zotero (*File → Import*) for a second round trip. The file is overwritten on every run and deleted once nothing is unmatched; the completion message offers **Open Unmatched**. Ambiguous and conflicted entries are not exported — their items are already in the library, so importing them again would create duplicates.
 
 A per-entry report (new links, already linked, ambiguous, conflicts, unmatched — each with its reason) is written to the **Manuscript Markdown: Zotero** output channel; the completion message offers **Show Details** to open it.
 

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'bun:test';
 import {
+  buildUnmatchedBibliography,
   buildZoteroLibraryPickItems,
   describeZoteroLocalApiError,
   formatZoteroLinkConfirmation,
@@ -182,5 +183,82 @@ describe('formatZoteroLinkNoChanges', () => {
     expect(formatZoteroLinkNoChanges(summaryOf({}), 'refs.bib')).toBe(
       'No new Zotero links for "refs.bib".',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unmatched export
+// ---------------------------------------------------------------------------
+
+describe('buildUnmatchedBibliography', () => {
+  const bib = '@article{one,\n  title = {T1},\n}\n\n@article{two,\n  doi = {10.1/x},\n}\n';
+  const entryOne = { key: 'one', start: 0, end: 30, keyStart: 9, keyEnd: 12, trusted: true };
+  const entryTwo = { key: 'two', start: 32, end: 63, keyStart: 41, keyEnd: 44, trusted: true };
+
+  it('exports unmatched entries byte-exactly with a reason comment each', () => {
+    const out = buildUnmatchedBibliography(
+      bib,
+      [
+        { outcome: 'unmatched', entry: entryOne, reason: 'no-identifiers' },
+        { outcome: 'unmatched', entry: entryTwo, reason: 'no-exact-match' },
+      ],
+      'Guttmacher Library',
+      '\n',
+    );
+    expect(out).toBeDefined();
+    expect(out).toContain('could not match in Guttmacher Library');
+    expect(out).toContain('% one: no citation key, DOI, ISBN or PMID to match on');
+    expect(out).toContain('% two: no item in the selected library shares an identifier');
+    // Byte-exact entry slices.
+    expect(out).toContain(bib.slice(entryOne.start, entryOne.end));
+    expect(out).toContain(bib.slice(entryTwo.start, entryTwo.end));
+    expect(out!.endsWith('\n')).toBe(true);
+  });
+
+  it('exports only unmatched entries, never ambiguous or conflicted ones', () => {
+    // Their items are already in the library (or the entry needs fixing);
+    // importing them again would create duplicates.
+    const out = buildUnmatchedBibliography(
+      bib,
+      [
+        {
+          outcome: 'ambiguous',
+          entry: entryOne,
+          tier: 'doi',
+          evidence: ['doi'],
+          candidates: [zoteroItem('AAAAAAAA'), zoteroItem('BBBBBBBB')],
+        },
+        { outcome: 'conflict', entry: entryOne, reason: 'duplicate-field', detail: 'doi' },
+        { outcome: 'unmatched', entry: entryTwo, reason: 'no-exact-match' },
+      ],
+      'G',
+      '\n',
+    );
+    expect(out).toContain('@article{two');
+    expect(out).not.toContain('@article{one');
+  });
+
+  it('returns undefined when nothing is unmatched', () => {
+    expect(
+      buildUnmatchedBibliography(
+        bib,
+        [{ outcome: 'preserve', entry: entryOne, target: zoteroItem('AAAAAAAA') }],
+        'G',
+        '\n',
+      ),
+    ).toBeUndefined();
+    expect(buildUnmatchedBibliography(bib, [], 'G', '\n')).toBeUndefined();
+  });
+
+  it('uses the requested line ending throughout', () => {
+    const out = buildUnmatchedBibliography(
+      bib,
+      [{ outcome: 'unmatched', entry: entryOne, reason: 'no-identifiers' }],
+      'G',
+      '\r\n',
+    );
+    // Every generated line break is CRLF (the entry slice keeps its own).
+    const withoutEntry = out!.replace(bib.slice(entryOne.start, entryOne.end), '');
+    expect(withoutEntry).not.toMatch(/(?<!\r)\n/);
   });
 });
