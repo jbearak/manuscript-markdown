@@ -1,11 +1,15 @@
 import { describe, it, expect } from 'bun:test';
 import {
+  buildUnmatchedBibliography,
   buildZoteroLibraryPickItems,
   describeZoteroLocalApiError,
+  formatUnmatchedExportNote,
   formatZoteroLinkConfirmation,
   formatZoteroLinkNoChanges,
   formatZoteroLinkReport,
+  UNMATCHED_EXPORT_MARKER,
 } from './zotero-link-ui';
+import { parseBibtexWithRaw } from './bibtex-parser';
 import type { ZoteroLinkSummary, ZoteroLinkDecision } from './zotero-link';
 import { zoteroItem } from './zotero-link.fixtures';
 
@@ -182,5 +186,92 @@ describe('formatZoteroLinkNoChanges', () => {
     expect(formatZoteroLinkNoChanges(summaryOf({}), 'refs.bib')).toBe(
       'No new Zotero links for "refs.bib".',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unmatched export
+// ---------------------------------------------------------------------------
+
+describe('buildUnmatchedBibliography', () => {
+  const bib = '@article{one,\n  title = {T1},\n}\n\n@article{two,\n  doi = {10.1/x},\n}\n';
+  // The parser owns range offsets; hand-maintained copies would drift.
+  const [entryOne, entryTwo] = parseBibtexWithRaw(bib).ranges;
+
+  it('exports unmatched entries byte-exactly with a reason comment each', () => {
+    const out = buildUnmatchedBibliography(
+      bib,
+      [
+        { outcome: 'unmatched', entry: entryOne, reason: 'no-identifiers' },
+        { outcome: 'unmatched', entry: entryTwo, reason: 'no-exact-match' },
+      ],
+      'Guttmacher Library',
+    );
+    expect(out).toBeDefined();
+    // The ownership guard in extension.ts recognizes its own output by this
+    // marker as the first line; a generated file must always start with it.
+    expect(out!.startsWith(UNMATCHED_EXPORT_MARKER)).toBe(true);
+    expect(out).toContain('could not match in Guttmacher Library');
+    expect(out).toContain('% one: no citation key, DOI, ISBN or PMID to match on');
+    expect(out).toContain('% two: no item in the selected library shares an identifier');
+    // Byte-exact entry slices.
+    expect(out).toContain(bib.slice(entryOne.start, entryOne.end));
+    expect(out).toContain(bib.slice(entryTwo.start, entryTwo.end));
+    expect(out!.endsWith('\n')).toBe(true);
+  });
+
+  it('exports only unmatched entries, never ambiguous or conflicted ones', () => {
+    // Their items are already in the library (or the entry needs fixing);
+    // importing them again would create duplicates.
+    const out = buildUnmatchedBibliography(
+      bib,
+      [
+        {
+          outcome: 'ambiguous',
+          entry: entryOne,
+          tier: 'doi',
+          evidence: ['doi'],
+          candidates: [zoteroItem('AAAAAAAA'), zoteroItem('BBBBBBBB')],
+        },
+        { outcome: 'conflict', entry: entryOne, reason: 'duplicate-field', detail: 'doi' },
+        { outcome: 'unmatched', entry: entryTwo, reason: 'no-exact-match' },
+      ],
+      'G',
+    );
+    expect(out).toContain('@article{two');
+    expect(out).not.toContain('@article{one');
+  });
+
+  it('returns undefined when nothing is unmatched', () => {
+    expect(
+      buildUnmatchedBibliography(
+        bib,
+        [{ outcome: 'preserve', entry: entryOne, target: zoteroItem('AAAAAAAA') }],
+        'G',
+      ),
+    ).toBeUndefined();
+    expect(buildUnmatchedBibliography(bib, [], 'G')).toBeUndefined();
+  });
+
+  it('matches the source line ending in generated lines', () => {
+    const crlfBib = bib.replace(/\n/g, '\r\n');
+    const [crlfEntry] = parseBibtexWithRaw(crlfBib).ranges;
+    const out = buildUnmatchedBibliography(
+      crlfBib,
+      [{ outcome: 'unmatched', entry: crlfEntry, reason: 'no-identifiers' }],
+      'G',
+    );
+    // Every line break — generated and sliced alike — is CRLF.
+    expect(out).not.toMatch(/(?<!\r)\n/);
+  });
+});
+
+describe('formatUnmatchedExportNote', () => {
+  it('pluralizes and names the exported file', () => {
+    expect(formatUnmatchedExportNote(2, 'refs-unmatched.bib')).toBe(
+      ' 2 unmatched entries were exported to "refs-unmatched.bib" — ' +
+        'import it into Zotero, then run this command again.',
+    );
+    expect(formatUnmatchedExportNote(1, 'refs-unmatched.bib')).toContain('1 unmatched entry was');
   });
 });
