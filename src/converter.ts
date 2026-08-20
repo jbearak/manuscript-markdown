@@ -5,10 +5,11 @@ import { resolveMarkdownColor } from './highlight-colors';
 import { Frontmatter, NotesMode, serializeFrontmatter, noteTypeFromNumber, parseColWidths, type CustomStyleDef } from './frontmatter';
 import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType } from './gfm';
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
-import { escapeBibtexText, parseBibtex, mergeBibtex } from './bibtex-parser';
+import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
 import { customStyleId } from './md-to-docx';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { publicStyleNameForZoteroId, zoteroStyleIdForName } from './csl-loader';
+import { extractZoteroKey } from './zotero-link';
 
 // --- Implementation notes ---
 // Table parsing:
@@ -971,9 +972,6 @@ export function groupCommentThreads(
 
   return replyIds;
 }
-
-/** Matches the 8-character Zotero item key at the end of a URI. */
-export const ZOTERO_KEY_RE = /\/items\/([A-Z0-9]{8})$/;
 
 // Zotero document preferences extraction
 
@@ -2021,14 +2019,6 @@ export async function extractZoteroCitations(data: Uint8Array | JSZip): Promise<
   const parsed = await readZipXml(zip, 'word/document.xml');
   if (!parsed) { return []; }
   return extractZoteroCitationsFromParsed(parsed);
-}
-
-// Zotero URI key extraction
-
-/** Extract the 8-character Zotero item key from a Zotero URI, or undefined if it doesn't match. */
-export function extractZoteroKey(uri: string): string | undefined {
-  const m = uri.match(ZOTERO_KEY_RE);
-  return m ? m[1] : undefined;
 }
 
 // Citation key generation
@@ -6764,13 +6754,14 @@ export async function convertDocx(
     // Only append genuinely new Zotero entries (citations added in Word).
     const storedKeys = new Set(parseBibtex(storedBibData).keys());
     const generated = generateBibTeX(zoteroCitations, keyMap);
-    // generateBibTeX joins entries with '\n\n'; split to filter by key.
-    const newEntries = generated
-      .split(/\n\n+/)
-      .filter(entry => {
-        const m = entry.match(/@\w+\{([^,\s]+)/);
-        return m && !storedKeys.has(m[1]);
-      });
+    // Let the parser delimit the entries.  Splitting on blank lines would cut
+    // an entry in half the moment a field value contains one — `abstract` and
+    // `note` come through from Zotero verbatim and routinely do — and the
+    // half without the header would then be dropped as keyless, appending
+    // truncated BibTeX to the file.
+    const newEntries = parseBibtexWithRaw(generated)
+      .ranges.filter(range => !storedKeys.has(range.key))
+      .map(range => generated.slice(range.start, range.end));
     bibtex = newEntries.length > 0
       ? storedBibData.trimEnd() + '\n\n' + newEntries.join('\n\n')
       : storedBibData;

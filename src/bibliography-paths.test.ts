@@ -8,6 +8,8 @@ import {
   defaultBibliographyWritePath,
   resolveBibliographyWritePath,
   resolveBibliographyWritePathForOutput,
+  resolveDocumentBibliography,
+  resolveDocumentBibliographyPath,
 } from './bibliography-paths';
 
 describe('bibliography path helpers', () => {
@@ -77,5 +79,56 @@ describe('bibliography path helpers', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  test('resolveDocumentBibliographyPath prefers the frontmatter bibliography', async () => {
+    const existing = new Set(['/repo/docs/refs.bib', '/repo/docs/paper.bib']);
+    const resolved = await resolveDocumentBibliographyPath(
+      'refs',
+      '/repo/docs/paper',
+      async (p) => existing.has(p),
+      '/repo',
+    );
+    expect(resolved).toBe('/repo/docs/refs.bib');
+  });
+
+  test('resolveDocumentBibliographyPath falls back to <basePath>.bib', async () => {
+    const existing = new Set(['/repo/docs/paper.bib']);
+    // Configured but missing, and not configured at all, both fall back.
+    for (const bibliography of ['refs', undefined]) {
+      const resolved = await resolveDocumentBibliographyPath(
+        bibliography,
+        '/repo/docs/paper',
+        async (p) => existing.has(p),
+        '/repo',
+      );
+      expect(resolved).toBe('/repo/docs/paper.bib');
+    }
+  });
+
+  test('resolveDocumentBibliographyPath returns undefined when nothing exists', async () => {
+    const resolved = await resolveDocumentBibliographyPath(
+      'refs',
+      '/repo/docs/paper',
+      async () => false,
+      '/repo',
+    );
+    expect(resolved).toBeUndefined();
+  });
+
+  test('resolveDocumentBibliography reports whether the hit was configured or fallback', async () => {
+    // Export warns when a *configured* bibliography is missing but the
+    // fallback exists; that warning hangs on this distinction.
+    const existing = new Set(['/repo/docs/refs.bib', '/repo/docs/paper.bib']);
+    const fileExists = async (p: string) => existing.has(p);
+
+    const configured = await resolveDocumentBibliography('refs', '/repo/docs/paper', fileExists, '/repo');
+    expect(configured).toEqual({ path: '/repo/docs/refs.bib', source: 'configured' });
+
+    const missingConfigured = await resolveDocumentBibliography('other', '/repo/docs/paper', fileExists, '/repo');
+    expect(missingConfigured).toEqual({ path: '/repo/docs/paper.bib', source: 'fallback' });
+
+    const unconfigured = await resolveDocumentBibliography(undefined, '/repo/docs/paper', fileExists, '/repo');
+    expect(unconfigured).toEqual({ path: '/repo/docs/paper.bib', source: 'fallback' });
   });
 });

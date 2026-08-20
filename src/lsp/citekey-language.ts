@@ -3,7 +3,7 @@ import * as fsp from 'fs/promises';
 import * as path from 'path';
 import { promisify } from 'util';
 import { fileURLToPath, pathToFileURL } from 'url';
-import { BibtexEntry, parseBibtex, stripOuterBraces } from '../bibtex-parser';
+import { BibtexEntry, BibtexSourceRange, parseBibtexWithRaw, stripOuterBraces } from '../bibtex-parser';
 import { computeCodeRegions, isInsideCodeRegion, type CodeRegion } from '../code-regions';
 import { Frontmatter, normalizeBibPath, parseFrontmatter } from '../frontmatter';
 
@@ -86,6 +86,14 @@ export interface ParsedBibData {
 	filePath: string;
 	text: string;
 	entries: Map<string, BibtexEntry>;
+	/** Every delimited entry occurrence, in source order — see
+	 *  `BibtexSourceRange`. Repeated keys appear once per occurrence.
+	 *  Navigation deliberately uses all of these, including ones marked
+	 *  `trusted: false`: while a user is mid-edit with a brace temporarily
+	 *  missing, a best-effort location still beats no location at all. Only
+	 *  byte-level mutation needs to filter on `trusted`. */
+	ranges: BibtexSourceRange[];
+	/** First declaration offset of each citation key, derived from `ranges`. */
 	keyOffsets: Map<string, number>;
 }
 
@@ -368,22 +376,18 @@ export async function resolveBibliographyPathAsync(
 
 
 export function parseBibDataFromText(filePath: string, text: string): ParsedBibData {
-	const entries = parseBibtex(text);
+	// One scan supplies entries, ranges, and key offsets. Deriving offsets from
+	// the parser's ranges (rather than re-scanning for `@type{key,`) keeps them
+	// honest: a `@book{ref1,` inside a note field is not a declaration, and an
+	// entry whose closing brace is missing has no location worth jumping to.
+	const { parsed, ranges } = parseBibtexWithRaw(text);
 	const keyOffsets = new Map<string, number>();
-	const entryStartRe = /@(\w+)\s*\{\s*([^,\s]+)\s*,/g;
-	let match: RegExpExecArray | null;
-	while ((match = entryStartRe.exec(text)) !== null) {
-		const key = match[2];
-		if (!keyOffsets.has(key)) {
-			const bracePos = match[0].indexOf('{');
-			const offsetInMatch = bracePos >= 0 ? match[0].indexOf(key, bracePos + 1) : -1;
-			if (offsetInMatch >= 0) {
-				keyOffsets.set(key, match.index + offsetInMatch);
-			}
-		}
+	for (const range of ranges) {
+		// First occurrence wins — that is the declaration a lookup should reach.
+		if (!keyOffsets.has(range.key)) keyOffsets.set(range.key, range.keyStart);
 	}
 
-	return { filePath, text, entries, keyOffsets };
+	return { filePath, text, entries: parsed, ranges, keyOffsets };
 }
 
 export function findBibKeyAtOffset(parsedBib: ParsedBibData, offset: number): string | undefined {

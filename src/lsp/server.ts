@@ -70,7 +70,6 @@ import {
 	findRangeTextForId,
 	stripCriticMarkup,
 } from './comment-language';
-import { computeBibEntryRanges } from './bib-entry-ranges';
 import { type Frontmatter, parseFrontmatter, maskFrontmatter } from '../frontmatter';
 import { formatTableNumbers, validateTableNumberFormat } from '../table-number-format';
 import { preprocessGridTablesWithSourceMap } from '../grid-table-preprocess';
@@ -564,13 +563,13 @@ connection.onDocumentSymbol(async (params: DocumentSymbolParams): Promise<Docume
 	}
 
 	// Always create TextDocument from bibData.text so positionAt() offsets
-	// match the same snapshot that bibData.entries and computeBibEntryRanges
+	// match the same snapshot that bibData.entries and bibData.ranges
 	// operate on. Using documents.get(params.textDocument.uri) would risk a
 	// mismatch when the URI round-trip (uriToFsPath → fsPathToUri) differs
 	// from the original URI (e.g. drive-letter casing on Windows), since
 	// getBibDataForPath may have read from disk while the editor has unsaved edits.
 	const text = bibData.text;
-	const ranges = computeBibEntryRanges(text);
+	const ranges = bibData.ranges;
 	const doc = TextDocument.create(params.textDocument.uri, 'bibtex', 0, text);
 	const symbols: DocumentSymbol[] = [];
 
@@ -584,7 +583,7 @@ connection.onDocumentSymbol(async (params: DocumentSymbolParams): Promise<Docume
 			r.key,
 			getEntryDetail(entry),
 			SymbolKind.Key,
-			Range.create(doc.positionAt(r.entryStart), doc.positionAt(r.entryEnd)),
+			Range.create(doc.positionAt(r.start), doc.positionAt(r.end)),
 			Range.create(doc.positionAt(r.keyStart), doc.positionAt(r.keyEnd)),
 		));
 	}

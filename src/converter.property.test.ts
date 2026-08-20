@@ -19,7 +19,7 @@ import type { ZoteroCitation, CitationMetadata } from './converter';
  * **Validates: Requirements 1.2, 1.3, 1.4, 1.5**
  */
 
-import { extractZoteroKey } from './converter';
+import { extractZoteroKey } from './zotero-link';
 
 const ALPHANUM_UPPER = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 const ALNUM_ALL = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';

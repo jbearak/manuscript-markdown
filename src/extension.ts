@@ -37,8 +37,10 @@ import {
 import { setDefaultColorScheme } from './alert-colors';
 import { computeCodeRegions, overlapsCodeRegion } from './code-regions';
 import {
-	bibliographyCandidatePaths,
 	resolveBibliographyWritePathForOutput,
+	resolveDocumentBibliography,
+	resolveDocumentBibliographyPath,
+	resolveExistingBibliographyPath,
 } from './bibliography-paths';
 import {
 	buildEmbedPathTargetUri,
@@ -52,6 +54,36 @@ import {
 	getFrontmatterSettingEdit,
 } from './frontmatter-settings';
 import { getPostExportAction } from './post-export-action';
+import { createZoteroLinkPlan, type ZoteroLinkPlan } from './zotero-link';
+import {
+	BIBTEX_ENTRY_TEMPLATES,
+	bibtexEntryCommand,
+	bibtexEntrySnippet,
+	bibtexInsertionPrefix,
+} from './bibtex-entry-templates';
+import { createZoteroSyncPlan, zoteroSyncKeys } from './zotero-sync';
+import {
+	listZoteroGroups,
+	fetchZoteroBibtex,
+	fetchZoteroCatalog,
+	ZoteroLocalApiError,
+	type ZoteroLibraryScope,
+} from './zotero-local-api';
+import {
+	buildUnmatchedBibliography,
+	buildZoteroLibraryPickItems,
+	describeZoteroLocalApiError,
+	formatStaleUnmatchedExportNote,
+	formatUnmatchedExportBlockedNote,
+	formatUnmatchedExportFailedNote,
+	formatUnmatchedExportNote,
+	formatZoteroSyncConfirmation,
+	formatZoteroSyncNoChanges,
+	formatZoteroSyncReport,
+	formatZoteroSyncSuccess,
+	isUnmatchedExportOurs,
+	ZOTERO_REMOTE_WORKSPACE_MESSAGE,
+} from './zotero-sync-ui';
 
 // --- Implementation notes ---
 // - Editor decorations: use light/dark sub-properties for theme-aware backgrounds
@@ -363,6 +395,33 @@ export function activate(context: vscode.ExtensionContext) {
 		})
 	);
 
+	// Register Sync Bibliography from Zotero command
+	context.subscriptions.push(
+		vscode.commands.registerCommand('manuscript-markdown.syncBibliographyFromZotero', () =>
+			syncBibliographyFromZotero()
+		)
+	);
+
+	// Register "Add <entry type>" commands for the .bib toolbar menu
+	for (const template of BIBTEX_ENTRY_TEMPLATES) {
+		context.subscriptions.push(
+			vscode.commands.registerCommand(bibtexEntryCommand(template.type), async () => {
+				const editor = vscode.window.activeTextEditor;
+				if (!editor || !isBibtexDocument(editor.document)) {
+					vscode.window.showErrorMessage('No active .bib file');
+					return;
+				}
+				const eol = editor.document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
+				const text = editor.document.getText();
+				const insertPos = editor.document.positionAt(text.length);
+				const snippet = new vscode.SnippetString(
+					bibtexInsertionPrefix(text, eol) + bibtexEntrySnippet(template, eol)
+				);
+				await editor.insertSnippet(snippet, insertPos);
+			})
+		);
+	}
+
 	for (const setting of FRONTMATTER_MENU_SETTINGS) {
 		context.subscriptions.push(
 			vscode.commands.registerCommand(frontmatterSettingCommand(setting.key), async () => {
@@ -551,9 +610,9 @@ export function activate(context: vscode.ExtensionContext) {
 					const { metadata } = parseFrontmatter(existingMarkdown);
 					if (metadata.bibliography) {
 						const resolved = await readBibliographyFromFrontmatterPath(metadata.bibliography, path.dirname(existingMdUri.fsPath));
-						if (resolved) {
+						if (resolved !== undefined) {
 							preferredBibliographyPath = metadata.bibliography;
-							existingBibtex = resolved.bibtex;
+							existingBibtex = resolved;
 						}
 					}
 				}
@@ -1154,7 +1213,7 @@ function startLanguageClient(context: vscode.ExtensionContext): void {
 			// For Markdown, the server returns null which can interfere with VS Code's
 			// built-in Markdown outline/breadcrumb provider.
 			provideDocumentSymbols: (document, token, next) => {
-				if (document.languageId === 'bibtex' || document.uri.fsPath.endsWith('.bib')) {
+				if (isBibtexDocument(document)) {
 					return next(document, token);
 				}
 				return undefined;
@@ -1355,18 +1414,15 @@ function workspaceRootPath(): string | undefined {
 	return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 }
 
-async function readBibliographyFromFrontmatterPath(bibliography: string, mdDir: string): Promise<{ uri: vscode.Uri; bibtex: string } | undefined> {
-	for (const candidatePath of bibliographyCandidatePaths(bibliography, mdDir, workspaceRootPath())) {
-		const candidate = vscode.Uri.file(candidatePath);
-		if (await fileExists(candidate)) {
-			const data = await vscode.workspace.fs.readFile(candidate);
-			return {
-				uri: candidate,
-				bibtex: new TextDecoder().decode(data),
-			};
-		}
-	}
-	return undefined;
+async function readBibliographyFromFrontmatterPath(bibliography: string, mdDir: string): Promise<string | undefined> {
+	const resolved = await resolveExistingBibliographyPath(
+		bibliography,
+		mdDir,
+		async (candidatePath) => fileExists(vscode.Uri.file(candidatePath)),
+		workspaceRootPath(),
+	);
+	if (resolved === undefined) return undefined;
+	return new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.file(resolved)));
 }
 
 async function resolveBibliographyWriteUriForOutput(bibliography: string, mdDir: string): Promise<vscode.Uri> {
@@ -1415,32 +1471,28 @@ async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undef
 	}
 
 	const basePath = getOutputBasePath(sourceUri.fsPath);
-	const mdDir = path.dirname(basePath);
 	const { metadata } = parseFrontmatter(markdown);
 
 	let bibtex: string | undefined;
-	if (metadata.bibliography) {
-		const resolved = await readBibliographyFromFrontmatterPath(metadata.bibliography, mdDir);
-		bibtex = resolved?.bibtex;
-		if (!bibtex) {
-			// Fallback to default {basePath}.bib
-			const defaultBib = vscode.Uri.file(basePath + '.bib');
-			if (await fileExists(defaultBib)) {
-				const data = await vscode.workspace.fs.readFile(defaultBib);
-				bibtex = new TextDecoder().decode(data);
-				if (hasCitations(markdown)) {
-					vscode.window.showWarningMessage(`Bibliography "${metadata.bibliography}" not found; using ${path.basename(basePath)}.bib`);
-				}
-			} else if (hasCitations(markdown)) {
-				vscode.window.showWarningMessage(`Bibliography "${metadata.bibliography}" not found and no default .bib file exists`);
-			}
-		}
-	} else {
-		const bibUri = vscode.Uri.file(basePath + '.bib');
-		if (await fileExists(bibUri)) {
-			const bibData = await vscode.workspace.fs.readFile(bibUri);
-			bibtex = new TextDecoder().decode(bibData);
-		}
+	const resolved = await resolveDocumentBibliography(
+		metadata.bibliography,
+		basePath,
+		async candidatePath => fileExists(vscode.Uri.file(candidatePath)),
+		workspaceRootPath()
+	);
+	if (resolved) {
+		const data = await vscode.workspace.fs.readFile(vscode.Uri.file(resolved.path));
+		bibtex = new TextDecoder().decode(data);
+	}
+	// A missing *configured* bibliography is worth a warning, but only when
+	// the document actually cites anything; the frontmatter-less fallback
+	// missing is the ordinary no-bibliography case and stays silent.
+	if (metadata.bibliography && resolved?.source !== 'configured' && hasCitations(markdown)) {
+		vscode.window.showWarningMessage(
+			resolved
+				? `Bibliography "${metadata.bibliography}" not found; using ${path.basename(basePath)}.bib`
+				: `Bibliography "${metadata.bibliography}" not found and no default .bib file exists`
+		);
 	}
 
 	return { markdown, basePath, sourceUri, bibtex };
@@ -1661,4 +1713,368 @@ async function fileExists(uri: vscode.Uri): Promise<boolean> {
 	} catch {
 		return false;
 	}
+}
+
+// --- Sync Bibliography from Zotero ---
+
+let zoteroLinkOutputChannel: vscode.OutputChannel | undefined;
+
+function getZoteroLinkOutputChannel(): vscode.OutputChannel {
+	zoteroLinkOutputChannel ??= vscode.window.createOutputChannel('Manuscript Markdown: Zotero');
+	return zoteroLinkOutputChannel;
+}
+
+/** Whether a document is BibTeX: by language id when one is assigned, by
+ *  case-insensitive extension otherwise (VS Code has no built-in bibtex
+ *  language, so plain .bib files often carry a generic language id). */
+function isBibtexDocument(document: vscode.TextDocument): boolean {
+	return (
+		document.languageId === 'bibtex' || document.uri.fsPath.toLowerCase().endsWith('.bib')
+	);
+}
+
+/** The bibliography this command operates on: the active .bib file, or the
+ *  active Markdown file's frontmatter bibliography (falling back to
+ *  `{basePath}.bib`, mirroring export). */
+async function resolveZoteroLinkBibliography(): Promise<vscode.Uri | undefined> {
+	const active = vscode.window.activeTextEditor?.document;
+	if (active !== undefined && active.uri.scheme === 'file' && isBibtexDocument(active)) {
+		return active.uri;
+	}
+
+	// Same tiers as export's getMdExportInput: active editor, any visible
+	// Markdown editor, then any open Markdown document — the last covers a
+	// full-screen preview, whose source document is open but not visible.
+	const mdDoc =
+		active !== undefined && active.languageId === 'markdown' && active.uri.scheme === 'file'
+			? active
+			: (vscode.window.visibleTextEditors.find(
+				e => e.document.languageId === 'markdown' && e.document.uri.scheme === 'file'
+			)?.document ??
+			vscode.workspace.textDocuments.find(
+				d => d.languageId === 'markdown' && d.uri.scheme === 'file'
+			));
+	if (!mdDoc) {
+		vscode.window.showErrorMessage(
+			'Open the Markdown manuscript or its .bib file, then run this command again.'
+		);
+		return undefined;
+	}
+
+	const basePath = getOutputBasePath(mdDoc.uri.fsPath);
+	const { metadata } = parseFrontmatter(mdDoc.getText());
+	const resolved = await resolveDocumentBibliographyPath(
+		metadata.bibliography,
+		basePath,
+		async candidatePath => fileExists(vscode.Uri.file(candidatePath)),
+		workspaceRootPath()
+	);
+	if (resolved !== undefined) {
+		return vscode.Uri.file(resolved);
+	}
+	vscode.window.showErrorMessage(
+		metadata.bibliography
+			? `Bibliography "${metadata.bibliography}" not found`
+			: `No bibliography found for "${path.basename(mdDoc.uri.fsPath)}" — add a "bibliography:" entry to its frontmatter or create ${path.basename(basePath)}.bib`
+	);
+	return undefined;
+}
+
+async function syncBibliographyFromZotero(): Promise<void> {
+	// The extension host runs next to the workspace; in a remote workspace
+	// "localhost" is the remote machine, not the desktop running Zotero.
+	if (vscode.env.remoteName !== undefined) {
+		vscode.window.showErrorMessage(ZOTERO_REMOTE_WORKSPACE_MESSAGE);
+		return;
+	}
+
+	const bibUri = await resolveZoteroLinkBibliography();
+	if (!bibUri) {
+		return;
+	}
+
+	// The plan is computed from the file's bytes and written back as bytes, so
+	// unsaved editor changes would be silently reverted by the write.
+	const openBibDoc = vscode.workspace.textDocuments.find(
+		d => d.uri.toString() === bibUri.toString()
+	);
+	if (openBibDoc?.isDirty) {
+		vscode.window.showErrorMessage(
+			`"${path.basename(bibUri.fsPath)}" has unsaved changes. Save it, then run this command again.`
+		);
+		return;
+	}
+
+	try {
+		const groups = await vscode.window.withProgress(
+			{
+				location: vscode.ProgressLocation.Notification,
+				title: 'Fetching Zotero libraries…',
+				cancellable: true,
+			},
+			async (_progress, token) => {
+				const controller = new AbortController();
+				token.onCancellationRequested(() => controller.abort());
+				return listZoteroGroups({ signal: controller.signal });
+			}
+		);
+		const picked = await vscode.window.showQuickPick(buildZoteroLibraryPickItems(groups), {
+			placeHolder: 'Select the Zotero library to sync from',
+			title: 'Sync Bibliography from Zotero',
+		});
+		if (!picked) {
+			return;
+		}
+		await syncBibliographyFromLibrary(bibUri, picked.scope, picked.label);
+	} catch (err: unknown) {
+		showZoteroLinkError(err);
+	}
+}
+
+async function syncBibliographyFromLibrary(
+	bibUri: vscode.Uri,
+	scope: ZoteroLibraryScope,
+	libraryLabel: string
+): Promise<void> {
+	const bibName = path.basename(bibUri.fsPath);
+	const bibBytes = await vscode.workspace.fs.readFile(bibUri);
+	const bibText = new TextDecoder().decode(bibBytes);
+	// The whole file is decoded, planned over, and re-encoded, so the write is
+	// byte-surgical only if decode∘encode is the identity on this file.  A BOM
+	// or a non-UTF-8 byte breaks that — the decoder strips or replaces it, and
+	// the write would silently rewrite bytes far from any added field.
+	if (!bytesEqual(new TextEncoder().encode(bibText), bibBytes)) {
+		vscode.window.showErrorMessage(
+			`"${bibName}" is not plain UTF-8 (it has a byte-order mark or bytes in another encoding), ` +
+			'so this command cannot edit it without changing unrelated bytes. Nothing was changed.'
+		);
+		return;
+	}
+
+	// One cancellable progress covers both round trips to Zotero: the catalog
+	// (to decide which item each entry is) and the matched items' BibTeX (to
+	// pull their current metadata).  The link plan runs in between because it
+	// determines which keys the second fetch needs.  Undefined means the
+	// bibliography could not be parsed safely.
+	const plan = await vscode.window.withProgress(
+		{
+			location: vscode.ProgressLocation.Notification,
+			title: `Fetching "${libraryLabel}" from Zotero…`,
+			cancellable: true,
+		},
+		async (_progress, token) => {
+			const controller = new AbortController();
+			token.onCancellationRequested(() => controller.abort());
+			const catalog = await fetchZoteroCatalog(scope, { signal: controller.signal });
+			const linkPlan = createZoteroLinkPlan(bibText, catalog);
+			if (linkPlan.blocked !== undefined) {
+				return undefined;
+			}
+			const bibtexByKey = await fetchZoteroBibtex(
+				scope,
+				zoteroSyncKeys(linkPlan.decisions, catalog),
+				{ signal: controller.signal }
+			);
+			return createZoteroSyncPlan(bibText, linkPlan.decisions, catalog, bibtexByKey);
+		}
+	);
+
+	if (plan === undefined) {
+		vscode.window.showErrorMessage(
+			`Could not safely parse "${bibName}", so nothing was changed. ` +
+			'Check the file for unbalanced braces or a stray @.'
+		);
+		return;
+	}
+
+	// The plan's byte offsets are only valid against the exact text it saw,
+	// and both the .bib write and the unmatched export are derived from that
+	// snapshot — so every path that writes anything rechecks the file first.
+	// A write beneath a dirty buffer would also be undone by its next save.
+	const bibliographyChanged = async (): Promise<boolean> => {
+		const openBibDoc = vscode.workspace.textDocuments.find(
+			d => d.uri.toString() === bibUri.toString()
+		);
+		const currentBytes = await vscode.workspace.fs.readFile(bibUri);
+		return openBibDoc?.isDirty === true || !bytesEqual(currentBytes, bibBytes);
+	};
+
+	// The completion postlude, shared by the no-changes and written branches.
+	// The report is written to the channel only once the run's outcome is
+	// known: its header says "linked N", which must not outlive a cancelled
+	// confirmation or a failed write as a false record of success.  The
+	// unmatched export is best-effort: by this point any links are already
+	// committed, so its failures become notes, never a command failure.
+	const summary = plan.summary;
+	const finish = async (message: string): Promise<void> => {
+		const channel = getZoteroLinkOutputChannel();
+		channel.appendLine(formatZoteroSyncReport(plan.decisions, plan.metadata, libraryLabel));
+		channel.appendLine('');
+		const exported = await writeUnmatchedBibliography(bibUri, bibText, plan.decisions, libraryLabel);
+		let note: string;
+		switch (exported.kind) {
+			case 'none':
+				note = '';
+				break;
+			case 'written':
+				note = formatUnmatchedExportNote(summary.link.unmatched, path.basename(exported.uri.fsPath));
+				break;
+			case 'blocked':
+				note = formatUnmatchedExportBlockedNote(summary.link.unmatched, exported.filename);
+				break;
+			case 'write-failed':
+				note = formatUnmatchedExportFailedNote(summary.link.unmatched, exported.filename);
+				break;
+			case 'stale-left':
+				note = formatStaleUnmatchedExportNote(exported.filename);
+				break;
+		}
+		await showZoteroLinkResult(
+			message + note,
+			exported.kind === 'written' ? exported.uri : undefined
+		);
+	};
+
+	if (!plan.changed) {
+		if (await bibliographyChanged()) {
+			vscode.window.showErrorMessage(
+				`"${bibName}" changed while the command was running, so nothing was written. Run it again.`
+			);
+			return;
+		}
+		await finish(formatZoteroSyncNoChanges(summary, bibName));
+		return;
+	}
+
+	const confirmation = formatZoteroSyncConfirmation(summary, scope);
+	const choice = await vscode.window.showInformationMessage(
+		confirmation.message,
+		{ modal: true, detail: confirmation.detail },
+		'Update'
+	);
+	if (choice !== 'Update') {
+		return;
+	}
+
+	if (await bibliographyChanged()) {
+		vscode.window.showErrorMessage(
+			`"${bibName}" changed while the command was running, so nothing was written. Run it again.`
+		);
+		return;
+	}
+	// The .bib may be a symlink whose target sits outside VS Code's sandbox;
+	// use the same tiered write as export so the link is written through, not
+	// replaced by a regular file.
+	await writeFileThroughSymlink(bibUri, new TextEncoder().encode(plan.updatedText));
+
+	await finish(formatZoteroSyncSuccess(summary, bibName));
+}
+
+/** What became of the unmatched export beside the bibliography. */
+type UnmatchedExportOutcome =
+	| { readonly kind: 'none' }
+	| { readonly kind: 'written'; readonly uri: vscode.Uri }
+	| { readonly kind: 'blocked'; readonly filename: string }
+	| { readonly kind: 'write-failed'; readonly filename: string }
+	| { readonly kind: 'stale-left'; readonly filename: string };
+
+/** Write `<name>-unmatched.bib` beside the bibliography so the user can
+ *  import the leftover entries into Zotero and run the command again.  The
+ *  file is regenerated on every run and removed once nothing is unmatched,
+ *  so a stale copy never misleads a second round trip.
+ *
+ *  The sidecar's path is predictable, so a file already sitting there is
+ *  replaced or deleted only when its generated-content checksum still matches
+ *  and it has no unsaved edits.  Anything else is the user's file — left
+ *  untouched and reported as `blocked` (or silently kept when there is nothing
+ *  to export). */
+async function writeUnmatchedBibliography(
+	bibUri: vscode.Uri,
+	bibText: string,
+	decisions: ZoteroLinkPlan['decisions'],
+	libraryLabel: string
+): Promise<UnmatchedExportOutcome> {
+	const unmatchedUri = vscode.Uri.file(
+		bibUri.fsPath.replace(/\.bib$/i, '') + '-unmatched.bib'
+	);
+	const filename = path.basename(unmatchedUri.fsPath);
+	const content = buildUnmatchedBibliography(bibText, decisions, libraryLabel);
+
+	const openDoc = vscode.workspace.textDocuments.find(
+		d => d.uri.toString() === unmatchedUri.toString()
+	);
+	let existing: 'absent' | 'ours' | 'foreign';
+	try {
+		const bytes = await vscode.workspace.fs.readFile(unmatchedUri);
+		const isOurs = isUnmatchedExportOurs(bytes);
+		existing = isOurs && openDoc?.isDirty !== true ? 'ours' : 'foreign';
+	} catch {
+		// Unreadable is not the same as absent: a file that exists but cannot
+		// be read cannot be proven ours, so it must not be overwritten.
+		existing = (await fileExists(unmatchedUri)) ? 'foreign' : 'absent';
+	}
+
+	if (content === undefined) {
+		if (existing === 'ours') {
+			try {
+				await vscode.workspace.fs.delete(unmatchedUri);
+			} catch {
+				// The stale export could not be removed; without a note it
+				// would read as this run's current output.
+				return { kind: 'stale-left', filename };
+			}
+		}
+		// 'foreign' here is the user's own file (or one they edited), not
+		// stale output — leave it alone without comment.
+		return { kind: 'none' };
+	}
+
+	if (existing === 'foreign') {
+		return { kind: 'blocked', filename };
+	}
+	try {
+		// Same tiered write as the bibliography itself: the sidecar may sit
+		// beside a symlinked .bib whose directory is outside the sandbox.
+		await writeFileThroughSymlink(unmatchedUri, new TextEncoder().encode(content));
+	} catch {
+		return { kind: 'write-failed', filename };
+	}
+	return { kind: 'written', uri: unmatchedUri };
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		if (a[i] !== b[i]) return false;
+	}
+	return true;
+}
+
+/** A completion notification with a "Show Details" action that opens the
+ *  per-entry report in the output channel, plus an "Open Unmatched" action
+ *  when an unmatched export was written. */
+async function showZoteroLinkResult(message: string, unmatchedUri?: vscode.Uri): Promise<void> {
+	const actions = unmatchedUri ? ['Open Unmatched', 'Show Details'] : ['Show Details'];
+	const action = await vscode.window.showInformationMessage(message, ...actions);
+	if (action === 'Show Details') {
+		getZoteroLinkOutputChannel().show();
+	} else if (action === 'Open Unmatched' && unmatchedUri) {
+		await vscode.commands.executeCommand('vscode.open', unmatchedUri);
+	}
+}
+
+function showZoteroLinkError(err: unknown): void {
+	if (err instanceof ZoteroLocalApiError) {
+		if (err.kind === 'aborted') {
+			// The user pressed Cancel on the progress notification.
+			return;
+		}
+		if (err.kind === 'request-failed') {
+			getZoteroLinkOutputChannel().appendLine('Zotero request failed: ' + err.message);
+		}
+		vscode.window.showErrorMessage(describeZoteroLocalApiError(err.kind));
+		return;
+	}
+	const message = err instanceof Error ? err.message : String(err);
+	vscode.window.showErrorMessage('Sync Bibliography from Zotero failed: ' + message);
 }
