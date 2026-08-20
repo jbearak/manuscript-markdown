@@ -278,42 +278,48 @@ function plainFieldValue(value: string | undefined): string {
   return stripWrappingBraces(unescapeBibtexPunctuation(plain).trim());
 }
 
-/** Remove every brace pair that wraps the whole value, in one pass.
+/** Remove every brace pair that wraps the whole value, tolerating whitespace
+ *  between layers (`{ {x} }`), in linear time.
  *
  *  `stripOuterBraces` rescans from the start for each pair it removes, so
  *  calling it in a loop is quadratic — a value wrapped in tens of thousands of
- *  pairs would block the command for seconds.  Since only pairs that enclose
- *  everything are being removed, the depth profile answers it directly: the
- *  number of leading braces that are still open at the last character. */
-function stripWrappingBraces(value: string): string {
-  let leading = 0;
-  while (leading < value.length && value[leading] === '{') leading++;
-  if (leading === 0) return value;
-
-  // Walk once, tracking depth, and record the last position at which the depth
-  // was still above each level — equivalently, for each leading brace, whether
-  // anything outside it follows.  The nth leading brace wraps the whole value
-  // exactly when the last time the depth fell to n-1 is the final character.
-  //
-  // This is what settles the asymmetric cases.  In `{a}}` the leading brace
-  // closes at the first `}`, with a character still to come, so nothing wraps.
-  // In `{{{a}}}` all three closers sit at the end, so all three pairs do.
-  let depth = 0;
-  // closedAt[n] = index where depth last dropped from n+1 to n.
-  const closedAt: number[] = [];
+ *  pairs would block the command for seconds.  Instead every brace is paired
+ *  with its partner once, up front, and layers are peeled by moving a window
+ *  inward.
+ *
+ *  The pairing is explicit — each opener matched to its own closer — because
+ *  every shortcut tried here has credited a leading brace with a closer that
+ *  belonged to a different brace, turning `{10.1/a}{b}` into a manufactured
+ *  value.  On unbalanced input nothing is stripped, since pairing is
+ *  meaningless there.  A differential test in zotero-link.test.ts holds this
+ *  function to `stripOuterBraces` looped to a fixed point; it is exported for
+ *  that test alone. */
+export function stripWrappingBraces(value: string): string {
+  // closerOf[i] = index of the closer paired with the opener at index i.
+  const closerOf = new Map<number, number>();
+  const openers: number[] = [];
   for (let i = 0; i < value.length; i++) {
-    if (value[i] === '{') depth++;
+    if (value[i] === '{') openers.push(i);
     else if (value[i] === '}') {
-      depth--;
-      if (depth >= 0) closedAt[depth] = i;
+      const opener = openers.pop();
+      if (opener === undefined) return value;
+      closerOf.set(opener, i);
     }
   }
-  // Unbalanced overall: nothing can be said about what wraps what.
-  if (depth !== 0) return value;
+  if (openers.length > 0) return value;
 
-  let strip = 0;
-  while (strip < leading && closedAt[strip] === value.length - 1 - strip) strip++;
-  return strip === 0 ? value : value.slice(strip, value.length - strip).trim();
+  let lo = 0;
+  let hi = value.length;
+  for (;;) {
+    while (lo < hi && /\s/.test(value[lo])) lo++;
+    while (hi > lo && /\s/.test(value[hi - 1])) hi--;
+    // The window is wrapped exactly when its first character is an opener
+    // whose own closer is its last character.
+    if (value[lo] !== '{' || closerOf.get(lo) !== hi - 1) break;
+    lo++;
+    hi--;
+  }
+  return value.slice(lo, hi);
 }
 
 /** A DOI reduced to its bare lowercase form, or undefined if the value is not
@@ -387,7 +393,11 @@ export function normalizeIsbns(value: string | undefined): string[] {
   // 10- and 13-digit runs in several ways, most of which straddle the real
   // boundary and produce numbers present in neither ISBN.  The check digit is
   // what distinguishes them — that is what it is for — so a *split* is taken
-  // only when every piece of it validates.
+  // only when every piece of it validates, and only when it is the sole split
+  // that does.  About 1 in 800 realistically formatted ISBN pairs admits two
+  // fully-validating splits; picking either silently risks a wrong
+  // `zotero-key`, which makes Word cite the wrong source, so such a run is
+  // refused whole — the same answer every other ambiguity here gets.
   //
   // A value needing no split is accepted on shape alone.  Both sides of a
   // match come from the same catalogue of human-entered data, and a mistyped
@@ -397,31 +407,39 @@ export function normalizeIsbns(value: string | undefined): string[] {
   const compactOf = (tokens: readonly string[]) =>
     tokens.join('').replace(/-/g, '').toUpperCase();
 
-  /** Split `tokens` entirely into valid ISBNs, or undefined if no split does.
+  /** How many ways `tokens[from..]` splits entirely into valid ISBNs — capped
+   *  at 2, since past that only "more than one" matters — and one such split.
    *
    *  Memoized by start offset: without it the same suffix is re-explored for
    *  every way of reaching it, which is exponential — a run of a few hundred
    *  single-digit tokens would hang the command. */
-  const solved = new Map<number, string[] | undefined>();
-  const segment = (tokens: readonly string[], from: number): string[] | undefined => {
-    if (from === tokens.length) return [];
+  interface Segmentation {
+    count: number;
+    split: string[] | undefined;
+  }
+  const solved = new Map<number, Segmentation>();
+  const segment = (tokens: readonly string[], from: number): Segmentation => {
+    if (from === tokens.length) return { count: 1, split: [] };
     const cached = solved.get(from);
-    if (cached !== undefined || solved.has(from)) return cached;
-    solved.set(from, undefined); // guard against revisiting while in progress
-    let answer: string[] | undefined;
+    if (cached) return cached;
+    const answer: Segmentation = { count: 0, split: undefined };
+    solved.set(from, answer);
     for (let take = 1; from + take <= tokens.length; take++) {
       const compact = compactOf(tokens.slice(from, from + take));
-      // Longer runs can only get longer, so stop once even the digits alone
-      // exceed the longest ISBN.
-      if (compact.replace(/[^0-9X]/gi, '').length > 13) break;
+      // A valid ISBN is at most 13 characters, and `compact` only grows with
+      // `take`, so once it is longer nothing further can validate.  The whole
+      // length is what must be counted: measuring only the digits would let a
+      // run of non-numeric tokens extend the scan forever, and the scan is
+      // quadratic in how far `take` can reach.
+      if (compact.length > 13) break;
       if (!isValidIsbn(compact)) continue;
       const rest = segment(tokens, from + take);
-      if (rest) {
-        answer = [compact, ...rest];
-        break;
+      answer.count = Math.min(2, answer.count + rest.count);
+      if (answer.split === undefined && rest.split !== undefined) {
+        answer.split = [compact, ...rest.split];
       }
+      if (answer.count >= 2) break;
     }
-    solved.set(from, answer);
     return answer;
   };
 
@@ -438,8 +456,9 @@ export function normalizeIsbns(value: string | undefined): string[] {
 
     solved.clear();
     const whole = segment(tokens, 0);
-    if (whole) {
-      isbns.push(...whole);
+    if (whole.count >= 2) continue; // ambiguous: refuse the run whole
+    if (whole.split) {
+      isbns.push(...whole.split);
       continue;
     }
     // No split covers the whole run: it holds a label, a stray word, or an
@@ -455,7 +474,8 @@ export function normalizeIsbns(value: string | undefined): string[] {
       let matched = 0;
       for (let take = 1; start + take <= tokens.length; take++) {
         const compact = compactOf(tokens.slice(start, start + take));
-        if (compact.replace(/[^0-9X]/gi, '').length > 13) break;
+        // Whole length, not digits-only, for the same reason as in `segment`.
+        if (compact.length > 13) break;
         if (take === 1 ? isIsbnShaped(compact) : isValidIsbn(compact)) {
           isbns.push(compact);
           matched = take;

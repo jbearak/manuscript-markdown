@@ -5,9 +5,10 @@ import {
   normalizeIsbns,
   normalizePmid,
   extractZoteroKey,
+  stripWrappingBraces,
   type ZoteroLinkDecision,
 } from './zotero-link';
-import { parseBibtex } from './bibtex-parser';
+import { parseBibtex, stripOuterBraces } from './bibtex-parser';
 import { GROUP_URI_BASE as GROUP, zoteroItem as item } from './zotero-link.fixtures';
 
 
@@ -113,6 +114,24 @@ describe('normalizeIsbns', () => {
     expect(performance.now() - started).toBeLessThan(1000);
   });
 
+  it('does not go quadratic on a long run of non-numeric tokens', () => {
+    // The length cutoff must count every character: measured on digits alone,
+    // junk tokens never trip it and the fallback scan took seconds.
+    const input = Array.from({ length: 2000 }, (_, i) => 'junk' + i).join(' ');
+    const started = performance.now();
+    expect(normalizeIsbns(input)).toEqual([]);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
+  it('refuses a run that splits validly in more than one way', () => {
+    // Both of these divisions validate every check digit:
+    //   9791803811 | 9798694135221    and    9791803811979 | 8694135221
+    // Nothing in the text says which was meant, and a wrong pick becomes a
+    // wrong zotero-key — Word would cite the wrong source with no visible
+    // error.  Refuse the run, as every other ambiguity here is refused.
+    expect(normalizeIsbns('979 180 3811 97 9 869 413 522 1')).toEqual([]);
+  });
+
   it('splits two grouped ISBNs written side by side', () => {
     // Taking the longest ISBN-shaped prefix runs the first ISBN's tail into
     // the second's `978`, producing a pair that is in neither.  Only a split
@@ -206,6 +225,53 @@ describe('field value normalization', () => {
     expect(normalizePmid('{{12345678}')).toBeUndefined();
     expect(normalizePmid('{{12345678}}')).toBe('12345678');
     expect(normalizePmid('{{{12345678}}}')).toBe('12345678');
+  });
+
+  it('credits each leading brace with its own closer, not another\'s', () => {
+    // In `{10.1/a}{b}` the value's last `}` belongs to the second group; a
+    // last-closer-per-depth shortcut once credited it to the first brace and
+    // manufactured `10.1/a}{b` — an identifier present nowhere in the file.
+    expect(normalizeDoi('{10.1/a}{b}')).toBeUndefined();
+    expect(normalizeDoi('{10.1000/x}{10.2000/y}')).toBeUndefined();
+  });
+
+  it('strips wrapping layers separated by whitespace', () => {
+    expect(normalizePmid('{ { {12345678} } }')).toBe('12345678');
+    expect(normalizeDoi('{ {10.1000/abc} }')).toBe('10.1000/abc');
+  });
+
+  it('agrees with stripOuterBraces looped to a fixed point', () => {
+    // stripOuterBraces is the independent reference: single-pair semantics,
+    // written separately.  Looping it with trims is the whole specification of
+    // stripWrappingBraces on balanced input; on unbalanced input the contract
+    // is identity, since brace pairing is meaningless there.  This exhaustive
+    // differential is what caught this function's last two defects — the
+    // suite's own examples, written from the same mental model as the code,
+    // did not.
+    const reference = (s: string): string => {
+      for (;;) {
+        s = s.trim();
+        const t = stripOuterBraces(s);
+        if (t === s) return s;
+        s = t;
+      }
+    };
+    const balanced = (s: string): boolean => {
+      let depth = 0;
+      for (const ch of s) {
+        if (ch === '{') depth++;
+        else if (ch === '}' && --depth < 0) return false;
+      }
+      return depth === 0;
+    };
+    const alphabet = ['{', '}', 'a', ' '];
+    const walk = (s: string, left: number): void => {
+      const trimmed = s.trim();
+      expect(stripWrappingBraces(trimmed)).toBe(balanced(s) ? reference(s) : trimmed);
+      if (left === 0) return;
+      for (const ch of alphabet) walk(s + ch, left - 1);
+    };
+    walk('', 8);
   });
 
   it('strips deep brace nesting without quadratic cost', () => {
