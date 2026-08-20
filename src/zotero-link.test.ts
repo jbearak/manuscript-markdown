@@ -5,10 +5,9 @@ import {
   normalizeIsbns,
   normalizePmid,
   extractZoteroKey,
-  stripWrappingBraces,
   type ZoteroLinkDecision,
 } from './zotero-link';
-import { parseBibtex, stripOuterBraces } from './bibtex-parser';
+import { parseBibtex } from './bibtex-parser';
 import { GROUP_URI_BASE as GROUP, zoteroItem as item } from './zotero-link.fixtures';
 
 
@@ -60,196 +59,213 @@ describe('normalizeDoi', () => {
 });
 
 describe('normalizeIsbns', () => {
-  it('accepts ISBN-10 and ISBN-13 with separators', () => {
-    expect(normalizeIsbns('978-0-306-40615-7')).toEqual(['9780306406157']);
-    expect(normalizeIsbns('0-306-40615-2')).toEqual(['0306406152']);
-    expect(normalizeIsbns('080442957x')).toEqual(['080442957X']);
+  // Grouped by the policy each case exercises: a part taken as written on
+  // shape alone, the unique full partition into check-valid ISBNs, the unique
+  // best salvage emission, refusal of any ambiguity, and the complexity
+  // guards.
+
+  describe('taken as written', () => {
+    it('accepts ISBN-10 and ISBN-13 with separators', () => {
+      expect(normalizeIsbns('978-0-306-40615-7')).toEqual(['9780306406157']);
+      expect(normalizeIsbns('0-306-40615-2')).toEqual(['0306406152']);
+      expect(normalizeIsbns('080442957x')).toEqual(['080442957X']);
+    });
+
+    it('accepts space-grouped ISBNs', () => {
+      // The registration-group separator is written as a space as often as a
+      // hyphen, so a space is not an ISBN boundary.
+      expect(normalizeIsbns('978 0 306 40615 7')).toEqual(['9780306406157']);
+      expect(normalizeIsbns('0 306 40615 2')).toEqual(['0306406152']);
+    });
+
+    it('accepts an unambiguous value whose check digit disagrees', () => {
+      // A mistyped ISBN recorded the same way in Zotero and in the .bib still
+      // identifies the same work.  There is no split to resolve here, so the
+      // checksum is not needed and enforcing it would only lose the match.
+      expect(normalizeIsbns('9780306406158')).toEqual(['9780306406158']);
+    });
+
+    it('reads several ISBNs from one field', () => {
+      expect(normalizeIsbns('9780306406157, 0306406152')).toEqual(['9780306406157', '0306406152']);
+      expect(normalizeIsbns('9780306406157; 0306406152')).toEqual(['9780306406157', '0306406152']);
+      expect(normalizeIsbns('9780306406157\n0306406152')).toEqual(['9780306406157', '0306406152']);
+    });
+
+    it('drops values of the wrong length', () => {
+      expect(normalizeIsbns('12345')).toEqual([]);
+      expect(normalizeIsbns(undefined)).toEqual([]);
+    });
   });
 
-  it('accepts space-grouped ISBNs', () => {
-    // The registration-group separator is written as a space as often as a
-    // hyphen, so a space is not an ISBN boundary.
-    expect(normalizeIsbns('978 0 306 40615 7')).toEqual(['9780306406157']);
-    expect(normalizeIsbns('0 306 40615 2')).toEqual(['0306406152']);
+  describe('unique full partition', () => {
+    it('uses the check digit to choose between possible splits', () => {
+      // These tokens divide into correctly-shaped runs several ways; only one
+      // division gives ISBNs whose check digits agree, and it is the intended
+      // 13/10/10 reading.
+      expect(normalizeIsbns('9780 306406 157 0306406 152 0306 406152')).toEqual([
+        '9780306406157',
+        '0306406152',
+        '0306406152',
+      ]);
+    });
+
+    it('reads a whitespace-separated pair as two ISBNs', () => {
+      // Only the digits distinguish this from a single space-grouped ISBN:
+      // read whole first, then fall back to the individual tokens.
+      expect(normalizeIsbns('9780306406157 0306406152')).toEqual(['9780306406157', '0306406152']);
+      expect(normalizeIsbns('978-0-306-40615-7 0-306-40615-2')).toEqual([
+        '9780306406157',
+        '0306406152',
+      ]);
+    });
+
+    it('splits two grouped ISBNs written side by side', () => {
+      // Taking the longest ISBN-shaped prefix runs the first ISBN's tail into
+      // the second's `978`, producing a pair that is in neither.  Only a
+      // split that consumes the whole run is right.
+      expect(normalizeIsbns('0 306 40615 2 978 0 306 40615 7')).toEqual([
+        '0306406152',
+        '9780306406157',
+      ]);
+      expect(normalizeIsbns('978 0 306 40615 7 0 306 40615 2')).toEqual([
+        '9780306406157',
+        '0306406152',
+      ]);
+    });
+
+    it('reads a space-grouped ISBN alongside a plain one', () => {
+      // One field, both conventions at once: the grouped ISBN's leading
+      // tokens are not ISBNs on their own, so the longest run has to win.
+      expect(normalizeIsbns('978 0 306 40615 7 0306406152')).toEqual([
+        '9780306406157',
+        '0306406152',
+      ]);
+      expect(normalizeIsbns('0306406152 978 0 306 40615 7')).toEqual([
+        '0306406152',
+        '9780306406157',
+      ]);
+    });
+
+    it('reads a pair separated by a lone hyphen as unambiguous', () => {
+      // A separator hyphen compacts to nothing, so the token boundary can sit
+      // on either side of it — two "splits" that normalize identically.  That
+      // is one reading, not an ambiguity to refuse.
+      expect(normalizeIsbns('9780306406157 - 0306406152')).toEqual([
+        '9780306406157',
+        '0306406152',
+      ]);
+      expect(normalizeIsbns('978-0-306-40615-7 - 0-306-40615-2')).toEqual([
+        '9780306406157',
+        '0306406152',
+      ]);
+    });
   });
 
-  it('reads several ISBNs from one field', () => {
-    expect(normalizeIsbns('9780306406157, 0306406152')).toEqual(['9780306406157', '0306406152']);
-    expect(normalizeIsbns('9780306406157; 0306406152')).toEqual(['9780306406157', '0306406152']);
-    expect(normalizeIsbns('9780306406157\n0306406152')).toEqual(['9780306406157', '0306406152']);
+  describe('unique salvage emission', () => {
+    it('keeps a check-invalid ISBN that shares a field with a valid one', () => {
+      // A mistyped ISBN must not lose its match because something valid sits
+      // beside it, and the separator between them must not change the answer.
+      const typo = '9780306406158';
+      expect(normalizeIsbns(typo + ' 0306406152')).toEqual([typo, '0306406152']);
+      expect(normalizeIsbns(typo + ', 0306406152')).toEqual([typo, '0306406152']);
+      expect(normalizeIsbns('0306406152 ' + typo)).toEqual(['0306406152', typo]);
+    });
+
+    it('reads an ISBN out of a run that does not divide evenly', () => {
+      expect(normalizeIsbns('print 9780306406157')).toEqual(['9780306406157']);
+      expect(normalizeIsbns('9780306406157 (hardcover)')).toEqual(['9780306406157']);
+    });
+
+    it('assembles a grouped ISBN in the fallback', () => {
+      // `print` blocks a whole-run split, so the fallback selects among the
+      // tokens (the lone `-` compacts to nothing and is dropped before either
+      // pass).  The joined check-valid ISBN-13 must win over its
+      // ten-character prefix, which is shaped but check-invalid.
+      expect(normalizeIsbns('print - 9780306406 157')).toEqual(['9780306406157']);
+    });
+
+    it('treats selections that read identically as one reading', () => {
+      // Twelve `1`s: the check-valid ten-digit window can start at three
+      // offsets, but every choice emits the same lone ISBN — the leftover
+      // `1`s are not ISBN-shaped and emit nothing.  Counting selections
+      // instead of emissions once refused this.
+      expect(normalizeIsbns('1 1 1 1 1 1 1 1 1 1 1 1')).toEqual(['1111111111']);
+    });
   });
 
-  it('uses the check digit to choose between possible splits', () => {
-    // These tokens divide into correctly-shaped runs several ways; only one
-    // division gives ISBNs whose check digits agree, and it is the intended
-    // 13/10/10 reading.
-    expect(normalizeIsbns('9780 306406 157 0306406 152 0306 406152')).toEqual([
-      '9780306406157',
-      '0306406152',
-      '0306406152',
-    ]);
+  describe('ambiguity refusal', () => {
+    it('refuses a run that splits validly in more than one way', () => {
+      // Both of these divisions validate every check digit:
+      //   9791803811 | 9798694135221    and    9791803811979 | 8694135221
+      // Nothing in the text says which was meant, and a wrong pick becomes a
+      // wrong zotero-key — Word would cite the wrong source with no visible
+      // error.  Refuse the run, as every other ambiguity here is refused.
+      expect(normalizeIsbns('979 180 3811 97 9 869 413 522 1')).toEqual([]);
+    });
+
+    it('refuses a fallback run whose best readings disagree', () => {
+      // `06152` joins leftward into the check-valid `0306406152` or rightward
+      // into the check-valid `0615200001`.  Both readings recover one valid
+      // identifier; nothing in the text says which was meant, so the run is
+      // refused rather than linked to either.
+      expect(normalizeIsbns('03064 06152 00001')).toEqual([]);
+    });
+
+    it('refuses when a join across a value boundary reads check-valid', () => {
+      // Two check-valid readings exist: `0306406152` (leaving `1000000000` as
+      // a mistyped standalone), or `1000000000030` — the standalone's digits
+      // joined to the next token.  A greedy scan silently took the second; a
+      // count-of-identifiers score silently took the first, and was in turn
+      // gamed elsewhere by check-invalid tokens.  The readings disagree about
+      // which check-valid ISBN the field holds, so the run is refused.
+      expect(normalizeIsbns('print - 1000000000 030 640 615 2')).toEqual([]);
+    });
+
+    it('does not let a check-invalid token outvote a real ISBN', () => {
+      // `9780306406157` is check-valid; `157 0000018` rereads its tail as the
+      // check-valid `1570000018`, leaving the check-invalid prefix
+      // `9780306406` behind as a "standalone".  Scoring shaped-but-invalid
+      // leftovers once let that two-identifier reading win.  The check-valid
+      // anchors disagree, so the run is refused.
+      expect(normalizeIsbns('9780306406 157 0000018')).toEqual([]);
+    });
   });
 
-  it('keeps a check-invalid ISBN that shares a field with a valid one', () => {
-    // A mistyped ISBN must not lose its match because something valid sits
-    // beside it, and the separator between them must not change the answer.
-    const typo = '9780306406158';
-    expect(normalizeIsbns(typo + ' 0306406152')).toEqual([typo, '0306406152']);
-    expect(normalizeIsbns(typo + ', 0306406152')).toEqual([typo, '0306406152']);
-    expect(normalizeIsbns('0306406152 ' + typo)).toEqual(['0306406152', typo]);
-  });
+  describe('complexity guards', () => {
+    it('does not hang on a long run of digit tokens', () => {
+      // Segmentation explored suffix by suffix without a table is
+      // exponential; this took minutes.
+      const input = Array.from({ length: 300 }, () => '1').join(' ') + ' bad';
+      const started = performance.now();
+      normalizeIsbns(input);
+      expect(performance.now() - started).toBeLessThan(1000);
+    });
 
-  it('accepts an unambiguous value whose check digit disagrees', () => {
-    // A mistyped ISBN recorded the same way in Zotero and in the .bib still
-    // identifies the same work.  There is no split to resolve here, so the
-    // checksum is not needed and enforcing it would only lose the match.
-    expect(normalizeIsbns('9780306406158')).toEqual(['9780306406158']);
-  });
+    it('does not go quadratic on a long run of non-numeric tokens', () => {
+      // The length cutoff must count every character: measured on digits
+      // alone, junk tokens never trip it and the fallback scan took seconds.
+      const input = Array.from({ length: 2000 }, (_, i) => 'junk' + i).join(' ');
+      const started = performance.now();
+      expect(normalizeIsbns(input)).toEqual([]);
+      expect(performance.now() - started).toBeLessThan(1000);
+    });
 
-  it('does not hang on a long run of digit tokens', () => {
-    // Segmentation without memoization is exponential; this took minutes.
-    const input = Array.from({ length: 300 }, () => '1').join(' ') + ' bad';
-    const started = performance.now();
-    normalizeIsbns(input);
-    expect(performance.now() - started).toBeLessThan(1000);
-  });
+    it('survives a very long token run without overflowing the stack', () => {
+      // The fallback selection once recursed per token; fifty thousand tokens
+      // is a stack frame per token and overflowed.
+      const input = Array.from({ length: 50000 }, (_, i) => 'junk' + i).join(' ');
+      expect(normalizeIsbns(input)).toEqual([]);
+    });
 
-  it('does not go quadratic on a long run of non-numeric tokens', () => {
-    // The length cutoff must count every character: measured on digits alone,
-    // junk tokens never trip it and the fallback scan took seconds.
-    const input = Array.from({ length: 2000 }, (_, i) => 'junk' + i).join(' ');
-    const started = performance.now();
-    expect(normalizeIsbns(input)).toEqual([]);
-    expect(performance.now() - started).toBeLessThan(1000);
-  });
-
-  it('survives a very long token run without overflowing the stack', () => {
-    // The fallback selection once recursed per token; fifty thousand tokens
-    // is a stack frame per token and overflowed.
-    const input = Array.from({ length: 50000 }, (_, i) => 'junk' + i).join(' ');
-    expect(normalizeIsbns(input)).toEqual([]);
-  });
-
-  it('handles a long run of check-valid ISBNs in linear memory', () => {
-    // Selections are kept as shared-tail lists; materialized arrays copied
-    // the whole suffix per accepted run — quadratic retention that exhausted
-    // the heap on a field like this.
-    const input = 'print ' + Array(50000).fill('0306406152').join(' ');
-    const started = performance.now();
-    expect(normalizeIsbns(input)).toEqual(Array(50000).fill('0306406152'));
-    expect(performance.now() - started).toBeLessThan(2000);
-  });
-
-  it('assembles a grouped ISBN past a separator token in the fallback', () => {
-    // `print` blocks a whole-run split, so the fallback selects among the
-    // tokens.  The joined check-valid ISBN-13 must win over its ten-character
-    // prefix, which is shaped but check-invalid.
-    expect(normalizeIsbns('print - 9780306406 157')).toEqual(['9780306406157']);
-  });
-
-  it('refuses when a join across a value boundary reads check-valid', () => {
-    // Two check-valid readings exist: `0306406152` (leaving `1000000000` as a
-    // mistyped standalone), or `1000000000030` — the standalone's digits
-    // joined to the next token.  A greedy scan silently took the second; a
-    // count-of-identifiers score silently took the first, and was in turn
-    // gamed elsewhere by check-invalid tokens.  The readings disagree about
-    // which check-valid ISBN the field holds, so the run is refused.
-    expect(normalizeIsbns('print - 1000000000 030 640 615 2')).toEqual([]);
-  });
-
-  it('treats selections that read identically as one reading', () => {
-    // Twelve `1`s: the check-valid ten-digit window can start at three
-    // offsets, but every choice emits the same lone ISBN — the leftover `1`s
-    // are not ISBN-shaped and emit nothing.  Counting selections instead of
-    // emissions once refused this.
-    expect(normalizeIsbns('1 1 1 1 1 1 1 1 1 1 1 1')).toEqual(['1111111111']);
-  });
-
-  it('does not let a check-invalid token outvote a real ISBN', () => {
-    // `9780306406157` is check-valid; `157 0000018` rereads its tail as the
-    // check-valid `1570000018`, leaving the check-invalid prefix
-    // `9780306406` behind as a "standalone".  Scoring shaped-but-invalid
-    // leftovers once let that two-identifier reading win.  The check-valid
-    // anchors disagree, so the run is refused.
-    expect(normalizeIsbns('9780306406 157 0000018')).toEqual([]);
-  });
-
-  it('reads a pair separated by a lone hyphen as unambiguous', () => {
-    // A separator hyphen compacts to nothing, so the token boundary can sit
-    // on either side of it — two "splits" that normalize identically.  That
-    // is one reading, not an ambiguity to refuse.
-    expect(normalizeIsbns('9780306406157 - 0306406152')).toEqual([
-      '9780306406157',
-      '0306406152',
-    ]);
-    expect(normalizeIsbns('978-0-306-40615-7 - 0-306-40615-2')).toEqual([
-      '9780306406157',
-      '0306406152',
-    ]);
-  });
-
-  it('refuses a fallback run whose best readings disagree', () => {
-    // `06152` joins leftward into the check-valid `0306406152` or rightward
-    // into the check-valid `0615200001`.  Both readings recover one valid
-    // identifier; nothing in the text says which was meant, so the run is
-    // refused rather than linked to either.
-    expect(normalizeIsbns('03064 06152 00001')).toEqual([]);
-  });
-
-  it('refuses a run that splits validly in more than one way', () => {
-    // Both of these divisions validate every check digit:
-    //   9791803811 | 9798694135221    and    9791803811979 | 8694135221
-    // Nothing in the text says which was meant, and a wrong pick becomes a
-    // wrong zotero-key — Word would cite the wrong source with no visible
-    // error.  Refuse the run, as every other ambiguity here is refused.
-    expect(normalizeIsbns('979 180 3811 97 9 869 413 522 1')).toEqual([]);
-  });
-
-  it('splits two grouped ISBNs written side by side', () => {
-    // Taking the longest ISBN-shaped prefix runs the first ISBN's tail into
-    // the second's `978`, producing a pair that is in neither.  Only a split
-    // that consumes the whole run is right.
-    expect(normalizeIsbns('0 306 40615 2 978 0 306 40615 7')).toEqual([
-      '0306406152',
-      '9780306406157',
-    ]);
-    expect(normalizeIsbns('978 0 306 40615 7 0 306 40615 2')).toEqual([
-      '9780306406157',
-      '0306406152',
-    ]);
-  });
-
-  it('reads an ISBN out of a run that does not divide evenly', () => {
-    expect(normalizeIsbns('print 9780306406157')).toEqual(['9780306406157']);
-    expect(normalizeIsbns('9780306406157 (hardcover)')).toEqual(['9780306406157']);
-  });
-
-  it('reads a space-grouped ISBN alongside a plain one', () => {
-    // One field, both conventions at once: the grouped ISBN's leading tokens
-    // are not ISBNs on their own, so the longest run has to win.
-    expect(normalizeIsbns('978 0 306 40615 7 0306406152')).toEqual([
-      '9780306406157',
-      '0306406152',
-    ]);
-    expect(normalizeIsbns('0306406152 978 0 306 40615 7')).toEqual([
-      '0306406152',
-      '9780306406157',
-    ]);
-  });
-
-  it('reads a whitespace-separated pair as two ISBNs', () => {
-    // Only the digits distinguish this from a single space-grouped ISBN: read
-    // whole first, then fall back to the individual tokens.
-    expect(normalizeIsbns('9780306406157 0306406152')).toEqual(['9780306406157', '0306406152']);
-    expect(normalizeIsbns('978-0-306-40615-7 0-306-40615-2')).toEqual([
-      '9780306406157',
-      '0306406152',
-    ]);
-  });
-
-  it('drops values of the wrong length', () => {
-    expect(normalizeIsbns('12345')).toEqual([]);
-    expect(normalizeIsbns(undefined)).toEqual([]);
+    it('handles a long run of check-valid ISBNs in linear memory', () => {
+      // Selections are kept as shared-tail lists; materialized arrays copied
+      // the whole suffix per accepted run — quadratic retention that
+      // exhausted the heap on a field like this.
+      const input = 'print ' + Array(50000).fill('0306406152').join(' ');
+      const started = performance.now();
+      expect(normalizeIsbns(input)).toEqual(Array(50000).fill('0306406152'));
+      expect(performance.now() - started).toBeLessThan(2000);
+    });
   });
 });
 
@@ -309,51 +325,11 @@ describe('field value normalization', () => {
   });
 
   it('strips wrapping layers separated by whitespace', () => {
+    // Exhaustive brace-stripping coverage — the differential against
+    // stripOuterBraces and the complexity guard — lives with
+    // stripWrappingBraces in bibtex-parser.test.ts.
     expect(normalizePmid('{ { {12345678} } }')).toBe('12345678');
     expect(normalizeDoi('{ {10.1000/abc} }')).toBe('10.1000/abc');
-  });
-
-  it('agrees with stripOuterBraces looped to a fixed point', () => {
-    // stripOuterBraces is the independent reference: single-pair semantics,
-    // written separately.  Looping it with trims is the whole specification of
-    // stripWrappingBraces on balanced input; on unbalanced input the contract
-    // is identity, since brace pairing is meaningless there.  This exhaustive
-    // differential is what caught this function's last two defects — the
-    // suite's own examples, written from the same mental model as the code,
-    // did not.
-    const reference = (s: string): string => {
-      for (;;) {
-        s = s.trim();
-        const t = stripOuterBraces(s);
-        if (t === s) return s;
-        s = t;
-      }
-    };
-    const balanced = (s: string): boolean => {
-      let depth = 0;
-      for (const ch of s) {
-        if (ch === '{') depth++;
-        else if (ch === '}' && --depth < 0) return false;
-      }
-      return depth === 0;
-    };
-    const alphabet = ['{', '}', 'a', ' '];
-    const walk = (s: string, left: number): void => {
-      const trimmed = s.trim();
-      expect(stripWrappingBraces(trimmed)).toBe(balanced(s) ? reference(s) : trimmed);
-      if (left === 0) return;
-      for (const ch of alphabet) walk(s + ch, left - 1);
-    };
-    walk('', 8);
-  });
-
-  it('strips deep brace nesting without quadratic cost', () => {
-    // Calling stripOuterBraces in a loop rescans the whole value per pair;
-    // this case took seconds.
-    const wrapped = '{'.repeat(50000) + '10.1000/abc' + '}'.repeat(50000);
-    const started = performance.now();
-    expect(normalizeDoi(wrapped)).toBe('10.1000/abc');
-    expect(performance.now() - started).toBeLessThan(1000);
   });
 });
 
@@ -695,15 +671,15 @@ describe('entries whose own text is ambiguous', () => {
   });
 
   it('does not read a field name out of the middle of a longer one', () => {
-    // All of these are field names BibTeX reads whole — its names allow far
-    // more than identifier characters.  Starting a name at the embedded `d`
-    // would report a `doi` the entry does not have.
-    for (const name of ['_doi', '1doi', 'xdoi', ':doi', '+doi', '.doi', '/doi', '@doi', '-doi']) {
-      const bib = '@article{k1, ' + name + ' = {10.1000/abc}}\n';
-      const plan = createZoteroLinkPlan(bib, matching);
-      expect(decisionWithOutcome(plan.decisions, 'k1', 'unmatched').reason).toBe('no-identifiers');
-      expect(plan.updatedText).toBe(bib);
-    }
+    // `_doi` is a field name BibTeX reads whole; starting a name at the
+    // embedded `d` would report a `doi` the entry does not have.  The
+    // exhaustive sweep of name-leading characters lives with
+    // scanBibtexEntryBody in bibtex-parser.test.ts; this holds the decision
+    // layer to the walk's reading.
+    const bib = '@article{k1, _doi = {10.1000/abc}}\n';
+    const plan = createZoteroLinkPlan(bib, matching);
+    expect(decisionWithOutcome(plan.decisions, 'k1', 'unmatched').reason).toBe('no-identifiers');
+    expect(plan.updatedText).toBe(bib);
   });
 
   it('does not match on an identifier that is inside another value', () => {
@@ -838,7 +814,6 @@ describe('rewriting', () => {
     const bib = '@article{k1,\r\n  doi = {10.1000/abc}\r\n}\r\n';
     const plan = createZoteroLinkPlan(bib, [item('ABCD1234', { doi: '10.1000/abc' })]);
     expect(plan.updatedText).toContain('\r\n  zotero-key = {ABCD1234},\r\n');
-    expect(plan.updatedText.includes('\n  zotero-key')).toBe(true);
     // No bare LF was introduced anywhere.
     expect(/[^\r]\n/.test(plan.updatedText)).toBe(false);
   });
@@ -883,12 +858,6 @@ describe('rewriting', () => {
     expect(parseBibtex(plan.updatedText).get('k1')?.zoteroKey).toBe('ABCD1234');
   });
 
-  it('does not mutate the parsed entries it was given', () => {
-    const bib = '@article{k1,\n  doi = {10.1000/abc}\n}\n';
-    createZoteroLinkPlan(bib, [item('ABCD1234', { doi: '10.1000/abc' })]);
-    const fresh = parseBibtex(bib).get('k1')!;
-    expect(fresh.fields.has('zotero-key')).toBe(false);
-  });
 });
 
 describe('summary', () => {

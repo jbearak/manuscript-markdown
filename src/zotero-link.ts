@@ -35,7 +35,7 @@ import {
   detectEntryEol,
   detectBibtexEol,
   unescapeBibtexPunctuation,
-  type BibtexEntry,
+  stripWrappingBraces,
   type BibtexSourceRange,
   type BibtexEntryFieldOccurrence,
   type BibtexEol,
@@ -265,61 +265,16 @@ const DOI_SCHEME_PREFIX_RE = /^doi:\s*/i;
  *  `pmid = {{{12345678}}}` arrives as `{{12345678}}`, and a single strip would
  *  leave a brace on each side of an otherwise exact identifier.
  *
- *  Braces are therefore stripped repeatedly, but unescaping runs exactly once,
- *  at the end.  Alternating the two would read the output of one pass as more
- *  input for the next: `\\\_` is a literal backslash followed by an escaped
- *  underscore, and a second pass over the resulting `\_` would eat the
- *  backslash that belongs to the value. */
+ *  The order is: strip wrappers, unescape exactly once, then strip any
+ *  wrapper the unescaping newly exposed (`{\{12345678\}}`).  Unescaping never
+ *  runs twice: it would read the output of the first pass as more input —
+ *  `\\\_` is a literal backslash followed by an escaped underscore, and a
+ *  second pass over the resulting `\_` would eat the backslash that belongs
+ *  to the value. */
 function plainFieldValue(value: string | undefined): string {
   if (value === undefined) return '';
   const plain = stripWrappingBraces(value.trim());
-  // One brace pair can be hidden behind escapes (`{\{12345678\}}`); unescaping
-  // exposes it, so strip once more afterwards — again without re-unescaping.
   return stripWrappingBraces(unescapeBibtexPunctuation(plain).trim());
-}
-
-/** Remove every brace pair that wraps the whole value, tolerating whitespace
- *  between layers (`{ {x} }`), in linear time.
- *
- *  `stripOuterBraces` rescans from the start for each pair it removes, so
- *  calling it in a loop is quadratic — a value wrapped in tens of thousands of
- *  pairs would block the command for seconds.  Instead every brace is paired
- *  with its partner once, up front, and layers are peeled by moving a window
- *  inward.
- *
- *  The pairing is explicit — each opener matched to its own closer — because
- *  every shortcut tried here has credited a leading brace with a closer that
- *  belonged to a different brace, turning `{10.1/a}{b}` into a manufactured
- *  value.  On unbalanced input nothing is stripped, since pairing is
- *  meaningless there.  A differential test in zotero-link.test.ts holds this
- *  function to `stripOuterBraces` looped to a fixed point; it is exported for
- *  that test alone. */
-export function stripWrappingBraces(value: string): string {
-  // closerOf[i] = index of the closer paired with the opener at index i.
-  const closerOf = new Map<number, number>();
-  const openers: number[] = [];
-  for (let i = 0; i < value.length; i++) {
-    if (value[i] === '{') openers.push(i);
-    else if (value[i] === '}') {
-      const opener = openers.pop();
-      if (opener === undefined) return value;
-      closerOf.set(opener, i);
-    }
-  }
-  if (openers.length > 0) return value;
-
-  let lo = 0;
-  let hi = value.length;
-  for (;;) {
-    while (lo < hi && /\s/.test(value[lo])) lo++;
-    while (hi > lo && /\s/.test(value[hi - 1])) hi--;
-    // The window is wrapped exactly when its first character is an opener
-    // whose own closer is its last character.
-    if (value[lo] !== '{' || closerOf.get(lo) !== hi - 1) break;
-    lo++;
-    hi--;
-  }
-  return value.slice(lo, hi);
 }
 
 /** A DOI reduced to its bare lowercase form, or undefined if the value is not
@@ -355,7 +310,7 @@ function isIsbnShaped(compact: string): boolean {
  *  ISBNs separated by spaces can be divided into correctly-shaped runs in more
  *  than one way, and the check digit is what says which division is the real
  *  one. */
-export function isValidIsbn(compact: string): boolean {
+function isValidIsbn(compact: string): boolean {
   if (!isIsbnShaped(compact)) return false;
   if (compact.length === 10) {
     // ISBN-10: sum of digit × (10 … 1) is divisible by 11, with X as ten.
@@ -407,51 +362,8 @@ export function normalizeIsbns(value: string | undefined): string[] {
   const compactOf = (tokens: readonly string[]) =>
     tokens.join('').replace(/-/g, '').toUpperCase();
 
-  /** How many ways `tokens[from..]` splits entirely into valid ISBNs — capped
-   *  at 2, since past that only "more than one" matters — and one such split.
-   *
-   *  Memoized by start offset: without it the same suffix is re-explored for
-   *  every way of reaching it, which is exponential — a run of a few hundred
-   *  single-digit tokens would hang the command. */
-  interface Segmentation {
-    count: number;
-    split: string[] | undefined;
-  }
-  const solved = new Map<number, Segmentation>();
-  const segment = (tokens: readonly string[], from: number): Segmentation => {
-    if (from === tokens.length) return { count: 1, split: [] };
-    const cached = solved.get(from);
-    if (cached) return cached;
-    const answer: Segmentation = { count: 0, split: undefined };
-    solved.set(from, answer);
-    for (let take = 1; from + take <= tokens.length; take++) {
-      const compact = compactOf(tokens.slice(from, from + take));
-      // A valid ISBN is at most 13 characters, and `compact` only grows with
-      // `take`, so once it is longer nothing further can validate.  The whole
-      // length is what must be counted: measuring only the digits would let a
-      // run of non-numeric tokens extend the scan forever, and the scan is
-      // quadratic in how far `take` can reach.
-      if (compact.length > 13) break;
-      if (!isValidIsbn(compact)) continue;
-      const rest = segment(tokens, from + take);
-      answer.count = Math.min(2, answer.count + rest.count);
-      if (answer.split === undefined && rest.split !== undefined) {
-        answer.split = [compact, ...rest.split];
-      }
-      if (answer.count >= 2) break;
-    }
-    return answer;
-  };
-
   for (const part of raw.split(/[,;\n]+/)) {
     const tokens = part.split(/\s+/).filter(t => t.length > 0);
-    // For split counting, tokens that compact to nothing (a lone `-` used as
-    // a separator) are dropped.  Left in, they let two token splits normalize
-    // to the same ISBNs — the boundary can sit on either side of the empty
-    // token — and the ambiguity count would refuse a run whose every reading
-    // agrees.  With them gone, token boundaries and compacted-text boundaries
-    // coincide, so the count is of genuinely distinct readings.
-    const segTokens = tokens.filter(t => compactOf([t]).length > 0);
 
     // Nothing to disambiguate: the part is one ISBN-shaped value, so take it
     // as written whether or not its check digit agrees.
@@ -461,16 +373,25 @@ export function normalizeIsbns(value: string | undefined): string[] {
       continue;
     }
 
-    solved.clear();
-    const whole = segment(segTokens, 0);
+    // Each remaining token compacted once, and tokens that compact to nothing
+    // (a lone `-` used as a separator) dropped.  Left in, they let two token
+    // splits normalize to the same ISBNs — the boundary can sit on either
+    // side of the empty token — and the ambiguity counts below would refuse a
+    // run whose every reading agrees.  With them gone, token boundaries and
+    // compacted-text boundaries coincide, so what gets counted is genuinely
+    // distinct readings.  Both `segment` and `salvage` read these.
+    const compacts = tokens.map(t => compactOf([t])).filter(c => c.length > 0);
+
+    const whole = segment(compacts);
     if (whole.count >= 2) continue; // ambiguous: refuse the run whole
-    if (whole.split) {
-      isbns.push(...whole.split);
+    if (whole.count === 1) {
+      for (let node = whole.split; node !== null; node = node.next) isbns.push(node.value);
       continue;
     }
     // No split covers the whole run: it holds a label, a stray word, or an
-    // ISBN whose check digit does not agree.  Take the values that stand on
-    // their own and skip the rest.
+    // ISBN whose check digit does not agree.  Fall back to selecting within
+    // the run: check-valid joined runs, plus each leftover token that is
+    // ISBN-shaped on its own.
     //
     // A single token that is ISBN-shaped is taken even when its check digit
     // disagrees, for the same reason a lone value is: one mistyped ISBN in a
@@ -484,23 +405,65 @@ export function normalizeIsbns(value: string | undefined): string[] {
     // of the next.  If the tokens admit more than one best reading, the run
     // is refused — the same answer an ambiguous whole-run split gets, for the
     // same reason.
-    const best = salvage(segTokens, compactOf);
+    const best = salvage(compacts);
     if (best) isbns.push(...best);
   }
   return isbns;
+}
+
+/** One full split of a run into valid ISBNs, as a shared-tail list: suffixes
+ *  are common to every split that reaches them, so sharing keeps the table
+ *  linear where copied arrays were quadratic. */
+interface SegmentSplit {
+  value: string;
+  next: SegmentSplit | null;
+}
+
+/** How many ways a run of compacted tokens splits *entirely* into check-valid
+ *  ISBNs — capped at 2, since past that only "more than one" matters — and
+ *  one such split when any exists.
+ *
+ *  Filled right to left, one cell per suffix: recursing instead re-explores
+ *  the same suffix for every way of reaching it, which is exponential — a run
+ *  of a few hundred single-digit tokens once hung the command. */
+function segment(compacts: readonly string[]): { count: number; split: SegmentSplit | null } {
+  const table = new Array<{ count: number; split: SegmentSplit | null }>(compacts.length + 1);
+  table[compacts.length] = { count: 1, split: null };
+  for (let from = compacts.length - 1; from >= 0; from--) {
+    const cell: { count: number; split: SegmentSplit | null } = { count: 0, split: null };
+    let compact = '';
+    for (let take = 1; from + take <= compacts.length; take++) {
+      compact += compacts[from + take - 1];
+      // A valid ISBN is at most 13 characters, and `compact` only grows with
+      // `take` — every token contributes at least one character — so once it
+      // is longer nothing further can validate.  The whole length is what
+      // must be measured: counting only the digits would let a run of
+      // non-numeric tokens extend the scan forever.
+      if (compact.length > 13) break;
+      if (!isValidIsbn(compact)) continue;
+      const rest = table[from + take];
+      cell.count = Math.min(2, cell.count + rest.count);
+      if (cell.split === null && rest.count > 0) {
+        cell.split = { value: compact, next: rest.split };
+      }
+      if (cell.count >= 2) break;
+    }
+    table[from] = cell;
+  }
+  return table[0];
 }
 
 /** The unique best reading of a token run that resisted whole-run splitting,
  *  or undefined when the tokens admit more than one.
  *
  *  Check-valid runs anchor the reading: a selection of disjoint token runs,
- *  each of whose compacted text is a check-valid ISBN, maximizing how many
- *  such runs are recovered.  Leftover tokens then contribute only passively —
- *  each leftover that is ISBN-shaped on its own is kept as a mistyped
- *  standalone value (see the caller).  Shaped-but-invalid tokens deliberately
- *  carry no weight in choosing between readings: scoring them once let a
- *  check-invalid prefix of a real ISBN, plus a value fabricated from that
- *  ISBN's tail, outrank the ISBN itself.
+ *  each of whose joined text is a check-valid ISBN, maximizing how many such
+ *  runs are recovered.  Leftover tokens then contribute only passively — each
+ *  leftover that is ISBN-shaped on its own is kept as a mistyped standalone
+ *  value.  Shaped-but-invalid tokens deliberately carry no weight in choosing
+ *  between readings: scoring them once let a check-invalid prefix of a real
+ *  ISBN, plus a value fabricated from that ISBN's tail, outrank the ISBN
+ *  itself.
  *
  *  What is compared for ambiguity is each selection's *emission* — its runs
  *  and shaped leftovers in text order — not the selection itself.  Distinct
@@ -514,24 +477,19 @@ export function normalizeIsbns(value: string | undefined): string[] {
  *  (value, tail) pair — so equality is reference equality, a suffix's
  *  emissions dedupe as they are built, and memory stays linear where
  *  materialized arrays once copied every suffix and exhausted the heap. */
-function salvage(
-  tokens: readonly string[],
-  compactOf: (tokens: readonly string[]) => string,
-): string[] | undefined {
+function salvage(compacts: readonly string[]): string[] | undefined {
   interface Node {
+    id: number;
     value: string;
     next: Node | null;
   }
   const interned = new Map<string, Node>();
-  let nextId = 1;
-  const ids = new Map<Node, number>(); // null is id 0
   const cons = (value: string, next: Node | null): Node => {
-    const key = value + ' ' + (next === null ? 0 : ids.get(next));
+    const key = value + '\0' + (next?.id ?? 0); // null is id 0
     let node = interned.get(key);
     if (node === undefined) {
-      node = { value, next };
+      node = { id: interned.size + 1, value, next };
       interned.set(key, node);
-      ids.set(node, nextId++);
     }
     return node;
   };
@@ -548,20 +506,20 @@ function salvage(
   // Filled right to left: every position depends only on positions after it.
   // (Recursing instead — even just the skip-one-token chain — is a stack
   // frame per token, and a long field value overflows the stack.)
-  const table = new Array<Best>(tokens.length + 1);
-  table[tokens.length] = { valid: 0, emits: [null] };
-  for (let from = tokens.length - 1; from >= 0; from--) {
-    // Either no run starts at this token — it is a leftover, emitting its
-    // compacted self when ISBN-shaped and nothing otherwise — or a run of
-    // some length does.
-    const single = compactOf([tokens[from]]);
+  const table = new Array<Best>(compacts.length + 1);
+  table[compacts.length] = { valid: 0, emits: [null] };
+  for (let from = compacts.length - 1; from >= 0; from--) {
+    // Either no run starts at this token — it is a leftover, emitting itself
+    // when ISBN-shaped and nothing otherwise — or a run of some length does.
+    const single = compacts[from];
     const skipped = table[from + 1];
     const best: Best = { valid: skipped.valid, emits: [] };
     for (const emit of skipped.emits) {
       admit(best, isIsbnShaped(single) ? cons(single, emit) : emit);
     }
-    for (let take = 1; from + take <= tokens.length; take++) {
-      const compact = take === 1 ? single : compactOf(tokens.slice(from, from + take));
+    let compact = '';
+    for (let take = 1; from + take <= compacts.length; take++) {
+      compact += compacts[from + take - 1];
       // A valid ISBN is at most 13 characters and `compact` only grows, so
       // nothing longer can ever be admissible.
       if (compact.length > 13) break;
@@ -835,8 +793,7 @@ function findSymbolicIdentifier(
 
 function decideEntry(
   range: BibtexSourceRange,
-  entry: BibtexEntry | undefined,
-  rawEntry: string,
+  rawEntry: string | undefined,
   index: ZoteroCatalogIndex,
   duplicateKeys: ReadonlySet<string>,
 ): ZoteroLinkDecision {
@@ -845,7 +802,11 @@ function decideEntry(
   // and the cost of being wrong is an edit written into someone's field value.
   if (!range.trusted) return conflict(range, 'entry-not-editable');
   if (duplicateKeys.has(range.key)) return conflict(range, 'duplicate-bibtex-key', range.key);
-  if (!entry) return conflict(range, 'entry-not-editable');
+  // The scanner records raw text for every range it reports, so this is
+  // another cannot-happen guard bought for a lookup already paid for.  (It is
+  // also why the duplicate check comes first: with a duplicated key, the raw
+  // map holds only the last entry's text.)
+  if (rawEntry === undefined) return conflict(range, 'entry-not-editable');
 
   // What the field parser reports is only trustworthy when the entry's own
   // lexical level holds no surprises.  Each of these makes the parsed value a
@@ -914,9 +875,12 @@ function decideEntry(
 
 /** Splice each update's fields into its entry.
  *
- *  Applied last-first so that every range still describes the text it was
- *  measured against: an edit near the end of the file cannot move the bytes of
- *  one earlier in it. */
+ *  Built as one pass over the file in source order — the untouched span before
+ *  each updated entry, then its rewritten text — joined once at the end.
+ *  Splicing into a growing copy of the whole file instead recopies the
+ *  bibliography per updated entry, which is quadratic in how much of it
+ *  matched.  The scanner reports entry ranges in document order and they never
+ *  overlap, so the spans tile the file. */
 function applyUpdates(text: string, decisions: readonly ZoteroLinkDecision[]): string {
   const updates = decisions.filter(
     (d): d is Extract<ZoteroLinkDecision, { outcome: 'update' }> => d.outcome === 'update',
@@ -928,20 +892,20 @@ function applyUpdates(text: string, decisions: readonly ZoteroLinkDecision[]): s
   let documentEolCache: BibtexEol | null = null;
   const documentEol = () => (documentEolCache ??= detectBibtexEol(text));
 
-  let result = text;
-  for (let i = updates.length - 1; i >= 0; i--) {
-    const { entry, additions } = updates[i];
+  const chunks: string[] = [];
+  let pos = 0;
+  for (const { entry, additions } of updates) {
     const rawEntry = text.slice(entry.start, entry.end);
     const indent = detectBibtexFieldIndent(rawEntry);
     const lines = additions.map(a => formatBibtexFieldLine(a.name, a.value, indent));
-    const spliced = spliceFieldsIntoEntry(
-      rawEntry,
-      lines,
-      detectEntryEol(rawEntry) ?? documentEol(),
+    chunks.push(
+      text.slice(pos, entry.start),
+      spliceFieldsIntoEntry(rawEntry, lines, detectEntryEol(rawEntry) ?? documentEol()),
     );
-    result = result.slice(0, entry.start) + spliced + result.slice(entry.end);
+    pos = entry.end;
   }
-  return result;
+  chunks.push(text.slice(pos));
+  return chunks.join('');
 }
 
 function summarize(decisions: readonly ZoteroLinkDecision[]): ZoteroLinkSummary {
@@ -987,7 +951,7 @@ export function createZoteroLinkPlan(
   bibliographyText: string,
   items: readonly ZoteroCatalogItem[],
 ): ZoteroLinkPlan {
-  const { parsed, ranges, rangesTrusted } = parseBibtexWithRaw(bibliographyText);
+  const { raw, ranges, rangesTrusted } = parseBibtexWithRaw(bibliographyText);
 
   // Something in the file defeated the scanner.  Past that point an entry's
   // citation key no longer identifies one place in the file, so even the part
@@ -1005,14 +969,12 @@ export function createZoteroLinkPlan(
 
   const index = buildZoteroCatalogIndex(items);
   const duplicateKeys = findDuplicateBibtexKeys(ranges);
+  // The scanner already materialized each entry's raw text; re-slicing it
+  // here would allocate a second bibliography's worth of strings.  With a
+  // duplicated key the map holds only the last duplicate's text, but that is
+  // fine: decideEntry refuses duplicates before reading it.
   const decisions = ranges.map(range =>
-    decideEntry(
-      range,
-      parsed.get(range.key),
-      bibliographyText.slice(range.start, range.end),
-      index,
-      duplicateKeys,
-    ),
+    decideEntry(range, raw.get(range.key), index, duplicateKeys),
   );
   const updatedText = applyUpdates(bibliographyText, decisions);
 

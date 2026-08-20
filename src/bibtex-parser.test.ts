@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { parseBibtex, parseBibtexWithRaw, scanBibtexEntryBody, findDuplicateBibtexKeys, detectBibtexEol, detectEntryEol, serializeBibtex, stripOuterBraces, mergeBibtex, extractRawField, spliceFieldsIntoEntry, BibtexEntry } from './bibtex-parser';
+import { parseBibtex, parseBibtexWithRaw, scanBibtexEntryBody, findDuplicateBibtexKeys, detectBibtexEol, detectEntryEol, serializeBibtex, stripOuterBraces, stripWrappingBraces, mergeBibtex, extractRawField, spliceFieldsIntoEntry, BibtexEntry } from './bibtex-parser';
 
 describe('BibTeX Parser', () => {
   it('parses basic entry', () => {
@@ -250,6 +250,51 @@ describe('double-brace fix', () => {
 
     it('{The {RNA} Paradox} → "The {RNA} Paradox" (partial inner group, not stripped)', () => {
       expect(stripOuterBraces('{The {RNA} Paradox}')).toBe('The {RNA} Paradox');
+    });
+  });
+
+  describe('stripWrappingBraces', () => {
+    it('agrees with stripOuterBraces looped to a fixed point', () => {
+      // stripOuterBraces is the independent reference: single-pair semantics,
+      // written separately.  Looping it with trims is the whole specification
+      // of stripWrappingBraces on balanced input; on unbalanced input the
+      // contract is identity, since brace pairing is meaningless there.  This
+      // exhaustive differential is what caught this function's last two
+      // defects — the suite's own examples, written from the same mental
+      // model as the code, did not.
+      const reference = (s: string): string => {
+        for (;;) {
+          s = s.trim();
+          const t = stripOuterBraces(s);
+          if (t === s) return s;
+          s = t;
+        }
+      };
+      const balanced = (s: string): boolean => {
+        let depth = 0;
+        for (const ch of s) {
+          if (ch === '{') depth++;
+          else if (ch === '}' && --depth < 0) return false;
+        }
+        return depth === 0;
+      };
+      const alphabet = ['{', '}', 'a', ' '];
+      const walk = (s: string, left: number): void => {
+        const trimmed = s.trim();
+        expect(stripWrappingBraces(trimmed)).toBe(balanced(s) ? reference(s) : trimmed);
+        if (left === 0) return;
+        for (const ch of alphabet) walk(s + ch, left - 1);
+      };
+      walk('', 8);
+    });
+
+    it('strips deep brace nesting without quadratic cost', () => {
+      // Calling stripOuterBraces in a loop rescans the whole value per pair;
+      // this case took seconds.
+      const wrapped = '{'.repeat(50000) + 'x' + '}'.repeat(50000);
+      const started = performance.now();
+      expect(stripWrappingBraces(wrapped)).toBe('x');
+      expect(performance.now() - started).toBeLessThan(1000);
     });
   });
 

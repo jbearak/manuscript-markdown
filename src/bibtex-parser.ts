@@ -50,6 +50,49 @@ export function stripOuterBraces(s: string): string {
   return s.slice(1, -1);
 }
 
+/** Remove every brace pair that wraps the whole value, tolerating whitespace
+ *  between layers (`{ {x} }`), in linear time.
+ *
+ *  `stripOuterBraces` rescans from the start for each pair it removes, so
+ *  calling it in a loop is quadratic — a value wrapped in tens of thousands of
+ *  pairs would block a command for seconds.  Instead every brace is paired
+ *  with its partner once, up front, and layers are peeled by moving a window
+ *  inward.
+ *
+ *  The pairing is explicit — each opener matched to its own closer — because
+ *  every shortcut tried here has credited a leading brace with a closer that
+ *  belonged to a different brace, turning `{10.1/a}{b}` into a manufactured
+ *  value.  On unbalanced input nothing is stripped, since pairing is
+ *  meaningless there.  A differential test in bibtex-parser.test.ts holds this
+ *  function to `stripOuterBraces` looped to a fixed point. */
+export function stripWrappingBraces(value: string): string {
+  // closerOf[i] = index of the closer paired with the opener at index i.
+  const closerOf = new Map<number, number>();
+  const openers: number[] = [];
+  for (let i = 0; i < value.length; i++) {
+    if (value[i] === '{') openers.push(i);
+    else if (value[i] === '}') {
+      const opener = openers.pop();
+      if (opener === undefined) return value;
+      closerOf.set(opener, i);
+    }
+  }
+  if (openers.length > 0) return value;
+
+  let lo = 0;
+  let hi = value.length;
+  for (;;) {
+    while (lo < hi && /\s/.test(value[lo])) lo++;
+    while (hi > lo && /\s/.test(value[hi - 1])) hi--;
+    // The window is wrapped exactly when its first character is an opener
+    // whose own closer is its last character.
+    if (value[lo] !== '{' || closerOf.get(lo) !== hi - 1) break;
+    lo++;
+    hi--;
+  }
+  return value.slice(lo, hi);
+}
+
 interface DecodedCommand {
   value: string;
   nextIndex: number;
