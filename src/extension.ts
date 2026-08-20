@@ -64,10 +64,14 @@ import {
 	buildUnmatchedBibliography,
 	buildZoteroLibraryPickItems,
 	describeZoteroLocalApiError,
+	formatStaleUnmatchedExportNote,
+	formatUnmatchedExportBlockedNote,
+	formatUnmatchedExportFailedNote,
 	formatUnmatchedExportNote,
 	formatZoteroLinkConfirmation,
 	formatZoteroLinkNoChanges,
 	formatZoteroLinkReport,
+	UNMATCHED_EXPORT_MARKER,
 	ZOTERO_REMOTE_WORKSPACE_MESSAGE,
 } from './zotero-link-ui';
 
@@ -1830,23 +1834,61 @@ async function linkBibliographyToLibrary(
 		return;
 	}
 
+	// The plan's byte offsets are only valid against the exact text it saw,
+	// and both the .bib write and the unmatched export are derived from that
+	// snapshot — so every path that writes anything rechecks the file first.
+	// A write beneath a dirty buffer would also be undone by its next save.
+	const bibliographyChanged = async (): Promise<boolean> => {
+		const openBibDoc = vscode.workspace.textDocuments.find(
+			d => d.uri.toString() === bibUri.toString()
+		);
+		const currentBytes = await vscode.workspace.fs.readFile(bibUri);
+		return openBibDoc?.isDirty === true || !bytesEqual(currentBytes, bibBytes);
+	};
+
 	// The completion postlude, shared by the no-changes and written branches.
 	// The report is written to the channel only once the run's outcome is
 	// known: its header says "linked N", which must not outlive a cancelled
-	// confirmation or a failed write as a false record of success.
+	// confirmation or a failed write as a false record of success.  The
+	// unmatched export is best-effort: by this point any links are already
+	// committed, so its failures become notes, never a command failure.
 	const summary = plan.summary;
 	const finish = async (message: string): Promise<void> => {
 		const channel = getZoteroLinkOutputChannel();
 		channel.appendLine(formatZoteroLinkReport(plan.decisions, libraryLabel));
 		channel.appendLine('');
-		const unmatchedUri = await writeUnmatchedBibliography(bibUri, bibText, plan.decisions, libraryLabel);
-		const note = unmatchedUri
-			? formatUnmatchedExportNote(summary.unmatched, path.basename(unmatchedUri.fsPath))
-			: '';
-		await showZoteroLinkResult(message + note, unmatchedUri);
+		const exported = await writeUnmatchedBibliography(bibUri, bibText, plan.decisions, libraryLabel);
+		let note: string;
+		switch (exported.kind) {
+			case 'none':
+				note = '';
+				break;
+			case 'written':
+				note = formatUnmatchedExportNote(summary.unmatched, path.basename(exported.uri.fsPath));
+				break;
+			case 'blocked':
+				note = formatUnmatchedExportBlockedNote(summary.unmatched, exported.filename);
+				break;
+			case 'write-failed':
+				note = formatUnmatchedExportFailedNote(summary.unmatched, exported.filename);
+				break;
+			case 'stale-left':
+				note = formatStaleUnmatchedExportNote(exported.filename);
+				break;
+		}
+		await showZoteroLinkResult(
+			message + note,
+			exported.kind === 'written' ? exported.uri : undefined
+		);
 	};
 
 	if (!plan.changed) {
+		if (await bibliographyChanged()) {
+			vscode.window.showErrorMessage(
+				`"${bibName}" changed while the command was running, so nothing was written. Run it again.`
+			);
+			return;
+		}
 		await finish(formatZoteroLinkNoChanges(summary, bibName));
 		return;
 	}
@@ -1861,15 +1903,7 @@ async function linkBibliographyToLibrary(
 		return;
 	}
 
-	// The file — on disk or in an open editor — may have changed while the
-	// catalog fetch ran or the modal was up; the plan's byte offsets are only
-	// valid against the exact text it saw, and a write beneath a dirty buffer
-	// would be undone by the buffer's next save.
-	const openBibDoc = vscode.workspace.textDocuments.find(
-		d => d.uri.toString() === bibUri.toString()
-	);
-	const currentBytes = await vscode.workspace.fs.readFile(bibUri);
-	if (openBibDoc?.isDirty || !bytesEqual(currentBytes, bibBytes)) {
+	if (await bibliographyChanged()) {
 		vscode.window.showErrorMessage(
 			`"${bibName}" changed while the command was running, so nothing was written. Run it again.`
 		);
@@ -1883,31 +1917,76 @@ async function linkBibliographyToLibrary(
 	await finish(`Linked ${summary.updates} of ${summary.totalEntries} entries in "${bibName}" to Zotero.`);
 }
 
+/** What became of the unmatched export beside the bibliography. */
+type UnmatchedExportOutcome =
+	| { readonly kind: 'none' }
+	| { readonly kind: 'written'; readonly uri: vscode.Uri }
+	| { readonly kind: 'blocked'; readonly filename: string }
+	| { readonly kind: 'write-failed'; readonly filename: string }
+	| { readonly kind: 'stale-left'; readonly filename: string };
+
 /** Write `<name>-unmatched.bib` beside the bibliography so the user can
  *  import the leftover entries into Zotero and run the command again.  The
  *  file is regenerated on every run and removed once nothing is unmatched,
- *  so a stale copy never misleads a second round trip.  Returns the written
- *  file's URI, or undefined when nothing was unmatched. */
+ *  so a stale copy never misleads a second round trip.
+ *
+ *  The sidecar's path is predictable, so a file already sitting there is
+ *  replaced or deleted only when it is provably this command's own output:
+ *  it starts with the generated marker and has no unsaved edits.  Anything
+ *  else is the user's file — left untouched and reported as `blocked` (or
+ *  silently kept when there is nothing to export). */
 async function writeUnmatchedBibliography(
 	bibUri: vscode.Uri,
 	bibText: string,
 	decisions: ZoteroLinkPlan['decisions'],
 	libraryLabel: string
-): Promise<vscode.Uri | undefined> {
+): Promise<UnmatchedExportOutcome> {
 	const unmatchedUri = vscode.Uri.file(
 		bibUri.fsPath.replace(/\.bib$/i, '') + '-unmatched.bib'
 	);
+	const filename = path.basename(unmatchedUri.fsPath);
 	const content = buildUnmatchedBibliography(bibText, decisions, libraryLabel);
-	if (content === undefined) {
-		try {
-			await vscode.workspace.fs.delete(unmatchedUri);
-		} catch {
-			// Nothing to delete — the usual case.
-		}
-		return undefined;
+
+	const openDoc = vscode.workspace.textDocuments.find(
+		d => d.uri.toString() === unmatchedUri.toString()
+	);
+	let existing: 'absent' | 'ours' | 'foreign';
+	try {
+		const bytes = await vscode.workspace.fs.readFile(unmatchedUri);
+		const isOurs = new TextDecoder().decode(bytes).startsWith(UNMATCHED_EXPORT_MARKER);
+		existing = isOurs && openDoc?.isDirty !== true ? 'ours' : 'foreign';
+	} catch {
+		// Unreadable is not the same as absent: a file that exists but cannot
+		// be read cannot be proven ours, so it must not be overwritten.
+		existing = (await fileExists(unmatchedUri)) ? 'foreign' : 'absent';
 	}
-	await vscode.workspace.fs.writeFile(unmatchedUri, new TextEncoder().encode(content));
-	return unmatchedUri;
+
+	if (content === undefined) {
+		if (existing === 'ours') {
+			try {
+				await vscode.workspace.fs.delete(unmatchedUri);
+			} catch {
+				// The stale export could not be removed; without a note it
+				// would read as this run's current output.
+				return { kind: 'stale-left', filename };
+			}
+		}
+		// 'foreign' here is the user's own file (or one they edited), not
+		// stale output — leave it alone without comment.
+		return { kind: 'none' };
+	}
+
+	if (existing === 'foreign') {
+		return { kind: 'blocked', filename };
+	}
+	try {
+		// Same tiered write as the bibliography itself: the sidecar may sit
+		// beside a symlinked .bib whose directory is outside the sandbox.
+		await writeFileThroughSymlink(unmatchedUri, new TextEncoder().encode(content));
+	} catch {
+		return { kind: 'write-failed', filename };
+	}
+	return { kind: 'written', uri: unmatchedUri };
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {

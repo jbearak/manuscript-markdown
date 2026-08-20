@@ -7,6 +7,7 @@ import {
   formatZoteroLinkConfirmation,
   formatZoteroLinkNoChanges,
   formatZoteroLinkReport,
+  UNMATCHED_EXPORT_MARKER,
 } from './zotero-link-ui';
 import { parseBibtexWithRaw } from './bibtex-parser';
 import type { ZoteroLinkSummary, ZoteroLinkDecision } from './zotero-link';
@@ -207,6 +208,9 @@ describe('buildUnmatchedBibliography', () => {
       'Guttmacher Library',
     );
     expect(out).toBeDefined();
+    // The ownership guard in extension.ts recognizes its own output by this
+    // marker as the first line; a generated file must always start with it.
+    expect(out!.startsWith(UNMATCHED_EXPORT_MARKER)).toBe(true);
     expect(out).toContain('could not match in Guttmacher Library');
     expect(out).toContain('% one: no citation key, DOI, ISBN or PMID to match on');
     expect(out).toContain('% two: no item in the selected library shares an identifier');
