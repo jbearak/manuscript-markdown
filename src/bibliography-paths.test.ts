@@ -8,6 +8,7 @@ import {
   defaultBibliographyWritePath,
   resolveBibliographyWritePath,
   resolveBibliographyWritePathForOutput,
+  resolveDocumentBibliography,
   resolveDocumentBibliographyPath,
 } from './bibliography-paths';
 
@@ -113,5 +114,21 @@ describe('bibliography path helpers', () => {
       '/repo',
     );
     expect(resolved).toBeUndefined();
+  });
+
+  test('resolveDocumentBibliography reports whether the hit was configured or fallback', async () => {
+    // Export warns when a *configured* bibliography is missing but the
+    // fallback exists; that warning hangs on this distinction.
+    const existing = new Set(['/repo/docs/refs.bib', '/repo/docs/paper.bib']);
+    const fileExists = async (p: string) => existing.has(p);
+
+    const configured = await resolveDocumentBibliography('refs', '/repo/docs/paper', fileExists, '/repo');
+    expect(configured).toEqual({ path: '/repo/docs/refs.bib', source: 'configured' });
+
+    const missingConfigured = await resolveDocumentBibliography('other', '/repo/docs/paper', fileExists, '/repo');
+    expect(missingConfigured).toEqual({ path: '/repo/docs/paper.bib', source: 'fallback' });
+
+    const unconfigured = await resolveDocumentBibliography(undefined, '/repo/docs/paper', fileExists, '/repo');
+    expect(unconfigured).toEqual({ path: '/repo/docs/paper.bib', source: 'fallback' });
   });
 });

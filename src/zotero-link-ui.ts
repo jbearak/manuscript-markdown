@@ -164,9 +164,10 @@ export function formatZoteroLinkConfirmation(
     lines.push(
       'Warning: these links point into My Library, so they work only for your ' +
         'Zotero account. Collaborators’ Word will fall back to embedded ' +
-        'metadata and stop refreshing these citations. This is how Zotero ' +
-        'addresses personal libraries, not a limitation of this extension — ' +
-        'for a shared manuscript, choose a group library instead.',
+        'metadata and stop refreshing these citations. Zotero addresses ' +
+        'personal libraries per account; only group libraries have addresses ' +
+        'every member can resolve — for a shared manuscript, choose a group ' +
+        'library instead.',
     );
   }
   return {

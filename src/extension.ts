@@ -39,6 +39,7 @@ import { computeCodeRegions, overlapsCodeRegion } from './code-regions';
 import {
 	bibliographyCandidatePaths,
 	resolveBibliographyWritePathForOutput,
+	resolveDocumentBibliography,
 	resolveDocumentBibliographyPath,
 } from './bibliography-paths';
 import {
@@ -1448,28 +1449,25 @@ async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undef
 	const { metadata } = parseFrontmatter(markdown);
 
 	let bibtex: string | undefined;
-	if (metadata.bibliography) {
-		const resolved = await readBibliographyFromFrontmatterPath(metadata.bibliography, mdDir);
-		bibtex = resolved?.bibtex;
-		if (!bibtex) {
-			// Fallback to default {basePath}.bib
-			const defaultBib = vscode.Uri.file(basePath + '.bib');
-			if (await fileExists(defaultBib)) {
-				const data = await vscode.workspace.fs.readFile(defaultBib);
-				bibtex = new TextDecoder().decode(data);
-				if (hasCitations(markdown)) {
-					vscode.window.showWarningMessage(`Bibliography "${metadata.bibliography}" not found; using ${path.basename(basePath)}.bib`);
-				}
-			} else if (hasCitations(markdown)) {
-				vscode.window.showWarningMessage(`Bibliography "${metadata.bibliography}" not found and no default .bib file exists`);
-			}
-		}
-	} else {
-		const bibUri = vscode.Uri.file(basePath + '.bib');
-		if (await fileExists(bibUri)) {
-			const bibData = await vscode.workspace.fs.readFile(bibUri);
-			bibtex = new TextDecoder().decode(bibData);
-		}
+	const resolved = await resolveDocumentBibliography(
+		metadata.bibliography,
+		basePath,
+		async candidatePath => fileExists(vscode.Uri.file(candidatePath)),
+		workspaceRootPath()
+	);
+	if (resolved) {
+		const data = await vscode.workspace.fs.readFile(vscode.Uri.file(resolved.path));
+		bibtex = new TextDecoder().decode(data);
+	}
+	// A missing *configured* bibliography is worth a warning, but only when
+	// the document actually cites anything; the frontmatter-less fallback
+	// missing is the ordinary no-bibliography case and stays silent.
+	if (metadata.bibliography && resolved?.source !== 'configured' && hasCitations(markdown)) {
+		vscode.window.showWarningMessage(
+			resolved
+				? `Bibliography "${metadata.bibliography}" not found; using ${path.basename(basePath)}.bib`
+				: `Bibliography "${metadata.bibliography}" not found and no default .bib file exists`
+		);
 	}
 
 	return { markdown, basePath, sourceUri, bibtex };

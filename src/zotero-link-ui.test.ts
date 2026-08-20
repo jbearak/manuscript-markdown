@@ -107,9 +107,10 @@ describe('formatZoteroLinkConfirmation', () => {
     expect(group.detail).not.toContain('Warning');
     const personal = formatZoteroLinkConfirmation(summary, { type: 'user' });
     expect(personal.detail).toContain('only for your');
-    // The warning must not read as an extension limitation, and must point
-    // at the collaborative alternative.
-    expect(personal.detail).toContain('not a limitation of this extension');
+    // The warning attributes the behavior to Zotero's addressing scheme
+    // (so it does not read as an extension limitation) and points at the
+    // collaborative alternative.
+    expect(personal.detail).toContain('Zotero addresses personal libraries per account');
     expect(personal.detail).toContain('choose a group library');
   });
 });
