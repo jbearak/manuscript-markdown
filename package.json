@@ -950,6 +950,11 @@
           "command": "manuscript-markdown.setFrontmatter.bibliography-hanging-indent",
           "when": "editorLangId == markdown",
           "group": "2_notes@3"
+        },
+        {
+          "command": "manuscript-markdown.syncBibliographyFromZotero",
+          "when": "editorLangId == markdown",
+          "group": "3_zotero@1"
         }
       ],
       "markdown.frontmatter.code": [

@@ -220,9 +220,11 @@ describe('Toolbar Configuration Property-Based Tests', () => {
         expect(menuEntry?.when).toBe('editorLangId == markdown');
       }
 
-      const allSettingEntries = Object.values(menuIds).flatMap(
-        menuId => packageJson.contributes?.menus?.[menuId] || []
-      );
+      // The submenus may also carry non-setting commands (Sync Bibliography
+      // from Zotero sits in the citations submenu), so count only settings.
+      const allSettingEntries = Object.values(menuIds)
+        .flatMap(menuId => packageJson.contributes?.menus?.[menuId] || [])
+        .filter((entry: any) => entry.command?.startsWith('manuscript-markdown.setFrontmatter.'));
       expect(allSettingEntries.length).toBe(FRONTMATTER_MENU_SETTINGS.length);
 
       expect(
