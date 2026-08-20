@@ -1272,6 +1272,15 @@ describe('scanBibtexEntryBody', () => {
     expect(scan(raw).fieldNames).toEqual(['title', 'doi', 'doi']);
   });
 
+  it('reads a field name whole when it starts with an underscore or digit', () => {
+    // Both are names BibTeX reads whole; reporting `doi` for `_doi` would let
+    // a caller act on an identifier the entry does not have.
+    expect(scan('@article{k,\n  _doi = {10.1/a}\n}').fields).toEqual([
+      { name: '_doi', value: '10.1/a', delimiter: 'brace' },
+    ]);
+    expect(scan('@article{k,\n  1doi = {10.1/a}\n}').fieldNames).toEqual(['1doi']);
+  });
+
   it('does not mistake a bare value for a field name', () => {
     // `jan` is a value here, not a field: no `=` follows it.
     expect(scan('@article{k,\n  month = jan,\n  year = {2020}\n}').fieldNames)

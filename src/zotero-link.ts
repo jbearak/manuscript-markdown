@@ -258,12 +258,23 @@ export interface ZoteroLinkPlan {
 const DOI_URL_PREFIX_RE = /^https?:\/\/(?:dx\.)?doi\.org\//i;
 const DOI_SCHEME_PREFIX_RE = /^doi:\s*/i;
 
-/** A field value as the user typed it, reduced to comparable form: outer
- *  braces removed (`doi = {{10.1/x}}` keeps a brace pair on verbatim fields)
- *  and BibTeX punctuation escapes undone (`10.1/a\_b`). */
+/** A field value as the user typed it, reduced to comparable form: wrapping
+ *  braces removed and BibTeX punctuation escapes undone (`10.1/a\_b`).
+ *
+ *  Values reach this from the lexical walk with their delimiters stripped but
+ *  nothing else done to them, so any number of brace pairs may remain:
+ *  `pmid = {{{12345678}}}` arrives as `{{12345678}}`, and a single pass would
+ *  leave a brace on each side of an otherwise exact identifier.  Unescaping
+ *  can expose another pair (`{\{12345678\}}`), so the two alternate until the
+ *  value stops shrinking. */
 function plainFieldValue(value: string | undefined): string {
   if (value === undefined) return '';
-  return unescapeBibtexPunctuation(stripOuterBraces(value.trim())).trim();
+  let plain = value.trim();
+  for (;;) {
+    const reduced = unescapeBibtexPunctuation(stripOuterBraces(plain).trim()).trim();
+    if (reduced === plain) return plain;
+    plain = reduced;
+  }
 }
 
 /** A DOI reduced to its bare lowercase form, or undefined if the value is not
@@ -302,44 +313,52 @@ export function normalizeIsbns(value: string | undefined): string[] {
   // A space between ISBN digits is ambiguous: it separates the registration
   // groups *within* one ISBN (`978 0 306 40615 7`) as often as it separates
   // two of them (`9780306406157 0306406152`), and one field can mix both
-  // (`978 0 306 40615 7 0306406152`).  Only the digits decide.
+  // (`978 0 306 40615 7 0306406152`).  Only the digits decide, and no
+  // left-to-right rule decides them: taking the longest ISBN-shaped prefix of
+  // `0 306 40615 2 978 0 306 40615 7` runs the first ISBN's tail into the
+  // second's `978` and fabricates a pair that is in neither.
   //
-  // A token that is an ISBN by itself is taken as one and never absorbed into
-  // a longer run: joining it to its neighbour is what would turn
-  // `0306406152 978 …` into the 13-digit fiction `0306406152978`.  Only the
-  // tokens between such anchors are joined, since a grouped ISBN's leading
-  // tokens are not ISBNs on their own.
+  // So it is read as a segmentation: prefer a split of the whole run into
+  // consecutive ISBNs, shortest group first, and only fall back to scanning
+  // for isolated ISBNs when no such split exists.
   const compactOf = (tokens: readonly string[]) =>
     tokens.join('').replace(/-/g, '').toUpperCase();
-  for (const part of raw.split(/[,;\n]+/)) {
-    let run: string[] = [];
-    const flushRun = () => {
-      while (run.length >= 2) {
-        let matched = 0;
-        for (let take = run.length; take >= 2; take--) {
-          const compact = compactOf(run.slice(0, take));
-          if (isIsbn(compact)) {
-            isbns.push(compact);
-            matched = take;
-            break;
-          }
-        }
-        if (matched === 0) break;
-        run = run.slice(matched);
-      }
-      run = [];
-    };
-    for (const token of part.split(/\s+/)) {
-      if (token.length === 0) continue;
-      const alone = compactOf([token]);
-      if (isIsbn(alone)) {
-        flushRun();
-        isbns.push(alone);
-      } else {
-        run.push(token);
-      }
+
+  /** Split `tokens` entirely into ISBNs, or undefined if it does not divide.
+   *  Shortest group first, so tokens that are ISBNs on their own stay whole
+   *  rather than being absorbed into a longer neighbour. */
+  const segment = (tokens: readonly string[]): string[] | undefined => {
+    if (tokens.length === 0) return [];
+    for (let take = 1; take <= tokens.length; take++) {
+      const compact = compactOf(tokens.slice(0, take));
+      if (!isIsbn(compact)) continue;
+      const rest = segment(tokens.slice(take));
+      if (rest) return [compact, ...rest];
     }
-    flushRun();
+    return undefined;
+  };
+
+  for (const part of raw.split(/[,;\n]+/)) {
+    const tokens = part.split(/\s+/).filter(t => t.length > 0);
+    const whole = segment(tokens);
+    if (whole) {
+      isbns.push(...whole);
+      continue;
+    }
+    // The run holds something that is not part of any ISBN — a label, a stray
+    // word.  Take the ISBNs that do stand on their own and skip the rest.
+    for (let start = 0; start < tokens.length; ) {
+      let matched = 0;
+      for (let take = 1; start + take <= tokens.length; take++) {
+        const compact = compactOf(tokens.slice(start, start + take));
+        if (isIsbn(compact)) {
+          isbns.push(compact);
+          matched = take;
+          break;
+        }
+      }
+      start += matched || 1;
+    }
   }
   return isbns;
 }

@@ -78,6 +78,25 @@ describe('normalizeIsbns', () => {
     expect(normalizeIsbns('9780306406157\n0306406152')).toEqual(['9780306406157', '0306406152']);
   });
 
+  it('splits two grouped ISBNs written side by side', () => {
+    // Taking the longest ISBN-shaped prefix runs the first ISBN's tail into
+    // the second's `978`, producing a pair that is in neither.  Only a split
+    // that consumes the whole run is right.
+    expect(normalizeIsbns('0 306 40615 2 978 0 306 40615 7')).toEqual([
+      '0306406152',
+      '9780306406157',
+    ]);
+    expect(normalizeIsbns('978 0 306 40615 7 0 306 40615 2')).toEqual([
+      '9780306406157',
+      '0306406152',
+    ]);
+  });
+
+  it('reads an ISBN out of a run that does not divide evenly', () => {
+    expect(normalizeIsbns('print 9780306406157')).toEqual(['9780306406157']);
+    expect(normalizeIsbns('9780306406157 (hardcover)')).toEqual(['9780306406157']);
+  });
+
   it('reads a space-grouped ISBN alongside a plain one', () => {
     // One field, both conventions at once: the grouped ISBN's leading tokens
     // are not ISBNs on their own, so the longest run has to win.
@@ -116,6 +135,25 @@ describe('normalizePmid', () => {
   it('rejects non-numeric values', () => {
     expect(normalizePmid('PMC12345')).toBeUndefined();
     expect(normalizePmid(undefined)).toBeUndefined();
+  });
+
+  it('sees through repeated and escaped brace wrapping', () => {
+    // The lexical walk strips a value's delimiters and nothing else, so any
+    // number of pairs can remain, and unescaping can expose another.
+    expect(normalizePmid('{12345678}')).toBe('12345678');
+    expect(normalizePmid('{{12345678}}')).toBe('12345678');
+    expect(normalizePmid('{\\{12345678\\}}')).toBe('12345678');
+  });
+});
+
+describe('field value normalization', () => {
+  it('strips only wrapping braces, never inner ones', () => {
+    // Inner braces protect capitalization and are part of the value.
+    expect(normalizeDoi('{10.1000/{ABC}}')).toBe('10.1000/{abc}');
+  });
+
+  it('undoes BibTeX punctuation escapes', () => {
+    expect(normalizeDoi('10.1000/a\\_b')).toBe('10.1000/a_b');
   });
 });
 
@@ -454,6 +492,17 @@ describe('entries whose own text is ambiguous', () => {
     expect(decision.reason).toBe('symbolic-field');
     expect(decision.detail).toBe('zotero-key');
     expect(plan.updatedText).toBe(bib);
+  });
+
+  it('does not read a field name out of the middle of a longer one', () => {
+    // `_doi` and `1doi` are field names BibTeX reads whole.  Starting a name
+    // at the embedded `d` would report a `doi` the entry does not have.
+    for (const name of ['_doi', '1doi', 'xdoi']) {
+      const bib = '@article{k1, ' + name + ' = {10.1000/abc}}\n';
+      const plan = createZoteroLinkPlan(bib, matching);
+      expect(decisionWithOutcome(plan.decisions, 'k1', 'unmatched').reason).toBe('no-identifiers');
+      expect(plan.updatedText).toBe(bib);
+    }
   });
 
   it('does not match on an identifier that is inside another value', () => {

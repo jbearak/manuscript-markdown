@@ -904,7 +904,11 @@ export interface BibtexEntryFieldOccurrence {
 }
 
 const ENTRY_HEADER_RE = /^@\w+\s*[{(]/;
-const NAME_START_RE = /[A-Za-z]/;
+/** A field name may start with anything a name may contain — `_doi` and `1doi`
+ *  are names BibTeX reads whole.  Starting a name only at a letter would read
+ *  `_doi` as the name `doi`, and a caller matching on field names would then
+ *  act on a `doi` the file does not have. */
+const NAME_START_RE = /[\w-]/;
 const NAME_CHAR_RE = /[\w-]/;
 const SPACE_RE = /\s/;
 
