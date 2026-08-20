@@ -321,3 +321,47 @@ export async function fetchZoteroCatalog(
     extra,
   }));
 }
+
+/** How many item keys ride in one `itemKey=` batch.  The parameter is a
+ *  comma-joined list in the query string; 50 keys is ~450 bytes of URL,
+ *  comfortably under every parser's limits, and each response arrives in
+ *  milliseconds. */
+const BIBTEX_BATCH_SIZE = 50;
+
+/** The BibTeX exports for the given item keys, keyed by item key.
+ *
+ *  Fetched in batches via `?itemKey=…&include=bibtex` rather than riding on
+ *  the catalog request: asking the translator to render an entire library
+ *  multiplies the catalog's response ~40x (measured 42MB and 33s for 17k
+ *  items), while a matched bibliography is at most a few hundred keys.
+ *  Batches run sequentially — the server reruns its search per request, and
+ *  hammering it in parallel starves the Zotero UI.
+ *
+ *  A key the server does not answer for, or whose export is empty, is simply
+ *  absent from the result; the sync planner degrades that entry to
+ *  identity-only. */
+export async function fetchZoteroBibtex(
+  scope: ZoteroLibraryScope,
+  keys: readonly string[],
+  options: ZoteroLocalApiOptions = {},
+): Promise<Map<string, string>> {
+  const prefix = scope.type === 'user' ? '/users/0' : '/groups/' + scope.groupId;
+  const result = new Map<string, string>();
+  for (let i = 0; i < keys.length; i += BIBTEX_BATCH_SIZE) {
+    const batch = keys.slice(i, i + BIBTEX_BATCH_SIZE);
+    const rows = await requestArray(
+      prefix + '/items?itemKey=' + batch.join(',') + '&include=bibtex',
+      CATALOG_TIMEOUT_MS,
+      options,
+    );
+    for (const row of rows) {
+      const record = asRecord(row);
+      const key = asString(record?.key);
+      const bibtex = asString(record?.bibtex);
+      if (key !== undefined && bibtex !== undefined && bibtex.trim().length > 0) {
+        result.set(key, bibtex);
+      }
+    }
+  }
+  return result;
+}

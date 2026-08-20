@@ -55,8 +55,10 @@ import {
 } from './frontmatter-settings';
 import { getPostExportAction } from './post-export-action';
 import { createZoteroLinkPlan, type ZoteroLinkPlan } from './zotero-link';
+import { createZoteroSyncPlan, zoteroSyncKeys } from './zotero-sync';
 import {
 	listZoteroGroups,
+	fetchZoteroBibtex,
 	fetchZoteroCatalog,
 	ZoteroLocalApiError,
 	type ZoteroLibraryScope,
@@ -69,12 +71,14 @@ import {
 	formatUnmatchedExportBlockedNote,
 	formatUnmatchedExportFailedNote,
 	formatUnmatchedExportNote,
-	formatZoteroLinkConfirmation,
-	formatZoteroLinkNoChanges,
-	formatZoteroLinkReport,
+	formatZoteroSyncConfirmation,
+	formatZoteroSyncNoChanges,
+	formatZoteroSyncReport,
+	formatZoteroSyncSuccess,
+	LEGACY_UNMATCHED_EXPORT_MARKER,
 	UNMATCHED_EXPORT_MARKER,
 	ZOTERO_REMOTE_WORKSPACE_MESSAGE,
-} from './zotero-link-ui';
+} from './zotero-sync-ui';
 
 // --- Implementation notes ---
 // - Editor decorations: use light/dark sub-properties for theme-aware backgrounds
@@ -386,10 +390,10 @@ export function activate(context: vscode.ExtensionContext) {
 		})
 	);
 
-	// Register Link Bibliography to Zotero command
+	// Register Sync Bibliography from Zotero command
 	context.subscriptions.push(
-		vscode.commands.registerCommand('manuscript-markdown.linkBibliographyToZotero', () =>
-			linkBibliographyToZotero()
+		vscode.commands.registerCommand('manuscript-markdown.syncBibliographyFromZotero', () =>
+			syncBibliographyFromZotero()
 		)
 	);
 
@@ -1686,7 +1690,7 @@ async function fileExists(uri: vscode.Uri): Promise<boolean> {
 	}
 }
 
-// --- Link Bibliography to Zotero ---
+// --- Sync Bibliography from Zotero ---
 
 let zoteroLinkOutputChannel: vscode.OutputChannel | undefined;
 
@@ -1746,7 +1750,7 @@ async function resolveZoteroLinkBibliography(): Promise<vscode.Uri | undefined> 
 	return undefined;
 }
 
-async function linkBibliographyToZotero(): Promise<void> {
+async function syncBibliographyFromZotero(): Promise<void> {
 	// The extension host runs next to the workspace; in a remote workspace
 	// "localhost" is the remote machine, not the desktop running Zotero.
 	if (vscode.env.remoteName !== undefined) {
@@ -1774,19 +1778,19 @@ async function linkBibliographyToZotero(): Promise<void> {
 	try {
 		const groups = await listZoteroGroups();
 		const picked = await vscode.window.showQuickPick(buildZoteroLibraryPickItems(groups), {
-			placeHolder: 'Select the Zotero library to link against',
-			title: 'Link Bibliography to Zotero',
+			placeHolder: 'Select the Zotero library to sync from',
+			title: 'Sync Bibliography from Zotero',
 		});
 		if (!picked) {
 			return;
 		}
-		await linkBibliographyToLibrary(bibUri, picked.scope, picked.label);
+		await syncBibliographyFromLibrary(bibUri, picked.scope, picked.label);
 	} catch (err: unknown) {
 		showZoteroLinkError(err);
 	}
 }
 
-async function linkBibliographyToLibrary(
+async function syncBibliographyFromLibrary(
 	bibUri: vscode.Uri,
 	scope: ZoteroLibraryScope,
 	libraryLabel: string
@@ -1806,27 +1810,39 @@ async function linkBibliographyToLibrary(
 		return;
 	}
 
-	const catalog = await vscode.window.withProgress(
+	// One cancellable progress covers both round trips to Zotero: the catalog
+	// (to decide which item each entry is) and the matched items' BibTeX (to
+	// pull their current metadata).  The link plan runs in between because it
+	// determines which keys the second fetch needs.
+	const fetched = await vscode.window.withProgress(
 		{
 			location: vscode.ProgressLocation.Notification,
 			title: `Fetching "${libraryLabel}" from Zotero…`,
 			cancellable: true,
 		},
-		(_progress, token) => {
+		async (_progress, token) => {
 			const controller = new AbortController();
 			token.onCancellationRequested(() => controller.abort());
-			return fetchZoteroCatalog(scope, { signal: controller.signal });
+			const catalog = await fetchZoteroCatalog(scope, { signal: controller.signal });
+			const linkPlan = createZoteroLinkPlan(bibText, catalog);
+			if (linkPlan.blocked !== undefined) {
+				return { linkPlan, bibtexByKey: new Map<string, string>() };
+			}
+			const bibtexByKey = await fetchZoteroBibtex(scope, zoteroSyncKeys(linkPlan.decisions), {
+				signal: controller.signal,
+			});
+			return { linkPlan, bibtexByKey };
 		}
 	);
 
-	const plan = createZoteroLinkPlan(bibText, catalog);
-	if (plan.blocked === 'unparsable-bibliography') {
+	if (fetched.linkPlan.blocked === 'unparsable-bibliography') {
 		vscode.window.showErrorMessage(
 			`Could not safely parse "${bibName}", so nothing was changed. ` +
 			'Check the file for unbalanced braces or a stray @.'
 		);
 		return;
 	}
+	const plan = createZoteroSyncPlan(bibText, fetched.linkPlan.decisions, fetched.bibtexByKey);
 
 	// The plan's byte offsets are only valid against the exact text it saw,
 	// and both the .bib write and the unmatched export are derived from that
@@ -1849,7 +1865,7 @@ async function linkBibliographyToLibrary(
 	const summary = plan.summary;
 	const finish = async (message: string): Promise<void> => {
 		const channel = getZoteroLinkOutputChannel();
-		channel.appendLine(formatZoteroLinkReport(plan.decisions, libraryLabel));
+		channel.appendLine(formatZoteroSyncReport(plan.decisions, plan.metadata, libraryLabel));
 		channel.appendLine('');
 		const exported = await writeUnmatchedBibliography(bibUri, bibText, plan.decisions, libraryLabel);
 		let note: string;
@@ -1858,13 +1874,13 @@ async function linkBibliographyToLibrary(
 				note = '';
 				break;
 			case 'written':
-				note = formatUnmatchedExportNote(summary.unmatched, path.basename(exported.uri.fsPath));
+				note = formatUnmatchedExportNote(summary.link.unmatched, path.basename(exported.uri.fsPath));
 				break;
 			case 'blocked':
-				note = formatUnmatchedExportBlockedNote(summary.unmatched, exported.filename);
+				note = formatUnmatchedExportBlockedNote(summary.link.unmatched, exported.filename);
 				break;
 			case 'write-failed':
-				note = formatUnmatchedExportFailedNote(summary.unmatched, exported.filename);
+				note = formatUnmatchedExportFailedNote(summary.link.unmatched, exported.filename);
 				break;
 			case 'stale-left':
 				note = formatStaleUnmatchedExportNote(exported.filename);
@@ -1883,17 +1899,17 @@ async function linkBibliographyToLibrary(
 			);
 			return;
 		}
-		await finish(formatZoteroLinkNoChanges(summary, bibName));
+		await finish(formatZoteroSyncNoChanges(summary, bibName));
 		return;
 	}
 
-	const confirmation = formatZoteroLinkConfirmation(summary, scope);
+	const confirmation = formatZoteroSyncConfirmation(summary, scope);
 	const choice = await vscode.window.showInformationMessage(
 		confirmation.message,
 		{ modal: true, detail: confirmation.detail },
-		'Add Links'
+		'Update'
 	);
-	if (choice !== 'Add Links') {
+	if (choice !== 'Update') {
 		return;
 	}
 
@@ -1908,7 +1924,7 @@ async function linkBibliographyToLibrary(
 	// replaced by a regular file.
 	await writeFileThroughSymlink(bibUri, new TextEncoder().encode(plan.updatedText));
 
-	await finish(`Linked ${summary.updates} of ${summary.totalEntries} entries in "${bibName}" to Zotero.`);
+	await finish(formatZoteroSyncSuccess(summary, bibName));
 }
 
 /** What became of the unmatched export beside the bibliography. */
@@ -1947,7 +1963,12 @@ async function writeUnmatchedBibliography(
 	let existing: 'absent' | 'ours' | 'foreign';
 	try {
 		const bytes = await vscode.workspace.fs.readFile(unmatchedUri);
-		const isOurs = new TextDecoder().decode(bytes).startsWith(UNMATCHED_EXPORT_MARKER);
+		const text = new TextDecoder().decode(bytes);
+		// Both markers are ours: the legacy one was written while the command
+		// was named "Link Bibliography to Zotero".
+		const isOurs =
+			text.startsWith(UNMATCHED_EXPORT_MARKER) ||
+			text.startsWith(LEGACY_UNMATCHED_EXPORT_MARKER);
 		existing = isOurs && openDoc?.isDirty !== true ? 'ours' : 'foreign';
 	} catch {
 		// Unreadable is not the same as absent: a file that exists but cannot
@@ -2017,5 +2038,5 @@ function showZoteroLinkError(err: unknown): void {
 		return;
 	}
 	const message = err instanceof Error ? err.message : String(err);
-	vscode.window.showErrorMessage('Link Bibliography to Zotero failed: ' + message);
+	vscode.window.showErrorMessage('Sync Bibliography from Zotero failed: ' + message);
 }

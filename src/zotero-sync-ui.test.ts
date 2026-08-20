@@ -4,13 +4,15 @@ import {
   buildZoteroLibraryPickItems,
   describeZoteroLocalApiError,
   formatUnmatchedExportNote,
-  formatZoteroLinkConfirmation,
-  formatZoteroLinkNoChanges,
-  formatZoteroLinkReport,
+  formatZoteroSyncConfirmation,
+  formatZoteroSyncNoChanges,
+  formatZoteroSyncReport,
+  formatZoteroSyncSuccess,
   UNMATCHED_EXPORT_MARKER,
-} from './zotero-link-ui';
+} from './zotero-sync-ui';
 import { parseBibtexWithRaw } from './bibtex-parser';
 import type { ZoteroLinkSummary, ZoteroLinkDecision } from './zotero-link';
+import type { ZoteroEntryMetadataResult, ZoteroSyncSummary } from './zotero-sync';
 import { zoteroItem } from './zotero-link.fixtures';
 
 // ---------------------------------------------------------------------------
@@ -31,7 +33,9 @@ describe('buildZoteroLibraryPickItems', () => {
   it('warns on the personal-library row that its links are personal', () => {
     const items = buildZoteroLibraryPickItems([]);
     expect(items).toHaveLength(1);
-    expect(items[0].detail).toContain('group library');
+    // One short clause: QuickPick detail rows truncate, so the "choose a
+    // group library" guidance lives in the confirmation modal and docs.
+    expect(items[0].detail).toBe('Links to My Library work only for your Zotero account.');
   });
 });
 
@@ -70,7 +74,7 @@ describe('describeZoteroLocalApiError', () => {
 // Confirmation modal
 // ---------------------------------------------------------------------------
 
-const summaryOf = (partial: Partial<ZoteroLinkSummary>): ZoteroLinkSummary => ({
+const linkSummaryOf = (partial: Partial<ZoteroLinkSummary>): ZoteroLinkSummary => ({
   totalEntries: 0,
   updates: 0,
   preserved: 0,
@@ -81,31 +85,78 @@ const summaryOf = (partial: Partial<ZoteroLinkSummary>): ZoteroLinkSummary => ({
   ...partial,
 });
 
-describe('formatZoteroLinkConfirmation', () => {
+/** A sync summary whose derived fields default to "links only, no metadata":
+ *  entriesChanged mirrors the link updates unless stated otherwise. */
+const summaryOf = (
+  link: Partial<ZoteroLinkSummary>,
+  sync: Partial<Omit<ZoteroSyncSummary, 'link'>> = {},
+): ZoteroSyncSummary => {
+  const linkSummary = linkSummaryOf(link);
+  return {
+    link: linkSummary,
+    entriesChanged: linkSummary.updates,
+    metadataEntries: 0,
+    metadataFields: 0,
+    metadataUnavailable: 0,
+    ...sync,
+  };
+};
+
+describe('formatZoteroSyncConfirmation', () => {
   it('states what will change and what stays untouched', () => {
-    const c = formatZoteroLinkConfirmation(
+    const c = formatZoteroSyncConfirmation(
       summaryOf({ totalEntries: 10, updates: 4, preserved: 3, ambiguous: 1, conflicts: 1, unmatched: 1 }),
       { type: 'group', groupId: 1 },
     );
-    expect(c.message).toBe('Add Zotero links to 4 bibliography entries?');
-    expect(c.detail).toContain('4 of 10 entries will get Zotero links.');
-    expect(c.detail).toContain('3 already linked, 1 ambiguous, 1 conflict, 1 unmatched — left unchanged.');
+    expect(c.message).toBe('Update 4 bibliography entries from Zotero?');
+    expect(c.detail).toContain('4 of 10 entries will be linked to Zotero items.');
+    expect(c.detail).toContain(
+      '3 already in sync, 1 matched more than one item, 1 conflict, 1 not found in Zotero — left unchanged.',
+    );
+  });
+
+  it('counts metadata updates separately from new links', () => {
+    const c = formatZoteroSyncConfirmation(
+      summaryOf(
+        { totalEntries: 10, updates: 2, preserved: 8 },
+        { entriesChanged: 5, metadataEntries: 3, metadataFields: 7 },
+      ),
+      { type: 'group', groupId: 1 },
+    );
+    expect(c.message).toBe('Update 5 bibliography entries from Zotero?');
+    expect(c.detail).toContain('2 of 10 entries will be linked to Zotero items.');
+    expect(c.detail).toContain('Metadata will be updated in 3 entries (7 fields).');
+    // 10 total − 5 rewritten = 5 already in sync, even though 8 are "preserved"
+    // in link terms — three of those preserved entries get metadata edits.
+    expect(c.detail).toContain('5 already in sync — left unchanged.');
+  });
+
+  it('omits the link line when only metadata changes', () => {
+    const c = formatZoteroSyncConfirmation(
+      summaryOf(
+        { totalEntries: 4, updates: 0, preserved: 4 },
+        { entriesChanged: 2, metadataEntries: 2, metadataFields: 3 },
+      ),
+      { type: 'group', groupId: 1 },
+    );
+    expect(c.detail).not.toContain('will be linked');
+    expect(c.detail).toContain('Metadata will be updated in 2 entries (3 fields).');
   });
 
   it('uses singular forms for one entry', () => {
-    const c = formatZoteroLinkConfirmation(
+    const c = formatZoteroSyncConfirmation(
       summaryOf({ totalEntries: 1, updates: 1 }),
       { type: 'group', groupId: 1 },
     );
-    expect(c.message).toBe('Add Zotero links to 1 bibliography entry?');
-    expect(c.detail).toContain('1 of 1 entry will get Zotero links.');
+    expect(c.message).toBe('Update 1 bibliography entry from Zotero?');
+    expect(c.detail).toContain('1 of 1 entry will be linked to Zotero items.');
   });
 
   it('warns about personal links only for the personal library', () => {
     const summary = summaryOf({ totalEntries: 2, updates: 2 });
-    const group = formatZoteroLinkConfirmation(summary, { type: 'group', groupId: 1 });
+    const group = formatZoteroSyncConfirmation(summary, { type: 'group', groupId: 1 });
     expect(group.detail).not.toContain('Warning');
-    const personal = formatZoteroLinkConfirmation(summary, { type: 'user' });
+    const personal = formatZoteroSyncConfirmation(summary, { type: 'user' });
     expect(personal.detail).toContain('only for your');
     // The warning attributes the behavior to Zotero's addressing scheme
     // (so it does not read as an extension limitation) and points at the
@@ -128,7 +179,9 @@ const entryAt = (key: string) => ({
   trusted: true,
 });
 
-describe('formatZoteroLinkReport', () => {
+const noMetadata: ZoteroEntryMetadataResult[] = [];
+
+describe('formatZoteroSyncReport', () => {
   it('renders every outcome in its own section, with counts derived from the decisions', () => {
     const decisions: ZoteroLinkDecision[] = [
       {
@@ -150,12 +203,14 @@ describe('formatZoteroLinkReport', () => {
       { outcome: 'conflict', entry: entryAt('d'), reason: 'unknown-zotero-key', detail: 'XXXXXXXX' },
       { outcome: 'unmatched', entry: entryAt('e'), reason: 'no-identifiers' },
     ];
-    const report = formatZoteroLinkReport(decisions, 'Guttmacher Library');
+    const report = formatZoteroSyncReport(decisions, noMetadata, 'Guttmacher Library');
 
-    expect(report).toContain('Guttmacher Library, 5 entries');
-    expect(report).toContain('linked 1, already linked 1, ambiguous 1, conflicts 1, unmatched 1');
+    expect(report).toContain('Sync Bibliography from Zotero — Guttmacher Library, 5 entries');
+    expect(report).toContain(
+      'linked 1, already linked 1, metadata updated in 0, ambiguous 1, conflicts 1, unmatched 1',
+    );
     expect(report).toContain('New links:\n  a → AAAAAAAA (doi) — Paper A');
-    expect(report).toContain('Already linked (unchanged):\n  b → BBBBBBBB');
+    expect(report).toContain('Already linked:\n  b → BBBBBBBB');
     expect(report).toContain('Ambiguous (left unchanged):\n  c: 2 items share its isbn (CCCCCCC1, CCCCCCC2)');
     expect(report).toContain(
       'Conflicts (left unchanged):\n  d: no item in the selected library has this zotero-key ("XXXXXXXX")',
@@ -164,29 +219,94 @@ describe('formatZoteroLinkReport', () => {
   });
 
   it('omits empty sections', () => {
-    const report = formatZoteroLinkReport(
+    const report = formatZoteroSyncReport(
       [{ outcome: 'unmatched', entry: entryAt('a'), reason: 'no-exact-match' }],
+      noMetadata,
       'G',
     );
     expect(report).toContain('Unmatched');
     expect(report).not.toContain('New links');
     expect(report).not.toContain('Conflicts');
+    expect(report).not.toContain('Metadata');
+  });
+
+  it('lists metadata updates, skips, and unavailability with their reasons', () => {
+    const metadata: ZoteroEntryMetadataResult[] = [
+      {
+        key: 'a',
+        changes: [
+          { kind: 'update', name: 'title', from: 'Old', to: 'New' },
+          { kind: 'add', name: 'volume', to: '12' },
+          { kind: 'type', from: 'misc', to: 'article' },
+        ],
+        skipped: [{ name: 'month', reason: 'macro-value' }],
+        unavailable: false,
+      },
+      { key: 'b', changes: [], skipped: [{ name: 'doi', reason: 'repeated-field' }], unavailable: false },
+      { key: 'c', changes: [], skipped: [], unavailable: true },
+    ];
+    const report = formatZoteroSyncReport(
+      [
+        {
+          outcome: 'update',
+          entry: entryAt('a'),
+          tier: 'doi',
+          evidence: ['doi'],
+          target: zoteroItem('AAAAAAAA'),
+          additions: [],
+        },
+      ],
+      metadata,
+      'G',
+    );
+    expect(report).toContain('metadata updated in 1');
+    expect(report).toContain('Metadata updates:\n  a: title updated, volume added, type @misc → @article');
+    expect(report).toContain(
+      'Metadata fields not applied:\n' +
+        '  a: month — Zotero exports it as a macro reference, not a literal value\n' +
+        '  b: doi — the field appears more than once in the entry',
+    );
+    expect(report).toContain('Metadata unavailable');
+    expect(report).toContain('\n  c');
   });
 });
 
-describe('formatZoteroLinkNoChanges', () => {
+describe('formatZoteroSyncSuccess', () => {
+  it('reports links and metadata updates in plain language', () => {
+    expect(
+      formatZoteroSyncSuccess(
+        summaryOf({ totalEntries: 9, updates: 4 }, { entriesChanged: 6, metadataEntries: 3, metadataFields: 5 }),
+        'refs.bib',
+      ),
+    ).toBe('Synced "refs.bib": linked 4 entries to Zotero and updated metadata in 3 entries.');
+  });
+
+  it('mentions only what happened', () => {
+    expect(
+      formatZoteroSyncSuccess(summaryOf({ totalEntries: 2, updates: 1 }), 'refs.bib'),
+    ).toBe('Synced "refs.bib": linked 1 entry to Zotero.');
+    expect(
+      formatZoteroSyncSuccess(
+        summaryOf({ totalEntries: 2, updates: 0 }, { entriesChanged: 1, metadataEntries: 1, metadataFields: 2 }),
+        'refs.bib',
+      ),
+    ).toBe('Synced "refs.bib": updated metadata in 1 entry.');
+  });
+});
+
+describe('formatZoteroSyncNoChanges', () => {
   it('says why nothing changed', () => {
-    const message = formatZoteroLinkNoChanges(
+    const message = formatZoteroSyncNoChanges(
       summaryOf({ totalEntries: 5, preserved: 3, ambiguous: 1, unmatched: 1 }),
       'refs.bib',
     );
-    expect(message).toBe('No new Zotero links for "refs.bib" (3 already linked, 1 ambiguous, 1 unmatched).');
+    expect(message).toBe(
+      'No changes to "refs.bib" (3 already in sync, 1 matched more than one item, 1 not found in Zotero).',
+    );
   });
 
   it('stays plain for an empty bibliography', () => {
-    expect(formatZoteroLinkNoChanges(summaryOf({}), 'refs.bib')).toBe(
-      'No new Zotero links for "refs.bib".',
-    );
+    expect(formatZoteroSyncNoChanges(summaryOf({}), 'refs.bib')).toBe('No changes to "refs.bib".');
   });
 });
 
@@ -212,7 +332,7 @@ describe('buildUnmatchedBibliography', () => {
     // The ownership guard in extension.ts recognizes its own output by this
     // marker as the first line; a generated file must always start with it.
     expect(out!.startsWith(UNMATCHED_EXPORT_MARKER)).toBe(true);
-    expect(out).toContain('could not match in Guttmacher Library');
+    expect(out).toContain('could not find in Guttmacher Library');
     expect(out).toContain('% one: no citation key, DOI, ISBN or PMID to match on');
     expect(out).toContain('% two: no item in the selected library shares an identifier');
     // Byte-exact entry slices.
@@ -268,11 +388,12 @@ describe('buildUnmatchedBibliography', () => {
 });
 
 describe('formatUnmatchedExportNote', () => {
-  it('pluralizes and names the exported file', () => {
+  it('walks the user through the round trip in plain language', () => {
     expect(formatUnmatchedExportNote(2, 'refs-unmatched.bib')).toBe(
-      ' 2 unmatched entries were exported to "refs-unmatched.bib" — ' +
-        'import it into Zotero, then run this command again.',
+      ' 2 entries in your .bib file were not found in Zotero, so they were copied to ' +
+        'a new file, "refs-unmatched.bib", that you can import into Zotero (File → Import). ' +
+        'After importing, run this command again to link them.',
     );
-    expect(formatUnmatchedExportNote(1, 'refs-unmatched.bib')).toContain('1 unmatched entry was');
+    expect(formatUnmatchedExportNote(1, 'refs-unmatched.bib')).toContain('1 entry in your .bib file was');
   });
 });

@@ -1321,8 +1321,15 @@ describe('scanBibtexEntryBody', () => {
     // BibTeX field names are not identifiers: everything up to the separator
     // belongs to the name.  Reporting `doi` for `:doi` would let a caller act
     // on an identifier the entry does not have.
-    expect(scan('@article{k,\n  _doi = {10.1/a}\n}').fields).toEqual([
-      { name: '_doi', value: '10.1/a', delimiter: 'brace' },
+    const raw = '@article{k,\n  _doi = {10.1/a}\n}';
+    expect(scan(raw).fields).toEqual([
+      {
+        name: '_doi',
+        value: '10.1/a',
+        delimiter: 'brace',
+        valueStart: raw.indexOf('{10.1/a}'),
+        valueEnd: raw.indexOf('{10.1/a}') + '{10.1/a}'.length,
+      },
     ]);
     for (const name of ['1doi', ':doi', '+doi', '.doi', '/doi', '@doi', '-doi']) {
       expect(scan('@article{k,\n  ' + name + ' = {10.1/a}\n}').fieldNames).toEqual([name]);
@@ -1370,11 +1377,19 @@ describe('scanBibtexEntryBody', () => {
 
   it('returns each field occurrence with the value it read', () => {
     const raw = '@article{k,\n  title = {T},\n  note = "q",\n  year = 2020\n}';
+    // Value offsets bracket the delimited text, so the slice round-trips.
+    const at = (text: string) => ({
+      valueStart: raw.indexOf(text),
+      valueEnd: raw.indexOf(text) + text.length,
+    });
     expect(scan(raw).fields).toEqual([
-      { name: 'title', value: 'T', delimiter: 'brace' },
-      { name: 'note', value: 'q', delimiter: 'quote' },
-      { name: 'year', value: '2020', delimiter: 'bare' },
+      { name: 'title', value: 'T', delimiter: 'brace', ...at('{T}') },
+      { name: 'note', value: 'q', delimiter: 'quote', ...at('"q"') },
+      { name: 'year', value: '2020', delimiter: 'bare', ...at('2020') },
     ]);
+    for (const field of scan(raw).fields) {
+      expect(raw.slice(field.valueStart, field.valueEnd)).toContain(field.value);
+    }
   });
 
   it('does not report field-shaped text inside a value', () => {

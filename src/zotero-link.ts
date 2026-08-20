@@ -1,4 +1,4 @@
-/** Pure core for "Link Bibliography to Zotero".
+/** Pure link planner for "Sync Bibliography from Zotero".
  *
  *  Takes the text of a .bib file plus a catalog of Zotero items from one
  *  library, and returns a plan: what each entry would become, and the whole

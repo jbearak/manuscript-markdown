@@ -288,9 +288,9 @@ If no Markdown file is open: `"No active Markdown file"`
 
 ---
 
-### Link Bibliography to Zotero
+### Sync Bibliography from Zotero
 
-Available from the Command Palette. Adds `zotero-key` / `zotero-uri` fields to BibTeX entries by matching them against a Zotero library over Zotero's local API, so that citations exported to Word refresh live under Zotero's control (see [Zotero Citation Roundtrip](zotero-roundtrip.md)).
+Available from the Command Palette. Links BibTeX entries to their records in a Zotero library (adding `zotero-key` / `zotero-uri` fields) and pulls each linked entry's current metadata down from Zotero, over Zotero's local API — so that citations exported to Word refresh live under Zotero's control (see [Zotero Citation Roundtrip](zotero-roundtrip.md), which also explains when this command is and is not needed — a bibliography converted from a Zotero-managed DOCX already has the links).
 
 **Requirements shown to the user:**
 
@@ -302,17 +302,18 @@ Available from the Command Palette. Adds `zotero-key` / `zotero-uri` fields to B
 
 1. Resolves the bibliography: the active `.bib` file, or the active Markdown file's frontmatter `bibliography:` entry (falling back to `<name>.bib` beside the Markdown file). Refuses to run while the `.bib` file has unsaved changes.
 2. Shows a Quick Pick of libraries: group libraries first (sorted by name, with item counts), My Library last with a note that its links only work for your own Zotero account.
-3. Fetches the library catalog with a cancellable progress notification.
+3. Fetches the library catalog, then the matched items' BibTeX, with a cancellable progress notification.
 4. Matches entries by exact identifiers only (existing Zotero identity, Better BibTeX citation key, DOI, ISBN/PMID) — never by title or author.
-5. Shows a confirmation modal stating how many entries will gain links and how many are left unchanged (already linked, ambiguous, conflicts, unmatched). Selecting My Library adds a warning that personal links stop refreshing for collaborators — a property of Zotero's personal libraries, not of this extension — and suggests a group library for shared manuscripts.
-6. On confirmation, writes only the new fields; every other byte of the file is unchanged. If the file changed on disk while the modal was open, nothing is written.
-7. Exports any unmatched entries to `<name>-unmatched.bib` beside the bibliography, each prefixed with a `%` comment naming why it did not match, so they can be imported into Zotero (*File → Import*) for a second round trip. The file is regenerated on every run and deleted once nothing is unmatched — but only when it is recognizably this command's own output (it starts with the generated header and has no unsaved edits); a file that isn't is left untouched and the completion message says so. The completion message offers **Open Unmatched** when the export was written. Ambiguous and conflicted entries are not exported — their items are already in the library, so importing them again would create duplicates.
+5. Plans the metadata updates for every matched entry (newly linked and already linked alike): fields whose Zotero value differs are rewritten in place, fields Zotero has that the entry lacks are added, and fields only the `.bib` has are preserved. `file` is never written; `abstract`/`keywords` are updated when present but never added; a value Zotero exports as a bare macro (`month = aug`) or a field the entry repeats is skipped and reported.
+6. Shows a confirmation modal stating how many entries will be linked, how many get metadata updates (and how many fields), and how many are left unchanged (already in sync, matched more than one item, conflicts, not found in Zotero). Selecting My Library adds a warning that personal links stop refreshing for collaborators — a property of Zotero's personal libraries, not of this extension — and suggests a group library for shared manuscripts.
+7. On confirmation, rewrites only the added fields and genuinely changed values; every other byte of the file is unchanged, and a second run plans no further changes. If the file changed on disk while the modal was open, nothing is written.
+8. Exports any entries not found in Zotero to `<name>-unmatched.bib` beside the bibliography, each prefixed with a `%` comment naming why it did not match, so they can be imported into Zotero (*File → Import*) for a second round trip. The file is regenerated on every run and deleted once nothing is unmatched — but only when it is recognizably this command's own output (it starts with the generated header and has no unsaved edits); a file that isn't is left untouched and the completion message says so. The completion message offers **Open Unmatched** when the export was written. Ambiguous and conflicted entries are not exported — their items are already in the library, so importing them again would create duplicates.
 
-A per-entry report (new links, already linked, ambiguous, conflicts, unmatched — each with its reason) is written to the **Manuscript Markdown: Zotero** output channel; the completion message offers **Show Details** to open it.
+A per-entry report (new links, already linked, metadata updates, metadata fields not applied, ambiguous, conflicts, unmatched — each with its reason) is written to the **Manuscript Markdown: Zotero** output channel; the completion message offers **Show Details** to open it.
 
 | Scenario | Message |
 |----------|---------|
-| Remote workspace | `"Link Bibliography to Zotero needs Zotero running on the same machine as this window. …"` |
+| Remote workspace | `"Sync Bibliography from Zotero needs Zotero running on the same machine as this window. …"` |
 | No manuscript or .bib open | `"Open the Markdown manuscript or its .bib file, then run this command again."` |
 | .bib has unsaved changes | `"<name>.bib" has unsaved changes. Save it, then run this command again.` |
 | Zotero not running | `"Could not connect to Zotero. Start Zotero on this computer, then run this command again."` |

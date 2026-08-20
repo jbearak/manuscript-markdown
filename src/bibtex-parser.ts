@@ -944,6 +944,12 @@ export interface BibtexEntryFieldOccurrence {
    *  macro, not the item key `ABCD1234`.  A bare number (`year = 2020`) is a
    *  literal and means itself. */
   readonly delimiter: 'brace' | 'quote' | 'bare';
+  /** Half-open offsets of the value within the scanned entry text, delimiters
+   *  included for brace/quote values.  Replacing exactly this slice rewrites
+   *  the value while leaving the field name's own spelling and the
+   *  surrounding layout untouched. */
+  readonly valueStart: number;
+  readonly valueEnd: number;
 }
 
 const ENTRY_HEADER_RE = /^@\w+\s*[{(]/;
@@ -1060,19 +1066,37 @@ export function scanBibtexEntryBody(rawEntry: string): BibtexEntryBodyScan {
     if (ch === '{') {
       const close = skipBraced(at);
       if (close === -1) return -1;
-      fields.push({ name, value: rawEntry.slice(at + 1, close - 1), delimiter: 'brace' });
+      fields.push({
+        name,
+        value: rawEntry.slice(at + 1, close - 1),
+        delimiter: 'brace',
+        valueStart: at,
+        valueEnd: close,
+      });
       return close;
     }
     if (ch === '"') {
       const close = skipQuoted(at);
       if (close === -1) return -1;
-      fields.push({ name, value: rawEntry.slice(at + 1, close - 1), delimiter: 'quote' });
+      fields.push({
+        name,
+        value: rawEntry.slice(at + 1, close - 1),
+        delimiter: 'quote',
+        valueStart: at,
+        valueEnd: close,
+      });
       return close;
     }
     let bareEnd = at;
     while (bareEnd < end && NAME_CHAR_RE.test(rawEntry[bareEnd])) bareEnd++;
     if (bareEnd === at) return at;
-    fields.push({ name, value: rawEntry.slice(at, bareEnd), delimiter: 'bare' });
+    fields.push({
+      name,
+      value: rawEntry.slice(at, bareEnd),
+      delimiter: 'bare',
+      valueStart: at,
+      valueEnd: bareEnd,
+    });
     return bareEnd;
   };
 

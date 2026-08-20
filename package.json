@@ -185,8 +185,8 @@
         "title": "Set Citation Style"
       },
       {
-        "command": "manuscript-markdown.linkBibliographyToZotero",
-        "title": "Link Bibliography to Zotero"
+        "command": "manuscript-markdown.syncBibliographyFromZotero",
+        "title": "Sync Bibliography from Zotero"
       },
       {
         "command": "manuscript-markdown.setFrontmatter.title",
