@@ -3,10 +3,11 @@ import {
   buildZoteroLibraryPickItems,
   describeZoteroLocalApiError,
   formatZoteroLinkConfirmation,
+  formatZoteroLinkNoChanges,
   formatZoteroLinkReport,
 } from './zotero-link-ui';
-import type { ZoteroLinkPlan, ZoteroLinkSummary, ZoteroLinkDecision } from './zotero-link';
-import type { ZoteroLocalApiErrorKind } from './zotero-local-api';
+import type { ZoteroLinkSummary, ZoteroLinkDecision } from './zotero-link';
+import { zoteroItem } from './zotero-link.fixtures';
 
 // ---------------------------------------------------------------------------
 // Library picker
@@ -46,7 +47,9 @@ describe('describeZoteroLocalApiError', () => {
   });
 
   it('covers every showable error kind with non-empty prose', () => {
-    const kinds: ZoteroLocalApiErrorKind[] = [
+    // 'aborted' is excluded from the parameter type: the caller aborting is
+    // its own action, so there is nothing to show.
+    const kinds: Parameters<typeof describeZoteroLocalApiError>[0][] = [
       'not-running',
       'api-disabled',
       'timeout',
@@ -56,8 +59,6 @@ describe('describeZoteroLocalApiError', () => {
     for (const kind of kinds) {
       expect(describeZoteroLocalApiError(kind).length).toBeGreaterThan(20);
     }
-    // Cancellation was the user's own action — nothing to show.
-    expect(describeZoteroLocalApiError('cancelled')).toBe('');
   });
 });
 
@@ -122,45 +123,29 @@ const entryAt = (key: string) => ({
   trusted: true,
 });
 
-const planOf = (
-  decisions: ZoteroLinkDecision[],
-  summary: Partial<ZoteroLinkSummary> = {},
-): ZoteroLinkPlan => ({
-  decisions,
-  summary: summaryOf({ totalEntries: decisions.length, ...summary }),
-  updatedText: '',
-  changed: false,
-});
-
 describe('formatZoteroLinkReport', () => {
-  it('renders every outcome in its own section, in source order', () => {
-    const plan = planOf(
-      [
-        {
-          outcome: 'update',
-          entry: entryAt('a'),
-          tier: 'doi',
-          evidence: ['doi'],
-          target: { key: 'AAAAAAAA', uri: 'u', title: 'Paper A' },
-          additions: [],
-        },
-        { outcome: 'preserve', entry: entryAt('b'), target: { key: 'BBBBBBBB', uri: 'u' } },
-        {
-          outcome: 'ambiguous',
-          entry: entryAt('c'),
-          tier: 'isbn-pmid',
-          evidence: ['isbn'],
-          candidates: [
-            { key: 'CCCCCCC1', uri: 'u' },
-            { key: 'CCCCCCC2', uri: 'u' },
-          ],
-        },
-        { outcome: 'conflict', entry: entryAt('d'), reason: 'unknown-zotero-key', detail: 'XXXXXXXX' },
-        { outcome: 'unmatched', entry: entryAt('e'), reason: 'no-identifiers' },
-      ],
-      { updates: 1, preserved: 1, ambiguous: 1, conflicts: 1, unmatched: 1 },
-    );
-    const report = formatZoteroLinkReport(plan, 'Guttmacher Library');
+  it('renders every outcome in its own section, with counts derived from the decisions', () => {
+    const decisions: ZoteroLinkDecision[] = [
+      {
+        outcome: 'update',
+        entry: entryAt('a'),
+        tier: 'doi',
+        evidence: ['doi'],
+        target: zoteroItem('AAAAAAAA', { title: 'Paper A' }),
+        additions: [],
+      },
+      { outcome: 'preserve', entry: entryAt('b'), target: zoteroItem('BBBBBBBB') },
+      {
+        outcome: 'ambiguous',
+        entry: entryAt('c'),
+        tier: 'isbn-pmid',
+        evidence: ['isbn'],
+        candidates: [zoteroItem('CCCCCCC1'), zoteroItem('CCCCCCC2')],
+      },
+      { outcome: 'conflict', entry: entryAt('d'), reason: 'unknown-zotero-key', detail: 'XXXXXXXX' },
+      { outcome: 'unmatched', entry: entryAt('e'), reason: 'no-identifiers' },
+    ];
+    const report = formatZoteroLinkReport(decisions, 'Guttmacher Library');
 
     expect(report).toContain('Guttmacher Library, 5 entries');
     expect(report).toContain('linked 1, already linked 1, ambiguous 1, conflicts 1, unmatched 1');
@@ -174,13 +159,28 @@ describe('formatZoteroLinkReport', () => {
   });
 
   it('omits empty sections', () => {
-    const plan = planOf(
+    const report = formatZoteroLinkReport(
       [{ outcome: 'unmatched', entry: entryAt('a'), reason: 'no-exact-match' }],
-      { unmatched: 1 },
+      'G',
     );
-    const report = formatZoteroLinkReport(plan, 'G');
     expect(report).toContain('Unmatched');
     expect(report).not.toContain('New links');
     expect(report).not.toContain('Conflicts');
+  });
+});
+
+describe('formatZoteroLinkNoChanges', () => {
+  it('says why nothing changed', () => {
+    const message = formatZoteroLinkNoChanges(
+      summaryOf({ totalEntries: 5, preserved: 3, ambiguous: 1, unmatched: 1 }),
+      'refs.bib',
+    );
+    expect(message).toBe('No new Zotero links for "refs.bib" (3 already linked, 1 ambiguous, 1 unmatched).');
+  });
+
+  it('stays plain for an empty bibliography', () => {
+    expect(formatZoteroLinkNoChanges(summaryOf({}), 'refs.bib')).toBe(
+      'No new Zotero links for "refs.bib".',
+    );
   });
 });

@@ -39,6 +39,7 @@ import { computeCodeRegions, overlapsCodeRegion } from './code-regions';
 import {
 	bibliographyCandidatePaths,
 	resolveBibliographyWritePathForOutput,
+	resolveDocumentBibliographyPath,
 } from './bibliography-paths';
 import {
 	buildEmbedPathTargetUri,
@@ -63,6 +64,7 @@ import {
 	buildZoteroLibraryPickItems,
 	describeZoteroLocalApiError,
 	formatZoteroLinkConfirmation,
+	formatZoteroLinkNoChanges,
 	formatZoteroLinkReport,
 	ZOTERO_REMOTE_WORKSPACE_MESSAGE,
 } from './zotero-link-ui';
@@ -1717,18 +1719,14 @@ async function resolveZoteroLinkBibliography(): Promise<vscode.Uri | undefined> 
 
 	const basePath = getOutputBasePath(mdDoc.uri.fsPath);
 	const { metadata } = parseFrontmatter(mdDoc.getText());
-	if (metadata.bibliography) {
-		const resolved = await readBibliographyFromFrontmatterPath(
-			metadata.bibliography,
-			path.dirname(basePath)
-		);
-		if (resolved) {
-			return resolved.uri;
-		}
-	}
-	const defaultBib = vscode.Uri.file(basePath + '.bib');
-	if (await fileExists(defaultBib)) {
-		return defaultBib;
+	const resolved = await resolveDocumentBibliographyPath(
+		metadata.bibliography,
+		basePath,
+		async candidatePath => fileExists(vscode.Uri.file(candidatePath)),
+		workspaceRootPath()
+	);
+	if (resolved !== undefined) {
+		return vscode.Uri.file(resolved);
 	}
 	vscode.window.showErrorMessage(
 		metadata.bibliography
@@ -1809,25 +1807,12 @@ async function linkBibliographyToLibrary(
 	}
 
 	const channel = getZoteroLinkOutputChannel();
-	channel.appendLine(formatZoteroLinkReport(plan, libraryLabel));
+	channel.appendLine(formatZoteroLinkReport(plan.decisions, libraryLabel));
 	channel.appendLine('');
 
 	const summary = plan.summary;
 	if (!plan.changed) {
-		const parts = [
-			summary.preserved > 0 ? `${summary.preserved} already linked` : '',
-			summary.ambiguous > 0 ? `${summary.ambiguous} ambiguous` : '',
-			summary.conflicts > 0 ? `${summary.conflicts} with conflicts` : '',
-			summary.unmatched > 0 ? `${summary.unmatched} unmatched` : '',
-		].filter(p => p !== '');
-		const detail = parts.length > 0 ? ` (${parts.join(', ')})` : '';
-		const action = await vscode.window.showInformationMessage(
-			`No new Zotero links for "${path.basename(bibUri.fsPath)}"${detail}.`,
-			'Show Details'
-		);
-		if (action === 'Show Details') {
-			channel.show();
-		}
+		await showZoteroLinkResult(formatZoteroLinkNoChanges(summary, path.basename(bibUri.fsPath)));
 		return;
 	}
 
@@ -1850,20 +1835,29 @@ async function linkBibliographyToLibrary(
 		);
 		return;
 	}
-	await vscode.workspace.fs.writeFile(bibUri, new TextEncoder().encode(plan.updatedText));
+	// The .bib may be a symlink whose target sits outside VS Code's sandbox;
+	// use the same tiered write as export so the link is written through, not
+	// replaced by a regular file.
+	await writeFileThroughSymlink(bibUri, new TextEncoder().encode(plan.updatedText));
 
-	const action = await vscode.window.showInformationMessage(
-		`Linked ${summary.updates} of ${summary.totalEntries} entries in "${path.basename(bibUri.fsPath)}" to Zotero.`,
-		'Show Details'
+	await showZoteroLinkResult(
+		`Linked ${summary.updates} of ${summary.totalEntries} entries in "${path.basename(bibUri.fsPath)}" to Zotero.`
 	);
+}
+
+/** A completion notification with a "Show Details" action that opens the
+ *  per-entry report in the output channel. */
+async function showZoteroLinkResult(message: string): Promise<void> {
+	const action = await vscode.window.showInformationMessage(message, 'Show Details');
 	if (action === 'Show Details') {
-		channel.show();
+		getZoteroLinkOutputChannel().show();
 	}
 }
 
 function showZoteroLinkError(err: unknown): void {
 	if (err instanceof ZoteroLocalApiError) {
-		if (err.kind === 'cancelled') {
+		if (err.kind === 'aborted') {
+			// The user pressed Cancel on the progress notification.
 			return;
 		}
 		if (err.kind === 'request-failed') {

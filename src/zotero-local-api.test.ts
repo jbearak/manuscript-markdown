@@ -99,7 +99,7 @@ describe('zotero-local-api error taxonomy', () => {
     await expectKind(fetchZoteroCatalog(GROUP_SCOPE, { fetchFn }), 'timeout');
   });
 
-  it('reports an abort as cancelled when the caller aborted', async () => {
+  it('distinguishes a caller abort from its own deadline', async () => {
     const controller = new AbortController();
     const fetchFn: ZoteroFetch = async () => {
       controller.abort();
@@ -107,7 +107,7 @@ describe('zotero-local-api error taxonomy', () => {
     };
     await expectKind(
       fetchZoteroCatalog(GROUP_SCOPE, { fetchFn, signal: controller.signal }),
-      'cancelled',
+      'aborted',
     );
   });
 

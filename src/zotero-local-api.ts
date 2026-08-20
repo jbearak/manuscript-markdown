@@ -60,9 +60,10 @@ export type ZoteroLocalApiErrorKind =
   | 'api-disabled'
   /** A request exceeded its deadline. */
   | 'timeout'
-  /** The caller's own abort signal fired — the user cancelled.  Never worth
-   *  showing: the user knows what they did. */
-  | 'cancelled'
+  /** The caller's own abort signal fired, rather than this adapter's
+   *  deadline.  What that means — usually a pressed Cancel button — is the
+   *  caller's knowledge, not this adapter's. */
+  | 'aborted'
   /** The personal library's real id is unknown — the user has never logged
    *  in — so no portable URI can be built for its items. */
   | 'user-id-unavailable'
@@ -135,7 +136,7 @@ async function requestArray(
   };
   const aborted = (): ZoteroLocalApiError =>
     options.signal?.aborted
-      ? new ZoteroLocalApiError('cancelled', 'The user cancelled the request.')
+      ? new ZoteroLocalApiError('aborted', 'The caller aborted the request.')
       : new ZoteroLocalApiError('timeout', 'Zotero did not answer within ' + timeoutMs + 'ms.');
   let response: Awaited<ReturnType<ZoteroFetch>>;
   try {

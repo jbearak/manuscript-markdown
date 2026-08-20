@@ -10,7 +10,6 @@
 
 import type {
   ZoteroLinkDecision,
-  ZoteroLinkPlan,
   ZoteroLinkSummary,
   ZoteroLinkConflictReason,
   ZoteroLinkUnmatchedReason,
@@ -67,8 +66,14 @@ export function buildZoteroLibraryPickItems(
  *  failures name the exact user action: `not-running` means nothing answered
  *  on the port, `api-disabled` means Zotero answered 403 because the
  *  "Allow other applications…" setting is off — different fixes, and telling
- *  the user the wrong one strands them. */
-export function describeZoteroLocalApiError(kind: ZoteroLocalApiErrorKind): string {
+ *  the user the wrong one strands them.
+ *
+ *  `aborted` is excluded: the caller aborting is its own action, so there is
+ *  nothing to tell the user, and the exclusion makes forgetting to suppress
+ *  it a type error rather than an empty notification. */
+export function describeZoteroLocalApiError(
+  kind: Exclude<ZoteroLocalApiErrorKind, 'aborted'>,
+): string {
   switch (kind) {
     case 'not-running':
       return (
@@ -89,9 +94,6 @@ export function describeZoteroLocalApiError(kind: ZoteroLocalApiErrorKind): stri
         'other applications can resolve. Log in to your Zotero account in Zotero, ' +
         'or choose a group library instead.'
       );
-    case 'cancelled':
-      // The user pressed Cancel; there is nothing to explain.
-      return '';
     case 'request-failed':
       return 'The request to Zotero failed unexpectedly. See the output channel for details.';
   }
@@ -120,6 +122,25 @@ export interface ZoteroLinkConfirmation {
 const plural = (n: number, noun: string, nouns: string = noun + 's'): string =>
   n + ' ' + (n === 1 ? noun : nouns);
 
+/** The entries a run leaves alone, phrased for a notification: "3 already
+ *  linked, 1 ambiguous, 2 conflicts".  Empty when everything matched. */
+function describeUntouched(summary: ZoteroLinkSummary): string {
+  const untouched: string[] = [];
+  if (summary.preserved > 0) untouched.push(summary.preserved + ' already linked');
+  if (summary.ambiguous > 0) untouched.push(summary.ambiguous + ' ambiguous');
+  if (summary.conflicts > 0) untouched.push(plural(summary.conflicts, 'conflict'));
+  if (summary.unmatched > 0) untouched.push(summary.unmatched + ' unmatched');
+  return untouched.join(', ');
+}
+
+/** The notification for a run that has nothing to write: every entry is
+ *  already linked, unmatched, or held back — and the message says which. */
+export function formatZoteroLinkNoChanges(summary: ZoteroLinkSummary, filename: string): string {
+  const untouched = describeUntouched(summary);
+  const detail = untouched.length > 0 ? ' (' + untouched + ')' : '';
+  return 'No new Zotero links for "' + filename + '"' + detail + '.';
+}
+
 /** The modal shown before anything is written.  Only `updates` entries will
  *  change; everything else is enumerated so "left unchanged" is a statement,
  *  not an implication. */
@@ -127,11 +148,7 @@ export function formatZoteroLinkConfirmation(
   summary: ZoteroLinkSummary,
   scope: ZoteroLibraryScope,
 ): ZoteroLinkConfirmation {
-  const untouched: string[] = [];
-  if (summary.preserved > 0) untouched.push(summary.preserved + ' already linked');
-  if (summary.ambiguous > 0) untouched.push(summary.ambiguous + ' ambiguous');
-  if (summary.conflicts > 0) untouched.push(plural(summary.conflicts, 'conflict'));
-  if (summary.unmatched > 0) untouched.push(summary.unmatched + ' unmatched');
+  const untouched = describeUntouched(summary);
 
   const lines: string[] = [
     summary.updates +
@@ -140,7 +157,7 @@ export function formatZoteroLinkConfirmation(
       ' will get Zotero links.',
   ];
   if (untouched.length > 0) {
-    lines.push(untouched.join(', ') + ' — left unchanged.');
+    lines.push(untouched + ' — left unchanged.');
   }
   if (scope.type === 'user') {
     lines.push(
@@ -219,28 +236,41 @@ const REPORT_SECTIONS: ReadonlyArray<
 ];
 
 /** The full per-entry report, for the output channel.  Sections appear only
- *  when non-empty, each entry on its own line, in source order. */
-export function formatZoteroLinkReport(plan: ZoteroLinkPlan, libraryLabel: string): string {
-  const s = plan.summary;
+ *  when non-empty, each entry on its own line, in source order.  Takes the
+ *  decisions alone — every count in the header is derived from them, so the
+ *  report cannot disagree with its own sections. */
+export function formatZoteroLinkReport(
+  decisions: readonly ZoteroLinkDecision[],
+  libraryLabel: string,
+): string {
+  const byOutcome = new Map<ZoteroLinkDecision['outcome'], ZoteroLinkDecision[]>();
+  for (const decision of decisions) {
+    const bucket = byOutcome.get(decision.outcome);
+    if (bucket) bucket.push(decision);
+    else byOutcome.set(decision.outcome, [decision]);
+  }
+  const count = (outcome: ZoteroLinkDecision['outcome']): number =>
+    byOutcome.get(outcome)?.length ?? 0;
+
   const lines: string[] = [
     'Link Bibliography to Zotero — ' +
       libraryLabel +
       ', ' +
-      plural(s.totalEntries, 'entry', 'entries'),
+      plural(decisions.length, 'entry', 'entries'),
     'linked ' +
-      s.updates +
+      count('update') +
       ', already linked ' +
-      s.preserved +
+      count('preserve') +
       ', ambiguous ' +
-      s.ambiguous +
+      count('ambiguous') +
       ', conflicts ' +
-      s.conflicts +
+      count('conflict') +
       ', unmatched ' +
-      s.unmatched,
+      count('unmatched'),
   ];
   for (const [outcome, heading] of REPORT_SECTIONS) {
-    const matching = plan.decisions.filter(d => d.outcome === outcome);
-    if (matching.length === 0) continue;
+    const matching = byOutcome.get(outcome);
+    if (matching === undefined) continue;
     lines.push('', heading + ':');
     for (const decision of matching) lines.push('  ' + reportLine(decision));
   }
