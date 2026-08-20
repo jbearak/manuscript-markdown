@@ -99,6 +99,24 @@ function parseZoteroUri(uri: string): string | undefined {
   return m[1];
 }
 
+/** Build the canonical identity URI for one item.  Everything this function
+ *  emits must satisfy `ZOTERO_URI_RE` above — it lives beside the grammar so
+ *  the two cannot drift.  The library id must be real (>= 1); the caller owns
+ *  that guarantee. */
+export function formatZoteroItemUri(
+  libraryType: 'user' | 'group',
+  libraryId: number,
+  key: string,
+): string {
+  return (
+    'http://zotero.org/' +
+    (libraryType === 'user' ? 'users/' : 'groups/') +
+    libraryId +
+    '/items/' +
+    key
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Domain types
 // ---------------------------------------------------------------------------

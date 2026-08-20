@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'bun:test';
 import {
-  listZoteroLibraries,
+  listZoteroGroups,
   fetchZoteroCatalog,
   ZoteroLocalApiError,
   type ZoteroFetch,
-  type ZoteroLibraryRef,
+  type ZoteroLibraryScope,
 } from './zotero-local-api';
 
 // ---------------------------------------------------------------------------
@@ -14,7 +14,6 @@ import {
 interface CannedResponse {
   status?: number;
   body?: unknown;
-  totalResults?: number;
 }
 
 /** A fetch that answers each URL from a route table and records what was
@@ -33,19 +32,11 @@ function fakeFetch(
     return {
       ok: status >= 200 && status < 300,
       status,
-      headers: {
-        get: (name: string) =>
-          name === 'Total-Results' && canned.totalResults !== undefined
-            ? String(canned.totalResults)
-            : null,
-      },
       json: async () => canned.body,
     };
   };
   return { fetchFn, requests };
 }
-
-const startOf = (url: string): number => Number(new URL(url).searchParams.get('start') ?? '0');
 
 /** An item row as the Local API shapes it. */
 function apiItem(
@@ -67,8 +58,8 @@ function apiItem(
   };
 }
 
-const GROUP_LIB: ZoteroLibraryRef = { type: 'group', id: 2295646, name: 'G', itemCount: 3 };
-const USER_LIB: ZoteroLibraryRef = { type: 'user', id: 0, name: 'My Library', itemCount: 3 };
+const GROUP_SCOPE: ZoteroLibraryScope = { type: 'group', groupId: 2295646 };
+const USER_SCOPE: ZoteroLibraryScope = { type: 'user' };
 
 async function expectKind(promise: Promise<unknown>, kind: string): Promise<ZoteroLocalApiError> {
   try {
@@ -91,47 +82,84 @@ describe('zotero-local-api error taxonomy', () => {
     const fetchFn: ZoteroFetch = async () => {
       throw new TypeError('fetch failed: connection refused');
     };
-    await expectKind(fetchZoteroCatalog(GROUP_LIB, { fetchFn }), 'not-running');
+    await expectKind(fetchZoteroCatalog(GROUP_SCOPE, { fetchFn }), 'not-running');
   });
 
   it('reports HTTP 403 as the local API being disabled', async () => {
     // Zotero running with the "Allow other applications…" setting off answers
     // 403 — a different user action than starting Zotero, so a distinct kind.
     const { fetchFn } = fakeFetch([['/items', () => ({ status: 403 })]]);
-    await expectKind(fetchZoteroCatalog(GROUP_LIB, { fetchFn }), 'api-disabled');
+    await expectKind(fetchZoteroCatalog(GROUP_SCOPE, { fetchFn }), 'api-disabled');
   });
 
-  it('reports an abort as a timeout', async () => {
+  it('reports an abort during the request as a timeout', async () => {
     const fetchFn: ZoteroFetch = async () => {
       throw new DOMException('timed out', 'TimeoutError');
     };
-    await expectKind(fetchZoteroCatalog(GROUP_LIB, { fetchFn }), 'timeout');
+    await expectKind(fetchZoteroCatalog(GROUP_SCOPE, { fetchFn }), 'timeout');
+  });
+
+  it('reports an abort while reading the body as a timeout too', async () => {
+    // Headers arriving before the deadline while the body stalls is as hung
+    // as a request that never answered — not "unreadable JSON".
+    const fetchFn: ZoteroFetch = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new DOMException('timed out', 'TimeoutError');
+      },
+    });
+    await expectKind(fetchZoteroCatalog(GROUP_SCOPE, { fetchFn }), 'timeout');
+  });
+
+  it('does not blame Zotero for a non-network transport failure', async () => {
+    // Only TypeError is fetch's connection-failure shape; anything else is a
+    // defect in the transport or its arguments, and "start Zotero" would be
+    // the wrong advice.
+    const fetchFn: ZoteroFetch = async () => {
+      throw new RangeError('bad argument');
+    };
+    await expectKind(fetchZoteroCatalog(GROUP_SCOPE, { fetchFn }), 'request-failed');
   });
 
   it('passes its deadline to the transport as an abort signal', async () => {
     let sawSignal: AbortSignal | undefined;
     const fetchFn: ZoteroFetch = async (_url, init) => {
       sawSignal = init?.signal;
-      return {
-        ok: true,
-        status: 200,
-        headers: { get: () => '0' },
-        json: async () => [],
-      };
+      return { ok: true, status: 200, json: async () => [] };
     };
-    await fetchZoteroCatalog(GROUP_LIB, { fetchFn, timeoutMs: 1234 });
+    await fetchZoteroCatalog(GROUP_SCOPE, { fetchFn });
     expect(sawSignal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('pins the API version on every request', async () => {
+    let sawHeaders: Record<string, string> | undefined;
+    const fetchFn: ZoteroFetch = async (_url, init) => {
+      sawHeaders = init?.headers;
+      return { ok: true, status: 200, json: async () => [] };
+    };
+    await fetchZoteroCatalog(GROUP_SCOPE, { fetchFn });
+    expect(sawHeaders?.['Zotero-API-Version']).toBe('3');
   });
 
   it('reports other HTTP failures with their status', async () => {
     const { fetchFn } = fakeFetch([['/items', () => ({ status: 500 })]]);
-    const error = await expectKind(fetchZoteroCatalog(GROUP_LIB, { fetchFn }), 'request-failed');
+    const error = await expectKind(fetchZoteroCatalog(GROUP_SCOPE, { fetchFn }), 'request-failed');
     expect(error.message).toContain('500');
   });
 
-  it('reports a non-list response as a failed request', async () => {
+  it('reports unreadable and non-list responses as failed requests', async () => {
+    const badJson: ZoteroFetch = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError('unexpected token');
+      },
+    });
+    await expectKind(fetchZoteroCatalog(GROUP_SCOPE, { fetchFn: badJson }), 'request-failed');
+
     const { fetchFn } = fakeFetch([['/items', () => ({ body: { not: 'a list' } })]]);
-    await expectKind(fetchZoteroCatalog(GROUP_LIB, { fetchFn }), 'request-failed');
+    await expectKind(fetchZoteroCatalog(GROUP_SCOPE, { fetchFn }), 'request-failed');
   });
 });
 
@@ -140,14 +168,23 @@ describe('zotero-local-api error taxonomy', () => {
 // ---------------------------------------------------------------------------
 
 describe('fetchZoteroCatalog', () => {
+  it('fetches top-level items in one unpaginated request', async () => {
+    // One request is one coherent snapshot; /items/top keeps child
+    // attachments and notes on the server.
+    const { fetchFn, requests } = fakeFetch([
+      ['/groups/2295646/items/top', () => ({ body: [apiItem('ABCD1234')] })],
+    ]);
+    await fetchZoteroCatalog(GROUP_SCOPE, { fetchFn });
+    expect(requests).toEqual(['http://localhost:23119/api/groups/2295646/items/top']);
+  });
+
   it('maps item rows to catalog items with canonical group URIs', async () => {
     const { fetchFn } = fakeFetch([
-      ['/groups/2295646/items', () => ({
+      ['/groups/2295646/items/top', () => ({
         body: [apiItem('ABCD1234', { title: 'T', DOI: '10.1/a', ISBN: '9780306406157', extra: 'PMID: 123' })],
-        totalResults: 1,
       })],
     ]);
-    const items = await fetchZoteroCatalog(GROUP_LIB, { fetchFn });
+    const items = await fetchZoteroCatalog(GROUP_SCOPE, { fetchFn });
     expect(items).toEqual([
       {
         key: 'ABCD1234',
@@ -161,171 +198,147 @@ describe('fetchZoteroCatalog', () => {
     ]);
   });
 
+  it('builds group URIs from the selected group, whatever the rows claim', async () => {
+    // The request URL is the authority on which library the rows belong to.
+    // A row with a missing or garbled `library` envelope must neither fail
+    // the fetch nor redirect its item into another library.
+    const { fetchFn } = fakeFetch([
+      ['/groups/2295646/items/top', () => ({
+        body: [
+          apiItem('AAAAAAAA', {}, null),
+          apiItem('BBBBBBBB', {}, { type: 'user', id: 2417153 }),
+        ],
+      })],
+    ]);
+    const items = await fetchZoteroCatalog(GROUP_SCOPE, { fetchFn });
+    expect(items.map(i => i.uri)).toEqual([
+      'http://zotero.org/groups/2295646/items/AAAAAAAA',
+      'http://zotero.org/groups/2295646/items/BBBBBBBB',
+    ]);
+  });
+
   it('builds personal URIs from the real library id, never /users/0/', async () => {
     // Requests address the personal library as the /users/0/ placeholder, but
     // each row's `library` carries the real id — the only id worth writing.
     const { fetchFn, requests } = fakeFetch([
-      ['/users/0/items', () => ({
-        body: [apiItem('ABCD1234', {}, { type: 'user', id: 2417153 })],
-        totalResults: 1,
+      ['/users/0/items/top', () => ({
+        body: [
+          apiItem('ABCD1234', {}, { type: 'user', id: 2417153 }),
+          // A row whose envelope is missing rides along on its siblings' id.
+          apiItem('EFGH5678', {}, null),
+        ],
       })],
     ]);
-    const items = await fetchZoteroCatalog(USER_LIB, { fetchFn });
-    expect(items[0].uri).toBe('http://zotero.org/users/2417153/items/ABCD1234');
-    expect(requests[0]).toContain('/users/0/items');
+    const items = await fetchZoteroCatalog(USER_SCOPE, { fetchFn });
+    expect(items.map(i => i.uri)).toEqual([
+      'http://zotero.org/users/2417153/items/ABCD1234',
+      'http://zotero.org/users/2417153/items/EFGH5678',
+    ]);
+    expect(requests[0]).toContain('/users/0/items/top');
   });
 
-  it('fails the whole fetch when a personal item has no real library id', async () => {
+  it.each([
+    ['no library envelope at all', null],
+    ['a library id of 0', { type: 'user' as const, id: 0 }],
+    ['a negative library id', { type: 'user' as const, id: -1 }],
+    ['a fractional library id', { type: 'user' as const, id: 1.5 }],
+    ['a NaN library id', { type: 'user' as const, id: Number.NaN }],
+  ])('fails a personal fetch whose rows carry %s', async (_what, library) => {
     // A URI built without a real id is one nobody — including the user after
     // a future login — can resolve.  Better to link nothing than that.
     const { fetchFn } = fakeFetch([
-      ['/users/0/items', () => ({
-        body: [apiItem('ABCD1234', {}, null)],
-        totalResults: 1,
-      })],
+      ['/users/0/items/top', () => ({ body: [apiItem('ABCD1234', {}, library)] })],
     ]);
-    await expectKind(fetchZoteroCatalog(USER_LIB, { fetchFn }), 'user-id-unavailable');
+    await expectKind(fetchZoteroCatalog(USER_SCOPE, { fetchFn }), 'user-id-unavailable');
   });
 
-  it('rejects a library id of 0 as unavailable, not as an identity', async () => {
-    const { fetchFn } = fakeFetch([
-      ['/users/0/items', () => ({
-        body: [apiItem('ABCD1234', {}, { type: 'user', id: 0 })],
-        totalResults: 1,
-      })],
-    ]);
-    await expectKind(fetchZoteroCatalog(USER_LIB, { fetchFn }), 'user-id-unavailable');
+  it('returns an empty catalog for an empty personal library, id or not', async () => {
+    const { fetchFn } = fakeFetch([['/users/0/items/top', () => ({ body: [] })]]);
+    expect(await fetchZoteroCatalog(USER_SCOPE, { fetchFn })).toEqual([]);
   });
 
-  it('drops attachments, notes and annotations', async () => {
+  it('fails when personal rows disagree about the library id', async () => {
     const { fetchFn } = fakeFetch([
-      ['/items', () => ({
+      ['/users/0/items/top', () => ({
+        body: [
+          apiItem('AAAAAAAA', {}, { type: 'user', id: 1 }),
+          apiItem('BBBBBBBB', {}, { type: 'user', id: 2 }),
+        ],
+      })],
+    ]);
+    await expectKind(fetchZoteroCatalog(USER_SCOPE, { fetchFn }), 'request-failed');
+  });
+
+  it('drops standalone attachments, notes and annotations', async () => {
+    const { fetchFn } = fakeFetch([
+      ['/items/top', () => ({
         body: [
           apiItem('AAAAAAAA', { itemType: 'attachment' }),
           apiItem('BBBBBBBB', { itemType: 'note' }),
           apiItem('CCCCCCCC', { itemType: 'annotation' }),
           apiItem('DDDDDDDD', { itemType: 'book' }),
         ],
-        totalResults: 4,
       })],
     ]);
-    const items = await fetchZoteroCatalog(GROUP_LIB, { fetchFn });
+    const items = await fetchZoteroCatalog(GROUP_SCOPE, { fetchFn });
     expect(items.map(i => i.key)).toEqual(['DDDDDDDD']);
   });
 
   it('skips malformed rows without failing the fetch', async () => {
+    // Includes keys that are not 8 uppercase alphanumerics: everything
+    // written into a document is validated against that pattern, so a row
+    // that fails it would be an unwritable catalog item.
     const { fetchFn } = fakeFetch([
-      ['/items', () => ({
-        body: [null, 42, { data: {} }, apiItem('DDDDDDDD')],
-        totalResults: 4,
+      ['/items/top', () => ({
+        body: [null, 42, { data: {} }, apiItem('abcd1234'), apiItem('TOOLONGKEY1'), apiItem('DDDDDDDD')],
       })],
     ]);
-    const items = await fetchZoteroCatalog(GROUP_LIB, { fetchFn });
+    const items = await fetchZoteroCatalog(GROUP_SCOPE, { fetchFn });
     expect(items.map(i => i.key)).toEqual(['DDDDDDDD']);
-  });
-
-  it('walks every page of a paginated listing', async () => {
-    // 1200 items at limit=500: three pages, the last one short.
-    const all = Array.from({ length: 1200 }, (_, i) =>
-      apiItem('K' + String(i).padStart(7, '0')),
-    );
-    const { fetchFn, requests } = fakeFetch([
-      ['/items', url => ({
-        body: all.slice(startOf(url), startOf(url) + 500),
-        totalResults: 1200,
-      })],
-    ]);
-    const items = await fetchZoteroCatalog(GROUP_LIB, { fetchFn });
-    expect(items.length).toBe(1200);
-    expect(items[0].key).toBe('K0000000');
-    expect(items[1199].key).toBe('K0001199');
-    expect(requests.length).toBe(3);
-    expect(requests.every(u => u.includes('limit=500'))).toBe(true);
-  });
-
-  it('advances by rows received, not by the page limit', async () => {
-    // A server that serves short pages must still be walked completely.
-    const all = Array.from({ length: 250 }, (_, i) =>
-      apiItem('K' + String(i).padStart(7, '0')),
-    );
-    const { fetchFn, requests } = fakeFetch([
-      ['/items', url => ({
-        body: all.slice(startOf(url), startOf(url) + 100),
-        totalResults: 250,
-      })],
-    ]);
-    const items = await fetchZoteroCatalog(GROUP_LIB, { fetchFn });
-    expect(items.length).toBe(250);
-    expect(requests.length).toBe(3);
-  });
-
-  it('stops on an empty page even when Total-Results overstates', async () => {
-    // A lying header must not loop the command forever.
-    const { fetchFn, requests } = fakeFetch([
-      ['/items', url => ({
-        body: startOf(url) === 0 ? [apiItem('AAAAAAAA')] : [],
-        totalResults: 9999,
-      })],
-    ]);
-    const items = await fetchZoteroCatalog(GROUP_LIB, { fetchFn });
-    expect(items.length).toBe(1);
-    expect(requests.length).toBe(2);
-  });
-
-  it('stops after one page when Total-Results is missing', async () => {
-    const { fetchFn, requests } = fakeFetch([
-      ['/items', () => ({ body: [apiItem('AAAAAAAA')] })],
-    ]);
-    const items = await fetchZoteroCatalog(GROUP_LIB, { fetchFn });
-    expect(items.length).toBe(1);
-    expect(requests.length).toBe(1);
   });
 });
 
 // ---------------------------------------------------------------------------
-// Library listing
+// Group listing
 // ---------------------------------------------------------------------------
 
-describe('listZoteroLibraries', () => {
+describe('listZoteroGroups', () => {
   const groupRow = (id: number, name: string, numItems: number) => ({
     id,
     data: { id, name },
     meta: { numItems },
   });
 
-  it('lists groups sorted by name with the personal library last', async () => {
+  it('lists groups in server order with their reported item counts', async () => {
     const { fetchFn } = fakeFetch([
       ['/users/0/groups', () => ({ body: [groupRow(2, 'Zeta', 5), groupRow(1, 'Alpha', 9)] })],
-      ['/users/0/items', () => ({ body: [], totalResults: 1393 })],
     ]);
-    const libraries = await listZoteroLibraries({ fetchFn });
-    expect(libraries.map(l => l.name)).toEqual(['Alpha', 'Zeta', 'My Library']);
-    expect(libraries[0]).toEqual({ type: 'group', id: 1, name: 'Alpha', itemCount: 9 });
-    expect(libraries[2]).toEqual({ type: 'user', id: 0, name: 'My Library', itemCount: 1393 });
+    const groups = await listZoteroGroups({ fetchFn });
+    expect(groups).toEqual([
+      { groupId: 2, name: 'Zeta', itemCount: 5 },
+      { groupId: 1, name: 'Alpha', itemCount: 9 },
+    ]);
   });
 
-  it('offers the personal library even with no groups', async () => {
+  it('returns an empty list when there are no groups', async () => {
+    const { fetchFn } = fakeFetch([['/users/0/groups', () => ({ body: [] })]]);
+    expect(await listZoteroGroups({ fetchFn })).toEqual([]);
+  });
+
+  it('skips malformed group rows and rejects non-identity ids', async () => {
     const { fetchFn } = fakeFetch([
-      ['/users/0/groups', () => ({ body: [] })],
-      ['/users/0/items', () => ({ body: [], totalResults: 0 })],
+      ['/users/0/groups', () => ({
+        body: [null, { id: 'x' }, groupRow(0, 'Zero', 1), groupRow(-3, 'Neg', 1), groupRow(7, 'Ok', 1)],
+      })],
     ]);
-    const libraries = await listZoteroLibraries({ fetchFn });
-    expect(libraries).toEqual([{ type: 'user', id: 0, name: 'My Library', itemCount: 0 }]);
+    const groups = await listZoteroGroups({ fetchFn });
+    expect(groups.map(g => g.name)).toEqual(['Ok']);
   });
 
-  it('skips malformed group rows', async () => {
-    const { fetchFn } = fakeFetch([
-      ['/users/0/groups', () => ({ body: [null, { id: 'x' }, groupRow(7, 'Ok', 1)] })],
-      ['/users/0/items', () => ({ body: [], totalResults: 0 })],
-    ]);
-    const libraries = await listZoteroLibraries({ fetchFn });
-    expect(libraries.map(l => l.name)).toEqual(['Ok', 'My Library']);
-  });
-
-  it('surfaces the not-running error from either request', async () => {
+  it('surfaces the not-running error', async () => {
     const fetchFn: ZoteroFetch = async () => {
       throw new TypeError('connection refused');
     };
-    await expectKind(listZoteroLibraries({ fetchFn }), 'not-running');
+    await expectKind(listZoteroGroups({ fetchFn }), 'not-running');
   });
 });

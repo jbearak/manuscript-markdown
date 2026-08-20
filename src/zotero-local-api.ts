@@ -2,45 +2,54 @@
  *
  *  Turns one selected library into the `ZoteroCatalogItem[]` that
  *  `createZoteroLinkPlan` matches against.  Everything here is measured
- *  behavior of Zotero 9 (see docs/zotero-roundtrip.md once stage 4 lands):
+ *  behavior of Zotero 9:
  *
  *  - Zotero not running → the connection is refused.  The API setting off →
  *    HTTP 403 with the body `Local API is not enabled`.  The two read very
  *    differently to a user — "start Zotero" versus "turn on the setting in
  *    Settings → Advanced → Miscellaneous" — so they are distinct error kinds.
+ *  - The catalog is fetched in ONE unpaginated request.  The Local API has no
+ *    default or maximum `limit`, and its server reruns the *whole* library
+ *    search and sort for every request before slicing out a page — so a paged
+ *    scan multiplies that work per page and, worse, a write landing between
+ *    pages shifts the offsets and silently skips or duplicates an item.  One
+ *    request is one coherent snapshot.  (Measured: 17,471 rows in 2.3s.)
+ *  - `/items/top` rather than `/items`: child attachments, notes and
+ *    annotations never leave the server (17,471 vs 23,134 rows on the same
+ *    library).  Standalone non-bibliographic items still appear and are
+ *    dropped here so the matcher never sees them.
  *  - Requests address the personal library as `/users/0/` ("whoever is logged
  *    in"), but a URI written into a document must never carry that
- *    placeholder: every item response includes `library: {type, id}` with the
- *    library's real id, and the canonical URI is built from that.  A personal
- *    library whose real id is unknown (never logged in) cannot yield portable
- *    URIs at all, so the whole fetch fails with `user-id-unavailable` rather
- *    than linking entries to URIs nobody else — and no future login — can
- *    resolve.
- *  - Results are paginated (`Total-Results` header); a full scan of a
- *    20k-item group at 500/page is seconds, while per-entry `q=` searches
- *    return fuzzy false positives — so the whole library is fetched once and
- *    matched in memory.
- *  - Attachments, notes and annotations appear in item listings.  They carry
- *    no bibliography identity and are dropped here so the matcher never sees
- *    them.
+ *    placeholder.  For a group, the selected group id is authoritative — it
+ *    is in the request URL itself.  For the personal library, the real id is
+ *    resolved once from the `library` envelope the rows carry when the user
+ *    has an account; without one no portable URI exists at all, so the fetch
+ *    fails with `user-id-unavailable` rather than linking entries to URIs
+ *    nobody — including the user after a future login — can resolve.
  *
  *  No `vscode` import: the transport is a `fetch`-shaped parameter, injected
- *  by tests and defaulted for the extension. */
+ *  by tests and defaulted for the extension.  (Stage-4 note: the default
+ *  targets the extension host's localhost, which is only the user's desktop
+ *  when the extension runs locally — the command must not offer this feature
+ *  in remote workspaces.) */
 
-import type { ZoteroCatalogItem } from './zotero-link';
+import { formatZoteroItemUri, ZOTERO_ITEM_KEY_RE, type ZoteroCatalogItem } from './zotero-link';
 
 /** Where Zotero 9 serves its Local API.  Fixed by Zotero, not configurable
  *  in its settings UI. */
 const ZOTERO_LOCAL_API_BASE = 'http://localhost:23119/api';
 
-/** Page size for item listings.  Zotero caps pages at 100 by default; 500 cut
- *  a 23k-item scan to ~47 requests in measurement. */
-const PAGE_LIMIT = 500;
+/** Only one API version is served locally; pinning it turns a future default
+ *  change into an explicit error instead of silently reshaped JSON. */
+const ZOTERO_API_VERSION = '3';
 
-/** Per-request deadline.  A healthy local Zotero answers a 500-item page in
- *  well under a second; five seconds of silence means something is wedged and
- *  the command should say so instead of hanging the progress dialog. */
-const REQUEST_TIMEOUT_MS = 5000;
+/** Deadline for the group listing — a few rows, answered in milliseconds. */
+const LIST_TIMEOUT_MS = 5000;
+
+/** Deadline for the one whole-catalog request, body included.  Measured
+ *  2.3s for a 17k-item group; the headroom is for cold caches and slower
+ *  machines, not for retries. */
+const CATALOG_TIMEOUT_MS = 60000;
 
 export type ZoteroLocalApiErrorKind =
   /** Nothing is listening — Zotero is not running. */
@@ -51,8 +60,8 @@ export type ZoteroLocalApiErrorKind =
   | 'api-disabled'
   /** A request exceeded its deadline. */
   | 'timeout'
-  /** A personal-library item carries no real library id, so no portable URI
-   *  can be built for it (the user has never logged in to Zotero). */
+  /** The personal library's real id is unknown — the user has never logged
+   *  in — so no portable URI can be built for its items. */
   | 'user-id-unavailable'
   /** Any other failed request or unreadable response. */
   | 'request-failed';
@@ -67,13 +76,17 @@ export class ZoteroLocalApiError extends Error {
   }
 }
 
-/** One library the user can link against. */
-export interface ZoteroLibraryRef {
-  readonly type: 'user' | 'group';
-  /** Group id for groups.  0 for the personal library: its request address is
-   *  the `/users/0/` placeholder, and its real id is read from the items it
-   *  returns, never from this field. */
-  readonly id: number;
+/** Which library to fetch.  The personal library needs no id: its request
+ *  address is the `/users/0/` placeholder, and the identity its URIs carry is
+ *  resolved from the rows it returns. */
+export type ZoteroLibraryScope =
+  | { readonly type: 'user' }
+  | { readonly type: 'group'; readonly groupId: number };
+
+/** One group the running Zotero can serve, as data — ordering, labels and
+ *  the personal-library entry are the picker's business, not the adapter's. */
+export interface ZoteroGroupSummary {
+  readonly groupId: number;
   readonly name: string;
   /** As reported by Zotero.  Counts attachments and notes too, so it is an
    *  upper bound on linkable items — display it, don't reason from it. */
@@ -81,41 +94,53 @@ export interface ZoteroLibraryRef {
 }
 
 /** The transport this adapter needs: the WHATWG `fetch` shape, injectable so
- *  tests can serve canned pages and the extension can pass the global. */
+ *  tests can serve canned responses and the extension can pass the global. */
 export type ZoteroFetch = (
   url: string,
-  init?: { signal?: AbortSignal },
+  init?: { signal?: AbortSignal; headers?: Record<string, string> },
 ) => Promise<{
   readonly ok: boolean;
   readonly status: number;
-  readonly headers: { get(name: string): string | null };
   json(): Promise<unknown>;
 }>;
 
 export interface ZoteroLocalApiOptions {
   readonly fetchFn?: ZoteroFetch;
-  readonly timeoutMs?: number;
 }
 
-/** One GET against the Local API, with the error taxonomy applied. */
-async function request(
+const isAbort = (error: unknown): boolean =>
+  error instanceof DOMException && (error.name === 'TimeoutError' || error.name === 'AbortError');
+
+/** One GET against the Local API, returning its body as a JSON array — both
+ *  endpoints this adapter uses list arrays, so anything else is a protocol
+ *  surprise worth failing loudly on.  The deadline covers reading the body,
+ *  not just the headers: a response that stalls mid-body is as hung as one
+ *  that never came. */
+async function requestArray(
   path: string,
+  timeoutMs: number,
   options: ZoteroLocalApiOptions,
-): ReturnType<ZoteroFetch> {
-  const fetchFn = options.fetchFn ?? (fetch as unknown as ZoteroFetch);
-  const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
+): Promise<unknown[]> {
+  const fetchFn: ZoteroFetch = options.fetchFn ?? fetch;
+  const init = {
+    signal: AbortSignal.timeout(timeoutMs),
+    headers: { 'Zotero-API-Version': ZOTERO_API_VERSION },
+  };
   let response: Awaited<ReturnType<ZoteroFetch>>;
   try {
-    response = await fetchFn(ZOTERO_LOCAL_API_BASE + path, {
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    response = await fetchFn(ZOTERO_LOCAL_API_BASE + path, init);
   } catch (error) {
-    // An abort is the deadline firing; anything else from a localhost fetch
-    // is a refused connection, which means Zotero itself is not running.
-    if (error instanceof DOMException && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
+    if (isAbort(error)) {
       throw new ZoteroLocalApiError('timeout', 'Zotero did not answer within ' + timeoutMs + 'ms.');
     }
-    throw new ZoteroLocalApiError('not-running', 'Could not connect to Zotero on localhost:23119.');
+    // fetch rejects network-level failures as TypeError; on localhost that
+    // means nothing is listening.  Anything else — a caller-injected
+    // transport blowing up, a RangeError from bad arguments — is not
+    // evidence about Zotero and must not tell the user to start it.
+    if (error instanceof TypeError) {
+      throw new ZoteroLocalApiError('not-running', 'Could not connect to Zotero on localhost:23119.');
+    }
+    throw new ZoteroLocalApiError('request-failed', 'Request to Zotero failed: ' + String(error));
   }
   if (response.status === 403) {
     throw new ZoteroLocalApiError(
@@ -126,137 +151,89 @@ async function request(
   if (!response.ok) {
     throw new ZoteroLocalApiError('request-failed', 'Zotero answered HTTP ' + response.status + ' for ' + path + '.');
   }
-  return response;
-}
-
-/** The response body as a JSON array, or `request-failed` — the Local API
- *  lists both groups and items as arrays, so anything else is a protocol
- *  surprise worth failing loudly on. */
-async function requestArray(path: string, options: ZoteroLocalApiOptions): Promise<{
-  rows: unknown[];
-  totalResults: number | undefined;
-}> {
-  const response = await request(path, options);
   let body: unknown;
   try {
     body = await response.json();
-  } catch {
+  } catch (error) {
+    if (isAbort(error)) {
+      throw new ZoteroLocalApiError('timeout', 'Zotero did not answer within ' + timeoutMs + 'ms.');
+    }
     throw new ZoteroLocalApiError('request-failed', 'Zotero returned unreadable JSON for ' + path + '.');
   }
   if (!Array.isArray(body)) {
     throw new ZoteroLocalApiError('request-failed', 'Zotero returned a non-list response for ' + path + '.');
   }
-  const header = response.headers.get('Total-Results');
-  const totalResults = header === null ? undefined : Number(header);
-  return { rows: body, totalResults: Number.isFinite(totalResults) ? totalResults : undefined };
-}
-
-/** Every row of a paginated listing.
- *
- *  Advances by the rows actually received rather than by the page limit, so a
- *  server that returns short pages is walked correctly, and stops on an empty
- *  page whatever `Total-Results` claims — a header that overstates the total
- *  must not loop the command forever. */
-async function requestAllPages(path: string, options: ZoteroLocalApiOptions): Promise<unknown[]> {
-  const all: unknown[] = [];
-  let start = 0;
-  for (;;) {
-    const separator = path.includes('?') ? '&' : '?';
-    const { rows, totalResults } = await requestArray(
-      path + separator + 'limit=' + PAGE_LIMIT + '&start=' + start,
-      options,
-    );
-    all.push(...rows);
-    if (rows.length === 0) break;
-    start += rows.length;
-    if (totalResults === undefined || start >= totalResults) break;
-  }
-  return all;
+  return body;
 }
 
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
-  typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined;
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 
 const asString = (value: unknown): string | undefined =>
   typeof value === 'string' && value.length > 0 ? value : undefined;
 
-/** The libraries the running Zotero can serve: every group, then the personal
- *  library last.  (The command's picker keeps that order: group URIs resolve
- *  for every member, personal URIs only for their owner, so groups are the
- *  collaborative default.) */
-export async function listZoteroLibraries(
-  options: ZoteroLocalApiOptions = {},
-): Promise<ZoteroLibraryRef[]> {
-  const groupsPromise = requestAllPages('/users/0/groups', options);
-  // Only the header is wanted; one item is the smallest page Zotero serves.
-  // Trashed items are excluded, as they are from the catalog fetch: a count
-  // of what the command can actually link against.
-  const countPromise = requestArray('/users/0/items?limit=1', options);
-  const [groupRows, count] = await Promise.all([groupsPromise, countPromise]);
+/** A server-assigned library id: a positive integer.  `0`, negatives and
+ *  fractions name no library, and interpolating one into a request path or a
+ *  URI would address something that does not exist. */
+const asLibraryId = (value: unknown): number | undefined =>
+  typeof value === 'number' && Number.isInteger(value) && value >= 1 ? value : undefined;
 
-  const refs: ZoteroLibraryRef[] = [];
-  for (const row of groupRows) {
+/** The groups the running Zotero can serve, in server order. */
+export async function listZoteroGroups(
+  options: ZoteroLocalApiOptions = {},
+): Promise<ZoteroGroupSummary[]> {
+  const rows = await requestArray('/users/0/groups', LIST_TIMEOUT_MS, options);
+  const groups: ZoteroGroupSummary[] = [];
+  for (const row of rows) {
     const record = asRecord(row);
-    const data = asRecord(record?.data);
-    const id = typeof record?.id === 'number' ? record.id : undefined;
-    const name = asString(data?.name);
-    if (id === undefined || name === undefined) continue;
-    const meta = asRecord(record?.meta);
-    const numItems = typeof meta?.numItems === 'number' ? meta.numItems : 0;
-    refs.push({ type: 'group', id, name, itemCount: numItems });
+    const groupId = asLibraryId(record?.id);
+    const name = asString(asRecord(record?.data)?.name);
+    if (groupId === undefined || name === undefined) continue;
+    const numItems = asRecord(record?.meta)?.numItems;
+    groups.push({ groupId, name, itemCount: typeof numItems === 'number' ? numItems : 0 });
   }
-  refs.sort((a, b) => a.name.localeCompare(b.name));
-  refs.push({ type: 'user', id: 0, name: 'My Library', itemCount: count.totalResults ?? 0 });
-  return refs;
+  return groups;
 }
 
-/** Item types that carry no bibliography identity of their own. */
+/** Item types that carry no bibliography identity of their own.  `/items/top`
+ *  already excludes children, but standalone attachments and notes are
+ *  top-level items. */
 const NON_BIBLIOGRAPHIC_TYPES: ReadonlySet<string> = new Set([
   'attachment',
   'note',
   'annotation',
 ]);
 
-/** One API item row reduced to a catalog item, or undefined for rows the
- *  matcher must never see (attachments, notes, malformed rows). */
-function toCatalogItem(row: unknown): ZoteroCatalogItem | undefined {
+/** The fields of one item row, reduced to exactly what the catalog carries —
+ *  the full row (creators, tags, relations) is dropped here, before the whole
+ *  result is held at once.  Returns undefined for rows the matcher must never
+ *  see: non-bibliographic or malformed.  A key that is not 8 uppercase
+ *  alphanumerics is malformed by definition — everything written into a
+ *  document is validated against that same pattern, so admitting it here
+ *  would put an unwritable item in the catalog. */
+function readItemRow(row: unknown): {
+  key: string;
+  userLibraryId: number | undefined;
+  title: string | undefined;
+  citationKey: string | undefined;
+  doi: string | undefined;
+  isbn: string | undefined;
+  extra: string | undefined;
+} | undefined {
   const record = asRecord(row);
   const data = asRecord(record?.data);
   if (data === undefined) return undefined;
   const key = asString(data.key);
-  if (key === undefined) return undefined;
+  if (key === undefined || !ZOTERO_ITEM_KEY_RE.test(key)) return undefined;
   const itemType = asString(data.itemType);
   if (itemType === undefined || NON_BIBLIOGRAPHIC_TYPES.has(itemType)) return undefined;
-
-  // The canonical URI comes from the row's own `library`, not from how the
-  // request was addressed: `/users/0/` is a placeholder that names no
-  // library, and writing it into a document would produce links nobody can
-  // resolve.  Group and personal rows carry the same shape.
   const library = asRecord(record?.library);
-  const libraryType = library?.type;
-  const libraryId = library?.id;
-  if (
-    (libraryType !== 'user' && libraryType !== 'group') ||
-    typeof libraryId !== 'number' ||
-    !Number.isInteger(libraryId) ||
-    libraryId < 1
-  ) {
-    throw new ZoteroLocalApiError(
-      'user-id-unavailable',
-      'Zotero reported no real library id for item ' + key +
-        '; log in to Zotero so items have portable identities.',
-    );
-  }
-  const uri =
-    'http://zotero.org/' +
-    (libraryType === 'user' ? 'users/' : 'groups/') +
-    libraryId +
-    '/items/' +
-    key;
-
+  const userLibraryId = library?.type === 'user' ? asLibraryId(library.id) : undefined;
   return {
     key,
-    uri,
+    userLibraryId,
     title: asString(data.title),
     citationKey: asString(data.citationKey),
     doi: asString(data.DOI),
@@ -267,19 +244,62 @@ function toCatalogItem(row: unknown): ZoteroCatalogItem | undefined {
 
 /** Every bibliographic item in one library, in matcher-ready form.
  *
- *  Fetches the whole library: identifier matching needs the full catalog to
- *  detect ambiguity, and a paged scan is fast where per-item searches are
- *  both slow and fuzzy. */
+ *  For a group, every URI is built from the selected group id — the request
+ *  URL is the authority, and a row's own `library` envelope, present or
+ *  garbled, cannot redirect an item into a different library.  For the
+ *  personal library the real user id is resolved once across the rows. */
 export async function fetchZoteroCatalog(
-  library: ZoteroLibraryRef,
+  scope: ZoteroLibraryScope,
   options: ZoteroLocalApiOptions = {},
 ): Promise<ZoteroCatalogItem[]> {
-  const path = library.type === 'user' ? '/users/0/items' : '/groups/' + library.id + '/items';
-  const rows = await requestAllPages(path, options);
-  const items: ZoteroCatalogItem[] = [];
+  const path =
+    scope.type === 'user' ? '/users/0/items/top' : '/groups/' + scope.groupId + '/items/top';
+  const rows = await requestArray(path, CATALOG_TIMEOUT_MS, options);
+
+  const read = [];
   for (const row of rows) {
-    const item = toCatalogItem(row);
-    if (item) items.push(item);
+    const item = readItemRow(row);
+    if (item) read.push(item);
   }
-  return items;
+
+  let libraryType: 'user' | 'group';
+  let libraryId: number;
+  if (scope.type === 'group') {
+    libraryType = 'group';
+    libraryId = scope.groupId;
+  } else {
+    // The rows all belong to one library, so they must agree on its id.
+    // None carrying one means the user has never logged in: Zotero has no
+    // portable identity for these items, and neither can this command.
+    const ids = new Set<number>();
+    for (const item of read) {
+      if (item.userLibraryId !== undefined) ids.add(item.userLibraryId);
+    }
+    if (ids.size > 1) {
+      throw new ZoteroLocalApiError(
+        'request-failed',
+        'Zotero reported conflicting ids for the personal library.',
+      );
+    }
+    const id = ids.values().next().value;
+    if (read.length > 0 && id === undefined) {
+      throw new ZoteroLocalApiError(
+        'user-id-unavailable',
+        'Zotero reported no account id for the personal library; ' +
+          'its items have no identity other applications can resolve.',
+      );
+    }
+    libraryType = 'user';
+    libraryId = id ?? 0; // unused: with no rows there is nothing to format
+  }
+
+  return read.map(({ key, title, citationKey, doi, isbn, extra }) => ({
+    key,
+    uri: formatZoteroItemUri(libraryType, libraryId, key),
+    title,
+    citationKey,
+    doi,
+    isbn,
+    extra,
+  }));
 }
