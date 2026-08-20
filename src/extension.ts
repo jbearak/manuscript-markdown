@@ -52,6 +52,20 @@ import {
 	getFrontmatterSettingEdit,
 } from './frontmatter-settings';
 import { getPostExportAction } from './post-export-action';
+import { createZoteroLinkPlan } from './zotero-link';
+import {
+	listZoteroGroups,
+	fetchZoteroCatalog,
+	ZoteroLocalApiError,
+	type ZoteroLibraryScope,
+} from './zotero-local-api';
+import {
+	buildZoteroLibraryPickItems,
+	describeZoteroLocalApiError,
+	formatZoteroLinkConfirmation,
+	formatZoteroLinkReport,
+	ZOTERO_REMOTE_WORKSPACE_MESSAGE,
+} from './zotero-link-ui';
 
 // --- Implementation notes ---
 // - Editor decorations: use light/dark sub-properties for theme-aware backgrounds
@@ -361,6 +375,13 @@ export function activate(context: vscode.ExtensionContext) {
 				}
 			});
 		})
+	);
+
+	// Register Link Bibliography to Zotero command
+	context.subscriptions.push(
+		vscode.commands.registerCommand('manuscript-markdown.linkBibliographyToZotero', () =>
+			linkBibliographyToZotero()
+		)
 	);
 
 	for (const setting of FRONTMATTER_MENU_SETTINGS) {
@@ -1661,4 +1682,196 @@ async function fileExists(uri: vscode.Uri): Promise<boolean> {
 	} catch {
 		return false;
 	}
+}
+
+// --- Link Bibliography to Zotero ---
+
+let zoteroLinkOutputChannel: vscode.OutputChannel | undefined;
+
+function getZoteroLinkOutputChannel(): vscode.OutputChannel {
+	zoteroLinkOutputChannel ??= vscode.window.createOutputChannel('Manuscript Markdown: Zotero');
+	return zoteroLinkOutputChannel;
+}
+
+/** The bibliography this command operates on: the active .bib file, or the
+ *  active Markdown file's frontmatter bibliography (falling back to
+ *  `{basePath}.bib`, mirroring export). */
+async function resolveZoteroLinkBibliography(): Promise<vscode.Uri | undefined> {
+	const active = vscode.window.activeTextEditor?.document;
+	if (active !== undefined && active.uri.scheme === 'file' && active.uri.fsPath.endsWith('.bib')) {
+		return active.uri;
+	}
+
+	const mdDoc =
+		active !== undefined && active.languageId === 'markdown' && active.uri.scheme === 'file'
+			? active
+			: vscode.window.visibleTextEditors.find(
+				e => e.document.languageId === 'markdown' && e.document.uri.scheme === 'file'
+			)?.document;
+	if (!mdDoc) {
+		vscode.window.showErrorMessage(
+			'Open the Markdown manuscript or its .bib file, then run this command again.'
+		);
+		return undefined;
+	}
+
+	const basePath = getOutputBasePath(mdDoc.uri.fsPath);
+	const { metadata } = parseFrontmatter(mdDoc.getText());
+	if (metadata.bibliography) {
+		const resolved = await readBibliographyFromFrontmatterPath(
+			metadata.bibliography,
+			path.dirname(basePath)
+		);
+		if (resolved) {
+			return resolved.uri;
+		}
+	}
+	const defaultBib = vscode.Uri.file(basePath + '.bib');
+	if (await fileExists(defaultBib)) {
+		return defaultBib;
+	}
+	vscode.window.showErrorMessage(
+		metadata.bibliography
+			? `Bibliography "${metadata.bibliography}" not found`
+			: `No bibliography found for "${path.basename(mdDoc.uri.fsPath)}" — add a "bibliography:" entry to its frontmatter or create ${path.basename(basePath)}.bib`
+	);
+	return undefined;
+}
+
+async function linkBibliographyToZotero(): Promise<void> {
+	// The extension host runs next to the workspace; in a remote workspace
+	// "localhost" is the remote machine, not the desktop running Zotero.
+	if (vscode.env.remoteName !== undefined) {
+		vscode.window.showErrorMessage(ZOTERO_REMOTE_WORKSPACE_MESSAGE);
+		return;
+	}
+
+	const bibUri = await resolveZoteroLinkBibliography();
+	if (!bibUri) {
+		return;
+	}
+
+	// The plan is computed from the file's bytes and written back as bytes, so
+	// unsaved editor changes would be silently reverted by the write.
+	const openBibDoc = vscode.workspace.textDocuments.find(
+		d => d.uri.toString() === bibUri.toString()
+	);
+	if (openBibDoc?.isDirty) {
+		vscode.window.showErrorMessage(
+			`"${path.basename(bibUri.fsPath)}" has unsaved changes. Save it, then run this command again.`
+		);
+		return;
+	}
+
+	try {
+		const groups = await listZoteroGroups();
+		const picked = await vscode.window.showQuickPick(buildZoteroLibraryPickItems(groups), {
+			placeHolder: 'Select the Zotero library to link against',
+			title: 'Link Bibliography to Zotero',
+		});
+		if (!picked) {
+			return;
+		}
+		await linkBibliographyToLibrary(bibUri, picked.scope, picked.label);
+	} catch (err: unknown) {
+		showZoteroLinkError(err);
+	}
+}
+
+async function linkBibliographyToLibrary(
+	bibUri: vscode.Uri,
+	scope: ZoteroLibraryScope,
+	libraryLabel: string
+): Promise<void> {
+	const bibBytes = await vscode.workspace.fs.readFile(bibUri);
+	const bibText = new TextDecoder().decode(bibBytes);
+
+	const catalog = await vscode.window.withProgress(
+		{
+			location: vscode.ProgressLocation.Notification,
+			title: `Fetching "${libraryLabel}" from Zotero…`,
+			cancellable: true,
+		},
+		(_progress, token) => {
+			const controller = new AbortController();
+			token.onCancellationRequested(() => controller.abort());
+			return fetchZoteroCatalog(scope, { signal: controller.signal });
+		}
+	);
+
+	const plan = createZoteroLinkPlan(bibText, catalog);
+	if (plan.blocked === 'unparsable-bibliography') {
+		vscode.window.showErrorMessage(
+			`Could not safely parse "${path.basename(bibUri.fsPath)}", so nothing was changed. ` +
+			'Check the file for unbalanced braces or a stray @.'
+		);
+		return;
+	}
+
+	const channel = getZoteroLinkOutputChannel();
+	channel.appendLine(formatZoteroLinkReport(plan, libraryLabel));
+	channel.appendLine('');
+
+	const summary = plan.summary;
+	if (!plan.changed) {
+		const parts = [
+			summary.preserved > 0 ? `${summary.preserved} already linked` : '',
+			summary.ambiguous > 0 ? `${summary.ambiguous} ambiguous` : '',
+			summary.conflicts > 0 ? `${summary.conflicts} with conflicts` : '',
+			summary.unmatched > 0 ? `${summary.unmatched} unmatched` : '',
+		].filter(p => p !== '');
+		const detail = parts.length > 0 ? ` (${parts.join(', ')})` : '';
+		const action = await vscode.window.showInformationMessage(
+			`No new Zotero links for "${path.basename(bibUri.fsPath)}"${detail}.`,
+			'Show Details'
+		);
+		if (action === 'Show Details') {
+			channel.show();
+		}
+		return;
+	}
+
+	const confirmation = formatZoteroLinkConfirmation(summary, scope);
+	const choice = await vscode.window.showInformationMessage(
+		confirmation.message,
+		{ modal: true, detail: confirmation.detail },
+		'Add Links'
+	);
+	if (choice !== 'Add Links') {
+		return;
+	}
+
+	// The file may have changed while the user was reading the modal; the
+	// plan's byte offsets are only valid against the exact text it saw.
+	const currentBytes = await vscode.workspace.fs.readFile(bibUri);
+	if (new TextDecoder().decode(currentBytes) !== bibText) {
+		vscode.window.showErrorMessage(
+			`"${path.basename(bibUri.fsPath)}" changed while the command was running, so nothing was written. Run it again.`
+		);
+		return;
+	}
+	await vscode.workspace.fs.writeFile(bibUri, new TextEncoder().encode(plan.updatedText));
+
+	const action = await vscode.window.showInformationMessage(
+		`Linked ${summary.updates} of ${summary.totalEntries} entries in "${path.basename(bibUri.fsPath)}" to Zotero.`,
+		'Show Details'
+	);
+	if (action === 'Show Details') {
+		channel.show();
+	}
+}
+
+function showZoteroLinkError(err: unknown): void {
+	if (err instanceof ZoteroLocalApiError) {
+		if (err.kind === 'cancelled') {
+			return;
+		}
+		if (err.kind === 'request-failed') {
+			getZoteroLinkOutputChannel().appendLine('Zotero request failed: ' + err.message);
+		}
+		vscode.window.showErrorMessage(describeZoteroLocalApiError(err.kind));
+		return;
+	}
+	const message = err instanceof Error ? err.message : String(err);
+	vscode.window.showErrorMessage('Link Bibliography to Zotero failed: ' + message);
 }

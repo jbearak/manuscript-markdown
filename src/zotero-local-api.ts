@@ -60,6 +60,9 @@ export type ZoteroLocalApiErrorKind =
   | 'api-disabled'
   /** A request exceeded its deadline. */
   | 'timeout'
+  /** The caller's own abort signal fired — the user cancelled.  Never worth
+   *  showing: the user knows what they did. */
+  | 'cancelled'
   /** The personal library's real id is unknown — the user has never logged
    *  in — so no portable URI can be built for its items. */
   | 'user-id-unavailable'
@@ -106,6 +109,9 @@ export type ZoteroFetch = (
 
 export interface ZoteroLocalApiOptions {
   readonly fetchFn?: ZoteroFetch;
+  /** Caller-side cancellation (a progress dialog's Cancel button).  Aborting
+   *  it aborts the in-flight request, not just the wait for it. */
+  readonly signal?: AbortSignal;
 }
 
 const isAbort = (error: unknown): boolean =>
@@ -122,16 +128,21 @@ async function requestArray(
   options: ZoteroLocalApiOptions,
 ): Promise<unknown[]> {
   const fetchFn: ZoteroFetch = options.fetchFn ?? fetch;
+  const deadline = AbortSignal.timeout(timeoutMs);
   const init = {
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: options.signal ? AbortSignal.any([deadline, options.signal]) : deadline,
     headers: { 'Zotero-API-Version': ZOTERO_API_VERSION },
   };
+  const aborted = (): ZoteroLocalApiError =>
+    options.signal?.aborted
+      ? new ZoteroLocalApiError('cancelled', 'The user cancelled the request.')
+      : new ZoteroLocalApiError('timeout', 'Zotero did not answer within ' + timeoutMs + 'ms.');
   let response: Awaited<ReturnType<ZoteroFetch>>;
   try {
     response = await fetchFn(ZOTERO_LOCAL_API_BASE + path, init);
   } catch (error) {
     if (isAbort(error)) {
-      throw new ZoteroLocalApiError('timeout', 'Zotero did not answer within ' + timeoutMs + 'ms.');
+      throw aborted();
     }
     // fetch rejects network-level failures as TypeError; on localhost that
     // means nothing is listening.  Anything else — a caller-injected
@@ -156,7 +167,7 @@ async function requestArray(
     body = await response.json();
   } catch (error) {
     if (isAbort(error)) {
-      throw new ZoteroLocalApiError('timeout', 'Zotero did not answer within ' + timeoutMs + 'ms.');
+      throw aborted();
     }
     throw new ZoteroLocalApiError('request-failed', 'Zotero returned unreadable JSON for ' + path + '.');
   }

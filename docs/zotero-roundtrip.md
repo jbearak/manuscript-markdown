@@ -72,6 +72,18 @@ All other BibTeX fields (author, title, etc.) are standard CSL-JSON-derived data
 
 Citation key format is configurable — see [Citation Key Formats](converter.md#citation-key-formats).
 
+### Linking an Existing Bibliography to Zotero
+
+A bibliography that did not come from a Zotero-managed DOCX — one you wrote by hand, exported from another reference manager, or received from a co-author — has no `zotero-key`/`zotero-uri` fields, so its exported citations embed static metadata that Zotero cannot refresh.
+
+The **Link Bibliography to Zotero** command (Command Palette) adds those fields by matching entries against a library in your running Zotero, using exact identifiers only: an entry's existing Zotero identity, its Better BibTeX citation key, DOI, or ISBN/PMID. Titles and authors are never used — a wrong link would make Word silently refresh a citation into a different work, so an entry without an exact identifier match is reported and left unchanged. Existing links are preserved, and rerunning the command is a no-op.
+
+Zotero must be running on the same machine, with *Settings → Advanced → Miscellaneous → "Allow other applications on this computer to communicate with Zotero"* checked.
+
+**Choose a group library for shared manuscripts.** Group URIs (`http://zotero.org/groups/…`) resolve for every member of the group. My Library URIs (`http://zotero.org/users/<your-id>/…`) resolve only for your own Zotero account — a collaborator's Word falls back to the embedded metadata and stops refreshing those citations, with no visible error. This is how Zotero addresses personal libraries, not a limitation of this extension.
+
+See [UI reference](ui.md#link-bibliography-to-zotero) for the full flow and messages.
+
 ## YAML Frontmatter
 
 When a DOCX has Zotero document preferences, the converter extracts them as YAML frontmatter:
