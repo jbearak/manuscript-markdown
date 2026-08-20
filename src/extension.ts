@@ -37,10 +37,10 @@ import {
 import { setDefaultColorScheme } from './alert-colors';
 import { computeCodeRegions, overlapsCodeRegion } from './code-regions';
 import {
-	bibliographyCandidatePaths,
 	resolveBibliographyWritePathForOutput,
 	resolveDocumentBibliography,
 	resolveDocumentBibliographyPath,
+	resolveExistingBibliographyPath,
 } from './bibliography-paths';
 import {
 	buildEmbedPathTargetUri,
@@ -581,9 +581,9 @@ export function activate(context: vscode.ExtensionContext) {
 					const { metadata } = parseFrontmatter(existingMarkdown);
 					if (metadata.bibliography) {
 						const resolved = await readBibliographyFromFrontmatterPath(metadata.bibliography, path.dirname(existingMdUri.fsPath));
-						if (resolved) {
+						if (resolved !== undefined) {
 							preferredBibliographyPath = metadata.bibliography;
-							existingBibtex = resolved.bibtex;
+							existingBibtex = resolved;
 						}
 					}
 				}
@@ -1385,18 +1385,15 @@ function workspaceRootPath(): string | undefined {
 	return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 }
 
-async function readBibliographyFromFrontmatterPath(bibliography: string, mdDir: string): Promise<{ uri: vscode.Uri; bibtex: string } | undefined> {
-	for (const candidatePath of bibliographyCandidatePaths(bibliography, mdDir, workspaceRootPath())) {
-		const candidate = vscode.Uri.file(candidatePath);
-		if (await fileExists(candidate)) {
-			const data = await vscode.workspace.fs.readFile(candidate);
-			return {
-				uri: candidate,
-				bibtex: new TextDecoder().decode(data),
-			};
-		}
-	}
-	return undefined;
+async function readBibliographyFromFrontmatterPath(bibliography: string, mdDir: string): Promise<string | undefined> {
+	const resolved = await resolveExistingBibliographyPath(
+		bibliography,
+		mdDir,
+		async (candidatePath) => fileExists(vscode.Uri.file(candidatePath)),
+		workspaceRootPath(),
+	);
+	if (resolved === undefined) return undefined;
+	return new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.file(resolved)));
 }
 
 async function resolveBibliographyWriteUriForOutput(bibliography: string, mdDir: string): Promise<vscode.Uri> {
@@ -1445,7 +1442,6 @@ async function getMdExportInput(uri?: vscode.Uri): Promise<MdExportInput | undef
 	}
 
 	const basePath = getOutputBasePath(sourceUri.fsPath);
-	const mdDir = path.dirname(basePath);
 	const { metadata } = parseFrontmatter(markdown);
 
 	let bibtex: string | undefined;
