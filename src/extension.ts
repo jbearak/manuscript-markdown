@@ -1700,16 +1700,26 @@ function getZoteroLinkOutputChannel(): vscode.OutputChannel {
  *  `{basePath}.bib`, mirroring export). */
 async function resolveZoteroLinkBibliography(): Promise<vscode.Uri | undefined> {
 	const active = vscode.window.activeTextEditor?.document;
-	if (active !== undefined && active.uri.scheme === 'file' && active.uri.fsPath.endsWith('.bib')) {
+	if (
+		active !== undefined &&
+		active.uri.scheme === 'file' &&
+		active.uri.fsPath.toLowerCase().endsWith('.bib')
+	) {
 		return active.uri;
 	}
 
+	// Same tiers as export's getMdExportInput: active editor, any visible
+	// Markdown editor, then any open Markdown document — the last covers a
+	// full-screen preview, whose source document is open but not visible.
 	const mdDoc =
 		active !== undefined && active.languageId === 'markdown' && active.uri.scheme === 'file'
 			? active
-			: vscode.window.visibleTextEditors.find(
+			: (vscode.window.visibleTextEditors.find(
 				e => e.document.languageId === 'markdown' && e.document.uri.scheme === 'file'
-			)?.document;
+			)?.document ??
+			vscode.workspace.textDocuments.find(
+				d => d.languageId === 'markdown' && d.uri.scheme === 'file'
+			));
 	if (!mdDoc) {
 		vscode.window.showErrorMessage(
 			'Open the Markdown manuscript or its .bib file, then run this command again.'
@@ -1781,8 +1791,20 @@ async function linkBibliographyToLibrary(
 	scope: ZoteroLibraryScope,
 	libraryLabel: string
 ): Promise<void> {
+	const bibName = path.basename(bibUri.fsPath);
 	const bibBytes = await vscode.workspace.fs.readFile(bibUri);
 	const bibText = new TextDecoder().decode(bibBytes);
+	// The whole file is decoded, planned over, and re-encoded, so the write is
+	// byte-surgical only if decode∘encode is the identity on this file.  A BOM
+	// or a non-UTF-8 byte breaks that — the decoder strips or replaces it, and
+	// the write would silently rewrite bytes far from any added field.
+	if (!bytesEqual(new TextEncoder().encode(bibText), bibBytes)) {
+		vscode.window.showErrorMessage(
+			`"${bibName}" is not plain UTF-8 (it has a byte-order mark or bytes in another encoding), ` +
+			'so this command cannot edit it without changing unrelated bytes. Nothing was changed.'
+		);
+		return;
+	}
 
 	const catalog = await vscode.window.withProgress(
 		{
@@ -1800,19 +1822,26 @@ async function linkBibliographyToLibrary(
 	const plan = createZoteroLinkPlan(bibText, catalog);
 	if (plan.blocked === 'unparsable-bibliography') {
 		vscode.window.showErrorMessage(
-			`Could not safely parse "${path.basename(bibUri.fsPath)}", so nothing was changed. ` +
+			`Could not safely parse "${bibName}", so nothing was changed. ` +
 			'Check the file for unbalanced braces or a stray @.'
 		);
 		return;
 	}
 
-	const channel = getZoteroLinkOutputChannel();
-	channel.appendLine(formatZoteroLinkReport(plan.decisions, libraryLabel));
-	channel.appendLine('');
+	// The report is written to the channel only once the run's outcome is
+	// known: its header says "linked N", which must not outlive a cancelled
+	// confirmation or a failed write as a false record of success.
+	const logReport = (): vscode.OutputChannel => {
+		const channel = getZoteroLinkOutputChannel();
+		channel.appendLine(formatZoteroLinkReport(plan.decisions, libraryLabel));
+		channel.appendLine('');
+		return channel;
+	};
 
 	const summary = plan.summary;
 	if (!plan.changed) {
-		await showZoteroLinkResult(formatZoteroLinkNoChanges(summary, path.basename(bibUri.fsPath)));
+		logReport();
+		await showZoteroLinkResult(formatZoteroLinkNoChanges(summary, bibName));
 		return;
 	}
 
@@ -1826,12 +1855,17 @@ async function linkBibliographyToLibrary(
 		return;
 	}
 
-	// The file may have changed while the user was reading the modal; the
-	// plan's byte offsets are only valid against the exact text it saw.
+	// The file — on disk or in an open editor — may have changed while the
+	// catalog fetch ran or the modal was up; the plan's byte offsets are only
+	// valid against the exact text it saw, and a write beneath a dirty buffer
+	// would be undone by the buffer's next save.
+	const openBibDoc = vscode.workspace.textDocuments.find(
+		d => d.uri.toString() === bibUri.toString()
+	);
 	const currentBytes = await vscode.workspace.fs.readFile(bibUri);
-	if (new TextDecoder().decode(currentBytes) !== bibText) {
+	if (openBibDoc?.isDirty || !bytesEqual(currentBytes, bibBytes)) {
 		vscode.window.showErrorMessage(
-			`"${path.basename(bibUri.fsPath)}" changed while the command was running, so nothing was written. Run it again.`
+			`"${bibName}" changed while the command was running, so nothing was written. Run it again.`
 		);
 		return;
 	}
@@ -1840,9 +1874,18 @@ async function linkBibliographyToLibrary(
 	// replaced by a regular file.
 	await writeFileThroughSymlink(bibUri, new TextEncoder().encode(plan.updatedText));
 
+	logReport();
 	await showZoteroLinkResult(
-		`Linked ${summary.updates} of ${summary.totalEntries} entries in "${path.basename(bibUri.fsPath)}" to Zotero.`
+		`Linked ${summary.updates} of ${summary.totalEntries} entries in "${bibName}" to Zotero.`
 	);
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		if (a[i] !== b[i]) return false;
+	}
+	return true;
 }
 
 /** A completion notification with a "Show Details" action that opens the
