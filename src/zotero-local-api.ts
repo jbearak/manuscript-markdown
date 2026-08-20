@@ -60,6 +60,10 @@ export type ZoteroLocalApiErrorKind =
   | 'api-disabled'
   /** A request exceeded its deadline. */
   | 'timeout'
+  /** The caller's own abort signal fired, rather than this adapter's
+   *  deadline.  What that means — usually a pressed Cancel button — is the
+   *  caller's knowledge, not this adapter's. */
+  | 'aborted'
   /** The personal library's real id is unknown — the user has never logged
    *  in — so no portable URI can be built for its items. */
   | 'user-id-unavailable'
@@ -106,10 +110,11 @@ export type ZoteroFetch = (
 
 export interface ZoteroLocalApiOptions {
   readonly fetchFn?: ZoteroFetch;
+  /** Caller-side cancellation (a progress dialog's Cancel button).  Aborting
+   *  it aborts the in-flight request, not just the wait for it. */
+  readonly signal?: AbortSignal;
 }
 
-const isAbort = (error: unknown): boolean =>
-  error instanceof DOMException && (error.name === 'TimeoutError' || error.name === 'AbortError');
 
 /** One GET against the Local API, returning its body as a JSON array — both
  *  endpoints this adapter uses list arrays, so anything else is a protocol
@@ -122,17 +127,31 @@ async function requestArray(
   options: ZoteroLocalApiOptions,
 ): Promise<unknown[]> {
   const fetchFn: ZoteroFetch = options.fetchFn ?? fetch;
+  const deadline = AbortSignal.timeout(timeoutMs);
   const init = {
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: options.signal ? AbortSignal.any([deadline, options.signal]) : deadline,
     headers: { 'Zotero-API-Version': ZOTERO_API_VERSION },
+  };
+  // Classification rides on the rejection's own name, never on signal state
+  // sampled afterwards: TimeoutError can only come from this function's
+  // deadline, AbortError only from the caller's signal, so a deadline that
+  // fires a moment before the user presses Cancel still reports a timeout.
+  const abortError = (error: unknown): ZoteroLocalApiError | undefined => {
+    if (!(error instanceof DOMException)) return undefined;
+    if (error.name === 'TimeoutError') {
+      return new ZoteroLocalApiError('timeout', 'Zotero did not answer within ' + timeoutMs + 'ms.');
+    }
+    if (error.name === 'AbortError' && options.signal !== undefined) {
+      return new ZoteroLocalApiError('aborted', 'The caller aborted the request.');
+    }
+    return undefined;
   };
   let response: Awaited<ReturnType<ZoteroFetch>>;
   try {
     response = await fetchFn(ZOTERO_LOCAL_API_BASE + path, init);
   } catch (error) {
-    if (isAbort(error)) {
-      throw new ZoteroLocalApiError('timeout', 'Zotero did not answer within ' + timeoutMs + 'ms.');
-    }
+    const abort = abortError(error);
+    if (abort) throw abort;
     // fetch rejects network-level failures as TypeError; on localhost that
     // means nothing is listening.  Anything else — a caller-injected
     // transport blowing up, a RangeError from bad arguments — is not
@@ -155,9 +174,8 @@ async function requestArray(
   try {
     body = await response.json();
   } catch (error) {
-    if (isAbort(error)) {
-      throw new ZoteroLocalApiError('timeout', 'Zotero did not answer within ' + timeoutMs + 'ms.');
-    }
+    const abort = abortError(error);
+    if (abort) throw abort;
     throw new ZoteroLocalApiError('request-failed', 'Zotero returned unreadable JSON for ' + path + '.');
   }
   if (!Array.isArray(body)) {

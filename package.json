@@ -185,6 +185,10 @@
         "title": "Set Citation Style"
       },
       {
+        "command": "manuscript-markdown.linkBibliographyToZotero",
+        "title": "Link Bibliography to Zotero"
+      },
+      {
         "command": "manuscript-markdown.setFrontmatter.title",
         "title": "Title"
       },

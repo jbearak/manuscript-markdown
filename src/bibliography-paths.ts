@@ -1,4 +1,4 @@
-import { join, isAbsolute } from 'path';
+import { join, isAbsolute, dirname } from 'path';
 import { normalizeBibPath } from './frontmatter';
 
 export function bibliographyCandidatePaths(
@@ -60,4 +60,28 @@ export async function resolveBibliographyWritePathForOutput(
     workspaceRoot,
   );
   return resolveBibliographyWritePath(bibliography, mdDir, resolvedExistingPath);
+}
+
+/** The bibliography file a Markdown document reads from, as export resolves
+ *  it: the frontmatter `bibliography:` candidates first (beside the document,
+ *  then the workspace root), falling back to `<basePath>.bib`.  Returns the
+ *  first path that exists, or undefined with no guessing — callers that
+ *  would *create* a bibliography use the write-path helpers instead. */
+export async function resolveDocumentBibliographyPath(
+  bibliography: string | undefined,
+  basePath: string,
+  fileExists: (path: string) => Promise<boolean>,
+  workspaceRoot?: string,
+): Promise<string | undefined> {
+  if (bibliography) {
+    const configured = await resolveExistingBibliographyPath(
+      bibliography,
+      dirname(basePath),
+      fileExists,
+      workspaceRoot,
+    );
+    if (configured !== undefined) return configured;
+  }
+  const fallback = basePath + '.bib';
+  return (await fileExists(fallback)) ? fallback : undefined;
 }

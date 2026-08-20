@@ -99,6 +99,33 @@ describe('zotero-local-api error taxonomy', () => {
     await expectKind(fetchZoteroCatalog(GROUP_SCOPE, { fetchFn }), 'timeout');
   });
 
+  it('distinguishes a caller abort from its own deadline', async () => {
+    const controller = new AbortController();
+    const fetchFn: ZoteroFetch = async () => {
+      controller.abort();
+      throw new DOMException('aborted', 'AbortError');
+    };
+    await expectKind(
+      fetchZoteroCatalog(GROUP_SCOPE, { fetchFn, signal: controller.signal }),
+      'aborted',
+    );
+  });
+
+  it('reports a deadline timeout even when the caller aborts moments later', async () => {
+    // Classification must ride on the rejection's own name, not on signal
+    // state sampled afterwards: the deadline fired first, so it is a timeout
+    // the user should hear about, even though Cancel was pressed too.
+    const controller = new AbortController();
+    const fetchFn: ZoteroFetch = async () => {
+      controller.abort();
+      throw new DOMException('timed out', 'TimeoutError');
+    };
+    await expectKind(
+      fetchZoteroCatalog(GROUP_SCOPE, { fetchFn, signal: controller.signal }),
+      'timeout',
+    );
+  });
+
   it('reports an abort while reading the body as a timeout too', async () => {
     // Headers arriving before the deadline while the body stalls is as hung
     // as a request that never answered — not "unreadable JSON".
