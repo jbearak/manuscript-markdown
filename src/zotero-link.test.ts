@@ -130,6 +130,16 @@ describe('normalizeIsbns', () => {
     expect(normalizeIsbns(input)).toEqual([]);
   });
 
+  it('handles a long run of check-valid ISBNs in linear memory', () => {
+    // Selections are kept as shared-tail lists; materialized arrays copied
+    // the whole suffix per accepted run — quadratic retention that exhausted
+    // the heap on a field like this.
+    const input = 'print ' + Array(50000).fill('0306406152').join(' ');
+    const started = performance.now();
+    expect(normalizeIsbns(input)).toEqual(Array(50000).fill('0306406152'));
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+
   it('assembles a grouped ISBN past a separator token in the fallback', () => {
     // `print` blocks a whole-run split, so the fallback selects among the
     // tokens.  The joined check-valid ISBN-13 must win over its ten-character
@@ -137,16 +147,23 @@ describe('normalizeIsbns', () => {
     expect(normalizeIsbns('print - 9780306406 157')).toEqual(['9780306406157']);
   });
 
-  it('does not join across the boundary between two fallback values', () => {
-    // `1000000000` is a shaped, check-invalid token — a mistyped standalone
-    // ISBN to keep.  Joining it with the next token happens to make the
-    // check-valid `1000000000030`, and a greedy left-to-right scan took that,
-    // fabricating an ISBN and beheading the real `0306406152` behind it.  Two
-    // recovered identifiers beat one, so whole-run scoring gets this right.
-    expect(normalizeIsbns('print - 1000000000 030 640 615 2')).toEqual([
-      '1000000000',
-      '0306406152',
-    ]);
+  it('refuses when a join across a value boundary reads check-valid', () => {
+    // Two check-valid readings exist: `0306406152` (leaving `1000000000` as a
+    // mistyped standalone), or `1000000000030` — the standalone's digits
+    // joined to the next token.  A greedy scan silently took the second; a
+    // count-of-identifiers score silently took the first, and was in turn
+    // gamed elsewhere by check-invalid tokens.  The readings disagree about
+    // which check-valid ISBN the field holds, so the run is refused.
+    expect(normalizeIsbns('print - 1000000000 030 640 615 2')).toEqual([]);
+  });
+
+  it('does not let a check-invalid token outvote a real ISBN', () => {
+    // `9780306406157` is check-valid; `157 0000018` rereads its tail as the
+    // check-valid `1570000018`, leaving the check-invalid prefix
+    // `9780306406` behind as a "standalone".  Scoring shaped-but-invalid
+    // leftovers once let that two-identifier reading win.  The check-valid
+    // anchors disagree, so the run is refused.
+    expect(normalizeIsbns('9780306406 157 0000018')).toEqual([]);
   });
 
   it('reads a pair separated by a lone hyphen as unambiguous', () => {
