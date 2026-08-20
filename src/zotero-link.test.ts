@@ -188,6 +188,17 @@ describe('field value normalization', () => {
     expect(normalizeDoi('10.1000/a\\\\\\_b')).toBe('10.1000/a\\_b');
   });
 
+  it('strips only pairs that actually wrap the value', () => {
+    // `{12345678}}` looks wrapped from both ends, but the leading brace is
+    // closed by the first `}` — nothing encloses the whole value, so nothing
+    // may be stripped.  A count of leading openers against trailing closers
+    // gets this wrong; only pairing them does.
+    expect(normalizePmid('{12345678}}')).toBeUndefined();
+    expect(normalizePmid('{{12345678}')).toBeUndefined();
+    expect(normalizePmid('{{12345678}}')).toBe('12345678');
+    expect(normalizePmid('{{{12345678}}}')).toBe('12345678');
+  });
+
   it('strips deep brace nesting without quadratic cost', () => {
     // Calling stripOuterBraces in a loop rescans the whole value per pair;
     // this case took seconds.

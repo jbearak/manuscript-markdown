@@ -290,23 +290,30 @@ function stripWrappingBraces(value: string): string {
   while (leading < value.length && value[leading] === '{') leading++;
   if (leading === 0) return value;
 
-  let trailing = 0;
-  while (trailing < value.length - leading && value[value.length - 1 - trailing] === '}') trailing++;
-  if (trailing === 0) return value;
-
-  // A leading brace wraps the whole value only if nothing inside closes back
-  // down to its level before the trailing run begins.  One walk over the
-  // interior gives the shallowest depth reached there, which is the most pairs
-  // that can be wrapping.
-  let depth = leading;
-  let shallowest = leading;
-  for (let i = leading; i < value.length - trailing; i++) {
+  // Walk once, tracking depth, and record the last position at which the depth
+  // was still above each level — equivalently, for each leading brace, whether
+  // anything outside it follows.  The nth leading brace wraps the whole value
+  // exactly when the last time the depth fell to n-1 is the final character.
+  //
+  // This is what settles the asymmetric cases.  In `{a}}` the leading brace
+  // closes at the first `}`, with a character still to come, so nothing wraps.
+  // In `{{{a}}}` all three closers sit at the end, so all three pairs do.
+  let depth = 0;
+  // closedAt[n] = index where depth last dropped from n+1 to n.
+  const closedAt: number[] = [];
+  for (let i = 0; i < value.length; i++) {
     if (value[i] === '{') depth++;
-    else if (value[i] === '}' && --depth < shallowest) shallowest = depth;
+    else if (value[i] === '}') {
+      depth--;
+      if (depth >= 0) closedAt[depth] = i;
+    }
   }
+  // Unbalanced overall: nothing can be said about what wraps what.
+  if (depth !== 0) return value;
 
-  const strip = Math.min(leading, trailing, shallowest);
-  return strip <= 0 ? value : value.slice(strip, value.length - strip).trim();
+  let strip = 0;
+  while (strip < leading && closedAt[strip] === value.length - 1 - strip) strip++;
+  return strip === 0 ? value : value.slice(strip, value.length - strip).trim();
 }
 
 /** A DOI reduced to its bare lowercase form, or undefined if the value is not
