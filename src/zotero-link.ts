@@ -451,11 +451,6 @@ export function normalizeIsbns(value: string | undefined): string[] {
     // token — and the ambiguity count would refuse a run whose every reading
     // agrees.  With them gone, token boundaries and compacted-text boundaries
     // coincide, so the count is of genuinely distinct readings.
-    //
-    // The fallback scan below stays on `tokens` as written: it has no
-    // ambiguity to count, and which token it starts a probe from decides
-    // whether a value is a single mistyped token (taken on shape) or a joined
-    // run (which must prove its check digit).
     const segTokens = tokens.filter(t => compactOf([t]).length > 0);
 
     // Nothing to disambiguate: the part is one ISBN-shaped value, so take it
@@ -482,22 +477,78 @@ export function normalizeIsbns(value: string | undefined): string[] {
     // field must not cost the others their match, nor cost itself one against
     // the same typo in Zotero.  A *joined* run still needs its check digit,
     // since joining is where a boundary gets invented.
-    for (let start = 0; start < tokens.length; ) {
-      let matched = 0;
-      for (let take = 1; start + take <= tokens.length; take++) {
-        const compact = compactOf(tokens.slice(start, start + take));
-        // Whole length, not digits-only, for the same reason as in `segment`.
-        if (compact.length > 13) break;
-        if (take === 1 ? isIsbnShaped(compact) : isValidIsbn(compact)) {
-          isbns.push(compact);
-          matched = take;
-          break;
-        }
-      }
-      start += matched || 1;
-    }
+    //
+    // The selection is over the whole run at once, not greedy: a left-to-right
+    // first-match scan commits to a boundary before seeing what it costs, and
+    // it has fabricated an ISBN by joining the tail of one value to the head
+    // of the next.  The best reading is the one that recovers the most
+    // identifiers, check-valid ones breaking ties; if two readings tie and
+    // still disagree about the identifiers, the run is refused — the same
+    // answer an ambiguous whole-run split gets, for the same reason.
+    const best = salvage(tokens, compactOf);
+    if (best.length === 1) isbns.push(...best[0]);
   }
   return isbns;
+}
+
+/** The best readings of a token run that resisted whole-run splitting: up to
+ *  two distinct identifier sequences that tie for the maximal score, so the
+ *  caller can tell a unique best reading from an ambiguous one.
+ *
+ *  A reading selects disjoint token runs, each either a single ISBN-shaped
+ *  token (accepted even check-invalid — see the caller) or a joined run whose
+ *  compacted text is a check-valid ISBN.  Readings are scored by identifiers
+ *  recovered, then by how many of them are check-valid.  Two selections that
+ *  emit the same identifiers are one reading: a separator token on a boundary
+ *  can sit on either side of it without changing what is read. */
+function salvage(
+  tokens: readonly string[],
+  compactOf: (tokens: readonly string[]) => string,
+): string[][] {
+  interface Best {
+    ids: number;
+    valid: number;
+    seqs: string[][]; // up to two distinct sequences achieving the score
+  }
+  // Filled right to left: every position depends only on positions after it.
+  // (Recursing instead — even just the skip-one-token chain — is a stack
+  // frame per token, and a long field value overflows the stack.)
+  const table = new Array<Best>(tokens.length + 1);
+  table[tokens.length] = { ids: 0, valid: 0, seqs: [[]] };
+  for (let from = tokens.length - 1; from >= 0; from--) {
+    // Skipping this token is always available and shares the suffix's result.
+    // The sequence list is copied: it may be extended below, and the suffix's
+    // table entry must not be.
+    const skipped = table[from + 1];
+    const best: Best = { ids: skipped.ids, valid: skipped.valid, seqs: [...skipped.seqs] };
+    for (let take = 1; from + take <= tokens.length; take++) {
+      const compact = compactOf(tokens.slice(from, from + take));
+      // A valid ISBN is at most 13 characters and `compact` only grows, so
+      // nothing longer can ever be admissible.
+      if (compact.length > 13) break;
+      if (take === 1 ? !isIsbnShaped(compact) : !isValidIsbn(compact)) continue;
+      const rest = table[from + take];
+      const ids = rest.ids + 1;
+      const valid = rest.valid + (isValidIsbn(compact) ? 1 : 0);
+      if (ids < best.ids || (ids === best.ids && valid < best.valid)) continue;
+      const seqs = rest.seqs.map(seq => [compact, ...seq]);
+      if (ids > best.ids || valid > best.valid) {
+        best.ids = ids;
+        best.valid = valid;
+        best.seqs = seqs;
+      } else {
+        // Same score: merge, keeping at most two *distinct* sequences.
+        for (const seq of seqs) {
+          if (best.seqs.length >= 2) break;
+          if (!best.seqs.some(s => s.length === seq.length && s.every((v, i) => v === seq[i]))) {
+            best.seqs.push(seq);
+          }
+        }
+      }
+    }
+    table[from] = best;
+  }
+  return table[0].seqs;
 }
 
 /** A PubMed id reduced to bare digits, or undefined. */

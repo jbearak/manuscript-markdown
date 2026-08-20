@@ -123,12 +123,30 @@ describe('normalizeIsbns', () => {
     expect(performance.now() - started).toBeLessThan(1000);
   });
 
+  it('survives a very long token run without overflowing the stack', () => {
+    // The fallback selection once recursed per token; fifty thousand tokens
+    // is a stack frame per token and overflowed.
+    const input = Array.from({ length: 50000 }, (_, i) => 'junk' + i).join(' ');
+    expect(normalizeIsbns(input)).toEqual([]);
+  });
+
   it('assembles a grouped ISBN past a separator token in the fallback', () => {
-    // `print` blocks a whole-run split, so the fallback scans token by token.
-    // The lone `-` must stay in that scan: dropping it would start a probe at
-    // `9780306406`, a shaped-but-invalid prefix that take-one accepts on shape
-    // and consumes before the real ISBN-13 can be assembled.
+    // `print` blocks a whole-run split, so the fallback selects among the
+    // tokens.  The joined check-valid ISBN-13 must win over its ten-character
+    // prefix, which is shaped but check-invalid.
     expect(normalizeIsbns('print - 9780306406 157')).toEqual(['9780306406157']);
+  });
+
+  it('does not join across the boundary between two fallback values', () => {
+    // `1000000000` is a shaped, check-invalid token — a mistyped standalone
+    // ISBN to keep.  Joining it with the next token happens to make the
+    // check-valid `1000000000030`, and a greedy left-to-right scan took that,
+    // fabricating an ISBN and beheading the real `0306406152` behind it.  Two
+    // recovered identifiers beat one, so whole-run scoring gets this right.
+    expect(normalizeIsbns('print - 1000000000 030 640 615 2')).toEqual([
+      '1000000000',
+      '0306406152',
+    ]);
   });
 
   it('reads a pair separated by a lone hyphen as unambiguous', () => {
@@ -143,6 +161,14 @@ describe('normalizeIsbns', () => {
       '9780306406157',
       '0306406152',
     ]);
+  });
+
+  it('refuses a fallback run whose best readings disagree', () => {
+    // `06152` joins leftward into the check-valid `0306406152` or rightward
+    // into the check-valid `0615200001`.  Both readings recover one valid
+    // identifier; nothing in the text says which was meant, so the run is
+    // refused rather than linked to either.
+    expect(normalizeIsbns('03064 06152 00001')).toEqual([]);
   });
 
   it('refuses a run that splits validly in more than one way', () => {
