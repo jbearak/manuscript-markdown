@@ -123,6 +123,14 @@ describe('normalizeIsbns', () => {
     expect(performance.now() - started).toBeLessThan(1000);
   });
 
+  it('assembles a grouped ISBN past a separator token in the fallback', () => {
+    // `print` blocks a whole-run split, so the fallback scans token by token.
+    // The lone `-` must stay in that scan: dropping it would start a probe at
+    // `9780306406`, a shaped-but-invalid prefix that take-one accepts on shape
+    // and consumes before the real ISBN-13 can be assembled.
+    expect(normalizeIsbns('print - 9780306406 157')).toEqual(['9780306406157']);
+  });
+
   it('reads a pair separated by a lone hyphen as unambiguous', () => {
     // A separator hyphen compacts to nothing, so the token boundary can sit
     // on either side of it — two "splits" that normalize identically.  That
