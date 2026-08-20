@@ -78,6 +78,16 @@ describe('normalizeIsbns', () => {
     expect(normalizeIsbns('9780306406157\n0306406152')).toEqual(['9780306406157', '0306406152']);
   });
 
+  it('reads a whitespace-separated pair as two ISBNs', () => {
+    // Only the digits distinguish this from a single space-grouped ISBN: read
+    // whole first, then fall back to the individual tokens.
+    expect(normalizeIsbns('9780306406157 0306406152')).toEqual(['9780306406157', '0306406152']);
+    expect(normalizeIsbns('978-0-306-40615-7 0-306-40615-2')).toEqual([
+      '9780306406157',
+      '0306406152',
+    ]);
+  });
+
   it('drops values of the wrong length', () => {
     expect(normalizeIsbns('12345')).toEqual([]);
     expect(normalizeIsbns(undefined)).toEqual([]);
@@ -401,6 +411,42 @@ describe('entries whose own text is ambiguous', () => {
     const bib = '@article{k1,\n  note = {a},\n  note = {b},\n  doi = {10.1000/abc}\n}\n';
     expect(createZoteroLinkPlan(bib, matching).summary.updates).toBe(1);
   });
+
+  it('refuses identifier fields repeated on one line with different values', () => {
+    // Nothing about the disagreement depends on the fields being on separate
+    // lines; a line-anchored check would miss this one.
+    const bib = '@article{k1, doi = {10.1000/first}, doi = {10.1000/second}}\n';
+    const plan = createZoteroLinkPlan(bib, [
+      item('AAAAAAAA', { doi: '10.1000/first' }),
+      item('BBBBBBBB', { doi: '10.1000/second' }),
+    ]);
+    expect(decisionWithOutcome(plan.decisions, 'k1', 'conflict').reason).toBe('duplicate-field');
+    expect(plan.updatedText).toBe(bib);
+  });
+
+  it('does not count field-shaped text inside a value as a repeat', () => {
+    // The `doi = {...}` here is prose inside a note, not a second field.
+    const bib =
+      '@article{k1,\n  note = {see doi = {10.1000/other} elsewhere},\n  doi = {10.1000/abc}\n}\n';
+    expect(createZoteroLinkPlan(bib, matching).summary.updates).toBe(1);
+  });
+
+  it('refuses an identifier written as a string macro reference', () => {
+    // `zotero-key = ABCD1234` names a macro defined elsewhere in the file.  Its
+    // spelling is not its value, so matching the token as written would link
+    // the entry to whatever item happens to share that name.
+    const bib = '@string{ABCD1234 = "ZZZZZZZZ"}\n@article{k1,\n  zotero-key = ABCD1234\n}\n';
+    const plan = createZoteroLinkPlan(bib, matching);
+    const decision = decisionWithOutcome(plan.decisions, 'k1', 'conflict');
+    expect(decision.reason).toBe('symbolic-field');
+    expect(decision.detail).toBe('zotero-key');
+    expect(plan.updatedText).toBe(bib);
+  });
+
+  it('treats a bare number as a literal, not a macro', () => {
+    const bib = '@article{k1,\n  year = 2020,\n  pmid = 12345678,\n  doi = {10.1000/abc}\n}\n';
+    expect(createZoteroLinkPlan(bib, matching).summary.updates).toBe(1);
+  });
 });
 
 describe('entries that cannot be edited by offset', () => {
@@ -418,6 +464,30 @@ describe('entries that cannot be edited by offset', () => {
       expect(d.reason).toBe('duplicate-bibtex-key');
     }
     expect(plan.updatedText).toBe(bib);
+  });
+
+  it('refuses an entry whose value holds an escaped closing brace', () => {
+    // BibTeX implementations disagree about whether `\}` is structural, so the
+    // entry's range ends in a different place depending on who is reading.
+    // Splicing into it put the new fields inside the note value.  The
+    // following entry is unaffected: only the ambiguous one is declined.
+    const bib =
+      '@article{k1,\n  doi = {10.1000/a},\n  note = {literal \\} brace},\n  title = {T}\n}\n' +
+      '@article{k2,\n  doi = {10.1000/b}\n}\n';
+    const plan = createZoteroLinkPlan(bib, [
+      item('AAAAAAAA', { doi: '10.1000/a' }),
+      item('BBBBBBBB', { doi: '10.1000/b' }),
+    ]);
+    expect(decisionWithOutcome(plan.decisions, 'k1', 'conflict').reason).toBe('entry-not-editable');
+    expect(plan.updatedText).toContain('note = {literal \\} brace},\n  title = {T}\n}');
+    expect(decisionWithOutcome(plan.decisions, 'k2', 'update').target.key).toBe('BBBBBBBB');
+  });
+
+  it('links an entry whose escaped braces balance', () => {
+    const bib = '@article{k1,\n  doi = {10.1000/a},\n  title = {A \\{b\\} c}\n}\n';
+    const plan = createZoteroLinkPlan(bib, [item('AAAAAAAA', { doi: '10.1000/a' })]);
+    expect(plan.summary.updates).toBe(1);
+    expect(plan.updatedText).toContain('title = {A \\{b\\} c},');
   });
 
   it('refuses the whole file when the scanner lost its place', () => {

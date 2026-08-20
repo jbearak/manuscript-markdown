@@ -30,7 +30,6 @@ import {
   findDuplicateBibtexKeys,
   spliceFieldsIntoEntry,
   scanBibtexEntryBody,
-  extractRawField,
   detectBibtexFieldIndent,
   formatBibtexFieldLine,
   detectEntryEol,
@@ -39,6 +38,7 @@ import {
   unescapeBibtexPunctuation,
   type BibtexEntry,
   type BibtexSourceRange,
+  type BibtexEntryFieldOccurrence,
   type BibtexEol,
 } from './bibtex-parser';
 
@@ -175,7 +175,10 @@ export type ZoteroLinkConflictReason =
    *  the first atom of. */
   | 'concatenated-field'
   /** An identifier field appears more than once with different values. */
-  | 'duplicate-field';
+  | 'duplicate-field'
+  /** An identifier field's value is a `@string` macro reference, so the token
+   *  as written is a name, not the identifier it stands for. */
+  | 'symbolic-field';
 
 export type ZoteroLinkUnmatchedReason =
   /** The entry carries a DOI, ISBN or PMID, and no Zotero item has it. */
@@ -293,13 +296,19 @@ export function normalizeIsbns(value: string | undefined): string[] {
   const raw = plainFieldValue(value);
   if (!raw) return [];
   const isbns: string[] = [];
-  // Split on the separators that divide *ISBNs*, not on every space: the
-  // registration-group separator inside one ISBN is written as a space as
-  // often as a hyphen (`978 0 306 40615 7`), and splitting there would leave
-  // five fragments, none of them an ISBN.
+  const addIfIsbn = (compact: string): boolean => {
+    if (!/^\d{9}[\dX]$/.test(compact) && !/^\d{13}$/.test(compact)) return false;
+    isbns.push(compact);
+    return true;
+  };
+  // A space between ISBN digits is ambiguous: it separates the registration
+  // groups *within* one ISBN (`978 0 306 40615 7`) as often as it separates
+  // two ISBNs (`9780306406157 0306406152`).  Only the digits decide, so read
+  // each comma/semicolon/newline-delimited part whole first, and fall back to
+  // its whitespace-separated tokens when the whole is not ISBN-shaped.
   for (const part of raw.split(/[,;\n]+/)) {
-    const compact = part.replace(/[-\s]/g, '').toUpperCase();
-    if (/^\d{9}[\dX]$/.test(compact) || /^\d{13}$/.test(compact)) isbns.push(compact);
+    if (addIfIsbn(part.replace(/[-\s]/g, '').toUpperCase())) continue;
+    for (const token of part.split(/\s+/)) addIfIsbn(token.replace(/-/g, '').toUpperCase());
   }
   return isbns;
 }
@@ -518,27 +527,36 @@ const IDENTIFIER_FIELDS = ['doi', 'isbn', 'pmid', 'zotero-key', 'zotero-uri'] as
  *
  *  `parseBibtex` keeps the last occurrence, so without this check the entry
  *  would link on whichever value happened to come last — a coin flip the user
- *  never sees.  A repeat with the *same* value is harmless and stays quiet. */
+ *  never sees.  A repeat with the *same* value is harmless and stays quiet.
+ *
+ *  The occurrences come from the body walk rather than a second search of the
+ *  raw text: only the walk knows which `doi =` was at the entry's own level
+ *  and which was prose inside a multi-line note. */
 function findContradictingField(
-  rawEntry: string,
-  fieldNames: readonly string[],
+  fields: readonly BibtexEntryFieldOccurrence[],
 ): string | undefined {
   for (const name of IDENTIFIER_FIELDS) {
-    if (fieldNames.filter(n => n === name).length < 2) continue;
     const values = new Set<string>();
-    // Read each occurrence's own text: the parsed map has already collapsed
-    // them to one.
-    let searchFrom = 0;
-    for (const occurrence of fieldNames) {
-      if (occurrence !== name) continue;
-      const raw = extractRawField(rawEntry.slice(searchFrom), name);
-      if (raw === null) break;
-      const at = rawEntry.indexOf(raw, searchFrom);
-      searchFrom = at === -1 ? searchFrom + raw.length : at + raw.length;
-      const eq = raw.indexOf('=');
-      values.add(plainFieldValue(raw.slice(eq + 1).replace(/,$/, '').trim()));
+    for (const field of fields) {
+      if (field.name === name) values.add(plainFieldValue(field.value));
     }
     if (values.size > 1) return name;
+  }
+  return undefined;
+}
+
+/** An identifier field whose value is a `@string` macro reference rather than
+ *  a literal.  Its spelling is not its value — `zotero-key = ABCD1234` names a
+ *  macro defined elsewhere in the file — so matching on the token as written
+ *  would link the entry to whatever item happens to share that name.  A bare
+ *  number (`pmid = 12345678`) is a literal and passes. */
+function findSymbolicIdentifier(
+  fields: readonly BibtexEntryFieldOccurrence[],
+): string | undefined {
+  for (const field of fields) {
+    if (field.delimiter !== 'bare') continue;
+    if (/^\d+$/.test(field.value)) continue;
+    if ((IDENTIFIER_FIELDS as readonly string[]).includes(field.name)) return field.name;
   }
   return undefined;
 }
@@ -562,10 +580,13 @@ function decideEntry(
   // guess about text that different BibTeX tools read differently, and this
   // command writes bytes into that text.
   const body = scanBibtexEntryBody(rawEntry);
+  if (body.unbalanced) return conflict(range, 'entry-not-editable');
   if (body.hasTopLevelComment) return conflict(range, 'ambiguous-comment');
   if (body.hasConcatenation) return conflict(range, 'concatenated-field');
-  const contradicting = findContradictingField(rawEntry, body.fieldNames);
+  const contradicting = findContradictingField(body.fields);
   if (contradicting) return conflict(range, 'duplicate-field', contradicting);
+  const symbolic = findSymbolicIdentifier(body.fields);
+  if (symbolic) return conflict(range, 'symbolic-field', symbolic);
 
   const fields = entry.fields;
   const existing = decideExistingIdentity(range, fields, index);

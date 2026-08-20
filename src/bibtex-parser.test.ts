@@ -1311,11 +1311,43 @@ describe('scanBibtexEntryBody', () => {
     expect(scan(raw).hasTopLevelComment).toBe(false);
   });
 
+  it('returns each field occurrence with the value it read', () => {
+    const raw = '@article{k,\n  title = {T},\n  note = "q",\n  year = 2020\n}';
+    expect(scan(raw).fields).toEqual([
+      { name: 'title', value: 'T', delimiter: 'brace' },
+      { name: 'note', value: 'q', delimiter: 'quote' },
+      { name: 'year', value: '2020', delimiter: 'bare' },
+    ]);
+  });
+
+  it('does not report field-shaped text inside a value', () => {
+    const raw = '@article{k,\n  note = {see doi = {10.1/b} there},\n  doi = {10.1/a}\n}';
+    expect(scan(raw).fields.map(f => f.name)).toEqual(['note', 'doi']);
+  });
+
+  it('reads repeated fields on one line', () => {
+    const raw = '@article{k, doi = {10.1/a}, doi = {10.1/b}}';
+    expect(scan(raw).fields.map(f => f.value)).toEqual(['10.1/a', '10.1/b']);
+  });
+
+  it('reports an entry whose escaped brace unbalances the body', () => {
+    // The range was measured with escapes counted as structural, so the value
+    // here swallows the range's own closing brace.  Which reading is right
+    // depends on the tool; either way the boundaries cannot be trusted.
+    expect(scan('@article{k,\n  note = {literal \\} brace}').unbalanced).toBe(true);
+  });
+
+  it('does not report balanced escaped braces as unbalanced', () => {
+    expect(scan('@article{k,\n  title = {A \\{b\\} c}\n}').unbalanced).toBe(false);
+  });
+
   it('returns nothing for text that is not an entry', () => {
     expect(scan('not an entry')).toEqual({
       hasTopLevelComment: false,
       hasConcatenation: false,
       fieldNames: [],
+      fields: [],
+      unbalanced: false,
     });
   });
 });

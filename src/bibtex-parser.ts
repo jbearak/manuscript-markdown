@@ -876,6 +876,31 @@ export interface BibtexEntryBodyScan {
    *  `fields` map keeps only the last of a repeated name; this says whether
    *  there was more than one. */
   readonly fieldNames: readonly string[];
+  /** Every field occurrence in source order, with the value the walk itself
+   *  read.  Callers comparing repeated fields must use these rather than
+   *  searching the raw text again: a second search has none of this walk's
+   *  lexical state, so it cannot tell a real second `doi =` from one sitting
+   *  inside a multi-line note. */
+  readonly fields: readonly BibtexEntryFieldOccurrence[];
+  /** True if the walk did not end at the entry's own level — an escaped or
+   *  stray delimiter left brace depth or a quote open.  The range's boundaries
+   *  then do not mean what they appear to, and nothing may be spliced into it. */
+  readonly unbalanced: boolean;
+}
+
+/** One `name = value` occurrence found by the body walk. */
+export interface BibtexEntryFieldOccurrence {
+  /** Lowercased field name. */
+  readonly name: string;
+  /** The value's text with its delimiters removed, exactly as written — no
+   *  unescaping, so callers can normalize as their own comparison requires. */
+  readonly value: string;
+  /** How the value was written.  A `bare` value that is not all digits is a
+   *  `@string` macro reference: what it stands for is defined elsewhere in the
+   *  file, so its spelling is not its value — `zotero-key = ABCD1234` names a
+   *  macro, not the item key `ABCD1234`.  A bare number (`year = 2020`) is a
+   *  literal and means itself. */
+  readonly delimiter: 'brace' | 'quote' | 'bare';
 }
 
 const ENTRY_HEADER_RE = /^@\w+\s*[{(]/;
@@ -895,21 +920,27 @@ const SPACE_RE = /\s/;
  *  `rawEntry` must be an exact parsed entry range — `raw.get(key)`, or a slice
  *  taken from a `BibtexSourceRange`. */
 export function scanBibtexEntryBody(rawEntry: string): BibtexEntryBodyScan {
-  const fieldNames: string[] = [];
+  const fields: BibtexEntryFieldOccurrence[] = [];
   let hasTopLevelComment = false;
   let hasConcatenation = false;
+  let unbalanced = false;
+
+  const result = (): BibtexEntryBodyScan => ({
+    hasTopLevelComment,
+    hasConcatenation,
+    fieldNames: fields.map(f => f.name),
+    fields,
+    unbalanced,
+  });
 
   const header = ENTRY_HEADER_RE.exec(rawEntry);
   // The citation key runs to the first comma and cannot contain one.
   const bodyStart = header ? rawEntry.indexOf(',', header[0].length) : -1;
-  if (bodyStart === -1) return { hasTopLevelComment, hasConcatenation, fieldNames };
+  if (bodyStart === -1) return result();
 
   // Stop before the closing delimiter, which is the last character of an exact
   // entry range.
   const end = rawEntry.length - 1;
-  let braceDepth = 0;
-  let inQuotes = false;
-  let quoteDepth = 0;
   let i = bodyStart + 1;
 
   const isEscaped = (pos: number): boolean => {
@@ -918,42 +949,115 @@ export function scanBibtexEntryBody(rawEntry: string): BibtexEntryBodyScan {
     return backslashes % 2 === 1;
   };
 
+  /** Consume a `{…}` value from `at`, returning the offset just past its
+   *  closing brace, or -1 if it does not close within the body.
+   *
+   *  Escaped braces are not structural here.  Implementations disagree about
+   *  that — classic bibtex counts every brace, biber and JabRef honour the
+   *  escape — and this walk exists to detect exactly such disagreement: when
+   *  the two readings differ, the value swallows the range's own closing brace
+   *  and `unbalanced` says so, which is the answer either way. */
+  const skipBraced = (at: number): number => {
+    let depth = 0;
+    for (let k = at; k < end; k++) {
+      if (rawEntry[k] === '\\') {
+        k++;
+        continue;
+      }
+      if (rawEntry[k] === '{') depth++;
+      else if (rawEntry[k] === '}' && --depth === 0) return k + 1;
+    }
+    return -1;
+  };
+
+  /** Consume a `"…"` value from `at`.  A `{…}` group inside protects a literal
+   *  quote, so its braces belong to the value, not to the entry. */
+  const skipQuoted = (at: number): number => {
+    let depth = 0;
+    for (let k = at + 1; k < end; k++) {
+      if (rawEntry[k] === '\\') {
+        k++;
+        continue;
+      }
+      if (rawEntry[k] === '{') depth++;
+      else if (rawEntry[k] === '}' && depth > 0) depth--;
+      else if (rawEntry[k] === '"' && depth === 0) return k + 1;
+    }
+    return -1;
+  };
+
+  /** Consume whatever value begins at `at`, recording it under `name`.
+   *  Returns the offset just past it, or -1 if it never closes. */
+  const readValue = (name: string, at: number): number => {
+    const ch = rawEntry[at];
+    if (ch === '{') {
+      const close = skipBraced(at);
+      if (close === -1) return -1;
+      fields.push({ name, value: rawEntry.slice(at + 1, close - 1), delimiter: 'brace' });
+      return close;
+    }
+    if (ch === '"') {
+      const close = skipQuoted(at);
+      if (close === -1) return -1;
+      fields.push({ name, value: rawEntry.slice(at + 1, close - 1), delimiter: 'quote' });
+      return close;
+    }
+    let bareEnd = at;
+    while (bareEnd < end && NAME_CHAR_RE.test(rawEntry[bareEnd])) bareEnd++;
+    if (bareEnd === at) return at;
+    fields.push({ name, value: rawEntry.slice(at, bareEnd), delimiter: 'bare' });
+    return bareEnd;
+  };
+
+  // Every value is consumed whole by `readValue`, so the loop itself only ever
+  // stands at the entry's own lexical level.
   while (i < end) {
     const ch = rawEntry[i];
 
-    if (ch === '"' && (inQuotes ? quoteDepth === 0 : braceDepth === 0) && !isEscaped(i)) {
-      inQuotes = !inQuotes;
-      quoteDepth = 0;
-    } else if (inQuotes) {
-      // A `{…}` group protects a literal `"`; its braces are the quoted
-      // value's, not the entry's.
-      if (ch === '{') quoteDepth++;
-      else if (ch === '}' && quoteDepth > 0) quoteDepth--;
-    } else if (ch === '{') {
-      braceDepth++;
-    } else if (ch === '}') {
-      if (braceDepth > 0) braceDepth--;
-    } else if (braceDepth === 0) {
-      if (ch === '%' && !isEscaped(i)) {
-        hasTopLevelComment = true;
-      } else if (ch === '#' && !isEscaped(i)) {
-        hasConcatenation = true;
-      } else if (NAME_START_RE.test(ch)) {
-        // A name is a field name only when an `=` follows it; a bare value
-        // such as `month = jan` is a word here too.
-        let nameEnd = i;
-        while (nameEnd < end && NAME_CHAR_RE.test(rawEntry[nameEnd])) nameEnd++;
-        let after = nameEnd;
-        while (after < end && SPACE_RE.test(rawEntry[after])) after++;
-        if (rawEntry[after] === '=') fieldNames.push(rawEntry.slice(i, nameEnd).toLowerCase());
+    if (ch === '%' && !isEscaped(i)) {
+      hasTopLevelComment = true;
+    } else if (ch === '#' && !isEscaped(i)) {
+      hasConcatenation = true;
+    } else if (ch === '{' || ch === '"') {
+      // A delimited run with no `name =` before it: the second operand of a
+      // concatenation, or a stray.  It still has to close.
+      const close = ch === '{' ? skipBraced(i) : skipQuoted(i);
+      if (close === -1) {
+        unbalanced = true;
+        break;
+      }
+      i = close;
+      continue;
+    } else if (ch === '}' || ch === ')') {
+      // A closer at the entry's own level: the range ends somewhere other than
+      // where it appears to.
+      unbalanced = true;
+      break;
+    } else if (NAME_START_RE.test(ch)) {
+      // A name is a field name only when an `=` follows it; a bare value such
+      // as `month = jan` is a word here too.
+      let nameEnd = i;
+      while (nameEnd < end && NAME_CHAR_RE.test(rawEntry[nameEnd])) nameEnd++;
+      let after = nameEnd;
+      while (after < end && SPACE_RE.test(rawEntry[after])) after++;
+      if (rawEntry[after] !== '=') {
         i = nameEnd;
         continue;
       }
+      let valueStart = after + 1;
+      while (valueStart < end && SPACE_RE.test(rawEntry[valueStart])) valueStart++;
+      const next = readValue(rawEntry.slice(i, nameEnd).toLowerCase(), valueStart);
+      if (next === -1) {
+        unbalanced = true;
+        break;
+      }
+      i = next;
+      continue;
     }
     i++;
   }
 
-  return { hasTopLevelComment, hasConcatenation, fieldNames };
+  return result();
 }
 
 /** Indentation of an entry's existing field lines, so an inserted field sits
