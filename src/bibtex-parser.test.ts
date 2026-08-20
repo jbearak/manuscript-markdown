@@ -1422,4 +1422,13 @@ describe('scanBibtexEntryBody', () => {
       unbalanced: false,
     });
   });
+
+  it('reports the entry-type token with offsets that slice back to it', () => {
+    const raw = '@Article{k,\n  year = {2020}\n}';
+    const entryType = scan(raw).entryType;
+    expect(entryType).toBeDefined();
+    expect(entryType!.raw).toBe('Article');
+    expect(raw.slice(entryType!.start, entryType!.end)).toBe('Article');
+    expect(scan('not an entry').entryType).toBeUndefined();
+  });
 });

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'bun:test';
 import { createZoteroSyncPlan, zoteroSyncKeys } from './zotero-sync';
 import { createZoteroLinkPlan, type ZoteroLinkDecision } from './zotero-link';
-import { zoteroItem } from './zotero-link.fixtures';
+import { entryAt, zoteroItem } from './zotero-link.fixtures';
 
 /** Plan links against a catalog, then sync against the exports — the same
  *  two-step pipeline the command runs. */
@@ -156,7 +156,6 @@ describe('createZoteroSyncPlan', () => {
       expect(plan.updatedText).toContain('zotero-key = {AAAAAAAA}');
       expect(plan.updatedText).toContain('title = {Old}');
       expect(plan.metadata[0].unavailable).toBe(true);
-      expect(plan.summary.metadataUnavailable).toBe(1);
     }
   });
 
@@ -193,8 +192,8 @@ describe('createZoteroSyncPlan', () => {
 
 describe('zoteroSyncKeys', () => {
   it('collects target keys from update and preserve decisions, deduplicated', () => {
-    const entry = { key: 'k', start: 0, end: 1, keyStart: 0, keyEnd: 1, trusted: true };
-    const target = { key: 'AAAAAAAA', uri: 'http://zotero.org/groups/1/items/AAAAAAAA' };
+    const entry = entryAt('k');
+    const target = zoteroItem('AAAAAAAA');
     const decisions: ZoteroLinkDecision[] = [
       { outcome: 'update', entry, tier: 'doi', evidence: ['doi'], target, additions: [] },
       { outcome: 'preserve', entry, target },

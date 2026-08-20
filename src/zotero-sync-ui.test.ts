@@ -13,7 +13,7 @@ import {
 import { parseBibtexWithRaw } from './bibtex-parser';
 import type { ZoteroLinkSummary, ZoteroLinkDecision } from './zotero-link';
 import type { ZoteroEntryMetadataResult, ZoteroSyncSummary } from './zotero-sync';
-import { zoteroItem } from './zotero-link.fixtures';
+import { entryAt, zoteroItem } from './zotero-link.fixtures';
 
 // ---------------------------------------------------------------------------
 // Library picker
@@ -97,7 +97,6 @@ const summaryOf = (
     entriesChanged: linkSummary.updates,
     metadataEntries: 0,
     metadataFields: 0,
-    metadataUnavailable: 0,
     ...sync,
   };
 };
@@ -169,15 +168,6 @@ describe('formatZoteroSyncConfirmation', () => {
 // ---------------------------------------------------------------------------
 // Output-channel report
 // ---------------------------------------------------------------------------
-
-const entryAt = (key: string) => ({
-  key,
-  start: 0,
-  end: 1,
-  keyStart: 0,
-  keyEnd: 1,
-  trusted: true,
-});
 
 const noMetadata: ZoteroEntryMetadataResult[] = [];
 

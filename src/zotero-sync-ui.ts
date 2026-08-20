@@ -382,8 +382,17 @@ export const UNMATCHED_EXPORT_MARKER =
 /** The marker written while the command was named "Link Bibliography to
  *  Zotero".  Still recognized by the ownership check, so sidecars from
  *  earlier runs are replaced rather than blocking the export. */
-export const LEGACY_UNMATCHED_EXPORT_MARKER =
+const LEGACY_UNMATCHED_EXPORT_MARKER =
   '% Entries "Link Bibliography to Zotero" could not match in ';
+
+/** Whether an existing sidecar's content is this command's own output —
+ *  current or legacy marker.  This module owns both spellings, so a future
+ *  marker migration changes only this file. */
+export function isUnmatchedExportOurs(text: string): boolean {
+  return (
+    text.startsWith(UNMATCHED_EXPORT_MARKER) || text.startsWith(LEGACY_UNMATCHED_EXPORT_MARKER)
+  );
+}
 
 /** A .bib of just the unmatched entries, for a second round trip: import
  *  this file into Zotero (File → Import), then run Sync Bibliography from

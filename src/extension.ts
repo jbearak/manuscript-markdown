@@ -75,8 +75,7 @@ import {
 	formatZoteroSyncNoChanges,
 	formatZoteroSyncReport,
 	formatZoteroSyncSuccess,
-	LEGACY_UNMATCHED_EXPORT_MARKER,
-	UNMATCHED_EXPORT_MARKER,
+	isUnmatchedExportOurs,
 	ZOTERO_REMOTE_WORKSPACE_MESSAGE,
 } from './zotero-sync-ui';
 
@@ -1813,8 +1812,9 @@ async function syncBibliographyFromLibrary(
 	// One cancellable progress covers both round trips to Zotero: the catalog
 	// (to decide which item each entry is) and the matched items' BibTeX (to
 	// pull their current metadata).  The link plan runs in between because it
-	// determines which keys the second fetch needs.
-	const fetched = await vscode.window.withProgress(
+	// determines which keys the second fetch needs.  Undefined means the
+	// bibliography could not be parsed safely.
+	const plan = await vscode.window.withProgress(
 		{
 			location: vscode.ProgressLocation.Notification,
 			title: `Fetching "${libraryLabel}" from Zotero…`,
@@ -1826,23 +1826,22 @@ async function syncBibliographyFromLibrary(
 			const catalog = await fetchZoteroCatalog(scope, { signal: controller.signal });
 			const linkPlan = createZoteroLinkPlan(bibText, catalog);
 			if (linkPlan.blocked !== undefined) {
-				return { linkPlan, bibtexByKey: new Map<string, string>() };
+				return undefined;
 			}
 			const bibtexByKey = await fetchZoteroBibtex(scope, zoteroSyncKeys(linkPlan.decisions), {
 				signal: controller.signal,
 			});
-			return { linkPlan, bibtexByKey };
+			return createZoteroSyncPlan(bibText, linkPlan.decisions, bibtexByKey);
 		}
 	);
 
-	if (fetched.linkPlan.blocked === 'unparsable-bibliography') {
+	if (plan === undefined) {
 		vscode.window.showErrorMessage(
 			`Could not safely parse "${bibName}", so nothing was changed. ` +
 			'Check the file for unbalanced braces or a stray @.'
 		);
 		return;
 	}
-	const plan = createZoteroSyncPlan(bibText, fetched.linkPlan.decisions, fetched.bibtexByKey);
 
 	// The plan's byte offsets are only valid against the exact text it saw,
 	// and both the .bib write and the unmatched export are derived from that
@@ -1963,12 +1962,7 @@ async function writeUnmatchedBibliography(
 	let existing: 'absent' | 'ours' | 'foreign';
 	try {
 		const bytes = await vscode.workspace.fs.readFile(unmatchedUri);
-		const text = new TextDecoder().decode(bytes);
-		// Both markers are ours: the legacy one was written while the command
-		// was named "Link Bibliography to Zotero".
-		const isOurs =
-			text.startsWith(UNMATCHED_EXPORT_MARKER) ||
-			text.startsWith(LEGACY_UNMATCHED_EXPORT_MARKER);
+		const isOurs = isUnmatchedExportOurs(new TextDecoder().decode(bytes));
 		existing = isOurs && openDoc?.isDirty !== true ? 'ours' : 'foreign';
 	} catch {
 		// Unreadable is not the same as absent: a file that exists but cannot

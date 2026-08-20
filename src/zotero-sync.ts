@@ -37,7 +37,11 @@ import {
   spliceFieldsIntoEntry,
   type BibtexEntryFieldOccurrence,
 } from './bibtex-parser';
-import type { ZoteroLinkDecision, ZoteroLinkSummary } from './zotero-link';
+import {
+  summarizeZoteroLinkDecisions,
+  type ZoteroLinkDecision,
+  type ZoteroLinkSummary,
+} from './zotero-link';
 
 /** Fields sync never writes, whatever the translator emits. */
 const NEVER_SYNCED: ReadonlySet<string> = new Set(['file', 'zotero-key', 'zotero-uri']);
@@ -86,8 +90,6 @@ export interface ZoteroSyncSummary {
   readonly metadataEntries: number;
   /** Total field changes across all entries (type changes included). */
   readonly metadataFields: number;
-  /** Matched entries whose Zotero BibTeX was missing or unusable. */
-  readonly metadataUnavailable: number;
 }
 
 export interface ZoteroSyncPlan {
@@ -109,8 +111,6 @@ function valuesEqual(a: string, b: string): boolean {
   return a.replace(/\s+/g, ' ').trim() === b.replace(/\s+/g, ' ').trim();
 }
 
-const ENTRY_TYPE_RE = /^@(\w+)/;
-
 /** The parsed pieces of Zotero's BibTeX export for one item, or undefined
  *  when the export is missing, empty, or not one clean entry. */
 function readZoteroBibtex(bibtex: string | undefined):
@@ -124,11 +124,9 @@ function readZoteroBibtex(bibtex: string | undefined):
   if (parsed.ranges.length !== 1 || !parsed.ranges[0].trusted) return undefined;
   const range = parsed.ranges[0];
   const raw = bibtex.slice(range.start, range.end);
-  const type = ENTRY_TYPE_RE.exec(raw)?.[1];
-  if (type === undefined) return undefined;
   const body = scanBibtexEntryBody(raw);
-  if (body.unbalanced) return undefined;
-  return { type: type.toLowerCase(), fields: body.fields };
+  if (body.unbalanced || body.entryType === undefined) return undefined;
+  return { type: body.entryType.raw.toLowerCase(), fields: body.fields };
 }
 
 interface EntryEdit {
@@ -159,12 +157,15 @@ function planEntryMetadata(
   const additions: string[] = [];
   const changes: ZoteroMetadataChange[] = [];
   const skipped: ZoteroMetadataSkip[] = [];
-  const indent = detectBibtexFieldIndent(rawEntry);
+  // Lazy: most entries add nothing, and the indent regex only matters when
+  // one does.
+  let indentCache: string | undefined;
+  const indent = () => (indentCache ??= detectBibtexFieldIndent(rawEntry));
 
-  const typeMatch = ENTRY_TYPE_RE.exec(rawEntry);
-  if (typeMatch && typeMatch[1].toLowerCase() !== zotero.type) {
-    replacements.push({ start: 1, end: 1 + typeMatch[1].length, text: zotero.type });
-    changes.push({ kind: 'type', from: typeMatch[1], to: zotero.type });
+  const sourceType = body.entryType;
+  if (sourceType !== undefined && sourceType.raw.toLowerCase() !== zotero.type) {
+    replacements.push({ start: sourceType.start, end: sourceType.end, text: zotero.type });
+    changes.push({ kind: 'type', from: sourceType.raw, to: zotero.type });
   }
 
   // Translator order; it never repeats a field, so first occurrence is the
@@ -182,7 +183,7 @@ function planEntryMetadata(
     const existing = lastOccurrence.get(field.name);
     if (existing === undefined) {
       if (UPDATE_ONLY.has(field.name)) continue;
-      additions.push(formatBibtexFieldLine(field.name, field.value, indent));
+      additions.push(formatBibtexFieldLine(field.name, field.value, indent()));
       changes.push({ kind: 'add', name: field.name, to: field.value });
       continue;
     }
@@ -241,38 +242,43 @@ export function createZoteroSyncPlan(
   let documentEolCache: '\n' | '\r\n' | null = null;
   const documentEol = () => (documentEolCache ??= detectBibtexEol(text));
 
+  // Several entries may target the same Zotero item; parse its export once.
+  // Unusable exports are cached too (as undefined), so they are not re-parsed
+  // per entry either.
+  const parsedByKey = new Map<string, ReturnType<typeof readZoteroBibtex>>();
+  const zoteroFor = (key: string) => {
+    if (!parsedByKey.has(key)) parsedByKey.set(key, readZoteroBibtex(bibtexByKey.get(key)));
+    return parsedByKey.get(key);
+  };
+
   const metadata: ZoteroEntryMetadataResult[] = [];
   const chunks: string[] = [];
   let pos = 0;
   let entriesChanged = 0;
   let metadataEntries = 0;
   let metadataFields = 0;
-  let metadataUnavailable = 0;
 
   for (const decision of decisions) {
     if (decision.outcome !== 'update' && decision.outcome !== 'preserve') continue;
 
     const rawEntry = text.slice(decision.entry.start, decision.entry.end);
-    const zotero = readZoteroBibtex(bibtexByKey.get(decision.target.key));
+    const zotero = zoteroFor(decision.target.key);
 
     let edit: EntryEdit = { replacements: [], additions: [] };
     let changes: readonly ZoteroMetadataChange[] = [];
     let skipped: readonly ZoteroMetadataSkip[] = [];
-    if (zotero === undefined) {
-      metadataUnavailable++;
-    } else {
+    if (zotero !== undefined) {
       const planned = planEntryMetadata(rawEntry, zotero);
       edit = planned.edit;
       changes = planned.changes;
       skipped = planned.skipped;
     }
 
-    const identityLines =
-      decision.outcome === 'update'
-        ? decision.additions.map(a =>
-            formatBibtexFieldLine(a.name, a.value, detectBibtexFieldIndent(rawEntry)),
-          )
-        : [];
+    let identityLines: string[] = [];
+    if (decision.outcome === 'update' && decision.additions.length > 0) {
+      const indent = detectBibtexFieldIndent(rawEntry);
+      identityLines = decision.additions.map(a => formatBibtexFieldLine(a.name, a.value, indent));
+    }
     const combined: EntryEdit = {
       replacements: edit.replacements,
       additions: [...edit.additions, ...identityLines],
@@ -297,56 +303,17 @@ export function createZoteroSyncPlan(
   chunks.push(text.slice(pos));
   const updatedText = chunks.join('');
 
-  const linkSummary = summarizeLink(decisions);
   return {
     decisions,
     metadata,
     summary: {
-      link: linkSummary,
+      link: summarizeZoteroLinkDecisions(decisions),
       entriesChanged,
       metadataEntries,
       metadataFields,
-      metadataUnavailable,
     },
     updatedText,
     changed: updatedText !== text,
-  };
-}
-
-/** The link summary re-derived from the decisions, so the sync summary is a
- *  superset of the link plan's without the caller threading both around. */
-function summarizeLink(decisions: readonly ZoteroLinkDecision[]): ZoteroLinkSummary {
-  const updatesByTier = {
-    'existing': 0,
-    'citation-key': 0,
-    'doi': 0,
-    'isbn-pmid': 0,
-  };
-  let updates = 0;
-  let preserved = 0;
-  let ambiguous = 0;
-  let conflicts = 0;
-  let unmatched = 0;
-  for (const decision of decisions) {
-    switch (decision.outcome) {
-      case 'update':
-        updates++;
-        updatesByTier[decision.tier]++;
-        break;
-      case 'preserve': preserved++; break;
-      case 'ambiguous': ambiguous++; break;
-      case 'conflict': conflicts++; break;
-      case 'unmatched': unmatched++; break;
-    }
-  }
-  return {
-    totalEntries: decisions.length,
-    updates,
-    preserved,
-    ambiguous,
-    conflicts,
-    unmatched,
-    updatesByTier,
   };
 }
 

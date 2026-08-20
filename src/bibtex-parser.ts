@@ -929,6 +929,11 @@ export interface BibtexEntryBodyScan {
    *  stray delimiter left brace depth or a quote open.  The range's boundaries
    *  then do not mean what they appear to, and nothing may be spliced into it. */
   readonly unbalanced: boolean;
+  /** The entry-type token (`article` in `@article{...`), with its half-open
+   *  offsets within the scanned text, so a caller rewriting the type replaces
+   *  exactly the token the walk read rather than re-deriving the header
+   *  grammar.  Undefined when the text does not start with an entry header. */
+  readonly entryType?: { readonly raw: string; readonly start: number; readonly end: number };
 }
 
 /** One `name = value` occurrence found by the body walk. */
@@ -952,7 +957,7 @@ export interface BibtexEntryFieldOccurrence {
   readonly valueEnd: number;
 }
 
-const ENTRY_HEADER_RE = /^@\w+\s*[{(]/;
+const ENTRY_HEADER_RE = /^@(\w+)\s*[{(]/;
 /** What may appear in a field name.  BibTeX names are far more permissive than
  *  the identifiers they usually are: everything up to the next separator is
  *  part of the name, so `:doi`, `+doi`, `.doi` and `@doi` are all names in
@@ -985,15 +990,20 @@ export function scanBibtexEntryBody(rawEntry: string): BibtexEntryBodyScan {
   let hasConcatenation = false;
   let unbalanced = false;
 
+  const header = ENTRY_HEADER_RE.exec(rawEntry);
+  const entryType = header
+    ? { raw: header[1], start: 1, end: 1 + header[1].length }
+    : undefined;
+
   const result = (): BibtexEntryBodyScan => ({
     hasTopLevelComment,
     hasConcatenation,
     fieldNames: fields.map(f => f.name),
     fields,
     unbalanced,
+    ...(entryType !== undefined ? { entryType } : {}),
   });
 
-  const header = ENTRY_HEADER_RE.exec(rawEntry);
   // The citation key runs to the first comma and cannot contain one.
   const bodyStart = header ? rawEntry.indexOf(',', header[0].length) : -1;
   if (bodyStart === -1) return result();
