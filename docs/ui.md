@@ -153,6 +153,30 @@ When a `.docx` file is open in the editor, one dropdown menu appears in the tool
 
 ---
 
+## Editor Toolbar — Bibliography Files
+
+When a `.bib` file is open in the editor, one dropdown menu appears in the toolbar.
+
+### Bibliography
+
+> Look for the **text-file icon** (codicon `file-text`) in the editor toolbar — the same icon as the Export to Word menu on Markdown files.
+
+| Item | Command |
+|------|---------|
+| **Sync Bibliography from Zotero** | `manuscript-markdown.syncBibliographyFromZotero` |
+| **Add Journal Article (@article)** | `manuscript-markdown.addBibtexEntry.article` |
+| **Add Book (@book)** | `manuscript-markdown.addBibtexEntry.book` |
+| **Add Book Chapter (@incollection)** | `manuscript-markdown.addBibtexEntry.incollection` |
+| **Add Conference Paper (@inproceedings)** | `manuscript-markdown.addBibtexEntry.inproceedings` |
+| **Add Report (@techreport)** | `manuscript-markdown.addBibtexEntry.techreport` |
+| **Add Miscellaneous Entry (@misc)** | `manuscript-markdown.addBibtexEntry.misc` |
+
+The sync command sits in its own section at the top; see [Sync Bibliography from Zotero](#sync-bibliography-from-zotero).
+
+Each **Add** item appends a skeleton entry of that type at the end of the file, with a placeholder citation key and empty values for the type's standard fields. The cursor lands on the key so you can type it immediately, and `Tab` steps through the field values.
+
+---
+
 ## Explorer Context Menu
 
 > **Explorer pane** — the file-tree sidebar, usually on the left side of the VS Code window. **Context menu** means the menu that appears when you right-click a file.
@@ -290,7 +314,7 @@ If no Markdown file is open: `"No active Markdown file"`
 
 ### Sync Bibliography from Zotero
 
-Available from the Command Palette and from the toolbar's **Citations & Notes** submenu. Links BibTeX entries to their records in a Zotero library (adding `zotero-key` / `zotero-uri` fields) and pulls each linked entry's current metadata down from Zotero, over Zotero's local API — so that citations exported to Word refresh live under Zotero's control (see [Zotero Citation Roundtrip](zotero-roundtrip.md), which also explains when this command is and is not needed — a bibliography converted from a Zotero-managed DOCX already has the links).
+Available from the Command Palette, from the toolbar's **Citations & Notes** submenu on Markdown files, and from the [**Bibliography** toolbar menu](#editor-toolbar--bibliography-files) on `.bib` files. Links BibTeX entries to their records in a Zotero library (adding `zotero-key` / `zotero-uri` fields) and pulls each linked entry's current metadata down from Zotero, over Zotero's local API — so that citations exported to Word refresh live under Zotero's control (see [Zotero Citation Roundtrip](zotero-roundtrip.md), which also explains when this command is and is not needed — a bibliography converted from a Zotero-managed DOCX already has the links).
 
 **Requirements shown to the user:**
 

@@ -55,6 +55,12 @@ import {
 } from './frontmatter-settings';
 import { getPostExportAction } from './post-export-action';
 import { createZoteroLinkPlan, type ZoteroLinkPlan } from './zotero-link';
+import {
+	BIBTEX_ENTRY_TEMPLATES,
+	bibtexEntryCommand,
+	bibtexEntrySnippet,
+	bibtexInsertionPrefix,
+} from './bibtex-entry-templates';
 import { createZoteroSyncPlan, zoteroSyncKeys } from './zotero-sync';
 import {
 	listZoteroGroups,
@@ -395,6 +401,26 @@ export function activate(context: vscode.ExtensionContext) {
 			syncBibliographyFromZotero()
 		)
 	);
+
+	// Register "Add <entry type>" commands for the .bib toolbar menu
+	for (const template of BIBTEX_ENTRY_TEMPLATES) {
+		context.subscriptions.push(
+			vscode.commands.registerCommand(bibtexEntryCommand(template.type), async () => {
+				const editor = vscode.window.activeTextEditor;
+				if (!editor || !editor.document.fileName.endsWith('.bib')) {
+					vscode.window.showErrorMessage('No active .bib file');
+					return;
+				}
+				const eol = editor.document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
+				const text = editor.document.getText();
+				const insertPos = editor.document.positionAt(text.length);
+				const snippet = new vscode.SnippetString(
+					bibtexInsertionPrefix(text, eol) + bibtexEntrySnippet(template, eol)
+				);
+				await editor.insertSnippet(snippet, insertPos);
+			})
+		);
+	}
 
 	for (const setting of FRONTMATTER_MENU_SETTINGS) {
 		context.subscriptions.push(
