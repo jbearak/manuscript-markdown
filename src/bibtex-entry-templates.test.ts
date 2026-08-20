@@ -98,17 +98,15 @@ describe('.bib toolbar contributions in package.json', () => {
     expect(entry.when).toBe('resourceExtname == .bib && !isInDiffEditor');
   });
 
-  it('groups the sync command apart from the add-entry commands', () => {
+  it('contains exactly the sync command plus one add command per template, grouped apart', () => {
     const entries = pkg.contributes.menus['bibtex.actions'];
-    const sync = entries.find(
-      (m: any) => m.command === 'manuscript-markdown.syncBibliographyFromZotero'
-    );
-    expect(sync.group).toBe('1_zotero@1');
-    const addGroups = BIBTEX_ENTRY_TEMPLATES.map((template, i) => {
-      const entry = entries.find((m: any) => m.command === bibtexEntryCommand(template.type));
-      expect(entry).toBeDefined();
-      return entry.group === '2_add@' + String(i + 1);
+    expect(entries.map((m: any) => m.command)).toEqual([
+      'manuscript-markdown.syncBibliographyFromZotero',
+      ...BIBTEX_ENTRY_TEMPLATES.map(template => bibtexEntryCommand(template.type)),
+    ]);
+    expect(entries[0].group).toBe('1_zotero@1');
+    BIBTEX_ENTRY_TEMPLATES.forEach((template, i) => {
+      expect(entries[i + 1].group).toBe('2_add@' + String(i + 1));
     });
-    expect(addGroups.every(Boolean)).toBe(true);
   });
 });

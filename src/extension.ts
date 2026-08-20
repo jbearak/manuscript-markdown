@@ -407,7 +407,7 @@ export function activate(context: vscode.ExtensionContext) {
 		context.subscriptions.push(
 			vscode.commands.registerCommand(bibtexEntryCommand(template.type), async () => {
 				const editor = vscode.window.activeTextEditor;
-				if (!editor || !editor.document.fileName.endsWith('.bib')) {
+				if (!editor || !isBibtexDocument(editor.document)) {
 					vscode.window.showErrorMessage('No active .bib file');
 					return;
 				}
@@ -1213,7 +1213,7 @@ function startLanguageClient(context: vscode.ExtensionContext): void {
 			// For Markdown, the server returns null which can interfere with VS Code's
 			// built-in Markdown outline/breadcrumb provider.
 			provideDocumentSymbols: (document, token, next) => {
-				if (document.languageId === 'bibtex' || document.uri.fsPath.endsWith('.bib')) {
+				if (isBibtexDocument(document)) {
 					return next(document, token);
 				}
 				return undefined;
@@ -1724,16 +1724,21 @@ function getZoteroLinkOutputChannel(): vscode.OutputChannel {
 	return zoteroLinkOutputChannel;
 }
 
+/** Whether a document is BibTeX: by language id when one is assigned, by
+ *  case-insensitive extension otherwise (VS Code has no built-in bibtex
+ *  language, so plain .bib files often carry a generic language id). */
+function isBibtexDocument(document: vscode.TextDocument): boolean {
+	return (
+		document.languageId === 'bibtex' || document.uri.fsPath.toLowerCase().endsWith('.bib')
+	);
+}
+
 /** The bibliography this command operates on: the active .bib file, or the
  *  active Markdown file's frontmatter bibliography (falling back to
  *  `{basePath}.bib`, mirroring export). */
 async function resolveZoteroLinkBibliography(): Promise<vscode.Uri | undefined> {
 	const active = vscode.window.activeTextEditor?.document;
-	if (
-		active !== undefined &&
-		active.uri.scheme === 'file' &&
-		active.uri.fsPath.toLowerCase().endsWith('.bib')
-	) {
+	if (active !== undefined && active.uri.scheme === 'file' && isBibtexDocument(active)) {
 		return active.uri;
 	}
 

@@ -4,6 +4,8 @@
 // the empty field values. Keep this module free of vscode imports so the
 // snippet text stays unit-testable.
 
+import { formatBibtexFieldLine } from './bibtex-parser';
+
 export interface BibtexEntryTemplate {
   /** BibTeX entry type, lowercase, without the leading `@`. */
   readonly type: string;
@@ -58,8 +60,8 @@ export function bibtexEntryCommand(type: string): string {
  */
 export function bibtexEntrySnippet(template: BibtexEntryTemplate, eol: string): string {
   const width = Math.max(...template.fields.map(f => f.length));
-  const lines = template.fields.map(
-    (field, i) => '  ' + field.padEnd(width) + ' = {' + '$' + String(i + 2) + '},'
+  const lines = template.fields.map((field, i) =>
+    formatBibtexFieldLine(field.padEnd(width), '$' + String(i + 2))
   );
   return '@' + template.type + '{' + '${1:key},' + eol + lines.join(eol) + eol + '}' + eol;
 }
@@ -71,7 +73,6 @@ export function bibtexEntrySnippet(template: BibtexEntryTemplate, eol: string): 
  */
 export function bibtexInsertionPrefix(text: string, eol: string): string {
   if (text.trim() === '') return '';
-  const trailing = text.match(/(?:\r?\n)*$/)![0];
-  const newlines = trailing.split(/\r?\n/).length - 1;
-  return eol.repeat(Math.max(0, 2 - newlines));
+  if (/(?:\r?\n){2}$/.test(text)) return '';
+  return /\r?\n$/.test(text) ? eol : eol + eol;
 }
