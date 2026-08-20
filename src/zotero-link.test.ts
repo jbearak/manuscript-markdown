@@ -123,6 +123,20 @@ describe('normalizeIsbns', () => {
     expect(performance.now() - started).toBeLessThan(1000);
   });
 
+  it('reads a pair separated by a lone hyphen as unambiguous', () => {
+    // A separator hyphen compacts to nothing, so the token boundary can sit
+    // on either side of it — two "splits" that normalize identically.  That
+    // is one reading, not an ambiguity to refuse.
+    expect(normalizeIsbns('9780306406157 - 0306406152')).toEqual([
+      '9780306406157',
+      '0306406152',
+    ]);
+    expect(normalizeIsbns('978-0-306-40615-7 - 0-306-40615-2')).toEqual([
+      '9780306406157',
+      '0306406152',
+    ]);
+  });
+
   it('refuses a run that splits validly in more than one way', () => {
     // Both of these divisions validate every check digit:
     //   9791803811 | 9798694135221    and    9791803811979 | 8694135221

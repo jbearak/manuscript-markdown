@@ -444,7 +444,13 @@ export function normalizeIsbns(value: string | undefined): string[] {
   };
 
   for (const part of raw.split(/[,;\n]+/)) {
-    const tokens = part.split(/\s+/).filter(t => t.length > 0);
+    // Tokens that compact to nothing (a lone `-` used as a separator) are
+    // dropped up front.  Left in, they let two token splits normalize to the
+    // same ISBNs — the boundary can sit on either side of the empty token —
+    // and the ambiguity count would refuse a run whose every reading agrees.
+    // With them gone, token boundaries and compacted-text boundaries coincide,
+    // so the count is of genuinely distinct readings.
+    const tokens = part.split(/\s+/).filter(t => compactOf([t]).length > 0);
 
     // Nothing to disambiguate: the part is one ISBN-shaped value, so take it
     // as written whether or not its check digit agrees.
