@@ -65,6 +65,13 @@ describe('bibtexInsertionPrefix', () => {
     expect(bibtexInsertionPrefix('@book{b,\n}\n\n', '\n')).toBe('');
     expect(bibtexInsertionPrefix('@book{b,\r\n}\r\n', '\r\n')).toBe('\r\n');
   });
+
+  it('treats trailing lines of spaces or tabs as blank', () => {
+    expect(bibtexInsertionPrefix('@book{b,\n}\n  ', '\n')).toBe('\n');
+    expect(bibtexInsertionPrefix('@book{b,\n}\n  \n', '\n')).toBe('');
+    expect(bibtexInsertionPrefix('@book{b,\n}\n\t\n\t', '\n')).toBe('');
+    expect(bibtexInsertionPrefix('@book{b,\r\n}\r\n \r\n', '\r\n')).toBe('');
+  });
 });
 
 describe('.bib toolbar contributions in package.json', () => {
@@ -91,11 +98,24 @@ describe('.bib toolbar contributions in package.json', () => {
     expect(submenu.icon).toBe(exportSubmenu.icon);
   });
 
-  it('shows the toolbar button only on .bib files outside diff editors', () => {
+  const BIB_WHEN = 'editorLangId == bibtex || resourceExtname =~ /^\\.bib$/i';
+
+  it('shows the toolbar button only on BibTeX files outside diff editors', () => {
     const entry = pkg.contributes.menus['editor/title'].find(
       (m: any) => m.submenu === 'bibtex.actions'
     );
-    expect(entry.when).toBe('resourceExtname == .bib && !isInDiffEditor');
+    expect(entry.when).toBe('(' + BIB_WHEN + ') && !isInDiffEditor');
+    for (const item of pkg.contributes.menus['bibtex.actions']) {
+      expect(item.when).toBe(BIB_WHEN);
+    }
+  });
+
+  it('hides the add commands from the Command Palette outside BibTeX files', () => {
+    const palette = pkg.contributes.menus.commandPalette;
+    for (const template of BIBTEX_ENTRY_TEMPLATES) {
+      const entry = palette.find((m: any) => m.command === bibtexEntryCommand(template.type));
+      expect(entry?.when).toBe(BIB_WHEN);
+    }
   });
 
   it('contains exactly the sync command plus one add command per template, grouped apart', () => {

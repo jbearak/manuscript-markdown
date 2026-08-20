@@ -73,6 +73,8 @@ export function bibtexEntrySnippet(template: BibtexEntryTemplate, eol: string): 
  */
 export function bibtexInsertionPrefix(text: string, eol: string): string {
   if (text.trim() === '') return '';
-  if (/(?:\r?\n){2}$/.test(text)) return '';
-  return /\r?\n$/.test(text) ? eol : eol + eol;
+  // A line holding only spaces or tabs still reads as blank, so horizontal
+  // whitespace around the trailing newlines must not defeat the checks.
+  if (/(?:\r?\n[ \t]*){2}$/.test(text)) return '';
+  return /\r?\n[ \t]*$/.test(text) ? eol : eol + eol;
 }
