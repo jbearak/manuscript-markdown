@@ -34,7 +34,6 @@ import {
   formatBibtexFieldLine,
   detectEntryEol,
   detectBibtexEol,
-  stripOuterBraces,
   unescapeBibtexPunctuation,
   type BibtexEntry,
   type BibtexSourceRange,
@@ -263,18 +262,51 @@ const DOI_SCHEME_PREFIX_RE = /^doi:\s*/i;
  *
  *  Values reach this from the lexical walk with their delimiters stripped but
  *  nothing else done to them, so any number of brace pairs may remain:
- *  `pmid = {{{12345678}}}` arrives as `{{12345678}}`, and a single pass would
- *  leave a brace on each side of an otherwise exact identifier.  Unescaping
- *  can expose another pair (`{\{12345678\}}`), so the two alternate until the
- *  value stops shrinking. */
+ *  `pmid = {{{12345678}}}` arrives as `{{12345678}}`, and a single strip would
+ *  leave a brace on each side of an otherwise exact identifier.
+ *
+ *  Braces are therefore stripped repeatedly, but unescaping runs exactly once,
+ *  at the end.  Alternating the two would read the output of one pass as more
+ *  input for the next: `\\\_` is a literal backslash followed by an escaped
+ *  underscore, and a second pass over the resulting `\_` would eat the
+ *  backslash that belongs to the value. */
 function plainFieldValue(value: string | undefined): string {
   if (value === undefined) return '';
-  let plain = value.trim();
-  for (;;) {
-    const reduced = unescapeBibtexPunctuation(stripOuterBraces(plain).trim()).trim();
-    if (reduced === plain) return plain;
-    plain = reduced;
+  const plain = stripWrappingBraces(value.trim());
+  // One brace pair can be hidden behind escapes (`{\{12345678\}}`); unescaping
+  // exposes it, so strip once more afterwards — again without re-unescaping.
+  return stripWrappingBraces(unescapeBibtexPunctuation(plain).trim());
+}
+
+/** Remove every brace pair that wraps the whole value, in one pass.
+ *
+ *  `stripOuterBraces` rescans from the start for each pair it removes, so
+ *  calling it in a loop is quadratic — a value wrapped in tens of thousands of
+ *  pairs would block the command for seconds.  Since only pairs that enclose
+ *  everything are being removed, the depth profile answers it directly: the
+ *  number of leading braces that are still open at the last character. */
+function stripWrappingBraces(value: string): string {
+  let leading = 0;
+  while (leading < value.length && value[leading] === '{') leading++;
+  if (leading === 0) return value;
+
+  let trailing = 0;
+  while (trailing < value.length - leading && value[value.length - 1 - trailing] === '}') trailing++;
+  if (trailing === 0) return value;
+
+  // A leading brace wraps the whole value only if nothing inside closes back
+  // down to its level before the trailing run begins.  One walk over the
+  // interior gives the shallowest depth reached there, which is the most pairs
+  // that can be wrapping.
+  let depth = leading;
+  let shallowest = leading;
+  for (let i = leading; i < value.length - trailing; i++) {
+    if (value[i] === '{') depth++;
+    else if (value[i] === '}' && --depth < shallowest) shallowest = depth;
   }
+
+  const strip = Math.min(leading, trailing, shallowest);
+  return strip <= 0 ? value : value.slice(strip, value.length - strip).trim();
 }
 
 /** A DOI reduced to its bare lowercase form, or undefined if the value is not
@@ -297,6 +329,38 @@ export function normalizeDoi(value: string | undefined): string | undefined {
   return doi;
 }
 
+/** True if `compact` has the length and alphabet of an ISBN, check digit
+ *  unexamined. */
+function isIsbnShaped(compact: string): boolean {
+  return /^\d{9}[\dX]$/.test(compact) || /^\d{13}$/.test(compact);
+}
+
+/** True if `compact` is an ISBN-10 or ISBN-13 whose check digit agrees with the
+ *  rest of it.
+ *
+ *  The check digit matters here beyond rejecting typos: a field listing several
+ *  ISBNs separated by spaces can be divided into correctly-shaped runs in more
+ *  than one way, and the check digit is what says which division is the real
+ *  one. */
+export function isValidIsbn(compact: string): boolean {
+  if (!isIsbnShaped(compact)) return false;
+  if (compact.length === 10) {
+    // ISBN-10: sum of digit × (10 … 1) is divisible by 11, with X as ten.
+    let sum = 0;
+    for (let i = 0; i < 10; i++) {
+      const ch = compact[i];
+      sum += (ch === 'X' ? 10 : ch.charCodeAt(0) - 48) * (10 - i);
+    }
+    return sum % 11 === 0;
+  }
+  // ISBN-13: alternating weights 1 and 3, sum divisible by 10.
+  let sum = 0;
+  for (let i = 0; i < 13; i++) {
+    sum += (compact.charCodeAt(i) - 48) * (i % 2 === 0 ? 1 : 3);
+  }
+  return sum % 10 === 0;
+}
+
 /** Every well-formed ISBN in a field value.  Zotero keeps multiple ISBNs for
  *  one item in a single string, and BibTeX files list them the same way.
  *
@@ -307,40 +371,66 @@ export function normalizeIsbns(value: string | undefined): string[] {
   const raw = plainFieldValue(value);
   if (!raw) return [];
   const isbns: string[] = [];
-  const isIsbn = (compact: string): boolean =>
-    /^\d{9}[\dX]$/.test(compact) || /^\d{13}$/.test(compact);
-
   // A space between ISBN digits is ambiguous: it separates the registration
   // groups *within* one ISBN (`978 0 306 40615 7`) as often as it separates
   // two of them (`9780306406157 0306406152`), and one field can mix both
-  // (`978 0 306 40615 7 0306406152`).  Only the digits decide, and no
-  // left-to-right rule decides them: taking the longest ISBN-shaped prefix of
-  // `0 306 40615 2 978 0 306 40615 7` runs the first ISBN's tail into the
-  // second's `978` and fabricates a pair that is in neither.
+  // (`978 0 306 40615 7 0306406152`).
   //
-  // So it is read as a segmentation: prefer a split of the whole run into
-  // consecutive ISBNs, shortest group first, and only fall back to scanning
-  // for isolated ISBNs when no such split exists.
+  // Shape alone cannot settle it: `9780 306406 157 0306406 152` divides into
+  // 10- and 13-digit runs in several ways, most of which straddle the real
+  // boundary and produce numbers present in neither ISBN.  The check digit is
+  // what distinguishes them — that is what it is for — so a *split* is taken
+  // only when every piece of it validates.
+  //
+  // A value needing no split is accepted on shape alone.  Both sides of a
+  // match come from the same catalogue of human-entered data, and a mistyped
+  // ISBN recorded the same way in Zotero and in the .bib still identifies the
+  // same work; refusing to match it would lose a real link to enforce a
+  // checksum neither side claimed to satisfy.
   const compactOf = (tokens: readonly string[]) =>
     tokens.join('').replace(/-/g, '').toUpperCase();
 
-  /** Split `tokens` entirely into ISBNs, or undefined if it does not divide.
-   *  Shortest group first, so tokens that are ISBNs on their own stay whole
-   *  rather than being absorbed into a longer neighbour. */
-  const segment = (tokens: readonly string[]): string[] | undefined => {
-    if (tokens.length === 0) return [];
-    for (let take = 1; take <= tokens.length; take++) {
-      const compact = compactOf(tokens.slice(0, take));
-      if (!isIsbn(compact)) continue;
-      const rest = segment(tokens.slice(take));
-      if (rest) return [compact, ...rest];
+  /** Split `tokens` entirely into valid ISBNs, or undefined if no split does.
+   *
+   *  Memoized by start offset: without it the same suffix is re-explored for
+   *  every way of reaching it, which is exponential — a run of a few hundred
+   *  single-digit tokens would hang the command. */
+  const solved = new Map<number, string[] | undefined>();
+  const segment = (tokens: readonly string[], from: number): string[] | undefined => {
+    if (from === tokens.length) return [];
+    const cached = solved.get(from);
+    if (cached !== undefined || solved.has(from)) return cached;
+    solved.set(from, undefined); // guard against revisiting while in progress
+    let answer: string[] | undefined;
+    for (let take = 1; from + take <= tokens.length; take++) {
+      const compact = compactOf(tokens.slice(from, from + take));
+      // Longer runs can only get longer, so stop once even the digits alone
+      // exceed the longest ISBN.
+      if (compact.replace(/[^0-9X]/gi, '').length > 13) break;
+      if (!isValidIsbn(compact)) continue;
+      const rest = segment(tokens, from + take);
+      if (rest) {
+        answer = [compact, ...rest];
+        break;
+      }
     }
-    return undefined;
+    solved.set(from, answer);
+    return answer;
   };
 
   for (const part of raw.split(/[,;\n]+/)) {
     const tokens = part.split(/\s+/).filter(t => t.length > 0);
-    const whole = segment(tokens);
+
+    // Nothing to disambiguate: the part is one ISBN-shaped value, so take it
+    // as written whether or not its check digit agrees.
+    const asWritten = compactOf(tokens);
+    if (isIsbnShaped(asWritten)) {
+      isbns.push(asWritten);
+      continue;
+    }
+
+    solved.clear();
+    const whole = segment(tokens, 0);
     if (whole) {
       isbns.push(...whole);
       continue;
@@ -351,7 +441,8 @@ export function normalizeIsbns(value: string | undefined): string[] {
       let matched = 0;
       for (let take = 1; start + take <= tokens.length; take++) {
         const compact = compactOf(tokens.slice(start, start + take));
-        if (isIsbn(compact)) {
+        if (compact.replace(/[^0-9X]/gi, '').length > 13) break;
+        if (isValidIsbn(compact)) {
           isbns.push(compact);
           matched = take;
           break;

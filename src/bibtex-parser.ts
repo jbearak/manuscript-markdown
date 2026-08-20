@@ -904,12 +904,19 @@ export interface BibtexEntryFieldOccurrence {
 }
 
 const ENTRY_HEADER_RE = /^@\w+\s*[{(]/;
-/** A field name may start with anything a name may contain — `_doi` and `1doi`
- *  are names BibTeX reads whole.  Starting a name only at a letter would read
- *  `_doi` as the name `doi`, and a caller matching on field names would then
- *  act on a `doi` the file does not have. */
-const NAME_START_RE = /[\w-]/;
-const NAME_CHAR_RE = /[\w-]/;
+/** What may appear in a field name.  BibTeX names are far more permissive than
+ *  the identifiers they usually are: everything up to the next separator is
+ *  part of the name, so `:doi`, `+doi`, `.doi` and `@doi` are all names in
+ *  their own right.
+ *
+ *  Defined by exclusion, and deliberately so.  A caller matches on these names
+ *  to decide whether an entry carries an identifier, and every character
+ *  wrongly left out of a name splits it — reading `:doi` as `doi` invents a
+ *  DOI field the file does not have.  The excluded set is exactly what ends a
+ *  name: whitespace, the `=` that follows it, the `,` between fields, the
+ *  value delimiters, and the `#`/`%` the surrounding walk must still see. */
+const NAME_CHAR_RE = /[^\s=,{}()"#%]/;
+const NAME_START_RE = NAME_CHAR_RE;
 const SPACE_RE = /\s/;
 
 /** Walk one entry's body, reporting what sits at the entry's own lexical level.

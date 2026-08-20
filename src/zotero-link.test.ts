@@ -78,6 +78,32 @@ describe('normalizeIsbns', () => {
     expect(normalizeIsbns('9780306406157\n0306406152')).toEqual(['9780306406157', '0306406152']);
   });
 
+  it('uses the check digit to choose between possible splits', () => {
+    // These tokens divide into correctly-shaped runs several ways; only one
+    // division gives ISBNs whose check digits agree, and it is the intended
+    // 13/10/10 reading.
+    expect(normalizeIsbns('9780 306406 157 0306406 152 0306 406152')).toEqual([
+      '9780306406157',
+      '0306406152',
+      '0306406152',
+    ]);
+  });
+
+  it('accepts an unambiguous value whose check digit disagrees', () => {
+    // A mistyped ISBN recorded the same way in Zotero and in the .bib still
+    // identifies the same work.  There is no split to resolve here, so the
+    // checksum is not needed and enforcing it would only lose the match.
+    expect(normalizeIsbns('9780306406158')).toEqual(['9780306406158']);
+  });
+
+  it('does not hang on a long run of digit tokens', () => {
+    // Segmentation without memoization is exponential; this took minutes.
+    const input = Array.from({ length: 300 }, () => '1').join(' ') + ' bad';
+    const started = performance.now();
+    normalizeIsbns(input);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+
   it('splits two grouped ISBNs written side by side', () => {
     // Taking the longest ISBN-shaped prefix runs the first ISBN's tail into
     // the second's `978`, producing a pair that is in neither.  Only a split
@@ -154,6 +180,21 @@ describe('field value normalization', () => {
 
   it('undoes BibTeX punctuation escapes', () => {
     expect(normalizeDoi('10.1000/a\\_b')).toBe('10.1000/a_b');
+  });
+
+  it('unescapes once, not to a fixed point', () => {
+    // `\\\_` is a literal backslash followed by an escaped underscore.  One
+    // pass gives `\_`; a second would eat the backslash the value owns.
+    expect(normalizeDoi('10.1000/a\\\\\\_b')).toBe('10.1000/a\\_b');
+  });
+
+  it('strips deep brace nesting without quadratic cost', () => {
+    // Calling stripOuterBraces in a loop rescans the whole value per pair;
+    // this case took seconds.
+    const wrapped = '{'.repeat(50000) + '10.1000/abc' + '}'.repeat(50000);
+    const started = performance.now();
+    expect(normalizeDoi(wrapped)).toBe('10.1000/abc');
+    expect(performance.now() - started).toBeLessThan(1000);
   });
 });
 
@@ -495,9 +536,10 @@ describe('entries whose own text is ambiguous', () => {
   });
 
   it('does not read a field name out of the middle of a longer one', () => {
-    // `_doi` and `1doi` are field names BibTeX reads whole.  Starting a name
-    // at the embedded `d` would report a `doi` the entry does not have.
-    for (const name of ['_doi', '1doi', 'xdoi']) {
+    // All of these are field names BibTeX reads whole — its names allow far
+    // more than identifier characters.  Starting a name at the embedded `d`
+    // would report a `doi` the entry does not have.
+    for (const name of ['_doi', '1doi', 'xdoi', ':doi', '+doi', '.doi', '/doi', '@doi', '-doi']) {
       const bib = '@article{k1, ' + name + ' = {10.1000/abc}}\n';
       const plan = createZoteroLinkPlan(bib, matching);
       expect(decisionWithOutcome(plan.decisions, 'k1', 'unmatched').reason).toBe('no-identifiers');
