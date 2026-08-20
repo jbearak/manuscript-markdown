@@ -495,56 +495,73 @@ export function normalizeIsbns(value: string | undefined): string[] {
  *
  *  Check-valid runs anchor the reading: a selection of disjoint token runs,
  *  each of whose compacted text is a check-valid ISBN, maximizing how many
- *  such runs are recovered.  Only after that selection is unique do the
- *  leftover tokens contribute — each leftover that is ISBN-shaped on its own
- *  is kept as a mistyped standalone value (see the caller).  Shaped-but-
- *  invalid tokens deliberately carry no weight in choosing between readings:
- *  scoring them once let a check-invalid prefix of a real ISBN, plus a value
- *  fabricated from that ISBN's tail, outrank the ISBN itself.
+ *  such runs are recovered.  Leftover tokens then contribute only passively —
+ *  each leftover that is ISBN-shaped on its own is kept as a mistyped
+ *  standalone value (see the caller).  Shaped-but-invalid tokens deliberately
+ *  carry no weight in choosing between readings: scoring them once let a
+ *  check-invalid prefix of a real ISBN, plus a value fabricated from that
+ *  ISBN's tail, outrank the ISBN itself.
  *
- *  Two selections that consume different tokens are different readings even
- *  when their check-valid runs spell the same ISBNs, because the leftovers —
- *  and so the emitted standalone values — can differ.  More than two
- *  selections is refused outright; two are compared by what they finally
- *  emit, since a disagreement there is exactly the ambiguity being guarded
- *  against.  The caller passes separator-free tokens, so a boundary cannot
- *  multiply selections that read identically. */
+ *  What is compared for ambiguity is each selection's *emission* — its runs
+ *  and shaped leftovers in text order — not the selection itself.  Distinct
+ *  selections can read identically: in `1 1 1 1 1 1 1 1 1 1 1 1` the valid
+ *  ten-digit window starts at three different offsets, but every choice
+ *  emits the same lone ISBN, because the leftover `1`s emit nothing.  That
+ *  is one reading, not an ambiguity.  Counting selections here once refused
+ *  it.
+ *
+ *  Emissions are compared as hash-consed lists — one node per distinct
+ *  (value, tail) pair — so equality is reference equality, a suffix's
+ *  emissions dedupe as they are built, and memory stays linear where
+ *  materialized arrays once copied every suffix and exhausted the heap. */
 function salvage(
   tokens: readonly string[],
   compactOf: (tokens: readonly string[]) => string,
 ): string[] | undefined {
-  interface Run {
-    compact: string;
-    from: number;
-    take: number;
-  }
-  /** A selection of runs as a shared-tail list, ordered by position.  Arrays
-   *  here would copy every suffix per accepted run — quadratic in kept memory
-   *  for a long all-ISBN field, which exhausted the heap. */
   interface Node {
-    run: Run;
+    value: string;
     next: Node | null;
   }
+  const interned = new Map<string, Node>();
+  let nextId = 1;
+  const ids = new Map<Node, number>(); // null is id 0
+  const cons = (value: string, next: Node | null): Node => {
+    const key = value + ' ' + (next === null ? 0 : ids.get(next));
+    let node = interned.get(key);
+    if (node === undefined) {
+      node = { value, next };
+      interned.set(key, node);
+      ids.set(node, nextId++);
+    }
+    return node;
+  };
+
   interface Best {
     valid: number; // check-valid runs in the best selections of this suffix
-    count: number; // how many selections achieve it, saturating at 3
-    seqs: (Node | null)[]; // up to two of them
+    emits: (Node | null)[]; // up to two distinct emissions achieving it
   }
+  /** Merge an emission into `best.emits`, relying on interning for equality. */
+  const admit = (best: Best, emit: Node | null) => {
+    if (best.emits.length < 2 && !best.emits.includes(emit)) best.emits.push(emit);
+  };
 
   // Filled right to left: every position depends only on positions after it.
   // (Recursing instead — even just the skip-one-token chain — is a stack
   // frame per token, and a long field value overflows the stack.)
   const table = new Array<Best>(tokens.length + 1);
-  table[tokens.length] = { valid: 0, count: 1, seqs: [null] };
+  table[tokens.length] = { valid: 0, emits: [null] };
   for (let from = tokens.length - 1; from >= 0; from--) {
-    // Each selection is counted once, keyed by what happens at this token:
-    // either no run starts here (the suffix's selections, unchanged) or a run
-    // of some length does.  The sequence list is copied — it may be extended
-    // below, and the suffix's table entry must not be.
+    // Either no run starts at this token — it is a leftover, emitting its
+    // compacted self when ISBN-shaped and nothing otherwise — or a run of
+    // some length does.
+    const single = compactOf([tokens[from]]);
     const skipped = table[from + 1];
-    const best: Best = { valid: skipped.valid, count: skipped.count, seqs: [...skipped.seqs] };
+    const best: Best = { valid: skipped.valid, emits: [] };
+    for (const emit of skipped.emits) {
+      admit(best, isIsbnShaped(single) ? cons(single, emit) : emit);
+    }
     for (let take = 1; from + take <= tokens.length; take++) {
-      const compact = compactOf(tokens.slice(from, from + take));
+      const compact = take === 1 ? single : compactOf(tokens.slice(from, from + take));
       // A valid ISBN is at most 13 characters and `compact` only grows, so
       // nothing longer can ever be admissible.
       if (compact.length > 13) break;
@@ -552,53 +569,20 @@ function salvage(
       const rest = table[from + take];
       const valid = rest.valid + 1;
       if (valid < best.valid) continue;
-      const extend = (next: Node | null): Node => ({ run: { compact, from, take }, next });
       if (valid > best.valid) {
         best.valid = valid;
-        best.count = rest.count;
-        best.seqs = rest.seqs.map(extend);
-      } else {
-        best.count = Math.min(3, best.count + rest.count);
-        for (const seq of rest.seqs) {
-          if (best.seqs.length >= 2) break;
-          best.seqs.push(extend(seq));
-        }
+        best.emits = [];
       }
+      for (const emit of rest.emits) admit(best, cons(compact, emit));
     }
     table[from] = best;
   }
 
   const top = table[0];
-  if (top.count > 2) return undefined;
-
-  /** What a selection finally emits: its check-valid runs and, between them,
-   *  every leftover token that is ISBN-shaped by itself, in text order.  A
-   *  leftover pair can never join into something check-valid — that selection
-   *  would have scored higher. */
-  const emitted = (seq: Node | null): string[] => {
-    const out: string[] = [];
-    let cursor = 0;
-    const singles = (upTo: number) => {
-      for (; cursor < upTo; cursor++) {
-        const compact = compactOf([tokens[cursor]]);
-        if (isIsbnShaped(compact)) out.push(compact);
-      }
-    };
-    for (let node = seq; node !== null; node = node.next) {
-      singles(node.run.from);
-      out.push(node.run.compact);
-      cursor = node.run.from + node.run.take;
-    }
-    singles(tokens.length);
-    return out;
-  };
-
-  const readings = top.seqs.map(emitted);
-  if (readings.length === 2) {
-    const [a, b] = readings;
-    if (a.length !== b.length || a.some((v, i) => v !== b[i])) return undefined;
-  }
-  return readings[0];
+  if (top.emits.length !== 1) return undefined;
+  const out: string[] = [];
+  for (let node = top.emits[0]; node !== null; node = node.next) out.push(node.value);
+  return out;
 }
 
 /** A PubMed id reduced to bare digits, or undefined. */

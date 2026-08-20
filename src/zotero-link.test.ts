@@ -157,6 +157,14 @@ describe('normalizeIsbns', () => {
     expect(normalizeIsbns('print - 1000000000 030 640 615 2')).toEqual([]);
   });
 
+  it('treats selections that read identically as one reading', () => {
+    // Twelve `1`s: the check-valid ten-digit window can start at three
+    // offsets, but every choice emits the same lone ISBN — the leftover `1`s
+    // are not ISBN-shaped and emit nothing.  Counting selections instead of
+    // emissions once refused this.
+    expect(normalizeIsbns('1 1 1 1 1 1 1 1 1 1 1 1')).toEqual(['1111111111']);
+  });
+
   it('does not let a check-invalid token outvote a real ISBN', () => {
     // `9780306406157` is check-valid; `157 0000018` rereads its tail as the
     // check-valid `1570000018`, leaving the check-invalid prefix
