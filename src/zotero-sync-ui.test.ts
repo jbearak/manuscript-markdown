@@ -433,6 +433,13 @@ describe('isUnmatchedExportOurs', () => {
     expect(
       isUnmatchedExportOurs(encoded(output.replace('SHA-256: ', 'SHA-256: 0'))),
     ).toBe(false);
+
+    const digest = /SHA-256: ([0-9a-f]{64})/.exec(output)?.[1];
+    if (digest === undefined) throw new Error('generated checksum missing');
+    const changedDigest = (digest[0] === '0' ? '1' : '0') + digest.slice(1);
+    expect(
+      isUnmatchedExportOurs(encoded(output.replace(digest, changedDigest))),
+    ).toBe(false);
   });
 
   it('rejects a valid signed file whose bytes gain a UTF-8 BOM', () => {
