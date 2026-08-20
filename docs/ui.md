@@ -125,7 +125,7 @@ Export and document-setting commands. See [Converter](converter.md) for details 
 | Settings | **Document** — title, author, timezone, and hard line breaks |
 | | **Typography** — body, heading, and title typography; paragraph layout; blockquotes; callout labels; colors; and custom styles |
 | | **Tables** — fonts, widths, borders, number formatting, and source line-width limits |
-| | **Citations & Notes** — bibliography, CSL style, locale, citation placement, notes, and bibliography indentation; plus **Sync Bibliography from Zotero** in its own section |
+| | **Citations & Notes** — bibliography, CSL style, locale, citation placement, notes, bibliography indentation, and Zotero sync |
 | | **Code Blocks** — font, size, colors, and inset |
 
 > **Export to Word** converts the Markdown file to `.docx`. If a `.docx` with the same name already exists, its paragraph and formatting styles are automatically reused as a template — so fonts, spacing, and colors you previously set in Word are preserved.
