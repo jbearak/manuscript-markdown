@@ -64,7 +64,10 @@ export type ZoteroMetadataSkipReason =
   | 'repeated-field'
   /** Zotero's value is a bare macro reference; its spelling is not its
    *  value. */
-  | 'macro-value';
+  | 'macro-value'
+  /** Wrapping Zotero's value in braces would make the entry lexically
+   *  ambiguous because its escaped braces do not balance. */
+  | 'unbalanced-braces';
 
 export interface ZoteroMetadataSkip {
   readonly name: string;
@@ -124,6 +127,19 @@ export interface ZoteroSyncPlan {
  *  not a metadata difference. */
 function valuesEqual(a: string, b: string): boolean {
   return a.replace(/\s+/g, ' ').trim() === b.replace(/\s+/g, ' ').trim();
+}
+
+/** Whether a translator value remains one unambiguous field value when sync
+ *  wraps it in braces.  Run the real body scanner over a synthetic entry so
+ *  this check cannot drift from the parser's two-reading escaped-brace rule. */
+function canBraceWrapValue(value: string): boolean {
+  const body = scanBibtexEntryBody('@misc{_,\n  value = {' + value + '}\n}');
+  return (
+    !body.unbalanced &&
+    body.fields.length === 1 &&
+    body.fields[0].name === 'value' &&
+    body.fields[0].value === value
+  );
 }
 
 /** The parsed pieces of Zotero's BibTeX export for one item, or undefined
@@ -206,6 +222,10 @@ function planEntryMetadata(
     const existing = lastOccurrence.get(field.name);
     if (existing === undefined) {
       if (UPDATE_ONLY.has(field.name)) continue;
+      if (!canBraceWrapValue(field.value)) {
+        skipped.push({ name: field.name, reason: 'unbalanced-braces' });
+        continue;
+      }
       additions.push(formatBibtexFieldLine(field.name, field.value, indent()));
       changes.push({ kind: 'add', name: field.name, to: field.value });
       continue;
@@ -219,6 +239,10 @@ function planEntryMetadata(
     // nothing. Fall through and replace it with the literal.
     const existingIsLiteral = existing.delimiter !== 'bare' || /^\d+$/.test(existing.value);
     if (existingIsLiteral && valuesEqual(existing.value, field.value)) continue;
+    if (!canBraceWrapValue(field.value)) {
+      skipped.push({ name: field.name, reason: 'unbalanced-braces' });
+      continue;
+    }
     replacements.push({
       start: existing.valueStart,
       end: existing.valueEnd,

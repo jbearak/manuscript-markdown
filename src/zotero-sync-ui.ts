@@ -12,6 +12,7 @@
  *  No `vscode` import.  The picker rows use QuickPick's field names (label /
  *  description / detail) but are plain data. */
 
+import { createHash } from 'crypto';
 import type {
   ZoteroLinkDecision,
   ZoteroLinkConflictReason,
@@ -179,16 +180,14 @@ export function formatZoteroSyncSuccess(summary: ZoteroSyncSummary, filename: st
   return 'Synced "' + filename + '": ' + parts.join(' and ') + '.';
 }
 
-/** The modal shown before anything is written.  Only `entriesChanged`
- *  entries will change; everything else is enumerated so "left unchanged" is
- *  a statement, not an implication. */
+/** The modal shown before anything is written.  It states only the planned
+ *  writes; unchanged counts are redundant with the headline and remain
+ *  available in the per-entry report. */
 export function formatZoteroSyncConfirmation(
   summary: ZoteroSyncSummary,
   scope: ZoteroLibraryScope,
 ): ZoteroSyncConfirmation {
   const { link } = summary;
-  const untouched = describeUntouched(summary);
-
   const lines: string[] = [];
   if (link.updates > 0) {
     lines.push(
@@ -207,12 +206,9 @@ export function formatZoteroSyncConfirmation(
         ').',
     );
   }
-  if (untouched.length > 0) {
-    lines.push(untouched + ' — left unchanged.');
-  }
   if (scope.type === 'user') {
     lines.push(
-      'Warning: these links point into My Library, so they work only for your ' +
+      'Warning: links to items from the selected My Library work only for your ' +
         'Zotero account. Collaborators’ Word will fall back to embedded ' +
         'metadata and stop refreshing these citations. Zotero addresses ' +
         'personal libraries per account; only group libraries have addresses ' +
@@ -245,8 +241,9 @@ const CONFLICT_PROSE: Readonly<Record<ZoteroLinkConflictReason, string>> = {
 };
 
 const UNMATCHED_PROSE: Readonly<Record<ZoteroLinkUnmatchedReason, string>> = {
-  'no-exact-match': 'no item in the selected library shares an identifier',
-  'no-identifiers': 'no citation key, DOI, ISBN or PMID to match on',
+  'no-match':
+    'no item in the selected library matches its citation key, URL, identifiers, ' +
+    'or at least 3 of title, author, journal/book title and year',
 };
 
 function reportLine(decision: ZoteroLinkDecision): string {
@@ -291,6 +288,7 @@ const REPORT_SECTIONS: ReadonlyArray<
 const SKIP_PROSE: Readonly<Record<ZoteroMetadataSkipReason, string>> = {
   'repeated-field': 'the field appears more than once in the entry',
   'macro-value': 'Zotero exports it as a macro reference, not a literal value',
+  'unbalanced-braces': "Zotero's value has unmatched escaped braces",
 };
 
 /** Report prose per not-checked reason. */
@@ -386,26 +384,59 @@ export function formatZoteroSyncReport(
 // Unmatched export
 // ---------------------------------------------------------------------------
 
-/** First line of every generated unmatched export.  The sidecar's path is
- *  predictable (`<name>-unmatched.bib`), so before overwriting or deleting a
- *  file there the command checks for this marker — a file without it was
- *  authored by the user and must not be destroyed. */
+/** First line of every generated unmatched export. */
 export const UNMATCHED_EXPORT_MARKER =
   '% Entries "Sync Bibliography from Zotero" could not find in ';
 
-/** The marker written while the command was named "Link Bibliography to
- *  Zotero".  Still recognized by the ownership check, so sidecars from
- *  earlier runs are replaced rather than blocking the export. */
-const LEGACY_UNMATCHED_EXPORT_MARKER =
-  '% Entries "Link Bibliography to Zotero" could not match in ';
+/** A digest over the generated file with this line omitted.  The sidecar path
+ *  is predictable, so a recognizable header alone cannot prove ownership: a
+ *  user may save edits while leaving that header in place. */
+const UNMATCHED_EXPORT_CHECKSUM_MARKER =
+  '% Manuscript Markdown generated-content SHA-256: ';
 
-/** Whether an existing sidecar's content is this command's own output —
- *  current or legacy marker.  This module owns both spellings, so a future
- *  marker migration changes only this file. */
-export function isUnmatchedExportOurs(text: string): boolean {
+function unmatchedExportChecksum(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+/** Insert a checksum after the descriptive first line. */
+function signUnmatchedExport(text: string, eol: '\n' | '\r\n'): string {
+  const insertAt = text.indexOf(eol) + eol.length;
   return (
-    text.startsWith(UNMATCHED_EXPORT_MARKER) || text.startsWith(LEGACY_UNMATCHED_EXPORT_MARKER)
+    text.slice(0, insertAt) +
+    UNMATCHED_EXPORT_CHECKSUM_MARKER +
+    unmatchedExportChecksum(text) +
+    eol +
+    text.slice(insertAt)
   );
+}
+
+/** Whether existing sidecar bytes are byte-for-byte generated output.
+ *  Decode/encode equality is part of ownership: TextDecoder consumes a UTF-8
+ *  BOM and replaces malformed sequences, so checking only the decoded string
+ *  could accept bytes the command never generated.  Marker-only files from
+ *  older versions are deliberately rejected because a saved manual edit
+ *  cannot be distinguished from generated text without a digest. */
+export function isUnmatchedExportOurs(bytes: Uint8Array): boolean {
+  const text = new TextDecoder().decode(bytes);
+  const encoded = new TextEncoder().encode(text);
+  if (encoded.length !== bytes.length) return false;
+  for (let i = 0; i < bytes.length; i++) {
+    if (encoded[i] !== bytes[i]) return false;
+  }
+
+  if (!text.startsWith(UNMATCHED_EXPORT_MARKER)) return false;
+  const firstLf = text.indexOf('\n');
+  if (firstLf === -1) return false;
+  const eol = firstLf > 0 && text[firstLf - 1] === '\r' ? '\r\n' : '\n';
+  const checksumStart = firstLf + 1;
+  const checksumEnd = text.indexOf(eol, checksumStart);
+  if (checksumEnd === -1) return false;
+  const checksumLine = text.slice(checksumStart, checksumEnd);
+  if (!checksumLine.startsWith(UNMATCHED_EXPORT_CHECKSUM_MARKER)) return false;
+  const expected = checksumLine.slice(UNMATCHED_EXPORT_CHECKSUM_MARKER.length);
+  if (!/^[0-9a-f]{64}$/.test(expected)) return false;
+  const unsigned = text.slice(0, checksumStart) + text.slice(checksumEnd + eol.length);
+  return unmatchedExportChecksum(unsigned) === expected;
 }
 
 /** A .bib of just the unmatched entries, for a second round trip: import
@@ -439,10 +470,10 @@ export function buildUnmatchedBibliography(
   const eol = detectBibtexEol(bibliographyText);
   const chunks: string[] = [
     UNMATCHED_EXPORT_MARKER + libraryLabel + '.',
-    '% Generated by Manuscript Markdown; this file is overwritten on every run.',
+    '% Generated by Manuscript Markdown; regenerated only while unmodified.',
     '% To sync them: import this file into Zotero (File -> Import), then run the',
-    '% command again. Matching uses exact identifiers only, so entries with no',
-    '% identifiers will match by their citation key if Better BibTeX manages it.',
+    '% command again. Entries can match by Zotero identity, citation key, DOI,',
+    '% ISBN, PMID, URL, or a unique combination of descriptive metadata.',
     '',
   ];
   for (const decision of unmatched) {
@@ -451,7 +482,7 @@ export function buildUnmatchedBibliography(
     chunks.push('');
   }
   chunks.pop();
-  return chunks.join(eol) + eol;
+  return signUnmatchedExport(chunks.join(eol) + eol, eol);
 }
 
 /** The sentence appended to the completion notification when an unmatched
@@ -470,8 +501,8 @@ export function formatUnmatchedExportNote(unmatchedCount: number, filename: stri
   );
 }
 
-/** The sentence appended when the sidecar exists but is not this command's
- *  output (no marker, or unsaved edits), so it was left untouched.  Phrased
+/** The sentence appended when the sidecar cannot be proven byte-intact
+ *  generated output (missing/mismatched checksum, or unsaved edits).  Phrased
  *  as a note, not an error: by the time it is shown, any links are already
  *  committed. */
 export function formatUnmatchedExportBlockedNote(

@@ -7,9 +7,12 @@
  *
  *  Invariants this module exists to hold:
  *
- *  1. Only exact identifiers match.  Titles, authors, years and journals are
- *     never consulted.  A wrong link is worse than no link: it makes Word
- *     refresh a citation into a different work, silently.
+ *  1. Stable identifiers match first.  When none resolves an item, a metadata
+ *     fallback requires at least three of title, first-author family or
+ *     organization, container title and year to agree by normalized first
+ *     word, and it links only one qualifying item.  This tolerates one changed
+ *     or unavailable field without silently
+ *     choosing among plausible records.
  *  2. Ambiguity is never resolved.  Two Zotero items sharing an identifier
  *     means the entry is left alone and reported, and no lower tier is tried
  *     — a second identifier agreeing with neither candidate would be a guess
@@ -123,22 +126,28 @@ export function formatZoteroItemUri(
 
 /** One Zotero item, reduced to what matching and reporting need.
  *
- *  The transport adapter builds these directly from each API page and drops
+ *  The transport adapter builds these directly from each API row and drops
  *  the rest of the payload: a full-library scan is tens of thousands of items,
- *  and retaining their creators, notes and tags to match on four fields would
- *  hold megabytes of JSON alive for the length of the command. */
+ *  so only the first creator and small match fields survive. */
 export interface ZoteroCatalogItem {
   /** 8-character item key, unique within the library. */
   readonly key: string;
   /** Canonical identity URI, built by the adapter from the library's real
    *  numeric id — never `/users/0/`. */
   readonly uri: string;
-  /** For display in the summary and details only. */
+  /** Also used by the metadata fallback; retained for summary display. */
   readonly title?: string;
+  /** First author's family name, or a single-field corporate name. */
+  readonly author?: string;
+  /** Journal/publication title or book title, depending on item type. */
+  readonly containerTitle?: string;
+  /** Zotero date or parsed date; the matcher extracts its four-digit year. */
+  readonly year?: string;
   readonly citationKey?: string;
   readonly doi?: string;
   /** Zotero stores one string, which may list several ISBNs. */
   readonly isbn?: string;
+  readonly url?: string;
   /** Zotero's free-text `Extra` field, which by convention carries the
    *  identifiers item types have no dedicated field for. */
   readonly extra?: string;
@@ -146,17 +155,31 @@ export interface ZoteroCatalogItem {
 
 /** Which rule produced a match.  Ordered by confidence: a tier only runs when
  *  every tier above it found nothing at all. */
-export type ZoteroMatchTier = 'existing' | 'citation-key' | 'doi' | 'isbn-pmid';
+export type ZoteroMatchTier =
+  | 'existing'
+  | 'citation-key'
+  | 'doi'
+  | 'isbn-pmid'
+  | 'url'
+  | 'metadata';
 
-/** The specific identifier that agreed.  A single match can rest on more than
- *  one — an entry whose ISBN and PMID both point at the same Zotero item. */
+/** The specific value that agreed.  A single match can rest on more than one
+ *  metadata field or exact identifier. */
 export type ZoteroMatchEvidence =
   | 'zotero-key'
   | 'zotero-uri'
   | 'citation-key'
   | 'doi'
   | 'isbn'
-  | 'pmid';
+  | 'pmid'
+  | 'url'
+  | 'title'
+  | 'author'
+  | 'container-title'
+  | 'year'
+  /** Used when ambiguous candidates qualified through different metadata
+   *  field combinations. */
+  | 'metadata';
 
 /** The Zotero item an entry was, or would be, linked to. */
 export interface ZoteroLinkTarget {
@@ -198,10 +221,8 @@ export type ZoteroLinkConflictReason =
   | 'symbolic-field';
 
 export type ZoteroLinkUnmatchedReason =
-  /** The entry carries a DOI, ISBN or PMID, and no Zotero item has it. */
-  | 'no-exact-match'
-  /** The entry carries nothing exact to match on. */
-  | 'no-identifiers';
+  /** No item matched a stable identifier or the metadata fallback. */
+  'no-match';
 
 export type ZoteroLinkDecision =
   | {
@@ -567,6 +588,301 @@ export function normalizePmid(value: string | undefined): string | undefined {
   return /^\d{1,9}$/.test(raw) ? raw : undefined;
 }
 
+/** A web URL in the canonical form produced by the platform URL parser. */
+export function normalizeUrl(value: string | undefined): string | undefined {
+  const raw = plainFieldValue(value).trim();
+  if (!raw || /\s/.test(raw)) return undefined;
+  try {
+    const url = new URL(raw);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** One comparison token per descriptive field.  The fallback deliberately
+ *  compares first words rather than whole values so later metadata edits do
+ *  not prevent a match. */
+interface ZoteroMetadataSignature {
+  readonly title?: string;
+  readonly author?: string;
+  readonly containerTitle?: string;
+  readonly year?: string;
+}
+
+/** TeX commands whose names produce text rather than format an argument. */
+const TEX_TEXT_COMMANDS: Readonly<Record<string, string>> = {
+  LaTeX: 'LaTeX',
+  TeX: 'TeX',
+  BibTeX: 'BibTeX',
+  textasciitilde: '~',
+  textasciicircum: '^',
+  textbackslash: '\\',
+  AA: 'A',
+  aa: 'a',
+  AE: 'AE',
+  ae: 'ae',
+  DH: 'D',
+  dh: 'd',
+  L: 'L',
+  l: 'l',
+  NG: 'N',
+  ng: 'n',
+  O: 'O',
+  o: 'o',
+  OE: 'OE',
+  oe: 'oe',
+  ss: 'ss',
+  TH: 'TH',
+  th: 'th',
+  i: 'i',
+  j: 'j',
+  alpha: 'α',
+  beta: 'β',
+  gamma: 'γ',
+  delta: 'δ',
+  epsilon: 'ϵ',
+  varepsilon: 'ε',
+  zeta: 'ζ',
+  eta: 'η',
+  theta: 'θ',
+  vartheta: 'ϑ',
+  iota: 'ι',
+  kappa: 'κ',
+  lambda: 'λ',
+  mu: 'μ',
+  nu: 'ν',
+  xi: 'ξ',
+  pi: 'π',
+  varpi: 'ϖ',
+  rho: 'ρ',
+  varrho: 'ϱ',
+  sigma: 'σ',
+  varsigma: 'ς',
+  tau: 'τ',
+  upsilon: 'υ',
+  phi: 'ϕ',
+  varphi: 'φ',
+  chi: 'χ',
+  psi: 'ψ',
+  omega: 'ω',
+  Gamma: 'Γ',
+  Delta: 'Δ',
+  Theta: 'Θ',
+  Lambda: 'Λ',
+  Xi: 'Ξ',
+  Pi: 'Π',
+  Sigma: 'Σ',
+  Upsilon: 'Υ',
+  Phi: 'Φ',
+  Psi: 'Ψ',
+  Omega: 'Ω',
+};
+
+/** Commands that change presentation while leaving their argument visible. */
+const TEX_TRANSPARENT_COMMANDS: ReadonlySet<string> = new Set([
+  'textit', 'textbf', 'textrm', 'textsf', 'texttt', 'textsc', 'textsl',
+  'textup', 'textmd', 'textnormal', 'textsuperscript', 'textsubscript',
+  'emph', 'underline', 'mbox', 'ensuremath', 'mathit', 'mathbf', 'mathrm',
+  'mathsf', 'mathtt', 'mathcal', 'mathbb', 'mathfrak', 'operatorname',
+  'em', 'it', 'bf', 'rm', 'sf', 'tt', 'sc', 'sl', 'up', 'md', 'normalfont',
+  'u', 'v', 'H', 't', 'c', 'd', 'b', 'r', 'k',
+]);
+
+/** Sentinel meaning that discarding a command could change the first word. */
+const UNKNOWN_TEX_COMMAND = '\u0000';
+
+/** Decode control words without reinterpreting an escaped backslash as their
+ *  introducer.  `\\alpha` is a line-break/literal-slash command followed by
+ *  visible `alpha`, while `\alpha` is the Greek letter. */
+function decodeTexCommands(value: string): string {
+  let decoded = '';
+  for (let i = 0; i < value.length;) {
+    if (value[i] !== '\\') {
+      decoded += value[i];
+      i++;
+      continue;
+    }
+
+    const next = value[i + 1];
+    if (next === undefined) break;
+    if (next === '\\') {
+      i += 2;
+      continue;
+    }
+    if (!/[A-Za-z]/.test(next)) {
+      decoded += next;
+      i += 2;
+      continue;
+    }
+
+    let end = i + 2;
+    while (end < value.length && /[A-Za-z]/.test(value[end])) end++;
+    const command = value.slice(i + 1, end);
+    if (value[end] === '*') end++;
+    if (Object.prototype.hasOwnProperty.call(TEX_TEXT_COMMANDS, command)) {
+      decoded += TEX_TEXT_COMMANDS[command];
+    } else {
+      decoded += TEX_TRANSPARENT_COMMANDS.has(command) ? '' : UNKNOWN_TEX_COMMAND;
+    }
+    i = end;
+  }
+  return decoded;
+}
+
+/** Comparable metadata text with punctuation escapes undone but escaped
+ *  backslashes still distinguishable by `decodeTexCommands`. */
+function plainMetadataValue(value: string | undefined): string {
+  if (value === undefined) return '';
+  const plain = stripWrappingBraces(value.trim());
+  const unescaped = plain.replace(/\\([&%$#_{}])/g, '$1');
+  return stripWrappingBraces(unescaped.trim());
+}
+
+const NONDECOMPOSING_LETTER_FOLDS: Readonly<Record<string, string>> = {
+  æ: 'ae',
+  ð: 'd',
+  ł: 'l',
+  ŋ: 'n',
+  ø: 'o',
+  œ: 'oe',
+  ß: 'ss',
+  þ: 'th',
+  ı: 'i',
+  ȷ: 'j',
+};
+
+/** First whitespace-delimited word after removing Zotero rich-text tags,
+ *  BibTeX/TeX syntax, case, accents and punctuation.  Punctuation is removed
+ *  within the word, so a corporate author such as `U.S.` compares as `us` on
+ *  both sides. */
+function firstMetadataWord(value: string | undefined): string | undefined {
+  const text = decodeTexCommands(plainMetadataValue(value).replace(/<[^>]*>/g, ''))
+    .replace(/[\\{}]/g, '')
+    .normalize('NFKD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .replace(/[æðłŋøœßþıȷ]/g, letter => NONDECOMPOSING_LETTER_FOLDS[letter]);
+  for (const part of text.trim().split(/\s+/)) {
+    // Advancing past an unknown leading command could manufacture a match on
+    // a later word.  Withhold this field instead.
+    if (part.includes(UNKNOWN_TEX_COMMAND)) return undefined;
+    const word = part.replace(/[^\p{L}\p{N}]/gu, '');
+    if (word) return word;
+  }
+  return undefined;
+}
+
+/** A four-digit year from Zotero's free-form date or parsed date. */
+function metadataYear(value: string | undefined): string | undefined {
+  return plainFieldValue(value).match(/\b([12]\d{3})\b/)?.[1];
+}
+
+function metadataSignature(values: {
+  readonly title?: string;
+  readonly author?: string;
+  readonly containerTitle?: string;
+  readonly year?: string;
+}): ZoteroMetadataSignature {
+  return {
+    title: firstMetadataWord(values.title),
+    author: firstMetadataWord(values.author),
+    containerTitle: firstMetadataWord(values.containerTitle),
+    year: metadataYear(values.year),
+  };
+}
+
+function beginsWithLowercaseBibtexLetter(word: string): boolean {
+  const visible = decodeTexCommands(word).replace(/[\\{}]/g, '');
+  if (visible.includes(UNKNOWN_TEX_COMMAND)) return false;
+  const firstLetter = visible.match(/\p{L}/u)?.[0];
+  return firstLetter !== undefined && /\p{Ll}/u.test(firstLetter);
+}
+
+function topLevelComma(value: string): number {
+  let depth = 0;
+  for (let i = 0; i < value.length; i++) {
+    if (value[i] === '{') depth++;
+    else if (value[i] === '}') depth = Math.max(0, depth - 1);
+    else if (value[i] === ',' && depth === 0) return i;
+  }
+  return -1;
+}
+
+/** The first BibTeX author's family name, or the full literal organization.
+ *  Top-level `and` is whitespace-delimited and case-insensitive in BibTeX.
+ *  In `Given von Family` form the first lowercase name part begins the family
+ *  name, while `Family, Given` states it directly. */
+function firstBibtexAuthor(value: string): string | undefined {
+  let depth = 0;
+  let end = value.length;
+  for (let i = 0; i < value.length; i++) {
+    if (value[i] === '{') depth++;
+    else if (value[i] === '}') depth = Math.max(0, depth - 1);
+    else if (
+      depth === 0 &&
+      value.slice(i, i + 3).toLowerCase() === 'and' &&
+      (i === 0 || /\s/.test(value[i - 1])) &&
+      (i + 3 === value.length || /\s/.test(value[i + 3]))
+    ) {
+      end = i;
+      break;
+    }
+  }
+
+  const first = value.slice(0, end).trim();
+  if (!first) return undefined;
+  // A literal organization's first word remains usable when an unknown command
+  // occurs later, and comma form states the family name before any given-name
+  // commands.  Require one brace pair to enclose the whole literal, and ignore
+  // commas nested inside command arguments; otherwise either shortcut could
+  // bypass the unknown-command guard used for uncommaed name parsing.
+  const literal = stripWrappingBraces(first);
+  if (literal !== first) return literal;
+  const comma = topLevelComma(first);
+  if (comma !== -1) return first.slice(0, comma).trim() || undefined;
+  if (decodeTexCommands(first).includes(UNKNOWN_TEX_COMMAND)) return undefined;
+  const words = first.split(/\s+/).filter(Boolean);
+  const particle = words.slice(0, -1).findIndex(beginsWithLowercaseBibtexLetter);
+  return (particle === -1 ? words.slice(-1) : words.slice(particle)).join(' ');
+}
+
+/** One unambiguous literal field occurrence.  Bare nonnumeric values name
+ *  `@string` macros, and repeated descriptive fields have no single value, so
+ *  neither may contribute evidence to a metadata-only link. */
+function metadataFieldToken(
+  fields: readonly BibtexEntryFieldOccurrence[],
+  names: readonly string[],
+  normalize: (value: string) => string | undefined,
+): string | undefined {
+  const occurrences = fields.filter(field => names.includes(field.name));
+  if (occurrences.length !== 1) return undefined;
+  const field = occurrences[0];
+  if (field.delimiter === 'bare' && !/^\d+$/.test(field.value)) {
+    return undefined;
+  }
+  return normalize(field.value);
+}
+
+function bibtexMetadataSignature(
+  fields: readonly BibtexEntryFieldOccurrence[],
+): ZoteroMetadataSignature {
+  return {
+    title: metadataFieldToken(fields, ['title'], firstMetadataWord),
+    author: metadataFieldToken(
+      fields,
+      ['author'],
+      value => firstMetadataWord(firstBibtexAuthor(value)),
+    ),
+    containerTitle: metadataFieldToken(
+      fields,
+      ['journal', 'booktitle'],
+      firstMetadataWord,
+    ),
+    year: metadataFieldToken(fields, ['year'], metadataYear),
+  };
+}
+
 /** The identifiers Zotero's free-text `Extra` field can carry. */
 interface ZoteroExtraFields {
   readonly citationKey?: string;
@@ -611,6 +927,11 @@ interface ZoteroCatalogIndex {
   readonly byDoi: Map<string, ZoteroCatalogItem[]>;
   readonly byIsbn: Map<string, ZoteroCatalogItem[]>;
   readonly byPmid: Map<string, ZoteroCatalogItem[]>;
+  readonly byUrl: Map<string, ZoteroCatalogItem[]>;
+  readonly metadata: Array<{
+    readonly item: ZoteroCatalogItem;
+    readonly signature: ZoteroMetadataSignature;
+  }>;
 }
 
 function addToIndex(
@@ -631,6 +952,8 @@ function buildZoteroCatalogIndex(items: readonly ZoteroCatalogItem[]): ZoteroCat
     byDoi: new Map(),
     byIsbn: new Map(),
     byPmid: new Map(),
+    byUrl: new Map(),
+    metadata: [],
   };
   for (const item of items) {
     const extra = parseZoteroExtra(item.extra);
@@ -639,6 +962,8 @@ function buildZoteroCatalogIndex(items: readonly ZoteroCatalogItem[]): ZoteroCat
     addToIndex(index.byDoi, normalizeDoi(item.doi) ?? normalizeDoi(extra.doi), item);
     for (const isbn of normalizeIsbns(item.isbn)) addToIndex(index.byIsbn, isbn, item);
     addToIndex(index.byPmid, normalizePmid(extra.pmid), item);
+    addToIndex(index.byUrl, normalizeUrl(item.url), item);
+    index.metadata.push({ item, signature: metadataSignature(item) });
   }
   return index;
 }
@@ -767,9 +1092,61 @@ function findIdentifierCandidates(
   return { candidates: [...found.values()], evidence: [...evidence] };
 }
 
+const METADATA_COMPARISONS = [
+  ['title', 'title'],
+  ['author', 'author'],
+  ['containerTitle', 'container-title'],
+  ['year', 'year'],
+] as const satisfies ReadonlyArray<
+  readonly [keyof ZoteroMetadataSignature, ZoteroMatchEvidence]
+>;
+
+/** Match when at least three of the four descriptive signals agree.  Missing
+ *  values and disagreements both consume the one allowed non-match. */
+function decideMetadataFallback(
+  entry: BibtexSourceRange,
+  fields: readonly BibtexEntryFieldOccurrence[],
+  index: ZoteroCatalogIndex,
+): ZoteroLinkDecision | undefined {
+  const signature = bibtexMetadataSignature(fields);
+  const matches: Array<{
+    item: ZoteroCatalogItem;
+    evidence: ZoteroMatchEvidence[];
+  }> = [];
+
+  for (const candidate of index.metadata) {
+    const evidence: ZoteroMatchEvidence[] = [];
+    for (const [field, label] of METADATA_COMPARISONS) {
+      const value = signature[field];
+      if (value !== undefined && value === candidate.signature[field]) evidence.push(label);
+    }
+    if (evidence.length >= 3) matches.push({ item: candidate.item, evidence });
+  }
+
+  if (matches.length === 0) return undefined;
+  if (matches.length > 1) {
+    return {
+      outcome: 'ambiguous',
+      entry,
+      tier: 'metadata',
+      evidence: ['metadata'],
+      candidates: matches.map(match => toTarget(match.item)),
+    };
+  }
+  const match = matches[0];
+  return {
+    outcome: 'update',
+    entry,
+    tier: 'metadata',
+    evidence: match.evidence,
+    target: toTarget(match.item),
+    additions: bothFields(match.item),
+  };
+}
+
 /** Identifier fields whose value decides a match, so a repeat with a different
  *  value is a contradiction rather than clutter. */
-const IDENTIFIER_FIELDS = ['doi', 'isbn', 'pmid', 'zotero-key', 'zotero-uri'] as const;
+const IDENTIFIER_FIELDS = ['doi', 'isbn', 'pmid', 'url', 'zotero-key', 'zotero-uri'] as const;
 
 /** The first identifier field written twice with values that disagree.
  *
@@ -786,7 +1163,12 @@ function findContradictingField(
   for (const name of IDENTIFIER_FIELDS) {
     const values = new Set<string>();
     for (const field of fields) {
-      if (field.name === name) values.add(plainFieldValue(field.value));
+      if (field.name === name) {
+        const value = name === 'url'
+          ? normalizeUrl(field.value) ?? plainFieldValue(field.value)
+          : plainFieldValue(field.value);
+        values.add(value);
+      }
     }
     if (values.size > 1) return name;
   }
@@ -877,14 +1259,18 @@ function decideEntry(
     if (byIdentifier) return byIdentifier;
   }
 
-  // Nothing matched.  The two reasons read differently to a user: one asks
-  // them to add an identifier, the other to add the work to Zotero.
-  const hadIdentifier = doi !== undefined || isbns.length > 0 || pmid !== undefined;
-  return {
-    outcome: 'unmatched',
-    entry: range,
-    reason: hadIdentifier ? 'no-exact-match' : 'no-identifiers',
-  };
+  // A normalized URL is a stable identifier too, but sits below the
+  // publication identifiers because duplicate imports commonly share one.
+  const url = normalizeUrl(fields.get('url'));
+  if (url) {
+    const byUrl = resolveCandidates(range, 'url', ['url'], index.byUrl.get(url) ?? [], bothFields);
+    if (byUrl) return byUrl;
+  }
+
+  const byMetadata = decideMetadataFallback(range, body.fields, index);
+  if (byMetadata) return byMetadata;
+
+  return { outcome: 'unmatched', entry: range, reason: 'no-match' };
 }
 
 // ---------------------------------------------------------------------------
@@ -937,6 +1323,8 @@ export function summarizeZoteroLinkDecisions(
     'citation-key': 0,
     'doi': 0,
     'isbn-pmid': 0,
+    'url': 0,
+    'metadata': 0,
   };
   let updates = 0;
   let preserved = 0;

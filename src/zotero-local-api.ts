@@ -128,21 +128,33 @@ async function requestArray(
 ): Promise<unknown[]> {
   const fetchFn: ZoteroFetch = options.fetchFn ?? fetch;
   const deadline = AbortSignal.timeout(timeoutMs);
+  const signal = options.signal ? AbortSignal.any([deadline, options.signal]) : deadline;
   const init = {
-    signal: options.signal ? AbortSignal.any([deadline, options.signal]) : deadline,
+    signal,
     headers: { 'Zotero-API-Version': ZOTERO_API_VERSION },
   };
-  // Classification rides on the rejection's own name, never on signal state
-  // sampled afterwards: TimeoutError can only come from this function's
-  // deadline, AbortError only from the caller's signal, so a deadline that
-  // fires a moment before the user presses Cancel still reports a timeout.
+  // Fetch can reject a response-body read with generic AbortError even when a
+  // timeout caused it.  AbortSignal.any retains the first signal's reason, so
+  // that reason — not a later snapshot where both signals may be aborted —
+  // distinguishes the deadline from the caller's Cancel button.
   const abortError = (error: unknown): ZoteroLocalApiError | undefined => {
-    if (!(error instanceof DOMException)) return undefined;
-    if (error.name === 'TimeoutError') {
+    const name = error instanceof DOMException ? error.name : undefined;
+    const abortLike = error === signal.reason || name === 'AbortError' || name === 'TimeoutError';
+    if (!abortLike) return undefined;
+    if (signal.aborted && deadline.aborted && signal.reason === deadline.reason) {
       return new ZoteroLocalApiError('timeout', 'Zotero did not answer within ' + timeoutMs + 'ms.');
     }
-    if (error.name === 'AbortError' && options.signal !== undefined) {
+    if (
+      signal.aborted &&
+      options.signal?.aborted === true &&
+      signal.reason === options.signal.reason
+    ) {
       return new ZoteroLocalApiError('aborted', 'The caller aborted the request.');
+    }
+    // Injected transports may throw TimeoutError directly without aborting the
+    // supplied signal; preserve that fetch-compatible testing seam.
+    if (name === 'TimeoutError') {
+      return new ZoteroLocalApiError('timeout', 'Zotero did not answer within ' + timeoutMs + 'ms.');
     }
     return undefined;
   };
@@ -224,10 +236,70 @@ const NON_BIBLIOGRAPHIC_TYPES: ReadonlySet<string> = new Set([
   'annotation',
 ]);
 
+/** Zotero's primary creator role by item type.  Its BibTeX translator writes
+ *  this role as `author`; accepting every author-like role globally would pick
+ *  secondary creators (for example a book contributor). */
+const PRIMARY_CREATOR_BY_ITEM_TYPE: Readonly<Record<string, string>> = {
+  artwork: 'artist',
+  audioRecording: 'performer',
+  bill: 'sponsor',
+  blogPost: 'author',
+  book: 'author',
+  bookSection: 'author',
+  case: 'author',
+  computerProgram: 'programmer',
+  conferencePaper: 'author',
+  dataset: 'author',
+  dictionaryEntry: 'author',
+  document: 'author',
+  email: 'author',
+  encyclopediaArticle: 'author',
+  film: 'director',
+  forumPost: 'author',
+  hearing: 'contributor',
+  instantMessage: 'author',
+  interview: 'interviewee',
+  journalArticle: 'author',
+  letter: 'author',
+  magazineArticle: 'author',
+  manuscript: 'author',
+  map: 'cartographer',
+  newspaperArticle: 'author',
+  patent: 'inventor',
+  podcast: 'podcaster',
+  preprint: 'author',
+  presentation: 'presenter',
+  radioBroadcast: 'creator',
+  report: 'author',
+  standard: 'author',
+  statute: 'author',
+  thesis: 'author',
+  tvBroadcast: 'director',
+  videoRecording: 'creator',
+  webpage: 'author',
+};
+
+/** First primary Zotero creator as the metadata fallback compares it: family
+ *  name for a personal creator, whole name for a single-field organization. */
+function firstPrimaryCreator(
+  data: Record<string, unknown>,
+  itemType: string,
+): string | undefined {
+  if (!Array.isArray(data.creators)) return undefined;
+  const primaryRole = PRIMARY_CREATOR_BY_ITEM_TYPE[itemType];
+  if (primaryRole === undefined) return undefined;
+  for (const value of data.creators) {
+    const creator = asRecord(value);
+    if (creator?.creatorType !== primaryRole) continue;
+    return asString(creator.name) ?? asString(creator.lastName);
+  }
+  return undefined;
+}
+
 /** The fields of one item row, reduced to exactly what the catalog carries —
- *  the full row (creators, tags, relations) is dropped here, before the whole
- *  result is held at once.  Returns undefined for rows the matcher must never
- *  see: non-bibliographic or malformed.  A key that is not 8 uppercase
+ *  the full row (all creators, tags, relations) is dropped here, before the
+ *  whole result is held at once.  Returns undefined for rows the matcher must
+ *  never see: non-bibliographic or malformed.  A key that is not 8 uppercase
  *  alphanumerics is malformed by definition — everything written into a
  *  document is validated against that same pattern, so admitting it here
  *  would put an unwritable item in the catalog. */
@@ -235,9 +307,13 @@ function readItemRow(row: unknown): {
   key: string;
   userLibraryId: number | undefined;
   title: string | undefined;
+  author: string | undefined;
+  containerTitle: string | undefined;
+  year: string | undefined;
   citationKey: string | undefined;
   doi: string | undefined;
   isbn: string | undefined;
+  url: string | undefined;
   extra: string | undefined;
 } | undefined {
   const record = asRecord(row);
@@ -248,14 +324,38 @@ function readItemRow(row: unknown): {
   const itemType = asString(data.itemType);
   if (itemType === undefined || NON_BIBLIOGRAPHIC_TYPES.has(itemType)) return undefined;
   const library = asRecord(record?.library);
+  const meta = asRecord(record?.meta);
   const userLibraryId = library?.type === 'user' ? asLibraryId(library.id) : undefined;
   return {
     key,
     userLibraryId,
-    title: asString(data.title),
+    title:
+      asString(data.title) ??
+      asString(data.caseName) ??
+      asString(data.subject) ??
+      asString(data.nameOfAct),
+    author: firstPrimaryCreator(data, itemType),
+    containerTitle:
+      asString(data.publicationTitle) ??
+      asString(data.blogTitle) ??
+      asString(data.bookTitle) ??
+      asString(data.proceedingsTitle) ??
+      asString(data.dictionaryTitle) ??
+      asString(data.encyclopediaTitle) ??
+      asString(data.forumTitle) ??
+      asString(data.sessionTitle) ??
+      asString(data.programTitle) ??
+      asString(data.websiteTitle),
+    year:
+      asString(meta?.parsedDate) ??
+      asString(data.date) ??
+      asString(data.dateDecided) ??
+      asString(data.issueDate) ??
+      asString(data.dateEnacted),
     citationKey: asString(data.citationKey),
     doi: asString(data.DOI),
     isbn: asString(data.ISBN),
+    url: asString(data.url),
     extra: asString(data.extra),
   };
 }
@@ -311,13 +411,28 @@ export async function fetchZoteroCatalog(
     libraryId = id ?? 0; // unused: with no rows there is nothing to format
   }
 
-  return read.map(({ key, title, citationKey, doi, isbn, extra }) => ({
+  return read.map(({
     key,
-    uri: formatZoteroItemUri(libraryType, libraryId, key),
     title,
+    author,
+    containerTitle,
+    year,
     citationKey,
     doi,
     isbn,
+    url,
+    extra,
+  }) => ({
+    key,
+    uri: formatZoteroItemUri(libraryType, libraryId, key),
+    title,
+    author,
+    containerTitle,
+    year,
+    citationKey,
+    doi,
+    isbn,
+    url,
     extra,
   }));
 }
@@ -337,9 +452,10 @@ const BIBTEX_BATCH_SIZE = 50;
  *  Batches run sequentially — the server reruns its search per request, and
  *  hammering it in parallel starves the Zotero UI.
  *
- *  A key the server does not answer for, or whose export is empty, is simply
- *  absent from the result; the sync planner degrades that entry to
- *  identity-only. */
+ *  A returned row proves the item exists even when its export is empty, so
+ *  present keys map to the export or `''`.  A requested key omitted from the
+ *  response is absent from the result.  The distinction lets the sync planner
+ *  report an unusable export separately from a missing item. */
 export async function fetchZoteroBibtex(
   scope: ZoteroLibraryScope,
   keys: readonly string[],

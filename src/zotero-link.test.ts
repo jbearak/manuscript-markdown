@@ -4,6 +4,7 @@ import {
   normalizeDoi,
   normalizeIsbns,
   normalizePmid,
+  normalizeUrl,
   extractZoteroKey,
   type ZoteroLinkDecision,
 } from './zotero-link';
@@ -289,6 +290,19 @@ describe('normalizePmid', () => {
   });
 });
 
+describe('normalizeUrl', () => {
+  it('normalizes web URLs after undoing BibTeX wrapping and escapes', () => {
+    expect(normalizeUrl('{HTTPS://Example.COM/report\\_1}')).toBe(
+      'https://example.com/report_1',
+    );
+  });
+
+  it('rejects non-web and malformed values', () => {
+    expect(normalizeUrl('not a url')).toBeUndefined();
+    expect(normalizeUrl('mailto:test@example.com')).toBeUndefined();
+  });
+});
+
 describe('field value normalization', () => {
   it('strips only wrapping braces, never inner ones', () => {
     // Inner braces protect capitalization and are part of the value.
@@ -421,19 +435,398 @@ describe('matching tiers', () => {
     expect(d.target.key).toBe('AAAAAAAA');
   });
 
-  it('never matches on title, author or year', () => {
-    const bib = '@article{k1,\n  title = {The Very Same Title},\n  author = {Jane Doe},\n  year = {2020}\n}\n';
-    const plan = createZoteroLinkPlan(bib, [item('ABCD1234', { title: 'The Very Same Title' })]);
-    const d = decisionWithOutcome(plan.decisions, 'k1', 'unmatched');
-    expect(d.reason).toBe('no-identifiers');
-    expect(plan.changed).toBe(false);
+  it('links on one unique normalized URL', () => {
+    const bib =
+      '@online{k1,\n  url = {HTTPS://Example.COM/reports/a\\_b}\n}\n';
+    const plan = createZoteroLinkPlan(bib, [
+      item('ABCD1234', { url: 'https://example.com/reports/a_b' }),
+    ]);
+    const d = decisionWithOutcome(plan.decisions, 'k1', 'update');
+    expect(d.tier).toBe('url');
+    expect(d.target.key).toBe('ABCD1234');
   });
 
-  it('separates "no identifier" from "no match" in the unmatched reason', () => {
-    const bib = '@article{k1,\n  doi = {10.1000/nowhere}\n}\n';
-    const plan = createZoteroLinkPlan(bib, []);
-    const d = decisionWithOutcome(plan.decisions, 'k1', 'unmatched');
-    expect(d.reason).toBe('no-exact-match');
+  it('rejects contradictory and symbolic URL fields before matching', () => {
+    const repeated =
+      '@online{k1,\n  url = {https://a.example/report},\n' +
+      '  url = {https://b.example/report}\n}\n';
+    const repeatedDecision = decisionWithOutcome(
+      createZoteroLinkPlan(repeated, [
+        item('ABCD1234', { url: 'https://b.example/report' }),
+      ]).decisions,
+      'k1',
+      'conflict',
+    );
+    expect(repeatedDecision.reason).toBe('duplicate-field');
+    expect(repeatedDecision.detail).toBe('url');
+
+    const symbolic = '@online{k2,\n  url = homepage\n}\n';
+    expect(
+      decisionWithOutcome(
+        createZoteroLinkPlan(symbolic, []).decisions,
+        'k2',
+        'conflict',
+      ).reason,
+    ).toBe('symbolic-field');
+  });
+
+  it('allows repeated URLs that normalize to the same address', () => {
+    const bib =
+      '@online{k1,\n  url = {HTTPS://Example.COM/report},\n' +
+      '  url = {https://example.com/report}\n}\n';
+    const plan = createZoteroLinkPlan(bib, [
+      item('ABCD1234', { url: 'https://example.com/report' }),
+    ]);
+    expect(decisionWithOutcome(plan.decisions, 'k1', 'update').tier).toBe('url');
+  });
+
+  it('reports a URL shared by two Zotero items as ambiguous', () => {
+    const bib = '@online{k1,\n  url = {https://example.com/report}\n}\n';
+    const plan = createZoteroLinkPlan(bib, [
+      item('AAAAAAAA', { url: 'https://example.com/report' }),
+      item('BBBBBBBB', { url: 'https://example.com/report' }),
+    ]);
+    expect(decisionWithOutcome(plan.decisions, 'k1', 'ambiguous').tier).toBe('url');
+  });
+
+  it('matches the reported entries on three normalized metadata fields', () => {
+    const bib =
+      '@online{snsinsider2024Smart,\n' +
+      '  author = {{SNS Insider}},\n' +
+      '  title = {{\\textit{Smart}} Fertility Tracker Market},\n' +
+      '  year = {2024}\n' +
+      '}\n\n' +
+      '@techreport{fda2018De,\n' +
+      '  author = {{U.S. Food and Drug Administration}},\n' +
+      '  title = {De Novo Classification Request for {Natural Cycles}},\n' +
+      '  year = {2018}\n' +
+      '}\n\n' +
+      '@techreport{fda2021K193330,\n' +
+      '  author = {{U.S. Food and Drug Administration}},\n' +
+      '  title = {{K193330} 510(k) Summary},\n' +
+      '  year = {2021}\n' +
+      '}\n\n' +
+      '@article{vandenberg2016Osteopathic,\n' +
+      '  author = {Vandenberg, Rachel and Schneider, Robert},\n' +
+      '  title = {Osteopathic family medicine residents},\n' +
+      '  journal = {Osteopathic Family Physician},\n' +
+      '  year = {2016}\n' +
+      '}\n\n' +
+      '@incollection{brooke1996SUS,\n' +
+      '  author = {Brooke, John},\n' +
+      '  title = {{SUS}: A `quick and dirty\' usability scale},\n' +
+      '  booktitle = {Usability Evaluation in Industry},\n' +
+      '  year = {1996}\n' +
+      '}\n';
+    const catalog = [
+      item('AAAAAAAA', { title: '<i>Smart</i> Fertility Tracker Market', author: 'SNS Insider', year: '2024' }),
+      item('BBBBBBBB', { title: 'De Novo Classification Request', author: 'U.S. Food and Drug Administration', year: '2018' }),
+      item('CCCCCCCC', { title: 'K193330 510(k) Summary', author: 'U.S. Food and Drug Administration', year: '2021' }),
+      item('DDDDDDDD', { title: 'Osteopathic family medicine residents', author: 'Vandenberg', containerTitle: 'Osteopathic Family Physician', year: 'March 2016' }),
+      item('EEEEEEEE', { title: 'SUS: A quick and dirty usability scale', author: 'Brooke', containerTitle: 'Usability Evaluation in Industry', year: '1996' }),
+    ];
+
+    const plan = createZoteroLinkPlan(bib, catalog);
+
+    expect(plan.summary.updatesByTier.metadata).toBe(5);
+    expect(plan.decisions.map(d => d.outcome)).toEqual([
+      'update', 'update', 'update', 'update', 'update',
+    ]);
+    expect(
+      plan.decisions.map(d => d.outcome === 'update' ? d.target.key : ''),
+    ).toEqual(['AAAAAAAA', 'BBBBBBBB', 'CCCCCCCC', 'DDDDDDDD', 'EEEEEEEE']);
+  });
+
+  it('requires three metadata fields and allows one mismatch', () => {
+    const twoFields =
+      '@article{k1,\n  title = {Same title},\n  author = {Doe, Jane}\n}\n';
+    const candidate = item('ABCD1234', {
+      title: 'Same title',
+      author: 'Doe',
+      containerTitle: 'Different Journal',
+      year: '2020',
+    });
+    expect(decisionWithOutcome(
+      createZoteroLinkPlan(twoFields, [candidate]).decisions,
+      'k1',
+      'unmatched',
+    ).reason).toBe('no-match');
+
+    const oneMismatch =
+      '@article{k1,\n  title = {Same title},\n  author = {Doe, Jane},\n' +
+      '  journal = {Other Journal},\n  year = {2020}\n}\n';
+    expect(decisionWithOutcome(
+      createZoteroLinkPlan(oneMismatch, [candidate]).decisions,
+      'k1',
+      'update',
+    ).tier).toBe('metadata');
+  });
+
+  it('matches a given-name-first BibTeX author to Zotero family name', () => {
+    const bib =
+      '@techreport{k1,\n  title = {Same report},\n  author = {Jane Doe},\n' +
+      '  year = {2020}\n}\n';
+    const plan = createZoteroLinkPlan(bib, [
+      item('ABCD1234', { title: 'Same report', author: 'Doe', year: '2020' }),
+    ]);
+    const decision = decisionWithOutcome(plan.decisions, 'k1', 'update');
+    expect(decision.tier).toBe('metadata');
+    expect(decision.evidence).toEqual(['title', 'author', 'year']);
+  });
+
+  it('keeps the first author across whitespace and includes family-name particles', () => {
+    const bib =
+      '@article{multiline,\n  title = {Shared study},\n' +
+      '  author = {Jane Doe and\n    John Smith},\n  year = {2020}\n}\n\n' +
+      '@article{particle,\n  title = {Particle study},\n' +
+      '  author = {Jane van der Berg},\n  year = {2021}\n}\n';
+    const plan = createZoteroLinkPlan(bib, [
+      item('AAAAAAAA', { title: 'Shared study', author: 'Doe', year: '2020' }),
+      item('BBBBBBBB', { title: 'Shared study', author: 'Smith', year: '2020' }),
+      item('CCCCCCCC', { title: 'Particle study', author: 'van der Berg', year: '2021' }),
+    ]);
+
+    expect(decisionWithOutcome(plan.decisions, 'multiline', 'update').target.key).toBe('AAAAAAAA');
+    expect(decisionWithOutcome(plan.decisions, 'particle', 'update').target.key).toBe('CCCCCCCC');
+  });
+
+  it('preserves text-producing TeX commands and folds special letters', () => {
+    const bib =
+      '@book{latex,\n  title = {{\\LaTeX} Companion},\n' +
+      '  author = {Doe, Jane},\n  year = {2020}\n}\n\n' +
+      '@article{special,\n  title = {Shared study},\n' +
+      '  author = {S{\\o}rensen, Jane},\n  year = {2021}\n}\n';
+    const plan = createZoteroLinkPlan(bib, [
+      item('AAAAAAAA', { title: 'LaTeX Companion', author: 'Doe', year: '2020' }),
+      item('BBBBBBBB', { title: 'Companion volume', author: 'Doe', year: '2020' }),
+      item('CCCCCCCC', { title: 'Shared study', author: 'Sørensen', year: '2021' }),
+    ]);
+
+    expect(decisionWithOutcome(plan.decisions, 'latex', 'update').target.key).toBe('AAAAAAAA');
+    expect(decisionWithOutcome(plan.decisions, 'special', 'update').target.key).toBe('CCCCCCCC');
+  });
+
+  it('decodes Greek TeX commands instead of matching a later word', () => {
+    const bib =
+      '@article{greek,\n  title = {{$\\alpha$-synuclein aggregation}},\n' +
+      '  author = {Doe, Jane},\n  year = {2020}\n}\n';
+    const plan = createZoteroLinkPlan(bib, [
+      item('AAAAAAAA', {
+        title: 'α-synuclein aggregation',
+        author: 'Doe',
+        year: '2020',
+      }),
+      item('BBBBBBBB', {
+        title: 'Synuclein aggregation',
+        author: 'Doe',
+        year: '2020',
+      }),
+    ]);
+
+    expect(
+      decisionWithOutcome(plan.decisions, 'greek', 'update').target.key,
+    ).toBe('AAAAAAAA');
+  });
+
+  it('withholds metadata fields containing unknown TeX commands', () => {
+    const unknownTitle =
+      '@article{title,\n  title = {{\\customword} Study},\n' +
+      '  author = {Doe, Jane},\n  year = {2020}\n}\n';
+    const titlePlan = createZoteroLinkPlan(unknownTitle, [
+      item('AAAAAAAA', { title: 'Study', author: 'Doe', year: '2020' }),
+    ]);
+    expect(
+      decisionWithOutcome(titlePlan.decisions, 'title', 'unmatched').reason,
+    ).toBe('no-match');
+
+    const unknownAuthor =
+      '@article{author,\n  title = {Shared study},\n' +
+      '  author = {Jane {\\customword} Doe},\n  year = {2020}\n}\n';
+    const authorPlan = createZoteroLinkPlan(unknownAuthor, [
+      item('BBBBBBBB', {
+        title: 'Shared study',
+        author: 'Doe',
+        year: '2020',
+      }),
+    ]);
+    expect(
+      decisionWithOutcome(authorPlan.decisions, 'author', 'unmatched').reason,
+    ).toBe('no-match');
+  });
+
+  it('treats prototype-named TeX commands as unknown', () => {
+    const unknownTitle =
+      '@article{title-prototype,\n  title = {{\\toString} Study},\n' +
+      '  author = {Doe, Jane},\n  year = {2020}\n}\n';
+    const titlePlan = createZoteroLinkPlan(unknownTitle, [
+      item('AAAAAAAA', {
+        title: 'function declaration',
+        author: 'Doe',
+        year: '2020',
+      }),
+    ]);
+    expect(
+      decisionWithOutcome(
+        titlePlan.decisions,
+        'title-prototype',
+        'unmatched',
+      ).reason,
+    ).toBe('no-match');
+
+    const unknownAuthor =
+      '@article{author-prototype,\n  title = {Shared study},\n' +
+      '  author = {Jane {\\constructor} Doe},\n  year = {2020}\n}\n';
+    const authorPlan = createZoteroLinkPlan(unknownAuthor, [
+      item('BBBBBBBB', {
+        title: 'Shared study',
+        author: 'function',
+        year: '2020',
+      }),
+    ]);
+    expect(
+      decisionWithOutcome(
+        authorPlan.decisions,
+        'author-prototype',
+        'unmatched',
+      ).reason,
+    ).toBe('no-match');
+  });
+
+  it('does not reinterpret escaped backslashes as TeX command introducers', () => {
+    const bib =
+      '@article{escaped-title,\n  title = {{\\\\alpha} Study},\n' +
+      '  author = {Doe, Jane},\n  year = {2020}\n}\n\n' +
+      '@article{escaped-author,\n  title = {Shared study},\n' +
+      '  author = {\\\\alpha, Jane},\n  year = {2021}\n}\n\n' +
+      '@article{escaped-unknown,\n  title = {{\\\\customword} Study},\n' +
+      '  author = {Roe, Jane},\n  year = {2022}\n}\n';
+    const plan = createZoteroLinkPlan(bib, [
+      item('AAAAAAAA', { title: 'alpha Study', author: 'Doe', year: '2020' }),
+      item('BBBBBBBB', { title: 'α Study', author: 'Doe', year: '2020' }),
+      item('CCCCCCCC', { title: 'Shared study', author: 'alpha', year: '2021' }),
+      item('DDDDDDDD', { title: 'Shared study', author: 'α', year: '2021' }),
+      item('EEEEEEEE', {
+        title: 'customword Study',
+        author: 'Roe',
+        year: '2022',
+      }),
+    ]);
+
+    expect(
+      decisionWithOutcome(plan.decisions, 'escaped-title', 'update').target.key,
+    ).toBe('AAAAAAAA');
+    expect(
+      decisionWithOutcome(plan.decisions, 'escaped-author', 'update').target.key,
+    ).toBe('CCCCCCCC');
+    expect(
+      decisionWithOutcome(plan.decisions, 'escaped-unknown', 'update').target.key,
+    ).toBe('EEEEEEEE');
+  });
+
+  it('preserves standard accent and literal-text commands', () => {
+    const bib =
+      '@article{ogonek,\n  title = {{\\k{A}}dam Study},\n' +
+      '  author = {Doe, Jane},\n  year = {2020}\n}\n\n' +
+      '@article{tilde,\n  title = {{\\textasciitilde{}} Study},\n' +
+      '  author = {Roe, Jane},\n  year = {2021}\n}\n';
+    const plan = createZoteroLinkPlan(bib, [
+      item('AAAAAAAA', { title: 'Adam Study', author: 'Doe', year: '2020' }),
+      item('BBBBBBBB', { title: 'Study', author: 'Roe', year: '2021' }),
+    ]);
+
+    expect(
+      decisionWithOutcome(plan.decisions, 'ogonek', 'update').target.key,
+    ).toBe('AAAAAAAA');
+    expect(
+      decisionWithOutcome(plan.decisions, 'tilde', 'update').target.key,
+    ).toBe('BBBBBBBB');
+  });
+
+  it('uses explicit family and organization words before later unknown commands', () => {
+    const bib =
+      '@article{family,\n  title = {Family study},\n' +
+      '  author = {Doe, Jane \\orcidlink{0000}},\n  year = {2020}\n}\n\n' +
+      '@article{organization,\n  title = {Organization study},\n' +
+      '  author = {{Agency \\orcidlink{0000}}},\n  year = {2021}\n}\n';
+    const plan = createZoteroLinkPlan(bib, [
+      item('AAAAAAAA', { title: 'Family study', author: 'Doe', year: '2020' }),
+      item('BBBBBBBB', {
+        title: 'Organization study',
+        author: 'Agency',
+        year: '2021',
+      }),
+    ]);
+
+    expect(
+      decisionWithOutcome(plan.decisions, 'family', 'update').target.key,
+    ).toBe('AAAAAAAA');
+    expect(
+      decisionWithOutcome(plan.decisions, 'organization', 'update').target.key,
+    ).toBe('BBBBBBBB');
+  });
+
+  it('withholds structurally ambiguous uncommaed authors', () => {
+    const bib =
+      '@article{separate-groups,\n  title = {Grouped study},\n' +
+      '  author = {{Jane} Doe \\orcidlink{0000}},\n  year = {2020}\n}\n\n' +
+      '@article{nested-comma,\n  title = {Nested study},\n' +
+      '  author = {Jane Doe \\thanks{Dept, University}},\n' +
+      '  year = {2021}\n}\n';
+    const plan = createZoteroLinkPlan(bib, [
+      item('AAAAAAAA', { title: 'Grouped study', author: 'Jane', year: '2020' }),
+      item('BBBBBBBB', { title: 'Nested study', author: 'Jane', year: '2021' }),
+    ]);
+
+    expect(
+      decisionWithOutcome(
+        plan.decisions,
+        'separate-groups',
+        'unmatched',
+      ).reason,
+    ).toBe('no-match');
+    expect(
+      decisionWithOutcome(plan.decisions, 'nested-comma', 'unmatched').reason,
+    ).toBe('no-match');
+  });
+
+  it('does not count symbolic or repeated metadata fields as evidence', () => {
+    const symbolic =
+      '@article{k1,\n  title = same,\n  author = {Jane Doe},\n  year = {2020}\n}\n';
+    const candidate = item('ABCD1234', {
+      title: 'Same study',
+      author: 'Doe',
+      year: '2020',
+    });
+    expect(
+      decisionWithOutcome(
+        createZoteroLinkPlan(symbolic, [candidate]).decisions,
+        'k1',
+        'unmatched',
+      ).reason,
+    ).toBe('no-match');
+
+    const repeated =
+      '@article{k2,\n  title = {Different},\n  title = {Same study},\n' +
+      '  author = {Jane Doe},\n  year = {2020}\n}\n';
+    expect(
+      decisionWithOutcome(
+        createZoteroLinkPlan(repeated, [candidate]).decisions,
+        'k2',
+        'unmatched',
+      ).reason,
+    ).toBe('no-match');
+  });
+
+  it('reports multiple three-field metadata matches as ambiguous', () => {
+    const bib =
+      '@article{k1,\n  title = {Shared title},\n  author = {Doe, Jane},\n  year = {2020}\n}\n';
+    const plan = createZoteroLinkPlan(bib, [
+      item('AAAAAAAA', { title: 'Shared title', author: 'Doe', year: '2020' }),
+      item('BBBBBBBB', { title: 'Shared title', author: 'Doe', year: '2020' }),
+    ]);
+    const decision = decisionWithOutcome(plan.decisions, 'k1', 'ambiguous');
+    expect(decision.tier).toBe('metadata');
+    expect(decision.evidence).toEqual(['metadata']);
   });
 });
 
@@ -678,7 +1071,7 @@ describe('entries whose own text is ambiguous', () => {
     // layer to the walk's reading.
     const bib = '@article{k1, _doi = {10.1000/abc}}\n';
     const plan = createZoteroLinkPlan(bib, matching);
-    expect(decisionWithOutcome(plan.decisions, 'k1', 'unmatched').reason).toBe('no-identifiers');
+    expect(decisionWithOutcome(plan.decisions, 'k1', 'unmatched').reason).toBe('no-match');
     expect(plan.updatedText).toBe(bib);
   });
 
@@ -688,7 +1081,7 @@ describe('entries whose own text is ambiguous', () => {
     // have at its own level; matching must follow the walk, not the regex.
     const bib = '@article{k1,\n  note = "a {"} doi = {10.1000/abc} b"\n}\n';
     const plan = createZoteroLinkPlan(bib, matching);
-    expect(decisionWithOutcome(plan.decisions, 'k1', 'unmatched').reason).toBe('no-identifiers');
+    expect(decisionWithOutcome(plan.decisions, 'k1', 'unmatched').reason).toBe('no-match');
     expect(plan.updatedText).toBe(bib);
   });
 
@@ -882,7 +1275,14 @@ describe('summary', () => {
       ambiguous: 1,
       conflicts: 1,
       unmatched: 1,
-      updatesByTier: { 'existing': 0, 'citation-key': 1, 'doi': 1, 'isbn-pmid': 0 },
+      updatesByTier: {
+        'existing': 0,
+        'citation-key': 1,
+        'doi': 1,
+        'isbn-pmid': 0,
+        'url': 0,
+        'metadata': 0,
+      },
     });
   });
 

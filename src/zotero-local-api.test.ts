@@ -2,10 +2,12 @@ import { describe, it, expect } from 'bun:test';
 import {
   listZoteroGroups,
   fetchZoteroCatalog,
+  fetchZoteroBibtex,
   ZoteroLocalApiError,
   type ZoteroFetch,
   type ZoteroLibraryScope,
 } from './zotero-local-api';
+import { createZoteroLinkPlan } from './zotero-link';
 
 // ---------------------------------------------------------------------------
 // Transport fakes
@@ -44,17 +46,39 @@ function apiItem(
   fields: Partial<{
     itemType: string;
     title: string;
+    caseName: string;
+    subject: string;
+    nameOfAct: string;
+    creators: unknown[];
+    publicationTitle: string;
+    blogTitle: string;
+    bookTitle: string;
+    proceedingsTitle: string;
+    dictionaryTitle: string;
+    encyclopediaTitle: string;
+    forumTitle: string;
+    sessionTitle: string;
+    programTitle: string;
+    websiteTitle: string;
+    date: string;
+    dateDecided: string;
+    issueDate: string;
+    dateEnacted: string;
+    parsedDate: string;
     DOI: string;
     ISBN: string;
+    url: string;
     extra: string;
     citationKey: string;
   }> = {},
   library: { type: 'user' | 'group'; id: number } | null = { type: 'group', id: 2295646 },
 ): unknown {
+  const { parsedDate, ...dataFields } = fields;
   return {
     key,
     library: library === null ? undefined : { type: library.type, id: library.id, name: 'L' },
-    data: { key, itemType: fields.itemType ?? 'journalArticle', ...fields },
+    data: { key, itemType: fields.itemType ?? 'journalArticle', ...dataFields },
+    meta: parsedDate === undefined ? undefined : { parsedDate },
   };
 }
 
@@ -71,6 +95,25 @@ async function expectKind(promise: Promise<unknown>, kind: string): Promise<Zote
     return apiError;
   }
   throw new Error('expected the call to reject with ' + kind);
+}
+
+/** Replace the adapter's deadline with a controllable signal for one test.
+ *  Native response-body aborts otherwise require waiting five seconds. */
+async function withControlledDeadline<T>(
+  run: (deadline: AbortController) => Promise<T>,
+): Promise<T> {
+  const descriptor = Object.getOwnPropertyDescriptor(AbortSignal, 'timeout');
+  if (descriptor === undefined) throw new Error('AbortSignal.timeout is unavailable');
+  const deadline = new AbortController();
+  Object.defineProperty(AbortSignal, 'timeout', {
+    configurable: true,
+    value: () => deadline.signal,
+  });
+  try {
+    return await run(deadline);
+  } finally {
+    Object.defineProperty(AbortSignal, 'timeout', descriptor);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -111,19 +154,44 @@ describe('zotero-local-api error taxonomy', () => {
     );
   });
 
-  it('reports a deadline timeout even when the caller aborts moments later', async () => {
-    // Classification must ride on the rejection's own name, not on signal
-    // state sampled afterwards: the deadline fired first, so it is a timeout
-    // the user should hear about, even though Cancel was pressed too.
-    const controller = new AbortController();
-    const fetchFn: ZoteroFetch = async () => {
-      controller.abort();
-      throw new DOMException('timed out', 'TimeoutError');
-    };
-    await expectKind(
-      fetchZoteroCatalog(GROUP_SCOPE, { fetchFn, signal: controller.signal }),
-      'timeout',
-    );
+  it('reports the deadline when a body read throws generic AbortError', async () => {
+    await withControlledDeadline(async deadline => {
+      const caller = new AbortController();
+      const fetchFn: ZoteroFetch = async () => ({
+        ok: true,
+        status: 200,
+        json: async () => {
+          deadline.abort(new DOMException('timed out', 'TimeoutError'));
+          caller.abort();
+          // Native fetch uses AbortError for an interrupted body even though
+          // the combined signal retains the deadline's TimeoutError reason.
+          throw new DOMException('body stream aborted', 'AbortError');
+        },
+      });
+      await expectKind(
+        fetchZoteroCatalog(GROUP_SCOPE, { fetchFn, signal: caller.signal }),
+        'timeout',
+      );
+    });
+  });
+
+  it('keeps caller cancellation when it wins the body-read race', async () => {
+    await withControlledDeadline(async deadline => {
+      const caller = new AbortController();
+      const fetchFn: ZoteroFetch = async () => ({
+        ok: true,
+        status: 200,
+        json: async () => {
+          caller.abort();
+          deadline.abort(new DOMException('timed out', 'TimeoutError'));
+          throw new DOMException('body stream aborted', 'AbortError');
+        },
+      });
+      await expectKind(
+        fetchZoteroCatalog(GROUP_SCOPE, { fetchFn, signal: caller.signal }),
+        'aborted',
+      );
+    });
   });
 
   it('reports an abort while reading the body as a timeout too', async () => {
@@ -208,7 +276,20 @@ describe('fetchZoteroCatalog', () => {
   it('maps item rows to catalog items with canonical group URIs', async () => {
     const { fetchFn } = fakeFetch([
       ['/groups/2295646/items/top', () => ({
-        body: [apiItem('ABCD1234', { title: 'T', DOI: '10.1/a', ISBN: '9780306406157', extra: 'PMID: 123' })],
+        body: [apiItem('ABCD1234', {
+          title: 'T',
+          creators: [
+            { creatorType: 'editor', lastName: 'Ignored' },
+            { creatorType: 'author', firstName: 'Rachel', lastName: 'Vandenberg' },
+          ],
+          publicationTitle: 'Osteopathic Family Physician',
+          date: 'March 2016',
+          parsedDate: '2016-03-00',
+          DOI: '10.1/a',
+          ISBN: '9780306406157',
+          url: 'https://example.test/article',
+          extra: 'PMID: 123',
+        })],
       })],
     ]);
     const items = await fetchZoteroCatalog(GROUP_SCOPE, { fetchFn });
@@ -217,12 +298,162 @@ describe('fetchZoteroCatalog', () => {
         key: 'ABCD1234',
         uri: 'http://zotero.org/groups/2295646/items/ABCD1234',
         title: 'T',
+        author: 'Vandenberg',
+        containerTitle: 'Osteopathic Family Physician',
+        year: '2016-03-00',
         citationKey: undefined,
         doi: '10.1/a',
         isbn: '9780306406157',
+        url: 'https://example.test/article',
         extra: 'PMID: 123',
       },
     ]);
+  });
+
+  it('maps corporate authors and conference containers through metadata matching', async () => {
+    const { fetchFn } = fakeFetch([
+      ['/groups/2295646/items/top', () => ({
+        body: [
+          apiItem('CONF1234', {
+            itemType: 'conferencePaper',
+            title: 'Revised heading',
+            creators: [{ creatorType: 'author', firstName: 'Jane', lastName: 'Doe' }],
+            proceedingsTitle: 'Proceedings of Testing',
+            parsedDate: '2020-00-00',
+          }),
+          apiItem('CORP1234', {
+            title: '<i>Smart</i> report',
+            creators: [{ creatorType: 'author', name: 'SNS Insider' }],
+            date: '2024',
+          }),
+        ],
+      })],
+    ]);
+    const items = await fetchZoteroCatalog(GROUP_SCOPE, { fetchFn });
+
+    expect(items[0].containerTitle).toBe('Proceedings of Testing');
+    expect(items[1].author).toBe('SNS Insider');
+    const bib =
+      '@inproceedings{paper2020,\n  title = {Original heading},\n' +
+      '  author = {Jane Doe},\n  booktitle = {Proceedings of Testing},\n' +
+      '  year = {2020}\n}\n';
+    const decision = createZoteroLinkPlan(bib, items).decisions[0];
+    expect(decision.outcome).toBe('update');
+    if (decision.outcome !== 'update') throw new Error('expected metadata match');
+    expect(decision.tier).toBe('metadata');
+    expect(decision.evidence).toEqual(['author', 'container-title', 'year']);
+    expect(decision.target.key).toBe('CONF1234');
+  });
+
+  it('maps Zotero type-specific title, container, and date aliases', async () => {
+    const rows = [
+      apiItem('ALIAS001', { itemType: 'case', caseName: 'Case name', dateDecided: '2020' }),
+      apiItem('ALIAS002', { itemType: 'email', subject: 'Email subject' }),
+      apiItem('ALIAS003', { itemType: 'statute', nameOfAct: 'Act name', dateEnacted: '2021' }),
+      apiItem('ALIAS004', { itemType: 'patent', title: 'Patent title', issueDate: '2022' }),
+      apiItem('CONT0001', { itemType: 'journalArticle', publicationTitle: 'Publication' }),
+      apiItem('CONT0002', { itemType: 'blogPost', blogTitle: 'Blog' }),
+      apiItem('CONT0003', { itemType: 'bookSection', bookTitle: 'Book' }),
+      apiItem('CONT0004', { itemType: 'conferencePaper', proceedingsTitle: 'Proceedings' }),
+      apiItem('CONT0005', { itemType: 'dictionaryEntry', dictionaryTitle: 'Dictionary' }),
+      apiItem('CONT0006', { itemType: 'encyclopediaArticle', encyclopediaTitle: 'Encyclopedia' }),
+      apiItem('CONT0007', { itemType: 'forumPost', forumTitle: 'Forum' }),
+      apiItem('CONT0008', { itemType: 'presentation', sessionTitle: 'Session' }),
+      apiItem('CONT0009', { itemType: 'radioBroadcast', programTitle: 'Program' }),
+      apiItem('CONT0010', { itemType: 'webpage', websiteTitle: 'Website' }),
+    ];
+    const { fetchFn } = fakeFetch([
+      ['/groups/2295646/items/top', () => ({ body: rows })],
+    ]);
+    const items = await fetchZoteroCatalog(GROUP_SCOPE, { fetchFn });
+    const byKey = new Map(items.map(item => [item.key, item]));
+
+    expect(byKey.get('ALIAS001')).toMatchObject({ title: 'Case name', year: '2020' });
+    expect(byKey.get('ALIAS002')?.title).toBe('Email subject');
+    expect(byKey.get('ALIAS003')).toMatchObject({ title: 'Act name', year: '2021' });
+    expect(byKey.get('ALIAS004')?.year).toBe('2022');
+    expect(
+      Array.from({ length: 10 }, (_, index) =>
+        byKey.get('CONT' + String(index + 1).padStart(4, '0'))?.containerTitle,
+      ),
+    ).toEqual([
+      'Publication',
+      'Blog',
+      'Book',
+      'Proceedings',
+      'Dictionary',
+      'Encyclopedia',
+      'Forum',
+      'Session',
+      'Program',
+      'Website',
+    ]);
+  });
+
+  it('matches a case through its type-specific title and date fields', async () => {
+    const { fetchFn } = fakeFetch([
+      ['/groups/2295646/items/top', () => ({
+        body: [apiItem('CASE0001', {
+          itemType: 'case',
+          caseName: 'Example case',
+          creators: [{ creatorType: 'author', lastName: 'Doe' }],
+          dateDecided: '2020-06-01',
+        })],
+      })],
+    ]);
+    const items = await fetchZoteroCatalog(GROUP_SCOPE, { fetchFn });
+    const bib =
+      '@misc{case,\n  title = {Example case},\n  author = {Doe, Jane},\n' +
+      '  year = {2020}\n}\n';
+    const decision = createZoteroLinkPlan(bib, items).decisions[0];
+    expect(decision.outcome).toBe('update');
+    if (decision.outcome !== 'update') throw new Error('expected metadata match');
+    expect(decision.tier).toBe('metadata');
+    expect(decision.evidence).toEqual(['title', 'author', 'year']);
+  });
+
+  it('uses each item type primary creator role and ignores secondary roles', async () => {
+    const mappings = [
+      ['artwork', 'artist'],
+      ['audioRecording', 'performer'],
+      ['bill', 'sponsor'],
+      ['computerProgram', 'programmer'],
+      ['film', 'director'],
+      ['hearing', 'contributor'],
+      ['interview', 'interviewee'],
+      ['map', 'cartographer'],
+      ['patent', 'inventor'],
+      ['podcast', 'podcaster'],
+      ['presentation', 'presenter'],
+      ['radioBroadcast', 'creator'],
+      ['tvBroadcast', 'director'],
+      ['videoRecording', 'creator'],
+    ] as const;
+    const rows = mappings.map(([itemType, creatorType], index) =>
+      apiItem('ROLE' + String(index).padStart(4, '0'), {
+        itemType,
+        creators: [
+          { creatorType: 'author', lastName: 'Secondary' },
+          { creatorType, lastName: 'Primary' + index },
+        ],
+      }),
+    );
+    rows.push(apiItem('BOOK0001', {
+      itemType: 'book',
+      creators: [
+        { creatorType: 'contributor', lastName: 'Secondary' },
+        { creatorType: 'author', lastName: 'BookAuthor' },
+      ],
+    }));
+    const { fetchFn } = fakeFetch([
+      ['/groups/2295646/items/top', () => ({ body: rows })],
+    ]);
+    const items = await fetchZoteroCatalog(GROUP_SCOPE, { fetchFn });
+
+    expect(items.slice(0, mappings.length).map(item => item.author)).toEqual(
+      mappings.map((_, index) => 'Primary' + index),
+    );
+    expect(items[mappings.length].author).toBe('BookAuthor');
   });
 
   it('builds group URIs from the selected group, whatever the rows claim', async () => {
@@ -322,6 +553,54 @@ describe('fetchZoteroCatalog', () => {
     ]);
     const items = await fetchZoteroCatalog(GROUP_SCOPE, { fetchFn });
     expect(items.map(i => i.key)).toEqual(['DDDDDDDD']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-item BibTeX fetching
+// ---------------------------------------------------------------------------
+
+describe('fetchZoteroBibtex', () => {
+  it('does not request a whole-library export when there are no matched keys', async () => {
+    const { fetchFn, requests } = fakeFetch([]);
+    const result = await fetchZoteroBibtex(GROUP_SCOPE, [], { fetchFn });
+    expect(result.size).toBe(0);
+    expect(requests).toHaveLength(0);
+  });
+
+  it('batches keys and distinguishes missing items from unusable exports', async () => {
+    const keys = Array.from({ length: 51 }, (_, i) => 'K' + String(i).padStart(7, '0'));
+    const { fetchFn, requests } = fakeFetch([
+      ['/items?itemKey=', url => {
+        const requested = new URL(url).searchParams.get('itemKey')?.split(',') ?? [];
+        if (requested.includes(keys[0])) {
+          return {
+            body: [
+              { key: keys[0], bibtex: '@article{one}' },
+              { key: keys[1], bibtex: '' },
+              { key: keys[2] },
+            ],
+          };
+        }
+        return { body: [{ key: keys[50], bibtex: '@book{last}' }] };
+      }],
+    ]);
+
+    const result = await fetchZoteroBibtex(GROUP_SCOPE, keys, { fetchFn });
+
+    expect(requests).toHaveLength(2);
+    expect(
+      requests.map(url => new URL(url).searchParams.get('itemKey')?.split(',')),
+    ).toEqual([keys.slice(0, 50), keys.slice(50)]);
+    for (const request of requests) {
+      expect(request).toContain('/groups/2295646/items?itemKey=');
+      expect(new URL(request).searchParams.get('include')).toBe('bibtex');
+    }
+    expect(result.get(keys[0])).toBe('@article{one}');
+    expect(result.get(keys[1])).toBe('');
+    expect(result.get(keys[2])).toBe('');
+    expect(result.has(keys[3])).toBe(false);
+    expect(result.get(keys[50])).toBe('@book{last}');
   });
 });
 

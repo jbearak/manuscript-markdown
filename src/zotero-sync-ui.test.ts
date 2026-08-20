@@ -8,6 +8,7 @@ import {
   formatZoteroSyncNoChanges,
   formatZoteroSyncReport,
   formatZoteroSyncSuccess,
+  isUnmatchedExportOurs,
   UNMATCHED_EXPORT_MARKER,
 } from './zotero-sync-ui';
 import { parseBibtexWithRaw } from './bibtex-parser';
@@ -81,7 +82,14 @@ const linkSummaryOf = (partial: Partial<ZoteroLinkSummary>): ZoteroLinkSummary =
   ambiguous: 0,
   conflicts: 0,
   unmatched: 0,
-  updatesByTier: { existing: 0, 'citation-key': 0, doi: 0, 'isbn-pmid': 0 },
+  updatesByTier: {
+    existing: 0,
+    'citation-key': 0,
+    doi: 0,
+    'isbn-pmid': 0,
+    url: 0,
+    metadata: 0,
+  },
   ...partial,
 });
 
@@ -103,16 +111,14 @@ const summaryOf = (
 };
 
 describe('formatZoteroSyncConfirmation', () => {
-  it('states what will change and what stays untouched', () => {
+  it('states only what will change', () => {
     const c = formatZoteroSyncConfirmation(
       summaryOf({ totalEntries: 10, updates: 4, preserved: 3, ambiguous: 1, conflicts: 1, unmatched: 1 }),
       { type: 'group', groupId: 1 },
     );
     expect(c.message).toBe('Update 4 bibliography entries from Zotero?');
-    expect(c.detail).toContain('4 of 10 entries will be linked to Zotero items.');
-    expect(c.detail).toContain(
-      '3 already in sync, 1 matched more than one item, 1 conflict, 1 not found in Zotero — left unchanged.',
-    );
+    expect(c.detail).toBe('4 of 10 entries will be linked to Zotero items.');
+    expect(c.detail).not.toContain('left unchanged');
   });
 
   it('counts metadata updates separately from new links', () => {
@@ -126,9 +132,8 @@ describe('formatZoteroSyncConfirmation', () => {
     expect(c.message).toBe('Update 5 bibliography entries from Zotero?');
     expect(c.detail).toContain('2 of 10 entries will be linked to Zotero items.');
     expect(c.detail).toContain('Metadata will be updated in 3 entries (7 fields).');
-    // 10 total − 5 rewritten = 5 already in sync, even though 8 are "preserved"
-    // in link terms — three of those preserved entries get metadata edits.
-    expect(c.detail).toContain('5 already in sync — left unchanged.');
+    expect(c.detail).not.toContain('already in sync');
+    expect(c.detail).not.toContain('left unchanged');
   });
 
   it('omits the link line when only metadata changes', () => {
@@ -157,6 +162,7 @@ describe('formatZoteroSyncConfirmation', () => {
     const group = formatZoteroSyncConfirmation(summary, { type: 'group', groupId: 1 });
     expect(group.detail).not.toContain('Warning');
     const personal = formatZoteroSyncConfirmation(summary, { type: 'user' });
+    expect(personal.detail).toContain('links to items from the selected My Library');
     expect(personal.detail).toContain('only for your');
     // The warning attributes the behavior to Zotero's addressing scheme
     // (so it does not read as an extension limitation) and points at the
@@ -192,7 +198,7 @@ describe('formatZoteroSyncReport', () => {
         candidates: [zoteroItem('CCCCCCC1'), zoteroItem('CCCCCCC2')],
       },
       { outcome: 'conflict', entry: entryAt('d'), reason: 'unknown-zotero-key', detail: 'XXXXXXXX' },
-      { outcome: 'unmatched', entry: entryAt('e'), reason: 'no-identifiers' },
+      { outcome: 'unmatched', entry: entryAt('e'), reason: 'no-match' },
     ];
     const report = formatZoteroSyncReport(decisions, noMetadata, 'Guttmacher Library');
 
@@ -206,12 +212,16 @@ describe('formatZoteroSyncReport', () => {
     expect(report).toContain(
       'Conflicts (left unchanged):\n  d: no item in the selected library has this zotero-key ("XXXXXXXX")',
     );
-    expect(report).toContain('Unmatched (left unchanged):\n  e: no citation key, DOI, ISBN or PMID to match on');
+    expect(report).toContain(
+      'Unmatched (left unchanged):\n' +
+        '  e: no item in the selected library matches its citation key, URL, identifiers, ' +
+        'or at least 3 of title, author, journal/book title and year',
+    );
   });
 
   it('omits empty sections', () => {
     const report = formatZoteroSyncReport(
-      [{ outcome: 'unmatched', entry: entryAt('a'), reason: 'no-exact-match' }],
+      [{ outcome: 'unmatched', entry: entryAt('a'), reason: 'no-match' }],
       noMetadata,
       'G',
     );
@@ -324,18 +334,22 @@ describe('buildUnmatchedBibliography', () => {
     const out = buildUnmatchedBibliography(
       bib,
       [
-        { outcome: 'unmatched', entry: entryOne, reason: 'no-identifiers' },
-        { outcome: 'unmatched', entry: entryTwo, reason: 'no-exact-match' },
+        { outcome: 'unmatched', entry: entryOne, reason: 'no-match' },
+        { outcome: 'unmatched', entry: entryTwo, reason: 'no-match' },
       ],
       'Guttmacher Library',
     );
     expect(out).toBeDefined();
-    // The ownership guard in extension.ts recognizes its own output by this
-    // marker as the first line; a generated file must always start with it.
+    // A generated file starts with the human-readable marker and carries a
+    // checksum on the next line so saved edits cannot be mistaken for ours.
     expect(out!.startsWith(UNMATCHED_EXPORT_MARKER)).toBe(true);
+    expect(out).toContain('regenerated only while unmodified');
     expect(out).toContain('could not find in Guttmacher Library');
-    expect(out).toContain('% one: no citation key, DOI, ISBN or PMID to match on');
-    expect(out).toContain('% two: no item in the selected library shares an identifier');
+    const reason =
+      'no item in the selected library matches its citation key, URL, identifiers, ' +
+      'or at least 3 of title, author, journal/book title and year';
+    expect(out).toContain('% one: ' + reason);
+    expect(out).toContain('% two: ' + reason);
     // Byte-exact entry slices.
     expect(out).toContain(bib.slice(entryOne.start, entryOne.end));
     expect(out).toContain(bib.slice(entryTwo.start, entryTwo.end));
@@ -356,7 +370,7 @@ describe('buildUnmatchedBibliography', () => {
           candidates: [zoteroItem('AAAAAAAA'), zoteroItem('BBBBBBBB')],
         },
         { outcome: 'conflict', entry: entryOne, reason: 'duplicate-field', detail: 'doi' },
-        { outcome: 'unmatched', entry: entryTwo, reason: 'no-exact-match' },
+        { outcome: 'unmatched', entry: entryTwo, reason: 'no-match' },
       ],
       'G',
     );
@@ -380,11 +394,69 @@ describe('buildUnmatchedBibliography', () => {
     const [crlfEntry] = parseBibtexWithRaw(crlfBib).ranges;
     const out = buildUnmatchedBibliography(
       crlfBib,
-      [{ outcome: 'unmatched', entry: crlfEntry, reason: 'no-identifiers' }],
+      [{ outcome: 'unmatched', entry: crlfEntry, reason: 'no-match' }],
       'G',
     );
     // Every line break — generated and sliced alike — is CRLF.
     expect(out).not.toMatch(/(?<!\r)\n/);
+  });
+});
+
+describe('isUnmatchedExportOurs', () => {
+  const source = '@article{one,\n  title = {T1},\n}\n';
+
+  function generated(eol: '\n' | '\r\n'): string {
+    const bib = eol === '\n' ? source : source.replace(/\n/g, eol);
+    const [entry] = parseBibtexWithRaw(bib).ranges;
+    return buildUnmatchedBibliography(
+      bib,
+      [{ outcome: 'unmatched', entry, reason: 'no-match' }],
+      'G',
+    )!;
+  }
+
+  const encoded = (text: string): Uint8Array => new TextEncoder().encode(text);
+
+  it('accepts byte-intact generated LF and CRLF files', () => {
+    expect(isUnmatchedExportOurs(encoded(generated('\n')))).toBe(true);
+    expect(isUnmatchedExportOurs(encoded(generated('\r\n')))).toBe(true);
+  });
+
+  it('rejects edits to the generated header, body, or checksum', () => {
+    const output = generated('\n');
+    expect(
+      isUnmatchedExportOurs(encoded(output.replace('could not find in G.', 'could not find in Edited.'))),
+    ).toBe(false);
+    expect(
+      isUnmatchedExportOurs(encoded(output.replace('title = {T1}', 'title = {Edited}'))),
+    ).toBe(false);
+    expect(
+      isUnmatchedExportOurs(encoded(output.replace('SHA-256: ', 'SHA-256: 0'))),
+    ).toBe(false);
+  });
+
+  it('rejects a valid signed file whose bytes gain a UTF-8 BOM', () => {
+    const content = encoded(generated('\n'));
+    const withBom = new Uint8Array(content.length + 3);
+    withBom.set([0xef, 0xbb, 0xbf]);
+    withBom.set(content, 3);
+    expect(isUnmatchedExportOurs(withBom)).toBe(false);
+  });
+
+  it('rejects current and legacy marker-only files', () => {
+    const markerOnly = generated('\n').replace(
+      /^% Manuscript Markdown generated-content SHA-256: [0-9a-f]{64}\n/m,
+      '',
+    );
+    expect(isUnmatchedExportOurs(encoded(markerOnly))).toBe(false);
+    expect(
+      isUnmatchedExportOurs(
+        encoded(
+          '% Entries "Link Bibliography to Zotero" could not match in G.\n' +
+            '@article{one, title = {T1}}\n',
+        ),
+      ),
+    ).toBe(false);
   });
 });
 

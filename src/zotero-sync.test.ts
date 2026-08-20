@@ -126,6 +126,40 @@ describe('createZoteroSyncPlan', () => {
     expect(plan.metadata[0].skipped).toContainEqual({ name: 'month', reason: 'macro-value' });
   });
 
+  it('skips additions whose escaped braces become ambiguous when wrapped', () => {
+    const bib = '@article{a,\n  doi = {10.1/x},\n}\n';
+    const plan = sync(bib, catalog, {
+      AAAAAAAA: zoteroExport('doi = {10.1/x},\n\ttitle = "A \\} brace",'),
+    });
+    expect(plan.updatedText).not.toContain('title =');
+    expect(plan.metadata[0].skipped).toContainEqual({
+      name: 'title',
+      reason: 'unbalanced-braces',
+    });
+  });
+
+  it('skips unsafe replacements without disturbing the existing value', () => {
+    const bib = '@article{a,\n  title = {Old},\n  doi = {10.1/x},\n}\n';
+    const plan = sync(bib, catalog, {
+      AAAAAAAA: zoteroExport('title = "A \\} brace",\n\tdoi = {10.1/x},'),
+    });
+    expect(plan.updatedText).toContain('title = {Old}');
+    expect(plan.metadata[0].changes).toEqual([]);
+    expect(plan.metadata[0].skipped).toContainEqual({
+      name: 'title',
+      reason: 'unbalanced-braces',
+    });
+  });
+
+  it('applies values whose escaped braces balance', () => {
+    const bib = '@article{a,\n  doi = {10.1/x},\n}\n';
+    const plan = sync(bib, catalog, {
+      AAAAAAAA: zoteroExport('doi = {10.1/x},\n\ttitle = "A \\{balanced\\} value",'),
+    });
+    expect(plan.updatedText).toContain('title = {A \\{balanced\\} value}');
+    expect(plan.metadata[0].skipped).toEqual([]);
+  });
+
   it('skips a field the .bib writes twice with the same value', () => {
     // Two same-value titles pass the link planner's contradiction check but
     // still leave "the" slice to replace ambiguous.
@@ -252,7 +286,7 @@ describe('zoteroSyncKeys', () => {
     const decisions: ZoteroLinkDecision[] = [
       { outcome: 'update', entry, tier: 'doi', evidence: ['doi'], target, additions: [] },
       { outcome: 'preserve', entry, target },
-      { outcome: 'unmatched', entry, reason: 'no-identifiers' },
+      { outcome: 'unmatched', entry, reason: 'no-match' },
     ];
     expect(zoteroSyncKeys(decisions, [target])).toEqual(['AAAAAAAA']);
   });

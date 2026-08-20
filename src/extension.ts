@@ -1806,7 +1806,18 @@ async function syncBibliographyFromZotero(): Promise<void> {
 	}
 
 	try {
-		const groups = await listZoteroGroups();
+		const groups = await vscode.window.withProgress(
+			{
+				location: vscode.ProgressLocation.Notification,
+				title: 'Fetching Zotero libraries…',
+				cancellable: true,
+			},
+			async (_progress, token) => {
+				const controller = new AbortController();
+				token.onCancellationRequested(() => controller.abort());
+				return listZoteroGroups({ signal: controller.signal });
+			}
+		);
 		const picked = await vscode.window.showQuickPick(buildZoteroLibraryPickItems(groups), {
 			placeHolder: 'Select the Zotero library to sync from',
 			title: 'Sync Bibliography from Zotero',
@@ -1973,10 +1984,10 @@ type UnmatchedExportOutcome =
  *  so a stale copy never misleads a second round trip.
  *
  *  The sidecar's path is predictable, so a file already sitting there is
- *  replaced or deleted only when it is provably this command's own output:
- *  it starts with the generated marker and has no unsaved edits.  Anything
- *  else is the user's file — left untouched and reported as `blocked` (or
- *  silently kept when there is nothing to export). */
+ *  replaced or deleted only when its generated-content checksum still matches
+ *  and it has no unsaved edits.  Anything else is the user's file — left
+ *  untouched and reported as `blocked` (or silently kept when there is nothing
+ *  to export). */
 async function writeUnmatchedBibliography(
 	bibUri: vscode.Uri,
 	bibText: string,
@@ -1995,7 +2006,7 @@ async function writeUnmatchedBibliography(
 	let existing: 'absent' | 'ours' | 'foreign';
 	try {
 		const bytes = await vscode.workspace.fs.readFile(unmatchedUri);
-		const isOurs = isUnmatchedExportOurs(new TextDecoder().decode(bytes));
+		const isOurs = isUnmatchedExportOurs(bytes);
 		existing = isOurs && openDoc?.isDirty !== true ? 'ours' : 'foreign';
 	} catch {
 		// Unreadable is not the same as absent: a file that exists but cannot

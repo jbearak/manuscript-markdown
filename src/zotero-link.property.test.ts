@@ -5,7 +5,7 @@
  *
  *   1. Byte preservation — every byte outside an inserted field line survives.
  *   2. Idempotency — running the command on its own output is a no-op.
- *   3. No fuzzy matching — descriptive metadata never produces a link.
+ *   3. Metadata threshold — fewer than three descriptive signals never link.
  */
 import { describe, it, expect } from 'bun:test';
 import * as fc from 'fast-check';
@@ -204,8 +204,8 @@ describe('Property 2: idempotency', () => {
   });
 });
 
-describe('Property 3: no fuzzy matching', () => {
-  it('identical descriptive metadata never links anything', () => {
+describe('Property 3: metadata matching threshold', () => {
+  it('fewer than three matching descriptive fields never links anything', () => {
     fc.assert(
       fc.property(
         citeKeyArb,
@@ -220,11 +220,15 @@ describe('Property 3: no fuzzy matching', () => {
             '  year = {' + year + '},\n' +
             '  journal = {Journal of Things}\n' +
             '}\n';
-          // A Zotero item agreeing on every descriptive field, and on nothing
-          // exact.  Its citation key is deliberately different from the entry's.
-          const plan = createZoteroLinkPlan(bib, [
-            { key: itemKey, uri: GROUP_URI_BASE + itemKey, title, citationKey: key + '-x' },
-          ]);
+          // Exactly title and author agree; year and container title are absent
+          // from the catalog item.  Its citation key is deliberately different.
+          const plan = createZoteroLinkPlan(bib, [{
+            key: itemKey,
+            uri: GROUP_URI_BASE + itemKey,
+            title,
+            author: 'Doe',
+            citationKey: key + '-x',
+          }]);
           expect(plan.changed).toBe(false);
           expect(plan.summary.updates).toBe(0);
           return true;
