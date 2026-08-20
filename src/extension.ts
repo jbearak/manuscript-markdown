@@ -54,7 +54,6 @@ import {
 } from './frontmatter-settings';
 import { getPostExportAction } from './post-export-action';
 import { createZoteroLinkPlan, type ZoteroLinkPlan } from './zotero-link';
-import { detectBibtexEol } from './bibtex-parser';
 import {
 	listZoteroGroups,
 	fetchZoteroCatalog,
@@ -65,6 +64,7 @@ import {
 	buildUnmatchedBibliography,
 	buildZoteroLibraryPickItems,
 	describeZoteroLocalApiError,
+	formatUnmatchedExportNote,
 	formatZoteroLinkConfirmation,
 	formatZoteroLinkNoChanges,
 	formatZoteroLinkReport,
@@ -1830,21 +1830,24 @@ async function linkBibliographyToLibrary(
 		return;
 	}
 
+	// The completion postlude, shared by the no-changes and written branches.
 	// The report is written to the channel only once the run's outcome is
 	// known: its header says "linked N", which must not outlive a cancelled
 	// confirmation or a failed write as a false record of success.
-	const logReport = (): vscode.OutputChannel => {
+	const summary = plan.summary;
+	const finish = async (message: string): Promise<void> => {
 		const channel = getZoteroLinkOutputChannel();
 		channel.appendLine(formatZoteroLinkReport(plan.decisions, libraryLabel));
 		channel.appendLine('');
-		return channel;
+		const unmatchedUri = await writeUnmatchedBibliography(bibUri, bibText, plan.decisions, libraryLabel);
+		const note = unmatchedUri
+			? formatUnmatchedExportNote(summary.unmatched, path.basename(unmatchedUri.fsPath))
+			: '';
+		await showZoteroLinkResult(message + note, unmatchedUri);
 	};
 
-	const summary = plan.summary;
 	if (!plan.changed) {
-		logReport();
-		const unmatched = await writeUnmatchedBibliography(bibUri, bibText, plan.decisions, libraryLabel);
-		await showZoteroLinkResult(formatZoteroLinkNoChanges(summary, bibName) + unmatched.note, unmatched.uri);
+		await finish(formatZoteroLinkNoChanges(summary, bibName));
 		return;
 	}
 
@@ -1877,47 +1880,34 @@ async function linkBibliographyToLibrary(
 	// replaced by a regular file.
 	await writeFileThroughSymlink(bibUri, new TextEncoder().encode(plan.updatedText));
 
-	logReport();
-	const unmatched = await writeUnmatchedBibliography(bibUri, bibText, plan.decisions, libraryLabel);
-	await showZoteroLinkResult(
-		`Linked ${summary.updates} of ${summary.totalEntries} entries in "${bibName}" to Zotero.` +
-		unmatched.note,
-		unmatched.uri
-	);
+	await finish(`Linked ${summary.updates} of ${summary.totalEntries} entries in "${bibName}" to Zotero.`);
 }
 
 /** Write `<name>-unmatched.bib` beside the bibliography so the user can
  *  import the leftover entries into Zotero and run the command again.  The
  *  file is regenerated on every run and removed once nothing is unmatched,
- *  so a stale copy never misleads a second round trip.  Returns a sentence
- *  to append to the completion message (empty when nothing was written)
- *  and the written file's URI for an Open button. */
+ *  so a stale copy never misleads a second round trip.  Returns the written
+ *  file's URI, or undefined when nothing was unmatched. */
 async function writeUnmatchedBibliography(
 	bibUri: vscode.Uri,
 	bibText: string,
 	decisions: ZoteroLinkPlan['decisions'],
 	libraryLabel: string
-): Promise<{ note: string; uri?: vscode.Uri }> {
+): Promise<vscode.Uri | undefined> {
 	const unmatchedUri = vscode.Uri.file(
 		bibUri.fsPath.replace(/\.bib$/i, '') + '-unmatched.bib'
 	);
-	const content = buildUnmatchedBibliography(bibText, decisions, libraryLabel, detectBibtexEol(bibText));
+	const content = buildUnmatchedBibliography(bibText, decisions, libraryLabel);
 	if (content === undefined) {
 		try {
 			await vscode.workspace.fs.delete(unmatchedUri);
 		} catch {
 			// Nothing to delete — the usual case.
 		}
-		return { note: '' };
+		return undefined;
 	}
 	await vscode.workspace.fs.writeFile(unmatchedUri, new TextEncoder().encode(content));
-	const unmatchedCount = decisions.filter(d => d.outcome === 'unmatched').length;
-	return {
-		note:
-			` ${unmatchedCount} unmatched ${unmatchedCount === 1 ? 'entry was' : 'entries were'} exported to ` +
-			`"${path.basename(unmatchedUri.fsPath)}" — import it into Zotero, then run this command again.`,
-		uri: unmatchedUri,
-	};
+	return unmatchedUri;
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
