@@ -97,6 +97,7 @@ const summaryOf = (
     entriesChanged: linkSummary.updates,
     metadataEntries: 0,
     metadataFields: 0,
+    entriesNotChecked: 0,
     ...sync,
   };
 };
@@ -230,10 +231,9 @@ describe('formatZoteroSyncReport', () => {
           { kind: 'type', from: 'misc', to: 'article' },
         ],
         skipped: [{ name: 'month', reason: 'macro-value' }],
-        unavailable: false,
       },
-      { key: 'b', changes: [], skipped: [{ name: 'doi', reason: 'repeated-field' }], unavailable: false },
-      { key: 'c', changes: [], skipped: [], unavailable: true },
+      { key: 'b', changes: [], skipped: [{ name: 'doi', reason: 'repeated-field' }] },
+      { key: 'c', changes: [], skipped: [], notChecked: 'item-missing' as const },
     ];
     const report = formatZoteroSyncReport(
       [
@@ -256,8 +256,9 @@ describe('formatZoteroSyncReport', () => {
         '  a: month — Zotero exports it as a macro reference, not a literal value\n' +
         '  b: doi — the field appears more than once in the entry',
     );
-    expect(report).toContain('Metadata unavailable');
-    expect(report).toContain('\n  c');
+    expect(report).toContain(
+      'Metadata not checked:\n  c — the selected library no longer has this item',
+    );
   });
 });
 
@@ -297,6 +298,16 @@ describe('formatZoteroSyncNoChanges', () => {
 
   it('stays plain for an empty bibliography', () => {
     expect(formatZoteroSyncNoChanges(summaryOf({}), 'refs.bib')).toBe('No changes to "refs.bib".');
+  });
+
+  it('never calls an unchecked entry in sync', () => {
+    const message = formatZoteroSyncNoChanges(
+      summaryOf({ totalEntries: 3, preserved: 3 }, { entriesNotChecked: 1 }),
+      'refs.bib',
+    );
+    expect(message).toBe(
+      'No changes to "refs.bib" (2 already in sync, 1 could not be checked).',
+    );
   });
 });
 

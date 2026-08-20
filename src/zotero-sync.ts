@@ -39,6 +39,7 @@ import {
 } from './bibtex-parser';
 import {
   summarizeZoteroLinkDecisions,
+  type ZoteroCatalogItem,
   type ZoteroLinkDecision,
   type ZoteroLinkSummary,
 } from './zotero-link';
@@ -70,15 +71,26 @@ export interface ZoteroMetadataSkip {
   readonly reason: ZoteroMetadataSkipReason;
 }
 
+/** Why a matched entry's metadata was never compared against Zotero. */
+export type ZoteroMetadataNotCheckedReason =
+  /** The entry links to an item outside the selected library.  Item keys are
+   *  only unique within one library, so a same-keyed item in the selected
+   *  library would be a different item — its export must not be applied. */
+  | 'different-library'
+  /** The selected library no longer has the linked item. */
+  | 'item-missing'
+  /** Zotero returned the item but produced no usable BibTeX for it. */
+  | 'unusable-export';
+
 /** The metadata outcome for one matched entry. */
 export interface ZoteroEntryMetadataResult {
   /** The .bib entry's citation key. */
   readonly key: string;
   readonly changes: readonly ZoteroMetadataChange[];
   readonly skipped: readonly ZoteroMetadataSkip[];
-  /** Zotero produced no usable BibTeX for the matched item, so its metadata
-   *  could not be compared at all.  The identity link still applies. */
-  readonly unavailable: boolean;
+  /** Set when the entry's metadata could not be compared at all.  The
+   *  identity link still applies. */
+  readonly notChecked?: ZoteroMetadataNotCheckedReason;
 }
 
 export interface ZoteroSyncSummary {
@@ -90,6 +102,9 @@ export interface ZoteroSyncSummary {
   readonly metadataEntries: number;
   /** Total field changes across all entries (type changes included). */
   readonly metadataFields: number;
+  /** Matched entries whose metadata was never compared and whose text this
+   *  plan leaves untouched — the notification must not call them in sync. */
+  readonly entriesNotChecked: number;
 }
 
 export interface ZoteroSyncPlan {
@@ -168,13 +183,21 @@ function planEntryMetadata(
     changes.push({ kind: 'type', from: sourceType.raw, to: zotero.type });
   }
 
-  // Translator order; it never repeats a field, so first occurrence is the
-  // occurrence.
+  // Zotero's translator never repeats a field, but if an export somehow does,
+  // neither occurrence is an unambiguous target — skip the name entirely.
+  const zoteroCounts = new Map<string, number>();
+  for (const field of zotero.fields) {
+    zoteroCounts.set(field.name, (zoteroCounts.get(field.name) ?? 0) + 1);
+  }
   const seen = new Set<string>();
   for (const field of zotero.fields) {
     if (seen.has(field.name)) continue;
     seen.add(field.name);
     if (NEVER_SYNCED.has(field.name)) continue;
+    if ((zoteroCounts.get(field.name) ?? 0) > 1) {
+      skipped.push({ name: field.name, reason: 'repeated-field' });
+      continue;
+    }
     if (field.delimiter === 'bare' && !/^\d+$/.test(field.value)) {
       skipped.push({ name: field.name, reason: 'macro-value' });
       continue;
@@ -191,7 +214,11 @@ function planEntryMetadata(
       skipped.push({ name: field.name, reason: 'repeated-field' });
       continue;
     }
-    if (valuesEqual(existing.value, field.value)) continue;
+    // A bare non-numeric source value is a macro reference: its spelling is
+    // not its value, so spelling equality with a Zotero literal proves
+    // nothing. Fall through and replace it with the literal.
+    const existingIsLiteral = existing.delimiter !== 'bare' || /^\d+$/.test(existing.value);
+    if (existingIsLiteral && valuesEqual(existing.value, field.value)) continue;
     replacements.push({
       start: existing.valueStart,
       end: existing.valueEnd,
@@ -231,14 +258,20 @@ function rewriteEntry(rawEntry: string, edit: EntryEdit, documentEol: () => '\n'
  *  a later run exists to pull in.  Everything else (ambiguous, conflict,
  *  unmatched) is untouched, as in the link plan.
  *
- *  `bibtexByKey` maps Zotero item keys to that item's BibTeX export; a
- *  missing or unusable entry downgrades gracefully — the identity fields are
- *  still written, and the entry is reported as metadata-unavailable. */
+ *  `bibtexByKey` maps Zotero item keys to that item's BibTeX export, fetched
+ *  from the library `catalog` was read from.  Item keys are only unique
+ *  within one library, so an entry preserved with a URI into a different
+ *  library must never be correlated by bare key — a same-keyed item in the
+ *  fetched library would be a different item.  Such entries, and entries
+ *  whose export is missing or unusable, downgrade gracefully: any identity
+ *  fields are still written, and the entry is reported as not checked. */
 export function createZoteroSyncPlan(
   text: string,
   decisions: readonly ZoteroLinkDecision[],
+  catalog: readonly ZoteroCatalogItem[],
   bibtexByKey: ReadonlyMap<string, string>,
 ): ZoteroSyncPlan {
+  const catalogPrefix = catalog.length > 0 ? libraryPrefixOf(catalog[0].uri) : undefined;
   let documentEolCache: '\n' | '\r\n' | null = null;
   const documentEol = () => (documentEolCache ??= detectBibtexEol(text));
 
@@ -257,12 +290,26 @@ export function createZoteroSyncPlan(
   let entriesChanged = 0;
   let metadataEntries = 0;
   let metadataFields = 0;
+  let entriesNotChecked = 0;
 
   for (const decision of decisions) {
     if (decision.outcome !== 'update' && decision.outcome !== 'preserve') continue;
 
     const rawEntry = text.slice(decision.entry.start, decision.entry.end);
-    const zotero = zoteroFor(decision.target.key);
+
+    let notChecked: ZoteroMetadataNotCheckedReason | undefined;
+    let zotero: ReturnType<typeof readZoteroBibtex>;
+    if (
+      catalogPrefix !== undefined &&
+      libraryPrefixOf(decision.target.uri) !== catalogPrefix
+    ) {
+      notChecked = 'different-library';
+    } else if (!bibtexByKey.has(decision.target.key)) {
+      notChecked = 'item-missing';
+    } else {
+      zotero = zoteroFor(decision.target.key);
+      if (zotero === undefined) notChecked = 'unusable-export';
+    }
 
     let edit: EntryEdit = { replacements: [], additions: [] };
     let changes: readonly ZoteroMetadataChange[] = [];
@@ -288,14 +335,19 @@ export function createZoteroSyncPlan(
       key: decision.entry.key,
       changes,
       skipped,
-      unavailable: zotero === undefined,
+      ...(notChecked !== undefined ? { notChecked } : {}),
     });
     if (changes.length > 0) {
       metadataEntries++;
       metadataFields += changes.length;
     }
 
-    if (combined.replacements.length === 0 && combined.additions.length === 0) continue;
+    if (combined.replacements.length === 0 && combined.additions.length === 0) {
+      // The notification counts untouched not-checked entries apart from the
+      // in-sync ones; a rewritten entry is already counted as changed.
+      if (notChecked !== undefined) entriesNotChecked++;
+      continue;
+    }
     entriesChanged++;
     chunks.push(text.slice(pos, decision.entry.start), rewriteEntry(rawEntry, combined, documentEol));
     pos = decision.entry.end;
@@ -311,20 +363,40 @@ export function createZoteroSyncPlan(
       entriesChanged,
       metadataEntries,
       metadataFields,
+      entriesNotChecked,
     },
     updatedText,
     changed: updatedText !== text,
   };
 }
 
+/** The library a canonical item URI lives in: everything before `/items/`,
+ *  scheme-normalized (stored URIs are preserved byte-for-byte and may say
+ *  https where the catalog formats http). */
+function libraryPrefixOf(uri: string): string | undefined {
+  const idx = uri.indexOf('/items/');
+  return idx === -1 ? undefined : uri.slice(0, idx).replace(/^https:\/\//, 'http://');
+}
+
 /** The Zotero item keys whose BibTeX the sync needs: every matched entry's
- *  target, deduplicated, in source order. */
-export function zoteroSyncKeys(decisions: readonly ZoteroLinkDecision[]): string[] {
+ *  target that lives in the catalog's library, deduplicated, in source
+ *  order.  A key into a different library is never requested — the fetched
+ *  library could answer with a same-keyed but different item. */
+export function zoteroSyncKeys(
+  decisions: readonly ZoteroLinkDecision[],
+  catalog: readonly ZoteroCatalogItem[],
+): string[] {
+  const catalogPrefix = catalog.length > 0 ? libraryPrefixOf(catalog[0].uri) : undefined;
   const keys = new Set<string>();
   for (const decision of decisions) {
-    if (decision.outcome === 'update' || decision.outcome === 'preserve') {
-      keys.add(decision.target.key);
+    if (decision.outcome !== 'update' && decision.outcome !== 'preserve') continue;
+    if (
+      catalogPrefix !== undefined &&
+      libraryPrefixOf(decision.target.uri) !== catalogPrefix
+    ) {
+      continue;
     }
+    keys.add(decision.target.key);
   }
   return [...keys];
 }

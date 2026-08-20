@@ -1859,10 +1859,12 @@ async function syncBibliographyFromLibrary(
 			if (linkPlan.blocked !== undefined) {
 				return undefined;
 			}
-			const bibtexByKey = await fetchZoteroBibtex(scope, zoteroSyncKeys(linkPlan.decisions), {
-				signal: controller.signal,
-			});
-			return createZoteroSyncPlan(bibText, linkPlan.decisions, bibtexByKey);
+			const bibtexByKey = await fetchZoteroBibtex(
+				scope,
+				zoteroSyncKeys(linkPlan.decisions, catalog),
+				{ signal: controller.signal }
+			);
+			return createZoteroSyncPlan(bibText, linkPlan.decisions, catalog, bibtexByKey);
 		}
 	);
 

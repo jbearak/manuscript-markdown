@@ -12,7 +12,7 @@ function sync(
 ) {
   const link = createZoteroLinkPlan(bib, catalog);
   expect(link.blocked).toBeUndefined();
-  return createZoteroSyncPlan(bib, link.decisions, new Map(Object.entries(bibtexByKey)));
+  return createZoteroSyncPlan(bib, link.decisions, catalog, new Map(Object.entries(bibtexByKey)));
 }
 
 const zoteroExport = (fields: string, type = 'article') =>
@@ -137,6 +137,33 @@ describe('createZoteroSyncPlan', () => {
     expect(plan.metadata[0].skipped).toContainEqual({ name: 'title', reason: 'repeated-field' });
   });
 
+  it('skips a field the Zotero export writes twice', () => {
+    // The translator never repeats a field; if an export somehow does,
+    // neither occurrence is an unambiguous target.
+    const bib = '@article{a,\n  title = {Old},\n  doi = {10.1/x},\n}\n';
+    const plan = sync(bib, catalog, {
+      AAAAAAAA: zoteroExport('title = {First},\n\ttitle = {Second},\n\tdoi = {10.1/x},'),
+    });
+    expect(plan.updatedText).toContain('title = {Old},');
+    expect(plan.metadata[0].skipped).toContainEqual({ name: 'title', reason: 'repeated-field' });
+  });
+
+  it('replaces a source macro reference even when its spelling matches the literal', () => {
+    // `journal = short` resolves via @string, so spelling equality with the
+    // Zotero literal {short} proves nothing — the literal wins.
+    const bib = '@article{a,\n  journal = short,\n  doi = {10.1/x},\n}\n';
+    const plan = sync(bib, catalog, {
+      AAAAAAAA: zoteroExport('journal = {short},\n\tdoi = {10.1/x},'),
+    });
+    expect(plan.updatedText).toContain('journal = {short},');
+    expect(plan.metadata[0].changes).toContainEqual({
+      kind: 'update',
+      name: 'journal',
+      from: 'short',
+      to: 'short',
+    });
+  });
+
   it('treats whitespace-only value differences as equal', () => {
     const bib = '@article{a,\n  title = {A Long\n    Wrapped Title},\n  doi = {10.1/x},\n}\n';
     const plan = sync(bib, catalog, {
@@ -150,13 +177,41 @@ describe('createZoteroSyncPlan', () => {
 
   it('degrades to identity-only when the export is missing or unusable', () => {
     const bib = '@article{a,\n  title = {Old},\n  doi = {10.1/x},\n}\n';
-    for (const exports of [{}, { AAAAAAAA: '\n\n' }, { AAAAAAAA: '@article{broken' }]) {
+    const cases: [Record<string, string>, string][] = [
+      [{}, 'item-missing'],
+      [{ AAAAAAAA: '\n\n' }, 'unusable-export'],
+      [{ AAAAAAAA: '@article{broken' }, 'unusable-export'],
+    ];
+    for (const [exports, reason] of cases) {
       const plan = sync(bib, catalog, exports);
       // The link fields still land; the metadata is untouched.
       expect(plan.updatedText).toContain('zotero-key = {AAAAAAAA}');
       expect(plan.updatedText).toContain('title = {Old}');
-      expect(plan.metadata[0].unavailable).toBe(true);
+      expect(plan.metadata[0].notChecked).toBe(reason as never);
     }
+  });
+
+  it('never applies a same-keyed item from another library to a preserved entry', () => {
+    // The stored URI points at a group; the selected catalog is My Library,
+    // where the key AAAAAAAA could name an unrelated item.
+    const bib =
+      '@article{a,\n  title = {Old},\n  zotero-key = {AAAAAAAA},\n' +
+      '  zotero-uri = {http://zotero.org/groups/999/items/AAAAAAAA},\n}\n';
+    const userCatalog = [
+      { key: 'BBBBBBBB', uri: 'http://zotero.org/users/7/items/BBBBBBBB', doi: '10.9/other' },
+    ];
+    const link = createZoteroLinkPlan(bib, userCatalog);
+    expect(link.blocked).toBeUndefined();
+    expect(zoteroSyncKeys(link.decisions, userCatalog)).toEqual([]);
+    const plan = createZoteroSyncPlan(
+      bib,
+      link.decisions,
+      userCatalog,
+      new Map([['AAAAAAAA', zoteroExport('title = {Wrong Item},')]]),
+    );
+    expect(plan.changed).toBe(false);
+    expect(plan.metadata[0].notChecked).toBe('different-library');
+    expect(plan.summary.entriesNotChecked).toBe(1);
   });
 
   it('leaves ambiguous, conflicted and unmatched entries byte-identical', () => {
@@ -199,6 +254,18 @@ describe('zoteroSyncKeys', () => {
       { outcome: 'preserve', entry, target },
       { outcome: 'unmatched', entry, reason: 'no-identifiers' },
     ];
-    expect(zoteroSyncKeys(decisions)).toEqual(['AAAAAAAA']);
+    expect(zoteroSyncKeys(decisions, [target])).toEqual(['AAAAAAAA']);
+  });
+
+  it('omits keys whose stored URI lives outside the catalog library', () => {
+    const entry = entryAt('k');
+    const decisions: ZoteroLinkDecision[] = [
+      {
+        outcome: 'preserve',
+        entry,
+        target: { key: 'CCCCCCCC', uri: 'http://zotero.org/users/7/items/CCCCCCCC' },
+      },
+    ];
+    expect(zoteroSyncKeys(decisions, [zoteroItem('AAAAAAAA')])).toEqual([]);
   });
 });

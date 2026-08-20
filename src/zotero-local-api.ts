@@ -357,9 +357,12 @@ export async function fetchZoteroBibtex(
     for (const row of rows) {
       const record = asRecord(row);
       const key = asString(record?.key);
-      const bibtex = asString(record?.bibtex);
-      if (key !== undefined && bibtex !== undefined && bibtex.trim().length > 0) {
-        result.set(key, bibtex);
+      // A row with empty or missing bibtex still proves the item exists —
+      // presence in this map means "Zotero has the item", and the empty
+      // string downgrades to metadata-not-checked downstream.  Absence from
+      // the map is the signal that Zotero no longer has the key at all.
+      if (key !== undefined) {
+        result.set(key, asString(record?.bibtex) ?? '');
       }
     }
   }

@@ -19,6 +19,7 @@ import type {
 } from './zotero-link';
 import type {
   ZoteroEntryMetadataResult,
+  ZoteroMetadataNotCheckedReason,
   ZoteroMetadataSkipReason,
   ZoteroSyncSummary,
 } from './zotero-sync';
@@ -134,19 +135,23 @@ const plural = (n: number, noun: string, nouns: string = noun + 's'): string =>
 
 /** The entries a run does not rewrite, phrased for a notification: "3 already
  *  in sync, 1 matched more than one item, 2 not found in Zotero".  The
- *  already-in-sync count is derived (total minus rewritten minus held back),
- *  so entries whose link is preserved but whose metadata changes are never
- *  miscounted as untouched. */
+ *  already-in-sync count is derived (total minus rewritten minus held back
+ *  minus not-checked), so entries whose link is preserved but whose metadata
+ *  changes — or was never compared — are never miscounted as untouched. */
 function describeUntouched(summary: ZoteroSyncSummary): string {
   const { link } = summary;
   const inSync =
     link.totalEntries -
     summary.entriesChanged -
+    summary.entriesNotChecked -
     link.ambiguous -
     link.conflicts -
     link.unmatched;
   const untouched: string[] = [];
   if (inSync > 0) untouched.push(inSync + ' already in sync');
+  if (summary.entriesNotChecked > 0) {
+    untouched.push(summary.entriesNotChecked + ' could not be checked');
+  }
   if (link.ambiguous > 0) untouched.push(link.ambiguous + ' matched more than one item');
   if (link.conflicts > 0) untouched.push(plural(link.conflicts, 'conflict'));
   if (link.unmatched > 0) untouched.push(link.unmatched + ' not found in Zotero');
@@ -288,6 +293,13 @@ const SKIP_PROSE: Readonly<Record<ZoteroMetadataSkipReason, string>> = {
   'macro-value': 'Zotero exports it as a macro reference, not a literal value',
 };
 
+/** Report prose per not-checked reason. */
+const NOT_CHECKED_PROSE: Record<ZoteroMetadataNotCheckedReason, string> = {
+  'different-library': 'links to an item in a different Zotero library than the one selected',
+  'item-missing': 'the selected library no longer has this item',
+  'unusable-export': 'Zotero produced no usable BibTeX for this item',
+};
+
 /** One report line per entry with metadata activity: the fields updated,
  *  added, or the type change, comma-joined. */
 function metadataLine(result: ZoteroEntryMetadataResult): string {
@@ -323,7 +335,7 @@ export function formatZoteroSyncReport(
     byOutcome.get(outcome)?.length ?? 0;
   const metadataUpdated = metadata.filter(m => m.changes.length > 0);
   const metadataSkipped = metadata.filter(m => m.skipped.length > 0);
-  const metadataUnavailable = metadata.filter(m => m.unavailable);
+  const metadataNotChecked = metadata.filter(m => m.notChecked !== undefined);
 
   const lines: string[] = [
     'Sync Bibliography from Zotero — ' +
@@ -361,9 +373,11 @@ export function formatZoteroSyncReport(
       }
     }
   }
-  if (metadataUnavailable.length > 0) {
-    lines.push('', 'Metadata unavailable (Zotero produced no usable BibTeX; links still written):');
-    for (const result of metadataUnavailable) lines.push('  ' + result.key);
+  if (metadataNotChecked.length > 0) {
+    lines.push('', 'Metadata not checked:');
+    for (const result of metadataNotChecked) {
+      lines.push('  ' + result.key + ' — ' + NOT_CHECKED_PROSE[result.notChecked!]);
+    }
   }
   return lines.join('\n');
 }
