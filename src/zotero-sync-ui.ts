@@ -1,19 +1,28 @@
-/** User-facing text and picker data for "Link Bibliography to Zotero".
+/** User-facing text and picker data for "Sync Bibliography from Zotero".
  *
  *  Everything the command shows a user — library picker rows, error prose,
  *  the confirmation modal, the output-channel report — is composed here as
  *  pure functions of plan/adapter data, so the wording is testable and the
  *  `extension.ts` wiring stays a thin shell.
  *
+ *  Notifications avoid the plan's own vocabulary: "unmatched" becomes "not
+ *  found in Zotero", "preserved" becomes "already up to date" — the report in
+ *  the output channel is where the precise terms live.
+ *
  *  No `vscode` import.  The picker rows use QuickPick's field names (label /
  *  description / detail) but are plain data. */
 
 import type {
   ZoteroLinkDecision,
-  ZoteroLinkSummary,
   ZoteroLinkConflictReason,
   ZoteroLinkUnmatchedReason,
 } from './zotero-link';
+import type {
+  ZoteroEntryMetadataResult,
+  ZoteroMetadataNotCheckedReason,
+  ZoteroMetadataSkipReason,
+  ZoteroSyncSummary,
+} from './zotero-sync';
 import type {
   ZoteroGroupSummary,
   ZoteroLibraryScope,
@@ -51,9 +60,10 @@ export function buildZoteroLibraryPickItems(
   items.push({
     label: 'My Library',
     description: 'Personal',
-    detail:
-      'Links to My Library work only for your Zotero account — ' +
-      'for a shared manuscript, choose a group library.',
+    // One clause only: QuickPick detail rows truncate, so the guidance
+    // ("choose a group library for shared manuscripts") lives in the
+    // confirmation modal and the docs instead.
+    detail: 'Links to My Library work only for your Zotero account.',
     scope: { type: 'user' },
   });
   return items;
@@ -104,15 +114,15 @@ export function describeZoteroLocalApiError(
  *  containers): the extension runs next to the workspace, so "localhost" is
  *  the remote machine, not the desktop where Zotero runs. */
 export const ZOTERO_REMOTE_WORKSPACE_MESSAGE =
-  'Link Bibliography to Zotero needs Zotero running on the same machine as this window. ' +
+  'Sync Bibliography from Zotero needs Zotero running on the same machine as this window. ' +
   'This workspace is remote, so the command cannot reach the Zotero on your desktop. ' +
-  'Open the bibliography in a local window to link it.';
+  'Open the bibliography in a local window to sync it.';
 
 // ---------------------------------------------------------------------------
 // Confirmation modal
 // ---------------------------------------------------------------------------
 
-export interface ZoteroLinkConfirmation {
+export interface ZoteroSyncConfirmation {
   /** The modal's headline question. */
   readonly message: string;
   /** The modal's detail block: counts, then the personal-library warning
@@ -123,40 +133,80 @@ export interface ZoteroLinkConfirmation {
 const plural = (n: number, noun: string, nouns: string = noun + 's'): string =>
   n + ' ' + (n === 1 ? noun : nouns);
 
-/** The entries a run leaves alone, phrased for a notification: "3 already
- *  linked, 1 ambiguous, 2 conflicts".  Empty when everything matched. */
-function describeUntouched(summary: ZoteroLinkSummary): string {
+/** The entries a run does not rewrite, phrased for a notification: "3 already
+ *  in sync, 1 matched more than one item, 2 not found in Zotero".  The
+ *  already-in-sync count is derived (total minus rewritten minus held back
+ *  minus not-checked), so entries whose link is preserved but whose metadata
+ *  changes — or was never compared — are never miscounted as untouched. */
+function describeUntouched(summary: ZoteroSyncSummary): string {
+  const { link } = summary;
+  const inSync =
+    link.totalEntries -
+    summary.entriesChanged -
+    summary.entriesNotChecked -
+    link.ambiguous -
+    link.conflicts -
+    link.unmatched;
   const untouched: string[] = [];
-  if (summary.preserved > 0) untouched.push(summary.preserved + ' already linked');
-  if (summary.ambiguous > 0) untouched.push(summary.ambiguous + ' ambiguous');
-  if (summary.conflicts > 0) untouched.push(plural(summary.conflicts, 'conflict'));
-  if (summary.unmatched > 0) untouched.push(summary.unmatched + ' unmatched');
+  if (inSync > 0) untouched.push(inSync + ' already in sync');
+  if (summary.entriesNotChecked > 0) {
+    untouched.push(summary.entriesNotChecked + ' could not be checked');
+  }
+  if (link.ambiguous > 0) untouched.push(link.ambiguous + ' matched more than one item');
+  if (link.conflicts > 0) untouched.push(plural(link.conflicts, 'conflict'));
+  if (link.unmatched > 0) untouched.push(link.unmatched + ' not found in Zotero');
   return untouched.join(', ');
 }
 
 /** The notification for a run that has nothing to write: every entry is
- *  already linked, unmatched, or held back — and the message says which. */
-export function formatZoteroLinkNoChanges(summary: ZoteroLinkSummary, filename: string): string {
+ *  already in sync, not found, or held back — and the message says which. */
+export function formatZoteroSyncNoChanges(summary: ZoteroSyncSummary, filename: string): string {
   const untouched = describeUntouched(summary);
   const detail = untouched.length > 0 ? ' (' + untouched + ')' : '';
-  return 'No new Zotero links for "' + filename + '"' + detail + '.';
+  return 'No changes to "' + filename + '"' + detail + '.';
 }
 
-/** The modal shown before anything is written.  Only `updates` entries will
- *  change; everything else is enumerated so "left unchanged" is a statement,
- *  not an implication. */
-export function formatZoteroLinkConfirmation(
-  summary: ZoteroLinkSummary,
+/** The completion notification once the file was written: what was linked
+ *  and what had its metadata updated, in that order. */
+export function formatZoteroSyncSuccess(summary: ZoteroSyncSummary, filename: string): string {
+  const parts: string[] = [];
+  if (summary.link.updates > 0) {
+    parts.push('linked ' + plural(summary.link.updates, 'entry', 'entries') + ' to Zotero');
+  }
+  if (summary.metadataEntries > 0) {
+    parts.push('updated metadata in ' + plural(summary.metadataEntries, 'entry', 'entries'));
+  }
+  return 'Synced "' + filename + '": ' + parts.join(' and ') + '.';
+}
+
+/** The modal shown before anything is written.  Only `entriesChanged`
+ *  entries will change; everything else is enumerated so "left unchanged" is
+ *  a statement, not an implication. */
+export function formatZoteroSyncConfirmation(
+  summary: ZoteroSyncSummary,
   scope: ZoteroLibraryScope,
-): ZoteroLinkConfirmation {
+): ZoteroSyncConfirmation {
+  const { link } = summary;
   const untouched = describeUntouched(summary);
 
-  const lines: string[] = [
-    summary.updates +
-      ' of ' +
-      plural(summary.totalEntries, 'entry', 'entries') +
-      ' will get Zotero links.',
-  ];
+  const lines: string[] = [];
+  if (link.updates > 0) {
+    lines.push(
+      link.updates +
+        ' of ' +
+        plural(link.totalEntries, 'entry', 'entries') +
+        ' will be linked to Zotero items.',
+    );
+  }
+  if (summary.metadataEntries > 0) {
+    lines.push(
+      'Metadata will be updated in ' +
+        plural(summary.metadataEntries, 'entry', 'entries') +
+        ' (' +
+        plural(summary.metadataFields, 'field') +
+        ').',
+    );
+  }
   if (untouched.length > 0) {
     lines.push(untouched + ' — left unchanged.');
   }
@@ -171,7 +221,8 @@ export function formatZoteroLinkConfirmation(
     );
   }
   return {
-    message: 'Add Zotero links to ' + plural(summary.updates, 'bibliography entry', 'bibliography entries') + '?',
+    message:
+      'Update ' + plural(summary.entriesChanged, 'bibliography entry', 'bibliography entries') + ' from Zotero?',
     detail: lines.join('\n\n'),
   };
 }
@@ -231,18 +282,47 @@ const REPORT_SECTIONS: ReadonlyArray<
   [outcome: ZoteroLinkDecision['outcome'], heading: string]
 > = [
   ['update', 'New links'],
-  ['preserve', 'Already linked (unchanged)'],
+  ['preserve', 'Already linked'],
   ['ambiguous', 'Ambiguous (left unchanged)'],
   ['conflict', 'Conflicts (left unchanged)'],
   ['unmatched', 'Unmatched (left unchanged)'],
 ];
 
+const SKIP_PROSE: Readonly<Record<ZoteroMetadataSkipReason, string>> = {
+  'repeated-field': 'the field appears more than once in the entry',
+  'macro-value': 'Zotero exports it as a macro reference, not a literal value',
+};
+
+/** Report prose per not-checked reason. */
+const NOT_CHECKED_PROSE: Record<ZoteroMetadataNotCheckedReason, string> = {
+  'different-library': 'links to an item in a different Zotero library than the one selected',
+  'item-missing': 'the selected library no longer has this item',
+  'unusable-export': 'Zotero produced no usable BibTeX for this item',
+};
+
+/** One report line per entry with metadata activity: the fields updated,
+ *  added, or the type change, comma-joined. */
+function metadataLine(result: ZoteroEntryMetadataResult): string {
+  const parts = result.changes.map(change => {
+    switch (change.kind) {
+      case 'update':
+        return change.name + ' updated';
+      case 'add':
+        return change.name + ' added';
+      case 'type':
+        return 'type @' + change.from + ' → @' + change.to;
+    }
+  });
+  return result.key + ': ' + parts.join(', ');
+}
+
 /** The full per-entry report, for the output channel.  Sections appear only
  *  when non-empty, each entry on its own line, in source order.  Takes the
- *  decisions alone — every count in the header is derived from them, so the
- *  report cannot disagree with its own sections. */
-export function formatZoteroLinkReport(
+ *  decisions and metadata results alone — every count in the header is
+ *  derived from them, so the report cannot disagree with its own sections. */
+export function formatZoteroSyncReport(
   decisions: readonly ZoteroLinkDecision[],
+  metadata: readonly ZoteroEntryMetadataResult[],
   libraryLabel: string,
 ): string {
   const byOutcome = new Map<ZoteroLinkDecision['outcome'], ZoteroLinkDecision[]>();
@@ -253,9 +333,12 @@ export function formatZoteroLinkReport(
   }
   const count = (outcome: ZoteroLinkDecision['outcome']): number =>
     byOutcome.get(outcome)?.length ?? 0;
+  const metadataUpdated = metadata.filter(m => m.changes.length > 0);
+  const metadataSkipped = metadata.filter(m => m.skipped.length > 0);
+  const metadataNotChecked = metadata.filter(m => m.notChecked !== undefined);
 
   const lines: string[] = [
-    'Link Bibliography to Zotero — ' +
+    'Sync Bibliography from Zotero — ' +
       libraryLabel +
       ', ' +
       plural(decisions.length, 'entry', 'entries'),
@@ -263,6 +346,8 @@ export function formatZoteroLinkReport(
       count('update') +
       ', already linked ' +
       count('preserve') +
+      ', metadata updated in ' +
+      metadataUpdated.length +
       ', ambiguous ' +
       count('ambiguous') +
       ', conflicts ' +
@@ -276,6 +361,24 @@ export function formatZoteroLinkReport(
     lines.push('', heading + ':');
     for (const decision of matching) lines.push('  ' + reportLine(decision));
   }
+  if (metadataUpdated.length > 0) {
+    lines.push('', 'Metadata updates:');
+    for (const result of metadataUpdated) lines.push('  ' + metadataLine(result));
+  }
+  if (metadataSkipped.length > 0) {
+    lines.push('', 'Metadata fields not applied:');
+    for (const result of metadataSkipped) {
+      for (const skip of result.skipped) {
+        lines.push('  ' + result.key + ': ' + skip.name + ' — ' + SKIP_PROSE[skip.reason]);
+      }
+    }
+  }
+  if (metadataNotChecked.length > 0) {
+    lines.push('', 'Metadata not checked:');
+    for (const result of metadataNotChecked) {
+      lines.push('  ' + result.key + ' — ' + NOT_CHECKED_PROSE[result.notChecked!]);
+    }
+  }
   return lines.join('\n');
 }
 
@@ -288,10 +391,25 @@ export function formatZoteroLinkReport(
  *  file there the command checks for this marker — a file without it was
  *  authored by the user and must not be destroyed. */
 export const UNMATCHED_EXPORT_MARKER =
+  '% Entries "Sync Bibliography from Zotero" could not find in ';
+
+/** The marker written while the command was named "Link Bibliography to
+ *  Zotero".  Still recognized by the ownership check, so sidecars from
+ *  earlier runs are replaced rather than blocking the export. */
+const LEGACY_UNMATCHED_EXPORT_MARKER =
   '% Entries "Link Bibliography to Zotero" could not match in ';
 
+/** Whether an existing sidecar's content is this command's own output —
+ *  current or legacy marker.  This module owns both spellings, so a future
+ *  marker migration changes only this file. */
+export function isUnmatchedExportOurs(text: string): boolean {
+  return (
+    text.startsWith(UNMATCHED_EXPORT_MARKER) || text.startsWith(LEGACY_UNMATCHED_EXPORT_MARKER)
+  );
+}
+
 /** A .bib of just the unmatched entries, for a second round trip: import
- *  this file into Zotero (File → Import), then run Link Bibliography to
+ *  this file into Zotero (File → Import), then run Sync Bibliography from
  *  Zotero again — the imported items match on the identifiers they were
  *  imported with.
  *
@@ -322,7 +440,7 @@ export function buildUnmatchedBibliography(
   const chunks: string[] = [
     UNMATCHED_EXPORT_MARKER + libraryLabel + '.',
     '% Generated by Manuscript Markdown; this file is overwritten on every run.',
-    '% To link them: import this file into Zotero (File -> Import), then run the',
+    '% To sync them: import this file into Zotero (File -> Import), then run the',
     '% command again. Matching uses exact identifiers only, so entries with no',
     '% identifiers will match by their citation key if Better BibTeX manages it.',
     '',
@@ -337,14 +455,18 @@ export function buildUnmatchedBibliography(
 }
 
 /** The sentence appended to the completion notification when an unmatched
- *  export was written beside the bibliography. */
+ *  export was written beside the bibliography.  Deliberately plain: it walks
+ *  the user through the round trip instead of naming plan outcomes. */
 export function formatUnmatchedExportNote(unmatchedCount: number, filename: string): string {
   return (
     ' ' +
-    plural(unmatchedCount, 'unmatched entry was', 'unmatched entries were') +
-    ' exported to "' +
+    plural(unmatchedCount, 'entry', 'entries') +
+    ' in your .bib file ' +
+    (unmatchedCount === 1 ? 'was' : 'were') +
+    ' not found in Zotero, so they were copied to a new file, "' +
     filename +
-    '" — import it into Zotero, then run this command again.'
+    '", that you can import into Zotero (File → Import). After importing, run ' +
+    'this command again to link them.'
   );
 }
 
@@ -358,8 +480,8 @@ export function formatUnmatchedExportBlockedNote(
 ): string {
   return (
     ' ' +
-    plural(unmatchedCount, 'entry is', 'entries are') +
-    ' unmatched, but "' +
+    plural(unmatchedCount, 'entry was', 'entries were') +
+    ' not found in Zotero, but "' +
     filename +
     '" was left untouched — it has unsaved edits or was not generated by this ' +
     'command. Move it aside and run the command again to export them.'
@@ -373,8 +495,8 @@ export function formatUnmatchedExportFailedNote(
 ): string {
   return (
     ' ' +
-    plural(unmatchedCount, 'entry is', 'entries are') +
-    ' unmatched, but "' +
+    plural(unmatchedCount, 'entry was', 'entries were') +
+    ' not found in Zotero, but "' +
     filename +
     '" could not be written — the per-entry report lists them.'
   );
@@ -386,6 +508,6 @@ export function formatStaleUnmatchedExportNote(filename: string): string {
   return (
     ' An outdated "' +
     filename +
-    '" from an earlier run could not be removed; its entries are no longer unmatched.'
+    '" from an earlier run could not be removed; its entries are all in Zotero now.'
   );
 }

@@ -929,6 +929,11 @@ export interface BibtexEntryBodyScan {
    *  stray delimiter left brace depth or a quote open.  The range's boundaries
    *  then do not mean what they appear to, and nothing may be spliced into it. */
   readonly unbalanced: boolean;
+  /** The entry-type token (`article` in `@article{...`), with its half-open
+   *  offsets within the scanned text, so a caller rewriting the type replaces
+   *  exactly the token the walk read rather than re-deriving the header
+   *  grammar.  Undefined when the text does not start with an entry header. */
+  readonly entryType?: { readonly raw: string; readonly start: number; readonly end: number };
 }
 
 /** One `name = value` occurrence found by the body walk. */
@@ -944,9 +949,15 @@ export interface BibtexEntryFieldOccurrence {
    *  macro, not the item key `ABCD1234`.  A bare number (`year = 2020`) is a
    *  literal and means itself. */
   readonly delimiter: 'brace' | 'quote' | 'bare';
+  /** Half-open offsets of the value within the scanned entry text, delimiters
+   *  included for brace/quote values.  Replacing exactly this slice rewrites
+   *  the value while leaving the field name's own spelling and the
+   *  surrounding layout untouched. */
+  readonly valueStart: number;
+  readonly valueEnd: number;
 }
 
-const ENTRY_HEADER_RE = /^@\w+\s*[{(]/;
+const ENTRY_HEADER_RE = /^@(\w+)\s*[{(]/;
 /** What may appear in a field name.  BibTeX names are far more permissive than
  *  the identifiers they usually are: everything up to the next separator is
  *  part of the name, so `:doi`, `+doi`, `.doi` and `@doi` are all names in
@@ -979,15 +990,20 @@ export function scanBibtexEntryBody(rawEntry: string): BibtexEntryBodyScan {
   let hasConcatenation = false;
   let unbalanced = false;
 
+  const header = ENTRY_HEADER_RE.exec(rawEntry);
+  const entryType = header
+    ? { raw: header[1], start: 1, end: 1 + header[1].length }
+    : undefined;
+
   const result = (): BibtexEntryBodyScan => ({
     hasTopLevelComment,
     hasConcatenation,
     fieldNames: fields.map(f => f.name),
     fields,
     unbalanced,
+    ...(entryType !== undefined ? { entryType } : {}),
   });
 
-  const header = ENTRY_HEADER_RE.exec(rawEntry);
   // The citation key runs to the first comma and cannot contain one.
   const bodyStart = header ? rawEntry.indexOf(',', header[0].length) : -1;
   if (bodyStart === -1) return result();
@@ -1060,19 +1076,37 @@ export function scanBibtexEntryBody(rawEntry: string): BibtexEntryBodyScan {
     if (ch === '{') {
       const close = skipBraced(at);
       if (close === -1) return -1;
-      fields.push({ name, value: rawEntry.slice(at + 1, close - 1), delimiter: 'brace' });
+      fields.push({
+        name,
+        value: rawEntry.slice(at + 1, close - 1),
+        delimiter: 'brace',
+        valueStart: at,
+        valueEnd: close,
+      });
       return close;
     }
     if (ch === '"') {
       const close = skipQuoted(at);
       if (close === -1) return -1;
-      fields.push({ name, value: rawEntry.slice(at + 1, close - 1), delimiter: 'quote' });
+      fields.push({
+        name,
+        value: rawEntry.slice(at + 1, close - 1),
+        delimiter: 'quote',
+        valueStart: at,
+        valueEnd: close,
+      });
       return close;
     }
     let bareEnd = at;
     while (bareEnd < end && NAME_CHAR_RE.test(rawEntry[bareEnd])) bareEnd++;
     if (bareEnd === at) return at;
-    fields.push({ name, value: rawEntry.slice(at, bareEnd), delimiter: 'bare' });
+    fields.push({
+      name,
+      value: rawEntry.slice(at, bareEnd),
+      delimiter: 'bare',
+      valueStart: at,
+      valueEnd: bareEnd,
+    });
     return bareEnd;
   };
 

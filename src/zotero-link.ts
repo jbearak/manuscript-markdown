@@ -1,4 +1,4 @@
-/** Pure core for "Link Bibliography to Zotero".
+/** Pure link planner for "Sync Bibliography from Zotero".
  *
  *  Takes the text of a .bib file plus a catalog of Zotero items from one
  *  library, and returns a plan: what each entry would become, and the whole
@@ -926,7 +926,12 @@ function applyUpdates(text: string, decisions: readonly ZoteroLinkDecision[]): s
   return chunks.join('');
 }
 
-function summarize(decisions: readonly ZoteroLinkDecision[]): ZoteroLinkSummary {
+/** Fold link decisions into their summary counts.  Exported so the sync
+ *  planner reports the same numbers for the same decisions without keeping a
+ *  second copy of this fold in step. */
+export function summarizeZoteroLinkDecisions(
+  decisions: readonly ZoteroLinkDecision[],
+): ZoteroLinkSummary {
   const updatesByTier: Record<ZoteroMatchTier, number> = {
     'existing': 0,
     'citation-key': 0,
@@ -978,7 +983,7 @@ export function createZoteroLinkPlan(
   if (!rangesTrusted) {
     return {
       decisions: [],
-      summary: summarize([]),
+      summary: summarizeZoteroLinkDecisions([]),
       updatedText: bibliographyText,
       changed: false,
       blocked: 'unparsable-bibliography',
@@ -998,7 +1003,7 @@ export function createZoteroLinkPlan(
 
   return {
     decisions,
-    summary: summarize(decisions),
+    summary: summarizeZoteroLinkDecisions(decisions),
     updatedText,
     changed: updatedText !== bibliographyText,
   };

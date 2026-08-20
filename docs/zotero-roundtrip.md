@@ -72,19 +72,26 @@ All other BibTeX fields (author, title, etc.) are standard CSL-JSON-derived data
 
 Citation key format is configurable — see [Citation Key Formats](converter.md#citation-key-formats).
 
-### Linking an Existing Bibliography to Zotero
+### Syncing a Bibliography from Zotero
 
-A bibliography that did not come from a Zotero-managed DOCX — one you wrote by hand, exported from another reference manager, or received from a co-author — has no `zotero-key`/`zotero-uri` fields, so its exported citations embed static metadata that Zotero cannot refresh.
+**If your workflow started in Word with Zotero, you do not need this command.** When manuscript-markdown converts a Zotero-managed DOCX, it pulls each citation's `zotero-key`/`zotero-uri` out of the Word document into the `.bib` file — the links are already there. The **Sync Bibliography from Zotero** command exists for the opposite starting point: you built the bibliography outside Zotero (by hand, from another reference manager, or from a co-author's file) and later decided to use Zotero to manage or edit the bibliographic metadata.
 
-The **Link Bibliography to Zotero** command (Command Palette) adds those fields by matching entries against a library in your running Zotero, using exact identifiers only: an entry's existing Zotero identity, its Better BibTeX citation key, DOI, or ISBN/PMID. Titles and authors are never used — a wrong link would make Word silently refresh a citation into a different work, so an entry without an exact identifier match is reported and left unchanged. Existing links are preserved, and rerunning the command is a no-op.
+Here is the problem it solves. Suppose you create a bibliography and you or a colleague imports the `.bib` file into a shared Zotero collection. Then someone edits a reference in Zotero — fixes an author, updates a title. Pressing **Refresh** in Word does nothing. When Zotero imports a bibliography, it creates a library record for each reference and assigns that record a unique internal identifier. Zotero uses those hidden identifiers — not the title, authors, DOI, or displayed citation — to match citations in Word with records in its library. A Word document generated from your `.bib` contains the same references, but its citations were generated with self-contained bibliographic data embedded in the document; they are not linked to the records Zotero created at import. Zotero sees them as separate items even though the citations look identical, and Refresh keeps using the metadata embedded in Word.
+
+The command repairs that split in one pass:
+
+1. **It links your entries to Zotero's records.** Each entry gains the `zotero-key`/`zotero-uri` of its library record, matched by exact identifiers only: an entry's existing Zotero identity, its Better BibTeX citation key, DOI, or ISBN/PMID. Titles and authors are never used — a wrong link would make Word silently refresh a citation into a different work, so an entry without an exact identifier match is reported and left unchanged. Existing links are preserved, and rerunning the command plans no further changes.
+2. **It pulls the current metadata down with the links.** Since there is no reason to run the command unless the metadata changed in Zotero, it also updates the other fields: any field Zotero's BibTeX export carries with a different value is rewritten in place, and fields Zotero has that the entry lacks are added. Fields only your `.bib` has are kept — Zotero's export omits plenty of fields Zotero does store, so absence is not evidence of deletion. (`file` is never written; `abstract`/`keywords` are updated when present but never added.)
+
+Regenerate the Word document after syncing and it carries both the updated metadata and the Zotero URIs — so the next time someone edits a reference in Zotero and presses Refresh, Zotero pulls from its library instead of the metadata embedded in the Word document.
 
 Zotero must be running on the same machine, with *Settings → Advanced → Miscellaneous → "Allow other applications on this computer to communicate with Zotero"* checked.
 
-**Unmatched entries round trip.** Entries the command cannot match are exported to `<name>-unmatched.bib` beside the bibliography, each with a comment naming the reason. Import that file into Zotero (*File → Import*), then run the command again: the imported items now carry the same identifiers, so they match. The file is regenerated on every run and removed once everything is linked — but only when it is recognizably the command's own output; a hand-authored or edited file at that path is never overwritten or deleted.
+**Entries not found in Zotero round trip.** Entries the command cannot match are exported to `<name>-unmatched.bib` beside the bibliography, each with a comment naming the reason. Import that file into Zotero (*File → Import*), then run the command again: the imported items now carry the same identifiers, so they match. The file is regenerated on every run and removed once everything is linked — but only when it is recognizably the command's own output; a hand-authored or edited file at that path is never overwritten or deleted.
 
 **Choose a group library for shared manuscripts.** Group URIs (`http://zotero.org/groups/…`) resolve for every member of the group. My Library URIs (`http://zotero.org/users/<your-id>/…`) resolve only for your own Zotero account — a collaborator's Word falls back to the embedded metadata and stops refreshing those citations, with no visible error. Zotero addresses personal libraries per account; only group libraries have addresses every member can resolve.
 
-See [UI reference](ui.md#link-bibliography-to-zotero) for the full flow and messages.
+See [UI reference](ui.md#sync-bibliography-from-zotero) for the full flow and messages.
 
 ## YAML Frontmatter
 

@@ -185,8 +185,32 @@
         "title": "Set Citation Style"
       },
       {
-        "command": "manuscript-markdown.linkBibliographyToZotero",
-        "title": "Link Bibliography to Zotero"
+        "command": "manuscript-markdown.syncBibliographyFromZotero",
+        "title": "Sync Bibliography from Zotero"
+      },
+      {
+        "command": "manuscript-markdown.addBibtexEntry.article",
+        "title": "Add Journal Article (@article)"
+      },
+      {
+        "command": "manuscript-markdown.addBibtexEntry.book",
+        "title": "Add Book (@book)"
+      },
+      {
+        "command": "manuscript-markdown.addBibtexEntry.incollection",
+        "title": "Add Book Chapter (@incollection)"
+      },
+      {
+        "command": "manuscript-markdown.addBibtexEntry.inproceedings",
+        "title": "Add Conference Paper (@inproceedings)"
+      },
+      {
+        "command": "manuscript-markdown.addBibtexEntry.techreport",
+        "title": "Add Report (@techreport)"
+      },
+      {
+        "command": "manuscript-markdown.addBibtexEntry.misc",
+        "title": "Add Miscellaneous Entry (@misc)"
       },
       {
         "command": "manuscript-markdown.setFrontmatter.title",
@@ -453,9 +477,40 @@
       {
         "id": "markdown.highlight",
         "label": "Highlight"
+      },
+      {
+        "id": "bibtex.actions",
+        "label": "Bibliography",
+        "icon": "$(file-text)"
       }
     ],
     "menus": {
+      "commandPalette": [
+        {
+          "command": "manuscript-markdown.addBibtexEntry.article",
+          "when": "editorLangId == bibtex || resourceExtname =~ /^\\.bib$/i"
+        },
+        {
+          "command": "manuscript-markdown.addBibtexEntry.book",
+          "when": "editorLangId == bibtex || resourceExtname =~ /^\\.bib$/i"
+        },
+        {
+          "command": "manuscript-markdown.addBibtexEntry.incollection",
+          "when": "editorLangId == bibtex || resourceExtname =~ /^\\.bib$/i"
+        },
+        {
+          "command": "manuscript-markdown.addBibtexEntry.inproceedings",
+          "when": "editorLangId == bibtex || resourceExtname =~ /^\\.bib$/i"
+        },
+        {
+          "command": "manuscript-markdown.addBibtexEntry.techreport",
+          "when": "editorLangId == bibtex || resourceExtname =~ /^\\.bib$/i"
+        },
+        {
+          "command": "manuscript-markdown.addBibtexEntry.misc",
+          "when": "editorLangId == bibtex || resourceExtname =~ /^\\.bib$/i"
+        }
+      ],
       "editor/title": [
         {
           "submenu": "markdown.formatting",
@@ -475,6 +530,11 @@
         {
           "submenu": "docx.actions",
           "when": "resourceExtname == .docx && !isInDiffEditor",
+          "group": "navigation@1"
+        },
+        {
+          "submenu": "bibtex.actions",
+          "when": "(editorLangId == bibtex || resourceExtname =~ /^\\.bib$/i) && !isInDiffEditor",
           "group": "navigation@1"
         }
       ],
@@ -950,6 +1010,11 @@
           "command": "manuscript-markdown.setFrontmatter.bibliography-hanging-indent",
           "when": "editorLangId == markdown",
           "group": "2_notes@3"
+        },
+        {
+          "command": "manuscript-markdown.syncBibliographyFromZotero",
+          "when": "editorLangId == markdown",
+          "group": "3_zotero@1"
         }
       ],
       "markdown.frontmatter.code": [
@@ -1011,6 +1076,43 @@
           "command": "manuscript-markdown.exportToWordWithTemplate",
           "when": "resourceExtname == .md",
           "group": "9_export@2"
+        }
+      ],
+      "bibtex.actions": [
+        {
+          "command": "manuscript-markdown.syncBibliographyFromZotero",
+          "when": "editorLangId == bibtex || resourceExtname =~ /^\\.bib$/i",
+          "group": "1_zotero@1"
+        },
+        {
+          "command": "manuscript-markdown.addBibtexEntry.article",
+          "when": "editorLangId == bibtex || resourceExtname =~ /^\\.bib$/i",
+          "group": "2_add@1"
+        },
+        {
+          "command": "manuscript-markdown.addBibtexEntry.book",
+          "when": "editorLangId == bibtex || resourceExtname =~ /^\\.bib$/i",
+          "group": "2_add@2"
+        },
+        {
+          "command": "manuscript-markdown.addBibtexEntry.incollection",
+          "when": "editorLangId == bibtex || resourceExtname =~ /^\\.bib$/i",
+          "group": "2_add@3"
+        },
+        {
+          "command": "manuscript-markdown.addBibtexEntry.inproceedings",
+          "when": "editorLangId == bibtex || resourceExtname =~ /^\\.bib$/i",
+          "group": "2_add@4"
+        },
+        {
+          "command": "manuscript-markdown.addBibtexEntry.techreport",
+          "when": "editorLangId == bibtex || resourceExtname =~ /^\\.bib$/i",
+          "group": "2_add@5"
+        },
+        {
+          "command": "manuscript-markdown.addBibtexEntry.misc",
+          "when": "editorLangId == bibtex || resourceExtname =~ /^\\.bib$/i",
+          "group": "2_add@6"
         }
       ]
     },

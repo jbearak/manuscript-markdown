@@ -125,7 +125,7 @@ Export and document-setting commands. See [Converter](converter.md) for details 
 | Settings | **Document** — title, author, timezone, and hard line breaks |
 | | **Typography** — body, heading, and title typography; paragraph layout; blockquotes; callout labels; colors; and custom styles |
 | | **Tables** — fonts, widths, borders, number formatting, and source line-width limits |
-| | **Citations & Notes** — bibliography, CSL style, locale, citation placement, notes, and bibliography indentation |
+| | **Citations & Notes** — bibliography, CSL style, locale, citation placement, notes, and bibliography indentation; plus **Sync Bibliography from Zotero** in its own section |
 | | **Code Blocks** — font, size, colors, and inset |
 
 > **Export to Word** converts the Markdown file to `.docx`. If a `.docx` with the same name already exists, its paragraph and formatting styles are automatically reused as a template — so fonts, spacing, and colors you previously set in Word are preserved.
@@ -150,6 +150,30 @@ When a `.docx` file is open in the editor, one dropdown menu appears in the tool
 | **Open in Word** | local files only | `manuscript-markdown.openInWord` |
 
 > **Open in Word** is hidden for remote workspaces (e.g., SSH, Codespaces) because it relies on launching a local application.
+
+---
+
+## Editor Toolbar — Bibliography Files
+
+When a `.bib` file is open in the editor, one dropdown menu appears in the toolbar.
+
+### Bibliography
+
+> Look for the **text-file icon** (codicon `file-text`) in the editor toolbar — the same icon as the Export to Word menu on Markdown files.
+
+| Item | Command |
+|------|---------|
+| **Sync Bibliography from Zotero** | `manuscript-markdown.syncBibliographyFromZotero` |
+| **Add Journal Article (@article)** | `manuscript-markdown.addBibtexEntry.article` |
+| **Add Book (@book)** | `manuscript-markdown.addBibtexEntry.book` |
+| **Add Book Chapter (@incollection)** | `manuscript-markdown.addBibtexEntry.incollection` |
+| **Add Conference Paper (@inproceedings)** | `manuscript-markdown.addBibtexEntry.inproceedings` |
+| **Add Report (@techreport)** | `manuscript-markdown.addBibtexEntry.techreport` |
+| **Add Miscellaneous Entry (@misc)** | `manuscript-markdown.addBibtexEntry.misc` |
+
+The sync command sits in its own section at the top; see [Sync Bibliography from Zotero](#sync-bibliography-from-zotero).
+
+Each **Add** item appends a skeleton entry of that type at the end of the file, with a placeholder citation key and empty values for the type's standard fields. The cursor lands on the key so you can type it immediately, and `Tab` steps through the field values.
 
 ---
 
@@ -288,9 +312,9 @@ If no Markdown file is open: `"No active Markdown file"`
 
 ---
 
-### Link Bibliography to Zotero
+### Sync Bibliography from Zotero
 
-Available from the Command Palette. Adds `zotero-key` / `zotero-uri` fields to BibTeX entries by matching them against a Zotero library over Zotero's local API, so that citations exported to Word refresh live under Zotero's control (see [Zotero Citation Roundtrip](zotero-roundtrip.md)).
+Available from the Command Palette, from the toolbar's **Citations & Notes** submenu on Markdown files, and from the [**Bibliography** toolbar menu](#editor-toolbar--bibliography-files) on `.bib` files. Links BibTeX entries to their records in a Zotero library (adding `zotero-key` / `zotero-uri` fields) and pulls each linked entry's current metadata down from Zotero, over Zotero's local API — so that citations exported to Word refresh live under Zotero's control (see [Zotero Citation Roundtrip](zotero-roundtrip.md), which also explains when this command is and is not needed — a bibliography converted from a Zotero-managed DOCX already has the links).
 
 **Requirements shown to the user:**
 
@@ -302,17 +326,18 @@ Available from the Command Palette. Adds `zotero-key` / `zotero-uri` fields to B
 
 1. Resolves the bibliography: the active `.bib` file, or the active Markdown file's frontmatter `bibliography:` entry (falling back to `<name>.bib` beside the Markdown file). Refuses to run while the `.bib` file has unsaved changes.
 2. Shows a Quick Pick of libraries: group libraries first (sorted by name, with item counts), My Library last with a note that its links only work for your own Zotero account.
-3. Fetches the library catalog with a cancellable progress notification.
+3. Fetches the library catalog, then the matched items' BibTeX, with a cancellable progress notification.
 4. Matches entries by exact identifiers only (existing Zotero identity, Better BibTeX citation key, DOI, ISBN/PMID) — never by title or author.
-5. Shows a confirmation modal stating how many entries will gain links and how many are left unchanged (already linked, ambiguous, conflicts, unmatched). Selecting My Library adds a warning that personal links stop refreshing for collaborators — a property of Zotero's personal libraries, not of this extension — and suggests a group library for shared manuscripts.
-6. On confirmation, writes only the new fields; every other byte of the file is unchanged. If the file changed on disk while the modal was open, nothing is written.
-7. Exports any unmatched entries to `<name>-unmatched.bib` beside the bibliography, each prefixed with a `%` comment naming why it did not match, so they can be imported into Zotero (*File → Import*) for a second round trip. The file is regenerated on every run and deleted once nothing is unmatched — but only when it is recognizably this command's own output (it starts with the generated header and has no unsaved edits); a file that isn't is left untouched and the completion message says so. The completion message offers **Open Unmatched** when the export was written. Ambiguous and conflicted entries are not exported — their items are already in the library, so importing them again would create duplicates.
+5. Plans the metadata updates for every matched entry (newly linked and already linked alike): fields whose Zotero value differs are rewritten in place, fields Zotero has that the entry lacks are added, and fields only the `.bib` has are preserved. `file` is never written; `abstract`/`keywords` are updated when present but never added; a value Zotero exports as a bare macro (`month = aug`) or a field the entry repeats is skipped and reported.
+6. Shows a confirmation modal stating how many entries will be linked, how many get metadata updates (and how many fields), and how many are left unchanged (already in sync, could not be checked — for example an entry linked into a different Zotero library than the one selected — matched more than one item, conflicts, not found in Zotero). Selecting My Library adds a warning that personal links stop refreshing for collaborators — a property of Zotero's personal libraries, not of this extension — and suggests a group library for shared manuscripts.
+7. On confirmation, rewrites only the added fields and genuinely changed values; every other byte of the file is unchanged, and a second run plans no further changes. If the file changed on disk while the modal was open, nothing is written.
+8. Exports any entries not found in Zotero to `<name>-unmatched.bib` beside the bibliography, each prefixed with a `%` comment naming why it did not match, so they can be imported into Zotero (*File → Import*) for a second round trip. The file is regenerated on every run and deleted once nothing is unmatched — but only when it is recognizably this command's own output (it starts with the generated header and has no unsaved edits); a file that isn't is left untouched and the completion message says so. The completion message offers **Open Unmatched** when the export was written. Ambiguous and conflicted entries are not exported — their items are already in the library, so importing them again would create duplicates.
 
-A per-entry report (new links, already linked, ambiguous, conflicts, unmatched — each with its reason) is written to the **Manuscript Markdown: Zotero** output channel; the completion message offers **Show Details** to open it.
+A per-entry report (new links, already linked, metadata updates, metadata fields not applied, ambiguous, conflicts, unmatched — each with its reason) is written to the **Manuscript Markdown: Zotero** output channel; the completion message offers **Show Details** to open it.
 
 | Scenario | Message |
 |----------|---------|
-| Remote workspace | `"Link Bibliography to Zotero needs Zotero running on the same machine as this window. …"` |
+| Remote workspace | `"Sync Bibliography from Zotero needs Zotero running on the same machine as this window. …"` |
 | No manuscript or .bib open | `"Open the Markdown manuscript or its .bib file, then run this command again."` |
 | .bib has unsaved changes | `"<name>.bib" has unsaved changes. Save it, then run this command again.` |
 | Zotero not running | `"Could not connect to Zotero. Start Zotero on this computer, then run this command again."` |
