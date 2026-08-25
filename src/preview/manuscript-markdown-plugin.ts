@@ -405,23 +405,36 @@ function addInlineContent(state: StateInline, content: string): void {
   if (content.length === 0) {
     return;
   }
-  
-  // Parse the content to get child tokens
-  const childTokens: Token[] = [];
-  state.md.inline.parse(content, state.md, state.env, childTokens);
-  
-  // Add each child token to the state
-  for (const childToken of childTokens) {
-    const token = state.push(childToken.type, childToken.tag, childToken.nesting);
-    token.content = childToken.content;
-    token.markup = childToken.markup;
-    if (childToken.attrs) {
-      for (const [key, value] of childToken.attrs) {
-        token.attrSet(key, value);
-      }
+
+  // The block preprocessor protects blank lines inside CriticMarkup with a
+  // private-use placeholder. markdown-it's text rule consumes that placeholder
+  // before paraPlaceholderRule can see it when this helper recursively parses
+  // the CriticMarkup body. Split it out here and render the original blank line
+  // as two hard breaks so it remains visible in the browser.
+  const parts = content.split(PARA_PLACEHOLDER);
+  for (let partIndex = 0; partIndex < parts.length; partIndex++) {
+    if (partIndex > 0) {
+      state.push('hardbreak', 'br', 0);
+      state.push('hardbreak', 'br', 0);
     }
-    if (childToken.children) {
-      token.children = childToken.children;
+
+    if (parts[partIndex].length === 0) continue;
+
+    const childTokens: Token[] = [];
+    state.md.inline.parse(parts[partIndex], state.md, state.env, childTokens);
+
+    for (const childToken of childTokens) {
+      const token = state.push(childToken.type, childToken.tag, childToken.nesting);
+      token.content = childToken.content;
+      token.markup = childToken.markup;
+      if (childToken.attrs) {
+        for (const [key, value] of childToken.attrs) {
+          token.attrSet(key, value);
+        }
+      }
+      if (childToken.children) {
+        token.children = childToken.children;
+      }
     }
   }
 }
@@ -736,7 +749,10 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
             const content = src.slice(idEnd + 2, endPos);
             const tokenOpen = state.push('manuscript_markdown_comment_open', 'span', 1);
             tokenOpen.attrSet('class', 'manuscript-markdown-comment');
-            tokenOpen.meta = { id, commentText: content };
+            tokenOpen.meta = {
+              id,
+              commentText: content.split(PARA_PLACEHOLDER).join('\n\n'),
+            };
             addInlineContent(state, content);
             state.push('manuscript_markdown_comment_close', 'span', -1);
           }
@@ -782,7 +798,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
         const content = src.slice(start + 3, endPos);
         const tokenOpen = state.push('manuscript_markdown_comment_open', 'span', 1);
         tokenOpen.attrSet('class', 'manuscript-markdown-comment');
-        tokenOpen.meta = { commentText: content };
+        tokenOpen.meta = { commentText: content.split(PARA_PLACEHOLDER).join('\n\n') };
 
         // Add parsed inline content to allow nested Markdown processing
         addInlineContent(state, content);

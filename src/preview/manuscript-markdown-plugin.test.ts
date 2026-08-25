@@ -850,6 +850,19 @@ describe('Edge Cases', () => {
 
 // Property 4: Empty line preservation — parameterized
 describe('Property 4: Empty line preservation', () => {
+  it('renders paragraph breaks inside an addition without leaking the placeholder', () => {
+    const output = renderWithPlugin(
+      '{++First paragraph.\n\nSecond paragraph.\n\n++}## Statistical Model'
+    );
+
+    expect(output).toContain('First paragraph.');
+    expect(output).toContain('Second paragraph.');
+    expect(output).toContain('## Statistical Model');
+    expect(output.match(/<br>/g)).toHaveLength(4);
+    expect(output).not.toContain('PARA');
+    expect(output).not.toContain('\uE000');
+  });
+
   const multilineTextWithEmptyLines = fc.array(
     fc.oneof(
       fc.string({ minLength: 1, maxLength: 50 }).filter(s =>
