@@ -406,35 +406,57 @@ function addInlineContent(state: StateInline, content: string): void {
     return;
   }
 
-  // The block preprocessor protects blank lines inside CriticMarkup with a
-  // private-use placeholder. markdown-it's text rule consumes that placeholder
-  // before paraPlaceholderRule can see it when this helper recursively parses
-  // the CriticMarkup body. Split it out here and render the original blank line
-  // as two hard breaks so it remains visible in the browser.
-  const parts = content.split(PARA_PLACEHOLDER);
-  for (let partIndex = 0; partIndex < parts.length; partIndex++) {
-    if (partIndex > 0) {
-      state.push('hardbreak', 'br', 0);
-      state.push('hardbreak', 'br', 0);
-    }
+  // Parse the entire body before expanding protected paragraph breaks. Splitting
+  // the source first would prevent delimiters that cross a blank line (such as
+  // nested CriticMarkup or emphasis) from matching.
+  const childTokens: Token[] = [];
+  state.md.inline.parse(content, state.md, state.env, childTokens);
 
-    if (parts[partIndex].length === 0) continue;
+  const expandParagraphBreaks = (tokens: Token[]): Token[] => {
+    const expanded: Token[] = [];
+    for (const token of tokens) {
+      if (token.children) {
+        token.children = expandParagraphBreaks(token.children);
+      }
 
-    const childTokens: Token[] = [];
-    state.md.inline.parse(parts[partIndex], state.md, state.env, childTokens);
-
-    for (const childToken of childTokens) {
-      const token = state.push(childToken.type, childToken.tag, childToken.nesting);
-      token.content = childToken.content;
-      token.markup = childToken.markup;
-      if (childToken.attrs) {
-        for (const [key, value] of childToken.attrs) {
-          token.attrSet(key, value);
+      if (token.type === 'text' && token.content.includes(PARA_PLACEHOLDER)) {
+        const parts = token.content.split(PARA_PLACEHOLDER);
+        for (let partIndex = 0; partIndex < parts.length; partIndex++) {
+          if (partIndex > 0) {
+            expanded.push(new state.Token('hardbreak', 'br', 0));
+            expanded.push(new state.Token('hardbreak', 'br', 0));
+          }
+          if (parts[partIndex].length > 0) {
+            const textToken = new state.Token('text', '', 0);
+            textToken.content = parts[partIndex];
+            expanded.push(textToken);
+          }
         }
+        continue;
       }
-      if (childToken.children) {
-        token.children = childToken.children;
+
+      // Code and other opaque inline tokens do not expose their content as text
+      // children, but the implementation placeholder must never reach HTML.
+      if (token.content.includes(PARA_PLACEHOLDER)) {
+        const separator = token.type === 'code_inline' ? ' ' : '\n\n';
+        token.content = token.content.split(PARA_PLACEHOLDER).join(separator);
       }
+      expanded.push(token);
+    }
+    return expanded;
+  };
+
+  for (const childToken of expandParagraphBreaks(childTokens)) {
+    const token = state.push(childToken.type, childToken.tag, childToken.nesting);
+    token.content = childToken.content;
+    token.markup = childToken.markup;
+    if (childToken.attrs) {
+      for (const [key, value] of childToken.attrs) {
+        token.attrSet(key, value);
+      }
+    }
+    if (childToken.children) {
+      token.children = childToken.children;
     }
   }
 }
