@@ -405,13 +405,48 @@ function addInlineContent(state: StateInline, content: string): void {
   if (content.length === 0) {
     return;
   }
-  
-  // Parse the content to get child tokens
+
+  // Parse the entire body before expanding protected paragraph breaks. Splitting
+  // the source first would prevent delimiters that cross a blank line (such as
+  // nested CriticMarkup or emphasis) from matching.
   const childTokens: Token[] = [];
   state.md.inline.parse(content, state.md, state.env, childTokens);
-  
-  // Add each child token to the state
-  for (const childToken of childTokens) {
+
+  const expandParagraphBreaks = (tokens: Token[]): Token[] => {
+    const expanded: Token[] = [];
+    for (const token of tokens) {
+      if (token.children) {
+        token.children = expandParagraphBreaks(token.children);
+      }
+
+      if (token.type === 'text' && token.content.includes(PARA_PLACEHOLDER)) {
+        const parts = token.content.split(PARA_PLACEHOLDER);
+        for (let partIndex = 0; partIndex < parts.length; partIndex++) {
+          if (partIndex > 0) {
+            expanded.push(new state.Token('hardbreak', 'br', 0));
+            expanded.push(new state.Token('hardbreak', 'br', 0));
+          }
+          if (parts[partIndex].length > 0) {
+            const textToken = new state.Token('text', '', 0);
+            textToken.content = parts[partIndex];
+            expanded.push(textToken);
+          }
+        }
+        continue;
+      }
+
+      // Code and other opaque inline tokens do not expose their content as text
+      // children, but the implementation placeholder must never reach HTML.
+      if (token.content.includes(PARA_PLACEHOLDER)) {
+        const separator = token.type === 'code_inline' ? ' ' : '\n\n';
+        token.content = token.content.split(PARA_PLACEHOLDER).join(separator);
+      }
+      expanded.push(token);
+    }
+    return expanded;
+  };
+
+  for (const childToken of expandParagraphBreaks(childTokens)) {
     const token = state.push(childToken.type, childToken.tag, childToken.nesting);
     token.content = childToken.content;
     token.markup = childToken.markup;
@@ -736,7 +771,10 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
             const content = src.slice(idEnd + 2, endPos);
             const tokenOpen = state.push('manuscript_markdown_comment_open', 'span', 1);
             tokenOpen.attrSet('class', 'manuscript-markdown-comment');
-            tokenOpen.meta = { id, commentText: content };
+            tokenOpen.meta = {
+              id,
+              commentText: content.split(PARA_PLACEHOLDER).join('\n\n'),
+            };
             addInlineContent(state, content);
             state.push('manuscript_markdown_comment_close', 'span', -1);
           }
@@ -782,7 +820,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
         const content = src.slice(start + 3, endPos);
         const tokenOpen = state.push('manuscript_markdown_comment_open', 'span', 1);
         tokenOpen.attrSet('class', 'manuscript-markdown-comment');
-        tokenOpen.meta = { commentText: content };
+        tokenOpen.meta = { commentText: content.split(PARA_PLACEHOLDER).join('\n\n') };
 
         // Add parsed inline content to allow nested Markdown processing
         addInlineContent(state, content);

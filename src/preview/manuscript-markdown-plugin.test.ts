@@ -850,6 +850,35 @@ describe('Edge Cases', () => {
 
 // Property 4: Empty line preservation — parameterized
 describe('Property 4: Empty line preservation', () => {
+  it('renders paragraph breaks inside an addition without leaking the placeholder', () => {
+    const output = renderWithPlugin(
+      '{++First paragraph.\n\nSecond paragraph.\n\n++}## Statistical Model'
+    );
+
+    expect(output).toContain('First paragraph.');
+    expect(output).toContain('Second paragraph.');
+    expect(output).toContain('## Statistical Model');
+    expect(output.match(/<br>/g)).toHaveLength(4);
+    expect(output).not.toContain('PARA');
+    expect(output).not.toContain('\uE000');
+  });
+
+  it('preserves nested CriticMarkup across a paragraph break', () => {
+    const output = renderWithPlugin('{++outer {--one\n\ntwo--} end++}');
+
+    expect(output).toContain('<ins class="manuscript-markdown-addition">');
+    expect(output).toContain('<del class="manuscript-markdown-deletion">one<br>\n<br>\ntwo</del>');
+    expect(output).not.toContain('{--');
+    expect(output).not.toContain('PARA');
+  });
+
+  it('preserves emphasis across a paragraph break inside CriticMarkup', () => {
+    const output = renderWithPlugin('{++**one\n\ntwo**++}');
+
+    expect(output).toContain('<strong>one<br>\n<br>\ntwo</strong>');
+    expect(output).not.toContain('PARA');
+  });
+
   const multilineTextWithEmptyLines = fc.array(
     fc.oneof(
       fc.string({ minLength: 1, maxLength: 50 }).filter(s =>
