@@ -15,6 +15,7 @@ import { formatTableNumbers } from '../table-number-format';
 import { getDefaultColorScheme } from '../alert-colors';
 import { splitCriticMarkupInMath, type CriticMathPart } from '../critic-math';
 import { findDollarMathAt } from '../math-delimiters';
+import { computeCodeRegions, isInsideCodeRegion, mergeRegions, type CodeRegion } from '../code-regions';
 
 export interface ManuscriptMarkdownIt extends MarkdownIt {
   manuscriptColors?: ColorScheme;
@@ -468,10 +469,28 @@ interface CriticHeadingSourceSegment {
   endLineOffset: number;
 }
 
+function criticCommentRegions(content: string): CodeRegion[] {
+  const regions: CodeRegion[] = [];
+  const opener = /\{(?:>>|#[A-Za-z0-9_-]+>>)/g;
+  let match: RegExpExecArray | null;
+  while ((match = opener.exec(content)) !== null) {
+    const close = findMatchingClose(content, match.index + match[0].length);
+    if (close === -1) continue;
+    const end = close + '<<}'.length;
+    regions.push({ start: match.index, end });
+    opener.lastIndex = end;
+  }
+  return regions;
+}
+
 function splitCriticHeadingSource(
   content: string,
   boundaries: CriticHeadingBoundary[],
 ): CriticHeadingSourceSegment[] {
+  const ignoredBreakRegions = mergeRegions([
+    ...computeCodeRegions(content),
+    ...criticCommentRegions(content),
+  ]);
   const segments: CriticHeadingSourceSegment[] = [];
   let segmentStart = 0;
   let segmentStartLine = 0;
@@ -486,7 +505,8 @@ function splitCriticHeadingSource(
     }
 
     const kind: CriticHeadingBoundary = isParagraphBreak ? 'paragraph' : 'line';
-    const shouldSplit = kind === boundaries[boundaryIndex];
+    const shouldSplit = !isInsideCodeRegion(index, ignoredBreakRegions) &&
+      kind === boundaries[boundaryIndex];
     if (shouldSplit) {
       segments.push({
         content: content.slice(segmentStart, index),
@@ -518,11 +538,41 @@ interface CriticHeadingChildSplit {
   boundaries: CriticHeadingBoundary[];
 }
 
+type ActiveInlineWrapper =
+  | { kind: 'token'; open: Token }
+  | { kind: 'html'; open: Token; tag: string };
+
+const VOID_HTML_TAGS = new Set([
+  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+  'link', 'meta', 'param', 'source', 'track', 'wbr',
+]);
+
+function rawHtmlTag(token: Token): { kind: 'open' | 'close'; tag: string } | undefined {
+  if (token.type !== 'html_inline') return undefined;
+  const close = /^<\/([A-Za-z][A-Za-z0-9-]*)\s*>$/.exec(token.content);
+  if (close) return { kind: 'close', tag: close[1].toLowerCase() };
+  const open = /^<([A-Za-z][A-Za-z0-9-]*)(?:\s|>)/.exec(token.content);
+  if (!open || /\/\s*>$/.test(token.content)) return undefined;
+  const tag = open[1].toLowerCase();
+  return VOID_HTML_TAGS.has(tag) ? undefined : { kind: 'open', tag };
+}
+
+function closeActiveWrapper(state: StateCore, wrapper: ActiveInlineWrapper): Token {
+  if (wrapper.kind === 'token') return closeTokenFor(state, wrapper.open);
+  const close = cloneInlineToken(state, wrapper.open);
+  close.content = '</' + wrapper.tag + '>';
+  return close;
+}
+
+function reopenActiveWrapper(state: StateCore, wrapper: ActiveInlineWrapper): Token {
+  return cloneInlineToken(state, wrapper.open);
+}
+
 function splitInlineChildrenAtHeadingBreaks(state: StateCore, inline: Token): CriticHeadingChildSplit {
   const children = inline.children ?? [];
   const segments: Token[][] = [];
   const boundaries: CriticHeadingBoundary[] = [];
-  const openStack: Token[] = [];
+  const openStack: ActiveInlineWrapper[] = [];
   let segment: Token[] = [];
   let splitFirstLineBreak = true;
   for (let index = 0; index < children.length; index++) {
@@ -533,10 +583,10 @@ function splitInlineChildrenAtHeadingBreaks(state: StateCore, inline: Token): Cr
     const shouldSplit = isParagraphBreak || (splitFirstLineBreak && isLineBreak);
     if (shouldSplit) {
       for (let stackIndex = openStack.length - 1; stackIndex >= 0; stackIndex--) {
-        segment.push(closeTokenFor(state, openStack[stackIndex]));
+        segment.push(closeActiveWrapper(state, openStack[stackIndex]));
       }
       segments.push(segment);
-      segment = openStack.map(open => cloneInlineToken(state, open));
+      segment = openStack.map(wrapper => reopenActiveWrapper(state, wrapper));
       boundaries.push(isParagraphBreak ? 'paragraph' : 'line');
       splitFirstLineBreak = false;
       if (isParagraphBreak) index++;
@@ -545,9 +595,17 @@ function splitInlineChildrenAtHeadingBreaks(state: StateCore, inline: Token): Cr
 
     segment.push(token);
     if (token.nesting === 1) {
-      openStack.push(token);
+      openStack.push({ kind: 'token', open: token });
     } else if (token.nesting === -1) {
       openStack.pop();
+    } else {
+      const htmlTag = rawHtmlTag(token);
+      if (htmlTag?.kind === 'open') {
+        openStack.push({ kind: 'html', open: token, tag: htmlTag.tag });
+      } else if (htmlTag?.kind === 'close') {
+        const active = openStack[openStack.length - 1];
+        if (active?.kind === 'html' && active.tag === htmlTag.tag) openStack.pop();
+      }
     }
   }
   segments.push(segment);
@@ -567,12 +625,17 @@ function setOriginalTokenMap(token: Token, map: [number, number]): void {
   token.meta = { ...(token.meta || {}), manuscriptMapIsOriginal: true };
 }
 
-/** Keep Markdown block boundaries visible when a Critic span crosses a heading. */
-function criticHeadingRule(state: StateCore): void {
+function promoteCriticHeadingsRule(state: StateCore): void {
   const tokens = state.tokens;
   for (let index = 0; index < tokens.length - 2; index++) {
     promoteFullParagraphCriticHeading(tokens, index);
+  }
+}
 
+/** Keep Markdown block boundaries visible when a Critic span crosses a heading. */
+function splitCriticHeadingsRule(state: StateCore): void {
+  const tokens = state.tokens;
+  for (let index = 0; index < tokens.length - 2; index++) {
     const headingOpen = tokens[index];
     const inline = tokens[index + 1];
     const headingClose = tokens[index + 2];
@@ -1386,14 +1449,19 @@ function paraPlaceholderRule(state: StateInline, silent: boolean): boolean {
   return true;
 }
 
-/** Preserve a Markdown hard break whose source newline was protected inside CriticMarkup. */
-function escapedLinePlaceholderRule(state: StateInline, silent: boolean): boolean {
+/** Preserve Markdown breaks whose source newlines were protected inside CriticMarkup. */
+function escapedCriticBreakPlaceholderRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
-  if (state.src.charCodeAt(start) !== 0x5C /* \ */ ||
-      !state.src.startsWith(LINE_PLACEHOLDER, start + 1)) return false;
+  if (state.src.charCodeAt(start) !== 0x5C /* \ */) return false;
+  const isParagraphBreak = state.src.startsWith(PARA_PLACEHOLDER, start + 1);
+  const isLineBreak = state.src.startsWith(LINE_PLACEHOLDER, start + 1);
+  if (!isParagraphBreak && !isLineBreak) return false;
 
-  if (!silent) state.push('hardbreak', 'br', 0);
-  state.pos = start + 1 + LINE_PLACEHOLDER.length;
+  if (!silent) {
+    state.push('hardbreak', 'br', 0);
+    if (isParagraphBreak) state.push('hardbreak', 'br', 0);
+  }
+  state.pos = start + 1 + (isParagraphBreak ? PARA_PLACEHOLDER.length : LINE_PLACEHOLDER.length);
   return true;
 }
 
@@ -1637,7 +1705,7 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
 
   // Register inline rule for paragraph placeholder (before other inline rules)
   md.inline.ruler.before('emphasis', 'para_placeholder', paraPlaceholderRule);
-  md.inline.ruler.before('escape', 'critic_escaped_line_placeholder', escapedLinePlaceholderRule);
+  md.inline.ruler.before('escape', 'critic_escaped_break_placeholder', escapedCriticBreakPlaceholderRule);
 
   // VS Code's math extension registers its inline rule immediately after
   // `escape`, before our general CriticMarkup rule. Intercept only equations
@@ -1656,9 +1724,10 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
   // Register core rule to associate comments with annotated elements
   // Runs after inline parsing to post-process the token stream
   md.core.ruler.after('inline', 'manuscript_markdown_autolink_literals', autolinkLiteralsRule);
-  md.core.ruler.after('manuscript_markdown_autolink_literals', 'manuscript_markdown_associate_comments', associateCommentsRule);
-  md.core.ruler.after('manuscript_markdown_associate_comments', 'manuscript_markdown_critic_headings', criticHeadingRule);
-  md.core.ruler.after('manuscript_markdown_critic_headings', 'manuscript_markdown_task_list', taskListRule);
+  md.core.ruler.after('manuscript_markdown_autolink_literals', 'manuscript_markdown_promote_critic_headings', promoteCriticHeadingsRule);
+  md.core.ruler.after('manuscript_markdown_promote_critic_headings', 'manuscript_markdown_associate_comments', associateCommentsRule);
+  md.core.ruler.after('manuscript_markdown_associate_comments', 'manuscript_markdown_split_critic_headings', splitCriticHeadingsRule);
+  md.core.ruler.after('manuscript_markdown_split_critic_headings', 'manuscript_markdown_task_list', taskListRule);
   md.core.ruler.after('manuscript_markdown_task_list', 'manuscript_markdown_alert_blockquote', alertBlockquoteRule);
 
   // Core rule: wrap <!-- style: X -->...<!-- /style --> blocks in <div class="ms-custom-style ms-custom-style-{name}">

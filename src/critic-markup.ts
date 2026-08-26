@@ -10,10 +10,11 @@ export const LINE_PLACEHOLDER = '\uE000LINE\uE000';
 function protectLineBreaks(content: string): string {
   // A visually blank Markdown line may contain indentation or trailing spaces.
   // Protect CRLF as well because this preprocessor runs before markdown-it's
-  // normalize rule converts line endings.
+  // normalize rule converts line endings. The bare-CR branch must not match
+  // the first half of CRLF when the two-break pattern backtracks.
   return content
-    .replace(/(?:\r\n|\r|\n)[ \t]*(?:\r\n|\r|\n)/g, PARA_PLACEHOLDER)
-    .replace(/\r\n|\r|\n/g, LINE_PLACEHOLDER);
+    .replace(/(?:\r\n|\r(?!\n)|\n)[ \t]*(?:\r\n|\r(?!\n)|\n)/g, PARA_PLACEHOLDER)
+    .replace(/\r\n|\r(?!\n)|\n/g, LINE_PLACEHOLDER);
 }
 
 export function restoreCriticLineBreaks(content: string): string {

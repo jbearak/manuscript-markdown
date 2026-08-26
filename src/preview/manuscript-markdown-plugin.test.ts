@@ -900,6 +900,17 @@ describe('CriticMarkup headings in preview', () => {
     );
   });
 
+  it('does not promote an internal heading with an attached comment run', () => {
+    for (const input of [
+      '{++## Section Name++}{>>note<<}',
+      '{++## Section Name++} {>>note<<}',
+    ]) {
+      const output = renderWithPlugin(input);
+      expect(output).toContain('## Section Name');
+      expect(output).not.toContain('<h2>');
+    }
+  });
+
   it('leaves internal Critic heading markers literal in quotes and lists', () => {
     for (const input of ['> {++## Quoted++}', '- {++## Listed++}']) {
       const output = renderWithPlugin(input);
@@ -958,6 +969,20 @@ describe('CriticMarkup headings in preview', () => {
     );
   });
 
+  it('balances raw inline HTML across the heading boundary', () => {
+    for (const [open, close] of [
+      ['<em>', '</em>'],
+      ['<span class="label">', '</span>'],
+      ['<a href="/section">', '</a>'],
+    ]) {
+      const output = renderWithPlugin('## {++' + open + 'Section\n\nParagraph' + close + '++}');
+      expect(output).toContain(
+        '<h2><ins class="manuscript-markdown-addition">' + open + 'Section' + close + '</ins></h2>\n' +
+        '<p><ins class="manuscript-markdown-addition">' + open + 'Paragraph' + close + '</ins></p>'
+      );
+    }
+  });
+
   it('propagates an attached comment to every split Critic span', () => {
     const output = renderWithPlugin('## {++Section Name\n\nParagraph text.++}{>>note<<}');
 
@@ -997,6 +1022,20 @@ describe('CriticMarkup headings in preview', () => {
     expect(output).not.toContain('\uE000');
   });
 
+  it('does not leak an escaped protected paragraph break in either heading form', () => {
+    for (const input of [
+      '## {++Section Name\\\n\nParagraph text.++}',
+      '{++## Section Name\\\n\nParagraph text.++}',
+    ]) {
+      const output = renderWithPlugin(input);
+      expect(output).toContain(
+        '<h2><ins class="manuscript-markdown-addition">Section Name</ins></h2>\n' +
+        '<p><ins class="manuscript-markdown-addition">Paragraph text.</ins></p>'
+      );
+      expect(output).not.toContain('\uE000');
+    }
+  });
+
   it('assigns each generated block its own source map and standard token shape', () => {
     const md = new MarkdownIt({ html: true });
     md.use(manuscriptMarkdownPlugin);
@@ -1010,6 +1049,37 @@ describe('CriticMarkup headings in preview', () => {
     expect(blockOpens.every(token => token.block && token.level === 0)).toBe(true);
     expect(inlineTokens.map(token => token.map)).toEqual([[0, 1], [2, 3]]);
     expect(inlineTokens.every(token => token.block && token.level === 1)).toBe(true);
+  });
+
+  it('maps a visible split after hidden comment and code-span breaks', () => {
+    const inputs = [
+      '## {>>first\n\nsecond<<}{++Section\n\nParagraph++}',
+      '## {++`Section\n\nName`\n\nParagraph++}',
+    ];
+    for (const input of inputs) {
+      const md = new MarkdownIt({ html: true });
+      md.use(manuscriptMarkdownPlugin);
+      const tokens = md.parse(input, {});
+      const blockMaps = tokens
+        .filter(token => token.type === 'heading_open' || token.type === 'paragraph_open')
+        .map(token => token.map);
+      expect(blockMaps).toEqual([[0, 3], [4, 5]]);
+    }
+  });
+
+  it('maps CRLF heading boundaries as one physical newline each', () => {
+    for (const [input, expectedMaps] of [
+      ['{++## Section\r\nParagraph++}', [[0, 1], [1, 2]]],
+      ['{++## Section\r\n\r\nParagraph++}', [[0, 1], [2, 3]]],
+    ] as const) {
+      const md = new MarkdownIt({ html: true });
+      md.use(manuscriptMarkdownPlugin);
+      const tokens = md.parse(input, {});
+      const blockMaps = tokens
+        .filter(token => token.type === 'heading_open' || token.type === 'paragraph_open')
+        .map(token => token.map);
+      expect(blockMaps).toEqual(expectedMaps);
+    }
   });
 
   it('does not emit an empty paragraph for a trailing blank segment', () => {

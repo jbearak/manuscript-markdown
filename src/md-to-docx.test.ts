@@ -2250,6 +2250,13 @@ describe('preprocessCriticMarkup', () => {
     expect(preprocessCriticMarkup(input)).toBe('{++a' + PARA_PLACEHOLDER + 'b++}');
   });
 
+  it('does not backtrack one CRLF into a paragraph break', () => {
+    expect(preprocessCriticMarkup('{++a\r\nb++}'))
+      .toBe('{++a' + LINE_PLACEHOLDER + 'b++}');
+    expect(preprocessCriticMarkup('{++a\r\n\r\nb++}'))
+      .toBe('{++a' + PARA_PLACEHOLDER + 'b++}');
+  });
+
   it('does not protect CriticMarkup newlines in a CR-only indented code block', () => {
     const input = 'Intro\r\r    {++first\r    second++}';
     expect(preprocessCriticMarkup(input)).toBe(input);
