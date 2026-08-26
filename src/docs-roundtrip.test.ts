@@ -2,7 +2,7 @@ import { describe, it, expect } from 'bun:test';
 import fc from 'fast-check';
 import { readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
-import { convertMdToDocx } from './md-to-docx';
+import { convertMdToDocx, parseMd } from './md-to-docx';
 import { convertDocx } from './converter';
 import { extractCriticMarkupPatterns } from './test-helpers';
 
@@ -333,11 +333,81 @@ describe('CriticMarkup round-trip: md -> docx -> md', () => {
       }
     }, 30_000);
   }
+
+  it('keeps split display math and prose inside a restarted ordered-list item', async () => {
+    const md = '5. {++before\n\n   $$x$$\n\n   after++}\n6. next';
+    const { docx, warnings } = await convertMdToDocx(md);
+    expect(warnings).toEqual([]);
+
+    const rt = await convertDocx(docx);
+    expect(rt.markdown).toBe(
+      '5. {++before++}\n\n'
+      + '   {++$$\n'
+      + '   x\n'
+      + '   $$++}\n\n'
+      + '   {++after++}\n'
+      + '6. next\n',
+    );
+    const secondDocx = await convertMdToDocx(rt.markdown);
+    expect(secondDocx.warnings).toEqual([]);
+    expect((await convertDocx(secondDocx.docx)).markdown).toBe(rt.markdown);
+  }, 30_000);
+
+  it('keeps split display math inside plain and alert blockquotes', async () => {
+    const cases = [
+      {
+        md: '> {++before\n>\n> $$x$$\n>\n> after++}',
+        expected: '> {++before++}\n>\n> {++$$\n> x\n> $$++}\n>\n> {++after++}\n',
+      },
+      {
+        md: '> [!NOTE]\n> {++before\n>\n> $$x$$\n>\n> after++}',
+        expected: '> [!NOTE]\n> {++before++}\n>\n> {++$$\n> x\n> $$++}\n>\n> {++after++}\n',
+      },
+    ];
+
+    for (const { md, expected } of cases) {
+      const { docx, warnings } = await convertMdToDocx(md);
+      expect(warnings).toEqual([]);
+      const first = await convertDocx(docx);
+      expect(first.markdown).toBe(expected);
+      const parsedBlockquotes = parseMd(first.markdown).filter(token => token.type === 'blockquote');
+      expect(parsedBlockquotes.length).toBeGreaterThan(0);
+      if (md.includes('[!NOTE]')) {
+        expect(parsedBlockquotes.every(token => token.alertType === 'note')).toBe(true);
+      }
+      const secondDocx = await convertMdToDocx(first.markdown);
+      expect(secondDocx.warnings).toEqual([]);
+      expect((await convertDocx(secondDocx.docx)).markdown).toBe(first.markdown);
+    }
+  }, 30_000);
 });
 
 const draftBib = readFileSync(join(repoRoot, 'test/fixtures/draft.bib'), 'utf-8');
 
 describe('double round-trip: md -> docx -> md -> docx -> md', () => {
+  it('list-contained blockquotes followed by continuations reach a whitespace fixpoint', async () => {
+    const cases = [
+      '- a\n\n  > q\n\n  para',
+      '1. a\n\n   > [!NOTE]\n   > q\n\n   para',
+      '- outer\n  - inner\n\n    > q\n\n    para',
+    ];
+
+    for (const source of cases) {
+      let markdown = source;
+      const roundTrips: string[] = [];
+      for (let pass = 0; pass < 3; pass++) {
+        const converted = await convertMdToDocx(markdown);
+        expect(converted.warnings).toEqual([]);
+        markdown = (await convertDocx(converted.docx)).markdown;
+        roundTrips.push(markdown);
+      }
+
+      expect(roundTrips[1]).toBe(roundTrips[0]);
+      expect(roundTrips[2]).toBe(roundTrips[0]);
+      expect(roundTrips[0]).not.toContain('\n\n\n');
+    }
+  }, 30_000);
+
   it('sample.md reaches a fixpoint after one round-trip', async () => {
     const originalMd = readFileSync(join(repoRoot, 'sample.md'), 'utf-8');
 

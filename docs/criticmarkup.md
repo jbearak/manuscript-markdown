@@ -62,8 +62,6 @@ spans multiple lines
 including empty lines.++}
 ```
 
-**Limitation**: Multi-line patterns only render correctly in the Markdown preview when they start at the beginning of a line. Navigation commands work for patterns at any position.
-
 ## Nesting Rules
 
 - CriticMarkup patterns **cannot be nested** within the same type

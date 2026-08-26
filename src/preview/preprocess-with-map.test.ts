@@ -128,4 +128,26 @@ describe('preprocessCriticMarkupWithMap', () => {
     // It should remap to original line 6
     expect(map.remap(afterIdx)).toBe(6);
   });
+
+  it('maps a changed first line to its source rather than a later anchor', () => {
+    const src = 'Before {++a\nb++}\nAfter';
+    const { output, map } = preprocessCriticMarkupWithMap(src);
+    const outLines = output.split('\n');
+
+    expect(outLines).toHaveLength(2);
+    expect(map.remap(0)).toBe(0);
+    expect(map.remap(outLines.indexOf('After'))).toBe(2);
+    expect(map.remap(outLines.length)).toBe(3);
+  });
+
+  it('maps a leading collapsed paragraph span and the following anchor monotonically', () => {
+    const src = '{++a\n\nb++}\nAfter';
+    const { output, map } = preprocessCriticMarkupWithMap(src);
+    const outLines = output.split('\n');
+    const mapped = outLines.map((_line, index) => map.remap(index));
+
+    expect(mapped[0]).toBe(0);
+    expect(map.remap(outLines.indexOf('After'))).toBe(3);
+    expect(mapped).toEqual([...mapped].sort((a, b) => a - b));
+  });
 });

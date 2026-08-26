@@ -1084,6 +1084,26 @@ describe('Grid table round-trip', () => {
 });
 
 describe('List indent round-trip', () => {
+  test('does not infer an ordinary left-indented paragraph as a list continuation', async () => {
+    const { docx } = await convertMdToDocx('- item\n\nBody');
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docx);
+    const documentXml = await zip.file('word/document.xml')!.async('string');
+    let replacedBody = false;
+    const modifiedXml = documentXml.replace(
+      /(<w:p\b[^>]*>)(<w:r><w:t>Body<\/w:t><\/w:r><\/w:p>)/,
+      (_full, open: string, body: string) => {
+        replacedBody = true;
+        return open + '<w:pPr><w:ind w:left="720"/></w:pPr>' + body;
+      },
+    );
+    expect(replacedBody).toBe(true);
+    zip.file('word/document.xml', modifiedXml);
+    const modified = await zip.generateAsync({ type: 'uint8array' });
+
+    expect((await convertDocx(modified)).markdown).toContain('- item\n\nBody');
+  });
+
   test('tab-indented lists round-trip with tabs', async () => {
     const md = '- item 1\n\t- nested\n\t\t- deep';
     const { docx } = await convertMdToDocx(md);

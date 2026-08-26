@@ -104,6 +104,14 @@ describe('Scroll sync: token .map remapping after preprocessing', () => {
   });
 
   describe('CriticMarkup', () => {
+    it('keeps a leading changed line anchored before a later unchanged line', () => {
+      const tokens = parseWithPlugin('Before {++a\nb++}\nAfter');
+      const paragraph = findToken(tokens, 'paragraph_open');
+
+      expect(paragraph).toBeDefined();
+      expect(paragraph!.map).toEqual([0, 3]);
+    });
+
     it('remaps paragraph after CriticMarkup with internal blank lines', () => {
       const src = [
         '{++added text',             // 0

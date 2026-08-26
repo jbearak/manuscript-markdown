@@ -11,7 +11,7 @@
  * table format ever changes.
  */
 
-import { LineMap, type LineMapSegment } from './line-map';
+import { LineMap } from './line-map';
 import { preprocessGridTables } from '../grid-table-preprocess';
 import { wrapBareLatexEnvironments } from '../latex-env-preprocess';
 import { preprocessCriticMarkup } from '../critic-markup';
@@ -19,9 +19,12 @@ import { preprocessCriticMarkup } from '../critic-markup';
 /**
  * Build a LineMap by comparing original and output line arrays.
  *
- * Scans both arrays in parallel. Unchanged lines (exact string match) get 1:1
- * segments. When lines diverge, we skip ahead in both arrays to find the next
- * matching anchor point, recording the divergent region as a gap.
+ * Scans both arrays in parallel. Unchanged lines retain exact provenance.
+ * Changed regions are mapped monotonically across the corresponding input
+ * region, so a collapsed region maps to its first source line and synthetic
+ * lines map to the adjacent source boundary. Every output boundary receives a
+ * mapping; relying only on unchanged anchors would map a changed first line to
+ * the first later anchor.
  *
  * This is a simplified diff that works well for our preprocessors, which make
  * isolated, non-overlapping replacements with unique surrounding context.
@@ -36,59 +39,94 @@ function buildMapFromLines(origLines: string[], outLines: string[]): LineMap {
     if (allMatch) return LineMap.identity();
   }
 
-  const segments: LineMapSegment[] = [];
+  const mappings = new Array<number>(outLines.length + 1);
+  const originalPositions = new Map<string, number[]>();
+  for (let line = 0; line < origLines.length; line++) {
+    const value = origLines[line];
+    if (value.trim() === '') continue;
+    const positions = originalPositions.get(value);
+    if (positions) positions.push(line);
+    else originalPositions.set(value, [line]);
+  }
+
+  const firstAtOrAfter = (positions: number[], minimum: number): number | undefined => {
+    let lo = 0;
+    let hi = positions.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (positions[mid] < minimum) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo < positions.length ? positions[lo] : undefined;
+  };
+
+  const mapChangedRegion = (
+    originalStart: number,
+    originalEnd: number,
+    outputStart: number,
+    outputEnd: number,
+  ) => {
+    const originalCount = originalEnd - originalStart;
+    const outputCount = outputEnd - outputStart;
+    for (let line = outputStart; line < outputEnd; line++) {
+      if (originalCount <= 0) {
+        mappings[line] = Math.min(originalStart, origLines.length);
+      } else {
+        const relative = line - outputStart;
+        mappings[line] = originalStart + Math.min(
+          originalCount - 1,
+          Math.floor(relative * originalCount / outputCount),
+        );
+      }
+    }
+  };
+
   let oi = 0; // original index
   let pi = 0; // preprocessed (output) index
 
   while (oi < origLines.length && pi < outLines.length) {
-    // Find a run of matching lines
     if (origLines[oi] === outLines[pi]) {
-      const segStart = pi;
-      const origStart = oi;
       while (oi < origLines.length && pi < outLines.length && origLines[oi] === outLines[pi]) {
+        mappings[pi] = oi;
         oi++;
         pi++;
       }
-      segments.push({ preprocessedStart: segStart, originalStart: origStart, length: pi - segStart });
       continue;
     }
 
-    // Lines diverge — find the next anchor point.
-    // Look for the next output line that matches some original line ahead.
-    let foundAnchor = false;
-    // Build an index of non-blank original lines to their first occurrence
-    // from oi onward, then do a single O(n) scan of output lines.
-    const origIndex = new Map<string, number>();
-    for (let oScan = oi; oScan < origLines.length; oScan++) {
-      const line = origLines[oScan];
-      if (line.trim() !== '' && !origIndex.has(line)) {
-        origIndex.set(line, oScan);
-      }
-    }
+    let anchorOriginal: number | undefined;
+    let anchorOutput: number | undefined;
     for (let pScan = pi; pScan < outLines.length; pScan++) {
       if (outLines[pScan].trim() === '') continue;
-      const oMatch = origIndex.get(outLines[pScan]);
-      if (oMatch !== undefined) {
-        oi = oMatch;
-        pi = pScan;
-        foundAnchor = true;
+      const positions = originalPositions.get(outLines[pScan]);
+      const match = positions ? firstAtOrAfter(positions, oi) : undefined;
+      if (match !== undefined) {
+        anchorOriginal = match;
+        anchorOutput = pScan;
         break;
       }
     }
 
-    if (!foundAnchor) {
-      // No anchor found — the rest is a single divergent region.
-      // Map remaining output lines to the current original position.
+    if (anchorOriginal === undefined || anchorOutput === undefined) {
+      mapChangedRegion(oi, origLines.length, pi, outLines.length);
+      oi = origLines.length;
+      pi = outLines.length;
       break;
     }
+
+    mapChangedRegion(oi, anchorOriginal, pi, anchorOutput);
+    oi = anchorOriginal;
+    pi = anchorOutput;
   }
 
-  // If there are remaining output lines after all original lines, they don't
-  // need mapping (they're synthetic). If there are remaining original lines
-  // after all output lines, they were deleted. Neither case needs segments.
+  if (pi < outLines.length) {
+    mapChangedRegion(oi, origLines.length, pi, outLines.length);
+  }
+  // Token maps use an exclusive end-line boundary, so retain the final source
+  // boundary as well as each output line's start provenance.
+  mappings[outLines.length] = origLines.length;
 
-  if (segments.length === 0) return LineMap.identity();
-  return LineMap.fromSegments(segments);
+  return LineMap.fromLineMappings(mappings);
 }
 
 /** Preprocess grid tables and return the output with a line map. */

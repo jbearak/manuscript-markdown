@@ -12,6 +12,8 @@ import {
   convertMdToDocx,
   parseMd,
   extractFootnoteDefinitions,
+  PARA_PLACEHOLDER,
+  LINE_PLACEHOLDER,
   preprocessCriticMarkup,
   preprocessGridTables,
   stylesXml,
@@ -294,6 +296,16 @@ describe('GFM support in Markdown→DOCX parser', () => {
     expect(tokens).toHaveLength(1);
     expect(tokens[0].type).toBe('paragraph');
     expect(tokens[0].runs[0]).toMatchObject({ type: 'text', text: '<div>alpha</div>' });
+  });
+
+  it('keeps multiline Critic-shaped text inside raw HTML blocks literal', () => {
+    const input = '<pre>\n{++a\nb++}\n</pre>';
+    const tokens = parseMd(input);
+    const runs = tokens.flatMap(token => token.runs);
+
+    expect(runs.map(run => run.text).join('')).toBe(input);
+    expect(runs.some(run => run.type === 'critic_add')).toBe(false);
+    expect(runs.map(run => run.text).join('')).not.toContain(LINE_PLACEHOLDER);
   });
 
   it('parses alert blockquotes and strips raw [!TYPE] marker text', () => {
@@ -828,7 +840,7 @@ describe('generateParagraph', () => {
     expect(result).toContain('w:color="D0D7DE"');
   });
 
-  it('generates list continuation blockquote with adjusted indent and no hidden metadata marker', () => {
+  it('generates list continuation blockquote with adjusted structural indent', () => {
     const token: MdToken = {
       type: 'blockquote',
       level: 1,
@@ -1946,6 +1958,250 @@ describe('CriticMarkup OOXML generation', () => {
     expect(result).not.toContain('**bold**');
     expect(result).not.toContain('==highlighted==');
   });
+
+  it('parses CriticMarkup inside inline math as revised math runs', () => {
+    const token = parseMd('The variance is $u_j^2{+++\\tau_{g_j}^2++}$.')[0];
+    const math = token.runs.find(run => run.type === 'math');
+    const addition = token.runs.find(run => run.type === 'critic_add');
+
+    expect(math?.text).toBe('u_j^2');
+    expect(addition?.text).toBe('$+\\tau_{g_j}^2$');
+    expect(addition?.innerRuns).toEqual([
+      expect.objectContaining({ type: 'math', text: '+\\tau_{g_j}^2' }),
+    ]);
+  });
+
+  it('restores source newlines in revised inline math for Word export', () => {
+    const token = parseMd('$a{++b\nc++}$')[0];
+    const addition = token.runs.find(run => run.type === 'critic_add');
+
+    expect(addition?.innerRuns).toEqual([
+      expect.objectContaining({ type: 'math', text: 'b\nc' }),
+    ]);
+    expect(addition?.text).not.toContain('LINE');
+  });
+
+  it('keeps a next-line Critic opener inside inline math for Word export', () => {
+    const token = parseMd('$a+{++\n+b++}$')[0];
+    const addition = token.runs.find(run => run.type === 'critic_add');
+
+    expect(token.runs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'math', text: 'a+' }),
+      expect.objectContaining({ type: 'critic_add' }),
+    ]));
+    expect(addition?.innerRuns).toEqual([
+      expect.objectContaining({ type: 'math', text: '\n+b' }),
+    ]);
+  });
+
+  it('ignores escaped dollars when closing revised inline math for Word export', () => {
+    const token = parseMd('$a+\\$+{++b++}$')[0];
+    const math = token.runs.find(run => run.type === 'math');
+    const addition = token.runs.find(run => run.type === 'critic_add');
+
+    expect(math?.text).toBe('a+\\$+');
+    expect(addition?.innerRuns).toEqual([
+      expect.objectContaining({ type: 'math', text: 'b' }),
+    ]);
+    expect(token.runs.at(-1)?.text).not.toBe('$');
+  });
+
+  it('closes inline and display math immediately after an escaped dollar', () => {
+    const inline = parseMd('$x+\\$$')[0].runs.find(run => run.type === 'math');
+    const display = parseMd('$$x+\\$$$')[0].runs.find(run => run.type === 'math');
+
+    expect(inline).toEqual(expect.objectContaining({ text: 'x+\\$' }));
+    expect(display).toEqual(expect.objectContaining({ text: 'x+\\$', display: true }));
+  });
+
+  it('generates Word revisions for substituted fragments inside inline math', () => {
+    const token = parseMd('$a{~~+b~>+c~~}$')[0];
+    const state = createState();
+    const result = generateParagraph(token, state, { authorName: 'Default' });
+
+    expect(result).toContain('<w:del');
+    expect(result).toContain('<w:ins');
+    expect(result.match(/<m:oMath>/g)).toHaveLength(3);
+    expect(result).not.toContain('{~~');
+  });
+
+  it('puts display math inside a multiline addition in its own Word paragraph', () => {
+    const markdown = 'Before {++First paragraph.\n\n$$x^2$$\n\nAfter paragraph.++} Tail';
+    const tokens = parseMd(markdown);
+
+    expect(tokens).toHaveLength(3);
+    expect(tokens[0].runs.map(run => run.type)).toEqual(['text', 'critic_add']);
+    expect(tokens[1].runs).toHaveLength(1);
+    expect(tokens[1].runs[0]).toEqual(expect.objectContaining({
+      type: 'critic_add',
+      innerRuns: [expect.objectContaining({ type: 'math', text: 'x^2', display: true })],
+    }));
+    expect(tokens[2].runs.map(run => run.type)).toEqual(['critic_add', 'text']);
+
+    const state = createState();
+    const xml = generateDocumentXml(tokens, state, { authorName: 'Default' });
+    const body = xml.slice(xml.indexOf('<w:body>'), xml.indexOf('</w:body>'));
+    expect(body.match(/<w:p>/g)).toHaveLength(3);
+    expect(body).toContain('<w:p><w:ins');
+    expect(body).toContain('<m:oMathPara><m:oMath>');
+    expect(body).not.toContain('<w:br/>');
+  });
+
+  it('keeps the first Critic display-math segment as a heading and demotes continuations', () => {
+    const tokens = parseMd('# {++before\n\n$$x$$\n\nafter++}');
+    const state = createState();
+    const xml = generateDocumentXml(tokens, state, { authorName: 'Default' });
+
+    expect(tokens.map(token => token.type)).toEqual(['heading', 'paragraph', 'paragraph']);
+    expect(tokens[0].level).toBe(1);
+    expect(tokens[1].level).toBeUndefined();
+    expect(xml.match(/w:pStyle w:val="Heading1"/g)).toHaveLength(1);
+    expect(xml).toContain('<m:oMathPara>');
+  });
+
+  it('puts display math inside a multiline highlight in its own Word paragraph', () => {
+    const tokens = parseMd('{==before\n\n$$x$$\n\nafter==}');
+
+    expect(tokens).toHaveLength(3);
+    expect(tokens.every(token => token.runs[0]?.type === 'critic_highlight')).toBe(true);
+    expect(tokens[1].runs[0].innerRuns).toEqual([
+      expect.objectContaining({ type: 'math', text: 'x', display: true }),
+    ]);
+  });
+
+  it('puts display math inside a multiline substitution in its own Word paragraph', () => {
+    const tokens = parseMd('{~~before\n\n$$x$$\n\nafter~>new before\n\n$$y$$\n\nnew after~~}');
+
+    expect(tokens).toHaveLength(3);
+    expect(tokens.every(token => token.runs[0]?.type === 'critic_sub')).toBe(true);
+    expect(tokens[1].runs[0].oldRuns).toEqual([
+      expect.objectContaining({ type: 'math', text: 'x', display: true }),
+    ]);
+    expect(tokens[1].runs[0].newRuns).toEqual([
+      expect.objectContaining({ type: 'math', text: 'y', display: true }),
+    ]);
+  });
+
+  it('preserves old-before-new order for asymmetric substitution paragraphs', () => {
+    const tokens = parseMd('{~~old\n\n$$x$$\n\nafter~>$$y$$~~}');
+    const runs = tokens.map(token => token.runs[0]);
+
+    expect(tokens).toHaveLength(4);
+    expect(runs[0].oldRuns?.some(run => run.text.includes('old'))).toBe(true);
+    expect(runs[1].oldRuns).toEqual([expect.objectContaining({ type: 'math', text: 'x', display: true })]);
+    expect(runs[2].oldRuns?.some(run => run.text.includes('after'))).toBe(true);
+    expect(runs[3].newRuns).toEqual([expect.objectContaining({ type: 'math', text: 'y', display: true })]);
+  });
+
+  it('keeps a multiline addition in a Word list item', () => {
+    const tokens = parseMd('- Earlier.{++\n  Added.++}');
+    const listItem = tokens.find(token => token.type === 'list_item');
+    const addition = listItem?.runs.find(run => run.type === 'critic_add');
+
+    expect(addition).toBeDefined();
+    expect(addition?.innerRuns?.some(run => run.text.includes('Added.'))).toBe(true);
+  });
+
+  it('keeps a multiline addition in a nested Word list item', () => {
+    const tokens = parseMd('- outer\n    - Earlier.{++\n      Added.++}');
+    const nestedItem = tokens.find(token => token.type === 'list_item' && token.level === 2);
+    const addition = nestedItem?.runs.find(run => run.type === 'critic_add');
+
+    expect(addition).toBeDefined();
+    expect(addition?.innerRuns?.some(run => run.text.includes('Added.'))).toBe(true);
+  });
+
+  it('keeps a multiline addition on a Word list continuation line', () => {
+    const tokens = parseMd('- Intro\n  Earlier.{++\n  Added.++}');
+    const listItem = tokens.find(token => token.type === 'list_item');
+    const addition = listItem?.runs.find(run => run.type === 'critic_add');
+
+    expect(addition?.innerRuns?.some(run => run.text.includes('Added.'))).toBe(true);
+  });
+
+  it('removes blockquote prefixes from revised Word text', () => {
+    const tokens = parseMd('> {++before\n>\n> after++}');
+    const addition = tokens[0].runs.find(run => run.type === 'critic_add');
+
+    expect(addition?.innerRuns?.some(run => run.text.includes('after'))).toBe(true);
+    expect(addition?.innerRuns?.some(run => run.text.includes('>'))).toBe(false);
+  });
+
+  it('removes blockquote prefixes after nested-list indentation', () => {
+    const input = '- outer\n    - inner\n      > {++before\n      >\n      > after++}';
+    const blockquote = parseMd(input).find(token => token.type === 'blockquote');
+    const addition = blockquote?.runs.find(run => run.type === 'critic_add');
+
+    expect(blockquote?.listContinuation).toEqual({ type: 'bullet', level: 2 });
+    expect(addition?.text).toBe('before\n\nafter');
+    expect(addition?.innerRuns?.some(run => run.text.includes('>'))).toBe(false);
+  });
+
+  it('splits Critic display math into Word list continuation paragraphs', () => {
+    const tokens = parseMd('- {++before\n\n  $$x$$\n\n  after++}');
+    const state = createState();
+    const xml = generateDocumentXml(tokens, state, { authorName: 'Default' });
+
+    expect(tokens.map(token => token.type)).toEqual(['list_item', 'paragraph', 'paragraph']);
+    expect(tokens[1].listContinuation).toEqual({ type: 'bullet', level: 1 });
+    expect(tokens[1].runs[0].innerRuns).toEqual([
+      expect.objectContaining({ type: 'math', text: 'x', display: true }),
+    ]);
+    expect(xml.match(/<w:numPr>/g)).toHaveLength(1);
+    expect(xml).toContain('<w:ind w:left="720"/>');
+  });
+
+  it('keeps restarted ordered-list numbering across generated continuation paragraphs', () => {
+    const tokens = parseMd('5. {++before\n\n   $$x$$\n\n   after++}\n6. next');
+    const state = createState();
+    const xml = generateDocumentXml(tokens, state, { authorName: 'Default' });
+    const orderedNumIds = [...xml.matchAll(/<w:numId w:val="(\d+)"\/>/g)].map(match => match[1]);
+
+    expect(tokens.map(token => token.type)).toEqual(['list_item', 'paragraph', 'paragraph', 'list_item']);
+    expect(orderedNumIds).toEqual(['3', '3']);
+    expect(state.listStartOverrides).toEqual([{ numId: 3, ilvl: 0, start: 5 }]);
+    expect(xml.match(/w:pStyle w:val="ManuscriptListContinuation"/g)).toHaveLength(2);
+    expect(xml).not.toContain('_lic:');
+  });
+
+  it('does not duplicate a single-quoted continuation style from a Word template', async () => {
+    const JSZip = (await import('jszip')).default;
+    const base = await convertMdToDocx('Body');
+    const templateZip = await JSZip.loadAsync(base.docx);
+    const templateStyles = await templateZip.file('word/styles.xml')!.async('string');
+    templateZip.file(
+      'word/styles.xml',
+      templateStyles.replace(
+        'w:styleId="ManuscriptListContinuation"',
+        "w:styleId='ManuscriptListContinuation'",
+      ),
+    );
+    const templateDocx = await templateZip.generateAsync({ type: 'uint8array' });
+
+    const converted = await convertMdToDocx('- {++before\n\n  $$x$$\n\n  after++}', { templateDocx });
+    const convertedZip = await JSZip.loadAsync(converted.docx);
+    const convertedStyles = await convertedZip.file('word/styles.xml')!.async('string');
+    expect(convertedStyles.match(/w:styleId\s*=\s*["']ManuscriptListContinuation["']/g)).toHaveLength(1);
+  });
+
+  it('splits Critic display math across Word blockquote paragraphs', () => {
+    const tokens = parseMd('> {++before\n>\n> $$x$$\n>\n> after++}');
+
+    expect(tokens).toHaveLength(3);
+    expect(tokens.every(token => token.type === 'blockquote')).toBe(true);
+    expect(tokens[1].runs[0].innerRuns).toEqual([
+      expect.objectContaining({ type: 'math', text: 'x', display: true }),
+    ]);
+  });
+
+  it('emits an alert lead only on the first split blockquote paragraph', () => {
+    const tokens = parseMd('> [!NOTE]\n> {++before\n>\n> $$x$$\n>\n> after++}');
+
+    expect(tokens).toHaveLength(3);
+    expect(tokens.map(token => token.alertLead)).toEqual([true, undefined, undefined]);
+    expect(tokens[0].alertFirst).toBe(true);
+    expect(tokens[2].alertLast).toBe(true);
+  });
 });
 
 describe('preprocessCriticMarkup', () => {
@@ -1957,6 +2213,63 @@ describe('preprocessCriticMarkup', () => {
   it('returns unchanged text for single-line CriticMarkup', () => {
     const input = 'Some {>>comment<<} here';
     expect(preprocessCriticMarkup(input)).toBe(input);
+  });
+
+  it('does not hoist an incomplete multiline opener', () => {
+    const input = 'Before.{++\nAfter';
+    expect(preprocessCriticMarkup(input)).toBe(input);
+  });
+
+  it('leaves Critic-shaped text in raw HTML blocks unchanged', () => {
+    for (const input of [
+      '<pre>\n{++a\nb++}\n</pre>',
+      '<pre>\nBefore{++\na++}\n</pre>',
+    ]) {
+      expect(preprocessCriticMarkup(input)).toBe(input);
+    }
+  });
+
+  it('does not hoist or protect a substitution without its separator', () => {
+    const input = 'Before{~~\nliteral~~}';
+    expect(preprocessCriticMarkup(input)).toBe(input);
+
+    const runs = parseMd(input).flatMap(token => token.runs);
+    expect(runs.some(run => run.type === 'critic_sub')).toBe(false);
+    expect(runs.map(run => run.text).join('')).toBe(input);
+  });
+
+  it('does not treat currency dollars as an inline-math region when moving a stranded opener', () => {
+    const input = 'Cost $100 and\nchange {++\nAdded++}\n$ later';
+    expect(preprocessCriticMarkup(input)).toBe(
+      'Cost $100 and\nchange \n\n{++Added++}\n$ later',
+    );
+  });
+
+  it('treats CR-only blank lines as paragraph breaks inside CriticMarkup', () => {
+    const input = '{++a\r\rb++}';
+    expect(preprocessCriticMarkup(input)).toBe('{++a' + PARA_PLACEHOLDER + 'b++}');
+  });
+
+  it('does not protect CriticMarkup newlines in a CR-only indented code block', () => {
+    const input = 'Intro\r\r    {++first\r    second++}';
+    expect(preprocessCriticMarkup(input)).toBe(input);
+  });
+
+  it('leaves CriticMarkup literal in indented and container-nested fences', () => {
+    for (const input of [
+      '  ~~~\n  {++first\n  second++}\n  ~~~',
+      '- item\n\n  ~~~\n  {++first\n  second++}\n  ~~~',
+      '> ~~~\n> {++first\n> second++}\n> ~~~',
+    ]) {
+      expect(preprocessCriticMarkup(input)).toBe(input);
+    }
+  });
+
+  it('does not let a CR-only fence hide later CriticMarkup', () => {
+    const input = '~~~\r{++code\rline++}\r~~~\rAfter {++revision\rline++}';
+    const processed = preprocessCriticMarkup(input);
+    expect(processed).toContain('{++code\rline++}');
+    expect(processed).toContain('{++revision' + LINE_PLACEHOLDER + 'line++}');
   });
 
   it('replaces \\n\\n inside a multi-paragraph comment', () => {
@@ -1977,6 +2290,18 @@ describe('preprocessCriticMarkup', () => {
     const input = '{++added\n\nmore++}';
     const result = preprocessCriticMarkup(input);
     expect(result).not.toContain('\n\n');
+  });
+
+  it('protects whitespace-only blank lines and CRLF inside CriticMarkup', () => {
+    const input = '{++before\r\n   \r\nafter++}';
+    const result = preprocessCriticMarkup(input);
+    expect(result).toContain('before' + PARA_PLACEHOLDER + 'after');
+    expect(result).not.toContain('\r\n');
+  });
+
+  it('moves an empty leading paragraph break before a stranded Critic opener', () => {
+    const input = 'Before.{++\n\nAfter.++}';
+    expect(preprocessCriticMarkup(input)).toBe('Before.\n\n{++After.++}');
   });
 
   it('replaces \\n\\n inside a multi-paragraph deletion', () => {
@@ -3203,6 +3528,27 @@ describe('Code region inertness in MD→DOCX', () => {
       ),
       { numRuns: 10 }
     );
+  });
+
+  it('keeps multiline CriticMarkup literal inside an indented code block', () => {
+    const tokens = parseMd('    {++first\n    second++}\n');
+    const codeBlock = tokens.find(token => token.type === 'code_block');
+
+    expect(codeBlock?.runs[0].text).toContain('{++first\nsecond++}');
+    expect(codeBlock?.runs[0].text).not.toContain('PARA');
+    expect(codeBlock?.runs[0].text).not.toContain('LINE');
+    expect(tokens.flatMap(token => token.runs)).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'critic_add' })]),
+    );
+  });
+
+  it('keeps overlapping inline-code regions literal inside an indented code block', () => {
+    const tokens = parseMd('    `x` `x` {++first\n    second++}\n');
+    const codeBlock = tokens.find(token => token.type === 'code_block');
+
+    expect(codeBlock?.runs[0].text).toContain('`x` `x` {++first\nsecond++}');
+    expect(codeBlock?.runs[0].text).not.toContain('PARA');
+    expect(codeBlock?.runs[0].text).not.toContain('LINE');
   });
 });
 

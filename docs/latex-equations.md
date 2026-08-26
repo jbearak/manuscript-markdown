@@ -10,6 +10,20 @@ Wrap equations in dollar signs:
 - **Display**: `$$E = mc^2$$` — renders as a centered block equation
 - **Bare environments**: `\begin{align}...\end{align}` — treated as `$$\begin{align}...\end{align}$$`
 
+### Tracked changes inside inline equations
+
+CriticMarkup can wrap a changed fragment inside an inline equation. Keep each
+changed side as a self-contained LaTeX fragment:
+
+```markdown
+$u_j^2{+++\tau_{g_j}^2++}$
+$a{~~+b~>+c~~}$
+```
+
+The first example marks `+\tau_{g_j}^2` as an addition. The second marks `+b`
+as deleted and `+c` as inserted. These fragments render as equation content in
+the preview and become tracked math revisions when exported to Word.
+
 ## Quick Examples
 
 ```markdown

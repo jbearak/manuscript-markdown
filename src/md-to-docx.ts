@@ -85,7 +85,7 @@ export interface MdToken {
   level?: number;           // heading level 1-6, blockquote nesting, list nesting
   ordered?: boolean;        // for list items
   bulletMarker?: '-' | '*' | '+'; // authored unordered-list marker for round-trip
-  listContinuation?: ListContinuation; // parent list context for blockquote continuation blocks
+  listContinuation?: ListContinuation; // parent list context for continuation paragraphs/blocks
   startNumber?: number;     // for ordered lists: first item's start number (when ≠ 1)
   taskChecked?: boolean;    // for GFM task list items
   alertType?: GfmAlertType; // for GFM alerts in blockquotes
@@ -231,9 +231,11 @@ const ALERT_GLYPH_BY_TYPE: Record<GfmAlertType, string> = {
   caution: '⛒',
 };
 
-import { PARA_PLACEHOLDER, preprocessCriticMarkup, findMatchingClose } from './critic-markup';
+import { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup, findMatchingClose, restoreCriticLineBreaks } from './critic-markup';
+import { splitCriticMarkupInMath, type CriticMathPart } from './critic-math';
+import { findDollarMathAt } from './math-delimiters';
 import { wrapBareLatexEnvironments } from './latex-env-preprocess';
-export { PARA_PLACEHOLDER, preprocessCriticMarkup };
+export { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup };
 
 // Custom inline rules
 
@@ -347,7 +349,7 @@ function commentRangeRule(state: StateInline, silent: boolean): boolean {
       if (endPos === -1) return false;
 
       if (!silent) {
-        const rawContent = src.slice(idEnd + 2, endPos).replaceAll(PARA_PLACEHOLDER, '\n\n');
+        const rawContent = restoreCriticLineBreaks(src.slice(idEnd + 2, endPos));
         const token = pushManuscriptToken(state, 'comment_body_with_id', '', 0);
         token.commentId = id;
 
@@ -428,9 +430,16 @@ function criticMarkupRule(state: StateInline, silent: boolean): boolean {
   }
   if (endPos === -1) return false;
 
+  // A substitution is only CriticMarkup when its old and new sides are
+  // separated by ~>. Leave malformed substitution-shaped text literal.
+  if (type === 'critic_sub') {
+    const separatorPos = state.src.indexOf('~>', start + 3);
+    if (separatorPos === -1 || separatorPos >= endPos) return false;
+  }
+
   if (!silent) {
     // Replace any paragraph placeholders back to real newlines
-    const content = state.src.slice(start + 3, endPos).replaceAll(PARA_PLACEHOLDER, '\n\n');
+    const content = restoreCriticLineBreaks(state.src.slice(start + 3, endPos));
     const token = pushManuscriptToken(state, 'critic_markup', '', 0);
     token.markup = marker;
     token.content = content;
@@ -615,50 +624,84 @@ function citationRule(state: StateInline, silent: boolean): boolean {
   return true;
 }
 
+const DOCX_DOLLAR_MATH_OPTIONS = { displayRun: 'at-least' as const };
+
+function pushMathToken(state: StateInline, content: string, display = false): void {
+  const token = pushManuscriptToken(state, 'math', '', 0);
+  token.content = content;
+  if (display) token.display = true;
+}
+
 function mathRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
-  const max = state.posMax;
-  
-  if (start >= max || state.src.charAt(start) !== '$') return false;
-  
-  // Check for display math
-  if (start + 1 < max && state.src.charAt(start + 1) === '$') {
-    const endPos = state.src.indexOf('$$', start + 2);
-    if (endPos === -1) return false;
-    
-    if (!silent) {
-      const content = state.src.slice(start + 2, endPos);
-      const token = pushManuscriptToken(state, 'math', '', 0);
-      token.content = content;
-      token.display = true;
+  if (start >= state.posMax || state.src.charAt(start) !== '$') return false;
+
+  const match = findDollarMathAt(state.src, start, DOCX_DOLLAR_MATH_OPTIONS);
+  if (!match || match.kind !== 'math') return false;
+
+  state.pos = match.end;
+  if (silent) return true;
+
+  const content = state.src.slice(match.contentStart, match.contentEnd);
+  const isDisplay = match.delimiterLength === 2;
+  if (!isDisplay) {
+    const criticParts = splitCriticMarkupInMath(content);
+    if (criticParts) {
+      pushCriticMathTokens(state, criticParts);
+      return true;
     }
-    state.pos = endPos + 2;
-    return true;
-  }
-  
-  // Inline math - don't match $ in middle of words
-  if (start > 0 && /\w/.test(state.src.charAt(start - 1))) return false;
-
-  // Don't match currency patterns like $100 (digit(s) followed by whitespace/punctuation/end)
-  if (start + 1 < max && /\d/.test(state.src.charAt(start + 1))) {
-    const afterDollar = state.src.slice(start + 1);
-    if (/^\d[\d,.]*(?:\s|$)/.test(afterDollar)) return false;
   }
 
-  const endPos = state.src.indexOf('$', start + 1);
-  if (endPos === -1) return false;
-
-  // Don't match $ at end if followed by word character
-  if (endPos + 1 < max && /\w/.test(state.src.charAt(endPos + 1))) return false;
-  
-  if (!silent) {
-    const content = state.src.slice(start + 1, endPos);
-    const token = pushManuscriptToken(state, 'math', '', 0);
-    token.content = content;
-    // Don't set display for inline math - leave it undefined
-  }
-  state.pos = endPos + 1;
+  pushMathToken(state, content, isDisplay);
   return true;
+}
+
+function wrapInlineMathFragment(content: string): string {
+  return content.length > 0 ? '$' + content + '$' : '';
+}
+
+function pushCriticMathTokens(state: StateInline, parts: CriticMathPart[]): void {
+  const pushMath = (content: string) => {
+    if (content) pushMathToken(state, content);
+  };
+
+  for (const part of parts) {
+    if (part.type === 'math') {
+      pushMath(part.content);
+      continue;
+    }
+
+    const token = pushManuscriptToken(state, 'critic_markup', '', 0);
+    if (part.type === 'substitution') {
+      token.markup = '{~~';
+      token.criticType = 'critic_sub';
+      token.oldText = wrapInlineMathFragment(part.oldContent);
+      token.newText = wrapInlineMathFragment(part.newContent);
+      token.content = (token.oldText || '') + '~>' + (token.newText || '');
+      continue;
+    }
+
+    if (part.type === 'comment') {
+      token.markup = '{>>';
+      token.criticType = 'critic_comment';
+      token.content = part.content;
+      const { parentText, replies } = extractReplies(part.content);
+      const parsed = parseCommentContent(parentText);
+      token.author = parsed.author;
+      token.date = parsed.date;
+      token.commentText = parsed.text;
+      if (replies.length > 0) token.replies = replies;
+      continue;
+    }
+
+    token.markup = part.type === 'addition' ? '{++' : part.type === 'deletion' ? '{--' : '{==';
+    token.criticType = part.type === 'addition'
+      ? 'critic_add'
+      : part.type === 'deletion'
+        ? 'critic_del'
+        : 'critic_highlight';
+    token.content = wrapInlineMathFragment(part.content);
+  }
 }
 
 /** Inline rule that converts the paragraph placeholder back into softbreak tokens. */
@@ -1326,6 +1369,172 @@ function promoteSoftbreaks(runs: MdRun[]): void {
   }
 }
 
+interface CriticDisplaySegment {
+  run: MdRun;
+  displayMath: boolean;
+}
+
+interface DisplayRunSegment {
+  runs: MdRun[];
+  displayMath: boolean;
+}
+
+function isBreakRun(run: MdRun): boolean {
+  return run.type === 'softbreak' || run.type === 'hardbreak';
+}
+
+function trimBreakRuns(runs: MdRun[]): MdRun[] {
+  let start = 0;
+  let end = runs.length;
+  while (start < end && isBreakRun(runs[start])) start++;
+  while (end > start && isBreakRun(runs[end - 1])) end--;
+  return runs.slice(start, end);
+}
+
+function splitRunsAtDisplayMath(runs: MdRun[] | undefined): DisplayRunSegment[] | undefined {
+  if (!runs?.some(run => run.type === 'math' && run.display)) return undefined;
+  const segments: DisplayRunSegment[] = [];
+  let start = 0;
+  for (let i = 0; i < runs.length; i++) {
+    const inner = runs[i];
+    if (inner.type !== 'math' || !inner.display) continue;
+
+    const before = trimBreakRuns(runs.slice(start, i));
+    if (before.length > 0) {
+      segments.push({ runs: before, displayMath: false });
+    }
+    segments.push({ runs: [inner], displayMath: true });
+    start = i + 1;
+  }
+
+  const after = trimBreakRuns(runs.slice(start));
+  if (after.length > 0) {
+    segments.push({ runs: after, displayMath: false });
+  }
+  return segments;
+}
+
+/**
+ * Split a visible CriticMarkup run around display equations. A display
+ * equation cannot share a Word paragraph with prose on either side.
+ */
+function splitCriticRunAtDisplayMath(run: MdRun): CriticDisplaySegment[] | undefined {
+  if (run.type === 'critic_add' || run.type === 'critic_del' || run.type === 'critic_highlight') {
+    const segments = splitRunsAtDisplayMath(run.innerRuns);
+    return segments?.map(segment => ({
+      run: { ...run, innerRuns: segment.runs },
+      displayMath: segment.displayMath,
+    }));
+  }
+
+  if (run.type !== 'critic_sub') return undefined;
+  const oldSegments = splitRunsAtDisplayMath(run.oldRuns);
+  const newSegments = splitRunsAtDisplayMath(run.newRuns);
+  if (!oldSegments && !newSegments) return undefined;
+
+  const oldParts = oldSegments ?? [{ runs: run.oldRuns ?? [], displayMath: false }];
+  const newParts = newSegments ?? [{ runs: run.newRuns ?? [], displayMath: false }];
+  const shapesAlign = oldParts.length === newParts.length &&
+    oldParts.every((part, index) => part.displayMath === newParts[index].displayMath);
+  if (shapesAlign) {
+    return oldParts.map((oldPart, index) => ({
+      run: { ...run, text: '', newText: '', oldRuns: oldPart.runs, newRuns: newParts[index].runs },
+      displayMath: oldPart.displayMath,
+    }));
+  }
+
+  // When paragraph shapes differ, preserve the substitution's semantic order:
+  // all deleted content precedes all inserted content. Pairing mismatched
+  // display/prose segments can otherwise move new content ahead of old text.
+  return [
+    ...oldParts.map(part => ({
+      run: { ...run, text: '', newText: '', oldRuns: part.runs, newRuns: [] },
+      displayMath: part.displayMath,
+    })),
+    ...newParts.map(part => ({
+      run: { ...run, text: '', newText: '', oldRuns: [], newRuns: part.runs },
+      displayMath: part.displayMath,
+    })),
+  ];
+}
+
+function splitCriticDisplayMathParagraphs(tokens: MdToken[]): MdToken[] {
+  const output: MdToken[] = [];
+  for (const token of tokens) {
+    if (token.type !== 'paragraph' && token.type !== 'heading' && token.type !== 'list_item' && token.type !== 'blockquote') {
+      output.push(token);
+      continue;
+    }
+
+    const splitRuns: MdRun[][] = [];
+    let currentRuns: MdRun[] = [];
+    const flushCurrent = () => {
+      if (currentRuns.length > 0) splitRuns.push(currentRuns);
+      currentRuns = [];
+    };
+
+    let foundDisplayMath = false;
+    for (const run of token.runs) {
+      const segments = splitCriticRunAtDisplayMath(run);
+      if (!segments) {
+        currentRuns.push(run);
+        continue;
+      }
+
+      foundDisplayMath = true;
+      for (const segment of segments) {
+        if (segment.displayMath) {
+          flushCurrent();
+          splitRuns.push([segment.run]);
+        } else {
+          currentRuns.push(segment.run);
+        }
+      }
+    }
+    flushCurrent();
+
+    if (!foundDisplayMath || splitRuns.length === 0) {
+      output.push(token);
+      continue;
+    }
+    for (let index = 0; index < splitRuns.length; index++) {
+      const runs = splitRuns[index];
+      if (token.type === 'list_item' && index > 0) {
+        output.push({
+          ...token,
+          type: 'paragraph',
+          runs,
+          listContinuation: {
+            type: token.ordered ? 'ordered' : 'bullet',
+            level: token.level ?? 1,
+          },
+          ordered: undefined,
+          startNumber: undefined,
+          bulletMarker: undefined,
+          taskChecked: undefined,
+        });
+      } else if (token.type === 'heading' && index > 0) {
+        output.push({
+          ...token,
+          type: 'paragraph',
+          runs,
+          level: undefined,
+          criticParaMark: undefined,
+        });
+      } else {
+        output.push({
+          ...token,
+          runs,
+          // A split alert is still one alert group. Only its first generated
+          // paragraph may emit the alert title/lead in Word.
+          ...(token.type === 'blockquote' && index > 0 ? { alertLead: undefined } : {}),
+        });
+      }
+    }
+  }
+  return output;
+}
+
 export function parseMd(markdown: string, warnings?: string[], breaks = false, originalText?: string): MdToken[] {
   const md = createMarkdownIt();
   // Preserve explicit source semantics for blockquotes by disabling markdown-it
@@ -1339,7 +1548,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
   const tokens = md.parse(processed, {});
 
   const processedLines = processed.split('\n');
-  const result = convertTokens(tokens, 0, 0, warnings, processedLines);
+  const result = splitCriticDisplayMathParagraphs(convertTokens(tokens, 0, 0, warnings, processedLines));
   annotateBlockquoteBoundaries(result);
 
   // When breaks mode is enabled, treat all bare newlines as hard breaks
@@ -2597,8 +2806,7 @@ function findClosingToken(tokens: ManuscriptToken[], start: number, closeType: s
 
 // Block token types that are silently dropped when they appear inside list
 // continuation (e.g. a fenced code block indented under a list item).
-// The md-to-docx converter only preserves the first paragraph and nested
-// sublists; all other block content is lost.
+// Unsupported list child blocks are reported rather than silently lost.
 const DROPPED_LIST_BLOCK_TYPES = new Set([
   'fence', 'code_block', 'html_block', 'blockquote_open', 'table_open',
 ]);
@@ -2627,8 +2835,20 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
           if (!foundFirstParagraph) {
             runs = processInlineChildren(itemTokens.slice(j + 1, paragraphClose));
             foundFirstParagraph = true;
-          } else if (warnings) {
-            warnings.push('Continuation paragraph inside list item dropped during conversion (not supported). Move the content outside the list for round-trip fidelity.');
+          } else {
+            childSegments.push({
+              startIndex: itemTokens[j].map?.[0] ?? j,
+              order: childSegmentOrder++,
+              items: [{
+                type: 'paragraph',
+                runs: processInlineChildren(itemTokens.slice(j + 1, paragraphClose)),
+                listContinuation: {
+                  type: continuationType,
+                  level,
+                  ...(continuationMarkerWidth !== undefined ? { markerWidth: continuationMarkerWidth } : {}),
+                },
+              }],
+            });
           }
           j = paragraphClose;
         } else if (itemTokens[j].type === 'blockquote_open') {
@@ -3718,6 +3938,18 @@ function applyLineSpacingToTemplate(xml: string, lineSpacingFm: string | number 
   return xml;
 }
 
+const LIST_CONTINUATION_STYLE_XML =
+  '<w:style w:type="paragraph" w:customStyle="1" w:styleId="ManuscriptListContinuation">\n'
+  + '<w:name w:val="Manuscript List Continuation"/>\n'
+  + '<w:basedOn w:val="Normal"/>\n'
+  + '<w:semiHidden/><w:unhideWhenUsed/>\n'
+  + '</w:style>\n';
+
+function ensureListContinuationStyle(xml: string): string {
+  if (/<w:style\b[^>]*\bw:styleId\s*=\s*(["'])ManuscriptListContinuation\1/.test(xml)) return xml;
+  return xml.replace('</w:styles>', LIST_CONTINUATION_STYLE_XML + '</w:styles>');
+}
+
 export function applyAlertColorsToTemplate(stylesXml: string, scheme: ColorScheme): string {
   const colors = alertColorsByScheme(scheme);
   let xml = stylesXml;
@@ -4050,6 +4282,7 @@ export function stylesXml(overrides?: FontOverrides, codeBlockConfig?: CodeBlock
     '<w:pPr><w:pBdr><w:left w:val="single" w:sz="' + GITHUB_BLOCKQUOTE_BORDER_SIZE + '" w:space="' + GITHUB_BLOCKQUOTE_BORDER_SPACE + '" w:color="' + GITHUB_BLOCKQUOTE_BORDER_COLOR + '"/></w:pBdr><w:spacing w:after="0" w:line="' + SINGLE_LINE_SPACING + '" w:lineRule="auto"/><w:ind w:left="' + GITHUB_BLOCKQUOTE_INDENT + '"/></w:pPr>\n' +
     (quoteRpr ? quoteRpr : '') +
     '</w:style>\n' +
+    LIST_CONTINUATION_STYLE_XML +
     githubAlertStyle('GitHubNote', 'GitHub Note', alertColors.note) +
     githubAlertStyle('GitHubTip', 'GitHub Tip', alertColors.tip) +
     githubAlertStyle('GitHubImportant', 'GitHub Important', alertColors.important) +
@@ -5312,6 +5545,12 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
   }
 
   switch (token.type) {
+    case 'paragraph':
+      if (token.listContinuation) {
+        const leftIndent = 720 * token.listContinuation.level;
+        pPr = '<w:pPr><w:pStyle w:val="ManuscriptListContinuation"/><w:ind w:left="' + leftIndent + '"/></w:pPr>';
+      }
+      break;
     case 'heading': {
       // Paragraph-mark revision for headings promoted from full-paragraph
       // {++### ...++} / {--### ...--} spans. Marking the paragraph mark as
@@ -6181,12 +6420,12 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       }
     }
     // Reset active list start override when leaving a list context
-    if (token.type !== 'list_item') {
+    if (token.type !== 'list_item' && !token.listContinuation) {
       state.activeListStartOverrides.clear();
     }
     // Track list block index for indent override round-trip.
     // A new list block starts when we see a list_item after a non-list-item.
-    if (token.type === 'list_item' && prevToken?.type !== 'list_item') {
+    if (token.type === 'list_item' && prevToken?.type !== 'list_item' && !prevToken?.listContinuation) {
       if (token.indentOverride) {
         state.listIndentOverrides.set(state.listBlockIndex, token.indentOverride);
       }
@@ -6798,11 +7037,11 @@ export async function convertMdToDocx(
     );
     mutated = applyLineSpacingToTemplate(mutated, frontmatter.lineSpacing, state.indentMode, frontmatter.bibliographyHangingIndent);
     mutated = applyAlertColorsToTemplate(mutated, effectiveColors);
-    zip.file('word/styles.xml', mutated);
+    zip.file('word/styles.xml', ensureListContinuationStyle(mutated));
   } else if (templateParts?.has('word/styles.xml')) {
     let decoded = new TextDecoder('utf-8').decode(templateParts.get('word/styles.xml')!);
     decoded = applyLineSpacingToTemplate(decoded, frontmatter.lineSpacing, state.indentMode, frontmatter.bibliographyHangingIndent);
-    zip.file('word/styles.xml', applyAlertColorsToTemplate(decoded, effectiveColors));
+    zip.file('word/styles.xml', ensureListContinuationStyle(applyAlertColorsToTemplate(decoded, effectiveColors)));
   } else {
     zip.file('word/styles.xml', stylesXml(fontOverrides, codeBlockConfig, effectiveColors, frontmatter.styles, frontmatter.lineSpacing, state.indentMode, frontmatter.bibliographyHangingIndent));
   }

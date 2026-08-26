@@ -85,6 +85,30 @@ export class LineMap {
     return new LineMap([new SingleLineMap(segments)]);
   }
 
+  /**
+   * Create an exact map from preprocessed line-boundary indices to input
+   * line-boundary indices. Adjacent 1:1 mappings are compressed into segments;
+   * repeated or skipped source lines remain explicit segment boundaries.
+   */
+  static fromLineMappings(mappings: readonly number[]): LineMap {
+    if (mappings.length === 0 || mappings.every((original, line) => original === line)) {
+      return LineMap.IDENTITY;
+    }
+
+    const segments: LineMapSegment[] = [];
+    let segmentStart = 0;
+    for (let line = 1; line <= mappings.length; line++) {
+      if (line < mappings.length && mappings[line] === mappings[line - 1] + 1) continue;
+      segments.push({
+        preprocessedStart: segmentStart,
+        originalStart: mappings[segmentStart],
+        length: line - segmentStart,
+      });
+      segmentStart = line;
+    }
+    return new LineMap([new SingleLineMap(segments)]);
+  }
+
   /** True when no remapping is needed. */
   get isIdentity(): boolean {
     return this.maps.length === 0;
@@ -113,4 +137,3 @@ export class LineMap {
     return new LineMap(combined);
   }
 }
-
