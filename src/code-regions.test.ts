@@ -65,6 +65,25 @@ describe('computeCodeRegions', () => {
 		expect(text.slice(regions[0].start, regions[0].end)).toBe('~~~python\nprint("hi")\n~~~');
 	});
 
+	test('recognizes indented and container-nested fenced blocks', () => {
+		for (const text of [
+			'  ~~~\n  {++first\n  second++}\n  ~~~',
+			'- item\n\n  ~~~\n  {++first\n  second++}\n  ~~~',
+			'> ~~~\n> {++first\n> second++}\n> ~~~',
+		]) {
+			const regions = computeCodeRegions(text);
+			const criticOffset = text.indexOf('{++');
+			expect(regions.some(region => isInsideCodeRegion(criticOffset, [region]))).toBe(true);
+		}
+	});
+
+	test('closes CR-only fences without swallowing later prose', () => {
+		const text = '~~~\r{++code\rline++}\r~~~\rAfter {++revision++}';
+		const regions = computeCodeRegions(text);
+		expect(isInsideCodeRegion(text.indexOf('{++code'), regions)).toBe(true);
+		expect(isInsideCodeRegion(text.indexOf('{++revision'), regions)).toBe(false);
+	});
+
 	test('mixed: document with both inline code and fenced blocks', () => {
 		const text = 'text `inline` more\n```\nfenced\n```\nend';
 		const regions = computeCodeRegions(text);
@@ -100,6 +119,20 @@ describe('computeCodeRegions', () => {
 		// Should be one fenced block, not separate inline spans
 		expect(regions.length).toBe(1);
 		expect(text.slice(regions[0].start, regions[0].end)).toBe(text);
+	});
+
+	test('handles many inline spans without rescanning completed regions', () => {
+		const text = '`x` '.repeat(10_000);
+		const regions = computeCodeRegions(text);
+		expect(regions).toHaveLength(10_000);
+		expect(text.slice(regions.at(-1)!.start, regions.at(-1)!.end)).toBe('`x`');
+	});
+
+	test('handles many fenced regions without restarting the region scan', () => {
+		const text = ('```\nx\n```\nprose\n').repeat(8_000);
+		const regions = computeCodeRegions(text);
+		expect(regions).toHaveLength(8_000);
+		expect(text.slice(regions.at(-1)!.start, regions.at(-1)!.end)).toBe('```\nx\n```');
 	});
 });
 

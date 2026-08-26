@@ -260,13 +260,14 @@ export type ContentItem =
       listMeta?: ListMeta;     // present if list item
       isTitle?: boolean;       // true if Word "Title" paragraph style
       blockquoteLevel?: number; // 1+ if Quote/IntenseQuote paragraph style
-      listContinuation?: ListContinuation; // parent list context for blockquote continuation blocks
+      listContinuation?: ListContinuation; // parent list context for continuation paragraphs/blocks
       alertType?: GfmAlertType; // present for GitHub alert styles
       isCodeBlock?: boolean;   // true if Word "Code Block" paragraph style
       blockquoteGroupIndex?: number; // sequential group index from md→docx gap metadata
       isBlockquoteSpacer?: boolean; // generated visual spacer; retained only as an import grouping boundary
       customStyleName?: string;      // user-defined custom style name (from MsCustomXxx pStyle)
       paragraphLeftIndentTwips?: number; // raw OOXML left indent for structural inference
+      generatedListContinuation?: boolean; // explicit Manuscript continuation paragraph style
       blockquoteIndentUnitTwips?: 240 | 720; // base indent unit for blockquote styles
       emptyParagraphCount?: number; // count of collapsed consecutive empty paragraphs
       indentOverride?: 'indent' | 'no-indent'; // per-paragraph indent override for round-trip
@@ -577,6 +578,12 @@ export function parseCodeBlockStyle(pPrChildren: XmlNode[]): boolean {
   const pStyleElement = pPrChildren.find(child => child['w:pStyle'] !== undefined);
   if (!pStyleElement) return false;
   return getAttr(pStyleElement, 'val').toLowerCase() === 'codeblock';
+}
+
+function parseListContinuationStyle(pPrChildren: XmlNode[]): boolean {
+  const pStyleElement = pPrChildren.find(child => child['w:pStyle'] !== undefined);
+  return pStyleElement !== undefined
+    && getAttr(pStyleElement, 'val').toLowerCase() === 'manuscriptlistcontinuation';
 }
 
 export function parseListMeta(pPrChildren: XmlNode[], numberingDefs: NumberingDefs, numberingStartOverrides?: NumberingStartOverrides): ListMeta | undefined {
@@ -2550,9 +2557,8 @@ export async function extractDocumentContent(
               lastItem.text += hiddenPayload;
               continue;
             }
-            // Legacy backward-compat path: older exports stored internal
-            // round-trip metadata in hidden \u200B-prefixed runs. Ignore and
-            // strip those markers so they never leak into markdown output.
+            // Legacy backward-compat metadata that is no longer interpreted
+            // must still remain invisible in Markdown output.
             if (hiddenPayload.startsWith('_bqg') || hiddenPayload.startsWith('_lic:') || hiddenPayload.startsWith('_lim:')) {
               continue;
             }
@@ -2607,6 +2613,7 @@ export async function extractDocumentContent(
           let blockquoteIndentUnitTwips: 240 | 720 | undefined;
           let alertType: GfmAlertType | undefined;
           let isCodeBlock = false;
+          let generatedListContinuation = false;
           let customStyle: string | undefined;
           let paragraphLeftIndentTwips: number | undefined;
           let paraFormatting = currentFormatting;
@@ -2693,6 +2700,7 @@ export async function extractDocumentContent(
               blockquoteIndentUnitTwips = blockquoteInfo.indentUnitTwips;
               alertType = parseAlertType(pPrChildren);
               isCodeBlock = parseCodeBlockStyle(pPrChildren);
+              generatedListContinuation = parseListContinuationStyle(pPrChildren);
               customStyle = parseCustomStyleName(pPrChildren, options?.customStyles ?? undefined);
               paragraphLeftIndentTwips = parseParagraphLeftIndentTwips(pPrChildren);
               const pRPrElement = pPrChildren.find(pprChild => pprChild['w:rPr'] !== undefined);
@@ -2749,9 +2757,10 @@ export async function extractDocumentContent(
             prevItem.isBlockquoteSpacer === true ||
             prevItem.blockquoteLevel !== undefined ||
             prevItem.isCodeBlock === true ||
+            prevItem.generatedListContinuation === true ||
             prevItem.customStyleName !== undefined
           );
-          const needsPara = inTableCell || (headingLevel || listMeta || isTitle || blockquoteLevel || isCodeBlock || customStyle)
+          const needsPara = inTableCell || (headingLevel || listMeta || isTitle || blockquoteLevel || isCodeBlock || generatedListContinuation || customStyle)
             ? true
             : target.length > 0 && (prevItem!.type !== 'para' || prevIsCodeBlockPara || prevIsStructuralPara);
 
@@ -2765,6 +2774,7 @@ export async function extractDocumentContent(
             if (blockquoteIndentUnitTwips) paraItem.blockquoteIndentUnitTwips = blockquoteIndentUnitTwips;
             if (alertType) paraItem.alertType = alertType;
             if (isCodeBlock) paraItem.isCodeBlock = true;
+            if (generatedListContinuation) paraItem.generatedListContinuation = true;
             if (customStyle) paraItem.customStyleName = customStyle;
             if (paragraphLeftIndentTwips !== undefined) paraItem.paragraphLeftIndentTwips = paragraphLeftIndentTwips;
             if (paraMarkRevision && headingLevel) paraItem.paraMarkRevision = paraMarkRevision;
@@ -2786,6 +2796,7 @@ export async function extractDocumentContent(
               !paraItem.isTitle &&
               !paraItem.blockquoteLevel &&
               !paraItem.isCodeBlock &&
+              !paraItem.generatedListContinuation &&
               !paraItem.customStyleName
             ) {
               paraItem.emptyParagraphCount = 1;
@@ -2798,6 +2809,7 @@ export async function extractDocumentContent(
                 !prevItem.isTitle &&
                 !prevItem.blockquoteLevel &&
                 !prevItem.isCodeBlock &&
+                !prevItem.generatedListContinuation &&
                 !prevItem.customStyleName
               ) {
                 prevItem.emptyParagraphCount += paraItem.emptyParagraphCount;
@@ -2811,6 +2823,7 @@ export async function extractDocumentContent(
             !isTitle &&
             !blockquoteLevel &&
             !isCodeBlock &&
+            !generatedListContinuation &&
             !customStyle
           ) {
             const prevItem = target.length > 0 ? target[target.length - 1] : undefined;
@@ -2822,6 +2835,7 @@ export async function extractDocumentContent(
               !prevItem.isTitle &&
               !prevItem.blockquoteLevel &&
               !prevItem.isCodeBlock &&
+              !prevItem.generatedListContinuation &&
               !prevItem.customStyleName
             ) {
               prevItem.emptyParagraphCount += 1;
@@ -4288,6 +4302,7 @@ function isPlainEmptyParagraph(item: Extract<ContentItem, { type: 'para' }>): bo
     && !item.isTitle
     && !item.blockquoteLevel
     && !item.isCodeBlock
+    && !item.generatedListContinuation
     && !item.customStyleName
     && item.emptyParagraphCount !== undefined;
 }
@@ -4559,7 +4574,9 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
         const inferred = inferListContinuationForBlockquote(item, listContexts);
         if (inferred) {
           item.blockquoteLevel = inferred.blockquoteLevel;
-          item.listContinuation = inferred.listContinuation;
+          if (inferred.listContinuation || !item.listContinuation) {
+            item.listContinuation = inferred.listContinuation;
+          }
         }
         const currentType: GfmAlertType | 'plain' = item.alertType || 'plain';
         const startsNewGroup = currentBlockquoteGroupIndex === undefined
@@ -4574,6 +4591,31 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
         lastBlockquoteType = currentType;
         lastListLevel = undefined;
         lastListType = undefined;
+        continue;
+      }
+
+      if (item.generatedListContinuation && item.paragraphLeftIndentTwips !== undefined) {
+        const candidates = [...listContexts.values()].sort((a, b) => b.level - a.level);
+        const context = candidates.find(candidate =>
+          item.paragraphLeftIndentTwips === 720 * (candidate.level + 1),
+        );
+        if (context) {
+          item.listContinuation = {
+            type: context.type,
+            level: context.level,
+            ...(context.markerWidth !== undefined ? { markerWidth: context.markerWidth } : {}),
+          };
+        }
+      }
+
+      if (item.listContinuation) {
+        const context = listContexts.get(item.listContinuation.level);
+        if (context?.markerWidth !== undefined && item.listContinuation.markerWidth === undefined) {
+          item.listContinuation.markerWidth = context.markerWidth;
+        }
+        currentBlockquoteGroupIndex = undefined;
+        lastBlockquoteLevel = undefined;
+        lastBlockquoteType = undefined;
         continue;
       }
 
@@ -4771,6 +4813,8 @@ export function buildMarkdown(
   // marker-only form (`> [!TYPE]\n> ...`) so callout/paragraph boundaries stay
   // stable on DOCX -> MD conversion.
   let pendingAlertInlinePrefixForHardBreak: string | undefined;
+  let pendingListContinuationPrefix: string | undefined;
+  let pendingBlockquoteMathPrefix: string | undefined;
   // Heading whose paragraph mark is inserted/deleted (whole-paragraph track
   // change): the `### ` marker must be re-inserted inside the leading Critic
   // span ({++### heading++}) rather than emitted before it. revType is kept
@@ -4805,6 +4849,20 @@ export function buildMarkdown(
   const sentinelGaps = options?.sentinelGaps;
   let sentinelLoIdx = 0, sentinelLcIdx = 0, sentinelPoIdx = 0, sentinelPcIdx = 0;
   let sentinelCsoIdx = 0, sentinelCscIdx = 0;
+  function ensureTrailingNewlines(desired: number): void {
+    let existing = 0;
+    for (let outputIndex = output.length - 1; outputIndex >= 0; outputIndex--) {
+      const value = output[outputIndex];
+      let charIndex = value.length - 1;
+      while (charIndex >= 0 && value[charIndex] === '\n') {
+        existing++;
+        charIndex--;
+      }
+      if (charIndex >= 0) break;
+    }
+    if (existing < desired) output.push('\n'.repeat(desired - existing));
+  }
+
   // Emit separator before a sentinel using stored gap metadata.
   // Returns true if a gap-aware separator was emitted, false otherwise.
   function emitSentinelSep(gapKey: string): boolean {
@@ -4991,15 +5049,22 @@ export function buildMarkdown(
       const isCurrentList = item.listMeta !== undefined;
 
       if (output.length > 0) {
-        if (lastListType && isCurrentList && item.listMeta!.type === lastListType) {
+        const continuesBlockquoteGroup = item.blockquoteLevel !== undefined
+          && item.blockquoteGroupIndex !== undefined
+          && item.blockquoteGroupIndex === lastBlockquoteGroupIndex;
+        if (continuesBlockquoteGroup) {
+          // A quoted blank line keeps multi-paragraph content—including
+          // display equations—inside one blockquote/alert on reparse.
+          output.push('\n' + blockquotePrefix(item).trimEnd() + '\n');
+        } else if (lastListType && isCurrentList && item.listMeta!.type === lastListType) {
           output.push('\n');
-        } else if (
-          item.blockquoteLevel &&
-          item.listContinuation &&
-          lastListType === item.listContinuation.type &&
-          lastListLevel === item.listContinuation.level
-        ) {
-          output.push('\n');
+        } else if (item.listContinuation) {
+          // Plain continuation paragraphs are block children of the list item
+          // and therefore require a blank line. An imported empty paragraph
+          // may already own that gap, so ensure the boundary instead of
+          // appending another one on every round trip. Blockquotes carry their
+          // own visible prefix and need only the line transition.
+          ensureTrailingNewlines(item.blockquoteLevel ? 1 : 2);
         } else if (incomingSep !== null) {
           output.push(incomingSep);
         } else if (
@@ -5224,7 +5289,9 @@ export function buildMarkdown(
         output.push(indent + marker);
       } else if (item.blockquoteLevel) {
         const itemPrefix = blockquotePrefix(item);
-        output.push(itemPrefix);
+        const next = i + 1 < mergedContent.length ? mergedContent[i + 1] : undefined;
+        const nextIsDisplayMath = next?.type === 'math' && next.display;
+        if (!nextIsDisplayMath) output.push(itemPrefix);
         if (item.alertType) {
           const alertKey = item.blockquoteLevel + ':' + item.alertType;
           // A new alert group starts when the key differs OR when the
@@ -5235,13 +5302,14 @@ export function buildMarkdown(
             && item.blockquoteGroupIndex !== prevBlockquoteGroupIndex;
           const isAlertStart = lastAlertParagraphKey !== alertKey || groupChanged;
           if (isAlertStart) {
+            if (nextIsDisplayMath) output.push(itemPrefix);
             output.push(toGfmAlertMarker(item.alertType));
             const isInlineMarker = options?.blockquoteAlertInlineByGroup?.get(item.blockquoteGroupIndex ?? -1) === true;
             if (isInlineMarker) {
-              output.push(' ');
+              output.push(nextIsDisplayMath ? '\n' : ' ');
               pendingAlertInlinePrefixForHardBreak = item.listContinuation ? itemPrefix : undefined;
             } else {
-              output.push('\n' + itemPrefix);
+              output.push('\n' + (nextIsDisplayMath ? '' : itemPrefix));
               pendingAlertInlinePrefixForHardBreak = undefined;
             }
             const next = i + 1 < mergedContent.length ? mergedContent[i + 1] : undefined;
@@ -5259,15 +5327,31 @@ export function buildMarkdown(
           pendingAlertPrefixStrip = undefined;
           pendingAlertInlinePrefixForHardBreak = undefined;
         }
+        if (nextIsDisplayMath) pendingBlockquoteMathPrefix = itemPrefix;
+      } else if (item.listContinuation) {
+        const continuationPrefix = listContinuationIndent(item.listContinuation);
+        const next = i + 1 < mergedContent.length ? mergedContent[i + 1] : undefined;
+        if (next?.type === 'math' && next.display) {
+          pendingListContinuationPrefix = continuationPrefix;
+        } else {
+          output.push(continuationPrefix);
+        }
+        lastAlertParagraphKey = undefined;
+        pendingAlertPrefixStrip = undefined;
+        pendingAlertInlinePrefixForHardBreak = undefined;
       } else {
         lastAlertParagraphKey = undefined;
         pendingAlertPrefixStrip = undefined;
         pendingAlertInlinePrefixForHardBreak = undefined;
       }
 
-      lastListType = isCurrentList ? item.listMeta!.type : undefined;
-      lastListLevel = isCurrentList ? item.listMeta!.level : undefined;
-      if (!isCurrentList) listTypeByLevel.clear();
+      lastListType = isCurrentList
+        ? item.listMeta!.type
+        : item.listContinuation?.type;
+      lastListLevel = isCurrentList
+        ? item.listMeta!.level
+        : item.listContinuation?.level;
+      if (!isCurrentList && !item.listContinuation) listTypeByLevel.clear();
 
       i++;
       continue;
@@ -5424,21 +5508,35 @@ export function buildMarkdown(
     }
 
     if (item.type === 'math' && item.display) {
+      const inListContinuation = pendingListContinuationPrefix !== undefined;
+      const inBlockquote = pendingBlockquoteMathPrefix !== undefined;
       // Ensure blank line before display math
-      if (output.length > 0 && !output[output.length - 1].endsWith('\n\n')) {
+      if (!inBlockquote && output.length > 0 && !output[output.length - 1].endsWith('\n\n')) {
         output.push('\n\n');
       }
       const mathBlock = MATH_FENCE + '\n' + canonicalizeDisplayMathLatex(item.latex) + '\n' + MATH_FENCE;
-      output.push(item.revision ? wrapWithRevision(mathBlock, item.revision) : mathBlock);
-      // A display math block breaks list flow; reset list continuation state.
-      lastListType = undefined;
-      lastListLevel = undefined;
-      listTypeByLevel.clear();
-      lastAlertParagraphKey = undefined;
+      const revisedMathBlock = item.revision ? wrapWithRevision(mathBlock, item.revision) : mathBlock;
+      if (inListContinuation) {
+        output.push(revisedMathBlock.split('\n').map(line => pendingListContinuationPrefix + line).join('\n'));
+        pendingListContinuationPrefix = undefined;
+      } else if (inBlockquote) {
+        output.push(revisedMathBlock.split('\n').map(line => pendingBlockquoteMathPrefix + line).join('\n'));
+        pendingBlockquoteMathPrefix = undefined;
+      } else {
+        output.push(revisedMathBlock);
+        // A top-level display math block breaks list flow. An indented list
+        // continuation instead keeps the parent numbering context active.
+        lastListType = undefined;
+        lastListLevel = undefined;
+        listTypeByLevel.clear();
+      }
       pendingAlertPrefixStrip = undefined;
       pendingAlertInlinePrefixForHardBreak = undefined;
-      lastBlockquoteAlertType = undefined;
-      lastBlockquoteLevel = undefined;
+      if (!inBlockquote) {
+        lastAlertParagraphKey = undefined;
+        lastBlockquoteAlertType = undefined;
+        lastBlockquoteLevel = undefined;
+      }
       i++;
       continue;
     }

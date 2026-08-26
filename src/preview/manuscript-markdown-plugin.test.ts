@@ -5,6 +5,7 @@ import { manuscriptMarkdownPlugin } from './manuscript-markdown-plugin';
 import type { EmbedResolver } from '../embed-preprocess';
 import { VALID_COLOR_IDS, setDefaultHighlightColor, getDefaultHighlightColor } from '../highlight-colors';
 import { escapeHtml, stripHtmlTags, hasNoSpecialSyntax, renderWithPlugin, SIMPLE_CRITIC_TYPES } from '../test-helpers';
+import { LINE_PLACEHOLDER, PARA_PLACEHOLDER } from '../critic-markup';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -987,8 +988,7 @@ describe('Property 3: Multi-line preview rendering (multiline-Manuscript Markdow
   });
 });
 
-// Mid-line limitations
-describe('Mid-line multi-line pattern limitations', () => {
+describe('Mid-line multi-line patterns', () => {
   it('should handle single-line patterns mid-line correctly', () => {
     const output = renderWithPlugin('Text {++add++} and {--del--} patterns');
     expect(output).toContain('manuscript-markdown-addition');
@@ -1000,10 +1000,13 @@ describe('Mid-line multi-line pattern limitations', () => {
     expect(output).toContain('patterns');
   });
 
-  it('should document that mid-line multi-line patterns are not fully supported', () => {
+  it('renders a mid-line pattern that continues across source lines', () => {
     const input = 'Text before {++multi\nline\naddition++}';
     const output = renderWithPlugin(input);
     expect(output).toContain('Text before');
+    expect(output).toContain('<ins class="manuscript-markdown-addition">');
+    expect(output).toContain('multi\nline\naddition');
+    expect(output).not.toContain('{++');
   });
 });
 
@@ -1168,6 +1171,30 @@ describe('Code region inertness in preview', () => {
     expect(output).not.toContain('<del');
     expect(output).not.toContain('<mark');
     expect(output).not.toContain('manuscript-markdown');
+  });
+
+  it('renders multiline CriticMarkup in a fenced code block as literal text', () => {
+    const html = renderWithPlugin('```markdown\n{++first\nsecond++}\n```');
+    expect(html).toContain('{++first\nsecond++}');
+    expect(html).not.toContain('PARA');
+    expect(html).not.toContain('LINE');
+    expect(html).not.toContain('manuscript-markdown-addition');
+  });
+
+  it('renders multiline CriticMarkup in an indented code block as literal text', () => {
+    const html = renderWithPlugin('    {++first\n    second++}');
+    expect(html).toContain('{++first\nsecond++}');
+    expect(html).not.toContain('PARA');
+    expect(html).not.toContain('LINE');
+    expect(html).not.toContain('manuscript-markdown-addition');
+  });
+
+  it('keeps overlapping inline-code regions inert inside an indented code block', () => {
+    const html = renderWithPlugin('    `x` `x` {++first\n    second++}');
+    expect(html).toContain('`x` `x` {++first\nsecond++}');
+    expect(html).not.toContain('PARA');
+    expect(html).not.toContain('LINE');
+    expect(html).not.toContain('manuscript-markdown-addition');
   });
 
   it('renders fenced code block with language tag as literal text', () => {
@@ -1598,5 +1625,205 @@ describe('Table numeric formatting preview', () => {
     ].join('\n');
     const html = renderWithEmbedSetup(input, resolver, { currentDocument: { fsPath: '/doc/file.md' } });
     expect(html).toContain('12\u00b730');
+  });
+});
+
+describe('CriticMarkup inside inline equations', () => {
+  it('recognizes a math opener preceded by an even run of backslashes', () => {
+    const html = renderWithPlugin('\\\\$a{++b++}$');
+
+    expect(html).toContain('\\');
+    expect(html).toContain('<span class="manuscript-markdown-math-fallback">a</span>');
+    expect(html).toContain('<ins class="manuscript-markdown-addition">');
+    expect(html).not.toContain('$a');
+  });
+
+  it('keeps the host math renderer and supplies boundary context for operator spacing', () => {
+    const md = new MarkdownIt({ html: true });
+    md.renderer.rules.math_inline = (tokens, idx) => '<katex>' + escapeHtml(tokens[idx].content) + '</katex>';
+    md.use(manuscriptMarkdownPlugin);
+
+    const html = md.render('$u^2{+++v^2++}$');
+    expect(html).toContain('<katex>u^2{}</katex>');
+    expect(html).toContain('<ins class="manuscript-markdown-addition"><katex>{}+v^2</katex></ins>');
+  });
+
+  it('renders a changed equation fragment outside the opaque math token', () => {
+    const html = renderWithPlugin('The variance is $u_j^2{+++\\tau_{g_j}^2++}$.');
+
+    expect(html).toContain('<span class="manuscript-markdown-math-fallback">u_j^2</span>');
+    expect(html).toContain(
+      '<ins class="manuscript-markdown-addition"><span class="manuscript-markdown-math-fallback">+\\tau_{g_j}^2</span></ins>'
+    );
+    expect(html).not.toContain('{++');
+    expect(html).not.toContain('++}');
+  });
+
+  it('renders both math sides of a substitution', () => {
+    const html = renderWithPlugin('$a{~~+b~>+c~~}$');
+
+    expect(html).toContain('<del class="manuscript-markdown-deletion"><span class="manuscript-markdown-math-fallback">+b</span></del>');
+    expect(html).toContain('<ins class="manuscript-markdown-addition"><span class="manuscript-markdown-math-fallback">+c</span></ins>');
+    expect(html).not.toContain('{~~');
+  });
+
+  it('associates an in-equation comment with the preceding changed fragment', () => {
+    const html = renderWithPlugin('$a{++b++}{>>why<<}$');
+
+    expect(html).toContain('class="manuscript-markdown-addition" data-comment="why"');
+    expect(html).not.toContain('{>>');
+  });
+
+  it('keeps a multiline addition around display math intact when blank lines contain whitespace', () => {
+    const input = 'Before {++Here with\n   \n$$\\begin{aligned}x &= 1\\end{aligned}$$\n\t\nwhere $x$ is defined.++}';
+    const html = renderWithPlugin(input);
+
+    expect(html).toContain('<ins class="manuscript-markdown-addition">');
+    expect(html).toContain('Here with');
+    expect(html).toContain('where $x$ is defined.');
+    expect(html).not.toContain('{++');
+    expect(html).not.toContain('PARA');
+  });
+
+  it('handles a multiline addition whose opener ends the preceding paragraph', () => {
+    const input = 'Earlier text.{++\nAdded paragraph.\n\n$$x^2$$\n\nAdded conclusion.++}';
+    const html = renderWithPlugin(input);
+
+    expect(html).toContain('<p>Earlier text.</p>');
+    expect(html).toContain('<ins class="manuscript-markdown-addition">Added paragraph.');
+    expect(html).toContain('Added conclusion.</ins>');
+    expect(html).not.toContain('{++');
+    expect(html).not.toContain('PARA');
+  });
+
+  it('does not hoist an incomplete multiline Critic opener', () => {
+    const html = renderWithPlugin('Before.{++\nAfter');
+
+    expect(html).toContain('Before.{++\nAfter');
+    expect(html).not.toContain('</p>\n<p>');
+    expect(html).not.toContain('manuscript-markdown-addition');
+  });
+
+  it('keeps an escaped multiline opener literal', () => {
+    const html = renderWithPlugin('Literal \\{++\ntext++}');
+
+    expect(html).toContain('Literal {++\ntext++}');
+    expect(html).not.toContain('manuscript-markdown-addition');
+    expect(html).not.toContain('PARA');
+    expect(html).not.toContain('LINE');
+  });
+
+  it('keeps a multiline addition inside its list item', () => {
+    const html = renderWithPlugin('- Earlier.{++\n  Added.++}');
+
+    expect(html).toContain('<li>Earlier.<ins class="manuscript-markdown-addition">');
+    expect(html.indexOf('Added.')).toBeLessThan(html.indexOf('</li>'));
+  });
+
+  it('keeps a multiline addition inside a nested list item', () => {
+    const html = renderWithPlugin('- outer\n    - Earlier.{++\n      Added.++}');
+
+    expect(html.match(/<ul>/g)).toHaveLength(2);
+    expect(html).toContain('Earlier.<ins class="manuscript-markdown-addition">');
+    expect(html.indexOf('Added.')).toBeLessThan(html.lastIndexOf('</li>'));
+  });
+
+  it('removes quote prefixes after nested-list indentation', () => {
+    const input = '- outer\n    - inner\n      > {++before\n      >\n      > after++}';
+    const html = renderWithPlugin(input);
+
+    expect(html.match(/<ul>/g)).toHaveLength(2);
+    expect(html).toContain('<blockquote>');
+    expect(html).toContain('<ins class="manuscript-markdown-addition">before');
+    expect(html).toContain('after</ins>');
+    expect(html).not.toContain('&gt;');
+  });
+
+  it('keeps a multiline addition on a list continuation line inside the list', () => {
+    const html = renderWithPlugin('- Intro\n  Earlier.{++\n  Added.++}');
+
+    expect(html).toContain('Earlier.<ins class="manuscript-markdown-addition">');
+    expect(html.indexOf('Added.')).toBeLessThan(html.indexOf('</li>'));
+  });
+
+  it('keeps a hoisted multiline addition inside its blockquote', () => {
+    const html = renderWithPlugin('> Earlier.{++\n> Added.++}');
+
+    expect(html).toContain('<blockquote>\n<p>Earlier.</p>');
+    expect(html).toContain('<p><ins class="manuscript-markdown-addition">Added.</ins></p>');
+    expect(html).toContain('</p>\n</blockquote>');
+    expect(html).not.toContain('&gt; Added.');
+  });
+
+  it('removes repeated blockquote prefixes from protected Critic content', () => {
+    const html = renderWithPlugin('> {++before\n>\n> after++}');
+
+    expect(html).toContain('<blockquote>');
+    expect(html).toContain('<ins class="manuscript-markdown-addition">before');
+    expect(html).toContain('after</ins>');
+    expect(html).not.toContain('&gt;');
+  });
+
+  it('restores source newlines inside a revised inline-math fragment', () => {
+    const html = renderWithPlugin('$a{++b\nc++}$');
+
+    expect(html).toContain('<ins class="manuscript-markdown-addition"><span class="manuscript-markdown-math-fallback">b\nc</span></ins>');
+    expect(html).not.toContain('PARA');
+    expect(html).not.toContain('LINE');
+  });
+
+  it('does not hoist a Critic opener out of multiline inline math', () => {
+    const html = renderWithPlugin('$a+{++\n+b++}$');
+
+    expect(html).toContain('<span class="manuscript-markdown-math-fallback">a+</span>');
+    expect(html).toContain('<ins class="manuscript-markdown-addition"><span class="manuscript-markdown-math-fallback">\n+b</span></ins>');
+    expect(html).not.toContain('{++');
+    expect(html).not.toContain('PARA');
+    expect(html).not.toContain('LINE');
+  });
+
+  it('keeps Critic-shaped multiline text inside raw HTML blocks literal', () => {
+    const input = '<pre>\n{++a\nb++}\n</pre>';
+    const html = renderWithPlugin(input);
+
+    expect(html).toContain(input);
+    expect(html).not.toContain('manuscript-markdown-addition');
+    expect(html).not.toContain(PARA_PLACEHOLDER);
+    expect(html).not.toContain(LINE_PLACEHOLDER);
+  });
+
+  it('keeps malformed multiline substitutions in their original paragraph', () => {
+    const html = renderWithPlugin('Before{~~\nliteral~~}');
+
+    expect(html).toContain('<p>Before{~~\nliteral~~}</p>');
+    expect(html.match(/<p>/g)).toHaveLength(1);
+    expect(html).not.toContain('manuscript-markdown-substitution');
+    expect(html).not.toContain(PARA_PLACEHOLDER);
+    expect(html).not.toContain(LINE_PLACEHOLDER);
+  });
+
+  it('restores protected aligned-math newlines before the host math renderer runs', () => {
+    const md = new MarkdownIt({ html: true });
+    md.inline.ruler.after('escape', 'test_opaque_display_math', (state: any, silent: boolean) => {
+      if (state.src.slice(state.pos, state.pos + 2) !== '$$') return false;
+      const closePos = state.src.indexOf('$$', state.pos + 2);
+      if (closePos === -1) return false;
+      if (!silent) {
+        const token = state.push('test_opaque_display_math', 'math', 0);
+        token.content = state.src.slice(state.pos + 2, closePos);
+      }
+      state.pos = closePos + 2;
+      return true;
+    });
+    md.renderer.rules.test_opaque_display_math = (tokens, idx) =>
+      '<opaque-math>' + escapeHtml(tokens[idx].content) + '</opaque-math>';
+    md.use(manuscriptMarkdownPlugin);
+
+    const input = 'Earlier text.{++\nAdded paragraph.\n\n$$\n\\begin{aligned}\nx &= 1 \\\\\ny &= 2\n\\end{aligned}\n$$\n\nAdded conclusion.++}';
+    const html = md.render(input);
+    expect(html).toContain('<opaque-math>\n\\begin{aligned}\nx &amp;= 1 \\\\\ny &amp;= 2\n\\end{aligned}\n</opaque-math>');
+    expect(html).not.toContain('PARA');
+    expect(html).not.toContain('LINE');
+    expect(html).not.toContain('{++');
   });
 });

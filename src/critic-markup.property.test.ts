@@ -1,6 +1,122 @@
 import { describe, test, expect } from 'bun:test';
 import fc from 'fast-check';
-import { preprocessCriticMarkup, PARA_PLACEHOLDER, findMatchingClose } from './critic-markup';
+import MarkdownIt from 'markdown-it';
+import { preprocessCriticMarkup, PARA_PLACEHOLDER, LINE_PLACEHOLDER, findMatchingClose } from './critic-markup';
+import { computeCodeRegions, isInsideCodeRegion } from './code-regions';
+
+function isEscapedAt(content: string, offset: number): boolean {
+  let backslashes = 0;
+  for (let i = offset - 1; i >= 0 && content.charCodeAt(i) === 0x5C; i--) backslashes++;
+  return backslashes % 2 === 1;
+}
+
+const blockCodeParser = new MarkdownIt();
+
+function computeReferenceCodeRegions(content: string): Array<{ start: number; end: number }> {
+  const regions = computeCodeRegions(content);
+  const lineStarts = [0];
+  for (let i = 0; i < content.length; i++) {
+    const char = content.charCodeAt(i);
+    if (char === 0x0D) {
+      if (content.charCodeAt(i + 1) === 0x0A) i++;
+      lineStarts.push(i + 1);
+    } else if (char === 0x0A) {
+      lineStarts.push(i + 1);
+    }
+  }
+  for (const token of blockCodeParser.parse(content, {})) {
+    if (token.type !== 'code_block' || !token.map) continue;
+    regions.push({
+      start: lineStarts[token.map[0]] ?? content.length,
+      end: lineStarts[token.map[1]] ?? content.length,
+    });
+  }
+  regions.sort((a, b) => a.start - b.start);
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const region of regions) {
+    const previous = merged[merged.length - 1];
+    if (previous && region.start <= previous.end) previous.end = Math.max(previous.end, region.end);
+    else merged.push({ ...region });
+  }
+  return merged;
+}
+
+function computeReferenceListRegions(content: string): Array<{ start: number; end: number }> {
+  const lineStarts = [0];
+  for (let i = 0; i < content.length; i++) {
+    const char = content.charCodeAt(i);
+    if (char === 0x0D) {
+      if (content.charCodeAt(i + 1) === 0x0A) i++;
+      lineStarts.push(i + 1);
+    } else if (char === 0x0A) {
+      lineStarts.push(i + 1);
+    }
+  }
+  const regions: Array<{ start: number; end: number }> = [];
+  for (const token of blockCodeParser.parse(content, {})) {
+    if (token.type !== 'list_item_open' || !token.map) continue;
+    regions.push({
+      start: lineStarts[token.map[0]] ?? content.length,
+      end: lineStarts[token.map[1]] ?? content.length,
+    });
+  }
+  regions.sort((a, b) => a.start - b.start);
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const region of regions) {
+    const previous = merged[merged.length - 1];
+    if (previous && region.start <= previous.end) previous.end = Math.max(previous.end, region.end);
+    else merged.push({ ...region });
+  }
+  return merged;
+}
+
+function quoteDepthAt(content: string, offset: number): number {
+  const lineStart = Math.max(content.lastIndexOf('\n', offset - 1), content.lastIndexOf('\r', offset - 1)) + 1;
+  let prefix = content.slice(lineStart, offset);
+  let depth = 0;
+  while (true) {
+    const match = prefix.match(/^[ \t]{0,3}>[ \t]?/);
+    if (!match) return depth;
+    depth++;
+    prefix = prefix.slice(match[0].length);
+  }
+}
+
+function stripQuoteContinuationPrefixes(content: string, depth: number): string {
+  if (depth === 0 || !/[\r\n]/.test(content)) return content;
+  return content.replace(/(\r\n|\r|\n)([^\r\n]*)/g, (_full, eol: string, line: string) => {
+    let remainder = line;
+    for (let level = 0; level < depth; level++) {
+      const match = remainder.match(/^[ \t]{0,3}>[ \t]?/);
+      if (!match) return eol + line;
+      remainder = remainder.slice(match[0].length);
+    }
+    return eol + remainder;
+  });
+}
+
+function isInsideDollarMathAt(content: string, offset: number, codeRegions: Array<{ start: number; end: number }>): boolean {
+  let delimiterLength = 0;
+  for (let i = 0; i < offset; i++) {
+    if (content.charCodeAt(i) !== 0x24 || isEscapedAt(content, i) || isInsideCodeRegion(i, codeRegions)) continue;
+    let runLength = 1;
+    while (i + runLength < content.length && content.charCodeAt(i + runLength) === 0x24) runLength++;
+    if (runLength <= 2) {
+      if (delimiterLength === 0) delimiterLength = runLength;
+      else if (delimiterLength === runLength) delimiterLength = 0;
+    }
+    i += runLength - 1;
+  }
+  if (delimiterLength === 0) return false;
+  for (let i = offset; i < content.length; i++) {
+    if (content.charCodeAt(i) !== 0x24 || isEscapedAt(content, i) || isInsideCodeRegion(i, codeRegions)) continue;
+    let runLength = 1;
+    while (i + runLength < content.length && content.charCodeAt(i + runLength) === 0x24) runLength++;
+    if (runLength === delimiterLength) return true;
+    i += runLength - 1;
+  }
+  return false;
+}
 
 // Reference: original slice-and-rebuild implementation
 function preprocessCriticMarkupReference(markdown: string): string {
@@ -9,6 +125,41 @@ function preprocessCriticMarkupReference(markdown: string): string {
       !markdown.includes('{==') && !markdown.includes('{#')) {
     return markdown;
   }
+  const initialCodeRegions = computeReferenceCodeRegions(markdown);
+  const initialListRegions = computeReferenceListRegions(markdown);
+  markdown = markdown.replace(
+    /(\{\+\+|\{--|\{~~|\{==|\{>>)((?:\r\n|\r|\n)(?:[ \t]*(?:>[ \t]*)?(?:\r\n|\r|\n))?)([ \t]*(?:(?:>[ \t]*)+)?)/g,
+    (full, open: string, leadingBreak: string, nextPrefix: string, offset: number) => {
+      if (isInsideCodeRegion(offset, initialCodeRegions) || isEscapedAt(markdown, offset) ||
+          isInsideDollarMathAt(markdown, offset, initialCodeRegions) ||
+          isInsideCodeRegion(offset, initialListRegions)) return full;
+      const contentStart = offset + open.length;
+      const closePos = open === '{>>'
+        ? findMatchingClose(markdown, contentStart)
+        : markdown.indexOf(open === '{++' ? '++}' : open === '{--' ? '--}' : open === '{==' ? '==}' : '~~}', contentStart);
+      if (closePos === -1) return full;
+      const lineStart = Math.max(
+        markdown.lastIndexOf('\n', offset - 1),
+        markdown.lastIndexOf('\r', offset - 1),
+      ) + 1;
+      const linePrefix = markdown.slice(lineStart, offset);
+      if (linePrefix.trim().length === 0) return full;
+      const quoteMatch = linePrefix.match(/^((?:[ \t]{0,3}>[ \t]?)+)/);
+      const lineEndings = leadingBreak.match(/\r\n|\r|\n/g) ?? [];
+      const eol = lineEndings[0] ?? '\n';
+      if (quoteMatch) {
+        const quoteDepth = (quoteMatch[1].match(/>/g) ?? []).length;
+        const nextQuoteDepth = (nextPrefix.match(/>/g) ?? []).length;
+        if (nextQuoteDepth < quoteDepth) return full;
+        const paragraphBreak = lineEndings.length > 1
+          ? leadingBreak
+          : eol + quoteMatch[1].trimEnd() + eol;
+        return paragraphBreak + nextPrefix + open;
+      }
+      const paragraphBreak = lineEndings.length > 1 ? leadingBreak : eol + eol;
+      return paragraphBreak + open + nextPrefix;
+    },
+  );
   const markers = [
     { open: '{++', close: '++}' },
     { open: '{--', close: '--}' },
@@ -23,6 +174,8 @@ function preprocessCriticMarkupReference(markdown: string): string {
       const openIdx = result.indexOf(open, searchFrom);
       if (openIdx === -1) break;
       const contentStart = openIdx + open.length;
+      const codeRegions = computeReferenceCodeRegions(result);
+      if (isInsideCodeRegion(openIdx, codeRegions) || isEscapedAt(result, openIdx)) { searchFrom = contentStart; continue; }
       let closeIdx: number;
       if (nested) {
         closeIdx = findMatchingClose(result, contentStart);
@@ -31,8 +184,10 @@ function preprocessCriticMarkupReference(markdown: string): string {
       }
       if (closeIdx === -1) { searchFrom = contentStart; continue; }
       const content = result.slice(contentStart, closeIdx);
-      if (content.includes('\n\n')) {
-        const replaced = content.replace(/\n\n/g, PARA_PLACEHOLDER);
+      if (/\r|\n/.test(content)) {
+      const replaced = stripQuoteContinuationPrefixes(content, quoteDepthAt(result, openIdx))
+          .replace(/(?:\r\n|\r|\n)[ \t]*(?:\r\n|\r|\n)/g, PARA_PLACEHOLDER)
+          .replace(/\r\n|\r|\n/g, LINE_PLACEHOLDER);
         result = result.slice(0, contentStart) + replaced + result.slice(closeIdx);
         searchFrom = contentStart + replaced.length + close.length;
       } else {
@@ -47,11 +202,15 @@ function preprocessCriticMarkupReference(markdown: string): string {
     if (!match) break;
     const matchIndex = idSearchFrom + match.index;
     const contentStart = matchIndex + match[0].length;
+    const codeRegions = computeReferenceCodeRegions(result);
+    if (isInsideCodeRegion(matchIndex, codeRegions) || isEscapedAt(result, matchIndex)) { idSearchFrom = contentStart; continue; }
     const closeIdx = findMatchingClose(result, contentStart);
     if (closeIdx === -1) { idSearchFrom = contentStart; continue; }
     const content = result.slice(contentStart, closeIdx);
-    if (content.includes('\n\n')) {
-      const replaced = content.replace(/\n\n/g, PARA_PLACEHOLDER);
+    if (/\r|\n/.test(content)) {
+      const replaced = stripQuoteContinuationPrefixes(content, quoteDepthAt(result, matchIndex))
+        .replace(/(?:\r\n|\r|\n)[ \t]*(?:\r\n|\r|\n)/g, PARA_PLACEHOLDER)
+        .replace(/\r\n|\r|\n/g, LINE_PLACEHOLDER);
       result = result.slice(0, contentStart) + replaced + result.slice(closeIdx);
       idSearchFrom = contentStart + replaced.length + 3;
     } else {
@@ -81,7 +240,11 @@ describe('Property 6: Streaming Preprocessor Equivalence', () => {
   );
 
   const textGen = fc.array(
-    fc.oneof(criticPatternGen, criticWithParaGen, fc.string({ maxLength: 40 })),
+    fc.oneof(
+      criticPatternGen,
+      criticWithParaGen,
+      fc.string({ maxLength: 40 }),
+    ),
     { minLength: 1, maxLength: 8 }
   ).map(parts => parts.join(' '));
 
@@ -92,5 +255,24 @@ describe('Property 6: Streaming Preprocessor Equivalence', () => {
       }),
       { numRuns: 200 }
     );
+  });
+
+  test('matches the reference in container and inert-region edge cases', () => {
+    for (const text of [
+      '- Intro\n  Earlier.{++\n  Added.++}',
+      '> {++before\n>\n> after++}',
+      '    `x` `x` {++first\n    second++}',
+    ]) {
+      expect(preprocessCriticMarkup(text)).toBe(preprocessCriticMarkupReference(text));
+    }
+  });
+
+  test('discovers many same-type and nested-comment openers without suffix rescans', () => {
+    for (const marker of ['{++x++}', '{>>x<<}', '{#id>>x<<}']) {
+      const input = Array.from({ length: 128_000 }, () => marker).join(' ');
+      const started = performance.now();
+      expect(preprocessCriticMarkup(input)).toBe(input);
+      expect(performance.now() - started).toBeLessThan(1_000);
+    }
   });
 });

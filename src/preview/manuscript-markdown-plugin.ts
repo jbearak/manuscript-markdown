@@ -4,7 +4,7 @@ import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
 import type StateBlock from 'markdown-it/lib/rules_block/state_block.mjs';
 import type Token from 'markdown-it/lib/token.mjs';
 import { VALID_COLOR_IDS, getDefaultHighlightColor } from '../highlight-colors';
-import { PARA_PLACEHOLDER, findMatchingClose } from '../critic-markup';
+import { PARA_PLACEHOLDER, LINE_PLACEHOLDER, findMatchingClose, restoreCriticLineBreaks } from '../critic-markup';
 import { GRID_TABLE_PLACEHOLDER_PREFIX } from '../grid-table-preprocess';
 import { preprocessGridTablesWithMap, wrapBareLatexEnvironmentsWithMap, preprocessCriticMarkupWithMap } from './preprocess-with-map';
 import { LineMap } from './line-map';
@@ -13,6 +13,7 @@ import { isGfmDisallowedRawHtml, escapeHtmlText, parseTaskListMarker, parseGfmAl
 import { parseFrontmatter, type ColorScheme } from '../frontmatter';
 import { formatTableNumbers } from '../table-number-format';
 import { getDefaultColorScheme } from '../alert-colors';
+import { splitCriticMarkupInMath, type CriticMathPart } from '../critic-math';
 
 export interface ManuscriptMarkdownIt extends MarkdownIt {
   manuscriptColors?: ColorScheme;
@@ -419,17 +420,34 @@ function addInlineContent(state: StateInline, content: string): void {
         token.children = expandParagraphBreaks(token.children);
       }
 
-      if (token.type === 'text' && token.content.includes(PARA_PLACEHOLDER)) {
-        const parts = token.content.split(PARA_PLACEHOLDER);
-        for (let partIndex = 0; partIndex < parts.length; partIndex++) {
-          if (partIndex > 0) {
-            expanded.push(new state.Token('hardbreak', 'br', 0));
-            expanded.push(new state.Token('hardbreak', 'br', 0));
-          }
-          if (parts[partIndex].length > 0) {
+      if (token.type === 'text' && (token.content.includes(PARA_PLACEHOLDER) || token.content.includes(LINE_PLACEHOLDER))) {
+        let textStart = 0;
+        while (textStart < token.content.length) {
+          const paraPos = token.content.indexOf(PARA_PLACEHOLDER, textStart);
+          const linePos = token.content.indexOf(LINE_PLACEHOLDER, textStart);
+          const markerPos = paraPos === -1
+            ? linePos
+            : linePos === -1
+              ? paraPos
+              : Math.min(paraPos, linePos);
+          if (markerPos === -1) {
             const textToken = new state.Token('text', '', 0);
-            textToken.content = parts[partIndex];
+            textToken.content = token.content.slice(textStart);
             expanded.push(textToken);
+            break;
+          }
+          if (markerPos > textStart) {
+            const textToken = new state.Token('text', '', 0);
+            textToken.content = token.content.slice(textStart, markerPos);
+            expanded.push(textToken);
+          }
+          if (markerPos === paraPos) {
+            expanded.push(new state.Token('hardbreak', 'br', 0));
+            expanded.push(new state.Token('hardbreak', 'br', 0));
+            textStart = markerPos + PARA_PLACEHOLDER.length;
+          } else {
+            expanded.push(new state.Token('softbreak', 'br', 0));
+            textStart = markerPos + LINE_PLACEHOLDER.length;
           }
         }
         continue;
@@ -437,9 +455,11 @@ function addInlineContent(state: StateInline, content: string): void {
 
       // Code and other opaque inline tokens do not expose their content as text
       // children, but the implementation placeholder must never reach HTML.
-      if (token.content.includes(PARA_PLACEHOLDER)) {
+      if (token.content.includes(PARA_PLACEHOLDER) || token.content.includes(LINE_PLACEHOLDER)) {
         const separator = token.type === 'code_inline' ? ' ' : '\n\n';
-        token.content = token.content.split(PARA_PLACEHOLDER).join(separator);
+        token.content = token.content
+          .split(PARA_PLACEHOLDER).join(separator)
+          .split(LINE_PLACEHOLDER).join(token.type === 'code_inline' ? ' ' : '\n');
       }
       expanded.push(token);
     }
@@ -461,16 +481,111 @@ function addInlineContent(state: StateInline, content: string): void {
   }
 }
 
+function pushInlineMathToken(state: StateInline, content: string, hasBefore = false, hasAfter = false): void {
+  if (!content) return;
+  const token = state.push('math_inline', 'math', 0);
+  token.markup = '$';
+  token.meta = { ...(token.meta || {}), manuscriptMathSource: content };
+  // KaTeX classifies a leading/trailing binary operator as unary when an
+  // equation is split across several tokens. Invisible empty groups retain
+  // the original operator spacing at CriticMarkup boundaries.
+  token.content = (hasBefore ? '{}' : '') + content + (hasAfter ? '{}' : '');
+}
+
+function pushCriticMathParts(state: StateInline, parts: CriticMathPart[]): void {
+  const hasVisibleMath = (part: CriticMathPart): boolean => {
+    if (part.type === 'comment') return false;
+    if (part.type === 'substitution') return part.oldContent.length > 0 || part.newContent.length > 0;
+    return part.content.length > 0;
+  };
+
+  let remainingVisible = parts.reduce((count, part) => count + (hasVisibleMath(part) ? 1 : 0), 0);
+  let hasBefore = false;
+  for (const part of parts) {
+    const partIsVisible = hasVisibleMath(part);
+    if (partIsVisible) remainingVisible--;
+    const hasAfter = remainingVisible > 0;
+    if (part.type === 'math') {
+      pushInlineMathToken(state, part.content, hasBefore, hasAfter);
+      if (partIsVisible) hasBefore = true;
+      continue;
+    }
+
+    if (part.type === 'comment') {
+      const tokenOpen = state.push('manuscript_markdown_comment_open', 'span', 1);
+      tokenOpen.attrSet('class', 'manuscript-markdown-comment');
+      tokenOpen.meta = { commentText: part.content };
+      addInlineContent(state, part.content);
+      state.push('manuscript_markdown_comment_close', 'span', -1);
+      continue;
+    }
+
+    if (part.type === 'substitution') {
+      const tokenOpen = state.push('manuscript_markdown_substitution_open', 'span', 1);
+      tokenOpen.attrSet('class', 'manuscript-markdown-substitution');
+      const oldOpen = state.push('manuscript_markdown_substitution_old_open', 'del', 1);
+      oldOpen.attrSet('class', 'manuscript-markdown-deletion');
+      pushInlineMathToken(state, part.oldContent, hasBefore, hasAfter);
+      state.push('manuscript_markdown_substitution_old_close', 'del', -1);
+      const newOpen = state.push('manuscript_markdown_substitution_new_open', 'ins', 1);
+      newOpen.attrSet('class', 'manuscript-markdown-addition');
+      pushInlineMathToken(state, part.newContent, hasBefore, hasAfter);
+      state.push('manuscript_markdown_substitution_new_close', 'ins', -1);
+      state.push('manuscript_markdown_substitution_close', 'span', -1);
+      if (partIsVisible) hasBefore = true;
+      continue;
+    }
+
+    const tokenType = part.type === 'addition'
+      ? 'addition'
+      : part.type === 'deletion'
+        ? 'deletion'
+        : 'highlight';
+    const tag = part.type === 'addition' ? 'ins' : part.type === 'deletion' ? 'del' : 'mark';
+    const tokenOpen = state.push('manuscript_markdown_' + tokenType + '_open', tag, 1);
+    tokenOpen.attrSet('class', 'manuscript-markdown-' + tokenType);
+    pushInlineMathToken(state, part.content, hasBefore, hasAfter);
+    state.push('manuscript_markdown_' + tokenType + '_close', tag, -1);
+    if (partIsVisible) hasBefore = true;
+  }
+}
+
+/** Parse CriticMarkup inside a single-dollar inline equation before VS Code's math rule consumes it. */
+function parseCriticMarkupInInlineMath(state: StateInline, silent: boolean): boolean {
+  const start = state.pos;
+  const src = state.src;
+  if (src.charAt(start) !== '$' || src.charAt(start + 1) === '$') return false;
+
+  const before = src.charAt(start - 1);
+  let openerSlash = start - 1;
+  while (openerSlash >= 0 && src.charAt(openerSlash) === '\\') openerSlash--;
+  const openerIsEscaped = (start - 1 - openerSlash) % 2 === 1;
+  if (before === '$' || openerIsEscaped || (before && /[\w\d]/.test(before))) return false;
+
+  let end = start + 1;
+  while ((end = src.indexOf('$', end)) !== -1) {
+    let slash = end - 1;
+    while (slash >= 0 && src.charAt(slash) === '\\') slash--;
+    if ((end - slash) % 2 === 1) break;
+    end++;
+  }
+  if (end === -1 || end === start + 1) return false;
+
+  const afterClose = src.charAt(end + 1);
+  if (afterClose === '$' || (afterClose && /[\w\d]/.test(afterClose))) return false;
+
+  const parts = splitCriticMarkupInMath(src.slice(start + 1, end));
+  if (!parts) return false;
+  if (!silent) pushCriticMathParts(state, parts);
+  state.pos = end + 1;
+  return true;
+}
+
 /**
- * Block-level rule that identifies Manuscript Markdown patterns before paragraph parsing
- * This prevents markdown-it from splitting patterns at empty lines
- *
- * AGENTS.md invariant: multi-line patterns must start at the beginning of a line
- * to be handled here. Navigation tolerates mid-line starts, preview does not.
- * 
- * LIMITATION: Only detects patterns that start at the beginning of a line.
- * Patterns that start mid-line with multi-line content will not be handled by this rule
- * and will be split by markdown-it's paragraph parser.
+ * Fallback block-level rule for multiline Manuscript Markdown that starts at
+ * the beginning of a line. The source preprocessor normally protects all line
+ * breaks inside complete spans, including mid-line spans, so they reach the
+ * inline parser without being split into separate Markdown blocks.
  * 
  * @param state - The block parsing state
  * @param startLine - Starting line number
@@ -773,7 +888,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
             tokenOpen.attrSet('class', 'manuscript-markdown-comment');
             tokenOpen.meta = {
               id,
-              commentText: content.split(PARA_PLACEHOLDER).join('\n\n'),
+              commentText: restoreCriticLineBreaks(content),
             };
             addInlineContent(state, content);
             state.push('manuscript_markdown_comment_close', 'span', -1);
@@ -820,7 +935,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
         const content = src.slice(start + 3, endPos);
         const tokenOpen = state.push('manuscript_markdown_comment_open', 'span', 1);
         tokenOpen.attrSet('class', 'manuscript-markdown-comment');
-        tokenOpen.meta = { commentText: content.split(PARA_PLACEHOLDER).join('\n\n') };
+        tokenOpen.meta = { commentText: restoreCriticLineBreaks(content) };
 
         // Add parsed inline content to allow nested Markdown processing
         addInlineContent(state, content);
@@ -1109,6 +1224,18 @@ function getEmbedDocumentPath(md: ManuscriptMarkdownIt, state: StateCore): strin
  * @param md - The MarkdownIt instance to extend
  */
 export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
+  // Standalone markdown-it consumers (including unit tests) do not load VS
+  // Code's math extension. Keep CriticMarkup-in-math output readable there;
+  // VS Code's KaTeX renderer wins when it is already registered or loads later.
+  if (!md.renderer.rules.math_inline) {
+    md.renderer.rules.math_inline = (tokens, idx) => {
+      const source = typeof tokens[idx].meta?.manuscriptMathSource === 'string'
+        ? tokens[idx].meta.manuscriptMathSource
+        : tokens[idx].content;
+      return '<span class="manuscript-markdown-math-fallback">' + escapeHtmlText(source) + '</span>';
+    };
+  }
+
   // Preprocess source before block parsing to handle multi-paragraph CriticMarkup
   md.core.ruler.before('normalize', 'manuscript_markdown_preprocess', (state: StateCore) => {
     // Parse frontmatter to extract color scheme before preprocessing.
@@ -1234,6 +1361,12 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
 
   // Register inline rule for paragraph placeholder (before other inline rules)
   md.inline.ruler.before('emphasis', 'para_placeholder', paraPlaceholderRule);
+
+  // VS Code's math extension registers its inline rule immediately after
+  // `escape`, before our general CriticMarkup rule. Intercept only equations
+  // that contain complete CriticMarkup spans before that opaque math token is
+  // created; ordinary equations continue through VS Code's normal rule.
+  md.inline.ruler.before('escape', 'manuscript_markdown_critic_math', parseCriticMarkupInInlineMath);
 
   // Register the inline rule for Manuscript Markdown parsing
   // Run before emphasis and other inline rules to handle Manuscript Markdown first

@@ -36,6 +36,16 @@ describe('findMatchingClose', () => {
     expect(findMatchingClose(src, 0)).toBe(21);
   });
 
+  test('finds close with a nested ID comment', () => {
+    const src = 'parent {#reply-1>>nested<<} end<<}';
+    expect(findMatchingClose(src, 0)).toBe(src.lastIndexOf('<<}'));
+  });
+
+  test('finds close with mixed plain and ID comment nesting', () => {
+    const src = 'parent {>>plain {#reply_2>>nested<<} tail<<} end<<}';
+    expect(findMatchingClose(src, 0)).toBe(src.lastIndexOf('<<}'));
+  });
+
   test('returns -1 when no close found', () => {
     expect(findMatchingClose('no close here', 0)).toBe(-1);
   });

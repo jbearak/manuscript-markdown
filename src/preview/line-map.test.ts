@@ -13,6 +13,14 @@ describe('LineMap', () => {
   });
 
   describe('remap', () => {
+    it('preserves explicit provenance across collapsed and repeated boundaries', () => {
+      const map = LineMap.fromLineMappings([0, 0, 2, 3]);
+      expect(map.remap(0)).toBe(0);
+      expect(map.remap(1)).toBe(0);
+      expect(map.remap(2)).toBe(2);
+      expect(map.remap(3)).toBe(3);
+    });
+
     it('maps 1:1 within a segment', () => {
       const map = LineMap.fromSegments([
         { preprocessedStart: 0, originalStart: 0, length: 5 },

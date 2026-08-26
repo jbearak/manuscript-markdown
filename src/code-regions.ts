@@ -4,10 +4,15 @@
  * Used by decoration, navigation, and LSP subsystems to skip code regions.
  */
 
+import MarkdownIt from 'markdown-it';
+import type Token from 'markdown-it/lib/token.mjs';
+
 export interface CodeRegion {
 	start: number;
 	end: number;
 }
+
+const blockParser = new MarkdownIt();
 
 /**
  * Compute all code regions (fenced code blocks + inline code spans) in text.
@@ -17,34 +22,47 @@ export interface CodeRegion {
 export function computeCodeRegions(text: string): CodeRegion[] {
 	const regions: CodeRegion[] = [];
 
-	// 1. Fenced code blocks (``` or ~~~)
-	const fenceRe = /^(`{3,}|~{3,})[^\n]*$/gm;
-	let openFence: { char: string; count: number; start: number } | null = null;
-	let fenceMatch: RegExpExecArray | null;
-
-	while ((fenceMatch = fenceRe.exec(text)) !== null) {
-		const fence = fenceMatch[1];
-		const fenceChar = fence[0];
-		const fenceCount = fence.length;
-
-		if (!openFence) {
-			openFence = { char: fenceChar, count: fenceCount, start: fenceMatch.index };
-		} else if (fenceChar === openFence.char && fenceCount >= openFence.count
-		&& fenceMatch[0].slice(fenceCount).trim() === '') {
-			regions.push({ start: openFence.start, end: fenceMatch.index + fenceMatch[0].length });
-			openFence = null;
+	// 1. Block code regions. markdown-it supplies source-line maps for fenced
+	// and indented blocks, including list/blockquote containers and every line
+	// ending convention. Convert those maps back to original byte offsets.
+	const lineStarts = [0];
+	for (let pos = 0; pos < text.length; pos++) {
+		const char = text.charCodeAt(pos);
+		if (char === 0x0D) {
+			if (text.charCodeAt(pos + 1) === 0x0A) pos++;
+			lineStarts.push(pos + 1);
+		} else if (char === 0x0A) {
+			lineStarts.push(pos + 1);
 		}
 	}
-	if (openFence) {
-		regions.push({ start: openFence.start, end: text.length });
+	const blockTokens: Token[] = [];
+	// The normal core rule performs this conversion before block parsing.
+	// Invoke the block parser directly to avoid unnecessary inline parsing, but
+	// retain its line-ending semantics (including bare CR documents).
+	const normalizedBlockText = text.replace(/\r\n?/g, '\n');
+	blockParser.block.parse(normalizedBlockText, blockParser, {}, blockTokens);
+	for (const token of blockTokens) {
+		if (!token.map || (token.type !== 'fence' && token.type !== 'code_block')) continue;
+		const start = lineStarts[token.map[0]] ?? text.length;
+		let end = lineStarts[token.map[1]] ?? text.length;
+		while (end > start && (text.charCodeAt(end - 1) === 0x0A || text.charCodeAt(end - 1) === 0x0D)) end--;
+		regions.push({ start, end });
 	}
 
 	// 2. Inline code spans (CommonMark §6.1) — only outside fenced blocks
-	// Fenced regions are added left-to-right so we can early-exit the scan.
+	// Consult only fenced regions while scanning. Previously this searched the
+	// growing array of already-completed inline spans as well, making a document
+	// with many code spans quadratic even though the cursor never moves backward.
+	const fencedRegions = [...regions];
 	const findContainingRegion = (pos: number): CodeRegion | null => {
-		for (const r of regions) {
-			if (pos < r.start) break;
-			if (pos < r.end) return r;
+		let lo = 0;
+		let hi = fencedRegions.length - 1;
+		while (lo <= hi) {
+			const mid = (lo + hi) >>> 1;
+			const region = fencedRegions[mid];
+			if (pos < region.start) hi = mid - 1;
+			else if (pos >= region.end) lo = mid + 1;
+			else return region;
 		}
 		return null;
 	};
