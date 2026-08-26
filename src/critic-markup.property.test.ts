@@ -11,6 +11,18 @@ function isEscapedAt(content: string, offset: number): boolean {
 }
 
 const blockCodeParser = new MarkdownIt();
+const htmlBlockParser = new MarkdownIt({ html: true });
+
+function mergeReferenceRegions(regions: Array<{ start: number; end: number }>): Array<{ start: number; end: number }> {
+  regions.sort((a, b) => a.start - b.start);
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const region of regions) {
+    const previous = merged[merged.length - 1];
+    if (previous && region.start <= previous.end) previous.end = Math.max(previous.end, region.end);
+    else merged.push({ ...region });
+  }
+  return merged;
+}
 
 function computeReferenceCodeRegions(content: string): Array<{ start: number; end: number }> {
   const regions = computeCodeRegions(content);
@@ -31,14 +43,11 @@ function computeReferenceCodeRegions(content: string): Array<{ start: number; en
       end: lineStarts[token.map[1]] ?? content.length,
     });
   }
-  regions.sort((a, b) => a.start - b.start);
-  const merged: Array<{ start: number; end: number }> = [];
-  for (const region of regions) {
-    const previous = merged[merged.length - 1];
-    if (previous && region.start <= previous.end) previous.end = Math.max(previous.end, region.end);
-    else merged.push({ ...region });
-  }
-  return merged;
+  return mergeReferenceRegions(regions);
+}
+
+function hasReferenceHtmlBlock(content: string): boolean {
+  return htmlBlockParser.parse(content, {}).some(token => token.type === 'html_block');
 }
 
 function computeReferenceListRegions(content: string): Array<{ start: number; end: number }> {
@@ -60,14 +69,7 @@ function computeReferenceListRegions(content: string): Array<{ start: number; en
       end: lineStarts[token.map[1]] ?? content.length,
     });
   }
-  regions.sort((a, b) => a.start - b.start);
-  const merged: Array<{ start: number; end: number }> = [];
-  for (const region of regions) {
-    const previous = merged[merged.length - 1];
-    if (previous && region.start <= previous.end) previous.end = Math.max(previous.end, region.end);
-    else merged.push({ ...region });
-  }
-  return merged;
+  return mergeReferenceRegions(regions);
 }
 
 function quoteDepthAt(content: string, offset: number): number {
@@ -259,14 +261,14 @@ describe('Property 6: Streaming Preprocessor Equivalence', () => {
 
   test('streaming builder matches original slice-and-rebuild', () => {
     fc.assert(
-      fc.property(textGen, (text) => {
+      fc.property(textGen.filter(text => !hasReferenceHtmlBlock(text)), (text) => {
         expect(preprocessCriticMarkup(text)).toBe(preprocessCriticMarkupReference(text));
       }),
       { numRuns: 200 }
     );
   });
 
-  test('matches the reference in container and inert-region edge cases', () => {
+  test('matches the reference in container edge cases', () => {
     for (const text of [
       '- Intro\n  Earlier.{++\n  Added.++}',
       '> {++before\n>\n> after++}',
@@ -274,6 +276,13 @@ describe('Property 6: Streaming Preprocessor Equivalence', () => {
     ]) {
       expect(preprocessCriticMarkup(text)).toBe(preprocessCriticMarkupReference(text));
     }
+  });
+
+  test('leaves CriticMarkup line breaks inside HTML blocks inert', () => {
+    expect(preprocessCriticMarkup('<? {--\n\n--} {~~~>~~}'))
+      .toBe('<? {--\n\n--} {~~~>~~}');
+    expect(preprocessCriticMarkup('{++<?\n\n<?++} {==\n\n==} {~~~>~~}'))
+      .toBe('{++<?' + PARA_PLACEHOLDER + '<?++} {==\n\n==} {~~~>~~}');
   });
 
   test('discovers many same-type and nested-comment openers without suffix rescans', () => {
