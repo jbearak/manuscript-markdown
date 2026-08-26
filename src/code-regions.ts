@@ -102,6 +102,7 @@ function computeInlineCodeRegions(text: string, blockRegions: CodeRegion[]): Cod
 			if (closeCount === backtickCount) {
 				regions.push({ start, end: j });
 				i = j;
+				blockIndex = innerBlockIndex;
 				break;
 			}
 		}

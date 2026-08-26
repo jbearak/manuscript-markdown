@@ -637,19 +637,17 @@ function mathRule(state: StateInline, silent: boolean): boolean {
   if (silent) return true;
 
   const content = state.src.slice(match.contentStart, match.contentEnd);
-  if (match.delimiterLength === 2) {
-    const token = pushManuscriptToken(state, 'math', '', 0);
-    token.content = content;
-    token.display = true;
-  } else {
+  if (match.delimiterLength === 1) {
     const criticParts = splitCriticMarkupInMath(content);
     if (criticParts) {
       pushCriticMathTokens(state, criticParts);
-    } else {
-      const token = pushManuscriptToken(state, 'math', '', 0);
-      token.content = content;
+      return true;
     }
   }
+
+  const token = pushManuscriptToken(state, 'math', '', 0);
+  token.content = content;
+  if (match.delimiterLength === 2) token.display = true;
   return true;
 }
 

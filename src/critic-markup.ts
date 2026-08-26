@@ -1,4 +1,4 @@
-import { computeMarkdownRegions, isInsideCodeRegion, mergeRegions, type MarkdownRegions } from './code-regions';
+import { type CodeRegion, computeMarkdownRegions, isInsideCodeRegion, mergeRegions } from './code-regions';
 import { computeDollarMathRegions, isEscapedAt } from './math-delimiters';
 
 // Placeholder used to preserve paragraph breaks inside CriticMarkup spans.
@@ -22,25 +22,42 @@ export function restoreCriticLineBreaks(content: string): string {
     .split(LINE_PLACEHOLDER).join('\n');
 }
 
-function computeCriticBlockAnalysis(content: string, includeLists = false): MarkdownRegions {
-  return computeMarkdownRegions(content, { html: 'all', includeLists });
+interface CriticBlockAnalysis {
+  source: string;
+  inertRegions: CodeRegion[];
 }
 
-interface LeadingBreakResult {
-  markdown: string;
-  analysis?: MarkdownRegions;
+interface CriticLeadingBreakAnalysis extends CriticBlockAnalysis {
+  listRegions: CodeRegion[];
 }
 
-function moveLeadingBreakOutsideCritic(markdown: string): LeadingBreakResult {
+function computeCriticBlockAnalysis(content: string): CriticBlockAnalysis;
+function computeCriticBlockAnalysis(content: string, includeLists: true): CriticLeadingBreakAnalysis;
+function computeCriticBlockAnalysis(
+  content: string,
+  includeLists = false,
+): CriticBlockAnalysis | CriticLeadingBreakAnalysis {
+  const { codeRegions, htmlRegions, listRegions } = computeMarkdownRegions(content, {
+    html: 'all',
+    includeLists,
+  });
+  const analysis: CriticBlockAnalysis = {
+    source: content,
+    inertRegions: mergeRegions([...codeRegions, ...htmlRegions]),
+  };
+  return includeLists ? { ...analysis, listRegions } : analysis;
+}
+
+const LEADING_CRITIC_BREAK_RE = /(?:\{\+\+|\{--|\{~~|\{==|\{>>)(?:\r\n|\r|\n)/;
+
+function moveLeadingBreakOutsideCritic(analysis: CriticLeadingBreakAnalysis): CriticBlockAnalysis {
   // When an opener is stranded at the end of a line, start the Critic span in
   // a new paragraph. Authors commonly put the opener at the end of the prior
   // paragraph's last line; a single source newline otherwise remains a soft
   // break and incorrectly pulls that paragraph into the revision.
-  if (!/(?:\{\+\+|\{--|\{~~|\{==|\{>>)(?:\r\n|\r|\n)/.test(markdown)) return { markdown };
-  const analysis = computeCriticBlockAnalysis(markdown, true);
-  const { codeRegions, htmlRegions, listRegions } = analysis;
-  const inertRegions = mergeRegions([...codeRegions, ...htmlRegions]);
+  const { source: markdown, inertRegions, listRegions } = analysis;
   const mathRegions = computeDollarMathRegions(markdown, inertRegions);
+  let changed = false;
   const transformed = markdown.replace(
     /(\{\+\+|\{--|\{~~|\{==|\{>>)((?:\r\n|\r|\n)(?:[ \t]*(?:>[ \t]*)?(?:\r\n|\r|\n))?)([ \t]*(?:(?:>[ \t]*)+)?)/g,
     (full, open: string, leadingBreak: string, nextPrefix: string, offset: number) => {
@@ -76,19 +93,18 @@ function moveLeadingBreakOutsideCritic(markdown: string): LeadingBreakResult {
         const paragraphBreak = lineEndings.length > 1
           ? leadingBreak
           : eol + quoteMatch[1].trimEnd() + eol;
+        changed = true;
         return paragraphBreak + nextPrefix + open;
       }
 
       // Preserve an existing blank line. For a lone newline, add the second
       // newline needed to form a Markdown paragraph boundary.
       const paragraphBreak = lineEndings.length > 1 ? leadingBreak : eol + eol;
+      changed = true;
       return paragraphBreak + open + nextPrefix;
     },
   );
-  return {
-    markdown: transformed,
-    analysis: transformed === markdown ? analysis : undefined,
-  };
+  return changed ? computeCriticBlockAnalysis(transformed) : analysis;
 }
 
 function quoteDepthAt(content: string, offset: number): number {
@@ -229,10 +245,10 @@ export function preprocessCriticMarkup(markdown: string): string {
     return markdown;
   }
 
-  const leadingBreak = moveLeadingBreakOutsideCritic(markdown);
-  const result = leadingBreak.markdown;
-  const { codeRegions, htmlRegions } = leadingBreak.analysis ?? computeCriticBlockAnalysis(result);
-  const inertRegions = mergeRegions([...codeRegions, ...htmlRegions]);
+  const analysis = LEADING_CRITIC_BREAK_RE.test(markdown)
+    ? moveLeadingBreakOutsideCritic(computeCriticBlockAnalysis(markdown, true))
+    : computeCriticBlockAnalysis(markdown);
+  const { source: result, inertRegions } = analysis;
   const segments: string[] = [];
   let lastPos = 0;
   let searchFrom = 0;
