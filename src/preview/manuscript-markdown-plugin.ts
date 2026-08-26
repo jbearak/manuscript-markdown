@@ -562,11 +562,15 @@ function parseCriticMarkupInInlineMath(state: StateInline, silent: boolean): boo
   const openerIsEscaped = (start - 1 - openerSlash) % 2 === 1;
   if (before === '$' || openerIsEscaped || (before && /[\w\d]/.test(before))) return false;
 
-  // Keep currency-like text literal, matching the DOCX parser's math rule.
-  // This interceptor runs before the host math extension, so it must not turn
-  // an otherwise-rejected currency span into math merely because it contains
-  // CriticMarkup.
-  if (/^\d[\d,.]*(?:\s|$)/.test(src.slice(start + 1))) return false;
+  const looksLikeCurrency = /^\d[\d,.]*(?:\s|$)/.test(src.slice(start + 1));
+  if (looksLikeCurrency) {
+    // The DOCX parser leaves this opening dollar literal. Consume it here as
+    // text so VS Code's later, more permissive math rule cannot swallow a
+    // following Critic span or pair it with another currency amount.
+    if (!silent) state.pending += '$';
+    state.pos = start + 1;
+    return true;
+  }
 
   let end = start + 1;
   while ((end = src.indexOf('$', end)) !== -1) {

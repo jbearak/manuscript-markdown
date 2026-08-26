@@ -1639,10 +1639,25 @@ describe('CriticMarkup inside inline equations', () => {
   });
 
   it('keeps currency-like dollars literal when the text contains CriticMarkup', () => {
-    const html = renderWithPlugin('$100 {++increase++}$');
+    const md = new MarkdownIt({ html: true });
+    md.inline.ruler.after('escape', 'test_permissive_host_math', (state: any, silent: boolean) => {
+      if (state.src.charAt(state.pos) !== '$') return false;
+      const close = state.src.indexOf('$', state.pos + 1);
+      if (close === -1) return false;
+      if (!silent) {
+        const token = state.push('math_inline', 'math', 0);
+        token.content = state.src.slice(state.pos + 1, close);
+      }
+      state.pos = close + 1;
+      return true;
+    });
+    md.renderer.rules.math_inline = (tokens, idx) => '<katex>' + escapeHtml(tokens[idx].content) + '</katex>';
+    md.use(manuscriptMarkdownPlugin);
 
-    expect(html).toContain('$100 <ins class="manuscript-markdown-addition">increase</ins>$');
-    expect(html).not.toContain('manuscript-markdown-math-fallback');
+    const html = md.render('Price $100 {++to $120++}');
+
+    expect(html).toContain('Price $100 <ins class="manuscript-markdown-addition">to $120</ins>');
+    expect(html).not.toContain('<katex>');
   });
 
   it('keeps the host math renderer and supplies boundary context for operator spacing', () => {
