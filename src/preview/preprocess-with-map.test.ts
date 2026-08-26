@@ -150,4 +150,17 @@ describe('preprocessCriticMarkupWithMap', () => {
     expect(map.remap(outLines.indexOf('After'))).toBe(3);
     expect(mapped).toEqual([...mapped].sort((a, b) => a - b));
   });
+
+  it('counts CRLF and bare CR as physical line endings', () => {
+    for (const src of [
+      '{++a\r\nb++}\r\nAfter',
+      '{++a\rb++}\rAfter',
+    ]) {
+      const { output, map } = preprocessCriticMarkupWithMap(src);
+      const outLines = output.split(/\r\n|\r|\n/);
+
+      expect(map.remap(outLines.indexOf('After'))).toBe(2);
+      expect(map.remap(outLines.length)).toBe(3);
+    }
+  });
 });

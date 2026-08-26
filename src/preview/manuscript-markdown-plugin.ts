@@ -15,7 +15,6 @@ import { formatTableNumbers } from '../table-number-format';
 import { getDefaultColorScheme } from '../alert-colors';
 import { splitCriticMarkupInMath, type CriticMathPart } from '../critic-math';
 import { findDollarMathAt } from '../math-delimiters';
-import { computeCodeRegions, isInsideCodeRegion, mergeRegions, type CodeRegion } from '../code-regions';
 
 export interface ManuscriptMarkdownIt extends MarkdownIt {
   manuscriptColors?: ColorScheme;
@@ -30,6 +29,7 @@ interface PreviewEnvironment {
   colorScheme?: ColorScheme;
   currentDocument?: string | { fsPath?: unknown };
   lineMap?: LineMap;
+  manuscriptInlineSourceBase?: number;
 }
 
 function getPreviewEnvironment(state: StateCore): PreviewEnvironment {
@@ -352,7 +352,12 @@ function taskListRule(state: StateCore): void {
 }
 
 const ATX_CRITIC_HEADING_RE = /^(#{1,6}) /;
-type CriticHeadingBoundary = 'line' | 'paragraph';
+type CriticHeadingBoundaryKind = 'line' | 'paragraph';
+
+interface CriticHeadingBoundary {
+  kind: CriticHeadingBoundaryKind;
+  sourceOffset?: number;
+}
 
 function cloneInlineToken(state: StateCore, source: Token): Token {
   const clone = new state.Token(source.type, source.tag, source.nesting);
@@ -460,6 +465,10 @@ function promoteFullParagraphCriticHeading(tokens: Token[], index: number): bool
   paragraphClose.tag = 'h' + level;
   paragraphClose.markup = match[1];
   inline.content = openMarker + body.slice(match[0].length);
+  inline.meta = {
+    ...(inline.meta || {}),
+    manuscriptCriticHeadingRemovedPrefix: match[0].length,
+  };
   return true;
 }
 
@@ -469,28 +478,11 @@ interface CriticHeadingSourceSegment {
   endLineOffset: number;
 }
 
-function criticCommentRegions(content: string): CodeRegion[] {
-  const regions: CodeRegion[] = [];
-  const opener = /\{(?:>>|#[A-Za-z0-9_-]+>>)/g;
-  let match: RegExpExecArray | null;
-  while ((match = opener.exec(content)) !== null) {
-    const close = findMatchingClose(content, match.index + match[0].length);
-    if (close === -1) continue;
-    const end = close + '<<}'.length;
-    regions.push({ start: match.index, end });
-    opener.lastIndex = end;
-  }
-  return regions;
-}
-
 function splitCriticHeadingSource(
   content: string,
   boundaries: CriticHeadingBoundary[],
+  sourceOffsetAdjustment: number,
 ): CriticHeadingSourceSegment[] {
-  const ignoredBreakRegions = mergeRegions([
-    ...computeCodeRegions(content),
-    ...criticCommentRegions(content),
-  ]);
   const segments: CriticHeadingSourceSegment[] = [];
   let segmentStart = 0;
   let segmentStartLine = 0;
@@ -504,9 +496,13 @@ function splitCriticHeadingSource(
       continue;
     }
 
-    const kind: CriticHeadingBoundary = isParagraphBreak ? 'paragraph' : 'line';
-    const shouldSplit = !isInsideCodeRegion(index, ignoredBreakRegions) &&
-      kind === boundaries[boundaryIndex];
+    const kind: CriticHeadingBoundaryKind = isParagraphBreak ? 'paragraph' : 'line';
+    const boundary = boundaries[boundaryIndex];
+    const expectedOffset = boundary?.sourceOffset === undefined
+      ? undefined
+      : boundary.sourceOffset - sourceOffsetAdjustment;
+    const shouldSplit = boundary !== undefined && kind === boundary.kind &&
+      (expectedOffset === undefined || index === expectedOffset);
     if (shouldSplit) {
       segments.push({
         content: content.slice(segmentStart, index),
@@ -548,7 +544,7 @@ const VOID_HTML_TAGS = new Set([
 ]);
 
 function rawHtmlTag(token: Token): { kind: 'open' | 'close'; tag: string } | undefined {
-  if (token.type !== 'html_inline') return undefined;
+  if (token.type !== 'html_inline' || isGfmDisallowedRawHtml(token.content)) return undefined;
   const close = /^<\/([A-Za-z][A-Za-z0-9-]*)\s*>$/.exec(token.content);
   if (close) return { kind: 'close', tag: close[1].toLowerCase() };
   const open = /^<([A-Za-z][A-Za-z0-9-]*)(?:\s|>)/.exec(token.content);
@@ -587,7 +583,11 @@ function splitInlineChildrenAtHeadingBreaks(state: StateCore, inline: Token): Cr
       }
       segments.push(segment);
       segment = openStack.map(wrapper => reopenActiveWrapper(state, wrapper));
-      boundaries.push(isParagraphBreak ? 'paragraph' : 'line');
+      const sourceOffset = token.meta?.manuscriptCriticBreakSourceOffset;
+      boundaries.push({
+        kind: isParagraphBreak ? 'paragraph' : 'line',
+        sourceOffset: typeof sourceOffset === 'number' ? sourceOffset : undefined,
+      });
       splitFirstLineBreak = false;
       if (isParagraphBreak) index++;
       continue;
@@ -646,7 +646,12 @@ function splitCriticHeadingsRule(state: StateCore): void {
     const childSplit = splitInlineChildrenAtHeadingBreaks(state, inline);
     const childSegments = childSplit.segments;
     if (childSegments.length < 2) continue;
-    const sourceSegments = splitCriticHeadingSource(inline.content, childSplit.boundaries);
+    const removedPrefix = inline.meta?.manuscriptCriticHeadingRemovedPrefix;
+    const sourceSegments = splitCriticHeadingSource(
+      inline.content,
+      childSplit.boundaries,
+      typeof removedPrefix === 'number' ? removedPrefix : 0,
+    );
     if (sourceSegments.length !== childSegments.length) continue;
 
     const lineMap = getPreviewEnvironment(state).lineMap;
@@ -738,7 +743,13 @@ const patterns: manuscriptMarkdownPattern[] = [
  * @param state - The inline parsing state
  * @param content - The content to parse
  */
-function addInlineContent(state: StateInline, content: string): void {
+function inlineSourceOffset(state: StateInline, localOffset: number): number {
+  const env = state.env as PreviewEnvironment;
+  const base = env.manuscriptInlineSourceBase;
+  return (typeof base === 'number' ? base : 0) + localOffset;
+}
+
+function addInlineContent(state: StateInline, content: string, sourceStart?: number): void {
   // Handle empty content - no tokens to add
   if (content.length === 0) {
     return;
@@ -748,11 +759,72 @@ function addInlineContent(state: StateInline, content: string): void {
   // the source first would prevent delimiters that cross a blank line (such as
   // nested CriticMarkup or emphasis) from matching.
   const childTokens: Token[] = [];
-  state.md.inline.parse(content, state.md, state.env, childTokens);
+  const env = state.env as PreviewEnvironment;
+  const previousSourceBase = env.manuscriptInlineSourceBase;
+  const nestedSourceBase = sourceStart ?? previousSourceBase ?? 0;
+  if (sourceStart !== undefined) env.manuscriptInlineSourceBase = sourceStart;
+  try {
+    state.md.inline.parse(content, state.md, state.env, childTokens);
+  } finally {
+    if (previousSourceBase === undefined) delete env.manuscriptInlineSourceBase;
+    else env.manuscriptInlineSourceBase = previousSourceBase;
+  }
+
+  const protectedBreaks: Array<{ kind: CriticHeadingBoundaryKind; sourceOffset: number }> = [];
+  for (let index = 0; index < content.length;) {
+    const kind = content.startsWith(PARA_PLACEHOLDER, index)
+      ? 'paragraph'
+      : content.startsWith(LINE_PLACEHOLDER, index)
+        ? 'line'
+        : undefined;
+    if (!kind) {
+      index++;
+      continue;
+    }
+    protectedBreaks.push({ kind, sourceOffset: nestedSourceBase + index });
+    index += kind === 'paragraph' ? PARA_PLACEHOLDER.length : LINE_PLACEHOLDER.length;
+  }
+  let protectedBreakIndex = 0;
+  const claimProtectedBreak = (
+    kind: CriticHeadingBoundaryKind,
+  ): { kind: CriticHeadingBoundaryKind; sourceOffset: number } | undefined => {
+    for (; protectedBreakIndex < protectedBreaks.length; protectedBreakIndex++) {
+      const candidate = protectedBreaks[protectedBreakIndex];
+      if (candidate.kind !== kind) continue;
+      protectedBreakIndex++;
+      return candidate;
+    }
+    return undefined;
+  };
+  const claimTokenBreak = (token: Token): void => {
+    const sourceOffset = token.meta?.manuscriptCriticBreakSourceOffset;
+    if (typeof sourceOffset !== 'number') return;
+    while (protectedBreakIndex < protectedBreaks.length &&
+        protectedBreaks[protectedBreakIndex].sourceOffset <= sourceOffset) {
+      protectedBreakIndex++;
+    }
+  };
+  const claimContentBreaks = (tokenContent: string): void => {
+    for (let index = 0; index < tokenContent.length;) {
+      const kind = tokenContent.startsWith(PARA_PLACEHOLDER, index)
+        ? 'paragraph'
+        : tokenContent.startsWith(LINE_PLACEHOLDER, index)
+          ? 'line'
+          : undefined;
+      if (!kind) {
+        index++;
+        continue;
+      }
+      claimProtectedBreak(kind);
+      index += kind === 'paragraph' ? PARA_PLACEHOLDER.length : LINE_PLACEHOLDER.length;
+    }
+  };
 
   const expandParagraphBreaks = (tokens: Token[]): Token[] => {
     const expanded: Token[] = [];
     for (const token of tokens) {
+      claimTokenBreak(token);
+      const hasChildren = token.children !== null && token.children !== undefined;
       if (token.children) {
         token.children = expandParagraphBreaks(token.children);
       }
@@ -779,11 +851,22 @@ function addInlineContent(state: StateInline, content: string): void {
             expanded.push(textToken);
           }
           if (markerPos === paraPos) {
-            expanded.push(new state.Token('hardbreak', 'br', 0));
-            expanded.push(new state.Token('hardbreak', 'br', 0));
+            const sourceBreak = claimProtectedBreak('paragraph');
+            const first = new state.Token('hardbreak', 'br', 0);
+            const second = new state.Token('hardbreak', 'br', 0);
+            if (sourceBreak) {
+              first.meta = { manuscriptCriticBreakSourceOffset: sourceBreak.sourceOffset };
+              second.meta = { manuscriptCriticBreakSourceOffset: sourceBreak.sourceOffset };
+            }
+            expanded.push(first, second);
             textStart = markerPos + PARA_PLACEHOLDER.length;
           } else {
-            expanded.push(new state.Token('softbreak', 'br', 0));
+            const sourceBreak = claimProtectedBreak('line');
+            const lineBreak = new state.Token('softbreak', 'br', 0);
+            if (sourceBreak) {
+              lineBreak.meta = { manuscriptCriticBreakSourceOffset: sourceBreak.sourceOffset };
+            }
+            expanded.push(lineBreak);
             textStart = markerPos + LINE_PLACEHOLDER.length;
           }
         }
@@ -793,6 +876,7 @@ function addInlineContent(state: StateInline, content: string): void {
       // Code and other opaque inline tokens do not expose their content as text
       // children, but the implementation placeholder must never reach HTML.
       if (token.content.includes(PARA_PLACEHOLDER) || token.content.includes(LINE_PLACEHOLDER)) {
+        if (!hasChildren) claimContentBreaks(token.content);
         const separator = token.type === 'code_inline' ? ' ' : '\n\n';
         token.content = token.content
           .split(PARA_PLACEHOLDER).join(separator)
@@ -807,6 +891,7 @@ function addInlineContent(state: StateInline, content: string): void {
     const token = state.push(childToken.type, childToken.tag, childToken.nesting);
     token.content = childToken.content;
     token.markup = childToken.markup;
+    token.meta = childToken.meta ? { ...childToken.meta } : null;
     if (childToken.attrs) {
       for (const [key, value] of childToken.attrs) {
         token.attrSet(key, value);
@@ -1076,7 +1161,7 @@ function parseFormatHighlight(state: StateInline, silent: boolean): boolean {
         tokenOpen.attrSet('class', cssClass);
         
         // Add parsed inline content to allow nested Markdown processing
-        addInlineContent(state, content);
+        addInlineContent(state, content, inlineSourceOffset(state, start + 2));
         
         state.push('manuscript_markdown_format_highlight_close', 'mark', -1);
         state.pos = endPos;
@@ -1129,7 +1214,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
         tokenOpen.attrSet('class', 'manuscript-markdown-addition');
         
         // Add parsed inline content to allow nested Markdown processing
-        addInlineContent(state, content);
+        addInlineContent(state, content, inlineSourceOffset(state, start + 3));
         
         state.push('manuscript_markdown_addition_close', 'ins', -1);
       }
@@ -1149,7 +1234,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
         tokenOpen.attrSet('class', 'manuscript-markdown-deletion');
         
         // Add parsed inline content to allow nested Markdown processing
-        addInlineContent(state, content);
+        addInlineContent(state, content, inlineSourceOffset(state, start + 3));
         
         state.push('manuscript_markdown_deletion_close', 'del', -1);
       }
@@ -1178,7 +1263,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
           tokenOldOpen.attrSet('class', 'manuscript-markdown-deletion');
           
           // Add parsed inline content to allow nested Markdown processing
-          addInlineContent(state, oldText);
+          addInlineContent(state, oldText, inlineSourceOffset(state, start + 3));
           
           state.push('manuscript_markdown_substitution_old_close', 'del', -1);
           
@@ -1187,7 +1272,11 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
           tokenNewOpen.attrSet('class', 'manuscript-markdown-addition');
           
           // Add parsed inline content to allow nested Markdown processing
-          addInlineContent(state, newText);
+          addInlineContent(
+            state,
+            newText,
+            inlineSourceOffset(state, start + 3 + separatorPos + 2),
+          );
           
           state.push('manuscript_markdown_substitution_new_close', 'ins', -1);
           
@@ -1218,7 +1307,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
               id,
               commentText: restoreCriticLineBreaks(content),
             };
-            addInlineContent(state, content);
+            addInlineContent(state, content, inlineSourceOffset(state, idEnd + 2));
             state.push('manuscript_markdown_comment_close', 'span', -1);
           }
           state.pos = endPos + 3;
@@ -1266,7 +1355,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
         tokenOpen.meta = { commentText: restoreCriticLineBreaks(content) };
 
         // Add parsed inline content to allow nested Markdown processing
-        addInlineContent(state, content);
+        addInlineContent(state, content, inlineSourceOffset(state, start + 3));
 
         state.push('manuscript_markdown_comment_close', 'span', -1);
       }
@@ -1286,7 +1375,7 @@ function parseManuscriptMarkdown(state: StateInline, silent: boolean): boolean {
         tokenOpen.attrSet('class', 'manuscript-markdown-highlight');
         
         // Add parsed inline content to allow nested Markdown processing
-        addInlineContent(state, content);
+        addInlineContent(state, content, inlineSourceOffset(state, start + 3));
         
         state.push('manuscript_markdown_highlight_close', 'mark', -1);
       }
@@ -1442,8 +1531,11 @@ function paraPlaceholderRule(state: StateInline, silent: boolean): boolean {
   if (!state.src.startsWith(PARA_PLACEHOLDER, start)) return false;
 
   if (!silent) {
-    state.push('softbreak', 'br', 0);
-    state.push('softbreak', 'br', 0);
+    const sourceOffset = inlineSourceOffset(state, start);
+    const first = state.push('softbreak', 'br', 0);
+    first.meta = { ...(first.meta || {}), manuscriptCriticBreakSourceOffset: sourceOffset };
+    const second = state.push('softbreak', 'br', 0);
+    second.meta = { ...(second.meta || {}), manuscriptCriticBreakSourceOffset: sourceOffset };
   }
   state.pos = start + PARA_PLACEHOLDER.length;
   return true;
@@ -1458,8 +1550,13 @@ function escapedCriticBreakPlaceholderRule(state: StateInline, silent: boolean):
   if (!isParagraphBreak && !isLineBreak) return false;
 
   if (!silent) {
-    state.push('hardbreak', 'br', 0);
-    if (isParagraphBreak) state.push('hardbreak', 'br', 0);
+    const sourceOffset = inlineSourceOffset(state, start + 1);
+    const first = state.push('hardbreak', 'br', 0);
+    first.meta = { ...(first.meta || {}), manuscriptCriticBreakSourceOffset: sourceOffset };
+    if (isParagraphBreak) {
+      const second = state.push('hardbreak', 'br', 0);
+      second.meta = { ...(second.meta || {}), manuscriptCriticBreakSourceOffset: sourceOffset };
+    }
   }
   state.pos = start + 1 + (isParagraphBreak ? PARA_PLACEHOLDER.length : LINE_PLACEHOLDER.length);
   return true;

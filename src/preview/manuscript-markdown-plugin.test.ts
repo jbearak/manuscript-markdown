@@ -1011,6 +1011,46 @@ describe('CriticMarkup headings in preview', () => {
     );
   });
 
+  it('splits at breaks after escaped comment and code delimiters', () => {
+    for (const body of [
+      'Section \\{>>literal\n\ntext<<}\n\nParagraph',
+      'Section \\{#note>>literal\n\ntext<<}\n\nParagraph',
+      'Section \\`literal\n\ntext`\n\nParagraph',
+    ]) {
+      for (const input of ['## {++' + body + '++}', '{++## ' + body + '++}']) {
+        const output = renderWithPlugin(input);
+        expect(output).toContain('</h2>\n<p>');
+        expect(output).toContain('Paragraph</ins></p>');
+        expect(output).not.toContain('Paragraph</ins></h2>');
+      }
+    }
+  });
+
+  it('maps a split after opaque HTML attributes and image labels', () => {
+    for (const body of [
+      '<span title="Section\n\nName">Visible</span>\n\nParagraph',
+      '![Section\n\nName](image.png)\n\nParagraph',
+    ]) {
+      for (const input of ['## {++' + body + '++}', '{++## ' + body + '++}']) {
+        const md = new MarkdownIt({ html: true });
+        md.use(manuscriptMarkdownPlugin);
+        const blockMaps = md.parse(input, {})
+          .filter(token => token.type === 'heading_open' || token.type === 'paragraph_open')
+          .map(token => token.map);
+        expect(blockMaps).toEqual([[0, 3], [4, 5]]);
+      }
+    }
+  });
+
+  it('does not synthesize wrappers for GFM-disallowed raw HTML', () => {
+    const output = renderWithPlugin('## {++<title>Section\n\nParagraph</title>++}');
+
+    expect(output).toContain(
+      '<h2><ins class="manuscript-markdown-addition">&lt;title&gt;Section</ins></h2>\n' +
+      '<p><ins class="manuscript-markdown-addition">Paragraph&lt;/title&gt;</ins></p>'
+    );
+  });
+
   it('does not leak a protected newline after a Markdown escape', () => {
     const output = renderWithPlugin('## {++Section Name\\\nParagraph text.++}');
 
@@ -1076,6 +1116,20 @@ describe('CriticMarkup headings in preview', () => {
       md.use(manuscriptMarkdownPlugin);
       const tokens = md.parse(input, {});
       const blockMaps = tokens
+        .filter(token => token.type === 'heading_open' || token.type === 'paragraph_open')
+        .map(token => token.map);
+      expect(blockMaps).toEqual(expectedMaps);
+    }
+  });
+
+  it('maps bare-CR heading boundaries as physical newlines', () => {
+    for (const [input, expectedMaps] of [
+      ['{++## Section\rParagraph++}', [[0, 1], [1, 2]]],
+      ['{++## Section\r\rParagraph++}', [[0, 1], [2, 3]]],
+    ] as const) {
+      const md = new MarkdownIt({ html: true });
+      md.use(manuscriptMarkdownPlugin);
+      const blockMaps = md.parse(input, {})
         .filter(token => token.type === 'heading_open' || token.type === 'paragraph_open')
         .map(token => token.map);
       expect(blockMaps).toEqual(expectedMaps);

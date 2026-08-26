@@ -129,23 +129,27 @@ function buildMapFromLines(origLines: string[], outLines: string[]): LineMap {
   return LineMap.fromLineMappings(mappings);
 }
 
+function splitPhysicalLines(source: string): string[] {
+  return source.split(/\r\n|\r|\n/);
+}
+
 /** Preprocess grid tables and return the output with a line map. */
 export function preprocessGridTablesWithMap(src: string): { output: string; map: LineMap } {
   const output = preprocessGridTables(src);
   if (output === src) return { output, map: LineMap.identity() };
-  return { output, map: buildMapFromLines(src.split('\n'), output.split('\n')) };
+  return { output, map: buildMapFromLines(splitPhysicalLines(src), splitPhysicalLines(output)) };
 }
 
 /** Preprocess bare LaTeX environments and return the output with a line map. */
 export function wrapBareLatexEnvironmentsWithMap(src: string): { output: string; map: LineMap } {
   const output = wrapBareLatexEnvironments(src);
   if (output === src) return { output, map: LineMap.identity() };
-  return { output, map: buildMapFromLines(src.split('\n'), output.split('\n')) };
+  return { output, map: buildMapFromLines(splitPhysicalLines(src), splitPhysicalLines(output)) };
 }
 
 /** Preprocess CriticMarkup and return the output with a line map. */
 export function preprocessCriticMarkupWithMap(src: string): { output: string; map: LineMap } {
   const output = preprocessCriticMarkup(src);
   if (output === src) return { output, map: LineMap.identity() };
-  return { output, map: buildMapFromLines(src.split('\n'), output.split('\n')) };
+  return { output, map: buildMapFromLines(splitPhysicalLines(src), splitPhysicalLines(output)) };
 }
