@@ -626,6 +626,12 @@ function citationRule(state: StateInline, silent: boolean): boolean {
 
 const DOCX_DOLLAR_MATH_OPTIONS = { displayRun: 'at-least' as const };
 
+function pushMathToken(state: StateInline, content: string, display = false): void {
+  const token = pushManuscriptToken(state, 'math', '', 0);
+  token.content = content;
+  if (display) token.display = true;
+}
+
 function mathRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   if (start >= state.posMax || state.src.charAt(start) !== '$') return false;
@@ -637,7 +643,8 @@ function mathRule(state: StateInline, silent: boolean): boolean {
   if (silent) return true;
 
   const content = state.src.slice(match.contentStart, match.contentEnd);
-  if (match.delimiterLength === 1) {
+  const isDisplay = match.delimiterLength === 2;
+  if (!isDisplay) {
     const criticParts = splitCriticMarkupInMath(content);
     if (criticParts) {
       pushCriticMathTokens(state, criticParts);
@@ -645,9 +652,7 @@ function mathRule(state: StateInline, silent: boolean): boolean {
     }
   }
 
-  const token = pushManuscriptToken(state, 'math', '', 0);
-  token.content = content;
-  if (match.delimiterLength === 2) token.display = true;
+  pushMathToken(state, content, isDisplay);
   return true;
 }
 
@@ -657,9 +662,7 @@ function wrapInlineMathFragment(content: string): string {
 
 function pushCriticMathTokens(state: StateInline, parts: CriticMathPart[]): void {
   const pushMath = (content: string) => {
-    if (!content) return;
-    const token = pushManuscriptToken(state, 'math', '', 0);
-    token.content = content;
+    if (content) pushMathToken(state, content);
   };
 
   for (const part of parts) {
