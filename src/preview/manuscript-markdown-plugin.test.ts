@@ -883,6 +883,23 @@ describe('CriticMarkup headings in preview', () => {
     }
   });
 
+  it('does not promote an empty internal Critic heading', () => {
+    for (const input of ['{++## ++}', '{--## --}']) {
+      const output = renderWithPlugin(input);
+      expect(output).toContain('## ');
+      expect(output).not.toContain('<h2>');
+    }
+  });
+
+  it('promotes an internal heading whose content continues in an adjacent revision span', () => {
+    const output = renderWithPlugin('{++## ++}{++Section Name++}');
+
+    expect(output).toContain(
+      '<h2><ins class="manuscript-markdown-addition"></ins>' +
+      '<ins class="manuscript-markdown-addition">Section Name</ins></h2>'
+    );
+  });
+
   it('leaves internal Critic heading markers literal in quotes and lists', () => {
     for (const input of ['> {++## Quoted++}', '- {++## Listed++}']) {
       const output = renderWithPlugin(input);
@@ -945,6 +962,39 @@ describe('CriticMarkup headings in preview', () => {
     const output = renderWithPlugin('## {++Section Name\n\nParagraph text.++}{>>note<<}');
 
     expect(output.match(/data-comment="note"/g)).toHaveLength(2);
+  });
+
+  it('ignores protected breaks inside an attached multiline comment when splitting', () => {
+    const output = renderWithPlugin(
+      '## {++Section Name\n\nParagraph text.++}{>>first\n\nsecond<<}'
+    );
+
+    expect(output).toContain(
+      '<h2><ins class="manuscript-markdown-addition" data-comment="first\n\nsecond">' +
+      'Section Name</ins></h2>\n' +
+      '<p><ins class="manuscript-markdown-addition" data-comment="first\n\nsecond">' +
+      'Paragraph text.</ins></p>'
+    );
+  });
+
+  it('uses emitted breaks when opaque inline content consumes a placeholder', () => {
+    const output = renderWithPlugin('## {++`Section\nName`\n\nParagraph text.++}');
+
+    expect(output).toContain(
+      '<h2><ins class="manuscript-markdown-addition"><code>Section Name</code></ins></h2>\n' +
+      '<p><ins class="manuscript-markdown-addition">Paragraph text.</ins></p>'
+    );
+  });
+
+  it('does not leak a protected newline after a Markdown escape', () => {
+    const output = renderWithPlugin('## {++Section Name\\\nParagraph text.++}');
+
+    expect(output).toContain(
+      '<h2><ins class="manuscript-markdown-addition">Section Name</ins></h2>\n' +
+      '<p><ins class="manuscript-markdown-addition">Paragraph text.</ins></p>'
+    );
+    expect(output).not.toContain(LINE_PLACEHOLDER);
+    expect(output).not.toContain('\uE000');
   });
 
   it('assigns each generated block its own source map and standard token shape', () => {

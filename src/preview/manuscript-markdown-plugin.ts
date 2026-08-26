@@ -351,6 +351,7 @@ function taskListRule(state: StateCore): void {
 }
 
 const ATX_CRITIC_HEADING_RE = /^(#{1,6}) /;
+type CriticHeadingBoundary = 'line' | 'paragraph';
 
 function cloneInlineToken(state: StateCore, source: Token): Token {
   const clone = new state.Token(source.type, source.tag, source.nesting);
@@ -398,6 +399,23 @@ function isEntirelyCriticKind(children: Token[], criticType: 'addition' | 'delet
   return depth === 0;
 }
 
+function hasHeadingContent(children: Token[], firstTextIndex: number, markerLength: number): boolean {
+  for (let index = firstTextIndex; index < children.length; index++) {
+    const token = children[index];
+    if (token.type === 'softbreak' || token.type === 'hardbreak') return false;
+    if (token.nesting !== 0) continue;
+    if (token.type === 'text' || token.type === 'html_inline') {
+      const content = index === firstTextIndex
+        ? token.content.slice(markerLength)
+        : token.content;
+      if (content.trim()) return true;
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
 function promoteFullParagraphCriticHeading(tokens: Token[], index: number): boolean {
   const paragraphOpen = tokens[index];
   const inline = tokens[index + 1];
@@ -423,17 +441,13 @@ function promoteFullParagraphCriticHeading(tokens: Token[], index: number): bool
   const body = inline.content.slice(openMarker.length);
   const match = ATX_CRITIC_HEADING_RE.exec(body);
   if (!match) return false;
-  const firstBreak = [body.indexOf(LINE_PLACEHOLDER), body.indexOf(PARA_PLACEHOLDER)]
-    .filter(position => position >= 0)
-    .reduce((earliest, position) => Math.min(earliest, position), body.length);
-  const firstBlock = body.slice(match[0].length, firstBreak);
-  if (!firstBlock.trim()) return false;
 
   const firstTextIndex = children.findIndex((child, childIndex) =>
     childIndex > 0 && child.type === 'text' && child.content.length > 0
   );
   const firstText = children[firstTextIndex];
   if (!firstText?.content.startsWith(match[0])) return false;
+  if (!hasHeadingContent(children, firstTextIndex, match[0].length)) return false;
   firstText.content = firstText.content.slice(match[0].length);
   if (!firstText.content) children.splice(firstTextIndex, 1);
 
@@ -454,12 +468,15 @@ interface CriticHeadingSourceSegment {
   endLineOffset: number;
 }
 
-function splitCriticHeadingSource(content: string): CriticHeadingSourceSegment[] {
+function splitCriticHeadingSource(
+  content: string,
+  boundaries: CriticHeadingBoundary[],
+): CriticHeadingSourceSegment[] {
   const segments: CriticHeadingSourceSegment[] = [];
   let segmentStart = 0;
   let segmentStartLine = 0;
   let currentLine = 0;
-  let splitFirstLineBreak = true;
+  let boundaryIndex = 0;
   for (let index = 0; index < content.length;) {
     const isParagraphBreak = content.startsWith(PARA_PLACEHOLDER, index);
     const isLineBreak = content.startsWith(LINE_PLACEHOLDER, index);
@@ -468,7 +485,8 @@ function splitCriticHeadingSource(content: string): CriticHeadingSourceSegment[]
       continue;
     }
 
-    const shouldSplit = splitFirstLineBreak || isParagraphBreak;
+    const kind: CriticHeadingBoundary = isParagraphBreak ? 'paragraph' : 'line';
+    const shouldSplit = kind === boundaries[boundaryIndex];
     if (shouldSplit) {
       segments.push({
         content: content.slice(segmentStart, index),
@@ -483,9 +501,10 @@ function splitCriticHeadingSource(content: string): CriticHeadingSourceSegment[]
     if (shouldSplit) {
       segmentStart = index;
       segmentStartLine = currentLine;
-      splitFirstLineBreak = false;
+      boundaryIndex++;
     }
   }
+  if (boundaryIndex !== boundaries.length) return [];
   segments.push({
     content: content.slice(segmentStart),
     startLineOffset: segmentStartLine,
@@ -494,30 +513,31 @@ function splitCriticHeadingSource(content: string): CriticHeadingSourceSegment[]
   return segments;
 }
 
-function splitInlineChildrenAtHeadingBreaks(state: StateCore, inline: Token): Token[][] {
-  const children = inline.children ?? [];
-  const sourceSegments = splitCriticHeadingSource(inline.content);
-  if (sourceSegments.length < 2) return [children];
+interface CriticHeadingChildSplit {
+  segments: Token[][];
+  boundaries: CriticHeadingBoundary[];
+}
 
+function splitInlineChildrenAtHeadingBreaks(state: StateCore, inline: Token): CriticHeadingChildSplit {
+  const children = inline.children ?? [];
   const segments: Token[][] = [];
+  const boundaries: CriticHeadingBoundary[] = [];
   const openStack: Token[] = [];
   let segment: Token[] = [];
   let splitFirstLineBreak = true;
-  let remainingBoundaries = sourceSegments.length - 1;
   for (let index = 0; index < children.length; index++) {
     const token = children[index];
     const next = children[index + 1];
     const isParagraphBreak = token.type === 'hardbreak' && next?.type === 'hardbreak';
-    const isLineBreak = token.type === 'softbreak';
-    const shouldSplit = remainingBoundaries > 0 &&
-      (isParagraphBreak || (splitFirstLineBreak && isLineBreak));
+    const isLineBreak = token.type === 'softbreak' || (token.type === 'hardbreak' && !isParagraphBreak);
+    const shouldSplit = isParagraphBreak || (splitFirstLineBreak && isLineBreak);
     if (shouldSplit) {
       for (let stackIndex = openStack.length - 1; stackIndex >= 0; stackIndex--) {
         segment.push(closeTokenFor(state, openStack[stackIndex]));
       }
       segments.push(segment);
       segment = openStack.map(open => cloneInlineToken(state, open));
-      remainingBoundaries--;
+      boundaries.push(isParagraphBreak ? 'paragraph' : 'line');
       splitFirstLineBreak = false;
       if (isParagraphBreak) index++;
       continue;
@@ -531,7 +551,7 @@ function splitInlineChildrenAtHeadingBreaks(state: StateCore, inline: Token): To
     }
   }
   segments.push(segment);
-  return segments;
+  return { segments, boundaries };
 }
 
 function hasVisibleInlineContent(children: Token[]): boolean {
@@ -560,9 +580,10 @@ function criticHeadingRule(state: StateCore): void {
         headingClose?.type !== 'heading_close' ||
         (!inline.content.includes(PARA_PLACEHOLDER) && !inline.content.includes(LINE_PLACEHOLDER))) continue;
 
-    const sourceSegments = splitCriticHeadingSource(inline.content);
-    const childSegments = splitInlineChildrenAtHeadingBreaks(state, inline);
+    const childSplit = splitInlineChildrenAtHeadingBreaks(state, inline);
+    const childSegments = childSplit.segments;
     if (childSegments.length < 2) continue;
+    const sourceSegments = splitCriticHeadingSource(inline.content, childSplit.boundaries);
     if (sourceSegments.length !== childSegments.length) continue;
 
     const lineMap = getPreviewEnvironment(state).lineMap;
@@ -1365,6 +1386,17 @@ function paraPlaceholderRule(state: StateInline, silent: boolean): boolean {
   return true;
 }
 
+/** Preserve a Markdown hard break whose source newline was protected inside CriticMarkup. */
+function escapedLinePlaceholderRule(state: StateInline, silent: boolean): boolean {
+  const start = state.pos;
+  if (state.src.charCodeAt(start) !== 0x5C /* \ */ ||
+      !state.src.startsWith(LINE_PLACEHOLDER, start + 1)) return false;
+
+  if (!silent) state.push('hardbreak', 'br', 0);
+  state.pos = start + 1 + LINE_PLACEHOLDER.length;
+  return true;
+}
+
 
 /**
  * Block rule that detects grid table placeholder comments and emits
@@ -1605,6 +1637,7 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
 
   // Register inline rule for paragraph placeholder (before other inline rules)
   md.inline.ruler.before('emphasis', 'para_placeholder', paraPlaceholderRule);
+  md.inline.ruler.before('escape', 'critic_escaped_line_placeholder', escapedLinePlaceholderRule);
 
   // VS Code's math extension registers its inline rule immediately after
   // `escape`, before our general CriticMarkup rule. Intercept only equations
