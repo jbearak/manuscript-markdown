@@ -1638,6 +1638,13 @@ describe('CriticMarkup inside inline equations', () => {
     expect(html).not.toContain('$a');
   });
 
+  it('keeps currency-like dollars literal when the text contains CriticMarkup', () => {
+    const html = renderWithPlugin('$100 {++increase++}$');
+
+    expect(html).toContain('$100 <ins class="manuscript-markdown-addition">increase</ins>$');
+    expect(html).not.toContain('manuscript-markdown-math-fallback');
+  });
+
   it('keeps the host math renderer and supplies boundary context for operator spacing', () => {
     const md = new MarkdownIt({ html: true });
     md.renderer.rules.math_inline = (tokens, idx) => '<katex>' + escapeHtml(tokens[idx].content) + '</katex>';

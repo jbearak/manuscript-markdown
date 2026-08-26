@@ -90,22 +90,42 @@ function computeDollarMathRegions(
   codeRegions: Array<{ start: number; end: number }>,
 ): Array<{ start: number; end: number }> {
   const regions: Array<{ start: number; end: number }> = [];
-  let delimiterLength = 0;
-  let regionStart = 0;
+
+  const findClose = (start: number, delimiterLength: 1 | 2): number => {
+    for (let i = start; i < content.length; i++) {
+      if (content.charCodeAt(i) !== 0x24 || isEscapedAt(content, i) || isInsideCodeRegion(i, codeRegions)) continue;
+      let runLength = 1;
+      while (i + runLength < content.length && content.charCodeAt(i + runLength) === 0x24) runLength++;
+      if (runLength === delimiterLength) return i;
+      i += runLength - 1;
+    }
+    return -1;
+  };
+
   for (let i = 0; i < content.length; i++) {
     if (content.charCodeAt(i) !== 0x24 || isEscapedAt(content, i) || isInsideCodeRegion(i, codeRegions)) continue;
     let runLength = 1;
     while (i + runLength < content.length && content.charCodeAt(i + runLength) === 0x24) runLength++;
-    if (runLength <= 2) {
-      if (delimiterLength === 0) {
-        delimiterLength = runLength;
-        regionStart = i;
-      } else if (delimiterLength === runLength) {
-        regions.push({ start: regionStart, end: i + runLength });
-        delimiterLength = 0;
+    if (runLength > 2) {
+      i += runLength - 1;
+      continue;
+    }
+
+    if (runLength === 1) {
+      // Match the inline-math boundary rules used by the DOCX parser. In
+      // particular, a currency amount must not make every later dollar look
+      // like part of one large equation and suppress Critic block handling.
+      if ((i > 0 && /\w/.test(content.charAt(i - 1))) ||
+          /^\d[\d,.]*(?:\s|$)/.test(content.slice(i + 1))) {
+        continue;
       }
     }
-    i += runLength - 1;
+
+    const delimiterLength = runLength as 1 | 2;
+    const close = findClose(i + delimiterLength, delimiterLength);
+    if (close === -1 || (delimiterLength === 1 && /\w/.test(content.charAt(close + 1)))) continue;
+    regions.push({ start: i, end: close + delimiterLength });
+    i = close + delimiterLength - 1;
   }
   return regions;
 }

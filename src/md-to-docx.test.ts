@@ -2238,6 +2238,13 @@ describe('preprocessCriticMarkup', () => {
     expect(runs.map(run => run.text).join('')).toBe(input);
   });
 
+  it('does not treat currency dollars as an inline-math region when moving a stranded opener', () => {
+    const input = 'Cost $100 and\nchange {++\nAdded++}\n$ later';
+    expect(preprocessCriticMarkup(input)).toBe(
+      'Cost $100 and\nchange \n\n{++Added++}\n$ later',
+    );
+  });
+
   it('treats CR-only blank lines as paragraph breaks inside CriticMarkup', () => {
     const input = '{++a\r\rb++}';
     expect(preprocessCriticMarkup(input)).toBe('{++a' + PARA_PLACEHOLDER + 'b++}');

@@ -96,24 +96,33 @@ function stripQuoteContinuationPrefixes(content: string, depth: number): string 
 }
 
 function isInsideDollarMathAt(content: string, offset: number, codeRegions: Array<{ start: number; end: number }>): boolean {
-  let delimiterLength = 0;
+  const findClose = (start: number, delimiterLength: 1 | 2): number => {
+    for (let i = start; i < content.length; i++) {
+      if (content.charCodeAt(i) !== 0x24 || isEscapedAt(content, i) || isInsideCodeRegion(i, codeRegions)) continue;
+      let runLength = 1;
+      while (i + runLength < content.length && content.charCodeAt(i + runLength) === 0x24) runLength++;
+      if (runLength === delimiterLength) return i;
+      i += runLength - 1;
+    }
+    return -1;
+  };
+
   for (let i = 0; i < offset; i++) {
     if (content.charCodeAt(i) !== 0x24 || isEscapedAt(content, i) || isInsideCodeRegion(i, codeRegions)) continue;
     let runLength = 1;
     while (i + runLength < content.length && content.charCodeAt(i + runLength) === 0x24) runLength++;
-    if (runLength <= 2) {
-      if (delimiterLength === 0) delimiterLength = runLength;
-      else if (delimiterLength === runLength) delimiterLength = 0;
+    if (runLength > 2) {
+      i += runLength - 1;
+      continue;
     }
-    i += runLength - 1;
-  }
-  if (delimiterLength === 0) return false;
-  for (let i = offset; i < content.length; i++) {
-    if (content.charCodeAt(i) !== 0x24 || isEscapedAt(content, i) || isInsideCodeRegion(i, codeRegions)) continue;
-    let runLength = 1;
-    while (i + runLength < content.length && content.charCodeAt(i + runLength) === 0x24) runLength++;
-    if (runLength === delimiterLength) return true;
-    i += runLength - 1;
+    if (runLength === 1 && ((i > 0 && /\w/.test(content.charAt(i - 1))) ||
+        /^\d[\d,.]*(?:\s|$)/.test(content.slice(i + 1)))) continue;
+
+    const delimiterLength = runLength as 1 | 2;
+    const close = findClose(i + delimiterLength, delimiterLength);
+    if (close === -1 || (delimiterLength === 1 && /\w/.test(content.charAt(close + 1)))) continue;
+    if (offset >= i && offset < close + delimiterLength) return true;
+    i = close + delimiterLength - 1;
   }
   return false;
 }
