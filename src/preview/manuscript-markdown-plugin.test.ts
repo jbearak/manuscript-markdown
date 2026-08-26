@@ -9,6 +9,12 @@ import { LINE_PLACEHOLDER, PARA_PLACEHOLDER } from '../critic-markup';
 import * as fs from 'fs';
 import * as path from 'path';
 
+function startsWithNonemptyAtxHeading(text: string): boolean {
+  const firstLine = text.split(/\r\n|\r|\n/, 1)[0];
+  const marker = /^(#{1,6}) /.exec(firstLine);
+  return marker !== null && firstLine.slice(marker[0].length).trim().length > 0;
+}
+
 function makeEmbedResolver(files: Record<string, string>): EmbedResolver {
   return {
     readFile(absolutePath: string): Uint8Array | null {
@@ -203,7 +209,10 @@ describe('Manuscript Markdown Plugin Property Tests', () => {
     it('should transform addition patterns into HTML with correct CSS class', () => {
       fc.assert(
         fc.property(
-          fc.string({ minLength: 1, maxLength: 100 }).filter(s => !s.includes('{') && !s.includes('}') && hasNoSpecialSyntax(s)),
+          fc.string({ minLength: 1, maxLength: 100 }).filter(s =>
+            !s.includes('{') && !s.includes('}') && hasNoSpecialSyntax(s) &&
+            !startsWithNonemptyAtxHeading(s)
+          ),
           (text) => {
             const output = renderWithPlugin('{++' + text + '++}');
             expect(output).toContain('manuscript-markdown-addition');
@@ -218,7 +227,10 @@ describe('Manuscript Markdown Plugin Property Tests', () => {
     it('should transform deletion patterns into HTML with correct CSS class', () => {
       fc.assert(
         fc.property(
-          fc.string({ minLength: 1, maxLength: 100 }).filter(s => !s.includes('{') && !s.includes('}') && hasNoSpecialSyntax(s)),
+          fc.string({ minLength: 1, maxLength: 100 }).filter(s =>
+            !s.includes('{') && !s.includes('}') && hasNoSpecialSyntax(s) &&
+            !startsWithNonemptyAtxHeading(s)
+          ),
           (text) => {
             const output = renderWithPlugin('{--' + text + '--}');
             expect(output).toContain('manuscript-markdown-deletion');
@@ -884,7 +896,7 @@ describe('CriticMarkup headings in preview', () => {
   });
 
   it('does not promote an empty internal Critic heading', () => {
-    for (const input of ['{++## ++}', '{--## --}']) {
+    for (const input of ['{++## ++}', '{--## --}', '{++## \nParagraph++}', '{--## \nParagraph--}']) {
       const output = renderWithPlugin(input);
       expect(output).toContain('## ');
       expect(output).not.toContain('<h2>');
@@ -1262,7 +1274,7 @@ describe('Property 4: Empty line preservation', () => {
 
   for (const type of SIMPLE_CRITIC_TYPES) {
     const eligibleText = type.name === 'addition' || type.name === 'deletion'
-      ? multilineTextWithEmptyLines.filter(lines => !/^#{1,6} /.test(lines[0]))
+      ? multilineTextWithEmptyLines.filter(lines => !startsWithNonemptyAtxHeading(lines[0]))
       : multilineTextWithEmptyLines;
     const arb = type.name === 'comment'
       ? eligibleText.filter(lines => lines.every(line => !line.includes('<') && !line.includes('>')))
@@ -1317,7 +1329,7 @@ describe('Property 3: Multi-line preview rendering (multiline-Manuscript Markdow
 
   for (const type of SIMPLE_CRITIC_TYPES) {
     const eligibleText = type.name === 'addition' || type.name === 'deletion'
-      ? multilineText.filter(lines => !/^#{1,6} /.test(lines[0]))
+      ? multilineText.filter(lines => !startsWithNonemptyAtxHeading(lines[0]))
       : multilineText;
     const arb = type.name === 'comment'
       ? eligibleText.filter(lines => lines.every(line => !line.includes('<') && !line.includes('>')))
