@@ -850,6 +850,126 @@ describe('Edge Cases', () => {
   });
 });
 
+describe('CriticMarkup headings in preview', () => {
+  it('renders a heading marker inside an addition as a heading', () => {
+    const output = renderWithPlugin('{++## Section Name++}');
+
+    expect(output).toContain('<h2><ins class="manuscript-markdown-addition">Section Name</ins></h2>');
+    expect(output).not.toContain('## Section Name');
+  });
+
+  it('renders a heading marker inside a deletion as a heading', () => {
+    const output = renderWithPlugin('{--### Old Section--}');
+
+    expect(output).toContain('<h3><del class="manuscript-markdown-deletion">Old Section</del></h3>');
+    expect(output).not.toContain('### Old Section');
+  });
+
+  it('does not promote a Critic heading marker in a partial paragraph', () => {
+    const output = renderWithPlugin('Before {++## not a heading++}');
+
+    expect(output).toContain('<p>Before <ins class="manuscript-markdown-addition">## not a heading</ins></p>');
+    expect(output).not.toContain('<h2>');
+  });
+
+  it('does not promote mixed top-level Critic and plain content', () => {
+    for (const input of [
+      '{++## One++} plain {++Two++}',
+      '{++## One++}{--Two--}{++Three++}',
+    ]) {
+      const output = renderWithPlugin(input);
+      expect(output).toContain('## One');
+      expect(output).not.toContain('<h2>');
+    }
+  });
+
+  it('leaves internal Critic heading markers literal in quotes and lists', () => {
+    for (const input of ['> {++## Quoted++}', '- {++## Listed++}']) {
+      const output = renderWithPlugin(input);
+      expect(output).toContain('## ');
+      expect(output).not.toContain('<h2>');
+    }
+  });
+
+  it('ends a heading before a multiline addition continues into a paragraph', () => {
+    const output = renderWithPlugin('## {++Section Name\n\nParagraph text.\n++}');
+
+    expect(output).toContain(
+      '<h2><ins class="manuscript-markdown-addition">Section Name</ins></h2>\n' +
+      '<p><ins class="manuscript-markdown-addition">Paragraph text.\n</ins></p>'
+    );
+  });
+
+  it('splits a paragraph-spanning addition after promoting its internal heading', () => {
+    const output = renderWithPlugin('{++## Section Name\n\nParagraph text.\n++}');
+
+    expect(output).toContain(
+      '<h2><ins class="manuscript-markdown-addition">Section Name</ins></h2>\n' +
+      '<p><ins class="manuscript-markdown-addition">Paragraph text.\n</ins></p>'
+    );
+  });
+
+  it('ends both heading forms at a single source newline', () => {
+    for (const input of [
+      '## {++Section Name\nParagraph text.++}',
+      '{++## Section Name\nParagraph text.++}',
+    ]) {
+      const output = renderWithPlugin(input);
+      expect(output).toContain(
+        '<h2><ins class="manuscript-markdown-addition">Section Name</ins></h2>\n' +
+        '<p><ins class="manuscript-markdown-addition">Paragraph text.</ins></p>'
+      );
+    }
+  });
+
+  it('keeps later soft line breaks inside the body paragraph', () => {
+    const output = renderWithPlugin('## {++Section Name\nFirst line\nSecond line++}');
+
+    expect(output).toContain(
+      '<h2><ins class="manuscript-markdown-addition">Section Name</ins></h2>\n' +
+      '<p><ins class="manuscript-markdown-addition">First line\nSecond line</ins></p>'
+    );
+  });
+
+  it('balances nested formatting and CriticMarkup across the heading boundary', () => {
+    const output = renderWithPlugin('## {++Section Name\n\n**bold {--old--}**++}');
+
+    expect(output).toContain(
+      '<h2><ins class="manuscript-markdown-addition">Section Name</ins></h2>\n' +
+      '<p><ins class="manuscript-markdown-addition"><strong>bold ' +
+      '<del class="manuscript-markdown-deletion">old</del></strong></ins></p>'
+    );
+  });
+
+  it('propagates an attached comment to every split Critic span', () => {
+    const output = renderWithPlugin('## {++Section Name\n\nParagraph text.++}{>>note<<}');
+
+    expect(output.match(/data-comment="note"/g)).toHaveLength(2);
+  });
+
+  it('assigns each generated block its own source map and standard token shape', () => {
+    const md = new MarkdownIt({ html: true });
+    md.use(manuscriptMarkdownPlugin);
+    const tokens = md.parse('## {++Section Name\n\nParagraph text.++}', {});
+    const blockOpens = tokens.filter(token =>
+      token.type === 'heading_open' || token.type === 'paragraph_open'
+    );
+    const inlineTokens = tokens.filter(token => token.type === 'inline');
+
+    expect(blockOpens.map(token => token.map)).toEqual([[0, 1], [2, 3]]);
+    expect(blockOpens.every(token => token.block && token.level === 0)).toBe(true);
+    expect(inlineTokens.map(token => token.map)).toEqual([[0, 1], [2, 3]]);
+    expect(inlineTokens.every(token => token.block && token.level === 1)).toBe(true);
+  });
+
+  it('does not emit an empty paragraph for a trailing blank segment', () => {
+    const output = renderWithPlugin('## {++Section Name\n\n++}');
+
+    expect(output).toContain('<h2><ins class="manuscript-markdown-addition">Section Name</ins></h2>');
+    expect(output).not.toContain('<p>');
+  });
+});
+
 // Property 4: Empty line preservation — parameterized
 describe('Property 4: Empty line preservation', () => {
   it('renders paragraph breaks inside an addition without leaking the placeholder', () => {
