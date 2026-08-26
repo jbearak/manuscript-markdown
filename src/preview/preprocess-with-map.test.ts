@@ -163,4 +163,14 @@ describe('preprocessCriticMarkupWithMap', () => {
       expect(map.remap(outLines.length)).toBe(3);
     }
   });
+
+  it('maps adjacent collapsed Critic spans to their exact source lines', () => {
+    const src = 'Before\n\n{++one\n\ntwo++}\n\n{++three\nfour++}\n\nAfter';
+    const { output, map } = preprocessCriticMarkupWithMap(src);
+    const outLines = output.split('\n');
+
+    expect(map.remap(outLines.findIndex(line => line.startsWith('{++one')))).toBe(2);
+    expect(map.remap(outLines.findIndex(line => line.startsWith('{++three')))).toBe(6);
+    expect(map.remap(outLines.indexOf('After'))).toBe(9);
+  });
 });

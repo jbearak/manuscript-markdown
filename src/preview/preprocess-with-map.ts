@@ -14,7 +14,7 @@
 import { LineMap } from './line-map';
 import { preprocessGridTables } from '../grid-table-preprocess';
 import { wrapBareLatexEnvironments } from '../latex-env-preprocess';
-import { preprocessCriticMarkup } from '../critic-markup';
+import { preprocessCriticMarkup, restoreCriticLineBreaks } from '../critic-markup';
 
 /**
  * Build a LineMap by comparing original and output line arrays.
@@ -133,6 +133,20 @@ function splitPhysicalLines(source: string): string[] {
   return source.split(/\r\n|\r|\n/);
 }
 
+function buildCriticLineMap(source: string, output: string): LineMap {
+  const outputLines = splitPhysicalLines(output);
+  const restoredLines: string[] = [];
+  const restoredBoundaries: number[] = [];
+  for (const line of outputLines) {
+    restoredBoundaries.push(restoredLines.length);
+    restoredLines.push(...splitPhysicalLines(restoreCriticLineBreaks(line)));
+  }
+  restoredBoundaries.push(restoredLines.length);
+
+  const restoredMap = buildMapFromLines(splitPhysicalLines(source), restoredLines);
+  return LineMap.fromLineMappings(restoredBoundaries.map(boundary => restoredMap.remap(boundary)));
+}
+
 /** Preprocess grid tables and return the output with a line map. */
 export function preprocessGridTablesWithMap(src: string): { output: string; map: LineMap } {
   const output = preprocessGridTables(src);
@@ -151,5 +165,5 @@ export function wrapBareLatexEnvironmentsWithMap(src: string): { output: string;
 export function preprocessCriticMarkupWithMap(src: string): { output: string; map: LineMap } {
   const output = preprocessCriticMarkup(src);
   if (output === src) return { output, map: LineMap.identity() };
-  return { output, map: buildMapFromLines(splitPhysicalLines(src), splitPhysicalLines(output)) };
+  return { output, map: buildCriticLineMap(src, output) };
 }

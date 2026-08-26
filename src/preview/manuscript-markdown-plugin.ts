@@ -359,6 +359,27 @@ interface CriticHeadingBoundary {
   sourceOffset?: number;
 }
 
+function collectProtectedBreaks(
+  content: string,
+  sourceBase: number,
+): Array<{ kind: CriticHeadingBoundaryKind; sourceOffset: number }> {
+  const breaks: Array<{ kind: CriticHeadingBoundaryKind; sourceOffset: number }> = [];
+  for (let index = 0; index < content.length;) {
+    const kind = content.startsWith(PARA_PLACEHOLDER, index)
+      ? 'paragraph'
+      : content.startsWith(LINE_PLACEHOLDER, index)
+        ? 'line'
+        : undefined;
+    if (!kind) {
+      index++;
+      continue;
+    }
+    breaks.push({ kind, sourceOffset: sourceBase + index });
+    index += kind === 'paragraph' ? PARA_PLACEHOLDER.length : LINE_PLACEHOLDER.length;
+  }
+  return breaks;
+}
+
 function cloneInlineToken(state: StateCore, source: Token): Token {
   const clone = new state.Token(source.type, source.tag, source.nesting);
   clone.attrs = source.attrs?.map(([name, value]) => [name, value]) ?? null;
@@ -656,7 +677,6 @@ function splitCriticHeadingsRule(state: StateCore): void {
 
     const lineMap = getPreviewEnvironment(state).lineMap;
     const originalStart = inline.map ? (lineMap?.remap(inline.map[0]) ?? inline.map[0]) : 0;
-    const originalEnd = inline.map ? (lineMap?.remap(inline.map[1]) ?? inline.map[1]) : originalStart + 1;
     const replacement: Token[] = [];
     for (let segmentIndex = 0; segmentIndex < childSegments.length; segmentIndex++) {
       const isHeading = segmentIndex === 0;
@@ -678,7 +698,7 @@ function splitCriticHeadingsRule(state: StateCore): void {
       const sourceSegment = sourceSegments[segmentIndex];
       const segmentMap: [number, number] = [
         originalStart + sourceSegment.startLineOffset,
-        Math.min(originalStart + sourceSegment.endLineOffset, originalEnd),
+        originalStart + sourceSegment.endLineOffset,
       ];
       setOriginalTokenMap(blockOpen, segmentMap);
       setOriginalTokenMap(blockInline, segmentMap);
@@ -770,20 +790,7 @@ function addInlineContent(state: StateInline, content: string, sourceStart?: num
     else env.manuscriptInlineSourceBase = previousSourceBase;
   }
 
-  const protectedBreaks: Array<{ kind: CriticHeadingBoundaryKind; sourceOffset: number }> = [];
-  for (let index = 0; index < content.length;) {
-    const kind = content.startsWith(PARA_PLACEHOLDER, index)
-      ? 'paragraph'
-      : content.startsWith(LINE_PLACEHOLDER, index)
-        ? 'line'
-        : undefined;
-    if (!kind) {
-      index++;
-      continue;
-    }
-    protectedBreaks.push({ kind, sourceOffset: nestedSourceBase + index });
-    index += kind === 'paragraph' ? PARA_PLACEHOLDER.length : LINE_PLACEHOLDER.length;
-  }
+  const protectedBreaks = collectProtectedBreaks(content, nestedSourceBase);
   let protectedBreakIndex = 0;
   const claimProtectedBreak = (
     kind: CriticHeadingBoundaryKind,
@@ -797,11 +804,18 @@ function addInlineContent(state: StateInline, content: string, sourceStart?: num
     return undefined;
   };
   const claimTokenBreak = (token: Token): void => {
-    const sourceOffset = token.meta?.manuscriptCriticBreakSourceOffset;
-    if (typeof sourceOffset !== 'number') return;
-    while (protectedBreakIndex < protectedBreaks.length &&
-        protectedBreaks[protectedBreakIndex].sourceOffset <= sourceOffset) {
-      protectedBreakIndex++;
+    const sourceOffsets = token.meta?.manuscriptCriticConsumedBreakSourceOffsets;
+    const ownSourceOffset = token.meta?.manuscriptCriticBreakSourceOffset;
+    const claimedOffsets = Array.isArray(sourceOffsets)
+      ? sourceOffsets.filter((offset): offset is number => typeof offset === 'number')
+      : typeof ownSourceOffset === 'number'
+        ? [ownSourceOffset]
+        : [];
+    for (const sourceOffset of claimedOffsets) {
+      while (protectedBreakIndex < protectedBreaks.length &&
+          protectedBreaks[protectedBreakIndex].sourceOffset <= sourceOffset) {
+        protectedBreakIndex++;
+      }
     }
   };
   const claimContentBreaks = (tokenContent: string): void => {
@@ -989,7 +1003,21 @@ function parseCriticMarkupInInlineMath(state: StateInline, silent: boolean): boo
 
   const parts = splitCriticMarkupInMath(state.src.slice(match.contentStart, match.contentEnd));
   if (!parts) return false;
-  if (!silent) pushCriticMathParts(state, parts);
+  if (!silent) {
+    const firstTokenIndex = state.tokens.length;
+    pushCriticMathParts(state, parts);
+    const consumedBreakSourceOffsets = collectProtectedBreaks(
+      state.src.slice(match.contentStart, match.contentEnd),
+      inlineSourceOffset(state, match.contentStart),
+    ).map(sourceBreak => sourceBreak.sourceOffset);
+    const firstToken = state.tokens[firstTokenIndex];
+    if (firstToken && consumedBreakSourceOffsets.length > 0) {
+      firstToken.meta = {
+        ...(firstToken.meta || {}),
+        manuscriptCriticConsumedBreakSourceOffsets: consumedBreakSourceOffsets,
+      };
+    }
+  }
   state.pos = match.end;
   return true;
 }

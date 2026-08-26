@@ -1136,6 +1136,62 @@ describe('CriticMarkup headings in preview', () => {
     }
   });
 
+  it('maps headings exactly within surrounding content', () => {
+    for (const eol of ['\n', '\r\n', '\r']) {
+      for (const [open, close] of [['{++', '++}'], ['{--', '--}']]) {
+        for (const [lineBreak, bodyStart] of [[eol, 3], [eol + eol, 4]] as const) {
+          for (const revisedHeading of [
+            '## ' + open + 'Section' + lineBreak + 'Paragraph' + close,
+            open + '## Section' + lineBreak + 'Paragraph' + close,
+          ]) {
+            const input = 'Before' + eol + eol + revisedHeading + eol + eol + 'After';
+            const md = new MarkdownIt({ html: true });
+            md.use(manuscriptMarkdownPlugin);
+            const revisedMaps = md.parse(input, {})
+              .filter(token => token.type === 'heading_open' || token.type === 'paragraph_open')
+              .slice(1, 3)
+              .map(token => token.map);
+            expect(revisedMaps).toEqual([[2, 3], [bodyStart, bodyStart + 1]]);
+          }
+        }
+      }
+    }
+  });
+
+  it('maps adjacent collapsed Critic headings from their exact source starts', () => {
+    const input =
+      'Before\n\n{++## One\n\nBody1++}\n\n{++## Two\nBody2++}\n\nAfter';
+    const md = new MarkdownIt({ html: true });
+    md.use(manuscriptMarkdownPlugin);
+    const revisedMaps = md.parse(input, {})
+      .filter(token => token.type === 'heading_open' || token.type === 'paragraph_open')
+      .slice(1, 5)
+      .map(token => token.map);
+
+    expect(revisedMaps).toEqual([[2, 3], [4, 5], [6, 7], [7, 8]]);
+  });
+
+  it('counts protected breaks consumed by inline math before a visible split', () => {
+    for (const mathCritic of [
+      '{>>note\n\nmore<<}',
+      '{--old\n\nmore--}',
+      '{==marked\n\nmore==}',
+      '{~~old\n\nmore~>new~~}',
+    ]) {
+      for (const input of [
+        '## {++$x ' + mathCritic + ' y$\n\nParagraph++}',
+        '{++## $x ' + mathCritic + ' y$\n\nParagraph++}',
+      ]) {
+        const md = new MarkdownIt({ html: true });
+        md.use(manuscriptMarkdownPlugin);
+        const blockMaps = md.parse(input, {})
+          .filter(token => token.type === 'heading_open' || token.type === 'paragraph_open')
+          .map(token => token.map);
+        expect(blockMaps).toEqual([[0, 3], [4, 5]]);
+      }
+    }
+  });
+
   it('does not emit an empty paragraph for a trailing blank segment', () => {
     const output = renderWithPlugin('## {++Section Name\n\n++}');
 
