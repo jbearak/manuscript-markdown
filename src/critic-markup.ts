@@ -41,10 +41,11 @@ function computeCriticBlockAnalysis(
     html: 'all',
     includeLists,
   });
-  const inertRegions = mergeRegions([...codeRegions, ...htmlRegions]);
-  return includeLists
-    ? { source: content, inertRegions, listRegions }
-    : { source: content, inertRegions };
+  const analysis: CriticBlockAnalysis = {
+    source: content,
+    inertRegions: mergeRegions([...codeRegions, ...htmlRegions]),
+  };
+  return includeLists ? { ...analysis, listRegions } : analysis;
 }
 
 const LEADING_CRITIC_BREAK_RE = /(?:\{\+\+|\{--|\{~~|\{==|\{>>)(?:\r\n|\r|\n)/;
