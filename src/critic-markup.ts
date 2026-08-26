@@ -22,20 +22,26 @@ export function restoreCriticLineBreaks(content: string): string {
     .split(LINE_PLACEHOLDER).join('\n');
 }
 
-function computeCriticBlockAnalysis(content: string): MarkdownRegions {
-  return computeMarkdownRegions(content, { html: 'all', includeLists: true });
+function computeCriticBlockAnalysis(content: string, includeLists = false): MarkdownRegions {
+  return computeMarkdownRegions(content, { html: 'all', includeLists });
 }
 
-function moveLeadingBreakOutsideCritic(markdown: string): string {
+interface LeadingBreakResult {
+  markdown: string;
+  analysis?: MarkdownRegions;
+}
+
+function moveLeadingBreakOutsideCritic(markdown: string): LeadingBreakResult {
   // When an opener is stranded at the end of a line, start the Critic span in
   // a new paragraph. Authors commonly put the opener at the end of the prior
   // paragraph's last line; a single source newline otherwise remains a soft
   // break and incorrectly pulls that paragraph into the revision.
-  if (!/(?:\{\+\+|\{--|\{~~|\{==|\{>>)(?:\r\n|\r|\n)/.test(markdown)) return markdown;
-  const { codeRegions, htmlRegions, listRegions } = computeCriticBlockAnalysis(markdown);
+  if (!/(?:\{\+\+|\{--|\{~~|\{==|\{>>)(?:\r\n|\r|\n)/.test(markdown)) return { markdown };
+  const analysis = computeCriticBlockAnalysis(markdown, true);
+  const { codeRegions, htmlRegions, listRegions } = analysis;
   const inertRegions = mergeRegions([...codeRegions, ...htmlRegions]);
   const mathRegions = computeDollarMathRegions(markdown, inertRegions);
-  return markdown.replace(
+  const transformed = markdown.replace(
     /(\{\+\+|\{--|\{~~|\{==|\{>>)((?:\r\n|\r|\n)(?:[ \t]*(?:>[ \t]*)?(?:\r\n|\r|\n))?)([ \t]*(?:(?:>[ \t]*)+)?)/g,
     (full, open: string, leadingBreak: string, nextPrefix: string, offset: number) => {
       if (isInsideCodeRegion(offset, inertRegions) || isEscapedAt(markdown, offset) ||
@@ -79,6 +85,10 @@ function moveLeadingBreakOutsideCritic(markdown: string): string {
       return paragraphBreak + open + nextPrefix;
     },
   );
+  return {
+    markdown: transformed,
+    analysis: transformed === markdown ? analysis : undefined,
+  };
 }
 
 function quoteDepthAt(content: string, offset: number): number {
@@ -219,8 +229,9 @@ export function preprocessCriticMarkup(markdown: string): string {
     return markdown;
   }
 
-  const result = moveLeadingBreakOutsideCritic(markdown);
-  const { codeRegions, htmlRegions } = computeCriticBlockAnalysis(result);
+  const leadingBreak = moveLeadingBreakOutsideCritic(markdown);
+  const result = leadingBreak.markdown;
+  const { codeRegions, htmlRegions } = leadingBreak.analysis ?? computeCriticBlockAnalysis(result);
   const inertRegions = mergeRegions([...codeRegions, ...htmlRegions]);
   const segments: string[] = [];
   let lastPos = 0;

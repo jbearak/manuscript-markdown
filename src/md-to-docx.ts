@@ -633,24 +633,23 @@ function mathRule(state: StateInline, silent: boolean): boolean {
   const match = findDollarMathAt(state.src, start, DOCX_DOLLAR_MATH_OPTIONS);
   if (!match || match.kind !== 'math') return false;
 
+  state.pos = match.end;
+  if (silent) return true;
+
   const content = state.src.slice(match.contentStart, match.contentEnd);
   if (match.delimiterLength === 2) {
-    if (!silent) {
-      const token = pushManuscriptToken(state, 'math', '', 0);
-      token.content = content;
-      token.display = true;
-    }
+    const token = pushManuscriptToken(state, 'math', '', 0);
+    token.content = content;
+    token.display = true;
   } else {
     const criticParts = splitCriticMarkupInMath(content);
-    if (!silent && criticParts) {
+    if (criticParts) {
       pushCriticMathTokens(state, criticParts);
-    } else if (!silent) {
+    } else {
       const token = pushManuscriptToken(state, 'math', '', 0);
       token.content = content;
-      // Don't set display for inline math - leave it undefined
     }
   }
-  state.pos = match.end;
   return true;
 }
 

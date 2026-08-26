@@ -55,24 +55,14 @@ export function mergeRegions(regions: CodeRegion[]): CodeRegion[] {
 
 function computeInlineCodeRegions(text: string, blockRegions: CodeRegion[]): CodeRegion[] {
 	const regions: CodeRegion[] = [];
-	const findContainingRegion = (pos: number): CodeRegion | undefined => {
-		let lo = 0;
-		let hi = blockRegions.length - 1;
-		while (lo <= hi) {
-			const mid = (lo + hi) >>> 1;
-			const region = blockRegions[mid];
-			if (pos < region.start) hi = mid - 1;
-			else if (pos >= region.end) lo = mid + 1;
-			else return region;
-		}
-		return undefined;
-	};
-
+	let blockIndex = 0;
 	let i = 0;
 	while (i < text.length) {
-		const blockRegion = findContainingRegion(i);
-		if (blockRegion) {
+		while (blockIndex < blockRegions.length && blockRegions[blockIndex].end <= i) blockIndex++;
+		const blockRegion = blockRegions[blockIndex];
+		if (blockRegion && blockRegion.start <= i) {
 			i = blockRegion.end;
+			blockIndex++;
 			continue;
 		}
 		if (text[i] !== '`') {
@@ -87,11 +77,16 @@ function computeInlineCodeRegions(text: string, blockRegions: CodeRegion[]): Cod
 			i++;
 		}
 
+		let innerBlockIndex = blockIndex;
 		let j = i;
 		while (j < text.length) {
-			const innerBlockRegion = findContainingRegion(j);
-			if (innerBlockRegion) {
+			while (innerBlockIndex < blockRegions.length && blockRegions[innerBlockIndex].end <= j) {
+				innerBlockIndex++;
+			}
+			const innerBlockRegion = blockRegions[innerBlockIndex];
+			if (innerBlockRegion && innerBlockRegion.start <= j) {
 				j = innerBlockRegion.end;
+				innerBlockIndex++;
 				continue;
 			}
 			if (text[j] !== '`') {

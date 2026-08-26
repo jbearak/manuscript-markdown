@@ -4594,9 +4594,7 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
 
       if (item.generatedListContinuation && item.paragraphLeftIndentTwips !== undefined) {
         const continuationLevel = item.paragraphLeftIndentTwips / 720 - 1;
-        const context = Number.isInteger(continuationLevel)
-          ? listContexts.get(continuationLevel)
-          : undefined;
+        const context = listContexts.get(continuationLevel);
         if (context) {
           item.listContinuation = {
             type: context.type,
