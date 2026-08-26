@@ -24,28 +24,6 @@ function mergeReferenceRegions(regions: Array<{ start: number; end: number }>): 
   return merged;
 }
 
-function computeReferenceCodeRegions(content: string): Array<{ start: number; end: number }> {
-  const regions = computeCodeRegions(content);
-  const lineStarts = [0];
-  for (let i = 0; i < content.length; i++) {
-    const char = content.charCodeAt(i);
-    if (char === 0x0D) {
-      if (content.charCodeAt(i + 1) === 0x0A) i++;
-      lineStarts.push(i + 1);
-    } else if (char === 0x0A) {
-      lineStarts.push(i + 1);
-    }
-  }
-  for (const token of blockCodeParser.parse(content, {})) {
-    if (token.type !== 'code_block' || !token.map) continue;
-    regions.push({
-      start: lineStarts[token.map[0]] ?? content.length,
-      end: lineStarts[token.map[1]] ?? content.length,
-    });
-  }
-  return mergeReferenceRegions(regions);
-}
-
 function hasReferenceHtmlBlock(content: string): boolean {
   return htmlBlockParser.parse(content, {}).some(token => token.type === 'html_block');
 }
@@ -136,7 +114,7 @@ function preprocessCriticMarkupReference(markdown: string): string {
       !markdown.includes('{==') && !markdown.includes('{#')) {
     return markdown;
   }
-  const initialCodeRegions = computeReferenceCodeRegions(markdown);
+  const initialCodeRegions = computeCodeRegions(markdown);
   const initialListRegions = computeReferenceListRegions(markdown);
   markdown = markdown.replace(
     /(\{\+\+|\{--|\{~~|\{==|\{>>)((?:\r\n|\r|\n)(?:[ \t]*(?:>[ \t]*)?(?:\r\n|\r|\n))?)([ \t]*(?:(?:>[ \t]*)+)?)/g,
@@ -176,7 +154,7 @@ function preprocessCriticMarkupReference(markdown: string): string {
     },
   );
   const result = markdown;
-  const codeRegions = computeReferenceCodeRegions(result);
+  const codeRegions = computeCodeRegions(result);
   // Keep source offsets stable so an earlier replacement cannot change the
   // line or container context used for a later opener.
   const edits: Array<{ start: number; end: number; replacement: string }> = [];

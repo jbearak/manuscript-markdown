@@ -1,4 +1,5 @@
 import { findMatchingClose, restoreCriticLineBreaks } from './critic-markup';
+import { isEscapedAt } from './math-delimiters';
 
 export type CriticMathPart =
   | { type: 'math'; content: string }
@@ -10,12 +11,7 @@ const SIMPLE_MARKERS = [
   { open: '{--', close: '--}', type: 'deletion' as const },
   { open: '{==', close: '==}', type: 'highlight' as const },
 ];
-
-function isEscaped(src: string, index: number): boolean {
-  let slashCount = 0;
-  for (let i = index - 1; i >= 0 && src.charAt(i) === '\\'; i--) slashCount++;
-  return slashCount % 2 === 1;
-}
+const CRITIC_MATH_OPENER_RE = /\{(?:\+\+|--|==|~~|>>)/;
 
 /**
  * Split an inline equation containing CriticMarkup into renderable math and
@@ -27,6 +23,7 @@ function isEscaped(src: string, index: number): boolean {
  * wrappers around only the changed portion of an equation.
  */
 export function splitCriticMarkupInMath(src: string): CriticMathPart[] | undefined {
+  if (!CRITIC_MATH_OPENER_RE.test(src)) return undefined;
   src = restoreCriticLineBreaks(src);
   const parts: CriticMathPart[] = [];
   let textStart = 0;
@@ -38,7 +35,7 @@ export function splitCriticMarkupInMath(src: string): CriticMathPart[] | undefin
   };
 
   while (pos < src.length - 2) {
-    if (src.charAt(pos) !== '{' || isEscaped(src, pos)) {
+    if (src.charAt(pos) !== '{' || isEscapedAt(src, pos)) {
       pos++;
       continue;
     }

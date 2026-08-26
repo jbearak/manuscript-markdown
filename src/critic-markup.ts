@@ -1,6 +1,5 @@
-import { computeCodeRegions, isInsideCodeRegion } from './code-regions';
-import MarkdownIt from 'markdown-it';
-import type Token from 'markdown-it/lib/token.mjs';
+import { computeMarkdownRegions, isInsideCodeRegion, mergeRegions, type MarkdownRegions } from './code-regions';
+import { computeDollarMathRegions, isEscapedAt } from './math-delimiters';
 
 // Placeholder used to preserve paragraph breaks inside CriticMarkup spans.
 // Uses Private Use Area characters to avoid markdown-it's normalize step
@@ -23,111 +22,8 @@ export function restoreCriticLineBreaks(content: string): string {
     .split(LINE_PLACEHOLDER).join('\n');
 }
 
-function isEscapedAt(content: string, offset: number): boolean {
-  let backslashes = 0;
-  for (let i = offset - 1; i >= 0 && content.charCodeAt(i) === 0x5C; i--) {
-    backslashes++;
-  }
-  return backslashes % 2 === 1;
-}
-
-const blockCodeParser = new MarkdownIt({ html: true });
-
-interface CriticBlockAnalysis {
-  codeRegions: Array<{ start: number; end: number }>;
-  htmlRegions: Array<{ start: number; end: number }>;
-  listRegions: Array<{ start: number; end: number }>;
-}
-
-function mergeRegions(regions: Array<{ start: number; end: number }>): Array<{ start: number; end: number }> {
-  regions.sort((a, b) => a.start - b.start);
-  const merged: Array<{ start: number; end: number }> = [];
-  for (const region of regions) {
-    const previous = merged[merged.length - 1];
-    if (previous && region.start <= previous.end) previous.end = Math.max(previous.end, region.end);
-    else merged.push({ ...region });
-  }
-  return merged;
-}
-
-function computeCriticBlockAnalysis(content: string): CriticBlockAnalysis {
-  const codeRegions = computeCodeRegions(content);
-  const htmlRegions: Array<{ start: number; end: number }> = [];
-  const listRegions: Array<{ start: number; end: number }> = [];
-  const lineStarts = [0];
-  for (let i = 0; i < content.length; i++) {
-    const char = content.charCodeAt(i);
-    if (char === 0x0D) {
-      if (content.charCodeAt(i + 1) === 0x0A) i++;
-      lineStarts.push(i + 1);
-    } else if (char === 0x0A) {
-      lineStarts.push(i + 1);
-    }
-  }
-  const blockTokens: Token[] = [];
-  const normalizedBlockContent = content.replace(/\r\n?/g, '\n');
-  blockCodeParser.block.parse(normalizedBlockContent, blockCodeParser, {}, blockTokens);
-  for (const token of blockTokens) {
-    if (!token.map || (token.type !== 'code_block' && token.type !== 'html_block' &&
-        token.type !== 'list_item_open')) continue;
-    const region = {
-      start: lineStarts[token.map[0]] ?? content.length,
-      end: lineStarts[token.map[1]] ?? content.length,
-    };
-    if (token.type === 'code_block') codeRegions.push(region);
-    else if (token.type === 'html_block') htmlRegions.push(region);
-    else listRegions.push(region);
-  }
-  return {
-    codeRegions: mergeRegions(codeRegions),
-    htmlRegions: mergeRegions(htmlRegions),
-    listRegions: mergeRegions(listRegions),
-  };
-}
-
-function computeDollarMathRegions(
-  content: string,
-  codeRegions: Array<{ start: number; end: number }>,
-): Array<{ start: number; end: number }> {
-  const regions: Array<{ start: number; end: number }> = [];
-
-  const findClose = (start: number, delimiterLength: 1 | 2): number => {
-    for (let i = start; i < content.length; i++) {
-      if (content.charCodeAt(i) !== 0x24 || isEscapedAt(content, i) || isInsideCodeRegion(i, codeRegions)) continue;
-      let runLength = 1;
-      while (i + runLength < content.length && content.charCodeAt(i + runLength) === 0x24) runLength++;
-      if (runLength === delimiterLength) return i;
-      i += runLength - 1;
-    }
-    return -1;
-  };
-
-  for (let i = 0; i < content.length; i++) {
-    if (content.charCodeAt(i) !== 0x24 || isEscapedAt(content, i) || isInsideCodeRegion(i, codeRegions)) continue;
-    let runLength = 1;
-    while (i + runLength < content.length && content.charCodeAt(i + runLength) === 0x24) runLength++;
-    if (runLength > 2) {
-      i += runLength - 1;
-      continue;
-    }
-
-    if (runLength === 1) {
-      // Match the inline-math boundary rules used by the DOCX parser. In
-      // particular, a currency amount must not make every later dollar look
-      // like part of one large equation and suppress Critic block handling.
-      if ((i > 0 && /\w/.test(content.charAt(i - 1))) ||
-          /^\d[\d,.]*(?:\s|$)/.test(content.slice(i + 1))) {
-        continue;
-      }
-    }
-
-    const delimiterLength = runLength as 1 | 2;
-    const close = findClose(i + delimiterLength, delimiterLength);
-    if (close === -1 || (delimiterLength === 1 && /\w/.test(content.charAt(close + 1)))) continue;
-    regions.push({ start: i, end: close + delimiterLength });
-    i = close + delimiterLength - 1;
-  }
-  return regions;
+function computeCriticBlockAnalysis(content: string): MarkdownRegions {
+  return computeMarkdownRegions(content, { html: 'all', includeLists: true });
 }
 
 function moveLeadingBreakOutsideCritic(markdown: string): string {

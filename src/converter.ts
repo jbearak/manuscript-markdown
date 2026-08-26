@@ -4574,9 +4574,7 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
         const inferred = inferListContinuationForBlockquote(item, listContexts);
         if (inferred) {
           item.blockquoteLevel = inferred.blockquoteLevel;
-          if (inferred.listContinuation || !item.listContinuation) {
-            item.listContinuation = inferred.listContinuation;
-          }
+          if (inferred.listContinuation) item.listContinuation = inferred.listContinuation;
         }
         const currentType: GfmAlertType | 'plain' = item.alertType || 'plain';
         const startsNewGroup = currentBlockquoteGroupIndex === undefined
@@ -4595,10 +4593,10 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
       }
 
       if (item.generatedListContinuation && item.paragraphLeftIndentTwips !== undefined) {
-        const candidates = [...listContexts.values()].sort((a, b) => b.level - a.level);
-        const context = candidates.find(candidate =>
-          item.paragraphLeftIndentTwips === 720 * (candidate.level + 1),
-        );
+        const continuationLevel = item.paragraphLeftIndentTwips / 720 - 1;
+        const context = Number.isInteger(continuationLevel)
+          ? listContexts.get(continuationLevel)
+          : undefined;
         if (context) {
           item.listContinuation = {
             type: context.type,
@@ -4813,8 +4811,7 @@ export function buildMarkdown(
   // marker-only form (`> [!TYPE]\n> ...`) so callout/paragraph boundaries stay
   // stable on DOCX -> MD conversion.
   let pendingAlertInlinePrefixForHardBreak: string | undefined;
-  let pendingListContinuationPrefix: string | undefined;
-  let pendingBlockquoteMathPrefix: string | undefined;
+  let pendingDisplayMathContainer: { prefix: string; type: 'list' | 'blockquote' } | undefined;
   // Heading whose paragraph mark is inserted/deleted (whole-paragraph track
   // change): the `### ` marker must be re-inserted inside the leading Critic
   // span ({++### heading++}) rather than emitted before it. revType is kept
@@ -5312,7 +5309,6 @@ export function buildMarkdown(
               output.push('\n' + (nextIsDisplayMath ? '' : itemPrefix));
               pendingAlertInlinePrefixForHardBreak = undefined;
             }
-            const next = i + 1 < mergedContent.length ? mergedContent[i + 1] : undefined;
             pendingAlertPrefixStrip = (next && next.type !== 'para') ? item.alertType : undefined;
             if (!pendingAlertPrefixStrip) {
               pendingAlertInlinePrefixForHardBreak = undefined;
@@ -5327,12 +5323,14 @@ export function buildMarkdown(
           pendingAlertPrefixStrip = undefined;
           pendingAlertInlinePrefixForHardBreak = undefined;
         }
-        if (nextIsDisplayMath) pendingBlockquoteMathPrefix = itemPrefix;
+        if (nextIsDisplayMath) {
+          pendingDisplayMathContainer = { prefix: itemPrefix, type: 'blockquote' };
+        }
       } else if (item.listContinuation) {
         const continuationPrefix = listContinuationIndent(item.listContinuation);
         const next = i + 1 < mergedContent.length ? mergedContent[i + 1] : undefined;
         if (next?.type === 'math' && next.display) {
-          pendingListContinuationPrefix = continuationPrefix;
+          pendingDisplayMathContainer = { prefix: continuationPrefix, type: 'list' };
         } else {
           output.push(continuationPrefix);
         }
@@ -5508,20 +5506,17 @@ export function buildMarkdown(
     }
 
     if (item.type === 'math' && item.display) {
-      const inListContinuation = pendingListContinuationPrefix !== undefined;
-      const inBlockquote = pendingBlockquoteMathPrefix !== undefined;
+      const displayMathContainer = pendingDisplayMathContainer;
+      const inBlockquote = displayMathContainer?.type === 'blockquote';
       // Ensure blank line before display math
       if (!inBlockquote && output.length > 0 && !output[output.length - 1].endsWith('\n\n')) {
         output.push('\n\n');
       }
       const mathBlock = MATH_FENCE + '\n' + canonicalizeDisplayMathLatex(item.latex) + '\n' + MATH_FENCE;
       const revisedMathBlock = item.revision ? wrapWithRevision(mathBlock, item.revision) : mathBlock;
-      if (inListContinuation) {
-        output.push(revisedMathBlock.split('\n').map(line => pendingListContinuationPrefix + line).join('\n'));
-        pendingListContinuationPrefix = undefined;
-      } else if (inBlockquote) {
-        output.push(revisedMathBlock.split('\n').map(line => pendingBlockquoteMathPrefix + line).join('\n'));
-        pendingBlockquoteMathPrefix = undefined;
+      if (displayMathContainer) {
+        output.push(revisedMathBlock.split('\n').map(line => displayMathContainer.prefix + line).join('\n'));
+        pendingDisplayMathContainer = undefined;
       } else {
         output.push(revisedMathBlock);
         // A top-level display math block breaks list flow. An indented list

@@ -233,6 +233,7 @@ const ALERT_GLYPH_BY_TYPE: Record<GfmAlertType, string> = {
 
 import { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup, findMatchingClose, restoreCriticLineBreaks } from './critic-markup';
 import { splitCriticMarkupInMath, type CriticMathPart } from './critic-math';
+import { findDollarMathAt } from './math-delimiters';
 import { wrapBareLatexEnvironments } from './latex-env-preprocess';
 export { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup };
 
@@ -623,75 +624,33 @@ function citationRule(state: StateInline, silent: boolean): boolean {
   return true;
 }
 
-function isEscapedDollar(src: string, index: number): boolean {
-  let slashCount = 0;
-  for (let i = index - 1; i >= 0 && src.charAt(i) === '\\'; i--) slashCount++;
-  return slashCount % 2 === 1;
-}
-
-function findMathClose(src: string, start: number, delimiter: '$' | '$$'): number {
-  let searchFrom = start;
-  while (searchFrom < src.length) {
-    const candidate = src.indexOf(delimiter, searchFrom);
-    if (candidate === -1) return -1;
-    const belongsToDoubleDelimiter = delimiter === '$' && (
-      (src.charAt(candidate - 1) === '$' && !isEscapedDollar(src, candidate - 1)) ||
-      (src.charAt(candidate + 1) === '$' && !isEscapedDollar(src, candidate + 1))
-    );
-    if (!isEscapedDollar(src, candidate) && !belongsToDoubleDelimiter) return candidate;
-    // Advance one character so an escaped dollar followed immediately by the
-    // real closing delimiter can still participate in that closing run.
-    searchFrom = candidate + 1;
-  }
-  return -1;
-}
+const DOCX_DOLLAR_MATH_OPTIONS = { displayRun: 'at-least' as const };
 
 function mathRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
-  const max = state.posMax;
-  
-  if (start >= max || state.src.charAt(start) !== '$') return false;
-  
-  // Check for display math
-  if (start + 1 < max && state.src.charAt(start + 1) === '$') {
-    const endPos = findMathClose(state.src, start + 2, '$$');
-    if (endPos === -1) return false;
-    
+  if (start >= state.posMax || state.src.charAt(start) !== '$') return false;
+
+  const match = findDollarMathAt(state.src, start, DOCX_DOLLAR_MATH_OPTIONS);
+  if (!match || match.kind !== 'math') return false;
+
+  const content = state.src.slice(match.contentStart, match.contentEnd);
+  if (match.delimiterLength === 2) {
     if (!silent) {
-      const content = state.src.slice(start + 2, endPos);
       const token = pushManuscriptToken(state, 'math', '', 0);
       token.content = content;
       token.display = true;
     }
-    state.pos = endPos + 2;
-    return true;
+  } else {
+    const criticParts = splitCriticMarkupInMath(content);
+    if (!silent && criticParts) {
+      pushCriticMathTokens(state, criticParts);
+    } else if (!silent) {
+      const token = pushManuscriptToken(state, 'math', '', 0);
+      token.content = content;
+      // Don't set display for inline math - leave it undefined
+    }
   }
-  
-  // Inline math - don't match $ in middle of words
-  if (start > 0 && /\w/.test(state.src.charAt(start - 1))) return false;
-
-  // Don't match currency patterns like $100 (digit(s) followed by whitespace/punctuation/end)
-  if (start + 1 < max && /\d/.test(state.src.charAt(start + 1))) {
-    const afterDollar = state.src.slice(start + 1);
-    if (/^\d[\d,.]*(?:\s|$)/.test(afterDollar)) return false;
-  }
-
-  const endPos = findMathClose(state.src, start + 1, '$');
-  if (endPos === -1) return false;
-
-  // Don't match $ at end if followed by word character
-  if (endPos + 1 < max && /\w/.test(state.src.charAt(endPos + 1))) return false;
-  
-  const content = state.src.slice(start + 1, endPos);
-  const criticParts = splitCriticMarkupInMath(content);
-  if (!silent && criticParts) {
-    pushCriticMathTokens(state, criticParts);
-  } else if (!silent) {
-    const token = pushManuscriptToken(state, 'math', '', 0);
-    token.content = content;
-    // Don't set display for inline math - leave it undefined
-  }
-  state.pos = endPos + 1;
+  state.pos = match.end;
   return true;
 }
 
@@ -3979,14 +3938,16 @@ function applyLineSpacingToTemplate(xml: string, lineSpacingFm: string | number 
   return xml;
 }
 
+const LIST_CONTINUATION_STYLE_XML =
+  '<w:style w:type="paragraph" w:customStyle="1" w:styleId="ManuscriptListContinuation">\n'
+  + '<w:name w:val="Manuscript List Continuation"/>\n'
+  + '<w:basedOn w:val="Normal"/>\n'
+  + '<w:semiHidden/><w:unhideWhenUsed/>\n'
+  + '</w:style>\n';
+
 function ensureListContinuationStyle(xml: string): string {
   if (/<w:style\b[^>]*\bw:styleId\s*=\s*(["'])ManuscriptListContinuation\1/.test(xml)) return xml;
-  const style = '<w:style w:type="paragraph" w:customStyle="1" w:styleId="ManuscriptListContinuation">'
-    + '<w:name w:val="Manuscript List Continuation"/>'
-    + '<w:basedOn w:val="Normal"/>'
-    + '<w:semiHidden/><w:unhideWhenUsed/>'
-    + '</w:style>';
-  return xml.replace('</w:styles>', style + '</w:styles>');
+  return xml.replace('</w:styles>', LIST_CONTINUATION_STYLE_XML + '</w:styles>');
 }
 
 export function applyAlertColorsToTemplate(stylesXml: string, scheme: ColorScheme): string {
@@ -4321,11 +4282,7 @@ export function stylesXml(overrides?: FontOverrides, codeBlockConfig?: CodeBlock
     '<w:pPr><w:pBdr><w:left w:val="single" w:sz="' + GITHUB_BLOCKQUOTE_BORDER_SIZE + '" w:space="' + GITHUB_BLOCKQUOTE_BORDER_SPACE + '" w:color="' + GITHUB_BLOCKQUOTE_BORDER_COLOR + '"/></w:pBdr><w:spacing w:after="0" w:line="' + SINGLE_LINE_SPACING + '" w:lineRule="auto"/><w:ind w:left="' + GITHUB_BLOCKQUOTE_INDENT + '"/></w:pPr>\n' +
     (quoteRpr ? quoteRpr : '') +
     '</w:style>\n' +
-    '<w:style w:type="paragraph" w:customStyle="1" w:styleId="ManuscriptListContinuation">\n' +
-    '<w:name w:val="Manuscript List Continuation"/>\n' +
-    '<w:basedOn w:val="Normal"/>\n' +
-    '<w:semiHidden/><w:unhideWhenUsed/>\n' +
-    '</w:style>\n' +
+    LIST_CONTINUATION_STYLE_XML +
     githubAlertStyle('GitHubNote', 'GitHub Note', alertColors.note) +
     githubAlertStyle('GitHubTip', 'GitHub Tip', alertColors.tip) +
     githubAlertStyle('GitHubImportant', 'GitHub Important', alertColors.important) +

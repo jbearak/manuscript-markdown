@@ -14,6 +14,7 @@ import { parseFrontmatter, type ColorScheme } from '../frontmatter';
 import { formatTableNumbers } from '../table-number-format';
 import { getDefaultColorScheme } from '../alert-colors';
 import { splitCriticMarkupInMath, type CriticMathPart } from '../critic-math';
+import { findDollarMathAt } from '../math-delimiters';
 
 export interface ManuscriptMarkdownIt extends MarkdownIt {
   manuscriptColors?: ColorScheme;
@@ -553,17 +554,9 @@ function pushCriticMathParts(state: StateInline, parts: CriticMathPart[]): void 
 /** Parse CriticMarkup inside a single-dollar inline equation before VS Code's math rule consumes it. */
 function parseCriticMarkupInInlineMath(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
-  const src = state.src;
-  if (src.charAt(start) !== '$' || src.charAt(start + 1) === '$') return false;
-
-  const before = src.charAt(start - 1);
-  let openerSlash = start - 1;
-  while (openerSlash >= 0 && src.charAt(openerSlash) === '\\') openerSlash--;
-  const openerIsEscaped = (start - 1 - openerSlash) % 2 === 1;
-  if (before === '$' || openerIsEscaped || (before && /[\w\d]/.test(before))) return false;
-
-  const looksLikeCurrency = /^\d[\d,.]*(?:\s|$)/.test(src.slice(start + 1));
-  if (looksLikeCurrency) {
+  const match = findDollarMathAt(state.src, start);
+  if (!match) return false;
+  if (match.kind === 'currency') {
     // The DOCX parser leaves this opening dollar literal. Consume it here as
     // text so VS Code's later, more permissive math rule cannot swallow a
     // following Critic span or pair it with another currency amount.
@@ -571,23 +564,12 @@ function parseCriticMarkupInInlineMath(state: StateInline, silent: boolean): boo
     state.pos = start + 1;
     return true;
   }
+  if (match.delimiterLength !== 1) return false;
 
-  let end = start + 1;
-  while ((end = src.indexOf('$', end)) !== -1) {
-    let slash = end - 1;
-    while (slash >= 0 && src.charAt(slash) === '\\') slash--;
-    if ((end - slash) % 2 === 1) break;
-    end++;
-  }
-  if (end === -1 || end === start + 1) return false;
-
-  const afterClose = src.charAt(end + 1);
-  if (afterClose === '$' || (afterClose && /[\w\d]/.test(afterClose))) return false;
-
-  const parts = splitCriticMarkupInMath(src.slice(start + 1, end));
+  const parts = splitCriticMarkupInMath(state.src.slice(match.contentStart, match.contentEnd));
   if (!parts) return false;
   if (!silent) pushCriticMathParts(state, parts);
-  state.pos = end + 1;
+  state.pos = match.end;
   return true;
 }
 
