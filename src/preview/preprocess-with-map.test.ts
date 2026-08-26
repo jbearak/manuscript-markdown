@@ -150,4 +150,27 @@ describe('preprocessCriticMarkupWithMap', () => {
     expect(map.remap(outLines.indexOf('After'))).toBe(3);
     expect(mapped).toEqual([...mapped].sort((a, b) => a - b));
   });
+
+  it('counts CRLF and bare CR as physical line endings', () => {
+    for (const src of [
+      '{++a\r\nb++}\r\nAfter',
+      '{++a\rb++}\rAfter',
+    ]) {
+      const { output, map } = preprocessCriticMarkupWithMap(src);
+      const outLines = output.split(/\r\n|\r|\n/);
+
+      expect(map.remap(outLines.indexOf('After'))).toBe(2);
+      expect(map.remap(outLines.length)).toBe(3);
+    }
+  });
+
+  it('maps adjacent collapsed Critic spans to their exact source lines', () => {
+    const src = 'Before\n\n{++one\n\ntwo++}\n\n{++three\nfour++}\n\nAfter';
+    const { output, map } = preprocessCriticMarkupWithMap(src);
+    const outLines = output.split('\n');
+
+    expect(map.remap(outLines.findIndex(line => line.startsWith('{++one')))).toBe(2);
+    expect(map.remap(outLines.findIndex(line => line.startsWith('{++three')))).toBe(6);
+    expect(map.remap(outLines.indexOf('After'))).toBe(9);
+  });
 });

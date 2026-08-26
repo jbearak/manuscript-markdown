@@ -14,7 +14,7 @@
 import { LineMap } from './line-map';
 import { preprocessGridTables } from '../grid-table-preprocess';
 import { wrapBareLatexEnvironments } from '../latex-env-preprocess';
-import { preprocessCriticMarkup } from '../critic-markup';
+import { preprocessCriticMarkup, restoreCriticLineBreaks } from '../critic-markup';
 
 /**
  * Build a LineMap by comparing original and output line arrays.
@@ -129,23 +129,44 @@ function buildMapFromLines(origLines: string[], outLines: string[]): LineMap {
   return LineMap.fromLineMappings(mappings);
 }
 
+function splitPhysicalLines(source: string): string[] {
+  return source.split(/\r\n?|\n/);
+}
+
+function buildCriticLineMap(source: string, output: string): LineMap {
+  const outputLines = splitPhysicalLines(output);
+  const restoredLines: string[] = [];
+  const restoredBoundaries: number[] = [];
+  for (const line of outputLines) {
+    restoredBoundaries.push(restoredLines.length);
+    for (const restoredLine of splitPhysicalLines(restoreCriticLineBreaks(line))) {
+      restoredLines.push(restoredLine);
+    }
+  }
+  restoredBoundaries.push(restoredLines.length);
+
+  const restoredMap = buildMapFromLines(splitPhysicalLines(source), restoredLines);
+  const outputToRestored = LineMap.fromLineMappings(restoredBoundaries);
+  return LineMap.chain(restoredMap, outputToRestored);
+}
+
 /** Preprocess grid tables and return the output with a line map. */
 export function preprocessGridTablesWithMap(src: string): { output: string; map: LineMap } {
   const output = preprocessGridTables(src);
   if (output === src) return { output, map: LineMap.identity() };
-  return { output, map: buildMapFromLines(src.split('\n'), output.split('\n')) };
+  return { output, map: buildMapFromLines(splitPhysicalLines(src), splitPhysicalLines(output)) };
 }
 
 /** Preprocess bare LaTeX environments and return the output with a line map. */
 export function wrapBareLatexEnvironmentsWithMap(src: string): { output: string; map: LineMap } {
   const output = wrapBareLatexEnvironments(src);
   if (output === src) return { output, map: LineMap.identity() };
-  return { output, map: buildMapFromLines(src.split('\n'), output.split('\n')) };
+  return { output, map: buildMapFromLines(splitPhysicalLines(src), splitPhysicalLines(output)) };
 }
 
 /** Preprocess CriticMarkup and return the output with a line map. */
 export function preprocessCriticMarkupWithMap(src: string): { output: string; map: LineMap } {
   const output = preprocessCriticMarkup(src);
   if (output === src) return { output, map: LineMap.identity() };
-  return { output, map: buildMapFromLines(src.split('\n'), output.split('\n')) };
+  return { output, map: buildCriticLineMap(src, output) };
 }

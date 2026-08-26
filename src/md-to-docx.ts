@@ -17,6 +17,7 @@ import { preprocessGridTables, GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData
 import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
 import { extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
+import { matchCriticHeadingPrefix } from './critic-markup';
 export { preprocessGridTables } from './grid-table-preprocess';
 export { extractHtmlTables } from './html-table-parser';
 
@@ -2147,8 +2148,6 @@ function annotateBlockquoteAlert(tokens: MdToken[], level: number): MdToken[] {
   return result;
 }
 
-const ATX_CRITIC_HEADING_RE = /^(#{1,6}) /;
-
 /**
  * Promote a paragraph consisting solely of a full-paragraph {++### ...++} or
  * {--### ...--} span whose payload starts with an ATX heading marker into a
@@ -2169,9 +2168,9 @@ function promoteCriticHeadingParagraph(runs: MdRun[]): MdToken | undefined {
   if (!runs.every(r => r.type === kind && r.author === runs[0].author && r.date === runs[0].date)) return undefined;
   const run = runs[0];
   if (!run.text || run.text.includes('\n')) return undefined;
-  const m = ATX_CRITIC_HEADING_RE.exec(run.text);
-  if (!m) return undefined;
-  const prefix = m[0];
+  const headingPrefix = matchCriticHeadingPrefix(run.text);
+  if (!headingPrefix) return undefined;
+  const prefix = headingPrefix.prefix;
   const remainder = run.text.slice(prefix.length);
   if (!remainder.trim() && runs.length === 1) return undefined;
   let innerRuns = run.innerRuns;
@@ -2191,7 +2190,7 @@ function promoteCriticHeadingParagraph(runs: MdRun[]): MdToken | undefined {
     : runs.slice(1);
   return {
     type: 'heading',
-    level: m[1].length,
+    level: headingPrefix.level,
     criticParaMark: kind === 'critic_add' ? 'addition' : 'deletion',
     runs: promotedRuns,
   };

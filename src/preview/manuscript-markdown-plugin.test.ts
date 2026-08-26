@@ -4,10 +4,43 @@ import MarkdownIt from 'markdown-it';
 import { manuscriptMarkdownPlugin } from './manuscript-markdown-plugin';
 import type { EmbedResolver } from '../embed-preprocess';
 import { VALID_COLOR_IDS, setDefaultHighlightColor, getDefaultHighlightColor } from '../highlight-colors';
-import { escapeHtml, stripHtmlTags, hasNoSpecialSyntax, renderWithPlugin, SIMPLE_CRITIC_TYPES } from '../test-helpers';
-import { LINE_PLACEHOLDER, PARA_PLACEHOLDER } from '../critic-markup';
+import {
+  createMarkdownItWithPlugin,
+  escapeHtml,
+  stripHtmlTags,
+  hasNoSpecialSyntax,
+  renderWithPlugin,
+  SIMPLE_CRITIC_TYPES,
+  type CriticType,
+} from '../test-helpers';
+import { LINE_PLACEHOLDER, PARA_PLACEHOLDER, matchCriticHeadingPrefix } from '../critic-markup';
 import * as fs from 'fs';
 import * as path from 'path';
+
+function startsWithNonemptyAtxHeading(text: string): boolean {
+  const firstLine = text.split(/\r\n|\r|\n/, 1)[0];
+  const headingPrefix = matchCriticHeadingPrefix(firstLine);
+  return headingPrefix !== undefined && firstLine.slice(headingPrefix.prefix.length).trim().length > 0;
+}
+
+const blockMapMarkdownIt = createMarkdownItWithPlugin();
+
+function parseBlockMaps(input: string, slice?: [number, number]): Array<[number, number] | null> {
+  const blockOpens = blockMapMarkdownIt.parse(input, {}).filter(token =>
+    token.type === 'heading_open' || token.type === 'paragraph_open'
+  );
+  const selected = slice ? blockOpens.slice(slice[0], slice[1]) : blockOpens;
+  return selected.map(token => token.map);
+}
+
+function criticLinesArbitrary(base: fc.Arbitrary<string[]>, type: CriticType): fc.Arbitrary<string[]> {
+  const withoutHeadings = type.name === 'addition' || type.name === 'deletion'
+    ? base.filter(lines => !startsWithNonemptyAtxHeading(lines[0]))
+    : base;
+  return type.name === 'comment'
+    ? withoutHeadings.filter(lines => lines.every(line => !line.includes('<') && !line.includes('>')))
+    : withoutHeadings;
+}
 
 function makeEmbedResolver(files: Record<string, string>): EmbedResolver {
   return {
@@ -203,7 +236,10 @@ describe('Manuscript Markdown Plugin Property Tests', () => {
     it('should transform addition patterns into HTML with correct CSS class', () => {
       fc.assert(
         fc.property(
-          fc.string({ minLength: 1, maxLength: 100 }).filter(s => !s.includes('{') && !s.includes('}') && hasNoSpecialSyntax(s)),
+          fc.string({ minLength: 1, maxLength: 100 }).filter(s =>
+            !s.includes('{') && !s.includes('}') && hasNoSpecialSyntax(s) &&
+            !startsWithNonemptyAtxHeading(s)
+          ),
           (text) => {
             const output = renderWithPlugin('{++' + text + '++}');
             expect(output).toContain('manuscript-markdown-addition');
@@ -218,7 +254,10 @@ describe('Manuscript Markdown Plugin Property Tests', () => {
     it('should transform deletion patterns into HTML with correct CSS class', () => {
       fc.assert(
         fc.property(
-          fc.string({ minLength: 1, maxLength: 100 }).filter(s => !s.includes('{') && !s.includes('}') && hasNoSpecialSyntax(s)),
+          fc.string({ minLength: 1, maxLength: 100 }).filter(s =>
+            !s.includes('{') && !s.includes('}') && hasNoSpecialSyntax(s) &&
+            !startsWithNonemptyAtxHeading(s)
+          ),
           (text) => {
             const output = renderWithPlugin('{--' + text + '--}');
             expect(output).toContain('manuscript-markdown-deletion');
@@ -850,6 +889,329 @@ describe('Edge Cases', () => {
   });
 });
 
+describe('CriticMarkup headings in preview', () => {
+  it('renders a heading marker inside an addition as a heading', () => {
+    const output = renderWithPlugin('{++## Section Name++}');
+
+    expect(output).toContain('<h2><ins class="manuscript-markdown-addition">Section Name</ins></h2>');
+    expect(output).not.toContain('## Section Name');
+  });
+
+  it('renders a heading marker inside a deletion as a heading', () => {
+    const output = renderWithPlugin('{--### Old Section--}');
+
+    expect(output).toContain('<h3><del class="manuscript-markdown-deletion">Old Section</del></h3>');
+    expect(output).not.toContain('### Old Section');
+  });
+
+  it('does not promote a Critic heading marker in a partial paragraph', () => {
+    const output = renderWithPlugin('Before {++## not a heading++}');
+
+    expect(output).toContain('<p>Before <ins class="manuscript-markdown-addition">## not a heading</ins></p>');
+    expect(output).not.toContain('<h2>');
+  });
+
+  it('does not promote mixed top-level Critic and plain content', () => {
+    for (const input of [
+      '{++## One++} plain {++Two++}',
+      '{++## One++}{--Two--}{++Three++}',
+    ]) {
+      const output = renderWithPlugin(input);
+      expect(output).toContain('## One');
+      expect(output).not.toContain('<h2>');
+    }
+  });
+
+  it('does not promote an empty internal Critic heading', () => {
+    for (const input of ['{++## ++}', '{--## --}', '{++## \nParagraph++}', '{--## \nParagraph--}']) {
+      const output = renderWithPlugin(input);
+      expect(output).toContain('## ');
+      expect(output).not.toContain('<h2>');
+    }
+  });
+
+  it('promotes an internal heading whose content continues in an adjacent revision span', () => {
+    const output = renderWithPlugin('{++## ++}{++Section Name++}');
+
+    expect(output).toContain(
+      '<h2><ins class="manuscript-markdown-addition"></ins>' +
+      '<ins class="manuscript-markdown-addition">Section Name</ins></h2>'
+    );
+  });
+
+  it('does not promote an internal heading with an attached comment run', () => {
+    for (const input of [
+      '{++## Section Name++}{>>note<<}',
+      '{++## Section Name++} {>>note<<}',
+    ]) {
+      const output = renderWithPlugin(input);
+      expect(output).toContain('## Section Name');
+      expect(output).not.toContain('<h2>');
+    }
+  });
+
+  it('leaves internal Critic heading markers literal in quotes and lists', () => {
+    for (const input of ['> {++## Quoted++}', '- {++## Listed++}']) {
+      const output = renderWithPlugin(input);
+      expect(output).toContain('## ');
+      expect(output).not.toContain('<h2>');
+    }
+  });
+
+  it('ends a heading before a multiline addition continues into a paragraph', () => {
+    const output = renderWithPlugin('## {++Section Name\n\nParagraph text.\n++}');
+
+    expect(output).toContain(
+      '<h2><ins class="manuscript-markdown-addition">Section Name</ins></h2>\n' +
+      '<p><ins class="manuscript-markdown-addition">Paragraph text.\n</ins></p>'
+    );
+  });
+
+  it('splits a paragraph-spanning addition after promoting its internal heading', () => {
+    const output = renderWithPlugin('{++## Section Name\n\nParagraph text.\n++}');
+
+    expect(output).toContain(
+      '<h2><ins class="manuscript-markdown-addition">Section Name</ins></h2>\n' +
+      '<p><ins class="manuscript-markdown-addition">Paragraph text.\n</ins></p>'
+    );
+  });
+
+  it('ends both heading forms at a single source newline', () => {
+    for (const input of [
+      '## {++Section Name\nParagraph text.++}',
+      '{++## Section Name\nParagraph text.++}',
+    ]) {
+      const output = renderWithPlugin(input);
+      expect(output).toContain(
+        '<h2><ins class="manuscript-markdown-addition">Section Name</ins></h2>\n' +
+        '<p><ins class="manuscript-markdown-addition">Paragraph text.</ins></p>'
+      );
+    }
+  });
+
+  it('keeps later soft line breaks inside the body paragraph', () => {
+    const output = renderWithPlugin('## {++Section Name\nFirst line\nSecond line++}');
+
+    expect(output).toContain(
+      '<h2><ins class="manuscript-markdown-addition">Section Name</ins></h2>\n' +
+      '<p><ins class="manuscript-markdown-addition">First line\nSecond line</ins></p>'
+    );
+  });
+
+  it('balances nested formatting and CriticMarkup across the heading boundary', () => {
+    const output = renderWithPlugin('## {++Section Name\n\n**bold {--old--}**++}');
+
+    expect(output).toContain(
+      '<h2><ins class="manuscript-markdown-addition">Section Name</ins></h2>\n' +
+      '<p><ins class="manuscript-markdown-addition"><strong>bold ' +
+      '<del class="manuscript-markdown-deletion">old</del></strong></ins></p>'
+    );
+  });
+
+  it('balances raw inline HTML across the heading boundary', () => {
+    for (const [open, close] of [
+      ['<em>', '</em>'],
+      ['<span class="label">', '</span>'],
+      ['<a href="/section">', '</a>'],
+    ]) {
+      const output = renderWithPlugin('## {++' + open + 'Section\n\nParagraph' + close + '++}');
+      expect(output).toContain(
+        '<h2><ins class="manuscript-markdown-addition">' + open + 'Section' + close + '</ins></h2>\n' +
+        '<p><ins class="manuscript-markdown-addition">' + open + 'Paragraph' + close + '</ins></p>'
+      );
+    }
+  });
+
+  it('propagates an attached comment to every split Critic span', () => {
+    const output = renderWithPlugin('## {++Section Name\n\nParagraph text.++}{>>note<<}');
+
+    expect(output.match(/data-comment="note"/g)).toHaveLength(2);
+  });
+
+  it('ignores protected breaks inside an attached multiline comment when splitting', () => {
+    const output = renderWithPlugin(
+      '## {++Section Name\n\nParagraph text.++}{>>first\n\nsecond<<}'
+    );
+
+    expect(output).toContain(
+      '<h2><ins class="manuscript-markdown-addition" data-comment="first\n\nsecond">' +
+      'Section Name</ins></h2>\n' +
+      '<p><ins class="manuscript-markdown-addition" data-comment="first\n\nsecond">' +
+      'Paragraph text.</ins></p>'
+    );
+  });
+
+  it('uses emitted breaks when opaque inline content consumes a placeholder', () => {
+    const output = renderWithPlugin('## {++`Section\nName`\n\nParagraph text.++}');
+
+    expect(output).toContain(
+      '<h2><ins class="manuscript-markdown-addition"><code>Section Name</code></ins></h2>\n' +
+      '<p><ins class="manuscript-markdown-addition">Paragraph text.</ins></p>'
+    );
+  });
+
+  it('splits at breaks after escaped comment and code delimiters', () => {
+    for (const body of [
+      'Section \\{>>literal\n\ntext<<}\n\nParagraph',
+      'Section \\{#note>>literal\n\ntext<<}\n\nParagraph',
+      'Section \\`literal\n\ntext`\n\nParagraph',
+    ]) {
+      for (const input of ['## {++' + body + '++}', '{++## ' + body + '++}']) {
+        const output = renderWithPlugin(input);
+        expect(output).toContain('</h2>\n<p>');
+        expect(output).toContain('Paragraph</ins></p>');
+        expect(output).not.toContain('Paragraph</ins></h2>');
+      }
+    }
+  });
+
+  it('maps a split after opaque HTML attributes and image labels', () => {
+    for (const body of [
+      '<span title="Section\n\nName">Visible</span>\n\nParagraph',
+      '![Section\n\nName](image.png)\n\nParagraph',
+    ]) {
+      for (const input of ['## {++' + body + '++}', '{++## ' + body + '++}']) {
+        expect(parseBlockMaps(input)).toEqual([[0, 3], [4, 5]]);
+      }
+    }
+  });
+
+  it('does not synthesize wrappers for GFM-disallowed raw HTML', () => {
+    const output = renderWithPlugin('## {++<title>Section\n\nParagraph</title>++}');
+
+    expect(output).toContain(
+      '<h2><ins class="manuscript-markdown-addition">&lt;title&gt;Section</ins></h2>\n' +
+      '<p><ins class="manuscript-markdown-addition">Paragraph&lt;/title&gt;</ins></p>'
+    );
+  });
+
+  it('does not leak a protected newline after a Markdown escape', () => {
+    const output = renderWithPlugin('## {++Section Name\\\nParagraph text.++}');
+
+    expect(output).toContain(
+      '<h2><ins class="manuscript-markdown-addition">Section Name</ins></h2>\n' +
+      '<p><ins class="manuscript-markdown-addition">Paragraph text.</ins></p>'
+    );
+    expect(output).not.toContain(LINE_PLACEHOLDER);
+    expect(output).not.toContain('\uE000');
+  });
+
+  it('does not leak an escaped protected paragraph break in either heading form', () => {
+    for (const input of [
+      '## {++Section Name\\\n\nParagraph text.++}',
+      '{++## Section Name\\\n\nParagraph text.++}',
+    ]) {
+      const output = renderWithPlugin(input);
+      expect(output).toContain(
+        '<h2><ins class="manuscript-markdown-addition">Section Name</ins></h2>\n' +
+        '<p><ins class="manuscript-markdown-addition">Paragraph text.</ins></p>'
+      );
+      expect(output).not.toContain('\uE000');
+    }
+  });
+
+  it('assigns each generated block its own source map and standard token shape', () => {
+    const tokens = createMarkdownItWithPlugin().parse(
+      '## {++Section Name\n\nParagraph text.++}',
+      {},
+    );
+    const blockOpens = tokens.filter(token =>
+      token.type === 'heading_open' || token.type === 'paragraph_open'
+    );
+    const inlineTokens = tokens.filter(token => token.type === 'inline');
+
+    expect(blockOpens.map(token => token.map)).toEqual([[0, 1], [2, 3]]);
+    expect(blockOpens.every(token => token.block && token.level === 0)).toBe(true);
+    expect(inlineTokens.map(token => token.map)).toEqual([[0, 1], [2, 3]]);
+    expect(inlineTokens.every(token => token.block && token.level === 1)).toBe(true);
+  });
+
+  it('maps a visible split after hidden comment and code-span breaks', () => {
+    const inputs = [
+      '## {>>first\n\nsecond<<}{++Section\n\nParagraph++}',
+      '## {++`Section\n\nName`\n\nParagraph++}',
+    ];
+    for (const input of inputs) {
+      expect(parseBlockMaps(input)).toEqual([[0, 3], [4, 5]]);
+    }
+  });
+
+  it('maps CRLF heading boundaries as one physical newline each', () => {
+    for (const [input, expectedMaps] of [
+      ['{++## Section\r\nParagraph++}', [[0, 1], [1, 2]]],
+      ['{++## Section\r\n\r\nParagraph++}', [[0, 1], [2, 3]]],
+    ] as const) {
+      expect(parseBlockMaps(input)).toEqual(expectedMaps);
+    }
+  });
+
+  it('maps bare-CR heading boundaries as physical newlines', () => {
+    for (const [input, expectedMaps] of [
+      ['{++## Section\rParagraph++}', [[0, 1], [1, 2]]],
+      ['{++## Section\r\rParagraph++}', [[0, 1], [2, 3]]],
+    ] as const) {
+      expect(parseBlockMaps(input)).toEqual(expectedMaps);
+    }
+  });
+
+  it('maps headings exactly within surrounding content', () => {
+    for (const eol of ['\n', '\r\n', '\r']) {
+      for (const [open, close] of [['{++', '++}'], ['{--', '--}']]) {
+        for (const [lineBreak, bodyStart] of [[eol, 3], [eol + eol, 4]] as const) {
+          for (const revisedHeading of [
+            '## ' + open + 'Section' + lineBreak + 'Paragraph' + close,
+            open + '## Section' + lineBreak + 'Paragraph' + close,
+          ]) {
+            const input = 'Before' + eol + eol + revisedHeading + eol + eol + 'After';
+            expect(parseBlockMaps(input, [1, 3])).toEqual([[2, 3], [bodyStart, bodyStart + 1]]);
+          }
+        }
+      }
+    }
+  });
+
+  it('maps adjacent collapsed Critic headings from their exact source starts', () => {
+    const input =
+      'Before\n\n{++## One\n\nBody1++}\n\n{++## Two\nBody2++}\n\nAfter';
+
+    expect(parseBlockMaps(input, [1, 5])).toEqual([[2, 3], [4, 5], [6, 7], [7, 8]]);
+  });
+
+  it('counts protected breaks consumed by inline math before a visible split', () => {
+    for (const mathCritic of [
+      '{>>note\n\nmore<<}',
+      '{--old\n\nmore--}',
+      '{==marked\n\nmore==}',
+      '{~~old\n\nmore~>new~~}',
+    ]) {
+      for (const input of [
+        '## {++$x ' + mathCritic + ' y$\n\nParagraph++}',
+        '{++## $x ' + mathCritic + ' y$\n\nParagraph++}',
+      ]) {
+        expect(parseBlockMaps(input)).toEqual([[0, 3], [4, 5]]);
+      }
+    }
+  });
+
+  it('does not attach consumed math breaks to preceding pending text', () => {
+    for (const eol of ['\n', '\r\n', '\r']) {
+      const body =
+        'Section' + eol + 'Continuation $x {--old' + eol + eol + 'more--} y$' +
+        eol + eol + 'Paragraph';
+      for (const input of ['## {++' + body + '++}', '{++## ' + body + '++}']) {
+        expect(parseBlockMaps(input)).toEqual([[0, 1], [1, 4], [5, 6]]);
+      }
+    }
+  });
+
+  it('does not emit an empty paragraph for a trailing blank segment', () => {
+    const output = renderWithPlugin('## {++Section Name\n\n++}');
+
+    expect(output).toContain('<h2><ins class="manuscript-markdown-addition">Section Name</ins></h2>');
+    expect(output).not.toContain('<p>');
+  });
+});
+
 // Property 4: Empty line preservation — parameterized
 describe('Property 4: Empty line preservation', () => {
   it('renders paragraph breaks inside an addition without leaking the placeholder', () => {
@@ -895,9 +1257,7 @@ describe('Property 4: Empty line preservation', () => {
   ).filter(lines => lines.some(line => line === '') && lines.some(line => line.trim().length > 0));
 
   for (const type of SIMPLE_CRITIC_TYPES) {
-    const arb = type.name === 'comment'
-      ? multilineTextWithEmptyLines.filter(lines => lines.every(line => !line.includes('<') && !line.includes('>')))
-      : multilineTextWithEmptyLines;
+    const arb = criticLinesArbitrary(multilineTextWithEmptyLines, type);
 
     it('should recognize ' + type.name + ' patterns containing empty lines as single patterns', () => {
       fc.assert(
@@ -947,9 +1307,7 @@ describe('Property 3: Multi-line preview rendering (multiline-Manuscript Markdow
   );
 
   for (const type of SIMPLE_CRITIC_TYPES) {
-    const arb = type.name === 'comment'
-      ? multilineText.filter(lines => lines.every(line => !line.includes('<') && !line.includes('>')))
-      : multilineText;
+    const arb = criticLinesArbitrary(multilineText, type);
 
     it('should render multi-line ' + type.name + ' patterns with correct HTML structure', () => {
       fc.assert(
