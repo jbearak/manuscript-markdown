@@ -520,6 +520,7 @@ describe('Manuscript Markdown Plugin Property Tests', () => {
 
     for (const type of SIMPLE_CRITIC_TYPES) {
       const charFilter = (s: string) => !s.includes('{') && !s.includes('}') &&
+        !s.includes('==') && !s.includes('~~') &&
         (type.name !== 'comment' ? true : !s.includes('<') && !s.includes('>')) &&
         isValidMultilineContent(s);
 

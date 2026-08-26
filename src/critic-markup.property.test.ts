@@ -77,7 +77,7 @@ function quoteDepthAt(content: string, offset: number): number {
   let prefix = content.slice(lineStart, offset);
   let depth = 0;
   while (true) {
-    const match = prefix.match(/^[ \t]{0,3}>[ \t]?/);
+    const match = prefix.match(/^[ \t]*>[ \t]?/);
     if (!match) return depth;
     depth++;
     prefix = prefix.slice(match[0].length);
@@ -89,7 +89,7 @@ function stripQuoteContinuationPrefixes(content: string, depth: number): string 
   return content.replace(/(\r\n|\r|\n)([^\r\n]*)/g, (_full, eol: string, line: string) => {
     let remainder = line;
     for (let level = 0; level < depth; level++) {
-      const match = remainder.match(/^[ \t]{0,3}>[ \t]?/);
+      const match = remainder.match(/^[ \t]*>[ \t]?/);
       if (!match) return eol + line;
       remainder = remainder.slice(match[0].length);
     }
@@ -149,6 +149,10 @@ function preprocessCriticMarkupReference(markdown: string): string {
         ? findMatchingClose(markdown, contentStart)
         : markdown.indexOf(open === '{++' ? '++}' : open === '{--' ? '--}' : open === '{==' ? '==}' : '~~}', contentStart);
       if (closePos === -1) return full;
+      if (open === '{~~') {
+        const separatorPos = markdown.indexOf('~>', contentStart);
+        if (separatorPos === -1 || separatorPos >= closePos) return full;
+      }
       const lineStart = Math.max(
         markdown.lastIndexOf('\n', offset - 1),
         markdown.lastIndexOf('\r', offset - 1),
@@ -171,64 +175,57 @@ function preprocessCriticMarkupReference(markdown: string): string {
       return paragraphBreak + open + nextPrefix;
     },
   );
-  const markers = [
-    { open: '{++', close: '++}' },
-    { open: '{--', close: '--}' },
-    { open: '{~~', close: '~~}' },
-    { open: '{>>', close: '<<}', nested: true },
-    { open: '{==', close: '==}' },
-  ];
-  let result = markdown;
-  for (const { open, close, nested } of markers) {
-    let searchFrom = 0;
-    while (true) {
-      const openIdx = result.indexOf(open, searchFrom);
-      if (openIdx === -1) break;
-      const contentStart = openIdx + open.length;
-      const codeRegions = computeReferenceCodeRegions(result);
-      if (isInsideCodeRegion(openIdx, codeRegions) || isEscapedAt(result, openIdx)) { searchFrom = contentStart; continue; }
-      let closeIdx: number;
-      if (nested) {
-        closeIdx = findMatchingClose(result, contentStart);
-      } else {
-        closeIdx = result.indexOf(close, contentStart);
-      }
-      if (closeIdx === -1) { searchFrom = contentStart; continue; }
-      const content = result.slice(contentStart, closeIdx);
-      if (/\r|\n/.test(content)) {
-      const replaced = stripQuoteContinuationPrefixes(content, quoteDepthAt(result, openIdx))
-          .replace(/(?:\r\n|\r|\n)[ \t]*(?:\r\n|\r|\n)/g, PARA_PLACEHOLDER)
-          .replace(/\r\n|\r|\n/g, LINE_PLACEHOLDER);
-        result = result.slice(0, contentStart) + replaced + result.slice(closeIdx);
-        searchFrom = contentStart + replaced.length + close.length;
-      } else {
-        searchFrom = closeIdx + close.length;
+  const result = markdown;
+  const codeRegions = computeReferenceCodeRegions(result);
+  // Keep source offsets stable so an earlier replacement cannot change the
+  // line or container context used for a later opener.
+  const edits: Array<{ start: number; end: number; replacement: string }> = [];
+  const openerRe = /\{\+\+|\{--|\{~~|\{>>|\{==|\{#[a-zA-Z0-9_-]+>>/g;
+  let searchFrom = 0;
+  while (true) {
+    openerRe.lastIndex = searchFrom;
+    const match = openerRe.exec(result);
+    if (!match) break;
+    const openIdx = match.index;
+    const open = match[0];
+    const contentStart = openIdx + open.length;
+    if (isInsideCodeRegion(openIdx, codeRegions) || isEscapedAt(result, openIdx)) {
+      searchFrom = contentStart;
+      continue;
+    }
+    const nested = open === '{>>' || open.startsWith('{#');
+    const close = nested
+      ? '<<}'
+      : open === '{++' ? '++}' : open === '{--' ? '--}' : open === '{==' ? '==}' : '~~}';
+    const closeIdx = nested
+      ? findMatchingClose(result, contentStart)
+      : result.indexOf(close, contentStart);
+    if (closeIdx === -1) {
+      searchFrom = contentStart;
+      continue;
+    }
+    if (open === '{~~') {
+      const separatorPos = result.indexOf('~>', contentStart);
+      if (separatorPos === -1 || separatorPos >= closeIdx) {
+        searchFrom = contentStart;
+        continue;
       }
     }
-  }
-  let idSearchFrom = 0;
-  while (true) {
-    const idCommentRe = /\{#[a-zA-Z0-9_-]+>>/;
-    const match = idCommentRe.exec(result.slice(idSearchFrom));
-    if (!match) break;
-    const matchIndex = idSearchFrom + match.index;
-    const contentStart = matchIndex + match[0].length;
-    const codeRegions = computeReferenceCodeRegions(result);
-    if (isInsideCodeRegion(matchIndex, codeRegions) || isEscapedAt(result, matchIndex)) { idSearchFrom = contentStart; continue; }
-    const closeIdx = findMatchingClose(result, contentStart);
-    if (closeIdx === -1) { idSearchFrom = contentStart; continue; }
     const content = result.slice(contentStart, closeIdx);
     if (/\r|\n/.test(content)) {
-      const replaced = stripQuoteContinuationPrefixes(content, quoteDepthAt(result, matchIndex))
+      const replaced = stripQuoteContinuationPrefixes(content, quoteDepthAt(result, openIdx))
         .replace(/(?:\r\n|\r|\n)[ \t]*(?:\r\n|\r|\n)/g, PARA_PLACEHOLDER)
         .replace(/\r\n|\r|\n/g, LINE_PLACEHOLDER);
-      result = result.slice(0, contentStart) + replaced + result.slice(closeIdx);
-      idSearchFrom = contentStart + replaced.length + 3;
-    } else {
-      idSearchFrom = closeIdx + 3;
+      edits.push({ start: contentStart, end: closeIdx, replacement: replaced });
     }
+    searchFrom = closeIdx + close.length;
   }
-  return result;
+  let rebuilt = result;
+  for (let i = edits.length - 1; i >= 0; i--) {
+    const edit = edits[i];
+    rebuilt = rebuilt.slice(0, edit.start) + edit.replacement + rebuilt.slice(edit.end);
+  }
+  return rebuilt;
 }
 
 describe('Property 6: Streaming Preprocessor Equivalence', () => {
@@ -272,8 +269,15 @@ describe('Property 6: Streaming Preprocessor Equivalence', () => {
     for (const text of [
       '- Intro\n  Earlier.{++\n  Added.++}',
       '> {++before\n>\n> after++}',
+      '- outer\n    - inner\n      > {++before\n      >\n      > after++}',
       '    `x` `x` {++first\n    second++}',
+      'Before{~~\nliteral~~}',
+      '{~~old\n\n# heading~~}',
+      '{#abc>>>\n\n><<} {>>\n\n<<} {==>\n\n>==}',
+      '> {--\n\n--} {>>>\n\n><<} {==\n\n==}',
+      '> {#abc>>\n\n<<} {==>\n\n>==} ',
     ]) {
+      if (text.includes('{~~')) expect(preprocessCriticMarkup(text)).toBe(text);
       expect(preprocessCriticMarkup(text)).toBe(preprocessCriticMarkupReference(text));
     }
   });
