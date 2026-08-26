@@ -130,7 +130,7 @@ function buildMapFromLines(origLines: string[], outLines: string[]): LineMap {
 }
 
 function splitPhysicalLines(source: string): string[] {
-  return source.split(/\r\n|\r|\n/);
+  return source.split(/\r\n?|\n/);
 }
 
 function buildCriticLineMap(source: string, output: string): LineMap {
@@ -139,12 +139,15 @@ function buildCriticLineMap(source: string, output: string): LineMap {
   const restoredBoundaries: number[] = [];
   for (const line of outputLines) {
     restoredBoundaries.push(restoredLines.length);
-    restoredLines.push(...splitPhysicalLines(restoreCriticLineBreaks(line)));
+    for (const restoredLine of splitPhysicalLines(restoreCriticLineBreaks(line))) {
+      restoredLines.push(restoredLine);
+    }
   }
   restoredBoundaries.push(restoredLines.length);
 
   const restoredMap = buildMapFromLines(splitPhysicalLines(source), restoredLines);
-  return LineMap.fromLineMappings(restoredBoundaries.map(boundary => restoredMap.remap(boundary)));
+  const outputToRestored = LineMap.fromLineMappings(restoredBoundaries);
+  return LineMap.chain(restoredMap, outputToRestored);
 }
 
 /** Preprocess grid tables and return the output with a line map. */

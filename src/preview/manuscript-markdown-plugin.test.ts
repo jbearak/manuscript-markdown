@@ -4,15 +4,42 @@ import MarkdownIt from 'markdown-it';
 import { manuscriptMarkdownPlugin } from './manuscript-markdown-plugin';
 import type { EmbedResolver } from '../embed-preprocess';
 import { VALID_COLOR_IDS, setDefaultHighlightColor, getDefaultHighlightColor } from '../highlight-colors';
-import { escapeHtml, stripHtmlTags, hasNoSpecialSyntax, renderWithPlugin, SIMPLE_CRITIC_TYPES } from '../test-helpers';
-import { LINE_PLACEHOLDER, PARA_PLACEHOLDER } from '../critic-markup';
+import {
+  createMarkdownItWithPlugin,
+  escapeHtml,
+  stripHtmlTags,
+  hasNoSpecialSyntax,
+  renderWithPlugin,
+  SIMPLE_CRITIC_TYPES,
+  type CriticType,
+} from '../test-helpers';
+import { LINE_PLACEHOLDER, PARA_PLACEHOLDER, matchCriticHeadingPrefix } from '../critic-markup';
 import * as fs from 'fs';
 import * as path from 'path';
 
 function startsWithNonemptyAtxHeading(text: string): boolean {
   const firstLine = text.split(/\r\n|\r|\n/, 1)[0];
-  const marker = /^(#{1,6}) /.exec(firstLine);
-  return marker !== null && firstLine.slice(marker[0].length).trim().length > 0;
+  const headingPrefix = matchCriticHeadingPrefix(firstLine);
+  return headingPrefix !== undefined && firstLine.slice(headingPrefix.prefix.length).trim().length > 0;
+}
+
+const blockMapMarkdownIt = createMarkdownItWithPlugin();
+
+function parseBlockMaps(input: string, slice?: [number, number]): Array<[number, number] | null> {
+  const blockOpens = blockMapMarkdownIt.parse(input, {}).filter(token =>
+    token.type === 'heading_open' || token.type === 'paragraph_open'
+  );
+  const selected = slice ? blockOpens.slice(slice[0], slice[1]) : blockOpens;
+  return selected.map(token => token.map);
+}
+
+function criticLinesArbitrary(base: fc.Arbitrary<string[]>, type: CriticType): fc.Arbitrary<string[]> {
+  const withoutHeadings = type.name === 'addition' || type.name === 'deletion'
+    ? base.filter(lines => !startsWithNonemptyAtxHeading(lines[0]))
+    : base;
+  return type.name === 'comment'
+    ? withoutHeadings.filter(lines => lines.every(line => !line.includes('<') && !line.includes('>')))
+    : withoutHeadings;
 }
 
 function makeEmbedResolver(files: Record<string, string>): EmbedResolver {
@@ -1044,12 +1071,7 @@ describe('CriticMarkup headings in preview', () => {
       '![Section\n\nName](image.png)\n\nParagraph',
     ]) {
       for (const input of ['## {++' + body + '++}', '{++## ' + body + '++}']) {
-        const md = new MarkdownIt({ html: true });
-        md.use(manuscriptMarkdownPlugin);
-        const blockMaps = md.parse(input, {})
-          .filter(token => token.type === 'heading_open' || token.type === 'paragraph_open')
-          .map(token => token.map);
-        expect(blockMaps).toEqual([[0, 3], [4, 5]]);
+        expect(parseBlockMaps(input)).toEqual([[0, 3], [4, 5]]);
       }
     }
   });
@@ -1089,9 +1111,10 @@ describe('CriticMarkup headings in preview', () => {
   });
 
   it('assigns each generated block its own source map and standard token shape', () => {
-    const md = new MarkdownIt({ html: true });
-    md.use(manuscriptMarkdownPlugin);
-    const tokens = md.parse('## {++Section Name\n\nParagraph text.++}', {});
+    const tokens = createMarkdownItWithPlugin().parse(
+      '## {++Section Name\n\nParagraph text.++}',
+      {},
+    );
     const blockOpens = tokens.filter(token =>
       token.type === 'heading_open' || token.type === 'paragraph_open'
     );
@@ -1109,13 +1132,7 @@ describe('CriticMarkup headings in preview', () => {
       '## {++`Section\n\nName`\n\nParagraph++}',
     ];
     for (const input of inputs) {
-      const md = new MarkdownIt({ html: true });
-      md.use(manuscriptMarkdownPlugin);
-      const tokens = md.parse(input, {});
-      const blockMaps = tokens
-        .filter(token => token.type === 'heading_open' || token.type === 'paragraph_open')
-        .map(token => token.map);
-      expect(blockMaps).toEqual([[0, 3], [4, 5]]);
+      expect(parseBlockMaps(input)).toEqual([[0, 3], [4, 5]]);
     }
   });
 
@@ -1124,13 +1141,7 @@ describe('CriticMarkup headings in preview', () => {
       ['{++## Section\r\nParagraph++}', [[0, 1], [1, 2]]],
       ['{++## Section\r\n\r\nParagraph++}', [[0, 1], [2, 3]]],
     ] as const) {
-      const md = new MarkdownIt({ html: true });
-      md.use(manuscriptMarkdownPlugin);
-      const tokens = md.parse(input, {});
-      const blockMaps = tokens
-        .filter(token => token.type === 'heading_open' || token.type === 'paragraph_open')
-        .map(token => token.map);
-      expect(blockMaps).toEqual(expectedMaps);
+      expect(parseBlockMaps(input)).toEqual(expectedMaps);
     }
   });
 
@@ -1139,12 +1150,7 @@ describe('CriticMarkup headings in preview', () => {
       ['{++## Section\rParagraph++}', [[0, 1], [1, 2]]],
       ['{++## Section\r\rParagraph++}', [[0, 1], [2, 3]]],
     ] as const) {
-      const md = new MarkdownIt({ html: true });
-      md.use(manuscriptMarkdownPlugin);
-      const blockMaps = md.parse(input, {})
-        .filter(token => token.type === 'heading_open' || token.type === 'paragraph_open')
-        .map(token => token.map);
-      expect(blockMaps).toEqual(expectedMaps);
+      expect(parseBlockMaps(input)).toEqual(expectedMaps);
     }
   });
 
@@ -1157,13 +1163,7 @@ describe('CriticMarkup headings in preview', () => {
             open + '## Section' + lineBreak + 'Paragraph' + close,
           ]) {
             const input = 'Before' + eol + eol + revisedHeading + eol + eol + 'After';
-            const md = new MarkdownIt({ html: true });
-            md.use(manuscriptMarkdownPlugin);
-            const revisedMaps = md.parse(input, {})
-              .filter(token => token.type === 'heading_open' || token.type === 'paragraph_open')
-              .slice(1, 3)
-              .map(token => token.map);
-            expect(revisedMaps).toEqual([[2, 3], [bodyStart, bodyStart + 1]]);
+            expect(parseBlockMaps(input, [1, 3])).toEqual([[2, 3], [bodyStart, bodyStart + 1]]);
           }
         }
       }
@@ -1173,14 +1173,8 @@ describe('CriticMarkup headings in preview', () => {
   it('maps adjacent collapsed Critic headings from their exact source starts', () => {
     const input =
       'Before\n\n{++## One\n\nBody1++}\n\n{++## Two\nBody2++}\n\nAfter';
-    const md = new MarkdownIt({ html: true });
-    md.use(manuscriptMarkdownPlugin);
-    const revisedMaps = md.parse(input, {})
-      .filter(token => token.type === 'heading_open' || token.type === 'paragraph_open')
-      .slice(1, 5)
-      .map(token => token.map);
 
-    expect(revisedMaps).toEqual([[2, 3], [4, 5], [6, 7], [7, 8]]);
+    expect(parseBlockMaps(input, [1, 5])).toEqual([[2, 3], [4, 5], [6, 7], [7, 8]]);
   });
 
   it('counts protected breaks consumed by inline math before a visible split', () => {
@@ -1194,12 +1188,7 @@ describe('CriticMarkup headings in preview', () => {
         '## {++$x ' + mathCritic + ' y$\n\nParagraph++}',
         '{++## $x ' + mathCritic + ' y$\n\nParagraph++}',
       ]) {
-        const md = new MarkdownIt({ html: true });
-        md.use(manuscriptMarkdownPlugin);
-        const blockMaps = md.parse(input, {})
-          .filter(token => token.type === 'heading_open' || token.type === 'paragraph_open')
-          .map(token => token.map);
-        expect(blockMaps).toEqual([[0, 3], [4, 5]]);
+        expect(parseBlockMaps(input)).toEqual([[0, 3], [4, 5]]);
       }
     }
   });
@@ -1210,12 +1199,7 @@ describe('CriticMarkup headings in preview', () => {
         'Section' + eol + 'Continuation $x {--old' + eol + eol + 'more--} y$' +
         eol + eol + 'Paragraph';
       for (const input of ['## {++' + body + '++}', '{++## ' + body + '++}']) {
-        const md = new MarkdownIt({ html: true });
-        md.use(manuscriptMarkdownPlugin);
-        const blockMaps = md.parse(input, {})
-          .filter(token => token.type === 'heading_open' || token.type === 'paragraph_open')
-          .map(token => token.map);
-        expect(blockMaps).toEqual([[0, 1], [1, 4], [5, 6]]);
+        expect(parseBlockMaps(input)).toEqual([[0, 1], [1, 4], [5, 6]]);
       }
     }
   });
@@ -1273,12 +1257,7 @@ describe('Property 4: Empty line preservation', () => {
   ).filter(lines => lines.some(line => line === '') && lines.some(line => line.trim().length > 0));
 
   for (const type of SIMPLE_CRITIC_TYPES) {
-    const eligibleText = type.name === 'addition' || type.name === 'deletion'
-      ? multilineTextWithEmptyLines.filter(lines => !startsWithNonemptyAtxHeading(lines[0]))
-      : multilineTextWithEmptyLines;
-    const arb = type.name === 'comment'
-      ? eligibleText.filter(lines => lines.every(line => !line.includes('<') && !line.includes('>')))
-      : eligibleText;
+    const arb = criticLinesArbitrary(multilineTextWithEmptyLines, type);
 
     it('should recognize ' + type.name + ' patterns containing empty lines as single patterns', () => {
       fc.assert(
@@ -1328,12 +1307,7 @@ describe('Property 3: Multi-line preview rendering (multiline-Manuscript Markdow
   );
 
   for (const type of SIMPLE_CRITIC_TYPES) {
-    const eligibleText = type.name === 'addition' || type.name === 'deletion'
-      ? multilineText.filter(lines => !startsWithNonemptyAtxHeading(lines[0]))
-      : multilineText;
-    const arb = type.name === 'comment'
-      ? eligibleText.filter(lines => lines.every(line => !line.includes('<') && !line.includes('>')))
-      : eligibleText;
+    const arb = criticLinesArbitrary(multilineText, type);
 
     it('should render multi-line ' + type.name + ' patterns with correct HTML structure', () => {
       fc.assert(

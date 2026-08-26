@@ -4,8 +4,63 @@ import { computeDollarMathRegions, isEscapedAt } from './math-delimiters';
 // Placeholder used to preserve paragraph breaks inside CriticMarkup spans.
 // Uses Private Use Area characters to avoid markdown-it's normalize step
 // which replaces \u0000 with \uFFFD.
-export const PARA_PLACEHOLDER = '\uE000PARA\uE000';
-export const LINE_PLACEHOLDER = '\uE000LINE\uE000';
+const CRITIC_BREAK_SENTINEL = String.fromCharCode(0xE000);
+export const PARA_PLACEHOLDER = CRITIC_BREAK_SENTINEL + 'PARA' + CRITIC_BREAK_SENTINEL;
+export const LINE_PLACEHOLDER = CRITIC_BREAK_SENTINEL + 'LINE' + CRITIC_BREAK_SENTINEL;
+
+export type CriticBreakKind = 'line' | 'paragraph';
+
+interface CriticProtectedBreak {
+  kind: CriticBreakKind;
+  index: number;
+  length: number;
+  lineCount: number;
+}
+
+interface CriticHeadingPrefix {
+  prefix: string;
+  marker: string;
+  level: number;
+}
+
+const ATX_CRITIC_HEADING_RE = /^(#{1,6}) /;
+
+export function matchCriticHeadingPrefix(text: string): CriticHeadingPrefix | undefined {
+  const match = ATX_CRITIC_HEADING_RE.exec(text);
+  if (!match) return undefined;
+  return { prefix: match[0], marker: match[1], level: match[1].length };
+}
+
+export function matchCriticBreakAt(content: string, index: number): CriticProtectedBreak | undefined {
+  if (content.startsWith(PARA_PLACEHOLDER, index)) {
+    return { kind: 'paragraph', index, length: PARA_PLACEHOLDER.length, lineCount: 2 };
+  }
+  if (content.startsWith(LINE_PLACEHOLDER, index)) {
+    return { kind: 'line', index, length: LINE_PLACEHOLDER.length, lineCount: 1 };
+  }
+  return undefined;
+}
+
+function findNextCriticBreak(content: string, from = 0): CriticProtectedBreak | undefined {
+  for (let index = content.indexOf(CRITIC_BREAK_SENTINEL, from);
+    index !== -1;
+    index = content.indexOf(CRITIC_BREAK_SENTINEL, index + 1)) {
+    const match = matchCriticBreakAt(content, index);
+    if (match) return match;
+  }
+  return undefined;
+}
+
+export function* iterateCriticBreaks(content: string, from = 0): IterableIterator<CriticProtectedBreak> {
+  for (let match = findNextCriticBreak(content, from); match;
+    match = findNextCriticBreak(content, match.index + match.length)) {
+    yield match;
+  }
+}
+
+export function hasCriticBreak(content: string): boolean {
+  return findNextCriticBreak(content) !== undefined;
+}
 
 function protectLineBreaks(content: string): string {
   // A visually blank Markdown line may contain indentation or trailing spaces.
@@ -18,6 +73,7 @@ function protectLineBreaks(content: string): string {
 }
 
 export function restoreCriticLineBreaks(content: string): string {
+  if (!content.includes(CRITIC_BREAK_SENTINEL)) return content;
   return content
     .split(PARA_PLACEHOLDER).join('\n\n')
     .split(LINE_PLACEHOLDER).join('\n');

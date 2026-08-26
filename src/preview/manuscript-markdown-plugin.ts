@@ -4,7 +4,17 @@ import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
 import type StateBlock from 'markdown-it/lib/rules_block/state_block.mjs';
 import type Token from 'markdown-it/lib/token.mjs';
 import { VALID_COLOR_IDS, getDefaultHighlightColor } from '../highlight-colors';
-import { PARA_PLACEHOLDER, LINE_PLACEHOLDER, findMatchingClose, restoreCriticLineBreaks } from '../critic-markup';
+import {
+  PARA_PLACEHOLDER,
+  LINE_PLACEHOLDER,
+  findMatchingClose,
+  hasCriticBreak,
+  iterateCriticBreaks,
+  matchCriticBreakAt,
+  matchCriticHeadingPrefix,
+  restoreCriticLineBreaks,
+  type CriticBreakKind,
+} from '../critic-markup';
 import { GRID_TABLE_PLACEHOLDER_PREFIX } from '../grid-table-preprocess';
 import { preprocessGridTablesWithMap, wrapBareLatexEnvironmentsWithMap, preprocessCriticMarkupWithMap } from './preprocess-with-map';
 import { LineMap } from './line-map';
@@ -351,47 +361,29 @@ function taskListRule(state: StateCore): void {
   }
 }
 
-const ATX_CRITIC_HEADING_RE = /^(#{1,6}) /;
-type CriticHeadingBoundaryKind = 'line' | 'paragraph';
+interface CriticBreakSource {
+  kind: CriticBreakKind;
+  sourceOffset: number;
+}
 
 interface CriticHeadingBoundary {
-  kind: CriticHeadingBoundaryKind;
+  kind: CriticBreakKind;
   sourceOffset?: number;
 }
 
-function collectProtectedBreaks(
-  content: string,
-  sourceBase: number,
-): Array<{ kind: CriticHeadingBoundaryKind; sourceOffset: number }> {
-  const breaks: Array<{ kind: CriticHeadingBoundaryKind; sourceOffset: number }> = [];
-  for (let index = 0; index < content.length;) {
-    const kind = content.startsWith(PARA_PLACEHOLDER, index)
-      ? 'paragraph'
-      : content.startsWith(LINE_PLACEHOLDER, index)
-        ? 'line'
-        : undefined;
-    if (!kind) {
-      index++;
-      continue;
-    }
-    breaks.push({ kind, sourceOffset: sourceBase + index });
-    index += kind === 'paragraph' ? PARA_PLACEHOLDER.length : LINE_PLACEHOLDER.length;
+function collectProtectedBreaks(content: string, sourceBase: number): CriticBreakSource[] {
+  const breaks: CriticBreakSource[] = [];
+  for (const match of iterateCriticBreaks(content)) {
+    breaks.push({ kind: match.kind, sourceOffset: sourceBase + match.index });
   }
   return breaks;
 }
 
 function cloneInlineToken(state: StateCore, source: Token): Token {
-  const clone = new state.Token(source.type, source.tag, source.nesting);
+  const clone = Object.assign(new state.Token(source.type, source.tag, source.nesting), source);
   clone.attrs = source.attrs?.map(([name, value]) => [name, value]) ?? null;
   clone.map = source.map ? [...source.map] : null;
-  clone.level = source.level;
-  clone.children = source.children;
-  clone.content = source.content;
-  clone.markup = source.markup;
-  clone.info = source.info;
   clone.meta = source.meta ? { ...source.meta } : null;
-  clone.block = source.block;
-  clone.hidden = source.hidden;
   return clone;
 }
 
@@ -426,71 +418,66 @@ function isEntirelyCriticKind(children: Token[], criticType: 'addition' | 'delet
   return depth === 0;
 }
 
+function isVisibleInlineToken(token: Token, content = token.content): boolean {
+  if (token.nesting !== 0 || token.type === 'softbreak' || token.type === 'hardbreak') return false;
+  if (token.type === 'text' || token.type === 'html_inline') return content.trim().length > 0;
+  return true;
+}
+
 function hasHeadingContent(children: Token[], firstTextIndex: number, markerLength: number): boolean {
   for (let index = firstTextIndex; index < children.length; index++) {
     const token = children[index];
     if (token.type === 'softbreak' || token.type === 'hardbreak') return false;
-    if (token.nesting !== 0) continue;
-    if (token.type === 'text' || token.type === 'html_inline') {
-      const content = index === firstTextIndex
-        ? token.content.slice(markerLength)
-        : token.content;
-      if (content.trim()) return true;
-      continue;
-    }
-    return true;
+    const content = index === firstTextIndex ? token.content.slice(markerLength) : token.content;
+    if (isVisibleInlineToken(token, content)) return true;
   }
   return false;
 }
 
-function promoteFullParagraphCriticHeading(tokens: Token[], index: number): boolean {
+function promoteFullParagraphCriticHeading(tokens: Token[], index: number): void {
   const paragraphOpen = tokens[index];
   const inline = tokens[index + 1];
   const paragraphClose = tokens[index + 2];
   if (paragraphOpen?.type !== 'paragraph_open' || inline?.type !== 'inline' ||
       paragraphClose?.type !== 'paragraph_close' || paragraphOpen.level !== 0 ||
-      !inline.children) return false;
+      !inline.children) return;
 
   const children = inline.children;
   const first = children[0];
-  const last = children[children.length - 1];
   const criticType = first?.type === 'manuscript_markdown_addition_open'
     ? 'addition'
     : first?.type === 'manuscript_markdown_deletion_open'
       ? 'deletion'
       : undefined;
-  if (!criticType || last?.type !== 'manuscript_markdown_' + criticType + '_close' ||
-      !isEntirelyCriticKind(children, criticType)) return false;
+  if (!criticType) return;
 
   const openMarker = criticType === 'addition' ? '{++' : '{--';
-  if (!inline.content.startsWith(openMarker)) return false;
+  if (!inline.content.startsWith(openMarker)) return;
 
   const body = inline.content.slice(openMarker.length);
-  const match = ATX_CRITIC_HEADING_RE.exec(body);
-  if (!match) return false;
+  const headingPrefix = matchCriticHeadingPrefix(body);
+  if (!headingPrefix || !isEntirelyCriticKind(children, criticType)) return;
 
   const firstTextIndex = children.findIndex((child, childIndex) =>
     childIndex > 0 && child.type === 'text' && child.content.length > 0
   );
   const firstText = children[firstTextIndex];
-  if (!firstText?.content.startsWith(match[0])) return false;
-  if (!hasHeadingContent(children, firstTextIndex, match[0].length)) return false;
-  firstText.content = firstText.content.slice(match[0].length);
+  if (!firstText?.content.startsWith(headingPrefix.prefix)) return;
+  if (!hasHeadingContent(children, firstTextIndex, headingPrefix.prefix.length)) return;
+  firstText.content = firstText.content.slice(headingPrefix.prefix.length);
   if (!firstText.content) children.splice(firstTextIndex, 1);
 
-  const level = match[1].length;
   paragraphOpen.type = 'heading_open';
-  paragraphOpen.tag = 'h' + level;
-  paragraphOpen.markup = match[1];
+  paragraphOpen.tag = 'h' + headingPrefix.level;
+  paragraphOpen.markup = headingPrefix.marker;
   paragraphClose.type = 'heading_close';
-  paragraphClose.tag = 'h' + level;
-  paragraphClose.markup = match[1];
-  inline.content = openMarker + body.slice(match[0].length);
+  paragraphClose.tag = 'h' + headingPrefix.level;
+  paragraphClose.markup = headingPrefix.marker;
+  inline.content = openMarker + body.slice(headingPrefix.prefix.length);
   inline.meta = {
     ...(inline.meta || {}),
-    manuscriptCriticHeadingRemovedPrefix: match[0].length,
+    manuscriptCriticHeadingRemovedPrefix: headingPrefix.prefix.length,
   };
-  return true;
 }
 
 interface CriticHeadingSourceSegment {
@@ -509,34 +496,23 @@ function splitCriticHeadingSource(
   let segmentStartLine = 0;
   let currentLine = 0;
   let boundaryIndex = 0;
-  for (let index = 0; index < content.length;) {
-    const isParagraphBreak = content.startsWith(PARA_PLACEHOLDER, index);
-    const isLineBreak = content.startsWith(LINE_PLACEHOLDER, index);
-    if (!isParagraphBreak && !isLineBreak) {
-      index++;
-      continue;
-    }
-
-    const kind: CriticHeadingBoundaryKind = isParagraphBreak ? 'paragraph' : 'line';
+  for (const match of iterateCriticBreaks(content)) {
     const boundary = boundaries[boundaryIndex];
     const expectedOffset = boundary?.sourceOffset === undefined
       ? undefined
       : boundary.sourceOffset - sourceOffsetAdjustment;
-    const shouldSplit = boundary !== undefined && kind === boundary.kind &&
-      (expectedOffset === undefined || index === expectedOffset);
+    const shouldSplit = boundary !== undefined && match.kind === boundary.kind &&
+      (expectedOffset === undefined || match.index === expectedOffset);
     if (shouldSplit) {
       segments.push({
-        content: content.slice(segmentStart, index),
+        content: content.slice(segmentStart, match.index),
         startLineOffset: segmentStartLine,
         endLineOffset: currentLine + 1,
       });
     }
-    const lineCount = isParagraphBreak ? 2 : 1;
-    const markerLength = isParagraphBreak ? PARA_PLACEHOLDER.length : LINE_PLACEHOLDER.length;
-    currentLine += lineCount;
-    index += markerLength;
+    currentLine += match.lineCount;
     if (shouldSplit) {
-      segmentStart = index;
+      segmentStart = match.index + match.length;
       segmentStartLine = currentLine;
       boundaryIndex++;
     }
@@ -634,11 +610,7 @@ function splitInlineChildrenAtHeadingBreaks(state: StateCore, inline: Token): Cr
 }
 
 function hasVisibleInlineContent(children: Token[]): boolean {
-  return children.some(token => {
-    if (token.nesting !== 0 || token.type === 'softbreak' || token.type === 'hardbreak') return false;
-    if (token.type === 'text' || token.type === 'html_inline') return token.content.trim().length > 0;
-    return true;
-  });
+  return children.some(token => isVisibleInlineToken(token));
 }
 
 function setOriginalTokenMap(token: Token, map: [number, number]): void {
@@ -646,7 +618,41 @@ function setOriginalTokenMap(token: Token, map: [number, number]): void {
   token.meta = { ...(token.meta || {}), manuscriptMapIsOriginal: true };
 }
 
+function createCriticBlockSegment(
+  state: StateCore,
+  headingTokens: [Token, Token, Token],
+  children: Token[],
+  sourceSegment: CriticHeadingSourceSegment,
+  originalStart: number,
+  isHeading: boolean,
+): [Token, Token, Token] | undefined {
+  if (!isHeading && !hasVisibleInlineContent(children)) return undefined;
+
+  const [headingOpen, headingInline, headingClose] = headingTokens;
+  const blockOpen = isHeading ? headingOpen : new state.Token('paragraph_open', 'p', 1);
+  const blockInline = isHeading ? headingInline : new state.Token('inline', '', 0);
+  const blockClose = isHeading ? headingClose : new state.Token('paragraph_close', 'p', -1);
+  const blockLevel = headingOpen.level;
+  blockOpen.level = blockLevel;
+  blockOpen.block = true;
+  blockInline.level = blockLevel + 1;
+  blockInline.block = true;
+  blockClose.level = blockLevel;
+  blockClose.block = true;
+
+  const segmentMap: [number, number] = [
+    originalStart + sourceSegment.startLineOffset,
+    originalStart + sourceSegment.endLineOffset,
+  ];
+  setOriginalTokenMap(blockOpen, segmentMap);
+  setOriginalTokenMap(blockInline, segmentMap);
+  blockInline.content = sourceSegment.content;
+  blockInline.children = children;
+  return [blockOpen, blockInline, blockClose];
+}
+
 function promoteCriticHeadingsRule(state: StateCore): void {
+  if (!state.src.includes('{++#') && !state.src.includes('{--#')) return;
   const tokens = state.tokens;
   for (let index = 0; index < tokens.length - 2; index++) {
     promoteFullParagraphCriticHeading(tokens, index);
@@ -655,60 +661,55 @@ function promoteCriticHeadingsRule(state: StateCore): void {
 
 /** Keep Markdown block boundaries visible when a Critic span crosses a heading. */
 function splitCriticHeadingsRule(state: StateCore): void {
+  if (!hasCriticBreak(state.src)) return;
   const tokens = state.tokens;
-  for (let index = 0; index < tokens.length - 2; index++) {
+  let rewritten: Token[] | undefined;
+  for (let index = 0; index < tokens.length; index++) {
     const headingOpen = tokens[index];
     const inline = tokens[index + 1];
     const headingClose = tokens[index + 2];
     if (headingOpen?.type !== 'heading_open' || inline?.type !== 'inline' ||
         headingClose?.type !== 'heading_close' ||
-        (!inline.content.includes(PARA_PLACEHOLDER) && !inline.content.includes(LINE_PLACEHOLDER))) continue;
+        !hasCriticBreak(inline.content)) {
+      if (rewritten) rewritten.push(headingOpen);
+      continue;
+    }
 
     const childSplit = splitInlineChildrenAtHeadingBreaks(state, inline);
     const childSegments = childSplit.segments;
-    if (childSegments.length < 2) continue;
+    if (childSegments.length < 2) {
+      if (rewritten) rewritten.push(headingOpen);
+      continue;
+    }
     const removedPrefix = inline.meta?.manuscriptCriticHeadingRemovedPrefix;
     const sourceSegments = splitCriticHeadingSource(
       inline.content,
       childSplit.boundaries,
       typeof removedPrefix === 'number' ? removedPrefix : 0,
     );
-    if (sourceSegments.length !== childSegments.length) continue;
+    if (sourceSegments.length !== childSegments.length) {
+      if (rewritten) rewritten.push(headingOpen);
+      continue;
+    }
 
+    if (!rewritten) rewritten = tokens.slice(0, index);
     const lineMap = getPreviewEnvironment(state).lineMap;
     const originalStart = inline.map ? (lineMap?.remap(inline.map[0]) ?? inline.map[0]) : 0;
-    const replacement: Token[] = [];
+    const headingTokens: [Token, Token, Token] = [headingOpen, inline, headingClose];
     for (let segmentIndex = 0; segmentIndex < childSegments.length; segmentIndex++) {
-      const isHeading = segmentIndex === 0;
-      if (!isHeading && !hasVisibleInlineContent(childSegments[segmentIndex])) continue;
-      const blockOpen = isHeading
-        ? headingOpen
-        : new state.Token('paragraph_open', 'p', 1);
-      const blockInline = isHeading ? inline : new state.Token('inline', '', 0);
-      const blockClose = isHeading
-        ? headingClose
-        : new state.Token('paragraph_close', 'p', -1);
-      const blockLevel = headingOpen.level;
-      blockOpen.level = blockLevel;
-      blockOpen.block = true;
-      blockInline.level = blockLevel + 1;
-      blockInline.block = true;
-      blockClose.level = blockLevel;
-      blockClose.block = true;
-      const sourceSegment = sourceSegments[segmentIndex];
-      const segmentMap: [number, number] = [
-        originalStart + sourceSegment.startLineOffset,
-        originalStart + sourceSegment.endLineOffset,
-      ];
-      setOriginalTokenMap(blockOpen, segmentMap);
-      setOriginalTokenMap(blockInline, segmentMap);
-      blockInline.content = sourceSegment.content;
-      blockInline.children = childSegments[segmentIndex];
-      replacement.push(blockOpen, blockInline, blockClose);
+      const segment = createCriticBlockSegment(
+        state,
+        headingTokens,
+        childSegments[segmentIndex],
+        sourceSegments[segmentIndex],
+        originalStart,
+        segmentIndex === 0,
+      );
+      if (segment) rewritten.push(...segment);
     }
-    tokens.splice(index, 3, ...replacement);
-    index += replacement.length - 1;
+    index += 2;
   }
+  if (rewritten) state.tokens = rewritten;
 }
 
 /**
@@ -769,6 +770,26 @@ function inlineSourceOffset(state: StateInline, localOffset: number): number {
   return (typeof base === 'number' ? base : 0) + localOffset;
 }
 
+function pushParsedInlineTokens(state: StateInline, childTokens: Token[]): void {
+  for (const childToken of childTokens) {
+    const token = state.push(childToken.type, childToken.tag, childToken.nesting);
+    token.content = childToken.content;
+    token.markup = childToken.markup;
+    token.meta = childToken.meta ? { ...childToken.meta } : null;
+    if (childToken.attrs) {
+      for (const [key, value] of childToken.attrs) {
+        token.attrSet(key, value);
+      }
+    }
+    if (childToken.children) token.children = childToken.children;
+  }
+}
+
+function setCriticBreakSourceOffset(token: Token, sourceOffset: number | undefined): void {
+  if (sourceOffset === undefined) return;
+  token.meta = { ...(token.meta || {}), manuscriptCriticBreakSourceOffset: sourceOffset };
+}
+
 function addInlineContent(state: StateInline, content: string, sourceStart?: number): void {
   // Handle empty content - no tokens to add
   if (content.length === 0) {
@@ -781,7 +802,7 @@ function addInlineContent(state: StateInline, content: string, sourceStart?: num
   const childTokens: Token[] = [];
   const env = state.env as PreviewEnvironment;
   const previousSourceBase = env.manuscriptInlineSourceBase;
-  const nestedSourceBase = sourceStart ?? previousSourceBase ?? 0;
+  const nestedSourceBase = sourceStart ?? inlineSourceOffset(state, 0);
   if (sourceStart !== undefined) env.manuscriptInlineSourceBase = sourceStart;
   try {
     state.md.inline.parse(content, state.md, state.env, childTokens);
@@ -791,10 +812,12 @@ function addInlineContent(state: StateInline, content: string, sourceStart?: num
   }
 
   const protectedBreaks = collectProtectedBreaks(content, nestedSourceBase);
+  if (protectedBreaks.length === 0) {
+    pushParsedInlineTokens(state, childTokens);
+    return;
+  }
   let protectedBreakIndex = 0;
-  const claimProtectedBreak = (
-    kind: CriticHeadingBoundaryKind,
-  ): { kind: CriticHeadingBoundaryKind; sourceOffset: number } | undefined => {
+  const claimProtectedBreak = (kind: CriticBreakKind): CriticBreakSource | undefined => {
     for (; protectedBreakIndex < protectedBreaks.length; protectedBreakIndex++) {
       const candidate = protectedBreaks[protectedBreakIndex];
       if (candidate.kind !== kind) continue;
@@ -803,34 +826,26 @@ function addInlineContent(state: StateInline, content: string, sourceStart?: num
     }
     return undefined;
   };
-  const claimTokenBreak = (token: Token): void => {
-    const sourceOffsets = token.meta?.manuscriptCriticConsumedBreakSourceOffsets;
-    const ownSourceOffset = token.meta?.manuscriptCriticBreakSourceOffset;
-    const claimedOffsets = Array.isArray(sourceOffsets)
-      ? sourceOffsets.filter((offset): offset is number => typeof offset === 'number')
-      : typeof ownSourceOffset === 'number'
-        ? [ownSourceOffset]
-        : [];
-    for (const sourceOffset of claimedOffsets) {
-      while (protectedBreakIndex < protectedBreaks.length &&
-          protectedBreaks[protectedBreakIndex].sourceOffset <= sourceOffset) {
-        protectedBreakIndex++;
-      }
+  const claimThroughSourceOffset = (sourceOffset: number): void => {
+    while (protectedBreakIndex < protectedBreaks.length &&
+        protectedBreaks[protectedBreakIndex].sourceOffset <= sourceOffset) {
+      protectedBreakIndex++;
     }
   };
-  const claimContentBreaks = (tokenContent: string): void => {
-    for (let index = 0; index < tokenContent.length;) {
-      const kind = tokenContent.startsWith(PARA_PLACEHOLDER, index)
-        ? 'paragraph'
-        : tokenContent.startsWith(LINE_PLACEHOLDER, index)
-          ? 'line'
-          : undefined;
-      if (!kind) {
-        index++;
-        continue;
+  const claimTokenBreak = (token: Token): void => {
+    const sourceOffsets = token.meta?.manuscriptCriticConsumedBreakSourceOffsets;
+    if (Array.isArray(sourceOffsets)) {
+      for (const sourceOffset of sourceOffsets) {
+        if (typeof sourceOffset === 'number') claimThroughSourceOffset(sourceOffset);
       }
-      claimProtectedBreak(kind);
-      index += kind === 'paragraph' ? PARA_PLACEHOLDER.length : LINE_PLACEHOLDER.length;
+      return;
+    }
+    const ownSourceOffset = token.meta?.manuscriptCriticBreakSourceOffset;
+    if (typeof ownSourceOffset === 'number') claimThroughSourceOffset(ownSourceOffset);
+  };
+  const claimContentBreaks = (tokenContent: string): void => {
+    for (const match of iterateCriticBreaks(tokenContent)) {
+      claimProtectedBreak(match.kind);
     }
   };
 
@@ -843,78 +858,45 @@ function addInlineContent(state: StateInline, content: string, sourceStart?: num
         token.children = expandParagraphBreaks(token.children);
       }
 
-      if (token.type === 'text' && (token.content.includes(PARA_PLACEHOLDER) || token.content.includes(LINE_PLACEHOLDER))) {
+      if (token.type === 'text' && hasCriticBreak(token.content)) {
         let textStart = 0;
-        while (textStart < token.content.length) {
-          const paraPos = token.content.indexOf(PARA_PLACEHOLDER, textStart);
-          const linePos = token.content.indexOf(LINE_PLACEHOLDER, textStart);
-          const markerPos = paraPos === -1
-            ? linePos
-            : linePos === -1
-              ? paraPos
-              : Math.min(paraPos, linePos);
-          if (markerPos === -1) {
+        for (const match of iterateCriticBreaks(token.content)) {
+          if (match.index > textStart) {
             const textToken = new state.Token('text', '', 0);
-            textToken.content = token.content.slice(textStart);
-            expanded.push(textToken);
-            break;
-          }
-          if (markerPos > textStart) {
-            const textToken = new state.Token('text', '', 0);
-            textToken.content = token.content.slice(textStart, markerPos);
+            textToken.content = token.content.slice(textStart, match.index);
             expanded.push(textToken);
           }
-          if (markerPos === paraPos) {
-            const sourceBreak = claimProtectedBreak('paragraph');
-            const first = new state.Token('hardbreak', 'br', 0);
-            const second = new state.Token('hardbreak', 'br', 0);
-            if (sourceBreak) {
-              first.meta = { manuscriptCriticBreakSourceOffset: sourceBreak.sourceOffset };
-              second.meta = { manuscriptCriticBreakSourceOffset: sourceBreak.sourceOffset };
-            }
-            expanded.push(first, second);
-            textStart = markerPos + PARA_PLACEHOLDER.length;
-          } else {
-            const sourceBreak = claimProtectedBreak('line');
-            const lineBreak = new state.Token('softbreak', 'br', 0);
-            if (sourceBreak) {
-              lineBreak.meta = { manuscriptCriticBreakSourceOffset: sourceBreak.sourceOffset };
-            }
-            expanded.push(lineBreak);
-            textStart = markerPos + LINE_PLACEHOLDER.length;
+          const sourceBreak = claimProtectedBreak(match.kind);
+          const tokenType = match.kind === 'paragraph' ? 'hardbreak' : 'softbreak';
+          for (let count = 0; count < match.lineCount; count++) {
+            const breakToken = new state.Token(tokenType, 'br', 0);
+            setCriticBreakSourceOffset(breakToken, sourceBreak?.sourceOffset);
+            expanded.push(breakToken);
           }
+          textStart = match.index + match.length;
+        }
+        if (textStart < token.content.length) {
+          const textToken = new state.Token('text', '', 0);
+          textToken.content = token.content.slice(textStart);
+          expanded.push(textToken);
         }
         continue;
       }
 
       // Code and other opaque inline tokens do not expose their content as text
       // children, but the implementation placeholder must never reach HTML.
-      if (token.content.includes(PARA_PLACEHOLDER) || token.content.includes(LINE_PLACEHOLDER)) {
+      if (hasCriticBreak(token.content)) {
         if (!hasChildren) claimContentBreaks(token.content);
-        const separator = token.type === 'code_inline' ? ' ' : '\n\n';
-        token.content = token.content
-          .split(PARA_PLACEHOLDER).join(separator)
-          .split(LINE_PLACEHOLDER).join(token.type === 'code_inline' ? ' ' : '\n');
+        token.content = token.type === 'code_inline'
+          ? token.content.split(PARA_PLACEHOLDER).join(' ').split(LINE_PLACEHOLDER).join(' ')
+          : restoreCriticLineBreaks(token.content);
       }
       expanded.push(token);
     }
     return expanded;
   };
 
-  for (const childToken of expandParagraphBreaks(childTokens)) {
-    const token = state.push(childToken.type, childToken.tag, childToken.nesting);
-    token.content = childToken.content;
-    token.markup = childToken.markup;
-    token.meta = childToken.meta ? { ...childToken.meta } : null;
-    if (childToken.attrs) {
-      for (const [key, value] of childToken.attrs) {
-        token.attrSet(key, value);
-      }
-    }
-    if (childToken.children) {
-      token.children = childToken.children;
-    }
-  }
+  pushParsedInlineTokens(state, expandParagraphBreaks(childTokens));
 }
 
 function pushInlineMathToken(state: StateInline, content: string, hasBefore = false, hasAfter = false): void {
@@ -1001,14 +983,15 @@ function parseCriticMarkupInInlineMath(state: StateInline, silent: boolean): boo
   }
   if (match.delimiterLength !== 1) return false;
 
-  const parts = splitCriticMarkupInMath(state.src.slice(match.contentStart, match.contentEnd));
+  const mathContent = state.src.slice(match.contentStart, match.contentEnd);
+  const parts = splitCriticMarkupInMath(mathContent);
   if (!parts) return false;
   if (!silent) {
     if (state.pending) state.pushPending();
     const firstTokenIndex = state.tokens.length;
     pushCriticMathParts(state, parts);
     const consumedBreakSourceOffsets = collectProtectedBreaks(
-      state.src.slice(match.contentStart, match.contentEnd),
+      mathContent,
       inlineSourceOffset(state, match.contentStart),
     ).map(sourceBreak => sourceBreak.sourceOffset);
     const firstToken = state.tokens[firstTokenIndex];
@@ -1557,16 +1540,16 @@ function associateCommentsRule(state: StateCore): void {
 function paraPlaceholderRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   if (state.src.charCodeAt(start) !== 0xE000) return false; // \uE000
-  if (!state.src.startsWith(PARA_PLACEHOLDER, start)) return false;
+  const sourceBreak = matchCriticBreakAt(state.src, start);
+  if (sourceBreak?.kind !== 'paragraph') return false;
 
   if (!silent) {
     const sourceOffset = inlineSourceOffset(state, start);
-    const first = state.push('softbreak', 'br', 0);
-    first.meta = { ...(first.meta || {}), manuscriptCriticBreakSourceOffset: sourceOffset };
-    const second = state.push('softbreak', 'br', 0);
-    second.meta = { ...(second.meta || {}), manuscriptCriticBreakSourceOffset: sourceOffset };
+    for (let count = 0; count < sourceBreak.lineCount; count++) {
+      setCriticBreakSourceOffset(state.push('softbreak', 'br', 0), sourceOffset);
+    }
   }
-  state.pos = start + PARA_PLACEHOLDER.length;
+  state.pos = start + sourceBreak.length;
   return true;
 }
 
@@ -1574,20 +1557,16 @@ function paraPlaceholderRule(state: StateInline, silent: boolean): boolean {
 function escapedCriticBreakPlaceholderRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   if (state.src.charCodeAt(start) !== 0x5C /* \ */) return false;
-  const isParagraphBreak = state.src.startsWith(PARA_PLACEHOLDER, start + 1);
-  const isLineBreak = state.src.startsWith(LINE_PLACEHOLDER, start + 1);
-  if (!isParagraphBreak && !isLineBreak) return false;
+  const sourceBreak = matchCriticBreakAt(state.src, start + 1);
+  if (!sourceBreak) return false;
 
   if (!silent) {
     const sourceOffset = inlineSourceOffset(state, start + 1);
-    const first = state.push('hardbreak', 'br', 0);
-    first.meta = { ...(first.meta || {}), manuscriptCriticBreakSourceOffset: sourceOffset };
-    if (isParagraphBreak) {
-      const second = state.push('hardbreak', 'br', 0);
-      second.meta = { ...(second.meta || {}), manuscriptCriticBreakSourceOffset: sourceOffset };
+    for (let count = 0; count < sourceBreak.lineCount; count++) {
+      setCriticBreakSourceOffset(state.push('hardbreak', 'br', 0), sourceOffset);
     }
   }
-  state.pos = start + 1 + (isParagraphBreak ? PARA_PLACEHOLDER.length : LINE_PLACEHOLDER.length);
+  state.pos = start + 1 + sourceBreak.length;
   return true;
 }
 

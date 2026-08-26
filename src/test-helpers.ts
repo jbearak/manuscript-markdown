@@ -21,14 +21,19 @@ export const hasNoSpecialSyntax = (s: string) => {
   return !/[\\`*_\[\]&<>"']/.test(s);
 };
 
-/** Create a MarkdownIt instance with the Manuscript Markdown plugin and render input.
- *  Pass colorScheme to override the module-level default (e.g. 'github' to suppress the
- *  color marker span in tests that don't care about color scheme behavior). */
-export function renderWithPlugin(input: string, colorScheme?: ColorScheme): string {
+/** Create a MarkdownIt instance with the Manuscript Markdown plugin. */
+export function createMarkdownItWithPlugin(colorScheme?: ColorScheme): ManuscriptMarkdownIt {
   const md: ManuscriptMarkdownIt = new MarkdownIt({ html: true });
   if (colorScheme !== undefined) md.manuscriptColors = colorScheme;
   md.use(manuscriptMarkdownPlugin);
-  return md.render(input);
+  return md;
+}
+
+/** Render input with the Manuscript Markdown plugin.
+ *  Pass colorScheme to override the module-level default (e.g. 'github' to suppress the
+ *  color marker span in tests that don't care about color scheme behavior). */
+export function renderWithPlugin(input: string, colorScheme?: ColorScheme): string {
+  return createMarkdownItWithPlugin(colorScheme).render(input);
 }
 
 /** CriticMarkup type definitions for parameterized tests. */

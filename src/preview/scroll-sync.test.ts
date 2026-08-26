@@ -1,15 +1,11 @@
 import { describe, it, expect } from 'bun:test';
-import MarkdownIt from 'markdown-it';
-import { manuscriptMarkdownPlugin } from './manuscript-markdown-plugin';
+import { createMarkdownItWithPlugin } from '../test-helpers';
+
+const md = createMarkdownItWithPlugin('github');
 
 /** Parse markdown with the plugin and return tokens with their .map values. */
 function parseWithPlugin(src: string): Array<{ type: string; map: [number, number] | null }> {
-  const md = new MarkdownIt({ html: true });
-  (md as any).manuscriptColors = 'github'; // suppress color scheme marker
-  md.use(manuscriptMarkdownPlugin);
-  const env = {};
-  const tokens = md.parse(src, env);
-  return tokens.map(t => ({ type: t.type, map: t.map }));
+  return md.parse(src, {}).map(t => ({ type: t.type, map: t.map }));
 }
 
 /** Find the first token of a given type. */
