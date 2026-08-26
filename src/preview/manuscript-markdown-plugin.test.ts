@@ -1192,6 +1192,22 @@ describe('CriticMarkup headings in preview', () => {
     }
   });
 
+  it('does not attach consumed math breaks to preceding pending text', () => {
+    for (const eol of ['\n', '\r\n', '\r']) {
+      const body =
+        'Section' + eol + 'Continuation $x {--old' + eol + eol + 'more--} y$' +
+        eol + eol + 'Paragraph';
+      for (const input of ['## {++' + body + '++}', '{++## ' + body + '++}']) {
+        const md = new MarkdownIt({ html: true });
+        md.use(manuscriptMarkdownPlugin);
+        const blockMaps = md.parse(input, {})
+          .filter(token => token.type === 'heading_open' || token.type === 'paragraph_open')
+          .map(token => token.map);
+        expect(blockMaps).toEqual([[0, 1], [1, 4], [5, 6]]);
+      }
+    }
+  });
+
   it('does not emit an empty paragraph for a trailing blank segment', () => {
     const output = renderWithPlugin('## {++Section Name\n\n++}');
 
@@ -1245,9 +1261,12 @@ describe('Property 4: Empty line preservation', () => {
   ).filter(lines => lines.some(line => line === '') && lines.some(line => line.trim().length > 0));
 
   for (const type of SIMPLE_CRITIC_TYPES) {
-    const arb = type.name === 'comment'
-      ? multilineTextWithEmptyLines.filter(lines => lines.every(line => !line.includes('<') && !line.includes('>')))
+    const eligibleText = type.name === 'addition' || type.name === 'deletion'
+      ? multilineTextWithEmptyLines.filter(lines => !/^#{1,6} /.test(lines[0]))
       : multilineTextWithEmptyLines;
+    const arb = type.name === 'comment'
+      ? eligibleText.filter(lines => lines.every(line => !line.includes('<') && !line.includes('>')))
+      : eligibleText;
 
     it('should recognize ' + type.name + ' patterns containing empty lines as single patterns', () => {
       fc.assert(
@@ -1297,9 +1316,12 @@ describe('Property 3: Multi-line preview rendering (multiline-Manuscript Markdow
   );
 
   for (const type of SIMPLE_CRITIC_TYPES) {
-    const arb = type.name === 'comment'
-      ? multilineText.filter(lines => lines.every(line => !line.includes('<') && !line.includes('>')))
+    const eligibleText = type.name === 'addition' || type.name === 'deletion'
+      ? multilineText.filter(lines => !/^#{1,6} /.test(lines[0]))
       : multilineText;
+    const arb = type.name === 'comment'
+      ? eligibleText.filter(lines => lines.every(line => !line.includes('<') && !line.includes('>')))
+      : eligibleText;
 
     it('should render multi-line ' + type.name + ' patterns with correct HTML structure', () => {
       fc.assert(

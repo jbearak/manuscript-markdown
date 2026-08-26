@@ -1004,6 +1004,7 @@ function parseCriticMarkupInInlineMath(state: StateInline, silent: boolean): boo
   const parts = splitCriticMarkupInMath(state.src.slice(match.contentStart, match.contentEnd));
   if (!parts) return false;
   if (!silent) {
+    if (state.pending) state.pushPending();
     const firstTokenIndex = state.tokens.length;
     pushCriticMathParts(state, parts);
     const consumedBreakSourceOffsets = collectProtectedBreaks(
