@@ -6492,7 +6492,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   // Uses split/join (not replace) to avoid $-corruption in replacement strings.
   const hasBiblMarker = body.includes(BIBL_PLACEHOLDER);
   let biblXml = '';
-  if (citeprocEngine) {
+  // Keep imported Zotero metadata even when there are no live citation fields.
+  if (citeprocEngine && (state.citedKeys.size > 0 || options?.zoteroBiblData)) {
     biblXml += generateBibliographyXml(citeprocEngine, options?.zoteroBiblData, frontmatter?.bibliographyHangingIndent);
   }
   if (state.missingKeys.size > 0) {

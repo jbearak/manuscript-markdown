@@ -111,7 +111,7 @@ zotero-notes: in-text
 | `locale` | Optional locale override (e.g., `en-US`, `en-GB`). Defaults to the style's own locale. |
 | `zotero-notes` | Optional Zotero note type: `in-text` (default), `footnotes`, or `endnotes`. Legacy alias: `note-type`. Legacy numeric values (0, 1, 2) are still accepted. |
 
-You can also add or modify this frontmatter manually. The `csl` field is required for CSL-formatted citation output — without it, citations use a plain-text `(Author Year)` fallback.
+You can also add or modify this frontmatter manually. When a nonempty bibliography is loaded, omitting `csl` uses the bundled APA style for citations and the reference list. Set `csl` to choose another style.
 
 ## CSL Citation Styles
 
