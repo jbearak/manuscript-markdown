@@ -682,6 +682,8 @@ Supported LaTeX elements include fractions, roots, Greek letters, operators, mat
 
 ## Images
 
+Image paths can contain spaces: `![alt text](my figures/some image.png)`. Angle brackets and percent-encoded spaces also work: `![alt text](<my figures/some image.png>)` and `![alt text](my%20figures/some%20image.png)`.
+
 Manuscript Markdown supports two syntaxes for images with optional dimension attributes.
 
 ### Attribute Syntax

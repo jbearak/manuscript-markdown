@@ -1896,6 +1896,59 @@ describe('Grid table preview', () => {
 });
 
 describe('Embed preview document resolution', () => {
+  for (const quoting of ['"', "'"]) {
+    it('renders a table with a quoted spaced path: ' + quoting, () => {
+      const html = renderWithEmbedSetup(
+        '<!-- embed: ' + quoting + 'my data/some table.csv' + quoting + ' headers=1 -->',
+        makeEmbedResolver({ '/doc/my data/some table.csv': 'Name,Age\nAlice,30' }),
+        { currentDocument: { fsPath: '/doc/file.md' } },
+      );
+      expect(html).toContain('<table');
+      expect(html).toContain('Alice');
+    });
+  }
+
+  it('preserves image titles, nested parentheses, and standard destinations', () => {
+    for (const destination of [
+      'my figures/some image.png "A title"',
+      '<my figures/some image.png> "A title"',
+      'my%20figures/some%20image.png "A title"',
+    ]) {
+      const html = renderWithPlugin('![description](' + destination + ')');
+      expect(html).toContain('src="my%20figures/some%20image.png"');
+      expect(html).toContain('title="A title"');
+    }
+    expect(renderWithPlugin('![](my figures/plot (final).png)')).toContain('src="my%20figures/plot%20(final).png"');
+  });
+
+  it('leaves code and malformed image destinations alone', () => {
+    for (const input of [
+      '`![alt](some image.png)`',
+      '```md\n![alt](some image.png)\n```',
+      '![alt](some image.png]',
+      '![alt](some\nimage.png)',
+      '![alt](javascript:alert (1))',
+    ]) {
+      expect(renderWithPlugin(input)).not.toContain('<img');
+    }
+    expect(renderWithPlugin('[link](some image.png)')).not.toContain('<a ');
+  });
+
+  it('renders a table whose bare path contains spaces', () => {
+    const html = renderWithEmbedSetup(
+      '<!-- embed: my data/some table.csv headers=1 -->',
+      makeEmbedResolver({ '/doc/my data/some table.csv': 'Name,Age\nAlice,30' }),
+      { currentDocument: { fsPath: '/doc/file.md' } },
+    );
+    expect(html).toContain('<table');
+    expect(html).toContain('Alice');
+  });
+
+  it('renders an image whose bare path contains spaces', () => {
+    const html = renderWithPlugin('![description of some image](my figures/some image.png)');
+    expect(html).toContain('<img src="my%20figures/some%20image.png" alt="description of some image"');
+  });
+
   it('uses state.env.currentDocument to resolve embed paths', () => {
     const resolver = makeEmbedResolver({
       '/doc/data.csv': 'Name,Age\nAlice,30',

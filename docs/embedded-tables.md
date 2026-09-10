@@ -14,6 +14,8 @@ File paths are resolved relative to the markdown file containing the directive. 
 <!-- embed: "my data/results.xlsx" sheet='Sheet One' range=A1:F20 headers=2 -->
 ```
 
+Bare paths can also contain spaces, as in `<!-- embed: my data/results.csv headers=1 -->`. The path ends at the first `key=value` option. Quote the path if a filename contains text that looks like an option, such as `headers=1`.
+
 ### Parameters
 
 | Param | Applies to | Default | Description |

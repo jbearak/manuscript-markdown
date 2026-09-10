@@ -53,7 +53,14 @@ export function parseEmbedDirective(comment: string): EmbedDirective | null {
   const body = m[1].trim();
   if (!body) return null;
 
-  const tokens = tokenize(body);
+  // A bare path ends at the first key=value option, not at its first space.
+  // Quote paths containing text that itself looks like an option.
+  const quotedPath = body[0] === '"' || body[0] === "'";
+  const optionStart = body.search(/\s+(?=[\w-]+=)/);
+  const tokens = quotedPath ? tokenize(body) : [
+    (optionStart < 0 ? body : body.slice(0, optionStart)).trim(),
+    ...tokenize(optionStart < 0 ? '' : body.slice(optionStart).trim()),
+  ];
   if (tokens.length === 0) return null;
 
   const path = tokens[0];
