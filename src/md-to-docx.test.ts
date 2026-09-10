@@ -2554,6 +2554,41 @@ describe('Nested critic runs in deletions and formatting propagation', () => {
 });
 
 describe('Citations inside CriticMarkup', () => {
+  it('generates references for an added citation when no CSL style is specified', async () => {
+    const doc = await getDocumentXml('{++[@smith2020]++}');
+    expect(doc).toContain('ZOTERO_BIBL');
+    const ins = doc.match(/<w:ins[^>]*>([\s\S]*?)<\/w:ins>/);
+    expect(ins?.[1]).toContain('ZOTERO_ITEM');
+    expect(doc.slice(doc.indexOf('ZOTERO_BIBL'))).toContain('Title');
+  });
+
+  it('generates references for a replacement citation without a CSL style', async () => {
+    const doc = await getDocumentXml('{~~(hand-typed cite)~>[@smith2020]~~}');
+    expect(doc).toContain('<w:delText>(hand-typed cite)</w:delText>');
+    const ins = doc.match(/<w:ins[^>]*>([\s\S]*?)<\/w:ins>/);
+    expect(ins?.[1]).toContain('ZOTERO_ITEM');
+    expect(doc).toContain('ZOTERO_BIBL');
+    expect(doc.slice(doc.indexOf('ZOTERO_BIBL'))).toContain('Title');
+  });
+
+  it('defaults ordinary citations to APA and records the style for Zotero', async () => {
+    const { docx } = await convertMdToDocx('[@smith2020]', { bibtex: bib });
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docx);
+    const doc = await zip.file('word/document.xml')!.async('text');
+    expect(doc).toContain('ZOTERO_BIBL');
+    expect(doc).toContain('(Smith, 2020)');
+    const props = await zip.file('docProps/custom.xml')!.async('text');
+    expect(props).toContain('http://www.zotero.org/styles/apa');
+  });
+
+  it('omits deleted-only references when using the default style', async () => {
+    const doc = await getDocumentXml('{++[@smith2020]++} {--[@jones2021]--}');
+    const bibliography = doc.slice(doc.indexOf('ZOTERO_BIBL'));
+    expect(bibliography).toContain('Smith');
+    expect(bibliography).not.toContain('Jones');
+  });
+
   const bib = '@article{smith2020, author={Smith, John}, title={Title}, journal={J}, year={2020}}\n' +
     '@article{jones2021, author={Jones, Ann}, title={Other}, journal={J}, year={2021}}';
 

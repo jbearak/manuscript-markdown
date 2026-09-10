@@ -489,6 +489,29 @@ describe('MD→DOCX with CSL frontmatter', () => {
 });
 
 describe('MD→DOCX without CSL frontmatter', () => {
+  test('preserves explicit Zotero bibliography metadata without live citations', async () => {
+    const result = await convertMdToDocx('Plain text', {
+      bibtex: SAMPLE_BIBTEX,
+      zoteroBiblData: { uncited: [['http://example.com/uncited-item']] },
+    });
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(result.docx);
+    const docXml = await zip.file('word/document.xml')!.async('string');
+    expect(docXml).toContain('ZOTERO_BIBL');
+    expect(docXml).toContain('http://example.com/uncited-item');
+  });
+
+  test.each(['', '---\ncsl: apa\n---\n\n'])('does not append an empty bibliography without live citations: %j', async (frontmatter) => {
+    for (const body of ['Plain text', '{--[@smith2020effects]--}']) {
+      const result = await convertMdToDocx(frontmatter + body, { bibtex: SAMPLE_BIBTEX });
+      const JSZip = (await import('jszip')).default;
+      const zip = await JSZip.loadAsync(result.docx);
+      const docXml = await zip.file('word/document.xml')!.async('string');
+      expect(docXml).not.toContain('ZOTERO_BIBL');
+      expect(docXml.match(/<w:p(?:\s|>)/g)).toHaveLength(1);
+    }
+  });
+
   test('generates custom.xml with bib key order even without CSL', async () => {
     const md = 'Some text [@smith2020effects].\n';
     const result = await convertMdToDocx(md, { bibtex: SAMPLE_BIBTEX });
@@ -499,14 +522,14 @@ describe('MD→DOCX without CSL frontmatter', () => {
     expect(customXml).toContain('MANUSCRIPT_BIB_KEY_ORDER');
   });
 
-  test('does not generate ZOTERO_BIBL when no CSL specified', async () => {
+  test('generates ZOTERO_BIBL with the default style when no CSL specified', async () => {
     const md = 'Some text [@smith2020effects].\n';
     const result = await convertMdToDocx(md, { bibtex: SAMPLE_BIBTEX });
 
     const JSZip = (await import('jszip')).default;
     const zip = await JSZip.loadAsync(result.docx);
     const docXml = await zip.file('word/document.xml')?.async('string');
-    expect(docXml).not.toContain('ZOTERO_BIBL');
+    expect(docXml).toContain('ZOTERO_BIBL');
   });
 });
 

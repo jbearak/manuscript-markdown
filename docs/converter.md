@@ -14,7 +14,7 @@ The converter supports DOCX → Markdown → DOCX round-tripping. The following 
 - **Task lists**: `- [ ]` / `- [x]` parsed as semantic task items in Markdown and exported to deterministic DOCX list output with checkbox prefixes (`☐`/`☒`)
 - **Comments**: non-overlapping comments use CriticMarkup `{==highlighted text==}{>>@author | comment<<}` format; overlapping comments use non-inline ID-based syntax (`{#1}highlighted text{/1}{#1>>@alice | comment<<}`) — see [Specification](specification.md#overlapping-comments)
 - **Track changes**: CriticMarkup `{++...++}` and `{--...--}` ↔ Word revisions (`w:ins`/`w:del`)
-- **Citations**: Zotero field codes ↔ Pandoc `[@key]` syntax with BibTeX export. On import, `ZOTERO_BIBL` field codes are detected and omitted (bibliography is regenerated on export). On export, bibliography is automatically generated and appended as a `ZOTERO_BIBL` field when a CSL style is specified. Mixed Zotero/non-Zotero grouped citations always produce unified output — a single set of parentheses wrapping all entries (see [Zotero Round-Trip](zotero-roundtrip.md#mixed-citations)). Missing keys appear inline as `@citekey` with a post-bibliography note.
+- **Citations**: Zotero field codes ↔ Pandoc `[@key]` syntax with BibTeX export. On import, `ZOTERO_BIBL` field codes are detected and omitted (bibliography is regenerated on export). On export, bibliography is automatically generated and appended as a `ZOTERO_BIBL` field for cited entries. If no `csl` style is specified, a nonempty bibliography uses bundled APA formatting. Mixed Zotero/non-Zotero grouped citations always produce unified output — a single set of parentheses wrapping all entries (see [Zotero Round-Trip](zotero-roundtrip.md#mixed-citations)). Missing keys appear inline as `@citekey` with a post-bibliography note.
 - **Zotero document preferences**: CSL style, locale, and note type round-tripped between YAML frontmatter (`csl`, `locale`, `zotero-notes`) and `docProps/custom.xml` (`ZOTERO_PREF_*` properties)
 - **Math**: OMML equations ↔ LaTeX (`$inline$`, `$$display$$`, and bare `\begin{env}...\end{env}`)
 - **Hyperlinks**: Markdown links ↔ Word hyperlinks (with proper escaping)
@@ -226,7 +226,7 @@ bibliography: shared/references
 |-------|-------------|
 | `title` | Document title. Multiple `title:` entries create multi-paragraph titles. |
 | `author` | Document author. Written as `dc:creator` in Document Properties on export. |
-| `csl` | CSL style short name (e.g., `apa`, `chicago-author-date`, `bmj`) or absolute path to a `.csl` file |
+| `csl` | CSL style short name (e.g., `apa`, `chicago-author-date`, `bmj`) or absolute path to a `.csl` file. Defaults to `apa`. Non-bundled styles are downloaded automatically by the converter on first use. |
 | `locale` | Optional locale override (e.g., `en-US`, `en-GB`). Defaults to the style's own locale. |
 | `zotero-notes` | Optional Zotero note type: `in-text` (default), `footnotes`, or `endnotes`. Legacy alias: `note-type`. Legacy numeric values (0, 1, 2) are still accepted. |
 | `notes` | Controls footnote/endnote generation: `footnotes` (default) or `endnotes`. Auto-detected on DOCX import. |

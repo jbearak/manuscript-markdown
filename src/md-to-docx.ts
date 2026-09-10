@@ -6497,7 +6497,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   // Uses split/join (not replace) to avoid $-corruption in replacement strings.
   const hasBiblMarker = body.includes(BIBL_PLACEHOLDER);
   let biblXml = '';
-  if (citeprocEngine) {
+  // Keep imported Zotero metadata even when there are no live citation fields.
+  if (citeprocEngine && (state.citedKeys.size > 0 || options?.zoteroBiblData)) {
     biblXml += generateBibliographyXml(citeprocEngine, options?.zoteroBiblData, frontmatter?.bibliographyHangingIndent);
   }
   if (state.missingKeys.size > 0) {
@@ -6630,6 +6631,9 @@ export async function convertMdToDocx(
     }
   }
 
+  // A bibliography file is sufficient to request formatted references. Use a
+  // bundled default when no style was selected, and record it in Zotero prefs.
+  if (!frontmatter.csl && bibEntries && bibEntries.size > 0) frontmatter.csl = 'apa';
   if (frontmatter.csl && bibEntries) {
     let styleName = frontmatter.csl;
 
