@@ -20,8 +20,13 @@ export function imagePathsWithSpaces(md: MarkdownIt): void {
     let title = '';
     for (; pos < state.posMax; pos++) {
       const ch = state.src[pos];
-      if (ch.charCodeAt(0) < 32 || ch === '<' || ch === '>') return false;
-      if (ch === '\\') { pos++; continue; }
+      if (ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127 || ch === '<' || ch === '>') return false;
+      if (ch === '\\') {
+        const escaped = state.src.charCodeAt(pos + 1);
+        if (pos + 1 >= state.posMax || escaped < 32 || escaped === 127) return false;
+        pos++;
+        continue;
+      }
       if (ch === ' ' && depth === 0) {
         let titleStart = pos;
         while (state.src[titleStart] === ' ') titleStart++;

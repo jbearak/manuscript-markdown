@@ -4,6 +4,16 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import JSZip from 'jszip';
 import { convertMdToDocx } from './md-to-docx';
+import { renderWithPlugin } from './test-helpers';
+
+it.each(['\n', '\t', '\x01', '\x7f'])('rejects escaped control characters in image paths: %j', async (control) => {
+  const filename = 'some \\' + control + 'image.png';
+  const markdown = '![description](' + filename + ')';
+  expect(renderWithPlugin(markdown)).not.toContain('<img');
+  const { docx } = await convertMdToDocx(markdown);
+  const zip = await JSZip.loadAsync(docx);
+  expect(await zip.file('word/document.xml')!.async('string')).toContain('![description]');
+});
 
 for (const quoting of ['', '"', "'"]) {
   it('exports a table with spaces in its path, quoting=' + quoting, async () => {
