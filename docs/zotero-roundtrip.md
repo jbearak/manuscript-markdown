@@ -113,6 +113,8 @@ zotero-notes: in-text
 
 You can also add or modify this frontmatter manually. When a nonempty bibliography is loaded, omitting `csl` uses the bundled APA style for citations and the reference list. Set `csl` to choose another style.
 
+APA is the default because it is bundled and works offline, and its author–year citations stay close to the converter's earlier plain-text fallback. This gives documents a formatted reference list without requiring a style selection first. Use the style required by your journal or collaborators by setting `csl`, for example `csl: vancouver` for numbered citations.
+
 ## CSL Citation Styles
 
 ### Bundled styles
