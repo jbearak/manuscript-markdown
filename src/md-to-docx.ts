@@ -799,7 +799,7 @@ function normalizeCriticInnerRuns(runs: MdRun[]): MdRun[] {
       continue;
     }
 
-    if (run.type === 'math' || run.type === 'citation') {
+    if (run.type === 'math' || run.type === 'citation' || run.type === 'image') {
       normalized.push(run);
       continue;
     }
@@ -5013,7 +5013,7 @@ function formatCriticInnerRuns(runs: MdRun[] | undefined, outer: MdRun, forced: 
       formatted.push(run);
       continue;
     }
-    if (run.type === 'math' || run.type === 'citation') {
+    if (run.type === 'math' || run.type === 'citation' || run.type === 'image') {
       // Citation visible text comes from the field result (CSL/fallback), so
       // outer formatting is not merged in — same as citations outside CriticMarkup.
       formatted.push(run);

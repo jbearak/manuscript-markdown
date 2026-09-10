@@ -31,13 +31,17 @@ for (const quoting of ['', '"', "'"]) {
   });
 }
 
-it('exports an image whose bare path contains spaces', async () => {
+it.each([
+  '![description](my figures/some image.png)',
+  '{++Added ![description](my figures/some image.png)++}',
+  '{~~old figure~>New ![description](my figures/some image.png)~~}',
+])('exports an image whose bare path contains spaces: %s', async (markdown) => {
   const dir = mkdtempSync(join(tmpdir(), 'manuscript image '));
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQI12NgAAIABQABNl7BcQAAAABJRU5ErkJggg==', 'base64');
   mkdirSync(join(dir, 'my figures'));
   writeFileSync(join(dir, 'my figures/some image.png'), png);
   try {
-    const { docx } = await convertMdToDocx('![description](my figures/some image.png)', { sourceDir: dir });
+    const { docx } = await convertMdToDocx(markdown, { sourceDir: dir });
     const zip = await JSZip.loadAsync(docx);
     expect(await zip.file('word/document.xml')!.async('string')).toContain('<w:drawing>');
     const media = zip.file(/^word\/media\/.*\.png$/);
