@@ -499,14 +499,14 @@ describe('MD→DOCX without CSL frontmatter', () => {
     expect(customXml).toContain('MANUSCRIPT_BIB_KEY_ORDER');
   });
 
-  test('does not generate ZOTERO_BIBL when no CSL specified', async () => {
+  test('generates ZOTERO_BIBL with the default style when no CSL specified', async () => {
     const md = 'Some text [@smith2020effects].\n';
     const result = await convertMdToDocx(md, { bibtex: SAMPLE_BIBTEX });
 
     const JSZip = (await import('jszip')).default;
     const zip = await JSZip.loadAsync(result.docx);
     const docXml = await zip.file('word/document.xml')?.async('string');
-    expect(docXml).not.toContain('ZOTERO_BIBL');
+    expect(docXml).toContain('ZOTERO_BIBL');
   });
 });
 

@@ -6625,6 +6625,9 @@ export async function convertMdToDocx(
     }
   }
 
+  // A bibliography file is sufficient to request formatted references. Use a
+  // bundled default when no style was selected, and record it in Zotero prefs.
+  if (!frontmatter.csl && bibEntries && bibEntries.size > 0) frontmatter.csl = 'apa';
   if (frontmatter.csl && bibEntries) {
     let styleName = frontmatter.csl;
 
