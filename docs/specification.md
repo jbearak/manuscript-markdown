@@ -33,7 +33,7 @@ The frontmatter may also include citation-related fields (`csl`, `locale`, `zote
 |-------|-------------|
 | `title` | Document title. Multiple `title:` entries create multi-paragraph titles. |
 | `author` | Document author. Written as `dc:creator` in Document Properties on DOCX export. |
-| `csl` | CSL style short name (e.g., `apa`, `chicago-author-date`) or absolute path to a `.csl` file. Controls citation and bibliography formatting. Defaults to bundled `apa` when a nonempty bibliography is loaded. Non-bundled styles are downloaded automatically by the converter on first use. |
+| `csl` | CSL style short name (e.g., `apa`, `chicago-author-date`) or absolute path to a `.csl` file. Controls citation and bibliography formatting. Defaults to `apa`. Non-bundled styles are downloaded automatically by the converter on first use. |
 | `locale` | Locale override for citation formatting (e.g., `en-US`, `en-GB`). Defaults to the style's own locale. |
 | `zotero-notes` | Zotero note type: `in-text` (default), `footnotes`, or `endnotes`. Legacy alias: `note-type`. |
 | `notes` | Controls footnote/endnote OOXML generation: `footnotes` (default) or `endnotes`. See [Footnotes](#footnotes). |
