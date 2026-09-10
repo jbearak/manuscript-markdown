@@ -1,4 +1,5 @@
 import MarkdownIt from 'markdown-it';
+import { imagePathsWithSpaces } from './image-paths';
 import type Token from 'markdown-it/lib/token.mjs';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
 import { escapeXml, escapeXmlText, generateCitation, generateMathXml, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, type CiteprocEngine } from './md-to-docx-citations';
@@ -722,6 +723,7 @@ function paraPlaceholderRule(state: StateInline, silent: boolean): boolean {
 
 function createMarkdownIt(): MarkdownIt {
   const md = new MarkdownIt({ html: true, linkify: true });
+  md.use(imagePathsWithSpaces);
 
   md.inline.ruler.before('emphasis', 'para_placeholder', paraPlaceholderRule);
   md.inline.ruler.before('emphasis', 'comment_range', commentRangeRule);
@@ -797,7 +799,7 @@ function normalizeCriticInnerRuns(runs: MdRun[]): MdRun[] {
       continue;
     }
 
-    if (run.type === 'math' || run.type === 'citation') {
+    if (run.type === 'math' || run.type === 'citation' || run.type === 'image') {
       normalized.push(run);
       continue;
     }
@@ -2753,7 +2755,10 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
         break;
 
       case 'image': {
-        const src = token.attrGet?.('src') || '';
+        // markdown-it URL-encodes destinations, including literal path spaces.
+        const encodedSrc = token.attrGet?.('src') || '';
+        let src = encodedSrc;
+        try { src = decodeURIComponent(encodedSrc); } catch { /* Keep malformed escapes literal. */ }
         const alt = token.children?.map(child => child.content || '').join('') || '';
         let width: number | undefined;
         let height: number | undefined;
@@ -5008,7 +5013,7 @@ function formatCriticInnerRuns(runs: MdRun[] | undefined, outer: MdRun, forced: 
       formatted.push(run);
       continue;
     }
-    if (run.type === 'math' || run.type === 'citation') {
+    if (run.type === 'math' || run.type === 'citation' || run.type === 'image') {
       // Citation visible text comes from the field result (CSL/fallback), so
       // outer formatting is not merged in — same as citations outside CriticMarkup.
       formatted.push(run);

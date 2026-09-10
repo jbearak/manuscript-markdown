@@ -32,13 +32,13 @@ export interface EmbedSheetRange {
 }
 
 /**
- * Regex to locate the path token (first non-whitespace token after `embed:`)
+ * Regex to locate the path before any key=value options after `embed:`.
  * inside a validated embed directive line.  Captures:
  *   [1] double-quoted path  OR
  *   [2] single-quoted path  OR
  *   [3] unquoted path
  */
-const PATH_RE = /<!--\s*embed:\s*(?:"([^"]+)"|'([^']+)'|(\S+?))\s*(?:-->|[\s])/;
+const PATH_RE = /<!--\s*embed:\s*(?:"([^"]+)"|'([^']+)'|(.+?))(?=\s+[\w-]+=|\s*-->)/;
 
 /**
  * Scan document text and return the location of each embed-directive file path.
