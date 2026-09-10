@@ -226,7 +226,7 @@ bibliography: shared/references
 |-------|-------------|
 | `title` | Document title. Multiple `title:` entries create multi-paragraph titles. |
 | `author` | Document author. Written as `dc:creator` in Document Properties on export. |
-| `csl` | CSL style short name (e.g., `apa`, `chicago-author-date`, `bmj`) or absolute path to a `.csl` file. Defaults to `apa` when a nonempty bibliography is loaded: it works offline and keeps author–year output close to the earlier fallback. Set this field to override the default. |
+| `csl` | CSL style short name (e.g., `apa`, `chicago-author-date`, `bmj`) or absolute path to a `.csl` file. Defaults to `apa` when a nonempty bibliography is loaded. |
 | `locale` | Optional locale override (e.g., `en-US`, `en-GB`). Defaults to the style's own locale. |
 | `zotero-notes` | Optional Zotero note type: `in-text` (default), `footnotes`, or `endnotes`. Legacy alias: `note-type`. Legacy numeric values (0, 1, 2) are still accepted. |
 | `notes` | Controls footnote/endnote generation: `footnotes` (default) or `endnotes`. Auto-detected on DOCX import. |
