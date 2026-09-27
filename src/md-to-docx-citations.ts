@@ -41,6 +41,7 @@ interface CiteprocCitationItem {
   locator?: string;
   label?: string;
   'suppress-author'?: boolean;
+  prefix?: string;
   itemData?: CiteprocItemData;
   uris?: string[];
 }
@@ -54,6 +55,9 @@ export interface CiteprocEngine {
   makeCitationCluster(items: CiteprocCitationItem[]): string;
   makeBibliography(): [CiteprocBibliographyMeta, string[]] | false | null;
   updateItems(ids: string[]): unknown;
+  /** citeproc-js internal: the style's in-cluster sort keys. makeCitationCluster
+   *  sorts whenever these are non-empty; it has no "unsorted" option. */
+  citation_sort?: { tokens: unknown[] };
 }
 
 interface CiteprocSystem {
@@ -296,10 +300,15 @@ export function renderCitationText(
   engine: CiteprocEngine,
   keys: string[],
   locators?: Map<string, string>,
-  suppressAuthorKeys?: Set<string>
+  suppressAuthorKeys?: Set<string>,
+  prefixes?: Map<string, string>
 ): string | undefined {
   if (!engine || !CSL) return undefined;
 
+  // Like Pandoc, keep a cluster with prefixes in written order so a leading
+  // "e.g.," stays in front; the field code sets properties.unsorted to match.
+  const sort = keys.some(key => prefixes?.has(key)) ? engine.citation_sort : undefined;
+  const sortTokens = sort?.tokens;
   try {
     const rawList = keys.map(key => {
       const item: CiteprocCitationItem = { id: key };
@@ -312,12 +321,17 @@ export function renderCitationText(
       if (suppressAuthorKeys?.has(key)) {
         item['suppress-author'] = true;
       }
+      const prefix = prefixes?.get(key);
+      if (prefix) item.prefix = prefix;
       return item;
     });
 
+    if (sort) sort.tokens = [];
     return engine.makeCitationCluster(rawList) as string;
   } catch {
     return undefined;
+  } finally {
+    if (sort && sortTokens) sort.tokens = sortTokens;
   }
 }
 
@@ -379,13 +393,14 @@ function resolveVisibleText(
   entries: Map<string, BibtexEntry>,
   locators: Map<string, string> | undefined,
   citeprocEngine: CiteprocEngine | undefined,
-  suppressAuthorKeys?: Set<string>
+  suppressAuthorKeys?: Set<string>,
+  prefixes?: Map<string, string>
 ): string {
   if (citeprocEngine) {
-    const rendered = renderCitationText(citeprocEngine, keys, locators, suppressAuthorKeys);
+    const rendered = renderCitationText(citeprocEngine, keys, locators, suppressAuthorKeys, prefixes);
     if (rendered) return rendered;
   }
-  return generateFallbackText(keys, entries, locators, suppressAuthorKeys);
+  return generateFallbackText(keys, entries, locators, suppressAuthorKeys, prefixes);
 }
 
 function buildCitationFieldCode(
@@ -397,13 +412,14 @@ function buildCitationFieldCode(
   usedCitationIds?: Set<string>,
   itemIdMap?: Map<string, string | number>,
   suppressAuthorKeys?: Set<string>,
+  prefixes?: Map<string, string>,
   extraRPr?: string
 ): string {
   // Resolve visible text first so we can populate properties (Defect 2)
   // Note: visibleTextOverride bypasses suppressAuthorKeys processing — callers
   // should not provide both, as the override text would include the author
   // while the CSL item has suppress-author set to true.
-  const visibleText = visibleTextOverride ?? resolveVisibleText(keys, entries, locators, citeprocEngine, suppressAuthorKeys);
+  const visibleText = visibleTextOverride ?? resolveVisibleText(keys, entries, locators, citeprocEngine, suppressAuthorKeys, prefixes);
 
   const citationItems: CiteprocCitationItem[] = [];
   for (const key of keys) {
@@ -448,6 +464,8 @@ function buildCitationFieldCode(
       citationItem.locator = parsed.locator;
       citationItem.label = parsed.label;
     }
+    const prefix = prefixes?.get(key);
+    if (prefix) citationItem.prefix = prefix;
     citationItems.push(citationItem);
   }
 
@@ -458,6 +476,8 @@ function buildCitationFieldCode(
       formattedCitation: visibleText,                                   // Defect 2
       plainCitation: stripHtmlTags(visibleText),                        // Defect 2
       noteIndex: 0,
+      // Zotero's "Keep Sources Sorted" off, matching renderCitationText
+      ...(citationItems.some(item => item.prefix) ? { unsorted: true } : {}),
     },
     citationItems,
     schema: 'https://github.com/citation-style-language/schema/raw/master/csl-citation.json',
@@ -472,7 +492,7 @@ function buildCitationFieldCode(
 }
 
 export function generateCitation(
-  run: { keys?: string[]; locators?: Map<string, string>; text: string; suppressAuthorKeys?: Set<string> },
+  run: { keys?: string[]; locators?: Map<string, string>; text: string; suppressAuthorKeys?: Set<string>; prefixes?: Map<string, string> },
   entries: Map<string, BibtexEntry>,
   citeprocEngine?: CiteprocEngine,
   usedCitationIds?: Set<string>,
@@ -481,7 +501,7 @@ export function generateCitation(
 ): CitationResult {
   const rPrOpen = extraRPr ? '<w:rPr>' + extraRPr + '</w:rPr>' : '';
   if (!run.keys || run.keys.length === 0) {
-    return { xml: '<w:r>' + rPrOpen + '<w:t>[@' + escapeXml(run.text) + ']</w:t></w:r>' };
+    return { xml: '<w:r>' + rPrOpen + '<w:t>[' + escapeXml(run.text) + ']</w:t></w:r>' };
   }
 
   // Classify keys into resolved (have bib data) vs missing
@@ -501,13 +521,17 @@ export function generateCitation(
 
   // All resolved — emit field code (works for both Zotero and non-Zotero entries)
   if (resolvedKeys.length > 0 && missingKeys.length === 0) {
-    const xml = buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine, undefined, usedCitationIds, itemIdMap, run.suppressAuthorKeys, extraRPr);
+    const xml = buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine, undefined, usedCitationIds, itemIdMap, run.suppressAuthorKeys, run.prefixes, extraRPr);
     return { xml };
   }
 
+  const missingText = '[' + missingKeys.map(k => {
+    const prefix = run.prefixes?.get(k);
+    return (prefix ? prefix + ' ' : '') + (run.suppressAuthorKeys?.has(k) ? '-@' : '@') + k;
+  }).join('; ') + ']';
+
   // Pure missing — emit @citekey references as plain text, preserving bracket format
   if (resolvedKeys.length === 0) {
-    const missingText = '[' + missingKeys.map(k => (run.suppressAuthorKeys?.has(k) ? '-@' : '@') + k).join('; ') + ']';
     return {
       xml: '<w:r>' + rPrOpen + '<w:t>' + escapeXml(missingText) + '</w:t></w:r>',
       warning: warnings.length > 0 ? warnings.join('; ') : undefined,
@@ -516,8 +540,7 @@ export function generateCitation(
   }
 
   // Mixed (some resolved, some missing) — resolved get field code, missing get plain text
-  const missingText = '[' + missingKeys.map(k => (run.suppressAuthorKeys?.has(k) ? '-@' : '@') + k).join('; ') + ']';
-  const xml = buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine, undefined, usedCitationIds, itemIdMap, run.suppressAuthorKeys, extraRPr) +
+  const xml = buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine, undefined, usedCitationIds, itemIdMap, run.suppressAuthorKeys, run.prefixes, extraRPr) +
     '<w:r>' + rPrOpen + '<w:t xml:space="preserve"> </w:t></w:r>' +
     '<w:r>' + rPrOpen + '<w:t>' + escapeXml(missingText) + '</w:t></w:r>';
 
@@ -698,7 +721,7 @@ function parseLocator(locator: string): { locator: string; label: string } {
   return { locator: trimmed, label: 'page' };
 }
 
-export function generateFallbackText(keys: string[], entries: Map<string, BibtexEntry>, locators?: Map<string, string>, suppressAuthorKeys?: Set<string>): string {
+export function generateFallbackText(keys: string[], entries: Map<string, BibtexEntry>, locators?: Map<string, string>, suppressAuthorKeys?: Set<string>, prefixes?: Map<string, string>): string {
   const parts = keys.map(key => {
     const entry = entries.get(key);
     if (!entry) return key;
@@ -730,6 +753,9 @@ export function generateFallbackText(keys: string[], entries: Map<string, Bibtex
 
     const locator = locators?.get(key);
     if (locator) text += ', ' + locator;
+
+    const prefix = prefixes?.get(key);
+    if (prefix) text = prefix + (text ? ' ' + text : '');
 
     return text;
   });

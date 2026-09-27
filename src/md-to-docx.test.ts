@@ -2646,6 +2646,13 @@ describe('Citations inside CriticMarkup', () => {
     expect(doc).not.toContain('ZOTERO_ITEM');
   });
 
+  it('keeps prefixes and suppress-author markers in deleted citation literals', async () => {
+    const doc = await getDocumentXml('{--Removed [e.g., @smith2020; -@jones2021]--}');
+    const delMatch = doc.match(/<w:del[^>]*>([\s\S]*?)<\/w:del>/);
+    expect(delMatch).toBeTruthy();
+    expect(delMatch![1]).toContain('<w:delText>[e.g., @smith2020; -@jones2021]</w:delText>');
+  });
+
   it('includes added citations in the bibliography but not deleted-only ones', async () => {
     const md = '---\ncsl: apa\n---\n{++Added [@smith2020]++} and {--removed [@jones2021]--}\n';
     const doc = await getDocumentXml(md);

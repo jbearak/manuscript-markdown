@@ -136,7 +136,7 @@
 			"name": "constant.character.escape.manuscript-markdown"
 		},
 		"citation_list": {
-			"begin": "\\[(?=\\s*@)",
+			"begin": "\\[(?=\\s*-?@|[^\\[\\];]*\\s-?@[A-Za-z0-9_](?![^\\[\\]]*\\][(\\[]))",
 			"beginCaptures": {
 				"0": { "name": "punctuation.definition.brackets.begin.manuscript-markdown" }
 			},

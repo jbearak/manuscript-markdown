@@ -302,6 +302,17 @@ describe('renderCitationText', () => {
     expect(text).toContain('15');
   });
 
+  test('keeps a prefixed cluster in written order even when the style sorts', () => {
+    const entries = parseBibtex(SAMPLE_BIBTEX);
+    const engine = createCiteprocEngine(entries, 'apa');
+    const keys = ['smith2020effects', 'jones2019urban'];
+
+    const prefixed = renderCitationText(engine, keys, undefined, undefined, new Map([['smith2020effects', 'e.g.,']]));
+    expect(prefixed).toBe('(e.g., Smith, 2020; Jones &#38; Lee, 2019)');
+    // The engine's own sort is restored for later clusters.
+    expect(renderCitationText(engine, keys)).toBe('(Jones &#38; Lee, 2019; Smith, 2020)');
+  });
+
   test('renders IEEE-style numeric citation', () => {
     const entries = parseBibtex(SAMPLE_BIBTEX);
     const engine = createCiteprocEngine(entries, 'ieee');
@@ -546,6 +557,19 @@ describe('DOCX→MD→DOCX roundtrip', () => {
     expect(mdResult.markdown).toContain('csl: apa');
     expect(mdResult.zoteroPrefs).toBeDefined();
     expect(mdResult.zoteroPrefs?.styleId).toContain('apa');
+  });
+
+  test('roundtrip preserves citation prefixes', async () => {
+    const md = '---\ncsl: apa\n---\n\nSome text [e.g., @smith2020effects; see also @jones2019urban, p. 4].\n';
+    const docxResult = await convertMdToDocx(md, { bibtex: SAMPLE_BIBTEX });
+
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docxResult.docx);
+    const docXml = await zip.file('word/document.xml')!.async('string');
+    expect(docXml).toContain('e.g., Smith, 2020; see also Jones &amp; Lee, 2019, p. 4');
+
+    const mdResult = await convertDocx(docxResult.docx);
+    expect(mdResult.markdown).toContain('[e.g., @smith2020effects; see also @jones2019urban, p. 4]');
   });
 
   test('ZOTERO_BIBL content is not in markdown output', async () => {

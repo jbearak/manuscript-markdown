@@ -215,13 +215,13 @@ describe('Feature: zotero-citation-roundtrip, Property 3: Locator formatting in 
             // Locator is sanitized (Pandoc-sensitive chars stripped)
             const sanitized = meta.locator.replace(/[\[\];@]/g, '');
             if (sanitized) {
-              expect(result).toBe(`${baseKey}, p. ${sanitized}`);
+              expect(result).toBe(`@${baseKey}, p. ${sanitized}`);
             } else {
-              expect(result).toBe(baseKey);
+              expect(result).toBe(`@${baseKey}`);
             }
           } else {
             // Must be the bare key with no suffix
-            expect(result).toBe(baseKey);
+            expect(result).toBe(`@${baseKey}`);
           }
         }
       }),
@@ -253,7 +253,7 @@ describe('Feature: zotero-citation-roundtrip, Property 4: Citation grouping pres
         // Each result must start with the expected base key (preserving order)
         for (let i = 0; i < items.length; i++) {
           const baseKey = keyMap.get(itemIdentifier(items[i]))!;
-          expect(results[i].startsWith(baseKey)).toBe(true);
+          expect(results[i].startsWith(`@${baseKey}`)).toBe(true);
         }
       }),
       { numRuns: 200 },
@@ -371,7 +371,7 @@ describe('Feature: zotero-citation-roundtrip, Property 6: Locator sanitization',
     const baseKey = keyMap.get(itemIdentifier(meta))!;
 
     const results = citationPandocKeys(citation, keyMap);
-    expect(results).toEqual([`${baseKey}, p. 20nextpart`]);
+    expect(results).toEqual([`@${baseKey}, p. 20nextpart`]);
   });
 
   it('returns bare key when locator consists entirely of Pandoc-sensitive chars', () => {
@@ -392,6 +392,6 @@ describe('Feature: zotero-citation-roundtrip, Property 6: Locator sanitization',
     const baseKey = keyMap.get(itemIdentifier(meta))!;
 
     const results = citationPandocKeys(citation, keyMap);
-    expect(results).toEqual([baseKey]);
+    expect(results).toEqual([`@${baseKey}`]);
   });
 });

@@ -39,10 +39,13 @@ Citations use [Pandoc citation syntax](https://pandoc.org/chunkedhtml-demo/8.20-
 | `[@smith2020; @jones2021]` | Grouped citation (one Zotero field) |
 | `[@smith2020, p. 20]` | Citation with page locator |
 | `[@smith2020, pp. 20-25]` | Citation with page range |
+| `[e.g., @smith2020; @jones2021]` | Citation with prefix |
 
 **Grouped citations**: Semicolons group multiple references into a single Zotero field code. When Zotero manages the exported document, it treats `[@smith2020; @jones2021]` as one citation cluster — the same as if you had inserted both references together in Word.
 
 **Locators**: Page numbers and other locators are written in the Markdown citation, not in the BibTeX file. This matches how Zotero handles them — a locator belongs to a specific citation instance, not to the bibliographic entry itself. Supported locator terms follow Pandoc conventions: `p.`, `pp.`, `ch.`, `sec.`, `vol.`, etc.
+
+**Prefixes**: Text before a key, such as `e.g.,` in `[e.g., @smith2020; @jones2021]`, becomes that item's Zotero prefix. Import does the reverse. Export turns off Zotero's "Keep Sources Sorted" for any citation with a prefix, so the keys stay in the order written and the prefix stays in front.
 
 ## BibTeX and Zotero Identity
 

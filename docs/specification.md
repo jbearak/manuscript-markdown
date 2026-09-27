@@ -611,6 +611,9 @@ Manuscript Markdown uses [Pandoc citation syntax](https://pandoc.org/MANUAL.html
 - With locator: `[@smith2020, p. 20]`
 - Multiple citations: `[@smith2020; @jones2021]`
 - Suppress author: `[-@smith2020]`
+- With prefix: `[e.g., @smith2020; @jones2021]`, or per item: `[@smith2020; see also @jones2021]`
+
+Separate keys with semicolons even after a prefix. Write `[e.g., @smith2020; @jones2021]`, not `[e.g., @smith2020 and @jones2021]`. A citation with a prefix keeps its keys in the order written, even when the style would otherwise sort them, so a leading "e.g.," stays first.
 
 Citations reference entries in a companion `.bib` file (see [BibTeX Companion File](#bibtex-companion-file) below).
 

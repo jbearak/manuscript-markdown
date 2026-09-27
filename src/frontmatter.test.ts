@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { maskFrontmatter, parseFrontmatter, serializeFrontmatter } from './frontmatter';
+import { hasCitations, maskFrontmatter, parseFrontmatter, serializeFrontmatter } from './frontmatter';
 import { scanOrientationDirectives } from './orientation-scan';
 
 describe('callout-labels frontmatter', () => {
@@ -37,5 +37,15 @@ describe('maskFrontmatter', () => {
   it('returns the original text when no frontmatter is present', () => {
     const markdown = 'Body\n<!-- landscape -->';
     expect(maskFrontmatter(markdown)).toBe(markdown);
+  });
+});
+
+describe('hasCitations', () => {
+  it.each(['[@smith2020]', '[-@smith2020]', '[e.g., @smith2020; @jones2021]'])('detects %s', (md) => {
+    expect(hasCitations('Text ' + md + '.')).toBe(true);
+  });
+
+  it.each(['[write to me@example.com]', 'No citations here.'])('ignores %s', (md) => {
+    expect(hasCitations(md)).toBe(false);
   });
 });

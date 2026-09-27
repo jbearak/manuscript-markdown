@@ -639,9 +639,9 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
   return '---\n' + lines.join('\n') + '\n---\n';
 }
 
-/** Check whether markdown body contains Pandoc-style citations ([@...]) */
+/** Check whether markdown body contains Pandoc-style citations ([@...], [-@...], [e.g., @...]) */
 export function hasCitations(markdown: string): boolean {
-  return /\[@[^\]]+\]/.test(markdown);
+  return /\[(?:[^\[\]]*\s)?-?@[^\]]+\]/.test(markdown);
 }
 
 /** Ensure a bibliography path ends with .bib */

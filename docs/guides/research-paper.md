@@ -39,6 +39,7 @@ You can insert citations using the standard Pandoc syntax:
 - `[@smith2020]` -> (Smith, 2020)
 - `[@smith2020; @jones2021]` -> (Smith, 2020; Jones, 2021)
 - `[-@smith2020]` -> (2020)
+- `[e.g., @smith2020; @jones2021]` -> (e.g., Smith, 2020; Jones, 2021)
 
 When you export to Word, these are converted to active Zotero citations.
 

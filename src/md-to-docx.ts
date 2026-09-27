@@ -163,6 +163,7 @@ export interface MdRun {
   keys?: string[];          // citation keys for [@key1; @key2]
   locators?: Map<string, string>; // key -> locator for [@key, p. 20]
   suppressAuthorKeys?: Set<string>; // per-key suppress-author: Set of keys with [-@key] form
+  prefixes?: Map<string, string>; // key -> Pandoc prefix for [e.g., @key]
   // Math specific
   display?: boolean;        // display math ($$...$$) vs inline ($...$)
   // Image specific
@@ -256,6 +257,7 @@ interface ManuscriptToken extends Token {
   keys?: string[];
   locators?: Map<string, string>;
   suppressAuthorKeys?: Set<string>;
+  prefixes?: Map<string, string>;
   display?: boolean;
   footnoteLabel?: string;
 }
@@ -564,62 +566,67 @@ function footnoteRefRule(state: StateInline, silent: boolean): boolean {
   return true;
 }
 
+// Start of a citation item's key: `@` or `-@` at the start of the item or
+// after whitespace. Text before it is the item's Pandoc prefix ("e.g.,").
+const CITATION_ITEM_START_RE = /(^|\s)(-?)@/;
+// A bracket that does not open with `@`/`-@` is a citation only if its first
+// item has a prefix followed by a real key, as in [e.g., @key]. The word
+// boundary keeps [write to me@example.com] plain text.
+const CITATION_PREFIXED_FIRST_ITEM_RE = /\s-?@[A-Za-z0-9_]/;
+
 function citationRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   const max = state.posMax;
 
-  // Match [@key] or [-@key] (Pandoc suppress-author form)
-  const isNormal = start + 2 < max && state.src.slice(start, start + 2) === '[@';
-  const isSuppressed = !isNormal && start + 3 < max && state.src.slice(start, start + 3) === '[-@';
-  if (!isNormal && !isSuppressed) return false;
-
-  const contentStart = isSuppressed ? start + 3 : start + 2;
-  const endPos = state.src.indexOf(']', contentStart);
+  // Match [@key], [-@key] (Pandoc suppress-author form), or [prefix @key]
+  if (start + 2 >= max || state.src.charAt(start) !== '[') return false;
+  const endPos = state.src.indexOf(']', start + 1);
   if (endPos === -1) return false;
+  const rawContent = state.src.slice(start + 1, endPos);
+
+  if (!/^-?@/.test(rawContent)) {
+    if (!CITATION_PREFIXED_FIRST_ITEM_RE.test(rawContent.split(';')[0])) return false;
+    // A nested `[` means any citation starts later; `](` or `][` makes this
+    // link text that happens to mention someone (Pandoc parses these as links).
+    if (rawContent.includes('[')) return false;
+    const after = state.src.charAt(endPos + 1);
+    if (after === '(' || after === '[') return false;
+  }
 
   if (!silent) {
-    const rawContent = state.src.slice(contentStart, endPos);
     const token = pushManuscriptToken(state, 'citation', '', 0);
-    // Preserve original content for fallback rendering
-    token.content = isSuppressed ? '-@' + rawContent : rawContent;
+    // Preserve original content (everything between the brackets) for fallback rendering
+    token.content = rawContent;
 
     const keys: string[] = [];
     const locators = new Map<string, string>();
     const suppressAuthorKeys = new Set<string>();
+    const prefixes = new Map<string, string>();
 
-    // Split raw content by `;` and check each part for -@ prefix BEFORE stripping
-    const rawParts = rawContent.split(';').map((p: string) => p.trim()).filter(Boolean);
-    for (let i = 0; i < rawParts.length; i++) {
-      let raw = rawParts[i];
-      let suppressed: boolean;
-      if (i === 0) {
-        // First part: the `[-@` or `[@` prefix was already consumed by the outer match,
-        // so `isSuppressed` tells us whether this item is suppressed.
-        suppressed = isSuppressed;
-        raw = raw.replace(/^@/, '').trim();
-      } else {
-        // Subsequent parts: check for `-@` prefix to determine per-item suppress
-        suppressed = raw.startsWith('-@');
-        raw = raw.replace(/^-?@/, '').trim();
+    for (const part of rawContent.split(';')) {
+      let raw = part.trim();
+      let suppressed = false;
+      let prefix = '';
+      const itemStart = CITATION_ITEM_START_RE.exec(raw);
+      if (itemStart) {
+        prefix = raw.slice(0, itemStart.index).trim();
+        suppressed = itemStart[2] === '-';
+        raw = raw.slice(itemStart.index + itemStart[0].length).trim();
       }
       if (!raw) continue;
 
       const commaPos = raw.indexOf(',');
-      if (commaPos !== -1) {
-        const key = raw.slice(0, commaPos).trim();
-        const locator = raw.slice(commaPos + 1).trim();
-        keys.push(key);
-        locators.set(key, locator);
-        if (suppressed) suppressAuthorKeys.add(key);
-      } else {
-        keys.push(raw);
-        if (suppressed) suppressAuthorKeys.add(raw);
-      }
+      const key = commaPos !== -1 ? raw.slice(0, commaPos).trim() : raw;
+      keys.push(key);
+      if (commaPos !== -1) locators.set(key, raw.slice(commaPos + 1).trim());
+      if (suppressed) suppressAuthorKeys.add(key);
+      if (prefix) prefixes.set(key, prefix);
     }
 
     token.keys = keys;
     token.locators = locators;
     token.suppressAuthorKeys = suppressAuthorKeys.size > 0 ? suppressAuthorKeys : undefined;
+    token.prefixes = prefixes.size > 0 ? prefixes : undefined;
   }
 
   state.pos = endPos + 1;
@@ -2702,6 +2709,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
           keys: token.keys,
           locators: token.locators,
           suppressAuthorKeys: token.suppressAuthorKeys || undefined,
+          prefixes: token.prefixes,
           ...formatStack,
           href: currentHref
         });
@@ -5100,7 +5108,7 @@ function generateDeletedCriticContent(
       // A live Zotero field inside <w:del> is unsafe (Word serializes deleted
       // field instructions as w:delInstrText, and Zotero may refresh deleted
       // fields), so deleted citations keep their literal source syntax.
-      const literal = run.text.startsWith('-@') ? '[' + run.text + ']' : '[@' + run.text + ']';
+      const literal = '[' + run.text + ']';
       const merged = mergeRunFormatting({ type: 'text', text: literal }, outer, forced);
       const rPr = generateRPr(merged, extraRPr);
       xml += '<w:r>' + (rPr ? rPr : '') + delText(literal) + '</w:r>';

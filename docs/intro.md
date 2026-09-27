@@ -82,6 +82,7 @@ _italic text_
 [@smith2020]
 [@smith2020, p. 20]
 [@smith2020; @jones2021]
+[e.g., @smith2020; @jones2021]
 ```
 
 Citations reference entries in a companion `.bib` file. If you converted a Word document that had Zotero citations, this file was generated automatically. BibTeX is a standard format for bibliographic data ([bibtex.org](https://www.bibtex.org/)). You don't need to learn it in detail: if you have an AI assistant in VS Code (like Claude), you can open its sidebar and ask it to add a citation — paste in bibliographic details or a screenshot of a reference page, and it will format the BibTeX entry for you.

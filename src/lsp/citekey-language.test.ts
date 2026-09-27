@@ -33,6 +33,13 @@ describe('scanCitationUsages', () => {
 		expect(usages.map((u) => u.key)).toEqual(['smith2020', 'jones2019']);
 	});
 
+	test('extracts citekeys from citations with prefixes', () => {
+		const text = 'See [e.g., @smith2020; see also @jones2019] for details.';
+		const usages = scanCitationUsages(text);
+		expect(usages.map((u) => u.key)).toEqual(['smith2020', 'jones2019']);
+		expect(text.slice(usages[0].keyStart, usages[0].keyEnd)).toBe('smith2020');
+	});
+
 	test('returns unique offsets for the same key cited in separate brackets', () => {
 		const text = 'See [@smith2020] and later [@smith2020].';
 		const usages = scanCitationUsages(text);
