@@ -163,6 +163,7 @@ export interface MdRun {
   keys?: string[];          // citation keys for [@key1; @key2]
   locators?: Map<string, string>; // key -> locator for [@key, p. 20]
   suppressAuthorKeys?: Set<string>; // per-key suppress-author: Set of keys with [-@key] form
+  prefixes?: string[];      // Pandoc prefix per item for [e.g., @key], aligned with keys ('' = none)
   // Math specific
   display?: boolean;        // display math ($$...$$) vs inline ($...$)
   // Image specific
@@ -256,6 +257,7 @@ interface ManuscriptToken extends Token {
   keys?: string[];
   locators?: Map<string, string>;
   suppressAuthorKeys?: Set<string>;
+  prefixes?: string[];
   display?: boolean;
   footnoteLabel?: string;
 }
@@ -564,62 +566,114 @@ function footnoteRefRule(state: StateInline, silent: boolean): boolean {
   return true;
 }
 
+// Start of a citation item's key: `@` or `-@` at the start of the item or
+// after whitespace. Text before it is the item's Pandoc prefix ("e.g.,").
+const CITATION_ITEM_START_RE = /(^|\s)(-?)@/;
+// A key start in plain text. Whitespace before `@` and a letter, digit, or `_`
+// after it keep [write to me@example.com] plain text.
+const CITATION_KEY_START_RE = /(^|\s)-?@[\p{L}\p{N}_]/u;
+// The first key with its extent, per Pandoc: letters, digits, and `_`, plus
+// punctuation from :.#$%&-+?<>~/ when another key character follows.
+const CITATION_KEY_RE = /((?:^|\s)-?@)([\p{L}\p{N}_](?:[\p{L}\p{N}_]|[:.#$%&\-+?<>~\/](?=[\p{L}\p{N}_]))*)/u;
+
+/** Links linkify makes from bare URLs are plain text in the source. */
+function isLinkifyToken(token: Token): boolean {
+  return (token.type === 'link_open' || token.type === 'link_close') && token.markup === 'linkify';
+}
+
+/** Whether a bracket's first item is plain text up to a real key, as in
+ *  [e.g., @key] or [for n = 10, see @key]. Formatting before or around the key
+ *  (code, emphasis, CriticMarkup, math, HTML) leaves the brackets ordinary
+ *  Markdown: a Zotero prefix is plain text, and an `@` inside a code span is not
+ *  a key. Escaped characters count as text but never start a key. hasCitations()
+ *  in frontmatter.ts and citation_list in the grammar approximate this with regexes. */
+function isPlainPrefixedCitationItem(state: StateInline, item: string): boolean {
+  const key = CITATION_KEY_RE.exec(item);
+  if (!key) return false;
+  // Parse with the key replaced by a plain word. The key is opaque, so the
+  // underscores in @_smith2020_ are not emphasis, but a code span or emphasis
+  // wrapped around the key still shows up.
+  const keyStart = key.index + key[1].length;
+  const masked = item.slice(0, keyStart) + 'k' + item.slice(keyStart + key[2].length);
+  const tokens: Token[] = [];
+  state.md.inline.parse(masked, state.md, state.env, tokens);
+  let text = '';
+  for (const token of tokens) {
+    if (token.type === 'text') text += token.content;
+    else if (token.type === 'text_special') text += '�';
+    else if (token.type === 'softbreak') text += '\n';
+    else if (!isLinkifyToken(token)) return false;
+    if (CITATION_KEY_START_RE.test(text)) return true;
+  }
+  return false;
+}
+
+/** A citation prefix as the plain text Zotero stores: backslash escapes
+ *  (converter.ts adds them on import) decoded, line breaks as spaces. This works
+ *  on the source text rather than parsed tokens, because linkify rewrites URLs
+ *  (it decodes %20, for one) and keeps escapes inside them. */
+function citationPrefixText(state: StateInline, prefix: string): string {
+  return state.md.utils.unescapeAll(prefix).replace(/\s+/g, ' ');
+}
+
 function citationRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   const max = state.posMax;
 
-  // Match [@key] or [-@key] (Pandoc suppress-author form)
-  const isNormal = start + 2 < max && state.src.slice(start, start + 2) === '[@';
-  const isSuppressed = !isNormal && start + 3 < max && state.src.slice(start, start + 3) === '[-@';
-  if (!isNormal && !isSuppressed) return false;
-
-  const contentStart = isSuppressed ? start + 3 : start + 2;
-  const endPos = state.src.indexOf(']', contentStart);
+  // Match [@key], [-@key] (Pandoc suppress-author form), or [prefix @key]
+  if (start + 2 >= max || state.src.charAt(start) !== '[') return false;
+  const endPos = state.src.indexOf(']', start + 1);
   if (endPos === -1) return false;
+  const rawContent = state.src.slice(start + 1, endPos);
+
+  if (!/^-?@/.test(rawContent)) {
+    // A nested `[` means any citation starts later; `](` or `][` makes this
+    // link text that happens to mention someone (Pandoc parses these as links).
+    if (rawContent.includes('[')) return false;
+    const after = state.src.charAt(endPos + 1);
+    if (after === '(' || after === '[') return false;
+    // Likewise a shortcut reference link. markdown-it has already consumed its
+    // `[label]: url` definition, so a citation here would drop the URL.
+    const references = state.env?.references as Record<string, unknown> | undefined;
+    if (references && references[state.md.utils.normalizeReference(rawContent)]) return false;
+    if (!isPlainPrefixedCitationItem(state, rawContent.split(';')[0])) return false;
+  }
 
   if (!silent) {
-    const rawContent = state.src.slice(contentStart, endPos);
     const token = pushManuscriptToken(state, 'citation', '', 0);
-    // Preserve original content for fallback rendering
-    token.content = isSuppressed ? '-@' + rawContent : rawContent;
+    // Preserve original content (everything between the brackets) for fallback rendering
+    token.content = rawContent;
 
     const keys: string[] = [];
     const locators = new Map<string, string>();
     const suppressAuthorKeys = new Set<string>();
+    const prefixes: string[] = [];
 
-    // Split raw content by `;` and check each part for -@ prefix BEFORE stripping
-    const rawParts = rawContent.split(';').map((p: string) => p.trim()).filter(Boolean);
-    for (let i = 0; i < rawParts.length; i++) {
-      let raw = rawParts[i];
-      let suppressed: boolean;
-      if (i === 0) {
-        // First part: the `[-@` or `[@` prefix was already consumed by the outer match,
-        // so `isSuppressed` tells us whether this item is suppressed.
-        suppressed = isSuppressed;
-        raw = raw.replace(/^@/, '').trim();
-      } else {
-        // Subsequent parts: check for `-@` prefix to determine per-item suppress
-        suppressed = raw.startsWith('-@');
-        raw = raw.replace(/^-?@/, '').trim();
+    for (const part of rawContent.split(';')) {
+      let raw = part.trim();
+      let suppressed = false;
+      let prefix = '';
+      const itemStart = CITATION_ITEM_START_RE.exec(raw);
+      if (itemStart) {
+        prefix = raw.slice(0, itemStart.index).trim();
+        if (prefix) prefix = citationPrefixText(state, prefix).trim();
+        suppressed = itemStart[2] === '-';
+        raw = raw.slice(itemStart.index + itemStart[0].length).trim();
       }
       if (!raw) continue;
 
       const commaPos = raw.indexOf(',');
-      if (commaPos !== -1) {
-        const key = raw.slice(0, commaPos).trim();
-        const locator = raw.slice(commaPos + 1).trim();
-        keys.push(key);
-        locators.set(key, locator);
-        if (suppressed) suppressAuthorKeys.add(key);
-      } else {
-        keys.push(raw);
-        if (suppressed) suppressAuthorKeys.add(raw);
-      }
+      const key = commaPos !== -1 ? raw.slice(0, commaPos).trim() : raw;
+      keys.push(key);
+      if (commaPos !== -1) locators.set(key, raw.slice(commaPos + 1).trim());
+      if (suppressed) suppressAuthorKeys.add(key);
+      prefixes.push(prefix);
     }
 
     token.keys = keys;
     token.locators = locators;
     token.suppressAuthorKeys = suppressAuthorKeys.size > 0 ? suppressAuthorKeys : undefined;
+    token.prefixes = prefixes.some(Boolean) ? prefixes : undefined;
   }
 
   state.pos = endPos + 1;
@@ -2702,6 +2756,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
           keys: token.keys,
           locators: token.locators,
           suppressAuthorKeys: token.suppressAuthorKeys || undefined,
+          prefixes: token.prefixes,
           ...formatStack,
           href: currentHref
         });
@@ -5100,7 +5155,7 @@ function generateDeletedCriticContent(
       // A live Zotero field inside <w:del> is unsafe (Word serializes deleted
       // field instructions as w:delInstrText, and Zotero may refresh deleted
       // fields), so deleted citations keep their literal source syntax.
-      const literal = run.text.startsWith('-@') ? '[' + run.text + ']' : '[@' + run.text + ']';
+      const literal = '[' + run.text + ']';
       const merged = mergeRunFormatting({ type: 'text', text: literal }, outer, forced);
       const rPr = generateRPr(merged, extraRPr);
       xml += '<w:r>' + (rPr ? rPr : '') + delText(literal) + '</w:r>';

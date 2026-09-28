@@ -141,6 +141,7 @@ export interface CitationMetadata {
   locator?: string;
   citationKey?: string;   // CSL citation-key preserved for round-trip
   suppressAuthor?: boolean; // [-@key] Pandoc suppress-author form
+  prefix?: string;          // [e.g., @key] Pandoc citation prefix
 }
 
 /** Each Zotero field in the document produces one of these. */
@@ -2009,6 +2010,12 @@ function extractZoteroCitationsFromInstructions(instructions: string[]): ZoteroC
           result.suppressAuthor = true;
         }
 
+        // Extract prefix (Pandoc [e.g., @key] form)
+        const prefix = stringField(item, 'prefix').trim();
+        if (prefix) {
+          result.prefix = prefix;
+        }
+
         return result;
       });
 
@@ -2102,12 +2109,22 @@ function getSurname(meta: CitationMetadata): string {
 }
 
 /** Strip characters that are significant in Pandoc citation syntax. */
-function sanitizeLocator(locator: string | number): string {
-  return String(locator).replace(/[\[\];@]/g, '');
+function sanitizeCitationText(text: string | number): string {
+  return String(text).replace(/[\[\];@]/g, '');
 }
 
-/** Get pandoc keys for a citation's items.
- *  Keys prefixed with '-' indicate suppress-author ([-@key] form). */
+/** Backslash-escape what would parse as Markdown formatting in a sanitized
+ *  citation prefix (code, emphasis, math, CriticMarkup, highlights,
+ *  strikethrough, HTML, escapes; entities can't form without `;`). The exporter
+ *  only accepts plain-text prefixes and decodes the escapes, so the Zotero
+ *  prefix comes back unchanged. Lone `=`, `~`, and `<` stay as written. */
+function escapeCitationPrefix(prefix: string): string {
+  return prefix.replace(/[\\`*_${]|==|~~|<(?=[A-Za-z\/!?])/g,
+    match => match.split('').map(c => '\\' + c).join(''));
+}
+
+/** Get the Pandoc citation items for a citation, e.g. `@key`, `-@key, p. 5`
+ *  (suppress-author), or `e.g., @key` (prefix). Join with '; ' inside brackets. */
 export function citationPandocKeys(
   citation: ZoteroCitation,
   keyMap: Map<string, string>
@@ -2116,12 +2133,13 @@ export function citationPandocKeys(
     .map(meta => {
       const k = keyMap.get(itemIdentifier(meta));
       if (!k) return undefined;
-      const prefix = meta.suppressAuthor ? '-' : '';
+      const prefix = meta.prefix ? escapeCitationPrefix(sanitizeCitationText(meta.prefix).replace(/\s+/g, ' ').trim()) : '';
+      let item = (prefix ? prefix + ' ' : '') + (meta.suppressAuthor ? '-@' : '@') + k;
       if (meta.locator) {
-        const safe = sanitizeLocator(meta.locator);
-        return safe ? prefix + k + ', p. ' + safe : prefix + k;
+        const safe = sanitizeCitationText(meta.locator);
+        if (safe) item += ', p. ' + safe;
       }
-      return prefix + k;
+      return item;
     })
     .filter((k): k is string => k !== undefined);
 }
@@ -2994,7 +3012,7 @@ function tryRenderSubstitution(
     if (deletion.href) oldText = `[${oldText}](${formatHrefForMarkdown(deletion.href)})`;
   } else if (deletion.type === 'citation') {
     oldText = deletion.pandocKeys.length > 0
-      ? (precedingText.endsWith(' ') ? '' : ' ') + '[' + deletion.pandocKeys.map(k => k.startsWith('-') ? '-@' + k.slice(1) : '@' + k).join('; ') + ']'
+      ? (precedingText.endsWith(' ') ? '' : ' ') + '[' + deletion.pandocKeys.join('; ') + ']'
       : deletion.text;
   } else if (deletion.type === 'math') {
     oldText = deletion.display
@@ -3008,7 +3026,7 @@ function tryRenderSubstitution(
     if (addition.href) newText = `[${newText}](${formatHrefForMarkdown(addition.href)})`;
   } else if (addition.type === 'citation') {
     newText = addition.pandocKeys.length > 0
-      ? (oldText.endsWith(' ') ? '' : ' ') + '[' + addition.pandocKeys.map(k => k.startsWith('-') ? '-@' + k.slice(1) : '@' + k).join('; ') + ']'
+      ? (oldText.endsWith(' ') ? '' : ' ') + '[' + addition.pandocKeys.join('; ') + ']'
       : addition.text;
   } else if (addition.type === 'math') {
     newText = addition.display
@@ -3254,7 +3272,7 @@ function renderInlineRange(
       let citeText: string;
       if (item.pandocKeys.length > 0) {
         const citeSep = out.endsWith(' ') ? '' : ' ';
-        citeText = citeSep + '[' + item.pandocKeys.map(k => k.startsWith('-') ? '-@' + k.slice(1) : '@' + k).join('; ') + ']';
+        citeText = citeSep + '[' + item.pandocKeys.join('; ') + ']';
       } else {
         citeText = item.text;
       }
@@ -3514,7 +3532,7 @@ function renderInlineRangeWithIds(
       let citeText: string;
       if (item.pandocKeys.length > 0) {
         const citeSep = out.endsWith(' ') ? '' : ' ';
-        citeText = citeSep + '[' + item.pandocKeys.map(k => k.startsWith('-') ? '-@' + k.slice(1) : '@' + k).join('; ') + ']';
+        citeText = citeSep + '[' + item.pandocKeys.join('; ') + ']';
       } else {
         citeText = item.text;
       }

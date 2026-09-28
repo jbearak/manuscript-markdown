@@ -302,6 +302,17 @@ describe('renderCitationText', () => {
     expect(text).toContain('15');
   });
 
+  test('keeps a prefixed cluster in written order even when the style sorts', () => {
+    const entries = parseBibtex(SAMPLE_BIBTEX);
+    const engine = createCiteprocEngine(entries, 'apa');
+    const keys = ['smith2020effects', 'jones2019urban'];
+
+    const prefixed = renderCitationText(engine, keys, undefined, undefined, ['e.g.,', '']);
+    expect(prefixed).toBe('(e.g., Smith, 2020; Jones &#38; Lee, 2019)');
+    // The engine's own sort is restored for later clusters.
+    expect(renderCitationText(engine, keys)).toBe('(Jones &#38; Lee, 2019; Smith, 2020)');
+  });
+
   test('renders IEEE-style numeric citation', () => {
     const entries = parseBibtex(SAMPLE_BIBTEX);
     const engine = createCiteprocEngine(entries, 'ieee');
@@ -546,6 +557,37 @@ describe('DOCX→MD→DOCX roundtrip', () => {
     expect(mdResult.markdown).toContain('csl: apa');
     expect(mdResult.zoteroPrefs).toBeDefined();
     expect(mdResult.zoteroPrefs?.styleId).toContain('apa');
+  });
+
+  test('roundtrip preserves citation prefixes', async () => {
+    const md = '---\ncsl: apa\n---\n\nSome text [e.g., @smith2020effects; see also @jones2019urban, p. 4].\n';
+    const docxResult = await convertMdToDocx(md, { bibtex: SAMPLE_BIBTEX });
+
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docxResult.docx);
+    const docXml = await zip.file('word/document.xml')!.async('string');
+    expect(docXml).toContain('e.g., Smith, 2020; see also Jones &amp; Lee, 2019, p. 4');
+
+    const mdResult = await convertDocx(docxResult.docx);
+    expect(mdResult.markdown).toContain('[e.g., @smith2020effects; see also @jones2019urban, p. 4]');
+  });
+
+  test('roundtrip keeps a prefix with Markdown-like characters as the same Zotero prefix', async () => {
+    const extractPrefix = async (docx: Uint8Array) => {
+      const JSZip = (await import('jszip')).default;
+      const docXml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      const json = docXml.match(/CSL_CITATION (.+?) <\/w:instrText>/)![1].replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+      return JSON.parse(json).citationItems[0].prefix;
+    };
+    const md = '---\ncsl: apa\n---\n\nSome text [for n = 10, see \\*also\\* https://example.com/a\\_b%20c @smith2020effects].\n';
+    const prefix = 'for n = 10, see *also* https://example.com/a_b%20c';
+    const first = await convertMdToDocx(md, { bibtex: SAMPLE_BIBTEX });
+    expect(await extractPrefix(first.docx)).toBe(prefix);
+
+    const mdResult = await convertDocx(first.docx);
+    expect(mdResult.markdown).toContain('[for n = 10, see \\*also\\* https://example.com/a\\_b%20c @smith2020effects]');
+    const second = await convertMdToDocx(mdResult.markdown, { bibtex: SAMPLE_BIBTEX });
+    expect(await extractPrefix(second.docx)).toBe(prefix);
   });
 
   test('ZOTERO_BIBL content is not in markdown output', async () => {

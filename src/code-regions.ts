@@ -65,6 +65,13 @@ function computeInlineCodeRegions(text: string, blockRegions: CodeRegion[]): Cod
 			blockIndex++;
 			continue;
 		}
+		// A backslash escapes the next character, so \` is a literal backtick
+		// (and \\` a literal backslash before a real one). Inside a code span
+		// backslashes are literal, so the closing scan below doesn't do this.
+		if (text[i] === '\\') {
+			i += 2;
+			continue;
+		}
 		if (text[i] !== '`') {
 			i++;
 			continue;

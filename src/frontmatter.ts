@@ -8,6 +8,7 @@ import {
   type TableDecimalMark,
   type TableDigitGrouping,
 } from './table-number-format';
+import { computeCodeRegions, overlapsCodeRegion, type CodeRegion } from './code-regions';
 
 export type { TableDigits, TableDecimalMark, TableDigitGrouping } from './table-number-format';
 
@@ -639,9 +640,22 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
   return '---\n' + lines.join('\n') + '\n---\n';
 }
 
-/** Check whether markdown body contains Pandoc-style citations ([@...]) */
+/** Check whether markdown body contains Pandoc-style citations ([@...], [-@...], [e.g., @...]).
+ *  Matches in code blocks and inline code don't count. The prefixed form approximates
+ *  citationRule in md-to-docx.ts, which also rejects a prefix with Markdown formatting
+ *  or a matching reference-link definition; this regex only rejects code spans (an
+ *  unescaped backtick in the prefix). */
 export function hasCitations(markdown: string): boolean {
-  return /\[@[^\]]+\]/.test(markdown);
+  const citationRe = /\[(?:-?@[^\]]+\]|(?:[^\[\];`\\]|\\[^\[\];])*\s-?@[\p{L}\p{N}_][^\[\]]*\](?![(\[]))/gu;
+  let codeRegions: CodeRegion[] | undefined;
+  let match: RegExpExecArray | null;
+  while ((match = citationRe.exec(markdown)) !== null) {
+    codeRegions ??= computeCodeRegions(markdown);
+    if (!overlapsCodeRegion(match.index, match.index + match[0].length, codeRegions)) return true;
+    // A match that runs into code can hide a citation starting inside it.
+    citationRe.lastIndex = match.index + 1;
+  }
+  return false;
 }
 
 /** Ensure a bibliography path ends with .bib */

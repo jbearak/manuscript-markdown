@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeAll } from 'bun:test';
 import fc from 'fast-check';
+import JSZip from 'jszip';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import {
@@ -24,6 +25,7 @@ import {
   parseRunProperties,
   formatLocalIsoMinute,
   citationPandocKeys,
+  itemIdentifier,
   ZoteroCitation,
   extractBibKeyOrder,
   extractBibData,
@@ -368,7 +370,7 @@ describe('DOCX table conversion', () => {
       { type: 'text', text: 'start ', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
       { type: 'text', text: 'commented', commentIds: new Set(['1']), formatting: { ...DEFAULT_FORMATTING, highlight: true } },
       { type: 'text', text: ' link', commentIds: new Set(), formatting: DEFAULT_FORMATTING, href: 'https://example.com/a(b)' },
-      { type: 'citation', text: '(Smith 2020)', commentIds: new Set(), pandocKeys: ['smith2020, p. 20'] },
+      { type: 'citation', text: '(Smith 2020)', commentIds: new Set(), pandocKeys: ['@smith2020, p. 20'] },
       { type: 'math', latex: 'x', display: false },
       { type: 'text', text: ' end', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
     ] as any;
@@ -1672,7 +1674,7 @@ describe('extractDocumentContent', () => {
     const citItems = content.filter(c => c.type === 'citation');
     expect(citItems.length).toBe(3);
     if (citItems[0].type === 'citation') {
-      expect(citItems[0].pandocKeys).toContain('smith2020effects, p. 15');
+      expect(citItems[0].pandocKeys).toContain('@smith2020effects, p. 15');
     }
   });
 
@@ -3016,6 +3018,50 @@ describe('Zotero citation roundtrip', () => {
     const keys = citationPandocKeys(citation, keyMap);
     expect(keys[0]).toContain(', p. 20');
     expect(keys[1]).not.toContain(', p.');
+  });
+
+  test('citationPandocKeys writes Zotero prefixes before the key', () => {
+    const citation: ZoteroCitation = {
+      plainCitation: '(e.g., A; B)',
+      items: [
+        { authors: [{ family: 'A', given: 'X' }], title: 'T1', year: '2020', journal: 'J', volume: '1', pages: '1', doi: '10.1/a', type: 'article-journal', fullItemData: {}, prefix: 'e.g.,', suppressAuthor: true, locator: '4' },
+        // Pandoc-significant characters and line breaks would change how the item parses
+        { authors: [{ family: 'B', given: 'Y' }], title: 'T2', year: '2021', journal: 'J', volume: '2', pages: '2', doi: '10.1/b', type: 'article-journal', fullItemData: {}, prefix: 'see [also];\n@here' },
+      ],
+    };
+    const keyMap = buildCitationKeyMap([citation]);
+    const [a, b] = citation.items.map(meta => keyMap.get(itemIdentifier(meta)));
+    expect(citationPandocKeys(citation, keyMap)).toEqual(['e.g., -@' + a + ', p. 4', 'see also here @' + b]);
+  });
+
+  test('citationPandocKeys escapes only prefix text that would parse as Markdown formatting', () => {
+    const meta = (title: string, prefix: string) => ({ authors: [], title, year: '2020', journal: '', volume: '', pages: '', doi: '', type: 'article-journal', fullItemData: {}, prefix });
+    const citation: ZoteroCitation = {
+      plainCitation: '',
+      items: [meta('T1', 'see *also* `x` $5 {++y++} <i>z</i> ==w== ~~v~~ a\\b'), meta('T2', 'for n = 10, p < .05, A & B ~ C')],
+    };
+    const keyMap = buildCitationKeyMap([citation]);
+    const [a, b] = citation.items.map(m => keyMap.get(itemIdentifier(m)));
+    expect(citationPandocKeys(citation, keyMap)).toEqual([
+      'see \\*also\\* \\`x\\` \\$5 \\{++y++} \\<i>z\\</i> \\=\\=w\\=\\= \\~\\~v\\~\\~ a\\\\b @' + a,
+      'for n = 10, p < .05, A & B ~ C @' + b,
+    ]);
+  });
+
+  test('extracts Zotero citation prefixes', async () => {
+    const payload = {
+      citationID: 'abc',
+      properties: { plainCitation: '(e.g., A 2020)', noteIndex: 0 },
+      citationItems: [{ id: 1, prefix: ' e.g., ', itemData: { type: 'article-journal', title: 'T', issued: { 'date-parts': [[2020]] } } }],
+    };
+    const xml = '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p>' +
+      '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+      '<w:r><w:instrText xml:space="preserve"> ADDIN ZOTERO_ITEM CSL_CITATION ' + JSON.stringify(payload).replace(/&/g, '&amp;').replace(/"/g, '&quot;') + ' </w:instrText></w:r>' +
+      '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>';
+    const zip = new JSZip();
+    zip.file('word/document.xml', xml);
+    const citations = await extractZoteroCitations(zip);
+    expect(citations[0].items[0].prefix).toBe('e.g.,');
   });
 
   test('end-to-end: sample DOCX produces BibTeX with zotero-key and markdown with locators', async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { maskFrontmatter, parseFrontmatter, serializeFrontmatter } from './frontmatter';
+import { hasCitations, maskFrontmatter, parseFrontmatter, serializeFrontmatter } from './frontmatter';
 import { scanOrientationDirectives } from './orientation-scan';
 
 describe('callout-labels frontmatter', () => {
@@ -37,5 +37,30 @@ describe('maskFrontmatter', () => {
   it('returns the original text when no frontmatter is present', () => {
     const markdown = 'Body\n<!-- landscape -->';
     expect(maskFrontmatter(markdown)).toBe(markdown);
+  });
+});
+
+describe('hasCitations', () => {
+  it.each(['[@smith2020]', '[-@smith2020]', '[e.g., @smith2020; @jones2021]', '[see @Öztürk2020]', '[for n = 10, see @smith2020]', '[see \\`x\\` @smith2020]'])('detects %s', (md) => {
+    expect(hasCitations('Text ' + md + '.')).toBe(true);
+  });
+
+  it.each([
+    '[write to me@example.com]',
+    'No citations here.',
+    '[see above; @smith2020]',
+    '[see @smith2020](https://example.com)',
+    '[see `git show @HEAD`]',
+    '```\n[see @smith2020]\n```\n',
+    '```\n[@smith2020]\n```\n',
+    '    [@smith2020]\n',
+    'Use `[@smith2020]` for citations.',
+  ])('ignores %s', (md) => {
+    expect(hasCitations(md)).toBe(false);
+  });
+
+  it('detects a citation after code that mentions one', () => {
+    expect(hasCitations('```\n[@example]\n```\n\nText [e.g., @smith2020].')).toBe(true);
+    expect(hasCitations('Use `[@a` and [@smith2020].')).toBe(true);
   });
 });
