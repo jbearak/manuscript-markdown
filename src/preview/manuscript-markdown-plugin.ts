@@ -573,6 +573,7 @@ function splitInlineChildrenAtCriticBreaks(state: StateCore, inline: Token, isHe
   const openStack: ActiveInlineWrapper[] = [];
   let segment: Token[] = [];
   let splitFirstLineBreak = isHeading;
+  let afterParagraphBreak = false;
   for (let index = 0; index < children.length; index++) {
     const token = children[index];
     const next = children[index + 1];
@@ -585,7 +586,8 @@ function splitInlineChildrenAtCriticBreaks(state: StateCore, inline: Token, isHe
       (wrapper.open.type === 'manuscript_markdown_addition_open' ||
        wrapper.open.type === 'manuscript_markdown_deletion_open'));
     const shouldSplit = (isParagraphBreak && (isHeading || insideRevision)) ||
-      (splitFirstLineBreak && isLineBreak);
+      (splitFirstLineBreak && isLineBreak) ||
+      (afterParagraphBreak && isLineBreak && typeof sourceOffset === 'number');
     if (shouldSplit) {
       for (let stackIndex = openStack.length - 1; stackIndex >= 0; stackIndex--) {
         segment.push(closeActiveWrapper(state, openStack[stackIndex]));
@@ -597,10 +599,14 @@ function splitInlineChildrenAtCriticBreaks(state: StateCore, inline: Token, isHe
         sourceOffset: typeof sourceOffset === 'number' ? sourceOffset : undefined,
       });
       splitFirstLineBreak = false;
+      // Extra blank lines form empty segments, which are omitted below. Keep
+      // their source boundaries so the next paragraph's line map skips them.
+      afterParagraphBreak = isParagraphBreak || afterParagraphBreak;
       if (isParagraphBreak) index++;
       continue;
     }
 
+    afterParagraphBreak = false;
     segment.push(token);
     if (token.nesting === 1) {
       openStack.push({ kind: 'token', open: token });

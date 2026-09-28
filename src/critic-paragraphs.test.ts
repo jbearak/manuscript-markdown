@@ -85,6 +85,21 @@ describe('paragraphs inside CriticMarkup additions', () => {
     }
   });
 
+  it('consumes extra blank lines without adding breaks to the next preview paragraph', () => {
+    for (const count of [3, 4, 5]) {
+      const md = createMarkdownItWithPlugin();
+      md.set({ breaks: true });
+      const input = '{++one' + '\n'.repeat(count) + 'two++}';
+      const tokens = md.parse(input, {});
+      expect(tokens.filter(t => t.type === 'paragraph_open').map(t => t.map))
+        .toEqual([[0, 1], [count, count + 1]]);
+      expect(md.render(input)).toContain('<p><ins class="manuscript-markdown-addition">two</ins></p>');
+      expect(md.render(input)).not.toContain('<br>');
+    }
+    expect(renderWithPlugin('{++one\n\n<br>two++}'))
+      .toContain('<p><ins class="manuscript-markdown-addition"><br>two</ins></p>');
+  });
+
   it('keeps blank lines inside code and inline math from splitting the paragraph', () => {
     for (const input of ['{++one `code\n\nspan` two++}', '{++one $x {--old\n\nmore--} y$ two++}']) {
       expect(parseMd(input)).toHaveLength(1);
