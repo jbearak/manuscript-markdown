@@ -163,7 +163,7 @@ export interface MdRun {
   keys?: string[];          // citation keys for [@key1; @key2]
   locators?: Map<string, string>; // key -> locator for [@key, p. 20]
   suppressAuthorKeys?: Set<string>; // per-key suppress-author: Set of keys with [-@key] form
-  prefixes?: Map<string, string>; // key -> Pandoc prefix for [e.g., @key]
+  prefixes?: string[];      // Pandoc prefix per item for [e.g., @key], aligned with keys ('' = none)
   // Math specific
   display?: boolean;        // display math ($$...$$) vs inline ($...$)
   // Image specific
@@ -257,7 +257,7 @@ interface ManuscriptToken extends Token {
   keys?: string[];
   locators?: Map<string, string>;
   suppressAuthorKeys?: Set<string>;
-  prefixes?: Map<string, string>;
+  prefixes?: string[];
   display?: boolean;
   footnoteLabel?: string;
 }
@@ -569,10 +569,52 @@ function footnoteRefRule(state: StateInline, silent: boolean): boolean {
 // Start of a citation item's key: `@` or `-@` at the start of the item or
 // after whitespace. Text before it is the item's Pandoc prefix ("e.g.,").
 const CITATION_ITEM_START_RE = /(^|\s)(-?)@/;
-// A bracket that does not open with `@`/`-@` is a citation only if its first
-// item has a prefix followed by a real key, as in [e.g., @key]. The word
-// boundary keeps [write to me@example.com] plain text.
-const CITATION_PREFIXED_FIRST_ITEM_RE = /\s-?@[A-Za-z0-9_]/;
+// A key start in plain text. Whitespace before `@` and a letter, digit, or `_`
+// after it keep [write to me@example.com] plain text.
+const CITATION_KEY_START_RE = /(^|\s)-?@[\p{L}\p{N}_]/u;
+// The first key with its extent, per Pandoc: letters, digits, and `_`, plus
+// punctuation from :.#$%&-+?<>~/ when another key character follows.
+const CITATION_KEY_RE = /((?:^|\s)-?@)([\p{L}\p{N}_](?:[\p{L}\p{N}_]|[:.#$%&\-+?<>~\/](?=[\p{L}\p{N}_]))*)/u;
+
+/** Links linkify makes from bare URLs are plain text in the source. */
+function isLinkifyToken(token: Token): boolean {
+  return (token.type === 'link_open' || token.type === 'link_close') && token.markup === 'linkify';
+}
+
+/** Whether a bracket's first item is plain text up to a real key, as in
+ *  [e.g., @key] or [for n = 10, see @key]. Formatting before or around the key
+ *  (code, emphasis, CriticMarkup, math, HTML) leaves the brackets ordinary
+ *  Markdown: a Zotero prefix is plain text, and an `@` inside a code span is not
+ *  a key. Escaped characters count as text but never start a key. hasCitations()
+ *  in frontmatter.ts and citation_list in the grammar approximate this with regexes. */
+function isPlainPrefixedCitationItem(state: StateInline, item: string): boolean {
+  const key = CITATION_KEY_RE.exec(item);
+  if (!key) return false;
+  // Parse with the key replaced by a plain word. The key is opaque, so the
+  // underscores in @_smith2020_ are not emphasis, but a code span or emphasis
+  // wrapped around the key still shows up.
+  const keyStart = key.index + key[1].length;
+  const masked = item.slice(0, keyStart) + 'k' + item.slice(keyStart + key[2].length);
+  const tokens: Token[] = [];
+  state.md.inline.parse(masked, state.md, state.env, tokens);
+  let text = '';
+  for (const token of tokens) {
+    if (token.type === 'text') text += token.content;
+    else if (token.type === 'text_special') text += '�';
+    else if (token.type === 'softbreak') text += '\n';
+    else if (!isLinkifyToken(token)) return false;
+    if (CITATION_KEY_START_RE.test(text)) return true;
+  }
+  return false;
+}
+
+/** A citation prefix as the plain text Zotero stores: backslash escapes
+ *  (converter.ts adds them on import) decoded, line breaks as spaces. This works
+ *  on the source text rather than parsed tokens, because linkify rewrites URLs
+ *  (it decodes %20, for one) and keeps escapes inside them. */
+function citationPrefixText(state: StateInline, prefix: string): string {
+  return state.md.utils.unescapeAll(prefix).replace(/\s+/g, ' ');
+}
 
 function citationRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
@@ -585,12 +627,16 @@ function citationRule(state: StateInline, silent: boolean): boolean {
   const rawContent = state.src.slice(start + 1, endPos);
 
   if (!/^-?@/.test(rawContent)) {
-    if (!CITATION_PREFIXED_FIRST_ITEM_RE.test(rawContent.split(';')[0])) return false;
     // A nested `[` means any citation starts later; `](` or `][` makes this
     // link text that happens to mention someone (Pandoc parses these as links).
     if (rawContent.includes('[')) return false;
     const after = state.src.charAt(endPos + 1);
     if (after === '(' || after === '[') return false;
+    // Likewise a shortcut reference link. markdown-it has already consumed its
+    // `[label]: url` definition, so a citation here would drop the URL.
+    const references = state.env?.references as Record<string, unknown> | undefined;
+    if (references && references[state.md.utils.normalizeReference(rawContent)]) return false;
+    if (!isPlainPrefixedCitationItem(state, rawContent.split(';')[0])) return false;
   }
 
   if (!silent) {
@@ -601,7 +647,7 @@ function citationRule(state: StateInline, silent: boolean): boolean {
     const keys: string[] = [];
     const locators = new Map<string, string>();
     const suppressAuthorKeys = new Set<string>();
-    const prefixes = new Map<string, string>();
+    const prefixes: string[] = [];
 
     for (const part of rawContent.split(';')) {
       let raw = part.trim();
@@ -610,6 +656,7 @@ function citationRule(state: StateInline, silent: boolean): boolean {
       const itemStart = CITATION_ITEM_START_RE.exec(raw);
       if (itemStart) {
         prefix = raw.slice(0, itemStart.index).trim();
+        if (prefix) prefix = citationPrefixText(state, prefix).trim();
         suppressed = itemStart[2] === '-';
         raw = raw.slice(itemStart.index + itemStart[0].length).trim();
       }
@@ -620,13 +667,13 @@ function citationRule(state: StateInline, silent: boolean): boolean {
       keys.push(key);
       if (commaPos !== -1) locators.set(key, raw.slice(commaPos + 1).trim());
       if (suppressed) suppressAuthorKeys.add(key);
-      if (prefix) prefixes.set(key, prefix);
+      prefixes.push(prefix);
     }
 
     token.keys = keys;
     token.locators = locators;
     token.suppressAuthorKeys = suppressAuthorKeys.size > 0 ? suppressAuthorKeys : undefined;
-    token.prefixes = prefixes.size > 0 ? prefixes : undefined;
+    token.prefixes = prefixes.some(Boolean) ? prefixes : undefined;
   }
 
   state.pos = endPos + 1;

@@ -41,11 +41,17 @@ describe('maskFrontmatter', () => {
 });
 
 describe('hasCitations', () => {
-  it.each(['[@smith2020]', '[-@smith2020]', '[e.g., @smith2020; @jones2021]'])('detects %s', (md) => {
+  it.each(['[@smith2020]', '[-@smith2020]', '[e.g., @smith2020; @jones2021]', '[see @Öztürk2020]', '[for n = 10, see @smith2020]', '[see \\`x\\` @smith2020]'])('detects %s', (md) => {
     expect(hasCitations('Text ' + md + '.')).toBe(true);
   });
 
-  it.each(['[write to me@example.com]', 'No citations here.'])('ignores %s', (md) => {
+  it.each([
+    '[write to me@example.com]',
+    'No citations here.',
+    '[see above; @smith2020]',
+    '[see @smith2020](https://example.com)',
+    '[see `git show @HEAD`]',
+  ])('ignores %s', (md) => {
     expect(hasCitations(md)).toBe(false);
   });
 });

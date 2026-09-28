@@ -639,9 +639,12 @@ export function serializeFrontmatter(metadata: Frontmatter, fieldOrder?: string[
   return '---\n' + lines.join('\n') + '\n---\n';
 }
 
-/** Check whether markdown body contains Pandoc-style citations ([@...], [-@...], [e.g., @...]) */
+/** Check whether markdown body contains Pandoc-style citations ([@...], [-@...], [e.g., @...]).
+ *  The prefixed form approximates citationRule in md-to-docx.ts, which also rejects a
+ *  prefix with Markdown formatting or a matching reference-link definition; this regex
+ *  only rejects code spans (an unescaped backtick in the prefix). */
 export function hasCitations(markdown: string): boolean {
-  return /\[(?:[^\[\]]*\s)?-?@[^\]]+\]/.test(markdown);
+  return /\[(?:-?@[^\]]+\]|(?:[^\[\];`\\]|\\[^\[\];])*\s-?@[\p{L}\p{N}_][^\[\]]*\](?![(\[]))/u.test(markdown);
 }
 
 /** Ensure a bibliography path ends with .bib */

@@ -738,14 +738,14 @@ describe('citation prefixes', () => {
     const run = findCitationRun(parseMd('[e.g., @smith2020; @doe2021]'));
     expect(run).toBeDefined();
     expect(run!.keys).toEqual(['smith2020', 'doe2021']);
-    expect(run!.prefixes).toEqual(new Map([['smith2020', 'e.g.,']]));
+    expect(run!.prefixes).toEqual(['e.g.,', '']);
     expect(run!.text).toBe('e.g., @smith2020; @doe2021');
   });
 
   it('parses per-item prefixes alongside locators and suppress-author', () => {
     const run = findCitationRun(parseMd('[see @smith2020, p. 4; see also -@doe2021]'));
     expect(run!.keys).toEqual(['smith2020', 'doe2021']);
-    expect(run!.prefixes).toEqual(new Map([['smith2020', 'see'], ['doe2021', 'see also']]));
+    expect(run!.prefixes).toEqual(['see', 'see also']);
     expect(run!.locators!.get('smith2020')).toBe('p. 4');
     expect(run!.suppressAuthorKeys).toEqual(new Set(['doe2021']));
   });
@@ -761,8 +761,67 @@ describe('citation prefixes', () => {
     ['reference link text', '[see @smith2020][ref]'],
     ['a key only after the first item', '[see above; @smith2020]'],
     ['an @ that does not start a key', '[5 @ 3]'],
+    ['an @ inside a code span', '[see `git show @HEAD`]'],
+    ['a prefix with CriticMarkup', '[see {++new++} @smith2020]'],
+    ['a prefix with emphasis', '[see *also* @smith2020]'],
+    ['emphasis around the key', '[*see @smith2020*]'],
+    ['math around the key', '[see $x @smith2020$]'],
+    ['an escaped @', '[see \\@smith2020]'],
+    ['a shortcut reference link', '[see @smith2020]\n\n[see @smith2020]: https://example.com'],
   ])('does not treat %s as a citation', (_label, md) => {
     expect(findCitationRun(parseMd(md))).toBeUndefined();
+  });
+
+  it.each([
+    ['[for n = 10, see @smith2020]', 'for n = 10, see'],
+    ['[p < .05 in @smith2020]', 'p < .05 in'],
+    ['[Smith & Jones, see @smith2020]', 'Smith & Jones, see'],
+    ['[see \\*also\\* @smith2020]', 'see *also*'],
+    ['[see https://example.com and @smith2020]', 'see https://example.com and'],
+    ['[see https://example.com/a\\_b%20c @smith2020]', 'see https://example.com/a_b%20c'],
+  ])('accepts punctuation that is not formatting: %s', (md, prefix) => {
+    const run = findCitationRun(parseMd(md));
+    expect(run!.keys).toEqual(['smith2020']);
+    expect(run!.prefixes).toEqual([prefix]);
+  });
+
+  it('treats the key as opaque, so underscores in it are not emphasis', () => {
+    const run = findCitationRun(parseMd('[see @_smith2020_]'));
+    expect(run!.keys).toEqual(['_smith2020_']);
+    expect(run!.prefixes).toEqual(['see']);
+  });
+
+  it('rejects an explicit autolink in the prefix', () => {
+    expect(findCitationRun(parseMd('[see <https://example.com> @smith2020]'))).toBeUndefined();
+  });
+
+  it('keeps the link for a shortcut reference link', () => {
+    const runs = parseMd('[see @smith2020]\n\n[see @smith2020]: https://example.com').flatMap(t => t.runs);
+    expect(runs.some(r => r.href === 'https://example.com')).toBe(true);
+  });
+
+  it('accepts a non-ASCII key after a prefix', () => {
+    const run = findCitationRun(parseMd('[see @Öztürk2020]'));
+    expect(run!.keys).toEqual(['Öztürk2020']);
+    expect(run!.prefixes).toEqual(['see']);
+  });
+
+  it('keeps distinct prefixes when a cluster repeats a key', () => {
+    const run = findCitationRun(parseMd('[see @smith2020; compare @smith2020]'));
+    expect(run!.keys).toEqual(['smith2020', 'smith2020']);
+    expect(run!.prefixes).toEqual(['see', 'compare']);
+
+    const csl = extractCsl(generateCitation(run!, makeEntries(), undefined, new Set(), new Map()).xml);
+    expect(csl.citationItems.map((item: { prefix?: string }) => item.prefix)).toEqual(['see', 'compare']);
+  });
+
+  it('keeps prefixes with their items when some keys are missing', () => {
+    const run = findCitationRun(parseMd('[e.g., @absent, p. 4; see @smith2020]'))!;
+    const result = generateCitation(run, makeEntries(), undefined, new Set(), new Map());
+    const csl = extractCsl(result.xml);
+    expect(csl.citationItems.map((item: { prefix?: string }) => item.prefix)).toEqual(['see']);
+    expect(result.xml).toContain('[e.g., @absent, p. 4]');
+    expect(result.missingKeys).toEqual(['absent']);
   });
 
   it('starts the citation at an inner bracket rather than swallowing it as prefix', () => {
@@ -772,7 +831,7 @@ describe('citation prefixes', () => {
   });
 
   it('writes the prefix to the Zotero citation item and keeps the cluster unsorted', () => {
-    const run = { keys: ['smith2020', 'doe2021'], text: 'e.g., @smith2020; @doe2021', prefixes: new Map([['smith2020', 'e.g.,']]) };
+    const run = { keys: ['smith2020', 'doe2021'], text: 'e.g., @smith2020; @doe2021', prefixes: ['e.g.,', ''] };
     const csl = extractCsl(generateCitation(run, makeEntries(), undefined, new Set(), new Map()).xml);
     expect(csl.citationItems[0].prefix).toBe('e.g.,');
     expect(csl.citationItems[1].prefix).toBeUndefined();
@@ -787,14 +846,14 @@ describe('citation prefixes', () => {
   });
 
   it('keeps the prefix in plain text for missing keys', () => {
-    const run = { keys: ['john'], text: 'TODO ask @john', prefixes: new Map([['john', 'TODO ask']]) };
+    const run = { keys: ['john'], text: 'TODO ask @john', prefixes: ['TODO ask'] };
     const result = generateCitation(run, makeEntries());
     expect(result.xml).toContain('[TODO ask @john]');
     expect(result.missingKeys).toEqual(['john']);
   });
 
   it('fallback text: prefix precedes the author, or the year when suppressed', () => {
-    const prefixes = new Map([['smith2020', 'e.g.,'], ['doe2021', 'cf.']]);
+    const prefixes = ['e.g.,', 'cf.'];
     expect(generateFallbackText(['smith2020', 'doe2021'], makeEntries(), undefined, new Set(['doe2021']), prefixes))
       .toBe('(e.g., Smith 2020; cf. 2021)');
   });

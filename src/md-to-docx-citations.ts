@@ -301,16 +301,16 @@ export function renderCitationText(
   keys: string[],
   locators?: Map<string, string>,
   suppressAuthorKeys?: Set<string>,
-  prefixes?: Map<string, string>
+  prefixes?: string[]
 ): string | undefined {
   if (!engine || !CSL) return undefined;
 
   // Like Pandoc, keep a cluster with prefixes in written order so a leading
   // "e.g.," stays in front; the field code sets properties.unsorted to match.
-  const sort = keys.some(key => prefixes?.has(key)) ? engine.citation_sort : undefined;
+  const sort = prefixes?.some(Boolean) ? engine.citation_sort : undefined;
   const sortTokens = sort?.tokens;
   try {
-    const rawList = keys.map(key => {
+    const rawList = keys.map((key, i) => {
       const item: CiteprocCitationItem = { id: key };
       const locator = locators?.get(key);
       if (locator) {
@@ -321,7 +321,7 @@ export function renderCitationText(
       if (suppressAuthorKeys?.has(key)) {
         item['suppress-author'] = true;
       }
-      const prefix = prefixes?.get(key);
+      const prefix = prefixes?.[i];
       if (prefix) item.prefix = prefix;
       return item;
     });
@@ -394,7 +394,7 @@ function resolveVisibleText(
   locators: Map<string, string> | undefined,
   citeprocEngine: CiteprocEngine | undefined,
   suppressAuthorKeys?: Set<string>,
-  prefixes?: Map<string, string>
+  prefixes?: string[]
 ): string {
   if (citeprocEngine) {
     const rendered = renderCitationText(citeprocEngine, keys, locators, suppressAuthorKeys, prefixes);
@@ -412,7 +412,7 @@ function buildCitationFieldCode(
   usedCitationIds?: Set<string>,
   itemIdMap?: Map<string, string | number>,
   suppressAuthorKeys?: Set<string>,
-  prefixes?: Map<string, string>,
+  prefixes?: string[],
   extraRPr?: string
 ): string {
   // Resolve visible text first so we can populate properties (Defect 2)
@@ -422,7 +422,8 @@ function buildCitationFieldCode(
   const visibleText = visibleTextOverride ?? resolveVisibleText(keys, entries, locators, citeprocEngine, suppressAuthorKeys, prefixes);
 
   const citationItems: CiteprocCitationItem[] = [];
-  for (const key of keys) {
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
     const entry = entries.get(key);
     if (!entry) continue;
     const itemData = buildItemData(entry);
@@ -464,7 +465,7 @@ function buildCitationFieldCode(
       citationItem.locator = parsed.locator;
       citationItem.label = parsed.label;
     }
-    const prefix = prefixes?.get(key);
+    const prefix = prefixes?.[i];
     if (prefix) citationItem.prefix = prefix;
     citationItems.push(citationItem);
   }
@@ -492,7 +493,7 @@ function buildCitationFieldCode(
 }
 
 export function generateCitation(
-  run: { keys?: string[]; locators?: Map<string, string>; text: string; suppressAuthorKeys?: Set<string>; prefixes?: Map<string, string> },
+  run: { keys?: string[]; locators?: Map<string, string>; text: string; suppressAuthorKeys?: Set<string>; prefixes?: string[] },
   entries: Map<string, BibtexEntry>,
   citeprocEngine?: CiteprocEngine,
   usedCitationIds?: Set<string>,
@@ -504,30 +505,36 @@ export function generateCitation(
     return { xml: '<w:r>' + rPrOpen + '<w:t>[' + escapeXml(run.text) + ']</w:t></w:r>' };
   }
 
-  // Classify keys into resolved (have bib data) vs missing
-  const resolvedKeys: string[] = [];
-  const missingKeys: string[] = [];
+  // Classify items into resolved (have bib data) vs missing. Track positions
+  // because prefixes are per occurrence, not per key.
+  const keys = run.keys;
+  const resolved: number[] = [];
+  const missing: number[] = [];
   const warnings: string[] = [];
 
-  for (const key of run.keys) {
-    const entry = entries.get(key);
-    if (!entry) {
-      missingKeys.push(key);
+  keys.forEach((key, i) => {
+    if (!entries.has(key)) {
+      missing.push(i);
       warnings.push(`Citation key not found: ${key}`);
     } else {
-      resolvedKeys.push(key);
+      resolved.push(i);
     }
-  }
+  });
+  const resolvedKeys = resolved.map(i => keys[i]);
+  const resolvedPrefixes = run.prefixes && resolved.map(i => run.prefixes![i]);
+  const missingKeys = missing.map(i => keys[i]);
 
   // All resolved — emit field code (works for both Zotero and non-Zotero entries)
   if (resolvedKeys.length > 0 && missingKeys.length === 0) {
-    const xml = buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine, undefined, usedCitationIds, itemIdMap, run.suppressAuthorKeys, run.prefixes, extraRPr);
+    const xml = buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine, undefined, usedCitationIds, itemIdMap, run.suppressAuthorKeys, resolvedPrefixes, extraRPr);
     return { xml };
   }
 
-  const missingText = '[' + missingKeys.map(k => {
-    const prefix = run.prefixes?.get(k);
-    return (prefix ? prefix + ' ' : '') + (run.suppressAuthorKeys?.has(k) ? '-@' : '@') + k;
+  const missingText = '[' + missing.map(i => {
+    const key = keys[i];
+    const prefix = run.prefixes?.[i];
+    const locator = run.locators?.get(key);
+    return (prefix ? prefix + ' ' : '') + (run.suppressAuthorKeys?.has(key) ? '-@' : '@') + key + (locator ? ', ' + locator : '');
   }).join('; ') + ']';
 
   // Pure missing — emit @citekey references as plain text, preserving bracket format
@@ -540,7 +547,7 @@ export function generateCitation(
   }
 
   // Mixed (some resolved, some missing) — resolved get field code, missing get plain text
-  const xml = buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine, undefined, usedCitationIds, itemIdMap, run.suppressAuthorKeys, run.prefixes, extraRPr) +
+  const xml = buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine, undefined, usedCitationIds, itemIdMap, run.suppressAuthorKeys, resolvedPrefixes, extraRPr) +
     '<w:r>' + rPrOpen + '<w:t xml:space="preserve"> </w:t></w:r>' +
     '<w:r>' + rPrOpen + '<w:t>' + escapeXml(missingText) + '</w:t></w:r>';
 
@@ -721,8 +728,8 @@ function parseLocator(locator: string): { locator: string; label: string } {
   return { locator: trimmed, label: 'page' };
 }
 
-export function generateFallbackText(keys: string[], entries: Map<string, BibtexEntry>, locators?: Map<string, string>, suppressAuthorKeys?: Set<string>, prefixes?: Map<string, string>): string {
-  const parts = keys.map(key => {
+export function generateFallbackText(keys: string[], entries: Map<string, BibtexEntry>, locators?: Map<string, string>, suppressAuthorKeys?: Set<string>, prefixes?: string[]): string {
+  const parts = keys.map((key, i) => {
     const entry = entries.get(key);
     if (!entry) return key;
 
@@ -754,7 +761,7 @@ export function generateFallbackText(keys: string[], entries: Map<string, Bibtex
     const locator = locators?.get(key);
     if (locator) text += ', ' + locator;
 
-    const prefix = prefixes?.get(key);
+    const prefix = prefixes?.[i];
     if (prefix) text = prefix + (text ? ' ' + text : '');
 
     return text;

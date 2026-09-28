@@ -3034,6 +3034,20 @@ describe('Zotero citation roundtrip', () => {
     expect(citationPandocKeys(citation, keyMap)).toEqual(['e.g., -@' + a + ', p. 4', 'see also here @' + b]);
   });
 
+  test('citationPandocKeys escapes only prefix text that would parse as Markdown formatting', () => {
+    const meta = (title: string, prefix: string) => ({ authors: [], title, year: '2020', journal: '', volume: '', pages: '', doi: '', type: 'article-journal', fullItemData: {}, prefix });
+    const citation: ZoteroCitation = {
+      plainCitation: '',
+      items: [meta('T1', 'see *also* `x` $5 {++y++} <i>z</i> ==w== ~~v~~ a\\b'), meta('T2', 'for n = 10, p < .05, A & B ~ C')],
+    };
+    const keyMap = buildCitationKeyMap([citation]);
+    const [a, b] = citation.items.map(m => keyMap.get(itemIdentifier(m)));
+    expect(citationPandocKeys(citation, keyMap)).toEqual([
+      'see \\*also\\* \\`x\\` \\$5 \\{++y++} \\<i>z\\</i> \\=\\=w\\=\\= \\~\\~v\\~\\~ a\\\\b @' + a,
+      'for n = 10, p < .05, A & B ~ C @' + b,
+    ]);
+  });
+
   test('extracts Zotero citation prefixes', async () => {
     const payload = {
       citationID: 'abc',

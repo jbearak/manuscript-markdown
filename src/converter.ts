@@ -2113,6 +2113,16 @@ function sanitizeCitationText(text: string | number): string {
   return String(text).replace(/[\[\];@]/g, '');
 }
 
+/** Backslash-escape what would parse as Markdown formatting in a sanitized
+ *  citation prefix (code, emphasis, math, CriticMarkup, highlights,
+ *  strikethrough, HTML, escapes; entities can't form without `;`). The exporter
+ *  only accepts plain-text prefixes and decodes the escapes, so the Zotero
+ *  prefix comes back unchanged. Lone `=`, `~`, and `<` stay as written. */
+function escapeCitationPrefix(prefix: string): string {
+  return prefix.replace(/[\\`*_${]|==|~~|<(?=[A-Za-z\/!?])/g,
+    match => match.split('').map(c => '\\' + c).join(''));
+}
+
 /** Get the Pandoc citation items for a citation, e.g. `@key`, `-@key, p. 5`
  *  (suppress-author), or `e.g., @key` (prefix). Join with '; ' inside brackets. */
 export function citationPandocKeys(
@@ -2123,7 +2133,7 @@ export function citationPandocKeys(
     .map(meta => {
       const k = keyMap.get(itemIdentifier(meta));
       if (!k) return undefined;
-      const prefix = meta.prefix ? sanitizeCitationText(meta.prefix).replace(/\s+/g, ' ').trim() : '';
+      const prefix = meta.prefix ? escapeCitationPrefix(sanitizeCitationText(meta.prefix).replace(/\s+/g, ' ').trim()) : '';
       let item = (prefix ? prefix + ' ' : '') + (meta.suppressAuthor ? '-@' : '@') + k;
       if (meta.locator) {
         const safe = sanitizeCitationText(meta.locator);
