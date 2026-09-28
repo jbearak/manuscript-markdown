@@ -30,6 +30,16 @@ describe('computeCodeRegions', () => {
 		expect(text.slice(regions[0].start, regions[0].end)).toBe('``code``');
 	});
 
+	test('backslash-escaped backticks do not open inline code', () => {
+		expect(computeCodeRegions('see \\`x\\` here')).toEqual([]);
+		// An escaped backslash leaves the backtick after it live
+		const text = 'a \\\\`code` b';
+		expect(computeCodeRegions(text).map(r => text.slice(r.start, r.end))).toEqual(['`code`']);
+		// Backslashes inside a code span are literal, so \` still closes it
+		const inner = '`a\\` b';
+		expect(computeCodeRegions(inner).map(r => inner.slice(r.start, r.end))).toEqual(['`a\\`']);
+	});
+
 	test('inline code containing CriticMarkup: `{++added++}`', () => {
 		const text = 'before `{++added++}` after';
 		const regions = computeCodeRegions(text);

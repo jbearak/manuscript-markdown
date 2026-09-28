@@ -51,7 +51,16 @@ describe('hasCitations', () => {
     '[see above; @smith2020]',
     '[see @smith2020](https://example.com)',
     '[see `git show @HEAD`]',
+    '```\n[see @smith2020]\n```\n',
+    '```\n[@smith2020]\n```\n',
+    '    [@smith2020]\n',
+    'Use `[@smith2020]` for citations.',
   ])('ignores %s', (md) => {
     expect(hasCitations(md)).toBe(false);
+  });
+
+  it('detects a citation after code that mentions one', () => {
+    expect(hasCitations('```\n[@example]\n```\n\nText [e.g., @smith2020].')).toBe(true);
+    expect(hasCitations('Use `[@a` and [@smith2020].')).toBe(true);
   });
 });
