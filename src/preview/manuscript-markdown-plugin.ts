@@ -487,6 +487,7 @@ interface CriticHeadingSourceSegment {
   endLineOffset: number;
 }
 
+/** Map rendered block boundaries to source segments, counting both protected and ordinary newlines. */
 function splitCriticHeadingSource(
   content: string,
   boundaries: CriticHeadingBoundary[],
@@ -566,6 +567,7 @@ function reopenActiveWrapper(state: StateCore, wrapper: ActiveInlineWrapper): To
   return cloneInlineToken(state, wrapper.open);
 }
 
+/** Balance inline wrappers across protected paragraph boundaries and a heading's first line break. */
 function splitInlineChildrenAtCriticBreaks(state: StateCore, inline: Token, isHeading: boolean): CriticHeadingChildSplit {
   const children = inline.children ?? [];
   const segments: Token[][] = [];
@@ -626,15 +628,18 @@ function splitInlineChildrenAtCriticBreaks(state: StateCore, inline: Token, isHe
   return { segments, boundaries };
 }
 
+/** Exclude wrapper and break tokens when deciding whether a segment is blank padding. */
 function hasVisibleInlineContent(children: Token[]): boolean {
   return children.some(token => isVisibleInlineToken(token));
 }
 
+/** Mark a source map as original so later preview synchronization does not remap it twice. */
 function setOriginalTokenMap(token: Token, map: [number, number]): void {
   token.map = map;
   token.meta = { ...(token.meta || {}), manuscriptMapIsOriginal: true };
 }
 
+/** Build a block with its original source map, omitting empty continuation segments. */
 function createCriticBlockSegment(
   state: StateCore,
   headingTokens: [Token, Token, Token],

@@ -830,6 +830,7 @@ function toTextRunFromInner(run: MdRun, overrides?: Partial<MdRun>): MdRun {
   };
 }
 
+/** Preserve break metadata and flatten nested highlights into formatted Word runs. */
 function normalizeCriticInnerRuns(runs: MdRun[]): MdRun[] {
   const normalized: MdRun[] = [];
   for (const run of runs) {
@@ -1486,6 +1487,7 @@ function splitRunsAtCriticParagraphs(runs: MdRun[]): MdRun[][] | undefined {
   return found ? parts : undefined;
 }
 
+/** Keep list indentation while limiting heading styles and alert labels to the first segment. */
 function criticBlockSegment(token: MdToken, runs: MdRun[], index: number): MdToken {
   if (token.type === 'list_item' && index > 0) {
     return {
@@ -1504,6 +1506,7 @@ function criticBlockSegment(token: MdToken, runs: MdRun[], index: number): MdTok
   };
 }
 
+/** Restore block boundaries inside additions and deletions, preserving wholly empty revisions. */
 function splitCriticParagraphs(tokens: MdToken[]): MdToken[] {
   return tokens.flatMap(token => {
     if (!['paragraph', 'heading', 'list_item', 'blockquote'].includes(token.type)) return [token];
@@ -1525,6 +1528,7 @@ function isBreakRun(run: MdRun): boolean {
   return run.type === 'softbreak' || run.type === 'hardbreak';
 }
 
+/** Remove edge breaks where the surrounding Word paragraph already supplies separation. */
 function trimBreakRuns(runs: MdRun[]): MdRun[] {
   let start = 0;
   let end = runs.length;
@@ -1600,6 +1604,7 @@ function splitCriticRunAtDisplayMath(run: MdRun): CriticDisplaySegment[] | undef
   ];
 }
 
+/** Give revised display equations their own Word paragraphs while retaining block context. */
 function splitCriticDisplayMathParagraphs(tokens: MdToken[]): MdToken[] {
   const output: MdToken[] = [];
   for (const token of tokens) {
@@ -1646,6 +1651,7 @@ function splitCriticDisplayMathParagraphs(tokens: MdToken[]): MdToken[] {
   return output;
 }
 
+/** Parse Markdown into Word blocks, restoring protected revision boundaries before formatting. */
 export function parseMd(markdown: string, warnings?: string[], breaks = false, originalText?: string): MdToken[] {
   const md = createMarkdownIt();
   // Preserve explicit source semantics for blockquotes by disabling markdown-it
@@ -2590,6 +2596,7 @@ function convertInlineTokens(tokens: ManuscriptToken[]): MdRun[] {
   return runs;
 }
 
+/** Convert inline tokens to Word runs, carrying formatting and protected paragraph metadata. */
 function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
   const runs: MdRun[] = [];
   const formatStack: Partial<Pick<MdRun, 'bold' | 'italic' | 'underline' | 'strikethrough' | 'superscript' | 'subscript'>> = {};
