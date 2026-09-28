@@ -34,6 +34,17 @@ describe('paragraphs inside CriticMarkup additions', () => {
     expect(html).not.toContain('\uE000');
   });
 
+  it('exports a multi-paragraph deletion as two revised Word paragraphs', async () => {
+    const { docx } = await convertMdToDocx('{--deleted\n\nmore--}');
+    const zip = await JSZip.loadAsync(docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const paragraphs = xml.match(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g) ?? [];
+    expect(paragraphs).toHaveLength(2);
+    expect(paragraphs[0]).toContain('<w:delText>deleted</w:delText>');
+    expect(paragraphs[1]).toContain('<w:delText>more</w:delText>');
+    for (const paragraph of paragraphs) expect(paragraph).toMatch(/<w:del\b/);
+  });
+
   it('keeps emphasis and surrounding text in the correct paragraphs', () => {
     const input = 'Before {++**one\n\ntwo**++} after';
     const tokens = parseMd(input);
