@@ -372,6 +372,7 @@ interface CriticHeadingBoundary {
   sourceOffset?: number;
 }
 
+/** Record absolute inline-source offsets so nested payload breaks retain their original positions. */
 function collectProtectedBreaks(content: string, sourceBase: number): CriticBreakSource[] {
   const breaks: CriticBreakSource[] = [];
   for (const match of iterateCriticBreaks(content)) {
@@ -380,6 +381,7 @@ function collectProtectedBreaks(content: string, sourceBase: number): CriticBrea
   return breaks;
 }
 
+/** Copy mutable token attributes and metadata before reusing a wrapper in another paragraph. */
 function cloneInlineToken(state: StateCore, source: Token): Token {
   const clone = Object.assign(new state.Token(source.type, source.tag, source.nesting), source);
   clone.attrs = source.attrs?.map(([name, value]) => [name, value]) ?? null;
@@ -388,6 +390,7 @@ function cloneInlineToken(state: StateCore, source: Token): Token {
   return clone;
 }
 
+/** Create a matching closing token when a paragraph boundary interrupts an open inline wrapper. */
 function closeTokenFor(state: StateCore, open: Token): Token {
   const type = open.type.endsWith('_open')
     ? open.type.slice(0, -'_open'.length) + '_close'

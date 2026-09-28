@@ -898,6 +898,7 @@ function criticParagraphBreakRule(state: StateInline, silent: boolean): boolean 
   return true;
 }
 
+/** Parse an entire revision payload so formatting delimiters can span protected paragraph breaks. */
 function parseCriticInnerRuns(content: string): MdRun[] {
   if (!content) return [];
   const md = getCriticInnerMarkdownIt();
@@ -1524,6 +1525,7 @@ interface DisplayRunSegment {
   displayMath: boolean;
 }
 
+/** Treat both explicit and soft line breaks as removable padding at a generated block boundary. */
 function isBreakRun(run: MdRun): boolean {
   return run.type === 'softbreak' || run.type === 'hardbreak';
 }
@@ -1537,6 +1539,7 @@ function trimBreakRuns(runs: MdRun[]): MdRun[] {
   return runs.slice(start, end);
 }
 
+/** Separate display equations from adjacent prose and discard line breaks at the new block edges. */
 function splitRunsAtDisplayMath(runs: MdRun[] | undefined): DisplayRunSegment[] | undefined {
   if (!runs?.some(run => run.type === 'math' && run.display)) return undefined;
   const segments: DisplayRunSegment[] = [];
