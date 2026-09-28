@@ -136,6 +136,7 @@ export interface MdTableRow {
 }
 
 export interface MdRun {
+  criticParagraphBreak?: true; // first of two softbreaks representing a blank line inside a Critic payload
   type: 'text' | 'critic_add' | 'critic_del' | 'critic_sub' | 'critic_highlight' | 'critic_comment' | 'citation' | 'math' | 'softbreak' | 'hardbreak' | 'comment_range_start' | 'comment_range_end' | 'comment_body_with_id' | 'footnote_ref' | 'html_comment' | 'image';
   text: string;
   bold?: boolean;
@@ -793,6 +794,7 @@ function createMarkdownIt(): MarkdownIt {
 /** Create a markdown-it instance for parsing inner formatting within CriticMarkup payloads. */
 function createCriticInnerMarkdownIt(): MarkdownIt {
   const md = createMarkdownIt();
+  md.inline.ruler.before('newline', 'critic_paragraph_break', criticParagraphBreakRule);
   // Inner parsing should recurse into regular inline formatting, but not into
   // other top-level custom syntaxes that carry separate document semantics.
   // Citations stay enabled: inserted/new-side citations become Zotero fields,
@@ -828,11 +830,12 @@ function toTextRunFromInner(run: MdRun, overrides?: Partial<MdRun>): MdRun {
   };
 }
 
+/** Preserve break metadata and flatten nested highlights into formatted Word runs. */
 function normalizeCriticInnerRuns(runs: MdRun[]): MdRun[] {
   const normalized: MdRun[] = [];
   for (const run of runs) {
     if (run.type === 'softbreak' || run.type === 'hardbreak') {
-      normalized.push({ type: run.type, text: '\n' });
+      normalized.push({ ...run, text: '\n' });
       continue;
     }
 
@@ -844,11 +847,13 @@ function normalizeCriticInnerRuns(runs: MdRun[]): MdRun[] {
     // Plain/colored `==...==` highlights inside Critic payloads should be
     // preserved as text runs with highlight flags.
     if (run.type === 'critic_highlight') {
-      if (run.text) {
-        normalized.push(toTextRunFromInner(run, {
+      for (const inner of run.innerRuns ?? (run.text ? [toTextRunFromInner(run)] : [])) {
+        normalized.push({
+          ...toTextRunFromInner(run),
+          ...inner,
           highlight: true,
-          highlightColor: run.highlightColor,
-        }));
+          highlightColor: run.highlightColor ?? inner.highlightColor,
+        });
       }
       continue;
     }
@@ -874,6 +879,26 @@ function normalizeCriticInnerRuns(runs: MdRun[]): MdRun[] {
   return normalized;
 }
 
+/** Recognize blank lines while parsing a payload, without touching code or math tokens. */
+function criticParagraphBreakRule(state: StateInline, silent: boolean): boolean {
+  const start = state.pos;
+  const escaped = state.src[start] === '\\';
+  const newlineStart = start + (escaped ? 1 : 0);
+  if (state.src[newlineStart] !== '\n') return false;
+  const match = /^\n[ \t]*\n/.exec(state.src.slice(newlineStart, state.posMax));
+  if (!match) return false;
+  if (!silent) {
+    state.pending = state.pending.replace(/ +$/, '');
+    const first = pushManuscriptToken(state, 'softbreak', 'br', 0);
+    first.meta = { criticParagraphBreak: true };
+    pushManuscriptToken(state, 'softbreak', 'br', 0);
+  }
+  state.pos = newlineStart + match[0].length;
+  while (state.pos < state.posMax && /[ \t]/.test(state.src[state.pos])) state.pos++;
+  return true;
+}
+
+/** Parse an entire revision payload so formatting delimiters can span protected paragraph breaks. */
 function parseCriticInnerRuns(content: string): MdRun[] {
   if (!content) return [];
   const md = getCriticInnerMarkdownIt();
@@ -1431,15 +1456,81 @@ interface CriticDisplaySegment {
   displayMath: boolean;
 }
 
+/** Split parsed runs so inline formatting and nested revisions survive each boundary. */
+function splitRunsAtCriticParagraphs(runs: MdRun[]): MdRun[][] | undefined {
+  const parts: MdRun[][] = [[]];
+  let found = false;
+  for (let index = 0; index < runs.length; index++) {
+    const run = runs[index];
+    if (run.criticParagraphBreak) {
+      found = true;
+      parts.push([]);
+      index++; // the second softbreak belongs to the same blank line
+      continue;
+    }
+    let split: MdRun[][] | undefined;
+    if (run.innerRuns && (run.type === 'critic_add' || run.type === 'critic_del')) {
+      split = splitRunsAtCriticParagraphs(run.innerRuns)?.map(part => {
+        const innerRuns = trimBreakRuns(part);
+        return innerRuns.length > 0
+          ? [{ ...run, text: innerRuns.map(inner => inner.text).join(''), innerRuns }]
+          : [];
+      });
+    }
+    if (!split) {
+      parts[parts.length - 1].push(run);
+      continue;
+    }
+    found = true;
+    parts[parts.length - 1].push(...split[0]);
+    parts.push(...split.slice(1));
+  }
+  return found ? parts : undefined;
+}
+
+/** Keep list indentation while limiting heading styles and alert labels to the first segment. */
+function criticBlockSegment(token: MdToken, runs: MdRun[], index: number): MdToken {
+  if (token.type === 'list_item' && index > 0) {
+    return {
+      ...token, type: 'paragraph', runs,
+      listContinuation: { type: token.ordered ? 'ordered' : 'bullet', level: token.level ?? 1 },
+      ordered: undefined, startNumber: undefined, bulletMarker: undefined, taskChecked: undefined,
+    };
+  }
+  if (token.type === 'heading' && index > 0) {
+    return { ...token, type: 'paragraph', runs, level: undefined, criticParaMark: undefined };
+  }
+  return {
+    ...token, runs,
+    // Only the first paragraph in a split alert emits its title.
+    ...(token.type === 'blockquote' && index > 0 ? { alertLead: undefined } : {}),
+  };
+}
+
+/** Restore block boundaries inside additions and deletions, preserving wholly empty revisions. */
+function splitCriticParagraphs(tokens: MdToken[]): MdToken[] {
+  return tokens.flatMap(token => {
+    if (!['paragraph', 'heading', 'list_item', 'blockquote'].includes(token.type)) return [token];
+    const parts = splitRunsAtCriticParagraphs(token.runs);
+    if (!parts) return [token];
+    const nonempty = parts.filter(runs => runs.length > 0);
+    return nonempty.length > 0
+      ? nonempty.map((runs, index) => criticBlockSegment(token, runs, index))
+      : [token];
+  });
+}
+
 interface DisplayRunSegment {
   runs: MdRun[];
   displayMath: boolean;
 }
 
+/** Treat both explicit and soft line breaks as removable padding at a generated block boundary. */
 function isBreakRun(run: MdRun): boolean {
   return run.type === 'softbreak' || run.type === 'hardbreak';
 }
 
+/** Remove edge breaks where the surrounding Word paragraph already supplies separation. */
 function trimBreakRuns(runs: MdRun[]): MdRun[] {
   let start = 0;
   let end = runs.length;
@@ -1448,6 +1539,7 @@ function trimBreakRuns(runs: MdRun[]): MdRun[] {
   return runs.slice(start, end);
 }
 
+/** Separate display equations from adjacent prose and discard line breaks at the new block edges. */
 function splitRunsAtDisplayMath(runs: MdRun[] | undefined): DisplayRunSegment[] | undefined {
   if (!runs?.some(run => run.type === 'math' && run.display)) return undefined;
   const segments: DisplayRunSegment[] = [];
@@ -1515,6 +1607,7 @@ function splitCriticRunAtDisplayMath(run: MdRun): CriticDisplaySegment[] | undef
   ];
 }
 
+/** Give revised display equations their own Word paragraphs while retaining block context. */
 function splitCriticDisplayMathParagraphs(tokens: MdToken[]): MdToken[] {
   const output: MdToken[] = [];
   for (const token of tokens) {
@@ -1555,43 +1648,13 @@ function splitCriticDisplayMathParagraphs(tokens: MdToken[]): MdToken[] {
       continue;
     }
     for (let index = 0; index < splitRuns.length; index++) {
-      const runs = splitRuns[index];
-      if (token.type === 'list_item' && index > 0) {
-        output.push({
-          ...token,
-          type: 'paragraph',
-          runs,
-          listContinuation: {
-            type: token.ordered ? 'ordered' : 'bullet',
-            level: token.level ?? 1,
-          },
-          ordered: undefined,
-          startNumber: undefined,
-          bulletMarker: undefined,
-          taskChecked: undefined,
-        });
-      } else if (token.type === 'heading' && index > 0) {
-        output.push({
-          ...token,
-          type: 'paragraph',
-          runs,
-          level: undefined,
-          criticParaMark: undefined,
-        });
-      } else {
-        output.push({
-          ...token,
-          runs,
-          // A split alert is still one alert group. Only its first generated
-          // paragraph may emit the alert title/lead in Word.
-          ...(token.type === 'blockquote' && index > 0 ? { alertLead: undefined } : {}),
-        });
-      }
+      output.push(criticBlockSegment(token, splitRuns[index], index));
     }
   }
   return output;
 }
 
+/** Parse Markdown into Word blocks, restoring protected revision boundaries before formatting. */
 export function parseMd(markdown: string, warnings?: string[], breaks = false, originalText?: string): MdToken[] {
   const md = createMarkdownIt();
   // Preserve explicit source semantics for blockquotes by disabling markdown-it
@@ -1605,7 +1668,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
   const tokens = md.parse(processed, {});
 
   const processedLines = processed.split('\n');
-  const result = splitCriticDisplayMathParagraphs(convertTokens(tokens, 0, 0, warnings, processedLines));
+  const result = splitCriticParagraphs(splitCriticDisplayMathParagraphs(convertTokens(tokens, 0, 0, warnings, processedLines)));
   annotateBlockquoteBoundaries(result);
 
   // When breaks mode is enabled, treat all bare newlines as hard breaks
@@ -2536,6 +2599,7 @@ function convertInlineTokens(tokens: ManuscriptToken[]): MdRun[] {
   return runs;
 }
 
+/** Convert inline tokens to Word runs, carrying formatting and protected paragraph metadata. */
 function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
   const runs: MdRun[] = [];
   const formatStack: Partial<Pick<MdRun, 'bold' | 'italic' | 'underline' | 'strikethrough' | 'superscript' | 'subscript'>> = {};
@@ -2572,7 +2636,8 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
         break;
         
       case 'softbreak':
-        runs.push({ type: 'softbreak', text: '\n', ...formatStack, href: currentHref });
+        runs.push({ type: 'softbreak', text: '\n', ...formatStack, href: currentHref,
+          ...(token.meta?.criticParagraphBreak ? { criticParagraphBreak: true as const } : {}) });
         break;
 
       case 'hardbreak':

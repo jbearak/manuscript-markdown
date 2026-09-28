@@ -2121,20 +2121,20 @@ describe('CriticMarkup OOXML generation', () => {
 
   it('removes blockquote prefixes from revised Word text', () => {
     const tokens = parseMd('> {++before\n>\n> after++}');
-    const addition = tokens[0].runs.find(run => run.type === 'critic_add');
-
-    expect(addition?.innerRuns?.some(run => run.text.includes('after'))).toBe(true);
-    expect(addition?.innerRuns?.some(run => run.text.includes('>'))).toBe(false);
+    expect(tokens.map(token => token.type)).toEqual(['blockquote', 'blockquote']);
+    expect(tokens.map(token => token.runs[0].innerRuns?.map(run => run.text).join('')))
+      .toEqual(['before', 'after']);
   });
 
   it('removes blockquote prefixes after nested-list indentation', () => {
     const input = '- outer\n    - inner\n      > {++before\n      >\n      > after++}';
-    const blockquote = parseMd(input).find(token => token.type === 'blockquote');
-    const addition = blockquote?.runs.find(run => run.type === 'critic_add');
-
-    expect(blockquote?.listContinuation).toEqual({ type: 'bullet', level: 2 });
-    expect(addition?.text).toBe('before\n\nafter');
-    expect(addition?.innerRuns?.some(run => run.text.includes('>'))).toBe(false);
+    const blockquotes = parseMd(input).filter(token => token.type === 'blockquote');
+    expect(blockquotes).toHaveLength(2);
+    for (const blockquote of blockquotes) {
+      expect(blockquote.listContinuation).toEqual({ type: 'bullet', level: 2 });
+    }
+    expect(blockquotes.map(token => token.runs[0].innerRuns?.map(run => run.text).join('')))
+      .toEqual(['before', 'after']);
   });
 
   it('splits Critic display math into Word list continuation paragraphs', () => {
@@ -2380,13 +2380,15 @@ describe('parseMd multi-paragraph CriticMarkup', () => {
   it('parses multi-paragraph addition', () => {
     const tokens = parseMd('{++added\n\nmore++}');
     const addRuns = tokens.flatMap(t => t.runs).filter(r => r.type === 'critic_add');
-    expect(addRuns.length).toBe(1);
+    expect(tokens).toHaveLength(2);
+    expect(addRuns.length).toBe(2);
   });
 
   it('parses multi-paragraph deletion', () => {
     const tokens = parseMd('{--deleted\n\nmore--}');
     const delRuns = tokens.flatMap(t => t.runs).filter(r => r.type === 'critic_del');
-    expect(delRuns.length).toBe(1);
+    expect(tokens).toHaveLength(2);
+    expect(delRuns.length).toBe(2);
   });
 
   it('parses multi-paragraph substitution', () => {
@@ -2425,7 +2427,7 @@ describe('parseMd multi-paragraph CriticMarkup', () => {
     const addRuns = tokens.flatMap(t => t.runs).filter(r => r.type === 'critic_add');
     expect(addRuns[0].text).not.toContain('\u0000');
     expect(addRuns[0].text).not.toContain('PARA');
-    expect(addRuns[0].text).toContain('added\n\nmore');
+    expect(addRuns.map(run => run.innerRuns?.map(inner => inner.text).join(''))).toEqual(['added', 'more']);
   });
 
   it('parses recursive formatting inside critic additions', () => {

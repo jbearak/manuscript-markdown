@@ -62,6 +62,8 @@ spans multiple lines
 including empty lines.++}
 ```
 
+Blank lines inside additions and deletions separate paragraphs in the preview and Word export. Inline formatting continues across those paragraph boundaries. A single newline stays within the same paragraph.
+
 ## Nesting Rules
 
 - CriticMarkup patterns **cannot be nested** within the same type

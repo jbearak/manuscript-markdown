@@ -1222,7 +1222,8 @@ describe('Property 4: Empty line preservation', () => {
     expect(output).toContain('First paragraph.');
     expect(output).toContain('Second paragraph.');
     expect(output).toContain('## Statistical Model');
-    expect(output.match(/<br>/g)).toHaveLength(4);
+    expect(output.match(/<p>/g)).toHaveLength(3);
+    expect(output).not.toContain('<br>');
     expect(output).not.toContain('PARA');
     expect(output).not.toContain('\uE000');
   });
@@ -1231,7 +1232,8 @@ describe('Property 4: Empty line preservation', () => {
     const output = renderWithPlugin('{++outer {--one\n\ntwo--} end++}');
 
     expect(output).toContain('<ins class="manuscript-markdown-addition">');
-    expect(output).toContain('<del class="manuscript-markdown-deletion">one<br>\n<br>\ntwo</del>');
+    expect(output).toContain('<del class="manuscript-markdown-deletion">one</del></ins></p>');
+    expect(output).toContain('<p><ins class="manuscript-markdown-addition"><del class="manuscript-markdown-deletion">two</del>');
     expect(output).not.toContain('{--');
     expect(output).not.toContain('PARA');
   });
@@ -1239,7 +1241,8 @@ describe('Property 4: Empty line preservation', () => {
   it('preserves emphasis across a paragraph break inside CriticMarkup', () => {
     const output = renderWithPlugin('{++**one\n\ntwo**++}');
 
-    expect(output).toContain('<strong>one<br>\n<br>\ntwo</strong>');
+    expect(output).toContain('<strong>one</strong></ins></p>');
+    expect(output).toContain('<p><ins class="manuscript-markdown-addition"><strong>two</strong>');
     expect(output).not.toContain('PARA');
   });
 
