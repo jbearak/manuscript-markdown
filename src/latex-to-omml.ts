@@ -626,6 +626,7 @@ class Parser {
 
     let depth = 0;
     let braceDepth = 0;
+    let envDepth = 0;
     for (let i = start; i < this.tokens.length; i++) {
       const token = this.tokens[i];
       if (token.type === 'lbrace') {
@@ -638,7 +639,17 @@ class Parser {
         continue;
       }
       if (braceDepth > 0) continue;
-      if (token.type === 'ampersand' || (token.type === 'command' && (token.value === '\\\\' || token.value === '\\end'))) {
+      if (token.type === 'command' && token.value === '\\begin') {
+        envDepth++;
+        continue;
+      }
+      if (token.type === 'command' && token.value === '\\end') {
+        if (envDepth === 0) return undefined;
+        envDepth--;
+        continue;
+      }
+      if (envDepth > 0) continue;
+      if (token.type === 'ampersand' || (token.type === 'command' && token.value === '\\\\')) {
         return undefined;
       }
       if (token.type !== 'text') continue;

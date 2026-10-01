@@ -582,6 +582,16 @@ describe('bracketed operands of n-ary operators and functions', () => {
     expect(result).toEndWith('<m:e>' + run('[') + run('a') + run(']') + '</m:e></m:nary>' + run('b'));
   });
 
+  test('environments inside the group do not end the scan', () => {
+    const result = latexToOmml('\\sum_i(\\begin{smallmatrix}a&b\\\\c&d\\end{smallmatrix})x');
+    expect(result).toEndWith('</m:m>' + run(')') + '</m:e></m:nary>' + run('x'));
+  });
+
+  test('a row or cell boundary of the enclosing environment stops the scan', () => {
+    const result = latexToOmml('\\begin{matrix}\\sum_i(a&b)\\end{matrix}');
+    expect(result).toContain('<m:e>' + run('(') + '</m:e></m:nary>');
+  });
+
   test('an unbalanced parenthesis falls back to the single-token body', () => {
     const result = latexToOmml('\\sum_i(a');
     expect(result).toEndWith('<m:e>' + run('(') + '</m:e></m:nary>' + run('a'));
