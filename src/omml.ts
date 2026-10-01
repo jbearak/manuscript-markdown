@@ -148,7 +148,7 @@ export function escapeLatex(text: string): string {
  * Map a single character to its LaTeX command if one exists.
  * Characters not in the mapping table are returned unchanged.
  * Multi-character strings are processed character-by-character.
- * With `primeAsCommand`, ′ maps to \prime (for superscript math).
+ * With `primeAsCommand`, ′ maps to \prime (for script math).
  */
 export function unicodeToLatex(text: string, primeAsCommand = false): string {
   let result = '';
@@ -397,10 +397,10 @@ function translateRun(children: XmlNode[]): string {
     return '';
   }
 
-  // Primes in superscript math (′, as \prime exports) become \prime; a raw ′
-  // in LaTeX source breaks pdflatex. Text-mode runs keep the character.
+  // Primes in script math (′, as \prime exports) become \prime; a raw ′ in
+  // LaTeX source breaks pdflatex. Base-level and text-mode runs keep the character.
   const textMode = style === 'p' && /\s/.test(text);
-  const mapped = unicodeToLatex(text, superscriptDepth > 0 && !textMode);
+  const mapped = unicodeToLatex(text, scriptDepth > 0 && !textMode);
   if (script === 'script') {
     return '\\mathcal{' + mapped + '}';
   }
@@ -464,20 +464,23 @@ function translateSuperscript(children: XmlNode[]): string {
     return fallbackPlaceholder('m:sSup', children);
   }
   const baseLatex = ommlToLatex(base);
-  const supLatex = superscriptToLatex(sup);
+  const supLatex = scriptToLatex(sup);
   return scriptArg(baseLatex) + '^' + scriptArg(supLatex);
 }
 
-/** Nesting depth of superscripts being translated; translateRun reads it. */
-let superscriptDepth = 0;
+/** Nesting depth of scripts and limits being translated; translateRun reads it. */
+let scriptDepth = 0;
 
-/** Translate superscript content, with its math-run primes as \prime (see translateRun). */
-function superscriptToLatex(sup: XmlNode[]): string {
-  superscriptDepth++;
+/**
+ * Translate a script or limit (sub, sup, n-ary limit, or the label above or
+ * below a base), with its math-run primes as \prime (see translateRun).
+ */
+function scriptToLatex(script: XmlNode[]): string {
+  scriptDepth++;
   try {
-    return ommlToLatex(sup);
+    return ommlToLatex(script);
   } finally {
-    superscriptDepth--;
+    scriptDepth--;
   }
 }
 
@@ -493,7 +496,7 @@ function translateSubscript(children: XmlNode[]): string {
     return fallbackPlaceholder('m:sSub', children);
   }
   const baseLatex = ommlToLatex(base);
-  const subLatex = ommlToLatex(sub);
+  const subLatex = scriptToLatex(sub);
   return scriptArg(baseLatex) + '_' + scriptArg(subLatex);
 }
 
@@ -510,8 +513,8 @@ function translateSubSup(children: XmlNode[]): string {
     return fallbackPlaceholder('m:sSubSup', children);
   }
   const baseLatex = ommlToLatex(base);
-  const subLatex = ommlToLatex(sub);
-  const supLatex = superscriptToLatex(sup);
+  const subLatex = scriptToLatex(sub);
+  const supLatex = scriptToLatex(sup);
   return scriptArg(baseLatex) + '_' + scriptArg(subLatex) + '^' + scriptArg(supLatex);
 }
 
@@ -565,8 +568,8 @@ function translateNary(children: XmlNode[]): string {
   const op = NARY_MAP.get(chr) || chr;
   const limits = limLoc === 'undOvr' ? '\\limits' : '';
 
-  const subLatex = ommlToLatex(findChild(children, 'm:sub'));
-  const supLatex = superscriptToLatex(findChild(children, 'm:sup'));
+  const subLatex = scriptToLatex(findChild(children, 'm:sub'));
+  const supLatex = scriptToLatex(findChild(children, 'm:sup'));
   const sub = (subHide || !subLatex) ? '' : '_' + scriptArg(subLatex);
   const sup = (supHide || !supLatex) ? '' : '^' + scriptArg(supLatex);
   const body = ommlToLatex(findChild(children, 'm:e'));
@@ -753,7 +756,7 @@ function braceGroupContent(eChildren: XmlNode[], chr: string, pos: string): stri
  */
 function translateLimLow(children: XmlNode[]): string {
   const eChildren = findChild(children, 'm:e');
-  const lim = ommlToLatex(findChild(children, 'm:lim'));
+  const lim = scriptToLatex(findChild(children, 'm:lim'));
   const braceContent = braceGroupContent(eChildren, '⏟', 'bot');
   if (braceContent !== null) {
     return `\\underbrace{${braceContent}}_{${lim}}`;
@@ -770,7 +773,7 @@ function translateLimLow(children: XmlNode[]): string {
  */
 function translateLimUpp(children: XmlNode[]): string {
   const eChildren = findChild(children, 'm:e');
-  const lim = ommlToLatex(findChild(children, 'm:lim'));
+  const lim = scriptToLatex(findChild(children, 'm:lim'));
   const braceContent = braceGroupContent(eChildren, '⏞', 'top');
   if (braceContent !== null) {
     return `\\overbrace{${braceContent}}^{${lim}}`;

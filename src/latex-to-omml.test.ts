@@ -527,6 +527,18 @@ describe('Word export of commands that used to be spelled out', () => {
     expect(roundTrip('\\sum^\\prime x')).toBe('\\sum^\\prime x');
   });
 
+  test('a prime over a brace or base round-trips as \\prime', () => {
+    expect(roundTrip('\\overbrace{x}^{\\prime}')).toBe('\\overbrace{x}^{\\prime}');
+    expect(roundTrip('\\overset{\\prime}{x}')).toBe('\\overset{\\prime}{x}');
+  });
+
+  test('a prime in any script or limit round-trips as \\prime', () => {
+    expect(roundTrip('x_\\prime')).toBe('x_\\prime');
+    expect(roundTrip('x_\\prime^2')).toBe('x_\\prime^2');
+    expect(roundTrip('\\sum_\\prime x')).toBe('\\sum_\\prime x');
+    expect(roundTrip('\\underset{\\prime}{x}')).toBe('\\underset{\\prime}{x}');
+  });
+
   test('a prime inside a preserved comment in a superscript is left alone', () => {
     expect(roundTrip('f^{\\prime % note ′\n}')).toContain('% note ′');
   });

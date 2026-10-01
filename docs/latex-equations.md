@@ -102,7 +102,7 @@ a^{n+1}      % multi-character superscript (use braces)
 | ℓ | `\ell` | | ⇔ | `\Leftrightarrow` |
 | ′ | `\prime` | | ↦ | `\mapsto` |
 
-The aliases `\le`, `\ge`, `\ne`, `\rightarrow`, `\gets`, `\lnot`, `\wedge`, and `\vee` also work. Re-import writes them as `\leq`, `\geq`, `\neq`, `\to`, `\leftarrow`, `\neg`, `\land`, and `\lor`. A superscript made only of primes comes back as `\prime`. A ′ anywhere else comes back as the character itself.
+The aliases `\le`, `\ge`, `\ne`, `\rightarrow`, `\gets`, `\lnot`, `\wedge`, and `\vee` also work. Re-import writes them as `\leq`, `\geq`, `\neq`, `\to`, `\leftarrow`, `\neg`, `\land`, and `\lor`. On re-import, a ′ in a subscript, superscript, or limit comes back as `\prime`. One at the base level of the equation stays the character itself.
 
 ## Dots
 
