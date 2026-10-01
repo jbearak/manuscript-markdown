@@ -37,9 +37,24 @@ const LATEX_UNICODE_MAP: Map<string, string> = new Map([
   ['\\cdot', '·'], ['\\ldots', '…'], ['\\cdots', '⋯'],
   ['\\dots', '…'], ['\\dotsc', '…'], ['\\dotsb', '…'], ['\\dotsm', '…'], ['\\dotsi', '…'],
   ['\\ddots', '⋱'], ['\\vdots', '⋮'],
+  ['\\sim', '∼'], ['\\simeq', '≃'], ['\\equiv', '≡'], ['\\cong', '≅'],
+  ['\\propto', '∝'], ['\\ll', '≪'], ['\\gg', '≫'],
+  ['\\subseteq', '⊆'], ['\\supseteq', '⊇'], ['\\setminus', '∖'],
+  ['\\perp', '⊥'], ['\\circ', '∘'], ['\\ast', '∗'],
+  ['\\emptyset', '∅'], ['\\ell', 'ℓ'],
+  ['\\Leftrightarrow', '⇔'], ['\\mapsto', '↦'],
+  // One-way entries: omml.ts maps these characters back to the canonical
+  // spelling above, except ′, which it keeps (f\prime renders a full-size prime)
+  ['\\prime', '′'],
+  ['\\le', '≤'], ['\\ge', '≥'], ['\\ne', '≠'],
+  ['\\rightarrow', '→'], ['\\gets', '←'],
+  ['\\lnot', '¬'], ['\\wedge', '∧'], ['\\vee', '∨'],
 ]);
 
 const LATEX_ACCENT_MAP: Map<string, string> = new Map([
+  // m:acc has no wide form; the wide variants reuse the \hat and \tilde characters
+  ['\\widehat', 'ˆ'],
+  ['\\widetilde', '~'],
   ['\\hat', 'ˆ'],
   ['\\bar', '¯'],
   ['\\dot', '˙'],
@@ -285,34 +300,34 @@ class Parser {
     }
 
   /**
-   * If the upcoming tokens are (optional whitespace-only text) followed by the
-   * given script operator, consume through the operator and return true.
+   * If the upcoming tokens are (optional whitespace-only text) followed by a
+   * token that satisfies `match`, consume through that token and return it.
    * Leaves the token stream untouched otherwise.
    */
-  private consumeScriptOperator(type: 'caret' | 'underscore'): boolean {
+  private consumeAfterWhitespace(match: (token: Token) => boolean): Token | undefined {
     let lookahead = this.pos;
     while (this.tokens[lookahead]?.type === 'text' && this.tokens[lookahead].value.trim() === '') {
       lookahead++;
     }
-    if (this.tokens[lookahead]?.type !== type) return false;
+    const token = this.tokens[lookahead];
+    if (!token || !match(token)) return undefined;
     this.pos = lookahead + 1;
-    return true;
+    return token;
+  }
+
+  private consumeScriptOperator(type: 'caret' | 'underscore'): boolean {
+    return this.consumeAfterWhitespace(t => t.type === type) !== undefined;
   }
 
   private parseScriptsForBase(base: string): string {
     let current = base;
 
-    while (this.peek() && (this.peek()?.type === 'caret' || this.peek()?.type === 'underscore')) {
-      const firstOp = this.consume()!;
+    // TeX ignores whitespace before a script operator
+    let firstOp: Token | undefined;
+    while ((firstOp = this.consumeAfterWhitespace(t => t.type === 'caret' || t.type === 'underscore'))) {
       const firstScript = this.parseGroup();
 
-      const nextToken = this.peek();
-      if (
-        nextToken &&
-        ((firstOp.type === 'caret' && nextToken.type === 'underscore') ||
-          (firstOp.type === 'underscore' && nextToken.type === 'caret'))
-      ) {
-        this.consume(); // consume second script operator
+      if (this.consumeScriptOperator(firstOp.type === 'caret' ? 'underscore' : 'caret')) {
         const secondScript = this.parseGroup();
 
         if (firstOp.type === 'caret') {
@@ -354,7 +369,7 @@ class Parser {
 
     // Functions
     if (KNOWN_FUNCTIONS.has(cmd.slice(1))) {
-      const arg = this.parseGroup();
+      const arg = this.parseBracketedOperand() ?? this.parseGroup();
       return '<m:func><m:fName>' + makeStyledRun(cmd.slice(1)) + '</m:fName><m:e>' + arg + '</m:e></m:func>';
     }
 
@@ -406,11 +421,12 @@ class Parser {
         // mirroring KNOWN_FUNCTIONS (e.g. \sin{x}) for round-trip fidelity
         // with the OMML→LaTeX direction which emits \operatorname{name}{arg}.
         const name = this.parseGroup();
-        const funcArg = this.parseGroup();
+        const funcArg = this.parseBracketedOperand() ?? this.parseGroup();
         return '<m:func><m:fName>' + makeStyledRun(this.extractText(name)) + '</m:fName><m:e>' + funcArg + '</m:e></m:func>';
       }
 
       case '\\limits':
+      case '\\nolimits':
         // This should be handled by nary parsing, but if encountered alone, ignore
         return '';
 
@@ -566,25 +582,90 @@ class Parser {
     let sup = '';
 
     // Check for \limits
-    if (this.peek()?.type === 'command' && this.peek()?.value === '\\limits') {
-      this.consume();
-      limits = '<m:limLoc m:val="undOvr"/>';
+    // TeX ignores whitespace before \limits and before each limit
+    const limitsCmd = this.consumeAfterWhitespace(
+      t => t.type === 'command' && (t.value === '\\limits' || t.value === '\\nolimits'),
+    );
+    if (limitsCmd) {
+      limits = '<m:limLoc m:val="' + (limitsCmd.value === '\\limits' ? 'undOvr' : 'subSup') + '"/>';
     }
 
     // Parse subscript and superscript
-    while (this.peek() && (this.peek()?.type === 'underscore' || this.peek()?.type === 'caret')) {
-      const token = this.consume()!;
-      if (token.type === 'underscore') {
-        sub = '<m:sub>' + this.parseGroup() + '</m:sub>';
-      } else if (token.type === 'caret') {
-        sup = '<m:sup>' + this.parseGroup() + '</m:sup>';
+    let script: Token | undefined;
+    while ((script = this.consumeAfterWhitespace(t => t.type === 'underscore' || t.type === 'caret'))) {
+      if (script.type === 'underscore') {
+        sub = this.parseGroup();
+      } else {
+        sup = this.parseGroup();
       }
     }
 
-    const bodyAtom = this.parseGroup();
+    const bodyAtom = this.parseBracketedOperand() ?? this.parseGroup();
     const body = this.parseScriptsForBase(bodyAtom);
 
-    return '<m:nary><m:naryPr><m:chr m:val="' + escapeXmlChars(naryChar) + '"/>' + limits + '</m:naryPr>' + sub + sup + '<m:e>' + body + '</m:e></m:nary>';
+    // m:sub and m:sup are required; without the hide flags Word shows an
+    // absent limit as an empty placeholder box.
+    const hide = (sub ? '' : '<m:subHide m:val="1"/>') + (sup ? '' : '<m:supHide m:val="1"/>');
+    return '<m:nary><m:naryPr><m:chr m:val="' + escapeXmlChars(naryChar) + '"/>' + limits + hide + '</m:naryPr>' +
+      '<m:sub>' + sub + '</m:sub><m:sup>' + sup + '</m:sup><m:e>' + body + '</m:e></m:nary>';
+  }
+
+  /**
+   * Parse a `(…)` or `[…]` group that directly follows an n-ary operator or a
+   * function name as that construct's whole operand, so the m:e holds the
+   * group instead of just its opening bracket. Returns undefined, leaving the
+   * token stream untouched, unless the bracket closes within the current
+   * brace group, \left…\right pair, row, and cell.
+   */
+  private parseBracketedOperand(): string | undefined {
+    let start = this.pos;
+    while (this.tokens[start]?.type === 'text' && this.tokens[start].value.trim() === '') start++;
+    const first = this.tokens[start];
+    if (first?.type !== 'text') return undefined;
+    const lead = first.value.length - first.value.trimStart().length;
+    const open = first.value.charAt(lead);
+    const close = open === '(' ? ')' : open === '[' ? ']' : '';
+    if (!close) return undefined;
+
+    let depth = 0;
+    // Braces, environments, and \left…\right pairs are opaque: nothing inside
+    // them can close the bracket, and an unmatched closer ends the enclosing group.
+    let nesting = 0;
+    for (let i = start; i < this.tokens.length; i++) {
+      const token = this.tokens[i];
+      if (token.type === 'lbrace' || (token.type === 'command' && (token.value === '\\begin' || token.value === '\\left'))) {
+        nesting++;
+        continue;
+      }
+      if (token.type === 'rbrace' || (token.type === 'command' && (token.value === '\\end' || token.value === '\\right'))) {
+        if (nesting === 0) return undefined;
+        nesting--;
+        continue;
+      }
+      if (nesting > 0) continue;
+      if (token.type === 'ampersand' || (token.type === 'command' && token.value === '\\\\')) {
+        return undefined;
+      }
+      if (token.type !== 'text') continue;
+
+      // The character right after \right is that command's delimiter.
+      const prev = this.tokens[i - 1];
+      const skipDelimiter = prev?.type === 'command' && prev.value === '\\right';
+      for (let j = i === start ? lead : skipDelimiter ? 1 : 0; j < token.value.length; j++) {
+        const ch = token.value.charAt(j);
+        if (ch === open) {
+          depth++;
+        } else if (ch === close && --depth === 0) {
+          const operand = this.tokens.slice(start, i + 1).map(t => ({ ...t }));
+          operand[operand.length - 1].value = operand[operand.length - 1].value.slice(0, j + 1);
+          operand[0].value = operand[0].value.slice(lead);
+          const rest = token.value.slice(j + 1);
+          this.tokens.splice(this.pos, i + 1 - this.pos, ...(rest ? [{ type: 'text' as const, value: rest, pos: token.pos + j + 1 }] : []));
+          return new Parser(operand).parseExpression(false);
+        }
+      }
+    }
+    return undefined;
   }
 
   private parseDelimiter(): string {
@@ -696,8 +777,13 @@ class Parser {
         atoms.push(this.parseGroup());
       } else {
         const consumed = this.consume()!;
-        if (consumed.type === 'text' && consumed.value.length > 1) {
-          for (const ch of consumed.value) {
+        if (consumed.type === 'text') {
+          // TeX ignores source whitespace before a script, so the script binds
+          // to the atom before the space. Spacing commands such as \quad are
+          // not text tokens and keep their runs.
+          const next = this.peek();
+          const beforeScript = next?.type === 'caret' || next?.type === 'underscore';
+          for (const ch of beforeScript ? consumed.value.replace(/[ \t\r\n]+$/, '') : consumed.value) {
             atoms.push(makeRun(ch));
           }
         } else if (consumed.type === 'comment' || consumed.type === 'line_continuation') {

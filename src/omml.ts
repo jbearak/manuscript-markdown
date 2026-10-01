@@ -61,6 +61,12 @@ const UNICODE_LATEX_MAP: Map<string, string> = new Map([
   ['∣', '\\mid'],
   ['·', '\\cdot'], ['…', '\\ldots'], ['⋯', '\\cdots'],
   ['⋱', '\\ddots'], ['⋮', '\\vdots'],
+  ['∼', '\\sim'], ['≃', '\\simeq'], ['≡', '\\equiv'], ['≅', '\\cong'],
+  ['∝', '\\propto'], ['≪', '\\ll'], ['≫', '\\gg'],
+  ['⊆', '\\subseteq'], ['⊇', '\\supseteq'], ['∖', '\\setminus'],
+  ['⊥', '\\perp'], ['∘', '\\circ'], ['∗', '\\ast'],
+  ['∅', '\\emptyset'], ['ℓ', '\\ell'],
+  ['⇔', '\\Leftrightarrow'], ['↦', '\\mapsto'],
 ]);
 
 const ACCENT_MAP: Map<string, string> = new Map([
@@ -142,13 +148,14 @@ export function escapeLatex(text: string): string {
  * Map a single character to its LaTeX command if one exists.
  * Characters not in the mapping table are returned unchanged.
  * Multi-character strings are processed character-by-character.
+ * With `primeAsCommand`, ′ maps to \prime (for script math).
  */
-export function unicodeToLatex(text: string): string {
+export function unicodeToLatex(text: string, primeAsCommand = false): string {
   let result = '';
   const chars = [...text];
   for (let i = 0; i < chars.length; i++) {
     const ch = chars[i];
-    const mapped = UNICODE_LATEX_MAP.get(ch);
+    const mapped = primeAsCommand && ch === '′' ? '\\prime' : UNICODE_LATEX_MAP.get(ch);
     if (mapped) {
       result += mapped;
       // Prevent command-name capture when the next source character is an ASCII
@@ -390,7 +397,10 @@ function translateRun(children: XmlNode[]): string {
     return '';
   }
 
-  const mapped = unicodeToLatex(text);
+  // Primes in script math (′, as \prime exports) become \prime; a raw ′ in
+  // LaTeX source breaks pdflatex. Base-level and text-mode runs keep the character.
+  const textMode = style === 'p' && /\s/.test(text);
+  const mapped = unicodeToLatex(text, scriptDepth > 0 && !textMode);
   if (script === 'script') {
     return '\\mathcal{' + mapped + '}';
   }
@@ -454,8 +464,24 @@ function translateSuperscript(children: XmlNode[]): string {
     return fallbackPlaceholder('m:sSup', children);
   }
   const baseLatex = ommlToLatex(base);
-  const supLatex = ommlToLatex(sup);
+  const supLatex = scriptToLatex(sup);
   return scriptArg(baseLatex) + '^' + scriptArg(supLatex);
+}
+
+/** Nesting depth of scripts and limits being translated; translateRun reads it. */
+let scriptDepth = 0;
+
+/**
+ * Translate a script or limit (sub, sup, n-ary limit, or the label above or
+ * below a base), with its math-run primes as \prime (see translateRun).
+ */
+function scriptToLatex(script: XmlNode[]): string {
+  scriptDepth++;
+  try {
+    return ommlToLatex(script);
+  } finally {
+    scriptDepth--;
+  }
 }
 
 /**
@@ -470,7 +496,7 @@ function translateSubscript(children: XmlNode[]): string {
     return fallbackPlaceholder('m:sSub', children);
   }
   const baseLatex = ommlToLatex(base);
-  const subLatex = ommlToLatex(sub);
+  const subLatex = scriptToLatex(sub);
   return scriptArg(baseLatex) + '_' + scriptArg(subLatex);
 }
 
@@ -487,8 +513,8 @@ function translateSubSup(children: XmlNode[]): string {
     return fallbackPlaceholder('m:sSubSup', children);
   }
   const baseLatex = ommlToLatex(base);
-  const subLatex = ommlToLatex(sub);
-  const supLatex = ommlToLatex(sup);
+  const subLatex = scriptToLatex(sub);
+  const supLatex = scriptToLatex(sup);
   return scriptArg(baseLatex) + '_' + scriptArg(subLatex) + '^' + scriptArg(supLatex);
 }
 
@@ -542,15 +568,12 @@ function translateNary(children: XmlNode[]): string {
   const op = NARY_MAP.get(chr) || chr;
   const limits = limLoc === 'undOvr' ? '\\limits' : '';
 
-  const subLatex = ommlToLatex(findChild(children, 'm:sub'));
-  const supLatex = ommlToLatex(findChild(children, 'm:sup'));
+  const subLatex = scriptToLatex(findChild(children, 'm:sub'));
+  const supLatex = scriptToLatex(findChild(children, 'm:sup'));
   const sub = (subHide || !subLatex) ? '' : '_' + scriptArg(subLatex);
   const sup = (supHide || !supLatex) ? '' : '^' + scriptArg(supLatex);
   const body = ommlToLatex(findChild(children, 'm:e'));
-  // When both sub and sup are empty and op is a named command (e.g. \sum),
-  // insert a space before the body to avoid merging like \sumx → \sum x.
-  const needsBodySeparator = !sub && !sup && op.startsWith('\\') && /^[A-Za-z]/.test(body);
-  return op + limits + sub + sup + (needsBodySeparator ? ' ' : '') + body;
+  return appendLatex(op + limits + sub + sup, body);
 }
 
 
@@ -733,7 +756,7 @@ function braceGroupContent(eChildren: XmlNode[], chr: string, pos: string): stri
  */
 function translateLimLow(children: XmlNode[]): string {
   const eChildren = findChild(children, 'm:e');
-  const lim = ommlToLatex(findChild(children, 'm:lim'));
+  const lim = scriptToLatex(findChild(children, 'm:lim'));
   const braceContent = braceGroupContent(eChildren, '⏟', 'bot');
   if (braceContent !== null) {
     return `\\underbrace{${braceContent}}_{${lim}}`;
@@ -750,7 +773,7 @@ function translateLimLow(children: XmlNode[]): string {
  */
 function translateLimUpp(children: XmlNode[]): string {
   const eChildren = findChild(children, 'm:e');
-  const lim = ommlToLatex(findChild(children, 'm:lim'));
+  const lim = scriptToLatex(findChild(children, 'm:lim'));
   const braceContent = braceGroupContent(eChildren, '⏞', 'top');
   if (braceContent !== null) {
     return `\\overbrace{${braceContent}}^{${lim}}`;
