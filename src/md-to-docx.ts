@@ -5176,7 +5176,8 @@ function generateDeletedCriticContent(
   fallbackText: string,
   outer: MdRun,
   forced: Partial<MdRun> = {},
-  extraRPr?: string
+  extraRPr?: string,
+  warnings?: string[]
 ): string {
   const formattedRuns = formatCriticInnerRuns(runs, outer, forced);
   if (!formattedRuns || formattedRuns.length === 0) {
@@ -5198,21 +5199,21 @@ function generateDeletedCriticContent(
       continue;
     }
     if (run.type === 'math') {
-      xml += generateMathXml(run.text, !!run.display);
+      xml += generateMathXml(run.text, !!run.display, warnings);
       continue;
     }
     if (run.type === 'critic_add' || run.type === 'critic_del') {
-      xml += generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr);
+      xml += generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr, warnings);
       continue;
     }
     if (run.type === 'critic_sub') {
-      xml += generateDeletedCriticContent(run.oldRuns, run.text, run, {}, extraRPr);
-      if (run.newText) xml += generateDeletedCriticContent(run.newRuns, run.newText, run, {}, extraRPr);
+      xml += generateDeletedCriticContent(run.oldRuns, run.text, run, {}, extraRPr, warnings);
+      if (run.newText) xml += generateDeletedCriticContent(run.newRuns, run.newText, run, {}, extraRPr, warnings);
       continue;
     }
     if (run.type === 'critic_highlight' || run.type === 'critic_comment') {
       if (run.type === 'critic_highlight' && run.text) {
-        xml += generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr);
+        xml += generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr, warnings);
       }
       continue;
     }
@@ -5277,13 +5278,13 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       const author = run.author || options?.authorName || 'Unknown';
       const date = normalizeToUtcIso(run.date || '', state.timezone);
       const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
-      const deletedXml = generateDeletedCriticContent(run.innerRuns, run.text, run, {}, state.tableRunRPrExtra || undefined);
+      const deletedXml = generateDeletedCriticContent(run.innerRuns, run.text, run, {}, state.tableRunRPrExtra || undefined, state.warnings);
       xml += '<w:del w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + deletedXml + '</w:del>';
     } else if (run.type === 'critic_sub') {
       const author = run.author || options?.authorName || 'Unknown';
       const date = normalizeToUtcIso(run.date || '', state.timezone);
       const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
-      const deletedXml = generateDeletedCriticContent(run.oldRuns, run.text, run, {}, state.tableRunRPrExtra || undefined);
+      const deletedXml = generateDeletedCriticContent(run.oldRuns, run.text, run, {}, state.tableRunRPrExtra || undefined, state.warnings);
       const insertedXml = generateInlineCriticContent(run.newRuns, run.newText || '', run, state, options, bibEntries, citeprocEngine);
       xml += '<w:del w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + deletedXml + '</w:del>';
       xml += '<w:ins w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + insertedXml + '</w:ins>';
@@ -5476,7 +5477,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         }
       }
     } else if (run.type === 'math') {
-      xml += generateMathXml(run.text, !!run.display);
+      xml += generateMathXml(run.text, !!run.display, state.warnings);
     } else if (run.type === 'comment_range_start') {
       const mdId = run.commentId || '';
       let numericId = state.commentIdMap.get(mdId);

@@ -67,6 +67,13 @@ const UNICODE_LATEX_MAP: Map<string, string> = new Map([
   ['⊥', '\\perp'], ['∘', '\\circ'], ['∗', '\\ast'],
   ['∅', '\\emptyset'], ['ℓ', '\\ell'],
   ['⇔', '\\Leftrightarrow'], ['↦', '\\mapsto'],
+  ['⟨', '\\langle'], ['⟩', '\\rangle'], ['‖', '\\|'], ['⊤', '\\top'],
+  ['⟹', '\\Longrightarrow'], ['⟸', '\\Longleftarrow'], ['⟺', '\\Longleftrightarrow'], ['⟶', '\\longrightarrow'],
+  ['⩽', '\\leqslant'], ['⩾', '\\geqslant'],
+  ['⋆', '\\star'], ['†', '\\dagger'], ['‡', '\\ddagger'], ['ℏ', '\\hbar'],
+  ['∄', '\\nexists'], ['∋', '\\ni'], ['↑', '\\uparrow'], ['↓', '\\downarrow'],
+  ['ℵ', '\\aleph'], ['∠', '\\angle'],
+  ['⌊', '\\lfloor'], ['⌋', '\\rfloor'], ['⌈', '\\lceil'], ['⌉', '\\rceil'],
 ]);
 
 const ACCENT_MAP: Map<string, string> = new Map([
@@ -101,7 +108,24 @@ const KNOWN_FUNCTIONS = new Set([
   'sinh', 'cosh', 'tanh', 'coth',
   'log', 'ln', 'exp', 'lim', 'max', 'min',
   'sup', 'inf', 'det', 'dim', 'gcd', 'deg',
-  'arg', 'hom', 'ker',
+  'arg', 'hom', 'ker', 'Pr', 'liminf', 'limsup',
+]);
+
+/** Functions whose limits go under the name, as in latex-to-omml.ts. */
+const LIMIT_FUNCTIONS = new Set(['lim', 'liminf', 'limsup', 'max', 'min', 'sup', 'inf', 'det', 'gcd', 'Pr']);
+
+/** Function names that LaTeX sets with a space, keyed by how Word shows them. */
+const SPACED_FUNCTION_NAMES: Map<string, string> = new Map([['lim inf', 'liminf'], ['lim sup', 'limsup']]);
+
+/** m:scr values and the math alphabet commands that produce them. */
+const SCRIPT_ALPHABETS: Map<string, string> = new Map([
+  ['script', '\\mathcal'], ['double-struck', '\\mathbb'], ['fraktur', '\\mathfrak'],
+  ['sans-serif', '\\mathsf'], ['monospace', '\\mathtt'],
+]);
+
+/** m:sty values other than p (plain), with the math alphabet commands that produce them. */
+const STYLE_ALPHABETS: Map<string, string> = new Map([
+  ['b', '\\mathbf'], ['bi', '\\boldsymbol'], ['i', '\\mathit'],
 ]);
 
 /** Property/control tags that should be silently skipped during translation. */
@@ -148,9 +172,11 @@ export function escapeLatex(text: string): string {
  * Map a single character to its LaTeX command if one exists.
  * Characters not in the mapping table are returned unchanged.
  * Multi-character strings are processed character-by-character.
- * With `primeAsCommand`, ′ maps to \prime (for script math).
+ * With `primeAsCommand`, ′ maps to \prime (for script math). `separator`
+ * ends a command before a letter; inside a group such as \mathbf{…} it is
+ * `{}`, since a space there exports as a space.
  */
-export function unicodeToLatex(text: string, primeAsCommand = false): string {
+export function unicodeToLatex(text: string, primeAsCommand = false, separator = ' '): string {
   let result = '';
   const chars = [...text];
   for (let i = 0; i < chars.length; i++) {
@@ -159,10 +185,11 @@ export function unicodeToLatex(text: string, primeAsCommand = false): string {
     if (mapped) {
       result += mapped;
       // Prevent command-name capture when the next source character is an ASCII
-      // letter (e.g. αx -> \alpha x, not \alphax).
+      // letter (e.g. αx -> \alpha x, not \alphax). A control symbol such as \|
+      // needs no separator.
       const next = chars[i + 1];
-      if (next && /[A-Za-z]/.test(next)) {
-        result += ' ';
+      if (next && /[A-Za-z]/.test(next) && /[A-Za-z]$/.test(mapped)) {
+        result += separator;
       }
     } else {
       result += ch;
@@ -378,43 +405,91 @@ function translateRun(children: XmlNode[]): string {
   // Extract text from m:t nodes
   const text = extractText(children);
   if (!text) return '';
+  return runTextLatex(text, style, script);
+}
 
-  // Detect hidden comment runs: text starts with \u200B (zero-width space)
-  if (text.charAt(0) === '\u200B') {
-    const payload = text.slice(1); // remove \u200B prefix
-    const pctIdx = payload.indexOf('%');
-    if (pctIdx !== -1) {
-      const whitespace = payload.slice(0, pctIdx);
-      const afterPct = payload.slice(pctIdx + 1);
-      // Line-continuation: nothing between % and \n (or just \n)
-      if (afterPct === '\n') {
-        return whitespace + '%\n';
-      }
-      // Regular comment: restore {whitespace}%{comment_text} (includes \n if original had one)
-      return whitespace + '%' + afterPct;
-    }
-    // Fallback: suppress malformed hidden runs (no % found)
-    return '';
-  }
+/** Where a run's text goes: into the equation, or into an \operatorname name. */
+type RunContext = 'math' | 'name';
 
-  // Primes in script math (′, as \prime exports) become \prime; a raw ′ in
-  // LaTeX source breaks pdflatex. Base-level and text-mode runs keep the character.
-  const textMode = style === 'p' && /\s/.test(text);
-  const mapped = unicodeToLatex(text, scriptDepth > 0 && !textMode);
-  if (script === 'script') {
-    return '\\mathcal{' + mapped + '}';
-  }
-  if (style === 'p') {
-    // \mathrm{} collapses interior spaces when re-rendered by LaTeX/KaTeX;
-    // plain-style runs containing whitespace must round-trip as \text{}.
-    // Test the original text, not `mapped` — unicodeToLatex inserts synthetic
-    // separator spaces after commands (αx → \alpha x) that are not prose.
-    if (/\s/.test(text)) {
-      return '\\text{' + mapped + '}';
+/**
+ * LaTeX for the text of a math run. The mode, escaping, command separators,
+ * and primes for every kind of run are decided here, and latex-to-omml.ts
+ * reads each form back in the matching parse mode:
+ *
+ * - A hidden comment run comes back as its % comment.
+ * - A function name is text with its symbols inline, as \operatorname{} allows.
+ * - A bare run is math: symbols become commands, and ′ is ' at the base level
+ *   and \prime in a script or limit (a raw ′ breaks pdflatex). Reserved
+ *   characters stay as they are, since the export keeps math escapes such as
+ *   \% and unknown commands as literal text.
+ * - An upright run with spaces, apostrophes, or reserved characters is text
+ *   (see textModeLatex): \mathrm{} drops spaces and reads ' as a prime.
+ * - Any other styled run is math in a group, \mathrm{} or an alphabet such
+ *   as \mathbf{}. # $ % & _ { } take a backslash. ~ ^ \ have no math escape,
+ *   so a run with one goes in \text{} inside the group.
+ *
+ * In a group, a command ends with {} before a letter, since a space there
+ * would export as a space; bare math keeps the readable space.
+ */
+function runTextLatex(text: string, style: string, script: string, context: RunContext = 'math'): string {
+  if (text.charAt(0) === '\u200B') return hiddenCommentLatex(text);
+  if (context === 'name') return unicodeToLatex(escapeLatex(text), false, '{}');
+
+  const mathLatex = (source: string, separator: string) =>
+    unicodeToLatex(source, scriptDepth > 0, separator).replace(/′/g, "'");
+  const alphabet = SCRIPT_ALPHABETS.get(script) ?? STYLE_ALPHABETS.get(style);
+  const group = alphabet ?? (style === 'p' ? '\\mathrm' : '');
+  if (!group) return mathLatex(text, ' ');
+  if (!alphabet && /[\s'#$%&_{}~^\\]/.test(text)) return textModeLatex(text);
+  if (/[~^\\]/.test(text)) return group + '{\\text{' + escapeLatex(text) + '}}';
+  return group + '{' + mathLatex(text.replace(/[#$%&_{}]/g, ch => '\\' + ch), '{}') + '}';
+}
+
+/** A hidden comment run (text after a \u200B marker) as its LaTeX comment. */
+function hiddenCommentLatex(text: string): string {
+  const payload = text.slice(1); // remove \u200B prefix
+  const pctIdx = payload.indexOf('%');
+  if (pctIdx !== -1) {
+    const whitespace = payload.slice(0, pctIdx);
+    const afterPct = payload.slice(pctIdx + 1);
+    // Line-continuation: nothing between % and \n (or just \n)
+    if (afterPct === '\n') {
+      return whitespace + '%\n';
     }
-    return '\\mathrm{' + mapped + '}';
+    // Regular comment: restore {whitespace}%{comment_text} (includes \n if original had one)
+    return whitespace + '%' + afterPct;
   }
-  return mapped;
+  // Fallback: suppress malformed hidden runs (no % found)
+  return '';
+}
+
+/**
+ * LaTeX for normal text in an equation. Math commands are invalid inside
+ * \text{}, so characters that map to one sit between the text segments as
+ * \mathrm{…}, and reserved characters are escaped. All of it re-exports as
+ * plain-style runs.
+ */
+function textModeLatex(text: string): string {
+  let latex = '';
+  let prose = '';
+  let symbols = '';
+  const flush = () => {
+    if (prose) latex += '\\text{' + escapeLatex(prose) + '}';
+    if (symbols) latex += '\\mathrm{' + unicodeToLatex(symbols) + '}';
+    prose = '';
+    symbols = '';
+  };
+  for (const ch of text) {
+    if (UNICODE_LATEX_MAP.has(ch)) {
+      if (prose) flush();
+      symbols += ch;
+    } else {
+      if (symbols) flush();
+      prose += ch;
+    }
+  }
+  flush();
+  return latex;
 }
 
 
@@ -447,8 +522,10 @@ function scriptArg(latex: string): string {
   if (latex.length === 1) return latex;
   // Single LaTeX command like \alpha
   if (/^\\[a-zA-Z]+$/.test(latex)) return latex;
-  // Single LaTeX command with one braced argument like \mathcal{A}
-  if (/^\\[a-zA-Z]+\{[^{}]*\}$/.test(latex)) return latex;
+  // Single LaTeX command with one braced argument like \mathcal{A}. A function
+  // such as \sin{x} takes no argument, so it needs the braces: {\sin{x}}^2.
+  const command = /^\\([a-zA-Z]+)\{[^{}]*\}$/.exec(latex);
+  if (command && !KNOWN_FUNCTIONS.has(command[1])) return latex;
   return '{' + latex + '}';
 }
 
@@ -573,7 +650,53 @@ function translateNary(children: XmlNode[]): string {
   const sub = (subHide || !subLatex) ? '' : '_' + scriptArg(subLatex);
   const sup = (supHide || !supLatex) ? '' : '^' + scriptArg(supLatex);
   const body = ommlToLatex(findChild(children, 'm:e'));
-  return appendLatex(op + limits + sub + sup, body);
+  // Export takes a leading bracket group as the whole body, so brace a body
+  // that continues past it (Word's ∏ over (1-x)y) to keep the rest inside.
+  return appendLatex(op + limits + sub + sup, leadingGroupEndsEarly(body) ? '{' + body + '}' : body);
+}
+
+/** Whether `latex` opens with ( or [ and closes that bracket before its end. */
+function leadingGroupEndsEarly(latex: string): boolean {
+  if (/^\\left(?![A-Za-z])/.test(latex)) return leftRightGroupEndsEarly(latex);
+  const open = latex.charAt(0);
+  const close = open === '(' ? ')' : open === '[' ? ']' : '';
+  if (!close) return false;
+  let depth = 0;
+  let braces = 0;
+  for (let i = 0; i < latex.length; i++) {
+    const ch = latex.charAt(i);
+    if (ch === '\\') {
+      i++; // skip the escaped or command character
+    } else if (ch === '{') {
+      braces++;
+    } else if (ch === '}') {
+      braces--;
+    } else if (braces === 0 && ch === open) {
+      depth++;
+    } else if (braces === 0 && ch === close && --depth === 0) {
+      return latex.slice(i + 1).trim() !== '';
+    }
+  }
+  return false;
+}
+
+/** leadingGroupEndsEarly for LaTeX that starts with a \left…\right pair. */
+function leftRightGroupEndsEarly(latex: string): boolean {
+  let depth = 0;
+  for (let i = 0; i < latex.length; i++) {
+    if (latex.charAt(i) !== '\\') continue;
+    const command = /^\\(?:[A-Za-z]+|.)/.exec(latex.slice(i))![0];
+    i += command.length;
+    if (command === '\\left') {
+      depth++;
+    } else if (command === '\\right' && --depth === 0) {
+      // Skip the closing delimiter: a command such as \rangle, or one character.
+      const delimiter = /^(?:\\(?:[A-Za-z]+|.)|.)?/.exec(latex.slice(i))![0];
+      return latex.slice(i + delimiter.length).trim() !== '';
+    }
+    i--;
+  }
+  return false;
 }
 
 
@@ -634,13 +757,31 @@ function translateDelimiter(children: XmlNode[]): string {
       }
 
       // Reuse already-computed innerLatex for default path
-      return `${begChr}${innerLatex}${endChr}`;
+      return delimitedLatex(begChr, innerLatex, endChr);
     }
   }
 
   // Default behavior
   const inner = elements.map(e => ommlToLatex(e)).join(sepChr);
-  return `${begChr}${inner}${endChr}`;
+  return delimitedLatex(begChr, inner, endChr);
+}
+
+/** The command for a delimiter character that needs one, such as ⟨ or {. */
+function delimiterCommand(chr: string): string | undefined {
+  return chr === '{' || chr === '}' ? '\\' + chr : UNICODE_LATEX_MAP.get(chr);
+}
+
+/**
+ * LaTeX for a Word delimiter. Brackets typed as characters import bare, as
+ * (x). One that needs a command, such as ⟨, gets \left and \right, since a
+ * bare \langle re-exports as text instead of a delimiter.
+ */
+function delimitedLatex(begChr: string, inner: string, endChr: string): string {
+  if (!delimiterCommand(begChr) && !delimiterCommand(endChr)) {
+    return begChr + inner + endChr;
+  }
+  const side = (chr: string) => delimiterCommand(chr) ?? (chr || '.');
+  return appendLatex('\\left' + side(begChr), inner) + '\\right' + side(endChr);
 }
 
 
@@ -678,26 +819,85 @@ function translateMatrix(children: XmlNode[]): string {
 
 function translateFunction(children: XmlNode[]): string {
   // Extract function name from m:fName
-  const fNameChildren = findChild(children, 'm:fName');
-  let name = ommlToLatex(fNameChildren);
-
-  // Strip \mathrm{} / \text{} wrapping that translateRun may have added
-  const mathrm = /^\\(?:mathrm|text)\{(.+)\}$/.exec(name);
-  if (mathrm) {
-    name = mathrm[1];
+  const { nameNodes, scripts, limitsUnder } = splitFunctionName(findChild(children, 'm:fName'));
+  const nameText = runsText(nameNodes);
+  let name: string;
+  if (nameText !== undefined) {
+    name = SPACED_FUNCTION_NAMES.get(nameText) ?? runTextLatex(nameText, '', '', 'name');
+  } else {
+    name = ommlToLatex(nameNodes);
+    // Strip a single \mathrm{} / \text{} wrapping that translateRun may have added
+    const mathrm = /^\\(?:mathrm|text)\{([^{}]*)\}$/.exec(name);
+    if (mathrm) {
+      name = mathrm[1];
+    }
   }
 
   // Determine the LaTeX command for the function name
   let funcCmd: string;
   if (KNOWN_FUNCTIONS.has(name)) {
-    funcCmd = `\\${name}`;
+    // Scripts placed against the function's default need \limits or \nolimits.
+    const placement = scripts && limitsUnder !== LIMIT_FUNCTIONS.has(name)
+      ? (limitsUnder ? '\\limits' : '\\nolimits')
+      : '';
+    funcCmd = `\\${name}${placement}`;
   } else {
-    funcCmd = `\\operatorname{${name}}`;
+    funcCmd = `\\operatorname${limitsUnder ? '*' : ''}{${name}}`;
   }
 
   // Translate the argument
   const arg = ommlToLatex(findChild(children, 'm:e'));
-  return `${funcCmd}{${arg}}`;
+  return `${funcCmd}${scripts}{${arg}}`;
+}
+
+/** The text of nodes that are all math runs, skipping hidden comment runs; otherwise undefined. */
+function runsText(nodes: XmlNode[]): string | undefined {
+  let text = '';
+  for (const node of nodes) {
+    if (Object.keys(node).some(key => SKIP_TAGS.has(key))) continue;
+    if (node['m:r'] === undefined) return undefined;
+    const runText = extractText(asXmlNodes(node['m:r']));
+    if (runText.charAt(0) !== '\u200B') text += runText;
+  }
+  return text;
+}
+
+/**
+ * Word keeps a function's scripts in m:fName: m:limLow and m:limUpp put a
+ * limit under or over the name (lim, max), m:sSub, m:sSup, and m:sSubSup put
+ * scripts beside it (log₂, sin²). Peel them off so the name can be matched.
+ */
+function splitFunctionName(fName: XmlNode[]): { nameNodes: XmlNode[]; scripts: string; limitsUnder: boolean } {
+  const content = fName.filter(node => !Object.keys(node).some(key => SKIP_TAGS.has(key)));
+  const node = content.length === 1 ? content[0] : undefined;
+  const parts = (key: string) => asXmlNodes(node?.[key]);
+  const script = (latex: string) => scriptArg(latex);
+
+  if (node?.['m:limLow'] !== undefined || node?.['m:limUpp'] !== undefined) {
+    const key = node['m:limLow'] !== undefined ? 'm:limLow' : 'm:limUpp';
+    const inner = splitFunctionName(findChild(parts(key), 'm:e'));
+    const lim = scriptToLatex(findChild(parts(key), 'm:lim'));
+    const op = key === 'm:limLow' ? '_' : '^';
+    return { nameNodes: inner.nameNodes, scripts: inner.scripts + op + script(lim), limitsUnder: true };
+  }
+  if (node?.['m:sSub'] !== undefined) {
+    const sub = scriptToLatex(findChild(parts('m:sSub'), 'm:sub'));
+    return { nameNodes: findChild(parts('m:sSub'), 'm:e'), scripts: '_' + script(sub), limitsUnder: false };
+  }
+  if (node?.['m:sSup'] !== undefined) {
+    const sup = scriptToLatex(findChild(parts('m:sSup'), 'm:sup'));
+    return { nameNodes: findChild(parts('m:sSup'), 'm:e'), scripts: '^' + script(sup), limitsUnder: false };
+  }
+  if (node?.['m:sSubSup'] !== undefined) {
+    const sub = scriptToLatex(findChild(parts('m:sSubSup'), 'm:sub'));
+    const sup = scriptToLatex(findChild(parts('m:sSubSup'), 'm:sup'));
+    return {
+      nameNodes: findChild(parts('m:sSubSup'), 'm:e'),
+      scripts: '_' + script(sub) + '^' + script(sup),
+      limitsUnder: false,
+    };
+  }
+  return { nameNodes: fName, scripts: '', limitsUnder: false };
 }
 
 
@@ -831,7 +1031,10 @@ function translateGroupChr(children: XmlNode[]): string {
  */
 function appendLatex(acc: string, chunk: string): string {
   if (chunk && /\\[A-Za-z]+$/.test(acc) && /^[A-Za-z]/.test(chunk)) {
-    return acc + ' ' + chunk;
+    // A \left or \right delimiter such as \rangle ends with {} instead, since
+    // the space would export as a space. Other commands keep the space, as
+    // Markdown already written with them does.
+    return acc + (/\\(?:left|right)\\[A-Za-z]+$/.test(acc) ? '{}' : ' ') + chunk;
   }
   return acc + chunk;
 }

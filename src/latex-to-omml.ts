@@ -43,9 +43,19 @@ const LATEX_UNICODE_MAP: Map<string, string> = new Map([
   ['\\perp', '⊥'], ['\\circ', '∘'], ['\\ast', '∗'],
   ['\\emptyset', '∅'], ['\\ell', 'ℓ'],
   ['\\Leftrightarrow', '⇔'], ['\\mapsto', '↦'],
+  ['\\langle', '⟨'], ['\\rangle', '⟩'], ['\\|', '‖'], ['\\top', '⊤'],
+  // ⟹ and ⟺ map back to these, not to \implies and \iff, which add spacing
+  ['\\Longrightarrow', '⟹'], ['\\Longleftarrow', '⟸'], ['\\Longleftrightarrow', '⟺'], ['\\longrightarrow', '⟶'],
+  ['\\leqslant', '⩽'], ['\\geqslant', '⩾'],
+  ['\\star', '⋆'], ['\\dagger', '†'], ['\\ddagger', '‡'], ['\\hbar', 'ℏ'],
+  ['\\nexists', '∄'], ['\\ni', '∋'], ['\\uparrow', '↑'], ['\\downarrow', '↓'],
+  ['\\aleph', 'ℵ'], ['\\angle', '∠'],
+  ['\\lfloor', '⌊'], ['\\rfloor', '⌋'], ['\\lceil', '⌈'], ['\\rceil', '⌉'],
   // One-way entries: omml.ts maps these characters back to the canonical
   // spelling above, except ′, which it keeps (f\prime renders a full-size prime)
   ['\\prime', '′'],
+  ['\\lvert', '|'], ['\\rvert', '|'], ['\\vert', '|'], ['\\Vert', '‖'], ['\\lVert', '‖'], ['\\rVert', '‖'],
+  ['\\bot', '⊥'], ['\\varnothing', '∅'], ['\\implies', '⟹'], ['\\iff', '⟺'],
   ['\\le', '≤'], ['\\ge', '≥'], ['\\ne', '≠'],
   ['\\rightarrow', '→'], ['\\gets', '←'],
   ['\\lnot', '¬'], ['\\wedge', '∧'], ['\\vee', '∨'],
@@ -81,7 +91,30 @@ const KNOWN_FUNCTIONS = new Set([
   'sinh', 'cosh', 'tanh', 'coth',
   'log', 'ln', 'exp', 'lim', 'max', 'min',
   'sup', 'inf', 'det', 'dim', 'gcd', 'deg',
-  'arg', 'hom', 'ker',
+  'arg', 'hom', 'ker', 'Pr', 'liminf', 'limsup',
+]);
+
+/** Functions whose limits go under the name (m:limLow), as in Word's lim. */
+const LIMIT_FUNCTIONS = new Set(['lim', 'liminf', 'limsup', 'max', 'min', 'sup', 'inf', 'det', 'gcd', 'Pr']);
+
+/** How omml.ts escapes reserved characters in text and styled groups, read back outside math mode. */
+const TEXT_ESCAPES: Map<string, string> = new Map([
+  ['\\#', '#'], ['\\$', '$'], ['\\%', '%'], ['\\&', '&'], ['\\_', '_'], ['\\{', '{'], ['\\}', '}'],
+  ['\\textbackslash', '\\'], ['\\textasciitilde', '~'], ['\\textasciicircum', '^'],
+]);
+
+/** Function names that LaTeX sets with a space. */
+const FUNCTION_NAMES: Map<string, string> = new Map([['liminf', 'lim inf'], ['limsup', 'lim sup']]);
+
+/** Math alphabet commands and the m:rPr that gives the same letters in Word. */
+const MATH_ALPHABETS: Map<string, string> = new Map([
+  ['\\mathbf', '<m:sty m:val="b"/>'],
+  ['\\boldsymbol', '<m:sty m:val="bi"/>'],
+  ['\\mathit', '<m:sty m:val="i"/>'],
+  ['\\mathbb', '<m:scr m:val="double-struck"/><m:sty m:val="p"/>'],
+  ['\\mathfrak', '<m:scr m:val="fraktur"/><m:sty m:val="p"/>'],
+  ['\\mathsf', '<m:scr m:val="sans-serif"/><m:sty m:val="p"/>'],
+  ['\\mathtt', '<m:scr m:val="monospace"/><m:sty m:val="p"/>'],
 ]);
 
 // ---------------------------------------------------------------------------
@@ -106,13 +139,26 @@ function makeRun(text: string): string {
   return '<m:r><m:t>' + escapeXmlChars(text) + '</m:t></m:r>';
 }
 
-function makeStyledRun(text: string): string {
-  return '<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>' + escapeXmlChars(text) + '</m:t></m:r>';
+/**
+ * A plain-style (upright, normal text) run. Text-mode content passes
+ * `preserveSpace` so Word keeps its leading and trailing spaces; math-mode
+ * commands such as \mathrm ignore spaces, as LaTeX does.
+ */
+function makeStyledRun(text: string, preserveSpace = false): string {
+  const t = preserveSpace && /^\s|\s$/.test(text) ? '<m:t xml:space="preserve">' : '<m:t>';
+  return '<m:r><m:rPr><m:sty m:val="p"/></m:rPr>' + t + escapeXmlChars(text) + '</m:t></m:r>';
+}
+
+function makeAlphabetRun(text: string, rPr: string): string {
+  return '<m:r><m:rPr>' + rPr + '</m:rPr><m:t>' + escapeXmlChars(text) + '</m:t></m:r>';
 }
 
 function makeHiddenCommentRun(text: string): string {
   return '<m:r><m:rPr><m:nor/></m:rPr><w:rPr><w:vanish/></w:rPr><m:t xml:space="preserve">\u200B' + escapeXmlChars(text) + '</m:t></m:r>';
 }
+
+/** A whole hidden comment run (see makeHiddenCommentRun), as a split separator. */
+const HIDDEN_RUN_RE = /(<m:r><m:rPr><m:nor\/><\/m:rPr><w:rPr><w:vanish\/><\/w:rPr><m:t xml:space="preserve">\u200B[^<]*<\/m:t><\/m:r>)/;
 
 function makeCalligraphicRun(text: string): string {
   return '<m:r><m:rPr><m:scr m:val="script"/><m:sty m:val="p"/></m:rPr><m:t>' + escapeXmlChars(text) + '</m:t></m:r>';
@@ -225,13 +271,47 @@ export function tokenize(latex: string): Token[] {
 // Parser
 // ---------------------------------------------------------------------------
 
+/**
+ * What the parser is reading. In 'math', ' is a prime and an escape such as
+ * \% stays literal, as it always has. In 'styled', the argument of \mathbf
+ * or \mathrm, ' is still a prime but escapes give their character. In
+ * 'text', \text{} and \operatorname names, ' is an apostrophe too. Each mode
+ * mirrors how omml.ts writes that context (see runTextLatex there).
+ */
+type ParseMode = 'math' | 'styled' | 'text';
+
 class Parser {
   private tokens: Token[];
   private pos: number;
+  private onUnknownCommand?: (command: string) => void;
+  private mode: ParseMode;
 
-  constructor(tokens: Token[]) {
+  constructor(tokens: Token[], onUnknownCommand?: (command: string) => void, mode: ParseMode = 'math') {
     this.tokens = tokens;
     this.pos = 0;
+    this.onUnknownCommand = onUnknownCommand;
+    this.mode = mode;
+  }
+
+  /** Text as Word shows it: outside text mode, ' is a prime, as Word's own autocorrect makes it. */
+  private mathText(text: string): string {
+    return this.mode === 'text' ? text : text.replace(/'/g, '′');
+  }
+
+  /** Parse a group in the given mode. */
+  private parseGroupIn(mode: ParseMode): string {
+    const outer = this.mode;
+    this.mode = mode;
+    try {
+      return this.parseGroup();
+    } finally {
+      this.mode = outer;
+    }
+  }
+
+  /** Parse a group whose content is text, returning that text. */
+  private parseTextGroup(): string {
+    return this.extractText(this.parseGroupIn('text'));
   }
 
   private peek(): Token | undefined {
@@ -273,7 +353,7 @@ class Parser {
         if (rest) {
           this.tokens.splice(this.pos, 0, { type: 'text', value: rest, pos: next.pos });
         }
-        return makeRun(first);
+        return makeRun(this.mathText(first));
       }
       return this.parseToken(next);
     }
@@ -284,7 +364,7 @@ class Parser {
         case 'command':
           return this.parseCommand(token.value);
         case 'text':
-          return makeRun(token.value);
+          return makeRun(this.mathText(token.value));
         case 'caret':
         case 'underscore':
         case 'ampersand':
@@ -348,6 +428,11 @@ class Parser {
   }
 
   private parseCommand(cmd: string): string {
+    const escaped = this.mode === 'math' ? undefined : TEXT_ESCAPES.get(cmd);
+    if (escaped !== undefined) {
+      return makeRun(escaped);
+    }
+
     // Greek letters and symbols
     const unicode = LATEX_UNICODE_MAP.get(cmd);
     if (unicode) {
@@ -368,9 +453,15 @@ class Parser {
     }
 
     // Functions
-    if (KNOWN_FUNCTIONS.has(cmd.slice(1))) {
-      const arg = this.parseBracketedOperand() ?? this.parseGroup();
-      return '<m:func><m:fName>' + makeStyledRun(cmd.slice(1)) + '</m:fName><m:e>' + arg + '</m:e></m:func>';
+    const funcName = cmd.slice(1);
+    if (KNOWN_FUNCTIONS.has(funcName)) {
+      return this.parseFunction(makeStyledRun(FUNCTION_NAMES.get(funcName) ?? funcName), LIMIT_FUNCTIONS.has(funcName));
+    }
+
+    // Math alphabets
+    const alphabet = MATH_ALPHABETS.get(cmd);
+    if (alphabet) {
+      return this.styleGroup(text => makeAlphabetRun(text, alphabet));
     }
 
     switch (cmd) {
@@ -406,23 +497,19 @@ class Parser {
       case '\\begin':
         return this.parseEnvironment();
 
-      case '\\mathrm': {
-        const text = this.parseGroup();
-        return makeStyledRun(this.extractText(text));
-      }
+      case '\\mathrm':
+        return this.styleGroup(text => makeStyledRun(text));
 
-      case '\\mathcal': {
-        const calText = this.parseGroup();
-        return makeCalligraphicRun(this.extractText(calText));
-      }
+      case '\\mathcal':
+        return this.styleGroup(makeCalligraphicRun);
 
       case '\\operatorname': {
         // Intentionally consumes a following group as the function argument,
         // mirroring KNOWN_FUNCTIONS (e.g. \sin{x}) for round-trip fidelity
         // with the OMML→LaTeX direction which emits \operatorname{name}{arg}.
-        const name = this.parseGroup();
-        const funcArg = this.parseBracketedOperand() ?? this.parseGroup();
-        return '<m:func><m:fName>' + makeStyledRun(this.extractText(name)) + '</m:fName><m:e>' + funcArg + '</m:e></m:func>';
+        // \operatorname* puts limits under the name, like \lim.
+        const limitsUnder = this.consumeStarVariant();
+        return this.parseFunction(makeStyledRun(this.parseTextGroup()), limitsUnder);
       }
 
       case '\\limits':
@@ -451,10 +538,8 @@ class Parser {
       }
 
       // \text{} — same as \mathrm
-      case '\\text': {
-        const textContent = this.parseGroup();
-        return makeStyledRun(this.extractText(textContent));
-      }
+      case '\\text':
+        return makeStyledRun(this.parseTextGroup(), true);
 
       // \boxed{}
       case '\\boxed': {
@@ -514,12 +599,12 @@ class Parser {
       // Tags and labels (silently consumed)
       case '\\tag': {
         this.consumeStarVariant();
-        this.parseGroup();
+        this.discardGroup();
         return '';
       }
 
       case '\\label': {
-        this.parseGroup();
+        this.discardGroup();
         return '';
       }
 
@@ -534,10 +619,8 @@ class Parser {
 
       // Intertext
       case '\\intertext':
-      case '\\shortintertext': {
-        const itContent = this.parseGroup();
-        return makeStyledRun(this.extractText(itContent));
-      }
+      case '\\shortintertext':
+        return makeStyledRun(this.parseTextGroup(), true);
 
       // Shove commands — emit inner content
       case '\\shoveleft':
@@ -571,7 +654,10 @@ class Parser {
         return makeStyledRun('mod');
 
       default:
-        // Unsupported command - fallback
+        // Unsupported command - fallback. An escaped reserved character in
+        // math (\%, \_) stays literal so it reads back unchanged; it is valid
+        // LaTeX, so it is not reported.
+        if (!(cmd.length === 2 && TEXT_ESCAPES.has(cmd))) this.onUnknownCommand?.(cmd);
         return makeRun(cmd);
     }
   }
@@ -661,7 +747,7 @@ class Parser {
           operand[0].value = operand[0].value.slice(lead);
           const rest = token.value.slice(j + 1);
           this.tokens.splice(this.pos, i + 1 - this.pos, ...(rest ? [{ type: 'text' as const, value: rest, pos: token.pos + j + 1 }] : []));
-          return new Parser(operand).parseExpression(false);
+          return new Parser(operand, this.onUnknownCommand, this.mode).parseExpression(false);
         }
       }
     }
@@ -685,10 +771,10 @@ class Parser {
       }
     } else if (leftToken.type === 'command') {
       switch (leftToken.value) {
-        case '\\{': begChr = '{'; break;
+        case '\\{': case '\\lbrace': begChr = '{'; break;
         case '\\|': begChr = '\u2016'; break;
         case '\\[': begChr = '['; break;
-        default: begChr = leftToken.value.slice(1); break;
+        default: begChr = this.delimiterCommandChr(leftToken.value); break;
       }
     }
 
@@ -719,25 +805,51 @@ class Parser {
       }
     } else if (delimToken.type === 'command') {
       switch (delimToken.value) {
-        case '\\}': endChr = '}'; break;
+        case '\\}': case '\\rbrace': endChr = '}'; break;
         case '\\|': endChr = '\u2016'; break;
         case '\\]': endChr = ']'; break;
-        default: endChr = delimToken.value.slice(1); break;
+        default: endChr = this.delimiterCommandChr(delimToken.value); break;
       }
     }
 
     return '<m:d><m:dPr><m:begChr m:val="' + escapeXmlChars(begChr) + '"/><m:endChr m:val="' + escapeXmlChars(endChr) + '"/></m:dPr><m:e>' + content + '</m:e></m:d>';
   }
 
-  /** Consume a `*` prefix from the next text token (for `\tag*` variants). */
-  private consumeStarVariant(): void {
+  /** Consume a `*` prefix from the next text token (for `\tag*` variants); report whether there was one. */
+  private consumeStarVariant(): boolean {
     if (this.peek()?.type === 'text' && this.peek()?.value.startsWith('*')) {
       const starToken = this.consume()!;
       const rest = starToken.value.slice(1);
       if (rest) {
         this.tokens.splice(this.pos, 0, { type: 'text', value: rest, pos: starToken.pos });
       }
+      return true;
     }
+    return false;
+  }
+
+  /**
+   * Parse a function's scripts and argument after its name. Word keeps the
+   * scripts in m:fName: under the name (m:limLow, m:limUpp) for limit-style
+   * functions such as \lim and \max, beside it (\log_2, \sin^2) otherwise.
+   */
+  private parseFunction(name: string, limitsUnder: boolean): string {
+    const placement = this.consumeAfterWhitespace(
+      t => t.type === 'command' && (t.value === '\\limits' || t.value === '\\nolimits'),
+    );
+    if (placement) limitsUnder = placement.value === '\\limits';
+    let fName = name;
+    if (limitsUnder) {
+      let script: Token | undefined;
+      while ((script = this.consumeAfterWhitespace(t => t.type === 'underscore' || t.type === 'caret'))) {
+        const tag = script.type === 'underscore' ? 'm:limLow' : 'm:limUpp';
+        fName = '<' + tag + '><m:e>' + fName + '</m:e><m:lim>' + this.parseGroup() + '</m:lim></' + tag + '>';
+      }
+    } else {
+      fName = this.parseScriptsForBase(fName);
+    }
+    const arg = this.parseScriptsForBase(this.parseBracketedOperand() ?? this.parseGroup());
+    return '<m:func><m:fName>' + fName + '</m:fName><m:e>' + arg + '</m:e></m:func>';
   }
 
   /**
@@ -783,7 +895,7 @@ class Parser {
           // not text tokens and keep their runs.
           const next = this.peek();
           const beforeScript = next?.type === 'caret' || next?.type === 'underscore';
-          for (const ch of beforeScript ? consumed.value.replace(/[ \t\r\n]+$/, '') : consumed.value) {
+          for (const ch of this.mathText(beforeScript ? consumed.value.replace(/[ \t\r\n]+$/, '') : consumed.value)) {
             atoms.push(makeRun(ch));
           }
         } else if (consumed.type === 'comment' || consumed.type === 'line_continuation') {
@@ -874,6 +986,7 @@ class Parser {
       }
 
       default:
+        this.onUnknownCommand?.('\\begin{' + envName + '}');
         return makeRun('\\begin{' + envName + '}');
     }
   }
@@ -932,7 +1045,7 @@ class Parser {
         if (token.type === 'command' && (token.value === '\\tag' || token.value === '\\label')) {
           this.consume();
           if (token.value === '\\tag') this.consumeStarVariant();
-          this.parseGroup(); // consume argument, emit nothing
+          this.discardGroup();
           return true;
         }
         if (token.type === 'command' && (token.value === '\\notag' || token.value === '\\nonumber')) {
@@ -970,15 +1083,43 @@ class Parser {
     }
   }
 
-  private extractText(omml: string): string {
-    // Simple extraction - just get text between <m:t> tags.
-    // NOTE: <m:t> content has already been escaped via escapeXmlChars().
-    const matches = omml.match(/<m:t>([^<]*)<\/m:t>/g);
-    if (matches) {
-      const escaped = matches.map(m => m.replace(/<\/?m:t>/g, '')).join('');
-      return unescapeXmlChars(escaped);
+  /** The character for a \\left or \\right delimiter command, reporting one it doesn't know. */
+  private delimiterCommandChr(cmd: string): string {
+    const chr = LATEX_UNICODE_MAP.get(cmd);
+    if (chr !== undefined) return chr;
+    this.onUnknownCommand?.(cmd);
+    return cmd.slice(1);
+  }
+
+  /** Parse a group whose content is dropped, such as a \\label, without reporting its commands. */
+  private discardGroup(): void {
+    const onUnknownCommand = this.onUnknownCommand;
+    this.onUnknownCommand = undefined;
+    try {
+      this.parseGroup();
+    } finally {
+      this.onUnknownCommand = onUnknownCommand;
     }
-    return '';
+  }
+
+  /**
+   * Parse a group as styled text, such as the argument of \mathbf. Its
+   * comments stay as hidden runs between the styled runs.
+   */
+  private styleGroup(style: (text: string) => string): string {
+    return this.parseGroupIn('styled').split(HIDDEN_RUN_RE).map((part, i) => {
+      if (i % 2 === 1) return part;
+      const text = this.extractText(part);
+      return text ? style(text) : '';
+    }).join('');
+  }
+
+  private extractText(omml: string): string {
+    // Simple extraction - just get text between <m:t> tags, skipping hidden
+    // comment runs (which start with \u200B).
+    // NOTE: <m:t> content has already been escaped via escapeXmlChars().
+    const matches = [...omml.matchAll(/<m:t(?: xml:space="preserve")?>(?!\u200B)([^<]*)<\/m:t>/g)];
+    return unescapeXmlChars(matches.map(m => m[1]).join(''));
   }
 
   /** Parse tokens until the stop condition triggers.
@@ -994,13 +1135,17 @@ class Parser {
 // Main entry point
 // ---------------------------------------------------------------------------
 
-/** Convert a LaTeX math string to OMML XML string. */
-export function latexToOmml(latex: string): string {
+/**
+ * Convert a LaTeX math string to OMML XML string. `onUnknownCommand` hears
+ * each command or environment that has no OMML form and is exported as
+ * literal text.
+ */
+export function latexToOmml(latex: string, onUnknownCommand?: (command: string) => void): string {
   if (!latex.trim()) {
     return '';
   }
 
   const tokens = tokenize(latex);
-  const parser = new Parser(tokens);
+  const parser = new Parser(tokens, onUnknownCommand);
   return parser.parseExpression(false);
 }

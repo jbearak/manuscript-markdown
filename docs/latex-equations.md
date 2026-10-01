@@ -103,8 +103,23 @@ Each variant has its own character, so `\epsilon` (ϵ) and `\varepsilon` (ε) st
 | ≫ | `\gg` | | ∅ | `\emptyset` |
 | ℓ | `\ell` | | ⇔ | `\Leftrightarrow` |
 | ′ | `\prime` | | ↦ | `\mapsto` |
+| ⟨ | `\langle` | | ⟩ | `\rangle` |
+| ⊤ | `\top` | | ∋ | `\ni` |
+| ⟹ | `\Longrightarrow` | | ⟸ | `\Longleftarrow` |
+| ⟺ | `\Longleftrightarrow` | | ⟶ | `\longrightarrow` |
+| ⩽ | `\leqslant` | | ⩾ | `\geqslant` |
+| ⋆ | `\star` | | ∄ | `\nexists` |
+| † | `\dagger` | | ‡ | `\ddagger` |
+| ℏ | `\hbar` | | ∠ | `\angle` |
+| ↑ | `\uparrow` | | ↓ | `\downarrow` |
+| ℵ | `\aleph` | | | |
+| ⌊ ⌋ | `\lfloor` `\rfloor` | | ⌈ ⌉ | `\lceil` `\rceil` |
 
-The aliases `\le`, `\ge`, `\ne`, `\rightarrow`, `\gets`, `\lnot`, `\wedge`, and `\vee` also work. Re-import writes them as `\leq`, `\geq`, `\neq`, `\to`, `\leftarrow`, `\neg`, `\land`, and `\lor`. On re-import, a ′ in a subscript, superscript, or limit comes back as `\prime`. One at the base level of the equation stays the character itself.
+The aliases `\le`, `\ge`, `\ne`, `\rightarrow`, `\gets`, `\lnot`, `\wedge`, and `\vee` also work. Re-import writes them as `\leq`, `\geq`, `\neq`, `\to`, `\leftarrow`, `\neg`, `\land`, and `\lor`. The double bar ‖ is `\|`. Likewise `\vert`, `\lvert`, and `\rvert` come back as `|`, `\Vert`, `\lVert`, and `\rVert` as `\|`, `\bot` as `\perp`, `\varnothing` as `\emptyset`, and `\implies` and `\iff` as `\Longrightarrow` and `\Longleftrightarrow`.
+
+A `'` in math exports as the prime ′. On re-import, a ′ in a subscript, superscript, or limit comes back as `\prime`, and one at the base level of the equation as `'`. An apostrophe inside `\text{}` stays an apostrophe.
+
+A command the converter doesn't know exports as literal text, such as `\foo` in the equation. The export warns once for each such command. Escaped characters such as `\%` and `\#` outside `\text{}` also export as written, backslash included, but without a warning. Inside `\text{}`, `\mathrm{}`, and the math alphabets below, they export as the plain character.
 
 ## Dots
 
@@ -148,7 +163,7 @@ To place limits above/below (instead of as subscript/superscript):
 
 `\nolimits` does the reverse and keeps the limits beside the operator. Re-import drops it, so the limits fall back to the default placement.
 
-A group in parentheses or brackets right after the operator becomes its body in Word. In `\prod_{t=1}^{12}(1-\omega_t)`, all of `(1-\omega_t)` sits under the product. An operator written without a limit gets a hidden empty slot, so Word draws no placeholder box where the limit would go.
+A group in parentheses or brackets, or a `\left` and `\right` pair, right after the operator becomes its body in Word. In `\prod_{t=1}^{12}(1-\omega_t)`, all of `(1-\omega_t)` sits under the product. To put more under it, brace the body: `\prod{(1-x)y}`. Re-import adds those braces when a body from Word runs past its leading group. An operator written without a limit gets a hidden empty slot, so Word draws no placeholder box where the limit would go.
 
 ## Functions
 
@@ -160,7 +175,7 @@ arcsin  arccos  arctan
 sinh  cosh  tanh  coth
 log   ln    exp   lim   max   min
 sup   inf   det   dim   gcd   deg
-arg   hom   ker
+arg   hom   ker   Pr    liminf  limsup
 ```
 
 ```latex
@@ -175,6 +190,31 @@ For functions not in this list, use `\operatorname{name}`:
 ```
 
 A function name followed by `(...)` or `[...]` takes the whole group as its argument, as in `\log(x+1)` or `\operatorname{margin}(j)`. Re-import adds braces around it: `\log{(x+1)}`.
+
+Scripts on a function name stay with the name, as Word places them. `\log_2 n` and `\sin^2 x` put the script beside the name. `\lim`, `\liminf`, `\limsup`, `\max`, `\min`, `\sup`, `\inf`, `\det`, `\gcd`, and `\Pr` put a subscript under the name, and so does `\operatorname*`:
+
+```latex
+\lim_{n \to \infty} a_n
+\max_i x_i
+\operatorname*{argmax}_x f(x)
+```
+
+`\limits` or `\nolimits` right after the name moves its scripts under or beside it, as in `\lim\nolimits_n a_n`. Re-import keeps the placement.
+
+## Math Alphabets
+
+| LaTeX | Word style |
+|-------|------------|
+| `\mathbf{x}` | bold upright |
+| `\boldsymbol{\beta}` | bold italic |
+| `\mathit{x}` | italic |
+| `\mathbb{R}` | double-struck |
+| `\mathfrak{g}` | Fraktur |
+| `\mathsf{A}` | sans-serif |
+| `\mathtt{v}` | monospace |
+| `\mathcal{L}` | script |
+
+Each takes plain letters or symbols. Scripts go outside: `\boldsymbol{\beta}_c`.
 
 ## Accents and Decorations
 
@@ -197,10 +237,14 @@ Auto-sizing with `\left` and `\right`:
 ```latex
 \left( \frac{a}{b} \right)      % parentheses
 \left[ x + y \right]            % brackets
-\left\{ a, b, c \right\}        % braces
+\left\{ a, b, c \right\}        % braces, also \lbrace \rbrace
 \left| x \right|                % absolute value
-\left\| v \right\|              % norm (double bars)
+\left\| v \right\|              % norm (double bars), also \Vert
+\left\langle u, v \right\rangle  % angle brackets
+\left\lfloor x \right\rfloor    % floor (also \lceil \rceil)
 ```
+
+On re-import, braces, angle brackets, floor and ceiling brackets, double bars, and arrows keep their `\left` and `\right`. Parentheses, square brackets, and single bars come back as plain characters, such as `(x)`.
 
 One-sided delimiter (invisible on the other side):
 
@@ -347,7 +391,7 @@ This is standard LaTeX behavior: because `%` starts a comment, everything from t
 
 ### Roundtrip behavior
 
-When a LaTeX equation containing `%` comments is exported to Word `.docx`, the comments are stripped from the visible equation but preserved as hidden elements within the OMML structure. They are invisible in Word. On re-import from `.docx` back to Markdown, the comments are restored at their original positions — including any whitespace before the `%`, so vertically aligned comments stay aligned after roundtrip.
+When a LaTeX equation containing `%` comments is exported to Word `.docx`, the comments are stripped from the visible equation but preserved as hidden elements within the OMML structure. They are invisible in Word. On re-import from `.docx` back to Markdown, the comments are restored at their original positions — including any whitespace before the `%`, so vertically aligned comments stay aligned after roundtrip. A comment inside `\mathbf{}`, `\mathrm{}`, or another alphabet command splits it in two: `\mathbf{x% note` with `y}` on the next line comes back as `\mathbf{x}% note` with `\mathbf{y}` on the next line.
 
 ## Binomial Coefficients
 
@@ -394,6 +438,8 @@ a \qquad b % double em space
 x = 0 \text{ if } y > 1
 \mathrm{constant}
 ```
+
+Spaces at the edges of `\text{}` show in Word. Normal text from Word that contains a symbol imports with the symbol outside the text, as in `\text{a }\mathrm{\times}\text{ b}`, since `\text{}` cannot hold math commands.
 
 ## Mod
 

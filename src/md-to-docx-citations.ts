@@ -811,8 +811,14 @@ export function generateBibliographyXml(
     '<w:p>' + fieldPPr + '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>';
 }
 
-export function generateMathXml(latex: string, display: boolean): string {
-  const omml = latexToOmml(latex);
+/**
+ * Generate an equation. Each LaTeX command or environment with no OMML form
+ * adds a warning to `warnings`; the converter drops duplicate warnings.
+ */
+export function generateMathXml(latex: string, display: boolean, warnings?: string[]): string {
+  const omml = latexToOmml(latex, warnings && (command => warnings.push(
+    'Equation uses unsupported LaTeX "' + command + '"; Word shows it as literal text.',
+  )));
 
   if (display) {
     return '<m:oMathPara><m:oMath>' + omml + '</m:oMath></m:oMathPara>';
