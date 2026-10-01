@@ -421,7 +421,9 @@ function translateRun(children: XmlNode[]): string {
   // Primes in script math (′, as \prime exports) become \prime; a raw ′ in
   // LaTeX source breaks pdflatex. In base-level math, ′ is LaTeX's '.
   // Text-mode runs keep the character.
-  const textMode = style === 'p' && /[\s']/.test(text);
+  // Spaces, apostrophes, and reserved characters need text mode: \mathrm{}
+  // drops spaces, reads ' as a prime, and cannot escape reserved characters.
+  const textMode = style === 'p' && /[\s'#$%&_{}~^\\]/.test(text);
   let mapped = unicodeToLatex(text, scriptDepth > 0 && !textMode);
   if (!textMode) mapped = mapped.replace(/′/g, "'");
   const alphabet = SCRIPT_ALPHABETS.get(script) ?? STYLE_ALPHABETS.get(style);
@@ -429,11 +431,8 @@ function translateRun(children: XmlNode[]): string {
     return alphabet + '{' + mapped + '}';
   }
   if (style === 'p') {
-    // \mathrm{} collapses interior spaces when re-rendered by LaTeX/KaTeX;
-    // plain-style runs containing whitespace must round-trip as \text{}, as
-    // must runs with an apostrophe, which math mode reads as a prime.
-    // Test the original text, not `mapped` — unicodeToLatex inserts synthetic
-    // separator spaces after commands (αx → \alpha x) that are not prose.
+    // Test the original text (textMode), not `mapped` — unicodeToLatex inserts
+    // synthetic separator spaces after commands (αx → \alpha x) that are not prose.
     if (textMode) {
       return textModeLatex(text);
     }

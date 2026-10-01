@@ -282,3 +282,18 @@ describe('review follow-ups, round 2', () => {
     expect(latexToOmml(latex)).toBe(func(styled('a_b'), run('x')));
   });
 });
+
+describe('review follow-ups, round 3', () => {
+  test.each([
+    ['50%', '\\text{50\\%}'],
+    ['a_b', '\\text{a\\_b}'],
+    ['x#1', '\\text{x\\#1}'],
+  ])('normal text %s without spaces imports escaped as %s and re-exports unchanged', (text, latex) => {
+    expect(importOmml(styled(text))).toBe(latex);
+    expect(latexToOmml(latex)).toBe(styled(text));
+  });
+
+  test('plain upright runs without reserved characters still import as \\mathrm', () => {
+    expect(importOmml(styled('max'))).toBe('\\mathrm{max}');
+  });
+});
