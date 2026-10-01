@@ -4555,6 +4555,7 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
   let currentBlockquoteGroupIndex: number | undefined;
   let lastBlockquoteLevel: number | undefined;
   let lastBlockquoteType: GfmAlertType | 'plain' | undefined;
+  let lastBlockquoteListLevel: number | undefined;
 
   for (let i = 0; i < content.length; i++) {
     const item = content[i];
@@ -4602,9 +4603,13 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
           if (inferred.listContinuation) item.listContinuation = inferred.listContinuation;
         }
         const currentType: GfmAlertType | 'plain' = item.alertType || 'plain';
+        // A quote nested in a list and one outside it are separate groups, as
+        // annotateBlockquoteBoundaries in md-to-docx.ts groups them on export
+        const listLevel = item.listContinuation?.level;
         const startsNewGroup = currentBlockquoteGroupIndex === undefined
           || item.blockquoteLevel !== lastBlockquoteLevel
           || currentType !== lastBlockquoteType
+          || listLevel !== lastBlockquoteListLevel
           || (item.alertType !== undefined && paragraphStartsWithExportedAlertLead(content, i, item.alertType));
         if (startsNewGroup) {
           currentBlockquoteGroupIndex = nextBlockquoteGroupIndex++;
@@ -4612,6 +4617,7 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
         item.blockquoteGroupIndex = currentBlockquoteGroupIndex;
         lastBlockquoteLevel = item.blockquoteLevel;
         lastBlockquoteType = currentType;
+        lastBlockquoteListLevel = listLevel;
         lastListLevel = undefined;
         lastListType = undefined;
         continue;
@@ -4813,6 +4819,28 @@ export function buildMarkdown(
     return ' '.repeat(3 * list.level + markerWidth);
   }
 
+  /** Blank lines before a quote group that continues a list item, from the
+   *  same spacing metadata top-level quotes use. A different group right
+   *  after another needs at least one, or the two would merge on reparse. */
+  function blankLinesBeforeListQuote(item: Extract<ContentItem, { type: 'para' }>): number {
+    if (item.blockquoteGroupIndex === undefined) return 0;
+    if (lastBlockquoteGroupIndex !== undefined && lastBlockquoteGroupIndex !== item.blockquoteGroupIndex) {
+      const gap = blockquoteGaps?.get(lastBlockquoteGroupIndex);
+      if (gap !== undefined && gap >= 0) return gap;
+      if (gap === undefined) return 1;
+    }
+    return blockquotePreContentBlankLines?.get(item.blockquoteGroupIndex) ?? 0;
+  }
+
+  /** Blank lines before a plain list continuation paragraph: one, or after a
+   *  quote in the list, the blank lines the source had there (export writes
+   *  no empty paragraph after it). At least one, or the paragraph would
+   *  continue the quote on reparse. */
+  function blankLinesAfterListQuote(): number {
+    if (!prevItemWasListQuote || pendingPostContentGroupIndex === undefined) return 1;
+    return Math.max(1, blockquotePostContentBlankLines?.get(pendingPostContentGroupIndex) ?? 1);
+  }
+
   function blockquotePrefix(item: Extract<ContentItem, { type: 'para' }>): string {
     const quotePrefix = '> '.repeat(item.blockquoteLevel || 1);
     return (item.listContinuation ? listContinuationIndent(item.listContinuation) : '') + quotePrefix;
@@ -4823,6 +4851,7 @@ export function buildMarkdown(
   let tableIndex = 0;
   let lastListType: 'bullet' | 'ordered' | undefined;
   let lastListLevel: number | undefined;
+  let prevItemWasListQuote = false; // the paragraph before is a quote in a list item
   const listTypeByLevel = new Map<number, 'bullet' | 'ordered'>(); // per-level list type tracking
   const orderedListCounters = new Map<number, number>(); // per-level counters for ordered list items
   let codeBlockGroupIndex = 0;
@@ -5077,14 +5106,19 @@ export function buildMarkdown(
           // display equations—inside one blockquote/alert on reparse.
           output.push('\n' + blockquotePrefix(item).trimEnd() + '\n');
         } else if (lastListType && isCurrentList && item.listMeta!.type === lastListType) {
-          output.push('\n');
+          // After a quote in the item before, the blank lines the source had
+          // (export writes no empty paragraph there, which would end the list)
+          const afterQuote = prevItemWasListQuote && pendingPostContentGroupIndex !== undefined
+            ? blockquotePostContentBlankLines?.get(pendingPostContentGroupIndex) ?? 0 : 0;
+          output.push('\n' + '\n'.repeat(afterQuote));
         } else if (item.listContinuation) {
           // Plain continuation paragraphs are block children of the list item
           // and therefore require a blank line. An imported empty paragraph
           // may already own that gap, so ensure the boundary instead of
           // appending another one on every round trip. Blockquotes carry their
-          // own visible prefix and need only the line transition.
-          ensureTrailingNewlines(item.blockquoteLevel ? 1 : 2);
+          // own visible prefix and need only the line transition, plus the
+          // blank lines the source had before them.
+          ensureTrailingNewlines(item.blockquoteLevel ? 1 + blankLinesBeforeListQuote(item) : 1 + blankLinesAfterListQuote());
         } else if (incomingSep !== null) {
           output.push(incomingSep);
         } else if (
@@ -5366,6 +5400,7 @@ export function buildMarkdown(
         pendingAlertInlinePrefixForHardBreak = undefined;
       }
 
+      prevItemWasListQuote = !!item.blockquoteLevel && !!item.listContinuation;
       lastListType = isCurrentList
         ? item.listMeta!.type
         : item.listContinuation?.type;
