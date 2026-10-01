@@ -67,6 +67,13 @@ const UNICODE_LATEX_MAP: Map<string, string> = new Map([
   ['⊥', '\\perp'], ['∘', '\\circ'], ['∗', '\\ast'],
   ['∅', '\\emptyset'], ['ℓ', '\\ell'],
   ['⇔', '\\Leftrightarrow'], ['↦', '\\mapsto'],
+  ['⟨', '\\langle'], ['⟩', '\\rangle'], ['‖', '\\|'], ['⊤', '\\top'],
+  ['⟹', '\\Longrightarrow'], ['⟸', '\\Longleftarrow'], ['⟺', '\\Longleftrightarrow'], ['⟶', '\\longrightarrow'],
+  ['⩽', '\\leqslant'], ['⩾', '\\geqslant'],
+  ['⋆', '\\star'], ['†', '\\dagger'], ['‡', '\\ddagger'], ['ℏ', '\\hbar'],
+  ['∄', '\\nexists'], ['∋', '\\ni'], ['↑', '\\uparrow'], ['↓', '\\downarrow'],
+  ['ℵ', '\\aleph'], ['∠', '\\angle'],
+  ['⌊', '\\lfloor'], ['⌋', '\\rfloor'], ['⌈', '\\lceil'], ['⌉', '\\rceil'],
 ]);
 
 const ACCENT_MAP: Map<string, string> = new Map([
@@ -101,7 +108,21 @@ const KNOWN_FUNCTIONS = new Set([
   'sinh', 'cosh', 'tanh', 'coth',
   'log', 'ln', 'exp', 'lim', 'max', 'min',
   'sup', 'inf', 'det', 'dim', 'gcd', 'deg',
-  'arg', 'hom', 'ker',
+  'arg', 'hom', 'ker', 'Pr', 'liminf', 'limsup',
+]);
+
+/** Function names that LaTeX sets with a space, keyed by how Word shows them. */
+const SPACED_FUNCTION_NAMES: Map<string, string> = new Map([['lim inf', 'liminf'], ['lim sup', 'limsup']]);
+
+/** m:scr values and the math alphabet commands that produce them. */
+const SCRIPT_ALPHABETS: Map<string, string> = new Map([
+  ['script', '\\mathcal'], ['double-struck', '\\mathbb'], ['fraktur', '\\mathfrak'],
+  ['sans-serif', '\\mathsf'], ['monospace', '\\mathtt'],
+]);
+
+/** m:sty values other than p (plain), with the math alphabet commands that produce them. */
+const STYLE_ALPHABETS: Map<string, string> = new Map([
+  ['b', '\\mathbf'], ['bi', '\\boldsymbol'], ['i', '\\mathit'],
 ]);
 
 /** Property/control tags that should be silently skipped during translation. */
@@ -398,23 +419,55 @@ function translateRun(children: XmlNode[]): string {
   }
 
   // Primes in script math (′, as \prime exports) become \prime; a raw ′ in
-  // LaTeX source breaks pdflatex. Base-level and text-mode runs keep the character.
-  const textMode = style === 'p' && /\s/.test(text);
-  const mapped = unicodeToLatex(text, scriptDepth > 0 && !textMode);
-  if (script === 'script') {
-    return '\\mathcal{' + mapped + '}';
+  // LaTeX source breaks pdflatex. In base-level math, ′ is LaTeX's '.
+  // Text-mode runs keep the character.
+  const textMode = style === 'p' && /[\s']/.test(text);
+  let mapped = unicodeToLatex(text, scriptDepth > 0 && !textMode);
+  if (!textMode) mapped = mapped.replace(/′/g, "'");
+  const alphabet = SCRIPT_ALPHABETS.get(script) ?? STYLE_ALPHABETS.get(style);
+  if (alphabet) {
+    return alphabet + '{' + mapped + '}';
   }
   if (style === 'p') {
     // \mathrm{} collapses interior spaces when re-rendered by LaTeX/KaTeX;
-    // plain-style runs containing whitespace must round-trip as \text{}.
+    // plain-style runs containing whitespace must round-trip as \text{}, as
+    // must runs with an apostrophe, which math mode reads as a prime.
     // Test the original text, not `mapped` — unicodeToLatex inserts synthetic
     // separator spaces after commands (αx → \alpha x) that are not prose.
-    if (/\s/.test(text)) {
-      return '\\text{' + mapped + '}';
+    if (textMode) {
+      return textModeLatex(text);
     }
     return '\\mathrm{' + mapped + '}';
   }
   return mapped;
+}
+
+/**
+ * LaTeX for normal text in an equation. Math commands are invalid inside
+ * \text{}, so characters that map to one sit between the text segments as
+ * \mathrm{…}. Both forms re-export as plain-style runs.
+ */
+function textModeLatex(text: string): string {
+  let latex = '';
+  let prose = '';
+  let symbols = '';
+  const flush = () => {
+    if (prose) latex += '\\text{' + prose + '}';
+    if (symbols) latex += '\\mathrm{' + unicodeToLatex(symbols) + '}';
+    prose = '';
+    symbols = '';
+  };
+  for (const ch of text) {
+    if (UNICODE_LATEX_MAP.has(ch)) {
+      if (prose) flush();
+      symbols += ch;
+    } else {
+      if (symbols) flush();
+      prose += ch;
+    }
+  }
+  flush();
+  return latex;
 }
 
 
@@ -573,7 +626,33 @@ function translateNary(children: XmlNode[]): string {
   const sub = (subHide || !subLatex) ? '' : '_' + scriptArg(subLatex);
   const sup = (supHide || !supLatex) ? '' : '^' + scriptArg(supLatex);
   const body = ommlToLatex(findChild(children, 'm:e'));
-  return appendLatex(op + limits + sub + sup, body);
+  // Export takes a leading bracket group as the whole body, so brace a body
+  // that continues past it (Word's ∏ over (1-x)y) to keep the rest inside.
+  return appendLatex(op + limits + sub + sup, leadingGroupEndsEarly(body) ? '{' + body + '}' : body);
+}
+
+/** Whether `latex` opens with ( or [ and closes that bracket before its end. */
+function leadingGroupEndsEarly(latex: string): boolean {
+  const open = latex.charAt(0);
+  const close = open === '(' ? ')' : open === '[' ? ']' : '';
+  if (!close) return false;
+  let depth = 0;
+  let braces = 0;
+  for (let i = 0; i < latex.length; i++) {
+    const ch = latex.charAt(i);
+    if (ch === '\\') {
+      i++; // skip the escaped or command character
+    } else if (ch === '{') {
+      braces++;
+    } else if (ch === '}') {
+      braces--;
+    } else if (braces === 0 && ch === open) {
+      depth++;
+    } else if (braces === 0 && ch === close && --depth === 0) {
+      return latex.slice(i + 1).trim() !== '';
+    }
+  }
+  return false;
 }
 
 
@@ -678,26 +757,65 @@ function translateMatrix(children: XmlNode[]): string {
 
 function translateFunction(children: XmlNode[]): string {
   // Extract function name from m:fName
-  const fNameChildren = findChild(children, 'm:fName');
-  let name = ommlToLatex(fNameChildren);
+  const { nameNodes, scripts, limitsUnder } = splitFunctionName(findChild(children, 'm:fName'));
+  let name = ommlToLatex(nameNodes);
 
   // Strip \mathrm{} / \text{} wrapping that translateRun may have added
   const mathrm = /^\\(?:mathrm|text)\{(.+)\}$/.exec(name);
   if (mathrm) {
     name = mathrm[1];
   }
+  name = SPACED_FUNCTION_NAMES.get(name) ?? name;
 
   // Determine the LaTeX command for the function name
   let funcCmd: string;
   if (KNOWN_FUNCTIONS.has(name)) {
     funcCmd = `\\${name}`;
   } else {
-    funcCmd = `\\operatorname{${name}}`;
+    funcCmd = `\\operatorname${limitsUnder ? '*' : ''}{${name}}`;
   }
 
   // Translate the argument
   const arg = ommlToLatex(findChild(children, 'm:e'));
-  return `${funcCmd}{${arg}}`;
+  return `${funcCmd}${scripts}{${arg}}`;
+}
+
+/**
+ * Word keeps a function's scripts in m:fName: m:limLow and m:limUpp put a
+ * limit under or over the name (lim, max), m:sSub, m:sSup, and m:sSubSup put
+ * scripts beside it (log₂, sin²). Peel them off so the name can be matched.
+ */
+function splitFunctionName(fName: XmlNode[]): { nameNodes: XmlNode[]; scripts: string; limitsUnder: boolean } {
+  const content = fName.filter(node => !Object.keys(node).some(key => SKIP_TAGS.has(key)));
+  const node = content.length === 1 ? content[0] : undefined;
+  const parts = (key: string) => asXmlNodes(node?.[key]);
+  const script = (latex: string) => scriptArg(latex);
+
+  if (node?.['m:limLow'] !== undefined || node?.['m:limUpp'] !== undefined) {
+    const key = node['m:limLow'] !== undefined ? 'm:limLow' : 'm:limUpp';
+    const inner = splitFunctionName(findChild(parts(key), 'm:e'));
+    const lim = scriptToLatex(findChild(parts(key), 'm:lim'));
+    const op = key === 'm:limLow' ? '_' : '^';
+    return { nameNodes: inner.nameNodes, scripts: inner.scripts + op + script(lim), limitsUnder: true };
+  }
+  if (node?.['m:sSub'] !== undefined) {
+    const sub = scriptToLatex(findChild(parts('m:sSub'), 'm:sub'));
+    return { nameNodes: findChild(parts('m:sSub'), 'm:e'), scripts: '_' + script(sub), limitsUnder: false };
+  }
+  if (node?.['m:sSup'] !== undefined) {
+    const sup = scriptToLatex(findChild(parts('m:sSup'), 'm:sup'));
+    return { nameNodes: findChild(parts('m:sSup'), 'm:e'), scripts: '^' + script(sup), limitsUnder: false };
+  }
+  if (node?.['m:sSubSup'] !== undefined) {
+    const sub = scriptToLatex(findChild(parts('m:sSubSup'), 'm:sub'));
+    const sup = scriptToLatex(findChild(parts('m:sSubSup'), 'm:sup'));
+    return {
+      nameNodes: findChild(parts('m:sSubSup'), 'm:e'),
+      scripts: '_' + script(sub) + '^' + script(sup),
+      limitsUnder: false,
+    };
+  }
+  return { nameNodes: fName, scripts: '', limitsUnder: false };
 }
 
 

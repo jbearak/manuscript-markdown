@@ -43,9 +43,19 @@ const LATEX_UNICODE_MAP: Map<string, string> = new Map([
   ['\\perp', '⊥'], ['\\circ', '∘'], ['\\ast', '∗'],
   ['\\emptyset', '∅'], ['\\ell', 'ℓ'],
   ['\\Leftrightarrow', '⇔'], ['\\mapsto', '↦'],
+  ['\\langle', '⟨'], ['\\rangle', '⟩'], ['\\|', '‖'], ['\\top', '⊤'],
+  // ⟹ and ⟺ map back to these, not to \implies and \iff, which add spacing
+  ['\\Longrightarrow', '⟹'], ['\\Longleftarrow', '⟸'], ['\\Longleftrightarrow', '⟺'], ['\\longrightarrow', '⟶'],
+  ['\\leqslant', '⩽'], ['\\geqslant', '⩾'],
+  ['\\star', '⋆'], ['\\dagger', '†'], ['\\ddagger', '‡'], ['\\hbar', 'ℏ'],
+  ['\\nexists', '∄'], ['\\ni', '∋'], ['\\uparrow', '↑'], ['\\downarrow', '↓'],
+  ['\\aleph', 'ℵ'], ['\\angle', '∠'],
+  ['\\lfloor', '⌊'], ['\\rfloor', '⌋'], ['\\lceil', '⌈'], ['\\rceil', '⌉'],
   // One-way entries: omml.ts maps these characters back to the canonical
   // spelling above, except ′, which it keeps (f\prime renders a full-size prime)
   ['\\prime', '′'],
+  ['\\lvert', '|'], ['\\rvert', '|'], ['\\lVert', '‖'], ['\\rVert', '‖'],
+  ['\\bot', '⊥'], ['\\varnothing', '∅'], ['\\implies', '⟹'], ['\\iff', '⟺'],
   ['\\le', '≤'], ['\\ge', '≥'], ['\\ne', '≠'],
   ['\\rightarrow', '→'], ['\\gets', '←'],
   ['\\lnot', '¬'], ['\\wedge', '∧'], ['\\vee', '∨'],
@@ -81,7 +91,24 @@ const KNOWN_FUNCTIONS = new Set([
   'sinh', 'cosh', 'tanh', 'coth',
   'log', 'ln', 'exp', 'lim', 'max', 'min',
   'sup', 'inf', 'det', 'dim', 'gcd', 'deg',
-  'arg', 'hom', 'ker',
+  'arg', 'hom', 'ker', 'Pr', 'liminf', 'limsup',
+]);
+
+/** Functions whose limits go under the name (m:limLow), as in Word's lim. */
+const LIMIT_FUNCTIONS = new Set(['lim', 'liminf', 'limsup', 'max', 'min', 'sup', 'inf', 'det', 'gcd', 'Pr']);
+
+/** Function names that LaTeX sets with a space. */
+const FUNCTION_NAMES: Map<string, string> = new Map([['liminf', 'lim inf'], ['limsup', 'lim sup']]);
+
+/** Math alphabet commands and the m:rPr that gives the same letters in Word. */
+const MATH_ALPHABETS: Map<string, string> = new Map([
+  ['\\mathbf', '<m:sty m:val="b"/>'],
+  ['\\boldsymbol', '<m:sty m:val="bi"/>'],
+  ['\\mathit', '<m:sty m:val="i"/>'],
+  ['\\mathbb', '<m:scr m:val="double-struck"/><m:sty m:val="p"/>'],
+  ['\\mathfrak', '<m:scr m:val="fraktur"/><m:sty m:val="p"/>'],
+  ['\\mathsf', '<m:scr m:val="sans-serif"/><m:sty m:val="p"/>'],
+  ['\\mathtt', '<m:scr m:val="monospace"/><m:sty m:val="p"/>'],
 ]);
 
 // ---------------------------------------------------------------------------
@@ -106,8 +133,18 @@ function makeRun(text: string): string {
   return '<m:r><m:t>' + escapeXmlChars(text) + '</m:t></m:r>';
 }
 
-function makeStyledRun(text: string): string {
-  return '<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>' + escapeXmlChars(text) + '</m:t></m:r>';
+/**
+ * A plain-style (upright, normal text) run. Text-mode content passes
+ * `preserveSpace` so Word keeps its leading and trailing spaces; math-mode
+ * commands such as \mathrm ignore spaces, as LaTeX does.
+ */
+function makeStyledRun(text: string, preserveSpace = false): string {
+  const t = preserveSpace && /^\s|\s$/.test(text) ? '<m:t xml:space="preserve">' : '<m:t>';
+  return '<m:r><m:rPr><m:sty m:val="p"/></m:rPr>' + t + escapeXmlChars(text) + '</m:t></m:r>';
+}
+
+function makeAlphabetRun(text: string, rPr: string): string {
+  return '<m:r><m:rPr>' + rPr + '</m:rPr><m:t>' + escapeXmlChars(text) + '</m:t></m:r>';
 }
 
 function makeHiddenCommentRun(text: string): string {
@@ -228,10 +265,31 @@ export function tokenize(latex: string): Token[] {
 class Parser {
   private tokens: Token[];
   private pos: number;
+  private onUnknownCommand?: (command: string) => void;
+  /** Inside \text or an \operatorname name, where ' is an apostrophe, not a prime. */
+  private textMode: boolean;
 
-  constructor(tokens: Token[]) {
+  constructor(tokens: Token[], onUnknownCommand?: (command: string) => void, textMode = false) {
     this.tokens = tokens;
     this.pos = 0;
+    this.onUnknownCommand = onUnknownCommand;
+    this.textMode = textMode;
+  }
+
+  /** Text as Word shows it in math: ' is a prime, as Word's own autocorrect makes it. */
+  private mathText(text: string): string {
+    return this.textMode ? text : text.replace(/'/g, '′');
+  }
+
+  /** Parse a group whose content is text, returning that text. */
+  private parseTextGroup(): string {
+    const outer = this.textMode;
+    this.textMode = true;
+    try {
+      return this.extractText(this.parseGroup());
+    } finally {
+      this.textMode = outer;
+    }
   }
 
   private peek(): Token | undefined {
@@ -273,7 +331,7 @@ class Parser {
         if (rest) {
           this.tokens.splice(this.pos, 0, { type: 'text', value: rest, pos: next.pos });
         }
-        return makeRun(first);
+        return makeRun(this.mathText(first));
       }
       return this.parseToken(next);
     }
@@ -284,7 +342,7 @@ class Parser {
         case 'command':
           return this.parseCommand(token.value);
         case 'text':
-          return makeRun(token.value);
+          return makeRun(this.mathText(token.value));
         case 'caret':
         case 'underscore':
         case 'ampersand':
@@ -368,9 +426,15 @@ class Parser {
     }
 
     // Functions
-    if (KNOWN_FUNCTIONS.has(cmd.slice(1))) {
-      const arg = this.parseBracketedOperand() ?? this.parseGroup();
-      return '<m:func><m:fName>' + makeStyledRun(cmd.slice(1)) + '</m:fName><m:e>' + arg + '</m:e></m:func>';
+    const funcName = cmd.slice(1);
+    if (KNOWN_FUNCTIONS.has(funcName)) {
+      return this.parseFunction(makeStyledRun(FUNCTION_NAMES.get(funcName) ?? funcName), LIMIT_FUNCTIONS.has(funcName));
+    }
+
+    // Math alphabets
+    const alphabet = MATH_ALPHABETS.get(cmd);
+    if (alphabet) {
+      return makeAlphabetRun(this.extractText(this.parseGroup()), alphabet);
     }
 
     switch (cmd) {
@@ -420,9 +484,9 @@ class Parser {
         // Intentionally consumes a following group as the function argument,
         // mirroring KNOWN_FUNCTIONS (e.g. \sin{x}) for round-trip fidelity
         // with the OMML→LaTeX direction which emits \operatorname{name}{arg}.
-        const name = this.parseGroup();
-        const funcArg = this.parseBracketedOperand() ?? this.parseGroup();
-        return '<m:func><m:fName>' + makeStyledRun(this.extractText(name)) + '</m:fName><m:e>' + funcArg + '</m:e></m:func>';
+        // \operatorname* puts limits under the name, like \lim.
+        const limitsUnder = this.consumeStarVariant();
+        return this.parseFunction(makeStyledRun(this.parseTextGroup()), limitsUnder);
       }
 
       case '\\limits':
@@ -451,10 +515,8 @@ class Parser {
       }
 
       // \text{} — same as \mathrm
-      case '\\text': {
-        const textContent = this.parseGroup();
-        return makeStyledRun(this.extractText(textContent));
-      }
+      case '\\text':
+        return makeStyledRun(this.parseTextGroup(), true);
 
       // \boxed{}
       case '\\boxed': {
@@ -534,10 +596,8 @@ class Parser {
 
       // Intertext
       case '\\intertext':
-      case '\\shortintertext': {
-        const itContent = this.parseGroup();
-        return makeStyledRun(this.extractText(itContent));
-      }
+      case '\\shortintertext':
+        return makeStyledRun(this.parseTextGroup(), true);
 
       // Shove commands — emit inner content
       case '\\shoveleft':
@@ -572,6 +632,7 @@ class Parser {
 
       default:
         // Unsupported command - fallback
+        this.onUnknownCommand?.(cmd);
         return makeRun(cmd);
     }
   }
@@ -661,7 +722,7 @@ class Parser {
           operand[0].value = operand[0].value.slice(lead);
           const rest = token.value.slice(j + 1);
           this.tokens.splice(this.pos, i + 1 - this.pos, ...(rest ? [{ type: 'text' as const, value: rest, pos: token.pos + j + 1 }] : []));
-          return new Parser(operand).parseExpression(false);
+          return new Parser(operand, this.onUnknownCommand, this.textMode).parseExpression(false);
         }
       }
     }
@@ -729,15 +790,37 @@ class Parser {
     return '<m:d><m:dPr><m:begChr m:val="' + escapeXmlChars(begChr) + '"/><m:endChr m:val="' + escapeXmlChars(endChr) + '"/></m:dPr><m:e>' + content + '</m:e></m:d>';
   }
 
-  /** Consume a `*` prefix from the next text token (for `\tag*` variants). */
-  private consumeStarVariant(): void {
+  /** Consume a `*` prefix from the next text token (for `\tag*` variants); report whether there was one. */
+  private consumeStarVariant(): boolean {
     if (this.peek()?.type === 'text' && this.peek()?.value.startsWith('*')) {
       const starToken = this.consume()!;
       const rest = starToken.value.slice(1);
       if (rest) {
         this.tokens.splice(this.pos, 0, { type: 'text', value: rest, pos: starToken.pos });
       }
+      return true;
     }
+    return false;
+  }
+
+  /**
+   * Parse a function's scripts and argument after its name. Word keeps the
+   * scripts in m:fName: under the name (m:limLow, m:limUpp) for limit-style
+   * functions such as \lim and \max, beside it (\log_2, \sin^2) otherwise.
+   */
+  private parseFunction(name: string, limitsUnder: boolean): string {
+    let fName = name;
+    if (limitsUnder) {
+      let script: Token | undefined;
+      while ((script = this.consumeAfterWhitespace(t => t.type === 'underscore' || t.type === 'caret'))) {
+        const tag = script.type === 'underscore' ? 'm:limLow' : 'm:limUpp';
+        fName = '<' + tag + '><m:e>' + fName + '</m:e><m:lim>' + this.parseGroup() + '</m:lim></' + tag + '>';
+      }
+    } else {
+      fName = this.parseScriptsForBase(fName);
+    }
+    const arg = this.parseScriptsForBase(this.parseBracketedOperand() ?? this.parseGroup());
+    return '<m:func><m:fName>' + fName + '</m:fName><m:e>' + arg + '</m:e></m:func>';
   }
 
   /**
@@ -783,7 +866,7 @@ class Parser {
           // not text tokens and keep their runs.
           const next = this.peek();
           const beforeScript = next?.type === 'caret' || next?.type === 'underscore';
-          for (const ch of beforeScript ? consumed.value.replace(/[ \t\r\n]+$/, '') : consumed.value) {
+          for (const ch of this.mathText(beforeScript ? consumed.value.replace(/[ \t\r\n]+$/, '') : consumed.value)) {
             atoms.push(makeRun(ch));
           }
         } else if (consumed.type === 'comment' || consumed.type === 'line_continuation') {
@@ -874,6 +957,7 @@ class Parser {
       }
 
       default:
+        this.onUnknownCommand?.('\\begin{' + envName + '}');
         return makeRun('\\begin{' + envName + '}');
     }
   }
@@ -971,14 +1055,11 @@ class Parser {
   }
 
   private extractText(omml: string): string {
-    // Simple extraction - just get text between <m:t> tags.
+    // Simple extraction - just get text between <m:t> tags, skipping hidden
+    // comment runs (which start with \u200B).
     // NOTE: <m:t> content has already been escaped via escapeXmlChars().
-    const matches = omml.match(/<m:t>([^<]*)<\/m:t>/g);
-    if (matches) {
-      const escaped = matches.map(m => m.replace(/<\/?m:t>/g, '')).join('');
-      return unescapeXmlChars(escaped);
-    }
-    return '';
+    const matches = [...omml.matchAll(/<m:t(?: xml:space="preserve")?>(?!\u200B)([^<]*)<\/m:t>/g)];
+    return unescapeXmlChars(matches.map(m => m[1]).join(''));
   }
 
   /** Parse tokens until the stop condition triggers.
@@ -994,13 +1075,17 @@ class Parser {
 // Main entry point
 // ---------------------------------------------------------------------------
 
-/** Convert a LaTeX math string to OMML XML string. */
-export function latexToOmml(latex: string): string {
+/**
+ * Convert a LaTeX math string to OMML XML string. `onUnknownCommand` hears
+ * each command or environment that has no OMML form and is exported as
+ * literal text.
+ */
+export function latexToOmml(latex: string, onUnknownCommand?: (command: string) => void): string {
   if (!latex.trim()) {
     return '';
   }
 
   const tokens = tokenize(latex);
-  const parser = new Parser(tokens);
+  const parser = new Parser(tokens, onUnknownCommand);
   return parser.parseExpression(false);
 }
