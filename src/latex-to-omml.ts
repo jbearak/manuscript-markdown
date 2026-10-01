@@ -612,7 +612,7 @@ class Parser {
    * function name as that construct's whole operand, so the m:e holds the
    * group instead of just its opening bracket. Returns undefined, leaving the
    * token stream untouched, unless the bracket closes within the current
-   * brace group, row, and cell.
+   * brace group, \left…\right pair, row, and cell.
    */
   private parseBracketedOperand(): string | undefined {
     let start = this.pos;
@@ -627,6 +627,7 @@ class Parser {
     let depth = 0;
     let braceDepth = 0;
     let envDepth = 0;
+    let leftDepth = 0;
     for (let i = start; i < this.tokens.length; i++) {
       const token = this.tokens[i];
       if (token.type === 'lbrace') {
@@ -649,6 +650,15 @@ class Parser {
         continue;
       }
       if (envDepth > 0) continue;
+      if (token.type === 'command' && token.value === '\\left') {
+        leftDepth++;
+        continue;
+      }
+      if (token.type === 'command' && token.value === '\\right') {
+        if (leftDepth === 0) return undefined;
+        leftDepth--;
+        continue;
+      }
       if (token.type === 'ampersand' || (token.type === 'command' && token.value === '\\\\')) {
         return undefined;
       }

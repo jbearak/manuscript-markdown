@@ -587,6 +587,12 @@ describe('bracketed operands of n-ary operators and functions', () => {
     expect(result).toEndWith('</m:m>' + run(')') + '</m:e></m:nary>' + run('x'));
   });
 
+  test('the \\right of an enclosing \\left stops the scan', () => {
+    const result = latexToOmml('\\left(\\sum_i(a\\right))');
+    expect(result).toStartWith('<m:d><m:dPr><m:begChr m:val="("/><m:endChr m:val=")"/></m:dPr>');
+    expect(result).not.toContain('\\right');
+  });
+
   test('a row or cell boundary of the enclosing environment stops the scan', () => {
     const result = latexToOmml('\\begin{matrix}\\sum_i(a&b)\\end{matrix}');
     expect(result).toContain('<m:e>' + run('(') + '</m:e></m:nary>');
