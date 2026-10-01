@@ -62,16 +62,18 @@ a^{n+1}      % multi-character superscript (use braces)
 |-----------|---|-----------|---|
 | `\alpha` α | `\nu` ν | `\Gamma` Γ | `\Xi` Ξ |
 | `\beta` β | `\xi` ξ | `\Delta` Δ | `\Pi` Π |
-| `\gamma` γ | `\pi` π | `\Theta` Θ | `\Sigma` Σ |
-| `\delta` δ | `\rho` ρ | `\Lambda` Λ | `\Phi` Φ |
-| `\epsilon` ε | `\sigma` σ | | `\Psi` Ψ |
-| `\zeta` ζ | `\tau` τ | | `\Omega` Ω |
-| `\eta` η | `\upsilon` υ | | |
-| `\theta` θ | `\phi` φ | | |
+| `\gamma` γ | `\pi` π, `\varpi` ϖ | `\Theta` Θ | `\Sigma` Σ |
+| `\delta` δ | `\rho` ρ, `\varrho` ϱ | `\Lambda` Λ | `\Upsilon` Υ |
+| `\epsilon` ϵ, `\varepsilon` ε | `\sigma` σ, `\varsigma` ς | | `\Phi` Φ |
+| `\zeta` ζ | `\tau` τ | | `\Psi` Ψ |
+| `\eta` η | `\upsilon` υ | | `\Omega` Ω |
+| `\theta` θ, `\vartheta` ϑ | `\phi` ϕ, `\varphi` φ | | |
 | `\iota` ι | `\chi` χ | | |
 | `\kappa` κ | `\psi` ψ | | |
 | `\lambda` λ | `\omega` ω | | |
 | `\mu` μ | | | |
+
+Each variant has its own character, so `\epsilon` (ϵ) and `\varepsilon` (ε) stay distinct in Word and on re-import. The plain Greek ε and φ that most fonts and keyboards produce import as `\varepsilon` and `\varphi`, since that is how they look.
 
 ## Operators and Symbols
 

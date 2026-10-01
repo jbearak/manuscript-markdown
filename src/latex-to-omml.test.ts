@@ -698,3 +698,21 @@ describe('bracketed operands of n-ary operators and functions', () => {
     );
   });
 });
+
+describe('Greek variant letters', () => {
+  // Same code points as zotero-link.ts uses for BibTeX
+  const letters: [string, string][] = [
+    ['\\epsilon', 'ϵ'], ['\\varepsilon', 'ε'],
+    ['\\phi', 'ϕ'], ['\\varphi', 'φ'],
+    ['\\vartheta', 'ϑ'], ['\\varpi', 'ϖ'], ['\\varrho', 'ϱ'], ['\\varsigma', 'ς'],
+    ['\\Upsilon', 'Υ'],
+  ];
+
+  test.each(letters)('%s exports as %s', (cmd, ch) => {
+    expect(latexToOmml(cmd)).toBe('<m:r><m:t>' + ch + '</m:t></m:r>');
+  });
+
+  test.each(letters)('%s round-trips', (cmd) => {
+    expect(roundTrip(cmd + ' x')).toBe(cmd + ' x');
+  });
+});
