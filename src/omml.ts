@@ -111,6 +111,9 @@ const KNOWN_FUNCTIONS = new Set([
   'arg', 'hom', 'ker', 'Pr', 'liminf', 'limsup',
 ]);
 
+/** Functions whose limits go under the name, as in latex-to-omml.ts. */
+const LIMIT_FUNCTIONS = new Set(['lim', 'liminf', 'limsup', 'max', 'min', 'sup', 'inf', 'det', 'gcd', 'Pr']);
+
 /** Function names that LaTeX sets with a space, keyed by how Word shows them. */
 const SPACED_FUNCTION_NAMES: Map<string, string> = new Map([['lim inf', 'liminf'], ['lim sup', 'limsup']]);
 
@@ -639,6 +642,7 @@ function translateNary(children: XmlNode[]): string {
 
 /** Whether `latex` opens with ( or [ and closes that bracket before its end. */
 function leadingGroupEndsEarly(latex: string): boolean {
+  if (/^\\left(?![A-Za-z])/.test(latex)) return leftRightGroupEndsEarly(latex);
   const open = latex.charAt(0);
   const close = open === '(' ? ')' : open === '[' ? ']' : '';
   if (!close) return false;
@@ -657,6 +661,25 @@ function leadingGroupEndsEarly(latex: string): boolean {
     } else if (braces === 0 && ch === close && --depth === 0) {
       return latex.slice(i + 1).trim() !== '';
     }
+  }
+  return false;
+}
+
+/** leadingGroupEndsEarly for LaTeX that starts with a \left…\right pair. */
+function leftRightGroupEndsEarly(latex: string): boolean {
+  let depth = 0;
+  for (let i = 0; i < latex.length; i++) {
+    if (latex.charAt(i) !== '\\') continue;
+    const command = /^\\(?:[A-Za-z]+|.)/.exec(latex.slice(i))![0];
+    i += command.length;
+    if (command === '\\left') {
+      depth++;
+    } else if (command === '\\right' && --depth === 0) {
+      // Skip the closing delimiter: a command such as \rangle, or one character.
+      const delimiter = /^(?:\\(?:[A-Za-z]+|.)|.)?/.exec(latex.slice(i))![0];
+      return latex.slice(i + delimiter.length).trim() !== '';
+    }
+    i--;
   }
   return false;
 }
@@ -744,10 +767,7 @@ function delimitedLatex(begChr: string, inner: string, endChr: string): string {
     return begChr + inner + endChr;
   }
   const side = (chr: string) => DELIMITER_COMMANDS.get(chr) ?? (chr || '.');
-  const left = '\\left' + side(begChr);
-  // {} rather than a space ends \langle before a letter; a space exports as a space.
-  const separator = /\\[A-Za-z]+$/.test(left) && /^[A-Za-z]/.test(inner) ? '{}' : '';
-  return left + separator + inner + '\\right' + side(endChr);
+  return appendLatex('\\left' + side(begChr), inner) + '\\right' + side(endChr);
 }
 
 
@@ -802,7 +822,11 @@ function translateFunction(children: XmlNode[]): string {
   // Determine the LaTeX command for the function name
   let funcCmd: string;
   if (KNOWN_FUNCTIONS.has(name)) {
-    funcCmd = `\\${name}`;
+    // Scripts placed against the function's default need \limits or \nolimits.
+    const placement = scripts && limitsUnder !== LIMIT_FUNCTIONS.has(name)
+      ? (limitsUnder ? '\\limits' : '\\nolimits')
+      : '';
+    funcCmd = `\\${name}${placement}`;
   } else {
     funcCmd = `\\operatorname${limitsUnder ? '*' : ''}{${name}}`;
   }
@@ -1002,7 +1026,10 @@ function translateGroupChr(children: XmlNode[]): string {
  */
 function appendLatex(acc: string, chunk: string): string {
   if (chunk && /\\[A-Za-z]+$/.test(acc) && /^[A-Za-z]/.test(chunk)) {
-    return acc + ' ' + chunk;
+    // A \left or \right delimiter such as \rangle ends with {} instead, since
+    // the space would export as a space. Other commands keep the space, as
+    // Markdown already written with them does.
+    return acc + (/\\(?:left|right)\\[A-Za-z]+$/.test(acc) ? '{}' : ' ') + chunk;
   }
   return acc + chunk;
 }

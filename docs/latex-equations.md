@@ -163,7 +163,7 @@ To place limits above/below (instead of as subscript/superscript):
 
 `\nolimits` does the reverse and keeps the limits beside the operator. Re-import drops it, so the limits fall back to the default placement.
 
-A group in parentheses or brackets right after the operator becomes its body in Word. In `\prod_{t=1}^{12}(1-\omega_t)`, all of `(1-\omega_t)` sits under the product. To put more under it, brace the body: `\prod{(1-x)y}`. Re-import adds those braces when a body from Word runs past its leading group. An operator written without a limit gets a hidden empty slot, so Word draws no placeholder box where the limit would go.
+A group in parentheses or brackets, or a `\left` and `\right` pair, right after the operator becomes its body in Word. In `\prod_{t=1}^{12}(1-\omega_t)`, all of `(1-\omega_t)` sits under the product. To put more under it, brace the body: `\prod{(1-x)y}`. Re-import adds those braces when a body from Word runs past its leading group. An operator written without a limit gets a hidden empty slot, so Word draws no placeholder box where the limit would go.
 
 ## Functions
 
@@ -198,6 +198,8 @@ Scripts on a function name stay with the name, as Word places them. `\log_2 n` a
 \max_i x_i
 \operatorname*{argmax}_x f(x)
 ```
+
+`\limits` or `\nolimits` right after the name moves its scripts under or beside it, as in `\lim\nolimits_n a_n`. Re-import keeps the placement.
 
 ## Math Alphabets
 

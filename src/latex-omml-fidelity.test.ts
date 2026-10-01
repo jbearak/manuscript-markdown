@@ -239,7 +239,8 @@ describe('review follow-ups', () => {
       '<m:limLow><m:e>' + styled('foo') + '</m:e><m:lim>' + run('i') + '</m:lim></m:limLow>',
       run('x'),
     ));
-    expect(roundTrip('\\lim\\nolimits_i x')).toBe('\\lim_i{x}');
+    expect(roundTrip('\\lim\\nolimits_i x')).toBe('\\lim\\nolimits_i{x}');
+    expect(roundTrip('\\operatorname{foo}\\limits_i x')).toBe('\\operatorname*{foo}_i{x}');
   });
 
   test('an apostrophe in an operator name inside a superscript stays an apostrophe', () => {
@@ -346,5 +347,33 @@ describe('review follow-ups, round 5', () => {
 
   test('parentheses and brackets still import bare', () => {
     expect(importOmml('<m:d><m:e>' + run('x') + '</m:e></m:d>')).toBe('(x)');
+  });
+});
+
+describe('review follow-ups, round 6', () => {
+  const angle = (body: string) =>
+    '<m:d><m:dPr><m:begChr m:val="⟨"/><m:endChr m:val="⟩"/></m:dPr><m:e>' + body + '</m:e></m:d>';
+
+  test('a letter after a named closing delimiter does not gain a space', () => {
+    const omml = angle(run('a')) + run('x');
+    expect(importOmml(omml)).toBe('\\left\\langle{}a\\right\\rangle{}x');
+    expect(latexToOmml(importOmml(omml))).toBe(omml);
+  });
+
+  test.each([
+    ['side scripts on lim', '<m:sSub><m:e>' + styled('lim') + '</m:e><m:sub>' + run('i') + '</m:sub></m:sSub>', '\\lim\\nolimits_i{x}'],
+    ['a limit under sin', '<m:limLow><m:e>' + styled('sin') + '</m:e><m:lim>' + run('i') + '</m:lim></m:limLow>', '\\sin\\limits_i{x}'],
+  ])('%s keeps its placement through a round trip', (_, fName, latex) => {
+    const omml = func(fName, run('x'));
+    expect(importOmml(omml)).toBe(latex);
+    expect(latexToOmml(latex)).toBe(omml);
+  });
+
+  test('an n-ary body that continues past a leading \\left…\\right group is braced', () => {
+    const omml =
+      '<m:nary><m:naryPr><m:chr m:val="∏"/><m:subHide m:val="1"/><m:supHide m:val="1"/></m:naryPr>' +
+      '<m:sub></m:sub><m:sup></m:sup><m:e>' + angle(run('x')) + run('y') + '</m:e></m:nary>';
+    expect(importOmml(omml)).toBe('\\prod{\\left\\langle{}x\\right\\rangle{}y}');
+    expect(latexToOmml(importOmml(omml))).toBe(omml);
   });
 });
