@@ -315,3 +315,36 @@ describe('review follow-ups, round 4', () => {
     expect(seen).toEqual([]);
   });
 });
+
+describe('review follow-ups, round 5', () => {
+  const sinX = func(styled('sin'), run('x'));
+
+  test('a script on a whole Word function stays outside its argument', () => {
+    const omml = '<m:sSup><m:e>' + sinX + '</m:e><m:sup>' + run('2') + '</m:sup></m:sSup>';
+    expect(importOmml(omml)).toBe('{\\sin{x}}^2');
+    expect(latexToOmml(importOmml(omml))).toBe(omml);
+  });
+
+  test('a Word function in a script is braced', () => {
+    const omml = '<m:sSub><m:e>' + run('a') + '</m:e><m:sub>' + sinX + '</m:sub></m:sSub>';
+    expect(importOmml(omml)).toBe('a_{\\sin{x}}');
+  });
+
+  test.each([
+    ['\\left\\langle{}x\\right\\rangle', '⟨', '⟩'],
+    ['\\left\\lfloor{}x\\right\\rfloor', '⌊', '⌋'],
+    ['\\left\\lceil{}x\\right\\rceil', '⌈', '⌉'],
+    ['\\left\\|x\\right\\|', '‖', '‖'],
+    ['\\left\\langle{}x\\right|', '⟨', '|'],
+    ['\\left\\langle{}x\\right.', '⟨', ''],
+    ['\\left\\{x\\right\\}', '{', '}'],
+  ])('%s imports as a \\left/\\right pair and re-exports as the same delimiter', (latex, beg, end) => {
+    const omml = '<m:d><m:dPr><m:begChr m:val="' + beg + '"/><m:endChr m:val="' + end + '"/></m:dPr><m:e>' + run('x') + '</m:e></m:d>';
+    expect(importOmml(omml)).toBe(latex);
+    expect(latexToOmml(latex)).toBe(omml);
+  });
+
+  test('parentheses and brackets still import bare', () => {
+    expect(importOmml('<m:d><m:e>' + run('x') + '</m:e></m:d>')).toBe('(x)');
+  });
+});

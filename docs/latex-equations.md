@@ -238,7 +238,11 @@ Auto-sizing with `\left` and `\right`:
 \left\{ a, b, c \right\}        % braces
 \left| x \right|                % absolute value
 \left\| v \right\|              % norm (double bars)
+\left\langle u, v \right\rangle  % angle brackets
+\left\lfloor x \right\rfloor    % floor (also \lceil \rceil)
 ```
+
+On re-import, braces, angle brackets, floor and ceiling brackets, and double bars keep their `\left` and `\right`. Parentheses, square brackets, and single bars come back as plain characters, such as `(x)`.
 
 One-sided delimiter (invisible on the other side):
 

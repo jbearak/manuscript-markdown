@@ -504,8 +504,10 @@ function scriptArg(latex: string): string {
   if (latex.length === 1) return latex;
   // Single LaTeX command like \alpha
   if (/^\\[a-zA-Z]+$/.test(latex)) return latex;
-  // Single LaTeX command with one braced argument like \mathcal{A}
-  if (/^\\[a-zA-Z]+\{[^{}]*\}$/.test(latex)) return latex;
+  // Single LaTeX command with one braced argument like \mathcal{A}. A function
+  // such as \sin{x} takes no argument, so it needs the braces: {\sin{x}}^2.
+  const command = /^\\([a-zA-Z]+)\{[^{}]*\}$/.exec(latex);
+  if (command && !KNOWN_FUNCTIONS.has(command[1])) return latex;
   return '{' + latex + '}';
 }
 
@@ -717,13 +719,35 @@ function translateDelimiter(children: XmlNode[]): string {
       }
 
       // Reuse already-computed innerLatex for default path
-      return `${begChr}${innerLatex}${endChr}`;
+      return delimitedLatex(begChr, innerLatex, endChr);
     }
   }
 
   // Default behavior
   const inner = elements.map(e => ommlToLatex(e)).join(sepChr);
-  return `${begChr}${inner}${endChr}`;
+  return delimitedLatex(begChr, inner, endChr);
+}
+
+/** Delimiters that need a command, by the character Word stores. */
+const DELIMITER_COMMANDS: Map<string, string> = new Map([
+  ['{', '\\{'], ['}', '\\}'], ['⟨', '\\langle'], ['⟩', '\\rangle'],
+  ['⌊', '\\lfloor'], ['⌋', '\\rfloor'], ['⌈', '\\lceil'], ['⌉', '\\rceil'], ['‖', '\\|'],
+]);
+
+/**
+ * LaTeX for a Word delimiter. Brackets typed as characters import bare, as
+ * (x). One that needs a command, such as ⟨, gets \left and \right, since a
+ * bare \langle re-exports as text instead of a delimiter.
+ */
+function delimitedLatex(begChr: string, inner: string, endChr: string): string {
+  if (!DELIMITER_COMMANDS.has(begChr) && !DELIMITER_COMMANDS.has(endChr)) {
+    return begChr + inner + endChr;
+  }
+  const side = (chr: string) => DELIMITER_COMMANDS.get(chr) ?? (chr || '.');
+  const left = '\\left' + side(begChr);
+  // {} rather than a space ends \langle before a letter; a space exports as a space.
+  const separator = /\\[A-Za-z]+$/.test(left) && /^[A-Za-z]/.test(inner) ? '{}' : '';
+  return left + separator + inner + '\\right' + side(endChr);
 }
 
 
