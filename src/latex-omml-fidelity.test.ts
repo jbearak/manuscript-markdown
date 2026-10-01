@@ -377,3 +377,36 @@ describe('review follow-ups, round 6', () => {
     expect(latexToOmml(importOmml(omml))).toBe(omml);
   });
 });
+
+describe('review follow-ups, round 7', () => {
+  test.each([
+    ['\\mathbf{x% note\ny}', '\\mathbf{x}% note\n\\mathbf{y}'],
+    ['\\mathrm{ab% note\ncd}', '\\mathrm{ab}% note\n\\mathrm{cd}'],
+    ['\\mathcal{A% note\nB}', '\\mathcal{A}% note\n\\mathcal{B}'],
+  ])('a comment inside %s survives the round trip', (latex, back) => {
+    expect(latexToOmml(latex)).toContain('​% note');
+    expect(roundTrip(latex)).toBe(back);
+    expectStableExport(latex);
+  });
+
+  test.each([
+    ['\\left\\Vert x\\right\\Vert', '‖', '‖'],
+    ['\\left\\vert x\\right\\vert', '|', '|'],
+    ['\\left\\lbrace x\\right\\rbrace', '{', '}'],
+  ])('%s exports as a delimiter', (latex, beg, end) => {
+    expect(latexToOmml(latex)).toStartWith('<m:d><m:dPr><m:begChr m:val="' + beg + '"/><m:endChr m:val="' + end + '"/>');
+  });
+
+  test('an unknown delimiter command is reported', () => {
+    const seen: string[] = [];
+    latexToOmml('\\left\\foo x\\right\\bar', cmd => seen.push(cmd));
+    expect(seen).toEqual(['\\foo', '\\bar']);
+  });
+
+  test('commands inside discarded tags and labels are not reported', () => {
+    const seen: string[] = [];
+    latexToOmml('x \\tag{\\ref{a}} \\label{eq:\\foo}', cmd => seen.push(cmd));
+    latexToOmml('\\begin{align} a &= b \\label{\\foo} \\\\ c &= d \\tag*{\\bar} \\end{align}', cmd => seen.push(cmd));
+    expect(seen).toEqual([]);
+  });
+});

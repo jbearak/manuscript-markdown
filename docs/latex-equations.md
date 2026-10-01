@@ -115,7 +115,7 @@ Each variant has its own character, so `\epsilon` (ϵ) and `\varepsilon` (ε) st
 | ℵ | `\aleph` | | | |
 | ⌊ ⌋ | `\lfloor` `\rfloor` | | ⌈ ⌉ | `\lceil` `\rceil` |
 
-The aliases `\le`, `\ge`, `\ne`, `\rightarrow`, `\gets`, `\lnot`, `\wedge`, and `\vee` also work. Re-import writes them as `\leq`, `\geq`, `\neq`, `\to`, `\leftarrow`, `\neg`, `\land`, and `\lor`. The double bar ‖ is `\|`. Likewise `\lvert` and `\rvert` come back as `|`, `\lVert` and `\rVert` as `\|`, `\bot` as `\perp`, `\varnothing` as `\emptyset`, and `\implies` and `\iff` as `\Longrightarrow` and `\Longleftrightarrow`.
+The aliases `\le`, `\ge`, `\ne`, `\rightarrow`, `\gets`, `\lnot`, `\wedge`, and `\vee` also work. Re-import writes them as `\leq`, `\geq`, `\neq`, `\to`, `\leftarrow`, `\neg`, `\land`, and `\lor`. The double bar ‖ is `\|`. Likewise `\vert`, `\lvert`, and `\rvert` come back as `|`, `\Vert`, `\lVert`, and `\rVert` as `\|`, `\bot` as `\perp`, `\varnothing` as `\emptyset`, and `\implies` and `\iff` as `\Longrightarrow` and `\Longleftrightarrow`.
 
 A `'` in math exports as the prime ′. On re-import, a ′ in a subscript, superscript, or limit comes back as `\prime`, and one at the base level of the equation as `'`. An apostrophe inside `\text{}` stays an apostrophe.
 
@@ -237,9 +237,9 @@ Auto-sizing with `\left` and `\right`:
 ```latex
 \left( \frac{a}{b} \right)      % parentheses
 \left[ x + y \right]            % brackets
-\left\{ a, b, c \right\}        % braces
+\left\{ a, b, c \right\}        % braces, also \lbrace \rbrace
 \left| x \right|                % absolute value
-\left\| v \right\|              % norm (double bars)
+\left\| v \right\|              % norm (double bars), also \Vert
 \left\langle u, v \right\rangle  % angle brackets
 \left\lfloor x \right\rfloor    % floor (also \lceil \rceil)
 ```
@@ -391,7 +391,7 @@ This is standard LaTeX behavior: because `%` starts a comment, everything from t
 
 ### Roundtrip behavior
 
-When a LaTeX equation containing `%` comments is exported to Word `.docx`, the comments are stripped from the visible equation but preserved as hidden elements within the OMML structure. They are invisible in Word. On re-import from `.docx` back to Markdown, the comments are restored at their original positions — including any whitespace before the `%`, so vertically aligned comments stay aligned after roundtrip.
+When a LaTeX equation containing `%` comments is exported to Word `.docx`, the comments are stripped from the visible equation but preserved as hidden elements within the OMML structure. They are invisible in Word. On re-import from `.docx` back to Markdown, the comments are restored at their original positions — including any whitespace before the `%`, so vertically aligned comments stay aligned after roundtrip. A comment inside `\mathbf{}`, `\mathrm{}`, or another alphabet command splits it in two: `\mathbf{x% note` with `y}` on the next line comes back as `\mathbf{x}% note` with `\mathbf{y}` on the next line.
 
 ## Binomial Coefficients
 

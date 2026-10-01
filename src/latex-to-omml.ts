@@ -54,7 +54,7 @@ const LATEX_UNICODE_MAP: Map<string, string> = new Map([
   // One-way entries: omml.ts maps these characters back to the canonical
   // spelling above, except ′, which it keeps (f\prime renders a full-size prime)
   ['\\prime', '′'],
-  ['\\lvert', '|'], ['\\rvert', '|'], ['\\lVert', '‖'], ['\\rVert', '‖'],
+  ['\\lvert', '|'], ['\\rvert', '|'], ['\\vert', '|'], ['\\Vert', '‖'], ['\\lVert', '‖'], ['\\rVert', '‖'],
   ['\\bot', '⊥'], ['\\varnothing', '∅'], ['\\implies', '⟹'], ['\\iff', '⟺'],
   ['\\le', '≤'], ['\\ge', '≥'], ['\\ne', '≠'],
   ['\\rightarrow', '→'], ['\\gets', '←'],
@@ -156,6 +156,9 @@ function makeAlphabetRun(text: string, rPr: string): string {
 function makeHiddenCommentRun(text: string): string {
   return '<m:r><m:rPr><m:nor/></m:rPr><w:rPr><w:vanish/></w:rPr><m:t xml:space="preserve">\u200B' + escapeXmlChars(text) + '</m:t></m:r>';
 }
+
+/** A whole hidden comment run (see makeHiddenCommentRun), as a split separator. */
+const HIDDEN_RUN_RE = /(<m:r><m:rPr><m:nor\/><\/m:rPr><w:rPr><w:vanish\/><\/w:rPr><m:t xml:space="preserve">\u200B[^<]*<\/m:t><\/m:r>)/;
 
 function makeCalligraphicRun(text: string): string {
   return '<m:r><m:rPr><m:scr m:val="script"/><m:sty m:val="p"/></m:rPr><m:t>' + escapeXmlChars(text) + '</m:t></m:r>';
@@ -445,7 +448,7 @@ class Parser {
     // Math alphabets
     const alphabet = MATH_ALPHABETS.get(cmd);
     if (alphabet) {
-      return makeAlphabetRun(this.extractText(this.parseGroup()), alphabet);
+      return this.styleGroup(text => makeAlphabetRun(text, alphabet));
     }
 
     switch (cmd) {
@@ -481,15 +484,11 @@ class Parser {
       case '\\begin':
         return this.parseEnvironment();
 
-      case '\\mathrm': {
-        const text = this.parseGroup();
-        return makeStyledRun(this.extractText(text));
-      }
+      case '\\mathrm':
+        return this.styleGroup(text => makeStyledRun(text));
 
-      case '\\mathcal': {
-        const calText = this.parseGroup();
-        return makeCalligraphicRun(this.extractText(calText));
-      }
+      case '\\mathcal':
+        return this.styleGroup(makeCalligraphicRun);
 
       case '\\operatorname': {
         // Intentionally consumes a following group as the function argument,
@@ -587,12 +586,12 @@ class Parser {
       // Tags and labels (silently consumed)
       case '\\tag': {
         this.consumeStarVariant();
-        this.parseGroup();
+        this.discardGroup();
         return '';
       }
 
       case '\\label': {
-        this.parseGroup();
+        this.discardGroup();
         return '';
       }
 
@@ -759,10 +758,10 @@ class Parser {
       }
     } else if (leftToken.type === 'command') {
       switch (leftToken.value) {
-        case '\\{': begChr = '{'; break;
+        case '\\{': case '\\lbrace': begChr = '{'; break;
         case '\\|': begChr = '\u2016'; break;
         case '\\[': begChr = '['; break;
-        default: begChr = LATEX_UNICODE_MAP.get(leftToken.value) ?? leftToken.value.slice(1); break;
+        default: begChr = this.delimiterCommandChr(leftToken.value); break;
       }
     }
 
@@ -793,10 +792,10 @@ class Parser {
       }
     } else if (delimToken.type === 'command') {
       switch (delimToken.value) {
-        case '\\}': endChr = '}'; break;
+        case '\\}': case '\\rbrace': endChr = '}'; break;
         case '\\|': endChr = '\u2016'; break;
         case '\\]': endChr = ']'; break;
-        default: endChr = LATEX_UNICODE_MAP.get(delimToken.value) ?? delimToken.value.slice(1); break;
+        default: endChr = this.delimiterCommandChr(delimToken.value); break;
       }
     }
 
@@ -1033,7 +1032,7 @@ class Parser {
         if (token.type === 'command' && (token.value === '\\tag' || token.value === '\\label')) {
           this.consume();
           if (token.value === '\\tag') this.consumeStarVariant();
-          this.parseGroup(); // consume argument, emit nothing
+          this.discardGroup();
           return true;
         }
         if (token.type === 'command' && (token.value === '\\notag' || token.value === '\\nonumber')) {
@@ -1069,6 +1068,37 @@ class Parser {
       // Consume {envName}
       this.parseGroup();
     }
+  }
+
+  /** The character for a \\left or \\right delimiter command, reporting one it doesn't know. */
+  private delimiterCommandChr(cmd: string): string {
+    const chr = LATEX_UNICODE_MAP.get(cmd);
+    if (chr !== undefined) return chr;
+    this.onUnknownCommand?.(cmd);
+    return cmd.slice(1);
+  }
+
+  /** Parse a group whose content is dropped, such as a \\label, without reporting its commands. */
+  private discardGroup(): void {
+    const onUnknownCommand = this.onUnknownCommand;
+    this.onUnknownCommand = undefined;
+    try {
+      this.parseGroup();
+    } finally {
+      this.onUnknownCommand = onUnknownCommand;
+    }
+  }
+
+  /**
+   * Parse a group as styled text, such as the argument of \\mathbf. Its
+   * comments stay as hidden runs between the styled runs.
+   */
+  private styleGroup(style: (text: string) => string): string {
+    return this.parseGroup().split(HIDDEN_RUN_RE).map((part, i) => {
+      if (i % 2 === 1) return part;
+      const text = this.extractText(part);
+      return text ? style(text) : '';
+    }).join('');
   }
 
   private extractText(omml: string): string {
