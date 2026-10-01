@@ -524,6 +524,14 @@ describe('Word export of commands that used to be spelled out', () => {
     expect(roundTrip('f^\\prime')).toBe('f^\\prime');
     expect(roundTrip('f^{\\prime\\prime}(x)')).toBe('f^{\\prime\\prime}(x)');
     expect(roundTrip('f_i^\\prime')).toBe('f_i^\\prime');
+    expect(roundTrip('f^{\\prime2}')).toBe('f^{\\prime2}');
+    expect(roundTrip('\\sum^\\prime x')).toBe('\\sum^\\prime x');
+  });
+
+  test('a command followed by a structure keeps its separator on import', () => {
+    expect(roundTrip('a\\propto x_i')).toBe('a\\propto x_i');
+    expect(roundTrip('\\sum^\\alpha x')).toBe('\\sum^\\alpha x');
+    expect(roundTrip('a\\sim\\frac{b}{c}')).toBe('a\\sim\\frac{b}{c}');
   });
 
   test('\\widehat and \\widetilde are accents', () => {

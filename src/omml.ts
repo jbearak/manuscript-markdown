@@ -465,11 +465,11 @@ function translateSuperscript(children: XmlNode[]): string {
 }
 
 /**
- * A superscript of nothing but primes (′, as \prime exports) becomes
- * \prime commands; a raw ′ in LaTeX source breaks pdflatex.
+ * Primes in a superscript (′, as \prime exports) become \prime commands;
+ * a raw ′ in LaTeX source breaks pdflatex.
  */
 function primesToLatex(supLatex: string): string {
-  return /^′+$/.test(supLatex) ? supLatex.replace(/′/g, '\\prime') : supLatex;
+  return supLatex.replace(/′([A-Za-z]?)/g, (_match, next: string) => '\\prime' + (next ? ' ' + next : ''));
 }
 
 /**
@@ -559,12 +559,9 @@ function translateNary(children: XmlNode[]): string {
   const subLatex = ommlToLatex(findChild(children, 'm:sub'));
   const supLatex = ommlToLatex(findChild(children, 'm:sup'));
   const sub = (subHide || !subLatex) ? '' : '_' + scriptArg(subLatex);
-  const sup = (supHide || !supLatex) ? '' : '^' + scriptArg(supLatex);
+  const sup = (supHide || !supLatex) ? '' : '^' + scriptArg(primesToLatex(supLatex));
   const body = ommlToLatex(findChild(children, 'm:e'));
-  // When both sub and sup are empty and op is a named command (e.g. \sum),
-  // insert a space before the body to avoid merging like \sumx → \sum x.
-  const needsBodySeparator = !sub && !sup && op.startsWith('\\') && /^[A-Za-z]/.test(body);
-  return op + limits + sub + sup + (needsBodySeparator ? ' ' : '') + body;
+  return appendLatex(op + limits + sub + sup, body);
 }
 
 
