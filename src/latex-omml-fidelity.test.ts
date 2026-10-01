@@ -410,3 +410,34 @@ describe('review follow-ups, round 7', () => {
     expect(seen).toEqual([]);
   });
 });
+
+describe('review follow-ups, round 8', () => {
+  const bold = (t: string) => '<m:r><m:rPr><m:sty m:val="b"/></m:rPr><m:t>' + t + '</m:t></m:r>';
+
+  test.each([
+    ['50%', '\\mathbf{50\\%}'],
+    ['A_B', '\\mathbf{A\\_B}'],
+    ['{x}', '\\mathbf{\\{x\\}}'],
+    ['a^b', '\\mathbf{\\text{a\\textasciicircum{}b}}'],
+  ])('a bold run %s imports with its reserved characters escaped', (text, latex) => {
+    expect(importOmml(bold(text))).toBe(latex);
+    expect(latexToOmml(latex)).toBe(bold(text));
+  });
+
+  test('escapes in \\mathrm export as the plain character', () => {
+    expect(latexToOmml('\\mathrm{50\\%}')).toBe(styled('50%'));
+  });
+
+  test.each([
+    ['↑', '↓', '\\left\\uparrow{}x\\right\\downarrow'],
+    ['⟨', '|', '\\left\\langle{}x\\right|'],
+  ])('delimiters %s %s round-trip as delimiters', (beg, end, latex) => {
+    const omml = '<m:d><m:dPr><m:begChr m:val="' + beg + '"/><m:endChr m:val="' + end + '"/></m:dPr><m:e>' + run('x') + '</m:e></m:d>';
+    expect(importOmml(omml)).toBe(latex);
+    expect(latexToOmml(latex)).toBe(omml);
+  });
+
+  test('a control symbol needs no separator before a letter', () => {
+    expect(importOmml(run('‖x‖'))).toBe('\\|x\\|');
+  });
+});

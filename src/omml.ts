@@ -185,9 +185,10 @@ export function unicodeToLatex(text: string, primeAsCommand = false, separator =
     if (mapped) {
       result += mapped;
       // Prevent command-name capture when the next source character is an ASCII
-      // letter (e.g. αx -> \alpha x, not \alphax).
+      // letter (e.g. αx -> \alpha x, not \alphax). A control symbol such as \|
+      // needs no separator.
       const next = chars[i + 1];
-      if (next && /[A-Za-z]/.test(next)) {
+      if (next && /[A-Za-z]/.test(next) && /[A-Za-z]$/.test(mapped)) {
         result += separator;
       }
     } else {
@@ -427,15 +428,19 @@ function translateRun(children: XmlNode[]): string {
   // LaTeX source breaks pdflatex. In base-level math, ′ is LaTeX's '.
   // Text-mode runs keep the character.
   // Spaces, apostrophes, and reserved characters need text mode: \mathrm{}
-  // drops spaces, reads ' as a prime, and cannot escape reserved characters.
+  // drops spaces and reads ' as a prime, and only \text{} escapes all of
+  // # $ % & _ { } ~ ^ \.
   const textMode = style === 'p' && /[\s'#$%&_{}~^\\]/.test(text);
-  const toLatex = (separator: string) => {
-    const latex = unicodeToLatex(text, scriptDepth > 0 && !textMode, separator);
+  const toLatex = (separator: string, source = text) => {
+    const latex = unicodeToLatex(source, scriptDepth > 0 && !textMode, separator);
     return textMode ? latex : latex.replace(/′/g, "'");
   };
   const alphabet = SCRIPT_ALPHABETS.get(script) ?? STYLE_ALPHABETS.get(style);
   if (alphabet) {
-    return alphabet + '{' + toLatex('{}') + '}';
+    // Math-mode escapes keep the alphabet's font. ~, ^, and \ have none, so
+    // their text goes in \text{}, which the export reads back as plain text.
+    if (/[~^\\]/.test(text)) return alphabet + '{\\text{' + escapeLatex(text) + '}}';
+    return alphabet + '{' + toLatex('{}', text.replace(/[#$%&_{}]/g, ch => '\\' + ch)) + '}';
   }
   if (style === 'p') {
     // Test the original text (textMode), not the LaTeX — unicodeToLatex inserts
@@ -751,11 +756,10 @@ function translateDelimiter(children: XmlNode[]): string {
   return delimitedLatex(begChr, inner, endChr);
 }
 
-/** Delimiters that need a command, by the character Word stores. */
-const DELIMITER_COMMANDS: Map<string, string> = new Map([
-  ['{', '\\{'], ['}', '\\}'], ['⟨', '\\langle'], ['⟩', '\\rangle'],
-  ['⌊', '\\lfloor'], ['⌋', '\\rfloor'], ['⌈', '\\lceil'], ['⌉', '\\rceil'], ['‖', '\\|'],
-]);
+/** The command for a delimiter character that needs one, such as ⟨ or {. */
+function delimiterCommand(chr: string): string | undefined {
+  return chr === '{' || chr === '}' ? '\\' + chr : UNICODE_LATEX_MAP.get(chr);
+}
 
 /**
  * LaTeX for a Word delimiter. Brackets typed as characters import bare, as
@@ -763,10 +767,10 @@ const DELIMITER_COMMANDS: Map<string, string> = new Map([
  * bare \langle re-exports as text instead of a delimiter.
  */
 function delimitedLatex(begChr: string, inner: string, endChr: string): string {
-  if (!DELIMITER_COMMANDS.has(begChr) && !DELIMITER_COMMANDS.has(endChr)) {
+  if (!delimiterCommand(begChr) && !delimiterCommand(endChr)) {
     return begChr + inner + endChr;
   }
-  const side = (chr: string) => DELIMITER_COMMANDS.get(chr) ?? (chr || '.');
+  const side = (chr: string) => delimiterCommand(chr) ?? (chr || '.');
   return appendLatex('\\left' + side(begChr), inner) + '\\right' + side(endChr);
 }
 

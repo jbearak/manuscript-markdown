@@ -97,7 +97,7 @@ const KNOWN_FUNCTIONS = new Set([
 /** Functions whose limits go under the name (m:limLow), as in Word's lim. */
 const LIMIT_FUNCTIONS = new Set(['lim', 'liminf', 'limsup', 'max', 'min', 'sup', 'inf', 'det', 'gcd', 'Pr']);
 
-/** How omml.ts escapes reserved characters in \text{}, read back in text mode. */
+/** How omml.ts escapes reserved characters in \text{} and styled groups, read back there. */
 const TEXT_ESCAPES: Map<string, string> = new Map([
   ['\\#', '#'], ['\\$', '$'], ['\\%', '%'], ['\\&', '&'], ['\\_', '_'], ['\\{', '{'], ['\\}', '}'],
   ['\\textbackslash', '\\'], ['\\textasciitilde', '~'], ['\\textasciicircum', '^'],
@@ -277,6 +277,8 @@ class Parser {
   private onUnknownCommand?: (command: string) => void;
   /** Inside \text or an \operatorname name, where ' is an apostrophe, not a prime. */
   private textMode: boolean;
+  /** Inside a styled group such as \mathbf{}, whose escapes such as \% give the character. */
+  private styledGroup = false;
 
   constructor(tokens: Token[], onUnknownCommand?: (command: string) => void, textMode = false) {
     this.tokens = tokens;
@@ -415,7 +417,7 @@ class Parser {
   }
 
   private parseCommand(cmd: string): string {
-    const escaped = this.textMode ? TEXT_ESCAPES.get(cmd) : undefined;
+    const escaped = this.textMode || this.styledGroup ? TEXT_ESCAPES.get(cmd) : undefined;
     if (escaped !== undefined) {
       return makeRun(escaped);
     }
@@ -1094,7 +1096,15 @@ class Parser {
    * comments stay as hidden runs between the styled runs.
    */
   private styleGroup(style: (text: string) => string): string {
-    return this.parseGroup().split(HIDDEN_RUN_RE).map((part, i) => {
+    const outer = this.styledGroup;
+    this.styledGroup = true;
+    let omml: string;
+    try {
+      omml = this.parseGroup();
+    } finally {
+      this.styledGroup = outer;
+    }
+    return omml.split(HIDDEN_RUN_RE).map((part, i) => {
       if (i % 2 === 1) return part;
       const text = this.extractText(part);
       return text ? style(text) : '';

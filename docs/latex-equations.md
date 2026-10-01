@@ -119,7 +119,7 @@ The aliases `\le`, `\ge`, `\ne`, `\rightarrow`, `\gets`, `\lnot`, `\wedge`, and 
 
 A `'` in math exports as the prime ′. On re-import, a ′ in a subscript, superscript, or limit comes back as `\prime`, and one at the base level of the equation as `'`. An apostrophe inside `\text{}` stays an apostrophe.
 
-A command the converter doesn't know exports as literal text, such as `\foo` in the equation. The export warns once for each such command. Escaped characters such as `\%` and `\#` outside `\text{}` also export as written, backslash included, but without a warning. Inside `\text{}` they export as the plain character.
+A command the converter doesn't know exports as literal text, such as `\foo` in the equation. The export warns once for each such command. Escaped characters such as `\%` and `\#` outside `\text{}` also export as written, backslash included, but without a warning. Inside `\text{}`, `\mathrm{}`, and the math alphabets below, they export as the plain character.
 
 ## Dots
 
@@ -244,7 +244,7 @@ Auto-sizing with `\left` and `\right`:
 \left\lfloor x \right\rfloor    % floor (also \lceil \rceil)
 ```
 
-On re-import, braces, angle brackets, floor and ceiling brackets, and double bars keep their `\left` and `\right`. Parentheses, square brackets, and single bars come back as plain characters, such as `(x)`.
+On re-import, braces, angle brackets, floor and ceiling brackets, double bars, and arrows keep their `\left` and `\right`. Parentheses, square brackets, and single bars come back as plain characters, such as `(x)`.
 
 One-sided delimiter (invisible on the other side):
 
