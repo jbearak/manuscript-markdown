@@ -4,7 +4,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { XMLParser } from 'fast-xml-parser';
-import { latexToOmml } from './latex-to-omml';
+import { latexToOmml, trackedLatexToOmml, CRITIC_INSERTION_COMMAND, CRITIC_DELETION_COMMAND } from './latex-to-omml';
 import { ommlToLatex } from './omml';
 import { convertMdToDocx } from './md-to-docx';
 import { parserOptions, roundTrip } from './test-omml-helpers';
@@ -446,5 +446,61 @@ describe('review follow-ups, round 9', () => {
   test('escapes in a bracketed operand inside a styled group give their character', () => {
     expect(latexToOmml('\\mathrm{\\sin(50\\%)}')).toBe(styled('sin(50%)'));
     expect(latexToOmml("\\text{\\operatorname{f}(it's)}")).toBe(styled("f(it's)"));
+  });
+});
+
+describe('tracked changes inside an equation', () => {
+  const track = (element: 'w:ins' | 'w:del', omml: string) => '<' + element + '>' + omml + '</' + element + '>';
+
+  test('a tracked part stays inside the structure that contains it', () => {
+    expect(trackedLatexToOmml('x^{' + CRITIC_INSERTION_COMMAND + '{2}}', track)).toBe(
+      '<m:sSup><m:e>' + run('x') + '</m:e><m:sup><w:ins>' + run('2') + '</w:ins></m:sup></m:sSup>',
+    );
+    expect(trackedLatexToOmml('\\frac{a}{' + CRITIC_DELETION_COMMAND + '{b}c}', track)).toBe(
+      '<m:f><m:num>' + run('a') + '</m:num><m:den><w:del>' + run('b') + '</w:del>' + run('c') + '</m:den></m:f>',
+    );
+  });
+
+  test('a tracked part in a function operand or styled text keeps its revision', () => {
+    const upright = (t: string, preserve = false) => '<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t' + (preserve ? ' xml:space="preserve"' : '') + '>' + t + '</m:t></m:r>';
+    expect(trackedLatexToOmml('\\sin(' + CRITIC_INSERTION_COMMAND + '{x})', track)).toContain(
+      '<m:e>' + run('(') + '<w:ins>' + run('x') + '</w:ins>' + run(')') + '</m:e>',
+    );
+    expect(trackedLatexToOmml('\\text{a ' + CRITIC_INSERTION_COMMAND + '{b} c}', track)).toBe(
+      upright('a ', true) + '<w:ins>' + upright('b') + '</w:ins>' + upright(' c', true),
+    );
+    expect(trackedLatexToOmml('\\mathbf{a' + CRITIC_DELETION_COMMAND + '{b}}', track)).toBe(
+      '<m:r><m:rPr><m:sty m:val="b"/></m:rPr><m:t>a</m:t></m:r><w:del><m:r><m:rPr><m:sty m:val="b"/></m:rPr><m:t>b</m:t></m:r></w:del>',
+    );
+    expect(trackedLatexToOmml('\\operatorname{mar' + CRITIC_INSERTION_COMMAND + '{gin}}x', track)).toContain(
+      '<m:fName>' + upright('mar') + '<w:ins>' + upright('gin') + '</w:ins></m:fName>',
+    );
+  });
+
+  test('a root degree with a tracked part or a command stays the degree', () => {
+    const root = (degree: string, radicand: string) => '<m:rad><m:deg>' + degree + '</m:deg><m:e>' + radicand + '</m:e></m:rad>';
+    expect(trackedLatexToOmml('\\sqrt[' + CRITIC_INSERTION_COMMAND + '{3}]{a}', track)).toBe(root('<w:ins>' + run('3') + '</w:ins>', run('a')));
+    expect(latexToOmml('\\sqrt[\\alpha]{x}')).toBe(root(run('\u03B1'), run('x')));
+    expect(latexToOmml('\\sqrt[n+1]{x}')).toBe(root(run('n') + run('+') + run('1'), run('x')));
+    expect(latexToOmml('\\sqrt[]{x}')).toBe('<m:rad><m:radPr><m:degHide m:val="1"/></m:radPr><m:deg/><m:e>' + run('x') + '</m:e></m:rad>');
+  });
+
+  test('a \\right with no \\left is its delimiter', () => {
+    const seen: string[] = [];
+    expect(latexToOmml('x\\right)', cmd => seen.push(cmd))).toBe(run('x') + run(')'));
+    expect(latexToOmml('x\\right.')).toBe(run('x'));
+    expect(seen).toEqual([]);
+  });
+
+  test('an \\end with no \\begin is nothing', () => {
+    const seen: string[] = [];
+    expect(latexToOmml(' a \\end{matrix}', cmd => seen.push(cmd))).toBe(run(' ') + run('a') + run(' '));
+    expect(seen).toEqual([]);
+  });
+
+  test('without a tracker the commands are unsupported, as a user writing them would expect', () => {
+    const seen: string[] = [];
+    expect(latexToOmml('a' + CRITIC_INSERTION_COMMAND + '{b}', cmd => seen.push(cmd))).toContain('mmCriticIns');
+    expect(seen).toEqual([CRITIC_INSERTION_COMMAND]);
   });
 });

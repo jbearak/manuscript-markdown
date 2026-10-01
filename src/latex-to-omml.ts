@@ -160,6 +160,24 @@ function makeHiddenCommentRun(text: string): string {
 /** A whole hidden comment run (see makeHiddenCommentRun), as a split separator. */
 const HIDDEN_RUN_RE = /(<m:r><m:rPr><m:nor\/><\/m:rPr><w:rPr><w:vanish\/><\/w:rPr><m:t xml:space="preserve">\u200B[^<]*<\/m:t><\/m:r>)/;
 
+/**
+ * `omml` with `restyle` applied to the runs outside each tracked change and to
+ * those inside it, keeping the w:ins or w:del around the restyled runs.
+ */
+function restyleAroundRevisions(omml: string, restyle: (omml: string) => string): string {
+  const revisions = [...omml.matchAll(/(<w:(ins|del)\b[^>]*>)([\s\S]*?)<\/w:\2>/g)];
+  if (revisions.length === 0) return restyle(omml);
+  const restyled = (part: string) => part ? restyle(part) : '';
+  let result = '';
+  let last = 0;
+  for (const revision of revisions) {
+    const inner = restyled(revision[3]);
+    result += restyled(omml.slice(last, revision.index)) + (inner ? revision[1] + inner + '</w:' + revision[2] + '>' : '');
+    last = revision.index + revision[0].length;
+  }
+  return result + restyled(omml.slice(last));
+}
+
 function makeCalligraphicRun(text: string): string {
   return '<m:r><m:rPr><m:scr m:val="script"/><m:sty m:val="p"/></m:rPr><m:t>' + escapeXmlChars(text) + '</m:t></m:r>';
 }
@@ -280,17 +298,32 @@ export function tokenize(latex: string): Token[] {
  */
 type ParseMode = 'math' | 'styled' | 'text';
 
+/**
+ * Private commands for CriticMarkup inside an equation. md-to-docx rewrites
+ * each tracked span as one of these (see trackedEquationLatex in
+ * md-to-docx-citations.ts), so a change inside a fraction or script stays
+ * inside it in Word. Only trackedLatexToOmml reads them; elsewhere they're
+ * unsupported commands, as anything a user writes by these names is.
+ */
+export const CRITIC_INSERTION_COMMAND = '\\mmCriticIns';
+export const CRITIC_DELETION_COMMAND = '\\mmCriticDel';
+
+/** Wraps a tracked part's OMML in w:ins or w:del. */
+export type TrackChange = (element: 'w:ins' | 'w:del', omml: string) => string;
+
 class Parser {
   private tokens: Token[];
   private pos: number;
   private onUnknownCommand?: (command: string) => void;
   private mode: ParseMode;
+  private track?: TrackChange;
 
-  constructor(tokens: Token[], onUnknownCommand?: (command: string) => void, mode: ParseMode = 'math') {
+  constructor(tokens: Token[], onUnknownCommand?: (command: string) => void, mode: ParseMode = 'math', track?: TrackChange) {
     this.tokens = tokens;
     this.pos = 0;
     this.onUnknownCommand = onUnknownCommand;
     this.mode = mode;
+    this.track = track;
   }
 
   /** Text as Word shows it: outside text mode, ' is a prime, as Word's own autocorrect makes it. */
@@ -309,9 +342,9 @@ class Parser {
     }
   }
 
-  /** Parse a group whose content is text, returning that text. */
-  private parseTextGroup(): string {
-    return this.extractText(this.parseGroupIn('text'));
+  /** Parse a group whose content is text, as `style` writes that text, keeping tracked changes in it. */
+  private parseTextGroup(style: (text: string) => string): string {
+    return restyleAroundRevisions(this.parseGroupIn('text'), omml => style(this.extractText(omml)));
   }
 
   private peek(): Token | undefined {
@@ -428,6 +461,11 @@ class Parser {
   }
 
   private parseCommand(cmd: string): string {
+    if (this.track && (cmd === CRITIC_INSERTION_COMMAND || cmd === CRITIC_DELETION_COMMAND)) {
+      const omml = this.parseGroup();
+      return omml && this.track(cmd === CRITIC_INSERTION_COMMAND ? 'w:ins' : 'w:del', omml);
+    }
+
     const escaped = this.mode === 'math' ? undefined : TEXT_ESCAPES.get(cmd);
     if (escaped !== undefined) {
       return makeRun(escaped);
@@ -472,30 +510,31 @@ class Parser {
       }
 
       case '\\sqrt': {
-        // Check for optional argument [n]
-        if (this.peek()?.type === 'text' && this.peek()?.value.startsWith('[')) {
-          const token = this.consume()!;
-          const match = token.value.match(/^\[([^\]]*)\](.*)$/);
-          if (match) {
-            const deg = match[1];
-            const remaining = match[2];
-            if (remaining) {
-              // Put back remaining text
-              this.tokens.splice(this.pos, 0, { type: 'text', value: remaining, pos: token.pos });
-            }
-            const radicand = this.parseGroup();
-            return '<m:rad><m:deg>' + makeRun(deg) + '</m:deg><m:e>' + radicand + '</m:e></m:rad>';
-          }
-        }
+        // An optional [n] argument is the degree
+        const degree = this.parseBracketedOperand('[', true);
         const radicand = this.parseGroup();
+        if (degree) return '<m:rad><m:deg>' + degree + '</m:deg><m:e>' + radicand + '</m:e></m:rad>';
         return '<m:rad><m:radPr><m:degHide m:val="1"/></m:radPr><m:deg/><m:e>' + radicand + '</m:e></m:rad>';
       }
 
       case '\\left':
         return this.parseDelimiter();
 
+      // A \right with no \left, as when only the \left is tracked: just its
+      // delimiter, as a \left with no \right is
+      case '\\right': {
+        const endChr = this.closingDelimiter();
+        return endChr ? makeRun(endChr) : '';
+      }
+
       case '\\begin':
         return this.parseEnvironment();
+
+      // An \end with no \begin, as when only the \begin is tracked: nothing,
+      // as a \begin with no \end shows only its environment
+      case '\\end':
+        this.parseGroup();
+        return '';
 
       case '\\mathrm':
         return this.styleGroup(text => makeStyledRun(text));
@@ -509,7 +548,7 @@ class Parser {
         // with the OMML→LaTeX direction which emits \operatorname{name}{arg}.
         // \operatorname* puts limits under the name, like \lim.
         const limitsUnder = this.consumeStarVariant();
-        return this.parseFunction(makeStyledRun(this.parseTextGroup()), limitsUnder);
+        return this.parseFunction(this.parseTextGroup(text => makeStyledRun(text)), limitsUnder);
       }
 
       case '\\limits':
@@ -539,7 +578,7 @@ class Parser {
 
       // \text{} — same as \mathrm
       case '\\text':
-        return makeStyledRun(this.parseTextGroup(), true);
+        return this.parseTextGroup(text => makeStyledRun(text, true));
 
       // \boxed{}
       case '\\boxed': {
@@ -620,7 +659,7 @@ class Parser {
       // Intertext
       case '\\intertext':
       case '\\shortintertext':
-        return makeStyledRun(this.parseTextGroup(), true);
+        return this.parseTextGroup(text => makeStyledRun(text, true));
 
       // Shove commands — emit inner content
       case '\\shoveleft':
@@ -699,18 +738,19 @@ class Parser {
   /**
    * Parse a `(…)` or `[…]` group that directly follows an n-ary operator or a
    * function name as that construct's whole operand, so the m:e holds the
-   * group instead of just its opening bracket. Returns undefined, leaving the
-   * token stream untouched, unless the bracket closes within the current
-   * brace group, \left…\right pair, row, and cell.
+   * group instead of just its opening bracket. `opens` limits the brackets,
+   * and `inner` parses only what's between them, as for \sqrt's [n]. Returns
+   * undefined, leaving the token stream untouched, unless the bracket closes
+   * within the current brace group, \left…\right pair, row, and cell.
    */
-  private parseBracketedOperand(): string | undefined {
+  private parseBracketedOperand(opens = '([', inner = false): string | undefined {
     let start = this.pos;
     while (this.tokens[start]?.type === 'text' && this.tokens[start].value.trim() === '') start++;
     const first = this.tokens[start];
     if (first?.type !== 'text') return undefined;
     const lead = first.value.length - first.value.trimStart().length;
     const open = first.value.charAt(lead);
-    const close = open === '(' ? ')' : open === '[' ? ']' : '';
+    const close = !opens.includes(open) ? '' : open === '(' ? ')' : open === '[' ? ']' : '';
     if (!close) return undefined;
 
     let depth = 0;
@@ -743,11 +783,11 @@ class Parser {
           depth++;
         } else if (ch === close && --depth === 0) {
           const operand = this.tokens.slice(start, i + 1).map(t => ({ ...t }));
-          operand[operand.length - 1].value = operand[operand.length - 1].value.slice(0, j + 1);
-          operand[0].value = operand[0].value.slice(lead);
+          operand[operand.length - 1].value = operand[operand.length - 1].value.slice(0, inner ? j : j + 1);
+          operand[0].value = operand[0].value.slice(inner ? lead + 1 : lead);
           const rest = token.value.slice(j + 1);
           this.tokens.splice(this.pos, i + 1 - this.pos, ...(rest ? [{ type: 'text' as const, value: rest, pos: token.pos + j + 1 }] : []));
-          return new Parser(operand, this.onUnknownCommand, this.mode).parseExpression(false);
+          return new Parser(operand, this.onUnknownCommand, this.mode, this.track).parseExpression(false);
         }
       }
     }
@@ -789,12 +829,19 @@ class Parser {
 
     this.consume(); // consume \\right
 
-    const delimToken = this.consume();
-    if (!delimToken) {
+    const endChr = this.closingDelimiter();
+    if (endChr === undefined) {
       // Malformed input (missing \right delimiter): fall back to emitting the open delimiter + content.
       return makeRun(begChr) + content;
     }
 
+    return '<m:d><m:dPr><m:begChr m:val="' + escapeXmlChars(begChr) + '"/><m:endChr m:val="' + escapeXmlChars(endChr) + '"/></m:dPr><m:e>' + content + '</m:e></m:d>';
+  }
+
+  /** Consume the delimiter after \right and return its character, undefined if there is none. */
+  private closingDelimiter(): string | undefined {
+    const delimToken = this.consume();
+    if (!delimToken) return undefined;
     let endChr = ')';
     if (delimToken.type === 'text') {
       endChr = delimToken.value.charAt(0);
@@ -811,8 +858,7 @@ class Parser {
         default: endChr = this.delimiterCommandChr(delimToken.value); break;
       }
     }
-
-    return '<m:d><m:dPr><m:begChr m:val="' + escapeXmlChars(begChr) + '"/><m:endChr m:val="' + escapeXmlChars(endChr) + '"/></m:dPr><m:e>' + content + '</m:e></m:d>';
+    return endChr;
   }
 
   /** Consume a `*` prefix from the next text token (for `\tag*` variants); report whether there was one. */
@@ -1107,11 +1153,11 @@ class Parser {
    * comments stay as hidden runs between the styled runs.
    */
   private styleGroup(style: (text: string) => string): string {
-    return this.parseGroupIn('styled').split(HIDDEN_RUN_RE).map((part, i) => {
+    return restyleAroundRevisions(this.parseGroupIn('styled'), omml => omml.split(HIDDEN_RUN_RE).map((part, i) => {
       if (i % 2 === 1) return part;
       const text = this.extractText(part);
       return text ? style(text) : '';
-    }).join('');
+    }).join(''));
   }
 
   private extractText(omml: string): string {
@@ -1146,6 +1192,17 @@ export function latexToOmml(latex: string, onUnknownCommand?: (command: string) 
   }
 
   const tokens = tokenize(latex);
-  const parser = new Parser(tokens, onUnknownCommand);
+  const parser = new Parser(tokens, onUnknownCommand, 'math');
   return parser.parseExpression(false);
+}
+
+/**
+ * As latexToOmml, with each CRITIC_INSERTION_COMMAND or CRITIC_DELETION_COMMAND
+ * span's OMML passed through `track`.
+ */
+export function trackedLatexToOmml(latex: string, track: TrackChange, onUnknownCommand?: (command: string) => void): string {
+  if (!latex.trim()) {
+    return '';
+  }
+  return new Parser(tokenize(latex), onUnknownCommand, 'math', track).parseExpression(false);
 }

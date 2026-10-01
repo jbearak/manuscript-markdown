@@ -779,6 +779,57 @@ describe('Feature: docx-equation-conversion, Property 4: Structural fidelity rou
 // **Validates: Requirements 3.1–3.14, 6.1, 6.2, 6.3**
 // ---------------------------------------------------------------------------
 
+describe('Tracked changes inside an equation', () => {
+  const ins = (...children: any[]) => ({ 'w:ins': children, ':@': { '@_w:author': 'A' } });
+  const del = (...children: any[]) => ({ 'w:del': children, ':@': { '@_w:author': 'A' } });
+
+  it('reads w:ins and w:del as CriticMarkup instead of dropping their runs', () => {
+    expect(ommlToLatex([makeRun('a'), ins(makeRun('b')), makeRun('c')])).toBe('a{++b++}c');
+    expect(ommlToLatex([makeRun('a'), del(makeRun('b')), makeRun('c')])).toBe('a{--b--}c');
+    expect(ommlToLatex([makeRun('('), ins(makeRun('b')), makeRun(')')])).toBe('({++b++})');
+  });
+
+  it('keeps the spacing around tracked runs and separates a command from them', () => {
+    expect(ommlToLatex([makeRun('a '), ins(makeRun('b')), makeRun(' c')])).toBe('a {++b++} c');
+    // \quad is an em space in Word, which comes back as the character
+    expect(ommlToLatex([makeRun('a\u2003'), ins(makeRun('b')), makeRun('c')])).toBe('a\u2003{++b++}c');
+    // Accepting or rejecting the change would otherwise run the command into
+    // a letter. {} keeps them apart; a space would export as a space.
+    const alpha = makeRun('\u03B1');
+    expect(ommlToLatex([alpha, ins(makeRun('x'))])).toBe('\\alpha{}{++x++}');
+    expect(ommlToLatex([ins(alpha), makeRun('x')])).toBe('{++\\alpha++}{}x');
+    expect(ommlToLatex([alpha, del(makeRun('b')), makeRun('x')])).toBe('\\alpha{}{--b--}x');
+    // Likewise after a \left or \right delimiter
+    const angle = { 'm:d': [
+      { 'm:dPr': [{ 'm:begChr': [], ':@': { '@_m:val': '\u27E8' } }, { 'm:endChr': [], ':@': { '@_m:val': '\u27E9' } }] },
+      { 'm:e': [makeRun('x')] },
+    ] };
+    expect(ommlToLatex([angle, ins(makeRun('y'))])).toBe('\\left\\langle{}x\\right\\rangle{}{++y++}');
+    expect(ommlToLatex([ins(angle), makeRun('y')])).toBe('{++\\left\\langle{}x\\right\\rangle++}{}y');
+  });
+
+  it('keeps a tracked change that is only a space', () => {
+    expect(ommlToLatex([makeRun('a'), ins(makeRun('\u2003')), makeRun('b')])).toBe('a{++\u2003++}b');
+    expect(ommlToLatex([makeRun('a'), del(makeRun('\u2009')), makeRun('b')])).toBe('a{--\u2009--}b');
+  });
+
+  it('reads a deletion followed by an insertion as a substitution', () => {
+    expect(ommlToLatex([makeRun('a'), del(makeRun('b')), ins(makeRun('d')), makeRun('c')])).toBe('a{~~b~>d~~}c');
+  });
+
+  it('keeps a deletion and an insertion by different authors apart', () => {
+    const insBy = (author: string, ...children: any[]) => ({ 'w:ins': children, ':@': { '@_w:author': author } });
+    expect(ommlToLatex([makeRun('a'), del(makeRun('b')), insBy('B', makeRun('d'))])).toBe('a{--b--}{++d++}');
+  });
+
+  it('reads tracked structures and tracked runs inside them', () => {
+    const frac = { 'm:f': [{ 'm:num': [makeRun('1')] }, { 'm:den': [makeRun('2')] }] };
+    expect(ommlToLatex([makeRun('x'), ins(frac)])).toBe('x{++\\frac{1}{2}++}');
+    const sup = { 'm:sSup': [{ 'm:e': [makeRun('x')] }, { 'm:sup': [ins(makeRun('2'))] }] };
+    expect(ommlToLatex([sup])).toBe('x^{{++2++}}');
+  });
+});
+
 describe('Unit tests: OMML construct translation', () => {
 
   // --- Fraction (m:f → \frac{num}{den}) --- Req 3.1

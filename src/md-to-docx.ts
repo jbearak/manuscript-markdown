@@ -2,7 +2,7 @@ import MarkdownIt from 'markdown-it';
 import { imagePathsWithSpaces } from './image-paths';
 import type Token from 'markdown-it/lib/token.mjs';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
-import { escapeXml, escapeXmlText, generateCitation, generateMathXml, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, type CiteprocEngine } from './md-to-docx-citations';
+import { escapeXml, escapeXmlText, generateCitation, generateMathXml, generateTrackedMathXml, trackedEquationLatex, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, type CiteprocEngine } from './md-to-docx-citations';
 import { downloadStyle, resolveCslCachePath } from './csl-loader';
 import { existsSync, readFileSync } from 'fs';
 import { isAbsolute, join, resolve } from 'path';
@@ -157,6 +157,7 @@ export interface MdRun {
   innerRuns?: MdRun[];      // parsed inner formatting for critic_add/del/highlight
   oldRuns?: MdRun[];        // parsed old-side formatting for critic_sub
   newRuns?: MdRun[];        // parsed new-side formatting for critic_sub
+  mathParts?: CriticMathPart[]; // inline equation with CriticMarkup inside; text holds every part's LaTeX
   author?: string;          // for comments/revisions
   date?: string;            // for comments/revisions
   commentText?: string;     // for critic_comment: the comment body
@@ -264,6 +265,7 @@ interface ManuscriptToken extends Token {
   prefixes?: string[];
   display?: boolean;
   footnoteLabel?: string;
+  criticMathParts?: CriticMathPart[];
 }
 
 function pushManuscriptToken(state: StateInline, type: string, tag: string, nesting: 1 | 0 | -1): ManuscriptToken {
@@ -704,22 +706,44 @@ function mathRule(state: StateInline, silent: boolean): boolean {
 
   const content = state.src.slice(match.contentStart, match.contentEnd);
   const isDisplay = match.delimiterLength === 2;
-  if (!isDisplay) {
-    const criticParts = splitCriticMarkupInMath(content);
-    if (criticParts) {
-      pushCriticMathTokens(state, criticParts);
-      return true;
-    }
+  const criticParts = splitCriticMarkupInMath(content);
+  if (criticParts && criticParts.every(isTrackedMathPart)) {
+    pushTrackedMathToken(state, criticParts, isDisplay);
+    return true;
+  }
+  // A highlight or comment splits an inline equation; a display equation
+  // can't be split into inline ones and keeps it as LaTeX
+  if (criticParts && !isDisplay) {
+    pushCriticMathTokens(state, criticParts);
+    return true;
   }
 
   pushMathToken(state, content, isDisplay);
   return true;
 }
 
+/** Whether Word can record a part as a change inside an equation. */
+function isTrackedMathPart(part: CriticMathPart): boolean {
+  return part.type === 'math' || part.type === 'addition' || part.type === 'deletion' || part.type === 'substitution';
+}
+
+/** An equation with insertions, deletions and substitutions inside, which
+ *  become tracked runs in one equation (see generateTrackedMathXml). */
+function pushTrackedMathToken(state: StateInline, parts: CriticMathPart[], display: boolean): void {
+  const token = pushManuscriptToken(state, 'math', '', 0);
+  // For rendering without a tracker, as inside a deleted span: every part
+  // where it belongs
+  token.content = trackedEquationLatex(parts, true)
+    ?? parts.map(part => part.type === 'substitution' ? part.oldContent + ' ' + part.newContent : part.content).join(' ');
+  token.criticMathParts = parts;
+  if (display) token.display = true;
+}
+
 function wrapInlineMathFragment(content: string): string {
   return content.length > 0 ? '$' + content + '$' : '';
 }
 
+/** An inline equation split at its highlights and comments, which can't sit inside an equation. */
 function pushCriticMathTokens(state: StateInline, parts: CriticMathPart[]): void {
   const pushMath = (content: string) => {
     if (content) pushMathToken(state, content);
@@ -2822,6 +2846,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
           type: 'math',
           text: token.content,
           display: token.display,
+          ...(token.criticMathParts ? { mathParts: token.criticMathParts } : {}),
           ...formatStack,
           href: currentHref
         });
@@ -5474,7 +5499,9 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         }
       }
     } else if (run.type === 'math') {
-      xml += generateMathXml(run.text, !!run.display, state.warnings);
+      xml += run.mathParts
+        ? generateTrackedMathXml(run.mathParts, revisionWrapper(run, state, options), state.warnings, !!run.display)
+        : generateMathXml(run.text, !!run.display, state.warnings);
     } else if (run.type === 'comment_range_start') {
       const mdId = run.commentId || '';
       let numericId = state.commentIdMap.get(mdId);
@@ -5645,6 +5672,14 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
     }
   }
   return xml;
+}
+
+/** Wraps content in a w:ins or w:del attributed the way generateRuns attributes the run's revisions. */
+function revisionWrapper(run: MdRun, state: DocxGenState, options?: MdToDocxOptions): (element: 'w:ins' | 'w:del', content: string) => string {
+  const author = run.author || options?.authorName || 'Unknown';
+  const date = normalizeToUtcIso(run.date || '', state.timezone);
+  const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
+  return (element, content) => '<' + element + ' w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + content + '</' + element + '>';
 }
 
 export function generateParagraph(token: MdToken, state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine): string {

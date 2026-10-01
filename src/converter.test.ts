@@ -4513,6 +4513,35 @@ describe('Track changes (CriticMarkup)', () => {
       expect(md.trim()).toBe('{++$x^2$++}');
     });
 
+    test('CriticMarkup inside math survives a round trip', async () => {
+      const fence = '$'.repeat(2);
+      for (const md of [
+        'See $a {++b++} c$ here.', 'See $a {--b--} c$ here.', 'See $a {~~b~>d~~} c$ here.',
+        'See $x = {++\\frac{1}{2}++} + y$ here.',
+        // A change inside a structure, as import writes Word's edits to one
+        'See $x^{{++2++}}$ here.', 'See $\\frac{a}{{--b--} c}$ here.', 'See $x_{{++i++}}^{{~~2~>3~~}}$ here.',
+        'See $\\text{a } {++\\text{b c}++} \\text{ d}$ here.',
+        // Spacing around the markup stays as written
+        'See $a{++b++}c$ here.', 'See $a\u2003{++b++}c$ here.', 'See $\\alpha{}{++x++}$ here.', 'See ${++\\alpha++}{}x$ here.', 'See $x{~~\\beta~>\\alpha~~}{}y$ here.',
+        // An equation that's only a tracked space keeps it
+        'See ${++ ++}$ here.', 'See ${-- --}$ here.',
+        'See $\\left\\langle{}x\\right\\rangle{}{++y++}$ here.',
+        // A script binds to what's before it once the change is accepted or rejected
+        'See $x^{{++2++}}{+++y^3++}$ here.', 'See $x{++y^3++}{--z--}$ here.',
+        // An equation Word can't track in part comes back replaced
+        'See ${~~\\sqrt[3]{x}~>\\sqrt[4]{x}~~}$ here.',
+        // A LaTeX comment's braces aren't structure
+        'See $\\frac{{++a % }\nb++}}{c}$ here.',
+        'Text\n\n' + fence + '\na {++b++} c\n' + fence + '\n\nmore', 'Text\n\n' + fence + '\na {~~b~>d~~} c\n' + fence + '\n\nmore',
+        // Whole tracked equations next to other equations keep their boundaries
+        'See {~~$b$~>$d$~~} here.', 'See {++$b$++}$c$ here.', 'See {++$a$++}{--$b$--} here.',
+      ]) {
+        const { docx } = await convertMdToDocx(md);
+        const imported = (await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+        expect(imported).toBe(md);
+      }
+    });
+
     test('display math with revision', () => {
       const content: ContentItem[] = [
         { type: 'para' } as any,
