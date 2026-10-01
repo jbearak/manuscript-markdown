@@ -97,6 +97,12 @@ const KNOWN_FUNCTIONS = new Set([
 /** Functions whose limits go under the name (m:limLow), as in Word's lim. */
 const LIMIT_FUNCTIONS = new Set(['lim', 'liminf', 'limsup', 'max', 'min', 'sup', 'inf', 'det', 'gcd', 'Pr']);
 
+/** How omml.ts escapes reserved characters in \text{}, read back in text mode. */
+const TEXT_ESCAPES: Map<string, string> = new Map([
+  ['\\#', '#'], ['\\$', '$'], ['\\%', '%'], ['\\&', '&'], ['\\_', '_'], ['\\{', '{'], ['\\}', '}'],
+  ['\\textbackslash', '\\'], ['\\textasciitilde', '~'], ['\\textasciicircum', '^'],
+]);
+
 /** Function names that LaTeX sets with a space. */
 const FUNCTION_NAMES: Map<string, string> = new Map([['liminf', 'lim inf'], ['limsup', 'lim sup']]);
 
@@ -406,6 +412,11 @@ class Parser {
   }
 
   private parseCommand(cmd: string): string {
+    const escaped = this.textMode ? TEXT_ESCAPES.get(cmd) : undefined;
+    if (escaped !== undefined) {
+      return makeRun(escaped);
+    }
+
     // Greek letters and symbols
     const unicode = LATEX_UNICODE_MAP.get(cmd);
     if (unicode) {
@@ -809,6 +820,10 @@ class Parser {
    * functions such as \lim and \max, beside it (\log_2, \sin^2) otherwise.
    */
   private parseFunction(name: string, limitsUnder: boolean): string {
+    const placement = this.consumeAfterWhitespace(
+      t => t.type === 'command' && (t.value === '\\limits' || t.value === '\\nolimits'),
+    );
+    if (placement) limitsUnder = placement.value === '\\limits';
     let fName = name;
     if (limitsUnder) {
       let script: Token | undefined;

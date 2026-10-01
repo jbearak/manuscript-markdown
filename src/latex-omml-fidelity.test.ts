@@ -228,3 +228,31 @@ describe('primes', () => {
     expect(importOmml(run('f′'))).toBe("f'");
   });
 });
+
+describe('review follow-ups', () => {
+  test('\\limits and \\nolimits after a function name set where its limits go', () => {
+    expect(latexToOmml('\\lim\\nolimits_i x')).toBe(func(
+      '<m:sSub><m:e>' + styled('lim') + '</m:e><m:sub>' + run('i') + '</m:sub></m:sSub>',
+      run('x'),
+    ));
+    expect(latexToOmml('\\operatorname{foo}\\limits_i x')).toBe(func(
+      '<m:limLow><m:e>' + styled('foo') + '</m:e><m:lim>' + run('i') + '</m:lim></m:limLow>',
+      run('x'),
+    ));
+    expect(roundTrip('\\lim\\nolimits_i x')).toBe('\\lim_i{x}');
+  });
+
+  test('an apostrophe in an operator name inside a superscript stays an apostrophe', () => {
+    expect(roundTrip("x^{\\operatorname{f'}{y}}")).toBe("x^{\\operatorname{f'}{y}}");
+  });
+
+  test.each([
+    ["O'Brien_1", "\\text{O'Brien\\_1}"],
+    ['50 % off', '\\text{50 \\% off}'],
+    ['a {b} c', '\\text{a \\{b\\} c}'],
+    ['x ~ y', '\\text{x \\textasciitilde{} y}'],
+  ])('normal text %s imports escaped as %s and re-exports unchanged', (text, latex) => {
+    expect(importOmml(styled(text))).toBe(latex);
+    expect(latexToOmml(latex)).toBe(styled(text));
+  });
+});

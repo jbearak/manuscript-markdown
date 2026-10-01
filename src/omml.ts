@@ -445,14 +445,15 @@ function translateRun(children: XmlNode[]): string {
 /**
  * LaTeX for normal text in an equation. Math commands are invalid inside
  * \text{}, so characters that map to one sit between the text segments as
- * \mathrm{…}. Both forms re-export as plain-style runs.
+ * \mathrm{…}, and reserved characters are escaped. All of it re-exports as
+ * plain-style runs.
  */
 function textModeLatex(text: string): string {
   let latex = '';
   let prose = '';
   let symbols = '';
   const flush = () => {
-    if (prose) latex += '\\text{' + prose + '}';
+    if (prose) latex += '\\text{' + escapeLatex(prose) + '}';
     if (symbols) latex += '\\mathrm{' + unicodeToLatex(symbols) + '}';
     prose = '';
     symbols = '';
