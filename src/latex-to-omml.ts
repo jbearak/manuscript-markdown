@@ -49,7 +49,6 @@ const LATEX_UNICODE_MAP: Map<string, string> = new Map([
   ['\\le', '≤'], ['\\ge', '≥'], ['\\ne', '≠'],
   ['\\rightarrow', '→'], ['\\gets', '←'],
   ['\\lnot', '¬'], ['\\wedge', '∧'], ['\\vee', '∨'],
-  ['\\varepsilon', 'ε'], ['\\varphi', 'φ'],
 ]);
 
 const LATEX_ACCENT_MAP: Map<string, string> = new Map([
@@ -106,8 +105,6 @@ function unescapeXmlChars(text: string): string {
 function makeRun(text: string): string {
   return '<m:r><m:t>' + escapeXmlChars(text) + '</m:t></m:r>';
 }
-
-const WHITESPACE_RUN_RE = /^<m:r><m:t>\s+<\/m:t><\/m:r>$/;
 
 function makeStyledRun(text: string): string {
   return '<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>' + escapeXmlChars(text) + '</m:t></m:r>';
@@ -768,9 +765,6 @@ class Parser {
     while ((token = this.peek()) && !shouldStop(token)) {
       if (onSpecialToken && onSpecialToken(token, atoms)) continue;
       if (token.type === 'caret' || token.type === 'underscore') {
-        // TeX ignores whitespace before a script, so the script binds to the
-        // atom before the space
-        while (atoms.length > 0 && WHITESPACE_RUN_RE.test(atoms[atoms.length - 1])) atoms.pop();
         if (atoms.length === 0) {
           atoms.push(this.parseToken(this.consume()!));
         } else {
@@ -783,8 +777,13 @@ class Parser {
         atoms.push(this.parseGroup());
       } else {
         const consumed = this.consume()!;
-        if (consumed.type === 'text' && consumed.value.length > 1) {
-          for (const ch of consumed.value) {
+        if (consumed.type === 'text') {
+          // TeX ignores source whitespace before a script, so the script binds
+          // to the atom before the space. Spacing commands such as \quad are
+          // not text tokens and keep their runs.
+          const next = this.peek();
+          const beforeScript = next?.type === 'caret' || next?.type === 'underscore';
+          for (const ch of beforeScript ? consumed.value.replace(/[ \t\r\n]+$/, '') : consumed.value) {
             atoms.push(makeRun(ch));
           }
         } else if (consumed.type === 'comment' || consumed.type === 'line_continuation') {

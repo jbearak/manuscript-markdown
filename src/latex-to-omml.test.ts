@@ -502,7 +502,6 @@ describe('Word export of commands that used to be spelled out', () => {
     ['\\emptyset', '∅'], ['\\ell', 'ℓ'],
     ['\\Leftrightarrow', '⇔'], ['\\mapsto', '↦'], ['\\rightarrow', '→'], ['\\gets', '←'],
     ['\\lnot', '¬'], ['\\wedge', '∧'], ['\\vee', '∨'],
-    ['\\varepsilon', 'ε'], ['\\varphi', 'φ'],
   ])('%s becomes %s', (cmd, ch) => {
     expect(latexToOmml(cmd)).toBe('<m:r><m:t>' + ch + '</m:t></m:r>');
   });
@@ -665,6 +664,12 @@ describe('bracketed operands of n-ary operators and functions', () => {
     expect(latexToOmml('\\sin(x) _j')).toBe(latexToOmml('\\sin(x)_j'));
     expect(latexToOmml('x ^2')).toBe(latexToOmml('x^2'));
     expect(latexToOmml('x_i ^2')).toBe(latexToOmml('x_i^2'));
+  });
+
+  test('explicit spacing commands before a script are kept', () => {
+    for (const [cmd, ch] of [['\\quad', '\u2003'], ['\\,', '\u2009'], ['\\;', '\u2004'], ['\\ ', ' ']]) {
+      expect(latexToOmml('x' + cmd + '^2')).toBe(run('x') + '<m:sSup><m:e>' + run(ch) + '</m:e><m:sup>' + run('2') + '</m:sup></m:sSup>');
+    }
   });
 
   test('scripts after the group still bind to the operand', () => {

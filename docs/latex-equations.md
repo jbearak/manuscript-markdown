@@ -73,8 +73,6 @@ a^{n+1}      % multi-character superscript (use braces)
 | `\lambda` λ | `\omega` ω | | |
 | `\mu` μ | | | |
 
-`\varepsilon` and `\varphi` export as ε and φ. Re-import writes them as `\epsilon` and `\phi`.
-
 ## Operators and Symbols
 
 | Symbol | LaTeX | | Symbol | LaTeX |
