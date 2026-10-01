@@ -781,6 +781,11 @@ function paraPlaceholderRule(state: StateInline, silent: boolean): boolean {
 
 function createMarkdownIt(): MarkdownIt {
   const md = new MarkdownIt({ html: true, linkify: true });
+  // Match the VS Code preview, which links only URLs with a scheme. Fuzzy
+  // matching would turn sd.ky or README.md into links to a country's TLD, and
+  // Word can't open a protocol-relative //example.com.
+  md.linkify.set({ fuzzyLink: false });
+  md.linkify.add('//', null);
   md.use(imagePathsWithSpaces);
 
   md.inline.ruler.before('emphasis', 'para_placeholder', paraPlaceholderRule);

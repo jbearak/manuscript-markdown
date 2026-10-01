@@ -190,6 +190,14 @@ describe('GFM support in Markdown→DOCX parser', () => {
     expect(hrefRun?.text).toBe('https://example.com');
   });
 
+  it('leaves bare domain names as text, as the VS Code preview does', () => {
+    // Fuzzy linkify reads sd.ky (the .ky TLD) and README.md (.md) as links,
+    // and a protocol-relative link has no scheme for Word to open
+    const tokens = parseMd('Uses sd.ky[3,2], README.md, //example.com and www.example.com, or me@example.com.');
+    const hrefs = tokens[0].runs.filter(run => run.href).map(run => run.href);
+    expect(hrefs).toEqual(['mailto:me@example.com']);
+  });
+
   it('parses task list markers semantically and strips literal marker text', () => {
     const tokens = parseMd('- [x] done\n- [ ] todo');
     const listItems = tokens.filter(t => t.type === 'list_item');
