@@ -148,13 +148,14 @@ export function escapeLatex(text: string): string {
  * Map a single character to its LaTeX command if one exists.
  * Characters not in the mapping table are returned unchanged.
  * Multi-character strings are processed character-by-character.
+ * With `primeAsCommand`, ′ maps to \prime (for superscript math).
  */
-export function unicodeToLatex(text: string): string {
+export function unicodeToLatex(text: string, primeAsCommand = false): string {
   let result = '';
   const chars = [...text];
   for (let i = 0; i < chars.length; i++) {
     const ch = chars[i];
-    const mapped = UNICODE_LATEX_MAP.get(ch);
+    const mapped = primeAsCommand && ch === '′' ? '\\prime' : UNICODE_LATEX_MAP.get(ch);
     if (mapped) {
       result += mapped;
       // Prevent command-name capture when the next source character is an ASCII
@@ -396,7 +397,10 @@ function translateRun(children: XmlNode[]): string {
     return '';
   }
 
-  const mapped = unicodeToLatex(text);
+  // Primes in superscript math (′, as \prime exports) become \prime; a raw ′
+  // in LaTeX source breaks pdflatex. Text-mode runs keep the character.
+  const textMode = style === 'p' && /\s/.test(text);
+  const mapped = unicodeToLatex(text, superscriptDepth > 0 && !textMode);
   if (script === 'script') {
     return '\\mathcal{' + mapped + '}';
   }
@@ -460,16 +464,21 @@ function translateSuperscript(children: XmlNode[]): string {
     return fallbackPlaceholder('m:sSup', children);
   }
   const baseLatex = ommlToLatex(base);
-  const supLatex = ommlToLatex(sup);
-  return scriptArg(baseLatex) + '^' + scriptArg(primesToLatex(supLatex));
+  const supLatex = superscriptToLatex(sup);
+  return scriptArg(baseLatex) + '^' + scriptArg(supLatex);
 }
 
-/**
- * Primes in a superscript (′, as \prime exports) become \prime commands;
- * a raw ′ in LaTeX source breaks pdflatex.
- */
-function primesToLatex(supLatex: string): string {
-  return supLatex.replace(/′([A-Za-z]?)/g, (_match, next: string) => '\\prime' + (next ? ' ' + next : ''));
+/** Nesting depth of superscripts being translated; translateRun reads it. */
+let superscriptDepth = 0;
+
+/** Translate superscript content, with its math-run primes as \prime (see translateRun). */
+function superscriptToLatex(sup: XmlNode[]): string {
+  superscriptDepth++;
+  try {
+    return ommlToLatex(sup);
+  } finally {
+    superscriptDepth--;
+  }
 }
 
 /**
@@ -502,8 +511,8 @@ function translateSubSup(children: XmlNode[]): string {
   }
   const baseLatex = ommlToLatex(base);
   const subLatex = ommlToLatex(sub);
-  const supLatex = ommlToLatex(sup);
-  return scriptArg(baseLatex) + '_' + scriptArg(subLatex) + '^' + scriptArg(primesToLatex(supLatex));
+  const supLatex = superscriptToLatex(sup);
+  return scriptArg(baseLatex) + '_' + scriptArg(subLatex) + '^' + scriptArg(supLatex);
 }
 
 /**
@@ -557,9 +566,9 @@ function translateNary(children: XmlNode[]): string {
   const limits = limLoc === 'undOvr' ? '\\limits' : '';
 
   const subLatex = ommlToLatex(findChild(children, 'm:sub'));
-  const supLatex = ommlToLatex(findChild(children, 'm:sup'));
+  const supLatex = superscriptToLatex(findChild(children, 'm:sup'));
   const sub = (subHide || !subLatex) ? '' : '_' + scriptArg(subLatex);
-  const sup = (supHide || !supLatex) ? '' : '^' + scriptArg(primesToLatex(supLatex));
+  const sup = (supHide || !supLatex) ? '' : '^' + scriptArg(supLatex);
   const body = ommlToLatex(findChild(children, 'm:e'));
   return appendLatex(op + limits + sub + sup, body);
 }

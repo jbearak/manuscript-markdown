@@ -527,6 +527,14 @@ describe('Word export of commands that used to be spelled out', () => {
     expect(roundTrip('\\sum^\\prime x')).toBe('\\sum^\\prime x');
   });
 
+  test('a prime inside a preserved comment in a superscript is left alone', () => {
+    expect(roundTrip('f^{\\prime % note ′\n}')).toContain('% note ′');
+  });
+
+  test('a prime in a text-mode run in a superscript stays a character', () => {
+    expect(roundTrip('f^{\\text{a ′}}')).toBe('f^\\text{a ′}');
+  });
+
   test('a command followed by a structure keeps its separator on import', () => {
     expect(roundTrip('a\\propto x_i')).toBe('a\\propto x_i');
     expect(roundTrip('\\sum^\\alpha x')).toBe('\\sum^\\alpha x');
