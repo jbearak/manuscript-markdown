@@ -256,3 +256,29 @@ describe('review follow-ups', () => {
     expect(latexToOmml(latex)).toBe(styled(text));
   });
 });
+
+describe('review follow-ups, round 2', () => {
+  test.each([
+    ['\\left\\langle x\\right\\rangle', '⟨', '⟩'],
+    ['\\left\\lfloor x\\right\\rfloor', '⌊', '⌋'],
+    ['\\left\\lceil x\\right\\rceil', '⌈', '⌉'],
+    ['\\left\\lvert x\\right\\rvert', '|', '|'],
+    ['\\left\\lVert x\\right\\rVert', '‖', '‖'],
+  ])('%s uses the delimiter characters', (latex, beg, end) => {
+    expect(latexToOmml(latex)).toStartWith(
+      '<m:d><m:dPr><m:begChr m:val="' + beg + '"/><m:endChr m:val="' + end + '"/></m:dPr><m:e>',
+    );
+  });
+
+  test('a Word function name with spaces and symbols stays one name', () => {
+    const latex = importOmml(func(styled('foo × bar'), run('x')));
+    expect(latex).toBe('\\operatorname{foo \\times bar}{x}');
+    expect(latexToOmml(latex)).toBe(func(styled('foo × bar'), run('x')));
+  });
+
+  test('reserved characters in a Word function name are escaped', () => {
+    const latex = importOmml(func(styled('a_b'), run('x')));
+    expect(latex).toBe('\\operatorname{a\\_b}{x}');
+    expect(latexToOmml(latex)).toBe(func(styled('a_b'), run('x')));
+  });
+});

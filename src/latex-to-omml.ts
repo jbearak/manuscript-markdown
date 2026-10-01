@@ -760,7 +760,7 @@ class Parser {
         case '\\{': begChr = '{'; break;
         case '\\|': begChr = '\u2016'; break;
         case '\\[': begChr = '['; break;
-        default: begChr = leftToken.value.slice(1); break;
+        default: begChr = LATEX_UNICODE_MAP.get(leftToken.value) ?? leftToken.value.slice(1); break;
       }
     }
 
@@ -794,7 +794,7 @@ class Parser {
         case '\\}': endChr = '}'; break;
         case '\\|': endChr = '\u2016'; break;
         case '\\]': endChr = ']'; break;
-        default: endChr = delimToken.value.slice(1); break;
+        default: endChr = LATEX_UNICODE_MAP.get(delimToken.value) ?? delimToken.value.slice(1); break;
       }
     }
 

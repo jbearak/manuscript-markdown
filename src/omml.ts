@@ -759,14 +759,18 @@ function translateMatrix(children: XmlNode[]): string {
 function translateFunction(children: XmlNode[]): string {
   // Extract function name from m:fName
   const { nameNodes, scripts, limitsUnder } = splitFunctionName(findChild(children, 'm:fName'));
-  let name = ommlToLatex(nameNodes);
-
-  // Strip \mathrm{} / \text{} wrapping that translateRun may have added
-  const mathrm = /^\\(?:mathrm|text)\{(.+)\}$/.exec(name);
-  if (mathrm) {
-    name = mathrm[1];
+  const nameText = runsText(nameNodes);
+  let name: string;
+  if (nameText !== undefined) {
+    name = SPACED_FUNCTION_NAMES.get(nameText) ?? functionNameLatex(nameText);
+  } else {
+    name = ommlToLatex(nameNodes);
+    // Strip a single \mathrm{} / \text{} wrapping that translateRun may have added
+    const mathrm = /^\\(?:mathrm|text)\{([^{}]*)\}$/.exec(name);
+    if (mathrm) {
+      name = mathrm[1];
+    }
   }
-  name = SPACED_FUNCTION_NAMES.get(name) ?? name;
 
   // Determine the LaTeX command for the function name
   let funcCmd: string;
@@ -779,6 +783,32 @@ function translateFunction(children: XmlNode[]): string {
   // Translate the argument
   const arg = ommlToLatex(findChild(children, 'm:e'));
   return `${funcCmd}${scripts}{${arg}}`;
+}
+
+/** The text of nodes that are all math runs, skipping hidden comment runs; otherwise undefined. */
+function runsText(nodes: XmlNode[]): string | undefined {
+  let text = '';
+  for (const node of nodes) {
+    if (Object.keys(node).some(key => SKIP_TAGS.has(key))) continue;
+    if (node['m:r'] === undefined) return undefined;
+    const runText = extractText(asXmlNodes(node['m:r']));
+    if (runText.charAt(0) !== '\u200B') text += runText;
+  }
+  return text;
+}
+
+/**
+ * A Word function name as \operatorname text: reserved characters escaped and
+ * symbols as commands. Text mode keeps spaces, so a command before a letter
+ * ends with {} instead of a separator space.
+ */
+function functionNameLatex(text: string): string {
+  const chars = [...text];
+  return chars.map((ch, i) => {
+    const command = UNICODE_LATEX_MAP.get(ch);
+    if (!command) return escapeLatex(ch);
+    return command + (/[A-Za-z]/.test(chars[i + 1] ?? '') ? '{}' : '');
+  }).join('');
 }
 
 /**
