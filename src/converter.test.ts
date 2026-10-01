@@ -4513,6 +4513,30 @@ describe('Track changes (CriticMarkup)', () => {
       expect(md.trim()).toBe('{++$x^2$++}');
     });
 
+    test('a deleted paragraph mark after deleted text imports inside the deletion', async () => {
+      const deletedMark = '<w:pPr><w:rPr><w:del w:id="1" w:author="A" w:date="2024-01-01T00:00:00Z"/></w:rPr></w:pPr>';
+      const deletedRun = (text: string) => '<w:del w:id="2" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r><w:delText>' + text + '</w:delText></w:r></w:del>';
+      const body = async (xml: string) => (await convertDocx(await buildSyntheticDocx(wrapDocumentXml(xml)))).markdown
+        .replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+      expect(await body(
+        '<w:p>' + deletedMark + '<w:r><w:t>Keep </w:t></w:r>' + deletedRun('cut') + '</w:p>'
+        + '<w:p>' + deletedRun('more') + '<w:r><w:t> kept</w:t></w:r></w:p>',
+      )).toBe('Keep {--cut\n\nmore--} kept');
+      // Word joins all three paragraphs on Accept All
+      expect(await body(
+        '<w:p>' + deletedMark + '<w:r><w:t>A </w:t></w:r>' + deletedRun('x') + '</w:p>'
+        + '<w:p>' + deletedMark + deletedRun('B') + '</w:p>'
+        + '<w:p><w:r><w:t>C</w:t></w:r></w:p>',
+      )).toBe('A {--x\n\nB\n\n--}C');
+      // Export moves a break that opens a span outside it, so a break with no
+      // deleted text before it stays an ordinary paragraph break
+      expect(await body('<w:p>' + deletedMark + '<w:r><w:t>Hello</w:t></w:r></w:p><w:p><w:r><w:t>World</w:t></w:r></w:p>'))
+        .toBe('Hello\n\nWorld');
+      // A deleted heading's mark keeps its own handling
+      expect(await body('<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:rPr><w:del w:id="1" w:author="A" w:date="2024-01-01T00:00:00Z"/></w:rPr></w:pPr>'
+        + deletedRun('Gone') + '</w:p><w:p><w:r><w:t>Kept</w:t></w:r></w:p>')).toBe('{--# Gone--}\n\nKept');
+    });
+
     test('CriticMarkup inside math survives a round trip', async () => {
       const fence = '$'.repeat(2);
       for (const md of [

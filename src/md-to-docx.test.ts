@@ -2479,10 +2479,16 @@ describe('parseMd multi-paragraph CriticMarkup', () => {
     expect(delRuns.length).toBe(2);
   });
 
-  it('parses multi-paragraph substitution', () => {
+  it('splits a multi-paragraph substitution into its deletion and addition', () => {
     const tokens = parseMd('{~~old\n\ntext~>new\n\ntext~~}');
-    const subRuns = tokens.flatMap(t => t.runs).filter(r => r.type === 'critic_sub');
-    expect(subRuns.length).toBe(1);
+    expect(tokens.flatMap(t => t.runs).filter(r => r.type === 'critic_sub')).toHaveLength(0);
+    expect(tokens.map(t => t.runs.map(r => r.type + ':' + r.text))).toEqual([
+      ['critic_del:old'],
+      ['critic_del:text', 'critic_add:new'],
+      ['critic_add:text'],
+    ]);
+    // Each break tracks the paragraph mark before it with its own side's revision
+    expect(tokens.map(t => t.criticParaMark)).toEqual(['deletion', 'addition', undefined]);
   });
 
   it('parses multi-paragraph comment with author attribution', () => {

@@ -273,6 +273,7 @@ export type ContentItem =
       emptyParagraphCount?: number; // count of collapsed consecutive empty paragraphs
       indentOverride?: 'indent' | 'no-indent'; // per-paragraph indent override for round-trip
       paraMarkRevision?: RevisionInfo; // w:ins/w:del on the paragraph mark (pPr > rPr) — whole paragraph inserted/deleted
+      breakRevision?: RevisionInfo; // w:ins/w:del on the previous paragraph's mark, which is the break before this one
     }
   | { type: 'math'; latex: string; display: boolean; commentIds: Set<string>; revision?: RevisionInfo }
   | { type: 'footnote_ref'; noteId: string; noteKind: 'footnote' | 'endnote'; commentIds: Set<string>; revision?: RevisionInfo }
@@ -1719,6 +1720,8 @@ function parseNoteBody(
   let citationTextParts: string[] = [];
   const cCounter = citationCounter ?? { idx: 0 };
   let currentHref: string | undefined;
+  // As in extractDocumentContent: a tracked paragraph mark, for breakRevision
+  let trackedParaMark: { revision: RevisionInfo; target: ContentItem[]; end: number } | undefined;
 
   function walkNoteBody(
     nodes: XmlNode[],
@@ -1877,8 +1880,11 @@ function parseNoteBody(
             });
           }
         } else if (key === 'w:p') {
+          const precedingMark = trackedParaMark;
+          trackedParaMark = undefined;
           const paraChildren = asXmlNodes(node[key]);
           let paraFormatting = currentFormatting;
+          let paraMarkRevision: RevisionInfo | undefined;
           for (const child of paraChildren) {
             if (child['w:pPr']) {
               const pPrChildren = asXmlNodes(child['w:pPr']);
@@ -1886,6 +1892,11 @@ function parseNoteBody(
               if (pRPrElement) {
                 const pRPrChildren = asXmlNodes(pRPrElement['w:rPr']);
                 paraFormatting = parseRunProperties(pRPrChildren, currentFormatting);
+                const revNode = pRPrChildren.find(c => Object.keys(c).some(k => k in REVISION_ELEMENTS));
+                const revKey = revNode && Object.keys(revNode).find(k => k in REVISION_ELEMENTS);
+                if (revNode && revKey) {
+                  paraMarkRevision = { type: REVISION_ELEMENTS[revKey], author: getAttr(revNode, 'author'), date: getAttr(revNode, 'date') };
+                }
               }
               break;
             }
@@ -1895,9 +1906,17 @@ function parseNoteBody(
             ? true
             : target.length > 0 && target[target.length - 1].type !== 'para';
           if (needsPara) {
-            target.push({ type: 'para' });
+            const paraItem: ContentItem = { type: 'para' };
+            if (!inTableCell && precedingMark?.target === target && precedingMark.end === target.length) {
+              paraItem.breakRevision = precedingMark.revision;
+            }
+            target.push(paraItem);
           }
+          const lenBeforeContent = target.length;
           walkNoteBody(paraChildren, paraFormatting, target, inTableCell, currentRevision);
+          if (paraMarkRevision && !inTableCell && target.length > lenBeforeContent) {
+            trackedParaMark = { revision: paraMarkRevision, target, end: target.length };
+          }
         } else if (key === 'w:r') {
           let runFormatting = currentFormatting;
           const runChildren = asXmlNodes(node[key]);
@@ -2343,6 +2362,9 @@ export async function extractDocumentContent(
   let citationTextParts: string[] = [];
   let currentHref: string | undefined;
   let zoteroBiblData: ZoteroBiblData | undefined;
+  // Set after a paragraph whose mark is tracked: where its content ended,
+  // so the next paragraph's para item can record the revision as breakRevision.
+  let trackedParaMark: { revision: RevisionInfo; target: ContentItem[]; end: number } | undefined;
   const crossRefMap = options?.footnoteCrossRefMap;
 
   // Section detection state
@@ -2630,6 +2652,8 @@ export async function extractDocumentContent(
             }
           }
         } else if (key === 'w:p') {
+          const precedingMark = trackedParaMark;
+          trackedParaMark = undefined;
           // Process paragraph - extract heading level, list metadata, and title style
           let headingLevel: number | undefined;
           let listMeta: ListMeta | undefined;
@@ -2790,6 +2814,9 @@ export async function extractDocumentContent(
             : target.length > 0 && (prevItem!.type !== 'para' || prevIsCodeBlockPara || prevIsStructuralPara);
 
           const targetLenBeforePara = target.length;
+          // Paragraphs whose tracked mark can become a break inside a CriticMarkup
+          // span (see joinTrackedParagraphBreaks); headings keep paraMarkRevision
+          const canJoinTrackedBreak = !inTableCell && !headingLevel && !isTitle && !isCodeBlock;
           if (needsPara) {
             const paraItem: ContentItem = { type: 'para' };
             if (headingLevel) paraItem.headingLevel = headingLevel;
@@ -2803,6 +2830,9 @@ export async function extractDocumentContent(
             if (customStyle) paraItem.customStyleName = customStyle;
             if (paragraphLeftIndentTwips !== undefined) paraItem.paragraphLeftIndentTwips = paragraphLeftIndentTwips;
             if (paraMarkRevision && headingLevel) paraItem.paraMarkRevision = paraMarkRevision;
+            if (canJoinTrackedBreak && precedingMark?.target === target && precedingMark.end === targetLenBeforePara) {
+              paraItem.breakRevision = precedingMark.revision;
+            }
             target.push(paraItem);
           }
           walk(paraChildren, paraFormatting, target, inTableCell, currentRevision);
@@ -2865,6 +2895,9 @@ export async function extractDocumentContent(
             ) {
               prevItem.emptyParagraphCount += 1;
             }
+          }
+          if (paraMarkRevision && canJoinTrackedBreak && !inBibliographyField && target.length > targetLenBeforePara) {
+            trackedParaMark = { revision: paraMarkRevision, target, end: target.length };
           }
         } else if (key === 'm:oMathPara') {
           // Display equation — extract m:oMath children from within
@@ -3002,49 +3035,79 @@ function commentSetsEqual(a: Set<string>, b: Set<string>): boolean {
   return true;
 }
 
+type SubstitutionItem = ContentItem & { type: 'text' | 'citation' | 'math' };
+
+/** One item of a substitution's side as Markdown, after `precedingText`. */
+function substitutionItemText(item: SubstitutionItem, precedingText: string): string {
+  if (item.type === 'text') {
+    const text = wrapWithFormatting(item.text, item.formatting);
+    return item.href ? `[${text}](${formatHrefForMarkdown(item.href)})` : text;
+  }
+  if (item.type === 'citation') {
+    return item.pandocKeys.length > 0
+      ? (precedingText.endsWith(' ') ? '' : ' ') + '[' + item.pandocKeys.join('; ') + ']'
+      : item.text;
+  }
+  return item.display
+    ? MATH_FENCE + '\n' + canonicalizeDisplayMathLatex(item.latex) + '\n' + MATH_FENCE
+    : '$' + item.latex + '$';
+}
+
 /** Render a CriticMarkup substitution `{~~old~>new~~}` when a deletion and
  *  addition of the same type are adjacent with matching author/date.
  *  Returns the substitution string, or `null` if the pair cannot be rendered
  *  as a substitution (e.g. unsupported type). */
 function tryRenderSubstitution(
-  deletion: ContentItem & { type: 'text' | 'citation' | 'math' },
-  addition: ContentItem & { type: 'text' | 'citation' | 'math' },
+  deletion: SubstitutionItem,
+  addition: SubstitutionItem,
   precedingText: string,
 ): string | null {
   if (deletion.type !== addition.type) return null;
-
-  let oldText = '';
-  if (deletion.type === 'text') {
-    oldText = wrapWithFormatting(deletion.text, deletion.formatting);
-    if (deletion.href) oldText = `[${oldText}](${formatHrefForMarkdown(deletion.href)})`;
-  } else if (deletion.type === 'citation') {
-    oldText = deletion.pandocKeys.length > 0
-      ? (precedingText.endsWith(' ') ? '' : ' ') + '[' + deletion.pandocKeys.join('; ') + ']'
-      : deletion.text;
-  } else if (deletion.type === 'math') {
-    oldText = deletion.display
-      ? MATH_FENCE + '\n' + canonicalizeDisplayMathLatex(deletion.latex) + '\n' + MATH_FENCE
-      : '$' + deletion.latex + '$';
-  }
-
-  let newText = '';
-  if (addition.type === 'text') {
-    newText = wrapWithFormatting(addition.text, addition.formatting);
-    if (addition.href) newText = `[${newText}](${formatHrefForMarkdown(addition.href)})`;
-  } else if (addition.type === 'citation') {
-    newText = addition.pandocKeys.length > 0
-      ? (oldText.endsWith(' ') ? '' : ' ') + '[' + addition.pandocKeys.join('; ') + ']'
-      : addition.text;
-  } else if (addition.type === 'math') {
-    newText = addition.display
-      ? MATH_FENCE + '\n' + canonicalizeDisplayMathLatex(addition.latex) + '\n' + MATH_FENCE
-      : '$' + addition.latex + '$';
-  }
-
+  const oldText = substitutionItemText(deletion, precedingText);
+  const newText = substitutionItemText(addition, oldText);
   if (oldText && newText) {
     return '{~~' + oldText + '~>' + newText + '~~}';
   }
   return null;
+}
+
+/**
+ * A substitution whose sides span several items, as Word records replacing
+ * formatted text or text across a paragraph break: deletions, then additions,
+ * all by one author at one time and passing `eligible`. Rendering it as one
+ * {~~old~>new~~} keeps a tracked break inside it (see
+ * joinTrackedParagraphBreaks). Undefined unless both sides are there and one
+ * has more than one item; tryRenderSubstitution renders a single pair.
+ */
+function renderSubstitutionRun(
+  segment: ContentItem[],
+  start: number,
+  end: number,
+  precedingText: string,
+  eligible: (item: ContentItem) => boolean,
+): { text: string; nextIndex: number } | undefined {
+  const first = segment[start];
+  const revision = first.type === 'text' || first.type === 'citation' || first.type === 'math' ? first.revision : undefined;
+  if (!revision) return undefined;
+  const side = (item: ContentItem | undefined, type: RevisionInfo['type']): item is SubstitutionItem =>
+    !!item && (item.type === 'text' || item.type === 'citation' || item.type === 'math')
+    && item.revision?.type === type && item.revision.author === revision.author && item.revision.date === revision.date
+    && eligible(item);
+  let k = start;
+  let oldText = '';
+  while (k < end && side(segment[k], 'deletion')) oldText += substitutionItemText(segment[k++] as SubstitutionItem, precedingText + oldText);
+  const deletions = k - start;
+  let newText = '';
+  while (k < end && side(segment[k], 'addition')) newText += substitutionItemText(segment[k++] as SubstitutionItem, precedingText + newText);
+  const additions = k - start - deletions;
+  if (deletions === 0 || additions === 0 || deletions + additions <= 2 || !oldText || !newText) return undefined;
+  // Two inline equations in a row on one side would run their dollar signs
+  // together and read as one, where spans of their own keep them apart
+  for (let j = start + 1; j < k; j++) {
+    const [a, b] = [segment[j - 1], segment[j]];
+    if (j !== start + deletions && a.type === 'math' && !a.display && b.type === 'math' && !b.display) return undefined;
+  }
+  return { text: '{~~' + oldText + '~>' + newText + '~~}', nextIndex: k };
 }
 
 function mergeConsecutiveRuns(content: ContentItem[]): ContentItem[] {
@@ -3259,6 +3322,12 @@ function renderInlineRange(
     // with identical author and date. Skip if either item has comments to
     // avoid unbalancing comment markers.
     if ((item.type === 'text' || item.type === 'citation' || item.type === 'math') && item.revision?.type === 'deletion' && item.commentIds.size === 0) {
+      const run = renderSubstitutionRun(segment, i, segmentEnd, out, candidate => candidate.type !== 'para' && 'commentIds' in candidate && candidate.commentIds.size === 0);
+      if (run) {
+        out += run.text;
+        i = run.nextIndex;
+        continue;
+      }
       const next = segment[i + 1];
       if (next && next.type === item.type && (next.type === 'text' || next.type === 'citation' || next.type === 'math') &&
           next.revision?.type === 'addition' &&
@@ -3504,6 +3573,12 @@ function renderInlineRangeWithIds(
     // with identical author and date. Skip if comment context differs to
     // avoid unbalancing comment markers.
     if ((item.type === 'text' || item.type === 'citation' || item.type === 'math') && item.revision?.type === 'deletion') {
+      const run = renderSubstitutionRun(segment, i, segmentEnd, out, candidate => candidate.type !== 'para' && 'commentIds' in candidate && commentSetsEqual(candidate.commentIds, prevCommentIds));
+      if (run) {
+        out += run.text;
+        i = run.nextIndex;
+        continue;
+      }
       const next = segment[i + 1];
       if (next && next.type === item.type && (next.type === 'text' || next.type === 'citation' || next.type === 'math') &&
           next.revision?.type === 'addition' &&
@@ -4674,12 +4749,152 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
   return deriveBlockquoteSpacingFromStructure(content);
 }
 
+/** Whether an item is still there after Word accepts (for a deletion) or
+ *  rejects (for an addition) every change of the given type. */
+function survivesRevisions(item: ContentItem, type: RevisionInfo['type']): boolean {
+  if (item.type === 'text') return item.text.trim() !== '' && item.revision?.type !== type;
+  if (item.type === 'citation' || item.type === 'math' || item.type === 'footnote_ref' || item.type === 'image') {
+    return item.revision?.type !== type;
+  }
+  return false;
+}
+
+/** Inline content on one side of the paragraph break at `index`, through any
+ *  further breaks tracked with the same type, since Word joins across those
+ *  too, and through a break that opens the new side of a substitution, as in
+ *  {~~a\n\nb~>\n\nc~~}, which the same CriticMarkup span holds. Undefined
+ *  when a table or other block intervenes. */
+function contentAcrossTrackedBreaks(content: ContentItem[], index: number, step: 1 | -1, type: RevisionInfo['type']): ContentItem[] | undefined {
+  const items: ContentItem[] = [];
+  for (let k = index + step; k >= 0 && k < content.length; k += step) {
+    const item = content[k];
+    // A custom style block closes after its last paragraph, which this ends
+    if (item.type === 'para' || (step === 1 && item.type === 'custom_style_close')) {
+      if (item.type === 'para' && (item.breakRevision?.type === type || opensNewSide(content, k))) continue;
+      return items;
+    }
+    if (isStructuralBoundaryItem(item) || (item.type === 'math' && item.display)) return undefined;
+    items.push(item);
+  }
+  return items;
+}
+
+type ParaItem = Extract<ContentItem, { type: 'para' }>;
+
+/** Whether the paragraph at `index` starts with an inserted break that opens
+ *  the new side of a substitution, right after its old side, as in
+ *  {~~a~>\n\nb~~}. */
+function opensNewSide(content: ContentItem[], index: number): boolean {
+  const para = content[index];
+  const prev = content[index - 1];
+  return para?.type === 'para' && para.breakRevision?.type === 'addition'
+    && !!prev && isInlineRevisionItem(prev) && revisionsEqual(prev.revision, { ...para.breakRevision, type: 'deletion' });
+}
+
+/** Inline content that can sit in a CriticMarkup span. */
+function isInlineRevisionItem(item: ContentItem): item is Extract<ContentItem, { type: 'text' | 'citation' | 'math' | 'footnote_ref' | 'image' }> {
+  return item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'image' || (item.type === 'math' && !item.display);
+}
+
+/** Where a paragraph sits, for joining it to a neighbour across a tracked
+ *  break: the body, a list item, or a quote at a given level, in a custom
+ *  style block or not. Undefined for blocks that can't take part, and for a
+ *  list item after the break, which starts a new item rather than continuing
+ *  one. */
+function breakContainer(para: ParaItem | undefined, side: 'before' | 'after'): string | undefined {
+  if (!para) return 'body';
+  if (para.headingLevel || para.isTitle || para.isCodeBlock) return undefined;
+  // Paragraphs in one custom style share a block (see custom_style_open)
+  const style = para.customStyleName ? ' in style ' + para.customStyleName : '';
+  const list = para.listContinuation ? 'list' + para.listContinuation.level : '';
+  if (para.blockquoteLevel) return list + '>' + para.blockquoteLevel + (para.alertType ?? '') + style;
+  if (para.listMeta) return side === 'before' ? 'list' + para.listMeta.level + style : undefined;
+  return (list || 'body') + style;
+}
+
+/** Characters around the text of a tracked paragraph break, so
+ *  joinSpansAtTrackedBreaks can find it in the rendered Markdown. */
+interface TrackedBreakMarks {
+  start: string;
+  end: string;
+}
+
+/** Two private-use characters that appear nowhere in `values`, which hold
+ *  everything buildMarkdown renders, so no text in the document is taken
+ *  for a mark. */
+function trackedBreakMarks(values: unknown): TrackedBreakMarks {
+  const text = JSON.stringify(values, (_key, value: unknown) => value instanceof Map || value instanceof Set ? [...value] : value);
+  const unused: string[] = [];
+  for (let code = 0xE000; unused.length < 2; code++) {
+    const ch = String.fromCharCode(code);
+    if (!text.includes(ch)) unused.push(ch);
+  }
+  return { start: unused[0], end: unused[1] };
+}
+
+/** A paragraph break tracked in Word goes inside the CriticMarkup span as a
+ *  blank line, as in {--end.\n\nStart--}, when content survives on both
+ *  sides: otherwise accepting or rejecting the change leaves an empty
+ *  paragraph, which Markdown drops anyway, and the plain break reads better.
+ *  The break must follow inline content in the same revision, or, opening
+ *  the new side of a substitution, as in {~~a~>\n\nb~~}, its old side.
+ *  md-to-docx moves a break that opens a span outside it (see
+ *  moveLeadingBreakOutsideCritic), so a span that starts with the break would
+ *  not survive export. Both paragraphs must sit in the same list item or
+ *  quote, and `linePrefix` gives the second one's line prefix (quote markers,
+ *  list indent) to start the line after the break. The break is plain text,
+ *  so formatting, code and links close before it, and
+ *  joinSpansAtTrackedBreaks then joins its span to the spans around it. */
+function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => TrackedBreakMarks, linePrefix: (para: ParaItem) => string = () => ''): ContentItem[] {
+  let joined: ContentItem[] | undefined;
+  for (let k = 0; k < content.length; k++) {
+    const para = content[k];
+    if (para.type !== 'para' || !para.breakRevision) continue;
+    const revision = para.breakRevision;
+    const prev = content[k - 1];
+    if (!prev || !isInlineRevisionItem(prev)) continue;
+    if (!opensNewSide(content, k) && !revisionsEqual(prev.revision, revision)) continue;
+    let opening: ParaItem | undefined;
+    for (let j = k - 1; j >= 0 && !opening; j--) {
+      const item = content[j];
+      if (item.type === 'para') opening = item;
+    }
+    const container = breakContainer(para, 'after');
+    if (!container || breakContainer(opening, 'before') !== container) continue;
+    const before = contentAcrossTrackedBreaks(content, k, -1, revision.type);
+    const after = contentAcrossTrackedBreaks(content, k, 1, revision.type);
+    if (!before?.some(item => survivesRevisions(item, revision.type))) continue;
+    if (!after?.some(item => survivesRevisions(item, revision.type))) continue;
+    joined ??= [...content];
+    const prefix = linePrefix(para);
+    const text = marks().start + '\n' + prefix.trimEnd() + '\n' + prefix + marks().end;
+    joined[k] = { type: 'text', text, commentIds: new Set(prev.commentIds), formatting: DEFAULT_FORMATTING, revision };
+  }
+  return joined ?? content;
+}
+
+/** Markdown with each tracked break from joinTrackedParagraphBreaks inside
+ *  the spans before and after it, as in {++**a**\n\nmore++} rather than
+ *  {++**a**++}{++\n\n++}{++more++}. */
+function joinSpansAtTrackedBreaks(markdown: string, marks: TrackedBreakMarks): string {
+  const boundary = '(?:\\+\\+\\}\\{\\+\\+|--\\}\\{--)?';
+  const marked = new RegExp(boundary + marks.start + '([^' + marks.end + ']*)' + marks.end + boundary, 'g');
+  return markdown.replace(marked, (_match, text: string) => text);
+}
+
 export function buildMarkdown(
   content: ContentItem[],
   comments: Map<string, Comment>,
   options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, { label: string; body: ContentItem[]; noteKind: 'footnote' | 'endnote' }>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null },
 ): string {
-  const mergedContent = mergeConsecutiveRuns(content);
+  let breakMarks: TrackedBreakMarks | undefined;
+  const marks = () => breakMarks ??= trackedBreakMarks([content, [...comments.values()], options]);
+  // listContinuationIndent and blockquotePrefix are declared further down
+  const mergedContent = mergeConsecutiveRuns(joinTrackedParagraphBreaks(content, marks, para => (
+    para.blockquoteLevel ? blockquotePrefix(para)
+      : para.listContinuation ? listContinuationIndent(para.listContinuation)
+        : ''
+  )));
 
   // Build 1-indexed comment ID remap (order of first appearance in document)
   const commentIdRemap = new Map<string, string>();
@@ -5804,7 +6019,7 @@ export function buildMarkdown(
       : renderOpts;
     for (const entry of entries) {
       output.push('\n\n');
-      const bodyMerged = mergeConsecutiveRuns(entry.body);
+      const bodyMerged = mergeConsecutiveRuns(joinTrackedParagraphBreaks(entry.body, marks));
       // Render body, splitting on para/table markers for multi-paragraph footnotes
       const bodyParts: string[] = [];
       const deferredAll: string[] = [];
@@ -5915,7 +6130,7 @@ export function buildMarkdown(
     }
   }
 
-  return output.join('');
+  return breakMarks ? joinSpansAtTrackedBreaks(output.join(''), breakMarks) : output.join('');
 }
 
 function formatOffsetString(offsetMinutes: number): string {
