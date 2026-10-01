@@ -363,7 +363,14 @@ const parserOptions = {
   parseTagValue: false,
   processEntities: {
     enabled: true,
-    maxTotalExpansions: 10000,
+    // fast-xml-parser counts every &quot;, &lt;, &gt; and &apos; toward
+    // maxTotalExpansions, and a long manuscript passes any fixed count (Zotero
+    // field codes are full of &quot;). Leaving it uncapped is safe because no
+    // expansion can grow the text: standard entities replace 4+ characters with
+    // one, and maxEntitySize holds DOCTYPE entities (which Word never writes) to
+    // one character in place of a reference of at least three.
+    maxTotalExpansions: Infinity,
+    maxEntitySize: 1,
     maxExpandedLength: 1000000,
   },
 };

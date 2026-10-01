@@ -5034,3 +5034,47 @@ describe('round-trip regression: pipe table alignment', () => {
     expect(segments.every(s => s.replace(/[^-]/g, '').length === 3)).toBe(true);
   });
 });
+
+describe('XML entity limits', () => {
+  test('a document with more than 10,000 standard entities converts', async () => {
+    // Long manuscripts pass this easily: every Zotero field code is full of &quot;
+    const paragraph = '<w:p><w:r><w:t>&quot;q&quot; &lt;r&gt;</w:t></w:r></w:p>';
+    const docx = await buildSyntheticDocx(wrapDocumentXml(paragraph.repeat(3000)));
+    const result = await convertDocx(docx);
+    expect(result.markdown.split('"q"').length - 1).toBe(3000);
+  });
+
+  test('a DOCTYPE entity longer than one character is refused', async () => {
+    const xml = wrapDocumentXml('<w:p><w:r><w:t>' + '&big;'.repeat(200) + '</w:t></w:r></w:p>')
+      .replace('<?xml version="1.0"?>', '<?xml version="1.0"?><!DOCTYPE w:document [<!ENTITY big "' + 'A'.repeat(9000) + '">]>');
+    await expect(convertDocx(await buildSyntheticDocx(xml))).rejects.toThrow(/exceeds maximum allowed size/);
+  });
+
+  test('a DOCTYPE after the root element is held to the same entity size', async () => {
+    // fast-xml-parser reads a DOCTYPE wherever it appears
+    const xml = wrapDocumentXml('<!DOCTYPE x [<!ENTITY big "AA">]><w:p><w:r><w:t>&big;</w:t></w:r></w:p>');
+    await expect(convertDocx(await buildSyntheticDocx(xml))).rejects.toThrow(/exceeds maximum allowed size/);
+  });
+
+  test('one-character and empty DOCTYPE entities expand any number of times', async () => {
+    const xml = wrapDocumentXml('<w:p><w:r><w:t>' + '&x;&z;'.repeat(5000) + '</w:t></w:r></w:p>')
+      .replace('<?xml version="1.0"?>', '<?xml version="1.0"?><!DOCTYPE w:document [<!ENTITY x ""><!ENTITY z "Z">]>');
+    const result = await convertDocx(await buildSyntheticDocx(xml));
+    expect(result.markdown).toContain('Z'.repeat(5000));
+  });
+
+  test('DOCTYPE inside CDATA, a comment, or a processing instruction is just content', async () => {
+    const xml = wrapDocumentXml(
+      '<!-- <!DOCTYPE x> --><?note <!DOCTYPE y>?>'
+      + '<w:p><w:r><w:t><![CDATA[<!DOCTYPE html>]]></w:t></w:r></w:p>',
+    );
+    const result = await convertDocx(await buildSyntheticDocx(xml));
+    expect(result.markdown).toContain('DOCTYPE html');
+  });
+
+  test('DOCTYPE in document text is just text', async () => {
+    const docx = await buildSyntheticDocx(wrapDocumentXml('<w:p><w:r><w:t>&lt;!DOCTYPE html&gt;</w:t></w:r></w:p>'));
+    const result = await convertDocx(docx);
+    expect(result.markdown).toContain('DOCTYPE html');
+  });
+});
