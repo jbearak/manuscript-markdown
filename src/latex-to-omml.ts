@@ -642,8 +642,10 @@ class Parser {
         return makeStyledRun('mod');
 
       default:
-        // Unsupported command - fallback
-        this.onUnknownCommand?.(cmd);
+        // Unsupported command - fallback. An escaped reserved character in
+        // math (\%, \_) stays literal so it reads back unchanged; it is valid
+        // LaTeX, so it is not reported.
+        if (!(cmd.length === 2 && TEXT_ESCAPES.has(cmd))) this.onUnknownCommand?.(cmd);
         return makeRun(cmd);
     }
   }

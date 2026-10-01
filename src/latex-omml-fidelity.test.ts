@@ -297,3 +297,21 @@ describe('review follow-ups, round 3', () => {
     expect(importOmml(styled('max'))).toBe('\\mathrm{max}');
   });
 });
+
+describe('review follow-ups, round 4', () => {
+  test.each([
+    ['<m:sty m:val="bi"/>', '\\boldsymbol{\\beta{}x}'],
+    ['<m:sty m:val="p"/>', '\\mathrm{\\beta{}x}'],
+    ['<m:scr m:val="double-struck"/><m:sty m:val="p"/>', '\\mathbb{\\beta{}x}'],
+  ])('a styled run with a symbol before a letter imports without a separator space (%s)', (rPr, latex) => {
+    const omml = '<m:r><m:rPr>' + rPr + '</m:rPr><m:t>βx</m:t></m:r>';
+    expect(importOmml(omml)).toBe(latex);
+    expect(latexToOmml(latex)).toBe(omml);
+  });
+
+  test('escaped reserved characters in math are not reported as unsupported', () => {
+    const seen: string[] = [];
+    latexToOmml('50\\% + \\#1 + \\$5 + a\\_b + a\\&b + \\{x\\}', cmd => seen.push(cmd));
+    expect(seen).toEqual([]);
+  });
+});

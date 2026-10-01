@@ -113,12 +113,13 @@ describe('ommlToLatex: labeled braces and \\text{} preservation', () => {
   });
 
   it('does not emit \\text{} for synthetic command-separator spaces (αx)', () => {
-    // unicodeToLatex maps αx → "\alpha x"; that space is a command
-    // delimiter, not prose whitespace, so \mathrm{} must be kept.
+    // αx needs a separator after \alpha; that is not prose whitespace, so
+    // \mathrm{} must be kept. Inside the group the separator is {}, since a
+    // space there would re-export as a space.
     const omml =
       '<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>αx</m:t></m:r>';
     const parsed = new XMLParser(parserOptions).parse('<m:oMath>' + omml + '</m:oMath>');
-    expect(ommlToLatex(parsed[0]['m:oMath'])).toBe('\\mathrm{\\alpha x}');
+    expect(ommlToLatex(parsed[0]['m:oMath'])).toBe('\\mathrm{\\alpha{}x}');
   });
 
   it('does not rewrite limLow/limUpp as braces when chr or pos mismatches', () => {

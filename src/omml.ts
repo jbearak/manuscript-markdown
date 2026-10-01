@@ -169,9 +169,11 @@ export function escapeLatex(text: string): string {
  * Map a single character to its LaTeX command if one exists.
  * Characters not in the mapping table are returned unchanged.
  * Multi-character strings are processed character-by-character.
- * With `primeAsCommand`, ′ maps to \prime (for script math).
+ * With `primeAsCommand`, ′ maps to \prime (for script math). `separator`
+ * ends a command before a letter; inside a group such as \mathbf{…} it is
+ * `{}`, since a space there exports as a space.
  */
-export function unicodeToLatex(text: string, primeAsCommand = false): string {
+export function unicodeToLatex(text: string, primeAsCommand = false, separator = ' '): string {
   let result = '';
   const chars = [...text];
   for (let i = 0; i < chars.length; i++) {
@@ -183,7 +185,7 @@ export function unicodeToLatex(text: string, primeAsCommand = false): string {
       // letter (e.g. αx -> \alpha x, not \alphax).
       const next = chars[i + 1];
       if (next && /[A-Za-z]/.test(next)) {
-        result += ' ';
+        result += separator;
       }
     } else {
       result += ch;
@@ -424,21 +426,23 @@ function translateRun(children: XmlNode[]): string {
   // Spaces, apostrophes, and reserved characters need text mode: \mathrm{}
   // drops spaces, reads ' as a prime, and cannot escape reserved characters.
   const textMode = style === 'p' && /[\s'#$%&_{}~^\\]/.test(text);
-  let mapped = unicodeToLatex(text, scriptDepth > 0 && !textMode);
-  if (!textMode) mapped = mapped.replace(/′/g, "'");
+  const toLatex = (separator: string) => {
+    const latex = unicodeToLatex(text, scriptDepth > 0 && !textMode, separator);
+    return textMode ? latex : latex.replace(/′/g, "'");
+  };
   const alphabet = SCRIPT_ALPHABETS.get(script) ?? STYLE_ALPHABETS.get(style);
   if (alphabet) {
-    return alphabet + '{' + mapped + '}';
+    return alphabet + '{' + toLatex('{}') + '}';
   }
   if (style === 'p') {
-    // Test the original text (textMode), not `mapped` — unicodeToLatex inserts
-    // synthetic separator spaces after commands (αx → \alpha x) that are not prose.
+    // Test the original text (textMode), not the LaTeX — unicodeToLatex inserts
+    // synthetic separators after commands (αx → \alpha x) that are not prose.
     if (textMode) {
       return textModeLatex(text);
     }
-    return '\\mathrm{' + mapped + '}';
+    return '\\mathrm{' + toLatex('{}') + '}';
   }
-  return mapped;
+  return toLatex(' ');
 }
 
 /**
@@ -802,12 +806,7 @@ function runsText(nodes: XmlNode[]): string | undefined {
  * ends with {} instead of a separator space.
  */
 function functionNameLatex(text: string): string {
-  const chars = [...text];
-  return chars.map((ch, i) => {
-    const command = UNICODE_LATEX_MAP.get(ch);
-    if (!command) return escapeLatex(ch);
-    return command + (/[A-Za-z]/.test(chars[i + 1] ?? '') ? '{}' : '');
-  }).join('');
+  return unicodeToLatex(escapeLatex(text), false, '{}');
 }
 
 /**
