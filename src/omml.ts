@@ -405,52 +405,62 @@ function translateRun(children: XmlNode[]): string {
   // Extract text from m:t nodes
   const text = extractText(children);
   if (!text) return '';
+  return runTextLatex(text, style, script);
+}
 
-  // Detect hidden comment runs: text starts with \u200B (zero-width space)
-  if (text.charAt(0) === '\u200B') {
-    const payload = text.slice(1); // remove \u200B prefix
-    const pctIdx = payload.indexOf('%');
-    if (pctIdx !== -1) {
-      const whitespace = payload.slice(0, pctIdx);
-      const afterPct = payload.slice(pctIdx + 1);
-      // Line-continuation: nothing between % and \n (or just \n)
-      if (afterPct === '\n') {
-        return whitespace + '%\n';
-      }
-      // Regular comment: restore {whitespace}%{comment_text} (includes \n if original had one)
-      return whitespace + '%' + afterPct;
-    }
-    // Fallback: suppress malformed hidden runs (no % found)
-    return '';
-  }
+/** Where a run's text goes: into the equation, or into an \operatorname name. */
+type RunContext = 'math' | 'name';
 
-  // Primes in script math (′, as \prime exports) become \prime; a raw ′ in
-  // LaTeX source breaks pdflatex. In base-level math, ′ is LaTeX's '.
-  // Text-mode runs keep the character.
-  // Spaces, apostrophes, and reserved characters need text mode: \mathrm{}
-  // drops spaces and reads ' as a prime, and only \text{} escapes all of
-  // # $ % & _ { } ~ ^ \.
-  const textMode = style === 'p' && /[\s'#$%&_{}~^\\]/.test(text);
-  const toLatex = (separator: string, source = text) => {
-    const latex = unicodeToLatex(source, scriptDepth > 0 && !textMode, separator);
-    return textMode ? latex : latex.replace(/′/g, "'");
-  };
+/**
+ * LaTeX for the text of a math run. The mode, escaping, command separators,
+ * and primes for every kind of run are decided here, and latex-to-omml.ts
+ * reads each form back in the matching parse mode:
+ *
+ * - A hidden comment run comes back as its % comment.
+ * - A function name is text with its symbols inline, as \operatorname{} allows.
+ * - A bare run is math: symbols become commands, and ′ is ' at the base level
+ *   and \prime in a script or limit (a raw ′ breaks pdflatex). Reserved
+ *   characters stay as they are, since the export keeps math escapes such as
+ *   \% and unknown commands as literal text.
+ * - An upright run with spaces, apostrophes, or reserved characters is text
+ *   (see textModeLatex): \mathrm{} drops spaces and reads ' as a prime.
+ * - Any other styled run is math in a group, \mathrm{} or an alphabet such
+ *   as \mathbf{}. # $ % & _ { } take a backslash. ~ ^ \ have no math escape,
+ *   so a run with one goes in \text{} inside the group.
+ *
+ * In a group, a command ends with {} before a letter, since a space there
+ * would export as a space; bare math keeps the readable space.
+ */
+function runTextLatex(text: string, style: string, script: string, context: RunContext = 'math'): string {
+  if (text.charAt(0) === '\u200B') return hiddenCommentLatex(text);
+  if (context === 'name') return unicodeToLatex(escapeLatex(text), false, '{}');
+
+  const mathLatex = (source: string, separator: string) =>
+    unicodeToLatex(source, scriptDepth > 0, separator).replace(/′/g, "'");
   const alphabet = SCRIPT_ALPHABETS.get(script) ?? STYLE_ALPHABETS.get(style);
-  if (alphabet) {
-    // Math-mode escapes keep the alphabet's font. ~, ^, and \ have none, so
-    // their text goes in \text{}, which the export reads back as plain text.
-    if (/[~^\\]/.test(text)) return alphabet + '{\\text{' + escapeLatex(text) + '}}';
-    return alphabet + '{' + toLatex('{}', text.replace(/[#$%&_{}]/g, ch => '\\' + ch)) + '}';
-  }
-  if (style === 'p') {
-    // Test the original text (textMode), not the LaTeX — unicodeToLatex inserts
-    // synthetic separators after commands (αx → \alpha x) that are not prose.
-    if (textMode) {
-      return textModeLatex(text);
+  const group = alphabet ?? (style === 'p' ? '\\mathrm' : '');
+  if (!group) return mathLatex(text, ' ');
+  if (!alphabet && /[\s'#$%&_{}~^\\]/.test(text)) return textModeLatex(text);
+  if (/[~^\\]/.test(text)) return group + '{\\text{' + escapeLatex(text) + '}}';
+  return group + '{' + mathLatex(text.replace(/[#$%&_{}]/g, ch => '\\' + ch), '{}') + '}';
+}
+
+/** A hidden comment run (text after a \u200B marker) as its LaTeX comment. */
+function hiddenCommentLatex(text: string): string {
+  const payload = text.slice(1); // remove \u200B prefix
+  const pctIdx = payload.indexOf('%');
+  if (pctIdx !== -1) {
+    const whitespace = payload.slice(0, pctIdx);
+    const afterPct = payload.slice(pctIdx + 1);
+    // Line-continuation: nothing between % and \n (or just \n)
+    if (afterPct === '\n') {
+      return whitespace + '%\n';
     }
-    return '\\mathrm{' + toLatex('{}') + '}';
+    // Regular comment: restore {whitespace}%{comment_text} (includes \n if original had one)
+    return whitespace + '%' + afterPct;
   }
-  return toLatex(' ');
+  // Fallback: suppress malformed hidden runs (no % found)
+  return '';
 }
 
 /**
@@ -813,7 +823,7 @@ function translateFunction(children: XmlNode[]): string {
   const nameText = runsText(nameNodes);
   let name: string;
   if (nameText !== undefined) {
-    name = SPACED_FUNCTION_NAMES.get(nameText) ?? functionNameLatex(nameText);
+    name = SPACED_FUNCTION_NAMES.get(nameText) ?? runTextLatex(nameText, '', '', 'name');
   } else {
     name = ommlToLatex(nameNodes);
     // Strip a single \mathrm{} / \text{} wrapping that translateRun may have added
@@ -850,15 +860,6 @@ function runsText(nodes: XmlNode[]): string | undefined {
     if (runText.charAt(0) !== '\u200B') text += runText;
   }
   return text;
-}
-
-/**
- * A Word function name as \operatorname text: reserved characters escaped and
- * symbols as commands. Text mode keeps spaces, so a command before a letter
- * ends with {} instead of a separator space.
- */
-function functionNameLatex(text: string): string {
-  return unicodeToLatex(escapeLatex(text), false, '{}');
 }
 
 /**

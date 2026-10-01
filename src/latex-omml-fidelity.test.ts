@@ -441,3 +441,10 @@ describe('review follow-ups, round 8', () => {
     expect(importOmml(run('‖x‖'))).toBe('\\|x\\|');
   });
 });
+
+describe('review follow-ups, round 9', () => {
+  test('escapes in a bracketed operand inside a styled group give their character', () => {
+    expect(latexToOmml('\\mathrm{\\sin(50\\%)}')).toBe(styled('sin(50%)'));
+    expect(latexToOmml("\\text{\\operatorname{f}(it's)}")).toBe(styled("f(it's)"));
+  });
+});

@@ -97,7 +97,7 @@ const KNOWN_FUNCTIONS = new Set([
 /** Functions whose limits go under the name (m:limLow), as in Word's lim. */
 const LIMIT_FUNCTIONS = new Set(['lim', 'liminf', 'limsup', 'max', 'min', 'sup', 'inf', 'det', 'gcd', 'Pr']);
 
-/** How omml.ts escapes reserved characters in \text{} and styled groups, read back there. */
+/** How omml.ts escapes reserved characters in text and styled groups, read back outside math mode. */
 const TEXT_ESCAPES: Map<string, string> = new Map([
   ['\\#', '#'], ['\\$', '$'], ['\\%', '%'], ['\\&', '&'], ['\\_', '_'], ['\\{', '{'], ['\\}', '}'],
   ['\\textbackslash', '\\'], ['\\textasciitilde', '~'], ['\\textasciicircum', '^'],
@@ -271,36 +271,47 @@ export function tokenize(latex: string): Token[] {
 // Parser
 // ---------------------------------------------------------------------------
 
+/**
+ * What the parser is reading. In 'math', ' is a prime and an escape such as
+ * \% stays literal, as it always has. In 'styled', the argument of \mathbf
+ * or \mathrm, ' is still a prime but escapes give their character. In
+ * 'text', \text{} and \operatorname names, ' is an apostrophe too. Each mode
+ * mirrors how omml.ts writes that context (see runTextLatex there).
+ */
+type ParseMode = 'math' | 'styled' | 'text';
+
 class Parser {
   private tokens: Token[];
   private pos: number;
   private onUnknownCommand?: (command: string) => void;
-  /** Inside \text or an \operatorname name, where ' is an apostrophe, not a prime. */
-  private textMode: boolean;
-  /** Inside a styled group such as \mathbf{}, whose escapes such as \% give the character. */
-  private styledGroup = false;
+  private mode: ParseMode;
 
-  constructor(tokens: Token[], onUnknownCommand?: (command: string) => void, textMode = false) {
+  constructor(tokens: Token[], onUnknownCommand?: (command: string) => void, mode: ParseMode = 'math') {
     this.tokens = tokens;
     this.pos = 0;
     this.onUnknownCommand = onUnknownCommand;
-    this.textMode = textMode;
+    this.mode = mode;
   }
 
-  /** Text as Word shows it in math: ' is a prime, as Word's own autocorrect makes it. */
+  /** Text as Word shows it: outside text mode, ' is a prime, as Word's own autocorrect makes it. */
   private mathText(text: string): string {
-    return this.textMode ? text : text.replace(/'/g, '′');
+    return this.mode === 'text' ? text : text.replace(/'/g, '′');
+  }
+
+  /** Parse a group in the given mode. */
+  private parseGroupIn(mode: ParseMode): string {
+    const outer = this.mode;
+    this.mode = mode;
+    try {
+      return this.parseGroup();
+    } finally {
+      this.mode = outer;
+    }
   }
 
   /** Parse a group whose content is text, returning that text. */
   private parseTextGroup(): string {
-    const outer = this.textMode;
-    this.textMode = true;
-    try {
-      return this.extractText(this.parseGroup());
-    } finally {
-      this.textMode = outer;
-    }
+    return this.extractText(this.parseGroupIn('text'));
   }
 
   private peek(): Token | undefined {
@@ -417,7 +428,7 @@ class Parser {
   }
 
   private parseCommand(cmd: string): string {
-    const escaped = this.textMode || this.styledGroup ? TEXT_ESCAPES.get(cmd) : undefined;
+    const escaped = this.mode === 'math' ? undefined : TEXT_ESCAPES.get(cmd);
     if (escaped !== undefined) {
       return makeRun(escaped);
     }
@@ -736,7 +747,7 @@ class Parser {
           operand[0].value = operand[0].value.slice(lead);
           const rest = token.value.slice(j + 1);
           this.tokens.splice(this.pos, i + 1 - this.pos, ...(rest ? [{ type: 'text' as const, value: rest, pos: token.pos + j + 1 }] : []));
-          return new Parser(operand, this.onUnknownCommand, this.textMode).parseExpression(false);
+          return new Parser(operand, this.onUnknownCommand, this.mode).parseExpression(false);
         }
       }
     }
@@ -1092,19 +1103,11 @@ class Parser {
   }
 
   /**
-   * Parse a group as styled text, such as the argument of \\mathbf. Its
+   * Parse a group as styled text, such as the argument of \mathbf. Its
    * comments stay as hidden runs between the styled runs.
    */
   private styleGroup(style: (text: string) => string): string {
-    const outer = this.styledGroup;
-    this.styledGroup = true;
-    let omml: string;
-    try {
-      omml = this.parseGroup();
-    } finally {
-      this.styledGroup = outer;
-    }
-    return omml.split(HIDDEN_RUN_RE).map((part, i) => {
+    return this.parseGroupIn('styled').split(HIDDEN_RUN_RE).map((part, i) => {
       if (i % 2 === 1) return part;
       const text = this.extractText(part);
       return text ? style(text) : '';
