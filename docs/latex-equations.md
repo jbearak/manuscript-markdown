@@ -104,7 +104,7 @@ a^{n+1}      % multi-character superscript (use braces)
 | ℓ | `\ell` | | ⇔ | `\Leftrightarrow` |
 | ′ | `\prime` | | ↦ | `\mapsto` |
 
-The aliases `\le`, `\ge`, `\ne`, `\rightarrow`, `\gets`, `\lnot`, `\wedge`, and `\vee` also work. Re-import writes them as `\leq`, `\geq`, `\neq`, `\to`, `\leftarrow`, `\neg`, `\land`, and `\lor`. A ′ typed in Word comes back as the character itself, not `\prime`.
+The aliases `\le`, `\ge`, `\ne`, `\rightarrow`, `\gets`, `\lnot`, `\wedge`, and `\vee` also work. Re-import writes them as `\leq`, `\geq`, `\neq`, `\to`, `\leftarrow`, `\neg`, `\land`, and `\lor`. A superscript made only of primes comes back as `\prime`. A ′ anywhere else comes back as the character itself.
 
 ## Dots
 
@@ -145,6 +145,8 @@ To place limits above/below (instead of as subscript/superscript):
 ```latex
 \sum\limits_{i=1}^{n} x_i
 ```
+
+`\nolimits` does the reverse and keeps the limits beside the operator. Re-import drops it, so the limits fall back to the default placement.
 
 A group in parentheses or brackets right after the operator becomes its body in Word. In `\prod_{t=1}^{12}(1-\omega_t)`, all of `(1-\omega_t)` sits under the product. An operator written without a limit gets a hidden empty slot, so Word draws no placeholder box where the limit would go.
 

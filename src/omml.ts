@@ -461,7 +461,15 @@ function translateSuperscript(children: XmlNode[]): string {
   }
   const baseLatex = ommlToLatex(base);
   const supLatex = ommlToLatex(sup);
-  return scriptArg(baseLatex) + '^' + scriptArg(supLatex);
+  return scriptArg(baseLatex) + '^' + scriptArg(primesToLatex(supLatex));
+}
+
+/**
+ * A superscript of nothing but primes (′, as \prime exports) becomes
+ * \prime commands; a raw ′ in LaTeX source breaks pdflatex.
+ */
+function primesToLatex(supLatex: string): string {
+  return /^′+$/.test(supLatex) ? supLatex.replace(/′/g, '\\prime') : supLatex;
 }
 
 /**
@@ -495,7 +503,7 @@ function translateSubSup(children: XmlNode[]): string {
   const baseLatex = ommlToLatex(base);
   const subLatex = ommlToLatex(sub);
   const supLatex = ommlToLatex(sup);
-  return scriptArg(baseLatex) + '_' + scriptArg(subLatex) + '^' + scriptArg(supLatex);
+  return scriptArg(baseLatex) + '_' + scriptArg(subLatex) + '^' + scriptArg(primesToLatex(supLatex));
 }
 
 /**

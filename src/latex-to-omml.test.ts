@@ -520,6 +520,12 @@ describe('Word export of commands that used to be spelled out', () => {
     expect(roundTrip('a' + cmd + ' b')).toBe('a' + expected + ' b');
   });
 
+  test('\\prime in a superscript round-trips as \\prime', () => {
+    expect(roundTrip('f^\\prime')).toBe('f^\\prime');
+    expect(roundTrip('f^{\\prime\\prime}(x)')).toBe('f^{\\prime\\prime}(x)');
+    expect(roundTrip('f_i^\\prime')).toBe('f_i^\\prime');
+  });
+
   test('\\widehat and \\widetilde are accents', () => {
     expect(latexToOmml('\\widehat{R}')).toBe(latexToOmml('\\hat{R}'));
     expect(latexToOmml('\\widetilde{x}')).toBe(latexToOmml('\\tilde{x}'));
@@ -542,6 +548,21 @@ describe('n-ary limits in Word export', () => {
       '<m:nary><m:naryPr><m:chr m:val="∑"/><m:limLoc m:val="undOvr"/><m:supHide m:val="1"/></m:naryPr>' +
       '<m:sub><m:r><m:t>w</m:t></m:r></m:sub><m:sup></m:sup><m:e>',
     );
+  });
+
+  test('whitespace before \\limits or a limit is ignored', () => {
+    expect(latexToOmml('\\sum_{i=1} ^{n} x')).toBe(latexToOmml('\\sum_{i=1}^{n} x'));
+    expect(latexToOmml('\\sum _i x')).toBe(latexToOmml('\\sum_i x'));
+    expect(latexToOmml('\\sum \\limits _i x')).toBe(latexToOmml('\\sum\\limits_i x'));
+  });
+
+  test('\\nolimits puts the limits beside the operator', () => {
+    const result = latexToOmml('\\sum\\nolimits_i x');
+    expect(result).toStartWith(
+      '<m:nary><m:naryPr><m:chr m:val="∑"/><m:limLoc m:val="subSup"/><m:supHide m:val="1"/></m:naryPr>' +
+      '<m:sub><m:r><m:t>i</m:t></m:r></m:sub>',
+    );
+    expect(result).not.toContain('nolimits');
   });
 
   test('both limits present hide nothing', () => {
@@ -591,6 +612,14 @@ describe('bracketed operands of n-ary operators and functions', () => {
     const result = latexToOmml('\\left(\\sum_i(a\\right))');
     expect(result).toStartWith('<m:d><m:dPr><m:begChr m:val="("/><m:endChr m:val=")"/></m:dPr>');
     expect(result).not.toContain('\\right');
+  });
+
+  test('brackets inside a \\left…\\right pair cannot close the operand', () => {
+    const result = latexToOmml('\\int(\\left[0,1)\\right])');
+    expect(result).toEndWith('</m:d>' + run(')') + '</m:e></m:nary>');
+    expect(result).toContain('<m:begChr m:val="["/><m:endChr m:val="]"/>');
+    expect(result).not.toContain('\\right');
+    expect(latexToOmml('\\sum_i(\\left(a)\\right)')).not.toContain('\\right');
   });
 
   test('a row or cell boundary of the enclosing environment stops the scan', () => {

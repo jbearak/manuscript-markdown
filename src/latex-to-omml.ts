@@ -301,18 +301,23 @@ class Parser {
     }
 
   /**
-   * If the upcoming tokens are (optional whitespace-only text) followed by the
-   * given script operator, consume through the operator and return true.
+   * If the upcoming tokens are (optional whitespace-only text) followed by a
+   * token that satisfies `match`, consume through that token and return it.
    * Leaves the token stream untouched otherwise.
    */
-  private consumeScriptOperator(type: 'caret' | 'underscore'): boolean {
+  private consumeAfterWhitespace(match: (token: Token) => boolean): Token | undefined {
     let lookahead = this.pos;
     while (this.tokens[lookahead]?.type === 'text' && this.tokens[lookahead].value.trim() === '') {
       lookahead++;
     }
-    if (this.tokens[lookahead]?.type !== type) return false;
+    const token = this.tokens[lookahead];
+    if (!token || !match(token)) return undefined;
     this.pos = lookahead + 1;
-    return true;
+    return token;
+  }
+
+  private consumeScriptOperator(type: 'caret' | 'underscore'): boolean {
+    return this.consumeAfterWhitespace(t => t.type === type) !== undefined;
   }
 
   private parseScriptsForBase(base: string): string {
@@ -427,6 +432,7 @@ class Parser {
       }
 
       case '\\limits':
+      case '\\nolimits':
         // This should be handled by nary parsing, but if encountered alone, ignore
         return '';
 
@@ -582,17 +588,20 @@ class Parser {
     let sup = '';
 
     // Check for \limits
-    if (this.peek()?.type === 'command' && this.peek()?.value === '\\limits') {
-      this.consume();
-      limits = '<m:limLoc m:val="undOvr"/>';
+    // TeX ignores whitespace before \limits and before each limit
+    const limitsCmd = this.consumeAfterWhitespace(
+      t => t.type === 'command' && (t.value === '\\limits' || t.value === '\\nolimits'),
+    );
+    if (limitsCmd) {
+      limits = '<m:limLoc m:val="' + (limitsCmd.value === '\\limits' ? 'undOvr' : 'subSup') + '"/>';
     }
 
     // Parse subscript and superscript
-    while (this.peek() && (this.peek()?.type === 'underscore' || this.peek()?.type === 'caret')) {
-      const token = this.consume()!;
-      if (token.type === 'underscore') {
+    let script: Token | undefined;
+    while ((script = this.consumeAfterWhitespace(t => t.type === 'underscore' || t.type === 'caret'))) {
+      if (script.type === 'underscore') {
         sub = this.parseGroup();
-      } else if (token.type === 'caret') {
+      } else {
         sup = this.parseGroup();
       }
     }
@@ -625,48 +634,29 @@ class Parser {
     if (!close) return undefined;
 
     let depth = 0;
-    let braceDepth = 0;
-    let envDepth = 0;
-    let leftDepth = 0;
+    // Braces, environments, and \left…\right pairs are opaque: nothing inside
+    // them can close the bracket, and an unmatched closer ends the enclosing group.
+    let nesting = 0;
     for (let i = start; i < this.tokens.length; i++) {
       const token = this.tokens[i];
-      if (token.type === 'lbrace') {
-        braceDepth++;
+      if (token.type === 'lbrace' || (token.type === 'command' && (token.value === '\\begin' || token.value === '\\left'))) {
+        nesting++;
         continue;
       }
-      if (token.type === 'rbrace') {
-        if (braceDepth === 0) return undefined;
-        braceDepth--;
+      if (token.type === 'rbrace' || (token.type === 'command' && (token.value === '\\end' || token.value === '\\right'))) {
+        if (nesting === 0) return undefined;
+        nesting--;
         continue;
       }
-      if (braceDepth > 0) continue;
-      if (token.type === 'command' && token.value === '\\begin') {
-        envDepth++;
-        continue;
-      }
-      if (token.type === 'command' && token.value === '\\end') {
-        if (envDepth === 0) return undefined;
-        envDepth--;
-        continue;
-      }
-      if (envDepth > 0) continue;
-      if (token.type === 'command' && token.value === '\\left') {
-        leftDepth++;
-        continue;
-      }
-      if (token.type === 'command' && token.value === '\\right') {
-        if (leftDepth === 0) return undefined;
-        leftDepth--;
-        continue;
-      }
+      if (nesting > 0) continue;
       if (token.type === 'ampersand' || (token.type === 'command' && token.value === '\\\\')) {
         return undefined;
       }
       if (token.type !== 'text') continue;
 
-      // The character right after \left or \right is that command's delimiter.
+      // The character right after \right is that command's delimiter.
       const prev = this.tokens[i - 1];
-      const skipDelimiter = prev?.type === 'command' && (prev.value === '\\left' || prev.value === '\\right');
+      const skipDelimiter = prev?.type === 'command' && prev.value === '\\right';
       for (let j = i === start ? lead : skipDelimiter ? 1 : 0; j < token.value.length; j++) {
         const ch = token.value.charAt(j);
         if (ch === open) {
