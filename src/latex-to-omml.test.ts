@@ -660,6 +660,13 @@ describe('bracketed operands of n-ary operators and functions', () => {
     );
   });
 
+  test('whitespace before a script is ignored', () => {
+    expect(latexToOmml('\\sum_i(a) ^2')).toBe(latexToOmml('\\sum_i(a)^2'));
+    expect(latexToOmml('\\sin(x) _j')).toBe(latexToOmml('\\sin(x)_j'));
+    expect(latexToOmml('x ^2')).toBe(latexToOmml('x^2'));
+    expect(latexToOmml('x_i ^2')).toBe(latexToOmml('x_i^2'));
+  });
+
   test('scripts after the group still bind to the operand', () => {
     expect(latexToOmml('\\sum_i(a)^2')).toEndWith(
       '<m:e><m:sSup><m:e>' + run('(') + run('a') + run(')') + '</m:e><m:sup>' + run('2') + '</m:sup></m:sSup></m:e></m:nary>',

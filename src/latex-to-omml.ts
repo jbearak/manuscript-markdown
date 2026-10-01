@@ -107,6 +107,8 @@ function makeRun(text: string): string {
   return '<m:r><m:t>' + escapeXmlChars(text) + '</m:t></m:r>';
 }
 
+const WHITESPACE_RUN_RE = /^<m:r><m:t>\s+<\/m:t><\/m:r>$/;
+
 function makeStyledRun(text: string): string {
   return '<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>' + escapeXmlChars(text) + '</m:t></m:r>';
 }
@@ -323,17 +325,12 @@ class Parser {
   private parseScriptsForBase(base: string): string {
     let current = base;
 
-    while (this.peek() && (this.peek()?.type === 'caret' || this.peek()?.type === 'underscore')) {
-      const firstOp = this.consume()!;
+    // TeX ignores whitespace before a script operator
+    let firstOp: Token | undefined;
+    while ((firstOp = this.consumeAfterWhitespace(t => t.type === 'caret' || t.type === 'underscore'))) {
       const firstScript = this.parseGroup();
 
-      const nextToken = this.peek();
-      if (
-        nextToken &&
-        ((firstOp.type === 'caret' && nextToken.type === 'underscore') ||
-          (firstOp.type === 'underscore' && nextToken.type === 'caret'))
-      ) {
-        this.consume(); // consume second script operator
+      if (this.consumeScriptOperator(firstOp.type === 'caret' ? 'underscore' : 'caret')) {
         const secondScript = this.parseGroup();
 
         if (firstOp.type === 'caret') {
@@ -771,6 +768,9 @@ class Parser {
     while ((token = this.peek()) && !shouldStop(token)) {
       if (onSpecialToken && onSpecialToken(token, atoms)) continue;
       if (token.type === 'caret' || token.type === 'underscore') {
+        // TeX ignores whitespace before a script, so the script binds to the
+        // atom before the space
+        while (atoms.length > 0 && WHITESPACE_RUN_RE.test(atoms[atoms.length - 1])) atoms.pop();
         if (atoms.length === 0) {
           atoms.push(this.parseToken(this.consume()!));
         } else {
