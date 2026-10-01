@@ -24,13 +24,13 @@ function makeRun(text: string, style?: string): Record<string, any> {
 
 const KNOWN_UNICODE_LATEX: [string, string][] = [
   ['α', '\\alpha'], ['β', '\\beta'], ['γ', '\\gamma'], ['δ', '\\delta'],
-  ['ε', '\\epsilon'], ['ζ', '\\zeta'], ['η', '\\eta'], ['θ', '\\theta'],
+  ['ϵ', '\\epsilon'], ['ε', '\\varepsilon'], ['ζ', '\\zeta'], ['η', '\\eta'], ['θ', '\\theta'], ['ϑ', '\\vartheta'],
   ['ι', '\\iota'], ['κ', '\\kappa'], ['λ', '\\lambda'], ['μ', '\\mu'],
-  ['ν', '\\nu'], ['ξ', '\\xi'], ['π', '\\pi'], ['ρ', '\\rho'],
-  ['σ', '\\sigma'], ['τ', '\\tau'], ['υ', '\\upsilon'], ['φ', '\\phi'],
+  ['ν', '\\nu'], ['ξ', '\\xi'], ['π', '\\pi'], ['ϖ', '\\varpi'], ['ρ', '\\rho'], ['ϱ', '\\varrho'],
+  ['σ', '\\sigma'], ['ς', '\\varsigma'], ['τ', '\\tau'], ['υ', '\\upsilon'], ['ϕ', '\\phi'], ['φ', '\\varphi'],
   ['χ', '\\chi'], ['ψ', '\\psi'], ['ω', '\\omega'],
   ['Γ', '\\Gamma'], ['Δ', '\\Delta'], ['Θ', '\\Theta'], ['Λ', '\\Lambda'],
-  ['Ξ', '\\Xi'], ['Π', '\\Pi'], ['Σ', '\\Sigma'], ['Φ', '\\Phi'],
+  ['Ξ', '\\Xi'], ['Π', '\\Pi'], ['Σ', '\\Sigma'], ['Υ', '\\Upsilon'], ['Φ', '\\Phi'],
   ['Ψ', '\\Psi'], ['Ω', '\\Omega'],
   ['×', '\\times'], ['÷', '\\div'], ['±', '\\pm'], ['∓', '\\mp'],
   ['≤', '\\leq'], ['≥', '\\geq'], ['≠', '\\neq'], ['≈', '\\approx'],
