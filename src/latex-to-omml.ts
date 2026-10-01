@@ -37,9 +37,25 @@ const LATEX_UNICODE_MAP: Map<string, string> = new Map([
   ['\\cdot', '·'], ['\\ldots', '…'], ['\\cdots', '⋯'],
   ['\\dots', '…'], ['\\dotsc', '…'], ['\\dotsb', '…'], ['\\dotsm', '…'], ['\\dotsi', '…'],
   ['\\ddots', '⋱'], ['\\vdots', '⋮'],
+  ['\\sim', '∼'], ['\\simeq', '≃'], ['\\equiv', '≡'], ['\\cong', '≅'],
+  ['\\propto', '∝'], ['\\ll', '≪'], ['\\gg', '≫'],
+  ['\\subseteq', '⊆'], ['\\supseteq', '⊇'], ['\\setminus', '∖'],
+  ['\\perp', '⊥'], ['\\circ', '∘'], ['\\ast', '∗'],
+  ['\\emptyset', '∅'], ['\\ell', 'ℓ'],
+  ['\\Leftrightarrow', '⇔'], ['\\mapsto', '↦'],
+  // One-way entries: omml.ts maps these characters back to the canonical
+  // spelling above, except ′, which it keeps (f\prime renders a full-size prime)
+  ['\\prime', '′'],
+  ['\\le', '≤'], ['\\ge', '≥'], ['\\ne', '≠'],
+  ['\\rightarrow', '→'], ['\\gets', '←'],
+  ['\\lnot', '¬'], ['\\wedge', '∧'], ['\\vee', '∨'],
+  ['\\varepsilon', 'ε'], ['\\varphi', 'φ'],
 ]);
 
 const LATEX_ACCENT_MAP: Map<string, string> = new Map([
+  // m:acc has no wide form; the wide variants reuse the \hat and \tilde characters
+  ['\\widehat', 'ˆ'],
+  ['\\widetilde', '~'],
   ['\\hat', 'ˆ'],
   ['\\bar', '¯'],
   ['\\dot', '˙'],
@@ -354,7 +370,7 @@ class Parser {
 
     // Functions
     if (KNOWN_FUNCTIONS.has(cmd.slice(1))) {
-      const arg = this.parseGroup();
+      const arg = this.parseBracketedOperand() ?? this.parseGroup();
       return '<m:func><m:fName>' + makeStyledRun(cmd.slice(1)) + '</m:fName><m:e>' + arg + '</m:e></m:func>';
     }
 
@@ -406,7 +422,7 @@ class Parser {
         // mirroring KNOWN_FUNCTIONS (e.g. \sin{x}) for round-trip fidelity
         // with the OMML→LaTeX direction which emits \operatorname{name}{arg}.
         const name = this.parseGroup();
-        const funcArg = this.parseGroup();
+        const funcArg = this.parseBracketedOperand() ?? this.parseGroup();
         return '<m:func><m:fName>' + makeStyledRun(this.extractText(name)) + '</m:fName><m:e>' + funcArg + '</m:e></m:func>';
       }
 
@@ -575,16 +591,76 @@ class Parser {
     while (this.peek() && (this.peek()?.type === 'underscore' || this.peek()?.type === 'caret')) {
       const token = this.consume()!;
       if (token.type === 'underscore') {
-        sub = '<m:sub>' + this.parseGroup() + '</m:sub>';
+        sub = this.parseGroup();
       } else if (token.type === 'caret') {
-        sup = '<m:sup>' + this.parseGroup() + '</m:sup>';
+        sup = this.parseGroup();
       }
     }
 
-    const bodyAtom = this.parseGroup();
+    const bodyAtom = this.parseBracketedOperand() ?? this.parseGroup();
     const body = this.parseScriptsForBase(bodyAtom);
 
-    return '<m:nary><m:naryPr><m:chr m:val="' + escapeXmlChars(naryChar) + '"/>' + limits + '</m:naryPr>' + sub + sup + '<m:e>' + body + '</m:e></m:nary>';
+    // m:sub and m:sup are required; without the hide flags Word shows an
+    // absent limit as an empty placeholder box.
+    const hide = (sub ? '' : '<m:subHide m:val="1"/>') + (sup ? '' : '<m:supHide m:val="1"/>');
+    return '<m:nary><m:naryPr><m:chr m:val="' + escapeXmlChars(naryChar) + '"/>' + limits + hide + '</m:naryPr>' +
+      '<m:sub>' + sub + '</m:sub><m:sup>' + sup + '</m:sup><m:e>' + body + '</m:e></m:nary>';
+  }
+
+  /**
+   * Parse a `(…)` or `[…]` group that directly follows an n-ary operator or a
+   * function name as that construct's whole operand, so the m:e holds the
+   * group instead of just its opening bracket. Returns undefined, leaving the
+   * token stream untouched, unless the bracket closes within the current
+   * brace group, row, and cell.
+   */
+  private parseBracketedOperand(): string | undefined {
+    let start = this.pos;
+    while (this.tokens[start]?.type === 'text' && this.tokens[start].value.trim() === '') start++;
+    const first = this.tokens[start];
+    if (first?.type !== 'text') return undefined;
+    const lead = first.value.length - first.value.trimStart().length;
+    const open = first.value.charAt(lead);
+    const close = open === '(' ? ')' : open === '[' ? ']' : '';
+    if (!close) return undefined;
+
+    let depth = 0;
+    let braceDepth = 0;
+    for (let i = start; i < this.tokens.length; i++) {
+      const token = this.tokens[i];
+      if (token.type === 'lbrace') {
+        braceDepth++;
+        continue;
+      }
+      if (token.type === 'rbrace') {
+        if (braceDepth === 0) return undefined;
+        braceDepth--;
+        continue;
+      }
+      if (braceDepth > 0) continue;
+      if (token.type === 'ampersand' || (token.type === 'command' && (token.value === '\\\\' || token.value === '\\end'))) {
+        return undefined;
+      }
+      if (token.type !== 'text') continue;
+
+      // The character right after \left or \right is that command's delimiter.
+      const prev = this.tokens[i - 1];
+      const skipDelimiter = prev?.type === 'command' && (prev.value === '\\left' || prev.value === '\\right');
+      for (let j = i === start ? lead : skipDelimiter ? 1 : 0; j < token.value.length; j++) {
+        const ch = token.value.charAt(j);
+        if (ch === open) {
+          depth++;
+        } else if (ch === close && --depth === 0) {
+          const operand = this.tokens.slice(start, i + 1).map(t => ({ ...t }));
+          operand[operand.length - 1].value = operand[operand.length - 1].value.slice(0, j + 1);
+          operand[0].value = operand[0].value.slice(lead);
+          const rest = token.value.slice(j + 1);
+          this.tokens.splice(this.pos, i + 1 - this.pos, ...(rest ? [{ type: 'text' as const, value: rest, pos: token.pos + j + 1 }] : []));
+          return new Parser(operand).parseExpression(false);
+        }
+      }
+    }
+    return undefined;
   }
 
   private parseDelimiter(): string {

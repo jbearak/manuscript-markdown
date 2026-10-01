@@ -61,6 +61,12 @@ const UNICODE_LATEX_MAP: Map<string, string> = new Map([
   ['∣', '\\mid'],
   ['·', '\\cdot'], ['…', '\\ldots'], ['⋯', '\\cdots'],
   ['⋱', '\\ddots'], ['⋮', '\\vdots'],
+  ['∼', '\\sim'], ['≃', '\\simeq'], ['≡', '\\equiv'], ['≅', '\\cong'],
+  ['∝', '\\propto'], ['≪', '\\ll'], ['≫', '\\gg'],
+  ['⊆', '\\subseteq'], ['⊇', '\\supseteq'], ['∖', '\\setminus'],
+  ['⊥', '\\perp'], ['∘', '\\circ'], ['∗', '\\ast'],
+  ['∅', '\\emptyset'], ['ℓ', '\\ell'],
+  ['⇔', '\\Leftrightarrow'], ['↦', '\\mapsto'],
 ]);
 
 const ACCENT_MAP: Map<string, string> = new Map([

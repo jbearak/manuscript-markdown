@@ -73,6 +73,8 @@ a^{n+1}      % multi-character superscript (use braces)
 | `\lambda` λ | `\omega` ω | | |
 | `\mu` μ | | | |
 
+`\varepsilon` and `\varphi` export as ε and φ. Re-import writes them as `\epsilon` and `\phi`.
+
 ## Operators and Symbols
 
 | Symbol | LaTeX | | Symbol | LaTeX |
@@ -92,6 +94,17 @@ a^{n+1}      % multi-character superscript (use braces)
 | ∃ | `\exists` | | ∨ | `\lor` |
 | ¬ | `\neg` | | ⊕ | `\oplus` |
 | · | `\cdot` | | ⊗ | `\otimes` |
+| ∼ | `\sim` | | ⊆ | `\subseteq` |
+| ≃ | `\simeq` | | ⊇ | `\supseteq` |
+| ≡ | `\equiv` | | ∖ | `\setminus` |
+| ≅ | `\cong` | | ⊥ | `\perp` |
+| ∝ | `\propto` | | ∘ | `\circ` |
+| ≪ | `\ll` | | ∗ | `\ast` |
+| ≫ | `\gg` | | ∅ | `\emptyset` |
+| ℓ | `\ell` | | ⇔ | `\Leftrightarrow` |
+| ′ | `\prime` | | ↦ | `\mapsto` |
+
+The aliases `\le`, `\ge`, `\ne`, `\rightarrow`, `\gets`, `\lnot`, `\wedge`, and `\vee` also work. Re-import writes them as `\leq`, `\geq`, `\neq`, `\to`, `\leftarrow`, `\neg`, `\land`, and `\lor`. A ′ typed in Word comes back as the character itself, not `\prime`.
 
 ## Dots
 
@@ -133,6 +146,8 @@ To place limits above/below (instead of as subscript/superscript):
 \sum\limits_{i=1}^{n} x_i
 ```
 
+A group in parentheses or brackets right after the operator becomes its body in Word. In `\prod_{t=1}^{12}(1-\omega_t)`, all of `(1-\omega_t)` sits under the product. An operator written without a limit gets a hidden empty slot, so Word draws no placeholder box where the limit would go.
+
 ## Functions
 
 Known function names are rendered upright (roman) in the equation:
@@ -157,6 +172,8 @@ For functions not in this list, use `\operatorname{name}`:
 \operatorname{tr}{A}
 ```
 
+A function name followed by `(...)` or `[...]` takes the whole group as its argument, as in `\log(x+1)` or `\operatorname{margin}(j)`. Re-import adds braces around it: `\log{(x+1)}`.
+
 ## Accents and Decorations
 
 ```latex
@@ -167,6 +184,8 @@ For functions not in this list, use `\operatorname{name}`:
 \dot{x}     % single dot: ẋ
 \ddot{x}    % double dot: ẍ
 \check{x}   % caron: x̌
+\widehat{x}   % same as \hat in Word; re-imports as \hat
+\widetilde{x} % same as \tilde in Word; re-imports as \tilde
 ```
 
 ## Delimiters

@@ -492,3 +492,124 @@ describe('latexToOmml', () => {
     });
   });
 });
+describe('Word export of commands that used to be spelled out', () => {
+  test.each([
+    ['\\le', '≤'], ['\\ge', '≥'], ['\\ne', '≠'],
+    ['\\sim', '∼'], ['\\simeq', '≃'], ['\\equiv', '≡'], ['\\cong', '≅'],
+    ['\\propto', '∝'], ['\\ll', '≪'], ['\\gg', '≫'],
+    ['\\subseteq', '⊆'], ['\\supseteq', '⊇'], ['\\setminus', '∖'],
+    ['\\perp', '⊥'], ['\\circ', '∘'], ['\\ast', '∗'], ['\\prime', '′'],
+    ['\\emptyset', '∅'], ['\\ell', 'ℓ'],
+    ['\\Leftrightarrow', '⇔'], ['\\mapsto', '↦'], ['\\rightarrow', '→'], ['\\gets', '←'],
+    ['\\lnot', '¬'], ['\\wedge', '∧'], ['\\vee', '∨'],
+    ['\\varepsilon', 'ε'], ['\\varphi', 'φ'],
+  ])('%s becomes %s', (cmd, ch) => {
+    expect(latexToOmml(cmd)).toBe('<m:r><m:t>' + ch + '</m:t></m:r>');
+  });
+
+  test('Pareto \\hat{k}\\le0.7 has no literal command text', () => {
+    const result = latexToOmml('\\hat{k}\\le0.7');
+    expect(result).not.toContain('\\');
+    expect(result).toContain('<m:t>≤</m:t>');
+  });
+
+  test.each([
+    ['\\sim', '\\sim'], ['\\equiv', '\\equiv'], ['\\propto', '\\propto'],
+    ['\\le', '\\leq'], ['\\ge', '\\geq'], ['\\ne', '\\neq'],
+  ])('%s round-trips as %s', (cmd, expected) => {
+    expect(roundTrip('a' + cmd + ' b')).toBe('a' + expected + ' b');
+  });
+
+  test('\\widehat and \\widetilde are accents', () => {
+    expect(latexToOmml('\\widehat{R}')).toBe(latexToOmml('\\hat{R}'));
+    expect(latexToOmml('\\widetilde{x}')).toBe(latexToOmml('\\tilde{x}'));
+    expect(roundTrip('\\widehat{R}')).toBe('\\hat{R}');
+  });
+});
+
+describe('n-ary limits in Word export', () => {
+  test('missing limits are emitted as hidden empty slots', () => {
+    const result = latexToOmml('\\prod(1-\\omega_t)');
+    expect(result).toStartWith(
+      '<m:nary><m:naryPr><m:chr m:val="∏"/><m:subHide m:val="1"/><m:supHide m:val="1"/></m:naryPr>' +
+      '<m:sub></m:sub><m:sup></m:sup><m:e>',
+    );
+  });
+
+  test('a lower limit alone hides only the upper slot', () => {
+    const result = latexToOmml('\\sum\\limits_wn_w');
+    expect(result).toStartWith(
+      '<m:nary><m:naryPr><m:chr m:val="∑"/><m:limLoc m:val="undOvr"/><m:supHide m:val="1"/></m:naryPr>' +
+      '<m:sub><m:r><m:t>w</m:t></m:r></m:sub><m:sup></m:sup><m:e>',
+    );
+  });
+
+  test('both limits present hide nothing', () => {
+    expect(latexToOmml('\\sum_{i=0}^{n}x_i')).not.toContain('Hide');
+  });
+
+  test('hidden slots round-trip without stray scripts', () => {
+    expect(roundTrip('\\prod(1-x)')).toBe('\\prod(1-x)');
+    expect(roundTrip('\\sum\\limits_wn_w')).toBe('\\sum\\limits_wn_w');
+  });
+});
+
+describe('bracketed operands of n-ary operators and functions', () => {
+  const run = (t: string) => '<m:r><m:t>' + t + '</m:t></m:r>';
+  const sub = (base: string, s: string) => '<m:sSub><m:e>' + run(base) + '</m:e><m:sub>' + s + '</m:sub></m:sSub>';
+
+  test('the product body is the whole parenthesized factor', () => {
+    const result = latexToOmml('\\prod_{t=1}^{12}(1-\\omega_{wct})');
+    expect(result).toEndWith(
+      '<m:e>' + run('(') + run('1') + run('-') + sub('ω', run('w') + run('c') + run('t')) + run(')') + '</m:e></m:nary>',
+    );
+  });
+
+  test('an unbraced subscript inside the factor does not end the body early', () => {
+    const result = latexToOmml('\\prod_t(1-\\omega_t)x');
+    expect(result).toEndWith(
+      '<m:e>' + run('(') + run('1') + run('-') + sub('ω', run('t')) + run(')') + '</m:e></m:nary>' + run('x'),
+    );
+  });
+
+  test('nested and \\left/\\right parentheses are balanced correctly', () => {
+    const result = latexToOmml('\\sum_i((a)\\left(b\\right)c)d');
+    expect(result).toEndWith('</m:d>' + run('c') + run(')') + '</m:e></m:nary>' + run('d'));
+  });
+
+  test('square brackets work too', () => {
+    const result = latexToOmml('\\sum_i[a]b');
+    expect(result).toEndWith('<m:e>' + run('[') + run('a') + run(']') + '</m:e></m:nary>' + run('b'));
+  });
+
+  test('an unbalanced parenthesis falls back to the single-token body', () => {
+    const result = latexToOmml('\\sum_i(a');
+    expect(result).toEndWith('<m:e>' + run('(') + '</m:e></m:nary>' + run('a'));
+  });
+
+  test('a group closed by the enclosing brace is not taken', () => {
+    const result = latexToOmml('{\\sum_i(a}b)');
+    expect(result).toContain('<m:e>' + run('(') + '</m:e></m:nary>');
+  });
+
+  test('\\operatorname{margin}(j) takes (j) as its argument', () => {
+    const result = latexToOmml('\\tau_{\\operatorname{margin}(j)}');
+    expect(result).toContain(
+      '<m:func><m:fName><m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>margin</m:t></m:r></m:fName>' +
+      '<m:e>' + run('(') + run('j') + run(')') + '</m:e></m:func>',
+    );
+    expect(roundTrip('\\operatorname{margin}(j)')).toBe('\\operatorname{margin}{(j)}');
+  });
+
+  test('known functions take a parenthesized argument', () => {
+    expect(latexToOmml('\\log(x+1)')).toEndWith(
+      '<m:e>' + run('(') + run('x') + run('+') + run('1') + run(')') + '</m:e></m:func>',
+    );
+  });
+
+  test('scripts after the group still bind to the operand', () => {
+    expect(latexToOmml('\\sum_i(a)^2')).toEndWith(
+      '<m:e><m:sSup><m:e>' + run('(') + run('a') + run(')') + '</m:e><m:sup>' + run('2') + '</m:sup></m:sSup></m:e></m:nary>',
+    );
+  });
+});
