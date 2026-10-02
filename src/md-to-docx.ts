@@ -832,8 +832,9 @@ function createCriticInnerMarkdownIt(): MarkdownIt {
   // other top-level custom syntaxes that carry separate document semantics.
   // Citations stay enabled: inserted/new-side citations become Zotero fields,
   // deleted/old-side ones render as literal deleted text (see
-  // generateDeletedCriticContent).
-  md.inline.ruler.disable(['comment_range', 'footnote_ref']);
+  // generateDeletedCriticContent). Footnote references stay enabled too, and
+  // become tracked note references (see noteReferenceXml).
+  md.inline.ruler.disable(['comment_range']);
   return md;
 }
 
@@ -891,7 +892,7 @@ function normalizeCriticInnerRuns(runs: MdRun[]): MdRun[] {
       continue;
     }
 
-    if (run.type === 'math' || run.type === 'citation' || run.type === 'image') {
+    if (run.type === 'math' || run.type === 'citation' || run.type === 'image' || run.type === 'footnote_ref') {
       normalized.push(run);
       continue;
     }
@@ -3436,6 +3437,10 @@ export interface DocxGenState {
   noteImageRelationships: Map<string, { rId: string; mediaPath: string }>; // dedup key -> { rId, media path } for images inside footnote/endnote bodies
   noteNextRId: number; // next rId for footnotes.xml.rels (independent of document rIds)
   footnoteCrossRefLabels: Set<string>; // footnote labels that have 2+ references (need bookmarks + cross-ref fields)
+  untrackedNoteLabels?: Set<string>; // note labels with a reference outside any tracked change (see noteReferenceXml)
+  trackedNoteReference?: boolean;    // whether a note reference sits in a tracked change
+  ownedNoteLabels?: Set<string>;     // note labels whose Word note reference has been written
+  noteRevision?: 'addition';         // set while generating inserted content
   nextBookmarkId: number; // counter for unique bookmark IDs within footnotes/endnotes XML
   firstLineIndentTwips?: number;   // undefined = no indent mode
   indentMode: boolean;       // true when first-line indent is active (controls inter-paragraph spacing removal)
@@ -4856,17 +4861,13 @@ function commentIdMappingProps(commentIdMap: Map<string, number>): CustomPropEnt
   return chunkCustomProps('MANUSCRIPT_COMMENT_IDS_', JSON.stringify(mapping));
 }
 
-function footnoteIdMappingProps(footnoteLabelToId: Map<string, number>): CustomPropEntry[] {
+function footnoteIdMappingProps(footnoteLabelToId: Map<string, number>, trackedReference: boolean): CustomPropEntry[] {
   if (footnoteLabelToId.size === 0) return [];
-  // Only store mapping if any label is non-numeric (named labels)
-  let hasNamedLabel = false;
-  for (const label of footnoteLabelToId.keys()) {
-    if (!/^\d+$/.test(label)) {
-      hasNamedLabel = true;
-      break;
-    }
-  }
-  if (!hasNamedLabel) return [];
+  // Import numbers notes in the order of their first references, which gives
+  // the labels back only when each is its note's ID and no reference is
+  // tracked, since a tracked one can cross-reference a note before the
+  // reference that holds it.
+  if (!trackedReference && [...footnoteLabelToId].every(([label, id]) => label === String(id))) return [];
 
   const mapping: Record<string, string> = {};
   for (const [label, numericId] of footnoteLabelToId) {
@@ -5219,7 +5220,7 @@ function formatCriticInnerRuns(runs: MdRun[] | undefined, outer: MdRun, forced: 
       formatted.push(run);
       continue;
     }
-    if (run.type === 'math' || run.type === 'citation' || run.type === 'image') {
+    if (run.type === 'math' || run.type === 'citation' || run.type === 'image' || run.type === 'footnote_ref') {
       // Citation visible text comes from the field result (CSL/fallback), so
       // outer formatting is not merged in — same as citations outside CriticMarkup.
       formatted.push(run);
@@ -5261,9 +5262,10 @@ function generateDeletedCriticContent(
   runs: MdRun[] | undefined,
   fallbackText: string,
   outer: MdRun,
-  forced: Partial<MdRun> = {},
-  extraRPr?: string,
-  warnings?: string[]
+  forced: Partial<MdRun>,
+  extraRPr: string | undefined,
+  warnings: string[] | undefined,
+  state: DocxGenState
 ): string {
   const formattedRuns = formatCriticInnerRuns(runs, outer, forced);
   if (!formattedRuns || formattedRuns.length === 0) {
@@ -5289,18 +5291,22 @@ function generateDeletedCriticContent(
       continue;
     }
     if (run.type === 'critic_add' || run.type === 'critic_del') {
-      xml += generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr, warnings);
+      xml += generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr, warnings, state);
       continue;
     }
     if (run.type === 'critic_sub') {
-      xml += generateDeletedCriticContent(run.oldRuns, run.text, run, {}, extraRPr, warnings);
-      if (run.newText) xml += generateDeletedCriticContent(run.newRuns, run.newText, run, {}, extraRPr, warnings);
+      xml += generateDeletedCriticContent(run.oldRuns, run.text, run, {}, extraRPr, warnings, state);
+      if (run.newText) xml += generateDeletedCriticContent(run.newRuns, run.newText, run, {}, extraRPr, warnings, state);
       continue;
     }
     if (run.type === 'critic_highlight' || run.type === 'critic_comment') {
       if (run.type === 'critic_highlight' && run.text) {
-        xml += generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr, warnings);
+        xml += generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr, warnings, state);
       }
+      continue;
+    }
+    if (run.type === 'footnote_ref') {
+      xml += noteReferenceXml(run.footnoteLabel || '', state, 'deletion');
       continue;
     }
     if (run.type === 'citation') {
@@ -5318,6 +5324,54 @@ function generateDeletedCriticContent(
     xml += '<w:r>' + (rPr ? rPr : '') + delText(run.text) + '</w:r>';
   }
   return xml;
+}
+
+/** Inserted content from `generate`, with its note references marked as inserted. */
+function insertedContent(state: DocxGenState, generate: () => string): string {
+  const saved = state.noteRevision;
+  state.noteRevision = 'addition';
+  try {
+    return generate();
+  } finally {
+    state.noteRevision = saved;
+  }
+}
+
+/**
+ * A reference to the note `label`, inside a tracked change of `revision` or
+ * none. The reference that owns the note gets Word's note reference; any
+ * other cross-references it with a NOTEREF field, whose instruction Word
+ * keeps as w:delInstrText inside a deletion. A tracked reference owns its
+ * note only when no untracked reference does, so accepting or rejecting the
+ * change can't take the note from a reference that stays.
+ */
+function noteReferenceXml(label: string, state: DocxGenState, revision?: 'addition' | 'deletion'): string {
+  let noteId = state.footnoteLabelToId.get(label);
+  if (noteId === undefined) {
+    noteId = state.footnoteId++;
+    state.footnoteLabelToId.set(label, noteId);
+  }
+  const owned = state.ownedNoteLabels ??= new Set();
+  const owns = !owned.has(label) && !(revision && state.untrackedNoteLabels?.has(label));
+  if (state.notesMode === 'endnotes') state.hasEndnotes = true;
+  else state.hasFootnotes = true;
+  const noteExtraRPr = state.tableRunRPrExtra || '';
+  const refStyleName = state.notesMode === 'endnotes' ? 'EndnoteReference' : 'FootnoteReference';
+  const rPr = '<w:rPr><w:rStyle w:val="' + refStyleName + '"/>' + noteExtraRPr + '</w:rPr>';
+  if (owns) {
+    owned.add(label);
+    const tag = state.notesMode === 'endnotes' ? 'w:endnoteReference' : 'w:footnoteReference';
+    return '<w:r>' + rPr + '<' + tag + ' w:id="' + noteId + '"/></w:r>';
+  }
+  // Cross-reference field pointing to the bookmark around the note's self-ref mark
+  state.footnoteCrossRefLabels.add(label);
+  const bkmkName = footnoteBookmarkName(noteId);
+  const instrTag = revision === 'deletion' ? 'w:delInstrText' : 'w:instrText';
+  return '<w:r>' + rPr + '<w:fldChar w:fldCharType="begin"/></w:r>'
+    + '<w:r>' + rPr + '<' + instrTag + ' xml:space="preserve"> NOTEREF ' + bkmkName + ' \\f \\h </' + instrTag + '></w:r>'
+    + '<w:r>' + rPr + '<w:fldChar w:fldCharType="separate"/></w:r>'
+    + '<w:r>' + rPr + (revision === 'deletion' ? delText(String(noteId)) : '<w:t>' + noteId + '</w:t>') + '</w:r>'
+    + '<w:r>' + rPr + '<w:fldChar w:fldCharType="end"/></w:r>';
 }
 
 export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine): string {
@@ -5358,20 +5412,20 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       const author = run.author || options?.authorName || 'Unknown';
       const date = normalizeToUtcIso(run.date || '', state.timezone);
       const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
-      const contentXml = generateInlineCriticContent(run.innerRuns, run.text, run, state, options, bibEntries, citeprocEngine);
+      const contentXml = insertedContent(state, () => generateInlineCriticContent(run.innerRuns, run.text, run, state, options, bibEntries, citeprocEngine));
       xml += '<w:ins w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + contentXml + '</w:ins>';
     } else if (run.type === 'critic_del') {
       const author = run.author || options?.authorName || 'Unknown';
       const date = normalizeToUtcIso(run.date || '', state.timezone);
       const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
-      const deletedXml = generateDeletedCriticContent(run.innerRuns, run.text, run, {}, state.tableRunRPrExtra || undefined, state.warnings);
+      const deletedXml = generateDeletedCriticContent(run.innerRuns, run.text, run, {}, state.tableRunRPrExtra || undefined, state.warnings, state);
       xml += '<w:del w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + deletedXml + '</w:del>';
     } else if (run.type === 'critic_sub') {
       const author = run.author || options?.authorName || 'Unknown';
       const date = normalizeToUtcIso(run.date || '', state.timezone);
       const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
-      const deletedXml = generateDeletedCriticContent(run.oldRuns, run.text, run, {}, state.tableRunRPrExtra || undefined, state.warnings);
-      const insertedXml = generateInlineCriticContent(run.newRuns, run.newText || '', run, state, options, bibEntries, citeprocEngine);
+      const deletedXml = generateDeletedCriticContent(run.oldRuns, run.text, run, {}, state.tableRunRPrExtra || undefined, state.warnings, state);
+      const insertedXml = insertedContent(state, () => generateInlineCriticContent(run.newRuns, run.newText || '', run, state, options, bibEntries, citeprocEngine));
       xml += '<w:del w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + deletedXml + '</w:del>';
       xml += '<w:ins w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + insertedXml + '</w:ins>';
     } else if (run.type === 'critic_highlight') {
@@ -5518,38 +5572,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         xml += '<w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:commentReference w:id=\"' + rid + '\"/></w:r>';
       }
     } else if (run.type === 'footnote_ref') {
-      const label = run.footnoteLabel || '';
-      let noteId = state.footnoteLabelToId.get(label);
-      const isRepeat = noteId !== undefined;
-      if (!isRepeat) {
-        noteId = state.footnoteId++;
-        state.footnoteLabelToId.set(label, noteId);
-      }
-      const noteExtraRPr = state.tableRunRPrExtra || '';
-      const refStyleName = state.notesMode === 'endnotes' ? 'EndnoteReference' : 'FootnoteReference';
-      if (isRepeat) {
-        // Subsequent reference: emit NOTEREF cross-reference field pointing to
-        // the bookmark around the original footnote's self-ref mark.
-        state.footnoteCrossRefLabels.add(label);
-        const bkmkName = footnoteBookmarkName(noteId!);
-        const rPr = '<w:rPr><w:rStyle w:val="' + refStyleName + '"/>' + noteExtraRPr + '</w:rPr>';
-        xml += '<w:r>' + rPr + '<w:fldChar w:fldCharType="begin"/></w:r>';
-        xml += '<w:r>' + rPr + '<w:instrText xml:space="preserve"> NOTEREF ' + bkmkName + ' \\f \\h </w:instrText></w:r>';
-        xml += '<w:r>' + rPr + '<w:fldChar w:fldCharType="separate"/></w:r>';
-        xml += '<w:r>' + rPr + '<w:t>' + noteId + '</w:t></w:r>';
-        xml += '<w:r>' + rPr + '<w:fldChar w:fldCharType="end"/></w:r>';
-        if (state.notesMode === 'endnotes') { state.hasEndnotes = true; }
-        else { state.hasFootnotes = true; }
-      } else {
-        // First reference: emit normal footnoteReference / endnoteReference
-        if (state.notesMode === 'endnotes') {
-          xml += '<w:r><w:rPr><w:rStyle w:val="EndnoteReference"/>' + noteExtraRPr + '</w:rPr><w:endnoteReference w:id="' + noteId + '"/></w:r>';
-          state.hasEndnotes = true;
-        } else {
-          xml += '<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/>' + noteExtraRPr + '</w:rPr><w:footnoteReference w:id="' + noteId + '"/></w:r>';
-          state.hasFootnotes = true;
-        }
-      }
+      xml += noteReferenceXml(run.footnoteLabel || '', state, state.noteRevision);
     } else if (run.type === 'citation') {
       const result = generateCitation(run, bibEntries || new Map(), citeprocEngine, state.citationIds, state.citationItemIds, state.tableRunRPrExtra || undefined);
       xml += result.xml;
@@ -7076,45 +7099,71 @@ export async function convertMdToDocx(
     state.indentMode = state.firstLineIndentTwips !== undefined;
   }
 
-  // Pre-scan all tokens (main document + footnotes) for citation keys so
-  // updateItems() registers only cited entries.  This ensures numeric styles
-  // assign citation numbers by document order, not bib-file order.
-  // Footnote bodies are scanned at the point their [^ref] appears (not after
-  // the main walk) so footnote citations get document-order numbering too.
-  if (bibEntries) {
-    const seenFootnotes = new Set<string>();
-    const collectFromRuns = (runs: MdRun[]) => {
-      for (const run of runs) {
-        if (run.type === 'citation' && run.keys) {
-          for (const k of run.keys) {
-            if (bibEntries.has(k)) state.citedKeys.add(k);
-          }
+  // Pre-scan the note references and the citations that become fields, in
+  // the order generateRuns reaches them. Deleted CriticMarkup content
+  // ({--...--} innerRuns, {~~old~>...~~} oldRuns) renders citations as
+  // literal deleted text, not fields, so its keys aren't registered.
+  {
+    type Reached = { label: string; tracked: boolean } | { keys: string[] };
+    const collectReached = (runs: MdRun[] | undefined, reached: Reached[], tracked: boolean, deleted: boolean) => {
+      for (const run of runs ?? []) {
+        if (run.type === 'footnote_ref') {
+          if (run.footnoteLabel) reached.push({ label: run.footnoteLabel, tracked });
+        } else if (run.type === 'citation') {
+          if (run.keys && !deleted) reached.push({ keys: run.keys });
+        } else if (run.type === 'critic_sub') {
+          collectReached(run.oldRuns, reached, true, true);
+          collectReached(run.newRuns, reached, true, deleted);
+        } else {
+          collectReached(run.innerRuns, reached, tracked || run.type === 'critic_add' || run.type === 'critic_del', deleted || run.type === 'critic_del');
         }
-        if (run.type === 'footnote_ref' && run.footnoteLabel && !seenFootnotes.has(run.footnoteLabel)) {
-          seenFootnotes.add(run.footnoteLabel);
-          const bodyText = footnoteDefs.get(run.footnoteLabel);
-          if (bodyText) collectCitedKeys(parseMd(bodyText));
-        }
-        // Deleted CriticMarkup content ({--...--} innerRuns, {~~old~>...~~}
-        // oldRuns) renders citations as literal deleted text, not fields —
-        // don't register those keys with citeproc or the bibliography.
-        if (run.innerRuns && run.type !== 'critic_del') collectFromRuns(run.innerRuns);
-        if (run.newRuns) collectFromRuns(run.newRuns);
       }
     };
-    const collectCitedKeys = (tokenList: MdToken[]) => {
+    const reachedIn = (tokenList: MdToken[]) => {
+      const reached: Reached[] = [];
       for (const token of tokenList) {
-        collectFromRuns(token.runs);
-        if (token.rows) {
-          for (const row of token.rows) {
-            for (const cell of row.cells) {
-              collectFromRuns(cell.runs);
-            }
-          }
+        collectReached(token.runs, reached, false, false);
+        for (const row of token.rows ?? []) {
+          for (const cell of row.cells) collectReached(cell.runs, reached, false, false);
         }
       }
+      return reached;
     };
-    collectCitedKeys(tokens);
+    // Register only cited keys, in document order, so numeric styles number
+    // citations by it, not by bib-file order. A note's citations come where
+    // the reference that owns the note is.
+    const registerKeys = (keys: string[]) => {
+      for (const k of keys) {
+        if (bibEntries?.has(k)) state.citedKeys.add(k);
+      }
+    };
+    const scannedNotes = new Set<string>();
+    const scanNote = (label: string) => {
+      if (!bibEntries || scannedNotes.has(label)) return;
+      scannedNotes.add(label);
+      const bodyText = footnoteDefs.get(label);
+      if (!bodyText) return;
+      for (const item of reachedIn(parseMd(bodyText))) {
+        if ('keys' in item) registerKeys(item.keys);
+        else scanNote(item.label);
+      }
+    };
+    // A reference outside any tracked change owns its note when there is one
+    // (see noteReferenceXml). Word numbers notes in the order of the
+    // references that own them, so number each note where its owner is, and
+    // a cross-reference's cached number is the one Word shows.
+    const reached = reachedIn(tokens);
+    const untracked = new Set(reached.flatMap(item => 'label' in item && !item.tracked ? [item.label] : []));
+    for (const item of reached) {
+      if ('keys' in item) {
+        registerKeys(item.keys);
+      } else if (!state.footnoteLabelToId.has(item.label) && !(item.tracked && untracked.has(item.label))) {
+        state.footnoteLabelToId.set(item.label, state.footnoteId++);
+        scanNote(item.label);
+      }
+    }
+    state.untrackedNoteLabels = untracked;
+    state.trackedNoteReference = reached.some(item => 'label' in item && item.tracked);
   }
 
   // Register only cited keys with citeproc so citation numbers reflect
@@ -7378,7 +7427,7 @@ export async function convertMdToDocx(
     customProps.push(...zoteroCustomProps(frontmatter));
   }
   customProps.push(...commentIdMappingProps(state.commentIdMap));
-  customProps.push(...footnoteIdMappingProps(state.footnoteLabelToId));
+  customProps.push(...footnoteIdMappingProps(state.footnoteLabelToId, !!state.trackedNoteReference));
   customProps.push(...footnoteCrossRefProps(state.footnoteCrossRefLabels, state.footnoteLabelToId, state.notesMode));
   customProps.push(...codeBlockLanguageProps(state.codeBlockLanguages));
   customProps.push(...codeBlockStylingProps(frontmatter));

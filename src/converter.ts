@@ -2358,6 +2358,9 @@ export async function extractDocumentContent(
   let inNoterefField = false;
   let noterefInfo: { noteId: string; noteKind: 'footnote' | 'endnote' } | undefined;
   let fieldInstrParts: string[] = [];
+  // A deleted field's instruction, read only for NOTEREF: zoteroCitations
+  // counts the w:instrText ones alone
+  let deletedInstrParts: string[] = [];
   let currentCitation: ZoteroCitation | undefined;
   let citationTextParts: string[] = [];
   let currentHref: string | undefined;
@@ -2388,6 +2391,7 @@ export async function extractDocumentContent(
           if (fldType === 'begin') {
             inField = true;
             fieldInstrParts = [];
+            deletedInstrParts = [];
             inCitationField = false;
             inBibliographyField = false;
             inNoterefField = false;
@@ -2395,6 +2399,7 @@ export async function extractDocumentContent(
           } else if (fldType === 'separate') {
             if (inField) {
               const instrText = fieldInstrParts.join('');
+              const deletedInstrText = deletedInstrParts.join('');
               if (instrText.includes('ZOTERO_ITEM')) {
                 inCitationField = true;
                 currentCitation = zoteroCitations[citationIdx++];
@@ -2414,12 +2419,12 @@ export async function extractDocumentContent(
                     };
                   } catch { /* ignore parse errors */ }
                 }
-              } else if (instrText.includes('NOTEREF')) {
+              } else if (instrText.includes('NOTEREF') || (!instrText && deletedInstrText.includes('NOTEREF'))) {
                 // Cross-reference to a footnote/endnote bookmark.
                 // Always suppress display text for NOTEREF fields (even when
                 // the mapping is unavailable) to prevent stray "1" literals.
                 inNoterefField = true;
-                const noterefMatch = instrText.match(/NOTEREF\s+(\S+)/);
+                const noterefMatch = (instrText || deletedInstrText).match(/NOTEREF\s+(\S+)/);
                 if (noterefMatch && crossRefMap) {
                   const bkmkName = noterefMatch[1];
                   const resolved = crossRefMap.get(bkmkName);
@@ -2466,6 +2471,8 @@ export async function extractDocumentContent(
           }
         } else if (key === 'w:instrText' && inField) {
           fieldInstrParts.push(nodeText(asXmlNodes(node['w:instrText'])));
+        } else if (key === 'w:delInstrText' && inField) {
+          deletedInstrParts.push(nodeText(asXmlNodes(node['w:delInstrText'])));
         } else if (key in REVISION_ELEMENTS) {
           const author = getAttr(node, 'author');
           const date = getAttr(node, 'date');
@@ -3145,16 +3152,18 @@ function spanJoin(item: InlineRevisionItem): { join: SpanJoin; literal: Set<stri
  * one, ! turns a following [ into an image. Whitespace on either side, or
  * letters and digits on both, is safe. So is a citation, link, equation, code
  * span or emphasis that ends before sentence punctuation, or one that starts
- * after an opening parenthesis, a hyphen or a slash, and a footnote reference
- * after a word or the end of a sentence.
+ * after an opening parenthesis, a hyphen or a slash. A footnote reference
+ * joins after a word, the end of a sentence, a closing quote, or a citation,
+ * equation, code span or emphasis, and a closing bracket before a letter or
+ * digit, which can't open a link: before[^1]after.
  */
 function canJoinSpans(beforeEnd: string, after: string): boolean {
   const a = beforeEnd.slice(-1);
   const b = after.charAt(0);
   if (!a || !b) return false;
   if (/\s/.test(a) || /\s/.test(b)) return true;
-  if (/[\p{L}\p{N}]/u.test(a) && /[\p{L}\p{N}]/u.test(b)) return true;
-  if (after.startsWith('[^') && /[\p{L}\p{N}.,;:?)]/u.test(a)) return true;
+  if (/[\p{L}\p{N}\]]/u.test(a) && /[\p{L}\p{N}]/u.test(b)) return true;
+  if (after.startsWith('[^') && /[\p{L}\p{N}.,;:?)\]$*`"'\u2019\u201D]/u.test(a)) return true;
   return (/[\])$*`]/.test(a) && /[.,;:!?)]/.test(b)) || (/[(\-/]/.test(a) && /[[$*`]/.test(b));
 }
 
@@ -3221,10 +3230,20 @@ function commentSetsEqual(a: Set<string>, b: Set<string>): boolean {
   return true;
 }
 
-type SubstitutionItem = ContentItem & { type: 'text' | 'citation' | 'math' };
+type SubstitutionItem = ContentItem & { type: 'text' | 'citation' | 'math' | 'footnote_ref' };
+
+function isSubstitutionItem(item: ContentItem | undefined): item is SubstitutionItem {
+  return !!item && (item.type === 'text' || item.type === 'citation' || item.type === 'math' || item.type === 'footnote_ref');
+}
+
+/** A note reference as Markdown, under the label import assigned its note. */
+function footnoteRefText(item: ContentItem & { type: 'footnote_ref' }, noteLabels?: Map<string, string>): string {
+  return '[^' + (noteLabels?.get(item.noteKind + ':' + item.noteId) ?? item.noteId) + ']';
+}
 
 /** One item of a substitution's side as Markdown, after `precedingText`. */
-function substitutionItemText(item: SubstitutionItem, precedingText: string): string {
+function substitutionItemText(item: SubstitutionItem, precedingText: string, noteLabels?: Map<string, string>): string {
+  if (item.type === 'footnote_ref') return footnoteRefText(item, noteLabels);
   if (item.type === 'text') {
     const text = wrapWithFormatting(item.text, item.formatting);
     return item.href ? `[${text}](${formatHrefForMarkdown(item.href)})` : text;
@@ -3254,11 +3273,12 @@ function tryRenderSubstitution(
   deletion: SubstitutionItem,
   addition: SubstitutionItem,
   precedingText: string,
+  noteLabels?: Map<string, string>,
 ): string | null {
   const display = (item: SubstitutionItem) => item.type === 'math' && item.display;
   if (deletion.type !== addition.type && (display(deletion) || display(addition))) return null;
-  const oldText = substitutionItemText(deletion, precedingText);
-  const newText = substitutionItemText(addition, precedingText);
+  const oldText = substitutionItemText(deletion, precedingText, noteLabels);
+  const newText = substitutionItemText(addition, precedingText, noteLabels);
   if (oldText && newText && substitutionHolds(oldText, newText)) {
     return '{~~' + oldText + '~>' + newText + '~~}';
   }
@@ -3289,20 +3309,21 @@ function renderSubstitutionRun(
   end: number,
   precedingText: string,
   eligible: (item: ContentItem) => boolean,
+  noteLabels?: Map<string, string>,
 ): { text: string; nextIndex: number } | undefined {
   const first = segment[start];
-  const revision = first.type === 'text' || first.type === 'citation' || first.type === 'math' ? first.revision : undefined;
+  const revision = isSubstitutionItem(first) ? first.revision : undefined;
   if (!revision) return undefined;
   const side = (item: ContentItem | undefined, type: RevisionInfo['type']): item is SubstitutionItem =>
-    !!item && (item.type === 'text' || item.type === 'citation' || item.type === 'math')
+    isSubstitutionItem(item)
     && item.revision?.type === type && item.revision.author === revision.author && item.revision.date === revision.date
     && eligible(item);
   let k = start;
   let oldText = '';
-  while (k < end && side(segment[k], 'deletion')) oldText += substitutionItemText(segment[k++] as SubstitutionItem, precedingText + oldText);
+  while (k < end && side(segment[k], 'deletion')) oldText += substitutionItemText(segment[k++] as SubstitutionItem, precedingText + oldText, noteLabels);
   const deletions = k - start;
   let newText = '';
-  while (k < end && side(segment[k], 'addition')) newText += substitutionItemText(segment[k++] as SubstitutionItem, precedingText + newText);
+  while (k < end && side(segment[k], 'addition')) newText += substitutionItemText(segment[k++] as SubstitutionItem, precedingText + newText, noteLabels);
   const additions = k - start - deletions;
   if (deletions === 0 || additions === 0 || deletions + additions <= 2 || !oldText || !newText) return undefined;
   if (!substitutionHolds(oldText, newText)) return undefined;
@@ -3527,22 +3548,22 @@ function renderInlineRange(
     // Detect substitution: a deletion followed immediately by an addition
     // with identical author and date. Skip if either item has comments to
     // avoid unbalancing comment markers.
-    if ((item.type === 'text' || item.type === 'citation' || item.type === 'math') && item.revision?.type === 'deletion' && item.commentIds.size === 0) {
-      const run = renderSubstitutionRun(segment, i, segmentEnd, out, candidate => candidate.type !== 'para' && 'commentIds' in candidate && candidate.commentIds.size === 0);
+    if (isSubstitutionItem(item) && item.revision?.type === 'deletion' && item.commentIds.size === 0) {
+      const run = renderSubstitutionRun(segment, i, segmentEnd, out, candidate => candidate.type !== 'para' && 'commentIds' in candidate && candidate.commentIds.size === 0, renderOpts?.noteLabels);
       if (run) {
         out += run.text;
         i = run.nextIndex;
         continue;
       }
       const next = segment[i + 1];
-      if (next && (next.type === 'text' || next.type === 'citation' || next.type === 'math') &&
+      if (isSubstitutionItem(next) &&
           next.revision?.type === 'addition' &&
           next.revision.author === item.revision.author &&
           next.revision.date === item.revision.date &&
           next.commentIds.size === 0 &&
           pairStandsAlone(segment, i)) {
 
-        const result = tryRenderSubstitution(item, next, out);
+        const result = tryRenderSubstitution(item, next, out, renderOpts?.noteLabels);
         if (result !== null) {
           out += result;
           i += 2;
@@ -3575,10 +3596,8 @@ function renderInlineRange(
       continue;
     }
 
-    if (item.type === 'footnote_ref') {
-      const noteKey = item.noteKind + ':' + item.noteId;
-      const label = renderOpts?.noteLabels?.get(noteKey) ?? item.noteId;
-      [out, lastSpan] = appendRevised(out, `[^${label}]`, item, lastSpan);
+    if (item.type === 'footnote_ref' && item.commentIds.size === 0) {
+      [out, lastSpan] = appendRevised(out, footnoteRefText(item, renderOpts?.noteLabels), item, lastSpan);
       i++;
       continue;
     }
@@ -3627,20 +3646,27 @@ function renderInlineRange(
       continue;
     }
 
-    if (item.type !== 'text') {
+    if (item.type !== 'text' && item.type !== 'footnote_ref') {
       i++;
       continue;
     }
 
-    if (item.commentIds.size > 0) {
+    // A note reference gets here only in a comment's range, which it shares with text
+    if (item.type === 'footnote_ref' || item.commentIds.size > 0) {
       const commentSet = item.commentIds;
-      const groupedCommentText: string[] = [];
+      let anchorText = '';
+      let anchorSpan: RevisionSpan | undefined;
       let j = i;
 
       while (j < segment.length) {
         const seg = segment[j];
-        if (seg.type !== 'text' || !commentSetsEqual(seg.commentIds, commentSet)) {
+        if ((seg.type !== 'text' && seg.type !== 'footnote_ref') || !commentSetsEqual(seg.commentIds, commentSet)) {
           break;
+        }
+        if (seg.type === 'footnote_ref') {
+          [anchorText, anchorSpan] = appendRevised(anchorText, footnoteRefText(seg, renderOpts?.noteLabels), seg, anchorSpan);
+          j++;
+          continue;
         }
         // IMPORTANT: Do NOT suppress highlights here. The outer {==...==} is CriticMarkup
         // comment syntax, while ==text== is color-highlight syntax. They are semantically
@@ -3652,12 +3678,10 @@ function renderInlineRange(
             segText = `[${segText}](${formatHrefForMarkdown(seg.href)})`;
           }
         }
-        segText = wrapWithRevision(segText, seg.revision);
-        groupedCommentText.push(segText);
+        [anchorText, anchorSpan] = appendRevised(anchorText, segText, seg, anchorSpan);
         j++;
       }
 
-      const anchorText = groupedCommentText.join('');
       if (anchorText) {
         out += `{==${anchorText}==}`;
       }
@@ -3781,15 +3805,15 @@ function renderInlineRangeWithIds(
     // Detect substitution: a deletion followed immediately by an addition
     // with identical author and date. Skip if comment context differs to
     // avoid unbalancing comment markers.
-    if ((item.type === 'text' || item.type === 'citation' || item.type === 'math') && item.revision?.type === 'deletion') {
-      const run = renderSubstitutionRun(segment, i, segmentEnd, out, candidate => candidate.type !== 'para' && 'commentIds' in candidate && commentSetsEqual(candidate.commentIds, prevCommentIds));
+    if (isSubstitutionItem(item) && item.revision?.type === 'deletion') {
+      const run = renderSubstitutionRun(segment, i, segmentEnd, out, candidate => candidate.type !== 'para' && 'commentIds' in candidate && commentSetsEqual(candidate.commentIds, prevCommentIds), noteLabels);
       if (run) {
         out += run.text;
         i = run.nextIndex;
         continue;
       }
       const next = segment[i + 1];
-      if (next && (next.type === 'text' || next.type === 'citation' || next.type === 'math') &&
+      if (isSubstitutionItem(next) &&
           next.revision?.type === 'addition' &&
           next.revision.author === item.revision.author &&
           next.revision.date === item.revision.date &&
@@ -3797,7 +3821,7 @@ function renderInlineRangeWithIds(
           commentSetsEqual(next.commentIds, prevCommentIds) &&
           pairStandsAlone(segment, i)) {
 
-        const result = tryRenderSubstitution(item, next, out);
+        const result = tryRenderSubstitution(item, next, out, noteLabels);
         if (result !== null) {
           out += result;
           i += 2;
@@ -3869,9 +3893,7 @@ function renderInlineRangeWithIds(
         }
       }
       prevCommentIds = new Set(currentIds);
-      const noteKey = item.noteKind + ':' + item.noteId;
-      const label = noteLabels?.get(noteKey) ?? item.noteId;
-      [out, lastSpan] = appendRevised(out, `[^${label}]`, item, lastSpan);
+      [out, lastSpan] = appendRevised(out, footnoteRefText(item, noteLabels), item, lastSpan);
       i++;
       continue;
     }
