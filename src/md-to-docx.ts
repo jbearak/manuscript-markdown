@@ -568,6 +568,8 @@ function footnoteRefRule(state: StateInline, silent: boolean): boolean {
   if (!silent) {
     const token = pushManuscriptToken(state, 'footnote_ref', '', 0);
     token.footnoteLabel = label;
+    // highlightContentRuns reads where the parser found references
+    state.env?.noteReferences?.push({ src: state.src, start, end: end + 1, label });
   }
   state.pos = end + 1;
   return true;
@@ -820,6 +822,16 @@ function createMarkdownIt(): MarkdownIt {
   md.inline.ruler.before('emphasis', 'footnote_ref', footnoteRefRule);
   md.inline.ruler.before('emphasis', 'citation', citationRule);
   md.inline.ruler.before('emphasis', 'math', mathRule);
+  // A note body parsed on its own resolves reference links with the
+  // document's definitions too, after its own (see parseMd)
+  md.core.ruler.after('block', 'document_link_definitions', state => {
+    const definitions: Record<string, unknown> | undefined = state.env.documentLinkDefinitions;
+    if (!definitions) return;
+    const references: Record<string, unknown> = state.env.references ??= {};
+    for (const [label, definition] of Object.entries(definitions)) {
+      if (!(label in references)) references[label] = definition;
+    }
+  });
 
   return md;
 }
@@ -938,6 +950,49 @@ function parseCriticInnerRuns(content: string): MdRun[] {
   const md = getCriticInnerMarkdownIt();
   const tokens = md.parseInline(content, {});
   return normalizeCriticInnerRuns(convertInlineTokens(tokens));
+}
+
+/** The link definitions of the document parseMd is converting, so a scan of
+ *  literal content resolves reference links and images as the document does. */
+let documentReferences: unknown;
+
+/** `convert` with `references` as the document's link definitions. */
+function withDocumentReferences<T>(references: unknown, convert: () => T): T {
+  const saved = documentReferences;
+  documentReferences = references;
+  try {
+    return convert();
+  } finally {
+    documentReferences = saved;
+  }
+}
+
+let _cachedScanMd: MarkdownIt | undefined;
+
+/**
+ * A format highlight's content as runs, when it holds a note reference.
+ * The content exports as literal text, but a reference the document's parser
+ * finds in it, so not escaped or in a code span or a comment, keeps its note:
+ * ==a[^1]==. One in an image's alt text, which the parser reads as a source
+ * of its own, stays text like the alt, and so does one in nested
+ * CriticMarkup, which exports as literal text with the rest of the content.
+ */
+function highlightContentRuns(content: string): MdRun[] | undefined {
+  const env: { references: unknown; noteReferences: { src: string; start: number; end: number; label: string }[] } =
+    { references: documentReferences, noteReferences: [] };
+  (_cachedScanMd ??= createMarkdownIt()).parseInline(content, env);
+  const references = env.noteReferences.filter(reference => reference.src === content);
+  if (references.length === 0) return undefined;
+  const runs: MdRun[] = [];
+  let last = 0;
+  for (const { start, end, label } of references.sort((a, b) => a.start - b.start)) {
+    if (start < last) continue;
+    if (start > last) runs.push({ type: 'text', text: content.slice(last, start) });
+    runs.push({ type: 'footnote_ref', text: '', footnoteLabel: label });
+    last = end;
+  }
+  if (last < content.length) runs.push({ type: 'text', text: content.slice(last) });
+  return runs;
 }
 
 /** Deterministic bookmark name for a footnote/endnote cross-reference target.
@@ -1711,12 +1766,17 @@ function splitCriticDisplayMathParagraphs(tokens: MdToken[]): MdToken[] {
 }
 
 /** Parse Markdown into Word blocks, restoring protected revision boundaries before formatting. */
+/** The link definitions each parseMd result was parsed with, for a note body to share. */
+const linkDefinitionsOf = new WeakMap<MdToken[], Record<string, unknown>>();
+
 /**
  * `tableNumberFormat` is the table number formatting `markdown` got, if it
  * changed anything, so that `originalText` can get it too: quote spacing
  * matches the parsed lines to the source (see annotateBlockquoteSpacing).
+ * `linkDefinitions` are the document's, which a note body parsed on its own
+ * resolves its reference links and images with, after its own definitions.
  */
-export function parseMd(markdown: string, warnings?: string[], breaks = false, originalText?: string, tableNumberFormat?: TableNumberFormat): MdToken[] {
+export function parseMd(markdown: string, warnings?: string[], breaks = false, originalText?: string, tableNumberFormat?: TableNumberFormat, linkDefinitions?: Record<string, unknown>): MdToken[] {
   const md = createMarkdownIt();
   // Preserve explicit source semantics for blockquotes by disabling markdown-it
   // lazy continuation behavior (where a non-`>` line can be absorbed into a
@@ -1726,10 +1786,13 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
   const deLazified = deLazifyBlockquotes(gridProcessed);
   const wrapped = wrapBareLatexEnvironments(deLazified);
   const processed = preprocessCriticMarkup(wrapped);
-  const tokens = md.parse(processed, {});
+  const env: { references?: Record<string, unknown>; documentLinkDefinitions?: Record<string, unknown> } =
+    linkDefinitions ? { documentLinkDefinitions: linkDefinitions } : {};
+  const tokens = md.parse(processed, env);
 
   const processedLines = processed.split('\n');
-  const result = splitCriticParagraphs(splitCriticDisplayMathParagraphs(convertTokens(tokens, 0, 0, warnings, processedLines)));
+  const converted = withDocumentReferences(env.references, () => convertTokens(tokens, 0, 0, warnings, processedLines));
+  const result = splitCriticParagraphs(splitCriticDisplayMathParagraphs(converted));
   annotateBlockquoteBoundaries(result);
   // Table number formatting rewrites a table's lines, and CriticMarkup
   // preprocessing joins a span's lines, so the source gets both too for a
@@ -2100,13 +2163,14 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
     }
   }
 
-  applyCustomStyleSentinels(result, warnings);
+  applyCustomStyleSentinels(result, warnings, env.references);
 
+  if (env.references) linkDefinitionsOf.set(result, env.references);
   return result;
 }
 
 /** Convert <!-- style: X --> / <!-- /style --> HTML comments into customStyleOpen/customStyleClose sentinel tokens. */
-function applyCustomStyleSentinels(tokens: MdToken[], warnings?: string[]): void {
+function applyCustomStyleSentinels(tokens: MdToken[], warnings?: string[], references?: unknown): void {
   let activeStyle: string | undefined;
   for (let i = 0; i < tokens.length; i++) {
     if (tokens[i].type !== 'paragraph' || tokens[i].runs.length !== 1) continue;
@@ -2127,9 +2191,10 @@ function applyCustomStyleSentinels(tokens: MdToken[], warnings?: string[]): void
       openSentinel.blankLinesBefore = tokens[i].blankLinesBefore;
       openSentinel.blankLinesAfter = 0; // inline: no blank line between open sentinel and content
 
-      // Re-parse content to recover inline formatting (bold, italic, links, etc.)
+      // Re-parse content to recover inline formatting (bold, italic, links,
+      // etc.), with the document's link definitions for reference links
       const md = createMarkdownIt();
-      const contentRuns = convertInlineTokens(md.parseInline(content, {}));
+      const contentRuns = withDocumentReferences(references, () => convertInlineTokens(md.parseInline(content, { references })));
       const contentToken: MdToken = {
         type: 'paragraph',
         runs: contentRuns.length > 0 ? contentRuns : [{ type: 'text', text: content }]
@@ -2868,9 +2933,11 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
         let text = token.content;
         const criticMatch = text.match(/^\{==([\s\S]*)==\}$/);
         if (criticMatch) text = criticMatch[1];
+        const innerRuns = highlightContentRuns(text);
         runs.push({
           type: 'critic_highlight',
           text,
+          ...(innerRuns ? { innerRuns } : {}),
           highlight: true,
           highlightColor: token.color,
           ...formatStack,
@@ -2883,9 +2950,11 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
         let text = token.content;
         const criticMatch = text.match(/^\{==([\s\S]*)==\}$/);
         if (criticMatch) text = criticMatch[1];
+        const innerRuns = highlightContentRuns(text);
         runs.push({
           type: 'critic_highlight',
           text,
+          ...(innerRuns ? { innerRuns } : {}),
           highlight: true,
           ...formatStack,
           href: currentHref
@@ -5125,6 +5194,11 @@ function noteRelsXml(
   return xml;
 }
 
+/** The w:highlight property for a highlighted run, or nothing. */
+function highlightRPr(run: MdRun): string {
+  return run.highlight ? '<w:highlight w:val="' + (COLOR_TO_OOXML[run.highlightColor || 'yellow'] || 'yellow') + '"/>' : '';
+}
+
 export function generateRPr(run: MdRun, extraRPr?: string): string {
   const parts: string[] = [];
 
@@ -5133,10 +5207,7 @@ export function generateRPr(run: MdRun, extraRPr?: string): string {
   if (run.italic) parts.push('<w:i/>');
   if (run.strikethrough) parts.push('<w:strike/>');
   if (run.underline) parts.push('<w:u w:val="single"/>');
-  if (run.highlight) {
-    const color = COLOR_TO_OOXML[run.highlightColor || 'yellow'] || 'yellow';
-    parts.push('<w:highlight w:val="' + color + '"/>');
-  }
+  if (run.highlight) parts.push(highlightRPr(run));
   if (run.superscript) parts.push('<w:vertAlign w:val="superscript"/>');
   else if (run.subscript) parts.push('<w:vertAlign w:val="subscript"/>');
   if (extraRPr) parts.push(extraRPr);
@@ -5220,7 +5291,17 @@ function formatCriticInnerRuns(runs: MdRun[] | undefined, outer: MdRun, forced: 
       formatted.push(run);
       continue;
     }
-    if (run.type === 'math' || run.type === 'citation' || run.type === 'image' || run.type === 'footnote_ref') {
+    if (run.type === 'footnote_ref') {
+      // A note reference takes Word's reference style, so other outer
+      // formatting is not merged in, as outside CriticMarkup. A highlight
+      // marks a range, though, and covers the mark like its text.
+      const highlight = run.highlight || outer.highlight || forced.highlight;
+      formatted.push(highlight
+        ? { ...run, highlight: true, highlightColor: run.highlightColor || outer.highlightColor || forced.highlightColor }
+        : run);
+      continue;
+    }
+    if (run.type === 'math' || run.type === 'citation' || run.type === 'image') {
       // Citation visible text comes from the field result (CSL/fallback), so
       // outer formatting is not merged in — same as citations outside CriticMarkup.
       formatted.push(run);
@@ -5306,7 +5387,7 @@ function generateDeletedCriticContent(
       continue;
     }
     if (run.type === 'footnote_ref') {
-      xml += noteReferenceXml(run.footnoteLabel || '', state, 'deletion');
+      xml += noteReferenceXml(run.footnoteLabel || '', state, 'deletion', highlightRPr(run));
       continue;
     }
     if (run.type === 'citation') {
@@ -5345,7 +5426,7 @@ function insertedContent(state: DocxGenState, generate: () => string): string {
  * note only when no untracked reference does, so accepting or rejecting the
  * change can't take the note from a reference that stays.
  */
-function noteReferenceXml(label: string, state: DocxGenState, revision?: 'addition' | 'deletion'): string {
+function noteReferenceXml(label: string, state: DocxGenState, revision?: 'addition' | 'deletion', extraRPr = ''): string {
   let noteId = state.footnoteLabelToId.get(label);
   if (noteId === undefined) {
     noteId = state.footnoteId++;
@@ -5357,7 +5438,7 @@ function noteReferenceXml(label: string, state: DocxGenState, revision?: 'additi
   else state.hasFootnotes = true;
   const noteExtraRPr = state.tableRunRPrExtra || '';
   const refStyleName = state.notesMode === 'endnotes' ? 'EndnoteReference' : 'FootnoteReference';
-  const rPr = '<w:rPr><w:rStyle w:val="' + refStyleName + '"/>' + noteExtraRPr + '</w:rPr>';
+  const rPr = '<w:rPr><w:rStyle w:val="' + refStyleName + '"/>' + extraRPr + noteExtraRPr + '</w:rPr>';
   if (owns) {
     owned.add(label);
     const tag = state.notesMode === 'endnotes' ? 'w:endnoteReference' : 'w:footnoteReference';
@@ -5572,7 +5653,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         xml += '<w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:commentReference w:id=\"' + rid + '\"/></w:r>';
       }
     } else if (run.type === 'footnote_ref') {
-      xml += noteReferenceXml(run.footnoteLabel || '', state, state.noteRevision);
+      xml += noteReferenceXml(run.footnoteLabel || '', state, state.noteRevision, highlightRPr(run));
     } else if (run.type === 'citation') {
       const result = generateCitation(run, bibEntries || new Map(), citeprocEngine, state.citationIds, state.citationItemIds, state.tableRunRPrExtra || undefined);
       xml += result.xml;
@@ -7143,7 +7224,7 @@ export async function convertMdToDocx(
       scannedNotes.add(label);
       const bodyText = footnoteDefs.get(label);
       if (!bodyText) return;
-      for (const item of reachedIn(parseMd(bodyText))) {
+      for (const item of reachedIn(parseMd(bodyText, undefined, false, undefined, undefined, linkDefinitionsOf.get(tokens)))) {
         if ('keys' in item) registerKeys(item.keys);
         else scanNote(item.label);
       }
@@ -7199,7 +7280,7 @@ export async function convertMdToDocx(
       continue;
     }
     // Parse the definition body into tokens and generate OOXML
-    const bodyTokens = parseMd(bodyText, state.warnings, frontmatter.breaks ?? false);
+    const bodyTokens = parseMd(bodyText, state.warnings, frontmatter.breaks ?? false, undefined, undefined, linkDefinitionsOf.get(tokens));
     applyCustomStyleSentinels(bodyTokens, state.warnings);
     // Generate paragraph OOXML for the note body
     const selfRefTag = state.notesMode === 'endnotes' ? 'w:endnoteRef' : 'w:footnoteRef';

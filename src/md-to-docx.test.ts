@@ -2976,6 +2976,26 @@ describe('Footnote OOXML structure', () => {
     expect(docRels).not.toContain('https://example.com');
   });
 
+  it('resolves a reference link in a footnote with a definition in the document', async () => {
+    const md = 'Text[^1] here.\n\n[^1]: See [example][ref] for details.\n\n[ref]: https://example.com';
+    const { docx } = await convertMdToDocx(md);
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docx);
+    const footnotesXml = await zip.file('word/footnotes.xml')!.async('string');
+    expect(footnotesXml).toContain('<w:hyperlink r:id="rId1">');
+    expect(footnotesXml).not.toContain('[ref]');
+    expect(await zip.file('word/_rels/footnotes.xml.rels')!.async('string')).toContain('https://example.com');
+  });
+
+  it('resolves a reference link in a footnote with the footnote\'s own definition first', async () => {
+    const md = 'Text[^1] here.\n\n[^1]: See [example][ref].\n\n    [ref]: https://local.example\n\n[ref]: https://global.example';
+    const { docx } = await convertMdToDocx(md);
+    const JSZip = (await import('jszip')).default;
+    const noteRelsXml = await (await JSZip.loadAsync(docx)).file('word/_rels/footnotes.xml.rels')!.async('string');
+    expect(noteRelsXml).toContain('https://local.example');
+    expect(noteRelsXml).not.toContain('https://global.example');
+  });
+
   it('footnote entries are sorted by ID regardless of definition order', async () => {
     // Definitions appear in reverse order (3, 2, 1) but references appear in order (1, 2, 3)
     const md = 'First[^a] second[^b] third[^c].\n\n[^c]: Third.\n\n[^b]: Second.\n\n[^a]: First.';
