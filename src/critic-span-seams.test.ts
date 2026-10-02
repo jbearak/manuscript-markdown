@@ -65,9 +65,22 @@ describe('one revision across citations, equations and formatting', () => {
   });
 
   it('keeps a footnote reference after a sentence in the span', () => {
-    // Export writes a reference inside an insertion as text, so this can't round-trip yet
+    // critic-footnotes.test.ts round-trips these through Word
     const note: ContentItem = { type: 'footnote_ref', noteId: '1', noteKind: 'footnote', commentIds: new Set(), revision: added };
     expect(render([text('more.'), note, text(' Then')])).toBe('{++more.[^1] Then++}');
+    expect(render([math('x'), note])).toBe('{++$x$[^1]++}');
+  });
+
+  it('keeps a footnote reference apart after text with a bracket of its own', () => {
+    const note: ContentItem = { type: 'footnote_ref', noteId: '1', noteKind: 'footnote', commentIds: new Set(), revision: added };
+    expect(render([text('see [a]'), note])).toBe('{++see [a]++}{++[^1]++}');
+    expect(render([text('Wow!'), note])).toBe('{++Wow!++}{++[^1]++}');
+  });
+
+  it('joins a footnote reference to a word after it, but not to a parenthesis that would make a link', () => {
+    const note: ContentItem = { type: 'footnote_ref', noteId: '1', noteKind: 'footnote', commentIds: new Set(), revision: added };
+    expect(render([text('before'), note, text('after')])).toBe('{++before[^1]after++}');
+    expect(render([text('before'), note, text('(x)')])).toBe('{++before[^1]++}{++(x)++}');
   });
 
   it.each([
