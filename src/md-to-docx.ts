@@ -9,6 +9,7 @@ import { isAbsolute, join, resolve } from 'path';
 import { parseBibtex, BibtexEntry } from './bibtex-parser';
 import { parseFrontmatter, maskFrontmatter, Frontmatter, noteTypeToNumber, type ColorScheme, type CustomStyleDef, parseColWidths, expandColWidths, colWidthsToPct } from './frontmatter';
 import { formatTableNumbers, parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping, type TableDigits, type TableDecimalMark, type TableDigitGrouping } from './table-number-format';
+import type { TableNumberFormat } from './table-metadata';
 import { alertColorsByScheme, getDefaultColorScheme } from './alert-colors';
 import { ZoteroBiblData, zoteroStyleFullId } from './converter';
 import { isGfmDisallowedRawHtml, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from './gfm';
@@ -88,6 +89,8 @@ export interface MdToken {
   ordered?: boolean;        // for list items
   bulletMarker?: '-' | '*' | '+'; // authored unordered-list marker for round-trip
   listContinuation?: ListContinuation; // parent list context for continuation paragraphs/blocks
+  sourceRange?: [number, number]; // lines [start, end) of the text parseMd parses that the token came from
+  blockquoteSpacing?: BlockquoteSpacing; // on a quote group's first token (see annotateBlockquoteSpacing)
   startNumber?: number;     // for ordered lists: first item's start number (when ≠ 1)
   taskChecked?: boolean;    // for GFM task list items
   alertType?: GfmAlertType; // for GFM alerts in blockquotes
@@ -995,11 +998,14 @@ function annotateBlockquoteBoundaries(tokens: MdToken[]): void {
     }
     const alertType = tokens[i].alertType;
     const level = tokens[i].level;
+    const listLevel = tokens[i].listContinuation?.level;
     const start = i;
     i++;
     // Continue the group while the next token has the same alertType/level
-    // AND is not an alertLead (which signals a new [!TYPE] marker group).
-    while (i < tokens.length && tokens[i].type === 'blockquote' && tokens[i].alertType === alertType && tokens[i].level === level && !tokens[i].alertLead) {
+    // and list depth AND is not an alertLead (which signals a new [!TYPE]
+    // marker group).
+    while (i < tokens.length && tokens[i].type === 'blockquote' && tokens[i].alertType === alertType && tokens[i].level === level
+      && tokens[i].listContinuation?.level === listLevel && !tokens[i].alertLead) {
       i++;
     }
     tokens[start].alertFirst = true;
@@ -1050,21 +1056,6 @@ export function detectListIndent(markdown: string): 'tab' | 'spaces' {
   const tabAfterMarker = /^[-*+]\t/m.test(markdown) || /^\d+\.\t/m.test(markdown);
   return (tabIndented || tabAfterMarker) ? 'tab' : 'spaces';
 }
-function parseBlockquoteLevel(line: string): number {
-  const stripped = line.replace(/^ {0,3}/, '');
-  let level = 0;
-  let j = 0;
-  while (j < stripped.length) {
-    if (stripped[j] === '>') {
-      level++;
-      j++;
-      if (stripped[j] === ' ') j++;
-      continue;
-    }
-    break;
-  }
-  return level;
-}
 
 function extractBulletMarkerFromSourceLine(line: string | undefined): '-' | '*' | '+' | undefined {
   if (!line) return undefined;
@@ -1075,152 +1066,166 @@ function extractBulletMarkerFromSourceLine(line: string | undefined): '-' | '*' 
   return marker === '-' || marker === '*' || marker === '+' ? marker : undefined;
 }
 
-export function computeBlockquoteGaps(markdown: string): Map<number, number> {
-  const gaps = new Map<number, number>();
-  const lines = markdown.split('\n');
-  const alertMarkerRe = /^ {0,3}(?:>\s*)+\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]/i;
-
-  // Identify blockquote group spans (start/end line indices).
-  // A new group starts when: (a) a '>' line follows a non-'>' line, or
-  // (b) a '>' line contains an alert [!TYPE] marker (except the very first
-  // line of a contiguous '>' run, which already starts a group).
-  const groups: Array<{ start: number; end: number }> = [];
-  let i = 0;
-  while (i < lines.length) {
-    if (/^ {0,3}>/.test(lines[i])) {
-      const runStart = i;
-      // First line of a contiguous '>' run always starts a group
-      let groupStart = i;
-      let groupLevel = parseBlockquoteLevel(lines[i]);
-      i++;
-      while (i < lines.length && /^ {0,3}>/.test(lines[i])) {
-        const level = parseBlockquoteLevel(lines[i]);
-        const startsAlertGroup = alertMarkerRe.test(lines[i]) && i > runStart;
-        const levelChanged = level !== groupLevel;
-        if (startsAlertGroup || levelChanged) {
-          // New group within the same '>' run when an alert marker starts or
-          // the effective nesting level changes.
-          groups.push({ start: groupStart, end: i - 1 });
-          groupStart = i;
-          groupLevel = level;
-        }
-        i++;
-      }
-      groups.push({ start: groupStart, end: i - 1 });
-    } else {
-      i++;
-    }
-  }
-
-  // Compute blank-line count between each pair of consecutive groups
-  for (let g = 0; g < groups.length - 1; g++) {
-    const afterEnd = groups[g].end + 1;
-    const nextStart = groups[g + 1].start;
-    let blankCount = 0;
-    for (let li = afterEnd; li < nextStart; li++) {
-      if (lines[li].trim() === '') {
-        blankCount++;
-      } else {
-        // Non-blank, non-blockquote content between groups — not a direct
-        // blockquote-to-blockquote gap; store -1 as sentinel.
-        blankCount = -1;
-        break;
-      }
-    }
-    gaps.set(g, blankCount);
-  }
-
-  return gaps;
+/** Blank lines around a quote group in the source (see annotateBlockquoteSpacing). */
+interface BlockquoteSpacing {
+  /** Blank lines to the next group, or -1 when other content sits between */
+  gapAfter?: number;
+  /** Blank lines before the group, after other content */
+  before?: number;
+  /** Blank lines after the group, before other content */
+  after?: number;
+  /** Whether an alert's marker line holds text, as in > [!NOTE] text */
+  alertInline?: boolean;
 }
 
-// Compute authored blank lines that appear *after* a blockquote group when the
-// next non-blank source line is regular (non-blockquote) content. This is used
-// only for MD→DOCX visual fidelity so callout→paragraph transitions preserve
-// explicit empty lines in Word.
-export function computeBlockquotePostContentBlankLines(markdown: string): Map<number, number> {
-  const blanksByGroup = new Map<number, number>();
-  const lines = markdown.split('\n');
-  const alertMarkerRe = /^ {0,3}(?:>\s*)+\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]/i;
+const BLOCKQUOTE_ALERT_MARKER_RE = /^(?:>\s*)+\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\](.*)$/i;
+const LIST_MARKERS_RE = /^\s*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*/;
+const BARE_QUOTE_LINE_RE = /^\s*(?:>\s*)+$/;
 
-  const groups: Array<{ start: number; end: number }> = [];
-  let i = 0;
-  while (i < lines.length) {
-    if (/^ {0,3}>/.test(lines[i])) {
-      const runStart = i;
-      let groupStart = i;
-      let groupLevel = parseBlockquoteLevel(lines[i]);
-      i++;
-      while (i < lines.length && /^ {0,3}>/.test(lines[i])) {
-        const level = parseBlockquoteLevel(lines[i]);
-        const startsAlertGroup = alertMarkerRe.test(lines[i]) && i > runStart;
-        const levelChanged = level !== groupLevel;
-        if (startsAlertGroup || levelChanged) {
-          groups.push({ start: groupStart, end: i - 1 });
-          groupStart = i;
-          groupLevel = level;
-        }
-        i++;
-      }
-      groups.push({ start: groupStart, end: i - 1 });
-    } else {
-      i++;
-    }
-  }
-
-  for (let g = 0; g < groups.length; g++) {
-    let li = groups[g].end + 1;
-    let blankCount = 0;
-    while (li < lines.length && lines[li].trim() === '') {
-      blankCount++;
-      li++;
-    }
-    if (li < lines.length && !/^ {0,3}>/.test(lines[li])) {
-      // Preserve explicit authored spacing before non-blockquote content,
-      // including zero-blank transitions (`> quote` immediately followed by
-      // a paragraph line), so DOCX→MD can reconstruct semantic boundaries.
-      blanksByGroup.set(g, blankCount);
-    }
-  }
-
-  return blanksByGroup;
+/** Whether `lines` occur in `source` at `at`. */
+function linesAt(source: string[], lines: string[], at: number): boolean {
+  return at >= 0 && at + lines.length <= source.length && lines.every((line, k) => source[at + k] === line);
 }
-// Compute per-blockquote-group alert marker style from source markdown.
-// true means `> [!TYPE] body`, false means marker-only line.
-export function computeBlockquoteAlertMarkerInlineByGroup(markdown: string): Map<number, boolean> {
-  const inlineByGroup = new Map<number, boolean>();
-  const lines = markdown.split('\n');
-  const alertMarkerRe = /^ {0,3}(?:>\s*)+\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\](.*)$/i;
 
-  let groupIndex = 0;
-  let i = 0;
-  while (i < lines.length) {
-    if (/^ {0,3}>/.test(lines[i])) {
-      const runStart = i;
-      let groupStart = i;
-      let groupLevel = parseBlockquoteLevel(lines[i]);
-      i++;
-      while (i < lines.length && /^ {0,3}>/.test(lines[i])) {
-        const level = parseBlockquoteLevel(lines[i]);
-        const startsAlertGroup = alertMarkerRe.test(lines[i]) && i > runStart;
-        const levelChanged = level !== groupLevel;
-        if (startsAlertGroup || levelChanged) {
-          const first = lines[groupStart].match(alertMarkerRe);
-          if (first) inlineByGroup.set(groupIndex, first[2].trim().length > 0);
-          groupIndex++;
-          groupStart = i;
-          groupLevel = level;
-        }
-        i++;
-      }
-      const first = lines[groupStart].match(alertMarkerRe);
-      if (first) inlineByGroup.set(groupIndex, first[2].trim().length > 0);
-      groupIndex++;
-    } else {
-      i++;
-    }
+/** Where `lines` first occur in `source` at or after `from`, or -1, given
+ *  where each line occurs in `source`. */
+function findLines(source: string[], lineIndex: Map<string, number[]>, lines: string[], from: number): number {
+  const candidates = lineIndex.get(lines[0]) ?? [];
+  let low = 0;
+  let high = candidates.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (candidates[mid] < from) low = mid + 1;
+    else high = mid;
   }
+  for (let k = low; k < candidates.length; k++) {
+    if (linesAt(source, lines, candidates[k])) return candidates[k];
+  }
+  return -1;
+}
 
-  return inlineByGroup;
+/**
+ * Record on each quote group's first token the blank lines around the group
+ * in the original source, which import restores (see the
+ * MANUSCRIPT_BLOCKQUOTE_* custom properties). The groups are the tokens' own
+ * (see annotateBlockquoteBoundaries), so spacing can't land on another
+ * quote. Each block's lines in `parsedLines`, the text parseMd parses, are
+ * found in order in `originalLines`, so a quote can't match the same text
+ * before the block above it, as in a code block. A group whose lines other
+ * preprocessing changed isn't found and gets no spacing.
+ */
+function annotateBlockquoteSpacing(tokens: MdToken[], parsedLines: string[], originalLines: string[]): void {
+  interface Group { first: MdToken; start: number; end: number; markerLine: boolean }
+  const groups: Array<Group | undefined> = [];
+  const lineIndex = new Map<string, number[]>();
+  originalLines.forEach((line, i) => {
+    const at = lineIndex.get(line);
+    if (at) at.push(i);
+    else lineIndex.set(line, [i]);
+  });
+  // The source line after the last block found
+  let cursor = 0;
+  // Source line minus parsed line where the last block was found, which holds
+  // for the next block unless preprocessing between them changed line counts
+  let offset = 0;
+  let parsedEnd = 0;
+  const find = (start: number, end: number): number => {
+    const lines = parsedLines.slice(start, end);
+    const at = start + offset;
+    // A block on the last one's lines, as the quote in - > q is, sits at its offset
+    const shared = start < parsedEnd;
+    parsedEnd = Math.max(parsedEnd, end);
+    const found = linesAt(originalLines, lines, at) && (shared || at >= cursor) ? at
+      : shared ? -1 : findLines(originalLines, lineIndex, lines, cursor);
+    if (found >= 0) {
+      cursor = Math.max(cursor, found + lines.length);
+      offset = found - start;
+    }
+    return found;
+  };
+  for (let t = 0; t < tokens.length; t++) {
+    if (tokens[t].type !== 'blockquote') {
+      const range = tokens[t].sourceRange;
+      if (range) find(range[0], range[1]);
+      continue;
+    }
+    if (!tokens[t].alertFirst) continue;
+    let start = Infinity;
+    let end = -Infinity;
+    for (let k = t; k < tokens.length && tokens[k].type === 'blockquote'; k++) {
+      const range = tokens[k].sourceRange;
+      if (range) {
+        start = Math.min(start, range[0]);
+        end = Math.max(end, range[1]);
+      }
+      if (tokens[k].alertLast) break;
+    }
+    const found = start < end ? find(start, end) : -1;
+    if (found < 0) {
+      groups.push(undefined);
+      continue;
+    }
+    groups.push({
+      first: tokens[t],
+      start: found,
+      end: found + end - start - 1,
+      // As in - > q: blank lines before it belong before the list item
+      markerLine: !originalLines[found].trimStart().startsWith('>'),
+    });
+  }
+  // A bare > line after a group's text stays in the group
+  groups.forEach((group, g) => {
+    if (!group) return;
+    const limit = groups[g + 1]?.start ?? originalLines.length;
+    while (group.end + 1 < limit && BARE_QUOTE_LINE_RE.test(originalLines[group.end + 1])) group.end++;
+  });
+  const blankRun = (from: number, step: 1 | -1) => {
+    let line = from;
+    while (line >= 0 && line < originalLines.length && originalLines[line].trim() === '') line += step;
+    return { count: Math.abs(line - from), line };
+  };
+  groups.forEach((group, g) => {
+    if (!group) return;
+    const previous = groups[g - 1];
+    const next = groups[g + 1];
+    const spacing: BlockquoteSpacing = {};
+    // Groups that share a line have nothing between them
+    const sharesPrevious = !!previous && group.start <= previous.end;
+    const sharesNext = !!next && next.start <= group.end;
+    const above = blankRun(group.start - 1, -1);
+    if (group.markerLine) spacing.before = 0;
+    else if (!sharesPrevious && above.line >= 0 && !(previous && above.line === previous.end)) spacing.before = above.count;
+    const below = blankRun(group.end + 1, 1);
+    if (sharesNext) spacing.gapAfter = 0;
+    else {
+      if (below.line < originalLines.length && !(next && !next.markerLine && below.line === next.start)) spacing.after = below.count;
+      if (next) spacing.gapAfter = !next.markerLine && below.line === next.start ? below.count : -1;
+    }
+    const alertMarker = originalLines[group.start].replace(LIST_MARKERS_RE, '').match(BLOCKQUOTE_ALERT_MARKER_RE);
+    if (alertMarker) spacing.alertInline = alertMarker[2].trim().length > 0;
+    group.first.blockquoteSpacing = spacing;
+  });
+}
+
+/** The spacing maps export stores as custom properties, by group index, from
+ *  the spacing annotateBlockquoteSpacing put on each group's first token. */
+function blockquoteSpacingMaps(tokens: MdToken[]) {
+  const maps = {
+    gaps: new Map<number, number>(),
+    before: new Map<number, number>(),
+    after: new Map<number, number>(),
+    alertInline: new Map<number, boolean>(),
+  };
+  for (const token of tokens) {
+    const spacing = token.blockquoteSpacing;
+    const group = token.blockquoteGroupIndex;
+    if (!spacing || group === undefined) continue;
+    if (spacing.gapAfter !== undefined) maps.gaps.set(group, spacing.gapAfter);
+    if (spacing.before !== undefined) maps.before.set(group, spacing.before);
+    if (spacing.after !== undefined) maps.after.set(group, spacing.after);
+    if (spacing.alertInline !== undefined) maps.alertInline.set(group, spacing.alertInline);
+  }
+  return maps;
 }
 
 // Assign a sequential blockquoteGroupIndex to each blockquote token so the
@@ -1257,49 +1262,6 @@ export function blockquoteGapProps(gaps: Map<number, number>): CustomPropEntry[]
     mapping[String(index)] = count;
   }
   return chunkCustomProps('MANUSCRIPT_BLOCKQUOTE_GAPS_', JSON.stringify(mapping));
-}
-export function computeBlockquotePreContentBlankLines(markdown: string): Map<number, number> {
-  const blanksByGroup = new Map<number, number>();
-  const lines = markdown.split('\n');
-  const alertMarkerRe = /^ {0,3}(?:>\s*)+\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]/i;
-
-  const groups: Array<{ start: number; end: number }> = [];
-  let i = 0;
-  while (i < lines.length) {
-    if (/^ {0,3}>/.test(lines[i])) {
-      const runStart = i;
-      let groupStart = i;
-      let groupLevel = parseBlockquoteLevel(lines[i]);
-      i++;
-      while (i < lines.length && /^ {0,3}>/.test(lines[i])) {
-        const level = parseBlockquoteLevel(lines[i]);
-        const startsAlertGroup = alertMarkerRe.test(lines[i]) && i > runStart;
-        const levelChanged = level !== groupLevel;
-        if (startsAlertGroup || levelChanged) {
-          groups.push({ start: groupStart, end: i - 1 });
-          groupStart = i;
-          groupLevel = level;
-        }
-        i++;
-      }
-      groups.push({ start: groupStart, end: i - 1 });
-    } else {
-      i++;
-    }
-  }
-
-  for (let g = 0; g < groups.length; g++) {
-    let li = groups[g].start - 1;
-    let blankCount = 0;
-    while (li >= 0 && lines[li].trim() === '') {
-      blankCount++;
-      li--;
-    }
-    if (li >= 0 && !/^ {0,3}>/.test(lines[li])) {
-      blanksByGroup.set(g, blankCount);
-    }
-  }
-  return blanksByGroup;
 }
 export function blockquoteAlertMarkerStyleProps(inlineByGroup: Map<number, boolean>): CustomPropEntry[] {
   if (inlineByGroup.size === 0) return [];
@@ -1655,7 +1617,12 @@ function splitCriticDisplayMathParagraphs(tokens: MdToken[]): MdToken[] {
 }
 
 /** Parse Markdown into Word blocks, restoring protected revision boundaries before formatting. */
-export function parseMd(markdown: string, warnings?: string[], breaks = false, originalText?: string): MdToken[] {
+/**
+ * `tableNumberFormat` is the table number formatting `markdown` got, if it
+ * changed anything, so that `originalText` can get it too: quote spacing
+ * matches the parsed lines to the source (see annotateBlockquoteSpacing).
+ */
+export function parseMd(markdown: string, warnings?: string[], breaks = false, originalText?: string, tableNumberFormat?: TableNumberFormat): MdToken[] {
   const md = createMarkdownIt();
   // Preserve explicit source semantics for blockquotes by disabling markdown-it
   // lazy continuation behavior (where a non-`>` line can be absorbed into a
@@ -1670,6 +1637,13 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
   const processedLines = processed.split('\n');
   const result = splitCriticParagraphs(splitCriticDisplayMathParagraphs(convertTokens(tokens, 0, 0, warnings, processedLines)));
   annotateBlockquoteBoundaries(result);
+  // Table number formatting rewrites a table's lines, and CriticMarkup
+  // preprocessing joins a span's lines, so the source gets both too for a
+  // quote holding either to match
+  const source = originalText !== undefined && tableNumberFormat
+    ? formatTableNumbers(originalText, tableNumberFormat).output
+    : originalText ?? markdown;
+  annotateBlockquoteSpacing(result, processedLines, preprocessCriticMarkup(source).split('\n'));
 
   // When breaks mode is enabled, treat all bare newlines as hard breaks
   if (breaks) {
@@ -2207,11 +2181,17 @@ function annotateBlockquoteAlert(tokens: MdToken[], level: number): MdToken[] {
       expanded.push(token);
       continue;
     }
+    // Each segment's own lines, from the line breaks before its runs
+    const range = token.sourceRange;
+    const lineOf = (runIndex: number) => range![0] + token.runs.slice(0, runIndex).filter(run => run.type === 'softbreak' || run.type === 'hardbreak').length;
+    const segmentRange = (start: number, end: number) => range
+      ? { sourceRange: [lineOf(start), end < token.runs.length ? lineOf(end) : range[1]] as [number, number] }
+      : {};
     // Content before the first marker becomes a plain paragraph
     if (markerIndices[0] > 0) {
       const preRuns = trimSoftbreaks(token.runs.slice(0, markerIndices[0]));
       if (preRuns.length > 0) {
-        expanded.push({ ...token, runs: preRuns });
+        expanded.push({ ...token, ...segmentRange(0, markerIndices[0]), runs: preRuns });
       }
     }
     // Each marker starts a new segment
@@ -2220,7 +2200,7 @@ function annotateBlockquoteAlert(tokens: MdToken[], level: number): MdToken[] {
       const end = m + 1 < markerIndices.length ? markerIndices[m + 1] : token.runs.length;
       const segRuns = trimSoftbreaks(token.runs.slice(start, end));
       if (segRuns.length > 0) {
-        expanded.push({ ...token, runs: segRuns });
+        expanded.push({ ...token, ...segmentRange(start, end), runs: segRuns });
       }
     }
   }
@@ -2321,6 +2301,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
   
   while (i < tokens.length) {
     const token = tokens[i];
+    const produced = result.length;
     
     switch (token.type) {
       case 'heading_open': {
@@ -2576,6 +2557,10 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
       default:
         i++;
         break;
+    }
+    // Tokens from a nested block keep the narrower range it gave them
+    if (token.map) {
+      for (let k = produced; k < result.length; k++) result[k].sourceRange ??= [token.map[0], token.map[1]];
     }
   }
   
@@ -2953,18 +2938,24 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
       const childSegments: Array<{ startIndex: number; order: number; items: MdToken[] }> = [];
       let childSegmentOrder = 0;
       let foundFirstParagraph = false;
+      // The item's own lines: its first paragraph's, or else its marker line
+      const itemMap = tokens[i].map;
+      let itemRange: [number, number] | undefined = itemMap ? [itemMap[0], itemMap[0] + 1] : undefined;
       for (let j = 0; j < itemTokens.length; j++) {
         if (itemTokens[j].type === 'paragraph_open') {
           const paragraphClose = findClosingToken(itemTokens, j, 'paragraph_close');
+          const paragraphMap = itemTokens[j].map;
           if (!foundFirstParagraph) {
             runs = processInlineChildren(itemTokens.slice(j + 1, paragraphClose));
             foundFirstParagraph = true;
+            if (paragraphMap) itemRange = [paragraphMap[0], paragraphMap[1]];
           } else {
             childSegments.push({
               startIndex: itemTokens[j].map?.[0] ?? j,
               order: childSegmentOrder++,
               items: [{
                 type: 'paragraph',
+                ...(paragraphMap ? { sourceRange: [paragraphMap[0], paragraphMap[1]] as [number, number] } : {}),
                 runs: processInlineChildren(itemTokens.slice(j + 1, paragraphClose)),
                 listContinuation: {
                   type: continuationType,
@@ -3025,6 +3016,7 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
         type: 'list_item',
         ordered,
         level,
+        ...(itemRange ? { sourceRange: itemRange } : {}),
         runs: taskInfo?.runs ?? runs,
         taskChecked: taskInfo?.checked,
         ...(authoredBulletMarker ? { bulletMarker: authoredBulletMarker } : {}),
@@ -6423,7 +6415,16 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   let sentinelLoIdx = 0, sentinelLcIdx = 0, sentinelPoIdx = 0, sentinelPcIdx = 0;
   let sentinelCsoIdx = 0, sentinelCscIdx = 0;
   const sentinelGaps: Record<string, number> = {};
-  for (const token of tokens) {
+  // Whether the list open at each level is ordered, so a quote in a list item
+  // can tell whether the next item continues its list or an ancestor's
+  const openListOrdered: boolean[] = [];
+  for (const [ti, token] of tokens.entries()) {
+    if (token.type === 'list_item') {
+      openListOrdered.length = token.level ?? 1;
+      openListOrdered[(token.level ?? 1) - 1] = !!token.ordered;
+    } else if (!token.listContinuation) {
+      openListOrdered.length = 0;
+    }
     // Any close sentinel directly preceding any open sentinel skips the open's break
     // to avoid an empty intermediate section that renders as a blank page.
     const prevWasClose: boolean = !!preserveCloseForNextToken;
@@ -6590,7 +6591,16 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       }
       body += generateParagraph(token, state, options, bibEntries, citeprocEngine);
     }
-    if (token.type === 'blockquote' && token.alertLast && token.blockquoteGroupIndex !== undefined) {
+    // An empty paragraph in a list ends it on import, so before more of the
+    // list, a quote in a list item keeps its spacing in the metadata alone.
+    // An item that starts another list, as 1. y does after - x, gets the
+    // empty paragraphs as after any quote.
+    const nextToken = tokens[ti + 1];
+    const nextLevel = nextToken?.level ?? 1;
+    const listGoesOn = !!token.listContinuation && (nextToken?.type === 'list_item'
+      ? nextLevel > token.listContinuation.level || openListOrdered[nextLevel - 1] === !!nextToken.ordered
+      : !!nextToken?.listContinuation);
+    if (token.type === 'blockquote' && token.alertLast && token.blockquoteGroupIndex !== undefined && !listGoesOn) {
       // Inter-blockquote gap: insert separators between consecutive blockquote
       // groups when the source markdown had blank lines between them.
       const interGap = state.blockquoteGaps.get(token.blockquoteGroupIndex) ?? 0;
@@ -6696,11 +6706,13 @@ export async function convertMdToDocx(
   // Numeric table formatting runs on the shared HTML/pipe/grid representation so
   // preview and DOCX export apply exactly the same transformations.
   bodyForParsing = preprocessGridTables(bodyForParsing);
-  const numberResult = formatTableNumbers(bodyForParsing, {
+  const tableNumberFormat: TableNumberFormat = {
     digits: frontmatter.tableDigits,
     decimalMark: frontmatter.tableDecimalMark,
     digitGrouping: frontmatter.tableDigitGrouping,
-  });
+  };
+  const numberResult = formatTableNumbers(bodyForParsing, tableNumberFormat);
+  const numbersFormatted = numberResult.output !== bodyForParsing;
   bodyForParsing = numberResult.output;
   parseWarnings.push(...numberResult.warnings);
 	for (const [label, noteBody] of footnoteDefs) {
@@ -6712,15 +6724,16 @@ export async function convertMdToDocx(
 		footnoteDefs.set(label, noteNumberResult.output);
 		parseWarnings.push(...noteNumberResult.warnings);
 	}
-  const tokens = parseMd(bodyForParsing, parseWarnings, frontmatter.breaks ?? false, maskFrontmatter(markdown));
+  const tokens = parseMd(bodyForParsing, parseWarnings, frontmatter.breaks ?? false, maskFrontmatter(markdown),
+    numbersFormatted ? tableNumberFormat : undefined);
 
-  // Compute inter-blockquote-group gap metadata from the original markdown
-  // source and annotate tokens with sequential group indices.
-  const blockquoteGaps = computeBlockquoteGaps(bodyWithoutFootnotes);
-  const blockquotePreContentBlankLines = computeBlockquotePreContentBlankLines(bodyWithoutFootnotes);
-  const blockquotePostContentBlankLines = computeBlockquotePostContentBlankLines(bodyWithoutFootnotes);
-  const blockquoteAlertMarkerInlineByGroup = computeBlockquoteAlertMarkerInlineByGroup(bodyWithoutFootnotes);
+  // Number quote groups and collect the source spacing parseMd recorded on them
   annotateBlockquoteGroupIndices(tokens);
+  const blockquoteSpacing = blockquoteSpacingMaps(tokens);
+  const blockquoteGaps = blockquoteSpacing.gaps;
+  const blockquotePreContentBlankLines = blockquoteSpacing.before;
+  const blockquotePostContentBlankLines = blockquoteSpacing.after;
+  const blockquoteAlertMarkerInlineByGroup = blockquoteSpacing.alertInline;
   const { beforeGaps: htmlCommentGaps, afterGaps: htmlCommentAfterGaps } = annotateHtmlCommentIndices(tokens);
 
   // Parse BibTeX if provided

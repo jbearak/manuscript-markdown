@@ -2982,6 +2982,124 @@ describe('Footnote round-trip', () => {
 });
 
 describe('List blockquote round-trip', () => {
+  async function roundTripBody(md: string): Promise<string> {
+    const { convertDocx } = await import('./converter');
+    const { docx } = await convertMdToDocx(md);
+    return (await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+  }
+
+  it('keeps the blank lines before a quote nested in a list item', async () => {
+    for (const md of [
+      '- x\n\n  > q',
+      '- x\n  > q',
+      '1. x\n\n   > q',
+      '- x\n  - y\n\n    > q',
+      '- x\n\n  > q\n- next',
+      '- x\n\n  > [!NOTE]\n  > q',
+    ]) {
+      expect(await roundTripBody(md)).toBe(md);
+    }
+  });
+
+  it('keeps an alert after a quote in the same list item separate', async () => {
+    const md = '- x\n\n  > a\n\n  > [!NOTE]\n  > b';
+    expect(await roundTripBody(md)).toBe(md);
+  });
+
+  it('keeps a top-level quote after a quote nested in a list separate', async () => {
+    const md = '- x\n  - y\n\n    > q\n\n> top';
+    expect(await roundTripBody(md)).toBe(md);
+  });
+
+  it('keeps later quote spacing when earlier quotes merge or code holds a > line', async () => {
+    // Word can't tell two adjacent quotes from one with two paragraphs, so
+    // they come back as one, but the spacing of later quotes must not shift
+    expect(await roundTripBody('> a\n\n> b\n\npara\n\n\n> c')).toBe('> a\n>\n> b\n\npara\n\n\n> c');
+    const fenced = '```\n> code\n```\n\npara\n\n\n> c';
+    expect(await roundTripBody(fenced)).toBe(fenced);
+    // Nor match the same text in a code block above it
+    const same = '```\n> c\n```\n\npara\n\n\n> c\n\n\nend';
+    expect(await roundTripBody(same)).toBe(same);
+    expect(await roundTripBody('- > n\n\n' + same)).toBe('- \n  > n\n\n' + same);
+    // Export ends a quote before a lazy line, so the line after it starts another
+    const lazy = '> a\nb\n> c\n\npara\n\n\n> d';
+    expect(await roundTripBody(lazy)).toBe(lazy);
+  });
+
+  it('keeps the spacing of a quote holding a table whose numbers export formats', async () => {
+    // The quote's table doesn't come back as a table, but the blank lines around it do
+    const table = '<table data-digits=1><tr><td>12.34</td></tr></table>';
+    expect(await roundTripBody('> a ' + table + '\n\n\np')).toMatch(/\n\n\np$/);
+    expect(await roundTripBody('- x\n\n  > ' + table + '\n\n\np')).toMatch(/^- x\n\n  > .*\n\n\np$/);
+  });
+
+  it('keeps later quote spacing after a quote on a list marker line or in another item', async () => {
+    // Import writes a quote that starts a list item on the line after the
+    // marker, but the quotes after it keep their spacing
+    expect(await roundTripBody('- > q\n\npara\n\n\n> tail')).toBe('- \n  > q\n\npara\n\n\n> tail');
+    expect(await roundTripBody('1. > q\n\n\n> tail')).toBe('1. \n   > q\n\n\n> tail');
+    // Quotes in two list items are two quotes, even with only blank lines between
+    expect(await roundTripBody('- x\n\n  > q\n\n- > r\n\n\n> tail')).toBe('- x\n\n  > q\n\n- \n  > r\n\n\n> tail');
+    // Blank lines before a marker line belong before the item, not in it
+    expect(await roundTripBody('paragraph\n\n- > r')).toBe('paragraph\n\n- \n  > r');
+  });
+
+  it('keeps a list going after a quote in one of its items', async () => {
+    // Export writes no empty paragraph after the quote, which would end the
+    // list and restart its numbering on import
+    for (const md of ['- x\n\n  > q\n\n- y', '1. x\n\n   > q\n\n2. y', '- x\n\n  > q\n\npara']) {
+      expect(await roundTripBody(md)).toBe(md);
+    }
+    expect(await roundTripBody('1. > a\n\n2. b')).toBe('1. \n   > a\n\n2. b');
+  });
+
+  it('keeps the empty paragraphs after a quote in a list item before another list', async () => {
+    // Only more of the same list needs them left out; Word shows them as the
+    // source's blank lines before a list that starts over
+    const JSZip = (await import('jszip')).default;
+    const emptyParagraphsBeforeLast = async (md: string) => {
+      const { docx } = await convertMdToDocx(md);
+      const xml = await (await JSZip.loadAsync(docx)).files['word/document.xml'].async('string');
+      const texts = [...xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map(m => m[0].replace(/<[^>]+>/g, ''));
+      return texts.length - 1 - texts.lastIndexOf('q') - 1;
+    };
+    const sameList = await emptyParagraphsBeforeLast('- x\n\n  > q\n\n\n- y');
+    expect(await emptyParagraphsBeforeLast('- x\n\n  > q\n\n\n1. y')).toBe(sameList + 2);
+    expect(await emptyParagraphsBeforeLast('1. x\n\n   > q\n\n\n- y')).toBe(sameList + 2);
+    expect(await emptyParagraphsBeforeLast('- x\n  - y\n\n    > q\n\n\n1. z')).toBe(sameList + 2);
+    expect(await emptyParagraphsBeforeLast('- x\n  - y\n\n    > q\n\n\n- z')).toBe(sameList);
+  });
+
+  it('keeps the spacing and alert style of a quote after a list in a quote', async () => {
+    // Export flattens the quoted list into one quote group, as import reads it
+    const md = await roundTripBody('> - a\n> - b\n\n> [!NOTE] inline\n> x');
+    expect(md).toMatch(/b\n\n> \[!NOTE\] inline/);
+  });
+
+  it('keeps the spacing of a quote holding a multi-line change or before a table', async () => {
+    // Preprocessing joins the change's lines, which the source must match
+    expect(await roundTripBody('para\n\n\n> {++before\n>\n> after++}')).toMatch(/^para\n\n\n> /);
+    // A table after a quote in a list item ends the list, so its spacer stays
+    expect(await roundTripBody('- x\n\n  > q\n\n\n| a |\n|---|\n| 1 |')).toMatch(/^- x\n\n  > q\n\n\n\| a \|/);
+  });
+
+  it('keeps the spacing after quote groups that share a line', async () => {
+    // In > - > q the outer quote and the one in its list item start on one line
+    expect(await roundTripBody('> - > q\n\n\npara')).toMatch(/q\n\n\npara$/);
+  });
+
+  it('keeps the blank lines before a list continuation paragraph after a quote', async () => {
+    for (const md of ['- x\n\n  > q\n\n\n  continuation', '- x\n\n  > q\n\n  continuation']) {
+      expect(await roundTripBody(md)).toBe(md);
+    }
+  });
+
+  it('keeps later quote spacing after a lazy line or a quote in a list in a quote', async () => {
+    // Four spaces in, the lazy line stays in the quote, as it does on export
+    expect(await roundTripBody('- x\n  - y\n    > q\n    lazy\n\n> top')).toBe('- x\n  - y\n    > q lazy\n\n> top');
+    expect(await roundTripBody('> - x\n>\n>   > q\n\n> tail')).toMatch(/[^\n]\n\n> tail$/);
+  });
+
   it('MD→DOCX→MD preserves blockquote continuation under a bullet list item', async () => {
     const md = '* **Clinical phrasing:**\n  > quoted line\n';
     const { docx, warnings } = await convertMdToDocx(md);
@@ -3896,6 +4014,7 @@ describe('landscape sections', () => {
       expect(tokens).toEqual([
         {
           type: 'paragraph',
+          sourceRange: [0, 3],
           runs: [{ type: 'text', text: '<div>\n<!-- landscape -->\n</div>' }],
         },
       ]);
