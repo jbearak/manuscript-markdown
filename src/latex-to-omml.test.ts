@@ -544,7 +544,7 @@ describe('Word export of commands that used to be spelled out', () => {
   });
 
   test('a prime in a text-mode run in a superscript stays a character', () => {
-    expect(roundTrip('f^{\\text{a ′}}')).toBe('f^\\text{a ′}');
+    expect(roundTrip('f^{\\text{a ′}}')).toBe('f^{\\text{a ′}}');
   });
 
   test('a command followed by a structure keeps its separator on import', () => {
