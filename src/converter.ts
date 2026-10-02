@@ -253,7 +253,7 @@ export type ContentItem =
       href?: string;           // hyperlink URL if inside w:hyperlink
       revision?: RevisionInfo;
     }
-  | { type: 'citation'; text: string; commentIds: Set<string>; pandocKeys: string[]; revision?: RevisionInfo }
+  | { type: 'citation'; text: string; commentIds: Set<string>; pandocKeys: string[]; revision?: RevisionInfo; formatting?: RunFormatting }
   | { type: 'table'; rows: TableRow[] }
   | {
       type: 'para';
@@ -276,7 +276,7 @@ export type ContentItem =
       breakRevision?: RevisionInfo; // w:ins/w:del on the previous paragraph's mark, which is the break before this one
     }
   | { type: 'math'; latex: string; display: boolean; commentIds: Set<string>; revision?: RevisionInfo }
-  | { type: 'footnote_ref'; noteId: string; noteKind: 'footnote' | 'endnote'; commentIds: Set<string>; revision?: RevisionInfo }
+  | { type: 'footnote_ref'; noteId: string; noteKind: 'footnote' | 'endnote'; commentIds: Set<string>; revision?: RevisionInfo; formatting?: RunFormatting }
   | { type: 'html_comment'; text: string; commentIds: Set<string> }
   | { type: 'image'; rId: string; src: string; alt: string; widthPx: number; heightPx: number; commentIds: Set<string>; revision?: RevisionInfo }
   | { type: 'landscape_open' }
@@ -823,6 +823,18 @@ function wrapMarkdownDelimited(text: string, open: string, close = open, suffix 
   return leading + open + core + close + suffix + trailing;
 }
 
+/** The Markdown name of a run's highlight color, if it has one. */
+function markdownHighlightColor(fmt: RunFormatting): string | undefined {
+  return fmt.highlightColor ? resolveMarkdownColor(fmt.highlightColor) : undefined;
+}
+
+/** `markdown` in a highlight of a Markdown color: ==a==, or ==a=={red}. */
+function wrapHighlight(markdown: string, color: string | undefined): string {
+  return color && color !== 'yellow'
+    ? wrapMarkdownDelimited(markdown, '==', '==', '{' + color + '}')
+    : wrapMarkdownDelimited(markdown, '==', '==');
+}
+
 export function wrapWithFormatting(text: string, fmt: RunFormatting): string {
   let result = text;
 
@@ -844,7 +856,10 @@ export function wrapWithFormatting(text: string, fmt: RunFormatting): string {
     const hasLeadingTrailingSpaces = result.startsWith(' ') && result.endsWith(' ') && result.trim().length > 0;
     const needsPadding = result.startsWith('`') || result.endsWith('`') || hasLeadingTrailingSpaces;
     result = needsPadding ? `${fence} ${result} ${fence}` : `${fence}${result}${fence}`;
-    return result;
+    // Code drops the formatting Word often gives it in passing, but keeps a
+    // highlight, which ==`code`== exports, unless an == in it would close
+    // the highlight
+    return fmt.highlight && !text.includes('==') ? wrapHighlight(result, markdownHighlightColor(fmt)) : result;
   }
 
   result = escapeSensitiveHtmlLikeTags(result);
@@ -859,14 +874,7 @@ export function wrapWithFormatting(text: string, fmt: RunFormatting): string {
   } else if (fmt.subscript) {
     result = `<sub>${result}</sub>`;
   }
-  if (fmt.highlight) {
-    const color = fmt.highlightColor ? resolveMarkdownColor(fmt.highlightColor) : undefined;
-    if (color && color !== 'yellow') {
-      result = wrapMarkdownDelimited(result, '==', '==', '{' + color + '}');
-    } else {
-      result = wrapMarkdownDelimited(result, '==', '==');
-    }
-  }
+  if (fmt.highlight) result = wrapHighlight(result, markdownHighlightColor(fmt));
   if (fmt.underline) result = `<u>${result}</u>`;
   if (fmt.strikethrough) result = wrapMarkdownDelimited(result, '~~', '~~');
   if (fmt.italic) result = wrapMarkdownDelimited(result, '*');
@@ -1718,6 +1726,7 @@ function parseNoteBody(
   let fieldInstrParts: string[] = [];
   let currentCitation: ZoteroCitation | undefined;
   let citationTextParts: string[] = [];
+  let fieldFormatting: RunFormatting | undefined;
   const cCounter = citationCounter ?? { idx: 0 };
   let currentHref: string | undefined;
   // As in extractDocumentContent: a tracked paragraph mark, for breakRevision
@@ -1747,6 +1756,7 @@ function parseNoteBody(
           if (fldType === 'begin') {
             inField = true;
             fieldInstrParts = [];
+            fieldFormatting = undefined;
             inCitationField = false;
           } else if (fldType === 'separate') {
             if (inField) {
@@ -1766,6 +1776,7 @@ function parseNoteBody(
                 commentIds: new Set(),
                 pandocKeys,
                 ...(currentRevision ? { revision: currentRevision } : {}),
+                ...highlightOnly(fieldFormatting),
               });
             }
             inField = false;
@@ -1853,6 +1864,7 @@ function parseNoteBody(
           const text = nodeText(asXmlNodes(node[key]));
           if (text) {
             if (inCitationField && context) {
+              fieldFormatting ??= currentFormatting;
               citationTextParts.push(text);
             } else {
               const textItem: ContentItem = {
@@ -2358,6 +2370,9 @@ export async function extractDocumentContent(
   let inNoterefField = false;
   let noterefInfo: { noteId: string; noteKind: 'footnote' | 'endnote' } | undefined;
   let fieldInstrParts: string[] = [];
+  // The highlight on a citation's or cross-reference's result, which the
+  // renderer keeps (see renderHighlightGroup)
+  let fieldFormatting: RunFormatting | undefined;
   // A deleted field's instruction, read only for NOTEREF: zoteroCitations
   // counts the w:instrText ones alone
   let deletedInstrParts: string[] = [];
@@ -2391,6 +2406,7 @@ export async function extractDocumentContent(
           if (fldType === 'begin') {
             inField = true;
             fieldInstrParts = [];
+            fieldFormatting = undefined;
             deletedInstrParts = [];
             inCitationField = false;
             inBibliographyField = false;
@@ -2447,6 +2463,7 @@ export async function extractDocumentContent(
                 noteKind: noterefInfo.noteKind,
                 commentIds: new Set(activeComments),
                 ...(currentRevision ? { revision: currentRevision } : {}),
+                ...highlightOnly(fieldFormatting),
               });
             }
             if (inCitationField && currentCitation) {
@@ -2457,6 +2474,7 @@ export async function extractDocumentContent(
                 commentIds: new Set(activeComments),
                 pandocKeys,
                 ...(currentRevision ? { revision: currentRevision } : {}),
+                ...highlightOnly(fieldFormatting),
               });
             }
             if (inBibliographyField) {
@@ -2509,12 +2527,12 @@ export async function extractDocumentContent(
         } else if (key === 'w:footnoteReference') {
           const noteId = getAttr(node, 'id');
           if (noteId && noteId !== '0' && noteId !== '-1') {
-            target.push({ type: 'footnote_ref', noteId, noteKind: 'footnote', commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
+            target.push({ type: 'footnote_ref', noteId, noteKind: 'footnote', commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...highlightOnly(currentFormatting) });
           }
         } else if (key === 'w:endnoteReference') {
           const noteId = getAttr(node, 'id');
           if (noteId && noteId !== '0' && noteId !== '-1') {
-            target.push({ type: 'footnote_ref', noteId, noteKind: 'endnote', commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
+            target.push({ type: 'footnote_ref', noteId, noteKind: 'endnote', commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...highlightOnly(currentFormatting) });
           }
         } else if (key === 'w:hyperlink') {
           const rId = node?.[':@']?.['@_r:id'] ?? getAttr(node, 'id');
@@ -2640,6 +2658,7 @@ export async function extractDocumentContent(
         } else if (key === 'w:t' || key === 'w:delText') {
           const text = nodeText(asXmlNodes(node[key]));
           if (text) {
+            if (inCitationField || inNoterefField) fieldFormatting ??= currentFormatting;
             if (inBibliographyField || inNoterefField) {
               // Skip display text inside ZOTERO_BIBL / NOTEREF fields
             } else if (inCitationField) {
@@ -3068,10 +3087,12 @@ function joinRevisedSpans(markdown: string): string {
  * so a Word revision that runs across a citation, an equation or a formatting
  * change stays one span: {++in month $t$, conditional++}.
  */
-function appendRevised(out: string, text: string, item: InlineRevisionItem, last: RevisionSpan | undefined): [string, RevisionSpan | undefined] {
+function appendRevised(
+  out: string, text: string, item: InlineRevisionItem, last: RevisionSpan | undefined, itemJoin = spanJoin(item),
+): [string, RevisionSpan | undefined] {
   const revision = item.revision;
   if (!revision) return [out + text, undefined];
-  const { join, literal } = spanJoin(item);
+  const { join, literal } = itemJoin;
   const kinds = delimiterKinds(text);
   const disjoint = (a: Set<string>, b: Set<string>) => ![...a].some(kind => b.has(kind));
   const seamSafe = (before: RevisionSpan) =>
@@ -3214,16 +3235,18 @@ function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = mar
 
 /** The space import puts before a Pandoc citation: none when the text before
  *  it already ends with one in a view the citation shows in, so no view gets
- *  two, as in Seen {++a ++}[@key]. A view without the space then keeps the
- *  citation against its text, as Word has it there. */
+ *  two, as in Seen {++a ++}[@key], or when there is none before it. A view
+ *  without the space then keeps the citation against its text, as Word has it
+ *  there. */
 function citationSeparator(precedingMarkdown: string, revision: RevisionInfo | undefined, last?: RevisionSpan): string {
   const views = revision?.type === 'addition' ? [true] : revision?.type === 'deletion' ? [false] : [true, false];
   // The span the Markdown ends with gives its last character without a scan
   const span = last && last.end === precedingMarkdown.length ? last : undefined;
-  return views.some(accepted => (
+  // Nor at the start of a block, where there is no text to space it from
+  return views.some(accepted => [' ', ''].includes(
     span?.revision.type === (accepted ? 'addition' : 'deletion') ? span.lastChar
       : lastVisibleChar(precedingMarkdown, accepted, 0, span ? span.start : precedingMarkdown.length)
-  ) === ' ') ? '' : ' ';
+  )) ? '' : ' ';
 }
 
 
@@ -3244,8 +3267,108 @@ function footnoteRefText(item: ContentItem & { type: 'footnote_ref' }, noteLabel
   return '[^' + (noteLabels?.get(item.noteKind + ':' + item.noteId) ?? item.noteId) + ']';
 }
 
+/** A note reference's or citation's run formatting, kept when highlighted:
+ *  its highlight is the formatting import writes back. */
+function highlightOnly(formatting: RunFormatting | undefined): { formatting?: RunFormatting } {
+  return formatting?.highlight ? { formatting } : {};
+}
+
+/** The color an item's highlight reads back as, if it has one. */
+function highlightColorOf(item: ContentItem): string | undefined {
+  const formatting = item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' ? item.formatting : undefined;
+  if (!formatting?.highlight) return undefined;
+  return markdownHighlightColor(formatting) ?? 'yellow';
+}
+
+/**
+ * Where a highlight group that starts at `start` ends, or `start` when none
+ * does. A group runs over items of one revision, or none, in the comments
+ * `commentIds`: text without a link, note references and citations that
+ * share a highlight color, and the inline equations between them, which
+ * export doesn't highlight. It needs a reference, citation or equation:
+ * highlighted text alone keeps its own markers. renderHighlightGroup writes
+ * it in one highlight, ==a[^1] b==, rather than one per item, ==a==[^1]== b==.
+ */
+function highlightGroupEnd(segment: ContentItem[], start: number, end: number, commentIds: Set<string>): number {
+  const first = segment[start];
+  const color = highlightColorOf(first);
+  if (!color || first.type === 'math' || !isSubstitutionItem(first)) return start;
+  // An == in an item would close the highlight, even in code or an equation
+  const source = (item: SubstitutionItem) =>
+    item.type === 'text' ? item.text : item.type === 'math' ? item.latex
+      : item.type === 'citation' ? (item.pandocKeys.length > 0 ? item.pandocKeys.join('; ') : item.text) : '';
+  const joins = (item: ContentItem) =>
+    (item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || (item.type === 'math' && !item.display))
+    && revisionsEqual(item.revision, first.revision) && commentSetsEqual(item.commentIds, commentIds)
+    && !(item.type === 'text' && (item.href || item.text === '\\\n')) && !source(item).includes('==');
+  if (!joins(first)) return start;
+  const groupless = grouplessRuns.get(segment);
+  if (groupless && groupless.from < start && start < groupless.to) return start;
+  let groupEnd = start + 1;
+  let j = start + 1;
+  for (; j < end && joins(segment[j]); j++) {
+    if (segment[j].type === 'math') continue;
+    if (highlightColorOf(segment[j]) !== color) break;
+    groupEnd = j + 1;
+  }
+  if (segment.slice(start, groupEnd).some(item => item.type !== 'text')) return groupEnd;
+  // The run ends at j, unless `end` cut it short
+  const next = segment[j];
+  if (!next || !joins(next) || (next.type !== 'math' && highlightColorOf(next) !== color)) grouplessRuns.set(segment, { from: start, to: j });
+  return start;
+}
+
+/** Per segment, a run of items in which highlightGroupEnd found no group, so
+ *  that none starts later in it either, which keeps import linear in a long
+ *  highlight of text alone. */
+const grouplessRuns = new WeakMap<ContentItem[], { from: number; to: number }>();
+
+/** The highlight group from `start` to `end` (highlightGroupEnd) as
+ *  Markdown, after `precedingMarkdown`, which ends with the span `last`. */
+function renderHighlightGroup(
+  segment: ContentItem[], start: number, end: number, precedingMarkdown: string, noteLabels?: Map<string, string>, last?: RevisionSpan,
+): string {
+  let inner = '';
+  for (let g = start; g < end; g++) {
+    const item = segment[g];
+    if (item.type === 'text') {
+      inner += wrapWithFormatting(item.text, { ...item.formatting, highlight: false });
+    } else if (item.type === 'footnote_ref') {
+      inner += footnoteRefText(item, noteLabels);
+    } else if (item.type === 'math') {
+      inner += '$' + item.latex + '$';
+    } else if (item.type === 'citation') {
+      // A separator before the first item lands outside the highlight
+      inner += item.pandocKeys.length > 0
+        ? (g === start ? citationSeparator(precedingMarkdown, item.revision, last) : citationSeparator(inner, item.revision))
+          + '[' + item.pandocKeys.join('; ') + ']'
+        : item.text;
+    }
+  }
+  return wrapHighlight(inner, highlightColorOf(segment[start]));
+}
+
+/** `out` with the highlight group from `start` to `end` appended as one span
+ *  of its revision, as appendRevised appends an item, and the span it ends
+ *  with. A citation first in it is spaced from `precedingMarkdown`. */
+function appendHighlightGroup(
+  out: string, segment: ContentItem[], start: number, end: number, last: RevisionSpan | undefined,
+  noteLabels?: Map<string, string>, precedingMarkdown = out,
+): [string, RevisionSpan | undefined] {
+  const items = segment.slice(start, end) as InlineRevisionItem[];
+  const joins = items.map(item => spanJoin(item));
+  const join: SpanJoin = joins.some(j => j.join === 'never') ? 'never' : joins.some(j => j.join === 'space') ? 'space' : 'seam';
+  const text = renderHighlightGroup(segment, start, end, precedingMarkdown, noteLabels, last);
+  return appendRevised(out, text, items[0], last, { join, literal: new Set(joins.flatMap(j => [...j.literal])) });
+}
+
 /** One item of a substitution's side as Markdown, after `precedingText`. */
 function substitutionItemText(item: SubstitutionItem, precedingText: string, noteLabels?: Map<string, string>): string {
+  const color = highlightColorOf(item);
+  if (color && (item.type === 'footnote_ref' || item.type === 'citation')) {
+    const text = substitutionItemText({ ...item, formatting: undefined }, precedingText, noteLabels);
+    return text.includes('==') ? text : wrapHighlight(text, color);
+  }
   if (item.type === 'footnote_ref') return footnoteRefText(item, noteLabels);
   if (item.type === 'text') {
     const text = wrapWithFormatting(item.text, item.formatting);
@@ -3321,14 +3444,31 @@ function renderSubstitutionRun(
     isSubstitutionItem(item)
     && item.revision?.type === type && item.revision.author === revision.author && item.revision.date === revision.date
     && eligible(item);
+  // One side's items, with highlight groups in one highlight
+  const sideText = (from: number, to: number) => {
+    let text = '';
+    for (let j = from; j < to;) {
+      const item = segment[j] as SubstitutionItem;
+      const highlightEnd = highlightGroupEnd(segment, j, to, item.commentIds);
+      if (highlightEnd > j) {
+        text += renderHighlightGroup(segment, j, highlightEnd, precedingText + text, noteLabels);
+        j = highlightEnd;
+      } else {
+        text += substitutionItemText(item, precedingText + text, noteLabels);
+        j++;
+      }
+    }
+    return text;
+  };
   let k = start;
-  let oldText = '';
-  while (k < end && side(segment[k], 'deletion')) oldText += substitutionItemText(segment[k++] as SubstitutionItem, precedingText + oldText, noteLabels);
+  while (k < end && side(segment[k], 'deletion')) k++;
   const deletions = k - start;
-  let newText = '';
-  while (k < end && side(segment[k], 'addition')) newText += substitutionItemText(segment[k++] as SubstitutionItem, precedingText + newText, noteLabels);
+  while (k < end && side(segment[k], 'addition')) k++;
   const additions = k - start - deletions;
-  if (deletions === 0 || additions === 0 || deletions + additions <= 2 || !oldText || !newText) return undefined;
+  if (deletions === 0 || additions === 0 || deletions + additions <= 2) return undefined;
+  const oldText = sideText(start, start + deletions);
+  const newText = sideText(start + deletions, k);
+  if (!oldText || !newText) return undefined;
   if (!substitutionHolds(oldText, newText)) return undefined;
   // Two inline equations in a row on one side would run their dollar signs
   // together and read as one, where spans of their own keep them apart
@@ -3575,7 +3715,15 @@ function renderInlineRange(
       }
     }
 
-    if (item.type === 'citation') {
+    const highlightEnd = highlightGroupEnd(segment, i, segmentEnd, new Set());
+    if (highlightEnd > i) {
+      [out, lastSpan] = appendHighlightGroup(out, segment, i, highlightEnd, lastSpan, renderOpts?.noteLabels);
+      i = highlightEnd;
+      continue;
+    }
+
+    // A citation in a comment's range goes in its anchor, below
+    if (item.type === 'citation' && item.commentIds.size === 0) {
       let citeText: string;
       if (item.pandocKeys.length > 0) {
         const citeSep = citationSeparator(out, item.revision, lastSpan);
@@ -3649,22 +3797,39 @@ function renderInlineRange(
       continue;
     }
 
-    if (item.type !== 'text' && item.type !== 'footnote_ref') {
+    if (item.type !== 'text' && item.type !== 'footnote_ref' && item.type !== 'citation') {
       i++;
       continue;
     }
 
-    // A note reference gets here only in a comment's range, which it shares with text
-    if (item.type === 'footnote_ref' || item.commentIds.size > 0) {
+    // A note reference or citation gets here only in a comment's range
+    if (item.type !== 'text' || item.commentIds.size > 0) {
       const commentSet = item.commentIds;
       let anchorText = '';
       let anchorSpan: RevisionSpan | undefined;
       let j = i;
+      // The space import adds before a citation that opens the range goes
+      // before the range, which Word's doesn't cover
+      const lead = item.type === 'citation' && item.pandocKeys.length > 0 ? citationSeparator(out, item.revision, lastSpan) : '';
 
       while (j < segment.length) {
         const seg = segment[j];
-        if ((seg.type !== 'text' && seg.type !== 'footnote_ref') || !commentSetsEqual(seg.commentIds, commentSet)) {
+        const highlightEnd = highlightGroupEnd(segment, j, segmentEnd, commentSet);
+        if (highlightEnd > j) {
+          [anchorText, anchorSpan] = appendHighlightGroup(anchorText, segment, j, highlightEnd, anchorSpan, renderOpts?.noteLabels, anchorText || out + lead);
+          j = highlightEnd;
+          continue;
+        }
+        if ((seg.type !== 'text' && seg.type !== 'footnote_ref' && seg.type !== 'citation') || !commentSetsEqual(seg.commentIds, commentSet)) {
           break;
+        }
+        if (seg.type === 'citation') {
+          const citeText = seg.pandocKeys.length > 0
+            ? citationSeparator(anchorText || out + lead, seg.revision, anchorSpan) + '[' + seg.pandocKeys.join('; ') + ']'
+            : seg.text;
+          [anchorText, anchorSpan] = appendRevised(anchorText, citeText, seg, anchorSpan);
+          j++;
+          continue;
         }
         if (seg.type === 'footnote_ref') {
           [anchorText, anchorSpan] = appendRevised(anchorText, footnoteRefText(seg, renderOpts?.noteLabels), seg, anchorSpan);
@@ -3686,7 +3851,7 @@ function renderInlineRange(
       }
 
       if (anchorText) {
-        out += `{==${anchorText}==}`;
+        out += lead + `{==${anchorText}==}`;
       }
       for (const cid of [...commentSet].sort()) {
         const c = comments.get(cid);
@@ -3831,6 +3996,26 @@ function renderInlineRangeWithIds(
           continue;
         }
       }
+    }
+
+    const highlightEnd = 'commentIds' in item ? highlightGroupEnd(segment, i, segmentEnd, item.commentIds) : i;
+    if (highlightEnd > i && 'commentIds' in item) {
+      const currentIds = item.commentIds;
+      for (const cid of [...prevCommentIds].sort()) {
+        if (!currentIds.has(cid)) {
+          out += `{/${remap(cid)}}`;
+          collectBody(cid);
+        }
+      }
+      for (const cid of [...currentIds].sort()) {
+        if (!prevCommentIds.has(cid)) {
+          out += `{#${remap(cid)}}`;
+        }
+      }
+      prevCommentIds = new Set(currentIds);
+      [out, lastSpan] = appendHighlightGroup(out, segment, i, highlightEnd, lastSpan, noteLabels);
+      i = highlightEnd;
+      continue;
     }
 
     if (item.type === 'citation') {

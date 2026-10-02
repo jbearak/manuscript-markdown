@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { generateCitation, generateCitationId, generateMathXml, escapeXml, generateMissingKeysXml, htmlToOoxmlRuns, generateFallbackText } from './md-to-docx-citations';
+import { generateCitation, orderRPr, generateCitationId, generateMathXml, escapeXml, generateMissingKeysXml, htmlToOoxmlRuns, generateFallbackText } from './md-to-docx-citations';
 import { BibtexEntry, parseBibtex } from './bibtex-parser';
 import { parseMd, type MdRun } from './md-to-docx';
 
@@ -856,5 +856,17 @@ describe('citation prefixes', () => {
     const prefixes = ['e.g.,', 'cf.'];
     expect(generateFallbackText(['smith2020', 'doe2021'], makeEntries(), undefined, new Set(['doe2021']), prefixes))
       .toBe('(e.g., Smith 2020; cf. 2021)');
+  });
+});
+
+describe('orderRPr', () => {
+  it('puts run properties in schema order', () => {
+    expect(orderRPr('<w:i/><w:b/><w:vertAlign w:val="superscript"/><w:smallCaps/><w:highlight w:val="red"/><w:sz w:val="18"/>'))
+      .toBe('<w:b/><w:i/><w:smallCaps/><w:sz w:val="18"/><w:highlight w:val="red"/><w:vertAlign w:val="superscript"/>');
+  });
+
+  it('leaves anything else as it was', () => {
+    expect(orderRPr('<w:u w:val="single"/><w:foo/><w:b/>')).toBe('<w:u w:val="single"/><w:foo/><w:b/>');
+    expect(orderRPr('<w:u w:val="single"/>text<w:b/>')).toBe('<w:u w:val="single"/>text<w:b/>');
   });
 });

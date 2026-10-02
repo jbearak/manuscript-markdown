@@ -166,6 +166,13 @@ describe('the space before a citation in a tracked change', () => {
     expect(render([plain('Seen '), text('x', deleted), citation])).toBe('Seen {--x--}[@doe2020]');
   });
 
+  it.each([
+    ['an insertion', '{++[@doe2020] found it.++} Next.'],
+    ['a list item', '- [@doe2020] found it.'],
+  ])('is not added at the start of a block, in %s', async (_, md) => {
+    expect(await roundTrip(md)).toBe(md);
+  });
+
   it('is added when no view the citation shows in ends with one', () => {
     const citation: ContentItem = { type: 'citation', text: '(Doe 2020)', commentIds: new Set(), pandocKeys: ['@doe2020'] };
     expect(render([plain('Seen'), text(' x'), citation])).toBe('Seen{++ x++} [@doe2020]');
