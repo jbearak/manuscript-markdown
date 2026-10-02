@@ -163,7 +163,7 @@ To place limits above/below (instead of as subscript/superscript):
 
 `\nolimits` does the reverse and keeps the limits beside the operator. Re-import drops it, so the limits fall back to the default placement.
 
-A group in parentheses or brackets, or a `\left` and `\right` pair, right after the operator becomes its body in Word. In `\prod_{t=1}^{12}(1-\omega_t)`, all of `(1-\omega_t)` sits under the product. To put more under it, brace the body: `\prod{(1-x)y}`. Re-import adds those braces when a body from Word runs past its leading group. An operator written without a limit gets a hidden empty slot, so Word draws no placeholder box where the limit would go.
+A group in parentheses or brackets, or a `\left` and `\right` pair, right after the operator becomes its body in Word. In `\prod_{t=1}^{12}(1-\omega_t)`, all of `(1-\omega_t)` sits under the product. To put more under it, brace the body: `\prod{(1-x)y}`. Re-import adds those braces when a body from Word starts with a bracket but isn't one whole group. An operator written without a limit gets a hidden empty slot, so Word draws no placeholder box where the limit would go.
 
 ## Functions
 
@@ -189,7 +189,7 @@ For functions not in this list, use `\operatorname{name}`:
 \operatorname{tr}{A}
 ```
 
-A function name followed by `(...)` or `[...]` takes the whole group as its argument, as in `\log(x+1)` or `\operatorname{margin}(j)`. Re-import adds braces around it: `\log{(x+1)}`.
+A function name followed by `(...)` or `[...]` takes the whole group as its argument, as in `\log(x+1)` or `\operatorname{margin}(j)`. Re-import writes an argument that is one such group, or one `\left` and `\right` pair, without braces, and braces any other: `\log{(x+1)y}`.
 
 Scripts on a function name stay with the name, as Word places them. `\log_2 n` and `\sin^2 x` put the script beside the name. `\lim`, `\liminf`, `\limsup`, `\max`, `\min`, `\sup`, `\inf`, `\det`, `\gcd`, and `\Pr` put a subscript under the name, and so does `\operatorname*`:
 

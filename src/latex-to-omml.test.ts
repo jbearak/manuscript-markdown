@@ -670,7 +670,7 @@ describe('bracketed operands of n-ary operators and functions', () => {
       '<m:func><m:fName><m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>margin</m:t></m:r></m:fName>' +
       '<m:e>' + run('(') + run('j') + run(')') + '</m:e></m:func>',
     );
-    expect(roundTrip('\\operatorname{margin}(j)')).toBe('\\operatorname{margin}{(j)}');
+    expect(roundTrip('\\operatorname{margin}(j)')).toBe('\\operatorname{margin}(j)');
   });
 
   test('known functions take a parenthesized argument', () => {
