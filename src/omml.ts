@@ -651,52 +651,82 @@ function translateNary(children: XmlNode[]): string {
   const sup = (supHide || !supLatex) ? '' : '^' + scriptArg(supLatex);
   const body = ommlToLatex(findChild(children, 'm:e'));
   // Export takes a leading bracket group as the whole body, so brace a body
-  // that continues past it (Word's ∏ over (1-x)y) to keep the rest inside.
-  return appendLatex(op + limits + sub + sup, leadingGroupEndsEarly(body) ? '{' + body + '}' : body);
+  // that is more than that group (Word's ∏ over (1-x)y) to keep the rest inside.
+  const bracketed = /^(?:[([]|\\left(?![A-Za-z]))/.test(body);
+  return appendLatex(op + limits + sub + sup, bracketed && !isBracketGroup(body) ? '{' + body + '}' : body);
 }
 
-/** Whether `latex` opens with ( or [ and closes that bracket before its end. */
-function leadingGroupEndsEarly(latex: string): boolean {
-  if (/^\\left(?![A-Za-z])/.test(latex)) return leftRightGroupEndsEarly(latex);
+/**
+ * Whether `latex` is one ( or [ group, or one \left…\right pair, which export
+ * reads back whole after a function name or an n-ary operator. It reads the
+ * group as export's parseBracketedOperand does: braces, environments and
+ * \left…\right pairs inside it are opaque, an & or \\ outside them leaves
+ * it unclosed, and comments don't count.
+ */
+function isBracketGroup(latex: string): boolean {
+  if (/^\\left(?![A-Za-z])/.test(latex)) return leftRightGroupEnd(latex) === latex.length;
   const open = latex.charAt(0);
   const close = open === '(' ? ')' : open === '[' ? ']' : '';
   if (!close) return false;
   let depth = 0;
-  let braces = 0;
+  let nesting = 0;
   for (let i = 0; i < latex.length; i++) {
     const ch = latex.charAt(i);
     if (ch === '\\') {
-      i++; // skip the escaped or command character
+      const command = /^\\(?:[A-Za-z]+|[\s\S]?)/.exec(latex.slice(i))![0];
+      i += command.length - 1;
+      if (command === '\\begin' || command === '\\left') {
+        nesting++;
+      } else if (command === '\\end' || command === '\\right') {
+        if (nesting === 0) return false;
+        nesting--;
+        // The character after \right is its delimiter, not a bracket.
+        if (command === '\\right' && !/^[\\{}^_&%]/.test(latex.slice(i + 1))) i++;
+      } else if (command === '\\\\' && nesting === 0) {
+        return false;
+      }
+    } else if (ch === '%') {
+      i = latex.indexOf('\n', i);
+      if (i < 0) return false;
     } else if (ch === '{') {
-      braces++;
+      nesting++;
     } else if (ch === '}') {
-      braces--;
-    } else if (braces === 0 && ch === open) {
-      depth++;
-    } else if (braces === 0 && ch === close && --depth === 0) {
-      return latex.slice(i + 1).trim() !== '';
+      if (nesting === 0) return false;
+      nesting--;
+    } else if (nesting === 0) {
+      if (ch === '&') return false;
+      if (ch === open) {
+        depth++;
+      } else if (ch === close && --depth === 0) {
+        return i === latex.length - 1;
+      }
     }
   }
   return false;
 }
 
-/** leadingGroupEndsEarly for LaTeX that starts with a \left…\right pair. */
-function leftRightGroupEndsEarly(latex: string): boolean {
+/** The index just past the \left…\right pair that opens `latex`, or undefined if it never closes. */
+function leftRightGroupEnd(latex: string): number | undefined {
   let depth = 0;
   for (let i = 0; i < latex.length; i++) {
+    if (latex.charAt(i) === '%') {
+      i = latex.indexOf('\n', i);
+      if (i < 0) return undefined;
+      continue;
+    }
     if (latex.charAt(i) !== '\\') continue;
-    const command = /^\\(?:[A-Za-z]+|.)/.exec(latex.slice(i))![0];
+    const command = /^\\(?:[A-Za-z]+|[\s\S]?)/.exec(latex.slice(i))![0];
     i += command.length;
     if (command === '\\left') {
       depth++;
     } else if (command === '\\right' && --depth === 0) {
       // Skip the closing delimiter: a command such as \rangle, or one character.
       const delimiter = /^(?:\\(?:[A-Za-z]+|.)|.)?/.exec(latex.slice(i))![0];
-      return latex.slice(i + delimiter.length).trim() !== '';
+      return i + delimiter.length;
     }
     i--;
   }
-  return false;
+  return undefined;
 }
 
 
@@ -845,9 +875,11 @@ function translateFunction(children: XmlNode[]): string {
     funcCmd = `\\operatorname${limitsUnder ? '*' : ''}{${name}}`;
   }
 
-  // Translate the argument
+  // Translate the argument. Export takes a bracket group right after the name
+  // as the whole argument, so one that is the whole argument, as in \sin(x),
+  // needs no braces.
   const arg = ommlToLatex(findChild(children, 'm:e'));
-  return `${funcCmd}${scripts}{${arg}}`;
+  return funcCmd + scripts + (isBracketGroup(arg) ? arg : '{' + arg + '}');
 }
 
 /** The text of nodes that are all math runs, skipping hidden comment runs; otherwise undefined. */

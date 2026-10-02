@@ -1,6 +1,6 @@
 // src/latex-omml-fidelity.test.ts — Word fidelity of function scripts, symbols,
 // math alphabets, unknown-command warnings, normal-text runs, n-ary bodies,
-// and primes, in both conversion directions.
+// function arguments, and primes, in both conversion directions.
 
 import { describe, test, expect } from 'bun:test';
 import { XMLParser } from 'fast-xml-parser';
@@ -81,15 +81,15 @@ describe('function names with scripts', () => {
   });
 
   test.each([
-    ['\\log_2(n)', '\\log_2{(n)}'],
-    ['\\sin^2(x)', '\\sin^2{(x)}'],
+    ['\\log_2(n)', '\\log_2(n)'],
+    ['\\sin^2(x)', '\\sin^2(x)'],
     ['\\lim_{n\\to\\infty} f', '\\lim_{n\\to\\infty}{f}'],
     ['\\lim_a^b f', '\\lim_a^b{f}'],
     ['\\max_i x_i', '\\max_i{x_i}'],
     ['\\operatorname{argmax}_x f', '\\operatorname{argmax}_x{f}'],
     ['\\operatorname*{argmax}_x f', '\\operatorname*{argmax}_x{f}'],
     ['\\liminf_n a', '\\liminf_n{a}'],
-    ['\\Pr(A)', '\\Pr{(A)}'],
+    ['\\Pr(A)', '\\Pr(A)'],
   ])('%s round-trips as %s', (latex, expected) => {
     expect(roundTrip(latex)).toBe(expected);
     expectStableExport(latex);
@@ -198,9 +198,46 @@ describe('Word-authored n-ary bodies', () => {
     expect(latexToOmml(latex)).toEndWith(run(')') + run('y') + '</m:e></m:nary>');
   });
 
+  test('a body whose leading bracket never closes is braced', () => {
+    const latex = importOmml(nary(run('(') + run('x')));
+    expect(latex).toBe('\\prod{(x}');
+    expect(latexToOmml(latex)).toEndWith(run('(') + run('x') + '</m:e></m:nary>');
+  });
+
   test('other bodies stay unbraced', () => {
     expect(importOmml(nary(run('(') + run('1') + run('-') + run('x') + run(')')))).toBe('\\prod(1-x)');
     expect(importOmml(nary(run('x')))).toBe('\\prod x');
+  });
+});
+
+describe('Word-authored function arguments', () => {
+  const delimited = (begChr: string, endChr: string, body: string) =>
+    '<m:d><m:dPr><m:begChr m:val="' + begChr + '"/><m:endChr m:val="' + endChr + '"/></m:dPr><m:e>' + body + '</m:e></m:d>';
+
+  test.each([
+    ['(x)', run('(') + run('x') + run(')'), '\\sin(x)'],
+    ['[x]', run('[') + run('x') + run(']'), '\\sin[x]'],
+    ['⟨x⟩', delimited('⟨', '⟩', run('x')), '\\sin\\left\\langle{}x\\right\\rangle'],
+  ])('an argument that is one bracket group, %s, is not braced', (_, arg, latex) => {
+    const omml = func(styled('sin'), arg);
+    expect(importOmml(omml)).toBe(latex);
+    expect(latexToOmml(latex)).toBe(omml);
+  });
+
+  test.each([
+    ['continues past its bracket group', run('(') + run('x') + run(')') + run('y'), '\\sin{(x)y}'],
+    ['never closes its bracket', run('(') + run('x'), '\\sin{(x}'],
+    ['has a ( after \\left, which export does not count', run('(') + delimited('(', '⟩', run('a')) + run(')') + run(')'),
+      '\\sin{(\\left(a\\right\\rangle))}'],
+  ])('an argument that %s is braced', (_, arg, latex) => {
+    const omml = func(styled('sin'), arg);
+    expect(importOmml(omml)).toBe(latex);
+    expect(latexToOmml(latex)).toBe(omml);
+  });
+
+  test('a bracket in a comment does not close the argument', () => {
+    expect(roundTrip('\\sin{(x %c)\n)}')).toBe('\\sin(x %c)\n)');
+    expectStableExport('\\sin(x %c)\n)');
   });
 });
 
