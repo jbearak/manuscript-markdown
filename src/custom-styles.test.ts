@@ -250,6 +250,12 @@ describe('Custom Styles — parseMd Sentinels', () => {
     expect(contentToken.runs.some(r => r.italic && r.text === 'italic')).toBe(true);
   });
 
+  it('single-line inline style resolves a reference link with the document\'s definitions', () => {
+    const tokens = parseMd('<!-- style: caption -->see [link][ref]<!-- /style -->\n\n[ref]: https://example.com');
+    const contentToken = tokens[tokens.findIndex(t => t.customStyleOpen) + 1];
+    expect(contentToken.runs.find(r => r.text === 'link')?.href).toBe('https://example.com');
+  });
+
   it('multiple style blocks → correct sentinel sequence', () => {
     const md = [
       '<!-- style: alpha -->',

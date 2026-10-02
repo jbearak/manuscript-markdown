@@ -77,6 +77,15 @@ describe('one revision across citations, equations and formatting', () => {
     expect(render([text('Wow!'), note])).toBe('{++Wow!++}{++[^1]++}');
   });
 
+  it('joins a footnote reference to the highlights around it', () => {
+    const note: ContentItem = { type: 'footnote_ref', noteId: '1', noteKind: 'footnote', commentIds: new Set(), revision: added };
+    const highlighted = (value: string, highlightColor?: string) => text(value, added, { ...DEFAULT_FORMATTING, highlight: true, highlightColor });
+    expect(render([highlighted('a'), note, highlighted('b')])).toBe('{++==a==[^1]==b==++}');
+    expect(render([highlighted('a', 'red'), note, highlighted('b', 'red')])).toBe('{++==a=={red}[^1]==b=={red}++}');
+    const bold = (value: string) => text(value, added, { ...DEFAULT_FORMATTING, bold: true, highlight: true });
+    expect(render([bold('a'), note, bold('b')])).toBe('{++**==a==**[^1]**==b==**++}');
+  });
+
   it('joins a footnote reference to a word after it, but not to a parenthesis that would make a link', () => {
     const note: ContentItem = { type: 'footnote_ref', noteId: '1', noteKind: 'footnote', commentIds: new Set(), revision: added };
     expect(render([text('before'), note, text('after')])).toBe('{++before[^1]after++}');

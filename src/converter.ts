@@ -3154,8 +3154,10 @@ function spanJoin(item: InlineRevisionItem): { join: SpanJoin; literal: Set<stri
  * span or emphasis that ends before sentence punctuation, or one that starts
  * after an opening parenthesis, a hyphen or a slash. A footnote reference
  * joins after a word, the end of a sentence, a closing quote, or a citation,
- * equation, code span or emphasis, and a closing bracket before a letter or
- * digit, which can't open a link: before[^1]after.
+ * equation, code span, emphasis, strikethrough, highlight or HTML-like
+ * formatting tag (</u>), and a closing bracket before a letter, a digit,
+ * emphasis, strikethrough, a highlight or a tag, none of which can open a
+ * link: before[^1]after, ==a==[^1]==b==, **==a==**[^1]**==b==**.
  */
 function canJoinSpans(beforeEnd: string, after: string): boolean {
   const a = beforeEnd.slice(-1);
@@ -3163,7 +3165,8 @@ function canJoinSpans(beforeEnd: string, after: string): boolean {
   if (!a || !b) return false;
   if (/\s/.test(a) || /\s/.test(b)) return true;
   if (/[\p{L}\p{N}\]]/u.test(a) && /[\p{L}\p{N}]/u.test(b)) return true;
-  if (after.startsWith('[^') && /[\p{L}\p{N}.,;:?)\]$*`"'\u2019\u201D]/u.test(a)) return true;
+  if (a === ']' && /^(?:\*|==|~~|<)/.test(after)) return true;
+  if (after.startsWith('[^') && /[\p{L}\p{N}.,;:?)\]$*`"'\u2019\u201D=}~>]/u.test(a)) return true;
   return (/[\])$*`]/.test(a) && /[.,;:!?)]/.test(b)) || (/[(\-/]/.test(a) && /[[$*`]/.test(b));
 }
 
