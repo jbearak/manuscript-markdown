@@ -1,5 +1,6 @@
 import { BibtexEntry } from './bibtex-parser';
-import { latexToOmml } from './latex-to-omml';
+import { latexToOmml, trackedLatexToOmml, CRITIC_DELETION_COMMAND, CRITIC_INSERTION_COMMAND, type TrackChange } from './latex-to-omml';
+import type { CriticMathPart } from './critic-math';
 import { loadStyle, loadStyleAsync, loadLocale } from './csl-loader';
 
 export interface CiteprocName {
@@ -812,13 +813,153 @@ export function generateBibliographyXml(
 }
 
 /**
- * Generate an equation. Each LaTeX command or environment with no OMML form
- * adds a warning to `warnings`; the converter drops duplicate warnings.
+ * The OMML for an equation. Each LaTeX command or environment with no OMML
+ * form adds a warning to `warnings`; the converter drops duplicate warnings.
  */
-export function generateMathXml(latex: string, display: boolean, warnings?: string[]): string {
-  const omml = latexToOmml(latex, warnings && (command => warnings.push(
+function equationOmml(latex: string, warnings?: string[]): string {
+  return latexToOmml(latex, unknownCommandWarning(warnings));
+}
+
+function unknownCommandWarning(warnings?: string[]): ((command: string) => void) | undefined {
+  return warnings && (command => warnings.push(
     'Equation uses unsupported LaTeX "' + command + '"; Word shows it as literal text.',
-  )));
+  ));
+}
+
+const LATEX_OPENER: Record<string, string> = { '}': '{', '\\right': '\\left', '\\end': '\\begin' };
+// What can open or close a structure, plus escapes and % comments, which can't
+const LATEX_STRUCTURE_RE = /\\(?:left|right|begin|end)(?![a-zA-Z])|\\.|%[^\n]*|[{}]/g;
+
+/** The private commands of trackedEquationLatex, as a user might also write them */
+const PRIVATE_COMMAND_RE = /\\mmCritic(?:Ins|Del)(?![A-Za-z])/;
+
+/** Whether `latex` closes every unescaped brace, \left and \begin it opens, in order, and opens every one it closes. */
+function latexSelfContained(latex: string): boolean {
+  const open: string[] = [];
+  for (const [token] of latex.matchAll(LATEX_STRUCTURE_RE)) {
+    if (token.startsWith('%')) continue;
+    if (token === '{' || token === '\\left' || token === '\\begin') open.push(token);
+    else if (LATEX_OPENER[token] !== undefined && open.pop() !== LATEX_OPENER[token]) return false;
+  }
+  return open.length === 0;
+}
+
+/** Whether `latex` ends in a % comment, which would take in what follows it. */
+function endsInComment(latex: string): boolean {
+  let last: RegExpMatchArray | undefined;
+  for (const match of latex.matchAll(LATEX_STRUCTURE_RE)) last = match;
+  return !!last && last[0].startsWith('%') && last.index! + last[0].length === latex.length;
+}
+
+/**
+ * An equation with CriticMarkup inside as LaTeX in which each tracked span is
+ * a private command (CRITIC_INSERTION_COMMAND, CRITIC_DELETION_COMMAND), so it
+ * parses as one expression and a change inside a fraction or script stays in
+ * it. With `untracked`, each span is a plain group instead, which shows every
+ * part where it belongs. Undefined when a span opens a brace, \left or \begin
+ * it doesn't close or closes one it doesn't open, as in {++a}{b++} or
+ * {++\left(++}x\right), which no single expression can hold, or when the
+ * LaTeX already uses the private commands' names.
+ */
+export function trackedEquationLatex(parts: CriticMathPart[], untracked = false): string | undefined {
+  const contents = parts.flatMap(part => part.type === 'substitution' ? [part.oldContent, part.newContent] : [part.content]);
+  if (contents.some(content => PRIVATE_COMMAND_RE.test(content))) return undefined;
+  // A newline ends a comment that would otherwise take the closing brace
+  const tracked = (command: string, latex: string) => latexSelfContained(latex)
+    ? (untracked ? '' : command) + '{' + latex + (endsInComment(latex) ? '\n' : '') + '}'
+    : undefined;
+  let latex = '';
+  for (const part of parts) {
+    let piece: string | undefined;
+    if (part.type === 'math') piece = part.content;
+    else if (part.type === 'addition') piece = tracked(CRITIC_INSERTION_COMMAND, part.content);
+    else if (part.type === 'deletion') piece = tracked(CRITIC_DELETION_COMMAND, part.content);
+    else if (part.type === 'substitution') {
+      const oldLatex = tracked(CRITIC_DELETION_COMMAND, part.oldContent);
+      const newLatex = tracked(CRITIC_INSERTION_COMMAND, part.newContent);
+      piece = oldLatex !== undefined && newLatex !== undefined ? oldLatex + newLatex : undefined;
+    }
+    if (piece === undefined) return undefined;
+    latex += (endsInComment(latex) ? '\n' : '') + piece;
+  }
+  return latex;
+}
+
+/** The LaTeX of an equation with CriticMarkup inside once every change is
+ *  accepted, or rejected. */
+function equationViewLatex(parts: CriticMathPart[], accepted: boolean): string {
+  let latex = '';
+  for (const part of parts) {
+    const piece = part.type === 'math' ? part.content
+      : part.type === 'substitution' ? (accepted ? part.newContent : part.oldContent)
+        : part.type === (accepted ? 'addition' : 'deletion') ? part.content : '';
+    // A newline ends a comment that would otherwise take what follows, and {}
+    // a command that would otherwise run into a letter, as in {++\alpha++}x
+    if (piece) latex += (endsInComment(latex) ? '\n' : /\\[A-Za-z]+$/.test(latex) && /^[A-Za-z]/.test(piece) ? '{}' : '') + piece;
+  }
+  return latex;
+}
+
+/** The OMML of one view of an equation (see equationViewLatex). LaTeX that's
+ *  only whitespace, as {++ ++} accepted is, is a run of it, where
+ *  equationOmml gives nothing, as for an empty equation. */
+function equationViewOmml(latex: string, warnings?: string[]): string {
+  return latex && !latex.trim() ? '<m:r><m:t>' + latex + '</m:t></m:r>' : equationOmml(latex, warnings);
+}
+
+/** `omml` with adjacent runs of the same properties joined, which Word shows
+ *  the same way as one run. */
+function joinedRuns(omml: string): string {
+  const pair = /<m:r>((?:<m:rPr>(?:(?!<\/m:rPr>)[\s\S])*<\/m:rPr>)?)<m:t>([^<]*)<\/m:t><\/m:r><m:r>\1<m:t>/g;
+  let joined = omml.replace(/ xml:space="preserve"/g, '');
+  for (let previous = ''; joined !== previous;) {
+    previous = joined;
+    joined = joined.replace(pair, (_match, props: string, text: string) => '<m:r>' + props + '<m:t>' + text);
+  }
+  return joined;
+}
+
+/**
+ * Whether tracking the changes in `latex` (see trackedEquationLatex) in place
+ * gives what Accept All and Reject All should: the equation with every change
+ * accepted, and rejected. Word tracks runs, so a span that holds syntax
+ * rather than math doesn't, as in a{++&++}b in a matrix, x{++^2++},
+ * \sum{++\limits++} or {++\frac++}{1}{2}.
+ */
+function tracksInPlace(latex: string, parts: CriticMathPart[]): boolean {
+  const omml = trackedLatexToOmml(latex, (element, content) => '<' + element + '>' + content + '</' + element + '>');
+  const view = (accepted: boolean) => {
+    const [keep, drop] = accepted ? ['w:ins', 'w:del'] : ['w:del', 'w:ins'];
+    return omml.replace(new RegExp('<' + drop + '>[\\s\\S]*?</' + drop + '>', 'g'), '').replace(new RegExp('</?' + keep + '>', 'g'), '');
+  };
+  return [true, false].every(accepted => joinedRuns(view(accepted)) === joinedRuns(equationViewOmml(equationViewLatex(parts, accepted))));
+}
+
+/**
+ * An equation with CriticMarkup inside, as Word records an edit to an
+ * equation: one m:oMath with each changed part in w:ins or w:del. `track`
+ * wraps a part's OMML in the revision element. When the changes can't be
+ * tracked in place (see tracksInPlace), the equation is recorded as
+ * replaced, as Word records an edit that changes a structure: the deleted
+ * equation is what Reject All leaves, and the inserted one what Accept All
+ * leaves.
+ */
+export function generateTrackedMathXml(parts: CriticMathPart[], track: TrackChange, warnings?: string[], display = false): string {
+  const equation = (omml: string) => display ? '<m:oMathPara><m:oMath>' + omml + '</m:oMath></m:oMathPara>' : '<m:oMath>' + omml + '</m:oMath>';
+  const latex = trackedEquationLatex(parts);
+  if (latex !== undefined && tracksInPlace(latex, parts)) {
+    return equation(trackedLatexToOmml(latex, track, unknownCommandWarning(warnings)));
+  }
+  const view = (accepted: boolean) => {
+    const omml = equationViewOmml(equationViewLatex(parts, accepted), warnings);
+    return omml ? track(accepted ? 'w:ins' : 'w:del', omml) : '';
+  };
+  return equation(view(false) + view(true));
+}
+
+/** Generate an equation, warning as equationOmml does. */
+export function generateMathXml(latex: string, display: boolean, warnings?: string[]): string {
+  const omml = equationOmml(latex, warnings);
 
   if (display) {
     return '<m:oMathPara><m:oMath>' + omml + '</m:oMath></m:oMathPara>';

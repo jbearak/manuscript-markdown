@@ -2,7 +2,7 @@ import MarkdownIt from 'markdown-it';
 import { imagePathsWithSpaces } from './image-paths';
 import type Token from 'markdown-it/lib/token.mjs';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
-import { escapeXml, escapeXmlText, generateCitation, generateMathXml, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, type CiteprocEngine } from './md-to-docx-citations';
+import { escapeXml, escapeXmlText, generateCitation, generateMathXml, generateTrackedMathXml, trackedEquationLatex, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, type CiteprocEngine } from './md-to-docx-citations';
 import { downloadStyle, resolveCslCachePath } from './csl-loader';
 import { existsSync, readFileSync } from 'fs';
 import { isAbsolute, join, resolve } from 'path';
@@ -120,7 +120,8 @@ export interface MdToken {
   tableDecimalMark?: TableDecimalMark;
   tableDigitGrouping?: TableDigitGrouping;
   gridSourceColWidths?: number[]; // column char-widths inferred from +---+---+ source; persisted for round-trip fidelity and Word Online layout
-  criticParaMark?: 'addition' | 'deletion'; // heading promoted from a full-paragraph {++### ...++} / {--### ...--} span; emit paragraph-mark revision
+  criticParaMark?: 'addition' | 'deletion'; // paragraph mark revision: a heading promoted from a full-paragraph {++### ...++} / {--### ...--} span, or a block split at a paragraph break inside a revision
+  criticParaMarkRun?: MdRun; // the revision whose paragraph break ends this block; supplies author and date (default: the first run)
   bibliographyMarker?: true;  // sentinel: <!-- references --> / <!-- bibliography --> placement marker
   customStyleOpen?: string;   // sentinel: start of custom style block (style name)
   customStyleClose?: true;    // sentinel: end of custom style block
@@ -157,6 +158,7 @@ export interface MdRun {
   innerRuns?: MdRun[];      // parsed inner formatting for critic_add/del/highlight
   oldRuns?: MdRun[];        // parsed old-side formatting for critic_sub
   newRuns?: MdRun[];        // parsed new-side formatting for critic_sub
+  mathParts?: CriticMathPart[]; // inline equation with CriticMarkup inside; text holds every part's LaTeX
   author?: string;          // for comments/revisions
   date?: string;            // for comments/revisions
   commentText?: string;     // for critic_comment: the comment body
@@ -264,6 +266,7 @@ interface ManuscriptToken extends Token {
   prefixes?: string[];
   display?: boolean;
   footnoteLabel?: string;
+  criticMathParts?: CriticMathPart[];
 }
 
 function pushManuscriptToken(state: StateInline, type: string, tag: string, nesting: 1 | 0 | -1): ManuscriptToken {
@@ -704,22 +707,44 @@ function mathRule(state: StateInline, silent: boolean): boolean {
 
   const content = state.src.slice(match.contentStart, match.contentEnd);
   const isDisplay = match.delimiterLength === 2;
-  if (!isDisplay) {
-    const criticParts = splitCriticMarkupInMath(content);
-    if (criticParts) {
-      pushCriticMathTokens(state, criticParts);
-      return true;
-    }
+  const criticParts = splitCriticMarkupInMath(content);
+  if (criticParts && criticParts.every(isTrackedMathPart)) {
+    pushTrackedMathToken(state, criticParts, isDisplay);
+    return true;
+  }
+  // A highlight or comment splits an inline equation; a display equation
+  // can't be split into inline ones and keeps it as LaTeX
+  if (criticParts && !isDisplay) {
+    pushCriticMathTokens(state, criticParts);
+    return true;
   }
 
   pushMathToken(state, content, isDisplay);
   return true;
 }
 
+/** Whether Word can record a part as a change inside an equation. */
+function isTrackedMathPart(part: CriticMathPart): boolean {
+  return part.type === 'math' || part.type === 'addition' || part.type === 'deletion' || part.type === 'substitution';
+}
+
+/** An equation with insertions, deletions and substitutions inside, which
+ *  become tracked runs in one equation (see generateTrackedMathXml). */
+function pushTrackedMathToken(state: StateInline, parts: CriticMathPart[], display: boolean): void {
+  const token = pushManuscriptToken(state, 'math', '', 0);
+  // For rendering without a tracker, as inside a deleted span: every part
+  // where it belongs
+  token.content = trackedEquationLatex(parts, true)
+    ?? parts.map(part => part.type === 'substitution' ? part.oldContent + ' ' + part.newContent : part.content).join(' ');
+  token.criticMathParts = parts;
+  if (display) token.display = true;
+}
+
 function wrapInlineMathFragment(content: string): string {
   return content.length > 0 ? '$' + content + '$' : '';
 }
 
+/** An inline equation split at its highlights and comments, which can't sit inside an equation. */
 function pushCriticMathTokens(state: StateInline, parts: CriticMathPart[]): void {
   const pushMath = (content: string) => {
     if (content) pushMathToken(state, content);
@@ -781,6 +806,11 @@ function paraPlaceholderRule(state: StateInline, silent: boolean): boolean {
 
 function createMarkdownIt(): MarkdownIt {
   const md = new MarkdownIt({ html: true, linkify: true });
+  // Match the VS Code preview, which links only URLs with a scheme. Fuzzy
+  // matching would turn sd.ky or README.md into links to a country's TLD, and
+  // Word can't open a protocol-relative //example.com.
+  md.linkify.set({ fuzzyLink: false });
+  md.linkify.add('//', null);
   md.use(imagePathsWithSpaces);
 
   md.inline.ruler.before('emphasis', 'para_placeholder', paraPlaceholderRule);
@@ -1418,36 +1448,71 @@ interface CriticDisplaySegment {
   displayMath: boolean;
 }
 
+interface CriticParagraphSplit {
+  parts: MdRun[][];
+  /** marks[k] is the revision containing the break after parts[k], if any. */
+  marks: Array<MdRun | undefined>;
+}
+
+/** A substitution whose old or new text has a paragraph break, as the deletion
+ *  and addition it exports to anyway, so each side can split at the break. */
+function splitSubstitution(run: MdRun): MdRun[] | undefined {
+  if (run.type !== 'critic_sub') return undefined;
+  const hasBreak = (runs: MdRun[] | undefined) => !!runs && !!splitRunsAtCriticParagraphs(runs);
+  if (!hasBreak(run.oldRuns) && !hasBreak(run.newRuns)) return undefined;
+  const side = { oldRuns: undefined, newRuns: undefined, newText: undefined };
+  const sides: MdRun[] = [{ ...run, ...side, type: 'critic_del', innerRuns: run.oldRuns }];
+  if (run.newText) sides.push({ ...run, ...side, type: 'critic_add', text: run.newText, innerRuns: run.newRuns });
+  return sides;
+}
+
 /** Split parsed runs so inline formatting and nested revisions survive each boundary. */
-function splitRunsAtCriticParagraphs(runs: MdRun[]): MdRun[][] | undefined {
+function splitRunsAtCriticParagraphs(runs: MdRun[]): CriticParagraphSplit | undefined {
   const parts: MdRun[][] = [[]];
+  const marks: Array<MdRun | undefined> = [];
   let found = false;
-  for (let index = 0; index < runs.length; index++) {
-    const run = runs[index];
+  const queue = [...runs];
+  for (let index = 0; index < queue.length; index++) {
+    const run = queue[index];
     if (run.criticParagraphBreak) {
       found = true;
       parts.push([]);
+      marks.push(undefined);
       index++; // the second softbreak belongs to the same blank line
       continue;
     }
-    let split: MdRun[][] | undefined;
+    const sides = splitSubstitution(run);
+    if (sides) {
+      queue.splice(index, 1, ...sides);
+      index--;
+      continue;
+    }
+    let split: CriticParagraphSplit | undefined;
     if (run.innerRuns && (run.type === 'critic_add' || run.type === 'critic_del')) {
-      split = splitRunsAtCriticParagraphs(run.innerRuns)?.map(part => {
-        const innerRuns = trimBreakRuns(part);
-        return innerRuns.length > 0
-          ? [{ ...run, text: innerRuns.map(inner => inner.text).join(''), innerRuns }]
-          : [];
-      });
+      const inner = splitRunsAtCriticParagraphs(run.innerRuns);
+      if (inner) {
+        split = {
+          parts: inner.parts.map(part => {
+            const innerRuns = trimBreakRuns(part);
+            return innerRuns.length > 0
+              ? [{ ...run, text: innerRuns.map(innerRun => innerRun.text).join(''), innerRuns }]
+              : [];
+          }),
+          // A break directly inside this revision is tracked by it
+          marks: inner.marks.map(mark => mark ?? run),
+        };
+      }
     }
     if (!split) {
       parts[parts.length - 1].push(run);
       continue;
     }
     found = true;
-    parts[parts.length - 1].push(...split[0]);
-    parts.push(...split.slice(1));
+    parts[parts.length - 1].push(...split.parts[0]);
+    parts.push(...split.parts.slice(1));
+    marks.push(...split.marks);
   }
-  return found ? parts : undefined;
+  return found ? { parts, marks } : undefined;
 }
 
 /** Keep list indentation while limiting heading styles and alert labels to the first segment. */
@@ -1469,16 +1534,44 @@ function criticBlockSegment(token: MdToken, runs: MdRun[], index: number): MdTok
   };
 }
 
-/** Restore block boundaries inside additions and deletions, preserving wholly empty revisions. */
+/** Restore block boundaries inside additions and deletions, preserving wholly
+ *  empty revisions. A break inside a revision tracks the paragraph mark of the
+ *  block before it, so Word's Accept All and Reject All join the blocks again. */
 function splitCriticParagraphs(tokens: MdToken[]): MdToken[] {
   return tokens.flatMap(token => {
     if (!['paragraph', 'heading', 'list_item', 'blockquote'].includes(token.type)) return [token];
-    const parts = splitRunsAtCriticParagraphs(token.runs);
-    if (!parts) return [token];
-    const nonempty = parts.filter(runs => runs.length > 0);
-    return nonempty.length > 0
-      ? nonempty.map((runs, index) => criticBlockSegment(token, runs, index))
-      : [token];
+    const split = splitRunsAtCriticParagraphs(token.runs);
+    if (!split) return [token];
+    const segments: MdToken[] = [];
+    split.parts.forEach((runs, k) => {
+      if (runs.length === 0) {
+        // An empty paragraph between a deleted and an inserted mark, as in
+        // {~~a\n\n~>\n\nc~~}, leaves one break whether the changes are
+        // accepted or rejected, so the mark before it isn't tracked
+        const previous = segments[segments.length - 1];
+        const mark = split.marks[k];
+        if (previous?.criticParaMark && mark && k < split.parts.length - 1
+          && previous.criticParaMark !== (mark.type === 'critic_add' ? 'addition' : 'deletion')) {
+          segments[segments.length - 1] = { ...previous, criticParaMark: undefined, criticParaMarkRun: undefined };
+        }
+        return;
+      }
+      const segment = criticBlockSegment(token, runs, segments.length);
+      // The last part ends where the block does, so it keeps the block's own
+      // mark. So does a heading: import reads a revised heading mark as a
+      // wholly inserted or deleted heading, as promoteCriticHeadingParagraph writes it.
+      if (k === split.parts.length - 1 || segment.type === 'heading') {
+        segments.push(segment);
+        return;
+      }
+      const mark = split.marks[k];
+      segments.push({
+        ...segment,
+        criticParaMark: mark ? (mark.type === 'critic_add' ? 'addition' : 'deletion') : undefined,
+        criticParaMarkRun: mark,
+      });
+    });
+    return segments.length > 0 ? segments : [token];
   });
 }
 
@@ -2817,6 +2910,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
           type: 'math',
           text: token.content,
           display: token.display,
+          ...(token.criticMathParts ? { mathParts: token.criticMathParts } : {}),
           ...formatStack,
           href: currentHref
         });
@@ -5469,7 +5563,9 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         }
       }
     } else if (run.type === 'math') {
-      xml += generateMathXml(run.text, !!run.display, state.warnings);
+      xml += run.mathParts
+        ? generateTrackedMathXml(run.mathParts, revisionWrapper(run, state, options), state.warnings, !!run.display)
+        : generateMathXml(run.text, !!run.display, state.warnings);
     } else if (run.type === 'comment_range_start') {
       const mdId = run.commentId || '';
       let numericId = state.commentIdMap.get(mdId);
@@ -5642,6 +5738,34 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
   return xml;
 }
 
+/** Wraps content in a w:ins or w:del attributed the way generateRuns attributes the run's revisions. */
+function revisionWrapper(run: MdRun, state: DocxGenState, options?: MdToDocxOptions): (element: 'w:ins' | 'w:del', content: string) => string {
+  const author = run.author || options?.authorName || 'Unknown';
+  const date = normalizeToUtcIso(run.date || '', state.timezone);
+  const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
+  return (element, content) => '<' + element + ' w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + content + '</' + element + '>';
+}
+
+/** The w:ins or w:del that tracks a block's paragraph mark (see criticParaMark), or ''. */
+function paragraphMarkRevision(token: MdToken, state: DocxGenState, options?: MdToDocxOptions): string {
+  if (!token.criticParaMark) return '';
+  const run = token.criticParaMarkRun ?? token.runs[0];
+  const author = run?.author || options?.authorName || 'Unknown';
+  const date = normalizeToUtcIso(run?.date || '', state.timezone);
+  const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
+  const el = token.criticParaMark === 'addition' ? 'w:ins' : 'w:del';
+  return '<' + el + ' w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '/>';
+}
+
+/** Add a paragraph-mark revision to a pPr. Revision elements come first in a
+ *  paragraph mark's rPr, and rPr comes last in every pPr this file writes. */
+function withParagraphMarkRevision(pPr: string, revision: string): string {
+  if (!revision) return pPr;
+  if (pPr.includes('<w:rPr>')) return pPr.replace('<w:rPr>', '<w:rPr>' + revision);
+  if (pPr) return pPr.replace('</w:pPr>', '<w:rPr>' + revision + '</w:rPr></w:pPr>');
+  return '<w:pPr><w:rPr>' + revision + '</w:rPr></w:pPr>';
+}
+
 export function generateParagraph(token: MdToken, state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine): string {
   let pPr = '';
 
@@ -5674,15 +5798,8 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
       // inserted/deleted is how Word represents a wholly added/removed
       // paragraph, and it lets the converter reconstruct the original
       // {++### ...++} form (marker inside the Critic span) on round-trip.
-      let paraMarkRPr = '';
-      if (token.criticParaMark) {
-        const run = token.runs[0];
-        const author = run?.author || options?.authorName || 'Unknown';
-        const date = normalizeToUtcIso(run?.date || '', state.timezone);
-        const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
-        const el = token.criticParaMark === 'addition' ? 'w:ins' : 'w:del';
-        paraMarkRPr = '<w:rPr><' + el + ' w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '/></w:rPr>';
-      }
+      const paraMarkRevision = paragraphMarkRevision(token, state, options);
+      const paraMarkRPr = paraMarkRevision ? '<w:rPr>' + paraMarkRevision + '</w:rPr>' : '';
       pPr = '<w:pPr><w:pStyle w:val="Heading' + (token.level || 1) + '"/>' + paraMarkRPr + '</w:pPr>';
       break;
     }
@@ -5829,6 +5946,8 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
       '<w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr></w:pPr>'
     );
   }
+  // Headings place their paragraph-mark revision above
+  if (token.type !== 'heading') pPr = withParagraphMarkRevision(pPr, paragraphMarkRevision(token, state, options));
   let xml = omitEmptyAlertLead
     ? ''
     : '<w:p>' + pPr + alertPrefix + taskPrefix + runs + '</w:p>';
@@ -7054,9 +7173,11 @@ export async function convertMdToDocx(
       // Handle custom style sentinels inside footnotes
       if (t.customStyleOpen) { state.activeCustomStyle = t.customStyleOpen; continue; }
       if (t.customStyleClose) { state.activeCustomStyle = undefined; continue; }
-      const effectivePPr = (t.type === 'paragraph' && state.activeCustomStyle)
+      const stylePPr = (t.type === 'paragraph' && state.activeCustomStyle)
         ? '<w:pPr><w:pStyle w:val="' + customStyleId(state.activeCustomStyle) + '"/></w:pPr>'
         : paragraphPPr;
+      // Note paragraphs are all FootnoteText, so a heading's whole-heading mark doesn't apply
+      const effectivePPr = t.type === 'heading' ? stylePPr : withParagraphMarkRevision(stylePPr, paragraphMarkRevision(t, state, options));
       if (isFirstContent) {
         isFirstContent = false;
         if (t.type === 'table') {

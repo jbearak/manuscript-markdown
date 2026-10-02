@@ -130,3 +130,145 @@ describe('paragraphs inside CriticMarkup additions', () => {
     expect(html.match(/<p>/g)).toHaveLength(2);
   });
 });
+
+describe('tracked paragraph marks', () => {
+  async function documentParagraphs(md: string): Promise<string[]> {
+    const { docx } = await convertMdToDocx(md);
+    const zip = await JSZip.loadAsync(docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    return xml.match(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g) ?? [];
+  }
+
+  async function roundTrip(md: string): Promise<string> {
+    const { docx } = await convertMdToDocx(md);
+    const imported = await convertDocx(docx);
+    return imported.markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+  }
+
+  it('splits a substitution at a paragraph break in its old text and deletes the paragraph mark', async () => {
+    const paragraphs = await documentParagraphs('Start {~~old text.\n\nNew para~>replacement~~} end.');
+    expect(paragraphs).toHaveLength(2);
+    expect(paragraphs[0]).toContain('<w:delText>old text.</w:delText>');
+    expect(paragraphs[0]).toMatch(/<w:pPr>(?:(?!<\/w:pPr>).)*<w:rPr><w:del w:id="\d+" w:author="[^"]*"[^>]*\/><\/w:rPr><\/w:pPr>/);
+    expect(paragraphs[1]).toContain('<w:delText>New para</w:delText>');
+    expect(paragraphs[1]).toContain('<w:t>replacement</w:t>');
+    expect(paragraphs[1]).not.toContain('<w:rPr><w:del ');
+  });
+
+  it('marks the paragraph mark inside additions, deletions, and the new text of a substitution', async () => {
+    const cases: Array<[string, 'ins' | 'del']> = [
+      ['x {++a\n\nb++} y', 'ins'],
+      ['A {--deleted\n\n--}B', 'del'],
+      ['x {~~a~>b\n\nc~~} y', 'ins'],
+    ];
+    for (const [md, el] of cases) {
+      const paragraphs = await documentParagraphs(md);
+      expect(paragraphs).toHaveLength(2);
+      expect(paragraphs[0]).toContain('<w:rPr><w:' + el + ' w:id=');
+      expect(paragraphs[1]).not.toMatch(/<w:pPr>.*<w:rPr><w:(?:ins|del) /);
+    }
+  });
+
+  it('imports a tracked paragraph break inside the CriticMarkup span when text remains on both sides', async () => {
+    for (const md of [
+      'Start {~~old text.\n\nNew para~>replacement~~} end.',
+      'A {--deleted\n\n--}B',
+      'x {++a\n\nb++} y',
+      'x {~~a~>b\n\nc~~} y',
+      // A break that opens the new side follows the old side, a deletion
+      'x {~~a~>\n\nb~~} y',
+      'x {~~a~>\n\n~~} y',
+      'x {~~**a**~>\n\nb~~} y',
+      '- x {~~a~>\n\n  b~~} y',
+      // ...and with a break in the old side too
+      'x {~~a\n\nb~>\n\nc~~} y',
+      '- x {~~a\n\n  b~>\n\n  c~~} y',
+    ]) {
+      expect(await roundTrip(md)).toBe(md);
+    }
+  });
+
+  it('leaves untracked a break that both sides of a substitution end and start with', async () => {
+    // Accepting or rejecting the change leaves the break either way
+    const paragraphs = await documentParagraphs('x {~~a\n\n~>\n\nc~~} y');
+    expect(paragraphs).toHaveLength(2);
+    expect(paragraphs[0]).not.toMatch(/<w:pPr>.*<w:rPr><w:(?:ins|del) /);
+    expect(await roundTrip('x {~~a\n\n~>\n\nc~~} y')).toBe('x {--a--}\n\n{++c++} y');
+  });
+
+  it('leaves a heading split by a revision without a paragraph-mark revision', async () => {
+    // Import reads a revised heading mark as a wholly inserted heading, which
+    // would move the # inside the span
+    const paragraphs = await documentParagraphs('# {++a\n\nb++} y');
+    expect(paragraphs[0]).toContain('w:val="Heading1"');
+    expect(paragraphs[0]).not.toContain('<w:rPr><w:ins ');
+    expect(await roundTrip('# {++a\n\nb++} y')).toBe('# {++a++}\n\n{++b++} y');
+  });
+
+  it('keeps a formatted substitution whole, across a break or not', async () => {
+    // Word stores each formatted run of a side separately; import pairs the sides
+    for (const md of [
+      'x {~~**a**\n\n**b**~>*c*\n\n*d*~~} y',
+      'x {~~**a**\n\nb~>c~~} y',
+      'x {~~a~>*c*\n\nd~~} y',
+      'x {~~**a** b~>c~~} y',
+    ]) {
+      expect(await roundTrip(md)).toBe(md);
+    }
+  });
+
+  it('keeps adjacent equations on one side of a substitution apart', async () => {
+    // One span for the side would run the equations' dollar signs together
+    for (const md of ['See {--x--}{++$a$++}{++$b$++} here.', 'See {--$a$--}{--$b$--}{++y++} here.', 'See {~~x~>$a$ $b$~~} here.']) {
+      expect(await roundTrip(md)).toBe(md);
+    }
+  });
+
+  it('keeps private-use characters in the text around a tracked break', async () => {
+    for (const md of ['A\uE000B\uE001C {++x\n\nmore++} end', 'A\uE000 {++x\n\nmore++} end \uE001']) {
+      expect(await roundTrip(md)).toBe(md);
+    }
+  });
+
+  it('keeps a break inside the span after a link, math, code or formatting', async () => {
+    // The link, code or emphasis closes before the break, which stays in the span
+    for (const md of [
+      'x {++[a](https://e.com)\n\nb++} y',
+      'x {++$a$\n\nb++} y',
+      'x {--$a$\n\nb--} y',
+      'x {++`a`\n\nb++} y',
+      'x {++**a**\n\nb++} y',
+      'x {++*a*\n\n*b*++} y',
+      'x {++H~2~\n\nb++} y',
+    ]) {
+      expect(await roundTrip(md)).toBe(md);
+    }
+  });
+
+  it('tracks and restores paragraph breaks inside revisions in notes', async () => {
+    const md = 'Text[^1] here.\n\n[^1]: Start {~~a\n\n    b~>c~~} end.';
+    const { docx } = await convertMdToDocx(md);
+    const zip = await JSZip.loadAsync(docx);
+    const notes = await zip.file('word/footnotes.xml')!.async('string');
+    expect(notes).toMatch(/<w:rPr><w:del w:id="\d+"[^>]*\/><\/w:rPr><\/w:pPr>(?:(?!<\/w:p>).)*<w:delText>a<\/w:delText>/);
+    const imported = await roundTrip(md);
+    expect(imported).toContain('Start {~~a\n    \n    b~>c~~} end.');
+  });
+
+  it('restores tracked breaks inside list items, quotes and custom styles', async () => {
+    for (const md of [
+      '- x {++a\n\n  b++} y\n- next',
+      '1. x {++a\n\n   b++} y',
+      '> x {++a\n>\n> b++} y',
+      '> [!NOTE]\n> x {++a\n>\n> b++} y',
+      '<!-- style: special -->\nx {++a\n\nb++} y\n<!-- /style -->',
+    ]) {
+      expect(await roundTrip(md)).toBe(md);
+    }
+  });
+
+  it('keeps wholly inserted or deleted paragraphs as separate paragraphs on import', async () => {
+    expect(await roundTrip('{--Gone.\n\n--}Kept.')).toBe('{--Gone.--}\n\nKept.');
+    expect(await roundTrip('Kept.{++\n\nNew.++}')).toBe('Kept.\n\n{++New.++}');
+  });
+});

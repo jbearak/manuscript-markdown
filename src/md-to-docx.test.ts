@@ -190,6 +190,14 @@ describe('GFM support in Markdown→DOCX parser', () => {
     expect(hrefRun?.text).toBe('https://example.com');
   });
 
+  it('leaves bare domain names as text, as the VS Code preview does', () => {
+    // Fuzzy linkify reads sd.ky (the .ky TLD) and README.md (.md) as links,
+    // and a protocol-relative link has no scheme for Word to open
+    const tokens = parseMd('Uses sd.ky[3,2], README.md, //example.com and www.example.com, or me@example.com.');
+    const hrefs = tokens[0].runs.filter(run => run.href).map(run => run.href);
+    expect(hrefs).toEqual(['mailto:me@example.com']);
+  });
+
   it('parses task list markers semantically and strips literal marker text', () => {
     const tokens = parseMd('- [x] done\n- [ ] todo');
     const listItems = tokens.filter(t => t.type === 'list_item');
@@ -1818,6 +1826,17 @@ console.log('code');
 describe('CriticMarkup OOXML generation', () => {
   const createState = () => ({ ...makeState(), rIdOffset: 3 });
 
+  it('writes CriticMarkup inside an inline equation as tracked runs in one equation', async () => {
+    const { docx } = await convertMdToDocx('See $a {++b++} c {~~d~>e~~}$ here.');
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const equations = xml.match(/<m:oMath>[\s\S]*?<\/m:oMath>/g) ?? [];
+    expect(equations).toHaveLength(1);
+    expect(equations[0]).toMatch(/<w:ins w:id="\d+" w:author="[^"]+"[^>]*><m:r>(?:(?!<\/m:r>).)*<m:t>b<\/m:t><\/m:r><\/w:ins>/);
+    expect(equations[0]).toMatch(/<w:del w:id="\d+"[^>]*><m:r>(?:(?!<\/m:r>).)*<m:t>d<\/m:t><\/m:r><\/w:del><w:ins w:id="\d+"[^>]*><m:r>(?:(?!<\/m:r>).)*<m:t>e<\/m:t>/);
+  });
+
   it('generates w:ins for additions', () => {
     const token: MdToken = {
       type: 'paragraph',
@@ -1959,49 +1978,44 @@ describe('CriticMarkup OOXML generation', () => {
     expect(result).not.toContain('==highlighted==');
   });
 
-  it('parses CriticMarkup inside inline math as revised math runs', () => {
+  it('parses CriticMarkup inside inline math as one math run with tracked parts', () => {
     const token = parseMd('The variance is $u_j^2{+++\\tau_{g_j}^2++}$.')[0];
-    const math = token.runs.find(run => run.type === 'math');
-    const addition = token.runs.find(run => run.type === 'critic_add');
+    const math = token.runs.filter(run => run.type === 'math');
 
-    expect(math?.text).toBe('u_j^2');
-    expect(addition?.text).toBe('$+\\tau_{g_j}^2$');
-    expect(addition?.innerRuns).toEqual([
-      expect.objectContaining({ type: 'math', text: '+\\tau_{g_j}^2' }),
+    expect(math).toHaveLength(1);
+    expect(token.runs.some(run => run.type === 'critic_add')).toBe(false);
+    expect(math[0].mathParts).toEqual([
+      { type: 'math', content: 'u_j^2' },
+      { type: 'addition', content: '+\\tau_{g_j}^2' },
     ]);
   });
 
   it('restores source newlines in revised inline math for Word export', () => {
-    const token = parseMd('$a{++b\nc++}$')[0];
-    const addition = token.runs.find(run => run.type === 'critic_add');
+    const math = parseMd('$a{++b\nc++}$')[0].runs.find(run => run.type === 'math');
 
-    expect(addition?.innerRuns).toEqual([
-      expect.objectContaining({ type: 'math', text: 'b\nc' }),
+    expect(math?.mathParts).toEqual([
+      { type: 'math', content: 'a' },
+      { type: 'addition', content: 'b\nc' },
     ]);
-    expect(addition?.text).not.toContain('LINE');
+    expect(math?.text).not.toContain('LINE');
   });
 
   it('keeps a next-line Critic opener inside inline math for Word export', () => {
-    const token = parseMd('$a+{++\n+b++}$')[0];
-    const addition = token.runs.find(run => run.type === 'critic_add');
+    const math = parseMd('$a+{++\n+b++}$')[0].runs.find(run => run.type === 'math');
 
-    expect(token.runs).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'math', text: 'a+' }),
-      expect.objectContaining({ type: 'critic_add' }),
-    ]));
-    expect(addition?.innerRuns).toEqual([
-      expect.objectContaining({ type: 'math', text: '\n+b' }),
+    expect(math?.mathParts).toEqual([
+      { type: 'math', content: 'a+' },
+      { type: 'addition', content: '\n+b' },
     ]);
   });
 
   it('ignores escaped dollars when closing revised inline math for Word export', () => {
     const token = parseMd('$a+\\$+{++b++}$')[0];
     const math = token.runs.find(run => run.type === 'math');
-    const addition = token.runs.find(run => run.type === 'critic_add');
 
-    expect(math?.text).toBe('a+\\$+');
-    expect(addition?.innerRuns).toEqual([
-      expect.objectContaining({ type: 'math', text: 'b' }),
+    expect(math?.mathParts).toEqual([
+      { type: 'math', content: 'a+\\$+' },
+      { type: 'addition', content: 'b' },
     ]);
     expect(token.runs.at(-1)?.text).not.toBe('$');
   });
@@ -2019,10 +2033,84 @@ describe('CriticMarkup OOXML generation', () => {
     const state = createState();
     const result = generateParagraph(token, state, { authorName: 'Default' });
 
-    expect(result).toContain('<w:del');
-    expect(result).toContain('<w:ins');
-    expect(result.match(/<m:oMath>/g)).toHaveLength(3);
+    expect(result.match(/<m:oMath>/g)).toHaveLength(1);
+    expect(result).toMatch(/<m:oMath>(?:(?!<\/m:oMath>).)*<w:del w:id="\d+" w:author="Default"[^>]*>.*<\/w:del><w:ins w:id="\d+" w:author="Default"[^>]*>/);
     expect(result).not.toContain('{~~');
+  });
+
+  it('records an equation as replaced when its changes can\'t be tracked in place', () => {
+    // Word can't track half a structure: the deletion is what Reject All
+    // leaves, and the insertion what Accept All leaves
+    for (const [md, rejected, structure] of [
+      ['$a{++\\left(++}x\\right)$', 'ax)', '<m:d>'],
+      ['${++\\begin{matrix}++} a \\end{matrix}$', ' a ', '<m:m>'],
+      // Nor a span around a root's degree, or a script, apart from what it's on
+      ['$\\sqrt{++[3]++}{x}$', 'x', '<m:deg>'],
+      ['$\\sin{++^2++}(x)$', 'sin(x)', '<m:sSup>'],
+      ['$\\sum{++_i++}^n x$', 'nx', '<m:sub><m:r>'],
+      // Nor one that holds syntax rather than math, which Word can't track
+      ['$\\begin{matrix}a{++&++}b\\end{matrix}$', 'ab', '<m:mr><m:e><m:r><m:t>a</m:t></m:r></m:e><m:e>'],
+      ['$\\sum{++\\limits++}_{i}^{n} x$', 'inx', '<m:limLoc m:val="undOvr"/>'],
+      ['${++\\frac++}{1}{2}$', '12', '<m:f>'],
+    ] as const) {
+      const result = generateParagraph(parseMd(md)[0], createState(), { authorName: 'Default' });
+      const deleted = [...result.matchAll(/<w:del [^>]*>(.*?)<\/w:del>/g)].map(m => m[1]);
+      const inserted = [...result.matchAll(/<w:ins [^>]*>(.*?)<\/w:ins>/g)].map(m => m[1]);
+      expect(deleted.map(omml => omml.replace(/<[^>]+>/g, ''))).toEqual([rejected]);
+      expect(inserted).toHaveLength(1);
+      expect(inserted[0]).toContain(structure);
+      expect(result.match(/<m:oMath>/g)).toHaveLength(1);
+    }
+  });
+
+  it('leaves the private commands to tracked parts', async () => {
+    const { trackedEquationLatex } = await import('./md-to-docx-citations');
+    const parts = [{ type: 'math' as const, content: 'a ' }, { type: 'addition' as const, content: 'b' }];
+    expect(trackedEquationLatex(parts)).toBe('a \\mmCriticIns{b}');
+    // Rendered without a tracker, as inside a deleted span, every part shows
+    expect(trackedEquationLatex(parts, true)).toBe('a {b}');
+    // A user's own command of that name is unsupported, as any other is
+    expect(trackedEquationLatex([{ type: 'math', content: '\\mmCriticIns{x}' }, { type: 'addition', content: 'b' }])).toBeUndefined();
+    const state = createState();
+    const result = generateParagraph(parseMd('$a {++\\mmCriticIns{x}++} b$')[0], state, { authorName: 'Default' });
+    expect(result).toContain('mmCriticIns');
+    expect(state.warnings.some(warning => warning.includes('mmCriticIns'))).toBe(true);
+  });
+
+  it('tracks a change in place when it splits styled text into runs or ends in a command', () => {
+    // Word shows adjacent runs of one style as one, so this is what accepting
+    // or rejecting the change should give. Accepting {++\alpha++}x gives
+    // \alpha then x, not \alphax.
+    for (const md of ['$\\text{a {++b++} c}$', '$\\mathbf{a{--b--}}$', '$\\operatorname{mar{++gin++}}x$', '${++\\alpha++}x$']) {
+      const result = generateParagraph(parseMd(md)[0], createState(), { authorName: 'Default' });
+      expect(result.match(/<w:(?:ins|del) /g)).toHaveLength(1);
+      expect(result).not.toMatch(/<w:(?:ins|del) [^>]*><m:(?:f|rad|func)\b/);
+    }
+  });
+
+  it('writes CriticMarkup inside a display equation as tracked runs in it', () => {
+    const fence = '$'.repeat(2);
+    const result = generateParagraph(parseMd(fence + '\na {++b++} c\n' + fence)[0], createState(), { authorName: 'Default' });
+    expect(result).toContain('<m:oMathPara><m:oMath>');
+    expect(result).toMatch(/<w:ins [^>]*><m:r><m:t>b<\/m:t><\/m:r><\/w:ins>/);
+    expect(result.match(/<m:oMath>/g)).toHaveLength(1);
+    expect(result).not.toContain('++');
+  });
+
+  it('ends a LaTeX comment before the brace that closes a tracked part', async () => {
+    const { trackedEquationLatex } = await import('./md-to-docx-citations');
+    expect(trackedEquationLatex([{ type: 'math', content: 'a ' }, { type: 'addition', content: 'b % c' }, { type: 'math', content: ' d' }]))
+      .toBe('a \\mmCriticIns{b % c\n} d');
+    expect(trackedEquationLatex([{ type: 'math', content: 'a % c' }, { type: 'addition', content: 'b' }]))
+      .toBe('a % c\n\\mmCriticIns{b}');
+    // Braces in a comment don't count toward balance
+    expect(trackedEquationLatex([{ type: 'addition', content: 'a % }\nb' }])).toBe('\\mmCriticIns{a % }\nb}');
+  });
+
+  it('keeps highlights and comments inside inline math as separate equations', () => {
+    const runs = parseMd('$a {==b==}{>>note<<} c$')[0].runs;
+    expect(runs.filter(run => run.type === 'math').every(run => !run.mathParts)).toBe(true);
+    expect(runs.some(run => run.type === 'critic_highlight')).toBe(true);
   });
 
   it('puts display math inside a multiline addition in its own Word paragraph', () => {
@@ -2391,10 +2479,16 @@ describe('parseMd multi-paragraph CriticMarkup', () => {
     expect(delRuns.length).toBe(2);
   });
 
-  it('parses multi-paragraph substitution', () => {
+  it('splits a multi-paragraph substitution into its deletion and addition', () => {
     const tokens = parseMd('{~~old\n\ntext~>new\n\ntext~~}');
-    const subRuns = tokens.flatMap(t => t.runs).filter(r => r.type === 'critic_sub');
-    expect(subRuns.length).toBe(1);
+    expect(tokens.flatMap(t => t.runs).filter(r => r.type === 'critic_sub')).toHaveLength(0);
+    expect(tokens.map(t => t.runs.map(r => r.type + ':' + r.text))).toEqual([
+      ['critic_del:old'],
+      ['critic_del:text', 'critic_add:new'],
+      ['critic_add:text'],
+    ]);
+    // Each break tracks the paragraph mark before it with its own side's revision
+    expect(tokens.map(t => t.criticParaMark)).toEqual(['deletion', 'addition', undefined]);
   });
 
   it('parses multi-paragraph comment with author attribution', () => {

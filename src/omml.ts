@@ -1091,10 +1091,57 @@ function translateNode(node: XmlNode): string {
  * @returns LaTeX string (without delimiters)
  */
 export function ommlToLatex(children: XmlNode[]): string {
+  return ommlChildrenToLatex(children).trim();
+}
+
+/** ommlToLatex without the trim, for the content of a tracked change, which
+ *  may be only a space such as \quad's em space. */
+function ommlChildrenToLatex(children: XmlNode[]): string {
   if (!Array.isArray(children)) return '';
   let result = '';
-  for (const child of children) {
-    result = appendLatex(result, translateNode(child));
+  // Whether the last markup's content ends with a command
+  let markupEndsInCommand = false;
+  for (let i = 0; i < children.length; i++) {
+    const change = trackedChange(children[i]);
+    if (!change) {
+      let latex = translateNode(children[i]);
+      if (markupEndsInCommand && /^[A-Za-z]/.test(latex)) latex = '{}' + latex;
+      if (latex) markupEndsInCommand = false;
+      result = appendLatex(result, latex);
+      continue;
+    }
+    let contents: string[];
+    const next = trackedChange(children[i + 1]);
+    // A substitution needs one author and time, as tryRenderSubstitution in converter.ts requires
+    if (change.type === 'w:del' && next?.type === 'w:ins' && next.author === change.author && next.date === change.date) {
+      contents = [ommlChildrenToLatex(change.children), ommlChildrenToLatex(next.children)];
+      i++;
+    } else {
+      contents = change.type === 'w:ins' ? ['', ommlChildrenToLatex(change.children)] : [ommlChildrenToLatex(change.children), ''];
+    }
+    const [oldLatex, newLatex] = contents;
+    const markup = oldLatex && newLatex ? '{~~' + oldLatex + '~>' + newLatex + '~~}'
+      : oldLatex ? '{--' + oldLatex + '--}'
+        : newLatex ? '{++' + newLatex + '++}' : '';
+    if (!markup) continue;
+    // Accepting or rejecting the change joins what's on either side of the
+    // markup to its content, so {} keeps a command from running into a letter
+    // there, as in \alpha{}{++x++}. A space would export as a space in both.
+    if (/\\[A-Za-z]+$/.test(result) || (markupEndsInCommand && contents.some(latex => /^[A-Za-z]/.test(latex)))) {
+      result += '{}';
+    }
+    result += markup;
+    markupEndsInCommand = contents.some(latex => /\\[A-Za-z]+$/.test(latex));
   }
-  return result.trim();
+  return result;
+}
+
+/** A w:ins or w:del inside an equation: Word's record of an edit to it, which
+ *  becomes CriticMarkup inside $...$ (see splitCriticMarkupInMath). */
+function trackedChange(node: XmlNode | undefined): { type: 'w:ins' | 'w:del'; children: XmlNode[]; author: string; date: string } | undefined {
+  if (!node) return undefined;
+  const type = node['w:ins'] !== undefined ? 'w:ins' : node['w:del'] !== undefined ? 'w:del' : undefined;
+  if (!type) return undefined;
+  const attrs = (node[':@'] ?? {}) as Record<string, string | undefined>;
+  return { type, children: asXmlNodes(node[type]), author: attrs['@_w:author'] ?? '', date: attrs['@_w:date'] ?? '' };
 }
