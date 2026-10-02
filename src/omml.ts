@@ -514,11 +514,11 @@ function translateFraction(children: XmlNode[]): string {
 }
 
 /**
- * Wrap a script argument in braces only when needed.
+ * Wrap a script's base in braces only when needed.
  * Single ASCII characters and single-character LaTeX commands pass through bare;
- * multi-char or complex arguments get braces.
+ * multi-char or complex bases get braces.
  */
-function scriptArg(latex: string): string {
+function scriptBase(latex: string): string {
   if (latex.length === 1) return latex;
   // Single LaTeX command like \alpha
   if (/^\\[a-zA-Z]+$/.test(latex)) return latex;
@@ -527,6 +527,16 @@ function scriptArg(latex: string): string {
   const command = /^\\([a-zA-Z]+)\{[^{}]*\}$/.exec(latex);
   if (command && !KNOWN_FUNCTIONS.has(command[1])) return latex;
   return '{' + latex + '}';
+}
+
+/**
+ * Wrap a sub- or superscript in braces unless it is one character or one
+ * LaTeX command, as in x^2 or x_\alpha. A command with an argument keeps its
+ * braces, \tau_{\mathrm{age}} rather than \tau_\mathrm{age}, as LaTeX is
+ * usually written.
+ */
+function scriptArg(latex: string): string {
+  return latex.length === 1 || /^\\[a-zA-Z]+$/.test(latex) ? latex : '{' + latex + '}';
 }
 
 /**
@@ -542,7 +552,7 @@ function translateSuperscript(children: XmlNode[]): string {
   }
   const baseLatex = ommlToLatex(base);
   const supLatex = scriptToLatex(sup);
-  return scriptArg(baseLatex) + '^' + scriptArg(supLatex);
+  return scriptBase(baseLatex) + '^' + scriptArg(supLatex);
 }
 
 /** Nesting depth of scripts and limits being translated; translateRun reads it. */
@@ -574,7 +584,7 @@ function translateSubscript(children: XmlNode[]): string {
   }
   const baseLatex = ommlToLatex(base);
   const subLatex = scriptToLatex(sub);
-  return scriptArg(baseLatex) + '_' + scriptArg(subLatex);
+  return scriptBase(baseLatex) + '_' + scriptArg(subLatex);
 }
 
 /**
@@ -592,7 +602,7 @@ function translateSubSup(children: XmlNode[]): string {
   const baseLatex = ommlToLatex(base);
   const subLatex = scriptToLatex(sub);
   const supLatex = scriptToLatex(sup);
-  return scriptArg(baseLatex) + '_' + scriptArg(subLatex) + '^' + scriptArg(supLatex);
+  return scriptBase(baseLatex) + '_' + scriptArg(subLatex) + '^' + scriptArg(supLatex);
 }
 
 /**

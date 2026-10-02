@@ -1,6 +1,7 @@
 // src/latex-omml-fidelity.test.ts — Word fidelity of function scripts, symbols,
 // math alphabets, unknown-command warnings, normal-text runs, n-ary bodies,
-// function arguments, and primes, in both conversion directions.
+// function arguments, script braces, and primes, in both conversion
+// directions.
 
 import { describe, test, expect } from 'bun:test';
 import { XMLParser } from 'fast-xml-parser';
@@ -238,6 +239,21 @@ describe('Word-authored function arguments', () => {
   test('a bracket in a comment does not close the argument', () => {
     expect(roundTrip('\\sin{(x %c)\n)}')).toBe('\\sin(x %c)\n)');
     expectStableExport('\\sin(x %c)\n)');
+  });
+});
+
+describe('script braces on import', () => {
+  test.each(['\\tau_{\\mathrm{age}}', 'x^{\\mathbf{v}}', 'x_{\\mathcal{A}}'])('%s keeps the braces around its script', latex => {
+    expect(roundTrip(latex)).toBe(latex);
+  });
+
+  test('a script of one character or one command needs no braces', () => {
+    expect(roundTrip('N^{+}')).toBe('N^+');
+    expect(roundTrip('x_{\\alpha}')).toBe('x_\\alpha');
+  });
+
+  test('a base that is one command with an argument stays bare', () => {
+    expect(roundTrip('\\mathcal{A}^2')).toBe('\\mathcal{A}^2');
   });
 });
 

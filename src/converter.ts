@@ -3028,6 +3028,192 @@ function wrapWithRevision(text: string, rev?: RevisionInfo): string {
   return text;
 }
 
+type InlineRevisionItem = Extract<ContentItem, { type: 'text' | 'citation' | 'math' | 'footnote_ref' | 'image' }>;
+
+/** How a span may join its neighbours: at any safe seam, only across
+ *  whitespace, or never. */
+type SpanJoin = 'seam' | 'space' | 'never';
+
+/** The span of one revision that rendered Markdown ends with: where it
+ *  starts and ends, its last character, the kinds of delimiter it holds and
+ *  that its text has of its own, and how its last item joins (spanJoin). */
+type RevisionSpan = {
+  revision: RevisionInfo; start: number; end: number; lastChar: string;
+  kinds: Set<string>; literal: Set<string>; join: SpanJoin;
+};
+
+/** Marks where appendRevised joined a span to the one before it, after that
+ *  span's closer; joinRevisedSpans drops both once the range is rendered, so
+ *  a join copies nothing. A Word document can't hold U+FFFF, which XML
+ *  excludes. */
+const SPAN_JOIN = '\uFFFF';
+
+/** Rendered Markdown with the spans appendRevised joined run together. */
+function joinRevisedSpans(markdown: string): string {
+  return markdown.includes(SPAN_JOIN) ? markdown.replace(/(?:\+\+|--)\}\uFFFF/g, '') : markdown;
+}
+
+/**
+ * `out` with `text`, the Markdown for `item`, appended as a span of the item's
+ * revision, and the span it now ends with. The text joins `last` instead of
+ * opening a span of its own when `last` ends `out`, records the same revision,
+ * and both items and the seam between them allow it (spanJoin, canJoinSpans),
+ * so a Word revision that runs across a citation, an equation or a formatting
+ * change stays one span: {++in month $t$, conditional++}.
+ */
+function appendRevised(out: string, text: string, item: InlineRevisionItem, last: RevisionSpan | undefined): [string, RevisionSpan | undefined] {
+  const revision = item.revision;
+  if (!revision) return [out + text, undefined];
+  const { join, literal } = spanJoin(item);
+  const kinds = delimiterKinds(text);
+  const disjoint = (a: Set<string>, b: Set<string>) => ![...a].some(kind => b.has(kind));
+  const seamSafe = (before: RevisionSpan) =>
+    text !== '' && join !== 'never' && before.join !== 'never'
+    // A delimiter of the text's own could pair with one of its kind in the other span
+    && disjoint(literal, before.kinds) && disjoint(before.literal, kinds)
+    && (join === 'space' || before.join === 'space'
+      ? /\s/.test(before.lastChar) || /^\s/.test(text)
+      : canJoinSpans(before.lastChar, text));
+  if (last && last.end === out.length && revisionsEqual(last.revision, revision) && seamSafe(last)) {
+    const joined = out + SPAN_JOIN + wrapWithRevision(text, revision).slice(3);
+    return [joined, {
+      revision, start: last.start, end: joined.length, lastChar: text.slice(-1),
+      kinds: new Set([...last.kinds, ...kinds]), literal: new Set([...last.literal, ...literal]), join,
+    }];
+  }
+  const wrapped = out + wrapWithRevision(text, revision);
+  return [wrapped, { revision, start: out.length, end: wrapped.length, lastChar: text.slice(-1), kinds, literal, join }];
+}
+
+/** Delimiters that can pair with one of their kind in another span once
+ *  spans join, even across a space, by kind: code, math, link and HTML
+ *  brackets, emphasis and the extension marks, CriticMarkup braces. */
+const DELIMITER_KINDS: Record<string, string> = {
+  '`': '`', '$': '$', '[': '[', ']': '[', '<': '<', '>': '<', '*': '*', '_': '_', '~': '~', '=': '=', '^': '^', '{': '{', '}': '{',
+};
+
+/** The kinds of delimiter in `markdown`, past backslash escapes. */
+function delimiterKinds(markdown: string): Set<string> {
+  const kinds = new Set<string>();
+  for (let i = 0; i < markdown.length; i++) {
+    if (markdown[i] === '\\') i++;
+    else if (DELIMITER_KINDS[markdown[i]]) kinds.add(DELIMITER_KINDS[markdown[i]]);
+  }
+  return kinds;
+}
+
+/**
+ * How an item's span may join its neighbours: at any safe seam, only across
+ * whitespace, or never; and the kinds of delimiter its text has of its own
+ * (`literal`), which appendRevised keeps from meeting their kind in the other
+ * span: in ` ` and `b` the backtick would pair with the code's and turn the
+ * space into code. Text is read as import writes it, with * escaped, except
+ * a bare URL's and a plain citation's. Code keeps its text literal, and so
+ * does math, except for a backtick, which Markdown reads before math. An &
+ * never joins, since &am and p; would read as an entity. A bare URL or email
+ * joins only across whitespace, since linkify finds one only between
+ * boundaries, and so does a plain citation, whose text may end in one.
+ * Images and display math keep their own spans.
+ */
+function spanJoin(item: InlineRevisionItem): { join: SpanJoin; literal: Set<string> } {
+  switch (item.type) {
+    case 'text': {
+      const bare = !!item.href && (item.text === item.href || item.href === 'mailto:' + item.text) && !hasFormatting(item.formatting);
+      if (item.formatting.code && !item.href) return { join: 'seam', literal: new Set() };
+      return {
+        join: item.text.includes('&') ? 'never' : bare ? 'space' : 'seam',
+        literal: delimiterKinds(bare ? item.text : escapeMarkdownChars(item.text)),
+      };
+    }
+    case 'citation':
+      if (item.pandocKeys.length > 0) return { join: 'seam', literal: new Set() };
+      return { join: item.text.includes('&') ? 'never' : 'space', literal: delimiterKinds(item.text) };
+    case 'math':
+      return { join: item.display ? 'never' : 'seam', literal: new Set(item.latex.includes('`') ? ['`'] : []) };
+    case 'footnote_ref':
+      return { join: 'seam', literal: new Set() };
+    default:
+      return { join: 'never', literal: new Set() };
+  }
+}
+
+/**
+ * Whether a span ending in `beforeEnd` and one starting with `after` can run
+ * together without changing how the Markdown at the seam reads. Apart, each side borders a {++ or ++} marker;
+ * joined, they border each other, which matters to emphasis, math, link and
+ * citation delimiters: $ can't close before a letter, *a.* can't close before
+ * one, ! turns a following [ into an image. Whitespace on either side, or
+ * letters and digits on both, is safe. So is a citation, link, equation, code
+ * span or emphasis that ends before sentence punctuation, or one that starts
+ * after an opening parenthesis, a hyphen or a slash, and a footnote reference
+ * after a word or the end of a sentence.
+ */
+function canJoinSpans(beforeEnd: string, after: string): boolean {
+  const a = beforeEnd.slice(-1);
+  const b = after.charAt(0);
+  if (!a || !b) return false;
+  if (/\s/.test(a) || /\s/.test(b)) return true;
+  if (/[\p{L}\p{N}]/u.test(a) && /[\p{L}\p{N}]/u.test(b)) return true;
+  if (after.startsWith('[^') && /[\p{L}\p{N}.,;:?)]/u.test(a)) return true;
+  return (/[\])$*`]/.test(a) && /[.,;:!?)]/.test(b)) || (/[(\-/]/.test(a) && /[[$*`]/.test(b));
+}
+
+const CRITIC_OPENERS: Record<string, string> = { '++': '{++', '--': '{--', '~~': '{~~', '==': '{==', '<<': '{>>' };
+
+/** Where the CriticMarkup that ends at `end` with `closer` opens, no earlier
+ *  than `from`, past spans of the same kind nested in it, as a comment's
+ *  replies are, and the closers of spans appendRevised joined; -1 if it
+ *  doesn't. */
+function criticSpanStart(text: string, opener: string, closer: string, from: number, end: number): number {
+  let depth = 0;
+  for (let i = end - closer.length; i >= from; i--) {
+    if (text.startsWith(closer, i) && text[i + closer.length] !== SPAN_JOIN) depth++;
+    else if (text.startsWith(opener, i) && --depth === 0) return i;
+  }
+  return -1;
+}
+
+/**
+ * The last character of `markdown` between `from` and `to` with its tracked
+ * changes accepted or rejected, skipping comments and the spans that view
+ * drops. Only the CriticMarkup at the end of the range is read.
+ */
+function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = markdown.length): string {
+  let end = to;
+  while (end > from) {
+    const closer = /(\+\+|--|~~|==|<<)\}$/.exec(markdown.slice(Math.max(from, end - 3), end));
+    const start = closer ? criticSpanStart(markdown, CRITIC_OPENERS[closer[1]], closer[0], from, end) : -1;
+    if (!closer || start < 0) return markdown[end - 1];
+    const inner = start + 3;
+    const innerEnd = end - 3;
+    const separator = closer[1] === '~~' ? markdown.indexOf('~>', inner) : -1;
+    const split = separator >= 0 && separator < innerEnd ? separator : -1;
+    const [visibleFrom, visibleTo] =
+      closer[1] === '++' ? [inner, accepted ? innerEnd : inner] :
+      closer[1] === '--' ? [inner, accepted ? inner : innerEnd] :
+      closer[1] === '~~' ? (split < 0 ? [inner, innerEnd] : accepted ? [split + 2, innerEnd] : [inner, split]) :
+      closer[1] === '==' ? [inner, innerEnd] : [inner, inner];
+    const last = lastVisibleChar(markdown, accepted, visibleFrom, visibleTo);
+    if (last) return last;
+    end = start;
+  }
+  return '';
+}
+
+/** The space import puts before a Pandoc citation: none when the text before
+ *  it already ends with one in a view the citation shows in, so no view gets
+ *  two, as in Seen {++a ++}[@key]. A view without the space then keeps the
+ *  citation against its text, as Word has it there. */
+function citationSeparator(precedingMarkdown: string, revision: RevisionInfo | undefined, last?: RevisionSpan): string {
+  const views = revision?.type === 'addition' ? [true] : revision?.type === 'deletion' ? [false] : [true, false];
+  // The span the Markdown ends with gives its last character without a scan
+  const span = last && last.end === precedingMarkdown.length ? last : undefined;
+  return views.some(accepted => (
+    span?.revision.type === (accepted ? 'addition' : 'deletion') ? span.lastChar
+      : lastVisibleChar(precedingMarkdown, accepted, 0, span ? span.start : precedingMarkdown.length)
+  ) === ' ') ? '' : ' ';
+}
+
 
 function commentSetsEqual(a: Set<string>, b: Set<string>): boolean {
   if (a.size !== b.size) return false;
@@ -3045,7 +3231,7 @@ function substitutionItemText(item: SubstitutionItem, precedingText: string): st
   }
   if (item.type === 'citation') {
     return item.pandocKeys.length > 0
-      ? (precedingText.endsWith(' ') ? '' : ' ') + '[' + item.pandocKeys.join('; ') + ']'
+      ? citationSeparator(precedingText, item.revision) + '[' + item.pandocKeys.join('; ') + ']'
       : item.text;
   }
   return item.display
@@ -3053,22 +3239,40 @@ function substitutionItemText(item: SubstitutionItem, precedingText: string): st
     : '$' + item.latex + '$';
 }
 
+/** Whether `{~~old~>new~~}` reads back as these sides: CriticMarkup splits at
+ *  the first ~> and ends at the first ~~}. */
+function substitutionHolds(oldText: string, newText: string): boolean {
+  return !oldText.includes('~>') && !(oldText + '~>' + newText).includes('~~}');
+}
+
 /** Render a CriticMarkup substitution `{~~old~>new~~}` when a deletion and
- *  addition of the same type are adjacent with matching author/date.
+ *  an addition are adjacent with matching author/date. The two can differ in
+ *  type, as when export writes a deleted citation as its [@key] text.
  *  Returns the substitution string, or `null` if the pair cannot be rendered
- *  as a substitution (e.g. unsupported type). */
+ *  as a substitution (e.g. display math paired with another type). */
 function tryRenderSubstitution(
   deletion: SubstitutionItem,
   addition: SubstitutionItem,
   precedingText: string,
 ): string | null {
-  if (deletion.type !== addition.type) return null;
+  const display = (item: SubstitutionItem) => item.type === 'math' && item.display;
+  if (deletion.type !== addition.type && (display(deletion) || display(addition))) return null;
   const oldText = substitutionItemText(deletion, precedingText);
-  const newText = substitutionItemText(addition, oldText);
-  if (oldText && newText) {
+  const newText = substitutionItemText(addition, precedingText);
+  if (oldText && newText && substitutionHolds(oldText, newText)) {
     return '{~~' + oldText + '~>' + newText + '~~}';
   }
   return null;
+}
+
+/** Whether the deletion at `index` and the addition after it are each alone
+ *  on their side, with no neighbour from the same revision. A longer side is
+ *  renderSubstitutionRun's; where it declines, as for two equations in a
+ *  row, the items keep their own spans rather than pairing at the seam. */
+function pairStandsAlone(segment: ContentItem[], index: number): boolean {
+  const sameRevision = (item: ContentItem | undefined, neighbour: ContentItem) =>
+    !!item && isInlineRevisionItem(item) && isInlineRevisionItem(neighbour) && !!item.revision && revisionsEqual(item.revision, neighbour.revision);
+  return !sameRevision(segment[index - 1], segment[index]) && !sameRevision(segment[index + 2], segment[index + 1]);
 }
 
 /**
@@ -3101,6 +3305,7 @@ function renderSubstitutionRun(
   while (k < end && side(segment[k], 'addition')) newText += substitutionItemText(segment[k++] as SubstitutionItem, precedingText + newText);
   const additions = k - start - deletions;
   if (deletions === 0 || additions === 0 || deletions + additions <= 2 || !oldText || !newText) return undefined;
+  if (!substitutionHolds(oldText, newText)) return undefined;
   // Two inline equations in a row on one side would run their dollar signs
   // together and read as one, where spans of their own keep them apart
   for (let j = start + 1; j < k; j++) {
@@ -3313,6 +3518,7 @@ function renderInlineRange(
   if (useIds) {
     return renderInlineRangeWithIds(segment, startIndex, comments, opts, renderOpts?.commentIdRemap, renderOpts?.emittedIdCommentBodies, renderOpts?.noteLabels, renderOpts?.imageFormatMapping);
   }
+  let lastSpan: RevisionSpan | undefined;
 
   while (i < segment.length) {
     const item = segment[i];
@@ -3329,11 +3535,12 @@ function renderInlineRange(
         continue;
       }
       const next = segment[i + 1];
-      if (next && next.type === item.type && (next.type === 'text' || next.type === 'citation' || next.type === 'math') &&
+      if (next && (next.type === 'text' || next.type === 'citation' || next.type === 'math') &&
           next.revision?.type === 'addition' &&
           next.revision.author === item.revision.author &&
           next.revision.date === item.revision.date &&
-          next.commentIds.size === 0) {
+          next.commentIds.size === 0 &&
+          pairStandsAlone(segment, i)) {
 
         const result = tryRenderSubstitution(item, next, out);
         if (result !== null) {
@@ -3347,12 +3554,12 @@ function renderInlineRange(
     if (item.type === 'citation') {
       let citeText: string;
       if (item.pandocKeys.length > 0) {
-        const citeSep = out.endsWith(' ') ? '' : ' ';
+        const citeSep = citationSeparator(out, item.revision, lastSpan);
         citeText = citeSep + '[' + item.pandocKeys.join('; ') + ']';
       } else {
         citeText = item.text;
       }
-      out += wrapWithRevision(citeText, item.revision);
+      [out, lastSpan] = appendRevised(out, citeText, item, lastSpan);
       i++;
       continue;
     }
@@ -3362,7 +3569,8 @@ function renderInlineRange(
       // formatting. If so, the caller (text rendering below) already handled it
       // as part of a formatting group. If not, emit standalone.
       const mathText = item.display ? MATH_FENCE + '\n' + item.latex + '\n' + MATH_FENCE : '$' + item.latex + '$';
-      out += wrapWithRevision(mathText, item.revision);
+      if (item.display) out += wrapWithRevision(mathText, item.revision);
+      else [out, lastSpan] = appendRevised(out, mathText, item, lastSpan);
       i++;
       continue;
     }
@@ -3370,7 +3578,7 @@ function renderInlineRange(
     if (item.type === 'footnote_ref') {
       const noteKey = item.noteKind + ':' + item.noteId;
       const label = renderOpts?.noteLabels?.get(noteKey) ?? item.noteId;
-      out += wrapWithRevision(`[^${label}]`, item.revision);
+      [out, lastSpan] = appendRevised(out, `[^${label}]`, item, lastSpan);
       i++;
       continue;
     }
@@ -3393,7 +3601,7 @@ function renderInlineRange(
           imgText += '{' + parts.join(' ') + '}';
         }
       }
-      out += wrapWithRevision(imgText, item.revision);
+      [out, lastSpan] = appendRevised(out, imgText, item, lastSpan);
       if (item.commentIds.size > 0) {
         for (const cid of [...item.commentIds].sort()) {
           const c = comments.get(cid);
@@ -3521,17 +3729,17 @@ function renderInlineRange(
       const isBareUrl = item.text === item.href && !hasFormatting(item.formatting);
       const isBareEmail = item.href === 'mailto:' + item.text && !hasFormatting(item.formatting);
       if (isBareUrl || isBareEmail) {
-        out += wrapWithRevision(item.text, item.revision);
+        [out, lastSpan] = appendRevised(out, item.text, item, lastSpan);
       } else {
         const formattedText = wrapWithFormatting(item.text, item.formatting);
-        out += wrapWithRevision('[' + formattedText + '](' + formatHrefForMarkdown(item.href) + ')', item.revision);
+        [out, lastSpan] = appendRevised(out, '[' + formattedText + '](' + formatHrefForMarkdown(item.href) + ')', item, lastSpan);
       }
     } else {
-      out += wrapWithRevision(wrapWithFormatting(item.text, item.formatting), item.revision);
+      [out, lastSpan] = appendRevised(out, wrapWithFormatting(item.text, item.formatting), item, lastSpan);
     }
     i++;
   }
-  return { text: out, nextIndex: i, deferredComments: [] };
+  return { text: joinRevisedSpans(out), nextIndex: i, deferredComments: [] };
 }
 
 /** Render inline content using ID-based comment syntax ({#id}...{/id}).
@@ -3548,6 +3756,7 @@ function renderInlineRangeWithIds(
 ): { text: string; nextIndex: number; deferredComments: string[] } {
   let out = '';
   let i = startIndex;
+  let lastSpan: RevisionSpan | undefined;
   let prevCommentIds = new Set<string>();
   const collectedBodies = new Set<string>();
   const deferred: Array<{ remappedId: string; body: string }> = [];
@@ -3580,12 +3789,13 @@ function renderInlineRangeWithIds(
         continue;
       }
       const next = segment[i + 1];
-      if (next && next.type === item.type && (next.type === 'text' || next.type === 'citation' || next.type === 'math') &&
+      if (next && (next.type === 'text' || next.type === 'citation' || next.type === 'math') &&
           next.revision?.type === 'addition' &&
           next.revision.author === item.revision.author &&
           next.revision.date === item.revision.date &&
           commentSetsEqual(item.commentIds, prevCommentIds) &&
-          commentSetsEqual(next.commentIds, prevCommentIds)) {
+          commentSetsEqual(next.commentIds, prevCommentIds) &&
+          pairStandsAlone(segment, i)) {
 
         const result = tryRenderSubstitution(item, next, out);
         if (result !== null) {
@@ -3613,12 +3823,12 @@ function renderInlineRangeWithIds(
 
       let citeText: string;
       if (item.pandocKeys.length > 0) {
-        const citeSep = out.endsWith(' ') ? '' : ' ';
+        const citeSep = citationSeparator(out, item.revision, lastSpan);
         citeText = citeSep + '[' + item.pandocKeys.join('; ') + ']';
       } else {
         citeText = item.text;
       }
-      out += wrapWithRevision(citeText, item.revision);
+      [out, lastSpan] = appendRevised(out, citeText, item, lastSpan);
       i++;
       continue;
     }
@@ -3639,7 +3849,8 @@ function renderInlineRangeWithIds(
       prevCommentIds = new Set(currentIds);
 
       const mathText = item.display ? MATH_FENCE + '\n' + item.latex + '\n' + MATH_FENCE : '$' + item.latex + '$';
-      out += wrapWithRevision(mathText, item.revision);
+      if (item.display) out += wrapWithRevision(mathText, item.revision);
+      else [out, lastSpan] = appendRevised(out, mathText, item, lastSpan);
       i++;
       continue;
     }
@@ -3660,7 +3871,7 @@ function renderInlineRangeWithIds(
       prevCommentIds = new Set(currentIds);
       const noteKey = item.noteKind + ':' + item.noteId;
       const label = noteLabels?.get(noteKey) ?? item.noteId;
-      out += wrapWithRevision(`[^${label}]`, item.revision);
+      [out, lastSpan] = appendRevised(out, `[^${label}]`, item, lastSpan);
       i++;
       continue;
     }
@@ -3697,7 +3908,7 @@ function renderInlineRangeWithIds(
           imgText += '{' + parts.join(' ') + '}';
         }
       }
-      out += wrapWithRevision(imgText, item.revision);
+      [out, lastSpan] = appendRevised(out, imgText, item, lastSpan);
       i++;
       continue;
     }
@@ -3795,13 +4006,13 @@ function renderInlineRangeWithIds(
       const isBareUrl = item.text === item.href && !hasFormatting(item.formatting);
       const isBareEmail = item.href === 'mailto:' + item.text && !hasFormatting(item.formatting);
       if (isBareUrl || isBareEmail) {
-        out += wrapWithRevision(item.text, item.revision);
+        [out, lastSpan] = appendRevised(out, item.text, item, lastSpan);
       } else {
         const formattedText = wrapWithFormatting(item.text, item.formatting);
-        out += wrapWithRevision('[' + formattedText + '](' + formatHrefForMarkdown(item.href) + ')', item.revision);
+        [out, lastSpan] = appendRevised(out, '[' + formattedText + '](' + formatHrefForMarkdown(item.href) + ')', item, lastSpan);
       }
     } else {
-      out += wrapWithRevision(wrapWithFormatting(item.text, item.formatting), item.revision);
+      [out, lastSpan] = appendRevised(out, wrapWithFormatting(item.text, item.formatting), item, lastSpan);
     }
     i++;
   }
@@ -3820,7 +4031,7 @@ function renderInlineRangeWithIds(
     return a.remappedId.localeCompare(b.remappedId);
   });
 
-  return { text: out, nextIndex: i, deferredComments: deferred.map(d => d.body) };
+  return { text: joinRevisedSpans(out), nextIndex: i, deferredComments: deferred.map(d => d.body) };
 }
 
 function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comment>, indent: string = '  ', renderOpts?: RenderOpts, extraAttrs: string = ''): string {
