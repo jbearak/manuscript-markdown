@@ -178,7 +178,7 @@ describe('generateRPr', () => {
       highlightColor: 'blue',
       superscript: true
     };
-    expect(generateRPr(run)).toBe('<w:rPr><w:rStyle w:val="CodeChar"/><w:b/><w:i/><w:strike/><w:u w:val="single"/><w:highlight w:val="blue"/><w:vertAlign w:val="superscript"/></w:rPr>');
+    expect(generateRPr(run)).toBe('<w:rPr><w:rStyle w:val="CodeChar"/><w:b/><w:i/><w:strike/><w:highlight w:val="blue"/><w:u w:val="single"/><w:vertAlign w:val="superscript"/></w:rPr>');
   });
 });
 
@@ -2456,7 +2456,7 @@ describe('parseMd multi-paragraph CriticMarkup', () => {
   it('does not treat adjacent Critic deletion as a highlight color suffix', () => {
     const tokens = parseMd('==a=={--a--}');
     const allRuns = tokens.flatMap(t => t.runs);
-    const highlightRuns = allRuns.filter(r => r.type === 'critic_highlight');
+    const highlightRuns = allRuns.filter(r => r.type === 'text' && r.highlight);
     const deletionRuns = allRuns.filter(r => r.type === 'critic_del');
     expect(highlightRuns.length).toBe(1);
     expect(highlightRuns[0].text).toBe('a');

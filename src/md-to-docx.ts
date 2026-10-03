@@ -2,7 +2,7 @@ import MarkdownIt from 'markdown-it';
 import { imagePathsWithSpaces } from './image-paths';
 import type Token from 'markdown-it/lib/token.mjs';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
-import { escapeXml, escapeXmlText, generateCitation, generateMathXml, generateTrackedMathXml, trackedEquationLatex, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, type CiteprocEngine } from './md-to-docx-citations';
+import { escapeXml, escapeXmlText, orderRPr, generateCitation, generateMathXml, generateTrackedMathXml, trackedEquationLatex, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, type CiteprocEngine } from './md-to-docx-citations';
 import { downloadStyle, resolveCslCachePath } from './csl-loader';
 import { existsSync, readFileSync } from 'fs';
 import { isAbsolute, join, resolve } from 'path';
@@ -514,33 +514,35 @@ function coloredHighlightRule(state: StateInline, silent: boolean): boolean {
   const endPos = findClosingHighlightMarker(state.src, start + 2, max);
   if (endPos === -1) return false;
   
-  const afterEnd = endPos + 2;
-  if (afterEnd < max && state.src.charAt(afterEnd) === '{') {
-    const colorEnd = state.src.indexOf('}', afterEnd + 1);
-    if (colorEnd !== -1) {
-      const color = state.src.slice(afterEnd + 1, colorEnd);
-      // Require identifier-like colors that do not start or end with '-'
-      // so adjacent CriticMarkup like {--deleted--} is not misparsed as a color suffix.
-      if (/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(color)) {
-        if (!silent) {
-          const content = state.src.slice(start + 2, endPos);
-          const token = pushManuscriptToken(state, 'colored_highlight', '', 0);
-          token.content = content;
-          token.color = color;
-        }
-        state.pos = colorEnd + 1;
-        return true;
-      }
+  let next = endPos + 2;
+  let color: string | undefined;
+  if (next < max && state.src.charAt(next) === '{') {
+    const colorEnd = state.src.indexOf('}', next + 1);
+    // Require identifier-like colors that do not start or end with '-'
+    // so adjacent CriticMarkup like {--deleted--} is not misparsed as a color suffix.
+    if (colorEnd !== -1 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(state.src.slice(next + 1, colorEnd))) {
+      color = state.src.slice(next + 1, colorEnd);
+      next = colorEnd + 1;
     }
   }
-  
-  // Plain highlight
+
   if (!silent) {
-    const content = state.src.slice(start + 2, endPos);
-    const token = pushManuscriptToken(state, 'plain_highlight', '', 0);
-    token.content = content;
+    // The content is Markdown, as the preview reads it, parsed with the
+    // document's parser and link definitions, as md.inline.parse would, but
+    // in a link around the highlight, where a URL is the link's text
+    const open = pushManuscriptToken(state, 'highlight_open', 'mark', 1);
+    open.color = color;
+    const children: Token[] = [];
+    const inner = new state.md.inline.State(state.src.slice(start + 2, endPos), state.md, state.env, children);
+    // markdown-it's types leave out linkLevel, which linkify reads
+    type LinkState = StateInline & { linkLevel: number };
+    (inner as LinkState).linkLevel = (state as LinkState).linkLevel;
+    state.md.inline.tokenize(inner);
+    for (const rule of state.md.inline.ruler2.getRules('')) rule(inner);
+    state.tokens.push(...children);
+    pushManuscriptToken(state, 'highlight_close', 'mark', -1);
   }
-  state.pos = endPos + 2;
+  state.pos = next;
   return true;
 }
 
@@ -568,8 +570,8 @@ function footnoteRefRule(state: StateInline, silent: boolean): boolean {
   if (!silent) {
     const token = pushManuscriptToken(state, 'footnote_ref', '', 0);
     token.footnoteLabel = label;
-    // highlightContentRuns reads where the parser found references
-    state.env?.noteReferences?.push({ src: state.src, start, end: end + 1, label });
+    // An image's alt text, which joins its tokens' content, keeps it as written
+    token.content = src.slice(start, end + 1);
   }
   state.pos = end + 1;
   return true;
@@ -879,7 +881,8 @@ function toTextRunFromInner(run: MdRun, overrides?: Partial<MdRun>): MdRun {
 /** Preserve break metadata and flatten nested highlights into formatted Word runs. */
 function normalizeCriticInnerRuns(runs: MdRun[]): MdRun[] {
   const normalized: MdRun[] = [];
-  for (const run of runs) {
+  for (let i = 0; i < runs.length; i++) {
+    const run = runs[i];
     if (run.type === 'softbreak' || run.type === 'hardbreak') {
       normalized.push({ ...run, text: '\n' });
       continue;
@@ -890,8 +893,15 @@ function normalizeCriticInnerRuns(runs: MdRun[]): MdRun[] {
       continue;
     }
 
-    // Plain/colored `==...==` highlights inside Critic payloads should be
-    // preserved as text runs with highlight flags.
+    // A {==...==} before its comment is the comment's range, which generateRuns
+    // anchors; flattened, the comment would cover nothing
+    if (run.type === 'critic_highlight' && runs[i + 1]?.type === 'critic_comment') {
+      normalized.push(run);
+      continue;
+    }
+
+    // A {==...==} without a comment inside a Critic payload is preserved as
+    // text runs with highlight flags, as it exports at the top level.
     if (run.type === 'critic_highlight') {
       for (const inner of run.innerRuns ?? (run.text ? [toTextRunFromInner(run)] : [])) {
         normalized.push({
@@ -950,49 +960,6 @@ function parseCriticInnerRuns(content: string): MdRun[] {
   const md = getCriticInnerMarkdownIt();
   const tokens = md.parseInline(content, {});
   return normalizeCriticInnerRuns(convertInlineTokens(tokens));
-}
-
-/** The link definitions of the document parseMd is converting, so a scan of
- *  literal content resolves reference links and images as the document does. */
-let documentReferences: unknown;
-
-/** `convert` with `references` as the document's link definitions. */
-function withDocumentReferences<T>(references: unknown, convert: () => T): T {
-  const saved = documentReferences;
-  documentReferences = references;
-  try {
-    return convert();
-  } finally {
-    documentReferences = saved;
-  }
-}
-
-let _cachedScanMd: MarkdownIt | undefined;
-
-/**
- * A format highlight's content as runs, when it holds a note reference.
- * The content exports as literal text, but a reference the document's parser
- * finds in it, so not escaped or in a code span or a comment, keeps its note:
- * ==a[^1]==. One in an image's alt text, which the parser reads as a source
- * of its own, stays text like the alt, and so does one in nested
- * CriticMarkup, which exports as literal text with the rest of the content.
- */
-function highlightContentRuns(content: string): MdRun[] | undefined {
-  const env: { references: unknown; noteReferences: { src: string; start: number; end: number; label: string }[] } =
-    { references: documentReferences, noteReferences: [] };
-  (_cachedScanMd ??= createMarkdownIt()).parseInline(content, env);
-  const references = env.noteReferences.filter(reference => reference.src === content);
-  if (references.length === 0) return undefined;
-  const runs: MdRun[] = [];
-  let last = 0;
-  for (const { start, end, label } of references.sort((a, b) => a.start - b.start)) {
-    if (start < last) continue;
-    if (start > last) runs.push({ type: 'text', text: content.slice(last, start) });
-    runs.push({ type: 'footnote_ref', text: '', footnoteLabel: label });
-    last = end;
-  }
-  if (last < content.length) runs.push({ type: 'text', text: content.slice(last) });
-  return runs;
 }
 
 /** Deterministic bookmark name for a footnote/endnote cross-reference target.
@@ -1791,8 +1758,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
   const tokens = md.parse(processed, env);
 
   const processedLines = processed.split('\n');
-  const converted = withDocumentReferences(env.references, () => convertTokens(tokens, 0, 0, warnings, processedLines));
-  const result = splitCriticParagraphs(splitCriticDisplayMathParagraphs(converted));
+  const result = splitCriticParagraphs(splitCriticDisplayMathParagraphs(convertTokens(tokens, 0, 0, warnings, processedLines)));
   annotateBlockquoteBoundaries(result);
   // Table number formatting rewrites a table's lines, and CriticMarkup
   // preprocessing joins a span's lines, so the source gets both too for a
@@ -2194,7 +2160,7 @@ function applyCustomStyleSentinels(tokens: MdToken[], warnings?: string[], refer
       // Re-parse content to recover inline formatting (bold, italic, links,
       // etc.), with the document's link definitions for reference links
       const md = createMarkdownIt();
-      const contentRuns = withDocumentReferences(references, () => convertInlineTokens(md.parseInline(content, { references })));
+      const contentRuns = convertInlineTokens(md.parseInline(content, { references }));
       const contentToken: MdToken = {
         type: 'paragraph',
         runs: contentRuns.length > 0 ? contentRuns : [{ type: 'text', text: content }]
@@ -2746,7 +2712,8 @@ function convertInlineTokens(tokens: ManuscriptToken[]): MdRun[] {
 /** Convert inline tokens to Word runs, carrying formatting and protected paragraph metadata. */
 function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
   const runs: MdRun[] = [];
-  const formatStack: Partial<Pick<MdRun, 'bold' | 'italic' | 'underline' | 'strikethrough' | 'superscript' | 'subscript'>> = {};
+  const formatStack: Partial<Pick<MdRun, 'bold' | 'italic' | 'underline' | 'strikethrough' | 'superscript' | 'subscript' | 'highlight' | 'highlightColor'>> = {};
+  const highlightStack: Pick<MdRun, 'highlight' | 'highlightColor'>[] = [];
   let currentHref: string | undefined;
   
   for (let ti = 0; ti < tokens.length; ti++) {
@@ -2929,39 +2896,22 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
         break;
       }
 
-      case 'colored_highlight': {
-        let text = token.content;
-        const criticMatch = text.match(/^\{==([\s\S]*)==\}$/);
-        if (criticMatch) text = criticMatch[1];
-        const innerRuns = highlightContentRuns(text);
-        runs.push({
-          type: 'critic_highlight',
-          text,
-          ...(innerRuns ? { innerRuns } : {}),
-          highlight: true,
-          highlightColor: token.color,
-          ...formatStack,
-          href: currentHref
-        });
+      case 'highlight_open':
+        highlightStack.push({ highlight: formatStack.highlight, highlightColor: formatStack.highlightColor });
+        formatStack.highlight = true;
+        if (token.color) formatStack.highlightColor = token.color;
+        else delete formatStack.highlightColor;
+        break;
+      case 'highlight_close': {
+        // An enclosing highlight's color comes back
+        const outer = highlightStack.pop();
+        delete formatStack.highlight;
+        delete formatStack.highlightColor;
+        if (outer?.highlight) formatStack.highlight = true;
+        if (outer?.highlightColor) formatStack.highlightColor = outer.highlightColor;
         break;
       }
 
-      case 'plain_highlight': {
-        let text = token.content;
-        const criticMatch = text.match(/^\{==([\s\S]*)==\}$/);
-        if (criticMatch) text = criticMatch[1];
-        const innerRuns = highlightContentRuns(text);
-        runs.push({
-          type: 'critic_highlight',
-          text,
-          ...(innerRuns ? { innerRuns } : {}),
-          highlight: true,
-          ...formatStack,
-          href: currentHref
-        });
-        break;
-      }
-        
       case 'citation':
         runs.push({
           type: 'citation',
@@ -5206,11 +5156,12 @@ export function generateRPr(run: MdRun, extraRPr?: string): string {
   if (run.bold) parts.push('<w:b/>');
   if (run.italic) parts.push('<w:i/>');
   if (run.strikethrough) parts.push('<w:strike/>');
-  if (run.underline) parts.push('<w:u w:val="single"/>');
   if (run.highlight) parts.push(highlightRPr(run));
+  if (run.underline) parts.push('<w:u w:val="single"/>');
   if (run.superscript) parts.push('<w:vertAlign w:val="superscript"/>');
   else if (run.subscript) parts.push('<w:vertAlign w:val="subscript"/>');
-  if (extraRPr) parts.push(extraRPr);
+  // A table's font and size go between these
+  if (extraRPr) return '<w:rPr>' + orderRPr(parts.join('') + extraRPr) + '</w:rPr>';
 
   return parts.length > 0 ? '<w:rPr>' + parts.join('') + '</w:rPr>' : '';
 }
@@ -5291,19 +5242,18 @@ function formatCriticInnerRuns(runs: MdRun[] | undefined, outer: MdRun, forced: 
       formatted.push(run);
       continue;
     }
-    if (run.type === 'footnote_ref') {
-      // A note reference takes Word's reference style, so other outer
+    if (run.type === 'citation' || run.type === 'footnote_ref') {
+      // Citation visible text comes from the field result (CSL/fallback), and
+      // a note reference takes Word's reference style, so other outer
       // formatting is not merged in, as outside CriticMarkup. A highlight
-      // marks a range, though, and covers the mark like its text.
+      // marks a range, though, and covers them like its text.
       const highlight = run.highlight || outer.highlight || forced.highlight;
       formatted.push(highlight
         ? { ...run, highlight: true, highlightColor: run.highlightColor || outer.highlightColor || forced.highlightColor }
         : run);
       continue;
     }
-    if (run.type === 'math' || run.type === 'citation' || run.type === 'image') {
-      // Citation visible text comes from the field result (CSL/fallback), so
-      // outer formatting is not merged in — same as citations outside CriticMarkup.
+    if (run.type === 'math' || run.type === 'image') {
       formatted.push(run);
       continue;
     }
@@ -5395,7 +5345,7 @@ function generateDeletedCriticContent(
       // field instructions as w:delInstrText, and Zotero may refresh deleted
       // fields), so deleted citations keep their literal source syntax.
       const literal = '[' + run.text + ']';
-      const merged = mergeRunFormatting({ type: 'text', text: literal }, outer, forced);
+      const merged = mergeRunFormatting({ type: 'text', text: literal, highlight: run.highlight, highlightColor: run.highlightColor }, outer, forced);
       const rPr = generateRPr(merged, extraRPr);
       xml += '<w:r>' + (rPr ? rPr : '') + delText(literal) + '</w:r>';
       continue;
@@ -5438,7 +5388,7 @@ function noteReferenceXml(label: string, state: DocxGenState, revision?: 'additi
   else state.hasFootnotes = true;
   const noteExtraRPr = state.tableRunRPrExtra || '';
   const refStyleName = state.notesMode === 'endnotes' ? 'EndnoteReference' : 'FootnoteReference';
-  const rPr = '<w:rPr><w:rStyle w:val="' + refStyleName + '"/>' + extraRPr + noteExtraRPr + '</w:rPr>';
+  const rPr = '<w:rPr>' + orderRPr('<w:rStyle w:val="' + refStyleName + '"/>' + extraRPr + noteExtraRPr) + '</w:rPr>';
   if (owns) {
     owned.add(label);
     const tag = state.notesMode === 'endnotes' ? 'w:endnoteReference' : 'w:footnoteReference';
@@ -5655,7 +5605,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
     } else if (run.type === 'footnote_ref') {
       xml += noteReferenceXml(run.footnoteLabel || '', state, state.noteRevision, highlightRPr(run));
     } else if (run.type === 'citation') {
-      const result = generateCitation(run, bibEntries || new Map(), citeprocEngine, state.citationIds, state.citationItemIds, state.tableRunRPrExtra || undefined);
+      const result = generateCitation(run, bibEntries || new Map(), citeprocEngine, state.citationIds, state.citationItemIds, orderRPr(highlightRPr(run) + (state.tableRunRPrExtra || '')) || undefined);
       xml += result.xml;
       if (result.warning) state.warnings.push(result.warning);
       if (result.missingKeys) {

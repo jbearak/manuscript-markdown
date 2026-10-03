@@ -1925,10 +1925,10 @@ describe('wrapWithFormatting', () => {
             return;
           }
 
-          // When code is true, all other formatting is stripped — only backtick fence
+          // When code is true, other formatting is stripped, except a
+          // highlight around the backtick fence
           if (fmt.code) {
-            expect(result).toMatch(/^`/);
-            expect(result).toMatch(/`$/);
+            expect(result).toMatch(fmt.highlight ? /^==`[\s\S]*`==$/ : /^`[\s\S]*`$/);
             return;
           }
 
@@ -2462,9 +2462,11 @@ describe('code run formatting stripping', () => {
       .toBe('`text`');
   });
 
-  test('code + highlight produces only backtick-fenced text', () => {
+  test('code + highlight keeps the highlight around the fence', () => {
     expect(wrapWithFormatting('text', { ...DEFAULT_FORMATTING, code: true, highlight: true }))
-      .toBe('`text`');
+      .toBe('==`text`==');
+    expect(wrapWithFormatting('text', { ...DEFAULT_FORMATTING, code: true, highlight: true, highlightColor: 'red' }))
+      .toBe('==`text`=={red}');
   });
 
   test('code + italic + strikethrough produces only backtick-fenced text', () => {
@@ -2482,12 +2484,12 @@ describe('code run formatting stripping', () => {
       .toBe('**text**');
   });
 
-  test('code + all formatting flags produces only backtick-fenced text', () => {
+  test('code + all formatting flags produces highlighted backtick-fenced text', () => {
     const fmt: RunFormatting = {
       bold: true, italic: true, underline: true, strikethrough: true,
       highlight: true, superscript: true, subscript: true, code: true,
     };
-    expect(wrapWithFormatting('text', fmt)).toBe('`text`');
+    expect(wrapWithFormatting('text', fmt)).toBe('==`text`==');
   });
 });
 

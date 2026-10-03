@@ -671,7 +671,7 @@ On DOCX import, the `notes` field is auto-detected from whether `word/footnotes.
 
 Named labels (e.g., `[^my-note]`) are preserved through DOCX round-trips via a `MANUSCRIPT_FOOTNOTE_IDS` mapping stored in `docProps/custom.xml`.
 
-A reference directly inside a highlight, `==as reported.[^1]==`, keeps its note too. The rest of a highlight's content exports as literal text, CriticMarkup included, so a reference inside `==a {++b[^1]++}==` stays text and its note is dropped.
+A reference inside a highlight, `==as reported.[^1]==`, keeps its note too, and comes back from Word inside the highlight. See [Markdown in a highlight](#markdown-in-a-highlight).
 
 A reference can sit inside a tracked change. `{++as reported.[^1]++}` exports as a note inserted with its text, and `{--as reported.[^1]--}` as one deleted with it. When a label has more than one reference, Word's note belongs to one of them and the others cross-reference it. A reference outside any tracked change gets the note when there is one, so accepting or rejecting a change never takes the note from a reference that stays.
 
@@ -770,6 +770,12 @@ Standard Markdown highlight syntax with an optional color suffix:
 - `{==text==}` is a **CriticMarkup highlight** (rendered with grey background) — denotes a commented-on region
 - `==text==` is a **format highlight** (rendered with the configured default color) — denotes colored text
 - The `{color}` suffix is unambiguous because CriticMarkup uses `{` *before* `==`, not after
+
+#### Markdown in a highlight
+
+A highlight's content is Markdown. Emphasis, code, equations, citations and footnote references inside `==...==` export to Word as they do elsewhere. The highlight covers code, a citation and a footnote reference mark, but not an equation.
+
+On DOCX import, highlighted code, citations and footnote references come back inside the highlight, with any equations between them: `==see [@smith2020]==`, `==as reported.[^1]==`, `==a $x$ b==`, also inside a tracked change, `{++==as reported.[^1]==++}`. Emphasis and tracked changes come back in highlights of their own: `==a *b* {++c++}==` comes back as `==a== *==b==* {++==c==++}`.
 
 #### Nesting with CriticMarkup
 

@@ -112,6 +112,27 @@ function decodeHtmlEntities(text: string): string {
     .replace(/&amp;/g, '&');
 }
 
+/** CT_RPr's children in schema order. */
+const RPR_ORDER = [
+  'rStyle', 'rFonts', 'b', 'bCs', 'i', 'iCs', 'caps', 'smallCaps', 'strike', 'dstrike', 'outline', 'shadow',
+  'emboss', 'imprint', 'noProof', 'snapToGrid', 'vanish', 'webHidden', 'color', 'spacing', 'w', 'kern',
+  'position', 'sz', 'szCs', 'highlight', 'u', 'effect', 'bdr', 'shd', 'fitText', 'vertAlign', 'rtl', 'cs',
+  'em', 'lang', 'eastAsianLayout', 'specVanish', 'oMath',
+];
+
+/**
+ * Run properties, empty elements such as `<w:b/>`, in schema order, so ones
+ * composed from several sources (a citation's style, a highlight, a table's
+ * font) don't make Word reorder them on open and mark the document modified.
+ * Anything else comes back as it was.
+ */
+export function orderRPr(children: string): string {
+  const elements = children.match(/<w:[A-Za-z]+(?:\s[^>]*)?\/>/g) ?? [];
+  const rank = (element: string) => RPR_ORDER.indexOf(element.slice(3).split(/[\s/]/)[0]);
+  if (elements.join('') !== children || elements.some(element => rank(element) < 0)) return children;
+  return elements.sort((a, b) => rank(a) - rank(b)).join('');
+}
+
 /**
  * Convert citeproc HTML output (e.g. `<i>1</i>`) to OOXML runs with
  * proper formatting.  Handles `<i>`, `<b>`, `<sup>`, `<sub>`, and
@@ -181,7 +202,7 @@ export function htmlToOoxmlRuns(html: string, extraRPr?: string): string {
     if (run.smallCaps) rPr.push('<w:smallCaps/>');
     if (extraRPr) rPr.push(extraRPr);
 
-    const rPrXml = rPr.length > 0 ? '<w:rPr>' + rPr.join('') + '</w:rPr>' : '';
+    const rPrXml = rPr.length > 0 ? '<w:rPr>' + orderRPr(rPr.join('')) + '</w:rPr>' : '';
     const escaped = escapeXmlText(decodeHtmlEntities(run.text));
     const needsPreserve = escaped.length > 0 && (escaped[0] === ' ' || escaped[escaped.length - 1] === ' ');
     const wt = needsPreserve ? '<w:t xml:space="preserve">' + escaped + '</w:t>' : '<w:t>' + escaped + '</w:t>';
