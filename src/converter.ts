@@ -4450,7 +4450,8 @@ function tryRenderPipeTable(table: { rows: TableRow[] }, maxLineWidth: number, c
 
   let result = lines.join('\n');
   if (deferredAll.length > 0) {
-    result += '\n' + deferredAll.join('\n');
+    // A line right after the table could read as part of it
+    result += '\n\n' + deferredAll.join('\n');
   }
   return result;
 }
@@ -4650,7 +4651,8 @@ function tryRenderGridTable(
 
   let result = lines.join('\n');
   if (deferredAll.length > 0) {
-    result += '\n' + deferredAll.join('\n');
+    // A line right after the table could read as part of it
+    result += '\n\n' + deferredAll.join('\n');
   }
   return result;
 }
@@ -5519,6 +5521,12 @@ export function buildMarkdown(
   // metadata is absent (plain↔alert or alert↔different-alert transitions).
   let lastBlockquoteAlertType: GfmAlertType | 'plain' | undefined;
   let lastBlockquoteLevel: number | undefined;
+  // A quote paragraph's comment bodies stay in its quote, where a line
+  // without > after it would start a paragraph of its own
+  let deferredCommentPrefix = '';
+  let deferredCommentQuote: { group?: number; level: number } | undefined;
+  // The last comment bodies written into a quote
+  let quotedBodies: { text: string; group?: number; level: number } | undefined;
   const codeBlockLangs = options?.codeBlockLangs;
   const blockquoteGaps = options?.blockquoteGaps;
   const blockquotePreContentBlankLines = options?.blockquotePreContentBlankLines;
@@ -5877,6 +5885,15 @@ export function buildMarkdown(
           output.push('\n\n');
         }
       }
+      // Comment bodies written into the quote before stand where lines
+      // without > kept it apart from this one. Unless this one opens an
+      // alert or is nested deeper, it needs a blank line, or it would go on
+      // their paragraph.
+      if (quotedBodies && output[output.length - 2] === quotedBodies.text && output[output.length - 1] === '\n'
+          && item.blockquoteLevel && item.blockquoteGroupIndex !== quotedBodies.group
+          && !item.alertType && item.blockquoteLevel <= quotedBodies.level) {
+        output[output.length - 1] = '\n\n';
+      }
 
       // Capture previous blockquote group index BEFORE updating, so the
       // alert-marker logic below can detect same-type group boundaries.
@@ -5925,6 +5942,8 @@ export function buildMarkdown(
         }
       }
 
+      deferredCommentPrefix = item.blockquoteLevel && !item.headingLevel && !item.listMeta && !item.isCodeBlock ? blockquotePrefix(item) : '';
+      deferredCommentQuote = deferredCommentPrefix ? { group: item.blockquoteGroupIndex, level: item.blockquoteLevel ?? 1 } : undefined;
       if (item.headingLevel) {
         lastAlertParagraphKey = undefined;
         pendingAlertPrefixStrip = undefined;
@@ -6413,7 +6432,10 @@ export function buildMarkdown(
       // Strip trailing newlines (from <w:br/> between comment references in round-tripped DOCX)
       output.push(textOut.replace(/(\\?\n)+$/, ''));
       output.push('\n');
-      output.push(rendered.deferredComments.join('\n'));
+      const bodies = rendered.deferredComments.join('\n').split('\n')
+        .map(line => (line ? deferredCommentPrefix : deferredCommentPrefix.trimEnd()) + line).join('\n');
+      output.push(bodies);
+      if (deferredCommentQuote) quotedBodies = { text: bodies, ...deferredCommentQuote };
     } else {
       output.push(textOut);
     }

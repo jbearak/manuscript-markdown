@@ -582,6 +582,8 @@ HTML tables support the full range of table features including colspan, rowspan,
 </table>
 ```
 
+A cell takes HTML formatting only. Markdown, CriticMarkup, comments, citations and math in a cell export as literal text.
+
 Per-table overrides use `data-` attributes directly on the `<table>` element (`data-font-size`, `data-font`, `data-col-widths`, `data-orientation`):
 
 ```html
@@ -852,6 +854,8 @@ Standard CriticMarkup comment syntax (`{==text==}{>>comment<<}`) does not suppor
 `{#id>>comment text<<}`
 
 The `#id` appears between `{` and `>>`, extending the existing comment syntax. Author attribution uses `@Author (Date) | text` format — see [Comment Attribution](#comment-attribution).
+
+A body can go on the lines after its paragraph, in a paragraph of its own, or at either end of a line. It adds no text to Word: the line breaks and spaces around it, and a paragraph that holds only bodies, don't export. On DOCX import, bodies go on the lines after their paragraph, inside its quote if it has one, or after a blank line below a pipe or grid table. An HTML table's cells don't take comment syntax (see [HTML Tables](#html-tables)).
 
 #### Examples
 

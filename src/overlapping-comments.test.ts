@@ -588,6 +588,114 @@ describe('Overlapping comments: round-trip', () => {
   });
 });
 
+describe('Overlapping comments: where the bodies go', () => {
+  const seen = 'Seen {#1}a {#2}b{/1} c{/2} on.';
+  const bodies = '{#1>>one<<}\n{#2>>two<<}';
+  async function imported(md: string): Promise<string> {
+    const { docx } = await convertMdToDocx(md);
+    return (await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+  }
+
+  test.each([
+    ['on the lines after the paragraph', seen + '\n' + bodies, seen + '\n' + bodies],
+    ['in a paragraph of their own', seen + '\n\n{#1>>one<<}\n\n{#2>>two<<}', seen + '\n' + bodies],
+    ['at the end of the line', seen + ' {#1>>one<<} {#2>>two<<}', seen + '\n' + bodies],
+    ['at the start of the line', '{#1>>one<<} ' + seen + '\n{#2>>two<<}', seen + '\n' + bodies],
+    ['at the end of the line in a range', '{#2}{#1}x{/1} {#1>>one<<}{/2}\n\nNext {#2>>two<<}', '{#2}{#1}x{/2}{/1}\n' + bodies + '\n\nNext'],
+    ['between lines of text', seen + '\n' + bodies + '\nMore.', 'Seen {#1}a {#2}b{/1} c{/2} on. More.\n' + bodies],
+    ['in a pipe table', '| A |\n|---|\n| ' + seen + ' {#1>>one<<} {#2>>two<<} |', '| A |\n| --- |\n| ' + seen + ' |\n\n' + bodies],
+    // In a quote, they stay in it: a line without > would start a paragraph
+    ['in a quote paragraph of their own', '> ' + seen + '\n>\n> {#1>>one<<}\n> {#2>>two<<}\n\nAfter.', '> ' + seen + '\n> {#1>>one<<}\n> {#2>>two<<}\n\nAfter.'],
+    ['in quote paragraphs before the text', '> {#1>>one<<}\n>\n> {#2>>two<<}\n>\n> ' + seen + '\n\nAfter.', '> ' + seen + '\n> {#1>>one<<}\n> {#2>>two<<}\n\nAfter.'],
+    ['in quote paragraphs around the text', '> {#1>>one<<}\n>\n> ' + seen + '\n>\n> {#2>>two<<}\n\nAfter.', '> ' + seen + '\n> {#1>>one<<}\n> {#2>>two<<}\n\nAfter.'],
+    ['in a nested quote', '> > ' + seen + '\n> >\n> > {#1>>one<<}\n> > {#2>>two<<}', '> > ' + seen + '\n> > {#1>>one<<}\n> > {#2>>two<<}'],
+    ['on an alert\'s marker line', '> [!NOTE] {#1>>one<<} {#2>>two<<}\n>\n> ' + seen, '> [!NOTE]\n> \n>\n> ' + seen + '\n> {#1>>one<<}\n> {#2>>two<<}'],
+    ['in an alert', '> [!NOTE]\n> ' + seen + '\n>\n> {#1>>one<<}\n> {#2>>two<<}', '> [!NOTE]\n> ' + seen + '\n> {#1>>one<<}\n> {#2>>two<<}'],
+  ])('come back the same way %s', async (_, md, back) => {
+    // Their line breaks and spaces aren't text in Word
+    expect(await imported(md)).toBe(back);
+    expect(await imported(back)).toBe(back);
+  });
+
+  test.each([
+    ['on the lines after its marker', '> [!NOTE]\n> {#1>>one<<}\n> {#2>>two<<}\n>\n> ' + seen, '> [!NOTE]\n> ' + seen + '\n> {#1>>one<<}\n> {#2>>two<<}'],
+    ['on its marker line', '> [!NOTE] {#1>>one<<} {#2>>two<<}\n>\n> ' + seen, '> [!NOTE]\n> ' + seen + '\n> {#1>>one<<}\n> {#2>>two<<}'],
+  ])('leave no empty alert lead with a hidden label %s', async (_, md, back) => {
+    const hidden = '---\ncallout-labels: false\n---\n\n';
+    expect(await imported(hidden + md)).toBe(back);
+    expect(await imported(hidden + back)).toBe(back);
+  });
+
+  const quoted = '> ' + seen + '\n> {#1>>one<<}\n> {#2>>two<<}';
+  test.each([
+    ['a quote right after them', '> ' + seen + '\n' + bodies + '\n> next', quoted + '\n\n> next', quoted + '\n>\n> next'],
+    ['a quote after a blank line', '> ' + seen + '\n\n' + bodies + '\n> next', quoted + '\n\n> next', quoted + '\n>\n> next'],
+    ['an alert', '> ' + seen + '\n\n' + bodies + '\n> [!NOTE]\n> next', quoted + '\n> [!NOTE]\n> next', quoted + '\n> [!NOTE]\n> next'],
+  ])('keep %s apart from the quote they go into', async (_, md, back, again) => {
+    expect(await imported(md)).toBe(back);
+    // A blank line between two quotes reads as one, as without bodies
+    expect(await imported(back)).toBe(again);
+  });
+
+  test('keep the blocks around a paragraph of bodies apart', async () => {
+    const md = seen + '\n\n```js\nx\n```\n\n' + bodies + '\n\n```py\ny\n```';
+    expect(await imported(md)).toBe(seen + '\n' + bodies + '\n\n```js\nx\n```\n\n```py\ny\n```');
+  });
+
+  test.each([
+    ['code', '` ` X'],
+    ['a link', '[ ](http://x.org) X'],
+  ])('keep whitespace that shows as %s on their line', async (_, line) => {
+    expect(await imported(seen + '\n\n' + line + ' {#1>>one<<} {#2>>two<<}')).toBe(seen + '\n' + bodies + '\n\n' + line);
+  });
+
+  test('keep two lists apart in a paragraph of their own', async () => {
+    // As an empty paragraph, which ends the first list, so the second keeps its override
+    const back = await imported('1. ' + seen + '\n\n' + bodies + '\n\n<!-- no-indent -->\n1. Next');
+    expect(back).toBe('1. ' + seen + '\n' + bodies + '\n\n\n\n<!-- no-indent -->\n1. Next');
+  });
+
+  test('space a list item\'s quote from a paragraph of their own before another list', async () => {
+    const { docx } = await convertMdToDocx('1. ' + seen + '\n\n   > Quote.\n\n' + bodies + '\n\n1. Next');
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    // As before any paragraph after the list: the quote's spacing, then the empty paragraph
+    expect(xml).toMatch(/<w:p[^>]*><w:pPr><w:spacing w:after="0"\/><\/w:pPr><\/w:p><w:p[^>]*><\/w:p><w:p[^>]*><w:pPr><w:numPr>/);
+  });
+
+  test('end a restarted list\'s numbering in a paragraph of their own', async () => {
+    const { docx } = await convertMdToDocx('3. ' + seen + '\n\n' + bodies + '\n\n1. Next');
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    // The second list starts afresh rather than going on from 3
+    expect(xml).toMatch(/<w:numId w:val="2"\/><\/w:numPr><\/w:pPr><w:r><w:t>Next<\/w:t>/);
+  });
+
+  test.each([
+    ['', 'Note {#1}x {#2}y{/1}{/2}.\n\n    {#1>>one<<}\n\n    {#2>>two<<}'],
+    [' in a quote', '> Note {#1}x {#2}y{/1}{/2}.\n    >\n    > {#1>>one<<}\n    > {#2>>two<<}'],
+    [' before the text', '{#1>>one<<}\n\n    {#2>>two<<}\n\n    Note {#1}x {#2}y{/1}{/2}.'],
+  ])('leave no empty paragraphs in a note%s', async (_, definition) => {
+    const { docx } = await convertMdToDocx('Main[^1].\n\n[^1]: ' + definition);
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docx);
+    const notes = await zip.file('word/footnotes.xml')!.async('string');
+    const note = notes.slice(notes.indexOf('<w:footnote w:id="1">'));
+    expect(note.match(/<w:p[ >]/g)).toHaveLength(1);
+    expect((await zip.file('word/comments.xml')!.async('string')).match(/<w:comment /g)).toHaveLength(2);
+  });
+
+  test('leave no spaces or empty paragraphs in Word', async () => {
+    const { docx } = await convertMdToDocx(seen + '\n' + bodies + '\n\n{#1>>one<<}\n\nNext.');
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml).toContain('<w:t xml:space="preserve"> on.</w:t></w:r></w:p><w:p');
+    expect(xml).not.toContain('<w:t xml:space="preserve"> </w:t>');
+    expect(xml).not.toMatch(/<w:p[^>]*><\/w:p>/);
+    expect(xml).toContain('>Next.</w:t>');
+  });
+});
+
 describe('Overlapping comments: CLI config', () => {
   test('parseArgs accepts --always-use-comment-ids flag', () => {
     const { parseArgs } = require('./cli');
