@@ -1132,6 +1132,21 @@ interface BlockquoteSpacing {
 }
 
 const BLOCKQUOTE_ALERT_MARKER_RE = /^(?:>\s*)+\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\](.*)$/i;
+
+/** Markdown source without its complete ID comment bodies ({#id>>...<<}). */
+function withoutCommentBodies(src: string): string {
+  let kept = '';
+  let from = 0;
+  for (let open = src.indexOf('{#'); open !== -1; open = src.indexOf('{#', open + 2)) {
+    const id = /^[a-zA-Z0-9_-]+>>/.exec(src.slice(open + 2));
+    const close = id ? findMatchingClose(src, open + 2 + id[0].length) : -1;
+    if (close === -1) continue;
+    kept += src.slice(from, open);
+    from = close + 3;
+    open = close + 1;
+  }
+  return kept + src.slice(from);
+}
 const LIST_MARKERS_RE = /^\s*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*/;
 const BARE_QUOTE_LINE_RE = /^\s*(?:>\s*)+$/;
 
@@ -1255,7 +1270,8 @@ function annotateBlockquoteSpacing(tokens: MdToken[], parsedLines: string[], ori
       if (next) spacing.gapAfter = !next.markerLine && below.line === next.start ? below.count : -1;
     }
     const alertMarker = originalLines[group.start].replace(LIST_MARKERS_RE, '').match(BLOCKQUOTE_ALERT_MARKER_RE);
-    if (alertMarker) spacing.alertInline = alertMarker[2].trim().length > 0;
+    // A comment body on the marker line shows nothing, and import writes it below
+    if (alertMarker) spacing.alertInline = withoutCommentBodies(alertMarker[2]).trim().length > 0;
     group.first.blockquoteSpacing = spacing;
   });
 }
@@ -5820,6 +5836,138 @@ function withParagraphMarkRevision(pPr: string, revision: string): string {
   return '<w:pPr><w:rPr>' + revision + '</w:rPr></w:pPr>';
 }
 
+/**
+ * A paragraph's runs without the spaces and line breaks around comment
+ * bodies ({#id>>...<<}) at either end of a line, which Word would show: the
+ * spaces between such bodies and the text beside them, and the line breaks
+ * around lines that hold only bodies. Import writes the bodies on the lines
+ * after their paragraph. A block of body lines keeps one break, joining the
+ * lines on either side, unless it ends the paragraph or is all of it.
+ */
+function withoutCommentBodyLines(runs: MdRun[]): MdRun[] {
+  if (!runs.some(run => run.type === 'comment_body_with_id')) return runs;
+  const lines: MdRun[][] = [[]];
+  const breaks: MdRun[] = [];
+  for (const run of runs) {
+    if (run.type === 'softbreak' || run.type === 'hardbreak') {
+      breaks.push(run);
+      lines.push([]);
+    } else {
+      lines[lines.length - 1].push(run);
+    }
+  }
+  // Whitespace that shows, as code, a link or a mark, isn't padding
+  const shows = (run: MdRun) => !!(run.code || run.href || run.highlight || run.underline || run.strikethrough);
+  const blank = (run: MdRun) => run.type === 'text' && !run.text.trim() && !shows(run);
+  // Range markers take no room, so they stay where they are
+  const marker = (run: MdRun) => run.type === 'comment_range_start' || run.type === 'comment_range_end';
+  const edge = (run: MdRun) => run.type === 'comment_body_with_id' || blank(run) || marker(run);
+  const edgeBodies = (line: MdRun[]) => {
+    // Bodies, markers and blank text from the start of the line, and from its end
+    let head = 0;
+    while (head < line.length && edge(line[head])) head++;
+    let tail = line.length;
+    while (tail > head && edge(line[tail - 1])) tail--;
+    return { head, tail };
+  };
+  const trimmed = lines.map(line => {
+    const { head, tail } = edgeBodies(line);
+    const hasBody = (from: number, to: number) => line.slice(from, to).some(run => run.type === 'comment_body_with_id');
+    const atHead = hasBody(0, head);
+    const atTail = hasBody(tail, line.length);
+    if (!atHead && !atTail) return line;
+    // An edge without a body keeps its runs
+    const middle = line.slice(atHead ? head : 0, atTail ? tail : line.length);
+    // The text beside the bodies loses its space toward them
+    const last = middle.length - 1;
+    if (atHead && middle[0]?.type === 'text' && !shows(middle[0])) middle[0] = { ...middle[0], text: middle[0].text.trimStart() };
+    if (atTail && middle[last]?.type === 'text' && !shows(middle[last])) middle[last] = { ...middle[last], text: middle[last].text.trimEnd() };
+    const bodies = (start: number, end: number) => line.slice(start, end).filter(run => run.type === 'comment_body_with_id' || marker(run));
+    return [...(atHead ? bodies(0, head) : []), ...middle, ...(atTail ? bodies(tail, line.length) : [])];
+  });
+  const bodyLine = (line: MdRun[]) => line.some(run => run.type === 'comment_body_with_id')
+    && line.every(run => run.type === 'comment_body_with_id' || marker(run));
+  // Break k sits between lines k and k + 1
+  const dropped = new Set<number>();
+  for (let first = 0; first < trimmed.length;) {
+    if (!bodyLine(trimmed[first])) {
+      first++;
+      continue;
+    }
+    let last = first;
+    while (last + 1 < trimmed.length && bodyLine(trimmed[last + 1])) last++;
+    for (let k = first; k < last; k++) dropped.add(k);
+    if (last + 1 < trimmed.length) dropped.add(last);
+    else if (first > 0) dropped.add(first - 1);
+    first = last + 1;
+  }
+  const kept: MdRun[] = [];
+  trimmed.forEach((line, k) => {
+    kept.push(...line);
+    if (k < breaks.length && !dropped.has(k)) kept.push(breaks[k]);
+  });
+  return kept;
+}
+
+/** Whether a token's runs are only comment bodies, which Word would show as
+ *  an empty paragraph. */
+function holdsOnlyCommentBodies(token: MdToken): boolean {
+  return !token.criticParaMark && token.runs.length > 0
+    && withoutCommentBodyLines(token.runs).every(run => run.type === 'comment_body_with_id');
+}
+
+/** Whether a paragraph holds only comment bodies, which generateDocumentXml
+ *  registers without writing the paragraph. */
+function isCommentBodyParagraph(token: MdToken): boolean {
+  return token.type === 'paragraph' && holdsOnlyCommentBodies(token);
+}
+
+/**
+ * Tokens with each quote paragraph of comment bodies only moved into the
+ * paragraph of its quote before it, or else the one after, which takes its
+ * place at the quote's edge, so Word gets no empty quoted paragraph. An alert
+ * lead takes them only when it shows text, since one that doesn't collapses,
+ * and a quote of bodies alone stays.
+ */
+function withQuoteCommentBodiesMerged(tokens: MdToken[]): MdToken[] {
+  const merged: MdToken[] = [];
+  const sameQuote = (other: MdToken | undefined, token: MdToken): other is MdToken =>
+    other?.type === 'blockquote' && other.blockquoteGroupIndex === token.blockquoteGroupIndex
+    && (!other.alertLead || other.runs.some(run => run.type !== 'comment_body_with_id' && !isNonRenderingAlertLeadRun(run)));
+  const lineBreak: MdRun = { type: 'softbreak', text: '\n' };
+  let carried: MdToken | undefined;
+  for (const token of tokens) {
+    const bodiesOnly = token.type === 'blockquote' && !token.alertLead && holdsOnlyCommentBodies(token);
+    if (carried && sameQuote(token, carried)) {
+      const joined = { ...token, runs: [...carried.runs, lineBreak, ...token.runs], alertFirst: token.alertFirst || carried.alertFirst };
+      // Bodies go on until the quote shows something
+      if (bodiesOnly) {
+        carried = joined;
+      } else {
+        merged.push(joined);
+        carried = undefined;
+      }
+      continue;
+    }
+    if (carried) {
+      merged.push(carried);
+      carried = undefined;
+    }
+    if (!bodiesOnly) {
+      merged.push(token);
+      continue;
+    }
+    const prev = merged[merged.length - 1];
+    if (sameQuote(prev, token)) {
+      merged[merged.length - 1] = { ...prev, runs: [...prev.runs, lineBreak, ...token.runs], alertLast: prev.alertLast || token.alertLast };
+    } else {
+      carried = token;
+    }
+  }
+  if (carried) merged.push(carried);
+  return merged;
+}
+
 export function generateParagraph(token: MdToken, state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine): string {
   let pPr = '';
 
@@ -5957,7 +6105,7 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
   
   const alertColorMap = alertColorsByScheme(options?.colors ?? getDefaultColorScheme());
   const hidesAlertLabel = token.type === 'blockquote' && token.alertType && token.alertLead && options?.calloutLabels === false;
-  let paragraphRuns = token.runs;
+  let paragraphRuns = withoutCommentBodyLines(token.runs);
   if (hidesAlertLabel) {
     let separatorIndex = 0;
     while (
@@ -5981,10 +6129,11 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
       + '<w:r><w:br/></w:r>'
     : '';
 
+  // Comment bodies show nothing, and generateRuns has registered them
   const visuallyEmptyHiddenAlertLead = hidesAlertLabel
-    && paragraphRuns.every(isNonRenderingAlertLeadRun);
+    && paragraphRuns.every(run => run.type === 'comment_body_with_id' || isNonRenderingAlertLeadRun(run));
   const omitEmptyAlertLead = visuallyEmptyHiddenAlertLead
-    && paragraphRuns.length === 0
+    && paragraphRuns.every(run => run.type === 'comment_body_with_id')
     && token.alertHasBodyParagraph;
   if (visuallyEmptyHiddenAlertLead && !omitEmptyAlertLead) {
     const collapsedSpacing = '<w:spacing w:after="0" w:line="1" w:lineRule="exact"/>';
@@ -6301,9 +6450,9 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
       xml += '<w:tc>' + tcPr + '<w:p>' + tablePPr;
       // Auto-bold header cells to match Word's default table header styling.
       // Word applies bold to header rows via table styles; we reproduce that here.
-      const cellRuns = row.header
+      const cellRuns = withoutCommentBodyLines(row.header
         ? cell.runs.map(r => r.type === 'text' && !r.bold ? { ...r, bold: true } : r)
-        : cell.runs;
+        : cell.runs);
       xml += generateRuns(cellRuns, state, options, bibEntries, citeprocEngine);
       xml += '</w:p></w:tc>';
       gridCol += cs;
@@ -6484,15 +6633,15 @@ function peopleXml(comments: CommentEntry[]): string {
   return xml;
 }
 
-export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine, frontmatter?: Frontmatter): string {
-  let body = '';
-  const separatorParagraph = '<w:p><w:pPr><w:spacing w:after=\"0\"/></w:pPr></w:p>';
-
-  // Pre-scan: assign comment IDs and discover reply relationships so that
-  // replyRanges is populated before range start/end markers are emitted.
-  // Without this, replyRanges would be empty when comment_range_start is
-  // processed because comment_body_with_id (which populates replyRanges)
-  // always appears after the range markers in the token stream.
+/**
+ * Pre-scan: assign comment IDs and discover reply relationships so that
+ * replyRanges is populated before range start/end markers are emitted, and a
+ * body before its range finds it. Without this, replyRanges would be empty
+ * when comment_range_start is processed because comment_body_with_id (which
+ * populates replyRanges) usually appears after the range markers in the token
+ * stream. The document and each note are scanned before they're written.
+ */
+function prescanCommentIds(tokens: MdToken[], state: DocxGenState): void {
   const prescanRun = (run: MdRun) => {
     if (run.type === 'comment_range_start') {
       const mdId = run.commentId || '';
@@ -6525,6 +6674,33 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       }
     }
   }
+}
+
+export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine, frontmatter?: Frontmatter): string {
+  tokens = withQuoteCommentBodiesMerged(tokens);
+  // The token after index ti, past paragraphs of comment bodies only
+  const pastCommentBodies = (ti: number): MdToken | undefined => {
+    let next = ti + 1;
+    while (next < tokens.length && isCommentBodyParagraph(tokens[next])) next++;
+    return tokens[next];
+  };
+  // Whether the token at index ti, after block prev, is a paragraph of comment
+  // bodies only that Word doesn't get. Alone between two lists, it's an empty
+  // paragraph, which import reads as the end of the first.
+  const omitsCommentBodies = (ti: number, prev: MdToken | undefined): boolean =>
+    isCommentBodyParagraph(tokens[ti]) && !(!tokens[ti].listContinuation
+      && (prev?.type === 'list_item' || !!prev?.listContinuation)
+      && pastCommentBodies(ti)?.type === 'list_item');
+  // The block Word gets after the one at index ti
+  const nextBlock = (ti: number): MdToken | undefined => {
+    let next = ti + 1;
+    while (next < tokens.length && omitsCommentBodies(next, tokens[ti])) next++;
+    return tokens[next];
+  };
+  let body = '';
+  const separatorParagraph = '<w:p><w:pPr><w:spacing w:after=\"0\"/></w:pPr></w:p>';
+
+  prescanCommentIds(tokens, state);
 
   // Emit title paragraphs from frontmatter before body content
   if (frontmatter?.title) {
@@ -6592,6 +6768,14 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   // can tell whether the next item continues its list or an ancestor's
   const openListOrdered: boolean[] = [];
   for (const [ti, token] of tokens.entries()) {
+    // A paragraph of comment bodies only registers them: Word gets no
+    // paragraph, and the blocks around it meet as if it weren't there
+    if (omitsCommentBodies(ti, prevToken)) {
+      generateRuns(withoutCommentBodyLines(token.runs), state, options, bibEntries, citeprocEngine);
+      // Outside a list item, it still ends a restarted list's numbering
+      if (!token.listContinuation) state.activeListStartOverrides.clear();
+      continue;
+    }
     if (token.type === 'list_item') {
       openListOrdered.length = token.level ?? 1;
       openListOrdered[(token.level ?? 1) - 1] = !!token.ordered;
@@ -6756,7 +6940,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     } else {
       state.afterHeading = prevToken?.type === 'heading' || (!prevToken && state.afterHeading);
       // Track body paragraph index for indent override round-trip
-      if (token.type === 'paragraph' && token.runs.length > 0 && !token.runs.every(r => r.type === 'html_comment')) {
+      if (token.type === 'paragraph' && token.runs.length > 0 && !token.runs.every(r => r.type === 'html_comment') && !isCommentBodyParagraph(token)) {
         if (token.indentOverride) {
           state.indentOverrides.set(state.bodyParagraphIndex, token.indentOverride);
         }
@@ -6768,7 +6952,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     // list, a quote in a list item keeps its spacing in the metadata alone.
     // An item that starts another list, as 1. y does after - x, gets the
     // empty paragraphs as after any quote.
-    const nextToken = tokens[ti + 1];
+    const nextToken = nextBlock(ti);
     const nextLevel = nextToken?.level ?? 1;
     const listGoesOn = !!token.listContinuation && (nextToken?.type === 'list_item'
       ? nextLevel > token.listContinuation.level || openListOrdered[nextLevel - 1] === !!nextToken.ordered
@@ -7232,6 +7416,7 @@ export async function convertMdToDocx(
     // Parse the definition body into tokens and generate OOXML
     const bodyTokens = parseMd(bodyText, state.warnings, frontmatter.breaks ?? false, undefined, undefined, linkDefinitionsOf.get(tokens));
     applyCustomStyleSentinels(bodyTokens, state.warnings);
+    prescanCommentIds(bodyTokens, state);
     // Generate paragraph OOXML for the note body
     const selfRefTag = state.notesMode === 'endnotes' ? 'w:endnoteRef' : 'w:footnoteRef';
     const pStyle = state.notesMode === 'endnotes' ? 'EndnoteText' : 'FootnoteText';
@@ -7253,6 +7438,12 @@ export async function convertMdToDocx(
       // Handle custom style sentinels inside footnotes
       if (t.customStyleOpen) { state.activeCustomStyle = t.customStyleOpen; continue; }
       if (t.customStyleClose) { state.activeCustomStyle = undefined; continue; }
+      // As in the body, a paragraph of comment bodies only registers them. A
+      // note writes a quote as plain paragraphs, so a quoted one does too.
+      if ((t.type === 'paragraph' || t.type === 'blockquote') && holdsOnlyCommentBodies(t)) {
+        generateRuns(withoutCommentBodyLines(t.runs), state, options, bibEntries, citeprocEngine);
+        continue;
+      }
       const stylePPr = (t.type === 'paragraph' && state.activeCustomStyle)
         ? '<w:pPr><w:pStyle w:val="' + customStyleId(state.activeCustomStyle) + '"/></w:pPr>'
         : paragraphPPr;
@@ -7269,7 +7460,7 @@ export async function convertMdToDocx(
           }
           state.tableIndex++;
         } else {
-          const runs = generateRuns(t.runs, state, options, bibEntries, citeprocEngine);
+          const runs = generateRuns(withoutCommentBodyLines(t.runs), state, options, bibEntries, citeprocEngine);
           bodyXml += '<w:p>' + effectivePPr + selfRefRun + runs + '</w:p>';
         }
       } else {
@@ -7281,7 +7472,7 @@ export async function convertMdToDocx(
           }
           state.tableIndex++;
         } else {
-          const runs = generateRuns(t.runs, state, options, bibEntries, citeprocEngine);
+          const runs = generateRuns(withoutCommentBodyLines(t.runs), state, options, bibEntries, citeprocEngine);
           bodyXml += '<w:p>' + effectivePPr + runs + '</w:p>';
         }
       }
