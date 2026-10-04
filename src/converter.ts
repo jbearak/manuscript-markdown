@@ -13,7 +13,7 @@ import { computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
 import { findDollarMathAt } from './math-delimiters';
 import type { TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { citationEndInText, customStyleId, linkifiedText, linkifyMatches } from './md-to-docx';
+import { citationEndInText, customStyleId, linkifiedText, linkifyMatches, startsHtmlBlock } from './md-to-docx';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { publicStyleNameForZoteroId, zoteroStyleIdForName } from './csl-loader';
 import { extractZoteroKey } from './zotero-link';
@@ -245,6 +245,9 @@ function escapeSensitiveHtmlLikeTags(text: string): string {
 
 // The HTML blocks markdown-it reads that can start inside a paragraph: all
 // but a line of one tag (see its html_block rule)
+// The HTML blocks that end at their own marker, not at a blank line
+const HTML_BLOCK_ENDS_AT_MARKER = /^<(?:(?:script|pre|style|textarea)(?=[\s>]|$)|!--|\?|![A-Za-z]|!\[CDATA\[)/i;
+
 const HTML_BLOCK_IN_PARAGRAPH = [
   /^<(script|pre|style|textarea)(?=(\s|>|$))/i, /^<!--/, /^<\?/, /^<![A-Z]/, /^<!\[CDATA\[/,
   new RegExp('^</?(' + htmlBlockNames.join('|') + ')(?=(\\s|/?>|$))', 'i'),
@@ -1774,8 +1777,9 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
   const escaped = edges[1] + core + edges[3];
   // A paragraph that is an HTML block, as export writes one, reads as it is,
   // escapes and all, so it takes none, as in <div>https://e.com</div>,
-  // unless a line break of Word's would read as a backslash in it
-  const htmlBlock = !delimited && blockStart && !result.includes('\\\n') && isHtmlBlock(result) && after?.first === '';
+  // unless a line break of Word's would read as a backslash in it. Up to
+  // three spaces can come before it, which buildMarkdown writes as they are
+  const htmlBlock = !delimited && blockStart && !result.includes('\\\n') && isHtmlBlock(result.replace(/^ {1,3}(?=<)/, '')) && after?.first === '';
   result = htmlBlock ? result : escaped;
 
   // If both superscript and subscript are true, superscript takes precedence
@@ -7461,6 +7465,15 @@ export function buildMarkdown(
   // Whether the paragraph is in a quote or list (see InlineRangeOpts)
   let paragraphNested = false;
   let paragraphHeading = false;
+  // A list item's or its continuation's lines after its first, where it's
+  // an HTML block, which has no lazy continuation to keep them in the item
+  let listLinePrefix = '';
+  // Whether the last list item's text or continuation is an HTML block that
+  // only a blank line ends, which takes in a sublist after it without one
+  let listHtmlBlockOpen = false;
+  // Whether the paragraph's text starts its own line, where an HTML block
+  // keeps the spaces before it: not after a heading's # or an item's marker
+  let ownLine = true;
   let deferredCommentQuote: { group?: number; level: number } | undefined;
   // The last comment bodies written into a quote
   let quotedBodies: { text: string; group?: number; level: number } | undefined;
@@ -7708,7 +7721,8 @@ export function buildMarkdown(
           // can interrupt the text before it
           const interrupts = startsList && !lastListItemEmpty && (isEmptyListItem(i)
             || (meta.type === 'ordered' && (meta.wordNumber ?? meta.startNumber ?? 1) !== 1));
-          output.push('\n' + '\n'.repeat(underEmpty ? 0 : Math.max(afterQuote, interrupts ? 1 : 0)));
+          const afterHtmlBlock = listHtmlBlockOpen && meta.level > (lastListLevel ?? 0);
+          output.push('\n' + '\n'.repeat(underEmpty ? 0 : Math.max(afterQuote, interrupts || afterHtmlBlock ? 1 : 0)));
         } else if (item.listContinuation) {
           // Plain continuation paragraphs are block children of the list item
           // and therefore require a blank line. An imported empty paragraph
@@ -7931,6 +7945,9 @@ export function buildMarkdown(
       quoteLinePrefix = prefixesQuoteLines(item) ? blockquotePrefix(item) : '';
       paragraphNested = !!(item.blockquoteLevel || item.listMeta || item.listContinuation);
       paragraphHeading = !!item.headingLevel;
+      listLinePrefix = '';
+      listHtmlBlockOpen = false;
+      ownLine = !item.headingLevel && !item.listMeta && !item.isTitle;
       deferredCommentQuote = quoteLinePrefix ? { group: item.blockquoteGroupIndex, level: item.blockquoteLevel ?? 1 } : undefined;
       if (item.headingLevel) {
         lastAlertParagraphKey = undefined;
@@ -7971,6 +7988,7 @@ export function buildMarkdown(
         listMarkerWidths = [...widths, listMarker.length];
         lastListItemEmpty = isEmptyListItem(i);
         output.push(indent + marker);
+        listLinePrefix = listContinuationIndent({ type: item.listMeta.type, level: item.listMeta.level });
       } else if (item.blockquoteLevel) {
         const itemPrefix = blockquotePrefix(item);
         const next = i + 1 < mergedContent.length ? mergedContent[i + 1] : undefined;
@@ -8015,6 +8033,7 @@ export function buildMarkdown(
         }
       } else if (item.listContinuation) {
         const continuationPrefix = listContinuationIndent(item.listContinuation);
+        listLinePrefix = continuationPrefix;
         const next = i + 1 < mergedContent.length ? mergedContent[i + 1] : undefined;
         if (next?.type === 'math' && next.display) {
           pendingDisplayMathContainer = { prefix: continuationPrefix, type: 'list' };
@@ -8414,7 +8433,14 @@ export function buildMarkdown(
     }
     pendingAlertPrefixStrip = undefined;
     pendingAlertInlinePrefixForHardBreak = undefined;
-    textOut = keepParagraphWhitespace(textOut, isMarkdownBlockEdge(mergedContent[i - 1]), isMarkdownBlockEdge(mergedContent[rendered.nextIndex]));
+    const atStart = isMarkdownBlockEdge(mergedContent[i - 1]);
+    const atEnd = isMarkdownBlockEdge(mergedContent[rendered.nextIndex]);
+    // An HTML block's indent, of up to three spaces, which markdown-it keeps
+    // in its text, and a reference would make a paragraph's
+    const htmlIndent = ownLine && atStart ? /^ {1,3}(?=<)/.exec(textOut)?.[0] ?? '' : '';
+    textOut = htmlIndent && startsHtmlBlock(textOut)
+      ? htmlIndent + keepParagraphWhitespace(textOut.slice(htmlIndent.length), true, atEnd)
+      : keepParagraphWhitespace(textOut, atStart, atEnd);
     if (paragraphHeading) {
       // A run of # that ends a heading's text, after a space or tab or as
       // all of it, is its closing sequence to Markdown, which drops it
@@ -8438,7 +8464,13 @@ export function buildMarkdown(
     if (quoteLinePrefix) {
       textOut = textOut.replace(/\n(?=([\s\S]))/g, (_m, next: string) =>
         '\n' + (next === '\n' ? quoteLinePrefix.trimEnd() : quoteLinePrefix));
+    } else if (listLinePrefix && /^ {0,3}</.test(textOut) && textOut.includes('\n') && startsHtmlBlock(textOut)) {
+      // A paragraph's lines stay in it without, and a comment's body would
+      // take the indent as its text. A blank line too, which a <pre> can
+      // hold, and which ends the item's block at the margin
+      textOut = textOut.replace(/\n(?=[\s\S])/g, '\n' + listLinePrefix);
     }
+    listHtmlBlockOpen = !!listLinePrefix && startsHtmlBlock(textOut) && !HTML_BLOCK_ENDS_AT_MARKER.test(textOut.trimStart());
     if (rendered.deferredComments.length > 0) {
       // Strip trailing newlines (from <w:br/> between comment references in round-tripped DOCX)
       output.push(textOut.replace(/(\\?\n)+$/, ''));
