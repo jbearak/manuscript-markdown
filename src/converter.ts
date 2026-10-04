@@ -4616,8 +4616,10 @@ function textNextToMath(markdown: string, segment: ContentItem[], index: number,
   if (!WORD_NEXT_TO_MATH.test(last)) return markdown;
   let slashes = 0;
   while (markdown[markdown.length - 2 - slashes] === '\\') slashes++;
-  // An escaped _ goes with its backslash
-  return markdown.slice(0, markdown.length - (last === '_' && slashes % 2 === 1 ? 2 : 1)) + characterReference(last);
+  // An escaped _ goes with its backslash, and a backslash before a letter
+  // or digit is doubled, as before the reference's & it would escape it
+  if (slashes % 2 === 0) return markdown.slice(0, -1) + characterReference(last);
+  return last === '_' ? markdown.slice(0, -2) + characterReference(last) : markdown.slice(0, -1) + '\\' + characterReference(last);
 }
 
 /**

@@ -4971,6 +4971,7 @@ describe('Word text that reads as Markdown', () => {
     ['a letter after it', 'the $x_i$&#115; are'],
     ['a digit before it', '&#50;$x$ and'],
     ['_ before it', 'a&#95;$x$'],
+    ['a backslash and letter before it', 'a\\\\&#97;$x$'],
     ['a letter after it in bold', '**the $x_i$&#115;**'],
     ['a digit before it in a highlight', '==&#50;$x$ b=='],
     ['a letter after it in a comment\'s range', '{==the $x_i$&#115;==}{>>c<<}'],
