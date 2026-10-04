@@ -7308,9 +7308,10 @@ export function buildMarkdown(
       const deferredAll: string[] = [];
       let partStart = 0;
       // The text of a part, from partStart, which ends its paragraph. Word
-      // puts a space or tab after the note's mark, which goes.
+      // puts a space or tab after the note's mark, which goes, but not the
+      // whitespace the note's text starts with after it.
       const inlinePart = (text: string) => partStart === 0
-        ? keepParagraphWhitespace(text.replace(/^[ \t]+/, ''), true, true)
+        ? keepParagraphWhitespace(text.replace(/^[ \t]/, ''), true, true)
         : keepParagraphWhitespace(text, isMarkdownBlockEdge(bodyMerged[partStart - 1]), true);
       for (let bi = 0; bi < bodyMerged.length; bi++) {
         const item = bodyMerged[bi];

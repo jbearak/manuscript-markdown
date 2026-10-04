@@ -7706,8 +7706,15 @@ export async function convertMdToDocx(
           }
           state.tableIndex++;
         } else {
-          const runs = generateRuns(withoutCommentBodyLines(t.runs), state, options, bibEntries, citeprocEngine);
-          bodyXml += '<w:p>' + effectivePPr + selfRefRun + runs + '</w:p>';
+          const firstRuns = withoutCommentBodyLines(t.runs);
+          const runs = generateRuns(firstRuns, state, options, bibEntries, citeprocEngine);
+          // Word puts a space after the note's mark, which import takes off,
+          // so text that starts with whitespace keeps it after one. A
+          // comment's body in ID syntax goes with the comment, not the text.
+          const first = firstRuns.find(run => !(run.type === 'text' && run.text === '') && run.type !== 'comment_body_with_id');
+          const separator = first?.type === 'text' && !first.code && /^[ \t]/.test(first.text)
+            ? '<w:r><w:t xml:space="preserve"> </w:t></w:r>' : '';
+          bodyXml += '<w:p>' + effectivePPr + selfRefRun + separator + runs + '</w:p>';
         }
       } else {
         if (t.type === 'table') {
