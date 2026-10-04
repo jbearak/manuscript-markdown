@@ -4632,6 +4632,34 @@ describe('Tabs', () => {
   });
 });
 
+describe('Hyphens and carriage returns', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+
+  test.each([
+    ['a non-breaking hyphen', 'w:noBreakHyphen', 'COVID‑19'],
+    ['an optional hyphen', 'w:softHyphen', 'hy­phen'],
+  ])('keeps %s', async (_name, element, md) => {
+    // Import dropped Word's element for it, so COVID‑19 came back COVID19
+    for (const [text, part] of [[md, 'word/document.xml'], ['T.[^1]\n\n[^1]: ' + md, 'word/footnotes.xml'],
+      ['{==x==}{>>@A (2024-01-15 10:30) | ' + md + '<<}', 'word/comments.xml'], ['{--' + md + '--}', 'word/document.xml']]) {
+      const { docx } = await convertMdToDocx(text);
+      const xml = await (await JSZip.loadAsync(docx)).file(part)!.async('string');
+      expect(xml).toContain('<' + element + '/>');
+      expect(strip((await convertDocx(docx)).markdown)).toBe(text);
+    }
+  });
+
+  test('reads a carriage return as a line break', async () => {
+    // Import dropped it, which Word shows as a line break
+    const zip = await JSZip.loadAsync((await convertMdToDocx('a\\\nb')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const cr = xml.replace('<w:br/>', '<w:cr/>');
+    expect(cr).not.toBe(xml);
+    zip.file('word/document.xml', cr);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('a\\\nb');
+  });
+});
+
 describe('Table alignment', () => {
   const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
   const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
