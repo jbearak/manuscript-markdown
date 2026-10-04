@@ -7062,6 +7062,16 @@ export function buildMarkdown(
     return Math.max(1, blockquotePostContentBlankLines?.get(pendingPostContentGroupIndex) ?? 1);
   }
 
+  // Before a quote group with no blank line before it, after another. Where
+  // it's the shallower, in the same list item or none, the source had a
+  // line that ended the deeper one's paragraph, as a bare >, without which
+  // its text continues that one. Out of the item, its indent ends that.
+  function adjoiningQuoteGroups(item: Extract<ContentItem, { type: 'para' }>): string {
+    const shallower = lastBlockquoteLevel !== undefined && item.blockquoteLevel !== undefined && item.blockquoteLevel < lastBlockquoteLevel
+      && lastBlockquoteListLevel === item.listContinuation?.level;
+    return shallower ? blockquotePrefix(item).trimEnd() + '\n' : '';
+  }
+
   function blockquotePrefix(item: Extract<ContentItem, { type: 'para' }>): string {
     const quotePrefix = '> '.repeat(item.blockquoteLevel || 1);
     return (item.listContinuation ? listContinuationIndent(item.listContinuation) : '') + quotePrefix;
@@ -7126,6 +7136,8 @@ export function buildMarkdown(
   // metadata is absent (plain↔alert or alert↔different-alert transitions).
   let lastBlockquoteAlertType: GfmAlertType | 'plain' | undefined;
   let lastBlockquoteLevel: number | undefined;
+  // The list level of the last quote's item, if it's in one
+  let lastBlockquoteListLevel: number | undefined;
   // A quote paragraph's lines after its first, and its comment bodies, stay
   // in its quote, where a line without > after it would start a paragraph of
   // its own
@@ -7389,6 +7401,10 @@ export function buildMarkdown(
           // own visible prefix and need only the line transition, plus the
           // blank lines the source had before them.
           ensureTrailingNewlines(item.blockquoteLevel ? 1 + blankLinesBeforeListQuote(item) : 1 + blankLinesAfterListQuote());
+          if (item.blockquoteLevel && lastBlockquoteGroupIndex !== undefined && item.blockquoteGroupIndex !== undefined
+            && item.blockquoteGroupIndex !== lastBlockquoteGroupIndex && blockquoteGaps?.get(lastBlockquoteGroupIndex) === 0) {
+            output.push(adjoiningQuoteGroups(item));
+          }
         } else if (incomingSep !== null) {
           output.push(incomingSep);
         } else if (
@@ -7401,7 +7417,9 @@ export function buildMarkdown(
           // Transitioning between blockquote groups — use gap metadata to
           // emit the exact number of blank lines from the original source.
           const gapCount = blockquoteGaps.get(lastBlockquoteGroupIndex);
-          if (gapCount !== undefined && gapCount >= 0) {
+          if (gapCount === 0) {
+            output.push('\n' + adjoiningQuoteGroups(item));
+          } else if (gapCount !== undefined && gapCount >= 0) {
             // gapCount blank lines = gapCount+1 newline characters
             output.push('\n' + '\n'.repeat(gapCount));
           } else if (gapCount === -1) {
@@ -7443,7 +7461,9 @@ export function buildMarkdown(
             // metadata if available, otherwise default double-newline.
             if (blockquoteGaps && lastBlockquoteGroupIndex !== undefined) {
               const gapCount = blockquoteGaps.get(lastBlockquoteGroupIndex);
-              if (gapCount !== undefined && gapCount >= 0) {
+              if (gapCount === 0) {
+                output.push('\n' + adjoiningQuoteGroups(item));
+              } else if (gapCount !== undefined && gapCount >= 0) {
                 output.push('\n' + '\n'.repeat(gapCount));
               } else {
                 output.push('\n\n');
@@ -7564,6 +7584,7 @@ export function buildMarkdown(
       if (item.blockquoteLevel) {
         lastBlockquoteAlertType = item.alertType || 'plain';
         lastBlockquoteLevel = item.blockquoteLevel;
+        lastBlockquoteListLevel = item.listContinuation?.level;
       } else if (item.headingLevel || item.listMeta || item.isCodeBlock) {
         lastBlockquoteAlertType = undefined;
         lastBlockquoteLevel = undefined;
