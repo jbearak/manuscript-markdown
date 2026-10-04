@@ -7,7 +7,7 @@ import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
 import { keepParagraphEdgeWhitespace } from './html-entities';
 import htmlBlockNames from 'markdown-it/lib/common/html_blocks.mjs';
-import { HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
+import { HTML_OPEN_CLOSE_TAG_RE, HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import { isMdAsciiPunct, isPunctChar, isWhiteSpace } from 'markdown-it/lib/common/utils.mjs';
 import { computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
 import { findDollarMathAt } from './math-delimiters';
@@ -253,12 +253,27 @@ const HTML_BLOCK_IN_PARAGRAPH = [
   new RegExp('^</?(' + htmlBlockNames.join('|') + ')(?=(\\s|/?>|$))', 'i'),
 ];
 
+// The HTML blocks that end at a marker, with it: a script, pre, style or
+// textarea, a processing instruction, a declaration and a CDATA section
+const HTML_BLOCKS_WITH_END: Array<[RegExp, RegExp]> = [
+  [HTML_BLOCK_IN_PARAGRAPH[0], /<\/(script|pre|style|textarea)>/i],
+  [HTML_BLOCK_IN_PARAGRAPH[2], /\?>/], [HTML_BLOCK_IN_PARAGRAPH[3], />/], [HTML_BLOCK_IN_PARAGRAPH[4], /\]\]>/],
+];
+// A line of one tag, which starts an HTML block, though not in a paragraph
+const HTML_TAG_LINE = new RegExp(HTML_OPEN_CLOSE_TAG_RE.source + '\\s*$');
+
 /** Whether text is an HTML block that ends in it, which Markdown reads as it
- *  is: one of a block's tag, or a script, pre, style or textarea with its
- *  closing tag */
+ *  is: one of a block's tag or that starts with a line of one tag, which a
+ *  blank line ends, or one that ends at a marker with it. Not a comment,
+ *  which export reads as the converter's own, nor a line of a tag import
+ *  writes as a reference (see escapeSensitiveHtmlLikeTags) */
 function isHtmlBlock(text: string): boolean {
-  const pre = HTML_BLOCK_IN_PARAGRAPH[0].test(text);
-  return pre ? /<\/(script|pre|style|textarea)>/i.test(text) : HTML_BLOCK_IN_PARAGRAPH[5].test(text);
+  const withEnd = HTML_BLOCKS_WITH_END.find(([start]) => start.test(text));
+  if (withEnd) return withEnd[1].test(text);
+  const line = text.split('\n', 1)[0];
+  const tag = HTML_LIKE_TAG_RE.exec(line);
+  return HTML_BLOCK_IN_PARAGRAPH[5].test(text)
+    || HTML_TAG_LINE.test(line) && !(tag && MARKDOWN_HTML_SENSITIVE_TAGS.has(tag[1].toLowerCase()));
 }
 
 // An HTML tag, comment or the like, as markdown-it reads one, from an offset
