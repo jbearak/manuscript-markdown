@@ -2896,6 +2896,13 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
               runs: [{ type: 'text', text: htmlContent.replace(/\n$/, '') }]
             });
           }
+        } else if (/^(?:<br\s*\/?>[ \t]*)+$/i.test(htmlContent.trim())) {
+          // Line breaks alone, as import writes a paragraph that is one,
+          // which markdown-it reads as a block, not a paragraph's text
+          result.push({
+            type: 'paragraph',
+            runs: htmlContent.trim().match(/<br\s*\/?>/gi)!.map(() => ({ type: 'hardbreak' as const, text: '\n' })),
+          });
         } else {
           const htmlTables = extractHtmlTables(htmlContent);
           if (htmlTables.length > 0) {
@@ -3107,6 +3114,10 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
             ...formatStack,
             href: currentHref
           });
+        } else if (/^<br\s*\/?>$/i.test(html)) {
+          // A line break, as import writes one Markdown's \ can't hold: at
+          // the end of a paragraph, or in a heading
+          runs.push({ type: 'hardbreak', text: '\n', ...formatStack, href: currentHref });
         } else if (/^<img\s/i.test(html)) {
           const srcMatch = html.match(/src\s*=\s*["']([^"']+)["']/);
           const altMatch = html.match(/alt\s*=\s*["']([^"']*?)["']/);

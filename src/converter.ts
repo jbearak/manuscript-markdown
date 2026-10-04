@@ -232,9 +232,10 @@ const MARKDOWN_HTML_SENSITIVE_TAGS = new Set([
   'colgroup',
   'col',
   'img',
+  'br',
 ]);
 
-const HTML_LIKE_TAG_RE = /<\/?([A-Za-z][A-Za-z0-9-]*)(?:\s[^<>]*?)?>/;
+const HTML_LIKE_TAG_RE = /<\/?([A-Za-z][A-Za-z0-9-]*)(?:\s[^<>]*?)?\/?>/;
 
 function escapeSensitiveHtmlLikeTags(text: string): string {
   return text.replace(new RegExp(HTML_LIKE_TAG_RE.source, 'g'), (fullMatch, tagName: string) => {
@@ -386,6 +387,11 @@ export function keepParagraphWhitespace(text: string, atStart: boolean, atEnd: b
   }
   return keepParagraphEdgeWhitespace(text, atStart, atEnd);
 }
+
+// A line break as Markdown writes one, a \ that isn't escaped before a line
+// end, with the escaped ones before it
+const HARD_BREAK = /(?<!\\)((?:\\\\)*)\\\n/g;
+const HARD_BREAK_AT_END = /(?<!\\)((?:\\\\)*)\\\n([ \t]*)$/;
 
 /** Whether text next to an item starts or ends a Markdown block there: at
  *  the end of the content, a paragraph break, a table, or a display
@@ -5126,7 +5132,9 @@ function renderInlineSegment(
 ): { text: string; deferredComments: string[] } {
   const result = renderInlineRange(segment, 0, comments, undefined, renderOpts);
   return {
-    // Keep parity with paragraph-level emission behavior.
+    // Keep parity with paragraph-level emission behavior. Export writes a
+    // grid table's cell with fewer lines than its row's with line breaks at
+    // its end, which it doesn't hold.
     text: result.text.replace(/(\\?\n)+$/, ''),
     deferredComments: result.deferredComments,
   };
@@ -8609,6 +8617,15 @@ export function buildMarkdown(
     pendingAlertInlinePrefixForHardBreak = undefined;
     const atStart = isMarkdownBlockEdge(mergedContent[i - 1]);
     const atEnd = isMarkdownBlockEdge(mergedContent[rendered.nextIndex]);
+    // A line break as \ before a line end holds in a paragraph's text but
+    // not at its end, where Markdown drops the line end and keeps the \ as
+    // text, nor in a heading, which the line end ends, so there it's <br>,
+    // which export reads as one. One before comment bodies goes, as below.
+    if (paragraphHeading) {
+      textOut = textOut.replace(HARD_BREAK, (_m, backslashes: string) => backslashes + '<br>');
+    } else if (atEnd && rendered.deferredComments.length === 0) {
+      textOut = textOut.replace(HARD_BREAK_AT_END, (_m, backslashes: string, whitespace: string) => backslashes + '<br>' + whitespace);
+    }
     // An HTML block's indent, of up to three spaces, which markdown-it keeps
     // in its text, and a reference would make a paragraph's
     const htmlIndent = ownLine && atStart ? /^ {1,3}(?=<)/.exec(textOut)?.[0] ?? '' : '';
@@ -8701,10 +8718,14 @@ export function buildMarkdown(
       let partStart = 0;
       // The text of a part, from partStart, which ends its paragraph. Word
       // puts a space or tab after the note's mark, which goes, but not the
-      // whitespace the note's text starts with after it.
-      const inlinePart = (text: string) => partStart === 0
-        ? keepParagraphWhitespace(text.replace(/^[ \t]/, ''), true, true)
-        : keepParagraphWhitespace(text, isMarkdownBlockEdge(bodyMerged[partStart - 1]), true);
+      // whitespace the note's text starts with after it. A line break at its
+      // end is <br>, as at a paragraph's end in the body.
+      const inlinePart = (text: string) => {
+        const broken = text.replace(HARD_BREAK_AT_END, (_m, backslashes: string, whitespace: string) => backslashes + '<br>' + whitespace);
+        return partStart === 0
+          ? keepParagraphWhitespace(broken.replace(/^[ \t]/, ''), true, true)
+          : keepParagraphWhitespace(broken, isMarkdownBlockEdge(bodyMerged[partStart - 1]), true);
+      };
       // The part that holds the paragraph's text and display math so far,
       // which an equation in the paragraph goes on in, on the next line, and
       // text after one from its closing fence, as in the document

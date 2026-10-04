@@ -4898,6 +4898,70 @@ describe('HTML comments in notes', () => {
   });
 });
 
+describe('Line breaks a backslash can\'t hold', () => {
+  const imported = async (xml: string) => (await convertDocx(await buildSyntheticDocx(wrapDocumentXml(xml)))).markdown
+    .replace(/^---\n[\s\S]*?\n---\n?/, '');
+  const exportedXml = async (md: string) => (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+  // Each paragraph's text, with a line break as ⏎
+  const exportedText = async (md: string) => [...(await exportedXml(md)).matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)]
+    .map(p => p[0].replace(/<w:br\/>/g, '⏎').replace(/<[^>]+>/g, '')).join(' | ');
+  const p = (runs: string, style?: string) => '<w:p>' + (style ? '<w:pPr><w:pStyle w:val="' + style + '"/></w:pPr>' : '') + runs + '</w:p>';
+  const r = (inner: string, rPr = '') => '<w:r>' + rPr + inner + '</w:r>';
+  const t = (text: string) => '<w:t xml:space="preserve">' + text + '</w:t>';
+
+  test.each([
+    ['ends a paragraph', p(r(t('a') + '<w:br/>')), 'a<br>\n', 'a⏎'],
+    ['ends bold text that ends a paragraph', p(r(t('a') + '<w:br/>', '<w:rPr><w:b/></w:rPr>')), '**a**<br>\n', 'a⏎'],
+    ['ends a paragraph after another', p(r(t('a') + '<w:br/><w:br/>')), 'a\\\n<br>\n', 'a⏎⏎'],
+    ['is in a heading', p(r(t('a') + '<w:br/>' + t('b')), 'Heading1'), '# a<br>b\n', 'a⏎b'],
+    ['ends a heading', p(r(t('a') + '<w:br/>'), 'Heading1'), '# a<br>\n', 'a⏎'],
+    // Which markdown-it reads as an HTML block, not a paragraph's text
+    ['is all of a paragraph', p(r('<w:br/>')), '<br>\n', '⏎'],
+  ])('writes one that %s as <br>', async (_name, xml, md, text) => {
+    // As a \ before a line end, it was a \ in the text at a paragraph's
+    // end, and ended a heading, whose text after it was a paragraph
+    expect(await imported(xml)).toBe(md);
+    expect(await exportedText(md)).toBe(text);
+  });
+
+  test.each([
+    ['inserted', 'w:ins', '{++\\\n++}'],
+    ['deleted', 'w:del', '{--\\\n--}'],
+  ])('keeps one %s alone as the change it is', async (_name, tag, span) => {
+    // Written as it was untracked, it lost its change
+    const change = '<' + tag + ' w:id="1" w:author="A" w:date="2024-01-01T00:00:00Z">' + r('<w:br/>') + '</' + tag + '>';
+    const md = await imported(p(r(t('a')) + change + r(t('b'))));
+    expect(md).toBe('a' + span + 'b\n');
+    expect(await exportedXml(md)).toMatch(new RegExp('<' + tag + ' [^>]*><w:r>(?:<w:rPr>(?:(?!</w:r>).)*</w:rPr>)?<w:br/></w:r></' + tag + '>'));
+  });
+
+  test.each([
+    ['its first', 'T.[^1]\n\n[^1]: a **XX**', 'T.[^1]\n\n[^1]: a <br>\n'],
+    ['a later one', 'T.[^1]\n\n[^1]: a\n\n    b **XX**', 'T.[^1]\n\n[^1]: a\n\n    b <br>\n'],
+    ['all of one', 'T.[^1]\n\n[^1]: **XX**', 'T.[^1]\n\n[^1]: <br>\n'],
+  ])('writes one that ends a note\'s paragraph, %s, as <br>', async (_name, source, md) => {
+    // A note's text was rendered apart from the document's, with its
+    // break as a \ before a line end, which export read as a \
+    const zip = await JSZip.loadAsync((await convertMdToDocx(source)).docx);
+    const xml = await zip.file('word/footnotes.xml')!.async('string');
+    const edited = xml.replace(/<w:r><w:rPr>(?:(?!<\/w:r>).)*<\/w:rPr><w:t>XX<\/w:t><\/w:r>/, '<w:r><w:br/></w:r>');
+    expect(edited).not.toBe(xml);
+    zip.file('word/footnotes.xml', edited);
+    const imported = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(imported).toBe(md);
+    const notes = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/footnotes.xml')!.async('string');
+    expect(notes).toContain('<w:br/>');
+    expect(notes).not.toContain('&lt;br');
+  });
+
+  test('escapes a <br> tag in Word\'s text, which export reads as a line break', async () => {
+    const md = await imported(p(r(t('a&lt;br&gt;b&lt;br/&gt;c&lt;BR /&gt;'))));
+    expect(md).toBe('a&lt;br&gt;b&lt;br/&gt;c&lt;BR /&gt;\n');
+    expect(await exportedText(md)).toBe('a&lt;br&gt;b&lt;br/&gt;c&lt;BR /&gt;');
+    expect(await exportedText('a<br>b<br/>c<BR >d')).toBe('a⏎b⏎c⏎d');
+  });
+});
+
 describe('Word text that reads as Markdown', () => {
   const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
   /** The Markdown for md's export, with its text XX in `part` replaced by text */
