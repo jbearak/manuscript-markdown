@@ -483,7 +483,7 @@ All three settings are preserved through DOCX round-trips via custom properties 
 
 Manuscript Markdown supports CommonMark plus the implemented [GitHub Flavored Markdown](https://github.github.com/gfm/) extension set.
 
-- **Formatting**: bold (`**text**`), italic (`_text_`), strikethrough (`~~text~~`), underline (`<u>text</u>`), superscript (`<sup>text</sup>`), subscript (`<sub>text</sub>`), inline code (`` `code` ``)
+- **Formatting**: bold (`**text**`), italic (`_text_`), strikethrough (`~~text~~`), underline (`<u>text</u>`), superscript (`<sup>text</sup>`), subscript (`<sub>text</sub>`), inline code (`` `code` ``). The HTML tags `<b>` and `<strong>` are bold too, `<i>` and `<em>` italic, and `<s>`, `<del>` and `<strike>` strikethrough. DOCX→MD conversion writes `<b>`, `<i>` or `<s>` where Word's formatting starts or ends at a point Markdown's delimiters can't: `a**.b**` isn't bold, since `**` after a letter can't open before punctuation, so a bold `.b` after an `a` is `a<b>.b</b>`. The same goes for formatting that would run into the delimiter of a neighbour, as italic `a` before bold `b` would in `*a***b**`.
 - **Headings**: `# H1` through `###### H6`
 - **Lists**: bulleted (`- item`), numbered (`1. item`), task lists (`- [ ] item`, `- [x] item`). Blockquote continuation blocks inside list items are preserved; see [List item limitations](#list-item-block-content) for the remaining unsupported block content.
 - **Links**: `[text](url)` plus autolink literals (bare URLs/emails)
@@ -518,7 +518,7 @@ The `breaks: true` frontmatter setting changes the default behavior so that bare
 - **Strikethrough** uses standard GitHub `~~text~~` behavior.
 - **Task list items** are parsed semantically as checkbox list items, not only plain text prefixes. As in GFM, the box must be plain text at the very start of the item: `` - `[ ] a` ``, `- **[ ] a**`, `- [[ ] a](url)` and `- \[ ] a` are ordinary list items. An alert's marker, likewise, must be plain text at the start of a quote's line: `` > `[!NOTE]` `` and `> \[!NOTE]` are ordinary quotes.
 - **Disallowed raw HTML** follows the GitHub extension set (`title`, `textarea`, `style`, `xmp`, `iframe`, `noembed`, `noframes`, `script`, `plaintext`) and is treated as literal text in preview/conversion paths.
-- **Intentional HTML exceptions**: HTML comments (`<!-- ... -->`) and supported inline HTML formatting tags used by this project (for example `<u>`, `<sup>`, `<sub>`) remain supported.
+- **Intentional HTML exceptions**: HTML comments (`<!-- ... -->`) and supported inline HTML formatting tags used by this project (for example `<u>`, `<sup>`, `<sub>`, `<b>`, `<i>`, `<s>`) remain supported.
 - **Alerts** use GitHub's blockquote-based syntax with `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, and `> [!CAUTION]` markers at the start of a line. Alert content follows on subsequent `>` lines, and a marker at the start of a later line starts another alert. Alerts are displayed with colored left borders and type-specific header icons in preview and are preserved through DOCX round-trip. Type labels are shown by default; set `callout-labels: false` in frontmatter to hide the label row in both preview and DOCX output without removing the callout's body, type, colors, border, or other styling. An explicit `true` or `false` value round-trips through DOCX via the `MANUSCRIPT_CALLOUT_LABELS` custom property.
 
 ## Tables

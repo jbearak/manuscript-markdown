@@ -2859,12 +2859,61 @@ function convertInlineTokens(tokens: ManuscriptToken[]): MdRun[] {
   return runs;
 }
 
+type HtmlFormat = 'bold' | 'italic' | 'strikethrough' | 'underline' | 'superscript' | 'subscript';
+
+/** The formats an inline HTML tag without attributes sets, by tag name: the
+ *  ones import writes, in HTML tables and where Markdown's delimiters
+ *  wouldn't read as emphasis, and their synonyms. */
+const HTML_FORMAT_TAGS: Record<string, HtmlFormat> = {
+  b: 'bold', strong: 'bold', i: 'italic', em: 'italic', s: 'strikethrough', del: 'strikethrough', strike: 'strikethrough',
+  u: 'underline', sup: 'superscript', sub: 'subscript',
+};
+const HTML_FORMAT_TAG_RE = /^<(\/?)(b|strong|i|em|s|del|strike|u|sup|sub)\s*>$/i;
+/** An opening tag of a name in HTML_FORMAT_TAGS, with attributes or without */
+const HTML_FORMAT_OPENER_RE = /^<(b|strong|i|em|s|del|strike|u|sup|sub)(?=[\s/>])/i;
+
 /** Convert inline tokens to Word runs, carrying formatting and protected paragraph metadata. */
 function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
   const runs: MdRun[] = [];
   const formatStack: Partial<Pick<MdRun, 'bold' | 'italic' | 'underline' | 'strikethrough' | 'superscript' | 'subscript' | 'highlight' | 'highlightColor'>> = {};
   const highlightStack: Pick<MdRun, 'highlight' | 'highlightColor'>[] = [];
   let currentHref: string | undefined;
+  // How many delimiters, and how many tags, hold each format open, so that
+  // one closing inside another, as </b> in **a <b>b</b> c**, leaves it on,
+  // and a closing tag closes only what a tag opened
+  const depth: Record<'delimiter' | 'tag', Partial<Record<HtmlFormat, number>>> = { delimiter: {}, tag: {} };
+  const holds = (format: HtmlFormat) => !!depth.delimiter[format] || !!depth.tag[format];
+  const openFormat = (format: HtmlFormat, by: 'delimiter' | 'tag' = 'delimiter') => {
+    depth[by][format] = (depth[by][format] ?? 0) + 1;
+    formatStack[format] = true;
+  };
+  // Whether a delimiter or tag held the format open
+  const closeFormat = (format: HtmlFormat, by: 'delimiter' | 'tag' = 'delimiter'): boolean => {
+    if (!depth[by][format]) return false;
+    depth[by][format]!--;
+    if (!holds(format)) delete formatStack[format];
+    return true;
+  };
+  // By tag name, whether each tag of that name still open set its format or
+  // is text, as one with attributes is, whose closing tag is text too, as
+  // the inner </b> of <b>a <b class="x">b</b> c</b>
+  const openTags: Record<string, boolean[]> = {};
+  // Whether `html` is a formatting tag (HTML_FORMAT_TAGS), which this
+  // applies, and not one closing a tag that is text, or none, which is text
+  const applyFormatTag = (html: string): boolean => {
+    const opener = HTML_FORMAT_OPENER_RE.exec(html);
+    if (opener) {
+      const name = opener[1].toLowerCase();
+      const applies = HTML_FORMAT_TAG_RE.test(html);
+      (openTags[name] ??= []).push(applies);
+      if (applies) openFormat(HTML_FORMAT_TAGS[name], 'tag');
+      return applies;
+    }
+    const match = HTML_FORMAT_TAG_RE.exec(html);
+    if (!match) return false;
+    const name = match[2].toLowerCase();
+    return openTags[name]?.pop() === true && closeFormat(HTML_FORMAT_TAGS[name], 'tag');
+  };
   
   for (let ti = 0; ti < tokens.length; ti++) {
     const token = tokens[ti];
@@ -2907,24 +2956,24 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
         break;
 
       case 'strong_open':
-        formatStack.bold = true;
+        openFormat('bold');
         break;
       case 'strong_close':
-        delete formatStack.bold;
+        closeFormat('bold');
         break;
         
       case 'em_open':
-        formatStack.italic = true;
+        openFormat('italic');
         break;
       case 'em_close':
-        delete formatStack.italic;
+        closeFormat('italic');
         break;
         
       case 's_open':
-        formatStack.strikethrough = true;
+        openFormat('strikethrough');
         break;
       case 's_close':
-        delete formatStack.strikethrough;
+        closeFormat('strikethrough');
         break;
         
       case 'link_open':
@@ -2965,13 +3014,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
             // Preserve malformed <img> tags as literal text
             runs.push({ type: 'text', text: html, ...formatStack });
           }
-        } else if (html === '<u>') formatStack.underline = true;
-        else if (html === '</u>') delete formatStack.underline;
-        else if (html === '<sup>') formatStack.superscript = true;
-        else if (html === '</sup>') delete formatStack.superscript;
-        else if (html === '<sub>') formatStack.subscript = true;
-        else if (html === '</sub>') delete formatStack.subscript;
-        else {
+        } else if (!applyFormatTag(html)) {
           // Preserve unsupported inline HTML-like fragments as literal text
           // instead of dropping them.
           runs.push({

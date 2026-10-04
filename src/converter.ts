@@ -8,6 +8,7 @@ import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './ima
 import { keepParagraphEdgeWhitespace } from './html-entities';
 import htmlBlockNames from 'markdown-it/lib/common/html_blocks.mjs';
 import { HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
+import { isMdAsciiPunct, isPunctChar, isWhiteSpace } from 'markdown-it/lib/common/utils.mjs';
 import { computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
 import { findDollarMathAt } from './math-delimiters';
 import type { TableAlign } from './grid-table-preprocess';
@@ -210,6 +211,13 @@ const REVISION_ELEMENTS: Record<string, 'addition' | 'deletion'> = {
 // Tags that are interpreted semantically by the MD→DOCX parser/preview pipeline
 // and therefore must be escaped when they occur as literal plain text in DOCX.
 const MARKDOWN_HTML_SENSITIVE_TAGS = new Set([
+  'b',
+  'strong',
+  'i',
+  'em',
+  's',
+  'del',
+  'strike',
   'u',
   'sup',
   'sub',
@@ -1667,9 +1675,10 @@ function markdownHighlightColor(fmt: RunFormatting): string | undefined {
 
 /** `markdown` in a highlight of a Markdown color: ==a==, or ==a=={red}. */
 function wrapHighlight(markdown: string, color: string | undefined): string {
+  const [open, close] = ['==' + HIGHLIGHT_OPEN, HIGHLIGHT_CLOSE + '=='];
   return color && color !== 'yellow'
-    ? wrapMarkdownDelimited(markdown, '==', '==', '{' + color + '}')
-    : wrapMarkdownDelimited(markdown, '==', '==');
+    ? wrapMarkdownDelimited(markdown, open, close, '{' + color + '}')
+    : wrapMarkdownDelimited(markdown, open, close);
 }
 
 /** `text` as Markdown with Word's formatting. `lineStart` says the text
@@ -1677,6 +1686,12 @@ function wrapHighlight(markdown: string, color: string | undefined): string {
  *  block can start, and `after` gives the text of the runs after it in its
  *  paragraph (see escapeMarkdownChars). */
 export function wrapWithFormatting(text: string, fmt: RunFormatting, lineStart = false, after?: RunsAfter, blockStart = lineStart): string {
+  return resolveEmphasis(markedFormatting(text, fmt, lineStart, after, blockStart));
+}
+
+/** A run's Markdown, as wrapWithFormatting writes it, with its outermost
+ *  bold, italic or strikethrough marked for resolveEmphasis. */
+function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, after?: RunsAfter, blockStart = lineStart): string {
   let result = text;
 
   // Apply in reverse nesting order (innermost to outermost)
@@ -1743,11 +1758,145 @@ export function wrapWithFormatting(text: string, fmt: RunFormatting, lineStart =
     result = wrapHighlight(result, markdownHighlightColor(fmt));
   }
   if (fmt.underline) result = `<u>${result}</u>`;
-  if (fmt.strikethrough) result = wrapMarkdownDelimited(result, '~~', '~~');
-  if (fmt.italic) result = wrapMarkdownDelimited(result, '*');
-  if (fmt.bold) result = wrapMarkdownDelimited(result, '**');
+  if (fmt.strikethrough) result = wrapEmphasis(result, '~~', !fmt.italic && !fmt.bold);
+  if (fmt.italic) result = wrapEmphasis(result, '*', !fmt.bold);
+  if (fmt.bold) result = wrapEmphasis(result, '**');
 
   return result;
+}
+
+/** The marks markedFormatting puts after a run's outermost opening delimiter
+ *  of emphasis or strikethrough, by delimiter, and before its closing one. A
+ *  Word document can't hold them, which XML excludes. */
+const EMPHASIS_OPEN = { '**': '\u0001', '*': '\u0002', '~~': '\u0003' } as const;
+const EMPHASIS_CLOSE = '\u0004';
+/** The marks wrapHighlight puts after a highlight's opening == and before
+ *  its closing one, so that resolveEmphasis can tell an = of the text
+ *  before it, which would run into its ==, from another's closing == */
+const HIGHLIGHT_OPEN = '\u0005';
+const HIGHLIGHT_CLOSE = '\u0006';
+/** By opening mark, its delimiter and the HTML tag that can stand for it,
+ *  as an HTML table's cells write it */
+const EMPHASIS_BY_MARK: Record<string, { delimiter: string; tag: string }> = {
+  '\u0001': { delimiter: '**', tag: 'b' }, '\u0002': { delimiter: '*', tag: 'i' }, '\u0003': { delimiter: '~~', tag: 's' },
+};
+
+/** `markdown` in emphasis or strikethrough, its delimiters marked for
+ *  resolveEmphasis unless `marked` is false, as for one inside another. */
+function wrapEmphasis(markdown: string, delimiter: keyof typeof EMPHASIS_OPEN, marked = true): string {
+  return marked
+    ? wrapMarkdownDelimited(markdown, delimiter + EMPHASIS_OPEN[delimiter], EMPHASIS_CLOSE + delimiter)
+    : wrapMarkdownDelimited(markdown, delimiter);
+}
+
+const FLANK_SPACE = 0;
+const FLANK_PUNCT = 1;
+const FLANK_OTHER = 2;
+
+/** How markdown-it reads a character next to a delimiter of emphasis:
+ *  whitespace, punctuation or other, by UTF-16 code unit, as it does. A
+ *  text's edge reads as whitespace, as a line's does, and a mark as
+ *  punctuation, as its delimiter or tag does. */
+function flankClass(code: number): number {
+  if (Number.isNaN(code) || isWhiteSpace(code)) return FLANK_SPACE;
+  return code <= 6 || isMdAsciiPunct(code) || isPunctChar(String.fromCharCode(code)) ? FLANK_PUNCT : FLANK_OTHER;
+}
+
+/**
+ * `markdown` with its marked delimiters (markedFormatting) written as
+ * Markdown where they read as emphasis between the characters around them,
+ * and as HTML tags where they don't: an opening delimiter after a letter
+ * and before punctuation, as in a**.b**, a closing one after punctuation
+ * and before a letter, or one that runs into a delimiter of its kind
+ * outside it, as in *a***b**. Delimiters inside a run's outermost border it,
+ * or once that's HTML, its tag, which are punctuation, so only the
+ * outermost is marked. The text's start and end read as a line's, as a
+ * range's Markdown starts and ends one.
+ */
+function resolveEmphasis(markdown: string): string {
+  if (!markdown.includes(EMPHASIS_CLOSE) && !markdown.includes(HIGHLIGHT_OPEN)) return markdown;
+  const closeAt = new Map<number, number>();
+  const opens: number[] = [];
+  for (let i = 0; i < markdown.length; i++) {
+    const code = markdown.charCodeAt(i);
+    if (code >= 1 && code <= 3) opens.push(i);
+    else if (code === 4 && opens.length > 0) closeAt.set(opens.pop()!, i);
+  }
+  // A closing mark's delimiter and what it's written as, and by where a
+  // closing delimiter ends, the last character it's written with. Reading
+  // the text as written, not the parts, keeps this linear.
+  const closers = new Map<number, { delimiter: string; text: string }>();
+  const writtenEnds = new Map<number, number>();
+  const parts: string[] = [];
+  let from = 0;
+  for (let i = 0; i < markdown.length; i++) {
+    const code = markdown.charCodeAt(i);
+    if (code >= 1 && code <= 3) {
+      const { delimiter, tag } = EMPHASIS_BY_MARK[markdown[i]];
+      const marker = delimiter[0];
+      const start = i - delimiter.length;
+      parts.push(markdown.slice(from, start));
+      from = i + 1;
+      const close = closeAt.get(i);
+      if (close === undefined) {
+        parts.push(delimiter);
+        continue;
+      }
+      // A delimiter inside of the same character is in the same run, which
+      // reads by the characters past it: ***a*** after a letter opens
+      let first = i + 1;
+      while (markdown[first] === marker) first++;
+      let last = close - 1;
+      while (last > i && markdown[last] === marker) last--;
+      const afterAt = close + 1 + delimiter.length;
+      let afterRun = afterAt;
+      while (markdown[afterRun] === marker) afterRun++;
+      const beforeCode = writtenEnds.get(start) ?? markdown.charCodeAt(start - 1);
+      const before = flankClass(beforeCode);
+      const after = flankClass(markdown.charCodeAt(afterAt));
+      const inner = [flankClass(markdown.charCodeAt(first)), flankClass(markdown.charCodeAt(last))];
+      const canOpen = inner[0] !== FLANK_SPACE && !(inner[0] === FLANK_PUNCT && before === FLANK_OTHER);
+      const canClose = inner[1] !== FLANK_SPACE && !(inner[1] === FLANK_PUNCT && after === FLANK_OTHER);
+      // One of its kind before it, unless escaped, or after it, unless that
+      // opens a marked run, which reads this one before it. A substitution's
+      // sides read apart from its {~~, ~> and ~~}.
+      let slashes = 0;
+      if (!writtenEnds.has(start)) while (markdown[start - 2 - slashes] === '\\') slashes++;
+      const runsInto = (beforeCode === marker.charCodeAt(0) && slashes % 2 === 0
+          && !markdown.startsWith('{~~', start - 3) && !markdown.startsWith('~>', start - 2))
+        || (afterRun > afterAt && !(markdown.charCodeAt(afterRun) >= 1 && markdown.charCodeAt(afterRun) <= 3)
+          && !markdown.startsWith('~>', afterAt) && !markdown.startsWith('~~}', afterAt));
+      const html = !canOpen || !canClose || runsInto;
+      parts.push(html ? '<' + tag + '>' : delimiter);
+      closers.set(close, { delimiter, text: html ? '</' + tag + '>' : delimiter });
+    } else if (code === 4) {
+      parts.push(markdown.slice(from, i));
+      const closer = closers.get(i);
+      if (closer) {
+        parts.push(closer.text);
+        writtenEnds.set(i + 1 + closer.delimiter.length, closer.text.charCodeAt(closer.text.length - 1));
+      }
+      from = i + 1 + (closer ? closer.delimiter.length : 0);
+    } else if (code === 5) {
+      // The text's = before a highlight's == would open it a character
+      // early, unless escaped: a===b== highlights =b. Another's closing ==
+      // doesn't, as the highlight before closes there first, nor does a
+      // comment's {==, which its range starts after.
+      const start = i - 2;
+      let slashes = 0;
+      while (markdown[start - 2 - slashes] === '\\') slashes++;
+      const delimiter = markdown[start - 2] === '=' && (markdown[start - 3] === HIGHLIGHT_CLOSE || markdown[start - 3] === '{');
+      const before = markdown.slice(from, start);
+      parts.push(before.endsWith('=') && slashes % 2 === 0 && !delimiter ? before.slice(0, -1) + '\\=' : before);
+      parts.push('==');
+      from = i + 1;
+    } else if (code === 6) {
+      parts.push(markdown.slice(from, i));
+      from = i + 1;
+    }
+  }
+  parts.push(markdown.slice(from));
+  return parts.join('');
 }
 
 function formatHrefForMarkdown(href: string): string {
@@ -4484,7 +4633,7 @@ function renderHighlightGroup(
   for (let g = start; g < end; g++) {
     const item = segment[g];
     if (item.type === 'text') {
-      inner += wrapWithFormatting(item.text, { ...item.formatting, highlight: false }, false, runsAfter(segment, g + 1, rangeEnd));
+      inner += markedFormatting(item.text, { ...item.formatting, highlight: false }, false, runsAfter(segment, g + 1, rangeEnd));
     } else if (item.type === 'footnote_ref') {
       inner += footnoteRefText(item, noteLabels);
     } else if (item.type === 'math') {
@@ -4524,8 +4673,8 @@ function substitutionItemText(item: SubstitutionItem, precedingText: string, not
   }
   if (item.type === 'footnote_ref') return footnoteRefText(item, noteLabels);
   if (item.type === 'text') {
-    if (!item.href) return wrapWithFormatting(item.text, item.formatting, false, after);
-    const text = wrapWithFormatting(item.text, item.formatting, false, (after ?? RunsAfter.of('')).linkTo(item.href));
+    if (!item.href) return markedFormatting(item.text, item.formatting, false, after);
+    const text = markedFormatting(item.text, item.formatting, false, (after ?? RunsAfter.of('')).linkTo(item.href));
     return `[${text}](${formatHrefForMarkdown(item.href)})`;
   }
   if (item.type === 'citation') {
@@ -4557,8 +4706,10 @@ function tryRenderSubstitution(
 ): string | null {
   const display = (item: SubstitutionItem) => item.type === 'math' && item.display;
   if (deletion.type !== addition.type && (display(deletion) || display(addition))) return null;
-  const oldText = substitutionItemText(deletion, precedingText, noteLabels);
-  const newText = substitutionItemText(addition, precedingText, noteLabels);
+  // Each side reads apart, so its emphasis resolves apart, and before the
+  // check, as a mark hid the ~> of a struck >a: {~~~~>a~~~>b~~}
+  const oldText = resolveEmphasis(substitutionItemText(deletion, precedingText, noteLabels));
+  const newText = resolveEmphasis(substitutionItemText(addition, precedingText, noteLabels));
   if (oldText && newText && substitutionHolds(oldText, newText)) {
     return '{~~' + oldText + '~>' + newText + '~~}';
   }
@@ -4620,8 +4771,9 @@ function renderSubstitutionRun(
   while (k < end && side(segment[k], 'addition')) k++;
   const additions = k - start - deletions;
   if (deletions === 0 || additions === 0 || deletions + additions <= 2) return undefined;
-  const oldText = sideText(start, start + deletions);
-  const newText = sideText(start + deletions, k);
+  // Resolved apart, before the check (see tryRenderSubstitution)
+  const oldText = resolveEmphasis(sideText(start, start + deletions));
+  const newText = resolveEmphasis(sideText(start + deletions, k));
   if (!oldText || !newText) return undefined;
   if (!substitutionHolds(oldText, newText)) return undefined;
   // Two inline equations in a row on one side would run their dollar signs
@@ -4633,7 +4785,23 @@ function renderSubstitutionRun(
   return { text: '{~~' + oldText + '~>' + newText + '~~}', nextIndex: k };
 }
 
-function mergeConsecutiveRuns(content: ContentItem[]): ContentItem[] {
+/**
+ * Whether code with `formatting` and `text` writes the code span `next`
+ * does, so that one span holds both, as two side by side would run their
+ * backticks into one: code drops the rest of a run's formatting, and its
+ * highlight where an == in it would close that, unless together they'd
+ * have an == that neither has.
+ */
+function sameCodeSpan(formatting: RunFormatting, text: string, next: Extract<ContentItem, { type: 'text' }>): boolean {
+  const highlight = (f: RunFormatting, t: string) => f.highlight && !t.includes('==') ? f.highlightColor ?? 'yellow' : '';
+  const kept = highlight(formatting, text);
+  return formatting.code && next.formatting.code && kept === highlight(next.formatting, next.text)
+    && (kept === '' || !(text + next.text).includes('=='));
+}
+
+/** Joins runs that read as one. In HTML, which keeps the rest of code's
+ *  formatting, only runs formatted alike do (`markdown` false). */
+function mergeConsecutiveRuns(content: ContentItem[], markdown = true): ContentItem[] {
   const merged: ContentItem[] = [];
   let i = 0;
 
@@ -4652,7 +4820,7 @@ function mergeConsecutiveRuns(content: ContentItem[]): ContentItem[] {
     while (j < content.length) {
       const next = content[j];
       if (next.type !== 'text' ||
-          !formattingEquals(item.formatting, next.formatting) ||
+          !formattingEquals(item.formatting, next.formatting) && !(markdown && sameCodeSpan(item.formatting, mergedText, next)) ||
           item.href !== next.href ||
           !commentSetsEqual(item.commentIds, next.commentIds) ||
           !revisionsEqual(item.revision, next.revision)) {
@@ -4900,11 +5068,11 @@ function emphasisGroup(
       text += '$' + item.latex + '$';
     } else if (item.type === 'text') {
       // Inner formatting per item, all but the bold or italic around the group
-      text += wrapWithFormatting(item.text, { ...item.formatting, bold: false, italic: false }, false, runsAfter(segment, g + 1, end));
+      text += markedFormatting(item.text, { ...item.formatting, bold: false, italic: false }, false, runsAfter(segment, g + 1, end));
     }
   }
-  if (first.formatting.italic) text = wrapMarkdownDelimited(text, '*');
-  if (first.formatting.bold) text = wrapMarkdownDelimited(text, '**');
+  if (first.formatting.italic) text = wrapEmphasis(text, '*', !first.formatting.bold);
+  if (first.formatting.bold) text = wrapEmphasis(text, '**');
   return { text, end: groupEnd };
 }
 
@@ -5087,9 +5255,9 @@ function renderInlineRange(
         const after = runsAfter(segment, j + 1, segmentEnd);
         let segText: string;
         if (!seg.href) {
-          segText = wrapWithFormatting(seg.text, seg.formatting, false, after);
+          segText = markedFormatting(seg.text, seg.formatting, false, after);
         } else if (seg.text !== seg.href || hasFormatting(seg.formatting)) {
-          segText = `[${wrapWithFormatting(seg.text, seg.formatting, false, after.linkTo(seg.href))}](${formatHrefForMarkdown(seg.href)})`;
+          segText = `[${markedFormatting(seg.text, seg.formatting, false, after.linkTo(seg.href))}](${formatHrefForMarkdown(seg.href)})`;
         } else {
           // Bare, for linkify, which its escapes would keep from it
           segText = seg.text;
@@ -5136,7 +5304,7 @@ function renderInlineRange(
         [out, lastSpan] = appendRevised(out, item.text, item, lastSpan);
       } else {
         // Math can close past the link's text, in its URL or the runs after
-        const formattedText = wrapWithFormatting(item.text, item.formatting, false, runsAfter(segment, i + 1, segmentEnd).linkTo(item.href));
+        const formattedText = markedFormatting(item.text, item.formatting, false, runsAfter(segment, i + 1, segmentEnd).linkTo(item.href));
         [out, lastSpan] = appendRevised(out, '[' + formattedText + '](' + formatHrefForMarkdown(item.href) + ')', item, lastSpan);
       }
     } else {
@@ -5147,11 +5315,11 @@ function renderInlineRange(
       // An HTML block starts only a block's text, not a heading's or a
       // tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !item.revision;
-      [out, lastSpan] = appendRevised(out, wrapWithFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart), item, lastSpan);
     }
     i++;
   }
-  return { text: joinRevisedSpans(out), nextIndex: i, deferredComments: [] };
+  return { text: resolveEmphasis(joinRevisedSpans(out)), nextIndex: i, deferredComments: [] };
 }
 
 /** Render inline content using ID-based comment syntax ({#id}...{/id}).
@@ -5397,7 +5565,7 @@ function renderInlineRangeWithIds(
         [out, lastSpan] = appendRevised(out, item.text, item, lastSpan);
       } else {
         // Math can close past the link's text, in its URL or the runs after
-        const formattedText = wrapWithFormatting(item.text, item.formatting, false, runsAfter(segment, i + 1, segmentEnd).linkTo(item.href));
+        const formattedText = markedFormatting(item.text, item.formatting, false, runsAfter(segment, i + 1, segmentEnd).linkTo(item.href));
         [out, lastSpan] = appendRevised(out, '[' + formattedText + '](' + formatHrefForMarkdown(item.href) + ')', item, lastSpan);
       }
     } else {
@@ -5408,7 +5576,7 @@ function renderInlineRangeWithIds(
       // An HTML block starts only a block's text, not a heading's or a
       // tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !item.revision;
-      [out, lastSpan] = appendRevised(out, wrapWithFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart), item, lastSpan);
     }
     i++;
   }
@@ -5435,7 +5603,7 @@ function renderInlineRangeWithIds(
     return a.remappedId.localeCompare(b.remappedId);
   });
 
-  return { text: joinRevisedSpans(out), nextIndex: i, deferredComments: deferred.map(d => d.body) };
+  return { text: resolveEmphasis(joinRevisedSpans(out)), nextIndex: i, deferredComments: deferred.map(d => d.body) };
 }
 
 /**
@@ -5543,7 +5711,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
           ? para.map(item => item.type === 'text' && item.formatting?.bold
             ? { ...item, formatting: { ...item.formatting, bold: false } }
             : item)
-          : para);
+          : para, false);
         const html = renderHtmlCellParagraph(items);
         if (html !== undefined) {
           lines.push(i3 + '<p>' + html + '</p>');

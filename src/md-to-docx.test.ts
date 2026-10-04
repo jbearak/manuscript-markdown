@@ -390,6 +390,58 @@ describe('GFM support in Markdown→DOCX parser', () => {
     expect(bqTokens[0].alertFirst).toBe(true);
     expect(bqTokens[bqTokens.length - 1].alertLast).toBe(true);
   });
+
+  // Import writes these where Markdown's delimiters wouldn't read as emphasis
+  it.each([
+    ['<b>', 'a<b>.b</b>c', 'bold'],
+    ['<strong>', 'a<strong>.b</strong>c', 'bold'],
+    ['<i>', 'a<i>.b</i>c', 'italic'],
+    ['<em>', 'a<em>.b</em>c', 'italic'],
+    ['<s>', 'a<s>.b</s>c', 'strikethrough'],
+    ['<del>', 'a<del>.b</del>c', 'strikethrough'],
+    ['<strike>', 'a<strike>.b</strike>c', 'strikethrough'],
+    ['<B>', 'a<B>.b</B>c', 'bold'],
+  ] as const)('reads %s as formatting', (_tag, md, format) => {
+    const runs = parseMd(md)[0].runs;
+    expect(runs.map(run => [run.text, !!run[format]])).toEqual([['a', false], ['.b', true], ['c', false]]);
+  });
+
+  it('keeps formatting on past a tag of it closing inside its delimiters', () => {
+    const runs = parseMd('**a <b>b</b> c** d *e <i>f</i>* g')[0].runs;
+    expect(runs.map(run => [run.text, !!run.bold, !!run.italic])).toEqual([
+      ['a ', true, false], ['b', true, false], [' c', true, false], [' d ', false, false],
+      ['e ', false, true], ['f', false, true], [' g', false, false],
+    ]);
+  });
+
+  it('reads a tag with a space before its >, as markdown-it does', () => {
+    const runs = parseMd('a <b >b</b > c <u\t>d</u\t> e')[0].runs;
+    expect(runs.map(run => [run.text, !!run.bold, !!run.underline])).toEqual([
+      ['a ', false, false], ['b', true, false], [' c ', false, false], ['d', false, true], [' e', false, false],
+    ]);
+  });
+
+  it('keeps a tag with attributes as text', () => {
+    const runs = parseMd('a <b class="x">b</b>')[0].runs;
+    expect(runs.some(run => run.bold)).toBe(false);
+    expect(runs.map(run => run.text).join('')).toBe('a <b class="x">b</b>');
+  });
+
+  it('keeps a closing tag no tag opened as text, in emphasis of its kind', () => {
+    // </b> closed the bold of **, which ended before c
+    const runs = parseMd('**a <b class="x">b</b> c** d </i>')[0].runs;
+    expect(runs.map(run => [run.text, !!run.bold])).toEqual([
+      ['a ', true], ['<b class="x">', true], ['b', true], ['</b>', true], [' c', true], [' d ', false], ['</i>', false],
+    ]);
+  });
+
+  it('keeps the closing tag of a tag with attributes as text, in a tag of its kind', () => {
+    // The inner </b> closed the outer <b>, which ended before c
+    const runs = parseMd('<b>a <b class="x">b</b> c</b> d')[0].runs;
+    expect(runs.map(run => [run.text, !!run.bold])).toEqual([
+      ['a ', true], ['<b class="x">', true], ['b', true], ['</b>', true], [' c', true], [' d', false],
+    ]);
+  });
 });
 
 describe('parseMd HTML tables', () => {
