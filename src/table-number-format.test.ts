@@ -12,6 +12,12 @@ describe('table number formatting', () => {
     expect(result.output).toContain('| 1\u202f234\u00b750 | 12\u00b730 (4\u00b756) |');
   });
 
+  test('keeps the width of a cell of whitespace alone', () => {
+    // Its whitespace went in twice, as both leading and trailing
+    const table = '|     | V   |\n|-----|-----|\n| a   | 12  |';
+    expect(formatTableNumbers(table, { digits: 0 }).output).toBe(table);
+  });
+
   test('pads integer values with a point when no source decimal exists', () => {
     const result = formatTableNumbers('| V |\n| --- |\n| 12 |', { digits: 2 });
     expect(result.output).toContain('| 12.00 |');

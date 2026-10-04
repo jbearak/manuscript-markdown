@@ -1896,6 +1896,20 @@ describe('Grid table preview', () => {
     expect(html).toContain('A');
     expect(html).toContain('D');
   });
+
+  it('renders a grid table\'s alignment', () => {
+    // A separator with colons wasn't a grid table's
+    const gridMd = [
+      '+------+------+',
+      '| H1   | H2   |',
+      '+:=====+=====:+',
+      '| A    | B    |',
+      '+------+------+',
+    ].join('\n');
+    const html = renderWithPlugin(gridMd);
+    expect(html).toContain('<th style="text-align:left">H1</th>');
+    expect(html).toContain('<td style="text-align:right">B</td>');
+  });
 });
 
 describe('Embed preview document resolution', () => {

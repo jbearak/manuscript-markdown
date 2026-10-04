@@ -16,7 +16,7 @@ import {
   restoreCriticLineBreaks,
   type CriticBreakKind,
 } from '../critic-markup';
-import { GRID_TABLE_PLACEHOLDER_PREFIX } from '../grid-table-preprocess';
+import { GRID_TABLE_PLACEHOLDER_PREFIX, gridColumnAlign } from '../grid-table-preprocess';
 import { preprocessGridTablesWithMap, wrapBareLatexEnvironmentsWithMap, preprocessCriticMarkupWithMap } from './preprocess-with-map';
 import { LineMap } from './line-map';
 import { preprocessEmbedsWithMap, type EmbedResolver, type EmbedOptions } from '../embed-preprocess';
@@ -1613,7 +1613,7 @@ function gridTableBlockRule(state: StateBlock, startLine: number, endLine: numbe
   if (silent) return true;
 
   const b64 = lineText.slice(GRID_TABLE_PLACEHOLDER_PREFIX.length, -4);
-  let gridData: { rows: Array<{ cells: string[]; header: boolean }> };
+  let gridData: { rows: Array<{ cells: string[]; header: boolean }>; aligns?: Array<string | null> };
   try {
     const jsonStr = Buffer.from(b64, 'base64').toString();
     gridData = JSON.parse(jsonStr);
@@ -1632,8 +1632,9 @@ function gridTableBlockRule(state: StateBlock, startLine: number, endLine: numbe
     state.push('thead_open', 'thead', 1);
     for (const row of headerRows) {
       state.push('tr_open', 'tr', 1);
-      for (const cellText of row.cells) {
-        state.push('th_open', 'th', 1);
+      for (const [ci, cellText] of row.cells.entries()) {
+        const open = state.push('th_open', 'th', 1);
+        if (gridColumnAlign(gridData, ci)) open.attrSet('style', 'text-align:' + gridColumnAlign(gridData, ci));
         const inlineTok = state.push('inline', '', 0);
         inlineTok.content = cellText.replace(/\n/g, '  \n');
         inlineTok.children = [];
@@ -1648,9 +1649,10 @@ function gridTableBlockRule(state: StateBlock, startLine: number, endLine: numbe
     state.push('tbody_open', 'tbody', 1);
     for (const row of bodyRows) {
       state.push('tr_open', 'tr', 1);
-      for (const cellText of row.cells) {
+      for (const [ci, cellText] of row.cells.entries()) {
         const tag = headerRows.length === 0 && bodyRows.indexOf(row) === 0 ? 'th' : 'td';
-        state.push(tag + '_open', tag, 1);
+        const open = state.push(tag + '_open', tag, 1);
+        if (gridColumnAlign(gridData, ci)) open.attrSet('style', 'text-align:' + gridColumnAlign(gridData, ci));
         const inlineTok = state.push('inline', '', 0);
         inlineTok.content = cellText.replace(/\n/g, '  \n');
         inlineTok.children = [];

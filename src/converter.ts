@@ -9,6 +9,7 @@ import { keepParagraphEdgeWhitespace } from './html-entities';
 import { HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import { computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
 import { findDollarMathAt } from './math-delimiters';
+import type { TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
 import { citationEndInText, customStyleId } from './md-to-docx';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
@@ -426,6 +427,7 @@ interface NoteBodyContext {
   numberingStartOverrides?: NumberingStartOverrides;
   format: CitationKeyFormat;
   replyIds?: Set<string>;
+  styleLayouts?: StyleLayouts;
 }
 
 export interface TableRow {
@@ -436,6 +438,208 @@ export interface TableCell {
   paragraphs: ContentItem[][];
   colspan?: number;
   rowspan?: number;
+  align?: TableAlign;
+}
+
+/** A Word cell's paragraphs, in any element around them, as a content
+ *  control's, but not a nested table's */
+function cellParagraphs(nodes: XmlNode[]): XmlNode[] {
+  return nodes.flatMap(node => node['w:p'] !== undefined ? [node]
+    : Object.keys(node).filter(key => key !== ':@' && key !== 'w:tbl' && Array.isArray(node[key]))
+      .flatMap(key => cellParagraphs(asXmlNodes(node[key]))));
+}
+
+/** A paragraph's alignment and direction, where something sets them */
+interface ParagraphLayout { jc?: string; bidi?: boolean }
+
+/** The alignment and direction styles.xml gives paragraphs: each style's,
+ *  its own or its base's, the document's defaults, and which paragraph and
+ *  table styles are the defaults */
+export interface StyleLayouts {
+  styles: Map<string, ParagraphLayout>;
+  /** A table style's layouts for parts of a table, by tblStylePr type, and
+   *  how many rows and columns a band takes */
+  tables: Map<string, { parts: Map<string, ParagraphLayout>; rowBand: number; colBand: number }>;
+  defaults: ParagraphLayout;
+  defaultParagraphStyle?: string;
+  defaultTableStyle?: string;
+}
+
+/** A pPr's alignment and direction, where it sets them */
+function paragraphLayout(pPrChildren: XmlNode[]): ParagraphLayout {
+  const jc = pPrChildren.find(c => c['w:jc'] !== undefined);
+  const bidi = pPrChildren.some(c => c['w:bidi'] !== undefined);
+  return { ...(jc ? { jc: getAttr(jc, 'val') } : {}), ...(bidi ? { bidi: isToggleOn(pPrChildren, 'w:bidi') } : {}) };
+}
+
+/** Read styles.xml's paragraph alignment and direction */
+export async function parseStyleLayouts(zip: JSZip): Promise<StyleLayouts> {
+  const parsed = await readZipXml(zip, 'word/styles.xml');
+  const layouts: StyleLayouts = { styles: new Map(), tables: new Map(), defaults: {} };
+  if (!parsed) return layouts;
+  const pPrOf = (children: XmlNode[]) => {
+    const pPr = children.find(c => c['w:pPr'] !== undefined);
+    return pPr ? asXmlNodes(pPr['w:pPr']) : [];
+  };
+  const pPrDefault = findAllDeep(parsed, 'w:pPrDefault')[0];
+  if (pPrDefault) layouts.defaults = paragraphLayout(pPrOf(asXmlNodes(pPrDefault['w:pPrDefault'])));
+  const own = new Map<string, { layout: ParagraphLayout; basedOn: string; parts: Map<string, ParagraphLayout>; rowBand?: number; colBand?: number }>();
+  for (const node of findAllDeep(parsed, 'w:style')) {
+    const children = asXmlNodes(node['w:style']);
+    const id = getAttr(node, 'styleId');
+    const basedOn = children.find(c => c['w:basedOn'] !== undefined);
+    const parts = new Map(children.filter(c => c['w:tblStylePr'] !== undefined)
+      .map(c => [getAttr(c, 'type'), paragraphLayout(pPrOf(asXmlNodes(c['w:tblStylePr'])))]));
+    const tblPr = children.find(c => c['w:tblPr'] !== undefined);
+    const band = (name: string) => {
+      const size = tblPr && asXmlNodes(tblPr['w:tblPr']).find(c => c[name] !== undefined);
+      return size ? parseInt(getAttr(size, 'val'), 10) || undefined : undefined;
+    };
+    own.set(id, {
+      layout: paragraphLayout(pPrOf(children)), basedOn: basedOn ? getAttr(basedOn, 'val') : '',
+      parts, rowBand: band('w:tblStyleRowBandSize'), colBand: band('w:tblStyleColBandSize'),
+    });
+    if (['1', 'true', 'on'].includes(getAttr(node, 'default'))) {
+      if (getAttr(node, 'type') === 'paragraph') layouts.defaultParagraphStyle ??= id;
+      else if (getAttr(node, 'type') === 'table') layouts.defaultTableStyle ??= id;
+    }
+  }
+  const resolve = (id: string, seen: Set<string>): ParagraphLayout => {
+    const style = own.get(id);
+    if (!style || seen.has(id)) return {};
+    seen.add(id);
+    return { ...resolve(style.basedOn, seen), ...style.layout };
+  };
+  for (const id of own.keys()) layouts.styles.set(id, resolve(id, new Set()));
+  // A table style's parts, each its own or its base's
+  const resolveTable = (id: string, seen: Set<string>): { parts: Map<string, ParagraphLayout>; rowBand: number; colBand: number } => {
+    const style = own.get(id);
+    if (!style || seen.has(id)) return { parts: new Map(), rowBand: 1, colBand: 1 };
+    seen.add(id);
+    const base = resolveTable(style.basedOn, seen);
+    const parts = new Map(base.parts);
+    for (const [type, layout] of style.parts) parts.set(type, { ...parts.get(type), ...layout });
+    return { parts, rowBand: style.rowBand ?? base.rowBand, colBand: style.colBand ?? base.colBand };
+  };
+  for (const id of own.keys()) layouts.tables.set(id, resolveTable(id, new Set()));
+  return layouts;
+}
+
+/** Where a cell is in its table, and which of the table style's parts the
+ *  table turns on */
+interface CellPlace { row: number; rows: number; col: number; span: number; cols: number; look: TableLook }
+interface TableLook { firstRow: boolean; lastRow: boolean; firstColumn: boolean; lastColumn: boolean; noHBand: boolean; noVBand: boolean }
+
+/** How many grid columns a table has, from its tblGrid, or else its widest row */
+function tableColumnCount(tblChildren: XmlNode[]): number {
+  const grid = tblChildren.find(c => c['w:tblGrid'] !== undefined);
+  const gridCols = grid ? asXmlNodes(grid['w:tblGrid']).filter(c => c['w:gridCol'] !== undefined).length : 0;
+  if (gridCols > 0) return gridCols;
+  return Math.max(0, ...tblChildren.filter(c => c['w:tr'] !== undefined).map(tr => asXmlNodes(tr['w:tr'])
+    .filter(c => c['w:tc'] !== undefined).reduce((n, tc) => {
+      const tcPr = asXmlNodes(tc['w:tc']).find(c => c['w:tcPr'] !== undefined);
+      const span = tcPr && asXmlNodes(tcPr['w:tcPr']).find(c => c['w:gridSpan'] !== undefined);
+      return n + (span ? parseInt(getAttr(span, 'val'), 10) || 1 : 1);
+    }, 0)));
+}
+
+/** A table's tblLook, from its attributes or else its w:val's bits */
+function tableLook(tblChildren: XmlNode[]): TableLook {
+  const tblPr = tblChildren.find(c => c['w:tblPr'] !== undefined);
+  const look = tblPr ? asXmlNodes(tblPr['w:tblPr']).find(c => c['w:tblLook'] !== undefined) : undefined;
+  const bits = parseInt(getAttr(look, 'val') || '0', 16) || 0;
+  const flag = (name: string, bit: number) => {
+    const value = getAttr(look, name);
+    return value ? ['1', 'true', 'on'].includes(value) : (bits & bit) !== 0;
+  };
+  return {
+    firstRow: flag('firstRow', 0x20), lastRow: flag('lastRow', 0x40), firstColumn: flag('firstColumn', 0x80),
+    lastColumn: flag('lastColumn', 0x100), noHBand: flag('noHBand', 0x200), noVBand: flag('noVBand', 0x400),
+  };
+}
+
+/** A table style's layout for a cell: the whole table's, then its bands',
+ *  its first or last column's and row's, and its corner's, each over the
+ *  last, as Word applies them */
+function tableStyleLayout(layouts: StyleLayouts | undefined, style: string, place?: CellPlace): ParagraphLayout {
+  const table = layouts?.tables.get(style);
+  const layout: ParagraphLayout = { ...layouts?.styles.get(style), ...table?.parts.get('wholeTable') };
+  if (!table || !place) return layout;
+  const { row, rows, col, span, cols, look } = place;
+  const firstRow = look.firstRow && row === 0;
+  const lastRow = look.lastRow && row === rows - 1;
+  const firstCol = look.firstColumn && col === 0;
+  const lastCol = look.lastColumn && col + span >= cols;
+  const parts: string[] = [];
+  if (!look.noVBand && !firstCol && !lastCol) {
+    parts.push(Math.floor((col - (look.firstColumn ? 1 : 0)) / table.colBand) % 2 === 0 ? 'band1Vert' : 'band2Vert');
+  }
+  if (!look.noHBand && !firstRow && !lastRow) {
+    parts.push(Math.floor((row - (look.firstRow ? 1 : 0)) / table.rowBand) % 2 === 0 ? 'band1Horz' : 'band2Horz');
+  }
+  if (firstCol) parts.push('firstCol');
+  if (lastCol) parts.push('lastCol');
+  if (firstRow) parts.push('firstRow');
+  if (lastRow) parts.push('lastRow');
+  if (firstRow && firstCol) parts.push('nwCell');
+  if (firstRow && lastCol) parts.push('neCell');
+  if (lastRow && firstCol) parts.push('swCell');
+  if (lastRow && lastCol) parts.push('seCell');
+  for (const part of parts) Object.assign(layout, table.parts.get(part));
+  return layout;
+}
+
+/** A table's style, from its tblPr, or the default table style */
+function tableStyleId(tblChildren: XmlNode[], layouts?: StyleLayouts): string {
+  const tblPr = tblChildren.find(c => c['w:tblPr'] !== undefined);
+  const style = tblPr ? asXmlNodes(tblPr['w:tblPr']).find(c => c['w:tblStyle'] !== undefined) : undefined;
+  return style ? getAttr(style, 'val') : layouts?.defaultTableStyle ?? '';
+}
+
+/** A Word cell's alignment, its paragraphs' when they all share one. A
+ *  paragraph's own setting comes first, then its style's, which takes in
+ *  the default paragraph style only through its base, the table's style's
+ *  for where the cell is, the default paragraph style's where it has no
+ *  other, and the document's defaults, as Word reads them. Left from a
+ *  style is what Word does with none, so only a paragraph's own left aligns
+ *  its column. In a right-to-left paragraph only center counts, as start
+ *  and end, and what left and right mean there, turn around. */
+function cellAlignment(tcChildren: XmlNode[], layouts?: StyleLayouts, tableStyle = '', place?: CellPlace): TableAlign | undefined {
+  const aligns = new Set<TableAlign | undefined>();
+  const fromStyle = (id: string | undefined) => (id && layouts?.styles.get(id)) || {};
+  const fromTable = tableStyleLayout(layouts, tableStyle, place);
+  for (const p of cellParagraphs(tcChildren)) {
+    const pPr = asXmlNodes(p['w:p']).find(c => c['w:pPr'] !== undefined);
+    const pPrChildren = pPr ? asXmlNodes(pPr['w:pPr']) : [];
+    const pStyle = pPrChildren.find(c => c['w:pStyle'] !== undefined);
+    const styleId = pStyle ? getAttr(pStyle, 'val') : '';
+    // A style styles.xml doesn't have is the default, as Word reads it
+    const isDefault = !styleId || styleId === layouts?.defaultParagraphStyle || !layouts?.styles.has(styleId);
+    const own = paragraphLayout(pPrChildren);
+    const layout: ParagraphLayout = {
+      ...layouts?.defaults,
+      ...(isDefault ? fromStyle(layouts?.defaultParagraphStyle) : {}),
+      ...fromTable,
+      ...(isDefault ? {} : fromStyle(styleId)),
+      ...own,
+    };
+    const val = layout.jc ?? '';
+    aligns.add(val === 'center' ? 'center' : layout.bidi ? undefined
+      : val === 'right' || val === 'end' ? 'right' : (val === 'left' || val === 'start') && own.jc !== undefined ? 'left' : undefined);
+  }
+  return aligns.size === 1 ? [...aligns][0] : undefined;
+}
+
+/** Each column's alignment, where its cells with text share one, or its
+ *  empty cells if it has none: a pipe or grid table aligns a column, not a
+ *  cell */
+function columnAlignments(rows: TableRow[], numCols: number): Array<TableAlign | undefined> {
+  return Array.from({ length: numCols }, (_, ci) => {
+    const cells = rows.map(row => row.cells[ci]).filter(cell => cell !== undefined);
+    const filled = cells.filter(cell => cell.paragraphs.some(para => para.length > 0));
+    const aligns = new Set((filled.length > 0 ? filled : cells).map(cell => cell.align));
+    return aligns.size === 1 ? [...aligns][0] : undefined;
+  });
 }
 
 export type CitationKeyFormat = 'authorYearTitle' | 'authorYear' | 'numeric';
@@ -2194,11 +2398,15 @@ function parseNoteBody(
         // --- Tables ---
         } else if (key === 'w:tbl' && context && !inTableCell) {
           const tblChildren = asXmlNodes(node[key]);
-          const rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue' }> }> = [];
+          const rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> }> = [];
           const firstRowHeaderByLook = tableHasFirstRowHeader(tblChildren);
+          // Where each cell is, for its table style's parts
+          const look = tableLook(tblChildren);
+          const rowCount = tblChildren.filter((c) => c['w:tr'] !== undefined).length;
+          const columnCount = tableColumnCount(tblChildren);
           for (const tr of tblChildren.filter((c) => c['w:tr'] !== undefined)) {
             const trChildren = asXmlNodes(tr['w:tr']);
-            const cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue' }> = [];
+            const cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> = [];
             for (const tc of trChildren.filter((c) => c['w:tc'] !== undefined)) {
               const tcChildren = asXmlNodes(tc['w:tc']);
               let colspan = 1;
@@ -2219,7 +2427,8 @@ function parseNoteBody(
               }
               const cellItems: ContentItem[] = [];
               walkNoteBody(tcChildren, currentFormatting, cellItems, true, currentRevision);
-              cells.push({ paragraphs: splitCellParagraphs(cellItems), colspan, vMergeType });
+              cells.push({ paragraphs: splitCellParagraphs(cellItems), colspan, vMergeType, align: cellAlignment(tcChildren, context.styleLayouts, tableStyleId(tblChildren, context.styleLayouts),
+                { row: rawRows.length, rows: rowCount, col: cells.reduce((n, cell) => n + cell.colspan, 0), span: colspan, cols: columnCount, look }) });
             }
             rawRows.push({ isHeader: rowHasHeaderProp(trChildren), cells });
           }
@@ -2653,7 +2862,7 @@ function rowHasHeaderProp(trChildren: XmlNode[]): boolean {
  * cell's rowspan is set to the total number of merged rows.
  */
 export function computeRowspans(
-  rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue' }> }>
+  rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> }>
 ): TableRow[] {
   // Build a 2D grid: grid[rowIdx][gridCol] = reference to the raw cell
   const numRows = rawRows.length;
@@ -2716,6 +2925,7 @@ export function computeRowspans(
       const raw = rawRows[r].cells[ci];
       const cell: TableCell = { paragraphs: raw.paragraphs };
       if (raw.colspan > 1) cell.colspan = raw.colspan;
+      if (raw.align) cell.align = raw.align;
       const rs = rowspanMap.get(r + ',' + ci);
       if (rs && rs > 1) cell.rowspan = rs;
       cells.push(cell);
@@ -2742,6 +2952,7 @@ export async function extractDocumentContent(
     customStyles?: Record<string, CustomStyleDef>;
     /** Bookmark name → "noteKind:noteId" for resolving NOTEREF cross-reference fields. */
     footnoteCrossRefMap?: Map<string, string>;
+    styleLayouts?: StyleLayouts;
   }
 ): Promise<DocumentContentResult> {
   const zip = data instanceof JSZip ? data : await loadZip(data);
@@ -2759,6 +2970,7 @@ export async function extractDocumentContent(
   const replyIds = options?.replyIds;
   const imageRelMap = options?.imageRelationships ?? new Map<string, string>();
   const imageFolder = options?.imageFolder ?? '';
+  const styleLayouts = options?.styleLayouts ?? await parseStyleLayouts(zip);
   const imageEntries: ImageExtractionEntry[] = [];
   const extractedImageFilenames = new Set<string>();
 
@@ -2965,11 +3177,15 @@ export async function extractDocumentContent(
           currentHref = prevHref;
         } else if (key === 'w:tbl' && !inTableCell) {
           const tblChildren = asXmlNodes(node[key]);
-          const rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue' }> }> = [];
+          const rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> }> = [];
           const firstRowHeaderByLook = tableHasFirstRowHeader(tblChildren);
+          // Where each cell is, for its table style's parts
+          const look = tableLook(tblChildren);
+          const rowCount = tblChildren.filter((c) => c['w:tr'] !== undefined).length;
+          const columnCount = tableColumnCount(tblChildren);
           for (const tr of tblChildren.filter((c) => c['w:tr'] !== undefined)) {
             const trChildren = asXmlNodes(tr['w:tr']);
-            const cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue' }> = [];
+            const cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> = [];
             for (const tc of trChildren.filter((c) => c['w:tc'] !== undefined)) {
               const tcChildren = asXmlNodes(tc['w:tc']);
               // Parse cell properties
@@ -2991,7 +3207,8 @@ export async function extractDocumentContent(
               }
               const cellItems: ContentItem[] = [];
               walk(tcChildren, currentFormatting, cellItems, true, currentRevision);
-              cells.push({ paragraphs: splitCellParagraphs(cellItems), colspan, vMergeType });
+              cells.push({ paragraphs: splitCellParagraphs(cellItems), colspan, vMergeType, align: cellAlignment(tcChildren, styleLayouts, tableStyleId(tblChildren, styleLayouts),
+                { row: rawRows.length, rows: rowCount, col: cells.reduce((n, cell) => n + cell.colspan, 0), span: colspan, cols: columnCount, look }) });
             }
             rawRows.push({ isHeader: rowHasHeaderProp(trChildren), cells });
           }
@@ -4741,6 +4958,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
       let attrs = '';
       if (cell.colspan && cell.colspan > 1) attrs += ' colspan="' + cell.colspan + '"';
       if (cell.rowspan && cell.rowspan > 1) attrs += ' rowspan="' + cell.rowspan + '"';
+      if (cell.align) attrs += ' align="' + cell.align + '"';
       lines.push(i2 + '<' + tag + attrs + '>');
       for (const para of cell.paragraphs) {
         // Export makes a header cell bold, as for a pipe table
@@ -4795,7 +5013,7 @@ function isFullWidth(cp: number): boolean {
   );
 }
 
-function getDisplayWidth(str: string): number {
+export function getDisplayWidth(str: string): number {
   let width = 0;
   for (const ch of str) {
     const cp = ch.codePointAt(0)!;
@@ -4887,8 +5105,20 @@ function tryRenderPipeTable(table: { rows: TableRow[] }, maxLineWidth: number, c
     if (width > maxLineWidth) { rollback(); return null; }
   }
 
-  // Separator row: | --- | --- | ... | — each column occupies 6 chars
-  const separatorWidth = 1 + numCols * 6;
+  // A column's alignment as colons at the ends of its dashes
+  const aligns = columnAlignments(rows, numCols);
+  const dashes = (ci: number, width: number) => {
+    const align = aligns[ci];
+    const left = align === 'left' || align === 'center' ? ':' : '';
+    const right = align === 'right' || align === 'center' ? ':' : '';
+    // At least three dashes, which formatTableNumbers looks for
+    return left + '-'.repeat(Math.max(3, width - left.length - right.length)) + right;
+  };
+
+  // Separator row: | --- | :---: | ... | — each column its dashes and colons,
+  // and 3 chars around them
+  let separatorWidth = 1;
+  for (let ci = 0; ci < numCols; ci++) separatorWidth += dashes(ci, 3).length + 3;
   if (separatorWidth > maxLineWidth) { rollback(); return null; }
 
   // Build pipe table lines
@@ -4932,11 +5162,11 @@ function tryRenderPipeTable(table: { rows: TableRow[] }, maxLineWidth: number, c
   if (colWidths) {
     let sep = '|';
     for (let ci = 0; ci < numCols; ci++) {
-      sep += '-'.repeat(colWidths[ci] + 2) + '|';
+      sep += dashes(ci, colWidths[ci] + 2) + '|';
     }
     lines.push(sep);
   } else {
-    lines.push('| ' + Array(numCols).fill('---').join(' | ') + ' |');
+    lines.push('| ' + Array.from({ length: numCols }, (_, ci) => dashes(ci, 3)).join(' | ') + ' |');
   }
 
   for (let i = 1; i < rendered.length; i++) {
@@ -5098,22 +5328,28 @@ function tryRenderGridTable(
     if (totalWidth > maxLineWidth) { rollback(); return null; }
   }
 
-  // Build separator line
-  const makeSep = (ch: string) =>
-    '+' + colWidths.map(w => ch.repeat(w + 2)).join('+') + '+';
-
-  const normalSep = makeSep('-');
-  const headerSep = makeSep('=');
-
   // Find header boundary
   const headerEnd = rows.findIndex(r => !r.isHeader);
   const hasHeader = headerEnd > 0;
+
+  // Build separator line; each column's alignment goes as colons at the
+  // ends of its line under the header, or the top line without one
+  const aligns = columnAlignments(rows, numCols);
+  const makeSep = (ch: string, aligned = false) =>
+    '+' + colWidths.map((w, c) => {
+      const align = aligned ? aligns[c] : undefined;
+      return (align === 'left' || align === 'center' ? ':' : ch) + ch.repeat(w)
+        + (align === 'right' || align === 'center' ? ':' : ch);
+    }).join('+') + '+';
+
+  const normalSep = makeSep('-');
+  const headerSep = makeSep('=', true);
 
   // Build output lines
   const lines: string[] = [];
   const deferredAll: string[] = [];
 
-  lines.push(normalSep);
+  lines.push(hasHeader ? normalSep : makeSep('-', true));
 
   for (let ri = 0; ri < rendered.length; ri++) {
     const rowCells = rendered[ri];
@@ -8068,6 +8304,7 @@ export async function convertDocx(
     parseRelationships(zip, 'word/_rels/footnotes.xml.rels'),
     parseRelationships(zip, 'word/_rels/endnotes.xml.rels'),
   ]);
+  const styleLayouts = await parseStyleLayouts(zip);
   const numberingDefs = numberingResult.defs;
   const numberingStartOverrides = numberingResult.startOverrides;
   const numberingInstances = numberingResult.instances;
@@ -8077,11 +8314,11 @@ export async function convertDocx(
   // Build note contexts with merged rels (note rels + document rels as fallback)
   const fnRelsMerged = new Map([...docRels, ...fnRels]);
   const enRelsMerged = new Map([...docRels, ...enRels]);
-  const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, zoteroCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds };
-  const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, zoteroCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds };
+  const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, zoteroCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, styleLayouts };
+  const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, zoteroCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, styleLayouts };
 
   const [{ content: docContent, zoteroBiblData, imageEntries }, footnotes, endnotes] = await Promise.all([
-    extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, relationshipMap: docRels, replyIds, imageRelationships: imageRels, imageFolder: options?.imageFolder, portraitBreakOrdinals: portraitBreaks ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined }),
+    extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, relationshipMap: docRels, replyIds, imageRelationships: imageRels, imageFolder: options?.imageFolder, portraitBreakOrdinals: portraitBreaks ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined, styleLayouts }),
     extractFootnotes(zip, fnContext),
     extractEndnotes(zip, enContext),
   ]);

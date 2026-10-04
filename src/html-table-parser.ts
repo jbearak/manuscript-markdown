@@ -28,6 +28,7 @@ export interface HtmlTableCell {
   colspan?: number;
   rowspan?: number;
   source?: HtmlTableCellSource;
+  align?: 'left' | 'center' | 'right';
 }
 
 export interface HtmlTableCellSource {
@@ -149,6 +150,7 @@ function extractHtmlTableRows(tableHtml: string): HtmlTableRow[] {
           ...(cell.source ? { source: cell.source } : {}),
           ...(cell.colspan && cell.colspan > 1 ? { colspan: cell.colspan } : {}),
           ...(cell.rowspan && cell.rowspan > 1 ? { rowspan: cell.rowspan } : {}),
+          ...(cell.align ? { align: cell.align } : {}),
         })),
         header: cells.some(c => c.isHeader)
       });
@@ -157,8 +159,8 @@ function extractHtmlTableRows(tableHtml: string): HtmlTableRow[] {
   return rows;
 }
 
-function extractHtmlTableCells(rowHtml: string): Array<{ runs: HtmlTableRun[]; isHeader: boolean; colspan?: number; rowspan?: number; source?: HtmlTableCellSource }> {
-  const cells: Array<{ runs: HtmlTableRun[]; isHeader: boolean; colspan?: number; rowspan?: number; source?: HtmlTableCellSource }> = [];
+function extractHtmlTableCells(rowHtml: string): Array<HtmlTableCell & { isHeader: boolean }> {
+  const cells: Array<HtmlTableCell & { isHeader: boolean }> = [];
   // Nested table-cell tags are not supported; this matches flat <th>/<td> content only.
 	const cellRegex = /<(th|td)\b((?:"[^"]*"|'[^']*'|[^'">])*)>([\s\S]*?)<\/\1>/gi;
   let cellMatch: RegExpExecArray | null;
@@ -166,17 +168,24 @@ function extractHtmlTableCells(rowHtml: string): Array<{ runs: HtmlTableRun[]; i
     const isHeader = cellMatch[1].toLowerCase() === 'th';
     const attrs = cellMatch[2];
     const runs = parseHtmlCellRuns(cellMatch[3]);
-    const colspanMatch = attrs.match(/colspan\s*=\s*["']?(\d+)/i);
-    const rowspanMatch = attrs.match(/rowspan\s*=\s*["']?(\d+)/i);
-    const colspan = colspanMatch ? parseInt(colspanMatch[1], 10) : undefined;
-    const rowspan = rowspanMatch ? parseInt(rowspanMatch[1], 10) : undefined;
+    const colspan = parseInt(extractAttr(attrs, 'colspan') ?? '', 10) || undefined;
+    const rowspan = parseInt(extractAttr(attrs, 'rowspan') ?? '', 10) || undefined;
     const kind = parseHtmlTableCellSourceKind(extractAttr(attrs, 'data-mm-kind'));
     const rawValueText = extractAttr(attrs, 'data-mm-raw');
     const rawValue = rawValueText !== undefined ? Number(rawValueText) : undefined;
     const sourceFormat = extractAttr(attrs, 'data-mm-format');
+    // A text-align style, as markdown-it writes one, or else an align
+    // attribute, which the style overrides in HTML: the last declaration,
+    // as CSS reads it, but an !important one over the others
+    const declarations = [...(extractAttr(attrs, 'style') ?? '').matchAll(/(?:^|;)\s*text-align\s*:\s*([^;!]*?)\s*(!\s*important\s*)?(?=;|$)/gi)];
+    const declaration = declarations.filter(d => d[2]).pop() ?? declarations.pop();
+    const alignMatch = declaration
+      ? /^(left|center|right)$/i.exec(declaration[1])
+      : /^\s*(left|center|right)\s*$/i.exec(extractAttr(attrs, 'align') ?? '');
     cells.push({
       runs,
       isHeader,
+      ...(alignMatch ? { align: alignMatch[1].toLowerCase() as HtmlTableCell['align'] } : {}),
       ...(colspan && colspan > 1 ? { colspan } : {}),
       ...(rowspan && rowspan > 1 ? { rowspan } : {}),
       ...(kind ? { source: { kind, display: runs.map(run => run.text).join(''), ...(rawValue !== undefined && Number.isFinite(rawValue) ? { rawValue } : {}), ...(sourceFormat ? { sourceFormat } : {}) } } : {}),
@@ -186,9 +195,14 @@ function extractHtmlTableCells(rowHtml: string): Array<{ runs: HtmlTableRun[]; i
 }
 
 function extractAttr(attrs: string, name: string): string | undefined {
-  const match = attrs.match(new RegExp('\\b' + name + '\\s*=\\s*(?:"([^"]*)"|\'([^\']*)\'|([^\\s>]+))', 'i'));
-  const value = match ? match[1] ?? match[2] ?? match[3] : undefined;
-  return value === undefined ? undefined : decodeHtmlEntities(value);
+  // Attribute by attribute, so a name is a whole one, not the end of
+  // another's, as data-align's, nor in another's value
+  for (const match of attrs.matchAll(/([^\s"'>\/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g)) {
+    if (match[1].toLowerCase() !== name.toLowerCase()) continue;
+    const value = match[2] ?? match[3] ?? match[4];
+    return value === undefined ? undefined : decodeHtmlEntities(value);
+  }
+  return undefined;
 }
 
 /**

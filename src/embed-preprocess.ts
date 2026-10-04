@@ -3,7 +3,7 @@ import { parseXlsx } from './xlsx-parser';
 import { parseDta } from './dta-parser';
 import type { HtmlTableMeta, HtmlTableRun } from './html-table-parser';
 import { LineMap, type LineMapSegment } from './preview/line-map';
-import { preprocessGridTables, GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData } from './grid-table-preprocess';
+import { preprocessGridTables, gridColumnAlign, GRID_TABLE_PLACEHOLDER_PREFIX, GRID_TABLE_SEPARATOR_RE, type GridTableData } from './grid-table-preprocess';
 import MarkdownIt from 'markdown-it';
 
 const sharedMarkdownIt = new MarkdownIt({ html: true });
@@ -467,11 +467,11 @@ function extractTableBlocks(content: string): TableBlock[] {
     }
 
     // Grid table (starts with +---+)
-    if (/^\+[-=]+(\+[-=]+)*\+$/.test(trimmed)) {
+    if (GRID_TABLE_SEPARATOR_RE.test(trimmed)) {
       const tableLines: string[] = [];
       while (i < lines.length) {
         const t = lines[i].trim();
-        if (/^\+[-=]+(\+[-=]+)*\+$/.test(t) || (t.startsWith('|') && t.endsWith('|'))) {
+        if (GRID_TABLE_SEPARATOR_RE.test(t) || (t.startsWith('|') && t.endsWith('|'))) {
           tableLines.push(lines[i]);
           i++;
         } else {
@@ -546,6 +546,7 @@ function tableContentToHtml(tableContent: string): string | null {
  * Convert GridTableData to an HTML <table> string.
  */
 function gridTableDataToHtml(data: GridTableData): string {
+  const alignAttr = (ci: number) => gridColumnAlign(data, ci) ? ' align="' + gridColumnAlign(data, ci) + '"' : '';
   const headerRows = data.rows.filter(r => r.header);
   const bodyRows = data.rows.filter(r => !r.header);
 
@@ -555,9 +556,9 @@ function gridTableDataToHtml(data: GridTableData): string {
     html += '<thead>';
     for (const row of headerRows) {
       html += '<tr>';
-      for (const cell of row.cells) {
+      for (const [ci, cell] of row.cells.entries()) {
         const formatted = escapeHtml(cell).replace(/\n/g, '<br>');
-        html += '<th>' + formatted + '</th>';
+        html += '<th' + alignAttr(ci) + '>' + formatted + '</th>';
       }
       html += '</tr>';
     }
@@ -568,9 +569,9 @@ function gridTableDataToHtml(data: GridTableData): string {
     html += '<tbody>';
     for (const row of bodyRows) {
       html += '<tr>';
-      for (const cell of row.cells) {
+      for (const [ci, cell] of row.cells.entries()) {
         const formatted = escapeHtml(cell).replace(/\n/g, '<br>');
-        html += '<td>' + formatted + '</td>';
+        html += '<td' + alignAttr(ci) + '>' + formatted + '</td>';
       }
       html += '</tr>';
     }

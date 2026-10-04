@@ -308,6 +308,17 @@ describe('preprocessEmbeds — .md embed formats', () => {
     expect(result).not.toContain('+---');
   });
 
+  it('converts an embedded grid table with alignment to HTML', () => {
+    // A colon on a border made it no grid table, and the embed dropped it
+    const resolver = makeTestResolver({
+      '/doc/table.md': '+------+-----+\n| Name | Age |\n+:=====+====:+\n| Alice| 30  |\n+------+-----+',
+    });
+    const result = preprocessEmbeds('<!-- embed: table.md -->', resolver, '/doc/file.md');
+    expect(result).toContain('<th align="left">');
+    expect(result).toContain('<td align="right">');
+    expect(result).toContain('Alice');
+  });
+
   it('passes through an embedded HTML table', () => {
     const resolver = makeTestResolver({
       '/doc/table.md': '<table><tr><th>X</th><th>Y</th></tr><tr><td>1</td><td>2</td></tr></table>',
