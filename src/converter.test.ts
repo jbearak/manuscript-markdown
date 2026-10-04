@@ -1764,18 +1764,57 @@ describe('Comments across paragraphs', () => {
     expect(markdown).toBe('{#1}P1\n\n| {#2}x {#3}y{/2} z{/3} |\n| --- |\n\n{#2>>@B | d<<}\n{#3>>@C | e<<}\n\nP2{/1}\n{#1>>@A | c<<}');
   });
 
-  test.each([
-    ['a display equation', { type: 'math', latex: 'x', display: true, commentIds: new Set(['0']) }],
-    ['a code block', [{ type: 'para', isCodeBlock: true }, { type: 'text', text: 'code', commentIds: new Set(['0']), formatting: DEFAULT_FORMATTING }]],
-  ])('closes a range that ends in %s in the text before it', (_name, block) => {
-    // Neither can hold an ID marker, so the range ended nowhere, without its body
+  test('closes a range that ends in a code block in the text before it', () => {
+    // A code block can't hold an ID marker, so the range ended nowhere, without its body
     const comments = new Map([['0', { author: 'A', text: 'c', date: '' }]]);
     const markdown = buildMarkdown([
       { type: 'text', text: 'A ', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
       { type: 'text', text: 'b', commentIds: new Set(['0']), formatting: DEFAULT_FORMATTING },
-      ...(Array.isArray(block) ? block : [{ type: 'para' as const }, block]),
+      { type: 'para', isCodeBlock: true },
+      { type: 'text', text: 'code', commentIds: new Set(['0']), formatting: DEFAULT_FORMATTING },
     ] as ContentItem[], comments);
     expect(markdown).toContain('A {==b==}{>>@A | c<<}');
+  });
+});
+
+describe('Comments over display equations', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+  const body = (id: number, text: string) => '{#' + id + '>>@A (2024-01-15 10:30) | ' + text + '<<}';
+  const MATH_FENCE = '$' + '$';
+  const equation = MATH_FENCE + '\nx\n' + MATH_FENCE;
+
+  test.each([
+    ['an equation alone', 'A.\n\n{#1}' + equation + '{/1}\n' + body(1, 'c') + '\n\nB.\n'],
+    ['text and the equation after it', '{#1}A\n\n' + equation + '{/1}\n' + body(1, 'c') + '\n\nB.\n'],
+    ['an equation and the text after it', 'A.\n\n{#1}' + equation + '\n\nB{/1}\n' + body(1, 'c') + '\n'],
+    ['an equation in a footnote', 'Text.[^1]\n\n[^1]: A.\n\n    {#1}' + MATH_FENCE + '\n    x\n    ' + MATH_FENCE + '{/1}\n    ' + body(1, 'n') + '\n'],
+    ['an equation in a quote', '> A.\n>\n> {#1}' + MATH_FENCE + '\n> x\n> ' + MATH_FENCE + '{/1}\n> ' + body(1, 'q') + '\n'],
+  ])('keeps a comment over %s', async (_name, md) => {
+    // An equation couldn't hold the comment's markers, so a comment over it
+    // alone went missing
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('writes a comment over text and the equation after it in its paragraph in ID syntax', () => {
+    // Word keeps both in one paragraph; Markdown has two blocks
+    const comments = new Map([['0', { author: 'A', text: 'c', date: '' }]]);
+    const markdown = buildMarkdown([
+      { type: 'text', text: 'A ', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
+      { type: 'text', text: 'b', commentIds: new Set(['0']), formatting: DEFAULT_FORMATTING },
+      { type: 'math', latex: 'x', display: true, commentIds: new Set(['0']) },
+    ] as ContentItem[], comments);
+    expect(markdown).toBe('A {#1}b\n\n' + equation + '{/1}\n{#1>>@A | c<<}');
+  });
+
+  test('puts the body after text that follows the equation in its paragraph', () => {
+    // The body went between the closing fence and the text, which gained a
+    // space before it on the next round trip
+    const comments = new Map([['0', { author: 'A', text: 'c', date: '' }]]);
+    const markdown = buildMarkdown([
+      { type: 'math', latex: 'x', display: true, commentIds: new Set(['0']) },
+      { type: 'text', text: 'B', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
+    ] as ContentItem[], comments);
+    expect(markdown).toBe('{#1}' + equation + '{/1}B\n{#1>>@A | c<<}');
   });
 });
 
