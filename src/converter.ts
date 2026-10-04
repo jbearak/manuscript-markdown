@@ -2,7 +2,7 @@ import JSZip from 'jszip';
 import { XMLParser } from 'fast-xml-parser';
 import { asXmlNodes, ommlToLatex, type XmlNode } from './omml';
 import { resolveMarkdownColor } from './highlight-colors';
-import { Frontmatter, NotesMode, serializeFrontmatter, noteTypeFromNumber, parseColWidths, type CustomStyleDef } from './frontmatter';
+import { Frontmatter, NotesMode, parseFrontmatter, serializeFrontmatter, noteTypeFromNumber, parseColWidths, type CustomStyleDef } from './frontmatter';
 import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType } from './gfm';
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
@@ -1562,6 +1562,12 @@ export async function extractParagraphIndent(data: Uint8Array | JSZip): Promise<
 
 export async function extractBibliographyHangingIndent(data: Uint8Array | JSZip): Promise<string | null> {
   return extractStringCustomProp(data, 'MANUSCRIPT_BIBLIOGRAPHY_HANGING_INDENT');
+}
+
+/** The settings export stored as frontmatter text (see frontmatterSettingsProps) */
+export async function extractFrontmatterSettings(data: Uint8Array | JSZip): Promise<Frontmatter | null> {
+  const yaml = await extractChunkedCustomProp(data, 'MANUSCRIPT_FRONTMATTER_SETTINGS_');
+  return yaml ? parseFrontmatter(yaml).metadata : null;
 }
 
 export async function extractCalloutLabels(data: Uint8Array | JSZip): Promise<boolean | null> {
@@ -3602,32 +3608,32 @@ function hasOverlappingComments(segment: ContentItem[]): boolean {
   return false;
 }
 
-function formatDateSuffix(date: string | undefined): string {
+function formatDateSuffix(date: string | undefined, timezone?: string): string {
   if (!date) return '';
   try {
-    return ` (${formatLocalIsoMinute(date)})`;
+    return ` (${formatLocalIsoMinute(date, timezone)})`;
   } catch { return ` (${date})`; }
 }
 
-function formatCommentAttribution(author: string | undefined, date: string | undefined, text: string): string {
+function formatCommentAttribution(author: string | undefined, date: string | undefined, text: string, timezone?: string): string {
   const trimmedAuthor = (author || '').trim();
   if (!trimmedAuthor) return text;
-  return '@' + trimmedAuthor + formatDateSuffix(date) + ' | ' + text;
+  return '@' + trimmedAuthor + formatDateSuffix(date, timezone) + ' | ' + text;
 }
 
-function formatCommentBody(_cid: string, c: Comment): string {
+function formatCommentBody(_cid: string, c: Comment, timezone?: string): string {
   if (c.consecutiveReplies && c.replies && c.replies.length > 0) {
     // Consecutive format: each reply is a separate {>>...<<} block
-    let body = `{>>${formatCommentAttribution(c.author, c.date, c.text)}<<}`;
+    let body = `{>>${formatCommentAttribution(c.author, c.date, c.text, timezone)}<<}`;
     for (const reply of c.replies) {
-      body += `{>>${formatCommentAttribution(reply.author, reply.date, reply.text)}<<}`;
+      body += `{>>${formatCommentAttribution(reply.author, reply.date, reply.text, timezone)}<<}`;
     }
     return body;
   }
-  let body = `{>>${formatCommentAttribution(c.author, c.date, c.text)}`;
+  let body = `{>>${formatCommentAttribution(c.author, c.date, c.text, timezone)}`;
   if (c.replies && c.replies.length > 0) {
     for (const reply of c.replies) {
-      body += `\n  {>>${formatCommentAttribution(reply.author, reply.date, reply.text)}<<}`;
+      body += `\n  {>>${formatCommentAttribution(reply.author, reply.date, reply.text, timezone)}<<}`;
     }
     body += '\n<<}';
   } else {
@@ -3636,19 +3642,19 @@ function formatCommentBody(_cid: string, c: Comment): string {
   return body;
 }
 
-function formatCommentBodyWithId(cid: string, c: Comment): string {
+function formatCommentBodyWithId(cid: string, c: Comment, timezone?: string): string {
   if (c.consecutiveReplies && c.replies && c.replies.length > 0) {
     // Consecutive format: each reply is a separate {>>...<<} block
-    let body = `{#${cid}>>${formatCommentAttribution(c.author, c.date, c.text)}<<}`;
+    let body = `{#${cid}>>${formatCommentAttribution(c.author, c.date, c.text, timezone)}<<}`;
     for (const reply of c.replies) {
-      body += `{>>${formatCommentAttribution(reply.author, reply.date, reply.text)}<<}`;
+      body += `{>>${formatCommentAttribution(reply.author, reply.date, reply.text, timezone)}<<}`;
     }
     return body;
   }
-  let body = `{#${cid}>>${formatCommentAttribution(c.author, c.date, c.text)}`;
+  let body = `{#${cid}>>${formatCommentAttribution(c.author, c.date, c.text, timezone)}`;
   if (c.replies && c.replies.length > 0) {
     for (const reply of c.replies) {
-      body += `\n  {>>${formatCommentAttribution(reply.author, reply.date, reply.text)}<<}`;
+      body += `\n  {>>${formatCommentAttribution(reply.author, reply.date, reply.text, timezone)}<<}`;
     }
     body += '\n<<}';
   } else {
@@ -3692,7 +3698,7 @@ function renderInlineRange(
   const useIds = renderOpts?.alwaysUseCommentIds || hasForcedIdCommentInSegment || hasOverlappingComments(segment.slice(startIndex, segmentEnd));
 
   if (useIds) {
-    return renderInlineRangeWithIds(segment, startIndex, comments, opts, renderOpts?.commentIdRemap, renderOpts?.emittedIdCommentBodies, renderOpts?.noteLabels, renderOpts?.imageFormatMapping);
+    return renderInlineRangeWithIds(segment, startIndex, comments, opts, renderOpts?.commentIdRemap, renderOpts?.emittedIdCommentBodies, renderOpts?.noteLabels, renderOpts?.imageFormatMapping, renderOpts?.timezone);
   }
   let lastSpan: RevisionSpan | undefined;
 
@@ -3788,7 +3794,7 @@ function renderInlineRange(
         for (const cid of [...item.commentIds].sort()) {
           const c = comments.get(cid);
           if (!c) continue;
-          out += formatCommentBody(cid, c);
+          out += formatCommentBody(cid, c, renderOpts?.timezone);
         }
       }
       i++;
@@ -3802,7 +3808,7 @@ function renderInlineRange(
         for (const cid of [...item.commentIds].sort()) {
           const c = comments.get(cid);
           if (!c) { continue; }
-          out += formatCommentBody(cid, c);
+          out += formatCommentBody(cid, c, renderOpts?.timezone);
         }
       }
       i++;
@@ -3868,7 +3874,7 @@ function renderInlineRange(
       for (const cid of [...commentSet].sort()) {
         const c = comments.get(cid);
         if (!c) { continue; }
-        out += formatCommentBody(cid, c);
+        out += formatCommentBody(cid, c, renderOpts?.timezone);
       }
 
       i = j;
@@ -3956,7 +3962,8 @@ function renderInlineRangeWithIds(
   commentIdRemap?: Map<string, string>,
   emittedIdCommentBodies?: Set<string>,
   noteLabels?: Map<string, string>,
-  imageFormatMapping?: Map<string, string>
+  imageFormatMapping?: Map<string, string>,
+  timezone?: string
 ): { text: string; nextIndex: number; deferredComments: string[] } {
   let out = '';
   let i = startIndex;
@@ -3975,7 +3982,7 @@ function renderInlineRangeWithIds(
     if (!c) return;
     collectedBodies.add(cid);
     emittedIdCommentBodies?.add(cid);
-    deferred.push({ remappedId: remap(cid), body: formatCommentBodyWithId(remap(cid), c) });
+    deferred.push({ remappedId: remap(cid), body: formatCommentBodyWithId(remap(cid), c, timezone) });
   }
 
   while (i < segment.length) {
@@ -4285,7 +4292,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
   return lines.join('\n');
 }
 
-type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string> };
+type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string };
 
 // East Asian Wide / Fullwidth code-point ranges (UAX #11).  Characters in
 // these ranges occupy two terminal columns; everything else is treated as
@@ -5361,7 +5368,7 @@ function joinSpansAtTrackedBreaks(markdown: string, marks: TrackedBreakMarks): s
 export function buildMarkdown(
   content: ContentItem[],
   comments: Map<string, Comment>,
-  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, { label: string; body: ContentItem[]; noteKind: 'footnote' | 'endnote' }>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null },
+  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, { label: string; body: ContentItem[]; noteKind: 'footnote' | 'endnote' }>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string },
 ): string {
   let breakMarks: TrackedBreakMarks | undefined;
   const marks = () => breakMarks ??= trackedBreakMarks([content, [...comments.values()], options]);
@@ -5478,6 +5485,7 @@ export function buildMarkdown(
   const noteLabels = options?.notes?.assignedLabels;
   const renderOpts = {
     alwaysUseCommentIds: options?.alwaysUseCommentIds,
+    timezone: options?.timezone,
     commentIdRemap,
     forceIdCommentIds,
     emittedIdCommentBodies,
@@ -6636,12 +6644,19 @@ function formatOffsetString(offsetMinutes: number): string {
   return `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
 }
 
-export function formatLocalIsoMinute(ts: string): string {
+/** Format a timestamp to the minute, in the given UTC offset (such as -05:00) or else the system's timezone. */
+export function formatLocalIsoMinute(ts: string, timezone?: string): string {
   const dt = new Date(ts);
   if (isNaN(dt.getTime())) {
     throw new Error(`Invalid timestamp: ${ts}`);
   }
   const pad = (n: number) => String(n).padStart(2, '0');
+  const offset = timezone?.match(/^([+-])(\d{2}):(\d{2})$/);
+  if (offset) {
+    const minutes = (offset[1] === '-' ? -1 : 1) * (Number(offset[2]) * 60 + Number(offset[3]));
+    const at = new Date(dt.getTime() + minutes * 60000);
+    return `${at.getUTCFullYear()}-${pad(at.getUTCMonth() + 1)}-${pad(at.getUTCDate())} ${pad(at.getUTCHours())}:${pad(at.getUTCMinutes())}`;
+  }
   return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
 }
 
@@ -6908,7 +6923,10 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   }
 
   function extractFont(rpr: string): string | undefined {
-    const v = extractAttr(rpr, 'w:ascii="');
+    // Export escapes a name such as "A & B"
+    const v = extractAttr(rpr, 'w:ascii="')?.replace(/&(?:#(\d+)|#x([0-9a-fA-F]+)|(amp|lt|gt|quot|apos));/g, (_, dec: string, hex: string, name: string) =>
+      dec ? String.fromCodePoint(Number(dec)) : hex ? String.fromCodePoint(parseInt(hex, 16))
+        : ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" } as Record<string, string>)[name]);
     return v || undefined;
   }
 
@@ -7051,6 +7069,17 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
     }
   }
 
+  // CodeBlock extraction: export sets its size a point under a body size the
+  // frontmatter sets, or else to 10pt
+  const codeRpr = getStyleRPr('CodeBlock');
+  if (codeRpr) {
+    const codeFont = extractFont(codeRpr);
+    if (codeFont && codeFont !== 'Consolas') result.codeFont = codeFont;
+    const codeSizeHp = extractSizeHp(codeRpr);
+    const inferredHp = bodySizeHp !== undefined && bodySizeHp !== 22 ? Math.max(1, bodySizeHp - 2) : 20;
+    if (codeSizeHp !== undefined && codeSizeHp !== inferredHp) result.codeFontSize = codeSizeHp / 2;
+  }
+
   // Custom named styles: detect "Custom: ..." styles for fallback extraction
   const extractedCustomStyles: Record<string, CustomStyleDef> = {};
   let csSearchPos = 0;
@@ -7152,6 +7181,7 @@ export async function convertDocx(
     storedParagraphIndent,
     storedBibHangingIndent,
     storedCalloutLabels,
+    storedSettings,
     storedIndentOverrides,
     storedListIndentOverrides,
     embedDirectiveMapping,
@@ -7207,6 +7237,7 @@ export async function convertDocx(
     storedParagraphIndent: extractParagraphIndent(zip),
     storedBibHangingIndent: extractBibliographyHangingIndent(zip),
     storedCalloutLabels: extractCalloutLabels(zip),
+    storedSettings: extractFrontmatterSettings(zip),
     storedIndentOverrides: extractIndentOverrides(zip),
     storedListIndentOverrides: extractListIndentOverrides(zip),
     embedDirectiveMapping: extractEmbedDirectiveMapping(zip),
@@ -7449,6 +7480,8 @@ export async function convertDocx(
 
   let markdown = buildMarkdown(docContent, comments, {
     tableIndent: options?.tableIndent,
+    // Comment dates in the offset the frontmatter will declare, which export reads them in
+    timezone: storedSettings?.timezone,
     alwaysUseCommentIds: options?.alwaysUseCommentIds,
     pipeTableMaxLineWidth: resolvedPipeTableMaxLineWidth,
     gridTableMaxLineWidth: resolvedGridTableMaxLineWidth,
@@ -7517,9 +7550,9 @@ export async function convertDocx(
   } else if (options?.preferredBibliographyPath) {
     fm.bibliography = options.preferredBibliographyPath;
   }
-  // Note: timezone is intentionally omitted from frontmatter to avoid injecting
-  // fields that weren't in the original. Dates without explicit offsets are
-  // interpreted in the system timezone by normalizeToUtcIso, which is correct.
+  // Note: timezone comes only from the stored settings, to avoid injecting
+  // fields that weren't in the original. Without one, import writes comment
+  // dates in the system timezone, and normalizeToUtcIso reads them back in it.
   // Extract heading/title font overrides from styles.xml for round-trip
   const stylesFile = zip.file('word/styles.xml');
   if (stylesFile) {
@@ -7598,6 +7631,19 @@ export async function convertDocx(
   }
   if (storedCalloutLabels !== null) {
     fm.calloutLabels = storedCalloutLabels;
+  }
+  if (storedSettings) {
+    // Where the document shows a setting, it wins: Zotero's preferences, and
+    // the kind of notes it has
+    if (!zoteroPrefs) {
+      fm.locale ??= storedSettings.locale;
+      fm.zoteroNotes ??= storedSettings.zoteroNotes;
+    }
+    if (storedSettings.notes === 'endnotes' ? footnotes.size === 0 : endnotes.size === 0) fm.notes ??= storedSettings.notes;
+    fm.timezone ??= storedSettings.timezone;
+    fm.blockquoteStyle ??= storedSettings.blockquoteStyle;
+    fm.colors ??= storedSettings.colors;
+    fm.breaks ??= storedSettings.breaks;
   }
   const frontmatterStr = serializeFrontmatter(fm, storedFieldOrder ?? undefined);
   if (frontmatterStr) {
