@@ -2743,9 +2743,9 @@ describe('wrapWithFormatting', () => {
           }
 
           // When code is true, other formatting is stripped, except a
-          // highlight around the backtick fence
+          // highlight around the backtick fence, which an == in it would close
           if (fmt.code) {
-            expect(result).toMatch(fmt.highlight ? /^==`[\s\S]*`==$/ : /^`[\s\S]*`$/);
+            expect(result).toMatch(fmt.highlight && !text.includes('==') ? /^==`[\s\S]*`==$/ : /^`[\s\S]*`$/);
             return;
           }
 
