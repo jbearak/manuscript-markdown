@@ -3889,7 +3889,7 @@ function renderInlineRange(
   const useIds = renderOpts?.alwaysUseCommentIds || hasForcedIdCommentInSegment || hasOverlappingComments(segment.slice(startIndex, segmentEnd));
 
   if (useIds) {
-    return renderInlineRangeWithIds(segment, startIndex, comments, opts, renderOpts?.commentIdRemap, renderOpts?.emittedIdCommentBodies, renderOpts?.noteLabels, renderOpts?.imageFormatMapping, renderOpts?.timezone);
+    return renderInlineRangeWithIds(segment, startIndex, comments, opts, renderOpts?.commentIdRemap, renderOpts?.emittedIdCommentBodies, renderOpts?.noteLabels, renderOpts?.imageFormatMapping, renderOpts?.timezone, renderOpts?.openIdComments, renderOpts?.lastCommentItem);
   }
   let lastSpan: RevisionSpan | undefined;
 
@@ -4131,12 +4131,15 @@ function renderInlineRangeWithIds(
   emittedIdCommentBodies?: Set<string>,
   noteLabels?: Map<string, string>,
   imageFormatMapping?: Map<string, string>,
-  timezone?: string
+  timezone?: string,
+  openIdComments?: Set<string>,
+  lastCommentItem?: Map<string, ContentItem>,
 ): { text: string; nextIndex: number; deferredComments: string[] } {
   let out = '';
   let i = startIndex;
   let lastSpan: RevisionSpan | undefined;
-  let prevCommentIds = new Set<string>();
+  // A comment that spans paragraphs stays open from the one before
+  let prevCommentIds = new Set<string>(openIdComments);
   const collectedBodies = new Set<string>();
   const deferred: Array<{ remappedId: string; body: string }> = [];
   const segmentEnd = computeSegmentEnd(segment, startIndex, opts);
@@ -4384,8 +4387,16 @@ function renderInlineRangeWithIds(
     i++;
   }
 
-  // Close any remaining open comments
+  // Close any remaining open comments, but those whose range goes on into a
+  // later paragraph
+  openIdComments?.clear();
+  const rendered = new Set(segment.slice(startIndex, i));
   for (const cid of [...prevCommentIds].sort()) {
+    const last = lastCommentItem?.get(cid);
+    if (last && !rendered.has(last)) {
+      openIdComments?.add(cid);
+      continue;
+    }
     out += `{/${remap(cid)}}`;
     collectBody(cid);
   }
@@ -4430,7 +4441,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
   return lines.join('\n');
 }
 
-type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string };
+type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem> };
 
 // East Asian Wide / Fullwidth code-point ranges (UAX #11).  Characters in
 // these ranges occupy two terminal columns; everything else is treated as
@@ -4900,6 +4911,9 @@ function renderTableOrFallback(
   storedFormat?: string,
   tableIndex?: number,
 ): { directivePrefix: string; body: string } {
+  // A cell holds no range that goes on past it, and a range open around the
+  // table, with no item in it, stays open for the text after
+  if (renderOpts?.openIdComments) renderOpts = { ...renderOpts, openIdComments: undefined };
   const { fontPrefix, commentUnsafeFont: forceHtmlTable } = buildTableDirectivePrefix(renderOpts, tableIndex);
   let htmlFontAttrs = '';
   const isLandscapeTable = tableIndex !== undefined && renderOpts?.landscapeTableIndices?.has(tableIndex);
@@ -5618,9 +5632,61 @@ export function buildMarkdown(
     if (!isNaN(na) && !isNaN(nb)) return na - nb;
     return a.label.localeCompare(b.label);
   });
+  // Each note's content as it renders, which collectCommentSpans finds the
+  // last item of a comment's range in
+  const noteBodies = new Map(noteEntries.map(entry => [entry, mergeConsecutiveRuns(joinTrackedParagraphBreaks(entry.body, marks))]));
   collectCommentMetadata(mergedContent);
   for (const entry of noteEntries) collectCommentMetadata(entry.body);
   for (const id of overUnanchored) if (overAnchored.has(id)) forceIdCommentIds.add(id);
+
+  // A comment whose range spans paragraphs takes ID syntax, which keeps its
+  // range open from one to the next, up to its last item. One that reaches
+  // into a table, whose cells can't hold that, goes on in each paragraph.
+  // Code blocks, display equations and HTML comments can't hold ID markers
+  // either, so a range starts and ends in the text around them.
+  const lastCommentItem = new Map<string, ContentItem>();
+  function collectCommentSpans(items: ContentItem[]): void {
+    const paragraphOf = new Map<string, number>();
+    const spanning = new Set<string>();
+    const inTable = new Set<string>();
+    let paragraph = 0;
+    let inCodeBlock = false;
+    const visit = (list: ContentItem[], table: boolean) => {
+      for (const item of list) {
+        if (item.type === 'para') {
+          paragraph++;
+          inCodeBlock = !!item.isCodeBlock;
+          continue;
+        }
+        if (item.type === 'table') {
+          for (const row of item.rows) for (const cell of row.cells) for (const para of cell.paragraphs) {
+            paragraph++;
+            visit(para, true);
+          }
+          paragraph++;
+          continue;
+        }
+        const marked = item.type === 'text' ? !inCodeBlock
+          : item.type === 'math' ? !item.display
+            : item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'image';
+        if (!marked || !('commentIds' in item) || !item.commentIds) continue;
+        for (const id of item.commentIds) {
+          const first = paragraphOf.get(id);
+          if (first === undefined) paragraphOf.set(id, paragraph);
+          else if (first !== paragraph) spanning.add(id);
+          if (table) inTable.add(id);
+          lastCommentItem.set(id, item);
+        }
+      }
+    };
+    visit(items, false);
+    for (const id of paragraphOf.keys()) {
+      if (spanning.has(id) && !inTable.has(id)) forceIdCommentIds.add(id);
+      else lastCommentItem.delete(id);
+    }
+  }
+  collectCommentSpans(mergedContent);
+  for (const body of noteBodies.values()) collectCommentSpans(body);
 
   // Global overlap detection: mark comments that overlap anywhere in the document
   function detectGlobalOverlaps(items: ContentItem[]): void {
@@ -5679,6 +5745,8 @@ export function buildMarkdown(
     commentIdRemap,
     forceIdCommentIds,
     emittedIdCommentBodies,
+    openIdComments: new Set<string>(),
+    lastCommentItem,
     noteLabels,
     imageFormatMapping: options?.imageFormatMapping ?? undefined,
     noteImageFormatMapping: options?.noteImageFormatMapping ?? undefined,
@@ -6763,7 +6831,7 @@ export function buildMarkdown(
       : renderOpts;
     for (const entry of noteEntries) {
       output.push('\n\n');
-      const bodyMerged = mergeConsecutiveRuns(joinTrackedParagraphBreaks(entry.body, marks));
+      const bodyMerged = noteBodies.get(entry)!;
       // Render body, splitting on para/table markers for multi-paragraph footnotes
       const bodyParts: string[] = [];
       const deferredAll: string[] = [];
