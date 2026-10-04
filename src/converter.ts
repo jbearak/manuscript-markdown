@@ -1798,6 +1798,67 @@ async function extractNotes(
  * citations), and tables using the same logic as the main document `walk()`.
  * Without context, only basic text formatting is parsed.
  */
+/**
+ * Reads a hidden (w:vanish) run into `target`, and returns the children the
+ * walk still reads: all of a run that shows, and of a hidden one only its
+ * field characters and code, since a field's code can be hidden while its
+ * result shows. Export hides an HTML comment in such a run, its text
+ * starting with \u200B, and Word may split it into many on save (the first
+ * "<!--", the rest lines, breaks and "-->"), which join the html_comment
+ * before them until it closes. Other hidden text, such as legacy metadata or
+ * the pieces of a split \u200B-prefixed sentinel, stays hidden.
+ */
+function readHiddenRun(runChildren: XmlNode[], rPrChildren: XmlNode[] | undefined, target: ContentItem[], activeComments: Set<string>): XmlNode[] {
+  if (!rPrChildren || !isToggleOn(rPrChildren, 'w:vanish')) return runChildren;
+  const fieldChildren = runChildren.filter((c) => c['w:fldChar'] !== undefined || c['w:instrText'] !== undefined);
+  if (fieldChildren.length > 0) return fieldChildren;
+  // Text from w:t/w:delText, with breaks, so multiline payloads survive
+  let runText = '';
+  for (const child of runChildren) {
+    if (child['w:t'] !== undefined) {
+      runText += nodeText(asXmlNodes(child['w:t']));
+    } else if (child['w:delText'] !== undefined) {
+      runText += nodeText(asXmlNodes(child['w:delText']));
+    } else if (child['w:br'] !== undefined || child['w:cr'] !== undefined) {
+      runText += '\n';
+    }
+  }
+  const hiddenPayload = runText.replace(/^\u200B+/, '');
+  const lastItem = target.length > 0 ? target[target.length - 1] : undefined;
+  if (hiddenPayload.trimStart().startsWith('<!--')) {
+    target.push({ type: 'html_comment', text: hiddenPayload, commentIds: new Set(activeComments) });
+  } else if (lastItem?.type === 'html_comment' && commentSetsEqual(lastItem.commentIds, activeComments) && hiddenPayload.length > 0
+      && !lastItem.text.includes('-->', lastItem.text.lastIndexOf('<!--') + 4)) {
+    lastItem.text += hiddenPayload;
+  }
+  return [];
+}
+
+const FIELD_RUN_KEYS = new Set([':@', 'w:rPr', 'w:fldChar', 'w:instrText', 'w:delInstrText', 'w:lastRenderedPageBreak']);
+
+/**
+ * Tracks whether a field shows, since readHiddenRun gives the walk the
+ * field characters and code of a hidden run: a field hidden from its begin
+ * shows only if a run in it shows something, and otherwise adds nothing.
+ */
+function fieldVisibility() {
+  let runHidden = false;
+  let fieldHidden = false;
+  let fieldShown = false;
+  return {
+    /** Before the walk reads a run, with the children readHiddenRun gave it */
+    run(runChildren: XmlNode[], walked: XmlNode[]) {
+      runHidden = walked !== runChildren;
+      if (!runHidden && runChildren.some((c) => Object.keys(c).some((k) => !FIELD_RUN_KEYS.has(k)))) fieldShown = true;
+    },
+    begin() {
+      fieldHidden = runHidden;
+      fieldShown = false;
+    },
+    shows: () => !fieldHidden || fieldShown,
+  };
+}
+
 function parseNoteBody(
   noteChildren: XmlNode[],
   tagName: string,
@@ -1816,6 +1877,7 @@ function parseNoteBody(
   let currentCitation: ZoteroCitation | undefined;
   let citationTextParts: string[] = [];
   let fieldFormatting: RunFormatting | undefined;
+  const fieldShows = fieldVisibility();
   const cCounter = citationCounter ?? { idx: 0 };
   let currentHref: string | undefined;
   // As in extractDocumentContent: a tracked paragraph mark, for breakRevision
@@ -1865,6 +1927,7 @@ function parseNoteBody(
           const fldType = getAttr(node, 'fldCharType');
           if (fldType === 'begin') {
             inField = true;
+            fieldShows.begin();
             fieldInstrParts = [];
             fieldFormatting = undefined;
             inCitationField = false;
@@ -1878,7 +1941,7 @@ function parseNoteBody(
               }
             }
           } else if (fldType === 'end') {
-            if (inCitationField && currentCitation) {
+            if (inCitationField && currentCitation && fieldShows.shows()) {
               const pandocKeys = citationPandocKeys(currentCitation, context.keyMap);
               target.push({
                 type: 'citation',
@@ -2042,14 +2105,17 @@ function parseNoteBody(
         } else if (key === 'w:r') {
           let runFormatting = currentFormatting;
           const runChildren = asXmlNodes(node[key]);
+          let rPrChildren: XmlNode[] | undefined;
           for (const child of runChildren) {
             if (child['w:rPr']) {
-              const rPrChildren = asXmlNodes(child['w:rPr']);
+              rPrChildren = asXmlNodes(child['w:rPr']);
               runFormatting = parseRunProperties(rPrChildren, currentFormatting);
               break;
             }
           }
-          walkNoteBody(runChildren, runFormatting, target, inTableCell, currentRevision);
+          const walked = readHiddenRun(runChildren, rPrChildren, target, activeComments);
+          fieldShows.run(runChildren, walked);
+          walkNoteBody(walked, runFormatting, target, inTableCell, currentRevision);
         } else if (Array.isArray(node[key])) {
           walkNoteBody(node[key], currentFormatting, target, inTableCell, currentRevision);
         }
@@ -2487,6 +2553,7 @@ export async function extractDocumentContent(
   // The highlight on a citation's or cross-reference's result, which the
   // renderer keeps (see renderHighlightGroup)
   let fieldFormatting: RunFormatting | undefined;
+  const fieldShows = fieldVisibility();
   // A deleted field's instruction, read only for NOTEREF: zoteroCitations
   // counts the w:instrText ones alone
   let deletedInstrParts: string[] = [];
@@ -2535,6 +2602,7 @@ export async function extractDocumentContent(
           const fldType = getAttr(node, 'fldCharType');
           if (fldType === 'begin') {
             inField = true;
+            fieldShows.begin();
             fieldInstrParts = [];
             fieldFormatting = undefined;
             deletedInstrParts = [];
@@ -2586,7 +2654,8 @@ export async function extractDocumentContent(
               }
             }
           } else if (fldType === 'end') {
-            if (inNoterefField && noterefInfo) {
+            const shows = fieldShows.shows();
+            if (inNoterefField && noterefInfo && shows) {
               target.push({
                 type: 'footnote_ref',
                 noteId: noterefInfo.noteId,
@@ -2596,7 +2665,7 @@ export async function extractDocumentContent(
                 ...highlightOnly(fieldFormatting),
               });
             }
-            if (inCitationField && currentCitation) {
+            if (inCitationField && currentCitation && shows) {
               const pandocKeys = citationPandocKeys(currentCitation, keyMap);
               target.push({
                 type: 'citation',
@@ -2607,7 +2676,7 @@ export async function extractDocumentContent(
                 ...highlightOnly(fieldFormatting),
               });
             }
-            if (inBibliographyField) {
+            if (inBibliographyField && shows) {
               target.push({ type: 'bibliography_marker' });
             }
             inField = false;
@@ -2722,54 +2791,9 @@ export async function extractDocumentContent(
             }
           }
 
-          // Detect vanish runs carrying HTML comments (encoded with \u200B prefix).
-          // LaTeX OMML hidden runs and other vanish runs without the prefix fall through.
-          const hasVanish = rPrChildren?.some((c) => c['w:vanish'] !== undefined) ?? false;
-          if (hasVanish) {
-            // Collect text from w:t/w:delText elements in this run and preserve
-            // explicit break elements so multiline hidden payloads survive.
-            let runText = '';
-            for (const child of runChildren) {
-              if (child['w:t'] !== undefined) {
-                runText += nodeText(asXmlNodes(child['w:t']));
-              } else if (child['w:delText'] !== undefined) {
-                runText += nodeText(asXmlNodes(child['w:delText']));
-              } else if (child['w:br'] !== undefined || child['w:cr'] !== undefined) {
-                runText += '\n';
-              }
-            }
-            const hiddenPayload = runText.replace(/^\u200B+/, '');
-            const lastItem = target.length > 0 ? target[target.length - 1] : undefined;
-            const canContinueHiddenHtmlComment = lastItem?.type === 'html_comment'
-              && commentSetsEqual(lastItem.commentIds, activeComments);
-            if (hiddenPayload.trimStart().startsWith('<!--')) {
-              const payload = hiddenPayload;
-              target.push({
-                type: 'html_comment',
-                text: payload,
-                commentIds: new Set(activeComments),
-              });
-              continue; // skip normal walk for this run
-            }
-            // Word may split a hidden HTML comment across many vanish runs on
-            // save (first run "<!--", following runs for lines/breaks/"-->").
-            // Reassemble contiguous hidden fragments into the preceding
-            // html_comment item instead of dropping continuation runs.
-            if (canContinueHiddenHtmlComment && hiddenPayload.length > 0) {
-              lastItem.text += hiddenPayload;
-              continue;
-            }
-            // Legacy backward-compat metadata that is no longer interpreted
-            // must still remain invisible in Markdown output.
-            if (hiddenPayload.startsWith('_bqg') || hiddenPayload.startsWith('_lic:') || hiddenPayload.startsWith('_lim:')) {
-              continue;
-            }
-            // Hidden metadata markers are not user-visible content. This avoids
-            // leaking internal sentinels when Word splits \u200B-prefixed runs.
-            continue;
-          }
-
-          walk(runChildren, runFormatting, target, inTableCell, currentRevision);
+          const walked = readHiddenRun(runChildren, rPrChildren, target, activeComments);
+          fieldShows.run(runChildren, walked);
+          walk(walked, runFormatting, target, inTableCell, currentRevision);
         } else if (key === 'w:br') {
           // Line break within a run (Shift+Enter in Word).
           // Only emit for default/textWrapping breaks; skip page/column breaks.

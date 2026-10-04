@@ -4128,6 +4128,82 @@ describe('Comments in notes', () => {
   });
 });
 
+describe('HTML comments in notes', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+
+  test.each([
+    ['in a line', 'Text.[^1]\n\n[^1]: A <!-- x --> z.\n'],
+    ['side by side', 'Text.[^1]\n\n[^1]: A <!-- x --><!-- y --> z.\n'],
+    ['on a line of its own', 'Text.[^1]\n\n[^1]: A.\n\n    <!-- c -->\n\n    B.\n'],
+    ['over two lines', 'Text.[^1]\n\n[^1]:\n\n    A <!-- x\n    y --> z.\n'],
+    ['in an endnote', '---\nnotes: endnotes\n---\n\nText.[^1]\n\n[^1]: A <!-- x --> z.\n'],
+  ])('keeps an HTML comment %s', async (_name, md) => {
+    // Import read the hidden run export puts it in as text, with the
+    // zero-width space before it, which added one more on each round trip
+    expect(await roundTrip(md)).toBe(md);
+    expect(await roundTrip(await roundTrip(md))).toBe(md);
+  });
+
+  test('reads a citation whose field code is hidden', async () => {
+    // The field's runs went unread, so the citation came back as plain text,
+    // and hidden text beside its field characters mustn't show
+    const bibtex = '@article{smith2020,\n  author = {Smith, Jane},\n  title = {T},\n  journal = {J},\n  year = {2020},\n}';
+    const zip = await JSZip.loadAsync((await convertMdToDocx('See [@smith2020].[^1]\n\n[^1]: See [@smith2020].', { bibtex })).docx);
+    for (const part of ['word/document.xml', 'word/footnotes.xml']) {
+      const xml = await zip.file(part)!.async('string');
+      const hidden = xml.replace(/<w:r>(<w:rPr>)?(?=(?:(?!<\/w:r>).)*<w:(?:fldChar|instrText)\b)/g,
+        (_match, rPr?: string) => '<w:r>' + (rPr ? rPr + '<w:vanish/>' : '<w:rPr><w:vanish/></w:rPr>'))
+        .replace(/<w:fldChar w:fldCharType="begin"\/>/g, '$&<w:t>secret</w:t>');
+      expect(hidden).toContain('<w:vanish/></w:rPr><w:fldChar w:fldCharType="begin"/><w:t>secret</w:t>');
+      zip.file(part, hidden);
+    }
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toContain('\nSee [@smith2020].[^1]\n');
+    expect(markdown).toContain('\n[^1]: See [@smith2020].\n');
+    expect(markdown).not.toContain('secret');
+  });
+
+  test('leaves out a citation hidden from its begin to its end', async () => {
+    // Its field characters and code went on to the walk, which added it
+    const bibtex = '@article{smith2020,\n  author = {Smith, Jane},\n  title = {T},\n  journal = {J},\n  year = {2020},\n}';
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A [@smith2020] b.[^1]\n\n[^1]: N [@smith2020] b.', { bibtex })).docx);
+    for (const part of ['word/document.xml', 'word/footnotes.xml']) {
+      const xml = await zip.file(part)!.async('string');
+      // Every run from the citation's begin to its end
+      const hidden = xml.replace(/<w:r>(?:(?!<w:r>).)*?<w:fldChar w:fldCharType="begin"\/>.*?<w:fldChar w:fldCharType="end"\/><\/w:r>/,
+        (field) => field.replace(/<w:r>(<w:rPr>)?/g, (_match, rPr?: string) => '<w:r>' + (rPr ? rPr + '<w:vanish/>' : '<w:rPr><w:vanish/></w:rPr>')));
+      expect(hidden).not.toBe(xml);
+      zip.file(part, hidden);
+    }
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toContain('\nA  b.[^1]\n');
+    expect(markdown).toContain('\n[^1]: N  b.\n');
+  });
+
+  test('keeps hidden text after an HTML comment out of it', async () => {
+    // It joined the closed comment, and showed after its -->
+    for (const part of ['word/document.xml', 'word/footnotes.xml']) {
+      const zip = await JSZip.loadAsync((await convertMdToDocx('A <!-- x --> b.[^1]\n\n[^1]: N <!-- x --> b.')).docx);
+      const xml = await zip.file(part)!.async('string');
+      const hidden = xml.replace(/<w:t>\u200B&lt;!-- x --&gt;<\/w:t><\/w:r>/, '$&<w:r><w:rPr><w:vanish/></w:rPr><w:t>secret</w:t></w:r>');
+      expect(hidden).not.toBe(xml);
+      zip.file(part, hidden);
+      expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown).toBe('A <!-- x --> b.[^1]\n\n[^1]: N <!-- x --> b.\n');
+    }
+  });
+
+  test.each(['0', 'false', 'off'])('keeps the text of a run with w:vanish="%s"', async (val) => {
+    // The run is visible, though it has a w:vanish
+    for (const part of ['word/document.xml', 'word/footnotes.xml']) {
+      const zip = await JSZip.loadAsync((await convertMdToDocx('A b.[^1]\n\n[^1]: N b.')).docx);
+      const xml = await zip.file(part)!.async('string');
+      zip.file(part, xml.replace(/<w:r><w:t>([AN]) b\.<\/w:t>/, (_match, letter: string) =>
+        '<w:r><w:rPr><w:vanish w:val="' + val + '"/></w:rPr><w:t>' + letter + ' b.</w:t>'));
+      expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown).toBe('A b.[^1]\n\n[^1]: N b.\n');
+    }
+  });
+});
+
 describe('DOCX footnote cross-reference import', () => {
   function wrapCustomPropsXml(props: Record<string, string>): string {
     let xml = '<?xml version="1.0"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">';
