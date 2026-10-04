@@ -6604,6 +6604,128 @@ describe('round-trip regression: image path preservation', () => {
     }
   });
 
+  test.each([
+    ['a footnote', 'Text.[^1]\n\n[^1]: a ![x](image.png){width=100 height=100} b'],
+    ['an endnote', '---\nnotes: endnotes\n---\n\nText.[^1]\n\n[^1]: ![x](image.png){width=100 height=100}'],
+    ['a note\'s table', 'Text.[^1]\n\n[^1]: Note.\n\n    | a |\n    | --- |\n    | ![x](image.png){width=100 height=100} |'],
+    ['a note, as HTML, after an image in Markdown', '![y](image.png){width=100 height=100}\n\nText.[^1]\n\n[^1]: <img src="image.png" alt="x" width="100" height="100">'],
+    ['a note, in Markdown, after an image as HTML', '<img src="image.png" alt="y" width="100" height="100">\n\nText.[^1]\n\n[^1]: ![x](image.png){width=100 height=100}'],
+  ])('keeps an image in %s', async (_name, md) => {
+    // Import read no images in notes, and gave a note's image the format
+    // of the document's image with its relationship ID
+    const tmpDir = join(require('os').tmpdir(), 'mms-test-note-img-' + Date.now());
+    const { mkdirSync, writeFileSync, rmSync } = require('fs');
+    mkdirSync(tmpDir, { recursive: true });
+    writeFileSync(join(tmpDir, 'image.png'), TINY_PNG);
+    try {
+      const { docx } = await convertMdToDocx(md, { sourceDir: tmpDir });
+      const result = await convertDocx(docx);
+      expect(result.markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(md.replace(/^---\n[\s\S]*?\n---\n\n/, '') + '\n');
+      expect([...(result.images?.keys() ?? [])]).toEqual(['image.png']);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    ['in the document', '![a](a/x.png){width=100 height=100} ![b](b/x.png){width=100 height=100}'],
+    ['in the document and a note', '![a](a/x.png){width=100 height=100}\n\nText.[^1]\n\n[^1]: ![b](b/x.png){width=100 height=100}'],
+  ])('writes distinct images with one name %s to files of their own', async (_name, md) => {
+    // One file per name kept the first image's, which both then showed
+    const tmpDir = join(require('os').tmpdir(), 'mms-test-img-names-' + Date.now());
+    const { mkdirSync, writeFileSync, rmSync } = require('fs');
+    mkdirSync(join(tmpDir, 'a'), { recursive: true });
+    mkdirSync(join(tmpDir, 'b'), { recursive: true });
+    writeFileSync(join(tmpDir, 'a', 'x.png'), TINY_PNG);
+    writeFileSync(join(tmpDir, 'b', 'x.png'), Buffer.concat([TINY_PNG, Buffer.from('X')]));
+    try {
+      const JSZip = (await import('jszip')).default;
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md, { sourceDir: tmpDir })).docx);
+      for (const part of ['word/document.xml', 'word/footnotes.xml']) {
+        const xml = await zip.file(part)?.async('string');
+        if (xml) zip.file(part, xml.replace(/ name="[ab]\/x\.png"/g, ' name="photo.png"'));
+      }
+      const result = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+      const sources = [...result.markdown.matchAll(/!\[[ab]\]\(([^)]+)\)/g)].map(match => match[1]);
+      expect(new Set(sources)).toEqual(new Set(['photo.png', 'photo-2.png']));
+      expect(new Set([...result.images!.values()].map(bytes => bytes.length))).toEqual(new Set([TINY_PNG.length, TINY_PNG.length + 1]));
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test('writes no file for an image in a note nothing references', async () => {
+    // A stale note's image took a file, and the name of the document's
+    const tmpDir = join(require('os').tmpdir(), 'mms-test-img-stale-' + Date.now());
+    const { mkdirSync, writeFileSync, rmSync } = require('fs');
+    mkdirSync(join(tmpDir, 'a'), { recursive: true });
+    mkdirSync(join(tmpDir, 'b'), { recursive: true });
+    writeFileSync(join(tmpDir, 'a', 'x.png'), TINY_PNG);
+    writeFileSync(join(tmpDir, 'b', 'x.png'), Buffer.concat([TINY_PNG, Buffer.from('X')]));
+    try {
+      const md = 'Text.[^1]\n\n![a](a/x.png){width=100 height=100}\n\n[^1]: ![b](b/x.png){width=100 height=100}';
+      const JSZip = (await import('jszip')).default;
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md, { sourceDir: tmpDir })).docx);
+      for (const part of ['word/document.xml', 'word/footnotes.xml']) {
+        const xml = await zip.file(part)!.async('string');
+        const edited = xml.replace(/ name="[ab]\/x\.png"/g, ' name="photo.png"').replace(/<w:footnoteReference [^>]*\/>/g, '');
+        expect(edited).not.toBe(xml);
+        zip.file(part, edited);
+      }
+      const result = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+      expect(result.markdown).toContain('![a](photo.png)');
+      expect(result.markdown).not.toContain('![b]');
+      expect([...result.images!.entries()].map(([name, bytes]) => [name, bytes.length])).toEqual([['photo.png', TINY_PNG.length]]);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    ['the notes\' part', 'endnotes:rId1', '<img src="image.png"'],
+    ['another part, whose rId1 is another image', 'footnotes:rId1', '![x](image.png)'],
+    ['no part, as export wrote before', 'rId1', '<img src="image.png"'],
+  ])('reads a note image\'s format from a mapping for %s', async (_name, key, expected) => {
+    // Footnotes and endnotes number their relationships apart, so one
+    // mapping for both gave an endnote's image a footnote's format
+    const tmpDir = join(require('os').tmpdir(), 'mms-test-img-part-' + Date.now());
+    const { mkdirSync, writeFileSync, rmSync } = require('fs');
+    mkdirSync(tmpDir, { recursive: true });
+    writeFileSync(join(tmpDir, 'image.png'), TINY_PNG);
+    try {
+      const md = '---\nnotes: endnotes\n---\nText.[^1]\n\n[^1]: <img src="image.png" alt="x" width="100" height="100">';
+      const JSZip = (await import('jszip')).default;
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md, { sourceDir: tmpDir })).docx);
+      const custom = await zip.file('docProps/custom.xml')!.async('string');
+      expect(custom).toContain('{"endnotes:rId1":"html"}');
+      zip.file('docProps/custom.xml', custom.replace('endnotes:rId1', key));
+      const result = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+      expect(result.markdown).toContain('[^1]: ' + expected);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test('keeps a note\'s HTML image whose format is in the document\'s mapping', async () => {
+    // As export wrote it before the notes had a mapping of their own
+    const tmpDir = join(require('os').tmpdir(), 'mms-test-img-legacy-' + Date.now());
+    const { mkdirSync, writeFileSync, rmSync } = require('fs');
+    mkdirSync(tmpDir, { recursive: true });
+    writeFileSync(join(tmpDir, 'image.png'), TINY_PNG);
+    try {
+      const md = 'Text.[^1]\n\n[^1]: <img src="image.png" alt="x" width="100" height="100">';
+      const JSZip = (await import('jszip')).default;
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md, { sourceDir: tmpDir })).docx);
+      const custom = await zip.file('docProps/custom.xml')!.async('string');
+      expect(custom).toContain('MANUSCRIPT_NOTE_IMAGE_FORMATS');
+      zip.file('docProps/custom.xml', custom.replace(/MANUSCRIPT_NOTE_IMAGE_FORMATS/g, 'MANUSCRIPT_IMAGE_FORMATS').replace(/footnotes:rId/g, 'rId'));
+      const result = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+      expect(result.markdown).toContain('[^1]: <img src="image.png" alt="x" width="100" height="100">');
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   test('image with simple filename round-trips correctly', async () => {
     const tmpDir = join(require('os').tmpdir(), 'mms-test-img2-' + Date.now());
     const { mkdirSync, writeFileSync, rmSync } = require('fs');
