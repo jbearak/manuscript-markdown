@@ -6048,6 +6048,10 @@ function withoutCommentBodyLines(runs: MdRun[]): MdRun[] {
   return kept;
 }
 
+/** Paragraph XML with something import reads: a run, as text, deleted
+ *  text, an image, a note or comment reference, or math. */
+const PARAGRAPH_CONTENT_RE = /<w:r[ >]|<m:oMath[ >]/;
+
 /** Whether a token's runs are only comment bodies, which Word would show as
  *  an empty paragraph. */
 function holdsOnlyCommentBodies(token: MdToken): boolean {
@@ -7109,14 +7113,18 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       state.tableIndex++;
     } else {
       state.afterHeading = prevToken?.type === 'heading' || (!prevToken && state.afterHeading);
-      // Track body paragraph index for indent override round-trip
-      if (token.type === 'paragraph' && token.runs.length > 0 && !token.runs.every(r => r.type === 'html_comment') && !isCommentBodyParagraph(token)) {
+      const paragraphXml = generateParagraph(token, state, options, bibEntries, citeprocEngine);
+      // Track body paragraph index for indent override round-trip. Import
+      // counts the paragraphs that show something, so one whose only image
+      // couldn't be read doesn't count.
+      if (token.type === 'paragraph' && token.runs.length > 0 && !token.runs.every(r => r.type === 'html_comment') && !isCommentBodyParagraph(token)
+          && PARAGRAPH_CONTENT_RE.test(paragraphXml)) {
         if (token.indentOverride) {
           state.indentOverrides.set(state.bodyParagraphIndex, token.indentOverride);
         }
         state.bodyParagraphIndex++;
       }
-      body += generateParagraph(token, state, options, bibEntries, citeprocEngine);
+      body += paragraphXml;
     }
     // An empty paragraph in a list ends it on import, so before more of the
     // list, a quote in a list item keeps its spacing in the metadata alone.
