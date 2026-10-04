@@ -1085,6 +1085,113 @@ describe('Grid table round-trip', () => {
   });
 });
 
+describe('Horizontal rule round-trip', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+
+  const RULE_BORDER = '<w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="auto"/></w:pBdr>';
+  /** The Markdown export makes, with the paragraph after the rule merged into
+   *  it: `after`, right after the rule's border, becomes `merged` */
+  const withParagraphMergedIntoRule = async (md: string, after: RegExp, merged: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const at = xml.indexOf(RULE_BORDER) + RULE_BORDER.length;
+    zip.file('word/document.xml', xml.slice(0, at) + xml.slice(at).replace(after, merged));
+    return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+  };
+
+  test('keeps a rule that holds a zero-width comment', async () => {
+    // The comment's empty anchor counted as content
+    expect(await withParagraphMergedIntoRule('A.\n\n---\n{>>@A (2024-01-15 10:30) | c<<}\n\nB.',
+      /^<\/w:pPr><\/w:p><w:p\b[^>]*>(<w:commentRangeStart[\s\S]*?<\/w:r>)<\/w:p>/, '</w:pPr>$1</w:p>'))
+      .toBe('A.\n\n---\n{>>@A (2024-01-15 10:30) | c<<}\n\nB.\n');
+  });
+
+  test('keeps the zero-width comment on a rule that carries an ordinary section break', async () => {
+    // Only the children of a landscape or portrait section's carrier were read
+    expect(await withParagraphMergedIntoRule('A.\n\n---\n{>>@A (2024-01-15 10:30) | c<<}\n\nB.',
+      /^<\/w:pPr><\/w:p><w:p\b[^>]*>(<w:commentRangeStart[\s\S]*?<\/w:r>)<\/w:p>/,
+      '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr>$1</w:p>'))
+      .toBe('A.\n\n---\n{>>@A (2024-01-15 10:30) | c<<}\n\nB.\n');
+  });
+
+  test('counts no rule for indent overrides, with a comment or not', async () => {
+    // Export counts no rule, and one a comment was added to in Word took the
+    // next paragraph's override
+    const zip = await JSZip.loadAsync((await convertMdToDocx('# H\n\nA.\n\n---\n\n<!-- no-indent -->\nB.\n\nC.')).docx);
+    const commented = await JSZip.loadAsync((await convertMdToDocx('# H\n\nA.\n\n---\n{>>@A (2024-01-15 10:30) | c<<}\n\nB.')).docx);
+    const xml = await commented.file('word/document.xml')!.async('string');
+    const at = xml.indexOf(RULE_BORDER) + RULE_BORDER.length;
+    const comment = /^<\/w:pPr><\/w:p><w:p\b[^>]*>(<w:commentRangeStart[\s\S]*?<\/w:r>)<\/w:p>/.exec(xml.slice(at))![1];
+    const doc = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', doc.replace(RULE_BORDER + '</w:pPr>', RULE_BORDER + '</w:pPr>' + comment));
+    for (const part of ['word/comments.xml', '[Content_Types].xml', 'word/_rels/document.xml.rels']) {
+      zip.file(part, await commented.file(part)!.async('string'));
+    }
+    expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)
+      .toBe('# H\n\nA.\n\n---\n{>>@A (2024-01-15 10:30) | c<<}\n\n<!-- no-indent -->\nB.\n\nC.\n');
+  });
+
+  test('keeps a rule that Word moved a section break onto', async () => {
+    // As an empty carrier of the break, it went with the section
+    const md = 'A.\n\n---\n\n<!-- landscape -->\n\nWide.\n\n<!-- /landscape -->';
+    expect(await withParagraphMergedIntoRule(md,
+      /^<\/w:pPr><\/w:p><w:p\b[^>]*><w:pPr>(<w:sectPr[\s\S]*?<\/w:sectPr>)<\/w:pPr><\/w:p>/, '$1</w:pPr></w:p>'))
+      .toBe(md + '\n');
+  });
+
+  test.each([
+    ['a quote', '***\n> q\n\n---\n\nB.', '---\n\n> q\n\n---\n\nB.\n'],
+    ['an HTML comment', '___\n<!-- c -->\n\n---\n\nB.', '---\n\n<!-- c -->\n\n---\n\nB.\n'],
+  ])('keeps a rule that starts the document, right before %s, from opening frontmatter', async (_name, md, expected) => {
+    // ---\n> q up to the next rule read as frontmatter, which lost the quote
+    let markdown = md;
+    for (let i = 0; i < 2; i++) markdown = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(markdown).toBe(expected);
+  });
+
+  test.each([
+    ['between paragraphs', 'A.\n\n---\n\nB.'],
+    ['at the end', 'A.\n\n---'],
+    ['twice in a row', 'A.\n\n---\n\n---\n\nB.'],
+    ['between lists', '- a\n\n---\n\n- b'],
+    ['between headings', '# H\n\n---\n\n## I'],
+    ['after a quote', '> q\n\n---\n\nB.'],
+    ['right after a quote', '> q\n---\n\nB.'],
+    ['before a table', 'A.\n\n---\n\n| a |\n| --- |\n| b |'],
+    ['between a code block and a quote', '```\ncode\n```\n\n---\n\n> q'],
+    ['between code blocks', '```\ncode\n```\n\n---\n\n```\nmore\n```'],
+    ['between a code block and an alert', '```\ncode\n```\n\n---\n\n> [!NOTE]\n> alert'],
+    ['after a code block', '```\ncode\n```\n\n---\n\nB.'],
+    ['between a quote and a heading', '> q\n\n---\n\n# H'],
+    ['between quotes', '> q\n\n---\n\n> r'],
+    ['between a quote and a list', '> q\n\n---\n\n- a'],
+  ])('keeps a rule %s', async (_, md) => {
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('keeps a rule before a title paragraph', async () => {
+    // A title after the rule isn't the document's title
+    const zip = await JSZip.loadAsync((await convertMdToDocx('---\ntitle: T\n---\n\nBody.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<w:p\b[^>]*><w:pPr><w:pStyle w:val="Title"\/>/,
+      '<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="auto"/></w:pBdr></w:pPr></w:p>$&'));
+    expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown).toBe('---\n\nT\n\nBody.\n');
+  });
+
+  test('writes a rule of any kind as ---', async () => {
+    expect(await roundTrip('A.\n\n***\n\nB.')).toBe('A.\n\n---\n\nB.');
+  });
+
+  test('keeps the text of a paragraph with a bottom border', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\nB.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/(<w:p\b[^>]*>)(<w:r><w:t>A\.)/,
+      '$1<w:pPr><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="auto"/></w:pBdr></w:pPr>$2'));
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('A.\n\nB.');
+  });
+});
+
 describe('List indent round-trip', () => {
   test('does not infer an ordinary left-indented paragraph as a list continuation', async () => {
     const { docx } = await convertMdToDocx('- item\n\nBody');
