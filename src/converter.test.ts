@@ -4717,6 +4717,35 @@ describe('Whitespace at the edges of a paragraph', () => {
   });
 
   test.each([
+    ['a tab', '&#9;t'], ['spaces', '&#32;&#32;t'], ['a space before bold', '&#32;**t**'],
+  ])('keeps %s at the start of a note', async (_name, text) => {
+    // Import took it all for the space Word puts after the note's mark
+    const md = 'T.[^1]\n\n[^1]: ' + text + '\n';
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('keeps the whitespace at the start of a note after a comment\'s body', async () => {
+    // Export looked for it in the body, which goes with the comment
+    const md = 'T.[^1]\n\n[^1]: {#1>>c<<}\n    &#32;t {#1}x{/1}\n';
+    expect(await roundTrip(md)).toBe('T.[^1]\n\n[^1]: &#32;t {==x==}{>>c<<}\n');
+  });
+
+  test.each([
+    ['a space', ' ', 't', 'T.[^1]\n\n[^1]: t\n'],
+    ['a tab', '\t', 't', 'T.[^1]\n\n[^1]: t\n'],
+    ['a space, before text that starts with spaces', ' ', '  t', 'T.[^1]\n\n[^1]: &#32;&#32;t\n'],
+    ['a tab, before text that starts with spaces', '\t', '  t', 'T.[^1]\n\n[^1]: &#32;&#32;t\n'],
+  ])('leaves out %s Word puts after a note\'s mark', async (_name, separator, text, expected) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('T.[^1]\n\n[^1]: XX')).docx);
+    const xml = await zip.file('word/footnotes.xml')!.async('string');
+    const run = (t: string) => t === '\t' ? '<w:r><w:tab/></w:r>' : '<w:r><w:t xml:space="preserve">' + t + '</w:t></w:r>';
+    const edited = xml.replace('<w:r><w:t>XX</w:t></w:r>', run(separator) + run(text));
+    expect(edited).not.toBe(xml);
+    zip.file('word/footnotes.xml', edited);
+    expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown).toBe(expected);
+  });
+
+  test.each([
     ['a table cell', '| a | b |\n| --- | --- |\n| XX | 2 |', '| a | b |\n| --- | --- |\n| &#9;t&nbsp; | 2 |\n'],
     ['an HTML table cell', '<table>\n  <tr>\n    <td>\n      <p>XX</p>\n    </td>\n  </tr>\n</table>',
       '<table>\n  <tr>\n    <td>\n      <p>&#9;t&nbsp;</p>\n    </td>\n  </tr>\n</table>\n'],
