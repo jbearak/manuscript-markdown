@@ -536,7 +536,7 @@ The most common format — simple, compact tables using pipe delimiters with opt
 | d    |   e    |     f |
 ```
 
-Pipe tables support column alignment via `:` in the separator row but do not support multi-line cells, colspan, or rowspan. Tables support per-table font and column-width overrides via comment directives (`<!-- table-font-size: N -->`) and HTML data attributes (`data-font-size`, `data-font`); see [Table Font Configuration](#table-font-configuration).
+Pipe tables support column alignment via `:` in the separator row, which sets the alignment of the column's paragraphs in Word, but do not support multi-line cells, colspan, or rowspan. Tables support per-table font and column-width overrides via comment directives (`<!-- table-font-size: N -->`) and HTML data attributes (`data-font-size`, `data-font`); see [Table Font Configuration](#table-font-configuration).
 
 The line-width threshold for pipe tables is controlled by the `pipe-table-max-line-width` frontmatter field, the VS Code `pipeTableMaxLineWidth` setting, or the CLI `--pipe-table-max-line-width` flag.
 
@@ -557,6 +557,7 @@ Grid tables use [Pandoc grid table syntax](https://pandoc.org/MANUAL.html#extens
 
 - Column boundaries are defined by `+` positions in the separator line
 - The `=` separator distinguishes header rows from body rows
+- A `:` at either end of a column's `=` in the header's separator sets its alignment, as in `+:===+===:+` (left, then right); a table without a header takes them in its top line
 - Multiple content lines between separators form a single logical row with multi-line cells
 - Grid tables do not support colspan or rowspan (use HTML tables for spans)
 - On round-trip, grid tables are stored with `sourceFormat: 'grid'` metadata so the format is preserved
@@ -582,7 +583,9 @@ HTML tables support the full range of table features including colspan, rowspan,
 </table>
 ```
 
-A cell takes HTML formatting only. Markdown, CriticMarkup, comments, citations and math in a cell export as literal text. Each `<p>` in a cell exports as a paragraph of the Word cell, and `<br>` as a line break.
+A cell takes HTML formatting only. Markdown, CriticMarkup, comments, citations and math in a cell export as literal text. Each `<p>` in a cell exports as a paragraph of the Word cell, and `<br>` as a line break. A cell's `align="left"`, `"center"` or `"right"`, or a `text-align` style, sets its alignment.
+
+On DOCX import, a column whose cells share an alignment takes it in a pipe or grid table, and an HTML table's cell takes its own. A cell's alignment is its paragraphs', set on them or by their style or the table's.
 
 Per-table overrides use `data-` attributes directly on the `<table>` element (`data-font-size`, `data-font`, `data-col-widths`, `data-orientation`):
 

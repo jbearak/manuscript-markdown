@@ -12,11 +12,11 @@ import { parseFrontmatter, maskFrontmatter, serializeFrontmatter, Frontmatter, n
 import { formatTableNumbers, parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping, type TableDigits, type TableDecimalMark, type TableDigitGrouping } from './table-number-format';
 import type { TableNumberFormat } from './table-metadata';
 import { alertColorsByScheme, getDefaultColorScheme } from './alert-colors';
-import { ZoteroBiblData, zoteroStyleFullId } from './converter';
+import { ZoteroBiblData, zoteroStyleFullId, getDisplayWidth } from './converter';
 import { isGfmDisallowedRawHtml, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from './gfm';
 import { scanOrientationDirectives } from './orientation-scan';
 import { pixelsToEmu, isSupportedImageFormat, getImageContentType, readImageDimensions, computeMissingDimension, IMAGE_WARNINGS, parseImageDimension } from './image-utils';
-import { preprocessGridTables, GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData } from './grid-table-preprocess';
+import { preprocessGridTables, gridColumnAlign, GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData, type TableAlign } from './grid-table-preprocess';
 import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
 import { extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
@@ -135,6 +135,7 @@ export interface MdTableCell {
   runs: MdRun[];
   colspan?: number;
   rowspan?: number;
+  align?: TableAlign;
 }
 export interface MdTableRow {
   cells: MdTableCell[];     // each cell has runs + optional span info
@@ -224,6 +225,7 @@ function mapHtmlTableRowsToMdTableRows(rows: HtmlTableRow[]): MdTableRow[] {
       runs: cell.runs.map(mapHtmlTableRunToMdRun),
       ...(cell.colspan && cell.colspan > 1 ? { colspan: cell.colspan } : {}),
       ...(cell.rowspan && cell.rowspan > 1 ? { rowspan: cell.rowspan } : {}),
+      ...(cell.align ? { align: cell.align } : {}),
     })),
   }));
 }
@@ -1806,7 +1808,7 @@ function startsAdjacentList(item: MdToken, prevTopOrdered: boolean | undefined):
  * `linkDefinitions` are the document's, which a note body parsed on its own
  * resolves its reference links and images with, after its own definitions.
  */
-export function parseMd(markdown: string, warnings?: string[], breaks = false, originalText?: string, tableNumberFormat?: TableNumberFormat, linkDefinitions?: Record<string, unknown>): MdToken[] {
+export function parseMd(markdown: string, warnings?: string[], breaks = false, originalText?: string, tableNumberFormat?: TableNumberFormat, linkDefinitions?: Record<string, unknown>, unformatted?: string): MdToken[] {
   const md = createMarkdownIt();
   // Preserve explicit source semantics for blockquotes by disabling markdown-it
   // lazy continuation behavior (where a non-`>` line can be absorbed into a
@@ -1821,7 +1823,13 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
   const tokens = md.parse(processed, env);
 
   const processedLines = processed.split('\n');
-  const result = splitCriticParagraphs(splitCriticDisplayMathParagraphs(convertTokens(tokens, 0, 0, warnings, processedLines)));
+  // Number formatting can widen a table's cells past their padding, so
+  // whether a table's columns line up reads its lines from before it,
+  // `unformatted`, which differ from these in cell text alone
+  const unformattedLines = unformatted === undefined ? undefined
+    : preprocessCriticMarkup(wrapBareLatexEnvironments(deLazifyBlockquotes(preprocessGridTables(unformatted)))).split('\n');
+  const sourceLines = unformattedLines?.length === processedLines.length ? unformattedLines : processedLines;
+  const result = splitCriticParagraphs(splitCriticDisplayMathParagraphs(convertTokens(tokens, 0, 0, warnings, sourceLines)));
   annotateBlockquoteBoundaries(result);
   // Table number formatting rewrites a table's lines, and CriticMarkup
   // preprocessing joins a span's lines, so the source gets both too for a
@@ -2577,7 +2585,8 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
         const tableData = extractTableData(tokens.slice(i + 1, tableClose));
         // Detect whether the pipe table was column-aligned (padded) in source.
         // The separator row is the second line of the table; if any column's
-        // dash segment exceeds the minimum 3 characters, the table is aligned.
+        // dash segment exceeds the minimum 3 characters, and each line's
+        // cells are as wide as the separator's, the table is aligned.
         let pipeAligned: boolean | undefined;
         if (sourceLines && token.map) {
           const [startLine, endLine] = token.map;
@@ -2588,7 +2597,35 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
               let segments = sepLine.split('|');
               if (segments[0].trim() === '') segments = segments.slice(1);
               if (segments.length > 0 && segments[segments.length - 1].trim() === '') segments = segments.slice(0, -1);
-              pipeAligned = segments.some(s => s.replace(/[^-]/g, '').length > 3);
+              // A line's cells' widths. Without a closing pipe, which a line
+              // can have or not, the last cell's padding is whitespace at the
+              // end of the line, which an editor can take off, so its width
+              // counts only where the line and the separator both close.
+              const widths = (line: string) => {
+                const trimmed = line.trimEnd();
+                const closed = /(?<!\\)\|$/.test(trimmed);
+                return { closed, cells: (closed ? trimmed.slice(0, -1) : trimmed).split(/(?<!\\)\|/).map(getDisplayWidth) };
+              };
+              const separator = widths(sepLine);
+              const lines = sourceLines.slice(startLine, endLine).filter(line => line.trim() !== '');
+              const linesUp = lines.every(line => {
+                const row = widths(line);
+                const last = row.cells.length - 1;
+                return row.cells.length === separator.cells.length
+                  && row.cells.every((width, k) => width === separator.cells[k] || (k === last && !(row.closed && separator.closed)));
+              });
+              // A table whose cells have no space around them, as |aaaaa|
+              // over |:---:|, lines up but is compact. A cell with more than
+              // a space on a side, as only a padded table's are, counts where
+              // an edit has put a line out of line.
+              const cells = lines.filter((_line, li) => li !== 1).flatMap(line => line.trim().replace(/^\|/, '')
+                .replace(/(?<!\\)\|$/, '').split(/(?<!\\)\|/).filter(cell => cell.trim() !== ''));
+              const cellPadded = cells.some(cell => /^\s{2}|\s{2}$/.test(cell));
+              const spaced = cells.some(cell => /^\s|\s$/.test(cell));
+              // A column is wider than the least, of 3 dashes, or with an
+              // alignment's colons, its dashes and colons fill it, with no
+              // space around them, as in :---:
+              pipeAligned = (linesUp && spaced || cellPadded) && segments.some(s => s.replace(/[^-]/g, '').length > 3 || /^[-:]{5,}$/.test(s));
             }
           }
         }
@@ -2613,11 +2650,12 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
             const gridData: GridTableData = JSON.parse(jsonStr);
             const md = createMarkdownIt();
             const gridRows: MdTableRow[] = gridData.rows.map(row => ({
-              cells: row.cells.map(cellText => ({
+              cells: row.cells.map((cellText, ci) => ({
                 // Grid table cells always treat bare newlines as hard breaks
                 runs: cellText
                   ? (() => { const runs = convertInlineTokens(md.parseInline(cellText, {})); promoteSoftbreaks(runs); return runs; })()
                   : [],
+                ...(gridColumnAlign(gridData, ci) ? { align: gridColumnAlign(gridData, ci)! } : {}),
               })),
               header: row.header,
             }));
@@ -3280,7 +3318,9 @@ function extractTableCells(tokens: ManuscriptToken[]): MdTableCell[] {
     if (tokens[i].type === 'td_open' || tokens[i].type === 'th_open') {
       const closeType = tokens[i].type.replace('_open', '_close');
       const closePos = findClosingToken(tokens, i, closeType);
-      cells.push({ runs: convertInlineTokens(tokens.slice(i + 1, closePos)) });
+      // markdown-it writes a column's alignment, from its :-: , as a style
+      const align = /text-align:(left|center|right)/.exec(tokens[i].attrGet?.('style') ?? '')?.[1] as TableAlign | undefined;
+      cells.push({ runs: convertInlineTokens(tokens.slice(i + 1, closePos)), ...(align ? { align } : {}) });
       i = closePos + 1;
     } else {
       i++;
@@ -6671,6 +6711,10 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
       const cellRuns = withoutCommentBodyLines(row.header
         ? cell.runs.map(r => r.type === 'text' && !r.bold ? { ...r, bold: true } : r)
         : cell.runs);
+      // The column's or cell's alignment, which jc sets after spacing
+      const cellPPr = cell.align
+        ? tablePPr.replace(spacingZero, spacingZero + '<w:jc w:val="' + cell.align + '"/>')
+        : tablePPr;
       // An HTML cell's paragraphs, each a paragraph of the Word cell
       let paragraphRuns: MdRun[] = [];
       for (const run of [...cellRuns, { type: 'hardbreak', text: '\n', cellParagraphBreak: true } as MdRun]) {
@@ -6678,7 +6722,7 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
           paragraphRuns.push(run);
           continue;
         }
-        xml += '<w:p>' + tablePPr + generateRuns(paragraphRuns, state, options, bibEntries, citeprocEngine) + '</w:p>';
+        xml += '<w:p>' + cellPPr + generateRuns(paragraphRuns, state, options, bibEntries, citeprocEngine) + '</w:p>';
         paragraphRuns = [];
       }
       xml += '</w:tc>';
@@ -7314,19 +7358,23 @@ export async function convertMdToDocx(
   };
   const numberResult = formatTableNumbers(bodyForParsing, tableNumberFormat);
   const numbersFormatted = numberResult.output !== bodyForParsing;
+  const unformattedBody = bodyForParsing;
   bodyForParsing = numberResult.output;
   parseWarnings.push(...numberResult.warnings);
+	// A note's body from before number formatting, where it formatted any
+	const unformattedNotes = new Map<string, string>();
 	for (const [label, noteBody] of footnoteDefs) {
 		const noteNumberResult = formatTableNumbers(preprocessGridTables(noteBody), {
 			digits: frontmatter.tableDigits,
 			decimalMark: frontmatter.tableDecimalMark,
 			digitGrouping: frontmatter.tableDigitGrouping,
 		});
+		if (noteNumberResult.output !== noteBody) unformattedNotes.set(label, noteBody);
 		footnoteDefs.set(label, noteNumberResult.output);
 		parseWarnings.push(...noteNumberResult.warnings);
 	}
   const tokens = parseMd(bodyForParsing, parseWarnings, frontmatter.breaks ?? false, maskFrontmatter(markdown),
-    numbersFormatted ? tableNumberFormat : undefined);
+    numbersFormatted ? tableNumberFormat : undefined, undefined, numbersFormatted ? unformattedBody : undefined);
 
   // Number quote groups and collect the source spacing parseMd recorded on them
   annotateBlockquoteGroupIndices(tokens);
@@ -7660,7 +7708,8 @@ export async function convertMdToDocx(
       continue;
     }
     // Parse the definition body into tokens and generate OOXML
-    const bodyTokens = parseMd(bodyText, state.warnings, frontmatter.breaks ?? false, undefined, undefined, linkDefinitionsOf.get(tokens));
+    const bodyTokens = parseMd(bodyText, state.warnings, frontmatter.breaks ?? false, undefined, undefined, linkDefinitionsOf.get(tokens),
+      unformattedNotes.get(label));
     applyCustomStyleSentinels(bodyTokens, state.warnings);
     prescanCommentIds(bodyTokens, state);
     // Generate paragraph OOXML for the note body

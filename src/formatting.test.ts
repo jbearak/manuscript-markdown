@@ -534,6 +534,14 @@ describe('grid table support for Expand Table and Compact Table', () => {
     }
   });
 
+  it('reflowTable and compactTable keep a grid table\'s alignment', () => {
+    // A colon on a border made it no grid table to them
+    const input = '+:--+--:+\n| Name | Age |\n+:==+==:+\n| Beatrice | 10 |\n+---+---+';
+    const expected = '+:---------+----:+\n| Name     | Age |\n+:=========+====:+\n| Beatrice | 10  |\n+----------+-----+';
+    expect(reflowTable(input).newText).toBe(expected);
+    expect(compactTable(input).newText).toBe(expected);
+  });
+
   it('reflowTable and compactTable keep the whitespace an HTML cell writes as references at its edges', () => {
     // The parser decoded it, and the Markdown cell trimmed it
     const input = '<table><tr><th>h</th></tr><tr><td>&#9;t&nbsp;</td></tr></table>';

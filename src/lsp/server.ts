@@ -72,7 +72,7 @@ import {
 } from './comment-language';
 import { type Frontmatter, parseFrontmatter, maskFrontmatter } from '../frontmatter';
 import { formatTableNumbers, validateTableNumberFormat } from '../table-number-format';
-import { preprocessGridTablesWithSourceMap } from '../grid-table-preprocess';
+import { preprocessGridTablesWithSourceMap, GRID_TABLE_SEPARATOR_RE } from '../grid-table-preprocess';
 import { BUNDLED_STYLE_LABELS, isCslAvailableAsync } from '../csl-loader';
 import {
 	getFrontmatterLocation,
@@ -823,7 +823,7 @@ async function validateEmbedDirectives(doc: TextDocument): Promise<void> {
 								if (t.startsWith('<table') || t === '<table>') { inTable = true; continue; }
 								if (inTable) { if (t.includes('</table>')) inTable = false; continue; }
 								if (t.startsWith('|') && t.endsWith('|')) continue;
-								if (/^\+[-=]+(\+[-=]+)*\+$/.test(t)) continue;
+								if (GRID_TABLE_SEPARATOR_RE.test(t)) continue;
 								hasNonTableContent = true;
 								break;
 							}

@@ -1,11 +1,30 @@
 // Shared grid table preprocessing — used by both md-to-docx and the preview plugin.
 
-const GRID_TABLE_SEPARATOR_RE = /^\+[-=]+(\+[-=]+)*\+$/;
+// A colon at either end of a column's dashes sets its alignment, as in +:==+==:+
+export const GRID_TABLE_SEPARATOR_RE = /^\+:?[-=]+:?(\+:?[-=]+:?)*\+$/;
 export const GRID_TABLE_PLACEHOLDER_PREFIX = '<!-- MANUSCRIPT_GRID_TABLE:';
+
+export type TableAlign = 'left' | 'center' | 'right';
 
 export interface GridTableData {
   rows: Array<{ cells: string[]; header: boolean }>;
   colWidths?: number[]; // inner character widths of each column, derived from +---+---+ separators
+  aligns?: Array<TableAlign | null>; // each column's alignment, from the colons of the header's separator, or the top one
+}
+
+/** The alignment a column's dashes in a separator set: :-- left, :-: center, --: right */
+export function separatorAlign(dashes: string): TableAlign | null {
+  const left = dashes.startsWith(':');
+  const right = dashes.endsWith(':');
+  return left && right ? 'center' : right ? 'right' : left ? 'left' : null;
+}
+
+/** A decoded table's alignment of a column, if it's one a separator gives:
+ *  the placeholder is an HTML comment, which the Markdown can also hold, so
+ *  its JSON can hold anything */
+export function gridColumnAlign(data: { aligns?: unknown }, ci: number): TableAlign | null {
+  const align: unknown = Array.isArray(data.aligns) ? data.aligns[ci] : undefined;
+  return align === 'left' || align === 'center' || align === 'right' ? align : null;
 }
 
 export interface GridTableSourceMapEntry {
@@ -191,5 +210,10 @@ function parseGridTable(lines: string[]): GridTableData | null {
   for (let c = 0; c < numCols; c++) {
     colWidths.push(colBoundaries[c + 1] - colBoundaries[c] - 1);
   }
-  return rows.length > 0 ? { rows, colWidths } : null;
+  // Alignment, as Pandoc reads it: from the separator under the header, or
+  // for a table without one, from the top line
+  const headerSep = lines.slice(1).find(line => GRID_TABLE_SEPARATOR_RE.test(line.trim()) && line.includes('='));
+  const aligns = (headerSep ?? lines[0]).trim().slice(1, -1).split('+').map(separatorAlign);
+  if (rows.length === 0) return null;
+  return aligns.length === numCols && aligns.some(Boolean) ? { rows, colWidths, aligns } : { rows, colWidths };
 }

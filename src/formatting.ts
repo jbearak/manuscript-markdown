@@ -1,5 +1,6 @@
 import { keepParagraphEdgeWhitespace } from './html-entities';
 import { extractHtmlTables, type HtmlTableRun } from './html-table-parser';
+import { separatorAlign, type TableAlign } from './grid-table-preprocess';
 
 export interface TextTransformation {
   newText: string;
@@ -313,6 +314,7 @@ interface ParsedGridTable {
   rows: string[][];
   columnWidths: number[];
   borderStyles: GridBorderStyle[]; // One style per border line (rows + 1)
+  borderAligns: Array<Array<TableAlign | null>>; // Each border line's columns' alignment colons
 }
 
 /**
@@ -542,7 +544,7 @@ function parseGridBorderSegments(line: string): string[] | null {
     return null;
   }
   for (const segment of segments) {
-    if (segment.length === 0 || !/^[=-]+$/.test(segment)) {
+    if (segment.length === 0 || !/^:?[=-]+:?$/.test(segment)) {
       return null;
     }
   }
@@ -573,6 +575,7 @@ function parseGridTable(text: string): ParsedGridTable | null {
 
   const rows: string[][] = [];
   const borderStyles: GridBorderStyle[] = [];
+  const borderAligns: Array<Array<TableAlign | null>> = [];
 
   for (let i = 0; i < lines.length; i++) {
     if (i % 2 === 0) {
@@ -581,6 +584,7 @@ function parseGridTable(text: string): ParsedGridTable | null {
         return null;
       }
       borderStyles.push(borderSegments.some(segment => segment.includes('=')) ? 'equal' : 'dash');
+      borderAligns.push(borderSegments.map(separatorAlign));
     } else {
       const cells = parseGridRow(lines[i]);
       if (!cells || cells.length !== columnCount) {
@@ -597,12 +601,17 @@ function parseGridTable(text: string): ParsedGridTable | null {
     }
   }
 
-  return { rows, columnWidths, borderStyles };
+  return { rows, columnWidths, borderStyles, borderAligns };
 }
 
-function formatGridBorderRow(columnWidths: number[], style: GridBorderStyle): string {
+function formatGridBorderRow(columnWidths: number[], style: GridBorderStyle, aligns: Array<TableAlign | null> = []): string {
   const borderChar = style === 'equal' ? '=' : '-';
-  const segments = columnWidths.map(width => borderChar.repeat(Math.max(width + 2, 3)));
+  const segments = columnWidths.map((width, i) => {
+    // An alignment's colons take the place of the border's ends
+    const left = aligns[i] === 'left' || aligns[i] === 'center' ? ':' : '';
+    const right = aligns[i] === 'right' || aligns[i] === 'center' ? ':' : '';
+    return left + borderChar.repeat(Math.max(width + 2, 3) - left.length - right.length) + right;
+  });
   return '+' + segments.join('+') + '+';
 }
 
@@ -863,10 +872,10 @@ export function compactTable(text: string): TextTransformation {
   if (grid) {
     const lines: string[] = [];
     for (let i = 0; i < grid.rows.length; i++) {
-      lines.push(formatGridBorderRow(grid.columnWidths, grid.borderStyles[i] || 'dash'));
+      lines.push(formatGridBorderRow(grid.columnWidths, grid.borderStyles[i] || 'dash', grid.borderAligns[i]));
       lines.push(formatGridContentRow(grid.rows[i], grid.columnWidths, true));
     }
-    lines.push(formatGridBorderRow(grid.columnWidths, grid.borderStyles[grid.rows.length] || 'dash'));
+    lines.push(formatGridBorderRow(grid.columnWidths, grid.borderStyles[grid.rows.length] || 'dash', grid.borderAligns[grid.rows.length]));
     return { newText: lines.join('\n') };
   }
 
@@ -906,10 +915,10 @@ export function reflowTable(text: string): TextTransformation {
   if (grid) {
     const lines: string[] = [];
     for (let i = 0; i < grid.rows.length; i++) {
-      lines.push(formatGridBorderRow(grid.columnWidths, grid.borderStyles[i] || 'dash'));
+      lines.push(formatGridBorderRow(grid.columnWidths, grid.borderStyles[i] || 'dash', grid.borderAligns[i]));
       lines.push(formatGridContentRow(grid.rows[i], grid.columnWidths, true));
     }
-    lines.push(formatGridBorderRow(grid.columnWidths, grid.borderStyles[grid.rows.length] || 'dash'));
+    lines.push(formatGridBorderRow(grid.columnWidths, grid.borderStyles[grid.rows.length] || 'dash', grid.borderAligns[grid.rows.length]));
     return { newText: lines.join('\n') };
   }
 

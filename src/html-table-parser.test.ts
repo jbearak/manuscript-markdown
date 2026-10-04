@@ -67,3 +67,28 @@ describe('HTML table cell paragraphs', () => {
     expect(runs('<p>&#9;a &#32;b&nbsp;</p>')).toEqual([{ type: 'text', text: '\ta  b ' }]);
   });
 });
+
+describe('HTML table cell alignment', () => {
+  test.each([
+    ['an align attribute', '<td align="center">a</td>', 'center'],
+    ['a text-align style', '<td style="color: red; text-align: right">a</td>', 'right'],
+    ['markdown-it\'s style', '<th style="text-align:left">a</th>', 'left'],
+    ['a text-align style over an align attribute', '<td align="left" style="text-align:right">a</td>', 'right'],
+    ['an !important text-align style', '<td align="left" style="text-align:right!important">a</td>', 'right'],
+    ['an !important text-align style over a later one', '<td style="text-align: right !important; text-align: left">a</td>', 'right'],
+    ['the last text-align style', '<td style="text-align: left; text-align: center">a</td>', 'center'],
+    ['a text-align style Word has no alignment for, over an align attribute', '<td align="left" style="text-align: justify">a</td>', undefined],
+    ['neither', '<td>a</td>', undefined],
+    ['no alignment from data-align or data-style', '<td data-align="center" data-style="text-align: right">a</td>', undefined],
+    ['no alignment from another attribute\'s value', '<td title=\'x align="center"\'>a</td>', undefined],
+  ])('reads %s', (_name, cell, align) => {
+    const [table] = extractHtmlTables('<table><tr>' + cell + '</tr></table>');
+    expect(table.rows[0].cells[0].align).toBe(align);
+  });
+
+  test('reads colspan and rowspan as whole attribute names', () => {
+    const [table] = extractHtmlTables('<table><tr><td data-colspan="2" data-rowspan="2">a</td><td colspan="2" rowspan="3">b</td></tr></table>');
+    expect(table.rows[0].cells.map(cell => [cell.colspan, cell.rowspan])).toEqual([[undefined, undefined], [2, 3]]);
+  });
+});
+

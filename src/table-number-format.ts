@@ -1167,8 +1167,10 @@ function formatPipeRow(line: string, format: TableNumberFormat, warnings: string
   const parsed = splitPipeRow(line);
   if (!parsed) return line;
   const cells = parsed.cells.map(cell => {
+    // The whitespace after what is left, which a cell of whitespace alone
+    // has none of, or it went in twice
     const leading = cell.match(/^\s*/)?.[0] ?? '';
-    const trailing = cell.match(/\s*$/)?.[0] ?? '';
+    const trailing = cell.slice(leading.length).match(/\s*$/)?.[0] ?? '';
     return leading + formatTextCell(cell.trim(), format, warnings) + trailing;
   });
   return parsed.prefix + cells.join('|') + parsed.suffix;

@@ -35,6 +35,7 @@ import {
 } from './converter';
 import { parseBibtex } from './bibtex-parser';
 import { convertMdToDocx } from './md-to-docx';
+import { GRID_TABLE_PLACEHOLDER_PREFIX } from './grid-table-preprocess';
 
 const fixturesDir = join(__dirname, '..', 'test', 'fixtures');
 const sampleData = new Uint8Array(readFileSync(join(fixturesDir, 'sample.docx')));
@@ -4578,6 +4579,209 @@ describe('Tabs', () => {
     expect(stops).not.toBe(xml);
     zip.file('word/document.xml', stops);
     expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('a\tb');
+  });
+});
+
+describe('Table alignment', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+
+  test.each([
+    ['a pipe table', '| a | b | c | d |\n| :--- | :---: | ---: | --- |\n| 1 | 2 | 3 | 4 |\n'],
+    ['a column of empty cells', '| a | |\n| --- | ---: |\n| 1 | |\n'],
+    ['an aligned pipe table', '| Name  | Value |\n|:------|------:|\n| Alpha | 1     |\n'],
+    ['an aligned pipe table of narrow columns', '| a   | b   |\n|:---:|:---:|\n| 1   | 2   |\n'],
+    ['a grid table', '+-----+-----+\n| a   | b   |\n+:====+====:+\n| 1   | 2   |\n|     |     |\n| 3   | 4   |\n+-----+-----+\n'],
+    ['a grid table without a header', '+:----+----:+\n| 1   | 2   |\n|     |     |\n| 3   | 4   |\n+-----+-----+\n'],
+    ['an HTML table', '<table>\n  <tr>\n    <th align="center">\n      <p>a</p>\n    </th>\n    <th>\n      <p>b</p>\n    </th>\n  </tr>\n'
+      + '  <tr>\n    <td colspan="2" align="right">\n      <p>x</p>\n    </td>\n  </tr>\n</table>\n'],
+  ])('keeps the alignment of %s', async (_name, md) => {
+    // Export dropped it, and a grid table with it was text
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('writes a column\'s alignment as its paragraphs\'', async () => {
+    const { docx } = await convertMdToDocx('| a | b | c | d |\n| :-- | :-: | --: | --- |\n| 1 | 2 | 3 | 4 |');
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const row = xml.split('<w:tr>')[2];
+    expect([...row.matchAll(/<w:tc>[\s\S]*?<\/w:tc>/g)].map(tc => /<w:jc w:val="(\w+)"\/>/.exec(tc[0])?.[1]))
+      .toEqual(['left', 'center', 'right', undefined]);
+    expect(row).toContain('<w:spacing w:after="0"/><w:jc w:val="left"/>');
+  });
+
+  test('writes at least three dashes in a column, as number formatting reads', async () => {
+    // A colon took the place of a dash
+    expect(await roundTrip('| a | b | c |\n| :-- | :-: | --: |\n| 1 | 2 | 3 |')).toBe('| a | b | c |\n| :--- | :---: | ---: |\n| 1 | 2 | 3 |\n');
+  });
+
+  test('writes only an alignment a separator gives from a grid table placeholder', async () => {
+    // The placeholder's JSON went in the XML as written
+    const data = { rows: [{ cells: ['a', 'b'], header: false }], colWidths: [3, 3], aligns: ['"/><w:injected/><w:jc w:val="left', 'right'] };
+    const md = GRID_TABLE_PLACEHOLDER_PREFIX + Buffer.from(JSON.stringify(data)).toString('base64') + ' -->';
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    expect(xml).not.toContain('w:injected');
+    expect([...xml.matchAll(/<w:jc w:val="(\w+)"\/>/g)].map(m => m[1])).toEqual(['right']);
+  });
+
+  test('counts an alignment\'s colons in the width of a pipe table\'s separator', async () => {
+    // It took six characters a column, and wrote a line past the limit
+    const cell = (text: string) => '<w:tc><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>' + text + '</w:t></w:r></w:p></w:tc>';
+    const xml = '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl>'
+      + '<w:tr>' + cell('a') + cell('b') + '</w:tr><w:tr>' + cell('1') + cell('2') + '</w:tr></w:tbl></w:body></w:document>';
+    const docx = await buildSyntheticDocx(xml);
+    const markdown = async (width: number) => (await convertDocx(docx, 'authorYearTitle', { pipeTableMaxLineWidth: width })).markdown;
+    expect(await markdown(17)).toContain('| :---: | :---: |');
+    expect(await markdown(16)).not.toContain('| :---: | :---: |');
+  });
+
+  test('reads the alignment of a cell\'s paragraphs in a content control', async () => {
+    // Only a cell's own paragraphs counted
+    const zip = await JSZip.loadAsync((await convertMdToDocx('| a | b |\n| :---: | ---: |\n| 1 | 2 |')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const wrapped = xml.replace(/(<w:tc>(?:(?!<\/w:tc>)[\s\S])*?)(<w:p[ >][\s\S]*?<\/w:p>)(<\/w:tc>)/g, (_m, a, p, b) => a + '<w:sdt><w:sdtContent>' + p + '</w:sdtContent></w:sdt>' + b);
+    expect(wrapped.match(/<w:sdtContent>/g)).toHaveLength(4);
+    zip.file('word/document.xml', wrapped);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('| a | b |\n| :---: | ---: |\n| 1 | 2 |\n');
+  });
+
+  test.each([
+    ['|a|b|\n|:---|---:|\n|1|2|', '| a | b |\n| :--- | ---: |\n| 1 | 2 |\n'],
+    ['|a|long|\n|:---:|---|\n|1|2|', '| a | long |\n| :---: | --- |\n| 1 | 2 |\n'],
+    ['|aaaaa|\n|:---:|\n|11111|', '| aaaaa |\n| :---: |\n| 11111 |\n'],
+  ])('keeps a compact pipe table with alignment compact: %s', async (md, expected) => {
+    // :--- or :---: was taken for a column padded to its width
+    expect(await roundTrip(md)).toBe(expected);
+  });
+
+  test('keeps a padded pipe table with an empty cell padded', async () => {
+    // Number formatting doubled the empty cell's whitespace, and its line
+    // no longer lined up with the others
+    const md = '|     | b   |\n|:----|----:|\n| 1   | 2   |\n';
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('leaves out a right-to-left paragraph\'s alignment but center', async () => {
+    // start and end are the other way around there
+    const zip = await JSZip.loadAsync((await convertMdToDocx('| a | b |\n| :---: | ---: |\n| 1 | 2 |')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const rtl = xml.replace(/<w:pPr><w:pStyle w:val="TableParagraph"\/>/g, '<w:pPr><w:pStyle w:val="TableParagraph"/><w:bidi/>');
+    expect(rtl).not.toBe(xml);
+    zip.file('word/document.xml', rtl);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('| a | b |\n| :---: | --- |\n| 1 | 2 |\n');
+  });
+
+  test('reads a column\'s alignment from its paragraphs\' style or its table\'s', async () => {
+    // Only a paragraph's own alignment counted
+    const zip = await JSZip.loadAsync((await convertMdToDocx('| a | b | c |\n| --- | --- | --- |\n| 1 | 2 | 3 |')).docx);
+    const styles = await zip.file('word/styles.xml')!.async('string');
+    zip.file('word/styles.xml', styles.replace('</w:styles>',
+      '<w:style w:type="paragraph" w:styleId="Right"><w:name w:val="Right"/><w:pPr><w:jc w:val="right"/></w:pPr></w:style>'
+      + '<w:style w:type="paragraph" w:styleId="RightCell"><w:name w:val="Right Cell"/><w:basedOn w:val="Right"/></w:style>'
+      + '<w:style w:type="paragraph" w:styleId="LeftCell"><w:name w:val="Left Cell"/><w:pPr><w:jc w:val="left"/></w:pPr></w:style>'
+      + '<w:style w:type="table" w:styleId="Centered"><w:name w:val="Centered"/><w:pPr><w:jc w:val="center"/></w:pPr></w:style></w:styles>'));
+    const xml = await zip.file('word/document.xml')!.async('string');
+    let column = 0;
+    const styled = xml.replace('<w:tblPr>', '<w:tblPr><w:tblStyle w:val="Centered"/>')
+      .replace(/<w:tc>[\s\S]*?<\/w:tc>/g, tc => tc.replace('<w:pStyle w:val="TableParagraph"/>', ['', '<w:pStyle w:val="RightCell"/>', '<w:pStyle w:val="LeftCell"/>'][column++ % 3]));
+    expect(styled.match(/RightCell/g)).toHaveLength(2);
+    zip.file('word/document.xml', styled);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('| a | b | c |\n| :---: | ---: | --- |\n| 1 | 2 | 3 |\n');
+  });
+
+  test('reads a column\'s alignment from the default table style', async () => {
+    // A table without a style of its own takes the default one
+    const zip = await JSZip.loadAsync((await convertMdToDocx('| a | b |\n| --- | --- |\n| 1 | 2 |')).docx);
+    const styles = await zip.file('word/styles.xml')!.async('string');
+    const centered = styles.replace(/(w:styleId="TableNormal">[\s\S]*?)<w:tblPr>/, (_m, before) => before + '<w:pPr><w:jc w:val="center"/></w:pPr><w:tblPr>');
+    expect(centered).not.toBe(styles);
+    zip.file('word/styles.xml', centered);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('| a | b |\n| :---: | :---: |\n| 1 | 2 |\n');
+  });
+
+  /** md's import, with styles added to styles.xml, Normal centered or not, and the table's tblPr and cells' paragraphs changed */
+  const withStyles = async (md: string, styles: string, tblPr: (xml: string) => string, paragraph: (column: number) => string, centerNormal = false) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const stylesXml = await zip.file('word/styles.xml')!.async('string');
+    zip.file('word/styles.xml', stylesXml.replace('</w:styles>', styles + '</w:styles>')
+      .replace(/(w:styleId="Normal">[\s\S]*?<w:pPr>)/, (_m, before: string) => before + (centerNormal ? '<w:jc w:val="center"/>' : '')));
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const columns = md.split('\n')[0].split('|').length - 2;
+    let cell = 0;
+    zip.file('word/document.xml', tblPr(xml).replace(/<w:tc>[\s\S]*?<\/w:tc>/g, tc => tc.replace('<w:pStyle w:val="TableParagraph"/>', paragraph(cell++ % columns))));
+    return strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+  };
+
+  test.each([
+    ['its bands', '<w:tblStylePr w:type="band1Vert"><w:pPr><w:jc w:val="center"/></w:pPr></w:tblStylePr><w:tblStylePr w:type="band2Vert"><w:pPr><w:jc w:val="right"/></w:pPr></w:tblStylePr>',
+      '<w:tblLook w:val="0000"/>', '| :---: | ---: | :---: |'],
+    ['its last column, from tblLook\'s bits', '<w:tblStylePr w:type="lastCol"><w:pPr><w:jc w:val="right"/></w:pPr></w:tblStylePr>',
+      '<w:tblLook w:val="0500"/>', '| --- | --- | ---: |'],
+    ['its last column, which tblLook leaves off', '<w:tblStylePr w:type="lastCol"><w:pPr><w:jc w:val="right"/></w:pPr></w:tblStylePr>',
+      '<w:tblLook w:val="0400"/>', '| --- | --- | --- |'],
+  ])('reads a column\'s alignment from %s in the table style', async (_name, parts, look, separator) => {
+    // Only the table style's own paragraph properties counted
+    const markdown = await withStyles('| a | b | c |\n| --- | --- | --- |\n| 1 | 2 | 3 |',
+      '<w:style w:type="table" w:styleId="Parts"><w:name w:val="Parts"/>' + parts + '</w:style>',
+      xml => xml.replace(/<w:tblLook [^>]*\/>/, '<w:tblStyle w:val="Parts"/>' + look), () => '');
+    expect(markdown).toBe('| a | b | c |\n' + separator + '\n| 1 | 2 | 3 |\n');
+  });
+
+  test('reads the alignment of a table of one row from its first row\'s part of the table style', async () => {
+    const markdown = await withStyles('| a | b |\n| --- | --- |',
+      '<w:style w:type="table" w:styleId="Parts"><w:name w:val="Parts"/><w:tblStylePr w:type="firstRow"><w:pPr><w:jc w:val="center"/></w:pPr></w:tblStylePr></w:style>',
+      xml => xml.replace(/<w:tblLook [^>]*\/>/, '<w:tblStyle w:val="Parts"/><w:tblLook w:firstRow="1"/>'), () => '');
+    expect(markdown).toBe('| a | b |\n| :---: | :---: |\n');
+  });
+
+  test('reads the default paragraph style\'s alignment only where a paragraph has no other style', async () => {
+    // A style of its own, without a base, took the default's, a centered
+    // Normal
+    const markdown = await withStyles('| a | b |\n| --- | --- |\n| 1 | 2 |',
+      '<w:style w:type="paragraph" w:styleId="Plain"><w:name w:val="Plain"/></w:style>',
+      xml => xml, column => column === 0 ? '<w:pStyle w:val="Plain"/>' : '', true);
+    expect(markdown).toBe('| a | b |\n| --- | :---: |\n| 1 | 2 |\n');
+    // A style styles.xml doesn't have is the default
+    const missing = await withStyles('| a | b |\n| --- | --- |\n| 1 | 2 |',
+      '<w:style w:type="paragraph" w:styleId="Plain"><w:name w:val="Plain"/></w:style>',
+      xml => xml, column => column === 0 ? '<w:pStyle w:val="Plain"/>' : '<w:pStyle w:val="Missing"/>', true);
+    expect(missing).toBe('| a | b |\n| --- | :---: |\n| 1 | 2 |\n');
+  });
+
+  test('keeps a padded pipe table padded when a row has no closing pipe', async () => {
+    // Its last cell's width counted against the separator's, which closes
+    expect(await roundTrip('| Name | Value |\n|:-----|------:|\n| Abcd | 1\n')).toBe('| Name | Value |\n|:-----|------:|\n| Abcd | 1     |\n');
+  });
+
+  test('keeps a padded pipe table padded when number formatting widens its cells', async () => {
+    // Its rows no longer lined up once formatted
+    const md = '---\ntable-digits: 2\n---\n\n| Name  | Value |\n|:------|------:|\n| Alpha | 1     |\n| Beta  | 12345 |\n';
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown)
+      .toBe('---\ntable-digits: 2\n---\n\n| Name  | Value    |\n|:------|---------:|\n| Alpha | 1.00     |\n| Beta  | 12345.00 |\n');
+  });
+
+  test.each([
+    ['', '| Val |\n|-----|\n| 123 |\n', '| Val    |\n|--------|\n| 123.00 |\n'],
+    [' in a note', 'Text.[^1]\n\n[^1]: Note.\n\n    | Val |\n    |-----|\n    | 123 |\n',
+      'Text.[^1]\n\n[^1]: Note.\n\n    | Val    |\n    |--------|\n    | 123.00 |\n'],
+  ])('keeps a narrow padded pipe table%s padded when number formatting widens its cells', async (_name, body, expected) => {
+    // Its cells, a space on a side, no longer lined up once formatted
+    const front = '---\ntable-digits: 2\n---\n\n';
+    expect((await convertDocx((await convertMdToDocx(front + body)).docx)).markdown).toBe(front + expected);
+  });
+
+  test('keeps a padded pipe table without a closing pipe padded', async () => {
+    // The last cell's padding, which a line can end in or not, counted
+    expect(await roundTrip('Name  |Value\n:-----|----:\nAlpha |1\n')).toBe('| Name  | Value |\n|:------|------:|\n| Alpha | 1     |\n');
+  });
+
+  test('leaves out the alignment of a column whose cells differ', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('| a | b |\n| :-: | --: |\n| 1 | 2 |\n| 3 | 4 |')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace(/(<w:jc w:val=")right("\/><\/w:pPr><w:r><w:t>4<)/, (_m, a, b) => a + 'center' + b);
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown))
+      .toBe('| a | b |\n| :---: | --- |\n| 1 | 2 |\n| 3 | 4 |\n');
   });
 });
 
