@@ -166,7 +166,8 @@ export interface MdRun {
   commentText?: string;     // for critic_comment: the comment body
   commentId?: string;       // for comment_range_start/end/body_with_id
   footnoteLabel?: string;   // for footnote_ref: the [^label] label
-  replies?: Array<{author?: string; date?: string; text: string}>; // nested replies for comment_body_with_id
+  replies?: Array<{author?: string; date?: string; text: string; parentReply?: number}>; // nested replies for comment_body_with_id; parentReply: the index of the reply this one replies to
+  consecutiveReplies?: true; // comment_body_with_id: its replies follow it, as in {#1>>a<<}{>>b<<}
   // Citation specific
   keys?: string[];          // citation keys for [@key1; @key2]
   locators?: Map<string, string>; // key -> locator for [@key, p. 20]
@@ -2877,6 +2878,13 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
             ...formatStack,
             href: currentHref
           });
+        } else if (criticType === 'critic_comment' && runs[runs.length - 1]?.type === 'comment_body_with_id') {
+          // Right after an ID body, a reply to it, as after a {==...==} anchor's
+          const body = runs[runs.length - 1];
+          const parentReply = body.replies?.length ?? 0;
+          body.replies = [...(body.replies ?? []), { author: token.author, date: token.date, text: token.commentText || '' },
+            ...(token.replies ?? []).map(reply => ({ ...reply, parentReply }))];
+          body.consecutiveReplies = true;
         } else if (criticType === 'critic_comment') {
           const commentAnchorText = '';
           runs.push({
@@ -5805,18 +5813,22 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         const commentBody = run.commentText || '';
         const parentParaId = generateParaId(state);
         state.comments.push({ id: numericId, author, date, text: commentBody, paraId: parentParaId });
+        if (run.consecutiveReplies) state.consecutiveReplyParaIds.add(parentParaId);
 
         // Generate reply comment entries (reply IDs may have been
         // pre-allocated by the pre-scan in generateDocumentXml)
         if (run.replies && run.replies.length > 0) {
           const preAllocated = state.replyRanges.filter(rr => rr.parentId === numericId);
+          const replyParaIds: string[] = [];
           for (let i = 0; i < run.replies.length; i++) {
             const reply = run.replies[i];
             const replyId = i < preAllocated.length ? preAllocated[i].replyId : state.commentId++;
             const replyParaId = generateParaId(state);
+            replyParaIds.push(replyParaId);
             const replyAuthor = reply.author ?? '';
             const replyDate = normalizeToUtcIso(reply.date || '', state.timezone);
-            state.comments.push({ id: replyId, author: replyAuthor, date: replyDate, text: reply.text, paraId: replyParaId, parentParaId });
+            state.comments.push({ id: replyId, author: replyAuthor, date: replyDate, text: reply.text, paraId: replyParaId,
+              parentParaId: reply.parentReply !== undefined ? replyParaIds[reply.parentReply] : parentParaId });
             if (i >= preAllocated.length) {
               state.replyRanges.push({ replyId, parentId: numericId });
             }
