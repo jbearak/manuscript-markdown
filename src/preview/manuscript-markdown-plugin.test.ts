@@ -672,6 +672,16 @@ describe('GFM behavior in preview plugin', () => {
   });
 
   it.each([
+    ['a line break', 'See https://e.com/a{++x\ny++} now.'],
+    ['a paragraph break', 'See https://e.com/a{++x\n\ny++} now.'],
+  ])('ends a bare URL before CriticMarkup with %s in it', (_name, md) => {
+    // With linkify, as VS Code's preview has it, the break's placeholder
+    // went on the URL, and the markup in it
+    const output = new MarkdownIt({ html: true, linkify: true }).use(manuscriptMarkdownPlugin).render(md);
+    expect(output).toContain('<a href="https://e.com/a">https://e.com/a</a><ins');
+  });
+
+  it.each([
     ['- `[ ] a`', '<code>[ ] a</code>'], ['- **[ ] a**', '<strong>[ ] a</strong>'], ['- [[ ] a](https://e.com)', '>[ ] a</a>'],
     ['> **[!NOTE]**', '<strong>[!NOTE]</strong>'], ['> a\n> **[!TIP]**', '<strong>[!TIP]</strong>'],
     ['- first\n\n  [ ] second', '[ ] second'],

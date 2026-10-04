@@ -9,6 +9,7 @@ import { VALID_COLOR_IDS, getDefaultHighlightColor } from '../highlight-colors';
 import {
   PARA_PLACEHOLDER,
   LINE_PLACEHOLDER,
+  criticBreaksEndLinks,
   findMatchingClose,
   hasCriticBreak,
   iterateCriticBreaks,
@@ -1726,6 +1727,7 @@ function getEmbedDocumentPath(md: ManuscriptMarkdownIt, state: StateCore): strin
 export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
   md.use(imagePathsWithSpaces);
   md.use(codeSpansOfSpaces);
+  md.use(criticBreaksEndLinks);
   // Standalone markdown-it consumers (including unit tests) do not load VS
   // Code's math extension. Keep CriticMarkup-in-math output readable there;
   // VS Code's KaTeX renderer wins when it is already registered or loads later.

@@ -264,7 +264,7 @@ const ALERT_GLYPH_BY_TYPE: Record<GfmAlertType, string> = {
   caution: '⛒',
 };
 
-import { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup, findMatchingClose, restoreCriticLineBreaks } from './critic-markup';
+import { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup, findMatchingClose, restoreCriticLineBreaks, criticBreaksEndLinks } from './critic-markup';
 import { splitCriticMarkupInMath, type CriticMathPart } from './critic-math';
 import { findDollarMathAt } from './math-delimiters';
 import { wrapBareLatexEnvironments } from './latex-env-preprocess';
@@ -883,6 +883,7 @@ function createMarkdownIt(): MarkdownIt {
   md.linkify.add('//', null);
   md.use(imagePathsWithSpaces);
   md.use(codeSpansOfSpaces);
+  md.use(criticBreaksEndLinks);
 
   md.inline.ruler.before('emphasis', 'para_placeholder', paraPlaceholderRule);
   md.inline.ruler.before('emphasis', 'comment_range', commentRangeRule);
