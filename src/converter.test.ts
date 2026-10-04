@@ -1700,13 +1700,41 @@ describe('Comments over equations', () => {
   test.each([
     ['an equation', { type: 'math', latex: 'x', display: false, commentIds: new Set(['0']) }, '$x$'],
     ['text', { type: 'text', text: 'b', commentIds: new Set(['0']), formatting: DEFAULT_FORMATTING }, 'b'],
-  ])('writes a comment over %s and an image in ID syntax', (_name, first, markdown) => {
+  ])('writes a comment over %s and an image in one anchor', (_name, first, markdown) => {
     // The anchor couldn't hold the image, and both got a copy of the comment
     const comments = new Map([['0', { author: 'A', text: 'c', date: '' }]]);
     expect(buildMarkdown([
       first,
       { type: 'image', rId: 'rId9', src: 'media/a.png', alt: '', widthPx: 10, heightPx: 10, commentIds: new Set(['0']) },
-    ] as ContentItem[], comments)).toBe('{#1}' + markdown + '![](media/a.png){width=10 height=10}{/1}\n{#1>>@A | c<<}');
+    ] as ContentItem[], comments)).toBe('{==' + markdown + '![](media/a.png){width=10 height=10}==}{>>@A | c<<}');
+  });
+
+  test.each([
+    ['', [], '{==![](media/a.png){width=10 height=10}==}{>>@A | c<<}'],
+    [' between text', [['a ', false], [' b', false]], 'a {==![](media/a.png){width=10 height=10}==}{>>@A | c<<} b'],
+    [' and text after it', [['a ', false], [' b', true]], 'a {==![](media/a.png){width=10 height=10} b==}{>>@A | c<<}'],
+  ] as Array<[string, Array<[string, boolean]>, string]>)('writes a comment over an image%s in an anchor', (_name, around, expected) => {
+    // A comment over only an image had no range
+    const comments = new Map([['0', { author: 'A', text: 'c', date: '' }]]);
+    const text = ([value, commented]: [string, boolean]) =>
+      ({ type: 'text', text: value, commentIds: new Set(commented ? ['0'] : []), formatting: DEFAULT_FORMATTING });
+    expect(buildMarkdown([
+      ...around.slice(0, 1).map(text),
+      { type: 'image', rId: 'rId9', src: 'media/a.png', alt: '', widthPx: 10, heightPx: 10, commentIds: new Set(['0']) },
+      ...around.slice(1).map(text),
+    ] as ContentItem[], comments)).toBe(expected);
+  });
+
+  test.each([
+    ['alt text', { alt: 'a==}b' }, '![a==}b](media/a.png){width=10 height=10}'],
+    ['path', { src: 'media/a==}.png' }, '![](media/a==}.png){width=10 height=10}'],
+    ['Markdown', { markdown: '![](x==}.png)' }, '![](x==}.png)'],
+  ])('writes a comment over an image with ==} in its %s in ID syntax', (_name, image, markdown) => {
+    // The ==} ended the {==...==} around the image
+    const comments = new Map([['0', { author: 'A', text: 'c', date: '' }]]);
+    expect(buildMarkdown([
+      { type: 'image', rId: 'rId9', src: 'media/a.png', alt: '', widthPx: 10, heightPx: 10, commentIds: new Set(['0']), ...image },
+    ] as ContentItem[], comments)).toBe('{#1}' + markdown + '{/1}\n{#1>>@A | c<<}');
   });
 
   test('writes a comment over ==} in ID syntax in every paragraph it spans', () => {
@@ -6552,6 +6580,25 @@ describe('round-trip regression: image path preservation', () => {
       expect(xml).toMatch(/<w:del\b[^>]*><w:r><w:drawing>/);
       const result = await convertDocx(docx);
       expect(result.markdown).toContain(md);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    ['', '{==![](image.png){width=100 height=100}==}{>>c<<}'],
+    [' and text', 'a {==![](image.png){width=100 height=100} b==}{>>c<<}'],
+    [' in a table', '| a |\n| --- |\n| {==![](image.png){width=100 height=100}==}{>>c<<} |'],
+  ])('keeps a comment over an image%s', async (_name, md) => {
+    // A comment over only an image lost its range, and one over more took ID syntax
+    const tmpDir = join(require('os').tmpdir(), 'mms-test-img-comment-' + Date.now());
+    const { mkdirSync, writeFileSync, rmSync } = require('fs');
+    mkdirSync(tmpDir, { recursive: true });
+    writeFileSync(join(tmpDir, 'image.png'), TINY_PNG);
+    try {
+      const { docx } = await convertMdToDocx(md, { sourceDir: tmpDir });
+      expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '').replace(/>>[^<]*<</g, '>>c<<'))
+        .toBe(md + '\n');
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
