@@ -5112,3 +5112,38 @@ describe('A horizontal rule at the start', () => {
     expect(custom).not.toContain('MANUSCRIPT_FRONTMATTER_BLANK_LINES');
   });
 });
+
+describe('Characters XML can\'t hold', () => {
+  it('removes them, which made a part Word can\'t read', async () => {
+    const { docx, warnings } = await convertMdToDocx('---\ntitle: t\u0007\n---\n\na\u0002b {==c==}{>>d\u000B<<} \uFFFF');
+    const zip = await (await import('jszip')).default.loadAsync(docx);
+    for (const path of Object.keys(zip.files).filter(path => /\.(?:xml|rels)$/.test(path))) {
+      expect(await zip.file(path)!.async('string')).not.toMatch(/[^\t\n\r -퟿-�\u{10000}-\u{10FFFF}]/u);
+    }
+    const xml = await zip.file('word/document.xml')!.async('string');
+    expect(xml).toContain('>ab <');
+    expect(warnings).toContain('Removed 4 characters a Word document can\'t hold, such as control characters');
+  });
+
+  it('keeps a space it leaves at the edge of a run\'s text', async () => {
+    // Written without xml:space="preserve", which a space at the edge needs
+    // and the character had kept from it, Word dropped the space
+    const { docx } = await convertMdToDocx('a \u0007**b** \u0002c');
+    const xml = await (await import('jszip')).default.loadAsync(docx).then(zip => zip.file('word/document.xml')!.async('string'));
+    expect(xml).toContain('<w:t xml:space="preserve">a </w:t>');
+    expect(xml).toContain('<w:t xml:space="preserve"> c</w:t>');
+  });
+
+  it('keeps a template\'s part in UTF-16 as it is', async () => {
+    // Read as UTF-8, its bytes of 0 went, and it was neither
+    const JSZip = (await import('jszip')).default;
+    const template = await JSZip.loadAsync((await convertMdToDocx('a')).docx);
+    const theme = await template.file('word/theme/theme1.xml')!.async('string');
+    const utf16 = new Uint8Array(2 + theme.length * 2);
+    utf16.set([0xFF, 0xFE]);
+    for (let k = 0; k < theme.length; k++) utf16.set([theme.charCodeAt(k) & 0xFF, theme.charCodeAt(k) >> 8], 2 + k * 2);
+    template.file('word/theme/theme1.xml', utf16);
+    const { docx } = await convertMdToDocx('b', { templateDocx: await template.generateAsync({ type: 'uint8array' }) });
+    expect(await (await JSZip.loadAsync(docx)).file('word/theme/theme1.xml')!.async('uint8array')).toEqual(utf16);
+  });
+});

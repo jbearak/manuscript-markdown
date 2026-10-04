@@ -3367,6 +3367,44 @@ interface TemplateParts {
   templateSectPr?: string; // trailing <w:sectPr> from template document.xml
 }
 
+/** A character XML 1.0 can't hold: a control character other than a tab
+ *  or line end, or U+FFFE or U+FFFF. Half a surrogate pair is one too, but
+ *  JSZip writes it as U+FFFD before the pass reads the part. */
+const NOT_XML_CHARACTER = /[^\t\n\r -\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}]/gu;
+
+/** A run's text, deleted text or field code, or an equation's text */
+const TEXT_ELEMENT = /<((?:w|m):(?:t|delText|instrText|delInstrText))(\s[^>]*)?>([^<]*)<\/\1>/g;
+
+/** Remove the characters XML can't hold from the package's XML, as the
+ *  Markdown's text, URLs or comments can have, which made a part Word
+ *  can't read, and say how many */
+async function removeCharactersXmlCantHold(zip: import('jszip'), warnings: string[]): Promise<void> {
+  let removed = 0;
+  for (const path of Object.keys(zip.files)) {
+    if (zip.files[path].dir || !/\.(?:xml|rels)$/.test(path)) continue;
+    const bytes = await zip.file(path)!.async('uint8array');
+    // A template's part in UTF-16, which goes as it came
+    if (bytes[0] === 0 || bytes[1] === 0 || bytes[0] === 0xFF && bytes[1] === 0xFE || bytes[0] === 0xFE && bytes[1] === 0xFF) continue;
+    const xml = new TextDecoder().decode(bytes);
+    if (xml.search(NOT_XML_CHARACTER) < 0) continue;
+    const strip = (text: string) => text.replace(NOT_XML_CHARACTER, () => {
+      removed++;
+      return '';
+    });
+    zip.file(path, strip(xml.replace(TEXT_ELEMENT, (element, tag: string, attrs = '', text: string) => {
+      if (text.search(NOT_XML_CHARACTER) < 0) return element;
+      const rest = strip(text);
+      // A space the character kept from the edge of the text, which Word
+      // drops there without
+      const preserve = !attrs.includes('xml:space') && (rest.startsWith(' ') || rest.endsWith(' '));
+      return '<' + tag + attrs + (preserve ? ' xml:space="preserve"' : '') + '>' + rest + '</' + tag + '>';
+    })));
+  }
+  if (removed > 0) {
+    warnings.push('Removed ' + removed + ' character' + (removed === 1 ? '' : 's') + ' a Word document can\'t hold, such as control characters');
+  }
+}
+
 async function extractTemplateParts(templateDocx: Uint8Array): Promise<TemplateParts> {
   const JSZip = (await import('jszip')).default;
   const zip = await JSZip.loadAsync(templateDocx);
@@ -8098,6 +8136,8 @@ export async function convertMdToDocx(
       state.warnings.push(`Comment range markers {#${mdId}}...{/${mdId}} exist without corresponding body {#${mdId}>>...<<}`);
     }
   }
+
+  await removeCharactersXmlCantHold(zip, state.warnings);
 
   // Remove directory entries — Word marks files with explicit folder entries as modified on open.
   // Cannot use zip.remove() as it also removes children; instead delete from the files map directly.
