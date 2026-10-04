@@ -6051,6 +6051,31 @@ describe('Blockquote round-trip', () => {
   });
 });
 
+describe('A quote after a deeper one', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+
+  test.each([
+    ['a nested quote', '> > q\n>\n> b\n'],
+    ['a quote two deep', '> > > q\n> >\n> > b\n>\n> c\n'],
+    ['an alert', '> > [!NOTE]\n> > q\n>\n> b\n'],
+    ['a nested quote in a list item', '- a\n\n  > > q\n  >\n  > b\n'],
+  ])('keeps its text out of %s', async (_name, md) => {
+    // Import wrote no line between them, so the shallower quote's text
+    // continued the deeper one's paragraph
+    const { docx } = await convertMdToDocx(md);
+    expect(strip((await convertDocx(docx)).markdown)).toBe(md);
+  });
+
+  test.each([
+    ['a list item', '- a\n\n  > > q\n> b\n'],
+    ['a sublist', '- a\n  - b\n\n    > > q\n  > c\n'],
+  ])('writes no line between them where it\'s out of %s the deeper is in', async (_name, md) => {
+    // The indent ends the deeper quote
+    const { docx } = await convertMdToDocx(md);
+    expect(strip((await convertDocx(docx)).markdown)).toBe(md);
+  });
+});
+
 describe('parseCodeBlockStyle', () => {
   test('returns true for CodeBlock style', () => {
     const children = [{ 'w:pStyle': [], ':@': { '@_w:val': 'CodeBlock' } }];
