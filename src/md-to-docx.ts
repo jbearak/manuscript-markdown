@@ -1,6 +1,7 @@
 import MarkdownIt from 'markdown-it';
 import { XMLBuilder, XMLParser } from 'fast-xml-parser';
 import { imagePathsWithSpaces } from './image-paths';
+import { codeSpansOfSpaces } from './code-spans';
 import type Token from 'markdown-it/lib/token.mjs';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
 import { escapeXml, escapeXmlText, textElements, orderRPr, generateCitation, generateMathXml, generateTrackedMathXml, trackedEquationLatex, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, type CiteprocEngine } from './md-to-docx-citations';
@@ -856,6 +857,7 @@ function createMarkdownIt(): MarkdownIt {
   md.linkify.set({ fuzzyLink: false });
   md.linkify.add('//', null);
   md.use(imagePathsWithSpaces);
+  md.use(codeSpansOfSpaces);
 
   md.inline.ruler.before('emphasis', 'para_placeholder', paraPlaceholderRule);
   md.inline.ruler.before('emphasis', 'comment_range', commentRangeRule);

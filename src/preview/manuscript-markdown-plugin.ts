@@ -1,5 +1,6 @@
 import type MarkdownIt from 'markdown-it';
 import { imagePathsWithSpaces } from '../image-paths';
+import { codeSpansOfSpaces } from '../code-spans';
 import type StateCore from 'markdown-it/lib/rules_core/state_core.mjs';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
 import type StateBlock from 'markdown-it/lib/rules_block/state_block.mjs';
@@ -1702,6 +1703,7 @@ function getEmbedDocumentPath(md: ManuscriptMarkdownIt, state: StateCore): strin
  */
 export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
   md.use(imagePathsWithSpaces);
+  md.use(codeSpansOfSpaces);
   // Standalone markdown-it consumers (including unit tests) do not load VS
   // Code's math extension. Keep CriticMarkup-in-math output readable there;
   // VS Code's KaTeX renderer wins when it is already registered or loads later.

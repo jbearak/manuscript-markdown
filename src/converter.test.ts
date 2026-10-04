@@ -34,7 +34,7 @@ import {
   extractCalloutLabels,
 } from './converter';
 import { parseBibtex } from './bibtex-parser';
-import { convertMdToDocx } from './md-to-docx';
+import { convertMdToDocx, parseMd } from './md-to-docx';
 import { GRID_TABLE_PLACEHOLDER_PREFIX } from './grid-table-preprocess';
 
 const fixturesDir = join(__dirname, '..', 'test', 'fixtures');
@@ -5599,6 +5599,13 @@ describe('Inline code import (CodeChar detection)', () => {
   test('wrapWithFormatting does not pad all-space content', () => {
     const fmt = { ...DEFAULT_FORMATTING, code: true };
     expect(wrapWithFormatting('   ', fmt)).toBe('`   `');
+  });
+
+  test.each([' ', '  ', '   ', '     ', ' \t ', ' \u00a0 '])('wrapWithFormatting writes code of %j as code that reads back as it', (text) => {
+    // Code of spaces alone reads as it is, as CommonMark has it; ' \t '
+    // isn't, and takes padding against losing a space from each end
+    const written = wrapWithFormatting(text, { ...DEFAULT_FORMATTING, code: true });
+    expect(parseMd('a ' + written + ' b')[0].runs.find(run => run.code)?.text).toBe(text);
   });
 
   test('wrapWithFormatting strips bold when code is true', () => {
