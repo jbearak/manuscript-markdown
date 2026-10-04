@@ -5753,6 +5753,17 @@ describe('Track changes (CriticMarkup)', () => {
       expect(result.markdown.trim()).toBe('{++[link](https://example.com)++}');
     });
 
+    test.each([
+      'P {--A [a](https://e.com/ab) B--} Q.',
+      'P {~~[a](https://e.com/ab)~>z~~} Q.',
+      'P {=={--[a](https://e.com/ab)--}==}{>>c<<} Q.',
+      'P[^1] Q.\n\n[^1]: N {--[a](https://e.com/n)--} x.',
+    ])('keeps a deleted link in %j a link', async (md) => {
+      // Export wrote its runs without their hyperlink
+      const result = await convertDocx((await convertMdToDocx(md)).docx);
+      expect(result.markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(md + '\n');
+    });
+
     test('revision in footnote body', async () => {
       const docXml = wrapDocumentXml(
         '<w:p><w:r><w:t>Text</w:t></w:r>'

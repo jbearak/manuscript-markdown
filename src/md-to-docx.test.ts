@@ -2576,6 +2576,17 @@ describe('parseMd multi-paragraph CriticMarkup', () => {
 describe('Nested critic runs in deletions and formatting propagation', () => {
   const createState = () => ({ ...makeState(), rIdOffset: 3 });
 
+  it('writes a deleted link\'s runs in a deletion of their own in its hyperlink', () => {
+    // They went without the hyperlink, which a w:del can't hold
+    const state = createState();
+    const result = generateParagraph(parseMd('P {--A [a](https://e.com/ab) B--} Q.')[0], state, { authorName: 'R' });
+    const rId = state.relationships.get('https://e.com/ab');
+    expect(rId).toBeDefined();
+    expect(result).toContain('<w:del w:id="0" w:author="R"><w:r><w:delText xml:space="preserve">A </w:delText></w:r></w:del>'
+      + '<w:hyperlink r:id="' + rId + '"><w:del w:id="1" w:author="R"><w:r><w:delText>a</w:delText></w:r></w:del></w:hyperlink>'
+      + '<w:del w:id="2" w:author="R"><w:r><w:delText xml:space="preserve"> B</w:delText></w:r></w:del>');
+  });
+
   it('renders nested addition inside deletion as delText', () => {
     const token: MdToken = {
       type: 'paragraph',

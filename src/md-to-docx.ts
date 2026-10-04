@@ -5593,7 +5593,8 @@ function generateDeletedCriticContent(
     }
     if (run.type !== 'text' || !run.text) continue;
     const rPr = generateRPr(run, extraRPr);
-    xml += '<w:r>' + (rPr ? rPr : '') + delText(run.text) + '</w:r>';
+    const runXml = '<w:r>' + (rPr ? rPr : '') + delText(run.text) + '</w:r>';
+    xml += run.href ? '<' + DELETED_LINK + ' rId="' + hyperlinkRelationshipId(run.href, state) + '">' + runXml + '</' + DELETED_LINK + '>' : runXml;
   }
   return xml;
 }
@@ -5646,6 +5647,49 @@ function noteReferenceXml(label: string, state: DocxGenState, revision?: 'additi
     + '<w:r>' + rPr + '<w:fldChar w:fldCharType="end"/></w:r>';
 }
 
+/** The ID of the relationship to `href`, in the notes' part in a note */
+function hyperlinkRelationshipId(href: string, state: DocxGenState): string {
+  if (state.inNoteBody) {
+    let rId = state.noteRelationships.get(href);
+    if (!rId) {
+      rId = 'rId' + state.noteNextRId;
+      state.noteRelationships.set(href, rId);
+      state.noteNextRId++;
+    }
+    return rId;
+  }
+  let rId = state.relationships.get(href);
+  if (!rId) {
+    rId = 'rId' + (state.nextRId + state.rIdOffset);
+    state.relationships.set(href, rId);
+    state.nextRId++;
+  }
+  return rId;
+}
+
+/** A deleted link's runs in generateDeletedCriticContent's XML, in an
+ *  element of this name for deletionXml to take out, which no text can
+ *  look like, as its escaped XML has no < */
+const DELETED_LINK = 'manuscriptDeletedLink';
+const DELETED_LINK_RE = new RegExp('<' + DELETED_LINK + ' rId="([^"]*)">([\\s\\S]*?)</' + DELETED_LINK + '>', 'g');
+
+/** Deleted content, from generateDeletedCriticContent, in w:del. A link's
+ *  runs go in a w:del of their own inside its w:hyperlink, as Word writes
+ *  a deleted link, since a w:del can't hold a w:hyperlink. */
+function deletionXml(deletedXml: string, author: string, dateAttr: string, state: DocxGenState): string {
+  const del = (content: string) => '<w:del w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + content + '</w:del>';
+  if (!deletedXml.includes('<' + DELETED_LINK + ' ')) return del(deletedXml);
+  let xml = '';
+  let last = 0;
+  for (const link of deletedXml.matchAll(DELETED_LINK_RE)) {
+    if (link.index > last) xml += del(deletedXml.slice(last, link.index));
+    xml += '<w:hyperlink r:id="' + link[1] + '">' + del(link[2]) + '</w:hyperlink>';
+    last = link.index + link[0].length;
+  }
+  if (last < deletedXml.length) xml += del(deletedXml.slice(last));
+  return xml;
+}
+
 export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine): string {
   let xml = '';
   for (let ri = 0; ri < inputRuns.length; ri++) {
@@ -5654,23 +5698,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
     if (run.type === 'text') {
       const rPr = generateRPr(run, state.tableRunRPrExtra || undefined);
       if (run.href) {
-        let rId: string | undefined;
-        if (state.inNoteBody) {
-          rId = state.noteRelationships.get(run.href);
-          if (!rId) {
-            rId = 'rId' + state.noteNextRId;
-            state.noteRelationships.set(run.href, rId);
-            state.noteNextRId++;
-          }
-        } else {
-          rId = state.relationships.get(run.href);
-          if (!rId) {
-            rId = 'rId' + (state.nextRId + state.rIdOffset);
-            state.relationships.set(run.href, rId);
-            state.nextRId++;
-          }
-        }
-        xml += '<w:hyperlink r:id="' + rId + '">' + generateRun(run.text, rPr) + '</w:hyperlink>';
+        xml += '<w:hyperlink r:id="' + hyperlinkRelationshipId(run.href, state) + '">' + generateRun(run.text, rPr) + '</w:hyperlink>';
       } else {
         xml += generateRun(run.text, rPr);
       }
@@ -5691,14 +5719,14 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       const date = normalizeToUtcIso(run.date || '', state.timezone);
       const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
       const deletedXml = generateDeletedCriticContent(run.innerRuns, run.text, run, {}, state.tableRunRPrExtra || undefined, state.warnings, state, options);
-      xml += '<w:del w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + deletedXml + '</w:del>';
+      xml += deletionXml(deletedXml, author, dateAttr, state);
     } else if (run.type === 'critic_sub') {
       const author = run.author || options?.authorName || 'Unknown';
       const date = normalizeToUtcIso(run.date || '', state.timezone);
       const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
       const deletedXml = generateDeletedCriticContent(run.oldRuns, run.text, run, {}, state.tableRunRPrExtra || undefined, state.warnings, state, options);
       const insertedXml = insertedContent(state, () => generateInlineCriticContent(run.newRuns, run.newText || '', run, state, options, bibEntries, citeprocEngine));
-      xml += '<w:del w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + deletedXml + '</w:del>';
+      xml += deletionXml(deletedXml, author, dateAttr, state);
       xml += '<w:ins w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + insertedXml + '</w:ins>';
     } else if (run.type === 'critic_highlight') {
       if (nextRun?.type === 'critic_comment') {
