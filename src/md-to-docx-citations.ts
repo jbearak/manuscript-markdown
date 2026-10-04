@@ -95,6 +95,15 @@ export function escapeXmlText(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+/** Text as `w:t` (or `w:delText`) elements. A tab becomes the `<w:tab/>`
+ *  element Word writes for it, since Word shows a tab inside `w:t` as a space. */
+export function textElements(text: string, tag: 'w:t' | 'w:delText' = 'w:t'): string {
+  if (text.includes('\t')) return text.split('\t').map(part => part ? textElements(part, tag) : '').join('<w:tab/>');
+  const escaped = escapeXmlText(text);
+  const preserve = escaped.length > 0 && (escaped[0] === ' ' || escaped[escaped.length - 1] === ' ');
+  return '<' + tag + (preserve ? ' xml:space="preserve"' : '') + '>' + escaped + '</' + tag + '>';
+}
+
 function stripHtmlTags(html: string): string {
   return decodeHtmlEntities(html.replace(/<[^>]+>/g, ''));
 }
@@ -203,10 +212,7 @@ export function htmlToOoxmlRuns(html: string, extraRPr?: string): string {
     if (extraRPr) rPr.push(extraRPr);
 
     const rPrXml = rPr.length > 0 ? '<w:rPr>' + orderRPr(rPr.join('')) + '</w:rPr>' : '';
-    const escaped = escapeXmlText(decodeHtmlEntities(run.text));
-    const needsPreserve = escaped.length > 0 && (escaped[0] === ' ' || escaped[escaped.length - 1] === ' ');
-    const wt = needsPreserve ? '<w:t xml:space="preserve">' + escaped + '</w:t>' : '<w:t>' + escaped + '</w:t>';
-    return '<w:r>' + rPrXml + wt + '</w:r>';
+    return '<w:r>' + rPrXml + textElements(decodeHtmlEntities(run.text)) + '</w:r>';
   }).join('');
 }
 
@@ -524,7 +530,7 @@ export function generateCitation(
 ): CitationResult {
   const rPrOpen = extraRPr ? '<w:rPr>' + extraRPr + '</w:rPr>' : '';
   if (!run.keys || run.keys.length === 0) {
-    return { xml: '<w:r>' + rPrOpen + '<w:t>[' + escapeXml(run.text) + ']</w:t></w:r>' };
+    return { xml: '<w:r>' + rPrOpen + textElements('[' + run.text + ']') + '</w:r>' };
   }
 
   // Classify items into resolved (have bib data) vs missing. Track positions
@@ -562,7 +568,7 @@ export function generateCitation(
   // Pure missing — emit @citekey references as plain text, preserving bracket format
   if (resolvedKeys.length === 0) {
     return {
-      xml: '<w:r>' + rPrOpen + '<w:t>' + escapeXml(missingText) + '</w:t></w:r>',
+      xml: '<w:r>' + rPrOpen + textElements(missingText) + '</w:r>',
       warning: warnings.length > 0 ? warnings.join('; ') : undefined,
       missingKeys
     };
@@ -571,7 +577,7 @@ export function generateCitation(
   // Mixed (some resolved, some missing) — resolved get field code, missing get plain text
   const xml = buildCitationFieldCode(resolvedKeys, entries, run.locators, citeprocEngine, undefined, usedCitationIds, itemIdMap, run.suppressAuthorKeys, resolvedPrefixes, extraRPr) +
     '<w:r>' + rPrOpen + '<w:t xml:space="preserve"> </w:t></w:r>' +
-    '<w:r>' + rPrOpen + '<w:t>' + escapeXml(missingText) + '</w:t></w:r>';
+    '<w:r>' + rPrOpen + textElements(missingText) + '</w:r>';
 
   return {
     xml,

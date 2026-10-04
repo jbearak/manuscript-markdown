@@ -4527,6 +4527,60 @@ describe('HTML table cells', () => {
   });
 });
 
+describe('Tabs', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+
+  test.each([
+    ['a paragraph', 'a\tb', 'word/document.xml'],
+    ['a paragraph\'s start', '&#9;t', 'word/document.xml'],
+    ['a line\'s start after a line break', 'a\\\n&#9;t', 'word/document.xml'],
+    ['a note', 'T.[^1]\n\n[^1]: a\tb', 'word/footnotes.xml'],
+    ['a comment', '{==x==}{>>@A (2024-01-15 10:30) | a\tb<<}', 'word/comments.xml'],
+    ['a comment\'s start', '{==x==}{>>@A (2024-01-15 10:30) | \tb<<}', 'word/comments.xml'],
+    ['a comment\'s second paragraph', '{==x==}{>>@A (2024-01-15 10:30) | a\n\n\tb<<}', 'word/comments.xml'],
+    ['a deletion', '{--a\tb--}', 'word/document.xml'],
+    ['an HTML comment', 'A <!-- a\tb --> c.', 'word/document.xml'],
+    ['a table cell', '| a\tb |\n| --- |', 'word/document.xml'],
+    ['a code block', '```\na\tb\n```', 'word/document.xml'],
+  ])('keeps a tab in %s', async (_name, md, part) => {
+    // Export wrote a tab in the text, where Word writes a w:tab, which import
+    // dropped
+    const { docx } = await convertMdToDocx(md);
+    const xml = await (await JSZip.loadAsync(docx)).file(part)!.async('string');
+    expect(xml).toContain('<w:tab/>');
+    expect(xml).not.toMatch(/<w:(?:t|delText)\b[^>]*>[^<]*\t/);
+    expect(strip((await convertDocx(docx)).markdown)).toBe(md);
+  });
+
+  test('keeps a tab in a citation Markdown writes as text', async () => {
+    const { docx } = await convertMdToDocx('T [@missing, p.\t2].');
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml).toContain('<w:tab/>');
+    expect(xml).not.toMatch(/<w:t\b[^>]*>[^<]*\t/);
+    expect(strip((await convertDocx(docx)).markdown)).toStartWith('T [@missing, p.\t2].');
+  });
+
+  test('leaves a deleted tab out of a comment', async () => {
+    // A deleted run's tab became text of the comment, though its other text
+    // didn't
+    const zip = await JSZip.loadAsync((await convertMdToDocx('{==x==}{>>@A (2024-01-15 10:30) | kept<<}')).docx);
+    const xml = await zip.file('word/comments.xml')!.async('string');
+    const deleted = xml.replace(/(<w:t>kept<\/w:t><\/w:r>)/, '$1<w:del w:id="90" w:author="A"><w:r><w:tab/><w:delText>gone</w:delText></w:r></w:del>');
+    expect(deleted).not.toBe(xml);
+    zip.file('word/comments.xml', deleted);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('{==x==}{>>@A (2024-01-15 10:30) | kept<<}');
+  });
+
+  test('leaves a paragraph\'s tab stops out of its text', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('a\tb')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const stops = xml.replace(/(<w:p [^>]*>)/, '$1<w:pPr><w:tabs><w:tab w:val="left" w:pos="720"/></w:tabs></w:pPr>');
+    expect(stops).not.toBe(xml);
+    zip.file('word/document.xml', stops);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('a\tb');
+  });
+});
+
 describe('Whitespace at the edges of a paragraph', () => {
   const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
   /** The Markdown of md's export, with the text XX in part replaced by text */

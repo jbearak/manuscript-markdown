@@ -871,6 +871,14 @@ function findAllDeep(nodes: XmlNode[], tagName: string, depth = 0, maxDepth = 50
   return results;
 }
 
+/** A run's children with each w:tab as the text of a tab. A w:tab outside a
+ *  run, in w:tabs, is a tab stop, not text. */
+function withTabsAsText(runChildren: XmlNode[]): XmlNode[] {
+  return runChildren.some((c) => c['w:tab'] !== undefined)
+    ? runChildren.map((c) => c['w:tab'] !== undefined ? { 'w:t': [{ '#text': '\t' }] } : c)
+    : runChildren;
+}
+
 function getAttr(node: XmlNode | undefined, attr: string): string {
   const value = node?.[':@']?.[`@_w:${attr}`] ?? node?.[':@']?.[`@_${attr}`];
   return value === undefined ? '' : String(value);
@@ -1109,6 +1117,8 @@ function commentParagraphText(nodes: XmlNode[]): string {
     for (const key of Object.keys(node)) {
       if (key === 'w:t') {
         text += nodeText(asXmlNodes(node[key]));
+      } else if (key === 'w:tab') {
+        text += '\t';
       } else if (key === 'w:cr' || (key === 'w:br' && [undefined, '', 'textWrapping'].includes(node[':@']?.['@_w:type']))) {
         text += '\n';
       } else if (!['w:del', 'w:moveFrom', 'w:pPr', 'w:rPr', 'w:p'].includes(key) && key !== ':@' && Array.isArray(node[key])) {
@@ -2318,7 +2328,7 @@ function parseNoteBody(
           }
         } else if (key === 'w:r') {
           let runFormatting = currentFormatting;
-          const runChildren = asXmlNodes(node[key]);
+          const runChildren = withTabsAsText(asXmlNodes(node[key]));
           let rPrChildren: XmlNode[] | undefined;
           for (const child of runChildren) {
             if (child['w:rPr']) {
@@ -2995,7 +3005,7 @@ export async function extractDocumentContent(
         } else if (key === 'w:r') {
           // Process run - extract formatting from w:rPr
           let runFormatting = currentFormatting;
-          const runChildren = asXmlNodes(node[key]);
+          const runChildren = withTabsAsText(asXmlNodes(node[key]));
           let rPrChildren: XmlNode[] | undefined;
           for (const child of runChildren) {
             if (child['w:rPr']) {
