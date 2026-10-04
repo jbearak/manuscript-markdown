@@ -158,6 +158,7 @@ export interface MdRun {
   subscript?: boolean;
   code?: boolean;           // inline code
   href?: string;            // hyperlink URL
+  escapedBracket?: true;    // text that starts with \[, whose [ is text and not a task's box or an alert's marker
   // CriticMarkup specific
   newText?: string;         // for substitutions: {~~old~>new~~}
   innerRuns?: MdRun[];      // parsed inner formatting for critic_add/del/highlight
@@ -509,8 +510,11 @@ function findClosingHighlightMarker(src: string, from: number, max: number): num
   let pos = from;
   while (pos < max - 1) {
     if (src[pos] === '=' && src[pos + 1] === '=') {
-      // Opening {== increases depth
-      if (pos > 0 && src[pos - 1] === '{') {
+      // Opening {== increases depth, unless its { is escaped, as import
+      // writes Word's { before a highlight's closing ==
+      let slashes = 0;
+      while (src[pos - 2 - slashes] === '\\') slashes++;
+      if (pos > 0 && src[pos - 1] === '{' && slashes % 2 === 0) {
         depth++;
         pos += 2;
         continue;
@@ -680,6 +684,12 @@ let citationTextMd: MarkdownIt | undefined;
 export function citationEndInText(text: string, start: number): number {
   citationTextMd ??= createMarkdownIt();
   return citationEnd({ src: text, md: citationTextMd, env: {} }, start);
+}
+
+/** The URLs and email addresses linkify finds in text, as export reads it */
+export function linkifyMatches(text: string): Array<{ schema: string; index: number; lastIndex: number }> {
+  citationTextMd ??= createMarkdownIt();
+  return citationTextMd.linkify.match(text) ?? [];
 }
 
 function citationRule(state: StateInline, silent: boolean): boolean {
@@ -868,6 +878,23 @@ function createMarkdownIt(): MarkdownIt {
   md.inline.ruler.before('emphasis', 'math', mathRule);
   // A note body parsed on its own resolves reference links with the
   // document's definitions too, after its own (see parseMd)
+  // A text token that starts with an escaped [, or one written as an
+  // entity, as &#91;, as import writes Word's
+  // text that reads as a task's box or an alert's marker, keeps that in its
+  // meta, which text_join leaves on the last token of the run it joins
+  md.core.ruler.before('text_join', 'escaped_bracket', state => {
+    for (const block of state.tokens) {
+      const children = block.type === 'inline' ? block.children ?? [] : [];
+      const isText = (token: Token | undefined) => token?.type === 'text' || token?.type === 'text_special';
+      for (let i = 0; i < children.length; i++) {
+        if (children[i].type !== 'text_special' || children[i].content !== '[' || isText(children[i - 1])) continue;
+        let last = i;
+        while (isText(children[last + 1])) last++;
+        children[last].meta = { ...children[last].meta, escapedBracket: true };
+        i = last;
+      }
+    }
+  });
   md.core.ruler.after('block', 'document_link_definitions', state => {
     const definitions: Record<string, unknown> | undefined = state.env.documentLinkDefinitions;
     if (!definitions) return;
@@ -2336,11 +2363,27 @@ function deLazifyBlockquotes(markdown: string): string {
 }
 
 
+/**
+ * Whether runs[r] can hold a task's box or an alert's marker, as GFM reads
+ * one: text without code, formatting or a link, not after an escaped [, that
+ * starts the paragraph, after any empty text, or with `afterBreak` a line.
+ */
+function holdsMarker(runs: MdRun[], r: number, afterBreak = false): boolean {
+  const run = runs[r];
+  if (run?.type !== 'text' || run.escapedBracket || run.code || run.href || run.bold || run.italic || run.underline
+      || run.strikethrough || run.highlight || run.superscript || run.subscript) return false;
+  for (let k = r - 1; k >= 0; k--) {
+    if (afterBreak && (runs[k].type === 'softbreak' || runs[k].type === 'hardbreak')) return true;
+    if (runs[k].type !== 'text' || runs[k].text !== '') return false;
+  }
+  return true;
+}
+
 function stripLeadingAlertMarker(runs: MdRun[]): { alertType?: GfmAlertType; runs: MdRun[] } {
   const firstTextIdx = runs.findIndex(run => run.type === 'text' && run.text.length > 0);
   if (firstTextIdx === -1) return { runs };
   const firstText = runs[firstTextIdx];
-  const parsed = parseGfmAlertMarker(firstText.text);
+  const parsed = holdsMarker(runs, firstTextIdx) ? parseGfmAlertMarker(firstText.text) : undefined;
   if (!parsed) return { runs };
   const nextRuns = [...runs];
   if (parsed.rest.length > 0) {
@@ -2371,7 +2414,7 @@ function annotateBlockquoteAlert(tokens: MdToken[], level: number): MdToken[] {
     }
     const markerIndices: number[] = [];
     for (let r = 0; r < token.runs.length; r++) {
-      if (token.runs[r].type === 'text' && parseGfmAlertMarker(token.runs[r].text)) {
+      if (holdsMarker(token.runs, r, true) && parseGfmAlertMarker(token.runs[r].text)) {
         markerIndices.push(r);
       }
     }
@@ -2838,7 +2881,8 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
             type: 'text',
             text: token.content,
             ...formatStack,
-            href: currentHref
+            href: currentHref,
+            ...(token.meta?.escapedBracket ? { escapedBracket: true as const } : {}),
           });
         }
         break;
@@ -3242,7 +3286,8 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
         }
       }
 
-      const taskInfo = extractTaskListItem(runs);
+      // As GFM, a box only at the start of the item's first block, a paragraph
+      const taskInfo = itemTokens[0]?.type === 'paragraph_open' || itemTokens[0]?.type === 'inline' ? extractTaskListItem(runs) : undefined;
       const sourceLineIndex = tokens[i].map?.[0];
       const authoredBulletMarker = !ordered && sourceLineIndex !== undefined
         ? extractBulletMarkerFromSourceLine(sourceLines?.[sourceLineIndex])
@@ -3281,7 +3326,7 @@ function extractTaskListItem(runs: MdRun[]): { checked: boolean; runs: MdRun[] }
   const firstTextIdx = runs.findIndex(run => run.type === 'text' && run.text.length > 0);
   if (firstTextIdx === -1) return undefined;
   const firstTextRun = runs[firstTextIdx];
-  const parsed = parseTaskListMarker(firstTextRun.text);
+  const parsed = holdsMarker(runs, firstTextIdx) ? parseTaskListMarker(firstTextRun.text) : undefined;
   if (!parsed) return undefined;
   const updatedRuns = [...runs];
   if (parsed.rest.length === 0) {

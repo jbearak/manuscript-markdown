@@ -671,6 +671,19 @@ describe('GFM behavior in preview plugin', () => {
     expect(output).toContain('<a href="https://example.com">https://example.com</a>');
   });
 
+  it.each([
+    ['- `[ ] a`', '<code>[ ] a</code>'], ['- **[ ] a**', '<strong>[ ] a</strong>'], ['- [[ ] a](https://e.com)', '>[ ] a</a>'],
+    ['> **[!NOTE]**', '<strong>[!NOTE]</strong>'], ['> a\n> **[!TIP]**', '<strong>[!TIP]</strong>'],
+    ['- first\n\n  [ ] second', '[ ] second'],
+  ])('reads %s as text, as GFM does', (md, html) => {
+    // A task's box or an alert's marker counts only in text that starts
+    // the item or line, outside code, formatting and links
+    const output = renderWithPlugin(md);
+    expect(output).toContain(html);
+    expect(output).not.toContain('task-list-item');
+    expect(output).not.toContain('markdown-alert');
+  });
+
   it('renders task list items with disabled checkbox inputs', () => {
     const output = renderWithPlugin('- [x] done\n- [ ] todo');
     expect(output).toContain('class="task-list-item"');

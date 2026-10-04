@@ -6,15 +6,17 @@ import { FRONTMATTER_OPENING_RE, Frontmatter, NotesMode, parseFrontmatter, seria
 import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType } from './gfm';
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
 import { keepParagraphEdgeWhitespace } from './html-entities';
+import htmlBlockNames from 'markdown-it/lib/common/html_blocks.mjs';
 import { HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import { computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
 import { findDollarMathAt } from './math-delimiters';
 import type { TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { citationEndInText, customStyleId } from './md-to-docx';
+import { citationEndInText, customStyleId, linkifyMatches } from './md-to-docx';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { publicStyleNameForZoteroId, zoteroStyleIdForName } from './csl-loader';
 import { extractZoteroKey } from './zotero-link';
+import { DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
 
 // --- Implementation notes ---
 // Table parsing:
@@ -221,17 +223,39 @@ const MARKDOWN_HTML_SENSITIVE_TAGS = new Set([
   'caption',
   'colgroup',
   'col',
+  'img',
 ]);
 
+const HTML_LIKE_TAG_RE = /<\/?([A-Za-z][A-Za-z0-9-]*)(?:\s[^<>]*?)?>/;
+
 function escapeSensitiveHtmlLikeTags(text: string): string {
-  return text.replace(/<\/?([A-Za-z][A-Za-z0-9-]*)(?:\s[^<>]*?)?>/g, (fullMatch, tagName: string) => {
+  return text.replace(new RegExp(HTML_LIKE_TAG_RE.source, 'g'), (fullMatch, tagName: string) => {
     if (!MARKDOWN_HTML_SENSITIVE_TAGS.has(tagName.toLowerCase())) return fullMatch;
     return fullMatch.replace(/</g, '&lt;').replace(/>/g, '&gt;');
   });
 }
 
+// The HTML blocks markdown-it reads that can start inside a paragraph: all
+// but a line of one tag (see its html_block rule)
+const HTML_BLOCK_IN_PARAGRAPH = [
+  /^<(script|pre|style|textarea)(?=(\s|>|$))/i, /^<!--/, /^<\?/, /^<![A-Z]/, /^<!\[CDATA\[/,
+  new RegExp('^</?(' + htmlBlockNames.join('|') + ')(?=(\\s|/?>|$))', 'i'),
+];
+
+/** Whether text is an HTML block that ends in it, which Markdown reads as it
+ *  is: one of a block's tag, or a script, pre, style or textarea with its
+ *  closing tag */
+function isHtmlBlock(text: string): boolean {
+  const pre = HTML_BLOCK_IN_PARAGRAPH[0].test(text);
+  return pre ? /<\/(script|pre|style|textarea)>/i.test(text) : HTML_BLOCK_IN_PARAGRAPH[5].test(text);
+}
+
 // An HTML tag, comment or the like, as markdown-it reads one, from an offset
 const HTML_TAG_AT = new RegExp(HTML_TAG_RE.source.replace(/^\^/, ''), 'y');
+/** An HTML comment's or declaration's start, or an autolink, a URL's as
+ *  markdown-it reads one, of any length, with no space, control character,
+ *  < or > after its scheme, or an email address's, at lastIndex */
+const COMMENT_OR_AUTOLINK_AT = /<(?:[!?]|[A-Za-z][A-Za-z\d+.-]{1,31}:[!-;=?-\uFFFF]*>|[^\s<>@]+@[^\s<>]+>)/y;
 
 /**
  * The offsets of the lines after a paragraph's line breaks, a backslash at a
@@ -344,12 +368,384 @@ function isMarkdownBlockEdge(item: ContentItem | undefined): boolean {
   return item === undefined || isStructuralBoundaryItem(item) || (item.type === 'math' && !!item.display);
 }
 
-/** Escape markdown-sensitive characters that would otherwise be interpreted as formatting. */
-function escapeMarkdownChars(text: string): string {
-  // Escape * which always triggers bold/italic in CommonMark.
-  // Do NOT escape _ (only triggers emphasis in flanking contexts — blanket escaping
-  // changes visible text) or ~ (rare, only triggers strikethrough with ~~).
-  return text.replace(/\*/g, '\\*');
+const ASCII_PUNCTUATION_RE = /[!-\/:-@[-`{-~]/;
+const WORD_CHARACTER_RE = /[\p{L}\p{N}]/u;
+
+/** Whether the run of = at `start`, `length` long, could open or close a
+ *  highlight, whose == pairs with the next, wherever it is: in the text or
+ *  the runs `after` it */
+function equalsOpensHighlight(text: string, start: number, length: number, after?: RunsAfter): boolean {
+  if (length < 2) return false;
+  // Four or more pair with each other, as an empty highlight
+  if (length >= 4 || start === 0 || start + length === text.length) return true;
+  const first = text.indexOf('==');
+  return first + 2 <= start || text.lastIndexOf('==') >= start + length || !!after?.hasEquals;
+}
+
+/** Where a line of Word's text, from `start` to `end`, starts a block in
+ *  Markdown, the character a backslash goes before */
+function blockSyntaxAt(text: string, start: number, end: number): number | undefined {
+  const line = text.slice(start, end);
+  const indent = /^ {0,3}/.exec(line)![0].length;
+  const rest = line.slice(indent);
+  const at = start + indent;
+  // A heading, list item or quote
+  if (/^(?:#{1,6}|[-+*])(?:[ \t]|$)/.test(rest) || rest[0] === '>') return at;
+  const ordered = /^(\d{1,9})[.)](?:[ \t]|$)/.exec(rest);
+  if (ordered) return at + ordered[1].length;
+  // A thematic break, or an underline that makes the line before a heading
+  if (/^([-*_])(?:[ \t]*\1){2,}[ \t]*$/.test(rest) || /^(?:=+|-+)[ \t]*$/.test(rest)) return at;
+  // An HTML block, unless escapeSensitiveHtmlLikeTags writes the tag as
+  // text. A line of one tag only starts one at a paragraph's start, where
+  // the paragraph is that line, as export writes it, and reads as it is.
+  const tag = HTML_LIKE_TAG_RE.exec(rest);
+  if (HTML_BLOCK_IN_PARAGRAPH.some(opener => opener.test(rest)) && !(tag?.index === 0 && MARKDOWN_HTML_SENSITIVE_TAGS.has(tag[1].toLowerCase()))) return at;
+  // A table's delimiter row, under a line that would be its header
+  if (rest.includes('|') && /^\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/.test(rest)) return at;
+  // A task list item's box, an alert's marker, or a link's definition
+  if (/^\[(?:[ xX]\]|!)/.test(rest) || /^\[[^\]]+\]:/.test(rest)) return at;
+  // A LaTeX environment, which export reads as display math
+  const environment = /^\\begin\{([a-zA-Z*]+)\}/.exec(rest);
+  if (environment && DISPLAY_MATH_ENVIRONMENTS.has(environment[1])) return at;
+  return undefined;
+}
+
+/** A text's ]s and runs of dollar signs, where they are, and the run of
+ *  each length class, one sign or more, at or after each run */
+interface TextIndex {
+  text: string;
+  closers: number[];
+  dollarRuns: Array<{ start: number; length: number }>;
+  dollarStarts: number[];
+  nextSingle: number[];
+  nextDouble: number[];
+  /** Where each run of two or more = starts */
+  equals: number[];
+}
+
+/** `text`'s index, where a run of dollar signs ends at each of `bounds`,
+ *  the starts of runs, between which formatting's or a span's delimiters
+ *  can come */
+function indexText(text: string, bounds: ReadonlySet<number> = new Set()): TextIndex {
+  const closers: number[] = [];
+  const dollarRuns: Array<{ start: number; length: number }> = [];
+  const equals: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === ']') closers.push(i);
+    else if (text[i] === '=' && text[i + 1] === '=' && text[i - 1] !== '=') equals.push(i);
+    else if (text[i] === '$') {
+      let length = 1;
+      while (text[i + length] === '$' && !bounds.has(i + length)) length++;
+      dollarRuns.push({ start: i, length });
+      i += length - 1;
+    }
+  }
+  const nextSingle: number[] = new Array(dollarRuns.length + 1).fill(-1);
+  const nextDouble: number[] = new Array(dollarRuns.length + 1).fill(-1);
+  for (let k = dollarRuns.length - 1; k >= 0; k--) {
+    nextSingle[k] = dollarRuns[k].length === 1 ? k : nextSingle[k + 1];
+    nextDouble[k] = dollarRuns[k].length > 1 ? k : nextDouble[k + 1];
+  }
+  return { text, closers, dollarRuns, dollarStarts: dollarRuns.map(run => run.start), nextSingle, nextDouble, equals };
+}
+
+/** The first of `sorted` at or after `value` */
+function lowerBound(sorted: number[], value: number): number {
+  let low = 0;
+  let high = sorted.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (sorted[middle] < value) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+/** The text of the runs after one in its paragraph, as escapeMarkdownChars
+ *  reads it, from an index of the paragraph's text, which each of its runs
+ *  reads from where it ends */
+export class RunsAfter {
+  /** `prefix` comes before the runs, as a link's text has its ](url), and
+   *  `link` says the text is a link's */
+  constructor(private readonly index: TextIndex, private readonly from: number, private readonly prefix = '', readonly link = false) {}
+
+  /** The runs after as text alone, where it's all there is */
+  static of(text: string): RunsAfter {
+    return new RunsAfter(indexText(text), 0);
+  }
+
+  /** These after a link's ](url), for its text */
+  linkTo(href: string): RunsAfter {
+    return new RunsAfter(this.index, this.from, '](' + formatHrefForMarkdown(href) + ')' + this.prefix, true);
+  }
+
+  /** The first character, '' for none */
+  get first(): string {
+    return this.prefix[0] ?? this.index.text[this.from] ?? '';
+  }
+
+  /** Whether two = are next to each other, which can close a highlight */
+  get hasEquals(): boolean {
+    return this.prefix.includes('==') || lowerBound(this.index.equals, this.from) < this.index.equals.length;
+  }
+
+  /** The character after the nth ], from 0: '' at the end, and undefined
+   *  without an nth */
+  afterCloser(n: number): string | undefined {
+    for (let k = 0; k < this.prefix.length; k++) {
+      if (this.prefix[k] === ']' && n-- === 0) return this.prefix[k + 1] ?? this.index.text[this.from] ?? '';
+    }
+    const k = lowerBound(this.index.closers, this.from) + n;
+    return k < this.index.closers.length ? this.index.text[this.index.closers[k] + 1] ?? '' : undefined;
+  }
+
+  /** The dollar signs, with what is between them as \u0001, as far as any
+   *  can close math before them: the first single one, which closes $, and
+   *  after one at the start, which a $ before can join, the first two or
+   *  more, which close $$. Those between, which close neither, are left
+   *  out, and runs of more than three signs are three, which close the
+   *  same. */
+  dollars(): string {
+    const { dollarRuns, nextSingle, nextDouble } = this.index;
+    const k = lowerBound(this.index.dollarStarts, this.from);
+    const leading = !this.prefix && k < dollarRuns.length && dollarRuns[k].start === this.from;
+    const kept = new Set([leading ? k : -1, nextSingle[k], leading ? nextDouble[k + 1] : -1].filter(run => run >= 0));
+    // A $ in a link's URL, which Markdown has as it is, can close math too
+    let text = this.prefix.includes('$') ? this.prefix : this.prefix ? '\u0001' : '';
+    let end = this.from;
+    for (const run of [...kept].sort((a, b) => a - b)) {
+      if (dollarRuns[run].start > end) text += '\u0001';
+      text += '$'.repeat(Math.min(dollarRuns[run].length, 3));
+      end = dollarRuns[run].start + dollarRuns[run].length;
+    }
+    return end < this.index.text.length ? text + '\u0001' : text;
+  }
+}
+
+/**
+ * Word's text as Markdown that reads as that text: a backslash goes before
+ * each character Markdown would take for syntax, but only there, so most
+ * text reads as it is. A character that could pair with one in the runs
+ * around the text, as an opening [ whose ] isn't in it, is escaped too.
+ * The text starts a line where `lineStart` says so and after each line
+ * break (a backslash and a line's end, which stays as it is), where a block
+ * can start. Code is literal, and doesn't come here.
+ */
+function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter): string {
+  const escaped = new Set<number>();
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    const next = text[i + 1];
+    // A tracked change's closer, which would end one around the text (a
+    // comment's range with ==} goes in ID syntax)
+    if ((c === '+' || c === '-') && next === c && text[i + 2] === '}') escaped.add(i + 1);
+    if (c === '\\') {
+      if (next !== '\n' && (next === undefined || ASCII_PUNCTUATION_RE.test(next))) escaped.add(i);
+    } else if (c === '*' || c === '`') {
+      escaped.add(i);
+    } else if (c === '_') {
+      // Not inside a word, where _ can't be emphasis, as in snake_case
+      if (!(WORD_CHARACTER_RE.test(text[i - 1] ?? '') && WORD_CHARACTER_RE.test(next ?? ''))) escaped.add(i);
+    } else if (c === '~') {
+      // Strikethrough, or a code fence
+      if (text[i - 1] === '~' || next === '~') escaped.add(i);
+    } else if (c === '=') {
+      if (text[i - 1] !== '=') {
+        // Every other one, so no two that are left pair
+        const length = /^=+/.exec(text.slice(i))![0].length;
+        if (equalsOpensHighlight(text, i, length, after)) for (let k = 0; k < length; k += 2) escaped.add(i + k);
+      }
+    } else if (c === '{') {
+      // CriticMarkup, or a comment's range
+      if (next === undefined || /^(?:\+\+|--|~~|>>|==|#|\/)/.test(text.slice(i + 1, i + 3))) escaped.add(i);
+    } else if (c === '<') {
+      // An HTML comment, which export hides, or an autolink
+      COMMENT_OR_AUTOLINK_AT.lastIndex = i;
+      if (COMMENT_OR_AUTOLINK_AT.test(text)) escaped.add(i);
+    } else if (c === '&') {
+      // An entity or character reference
+      if (/^&(?:#\d{1,7}|#[xX][\da-fA-F]{1,6}|[A-Za-z][A-Za-z\d]{1,31});/.test(text.slice(i, i + 40))) escaped.add(i);
+    }
+  }
+  // A URL or email address, which linkify would make a link of, as export's
+  // linkify finds them: the colon after the scheme, or the @
+  for (const link of linkifyMatches(text)) {
+    const at = link.schema.endsWith(':') && link.schema !== 'mailto:' ? link.index + link.schema.length - 1 : text.indexOf('@', link.index);
+    if (at >= link.index && at < link.lastIndex) escaped.add(at);
+  }
+  // The start of each line: the text's, if it starts one, and each after a
+  // line break
+  const starts = lineStart ? [0] : [];
+  for (let k = text.indexOf('\\\n'); k !== -1; k = text.indexOf('\\\n', k + 2)) starts.push(k + 2);
+  for (const start of starts) {
+    const end = text.indexOf('\\\n', start);
+    const at = blockSyntaxAt(text, start, end === -1 ? text.length : end);
+    if (at !== undefined) escaped.add(at);
+  }
+  // Every bracket in a link's text: a ] that a [ in it doesn't close would
+  // end it, and a [ that starts a link, note reference or citation in it
+  // makes it none, as markdown-it nests none in its text
+  if (after?.link) {
+    for (let i = text.indexOf('['); i !== -1; i = text.indexOf('[', i + 1)) escaped.add(i);
+    for (let i = text.indexOf(']'); i !== -1; i = text.indexOf(']', i + 1)) escaped.add(i);
+  }
+  // A [ that would start a link, image, note reference or span: [a](b),
+  // [a][b], [a]{.underline} or [^1]. From the right, as an escaped [ inside
+  // one doesn't nest. Each [ that isn't escaped closes at the nearest ]
+  // after it that no [ inside it closes at, or else in the runs `after` it,
+  // at the ] after those the [s inside it that close there take; a [ in
+  // those runs doesn't nest, as it may yet be escaped. Without them, it's
+  // escaped, as one of them could close it.
+  const closers: number[] = [];
+  let openAfter = 0;
+  for (let i = text.length - 1; i >= 0; i--) {
+    if (text[i] === ']') closers.push(i);
+    if (text[i] !== '[' || escaped.has(i)) continue;
+    const close = closers[closers.length - 1];
+    let opens: boolean;
+    if (text[i + 1] === '^') opens = true;
+    else if (close !== undefined) opens = '([{'.includes(text[close + 1] ?? (after?.first || ' '));
+    else if (!after) opens = true;
+    else {
+      // What follows the ] in the runs after
+      const follows = after.afterCloser(openAfter);
+      opens = follows !== undefined && '([{'.includes(follows || ' ');
+    }
+    if (opens) escaped.add(i);
+    else if (close !== undefined) closers.pop();
+    else openAfter++;
+  }
+  // A citation's keys and locators, which a bracket around them takes as
+  // they are: export writes a citation whose key is missing as that text,
+  // from its items, so a bracket stays one where they give its text back,
+  // and its prefixes, which export decodes, keep their escapes. Any other
+  // bracket export would read as a citation is text.
+  const keys = new Set<number>();
+  // As export reads one: an @ after the [ takes it to the next ], past any
+  // [ before it, and whatever follows, as [@a[b] or [@a](b) do; any other
+  // [ starts one only with no [ before its ] (see citationEnd)
+  for (let i = text.indexOf('['), close = -1; i !== -1; i = text.indexOf('[', i + 1)) {
+    if (close <= i) close = text.indexOf(']', i);
+    if (close === -1) break;
+    if (escaped.has(i)) continue;
+    const open = text.indexOf('[', i + 1);
+    if (open !== -1 && open < close && !/^-?@/.test(text.slice(i + 1, i + 3))) continue;
+    if (citationEndInText(text, i) !== close) continue;
+    const content = text.slice(i + 1, close);
+    let offset = i + 1;
+    const raw: Array<[number, number]> = [];
+    const items = content.split(';').map(part => {
+      const item = part.trim();
+      const start = /(^|\s)(-?)@/.exec(item);
+      const prefix = start ? item.slice(0, start.index).trim() : '';
+      const rest = start ? item.slice(start.index + start[0].length).trim() : item;
+      const comma = rest.indexOf(',');
+      const key = comma === -1 ? rest : rest.slice(0, comma).trim();
+      const locator = comma === -1 ? '' : rest.slice(comma + 1).trim();
+      if (start) raw.push([offset + part.indexOf(item) + start.index + start[1].length, offset + part.length]);
+      offset += part.length + 1;
+      return rest ? (prefix ? prefix + ' ' : '') + (start?.[2] ?? '') + '@' + key + (locator ? ', ' + locator : '') : undefined;
+    });
+    if ('[' + items.filter(item => item !== undefined).join('; ') + ']' !== text.slice(i, close + 1)) {
+      escaped.add(i);
+      continue;
+    }
+    for (const [start, end] of raw) for (let k = start; k < end; k++) keys.add(k);
+    i = close;
+  }
+  for (const k of keys) escaped.delete(k);
+  // An HTML tag Markdown keeps raw, which export writes as its text, takes
+  // no escapes, which would be text there; a comment's or one
+  // escapeSensitiveHtmlLikeTags writes as text has its < escaped
+  const inTag = new Set<number>();
+  for (let i = text.indexOf('<'); i !== -1; i = text.indexOf('<', i + 1)) {
+    if (escaped.has(i)) continue;
+    HTML_TAG_AT.lastIndex = i;
+    const tag = HTML_TAG_AT.exec(text)?.[0];
+    const name = tag && /^<\/?([A-Za-z][A-Za-z\d-]*)/.exec(tag)?.[1];
+    if (!tag || !name || MARKDOWN_HTML_SENSITIVE_TAGS.has(name.toLowerCase())) continue;
+    for (let k = i + 1; k < i + tag.length; k++) {
+      escaped.delete(k);
+      inTag.add(k);
+    }
+    i += tag.length - 1;
+  }
+  // A URL or email address linkify finds in the text as escaped, which an
+  // escape can end where linkify found none in Word's text, as the \ in
+  // http://e.com\_ ends http://e.com
+  if (/[:@]/.test(text)) {
+    let markdown = '';
+    const from = new Map<number, number>();
+    for (let k = 0; k < text.length; k++) {
+      if (escaped.has(k)) markdown += '\\';
+      from.set(markdown.length, k);
+      markdown += text[k];
+    }
+    for (const link of linkifyMatches(markdown)) {
+      const at = from.get(link.schema.endsWith(':') && link.schema !== 'mailto:' ? link.index + link.schema.length - 1 : markdown.indexOf('@', link.index));
+      if (at !== undefined && !keys.has(at) && !inTag.has(at)) escaped.add(at);
+    }
+  }
+  // Dollar signs, last: whether one opens math depends on the escapes
+  // around it, as a \ before the _ after $x$ lets the $ close it. In the
+  // text as Markdown reads it, Word's own backslashes, which this doubles,
+  // aren't escapes; math can close in the runs after the text. From the
+  // right, since escaping a $ can let one before it close at a later $.
+  // The escapes after each are final, so a $ closes at the nearest after
+  // it that isn't escaped, and what is between needn't be read: building
+  // the Markdown for each took time in the square of the text's length.
+  // The runs after, as their escapes and formatting are yet to come: only
+  // their dollar signs, any of which can close math, whatever is around it,
+  // and between them what is neither a space nor a word, as a delimiter
+  let afterText: string | undefined;
+  /** The kth character as Markdown has it, Word's backslash as \u0001 */
+  const char = (k: number) => text[k] === '\\' ? '\u0001' : text[k];
+  /** The first character Markdown has for the kth, its escape if it has
+   *  one, or of `rest` after the text, '' at the end */
+  const read = (k: number, rest: string) => k < text.length ? (escaped.has(k) ? '\\' : char(k)) : rest[k - text.length] ?? '';
+  let nearest = -1;
+  /** Whether the single $ at i opens math, with `between` and the runs
+   *  after following the text (see findDollarMathAt) */
+  const opensMath = (i: number, between: string): boolean => {
+    const rest = between + afterText;
+    const before = i > 0 ? char(i - 1) : '';
+    // Its Markdown from the character before it, as findDollarMathAt reads it
+    const exactly = () => {
+      let markdown = before;
+      for (let k = i; k < text.length; k++) markdown += (escaped.has(k) ? '\\' : '') + char(k);
+      return findDollarMathAt(markdown + rest, before.length, { displayRun: 'at-least' })?.kind === 'math';
+    };
+    // With a $ after it, display math's
+    if (read(i + 1, rest) === '$') return exactly();
+    if (/\w/.test(before)) return false;
+    if (/\d/.test(read(i + 1, rest))) {
+      // A price, as $5, isn't math
+      let k = i + 1;
+      while (/^[\d,.]$/.test(read(k, rest))) k++;
+      if (read(k, rest) === '' || /\s/.test(read(k, rest))) return false;
+    }
+    if (nearest === -1) return findDollarMathAt('\u0001$\u0001' + rest, 1, { displayRun: 'at-least' })?.kind === 'math';
+    // The nearest closes it, unless it's in a run of them
+    const next = read(nearest + 1, rest);
+    return next === '$' ? exactly() : !/\w/.test(next);
+  };
+  for (let i = text.length - 1; i >= 0; i--) {
+    if (text[i] !== '$') continue;
+    if (!keys.has(i) && !inTag.has(i) && !escaped.has(i)) {
+      if (text[i - 1] === '$' || text[i + 1] === '$') {
+        escaped.add(i);
+      } else {
+        afterText ??= after ? after.dollars() : '';
+        // with formatting's delimiters between the runs, or not
+        if (opensMath(i, '') || (afterText && opensMath(i, '\u0001'))) escaped.add(i);
+      }
+    }
+    if (!escaped.has(i)) nearest = i;
+  }
+  if (escaped.size === 0) return text;
+  let result = '';
+  for (let i = 0; i < text.length; i++) result += (escaped.has(i) ? '\\' : '') + text[i];
+  return result;
 }
 
 export type RevisionInfo = { type: 'addition' | 'deletion'; author: string; date: string };
@@ -1245,9 +1641,11 @@ export function parseRunProperties(
   return formatting;
 }
 
-/** Apply formatting delimiters in nesting order, keeping edge whitespace outside markers. */
+/** Apply formatting delimiters in nesting order, keeping edge whitespace
+ *  outside markers, and line breaks, whose backslash before a closer would
+ *  escape it */
 function wrapMarkdownDelimited(text: string, open: string, close = open, suffix = ''): string {
-  const match = text.match(/^(\s*)(.*?)(\s*)$/s);
+  const match = text.match(/^((?:\s|\\\n)*)(.*?)((?:\s|\\\n)*)$/s);
   if (!match) return open + text + close + suffix;
   const [, leading, core, trailing] = match;
   if (!core) return text;
@@ -1266,7 +1664,11 @@ function wrapHighlight(markdown: string, color: string | undefined): string {
     : wrapMarkdownDelimited(markdown, '==', '==');
 }
 
-export function wrapWithFormatting(text: string, fmt: RunFormatting): string {
+/** `text` as Markdown with Word's formatting. `lineStart` says the text
+ *  starts a line, `blockStart` that it starts a block's text, where an HTML
+ *  block can start, and `after` gives the text of the runs after it in its
+ *  paragraph (see escapeMarkdownChars). */
+export function wrapWithFormatting(text: string, fmt: RunFormatting, lineStart = false, after?: RunsAfter, blockStart = lineStart): string {
   let result = text;
 
   // Apply in reverse nesting order (innermost to outermost)
@@ -1294,11 +1696,30 @@ export function wrapWithFormatting(text: string, fmt: RunFormatting): string {
     return fmt.highlight && !text.includes('==') ? wrapHighlight(result, markdownHighlightColor(fmt)) : result;
   }
 
-  result = escapeSensitiveHtmlLikeTags(result);
-
   // Escape markdown-sensitive characters so they round-trip faithfully.
-  // Only applies to non-code text (code is already fenced with backticks above).
-  result = escapeMarkdownChars(result);
+  // Only applies to non-code text (code is already fenced with backticks
+  // above), and before the tags, whose &lt; it would take for Word's text.
+  // Formatting's delimiters start the line in place of the text.
+  const delimited = fmt.superscript || fmt.subscript || fmt.highlight || fmt.underline || fmt.strikethrough || fmt.italic || fmt.bold;
+  // Markdown's delimiters go inside the text's edge whitespace (see
+  // wrapMarkdownDelimited), so the text reads them next, not the
+  // whitespace: a \ or { at its end would escape the closer or open with
+  // it, as in **\** and =={==, which its end escapes, as nothing follows
+  const edges = !fmt.superscript && !fmt.subscript && (fmt.highlight || !fmt.underline && (fmt.strikethrough || fmt.italic || fmt.bold))
+    ? /^((?:\s|\\\n)*)(.*?)((?:\s|\\\n)*)$/s.exec(result)!
+    : ['', '', result, ''];
+  let core = escapeSensitiveHtmlLikeTags(escapeMarkdownChars(edges[2], lineStart && !delimited, after));
+  // A ~ at the edge of struck text would join the ~~ around it, which
+  // reads ~~~a~~ as ~ and struck a, where nothing comes between them
+  if (fmt.strikethrough && !fmt.superscript && !fmt.subscript && !fmt.highlight && !fmt.underline) {
+    core = core.replace(/^~/, '\\~').replace(/((?:^|[^\\])(?:\\\\)*)~$/, (_m, before: string) => before + '\\~');
+  }
+  const escaped = edges[1] + core + edges[3];
+  // A paragraph that is an HTML block, as export writes one, reads as it is,
+  // escapes and all, so it takes none, as in <div>https://e.com</div>,
+  // unless a line break of Word's would read as a backslash in it
+  const htmlBlock = !delimited && blockStart && !result.includes('\\\n') && isHtmlBlock(result) && after?.first === '';
+  result = htmlBlock ? result : escaped;
 
   // If both superscript and subscript are true, superscript takes precedence
   if (fmt.superscript) {
@@ -1306,7 +1727,13 @@ export function wrapWithFormatting(text: string, fmt: RunFormatting): string {
   } else if (fmt.subscript) {
     result = `<sub>${result}</sub>`;
   }
-  if (fmt.highlight) result = wrapHighlight(result, markdownHighlightColor(fmt));
+  if (fmt.highlight) {
+    // An = that could join the highlight's closing ==, which no backslash
+    // keeps from it, as a reference
+    // The backslash of an escaped =, not one of an escaped backslash's
+    if (/==|=\s*$/.test(text)) result = result.replace(/((?:\\\\)*)\\?=/g, (_m, pairs: string) => pairs + '&#61;');
+    result = wrapHighlight(result, markdownHighlightColor(fmt));
+  }
   if (fmt.underline) result = `<u>${result}</u>`;
   if (fmt.strikethrough) result = wrapMarkdownDelimited(result, '~~', '~~');
   if (fmt.italic) result = wrapMarkdownDelimited(result, '*');
@@ -4040,15 +4467,16 @@ function highlightGroupEnd(segment: ContentItem[], start: number, end: number, c
 const grouplessRuns = new WeakMap<ContentItem[], { from: number; to: number }>();
 
 /** The highlight group from `start` to `end` (highlightGroupEnd) as
- *  Markdown, after `precedingMarkdown`, which ends with the span `last`. */
+ *  Markdown, after `precedingMarkdown`, which ends with the span `last`, in
+ *  the range of runs ending at `rangeEnd`, which its text reads up to. */
 function renderHighlightGroup(
-  segment: ContentItem[], start: number, end: number, precedingMarkdown: string, noteLabels?: Map<string, string>, last?: RevisionSpan,
+  segment: ContentItem[], start: number, end: number, rangeEnd: number, precedingMarkdown: string, noteLabels?: Map<string, string>, last?: RevisionSpan,
 ): string {
   let inner = '';
   for (let g = start; g < end; g++) {
     const item = segment[g];
     if (item.type === 'text') {
-      inner += wrapWithFormatting(item.text, { ...item.formatting, highlight: false });
+      inner += wrapWithFormatting(item.text, { ...item.formatting, highlight: false }, false, runsAfter(segment, g + 1, rangeEnd));
     } else if (item.type === 'footnote_ref') {
       inner += footnoteRefText(item, noteLabels);
     } else if (item.type === 'math') {
@@ -4068,27 +4496,29 @@ function renderHighlightGroup(
  *  of its revision, as appendRevised appends an item, and the span it ends
  *  with. A citation first in it is spaced from `precedingMarkdown`. */
 function appendHighlightGroup(
-  out: string, segment: ContentItem[], start: number, end: number, last: RevisionSpan | undefined,
+  out: string, segment: ContentItem[], start: number, end: number, rangeEnd: number, last: RevisionSpan | undefined,
   noteLabels?: Map<string, string>, precedingMarkdown = out,
 ): [string, RevisionSpan | undefined] {
   const items = segment.slice(start, end) as InlineRevisionItem[];
   const joins = items.map(item => spanJoin(item));
   const join: SpanJoin = joins.some(j => j.join === 'never') ? 'never' : joins.some(j => j.join === 'space') ? 'space' : 'seam';
-  const text = renderHighlightGroup(segment, start, end, precedingMarkdown, noteLabels, last);
+  const text = renderHighlightGroup(segment, start, end, rangeEnd, precedingMarkdown, noteLabels, last);
   return appendRevised(out, text, items[0], last, { join, literal: new Set(joins.flatMap(j => [...j.literal])) });
 }
 
-/** One item of a substitution's side as Markdown, after `precedingText`. */
-function substitutionItemText(item: SubstitutionItem, precedingText: string, noteLabels?: Map<string, string>): string {
+/** One item of a substitution's side as Markdown, after `precedingText`,
+ *  before the rest of its side, `after` (see escapeMarkdownChars). */
+function substitutionItemText(item: SubstitutionItem, precedingText: string, noteLabels?: Map<string, string>, after?: RunsAfter): string {
   const color = highlightColorOf(item);
   if (color && (item.type === 'footnote_ref' || item.type === 'citation')) {
-    const text = substitutionItemText({ ...item, formatting: undefined }, precedingText, noteLabels);
+    const text = substitutionItemText({ ...item, formatting: undefined }, precedingText, noteLabels, after);
     return text.includes('==') ? text : wrapHighlight(text, color);
   }
   if (item.type === 'footnote_ref') return footnoteRefText(item, noteLabels);
   if (item.type === 'text') {
-    const text = wrapWithFormatting(item.text, item.formatting);
-    return item.href ? `[${text}](${formatHrefForMarkdown(item.href)})` : text;
+    if (!item.href) return wrapWithFormatting(item.text, item.formatting, false, after);
+    const text = wrapWithFormatting(item.text, item.formatting, false, (after ?? RunsAfter.of('')).linkTo(item.href));
+    return `[${text}](${formatHrefForMarkdown(item.href)})`;
   }
   if (item.type === 'citation') {
     return item.pandocKeys.length > 0
@@ -4167,10 +4597,10 @@ function renderSubstitutionRun(
       const item = segment[j] as SubstitutionItem;
       const highlightEnd = highlightGroupEnd(segment, j, to, item.commentIds);
       if (highlightEnd > j) {
-        text += renderHighlightGroup(segment, j, highlightEnd, precedingText + text, noteLabels);
+        text += renderHighlightGroup(segment, j, highlightEnd, to, precedingText + text, noteLabels);
         j = highlightEnd;
       } else {
-        text += substitutionItemText(item, precedingText + text, noteLabels);
+        text += substitutionItemText(item, precedingText + text, noteLabels, runsAfter(segment, j + 1, to));
         j++;
       }
     }
@@ -4361,15 +4791,69 @@ function formatCommentBodyWithId(cid: string, c: Comment, timezone?: string): st
   return body;
 }
 
+/** Where an inline range stops, whether its paragraph is in a quote or
+ *  list, where export reads a revision's span starting with a heading's
+ *  marker as text (see escapeMarkdownChars), as it doesn't at the top level,
+ *  and whether it's a heading, whose text is inline */
+type InlineRangeOpts = { stopBeforeDisplayMath?: boolean; nested?: boolean; heading?: boolean };
+
+/** A segment's runs from the start of a paragraph to `end` as text, by
+ *  `end`: their text, with anything else as a character that is no syntax,
+ *  but an equation in its dollar signs, which can close math before it. One
+ *  serves each run's runsAfter, which would take time in the square of the
+ *  runs each to build its own, and each starts at its paragraph, where one
+ *  from the segment's start took time in the square of the paragraphs. */
+const runsTextIndexes = new WeakMap<ContentItem[], Map<number, { length: number; first: number; offsets: number[]; index: TextIndex }>>();
+
+/** The runs of a segment from `start` to `end`, as escapeMarkdownChars
+ *  reads the runs after a run */
+function runsAfter(segment: ContentItem[], start: number, end: number): RunsAfter {
+  let byEnd = runsTextIndexes.get(segment);
+  if (!byEnd) runsTextIndexes.set(segment, byEnd = new Map());
+  let cached = byEnd.get(end);
+  if (!cached || cached.length !== segment.length || start < cached.first) {
+    // From the paragraph's start, where the runs before `start` in it can
+    // read from too. An index reads the same from any run on, as no run of
+    // dollar signs crosses one and the rest it reads from the right.
+    let first = Math.min(start, end);
+    while (first > 0 && !endsInlineRange(segment[first - 1])) first--;
+    const offsets: number[] = [];
+    let text = '';
+    for (let k = first; k < end; k++) {
+      offsets.push(text.length);
+      const item = segment[k];
+      if (item.type !== 'text') {
+        text += item.type === 'math' ? (item.display ? '$' + '$\uFFFC$' + '$' : '$\uFFFC$') : '\uFFFC';
+        continue;
+      }
+      // A link's text in its brackets, whose ] closes a citation before it
+      // and whose URL's $ closes math, unless it's written as its URL alone;
+      // its text's own brackets, which it escapes, close nothing
+      const run = !item.href || item.text === item.href && !hasFormatting(item.formatting) ? item.text
+        : '[' + item.text.replace(/[[\]]/g, '\uFFFC') + '](' + formatHrefForMarkdown(item.href) + ')';
+      // A highlight's ==, which an == before it can pair with
+      text += item.formatting.highlight ? '==' + run + '==' : run;
+    }
+    offsets.push(text.length);
+    byEnd.set(end, cached = { length: segment.length, first, offsets, index: indexText(text, new Set(offsets)) });
+  }
+  return new RunsAfter(cached.index, cached.offsets[start - cached.first]);
+}
+
+/** Whether an inline range stops before `item`, as at a paragraph's end */
+function endsInlineRange(item: ContentItem): boolean {
+  return item.type === 'para' || item.type === 'table' || item.type === 'landscape_open' || item.type === 'landscape_close' || item.type === 'portrait_open' || item.type === 'portrait_close' || item.type === 'bibliography_marker' || item.type === 'custom_style_open' || item.type === 'custom_style_close';
+}
+
 function computeSegmentEnd(
   segment: ContentItem[],
   startIndex: number,
-  opts?: { stopBeforeDisplayMath?: boolean }
+  opts?: InlineRangeOpts
 ): number {
   let idx = startIndex;
   while (idx < segment.length) {
     const item = segment[idx];
-    if (item.type === 'para' || item.type === 'table' || item.type === 'landscape_open' || item.type === 'landscape_close' || item.type === 'portrait_open' || item.type === 'portrait_close' || item.type === 'bibliography_marker' || item.type === 'custom_style_open' || item.type === 'custom_style_close') break;
+    if (endsInlineRange(item)) break;
     if (opts?.stopBeforeDisplayMath && item.type === 'math' && item.display) break;
     idx++;
   }
@@ -4408,7 +4892,7 @@ function emphasisGroup(
       text += '$' + item.latex + '$';
     } else if (item.type === 'text') {
       // Inner formatting per item, all but the bold or italic around the group
-      text += wrapWithFormatting(item.text, { ...item.formatting, bold: false, italic: false });
+      text += wrapWithFormatting(item.text, { ...item.formatting, bold: false, italic: false }, false, runsAfter(segment, g + 1, end));
     }
   }
   if (first.formatting.italic) text = wrapMarkdownDelimited(text, '*');
@@ -4420,7 +4904,7 @@ function renderInlineRange(
   segment: ContentItem[],
   startIndex: number,
   comments: Map<string, Comment>,
-  opts?: { stopBeforeDisplayMath?: boolean },
+  opts?: InlineRangeOpts,
   renderOpts?: RenderOpts
 ): { text: string; nextIndex: number; deferredComments: string[] } {
   let out = '';
@@ -4473,7 +4957,7 @@ function renderInlineRange(
 
     const highlightEnd = highlightGroupEnd(segment, i, segmentEnd, new Set());
     if (highlightEnd > i) {
-      [out, lastSpan] = appendHighlightGroup(out, segment, i, highlightEnd, lastSpan, renderOpts?.noteLabels);
+      [out, lastSpan] = appendHighlightGroup(out, segment, i, highlightEnd, segmentEnd, lastSpan, renderOpts?.noteLabels);
       i = highlightEnd;
       continue;
     }
@@ -4551,7 +5035,7 @@ function renderInlineRange(
         const seg = segment[j];
         const highlightEnd = highlightGroupEnd(segment, j, segmentEnd, commentSet);
         if (highlightEnd > j) {
-          [anchorText, anchorSpan] = appendHighlightGroup(anchorText, segment, j, highlightEnd, anchorSpan, renderOpts?.noteLabels, anchorText || out + lead);
+          [anchorText, anchorSpan] = appendHighlightGroup(anchorText, segment, j, highlightEnd, segmentEnd, anchorSpan, renderOpts?.noteLabels, anchorText || out + lead);
           j = highlightEnd;
           continue;
         }
@@ -4592,11 +5076,15 @@ function renderInlineRange(
         // comment syntax, while ==text== is color-highlight syntax. They are semantically
         // distinct: Word text that is both highlighted AND commented needs both layers,
         // producing {====text====} (highlight nested inside comment delimiters).
-        let segText = wrapWithFormatting(seg.text, seg.formatting);
-        if (seg.href) {
-          if (seg.text !== seg.href || hasFormatting(seg.formatting)) {
-            segText = `[${segText}](${formatHrefForMarkdown(seg.href)})`;
-          }
+        const after = runsAfter(segment, j + 1, segmentEnd);
+        let segText: string;
+        if (!seg.href) {
+          segText = wrapWithFormatting(seg.text, seg.formatting, false, after);
+        } else if (seg.text !== seg.href || hasFormatting(seg.formatting)) {
+          segText = `[${wrapWithFormatting(seg.text, seg.formatting, false, after.linkTo(seg.href))}](${formatHrefForMarkdown(seg.href)})`;
+        } else {
+          // Bare, for linkify, which its escapes would keep from it
+          segText = seg.text;
         }
         [anchorText, anchorSpan] = appendRevised(anchorText, segText, seg, anchorSpan);
         j++;
@@ -4639,11 +5127,19 @@ function renderInlineRange(
       if (isBareUrl || isBareEmail) {
         [out, lastSpan] = appendRevised(out, item.text, item, lastSpan);
       } else {
-        const formattedText = wrapWithFormatting(item.text, item.formatting);
+        // Math can close past the link's text, in its URL or the runs after
+        const formattedText = wrapWithFormatting(item.text, item.formatting, false, runsAfter(segment, i + 1, segmentEnd).linkTo(item.href));
         [out, lastSpan] = appendRevised(out, '[' + formattedText + '](' + formatHrefForMarkdown(item.href) + ')', item, lastSpan);
       }
     } else {
-      [out, lastSpan] = appendRevised(out, wrapWithFormatting(item.text, item.formatting), item, lastSpan);
+      // Markdown ends with a line break only after text that does, so it's
+      // read only there, as reading it copies Markdown being built
+      const prev = segment[i - 1];
+      const lineStart = (out === '' || prev?.type === 'text' && prev.text.endsWith('\n') && out.endsWith('\n')) && !(item.revision && opts?.nested);
+      // An HTML block starts only a block's text, not a heading's or a
+      // tracked change's, after its {++
+      const blockStart = lineStart && !opts?.heading && !item.revision;
+      [out, lastSpan] = appendRevised(out, wrapWithFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart), item, lastSpan);
     }
     i++;
   }
@@ -4656,7 +5152,7 @@ function renderInlineRangeWithIds(
   segment: ContentItem[],
   startIndex: number,
   comments: Map<string, Comment>,
-  opts?: { stopBeforeDisplayMath?: boolean },
+  opts?: InlineRangeOpts,
   commentIdRemap?: Map<string, string>,
   emittedIdCommentBodies?: Set<string>,
   noteLabels?: Map<string, string>,
@@ -4733,7 +5229,7 @@ function renderInlineRangeWithIds(
         }
       }
       prevCommentIds = new Set(currentIds);
-      [out, lastSpan] = appendHighlightGroup(out, segment, i, highlightEnd, lastSpan, noteLabels);
+      [out, lastSpan] = appendHighlightGroup(out, segment, i, highlightEnd, segmentEnd, lastSpan, noteLabels);
       i = highlightEnd;
       continue;
     }
@@ -4892,11 +5388,19 @@ function renderInlineRangeWithIds(
       if (isBareUrl || isBareEmail) {
         [out, lastSpan] = appendRevised(out, item.text, item, lastSpan);
       } else {
-        const formattedText = wrapWithFormatting(item.text, item.formatting);
+        // Math can close past the link's text, in its URL or the runs after
+        const formattedText = wrapWithFormatting(item.text, item.formatting, false, runsAfter(segment, i + 1, segmentEnd).linkTo(item.href));
         [out, lastSpan] = appendRevised(out, '[' + formattedText + '](' + formatHrefForMarkdown(item.href) + ')', item, lastSpan);
       }
     } else {
-      [out, lastSpan] = appendRevised(out, wrapWithFormatting(item.text, item.formatting), item, lastSpan);
+      // Markdown ends with a line break only after text that does, so it's
+      // read only there, as reading it copies Markdown being built
+      const prev = segment[i - 1];
+      const lineStart = (out === '' || prev?.type === 'text' && prev.text.endsWith('\n') && out.endsWith('\n')) && !(item.revision && opts?.nested);
+      // An HTML block starts only a block's text, not a heading's or a
+      // tracked change's, after its {++
+      const blockStart = lineStart && !opts?.heading && !item.revision;
+      [out, lastSpan] = appendRevised(out, wrapWithFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart), item, lastSpan);
     }
     i++;
   }
@@ -5145,10 +5649,11 @@ function tryRenderPipeTable(table: { rows: TableRow[] }, maxLineWidth: number, c
           : cell.paragraphs[0];
         const r = renderInlineSegment(mergeConsecutiveRuns(items), comments, renderOpts);
         if (r.text.includes('\n')) { rollback(); return null; }
-        // Escape pipes for GFM table cells: \| in source must become \\\| (escaped
-        // backslash + escaped pipe); bare | must become \|. Single-pass callback
-        // avoids double-escape issues with two-step approaches.
-        const escaped = keepParagraphWhitespace(r.text, true, true).replace(/\\?\|/g, m => m.length === 2 ? '\\\\\\|' : '\\|');
+        // Escape pipes for GFM table cells, which take the backslash before
+        // a pipe for the table's, and leave the rest to the cell's Markdown:
+        // a backslash of Word's before it, which escapeMarkdownChars doubled,
+        // or LaTeX's, as in $\|x\|$
+        const escaped = keepParagraphWhitespace(r.text, true, true).replace(/\|/g, '\\|');
         rowCells.push({ text: escaped, deferred: r.deferredComments });
       } else {
         rowCells.push({ text: '', deferred: [] });
@@ -6617,9 +7122,9 @@ export function buildMarkdown(
   // in its quote, where a line without > after it would start a paragraph of
   // its own
   let quoteLinePrefix = '';
-  // Whether the paragraph is a heading, whose text Markdown reads up to a
-  // closing sequence of #
-  let headingText = false;
+  // Whether the paragraph is in a quote or list (see InlineRangeOpts)
+  let paragraphNested = false;
+  let paragraphHeading = false;
   let deferredCommentQuote: { group?: number; level: number } | undefined;
   // The last comment bodies written into a quote
   let quotedBodies: { text: string; group?: number; level: number } | undefined;
@@ -7079,7 +7584,8 @@ export function buildMarkdown(
       }
 
       quoteLinePrefix = prefixesQuoteLines(item) ? blockquotePrefix(item) : '';
-      headingText = !!item.headingLevel;
+      paragraphNested = !!(item.blockquoteLevel || item.listMeta || item.listContinuation);
+      paragraphHeading = !!item.headingLevel;
       deferredCommentQuote = quoteLinePrefix ? { group: item.blockquoteGroupIndex, level: item.blockquoteLevel ?? 1 } : undefined;
       if (item.headingLevel) {
         lastAlertParagraphKey = undefined;
@@ -7527,7 +8033,7 @@ export function buildMarkdown(
       htmlCommentIndex++;
     }
 
-    const rendered = renderInlineRange(mergedContent, i, comments, { stopBeforeDisplayMath: true }, renderOpts);
+    const rendered = renderInlineRange(mergedContent, i, comments, { stopBeforeDisplayMath: true, nested: paragraphNested, heading: paragraphHeading }, renderOpts);
     if (rendered.nextIndex <= i) {
       throw new Error('Invariant violated: renderInlineRange did not advance index');
     }
@@ -7564,7 +8070,7 @@ export function buildMarkdown(
     pendingAlertPrefixStrip = undefined;
     pendingAlertInlinePrefixForHardBreak = undefined;
     textOut = keepParagraphWhitespace(textOut, isMarkdownBlockEdge(mergedContent[i - 1]), isMarkdownBlockEdge(mergedContent[rendered.nextIndex]));
-    if (headingText) {
+    if (paragraphHeading) {
       // A run of # that ends a heading's text, after a space or tab or as
       // all of it, is its closing sequence to Markdown, which drops it
       textOut = textOut.replace(/(^|[ \t])(#+[ \t]*)$/, (_m, before: string, hashes: string) => before + '\\' + hashes);

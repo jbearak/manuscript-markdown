@@ -109,7 +109,11 @@ describe('headings inside CriticMarkup spans', () => {
       const { docx } = await convertMdToDocx(md);
       const paras = await paragraphInfo(docx);
       expect(paras[0].style).toBe('Normal');
-      expect(await roundTrip(md)).toBe(md);
+      // Import escapes a marker that starts a paragraph's text, which an
+      // inserted paragraph with more text after it would make a heading
+      const expected = md.replace('{++### ++}', '{++\\### ++}');
+      expect(await roundTrip(md)).toBe(expected);
+      expect(await roundTrip(expected)).toBe(expected);
     }
   });
 

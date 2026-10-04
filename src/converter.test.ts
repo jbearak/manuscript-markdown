@@ -14,6 +14,7 @@ import {
   convertDocx,
   generateCitationKey,
   wrapWithFormatting,
+  RunsAfter,
   DEFAULT_FORMATTING,
   RunFormatting,
   ContentItem,
@@ -36,6 +37,7 @@ import {
 import { parseBibtex } from './bibtex-parser';
 import { convertMdToDocx, parseMd } from './md-to-docx';
 import { GRID_TABLE_PLACEHOLDER_PREFIX } from './grid-table-preprocess';
+import { keepParagraphEdgeWhitespace } from './html-entities';
 
 const fixturesDir = join(__dirname, '..', 'test', 'fixtures');
 const sampleData = new Uint8Array(readFileSync(join(fixturesDir, 'sample.docx')));
@@ -2829,7 +2831,12 @@ describe('buildMarkdown', () => {
           
           const result = buildMarkdown(content, new Map());
           const expectedText = texts.join('');
-          const expectedRendering = wrapWithFormatting(expectedText, formatting);
+          // The paragraph's text starts its line, and nothing follows it,
+          // and whitespace at its edges takes character references; a
+          // link's text is the link's alone, inside its brackets
+          const expectedRendering = href
+            ? wrapWithFormatting(expectedText, formatting, false, RunsAfter.of('').linkTo(href))
+            : keepParagraphEdgeWhitespace(wrapWithFormatting(expectedText, formatting, true, RunsAfter.of('')), true, true);
           
           // The result should contain the merged rendering for the combined text.
           expect(result).toContain(expectedRendering);
@@ -4520,6 +4527,380 @@ describe('HTML comments in notes', () => {
   });
 });
 
+describe('Word text that reads as Markdown', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  /** The Markdown for md's export, with its text XX in `part` replaced by text */
+  const importText = async (md: string, text: string, part = 'word/document.xml') => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file(part)!.async('string');
+    const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const edited = xml.replace(/<w:(t|delText)(?: [^>]*)?>([^<]*)XX([^<]*)<\/w:\1>/, (_m, tag: string, before: string, after: string) =>
+      '<w:' + tag + ' xml:space="preserve">' + before + escaped + after + '</w:' + tag + '>');
+    expect(edited).not.toBe(xml);
+    zip.file(part, edited);
+    return strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+  };
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+  /** The text of each paragraph of md's export, and whether any is more than text */
+  const exported = async (md: string, part = 'word/document.xml') => {
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file(part)!.async('string');
+    const body = part === 'word/document.xml' ? xml.slice(xml.indexOf('<w:body>'), xml.indexOf('<w:sectPr')) : xml;
+    const text = [...body.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)]
+      .map(p => p[0].replace(/<w:br\/>/g, '\n').replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'))
+      .filter(Boolean);
+    const formatted = /<w:(?:b|i|strike|highlight|vertAlign|hyperlink|ins|del|commentRangeStart|numPr|footnoteReference)\b|<m:oMath|<w:pStyle w:val="(?:Heading|Quote|GitHub)/.test(body);
+    return { text, formatted };
+  };
+
+  test.each([
+    'a\\.b', '_a_', '__a__', 'snake__case', '`c`', '[a](b)', '![a](b)', '[a]{.underline}', '[^1]', '$x$', '$' + '$', '~~s~~', '==h==',
+    '{++a++}', '{--a--}', '{~~a~>b~~}', '{>>c<<}', '{==h==}', '{#1}', '{/1}', '<!-- c -->', '&amp;', '&nbsp;', '&#32;',
+    '<http://e.com>', 'http://e.com', 'a@b.com', '\\[', '\\\\', 'end\\', '<img src="x.png">', '$x$_', 'a === b === c',
+    // Escaping the second $ let the first close at the third
+    '$ then $a$_ v', '$x then $a$_ v',
+    // Escaping the inner [ left the outer one a link's
+    '[[`](`)`',
+    // Four or more = pair as an empty highlight
+    'a ==== b',
+    // A citation whose items export gives back otherwise
+    '[@a; see_also_x]', '[@a;@b]',
+    // A citation lookalike before a (, which export reads as one
+    '[@a](b)',
+    // An autolink past the 256 characters the check read, or with a
+    // no-break space, which markdown-it allows in one
+    '<urn:' + 'x'.repeat(300) + '>', '<ab:c\u00a0d>',
+    // An email address linkify finds, past a narrower pattern's
+    'foo$@example.com', 'user@bücher.de',
+    // A URL or email address that the escape of what follows it ends, where
+    // linkify found none before it was escaped
+    'http://e.com_', 'a@b.co_',
+  ])('keeps %s in a paragraph as text', async (text) => {
+    // Import wrote Word's text as it was, and export read it as Markdown:
+    // emphasis, code, a link, math, a tracked change, a comment, a
+    // character reference, or a backslash escape
+    const markdown = await importText('A.\n\nP XX Q.\n\nB.', text);
+    expect(await exported(markdown)).toEqual({ text: ['A.', 'P ' + text + ' Q.', 'B.'], formatted: false });
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each(['https://e.com', '<https://e.com>'])('keeps %s, a link a comment is over, a link', async (md) => {
+    // Its escapes, as for text, kept linkify from it: {==https\://e.com==}
+    expect(await roundTrip('A {==' + md + '==}{>>c<<} B.')).toContain('{==https://e.com==}');
+  });
+
+  test.each([
+    '# h', '###### h', '- a', '+ a', '* a', '-', '1. a', '1) a', '2020. A year', '> q', '>q', '```', '~~~', '---', '***', '___', '- - -',
+    '<div>', '<!-- c -->', '[x]: /u', '[^x]: n', '\\begin{equation}x\\end{equation}',
+  ])('keeps %s at the start of a paragraph or line as text', async (text) => {
+    // A heading, list, quote, code block, thematic break, HTML block,
+    // definition or equation took the text, or the paragraph went missing
+    for (const md of ['A.\n\nXX\n\nB.', 'A.\n\nP\\\nXX\n\nB.']) {
+      const markdown = await importText(md, text);
+      const lines = md.includes('P') ? ['A.', 'P\n' + text, 'B.'] : ['A.', text, 'B.'];
+      expect(await exported(markdown)).toEqual({ text: lines, formatted: false });
+    }
+  });
+
+  test.each([
+    ['===', '==='], ['--', '--'],
+  ])('keeps %s after a line break as text', async (text) => {
+    // It made the line before it a heading
+    const markdown = await importText('A.\n\nP\\\nXX\n\nB.', text);
+    expect(await exported(markdown)).toEqual({ text: ['A.', 'P\n' + text, 'B.'], formatted: false });
+  });
+
+  test.each([
+    ['a list item', '- XX\n- b', '[ ] a'],
+    ['a list item', '- XX\n- b', '1. a'],
+    ['a quote', '> A.\n>\n> XX', '[!NOTE] x'],
+    ['a quote', '> XX', '# h'],
+    ['a note', 'T.[^1]\n\n[^1]: XX', '- a'],
+    ['a list item in bold', '- **XX**\n- b', '[ ] a'],
+    ['a quote in bold', '> A.\n>\n> **XX**', '[!NOTE] x'],
+    ['a list item in code', '- `XX`\n- b', '[ ] a'],
+    ['a quote in code', '> A.\n>\n> `XX`', '[!NOTE] x'],
+    ['a list item in a link', '- [XX](https://e.com)\n- b', '[ ] a'],
+  ])('keeps the text at the start of %s as text', async (_name, md, text) => {
+    // A task's box, an alert's marker, a list or a heading took it, and
+    // export found a box or marker through code, formatting or a link
+    const part = md.includes('[^1]') ? 'word/footnotes.xml' : 'word/document.xml';
+    const markdown = await importText(md, text, part);
+    expect((await exported(markdown, part)).text).toContain(text);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps a line that reads as a table\'s delimiter row as text', async () => {
+    // The line before it became the header of a table
+    const markdown = await importText('A.\n\na | b\\\nXX\n\nB.', '--- | ---');
+    expect(await exported(markdown)).toEqual({ text: ['A.', 'a | b\n--- | ---', 'B.'], formatted: false });
+  });
+
+  test.each([
+    '<div>\nx\n</div>', '<script>x</script>', '<p>a</p>', '<details>\n<summary>s</summary>\nx\n</details>',
+    '<span>x</span> y', 'a\\\n<span>x</span>',
+    // Escapes in a tag, which Markdown keeps raw, were text there
+    '<span title="https://example.com">x</span>', '<a href="mailto:a@b.com">x</a>', '<span title="*a* [b] $c$ a_b ==c==">x</span> y',
+    // Escapes in an HTML block, which Markdown keeps raw, were text there
+    '<div>https://example.com</div>', '<pre>`code`</pre>', '<div>*a* [b] a_b</div>',
+  ])('keeps the HTML %s as it is', async (md) => {
+    // Import escaped a tag that started the paragraph or a line, which
+    // export writes as text
+    expect(await roundTrip(md)).toBe(md + '\n');
+  });
+
+  test.each([
+    ['a heading', 'A.\n\n# XX\n\nB.'],
+    ['a tracked change', 'A.\n\n{++XX++}\n\nB.'],
+    ['a deleted heading', 'A.\n\n{--# XX--}\n\nB.'],
+  ])('escapes the text of an HTML block in %s', async (_name, md) => {
+    // Its tag doesn't start a block there, so *a* was italics
+    const markdown = await importText(md, '<div>*a* [b](c) $x$</div>');
+    expect(markdown).toContain('\\*a\\* \\[b](c) \\$x$');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['formatting after it', 'A.\n\nXX **b**\n\nB.', '<div>'],
+    ['a line break after it', 'A.\n\nXX\\\nb\n\nB.', '<div>'],
+    ['no closing tag', 'A.\n\nXX\n\nB.', '<script>'],
+  ])('keeps an HTML block\'s tag at the start of a paragraph with %s as text', async (_name, md, text) => {
+    // The paragraph's text was raw HTML, so its formatting, escapes and
+    // line breaks, or the paragraphs after it, were text
+    const markdown = await importText(md, text);
+    expect((await exported(markdown)).text).toEqual(['A.', md.slice(4, md.indexOf('\n\nB')).replace('XX', text).replace(/\*\*/g, '').replace('\\\n', '\n'), 'B.']);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    'snake_case_name', 'C:\\Users\\x', 'costs $5 and $10', 'a == b', 'x < y > z', 'AT&T', '[sic]', 'see [1].', '#hashtag', 'a - b',
+    '1.5 times', '50% off', '~a~', 'e.g. [@key]',
+    // A citation's locator, which export writes as it is
+    '[@missing, _p_]', '[-@smith, p. 2; see @jones]',
+    // A citation through a [, which export reads to the ], $x$ and all; a
+    // backslash would go into its key, and another each round trip
+    '[@[$x$]', '[@a[$x$] b',
+  ])('writes %s as it is', async (text) => {
+    expect(await importText('A.\n\nP XX Q.\n\nB.', text)).toBe('A.\n\nP ' + text + ' Q.\n\nB.\n');
+  });
+
+  test('keeps dollar signs around formatted text in a comment\'s range as text', async () => {
+    // $**x**$ in the range was an equation
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\nP {==XX==}{>>c<<} Q.\n\nB.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace('<w:r><w:t>XX</w:t></w:r>', '<w:r><w:t>$</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>x</w:t></w:r><w:r><w:t>$</w:t></w:r>');
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect((await exported(markdown)).text).toEqual(['A.', 'P $x$ Q.', 'B.']);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps a dollar sign at the end of a run before formatted dollar signs as text', async () => {
+    // The two looked like $$ with the formatting's delimiters left out, so
+    // the first wasn't escaped, and opened math at the second's closer
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\n~~XX~~<sub>YY</sub>\n\nB.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace('<w:t>XX</w:t>', '<w:t>:$</w:t>').replace('<w:t>YY</w:t>', '<w:t>$b$_</w:t>');
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(await exported(markdown)).toEqual({ text: ['A.', ':$$b$_', 'B.'], formatted: true });
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each(['[', '$', 'a[b$'])('escapes runs with %s that can\'t join in linear time', (text) => {
+    // Each run's [ or $ read the text of all the runs after it
+    const items = Array.from({ length: 32000 }, (_, k) => (
+      { type: 'text', text: 'a' + text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, bold: k % 2 === 0 } }));
+    const start = performance.now();
+    buildMarkdown(items as ContentItem[], new Map());
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+
+  test('writes a paragraph of many links in linear time', () => {
+    // Each run read whether the Markdown before it ended a line, which
+    // copied it, as it ended with a link's concatenated syntax
+    const items = Array.from({ length: 80000 }, (_, k) => [
+      { type: 'text', text: 't' + k, href: 'https://e.com/' + k, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING } },
+      { type: 'text', text: ' ', commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING } }]).flat();
+    const start = performance.now();
+    buildMarkdown(items as ContentItem[], new Map());
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+
+  test('escapes many paragraphs in linear time', () => {
+    // Each paragraph's runs read an index of the text from the document's start
+    const items = Array.from({ length: 8000 }, () => [
+      { type: 'text', text: 'a', commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING } }, { type: 'para' }]).flat();
+    const start = performance.now();
+    buildMarkdown(items as ContentItem[], new Map());
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+
+  test.each([
+    ['a dollar sign before one in the next run, as a subscript', 'A.\n\nXX\n\nB.',
+      '<w:r><w:rPr><w:vertAlign w:val="subscript"/></w:rPr><w:t>$</w:t></w:r><w:r><w:rPr><w:u w:val="single"/></w:rPr><w:t>$_</w:t></w:r>', '$$_'],
+    ['a dollar sign in a link before one after it', 'A.\n\n[XX](https://e.com)\n\nB.',
+      '<w:r><w:t>$</w:t></w:r></w:hyperlink><w:r><w:rPr><w:u w:val="single"/></w:rPr><w:t>$_</w:t></w:r><w:hyperlink><w:r><w:t>x</w:t></w:r>', '$$_x'],
+    ['a dollar sign in a substitution\'s side before one in the next run', 'A.\n\n{~~XX~>cd~~}\n\nB.',
+      '<w:r><w:delText>$</w:delText></w:r><w:r><w:rPr><w:u w:val="single"/></w:rPr><w:delText>$_</w:delText></w:r>', '$$_cd'],
+    ['a == in a run before one in the next', 'A.\n\nXX\n\nB.',
+      '<w:r><w:rPr><w:u w:val="single"/></w:rPr><w:t>x==a</w:t></w:r><w:r><w:t xml:space="preserve"> {==b</w:t></w:r>', 'x==a {==b'],
+    ['a backslash before a line break at the end of bold text', 'A.\n\nXX\n\nB.',
+      '<w:r><w:rPr><w:b/></w:rPr><w:t>a\\</w:t><w:br/></w:r><w:r><w:t>c</w:t></w:r>', 'a\\\nc'],
+  ])('keeps %s as text', async (_name, md, runs, text) => {
+    // Runs' dollar signs ran together in the index of the runs after, and
+    // a link's text and a substitution's side had none, so math opened;
+    // a == paired with one in the next run as a highlight; a line break's
+    // backslash escaped bold's closer
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace(/<w:r><w:t>XX<\/w:t><\/w:r>|<w:r><w:delText>XX<\/w:delText><\/w:r>/, runs);
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect((await exported(markdown)).text).toEqual(['A.', text, 'B.']);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each(['[x](y)', '[^1]', '[@x]', 'a]b', 'a[b', '[a]', '$x', '!'].flatMap(text => [
+    [text, 'P [XX](https://e.com/a$b) Q.'],
+    [text, 'P {==[XX](https://e.com/a$b)==}{>>c<<} Q.'],
+    [text, 'P {~~z~>[XX](https://e.com/a$b)~~} Q.'],
+  ]))('keeps %s, a link\'s text, as it is, in %s', async (text, md) => {
+    // A ] that a [ in it didn't close ended the link's text, a link, note
+    // or citation in it made it none, and a $ in it closed at its URL's
+    const markdown = await importText('A.\n\n' + md + '\n\nB.', text);
+    expect((await exported(markdown)).text).toEqual(['A.', md.replace(/\{[=~]+|[=~]+\}|\{>>c<<\}|~>|\[|\]\(.*?\)/g, '').replace('XX', text), 'B.']);
+    expect(markdown.split('](https://e.com/a$b)')).toHaveLength(2);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([['[@', 'https://e.com/a'], ['[@x ', 'https://e.com/a'], ['$a', 'https://e.com/a$/b']])('keeps %s before a link to %s as text', async (text, href) => {
+    // The link's ] closed a citation the text opened, and a $ in its URL
+    // the text's math, as the text read the link's text alone after it
+    const markdown = await importText('A.\n\nP XX[b](' + href + ') Q.\n\nB.', text);
+    expect((await exported(markdown)).text).toEqual(['A.', 'P ' + text + 'b Q.', 'B.']);
+    expect(markdown.split('[b](' + href + ')')).toHaveLength(2);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([['{=={'], ['a==b']])('escapes the == of %s before highlighted text, which it pairs with', async (text) => {
+    // The runs after it read as the highlighted text alone, without its ==
+    const markdown = await importText('A.\n\nXX==x==\n\nB.', text);
+    expect((await exported(markdown)).text).toEqual(['A.', text + 'x', 'B.']);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('escapes bold text with math in it for the syntax in its paragraph alone', async () => {
+    // It read the runs after it to the end of the document, so a == in a
+    // later paragraph escaped one in it, as a highlight's text did
+    const markdown = await importText('**XX $m$**\n\nx == y', 'a==b');
+    expect(markdown).toContain('**a==b $m$**\n\nx == y');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('escapes many dollar signs in linear time', () => {
+    // Each $ read the text's Markdown whole, with the runs after it, and
+    // each escape built it anew
+    const start = performance.now();
+    expect(wrapWithFormatting('$a$ '.repeat(25000), DEFAULT_FORMATTING, false, RunsAfter.of(' x'))).toBe('\\$a$ '.repeat(25000));
+    expect(performance.now() - start).toBeLessThan(500);
+  });
+
+  test('escapes a long run of [ in linear time', () => {
+    // Each [ looked for its ] through the rest of the text
+    const start = performance.now();
+    expect(wrapWithFormatting('['.repeat(50000), DEFAULT_FORMATTING)).toBe('\\['.repeat(50000));
+    expect(performance.now() - start).toBeLessThan(500);
+  });
+
+  test('writes the keys of a citation as they are', async () => {
+    // A key's _ took a backslash, which went in the key
+    const markdown = await importText('A.\n\nP XX Q.\n\nB.', '[@_smith] and [see @smith_, p. 5]');
+    expect(markdown).toBe('A.\n\nP [@_smith] and [see @smith_, p. 5] Q.\n\nB.\n');
+  });
+
+  test('writes a line start of formatted text as it is', async () => {
+    // Its delimiter starts the line
+    const markdown = await importText('A.\n\n**XX** b.\n\nB.', '1. Introduction');
+    expect(markdown).toBe('A.\n\n**1. Introduction** b.\n\nB.\n');
+  });
+
+  test('keeps dollar signs around formatted text as text', async () => {
+    // $**x**$ was an equation
+    const markdown = await importText('A.\n\nP XX**x**$ Q.\n\nB.', '$');
+    expect((await exported(markdown)).text).toEqual(['A.', 'P $x$ Q.', 'B.']);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['an insertion', 'P {++XX++} Q.', '{++a++} b', 'w:ins'],
+    ['a deletion', 'P {--XX--} Q.', 'x --} y', 'w:del'],
+    ['a substitution', 'P {~~XX~>c~~} Q.', 'a ~> b', 'w:del'],
+  ])('keeps the closer of %s in its text', async (_name, md, text, tag) => {
+    // The text's closer ended the tracked change around it, or its ~> split it
+    const markdown = await importText('A.\n\n' + md + '\n\nB.', text);
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    const changed = [...xml.matchAll(new RegExp('<' + tag + '\\b[\\s\\S]*?</' + tag + '>', 'g'))]
+      .map(m => m[0].replace(/<[^>]+>/g, '').replace(/&gt;/g, '>'));
+    expect(changed).toEqual([text]);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['bold', '**XX**b', '\\ '],
+    ['a highlight', '==XX==b', '{ '],
+    ['strikethrough', '~~XX~~b', ')\\ '],
+  ])('keeps a \\ or { before the space at the end of %s as text', async (_name, md, text) => {
+    // The space goes outside the delimiters, after which the \ escaped the
+    // closer and the { opened a comment's range with it
+    const markdown = await importText('A.\n\n' + md + '\n\nB.', text);
+    expect(await exported(markdown)).toEqual({ text: ['A.', text + 'b', 'B.'], formatted: true });
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps a { before the space at the end of an underlined highlight as text', async () => {
+    // The highlight's == go inside the space, as in a highlight alone
+    const markdown = await importText('A.\n\n<u>==XX==</u>b\n\nB.', '{ ');
+    expect(markdown).toContain('<u>==\\{== </u>b');
+    expect(await exported(markdown)).toEqual({ text: ['A.', '{ b', 'B.'], formatted: true });
+  });
+
+  test.each(['~a', 'a~', '~', '~a~', 'a\\~', ' ~a'])('keeps %s in a strikethrough as text', async (text) => {
+    // A ~ at the edge joined the ~~ around it, which ~~~a~~ reads as ~ and
+    // struck a
+    const markdown = await importText('A.\n\n~~XX~~\n\nB.', text);
+    expect(await exported(markdown)).toEqual({ text: ['A.', text.trimEnd(), 'B.'], formatted: true });
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each(['a==', '==a', 'a == b', 'a=', 'a = b', 'a\\=', 'a\\\\=', 'a{', '{'])('keeps %s in a highlight as text', async (text) => {
+    // The highlight closed at its ==, which a backslash didn't keep from it
+    const markdown = await importText('A.\n\n==XX==\n\nB.', text);
+    expect(await exported(markdown)).toEqual({ text: ['A.', text, 'B.'], formatted: true });
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['in bold', 'A.\n\nXX**x$\\_** Z\n\nB.', 'P $1', 'P $1x$_ Z'],
+    ['in an equation', 'A.\n\nXX $(x)$ Z\n\nB.', 'P $a', undefined],
+  ])('keeps a dollar sign whose math would close in a later run %s as text', async (_name, md, text, expected) => {
+    // The run's escapes and formatting, yet to come, or the equation's
+    // dollar signs, let it close where the run's text didn't
+    const markdown = await importText(md, text);
+    expect(markdown).toContain(text.replace('$', '\\$'));
+    if (expected) expect((await exported(markdown)).text).toEqual(['A.', expected, 'B.']);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps a bracket apart from a link whose ] is in a later run', async () => {
+    const markdown = await importText('A.\n\nXX**b**](c)\n\nB.', 'P [a');
+    expect(await exported(markdown)).toEqual({ text: ['A.', 'P [ab](c)', 'B.'], formatted: true });
+    expect(markdown).toContain('P \\[a');
+  });
+});
+
 describe('HTML table cells', () => {
   const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
   const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
@@ -4893,10 +5274,15 @@ describe('Whitespace at the edges of a paragraph', () => {
     ['an HTML comment', 'A <!-- x\\\n  y --> b.\n'],
     ['math', 'A $x\\\n  y$ b.\n'],
     ['an HTML tag', 'A <span title="a\\\n  b">x</span> c.\n'],
-    ['an HTML block', '<script>x\\\n  y</script>\n'],
   ])('leaves the whitespace after a backslash at a line\'s end in %s as it is', async (_name, md) => {
     // Its text is raw, where a reference is text
     expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('leaves the whitespace after a backslash at a line\'s end in an HTML block as it is', () => {
+    // Its text is raw. A round trip escapes the tag, as it can't tell the
+    // backslash from a line break of Word's, which would be raw text there.
+    expect(keepParagraphWhitespace('<script>x\\\n  y</script>', true, true)).toBe('<script>x\\\n  y</script>');
   });
 
   test.each([
@@ -4938,13 +5324,13 @@ describe('Whitespace at the edges of a paragraph', () => {
     expect(edited).not.toBe(xml);
     zip.file('word/document.xml', edited);
     const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
-    expect(markdown).toContain('p ```a `x\\\n  y`');
+    expect(markdown).toContain('p \\`\\`\\`a `x\\\n  y`');
   });
 
   test.each([
-    ['a paragraph that starts with a tab and has a backtick', '\ta`b', '', '&#9;a`b\\\n&#9;&#32;t'],
+    ['a paragraph that starts with a tab and has a backtick', '\ta`b', '', '&#9;a\\`b\\\n&#9;&#32;t'],
     ['an HTML comment with a backtick, before code', 'p <!-- ` --> q', '<w:r><w:rPr><w:rStyle w:val="CodeChar"/></w:rPr><w:t>c</w:t></w:r>',
-      'p <!-- ` --> q\\\n&#9;&#32;t`c`'],
+      'p \\<!-- \\` --> q\\\n&#9;&#32;t`c`'],
   ])('keeps the whitespace after a line break in %s', async (_name, before, after, expected) => {
     // The scan for code read the paragraph as indented code, or paired the
     // comment's backtick with the code's, and left the whitespace as it was
@@ -5364,7 +5750,10 @@ describe('Blockquote round-trip', () => {
     const result = await convertDocx(buf);
 
     expect(result.markdown).toContain('> [!NOTE]\n> First paragraph.');
-    expect(result.markdown).toContain('> [!NOTE] literal marker text');
+    // Escaped, which export otherwise took for a second alert's marker
+    expect(result.markdown).toContain('> \\[!NOTE] literal marker text');
+    const { docx } = await convertMdToDocx(result.markdown);
+    expect(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).toContain('[!NOTE] literal marker text');
   });
 
   test('list-contained inline alert with hard break rewrites to marker-only form', () => {

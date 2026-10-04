@@ -92,11 +92,13 @@ describe('one revision across citations, equations and formatting', () => {
     expect(render([text('before'), note, text('(x)')])).toBe('{++before[^1]++}{++(x)++}');
   });
 
-  it.each([
-    ['a backtick', [text('` '), text('b', added, { ...DEFAULT_FORMATTING, code: true })], '{++` ++}{++`b`++}'],
-    ['a dollar sign', [text('costs $ '), math('t')], '{++costs $ ++}{++$t$++}'],
-  ])('keeps a span apart whose text has %s of its own, even across a space', (_, items, expected) => {
-    expect(render(items)).toBe(expected);
+  it('keeps a span apart whose text has a dollar sign of its own, even across a space', () => {
+    // Escaped too, as an equation after it closes math it opens outside a span
+    expect(render([text('costs $ '), math('t')])).toBe('{++costs \\$ ++}{++$t$++}');
+  });
+
+  it('joins a span whose backtick import escapes', () => {
+    expect(render([text('` '), text('b', added, { ...DEFAULT_FORMATTING, code: true })])).toBe('{++\\` `b`++}');
   });
 
   it('joins text with a delimiter of its own only to a span without that kind', () => {

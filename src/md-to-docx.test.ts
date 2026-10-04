@@ -210,6 +210,39 @@ describe('GFM support in Markdown→DOCX parser', () => {
     expect(listItems[1].runs.map(r => r.text).join('')).not.toContain('[ ]');
   });
 
+  it.each([
+    ['code', '`[ ] a`'], ['bold', '**[ ] a**'], ['italic', '*[x] a*'], ['a link', '[[ ] a](https://e.com)'],
+    ['strikethrough', '~~[ ] a~~'], ['a highlight', '==[ ] a=='], ['an escaped bracket', '\\[ ] a'], ['after an image', '![](x.png) [ ] a'],
+    ['a bracket written as an entity', '&#91; ] a'], ['a bracket written as a named entity', '&lbrack; ] a'],
+  ])('reads a task\'s box only from text that starts the item, not in %s', (_name, item) => {
+    // As GFM: export read one through code, formatting, a link or an
+    // escape, which a Word list item's text, as import writes it, can start
+    // with
+    const [listItem] = parseMd('- ' + item).filter(t => t.type === 'list_item');
+    expect(listItem.taskChecked).toBeUndefined();
+    expect(listItem.runs.map(r => r.text).join('')).toContain('] a');
+  });
+
+  it('reads a task\'s box only from the item\'s first block, not a paragraph after a list', () => {
+    // As GFM and the preview, which read no box where a list comes first
+    const [listItem] = parseMd('-\n  - child\n\n  [ ] later').filter(t => t.type === 'list_item');
+    expect(listItem.taskChecked).toBeUndefined();
+  });
+
+  it.each([
+    ['code', '> `[!NOTE]`'], ['bold', '> **[!NOTE]**'], ['a link', '> [[!NOTE]](https://e.com)'], ['an escaped bracket', '> \\[!NOTE]'],
+    ['a bracket written as an entity', '> &lbrack;!NOTE]'],
+    ['mid-line', '> a **b** [!NOTE]'], ['bold, on a later line', '> a\n> **[!TIP]**'],
+  ])('reads an alert\'s marker only from text that starts a line, not in %s', (_name, md) => {
+    const tokens = parseMd(md);
+    expect(tokens.some(t => t.alertType)).toBe(false);
+    expect(tokens.map(t => t.runs.map(r => r.text).join('')).join('')).toContain('[!');
+  });
+
+  it('reads alerts\' markers that start a quote\'s lines', () => {
+    expect(parseMd('> [!NOTE]\n> b\n> [!TIP]\n> c').map(t => t.alertType)).toEqual(['note', 'tip']);
+  });
+
   it('does not promote nested sublist paragraph to parent list item', () => {
     // Parent has no direct text — only a nested sublist.
     // The child's paragraph must NOT be captured as the parent's runs.
