@@ -1990,7 +1990,7 @@ describe('Sentinel gap round-trip', () => {
   test('keeps a section after a paragraph of whitespace on a line of its own', async () => {
     const md = '&nbsp;\n\n<!-- landscape -->\n\nWide.\n\n<!-- /landscape -->\n';
     const markdown = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
-    expect(markdown).toBe('\u00a0\n\n<!-- landscape -->\n\nWide.\n\n<!-- /landscape -->\n');
+    expect(markdown).toBe(md);
   });
 
   test('portrait sentinel with no blank line after opening', async () => {
@@ -4362,6 +4362,109 @@ describe('HTML comments in notes', () => {
         '<w:r><w:rPr><w:vanish w:val="' + val + '"/></w:rPr><w:t>' + letter + ' b.</w:t>'));
       expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown).toBe('A b.[^1]\n\n[^1]: N b.\n');
     }
+  });
+});
+
+describe('Whitespace at the edges of a paragraph', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+  /** The Markdown of md's export, with the text XX in part replaced by text */
+  const withText = async (md: string, part: string, text: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file(part)!.async('string');
+    zip.file(part, xml.replace('<w:t>XX</w:t>', '<w:t xml:space="preserve">' + text + '</w:t>'));
+    return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+  };
+
+  test.each([
+    ['four spaces', '    four', 'A.\n\n&#32;&#32;&#32;&#32;four\n\nB.\n'],
+    ['a tab', '\tt', 'A.\n\n&#9;t\n\nB.\n'],
+    ['two spaces', '  two', 'A.\n\n&#32;&#32;two\n\nB.\n'],
+    ['a no-break space', '\u00a0x', 'A.\n\n&nbsp;x\n\nB.\n'],
+    ['a no-break space alone', '\u00a0', 'A.\n\n&nbsp;\n\nB.\n'],
+  ])('keeps %s at the start of a paragraph', async (_name, text, expected) => {
+    // Four spaces or a tab made the paragraph a code block, and Markdown
+    // dropped other whitespace there, or the whole paragraph
+    const markdown = await withText('A.\n\nXX\n\nB.', 'word/document.xml', text);
+    expect(markdown).toBe(expected);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps a no-break space at the end of a paragraph', async () => {
+    const markdown = await withText('A.\n\nXX\n\nB.', 'word/document.xml', 'end\u00a0');
+    expect(markdown).toBe('A.\n\nend&nbsp;\n\nB.\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['a space', 'end\u00a0 ', 'A.\n\nend&nbsp; \n\nB.\n'],
+    ['a tab', 'end\u00a0\t', 'A.\n\nend&nbsp;\t\n\nB.\n'],
+  ])('keeps a no-break space at the end of a paragraph before %s', async (_name, text, expected) => {
+    // Markdown trims the space or tab, which Word doesn't show, and the
+    // no-break space with it
+    const markdown = await withText('A.\n\nXX\n\nB.', 'word/document.xml', text);
+    expect(markdown).toBe(expected);
+    expect(await roundTrip(markdown)).toBe('A.\n\nend&nbsp;\n\nB.\n');
+  });
+
+  test.each([
+    ['a list item', '- XX\n- b', 'word/document.xml', '- &#9;t\n- b\n'],
+    ['a quote', '> XX', 'word/document.xml', '> &#9;t\n'],
+    ['a heading', '# XX', 'word/document.xml', '# &#9;t\n'],
+    ['a note\'s second paragraph', 'T.[^1]\n\n[^1]: A.\n\n    XX', 'word/footnotes.xml', 'T.[^1]\n\n[^1]: A.\n\n    &#9;t\n'],
+  ])('keeps a tab at the start of %s', async (_name, md, part, expected) => {
+    const markdown = await withText(md, part, '\tt');
+    expect(markdown).toBe(expected);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['a table cell', '| a | b |\n| --- | --- |\n| XX | 2 |', '| a | b |\n| --- | --- |\n| &#9;t&nbsp; | 2 |\n'],
+    ['an HTML table cell', '<table>\n  <tr>\n    <td>\n      <p>XX</p>\n    </td>\n  </tr>\n</table>',
+      '<table>\n  <tr>\n    <td>\n      <p>&#9;t&nbsp;</p>\n    </td>\n  </tr>\n</table>\n'],
+    ['an alert', '> [!NOTE]\n> XX', '> [!NOTE]\n> &#9;t&nbsp;\n'],
+    ['a paragraph before a table', 'XX\n\n| a | b |\n| --- | --- |\n| 1 | 2 |', '&#9;t&nbsp;\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n'],
+    ['a paragraph before an equation', 'XX\n\n' + '$' + '$\nx\n' + '$' + '$', '&#9;t&nbsp;\n\n' + '$' + '$\nx\n' + '$' + '$\n'],
+    ['a paragraph before a section', 'XX\n\n<!-- landscape -->\n\nW.\n\n<!-- /landscape -->', '&#9;t&nbsp;\n\n<!-- landscape -->\n\nW.\n\n<!-- /landscape -->\n'],
+  ])('keeps the whitespace at the edges of %s', async (_name, md, expected) => {
+    // An alert's label took the whitespace after it, and the end of the
+    // text before a block that isn't a paragraph didn't count as its end
+    const markdown = await withText(md, 'word/document.xml', '\tt\u00a0');
+    expect(markdown).toBe(expected);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps the whitespace after the space that follows an alert\'s label on its line', async () => {
+    // The bold label took all of it
+    const zip = await JSZip.loadAsync((await convertMdToDocx('> [!NOTE]\n> XX')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const sameLine = xml.replace('<w:r><w:br/></w:r><w:r><w:t xml:space="preserve"> </w:t></w:r><w:r><w:t>XX</w:t></w:r>',
+      '<w:r><w:t xml:space="preserve">  \tt</w:t></w:r>');
+    expect(sameLine).not.toBe(xml);
+    zip.file('word/document.xml', sameLine);
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toBe('> [!NOTE]\n> &#32;&#9;t\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps the whitespace at the edges of a note\'s text after an equation in its paragraph', async () => {
+    // The text didn't count as the start of a paragraph, though Markdown
+    // puts it in one of its own
+    const fence = '$' + '$';
+    const zip = await JSZip.loadAsync((await convertMdToDocx('T.[^1]\n\n[^1]: A.\n\n    ' + fence + '\n    x\n    ' + fence)).docx);
+    const xml = await zip.file('word/footnotes.xml')!.async('string');
+    zip.file('word/footnotes.xml', xml.replace('</m:oMathPara>', '</m:oMathPara><w:r><w:t xml:space="preserve">\tt\u00a0</w:t></w:r>'));
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toBe('T.[^1]\n\n[^1]: A.\n\n    ' + fence + '\n    x\n    ' + fence + '\n\n    &#9;t&nbsp;\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('drops the space or tab after a note\'s mark, but keeps a no-break space', async () => {
+    expect(await withText('T.[^1]\n\n[^1]: XX', 'word/footnotes.xml', '\tt')).toBe('T.[^1]\n\n[^1]: t\n');
+    expect(await withText('T.[^1]\n\n[^1]: XX', 'word/footnotes.xml', '\u00a0')).toBe('T.[^1]\n\n[^1]: &nbsp;\n');
+  });
+
+  test('leaves a paragraph of spaces alone, an empty paragraph to Markdown', async () => {
+    expect(await withText('A.\n\nXX\n\nB.', 'word/document.xml', '   ')).not.toContain('&#32;');
   });
 });
 

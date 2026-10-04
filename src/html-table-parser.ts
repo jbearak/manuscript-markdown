@@ -191,6 +191,16 @@ function extractAttr(attrs: string, name: string): string | undefined {
   return value === undefined ? undefined : decodeHtmlEntities(value);
 }
 
+/**
+ * A cell's source text with its whitespace collapsed, as HTML lays it out.
+ * A space or tab written as a character reference stays, since import
+ * writes them for whitespace a cell would otherwise lose; a line break so
+ * written is the end of a line like any other.
+ */
+function collapseHtmlWhitespace(rawText: string): string {
+  return rawText.replace(/&#(?:0*1[03]|x0*[ad]);/gi, ' ').replace(/[ \t\r\n]+/g, ' ');
+}
+
 function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
   const runs: HtmlTableRun[] = [];
   let bold = false;
@@ -211,8 +221,9 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
     // Emit any text before this tag
     if (match.index > lastIndex) {
       const rawText = cellHtml.slice(lastIndex, match.index);
-      const decoded = decodeHtmlEntities(rawText);
-			const text = code ? decoded : decoded.replace(/[ \t\r\n]+/g, ' ');
+			let text = code ? rawText : collapseHtmlWhitespace(rawText);
+			// Whitespace at the start of a line is the HTML's layout
+			if (!code && runs[runs.length - 1]?.type === 'softbreak') text = text.replace(/^ /, '');
       if (text) {
         runs.push({
           type: 'text', text,
@@ -265,8 +276,9 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
   // Emit any trailing text
   if (lastIndex < cellHtml.length) {
     const rawText = cellHtml.slice(lastIndex);
-    const decoded = decodeHtmlEntities(rawText);
-		const text = code ? decoded : decoded.replace(/[ \t\r\n]+/g, ' ');
+		let text = code ? rawText : collapseHtmlWhitespace(rawText);
+		// Whitespace at the start of a line is the HTML's layout
+		if (!code && runs[runs.length - 1]?.type === 'softbreak') text = text.replace(/^ /, '');
     if (text) {
       runs.push({
         type: 'text', text,
@@ -282,11 +294,13 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
     }
   }
 
-  // Trim leading/trailing whitespace from the run sequence
+  // Trim leading/trailing whitespace from the run sequence. Runs hold the
+  // source text until here, so whitespace written as a character reference,
+  // such as &#9; or &nbsp;, neither collapses nor trims.
   if (runs.length > 0) {
     const first = runs[0];
     if (first.type === 'text' && !first.code) {
-      first.text = first.text.replace(/^\s+/, '');
+      first.text = first.text.replace(/^[ \t\r\n]+/, '');
       if (!first.text) runs.shift();
     }
   }
@@ -294,9 +308,12 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
     const last = runs[runs.length - 1];
     if (last.type === 'softbreak') runs.pop();
     else if (last.type === 'text' && !last.code) {
-      last.text = last.text.replace(/\s+$/, '');
+      last.text = last.text.replace(/[ \t\r\n]+$/, '');
       if (!last.text) runs.pop();
     }
+  }
+  for (const run of runs) {
+    if (run.type === 'text') run.text = decodeHtmlEntities(run.text);
   }
 
   // Keep shape stable for callers expecting at least one run per cell.
@@ -311,7 +328,7 @@ function decodeHtmlEntities(text: string): string {
   return text
     .replace(/&#(\d+);/g, (entity, code) => decodeNumericHtmlEntity(entity, code, 10))
     .replace(/&#x([0-9a-fA-F]+);/g, (entity, hex) => decodeNumericHtmlEntity(entity, hex, 16))
-    .replace(/&nbsp;/g, ' ')
+    .replace(/&nbsp;/g, '\u00a0')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')

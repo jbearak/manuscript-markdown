@@ -1,4 +1,4 @@
-import { describe, it } from 'bun:test';
+import { describe, expect, it } from 'bun:test';
 import * as fc from 'fast-check';
 import { wrapSelection, wrapLines, wrapLinesNumbered, formatHeading, highlightAndComment, wrapCodeBlock, substituteAndComment, additionAndComment, deletionAndComment, reflowTable, compactTable, parseTable, isTableRow } from './formatting';
 
@@ -532,6 +532,25 @@ describe('grid table support for Expand Table and Compact Table', () => {
     if (result.newText !== expected) {
       throw new Error('Expected:\n' + expected + '\n\nGot:\n' + result.newText);
     }
+  });
+
+  it('reflowTable and compactTable keep the whitespace an HTML cell writes as references at its edges', () => {
+    // The parser decoded it, and the Markdown cell trimmed it
+    const input = '<table><tr><th>h</th></tr><tr><td>&#9;t&nbsp;</td></tr></table>';
+    expect(reflowTable(input).newText).toBe('| h           |\n| ----------- |\n| &#9;t&nbsp; |');
+    expect(compactTable(input).newText).toBe('| h |\n| --- |\n| &#9;t&nbsp; |');
+    // Inside formatting too, which the whitespace kept from opening
+    expect(compactTable('<table><tr><th>h</th></tr><tr><td><b>&#9;t&nbsp;</b> <i>u </i>v</td></tr></table>').newText)
+      .toBe('| h |\n| --- |\n| &#9;**t**\u00a0 *u* v |');
+    // Superscript, underline and a link hold whitespace, and a line's
+    // indentation is the HTML's layout
+    expect(compactTable('<table><tr><th>h</th></tr><tr><td><sup>a </sup>b <a href="https://e.org">c </a>d</td></tr></table>').newText)
+      .toBe('| h |\n| --- |\n| <sup>a </sup>b [c ](https://e.org)d |');
+    expect(reflowTable('<table><tr><th>h</th></tr><tr><td><p>a</p>\n  <p>b</p></td></tr></table>').newText)
+      .not.toContain('&#32;');
+    // A line break written as a reference is whitespace HTML collapses
+    expect(compactTable('<table><tr><th>h</th></tr><tr><td>a&#10;b&#x0D;\nc</td></tr></table>').newText)
+      .toBe('| h |\n| --- |\n| a b c |');
   });
 
   it('compactTable compacts Pandoc-style grid tables while preserving separator style', () => {
