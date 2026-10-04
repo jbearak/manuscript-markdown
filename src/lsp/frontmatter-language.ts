@@ -430,7 +430,9 @@ function findStylesTypoSuggestions(unknownKey: string): string[] {
 // Frontmatter line scanner (offset-aware)
 // ---------------------------------------------------------------------------
 
-const FRONTMATTER_RE = /^---\r?\n(?:([\s\S]*?)\r?\n)?---(?=\r?\n|$)/;
+const FRONTMATTER_RE = /^---[ \t]*\r?\n(?![ \t]*\r?\n)(?:([\s\S]*?)\r?\n)?---(?=\r?\n|$)/;
+// A block with a closing line, whatever its first line is
+const CLOSED_BLOCK_RE = /^---[ \t]*\r?\n(?:[\s\S]*?\r?\n)?---(?=\r?\n|$)/;
 
 interface FmLine {
 	/** Raw key name (left of colon) */
@@ -467,7 +469,9 @@ interface ParsedFrontmatter {
 
 function parseFrontmatterLines(text: string, allowUnclosed = false): ParsedFrontmatter | undefined {
 	const fmMatch = FRONTMATTER_RE.exec(text);
-	const unclosedMatch = allowUnclosed && !fmMatch ? /^---\r?\n/.exec(text) : undefined;
+	// Before its closing line exists, a block being written can start with a
+	// blank line; once closed, one that does is a pair of horizontal rules
+	const unclosedMatch = allowUnclosed && !fmMatch && !CLOSED_BLOCK_RE.test(text) ? /^---[ \t]*\r?\n/.exec(text) : undefined;
 	if (!fmMatch && !unclosedMatch) return undefined;
 
 	const fmStart = 0;

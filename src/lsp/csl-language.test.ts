@@ -123,6 +123,14 @@ describe('getCslFieldInfo', () => {
 		expect(getCslFieldInfo(text)).toBeUndefined();
 	});
 
+	test('returns undefined before a longer rule', () => {
+		expect(getCslFieldInfo('---\ncsl: apa\n----\nBody.')).toBeUndefined();
+	});
+
+	test('returns undefined between horizontal rules', () => {
+		expect(getCslFieldInfo('---\n\ncsl: apa\n\n---\n\nBody.')).toBeUndefined();
+	});
+
 	test('returns undefined when frontmatter has no csl field', () => {
 		const text = '---\ntitle: My Paper\n---\n\nBody.';
 		expect(getCslFieldInfo(text)).toBeUndefined();

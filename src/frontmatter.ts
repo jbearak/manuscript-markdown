@@ -147,10 +147,17 @@ export interface Frontmatter {
   bibliographyHangingIndent?: boolean;
 }
 
+/**
+ * The line that opens frontmatter, with YAML right after it: as Pandoc has
+ * it, --- before a blank line is a horizontal rule. Keep the frontmatter
+ * patterns elsewhere in step with this one.
+ */
+export const FRONTMATTER_OPENING_RE = /^---[^\r\n]*\r?\n(?![ \t]*\r?\n)/;
+
 function frontmatterBodyStartOffset(markdown: string): number | undefined {
   const leadingTrimmedLength = markdown.length - markdown.trimStart().length;
   const trimmed = markdown.slice(leadingTrimmedLength);
-  if (!trimmed.startsWith('---')) return undefined;
+  if (!FRONTMATTER_OPENING_RE.test(trimmed)) return undefined;
 
   const endMatch = trimmed.substring(3).match(/\n---(?:\r?\n|$)/);
   if (!endMatch) return undefined;
