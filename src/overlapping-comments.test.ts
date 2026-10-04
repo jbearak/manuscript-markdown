@@ -259,7 +259,7 @@ describe('Overlapping comments: docx-to-md (buildMarkdown)', () => {
     expect(result).not.toContain('{#47>>');
   });
 
-  test('comment spanning paragraphs uses consistent ID syntax when it overlaps elsewhere', () => {
+  test('comment spanning paragraphs keeps one ID range when it overlaps elsewhere', () => {
     const comments = new Map([
       ['a', { author: 'alice', text: 'note A', date: '' }],
       ['b', { author: 'bob', text: 'note B', date: '' }],
@@ -282,8 +282,9 @@ describe('Overlapping comments: docx-to-md (buildMarkdown)', () => {
     ];
 
     const result = buildMarkdown(content as any, comments);
-    expect(result).toContain('{#1}p1 {/1}');
-    expect(result).toContain('{#1}{#2}p2{/1}{/2}');
+    // Not closed at the end of the first paragraph and opened again
+    expect(result).toContain('{#1}p1 \n\n{#2}p2{/1}{/2}');
+    expect((result.match(/\{#1\}/g) || []).length).toBe(1);
     expect(result).toContain('{#1>>@alice | note A<<}');
     expect(result).toContain('{#2>>@bob | note B<<}');
     expect(result).not.toContain('{>>@alice | note A<<}');

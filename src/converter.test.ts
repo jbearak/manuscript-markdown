@@ -1657,6 +1657,56 @@ describe('Comments over equations', () => {
   });
 });
 
+describe('Comments across paragraphs', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+  const body = (id: number, text: string) => '{#' + id + '>>@A (2024-01-15 10:30) | ' + text + '<<}';
+  const MATH_FENCE = '$' + '$';
+
+  test.each([
+    ['two paragraphs', '{#1}First para\n\nsecond{/1} para.\n' + body(1, 'spans') + '\n'],
+    ['three paragraphs', 'A {#1}b\n\nc\n\nd{/1} e.\n' + body(1, 'three') + '\n'],
+    ['a heading and a paragraph', '# {#1}Head\n\nbody{/1} rest.\n' + body(1, 'h') + '\n'],
+    ['list items', '- {#1}one\n- two{/1} x\n' + body(1, 'l') + '\n'],
+    ['quoted paragraphs', '> {#1}q1\n>\n> q2{/1} z\n> ' + body(1, 'q') + '\n'],
+    ['an equation between paragraphs', '{#1}A\n\n' + MATH_FENCE + '\nx\n' + MATH_FENCE + '\n\nB{/1}\n' + body(1, 'm') + '\n'],
+    ['a code block between paragraphs', '{#1}A\n\n```\ncode\n```\n\nB{/1}\n' + body(1, 'c') + '\n'],
+    ['another comment it overlaps', '{#1}A {#2}b\n\nc{/1} d{/2}.\n' + body(1, 'one') + '\n' + body(2, 'two') + '\n'],
+    ['paragraphs in a footnote', 'Text.[^1]\n\n[^1]: x {#1}A\n\n    B\n\n    C{/1} c.\n    ' + body(1, 'n') + '\n'],
+    ['paragraphs in the body and in a footnote', '{#1}P1\n\nP2{/1}.[^1]\n' + body(1, 'b') + '\n\n[^1]: {#2}A\n\n    B{/2} c.\n    ' + body(2, 'n') + '\n'],
+  ])('keeps one comment over %s', async (_name, md) => {
+    // Each paragraph got a copy of the comment, which export made into a comment each
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('keeps a range open around a table whose cells have comments of their own', () => {
+    // A cell's comments in ID syntax closed it in the cell, and it opened again after
+    const comments = new Map([['0', { author: 'A', text: 'c', date: '' }], ['1', { author: 'B', text: 'd', date: '' }], ['2', { author: 'C', text: 'e', date: '' }]]);
+    const text = (t: string, ids: string[]) => ({ type: 'text', text: t, commentIds: new Set(ids), formatting: DEFAULT_FORMATTING });
+    const markdown = buildMarkdown([
+      text('P1', ['0']),
+      { type: 'para' },
+      { type: 'table', rows: [{ cells: [{ paragraphs: [[text('x ', ['1']), text('y', ['1', '2']), text(' z', ['2'])]] }] }] },
+      { type: 'para' },
+      text('P2', ['0']),
+    ] as ContentItem[], comments);
+    expect(markdown).toBe('{#1}P1\n\n| {#2}x {#3}y{/2} z{/3} |\n| --- |\n\n{#2>>@B | d<<}\n{#3>>@C | e<<}\n\nP2{/1}\n{#1>>@A | c<<}');
+  });
+
+  test.each([
+    ['a display equation', { type: 'math', latex: 'x', display: true, commentIds: new Set(['0']) }],
+    ['a code block', [{ type: 'para', isCodeBlock: true }, { type: 'text', text: 'code', commentIds: new Set(['0']), formatting: DEFAULT_FORMATTING }]],
+  ])('closes a range that ends in %s in the text before it', (_name, block) => {
+    // Neither can hold an ID marker, so the range ended nowhere, without its body
+    const comments = new Map([['0', { author: 'A', text: 'c', date: '' }]]);
+    const markdown = buildMarkdown([
+      { type: 'text', text: 'A ', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
+      { type: 'text', text: 'b', commentIds: new Set(['0']), formatting: DEFAULT_FORMATTING },
+      ...(Array.isArray(block) ? block : [{ type: 'para' as const }, block]),
+    ] as ContentItem[], comments);
+    expect(markdown).toContain('A {==b==}{>>@A | c<<}');
+  });
+});
+
 describe('Dateless comment round-trip', () => {
   test('standalone comment without date round-trips without gaining a date', async () => {
     const md = 'Some text.\n\n{>>This is a comment without a date<<}';
