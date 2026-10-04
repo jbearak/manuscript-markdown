@@ -2947,7 +2947,8 @@ describe('Emphasis between runs', () => {
 
   test('closes bold with equations in it before a letter', () => {
     const items: ContentItem[] = [run('x', { bold: true }), { type: 'math', latex: 'y', display: false, commentIds: new Set() }, run('.', { bold: true }), run('z')];
-    expect(buildMarkdown(items, new Map())).toBe('<b>x$y$.</b>z');
+    // The x before the equation's $ is a reference, after which it opens
+    expect(buildMarkdown(items, new Map())).toBe('<b>&#120;$y$.</b>z');
   });
 
   test.each([
@@ -3723,7 +3724,9 @@ describe('Feature: docx-equation-conversion, Property 8: Mixed content preservat
         );
         const buf = await buildSyntheticDocx(xml);
         const result = await convertDocx(buf);
-        const md = result.markdown;
+        // A letter or digit next to the equation's $ is a character
+        // reference, which reads as it
+        const md = result.markdown.replace(/&#(\d+);/g, (_m, code: string) => String.fromCharCode(Number(code)));
 
         // Output must contain the text before, the inline math, and the text after
         expect(md).toContain(textBefore);
@@ -4936,6 +4939,48 @@ describe('Word text that reads as Markdown', () => {
     // The line before it became the header of a table
     const markdown = await importText('A.\n\na | b\\\nXX\n\nB.', '--- | ---');
     expect(await exported(markdown)).toEqual({ text: ['A.', 'a | b\n--- | ---', 'B.'], formatted: false });
+  });
+
+  test.each([
+    ['after it', '$x$\\$ Q'],
+    ['before a number', 'a $x$\\$5'],
+    ['in a substitution', '{~~$x$\\$~>b~~}'],
+    // An equation that starts the other side is no $ of text
+    ['before an equation on a substitution\'s other side', '{~~a $x$~>$y$ c~~}'],
+    ['in bold', '**a $x$\\$ Q**'],
+    ['in a highlight', '==a $x$\\$ Q=='],
+    ['in a comment\'s range', '{==a $x$\\$ Q==}{>>c<<}'],
+  ])('keeps a $ right after inline math as text, %s', async (_name, md) => {
+    // Import wrote it bare, and with the equation's closing $ it read as
+    // no math
+    expect(await roundTrip(md)).toBe(md + '\n');
+  });
+
+  test.each([
+    ['after a tracked change', '{++$x$++}$ Q'],
+    ['after a comment', '{==$x$==}{>>c<<}$ Q'],
+    ['in a tracked change after one', '{++$x$++}{--$ Q--}'],
+    ['on a substitution\'s other side', '{~~a $x$~>$ Q~~}'],
+    ['after bold', '**a $x$**$ Q'],
+    ['in a link', '{==a $x$[$5](https://e.com)==}{>>c<<}'],
+  ])('keeps a $ after inline math that a delimiter comes between bare, %s', async (_name, md) => {
+    expect(await roundTrip(md)).toBe(md + '\n');
+  });
+
+  test.each([
+    ['a letter after it', 'the $x_i$&#115; are'],
+    ['a digit before it', '&#50;$x$ and'],
+    ['_ before it', 'a&#95;$x$'],
+    ['a letter after it in bold', '**the $x_i$&#115;**'],
+    ['a digit before it in a highlight', '==&#50;$x$ b=='],
+    ['a letter after it in a comment\'s range', '{==the $x_i$&#115;==}{>>c<<}'],
+    ['a letter after it in a substitution', '{~~$x$&#97;~>b~~}'],
+  ])('keeps inline math next to %s as math', async (_name, md) => {
+    // Import wrote the character bare, by which the $ next to it opened or
+    // closed no math, and the equation came back as text
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    expect(await zip.file('word/document.xml')!.async('string')).toContain('<m:oMath>');
+    expect(await roundTrip(md)).toBe(md + '\n');
   });
 
   test.each([
