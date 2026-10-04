@@ -1309,6 +1309,26 @@ describe('HTML comment blank line round-trip', () => {
 });
 
 describe('Sentinel gap round-trip', () => {
+  test.each([
+    ['a landscape section', '<!-- landscape -->\n\nWide.\n\n<!-- /landscape -->\n\nAfter.\n'],
+    ['a tight landscape section', '<!-- landscape -->\nWide.\n<!-- /landscape -->\n'],
+    ['a style block', '<!-- style: quote -->\nQuoted.\n<!-- /style -->\n\nAfter.\n'],
+    ['a landscape section after frontmatter', '---\ntitle: T\n---\n\n<!-- landscape -->\n\nWide.\n\n<!-- /landscape -->\n\nAfter.\n'],
+    ['a landscape section right after frontmatter', '---\ntitle: T\n---\n<!-- landscape -->\n\nWide.\n\n<!-- /landscape -->\n'],
+    ['a style block after frontmatter', '---\ntitle: T\n---\n\n<!-- style: quote -->\nQuoted.\n<!-- /style -->\n\nAfter.\n'],
+  ])('puts no blank lines before %s that starts the document', async (_name, md) => {
+    // They grew by one or more with each round trip
+    let markdown = md;
+    for (let i = 0; i < 2; i++) markdown = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(markdown).toBe(md);
+  });
+
+  test('keeps a section after a paragraph of whitespace on a line of its own', async () => {
+    const md = '&nbsp;\n\n<!-- landscape -->\n\nWide.\n\n<!-- /landscape -->\n';
+    const markdown = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+    expect(markdown).toBe('\u00a0\n\n<!-- landscape -->\n\nWide.\n\n<!-- /landscape -->\n');
+  });
+
   test('portrait sentinel with no blank line after opening', async () => {
     const md = 'Before.\n\n<!-- portrait -->\n## Table 1\n\nSome text.\n\n<!-- /portrait -->\n\nAfter.';
     const { docx } = await convertMdToDocx(md);

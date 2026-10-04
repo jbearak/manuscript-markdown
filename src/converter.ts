@@ -5623,6 +5623,10 @@ export function buildMarkdown(
     if (!sentinelGaps) return false;
     const gapCount = sentinelGaps[gapKey];
     if (gapCount === undefined) return false;
+    // Nothing goes before the document's first line. Export counts the lines
+    // of masked frontmatter as blank ones, and the frontmatter's own gap
+    // metadata spaces the body from it.
+    if (output.every(part => /^\n*$/.test(part))) return true;
     const desiredNewlines = gapCount + 1;
     let existingNewlines = 0;
     for (let oi = output.length - 1; oi >= 0; oi--) {
