@@ -488,7 +488,7 @@ Manuscript Markdown supports CommonMark plus the implemented [GitHub Flavored Ma
 - **Lists**: bulleted (`- item`), numbered (`1. item`), task lists (`- [ ] item`, `- [x] item`). Blockquote continuation blocks inside list items are preserved; see [List item limitations](#list-item-block-content) for the remaining unsupported block content.
 - **Links**: `[text](url)` plus autolink literals (bare URLs/emails)
 - **Code blocks**: fenced with triple backticks. Optional language annotation (e.g., `` ```stata ``) is preserved on round-trip via the `MANUSCRIPT_CODE_BLOCK_LANGS` custom property in the DOCX. In Word, code blocks use the "Code Block" paragraph style (Consolas, shaded background). Consecutive code blocks are separated by an empty paragraph to prevent merging.
-- **Blockquotes**: `> quoted text`
+- **Blockquotes**: `> quoted text`. A quote holds paragraphs, nested quotes, alerts, HTML blocks and display math; see [Blockquote limitations](#blockquote-block-content) for the rest.
 - **Tables**: pipe tables, grid tables, and HTML tables. See [Tables](#tables) for syntax, examples, and comparison.
 
 ### Line Breaks
@@ -941,3 +941,9 @@ print("hello")
 
 3. Third item
 ````
+
+### Blockquote Block Content
+
+The Markdown-to-DOCX converter doesn't carry a list, heading, code block, table or horizontal rule inside a quote. It exports a list, heading or code block there as the quote's paragraphs, which keep its text but not its markers, and drops a table or horizontal rule. It emits a warning for each. A grid table's lines in a quote aren't a table, in the preview or in Word, but the quote's text.
+
+To keep one through a round-trip, end the quote before it and start another after.

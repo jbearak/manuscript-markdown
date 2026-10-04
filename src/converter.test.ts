@@ -6076,6 +6076,37 @@ describe('A quote after a deeper one', () => {
   });
 });
 
+describe('Blocks a quote can\'t hold', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+
+  test.each([
+    ['a list', '> - a\n>\n>   b\n> - c\n', '> a\n>\n> b\n>\n> c\n', 'List inside blockquote exported as quote paragraphs'],
+    ['a list with a quote in an item', '> - a\n>\n>   > q\n', '> a\n> > q\n', 'List inside blockquote exported as quote paragraphs'],
+    ['a heading', '> # h\n>\n> b\n', '> h\n>\n> b\n', 'Heading inside blockquote exported as a quote paragraph'],
+    ['a code block', '> a\n>\n> ```\n> c\n> ```\n>\n> b\n', '> a\n>\n> c\n>\n> b\n', 'Code block inside blockquote exported as a quote paragraph'],
+    ['a code block in a quote in a list item', '- a\n\n  > ```\n  > c\n  > ```\n', '- a\n\n  > c\n', 'Code block inside blockquote exported as a quote paragraph'],
+    ['a table', '> a\n>\n> | t |\n> |---|\n> | u |\n>\n> b\n', '> a\n>\n> b\n', 'Table inside blockquote dropped during conversion'],
+    ['an HTML table', '> a\n>\n> <table><tr><td>t</td></tr></table>\n>\n> b\n', '> a\n>\n> b\n', 'Table inside blockquote dropped during conversion'],
+    ['a horizontal rule', '> a\n>\n> ---\n>\n> b\n', '> a\n>\n> b\n', 'Horizontal rule inside blockquote dropped during conversion'],
+    // Which took the blank lines around the quote, and joined the quote to
+    // the paragraph after it
+    ['a table that starts the quote', 'p\n\n> | t |\n> |---|\n> | u |\n>\n> q\n', 'p\n\n> q\n', 'Table inside blockquote dropped during conversion'],
+    ['a horizontal rule that ends the quote', '> q\n>\n> ---\n\n\np\n', '> q\n\n\np\n', 'Horizontal rule inside blockquote dropped during conversion'],
+    ['a table that is all of a nested quote', 'p\n\n\n> > | t |\n> > |---|\n> > | u |\n>\n> b\n', 'p\n\n\n> b\n', 'Table inside blockquote dropped during conversion'],
+    // Whose marker line was the rule's, so its text went under it
+    ['a horizontal rule before an alert', '> ---\n>\n> [!NOTE] body\n', '> [!NOTE] body\n', 'Horizontal rule inside blockquote dropped during conversion'],
+  ])('warns of %s', async (_name, md, expected, warning) => {
+    // Export changed or dropped each with no warning, and left an empty
+    // paragraph where a table or rule was. A list item's continuation kept
+    // the item's indent, and came back as a quote four deep, a quote in the
+    // item lost the outer quote's level, and a code block's last line end
+    // split the quote in two
+    const { docx, warnings } = await convertMdToDocx(md);
+    expect(warnings).toEqual([warning + ' (not supported). Move it outside the quote for round-trip fidelity.']);
+    expect(strip((await convertDocx(docx)).markdown)).toBe(expected);
+  });
+});
+
 describe('parseCodeBlockStyle', () => {
   test('returns true for CodeBlock style', () => {
     const children = [{ 'w:pStyle': [], ':@': { '@_w:val': 'CodeBlock' } }];

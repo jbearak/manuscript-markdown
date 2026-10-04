@@ -92,6 +92,7 @@ export interface MdToken {
   bulletMarker?: '-' | '*' | '+'; // authored unordered-list marker for round-trip
   listContinuation?: ListContinuation; // parent list context for continuation paragraphs/blocks
   sourceRange?: [number, number]; // lines [start, end) of the text parseMd parses that the token came from
+  droppedRange?: [number, number]; // lines of the blocks next to it its quote dropped (see blockquote_open)
   blockquoteSpacing?: BlockquoteSpacing; // on a quote group's first token (see annotateBlockquoteSpacing)
   startNumber?: number;     // for ordered lists: first item's start number (when ≠ 1)
   listStart?: boolean;      // for list items: the first item of its list
@@ -1260,7 +1261,9 @@ function findLines(source: string[], lineIndex: Map<string, number[]>, lines: st
  * preprocessing changed isn't found and gets no spacing.
  */
 function annotateBlockquoteSpacing(tokens: MdToken[], parsedLines: string[], originalLines: string[]): void {
-  interface Group { first: MdToken; start: number; end: number; markerLine: boolean }
+  // Its lines, from start, and from text, its first's own, as an alert's
+  // marker's, past the lines of a block its quote dropped before it
+  interface Group { first: MdToken; start: number; text: number; end: number; markerLine: boolean }
   const groups: Array<Group | undefined> = [];
   const lineIndex = new Map<string, number[]>();
   originalLines.forEach((line, i) => {
@@ -1298,10 +1301,11 @@ function annotateBlockquoteSpacing(tokens: MdToken[], parsedLines: string[], ori
     let start = Infinity;
     let end = -Infinity;
     for (let k = t; k < tokens.length && tokens[k].type === 'blockquote'; k++) {
-      const range = tokens[k].sourceRange;
-      if (range) {
-        start = Math.min(start, range[0]);
-        end = Math.max(end, range[1]);
+      for (const range of [tokens[k].sourceRange, tokens[k].droppedRange]) {
+        if (range) {
+          start = Math.min(start, range[0]);
+          end = Math.max(end, range[1]);
+        }
       }
       if (tokens[k].alertLast) break;
     }
@@ -1313,6 +1317,7 @@ function annotateBlockquoteSpacing(tokens: MdToken[], parsedLines: string[], ori
     groups.push({
       first: tokens[t],
       start: found,
+      text: found + Math.max(0, (tokens[t].sourceRange?.[0] ?? start) - start),
       end: found + end - start - 1,
       // As in - > q: blank lines before it belong before the list item
       markerLine: !originalLines[found].trimStart().startsWith('>'),
@@ -1346,7 +1351,7 @@ function annotateBlockquoteSpacing(tokens: MdToken[], parsedLines: string[], ori
       if (below.line < originalLines.length && !(next && !next.markerLine && below.line === next.start)) spacing.after = below.count;
       if (next) spacing.gapAfter = !next.markerLine && below.line === next.start ? below.count : -1;
     }
-    const alertMarker = originalLines[group.start].replace(LIST_MARKERS_RE, '').match(BLOCKQUOTE_ALERT_MARKER_RE);
+    const alertMarker = originalLines[group.text].replace(LIST_MARKERS_RE, '').match(BLOCKQUOTE_ALERT_MARKER_RE);
     // A comment body on the marker line shows nothing, and import writes it below
     if (alertMarker) spacing.alertInline = withoutCommentBodies(alertMarker[2]).trim().length > 0;
     group.first.blockquoteSpacing = spacing;
@@ -2547,6 +2552,15 @@ function promoteCriticHeadingParagraph(runs: MdRun[]): MdToken | undefined {
   };
 }
 
+// What export does with a block a quote can't hold
+const QUOTE_BLOCK_WARNINGS: Partial<Record<MdToken['type'], string>> = {
+  list_item: 'List inside blockquote exported as quote paragraphs',
+  heading: 'Heading inside blockquote exported as a quote paragraph',
+  code_block: 'Code block inside blockquote exported as a quote paragraph',
+  table: 'Table inside blockquote dropped during conversion',
+  hr: 'Horizontal rule inside blockquote dropped during conversion',
+};
+
 function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel = 0, warnings?: string[], sourceLines?: string[]): MdToken[] {
   const result: MdToken[] = [];
   let i = 0;
@@ -2599,7 +2613,50 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
         // In Markdown, `> - item` starts a new list context within the quote,
         // so numbering/indentation should not inherit from outer lists.
         const blockquoteTokens = convertTokens(tokens.slice(i + 1, blockquoteClose), 0, bqLevel, warnings, sourceLines);
-        result.push(...annotateBlockquoteAlert(blockquoteTokens, bqLevel));
+        // Its blocks become its paragraphs, in its style, which keeps a list
+        // item's, heading's or code block's text but not what it was, and
+        // has nothing for a table or rule: warn of each, and drop a table or
+        // rule, which left an empty paragraph. An item's continuation is the
+        // quote's, not indented as under the item, and a quote in the item,
+        // whose level counts from the item's, one in this
+        for (const type of new Set(blockquoteTokens.map(t => t.type))) {
+          const warning = QUOTE_BLOCK_WARNINGS[type];
+          if (warning) warnings?.push(warning + ' (not supported). Move it outside the quote for round-trip fidelity.');
+        }
+        const quoted: MdToken[] = [];
+        // A dropped block's lines stay in the quote, on the paragraph before
+        // it, so the blank lines around it are the quote's (see
+        // annotateBlockquoteSpacing)
+        const span = (a: [number, number] | undefined, b: [number, number]): [number, number] => a ? [Math.min(a[0], b[0]), Math.max(a[1], b[1])] : b;
+        for (const t of blockquoteTokens) {
+          if (t.type === 'table' || t.type === 'hr') {
+            const previous = quoted[quoted.length - 1];
+            if (t.sourceRange && previous) previous.droppedRange = span(previous.droppedRange, t.sourceRange);
+            continue;
+          }
+          const kept: MdToken = t.type === 'blockquote'
+            ? t.listContinuation ? { ...t, listContinuation: undefined, level: bqLevel + (t.level ?? 1) } : { ...t }
+            : {
+              ...t,
+              listContinuation: undefined,
+              trailingBlankLine: undefined,
+              // A code block's text ends with its last line's end
+              ...(t.type === 'code_block' ? { runs: t.runs.map(run => ({ ...run, text: run.text.replace(/\n$/, '') })) } : {}),
+            };
+          quoted.push(kept);
+        }
+        const annotated = annotateBlockquoteAlert(quoted, bqLevel);
+        // And its first and last lines, which a dropped block, or a nested
+        // quote that held only one, can have been, not the blank lines its
+        // range ends with
+        if (token.map && annotated.length > 0) {
+          let end = token.map[1];
+          while (end > token.map[0] + 1 && sourceLines?.[end - 1]?.trim() === '') end--;
+          annotated[0].droppedRange = span(annotated[0].droppedRange, [token.map[0], token.map[0] + 1]);
+          const last = annotated[annotated.length - 1];
+          last.droppedRange = span(last.droppedRange, [end - 1, end]);
+        }
+        result.push(...annotated);
         i = blockquoteClose + 1;
         break;
       }
