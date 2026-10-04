@@ -3290,7 +3290,7 @@ function citationSeparator(precedingMarkdown: string, revision: RevisionInfo | u
 }
 
 
-function commentSetsEqual(a: Set<string>, b: Set<string>): boolean {
+function commentSetsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   if (a.size !== b.size) return false;
   for (const id of a) if (!b.has(id)) return false;
   return true;
@@ -3700,6 +3700,46 @@ function computeSegmentEnd(
   return idx;
 }
 
+const NO_COMMENTS: ReadonlySet<string> = new Set();
+
+/**
+ * Bold or italic text from `start` with inline equations in it, all in the
+ * comments `commentIds`, as one run of emphasis around the lot, so that
+ * **Ex. 1: $y = Y$ and $k = 1$** stays one bold run. Undefined where the run
+ * has no equation.
+ */
+function emphasisGroup(
+  segment: ContentItem[], start: number, end: number, commentIds: ReadonlySet<string>,
+): { text: string; end: number } | undefined {
+  const first = segment[start];
+  if (first.type !== 'text' || !(first.formatting.bold || first.formatting.italic) || first.revision || first.href
+      || first.text === '\\\n' || !commentSetsEqual(first.commentIds, commentIds)) return undefined;
+  let groupEnd = start + 1;
+  for (; groupEnd < end; groupEnd++) {
+    const next = segment[groupEnd];
+    const joins = next.type === 'math'
+      ? !next.display && !next.revision && commentSetsEqual(next.commentIds ?? NO_COMMENTS, commentIds)
+      : next.type === 'text' && !next.revision && !next.href && commentSetsEqual(next.commentIds, commentIds)
+        && next.formatting.bold === first.formatting.bold && next.formatting.italic === first.formatting.italic
+        && next.text !== '\\\n';
+    if (!joins) break;
+  }
+  if (!segment.slice(start, groupEnd).some(item => item.type === 'math')) return undefined;
+  let text = '';
+  for (let g = start; g < groupEnd; g++) {
+    const item = segment[g];
+    if (item.type === 'math') {
+      text += '$' + item.latex + '$';
+    } else if (item.type === 'text') {
+      // Inner formatting per item, all but the bold or italic around the group
+      text += wrapWithFormatting(item.text, { ...item.formatting, bold: false, italic: false });
+    }
+  }
+  if (first.formatting.italic) text = wrapMarkdownDelimited(text, '*');
+  if (first.formatting.bold) text = wrapMarkdownDelimited(text, '**');
+  return { text, end: groupEnd };
+}
+
 function renderInlineRange(
   segment: ContentItem[],
   startIndex: number,
@@ -3776,7 +3816,8 @@ function renderInlineRange(
       continue;
     }
 
-    if (item.type === 'math') {
+    // Inline math in a comment's range goes in its anchor, below
+    if (item.type === 'math' && (item.display || !item.commentIds?.size)) {
       // Check if this inline math is between bold/italic text items that share
       // formatting. If so, the caller (text rendering below) already handled it
       // as part of a formatting group. If not, emit standalone.
@@ -3837,12 +3878,12 @@ function renderInlineRange(
       continue;
     }
 
-    if (item.type !== 'text' && item.type !== 'footnote_ref' && item.type !== 'citation') {
+    if (item.type !== 'text' && item.type !== 'footnote_ref' && item.type !== 'citation' && item.type !== 'math') {
       i++;
       continue;
     }
 
-    // A note reference or citation gets here only in a comment's range
+    // A note reference, citation or equation gets here only in a comment's range
     if (item.type !== 'text' || item.commentIds.size > 0) {
       const commentSet = item.commentIds;
       let anchorText = '';
@@ -3860,8 +3901,20 @@ function renderInlineRange(
           j = highlightEnd;
           continue;
         }
-        if ((seg.type !== 'text' && seg.type !== 'footnote_ref' && seg.type !== 'citation') || !commentSetsEqual(seg.commentIds, commentSet)) {
+        if ((seg.type !== 'text' && seg.type !== 'footnote_ref' && seg.type !== 'citation' && !(seg.type === 'math' && !seg.display))
+            || !commentSetsEqual(seg.commentIds ?? new Set(), commentSet)) {
           break;
+        }
+        if (seg.type === 'math') {
+          [anchorText, anchorSpan] = appendRevised(anchorText, '$' + seg.latex + '$', seg, anchorSpan);
+          j++;
+          continue;
+        }
+        const group = emphasisGroup(segment, j, segmentEnd, commentSet);
+        if (group) {
+          [anchorText, anchorSpan] = appendRevised(anchorText, group.text, seg, anchorSpan);
+          j = group.end;
+          continue;
         }
         if (seg.type === 'citation') {
           const citeText = seg.pandocKeys.length > 0
@@ -3911,48 +3964,12 @@ function renderInlineRange(
       continue;
     }
 
-    // Detect formatting groups: text items with bold/italic interspersed with
-    // inline math. Emit shared formatting markers around the entire group so
-    // that e.g. **Ex. 1: $y = Y$ and $k = 1$** stays as one bold run.
-    if ((item.formatting.bold || item.formatting.italic) && !item.revision && !item.href && item.commentIds.size === 0) {
-      // Look ahead: collect text+math items that form a formatting group
-      let groupEnd = i + 1;
-      while (groupEnd < segmentEnd) {
-        const next = segment[groupEnd];
-        if (next.type === 'math' && !next.display && !next.revision && next.commentIds.size === 0) {
-          groupEnd++;
-          continue;
-        }
-        if (next.type === 'text' && !next.revision && !next.href && next.commentIds.size === 0 &&
-            next.formatting.bold === item.formatting.bold &&
-            next.formatting.italic === item.formatting.italic &&
-            next.text !== '\\\n') {
-          groupEnd++;
-          continue;
-        }
-        break;
-      }
-      // Only use group rendering if there's actually math interspersed
-      const hasMathInGroup = groupEnd > i + 1 && segment.slice(i, groupEnd).some(it => it.type === 'math');
-      if (hasMathInGroup) {
-        // Render the group: apply bold/italic around everything, inner formatting per-text-item
-        let groupText = '';
-        for (let g = i; g < groupEnd; g++) {
-          const gItem = segment[g];
-          if (gItem.type === 'math' && !gItem.display) {
-            groupText += '$' + gItem.latex + '$';
-          } else if (gItem.type === 'text') {
-            // Apply inner formatting (everything except bold/italic which wraps the group)
-            const innerFmt: RunFormatting = { ...gItem.formatting, bold: false, italic: false };
-            groupText += wrapWithFormatting(gItem.text, innerFmt);
-          }
-        }
-        if (item.formatting.italic) groupText = wrapMarkdownDelimited(groupText, '*');
-        if (item.formatting.bold) groupText = wrapMarkdownDelimited(groupText, '**');
-        out += groupText;
-        i = groupEnd;
-        continue;
-      }
+    // Bold or italic text with equations in it keeps one run of emphasis
+    const group = emphasisGroup(segment, i, segmentEnd, NO_COMMENTS);
+    if (group) {
+      out += group.text;
+      i = group.end;
+      continue;
     }
 
     if (item.href) {
@@ -4214,43 +4231,13 @@ function renderInlineRangeWithIds(
       continue;
     }
 
-    // Detect formatting groups: text items with bold/italic interspersed with
-    // inline math (same logic as renderInlineRange).
-    if ((item.formatting.bold || item.formatting.italic) && !item.revision && !item.href && item.commentIds.size === 0) {
-      let groupEnd = i + 1;
-      while (groupEnd < segmentEnd) {
-        const next = segment[groupEnd];
-        if (next.type === 'math' && !next.display && !next.revision && next.commentIds.size === 0) {
-          groupEnd++;
-          continue;
-        }
-        if (next.type === 'text' && !next.revision && !next.href && next.commentIds.size === 0 &&
-            next.formatting.bold === item.formatting.bold &&
-            next.formatting.italic === item.formatting.italic &&
-            next.text !== '\\\n') {
-          groupEnd++;
-          continue;
-        }
-        break;
-      }
-      const hasMathInGroup = groupEnd > i + 1 && segment.slice(i, groupEnd).some(it => it.type === 'math');
-      if (hasMathInGroup) {
-        let groupText = '';
-        for (let g = i; g < groupEnd; g++) {
-          const gItem = segment[g];
-          if (gItem.type === 'math' && !gItem.display) {
-            groupText += '$' + gItem.latex + '$';
-          } else if (gItem.type === 'text') {
-            const innerFmt: RunFormatting = { ...gItem.formatting, bold: false, italic: false };
-            groupText += wrapWithFormatting(gItem.text, innerFmt);
-          }
-        }
-        if (item.formatting.italic) groupText = wrapMarkdownDelimited(groupText, '*');
-        if (item.formatting.bold) groupText = wrapMarkdownDelimited(groupText, '**');
-        out += groupText;
-        i = groupEnd;
-        continue;
-      }
+    // Bold or italic text with equations in it keeps one run of emphasis, in
+    // the comments the text is in
+    const group = emphasisGroup(segment, i, segmentEnd, currentIds);
+    if (group) {
+      out += group.text;
+      i = group.end;
+      continue;
     }
 
     if (item.href) {
@@ -5427,17 +5414,33 @@ export function buildMarkdown(
     }
     return nextAvailableNumericId();
   }
+  // Comments over an image or HTML comment, which an anchor can't hold, and
+  // over other content, which goes in one: only ID syntax keeps them whole
+  const overUnanchored = new Set<string>();
+  const overAnchored = new Set<string>();
   function collectCommentMetadata(items: ContentItem[]): void {
+    // The end of the text each comment's anchor has so far, as ==} can
+    // straddle two of the runs Word splits text into
+    const anchorEnds = new Map<string, string>();
     for (const item of items) {
+      for (const id of [...anchorEnds.keys()]) {
+        if (!('commentIds' in item) || !item.commentIds?.has(id)) anchorEnds.delete(id);
+      }
       if (item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'math' || item.type === 'html_comment' || item.type === 'image') {
         if (item.commentIds) {
           const ids = [...item.commentIds];
+          // Text with ==}, which would end a {==...==} anchor early
+          let holdsAnchorEnd = item.type === 'math' && item.latex.includes('==}');
           for (const id of ids) {
             if (!commentIdRemap.has(id)) {
               commentIdRemap.set(id, assignRemappedId(id));
             }
+            (item.type === 'image' || item.type === 'html_comment' ? overUnanchored : overAnchored).add(id);
+            const text = item.type === 'text' ? (anchorEnds.get(id) ?? '') + item.text : '';
+            if (text.includes('==}')) holdsAnchorEnd = true;
+            anchorEnds.set(id, text.slice(-2));
           }
-          if (ids.length > 1) {
+          if (ids.length > 1 || holdsAnchorEnd) {
             for (const id of ids) {
               forceIdCommentIds.add(id);
             }
@@ -5463,6 +5466,7 @@ export function buildMarkdown(
   });
   collectCommentMetadata(mergedContent);
   for (const entry of noteEntries) collectCommentMetadata(entry.body);
+  for (const id of overUnanchored) if (overAnchored.has(id)) forceIdCommentIds.add(id);
 
   // Global overlap detection: mark comments that overlap anywhere in the document
   function detectGlobalOverlaps(items: ContentItem[]): void {
