@@ -4479,7 +4479,18 @@ function resolveBareLinks(markdown: string): string {
         : k + 1 < count ? undefined : after;
     if (head !== undefined && head.length > BARE_LINK_CONTEXT) head = undefined;
     nextHead = head;
-    chosen[k] = head !== undefined && bareLinkReadsBack(before, address, closer, head) ? address : link;
+    // A ! before it, escaped for the link's [, which keeps the address from
+    // reading as one, is text before it bare
+    const bang = /(?:^|[^\\])(?:\\\\)*\\!$/.test(before) ? before.slice(0, -2) + '!' : undefined;
+    // Whitespace that may start a line, which keepParagraphWhitespace
+    // writes as references
+    const lineStart = (k === 0 ? /(?:^|\n)[ \t]+$/ : /\n[ \t]+$/).test(before);
+    if (head !== undefined && bang !== undefined && bareLinkReadsBack(bang, address, closer, head, lineStart)) {
+      chosen[k] = address;
+      parts[4 * k] = bang;
+    } else {
+      chosen[k] = head !== undefined && bareLinkReadsBack(before, address, closer, head, lineStart) ? address : link;
+    }
   }
   const out: string[] = [parts[0]];
   for (let k = 0; k < count; k++) out.push(chosen[k], parts[4 * k + 4]);
@@ -4487,8 +4498,9 @@ function resolveBareLinks(markdown: string): string {
 }
 
 /** Whether `address`, written bare between `before` and `following`, reads
- *  back as a link of it alone (see resolveBareLinks) */
-function bareLinkReadsBack(before: string, address: string, closer: string, following: string): boolean {
+ *  back as a link of it alone (see resolveBareLinks), after whitespace that
+ *  starts its line where `lineStart` */
+function bareLinkReadsBack(before: string, address: string, closer: string, following: string, lineStart: boolean): boolean {
   const email = !/^[a-z][a-z0-9.+-]*:/i.test(address);
   if (linkifiedText(address, email) !== address) return false;
   // In a span, which ends the text it holds
@@ -4505,6 +4517,10 @@ function bareLinkReadsBack(before: string, address: string, closer: string, foll
     lead = '';
   } else if (/[$&=*`~\\<>[\]!]|(?:^|[^a-z0-9])_|_(?:[^a-z0-9]|$)/i.test(address)) {
     // Syntax, which splits the text linkify reads, as _ that can be emphasis
+    return false;
+  } else if (lineStart || /(?:^|[^\\])(?:\\\\)*(?:\\[!-/:-@[-`{-~]|&#?[a-z0-9]+;)$/i.test(lead)) {
+    // An escape or a character reference, after which markdown-it links no
+    // address but a URL with //, which it reads before them
     return false;
   }
   return linkifyMatches(lead + address + following).some(link => link.index === lead.length && link.lastIndex === lead.length + address.length);

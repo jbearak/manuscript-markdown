@@ -4137,6 +4137,13 @@ describe('Bare links', () => {
     ['an equation after it', '[https://e.com](https://e.com)$x$', '[https\\://e.com](https://e.com)$x$'],
     ['a link after its path', '[https://e.com/a](https://e.com/a)[b](https://f.com)', '[https\\://e.com/a](https://e.com/a)[b](https://f.com)'],
     ['an insertion after its path', '[https://e.com/a](https://e.com/a){++b++}', '[https\\://e.com/a](https://e.com/a){++b++}'],
+    // markdown-it links no address but a URL with // that starts its text
+    // after an escape or a reference
+    ['an escaped [ before an address', 'a\\[[mailto:a@b.com](mailto:a@b.com)', 'a\\[[mailto:a\\@b.com](mailto:a@b.com)'],
+    ['an escaped * before an address', 'x\\*[mailto:a@b.com](mailto:a@b.com)', 'x\\*[mailto:a\\@b.com](mailto:a@b.com)'],
+    ['a backslash before an address', 'a\\\\[mailto:a@b.com](mailto:a@b.com)', 'a\\\\[mailto:a\\@b.com](mailto:a@b.com)'],
+    ['a space that starts the paragraph before an address', '&#32;[mailto:a@b.com](mailto:a@b.com)', '&#32;[mailto:a\\@b.com](mailto:a@b.com)'],
+    ['a space that starts a line before an address', 'a\\\n&#32;[a@b.com](mailto:a@b.com)', 'a\\\n&#32;[a\\@b.com](mailto:a@b.com)'],
   ])('writes a link next to %s in link syntax', async (_name, md, expected) => {
     // Written bare, linkify read the link with the text next to it, or
     // didn't read it as a link
@@ -4158,6 +4165,9 @@ describe('Bare links', () => {
     // Unicode punctuation and symbols, which linkify ends a link at or reads one after
     'https://e.com\u2026 next', '\u201chttps://e.com\u201d', '\u00a9https://e.com', '\u00e9https://e.com', 'https://e.com,x',
     'https://e.com/a.', '{==https://e.com/a==}{>>c<<}', 'first_last@e.com',
+    // A ! before it, escaped for a link's [, isn't, and an escaped & starts
+    // no reference
+    'a!mailto:a@b.com', 'a\\&#33;mailto:a@b.com', '&#32;https://e.com',
   ])('keeps %s bare', async (md) => {
     expect((await roundTrip(md)).replace(/\{>>[^<]*<<\}/, '{>>c<<}')).toBe(md + '\n');
   });
