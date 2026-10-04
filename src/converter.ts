@@ -991,6 +991,32 @@ function formatHrefForMarkdown(href: string): string {
 
 // Comment extraction
 
+/** The text a comment's paragraph shows: its runs' text, with a line break
+ *  as a line's end, without deleted runs or a paragraph inside it */
+function commentParagraphText(nodes: XmlNode[]): string {
+  let text = '';
+  for (const node of nodes) {
+    for (const key of Object.keys(node)) {
+      if (key === 'w:t') {
+        text += nodeText(asXmlNodes(node[key]));
+      } else if (key === 'w:cr' || (key === 'w:br' && [undefined, '', 'textWrapping'].includes(node[':@']?.['@_w:type']))) {
+        text += '\n';
+      } else if (!['w:del', 'w:moveFrom', 'w:pPr', 'w:rPr', 'w:p'].includes(key) && key !== ':@' && Array.isArray(node[key])) {
+        text += commentParagraphText(node[key]);
+      }
+    }
+  }
+  return text;
+}
+
+/** Whether a comment paragraph's mark is deleted, which joins its text to
+ *  the next paragraph's, as accepting the deletion would */
+function commentParagraphMarkDeleted(paragraph: XmlNode): boolean {
+  const pPr = asXmlNodes(paragraph['w:p']).find(child => child['w:pPr'] !== undefined);
+  const rPr = pPr && asXmlNodes(pPr['w:pPr']).find(child => child['w:rPr'] !== undefined);
+  return !!rPr && asXmlNodes(rPr['w:rPr']).some(child => child['w:del'] !== undefined || child['w:moveFrom'] !== undefined);
+}
+
 export async function extractComments(data: Uint8Array | JSZip): Promise<Map<string, Comment>> {
   const comments = new Map<string, Comment>();
   const zip = data instanceof JSZip ? data : await loadZip(data);
@@ -1001,9 +1027,11 @@ export async function extractComments(data: Uint8Array | JSZip): Promise<Map<str
     const id = getAttr(node, 'id');
     const author = getAttr(node, 'author');
     const date = getAttr(node, 'date') || '';
-    // Collect all w:t text within this comment
-    const tNodes = findAllDeep(asXmlNodes(node['w:comment']), 'w:t');
-    const text = tNodes.map(t => nodeText(asXmlNodes(t['w:t']))).join('');
+    // The comment's paragraphs, with a blank line between them, where
+    // export splits them
+    const paragraphs = findAllDeep(asXmlNodes(node['w:comment']), 'w:p');
+    const text = paragraphs.map((p, k) => commentParagraphText(asXmlNodes(p['w:p']))
+      + (k < paragraphs.length - 1 && !commentParagraphMarkDeleted(p) ? '\n\n' : '')).join('');
     // Extract w14:paraId from the last comment paragraph. md-to-docx emits
     // paraId on the last <w:p> (per commentsExtended linking expectations),
     // but keep a first-paragraph fallback for third-party documents.
@@ -4523,6 +4551,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
   const i2 = indent + indent;  // td/th level
   const i3 = indent + indent + indent;  // content level
   const lines: string[] = ['<table' + extraAttrs + '>'];
+  const deferredAll: string[] = [];
   for (let rowIdx = 0; rowIdx < table.rows.length; rowIdx++) {
     const row = table.rows[rowIdx];
     lines.push(i1 + '<tr>');
@@ -4548,16 +4577,16 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
         // rest exports as literal text
         const rendered = renderInlineSegment(items, comments, renderOpts);
         lines.push(i3 + '<p>' + keepParagraphEdgeWhitespace(rendered.text, true, true) + '</p>');
-        if (rendered.deferredComments.length > 0) {
-          lines.push(i3 + rendered.deferredComments.join('\n' + i3));
-        }
+        deferredAll.push(...rendered.deferredComments);
       }
       lines.push(i2 + '</' + tag + '>');
     }
     lines.push(i1 + '</tr>');
   }
   lines.push('</table>');
-  return lines.join('\n');
+  // Comment bodies go after the table, as in a pipe table: a blank line in
+  // one would end the table's HTML
+  return lines.join('\n') + (deferredAll.length > 0 ? '\n\n' + deferredAll.join('\n') : '');
 }
 
 type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem> };
@@ -5620,6 +5649,13 @@ function isInlineRevisionItem(item: ContentItem): item is Extract<ContentItem, {
  *  style block or not. Undefined for blocks that can't take part, and for a
  *  list item after the break, which starts a new item rather than continuing
  *  one. */
+/** Whether buildMarkdown writes a quote's prefix on each line of the
+ *  paragraph's text, after a line break or in a comment's body, and before
+ *  the comment bodies after it */
+function prefixesQuoteLines(para: ParaItem): boolean {
+  return !!para.blockquoteLevel && !para.headingLevel && !para.listMeta && !para.isCodeBlock;
+}
+
 function breakContainer(para: ParaItem | undefined, side: 'before' | 'after'): string | undefined {
   if (!para) return 'body';
   if (para.headingLevel || para.isTitle || para.isCodeBlock) return undefined;
@@ -5660,11 +5696,12 @@ function trackedBreakMarks(values: unknown): TrackedBreakMarks {
  *  md-to-docx moves a break that opens a span outside it (see
  *  moveLeadingBreakOutsideCritic), so a span that starts with the break would
  *  not survive export. Both paragraphs must sit in the same list item or
- *  quote, and `linePrefix` gives the second one's line prefix (quote markers,
- *  list indent) to start the line after the break. The break is plain text,
+ *  quote, and `linePrefix` gives the line prefix (quote markers, list indent)
+ *  to start the line after the break, from the second paragraph and the one
+ *  whose text the break joins it to. The break is plain text,
  *  so formatting, code and links close before it, and
  *  joinSpansAtTrackedBreaks then joins its span to the spans around it. */
-function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => TrackedBreakMarks, linePrefix: (para: ParaItem) => string = () => ''): ContentItem[] {
+function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => TrackedBreakMarks, linePrefix: (para: ParaItem, opening: ParaItem | undefined) => string = () => ''): ContentItem[] {
   let joined: ContentItem[] | undefined;
   for (let k = 0; k < content.length; k++) {
     const para = content[k];
@@ -5685,7 +5722,7 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
     if (!before?.some(item => survivesRevisions(item, revision.type))) continue;
     if (!after?.some(item => survivesRevisions(item, revision.type))) continue;
     joined ??= [...content];
-    const prefix = linePrefix(para);
+    const prefix = linePrefix(para, opening);
     const text = marks().start + '\n' + prefix.trimEnd() + '\n' + prefix + marks().end;
     joined[k] = { type: 'text', text, commentIds: new Set(prev.commentIds), formatting: DEFAULT_FORMATTING, revision };
   }
@@ -5712,10 +5749,12 @@ export function buildMarkdown(
   // items and paragraphs under it indent by
   let listMarkerWidths: number[] = [];
   // listContinuationIndent and blockquotePrefix are declared further down
-  const mergedContent = mergeConsecutiveRuns(joinTrackedParagraphBreaks(content, marks, para => (
-    para.blockquoteLevel ? blockquotePrefix(para)
-      : para.listContinuation ? listContinuationIndent(para.listContinuation)
-        : ''
+  // A quote paragraph's own lines take its prefix in the main loop below
+  const mergedContent = mergeConsecutiveRuns(joinTrackedParagraphBreaks(content, marks, (para, opening) => (
+    opening && prefixesQuoteLines(opening) ? ''
+      : para.blockquoteLevel ? blockquotePrefix(para)
+        : para.listContinuation ? listContinuationIndent(para.listContinuation)
+          : ''
   )));
 
   // Build 1-indexed comment ID remap (order of first appearance in document)
@@ -5802,7 +5841,34 @@ export function buildMarkdown(
   const noteBodies = new Map(noteEntries.map(entry => [entry, mergeConsecutiveRuns(joinTrackedParagraphBreaks(entry.body, marks))]));
   collectCommentMetadata(mergedContent);
   for (const entry of noteEntries) collectCommentMetadata(entry.body);
+  // A comment in a table cell whose body has more than one line takes ID
+  // syntax, which puts the body after the table, as a cell has one line
+  const bodyHasLines = (c: Comment) => c.text.includes('\n') || (!!c.replies?.length
+    && (!c.consecutiveReplies || c.replies.some(reply => reply.text.includes('\n'))));
+  for (const items of [mergedContent, ...noteEntries.map(entry => entry.body)]) {
+    for (const item of items) {
+      if (item.type !== 'table') continue;
+      for (const row of item.rows) for (const cell of row.cells) for (const para of cell.paragraphs) for (const part of para) {
+        if (!('commentIds' in part) || !part.commentIds) continue;
+        for (const id of part.commentIds) {
+          const c = comments.get(id);
+          if (c && bodyHasLines(c)) forceIdCommentIds.add(id);
+        }
+      }
+    }
+  }
   for (const id of overUnanchored) if (overAnchored.has(id)) forceIdCommentIds.add(id);
+  // Text that starts with a line break right after a body's {>>, as without
+  // an author, which export takes for an opener at a line's end and moves to
+  // a paragraph of its own: the body takes ID syntax, which starts a line,
+  // and replies go on lines of their own
+  const opensWithBreak = (author: string | undefined, text: string) => !(author || '').trim() && /^[\r\n]/.test(text);
+  for (const [id, c] of comments) {
+    if (opensWithBreak(c.author, c.text)) forceIdCommentIds.add(id);
+    if (c.consecutiveReplies && c.replies?.some(reply => opensWithBreak(reply.author, reply.text))) {
+      comments.set(id, { ...c, consecutiveReplies: false });
+    }
+  }
 
   // A comment whose range spans paragraphs takes ID syntax, which keeps its
   // range open from one to the next, up to its last item. One that reaches
@@ -6063,9 +6129,10 @@ export function buildMarkdown(
   // metadata is absent (plain↔alert or alert↔different-alert transitions).
   let lastBlockquoteAlertType: GfmAlertType | 'plain' | undefined;
   let lastBlockquoteLevel: number | undefined;
-  // A quote paragraph's comment bodies stay in its quote, where a line
-  // without > after it would start a paragraph of its own
-  let deferredCommentPrefix = '';
+  // A quote paragraph's lines after its first, and its comment bodies, stay
+  // in its quote, where a line without > after it would start a paragraph of
+  // its own
+  let quoteLinePrefix = '';
   let deferredCommentQuote: { group?: number; level: number } | undefined;
   // The last comment bodies written into a quote
   let quotedBodies: { text: string; group?: number; level: number } | undefined;
@@ -6524,8 +6591,8 @@ export function buildMarkdown(
         }
       }
 
-      deferredCommentPrefix = item.blockquoteLevel && !item.headingLevel && !item.listMeta && !item.isCodeBlock ? blockquotePrefix(item) : '';
-      deferredCommentQuote = deferredCommentPrefix ? { group: item.blockquoteGroupIndex, level: item.blockquoteLevel ?? 1 } : undefined;
+      quoteLinePrefix = prefixesQuoteLines(item) ? blockquotePrefix(item) : '';
+      deferredCommentQuote = quoteLinePrefix ? { group: item.blockquoteGroupIndex, level: item.blockquoteLevel ?? 1 } : undefined;
       if (item.headingLevel) {
         lastAlertParagraphKey = undefined;
         pendingAlertPrefixStrip = undefined;
@@ -7022,12 +7089,18 @@ export function buildMarkdown(
       }
       pendingHeadingCriticMarker = undefined;
     }
+    // A quote's continuation lines, as of a comment's body, take its prefix,
+    // without which a line break in the body reads as a paragraph break
+    if (quoteLinePrefix) {
+      textOut = textOut.replace(/\n(?=([\s\S]))/g, (_m, next: string) =>
+        '\n' + (next === '\n' ? quoteLinePrefix.trimEnd() : quoteLinePrefix));
+    }
     if (rendered.deferredComments.length > 0) {
       // Strip trailing newlines (from <w:br/> between comment references in round-tripped DOCX)
       output.push(textOut.replace(/(\\?\n)+$/, ''));
       output.push('\n');
       const bodies = rendered.deferredComments.join('\n').split('\n')
-        .map(line => (line ? deferredCommentPrefix : deferredCommentPrefix.trimEnd()) + line).join('\n');
+        .map(line => (line ? quoteLinePrefix : quoteLinePrefix.trimEnd()) + line).join('\n');
       output.push(bodies);
       if (deferredCommentQuote) quotedBodies = { text: bodies, ...deferredCommentQuote };
     } else {

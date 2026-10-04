@@ -290,15 +290,17 @@ function pushManuscriptToken(state: StateInline, type: string, tag: string, nest
  */
 function parseCommentContent(content: string): { author?: string; date?: string; text: string } {
   if (content.startsWith('@')) {
-    // Try @Author (Date) | text  — \s* allows missing/extra whitespace
-    const match = content.match(/^@(.+?)\s*\(([^)]+)\)\s*\|\s*([\s\S]*)$/);
+    // Try @Author (Date) | text  — \s* allows missing/extra whitespace. One
+    // space after | is the separator's; more whitespace, or a line's end, is
+    // the text's, whose first paragraph can be empty
+    const match = content.match(/^@(.+?)\s*\(([^)]+)\)\s*\| ?([\s\S]*)$/);
     if (match) {
       const author = match[1].trim();
       const date = match[2].trim();
       if (author) return { author, ...(date ? { date } : {}), text: match[3] };
     }
     // Try @Author | text
-    const simpleMatch = content.match(/^@([^|]+?)\s*\|\s*([\s\S]*)$/);
+    const simpleMatch = content.match(/^@([^|]+?)\s*\| ?([\s\S]*)$/);
     if (simpleMatch) {
       const author = simpleMatch[1].trim();
       if (author) return { author, text: simpleMatch[2] };
@@ -6720,7 +6722,8 @@ function commentsXml(comments: CommentEntry[]): string {
       const paraIdAttr = isLast ? ' w14:paraId="' + c.paraId + '" w14:textId="77777777"' : '';
       const annotationRefRun = pi === 0
         ? '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:annotationRef/></w:r>' : '';
-      xml += '<w:p' + paraIdAttr + '>' + annotationRefRun + '<w:r>' + wt(paragraphs[pi]) + '</w:r></w:p>';
+      // A line's end in a paragraph is a line break, as Word writes it
+      xml += '<w:p' + paraIdAttr + '>' + annotationRefRun + '<w:r>' + paragraphs[pi].split('\n').map(wt).join('<w:br/>') + '</w:r></w:p>';
     }
     xml += '</w:comment>';
   }

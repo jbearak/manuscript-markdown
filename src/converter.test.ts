@@ -405,7 +405,7 @@ describe('DOCX table conversion', () => {
     expect(paraMatch?.[1]).toBe(bodyMarkdown);
   });
 
-  test('emits deferred ID comment bodies outside table cell paragraph tags', () => {
+  test('emits deferred ID comment bodies after an HTML table', () => {
     const comments = new Map([
       ['1', { author: 'Reviewer', text: 'note', date: '' }],
     ]);
@@ -434,7 +434,7 @@ describe('DOCX table conversion', () => {
     expect(paraMatch?.[1]).toBe('{#1}commented{/1}');
     expect(paraMatch?.[1]).not.toContain('{#1>>');
     expect(tableMarkdown).toContain('{#1>>@Reviewer | note<<}');
-    expect(tableMarkdown).toContain('</p>\n      {#1>>@Reviewer | note<<}');
+    expect(tableMarkdown).toContain('</table>\n\n{#1>>@Reviewer | note<<}');
   });
 });
 
@@ -1815,6 +1815,109 @@ describe('Comments over display equations', () => {
       { type: 'text', text: 'B', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
     ] as ContentItem[], comments);
     expect(markdown).toBe('{#1}' + equation + '{/1}B\n{#1>>@A | c<<}');
+  });
+});
+
+describe('Comments with more than one line', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+  const body = (text: string) => '{>>@A (2024-01-15 10:30) | ' + text + '<<}';
+
+  test.each([
+    ['two paragraphs', 'A {==b==}' + body('one\n\ntwo') + ' c.'],
+    ['a line break', 'A {==b==}' + body('one\ntwo') + ' c.'],
+    ['two paragraphs in a list item', '- A {==b==}' + body('one\n\ntwo') + ' c.\n- d'],
+    ['a line break in a quote', '> A {==b==}' + body('one\n> two') + ' c.'],
+    ['two paragraphs in a quote', '> A {==b==}' + body('one\n>\n> two') + ' c.'],
+    ['a line break in an alert in a list', '1. item\n\n   > [!NOTE]\n   > A {==b==}' + body('one\n   > two') + ' c.'],
+    ['an empty first paragraph', 'A {==b==}' + body('\n\ntwo') + ' c.'],
+    ['spaces at its start', 'A {==b==}' + body('  two') + ' c.'],
+    ['two paragraphs in a table cell', '| h |\n| --- |\n| {#1}b{/1} |\n\n{#1>>@A (2024-01-15 10:30) | one\n\ntwo<<}'],
+    ['a reply in a table cell', '| h |\n| --- |\n| {#1}b{/1} |\n\n{#1>>@A (2024-01-15 10:30) | one\n  {>>@B (2024-01-15 10:31) | two<<}\n<<}'],
+  ])('keeps a comment with %s', async (_name, md) => {
+    // Import joined the comment's paragraphs with nothing between them, and
+    // export wrote a line's end into the text, where Word writes a break.
+    // In a quote, the body's next line lacked the quote's prefix; in a table
+    // cell, which can't hold a line's end, the table became HTML, where the
+    // comment was text; and export took a blank line, or more than one
+    // space, after | as the space before the text
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    ['a quote', '> A\\\n> b'],
+    ['an alert', '> [!NOTE]\n> A\\\n> b\\\n> c'],
+  ])('keeps the prefix of a line after a line break in %s', async (_name, md) => {
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('writes the body of a comment with paragraphs in an HTML table after the table', async () => {
+    // A blank line in the body ended the table's HTML; a cell of a table
+    // only HTML holds, as with merged cells, writes the comment as text
+    const md = '<table>\n  <tr>\n    <td colspan="2">h</td>\n  </tr>\n  <tr>\n    <td>XX</td>\n    <td>y</td>\n  </tr>\n</table>\n\nA {==b==}' + body('one\n\ntwo') + ' c.';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    let xml = await zip.file('word/document.xml')!.async('string');
+    const start = '<w:commentRangeStart w:id="0"/>';
+    const end = /<w:commentRangeEnd w:id="0"\/>(<w:r>(?:(?!<\/w:r>).)*?<w:commentReference w:id="0"\/><\/w:r>)/.exec(xml)!;
+    xml = xml.replace(start, '').replace(end[0], '')
+      .replace(/<w:r>(?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>/, run => start + run + '<w:commentRangeEnd w:id="0"/>' + end[1]);
+    zip.file('word/document.xml', xml);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    const table = markdown.slice(0, markdown.indexOf('</table>'));
+    expect(table).toContain('{#1}XX{/1}');
+    expect(table).not.toContain('\n\n');
+    expect(markdown.slice(table.length)).toBe('</table>\n\n{#1>>@A (2024-01-15 10:30) | one\n\ntwo<<}\n\nA b c.');
+  });
+
+  test('writes a comment whose text starts with a break in ID syntax', async () => {
+    // After {==b==}, export took the {>> before the break for an opener at
+    // a line's end, and moved the body to a paragraph of its own
+    const md = 'A {#1}b{/1} c.\n{#1>>\n\ntwo<<}';
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('writes a reply whose text starts with a break on a line of its own', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A {==b==}' + body('one') + '{>>@B (2024-01-15 10:31) | two<<} c.')).docx);
+    const xml = await zip.file('word/comments.xml')!.async('string');
+    const edited = xml.replace('w:author="B" w:initials="B"', 'w:author="" w:initials=""')
+      .replace('<w:t>two</w:t></w:r></w:p>', '</w:r></w:p><w:p><w:r><w:t>two</w:t></w:r></w:p>');
+    expect(edited).not.toBe(xml);
+    zip.file('word/comments.xml', edited);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('A {==b==}{>>@A (2024-01-15 10:30) | one\n  {>>\n\ntwo<<}\n<<} c.');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps the text of a comment with paragraphs in a list item', async () => {
+    const { docx } = await convertMdToDocx('- A {==b==}' + body('one\n\ntwo') + ' c.');
+    expect([...(await extractComments(docx)).values()].map(c => c.text)).toEqual(['one\n\ntwo']);
+  });
+
+  test('leaves out a page break and deleted text in a comment', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A {==b==}' + body('one') + ' c.')).docx);
+    const xml = await zip.file('word/comments.xml')!.async('string');
+    const edited = xml.replace('<w:t>one</w:t></w:r>', '<w:t>one</w:t><w:br w:type="page"/><w:t>two</w:t></w:r>'
+      + '<w:del w:id="9" w:author="A" w:date="2024-01-15T10:30:00Z"><w:r><w:br/><w:delText>gone</w:delText></w:r></w:del>');
+    expect(edited).not.toBe(xml);
+    zip.file('word/comments.xml', edited);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('A {==b==}' + body('onetwo') + ' c.');
+  });
+
+  test('joins a comment\'s paragraph whose mark is deleted to the next', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A {==b==}' + body('one\n\ntwo') + ' c.')).docx);
+    const xml = await zip.file('word/comments.xml')!.async('string');
+    const edited = xml.replace(/(<w:p>)(<w:r><w:rPr><w:rStyle w:val="CommentReference"\/>)/,
+      '$1<w:pPr><w:rPr><w:del w:id="9" w:author="A" w:date="2024-01-15T10:30:00Z"/></w:rPr></w:pPr>$2');
+    expect(edited).not.toBe(xml);
+    zip.file('word/comments.xml', edited);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('A {==b==}' + body('onetwo') + ' c.');
+  });
+
+  test('writes a comment\'s paragraphs and line breaks as Word does', async () => {
+    const { docx } = await convertMdToDocx('A {==b==}' + body('one\ntwo\n\nthree') + ' c.');
+    const xml = await (await JSZip.loadAsync(docx)).file('word/comments.xml')!.async('string');
+    expect(xml).toContain('<w:t>one</w:t><w:br/><w:t>two</w:t></w:r></w:p>');
+    expect(xml).toContain('<w:r><w:t>three</w:t></w:r></w:p>');
   });
 });
 
