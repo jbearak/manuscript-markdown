@@ -78,6 +78,20 @@ function alertOcticonSvg(type: GfmAlertType): string {
 
 interface AlertHit { inlineIdx: number; paraOpenIdx: number; type: GfmAlertType; rest: string }
 
+/**
+ * Whether children[c] can hold a task's box or an alert's marker, as GFM
+ * reads one: text, not code, formatting, a link or an escaped [, that starts
+ * the paragraph, after any empty text, or with `afterBreak` a line.
+ */
+function holdsMarker(children: Token[], c: number, afterBreak = false): boolean {
+  if (children[c]?.type !== 'text') return false;
+  for (let k = c - 1; k >= 0; k--) {
+    if (afterBreak && (children[k].type === 'softbreak' || children[k].type === 'hardbreak')) return true;
+    if (children[k].type !== 'text' || children[k].content !== '') return false;
+  }
+  return true;
+}
+
 function alertBlockquoteRule(state: StateCore): void {
   const tokens = state.tokens;
   let i = 0;
@@ -105,7 +119,7 @@ function alertBlockquoteRule(state: StateCore): void {
       // Find all child indices that are alert markers
       const markerChildIndices: number[] = [];
       for (let c = 0; c < children.length; c++) {
-        if (children[c].type === 'text' && parseGfmAlertMarker(children[c].content)) {
+        if (holdsMarker(children, c, true) && parseGfmAlertMarker(children[c].content)) {
           markerChildIndices.push(c);
         }
       }
@@ -172,9 +186,9 @@ function alertBlockquoteRule(state: StateCore): void {
       if (token.type === 'blockquote_close') { nestedDepth--; continue; }
       if (nestedDepth > 0) continue;
       if (token.type !== 'inline' || !token.children) continue;
-      const firstText = token.children.find(child => child.type === 'text' && child.content.length > 0);
-      if (!firstText) continue;
-      const parsed = parseGfmAlertMarker(firstText.content);
+      const firstTextIdx = token.children.findIndex(child => child.type === 'text' && child.content.length > 0);
+      if (!holdsMarker(token.children, firstTextIdx)) continue;
+      const parsed = parseGfmAlertMarker(token.children[firstTextIdx].content);
       if (!parsed) continue;
       let paraOpenIdx = j - 1;
       while (paraOpenIdx > i && tokens[paraOpenIdx].type !== 'paragraph_open') paraOpenIdx--;
@@ -337,24 +351,32 @@ function autolinkLiteralsRule(state: StateCore): void {
 
 /** Core rule: detect GFM task list markers at list item starts and mark list_item_open tokens. */
 function taskListRule(state: StateCore): void {
-  const stack: number[] = [];
+  // Each open list item, and whether its first block has gone by, as GFM
+  // reads a box only at the start of an item's first paragraph
+  const stack: Array<{ index: number; started: boolean }> = [];
   for (let i = 0; i < state.tokens.length; i++) {
     const token = state.tokens[i];
     if (token.type === 'list_item_open') {
-      stack.push(i);
+      stack.push({ index: i, started: false });
       continue;
     }
     if (token.type === 'list_item_close') {
       stack.pop();
       continue;
     }
-    if (token.type !== 'inline' || !token.children || stack.length === 0) continue;
+    const item = stack[stack.length - 1];
+    if (!item || item.started || token.nesting === -1 || token.type === 'inline') continue;
+    item.started = true;
+    const inline = state.tokens[i + 1];
+    if (token.type !== 'paragraph_open' || inline?.type !== 'inline' || !inline.children) continue;
 
-    const listItemOpen = state.tokens[stack[stack.length - 1]];
+    const listItemOpen = state.tokens[item.index];
     if (listItemOpen.meta?.taskChecked !== undefined) continue;
+    const children = inline.children;
 
-    const firstText = token.children.find(child => child.type === 'text' && child.content.length > 0);
-    if (!firstText) continue;
+    const firstTextIdx = children.findIndex(child => child.type === 'text' && child.content.length > 0);
+    if (!holdsMarker(children, firstTextIdx)) continue;
+    const firstText = children[firstTextIdx];
     const parsed = parseTaskListMarker(firstText.content);
     if (!parsed) continue;
 
