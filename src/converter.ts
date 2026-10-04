@@ -4435,6 +4435,89 @@ function renderInlineRangeWithIds(
   return { text: joinRevisedSpans(out), nextIndex: i, deferredComments: deferred.map(d => d.body) };
 }
 
+/**
+ * A cell paragraph's text items as the HTML of a <p>, or undefined if it
+ * holds what a cell can't: a cell takes HTML formatting only (see HTML
+ * Tables in the specification), so a comment, a tracked change, a
+ * highlight, a citation, a note, math or an image would export as literal
+ * text. Whitespace HTML collapses or trims is written as references.
+ */
+function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
+  type TextItem = Extract<ContentItem, { type: 'text' }>;
+  // The paragraph's text, with each line break as null
+  const pieces: Array<{ text: string; item: TextItem; html: string } | null> = [];
+  for (const item of items) {
+    if (item.type !== 'text' || item.revision || item.commentIds.size > 0 || item.formatting.highlight) return undefined;
+    item.text.split('\\\n').forEach((text, k) => {
+      if (k > 0) pieces.push(null);
+      if (text) pieces.push({ text, item, html: '' });
+    });
+  }
+  // Each piece's HTML, from the characters of its line, as the whitespace a
+  // line keeps can straddle two pieces
+  for (let k = 0; k < pieces.length; k++) {
+    let end = k;
+    while (end < pieces.length && pieces[end] !== null) end++;
+    const line = pieces.slice(k, end) as Array<{ text: string; item: TextItem; html: string }>;
+    const characters = htmlLineCharacters(line.map(piece => piece.text).join(''));
+    let at = 0;
+    for (const piece of line) piece.html = characters.slice(at, at += piece.text.length).join('');
+    k = end;
+  }
+  let html = '';
+  // The tags open around the text, outermost first, which the next piece
+  // keeps as far as its own match, so <b>a <i>b</i></b> stays nested
+  let open: string[] = [];
+  const closeTo = (depth: number) => {
+    while (open.length > depth) html += '</' + /^<(\w+)/.exec(open.pop()!)![1] + '>';
+  };
+  let breaks = 0;
+  pieces.forEach(piece => {
+    if (piece === null) {
+      breaks++;
+      return;
+    }
+    const lineBreaks = breaks;
+    breaks = 0;
+    const fmt = piece.item.formatting;
+    const tags = [
+      ...(piece.item.href ? ['<a href="' + escapeHtmlAttr(piece.item.href) + '">'] : []),
+      ...(fmt.bold ? ['<b>'] : []),
+      ...(fmt.italic ? ['<i>'] : []),
+      ...(fmt.strikethrough ? ['<s>'] : []),
+      ...(fmt.underline ? ['<u>'] : []),
+      ...(fmt.superscript ? ['<sup>'] : fmt.subscript ? ['<sub>'] : []),
+      ...(fmt.code ? ['<code>'] : []),
+    ];
+    let kept = 0;
+    while (kept < open.length && kept < tags.length && open[kept] === tags[kept]) kept++;
+    closeTo(kept);
+    html += '<br>'.repeat(lineBreaks) + tags.slice(kept).join('') + piece.html;
+    open = tags;
+  });
+  closeTo(0);
+  return html + '<br>'.repeat(breaks);
+}
+
+/** A line of a cell's text as HTML, a string for each of its characters.
+ *  HTML collapses a run of spaces and drops those at a line's start, so a
+ *  space after another, or at the start of a line with text, is a reference,
+ *  as is a tab or no-break space. A line of spaces alone is empty, as a
+ *  paragraph is (see keepParagraphEdgeWhitespace). */
+function htmlLineCharacters(line: string): string[] {
+  if (!/[^ ]/.test(line)) return line.split('');
+  const lead = /^[ \t\u00a0]*/.exec(line)![0].length;
+  return line.split('').map((c, i) => c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;'
+    : c === '\t' ? '&#9;' : c === '\u00a0' ? '&nbsp;'
+      : c === ' ' && (i < lead || line[i - 1] === ' ') ? '&#32;' : c);
+}
+
+/** Whether every cell of a table takes HTML (see renderHtmlCellParagraph) */
+function htmlCellsHoldTable(table: { rows: TableRow[] }): boolean {
+  return table.rows.every(row => row.cells.every(cell =>
+    cell.paragraphs.every(para => renderHtmlCellParagraph(para) !== undefined)));
+}
+
 function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comment>, indent: string = '  ', renderOpts?: RenderOpts, extraAttrs: string = ''): string {
   const i1 = indent;  // tr level
   const i2 = indent + indent;  // td/th level
@@ -4450,7 +4533,20 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
       if (cell.rowspan && cell.rowspan > 1) attrs += ' rowspan="' + cell.rowspan + '"';
       lines.push(i2 + '<' + tag + attrs + '>');
       for (const para of cell.paragraphs) {
-        const rendered = renderInlineSegment(mergeConsecutiveRuns(para), comments, renderOpts);
+        // Export makes a header cell bold, as for a pipe table
+        const items = mergeConsecutiveRuns(row.isHeader
+          ? para.map(item => item.type === 'text' && item.formatting?.bold
+            ? { ...item, formatting: { ...item.formatting, bold: false } }
+            : item)
+          : para);
+        const html = renderHtmlCellParagraph(items);
+        if (html !== undefined) {
+          lines.push(i3 + '<p>' + html + '</p>');
+          continue;
+        }
+        // In a table only HTML holds, such as one with merged cells, the
+        // rest exports as literal text
+        const rendered = renderInlineSegment(items, comments, renderOpts);
         lines.push(i3 + '<p>' + keepParagraphEdgeWhitespace(rendered.text, true, true) + '</p>');
         if (rendered.deferredComments.length > 0) {
           lines.push(i3 + rendered.deferredComments.join('\n' + i3));
@@ -4961,8 +5057,10 @@ function renderTableOrFallback(
   }
   const r = (body: string) => ({ directivePrefix: fontPrefix, body });
   const rHtml = (body: string) => ({ directivePrefix: '', body });
-  // If the original format was HTML or font value is comment-unsafe, emit HTML directly
-  if (storedFormat === 'html' || forceHtmlTable) {
+  // If the original format was HTML or font value is comment-unsafe, emit HTML
+  // directly. A table that holds what HTML cells can't goes on as if it had
+  // no stored format, to a format that can, unless it needs HTML.
+  if ((storedFormat === 'html' && htmlCellsHoldTable(item)) || forceHtmlTable) {
     return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs));
   }
   // Parse stored grid source column widths for this table

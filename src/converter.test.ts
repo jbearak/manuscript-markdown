@@ -4365,6 +4365,64 @@ describe('HTML comments in notes', () => {
   });
 });
 
+describe('HTML table cells', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+  const table = (cell: string) => '<table>\n  <tr>\n    <th>\n      <p>h</p>\n    </th>\n  </tr>\n  <tr>\n    <td>\n' + cell + '\n    </td>\n  </tr>\n</table>';
+
+  test.each([
+    ['formatting', '      <p><b>b</b> <i>i</i> <u>u</u> <s>s</s> x<sup>2</sup> H<sub>2</sub>O <code>c</code> <a href="https://e.com/?a=1&amp;b=2">l</a></p>'],
+    ['nested formatting', '      <p><b><i>bi</i></b> <b>b <i>bi</i></b></p>'],
+    ['characters HTML or Markdown would read', '      <p>a &lt; b &amp;&amp; c &gt; d * _ [x] `y` {++w++}</p>'],
+    ['two paragraphs and a line break', '      <p>a</p>\n      <p>b<br>c</p>'],
+    ['two line breaks, apart from two paragraphs', '      <p>a<br><br>b</p>'],
+    ['empty paragraphs', '      <p></p>\n      <p>a</p>\n      <p></p>\n      <p>b</p>\n      <p></p>'],
+    ['a line break at the end of a paragraph', '      <p>a<br></p>'],
+    ['a space at the start of a line', '      <p>a<br>&#32;b</p>'],
+    ['a link whose target has an apostrophe', '      <p><a href="https://e.com/O\'Brien">o</a></p>'],
+    ['whitespace HTML would collapse', '      <p>a&#9;b &#32;c</p>'],
+    ['a space at the start of a line before formatting', '      <p>&#32;<b>x</b> &#32;<i>y</i><br>&#32;&#32;<b>&#32;z</b>&nbsp;</p>'],
+  ])('keeps %s', async (_name, cell) => {
+    // Import wrote Markdown in the cell, which exports as literal text, with
+    // a backslash before each character Markdown would read, and more on
+    // each round trip, and a cell's paragraphs as one with a \ break
+    const md = table(cell);
+    expect(await roundTrip(md)).toBe(md);
+    expect(await roundTrip(await roundTrip(md))).toBe(md);
+  });
+
+  test('writes a cell\'s paragraphs as paragraphs of the Word cell', async () => {
+    const { docx } = await convertMdToDocx(table('      <p>a</p>\n      <p>b</p>'));
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const cell = xml.split('<w:tc>')[2];
+    expect(cell.match(/<w:p[ >]/g)).toHaveLength(2);
+    expect(cell).not.toContain('<w:br/>');
+  });
+
+  test('reads a Word cell with two paragraphs, under a bold header, as HTML', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('| h |\n| --- |\n| XX |')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const two = xml.replace('<w:r><w:t>XX</w:t></w:r></w:p>', '<w:r><w:t>a</w:t></w:r></w:p><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>b</w:t></w:r></w:p>');
+    expect(two).not.toBe(xml);
+    zip.file('word/document.xml', two);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe(table('      <p>a</p>\n      <p><b>b</b></p>'));
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('writes a table whose cells hold what HTML can\'t in a format that can, unless it needs HTML', () => {
+    // Its comment exported as literal text
+    const comments = new Map([['0', { author: 'A', text: 'c', date: '' }]]);
+    const text = (t: string, ids: string[] = []) => ({ type: 'text', text: t, commentIds: new Set(ids), formatting: DEFAULT_FORMATTING });
+    const markdown = (colspan: number) => buildMarkdown([{ type: 'table', rows: [
+      { isHeader: true, cells: [{ paragraphs: [[text('h')]], colspan }] },
+      { isHeader: false, cells: [{ paragraphs: [[text('a '), text('b', ['0'])]], colspan }] },
+    ] }] as ContentItem[], comments, { tableFormatMapping: new Map([['0', 'html']]) });
+    expect(markdown(1)).toBe('| h |\n| --- |\n| a {==b==}{>>@A \\| c<<} |');
+    expect(markdown(2)).toStartWith('<table>\n  <tr>\n    <th colspan="2">');
+  });
+});
+
 describe('Whitespace at the edges of a paragraph', () => {
   const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
   /** The Markdown of md's export, with the text XX in part replaced by text */

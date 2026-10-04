@@ -202,6 +202,8 @@ function renderRuns(runs: HtmlTableRun[]): string {
   for (const run of runs) {
     if (run.type === 'hardbreak' || run.type === 'softbreak') {
       html += '<br>';
+    } else if (run.type === 'paragraph') {
+      html += '<br><br>';
     } else {
       html += escapeHtml(run.text);
     }

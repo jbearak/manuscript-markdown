@@ -143,6 +143,7 @@ export interface MdTableRow {
 
 export interface MdRun {
   criticParagraphBreak?: true; // first of two softbreaks representing a blank line inside a Critic payload
+  cellParagraphBreak?: true; // hardbreak between two of an HTML table cell's paragraphs, which generateTable splits on
   type: 'text' | 'critic_add' | 'critic_del' | 'critic_sub' | 'critic_highlight' | 'critic_comment' | 'citation' | 'math' | 'softbreak' | 'hardbreak' | 'comment_range_start' | 'comment_range_end' | 'comment_body_with_id' | 'footnote_ref' | 'html_comment' | 'image';
   text: string;
   bold?: boolean;
@@ -186,6 +187,9 @@ export interface MdRun {
 function mapHtmlTableRunToMdRun(run: HtmlTableRun): MdRun {
   if (run.type === 'softbreak') {
     return { type: 'hardbreak', text: '\n' };
+  }
+  if (run.type === 'paragraph') {
+    return { type: 'hardbreak', text: '\n', cellParagraphBreak: true };
   }
   return {
     type: 'text',
@@ -6611,14 +6615,23 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
         mergeMap.set(gridCol, { remaining: rs - 1, colspan: cs });
       }
 
-      xml += '<w:tc>' + tcPr + '<w:p>' + tablePPr;
+      xml += '<w:tc>' + tcPr;
       // Auto-bold header cells to match Word's default table header styling.
       // Word applies bold to header rows via table styles; we reproduce that here.
       const cellRuns = withoutCommentBodyLines(row.header
         ? cell.runs.map(r => r.type === 'text' && !r.bold ? { ...r, bold: true } : r)
         : cell.runs);
-      xml += generateRuns(cellRuns, state, options, bibEntries, citeprocEngine);
-      xml += '</w:p></w:tc>';
+      // An HTML cell's paragraphs, each a paragraph of the Word cell
+      let paragraphRuns: MdRun[] = [];
+      for (const run of [...cellRuns, { type: 'hardbreak', text: '\n', cellParagraphBreak: true } as MdRun]) {
+        if (!run.cellParagraphBreak) {
+          paragraphRuns.push(run);
+          continue;
+        }
+        xml += '<w:p>' + tablePPr + generateRuns(paragraphRuns, state, options, bibEntries, citeprocEngine) + '</w:p>';
+        paragraphRuns = [];
+      }
+      xml += '</w:tc>';
       gridCol += cs;
     }
     xml += '</w:tr>';
