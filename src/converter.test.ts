@@ -2804,6 +2804,127 @@ describe('wrapWithFormatting', () => {
 
 });
 
+describe('Emphasis between runs', () => {
+  const run = (text: string, formatting: Partial<RunFormatting> = {}): ContentItem =>
+    ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting } });
+  const FORMATS = ['bold', 'italic', 'strikethrough', 'underline', 'superscript', 'highlight', 'code'] as const;
+  // Each character's text and formats, as Markdown reads them back
+  const characters = (markdown: string) => parseMd(markdown).flatMap(token => token.runs ?? [])
+    .flatMap(r => [...r.text].map(c => c + ':' + FORMATS.filter(f => r[f]).join('+')));
+  // ...and as the runs have them
+  const expectedCharacters = (items: ContentItem[]) => items
+    .flatMap(item => item.type === 'text' ? [...item.text].map(c => c + ':' + FORMATS.filter(f => item.formatting[f]).join('+')) : []);
+
+  test.each([
+    ['bold starting with punctuation after a letter', [run('a'), run('.b', { bold: true })], 'a<b>.b</b>'],
+    ['italic ending with punctuation before a letter', [run('a.', { italic: true }), run('b')], '<i>a.</i>b'],
+    ['bold italic ending with punctuation before a digit', [run('--', { bold: true, italic: true }), run('1a')], '<b>*--*</b>1a'],
+    ['italic before bold', [run('a', { italic: true }), run('b', { bold: true })], '*a*<b>b</b>'],
+    ['bold before bold italic', [run('x', { bold: true }), run('y', { bold: true, italic: true })], '**x**<b>*y*</b>'],
+    ['bold underline after a letter', [run('a'), run('b', { bold: true, underline: true })], 'a<b><u>b</u></b>'],
+    ['strikethrough superscript after a letter', [run('a'), run('b', { strikethrough: true, superscript: true })], 'a<s><sup>b</sup></s>'],
+  ])('writes %s as HTML', (_name, items, markdown) => {
+    const written = buildMarkdown(items, new Map());
+    expect(written).toBe(markdown);
+    expect(characters(written)).toEqual(expectedCharacters(items));
+  });
+
+  test.each([
+    ['bold after a letter', [run('a'), run('b', { bold: true })], 'a**b**'],
+    ['bold ending with punctuation before a space', [run('Note:', { bold: true }), run(' text')], '**Note:** text'],
+    ['bold italic after a letter', [run('a'), run('b', { bold: true, italic: true })], 'a***b***'],
+    ['strikethrough before bold strikethrough', [run('a', { strikethrough: true }), run('b', { bold: true, strikethrough: true })], '~~a~~**~~b~~**'],
+    ['bold after an escaped asterisk', [run('*'), run('b', { bold: true })], '\\***b**'],
+  ])('keeps %s as Markdown', (_name, items, markdown) => {
+    expect(buildMarkdown(items, new Map())).toBe(markdown);
+  });
+
+  test('writes HTML in a comment', () => {
+    const items = [run('a'), run('.b', { bold: true })].map(item => ({ ...item, commentIds: new Set(['c1']) })) as ContentItem[];
+    const comments = new Map([['c1', { author: 'R', text: 'note', date: '2024-01-01T00:00:00Z' }]]);
+    expect(buildMarkdown(items, comments)).toStartWith('{==a<b>.b</b>==}');
+  });
+
+  test.each([
+    ['a struck >a for b', [['>a', { strikethrough: true }]], [['b', {}]]],
+    ['a for a struck }b', [['a', {}]], [['}b', { strikethrough: true }]]],
+    ['struck >a and c for b and d', [['>a', { strikethrough: true }], ['c', {}]], [['b', {}], ['d', {}]]],
+  ] as Array<[string, Array<[string, Partial<RunFormatting>]>, Array<[string, Partial<RunFormatting>]>]>)('keeps %s, a substitution, as written', (_name, deleted, added) => {
+    // A mark hid the ~> or ~~} its strikethrough's delimiters made from
+    // the check that the substitution reads back: {~~~~>a~~~>b~~}
+    const revision = (type: 'deletion' | 'addition') => ({ type, author: 'A', date: '2024-01-01T00:00:00Z' });
+    const side = (runs: typeof deleted, type: 'deletion' | 'addition') =>
+      runs.map(([text, formatting]) => ({ ...run(text, formatting), revision: revision(type) }) as ContentItem);
+    const written = buildMarkdown([run('x '), ...side(deleted, 'deletion'), ...side(added, 'addition'), run(' y')], new Map());
+    const runs = parseMd(written).flatMap(token => token.runs ?? []);
+    const read = (type: string) => runs.filter(r => r.type === type || r.type === 'critic_sub')
+      .flatMap(r => r.type === 'critic_sub' ? (type === 'critic_del' ? r.oldRuns : r.newRuns) ?? [] : r.innerRuns ?? [{ ...r, type: 'text' }])
+      .flatMap(r => [...r.text].map(c => c + (r.strikethrough ? '~' : '')));
+    const expected = (side: typeof deleted) => side.flatMap(([text, f]) => [...text].map(c => c + (f.strikethrough ? '~' : '')));
+    expect(read('critic_del')).toEqual(expected(deleted));
+    expect(read('critic_add')).toEqual(expected(added));
+  });
+
+  test('closes bold with equations in it before a letter', () => {
+    const items: ContentItem[] = [run('x', { bold: true }), { type: 'math', latex: 'y', display: false, commentIds: new Set() }, run('.', { bold: true }), run('z')];
+    expect(buildMarkdown(items, new Map())).toBe('<b>x$y$.</b>z');
+  });
+
+  test.each([
+    ['an = before a highlight', [run('a='), run('b', { highlight: true })], 'a\\===b=='],
+    ['an = between highlights', [run('a', { highlight: true }), run('='), run('b', { highlight: true, highlightColor: 'red' })], '==a==\\===b=={red}'],
+  ])('escapes %s, which would open it a character early', (_name, items, markdown) => {
+    const written = buildMarkdown(items, new Map());
+    expect(written).toBe(markdown);
+    expect(characters(written)).toEqual(expectedCharacters(items));
+  });
+
+  test('keeps highlights side by side as they are', () => {
+    const items = [run('yellow', { highlight: true }), run('cyan', { highlight: true, highlightColor: 'cyan' })];
+    expect(buildMarkdown(items, new Map())).toBe('==yellow====cyan=={turquoise}');
+  });
+
+  test.each([
+    ['bold', [run('a', { code: true }), run('b', { code: true, bold: true })], '`ab`'],
+    ['a highlight with ==, which code drops', [run(':) ', { code: true }), run('$==', { code: true, highlight: true })], '`:) $==`'],
+  ])('writes code beside code with %s as one span', (_name, items, markdown) => {
+    // Their backticks ran into one: `a``b`
+    expect(buildMarkdown(items, new Map())).toBe(markdown);
+  });
+
+  test('keeps highlighted code beside code apart', () => {
+    expect(buildMarkdown([run('a', { code: true }), run('b', { code: true, highlight: true })], new Map())).toBe('`a`==`b`==');
+  });
+
+  test('keeps code beside bold code apart in an HTML table', () => {
+    // HTML keeps the bold outside code, which one span lost
+    const cell = { colspan: 2, paragraphs: [[run('a', { code: true }), run('b', { code: true, bold: true })]] };
+    const table = { type: 'table', rows: [{ isHeader: false, cells: [cell] }] } as unknown as ContentItem;
+    expect(buildMarkdown([table], new Map())).toContain('<p><code>a</code><b><code>b</code></b></p>');
+  });
+
+  test('writes a long paragraph of formatted runs in linear time', () => {
+    const items = Array.from({ length: 40000 }, (_, i) => run(i % 2 ? 'a.' : '.b', { bold: i % 3 === 0, italic: i % 5 === 0 }));
+    const start = performance.now();
+    buildMarkdown(items, new Map());
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+
+  test('property: adjacent runs read back with their formatting', () => {
+    const format = fc.record({
+      bold: fc.boolean(), italic: fc.boolean(), strikethrough: fc.boolean(), underline: fc.boolean(),
+      superscript: fc.boolean(), highlight: fc.boolean(), code: fc.boolean(),
+    });
+    const text = fc.array(fc.constantFrom(...'ab1.:(),!?-"\' \u00e9\u4e2d'), { minLength: 1, maxLength: 3 }).map(c => c.join(''));
+    fc.assert(fc.property(fc.array(fc.tuple(text, format), { minLength: 2, maxLength: 4 }), runs => {
+      const items = runs.map(([t, f]) => run(t, f.code ? { code: true, highlight: f.highlight } : { ...f, code: false }));
+      // Whitespace's formatting doesn't show
+      const visible = (cs: string[]) => cs.filter(c => !/^\s:/.test(c));
+      expect(visible(characters(buildMarkdown(items, new Map())))).toEqual(visible(expectedCharacters(items)));
+    }), { numRuns: 300 });
+  });
+});
+
 describe('buildMarkdown', () => {
   test('Property 2: Consecutive runs with identical formatting merge into a single span', () => {
     fc.assert(
@@ -6033,6 +6154,10 @@ describe('Inline code import (CodeChar detection)', () => {
 describe('Selective escaping for literal HTML-like text', () => {
   test('escapes literal <sup> and </sup> in plain text', () => {
     expect(wrapWithFormatting('x <sup>2</sup>', DEFAULT_FORMATTING)).toBe('x &lt;sup&gt;2&lt;/sup&gt;');
+  });
+
+  test.each(['b', 'strong', 'i', 'em', 's', 'del', 'strike'])('escapes literal <%s> in plain text, which reads as formatting', tag => {
+    expect(wrapWithFormatting('x <' + tag + '>y</' + tag + '>', DEFAULT_FORMATTING)).toBe('x &lt;' + tag + '&gt;y&lt;/' + tag + '&gt;');
   });
 
   test('escapes literal table tags in plain text', () => {
