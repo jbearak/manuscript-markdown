@@ -2,7 +2,7 @@ import JSZip from 'jszip';
 import { XMLParser } from 'fast-xml-parser';
 import { asXmlNodes, ommlToLatex, type XmlNode } from './omml';
 import { resolveMarkdownColor } from './highlight-colors';
-import { Frontmatter, NotesMode, parseFrontmatter, serializeFrontmatter, noteTypeFromNumber, parseColWidths, type CustomStyleDef } from './frontmatter';
+import { FRONTMATTER_OPENING_RE, Frontmatter, NotesMode, parseFrontmatter, serializeFrontmatter, noteTypeFromNumber, parseColWidths, type CustomStyleDef } from './frontmatter';
 import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType } from './gfm';
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
@@ -269,6 +269,7 @@ export type ContentItem =
       customStyleName?: string;      // user-defined custom style name (from MsCustomXxx pStyle)
       paragraphLeftIndentTwips?: number; // raw OOXML left indent for structural inference
       spacerShaped?: boolean; // its only property is w:spacing after="0", as on the empty paragraph export puts after a code block
+      horizontalRule?: boolean; // an empty paragraph with only a bottom border, as export writes a thematic break
       generatedListContinuation?: boolean; // explicit Manuscript continuation paragraph style
       blockquoteIndentUnitTwips?: 240 | 720; // base indent unit for blockquote styles
       emptyParagraphCount?: number; // count of collapsed consecutive empty paragraphs
@@ -542,6 +543,21 @@ export function parseTitleStyle(pPrChildren: XmlNode[]): boolean {
   const pStyleElement = pPrChildren.find(child => child['w:pStyle'] !== undefined);
   if (!pStyleElement) return false;
   return getAttr(pStyleElement, 'val').toLowerCase() === 'title';
+}
+
+/** An empty paragraph with only a bottom border and no style, as export
+ *  writes a horizontal rule, or Word keeps one it moved a section break onto. */
+function isRuleCarrier(pPrChildren: XmlNode[]): boolean {
+  return hasOnlyBottomBorder(pPrChildren) && !pPrChildren.some(child => child['w:pStyle'] !== undefined || child['w:numPr'] !== undefined);
+}
+
+/** Whether a paragraph's only border is at its bottom, as export draws a
+ *  thematic break */
+function hasOnlyBottomBorder(pPrChildren: XmlNode[]): boolean {
+  const pBdr = pPrChildren.find(child => child['w:pBdr'] !== undefined);
+  if (!pBdr) return false;
+  const drawn = asXmlNodes(pBdr['w:pBdr']).filter(border => !['none', 'nil'].includes(getAttr(border, 'val')));
+  return drawn.length === 1 && drawn[0]['w:bottom'] !== undefined;
 }
 
 function parseParagraphLeftIndentTwips(pPrChildren: XmlNode[]): number | undefined {
@@ -2736,6 +2752,7 @@ export async function extractDocumentContent(
           let customStyle: string | undefined;
           let paragraphLeftIndentTwips: number | undefined;
           let spacerShaped = false;
+          let horizontalRule = false;
           let paraFormatting = currentFormatting;
           let isSpacerParagraph = false;
           let isSectionBreakHandled = false;
@@ -2790,8 +2807,10 @@ export async function extractDocumentContent(
                   sectionFence = fence ?? 'none';
                 } else {
                   // An empty section-break carrier, whose children can still
-                  // hold comment ranges
-                  if (fence) walk(paraChildren, paraFormatting, target, inTableCell, currentRevision);
+                  // hold comment ranges, and which can be a rule
+                  const rule = isRuleCarrier(pPrChildren);
+                  if (rule) target.push({ type: 'para', horizontalRule: true });
+                  if (fence || rule) walk(paraChildren, paraFormatting, target, inTableCell, currentRevision);
                   endSection(target, fence);
                   isSectionBreakHandled = true;
                   break;
@@ -2811,6 +2830,9 @@ export async function extractDocumentContent(
               paragraphLeftIndentTwips = parseParagraphLeftIndentTwips(pPrChildren);
               spacerShaped = pPrChildren.length === 1 && pPrChildren[0]['w:spacing'] !== undefined
                 && Object.keys(pPrChildren[0][':@'] ?? {}).join() === '@_w:after' && getAttr(pPrChildren[0], 'after') === '0';
+              // Taken back below if the paragraph has content
+              horizontalRule = !headingLevel && !listMeta && !isTitle && !blockquoteLevel && !isCodeBlock
+                && !generatedListContinuation && !customStyle && hasOnlyBottomBorder(pPrChildren);
               const pRPrElement = pPrChildren.find(pprChild => pprChild['w:rPr'] !== undefined);
               if (pRPrElement) {
                 const pRPrChildren = asXmlNodes(pRPrElement['w:rPr']);
@@ -2867,9 +2889,10 @@ export async function extractDocumentContent(
             prevItem.blockquoteLevel !== undefined ||
             prevItem.isCodeBlock === true ||
             prevItem.generatedListContinuation === true ||
-            prevItem.customStyleName !== undefined
+            prevItem.customStyleName !== undefined ||
+            prevItem.horizontalRule === true
           );
-          const needsPara = inTableCell || (headingLevel || listMeta || isTitle || blockquoteLevel || isCodeBlock || generatedListContinuation || customStyle)
+          const needsPara = inTableCell || (headingLevel || listMeta || isTitle || blockquoteLevel || isCodeBlock || generatedListContinuation || customStyle || horizontalRule)
             ? true
             : target.length > 0 && (prevItem!.type !== 'para' || prevIsCodeBlockPara || prevIsStructuralPara);
 
@@ -2890,6 +2913,7 @@ export async function extractDocumentContent(
             if (customStyle) paraItem.customStyleName = customStyle;
             if (paragraphLeftIndentTwips !== undefined) paraItem.paragraphLeftIndentTwips = paragraphLeftIndentTwips;
             if (spacerShaped) paraItem.spacerShaped = true;
+            if (horizontalRule) paraItem.horizontalRule = true;
             if (paraMarkRevision && headingLevel) paraItem.paraMarkRevision = paraMarkRevision;
             if (canJoinTrackedBreak && precedingMark?.target === target && precedingMark.end === targetLenBeforePara) {
               paraItem.breakRevision = precedingMark.revision;
@@ -2904,8 +2928,14 @@ export async function extractDocumentContent(
             target.splice(targetLenBeforePara, 1);
           } else if (needsPara) {
             const paraItem = target[targetLenBeforePara];
+            // A rule has nothing to show, though it can hold a zero-width comment
+            if (paraItem?.type === 'para' && paraItem.horizontalRule
+                && target.slice(targetLenBeforePara + 1).some(item => item.type !== 'text' || item.text !== '')) {
+              delete paraItem.horizontalRule;
+            }
             if (
               paraItem?.type === 'para' &&
+              !paraItem.horizontalRule &&
               target.length === targetLenBeforePara + 1 &&
               !paraItem.headingLevel &&
               !paraItem.listMeta &&
@@ -4875,8 +4905,8 @@ function paragraphHasContent(content: ContentItem[], paraIndex: number): boolean
 
 /**
  * Export spaces a code block from what follows with an empty paragraph. A
- * plain paragraph after it fills that paragraph with its text; a heading or
- * list item has a para item of its own, which the empty one would add blank
+ * plain paragraph after it fills that paragraph with its text; a heading,
+ * list item or rule has a para item of its own, which the empty one would add blank
  * lines before, so the empty one goes. An empty paragraph of another shape,
  * as a Word user adds, stays.
  */
@@ -4891,7 +4921,7 @@ function dropCodeBlockSeparators(content: ContentItem[]): void {
     }
     const next = content[i + 1];
     if (afterCodeBlock && item.spacerShaped && isPlainEmptyParagraph(item) && item.emptyParagraphCount === 1
-        && next?.type === 'para' && (next.headingLevel || next.listMeta)) {
+        && next?.type === 'para' && (next.headingLevel || next.listMeta || next.horizontalRule)) {
       content.splice(i, 1);
       i--;
       afterCodeBlock = false;
@@ -5830,7 +5860,7 @@ export function buildMarkdown(
         // content).
         const sep = i < mergedContent.length ? mergedContent[i] : undefined;
         const afterSep = i + 1 < mergedContent.length ? mergedContent[i + 1] : undefined;
-        if (sep && sep.type === 'para' && !sep.isCodeBlock && afterSep && afterSep.type === 'para' && (afterSep.isCodeBlock || afterSep.blockquoteLevel)) {
+        if (sep && sep.type === 'para' && !sep.isCodeBlock && !sep.horizontalRule && afterSep && afterSep.type === 'para' && (afterSep.isCodeBlock || afterSep.blockquoteLevel)) {
           i++;
         }
         continue;
@@ -5935,10 +5965,11 @@ export function buildMarkdown(
         ) {
           // Non-blockquote paragraph after a blockquote group: restore the
           // authored blank-line count exactly (including zero-blank adjacency).
-          const next = i + 1 < mergedContent.length ? mergedContent[i + 1] : undefined;
+          // A rule is content of its own, not a separator before what's next
+          const next = !item.horizontalRule && i + 1 < mergedContent.length ? mergedContent[i + 1] : undefined;
           const nextIsBlockquotePara = next?.type === 'para' && !!next.blockquoteLevel;
           const nextIsStructuralPara = next?.type === 'para' && (
-            !!next.headingLevel || !!next.listMeta || !!next.isCodeBlock
+            !!next.headingLevel || !!next.listMeta || !!next.isCodeBlock || !!next.horizontalRule
           );
           if (nextIsBlockquotePara) {
             // Structural separator between blockquote groups — let the
@@ -5971,7 +6002,7 @@ export function buildMarkdown(
           // (>= 0). Suppress only when the *next* para is a blockquote, so
           // real content paragraphs are never swallowed by this optimization.
           const gapCount = blockquoteGaps.get(lastBlockquoteGroupIndex);
-          const next = i + 1 < mergedContent.length ? mergedContent[i + 1] : undefined;
+          const next = !item.horizontalRule && i + 1 < mergedContent.length ? mergedContent[i + 1] : undefined;
           const nextIsBlockquotePara = next?.type === 'para' && !!next.blockquoteLevel;
           if (gapCount !== undefined && (gapCount >= 0 || gapCount === -1) && nextIsBlockquotePara) {
             // Suppress — gap handled at next blockquote para transition
@@ -6150,6 +6181,11 @@ export function buildMarkdown(
         lastAlertParagraphKey = undefined;
         pendingAlertPrefixStrip = undefined;
         pendingAlertInlinePrefixForHardBreak = undefined;
+        if (item.horizontalRule) {
+          // A comment on it goes on the line after, which keeps the line a rule
+          const next = mergedContent[i + 1];
+          output.push(next?.type === 'text' ? '---\n' : '---');
+        }
       }
 
       prevItemWasListQuote = !!item.blockquoteLevel && !!item.listContinuation;
@@ -6869,8 +6905,8 @@ export function extractTitleLines(content: ContentItem[]): string[] {
 
   while (i < content.length) {
     const item = content[i];
-    // Skip leading plain para separators (no heading/list/title) that precede the first title
-    if (item.type === 'para' && !item.isTitle && !item.headingLevel && !item.listMeta && titles.length === 0) {
+    // Skip leading plain para separators (no heading/list/title/rule) that precede the first title
+    if (item.type === 'para' && !item.isTitle && !item.headingLevel && !item.listMeta && !item.horizontalRule && titles.length === 0) {
       i++;
       continue;
     }
@@ -7348,7 +7384,7 @@ export async function convertDocx(
     for (let ci = 0; ci < docContent.length; ci++) {
       const item = docContent[ci];
       if (item.type !== 'para' || item.headingLevel || item.isTitle || item.isCodeBlock
-          || item.listMeta || item.blockquoteLevel) continue;
+          || item.listMeta || item.blockquoteLevel || item.horizontalRule) continue;
       // Skip empty separator paragraphs (no inline content follows before next structural item)
       if (isPlainEmptyParagraph(item)) continue;
       // Check if this para has any non-html_comment inline content after it
@@ -7679,6 +7715,10 @@ export async function convertDocx(
     // Default to 1 blank line (conventional) when no stored value exists.
     const blankLines = storedFrontmatterBlankLines ?? 1;
     markdown = frontmatterStr + '\n'.repeat(blankLines) + markdown;
+  } else if (FRONTMATTER_OPENING_RE.test(markdown)) {
+    // A rule that starts the document, with a block right after it, would
+    // open frontmatter that the next rule closes; a blank line keeps it a rule
+    markdown = markdown.replace(/^---[ \t]*\n/, line => line + '\n');
   }
 
   // Layered .bib restoration:

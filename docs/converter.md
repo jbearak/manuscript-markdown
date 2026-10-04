@@ -11,6 +11,7 @@ The converter supports DOCX → Markdown → DOCX round-tripping. The following 
 - **Text formatting**: Markdown syntax ↔ Word run formatting (bold, italic, underline, strikethrough, superscript, subscript, inline code)
 - **Headings**: `#`–`######` Markdown headings ↔ Word heading styles (H1 through H6)
 - **Lists**: Markdown list syntax ↔ Word numbering (bulleted and numbered with nesting)
+- **Horizontal rules**: `---`, `***` or `___` ↔ an empty paragraph with a bottom border. Import writes every rule as `---`
 - **Task lists**: `- [ ]` / `- [x]` parsed as semantic task items in Markdown and exported to deterministic DOCX list output with checkbox prefixes (`☐`/`☒`)
 - **Comments**: non-overlapping comments use CriticMarkup `{==highlighted text==}{>>@author | comment<<}` format; overlapping comments use non-inline ID-based syntax (`{#1}highlighted text{/1}{#1>>@alice | comment<<}`) — see [Specification](specification.md#overlapping-comments)
 - **Track changes**: CriticMarkup `{++...++}` and `{--...--}` ↔ Word revisions (`w:ins`/`w:del`)
