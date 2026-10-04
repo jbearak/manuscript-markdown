@@ -1,3 +1,4 @@
+import { keepParagraphEdgeWhitespace } from './html-entities';
 import { extractHtmlTables, type HtmlTableRun } from './html-table-parser';
 
 export interface TextTransformation {
@@ -642,9 +643,15 @@ function runsToMarkdown(runs: HtmlTableRun[]): string {
       result += run.href ? '[' + codeSpan + '](' + formatHrefForMarkdown(run.href) + ')' : codeSpan;
       continue;
     }
-    if (run.bold) t = '**' + t + '**';
-    if (run.italic) t = '*' + t + '*';
-    if (run.strikethrough) t = '~~' + t + '~~';
+    // Emphasis can't open before whitespace or close after it, so the
+    // whitespace at the run's edges goes outside it, but inside the
+    // formatting that can hold it
+    const [, lead, core, trail] = /^([ \t\u00a0]*)([\s\S]*?)([ \t\u00a0]*)$/.exec(t)!;
+    t = core;
+    if (t && run.bold) t = '**' + t + '**';
+    if (t && run.italic) t = '*' + t + '*';
+    if (t && run.strikethrough) t = '~~' + t + '~~';
+    t = lead + t + trail;
     if (run.underline) t = '[' + t + ']{.underline}';
     if (run.superscript) t = '<sup>' + t + '</sup>';
     if (run.subscript) t = '<sub>' + t + '</sub>';
@@ -683,7 +690,9 @@ function convertHtmlTable(text: string, pad: boolean): string | null {
 
   // Convert cells to markdown text
   const mdRows: { cells: string[]; header: boolean }[] = rows.map(row => ({
-    cells: row.cells.map(cell => runsToMarkdown(cell.runs)),
+    // A cell's edges keep the whitespace its HTML wrote as references
+    cells: row.cells.map(cell => runsToMarkdown(cell.runs).split('\n')
+      .map(line => keepParagraphEdgeWhitespace(line, true, true)).join('\n')),
     header: row.header,
   }));
 

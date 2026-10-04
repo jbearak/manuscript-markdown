@@ -5,6 +5,7 @@ import { resolveMarkdownColor } from './highlight-colors';
 import { FRONTMATTER_OPENING_RE, Frontmatter, NotesMode, parseFrontmatter, serializeFrontmatter, noteTypeFromNumber, parseColWidths, type CustomStyleDef } from './frontmatter';
 import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType } from './gfm';
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
+import { keepParagraphEdgeWhitespace } from './html-entities';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
 import { customStyleId } from './md-to-docx';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
@@ -223,6 +224,13 @@ function escapeSensitiveHtmlLikeTags(text: string): string {
     if (!MARKDOWN_HTML_SENSITIVE_TAGS.has(tagName.toLowerCase())) return fullMatch;
     return fullMatch.replace(/</g, '&lt;').replace(/>/g, '&gt;');
   });
+}
+
+/** Whether text next to an item starts or ends a Markdown block there: at
+ *  the end of the content, a paragraph break, a table, or a display
+ *  equation, which is a block of its own in Markdown. */
+function isMarkdownBlockEdge(item: ContentItem | undefined): boolean {
+  return item === undefined || isStructuralBoundaryItem(item) || (item.type === 'math' && !!item.display);
 }
 
 /** Escape markdown-sensitive characters that would otherwise be interpreted as formatting. */
@@ -4443,7 +4451,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
       lines.push(i2 + '<' + tag + attrs + '>');
       for (const para of cell.paragraphs) {
         const rendered = renderInlineSegment(mergeConsecutiveRuns(para), comments, renderOpts);
-        lines.push(i3 + '<p>' + rendered.text + '</p>');
+        lines.push(i3 + '<p>' + keepParagraphEdgeWhitespace(rendered.text, true, true) + '</p>');
         if (rendered.deferredComments.length > 0) {
           lines.push(i3 + rendered.deferredComments.join('\n' + i3));
         }
@@ -4551,7 +4559,7 @@ function tryRenderPipeTable(table: { rows: TableRow[] }, maxLineWidth: number, c
         // Escape pipes for GFM table cells: \| in source must become \\\| (escaped
         // backslash + escaped pipe); bare | must become \|. Single-pass callback
         // avoids double-escape issues with two-step approaches.
-        const escaped = r.text.replace(/\\?\|/g, m => m.length === 2 ? '\\\\\\|' : '\\|');
+        const escaped = keepParagraphEdgeWhitespace(r.text, true, true).replace(/\\?\|/g, m => m.length === 2 ? '\\\\\\|' : '\\|');
         rowCells.push({ text: escaped, deferred: r.deferredComments });
       } else {
         rowCells.push({ text: '', deferred: [] });
@@ -4652,7 +4660,9 @@ function stripAlertLeadPrefix(text: string, alertType: GfmAlertType): string {
   // 1. Standard [!TYPE] marker (e.g. from a re-imported markdown)
   const marker = parseGfmAlertMarker(text.trimStart());
   if (marker?.type === alertType) {
-    return text.replace(/^\s*\[![A-Za-z]+\](?:[ \t]+|\\?\n\s*|$)/, '');
+    // Up to the line break and the space export writes after it: the
+    // body's own whitespace stays
+    return text.replace(/^\s*\[![A-Za-z]+\](?:[ \t]+|\\?\n ?|$)/, '');
   }
   const title = gfmAlertTitle(alertType);
   const glyphAlternation = Object.keys(ALERT_GLYPH_TO_TYPE).map(escapeRegExp).join('|');
@@ -4662,13 +4672,13 @@ function stripAlertLeadPrefix(text: string, alertType: GfmAlertType): string {
   //    most common roundtrip format — check it before the bold-wrapped
   //    and colon-suffixed variants.
   const exactPlain = new RegExp(
-    '^\\s*(?:' + glyphAlternation + ') ' + escapeRegExp(title) + '(?:\\\\?\\n\\s*| )'
+    '^\\s*(?:' + glyphAlternation + ') ' + escapeRegExp(title) + '(?:\\\\?\\n ?| )'
   );
   if (exactPlain.test(text)) return text.replace(exactPlain, '');
 
   // 3. Bold-wrapped: **GLYPH Title** or __GLYPH Title__
   const titleCore = '(?:' + glyphAlternation + ')\\s*' + escapeRegExp(title);
-  const boldWrapped = text.match(/^\s*(\*\*|__)(.+?)\1\s*(?:\\?\n\s*)?/);
+  const boldWrapped = text.match(/^\s*(\*\*|__)(.+?)\1[ \t]*(?:\\?\n ?)?/);
   if (boldWrapped) {
     const inner = boldWrapped[2].trim();
     if (new RegExp('^' + titleCore + '\\s*[:：-]?$').test(inner)) {
@@ -4740,7 +4750,7 @@ function tryRenderGridTable(
         // Split on newlines within a paragraph (e.g. hard breaks).
         // Strip trailing backslash from each line — grid table cells treat
         // bare newlines as hard breaks, so the backslash is redundant.
-        cellLines.push(...r.text.split('\n').map(l => l.replace(/\\$/, '')));
+        cellLines.push(...keepParagraphEdgeWhitespace(r.text, true, true).split('\n').map(l => l.replace(/\\$/, '')));
         cellDeferred.push(...r.deferredComments);
       }
       if (cellLines.length === 0) cellLines.push('');
@@ -6900,6 +6910,7 @@ export function buildMarkdown(
     }
     pendingAlertPrefixStrip = undefined;
     pendingAlertInlinePrefixForHardBreak = undefined;
+    textOut = keepParagraphEdgeWhitespace(textOut, isMarkdownBlockEdge(mergedContent[i - 1]), isMarkdownBlockEdge(mergedContent[rendered.nextIndex]));
     if (pendingHeadingCriticMarker !== undefined) {
       // Re-insert the heading marker inside the leading Critic span so the
       // whole-paragraph form {++### heading++} round-trips. If the inline
@@ -6944,12 +6955,17 @@ export function buildMarkdown(
       const bodyParts: string[] = [];
       const deferredAll: string[] = [];
       let partStart = 0;
+      // The text of a part, from partStart, which ends its paragraph. Word
+      // puts a space or tab after the note's mark, which goes.
+      const inlinePart = (text: string) => partStart === 0
+        ? keepParagraphEdgeWhitespace(text.replace(/^[ \t]+/, ''), true, true)
+        : keepParagraphEdgeWhitespace(text, isMarkdownBlockEdge(bodyMerged[partStart - 1]), true);
       for (let bi = 0; bi < bodyMerged.length; bi++) {
         const item = bodyMerged[bi];
         if (item.type === 'para') {
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
-            bodyParts.push(part.text);
+            bodyParts.push(inlinePart(part.text));
             deferredAll.push(...part.deferredComments);
           }
           partStart = bi + 1;
@@ -6957,7 +6973,7 @@ export function buildMarkdown(
           // Flush preceding inline content and keep display math as its own block part.
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
-            bodyParts.push(part.text);
+            bodyParts.push(inlinePart(part.text));
             deferredAll.push(...part.deferredComments);
           }
           const mathBlock = MATH_FENCE + '\n' + canonicalizeDisplayMathLatex(item.latex) + '\n' + MATH_FENCE;
@@ -6969,7 +6985,7 @@ export function buildMarkdown(
           // Flush preceding inline content
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
-            bodyParts.push(part.text);
+            bodyParts.push(inlinePart(part.text));
             deferredAll.push(...part.deferredComments);
           }
           const noteRawEmbedValue = noteRenderOpts?.embedDirectiveMapping?.get(String(tableIndex));
@@ -7028,7 +7044,7 @@ export function buildMarkdown(
       }
       if (partStart < bodyMerged.length) {
         const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
-        bodyParts.push(part.text);
+        bodyParts.push(inlinePart(part.text));
         deferredAll.push(...part.deferredComments);
       }
       if (bodyParts.length === 0) {
