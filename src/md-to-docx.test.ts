@@ -5047,3 +5047,21 @@ describe('per-paragraph indent overrides', () => {
     expect(result.markdown).not.toContain('Paragraph text.\n\n<!-- style: caption -->');
   });
 });
+
+describe('A horizontal rule at the start', () => {
+  it('keeps the text before the next rule', async () => {
+    // Not frontmatter, as --- before a blank line opens none
+    const { docx } = await convertMdToDocx('---\n\nKept.\n\n---\n\nAfter.');
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml).toContain('Kept.');
+    expect(xml).toContain('After.');
+  });
+
+  it('stores no frontmatter spacing for it', async () => {
+    const { docx } = await convertMdToDocx('---\n\nKept.');
+    const JSZip = (await import('jszip')).default;
+    const custom = await (await JSZip.loadAsync(docx)).file('docProps/custom.xml')?.async('string') ?? '';
+    expect(custom).not.toContain('MANUSCRIPT_FRONTMATTER_BLANK_LINES');
+  });
+});

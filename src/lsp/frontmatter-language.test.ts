@@ -159,6 +159,30 @@ describe('getFrontmatterLocation', () => {
 		expect(loc.inFrontmatter).toBe(false);
 	});
 
+	test('returns outside between horizontal rules', () => {
+		const text = '---\n\nBody [@smi\n\n---\n\nMore.';
+		const loc = getFrontmatterLocation(text, text.indexOf('@smi') + 4);
+		expect(loc.kind).toBe('outside');
+		expect(loc.inFrontmatter).toBe(false);
+	});
+
+	test.each([
+		['a blank first line', '---\n\nfo'],
+		['spaces after its opening line', '---  \nfo'],
+	])('returns a location in a block still being written with %s', (_, text) => {
+		expect(getFrontmatterLocation(text, text.length).inFrontmatter).toBe(true);
+	});
+
+	test('returns outside after a closing line with spaces after it', () => {
+		const text = '---\nfont: Georgia\n---   \nBody text.';
+		expect(getFrontmatterLocation(text, text.indexOf('Body')).inFrontmatter).toBe(false);
+	});
+
+	test('returns outside between horizontal rules with spaces after the second', () => {
+		const text = '---\n\nBody [@smi\n\n---   ';
+		expect(getFrontmatterLocation(text, text.indexOf('@smi') + 4).inFrontmatter).toBe(false);
+	});
+
 	test('returns outside when offset is past frontmatter', () => {
 		const text = '---\nfont: Georgia\n---\n\nBody text.';
 		const loc = getFrontmatterLocation(text, text.indexOf('Body'));
@@ -800,6 +824,11 @@ describe('validateFrontmatter', () => {
 		const text = '---\nfont: Georgia\nfont-size: 12\nbreaks: true\ncallout-labels: false\n---\n';
 		const diags = await validateFrontmatter(text, stubCallbacks);
 		expect(diags).toEqual([]);
+	});
+
+	test('checks nothing between horizontal rules', async () => {
+		const text = '---\n\nbreaks: maybe\n\n---\n';
+		expect(await validateFrontmatter(text, stubCallbacks)).toEqual([]);
 	});
 
 	test('invalid boolean value produces error', async () => {

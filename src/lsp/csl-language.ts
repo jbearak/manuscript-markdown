@@ -19,7 +19,7 @@ export interface CslFieldInfo {
 	valueEnd: number;
 }
 
-const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---/;
+const FRONTMATTER_RE = /^---[ \t]*\r?\n(?![ \t]*\r?\n)([\s\S]*?)\r?\n---[ \t]*(?=\r?\n|$)/;
 
 interface CslLineMatch {
 	lineStart: number;

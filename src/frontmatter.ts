@@ -147,17 +147,25 @@ export interface Frontmatter {
   bibliographyHangingIndent?: boolean;
 }
 
+/**
+ * The line that opens frontmatter: just ---, with YAML right after it. As
+ * Pandoc has it, --- before a blank line is a horizontal rule, as is ----.
+ * Keep the frontmatter patterns elsewhere in step with this one.
+ */
+export const FRONTMATTER_OPENING_RE = /^---[ \t]*\r?\n(?![ \t]*\r?\n)/;
+/** The line that closes it, which can end in spaces too. */
+export const FRONTMATTER_CLOSING_RE = /\n---[ \t]*(?=\r?\n|$)/;
+
 function frontmatterBodyStartOffset(markdown: string): number | undefined {
   const leadingTrimmedLength = markdown.length - markdown.trimStart().length;
   const trimmed = markdown.slice(leadingTrimmedLength);
-  if (!trimmed.startsWith('---')) return undefined;
+  if (!FRONTMATTER_OPENING_RE.test(trimmed)) return undefined;
 
-  const endMatch = trimmed.substring(3).match(/\n---(?:\r?\n|$)/);
+  const endMatch = trimmed.substring(3).match(FRONTMATTER_CLOSING_RE);
   if (!endMatch) return undefined;
-  const endIdx = endMatch.index! + 3;
-  const afterDelimiter = trimmed.slice(endIdx + 4);
-  const consumedLeadingNewline = afterDelimiter.match(/^\r?\n/)?.[0].length ?? 0;
-  return leadingTrimmedLength + endIdx + 4 + consumedLeadingNewline;
+  const closeEnd = endMatch.index! + 3 + endMatch[0].length;
+  const consumedLeadingNewline = trimmed.slice(closeEnd).match(/^\r?\n/)?.[0].length ?? 0;
+  return leadingTrimmedLength + closeEnd + consumedLeadingNewline;
 }
 
 /** Replace YAML frontmatter characters with spaces while preserving length and newlines. */
@@ -218,7 +226,7 @@ export function parseFrontmatter(markdown: string): { metadata: Frontmatter; bod
   }
   const trimmed = markdown.trimStart();
 
-  const endMatch = trimmed.substring(3).match(/\n---(?:\r?\n|$)/)!;
+  const endMatch = trimmed.substring(3).match(FRONTMATTER_CLOSING_RE)!;
   const endIdx = endMatch.index! + 3;
 
   const yamlBlock = trimmed.slice(3, endIdx).trim();

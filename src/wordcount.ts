@@ -20,7 +20,7 @@ import * as vscode from 'vscode';
  */
 export function countWords(text: string): number {
   // Strip YAML frontmatter (--- delimited block at start of document)
-  const stripped = text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '');
+  const stripped = text.replace(/^---[ \t]*\r?\n(?![ \t]*\r?\n)[\s\S]*?\r?\n---[ \t]*(?=\r?\n|$)\r?\n?/, '');
   const trimmed = stripped.trim();
 
   if (trimmed === "") {

@@ -22,6 +22,34 @@ describe('callout-labels frontmatter', () => {
   });
 });
 
+describe('parseFrontmatter', () => {
+  it.each([
+    ['a rule', '---\n\nB.\n\n---\n\nC.'],
+    ['a rule before spaces', '---\n  \nB.\n---\n\nC.'],
+    ['a rule with CRLF line endings', '---\r\n\r\nB.\r\n---\r\n'],
+  ])('reads --- before a blank line as %s, not frontmatter', (_, markdown) => {
+    // As Pandoc does
+    expect(parseFrontmatter(markdown)).toEqual({ metadata: {}, body: markdown, fieldOrder: [] });
+  });
+
+  it('reads a closing line with spaces after it', () => {
+    expect(parseFrontmatter('---\ntitle: T\n--- \t\nB.')).toMatchObject({ metadata: { title: ['T'] }, body: 'B.' });
+  });
+
+  it('reads ---- as a rule, not frontmatter', () => {
+    const markdown = '----\ntitle: T\n---\n\nC.';
+    expect(parseFrontmatter(markdown)).toEqual({ metadata: {}, body: markdown, fieldOrder: [] });
+  });
+
+  it('reads frontmatter whose opening line ends in spaces', () => {
+    expect(parseFrontmatter('---  \ntitle: T\n---\nB.')).toMatchObject({ metadata: { title: ['T'] }, body: 'B.' });
+  });
+
+  it('reads empty frontmatter', () => {
+    expect(parseFrontmatter('---\n---\nB.').body).toBe('B.');
+  });
+});
+
 describe('maskFrontmatter', () => {
   it('masks directive-like comments in YAML frontmatter while preserving body offsets', () => {
     const markdown = '---\nabstract: |\n  <!-- portrait -->\n---\n\nBody\n<!-- landscape -->';

@@ -187,6 +187,19 @@ describe('Word Count Property Tests', () => {
       expect(countWords(text)).toBe(6);
     });
 
+    it('strips frontmatter whose closing line has spaces after it', () => {
+      expect(countWords('---\ntitle: T\n---  \nBody')).toBe(1);
+    });
+
+    it('counts words before a longer rule', () => {
+      expect(countWords('---  \nBody\n----\nMore')).toBe(4);
+    });
+
+    it('counts words between horizontal rules', () => {
+      // Each rule counts as a word, as --- does after the first line
+      expect(countWords('---\n\nOne two.\n\n---\n\nThree.')).toBe(5);
+    });
+
     it('should handle frontmatter with CRLF line endings', () => {
       const text = '---\r\ntitle: Test\r\n---\r\nHello world';
       expect(countWords(text)).toBe(2);
