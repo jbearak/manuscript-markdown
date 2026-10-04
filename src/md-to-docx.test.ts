@@ -1155,6 +1155,38 @@ describe('generateParagraph', () => {
     expect(state.relationships.get('https://example.com')).toBe('rId4');
   });
 
+  it('writes a link\'s tracked change in its hyperlink, and the next link to the same place in another', () => {
+    const href = 'https://example.com';
+    const token: MdToken = {
+      type: 'paragraph',
+      runs: [
+        { type: 'text', text: 'a ', href, linkStart: true }, { type: 'critic_del', text: 'b', innerRuns: [{ type: 'text', text: 'b' }], href },
+        { type: 'text', text: 'c', href, linkStart: true },
+      ],
+    };
+    // A deletion went outside the hyperlink, without the link
+    expect(generateParagraph(token, createState()).replace(/ w:author="[^"]*"| w:date="[^"]*"/g, '')).toBe('<w:p><w:hyperlink r:id="rId4">'
+      + '<w:r><w:t xml:space="preserve">a </w:t></w:r><w:del w:id="0"><w:r><w:delText>b</w:delText></w:r></w:del>'
+      + '</w:hyperlink><w:hyperlink r:id="rId4"><w:r><w:t>c</w:t></w:r></w:hyperlink></w:p>');
+  });
+
+  it('writes a link\'s runs and line breaks in one hyperlink', () => {
+    const href = 'https://example.com';
+    const token: MdToken = {
+      type: 'paragraph',
+      runs: [
+        { type: 'text', text: 'a ', href }, { type: 'text', text: 'b', bold: true, href },
+        { type: 'softbreak', text: '\n', href }, { type: 'hardbreak', text: '\n', href },
+        { type: 'text', text: 'c', href }, { type: 'text', text: ' d' },
+      ],
+    };
+    // Each run, but not a line break, was a hyperlink of its own
+    expect(generateParagraph(token, createState())).toBe('<w:p><w:hyperlink r:id="rId4">'
+      + '<w:r><w:t xml:space="preserve">a </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>b</w:t></w:r>'
+      + '<w:r><w:t xml:space="preserve"> </w:t></w:r><w:r><w:br/></w:r><w:r><w:t>c</w:t></w:r>'
+      + '</w:hyperlink><w:r><w:t xml:space="preserve"> d</w:t></w:r></w:p>');
+  });
+
   it('generates softbreak as space', () => {
     const token: MdToken = {
       type: 'paragraph',

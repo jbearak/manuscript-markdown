@@ -1022,6 +1022,7 @@ export type ContentItem =
       commentIds: Set<string>;
       formatting: RunFormatting;
       href?: string;           // hyperlink URL if inside w:hyperlink
+      link?: number;           // which w:hyperlink, so two to one place stay two links
       revision?: RevisionInfo;
     }
   | { type: 'citation'; text: string; commentIds: Set<string>; pandocKeys: string[]; revision?: RevisionInfo; formatting?: RunFormatting }
@@ -3233,6 +3234,9 @@ function parseNoteBody(
   const fieldShows = fieldVisibility();
   const cCounter = citationCounter ?? { idx: 0 };
   let currentHref: string | undefined;
+  // Each w:hyperlink's number, which its text keeps
+  let currentLink = 0;
+  let linkCount = 0;
   // As in extractDocumentContent: a tracked paragraph mark, for breakRevision
   let trackedParaMark: { revision: RevisionInfo; target: ContentItem[]; end: number } | undefined;
   // As in extractDocumentContent: the comments whose ranges are open, but not replies
@@ -3316,9 +3320,12 @@ function parseNoteBody(
         } else if (key === 'w:hyperlink' && context) {
           const rId = node?.[':@']?.['@_r:id'] ?? getAttr(node, 'id');
           const prevHref = currentHref;
+          const prevLink = currentLink;
           currentHref = context.relationshipMap.get(rId);
+          currentLink = ++linkCount;
           if (Array.isArray(node[key])) { walkNoteBody(node[key], currentFormatting, target, inTableCell, currentRevision); }
           currentHref = prevHref;
+          currentLink = prevLink;
 
         // --- Tables ---
         } else if (key === 'w:tbl' && context && !inTableCell) {
@@ -3412,6 +3419,7 @@ function parseNoteBody(
               };
               if (currentHref) {
                 textItem.href = currentHref;
+                textItem.link = currentLink;
               }
               target.push(textItem);
             }
@@ -3425,6 +3433,7 @@ function parseNoteBody(
               commentIds: new Set(activeComments),
               formatting: currentFormatting,
               ...(currentRevision ? { revision: currentRevision } : {}),
+              ...(currentHref ? { href: currentHref, link: currentLink } : {}),
             });
           }
         } else if (key === 'w:p') {
@@ -4065,6 +4074,9 @@ export async function extractDocumentContent(
   let currentCitation: ZoteroCitation | undefined;
   let citationTextParts: string[] = [];
   let currentHref: string | undefined;
+  // Each w:hyperlink's number, which its text keeps
+  let currentLink = 0;
+  let linkCount = 0;
   let zoteroBiblData: ZoteroBiblData | undefined;
   // Set after a paragraph whose mark is tracked: where its content ended,
   // so the next paragraph's para item can record the revision as breakRevision.
@@ -4241,9 +4253,12 @@ export async function extractDocumentContent(
         } else if (key === 'w:hyperlink') {
           const rId = node?.[':@']?.['@_r:id'] ?? getAttr(node, 'id');
           const prevHref = currentHref;
+          const prevLink = currentLink;
           currentHref = relationshipMap.get(rId);
+          currentLink = ++linkCount;
           if (Array.isArray(node[key])) { walk(node[key], currentFormatting, target, inTableCell, currentRevision); }
           currentHref = prevHref;
+          currentLink = prevLink;
         } else if (key === 'w:tbl' && !inTableCell) {
           const tblChildren = asXmlNodes(node[key]);
           const rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> }> = [];
@@ -4316,6 +4331,7 @@ export async function extractDocumentContent(
                 commentIds: new Set(activeComments),
                 formatting: currentFormatting,
                 ...(currentRevision ? { revision: currentRevision } : {}),
+                ...(currentHref ? { href: currentHref, link: currentLink } : {}),
               });
             }
           }
@@ -4337,6 +4353,7 @@ export async function extractDocumentContent(
               };
               if (currentHref) {
                 textItem.href = currentHref;
+                textItem.link = currentLink;
               }
               target.push(textItem);
             }
@@ -5363,6 +5380,11 @@ function mergeConsecutiveRuns(content: ContentItem[], markdown = true): ContentI
       if (next.type !== 'text' ||
           !formattingEquals(item.formatting, next.formatting) && !(markdown && sameCodeSpan(item.formatting, mergedText, next)) ||
           item.href !== next.href ||
+          item.link !== next.link ||
+          // A link's line break before a line that would start a block
+          // stays its own, where linkGroup splits the link
+          (item.href !== undefined && (next.text === '\\\n' && startsBlock(content[j + 1])
+            || mergedText.endsWith('\\\n') && startsBlock(next))) ||
           !commentSetsEqual(item.commentIds, next.commentIds) ||
           !revisionsEqual(item.revision, next.revision)) {
         break;
@@ -5377,6 +5399,7 @@ function mergeConsecutiveRuns(content: ContentItem[], markdown = true): ContentI
       commentIds: item.commentIds,
       formatting: item.formatting,
       href: item.href,
+      ...(item.link !== undefined ? { link: item.link } : {}),
       ...(item.revision ? { revision: item.revision } : {}),
     });
     i = j;
@@ -5623,6 +5646,74 @@ function emphasisGroup(
   return { text, end: groupEnd };
 }
 
+/** The start of a line that would start a block within a paragraph: a
+ *  heading, list item, quote, code fence, HTML, display math, a table's
+ *  row or a note's definition */
+const BLOCK_START_RE = /^[ \t]{0,3}(?:#{1,6}(?:[ \t]|$)|[-+*](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$)|>|```|~~~|<|\$\$|\||\[\^[^\]]*\]:)/;
+
+const startsBlock = (item: ContentItem | undefined): boolean =>
+  item?.type === 'text' && BLOCK_START_RE.test(wrapWithFormatting(item.text, item.formatting));
+
+/**
+ * A Word hyperlink's runs from `start`, its text and line breaks, all in the
+ * comments `commentIds`, as one Markdown link around them, but not the next
+ * hyperlink's, though it goes to the same place, so [a **b** c](u)
+ * and a link with a line break in it stay one link. A revision of the whole
+ * link goes around it, from `item`'s, and one of part of it inside it.
+ * Undefined where the link is one run.
+ */
+function linkGroup(
+  segment: ContentItem[], start: number, end: number, commentIds: ReadonlySet<string>,
+): { text: string; end: number; item: InlineRevisionItem } | undefined {
+  const first = segment[start];
+  if (first.type !== 'text' || !first.href || !commentSetsEqual(first.commentIds, commentIds)) return undefined;
+  const inLink = (i: number): ContentItem & { type: 'text' } | undefined => {
+    const item = segment[i];
+    return i < end && item.type === 'text' && item.href === first.href && item.link === first.link
+      && commentSetsEqual(item.commentIds, commentIds) ? item : undefined;
+  };
+  const items: Array<ContentItem & { type: 'text' }> = [];
+  for (let next = first; next; next = inLink(start + items.length)!) {
+    if (next.text === '\\\n') {
+      // A line of the link that would start a block, which Markdown reads
+      // before the link, starts a link of its own after the break
+      let line = '';
+      for (let i = start + items.length + 1, item = inLink(i); item && item.text !== '\\\n'; item = inLink(++i)) {
+        line += wrapWithFormatting(item.text, item.formatting);
+      }
+      if (BLOCK_START_RE.test(line)) break;
+    }
+    items.push(next);
+  }
+  if (items.length < 2) return undefined;
+  const whole = items.every(item => revisionsEqual(item.revision, first.revision));
+  let text = '';
+  let span: RevisionSpan | undefined;
+  for (let k = 0; k < items.length; k++) {
+    const item = items[k];
+    const next = items[k + 1];
+    // A deletion and an insertion of one author and time, a substitution
+    if (!whole && item.revision?.type === 'deletion' && next?.revision?.type === 'addition'
+        && next.revision.author === item.revision.author && next.revision.date === item.revision.date) {
+      const substitution = tryRenderSubstitution({ ...item, href: undefined }, { ...next, href: undefined }, text);
+      if (substitution !== null) {
+        text += substitution;
+        span = undefined;
+        k++;
+        continue;
+      }
+    }
+    const markdown = item.text === '\\\n' ? item.text : wrapWithFormatting(item.text, item.formatting);
+    if (whole) text += markdown;
+    else [text, span] = appendRevised(text, markdown, item, span);
+  }
+  return {
+    text: '[' + (whole ? text : joinRevisedSpans(text)) + '](' + formatHrefForMarkdown(first.href) + ')',
+    end: start + items.length,
+    item: whole ? first : { ...first, revision: undefined },
+  };
+}
+
 function renderInlineRange(
   segment: ContentItem[],
   startIndex: number,
@@ -5656,8 +5747,9 @@ function renderInlineRange(
 
     // Detect substitution: a deletion followed immediately by an addition
     // with identical author and date. Skip if either item has comments to
-    // avoid unbalancing comment markers.
-    if (isSubstitutionItem(item) && item.revision?.type === 'deletion' && item.commentIds.size === 0) {
+    // avoid unbalancing comment markers, or is in a link, which keeps it.
+    if (isSubstitutionItem(item) && item.revision?.type === 'deletion' && item.commentIds.size === 0
+        && !linkGroup(segment, i, segmentEnd, NO_COMMENTS)) {
       const run = renderSubstitutionRun(segment, i, segmentEnd, out, candidate => candidate.type !== 'para' && 'commentIds' in candidate && candidate.commentIds.size === 0, renderOpts?.noteLabels);
       if (run) {
         out += run.text;
@@ -5784,6 +5876,12 @@ function renderInlineRange(
           j++;
           continue;
         }
+        const link = linkGroup(segment, j, segmentEnd, commentSet);
+        if (link) {
+          [anchorText, anchorSpan] = appendRevised(anchorText, link.text, link.item, anchorSpan);
+          j = link.end;
+          continue;
+        }
         const group = emphasisGroup(segment, j, segmentEnd, commentSet);
         if (group) {
           [anchorText, anchorSpan] = appendRevised(anchorText, group.text, seg, anchorSpan);
@@ -5826,6 +5924,13 @@ function renderInlineRange(
       }
 
       i = j;
+      continue;
+    }
+
+    const link = linkGroup(segment, i, segmentEnd, NO_COMMENTS);
+    if (link) {
+      [out, lastSpan] = appendRevised(out, link.text, link.item, lastSpan);
+      i = link.end;
       continue;
     }
 
@@ -5910,8 +6015,10 @@ function renderInlineRangeWithIds(
 
     // Detect substitution: a deletion followed immediately by an addition
     // with identical author and date. Skip if comment context differs to
-    // avoid unbalancing comment markers.
-    if (isSubstitutionItem(item) && item.revision?.type === 'deletion') {
+    // avoid unbalancing comment markers, or the item is in a link, which
+    // keeps it.
+    if (isSubstitutionItem(item) && item.revision?.type === 'deletion'
+        && !(item.type === 'text' && linkGroup(segment, i, segmentEnd, item.commentIds))) {
       const run = renderSubstitutionRun(segment, i, segmentEnd, out, candidate => candidate.type !== 'para' && 'commentIds' in candidate && commentSetsEqual(candidate.commentIds, prevCommentIds), noteLabels);
       if (run) {
         out += run.text;
@@ -6089,6 +6196,13 @@ function renderInlineRangeWithIds(
     }
 
     prevCommentIds = new Set(currentIds);
+
+    const link = linkGroup(segment, i, segmentEnd, currentIds);
+    if (link) {
+      [out, lastSpan] = appendRevised(out, link.text, link.item, lastSpan);
+      i = link.end;
+      continue;
+    }
 
     // Hard line breaks must not be wrapped in formatting markers (e.g. **\\\n**)
     // because the backslash must be the final character on its line. A

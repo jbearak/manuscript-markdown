@@ -146,6 +146,7 @@ export interface MdTableRow {
 
 export interface MdRun {
   criticParagraphBreak?: true; // first of two softbreaks representing a blank line inside a Critic payload
+  linkStart?: true; // first run of a link, where a hyperlink starts though the run before goes to the same place
   cellParagraphBreak?: true; // hardbreak between two of an HTML table cell's paragraphs, which generateTable splits on
   type: 'text' | 'critic_add' | 'critic_del' | 'critic_sub' | 'critic_highlight' | 'critic_comment' | 'citation' | 'math' | 'softbreak' | 'hardbreak' | 'comment_range_start' | 'comment_range_end' | 'comment_body_with_id' | 'footnote_ref' | 'html_comment' | 'image';
   text: string;
@@ -3040,6 +3041,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
     const name = match[2].toLowerCase();
     return openTags[name]?.pop() === true && closeFormat(HTML_FORMAT_TAGS[name], 'tag');
   };
+  let linkStartIndex = 0;
   
   for (let ti = 0; ti < tokens.length; ti++) {
     const token = tokens[ti];
@@ -3104,9 +3106,11 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
         
       case 'link_open':
         currentHref = token.attrGet('href') ?? undefined;
+        linkStartIndex = runs.length;
         break;
       case 'link_close':
         currentHref = undefined;
+        if (runs.length > linkStartIndex) runs[linkStartIndex] = { ...runs[linkStartIndex], linkStart: true };
         break;
         
       case 'html_inline': {
@@ -5989,18 +5993,33 @@ function deletionXml(deletedXml: string, author: string, dateAttr: string, state
   return xml;
 }
 
+/** The runs a link's hyperlink holds: its text, line breaks and tracked changes */
+const LINK_RUN_TYPES = new Set<MdRun['type']>(['text', 'softbreak', 'hardbreak', 'critic_add', 'critic_del', 'critic_sub']);
+
 export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine): string {
   let xml = '';
   for (let ri = 0; ri < inputRuns.length; ri++) {
     const run = inputRuns[ri];
     const nextRun = inputRuns[ri + 1];
-    if (run.type === 'text') {
+    if (run.href && LINK_RUN_TYPES.has(run.type)) {
+      // The link's runs, with its line breaks and tracked changes, go in one
+      // hyperlink, as Word writes one, which import reads back as one link;
+      // the next link to the same place starts another. Inside it, no run,
+      // nor one in a tracked change, is a link of its own.
+      let end = ri + 1;
+      while (end < inputRuns.length && inputRuns[end].href === run.href && !inputRuns[end].linkStart && LINK_RUN_TYPES.has(inputRuns[end].type)) end++;
+      const withoutLink = (linkRun: MdRun): MdRun => ({
+        ...linkRun, href: undefined,
+        ...(linkRun.innerRuns ? { innerRuns: linkRun.innerRuns.map(withoutLink) } : {}),
+        ...(linkRun.oldRuns ? { oldRuns: linkRun.oldRuns.map(withoutLink) } : {}),
+        ...(linkRun.newRuns ? { newRuns: linkRun.newRuns.map(withoutLink) } : {}),
+      });
+      const inner = generateRuns(inputRuns.slice(ri, end).map(withoutLink), state, options, bibEntries, citeprocEngine);
+      xml += '<w:hyperlink r:id="' + hyperlinkRelationshipId(run.href, state) + '">' + inner + '</w:hyperlink>';
+      ri = end - 1;
+    } else if (run.type === 'text') {
       const rPr = generateRPr(run, state.tableRunRPrExtra || undefined);
-      if (run.href) {
-        xml += '<w:hyperlink r:id="' + hyperlinkRelationshipId(run.href, state) + '">' + generateRun(run.text, rPr) + '</w:hyperlink>';
-      } else {
-        xml += generateRun(run.text, rPr);
-      }
+      xml += generateRun(run.text, rPr);
     } else if (run.type === 'softbreak') {
       const rPr = generateRPr(run, state.tableRunRPrExtra || undefined);
       xml += '<w:r>' + (rPr ? rPr : '') + '<w:t xml:space="preserve"> </w:t></w:r>';
