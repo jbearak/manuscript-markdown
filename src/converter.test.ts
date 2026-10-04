@@ -4030,6 +4030,39 @@ describe('buildMarkdown code block emission', () => {
 });
 
 describe('Code block round-trip', () => {
+  test.each([
+    ['a heading', '```\ncode\n```\n\n## H'],
+    ['a level 4 heading', '```\ncode\n```\n\n#### H'],
+    ['a bulleted list', '```\ncode\n```\n\n- a'],
+    ['a numbered list', '```\ncode\n```\n\n1. a'],
+    ['a paragraph', '```\ncode\n```\n\nB.'],
+  ])('keeps one blank line between a code block and %s', async (_, md) => {
+    const result = await convertDocx((await convertMdToDocx(md)).docx);
+    expect(result.markdown.trim()).toBe(md);
+  });
+
+  test('keeps an empty paragraph a Word user adds after a code block', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('```\ncode\n```\n\n## H')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<w:p\b[^>]*><w:pPr><w:spacing w:after="0"\/><\/w:pPr><\/w:p>/, '<w:p/>'));
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown.trim()).toBe('```\ncode\n```\n\n\n\n## H');
+  });
+
+  test('keeps an empty paragraph that follows a table, not the code block', async () => {
+    // What import makes of the table and what follows, with an empty paragraph before the heading
+    const afterTable = async (md: string) => {
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+      const xml = await zip.file('word/document.xml')!.async('string');
+      zip.file('word/document.xml', xml.replace(/(<w:p\b[^>]*><w:pPr><w:pStyle w:val="Heading2"\/>)/, '<w:p/>$1'));
+      const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+      return markdown.slice(markdown.indexOf('| a |'));
+    };
+    const table = '| a |\n| --- |\n| b |\n\n## H';
+    // Right after the fence, with no empty paragraph between
+    expect(await afterTable('```\ncode\n```\n' + table)).toBe(await afterTable('Text.\n\n' + table));
+  });
+
   test('single code block with language survives MD→DOCX→MD', async () => {
     const md = '```stata\ndisplay "hello"\n```';
     const docxResult = await convertMdToDocx(md);
