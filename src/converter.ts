@@ -300,6 +300,7 @@ interface NoteBodyContext {
   numberingDefs: NumberingDefs;
   numberingStartOverrides?: NumberingStartOverrides;
   format: CitationKeyFormat;
+  replyIds?: Set<string>;
 }
 
 export interface TableRow {
@@ -1738,6 +1739,9 @@ function parseNoteBody(
   let currentHref: string | undefined;
   // As in extractDocumentContent: a tracked paragraph mark, for breakRevision
   let trackedParaMark: { revision: RevisionInfo; target: ContentItem[]; end: number } | undefined;
+  // As in extractDocumentContent: the comments whose ranges are open, but not replies
+  const activeComments = new Set<string>();
+  const commentStartTargetIndex = new Map<string, { target: ContentItem[]; index: number }>();
 
   function walkNoteBody(
     nodes: XmlNode[],
@@ -1753,6 +1757,24 @@ function parseNoteBody(
         if (key === selfRefTag && !skippedSelfRef) {
           skippedSelfRef = true;
           continue;
+        } else if (key === 'w:commentRangeStart') {
+          const id = getAttr(node, 'id');
+          if (!context?.replyIds?.has(id)) {
+            activeComments.add(id);
+            commentStartTargetIndex.set(id, { target, index: target.length });
+          }
+        } else if (key === 'w:commentRangeEnd') {
+          const id = getAttr(node, 'id');
+          if (!context?.replyIds?.has(id)) {
+            const startInfo = commentStartTargetIndex.get(id);
+            if (startInfo?.target === target
+                && !target.slice(startInfo.index).some(item => 'commentIds' in item && item.commentIds?.has(id))) {
+              // Zero-width comment range: emit a synthetic empty text item
+              target.push({ type: 'text', text: '', formatting: currentFormatting, commentIds: new Set(activeComments), href: undefined });
+            }
+            commentStartTargetIndex.delete(id);
+            activeComments.delete(id);
+          }
         } else if (key in REVISION_ELEMENTS) {
           const author = getAttr(node, 'author');
           const date = getAttr(node, 'date');
@@ -1780,7 +1802,7 @@ function parseNoteBody(
               target.push({
                 type: 'citation',
                 text: citationTextParts.join(''),
-                commentIds: new Set(),
+                commentIds: new Set(activeComments),
                 pandocKeys,
                 ...(currentRevision ? { revision: currentRevision } : {}),
                 ...highlightOnly(fieldFormatting),
@@ -1849,10 +1871,10 @@ function parseNoteBody(
             try {
               const latex = ommlToLatex(asXmlNodes(oMathNode['m:oMath']));
               if (latex) {
-                target.push({ type: 'math', latex, display: true, commentIds: new Set(), ...(currentRevision ? { revision: currentRevision } : {}) });
+                target.push({ type: 'math', latex, display: true, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
               }
             } catch {
-              target.push({ type: 'math', latex: '\\text{[EQUATION ERROR]}', display: true, commentIds: new Set(), ...(currentRevision ? { revision: currentRevision } : {}) });
+              target.push({ type: 'math', latex: '\\text{[EQUATION ERROR]}', display: true, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
             }
           }
         } else if (key === 'm:oMath' && context) {
@@ -1860,10 +1882,10 @@ function parseNoteBody(
           try {
             const latex = ommlToLatex(mathChildren);
             if (latex) {
-              target.push({ type: 'math', latex, display: false, commentIds: new Set(), ...(currentRevision ? { revision: currentRevision } : {}) });
+              target.push({ type: 'math', latex, display: false, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
             }
           } catch {
-            target.push({ type: 'math', latex: '\\text{[EQUATION ERROR]}', display: false, commentIds: new Set(), ...(currentRevision ? { revision: currentRevision } : {}) });
+            target.push({ type: 'math', latex: '\\text{[EQUATION ERROR]}', display: false, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
           }
 
         // --- Basic text elements (always handled) ---
@@ -1877,7 +1899,7 @@ function parseNoteBody(
               const textItem: ContentItem = {
                 type: 'text',
                 text,
-                commentIds: new Set(),
+                commentIds: new Set(activeComments),
                 formatting: currentFormatting,
                 ...(currentRevision ? { revision: currentRevision } : {}),
               };
@@ -1893,7 +1915,7 @@ function parseNoteBody(
             target.push({
               type: 'text',
               text: '\\\n',
-              commentIds: new Set(),
+              commentIds: new Set(activeComments),
               formatting: currentFormatting,
               ...(currentRevision ? { revision: currentRevision } : {}),
             });
@@ -5432,7 +5454,15 @@ export function buildMarkdown(
       }
     }
   }
+  // Notes in the order they're written, after the body
+  const noteEntries = [...(options?.notes?.map.values() ?? [])].sort((a, b) => {
+    const na = parseInt(a.label, 10);
+    const nb = parseInt(b.label, 10);
+    if (!isNaN(na) && !isNaN(nb)) return na - nb;
+    return a.label.localeCompare(b.label);
+  });
   collectCommentMetadata(mergedContent);
+  for (const entry of noteEntries) collectCommentMetadata(entry.body);
 
   // Global overlap detection: mark comments that overlap anywhere in the document
   function detectGlobalOverlaps(items: ContentItem[]): void {
@@ -5469,8 +5499,9 @@ export function buildMarkdown(
       if (!ends.has(id)) ends.set(id, pos);
     }
 
-    const allIds = [...commentIdRemap.keys()];
-    const ranges = allIds.map(id => ({ id, start: starts.get(id) ?? 0, end: ends.get(id) ?? 0 }));
+    // Only the comments in these items, so that a scan of each note compares
+    // its own and not every pair in the document
+    const ranges = [...starts.keys()].map(id => ({ id, start: starts.get(id) ?? 0, end: ends.get(id) ?? 0 }));
     for (let a = 0; a < ranges.length; a++) {
       for (let b = a + 1; b < ranges.length; b++) {
         if (ranges[a].start < ranges[b].end && ranges[b].start < ranges[a].end) {
@@ -5481,6 +5512,7 @@ export function buildMarkdown(
     }
   }
   detectGlobalOverlaps(mergedContent);
+  for (const entry of noteEntries) detectGlobalOverlaps(entry.body);
 
   const noteLabels = options?.notes?.assignedLabels;
   const renderOpts = {
@@ -6511,21 +6543,13 @@ export function buildMarkdown(
 
   // Append footnote definitions
   if (options?.notes) {
-    const notesInfo = options.notes;
-    // Sort entries by label (numeric first, then alpha)
-    const entries = [...notesInfo.map.values()].sort((a, b) => {
-      const na = parseInt(a.label, 10);
-      const nb = parseInt(b.label, 10);
-      if (!isNaN(na) && !isNaN(nb)) return na - nb;
-      return a.label.localeCompare(b.label);
-    });
     // Use note-specific image format mapping when rendering note bodies,
     // merging with the document-body mapping so note overrides fall back
     // to the original imageFormatMapping where keys are missing.
     const noteRenderOpts = renderOpts.noteImageFormatMapping
       ? { ...renderOpts, imageFormatMapping: { ...renderOpts.imageFormatMapping, ...renderOpts.noteImageFormatMapping } }
       : renderOpts;
-    for (const entry of entries) {
+    for (const entry of noteEntries) {
       output.push('\n\n');
       const bodyMerged = mergeConsecutiveRuns(joinTrackedParagraphBreaks(entry.body, marks));
       // Render body, splitting on para/table markers for multi-paragraph footnotes
@@ -7293,8 +7317,8 @@ export async function convertDocx(
   // Build note contexts with merged rels (note rels + document rels as fallback)
   const fnRelsMerged = new Map([...docRels, ...fnRels]);
   const enRelsMerged = new Map([...docRels, ...enRels]);
-  const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, zoteroCitations, keyMap, numberingDefs, numberingStartOverrides, format };
-  const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, zoteroCitations, keyMap, numberingDefs, numberingStartOverrides, format };
+  const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, zoteroCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds };
+  const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, zoteroCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds };
 
   const [{ content: docContent, zoteroBiblData, imageEntries }, footnotes, endnotes] = await Promise.all([
     extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, relationshipMap: docRels, replyIds, imageRelationships: imageRels, imageFolder: options?.imageFolder, portraitBreakOrdinals: portraitBreaks ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined }),
