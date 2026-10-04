@@ -1578,6 +1578,15 @@ describe('Code region inertness in preview', () => {
     expect(output).toContain('<code>code</code>');
     expect(output).toContain('manuscript-markdown-highlight');
   });
+
+  it.each([
+    ['`   `', '<code>   </code>'],
+    ['``  `  ``', '<code> ` </code>'],
+    ['` a `', '<code>a</code>'],
+  ])('reads %j as CommonMark does, keeping spaces alone', (input, code) => {
+    // markdown-it strips a space from each end of spaces alone too
+    expect(renderWithPlugin('a ' + input + ' b')).toContain(code);
+  });
 });
 
 // Comment association tests (unique logic, kept as-is)
