@@ -5640,7 +5640,7 @@ export function buildMarkdown(
   // over other content, which goes in one: only ID syntax keeps them whole
   const overUnanchored = new Set<string>();
   const overAnchored = new Set<string>();
-  function collectCommentMetadata(items: ContentItem[]): void {
+  function collectCommentMetadata(items: ContentItem[], inTable = false): void {
     // The end of the text each comment's anchor has so far, as ==} can
     // straddle two of the runs Word splits text into
     const anchorEnds = new Map<string, string>();
@@ -5662,7 +5662,10 @@ export function buildMarkdown(
             if (text.includes('==}')) holdsAnchorEnd = true;
             anchorEnds.set(id, text.slice(-2));
           }
-          if (ids.length > 1 || holdsAnchorEnd) {
+          // A display equation is a block of its own, which only ID
+          // markers can go around
+          const displayBlock = item.type === 'math' && item.display && !inTable;
+          if (ids.length > 1 || holdsAnchorEnd || displayBlock) {
             for (const id of ids) {
               forceIdCommentIds.add(id);
             }
@@ -5672,7 +5675,7 @@ export function buildMarkdown(
         for (const row of item.rows) {
           for (const cell of row.cells) {
             for (const para of cell.paragraphs) {
-              collectCommentMetadata(para);
+              collectCommentMetadata(para, true);
             }
           }
         }
@@ -5720,17 +5723,21 @@ export function buildMarkdown(
           paragraph++;
           continue;
         }
+        // A display equation outside a table is a block of its own, which
+        // ID markers go around
+        const displayBlock = item.type === 'math' && item.display && !table;
         const marked = item.type === 'text' ? !inCodeBlock
-          : item.type === 'math' ? !item.display
+          : item.type === 'math' ? !item.display || displayBlock
             : item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'image';
-        if (!marked || !('commentIds' in item) || !item.commentIds) continue;
-        for (const id of item.commentIds) {
+        if (displayBlock) paragraph++;
+        for (const id of marked && 'commentIds' in item ? item.commentIds ?? [] : []) {
           const first = paragraphOf.get(id);
           if (first === undefined) paragraphOf.set(id, paragraph);
           else if (first !== paragraph) spanning.add(id);
           if (table) inTable.add(id);
           lastCommentItem.set(id, item);
         }
+        if (displayBlock) paragraph++;
       }
     };
     visit(items, false);
@@ -5818,6 +5825,35 @@ export function buildMarkdown(
     embedDirectiveMapping: options?.embedDirectiveMapping ?? undefined,
   };
 
+  /** A display equation's block with the ID markers of the comments over
+   *  it, which open before its fences, unless open from the text before,
+   *  and close after them, unless the range goes on; and the bodies of
+   *  those that close. */
+  function displayMathWithComments(block: string, item: ContentItem): { block: string; bodies: string[] } {
+    const ids = [...('commentIds' in item ? item.commentIds ?? [] : [])].sort();
+    const open = renderOpts.openIdComments;
+    const remap = (id: string) => commentIdRemap.get(id) ?? id;
+    let before = '';
+    let after = '';
+    const bodies: string[] = [];
+    for (const id of ids) {
+      if (!open.has(id)) before += '{#' + remap(id) + '}';
+      const last = lastCommentItem.get(id);
+      if (last && last !== item) {
+        open.add(id);
+        continue;
+      }
+      open.delete(id);
+      after += '{/' + remap(id) + '}';
+      const comment = comments.get(id);
+      if (comment && !emittedIdCommentBodies.has(id)) {
+        emittedIdCommentBodies.add(id);
+        bodies.push(formatCommentBodyWithId(remap(id), comment, options?.timezone));
+      }
+    }
+    return { block: before + block + after, bodies };
+  }
+
   function listContinuationIndent(list: ListContinuation): string {
     const useTab = options?.listIndent === 'tab';
     if (useTab) {
@@ -5897,6 +5933,9 @@ export function buildMarkdown(
   // stable on DOCX -> MD conversion.
   let pendingAlertInlinePrefixForHardBreak: string | undefined;
   let pendingDisplayMathContainer: { prefix: string; type: 'list' | 'blockquote' } | undefined;
+  // Comment bodies from a display equation that text follows in its Word
+  // paragraph, which go after that text
+  const pendingEquationBodies: string[] = [];
   // Heading whose paragraph mark is inserted/deleted (whole-paragraph track
   // change): the `### ` marker must be re-inserted inside the leading Critic
   // span ({++### heading++}) rather than emitted before it. revType is kept
@@ -6661,7 +6700,14 @@ export function buildMarkdown(
         output.push('\n\n');
       }
       const mathBlock = MATH_FENCE + '\n' + canonicalizeDisplayMathLatex(item.latex) + '\n' + MATH_FENCE;
-      const revisedMathBlock = item.revision ? wrapWithRevision(mathBlock, item.revision) : mathBlock;
+      const commented = displayMathWithComments(item.revision ? wrapWithRevision(mathBlock, item.revision) : mathBlock, item);
+      // Text after the equation in its paragraph goes on from the closing
+      // fence, so a body there would come before it
+      const next = mergedContent[i + 1];
+      const textFollows = next !== undefined && (next.type === 'text' || next.type === 'citation'
+        || next.type === 'footnote_ref' || next.type === 'image' || (next.type === 'math' && !next.display));
+      if (textFollows) pendingEquationBodies.push(...commented.bodies);
+      const revisedMathBlock = [commented.block, ...(textFollows ? [] : commented.bodies)].join('\n');
       if (displayMathContainer) {
         output.push(revisedMathBlock.split('\n').map(line => displayMathContainer.prefix + line).join('\n'));
         pendingDisplayMathContainer = undefined;
@@ -6822,6 +6868,7 @@ export function buildMarkdown(
     if (rendered.nextIndex <= i) {
       throw new Error('Invariant violated: renderInlineRange did not advance index');
     }
+    rendered.deferredComments.unshift(...pendingEquationBodies.splice(0));
     let strippedAlertLeadHadHardBreak = false;
     let textOut = rendered.text;
     if (pendingAlertPrefixStrip) {
@@ -6914,7 +6961,9 @@ export function buildMarkdown(
             deferredAll.push(...part.deferredComments);
           }
           const mathBlock = MATH_FENCE + '\n' + canonicalizeDisplayMathLatex(item.latex) + '\n' + MATH_FENCE;
-          bodyParts.push(item.revision ? wrapWithRevision(mathBlock, item.revision) : mathBlock);
+          const commented = displayMathWithComments(item.revision ? wrapWithRevision(mathBlock, item.revision) : mathBlock, item);
+          bodyParts.push(commented.block);
+          deferredAll.push(...commented.bodies);
           partStart = bi + 1;
         } else if (item.type === 'table') {
           // Flush preceding inline content
