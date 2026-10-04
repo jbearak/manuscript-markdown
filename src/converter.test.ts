@@ -1154,6 +1154,103 @@ describe('legacy hidden metadata compatibility', () => {
   });
 });
 
+describe('Comments over equations', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+
+  test.each([
+    ['an equation', 'A {==$x$==}{>>@A (2024-01-15 10:30) | c<<} z.\n'],
+    ['an equation between words', 'A {==before $x$ after==}{>>@A (2024-01-15 10:30) | c<<} z.\n'],
+    ['two equations', 'A {==$x$ and $y$==}{>>@A (2024-01-15 10:30) | c<<} z.\n'],
+    ['an equation between formatted words', 'A {==**b** $x$ *i*==}{>>@A (2024-01-15 10:30) | c<<} z.\n'],
+    ['an inserted equation', 'A {==t {++$y$++}==}{>>@A (2024-01-15 10:30) | c<<}.\n'],
+    ['an equation in a heading', '# H {==$x$==}{>>@A (2024-01-15 10:30) | c<<}\n'],
+    ['an equation in a table cell', '| a | b |\n| --- | --- |\n| {==$x$==}{>>@A (2024-01-15 10:30) \\| c<<} | 2 |\n'],
+    ['an equation in bold text', 'A {==**b $x$ c**==}{>>@A (2024-01-15 10:30) | c<<} z.\n'],
+    ['an equation in italic text', 'A {==*i $x$*==}{>>@A (2024-01-15 10:30) | c<<} z.\n'],
+    ['an equation in a footnote', 'Text.[^1]\n\n[^1]: A {==$x$==}{>>@A (2024-01-15 10:30) | c<<} z.\n'],
+    ['an equation between words in a footnote', 'Text.[^1]\n\n[^1]: A {==before $x$ after==}{>>@A (2024-01-15 10:30) | c<<} z.\n'],
+  ])('keeps a comment over %s', async (_name, md) => {
+    // The equation came out of the range, splitting the comment in two, or
+    // the comment went missing
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('writes a comment over text with ==} in ID syntax', async () => {
+    // Where {==...==} would end at the text's ==}
+    const markdown = await roundTrip('A {==x \\=\\=} y==}{>>@A (2024-01-15 10:30) | c<<} z.');
+    expect(markdown).toBe('A {#1}x ==} y{/1} z.\n{#1>>@A (2024-01-15 10:30) | c<<}\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['the body', 'A {==x \\=\\=} y==}{>>@A (2024-01-15 10:30) | c<<} z.', 'A {#1}x ==} y{/1} z.\n{#1>>@A (2024-01-15 10:30) | c<<}\n'],
+    ['a footnote', 'Text.[^1]\n\n[^1]: A {==x \\=\\=} y==}{>>@A (2024-01-15 10:30) | c<<} z.',
+      'Text.[^1]\n\n[^1]: A {#1}x ==} y{/1} z.\n    {#1>>@A (2024-01-15 10:30) | c<<}\n'],
+    ['a table cell', '| a | b |\n| --- | --- |\n| {==x \\=\\=} y==}{>>@A (2024-01-15 10:30) \\| c<<} | 2 |',
+      '| a | b |\n| --- | --- |\n| {#1}x ==} y{/1} | 2 |\n\n{#1>>@A (2024-01-15 10:30) | c<<}\n'],
+  ])('writes a comment over ==} split between runs in %s in ID syntax', async (_name, md, expected) => {
+    // Word splits text into runs anywhere, and neither run held all of ==}
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    for (const part of ['word/document.xml', 'word/footnotes.xml']) {
+      const xml = await zip.file(part)?.async('string');
+      if (xml === undefined) continue;
+      zip.file(part, xml.replace(/(<w:r>(?:<w:rPr>(?:(?!<\/w:rPr>).)*<\/w:rPr>)?)<w:t([^>]*)>x ==\} y<\/w:t><\/w:r>/,
+        (_match, run: string, attrs: string) => run + '<w:t' + attrs + '>x ==</w:t></w:r>' + run + '<w:t' + attrs + '>} y</w:t></w:r>'));
+    }
+    expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown).toBe(expected);
+  });
+
+  test('writes a comment over text with ==} in a footnote in ID syntax', async () => {
+    const markdown = await roundTrip('Text.[^1]\n\n[^1]: A {==x \\=\\=} y==}{>>@A (2024-01-15 10:30) | c<<} z.');
+    expect(markdown).toBe('Text.[^1]\n\n[^1]: A {#1}x ==} y{/1} z.\n    {#1>>@A (2024-01-15 10:30) | c<<}\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps bold text around an equation in a comment in ID syntax', () => {
+    const comments = new Map([['0', { author: 'A', text: 'c', date: '' }]]);
+    const bold = { ...DEFAULT_FORMATTING, bold: true };
+    const markdown = buildMarkdown([
+      { type: 'text', text: 'b ', commentIds: new Set(['0']), formatting: bold },
+      { type: 'math', latex: '\\text{a ==}', display: false, commentIds: new Set(['0']) },
+      { type: 'text', text: ' c', commentIds: new Set(['0']), formatting: bold },
+    ], comments);
+    expect(markdown).toBe('{#1}**b $\\text{a ==}$ c**{/1}\n{#1>>@A | c<<}');
+  });
+
+  test.each([
+    ['an equation', { type: 'math', latex: 'x', display: false, commentIds: new Set(['0']) }, '$x$'],
+    ['text', { type: 'text', text: 'b', commentIds: new Set(['0']), formatting: DEFAULT_FORMATTING }, 'b'],
+  ])('writes a comment over %s and an image in ID syntax', (_name, first, markdown) => {
+    // The anchor couldn't hold the image, and both got a copy of the comment
+    const comments = new Map([['0', { author: 'A', text: 'c', date: '' }]]);
+    expect(buildMarkdown([
+      first,
+      { type: 'image', rId: 'rId9', src: 'media/a.png', alt: '', widthPx: 10, heightPx: 10, commentIds: new Set(['0']) },
+    ] as ContentItem[], comments)).toBe('{#1}' + markdown + '![](media/a.png){width=10 height=10}{/1}\n{#1>>@A | c<<}');
+  });
+
+  test('writes a comment over ==} in ID syntax in every paragraph it spans', () => {
+    // Not in the one paragraph with ==} alone, which made two comments of it
+    const comments = new Map([['0', { author: 'A', text: 'c', date: '' }]]);
+    const markdown = buildMarkdown([
+      { type: 'text', text: 'a', commentIds: new Set(['0']), formatting: DEFAULT_FORMATTING },
+      { type: 'para' },
+      { type: 'text', text: 'b ==} c', commentIds: new Set(['0']), formatting: DEFAULT_FORMATTING },
+    ] as ContentItem[], comments);
+    expect(markdown).not.toContain('{==');
+    expect(markdown.match(/@A \| c/g)).toHaveLength(1);
+  });
+
+  test('writes a comment over an equation with ==} in ID syntax', () => {
+    const comments = new Map([['0', { author: 'A', text: 'c', date: '' }]]);
+    const markdown = buildMarkdown([
+      { type: 'text', text: 'A ', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
+      { type: 'math', latex: '\\text{a ==}', display: false, commentIds: new Set(['0']) },
+    ], comments);
+    expect(markdown).toBe('A {#1}$\\text{a ==}${/1}\n{#1>>@A | c<<}');
+  });
+});
+
 describe('Dateless comment round-trip', () => {
   test('standalone comment without date round-trips without gaining a date', async () => {
     const md = 'Some text.\n\n{>>This is a comment without a date<<}';
