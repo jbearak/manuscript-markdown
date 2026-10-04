@@ -3544,7 +3544,7 @@ export interface DocxGenState {
   imageMediaPaths: Map<string, string>; // absPath -> mediaPath (for binary dedup across syntaxes)
   imageBinaries: Map<string, Uint8Array>; // media path -> binary data
   imageFormats: Map<string, string>; // rId -> syntax ("md" | "html") — document-body only
-  noteImageFormats: Map<string, string>; // rId -> syntax ("md" | "html") — note-body only
+  noteImageFormats: Map<string, string>; // part:rId, as footnotes:rId1 -> syntax ("md" | "html") — note-body only
   imageExtensions: Set<string>; // collected extensions for content types
   rsid: string; // Revision Save ID for paragraph-level w:rsidR attributes
   nextImageDocPrId: number;
@@ -5991,7 +5991,10 @@ function imageRunXml(run: MdRun, state: DocxGenState, options: MdToDocxOptions |
     }
     imgEntry = { rId, mediaPath };
     imgRelMap.set(dedupeKey, imgEntry);
-    (state.inNoteBody ? state.noteImageFormats : state.imageFormats).set(rId, syntax);
+    // A note's rId is its part's, footnotes' or endnotes', which another
+    // part, as Word can add, numbers the same
+    if (state.inNoteBody) state.noteImageFormats.set((state.notesMode === 'endnotes' ? 'endnotes' : 'footnotes') + ':' + rId, syntax);
+    else state.imageFormats.set(rId, syntax);
   }
   // Determine dimensions
   let width = run.imageWidth;

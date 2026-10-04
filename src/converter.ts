@@ -421,6 +421,12 @@ export interface FootnoteBody {
 /** Context for parsing rich content in footnote/endnote bodies. */
 interface NoteBodyContext {
   relationshipMap: Map<string, string>;
+  /** The notes' own image relationships, and where and to which files
+   *  their images go, which the document's share */
+  images?: { relationships: Map<string, string>; folder: string; files: ImageFiles };
+  /** The IDs of the notes the document references, which only have images:
+   *  another's would take a file, and a name, for an image nothing shows */
+  referenced?: ReadonlySet<string>;
   zoteroCitations: ZoteroCitation[];
   keyMap: Map<string, string>;
   numberingDefs: NumberingDefs;
@@ -735,10 +741,11 @@ export async function parseRelationships(
 
 export async function parseDocumentRelationships(
   zip: JSZip,
+  relsPath = 'word/_rels/document.xml.rels',
 ): Promise<{ hyperlinks: Map<string, string>; images: Map<string, string> }> {
   const hyperlinks = new Map<string, string>();
   const images = new Map<string, string>();
-  const parsed = await readZipXml(zip, 'word/_rels/document.xml.rels');
+  const parsed = await readZipXml(zip, relsPath);
   if (!parsed) return { hyperlinks, images };
   for (const node of findAllDeep(parsed, 'Relationship')) {
     const id = getAttr(node, 'Id');
@@ -2156,7 +2163,8 @@ async function extractNotes(
     const noteChildren = node[tagName];
     if (!Array.isArray(noteChildren)) continue;
 
-    const content = parseNoteBody(noteChildren, tagName, fileContext, citationCounter);
+    const noteContext = fileContext?.referenced && !fileContext.referenced.has(id) ? { ...fileContext, images: undefined } : fileContext;
+    const content = parseNoteBody(noteChildren, tagName, noteContext, citationCounter);
     notes.set(id, { id, content });
   }
   return notes;
@@ -2478,6 +2486,11 @@ function parseNoteBody(
           } catch {
             target.push({ type: 'math', latex: '\\text{[EQUATION ERROR]}', display: false, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
           }
+        } else if (key === 'w:drawing' && context?.images) {
+          // As in extractDocumentContent, from the notes' relationships
+          const { relationships, folder, files } = context.images;
+          target.push(...drawingImages(asXmlNodes(node[key]), relationships, folder, files,
+            { commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) }));
 
         // --- Basic text elements (always handled) ---
         } else if (key === 'w:t' || key === 'w:delText') {
@@ -2572,6 +2585,40 @@ function parseNoteBody(
 
   walkNoteBody(noteChildren);
   return content;
+}
+
+/** The note references in `items`, in table cells too, in order, after `refs` */
+function noteReferences(
+  items: ContentItem[], refs: { noteId: string; noteKind: 'footnote' | 'endnote' }[] = [],
+): { noteId: string; noteKind: 'footnote' | 'endnote' }[] {
+  for (const item of items) {
+    if (item.type === 'footnote_ref') {
+      refs.push({ noteId: item.noteId, noteKind: item.noteKind });
+    } else if (item.type === 'table') {
+      for (const row of item.rows) {
+        for (const cell of row.cells) {
+          for (const para of cell.paragraphs) noteReferences(para, refs);
+        }
+      }
+    }
+  }
+  return refs;
+}
+
+/** The notes' image format mapping for the notes of `part`, by relationship
+ *  ID, which is that part's own: its keys, part:rId, and those without a
+ *  part, as export wrote before it gave them one */
+function noteImageFormats(mapping: Map<string, string>, part: 'footnotes' | 'endnotes'): Map<string, string> {
+  const formats = new Map<string, string>();
+  for (const [key, syntax] of mapping) {
+    const colon = key.indexOf(':');
+    if (colon < 0) {
+      if (!formats.has(key)) formats.set(key, syntax);
+    } else if (key.slice(0, colon) === part) {
+      formats.set(key.slice(colon + 1), syntax);
+    }
+  }
+  return formats;
 }
 
 async function extractFootnotes(zip: JSZip, context?: NoteBodyContext): Promise<Map<string, FootnoteBody>> {
@@ -2813,6 +2860,91 @@ export interface ImageExtractionEntry {
   outputFilename: string;
 }
 
+/** The image files a conversion writes, and the media each file name holds */
+interface ImageFiles {
+  entries: ImageExtractionEntry[];
+  filenames: Map<string, string>;
+}
+
+/** A relationship's media target as its path in the package */
+function mediaZipPath(target: string): string {
+  const resolved: string[] = [];
+  for (const part of (target.startsWith('word/') ? target : 'word/' + target).split('/')) {
+    if (part === '..') resolved.pop();
+    else if (part !== '.') resolved.push(part);
+  }
+  return resolved.join('/');
+}
+
+/** The file name an image's media takes: its own, or where another
+ *  media's has it, the first with -2, -3 and so on that none has */
+function imageFilename(files: ImageFiles, filename: string, mediaPath: string): string {
+  const media = mediaZipPath(mediaPath);
+  const dot = filename.lastIndexOf('.');
+  const [stem, ext] = dot > 0 ? [filename.slice(0, dot), filename.slice(dot)] : [filename, ''];
+  for (let n = 1, name = filename; ; name = stem + '-' + ++n + ext) {
+    const holder = files.filenames.get(name);
+    if (holder === undefined || holder === media) return name;
+  }
+}
+
+/**
+ * The images of a w:drawing, its <wp:inline>s and <wp:anchor>s, whose
+ * pictures' relationships are in `relationships`, with `extra` on each
+ * item. `files` collects the file each needs.
+ */
+function drawingImages(
+  drawing: XmlNode[], relationships: Map<string, string>, imageFolder: string, files: ImageFiles,
+  extra: { commentIds: Set<string>; revision?: RevisionInfo },
+): ContentItem[] {
+  const images: ContentItem[] = [];
+  for (const child of drawing) {
+    const inlineOrAnchor = child['wp:inline'] || child['wp:anchor'];
+    if (!inlineOrAnchor) continue;
+    const elements = asXmlNodes(inlineOrAnchor);
+    // Extract extent, docPr, and blip from the inline/anchor element
+    let cx = 0, cy = 0, alt = '', docPrName = '', blipRId = '';
+    for (const el of elements) {
+      if (el['wp:extent'] !== undefined) {
+        cx = parseInt(getAttr(el, 'cx') || '0', 10);
+        cy = parseInt(getAttr(el, 'cy') || '0', 10);
+      } else if (el['wp:docPr'] !== undefined) {
+        alt = getAttr(el, 'descr') || '';
+        docPrName = getAttr(el, 'name') || '';
+      } else if (el['a:graphic'] !== undefined) {
+        // Dig into a:graphic > a:graphicData > pic:pic > pic:blipFill > a:blip
+        const graphicData = findAllDeep([el], 'a:graphicData');
+        for (const gd of graphicData) {
+          const blips = findAllDeep([gd], 'a:blip');
+          for (const blip of blips) {
+            const embed = blip?.[':@']?.['@_r:embed'] ?? getAttr(blip, 'embed');
+            if (embed) blipRId = embed;
+          }
+        }
+      }
+    }
+    if (!blipRId) continue;
+    const mediaPath = relationships.get(blipRId);
+    if (!mediaPath) continue;
+    // Check supported format
+    const mediaFilename = mediaPath.split('/').pop() || '';
+    const ext = mediaFilename.split('.').pop()?.toLowerCase() || '';
+    if (!isSupportedImageFormat(ext)) continue;
+    // A distinct image with the name of one in the document or a note takes
+    // another name, which one file per name would have written over
+    const outputFilename = imageFilename(files, resolveImageFilename(docPrName, mediaFilename), mediaPath);
+    const src = imageFolder ? imageFolder.replace(/\/$/, '') + '/' + outputFilename : outputFilename;
+    const widthPx = cx > 0 ? emuToPixels(cx) : 0;
+    const heightPx = cy > 0 ? emuToPixels(cy) : 0;
+    images.push({ type: 'image', rId: blipRId, src, alt, widthPx, heightPx, ...extra, commentIds: new Set(extra.commentIds) });
+    if (!files.filenames.has(outputFilename)) {
+      files.filenames.set(outputFilename, mediaZipPath(mediaPath));
+      files.entries.push({ rId: blipRId, mediaPath, outputFilename });
+    }
+  }
+  return images;
+}
+
 export interface DocumentContentResult {
   content: ContentItem[];
   zoteroBiblData?: ZoteroBiblData;
@@ -2962,6 +3094,8 @@ export async function extractDocumentContent(
     replyIds?: Set<string>;
     imageRelationships?: Map<string, string>;
     imageFolder?: string;
+    /** The image files the conversion writes, which the notes' images share */
+    imageFiles?: ImageFiles;
     portraitBreakOrdinals?: Set<number>;
     customStyles?: Record<string, CustomStyleDef>;
     /** Bookmark name → "noteKind:noteId" for resolving NOTEREF cross-reference fields. */
@@ -2985,8 +3119,7 @@ export async function extractDocumentContent(
   const imageRelMap = options?.imageRelationships ?? new Map<string, string>();
   const imageFolder = options?.imageFolder ?? '';
   const styleLayouts = options?.styleLayouts ?? await parseStyleLayouts(zip);
-  const imageEntries: ImageExtractionEntry[] = [];
-  const extractedImageFilenames = new Set<string>();
+  const imageFiles: ImageFiles = options?.imageFiles ?? { entries: [], filenames: new Map() };
 
   // Build a lookup: instrText index -> ZoteroCitation (in order of appearance)
   let citationIdx = 0;
@@ -3579,54 +3712,8 @@ export async function extractDocumentContent(
             target.push({ type: 'math', latex: '\\text{[EQUATION ERROR]}', display: false, commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) });
           }
         } else if (key === 'w:drawing') {
-          // Image extraction from <w:drawing> containing <wp:inline> or <wp:anchor>
-          const drawingChildren = asXmlNodes(node[key]);
-          for (const child of drawingChildren) {
-            const inlineOrAnchor = child['wp:inline'] || child['wp:anchor'];
-            if (!inlineOrAnchor) continue;
-            const elements = asXmlNodes(inlineOrAnchor);
-            // Extract extent, docPr, and blip from the inline/anchor element
-            let cx = 0, cy = 0, alt = '', docPrName = '', blipRId = '';
-            for (const el of elements) {
-              if (el['wp:extent'] !== undefined) {
-                cx = parseInt(getAttr(el, 'cx') || '0', 10);
-                cy = parseInt(getAttr(el, 'cy') || '0', 10);
-              } else if (el['wp:docPr'] !== undefined) {
-                alt = getAttr(el, 'descr') || '';
-                docPrName = getAttr(el, 'name') || '';
-              } else if (el['a:graphic'] !== undefined) {
-                // Dig into a:graphic > a:graphicData > pic:pic > pic:blipFill > a:blip
-                const graphicData = findAllDeep([el], 'a:graphicData');
-                for (const gd of graphicData) {
-                  const blips = findAllDeep([gd], 'a:blip');
-                  for (const blip of blips) {
-                    const embed = blip?.[':@']?.['@_r:embed'] ?? getAttr(blip, 'embed');
-                    if (embed) blipRId = embed;
-                  }
-                }
-              }
-            }
-            if (!blipRId) continue;
-            const mediaPath = imageRelMap.get(blipRId);
-            if (!mediaPath) continue;
-            // Check supported format
-            const mediaFilename = mediaPath.split('/').pop() || '';
-            const ext = mediaFilename.split('.').pop()?.toLowerCase() || '';
-            if (!isSupportedImageFormat(ext)) continue;
-            const outputFilename = resolveImageFilename(docPrName, mediaFilename);
-            const src = imageFolder ? imageFolder.replace(/\/$/, '') + '/' + outputFilename : outputFilename;
-            const widthPx = cx > 0 ? emuToPixels(cx) : 0;
-            const heightPx = cy > 0 ? emuToPixels(cy) : 0;
-            target.push({
-              type: 'image', rId: blipRId, src, alt,
-              widthPx, heightPx, commentIds: new Set(activeComments),
-              ...(currentRevision ? { revision: currentRevision } : {}),
-            });
-            if (!extractedImageFilenames.has(outputFilename)) {
-              extractedImageFilenames.add(outputFilename);
-              imageEntries.push({ rId: blipRId, mediaPath, outputFilename });
-            }
-          }
+          target.push(...drawingImages(asXmlNodes(node[key]), imageRelMap, imageFolder, imageFiles,
+            { commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}) }));
         } else if (Array.isArray(node[key])) {
           walk(node[key], currentFormatting, target, inTableCell, currentRevision);
         }
@@ -3635,7 +3722,7 @@ export async function extractDocumentContent(
   }
 
   walk(parsed);
-  return { content, zoteroBiblData, imageEntries: imageEntries.length > 0 ? imageEntries : undefined };
+  return { content, zoteroBiblData, imageEntries: imageFiles.entries.length > 0 ? imageFiles.entries : undefined };
 }
 
 // Markdown generation
@@ -7509,13 +7596,15 @@ export function buildMarkdown(
 
   // Append footnote definitions
   if (options?.notes) {
-    // Use note-specific image format mapping when rendering note bodies,
-    // merging with the document-body mapping so note overrides fall back
-    // to the original imageFormatMapping where keys are missing.
-    const noteRenderOpts = renderOpts.noteImageFormatMapping
-      ? { ...renderOpts, imageFormatMapping: { ...renderOpts.imageFormatMapping, ...renderOpts.noteImageFormatMapping } }
-      : renderOpts;
+    // A note's images take the notes' image format mapping for its part, as
+    // their relationship IDs are that part's, not the document's, but where
+    // there is none, as before export wrote one, the document's held them
+    const noteMapping = renderOpts.noteImageFormatMapping;
+    const noteRenderOptsByKind = Object.fromEntries((['footnote', 'endnote'] as const).map(kind => [kind, noteMapping
+      ? { ...renderOpts, imageFormatMapping: noteImageFormats(noteMapping, kind === 'endnote' ? 'endnotes' : 'footnotes') }
+      : renderOpts])) as Record<'footnote' | 'endnote', RenderOpts>;
     for (const entry of noteEntries) {
+      const noteRenderOpts = noteRenderOptsByKind[entry.noteKind];
       output.push('\n\n');
       const bodyMerged = noteBodies.get(entry)!;
       // Render body, splitting on para/table markers for multi-paragraph footnotes
@@ -8277,11 +8366,11 @@ export async function convertDocx(
   const keyMap = buildCitationKeyMap(zoteroCitations, format);
 
   // Parse note-specific rels and numbering for footnote/endnote body parsing
-  const [numberingResult, docRelsParsed, fnRels, enRels] = await Promise.all([
+  const [numberingResult, docRelsParsed, fnRelsParsed, enRelsParsed] = await Promise.all([
     parseNumberingDefinitions(zip),
     parseDocumentRelationships(zip),
-    parseRelationships(zip, 'word/_rels/footnotes.xml.rels'),
-    parseRelationships(zip, 'word/_rels/endnotes.xml.rels'),
+    parseDocumentRelationships(zip, 'word/_rels/footnotes.xml.rels'),
+    parseDocumentRelationships(zip, 'word/_rels/endnotes.xml.rels'),
   ]);
   const styleLayouts = await parseStyleLayouts(zip);
   const numberingDefs = numberingResult.defs;
@@ -8291,16 +8380,22 @@ export async function convertDocx(
   const imageRels = docRelsParsed.images;
 
   // Build note contexts with merged rels (note rels + document rels as fallback)
-  const fnRelsMerged = new Map([...docRels, ...fnRels]);
-  const enRelsMerged = new Map([...docRels, ...enRels]);
-  const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, zoteroCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, styleLayouts };
-  const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, zoteroCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, styleLayouts };
+  const fnRelsMerged = new Map([...docRels, ...fnRelsParsed.hyperlinks]);
+  const enRelsMerged = new Map([...docRels, ...enRelsParsed.hyperlinks]);
+  // One set of image files for the document and its notes, whose images'
+  // relationships are each part's own
+  const imageFiles: ImageFiles = { entries: [], filenames: new Map() };
+  const imageFolder = options?.imageFolder ?? '';
+  const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, images: { relationships: fnRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, styleLayouts };
+  const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, images: { relationships: enRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, styleLayouts };
 
-  const [{ content: docContent, zoteroBiblData, imageEntries }, footnotes, endnotes] = await Promise.all([
-    extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, relationshipMap: docRels, replyIds, imageRelationships: imageRels, imageFolder: options?.imageFolder, portraitBreakOrdinals: portraitBreaks ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined, styleLayouts }),
-    extractFootnotes(zip, fnContext),
-    extractEndnotes(zip, enContext),
-  ]);
+  const { content: docContent, zoteroBiblData } = await extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, relationshipMap: docRels, replyIds, imageRelationships: imageRels, imageFolder: options?.imageFolder, imageFiles, portraitBreakOrdinals: portraitBreaks ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined, styleLayouts });
+  // The notes the document references, in its order, which are the ones it
+  // shows; their images take names after its own, footnotes' first
+  const refOrder = noteReferences(docContent);
+  const referenced = (kind: 'footnote' | 'endnote') => new Set(refOrder.filter(ref => ref.noteKind === kind).map(ref => ref.noteId));
+  const footnotes = await extractFootnotes(zip, { ...fnContext, referenced: referenced('footnote') });
+  const endnotes = await extractEndnotes(zip, { ...enContext, referenced: referenced('endnote') });
 
   // A task item is a list item, which the code block's spacer goes before
   markTaskListItems(docContent);
@@ -8448,25 +8543,6 @@ export async function convertDocx(
   // Build unified notes map with renumbered labels
   const notesMap = new Map<string, { label: string; body: ContentItem[]; noteKind: 'footnote' | 'endnote' }>();
   let noteCounter = 1;
-  // Collect all footnote_ref items to assign labels in document order
-  const refOrder: { noteId: string; noteKind: 'footnote' | 'endnote' }[] = [];
-  function collectRefs(items: ContentItem[]) {
-    for (const item of items) {
-      if (item.type === 'footnote_ref') {
-        refOrder.push({ noteId: item.noteId, noteKind: item.noteKind });
-      } else if (item.type === 'table') {
-        // Recursively collect refs from table cells
-        for (const row of item.rows) {
-          for (const cell of row.cells) {
-            for (const para of cell.paragraphs) {
-              collectRefs(para);
-            }
-          }
-        }
-      }
-    }
-  }
-  collectRefs(docContent);
 
   const assignedLabels = new Map<string, string>(); // "kind:noteId" -> label
   const usedLabels = new Set<string>();
@@ -8721,18 +8797,10 @@ export async function convertDocx(
 
   // Extract image binaries from the ZIP
   let images: Map<string, Uint8Array> | undefined;
-  if (imageEntries && imageEntries.length > 0) {
+  if (imageFiles.entries.length > 0) {
     images = new Map();
-    for (const entry of imageEntries) {
-      const rawPath = entry.mediaPath.startsWith('word/') ? entry.mediaPath : 'word/' + entry.mediaPath;
-      // Normalize ../ segments (e.g. "word/../media/image1.png" -> "media/image1.png")
-      const pathParts = rawPath.split('/');
-      const resolved: string[] = [];
-      for (const p of pathParts) {
-        if (p === '..') resolved.pop();
-        else if (p !== '.') resolved.push(p);
-      }
-      const mediaPath = resolved.join('/');
+    for (const entry of imageFiles.entries) {
+      const mediaPath = mediaZipPath(entry.mediaPath);
       const file = zip.file(mediaPath);
       if (file) {
         images.set(entry.outputFilename, await file.async('uint8array'));
