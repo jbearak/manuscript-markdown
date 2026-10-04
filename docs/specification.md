@@ -828,6 +828,8 @@ Comments can include author name and timestamp:
 {>>@alice (2024-01-15 14:30) | This needs revision<<}
 ```
 
+A blank line in a comment's text separates two of the Word comment's paragraphs, and a single line's end is a line break. In a quote, each of the comment's lines after the first starts with the quote's `>`. On DOCX import, a comment in a table cell whose text has more than one line takes [ID syntax](#overlapping-comments), with its body below the table, because a pipe table's cell can't hold a line's end.
+
 #### Configuration
 
 | Setting | Default | Description |
@@ -855,7 +857,7 @@ Standard CriticMarkup comment syntax (`{==text==}{>>comment<<}`) does not suppor
 
 The `#id` appears between `{` and `>>`, extending the existing comment syntax. Author attribution uses `@Author (Date) | text` format — see [Comment Attribution](#comment-attribution).
 
-A body can go on the lines after its paragraph, in a paragraph of its own, or at either end of a line. It adds no text to Word: the line breaks and spaces around it, and a paragraph that holds only bodies, don't export. On DOCX import, bodies go on the lines after their paragraph, inside its quote if it has one, or after a blank line below a pipe or grid table. An HTML table's cells don't take comment syntax (see [HTML Tables](#html-tables)).
+A body can go on the lines after its paragraph, in a paragraph of its own, or at either end of a line. It adds no text to Word: the line breaks and spaces around it, and a paragraph that holds only bodies, don't export. On DOCX import, bodies go on the lines after their paragraph, inside its quote if it has one, or after a blank line below a table. An HTML table's cells don't take comment syntax (see [HTML Tables](#html-tables)).
 
 #### Examples
 
