@@ -4890,6 +4890,73 @@ describe('Landscape section round-trip', () => {
   });
 });
 
+describe('A section at the start of the document', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+
+  test.each([
+    ['a landscape section', '<!-- landscape -->\n\nText.\n\n<!-- /landscape -->\n\nAfter.'],
+    ['a portrait section', '<!-- portrait -->\n\nText.\n\n<!-- /portrait -->\n\nAfter.'],
+    ['a landscape section with no blank lines', '<!-- landscape -->\nText.\n<!-- /landscape -->'],
+    ['comment ranges in a landscape section', '<!-- landscape -->\n\nSeen {#1}a {#2}b{/1} c{/2} on.\n{#1>>one<<}\n{#2>>two<<}\n\n<!-- /landscape -->'],
+  ])('keeps the opener of %s apart from its first paragraph', async (_, md) => {
+    // Its first paragraph has no paragraph marker of its own on import
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('adds no blank line before display math that opens it', async () => {
+    // Without the custom property for sentinel gaps, as for a Word document
+    const fence = '$' + '$';
+    const zip = await JSZip.loadAsync((await convertMdToDocx('<!-- landscape -->\n\n' + fence + '\nx^2\n' + fence + '\n\n<!-- /landscape -->')).docx);
+    zip.remove('docProps/custom.xml');
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toStartWith('<!-- landscape -->\n\n' + fence + '\nx^2');
+  });
+});
+
+describe('A section break on the last paragraph of its section', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+  // Moves each section break from its empty carrier onto the paragraph
+  // before, as Word does when the carrier is deleted
+  const withoutCarriers = async (md: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(
+      /(<w:p\b[^>]*>)(<w:pPr>((?:(?!<\/w:pPr>).)*)<\/w:pPr>)?((?:(?!<w:p[ >]).)*?<\/w:p>)<w:p\b[^>]*><w:pPr>(<w:sectPr\b(?:(?!<\/w:sectPr>).)*<\/w:sectPr>)<\/w:pPr><\/w:p>/g,
+      (_m, open, _pPr, props, rest, sectPr) => open + '<w:pPr>' + (props ?? '') + sectPr + '</w:pPr>' + rest));
+    return strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+  };
+
+  test.each([
+    ['a landscape section', '<!-- landscape -->\n\nText.\n\n<!-- /landscape -->\n\nAfter.'],
+    ['two paragraphs', 'Before.\n\n<!-- landscape -->\n\nA.\n\nB.\n\n<!-- /landscape -->\n\nAfter.'],
+    ['a heading', 'Before.\n\n<!-- landscape -->\n\n## Head\n\n<!-- /landscape -->\n\nAfter.'],
+    ['a list', 'A.\n\n<!-- landscape -->\n\n- x\n- y\n\n<!-- /landscape -->\n\nC.'],
+    ['a portrait section', 'A.\n\n<!-- portrait -->\n\nB.\n\n<!-- /portrait -->\n\nC.'],
+  ])('keeps the paragraphs and fences of %s', async (_, md) => {
+    expect(await withoutCarriers(md)).toBe(md);
+  });
+
+  test('takes a carrier with an empty run for an empty carrier', async () => {
+    // A table with its own orientation, which needs no fences
+    const md = 'A.\n\n<table data-orientation="landscape">\n<tr><td>a</td></tr>\n</table>\n\nC.';
+    const { docx } = await convertMdToDocx(md);
+    const zip = await JSZip.loadAsync(docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/(<w:sectPr\b[\s\S]*?<\/w:sectPr><\/w:pPr>)(<\/w:p>)/g, '$1<w:r><w:t/></w:r>$2'));
+    const withEmptyRuns = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(withEmptyRuns).toBe(strip((await convertDocx(docx)).markdown));
+  });
+
+  test('adds no blank lines before an HTML comment that opens it', async () => {
+    // Without the custom property for sentinel gaps, as for a Word document
+    const zip = await JSZip.loadAsync((await convertMdToDocx('<!-- landscape -->\n<!-- note -->\nText.\n<!-- /landscape -->')).docx);
+    zip.remove('docProps/custom.xml');
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toStartWith('<!-- landscape -->\n<!-- note -->\n');
+  });
+});
+
 describe('Portrait section round-trip', () => {
   test('fence-based portrait round-trips through MD→DOCX→MD', async () => {
     const md = 'Before\n\n<!-- portrait -->\n\nTable title\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\nTable note\n\n<!-- /portrait -->\n\nAfter';
