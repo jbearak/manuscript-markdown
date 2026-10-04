@@ -230,11 +230,13 @@ bibliography: shared/references
 | `locale` | Optional locale override (e.g., `en-US`, `en-GB`). Defaults to the style's own locale. |
 | `zotero-notes` | Optional Zotero note type: `in-text` (default), `footnotes`, or `endnotes`. Legacy alias: `note-type`. Legacy numeric values (0, 1, 2) are still accepted. |
 | `notes` | Controls footnote/endnote generation: `footnotes` (default) or `endnotes`. Auto-detected on DOCX import. |
-| `timezone` | Local timezone offset (e.g., `+05:00`, `-05:00`). Auto-generated on DOCX import for idempotent date roundtripping. |
+| `timezone` | Local timezone offset (e.g., `+05:00`, `-05:00`) for comment and revision dates. Kept through a DOCX round trip, with comment dates written in it; import doesn't add it. |
 | `bibliography` | Path to a `.bib` file (`.bib` extension optional). Aliases: `bib`, `bibtex`. See [Specification](specification.md#bibtex-companion-file). |
 | `line-spacing` | Line spacing for body text: `single`, `1.5`, `double`, or a numeric multiplier. See [Specification](specification.md#line-spacing-and-paragraph-indent). |
 | `paragraph-indent` | First-line paragraph indentation in inches (e.g., `0.5`). Set to `none` to disable. See [Specification](specification.md#line-spacing-and-paragraph-indent). |
 | `bibliography-hanging-indent` | When `true` (default), bibliography entries use a hanging indent. Set to `false` to disable. |
+
+Some settings leave no trace in the Word document: `locale` and `zotero-notes` without Zotero citations, `notes` without notes, `timezone`, `blockquote-style`, `colors` and `breaks`. Export stores them in the `MANUSCRIPT_FRONTMATTER_SETTINGS_*` custom properties, and import restores each one unless the document itself says otherwise (Zotero's preferences, or the kind of notes it has). Import reads `code-font` and `code-font-size` from the Code Block style, as it reads the other fonts from theirs. An explicit setting equal to the default, such as `code-font: Consolas`, isn't written back.
 
 > **`zotero-notes` vs `notes`:** These fields are independent. `zotero-notes` controls how Zotero citations render (in-text, footnotes, or endnotes) and is stored in `ZOTERO_PREF_*` document properties for Zotero to read. `notes` controls whether the document's own footnote/endnote references are placed at the bottom of each page (footnotes) or collected at the end (endnotes). For example, a document can use `zotero-notes: in-text` for citations while using `notes: endnotes` for its own notes.
 

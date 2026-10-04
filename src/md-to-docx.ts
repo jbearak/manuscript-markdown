@@ -7,7 +7,7 @@ import { downloadStyle, resolveCslCachePath } from './csl-loader';
 import { existsSync, readFileSync } from 'fs';
 import { isAbsolute, join, resolve } from 'path';
 import { parseBibtex, BibtexEntry } from './bibtex-parser';
-import { parseFrontmatter, maskFrontmatter, Frontmatter, noteTypeToNumber, type ColorScheme, type CustomStyleDef, parseColWidths, expandColWidths, colWidthsToPct } from './frontmatter';
+import { parseFrontmatter, maskFrontmatter, serializeFrontmatter, Frontmatter, noteTypeToNumber, type ColorScheme, type CustomStyleDef, parseColWidths, expandColWidths, colWidthsToPct } from './frontmatter';
 import { formatTableNumbers, parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping, type TableDigits, type TableDecimalMark, type TableDigitGrouping } from './table-number-format';
 import type { TableNumberFormat } from './table-metadata';
 import { alertColorsByScheme, getDefaultColorScheme } from './alert-colors';
@@ -4996,6 +4996,20 @@ function consecutiveReplyProps(state: DocxGenState): CustomPropEntry[] {
   return [{ name: 'MANUSCRIPT_CONSECUTIVE_REPLY_COMMENTS', value: [...state.consecutiveReplyParaIds].join(',') }];
 }
 
+/**
+ * Settings the document has no other trace of, as frontmatter text, for
+ * import to restore: notes and Zotero settings with no notes or citations to
+ * show them, and settings for Markdown or for parts the document may lack.
+ */
+function frontmatterSettingsProps(fm: Frontmatter): CustomPropEntry[] {
+  const settings: Frontmatter = {
+    locale: fm.locale, zoteroNotes: fm.zoteroNotes, notes: fm.notes, timezone: fm.timezone,
+    blockquoteStyle: fm.blockquoteStyle, colors: fm.colors, breaks: fm.breaks,
+  };
+  const yaml = serializeFrontmatter(settings);
+  return yaml ? chunkCustomProps('MANUSCRIPT_FRONTMATTER_SETTINGS_', yaml) : [];
+}
+
 function frontmatterBlankLineProps(count: number): CustomPropEntry[] {
   if (count < 0) return []; // no frontmatter
   return [{ name: 'MANUSCRIPT_FRONTMATTER_BLANK_LINES', value: String(count) }];
@@ -7708,6 +7722,7 @@ export async function convertMdToDocx(
     customProps.push(...chunkCustomProps('MANUSCRIPT_CUSTOM_STYLES_', JSON.stringify(frontmatter.styles)));
   }
   customProps.push(...frontmatterBlankLineProps(frontmatterBlankLines));
+  customProps.push(...frontmatterSettingsProps(frontmatter));
   customProps.push(...frontmatterFieldOrderProps(fieldOrder));
   customProps.push(...bibKeyOrderProps(bibEntries));
   customProps.push(...bibDataProps(options?.bibtex));

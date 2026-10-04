@@ -5233,3 +5233,61 @@ describe('XML entity limits', () => {
     expect(result.markdown).toContain('DOCTYPE html');
   });
 });
+
+describe('Frontmatter settings round-trip', () => {
+  const frontmatterOf = async (md: string, edit?: (zip: JSZip) => Promise<void>) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    await edit?.(zip);
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    return /^---\n([\s\S]*?)\n---/.exec(markdown)?.[1] ?? '';
+  };
+
+  test.each([
+    'locale: en-GB',
+    'zotero-notes: endnotes',
+    'notes: endnotes',
+    'timezone: -05:00',
+    'blockquote-style: IntenseQuote',
+    'colors: guttmacher',
+    'breaks: true',
+    'code-font: Courier New',
+    'code-font-size: 9',
+  ])('keeps %s', async (setting) => {
+    // With nothing in the document that shows the setting
+    expect(await frontmatterOf('---\n' + setting + '\n---\n\nText.')).toBe(setting);
+  });
+
+  test('keeps comment dates in the stored timezone', async () => {
+    // Whatever the system's timezone, which export doesn't read them in
+    const md = '---\ntimezone: +05:45\n---\n\n{==Text==}{>>@A (2024-01-15 23:30) | Note.<<}';
+    const markdown = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+    expect(markdown).toContain('{>>@A (2024-01-15 23:30) | Note.<<}');
+  });
+
+  test('formats a timestamp in a given offset', () => {
+    expect(formatLocalIsoMinute('2024-01-15T17:45:00Z', '+05:45')).toBe('2024-01-15 23:30');
+    expect(formatLocalIsoMinute('2024-01-15T02:00:00Z', '-05:00')).toBe('2024-01-14 21:00');
+  });
+
+  test.each(['code-font', 'font', 'header-font'])('keeps a %s with an ampersand in its name', async (key) => {
+    expect(await frontmatterOf('---\n' + key + ': A & B\n---\n\n# H\n\nText.\n\n```\ncode\n```')).toBe(key + ': A & B');
+  });
+
+  test('takes the kind of notes the document has over the stored setting', async () => {
+    expect(await frontmatterOf('---\nnotes: footnotes\n---\n\nText.[^1]\n\n[^1]: Note.', async zip => {
+      // As if the notes became endnotes in Word
+      const footnotes = await zip.file('word/footnotes.xml')!.async('string');
+      zip.file('word/endnotes.xml', footnotes.replace(/footnote/g, 'endnote').replace(/Footnote/g, 'Endnote'));
+      zip.remove('word/footnotes.xml');
+      const xml = await zip.file('word/document.xml')!.async('string');
+      zip.file('word/document.xml', xml.replace(/footnoteReference/g, 'endnoteReference').replace(/FootnoteReference/g, 'EndnoteReference'));
+    })).toBe('notes: endnotes');
+  });
+
+  test('reads a code font set in Word', async () => {
+    expect(await frontmatterOf('```\ncode\n```', async zip => {
+      const styles = await zip.file('word/styles.xml')!.async('string');
+      zip.file('word/styles.xml', styles.replace(/(w:styleId="CodeBlock">[\s\S]*?)Consolas/, '$1Menlo').replace(/(w:styleId="CodeBlock">[\s\S]*?)Consolas/, '$1Menlo'));
+    })).toBe('code-font: Menlo');
+  });
+});
