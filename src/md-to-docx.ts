@@ -692,6 +692,14 @@ export function linkifyMatches(text: string): Array<{ schema: string; index: num
   return citationTextMd.linkify.match(text) ?? [];
 }
 
+/** The text of the link linkify makes of a URL, or an email address
+ *  (`email`), as export reads it: with percent-encoding and punycode
+ *  decoded, as https://e.com/a%20b shows https://e.com/a b */
+export function linkifiedText(address: string, email: boolean): string {
+  citationTextMd ??= createMarkdownIt();
+  return email ? citationTextMd.normalizeLinkText('mailto:' + address).replace(/^mailto:/, '') : citationTextMd.normalizeLinkText(address);
+}
+
 function citationRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   const max = state.posMax;

@@ -4115,6 +4115,83 @@ describe('Integration: comments.docx fixture', () => {
   });
 });
 
+describe('Bare links', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+
+  test.each([
+    ['another to a different place', '[https://e.com](https://e.com)[https://f.com](https://f.com)', '[https\\://e.com](https://e.com)https://f.com'],
+    ['a letter', '[https://e.com](https://e.com)abc', '[https\\://e.com](https://e.com)abc'],
+    ['a path', '[https://e.com](https://e.com)/x', '[https\\://e.com](https://e.com)/x'],
+    ['a domain', '[https://e.com](https://e.com).org', '[https\\://e.com](https://e.com).org'],
+    ['a letter before it', 'abc[https://e.com](https://e.com)', 'abc[https\\://e.com](https://e.com)'],
+    ['a colon before an address', 'Contact:[a@b.com](mailto:a@b.com)', 'Contact:[a\\@b.com](mailto:a@b.com)'],
+    ['a letter, in a comment\'s range', '{==[https://e.com](https://e.com)abc==}{>>c<<}', '{==[https\\://e.com](https://e.com)abc==}{>>c<<}'],
+    ['a colon after its path', '[https://e.com/a](https://e.com/a): x', '[https\\://e.com/a](https://e.com/a): x'],
+    ['a quote before an address', 'x"[a@b.com](mailto:a@b.com)', 'x"[a\\@b.com](mailto:a@b.com)'],
+    ['a backslash, which escapes its scheme', '\\\\[https://e.com](https://e.com)', '\\\\https://e.com'],
+    ['a line break after its path', '[https://e.com/a](https://e.com/a)\\\nx', '[https\\://e.com/a](https://e.com/a)\\\nx'],
+    ['bold after its path', '[https://e.com/a](https://e.com/a)**b**', '[https\\://e.com/a](https://e.com/a)**b**'],
+    ['strikethrough after it', '[https://e.com](https://e.com)~~b~~', '[https\\://e.com](https://e.com)~~b~~'],
+    ['a highlight after it', '[https://e.com](https://e.com)==b==', '[https\\://e.com](https://e.com)==b=='],
+    ['code after it', '[https://e.com](https://e.com)`b`', '[https\\://e.com](https://e.com)`b`'],
+    ['an equation after it', '[https://e.com](https://e.com)$x$', '[https\\://e.com](https://e.com)$x$'],
+    ['a link after its path', '[https://e.com/a](https://e.com/a)[b](https://f.com)', '[https\\://e.com/a](https://e.com/a)[b](https://f.com)'],
+    ['an insertion after its path', '[https://e.com/a](https://e.com/a){++b++}', '[https\\://e.com/a](https://e.com/a){++b++}'],
+  ])('writes a link next to %s in link syntax', async (_name, md, expected) => {
+    // Written bare, linkify read the link with the text next to it, or
+    // didn't read it as a link
+    expect(await roundTrip(md)).toBe(expected + '\n');
+  });
+
+  test.each([
+    ['a percent-encoded space', '[https://e.com/a%20b](https://e.com/a%20b)', '[https\\://e.com/a%20b](https://e.com/a%20b)'],
+    ['punycode', '[https://xn--bcher-kva.de](https://xn--bcher-kva.de)', '[https\\://xn--bcher-kva.de](https://xn--bcher-kva.de)'],
+    ['an asterisk at its end', '[https://e.com/a\\*](https://e.com/a*)', '[https\\://e.com/a\\*](https://e.com/a*)'],
+  ])('writes a link to an address with %s in link syntax', async (_name, md, expected) => {
+    // Linkify's link showed it decoded, or left the * out
+    expect(await roundTrip(md)).toBe(expected + '\n');
+  });
+
+  test.each([
+    '(https://e.com)', 'https://e.com.', 'see https://e.com, and', '(a@b.com)', 'a@b.com.', '"https://e.com"',
+    '**b**https://e.com', '{++https://e.com++}', 'x {++https://e.com++} y', 'https://e.com\\\nx', 'https://e.com[^1]\n\n[^1]: n',
+    // Unicode punctuation and symbols, which linkify ends a link at or reads one after
+    'https://e.com\u2026 next', '\u201chttps://e.com\u201d', '\u00a9https://e.com', '\u00e9https://e.com', 'https://e.com,x',
+    'https://e.com/a.', '{==https://e.com/a==}{>>c<<}', 'first_last@e.com',
+  ])('keeps %s bare', async (md) => {
+    expect((await roundTrip(md)).replace(/\{>>[^<]*<<\}/, '{>>c<<}')).toBe(md + '\n');
+  });
+
+  test.each([
+    ['a link', '[ab](https://e.com)', '\\![ab](https://e.com)'],
+    ['a link to its address, before a letter', '[https://e.com](https://e.com)x', '\\![https\\://e.com](https://e.com)x'],
+    ['a link in a comment\'s range', '{==[ab](https://e.com)==}{>>c<<}', '{==\\![ab](https://e.com)==}{>>c<<}'],
+  ])('escapes a ! before %s', async (_name, md, expected) => {
+    // ![ made the link an image
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace('<w:hyperlink', '<w:r><w:t>!</w:t></w:r><w:hyperlink');
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toBe(expected + '\n');
+    expect(await roundTrip(markdown.slice(0, -1))).toBe(markdown);
+  });
+
+  test('escapes a ! before a link on a substitution\'s side', async () => {
+    // A side has no spans of its own to keep them apart
+    const md = 'A {~~a~>Wow\\![x](https://e.com)~~} b';
+    expect(await roundTrip(md)).toBe(md + '\n');
+  });
+
+  test.each([
+    'Really![^1]\n\n[^1]: Note.',
+    'Really!{~~a~>b~~}',
+  ])('leaves a ! alone before what no link starts: %s', async (md) => {
+    expect(await roundTrip(md)).toBe(md + '\n');
+  });
+});
+
 describe('w:br line break handling', () => {
   test('w:br without type attribute emits backslash-newline', async () => {
     const xml = wrapDocumentXml(
@@ -4918,6 +4995,15 @@ describe('Word text that reads as Markdown', () => {
     // later paragraph escaped one in it, as a highlight's text did
     const markdown = await importText('**XX $m$**\n\nx == y', 'a==b');
     expect(markdown).toContain('**a==b $m$**\n\nx == y');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([['[@a', 'https://e.com/a'], ['$a', 'https://e.com/a$/b']])('keeps %s before a link whose text is its URL, %s, as text', async (text, href) => {
+    // Read as its URL alone, the link left the text before it as it was,
+    // but after a letter, where linkify doesn't find it, it's written with
+    // its text in brackets, whose ] closed a citation the text opened
+    const markdown = await importText('A.\n\nP XX<' + href + '> Q.\n\nB.', text);
+    expect((await exported(markdown)).text).toEqual(['A.', 'P ' + text + href + ' Q.', 'B.']);
     expect(await roundTrip(markdown)).toBe(markdown);
   });
 

@@ -13,7 +13,7 @@ import { computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
 import { findDollarMathAt } from './math-delimiters';
 import type { TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { citationEndInText, customStyleId, linkifyMatches } from './md-to-docx';
+import { citationEndInText, customStyleId, linkifiedText, linkifyMatches } from './md-to-docx';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { publicStyleNameForZoteroId, zoteroStyleIdForName } from './csl-loader';
 import { extractZoteroKey } from './zotero-link';
@@ -4371,6 +4371,120 @@ function joinRevisedSpans(markdown: string): string {
   return markdown.includes(SPAN_JOIN) ? markdown.replace(/(?:\+\+|--)\}\uFFFF/g, '') : markdown;
 }
 
+/** Around a link bareLinkChoice gave a choice: its Markdown as a link, its
+ *  address alone, and the closer of the CriticMarkup span it's in, if any,
+ *  for resolveBareLinks to pick between once the text around it is written.
+ *  A Word document can't hold it, which XML excludes, as it does the marks
+ *  of emphasis (EMPHASIS_OPEN). */
+const BARE_LINK = '\u0007';
+
+/**
+ * `link`, the Markdown for `item`, or, where its text is its URL or email
+ * address, without formatting, a choice between that and its address alone,
+ * which linkify makes a link of, for resolveBareLinks. It reads the text as
+ * written around the link, where formatting, another link or an equation
+ * after it can be what linkify reads, not where it ends. `rangeCloser` ends
+ * the comment's range it's in, if any, as ==} does, or else a tracked
+ * change's span does, as ++}: Markdown reads a span apart from the text
+ * after it.
+ */
+function bareLinkChoice(item: ContentItem, link: string, rangeCloser = ''): string {
+  if (item.type !== 'text' || !item.href || hasFormatting(item.formatting)
+    || item.text !== item.href && item.href !== 'mailto:' + item.text) return link;
+  const closer = item.revision ? (item.revision.type === 'addition' ? '++}' : '--}') : rangeCloser;
+  return BARE_LINK + link + BARE_LINK + item.text + BARE_LINK + closer + BARE_LINK;
+}
+
+/** The most text resolveBareLinks reads on either side of a link without a
+ *  space in it; past that, the link keeps its syntax. */
+const BARE_LINK_CONTEXT = 1000;
+
+/**
+ * `markdown` with each link bareLinkChoice gave a choice as its address
+ * alone where export reads that back as the link, and as a link elsewhere.
+ * For an address, linkify, as export runs it, must find it in the text
+ * around it, starting and ending where it does. A URL with // after its
+ * scheme is one markdown-it's own rule finds at its colon, from the text
+ * before it, which mustn't end in a letter, a digit or a +, or a
+ * backslash, which escapes the scheme's first letter; it reads the
+ * address whole, past syntax in it, and drops a * from its end. After a .
+ * or -, as for an email address, linkify finds it in the text as Markdown
+ * leaves it, which syntax splits, so its address must hold none. Export shows an address
+ * with percent-encoding and punycode decoded, so it must have neither.
+ *
+ * From the last link, so the text after each is as written. One before it
+ * counts as a link, as it is before one that's bare, which its address
+ * would run into. A span a link is in ends the text after it, and its
+ * opener the text before it. The pass reads up to a space on either side,
+ * so it takes time in the length of the text.
+ */
+function resolveBareLinks(markdown: string): string {
+  if (!markdown.includes(BARE_LINK)) return markdown;
+  // Text, then each link's Markdown, address and closer, and the text after it
+  const parts = markdown.split(BARE_LINK);
+  const count = (parts.length - 1) / 4;
+  const chosen: string[] = new Array(count);
+  // The text after the link after this one, to its first space, if in reach
+  let nextHead: string | undefined;
+  for (let k = count - 1; k >= 0; k--) {
+    const [before, link, address, closer, after] = parts.slice(4 * k, 4 * k + 5);
+    // The text after it, to a space, or through the next link if there's none
+    const space = after.search(/\s/);
+    let head = space >= 0 ? after.slice(0, space + 1)
+      : k + 1 < count && nextHead !== undefined ? after + chosen[k + 1] + nextHead
+        : k + 1 < count ? undefined : after;
+    if (head !== undefined && head.length > BARE_LINK_CONTEXT) head = undefined;
+    nextHead = head;
+    chosen[k] = head !== undefined && bareLinkReadsBack(before, address, closer, head) ? address : link;
+  }
+  const out: string[] = [parts[0]];
+  for (let k = 0; k < count; k++) out.push(chosen[k], parts[4 * k + 4]);
+  return out.join('');
+}
+
+/** Whether `address`, written bare between `before` and `following`, reads
+ *  back as a link of it alone (see resolveBareLinks) */
+function bareLinkReadsBack(before: string, address: string, closer: string, following: string): boolean {
+  const email = !/^[a-z][a-z0-9.+-]*:/i.test(address);
+  if (linkifiedText(address, email) !== address) return false;
+  // In a span, which ends the text it holds
+  if (closer) {
+    const at = following.indexOf(closer);
+    if (at >= 0 && !following.slice(0, at).includes('{')) following = following.slice(0, at);
+  }
+  // The text before it to a space or the opener of the span it starts
+  let lead = before.slice(-BARE_LINK_CONTEXT);
+  if (/(?:^|[^\\])(?:\\\\)*(?:\{(?:\+\+|--|~~|==)|~>)$/.test(lead)) lead = '';
+  lead = lead.slice(lead.search(/\S*$/));
+  if (/^[a-z][a-z0-9.+-]*:\/\//i.test(address) && !/[.-]$/.test(lead)) {
+    if (/[a-z0-9+]$/i.test(lead) || /(?:^|[^\\])(?:\\\\)*\\$/.test(lead) || address.endsWith('*')) return false;
+    lead = '';
+  } else if (/[$&=*`~\\<>[\]!]|(?:^|[^a-z0-9])_|_(?:[^a-z0-9]|$)/i.test(address)) {
+    // Syntax, which splits the text linkify reads, as _ that can be emphasis
+    return false;
+  }
+  return linkifyMatches(lead + address + following).some(link => link.index === lead.length && link.lastIndex === lead.length + address.length);
+}
+
+/** `markdown`, the Markdown of the text at `index`, with a ! at its end
+ *  escaped where a link comes next in its comments, which the ! would make
+ *  an image of, as in ![text](url). A note's [^1] or a citation's [@key]
+ *  isn't one, and stays one after a !. Spans of a tracked change keep apart
+ *  at a ! before a link (canJoinSpans), so only text in none, or on a side
+ *  of a substitution (`side`), which has none of its own, runs into one.
+ *  From the text's Markdown, as reading the end of Markdown being built
+ *  copies it, which took time in the square of a paragraph's length over
+ *  its links. */
+function escapeBangBeforeLink(markdown: string, segment: ContentItem[], index: number, end: number, side = false): string {
+  const item = segment[index];
+  let k = index + 1;
+  while (k < end && segment[k].type === 'text' && (segment[k] as ContentItem & { type: 'text' }).text === '') k++;
+  const next = segment[k];
+  if (k >= end || item.type !== 'text' || next.type !== 'text' || next.href === undefined
+    || !side && (item.revision || next.revision) || !commentSetsEqual(item.commentIds, next.commentIds)) return markdown;
+  return /(?:^|[^\\])(?:\\\\)*!$/.test(markdown) ? markdown.slice(0, -1) + '\\!' : markdown;
+}
+
 /**
  * `out` with `text`, the Markdown for `item`, appended as a span of the item's
  * revision, and the span it now ends with. The text joins `last` instead of
@@ -4751,7 +4865,7 @@ function renderSubstitutionRun(
         text += renderHighlightGroup(segment, j, highlightEnd, to, precedingText + text, noteLabels);
         j = highlightEnd;
       } else {
-        text += substitutionItemText(item, precedingText + text, noteLabels, runsAfter(segment, j + 1, to));
+        text += escapeBangBeforeLink(substitutionItemText(item, precedingText + text, noteLabels, runsAfter(segment, j + 1, to)), segment, j, to, true);
         j++;
       }
     }
@@ -4995,9 +5109,10 @@ function runsAfter(segment: ContentItem[], start: number, end: number): RunsAfte
         continue;
       }
       // A link's text in its brackets, whose ] closes a citation before it
-      // and whose URL's $ closes math, unless it's written as its URL alone;
+      // and whose URL's $ closes math, even where it's written as its URL
+      // alone, which resolveBareLinks decides from the Markdown after this;
       // its text's own brackets, which it escapes, close nothing
-      const run = !item.href || item.text === item.href && !hasFormatting(item.formatting) ? item.text
+      const run = !item.href ? item.text
         : '[' + item.text.replace(/[[\]]/g, '\uFFFC') + '](' + formatHrefForMarkdown(item.href) + ')';
       // A highlight's ==, which an == before it can pair with
       text += item.formatting.highlight ? '==' + run + '==' : run;
@@ -5245,14 +5360,9 @@ function renderInlineRange(
         // distinct: Word text that is both highlighted AND commented needs both layers,
         // producing {====text====} (highlight nested inside comment delimiters).
         const after = runsAfter(segment, j + 1, segmentEnd);
-        let segText: string;
-        if (!seg.href) {
-          segText = markedFormatting(seg.text, seg.formatting, false, after);
-        } else if (seg.text !== seg.href || hasFormatting(seg.formatting)) {
-          segText = `[${markedFormatting(seg.text, seg.formatting, false, after.linkTo(seg.href))}](${formatHrefForMarkdown(seg.href)})`;
-        } else {
-          // Bare, for linkify, which its escapes would keep from it
-          segText = seg.text;
+        let segText = escapeBangBeforeLink(markedFormatting(seg.text, seg.formatting, false, seg.href ? after.linkTo(seg.href) : after), segment, j, segmentEnd);
+        if (seg.href) {
+          segText = bareLinkChoice(seg, `[${segText}](${formatHrefForMarkdown(seg.href)})`, '==}');
         }
         [anchorText, anchorSpan] = appendRevised(anchorText, segText, seg, anchorSpan);
         j++;
@@ -5288,17 +5398,9 @@ function renderInlineRange(
     }
 
     if (item.href) {
-      // Bare URL autolink: if the link text equals the URL (no formatting), emit bare text.
-      // Bare email autolink: if href is mailto:text (no formatting), emit bare text.
-      const isBareUrl = item.text === item.href && !hasFormatting(item.formatting);
-      const isBareEmail = item.href === 'mailto:' + item.text && !hasFormatting(item.formatting);
-      if (isBareUrl || isBareEmail) {
-        [out, lastSpan] = appendRevised(out, item.text, item, lastSpan);
-      } else {
-        // Math can close past the link's text, in its URL or the runs after
-        const formattedText = markedFormatting(item.text, item.formatting, false, runsAfter(segment, i + 1, segmentEnd).linkTo(item.href));
-        [out, lastSpan] = appendRevised(out, '[' + formattedText + '](' + formatHrefForMarkdown(item.href) + ')', item, lastSpan);
-      }
+      // Math can close past the link's text, in its URL or the runs after
+      const formattedText = markedFormatting(item.text, item.formatting, false, runsAfter(segment, i + 1, segmentEnd).linkTo(item.href));
+      [out, lastSpan] = appendRevised(out, bareLinkChoice(item, '[' + formattedText + '](' + formatHrefForMarkdown(item.href) + ')'), item, lastSpan);
     } else {
       // Markdown ends with a line break only after text that does, so it's
       // read only there, as reading it copies Markdown being built
@@ -5307,11 +5409,11 @@ function renderInlineRange(
       // An HTML block starts only a block's text, not a heading's or a
       // tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !item.revision;
-      [out, lastSpan] = appendRevised(out, markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, escapeBangBeforeLink(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart), segment, i, segmentEnd), item, lastSpan);
     }
     i++;
   }
-  return { text: resolveEmphasis(joinRevisedSpans(out)), nextIndex: i, deferredComments: [] };
+  return { text: resolveBareLinks(resolveEmphasis(joinRevisedSpans(out))), nextIndex: i, deferredComments: [] };
 }
 
 /** Render inline content using ID-based comment syntax ({#id}...{/id}).
@@ -5551,15 +5653,9 @@ function renderInlineRangeWithIds(
     }
 
     if (item.href) {
-      const isBareUrl = item.text === item.href && !hasFormatting(item.formatting);
-      const isBareEmail = item.href === 'mailto:' + item.text && !hasFormatting(item.formatting);
-      if (isBareUrl || isBareEmail) {
-        [out, lastSpan] = appendRevised(out, item.text, item, lastSpan);
-      } else {
-        // Math can close past the link's text, in its URL or the runs after
-        const formattedText = markedFormatting(item.text, item.formatting, false, runsAfter(segment, i + 1, segmentEnd).linkTo(item.href));
-        [out, lastSpan] = appendRevised(out, '[' + formattedText + '](' + formatHrefForMarkdown(item.href) + ')', item, lastSpan);
-      }
+      // Math can close past the link's text, in its URL or the runs after
+      const formattedText = markedFormatting(item.text, item.formatting, false, runsAfter(segment, i + 1, segmentEnd).linkTo(item.href));
+      [out, lastSpan] = appendRevised(out, bareLinkChoice(item, '[' + formattedText + '](' + formatHrefForMarkdown(item.href) + ')'), item, lastSpan);
     } else {
       // Markdown ends with a line break only after text that does, so it's
       // read only there, as reading it copies Markdown being built
@@ -5568,7 +5664,7 @@ function renderInlineRangeWithIds(
       // An HTML block starts only a block's text, not a heading's or a
       // tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !item.revision;
-      [out, lastSpan] = appendRevised(out, markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, escapeBangBeforeLink(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart), segment, i, segmentEnd), item, lastSpan);
     }
     i++;
   }
@@ -5595,7 +5691,7 @@ function renderInlineRangeWithIds(
     return a.remappedId.localeCompare(b.remappedId);
   });
 
-  return { text: resolveEmphasis(joinRevisedSpans(out)), nextIndex: i, deferredComments: deferred.map(d => d.body) };
+  return { text: resolveBareLinks(resolveEmphasis(joinRevisedSpans(out))), nextIndex: i, deferredComments: deferred.map(d => d.body) };
 }
 
 /**
