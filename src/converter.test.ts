@@ -6202,6 +6202,70 @@ describe('Blocks a quote can\'t hold', () => {
   });
 });
 
+describe('Display math in a paragraph\'s text', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+  const fence = '$' + '$';
+  const math = (prefix: string) => fence + '\n' + prefix + 'x\n' + prefix + fence;
+
+  test.each([
+    ['after its text', 'a\n' + math('') + '\n'],
+    ['after its text in a quote', '> a\n> ' + math('> ') + '\n'],
+    ['after its text in a list item', '- a\n  ' + math('  ') + '\n'],
+    ['after a later paragraph\'s text in a list item', '1. a\n\n   b\n   ' + math('   ') + '\n2. c\n'],
+    ['first in a list item', '- ' + math('  ') + '\n'],
+    ['after a line break', 'a\\\n' + math('') + '\n'],
+    ['after an alert\'s marker', '> [!NOTE]\n> ' + math('> ') + '\n'],
+    ['after an alert\'s first line', '> [!TIP]\n> a\n> ' + math('> ') + '\n'],
+    // An empty run comes before it there
+    ['first in a task item', '- [ ] ' + math('  ') + '\n'],
+    ['after an alert\'s marker on its line', '> [!NOTE] ' + math('> ') + '\n'],
+    // Whose bodies go after the text, before it
+    ['after overlapping comments in a quote', '> Seen {#1}a {#2}b{/1} c{/2}\n> {#1>>one<<}\n> {#2>>two<<}\n> ' + math('> ') + '\n'],
+    ['in a footnote', 'P[^1]\n\n[^1]:\n\n    Note\n    ' + math('    ') + '\n'],
+    ['in a footnote\'s later paragraph', 'P[^1]\n\n[^1]: a\n\n    b\n    ' + math('    ') + '\n'],
+  ])('keeps it %s', async (_name, md) => {
+    // Import wrote a blank line before it, which ended the paragraph, and
+    // the quote or list item around it, out of which the equation went
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    ['at the top level', ''],
+    ['in a quote', '> '],
+    ['in a list item', '- '],
+  ])('keeps two of Word\'s in a row in their paragraph %s', async (_name, prefix) => {
+    // The second went out of the paragraph, and its quote or list item
+    const zip = await JSZip.loadAsync((await convertMdToDocx(prefix + 'a**XX**')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const equation = (x: string) => '<m:oMathPara><m:oMath><m:r><m:t>' + x + '</m:t></m:r></m:oMath></m:oMathPara>';
+    zip.file('word/document.xml', xml.replace(/<w:r><w:rPr><w:b\/>(?:(?!<\/w:r>).)*XX<\/w:t><\/w:r>/, equation('x') + equation('y')));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    const lines = prefix ? (prefix === '> ' ? '> ' : '  ') : '';
+    expect(markdown).toBe(prefix + 'a\n' + lines + math(lines) + '\n' + lines + math(lines).replace('x', 'y') + '\n');
+  });
+
+  test('keeps a blank line before one after a heading\'s text', async () => {
+    // Which a line can't go on, so the equation came back after it
+    const md = '# H\n\n' + math('') + '\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx('# H**XX**')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<w:r><w:rPr><w:b\/>(?:(?!<\/w:r>).)*XX<\/w:t><\/w:r>/, '<m:oMathPara><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath></m:oMathPara>'));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    ['before a paragraph', '> [!NOTE]\n>\n> a\n'],
+    ['before two', '> [!WARNING]\n>\n> a\n>\n> b\n'],
+  ])('keeps an alert\'s marker alone in its paragraph %s', async (_name, md) => {
+    // Import wrote the marker's line end and the quote's > after it, as
+    // for text, which made an empty line of the quote
+    expect(await roundTrip(md)).toBe(md);
+  });
+});
+
 describe('parseCodeBlockStyle', () => {
   test('returns true for CodeBlock style', () => {
     const children = [{ 'w:pStyle': [], ':@': { '@_w:val': 'CodeBlock' } }];
