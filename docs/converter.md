@@ -129,6 +129,8 @@ When exporting to Word, the converter:
 4. Falls back to intrinsic image dimensions when explicit dimensions are not specified
 5. Records each image's original syntax format in the `MANUSCRIPT_IMAGE_FORMATS` custom property for roundtrip fidelity
 
+An image it can't embed (a URL or data URI, an unsupported format, or a file it can't read) gets a warning, and its Markdown or `<img>` tag goes in the document as hidden text. Word doesn't show it, and import writes it back as it was. An image in a deletion exports as a deleted image, or as deleted hidden text.
+
 ### Round-Trip Behavior
 
 - **Dimensions**: Pixel values are converted to EMUs on export and back to pixels on import. Sub-pixel precision is lost due to integer rounding.

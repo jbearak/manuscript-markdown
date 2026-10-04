@@ -6168,6 +6168,24 @@ describe('round-trip regression: image path preservation', () => {
     }
   });
 
+  test('deleted image round-trips', async () => {
+    // A deletion left its image out
+    const tmpDir = join(require('os').tmpdir(), 'mms-test-img4-' + Date.now());
+    const { mkdirSync, writeFileSync, rmSync } = require('fs');
+    mkdirSync(tmpDir, { recursive: true });
+    writeFileSync(join(tmpDir, 'image.png'), TINY_PNG);
+    try {
+      const md = 'A {--![alt](image.png){width=100 height=100}--} b.\n';
+      const { docx } = await convertMdToDocx(md, { sourceDir: tmpDir });
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      expect(xml).toMatch(/<w:del\b[^>]*><w:r><w:drawing>/);
+      const result = await convertDocx(docx);
+      expect(result.markdown).toContain(md);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   test('image with simple filename round-trips correctly', async () => {
     const tmpDir = join(require('os').tmpdir(), 'mms-test-img2-' + Date.now());
     const { mkdirSync, writeFileSync, rmSync } = require('fs');
@@ -6181,6 +6199,103 @@ describe('round-trip regression: image path preservation', () => {
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('round-trip regression: images export cannot embed', () => {
+  async function roundTrip(md: string, sourceDir?: string) {
+    const { docx, warnings } = await convertMdToDocx(md, sourceDir ? { sourceDir } : undefined);
+    const markdown = (await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
+    return { markdown, warnings };
+  }
+
+  test.each([
+    ['a missing file', '![alt](missing.png)', 'Image not found'],
+    ['a URL', 'Text ![a b](http://example.com/x.png "Title") more.', 'is a URL or data URI'],
+    ['a data URI', '![x](data:image/png;base64,AAAA)', 'is a URL or data URI'],
+    ['an unsupported format', '![alt](figure.tiff){width=100 height=50}', 'Unsupported image format'],
+    ['a path with spaces', '![a\\]b](<my figure.png>)', 'Image not found'],
+    ['an HTML image', 'Text <img src="http://example.com/x.png" alt="a"> more.', 'is a URL or data URI'],
+    ['an HTML image block', '<img src="missing.png" alt="a" width="20">', 'Image not found'],
+    ['an image in a quote', '> ![alt](missing.png)', 'Image not found'],
+    ['an image in a list', '- ![alt](missing.png)', 'Image not found'],
+    ['an image in a table', '| a |\n| --- |\n| ![x](missing.png) |', 'Image not found'],
+    ['an image in a footnote', 'Text[^1].\n\n[^1]: ![x](missing.png)', 'Image not found'],
+    ['an inserted image', '{++![alt](missing.png)++}', 'Image not found'],
+    ['a deleted image', 'A {--![alt](missing.png)--} b.', 'Image not found'],
+    ['an escape in a URL', '![x](https://example.com/a%2Fb.png)', 'is a URL or data URI'],
+    ['a formatted description and a title', '![**b** x](missing.png "t")', 'Image not found'],
+  ])('keeps %s', async (_name, md, warning) => {
+    const { markdown, warnings } = await roundTrip(md);
+    expect(markdown).toBe(md + '\n');
+    expect(warnings.some(w => w.includes(warning))).toBe(true);
+  });
+
+  test('keeps an image whose file cannot be read', async () => {
+    const tmpDir = join(require('os').tmpdir(), 'mms-test-img3-' + Date.now());
+    const { mkdirSync, rmSync } = require('fs');
+    mkdirSync(join(tmpDir, 'folder.png'), { recursive: true });
+    try {
+      const { markdown, warnings } = await roundTrip('![alt](folder.png)', tmpDir);
+      expect(markdown).toBe('![alt](folder.png)\n');
+      expect(warnings.some(w => w.includes('folder.png'))).toBe(true);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test('hides the image in Word', async () => {
+    const { docx } = await convertMdToDocx('A ![alt](missing.png) b');
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml).toContain('<w:vanish/>');
+    expect(xml).toContain('\u200B![alt](missing.png)\u200B');
+    expect(xml).not.toContain('<w:drawing>');
+  });
+
+  test.each([
+    ['two images', 'A ![x](m.png)![y](n.png) B'],
+    ['two HTML comments', 'A <!-- a --><!-- b --> B'],
+    ['an HTML comment and an image', 'A <!-- a -->![y](n.png) B'],
+    ['an image and an HTML comment', 'A ![y](n.png)<!-- a --> B'],
+  ])('reads %s that Word joins in one run', async (_name, md) => {
+    // Their ZWSPs went in the Markdown, or the image after a comment went
+    // missing
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const rPr = '<w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr>';
+    const joined = xml.replace(new RegExp('(<w:r>' + rPr + '(?:(?!</w:r>).)*)</w:r><w:r>' + rPr), (_m, run) => run);
+    expect(joined).not.toBe(xml);
+    zip.file('word/document.xml', joined);
+    const markdown = (await convertDocx(new Uint8Array(await zip.generateAsync({ type: 'uint8array' })))).markdown;
+    expect(markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(md + '\n');
+  });
+
+  test.each([
+    ['an image', 'A ![alt](missing.png) b', 9],
+    ['an image after its ZWSP', 'A ![alt](missing.png) b', 1],
+    ['an image after its !', 'A ![alt](missing.png) b', 2],
+    ['an HTML comment after its <', 'A <!-- c --> b', 2],
+  ])('joins %s when Word splits its run', async (_name, md, at) => {
+    // Without the start of its opener, the run before it was dropped
+    const { docx } = await convertMdToDocx(md);
+    const zip = await JSZip.loadAsync(docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const rPr = '<w:r><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr>';
+    const decode = (text: string) => text.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+    const encode = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const split = xml.replace(new RegExp(rPr + '<w:t>([^<]*)</w:t></w:r>'), (_m, text: string) =>
+      rPr + '<w:t>' + encode(decode(text).slice(0, at)) + '</w:t></w:r>' + rPr + '<w:t>' + encode(decode(text).slice(at)) + '</w:t></w:r>');
+    expect(split).not.toBe(xml);
+    zip.file('word/document.xml', split);
+    const markdown = (await convertDocx(new Uint8Array(await zip.generateAsync({ type: 'uint8array' })))).markdown;
+    expect(markdown).toContain(md);
+  });
+
+  test('keeps a ZWSP in an image\'s Markdown as a character reference', async () => {
+    // It closed the image there
+    const { markdown } = await roundTrip('![x\u200By](missing.png)');
+    expect(markdown).toBe('![x&#8203;y](missing.png)\n');
+    expect((await roundTrip(markdown.trimEnd())).markdown).toBe(markdown);
   });
 });
 

@@ -7,8 +7,17 @@ import image from 'markdown-it/lib/rules_inline/image.mjs';
  */
 export function imagePathsWithSpaces(md: MarkdownIt): void {
   md.inline.ruler.at('image', (state, silent) => {
-    if (image(state, silent)) return true;
     const start = state.pos;
+    if (image(state, silent)) {
+      // An inline image's Markdown as written, which export keeps when it
+      // can't embed the image; a reference's definition doesn't go to Word
+      const token = state.tokens[state.tokens.length - 1];
+      const labelEnd = md.helpers.parseLinkLabel(state, start + 1, false);
+      if (!silent && token?.type === 'image' && state.src[labelEnd + 1] === '(') {
+        token.meta = { ...token.meta, source: state.src.slice(start, state.pos) };
+      }
+      return true;
+    }
     if (state.src.slice(start, start + 2) !== '![') return false;
     const labelEnd = md.helpers.parseLinkLabel(state, start + 1, false);
     if (labelEnd < 0 || state.src[labelEnd + 1] !== '(') return false;
@@ -60,6 +69,7 @@ export function imagePathsWithSpaces(md: MarkdownIt): void {
       token.attrs = [['src', href], ['alt', '']];
       if (title) token.attrSet('title', title);
       token.content = content;
+      token.meta = { ...token.meta, source: state.src.slice(start, pos + 1) };
       token.children = [];
       md.inline.parse(content, md, state.env, token.children);
     }
