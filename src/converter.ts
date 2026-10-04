@@ -2054,6 +2054,20 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
 const pendingHiddenText = new WeakMap<ContentItem[], { text: string; at: number }>();
 
 /** The Markdown of an image export couldn't embed, without its closing ZWSP */
+/** An image's Markdown: its own, as an embed wrote it, an <img> tag where
+ *  it came from one, or else ![alt](src) with its size */
+function imageMarkdown(item: ContentItem & { type: 'image' }, imageFormatMapping?: Map<string, string>): string {
+  if (item.markdown !== undefined) return unembeddedImageMarkdown(item.markdown);
+  if (imageFormatMapping?.get(item.rId) === 'html') {
+    return '<img src="' + escapeHtmlAttr(item.src) + '" alt="' + escapeHtmlAttr(item.alt) + '"'
+      + (item.widthPx > 0 ? ' width="' + item.widthPx + '"' : '')
+      + (item.heightPx > 0 ? ' height="' + item.heightPx + '"' : '') + '>';
+  }
+  const safeAlt = item.alt.replace(/\\/g, '\\\\').replace(/\]/g, '\\]');
+  const size = [...(item.widthPx > 0 ? ['width=' + item.widthPx] : []), ...(item.heightPx > 0 ? ['height=' + item.heightPx] : [])];
+  return '![' + safeAlt + '](' + formatHrefForMarkdown(item.src) + ')' + (size.length ? '{' + size.join(' ') + '}' : '');
+}
+
 function unembeddedImageMarkdown(markdown: string): string {
   return markdown.endsWith('\u200B') ? markdown.slice(0, -1) : markdown;
 }
@@ -4191,34 +4205,9 @@ function renderInlineRange(
       continue;
     }
 
-    if (item.type === 'image') {
-      const syntax = renderOpts?.imageFormatMapping?.get(item.rId) || 'md';
-      let imgText: string;
-      if (item.markdown !== undefined) {
-        imgText = unembeddedImageMarkdown(item.markdown);
-      } else if (syntax === 'html') {
-        imgText = '<img src="' + escapeHtmlAttr(item.src) + '" alt="' + escapeHtmlAttr(item.alt) + '"';
-        if (item.widthPx > 0) imgText += ' width="' + item.widthPx + '"';
-        if (item.heightPx > 0) imgText += ' height="' + item.heightPx + '"';
-        imgText += '>';
-      } else {
-        const safeAlt = item.alt.replace(/\\/g, '\\\\').replace(/\]/g, '\\]');
-        imgText = '![' + safeAlt + '](' + formatHrefForMarkdown(item.src) + ')';
-        if (item.widthPx > 0 || item.heightPx > 0) {
-          const parts: string[] = [];
-          if (item.widthPx > 0) parts.push('width=' + item.widthPx);
-          if (item.heightPx > 0) parts.push('height=' + item.heightPx);
-          imgText += '{' + parts.join(' ') + '}';
-        }
-      }
-      [out, lastSpan] = appendRevised(out, imgText, item, lastSpan);
-      if (item.commentIds.size > 0) {
-        for (const cid of [...item.commentIds].sort()) {
-          const c = comments.get(cid);
-          if (!c) continue;
-          out += formatCommentBody(cid, c, renderOpts?.timezone);
-        }
-      }
+    // An image in a comment's range goes in its anchor, below
+    if (item.type === 'image' && item.commentIds.size === 0) {
+      [out, lastSpan] = appendRevised(out, imageMarkdown(item, renderOpts?.imageFormatMapping), item, lastSpan);
       i++;
       continue;
     }
@@ -4237,12 +4226,13 @@ function renderInlineRange(
       continue;
     }
 
-    if (item.type !== 'text' && item.type !== 'footnote_ref' && item.type !== 'citation' && item.type !== 'math') {
+    if (item.type !== 'text' && item.type !== 'footnote_ref' && item.type !== 'citation' && item.type !== 'math' && item.type !== 'image') {
       i++;
       continue;
     }
 
-    // A note reference, citation or equation gets here only in a comment's range
+    // A note reference, citation, equation or image gets here only in a
+    // comment's range
     if (item.type !== 'text' || item.commentIds.size > 0) {
       const commentSet = item.commentIds;
       let anchorText = '';
@@ -4260,9 +4250,14 @@ function renderInlineRange(
           j = highlightEnd;
           continue;
         }
-        if ((seg.type !== 'text' && seg.type !== 'footnote_ref' && seg.type !== 'citation' && !(seg.type === 'math' && !seg.display))
-            || !commentSetsEqual(seg.commentIds ?? new Set(), commentSet)) {
+        if ((seg.type !== 'text' && seg.type !== 'footnote_ref' && seg.type !== 'citation' && seg.type !== 'image'
+            && !(seg.type === 'math' && !seg.display)) || !commentSetsEqual(seg.commentIds ?? new Set(), commentSet)) {
           break;
+        }
+        if (seg.type === 'image') {
+          [anchorText, anchorSpan] = appendRevised(anchorText, imageMarkdown(seg, renderOpts?.imageFormatMapping), seg, anchorSpan);
+          j++;
+          continue;
         }
         if (seg.type === 'math') {
           [anchorText, anchorSpan] = appendRevised(anchorText, '$' + seg.latex + '$', seg, anchorSpan);
@@ -4521,25 +4516,7 @@ function renderInlineRangeWithIds(
         }
       }
       prevCommentIds = new Set(currentIds);
-      const syntax = imageFormatMapping?.get(item.rId) || 'md';
-      let imgText: string;
-      if (item.markdown !== undefined) {
-        imgText = unembeddedImageMarkdown(item.markdown);
-      } else if (syntax === 'html') {
-        imgText = '<img src="' + escapeHtmlAttr(item.src) + '" alt="' + escapeHtmlAttr(item.alt) + '"';
-        if (item.widthPx > 0) imgText += ' width="' + item.widthPx + '"';
-        if (item.heightPx > 0) imgText += ' height="' + item.heightPx + '"';
-        imgText += '>';
-      } else {
-        const safeAlt = item.alt.replace(/\\/g, '\\\\').replace(/\]/g, '\\]');
-        imgText = '![' + safeAlt + '](' + formatHrefForMarkdown(item.src) + ')';
-        if (item.widthPx > 0 || item.heightPx > 0) {
-          const parts: string[] = [];
-          if (item.widthPx > 0) parts.push('width=' + item.widthPx);
-          if (item.heightPx > 0) parts.push('height=' + item.heightPx);
-          imgText += '{' + parts.join(' ') + '}';
-        }
-      }
+      const imgText = imageMarkdown(item, imageFormatMapping);
       [out, lastSpan] = appendRevised(out, imgText, item, lastSpan);
       i++;
       continue;
@@ -5964,8 +5941,8 @@ export function buildMarkdown(
     }
     return nextAvailableNumericId();
   }
-  // Comments over an image or HTML comment, which an anchor can't hold, and
-  // over other content, which goes in one: only ID syntax keeps them whole
+  // Comments over an HTML comment, which an anchor can't hold, and over
+  // other content, which goes in one: only ID syntax keeps them whole
   const overUnanchored = new Set<string>();
   const overAnchored = new Set<string>();
   function collectCommentMetadata(items: ContentItem[], inTable = false): void {
@@ -5979,13 +5956,15 @@ export function buildMarkdown(
       if (item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'math' || item.type === 'html_comment' || item.type === 'image') {
         if (item.commentIds) {
           const ids = [...item.commentIds];
-          // Text with ==}, which would end a {==...==} anchor early
-          let holdsAnchorEnd = item.type === 'math' && item.latex.includes('==}');
+          // Text with ==}, which would end a {==...==} anchor early, in an
+          // equation or an image's alt text, path or Markdown too
+          let holdsAnchorEnd = item.type === 'math' ? item.latex.includes('==}')
+            : item.type === 'image' && (item.alt + '\n' + item.src + '\n' + (item.markdown ?? '')).includes('==}');
           for (const id of ids) {
             if (!commentIdRemap.has(id)) {
               commentIdRemap.set(id, assignRemappedId(id));
             }
-            (item.type === 'image' || item.type === 'html_comment' ? overUnanchored : overAnchored).add(id);
+            (item.type === 'html_comment' ? overUnanchored : overAnchored).add(id);
             const text = item.type === 'text' ? (anchorEnds.get(id) ?? '') + item.text : '';
             if (text.includes('==}')) holdsAnchorEnd = true;
             anchorEnds.set(id, text.slice(-2));
