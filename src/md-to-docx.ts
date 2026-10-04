@@ -1,4 +1,5 @@
 import MarkdownIt from 'markdown-it';
+import { XMLBuilder, XMLParser } from 'fast-xml-parser';
 import { imagePathsWithSpaces } from './image-paths';
 import type Token from 'markdown-it/lib/token.mjs';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
@@ -92,6 +93,7 @@ export interface MdToken {
   sourceRange?: [number, number]; // lines [start, end) of the text parseMd parses that the token came from
   blockquoteSpacing?: BlockquoteSpacing; // on a quote group's first token (see annotateBlockquoteSpacing)
   startNumber?: number;     // for ordered lists: first item's start number (when ≠ 1)
+  listStart?: boolean;      // for list items: the first item of its list
   taskChecked?: boolean;    // for GFM task list items
   alertType?: GfmAlertType; // for GFM alerts in blockquotes
   alertLead?: boolean;      // first blockquote paragraph carrying alert header
@@ -1560,7 +1562,7 @@ function criticBlockSegment(token: MdToken, runs: MdRun[], index: number): MdTok
     return {
       ...token, type: 'paragraph', runs,
       listContinuation: { type: token.ordered ? 'ordered' : 'bullet', level: token.level ?? 1 },
-      ordered: undefined, startNumber: undefined, bulletMarker: undefined, taskChecked: undefined,
+      ordered: undefined, startNumber: undefined, listStart: undefined, bulletMarker: undefined, taskChecked: undefined,
     };
   }
   if (token.type === 'heading' && index > 0) {
@@ -1751,6 +1753,15 @@ function splitCriticDisplayMathParagraphs(tokens: MdToken[]): MdToken[] {
 /** Parse Markdown into Word blocks, restoring protected revision boundaries before formatting. */
 /** The link definitions each parseMd result was parsed with, for a note body to share. */
 const linkDefinitionsOf = new WeakMap<MdToken[], Record<string, unknown>>();
+
+/**
+ * Whether a top-level list item starts a list of its own, as import reads
+ * it: after one of the other kind, or as the first item of an ordered list.
+ */
+function startsAdjacentList(item: MdToken, prevTopOrdered: boolean | undefined): boolean {
+  return (item.level ?? 1) === 1 && prevTopOrdered !== undefined
+    && (!!item.ordered !== prevTopOrdered || (!!item.ordered && !!item.listStart));
+}
 
 /**
  * `tableNumberFormat` is the table number formatting `markdown` got, if it
@@ -2136,7 +2147,10 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
       result.splice(i, 1);
     } else if (target < result.length && result[target].type === 'list_item') {
       // Apply to all consecutive list items in this list block
+      let prevTopOrdered: boolean | undefined;
       for (let j = target; j < result.length && result[j].type === 'list_item'; j++) {
+        if (startsAdjacentList(result[j], prevTopOrdered)) break;
+        if ((result[j].level ?? 1) === 1) prevTopOrdered = !!result[j].ordered;
         if (result[j].indentOverride === undefined) {
           result[j].indentOverride = override;
         }
@@ -3126,7 +3140,11 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
         } else if (itemTokens[j].type === 'inline' && !foundFirstParagraph) {
           runs = processInlineChildren([itemTokens[j]]);
           foundFirstParagraph = true;
-        } else if (warnings && DROPPED_LIST_BLOCK_TYPES.has(itemTokens[j].type)) {
+        } else if (warnings && DROPPED_LIST_BLOCK_TYPES.has(itemTokens[j].type)
+            // An empty comment between two numbered sublists, as import writes
+            // it where Word starts the second over, which its numbering keeps
+            && !(itemTokens[j].type === 'html_block' && /^\s*<!--\s*-->\s*$/.test(itemTokens[j].content)
+              && itemTokens[j - 1]?.type === 'ordered_list_close' && itemTokens[j + 1]?.type === 'ordered_list_open')) {
           const kind = itemTokens[j].type === 'fence' ? 'Code block'
             : itemTokens[j].type === 'code_block' ? 'Indented code block'
             : itemTokens[j].type === 'html_block' ? 'HTML block'
@@ -3155,6 +3173,7 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
       if (items.length === 0 && startNumber !== undefined && startNumber !== 1) {
         listItem.startNumber = startNumber;
       }
+      if (items.length === 0) listItem.listStart = true;
       items.push(listItem);
       childSegments.sort((a, b) => (a.startIndex - b.startIndex) || (a.order - b.order));
       for (const segment of childSegments) {
@@ -3408,7 +3427,9 @@ export interface DocxGenState {
   rIdOffset: number; // reserved rIds for fixed relationships (styles, numbering, comments, theme, settings)
   warnings: string[];
   hasList: boolean;
-  listStartOverrides: { numId: number; ilvl: number; start: number }[]; // ordered lists with start ≠ 1
+  listStartOverrides: NumberingOverride[]; // ordered lists after the first
+  firstOverrideNumId?: number; // numIds below it are 1 and 2, for bullets and numbers, and a template's styles' (default 3)
+  usedOrderedNumId?: boolean; // whether an ordered list has used numId 2, so the next needs its own
   hasComments: boolean;
   hasFootnotes: boolean;
   hasEndnotes: boolean;
@@ -3466,7 +3487,8 @@ export interface DocxGenState {
   sentinelGaps: Record<string, number>; // before-gap for landscape/portrait sentinels (e.g. "pc0" → blankLinesBefore for first portrait_close)
   activeCustomStyle?: string; // currently active <!-- style: X --> block name
   customStyles?: Record<string, CustomStyleDef>; // declared styles for indent inheritance/overrides
-  activeListStartOverrides: Map<number, number>; // ilvl → override numId for restarted ordered lists
+  activeListStartOverrides: Map<number, number>; // ilvl → numId of the ordered list open at that level
+  listItemNumbers?: (number | undefined)[]; // the number of the last item at each level of the open list, to its level, or undefined for a bullet
   inNoteBody: boolean; // true while generating footnote/endnote body XML
   noteRelationships: Map<string, string>; // URL -> rId for hyperlinks inside footnote/endnote bodies
   noteImageRelationships: Map<string, { rId: string; mediaPath: string }>; // dedup key -> { rId, media path } for images inside footnote/endnote bodies
@@ -4632,7 +4654,103 @@ function randomHex8(): string {
   return Math.floor(Math.random() * 0xFFFFFFFF).toString(16).toUpperCase().padStart(8, '0');
 }
 
-function numberingXml(startOverrides?: { numId: number; ilvl: number; start: number }[]): string {
+type OrderedXmlNode = Record<string, unknown> & { ':@'?: Record<string, string> };
+
+const templateXmlOptions = {
+  ignoreAttributes: false,
+  attributeNamePrefix: '@_',
+  preserveOrder: true,
+  parseTagValue: false,
+  parseAttributeValue: false,
+  trimValues: false,
+  suppressEmptyNode: true,
+};
+
+const childNodes = (node: OrderedXmlNode | undefined, name: string): OrderedXmlNode[] =>
+  ((node?.[name] ?? []) as OrderedXmlNode[]);
+
+const intAttr = (node: OrderedXmlNode, name: string): number => parseInt(node[':@']?.['@_' + name] ?? '', 10);
+
+/** A template's numbering root and its w:num instances, parsed, as XML allows them to be written. */
+function parseTemplateNumbering(xml: string): { root: OrderedXmlNode; nums: OrderedXmlNode[] } | undefined {
+  try {
+    const root = (new XMLParser(templateXmlOptions).parse(xml) as OrderedXmlNode[]).find(n => 'w:numbering' in n);
+    return root && { root, nums: childNodes(root, 'w:numbering').filter(n => 'w:num' in n) };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The numIds of a template's numbering the document can use: 1 and 2, for
+ * bullets and numbers, and those its styles use. The rest numbered the
+ * template's own text, as a previous export's start overrides did where the
+ * template is that export, and go, so that each save doesn't add more.
+ */
+function templateNumIdsInUse(templateStyles?: Uint8Array): Set<number> {
+  const used = new Set([1, 2]);
+  if (!templateStyles) return used;
+  const styles = new TextDecoder('utf-8').decode(templateStyles);
+  for (const m of styles.matchAll(/<w:numId\b[^>]*?\bw:val\s*=\s*["'](\d+)["']/g)) used.add(parseInt(m[1], 10));
+  return used;
+}
+
+/** A template's numbering without the instances the document can't use. */
+function withoutUnusedNums(xml: string, used: Set<number>): string {
+  return xml.replace(/<w:num\b[^>]*?\bw:numId\s*=\s*["'](\d+)["'][^>]*?(?:\/>|>[\s\S]*?<\/w:num\s*>)\s*/g,
+    (num, numId: string) => used.has(parseInt(numId, 10)) ? num : '');
+}
+
+/**
+ * A numbering instance that starts a level over, at `start`. A sublist's
+ * starts its numbered ancestors' levels at their items' numbers too, which
+ * a label such as %1.%2 shows, since the instance counts them on its own.
+ */
+type NumberingOverride = { numId: number; ilvl: number; start: number; ancestors?: { ilvl: number; start: number }[] };
+
+/**
+ * The w:num of a numbering override. It keeps the level overrides of the
+ * instance it copies, by level, which a template can format its lists with
+ * in place of their abstract numbering.
+ */
+function numberingOverrideXml(o: NumberingOverride, abstractNumId: string,
+    durableId: boolean, levelOverrides = new Map<number, string>()): string {
+  const starts = new Map([...(o.ancestors ?? []).map(a => [a.ilvl, a.start] as const), [o.ilvl, o.start]]);
+  const levels = [...new Set([...levelOverrides.keys(), ...starts.keys()])].sort((a, b) => a - b);
+  return '<w:num w:numId="' + o.numId + '"' + (durableId ? ' w16cid:durableId="' + Math.floor(Math.random() * 2000000000) + '"' : '') + '>' +
+    '<w:abstractNumId w:val="' + abstractNumId + '"/>' +
+    levels.map(ilvl => {
+      const inner = levelOverrides.get(ilvl) ?? '';
+      const start = starts.get(ilvl);
+      return '<w:lvlOverride w:ilvl="' + ilvl + '">' + (start !== undefined
+        ? '<w:startOverride w:val="' + start + '"/>' + inner.replace(/<w:startOverride\b[^>]*(?:\/>|>[\s\S]*?<\/w:startOverride>)/g, '')
+        : inner) + '</w:lvlOverride>';
+    }).join('') +
+    '</w:num>\n';
+}
+
+/** A template's numbering with start overrides added as instances like its
+ *  numId 2, or undefined when it has none. */
+function withNumberingOverrides(xml: string, startOverrides: NumberingOverride[]): string | undefined {
+  const numbering = parseTemplateNumbering(xml);
+  const instance = childNodes(numbering?.nums.find(n => intAttr(n, 'w:numId') === 2), 'w:num');
+  const abstractNum = instance.find(n => 'w:abstractNumId' in n);
+  const abstractNumId = abstractNum && intAttr(abstractNum, 'w:val');
+  // w:num entries go before numIdMacAtCleanup, which ends the part
+  const at = /<w:numIdMacAtCleanup\b/.exec(xml)?.index ?? [...xml.matchAll(/<\/w:numbering\s*>/g)].pop()?.index;
+  if (!numbering || abstractNumId === undefined || !Number.isInteger(abstractNumId) || at === undefined) return undefined;
+  const builder = new XMLBuilder(templateXmlOptions);
+  const levelOverrides = new Map<number, string>();
+  for (const n of instance) {
+    const ilvl = intAttr(n, 'w:ilvl');
+    if ('w:lvlOverride' in n && Number.isInteger(ilvl)) levelOverrides.set(ilvl, builder.build(childNodes(n, 'w:lvlOverride')) as string);
+  }
+  // Durable IDs only where the template declares their namespace
+  const durableId = numbering.root[':@']?.['@_xmlns:w16cid'] !== undefined;
+  return xml.slice(0, at) + startOverrides.map(o => numberingOverrideXml(o, String(abstractNumId), durableId, levelOverrides)).join('') + xml.slice(at);
+}
+
+function numberingXml(startOverrides?: NumberingOverride[]): string {
   // Generate random identifiers that Word expects on numbering definitions.
   // Without these, Word adds them on open, marking the document as modified.
   function lvlsWithTplc(lvls: string[]): string {
@@ -4671,13 +4789,8 @@ function numberingXml(startOverrides?: { numId: number; ilvl: number; start: num
     '</w:abstractNum>\n' +
     '<w:num w:numId="1" w16cid:durableId="' + durableId1 + '"><w:abstractNumId w:val="0"/></w:num>\n' +
     '<w:num w:numId="2" w16cid:durableId="' + durableId2 + '"><w:abstractNumId w:val="1"/></w:num>\n' +
-    // Emit extra w:num entries for ordered lists with custom start numbers
-    (startOverrides ?? []).map(o => {
-      const did = Math.floor(Math.random() * 2000000000);
-      return '<w:num w:numId="' + o.numId + '" w16cid:durableId="' + did + '"><w:abstractNumId w:val="1"/>' +
-        '<w:lvlOverride w:ilvl="' + o.ilvl + '"><w:startOverride w:val="' + o.start + '"/></w:lvlOverride>' +
-        '</w:num>\n';
-    }).join('') +
+    // Emit extra w:num entries for ordered lists with their own start
+    (startOverrides ?? []).map(o => numberingOverrideXml(o, '1', true)).join('') +
     '</w:numbering>';
 }
 
@@ -6026,18 +6139,37 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
       } else {
         let numId = token.ordered ? '2' : '1';
         const ilvl = (token.level || 1) - 1;
-        // Ordered lists with start ≠ 1 need a dedicated numId with lvlOverride
-        if (token.startNumber !== undefined && token.startNumber !== 1) {
-          const overrideNumId = 3 + state.listStartOverrides.length; // numIds 1,2 are reserved
-          state.listStartOverrides.push({ numId: overrideNumId, ilvl, start: token.startNumber });
-          numId = String(overrideNumId);
-          state.activeListStartOverrides.set(ilvl, overrideNumId);
-        } else if (token.ordered && state.activeListStartOverrides.has(ilvl)) {
-          // Subsequent items in the same restarted list share the override numId
-          numId = String(state.activeListStartOverrides.get(ilvl));
+        // Word counts on through every paragraph of a numbering instance, so
+        // each ordered list after the first gets one of its own, which
+        // starts at its own number. Its items share it. The first sublist of
+        // a numbered item stays in its parent's instance, which Word starts
+        // over after each parent item, so a template can number it as 2.1.
+        const parentNumId = ilvl > 0 && state.listItemNumbers?.length === ilvl && state.listItemNumbers[ilvl - 1] !== undefined
+          ? state.activeListStartOverrides.get(ilvl - 1) : undefined;
+        if (token.ordered && (token.listStart || !state.activeListStartOverrides.has(ilvl))) {
+          const start = token.startNumber ?? 1;
+          if (parentNumId !== undefined && start === 1) {
+            state.activeListStartOverrides.set(ilvl, parentNumId);
+          } else if (!state.usedOrderedNumId && start === 1) {
+            state.activeListStartOverrides.set(ilvl, 2);
+          } else {
+            const overrideNumId = (state.firstOverrideNumId ?? 3) + state.listStartOverrides.length;
+            const ancestors = (state.listItemNumbers ?? []).slice(0, ilvl).flatMap((number, level) =>
+              number !== undefined ? [{ ilvl: level, start: number }] : []);
+            state.listStartOverrides.push({ numId: overrideNumId, ilvl, start, ...(ancestors.length > 0 ? { ancestors } : {}) });
+            state.activeListStartOverrides.set(ilvl, overrideNumId);
+          }
+          state.usedOrderedNumId = true;
         }
+        if (token.ordered) numId = String(state.activeListStartOverrides.get(ilvl));
         pPr = '<w:pPr><w:numPr><w:ilvl w:val="' + ilvl + '"/><w:numId w:val="' + numId + '"/></w:numPr></w:pPr>';
         state.hasList = true;
+      }
+      {
+        const ilvl = (token.level || 1) - 1;
+        const previous = token.listStart ? undefined : state.listItemNumbers?.[ilvl];
+        const number = token.ordered ? (previous !== undefined ? previous + 1 : token.startNumber ?? 1) : undefined;
+        state.listItemNumbers = [...(state.listItemNumbers ?? []).slice(0, ilvl), number];
       }
       break;
     case 'blockquote': {
@@ -6781,13 +6913,18 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   // Whether the list open at each level is ordered, so a quote in a list item
   // can tell whether the next item continues its list or an ancestor's
   const openListOrdered: boolean[] = [];
+  // Whether the last top-level list item, while its list is open, is ordered
+  let lastTopItem: { ordered: boolean } | undefined;
   for (const [ti, token] of tokens.entries()) {
     // A paragraph of comment bodies only registers them: Word gets no
     // paragraph, and the blocks around it meet as if it weren't there
     if (omitsCommentBodies(ti, prevToken)) {
       generateRuns(withoutCommentBodyLines(token.runs), state, options, bibEntries, citeprocEngine);
       // Outside a list item, it still ends a restarted list's numbering
-      if (!token.listContinuation) state.activeListStartOverrides.clear();
+      if (!token.listContinuation) {
+        state.activeListStartOverrides.clear();
+        state.listItemNumbers = [];
+      }
       continue;
     }
     if (token.type === 'list_item') {
@@ -6919,15 +7056,22 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     // Reset active list start override when leaving a list context
     if (token.type !== 'list_item' && !token.listContinuation) {
       state.activeListStartOverrides.clear();
+      state.listItemNumbers = [];
     }
     // Track list block index for indent override round-trip.
-    // A new list block starts when we see a list_item after a non-list-item.
-    if (token.type === 'list_item' && prevToken?.type !== 'list_item' && !prevToken?.listContinuation) {
+    // A new list block starts when we see a list_item after a non-list-item,
+    // or where import sees a top-level item change type, or start a new
+    // numbering instance: at each ordered list after the first.
+    const isTopItem = token.type === 'list_item' && (token.level ?? 1) === 1;
+    const startsTopList = token.type === 'list_item' && startsAdjacentList(token, lastTopItem?.ordered);
+    if (token.type === 'list_item' && ((prevToken?.type !== 'list_item' && !prevToken?.listContinuation) || startsTopList)) {
       if (token.indentOverride) {
         state.listIndentOverrides.set(state.listBlockIndex, token.indentOverride);
       }
       state.listBlockIndex++;
     }
+    if (isTopItem) lastTopItem = { ordered: !!token.ordered };
+    else if (token.type !== 'list_item' && !token.listContinuation) lastTopItem = undefined;
     if (token.type === 'table') {
       recordTableMetadata(token, state);
       // Table-only landscape: wrap with section breaks (skip if already in fence-based landscape)
@@ -7236,6 +7380,8 @@ export async function convertMdToDocx(
     warnings: [...earlyWarnings],
     hasList: false,
     listStartOverrides: [],
+    firstOverrideNumId: Math.max(...templateNumIdsInUse(templateParts?.get('word/styles.xml'))) + 1,
+    usedOrderedNumId: false,
     hasComments: false,
     hasFootnotes: false,
     hasEndnotes: false,
@@ -7603,12 +7749,18 @@ export async function convertMdToDocx(
   zip.file('word/fontTable.xml', fontTableXml());
 
   // Handle numbering - use template as base but ensure bullet/decimal definitions exist.
-  // When listStartOverrides exist, we generate fresh numbering because the template
-  // numbering XML cannot be safely merged with override entries. Trade-off: any custom
-  // list formats in the template are discarded in this case.
+  // Start overrides join the template's numbering as instances of the
+  // abstract numbering its numId 2 uses. A template without one gets fresh
+  // numbering, which discards its custom list formats.
   if (state.hasList) {
-    if (templateParts?.has('word/numbering.xml') && state.listStartOverrides.length === 0) {
-      zip.file('word/numbering.xml', templateParts.get('word/numbering.xml')!);
+    const templateNumbering = templateParts?.get('word/numbering.xml');
+    const used = templateNumbering && withoutUnusedNums(new TextDecoder('utf-8').decode(templateNumbering),
+      templateNumIdsInUse(templateParts?.get('word/styles.xml')));
+    const merged = used && withNumberingOverrides(used, state.listStartOverrides);
+    if (used && state.listStartOverrides.length === 0) {
+      zip.file('word/numbering.xml', used);
+    } else if (merged) {
+      zip.file('word/numbering.xml', merged);
     } else {
       zip.file('word/numbering.xml', numberingXml(state.listStartOverrides));
     }

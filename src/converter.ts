@@ -176,6 +176,8 @@ export interface ListMeta {
   type: 'bullet' | 'ordered';
   level: number; // 0-based indentation level
   startNumber?: number; // ordered list start number (when ≠ 1)
+  wordNumber?: number; // ordered: the number Word shows for the item (see wordListCounter)
+  wordStarts?: boolean; // ordered: Word starts its level's numbering over at the item
   bulletMarker?: '-' | '*' | '+'; // authored unordered-list marker for round-trip
 }
 
@@ -274,6 +276,7 @@ export type ContentItem =
       blockquoteIndentUnitTwips?: 240 | 720; // base indent unit for blockquote styles
       emptyParagraphCount?: number; // count of collapsed consecutive empty paragraphs
       indentOverride?: 'indent' | 'no-indent'; // per-paragraph indent override for round-trip
+      listBlockStart?: boolean; // the first item of a list block, which a list indent override goes before
       paraMarkRevision?: RevisionInfo; // w:ins/w:del on the paragraph mark (pPr > rPr) — whole paragraph inserted/deleted
       breakRevision?: RevisionInfo; // w:ins/w:del on the previous paragraph's mark, which is the break before this one
     }
@@ -436,24 +439,80 @@ export async function extractNoteImageFormatMapping(data: Uint8Array | JSZip): P
 
 export interface NumberingLevelDef {
   type: 'bullet' | 'ordered';
+  start?: number; // w:start, where the level's count begins
 }
 
 export type NumberingDefs = Map<string, Map<string, NumberingLevelDef>>;
 export type NumberingStartOverrides = Map<string, Map<string, number>>; // numId → ilvl → start
+/** numId → its abstract numbering and all its start overrides, 1 included;
+ *  restartsAfterBreak when the abstract numbering has
+ *  w15:restartNumberingAfterBreak */
+export type NumberingInstances = Map<string, { abstractNumId: string; overrides: Map<string, number>; restartsAfterBreak?: boolean }>;
 
-export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: NumberingDefs; startOverrides: NumberingStartOverrides }> {
+export interface WordListCounter {
+  /** The number Word shows for the next list paragraph, in document order,
+   *  and whether its level's numbering starts over there */
+  (numId: string, ilvl: number): { number: number; starts: boolean } | undefined;
+  /** Starts over the lists Word restarts after a section break */
+  sectionBreak(): void;
+}
+
+/**
+ * Counts list paragraphs as Word numbers them. The instances of an abstract
+ * numbering share its count, so a list goes on across the paragraphs between
+ * its parts, even in two w:num elements, except at a level an instance
+ * overrides the start of: that level counts on its own, from that start. A
+ * level starts over after any higher level.
+ */
+export function wordListCounter(defs: NumberingDefs, instances: NumberingInstances): WordListCounter {
+  // abstractNumId → the shared count by level, and each instance's own;
+  // `deep` holds the counts with a level under the top one, for the next
+  // higher level to start over, without going through every instance
+  const lists = new Map<string, { shared: number[]; own: Map<string, number[]>; deep: Set<number[]>; restartsAfterBreak: boolean }>();
+  const count = (numId: string, ilvl: number): { number: number; starts: boolean } | undefined => {
+    const instance = instances.get(numId);
+    if (!instance) return undefined;
+    let list = lists.get(instance.abstractNumId);
+    if (!list) lists.set(instance.abstractNumId, list = { shared: [], own: new Map(), deep: new Set(), restartsAfterBreak: false });
+    if (instance.restartsAfterBreak) list.restartsAfterBreak = true;
+    const override = instance.overrides.get(String(ilvl));
+    let levels = list.shared;
+    if (override !== undefined) {
+      levels = list.own.get(numId) ?? [];
+      list.own.set(numId, levels);
+    }
+    const starts = levels[ilvl] === undefined;
+    levels[ilvl] = starts ? override ?? defs.get(numId)?.get(String(ilvl))?.start ?? 1 : levels[ilvl] + 1;
+    for (const deeper of list.deep) {
+      if (deeper.length > ilvl + 1) deeper.length = ilvl + 1;
+      if (deeper.length <= 1) list.deep.delete(deeper);
+    }
+    if (levels.length > 1) list.deep.add(levels);
+    return { number: levels[ilvl], starts };
+  };
+  return Object.assign(count, {
+    sectionBreak: () => {
+      for (const [abstractNumId, list] of lists) if (list.restartsAfterBreak) lists.delete(abstractNumId);
+    },
+  });
+}
+
+export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: NumberingDefs; startOverrides: NumberingStartOverrides; instances: NumberingInstances }> {
   const numberingDefs: NumberingDefs = new Map();
   const startOverrides: NumberingStartOverrides = new Map();
+  const instances: NumberingInstances = new Map();
   const parsed = await readZipXml(zip, 'word/numbering.xml');
-  if (!parsed) { return { defs: numberingDefs, startOverrides }; }
+  if (!parsed) { return { defs: numberingDefs, startOverrides, instances }; }
 
   // Build abstractNumId → levels map
   const abstractNums = new Map<string, Map<string, NumberingLevelDef>>();
+  const restartingAfterBreak = new Set<string>();
   for (const node of findAllDeep(parsed, 'w:abstractNum')) {
     const abstractNum = asXmlNodes(node['w:abstractNum']);
     if (abstractNum.length === 0) continue;
 
     const abstractNumId = getAttr(node, 'abstractNumId');
+    if (['1', 'true', 'on'].includes(String(node[':@']?.['@_w15:restartNumberingAfterBreak'] ?? ''))) restartingAfterBreak.add(abstractNumId);
     const levels = new Map<string, NumberingLevelDef>();
 
     for (const lvlNode of findAllDeep(abstractNum, 'w:lvl')) {
@@ -464,11 +523,9 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
       const numFmtNodes = findAllDeep(lvl, 'w:numFmt');
       if (numFmtNodes.length > 0) {
         const val = getAttr(numFmtNodes[0], 'val');
-        if (val === 'bullet') {
-          levels.set(ilvl, { type: 'bullet' });
-        } else {
-          levels.set(ilvl, { type: 'ordered' });
-        }
+        const startNodes = findAllDeep(lvl, 'w:start');
+        const start = startNodes.length > 0 ? parseInt(getAttr(startNodes[0], 'val'), 10) : NaN;
+        levels.set(ilvl, { type: val === 'bullet' ? 'bullet' : 'ordered', ...(isNaN(start) ? {} : { start }) });
       }
     }
 
@@ -482,8 +539,12 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
 
     const numId = getAttr(node, 'numId');
     const abstractNumIdNodes = findAllDeep(num, 'w:abstractNumId');
+    const instance = { abstractNumId: '', overrides: new Map<string, number>(), restartsAfterBreak: false };
     if (abstractNumIdNodes.length > 0) {
       const abstractNumId = getAttr(abstractNumIdNodes[0], 'val');
+      instance.abstractNumId = abstractNumId;
+      instance.restartsAfterBreak = restartingAfterBreak.has(abstractNumId);
+      instances.set(numId, instance);
       const levels = abstractNums.get(abstractNumId);
       if (levels) {
         numberingDefs.set(numId, levels);
@@ -497,6 +558,7 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
       if (lvlOverride.length === 0) continue;
       for (const startNode of findAllDeep(lvlOverride, 'w:startOverride')) {
         const startVal = parseInt(getAttr(startNode, 'val'), 10);
+        if (!isNaN(startVal)) instance.overrides.set(ilvl, startVal);
         if (!isNaN(startVal) && startVal !== 1) {
           if (!startOverrides.has(numId)) startOverrides.set(numId, new Map());
           startOverrides.get(numId)!.set(ilvl, startVal);
@@ -505,7 +567,7 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
     }
   }
 
-  return { defs: numberingDefs, startOverrides };
+  return { defs: numberingDefs, startOverrides, instances };
 }
 
 export function parseHeadingLevel(pPrChildren: XmlNode[]): number | undefined {
@@ -613,7 +675,7 @@ function parseListContinuationStyle(pPrChildren: XmlNode[]): boolean {
     && getAttr(pStyleElement, 'val').toLowerCase() === 'manuscriptlistcontinuation';
 }
 
-export function parseListMeta(pPrChildren: XmlNode[], numberingDefs: NumberingDefs, numberingStartOverrides?: NumberingStartOverrides): ListMeta | undefined {
+export function parseListMeta(pPrChildren: XmlNode[], numberingDefs: NumberingDefs, numberingStartOverrides?: NumberingStartOverrides, countListItem?: WordListCounter): ListMeta | undefined {
   const numPrElement = pPrChildren.find(child => child['w:numPr'] !== undefined);
   if (!numPrElement) return undefined;
 
@@ -644,10 +706,12 @@ export function parseListMeta(pPrChildren: XmlNode[], numberingDefs: NumberingDe
   if (isNaN(level) || level < 0) return undefined;
 
   const startNumber = numberingStartOverrides?.get(numId)?.get(ilvl);
+  const counted = countListItem?.(numId, level);
   return {
     type: def.type,
     level,
     ...(startNumber !== undefined ? { startNumber } : {}),
+    ...(def.type === 'ordered' && counted ? { wordNumber: counted.number, wordStarts: counted.starts } : {}),
   };
 }
 
@@ -2378,6 +2442,7 @@ export async function extractDocumentContent(
   options?: {
     numberingDefs?: NumberingDefs;
     numberingStartOverrides?: NumberingStartOverrides;
+    numberingInstances?: NumberingInstances;
     relationshipMap?: Map<string, string>;
     replyIds?: Set<string>;
     imageRelationships?: Map<string, string>;
@@ -2394,9 +2459,12 @@ export async function extractDocumentContent(
 
   // Parse relationships and numbering definitions
   const relationshipMap = options?.relationshipMap ?? await parseRelationships(zip);
-  const numberingResult = options?.numberingDefs ? { defs: options.numberingDefs, startOverrides: options.numberingStartOverrides ?? new Map() } : await parseNumberingDefinitions(zip);
+  const numberingResult = options?.numberingDefs
+    ? { defs: options.numberingDefs, startOverrides: options.numberingStartOverrides ?? new Map(), instances: options.numberingInstances ?? new Map() }
+    : await parseNumberingDefinitions(zip);
   const numberingDefs = numberingResult.defs;
   const numberingStartOverrides = numberingResult.startOverrides;
+  const countListItem = wordListCounter(numberingDefs, numberingResult.instances);
   const replyIds = options?.replyIds;
   const imageRelMap = options?.imageRelationships ?? new Map<string, string>();
   const imageFolder = options?.imageFolder ?? '';
@@ -2433,6 +2501,7 @@ export async function extractDocumentContent(
   // Section detection state
   let sectionStartIndex = 0; // index into `content` where the current section started
   let sectionBreakOrdinal = 0; // counter for paragraph-level sectPr occurrences
+  let afterSectionBreak = false; // the last paragraph ended a section
   const portraitBreakOrdinals = options?.portraitBreakOrdinals;
   // Ends the section at the end of `target`, fencing it if it's landscape or a
   // portrait fence. A plain first paragraph has no para item, which the
@@ -2740,6 +2809,10 @@ export async function extractDocumentContent(
         } else if (key === 'w:p') {
           const precedingMark = trackedParaMark;
           trackedParaMark = undefined;
+          if (afterSectionBreak) {
+            countListItem.sectionBreak();
+            afterSectionBreak = false;
+          }
           // Process paragraph - extract heading level, list metadata, and title style
           let headingLevel: number | undefined;
           let listMeta: ListMeta | undefined;
@@ -2789,6 +2862,7 @@ export async function extractDocumentContent(
               const sectPrNode = pPrChildren.find((c) => c['w:sectPr'] !== undefined);
               if (sectPrNode && !inTableCell) {
                 const currentOrdinal = sectionBreakOrdinal++;
+                afterSectionBreak = true;
                 const sectPrChildren = asXmlNodes(sectPrNode['w:sectPr']);
                 const pgSzNode = sectPrChildren.find((c) => c['w:pgSz'] !== undefined);
                 let isLandscapeSect = false;
@@ -2818,7 +2892,7 @@ export async function extractDocumentContent(
               }
 
               headingLevel = parseHeadingLevel(pPrChildren);
-              listMeta = parseListMeta(pPrChildren, numberingDefs, numberingStartOverrides);
+              listMeta = parseListMeta(pPrChildren, numberingDefs, numberingStartOverrides, countListItem);
               isTitle = parseTitleStyle(pPrChildren);
               const blockquoteInfo = parseBlockquoteInfo(pPrChildren);
               blockquoteLevel = blockquoteInfo.level;
@@ -4935,27 +5009,46 @@ function clearListContextsFromLevel(contexts: Map<number, StructuralListContext>
   }
 }
 
+/**
+ * The number import writes for an ordered list item, from the per-level
+ * counters, which it moves on. A new list or sub-list starts at the number
+ * Word shows. Where Word starts a top-level list over and Markdown would go
+ * on with the one before, the item restarts, and needs a break before it.
+ * (Markdown can't restart a nested list without one, so those go on.)
+ * `listTypesByLevel` tracks the list type at each nesting level
+ * independently, so returning from a nested sub-list (e.g. ordered → bullet
+ * → back to ordered) correctly identifies the parent ordered list as a
+ * continuation, where the type of the item before would reset the counter.
+ */
+function nextOrderedNumber(
+  listMeta: ListMeta,
+  orderedCounters: Map<number, number>,
+  listTypesByLevel: Map<number, 'bullet' | 'ordered'>,
+  lastListLevel: number | undefined,
+): { number: number; isNew: boolean; restarts: boolean } {
+  // The type at this item's own level: a deeper ordered list says nothing
+  // about a bullet list here
+  const isNewListContext = listTypesByLevel.get(listMeta.level) !== 'ordered';
+  const isNewSubList = lastListLevel !== undefined && listMeta.level > lastListLevel;
+  const isNew = isNewListContext || isNewSubList;
+  // Word starts a list over where Markdown would carry it on
+  const restarts = !isNew && listMeta.wordNumber !== undefined
+    && (listMeta.wordStarts === true || listMeta.wordNumber !== (orderedCounters.get(listMeta.level) ?? 1));
+  if (isNew || restarts) orderedCounters.set(listMeta.level, listMeta.wordNumber ?? listMeta.startNumber ?? 1);
+  const number = orderedCounters.get(listMeta.level) ?? 1;
+  orderedCounters.set(listMeta.level, number + 1);
+  return { number, isNew, restarts };
+}
+
 function inferOrderedMarkerWidth(
   listMeta: ListMeta,
   orderedCounters: Map<number, number>,
   listTypesByLevel: Map<number, 'bullet' | 'ordered'>,
   lastListLevel: number | undefined,
-  lastListType: 'bullet' | 'ordered' | undefined,
 ): number | undefined {
   if (listMeta.type !== 'ordered') return undefined;
-  const levelType = listTypesByLevel.get(listMeta.level);
-  const isNewListContext = levelType !== 'ordered' && (!lastListType || lastListType !== 'ordered');
-  const isNewSubList = lastListLevel !== undefined && listMeta.level > lastListLevel;
-  if (listMeta.startNumber !== undefined && (isNewListContext || isNewSubList)) {
-    orderedCounters.set(listMeta.level, listMeta.startNumber);
-  } else if (isNewListContext || isNewSubList) {
-    orderedCounters.set(listMeta.level, 1);
-  }
-  const currentNumber = listMeta.startNumber !== undefined && (isNewListContext || isNewSubList)
-    ? listMeta.startNumber
-    : (orderedCounters.get(listMeta.level) ?? 1);
-  orderedCounters.set(listMeta.level, currentNumber + 1);
-  return String(currentNumber).length + 2;
+  const { number } = nextOrderedNumber(listMeta, orderedCounters, listTypesByLevel, lastListLevel);
+  return String(number).length + 2;
 }
 
 function inferListContinuationForBlockquote(
@@ -5147,7 +5240,6 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
   const listTypesByLevel = new Map<number, 'bullet' | 'ordered'>();
   const orderedCounters = new Map<number, number>();
   let lastListLevel: number | undefined;
-  let lastListType: 'bullet' | 'ordered' | undefined;
   let nextBlockquoteGroupIndex = 0;
   let currentBlockquoteGroupIndex: number | undefined;
   let lastBlockquoteLevel: number | undefined;
@@ -5177,7 +5269,6 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
           orderedCounters,
           listTypesByLevel,
           lastListLevel,
-          lastListType,
         );
         listTypesByLevel.set(item.listMeta.level, item.listMeta.type);
         listContexts.set(item.listMeta.level, {
@@ -5186,7 +5277,6 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
           ...(markerWidth !== undefined ? { markerWidth } : {}),
         });
         lastListLevel = item.listMeta.level;
-        lastListType = item.listMeta.type;
         currentBlockquoteGroupIndex = undefined;
         lastBlockquoteLevel = undefined;
         lastBlockquoteType = undefined;
@@ -5216,7 +5306,6 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
         lastBlockquoteType = currentType;
         lastBlockquoteListLevel = listLevel;
         lastListLevel = undefined;
-        lastListType = undefined;
         continue;
       }
 
@@ -5248,7 +5337,6 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
         listTypesByLevel.clear();
         orderedCounters.clear();
         lastListLevel = undefined;
-        lastListType = undefined;
       }
       currentBlockquoteGroupIndex = undefined;
       lastBlockquoteLevel = undefined;
@@ -5261,7 +5349,6 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
       listTypesByLevel.clear();
       orderedCounters.clear();
       lastListLevel = undefined;
-      lastListType = undefined;
       currentBlockquoteGroupIndex = undefined;
       lastBlockquoteLevel = undefined;
       lastBlockquoteType = undefined;
@@ -5619,6 +5706,12 @@ export function buildMarkdown(
   let prevItemWasListQuote = false; // the paragraph before is a quote in a list item
   const listTypeByLevel = new Map<number, 'bullet' | 'ordered'>(); // per-level list type tracking
   const orderedListCounters = new Map<number, number>(); // per-level counters for ordered list items
+  // Where the content of the last list paragraph ended in the output, and the
+  // number Markdown gives a top-level ordered item that carries on its list
+  let listContentEnd: number | undefined;
+  let topOrderedNext: number | undefined;
+  // What follows starts a new list, with its own indent sentinel
+  const endListContext = () => { lastListType = undefined; lastListLevel = undefined; listTypeByLevel.clear(); };
   let codeBlockGroupIndex = 0;
   let lastAlertParagraphKey: string | undefined;
   let pendingAlertPrefixStrip: GfmAlertType | undefined;
@@ -5748,6 +5841,7 @@ export function buildMarkdown(
     }
 
     if (item.type === 'para') {
+      if (lastListType !== undefined) listContentEnd = output.length;
       // A pending heading marker still unconsumed here means the revised
       // heading paragraph had no inline content — serialize it as its own
       // empty span before starting the next paragraph.
@@ -6017,6 +6111,26 @@ export function buildMarkdown(
           output.push('\n\n');
         }
       }
+      const orderedItem = item.listMeta?.type === 'ordered' && !item.headingLevel
+        ? nextOrderedNumber(item.listMeta, orderedListCounters, listTypeByLevel, lastListLevel)
+        : undefined;
+      // Markdown carries a top-level list on across blank lines, so where
+      // Word starts one over, a comment keeps the two apart
+      const carriesOn = item.listMeta?.level === 0 && topOrderedNext !== undefined && listContentEnd !== undefined
+        && output.slice(listContentEnd).every(part => !part.trim());
+      if (orderedItem && carriesOn && (orderedItem.restarts || (orderedItem.isNew && orderedItem.number !== topOrderedNext))) {
+        while (output.length > 0 && !output[output.length - 1].trim()) output.pop();
+        if (output.length > 0) output[output.length - 1] = output[output.length - 1].replace(/\n+$/, '');
+        output.push('\n\n<!-- -->\n\n');
+        endListContext();
+      } else if (orderedItem?.restarts && item.listMeta!.level > 0 && listContentEnd !== undefined
+          && output.slice(listContentEnd).every(part => !part.trim())) {
+        // So does a sublist, which a comment in its parent item keeps apart
+        while (output.length > 0 && !output[output.length - 1].trim()) output.pop();
+        if (output.length > 0) output[output.length - 1] = output[output.length - 1].replace(/\n+$/, '');
+        const level = item.listMeta!.level;
+        output.push('\n\n' + (options?.listIndent === 'tab' ? '\t'.repeat(level) : ' '.repeat(3 * level)) + '<!-- -->\n\n');
+      }
       // Comment bodies written into the quote before stand where lines
       // without > kept it apart from this one. Unless this one opens an
       // alert or is nested deeper, it needs a blank line, or it would go on
@@ -6056,7 +6170,7 @@ export function buildMarkdown(
       if (item.indentOverride && !item.headingLevel && !item.blockquoteLevel && !item.isCodeBlock) {
         if (item.listMeta) {
           // Emit sentinel only before the first item of a list block
-          if (!lastListType) {
+          if (item.listBlockStart) {
             // Indent the sentinel to match the list nesting level so it doesn't
             // break an enclosing list as a top-level HTML block (CommonMark §4.6).
             const useTab = options?.listIndent === 'tab';
@@ -6101,32 +6215,13 @@ export function buildMarkdown(
           : item.listMeta.type === 'bullet'
             ? ' '.repeat(2 * item.listMeta.level)
             : ' '.repeat(3 * item.listMeta.level);
-        // For ordered lists: use per-level counters to handle nested lists correctly.
-        // startNumber is only applied at a new list boundary (not for continuation items
-        // that share the same numId override and thus all carry startNumber).
-        if (item.listMeta.type === 'ordered') {
-          // Check if the list at this level is continuing or new.
-          // `listTypeByLevel` tracks the list type at each nesting level independently,
-          // so returning from a nested sub-list (e.g. ordered → bullet → back to ordered)
-          // correctly identifies the parent ordered list as a continuation — without this,
-          // `lastListType` alone would see "bullet" and reset the counter to 1.
-          const levelType = listTypeByLevel.get(item.listMeta.level);
-          const isNewListContext = levelType !== 'ordered' && (!lastListType || lastListType !== 'ordered');
-          const isNewSubList = lastListLevel !== undefined && item.listMeta.level > lastListLevel;
-          if (item.listMeta.startNumber !== undefined && (isNewListContext || isNewSubList)) {
-            orderedListCounters.set(item.listMeta.level, item.listMeta.startNumber);
-          } else if (isNewListContext) {
-            orderedListCounters.set(item.listMeta.level, 1); // new list starts at 1
-          } else if (isNewSubList) {
-            orderedListCounters.set(item.listMeta.level, 1); // new nested sub-list starts at 1
-          }
-        }
+        // Per-level counters handle nested lists (see nextOrderedNumber)
         listTypeByLevel.set(item.listMeta.level, item.listMeta.type);
-        const orderedNum = orderedListCounters.get(item.listMeta.level) ?? 1;
+        const orderedNum = orderedItem?.number ?? 1;
         const marker = item.listMeta.type === 'bullet'
           ? (useTab ? (item.listMeta.bulletMarker ?? '-') + '\t' : (item.listMeta.bulletMarker ?? '-') + ' ')
           : (useTab ? orderedNum + '.\t' : orderedNum + '. ');
-        if (item.listMeta.type === 'ordered') orderedListCounters.set(item.listMeta.level, orderedNum + 1);
+        if (item.listMeta.level === 0) topOrderedNext = item.listMeta.type === 'ordered' ? orderedNum + 1 : undefined;
         output.push(indent + marker);
       } else if (item.blockquoteLevel) {
         const itemPrefix = blockquotePrefix(item);
@@ -6231,6 +6326,7 @@ export function buildMarkdown(
         output.push('\n\n');
       }
       output.push('<!-- landscape -->');
+      endListContext();
       lastWasSectionSentinel = true;
       lastSentinelAfterGapKey = gapKey.replace('lo', 'loa');
       i++;
@@ -6252,6 +6348,7 @@ export function buildMarkdown(
         output.push('\n\n');
       }
       output.push('<!-- /landscape -->');
+      endListContext();
       lastWasSectionSentinel = true;
       lastSentinelAfterGapKey = gapKey.replace('lc', 'lca');
       i++;
@@ -6278,6 +6375,7 @@ export function buildMarkdown(
         output.push('\n\n');
       }
       output.push('<!-- portrait -->');
+      endListContext();
       lastWasSectionSentinel = true;
       lastSentinelAfterGapKey = gapKey.replace('po', 'poa');
       i++;
@@ -6299,6 +6397,7 @@ export function buildMarkdown(
         output.push('\n\n');
       }
       output.push('<!-- /portrait -->');
+      endListContext();
       lastWasSectionSentinel = true;
       lastSentinelAfterGapKey = gapKey.replace('pc', 'pca');
       i++;
@@ -7351,6 +7450,7 @@ export async function convertDocx(
   ]);
   const numberingDefs = numberingResult.defs;
   const numberingStartOverrides = numberingResult.startOverrides;
+  const numberingInstances = numberingResult.instances;
   const docRels = docRelsParsed.hyperlinks;
   const imageRels = docRelsParsed.images;
 
@@ -7361,7 +7461,7 @@ export async function convertDocx(
   const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, zoteroCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds };
 
   const [{ content: docContent, zoteroBiblData, imageEntries }, footnotes, endnotes] = await Promise.all([
-    extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, relationshipMap: docRels, replyIds, imageRelationships: imageRels, imageFolder: options?.imageFolder, portraitBreakOrdinals: portraitBreaks ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined }),
+    extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, relationshipMap: docRels, replyIds, imageRelationships: imageRels, imageFolder: options?.imageFolder, portraitBreakOrdinals: portraitBreaks ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined }),
     extractFootnotes(zip, fnContext),
     extractEndnotes(zip, enContext),
   ]);
@@ -7409,9 +7509,18 @@ export async function convertDocx(
   if (storedListIndentOverrides) {
     let listBlockIdx = 0;
     let inList = false;
+    // The type of the block's last top-level item: a new block starts where
+    // a top-level item changes type, as Markdown starts a new list, or where
+    // Word starts the numbering over
+    let topType: 'bullet' | 'ordered' | undefined;
     for (const item of docContent) {
       if (item.type === 'para' && item.listMeta) {
+        if (item.listMeta.level === 0) {
+          if (inList && (item.listMeta.type !== topType || item.listMeta.wordStarts)) inList = false;
+          topType = item.listMeta.type;
+        }
         if (!inList) {
+          item.listBlockStart = true;
           // Start of a new list block
           const override = storedListIndentOverrides.get(listBlockIdx);
           if (override) item.indentOverride = override as 'indent' | 'no-indent';
@@ -7423,9 +7532,9 @@ export async function convertDocx(
           // Look back to find the override from the first item of this block
           // (already set above for the first item)
         }
-      } else if ((item.type === 'para' && !item.listContinuation) || item.type === 'table'
-          || isStructuralBoundaryItem(item)) {
+      } else if (item.type === 'para' ? !item.listContinuation : isStructuralBoundaryItem(item)) {
         inList = false;
+        topType = undefined;
       }
     }
     // Second pass: propagate override to all items in each list block
@@ -7433,14 +7542,13 @@ export async function convertDocx(
     let currentOverride: 'indent' | 'no-indent' | undefined;
     for (const item of docContent) {
       if (item.type === 'para' && item.listMeta) {
-        if (!inList) {
+        if (!inList || item.listBlockStart) {
           currentOverride = item.indentOverride;
           inList = true;
         } else if (currentOverride) {
           item.indentOverride = currentOverride;
         }
-      } else if ((item.type === 'para' && !item.listContinuation) || item.type === 'table'
-          || isStructuralBoundaryItem(item)) {
+      } else if (item.type === 'para' ? !item.listContinuation : isStructuralBoundaryItem(item)) {
         inList = false;
         currentOverride = undefined;
       }

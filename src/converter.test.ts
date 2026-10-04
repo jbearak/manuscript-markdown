@@ -1192,6 +1192,239 @@ describe('Horizontal rule round-trip', () => {
   });
 });
 
+describe('Ordered list numbering', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+  const documentXml = async (docx: Uint8Array) => (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+  const numIdsOf = (xml: string) => [...xml.matchAll(/<w:numId w:val="(\d+)"\/>/g)].map(match => match[1]);
+
+  test('gives each ordered list after the first numbering of its own, as Word counts on through one', async () => {
+    const { docx } = await convertMdToDocx('1. a\n2. b\n\nPara.\n\n1. c\n   1. x\n2. d\n   1. y');
+    const [a, b, c, x, d, y] = numIdsOf(await documentXml(docx));
+    expect(a).toBe(b);
+    expect(a).not.toBe(c);
+    // Sublists of a numbered item stay in its list's numbering
+    expect([x, d, y]).toEqual([c, c, c]);
+    const numbering = await (await JSZip.loadAsync(docx)).file('word/numbering.xml')!.async('string');
+    expect(numbering).toMatch(new RegExp('<w:num w:numId="' + c + '"[^>]*>[^]*?<w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/>'));
+  });
+
+  test.each([
+    ['a list after a paragraph', '1. a\n2. b\n\nPara.\n\n1. c\n2. d', undefined],
+    ['a list after another delimiter', '1. a\n2. b\n\n1) c\n2) d', '1. a\n2. b\n\n<!-- -->\n\n1. c\n2. d'],
+    ['a list after an indent sentinel', '1. a\n2. b\n\n<!-- no-indent -->\n1. c', '1. a\n2. b\n\n<!-- -->\n\n<!-- no-indent -->\n1. c'],
+    ['a numbered list after a bulleted one with a sentinel', '- b\n\n<!-- no-indent -->\n1. c', undefined],
+    ['nested lists', '1. a\n   1. x\n   2. y\n2. b\n   1. z', undefined],
+    ['a list that starts at 3', '1. a\n\nP.\n\n3. c', undefined],
+    ['a list after another delimiter that goes on', '1. a\n\n2) b', '1. a\n\n<!-- -->\n\n2. b'],
+    ['a sublist after a comment', '1. parent\n   1. a\n\n   <!-- -->\n\n   1. b', undefined],
+    ['sentinels around a quote in an item', '<!-- no-indent -->\n1. a\n\n   > q\n2. b\n\nP.\n\n<!-- indent -->\n1. c', undefined],
+    ['sentinels around a second paragraph in an item', '<!-- no-indent -->\n- a\n\n  more\n- b\n\nP.\n\n<!-- indent -->\n- c', undefined],
+  ])('round-trips the numbering of %s', async (_, md, back) => {
+    // Markdown starts each list over; Word has to as well
+    expect(await roundTrip(md)).toBe(back ?? md);
+    expect(await roundTrip(back ?? md)).toBe(back ?? md);
+  });
+
+  test('gives no warning for the comment between two sublists', async () => {
+    // Export drops it on purpose, as it does any HTML block in an item
+    const { warnings } = await convertMdToDocx('1. parent\n   1. a\n\n   <!-- -->\n\n   1. b');
+    expect(warnings).toEqual([]);
+    expect((await convertMdToDocx('- parent\n\n  <!-- c -->')).warnings).toHaveLength(1);
+    // Between bullet lists, nothing keeps the two apart in Word
+    expect((await convertMdToDocx('1. parent\n   - a\n\n   <!-- -->\n\n   - b')).warnings).toHaveLength(1);
+  });
+
+  test.each([
+    ['goes on', '0', '3. c'],
+    ['starts over', '1', '1. c'],
+  ])('reads a list that %s after a section break', async (_, restarts, last) => {
+    // One numbering instance throughout, as a document made in Word has
+    const { docx } = await convertMdToDocx('1. a\n2. b\n\n<!-- landscape -->\n\nT.\n\n<!-- /landscape -->\n\n3. c');
+    const zip = await JSZip.loadAsync(docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const first = numIdsOf(xml)[0];
+    zip.file('word/document.xml', xml.replace(/<w:numId w:val="\d+"\/>/g, '<w:numId w:val="' + first + '"/>'));
+    const numbering = await zip.file('word/numbering.xml')!.async('string');
+    zip.file('word/numbering.xml', numbering.replace('<w:abstractNum w:abstractNumId="1" w15:restartNumberingAfterBreak="0"',
+      '<w:abstractNum w:abstractNumId="1" w15:restartNumberingAfterBreak="' + restarts + '"'));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('1. a\n2. b\n\n<!-- landscape -->\n\nT.\n\n<!-- /landscape -->\n\n' + last);
+  });
+
+  test('reads a list Word numbers on across a paragraph', async () => {
+    // One numbering instance throughout, as a document made in Word has
+    const { docx } = await convertMdToDocx('1. a\n2. b\n\nPara.\n\n1. c');
+    const zip = await JSZip.loadAsync(docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const first = numIdsOf(xml)[0];
+    zip.file('word/document.xml', xml.replace(/<w:numId w:val="\d+"\/>/g, '<w:numId w:val="' + first + '"/>'));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('1. a\n2. b\n\nPara.\n\n3. c');
+  });
+
+  test('keeps apart two lists Word numbers separately', async () => {
+    // The third item starts numbering of its own, right after the second
+    const { docx } = await convertMdToDocx('1. a\n2. b\n\nPara.\n\n1. c');
+    const zip = await JSZip.loadAsync(docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<w:p\b[^>]*><w:r><w:t>Para\.<\/w:t><\/w:r><\/w:p>/, ''));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('1. a\n2. b\n\n<!-- -->\n\n1. c');
+  });
+
+  test('adds numbering of their own to a template\'s numbering', async () => {
+    const templateZip = await JSZip.loadAsync((await convertMdToDocx('1. t')).docx);
+    const templateNumbering = await templateZip.file('word/numbering.xml')!.async('string');
+    // A format of the template's own, which the document should keep
+    templateZip.file('word/numbering.xml', templateNumbering.replace('<w:lvlText w:val="%1."/>', '<w:lvlText w:val="%1)"/>'));
+    const templateDocx = await templateZip.generateAsync({ type: 'uint8array' });
+    const { docx } = await convertMdToDocx('1. a\n\nP.\n\n1. b', { templateDocx });
+    const [a, b] = numIdsOf(await documentXml(docx));
+    const numbering = await (await JSZip.loadAsync(docx)).file('word/numbering.xml')!.async('string');
+    expect(numbering).toContain('<w:lvlText w:val="%1)"/>');
+    expect(a).not.toBe(b);
+    expect(numbering).toMatch(new RegExp('<w:num w:numId="' + b + '"[^>]*><w:abstractNumId w:val="1"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/>'));
+  });
+
+  test.each([
+    ['landscape', '<!-- landscape -->\n\n1. a\n\n<!-- /landscape -->\n\n1. b'],
+    ['portrait', '1. a\n\n<!-- portrait -->\n\n1. b\n\n<!-- /portrait -->'],
+  ])('needs nothing between lists a %s section keeps apart', async (_name, md) => {
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  const templateWithNumbering = async (edit: (numbering: string) => string) => {
+    const templateZip = await JSZip.loadAsync((await convertMdToDocx('1. t')).docx);
+    templateZip.file('word/numbering.xml', edit(await templateZip.file('word/numbering.xml')!.async('string')));
+    return templateZip.generateAsync({ type: 'uint8array' });
+  };
+
+  test('adds no durable IDs to a template without their namespace', async () => {
+    // A root start tag broken across lines, with no w16cid
+    const templateDocx = await templateWithNumbering(numbering => numbering
+      .replace(/ w16cid:durableId="\d+"/g, '')
+      .replace(' xmlns:w16cid="http://schemas.microsoft.com/office/word/2016/wordml/cid"', '')
+      .replace(' mc:Ignorable="w15 w16cid"', ' mc:Ignorable="w15"')
+      .replace('<w:numbering ', '<w:numbering\n  '));
+    const { docx } = await convertMdToDocx('1. a\n\nP.\n\n1. b', { templateDocx });
+    const numbering = await (await JSZip.loadAsync(docx)).file('word/numbering.xml')!.async('string');
+    expect(numbering).toContain('<w:startOverride w:val="1"/>');
+    expect(numbering).not.toContain('w16cid');
+  });
+
+  test('formats a new list as the template formats its lists', async () => {
+    // The template formats its lists in its numbering instance, not the abstract numbering
+    const lvl = '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1)"/><w:lvlJc w:val="left"/></w:lvl>';
+    const templateDocx = await templateWithNumbering(numbering => numbering.replace(
+      /(<w:num w:numId="2"[^>]*><w:abstractNumId w:val="1"\/>)/, '$1<w:lvlOverride w:ilvl="0">' + lvl + '</w:lvlOverride>'));
+    const { docx } = await convertMdToDocx('1. a\n\nP.\n\n1. b', { templateDocx });
+    const [, b] = numIdsOf(await documentXml(docx));
+    const numbering = await (await JSZip.loadAsync(docx)).file('word/numbering.xml')!.async('string');
+    const instance = new RegExp('<w:num w:numId="' + b + '"[^>]*>([^]*?)</w:num>').exec(numbering)?.[1];
+    expect(instance).toBe('<w:abstractNumId w:val="1"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/>' + lvl + '</w:lvlOverride>');
+  });
+
+  test('counts on a level that a second instance doesn\'t override', async () => {
+    const { docx } = await convertMdToDocx('1. a\n2. b');
+    const zip = await JSZip.loadAsync(docx);
+    const numbering = await zip.file('word/numbering.xml')!.async('string');
+    // An instance of the same numbering that starts only its sublists over
+    zip.file('word/numbering.xml', numbering.replace('</w:numbering>',
+      '<w:num w:numId="9"><w:abstractNumId w:val="1"/><w:lvlOverride w:ilvl="1"><w:startOverride w:val="1"/></w:lvlOverride></w:num></w:numbering>'));
+    const xml = await zip.file('word/document.xml')!.async('string');
+    let seen = 0;
+    zip.file('word/document.xml', xml.replace(/<w:numId w:val="2"\/>/g, match => seen++ === 1 ? '<w:numId w:val="9"/>' : match));
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('1. a\n2. b');
+  });
+
+  test('replaces a template\'s start override written as an element pair', async () => {
+    const templateDocx = await templateWithNumbering(numbering => numbering.replace(
+      /(<w:num w:numId="2"[^>]*><w:abstractNumId w:val="1"\/>)/,
+      '$1<w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"></w:startOverride></w:lvlOverride>'));
+    const { docx } = await convertMdToDocx('1. a\n\nP.\n\n1. b', { templateDocx });
+    const [, b] = numIdsOf(await documentXml(docx));
+    const numbering = await (await JSZip.loadAsync(docx)).file('word/numbering.xml')!.async('string');
+    const instance = new RegExp('<w:num w:numId="' + b + '"[^>]*>([^]*?)</w:num>').exec(numbering)?.[1] ?? '';
+    expect(instance.match(/<w:startOverride\b/g)).toHaveLength(1);
+  });
+
+  test('numbers a sublist in its numbered parent\'s instance', async () => {
+    // Word starts it over after each parent item, and a template can number it as 2.1
+    const { docx } = await convertMdToDocx('1. p\n   1. x\n2. q\n   1. y');
+    expect(new Set(numIdsOf(await documentXml(docx))).size).toBe(1);
+  });
+
+  test('starts a restarted sublist\'s numbered ancestors at their items\' numbers', async () => {
+    // Its instance counts them on its own, so a label such as %1.%2 shows 2.1
+    const md = '1. a\n\n<!-- -->\n\n1. b\n2. c\n   1. x\n\n   <!-- -->\n\n   1. y';
+    const { docx } = await convertMdToDocx(md);
+    const y = numIdsOf(await documentXml(docx))[4];
+    const numbering = await (await JSZip.loadAsync(docx)).file('word/numbering.xml')!.async('string');
+    const instance = new RegExp('<w:num w:numId="' + y + '"[^>]*>([^]*?)</w:num>').exec(numbering)?.[1];
+    expect(instance).toBe('<w:abstractNumId w:val="1"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="2"/></w:lvlOverride>'
+      + '<w:lvlOverride w:ilvl="1"><w:startOverride w:val="1"/></w:lvlOverride>');
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('puts no break before a numbered list after a bullet list at its level', async () => {
+    // The sublist before it is numbered, not the list at the item's level
+    expect(await roundTrip('1. a\n   - x\n      1. xx\n   1. y')).not.toContain('<!-- -->');
+  });
+
+  test.each([
+    '<!-- no-indent -->\n- a\n\n1. b',
+    '<!-- no-indent -->\n1. a\n2. b\n\n- c',
+    '- a\n\n<!-- indent -->\n1. b\n\n- c',
+  ])('keeps an indent directive to the list right after it: %j', async (md) => {
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('adds no numbering on each export with the last as the template', async () => {
+    // The overrides the last export added numbered only its own text
+    const md = '1. a\n\nP.\n\n1. b\n\nQ.\n\n3. c';
+    const nums = async (docx: Uint8Array) =>
+      (await (await JSZip.loadAsync(docx)).file('word/numbering.xml')!.async('string')).match(/<w:num\b/g)?.length;
+    const first = (await convertMdToDocx(md)).docx;
+    const second = (await convertMdToDocx(md, { templateDocx: first })).docx;
+    const third = (await convertMdToDocx(md, { templateDocx: second })).docx;
+    expect(await nums(second)).toBe(await nums(first));
+    expect(await nums(third)).toBe(await nums(first));
+    expect(numIdsOf(await documentXml(third))).toEqual(numIdsOf(await documentXml(first)));
+  });
+
+  test('keeps the numbering a template\'s styles use', async () => {
+    const templateZip = await JSZip.loadAsync((await convertMdToDocx('1. t')).docx);
+    const numbering = await templateZip.file('word/numbering.xml')!.async('string');
+    templateZip.file('word/numbering.xml', numbering.replace('</w:numbering>',
+      '<w:num w:numId="7"><w:abstractNumId w:val="1"/></w:num><w:num w:numId="8"><w:abstractNumId w:val="1"/></w:num></w:numbering>'));
+    const styles = await templateZip.file('word/styles.xml')!.async('string');
+    templateZip.file('word/styles.xml', styles.replace('</w:styles>',
+      '<w:style w:type="paragraph" w:styleId="Numbered"><w:name w:val="Numbered"/><w:pPr><w:numPr><w:numId w:val="7"/></w:numPr></w:pPr></w:style></w:styles>'));
+    const templateDocx = await templateZip.generateAsync({ type: 'uint8array' });
+    const { docx } = await convertMdToDocx('1. a\n\nP.\n\n1. b', { templateDocx });
+    const merged = await (await JSZip.loadAsync(docx)).file('word/numbering.xml')!.async('string');
+    expect(merged).toContain('<w:num w:numId="7">');
+    expect(merged).not.toContain('<w:num w:numId="8">');
+    expect(numIdsOf(await documentXml(docx))[1]).toBe('8');
+  });
+
+  test.each([
+    ['single quotes', (numbering: string) => numbering
+      .replace(/<w:num w:numId="2"([^>]*)><w:abstractNumId w:val="1"\/>/, "<w:num w:numId='2'$1><w:abstractNumId w:val='1'/>")],
+    ['spaces around its equals signs', (numbering: string) => numbering
+      .replace(/<w:num w:numId="2"([^>]*)><w:abstractNumId w:val="1"\/>/, '<w:num w:numId = "2"$1><w:abstractNumId w:val =\n"1"/>')
+      .replace('</w:numbering>', '</w:numbering >')],
+  ])('reads template numbering written with %s', async (_name, edit) => {
+    const templateDocx = await templateWithNumbering(numbering => edit(numbering)
+      .replace('<w:lvlText w:val="%1."/>', '<w:lvlText w:val="%1)"/>'));
+    const { docx } = await convertMdToDocx('1. a\n\nP.\n\n1. b', { templateDocx });
+    const numbering = await (await JSZip.loadAsync(docx)).file('word/numbering.xml')!.async('string');
+    expect(numbering).toContain('<w:lvlText w:val="%1)"/>');
+    expect(numbering).toContain('<w:startOverride w:val="1"/>');
+  });
+});
+
 describe('List indent round-trip', () => {
   test('does not infer an ordinary left-indented paragraph as a list continuation', async () => {
     const { docx } = await convertMdToDocx('- item\n\nBody');

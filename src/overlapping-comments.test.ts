@@ -650,9 +650,11 @@ describe('Overlapping comments: where the bodies go', () => {
   });
 
   test('keep two lists apart in a paragraph of their own', async () => {
-    // As an empty paragraph, which ends the first list, so the second keeps its override
+    // As an empty paragraph, which ends the first list; import keeps them
+    // apart with a comment, so the second keeps its numbering and override
     const back = await imported('1. ' + seen + '\n\n' + bodies + '\n\n<!-- no-indent -->\n1. Next');
-    expect(back).toBe('1. ' + seen + '\n' + bodies + '\n\n\n\n<!-- no-indent -->\n1. Next');
+    expect(back).toBe('1. ' + seen + '\n' + bodies + '\n\n<!-- -->\n\n<!-- no-indent -->\n1. Next');
+    expect(await imported(back)).toBe(back);
   });
 
   test('space a list item\'s quote from a paragraph of their own before another list', async () => {
@@ -668,7 +670,12 @@ describe('Overlapping comments: where the bodies go', () => {
     const JSZip = (await import('jszip')).default;
     const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
     // The second list starts afresh rather than going on from 3
-    expect(xml).toMatch(/<w:numId w:val="2"\/><\/w:numPr><\/w:pPr><w:r><w:t>Next<\/w:t>/);
+    const numIds = [...xml.matchAll(/<w:numId w:val="(\d+)"\/>/g)].map(match => match[1]);
+    expect(numIds).toHaveLength(2);
+    expect(numIds[0]).not.toBe(numIds[1]);
+    const numbering = await (await JSZip.loadAsync(docx)).file('word/numbering.xml')!.async('string');
+    expect(numbering).toContain('<w:num w:numId="' + numIds[1] + '"');
+    expect(numbering).toMatch(new RegExp('w:numId="' + numIds[1] + '"[^]*?<w:startOverride w:val="1"/>'));
   });
 
   test.each([
