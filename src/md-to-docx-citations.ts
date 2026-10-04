@@ -97,8 +97,15 @@ export function escapeXmlText(text: string): string {
 
 /** Text as `w:t` (or `w:delText`) elements. A tab becomes the `<w:tab/>`
  *  element Word writes for it, since Word shows a tab inside `w:t` as a space. */
+const RUN_CHARACTER_ELEMENTS: Array<[string, string]> = [
+  ['\t', '<w:tab/>'], ['\u2011', '<w:noBreakHyphen/>'], ['\u00AD', '<w:softHyphen/>'],
+];
+
 export function textElements(text: string, tag: 'w:t' | 'w:delText' = 'w:t'): string {
-  if (text.includes('\t')) return text.split('\t').map(part => part ? textElements(part, tag) : '').join('<w:tab/>');
+  // A tab, non-breaking hyphen or optional hyphen as Word's element for it
+  for (const [character, element] of RUN_CHARACTER_ELEMENTS) {
+    if (text.includes(character)) return text.split(character).map(part => part ? textElements(part, tag) : '').join(element);
+  }
   const escaped = escapeXmlText(text);
   const preserve = escaped.length > 0 && (escaped[0] === ' ' || escaped[escaped.length - 1] === ' ');
   return '<' + tag + (preserve ? ' xml:space="preserve"' : '') + '>' + escaped + '</' + tag + '>';

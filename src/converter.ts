@@ -1478,11 +1478,19 @@ function findAllDeep(nodes: XmlNode[], tagName: string, depth = 0, maxDepth = 50
   return results;
 }
 
-/** A run's children with each w:tab as the text of a tab. A w:tab outside a
- *  run, in w:tabs, is a tab stop, not text. */
-function withTabsAsText(runChildren: XmlNode[]): XmlNode[] {
-  return runChildren.some((c) => c['w:tab'] !== undefined)
-    ? runChildren.map((c) => c['w:tab'] !== undefined ? { 'w:t': [{ '#text': '\t' }] } : c)
+// A run's elements that are characters, which export writes back as them
+const RUN_CHARACTERS: Record<string, string> = {
+  'w:tab': '\t', 'w:noBreakHyphen': '\u2011', 'w:softHyphen': '\u00AD',
+};
+
+/** A run's children with each w:tab, non-breaking hyphen or optional
+ *  hyphen as the text of its character, and a carriage return as the line
+ *  break it is. A w:tab outside a run, in w:tabs, is a tab stop, not text. */
+function withCharactersAsText(runChildren: XmlNode[]): XmlNode[] {
+  const tag = (child: XmlNode) => Object.keys(child).find(key => key !== ':@') ?? '';
+  return runChildren.some(child => tag(child) in RUN_CHARACTERS || tag(child) === 'w:cr')
+    ? runChildren.map(child => tag(child) === 'w:cr' ? { 'w:br': [] }
+      : tag(child) in RUN_CHARACTERS ? { 'w:t': [{ '#text': RUN_CHARACTERS[tag(child)] }] } : child)
     : runChildren;
 }
 
@@ -1756,8 +1764,8 @@ function commentParagraphText(nodes: XmlNode[]): string {
     for (const key of Object.keys(node)) {
       if (key === 'w:t') {
         text += nodeText(asXmlNodes(node[key]));
-      } else if (key === 'w:tab') {
-        text += '\t';
+      } else if (key in RUN_CHARACTERS) {
+        text += RUN_CHARACTERS[key];
       } else if (key === 'w:cr' || (key === 'w:br' && [undefined, '', 'textWrapping'].includes(node[':@']?.['@_w:type']))) {
         text += '\n';
       } else if (!['w:del', 'w:moveFrom', 'w:pPr', 'w:rPr', 'w:p'].includes(key) && key !== ':@' && Array.isArray(node[key])) {
@@ -2992,7 +3000,7 @@ function parseNoteBody(
           }
         } else if (key === 'w:r') {
           let runFormatting = currentFormatting;
-          const runChildren = withTabsAsText(asXmlNodes(node[key]));
+          const runChildren = withCharactersAsText(asXmlNodes(node[key]));
           let rPrChildren: XmlNode[] | undefined;
           for (const child of runChildren) {
             if (child['w:rPr']) {
@@ -3797,7 +3805,7 @@ export async function extractDocumentContent(
         } else if (key === 'w:r') {
           // Process run - extract formatting from w:rPr
           let runFormatting = currentFormatting;
-          const runChildren = withTabsAsText(asXmlNodes(node[key]));
+          const runChildren = withCharactersAsText(asXmlNodes(node[key]));
           let rPrChildren: XmlNode[] | undefined;
           for (const child of runChildren) {
             if (child['w:rPr']) {
