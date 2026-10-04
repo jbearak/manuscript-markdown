@@ -1082,19 +1082,53 @@ function findAllDeep(nodes: XmlNode[], tagName: string, depth = 0, maxDepth = 50
   return results;
 }
 
+// The Symbol font's characters as Unicode, from its code 0x20 on, after
+// Adobe's mapping, \0 where it has none
+const SYMBOL_FONT = (
+  ' !∀#∃%&∋()∗+,−./' +
+  '0123456789:;<=>?' +
+  '≅ΑΒΧΔΕΦΓΗΙϑΚΛΜΝΟ' +
+  'ΠΘΡΣΤΥςΩΞΨΖ[∴]⊥_' +
+  '‾αβχδεφγηιϕκλμνο' +
+  'πθρστυϖωξψζ{|}∼\0' +
+  '\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0' +
+  '\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0' +
+  '€ϒ′≤⁄∞ƒ♣♦♥♠↔←↑→↓' +
+  '°±″≥×∝∂•÷≠≡≈…⏐⎯↵' +
+  'ℵℑℜ℘⊗⊕∅∩∪⊃⊇⊄⊂⊆∈∉' +
+  '∠∇®©™∏√⋅¬∧∨⇔⇐⇑⇒⇓' +
+  '◊⟨®©™∑⎛⎜⎝⎡⎢⎣⎧⎨⎩⎪' +
+  '\0⟩∫⌠⎮⌡⎞⎟⎠⎤⎥⎦⎫⎬⎭\0'
+);
+
+/** The character a w:sym shows, which Word writes for one picked from the
+ *  Symbol font, as Unicode, or undefined for another font's, as Wingdings,
+ *  which Unicode doesn't hold */
+function symbolCharacter(node: XmlNode): string | undefined {
+  if (getAttr(node, 'font').toLowerCase() !== 'symbol') return undefined;
+  // In the font's private-use range, at 0xF020, or as the code alone
+  const code = parseInt(getAttr(node, 'char'), 16) & 0xFF;
+  const character = SYMBOL_FONT[code - 0x20];
+  return character && character !== '\0' ? character : undefined;
+}
+
 // A run's elements that are characters, which export writes back as them
 const RUN_CHARACTERS: Record<string, string> = {
   'w:tab': '\t', 'w:noBreakHyphen': '\u2011', 'w:softHyphen': '\u00AD',
 };
 
-/** A run's children with each w:tab, non-breaking hyphen or optional
- *  hyphen as the text of its character, and a carriage return as the line
+/** A run's children with each w:tab, non-breaking hyphen, optional hyphen
+ *  or Symbol font character as the text of its character, and a carriage
+ *  return as the line
  *  break it is. A w:tab outside a run, in w:tabs, is a tab stop, not text. */
 function withCharactersAsText(runChildren: XmlNode[]): XmlNode[] {
   const tag = (child: XmlNode) => Object.keys(child).find(key => key !== ':@') ?? '';
-  return runChildren.some(child => tag(child) in RUN_CHARACTERS || tag(child) === 'w:cr')
-    ? runChildren.map(child => tag(child) === 'w:cr' ? { 'w:br': [] }
-      : tag(child) in RUN_CHARACTERS ? { 'w:t': [{ '#text': RUN_CHARACTERS[tag(child)] }] } : child)
+  return runChildren.some(child => tag(child) in RUN_CHARACTERS || tag(child) === 'w:cr' || tag(child) === 'w:sym')
+    ? runChildren.map(child => {
+      if (tag(child) === 'w:cr') return { 'w:br': [] };
+      const character = tag(child) === 'w:sym' ? symbolCharacter(child) : RUN_CHARACTERS[tag(child)];
+      return character !== undefined ? { 'w:t': [{ '#text': character }] } : child;
+    })
     : runChildren;
 }
 
@@ -1339,6 +1373,8 @@ function commentParagraphText(nodes: XmlNode[]): string {
         text += nodeText(asXmlNodes(node[key]));
       } else if (key in RUN_CHARACTERS) {
         text += RUN_CHARACTERS[key];
+      } else if (key === 'w:sym') {
+        text += symbolCharacter(node) ?? '';
       } else if (key === 'w:cr' || (key === 'w:br' && [undefined, '', 'textWrapping'].includes(node[':@']?.['@_w:type']))) {
         text += '\n';
       } else if (!['w:del', 'w:moveFrom', 'w:pPr', 'w:rPr', 'w:p'].includes(key) && key !== ':@' && Array.isArray(node[key])) {

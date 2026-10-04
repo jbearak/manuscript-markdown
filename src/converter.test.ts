@@ -4632,7 +4632,7 @@ describe('Tabs', () => {
   });
 });
 
-describe('Hyphens and carriage returns', () => {
+describe('Hyphens, symbols and carriage returns', () => {
   const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
 
   test.each([
@@ -4647,6 +4647,26 @@ describe('Hyphens and carriage returns', () => {
       expect(xml).toContain('<' + element + '/>');
       expect(strip((await convertDocx(docx)).markdown)).toBe(text);
     }
+  });
+
+  test('reads a Symbol font character as the Unicode one it shows', async () => {
+    // Word writes one picked from the Symbol font as a w:sym, which import
+    // dropped, so p ≤ 0.05 came back p  0.05. One from another font, as
+    // Wingdings, has no Unicode character to be.
+    const sym = (font: string, char: string) => '<w:sym w:font="' + font + '" w:char="' + char + '"/>';
+    const docx = await buildSyntheticDocx(wrapDocumentXml('<w:p><w:r><w:t xml:space="preserve">p </w:t>'
+      + sym('Symbol', 'F0A3') + sym('Symbol', 'F061') + sym('SYMBOL', '0062') + sym('Wingdings', 'F0FC') + sym('Symbol', 'F080')
+      + '<w:t xml:space="preserve"> 0.05</w:t></w:r></w:p>'));
+    expect(strip((await convertDocx(docx)).markdown)).toBe('p ≤αβ 0.05');
+  });
+
+  test('reads a Symbol font character in a comment', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('{==x==}{>>@A (2024-01-15 10:30) | a XX<<}')).docx);
+    const xml = await zip.file('word/comments.xml')!.async('string');
+    const sym = xml.replace(/<w:t( [^>]*)?>a XX<\/w:t>/, '<w:t xml:space="preserve">a </w:t><w:sym w:font="Symbol" w:char="F0B1"/>');
+    expect(sym).not.toBe(xml);
+    zip.file('word/comments.xml', sym);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('{==x==}{>>@A (2024-01-15 10:30) | a ±<<}');
   });
 
   test('reads a carriage return as a line break', async () => {
