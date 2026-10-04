@@ -385,6 +385,40 @@ describe('Consecutive reply format preservation', () => {
     const extXml = await zip.file('word/commentsExtended.xml')!.async('string');
     expect((extXml.match(/w15:paraIdParent/g) || []).length).toBe(2);
   });
+
+  test.each([
+    ['the body', 'A {#1}b {#2}c{/1} d{/2}.\n{#1>>@A (2024-01-15 10:30) | one<<}{>>@B (2024-01-15 11:30) | r1<<}{>>@C (2024-01-15 12:30) | r2<<}\n'
+      + '{#2>>@B (2024-01-15 10:30) | two<<}\n'],
+    ['a footnote', 'Text.[^1]\n\n[^1]: {#1}A {#2}b{/1} c{/2}.\n    {#1>>@A (2024-01-15 10:30) | one<<}{>>@B (2024-01-15 11:30) | reply<<}\n'
+      + '    {#2>>@B (2024-01-15 10:30) | two<<}\n'],
+    ['a table', '| a | b |\n| --- | --- |\n| {#1}x {#2}y{/1} z{/2} | 2 |\n\n'
+      + '{#1>>@A (2024-01-15 10:30) | one<<}{>>@B (2024-01-15 11:30) | reply<<}\n{#2>>@B (2024-01-15 10:30) | two<<}\n'],
+  ])('reads consecutive replies after an ID body in %s as its replies', async (_name, md) => {
+    // Import writes them so where the comment takes ID syntax, and export
+    // read each as a comment of its own, without a range
+    const { docx } = await convertMdToDocx(md);
+    const extXml = await (await JSZip.loadAsync(docx)).file('word/commentsExtended.xml')!.async('string');
+    expect((extXml.match(/w15:paraIdParent/g) || []).length).toBe(md.split('{>>').length - 1);
+    expect((await convertDocx(docx)).markdown).toBe(md);
+  });
+
+  test('keeps a reply to a consecutive reply after an ID body a reply to it', async () => {
+    // As after a {==...==} anchor, rather than a reply to the comment
+    const md = 'A {#1}b {#2}c{/1} d{/2}.\n{#1>>@A (2024-01-15 10:30) | one<<}{>>@B (2024-01-15 11:30) | r1\n'
+      + '  {>>@C (2024-01-15 12:30) | nested<<}\n<<}\n{#2>>@B (2024-01-15 10:30) | two<<}';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const commentsXml = await zip.file('word/comments.xml')!.async('string');
+    const paraIdOf = (text: string) => new RegExp('w14:paraId="([^"]+)"(?:(?!</w:comment>)[^])*?>' + text + '<').exec(commentsXml)?.[1];
+    const extXml = await zip.file('word/commentsExtended.xml')!.async('string');
+    expect(extXml).toContain('w15:paraId="' + paraIdOf('r1') + '" w15:paraIdParent="' + paraIdOf('one') + '"');
+    expect(extXml).toContain('w15:paraId="' + paraIdOf('nested') + '" w15:paraIdParent="' + paraIdOf('r1') + '"');
+  });
+
+  test('leaves a comment after an ID body and a space a comment of its own', async () => {
+    const { docx } = await convertMdToDocx('A {#1}b{/1}.\n{#1>>@A (2024-01-15 10:30) | one<<} {>>@B (2024-01-15 11:30) | two<<}');
+    const extXml = await (await JSZip.loadAsync(docx)).file('word/commentsExtended.xml')?.async('string');
+    expect(extXml ?? '').not.toContain('w15:paraIdParent');
+  });
 });
 
 describe('Multi-level reply chain flattening', () => {
