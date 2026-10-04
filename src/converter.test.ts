@@ -3607,6 +3607,22 @@ describe('DOCX footnote extraction', () => {
   });
 });
 
+describe('Comments in notes', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+
+  test.each([
+    ['a comment', 'Text.[^1]\n\n[^1]: A {==note==}{>>@A (2024-01-15 10:30) | c<<} here.\n'],
+    ['a comment with a reply', 'Text.[^1]\n\n[^1]: A {==note==}{>>@A (2024-01-15 10:30) | c<<}{>>@B (2024-01-15 11:30) | r<<} here.\n'],
+    ['a comment without a range', 'Text.[^1]\n\n[^1]: A {>>@A (2024-01-15 10:30) | point<<} here.\n'],
+    ['overlapping comments', 'Text.[^1]\n\n[^1]: {#1}A {#2}b{/1} c{/2}.\n    {#1>>@A (2024-01-15 10:30) | one<<}\n    {#2>>@B (2024-01-15 10:30) | two<<}\n'],
+    ['overlapping comments in the body too', 'A {#5}b {#6}c{/5} d{/6}.[^1]\n{#5>>@A (2024-01-15 10:30) | one<<}\n{#6>>@B (2024-01-15 10:30) | two<<}\n\n'
+      + '[^1]: Note {#7}x {#8}y{/7} z{/8}.\n    {#7>>@A (2024-01-15 10:30) | n1<<}\n    {#8>>@B (2024-01-15 10:30) | n2<<}\n'],
+    ['a comment in an endnote', '---\nnotes: endnotes\n---\n\nText.[^1]\n\n[^1]: A {==note==}{>>@A (2024-01-15 10:30) | c<<} here.\n'],
+  ])('keeps %s', async (_name, md) => {
+    expect(await roundTrip(md)).toBe(md);
+  });
+});
+
 describe('DOCX footnote cross-reference import', () => {
   function wrapCustomPropsXml(props: Record<string, string>): string {
     let xml = '<?xml version="1.0"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">';
