@@ -717,6 +717,19 @@ describe('generateParagraph', () => {
     expect(state.hasList).toBe(false);
   });
 
+  it('numbers a numbered task list item', () => {
+    const token: MdToken = {
+      type: 'list_item',
+      level: 1,
+      ordered: true,
+      taskChecked: false,
+      runs: [{ type: 'text', text: 'todo item' }]
+    };
+    const result = generateParagraph(token, createState());
+    expect(result).toContain('<w:numPr>');
+    expect(result).toContain('<w:r><w:t xml:space="preserve">☐ </w:t></w:r>');
+  });
+
   it('generates blockquote', () => {
     const token: MdToken = {
       type: 'blockquote',

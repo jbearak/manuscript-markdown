@@ -179,6 +179,7 @@ export interface ListMeta {
   wordNumber?: number; // ordered: the number Word shows for the item (see wordListCounter)
   wordStarts?: boolean; // ordered: Word starts its level's numbering over at the item
   bulletMarker?: '-' | '*' | '+'; // authored unordered-list marker for round-trip
+  taskChecked?: boolean; // a task list item, checked or not
 }
 
 export const DEFAULT_FORMATTING: Readonly<RunFormatting> = Object.freeze({
@@ -273,6 +274,7 @@ export type ContentItem =
       paragraphLeftIndentTwips?: number; // raw OOXML left indent for structural inference
       spacerShaped?: boolean; // its only property is w:spacing after="0", as on the empty paragraph export puts after a code block
       horizontalRule?: boolean; // an empty paragraph with only a bottom border, as export writes a thematic break
+      taskLevel?: number; // 0-based level of an indented paragraph shaped like a bulleted task item (see markTaskListItems)
       generatedListContinuation?: boolean; // explicit Manuscript continuation paragraph style
       blockquoteIndentUnitTwips?: 240 | 720; // base indent unit for blockquote styles
       emptyParagraphCount?: number; // count of collapsed consecutive empty paragraphs
@@ -621,6 +623,15 @@ function hasOnlyBottomBorder(pPrChildren: XmlNode[]): boolean {
   if (!pBdr) return false;
   const drawn = asXmlNodes(pBdr['w:pBdr']).filter(border => !['none', 'nil'].includes(getAttr(border, 'val')));
   return drawn.length === 1 && drawn[0]['w:bottom'] !== undefined;
+}
+
+/** The 0-based level of a paragraph indented as export writes a bulleted
+ *  task item: a left indent in steps of 720 twips with a 360 hanging indent. */
+function parseTaskIndentLevel(pPrChildren: XmlNode[]): number | undefined {
+  const indElement = pPrChildren.find(child => child['w:ind'] !== undefined);
+  if (!indElement || getAttr(indElement, 'hanging') !== '360') return undefined;
+  const left = parseInt(getAttr(indElement, 'left'), 10);
+  return left > 0 && left % 720 === 0 ? left / 720 - 1 : undefined;
 }
 
 function parseParagraphLeftIndentTwips(pPrChildren: XmlNode[]): number | undefined {
@@ -2851,6 +2862,7 @@ export async function extractDocumentContent(
           let paragraphLeftIndentTwips: number | undefined;
           let spacerShaped = false;
           let horizontalRule = false;
+          let taskLevel: number | undefined;
           let paraFormatting = currentFormatting;
           let isSpacerParagraph = false;
           let isSectionBreakHandled = false;
@@ -2932,6 +2944,7 @@ export async function extractDocumentContent(
               // Taken back below if the paragraph has content
               horizontalRule = !headingLevel && !listMeta && !isTitle && !blockquoteLevel && !isCodeBlock
                 && !generatedListContinuation && !customStyle && hasOnlyBottomBorder(pPrChildren);
+              if (!listMeta && !headingLevel && !blockquoteLevel && !isCodeBlock && !customStyle) taskLevel = parseTaskIndentLevel(pPrChildren);
               const pRPrElement = pPrChildren.find(pprChild => pprChild['w:rPr'] !== undefined);
               if (pRPrElement) {
                 const pRPrChildren = asXmlNodes(pRPrElement['w:rPr']);
@@ -2989,9 +3002,10 @@ export async function extractDocumentContent(
             prevItem.isCodeBlock === true ||
             prevItem.generatedListContinuation === true ||
             prevItem.customStyleName !== undefined ||
-            prevItem.horizontalRule === true
+            prevItem.horizontalRule === true ||
+            prevItem.taskLevel !== undefined
           );
-          const needsPara = inTableCell || (headingLevel || listMeta || isTitle || blockquoteLevel || isCodeBlock || generatedListContinuation || customStyle || horizontalRule)
+          const needsPara = inTableCell || (headingLevel || listMeta || isTitle || blockquoteLevel || isCodeBlock || generatedListContinuation || customStyle || horizontalRule || taskLevel !== undefined)
             ? true
             : target.length > 0 && (prevItem!.type !== 'para' || prevIsCodeBlockPara || prevIsStructuralPara);
 
@@ -3013,6 +3027,7 @@ export async function extractDocumentContent(
             if (paragraphLeftIndentTwips !== undefined) paraItem.paragraphLeftIndentTwips = paragraphLeftIndentTwips;
             if (spacerShaped) paraItem.spacerShaped = true;
             if (horizontalRule) paraItem.horizontalRule = true;
+            if (taskLevel !== undefined) paraItem.taskLevel = taskLevel;
             if (paraMarkRevision && headingLevel) paraItem.paraMarkRevision = paraMarkRevision;
             if (canJoinTrackedBreak && precedingMark?.target === target && precedingMark.end === targetLenBeforePara) {
               paraItem.breakRevision = precedingMark.revision;
@@ -4983,6 +4998,45 @@ function paragraphCarriesContent(children: XmlNode[]): boolean {
       : PARAGRAPH_CONTENT_ELEMENTS.has(key) || paragraphCarriesContent(asXmlNodes(child[key])))));
 }
 
+/**
+ * Task list items: export writes a bulleted one as an indented paragraph
+ * starting with ☐ or ☒, and a numbered one in its list, so import finds the
+ * glyph, makes the paragraph a list item and takes the glyph off its text.
+ * Word may split the glyph and the space after it over runs. A tracked
+ * change to them, or a comment on them alone, stays in the text, of a plain
+ * list item, since `[ ]` can hold neither.
+ */
+function markTaskListItems(content: ContentItem[]): void {
+  type TextItem = Extract<ContentItem, { type: 'text' }>;
+  for (let i = 0; i + 1 < content.length; i++) {
+    const item = content[i];
+    if (item.type !== 'para' || (!item.listMeta && item.taskLevel === undefined)) continue;
+    const box: TextItem[] = [];
+    let prefix = '';
+    for (let j = i + 1; prefix.length < 2 && content[j]?.type === 'text'; j++) {
+      box.push(content[j] as TextItem);
+      prefix += (content[j] as TextItem).text;
+    }
+    const glyph = /^([☐☒]) /.exec(prefix);
+    if (!glyph) continue;
+    // The text after the box, which a comment on the box goes on over
+    const after = prefix.length > 2 ? box[box.length - 1] : content[i + 1 + box.length];
+    const afterIds = after && 'commentIds' in after ? after.commentIds : undefined;
+    if (box.some(text => text.revision || (text.text !== '' && [...text.commentIds].some(id => !afterIds?.has(id))))) {
+      item.listMeta ??= { type: 'bullet', level: item.taskLevel! };
+      continue;
+    }
+    const taskChecked = glyph[1] === '☒';
+    item.listMeta = item.listMeta ? { ...item.listMeta, taskChecked } : { type: 'bullet', level: item.taskLevel!, taskChecked };
+    let remove = 2;
+    box.forEach((text, k) => {
+      const take = Math.min(remove, text.text.length);
+      content[i + 1 + k] = { ...text, text: text.text.slice(take) };
+      remove -= take;
+    });
+  }
+}
+
 function isStructuralBoundaryItem(item: ContentItem): boolean {
   return item.type === 'para'
     || item.type === 'table'
@@ -5812,6 +5866,11 @@ export function buildMarkdown(
   let lastListType: 'bullet' | 'ordered' | undefined;
   let lastListLevel: number | undefined;
   let lastListItemEmpty = false; // the last list item has no text of its own
+  // A list item with no text, which a task item's box is
+  const isEmptyListItem = (index: number) => {
+    const item = mergedContent[index];
+    return !(item.type === 'para' && item.listMeta?.taskChecked !== undefined) && !paragraphHasContent(mergedContent, index);
+  };
   let prevItemWasListQuote = false; // the paragraph before is a quote in a list item
   const listTypeByLevel = new Map<number, 'bullet' | 'ordered'>(); // per-level list type tracking
   const orderedListCounters = new Map<number, number>(); // per-level counters for ordered list items
@@ -6105,7 +6164,7 @@ export function buildMarkdown(
           const underEmpty = meta.level > (lastListLevel ?? 0) && lastListItemEmpty;
           // Only a list whose first item has text, numbered from 1 if at all,
           // can interrupt the text before it
-          const interrupts = startsList && !lastListItemEmpty && (!paragraphHasContent(mergedContent, i)
+          const interrupts = startsList && !lastListItemEmpty && (isEmptyListItem(i)
             || (meta.type === 'ordered' && (meta.wordNumber ?? meta.startNumber ?? 1) !== 1));
           output.push('\n' + '\n'.repeat(underEmpty ? 0 : Math.max(afterQuote, interrupts ? 1 : 0)));
         } else if (item.listContinuation) {
@@ -6347,15 +6406,17 @@ export function buildMarkdown(
         // Per-level counters handle nested lists (see nextOrderedNumber)
         listTypeByLevel.set(item.listMeta.level, item.listMeta.type);
         const orderedNum = orderedItem?.number ?? 1;
-        const marker = item.listMeta.type === 'bullet'
+        const listMarker = item.listMeta.type === 'bullet'
           ? (useTab ? (item.listMeta.bulletMarker ?? '-') + '\t' : (item.listMeta.bulletMarker ?? '-') + ' ')
           : (useTab ? orderedNum + '.\t' : orderedNum + '. ');
+        // A task item's box is its text, which its sublists indent past only the marker of
+        const marker = listMarker + (item.listMeta.taskChecked === undefined ? '' : item.listMeta.taskChecked ? '[x] ' : '[ ] ');
         if (item.listMeta.level === 0) topOrderedNext = item.listMeta.type === 'ordered' ? orderedNum + 1 : undefined;
         // A level Word skipped keeps the width the item was indented by
         const widths = listMarkerWidths.slice(0, item.listMeta.level);
         for (let k = widths.length; k < item.listMeta.level; k++) widths.push(item.listMeta.type === 'bullet' ? 2 : 3);
-        listMarkerWidths = [...widths, marker.length];
-        lastListItemEmpty = !paragraphHasContent(mergedContent, i);
+        listMarkerWidths = [...widths, listMarker.length];
+        lastListItemEmpty = isEmptyListItem(i);
         output.push(indent + marker);
       } else if (item.blockquoteLevel) {
         const itemPrefix = blockquotePrefix(item);
@@ -7607,6 +7668,8 @@ export async function convertDocx(
     extractEndnotes(zip, enContext),
   ]);
 
+  // A task item is a list item, which the code block's spacer goes before
+  markTaskListItems(docContent);
   dropCodeBlockSeparators(docContent);
   const {
     derivedBlockquoteGaps,
