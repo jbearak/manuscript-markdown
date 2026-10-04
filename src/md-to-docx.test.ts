@@ -4995,6 +4995,29 @@ describe('per-paragraph indent overrides', () => {
     expect(result.markdown).toContain('<!-- indent -->\nFirst paragraph after heading.');
   });
 
+  it.each([
+    ['the first paragraph', '<!-- no-indent -->\nZ.\n\nZZ.'],
+    ['the second paragraph with no heading', 'A.\n\n<!-- no-indent -->\nZ.\n\nZZ.'],
+    ['a paragraph after a quote', 'A.\n\n> q\n\n<!-- indent -->\nZ.\n\nZZ.'],
+    ['a paragraph after an alert', '> [!NOTE]\n> q\n\n<!-- indent -->\nZ.\n\nZZ.'],
+    ['a paragraph after a code block', '```\nx\n```\n\n<!-- no-indent -->\nZ.\n\nZZ.'],
+    ['a paragraph after a deletion', '{--gone--}\n\n<!-- indent -->\nZ.\n\nZZ.'],
+    ['a deletion', '# H\n\n<!-- indent -->\n{--gone--}\n\nZZ.'],
+  ])('MD→DOCX→MD keeps the sentinel on %s', async (_, md) => {
+    const { convertDocx } = await import('./converter');
+    const roundTrip = async (source: string) =>
+      (await convertDocx((await convertMdToDocx(source)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+    // Not the paragraph after, where a miscounted index would put it
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  it('MD→DOCX→MD keeps the sentinel after an image that can\'t be read', async () => {
+    const { convertDocx } = await import('./converter');
+    const { docx } = await convertMdToDocx('![](missing.png)\n\n<!-- indent -->\nZ.\n\nZZ.');
+    // Word gets no image, nor a paragraph import would count
+    expect((await convertDocx(docx)).markdown).toContain('<!-- indent -->\nZ.\n\nZZ.');
+  });
+
   it('parseMd transfers <!-- no-indent --> to all list items', () => {
     const tokens = parseMd('<!-- no-indent -->\n1. apple\n2. pear');
     // Directive should be consumed

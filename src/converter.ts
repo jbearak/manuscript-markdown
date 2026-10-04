@@ -7737,20 +7737,33 @@ export async function convertDocx(
   // non-heading, non-title, non-code, non-list, non-blockquote para items that
   // have inline content following them (i.e. not empty separator paragraphs).
   if (storedIndentOverrides) {
+    // Whether inline content other than HTML comments starts at index from
+    const hasNonCommentContent = (from: number): boolean => {
+      for (let j = from; j < docContent.length; j++) {
+        if (isStructuralBoundaryItem(docContent[j])) return false;
+        if (docContent[j].type !== 'html_comment') return true;
+      }
+      return false;
+    };
     let bodyIdx = 0;
-    for (let ci = 0; ci < docContent.length; ci++) {
+    let firstIdx = 0;
+    // A plain first paragraph has no para item, since one only separates it
+    // from what's before: its inline content starts docContent
+    if (hasNonCommentContent(0)) {
+      const override = storedIndentOverrides.get(0);
+      if (override) {
+        docContent.unshift({ type: 'para', indentOverride: override as 'indent' | 'no-indent' });
+        firstIdx = 1;
+      }
+      bodyIdx = 1;
+    }
+    for (let ci = firstIdx; ci < docContent.length; ci++) {
       const item = docContent[ci];
       if (item.type !== 'para' || item.headingLevel || item.isTitle || item.isCodeBlock
           || item.listMeta || item.blockquoteLevel || item.horizontalRule) continue;
-      // Skip empty separator paragraphs (no inline content follows before next structural item)
-      if (isPlainEmptyParagraph(item)) continue;
-      // Check if this para has any non-html_comment inline content after it
-      let hasNonCommentContent = false;
-      for (let j = ci + 1; j < docContent.length; j++) {
-        if (isStructuralBoundaryItem(docContent[j])) break;
-        if (docContent[j].type !== 'html_comment') { hasNonCommentContent = true; break; }
-      }
-      if (!hasNonCommentContent) { continue; }
+      // Skip empty separator paragraphs. One that empty paragraphs merged
+      // into still counts when the paragraph's content follows.
+      if (!hasNonCommentContent(ci + 1)) { continue; }
       const override = storedIndentOverrides.get(bodyIdx);
       if (override) item.indentOverride = override as 'indent' | 'no-indent';
       bodyIdx++;
