@@ -1,3 +1,5 @@
+import { FRONTMATTER_CLOSING_RE, FRONTMATTER_OPENING_RE } from './frontmatter';
+
 export interface FrontmatterMenuSetting {
 	key: string;
 	label: string;
@@ -93,12 +95,12 @@ export function getFrontmatterSettingEdit(
 	// Match parseFrontmatter's treatment of leading whitespace and UTF-8 BOMs.
 	const openingOffset = markdown.length - markdown.trimStart().length;
 	const trimmed = markdown.slice(openingOffset);
-	if (!trimmed.startsWith('---')) {
+	if (!FRONTMATTER_OPENING_RE.test(trimmed)) {
 		return newFrontmatterEdit(eol, key);
 	}
 
 	const bodyStart = openingOffset + 3;
-	const closingMatch = /\n---(?:\r?\n|$)/.exec(markdown.slice(bodyStart));
+	const closingMatch = FRONTMATTER_CLOSING_RE.exec(markdown.slice(bodyStart));
 	if (!closingMatch) {
 		// Without a closing delimiter, the converter treats the text as Markdown.
 		return newFrontmatterEdit(eol, key);

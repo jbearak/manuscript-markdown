@@ -30,6 +30,13 @@ describe('getFrontmatterSettingEdit', () => {
 		});
 	});
 
+	test('creates frontmatter above a horizontal rule', () => {
+		expect(getFrontmatterSettingEdit('---\n\nBody\n\n---\n', '\n', 'font')).toMatchObject({
+			offset: 0,
+			text: '---\nfont: \n---\n',
+		});
+	});
+
 	test('inserts a missing setting before the closing delimiter', () => {
 		expect(getFrontmatterSettingEdit('---\ntitle: Draft\n---\nBody', '\n', 'font')).toEqual({
 			offset: 17,
@@ -93,12 +100,15 @@ describe('getFrontmatterSettingEdit', () => {
 		});
 	});
 
-	test('matches parser handling of opening delimiters longer than three hyphens', () => {
-		expect(getFrontmatterSettingEdit('----\nfont: Georgia\n---\nBody', '\n', 'font')).toEqual({
-			offset: 11,
-			text: '',
-			selectionStart: 11,
-			selectionEnd: 18,
+	test('adds a setting to frontmatter whose closing line has spaces after it', () => {
+		expect(getFrontmatterSettingEdit('---\ntitle: T\n---  \nBody', '\n', 'font')).toMatchObject({ offset: 13, text: 'font: \n' });
+	});
+
+	test('creates frontmatter above a line of four hyphens', () => {
+		// A horizontal rule, as the parser reads it too
+		expect(getFrontmatterSettingEdit('----\nfont: Georgia\n---\nBody', '\n', 'font')).toMatchObject({
+			offset: 0,
+			text: '---\nfont: \n---\n',
 		});
 	});
 
