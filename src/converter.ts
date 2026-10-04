@@ -268,6 +268,7 @@ export type ContentItem =
       isBlockquoteSpacer?: boolean; // generated visual spacer; retained only as an import grouping boundary
       customStyleName?: string;      // user-defined custom style name (from MsCustomXxx pStyle)
       paragraphLeftIndentTwips?: number; // raw OOXML left indent for structural inference
+      spacerShaped?: boolean; // its only property is w:spacing after="0", as on the empty paragraph export puts after a code block
       generatedListContinuation?: boolean; // explicit Manuscript continuation paragraph style
       blockquoteIndentUnitTwips?: 240 | 720; // base indent unit for blockquote styles
       emptyParagraphCount?: number; // count of collapsed consecutive empty paragraphs
@@ -2706,6 +2707,7 @@ export async function extractDocumentContent(
           let generatedListContinuation = false;
           let customStyle: string | undefined;
           let paragraphLeftIndentTwips: number | undefined;
+          let spacerShaped = false;
           let paraFormatting = currentFormatting;
           let isSpacerParagraph = false;
           let isSectionBreakHandled = false;
@@ -2779,6 +2781,8 @@ export async function extractDocumentContent(
               generatedListContinuation = parseListContinuationStyle(pPrChildren);
               customStyle = parseCustomStyleName(pPrChildren, options?.customStyles ?? undefined);
               paragraphLeftIndentTwips = parseParagraphLeftIndentTwips(pPrChildren);
+              spacerShaped = pPrChildren.length === 1 && pPrChildren[0]['w:spacing'] !== undefined
+                && Object.keys(pPrChildren[0][':@'] ?? {}).join() === '@_w:after' && getAttr(pPrChildren[0], 'after') === '0';
               const pRPrElement = pPrChildren.find(pprChild => pprChild['w:rPr'] !== undefined);
               if (pRPrElement) {
                 const pRPrChildren = asXmlNodes(pRPrElement['w:rPr']);
@@ -2857,6 +2861,7 @@ export async function extractDocumentContent(
             if (generatedListContinuation) paraItem.generatedListContinuation = true;
             if (customStyle) paraItem.customStyleName = customStyle;
             if (paragraphLeftIndentTwips !== undefined) paraItem.paragraphLeftIndentTwips = paragraphLeftIndentTwips;
+            if (spacerShaped) paraItem.spacerShaped = true;
             if (paraMarkRevision && headingLevel) paraItem.paraMarkRevision = paraMarkRevision;
             if (canJoinTrackedBreak && precedingMark?.target === target && precedingMark.end === targetLenBeforePara) {
               paraItem.breakRevision = precedingMark.revision;
@@ -4837,6 +4842,34 @@ function paragraphHasContent(content: ContentItem[], paraIndex: number): boolean
     return true;
   }
   return false;
+}
+
+/**
+ * Export spaces a code block from what follows with an empty paragraph. A
+ * plain paragraph after it fills that paragraph with its text; a heading or
+ * list item has a para item of its own, which the empty one would add blank
+ * lines before, so the empty one goes. An empty paragraph of another shape,
+ * as a Word user adds, stays.
+ */
+function dropCodeBlockSeparators(content: ContentItem[]): void {
+  let afterCodeBlock = false;
+  for (let i = 0; i < content.length; i++) {
+    const item = content[i];
+    if (item.type !== 'para') {
+      // Only the code block's own text keeps it the last block
+      if (item.type !== 'text') afterCodeBlock = false;
+      continue;
+    }
+    const next = content[i + 1];
+    if (afterCodeBlock && item.spacerShaped && isPlainEmptyParagraph(item) && item.emptyParagraphCount === 1
+        && next?.type === 'para' && (next.headingLevel || next.listMeta)) {
+      content.splice(i, 1);
+      i--;
+      afterCodeBlock = false;
+      continue;
+    }
+    afterCodeBlock = !!item.isCodeBlock;
+  }
 }
 
 function isPlainEmptyParagraph(item: Extract<ContentItem, { type: 'para' }>): boolean {
@@ -7234,6 +7267,7 @@ export async function convertDocx(
     extractEndnotes(zip, enContext),
   ]);
 
+  dropCodeBlockSeparators(docContent);
   const {
     derivedBlockquoteGaps,
     derivedBlockquotePreContentBlankLines,
