@@ -3,7 +3,7 @@ import { XMLBuilder, XMLParser } from 'fast-xml-parser';
 import { imagePathsWithSpaces } from './image-paths';
 import type Token from 'markdown-it/lib/token.mjs';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
-import { escapeXml, escapeXmlText, orderRPr, generateCitation, generateMathXml, generateTrackedMathXml, trackedEquationLatex, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, type CiteprocEngine } from './md-to-docx-citations';
+import { escapeXml, escapeXmlText, textElements, orderRPr, generateCitation, generateMathXml, generateTrackedMathXml, trackedEquationLatex, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, type CiteprocEngine } from './md-to-docx-citations';
 import { downloadStyle, resolveCslCachePath } from './csl-loader';
 import { existsSync, readFileSync } from 'fs';
 import { isAbsolute, join, resolve } from 'path';
@@ -5360,21 +5360,13 @@ export function generateRPr(run: MdRun, extraRPr?: string): string {
 // leading or trailing spaces. Word strips the attribute from text that doesn't
 // need it, which sets the dirty flag. See dirty-flag invariant #1.
 function wt(text: string): string {
-  // Use escapeXmlText (not escapeXml) — quotes don't need escaping in element
+  // escapeXmlText (not escapeXml) inside: quotes don't need escaping in element
   // text content, and &quot; triggers Word's dirty flag (see invariant #7 note).
-  const escaped = escapeXmlText(text);
-  if (escaped.length > 0 && (escaped[0] === ' ' || escaped[escaped.length - 1] === ' ')) {
-    return '<w:t xml:space="preserve">' + escaped + '</w:t>';
-  }
-  return '<w:t>' + escaped + '</w:t>';
+  return textElements(text);
 }
 
 function delText(text: string): string {
-  const escaped = escapeXmlText(text);
-  if (escaped.length > 0 && (escaped[0] === ' ' || escaped[escaped.length - 1] === ' ')) {
-    return '<w:delText xml:space="preserve">' + escaped + '</w:delText>';
-  }
-  return '<w:delText>' + escaped + '</w:delText>';
+  return textElements(text, 'w:delText');
 }
 
 export function generateRun(text: string, rPr: string): string {
