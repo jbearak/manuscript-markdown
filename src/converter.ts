@@ -6617,6 +6617,9 @@ export function buildMarkdown(
   // in its quote, where a line without > after it would start a paragraph of
   // its own
   let quoteLinePrefix = '';
+  // Whether the paragraph is a heading, whose text Markdown reads up to a
+  // closing sequence of #
+  let headingText = false;
   let deferredCommentQuote: { group?: number; level: number } | undefined;
   // The last comment bodies written into a quote
   let quotedBodies: { text: string; group?: number; level: number } | undefined;
@@ -7076,6 +7079,7 @@ export function buildMarkdown(
       }
 
       quoteLinePrefix = prefixesQuoteLines(item) ? blockquotePrefix(item) : '';
+      headingText = !!item.headingLevel;
       deferredCommentQuote = quoteLinePrefix ? { group: item.blockquoteGroupIndex, level: item.blockquoteLevel ?? 1 } : undefined;
       if (item.headingLevel) {
         lastAlertParagraphKey = undefined;
@@ -7560,6 +7564,11 @@ export function buildMarkdown(
     pendingAlertPrefixStrip = undefined;
     pendingAlertInlinePrefixForHardBreak = undefined;
     textOut = keepParagraphWhitespace(textOut, isMarkdownBlockEdge(mergedContent[i - 1]), isMarkdownBlockEdge(mergedContent[rendered.nextIndex]));
+    if (headingText) {
+      // A run of # that ends a heading's text, after a space or tab or as
+      // all of it, is its closing sequence to Markdown, which drops it
+      textOut = textOut.replace(/(^|[ \t])(#+[ \t]*)$/, (_m, before: string, hashes: string) => before + '\\' + hashes);
+    }
     if (pendingHeadingCriticMarker !== undefined) {
       // Re-insert the heading marker inside the leading Critic span so the
       // whole-paragraph form {++### heading++} round-trips. If the inline

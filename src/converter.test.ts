@@ -3365,6 +3365,28 @@ describe('parseHeadingLevel', () => {
   });
 });
 
+describe('A heading whose text ends in #', () => {
+  const heading = async (text: string) => (await convertDocx(await buildSyntheticDocx(wrapDocumentXml(
+    '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t xml:space="preserve">' + text + '</w:t></w:r></w:p>',
+  )))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+
+  test.each([
+    ['C #', '# C \\#\n'],
+    ['C ##', '# C \\##\n'],
+    ['C\t#', '# C\t\\#\n'],
+    ['#', '# \\#\n'],
+    ['C #a', '# C #a\n'],
+    ['C#', '# C#\n'],
+  ])('keeps the # of %j', async (text, md) => {
+    // Markdown reads a run of # at a heading's end, after a space or tab or
+    // as all its text, as its closing sequence, and drops it
+    expect(await heading(text)).toBe(md);
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    expect(xml).toContain('<w:pStyle w:val="Heading1"/>');
+    expect(xml.replace(/<w:tab\/>/g, '\t').replace(/<[^>]+>/g, '')).toContain(text);
+  });
+});
+
 
 // ---------------------------------------------------------------------------
 // Property tests for converter integration (Task 4.3)
