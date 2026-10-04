@@ -2389,6 +2389,21 @@ export async function extractDocumentContent(
   let sectionStartIndex = 0; // index into `content` where the current section started
   let sectionBreakOrdinal = 0; // counter for paragraph-level sectPr occurrences
   const portraitBreakOrdinals = options?.portraitBreakOrdinals;
+  // Ends the section at the end of `target`, fencing it if it's landscape or a
+  // portrait fence. A plain first paragraph has no para item, which the
+  // opener would leave it on the line of. Display math and HTML comments
+  // write their own line breaks.
+  const endSection = (target: ContentItem[], fence: 'landscape' | 'portrait' | undefined): void => {
+    if (fence) {
+      const first = target[sectionStartIndex];
+      const opener: ContentItem = { type: fence === 'landscape' ? 'landscape_open' : 'portrait_open' };
+      target.splice(sectionStartIndex, 0,
+        ...(first && !isStructuralBoundaryItem(first) && !(first.type === 'math' && first.display) && first.type !== 'html_comment'
+          ? [opener, { type: 'para' } as ContentItem] : [opener]));
+      target.push({ type: fence === 'landscape' ? 'landscape_close' : 'portrait_close' });
+    }
+    sectionStartIndex = target.length;
+  };
 
   function walk(
     nodes: XmlNode[],
@@ -2694,6 +2709,7 @@ export async function extractDocumentContent(
           let paraFormatting = currentFormatting;
           let isSpacerParagraph = false;
           let isSectionBreakHandled = false;
+          let sectionFence: 'landscape' | 'portrait' | 'none' | undefined; // this paragraph ends a section
           let paraMarkRevision: RevisionInfo | undefined;
 
           const paraChildren = asXmlNodes(node[key]);
@@ -2735,33 +2751,18 @@ export async function extractDocumentContent(
                   const h = parseInt(getAttr(pgSzNode, 'h') || '0', 10);
                   isLandscapeSect = orient === 'landscape' || (w > 0 && h > 0 && w > h);
                 }
-                if (isLandscapeSect) {
-                  // This paragraph ends a landscape section.
-                  // Insert landscape_open at the start of this section.
-                  target.splice(sectionStartIndex, 0, { type: 'landscape_open' });
-                  // Walk paragraph children to capture any content in this paragraph
-                  walk(paraChildren, paraFormatting, target, inTableCell, currentRevision);
-                  // Push landscape_close after this paragraph
-                  target.push({ type: 'landscape_close' });
-                  sectionStartIndex = target.length;
-                  isSectionBreakHandled = true;
-                  break;
-                }
-                // Portrait section break: check if this ordinal is a portrait fence close
-                if (portraitBreakOrdinals?.has(currentOrdinal)) {
-                  target.splice(sectionStartIndex, 0, { type: 'portrait_open' });
-                  walk(paraChildren, paraFormatting, target, inTableCell, currentRevision);
-                  target.push({ type: 'portrait_close' });
-                  sectionStartIndex = target.length;
-                  isSectionBreakHandled = true;
-                  break;
-                }
-                // Regular portrait section break: just update section start for next section
-                // and skip this paragraph (it's typically an empty section-break carrier)
-                sectionStartIndex = target.length;
-                // Check if paragraph has any content runs (not just sectPr)
-                const hasContent = paraChildren.some((c) => c['w:r'] !== undefined || c['w:hyperlink'] !== undefined);
-                if (!hasContent) {
+                const fence = isLandscapeSect ? 'landscape' as const
+                  : portraitBreakOrdinals?.has(currentOrdinal) ? 'portrait' as const : undefined;
+                if (paragraphCarriesContent(paraChildren)) {
+                  // Word attaches the break to the section's last paragraph
+                  // when nothing else carries it: read that paragraph as any
+                  // other, then end the section
+                  sectionFence = fence ?? 'none';
+                } else {
+                  // An empty section-break carrier, whose children can still
+                  // hold comment ranges
+                  if (fence) walk(paraChildren, paraFormatting, target, inTableCell, currentRevision);
+                  endSection(target, fence);
                   isSectionBreakHandled = true;
                   break;
                 }
@@ -2815,6 +2816,7 @@ export async function extractDocumentContent(
           if (inBibliographyField) {
             // Still need to walk children so field end markers are processed
             walk(paraChildren, paraFormatting, target, inTableCell, currentRevision);
+            if (sectionFence) endSection(target, sectionFence === 'none' ? undefined : sectionFence);
             continue;
           }
 
@@ -2924,6 +2926,11 @@ export async function extractDocumentContent(
           }
           if (paraMarkRevision && canJoinTrackedBreak && !inBibliographyField && target.length > targetLenBeforePara) {
             trackedParaMark = { revision: paraMarkRevision, target, end: target.length };
+          }
+          if (sectionFence) {
+            // A fence's opener goes in before this paragraph's content
+            if (sectionFence !== 'none') trackedParaMark = undefined;
+            endSection(target, sectionFence === 'none' ? undefined : sectionFence);
           }
         } else if (key === 'm:oMathPara') {
           // Display equation — extract m:oMath children from within
@@ -4797,6 +4804,19 @@ function renderTableOrFallback(
     if (gridResult !== null) return r(gridResult);
   }
   return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs));
+}
+
+const PARAGRAPH_CONTENT_ELEMENTS = new Set([
+  'w:drawing', 'w:pict', 'w:object', 'm:oMath', 'm:oMathPara', 'w:sym', 'w:tab', 'w:br',
+  'w:footnoteReference', 'w:endnoteReference', 'w:fldChar', 'w:fldSimple',
+]);
+const PARAGRAPH_TEXT_ELEMENTS = new Set(['w:t', 'w:delText', 'w:instrText']);
+
+/** Whether a paragraph holds anything besides its properties and markers */
+function paragraphCarriesContent(children: XmlNode[]): boolean {
+  return children.some(child => Object.keys(child).some(key => key !== 'w:pPr' && key !== ':@'
+    && (PARAGRAPH_TEXT_ELEMENTS.has(key) ? nodeText(asXmlNodes(child[key])) !== ''
+      : PARAGRAPH_CONTENT_ELEMENTS.has(key) || paragraphCarriesContent(asXmlNodes(child[key])))));
 }
 
 function isStructuralBoundaryItem(item: ContentItem): boolean {
