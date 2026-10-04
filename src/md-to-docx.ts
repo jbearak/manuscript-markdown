@@ -182,6 +182,18 @@ export interface MdRun {
   imageWidth?: number;
   imageHeight?: number;
   imageSyntax?: 'md' | 'html';
+  imageSource?: string;     // the image as written, which export hides in the text when it can't embed the image
+}
+
+/** An image's Markdown: as written, or for a reference, inline, with its
+ *  destination as markdown-it encoded it */
+function imageMarkdownSource(token: ManuscriptToken, alt: string, attrs: string | undefined): string {
+  const src = token.attrGet?.('src') || '';
+  const title = token.attrGet?.('title');
+  const source: string = token.meta?.source ?? '![' + alt.replace(/[\\[\]]/g, c => '\\' + c) + ']('
+    + (/[\s()<>]/.test(src) ? '<' + src + '>' : src)
+    + (title ? ' "' + title.replace(/["\\]/g, c => '\\' + c) + '"' : '') + ')';
+  return source + (attrs !== undefined ? '{' + attrs + '}' : '');
 }
 
 function mapHtmlTableRunToMdRun(run: HtmlTableRun): MdRun {
@@ -2661,6 +2673,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
                 imageWidth: width,
                 imageHeight: height,
                 imageSyntax: 'html' as const,
+                imageSource: htmlContent.trim(),
               }]
             });
           } else {
@@ -2845,6 +2858,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
               imageWidth: width,
               imageHeight: height,
               imageSyntax: 'html',
+              imageSource: html,
             });
           } else {
             // Preserve malformed <img> tags as literal text
@@ -3025,12 +3039,13 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
         const alt = token.children?.map(child => child.content || '').join('') || '';
         let width: number | undefined;
         let height: number | undefined;
+        let attrs: string | undefined;
         // Look ahead for {width=N height=N} attribute syntax
         const nextToken = tokens[ti + 1];
         if (nextToken?.type === 'text' && nextToken.content) {
           const attrMatch = nextToken.content.match(/^\{([^}]+)\}/);
           if (attrMatch) {
-            const attrs = attrMatch[1];
+            attrs = attrMatch[1];
             width = parseMarkdownImageDimension(attrs, 'width');
             height = parseMarkdownImageDimension(attrs, 'height');
             // Consume the attribute text (or remainder after it)
@@ -3050,6 +3065,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
           imageWidth: width,
           imageHeight: height,
           imageSyntax: 'md',
+          imageSource: imageMarkdownSource(token, alt, attrs),
         });
         break;
       }
@@ -5348,7 +5364,19 @@ export function generateRun(text: string, rPr: string): string {
   return '<w:r>' + rPr + wt(text) + '</w:r>';
 }
 
-function generateHiddenHtmlCommentRun(text: string): string {
+/**
+ * Hides an image export can't embed in the text, as its Markdown, so import
+ * writes it back; a ZWSP closes it, since Word can split the run.
+ */
+function generateUnembeddedImageRun(run: MdRun, deleted = false): string {
+  // A ZWSP of the image's own as a character reference, apart from the one
+  // that closes it
+  const source = run.imageSource?.replace(/\u200B/g, '&#8203;');
+  return source ? generateHiddenHtmlCommentRun(source + '\u200B', deleted ? 'w:delText' : 'w:t') : '';
+}
+
+function generateHiddenHtmlCommentRun(text: string, tag: 'w:t' | 'w:delText' = 'w:t'): string {
+  const textXml = tag === 'w:t' ? wt : delText;
   const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   const lines = normalized.split('\n');
   // vanish hides the run in Word Desktop; white color makes it invisible in Word Online
@@ -5361,9 +5389,9 @@ function generateHiddenHtmlCommentRun(text: string): string {
     }
     const line = lines[i];
     if (i === 0) {
-      xml += wt('\u200B' + line);
+      xml += textXml('\u200B' + line);
     } else if (line.length > 0) {
-      xml += wt(line);
+      xml += textXml(line);
     }
   }
   xml += '</w:r>';
@@ -5453,7 +5481,8 @@ function generateDeletedCriticContent(
   forced: Partial<MdRun>,
   extraRPr: string | undefined,
   warnings: string[] | undefined,
-  state: DocxGenState
+  state: DocxGenState,
+  options?: MdToDocxOptions,
 ): string {
   const formattedRuns = formatCriticInnerRuns(runs, outer, forced);
   if (!formattedRuns || formattedRuns.length === 0) {
@@ -5479,22 +5508,26 @@ function generateDeletedCriticContent(
       continue;
     }
     if (run.type === 'critic_add' || run.type === 'critic_del') {
-      xml += generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr, warnings, state);
+      xml += generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr, warnings, state, options);
       continue;
     }
     if (run.type === 'critic_sub') {
-      xml += generateDeletedCriticContent(run.oldRuns, run.text, run, {}, extraRPr, warnings, state);
-      if (run.newText) xml += generateDeletedCriticContent(run.newRuns, run.newText, run, {}, extraRPr, warnings, state);
+      xml += generateDeletedCriticContent(run.oldRuns, run.text, run, {}, extraRPr, warnings, state, options);
+      if (run.newText) xml += generateDeletedCriticContent(run.newRuns, run.newText, run, {}, extraRPr, warnings, state, options);
       continue;
     }
     if (run.type === 'critic_highlight' || run.type === 'critic_comment') {
       if (run.type === 'critic_highlight' && run.text) {
-        xml += generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr, warnings, state);
+        xml += generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr, warnings, state, options);
       }
       continue;
     }
     if (run.type === 'footnote_ref') {
       xml += noteReferenceXml(run.footnoteLabel || '', state, 'deletion', highlightRPr(run));
+      continue;
+    }
+    if (run.type === 'image') {
+      xml += imageRunXml(run, state, options, true);
       continue;
     }
     if (run.type === 'citation') {
@@ -5606,13 +5639,13 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       const author = run.author || options?.authorName || 'Unknown';
       const date = normalizeToUtcIso(run.date || '', state.timezone);
       const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
-      const deletedXml = generateDeletedCriticContent(run.innerRuns, run.text, run, {}, state.tableRunRPrExtra || undefined, state.warnings, state);
+      const deletedXml = generateDeletedCriticContent(run.innerRuns, run.text, run, {}, state.tableRunRPrExtra || undefined, state.warnings, state, options);
       xml += '<w:del w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + deletedXml + '</w:del>';
     } else if (run.type === 'critic_sub') {
       const author = run.author || options?.authorName || 'Unknown';
       const date = normalizeToUtcIso(run.date || '', state.timezone);
       const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
-      const deletedXml = generateDeletedCriticContent(run.oldRuns, run.text, run, {}, state.tableRunRPrExtra || undefined, state.warnings, state);
+      const deletedXml = generateDeletedCriticContent(run.oldRuns, run.text, run, {}, state.tableRunRPrExtra || undefined, state.warnings, state, options);
       const insertedXml = insertedContent(state, () => generateInlineCriticContent(run.newRuns, run.newText || '', run, state, options, bibEntries, citeprocEngine));
       xml += '<w:del w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + deletedXml + '</w:del>';
       xml += '<w:ins w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + insertedXml + '</w:ins>';
@@ -5845,112 +5878,118 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
     } else if (run.type === 'html_comment') {
       xml += generateHiddenHtmlCommentRun(run.text);
     } else if (run.type === 'image') {
-      const src = run.imageSrc || '';
-      const alt = run.imageAlt || '';
-      const syntax = run.imageSyntax || 'md';
-      // Detect unsupported URL/data URI sources
-      if (/^(https?:|data:)/i.test(src)) {
-        state.warnings.push('Image "' + src.slice(0, 80) + '" is a URL or data URI; only local file paths are supported');
-        continue;
-      }
-      const srcBase = src.split('?')[0].split('#')[0];
-      const ext = srcBase.split('.').pop()?.toLowerCase() || '';
-      if (!isSupportedImageFormat(ext)) {
-        state.warnings.push(IMAGE_WARNINGS.unsupportedFormat(ext, src));
-        continue;
-      }
-      // Resolve file path
-      const absPath = options?.sourceDir ? resolve(options.sourceDir, src) : resolve(src);
-      // Check deduplication: same file + same syntax reuses the same rId
-      const dedupeKey = absPath + '\0' + syntax;
-      const imgRelMap = state.inNoteBody ? state.noteImageRelationships : state.imageRelationships;
-      let imgEntry = imgRelMap.get(dedupeKey);
-      if (!imgEntry) {
-        // Check if media binary already loaded (different syntax, same file)
-        let mediaPath = state.imageMediaPaths.get(absPath);
-        if (!mediaPath) {
-          // Read file
-          let fileData: Uint8Array;
-          try {
-            fileData = new Uint8Array(readFileSync(absPath));
-          } catch (err: unknown) {
-            const errorCode = err && typeof err === 'object' && 'code' in err ? err.code : undefined;
-            const candidateMessage = err && typeof err === 'object' && 'message' in err ? err.message : undefined;
-            const errorMessage = typeof candidateMessage === 'string' && candidateMessage ? candidateMessage : String(err);
-            if (errorCode === 'ENOENT') {
-              state.warnings.push(IMAGE_WARNINGS.notFound(src));
-            } else {
-              state.warnings.push(IMAGE_WARNINGS.readError(src, errorMessage));
-            }
-            continue;
-          }
-          const mediaFilename = 'image' + state.imageMediaPaths.size + '.' + ext;
-          mediaPath = 'media/' + mediaFilename;
-          state.imageMediaPaths.set(absPath, mediaPath);
-          state.imageBinaries.set(mediaPath, fileData);
-          state.imageExtensions.add(ext);
-        }
-        let rId: string;
-        if (state.inNoteBody) {
-          rId = 'rId' + state.noteNextRId;
-          state.noteNextRId++;
-        } else {
-          rId = 'rId' + (state.nextRId + state.rIdOffset);
-          state.nextRId++;
-        }
-        imgEntry = { rId, mediaPath };
-        imgRelMap.set(dedupeKey, imgEntry);
-        (state.inNoteBody ? state.noteImageFormats : state.imageFormats).set(rId, syntax);
-      }
-      // Determine dimensions
-      let width = run.imageWidth;
-      let height = run.imageHeight;
-      if (!width || !height) {
-        const data = state.imageBinaries.get(imgEntry.mediaPath);
-        if (data) {
-          const intrinsic = readImageDimensions(data, ext);
-          if (intrinsic) {
-            const dims = computeMissingDimension({ width, height }, intrinsic);
-            width = dims.width;
-            height = dims.height;
-          } else {
-            if (!width) width = 100;
-            if (!height) height = 100;
-            state.warnings.push(IMAGE_WARNINGS.defaultDimensions(src));
-          }
-        } else {
-          if (!width) width = 100;
-          if (!height) height = 100;
-        }
-      }
-      // Word does not automatically constrain an inline drawing to the page.
-      // Downscale oversized images to the current section's writable width while
-      // preserving their aspect ratio; never enlarge smaller authored images.
-      const maxWidth = pageContentWidthPx(state);
-      if (width > maxWidth) {
-        const scale = maxWidth / width;
-        width = maxWidth;
-        height *= scale;
-      }
-      const cx = pixelsToEmu(width);
-      const cy = pixelsToEmu(height);
-      const docPrId = state.nextImageDocPrId++;
-      xml += '<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">'
-        + '<wp:extent cx="' + cx + '" cy="' + cy + '"/>'
-        + '<wp:effectExtent l="0" t="0" r="0" b="0"/>'
-        + '<wp:docPr id="' + docPrId + '" name="' + escapeXml(src) + '" descr="' + escapeXml(alt) + '"/>'
-        + '<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
-        + '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
-        + '<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">'
-        + '<pic:nvPicPr><pic:cNvPr id="' + docPrId + '" name="' + escapeXml(src) + '"/><pic:cNvPicPr/></pic:nvPicPr>'
-        + '<pic:blipFill><a:blip r:embed="' + imgEntry.rId + '"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
-        + '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="' + cx + '" cy="' + cy + '"/></a:xfrm>'
-        + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>'
-        + '</pic:pic></a:graphicData></a:graphic>'
-        + '</wp:inline></w:drawing></w:r>';
+      xml += imageRunXml(run, state, options);
     }
   }
   return xml;
+}
+
+/** An image's run: its drawing, or if export can't embed the image, its
+ *  Markdown hidden in the text, deleted text in a deletion */
+function imageRunXml(run: MdRun, state: DocxGenState, options: MdToDocxOptions | undefined, deleted = false): string {
+  const src = run.imageSrc || '';
+  const alt = run.imageAlt || '';
+  const syntax = run.imageSyntax || 'md';
+  // Detect unsupported URL/data URI sources
+  if (/^(https?:|data:)/i.test(src)) {
+    state.warnings.push('Image "' + src.slice(0, 80) + '" is a URL or data URI; only local file paths are supported');
+    return generateUnembeddedImageRun(run, deleted);
+  }
+  const srcBase = src.split('?')[0].split('#')[0];
+  const ext = srcBase.split('.').pop()?.toLowerCase() || '';
+  if (!isSupportedImageFormat(ext)) {
+    state.warnings.push(IMAGE_WARNINGS.unsupportedFormat(ext, src));
+    return generateUnembeddedImageRun(run, deleted);
+  }
+  // Resolve file path
+  const absPath = options?.sourceDir ? resolve(options.sourceDir, src) : resolve(src);
+  // Check deduplication: same file + same syntax reuses the same rId
+  const dedupeKey = absPath + '\0' + syntax;
+  const imgRelMap = state.inNoteBody ? state.noteImageRelationships : state.imageRelationships;
+  let imgEntry = imgRelMap.get(dedupeKey);
+  if (!imgEntry) {
+    // Check if media binary already loaded (different syntax, same file)
+    let mediaPath = state.imageMediaPaths.get(absPath);
+    if (!mediaPath) {
+      // Read file
+      let fileData: Uint8Array;
+      try {
+        fileData = new Uint8Array(readFileSync(absPath));
+      } catch (err: unknown) {
+        const errorCode = err && typeof err === 'object' && 'code' in err ? err.code : undefined;
+        const candidateMessage = err && typeof err === 'object' && 'message' in err ? err.message : undefined;
+        const errorMessage = typeof candidateMessage === 'string' && candidateMessage ? candidateMessage : String(err);
+        if (errorCode === 'ENOENT') {
+          state.warnings.push(IMAGE_WARNINGS.notFound(src));
+        } else {
+          state.warnings.push(IMAGE_WARNINGS.readError(src, errorMessage));
+        }
+        return generateUnembeddedImageRun(run, deleted);
+      }
+      const mediaFilename = 'image' + state.imageMediaPaths.size + '.' + ext;
+      mediaPath = 'media/' + mediaFilename;
+      state.imageMediaPaths.set(absPath, mediaPath);
+      state.imageBinaries.set(mediaPath, fileData);
+      state.imageExtensions.add(ext);
+    }
+    let rId: string;
+    if (state.inNoteBody) {
+      rId = 'rId' + state.noteNextRId;
+      state.noteNextRId++;
+    } else {
+      rId = 'rId' + (state.nextRId + state.rIdOffset);
+      state.nextRId++;
+    }
+    imgEntry = { rId, mediaPath };
+    imgRelMap.set(dedupeKey, imgEntry);
+    (state.inNoteBody ? state.noteImageFormats : state.imageFormats).set(rId, syntax);
+  }
+  // Determine dimensions
+  let width = run.imageWidth;
+  let height = run.imageHeight;
+  if (!width || !height) {
+    const data = state.imageBinaries.get(imgEntry.mediaPath);
+    if (data) {
+      const intrinsic = readImageDimensions(data, ext);
+      if (intrinsic) {
+        const dims = computeMissingDimension({ width, height }, intrinsic);
+        width = dims.width;
+        height = dims.height;
+      } else {
+        if (!width) width = 100;
+        if (!height) height = 100;
+        state.warnings.push(IMAGE_WARNINGS.defaultDimensions(src));
+      }
+    } else {
+      if (!width) width = 100;
+      if (!height) height = 100;
+    }
+  }
+  // Word does not automatically constrain an inline drawing to the page.
+  // Downscale oversized images to the current section's writable width while
+  // preserving their aspect ratio; never enlarge smaller authored images.
+  const maxWidth = pageContentWidthPx(state);
+  if (width > maxWidth) {
+    const scale = maxWidth / width;
+    width = maxWidth;
+    height *= scale;
+  }
+  const cx = pixelsToEmu(width);
+  const cy = pixelsToEmu(height);
+  const docPrId = state.nextImageDocPrId++;
+  return '<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">'
+    + '<wp:extent cx="' + cx + '" cy="' + cy + '"/>'
+    + '<wp:effectExtent l="0" t="0" r="0" b="0"/>'
+    + '<wp:docPr id="' + docPrId + '" name="' + escapeXml(src) + '" descr="' + escapeXml(alt) + '"/>'
+    + '<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+    + '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+    + '<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+    + '<pic:nvPicPr><pic:cNvPr id="' + docPrId + '" name="' + escapeXml(src) + '"/><pic:cNvPicPr/></pic:nvPicPr>'
+    + '<pic:blipFill><a:blip r:embed="' + imgEntry.rId + '"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
+    + '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="' + cx + '" cy="' + cy + '"/></a:xfrm>'
+    + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>'
+    + '</pic:pic></a:graphicData></a:graphic>'
+    + '</wp:inline></w:drawing></w:r>';
 }
 
 /** Wraps content in a w:ins or w:del attributed the way generateRuns attributes the run's revisions. */

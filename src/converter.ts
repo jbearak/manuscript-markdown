@@ -294,7 +294,7 @@ export type ContentItem =
   | { type: 'math'; latex: string; display: boolean; commentIds: Set<string>; revision?: RevisionInfo }
   | { type: 'footnote_ref'; noteId: string; noteKind: 'footnote' | 'endnote'; commentIds: Set<string>; revision?: RevisionInfo; formatting?: RunFormatting }
   | { type: 'html_comment'; text: string; commentIds: Set<string> }
-  | { type: 'image'; rId: string; src: string; alt: string; widthPx: number; heightPx: number; commentIds: Set<string>; revision?: RevisionInfo }
+  | { type: 'image'; rId: string; src: string; alt: string; widthPx: number; heightPx: number; commentIds: Set<string>; revision?: RevisionInfo; markdown?: string }
   | { type: 'landscape_open' }
   | { type: 'landscape_close' }
   | { type: 'portrait_open' }
@@ -1852,10 +1852,11 @@ async function extractNotes(
  * result shows. Export hides an HTML comment in such a run, its text
  * starting with \u200B, and Word may split it into many on save (the first
  * "<!--", the rest lines, breaks and "-->"), which join the html_comment
- * before them until it closes. Other hidden text, such as legacy metadata or
- * the pieces of a split \u200B-prefixed sentinel, stays hidden.
+ * before them until it closes, or join it with others (see readHiddenText).
+ * Other hidden text, such as legacy metadata or the pieces of a split
+ * \u200B-prefixed sentinel, stays hidden.
  */
-function readHiddenRun(runChildren: XmlNode[], rPrChildren: XmlNode[] | undefined, target: ContentItem[], activeComments: Set<string>): XmlNode[] {
+function readHiddenRun(runChildren: XmlNode[], rPrChildren: XmlNode[] | undefined, target: ContentItem[], activeComments: Set<string>, revision?: RevisionInfo): XmlNode[] {
   if (!rPrChildren || !isToggleOn(rPrChildren, 'w:vanish')) return runChildren;
   const fieldChildren = runChildren.filter((c) => c['w:fldChar'] !== undefined || c['w:instrText'] !== undefined);
   if (fieldChildren.length > 0) return fieldChildren;
@@ -1870,15 +1871,71 @@ function readHiddenRun(runChildren: XmlNode[], rPrChildren: XmlNode[] | undefine
       runText += '\n';
     }
   }
-  const hiddenPayload = runText.replace(/^\u200B+/, '');
-  const lastItem = target.length > 0 ? target[target.length - 1] : undefined;
-  if (hiddenPayload.trimStart().startsWith('<!--')) {
-    target.push({ type: 'html_comment', text: hiddenPayload, commentIds: new Set(activeComments) });
-  } else if (lastItem?.type === 'html_comment' && commentSetsEqual(lastItem.commentIds, activeComments) && hiddenPayload.length > 0
-      && !lastItem.text.includes('-->', lastItem.text.lastIndexOf('<!--') + 4)) {
-    lastItem.text += hiddenPayload;
-  }
+  readHiddenText(runText, target, activeComments, revision);
   return [];
+}
+
+/**
+ * The HTML comments and images export hid in a run's text, each after a
+ * ZWSP: a comment up to its -->, and an image export couldn't embed, as its
+ * Markdown, up to a closing ZWSP, which the image keeps once it has it. Word
+ * can split one between runs, or join several in one.
+ */
+function readHiddenText(runText: string, target: ContentItem[], activeComments: Set<string>, revision?: RevisionInfo): void {
+  // The start of one Word split off before it showed which it is
+  const pending = pendingHiddenText.get(target);
+  pendingHiddenText.delete(target);
+  if (pending && pending.at === target.length) runText = pending.text + runText;
+  /** Where the hidden text after a comment's --> starts, if anything does */
+  const afterComment = (text: string, from: number) => {
+    const close = text.indexOf('-->', from);
+    return close !== -1 && text[close + 3] === '\u200B' ? close + 3 : -1;
+  };
+  let rest = runText;
+  const lastItem = target[target.length - 1];
+  const continues = lastItem !== undefined && 'commentIds' in lastItem && !!lastItem.commentIds
+    && commentSetsEqual(lastItem.commentIds, activeComments);
+  if (continues && lastItem.type === 'html_comment' && !rest.replace(/^\u200B+/, '').trimStart().startsWith('<!--')
+      && !lastItem.text.includes('-->', lastItem.text.lastIndexOf('<!--') + 4)) {
+    lastItem.text += rest.replace(/^\u200B+/, '');
+    const end = afterComment(lastItem.text, lastItem.text.lastIndexOf('<!--') + 4);
+    rest = end === -1 ? '' : lastItem.text.slice(end);
+    if (end !== -1) lastItem.text = lastItem.text.slice(0, end);
+  } else if (continues && lastItem.type === 'image' && lastItem.markdown !== undefined && !lastItem.markdown.endsWith('\u200B')) {
+    const end = rest.indexOf('\u200B');
+    lastItem.markdown += end === -1 ? rest : rest.slice(0, end + 1);
+    rest = end === -1 ? '' : rest.slice(end + 1);
+  }
+  while (rest) {
+    const payload = rest.replace(/^\u200B+/, '');
+    if (payload.trimStart().startsWith('<!--')) {
+      const end = afterComment(payload, payload.indexOf('<!--') + 4);
+      target.push({ type: 'html_comment', text: end === -1 ? payload : payload.slice(0, end), commentIds: new Set(activeComments) });
+      rest = end === -1 ? '' : payload.slice(end);
+    } else if (rest.startsWith('\u200B') && /^(?:!\[|<img\b)/i.test(rest.slice(1))) {
+      const end = rest.indexOf('\u200B', 1);
+      target.push({
+        type: 'image', rId: '', src: '', alt: '', widthPx: 0, heightPx: 0, commentIds: new Set(activeComments),
+        markdown: end === -1 ? rest.slice(1) : rest.slice(1, end + 1), ...(revision ? { revision } : {}),
+      });
+      rest = end === -1 ? '' : rest.slice(end + 1);
+    } else {
+      // A ZWSP and the start of <!--, ![ or <img, for the next hidden run
+      if (rest.startsWith('\u200B') && /^(?:!|<|<!|<!-|<i|<im)?$/i.test(payload)) {
+        pendingHiddenText.set(target, { text: rest, at: target.length });
+      }
+      break;
+    }
+  }
+}
+
+/** The start of hidden text whose run Word split before it showed what it
+ *  is, as a ZWSP and !, which the next hidden run in the same place goes on */
+const pendingHiddenText = new WeakMap<ContentItem[], { text: string; at: number }>();
+
+/** The Markdown of an image export couldn't embed, without its closing ZWSP */
+function unembeddedImageMarkdown(markdown: string): string {
+  return markdown.endsWith('\u200B') ? markdown.slice(0, -1) : markdown;
 }
 
 const FIELD_RUN_KEYS = new Set([':@', 'w:rPr', 'w:fldChar', 'w:instrText', 'w:delInstrText', 'w:lastRenderedPageBreak']);
@@ -2160,7 +2217,7 @@ function parseNoteBody(
               break;
             }
           }
-          const walked = readHiddenRun(runChildren, rPrChildren, target, activeComments);
+          const walked = readHiddenRun(runChildren, rPrChildren, target, activeComments, currentRevision);
           fieldShows.run(runChildren, walked);
           walkNoteBody(walked, runFormatting, target, inTableCell, currentRevision);
         } else if (Array.isArray(node[key])) {
@@ -2838,7 +2895,7 @@ export async function extractDocumentContent(
             }
           }
 
-          const walked = readHiddenRun(runChildren, rPrChildren, target, activeComments);
+          const walked = readHiddenRun(runChildren, rPrChildren, target, activeComments, currentRevision);
           fieldShows.run(runChildren, walked);
           walk(walked, runFormatting, target, inTableCell, currentRevision);
         } else if (key === 'w:br') {
@@ -4017,7 +4074,9 @@ function renderInlineRange(
     if (item.type === 'image') {
       const syntax = renderOpts?.imageFormatMapping?.get(item.rId) || 'md';
       let imgText: string;
-      if (syntax === 'html') {
+      if (item.markdown !== undefined) {
+        imgText = unembeddedImageMarkdown(item.markdown);
+      } else if (syntax === 'html') {
         imgText = '<img src="' + escapeHtmlAttr(item.src) + '" alt="' + escapeHtmlAttr(item.alt) + '"';
         if (item.widthPx > 0) imgText += ' width="' + item.widthPx + '"';
         if (item.heightPx > 0) imgText += ' height="' + item.heightPx + '"';
@@ -4344,7 +4403,9 @@ function renderInlineRangeWithIds(
       prevCommentIds = new Set(currentIds);
       const syntax = imageFormatMapping?.get(item.rId) || 'md';
       let imgText: string;
-      if (syntax === 'html') {
+      if (item.markdown !== undefined) {
+        imgText = unembeddedImageMarkdown(item.markdown);
+      } else if (syntax === 'html') {
         imgText = '<img src="' + escapeHtmlAttr(item.src) + '" alt="' + escapeHtmlAttr(item.alt) + '"';
         if (item.widthPx > 0) imgText += ' width="' + item.widthPx + '"';
         if (item.heightPx > 0) imgText += ' height="' + item.heightPx + '"';
