@@ -4433,6 +4433,19 @@ describe('Whitespace at the edges of a paragraph', () => {
     expect(await roundTrip(markdown)).toBe(markdown);
   });
 
+  test('keeps the whitespace after the space that follows an alert\'s label on its line', async () => {
+    // The bold label took all of it
+    const zip = await JSZip.loadAsync((await convertMdToDocx('> [!NOTE]\n> XX')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const sameLine = xml.replace('<w:r><w:br/></w:r><w:r><w:t xml:space="preserve"> </w:t></w:r><w:r><w:t>XX</w:t></w:r>',
+      '<w:r><w:t xml:space="preserve">  \tt</w:t></w:r>');
+    expect(sameLine).not.toBe(xml);
+    zip.file('word/document.xml', sameLine);
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toBe('> [!NOTE]\n> &#32;&#9;t\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
   test('keeps the whitespace at the edges of a note\'s text after an equation in its paragraph', async () => {
     // The text didn't count as the start of a paragraph, though Markdown
     // puts it in one of its own

@@ -4678,7 +4678,7 @@ function stripAlertLeadPrefix(text: string, alertType: GfmAlertType): string {
 
   // 3. Bold-wrapped: **GLYPH Title** or __GLYPH Title__
   const titleCore = '(?:' + glyphAlternation + ')\\s*' + escapeRegExp(title);
-  const boldWrapped = text.match(/^\s*(\*\*|__)(.+?)\1[ \t]*(?:\\?\n ?)?/);
+  const boldWrapped = text.match(/^\s*(\*\*|__)(.+?)\1[ \t]?(?:\\?\n ?)?/);
   if (boldWrapped) {
     const inner = boldWrapped[2].trim();
     if (new RegExp('^' + titleCore + '\\s*[:：-]?$').test(inner)) {
