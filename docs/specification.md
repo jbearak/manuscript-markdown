@@ -485,7 +485,7 @@ Manuscript Markdown supports CommonMark plus the implemented [GitHub Flavored Ma
 
 - **Formatting**: bold (`**text**`), italic (`_text_`), strikethrough (`~~text~~`), underline (`<u>text</u>`), superscript (`<sup>text</sup>`), subscript (`<sub>text</sub>`), inline code (`` `code` ``). The HTML tags `<b>` and `<strong>` are bold too, `<i>` and `<em>` italic, and `<s>`, `<del>` and `<strike>` strikethrough. DOCX→MD conversion writes `<b>`, `<i>` or `<s>` where Word's formatting starts or ends at a point Markdown's delimiters can't: `a**.b**` isn't bold, since `**` after a letter can't open before punctuation, so a bold `.b` after an `a` is `a<b>.b</b>`. The same goes for formatting that would run into the delimiter of a neighbour, as italic `a` before bold `b` would in `*a***b**`.
 - **Headings**: `# H1` through `###### H6`
-- **Lists**: bulleted (`- item`), numbered (`1. item`), task lists (`- [ ] item`, `- [x] item`). Blockquote continuation blocks inside list items are preserved; see [List item limitations](#list-item-block-content) for the remaining unsupported block content.
+- **Lists**: bulleted (`- item`), numbered (`1. item`), task lists (`- [ ] item`, `- [x] item`). Blockquote continuation blocks and HTML blocks inside list items are preserved; see [List item limitations](#list-item-block-content) for the remaining unsupported block content.
 - **Links**: `[text](url)` plus autolink literals (bare URLs/emails)
 - **Code blocks**: fenced with triple backticks. Optional language annotation (e.g., `` ```stata ``) is preserved on round-trip via the `MANUSCRIPT_CODE_BLOCK_LANGS` custom property in the DOCX. In Word, code blocks use the "Code Block" paragraph style (Consolas, shaded background). Consecutive code blocks are separated by an empty paragraph to prevent merging.
 - **Blockquotes**: `> quoted text`. A quote holds paragraphs, nested quotes, alerts, HTML blocks and display math; see [Blockquote limitations](#blockquote-block-content) for the rest.
@@ -924,7 +924,7 @@ CLI flag: `--always-use-comment-ids`
 
 ### List Item Block Content
 
-The Markdown-to-DOCX converter preserves the first paragraph, nested sublists, and blockquote continuation blocks within a list item. Other block-level content in list continuation — such as fenced code blocks, indented code blocks, HTML blocks, and tables — is still dropped during conversion and will not survive a round-trip.
+The Markdown-to-DOCX converter preserves the first paragraph, nested sublists, blockquote continuation blocks, and HTML blocks other than comments within a list item. Other block-level content in list continuation — such as fenced code blocks, indented code blocks, HTML comments, and tables, whether in Markdown or HTML — is still dropped during conversion and will not survive a round-trip. So is a `<pre>`, `<script>`, `<style>`, or `<textarea>` block with a blank line in it, which ends the block inside a list item.
 
 The converter emits a warning when block content inside a list item is dropped.
 

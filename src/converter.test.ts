@@ -1429,6 +1429,70 @@ describe('Ordered list numbering', () => {
   });
 });
 
+describe('HTML blocks in list items', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+
+  test.each([
+    ['an item that is one', '- <div>a</div>\n- b\n'],
+    ['one under an item', '- a\n\n  <div>b</div>\n'],
+    ['one of more than one line', '- <div>\n  a\n  </div>\n'],
+    ['one under an item, of more than one line', '1. a\n\n   <div>\n   b\n   </div>\n'],
+    ['one in a numbered sublist', '- a\n  1. <div>b</div>\n'],
+    ['a comment of more than one line after one', '- <div>a</div>\n- b {==c==}{>>d\n  e<<}\n'],
+    ['one indented past its item', '- a\n\n    <div>b</div>\n'],
+    ['one of more than one line indented past its item', '- a\n\n   <div>\n   b\n   </div>\n'],
+    ['one of more than one line indented outside a list', ' <div>\n b\n </div>\n'],
+    ['a <pre> with a blank line that has the item\'s indent', '- <pre>\n  a\n  \n  b\n  </pre>\n'],
+    ['one with Markdown\'s characters and tags in it', '- <div data-x="*"><u>a</u> *b*</div>\n'],
+    ['an HTML table with no rows, which is text, as at the top level', '- <table><caption>T</caption></table>\n'],
+    // Which only a blank line ends, which took in the sublist without one
+    ['one before a sublist', '- <div>a</div>\n\n  - b\n'],
+    ['one under an item before a sublist', '1. a\n\n   <div>b</div>\n\n   1. c\n'],
+  ])('keeps %s', async (_name, md) => {
+    // Export dropped an HTML block in an item, and import wrote an item's
+    // lines after its first at the margin, where they ended the block and
+    // the item, as an empty line ends a <pre> there
+    expect(await roundTrip(md)).toBe(md);
+    expect((await convertMdToDocx(md)).warnings.filter(w => w.includes('dropped'))).toEqual([]);
+  });
+
+  test.each([
+    ['a quote', '- > quote\n\n  <div>after</div>\n', '- \n  > quote\n\n  <div>after</div>\n'],
+    ['a sublist', '- - sub\n\n  <div>after</div>\n', '- \n  - sub\n\n  <div>after</div>\n'],
+  ])('keeps one after %s in an item where it was', async (_name, md, expected) => {
+    // Taken for the item's own text, it went before the quote
+    expect(await roundTrip(md)).toBe(expected);
+    expect(await roundTrip(expected)).toBe(expected);
+  });
+
+  test.each([
+    ['a table', '- a\n\n  <table><tr><td>x</td></tr></table>\n'],
+    ['a <pre> with a blank line in it', '- <pre>\n  a\n\n  b\n  </pre>\n'],
+    // Which import writes as text
+    ['a processing instruction', '- <?x?>\n'],
+    ['a declaration', '- <!DOCTYPE html>\n'],
+    ['CDATA', '- <![CDATA[x]]>\n'],
+  ])('warns of %s, which it drops', async (_name, md) => {
+    // A table isn't a paragraph an item can hold, and markdown-it ends a
+    // <pre> at a blank line in an item, leaving its text as Markdown
+    expect((await convertMdToDocx(md)).warnings).toEqual([
+      'HTML block inside list item dropped during conversion (not supported). Move the content outside the list for round-trip fidelity.',
+    ]);
+  });
+
+  test.each([
+    ['the next item', '- <pre>\n  text\n- next\n'],
+    ['the end', '- a\n\n  <pre>\n  text\n'],
+  ])('keeps the text of a <pre> with no closing tag that ends at %s, as at the top level', async (_name, md) => {
+    // markdown-it ends it with the item, which loses none of it, but export
+    // dropped it all the same. Import writes it as text, as it does one at
+    // the top level.
+    const result = await convertMdToDocx(md);
+    expect(result.warnings).toEqual([]);
+    expect(await roundTrip(md)).toContain('\\<pre>\ntext\n');
+  });
+});
+
 describe('Lists nested in lists of the other kind', () => {
   const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
 

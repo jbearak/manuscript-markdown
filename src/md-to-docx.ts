@@ -701,6 +701,12 @@ export function linkifiedText(address: string, email: boolean): string {
   return email ? citationTextMd.normalizeLinkText('mailto:' + address).replace(/^mailto:/, '') : citationTextMd.normalizeLinkText(address);
 }
 
+/** Whether Markdown `text` starts with an HTML block, as export reads one */
+export function startsHtmlBlock(text: string): boolean {
+  citationTextMd ??= createMarkdownIt();
+  return citationTextMd.parse(text, {})[0]?.type === 'html_block';
+}
+
 function citationRule(state: StateInline, silent: boolean): boolean {
   const start = state.pos;
   const max = state.posMax;
@@ -3303,6 +3309,10 @@ const DROPPED_LIST_BLOCK_TYPES = new Set([
   'fence', 'code_block', 'html_block', 'blockquote_open', 'table_open',
 ]);
 
+function droppedListBlockWarning(kind: string): string {
+  return kind + ' inside list item dropped during conversion (not supported). Move the content outside the list for round-trip fidelity.';
+}
+
 function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: number, warnings?: string[], startNumber?: number, sourceLines?: string[]): MdToken[] {
   const items: MdToken[] = [];
   let i = 0;
@@ -3379,6 +3389,38 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
         } else if (itemTokens[j].type === 'inline' && !foundFirstParagraph) {
           runs = processInlineChildren([itemTokens[j]]);
           foundFirstParagraph = true;
+        } else if (itemTokens[j].type === 'html_block' && !/^\s*<(?:!--|\?|![A-Za-z]|!\[CDATA\[)/.test(itemTokens[j].content)) {
+          // An HTML block, as at the top level, the item's first paragraph if
+          // it comes first, as in - <div>a</div>, which kept nothing, and a
+          // continuation after a quote or sublist before it otherwise. Not a
+          // comment, a processing instruction, a declaration or CDATA, which
+          // import writes as text. Not a <pre>, <script>, <style> or
+          // <textarea> without its closing tag that more of the item follows,
+          // which markdown-it ended at a blank line in it, or a table, which
+          // an item can't hold
+          const blocks = convertTokens([itemTokens[j]], 0, 0, warnings, sourceLines);
+          const raw = /^\s*<(script|pre|style|textarea)(?=[\s>]|$)/i.exec(itemTokens[j].content);
+          if ((raw && j < itemTokens.length - 1 && !new RegExp('</' + raw[1] + '>', 'i').test(itemTokens[j].content)) || blocks.some(block => block.type !== 'paragraph')) {
+            warnings?.push(droppedListBlockWarning('HTML block'));
+          } else if (!foundFirstParagraph && childSegments.length === 0 && blocks.length === 1) {
+            runs = blocks[0].runs;
+            foundFirstParagraph = true;
+            const htmlMap = itemTokens[j].map;
+            if (htmlMap) itemRange = [htmlMap[0], htmlMap[1]];
+          } else {
+            childSegments.push({
+              startIndex: itemTokens[j].map?.[0] ?? j,
+              order: childSegmentOrder++,
+              items: blocks.map(t => ({
+                ...t,
+                listContinuation: {
+                  type: continuationType,
+                  level,
+                  ...(continuationMarkerWidth !== undefined ? { markerWidth: continuationMarkerWidth } : {}),
+                },
+              })),
+            });
+          }
         } else if (warnings && DROPPED_LIST_BLOCK_TYPES.has(itemTokens[j].type)
             // An empty comment between two numbered sublists, as import writes
             // it where Word starts the second over, which its numbering keeps
@@ -3390,7 +3432,7 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
             : itemTokens[j].type === 'blockquote_open' ? 'Blockquote'
             : itemTokens[j].type === 'table_open' ? 'Table'
             : 'Block element';
-          warnings.push(kind + ' inside list item dropped during conversion (not supported). Move the content outside the list for round-trip fidelity.');
+          warnings.push(droppedListBlockWarning(kind));
         }
       }
 
