@@ -19,3 +19,51 @@ describe('HTML table metadata', () => {
     expect(table.rows[0].cells[3].source).toBeUndefined();
   });
 });
+
+describe('HTML table cell paragraphs', () => {
+  const runs = (cell: string) => extractHtmlTables('<table><tr><td>' + cell + '</td></tr></table>')[0].rows[0].cells[0].runs;
+
+  test('separates a cell\'s paragraphs with a paragraph run, apart from its line breaks', () => {
+    // Each </p> was one break, and the whitespace between paragraphs a space
+    expect(runs('\n  <p>a</p>\n  <p> b<br><br>c</p>\n')).toEqual([
+      { type: 'text', text: 'a' },
+      { type: 'paragraph', text: '\n\n' },
+      { type: 'text', text: 'b' },
+      { type: 'softbreak', text: '\n' },
+      { type: 'softbreak', text: '\n' },
+      { type: 'text', text: 'c' },
+    ]);
+  });
+
+  test('keeps an empty paragraph', () => {
+    // A paragraph run only separated paragraphs with text
+    const paragraph = { type: 'paragraph', text: '\n\n' };
+    expect(runs('<p></p>\n<p>a</p><p> </p><p>b</p><p></p>')).toEqual([
+      paragraph, { type: 'text', text: 'a' }, paragraph, paragraph, { type: 'text', text: 'b' }, paragraph,
+    ]);
+    expect(runs('a<p>b</p>c')).toEqual([
+      { type: 'text', text: 'a' }, paragraph, { type: 'text', text: 'b' }, paragraph, { type: 'text', text: 'c' },
+    ]);
+  });
+
+  test('keeps a line break at the end of a paragraph, but not of a cell', () => {
+    expect(runs('<p>a<br></p>')).toEqual([{ type: 'text', text: 'a' }, { type: 'softbreak', text: '\n' }]);
+    expect(runs('a<br>')).toEqual([{ type: 'text', text: 'a' }]);
+  });
+
+  test('reads a link whose target has the other quote in it', () => {
+    expect(runs('<a href="https://e.com/O\'Brien">o</a>')).toEqual([{ type: 'text', text: 'o', href: 'https://e.com/O\'Brien' }]);
+  });
+
+  test('keeps a line break in a paragraph, and the formatting around it', () => {
+    expect(runs('<p><b>a<br>b</b></p>')).toEqual([
+      { type: 'text', text: 'a', bold: true },
+      { type: 'softbreak', text: '\n' },
+      { type: 'text', text: 'b', bold: true },
+    ]);
+  });
+
+  test('keeps whitespace written as references, which HTML neither collapses nor trims', () => {
+    expect(runs('<p>&#9;a &#32;b&nbsp;</p>')).toEqual([{ type: 'text', text: '\ta  b ' }]);
+  });
+});

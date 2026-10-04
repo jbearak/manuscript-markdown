@@ -11,7 +11,7 @@ import {
 } from './table-metadata';
 
 export interface HtmlTableRun {
-  type: 'text' | 'softbreak' | 'hardbreak';
+  type: 'text' | 'softbreak' | 'hardbreak' | 'paragraph'; // paragraph: the gap between two of a cell's <p>s
   text: string;
   bold?: boolean;
   italic?: boolean;
@@ -212,6 +212,50 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
   let subscript = false;
   let href: string | undefined;
 
+  // Each <p> starts a paragraph of the cell, as does content before any <p>
+  // or after a </p>. A paragraph run separates two of them, so an empty <p>
+  // is an empty paragraph. Whitespace between paragraphs, or at the start of
+  // one or of a line, is the HTML's layout.
+  let paragraphs = 0;
+  let paragraphClosed = false;
+  let atParagraphStart = true;
+  // A <br> at the end of a <p>, which stays, unlike one at the end of a cell
+  const closedBreaks = new Set<HtmlTableRun>();
+  const startParagraph = () => {
+    if (paragraphs > 0) {
+      const last = runs[runs.length - 1];
+      if (last?.type === 'text' && !last.code) {
+        last.text = last.text.replace(/[ \t\r\n]+$/, '');
+        if (!last.text) runs.pop();
+      }
+      runs.push({ type: 'paragraph', text: '\n\n' });
+    }
+    paragraphs++;
+    paragraphClosed = false;
+    atParagraphStart = true;
+  };
+  const startContent = () => {
+    if (paragraphs === 0 || paragraphClosed) startParagraph();
+    atParagraphStart = false;
+  };
+  const emitText = (rawText: string) => {
+    let text = code ? rawText : collapseHtmlWhitespace(rawText);
+    if (!code && (paragraphClosed || atParagraphStart || runs[runs.length - 1]?.type === 'softbreak')) text = text.replace(/^ /, '');
+    if (!text) return;
+    startContent();
+    runs.push({
+      type: 'text', text,
+      ...(bold ? { bold } : {}),
+      ...(italic ? { italic } : {}),
+      ...(underline ? { underline } : {}),
+      ...(strikethrough ? { strikethrough } : {}),
+      ...(code ? { code } : {}),
+      ...(superscript ? { superscript } : {}),
+      ...(subscript ? { subscript } : {}),
+      ...(href ? { href } : {}),
+    });
+  };
+
   // Tokenize the HTML into tags and text segments
   const tagRegex = /<(\/?)(\w+)\b([^>]*)>/g;
   let lastIndex = 0;
@@ -219,25 +263,7 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
 
   while ((match = tagRegex.exec(cellHtml)) !== null) {
     // Emit any text before this tag
-    if (match.index > lastIndex) {
-      const rawText = cellHtml.slice(lastIndex, match.index);
-			let text = code ? rawText : collapseHtmlWhitespace(rawText);
-			// Whitespace at the start of a line is the HTML's layout
-			if (!code && runs[runs.length - 1]?.type === 'softbreak') text = text.replace(/^ /, '');
-      if (text) {
-        runs.push({
-          type: 'text', text,
-          ...(bold ? { bold } : {}),
-          ...(italic ? { italic } : {}),
-          ...(underline ? { underline } : {}),
-          ...(strikethrough ? { strikethrough } : {}),
-          ...(code ? { code } : {}),
-          ...(superscript ? { superscript } : {}),
-          ...(subscript ? { subscript } : {}),
-          ...(href ? { href } : {}),
-        });
-      }
-    }
+    if (match.index > lastIndex) emitText(cellHtml.slice(lastIndex, match.index));
     lastIndex = match.index + match[0].length;
 
     const isClose = match[1] === '/';
@@ -245,6 +271,7 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
     const attrs = match[3];
 
     if (tag === 'br') {
+      startContent();
       runs.push({ type: 'softbreak', text: '\n' });
     } else if (tag === 'b' || tag === 'strong') {
       bold = !isClose;
@@ -262,37 +289,23 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
       subscript = !isClose;
     } else if (tag === 'a') {
       if (!isClose) {
-        const hrefMatch = attrs.match(/href\s*=\s*["']([^"']*)["']/i);
-        href = hrefMatch ? decodeHtmlEntities(hrefMatch[1]) : undefined;
+        const hrefMatch = attrs.match(/href\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+        href = hrefMatch ? decodeHtmlEntities(hrefMatch[1] ?? hrefMatch[2]) : undefined;
       } else {
         href = undefined;
       }
-    } else if (tag === 'p' && isClose) {
-      // Treat </p> as a soft break to separate paragraphs within a cell.
-      runs.push({ type: 'softbreak', text: '\n' });
+    } else if (tag === 'p') {
+      const last = runs[runs.length - 1];
+      if (!isClose) startParagraph();
+      else {
+        if (last?.type === 'softbreak') closedBreaks.add(last);
+        paragraphClosed = true;
+      }
     }
   }
 
   // Emit any trailing text
-  if (lastIndex < cellHtml.length) {
-    const rawText = cellHtml.slice(lastIndex);
-		let text = code ? rawText : collapseHtmlWhitespace(rawText);
-		// Whitespace at the start of a line is the HTML's layout
-		if (!code && runs[runs.length - 1]?.type === 'softbreak') text = text.replace(/^ /, '');
-    if (text) {
-      runs.push({
-        type: 'text', text,
-        ...(bold ? { bold } : {}),
-        ...(italic ? { italic } : {}),
-        ...(underline ? { underline } : {}),
-        ...(strikethrough ? { strikethrough } : {}),
-        ...(code ? { code } : {}),
-        ...(superscript ? { superscript } : {}),
-        ...(subscript ? { subscript } : {}),
-        ...(href ? { href } : {}),
-      });
-    }
-  }
+  if (lastIndex < cellHtml.length) emitText(cellHtml.slice(lastIndex));
 
   // Trim leading/trailing whitespace from the run sequence. Runs hold the
   // source text until here, so whitespace written as a character reference,
@@ -306,7 +319,7 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
   }
   if (runs.length > 0) {
     const last = runs[runs.length - 1];
-    if (last.type === 'softbreak') runs.pop();
+    if (last.type === 'softbreak' && !closedBreaks.has(last)) runs.pop();
     else if (last.type === 'text' && !last.code) {
       last.text = last.text.replace(/[ \t\r\n]+$/, '');
       if (!last.text) runs.pop();

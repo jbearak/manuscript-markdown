@@ -582,7 +582,7 @@ HTML tables support the full range of table features including colspan, rowspan,
 </table>
 ```
 
-A cell takes HTML formatting only. Markdown, CriticMarkup, comments, citations and math in a cell export as literal text.
+A cell takes HTML formatting only. Markdown, CriticMarkup, comments, citations and math in a cell export as literal text. Each `<p>` in a cell exports as a paragraph of the Word cell, and `<br>` as a line break.
 
 Per-table overrides use `data-` attributes directly on the `<table>` element (`data-font-size`, `data-font`, `data-col-widths`, `data-orientation`):
 
