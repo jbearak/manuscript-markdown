@@ -9,6 +9,7 @@ import {
   buildCitationKeyMap,
   extractDocumentContent,
   buildMarkdown,
+  keepParagraphWhitespace,
   generateBibTeX,
   convertDocx,
   generateCitationKey,
@@ -4565,6 +4566,89 @@ describe('Whitespace at the edges of a paragraph', () => {
     const markdown = await withText('A.\n\nXX\n\nB.', 'word/document.xml', text);
     expect(markdown).toBe(expected);
     expect(await roundTrip(markdown)).toBe('A.\n\nend&nbsp;\n\nB.\n');
+  });
+
+  test.each([
+    ['a paragraph', 'A.\n\np\\\nXX\n\nB.', 'word/document.xml', 'A.\n\np\\\n&#9;&#32;t\n\nB.\n'],
+    ['a list item', '- p\\\n  XX\n- b', 'word/document.xml', '- p\\\n&#9;&#32;t\n- b\n'],
+    ['a note', 'T.[^1]\n\n[^1]: A.\n\n    p\\\n    XX', 'word/footnotes.xml', 'T.[^1]\n\n[^1]: A.\n\n    p\\\n    &#9;&#32;t\n'],
+    ['a grid table\'s cell', '+-----+\n| a   |\n+=====+\n| p\\  |\n| XX  |\n|     |\n| z   |\n+-----+', 'word/document.xml',
+      '+------------+\n| a          |\n+============+\n| p          |\n| &#9;&#32;t |\n|            |\n| z          |\n+------------+\n'],
+  ])('keeps the whitespace at the start of a line after a line break in %s', async (_name, md, part, expected) => {
+    // Markdown drops it there
+    const markdown = await withText(md, part, '\t t');
+    expect(markdown).toBe(expected);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['an HTML comment', 'A <!-- x\\\n  y --> b.\n'],
+    ['math', 'A $x\\\n  y$ b.\n'],
+    ['an HTML tag', 'A <span title="a\\\n  b">x</span> c.\n'],
+    ['an HTML block', '<script>x\\\n  y</script>\n'],
+  ])('leaves the whitespace after a backslash at a line\'s end in %s as it is', async (_name, md) => {
+    // Its text is raw, where a reference is text
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    'A [@smith, p.\\\n  2] b.', 'A [see @smith, p.\\\n  2] b.', 'A [see @ékey, p.\\\n  2] b.',
+  ])('leaves the whitespace after a backslash at a line\'s end in a citation as it is: %s', (text) => {
+    // A citation's text is raw, and a reference split it at its ;
+    expect(keepParagraphWhitespace(text, true, true)).toBe(text);
+  });
+
+  test.each([
+    ['a key after its first item', 'A [a; @smith, p.'], ['a formatted prefix', 'A [*see* @smith, p.'],
+  ])('keeps the whitespace after a line break in a bracket that is no citation, with %s', (_name, before) => {
+    // It was taken for a citation, whose text is raw
+    expect(keepParagraphWhitespace(before + '\\\n  2]', true, true)).toBe(before + '\\\n&#32;&#32;2]');
+  });
+
+  test.each(['<!-->', '<!--->'])('keeps the whitespace after a line break after the comment %s', (comment) => {
+    // The comment went on to the next -->
+    expect(keepParagraphWhitespace('A ' + comment + ' x\\\n  y -->', true, true)).toBe('A ' + comment + ' x\\\n&#32;&#32;y -->');
+  });
+
+  test('keeps the whitespace after a line break past comments that don\'t close', () => {
+    // Each opener searched to the end for its closer
+    for (const opener of ['<!--', '{>>', '`']) {
+      const text = 'A ' + opener.repeat(30000) + 'x\\\n\t y';
+      const start = performance.now();
+      expect(keepParagraphWhitespace(text, false, false)).toEndWith('x\\\n&#9;&#32;y');
+      expect(performance.now() - start).toBeLessThan(500);
+    }
+  });
+
+  test('leaves the whitespace in code after a line break as it is', async () => {
+    // A run of backticks before the code, which closes nothing, ended it
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\nXX\n\nB.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const code = '<w:rPr><w:rStyle w:val="CodeChar"/></w:rPr>';
+    const edited = xml.replace('<w:r><w:t>XX</w:t></w:r>', '<w:r><w:t xml:space="preserve">p ```a </w:t></w:r><w:r>' + code + '<w:t>x</w:t></w:r>'
+      + '<w:r>' + code + '<w:br/></w:r><w:r>' + code + '<w:t xml:space="preserve">  y</w:t></w:r>');
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toContain('p ```a `x\\\n  y`');
+  });
+
+  test.each([
+    ['a paragraph that starts with a tab and has a backtick', '\ta`b', '', '&#9;a`b\\\n&#9;&#32;t'],
+    ['an HTML comment with a backtick, before code', 'p <!-- ` --> q', '<w:r><w:rPr><w:rStyle w:val="CodeChar"/></w:rPr><w:t>c</w:t></w:r>',
+      'p <!-- ` --> q\\\n&#9;&#32;t`c`'],
+  ])('keeps the whitespace after a line break in %s', async (_name, before, after, expected) => {
+    // The scan for code read the paragraph as indented code, or paired the
+    // comment's backtick with the code's, and left the whitespace as it was
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\nXX\n\nB.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace('<w:r><w:t>XX</w:t></w:r>', '<w:r><w:t xml:space="preserve">' + before.replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      + '</w:t><w:br/><w:t xml:space="preserve">\t t</w:t></w:r>' + after);
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toBe('A.\n\n' + expected + '\n\nB.\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
   });
 
   test.each([

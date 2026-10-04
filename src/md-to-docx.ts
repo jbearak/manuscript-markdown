@@ -619,7 +619,7 @@ function isLinkifyToken(token: Token): boolean {
  *  Markdown: a Zotero prefix is plain text, and an `@` inside a code span is not
  *  a key. Escaped characters count as text but never start a key. hasCitations()
  *  in frontmatter.ts and citation_list in the grammar approximate this with regexes. */
-function isPlainPrefixedCitationItem(state: StateInline, item: string): boolean {
+function isPlainPrefixedCitationItem(state: Pick<StateInline, 'md' | 'env'>, item: string): boolean {
   const key = CITATION_KEY_RE.exec(item);
   if (!key) return false;
   // Parse with the key replaced by a plain word. The key is opaque, so the
@@ -648,28 +648,45 @@ function citationPrefixText(state: StateInline, prefix: string): string {
   return state.md.utils.unescapeAll(prefix).replace(/\s+/g, ' ');
 }
 
-function citationRule(state: StateInline, silent: boolean): boolean {
-  const start = state.pos;
-  const max = state.posMax;
-
+/** The ] that ends the citation the [ at `start` opens, or -1 */
+function citationEnd(state: Pick<StateInline, 'src' | 'md' | 'env'>, start: number): number {
   // Match [@key], [-@key] (Pandoc suppress-author form), or [prefix @key]
-  if (start + 2 >= max || state.src.charAt(start) !== '[') return false;
+  if (state.src.charAt(start) !== '[') return -1;
   const endPos = state.src.indexOf(']', start + 1);
-  if (endPos === -1) return false;
+  if (endPos === -1) return -1;
   const rawContent = state.src.slice(start + 1, endPos);
 
   if (!/^-?@/.test(rawContent)) {
     // A nested `[` means any citation starts later; `](` or `][` makes this
     // link text that happens to mention someone (Pandoc parses these as links).
-    if (rawContent.includes('[')) return false;
+    if (rawContent.includes('[')) return -1;
     const after = state.src.charAt(endPos + 1);
-    if (after === '(' || after === '[') return false;
+    if (after === '(' || after === '[') return -1;
     // Likewise a shortcut reference link. markdown-it has already consumed its
     // `[label]: url` definition, so a citation here would drop the URL.
     const references = state.env?.references as Record<string, unknown> | undefined;
-    if (references && references[state.md.utils.normalizeReference(rawContent)]) return false;
-    if (!isPlainPrefixedCitationItem(state, rawContent.split(';')[0])) return false;
+    if (references && references[state.md.utils.normalizeReference(rawContent)]) return -1;
+    if (!isPlainPrefixedCitationItem(state, rawContent.split(';')[0])) return -1;
   }
+  return endPos;
+}
+
+let citationTextMd: MarkdownIt | undefined;
+/** The ] that ends the citation the [ at `start` in Markdown `text` opens,
+ *  as export reads one, but without the document's link definitions, or -1 */
+export function citationEndInText(text: string, start: number): number {
+  citationTextMd ??= createMarkdownIt();
+  return citationEnd({ src: text, md: citationTextMd, env: {} }, start);
+}
+
+function citationRule(state: StateInline, silent: boolean): boolean {
+  const start = state.pos;
+  const max = state.posMax;
+
+  if (start + 2 >= max) return false;
+  const endPos = citationEnd(state, start);
+  if (endPos === -1) return false;
+  const rawContent = state.src.slice(start + 1, endPos);
 
   if (!silent) {
     const token = pushManuscriptToken(state, 'citation', '', 0);

@@ -6,8 +6,11 @@ import { FRONTMATTER_OPENING_RE, Frontmatter, NotesMode, parseFrontmatter, seria
 import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType } from './gfm';
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
 import { keepParagraphEdgeWhitespace } from './html-entities';
+import { HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
+import { computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
+import { findDollarMathAt } from './math-delimiters';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { customStyleId } from './md-to-docx';
+import { citationEndInText, customStyleId } from './md-to-docx';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { publicStyleNameForZoteroId, zoteroStyleIdForName } from './csl-loader';
 import { extractZoteroKey } from './zotero-link';
@@ -224,6 +227,113 @@ function escapeSensitiveHtmlLikeTags(text: string): string {
     if (!MARKDOWN_HTML_SENSITIVE_TAGS.has(tagName.toLowerCase())) return fullMatch;
     return fullMatch.replace(/</g, '&lt;').replace(/>/g, '&gt;');
   });
+}
+
+// An HTML tag, comment or the like, as markdown-it reads one, from an offset
+const HTML_TAG_AT = new RegExp(HTML_TAG_RE.source.replace(/^\^/, ''), 'y');
+
+/**
+ * The offsets of the lines after a paragraph's line breaks, a backslash at a
+ * line's end, outside the text its Markdown keeps raw: an HTML block, an
+ * HTML comment or tag, a comment's body, code, math and a citation. One
+ * pass from the left,
+ * as Markdown reads them: an escaped character, a comment, a run of
+ * backticks with the code up to the next run as long, math, a tag, or a
+ * bracket with a citation's key, up to the next ], takes the text it
+ * covers. A closer's search goes on from where its last one ended, so the
+ * pass is linear, but for math and tags, whose search is the parser's.
+ */
+function lineStartsAfterBreaks(text: string): number[] {
+  const starts: number[] = [];
+  // Each closer's offset from its last search, -1 for none
+  const closers = new Map<string, number>();
+  const closerFrom = (closer: string, from: number): number => {
+    let at = closers.get(closer);
+    if (at === undefined || (at !== -1 && at < from)) closers.set(closer, at = text.indexOf(closer, from));
+    return at;
+  };
+  // The start of each run of backticks, by its length, and each length's
+  // first run not yet passed
+  const runs = new Map<number, number[]>();
+  for (const run of text.matchAll(/`+/g)) {
+    const list = runs.get(run[0].length);
+    if (list) list.push(run.index);
+    else runs.set(run[0].length, [run.index]);
+  }
+  const passed = new Map<number, number>();
+  const runFrom = (length: number, from: number): number => {
+    const list = runs.get(length) ?? [];
+    let k = passed.get(length) ?? 0;
+    while (k < list.length && list[k] < from) k++;
+    passed.set(length, k);
+    return k < list.length ? list[k] : -1;
+  };
+  const comment = /\{(?:#[\w-]+)?>>/y;
+  for (let i = 0; i < text.length;) {
+    const c = text[i];
+    if (c === '\\') {
+      if (text[i + 1] === '\n') starts.push(i + 2);
+      i += 2;
+    } else if (c === '<' && /^<!---?>/.test(text.slice(i, i + 6))) {
+      // A comment as short as <!--> or <!--->
+      i += text[i + 4] === '>' ? 5 : 6;
+    } else if (c === '<' && text.startsWith('<!--', i)) {
+      const end = closerFrom('-->', i + 4);
+      i = end === -1 ? i + 4 : end + 3;
+    } else if (c === '{' && (comment.lastIndex = i, comment.test(text))) {
+      const end = closerFrom('<<}', comment.lastIndex);
+      i = end === -1 ? comment.lastIndex : end + 3;
+    } else if (c === '`') {
+      let length = 1;
+      while (text[i + length] === '`') length++;
+      const end = runFrom(length, i + length);
+      i = end === -1 ? i + length : end + length;
+    } else if (c === '$') {
+      const math = findDollarMathAt(text, i, { displayRun: 'at-least' });
+      i = math?.kind === 'math' ? math.end : i + 1;
+    } else if (c === '<' && /[A-Za-z/!?]/.test(text[i + 1] ?? '')) {
+      HTML_TAG_AT.lastIndex = i;
+      i = HTML_TAG_AT.test(text) ? HTML_TAG_AT.lastIndex : i + 1;
+    } else if (c === '[') {
+      // A citation, as export reads one, whose text it keeps as it is.
+      // One with a [ before its ] would start with a key, which the
+      // search for both rules out first, as it goes on from the last.
+      const close = closerFrom(']', i + 1);
+      const open = closerFrom('[', i + 1);
+      const end = close !== -1 && (open === -1 || open > close || /^-?@/.test(text.slice(i + 1, i + 3)))
+        ? citationEndInText(text, i) : -1;
+      i = end === -1 ? i + 1 : end + 1;
+    } else {
+      i++;
+    }
+  }
+  // Not in an HTML block, which a paragraph can start, or a line in it
+  const html = text.includes('<') ? computeMarkdownRegions(text, { includeCode: false, html: 'all' }).htmlRegions : [];
+  return html.length > 0 ? starts.filter(start => !isInsideCodeRegion(start, html)) : starts;
+}
+
+/**
+ * A paragraph's text with the whitespace Markdown would lose written as
+ * character references: at its edges (see keepParagraphEdgeWhitespace), and
+ * the spaces and tabs at the start of a line after a line break, which
+ * Markdown drops there, outside the text it keeps raw.
+ */
+export function keepParagraphWhitespace(text: string, atStart: boolean, atEnd: boolean): string {
+  const reference = (whitespace: string) => whitespace.replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;');
+  if (text.includes('\\\n')) {
+    let kept = '';
+    let last = 0;
+    const indent = /[ \t]+/y;
+    for (const start of lineStartsAfterBreaks(text)) {
+      indent.lastIndex = start;
+      const whitespace = indent.exec(text);
+      if (!whitespace) continue;
+      kept += text.slice(last, start) + reference(whitespace[0]);
+      last = indent.lastIndex;
+    }
+    text = kept + text.slice(last);
+  }
+  return keepParagraphEdgeWhitespace(text, atStart, atEnd);
 }
 
 /** Whether text next to an item starts or ends a Markdown block there: at
@@ -4637,7 +4747,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
         // In a table only HTML holds, such as one with merged cells, the
         // rest exports as literal text
         const rendered = renderInlineSegment(items, comments, renderOpts);
-        lines.push(i3 + '<p>' + keepParagraphEdgeWhitespace(rendered.text, true, true) + '</p>');
+        lines.push(i3 + '<p>' + keepParagraphWhitespace(rendered.text, true, true) + '</p>');
         deferredAll.push(...rendered.deferredComments);
       }
       lines.push(i2 + '</' + tag + '>');
@@ -4745,7 +4855,7 @@ function tryRenderPipeTable(table: { rows: TableRow[] }, maxLineWidth: number, c
         // Escape pipes for GFM table cells: \| in source must become \\\| (escaped
         // backslash + escaped pipe); bare | must become \|. Single-pass callback
         // avoids double-escape issues with two-step approaches.
-        const escaped = keepParagraphEdgeWhitespace(r.text, true, true).replace(/\\?\|/g, m => m.length === 2 ? '\\\\\\|' : '\\|');
+        const escaped = keepParagraphWhitespace(r.text, true, true).replace(/\\?\|/g, m => m.length === 2 ? '\\\\\\|' : '\\|');
         rowCells.push({ text: escaped, deferred: r.deferredComments });
       } else {
         rowCells.push({ text: '', deferred: [] });
@@ -4936,7 +5046,7 @@ function tryRenderGridTable(
         // Split on newlines within a paragraph (e.g. hard breaks).
         // Strip trailing backslash from each line — grid table cells treat
         // bare newlines as hard breaks, so the backslash is redundant.
-        cellLines.push(...keepParagraphEdgeWhitespace(r.text, true, true).split('\n').map(l => l.replace(/\\$/, '')));
+        cellLines.push(...keepParagraphWhitespace(r.text, true, true).split('\n').map(l => l.replace(/\\$/, '')));
         cellDeferred.push(...r.deferredComments);
       }
       if (cellLines.length === 0) cellLines.push('');
@@ -7136,7 +7246,7 @@ export function buildMarkdown(
     }
     pendingAlertPrefixStrip = undefined;
     pendingAlertInlinePrefixForHardBreak = undefined;
-    textOut = keepParagraphEdgeWhitespace(textOut, isMarkdownBlockEdge(mergedContent[i - 1]), isMarkdownBlockEdge(mergedContent[rendered.nextIndex]));
+    textOut = keepParagraphWhitespace(textOut, isMarkdownBlockEdge(mergedContent[i - 1]), isMarkdownBlockEdge(mergedContent[rendered.nextIndex]));
     if (pendingHeadingCriticMarker !== undefined) {
       // Re-insert the heading marker inside the leading Critic span so the
       // whole-paragraph form {++### heading++} round-trips. If the inline
@@ -7190,8 +7300,8 @@ export function buildMarkdown(
       // The text of a part, from partStart, which ends its paragraph. Word
       // puts a space or tab after the note's mark, which goes.
       const inlinePart = (text: string) => partStart === 0
-        ? keepParagraphEdgeWhitespace(text.replace(/^[ \t]+/, ''), true, true)
-        : keepParagraphEdgeWhitespace(text, isMarkdownBlockEdge(bodyMerged[partStart - 1]), true);
+        ? keepParagraphWhitespace(text.replace(/^[ \t]+/, ''), true, true)
+        : keepParagraphWhitespace(text, isMarkdownBlockEdge(bodyMerged[partStart - 1]), true);
       for (let bi = 0; bi < bodyMerged.length; bi++) {
         const item = bodyMerged[bi];
         if (item.type === 'para') {
