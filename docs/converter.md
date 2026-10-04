@@ -159,7 +159,7 @@ If output files already exist, you'll be prompted to replace, choose a new name,
 ## Known Limitations
 
 - **Complex nested tables**: nested `<table>` elements inside cells are not supported
-- **Task-list round-trip normalization**: task list items are exported with deterministic checkbox prefixes in DOCX output; exact original marker spelling (`[x]` vs `[X]`) is not preserved
+- **Task-list round-trip normalization**: task list items are exported with deterministic checkbox prefixes in DOCX output. Import reads a `☐` or `☒` at the start of a list item, or of a paragraph indented the way export indents a bulleted task item, back as a task item. Exact original marker spelling (`[x]` vs `[X]`) is not preserved
 - **Disallowed raw HTML handling**: disallowed tags from the GitHub Flavored Markdown extension set (`title`, `textarea`, `style`, `xmp`, `iframe`, `noembed`, `noframes`, `script`, `plaintext`) are treated as literal text rather than executable/rendered HTML in parsing/preview paths
 
 ### Comment Boundary Expansion in Code Runs

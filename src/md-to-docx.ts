@@ -6145,7 +6145,9 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
       break;
     }
     case 'list_item':
-      if (token.taskChecked !== undefined) {
+      // A bulleted task item shows its checkbox in place of a bullet; a
+      // numbered one keeps its number
+      if (token.taskChecked !== undefined && !token.ordered) {
         const leftIndent = 720 * (token.level || 1);
         pPr = '<w:pPr><w:ind w:left="' + leftIndent + '" w:hanging="360"/></w:pPr>';
       } else {

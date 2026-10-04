@@ -1491,6 +1491,78 @@ describe('Lists nested in lists of the other kind', () => {
   });
 });
 
+describe('Task list round-trip', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+
+  test.each([
+    ['a bulleted task list', '- [ ] t\n- [x] u'],
+    ['a nested task item', 'A.\n\n- [ ] t\n  - [x] nested\n- [ ] v\n\nB.'],
+    ['a numbered task list', '1. [ ] o\n2. [x] p'],
+    ['a task item after a plain one', '- a\n- [ ] t'],
+    ['a task item with a second paragraph', '- [ ] t\n\n  more\n- [x] u'],
+    ['a task item with formatting', '- [ ] **bold** t'],
+    ['a task item after a code block', '```\nx\n```\n\n- [ ] t\n- [x] u'],
+    ['a numbered task item after a code block', '```\nx\n```\n\n1. [ ] t'],
+  ])('keeps %s', async (_, md) => {
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('leaves a tracked change to the box in the text', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('- [ ] todo')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace('<w:r><w:t xml:space="preserve">☐ </w:t></w:r>',
+      '<w:del w:id="90" w:author="A" w:date="2026-01-01T00:00:00Z"><w:r><w:delText xml:space="preserve">☐ </w:delText></w:r></w:del>'
+      + '<w:ins w:id="91" w:author="A" w:date="2026-01-01T00:00:00Z"><w:r><w:t xml:space="preserve">☒ </w:t></w:r></w:ins>'));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('- {~~☐ ~>☒ ~~}todo');
+  });
+
+  test.each([
+    ['the box and its space', '<w:r><w:t>☐</w:t></w:r><w:r><w:t xml:space="preserve"> </w:t></w:r>'],
+    ['the box and the text', '<w:r><w:t>☐</w:t></w:r><w:r><w:t xml:space="preserve"> </w:t></w:r><w:r><w:t>to</w:t></w:r>'],
+  ])('reads a task item whose runs split %s', async (_name, runs) => {
+    // Only a box and its space in one run made a task item
+    const zip = await JSZip.loadAsync((await convertMdToDocx('- [ ] todo')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const split = runs.includes('>to<')
+      ? xml.replace('<w:r><w:t xml:space="preserve">☐ </w:t></w:r><w:r><w:t>todo</w:t></w:r>', runs + '<w:r><w:t>do</w:t></w:r>')
+      : xml.replace('<w:r><w:t xml:space="preserve">☐ </w:t></w:r>', runs);
+    expect(split).not.toBe(xml);
+    zip.file('word/document.xml', split);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('- [ ] todo');
+  });
+
+  test.each([
+    ['the box alone', '<w:commentRangeStart w:id="0"/><w:r><w:t xml:space="preserve">☐ </w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:t>todo</w:t></w:r>', '- {==☐ ==}{>>@A (2024-01-15 10:30) | c<<}todo'],
+    ['the box and the text', '<w:commentRangeStart w:id="0"/><w:r><w:t xml:space="preserve">☐ </w:t></w:r><w:r><w:t>todo</w:t></w:r><w:commentRangeEnd w:id="0"/>', '- [ ] {==todo==}{>>@A (2024-01-15 10:30) | c<<}'],
+  ])('keeps a comment on %s', async (_name, runs, expected) => {
+    // A comment on the box alone lost its range with the box
+    const zip = await JSZip.loadAsync((await convertMdToDocx('- [ ] {==todo==}{>>@A (2024-01-15 10:30) | c<<}')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const moved = xml.replace('<w:r><w:t xml:space="preserve">☐ </w:t></w:r><w:commentRangeStart w:id="0"/><w:r><w:t>todo</w:t></w:r><w:commentRangeEnd w:id="0"/>', runs);
+    expect(moved).not.toBe(xml);
+    zip.file('word/document.xml', moved);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe(expected);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps an empty paragraph shaped like a task item from making the next one a task', async () => {
+    // The next paragraph took its paragraph marker, with the task level on it
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\n☐ not a task')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const empty = xml.replace(/(<w:p [^>]*>)(?=(?:(?!<\/w:p>).)*☐ not a task)/, '<w:p><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:p>$1');
+    expect(empty).not.toBe(xml);
+    zip.file('word/document.xml', empty);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('A.\n\n\n\n☐ not a task');
+  });
+
+  test('keeps a paragraph that only starts with a box', async () => {
+    expect(await roundTrip('☐ not a task')).toBe('☐ not a task');
+  });
+});
+
 describe('List indent round-trip', () => {
   test('does not infer an ordinary left-indented paragraph as a list continuation', async () => {
     const { docx } = await convertMdToDocx('- item\n\nBody');
