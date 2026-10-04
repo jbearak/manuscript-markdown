@@ -30,6 +30,13 @@ describe('getFrontmatterSettingEdit', () => {
 		});
 	});
 
+	test('creates frontmatter above a horizontal rule', () => {
+		expect(getFrontmatterSettingEdit('---\n\nBody\n\n---\n', '\n', 'font')).toMatchObject({
+			offset: 0,
+			text: '---\nfont: \n---\n',
+		});
+	});
+
 	test('inserts a missing setting before the closing delimiter', () => {
 		expect(getFrontmatterSettingEdit('---\ntitle: Draft\n---\nBody', '\n', 'font')).toEqual({
 			offset: 17,

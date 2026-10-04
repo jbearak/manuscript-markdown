@@ -1,3 +1,5 @@
+import { FRONTMATTER_OPENING_RE } from './frontmatter';
+
 export interface FrontmatterMenuSetting {
 	key: string;
 	label: string;
@@ -93,7 +95,7 @@ export function getFrontmatterSettingEdit(
 	// Match parseFrontmatter's treatment of leading whitespace and UTF-8 BOMs.
 	const openingOffset = markdown.length - markdown.trimStart().length;
 	const trimmed = markdown.slice(openingOffset);
-	if (!trimmed.startsWith('---')) {
+	if (!FRONTMATTER_OPENING_RE.test(trimmed)) {
 		return newFrontmatterEdit(eol, key);
 	}
 

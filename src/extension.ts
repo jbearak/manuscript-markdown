@@ -362,7 +362,7 @@ export function activate(context: vscode.ExtensionContext) {
 			const eol = editor.document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
 
 			await editor.edit(editBuilder => {
-				const fmMatch = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+				const fmMatch = text.match(/^---[ \t]*\r?\n(?![ \t]*\r?\n)([\s\S]*?)\r?\n---(?=\r?\n|$)/);
 				if (fmMatch) {
 					const fmStart = fmMatch.index!;
 					const bodyStart = text.indexOf('\n', fmStart) + 1;
