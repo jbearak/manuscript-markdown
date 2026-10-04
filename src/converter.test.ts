@@ -1425,6 +1425,72 @@ describe('Ordered list numbering', () => {
   });
 });
 
+describe('Lists nested in lists of the other kind', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+
+  test.each([
+    ['a bullet list in a numbered item', '1. a\n   - b\n2. c\n'],
+    ['a numbered list in a bullet item', '- a\n  1. b\n- c\n'],
+    ['three levels, numbered first', '1. a\n   - x\n     1. xx\n   1. y\n'],
+    ['three levels, bullets first', '- a\n  1. x\n     - xx\n  - y\n'],
+    ['paragraphs under each', '1. a\n   - b\n\n     cont b\n\n   more a\n2. c\n'],
+    ['a bullet list in item 10', '9. b\n10. c\n    - d\n11. e\n'],
+    ['a tracked break in a bullet item in a numbered item', '1. a\n   - x {++a\n\n     b++} y\n'],
+    ['a tracked break in a numbered item in a bullet item', '- a\n  1. x {++a\n\n     b++} y\n'],
+    ['a tracked break in a bullet item in item 10', '10. a\n    - x {++a\n\n      b++} y\n'],
+  ])('keeps %s', async (_name, md) => {
+    // Indented as a list of its own kind would be, the sublist came out of
+    // its item on the next round trip, with blank lines around it
+    expect(await roundTrip(md)).toBe(md);
+    expect(await roundTrip(await roundTrip(md))).toBe(md);
+  });
+
+  test.each([
+    ['a bullet item', '- parent\n\n  3. child\n'],
+    ['a numbered item', '1. parent\n\n   3. child\n'],
+    ['a bullet item, before an empty item', '- a\n\n  - \n    - b\n'],
+    ['a bullet item, before an empty numbered item', '- parent\n\n  1. \n     - grand\n'],
+    ['a bullet item, after an empty item and a paragraph', '- a\n\n  3. \n\n  more\n\n  3. c\n'],
+  ])('keeps the blank line before a sublist from 3 or empty in %s', async (_name, md) => {
+    // Only a list from 1 can interrupt the item's text: without the blank
+    // line, the sublist was read back as part of that text
+    expect(await roundTrip(md)).toBe(md);
+    expect(await roundTrip(await roundTrip(md))).toBe(md);
+  });
+
+  /** The Markdown of md's export with its level-1 list items at level 2, as Word can skip a level */
+  const skippingLevel1 = async (md: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<w:ilvl w:val="1"\/>/g, '<w:ilvl w:val="2"/>').replace(/w:left="1440"/g, 'w:left="2160"'));
+    const numbering = await zip.file('word/numbering.xml')!.async('string');
+    zip.file('word/numbering.xml', numbering.replace(/<w:lvlOverride w:ilvl="1">/g, '<w:lvlOverride w:ilvl="2">'));
+    return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+  };
+
+  test('indents a paragraph in an item at a level Word skipped under its marker', async () => {
+    // It took the indent of a list of its own kind, which left the item
+    const markdown = await skippingLevel1('10. a\n    - b\n\n      more\n');
+    expect(markdown).toBe('10. a\n      - b\n\n        more\n');
+    expect(await roundTrip(markdown)).toBe('10. a\n    - b\n\n      more\n');
+  });
+
+  test('indents the items at a level Word skipped alike', async () => {
+    // The width of the first marker went in the place of the skipped level's
+    expect(await skippingLevel1('- a\n\n  10. b\n  11. c\n')).toBe('- a\n\n     10. b\n     11. c\n');
+  });
+
+  test.each([
+    ['a sublist from 3', '1. \n   3. child\n'],
+    ['a bullet sublist', '1. \n   - child\n'],
+    ['a numbered sublist', '- \n  1. child\n'],
+  ])('puts no blank line between an empty item and %s', async (_name, md) => {
+    // A blank line ends an item that starts with one, and the sublist came out of it
+    expect(await roundTrip(md)).toBe(md);
+    expect(await roundTrip(await roundTrip(md))).toBe(md);
+  });
+});
+
 describe('List indent round-trip', () => {
   test('does not infer an ordinary left-indented paragraph as a list continuation', async () => {
     const { docx } = await convertMdToDocx('- item\n\nBody');
@@ -2723,8 +2789,10 @@ describe('buildMarkdown', () => {
           ]);
           
           const result = buildMarkdown(content, new Map());
-          const hasTypeTransition = items.some((item, idx) => idx > 0 && item.type !== items[idx - 1].type);
-          if (hasTypeTransition) {
+          // A list of the other kind at the same level is one of its own; a
+          // sublist of the other kind is nested, with no blank line
+          const startsAdjacentList = items.some((item, idx) => idx > 0 && item.level === items[idx - 1].level && item.type !== items[idx - 1].type);
+          if (startsAdjacentList) {
             expect(result).toContain('\n\n');
           }
           expect(result).not.toContain('\n\n\n'); // No double blank lines

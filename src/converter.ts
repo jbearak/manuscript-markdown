@@ -238,6 +238,7 @@ export interface ListContinuation {
   type: 'bullet' | 'ordered';
   level: number; // 0-based parent list nesting level for Markdown rendering
   markerWidth?: number; // ordered-list marker width (e.g. "10. " => 4)
+  indent?: number; // columns of the item's content: its marker and its parents'
 }
 
 interface StructuralListContext {
@@ -5051,6 +5052,24 @@ function inferOrderedMarkerWidth(
   return String(number).length + 2;
 }
 
+/** A paragraph in the item at `context`'s level, which indents by that
+ *  item's marker and the markers of the items it's in. A level Word skipped
+ *  takes the width of the item's own kind of marker, as buildMarkdown
+ *  indents the item by. */
+function continuationOf(context: StructuralListContext, listContexts: Map<number, StructuralListContext>): ListContinuation {
+  let indent = 0;
+  for (let k = 0; k <= context.level; k++) {
+    const item = listContexts.get(k) ?? context;
+    indent += item.level === k && item.markerWidth !== undefined ? item.markerWidth : item.type === 'bullet' ? 2 : 3;
+  }
+  return {
+    type: context.type,
+    level: context.level,
+    ...(context.markerWidth !== undefined ? { markerWidth: context.markerWidth } : {}),
+    indent,
+  };
+}
+
 function inferListContinuationForBlockquote(
   item: Extract<ContentItem, { type: 'para' }>,
   listContexts: Map<number, StructuralListContext>,
@@ -5070,14 +5089,7 @@ function inferListContinuationForBlockquote(
     if (adjustedIndent < unit || adjustedIndent % unit !== 0) continue;
     const inferredLevel = adjustedIndent / unit;
     if (!Number.isInteger(inferredLevel) || inferredLevel < 1) continue;
-    return {
-      blockquoteLevel: inferredLevel,
-      listContinuation: {
-        type: context.type,
-        level: context.level,
-        ...(context.markerWidth !== undefined ? { markerWidth: context.markerWidth } : {}),
-      },
-    };
+    return { blockquoteLevel: inferredLevel, listContinuation: continuationOf(context, listContexts) };
   }
 
   return fallback;
@@ -5312,19 +5324,17 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
       if (item.generatedListContinuation && item.paragraphLeftIndentTwips !== undefined) {
         const continuationLevel = item.paragraphLeftIndentTwips / 720 - 1;
         const context = listContexts.get(continuationLevel);
-        if (context) {
-          item.listContinuation = {
-            type: context.type,
-            level: context.level,
-            ...(context.markerWidth !== undefined ? { markerWidth: context.markerWidth } : {}),
-          };
-        }
+        if (context) item.listContinuation = continuationOf(context, listContexts);
       }
 
       if (item.listContinuation) {
         const context = listContexts.get(item.listContinuation.level);
         if (context?.markerWidth !== undefined && item.listContinuation.markerWidth === undefined) {
           item.listContinuation.markerWidth = context.markerWidth;
+        }
+        if (context && item.listContinuation.indent === undefined) {
+          const { indent } = continuationOf(context, listContexts);
+          if (indent !== undefined) item.listContinuation.indent = indent;
         }
         currentBlockquoteGroupIndex = undefined;
         lastBlockquoteLevel = undefined;
@@ -5498,6 +5508,9 @@ export function buildMarkdown(
 ): string {
   let breakMarks: TrackedBreakMarks | undefined;
   const marks = () => breakMarks ??= trackedBreakMarks([content, [...comments.values()], options]);
+  // The width of the marker of the open list item at each level, which the
+  // items and paragraphs under it indent by
+  let listMarkerWidths: number[] = [];
   // listContinuationIndent and blockquotePrefix are declared further down
   const mergedContent = mergeConsecutiveRuns(joinTrackedParagraphBreaks(content, marks, para => (
     para.blockquoteLevel ? blockquotePrefix(para)
@@ -5664,6 +5677,9 @@ export function buildMarkdown(
     if (useTab) {
       return '\t'.repeat(list.level + 1);
     }
+    if (listMarkerWidths.length > list.level) return ' '.repeat(listItemIndent(list.level + 1));
+    // Before the render loop reaches the item, as for a tracked break
+    if (list.indent !== undefined) return ' '.repeat(list.indent);
     if (list.type === 'bullet') {
       return ' '.repeat(2 * (list.level + 1));
     }
@@ -5703,6 +5719,7 @@ export function buildMarkdown(
   let tableIndex = 0;
   let lastListType: 'bullet' | 'ordered' | undefined;
   let lastListLevel: number | undefined;
+  let lastListItemEmpty = false; // the last list item has no text of its own
   let prevItemWasListQuote = false; // the paragraph before is a quote in a list item
   const listTypeByLevel = new Map<number, 'bullet' | 'ordered'>(); // per-level list type tracking
   const orderedListCounters = new Map<number, number>(); // per-level counters for ordered list items
@@ -5711,7 +5728,14 @@ export function buildMarkdown(
   let listContentEnd: number | undefined;
   let topOrderedNext: number | undefined;
   // What follows starts a new list, with its own indent sentinel
-  const endListContext = () => { lastListType = undefined; lastListLevel = undefined; listTypeByLevel.clear(); };
+  const endListContext = () => { lastListType = undefined; lastListLevel = undefined; listTypeByLevel.clear(); listMarkerWidths = []; };
+  /** The columns a list item at `level` indents by: its parents' markers, or
+   *  where they're unknown, 2 for a bullet and 3 for a number. */
+  const listItemIndent = (level: number, type?: 'bullet' | 'ordered') => {
+    let columns = 0;
+    for (let k = 0; k < level; k++) columns += listMarkerWidths[k] ?? (type === 'bullet' ? 2 : 3);
+    return columns;
+  };
   let codeBlockGroupIndex = 0;
   let lastAlertParagraphKey: string | undefined;
   let pendingAlertPrefixStrip: GfmAlertType | undefined;
@@ -5890,6 +5914,7 @@ export function buildMarkdown(
         lastListType = undefined;
         lastListLevel = undefined;
         listTypeByLevel.clear();
+        listMarkerWidths = [];
         lastAlertParagraphKey = undefined;
         pendingAlertPrefixStrip = undefined;
         pendingAlertInlinePrefixForHardBreak = undefined;
@@ -5974,12 +5999,23 @@ export function buildMarkdown(
           // A quoted blank line keeps multi-paragraph content—including
           // display equations—inside one blockquote/alert on reparse.
           output.push('\n' + blockquotePrefix(item).trimEnd() + '\n');
-        } else if (lastListType && isCurrentList && item.listMeta!.type === lastListType) {
+        } else if (lastListType && isCurrentList && (item.listMeta!.type === lastListType
+            // A sublist of the other kind, or the list of the item it's in
+            || item.listMeta!.level > (lastListLevel ?? 0)
+            || listTypeByLevel.get(item.listMeta!.level) === item.listMeta!.type)) {
           // After a quote in the item before, the blank lines the source had
           // (export writes no empty paragraph there, which would end the list)
           const afterQuote = prevItemWasListQuote && pendingPostContentGroupIndex !== undefined
             ? blockquotePostContentBlankLines?.get(pendingPostContentGroupIndex) ?? 0 : 0;
-          output.push('\n' + '\n'.repeat(afterQuote));
+          const meta = item.listMeta!;
+          const startsList = meta.level > (lastListLevel ?? 0) || listTypeByLevel.get(meta.level) !== meta.type;
+          // A blank line ends an item with no text, before its sublist
+          const underEmpty = meta.level > (lastListLevel ?? 0) && lastListItemEmpty;
+          // Only a list whose first item has text, numbered from 1 if at all,
+          // can interrupt the text before it
+          const interrupts = startsList && !lastListItemEmpty && (!paragraphHasContent(mergedContent, i)
+            || (meta.type === 'ordered' && (meta.wordNumber ?? meta.startNumber ?? 1) !== 1));
+          output.push('\n' + '\n'.repeat(underEmpty ? 0 : Math.max(afterQuote, interrupts ? 1 : 0)));
         } else if (item.listContinuation) {
           // Plain continuation paragraphs are block children of the list item
           // and therefore require a blank line. An imported empty paragraph
@@ -6111,6 +6147,8 @@ export function buildMarkdown(
           output.push('\n\n');
         }
       }
+      // A paragraph or block in an item, which the list item below sets again
+      lastListItemEmpty = false;
       const orderedItem = item.listMeta?.type === 'ordered' && !item.headingLevel
         ? nextOrderedNumber(item.listMeta, orderedListCounters, listTypeByLevel, lastListLevel)
         : undefined;
@@ -6129,7 +6167,7 @@ export function buildMarkdown(
         while (output.length > 0 && !output[output.length - 1].trim()) output.pop();
         if (output.length > 0) output[output.length - 1] = output[output.length - 1].replace(/\n+$/, '');
         const level = item.listMeta!.level;
-        output.push('\n\n' + (options?.listIndent === 'tab' ? '\t'.repeat(level) : ' '.repeat(3 * level)) + '<!-- -->\n\n');
+        output.push('\n\n' + (options?.listIndent === 'tab' ? '\t'.repeat(level) : ' '.repeat(listItemIndent(level))) + '<!-- -->\n\n');
       }
       // Comment bodies written into the quote before stand where lines
       // without > kept it apart from this one. Unless this one opens an
@@ -6210,11 +6248,10 @@ export function buildMarkdown(
         pendingAlertPrefixStrip = undefined;
         pendingAlertInlinePrefixForHardBreak = undefined;
         const useTab = options?.listIndent === 'tab';
+        // Under the content of its parent items, whatever their markers
         const indent = useTab
           ? '\t'.repeat(item.listMeta.level)
-          : item.listMeta.type === 'bullet'
-            ? ' '.repeat(2 * item.listMeta.level)
-            : ' '.repeat(3 * item.listMeta.level);
+          : ' '.repeat(listItemIndent(item.listMeta.level, item.listMeta.type));
         // Per-level counters handle nested lists (see nextOrderedNumber)
         listTypeByLevel.set(item.listMeta.level, item.listMeta.type);
         const orderedNum = orderedItem?.number ?? 1;
@@ -6222,6 +6259,11 @@ export function buildMarkdown(
           ? (useTab ? (item.listMeta.bulletMarker ?? '-') + '\t' : (item.listMeta.bulletMarker ?? '-') + ' ')
           : (useTab ? orderedNum + '.\t' : orderedNum + '. ');
         if (item.listMeta.level === 0) topOrderedNext = item.listMeta.type === 'ordered' ? orderedNum + 1 : undefined;
+        // A level Word skipped keeps the width the item was indented by
+        const widths = listMarkerWidths.slice(0, item.listMeta.level);
+        for (let k = widths.length; k < item.listMeta.level; k++) widths.push(item.listMeta.type === 'bullet' ? 2 : 3);
+        listMarkerWidths = [...widths, marker.length];
+        lastListItemEmpty = !paragraphHasContent(mergedContent, i);
         output.push(indent + marker);
       } else if (item.blockquoteLevel) {
         const itemPrefix = blockquotePrefix(item);
@@ -6294,7 +6336,10 @@ export function buildMarkdown(
       lastListLevel = isCurrentList
         ? item.listMeta!.level
         : item.listContinuation?.level;
-      if (!isCurrentList && !item.listContinuation) listTypeByLevel.clear();
+      if (!isCurrentList && !item.listContinuation) {
+        listTypeByLevel.clear();
+        listMarkerWidths = [];
+      }
 
       i++;
       continue;
@@ -6412,6 +6457,7 @@ export function buildMarkdown(
       lastListType = undefined;
       lastListLevel = undefined;
       listTypeByLevel.clear();
+      listMarkerWidths = [];
       lastAlertParagraphKey = undefined;
       pendingAlertPrefixStrip = undefined;
       pendingAlertInlinePrefixForHardBreak = undefined;
@@ -6473,6 +6519,7 @@ export function buildMarkdown(
         lastListType = undefined;
         lastListLevel = undefined;
         listTypeByLevel.clear();
+        listMarkerWidths = [];
       }
       pendingAlertPrefixStrip = undefined;
       pendingAlertInlinePrefixForHardBreak = undefined;
@@ -6540,6 +6587,7 @@ export function buildMarkdown(
         lastListType = undefined;
         lastListLevel = undefined;
         listTypeByLevel.clear();
+        listMarkerWidths = [];
         lastAlertParagraphKey = undefined;
         pendingAlertPrefixStrip = undefined;
         pendingAlertInlinePrefixForHardBreak = undefined;
@@ -6554,6 +6602,7 @@ export function buildMarkdown(
       lastListType = undefined;
       lastListLevel = undefined;
       listTypeByLevel.clear();
+      listMarkerWidths = [];
       lastAlertParagraphKey = undefined;
       pendingAlertPrefixStrip = undefined;
       pendingAlertInlinePrefixForHardBreak = undefined;
