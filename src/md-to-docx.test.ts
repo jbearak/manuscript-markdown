@@ -3757,9 +3757,19 @@ describe('Code block language custom properties', () => {
     const zip = await JSZip.loadAsync(result.docx);
     const customXml = await zip.file('docProps/custom.xml')?.async('string');
     expect(customXml).toContain('MANUSCRIPT_CODE_BLOCK_LANGS_2');
-    expect(customXml).not.toContain('�');
+    expect(customXml).not.toContain('\ufffd');
     const { convertDocx } = await import('./converter');
     expect((await convertDocx(result.docx)).markdown).toBe(md);
+  });
+
+  it.each([0, 1])('splits Zotero\'s preferences between characters, not in an emoji, at offset %d', async (offset) => {
+    const md = '---\ncsl: ' + 'a'.repeat(offset) + '📊'.repeat(150) + '\n---\n\nText.\n';
+    const result = await convertMdToDocx(md);
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(result.docx);
+    const customXml = await zip.file('docProps/custom.xml')?.async('string');
+    expect(customXml).toContain('ZOTERO_PREF_2');
+    expect(customXml).not.toContain('\ufffd');
   });
 
   it('does not create custom property when no code block languages', async () => {

@@ -5383,15 +5383,7 @@ function zoteroCustomProps(fm: Frontmatter): CustomPropEntry[] {
   });
 
   // Chunk the pref string into ZOTERO_PREF_1, ZOTERO_PREF_2, etc. (max 240 chars each)
-  const CHUNK_SIZE = 240;
-  const props: CustomPropEntry[] = [];
-  for (let i = 0; i < prefData.length; i += CHUNK_SIZE) {
-    props.push({
-      name: 'ZOTERO_PREF_' + (props.length + 1),
-      value: prefData.slice(i, i + CHUNK_SIZE),
-    });
-  }
-  return props;
+  return chunkCustomProps('ZOTERO_PREF_', prefData);
 }
 
 function commentIdMappingProps(commentIdMap: Map<string, number>): CustomPropEntry[] {
