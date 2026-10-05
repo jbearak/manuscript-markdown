@@ -2933,7 +2933,8 @@ describe('wrapWithFormatting', () => {
 
           const result = wrapWithFormatting(text, fmt);
 
-          if ((formatType === 'bold' || formatType === 'italic' || formatType === 'strikethrough' || formatType === 'highlight') && text.trim().length === 0) {
+          // A highlight holds whitespace alone too, which Word shows it on
+          if ((formatType === 'bold' || formatType === 'italic' || formatType === 'strikethrough') && text.trim().length === 0) {
             expect(result).toBe(text);
             return;
           }
@@ -2984,7 +2985,8 @@ describe('wrapWithFormatting', () => {
           if (
             !fmt.code
             && text.trim().length === 0
-            && (fmt.bold || fmt.italic || fmt.strikethrough || fmt.highlight)
+            && (fmt.bold || fmt.italic || fmt.strikethrough)
+            && !fmt.highlight
             && !fmt.underline
             && !fmt.superscript
             && !fmt.subscript
@@ -9299,6 +9301,18 @@ describe('Highlights across runs', () => {
     // The highlight held it, as it holds its edge spaces, so export
     // highlighted a space Word doesn't have
     expect(buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim()).toBe(md);
+  });
+
+  const keyless = (commentIds: string[] = [], revision?: RevisionInfo) =>
+    ({ type: 'citation', text: '{1}', pandocKeys: [], commentIds: new Set(commentIds), formatting: DEFAULT_FORMATTING, ...(revision ? { revision } : {}) }) as ContentItem;
+
+  test.each([
+    ['', [run('Seen '), run('a ', { highlight: true }), keyless()], 'Seen ==a ==\\{1}'],
+    [' in a comment\'s range', [run('Seen '), { ...run('a ', { highlight: true }), commentIds: new Set(['0']) }, keyless(['0'])], 'Seen {====a ==\\{1}==}{>>@A | n<<}'],
+    [' in a substitution', [run('Seen '), run('x', {}, { ...inserted, type: 'deletion' }), run('a ', { highlight: true }, inserted), keyless([], inserted)], 'Seen {~~x~>==a ==\\{1}~~}'],
+  ])('escapes the text of a citation without keys after a highlight, whose == would take it as a color%s', (_name, items, md) => {
+    // Export read ==a =={1} as a highlight colored 1, without the text
+    expect(buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map([['0', { author: 'A', text: 'n', date: '' }]])).trim()).toBe(md);
   });
 });
 

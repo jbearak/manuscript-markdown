@@ -5478,7 +5478,7 @@ function substitutionItemText(item: SubstitutionItem, precedingText: string, not
   if (item.type === 'citation') {
     return item.pandocKeys.length > 0
       ? citationSeparator(precedingText, item.revision) + '[' + item.pandocKeys.join('; ') + ']'
-      : item.text;
+      : escapeAfterHighlight(item.text, precedingText);
   }
   return item.display
     ? MATH_FENCE + '\n' + canonicalizeDisplayMathLatex(item.latex) + '\n' + MATH_FENCE
@@ -6160,7 +6160,8 @@ function renderInlineRange(
         const citeSep = citationSeparator(out, item.revision, lastSpan);
         citeText = citeSep + '[' + item.pandocKeys.join('; ') + ']';
       } else {
-        citeText = item.text;
+        // Text a highlight's == before it would take, as a {1} for a color
+        citeText = escapeAfterHighlight(item.text, out, inSpanBefore(out, item, lastSpan));
       }
       [out, lastSpan] = appendRevised(out, citeText, item, lastSpan);
       i++;
@@ -6264,7 +6265,7 @@ function renderInlineRange(
         if (seg.type === 'citation') {
           const citeText = seg.pandocKeys.length > 0
             ? citationSeparator(anchorText || out + lead, seg.revision, anchorSpan) + '[' + seg.pandocKeys.join('; ') + ']'
-            : seg.text;
+            : escapeAfterHighlight(seg.text, anchorText, inSpanBefore(anchorText, seg, anchorSpan));
           [anchorText, anchorSpan] = appendRevised(anchorText, citeText, seg, anchorSpan);
           j++;
           continue;
@@ -6457,7 +6458,8 @@ function renderInlineRangeWithIds(
         const citeSep = citationSeparator(out, item.revision, lastSpan);
         citeText = citeSep + '[' + item.pandocKeys.join('; ') + ']';
       } else {
-        citeText = item.text;
+        // Text a highlight's == before it would take, as a {1} for a color
+        citeText = escapeAfterHighlight(item.text, out, inSpanBefore(out, item, lastSpan));
       }
       [out, lastSpan] = appendRevised(out, citeText, item, lastSpan);
       i++;
