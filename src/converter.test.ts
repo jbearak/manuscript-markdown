@@ -1678,13 +1678,13 @@ describe('Lists nested in lists of the other kind', () => {
   test('indents a paragraph in an item at a level Word skipped under its marker', async () => {
     // It took the indent of a list of its own kind, which left the item
     const markdown = await skippingLevel1('10. a\n    - b\n\n      more\n');
-    expect(markdown).toBe('10. a\n      - b\n\n        more\n');
-    expect(await roundTrip(markdown)).toBe('10. a\n    - b\n\n      more\n');
+    expect(markdown).toBe('10. a\n    - b\n\n      more\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
   });
 
   test('indents the items at a level Word skipped alike', async () => {
     // The width of the first marker went in the place of the skipped level's
-    expect(await skippingLevel1('- a\n\n  10. b\n  11. c\n')).toBe('- a\n\n     10. b\n     11. c\n');
+    expect(await skippingLevel1('- a\n\n  10. b\n  11. c\n')).toBe('- a\n\n  10. b\n  11. c\n');
   });
 
   test.each([
@@ -1695,6 +1695,119 @@ describe('Lists nested in lists of the other kind', () => {
     // A blank line ends an item that starts with one, and the sublist came out of it
     expect(await roundTrip(md)).toBe(md);
     expect(await roundTrip(await roundTrip(md))).toBe(md);
+  });
+});
+
+describe('List levels Word skips', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  const imported = async (docx: Uint8Array) => strip((await convertDocx(docx)).markdown);
+  /** md's export with its list items at `levels` in order, as Word can skip
+   *  levels, and `edit` made to its XML */
+  const atLevels = async (md: string, levels: number[], edit = (xml: string) => xml) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    let k = 0;
+    zip.file('word/document.xml', edit(xml.replace(/<w:ilvl w:val="\d+"\/>/g, () => '<w:ilvl w:val="' + levels[k++] + '"/>')));
+    return zip.generateAsync({ type: 'uint8array' });
+  };
+  /** The kind and text of each paragraph Word shows */
+  const shown = async (docx: Uint8Array) => {
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    return [...xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map(([p]) => p)
+      .filter(p => !p.includes('<w:vanish/>') && /<w:t[ >]/.test(p))
+      .map(p => (/<w:numPr>/.test(p) ? 'list' : /<w:pStyle w:val="([^"]*)"/.exec(p)?.[1] ?? 'plain') + ': '
+        + [...p.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map(t => t[1]).join(''));
+  };
+  /** The Markdown import writes for docx, after checking that it reads back
+   *  the same and that its export shows the same paragraphs as docx */
+  const stable = async (docx: Uint8Array) => {
+    const markdown = await imported(docx);
+    const exported = (await convertMdToDocx(markdown)).docx;
+    expect(await imported(exported)).toBe(markdown);
+    expect(await shown(exported)).toEqual(await shown(docx));
+    return markdown;
+  };
+
+  test.each([
+    ['a list at level 1 at the start', '- a\n- b\n', [1, 1]],
+    ['a list at level 2 at the start', '- a\n- b\n', [2, 2]],
+    ['a list at level 1 after a paragraph', 'Text\n\n- a\n- b\n', [1, 1]],
+    ['a list at level 2 after a paragraph', 'Text\n\n- a\n- b\n', [2, 2]],
+    ['a numbered list at level 1 at the start', '1. a\n2. b\n', [1, 1]],
+    ['a numbered list at level 2 after a paragraph', 'Text\n\n1. a\n2. b\n', [2, 2]],
+  ])('writes %s at the top level', async (_name, md, levels) => {
+    // Indented for its level, it read as a list at the top, or at 4 columns as code
+    expect(await stable(await atLevels(md, levels))).toBe(md);
+  });
+
+  test.each([
+    ['from 0 to 2', '- a\n  - b\n  - c\n- d\n', [0, 2, 2, 0]],
+    ['from 0 to 3', '- a\n  - b\n  - c\n- d\n', [0, 3, 3, 0]],
+    ['from 0 to 2 in a numbered list', '1. a\n   1. b\n   2. c\n2. d\n', [0, 2, 2, 0]],
+    ['from 0 to 3 in a numbered list', '1. a\n   1. b\n   2. c\n2. d\n', [0, 3, 3, 0]],
+    ['from 0 to 2 for bullets in a numbered item', '1. a\n   - b\n2. c\n', [0, 2, 0]],
+    ['from 0 to 3 for numbers in a bullet item', '- a\n  1. b\n- c\n', [0, 3, 0]],
+    ['from 0 to 2 under item 10', '9. a\n10. b\n    - c\n', [0, 0, 2]],
+    ['from 0 to 2 and 2 to 4', '1. a\n   1. b\n      1. c\n', [0, 2, 4]],
+    ['from 0 to 2, then back to the level skipped', '- a\n  - b\n  - c\n    - d\n', [0, 2, 1, 2]],
+  ])('nests an item one level under the item before where Word jumps %s', async (_name, md, levels) => {
+    // Indented for its level, it nested a level too deep, or went in the
+    // text of the item before, or read as code
+    expect(await stable(await atLevels(md, levels))).toBe(md);
+  });
+
+  test('keeps the number Word shows an item after a level it skipped', async () => {
+    // Word numbers it from 1 at its own level, where Markdown would go on
+    // from the items at the level it skipped, which nest at the same depth
+    const markdown = await stable(await atLevels('1. a\n   1. b\n   2. c\n   3. d\n', [0, 2, 2, 1]));
+    expect(markdown).toBe('1. a\n   1. b\n   2. c\n\n   <!-- -->\n\n   1. d\n');
+  });
+
+  test.each([
+    ['a paragraph', '- a\n  - b\n\n    more\n', (xml: string) => xml.replace(/w:left="1440"/g, 'w:left="2160"')],
+    ['a quote', '- a\n  - b\n\n    > q\n', (xml: string) => xml.replace(/w:left="1680"/g, 'w:left="2400"')],
+    ['an equation', '- a\n  - b\n    ' + '$' + '$\n    x\n    ' + '$' + '$\n', (xml: string) => xml],
+  ])('indents %s in an item at a level Word skipped as the item', async (_name, md, edit) => {
+    // Indented for the level Word gives its item, it went past the item's text
+    expect(await stable(await atLevels(md, [0, 2], edit))).toBe(md);
+  });
+
+  test.each([
+    ['at the start', '- [ ] a\n- [x] b\n', (xml: string) => xml.replace(/w:left="720"/g, 'w:left="2160"')],
+    ['under one at level 0', 'Text\n\n- [ ] a\n  - [x] b\n', (xml: string) => xml.replace(/w:left="1440"/g, 'w:left="2880"')],
+  ])('writes a task item at a level Word skipped, %s, as a list item', async (_name, md, edit) => {
+    // Its indent's level was the item's, which read as code at the start
+    expect(await stable(await atLevels(md, [], edit))).toBe(md);
+  });
+
+  test.each([
+    ['at the start', '- a\n\t- b\n', [2, 2], '-\ta\n-\tb\n'],
+    ['after level 0', '- a\n\t- b\n\t- c\n', [0, 2, 2], '-\ta\n\t-\tb\n\t-\tc\n'],
+  ])('indents an item at a level Word skipped %s with a tab for each level it nests at', async (_name, md, levels, expected) => {
+    // A tab for each level Word gives it read as code
+    expect(await stable(await atLevels(md, levels))).toBe(expected);
+  });
+
+  test.each([
+    ['at the next level', '9. a\n10. b\n    - c\n', [0, 0, 1], '9. a\n10. b\n\n\n\n    - c\n'],
+    ['at a level after one Word skipped', '- a\n  - b\n', [0, 2], '- a\n\n\n\n  - b\n'],
+  ])('nests an item after an empty paragraph in the item before, %s', async (_name, md, levels, expected) => {
+    // The empty paragraph lost the width of the item's marker, and the item
+    // indented for a bullet's left the numbered item
+    const docx = await atLevels(md, levels, xml => xml.slice(0, xml.lastIndexOf('<w:p ')) + '<w:p/>' + xml.slice(xml.lastIndexOf('<w:p ')));
+    const markdown = await imported(docx);
+    expect(markdown).toBe(expected);
+    // Export writes no empty paragraph between items
+    expect(await imported((await convertMdToDocx(markdown)).docx)).toBe(md);
+  });
+
+  test('puts an item after a numbered heading at the top', async () => {
+    // The heading ended no list, and the item nested under the one before it
+    const docx = await atLevels('- a\n\n## H\n\n- b\n', [0, 1], xml => xml.replace('<w:pStyle w:val="Heading2"/>',
+      '<w:pStyle w:val="Heading2"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="' + /<w:numId w:val="(\d+)"/.exec(xml)![1] + '"/></w:numPr>'));
+    const markdown = await imported(docx);
+    expect(markdown).toBe('- a\n\n## H\n\n- b\n');
+    expect(await imported((await convertMdToDocx(markdown)).docx)).toBe(markdown);
   });
 });
 
@@ -3429,11 +3542,16 @@ describe('buildMarkdown', () => {
         fc.integer({ min: 0, max: 3 }),
         fc.string({ minLength: 1, maxLength: 30 }),
         (listType, level, text) => {
+          // Under an item at each level before it, as Markdown can't skip one
           const content = [
+            ...Array.from({ length: level }, (_, parent) => [
+              { type: 'para' as const, listMeta: { type: listType, level: parent } },
+              { type: 'text' as const, text: 'parent', commentIds: new Set<string>(), formatting: DEFAULT_FORMATTING },
+            ]).flat(),
             { type: 'para' as const, listMeta: { type: listType, level } },
             { type: 'text' as const, text, commentIds: new Set<string>(), formatting: DEFAULT_FORMATTING }
           ];
-          
+
           const result = buildMarkdown(content, new Map());
           const expectedIndent = listType === 'bullet' 
             ? ' '.repeat(2 * level) + '- '
