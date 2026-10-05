@@ -5787,6 +5787,21 @@ describe('HTML table cells', () => {
   });
 
   test.each([
+    ['in HTML', false, table('      <p>a<!-- a <!--->b</p>')],
+    ['in a table that leaves HTML', true, '| h |\n| --- |\n| {++a++}<!-- a --> <!--->b |'],
+  ])('keeps a cell\'s comment hidden that Word splits before an <!-- in it, %s', async (_name, tracked, expected) => {
+    // Its pieces were two comments, the second with a space before it, which
+    // HTML held as none, and inline Markdown read the first as text
+    const zip = await JSZip.loadAsync((await convertMdToDocx(table('      <p>a<!-- a <!--->b</p>'))).docx);
+    let xml = await zip.file('word/document.xml')!.async('string');
+    const split = xml.replace('\u200B&lt;!-- a &lt;!---&gt;', '\u200B&lt;!-- a</w:t></w:r><w:r><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr><w:t xml:space="preserve"> &lt;!---&gt;');
+    expect(split).not.toBe(xml);
+    xml = tracked ? split.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>a<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>') : split;
+    zip.file('word/document.xml', xml);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(expected);
+  });
+
+  test.each([
     ['ends at a --!>', 'a<!-- hidden --!>b', 'a<!-- hidden -->b'],
     ['has no end', 'a<!-- x', 'a<!-- x</td></tr></table> -->'],
     ['ends at a --!> before an empty one', 'a<!-- hidden --!><!--->b', 'a<!-- hidden --><!--->b'],
@@ -9045,6 +9060,12 @@ describe('round-trip regression: images export cannot embed', () => {
   test('keeps a comment block with trailing whitespace, with no other end', async () => {
     // An end went on the comment, after its whitespace, which showed it
     const md = '<!-- c -->  \n\nText.';
+    expect((await roundTrip(md)).markdown).toBe(md + '\n');
+  });
+
+  test('keeps a ZWSP after a ---> in an HTML comment, which inline Markdown reads on', async () => {
+    // It read as the comment's end, and the rest went
+    const md = 'A <!-- a ---> b --->\u200Btail --> B';
     expect((await roundTrip(md)).markdown).toBe(md + '\n');
   });
 
