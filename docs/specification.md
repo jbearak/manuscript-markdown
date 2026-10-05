@@ -558,7 +558,7 @@ Grid tables use [Pandoc grid table syntax](https://pandoc.org/MANUAL.html#extens
 - Column boundaries are defined by `+` positions in the separator line, counted in display columns as Pandoc counts them: a wide character, such as a CJK one or an emoji, takes two, and a combining mark none. An emoji sequence takes what Pandoc pads it to: a skin tone or a variation selector-16 makes the emoji before it wide, and emoji joined by joiners count as the last of them, so 🏳‍🌈 takes two. A table whose `|` signs line up with the `+` signs by character count instead, as Expand Table pads one, is read that way, and a line that lines up neither way is cut at its edges and at the `|` nearest each `+` between
 - The `=` separator distinguishes header rows from body rows
 - A `:` at either end of a column's `=` in the header's separator sets its alignment, as in `+:===+===:+` (left, then right); a table without a header takes them in its top line
-- Multiple content lines between separators form a single logical row with multi-line cells. Blank lines at a cell's end pad it to its row's height, as Pandoc reads them, and aren't line breaks
+- Multiple content lines between separators form a single logical row with multi-line cells. Blank lines at a cell's end pad it to its row's height, as Pandoc reads them, and aren't line breaks, though a `\` before them ends its line in one
 - Grid tables do not support colspan or rowspan (use HTML tables for spans)
 - On round-trip, grid tables are stored with `sourceFormat: 'grid'` metadata so the format is preserved
 

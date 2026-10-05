@@ -751,6 +751,13 @@ describe('parseMd grid tables', () => {
     expect(table?.rows?.[1].cells[0].runs.map(run => run.type)).toEqual(['text']);
   });
 
+  it('reads a line break from a backslash before the blank lines padding a grid table cell', () => {
+    // The blank line was trimmed with the line end the backslash escapes,
+    // leaving the backslash text
+    const table = parseMd('+-----+-----+\n| a\\  | b   |\n|     |     |\n+-----+-----+').find(t => t.type === 'table');
+    expect(table?.rows?.[0].cells.map(cell => cell.runs.map(run => run.type === 'hardbreak' ? '\n' : run.text).join(''))).toEqual(['a\n', 'b']);
+  });
+
   it('preprocessGridTables replaces grid tables with placeholders', () => {
     const markdown = 'Before\n\n+------+------+\n| H1   | H2   |\n+======+======+\n| A    | B    |\n+------+------+\n\nAfter';
     const result = preprocessGridTables(markdown);
