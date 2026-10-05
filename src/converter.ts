@@ -824,7 +824,9 @@ export type ContentItem =
       paraMarkRevision?: RevisionInfo; // w:ins/w:del on the paragraph mark (pPr > rPr) — whole paragraph inserted/deleted
       breakRevision?: RevisionInfo; // w:ins/w:del on the previous paragraph's mark, which is the break before this one
     }
-  | { type: 'math'; latex: string; display: boolean; commentIds: Set<string>; revision?: RevisionInfo }
+  // inParagraph: display math in a w:p, which goes on in its text, not a
+  // body's m:oMathPara of its own
+  | { type: 'math'; latex: string; display: boolean; commentIds: Set<string>; revision?: RevisionInfo; inParagraph?: boolean }
   | { type: 'footnote_ref'; noteId: string; noteKind: 'footnote' | 'endnote'; commentIds: Set<string>; revision?: RevisionInfo; formatting?: RunFormatting }
   | { type: 'html_comment'; text: string; commentIds: Set<string> }
   | { type: 'image'; rId: string; src: string; alt: string; widthPx: number; heightPx: number; commentIds: Set<string>; revision?: RevisionInfo; markdown?: string }
@@ -3199,6 +3201,13 @@ function parseNoteBody(
           }
           const lenBeforeContent = target.length;
           walkNoteBody(paraChildren, paraFormatting, target, inTableCell, currentRevision);
+          // Display math in the paragraph goes on in it (see the document's)
+          if (!inTableCell) {
+            for (let k = lenBeforeContent; k < target.length; k++) {
+              const walked = target[k];
+              if (walked.type === 'math' && walked.display) walked.inParagraph = true;
+            }
+          }
           if (paraMarkRevision && !inTableCell && target.length > lenBeforeContent) {
             trackedParaMark = { revision: paraMarkRevision, target, end: target.length };
           }
@@ -4252,6 +4261,10 @@ export async function extractDocumentContent(
             target.push(paraItem);
           }
           walk(paraChildren, paraFormatting, target, inTableCell, currentRevision);
+          for (let k = targetLenBeforePara; k < target.length; k++) {
+            const walked = target[k];
+            if (walked.type === 'math' && walked.display) walked.inParagraph = true;
+          }
           // If walking this paragraph's children entered a bibliography field
           // (i.e. the field-begin + separate markers were in this paragraph),
           // remove the para we just pushed — it would become a trailing blank line.
@@ -7409,6 +7422,14 @@ export function buildMarkdown(
     return shallower ? blockquotePrefix(item).trimEnd() + '\n' : '';
   }
 
+  // What a paragraph's lines after its first start with: its quote's >, or
+  // its list item's indent
+  function paragraphLinePrefix(item: Extract<ContentItem, { type: 'para' }>): string {
+    if (item.listMeta) return listContinuationIndent({ type: item.listMeta.type, level: item.listMeta.level });
+    if (item.blockquoteLevel) return blockquotePrefix(item);
+    return item.listContinuation ? listContinuationIndent(item.listContinuation) : '';
+  }
+
   function blockquotePrefix(item: Extract<ContentItem, { type: 'para' }>): string {
     const quotePrefix = '> '.repeat(item.blockquoteLevel || 1);
     return (item.listContinuation ? listContinuationIndent(item.listContinuation) : '') + quotePrefix;
@@ -7451,6 +7472,15 @@ export function buildMarkdown(
   // stable on DOCX -> MD conversion.
   let pendingAlertInlinePrefixForHardBreak: string | undefined;
   let pendingDisplayMathContainer: { prefix: string; type: 'list' | 'blockquote' } | undefined;
+  // Display math next in the paragraph just written, after its text or on
+  // its list item's marker line, which goes on in the paragraph: a blank
+  // line before it would end the paragraph, and a quote or list around it
+  let mathInParagraph: { prefix: string; sameLine: boolean; quoted: boolean } | undefined;
+  // The paragraph whose text is being written
+  let currentPara: Extract<ContentItem, { type: 'para' }> | undefined;
+  // Where the line end after an alert's marker is in output, which goes
+  // where nothing follows the marker in its paragraph
+  let alertMarkerLineEnd: number | undefined;
   // Comment bodies from a display equation that text follows in its Word
   // paragraph, which go after that text
   const pendingEquationBodies: string[] = [];
@@ -7960,6 +7990,8 @@ export function buildMarkdown(
       }
 
       quoteLinePrefix = prefixesQuoteLines(item) ? blockquotePrefix(item) : '';
+      currentPara = item;
+      alertMarkerLineEnd = undefined;
       paragraphNested = !!(item.blockquoteLevel || item.listMeta || item.listContinuation);
       paragraphHeading = !!item.headingLevel;
       listLinePrefix = '';
@@ -8006,6 +8038,8 @@ export function buildMarkdown(
         lastListItemEmpty = isEmptyListItem(i);
         output.push(indent + marker);
         listLinePrefix = listContinuationIndent({ type: item.listMeta.type, level: item.listMeta.level });
+        const first = mergedContent[i + 1];
+        if (first?.type === 'math' && first.display && first.inParagraph) mathInParagraph = { prefix: paragraphLinePrefix(item), sameLine: true, quoted: false };
       } else if (item.blockquoteLevel) {
         const itemPrefix = blockquotePrefix(item);
         const next = i + 1 < mergedContent.length ? mergedContent[i + 1] : undefined;
@@ -8028,6 +8062,7 @@ export function buildMarkdown(
               output.push(nextIsDisplayMath ? '\n' : ' ');
               pendingAlertInlinePrefixForHardBreak = item.listContinuation ? itemPrefix : undefined;
             } else {
+              if (!nextIsDisplayMath) alertMarkerLineEnd = output.length;
               output.push('\n' + (nextIsDisplayMath ? '' : itemPrefix));
               pendingAlertInlinePrefixForHardBreak = undefined;
             }
@@ -8244,9 +8279,22 @@ export function buildMarkdown(
 
     if (item.type === 'math' && item.display) {
       const displayMathContainer = pendingDisplayMathContainer;
-      const inBlockquote = displayMathContainer?.type === 'blockquote';
-      // Ensure blank line before display math
-      if (!inBlockquote && output.length > 0 && !output[output.length - 1].endsWith('\n\n')) {
+      const continued = mathInParagraph;
+      mathInParagraph = undefined;
+      const inBlockquote = displayMathContainer?.type === 'blockquote' || !!continued?.quoted;
+      if (continued) {
+        // On the line after the paragraph's text, whose line end is the
+        // space before the equation export wrote for it
+        if (!continued.sameLine) {
+          const last = output.length - 1;
+          if (output[last].endsWith('\n')) output.push(continued.prefix);
+          else {
+            output[last] = output[last].replace(/(?<!\\) $/, '');
+            output.push('\n' + continued.prefix);
+          }
+        }
+      } else if (!inBlockquote && output.length > 0 && !output[output.length - 1].endsWith('\n\n')) {
+        // Ensure blank line before display math
         output.push('\n\n');
       }
       const mathBlock = MATH_FENCE + '\n' + canonicalizeDisplayMathLatex(item.latex) + '\n' + MATH_FENCE;
@@ -8261,6 +8309,8 @@ export function buildMarkdown(
       if (displayMathContainer) {
         output.push(revisedMathBlock.split('\n').map(line => displayMathContainer.prefix + line).join('\n'));
         pendingDisplayMathContainer = undefined;
+      } else if (continued) {
+        output.push(revisedMathBlock.split('\n').map((line, k) => (k === 0 ? '' : continued.prefix) + line).join('\n'));
       } else {
         output.push(revisedMathBlock);
         // A top-level display math block breaks list flow. An indented list
@@ -8276,6 +8326,13 @@ export function buildMarkdown(
         lastAlertParagraphKey = undefined;
         lastBlockquoteAlertType = undefined;
         lastBlockquoteLevel = undefined;
+      }
+      // An equation right after it in its paragraph goes on in it too
+      const following = mergedContent[i + 1];
+      if (item.inParagraph && following?.type === 'math' && following.display && following.inParagraph) {
+        mathInParagraph = continued
+          ? { ...continued, sameLine: false }
+          : { prefix: currentPara ? paragraphLinePrefix(currentPara) : '', sameLine: false, quoted: !!currentPara?.blockquoteLevel };
       }
       i++;
       continue;
@@ -8490,9 +8547,15 @@ export function buildMarkdown(
       textOut = textOut.replace(/\n(?=[\s\S])/g, '\n' + listLinePrefix);
     }
     listHtmlBlockOpen = !!listLinePrefix && startsHtmlBlock(textOut) && !HTML_BLOCK_ENDS_AT_MARKER.test(textOut.trimStart());
+    const next = mergedContent[rendered.nextIndex];
+    // Not after a heading's text, which a line can't go on
+    const mathFollows = !paragraphHeading && next?.type === 'math' && next.display && !!next.inParagraph;
     if (rendered.deferredComments.length > 0) {
-      // Strip trailing newlines (from <w:br/> between comment references in round-tripped DOCX)
-      output.push(textOut.replace(/(\\?\n)+$/, ''));
+      // Strip trailing newlines (from <w:br/> between comment references in
+      // round-tripped DOCX), and a space before an equation, which the line
+      // end after the bodies is (see the math branch)
+      const text = textOut.replace(/(\\?\n)+$/, '');
+      output.push(mathFollows ? text.replace(/(?<!\\) $/, '') : text);
       output.push('\n');
       const bodies = rendered.deferredComments.join('\n').split('\n')
         .map(line => (line ? quoteLinePrefix : quoteLinePrefix.trimEnd()) + line).join('\n');
@@ -8500,7 +8563,22 @@ export function buildMarkdown(
       if (deferredCommentQuote) quotedBodies = { text: bodies, ...deferredCommentQuote };
     } else {
       output.push(textOut);
+      // Nothing follows an alert's marker in its paragraph, which takes the
+      // place of the marker's line end
+      if (alertMarkerLineEnd !== undefined && textOut === '' && !mathFollows) output[alertMarkerLineEnd] = '';
     }
+    // An equation in the paragraph goes on in it, after the comments' bodies
+    // where they go after the text, and where there's no text before it, on
+    // the line the text would start, as after an item's task box or an
+    // alert's marker. The first paragraph has no para item before it.
+    if (mathFollows) {
+      mathInParagraph = {
+        prefix: currentPara ? paragraphLinePrefix(currentPara) : '',
+        sameLine: textOut === '' && rendered.deferredComments.length === 0,
+        quoted: !!currentPara?.blockquoteLevel,
+      };
+    }
+    alertMarkerLineEnd = undefined;
     i = rendered.nextIndex;
   }
   // Trailing empty revised heading: serialize its deferred marker.
@@ -8529,34 +8607,54 @@ export function buildMarkdown(
       const inlinePart = (text: string) => partStart === 0
         ? keepParagraphWhitespace(text.replace(/^[ \t]/, ''), true, true)
         : keepParagraphWhitespace(text, isMarkdownBlockEdge(bodyMerged[partStart - 1]), true);
+      // The part that holds the paragraph's text and display math so far,
+      // which an equation in the paragraph goes on in, on the next line, and
+      // text after one from its closing fence, as in the document
+      let paragraphPart: number | undefined;
+      const pushInline = (text: string) => {
+        if (paragraphPart === undefined) {
+          bodyParts.push(text);
+          paragraphPart = bodyParts.length - 1;
+        } else {
+          bodyParts[paragraphPart] += text;
+        }
+      };
       for (let bi = 0; bi < bodyMerged.length; bi++) {
         const item = bodyMerged[bi];
         if (item.type === 'para') {
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
-            bodyParts.push(inlinePart(part.text));
+            pushInline(inlinePart(part.text));
             deferredAll.push(...part.deferredComments);
           }
           partStart = bi + 1;
+          paragraphPart = undefined;
         } else if (item.type === 'math' && item.display) {
           // Flush preceding inline content and keep display math as its own block part.
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
-            bodyParts.push(inlinePart(part.text));
+            pushInline(inlinePart(part.text));
             deferredAll.push(...part.deferredComments);
           }
           const mathBlock = MATH_FENCE + '\n' + canonicalizeDisplayMathLatex(item.latex) + '\n' + MATH_FENCE;
           const commented = displayMathWithComments(item.revision ? wrapWithRevision(mathBlock, item.revision) : mathBlock, item);
-          bodyParts.push(commented.block);
+          if (item.inParagraph && paragraphPart !== undefined) {
+            // In place of the space export wrote for the line's end
+            bodyParts[paragraphPart] = bodyParts[paragraphPart].replace(/(?<!\\) $/, '') + '\n' + commented.block;
+          } else {
+            bodyParts.push(commented.block);
+            paragraphPart = item.inParagraph ? bodyParts.length - 1 : undefined;
+          }
           deferredAll.push(...commented.bodies);
           partStart = bi + 1;
         } else if (item.type === 'table') {
           // Flush preceding inline content
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
-            bodyParts.push(inlinePart(part.text));
+            pushInline(inlinePart(part.text));
             deferredAll.push(...part.deferredComments);
           }
+          paragraphPart = undefined;
           const noteRawEmbedValue = noteRenderOpts?.embedDirectiveMapping?.get(String(tableIndex));
           if (noteRawEmbedValue) {
             const noteTabPos = noteRawEmbedValue.indexOf('\t');
@@ -8613,7 +8711,7 @@ export function buildMarkdown(
       }
       if (partStart < bodyMerged.length) {
         const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
-        bodyParts.push(inlinePart(part.text));
+        pushInline(inlinePart(part.text));
         deferredAll.push(...part.deferredComments);
       }
       if (bodyParts.length === 0) {

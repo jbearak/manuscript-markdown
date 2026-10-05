@@ -610,7 +610,8 @@ describe('Overlapping comments: where the bodies go', () => {
     ['in quote paragraphs before the text', '> {#1>>one<<}\n>\n> {#2>>two<<}\n>\n> ' + seen + '\n\nAfter.', '> ' + seen + '\n> {#1>>one<<}\n> {#2>>two<<}\n\nAfter.'],
     ['in quote paragraphs around the text', '> {#1>>one<<}\n>\n> ' + seen + '\n>\n> {#2>>two<<}\n\nAfter.', '> ' + seen + '\n> {#1>>one<<}\n> {#2>>two<<}\n\nAfter.'],
     ['in a nested quote', '> > ' + seen + '\n> >\n> > {#1>>one<<}\n> > {#2>>two<<}', '> > ' + seen + '\n> > {#1>>one<<}\n> > {#2>>two<<}'],
-    ['on an alert\'s marker line', '> [!NOTE] {#1>>one<<} {#2>>two<<}\n>\n> ' + seen, '> [!NOTE]\n> \n>\n> ' + seen + '\n> {#1>>one<<}\n> {#2>>two<<}'],
+    // Its marker alone in its paragraph, as the bodies are no text
+    ['on an alert\'s marker line', '> [!NOTE] {#1>>one<<} {#2>>two<<}\n>\n> ' + seen, '> [!NOTE]\n>\n> ' + seen + '\n> {#1>>one<<}\n> {#2>>two<<}'],
     ['in an alert', '> [!NOTE]\n> ' + seen + '\n>\n> {#1>>one<<}\n> {#2>>two<<}', '> [!NOTE]\n> ' + seen + '\n> {#1>>one<<}\n> {#2>>two<<}'],
   ])('come back the same way %s', async (_, md, back) => {
     // Their line breaks and spaces aren't text in Word
