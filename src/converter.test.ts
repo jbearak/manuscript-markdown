@@ -8035,6 +8035,15 @@ describe('Track changes (CriticMarkup)', () => {
       expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(md + '\n');
     });
 
+    test('keeps a line break at the start of a comment\'s anchor export splits at a tracked break', async () => {
+      // Export dropped every line break at the anchor's edges, as at a block's
+      const md = 'x\n\n{==\\\nq{++a\n\n++}==}{>>c<<}bc';
+      const { docx } = await convertMdToDocx(md);
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      expect(xml.slice(xml.indexOf('<w:body>')).split(/<w:p[ >]/)[2]).toContain('<w:br/>');
+      expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(md + '\n');
+    });
+
     test('keeps the text after a tracked break in its comment\'s anchor', async () => {
       // Export ended the anchor at the break, so b went after the comment's range
       const { docx } = await convertMdToDocx('{=={--a\n\nb--}==}{>>c<<}');

@@ -1670,13 +1670,14 @@ function splitRunsAtCriticParagraphs(runs: MdRun[]): CriticParagraphSplit | unde
     }
     // A comment's anchor whose text ends in tracked breaks, as import writes
     // a comment that ends where one does, {=={--b\n\n--}==}{>>c<<}: the anchor
-    // and its comment, with their replies, keep the text before them
+    // and its comment, with their replies, keep the text before them, and
+    // its line breaks, which are Word's
     if (!split && run.type === 'critic_highlight' && run.innerRuns && queue[index + 1]?.type === 'critic_comment') {
       const inner = splitRunsAtCriticParagraphs(run.innerRuns);
       if (inner && inner.marks.every(mark => mark !== undefined) && inner.parts.slice(1).every(part => trimBreakRuns(part).length === 0)) {
         const comments: MdRun[] = [];
         while (queue[index + 1]?.type === 'critic_comment') comments.push(queue[++index]);
-        const innerRuns = trimBreakRuns(inner.parts[0]);
+        const innerRuns = trimBreakRuns(inner.parts[0], true);
         split = {
           parts: [[...(innerRuns.length > 0 ? [{ ...run, text: innerRuns.map(innerRun => innerRun.text).join(''), innerRuns }] : []), ...comments],
             ...inner.parts.slice(1).map(() => [])],
