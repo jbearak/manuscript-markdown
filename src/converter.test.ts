@@ -7527,6 +7527,10 @@ describe('Track changes (CriticMarkup)', () => {
       ['{++### {==Heading==}{>>comment<<}++}', '{++### ++}{=={++Heading++}==}{>>comment<<}'],
       ['Prefix {--a{>>c<<}\n\nb--} suffix', 'Prefix {--a\n\n--}{>>c<<}{--b--} suffix'],
       ['Prefix {++a{>>c<<}\n\nb++} suffix', 'Prefix {++a\n\n++}{>>c<<}{++b++} suffix'],
+      ['Prefix {~~a{>>c<<}~>\n\nb~~} suffix', 'Prefix {~~a~>\n\n~~}{>>c<<}{++b++} suffix'],
+      // An anchor that ends at the break holds it, and export splits it there
+      ['Prefix {--a{==b==}{>>c<<}\n\nd--} suffix', 'Prefix {--a--}{=={--b\n\n--}==}{>>c<<}{--d--} suffix'],
+      ['Prefix {++a{==b==}{>>c<<}\n\nd++} suffix', 'Prefix {++a++}{=={++b\n\n++}==}{>>c<<}{++d++} suffix'],
     ])('keeps the revised paragraph mark of %j, beside a comment', async (md, expected) => {
       // Import wrote the heading's marker before the comment's anchor, outside
       // any span, and ended the paragraph its comment ended as an untracked
@@ -7538,6 +7542,12 @@ describe('Track changes (CriticMarkup)', () => {
       expect(await roundTrip(md2)).toBe(md2);
       const xml = await (await JSZip.loadAsync((await convertMdToDocx(md2)).docx)).file('word/document.xml')!.async('string');
       expect(xml).toMatch(/<w:pPr>(?:(?!<\/w:pPr>).)*<w:rPr>(?:(?!<\/w:rPr>).)*<w:(?:del|ins) /);
+    });
+
+    test('gives a revised heading\'s mark its revision\'s author, not a comment\'s before its text', async () => {
+      const { docx } = await convertMdToDocx('{++### ++}{>>@Alice (2024-01-01 12:00) | c<<}{++H++}', { authorName: 'Bob' });
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      expect(xml).toContain('<w:pStyle w:val="Heading3"/><w:rPr><w:ins w:id="0" w:author="Bob"/></w:rPr>');
     });
 
     test('drops the line breaks of comment body lines across a revision\'s end', async () => {

@@ -1651,6 +1651,24 @@ function splitRunsAtCriticParagraphs(runs: MdRun[]): CriticParagraphSplit | unde
         };
       }
     }
+    // A comment's anchor whose text holds tracked breaks, as import writes a
+    // comment that ends where one does, {=={--b\n\n--}==}{>>c<<}: the anchor
+    // and its comment keep the text before the first, and the rest goes on
+    // after it outside the anchor
+    if (!split && run.type === 'critic_highlight' && run.innerRuns && queue[index + 1]?.type === 'critic_comment') {
+      const inner = splitRunsAtCriticParagraphs(run.innerRuns);
+      if (inner && inner.marks.every(mark => mark !== undefined)) {
+        const comment = queue[++index];
+        split = {
+          parts: inner.parts.map((part, p) => {
+            const innerRuns = trimBreakRuns(part);
+            if (p > 0) return innerRuns;
+            return [...(innerRuns.length > 0 ? [{ ...run, text: innerRuns.map(innerRun => innerRun.text).join(''), innerRuns }] : []), comment];
+          }),
+          marks: inner.marks,
+        };
+      }
+    }
     if (!split) {
       parts[parts.length - 1].push(run);
       continue;
@@ -2584,6 +2602,9 @@ function promoteCriticHeadingParagraph(runs: MdRun[]): MdToken | undefined {
     type: 'heading',
     level: headingPrefix.level,
     criticParaMark: kind === 'critic_add' ? 'addition' : 'deletion',
+    // The mark's author and date are the revision's, though a comment may
+    // come first once the marker's span goes
+    criticParaMarkRun: run,
     runs: promotedRuns,
   };
 }

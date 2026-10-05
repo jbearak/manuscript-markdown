@@ -7461,7 +7461,10 @@ type ParaItem = Extract<ContentItem, { type: 'para' }>;
  *  {~~a~>\n\nb~~}. */
 function opensNewSide(content: ContentItem[], index: number): boolean {
   const para = content[index];
-  const prev = content[index - 1];
+  // Past a comment's reference, as of {~~a{>>c<<}~>\n\nb~~}
+  let before = index - 1;
+  while (before >= 0 && isCommentPoint(content[before])) before--;
+  const prev = content[before];
   return para?.type === 'para' && para.breakRevision?.type === 'addition'
     && !!prev && isInlineRevisionItem(prev) && revisionsEqual(prev.revision, { ...para.breakRevision, type: 'deletion' });
 }
