@@ -6479,12 +6479,15 @@ function withParagraphMarkRevision(pPr: string, revision: string): string {
  * lines on either side, unless it ends the paragraph or is all of it.
  * A revision's or a highlight's text loses them too, as in
  * {++x\n{#1>>c<<}++}, where its edges are its line's only if it starts or
- * ends one: `startsLine` and `endsLine` say whether the runs do.
+ * ends one: `startsLine` and `endsLine` say whether the runs do, and `shown`
+ * whether their whitespace shows, as the run they're the text of does.
  */
-function withoutCommentBodyLines(source: MdRun[], startsLine = true, endsLine = true): MdRun[] {
+function withoutCommentBodyLines(source: MdRun[], startsLine = true, endsLine = true, shown = false): MdRun[] {
   const hasBody = (runs: MdRun[] | undefined): boolean => !!runs?.some(run => run.type === 'comment_body_with_id'
     || hasBody(run.innerRuns) || hasBody(run.oldRuns) || hasBody(run.newRuns));
   if (!hasBody(source)) return source;
+  // Whitespace that shows, as code, a link or a mark, isn't padding
+  const shows = (run: MdRun) => shown || !!(run.code || run.href || run.highlight || run.underline || run.strikethrough);
   // A run starts or ends its line where only runs that take no room, as a
   // comment, its range markers or a body, are between it and the line's edge
   const roomless = (run: MdRun) => run.type === 'critic_comment' || isCommentMarkerRun(run);
@@ -6493,18 +6496,35 @@ function withoutCommentBodyLines(source: MdRun[], startsLine = true, endsLine = 
     while (j >= 0 && j < source.length && roomless(source[j])) j += step;
     return j < 0 || j === source.length ? atEdge : isBreakRun(source[j]);
   };
+  // Text of bodies and range markers alone, which Word gets nothing of to
+  // revise or highlight, so they take its run's place, where the lines
+  // around them see them
+  const unseen = (runs: MdRun[] | undefined): runs is MdRun[] => !!runs?.length && runs.every(isCommentMarkerRun);
+  const side = { oldRuns: undefined, newRuns: undefined, newText: undefined };
   // Each side of a substitution stands for the whole of it, as accepted or rejected
-  const runs = source.map((run, i) => {
-    if (!hasBody(run.innerRuns) && !hasBody(run.oldRuns) && !hasBody(run.newRuns)) return run;
+  const runs = source.flatMap((run, i): MdRun[] => {
+    if (!hasBody(run.innerRuns) && !hasBody(run.oldRuns) && !hasBody(run.newRuns)) return [run];
     const starts = edgeFrom(i, -1, startsLine);
     const ends = edgeFrom(i, 1, endsLine);
-    const payload = (inner: MdRun[] | undefined) => inner && withoutCommentBodyLines(inner, starts, ends);
-    return {
+    // A highlight shows its whitespace, but not a comment's range
+    const payloadShown = shows(run) || run.type === 'critic_highlight' && source[i + 1]?.type !== 'critic_comment';
+    const payload = (inner: MdRun[] | undefined) => inner && withoutCommentBodyLines(inner, starts, ends, payloadShown);
+    const innerRuns = payload(run.innerRuns);
+    const oldRuns = payload(run.oldRuns);
+    const newRuns = payload(run.newRuns);
+    if (run.type === 'critic_sub' && (unseen(oldRuns) || unseen(newRuns))) {
+      return [
+        ...(unseen(oldRuns) ? oldRuns : [{ ...run, ...side, type: 'critic_del' as const, innerRuns: oldRuns }]),
+        ...(unseen(newRuns) ? newRuns : run.newText ? [{ ...run, ...side, type: 'critic_add' as const, text: run.newText, innerRuns: newRuns }] : []),
+      ];
+    }
+    if (unseen(innerRuns)) return innerRuns;
+    return [{
       ...run,
-      ...(run.innerRuns ? { innerRuns: payload(run.innerRuns) } : {}),
-      ...(run.oldRuns ? { oldRuns: payload(run.oldRuns) } : {}),
-      ...(run.newRuns ? { newRuns: payload(run.newRuns) } : {}),
-    };
+      ...(innerRuns ? { innerRuns } : {}),
+      ...(oldRuns ? { oldRuns } : {}),
+      ...(newRuns ? { newRuns } : {}),
+    }];
   });
   if (!runs.some(run => run.type === 'comment_body_with_id')) return runs;
   const lines: MdRun[][] = [[]];
@@ -6517,8 +6537,6 @@ function withoutCommentBodyLines(source: MdRun[], startsLine = true, endsLine = 
       lines[lines.length - 1].push(run);
     }
   }
-  // Whitespace that shows, as code, a link or a mark, isn't padding
-  const shows = (run: MdRun) => !!(run.code || run.href || run.highlight || run.underline || run.strikethrough);
   const blank = (run: MdRun) => run.type === 'text' && !run.text.trim() && !shows(run);
   // Range markers take no room, so they stay where they are
   const marker = (run: MdRun) => run.type === 'comment_range_start' || run.type === 'comment_range_end';

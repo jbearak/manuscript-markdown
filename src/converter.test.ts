@@ -7484,6 +7484,9 @@ describe('Track changes (CriticMarkup)', () => {
       ['{=={#1}x{/1}\n{#1>>c<<}==}{>>d<<}', '{#1}{#2}x{/1}{/2}\n{#1>>d<<}\n{#2>>c<<}'],
       ['{++a {--{#1}x{/1}\n{#1>>c<<}--}++}', '{++a ++}{=={--x--}==}{>>c<<}'],
       ['{++{#1}x{/1} {#1>>c<<}++}', '{=={++x++}==}{>>c<<}'],
+      // A revision of a body alone has no text, so it's a body on its line
+      ['{#1}x{/1}\n{++{#1>>c<<}++}', '{==x==}{>>c<<}'],
+      ['{#1}x{/1}\n{--{#1>>c<<}--}', '{==x==}{>>c<<}'],
     ])('drops the line break before a comment body on its own line in %j', async (md, expected) => {
       // Only a paragraph's own lines lost it, so the break in a revision's
       // text exported as a space, or with breaks: true as a line break
@@ -7501,6 +7504,22 @@ describe('Track changes (CriticMarkup)', () => {
     ])('keeps one line break across a comment body on its own line in a revision, after %j', async (front, expected) => {
       const { docx } = await convertMdToDocx(front + '{++a {#1}x{/1}\n{#1>>c<<}\nb++}');
       expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(expected + '\n');
+    });
+
+    test.each([
+      ['<u>{++a {#1}x{/1} {#1>>c<<}++}</u>', '{++<u>a </u>++}{=={++<u>x</u>++}==}{>>c<<}{++<u> </u>++}'],
+      ['<u>a {#1}x{/1} {#1>>c<<}</u>', '<u>a </u>{==<u>x</u>==}{>>c<<}<u> </u>'],
+    ])('keeps the underlined space before a comment body in %j', async (md, expected) => {
+      // A revision's text lost it, as its runs don't hold the underline around it
+      const { docx } = await convertMdToDocx(md);
+      expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(expected + '\n');
+    });
+
+    test.each(['{++{#1>>c<<}++}', '{--{#1>>c<<}--}', '{~~{#1>>c<<}~>{#2>>d<<}~~}'])('writes no paragraph for %j after its own', async (body) => {
+      // Word got an empty paragraph, as the revision hid the body
+      const { docx } = await convertMdToDocx('{#1}x{/1}{#2}y{/2}\n\n' + body);
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      expect(xml.match(/<w:p[ >]/g)).toHaveLength(1);
     });
 
     test('revision in footnote body', async () => {
