@@ -1991,11 +1991,13 @@ function markdownHighlightColor(fmt: RunFormatting): string | undefined {
 /** `markdown` in a highlight of a Markdown color: ==a==, or ==a=={red}. The
  *  highlight holds the whitespace at its edges, which Word shows it on, as
  *  == reads as a highlight next to whitespace too, but not line breaks,
- *  which emphasis keeps out (see wrapMarkdownDelimited). */
-function wrapHighlight(markdown: string, color: string | undefined): string {
+ *  which emphasis keeps out (see wrapMarkdownDelimited). One that `joins`
+ *  its neighbour's takes marks of its own (see joinHighlights). */
+function wrapHighlight(markdown: string, color: string | undefined, joins = false): string {
   const [, leading, core, trailing] = /^((?:\\\n)*)(.*?)((?:\\\n)*)$/s.exec(markdown)!;
   if (!core) return markdown;
-  return leading + '==' + HIGHLIGHT_OPEN + core + HIGHLIGHT_CLOSE + '==' + (color && color !== 'yellow' ? '{' + color + '}' : '') + trailing;
+  return leading + '==' + (joins ? HIGHLIGHT_JOIN_OPEN : HIGHLIGHT_OPEN) + core + (joins ? HIGHLIGHT_JOIN_CLOSE : HIGHLIGHT_CLOSE) + '=='
+    + (color && color !== 'yellow' ? '{' + color + '}' : '') + trailing;
 }
 
 /** `text` as Markdown with Word's formatting. `lineStart` says the text
@@ -2094,40 +2096,69 @@ function wrapFormatting(markdown: string, fmt: RunFormatting, highlightOuter = f
   if (fmt.bold) result = wrapEmphasis(result, '**');
   // A highlight that joins its neighbour's goes around the rest, so that
   // they join in one (see joinHighlights)
-  if (fmt.highlight && highlightOuter) result = wrapHighlight(result, markdownHighlightColor(fmt));
+  if (fmt.highlight && highlightOuter) result = wrapHighlight(result, markdownHighlightColor(fmt), true);
   return result;
 }
 
-/** Whether the highlight of the text item at `i` joins a neighbour's in
- *  segment[start, end): one highlighted alike, with nothing between them in
- *  Markdown, in the same comments and revision, outside a link, and not a
- *  line break, which goes outside a highlight. Its highlight goes around
- *  the rest of its formatting then; one alone keeps it inside, as **==a==**
- *  has it. */
+/** By segment, and range of it, whether the highlight of each item in it
+ *  joins (see joinsHighlight) */
+const highlightJoins = new WeakMap<ContentItem[], Map<string, boolean[]>>();
+
+/** Whether the highlight of the text item at `i` joins its neighbours' in
+ *  segment[start, end): it's one of two or more side by side highlighted
+ *  alike, with nothing between them in Markdown, in the same comments and
+ *  revision, outside a link, and not a line break, which goes outside a
+ *  highlight, nor code, which navigation reads no highlight around. Their
+ *  highlight goes around the rest of their formatting then; one alone
+ *  keeps it inside, as **==a==** has it, as do they all next to a
+ *  highlight of its own, as of another color, which one around the rest
+ *  would run into, as in ==a====**b**c=={red}. For the range at once, so
+ *  each run is read once. */
 function joinsHighlight(segment: ContentItem[], i: number, start: number, end: number): boolean {
-  const highlighted = (k: number): (ContentItem & { type: 'text' }) | undefined => {
-    const item = k >= start && k < end ? segment[k] : undefined;
-    return item?.type === 'text' && item.formatting.highlight && !item.href && item.text !== '\\\n'
-      && !(item.formatting.code && item.text.includes('==')) ? item : undefined;
-  };
-  const item = highlighted(i);
-  const alike = (k: number): boolean => {
-    const other = highlighted(k);
-    return !!item && !!other && other.formatting.highlightColor === item.formatting.highlightColor
+  let byRange = highlightJoins.get(segment);
+  if (!byRange) highlightJoins.set(segment, byRange = new Map());
+  const key = start + ':' + end + ':' + segment.length;
+  let joins = byRange.get(key);
+  if (!joins) {
+    const joinable = (item: ContentItem | undefined): item is ContentItem & { type: 'text' } =>
+      item?.type === 'text' && !!item.formatting.highlight && !item.href && item.text !== '\\\n' && !item.formatting.code;
+    const alike = (item: ContentItem & { type: 'text' }, other: ContentItem | undefined): boolean => joinable(other)
+      && other.formatting.highlightColor === item.formatting.highlightColor
       && commentSetsEqual(other.commentIds, item.commentIds) && revisionsEqual(other.revision, item.revision);
-  };
-  return alike(i - 1) || alike(i + 1);
+    // Highlighted otherwise, with nothing between them, as a tracked
+    // change's or a comment's delimiters or a link's brackets would be
+    const abuts = (item: ContentItem & { type: 'text' }, other: ContentItem | undefined): boolean => !!other
+      && 'formatting' in other && !!other.formatting?.highlight && !('href' in other && other.href)
+      && !(other.type === 'text' && other.text === '\\\n')
+      && commentSetsEqual(other.commentIds, item.commentIds) && revisionsEqual(other.revision, item.revision);
+    joins = new Array<boolean>(end - start).fill(false);
+    for (let k = start; k < end;) {
+      const item = segment[k];
+      let last = k;
+      if (joinable(item)) {
+        while (last + 1 < end && alike(item, segment[last + 1])) last++;
+        if (last > k && !(k > start && abuts(item, segment[k - 1])) && !(last + 1 < end && abuts(item, segment[last + 1]))) {
+          for (let m = k; m <= last; m++) joins[m - start] = true;
+        }
+      }
+      k = last + 1;
+    }
+    byRange.set(key, joins);
+  }
+  return joins[i - start] ?? false;
 }
 
-/** `markdown` with each highlight that runs into the next of its color, as
- *  in ==a ====*b*==, joined with it, as in ==a *b*==, as Word's text of
- *  the runs is highlighted all along, as a Markdown highlight around
- *  emphasis exports it. The highlight of a run that joins goes around the
- *  rest of its formatting (see joinsHighlight), so what they hold stays
- *  whole. */
+/** `markdown` with each highlight of a run that joins its neighbour's (see
+ *  joinsHighlight) that runs into the next of its color, as in
+ *  ==a ====*b*==, joined with it, as in ==a *b*==, as Word's text of the
+ *  runs is highlighted all along, as a Markdown highlight around emphasis
+ *  exports it. Their highlights go around the rest of their formatting, so
+ *  what they hold stays whole. Their marks are a highlight's then. */
 function joinHighlights(markdown: string): string {
-  return markdown.replace(/\u0006==(\{[a-z0-9-]+\})?==\u0005(?=[^\u0006]*\u0006==(\{[a-z0-9-]+\})?)/g,
-    (seam, color: string | undefined, nextColor: string | undefined) => color === nextColor ? '' : seam);
+  if (!markdown.includes(HIGHLIGHT_JOIN_OPEN)) return markdown;
+  return markdown.replace(/\u000F==(\{[a-z0-9-]+\})?==\u000E(?=[^\u000F]*\u000F==(\{[a-z0-9-]+\})?)/g,
+    (seam, color: string | undefined, nextColor: string | undefined) => color === nextColor ? '' : seam)
+    .replace(/\u000E/g, HIGHLIGHT_OPEN).replace(/\u000F/g, HIGHLIGHT_CLOSE);
 }
 
 /** The marks markedFormatting puts after a run's outermost opening delimiter
@@ -2140,6 +2171,9 @@ const EMPHASIS_CLOSE = '\u0004';
  *  before it, which would run into its ==, from another's closing == */
 const HIGHLIGHT_OPEN = '\u0005';
 const HIGHLIGHT_CLOSE = '\u0006';
+/** The marks of a highlight that joins its neighbour's (see joinHighlights) */
+const HIGHLIGHT_JOIN_OPEN = '\u000E';
+const HIGHLIGHT_JOIN_CLOSE = '\u000F';
 /** By opening mark, its delimiter and the HTML tag that can stand for it,
  *  as an HTML table's cells write it */
 const EMPHASIS_BY_MARK: Record<string, { delimiter: string; tag: string }> = {
@@ -2179,14 +2213,17 @@ function flankClass(code: number): number {
  * range's Markdown starts and ends one.
  */
 function resolveEmphasis(markdown: string): string {
-  if (!markdown.includes(EMPHASIS_CLOSE) && !markdown.includes(HIGHLIGHT_OPEN)) return markdown;
+  if (!markdown.includes(EMPHASIS_CLOSE) && !markdown.includes(HIGHLIGHT_OPEN) && !markdown.includes(HIGHLIGHT_JOIN_OPEN)) return markdown;
   // Whitespace at a highlight's edge goes outside it, as before it held it,
-  // next to an = outside it, as of the text or another highlight's ==,
-  // which navigation and the grammar read with the highlight's own, so
-  // ==a ====b=={red} as no highlight, but not a comment's ==}
+  // next to an = outside it, as of the text, another highlight's == or a
+  // comment's ==}, which navigation and the grammar read with the
+  // highlight's own, so ==a ====b=={red} as no highlight, and export a
+  // comment's {====a=={red}==b ====} as one highlight in it. Not all of
+  // it, which would leave none. From where the whitespace starts, so each
+  // is read once.
   markdown = joinHighlights(markdown)
-    .replace(/([^\S\n]+)\u0006==(?==(?!=\}))/g, (_m, space: string) => '\u0006==' + space)
-    .replace(/(?<==)==\u0005([^\S\n]+)/g, (_m, space: string) => space + '==\u0005');
+    .replace(/(?<=[^\s\u0005])([^\S\n]+)\u0006==(?==)/g, (_m, space: string) => '\u0006==' + space)
+    .replace(/(?<==)==\u0005([^\S\n]+)(?=[^\s\u0006])/g, (_m, space: string) => space + '==\u0005');
   const closeAt = new Map<number, number>();
   const opens: number[] = [];
   for (let i = 0; i < markdown.length; i++) {
@@ -4836,10 +4873,11 @@ type SpanJoin = 'seam' | 'space' | 'never';
 
 /** The span of one revision that rendered Markdown ends with: where it
  *  starts and ends, its last character, the kinds of delimiter it holds and
- *  that its text has of its own, and how its last item joins (spanJoin). */
+ *  that its text has of its own, how its last item joins (spanJoin), and
+ *  the mark of the highlight it ends with, if it ends with one's ==. */
 type RevisionSpan = {
   revision: RevisionInfo; start: number; end: number; lastChar: string;
-  kinds: Set<string>; literal: Set<string>; join: SpanJoin;
+  kinds: Set<string>; literal: Set<string>; join: SpanJoin; highlightEnd?: string;
 };
 
 /** Marks where appendRevised joined a span to the one before it, after that
@@ -4989,17 +5027,22 @@ function escapeBangBeforeLink(markdown: string, segment: ContentItem[], index: n
   return /(?:^|[^\\])(?:\\\\)*!$/.test(markdown) ? markdown.slice(0, -1) + '\\!' : markdown;
 }
 
-/** `markdown`, the Markdown of the item at `index`, with a } or {color} it
- *  starts with escaped after a highlighted item, whose closing == would
- *  read them as its own: ==a==} as CriticMarkup's ==}, which ends no
- *  highlight, and ==a=={red} as its color. Where the highlight's == isn't
- *  last, as in **==a==**}, the escape keeps the text as it is too. */
-function escapeAfterHighlight(markdown: string, segment: ContentItem[], index: number): string {
-  let k = index - 1;
-  while (k >= 0 && segment[k].type === 'text' && (segment[k] as ContentItem & { type: 'text' }).text === '') k--;
-  const before = segment[k];
-  if (k < 0 || !('formatting' in before) || !before.formatting?.highlight) return markdown;
-  return /^(?:\}|\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})/.test(markdown) ? '\\' + markdown : markdown;
+/** `markdown`, the Markdown of an item, with a } or {color} it starts with
+ *  escaped after a highlight's closing == at the end of the Markdown
+ *  `before` it, which would read them as its own: ==a==} as CriticMarkup's
+ *  ==}, which ends no highlight, and ==a=={red} as its color. After one
+ *  with a color, as in ==a=={red}{blue}, the escape keeps the text as it
+ *  is too. From the end of `before`, which may be long. */
+function escapeAfterHighlight(markdown: string, before: string): string {
+  return /^(?:\}|\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})/.test(markdown)
+    && /==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?$/.test(before.slice(-64)) ? '\\' + markdown : markdown;
+}
+
+/** `out`, the Markdown before `item`'s, as it reads once appendRevised
+ *  joins the item to the span of its revision `out` ends with, without
+ *  the span's closer */
+function joinedBefore(out: string, item: InlineRevisionItem, last: RevisionSpan | undefined): string {
+  return item.revision && last && last.end === out.length && revisionsEqual(last.revision, item.revision) ? out.slice(0, -3) : out;
 }
 
 /** A letter, digit or _, next to an inline equation's $, after which it
@@ -5086,16 +5129,17 @@ function appendRevised(
     && disjoint(literal, before.kinds) && disjoint(before.literal, kinds)
     && (join === 'space' || before.join === 'space'
       ? /\s/.test(before.lastChar) || /^\s/.test(text)
-      : canJoinSpans(before.lastChar, text));
+      : canJoinSpans(before.lastChar, text) || canJoinAtHighlight(before, text));
+  const highlightEnd = /([\u0006\u000F])==(?:\{[a-z0-9-]+\})?$/.exec(text)?.[1];
   if (last && last.end === out.length && revisionsEqual(last.revision, revision) && seamSafe(last)) {
     const joined = out + SPAN_JOIN + wrapWithRevision(text, revision).slice(3);
     return [joined, {
       revision, start: last.start, end: joined.length, lastChar: text.slice(-1),
-      kinds: new Set([...last.kinds, ...kinds]), literal: new Set([...last.literal, ...literal]), join,
+      kinds: new Set([...last.kinds, ...kinds]), literal: new Set([...last.literal, ...literal]), join, highlightEnd,
     }];
   }
   const wrapped = out + wrapWithRevision(text, revision);
-  return [wrapped, { revision, start: out.length, end: wrapped.length, lastChar: text.slice(-1), kinds, literal, join }];
+  return [wrapped, { revision, start: out.length, end: wrapped.length, lastChar: text.slice(-1), kinds, literal, join, highlightEnd }];
 }
 
 /** Delimiters that can pair with one of their kind in another span once
@@ -5179,6 +5223,20 @@ function canJoinSpans(beforeEnd: string, after: string): boolean {
   // of either, as a ! before [ makes an image and a ] a reference
   if (a === ')' && /[\p{L}\p{N}[*_]/u.test(b) || b === '[' && /[\p{L}\p{N})*_`$]/u.test(a)) return true;
   return (/[\])$*`]/.test(a) && /[.,;:!?)]/.test(b)) || (/[(\-/]/.test(a) && /[[$*`]/.test(b));
+}
+
+/** Whether a span that ends `before` and one starting with `after` can run
+ *  together at a highlight's ==, which reads as it did next to ++} or {++:
+ *  one that closes it before a letter, digit or escape, as of a {color}
+ *  after it (see escapeAfterHighlight), or before the == that
+ *  opens the next of the highlights it joins (see joinHighlights), which
+ *  joins them then, or one that opens it after a letter or digit, as in
+ *  ==a ==b and a== b==. Their marks are still in the Markdown. */
+function canJoinAtHighlight(before: RevisionSpan, after: string): boolean {
+  if (before.highlightEnd) {
+    return /^[\p{L}\p{N}\\]/u.test(after) || (before.highlightEnd === HIGHLIGHT_JOIN_CLOSE && after.startsWith('==' + HIGHLIGHT_JOIN_OPEN));
+  }
+  return /[\p{L}\p{N}]/u.test(before.lastChar) && (after.startsWith('==' + HIGHLIGHT_OPEN) || after.startsWith('==' + HIGHLIGHT_JOIN_OPEN));
 }
 
 const CRITIC_OPENERS: Record<string, string> = { '++': '{++', '--': '{--', '~~': '{~~', '==': '{==', '<<': '{>>' };
@@ -5371,7 +5429,7 @@ function substitutionItemText(item: SubstitutionItem, precedingText: string, not
   }
   if (item.type === 'footnote_ref') return footnoteRefText(item, noteLabels);
   if (item.type === 'text') {
-    if (!item.href) return markedFormatting(item.text, item.formatting, false, after);
+    if (!item.href) return escapeAfterHighlight(markedFormatting(item.text, item.formatting, false, after), precedingText);
     const text = markedFormatting(item.text, item.formatting, false, (after ?? RunsAfter.of('')).linkTo(item.href));
     return markdownLink(text, item.href);
   }
@@ -6178,7 +6236,7 @@ function renderInlineRange(
         // distinct: Word text that is both highlighted AND commented needs both layers,
         // producing {====text====} (highlight nested inside comment delimiters).
         const after = runsAfter(segment, j + 1, segmentEnd);
-        let segText = textNextToMath(escapeBangBeforeLink(markedFormatting(seg.text, seg.formatting, false, seg.href ? after.linkTo(seg.href) : after), segment, j, segmentEnd), segment, j, segmentEnd, anchorText.length === anchorMathEnd, false, anchorText);
+        let segText = textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(seg.text, seg.formatting, false, seg.href ? after.linkTo(seg.href) : after), anchorText), segment, j, segmentEnd), segment, j, segmentEnd, anchorText.length === anchorMathEnd, false, anchorText);
         if (seg.href) {
           segText = bareLinkChoice(seg, markdownLink(segText, seg.href), '==}');
         }
@@ -6235,7 +6293,7 @@ function renderInlineRange(
       // An HTML block starts only a block's text, not a heading's, a table
       // cell's or a tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !opts?.cell && !item.revision;
-      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), segment, i), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), joinedBefore(out, item, lastSpan)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
     }
     i++;
   }
@@ -6506,7 +6564,7 @@ function renderInlineRangeWithIds(
       // An HTML block starts only a block's text, not a heading's, a table
       // cell's or a tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !opts?.cell && !item.revision;
-      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), segment, i), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), joinedBefore(out, item, lastSpan)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
     }
     i++;
   }

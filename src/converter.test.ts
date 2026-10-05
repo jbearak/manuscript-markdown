@@ -9117,7 +9117,10 @@ describe('Highlights across runs', () => {
   const plain = (text: string) => '<w:r><w:t xml:space="preserve">' + text + '</w:t></w:r>';
 
   test.each([
-    '==a *b* c==\n', '==a **b** `c` d=={red}\n', '==a <u>b</u> <sup>c</sup>==\n', '**==a==** b\n', '*==a==* ==b==\n',
+    '==a *b* c==\n', '==a **b** d=={red}\n', '==a <u>b</u> <sup>c</sup>==\n', '**==a==** b\n', '*==a==* ==b==\n',
+    // Code, which navigation reads no highlight around, and another color,
+    // whose == the joined highlight's would run into, keep theirs apart
+    '==a== ==`b`== ==c==\n', '==a== *==b==* ==c== ==d=={red}\n',
   ])('keeps %j as it is', async (md) => {
     // Each run had a highlight of its own, so the spaces between them,
     // which Word highlighted, lost theirs
@@ -9149,6 +9152,38 @@ describe('Highlights across runs', () => {
     // color, which lost the text
     expect(await fromWord(runs)).toBe(md);
     expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    'P {====a ==\\{red}==}{>>c<<} Q\n', '{~~==a ==\\{red}~>x~~}\n', '{++==a ==\\{red}++}\n', '{--==a ==\\}--}\n',
+  ])('keeps the escape after a highlight in %j', async (md) => {
+    // In a comment, a substitution or a tracked change, which the escape
+    // read the Markdown before it without
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    '{++==a ==b++}\n', '{++a== b==++}\n', '{--==a ==b--}\n', '{++==a==b++}\n', '{++==a *b*==++}\n', '{++a==b *c*==++}\n',
+  ])('keeps %j one tracked change', async (md) => {
+    // Its runs' spans didn't join at a highlight's ==, so it came back as
+    // {++==a ==++}{++b++}, and ==a *b*== as two highlights
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('keeps a highlight\'s edge space outside it before a comment\'s ==}', async () => {
+    // Which export read as one highlight in the comment, ==a=={red}==b ==
+    const md = '{====a=={red}==b== ==}{>>c<<}\n';
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('reads many runs highlighted alike in linear time', async () => {
+    // Each run's highlight joins its neighbours' if theirs do, which is
+    // read for the whole range at once
+    const md = '==' + Array.from({ length: 20000 }, (_, k) => k % 2 ? '*a*' : 'b ').join('') + '==\n';
+    const docx = (await convertMdToDocx(md)).docx;
+    const start = performance.now();
+    expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(md);
+    expect(performance.now() - start).toBeLessThan(3000);
   });
 
   test.each([
