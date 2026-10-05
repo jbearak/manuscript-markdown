@@ -204,7 +204,7 @@ describe('Overlapping comments: docx-to-md (buildMarkdown)', () => {
     ];
     const result = buildMarkdown(content, comments);
     expect(result).toContain('==highlighted==');
-    expect(result).toContain(' ==both==');
+    expect(result).toContain('== both==');
   });
 
   test('highlighted text inside non-overlapping comment produces {====text====}', () => {

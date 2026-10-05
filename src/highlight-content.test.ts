@@ -73,9 +73,10 @@ describe('Markdown in a format highlight', () => {
     expect(body).not.toContain('$x$');
   });
 
-  it('reads emphasis and a revision back in highlights of their own', async () => {
+  it('reads emphasis back in one highlight, and a revision in a highlight of its own', async () => {
     const { docx } = await exportParts('Seen ==a *b* {++c++}== on.');
-    expect(await imported(docx)).toBe('Seen ==a== *==b==* {++==c==++} on.');
+    // The space before the revision is highlighted in Word, as in the source
+    expect(await imported(docx)).toBe('Seen ==a *b* =={++==c==++} on.');
   });
 });
 
@@ -110,7 +111,7 @@ describe('a highlight read back', () => {
     const xml = await zip.file('word/document.xml')!.async('string');
     zip.file('word/document.xml', xml.replace('>a = b<', '>a == b<').replace('>c = d<', '>c == d<'));
     const back = await imported(await zip.generateAsync({ type: 'uint8array' }));
-    expect(back).toBe('Seen ==x== `a == b` ==y[^1]== and `c == d` on.\n\n[^1]: Note.');
+    expect(back).toBe('Seen ==x ==`a == b`== y[^1]== and `c == d` on.\n\n[^1]: Note.');
   });
 
   it('keeps a citation whose text has an == in it, which Markdown doesn\'t show', async () => {
@@ -150,7 +151,7 @@ describe('a highlight read back', () => {
     const markdown = buildMarkdown([{ type: 'para' }, ...items], new Map());
     // Looking for a group from each item afresh took seconds here
     expect(performance.now() - started).toBeLessThan(2000);
-    expect(markdown).toStartWith('==w0== *==w1==*');
+    expect(markdown).toStartWith('==w0 *w1* w2 *w3*');
   });
 
   it('puts bold around an equation inside the highlight', async () => {

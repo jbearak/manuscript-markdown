@@ -1988,12 +1988,14 @@ function markdownHighlightColor(fmt: RunFormatting): string | undefined {
   return fmt.highlightColor ? resolveMarkdownColor(fmt.highlightColor) : undefined;
 }
 
-/** `markdown` in a highlight of a Markdown color: ==a==, or ==a=={red}. */
+/** `markdown` in a highlight of a Markdown color: ==a==, or ==a=={red}. The
+ *  highlight holds the whitespace at its edges, which Word shows it on, as
+ *  == reads as a highlight next to whitespace too, but not line breaks,
+ *  which emphasis keeps out (see wrapMarkdownDelimited). */
 function wrapHighlight(markdown: string, color: string | undefined): string {
-  const [open, close] = ['==' + HIGHLIGHT_OPEN, HIGHLIGHT_CLOSE + '=='];
-  return color && color !== 'yellow'
-    ? wrapMarkdownDelimited(markdown, open, close, '{' + color + '}')
-    : wrapMarkdownDelimited(markdown, open, close);
+  const [, leading, core, trailing] = /^((?:\\\n)*)(.*?)((?:\\\n)*)$/s.exec(markdown)!;
+  if (!core) return markdown;
+  return leading + '==' + HIGHLIGHT_OPEN + core + HIGHLIGHT_CLOSE + '==' + (color && color !== 'yellow' ? '{' + color + '}' : '') + trailing;
 }
 
 /** `text` as Markdown with Word's formatting. `lineStart` says the text
@@ -2005,8 +2007,9 @@ export function wrapWithFormatting(text: string, fmt: RunFormatting, lineStart =
 }
 
 /** A run's Markdown, as wrapWithFormatting writes it, with its outermost
- *  bold, italic or strikethrough marked for resolveEmphasis. */
-function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, after?: RunsAfter, blockStart = lineStart): string {
+ *  bold, italic or strikethrough marked for resolveEmphasis, and its
+ *  highlight around the rest where `highlightOuter` (see joinsHighlight). */
+function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, after?: RunsAfter, blockStart = lineStart, highlightOuter = false): string {
   let result = text;
 
   // Apply in reverse nesting order (innermost to outermost)
@@ -2015,7 +2018,7 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
     // A line break, which a code span can't hold, goes between spans of the
     // text on each side of it
     if (text.includes('\\\n')) {
-      return text.split('\\\n').map(part => part && markedFormatting(part, fmt, lineStart, after, blockStart)).join('\\\n');
+      return text.split('\\\n').map(part => part && markedFormatting(part, fmt, lineStart, after, blockStart, highlightOuter)).join('\\\n');
     }
     // Find the longest run of consecutive backticks in the text
     let maxRun = 0;
@@ -2035,7 +2038,7 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
     result = needsPadding ? `${fence} ${result} ${fence}` : `${fence}${result}${fence}`;
     // Code keeps its formatting, which **`code`** and ==`code`== export,
     // but for a highlight that an == in it would close
-    return wrapFormatting(result, fmt.highlight && text.includes('==') ? { ...fmt, highlight: false } : fmt);
+    return wrapFormatting(result, fmt.highlight && text.includes('==') ? { ...fmt, highlight: false } : fmt, highlightOuter);
   }
 
   // Escape markdown-sensitive characters so they round-trip faithfully.
@@ -2070,12 +2073,12 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
   // keeps from it, as a reference
   // The backslash of an escaped =, not one of an escaped backslash's
   if (fmt.highlight && /==|=\s*$/.test(text)) result = result.replace(/((?:\\\\)*)\\?=/g, (_m, pairs: string) => pairs + '&#61;');
-  return wrapFormatting(result, fmt);
+  return wrapFormatting(result, fmt, highlightOuter);
 }
 
 /** `markdown`, a run's text, in the tags and delimiters of its formatting
  *  `fmt`, innermost first, but for code, whose backticks are its own */
-function wrapFormatting(markdown: string, fmt: RunFormatting): string {
+function wrapFormatting(markdown: string, fmt: RunFormatting, highlightOuter = false): string {
   let result = markdown;
   // If both superscript and subscript are true, superscript takes precedence
   if (fmt.superscript) {
@@ -2083,12 +2086,47 @@ function wrapFormatting(markdown: string, fmt: RunFormatting): string {
   } else if (fmt.subscript) {
     result = `<sub>${result}</sub>`;
   }
-  if (fmt.highlight) result = wrapHighlight(result, markdownHighlightColor(fmt));
+  if (fmt.highlight && !highlightOuter) result = wrapHighlight(result, markdownHighlightColor(fmt));
   if (fmt.underline) result = `<u>${result}</u>`;
   if (fmt.strikethrough) result = wrapEmphasis(result, '~~', !fmt.italic && !fmt.bold);
   if (fmt.italic) result = wrapEmphasis(result, '*', !fmt.bold);
   if (fmt.bold) result = wrapEmphasis(result, '**');
+  // A highlight that joins its neighbour's goes around the rest, so that
+  // they join in one (see joinHighlights)
+  if (fmt.highlight && highlightOuter) result = wrapHighlight(result, markdownHighlightColor(fmt));
   return result;
+}
+
+/** Whether the highlight of the text item at `i` joins a neighbour's in
+ *  segment[start, end): one highlighted alike, with nothing between them in
+ *  Markdown, in the same comments and revision, outside a link, and not a
+ *  line break, which goes outside a highlight. Its highlight goes around
+ *  the rest of its formatting then; one alone keeps it inside, as **==a==**
+ *  has it. */
+function joinsHighlight(segment: ContentItem[], i: number, start: number, end: number): boolean {
+  const highlighted = (k: number): (ContentItem & { type: 'text' }) | undefined => {
+    const item = k >= start && k < end ? segment[k] : undefined;
+    return item?.type === 'text' && item.formatting.highlight && !item.href && item.text !== '\\\n'
+      && !(item.formatting.code && item.text.includes('==')) ? item : undefined;
+  };
+  const item = highlighted(i);
+  const alike = (k: number): boolean => {
+    const other = highlighted(k);
+    return !!item && !!other && other.formatting.highlightColor === item.formatting.highlightColor
+      && commentSetsEqual(other.commentIds, item.commentIds) && revisionsEqual(other.revision, item.revision);
+  };
+  return alike(i - 1) || alike(i + 1);
+}
+
+/** `markdown` with each highlight that runs into the next of its color, as
+ *  in ==a ====*b*==, joined with it, as in ==a *b*==, as Word's text of
+ *  the runs is highlighted all along, as a Markdown highlight around
+ *  emphasis exports it. The highlight of a run that joins goes around the
+ *  rest of its formatting (see joinsHighlight), so what they hold stays
+ *  whole. */
+function joinHighlights(markdown: string): string {
+  return markdown.replace(/\u0006==(\{[a-z0-9-]+\})?==\u0005(?=[^\u0006]*\u0006==(\{[a-z0-9-]+\})?)/g,
+    (seam, color: string | undefined, nextColor: string | undefined) => color === nextColor ? '' : seam);
 }
 
 /** The marks markedFormatting puts after a run's outermost opening delimiter
@@ -2141,6 +2179,7 @@ function flankClass(code: number): number {
  */
 function resolveEmphasis(markdown: string): string {
   if (!markdown.includes(EMPHASIS_CLOSE) && !markdown.includes(HIGHLIGHT_OPEN)) return markdown;
+  markdown = joinHighlights(markdown);
   const closeAt = new Map<number, number>();
   const opens: number[] = [];
   for (let i = 0; i < markdown.length; i++) {
@@ -6176,7 +6215,7 @@ function renderInlineRange(
       // An HTML block starts only a block's text, not a heading's, a table
       // cell's or a tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !opts?.cell && !item.revision;
-      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
     }
     i++;
   }
@@ -6447,7 +6486,7 @@ function renderInlineRangeWithIds(
       // An HTML block starts only a block's text, not a heading's, a table
       // cell's or a tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !opts?.cell && !item.revision;
-      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
     }
     i++;
   }

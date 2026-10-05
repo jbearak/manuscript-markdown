@@ -2813,7 +2813,7 @@ describe('extractDocumentContent', () => {
     expect(result.markdown).toBe('~~Strike~~ Plain\n');
   });
 
-  test('run boundary hoists trailing whitespace outside highlight delimiters', async () => {
+  test('run boundary keeps trailing whitespace inside highlight delimiters, as Word highlights it', async () => {
     const JSZip = (await import('jszip')).default;
     const zip = new JSZip();
     zip.file('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>');
@@ -2832,7 +2832,7 @@ describe('extractDocumentContent', () => {
 </w:document>`);
     const buf = await zip.generateAsync({ type: 'uint8array' });
     const result = await convertDocx(buf);
-    expect(result.markdown).toBe('==Mark=={green} Plain\n');
+    expect(result.markdown).toBe('==Mark =={green}Plain\n');
   });
 });
 
@@ -2912,11 +2912,13 @@ describe('wrapWithFormatting', () => {
     expect(wrapWithFormatting(' Bold', { ...DEFAULT_FORMATTING, italic: true })).toBe(' *Bold*');
     expect(wrapWithFormatting(' Bold ', { ...DEFAULT_FORMATTING, bold: true, italic: true })).toBe(' ***Bold*** ');
     expect(wrapWithFormatting('Strike ', { ...DEFAULT_FORMATTING, strikethrough: true })).toBe('~~Strike~~ ');
-    expect(wrapWithFormatting(' Mark ', { ...DEFAULT_FORMATTING, highlight: true })).toBe(' ==Mark== ');
-    expect(wrapWithFormatting(' Mark ', { ...DEFAULT_FORMATTING, highlight: true, highlightColor: 'green' })).toBe(' ==Mark=={green} ');
     expect(wrapWithFormatting('   ', { ...DEFAULT_FORMATTING, bold: true })).toBe('   ');
     expect(wrapWithFormatting('   ', { ...DEFAULT_FORMATTING, strikethrough: true })).toBe('   ');
-    expect(wrapWithFormatting('   ', { ...DEFAULT_FORMATTING, highlight: true, highlightColor: 'green' })).toBe('   ');
+    // But a highlight's, which == holds, and Word shows the highlight on
+    expect(wrapWithFormatting(' Mark ', { ...DEFAULT_FORMATTING, highlight: true })).toBe('== Mark ==');
+    expect(wrapWithFormatting(' Mark ', { ...DEFAULT_FORMATTING, highlight: true, highlightColor: 'green' })).toBe('== Mark =={green}');
+    expect(wrapWithFormatting('   ', { ...DEFAULT_FORMATTING, highlight: true, highlightColor: 'green' })).toBe('==   =={green}');
+    expect(wrapWithFormatting('a\\\n', { ...DEFAULT_FORMATTING, highlight: true })).toBe('==a==\\\n');
   });
 
   // Property 1: Formatting wrapping produces correct delimiters
@@ -3394,8 +3396,9 @@ describe('buildMarkdown', () => {
     ];
 
     const result = buildMarkdown(content, comments, { alwaysUseCommentIds: true });
-    // The highlight wraps both runs that have it, producing two ==...== regions
-    expect(result).toContain('==before== ');
+    // The highlight wraps both runs that have it, producing two ==...== regions,
+    // with the space Word highlights in the first
+    expect(result).toContain('==before ==');
     expect(result).toContain('==overlap==');
     // Comment boundary markers are present
     expect(result).toContain('{#1}');
@@ -5680,9 +5683,9 @@ describe('Word text that reads as Markdown', () => {
   });
 
   test('keeps a { before the space at the end of an underlined highlight as text', async () => {
-    // The highlight's == go inside the space, as in a highlight alone
+    // The { before the space and the highlight's closing ==
     const markdown = await importText('A.\n\n<u>==XX==</u>b\n\nB.', '{ ');
-    expect(markdown).toContain('<u>==\\{== </u>b');
+    expect(markdown).toContain('<u>==\\{ ==</u>b');
     expect(await exported(markdown)).toEqual({ text: ['A.', '{ b', 'B.'], formatted: true });
   });
 
@@ -9097,6 +9100,38 @@ describe('Markdown across Word runs', () => {
     const start = performance.now();
     buildMarkdown(items as ContentItem[], new Map());
     expect(performance.now() - start).toBeLessThan(3000);
+  });
+});
+
+describe('Highlights across runs', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
+  const fromWord = async (runs: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('XX')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const broken = xml.replace(/<w:r>(?:(?!<w:r>).)*?<w:t[^>]*>XX<\/w:t><\/w:r>/s, runs);
+    expect(broken).not.toBe(xml);
+    zip.file('word/document.xml', broken);
+    return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
+  };
+  const highlighted = (text: string, rPr = '') => '<w:r><w:rPr>' + rPr + '<w:highlight w:val="yellow"/></w:rPr><w:t xml:space="preserve">' + text + '</w:t></w:r>';
+
+  test.each([
+    '==a *b* c==\n', '==a **b** `c` d=={red}\n', '==a <u>b</u> <sup>c</sup>==\n', '**==a==** b\n', '*==a==* ==b==\n',
+  ])('keeps %j as it is', async (md) => {
+    // Each run had a highlight of its own, so the spaces between them,
+    // which Word highlighted, lost theirs
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    ['a highlighted space at its end', highlighted('a ') + '<w:r><w:t>b</w:t></w:r>', '==a ==b\n'],
+    ['a highlighted space at its start', '<w:r><w:t>a</w:t></w:r>' + highlighted(' b'), 'a== b==\n'],
+    ['highlighted spaces alone', '<w:r><w:t>a</w:t></w:r>' + highlighted('  ') + '<w:r><w:t>b</w:t></w:r>', 'a==  ==b\n'],
+    ['runs highlighted alike', highlighted('a ') + highlighted('b', '<w:i/>') + highlighted(' c'), '==a *b* c==\n'],
+  ])('keeps Word\'s highlight with %s', async (_name, runs, md) => {
+    // Its edge spaces went outside it, where Word showed them without it
+    expect(await fromWord(runs)).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
   });
 });
 
