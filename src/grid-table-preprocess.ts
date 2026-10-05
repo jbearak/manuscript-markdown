@@ -13,10 +13,7 @@ export interface GridTableData {
 }
 
 // East Asian Wide / Fullwidth code-point ranges (UAX #11).  Characters in
-// these ranges occupy two terminal columns; everything else is treated as
-// single-width.  This is intentionally conservative — zero-width joiners,
-// combining marks, etc. are counted as width-1 which is acceptable for the
-// "does the pipe table fit?" heuristic.
+// these ranges occupy two terminal columns, as do emoji (see getDisplayWidth).
 function isFullWidth(cp: number): boolean {
   return (
     (cp >= 0x1100 && cp <= 0x115f) ||  // Hangul Jamo
@@ -29,17 +26,55 @@ function isFullWidth(cp: number): boolean {
     (cp >= 0xfe10 && cp <= 0xfe6f) ||  // Vertical forms, CJK compat forms
     (cp >= 0xff01 && cp <= 0xff60) ||  // Fullwidth Latin/Symbols
     (cp >= 0xffe0 && cp <= 0xffe6) ||  // Fullwidth Signs
-    (cp >= 0x1f000 && cp <= 0x1fbff) || // Emoji & symbols
+    (cp >= 0x1f200 && cp <= 0x1f2ff) || // Enclosed Ideographic Supplement
     (cp >= 0x20000 && cp <= 0x2ffff) || // CJK Extension B–F
     (cp >= 0x30000 && cp <= 0x3ffff)    // CJK Extension G+
   );
 }
 
+const ZERO_WIDTH_RE = /^[\p{Mn}\p{Me}\p{Cf}]$/u;
+const EMOJI_PRESENTATION_RE = /^\p{Emoji_Presentation}$/u;
+const PICTOGRAPHIC_RE = /^\p{Extended_Pictographic}$/u;
+
+/**
+ * A string's width in the columns of a monospace editor, as Pandoc counts
+ * them in a grid table: two for a wide character, as a CJK one, or an emoji,
+ * and none for a combining mark or a format character, as a joiner or a soft
+ * hyphen. An emoji's sequence counts as the emoji: a skin tone after it, or
+ * an emoji a joiner joins to it, counts none, and a variation selector-16
+ * makes a narrow character before it wide. A regional indicator counts one,
+ * so a flag, two of them, counts two.
+ */
 export function getDisplayWidth(str: string): number {
   let width = 0;
+  // The last character that isn't a mark, and what it counted
+  let base = '';
+  let baseWidth = 0;
+  let joined = false;
   for (const ch of str) {
     const cp = ch.codePointAt(0)!;
-    width += isFullWidth(cp) ? 2 : 1;
+    let w: number;
+    if (cp < 0x7f) {
+      // ASCII, which is most text, without the tests of its properties
+      w = 1;
+      base = ch;
+      baseWidth = 1;
+      joined = false;
+    } else if (cp === 0xfe0f) {
+      w = baseWidth === 1 ? 1 : 0;
+      baseWidth += w;
+    } else if (ZERO_WIDTH_RE.test(ch)) {
+      w = 0;
+      if (cp === 0x200d) joined = PICTOGRAPHIC_RE.test(base);
+    } else {
+      w = (joined && PICTOGRAPHIC_RE.test(ch)) || (cp >= 0x1f3fb && cp <= 0x1f3ff && PICTOGRAPHIC_RE.test(base)) ? 0
+        : cp >= 0x1f1e6 && cp <= 0x1f1ff ? 1
+          : isFullWidth(cp) || EMOJI_PRESENTATION_RE.test(ch) ? 2 : 1;
+      base = ch;
+      baseWidth = w;
+      joined = false;
+    }
+    width += w;
   }
   return width;
 }
@@ -179,28 +214,58 @@ export function preprocessGridTablesWithSourceMap(markdown: string): GridTablePr
 }
 
 /**
- * The text of each column of a grid table's line, between the display
- * columns of the separator's + signs, a wide character taking two, as Pandoc
- * reads a table and import pads one. Expand Table pads a table by
+ * The text of each column of a grid table's line, between its | signs under
+ * the separator's + signs: by display columns, a wide character taking two,
+ * as Pandoc reads a table and import pads one. Expand Table pads a table by
  * characters, so a line whose | signs are under the + signs by their
- * indices, and not by display columns, is read by indices.
+ * indices, and not by display columns, is read by indices. A line neither
+ * lines up, as with a character whose width an editor counts otherwise, is
+ * cut at the | nearest each + by display columns, or with too few, as a
+ * cell spanning columns, at the + signs' display columns.
  */
 function gridLineCells(line: string, boundaries: number[]): string[] {
   const chars: string[] = [];
-  const display: number[] = [];
-  const index: number[] = [];
+  const columns: number[] = [];
+  const display = new Map<number, number>();
+  const index = new Map<number, number>();
+  const pipes: Array<{ k: number; column: number }> = [];
   let width = 0;
   let offset = 0;
   for (const ch of line) {
+    const k = chars.length;
     chars.push(ch);
-    display.push(width);
-    index.push(offset);
+    columns.push(width);
+    if (ch === '|') {
+      display.set(width, k);
+      index.set(offset, k);
+      pipes.push({ k, column: width });
+    }
     width += getDisplayWidth(ch);
     offset += ch.length;
   }
-  const aligned = (columns: number[]) => boundaries.every(b => chars[columns.indexOf(b)] === '|');
-  const columns = aligned(display) || !aligned(index) ? display : index;
-  return boundaries.slice(0, -1).map((b, c) => chars.filter((_ch, k) => columns[k] > b && columns[k] < boundaries[c + 1]).join(''));
+  const at = (columns: Map<number, number>) => boundaries.map(b => columns.get(b) ?? -1);
+  let cuts = at(display);
+  if (cuts.includes(-1)) {
+    const byIndex = at(index);
+    if (!byIndex.includes(-1)) {
+      cuts = byIndex;
+    } else if (pipes.length >= boundaries.length) {
+      let next = 0;
+      cuts = boundaries.map((b, c) => {
+        // The nearest | that leaves one for each + after
+        let best = next;
+        for (let p = next; p <= pipes.length - (boundaries.length - c); p++) {
+          if (Math.abs(pipes[p].column - b) < Math.abs(pipes[best].column - b)) best = p;
+        }
+        next = best + 1;
+        return pipes[best].k;
+      });
+    }
+  }
+  if (cuts.includes(-1)) {
+    return boundaries.slice(0, -1).map((b, c) => chars.filter((_ch, k) => columns[k] > b && columns[k] < boundaries[c + 1]).join(''));
+  }
+  return boundaries.slice(0, -1).map((_b, c) => chars.slice(cuts[c] + 1, cuts[c + 1]).join(''));
 }
 
 /**
