@@ -4928,6 +4928,15 @@ describe('Line breaks a backslash can\'t hold', () => {
     expect(await exportedText(md)).toBe(text);
   });
 
+  test.each([
+    ['a paragraph', p(r(t('a') + '<w:br/>' + t('  '))), 'a\\\n&#32;&#32;\n'],
+    ['a heading', p(r(t('a') + '<w:br/>' + t('  ')), 'Heading1'), '# a<br>&#32;&#32;\n'],
+  ])('keeps the spaces after one at the end of %s', async (_name, xml, md) => {
+    // After a <br>, they were at the end, where Markdown drops them
+    expect(await imported(xml)).toBe(md);
+    expect(await exportedText(md)).toBe('a⏎  ');
+  });
+
   test('keeps one in inline code between the code on each side', async () => {
     // Inside the code span, the \ was code, and the line end a space
     const md = await imported(p(r(t('a') + '<w:br/>' + t('b'), code)));

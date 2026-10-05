@@ -389,9 +389,10 @@ export function keepParagraphWhitespace(text: string, atStart: boolean, atEnd: b
 }
 
 // A line break as Markdown writes one, a \ that isn't escaped before a line
-// end, with the escaped ones before it
-const HARD_BREAK = /(?<!\\)((?:\\\\)*)\\\n/g;
-const HARD_BREAK_AT_END = /(?<!\\)((?:\\\\)*)\\\n([ \t]*)$/;
+// end, with the escaped ones before it, and the spaces and tabs after it if
+// they end the text
+const HARD_BREAK = /(?<!\\)((?:\\\\)*)\\\n([ \t]+$)?/g;
+const HARD_BREAK_AT_END = /(?<!\\)((?:\\\\)*)\\\n$/;
 
 /** Whether text next to an item starts or ends a Markdown block there: at
  *  the end of the content, a paragraph break, a table, or a display
@@ -8632,11 +8633,15 @@ export function buildMarkdown(
     // not at its end, where Markdown drops the line end and keeps the \ as
     // text, nor in a heading, which the line end ends, so there it's <br>,
     // which export reads as one. One before comment bodies goes, as below.
+    // Spaces and tabs after the last, which keepParagraphWhitespace writes
+    // as references after a \ and a line end, are references after a <br>
+    // too, where they'd end the heading, which Markdown drops.
     if (paragraphHeading) {
       const bodiesBreak = rendered.deferredComments.length > 0 ? /(\\?\n)+$/.exec(textOut)?.[0] ?? '' : '';
-      textOut = textOut.slice(0, textOut.length - bodiesBreak.length).replace(HARD_BREAK, (_m, backslashes: string) => backslashes + '<br>') + bodiesBreak;
+      textOut = textOut.slice(0, textOut.length - bodiesBreak.length).replace(HARD_BREAK, (_m, backslashes: string, whitespace = '') =>
+        backslashes + '<br>' + whitespace.replace(/[ \t]/g, (c: string) => c === ' ' ? '&#32;' : '&#9;')) + bodiesBreak;
     } else if (atEnd && rendered.deferredComments.length === 0 && !isInParagraphMath(mergedContent[rendered.nextIndex])) {
-      textOut = textOut.replace(HARD_BREAK_AT_END, (_m, backslashes: string, whitespace: string) => backslashes + '<br>' + whitespace);
+      textOut = textOut.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + '<br>');
     }
     // An HTML block's indent, of up to three spaces, which markdown-it keeps
     // in its text, and a reference would make a paragraph's
@@ -8735,7 +8740,7 @@ export function buildMarkdown(
       // equation in the paragraph (`beforeMath`), which the paragraph goes
       // on in after it.
       const inlinePart = (text: string, beforeMath = false) => {
-        const broken = beforeMath ? text : text.replace(HARD_BREAK_AT_END, (_m, backslashes: string, whitespace: string) => backslashes + '<br>' + whitespace);
+        const broken = beforeMath ? text : text.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + '<br>');
         return partStart === 0
           ? keepParagraphWhitespace(broken.replace(/^[ \t]/, ''), true, true)
           : keepParagraphWhitespace(broken, isMarkdownBlockEdge(bodyMerged[partStart - 1]), true);
