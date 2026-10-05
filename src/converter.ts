@@ -8743,9 +8743,10 @@ export function buildMarkdown(
       // whitespace the note's text starts with after it. A line break at its
       // end is <br>, as at a paragraph's end in the body, but not before an
       // equation in the paragraph (`beforeMath`), which the paragraph goes
-      // on in after it.
-      const inlinePart = (text: string, beforeMath = false) => {
-        const broken = beforeMath ? text : text.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + '<br>');
+      // on in after it, and goes where comment bodies follow (`beforeBodies`),
+      // as in the body, where an older export wrote it between references.
+      const inlinePart = (text: string, beforeMath = false, beforeBodies = false) => {
+        const broken = beforeMath ? text : text.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + (beforeBodies ? '' : '<br>'));
         return partStart === 0
           ? keepParagraphWhitespace(broken.replace(/^[ \t]/, ''), true, true)
           : keepParagraphWhitespace(broken, isMarkdownBlockEdge(bodyMerged[partStart - 1]), true);
@@ -8767,7 +8768,7 @@ export function buildMarkdown(
         if (item.type === 'para') {
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
-            pushInline(inlinePart(part.text));
+            pushInline(inlinePart(part.text, false, part.deferredComments.length > 0));
             deferredAll.push(...part.deferredComments);
           }
           partStart = bi + 1;
@@ -8796,7 +8797,7 @@ export function buildMarkdown(
           // Flush preceding inline content
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
-            pushInline(inlinePart(part.text));
+            pushInline(inlinePart(part.text, false, part.deferredComments.length > 0));
             deferredAll.push(...part.deferredComments);
           }
           paragraphPart = undefined;
@@ -8856,7 +8857,7 @@ export function buildMarkdown(
       }
       if (partStart < bodyMerged.length) {
         const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
-        pushInline(inlinePart(part.text));
+        pushInline(inlinePart(part.text, false, part.deferredComments.length > 0));
         deferredAll.push(...part.deferredComments);
       }
       if (bodyParts.length === 0) {

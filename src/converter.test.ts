@@ -4974,6 +4974,34 @@ describe('Line breaks a backslash can\'t hold', () => {
     expect(body.replace(/<w:rPr>[\s\S]*?<\/w:rPr>/g, '').replace(/<w:br\/>/g, '\n').replace(/<[^>]+>/g, '')).toBe('a\\\nb');
   });
 
+  test.each([
+    ['all of', 'A\n\n<!-- c -->\n\nB', 'A\n\n<!-- c --><br>\n\nB\n'],
+    ['after text in', 'A\n\nx <!-- c -->\n\nB', 'A\n\nx <!-- c --><br>\n\nB\n'],
+  ])('keeps one after a comment that is %s a paragraph', async (_name, source, md) => {
+    // markdown-it read the comment and the <br> as one block, which was text
+    const zip = await JSZip.loadAsync((await convertMdToDocx(source)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const end = xml.indexOf('</w:p>', xml.indexOf('c --'));
+    zip.file('word/document.xml', xml.slice(0, end) + '<w:r><w:br/></w:r>' + xml.slice(end));
+    const imported = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(imported).toBe(md);
+    const exported = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    expect(exported).not.toContain('&lt;br');
+    expect(exported).toContain('<w:br/>');
+    expect(exported).toContain('<w:vanish/>');
+  });
+
+  test('drops one that ends a note\'s paragraph before its comments\' bodies', async () => {
+    // As in the document, where an older export wrote it between comment
+    // references, which a <br> would keep for good
+    const md = 'T[^1]\n\n[^1]: {#1}a {#2}b{/1} c{/2}\n    {#1>>@A | x<<}\n    {#2>>@A | y<<}\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/footnotes.xml')!.async('string');
+    const end = xml.lastIndexOf('</w:p>');
+    zip.file('word/footnotes.xml', xml.slice(0, end) + '<w:r><w:br/></w:r>' + xml.slice(end));
+    expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
+  });
+
   test('reads a list item that is only a <br> as a line break', async () => {
     // markdown-it reads the <br> as an HTML block, which an item keeps
     expect(await exportedText('- <br>\n- b')).toBe('⏎ | b');

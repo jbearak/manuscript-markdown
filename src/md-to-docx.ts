@@ -2896,12 +2896,16 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
               runs: [{ type: 'text', text: htmlContent.replace(/\n$/, '') }]
             });
           }
-        } else if (/^(?:<br\s*\/?>\s*)+$/i.test(htmlContent.trim())) {
+        } else if (/^(?:<br\s*\/?>\s*)+$/i.test(htmlContent.trim()) || /^(?:<!--(?:(?!-->)[\s\S])*-->)+(?:<br\s*\/?>)+$/i.test(htmlContent.trim())) {
           // Line breaks alone, as import writes a paragraph that is one,
-          // which markdown-it reads as a block, not a paragraph's text
+          // which markdown-it reads as a block, not a paragraph's text, or
+          // after comments, as import writes a paragraph of comments a line
+          // break ends, which markdown-it reads as the comments' block
           result.push({
             type: 'paragraph',
-            runs: htmlContent.trim().match(/<br\s*\/?>/gi)!.map(() => ({ type: 'hardbreak' as const, text: '\n' })),
+            runs: htmlContent.trim().match(/<!--(?:(?!-->)[\s\S])*-->|<br\s*\/?>/gi)!.map(tag => tag.startsWith('<!--')
+              ? { type: 'html_comment' as const, text: tag }
+              : { type: 'hardbreak' as const, text: '\n' }),
           });
         } else {
           const htmlTables = extractHtmlTables(htmlContent);
