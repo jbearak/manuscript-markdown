@@ -5888,6 +5888,12 @@ describe('Whitespace at the edges of a paragraph', () => {
     ['two spaces', '  two', 'A.\n\n&#32;&#32;two\n\nB.\n'],
     ['a no-break space', '\u00a0x', 'A.\n\n&nbsp;x\n\nB.\n'],
     ['a no-break space alone', '\u00a0', 'A.\n\n&nbsp;\n\nB.\n'],
+    // Which JavaScript's trim takes, as markdown-it trims a paragraph with
+    ['an ideographic space', '\u3000\u3000\u6bb5\u843d', 'A.\n\n&#12288;&#12288;\u6bb5\u843d\n\nB.\n'],
+    ['an ideographic space alone', '\u3000', 'A.\n\n&#12288;\n\nB.\n'],
+    ['a space before an ideographic space', ' \u3000x', 'A.\n\n&#32;&#12288;x\n\nB.\n'],
+    ['an em space', '\u2003x', 'A.\n\n&#8195;x\n\nB.\n'],
+    ['a zero-width no-break space', '\ufeffx', 'A.\n\n&#65279;x\n\nB.\n'],
   ])('keeps %s at the start of a paragraph', async (_name, text, expected) => {
     // Four spaces or a tab made the paragraph a code block, and Markdown
     // dropped other whitespace there, or the whole paragraph
@@ -5896,9 +5902,35 @@ describe('Whitespace at the edges of a paragraph', () => {
     expect(await roundTrip(markdown)).toBe(markdown);
   });
 
-  test('keeps a no-break space at the end of a paragraph', async () => {
-    const markdown = await withText('A.\n\nXX\n\nB.', 'word/document.xml', 'end\u00a0');
-    expect(markdown).toBe('A.\n\nend&nbsp;\n\nB.\n');
+  test.each([
+    ['a no-break space', 'end\u00a0', 'A.\n\nend&nbsp;\n\nB.\n'],
+    ['an ideographic space', 'end\u3000', 'A.\n\nend&#12288;\n\nB.\n'],
+    ['a line separator', 'end\u2028', 'A.\n\nend&#8232;\n\nB.\n'],
+    // Whose reference's & the backslash escaped, which showed the reference
+    ['an ideographic space after a backslash', 'end\\\u3000', 'A.\n\nend\\\\&#12288;\n\nB.\n'],
+    ['an ideographic space after two backslashes', 'end\\\\\u3000', 'A.\n\nend\\\\\\\\&#12288;\n\nB.\n'],
+    ['a no-break space after a backslash', 'end\\\u00a0', 'A.\n\nend\\\\&nbsp;\n\nB.\n'],
+    ['an ideographic space after a backslash and a space', 'end\\ \u3000', 'A.\n\nend\\ &#12288;\n\nB.\n'],
+  ])('keeps %s at the end of a paragraph', async (_name, text, expected) => {
+    const markdown = await withText('A.\n\nXX\n\nB.', 'word/document.xml', text);
+    expect(markdown).toBe(expected);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['a table\'s cell', '| a |\n|---|\n| XX |', '| a |\n| --- |\n| &#12288;x&#12288; |\n'],
+    ['a list item', '- XX', '- &#12288;x&#12288;\n'],
+    ['a quote', '> XX', '> &#12288;x&#12288;\n'],
+    ['a heading', '# XX', '# &#12288;x&#12288;\n'],
+  ])('keeps an ideographic space at the edges of %s', async (_name, md, expected) => {
+    const markdown = await withText(md, 'word/document.xml', '\u3000x\u3000');
+    expect(markdown).toBe(expected);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps an ideographic space at the edges of a note', async () => {
+    const markdown = await withText('T.[^1]\n\n[^1]: XX', 'word/footnotes.xml', '\u3000x\u3000');
+    expect(markdown).toBe('T.[^1]\n\n[^1]: &#12288;x&#12288;\n');
     expect(await roundTrip(markdown)).toBe(markdown);
   });
 
