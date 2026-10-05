@@ -7615,6 +7615,8 @@ describe('Missing citation keys', () => {
     ['a line end', 'P [@a\nb] Q', 'a b'],
     // Whose ` the note's escaped ` closed as a code span
     ['a backtick', 'P [@a`b c] Q', 'a\\`b c'],
+    // Which import writes as it is, as HTML, which export writes as text
+    ['a tag', 'P [@a<span>] Q', 'a<span>'],
   ])('writes the note of a missing key with %s once', async (_name, md, key) => {
     // The note for it, which export strips and writes anew, wasn't
     // stripped, and another was added each round trip
@@ -7633,6 +7635,9 @@ describe('Missing citation keys', () => {
     // took for the end of a citation's item
     ['with a reference in a key', 'P [@a] Q\n\nCitation data for @a&lt;b&gt;c was not found in the bibliography file.\n',
       'P [@a] Q\n\nCitation data for @a was not found in the bibliography file.\n'],
+    // Which export reads as a paragraph of its own, after a quote, as markdown-it doesn't
+    ['after a quote', 'P [@a] Q\n\n> x\nCitation data for @a was not found in the bibliography file.\n',
+      'P [@a] Q\n\n> x\n\nCitation data for @a was not found in the bibliography file.\n'],
   ])('writes the note of a missing key %s once', async (_name, md, expected) => {
     // It wasn't stripped, as a line between blank lines, or one a line feed
     // ends, and another was added

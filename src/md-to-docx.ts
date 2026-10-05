@@ -2378,7 +2378,10 @@ function applyCustomStyleSentinels(tokens: MdToken[], warnings?: string[], refer
   }
 }
 
-function deLazifyBlockquotes(markdown: string): string {
+/** `markdown` with a blank line between a quote's line and a line after it
+ *  without >, which would continue the quote's paragraph; the index of each
+ *  line it adds goes in `inserted` */
+function deLazifyBlockquotes(markdown: string, inserted?: number[]): string {
   const lines = markdown.split('\n');
   const out: string[] = [];
   let inBlockquoteRun = false;
@@ -2394,6 +2397,7 @@ function deLazifyBlockquotes(markdown: string): string {
       // code blocks, or code content roundtrip fidelity is corrupted.
       if (!fenceChar) {
         if (inBlockquoteRun) {
+          inserted?.push(out.length);
           out.push('');
           inBlockquoteRun = false;
         }
@@ -2428,6 +2432,7 @@ function deLazifyBlockquotes(markdown: string): string {
     if (inBlockquoteRun) {
       // Insert a blank line to end the previous blockquote before this
       // non-blank, non-`>` line.
+      inserted?.push(out.length);
       out.push('');
       inBlockquoteRun = false;
     }
@@ -7703,20 +7708,26 @@ export async function convertMdToDocx(
   // to a comma, spaces and all, as in [@a b], and hold no ; or ], which end
   // an item or the citation.
   // A note is a top-level paragraph of its own, as export reads one, not a
-  // line of one, of a list or quote, or of code or HTML. Lines end as
-  // markdown-it ends them. Its text is as it reads, with import's escapes
-  // and character references, as of a key's < in @a&lt;b, decoded.
+  // line of one, of a list or quote, or of code or HTML: as parseMd reads
+  // the body, where a line after a quote's is its own (deLazifyBlockquotes).
+  // Lines end as markdown-it ends them. Its text is as Word shows it, with
+  // import's escapes and character references, as of a key's < in
+  // @a&lt;b, decoded, and HTML, which export writes as text.
   const MISSING_KEY_TEXT = /^Citation data for @[^,;\]]+ was not found in the bibliography file\.$/;
   const bodyParts = body.split(/(\r\n?|\n)/);
   let notes: Set<number> | undefined;
   if (bodyParts.some((part, k) => k % 2 === 0 && part.startsWith('Citation data for @'))) {
     citationTextMd ??= createMarkdownIt();
-    const parsed = citationTextMd.parse(body, {});
+    const inserted: number[] = [];
+    const parsed = citationTextMd.parse(deLazifyBlockquotes(bodyParts.filter((_part, k) => k % 2 === 0).join('\n'), inserted), {});
+    // The lines added before the one a token starts at
+    let added = 0;
     notes = new Set(parsed.flatMap((token, t) => {
+      if (token.type !== 'paragraph_open' || token.level !== 0 || !token.map || token.map[1] - token.map[0] !== 1) return [];
+      while (added < inserted.length && inserted[added] < token.map[0]) added++;
       const children = parsed[t + 1]?.children;
-      return token.type === 'paragraph_open' && token.level === 0 && token.map && token.map[1] - token.map[0] === 1
-        && children?.every(child => child.type === 'text') && MISSING_KEY_TEXT.test(children.map(child => child.content).join(''))
-        ? [token.map[0]] : [];
+      return children?.every(child => child.type === 'text' || child.type === 'html_inline')
+        && MISSING_KEY_TEXT.test(children.map(child => child.content).join('')) ? [token.map[0] - added] : [];
     }));
   }
   const bodyStripped = bodyParts
