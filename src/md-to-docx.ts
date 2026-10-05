@@ -693,6 +693,30 @@ export function linkifyMatches(text: string): Array<{ schema: string; index: num
   return citationTextMd.linkify.match(text) ?? [];
 }
 
+/** The colons of the URLs with // that markdown-it's own linkify rule links
+ *  in Markdown `markdown`, as export reads it, which linkifyMatches can
+ *  miss: that rule runs before linkify's search, and reads the scheme from
+ *  the text before the colon, which needs no space or punctuation before
+ *  it but only no ASCII letter, digit, ., + or -, so it links the URL in
+ *  a_https://e.com and éhttps://e.com. A backslash ends that text, and
+ *  takes the character after it, a letter too, so x\hhttps://e.com links
+ *  https://e.com. */
+export function linkifiedColons(markdown: string): number[] {
+  citationTextMd ??= createMarkdownIt();
+  const colons: number[] = [];
+  for (let at = markdown.indexOf('://'); at !== -1; at = markdown.indexOf('://', at + 1)) {
+    let start = at;
+    while (start > 0 && /[a-z0-9.+-]/i.test(markdown[start - 1])) start--;
+    let backslashes = 0;
+    while (markdown[start - 1 - backslashes] === '\\') backslashes++;
+    if (backslashes % 2 === 1) start++;
+    if (!/^[a-z]/i.test(markdown.slice(start, at))) continue;
+    const link = citationTextMd.linkify.matchAtStart(markdown.slice(start));
+    if (link && link.url.length > at - start) colons.push(at);
+  }
+  return colons;
+}
+
 /** The text of the link linkify makes of a URL, or an email address
  *  (`email`), as export reads it: with percent-encoding and punycode
  *  decoded, as https://e.com/a%20b shows https://e.com/a b */

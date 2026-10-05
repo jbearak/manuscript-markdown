@@ -4945,6 +4945,9 @@ describe('Word text that reads as Markdown', () => {
     // A URL or email address that the escape of what follows it ends, where
     // linkify found none before it was escaped
     'http://e.com_', 'a@b.co_',
+    // A URL after text with no space, which markdown-it's own linkify rule
+    // links where linkify's search doesn't, as after an escape of a letter
+    'a_https://e.com', '\u00e9https://e.com', '$https://e.com', '`https://e.com', 'x\\hhttps://e.com', 'x\\\\hhttps://e.com',
   ])('keeps %s in a paragraph as text', async (text) => {
     // Import wrote Word's text as it was, and export read it as Markdown:
     // emphasis, code, a link, math, a tracked change, a comment, a
