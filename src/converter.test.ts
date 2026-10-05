@@ -7573,6 +7573,23 @@ describe('Track changes (CriticMarkup)', () => {
       expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(expected + '\n');
     });
 
+    test.each([
+      ['an untracked tail', [{ text: 'a', ids: ['1'], revision: 'addition' }, { text: ' tail' }], '### {=={++a++}==}{>>c<<} tail'],
+      ['an untracked tail without a comment', [{ text: 'a', revision: 'addition' }, { text: ' tail' }], '### {++a++} tail'],
+      ['a deletion', [{ text: 'a', ids: ['1'], revision: 'addition' }, { text: 'b', revision: 'deletion' }], '### {=={++a++}==}{>>c<<}{--b--}'],
+      ['its revision alone', [{ text: 'a', ids: ['1'], revision: 'addition' }], '{++### ++}{=={++a++}==}{>>c<<}'],
+    ] as Array<[string, Array<{ text: string; ids?: string[]; revision?: 'addition' | 'deletion' }>, string]>)(
+      'writes the marker of a heading whose mark is inserted, with %s, where export reads the heading back', (_name, runs, expected) => {
+      // A span of the marker made export read a heading with more than the
+      // revision as a paragraph, with a literal ###
+      const content: ContentItem[] = [
+        { type: 'para', headingLevel: 3, paraMarkRevision: { type: 'addition', author: 'A', date: '' } },
+        ...runs.map((run): ContentItem => ({ type: 'text', text: run.text, commentIds: new Set(run.ids ?? []), formatting: DEFAULT_FORMATTING,
+          ...(run.revision ? { revision: { type: run.revision, author: 'A', date: '' } } : {}) })),
+      ];
+      expect(buildMarkdown(content, new Map([['1', { author: '', date: '', text: 'c' }]]))).toBe(expected);
+    });
+
     test('gives a revised heading\'s mark its revision\'s author, not a comment\'s before its text', async () => {
       const { docx } = await convertMdToDocx('{++### ++}{>>@Alice (2024-01-01 12:00) | c<<}{++H++}', { authorName: 'Bob' });
       const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');

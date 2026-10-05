@@ -7984,7 +7984,7 @@ export function buildMarkdown(
   // so a heading with no inline content (empty inserted paragraph) can still
   // be serialized as its own {++### ++} / {--### --} span instead of leaking
   // the marker into the next paragraph.
-  let pendingHeadingCriticMarker: { marker: string; revType: 'addition' | 'deletion' } | undefined;
+  let pendingHeadingCriticMarker: { marker: string; revType: 'addition' | 'deletion'; whole: boolean } | undefined;
   const flushPendingHeadingCriticMarker = () => {
     if (pendingHeadingCriticMarker === undefined) return;
     const { marker, revType } = pendingHeadingCriticMarker;
@@ -8450,9 +8450,24 @@ export function buildMarkdown(
           // Whole-paragraph insertion/deletion (paragraph mark carries
           // w:ins/w:del): the heading marker belongs inside the Critic span
           // ({++### heading++}), so defer it to the rendered inline text.
+          // Only where export reads all of it back as the revised heading:
+          // text of the mark's revision alone, beside comments. Otherwise a
+          // plain marker keeps the heading, though not its mark's revision.
+          const revType = item.paraMarkRevision.type;
+          let whole = true;
+          for (let j = i + 1; j < mergedContent.length; j++) {
+            const part = mergedContent[j];
+            if (!isInlineRevisionItem(part) && part.type !== 'html_comment') break;
+            if (isCommentPoint(part)) continue;
+            if (part.type === 'html_comment' || part.revision?.type !== revType) {
+              whole = false;
+              break;
+            }
+          }
           pendingHeadingCriticMarker = {
             marker: '#'.repeat(item.headingLevel) + ' ',
-            revType: item.paraMarkRevision.type,
+            revType,
+            whole,
           };
         } else {
           output.push('#'.repeat(item.headingLevel) + ' ');
@@ -8991,11 +9006,13 @@ export function buildMarkdown(
       // content doesn't start with a Critic addition/deletion (unexpected),
       // fall back to a plain heading prefix.
       const openMatch = /^\{(\+\+|--)/.exec(textOut);
-      const { marker, revType } = pendingHeadingCriticMarker;
+      const { marker, revType, whole } = pendingHeadingCriticMarker;
       // Comments, their anchors or range markers before the revision's text,
       // or as all of the heading's
       const afterComments = /^(?:\{==|\{#[^}\s]+\}|\{>>[\s\S]*?<<\})+(?:\{(\+\+|--)|$)/.exec(textOut);
-      if (openMatch) {
+      if (!whole) {
+        textOut = marker + textOut;
+      } else if (openMatch) {
         textOut = textOut.slice(0, openMatch[0].length) + marker + textOut.slice(openMatch[0].length);
       } else if (afterComments && (afterComments[1] ?? (revType === 'addition' ? '++' : '--')) === (revType === 'addition' ? '++' : '--')) {
         // After a comment's anchor or range marker, as in
