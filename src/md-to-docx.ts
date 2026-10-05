@@ -7270,9 +7270,7 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
       xml += '<w:tc>' + tcPr;
       // Auto-bold header cells to match Word's default table header styling.
       // Word applies bold to header rows via table styles; we reproduce that here.
-      const cellRuns = withoutCommentBodyLines(row.header
-        ? cell.runs.map(r => r.type === 'text' && !r.bold ? { ...r, bold: true } : r)
-        : cell.runs);
+      const cellRuns = withoutCommentBodyLines(row.header ? cell.runs.map(boldHeaderRun) : cell.runs);
       // The column's or cell's alignment, which jc sets after spacing
       const cellPPr = cell.align
         ? tablePPr.replace(spacingZero, spacingZero + '<w:jc w:val="' + cell.align + '"/>')
@@ -7297,6 +7295,19 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
 
   xml += '</w:tbl>';
   return xml;
+}
+
+/** A header cell's run in bold, and a tracked change's or a comment's range
+ *  in it, whose text import reads without the bold too */
+function boldHeaderRun(run: MdRun): MdRun {
+  if (run.type === 'text') return run.bold ? run : { ...run, bold: true };
+  if (run.type !== 'critic_add' && run.type !== 'critic_del' && run.type !== 'critic_sub' && run.type !== 'critic_highlight') return run;
+  return {
+    ...run, bold: true,
+    ...(run.innerRuns ? { innerRuns: run.innerRuns.map(boldHeaderRun) } : {}),
+    ...(run.oldRuns ? { oldRuns: run.oldRuns.map(boldHeaderRun) } : {}),
+    ...(run.newRuns ? { newRuns: run.newRuns.map(boldHeaderRun) } : {}),
+  };
 }
 
 function generateParaId(state: DocxGenState): string {

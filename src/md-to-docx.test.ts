@@ -1346,6 +1346,22 @@ describe('generateTable', () => {
     expect(matches?.length).toBe(1);
   });
 
+  it.each([
+    ['an insertion and a deletion', '| a {++x++} {--y--} |\n| --- |\n| b |'],
+    ['a substitution', '| a {~~x~>y~~} |\n| --- |\n| b |'],
+    ['emphasis in an insertion', '| a {++*x*++} {--**y**--} |\n| --- |\n| b |'],
+    ['an insertion in a grid table', '+-----------+\n| a {++x++} |\n| {--y--}   |\n+===========+\n| b         |\n+-----------+'],
+  ])('makes %s in a header cell bold', async (_name, md) => {
+    // Its text was plain, and import strips a header's bold from it as
+    // from the rest of the header's text, so the bold Word had was lost
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    const header = xml.slice(xml.indexOf('<w:tr>'), xml.indexOf('</w:tr>'));
+    const changed = [...header.matchAll(/<w:(ins|del)\b[^>]*>([\s\S]*?)<\/w:\1>/g)].flatMap(m => m[2].match(/<w:r>[\s\S]*?<\/w:r>/g) ?? []);
+    expect(changed.length).toBeGreaterThanOrEqual(2);
+    for (const run of changed) expect(run).toContain('<w:b/>');
+  });
+
   it('preserves existing bold formatting in header cells', () => {
     const rows: MdTableRow[] = [
       {
