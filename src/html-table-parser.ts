@@ -72,6 +72,10 @@ function parseColWidthsAttr(raw: string): number[] | 'equal' | 'auto' | undefine
   return nums;
 }
 
+// A comment: to its -->, or an empty one that the browser and markdown-it
+// end sooner, <!--> or <!--->; or else, where none ends it, to the end
+const HTML_COMMENT = '<!--(?:-?>|[\\s\\S]*?-->)';
+const HTML_COMMENT_OR_REST = '<!--(?:-?>|[\\s\\S]*?-->|[\\s\\S]*$)';
 // A tag's attributes, whose quoted values can hold a > or a <!--. A < out
 // of quotes ends them, so that the search for a > from a < with none goes
 // no further than the next <, and each < is looked past once.
@@ -102,7 +106,7 @@ function rawTextElement(group: number): string {
  *  comment, or an element whose text is no HTML, with no end isn't one, as
  *  it ends what holds it (see htmlRestInComment). */
 function htmlContentUnit(group: number): string {
-  return '(?:(?=(<!--[\\s\\S]*?-->))\\' + group
+  return '(?:(?=(' + HTML_COMMENT + '))\\' + group
     + '|(?=(' + RAW_TEXT_START + '[\\s\\S]*?<\\/\\' + (group + 2) + '\\s*>))\\' + (group + 1)
     + '|(?=(<(?!' + RAW_TEXT_NAME + '[\\s/>])' + HTML_TAG_BODY + '))\\' + (group + 3)
     + '|[^<]|<(?!!--)(?!' + HTML_TAG_BODY + '))';
@@ -113,7 +117,7 @@ function htmlContentUnit(group: number): string {
  *  browser ends there, so it goes with what holds it, whose search reads it
  *  whole. `group` is the number of its first group in the search's pattern. */
 function htmlRestInComment(group: number): string {
-  return '((?=<!--(?![\\s\\S]*?-->)|' + RAW_TEXT_START + '(?![\\s\\S]*?<\\/\\' + (group + 1) + '\\s*>))[\\s\\S]*)';
+  return '((?=<!--(?!-?>|[\\s\\S]*?-->)|' + RAW_TEXT_START + '(?![\\s\\S]*?<\\/\\' + (group + 1) + '\\s*>))[\\s\\S]*)';
 }
 
 export function extractHtmlTables(html: string): HtmlTableMeta[] {
@@ -125,7 +129,7 @@ export function extractHtmlTables(html: string): HtmlTableMeta[] {
   // it goes past an element whose text is no HTML, as a <script>, in which
   // a <!-- is text, and each other tag, whose quoted attribute can hold
   // one. Nor does a </table> in a comment in it end it (see htmlContentUnit).
-	const tableRegex = new RegExp('<!--(?:[\\s\\S]*?-->|[\\s\\S]*$)|' + rawTextElement(1) + '|<table\\b(' + HTML_ATTRS + ')>(' + htmlContentUnit(4) + '*?)(?:<\\/table>|' + htmlRestInComment(8) + ')|' + HTML_TAG, 'gi');
+	const tableRegex = new RegExp(HTML_COMMENT_OR_REST + '|' + rawTextElement(1) + '|<table\\b(' + HTML_ATTRS + ')>(' + htmlContentUnit(4) + '*?)(?:<\\/table>|' + htmlRestInComment(8) + ')|' + HTML_TAG, 'gi');
   let tableMatch: RegExpExecArray | null;
   while ((tableMatch = tableRegex.exec(html)) !== null) {
     if (tableMatch[3] === undefined) continue;
@@ -194,7 +198,7 @@ function extractHtmlTableRows(tableHtml: string, comments: string[]): HtmlTableR
   const rows: HtmlTableRow[] = [];
   // Similarly, nested <tr> structures are out of scope for this lightweight parser.
   // Not one in a comment, as for a table (see extractHtmlTables).
-	const rowRegex = new RegExp('<!--(?:[\\s\\S]*?-->|[\\s\\S]*$)|' + rawTextElement(1) + '|<tr\\b' + HTML_ATTRS + '>(' + htmlContentUnit(3) + '*?)(?:<\\/tr>|' + htmlRestInComment(7) + ')|' + HTML_TAG, 'gi');
+	const rowRegex = new RegExp(HTML_COMMENT_OR_REST + '|' + rawTextElement(1) + '|<tr\\b' + HTML_ATTRS + '>(' + htmlContentUnit(3) + '*?)(?:<\\/tr>|' + htmlRestInComment(7) + ')|' + HTML_TAG, 'gi');
   let rowMatch: RegExpExecArray | null;
   while ((rowMatch = rowRegex.exec(tableHtml)) !== null) {
     if (rowMatch[0].startsWith('<!--')) {
@@ -224,7 +228,7 @@ function extractHtmlTableCells(rowHtml: string, comments: string[]): Array<HtmlT
   const cells: Array<HtmlTableCell & { isHeader: boolean }> = [];
   // Nested table-cell tags are not supported; this matches flat <th>/<td> content only.
   // Not one in a comment, as for a table (see extractHtmlTables).
-	const cellRegex = new RegExp('<!--(?:[\\s\\S]*?-->|[\\s\\S]*$)|' + rawTextElement(1) + '|<(th|td)\\b(' + HTML_ATTRS + ')>(' + htmlContentUnit(5) + '*?)(?:<\\/\\2>|' + htmlRestInComment(9) + ')|' + HTML_TAG, 'gi');
+	const cellRegex = new RegExp(HTML_COMMENT_OR_REST + '|' + rawTextElement(1) + '|<(th|td)\\b(' + HTML_ATTRS + ')>(' + htmlContentUnit(5) + '*?)(?:<\\/\\2>|' + htmlRestInComment(9) + ')|' + HTML_TAG, 'gi');
   let cellMatch: RegExpExecArray | null;
   while ((cellMatch = cellRegex.exec(rowHtml)) !== null) {
     if (cellMatch[0].startsWith('<!--')) {
@@ -356,7 +360,7 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
   // Tokenize the HTML into tags, comments, and text segments. A tag's
   // quoted attribute can hold a > or a <!--. An element whose text is no
   // HTML, as a <script>, is text, as its tags were, and a <!-- in it too.
-  const tagRegex = new RegExp('<!--(?:[\\s\\S]*?-->|[\\s\\S]*$)|' + RAW_TEXT_START + '([\\s\\S]*?)(?:<\\/\\1\\s*>|$)|<(\\/?)(\\w+)\\b(' + HTML_ATTRS + ')>', 'gi');
+  const tagRegex = new RegExp(HTML_COMMENT_OR_REST + '|' + RAW_TEXT_START + '([\\s\\S]*?)(?:<\\/\\1\\s*>|$)|<(\\/?)(\\w+)\\b(' + HTML_ATTRS + ')>', 'gi');
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 

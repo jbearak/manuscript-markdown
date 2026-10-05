@@ -70,6 +70,14 @@ describe('HTML table cell paragraphs', () => {
       .toEqual([expected]);
   });
 
+  test.each(['<!-->', '<!--->'])('reads %s as an empty comment, as the browser and markdown-it do', comment => {
+    // Which ran to the next --> or the end, and hid the rest of the table
+    const [table] = extractHtmlTables('<table><tr><td>a' + comment + 'b</td><td>c</td></tr>' + comment + '<tr><td>d</td></tr></table>');
+    expect(table.rows.map(row => row.cells.map(cell => cell.runs.map(run => run.type === 'html_comment' ? '[' + run.text + ']' : run.text).join(''))))
+      .toEqual([['a[' + comment + ']b', 'c'], ['d']]);
+    expect(table.comments).toEqual([comment]);
+  });
+
   test('reads the cells before a comment with no -->, which runs to the end, as one', () => {
     // Which the browser ends the row and table at
     const [table] = extractHtmlTables('<table><tr><td>a</td><!-- <td>b</td></tr></table>');

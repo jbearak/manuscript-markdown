@@ -6491,7 +6491,7 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
   const pieces: Array<{ text: string; item: TextItem; html: string; raw?: boolean } | null> = [];
   for (const item of items) {
     // Not one with a blank line, which would end the table's HTML block
-    if (item.type === 'html_comment' && item.commentIds.size === 0 && /^<!--(?:(?!-->)[\s\S])*-->$/.test(item.text)
+    if (item.type === 'html_comment' && item.commentIds.size === 0 && /^<!--(?:-?>|(?!-?>)(?:(?!-->)[\s\S])*-->)$/.test(item.text)
       && !/(?:\r\n?|\n)[ \t]*(?:\r\n?|\n)/.test(item.text)) {
       pieces.push({ text: '', item: { type: 'text', text: '', commentIds: item.commentIds, formatting: DEFAULT_FORMATTING }, html: item.text, raw: true });
       continue;

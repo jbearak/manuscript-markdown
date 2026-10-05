@@ -5742,6 +5742,9 @@ describe('HTML table cells', () => {
     ['comments alone and in formatting', '      <p><!-- c --></p>\n      <p><b>x<!-- d -->y</b></p>'],
     // Whose </td> ended the cell, which lost what came after it
     ['a comment with a cell\'s end in it', '      <p><!-- <td>old</td> -->b</p>'],
+    // Which hid the rest of the table, as it read no --> after them
+    ['an empty comment the browser ends at its >', '      <p>a<!-->b</p>'],
+    ['an empty comment the browser ends at its ->', '      <p>a<!--->b</p>'],
   ])('keeps %s', async (_name, cell) => {
     // Import wrote Markdown in the cell, which exports as literal text, with
     // a backslash before each character Markdown would read, and more on
