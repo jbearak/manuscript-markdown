@@ -3220,7 +3220,7 @@ function joinSplitComments(items: ContentItem[], browser: boolean): ContentItem[
   };
   for (const item of items) {
     const last = out[out.length - 1];
-    if (browser && last?.type === 'html_comment' && item.type === 'html_comment' && item.text.startsWith('<!--')
+    if (browser && !open && last?.type === 'html_comment' && item.type === 'html_comment' && item.text.startsWith('<!--')
         && /^\s*<!--(?:-?>|(?:(?!--!?>)[\s\S])*--!?>)\u200B+$/.test(last.text)) {
       out[out.length - 1] = { ...last, text: last.text.replace(/\u200B+$/, '') };
       joined = true;

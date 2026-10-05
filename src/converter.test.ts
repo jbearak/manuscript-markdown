@@ -3154,16 +3154,18 @@ describe('Emphasis between runs', () => {
     expect(buildMarkdown([table], new Map())).toContain('<p><code>a</code><b><code>b</code></b></p>');
   });
 
-  const inCell = (items: ContentItem[]) => [{ type: 'table', rows: [{ isHeader: false, cells: [{ colspan: 1, paragraphs: [items] }] }] } as unknown as ContentItem];
+  const inCell = (items: ContentItem[], colspan = 1) => [{ type: 'table', rows: [{ isHeader: false, cells: [{ colspan, paragraphs: [items] }] }] } as unknown as ContentItem];
   test.each([
     ['a paragraph', (items: ContentItem[]) => items, '<!-- c -->'],
     ['a table\'s cell', inCell, '<!-- c -->'],
     // Which Word split from each other at an <!-- in one
     ['a paragraph, as pieces of one', (items: ContentItem[]) => items, ' <!-- c'],
     ['a table\'s cell, as pieces of one', inCell, ' <!-- c'],
-  ])('writes many HTML comments in %s in linear time', (_name, wrap, text) => {
+    // Whose first piece was read again for each
+    ['an HTML table\'s cell, as pieces of one after a long one', (items: ContentItem[]) => inCell(items, 2), '<!-- c', '<!-- ' + 'a'.repeat(32000)],
+  ])('writes many HTML comments in %s in linear time', (_name, wrap, text, first = '<!-- a') => {
     // Each comment joined the text of all those after it
-    const items = Array.from({ length: 32000 }, (_, i): ContentItem => ({ type: 'html_comment', text: i === 0 ? '<!-- a' : i === 31999 ? ' -->' : text, commentIds: new Set() }));
+    const items = Array.from({ length: 32000 }, (_, i): ContentItem => ({ type: 'html_comment', text: i === 0 ? first : i === 31999 ? ' -->' : text, commentIds: new Set() }));
     const start = performance.now();
     buildMarkdown(wrap(items), new Map());
     expect(performance.now() - start).toBeLessThan(1000);
