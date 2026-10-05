@@ -8364,7 +8364,9 @@ export function buildMarkdown(
     // Track standalone HTML comment paragraphs for gap metadata and emit their
     // separator. A leading comment in an alert paragraph is inline content;
     // pendingAlertPrefixStrip means its blockquote prefix was already emitted.
-    if (item.type === 'html_comment' && !pendingAlertPrefixStrip) {
+    // So is one in a quote, list item or heading, after the line's prefix,
+    // which export doesn't count among them (annotateHtmlCommentIndices)
+    if (item.type === 'html_comment' && !pendingAlertPrefixStrip && !paragraphNested && !paragraphHeading) {
       if (output.length > 0) {
         if (incomingSep !== null) {
           output.push(incomingSep);
