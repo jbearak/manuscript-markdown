@@ -4535,6 +4535,9 @@ function resolveBareLinks(markdown: string): string {
 function bareLinkReadsBack(before: string, address: string, closer: string, following: string, lineStart: boolean): boolean {
   const email = !/^[a-z][a-z0-9.+-]*:/i.test(address);
   if (linkifiedText(address, email) !== address) return false;
+  // After a $, as of inline math, which a letter or digit after its
+  // closing $ keeps from closing (see textNextToMath)
+  if (/(?:^|[^\\])(?:\\\\)*\$$/.test(before) && /^\w/.test(address)) return false;
   // In a span, which ends the text it holds
   if (closer) {
     const at = following.indexOf(closer);
