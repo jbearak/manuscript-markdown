@@ -678,7 +678,7 @@ On DOCX import, the `notes` field is auto-detected from whether `word/footnotes.
 
 Named labels (e.g., `[^my-note]`) are preserved through DOCX round-trips via a `MANUSCRIPT_FOOTNOTE_IDS` mapping stored in `docProps/custom.xml`.
 
-DOCX import writes the notes in the order of their labels, numbered labels by value and then named ones, whatever order they were defined in. A table in a note keeps its own settings, as its font size, either way.
+DOCX import writes the notes in the order of their labels, numbered labels by value and then named ones, whatever order they were defined in. Labels of one number, as `1a` and `1b`, keep the order of their references. A table in a note keeps its own settings, as its font size, either way.
 
 A reference inside a highlight, `==as reported.[^1]==`, keeps its note too, and comes back from Word inside the highlight. See [Markdown in a highlight](#markdown-in-a-highlight).
 

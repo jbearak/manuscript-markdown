@@ -3089,6 +3089,16 @@ describe('Full MD→DOCX footnote generation', () => {
     }
   });
 
+  it('bookmarks a note a later one cross-references', async () => {
+    // Notes go in their labels' order, which made a before b, whose
+    // reference to a made a cross-reference, to a bookmark a didn't have
+    const { docx } = await convertMdToDocx('T[^a] and[^b].\n\n[^b]: B[^a].\n\n[^a]: A.\n');
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/footnotes.xml')!.async('string');
+    const target = /NOTEREF (_Ref\d+)/.exec(xml)![1];
+    expect(xml).toMatch(new RegExp('<w:footnote w:id="1">[^]*?<w:bookmarkStart w:id="\\d+" w:name="' + target + '"/><w:r>[^]*?<w:footnoteRef/></w:r><w:bookmarkEnd'));
+  });
+
 	it('formats tables in note definitions with document numeric defaults', async () => {
 		const md = '---\ntable-digits: 1\ntable-decimal-mark: midpoint\n---\n\nSee note[^1].\n\n[^1]: <table><tr><td>12.34</td></tr></table>';
 		const { docx } = await convertMdToDocx(md);

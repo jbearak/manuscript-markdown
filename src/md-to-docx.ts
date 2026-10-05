@@ -1087,15 +1087,23 @@ function footnoteBookmarkName(noteId: number): string {
 }
 
 /** The order import writes notes in, by label: numbers by value, then the
- *  rest. Export makes notes' bodies in this order, so that the tables and
- *  code blocks in them take the indices import reads them back at. Ties
- *  break on the text, so the order doesn't depend on the order notes come in,
- *  which is their definitions' in export and their references' in import,
- *  and the text compares in one locale, not the machine's. */
+ *  rest by text, in one locale, not the machine's. Export makes notes'
+ *  bodies in this order, so that the tables and code blocks in them take the
+ *  indices import reads them back at. Labels of one number, as 1a and 1b,
+ *  tie, and keep the order of their first references, which import reads
+ *  them in, as it read the notes of documents that older versions wrote in
+ *  that order, and which export breaks the tie with. */
 export function compareNoteLabels(a: string, b: string): number {
   const na = parseInt(a, 10);
   const nb = parseInt(b, 10);
-  return (!isNaN(na) && !isNaN(nb) ? na - nb : 0) || a.localeCompare(b, 'en') || (a < b ? -1 : a > b ? 1 : 0);
+  return !isNaN(na) && !isNaN(nb) ? na - nb : a.localeCompare(b, 'en');
+}
+
+/** A note's self-reference mark `selfRefRun` in the bookmark that
+ *  cross-references to note `noteId` point to (see noteReferenceXml) */
+function bookmarkedSelfRef(selfRefRun: string, noteId: number, state: DocxGenState): string {
+  const bkmkId = state.nextBookmarkId++;
+  return '<w:bookmarkStart w:id="' + bkmkId + '" w:name="' + footnoteBookmarkName(noteId) + '"/>' + selfRefRun + '<w:bookmarkEnd w:id="' + bkmkId + '"/>';
 }
 
 /** Extract footnote definitions from the markdown source and return cleaned markdown. */
@@ -8092,15 +8100,21 @@ export async function convertMdToDocx(
   // Set inNoteBody so hyperlinks/images route to note-scoped relationship maps
   // (footnotes.xml has its own .rels file, separate from document.xml.rels).
   // Notes go in the order import writes them back in, which their tables'
-  // and code blocks' indices follow (see compareNoteLabels).
+  // and code blocks' indices follow (see compareNoteLabels): the body's,
+  // whose first references, which their IDs follow, break ties, and then
+  // those only another note refers to, which import doesn't write.
   state.inNoteBody = true;
-  const noteDefs = [...footnoteDefs].sort(([a], [b]) => compareNoteLabels(a, b));
+  const bodyNoteIds = new Map(state.footnoteLabelToId);
+  const noteDefs = [...footnoteDefs].sort(([a], [b]) => Number(bodyNoteIds.has(b)) - Number(bodyNoteIds.has(a))
+    || compareNoteLabels(a, b) || (bodyNoteIds.get(a) ?? 0) - (bodyNoteIds.get(b) ?? 0));
   // A note only another note refers to gets its ID as that one is made, so
   // one without an ID goes again after the rest, until no note has been made
   // since it last went, which wrote a reference to a note that wasn't there
   // where it came first
   let notesMade = 0;
   const notesMadeAtDeferral = new Map<string, number>();
+  // The notes without a bookmark, which a later note can cross-reference
+  const unmarkedNotes: { label: string; noteId: number; entry: { id: number; bodyXml: string }; selfRefRun: string }[] = [];
   for (let k = 0; k < noteDefs.length; k++) {
     const [label, bodyText] = noteDefs[k];
     const noteId = state.footnoteLabelToId.get(label);
@@ -8140,12 +8154,9 @@ export async function convertMdToDocx(
     const paragraphPPr = '<w:pPr><w:pStyle w:val="' + pStyle + '"/></w:pPr>';
     // If this footnote is cross-referenced, wrap the self-ref run in a bookmark
     // so NOTEREF fields in the document body can point to it.
-    let selfRefRun = '<w:r><w:rPr><w:rStyle w:val="' + refStyle + '"/></w:rPr><' + selfRefTag + '/></w:r>';
-    if (state.footnoteCrossRefLabels.has(label)) {
-      const bkmkId = state.nextBookmarkId++;
-      const bkmkName = footnoteBookmarkName(noteId);
-      selfRefRun = '<w:bookmarkStart w:id="' + bkmkId + '" w:name="' + bkmkName + '"/>' + selfRefRun + '<w:bookmarkEnd w:id="' + bkmkId + '"/>';
-    }
+    const unmarkedSelfRefRun = '<w:r><w:rPr><w:rStyle w:val="' + refStyle + '"/></w:rPr><' + selfRefTag + '/></w:r>';
+    const marked = state.footnoteCrossRefLabels.has(label);
+    const selfRefRun = marked ? bookmarkedSelfRef(unmarkedSelfRefRun, noteId, state) : unmarkedSelfRefRun;
     const savedCustomStyle = state.activeCustomStyle;
     let isFirstContent = true;
     for (let ti = 0; ti < noteTokens.length; ti++) {
@@ -8204,8 +8215,15 @@ export async function convertMdToDocx(
       // No content tokens (empty body or all sentinels) — emit self-ref paragraph
       if (!bodyXml) bodyXml = '<w:p>' + paragraphPPr + selfRefRun + '</w:p>';
     }
-    state.footnoteEntries.push({ id: noteId, bodyXml });
+    const entry = { id: noteId, bodyXml };
+    state.footnoteEntries.push(entry);
+    if (!marked) unmarkedNotes.push({ label, noteId, entry, selfRefRun });
     notesMade++;
+  }
+  // A note made before a later one cross-referenced it, as the order can
+  // put it, takes its bookmark now, which the reference points to
+  for (const { label, noteId, entry, selfRefRun } of unmarkedNotes) {
+    if (state.footnoteCrossRefLabels.has(label)) entry.bodyXml = entry.bodyXml.replace(selfRefRun, () => bookmarkedSelfRef(selfRefRun, noteId, state));
   }
   state.inNoteBody = false;
 

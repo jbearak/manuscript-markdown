@@ -5873,18 +5873,41 @@ describe('Table alignment', () => {
     expect((await convertDocx((await convertMdToDocx(front + body)).docx)).markdown).toBe(front + expected);
   });
 
+  const tableNote = (label: string, size: number, cell: string, text = 'Note.') =>
+    '[^' + label + ']: ' + text + '\n\n    <!-- table-font-size: ' + size + ' -->\n    | ' + cell + ' |\n    | --- |\n    | 1 |\n';
+
   test.each([
     ['numbers', '2', '1'],
     ['names', 'b', 'a'],
-    ['labels of a number', '1b', '1a'],
   ])('keeps each note\'s table settings when notes are defined out of the order of their %s', async (_name, first, second) => {
     // Export numbered the tables in the order the notes were defined, and
     // import in the order it writes them, by label
-    const note = (label: string, size: number, cell: string) =>
-      '[^' + label + ']: Note.\n\n    <!-- table-font-size: ' + size + ' -->\n    | ' + cell + ' |\n    | --- |\n    | 1 |\n';
     const text = 'Text[^' + first + '] and[^' + second + '].\n\n';
-    expect(await roundTrip(text + note(first, 12, 'x') + '\n' + note(second, 7, 'y')))
-      .toBe(text + note(second, 7, 'y') + '\n' + note(first, 12, 'x'));
+    expect(await roundTrip(text + tableNote(first, 12, 'x') + '\n' + tableNote(second, 7, 'y')))
+      .toBe(text + tableNote(second, 7, 'y') + '\n' + tableNote(first, 12, 'x'));
+  });
+
+  test.each([
+    ['in the order of their references', '[^1b]: N.\n\n[^1a]: N.\n'],
+    ['out of it', '[^1a]: N.\n\n[^1b]: N.\n'],
+  ])('keeps the table settings of notes whose labels have one number, defined %s', async (_name, order) => {
+    // Their labels tie, and they keep their references' order, as import
+    // read them in documents older versions wrote, which numbered the tables
+    // in the order notes were defined: 1b's first here
+    const text = 'Text[^1b] and[^1a].\n\n';
+    const md = text + order.replace('[^1b]: N.\n', tableNote('1b', 12, 'x')).replace('[^1a]: N.\n', tableNote('1a', 7, 'y'));
+    const { docx } = await convertMdToDocx(md);
+    const custom = await (await JSZip.loadAsync(docx)).file('docProps/custom.xml')!.async('string');
+    expect(custom).toContain('"MANUSCRIPT_TABLE_FONT_SIZES_1"><vt:lpwstr>{"0":"12","1":"7"}<');
+    expect(strip((await convertDocx(docx)).markdown)).toBe(text + tableNote('1b', 12, 'x') + '\n' + tableNote('1a', 7, 'y'));
+  });
+
+  test('keeps the table settings of a note after one only another note refers to', async () => {
+    // Export made that one in its label's turn, which import, which writes
+    // only the notes the text refers to, doesn't read, so the next note
+    // read its table's settings
+    const md = 'T[^a] and[^c].\n\n[^a]: A[^b].\n\n' + tableNote('b', 7, 'y', 'B.') + '\n' + tableNote('c', 12, 'z', 'C.');
+    expect(await roundTrip(md)).toBe('T[^a] and[^c].\n\n[^a]: A.\n\n' + tableNote('c', 12, 'z', 'C.'));
   });
 
   test('keeps a padded pipe table without a closing pipe padded', async () => {
