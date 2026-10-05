@@ -6317,6 +6317,18 @@ describe('HTML around a table in its block', () => {
     expect(markdown).toBe('<p>Cap A</p>\n' + table(from === 'a' ? 'b' : 'a') + '\n<p>Cap B</p>\n' + table(from === 'a' ? 'b' : 'a'));
   });
 
+  test('keeps the HTML around a table off one without any that Word edits to be alike it', async () => {
+    // The edited one, first, took the HTML, which the other then lacked
+    const md = '<table><tr><td>H</td></tr><tr><td>a</td></tr></table>\n\n<p>Cap B</p>\n<table><tr><td>H</td></tr><tr><td>b</td></tr></table>\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace('<w:t>a</w:t>', '<w:t>b</w:t>');
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown.indexOf('<p>Cap B</p>')).toBeGreaterThan(markdown.indexOf('</table>'));
+  });
+
   test('puts no HTML around a table after Word deletes one before it whose first row\'s text is alike, cut apart elsewhere', async () => {
     // Both first rows read as 2:A|B|C, and the table at the deleted one's
     // index took its caption
@@ -6565,6 +6577,22 @@ describe('HTML around a table in its block', () => {
     zip.file('word/document.xml', tracked);
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
     expect(markdown).toBe(beforeMd + '+----------+-----+\n| {++XX++} | b   |\n+----------+-----+' + afterMd);
+  });
+
+  test.each([
+    ['a <pre> around it', '<pre>\n', '\n</pre>\n'],
+    ['a <pre> after it whose end is in a comment', '', '\nSource <pre><!-- </pre> -->\n    run()\n</pre>\n'],
+    ['a <script> after it whose end is in a comment', '', '\n<span>a</span> <script>// </pre>\nrun()\n</script>\n'],
+  ])('drops %s, which Markdown reads otherwise, from around a table that leaves HTML', async (_name, beforeHtml, afterHtml) => {
+    // The <pre> before it, as a block of its own, went on over the table,
+    // and an end in a comment ended it early
+    const zip = await JSZip.loadAsync((await convertMdToDocx(beforeHtml + '<table><tr><td>XX</td><td>b</td></tr></table>' + afterHtml)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const tracked = xml.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>');
+    expect(tracked).not.toBe(xml);
+    zip.file('word/document.xml', tracked);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('+----------+-----+\n| {++XX++} | b   |\n+----------+-----+\n');
   });
 
   test.each([

@@ -7640,35 +7640,65 @@ function htmlLinesAsText(lines: string[]): string[] {
  *  in the table's block, whether it starts in a comment (`inComment`), and
  *  where on it an element whose text keeps its whitespace, as a <pre>'s,
  *  starts that goes on past it, or -1 (`preformatted`): on a line of text,
- *  its lines would be a paragraph's, with their indents gone. */
-function detachedHtmlLines(lines: string[]): { inComment: boolean[]; preformatted: number[] } {
+ *  its lines would be a paragraph's, with their indents gone. Such an
+ *  element ends Markdown's HTML block at the first line with an end of one,
+ *  as in a comment, which the browser read as none, or past the HTML, as
+ *  for a <pre> around the table, which reads no more as it was
+ *  (`unreadable`). */
+function detachedHtmlLines(lines: string[]): { inComment: boolean[]; preformatted: number[]; unreadable: boolean } {
   const text = lines.join('\n');
   const starts: number[] = [];
   for (let k = 0, at = 0; k < lines.length; at += lines[k++].length + 1) starts.push(at);
+  const lineOf = (at: number) => {
+    let [low, high] = [0, starts.length - 1];
+    while (low < high) {
+      const mid = (low + high + 1) >> 1;
+      if (starts[mid] <= at) low = mid;
+      else high = mid - 1;
+    }
+    return low;
+  };
   const inComment = lines.map(() => false);
   const preformatted = lines.map(() => -1);
-  // The last end of such an element on each line, after which one starts
-  // none that goes on past it
-  const lastEnd = lines.map(() => -1);
-  let line = 0;
-  for (const match of text.matchAll(new RegExp(HTML_BLOCKS_WITH_END[0][1].source, 'gi'))) {
-    while (line + 1 < starts.length && starts[line + 1] <= match.index) line++;
-    lastEnd[line] = match.index;
-  }
+  // Each end of such an element as Markdown reads them, in its text
+  const ends = [...text.matchAll(new RegExp(HTML_BLOCKS_WITH_END[0][1].source, 'gi'))].map(match => match.index);
+  let nextEnd = 0;
   const start = new RegExp(HTML_BLOCKS_WITH_END[0][0].source.replace(/^\^/, ''), 'iy');
-  line = 0;
+  let unreadable = false;
+  // Where an open <pre> starts, which the browser ends at its end tag, as
+  // it reads no other element's text as no HTML
+  let pre = -1;
+  // Whether Markdown ends such an element from `from`, which the browser
+  // ends at `to`, or never, on the line the browser does
+  const endsAlike = (from: number, to: number | undefined) => {
+    while (nextEnd < ends.length && ends[nextEnd] < from) nextEnd++;
+    return to !== undefined && nextEnd < ends.length && lineOf(ends[nextEnd]) === lineOf(to - 1);
+  };
+  // One that starts at `from` after text on its line and ends at `to` on
+  // another starts a line of its own
+  const ownLine = (from: number, to: number) => {
+    const line = lineOf(from);
+    if (preformatted[line] === -1 && lineOf(to - 1) > line && /\S/.test(text.slice(starts[line], from))) preformatted[line] = from - starts[line];
+  };
   for (let i = 0; i < text.length;) {
     const piece = htmlPieceAt(text, i);
-    while (line + 1 < starts.length && starts[line + 1] <= i) line++;
     start.lastIndex = i;
     if (piece.kind === 'comment') {
-      for (let k = line + 1; k < starts.length && starts[k] < piece.end; k++) inComment[k] = true;
-    } else if (preformatted[line] === -1 && i > lastEnd[line] && start.test(text) && /\S/.test(text.slice(starts[line], i))) {
-      preformatted[line] = i - starts[line];
+      for (let k = lineOf(i) + 1; k < starts.length && starts[k] < piece.end; k++) inComment[k] = true;
+    } else if (pre >= 0) {
+      if (piece.kind === 'tag' && /^<\/pre[\s>]/i.test(text.slice(i, piece.end))) {
+        if (!endsAlike(pre, piece.end)) unreadable = true;
+        ownLine(pre, piece.end);
+        pre = -1;
+      }
+    } else if (start.test(text)) {
+      if (/^<pre/i.test(text.slice(i, i + 4))) pre = i;
+      else if (piece.rest || !endsAlike(i, piece.end)) unreadable = true;
+      else ownLine(i, piece.end);
     }
     i = piece.end;
   }
-  return { inComment, preformatted };
+  return { inComment, preformatted, unreadable: unreadable || pre >= 0 };
 }
 
 /** HTML from a table's block with each comment ending where the browser
@@ -7698,13 +7728,19 @@ function withMarkdownCommentEnds(html: string): string {
   return out + html.slice(from);
 }
 
+/** The end of the HTML block that `line` starts, where it ends at a marker,
+ *  as a comment does at its --> */
+function htmlBlockEndMarker(line: string): RegExp | undefined {
+  return HTML_BLOCKS_WITH_END.find(([start]) => start.test(line))?.[1] ?? (HTML_BLOCK_IN_PARAGRAPH[1].test(line) ? /-->/ : undefined);
+}
+
 /** Where the HTML block that starts at `lines[k]` ends, after its last
  *  line, as markdown-it reads one, or -1 where none does: a line of one
  *  tag starts none after a line of a paragraph (`inParagraph`). A line
  *  indented as code starts one too, as the browser read its tag. */
 function htmlBlockEnd(lines: string[], k: number, inParagraph: boolean): number {
   const text = lines[k].trimStart();
-  const ends = HTML_BLOCKS_WITH_END.find(([start]) => start.test(text))?.[1] ?? (HTML_BLOCK_IN_PARAGRAPH[1].test(text) ? /-->/ : undefined);
+  const ends = htmlBlockEndMarker(text);
   if (ends) {
     for (let m = k; m < lines.length; m++) if (ends.test(lines[m])) return m + 1;
     return lines.length;
@@ -7723,10 +7759,13 @@ function htmlBlockEnd(lines: string[], k: number, inParagraph: boolean): number 
  *  them was in the table's block, goes, but for the text a style's goes
  *  around on its line. Each line reads as it does in what's written, in
  *  order, in which a line of text is a paragraph's, after which a line of
- *  one tag starts no block. */
-function detachedTableHtml(html: string): string | undefined {
+ *  one tag starts no block. Null where it reads no more as it was, as a
+ *  block that ends at a marker without one, which would go on over the
+ *  table (see detachedHtmlLines). */
+function detachedTableHtml(html: string): string | undefined | null {
   const lines = withMarkdownCommentEnds(html).split('\n');
-  const { inComment, preformatted } = detachedHtmlLines(lines);
+  const { inComment, preformatted, unreadable } = detachedHtmlLines(lines);
+  if (unreadable) return null;
   const out: string[] = [];
   // The lines of text since the last that isn't, which escape together
   let texts: string[] = [];
@@ -7762,6 +7801,8 @@ function detachedTableHtml(html: string): string | undefined {
     }
     endTexts();
     const block = lines.slice(k, end);
+    const marker = htmlBlockEndMarker(line.trimStart());
+    if (marker && !marker.test(block[block.length - 1])) return null;
     const rest = directiveRest(block.join('\n'));
     if (rest === undefined) {
       // With its indent as code gone
@@ -7830,18 +7871,23 @@ function renderTableOrFallback(
     <= Number(mapping!.get(key)![4]);
   const own = tableIndex !== undefined && unused(String(tableIndex)) && edited(String(tableIndex)) ? String(tableIndex) : undefined;
   // Where there are more tables alike than export wrote, as where Word
-  // edited one to be alike another, one whose own isn't still there takes
-  // that, and the others what's left of those written alike, in order
+  // edited one to be alike another, which of them was written with the
+  // HTML is unknown: one whose own isn't still there takes that, one at
+  // the index of one written alike that, and the others none, as HTML
+  // that goes with another table is worse than none
   const index = mapping && tableHtmlAroundIndex(mapping);
   const identity = scope + '\n' + firstRow + '\n' + contents;
   const extra = !!index && (renderOpts?.tablesAlike?.get(identity) ?? 0) > (index.written.get(identity) ?? 0);
-  const aroundKey = index && (extra && own !== undefined ? own
-    : index.nth.get(identity + '\n' + alikeBefore)?.find(unused) ?? (extra ? index.alike.get(identity)?.find(unused) : undefined) ?? own);
+  const atIndex = tableIndex !== undefined && index?.alike.get(identity)?.includes(String(tableIndex)) && unused(String(tableIndex)) ? String(tableIndex) : undefined;
+  const aroundKey = index && (extra ? own ?? atIndex : index.nth.get(identity + '\n' + alikeBefore)?.find(unused) ?? own);
   const around = aroundKey !== undefined ? mapping?.get(aroundKey) : undefined;
   if (aroundKey !== undefined) renderOpts?.usedTableHtmlAround?.add(aroundKey);
   const r = (body: string) => {
-    const before = around && detachedTableHtml(around[0]);
-    const after = around && detachedTableHtml(around[1]);
+    // Neither, where one can't be read as it was, as a <pre> before the
+    // table and its end after it
+    let before = around && detachedTableHtml(around[0]);
+    let after = around && detachedTableHtml(around[1]);
+    if (before === null || after === null) before = after = undefined;
     return { directivePrefix: fontPrefix, body, ...(before ? { before } : {}), ...(after ? { after } : {}) };
   };
   const rHtml = (body: string) => ({ directivePrefix: '', body });
