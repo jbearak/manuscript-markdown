@@ -6527,6 +6527,12 @@ describe('HTML around a table in its block', () => {
     // Which export reads as no directive, but which went as one
     ['comments with a value no table directive reads', '', '\nSource\n<!-- table-digits: TBD -->\n<!-- table-col-widths: TBD -->\n', '',
       '\n\nSource\n<!-- table-digits: TBD -->\n<!-- table-col-widths: TBD -->\n'],
+    // Which read as the heading of a bibliography Word holds as text, which
+    // import dropped with all after it
+    ['a line that would read as a Sources heading', '', '\nSources\nWorld Bank\n\nAfter.\n', '', '\n\n&#83;ources\nWorld Bank\n\nAfter.\n'],
+    // Whose lines a paragraph's lost their indents
+    ['a <pre> that goes on past a line of text', '', '\nSource <pre>if ready:\n    run()\n</pre> done\n', '', '\n\nSource\n<pre>if ready:\n    run()\n</pre> done\n'],
+    ['a <pre> on a line of text that ends on it', '', '\nSource <pre>a</pre> <b>b</b>\n', '', '\n\nSource <pre>a</pre> <b>b</b>\n'],
   ])('keeps %s around a table that leaves HTML, as it read', async (_name, beforeHtml, afterHtml, beforeMd, afterMd) => {
     // A comment that reads as no directive went, as one that does, and text
     // read as Markdown, as # Source as a heading

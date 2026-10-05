@@ -7620,9 +7620,25 @@ function htmlLinesAsText(lines: string[]): string[] {
     return escapeMarkdownChars(line, true, new RunsAfter(index, Math.min(end, masked.length))).replace(/\0/g, '\\[');
   });
   // A \ before one of them, which escapeMarkdownChars leaves, as it escapes
-  // no character it doesn't see, but which would escape its < or &
+  // no character it doesn't see, but which would escape its < or &. A line
+  // that would read as the Sources heading of a bibliography Word holds as
+  // text, which import drops with all after it, starts with a reference.
   return escaped.join('\n').split(mark).map((part, k) => (k < raws.length && part.endsWith('\\') ? part + '\\' : part) + (raws[k] ?? ''))
-    .join('').split('\n');
+    .join('').split('\n').map(line => SOURCES_HEADING_RE.test(line) ? line.replace('S', '&#83;') : line);
+}
+
+/** Where on a line of text an element whose text keeps its whitespace, as a
+ *  <pre>'s, starts that goes on past the line, or -1: on the line of text,
+ *  its lines would be a paragraph's, with their indents gone. */
+function preformattedPastLine(line: string): number {
+  const ends = [...line.matchAll(new RegExp(HTML_BLOCKS_WITH_END[0][1].source, 'gi'))];
+  const lastEnd = ends.length > 0 ? ends[ends.length - 1].index : -1;
+  const start = new RegExp(HTML_BLOCKS_WITH_END[0][0].source.replace(/^\^/, ''), 'iy');
+  for (let i = 0; i < line.length; i = htmlPieceAt(line, i).end) {
+    start.lastIndex = i;
+    if (i > 0 && i > lastEnd && start.test(line)) return i;
+  }
+  return -1;
 }
 
 /** HTML from a table's block with each comment ending where the browser
@@ -7693,6 +7709,14 @@ function detachedTableHtml(html: string): string | undefined {
     const end = /\S/.test(line) ? htmlBlockEnd(lines, k, inParagraph) : -1;
     if (end === -1) {
       if (parseEmbedDirective(line)) continue;
+      // Which starts a line of its own, an HTML block to its end
+      const preformatted = preformattedPastLine(line);
+      if (preformatted > 0) {
+        texts.push(line.slice(0, preformatted));
+        lines[k--] = line.slice(preformatted);
+        inParagraph = true;
+        continue;
+      }
       if (/\S/.test(line)) texts.push(line);
       else {
         endTexts();
