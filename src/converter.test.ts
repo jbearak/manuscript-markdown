@@ -5412,6 +5412,17 @@ describe('Word text that reads as Markdown', () => {
     expect(performance.now() - start).toBeLessThan(1500);
   });
 
+  test.each([
+    ['bold', { bold: true }], ['italic', { italic: true }], ['struck', { strikethrough: true }], ['highlighted', { highlight: true }],
+  ])('writes %s text with a long run of spaces in it in linear time', (_name, formatting) => {
+    // A regex with a lazy middle read the spaces again from each one, and
+    // found no match past some 20,000 of them, which threw
+    const text = 'a' + ' '.repeat(100000) + 'b';
+    const start = performance.now();
+    expect(wrapWithFormatting(text, { ...DEFAULT_FORMATTING, ...formatting })).toContain(text);
+    expect(performance.now() - start).toBeLessThan(1500);
+  });
+
   test('reads a long run of citations for tags in linear time', () => {
     // Each citation's search for a < read the run to its end
     const start = performance.now();
