@@ -8635,11 +8635,16 @@ export function buildMarkdown(
     // which export reads as one. One before comment bodies goes, as below.
     // Spaces and tabs after the last, which keepParagraphWhitespace writes
     // as references after a \ and a line end, are references after a <br>
-    // too, where they'd end the heading, which Markdown drops.
+    // too, where they'd end the heading, which Markdown drops. A comment's
+    // body, which takes a <br> as text, keeps its \ and line end, which
+    // export reads in it in a heading too.
     if (paragraphHeading) {
       const bodiesBreak = rendered.deferredComments.length > 0 ? /(\\?\n)+$/.exec(textOut)?.[0] ?? '' : '';
-      textOut = textOut.slice(0, textOut.length - bodiesBreak.length).replace(HARD_BREAK, (_m, backslashes: string, whitespace = '') =>
-        backslashes + '<br>' + whitespace.replace(/[ \t]/g, (c: string) => c === ' ' ? '&#32;' : '&#9;')) + bodiesBreak;
+      const heading = textOut.slice(0, textOut.length - bodiesBreak.length);
+      const breaks = new Set(lineStartsAfterBreaks(heading));
+      textOut = heading.replace(HARD_BREAK, (match: string, backslashes: string, whitespace: string | undefined, offset: number) =>
+        !breaks.has(offset + backslashes.length + 2) ? match
+          : backslashes + '<br>' + (whitespace ?? '').replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;')) + bodiesBreak;
     } else if (atEnd && rendered.deferredComments.length === 0 && !isInParagraphMath(mergedContent[rendered.nextIndex])) {
       textOut = textOut.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + '<br>');
     }

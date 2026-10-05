@@ -4960,6 +4960,20 @@ describe('Line breaks a backslash can\'t hold', () => {
     expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
   });
 
+  test('keeps one after a \\ in a comment on a heading a \\ and a line end', async () => {
+    // As <br> in the comment's body, it was text there
+    const zip = await JSZip.loadAsync((await convertMdToDocx('# H {==x==}{>>a b<<} end')).docx);
+    const xml = await zip.file('word/comments.xml')!.async('string');
+    const edited = xml.replace('a b', 'a\\</w:t></w:r><w:r><w:br/></w:r><w:r><w:t>b');
+    expect(edited).not.toBe(xml);
+    zip.file('word/comments.xml', edited);
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(md).toBe('# H {==x==}{>>a\\\nb<<} end\n');
+    const comments = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/comments.xml')!.async('string');
+    const body = comments.slice(comments.indexOf('<w:comment '), comments.indexOf('</w:comment>'));
+    expect(body.replace(/<w:rPr>[\s\S]*?<\/w:rPr>/g, '').replace(/<w:br\/>/g, '\n').replace(/<[^>]+>/g, '')).toBe('a\\\nb');
+  });
+
   test('reads a list item that is only a <br> as a line break', async () => {
     // markdown-it reads the <br> as an HTML block, which an item keeps
     expect(await exportedText('- <br>\n- b')).toBe('⏎ | b');
