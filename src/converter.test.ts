@@ -6356,6 +6356,8 @@ describe('Display math in a paragraph\'s text', () => {
     ['after overlapping comments in a quote', '> Seen {#1}a {#2}b{/1} c{/2}\n> {#1>>one<<}\n> {#2>>two<<}\n> ' + math('> ') + '\n'],
     ['in a footnote', 'P[^1]\n\n[^1]:\n\n    Note\n    ' + math('    ') + '\n'],
     ['in a footnote\'s later paragraph', 'P[^1]\n\n[^1]: a\n\n    b\n    ' + math('    ') + '\n'],
+    // Its line went after the break's line end, which left a blank line
+    ['after a line break in a footnote', 'P[^1]\n\n[^1]:\n\n    a\\\n    ' + math('    ') + '\n'],
   ])('keeps it %s', async (_name, md) => {
     // Import wrote a blank line before it, which ended the paragraph, and
     // the quote or list item around it, out of which the equation went
