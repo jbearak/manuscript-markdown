@@ -1,3 +1,4 @@
+import type MarkdownIt from 'markdown-it';
 import { type CodeRegion, computeMarkdownRegions, isInsideCodeRegion, mergeRegions } from './code-regions';
 import { computeDollarMathRegions, isEscapedAt } from './math-delimiters';
 
@@ -7,6 +8,23 @@ import { computeDollarMathRegions, isEscapedAt } from './math-delimiters';
 const CRITIC_BREAK_SENTINEL = String.fromCharCode(0xE000);
 export const PARA_PLACEHOLDER = CRITIC_BREAK_SENTINEL + 'PARA' + CRITIC_BREAK_SENTINEL;
 export const LINE_PLACEHOLDER = CRITIC_BREAK_SENTINEL + 'LINE' + CRITIC_BREAK_SENTINEL;
+const CRITIC_BREAK_PLACEHOLDER_RE = new RegExp(CRITIC_BREAK_SENTINEL + '(?:PARA|LINE)' + CRITIC_BREAK_SENTINEL, 'g');
+
+/** End a link linkify finds at a break preprocessCriticMarkup wrote as a
+ * placeholder, as at the line end it stands for. Its letters, as any but a
+ * space, went on a URL before it, so https://e.com{++a, a line break and
+ * b++} took the markup in. Preview and Word export must install the same
+ * rule. */
+export function criticBreaksEndLinks(md: MarkdownIt): void {
+  const linkify = md.linkify;
+  const spaced = (text: string) => text.includes(CRITIC_BREAK_SENTINEL)
+    ? text.replace(CRITIC_BREAK_PLACEHOLDER_RE, placeholder => ' '.repeat(placeholder.length))
+    : text;
+  const { test, match, matchAtStart } = linkify;
+  linkify.test = text => test.call(linkify, spaced(text));
+  linkify.match = text => match.call(linkify, spaced(text));
+  linkify.matchAtStart = text => matchAtStart.call(linkify, spaced(text));
+}
 
 export type CriticBreakKind = 'line' | 'paragraph';
 

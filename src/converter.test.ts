@@ -4234,6 +4234,8 @@ describe('Bare links', () => {
     // A ! before it, escaped for a link's [, isn't, and an escaped & starts
     // no reference
     'a!mailto:a@b.com', 'a\\&#33;mailto:a@b.com', '&#32;https://e.com',
+    // A break in the markup after it, which export read as part of the URL
+    'https://e.com/a{~~\\\n~>x~~}', 'https://e.com/a{++x\\\ny++}',
   ])('keeps %s bare', async (md) => {
     expect((await roundTrip(md)).replace(/\{>>[^<]*<<\}/, '{>>c<<}')).toBe(md + '\n');
   });
