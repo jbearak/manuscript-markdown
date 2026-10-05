@@ -1479,6 +1479,13 @@ describe('HTML table support for Expand/Compact Table', () => {
     expect(compactTable(html).newText).toBe(html);
   });
 
+  it('leaves a table unchanged with a comment after it that a </table> in it ends', () => {
+    // The table was found alone, and the comment went
+    const html = '<table><tr><td>a</td></tr></table><!-- <table><tr><td>old</td></tr></table>';
+    expect(reflowTable(html).newText).toBe(html);
+    expect(compactTable(html).newText).toBe(html);
+  });
+
   it('mixed text + HTML table selection remains unchanged', () => {
     const html = '<table><tr><th>Name</th></tr><tr><td>Alice</td></tr></table>';
     const mixed = 'Intro\n' + html + '\nOutro';

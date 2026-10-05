@@ -3154,12 +3154,16 @@ describe('Emphasis between runs', () => {
     expect(buildMarkdown([table], new Map())).toContain('<p><code>a</code><b><code>b</code></b></p>');
   });
 
+  const inCell = (items: ContentItem[]) => [{ type: 'table', rows: [{ isHeader: false, cells: [{ colspan: 1, paragraphs: [items] }] }] } as unknown as ContentItem];
   test.each([
-    ['a paragraph', (items: ContentItem[]) => items],
-    ['a table\'s cell', (items: ContentItem[]) => [{ type: 'table', rows: [{ isHeader: false, cells: [{ colspan: 1, paragraphs: [items] }] }] } as unknown as ContentItem]],
-  ])('writes many HTML comments in %s in linear time', (_name, wrap) => {
+    ['a paragraph', (items: ContentItem[]) => items, '<!-- c -->'],
+    ['a table\'s cell', inCell, '<!-- c -->'],
+    // Which Word split from each other at an <!-- in one
+    ['a paragraph, as pieces of one', (items: ContentItem[]) => items, ' <!-- c'],
+    ['a table\'s cell, as pieces of one', inCell, ' <!-- c'],
+  ])('writes many HTML comments in %s in linear time', (_name, wrap, text) => {
     // Each comment joined the text of all those after it
-    const items = Array.from({ length: 32000 }, (): ContentItem => ({ type: 'html_comment', text: '<!-- c -->', commentIds: new Set() }));
+    const items = Array.from({ length: 32000 }, (_, i): ContentItem => ({ type: 'html_comment', text: i === 0 ? '<!-- a' : i === 31999 ? ' -->' : text, commentIds: new Set() }));
     const start = performance.now();
     buildMarkdown(wrap(items), new Map());
     expect(performance.now() - start).toBeLessThan(1000);
@@ -5799,7 +5803,7 @@ describe('HTML table cells', () => {
 
   test.each([
     ['in HTML', false, table('      <p>a<!-- a <!--->b</p>')],
-    ['in a table that leaves HTML', true, '| h |\n| --- |\n| {++a++}<!-- a --> <!--->b |'],
+    ['in a table that leaves HTML', true, '| h |\n| --- |\n| {++a++}<!-- a <!- -->b |'],
   ])('keeps a cell\'s comment hidden that Word splits before an <!-- in it, %s', async (_name, tracked, expected) => {
     // Its pieces were two comments, the second with a space before it, which
     // HTML held as none, and inline Markdown read the first as text

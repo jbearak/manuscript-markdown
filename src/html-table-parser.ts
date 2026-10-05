@@ -55,6 +55,8 @@ export interface HtmlTableMeta {
   decimalMark?: TableDecimalMark;
   digitGrouping?: TableDigitGrouping;
   comments?: string[]; // the comments between its rows or cells, which hide what's in them
+  start?: number;      // the table's offset in the HTML searched, from its <table
+  end?: number;        // and past its </table>
 }
 
 /** Parse data-col-widths attribute value (inline to avoid circular dependency with frontmatter.ts). */
@@ -166,7 +168,7 @@ export function extractHtmlTables(html: string): HtmlTableMeta[] {
     // Invariant: only tables with rows are returned to callers, or with
     // comments that hide all of them, which a caller can't drop unseen.
     if (rows.length > 0 || comments.length > 0) {
-      const meta: HtmlTableMeta = { rows };
+      const meta: HtmlTableMeta = { rows, start: table.start, end: table.end };
       if (comments.length > 0) meta.comments = comments;
       const fontSizeMatch = attrs.match(/data-font-size\s*=\s*["']?(\d+(?:\.\d+)?)["']?/i);
       if (fontSizeMatch) {

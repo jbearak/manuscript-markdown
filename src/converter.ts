@@ -3174,38 +3174,57 @@ function readHiddenRun(runChildren: XmlNode[], rPrChildren: XmlNode[] | undefine
 
 /** A hidden comment as inline Markdown reads one: one with no end, which
  *  ran to the end of an HTML table's cell, with one, but not one before
- *  others (their text, `after` it), which Word split it from at an <!-- in it,
- *  and which end it; and one the browser ended at a --!>, ended at a -->
- *  instead, as inline Markdown reads it on. In a table's cell (`cell`), one
- *  the browser ended at a --> after a -, which inline Markdown reads as
- *  text, ends at one it reads, as does one that ends at a --!> before
- *  another, and one before others gets an end where inline Markdown reads
- *  none in them. */
-function markdownComment(text: string, after: () => string = () => '', cell = false): string {
+ *  another (`beforeComment`), which Word split it from at an <!-- in it,
+ *  and which ends it; and one the browser ended at a --!>, ended at a -->
+ *  instead, as inline Markdown reads it on. In a table's cell (`cell`), as
+ *  joinSplitComments joins one Word split, one the browser ended at a -->
+ *  after a -, which inline Markdown reads as text, ends at one it reads, as
+ *  does one that ends at a --!> before another, and one before another gets
+ *  an end. */
+function markdownComment(text: string, beforeComment = false, cell = false): string {
   const from = text.indexOf('<!--') + 4;
-  // The length of the comment inline Markdown reads at the start of `html`
-  const read = (html: string) => HTML_TAG_RE.exec(html.trimStart())?.[0].length ?? 0;
-  if (/^-?>/.test(text.slice(from)) || cell && read(text) === text.trimStart().length) return text;
+  if (/^-?>/.test(text.slice(from)) || cell && HTML_TAG_RE.exec(text.trimStart())?.[0] === text.trimStart()) return text;
   const end = /--!?>$/.exec(text);
   if (cell && end && end.index >= from) {
     const body = text.slice(from, end.index);
     return text.slice(0, from) + body + (body.endsWith('-') ? ' ' : '') + '-->';
   }
-  if (text.includes('-->', from)) return text;
-  const following = after();
-  if (following && (!cell || read(text + following) > text.trimStart().length)) return text;
+  if (text.includes('-->', from) || beforeComment && !cell) return text;
   return end?.[0] === '--!>' && end.index >= from ? text.slice(0, -4) + '-->' : text.trimEnd() + ' -->';
 }
 
-/** The text of the comments one after another in `items` from `start` */
-function commentsFrom(items: readonly ContentItem[], start: number): string {
-  let text = '';
-  for (let k = start; k < items.length; k++) {
-    const item = items[k];
-    if (item.type !== 'html_comment') break;
-    text += item.text;
+/** The items of a table's cell with each comment the browser reads no end
+ *  in joined with the comments after it, which Word split it from at an
+ *  <!-- in it, which the browser reads on, up to the one an end is in, as
+ *  one comment, where none is in a comment's range */
+function joinSplitComments(items: ContentItem[]): ContentItem[] {
+  const out: ContentItem[] = [];
+  let joined = false;
+  // The texts of the comment at the end of `out` while it has no end, and
+  // their last three characters, which can start one
+  let open: { texts: string[]; tail: string } | undefined;
+  const close = () => {
+    if (open && open.texts.length > 1) {
+      out[out.length - 1] = { ...out[out.length - 1] as Extract<ContentItem, { type: 'html_comment' }>, text: open.texts.join('') };
+      joined = true;
+    }
+    open = undefined;
+  };
+  for (const item of items) {
+    if (item.type !== 'html_comment' || item.commentIds.size > 0) {
+      close();
+      out.push(item);
+    } else if (open) {
+      open.texts.push(item.text);
+      if (/--!?>/.test(open.tail + item.text)) close();
+      else open.tail = (open.tail + item.text).slice(-3);
+    } else {
+      out.push(item);
+      if (!/^\s*<!--(?:-?>|[\s\S]*?--!?>)/.test(item.text)) open = { texts: [item.text], tail: item.text.slice(-3) };
+    }
   }
-  return text;
+  close();
+  return joined ? out : items;
 }
 
 /**
@@ -5577,7 +5596,7 @@ function renderInlineSegment(
   renderOpts?: RenderOpts,
   opts?: InlineRangeOpts
 ): { text: string; deferredComments: string[] } {
-  const result = renderInlineRange(segment, 0, comments, opts, renderOpts);
+  const result = renderInlineRange(joinSplitComments(segment), 0, comments, opts, renderOpts);
   return {
     // A line break at a cell's end is <br>, which a pipe table holds, as a
     // grid table's blank line there pads the cell to its row's height
@@ -6091,7 +6110,7 @@ function renderInlineRange(
 
     // html_comment: emit the raw <!-- ... --> syntax directly
     if (item.type === 'html_comment') {
-      out += markdownComment(item.text, () => commentsFrom(segment, i + 1), opts?.cell);
+      out += markdownComment(item.text, segment[i + 1]?.type === 'html_comment', opts?.cell);
       if (item.commentIds.size > 0) {
         for (const cid of [...item.commentIds].sort()) {
           const c = comments.get(cid);
@@ -6437,7 +6456,7 @@ function renderInlineRangeWithIds(
         }
       }
       prevCommentIds = new Set(currentIds);
-      out += markdownComment(item.text, () => commentsFrom(segment, i + 1), opts?.cell);
+      out += markdownComment(item.text, segment[i + 1]?.type === 'html_comment', opts?.cell);
       i++;
       continue;
     }
@@ -6543,18 +6562,10 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
   type TextItem = Extract<ContentItem, { type: 'text' }>;
   // The paragraph's text, with each line break as null
   const pieces: Array<{ text: string; item: TextItem; html: string; raw?: boolean } | null> = [];
-  // A comment with no end, which Word split from those after it at an <!--
-  // in it, which the browser reads on to their end, as one; and comments
-  // the browser ended at a --!>, which Word joined in one hidden run, as
-  // inline Markdown would read them as one (see readHiddenText)
-  const joined = items.reduce<ContentItem[]>((out, item) => {
-    const last = out[out.length - 1];
-    if (item.type === 'html_comment' && last?.type === 'html_comment' && commentSetsEqual(last.commentIds, item.commentIds)
-      && !/^\s*<!--(?:-?>|[\s\S]*?--!?>)/.test(last.text)) out[out.length - 1] = { ...last, text: last.text + item.text };
-    else out.push(item);
-    return out;
-  }, []);
-  const split = joined.flatMap((item): ContentItem[] => item.type === 'html_comment'
+  // A comment Word split, as one; and comments the browser ended at a --!>,
+  // which Word joined in one hidden run, as inline Markdown would read them
+  // as one (see readHiddenText)
+  const split = joinSplitComments(items).flatMap((item): ContentItem[] => item.type === 'html_comment'
     ? item.text.split(/(?<=--!>)\u200B+(?=<!--)/).map(text => ({ ...item, text }))
     : [item]);
   for (const [k, item] of split.entries()) {
@@ -6562,7 +6573,7 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
     // One with no end, which ran to the end of the cell, gets one.
     if (item.type === 'html_comment' && item.commentIds.size === 0 && /^<!--(?:-?>|(?!-?>)(?:(?!--!?>)[\s\S])*(?:--!?>)?)$/.test(item.text)
       && !/(?:\r\n?|\n)[ \t]*(?:\r\n?|\n)/.test(item.text)) {
-      const html = item.text.endsWith('--!>') && item.text.length >= 8 ? item.text : markdownComment(item.text, () => commentsFrom(split, k + 1));
+      const html = item.text.endsWith('--!>') && item.text.length >= 8 ? item.text : markdownComment(item.text, split[k + 1]?.type === 'html_comment');
       pieces.push({ text: '', item: { type: 'text', text: '', commentIds: item.commentIds, formatting: DEFAULT_FORMATTING }, html, raw: true });
       continue;
     }

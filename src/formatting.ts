@@ -687,13 +687,14 @@ function convertHtmlTable(text: string, pad: boolean): string | null {
   const trimmed = text.trim();
   if (!/^<table\b[\s\S]*<\/table>$/i.test(trimmed)) return null;
   const tables = extractHtmlTables(trimmed);
-  // Subtle bug guard: mixed text/table selections must remain unchanged.
-  // So must a table with a comment between its rows or cells, which a pipe
+  // Subtle bug guard: mixed text/table selections must remain unchanged, as
+  // one with a comment after the table that a </table> in it ends. So must
+  // a table with a comment between its rows or cells, which a pipe
   // or grid table can't hold, so that it isn't lost, or one in a cell with
   // a line end, which would make a line of the cell, or a |, which would end
   // it or take a backslash, or one inline Markdown doesn't read whole, as
   // one with no end, whose text it would show.
-  if (tables.length !== 1 || tables[0].comments || tables[0].rows.some(row => row.cells.some(cell =>
+  if (tables.length !== 1 || tables[0].start !== 0 || tables[0].end !== trimmed.length || tables[0].comments || tables[0].rows.some(row => row.cells.some(cell =>
     cell.runs.some(run => run.type === 'html_comment' && (/[\r\n|]/.test(run.text) || HTML_TAG_RE.exec(run.text)?.[0] !== run.text))))) return null;
   const rows = tables[0].rows;
 
