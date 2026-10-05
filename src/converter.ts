@@ -6606,11 +6606,11 @@ function tryRenderPipeTable(table: { rows: TableRow[] }, maxLineWidth: number, c
 
   const numCols = Math.max(...rows.map(r => r.cells.length));
 
-  // GFM pipe tables support exactly one header row (the first).  Bail out if
-  // the DOCX marks multiple header rows or a non-first row as header.
+  // GFM pipe tables have exactly one header row (the first), which export
+  // makes the Word table's header, in bold. Bail out if the DOCX marks no
+  // row as header, more than one, or a row but the first.
   const explicitHeaderRows = rows.reduce((n, r) => n + (r.isHeader ? 1 : 0), 0);
-  if (explicitHeaderRows > 1) return null;
-  if (explicitHeaderRows === 1 && !rows[0].isHeader) return null;
+  if (explicitHeaderRows !== 1 || !rows[0].isHeader) return null;
 
   // Snapshot emittedIdCommentBodies so we can restore on fallback.
   // renderInlineSegment marks deferred comment bodies as emitted; if we
