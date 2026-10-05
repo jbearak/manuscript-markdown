@@ -115,6 +115,13 @@ describe('scanOrientationDirectives', () => {
     expect((await convertMdToDocx(text)).warnings).toEqual([]);
   });
 
+  it.each(['\r', '\r\n', '\n'])('reports a directive\'s line in export\'s warning after lines ended by %j', async (end) => {
+    // A carriage return alone wasn't counted
+    const { convertMdToDocx } = await import('./md-to-docx');
+    const { warnings } = await convertMdToDocx('First' + end + 'Second' + end + '<!-- /landscape -->');
+    expect(warnings.some(w => w.includes('near line 3'))).toBe(true);
+  });
+
   it('enforces single active orientation', () => {
     // landscape open then portrait open — portrait is nested because landscape is active.
     // The scanner keeps the original opener (landscape), so /portrait is crossed
