@@ -659,8 +659,9 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter)
     const close = closers[closers.length - 1];
     let opens: boolean;
     if (text[i + 1] === '^') opens = true;
-    // With no [ before its ], so each citation's text is read once
-    else if (close !== undefined && (inner === -1 || inner > close) && /^-?@/.test(text.slice(i + 1, i + 3))
+    // With no [ before its ], so each citation's text is read once, nor a
+    // ! before it, which makes it an image's
+    else if (close !== undefined && (inner === -1 || inner > close) && text[i - 1] !== '!' && /^-?@/.test(text.slice(i + 1, i + 3))
       && citationEndInText(text, i) === close && citationKeyRanges(text, i, close)) opens = false;
     else if (close !== undefined) opens = '([{'.includes(text[close + 1] ?? (after?.first || ' '));
     else if (!after) opens = true;
