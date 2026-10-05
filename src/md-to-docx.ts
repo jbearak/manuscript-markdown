@@ -2550,8 +2550,14 @@ function promoteCriticHeadingParagraph(runs: MdRun[]): MdToken | undefined {
   if (kind !== 'critic_add' && kind !== 'critic_del') return undefined;
   // Every run must be the same critic kind with matching author/date, so the
   // whole paragraph is one insertion/deletion (formatted payloads round-trip
-  // from Word as several adjacent spans: {++### ++}{++**bold**++}...).
-  if (!runs.every(r => r.type === kind && r.author === runs[0].author && r.date === runs[0].date)) return undefined;
+  // from Word as several adjacent spans: {++### ++}{++**bold**++}...). A
+  // comment, its range markers and body, and a comment's anchor around such
+  // spans go between them, as import writes a comment in a revised heading:
+  // {--### A --}{>>c<<} or {--### A --}{=={--b--}==}{>>c<<}.
+  const inSpan = (r: MdRun): boolean => r.type === kind && r.author === runs[0].author && r.date === runs[0].date
+    || r.type === 'critic_comment' || isCommentMarkerRun(r)
+    || r.type === 'critic_highlight' && !!r.innerRuns?.length && r.innerRuns.every(inSpan);
+  if (!runs.every(inSpan)) return undefined;
   const run = runs[0];
   if (!run.text || run.text.includes('\n')) return undefined;
   const headingPrefix = matchCriticHeadingPrefix(run.text);
@@ -2652,9 +2658,10 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
         const paragraphClose = findClosingToken(tokens, i, 'paragraph_close');
         const paraRuns = convertInlineTokens(tokens.slice(i + 1, paragraphClose));
         // Only promote at top level: nested contexts (blockquotes, lists) remap
-        // token types and would clobber the heading level.
+        // token types and would clobber the heading level. Comment bodies on
+        // lines of their own after the heading go with it, without the breaks.
         const promoted = listLevel === 0 && blockquoteLevel === 0
-          ? promoteCriticHeadingParagraph(paraRuns)
+          ? promoteCriticHeadingParagraph(withoutCommentBodyLines(paraRuns))
           : undefined;
         result.push(promoted ?? { type: 'paragraph', runs: paraRuns });
         i = paragraphClose + 1;
@@ -6479,72 +6486,50 @@ function withParagraphMarkRevision(pPr: string, revision: string): string {
  * around lines that hold only bodies. Import writes the bodies on the lines
  * after their paragraph. A block of body lines keeps one break, joining the
  * lines on either side, unless it ends the paragraph or is all of it.
- * A revision's or a highlight's text loses them too, as in
- * {++x\n{#1>>c<<}++}, where its edges are its line's only if it starts or
- * ends one: `startsLine` and `endsLine` say whether the runs do, and `shown`
- * whether their whitespace shows, as the run they're the text of does.
+ * The lines are those Word shows with changes marked, so a revision's or a
+ * highlight's text, as in {++x\n{#1>>c<<}++}, is read in its place, both
+ * sides of a substitution in turn, and a line can start in one revision and
+ * end in the next.
  */
-function withoutCommentBodyLines(source: MdRun[], startsLine = true, endsLine = true, shown = false): MdRun[] {
-  const hasBody = (runs: MdRun[] | undefined): boolean => !!runs?.some(run => run.type === 'comment_body_with_id'
-    || hasBody(run.innerRuns) || hasBody(run.oldRuns) || hasBody(run.newRuns));
+function withoutCommentBodyLines(source: MdRun[]): MdRun[] {
+  type Side = 'innerRuns' | 'oldRuns' | 'newRuns';
+  const sidesOf = (run: MdRun): Side[] =>
+    run.type === 'critic_add' || run.type === 'critic_del' || run.type === 'critic_sub' || run.type === 'critic_highlight'
+      ? (['innerRuns', 'oldRuns', 'newRuns'] as const).filter(key => !!run[key]?.length)
+      : [];
+  const hasBody = (runs: MdRun[]): boolean => runs.some(run => run.type === 'comment_body_with_id'
+    || sidesOf(run).some(key => hasBody(run[key]!)));
   if (!hasBody(source)) return source;
-  // Whitespace that shows, as code, a link or a mark, isn't padding
-  const shows = (run: MdRun) => shown || !!(run.code || run.href || run.highlight || run.underline || run.strikethrough);
-  // A run starts or ends its line where only runs that take no room, as a
-  // comment, its range markers, a body or a revision of them alone, are
-  // between it and the line's edge or a line break, which can end or start
-  // a revision's text, or each side of a substitution
-  const sidesOf = (run: MdRun) => [run.innerRuns, run.oldRuns, run.newRuns].filter((side): side is MdRun[] => !!side?.length);
-  const roomless = (run: MdRun): boolean => run.type === 'critic_comment' || isCommentMarkerRun(run)
-    || sidesOf(run).length > 0 && sidesOf(run).every(side => side.every(roomless));
-  // Whether runs from k, toward `step`, have a line break first, past those
-  // that take no room
-  const breakFrom = (runs: MdRun[], k: number, step: number): boolean => {
-    while (k >= 0 && k < runs.length && roomless(runs[k])) k += step;
-    if (k < 0 || k === runs.length) return false;
-    const sides = sidesOf(runs[k]);
-    return isBreakRun(runs[k])
-      || sides.length > 0 && sides.every(side => breakFrom(side, step < 0 ? side.length - 1 : 0, step));
-  };
-  const edgeFrom = (i: number, step: number, atEdge: boolean) => {
-    let j = i + step;
-    while (j >= 0 && j < source.length && roomless(source[j])) j += step;
-    return j < 0 || j === source.length ? atEdge : breakFrom(source, j, step);
-  };
-  // Text of bodies and range markers alone, which Word gets nothing of to
-  // revise or highlight, so they take its run's place, where the lines
-  // around them see them
-  const unseen = (runs: MdRun[] | undefined): boolean => !!runs?.length && runs.every(isCommentMarkerRun);
-  const side = { oldRuns: undefined, newRuns: undefined, newText: undefined };
-  // Each side of a substitution stands for the whole of it, as accepted or rejected
-  const runs = source.flatMap((run, i): MdRun[] => {
-    if (!hasBody(run.innerRuns) && !hasBody(run.oldRuns) && !hasBody(run.newRuns)) return [run];
-    const starts = edgeFrom(i, -1, startsLine);
-    const ends = edgeFrom(i, 1, endsLine);
-    // A highlight shows its whitespace, but not a comment's range
-    const payloadShown = shows(run) || run.type === 'critic_highlight' && source[i + 1]?.type !== 'critic_comment';
-    const payload = (inner: MdRun[] | undefined) => inner && withoutCommentBodyLines(inner, starts, ends, payloadShown);
-    const innerRuns = payload(run.innerRuns);
-    const oldRuns = payload(run.oldRuns);
-    const newRuns = payload(run.newRuns);
-    if (run.type === 'critic_sub' && (unseen(oldRuns) || unseen(newRuns))) {
-      return [
-        ...(unseen(oldRuns) ? oldRuns! : run.text || oldRuns?.length
-          ? [{ ...run, ...side, type: 'critic_del' as const, innerRuns: oldRuns }] : []),
-        // A part of one split at display math holds its new text in newRuns alone
-        ...(unseen(newRuns) ? newRuns! : run.newText || newRuns?.length
-          ? [{ ...run, ...side, type: 'critic_add' as const, text: run.newText || '', innerRuns: newRuns }] : []),
-      ];
+  // Whitespace that shows, as code, a link or a mark, isn't padding, nor is
+  // text's in a revision or a highlight that shows it
+  const showsOwn = (run: MdRun) => !!(run.code || run.href || run.highlight || run.underline || run.strikethrough);
+  const shownRuns = new Set<MdRun>();
+  const shows = (run: MdRun) => shownRuns.has(run) || showsOwn(run);
+  // Each side of a revision or highlight goes between range markers of its
+  // own, which take no room, as `opens` and `closes` hold them
+  const opens = new Map<MdRun, { run: MdRun; key: Side; last: boolean }>();
+  const closes = new Set<MdRun>();
+  const runs: MdRun[] = [];
+  const flatten = (from: MdRun[], shown: boolean) => from.forEach((run, i) => {
+    const keys = sidesOf(run);
+    if (keys.length === 0) {
+      if (shown) shownRuns.add(run);
+      runs.push(run);
+      return;
     }
-    if (unseen(innerRuns)) return innerRuns!;
-    return [{
-      ...run,
-      ...(innerRuns ? { innerRuns } : {}),
-      ...(oldRuns ? { oldRuns } : {}),
-      ...(newRuns ? { newRuns } : {}),
-    }];
+    // A highlight shows its whitespace, but not a comment's range
+    const inner = shown || showsOwn(run) || run.type === 'critic_highlight' && from[i + 1]?.type !== 'critic_comment';
+    keys.forEach((key, k) => {
+      const open: MdRun = { type: 'comment_range_start', text: '' };
+      const close: MdRun = { type: 'comment_range_end', text: '' };
+      opens.set(open, { run, key, last: k === keys.length - 1 });
+      closes.add(close);
+      runs.push(open);
+      flatten(run[key]!, inner);
+      runs.push(close);
+    });
   });
-  if (!runs.some(run => run.type === 'comment_body_with_id')) return runs;
+  flatten(source, false);
   const lines: MdRun[][] = [[]];
   const breaks: MdRun[] = [];
   for (const run of runs) {
@@ -6559,20 +6544,16 @@ function withoutCommentBodyLines(source: MdRun[], startsLine = true, endsLine = 
   // Range markers take no room, so they stay where they are
   const marker = (run: MdRun) => run.type === 'comment_range_start' || run.type === 'comment_range_end';
   const edge = (run: MdRun) => run.type === 'comment_body_with_id' || blank(run) || marker(run);
-  // Whether line k starts or ends its line in the paragraph, not where the
-  // runs are a payload with more of the line before or after it
-  const startsAt = (k: number) => k > 0 || startsLine;
-  const endsAt = (k: number) => k < lines.length - 1 || endsLine;
-  const edgeBodies = (line: MdRun[], k: number) => {
+  const edgeBodies = (line: MdRun[]) => {
     // Bodies, markers and blank text from the start of the line, and from its end
     let head = 0;
-    while (startsAt(k) && head < line.length && edge(line[head])) head++;
+    while (head < line.length && edge(line[head])) head++;
     let tail = line.length;
-    while (endsAt(k) && tail > head && edge(line[tail - 1])) tail--;
+    while (tail > head && edge(line[tail - 1])) tail--;
     return { head, tail };
   };
-  const trimmed = lines.map((line, k) => {
-    const { head, tail } = edgeBodies(line, k);
+  const trimmed = lines.map(line => {
+    const { head, tail } = edgeBodies(line);
     const hasBody = (from: number, to: number) => line.slice(from, to).some(run => run.type === 'comment_body_with_id');
     const atHead = hasBody(0, head);
     const atTail = hasBody(tail, line.length);
@@ -6586,18 +6567,18 @@ function withoutCommentBodyLines(source: MdRun[], startsLine = true, endsLine = 
     const bodies = (start: number, end: number) => line.slice(start, end).filter(run => run.type === 'comment_body_with_id' || marker(run));
     return [...(atHead ? bodies(0, head) : []), ...middle, ...(atTail ? bodies(tail, line.length) : [])];
   });
-  const bodyLine = (line: MdRun[], k: number) => startsAt(k) && endsAt(k)
-    && line.some(run => run.type === 'comment_body_with_id')
-    && line.every(run => run.type === 'comment_body_with_id' || marker(run));
+  // A comment takes no room either, as an anchor's after its highlight
+  const bodyLine = (line: MdRun[]) => line.some(run => run.type === 'comment_body_with_id')
+    && line.every(run => run.type === 'comment_body_with_id' || marker(run) || run.type === 'critic_comment');
   // Break k sits between lines k and k + 1
   const dropped = new Set<number>();
   for (let first = 0; first < trimmed.length;) {
-    if (!bodyLine(trimmed[first], first)) {
+    if (!bodyLine(trimmed[first])) {
       first++;
       continue;
     }
     let last = first;
-    while (last + 1 < trimmed.length && bodyLine(trimmed[last + 1], last + 1)) last++;
+    while (last + 1 < trimmed.length && bodyLine(trimmed[last + 1])) last++;
     for (let k = first; k < last; k++) dropped.add(k);
     if (last + 1 < trimmed.length) dropped.add(last);
     else if (first > 0) dropped.add(first - 1);
@@ -6608,7 +6589,40 @@ function withoutCommentBodyLines(source: MdRun[], startsLine = true, endsLine = 
     kept.push(...line);
     if (k < breaks.length && !dropped.has(k)) kept.push(breaks[k]);
   });
-  return kept;
+  // Each revision and highlight back around its text, or its text in its
+  // place where that's only bodies and range markers, which Word gets
+  // nothing of to revise or highlight
+  const unseen = (side: MdRun[] | undefined) => !!side && side.every(isCommentMarkerRun);
+  const noSides = { oldRuns: undefined, newRuns: undefined, newText: undefined };
+  const rebuilt = (run: MdRun, done: Partial<Record<Side, MdRun[]>>): MdRun[] => {
+    if (run.type !== 'critic_sub') return unseen(done.innerRuns) ? done.innerRuns! : [{ ...run, ...done }];
+    if (!unseen(done.oldRuns) && !unseen(done.newRuns)) return [{ ...run, ...done }];
+    const oldRuns = done.oldRuns ?? run.oldRuns;
+    const newRuns = done.newRuns ?? run.newRuns;
+    return [
+      ...(unseen(done.oldRuns) ? done.oldRuns! : run.text || oldRuns?.length
+        ? [{ ...run, ...noSides, type: 'critic_del' as const, innerRuns: oldRuns }] : []),
+      // A part of one split at display math holds its new text in newRuns alone
+      ...(unseen(done.newRuns) ? done.newRuns! : run.newText || newRuns?.length
+        ? [{ ...run, ...noSides, type: 'critic_add' as const, text: run.newText || '', innerRuns: newRuns }] : []),
+    ];
+  };
+  const frames: Array<{ children: MdRun[]; open?: { run: MdRun; key: Side; last: boolean } }> = [{ children: [] }];
+  const done = new Map<MdRun, Partial<Record<Side, MdRun[]>>>();
+  for (const run of kept) {
+    const open = opens.get(run);
+    if (open) {
+      frames.push({ children: [], open });
+    } else if (closes.has(run)) {
+      const frame = frames.pop()!;
+      const sides = { ...done.get(frame.open!.run), [frame.open!.key]: frame.children };
+      done.set(frame.open!.run, sides);
+      if (frame.open!.last) frames[frames.length - 1].children.push(...rebuilt(frame.open!.run, sides));
+    } else {
+      frames[frames.length - 1].children.push(run);
+    }
+  }
+  return frames[0].children;
 }
 
 /** Paragraph XML with something import reads: a run, as text, deleted

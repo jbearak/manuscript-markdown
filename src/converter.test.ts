@@ -7479,7 +7479,6 @@ describe('Track changes (CriticMarkup)', () => {
     test.each([
       ['{++{#1}x{/1}\n{#1>>c<<}++}', '{=={++x++}==}{>>c<<}'],
       ['{--{#1}x{/1}\n{#1>>c<<}--}', '{=={--x--}==}{>>c<<}'],
-      ['{~~{#1}x{/1}\n{#1>>c<<}~>y~~}', '{=={--x--}==}{>>c<<}{++y++}'],
       ['{~~y~>{#1}x{/1}\n{#1>>c<<}~~}', '{--y--}{=={++x++}==}{>>c<<}'],
       ['{=={#1}x{/1}\n{#1>>c<<}==}{>>d<<}', '{#1}{#2}x{/1}{/2}\n{#1>>d<<}\n{#2>>c<<}'],
       ['{++a {--{#1}x{/1}\n{#1>>c<<}--}++}', '{++a ++}{=={--x--}==}{>>c<<}'],
@@ -7499,11 +7498,36 @@ describe('Track changes (CriticMarkup)', () => {
     });
 
     test.each([
-      ['', '{++a ++}{=={++x++}==}{>>c<<}{++ b++}'],
-      ['---\nbreaks: true\n---\n\n', '{++a ++}{=={++x++}==}{>>c<<}{++\\\nb++}'],
-    ])('keeps one line break across a comment body on its own line in a revision, after %j', async (front, expected) => {
-      const { docx } = await convertMdToDocx(front + '{++a {#1}x{/1}\n{#1>>c<<}\nb++}');
-      expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(expected + '\n');
+      ['{++a {#1}x{/1}\n{#1>>c<<}\nb++}', '{++a ++}{=={++x++}==}{>>c<<}{++ b++}', '{++a ++}{=={++x++}==}{>>c<<}{++\\\nb++}'],
+      // As x\n{#1>>c<<}y keeps it, with the change marked as Word shows it
+      ['{~~{#1}x{/1}\n{#1>>c<<}~>y~~}', '{=={--x--}==}{>>c<<}{-- --}{++y++}', '{=={--x--}==}{>>c<<}{--\\\n--}{++y++}'],
+    ])('keeps one line break across a comment body on its own line in %j', async (md, plain, withBreaks) => {
+      for (const [front, expected] of [['', plain], ['---\nbreaks: true\n---\n\n', withBreaks]]) {
+        const { docx } = await convertMdToDocx(front + md);
+        expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(expected + '\n');
+      }
+    });
+
+    test.each([
+      ['{--### A {>>c<<}--}', '{--### A --}{>>c<<}'],
+      ['{--### A {#1}b{/1}--}\n{#1>>c<<}', '{--### A --}{=={--b--}==}{>>c<<}'],
+      ['{++### A {#1}b{/1}++}\n{#1>>c<<}', '{++### A ++}{=={++b++}==}{>>c<<}'],
+    ])('keeps the heading of %j, and its comment', async (md, expected) => {
+      // A comment between a revised heading's spans, as import writes it, or
+      // its body on a line after, made it text, with a literal ###
+      const roundTrip = async (source: string) =>
+        (await convertDocx((await convertMdToDocx(source)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
+      const md2 = await roundTrip(md);
+      expect(md2).toBe(expected + '\n');
+      expect(await roundTrip(md2)).toBe(md2);
+    });
+
+    test('drops the line breaks of comment body lines across a revision\'s end', async () => {
+      // Each revision's text lost its own, so the body line that ran on past
+      // its end kept the break after it
+      const { docx } = await convertMdToDocx('---\nbreaks: true\n---\n\n{++{#1}x{/1}\n{#1>>c<<}\n++}{#2>>d<<}\n{#2}y{/2}');
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      expect(xml.match(/<w:br\/>/g)).toHaveLength(1);
     });
 
     test.each([
