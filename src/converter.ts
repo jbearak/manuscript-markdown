@@ -1812,10 +1812,9 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
     const hasLeadingTrailingSpaces = result.startsWith(' ') && result.endsWith(' ') && /[^ ]/.test(result);
     const needsPadding = result.startsWith('`') || result.endsWith('`') || hasLeadingTrailingSpaces;
     result = needsPadding ? `${fence} ${result} ${fence}` : `${fence}${result}${fence}`;
-    // Code drops the formatting Word often gives it in passing, but keeps a
-    // highlight, which ==`code`== exports, unless an == in it would close
-    // the highlight
-    return fmt.highlight && !text.includes('==') ? wrapHighlight(result, markdownHighlightColor(fmt)) : result;
+    // Code keeps its formatting, which **`code`** and ==`code`== export,
+    // but for a highlight that an == in it would close
+    return wrapFormatting(result, fmt.highlight && text.includes('==') ? { ...fmt, highlight: false } : fmt);
   }
 
   // Escape markdown-sensitive characters so they round-trip faithfully.
@@ -1844,24 +1843,28 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
   const htmlBlock = !delimited && blockStart && !result.includes('\\\n') && isHtmlBlock(result.replace(/^ {1,3}(?=<)/, '')) && after?.first === '';
   result = htmlBlock ? result : escaped;
 
+  // An = that could join a highlight's closing ==, which no backslash
+  // keeps from it, as a reference
+  // The backslash of an escaped =, not one of an escaped backslash's
+  if (fmt.highlight && /==|=\s*$/.test(text)) result = result.replace(/((?:\\\\)*)\\?=/g, (_m, pairs: string) => pairs + '&#61;');
+  return wrapFormatting(result, fmt);
+}
+
+/** `markdown`, a run's text, in the tags and delimiters of its formatting
+ *  `fmt`, innermost first, but for code, whose backticks are its own */
+function wrapFormatting(markdown: string, fmt: RunFormatting): string {
+  let result = markdown;
   // If both superscript and subscript are true, superscript takes precedence
   if (fmt.superscript) {
     result = `<sup>${result}</sup>`;
   } else if (fmt.subscript) {
     result = `<sub>${result}</sub>`;
   }
-  if (fmt.highlight) {
-    // An = that could join the highlight's closing ==, which no backslash
-    // keeps from it, as a reference
-    // The backslash of an escaped =, not one of an escaped backslash's
-    if (/==|=\s*$/.test(text)) result = result.replace(/((?:\\\\)*)\\?=/g, (_m, pairs: string) => pairs + '&#61;');
-    result = wrapHighlight(result, markdownHighlightColor(fmt));
-  }
+  if (fmt.highlight) result = wrapHighlight(result, markdownHighlightColor(fmt));
   if (fmt.underline) result = `<u>${result}</u>`;
   if (fmt.strikethrough) result = wrapEmphasis(result, '~~', !fmt.italic && !fmt.bold);
   if (fmt.italic) result = wrapEmphasis(result, '*', !fmt.bold);
   if (fmt.bold) result = wrapEmphasis(result, '**');
-
   return result;
 }
 
@@ -5107,15 +5110,16 @@ function renderSubstitutionRun(
 /**
  * Whether code with `formatting` and `text` writes the code span `next`
  * does, so that one span holds both, as two side by side would run their
- * backticks into one: code drops the rest of a run's formatting, and its
- * highlight where an == in it would close that, unless together they'd
+ * backticks into one: code keeps the rest of a run's formatting, but drops
+ * its highlight where an == in it would close that, unless together they'd
  * have an == that neither has.
  */
 function sameCodeSpan(formatting: RunFormatting, text: string, next: Extract<ContentItem, { type: 'text' }>): boolean {
   const highlight = (f: RunFormatting, t: string) => f.highlight && !t.includes('==') ? f.highlightColor ?? 'yellow' : '';
+  const rest = (f: RunFormatting): RunFormatting => ({ ...f, highlight: false, highlightColor: undefined });
   const kept = highlight(formatting, text);
   return formatting.code && next.formatting.code && kept === highlight(next.formatting, next.text)
-    && (kept === '' || !(text + next.text).includes('=='));
+    && (kept === '' || !(text + next.text).includes('==')) && formattingEquals(rest(formatting), rest(next.formatting));
 }
 
 /** Joins runs that read as one. In HTML, which keeps the rest of code's

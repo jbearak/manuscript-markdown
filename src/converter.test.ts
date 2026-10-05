@@ -2854,7 +2854,7 @@ describe('wrapWithFormatting', () => {
           code: fc.boolean(),
         }).filter(fmt => Object.values(fmt).filter(Boolean).length >= 2),
         (text, fmt) => {
-          const result = wrapWithFormatting(text, fmt);
+          let result = wrapWithFormatting(text, fmt);
 
           if (
             !fmt.code
@@ -2868,11 +2868,13 @@ describe('wrapWithFormatting', () => {
             return;
           }
 
-          // When code is true, other formatting is stripped, except a
-          // highlight around the backtick fence, which an == in it would close
+          // When code is true, the backtick fence is innermost, and the
+          // rest goes around it, but for a highlight an == in it would close
           if (fmt.code) {
-            expect(result).toMatch(fmt.highlight && !text.includes('==') ? /^==`[\s\S]*`==$/ : /^`[\s\S]*`$/);
-            return;
+            const fenced = wrapWithFormatting(text, { ...DEFAULT_FORMATTING, code: true });
+            expect(result).toContain(fenced);
+            result = result.replace(fenced, 'x');
+            if (text.includes('==')) expect(result).not.toContain('==');
           }
 
           // Check nesting order without assuming wrappers begin at column 0,
@@ -3009,12 +3011,13 @@ describe('Emphasis between runs', () => {
     expect(buildMarkdown(items, new Map())).toBe('==yellow====cyan=={turquoise}');
   });
 
-  test.each([
-    ['bold', [run('a', { code: true }), run('b', { code: true, bold: true })], '`ab`'],
-    ['a highlight with ==, which code drops', [run(':) ', { code: true }), run('$==', { code: true, highlight: true })], '`:) $==`'],
-  ])('writes code beside code with %s as one span', (_name, items, markdown) => {
+  test('writes code beside code with a highlight with ==, which code drops, as one span', () => {
     // Their backticks ran into one: `a``b`
-    expect(buildMarkdown(items, new Map())).toBe(markdown);
+    expect(buildMarkdown([run(':) ', { code: true }), run('$==', { code: true, highlight: true })], new Map())).toBe('`:) $==`');
+  });
+
+  test('keeps code beside bold code apart, with the bold between them', () => {
+    expect(buildMarkdown([run('a', { code: true }), run('b', { code: true, bold: true })], new Map())).toBe('`a`**`b`**');
   });
 
   test('keeps highlighted code beside code apart', () => {
@@ -3528,10 +3531,12 @@ describe('wrapWithFormatting colored highlights', () => {
   });
 });
 
-describe('code run formatting stripping', () => {
-  test('code + bold produces only backtick-fenced text', () => {
+describe('code run formatting', () => {
+  // Formatting goes outside the backtick fence, where Markdown reads it,
+  // and export writes it back onto the code
+  test('code + bold puts the bold around the fence', () => {
     expect(wrapWithFormatting('text', { ...DEFAULT_FORMATTING, code: true, bold: true }))
-      .toBe('`text`');
+      .toBe('**`text`**');
   });
 
   test('code + highlight keeps the highlight around the fence', () => {
@@ -3541,14 +3546,14 @@ describe('code run formatting stripping', () => {
       .toBe('==`text`=={red}');
   });
 
-  test('code + italic + strikethrough produces only backtick-fenced text', () => {
+  test('code + italic + strikethrough puts both around the fence', () => {
     expect(wrapWithFormatting('text', { ...DEFAULT_FORMATTING, code: true, italic: true, strikethrough: true }))
-      .toBe('`text`');
+      .toBe('*~~`text`~~*');
   });
 
-  test('code + superscript produces only backtick-fenced text', () => {
+  test('code + superscript puts the tag around the fence', () => {
     expect(wrapWithFormatting('text', { ...DEFAULT_FORMATTING, code: true, superscript: true }))
-      .toBe('`text`');
+      .toBe('<sup>`text`</sup>');
   });
 
   test('non-code bold still produces **text**', () => {
@@ -3556,12 +3561,12 @@ describe('code run formatting stripping', () => {
       .toBe('**text**');
   });
 
-  test('code + all formatting flags produces highlighted backtick-fenced text', () => {
+  test('code + all formatting flags puts them all around the fence', () => {
     const fmt: RunFormatting = {
       bold: true, italic: true, underline: true, strikethrough: true,
       highlight: true, superscript: true, subscript: true, code: true,
     };
-    expect(wrapWithFormatting('text', fmt)).toBe('==`text`==');
+    expect(wrapWithFormatting('text', fmt)).toBe('***~~<u>==<sup>`text`</sup>==</u>~~***');
   });
 });
 
@@ -6926,14 +6931,14 @@ describe('Inline code import (CodeChar detection)', () => {
     expect(parseMd('a ' + written + ' b')[0].runs.find(run => run.code)?.text).toBe(text);
   });
 
-  test('wrapWithFormatting strips bold when code is true', () => {
+  test('wrapWithFormatting keeps bold around code', () => {
     const fmt = { ...DEFAULT_FORMATTING, code: true, bold: true };
-    expect(wrapWithFormatting('hello', fmt)).toBe('`hello`');
+    expect(wrapWithFormatting('hello', fmt)).toBe('**`hello`**');
   });
 
-  test('wrapWithFormatting strips italic when code is true', () => {
+  test('wrapWithFormatting keeps italic around code', () => {
     const fmt = { ...DEFAULT_FORMATTING, code: true, italic: true };
-    expect(wrapWithFormatting('hello', fmt)).toBe('`hello`');
+    expect(wrapWithFormatting('hello', fmt)).toBe('*`hello`*');
   });
 });
 
@@ -6968,20 +6973,13 @@ describe('Inline code round-trip', () => {
     expect(result.markdown.trim()).toBe('Some `inline code` here');
   });
 
-  test('bold inline code strips bold on round-trip', async () => {
-    const md = '**`bold code`**';
-    const docxResult = await convertMdToDocx(md);
-    const result = await convertDocx(docxResult.docx);
-    // Code runs strip all non-code formatting (bold is incidental in DOCX)
-    expect(result.markdown.trim()).toBe('`bold code`');
-  });
-
-  test('italic inline code strips italic on round-trip', async () => {
-    const md = '*`italic code`*';
-    const docxResult = await convertMdToDocx(md);
-    const result = await convertDocx(docxResult.docx);
-    // Code runs strip all non-code formatting (italic is incidental in DOCX)
-    expect(result.markdown.trim()).toBe('`italic code`');
+  test.each([
+    '**`bold code`**', '*`italic code`*', '~~`struck code`~~', '<u>`underlined code`</u>', '<sup>`raised code`</sup>',
+    '***~~<u>==<sup>`text`</sup>==</u>~~***', 'a<i>`b`</i>c', '*`a`*<b>`b`</b>',
+  ])('keeps the formatting around inline code in %s on round-trip', async (md) => {
+    // Code dropped it, though export writes it onto the code
+    const result = await convertDocx((await convertMdToDocx(md)).docx);
+    expect(result.markdown.trim()).toBe(md);
   });
 
   test('inline code containing backticks round-trips correctly', async () => {
