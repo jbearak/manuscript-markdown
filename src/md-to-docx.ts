@@ -8011,6 +8011,9 @@ export async function convertMdToDocx(
   // the order generateRuns reaches them. Deleted CriticMarkup content
   // ({--...--} innerRuns, {~~old~>...~~} oldRuns) renders citations as
   // literal deleted text, not fields, so its keys aren't registered.
+  // The order of the labels' first references, tracked or not, which import
+  // writes notes in where their labels tie (see compareNoteLabels)
+  const firstReferences = new Map<string, number>();
   {
     type Reached = { label: string; tracked: boolean } | { keys: string[] };
     const collectReached = (runs: MdRun[] | undefined, reached: Reached[], tracked: boolean, deleted: boolean) => {
@@ -8061,6 +8064,9 @@ export async function convertMdToDocx(
     // references that own them, so number each note where its owner is, and
     // a cross-reference's cached number is the one Word shows.
     const reached = reachedIn(tokens);
+    for (const item of reached) {
+      if ('label' in item && !firstReferences.has(item.label)) firstReferences.set(item.label, firstReferences.size);
+    }
     const untracked = new Set(reached.flatMap(item => 'label' in item && !item.tracked ? [item.label] : []));
     for (const item of reached) {
       if ('keys' in item) {
@@ -8101,12 +8107,11 @@ export async function convertMdToDocx(
   // (footnotes.xml has its own .rels file, separate from document.xml.rels).
   // Notes go in the order import writes them back in, which their tables'
   // and code blocks' indices follow (see compareNoteLabels): the body's,
-  // whose first references, which their IDs follow, break ties, and then
-  // those only another note refers to, which import doesn't write.
+  // whose first references break ties, and then those only another note
+  // refers to, which import doesn't write.
   state.inNoteBody = true;
-  const bodyNoteIds = new Map(state.footnoteLabelToId);
-  const noteDefs = [...footnoteDefs].sort(([a], [b]) => Number(bodyNoteIds.has(b)) - Number(bodyNoteIds.has(a))
-    || compareNoteLabels(a, b) || (bodyNoteIds.get(a) ?? 0) - (bodyNoteIds.get(b) ?? 0));
+  const noteDefs = [...footnoteDefs].sort(([a], [b]) => Number(firstReferences.has(b)) - Number(firstReferences.has(a))
+    || compareNoteLabels(a, b) || (firstReferences.get(a) ?? 0) - (firstReferences.get(b) ?? 0));
   // A note only another note refers to gets its ID as that one is made, so
   // one without an ID goes again after the rest, until no note has been made
   // since it last went, which wrote a reference to a note that wasn't there

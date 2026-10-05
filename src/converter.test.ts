@@ -5902,6 +5902,17 @@ describe('Table alignment', () => {
     expect(strip((await convertDocx(docx)).markdown)).toBe(text + tableNote('1b', 12, 'x') + '\n' + tableNote('1a', 7, 'y'));
   });
 
+  test.each([
+    ['footnotes', ''],
+    ['endnotes', '---\nnotes: endnotes\n---\n\n'],
+  ])('keeps the table settings of %s whose labels have one number where a tracked reference comes first', async (_name, front) => {
+    // Export broke the tie by the references that own the notes, which the
+    // tracked one doesn't, and import by the first, which it is
+    const text = '{--X[^1a]--} and Y[^1b] and Z[^1a].\n\n';
+    const md = text + tableNote('1a', 12, 'x') + '\n' + tableNote('1b', 7, 'y');
+    expect((await roundTrip(front + md)).replace(/^\n/, '')).toBe(md);
+  });
+
   test('keeps the table settings of a note after one only another note refers to', async () => {
     // Export made that one in its label's turn, which import, which writes
     // only the notes the text refers to, doesn't read, so the next note
