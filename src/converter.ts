@@ -6782,7 +6782,7 @@ function tryRenderPipeTable(table: { rows: TableRow[] }, maxLineWidth: number, c
           : cell.paragraphs[0];
         // Its line breaks at its end too, which renderInlineSegment drops
         // for a grid table's, as a cell of one line holds them as Word's
-        const r = renderInlineRange(mergeConsecutiveRuns(items), 0, comments, { cell: true }, renderOpts);
+        const r = renderInlineRange(joinSplitComments(mergeConsecutiveRuns(items), !!renderOpts?.htmlCells), 0, comments, { cell: true }, renderOpts);
         // A line break, which a cell's one line can't hold, as <br>, which a
         // cell reads as one, but not a line end in code, an equation or a
         // comment, which isn't one

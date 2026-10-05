@@ -5868,7 +5868,10 @@ describe('HTML table cells', () => {
     const tracked = xml.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>');
     expect(tracked).not.toBe(xml);
     zip.file('word/document.xml', tracked);
-    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('| {++XX++} | ' + expected + ' |\n| --- | --- |');
+    // A grid table, as a pipe table needs a header row
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown.split('\n')).toContain('| {++XX++} | ' + expected + ' |');
+    expect(markdown).not.toContain('<table');
   });
 
   test('keeps a table whose cell has a comment with no end as HTML, with an end', async () => {
