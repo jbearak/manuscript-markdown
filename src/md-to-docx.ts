@@ -7709,8 +7709,8 @@ export async function convertMdToDocx(
   // and a CriticMarkup span's lines are one.
   // Lines end as markdown-it ends them. Its text is as Word shows it, with
   // import's escapes and character references, as of a key's < in
-  // @a&lt;b, decoded, HTML, which export writes as text, and a URL
-  // linkify makes a link of.
+  // @a&lt;b, decoded, HTML export writes as text, as a key's <span>, but
+  // not a comment, break or formatting, and a URL linkify makes a link of.
   const MISSING_KEY_TEXT = /^Citation data for @[^,;\]]+ was not found in the bibliography file\.$/;
   const bodyParts = body.split(/(\r\n?|\n)/);
   let notes: Set<number> | undefined;
@@ -7729,9 +7729,12 @@ export async function convertMdToDocx(
       extractFootnoteDefinitions(marked).cleaned)))), {});
     notes = new Set(parsed.flatMap((token, t) => {
       if (token.type !== 'paragraph_open' || token.level !== 0 || !token.map || token.map[1] - token.map[0] !== 1) return [];
-      const children = parsed[t + 1]?.children;
-      const line = children?.every(child => child.type === 'text' || child.type === 'html_inline' || isLinkifyToken(child))
-        ? markedLine.exec(children.map(child => child.content).join('')) : null;
+      const children = parsed[t + 1]?.children?.filter(child => !isLinkifyToken(child));
+      // Its runs as export reads them
+      const runs = children?.every(child => child.type === 'text' || child.type === 'html_inline') ? processInlineChildren(children) : [];
+      const line = runs.every(run => run.type === 'text'
+        && !(run.bold || run.italic || run.underline || run.strikethrough || run.superscript || run.subscript))
+        ? markedLine.exec(runs.map(run => run.text).join('')) : null;
       return line && MISSING_KEY_TEXT.test(line[1].trimEnd()) ? [Number(line[2])] : [];
     }));
   }

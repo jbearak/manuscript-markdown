@@ -7677,6 +7677,18 @@ describe('Missing citation keys', () => {
     expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown).toBe(expected);
   });
 
+  test.each([
+    ['a comment', 'P\n\nCitation data for @a<!-- c --> was not found in the bibliography file.\n',
+      'P\n\nCitation data for @a<!-- c --> was not found in the bibliography file.\n'],
+    ['a break', 'P\n\nCitation data for @a<br> was not found in the bibliography file.\n',
+      'P\n\nCitation data for @a\\\n&#32;was not found in the bibliography file.\n'],
+    ['formatting', 'P\n\nCitation data for @a<u> was not found in the bibliography file.\n',
+      'P\n\nCitation data for @a<u> was not found in the bibliography file.</u>\n'],
+  ])('keeps a line like a note with %s, whose HTML export reads as no text of a key\'s', async (_name, md, expected) => {
+    // It was stripped, and the comment, break or formatting with it
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown).toBe(expected);
+  });
+
   test('keeps a line like the note of a key no citation could have', async () => {
     // A key ends at a comma, so it was no note of export's
     const md = 'P\n\nCitation data for @Smith, Alice was not found in the bibliography file.\n';
