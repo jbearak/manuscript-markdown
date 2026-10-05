@@ -2198,8 +2198,10 @@ function joinsHighlight(segment: ContentItem[], i: number, start: number, end: n
  *  what they hold stays whole. Their marks are a highlight's then. */
 function joinHighlights(markdown: string): string {
   if (!markdown.includes(HIGHLIGHT_JOIN_OPEN)) return markdown;
+  // eslint-disable-next-line no-control-regex
   return markdown.replace(/\u000F==(\{[a-z0-9-]+\})?==\u000E(?=[^\u000F]*\u000F==(\{[a-z0-9-]+\})?)/g,
     (seam, color: string | undefined, nextColor: string | undefined) => color === nextColor ? '' : seam)
+    // eslint-disable-next-line no-control-regex
     .replace(/\u000E/g, HIGHLIGHT_OPEN).replace(/\u000F/g, HIGHLIGHT_CLOSE);
 }
 
@@ -2263,11 +2265,14 @@ function resolveEmphasis(markdown: string): string {
   // which would leave none. From where the whitespace starts, so each is
   // read once.
   markdown = joinHighlights(markdown)
+    // eslint-disable-next-line no-control-regex
     .replace(/(?<=[^\s\u0005])([^\S\n]+)\u0006==(?==)/g, (_m, space: string) => '\u0006==' + space)
+    // eslint-disable-next-line no-control-regex
     .replace(/(?<==)==\u0005([^\S\n]+)(?=[^\s\u0006])/g, (_m, space: string) => space + '==\u0005')
     // Whitespace a highlight holds alone next to another's ==, as in
     // ==  ====b=={red}, goes without it, as before, where navigation and the
     // grammar would read no highlight, the other's either
+    // eslint-disable-next-line no-control-regex
     .replace(/(?<==)==\u0005([^\S\n]+)\u0006==(?:\{[a-z0-9-]+\})?|==\u0005([^\S\n]+)\u0006==(?==)/g,
       (_m, before: string | undefined, after: string | undefined) => before ?? after ?? '');
   const closeAt = new Map<number, number>();
@@ -5084,6 +5089,7 @@ function escapeBangBeforeLink(markdown: string, segment: ContentItem[], index: n
  *  built: without the closer of the span it ends with where the item
  *  joins that span (`inSpan`, see inSpanBefore). */
 function escapeAfterHighlight(markdown: string, before: string, inSpan = false): string {
+  // eslint-disable-next-line no-control-regex
   return /^(?:\}|=(?!=[\u0005\u000E])|\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})/.test(markdown)
     && /==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?$/.test(inSpan ? before.slice(-67, -3) : before.slice(-64)) ? '\\' + markdown : markdown;
 }
@@ -5180,6 +5186,7 @@ function appendRevised(
     && (join === 'space' || before.join === 'space'
       ? /\s/.test(before.lastChar) || /^\s/.test(text)
       : canJoinSpans(before.lastChar, text) || canJoinAtHighlight(before, text));
+  // eslint-disable-next-line no-control-regex
   const highlightEnd = /([\u0006\u000F])==(?:\{[a-z0-9-]+\})?$/.exec(text)?.[1];
   if (last && last.end === out.length && revisionsEqual(last.revision, revision) && seamSafe(last)) {
     const joined = out + SPAN_JOIN + wrapWithRevision(text, revision).slice(3);
@@ -5336,6 +5343,7 @@ function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = mar
 /** A close of formatting at the end of Markdown, after the text it holds:
  *  a highlight's or emphasis's, whose marks tell it from text's, or an
  *  underline's or a script's tag */
+// eslint-disable-next-line no-control-regex
 const FORMATTING_CLOSE_AT_END = /(?:[\u0006\u000F]==(?:\{[a-z0-9-]+\})?|\u0004(?:\*\*|\*|~~)|(?<!\\)<\/(?:u|sup|sub)>)$/;
 
 /** Where the text of `markdown` before `end` ends, past the closes of the
