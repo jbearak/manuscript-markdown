@@ -399,7 +399,7 @@ export function renderBibliography(engine: CiteprocEngine): { bibStart: string; 
  */
 export function generateMissingKeysXml(missingKeys: string[]): string {
   return missingKeys.map(key =>
-    '<w:p><w:r><w:t xml:space="preserve">Citation data for @' + escapeXml(key.replace(/\s*\n\s*/g, ' ')) +
+    '<w:p><w:r><w:t xml:space="preserve">Citation data for @' + escapeXml(key.split('\n').map(line => line.trim()).join(' ')) +
     ' was not found in the bibliography file.</w:t></w:r></w:p>'
   ).join('');
 }

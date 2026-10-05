@@ -471,6 +471,14 @@ describe('generateMissingKeysXml', () => {
     expect(xml).toContain('</w:p>');
   });
 
+  it('writes a key\'s line ends as spaces, in linear time', () => {
+    // Its whitespace was read again from each space in it
+    const start = performance.now();
+    const xml = generateMissingKeysXml(['a  \n  b', 'c' + ' '.repeat(200000) + 'd']);
+    expect(xml).toContain('Citation data for @a b was not found');
+    expect(performance.now() - start).toBeLessThan(500);
+  });
+
   it('returns empty string for no missing keys', () => {
     expect(generateMissingKeysXml([])).toBe('');
   });

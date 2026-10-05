@@ -7622,6 +7622,15 @@ describe('Missing citation keys', () => {
     expect(await roundTrip(once)).toBe(once);
   });
 
+  test.each([
+    ['a code block', '```\nCitation data for @a b was not found in the bibliography file.\n```\n'],
+    ['a code block, with a key of one word', '```\nCitation data for @a was not found in the bibliography file.\n```\n'],
+    ['an HTML block', '<div>\nCitation data for @a was not found in the bibliography file.\n</div>\n'],
+  ])('keeps a line like a note in %s', async (_name, md) => {
+    // It was stripped as export's note, though a note is a paragraph
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown).toBe(md);
+  });
+
   test('keeps a line like the note of a key no citation could have', async () => {
     // A key ends at a comma, so it was no note of export's
     const md = 'P\n\nCitation data for @Smith, Alice was not found in the bibliography file.\n';
