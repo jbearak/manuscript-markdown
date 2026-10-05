@@ -4935,6 +4935,8 @@ describe('Word text that reads as Markdown', () => {
     'a ==== b',
     // A citation whose items export gives back otherwise
     '[@a; see_also_x]', '[@a;@b]',
+    // One before a ( in brackets, whose ] closed the outer [ as a link's
+    '[[@a,p. 2](https://e.com)]',
     // An autolink past the 256 characters the check read, or with a
     // no-break space, which markdown-it allows in one
     '<urn:' + 'x'.repeat(300) + '>', '<ab:c\u00a0d>',
