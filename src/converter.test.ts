@@ -2813,7 +2813,7 @@ describe('extractDocumentContent', () => {
     expect(result.markdown).toBe('~~Strike~~ Plain\n');
   });
 
-  test('run boundary hoists trailing whitespace outside highlight delimiters', async () => {
+  test('run boundary keeps trailing whitespace inside highlight delimiters, as Word highlights it', async () => {
     const JSZip = (await import('jszip')).default;
     const zip = new JSZip();
     zip.file('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>');
@@ -2832,7 +2832,7 @@ describe('extractDocumentContent', () => {
 </w:document>`);
     const buf = await zip.generateAsync({ type: 'uint8array' });
     const result = await convertDocx(buf);
-    expect(result.markdown).toBe('==Mark=={green} Plain\n');
+    expect(result.markdown).toBe('==Mark =={green}Plain\n');
   });
 });
 
@@ -2912,11 +2912,13 @@ describe('wrapWithFormatting', () => {
     expect(wrapWithFormatting(' Bold', { ...DEFAULT_FORMATTING, italic: true })).toBe(' *Bold*');
     expect(wrapWithFormatting(' Bold ', { ...DEFAULT_FORMATTING, bold: true, italic: true })).toBe(' ***Bold*** ');
     expect(wrapWithFormatting('Strike ', { ...DEFAULT_FORMATTING, strikethrough: true })).toBe('~~Strike~~ ');
-    expect(wrapWithFormatting(' Mark ', { ...DEFAULT_FORMATTING, highlight: true })).toBe(' ==Mark== ');
-    expect(wrapWithFormatting(' Mark ', { ...DEFAULT_FORMATTING, highlight: true, highlightColor: 'green' })).toBe(' ==Mark=={green} ');
     expect(wrapWithFormatting('   ', { ...DEFAULT_FORMATTING, bold: true })).toBe('   ');
     expect(wrapWithFormatting('   ', { ...DEFAULT_FORMATTING, strikethrough: true })).toBe('   ');
-    expect(wrapWithFormatting('   ', { ...DEFAULT_FORMATTING, highlight: true, highlightColor: 'green' })).toBe('   ');
+    // But a highlight's, which == holds, and Word shows the highlight on
+    expect(wrapWithFormatting(' Mark ', { ...DEFAULT_FORMATTING, highlight: true })).toBe('== Mark ==');
+    expect(wrapWithFormatting(' Mark ', { ...DEFAULT_FORMATTING, highlight: true, highlightColor: 'green' })).toBe('== Mark =={green}');
+    expect(wrapWithFormatting('   ', { ...DEFAULT_FORMATTING, highlight: true, highlightColor: 'green' })).toBe('==   =={green}');
+    expect(wrapWithFormatting('a\\\n', { ...DEFAULT_FORMATTING, highlight: true })).toBe('==a==\\\n');
   });
 
   // Property 1: Formatting wrapping produces correct delimiters
@@ -2931,7 +2933,8 @@ describe('wrapWithFormatting', () => {
 
           const result = wrapWithFormatting(text, fmt);
 
-          if ((formatType === 'bold' || formatType === 'italic' || formatType === 'strikethrough' || formatType === 'highlight') && text.trim().length === 0) {
+          // A highlight holds whitespace alone too, which Word shows it on
+          if ((formatType === 'bold' || formatType === 'italic' || formatType === 'strikethrough') && text.trim().length === 0) {
             expect(result).toBe(text);
             return;
           }
@@ -2982,7 +2985,8 @@ describe('wrapWithFormatting', () => {
           if (
             !fmt.code
             && text.trim().length === 0
-            && (fmt.bold || fmt.italic || fmt.strikethrough || fmt.highlight)
+            && (fmt.bold || fmt.italic || fmt.strikethrough)
+            && !fmt.highlight
             && !fmt.underline
             && !fmt.superscript
             && !fmt.subscript
@@ -3411,8 +3415,9 @@ describe('buildMarkdown', () => {
     ];
 
     const result = buildMarkdown(content, comments, { alwaysUseCommentIds: true });
-    // The highlight wraps both runs that have it, producing two ==...== regions
-    expect(result).toContain('==before== ');
+    // The highlight wraps both runs that have it, producing two ==...== regions,
+    // with the space Word highlights in the first
+    expect(result).toContain('==before ==');
     expect(result).toContain('==overlap==');
     // Comment boundary markers are present
     expect(result).toContain('{#1}');
@@ -5697,9 +5702,9 @@ describe('Word text that reads as Markdown', () => {
   });
 
   test('keeps a { before the space at the end of an underlined highlight as text', async () => {
-    // The highlight's == go inside the space, as in a highlight alone
+    // The { before the space and the highlight's closing ==
     const markdown = await importText('A.\n\n<u>==XX==</u>b\n\nB.', '{ ');
-    expect(markdown).toContain('<u>==\\{== </u>b');
+    expect(markdown).toContain('<u>==\\{ ==</u>b');
     expect(await exported(markdown)).toEqual({ text: ['A.', '{ b', 'B.'], formatted: true });
   });
 
@@ -9288,6 +9293,301 @@ describe('Markdown across Word runs', () => {
     const start = performance.now();
     buildMarkdown(items as ContentItem[], new Map());
     expect(performance.now() - start).toBeLessThan(3000);
+  });
+});
+
+describe('Highlights across runs', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
+  const fromWord = async (runs: string, md = 'XX') => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const broken = xml.replace(/<w:r>(?:(?!<w:r>).)*?<w:t[^>]*>XX<\/w:t><\/w:r>/s, runs);
+    expect(broken).not.toBe(xml);
+    zip.file('word/document.xml', broken);
+    return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
+  };
+  const highlighted = (text: string, rPr = '', color = 'yellow') => '<w:r><w:rPr>' + rPr + '<w:highlight w:val="' + color + '"/></w:rPr><w:t xml:space="preserve">' + text + '</w:t></w:r>';
+  const plain = (text: string) => '<w:r><w:t xml:space="preserve">' + text + '</w:t></w:r>';
+
+  test.each([
+    '==a *b* c==\n', '==a **b** d=={red}\n', '==a <u>b</u> <sup>c</sup>==\n', '**==a==** b\n', '*==a==* ==b==\n',
+    // Code, which navigation reads no highlight around, and another color,
+    // whose == the joined highlight's would run into, keep theirs apart
+    '==a== ==`b`== ==c==\n', '==a== *==b==* ==c== ==d=={red}\n',
+  ])('keeps %j as it is', async (md) => {
+    // Each run had a highlight of its own, so the spaces between them,
+    // which Word highlighted, lost theirs
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    ['a highlighted space at its end', highlighted('a ') + '<w:r><w:t>b</w:t></w:r>', '==a ==b\n'],
+    ['a highlighted space at its start', '<w:r><w:t>a</w:t></w:r>' + highlighted(' b'), 'a== b==\n'],
+    ['highlighted spaces alone', '<w:r><w:t>a</w:t></w:r>' + highlighted('  ') + '<w:r><w:t>b</w:t></w:r>', 'a==  ==b\n'],
+    ['runs highlighted alike', highlighted('a ') + highlighted('b', '<w:i/>') + highlighted(' c'), '==a *b* c==\n'],
+    // Whose edge ~, which a highlight inside the ~~ kept from them, the ~~
+    // read as theirs once the highlight went around them
+    ['struck text with a ~ at its edge', highlighted('a ') + highlighted('~', '<w:strike/>'), '==a ~~\\~~~==\n'],
+  ])('keeps Word\'s highlight with %s', async (_name, runs, md) => {
+    // Its edge spaces went outside it, where Word showed them without it
+    expect(await fromWord(runs)).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    ['a }', highlighted('a ') + plain('}'), '==a ==\\}\n'],
+    ['a } with no space before it', highlighted('a') + plain('}'), '==a==\\}\n'],
+    ['a color in braces', highlighted('a ') + plain('{red}'), '==a ==\\{red}\n'],
+    ['a color in braces with no space before it', highlighted('a') + plain('{red}'), '==a==\\{red}\n'],
+  ])('escapes %s after a highlight', async (_name, runs, md) => {
+    // Its == read them as its own: ==a==} as CriticMarkup's ==}, which the
+    // preview and navigation read as no highlight, and ==a=={red} as its
+    // color, which lost the text
+    expect(await fromWord(runs)).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    'P {====a ==\\{red}==}{>>c<<} Q\n', '{~~==a ==\\{red}~>x~~}\n', '{++==a ==\\{red}++}\n', '{--==a ==\\}--}\n',
+  ])('keeps the escape after a highlight in %j', async (md) => {
+    // In a comment, a substitution or a tracked change, which the escape
+    // read the Markdown before it without
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    '{++==a ==b++}\n', '{++a== b==++}\n', '{--==a ==b--}\n', '{++==a==b++}\n', '{++==a *b*==++}\n', '{++a==b *c*==++}\n',
+  ])('keeps %j one tracked change', async (md) => {
+    // Its runs' spans didn't join at a highlight's ==, so it came back as
+    // {++==a ==++}{++b++}, and ==a *b*== as two highlights
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    ['before another color\'s', highlighted('  ') + highlighted('b', '', 'red'), 'XX', '&#32;&#32;==b=={red}\n'],
+    ['after another color\'s', highlighted('a', '', 'red') + highlighted('  ') + highlighted('b', '', 'blue'), 'XX', '==a=={red}  ==b=={blue}\n'],
+    ['at the end of a comment\'s text', highlighted('a', '', 'red') + highlighted('  '), 'P {==XX==}{>>c<<} Q', 'P {====a=={red}  ==}{>>c<<} Q\n'],
+    ['at the start of a comment\'s text', highlighted('  ') + highlighted('a', '', 'red'), 'P {==XX==}{>>c<<} Q', 'P {==  ==a=={red}==}{>>c<<} Q\n'],
+  ])('writes highlighted spaces alone without the highlight %s', async (_name, runs, template, md) => {
+    // Their == ran into the other highlight's, as in ==  ====b=={red},
+    // which navigation and the grammar read as no highlight, the other's
+    // either
+    expect(await fromWord(runs, template)).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('keeps a highlight\'s edge space in a comment beside another color\'s', async () => {
+    const md = 'P {====a== ==  =={red}==}{>>c<<} Q\n';
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    ['a }', highlighted('a ') + highlighted('}', '<w:b/>'), '==a ==**==}==**\n'],
+    ['an =', highlighted('a ') + highlighted('b', '<w:i/>') + highlighted('=c'), '==a ==*==b==*===c==\n'],
+  ])('joins no highlight through %s', async (_name, runs, md) => {
+    // Which navigation and the grammar read no highlight around, so they
+    // read none around its neighbours' text either
+    expect(await fromWord(runs)).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('reads a highlighted run of many line breaks in linear time', async () => {
+    // A regex with a lazy middle found the breaks at its edges, which past
+    // some thousands of them found no match and threw
+    const start = performance.now();
+    expect(await fromWord('<w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>a</w:t>' + '<w:br/>'.repeat(16000) + '<w:t>b</w:t></w:r>'))
+      .toBe('==a' + '\\\n'.repeat(16000) + 'b==\n');
+    expect(performance.now() - start).toBeLessThan(3000);
+  });
+
+  test('keeps a highlight\'s edge space outside it before a comment\'s ==}', async () => {
+    // Which export read as one highlight in the comment, ==a=={red}==b ==
+    const md = '{====a=={red}==b== ==}{>>c<<}\n';
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    ['an =', highlighted('b') + plain('=c'), '==b==\\=c\n'],
+    ['an = after an edge space', highlighted('a ') + plain('=b'), '==a ==\\=b\n'],
+    ['an = after a joined highlight', highlighted('a ') + highlighted('b', '<w:b/>') + plain('=c'), '==a **b**==\\=c\n'],
+    ['==', highlighted('b') + plain('==c'), '==b==\\==c\n'],
+  ])('escapes %s after a highlight', async (_name, runs, md) => {
+    // Which navigation and the grammar read with the highlight's ==, as in
+    // ==b===c, as no highlight
+    expect(await fromWord(runs)).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    '{=={++==a *b*==++}==}{>>c<<}\n', '{~~==a *b*==~>x~~}\n', '{~~x~>==a *b*==~~}\n',
+  ])('joins the highlights of runs alike in %j', async (md) => {
+    // In a comment's text or a substitution's side, each run had a
+    // highlight of its own, and an insertion's split in two at them
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('reads many runs in one tracked change in linear time', async () => {
+    // The escape after a highlight read the Markdown before each run, which
+    // copied all of it. Four times the runs take about four times as long,
+    // not sixteen, however fast the machine is.
+    const time = async (runs: number) => {
+      const md = '{++' + Array.from({ length: runs }, () => 'a *b* ').join('').trimEnd() + '++}\n';
+      const docx = (await convertMdToDocx(md)).docx;
+      const start = performance.now();
+      expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(md);
+      return performance.now() - start;
+    };
+    const small = await time(10000);
+    expect(await time(40000) / small).toBeLessThan(8);
+  });
+
+  test('writes a paragraph of many comments in linear time', () => {
+    // Each comment's text read which highlights join from its start to the
+    // paragraph's end, and kept what it read
+    const n = 20000;
+    const comments = new Map(Array.from({ length: n }, (_, k) => [String(k), { author: 'A', text: 'c', date: '' }]));
+    const items = Array.from({ length: 2 * n }, (_, k) => (
+      { type: 'text', text: k % 2 ? 'x' : ' a ', commentIds: new Set(k % 2 ? [String((k - 1) / 2)] : []), formatting: DEFAULT_FORMATTING }));
+    const start = performance.now();
+    buildMarkdown(items as ContentItem[], comments);
+    expect(performance.now() - start).toBeLessThan(3000);
+  });
+
+  test('reads many runs highlighted alike in linear time', async () => {
+    // Each run's highlight joins its neighbours' if theirs do, which is
+    // read for the whole range at once
+    const md = '==' + Array.from({ length: 20000 }, (_, k) => k % 2 ? '*a*' : 'b ').join('') + '==\n';
+    const docx = (await convertMdToDocx(md)).docx;
+    const start = performance.now();
+    expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(md);
+    expect(performance.now() - start).toBeLessThan(3000);
+  });
+
+  test.each([
+    ['another color\'s highlight', highlighted('a ') + highlighted('b', '', 'red'), '==a== ==b=={red}\n'],
+    ['another color\'s highlight before it', highlighted('a') + highlighted(' b', '', 'red'), '==a== ==b=={red}\n'],
+  ])('keeps a highlight\'s edge space outside it next to %s', async (_name, runs, md) => {
+    // Whose = ran into its ==, as in ==a ====b=={red}, which navigation and
+    // the grammar read as no highlight
+    expect(await fromWord(runs)).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  const run = (text: string, formatting: Partial<RunFormatting> = {}, revision?: RevisionInfo) =>
+    ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting }, ...(revision ? { revision } : {}) }) as ContentItem;
+  const citation = (formatting: Partial<RunFormatting> = {}, revision?: RevisionInfo) =>
+    ({ type: 'citation', text: '(Doe 2020)', pandocKeys: ['@doe2020'], commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting }, ...(revision ? { revision } : {}) }) as ContentItem;
+  const inserted: RevisionInfo = { type: 'addition', author: 'A', date: '2024-01-01T00:00:00Z' };
+
+  test.each([
+    ['a highlight that ends in a space', [run('Seen '), run('a ', { highlight: true }), citation()], 'Seen ==a ==[@doe2020]'],
+    ['bold around a highlight that ends in a space', [run('Seen '), run('a ', { highlight: true, bold: true }), citation()], 'Seen **==a ==**[@doe2020]'],
+    ['an inserted highlight that ends in a space', [run('Seen '), run('a ', { highlight: true }, inserted), citation({}, inserted)], 'Seen {++==a ==++}{++[@doe2020]++}'],
+    ['underlined text that ends in a space', [run('Seen '), run('a ', { underline: true }), citation()], 'Seen <u>a </u>[@doe2020]'],
+  ])('puts no second space before a citation after %s', (_name, items, md) => {
+    // The space before the citation read the formatting's close as the text
+    // before it, and added one
+    expect(buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim()).toBe(md);
+  });
+
+  test.each([
+    ['', [run('Seen'), citation({ highlight: true })], 'Seen ==[@doe2020]=='],
+    [' in a substitution', [run('Seen'), run('x', {}, { ...inserted, type: 'deletion' }), citation({ highlight: true }, inserted)], 'Seen{~~x~> ==[@doe2020]==~~}'],
+  ])('puts the space before a highlighted citation outside its highlight%s', (_name, items, md) => {
+    // The highlight held it, as it holds its edge spaces, so export
+    // highlighted a space Word doesn't have
+    expect(buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim()).toBe(md);
+  });
+
+  test.each([
+    ['struck', [run('https://', { highlight: true, strikethrough: true }), run(' b', { highlight: true })], '==~~https\\://~~ b=='],
+    ['before its host', [run('https://', { highlight: true }), run('e.com', { highlight: true })], '==https\\://e.com=='],
+  ])('escapes the scheme of a URL in a highlight that joins the runs after it, %s', async (_name, items, md) => {
+    // Export's linkify read the joined highlight's text on past the run, as
+    // https://~~, which took the strikethrough's closer, or https://e.com
+    const markdown = buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim();
+    expect(markdown).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim()).toBe(md);
+  });
+
+  const noteRef = { type: 'footnote_ref', noteId: '1', noteKind: 'footnote', commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, highlight: true } } as ContentItem;
+
+  test.each([
+    ['a highlight', [run('http://'), run(' b', { highlight: true })], 'http\\://== b=='],
+    ['a highlight after text', [run('x ftp://'), run('\tb', { highlight: true, highlightColor: 'red' })], 'x ftp\\://==\tb=={red}'],
+    ['struck text in a highlight', [run('https://'), run(' b', { highlight: true, strikethrough: true })], 'https\\://~~== b==~~'],
+    ['highlighted code', [run('http://'), run(' b', { highlight: true, code: true })], 'http\\://==` b`=='],
+    ['highlighted superscript', [run('http://'), run(' b', { highlight: true, superscript: true })], 'http\\://==<sup> b</sup>=='],
+    ['runs highlighted alike', [run('http://'), run(' b', { highlight: true, bold: true }), run('c', { highlight: true })], 'http\\://== **b**c=='],
+    ['runs highlighted alike with no space', [run('http://'), run('b', { highlight: true, underline: true }), run('c', { highlight: true })], 'http\\://==<u>b</u>c=='],
+    ['a highlighted note reference', [run('http://'), noteRef], 'http\\://==[^1]=='],
+    ['bold text and a note reference highlighted alike', [run('http://'), run('b', { highlight: true, bold: true }), noteRef], 'http\\://==**b**[^1]=='],
+  ])('escapes the scheme of a URL before %s, whose == goes before the text and the space at its start', async (_name, items, md) => {
+    // Export's linkify read the == on with the URL, as http://==, which took
+    // the highlight's opener, so the highlight's text lost it and came back
+    // with its closer as text, as http://== b\==
+    const markdown = buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim();
+    expect(markdown).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim()).toBe(md);
+  });
+
+  test.each([
+    ['a table\'s cell', '| h |\n|---|\n| XX |', '| h |\n| --- |\n| http\\://== b== |\n'],
+    ['a comment\'s range', 'P {==XX==}{>>c<<} Q', 'P {==http\\://== b====}{>>c<<} Q\n'],
+    ['a substitution', 'P {~~x~>XX~~} Q', 'P {~~x~>http\\://== b==~~} Q\n'],
+  ])('escapes the scheme of a URL before a highlight\'s space in %s', async (_name, template, md) => {
+    expect(await fromWord(plain('http://') + highlighted(' b'), template)).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    ['emphasis around it', [run('http://'), run(' b', { highlight: true, bold: true })], 'http://**== b==**'],
+    ['a space before it', [run('http://'), run(' b', { bold: true })], 'http:// **b**'],
+  ])('writes the scheme of a URL before a highlight or emphasis with %s as it is', (_name, items, md) => {
+    // Whose * ends the URL before the highlight's ==, as the space does
+    // before emphasis
+    expect(buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim()).toBe(md);
+  });
+
+  test.each([
+    ['a ~~ inside emphasis, which keeps it', [run('https://', { highlight: true, italic: true, strikethrough: true }), run('example.com', { highlight: true })],
+      '==<i>~~https\\://~~</i>example.com=='],
+    ['a ~~ inside emphasis, outside a highlight', [run('https://', { italic: true, strikethrough: true }), run('example.com')], '<i>~~https\\://~~</i>example.com'],
+    ['an escaped _ in a highlight', [run('https://', { highlight: true }), run('_', { highlight: true, strikethrough: true })], '==https\\://~~\\_~~=='],
+    ['an escaped _', [run('https://'), run('a_', { strikethrough: true })], 'https\\://~~a\\_~~'],
+    ['a highlight\'s color', [run('https://'), run('e.com', { highlight: true, highlightColor: 'red' }), run('e_x')], 'https\\://==e.com=={red}e_x'],
+    ['a ~~ that can\'t close, a tag', [run('https://'), run('~-', { code: true }), run('e-', { strikethrough: true }), run('Z')], 'https\\://`~-`<s>e-</s>Z'],
+    ['a ~~ that runs into the one before it, a tag', [run('x http://', { strikethrough: true }), run('e_x', { strikethrough: true, highlight: true }), run('Z')],
+      '~~x http\\://~~<s>==e_x==</s>Z'],
+    ['highlights that don\'t join', [run('http://'), run('~-', { highlight: true }), run('c ', { highlight: true, italic: true }), run('~', { highlight: true, code: true }), run('Z')],
+      'http\\://==~-==*==c ==*==`~`==Z'],
+  ])('escapes the scheme of a URL whose host goes on as the runs after it write it, past %s', async (_name, items, md) => {
+    // The host was read from the runs' text and delimiters, not their
+    // Markdown: with a ~~ as a tag where it wasn't, or as one where it was,
+    // which ends the host, as an escape's backslash or a color's { does, and
+    // after a _, which keeps a host from ending, linkify found none
+    const markdown = buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim();
+    expect(markdown).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim()).toBe(md);
+  });
+
+  test.each([
+    ['a space at the end of its run', [run('x http:// ', { highlight: true }), run('d e', { highlight: true, strikethrough: true }), run('Z')], '==x http:// ~~d e~~==Z'],
+    ['a ~~ that closes after it, a tag', [run('https://', { strikethrough: true }), run('example.com')], '<s>https://</s>example.com'],
+  ])('writes the scheme of a URL before %s as it is', (_name, items, md) => {
+    expect(buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim()).toBe(md);
+  });
+
+  const keyless = (commentIds: string[] = [], revision?: RevisionInfo) =>
+    ({ type: 'citation', text: '{1}', pandocKeys: [], commentIds: new Set(commentIds), formatting: DEFAULT_FORMATTING, ...(revision ? { revision } : {}) }) as ContentItem;
+
+  test.each([
+    ['', [run('Seen '), run('a ', { highlight: true }), keyless()], 'Seen ==a ==\\{1}'],
+    [' in a comment\'s range', [run('Seen '), { ...run('a ', { highlight: true }), commentIds: new Set(['0']) }, keyless(['0'])], 'Seen {====a ==\\{1}==}{>>@A | n<<}'],
+    [' in a substitution', [run('Seen '), run('x', {}, { ...inserted, type: 'deletion' }), run('a ', { highlight: true }, inserted), keyless([], inserted)], 'Seen {~~x~>==a ==\\{1}~~}'],
+  ])('escapes the text of a citation without keys after a highlight, whose == would take it as a color%s', (_name, items, md) => {
+    // Export read ==a =={1} as a highlight colored 1, without the text
+    expect(buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map([['0', { author: 'A', text: 'n', date: '' }]])).trim()).toBe(md);
   });
 });
 

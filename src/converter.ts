@@ -666,46 +666,80 @@ export class RunsAfter {
 
   /** The Markdown the run before these and these write after its text, as
    *  far as a URL's host at its end could go on into: its closing
-   *  delimiters, and each run's text in its own, to the first space or /
-   *  in it, which ends a host, and a space for anything else, as a tracked
-   *  change's or a comment's delimiters, a strikethrough's tag, or the
-   *  whitespace at a run's edge, which goes outside its delimiters, which
-   *  no host holds, at most `limit` characters of text in all. '' where
-   *  the runs aren't known, or the run before is a highlight's, whose text
-   *  export reads apart. */
-  hostAfter(limit: number): string {
-    if (!this.runs || this.prefix) return '';
-    const { items, at } = this.runs;
+   *  delimiters, and each run's Markdown as markedFormatting writes it,
+   *  escapes, whitespace and all, to the first space or / in it, which ends
+   *  a host, and a space for anything else, as a tracked change's or a
+   *  comment's delimiters, or a highlighted note reference or citation
+   *  without keys, after its ==, at most `limit` characters in all. Where a
+   *  ~~ that opens a run may be written as a tag, which ends a host (see
+   *  resolveEmphasis), as where it runs into the ~~ before it, the Markdown
+   *  up to it as well. None where the runs aren't known. A highlight's text
+   *  export reads apart, but for the runs highlighted alike after it, which
+   *  it may join (see joinHighlights), so they're read without it. */
+  hostAfter(limit: number): string[] {
+    if (!this.runs || this.prefix) return [];
+    const { items, at, offsets } = this.runs;
     const self = items[at - 1];
-    if (self?.type !== 'text' || self.href || self.formatting.highlight) return '';
-    let previous: ContentItem & { type: 'text' } = self;
-    let markdown = '';
-    let read = 0;
-    for (let k = at; k <= items.length && read < limit; k++) {
+    if (self?.type !== 'text' || self.href) return [];
+    const color = highlightColorOf(self);
+    const formatting = (run: ContentItem & { type: 'text' }): RunFormatting => color ? { ...run.formatting, highlight: false } : run.formatting;
+    // Whitespace at its end, which its text is read without (see
+    // markedFormatting), goes after the delimiters it's outside of
+    if (/\s$/.test(self.text)) return [formattingDelimiters(formatting(self))[1] + ' '];
+    // Whether the highlight of `run`, at k, goes around the rest of its
+    // formatting, its == first, where it joins the runs beside it (see
+    // joinsHighlight) or is one with a note reference or citation (see
+    // renderHighlightGroup), read from the paragraph's start as from the
+    // start of the range it's rendered in: the run before these, which has
+    // no highlight where this is read, joins none.
+    const around = (run: ContentItem & { type: 'text' }, k: number): boolean =>
+      joinsHighlight(items, k, 0, items.length) || highlightGroupEnd(items, k, items.length, run.commentIds) > k;
+    // The runs' Markdown, with its marks, to the first that ends a host. Each
+    // reads the runs after it without their runs, so this reads no further.
+    let written = '';
+    let end = '';
+    for (let k = at; written.length < limit; k++) {
       const item = items[k];
-      const next: (ContentItem & { type: 'text' }) | undefined = item?.type === 'text' && !item.href && revisionsEqual(item.revision, previous.revision)
-        && commentSetsEqual(item.commentIds, previous.commentIds) ? item : undefined;
-      const open = next ? formattingDelimiters(next.formatting)[0] : '';
-      const following = next ? open + next.text : ' ';
-      // A ~~ that would close after punctuation, as after https://, before
-      // a letter, or open before punctuation after one, is a tag (see
-      // resolveEmphasis)
-      const tag = (inner: string, outer: string) => flankClass(inner.charCodeAt(0)) === FLANK_PUNCT
-        && flankClass(outer.charCodeAt(0)) === FLANK_OTHER;
-      const closing = formattingDelimiters(previous.formatting)[1];
-      const space = /\s$/.test(previous.text);
-      if (closing.startsWith('~~') && !space && tag(previous.text.slice(-1), following)) return markdown + ' ';
-      markdown += closing;
-      if (!next || space || /^\s/.test(next.text)) return markdown + ' ';
-      if (open.endsWith('~~') && tag(next.text, (markdown || previous.text).slice(-1))) return markdown + ' ';
-      const part = next.text.slice(0, limit - read);
-      const end = part.search(/[\s/]/);
-      if (end !== -1) return markdown + open + part.slice(0, end + 1);
-      markdown += open + part;
-      read += part.length;
-      previous = next;
+      if (item?.type !== 'text' || item.href || !revisionsEqual(item.revision, self.revision)
+        || !commentSetsEqual(item.commentIds, self.commentIds) || (color && highlightColorOf(item) !== color)) {
+        // A highlighted note reference's or citation's ==, but for one with
+        // keys, which a space goes before (see citationSeparator)
+        const highlighted = !color && (item?.type === 'footnote_ref' || (item?.type === 'citation' && item.pandocKeys.length === 0))
+          && !!highlightColorOf(item) && revisionsEqual(item.revision, self.revision) && commentSetsEqual(item.commentIds, self.commentIds);
+        end = (highlighted ? '==' : '') + ' ';
+        break;
+      }
+      const fmt = formatting(item);
+      const run = markedFormatting(item.text, fmt, false, new RunsAfter(this.index, offsets[k + 1]), false, !color && !!fmt.highlight && around(item, k));
+      written += run;
+      if (/[\s/]/.test(run)) break;
     }
-    return markdown;
+    const markdown = formattingDelimiters(formatting(self))[1] + joinHighlights(written) + end;
+    // A ~~ that would close after punctuation, as after https://, before a
+    // letter, or open before punctuation after one, is a tag, where it's
+    // marked, outside emphasis, which keeps it as it is, as in
+    // <i>~~https://~~</i>
+    const tag = (inner: string, outer: string) => flankClass(inner.charCodeAt(0)) === FLANK_PUNCT
+      && flankClass(outer.charCodeAt(0)) === FLANK_OTHER;
+    const own = formatting(self);
+    if (markdown.startsWith('~~') && !own.italic && !own.bold && tag(self.text.slice(-1), markdown.slice(2))) return [];
+    const ends: string[] = [];
+    let host = '';
+    for (let i = 0; i < markdown.length && host.length < limit; i++) {
+      const c = markdown[i];
+      if (/[\s/]/.test(c)) return [...ends, host + c];
+      if (c === EMPHASIS_OPEN['~~']) {
+        // One that can't open is a tag, and one that can may be, as where
+        // it can't close
+        let inner = i + 1;
+        while (markdown[inner] === '~') inner++;
+        if (tag(markdown[inner] ?? ' ', i >= 3 ? markdown[i - 3] : self.text.slice(-1))) return [...ends, host.slice(0, -2) + ' '];
+        ends.push(host.slice(0, -2) + ' ');
+      } else if (c.charCodeAt(0) > 6) {
+        host += c;
+      }
+    }
+    return [...ends, host];
   }
 }
 
@@ -940,11 +974,11 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
     const colonsIn = (markdown: string) => [...linkifyMatches(markdown).map(link => link.schema.endsWith(':') && link.schema !== 'mailto:' ? link.index + link.schema.length - 1 : markdown.indexOf('@', link.index)), ...linkifiedColons(markdown)];
     const colons = colonsIn(markdown);
     // A URL whose host goes on in the runs after, as https:// before struck
-    // e.com, where the delimiters between, as ~~, don't end it
+    // e.com, where the delimiters between, as ~~, don't end it, in any way
+    // they may be written
     const scheme = markdown.lastIndexOf('://');
     if (after && scheme !== -1 && !/[\s/]/.test(markdown.slice(scheme + 3))) {
-      const host = after.hostAfter(HOST_LOOKAHEAD);
-      if (host) colons.push(...colonsIn(markdown + host).filter(colon => colon < markdown.length));
+      for (const host of after.hostAfter(HOST_LOOKAHEAD)) colons.push(...colonsIn(markdown + host).filter(colon => colon < markdown.length));
     }
     for (const colon of colons) {
       const at = from.get(colon);
@@ -1988,12 +2022,21 @@ function markdownHighlightColor(fmt: RunFormatting): string | undefined {
   return fmt.highlightColor ? resolveMarkdownColor(fmt.highlightColor) : undefined;
 }
 
-/** `markdown` in a highlight of a Markdown color: ==a==, or ==a=={red}. */
-function wrapHighlight(markdown: string, color: string | undefined): string {
-  const [open, close] = ['==' + HIGHLIGHT_OPEN, HIGHLIGHT_CLOSE + '=='];
-  return color && color !== 'yellow'
-    ? wrapMarkdownDelimited(markdown, open, close, '{' + color + '}')
-    : wrapMarkdownDelimited(markdown, open, close);
+/** `markdown` in a highlight of a Markdown color: ==a==, or ==a=={red}. The
+ *  highlight holds the whitespace at its edges, which Word shows it on, as
+ *  == reads as a highlight next to whitespace too, but not line breaks,
+ *  which emphasis keeps out (see wrapMarkdownDelimited). One that `joins`
+ *  its neighbour's takes marks of its own (see joinHighlights). */
+function wrapHighlight(markdown: string, color: string | undefined, joins = false): string {
+  // The line breaks at its edges, from its ends, as a regex with a lazy
+  // middle would scan the text for each
+  let start = 0;
+  while (markdown.startsWith('\\\n', start)) start += 2;
+  let end = markdown.length;
+  while (end - 2 >= start && markdown.startsWith('\\\n', end - 2)) end -= 2;
+  if (start === end) return markdown;
+  return markdown.slice(0, start) + '==' + (joins ? HIGHLIGHT_JOIN_OPEN : HIGHLIGHT_OPEN) + markdown.slice(start, end)
+    + (joins ? HIGHLIGHT_JOIN_CLOSE : HIGHLIGHT_CLOSE) + '==' + (color && color !== 'yellow' ? '{' + color + '}' : '') + markdown.slice(end);
 }
 
 /** `text` as Markdown with Word's formatting. `lineStart` says the text
@@ -2005,8 +2048,9 @@ export function wrapWithFormatting(text: string, fmt: RunFormatting, lineStart =
 }
 
 /** A run's Markdown, as wrapWithFormatting writes it, with its outermost
- *  bold, italic or strikethrough marked for resolveEmphasis. */
-function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, after?: RunsAfter, blockStart = lineStart): string {
+ *  bold, italic or strikethrough marked for resolveEmphasis, and its
+ *  highlight around the rest where `highlightOuter` (see joinsHighlight). */
+function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, after?: RunsAfter, blockStart = lineStart, highlightOuter = false): string {
   let result = text;
 
   // Apply in reverse nesting order (innermost to outermost)
@@ -2015,7 +2059,7 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
     // A line break, which a code span can't hold, goes between spans of the
     // text on each side of it
     if (text.includes('\\\n')) {
-      return text.split('\\\n').map(part => part && markedFormatting(part, fmt, lineStart, after, blockStart)).join('\\\n');
+      return text.split('\\\n').map(part => part && markedFormatting(part, fmt, lineStart, after, blockStart, highlightOuter)).join('\\\n');
     }
     // Find the longest run of consecutive backticks in the text
     let maxRun = 0;
@@ -2035,7 +2079,7 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
     result = needsPadding ? `${fence} ${result} ${fence}` : `${fence}${result}${fence}`;
     // Code keeps its formatting, which **`code`** and ==`code`== export,
     // but for a highlight that an == in it would close
-    return wrapFormatting(result, fmt.highlight && text.includes('==') ? { ...fmt, highlight: false } : fmt);
+    return wrapFormatting(result, fmt.highlight && text.includes('==') ? { ...fmt, highlight: false } : fmt, highlightOuter);
   }
 
   // Escape markdown-sensitive characters so they round-trip faithfully.
@@ -2054,8 +2098,9 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
   const keys = readsCitations ? new Set<number>() : undefined;
   let core = escapeSensitiveHtmlLikeTags(escapeMarkdownChars(edges[2], lineStart && !delimited, after, keys), keys);
   // A ~ at the edge of struck text would join the ~~ around it, which
-  // reads ~~~a~~ as ~ and struck a, where nothing comes between them
-  if (fmt.strikethrough && !fmt.superscript && !fmt.subscript && !fmt.highlight && !fmt.underline) {
+  // reads ~~~a~~ as ~ and struck a, where nothing comes between them, as a
+  // highlight does inside them, but not one around them (`highlightOuter`)
+  if (fmt.strikethrough && !fmt.superscript && !fmt.subscript && (!fmt.highlight || highlightOuter) && !fmt.underline) {
     core = core.replace(/^~/, '\\~').replace(/((?:^|[^\\])(?:\\\\)*)~$/, (_m, before: string) => before + '\\~');
   }
   const escaped = edges[1] + core + edges[3];
@@ -2070,12 +2115,12 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
   // keeps from it, as a reference
   // The backslash of an escaped =, not one of an escaped backslash's
   if (fmt.highlight && /==|=\s*$/.test(text)) result = result.replace(/((?:\\\\)*)\\?=/g, (_m, pairs: string) => pairs + '&#61;');
-  return wrapFormatting(result, fmt);
+  return wrapFormatting(result, fmt, highlightOuter);
 }
 
 /** `markdown`, a run's text, in the tags and delimiters of its formatting
  *  `fmt`, innermost first, but for code, whose backticks are its own */
-function wrapFormatting(markdown: string, fmt: RunFormatting): string {
+function wrapFormatting(markdown: string, fmt: RunFormatting, highlightOuter = false): string {
   let result = markdown;
   // If both superscript and subscript are true, superscript takes precedence
   if (fmt.superscript) {
@@ -2083,12 +2128,81 @@ function wrapFormatting(markdown: string, fmt: RunFormatting): string {
   } else if (fmt.subscript) {
     result = `<sub>${result}</sub>`;
   }
-  if (fmt.highlight) result = wrapHighlight(result, markdownHighlightColor(fmt));
+  if (fmt.highlight && !highlightOuter) result = wrapHighlight(result, markdownHighlightColor(fmt));
   if (fmt.underline) result = `<u>${result}</u>`;
   if (fmt.strikethrough) result = wrapEmphasis(result, '~~', !fmt.italic && !fmt.bold);
   if (fmt.italic) result = wrapEmphasis(result, '*', !fmt.bold);
   if (fmt.bold) result = wrapEmphasis(result, '**');
+  // A highlight that joins its neighbour's goes around the rest, so that
+  // they join in one (see joinHighlights)
+  if (fmt.highlight && highlightOuter) result = wrapHighlight(result, markdownHighlightColor(fmt), true);
   return result;
+}
+
+/** By segment, and range of it, whether the highlight of each item in it
+ *  joins (see joinsHighlight) */
+const highlightJoins = new WeakMap<ContentItem[], Map<string, boolean[]>>();
+
+/** Whether the highlight of the text item at `i` joins its neighbours' in
+ *  segment[start, end): it's one of two or more side by side highlighted
+ *  alike, with nothing between them in Markdown, in the same comments and
+ *  revision, outside a link, and not a line break, which goes outside a
+ *  highlight, nor code, which navigation reads no highlight around. Their
+ *  highlight goes around the rest of their formatting then; one alone
+ *  keeps it inside, as **==a==** has it, as do they all next to a
+ *  highlight of its own, as of another color, which one around the rest
+ *  would run into, as in ==a====**b**c=={red}. For the range at once, so
+ *  each run is read once. */
+function joinsHighlight(segment: ContentItem[], i: number, start: number, end: number): boolean {
+  let byRange = highlightJoins.get(segment);
+  if (!byRange) highlightJoins.set(segment, byRange = new Map());
+  const key = start + ':' + end + ':' + segment.length;
+  let joins = byRange.get(key);
+  if (!joins) {
+    const joinable = (item: ContentItem | undefined): item is ContentItem & { type: 'text' } =>
+      item?.type === 'text' && !!item.formatting.highlight && !item.href && item.text !== '\\\n' && !item.formatting.code
+      // A } or =, which navigation and the grammar read no highlight
+      // around, as they would then read none around its neighbours' text
+      && !/[}=]/.test(item.text);
+    const alike = (item: ContentItem & { type: 'text' }, other: ContentItem | undefined): boolean => joinable(other)
+      && other.formatting.highlightColor === item.formatting.highlightColor
+      && commentSetsEqual(other.commentIds, item.commentIds) && revisionsEqual(other.revision, item.revision);
+    // Highlighted otherwise, with nothing between them, as a tracked
+    // change's or a comment's delimiters or a link's brackets would be
+    const abuts = (item: ContentItem & { type: 'text' }, other: ContentItem | undefined): boolean => !!other
+      && 'formatting' in other && !!other.formatting?.highlight && !('href' in other && other.href)
+      && !(other.type === 'text' && other.text === '\\\n')
+      && commentSetsEqual(other.commentIds, item.commentIds) && revisionsEqual(other.revision, item.revision);
+    joins = new Array<boolean>(end - start).fill(false);
+    for (let k = start; k < end;) {
+      const item = segment[k];
+      let last = k;
+      if (joinable(item)) {
+        while (last + 1 < end && alike(item, segment[last + 1])) last++;
+        if (last > k && !(k > start && abuts(item, segment[k - 1])) && !(last + 1 < end && abuts(item, segment[last + 1]))) {
+          for (let m = k; m <= last; m++) joins[m - start] = true;
+        }
+      }
+      k = last + 1;
+    }
+    byRange.set(key, joins);
+  }
+  return joins[i - start] ?? false;
+}
+
+/** `markdown` with each highlight of a run that joins its neighbour's (see
+ *  joinsHighlight) that runs into the next of its color, as in
+ *  ==a ====*b*==, joined with it, as in ==a *b*==, as Word's text of the
+ *  runs is highlighted all along, as a Markdown highlight around emphasis
+ *  exports it. Their highlights go around the rest of their formatting, so
+ *  what they hold stays whole. Their marks are a highlight's then. */
+function joinHighlights(markdown: string): string {
+  if (!markdown.includes(HIGHLIGHT_JOIN_OPEN)) return markdown;
+  // eslint-disable-next-line no-control-regex
+  return markdown.replace(/\u000F==(\{[a-z0-9-]+\})?==\u000E(?=[^\u000F]*\u000F==(\{[a-z0-9-]+\})?)/g,
+    (seam, color: string | undefined, nextColor: string | undefined) => color === nextColor ? '' : seam)
+    // eslint-disable-next-line no-control-regex
+    .replace(/\u000E/g, HIGHLIGHT_OPEN).replace(/\u000F/g, HIGHLIGHT_CLOSE);
 }
 
 /** The marks markedFormatting puts after a run's outermost opening delimiter
@@ -2101,6 +2215,9 @@ const EMPHASIS_CLOSE = '\u0004';
  *  before it, which would run into its ==, from another's closing == */
 const HIGHLIGHT_OPEN = '\u0005';
 const HIGHLIGHT_CLOSE = '\u0006';
+/** The marks of a highlight that joins its neighbour's (see joinHighlights) */
+const HIGHLIGHT_JOIN_OPEN = '\u000E';
+const HIGHLIGHT_JOIN_CLOSE = '\u000F';
 /** By opening mark, its delimiter and the HTML tag that can stand for it,
  *  as an HTML table's cells write it */
 const EMPHASIS_BY_MARK: Record<string, { delimiter: string; tag: string }> = {
@@ -2140,7 +2257,24 @@ function flankClass(code: number): number {
  * range's Markdown starts and ends one.
  */
 function resolveEmphasis(markdown: string): string {
-  if (!markdown.includes(EMPHASIS_CLOSE) && !markdown.includes(HIGHLIGHT_OPEN)) return markdown;
+  if (!markdown.includes(EMPHASIS_CLOSE) && !markdown.includes(HIGHLIGHT_OPEN) && !markdown.includes(HIGHLIGHT_JOIN_OPEN)) return markdown;
+  // Whitespace at a highlight's edge goes outside it, as before it held it,
+  // next to an = outside it, as of the text, another highlight's == or a
+  // comment's ==}, which navigation and the grammar read with the
+  // highlight's own, so ==a ====b=={red} as no highlight. Not all of it,
+  // which would leave none. From where the whitespace starts, so each is
+  // read once.
+  markdown = joinHighlights(markdown)
+    // eslint-disable-next-line no-control-regex
+    .replace(/(?<=[^\s\u0005])([^\S\n]+)\u0006==(?==)/g, (_m, space: string) => '\u0006==' + space)
+    // eslint-disable-next-line no-control-regex
+    .replace(/(?<==)==\u0005([^\S\n]+)(?=[^\s\u0006])/g, (_m, space: string) => space + '==\u0005')
+    // Whitespace a highlight holds alone next to another's ==, as in
+    // ==  ====b=={red}, goes without it, as before, where navigation and the
+    // grammar would read no highlight, the other's either
+    // eslint-disable-next-line no-control-regex
+    .replace(/(?<==)==\u0005([^\S\n]+)\u0006==(?:\{[a-z0-9-]+\})?|==\u0005([^\S\n]+)\u0006==(?==)/g,
+      (_m, before: string | undefined, after: string | undefined) => before ?? after ?? '');
   const closeAt = new Map<number, number>();
   const opens: number[] = [];
   for (let i = 0; i < markdown.length; i++) {
@@ -4878,10 +5012,11 @@ type SpanJoin = 'seam' | 'space' | 'never';
 
 /** The span of one revision that rendered Markdown ends with: where it
  *  starts and ends, its last character, the kinds of delimiter it holds and
- *  that its text has of its own, and how its last item joins (spanJoin). */
+ *  that its text has of its own, how its last item joins (spanJoin), and
+ *  the mark of the highlight it ends with, if it ends with one's ==. */
 type RevisionSpan = {
   revision: RevisionInfo; start: number; end: number; lastChar: string;
-  kinds: Set<string>; literal: Set<string>; join: SpanJoin;
+  kinds: Set<string>; literal: Set<string>; join: SpanJoin; highlightEnd?: string;
 };
 
 /** Marks where appendRevised joined a span to the one before it, after that
@@ -5031,6 +5166,29 @@ function escapeBangBeforeLink(markdown: string, segment: ContentItem[], index: n
   return /(?:^|[^\\])(?:\\\\)*!$/.test(markdown) ? markdown.slice(0, -1) + '\\!' : markdown;
 }
 
+/** `markdown`, the Markdown of an item, with a }, = or {color} it starts
+ *  with escaped after a highlight's closing == at the end of the Markdown
+ *  `before` it, which would read them as its own: ==a==} as CriticMarkup's
+ *  ==}, which ends no highlight, ==a=={red} as its color, and ==a===b as
+ *  no highlight, as navigation and the grammar read it, but not the ==
+ *  that opens a highlight. After one with a color, as in ==a=={red}{blue},
+ *  the escape keeps the text as it is too. From the end of `before`, which may be long, and is read only
+ *  where the item's Markdown starts so, as reading it copies Markdown being
+ *  built: without the closer of the span it ends with where the item
+ *  joins that span (`inSpan`, see inSpanBefore). */
+function escapeAfterHighlight(markdown: string, before: string, inSpan = false): string {
+  // eslint-disable-next-line no-control-regex
+  return /^(?:\}|=(?!=[\u0005\u000E])|\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})/.test(markdown)
+    && /==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?$/.test(inSpan ? before.slice(-67, -3) : before.slice(-64)) ? '\\' + markdown : markdown;
+}
+
+/** Whether `item` is of the revision of the span `out` ends with, which
+ *  appendRevised joins it to where it can, after which the Markdown before
+ *  the item's is `out` without the span's closer */
+function inSpanBefore(out: string, item: InlineRevisionItem, last: RevisionSpan | undefined): boolean {
+  return !!item.revision && !!last && last.end === out.length && revisionsEqual(last.revision, item.revision);
+}
+
 /** A letter, digit or _, next to an inline equation's $, after which it
  *  opens no math, or before which it closes none */
 const WORD_NEXT_TO_MATH = /[A-Za-z0-9_]/;
@@ -5115,16 +5273,18 @@ function appendRevised(
     && disjoint(literal, before.kinds) && disjoint(before.literal, kinds)
     && (join === 'space' || before.join === 'space'
       ? /\s/.test(before.lastChar) || /^\s/.test(text)
-      : canJoinSpans(before.lastChar, text));
+      : canJoinSpans(before.lastChar, text) || canJoinAtHighlight(before, text));
+  // eslint-disable-next-line no-control-regex
+  const highlightEnd = /([\u0006\u000F])==(?:\{[a-z0-9-]+\})?$/.exec(text)?.[1];
   if (last && last.end === out.length && revisionsEqual(last.revision, revision) && seamSafe(last)) {
     const joined = out + SPAN_JOIN + wrapWithRevision(text, revision).slice(3);
     return [joined, {
       revision, start: last.start, end: joined.length, lastChar: text.slice(-1),
-      kinds: new Set([...last.kinds, ...kinds]), literal: new Set([...last.literal, ...literal]), join,
+      kinds: new Set([...last.kinds, ...kinds]), literal: new Set([...last.literal, ...literal]), join, highlightEnd,
     }];
   }
   const wrapped = out + wrapWithRevision(text, revision);
-  return [wrapped, { revision, start: out.length, end: wrapped.length, lastChar: text.slice(-1), kinds, literal, join }];
+  return [wrapped, { revision, start: out.length, end: wrapped.length, lastChar: text.slice(-1), kinds, literal, join, highlightEnd }];
 }
 
 /** Delimiters that can pair with one of their kind in another span once
@@ -5212,6 +5372,20 @@ function canJoinSpans(beforeEnd: string, after: string): boolean {
   return (/[\])$*`]/.test(a) && /[.,;:!?)]/.test(b)) || (/[(\-/]/.test(a) && /[[$*`]/.test(b));
 }
 
+/** Whether a span that ends `before` and one starting with `after` can run
+ *  together at a highlight's ==, which reads as it did next to ++} or {++:
+ *  one that closes it before a letter, digit or escape, as of a {color}
+ *  after it (see escapeAfterHighlight), or before the == that
+ *  opens the next of the highlights it joins (see joinHighlights), which
+ *  joins them then, or one that opens it after a letter or digit, as in
+ *  ==a ==b and a== b==. Their marks are still in the Markdown. */
+function canJoinAtHighlight(before: RevisionSpan, after: string): boolean {
+  if (before.highlightEnd) {
+    return /^[\p{L}\p{N}\\]/u.test(after) || (before.highlightEnd === HIGHLIGHT_JOIN_CLOSE && after.startsWith('==' + HIGHLIGHT_JOIN_OPEN));
+  }
+  return /[\p{L}\p{N}]/u.test(before.lastChar) && (after.startsWith('==' + HIGHLIGHT_OPEN) || after.startsWith('==' + HIGHLIGHT_JOIN_OPEN));
+}
+
 const CRITIC_OPENERS: Record<string, string> = { '++': '{++', '--': '{--', '~~': '{~~', '==': '{==', '<<': '{>>' };
 
 /** Where the CriticMarkup that ends at `end` with `closer` opens, no earlier
@@ -5235,6 +5409,8 @@ function criticSpanStart(text: string, opener: string, closer: string, from: num
 function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = markdown.length): string {
   let end = to;
   while (end > from) {
+    end = textEnd(markdown, from, end);
+    if (end <= from) break;
     const closer = /(\+\+|--|~~|==|<<)\}$/.exec(markdown.slice(Math.max(from, end - 3), end));
     const start = closer ? criticSpanStart(markdown, CRITIC_OPENERS[closer[1]], closer[0], from, end) : -1;
     if (!closer || start < 0) return markdown[end - 1];
@@ -5254,6 +5430,23 @@ function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = mar
   return '';
 }
 
+/** A close of formatting at the end of Markdown, after the text it holds:
+ *  a highlight's or emphasis's, whose marks tell it from text's, or an
+ *  underline's or a script's tag */
+// eslint-disable-next-line no-control-regex
+const FORMATTING_CLOSE_AT_END = /(?:[\u0006\u000F]==(?:\{[a-z0-9-]+\})?|\u0004(?:\*\*|\*|~~)|(?<!\\)<\/(?:u|sup|sub)>)$/;
+
+/** Where the text of `markdown` before `end` ends, past the closes of the
+ *  formatting around it, as a highlight's, which holds the whitespace at
+ *  its edges: ==a == */
+function textEnd(markdown: string, from: number, end: number): number {
+  for (;;) {
+    const close = FORMATTING_CLOSE_AT_END.exec(markdown.slice(Math.max(from, end - 72), end));
+    if (!close) return end;
+    end -= close[0].length;
+  }
+}
+
 /** The space import puts before a Pandoc citation: none when the text before
  *  it already ends with one in a view the citation shows in, so no view gets
  *  two, as in Seen {++a ++}[@key], or when there is none before it. A view
@@ -5261,11 +5454,13 @@ function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = mar
  *  there. */
 function citationSeparator(precedingMarkdown: string, revision: RevisionInfo | undefined, last?: RevisionSpan): string {
   const views = revision?.type === 'addition' ? [true] : revision?.type === 'deletion' ? [false] : [true, false];
-  // The span the Markdown ends with gives its last character without a scan
+  // The span the Markdown ends with gives its last character without a
+  // scan, past the formatting its text ends in, before its ++} or --}
   const span = last && last.end === precedingMarkdown.length ? last : undefined;
   // Nor at the start of a block, where there is no text to space it from
   return views.some(accepted => [' ', ''].includes(
-    span?.revision.type === (accepted ? 'addition' : 'deletion') ? span.lastChar
+    span?.revision.type === (accepted ? 'addition' : 'deletion')
+      ? precedingMarkdown[textEnd(precedingMarkdown, span.start, span.end - 3) - 1] ?? ''
       : lastVisibleChar(precedingMarkdown, accepted, 0, span ? span.start : precedingMarkdown.length)
   )) ? '' : ' ';
 }
@@ -5351,6 +5546,9 @@ function renderHighlightGroup(
   segment: ContentItem[], start: number, end: number, rangeEnd: number, precedingMarkdown: string, noteLabels?: Map<string, string>, last?: RevisionSpan,
 ): string {
   let inner = '';
+  // The separator before a citation that opens the group, which goes
+  // before the highlight, which would hold it
+  let lead = '';
   let mathEnd = -1;
   for (let g = start; g < end; g++) {
     const item = segment[g];
@@ -5362,14 +5560,13 @@ function renderHighlightGroup(
       inner += '$' + item.latex + '$';
       mathEnd = inner.length;
     } else if (item.type === 'citation') {
-      // A separator before the first item lands outside the highlight
+      if (item.pandocKeys.length > 0 && g === start) lead = citationSeparator(precedingMarkdown, item.revision, last);
       inner += item.pandocKeys.length > 0
-        ? (g === start ? citationSeparator(precedingMarkdown, item.revision, last) : citationSeparator(inner, item.revision))
-          + '[' + item.pandocKeys.join('; ') + ']'
+        ? (g === start ? '' : citationSeparator(inner, item.revision)) + '[' + item.pandocKeys.join('; ') + ']'
         : item.text;
     }
   }
-  return wrapHighlight(inner, highlightColorOf(segment[start]));
+  return lead + wrapHighlight(inner, highlightColorOf(segment[start]));
 }
 
 /** `out` with the highlight group from `start` to `end` appended as one span
@@ -5393,23 +5590,27 @@ function combinedSpanJoin(items: InlineRevisionItem[]): { join: SpanJoin; litera
 }
 
 /** One item of a substitution's side as Markdown, after `precedingText`,
- *  before the rest of its side, `after` (see escapeMarkdownChars). */
-function substitutionItemText(item: SubstitutionItem, precedingText: string, noteLabels?: Map<string, string>, after?: RunsAfter): string {
+ *  before the rest of its side, `after` (see escapeMarkdownChars), with
+ *  its highlight around the rest of its formatting where it joins its
+ *  neighbours' (`joinsHighlight`, see joinHighlights). */
+function substitutionItemText(item: SubstitutionItem, precedingText: string, noteLabels?: Map<string, string>, after?: RunsAfter, joinsHighlight = false): string {
   const color = highlightColorOf(item);
   if (color && (item.type === 'footnote_ref' || item.type === 'citation')) {
     const text = substitutionItemText({ ...item, formatting: undefined }, precedingText, noteLabels, after);
-    return text.includes('==') ? text : wrapHighlight(text, color);
+    // The separator before a citation goes before the highlight
+    const lead = item.type === 'citation' && item.pandocKeys.length > 0 && text.startsWith(' ') ? ' ' : '';
+    return text.includes('==') ? text : lead + wrapHighlight(text.slice(lead.length), color);
   }
   if (item.type === 'footnote_ref') return footnoteRefText(item, noteLabels);
   if (item.type === 'text') {
-    if (!item.href) return markedFormatting(item.text, item.formatting, false, after);
+    if (!item.href) return escapeAfterHighlight(markedFormatting(item.text, item.formatting, false, after, false, joinsHighlight), precedingText);
     const text = markedFormatting(item.text, item.formatting, false, (after ?? RunsAfter.of('')).linkTo(item.href));
     return markdownLink(text, item.href);
   }
   if (item.type === 'citation') {
     return item.pandocKeys.length > 0
       ? citationSeparator(precedingText, item.revision) + '[' + item.pandocKeys.join('; ') + ']'
-      : item.text;
+      : escapeAfterHighlight(item.text, precedingText);
   }
   return item.display
     ? MATH_FENCE + '\n' + canonicalizeDisplayMathLatex(item.latex) + '\n' + MATH_FENCE
@@ -5504,7 +5705,8 @@ function renderSubstitutionRun(
         text += renderHighlightGroup(segment, j, highlightEnd, to, precedingText + text, noteLabels);
         j = highlightEnd;
       } else {
-        text += textNextToMath(escapeBangBeforeLink(substitutionItemText(item, precedingText + text, noteLabels, runsAfter(segment, j + 1, to)), segment, j, to, true), segment, j, to, text.length === mathEnd, true, text);
+        text += textNextToMath(escapeBangBeforeLink(substitutionItemText(item, precedingText + text, noteLabels, runsAfter(segment, j + 1, to),
+          joinsHighlight(segment, j, from, to)), segment, j, to, true), segment, j, to, text.length === mathEnd, true, text);
         if (item.type === 'math' && !item.display) mathEnd = text.length;
         j++;
       }
@@ -6091,7 +6293,8 @@ function renderInlineRange(
         const citeSep = citationSeparator(out, item.revision, lastSpan);
         citeText = citeSep + '[' + item.pandocKeys.join('; ') + ']';
       } else {
-        citeText = item.text;
+        // Text a highlight's == before it would take, as a {1} for a color
+        citeText = escapeAfterHighlight(item.text, out, inSpanBefore(out, item, lastSpan));
       }
       [out, lastSpan] = appendRevised(out, citeText, item, lastSpan);
       i++;
@@ -6195,7 +6398,7 @@ function renderInlineRange(
         if (seg.type === 'citation') {
           const citeText = seg.pandocKeys.length > 0
             ? citationSeparator(anchorText || out + lead, seg.revision, anchorSpan) + '[' + seg.pandocKeys.join('; ') + ']'
-            : seg.text;
+            : escapeAfterHighlight(seg.text, anchorText, inSpanBefore(anchorText, seg, anchorSpan));
           [anchorText, anchorSpan] = appendRevised(anchorText, citeText, seg, anchorSpan);
           j++;
           continue;
@@ -6210,7 +6413,8 @@ function renderInlineRange(
         // distinct: Word text that is both highlighted AND commented needs both layers,
         // producing {====text====} (highlight nested inside comment delimiters).
         const after = runsAfter(segment, j + 1, segmentEnd);
-        let segText = textNextToMath(escapeBangBeforeLink(markedFormatting(seg.text, seg.formatting, false, seg.href ? after.linkTo(seg.href) : after), segment, j, segmentEnd), segment, j, segmentEnd, anchorText.length === anchorMathEnd, false, anchorText);
+        let segText = textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(seg.text, seg.formatting, false, seg.href ? after.linkTo(seg.href) : after,
+          false, joinsHighlight(segment, j, startIndex, segmentEnd)), anchorText, inSpanBefore(anchorText, seg, anchorSpan)), segment, j, segmentEnd), segment, j, segmentEnd, anchorText.length === anchorMathEnd, false, anchorText);
         if (seg.href) {
           segText = bareLinkChoice(seg, markdownLink(segText, seg.href), '==}');
         }
@@ -6267,7 +6471,7 @@ function renderInlineRange(
       // An HTML block starts only a block's text, not a heading's, a table
       // cell's or a tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !opts?.cell && !item.revision;
-      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), out, inSpanBefore(out, item, lastSpan)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
     }
     i++;
   }
@@ -6387,7 +6591,8 @@ function renderInlineRangeWithIds(
         const citeSep = citationSeparator(out, item.revision, lastSpan);
         citeText = citeSep + '[' + item.pandocKeys.join('; ') + ']';
       } else {
-        citeText = item.text;
+        // Text a highlight's == before it would take, as a {1} for a color
+        citeText = escapeAfterHighlight(item.text, out, inSpanBefore(out, item, lastSpan));
       }
       [out, lastSpan] = appendRevised(out, citeText, item, lastSpan);
       i++;
@@ -6538,7 +6743,7 @@ function renderInlineRangeWithIds(
       // An HTML block starts only a block's text, not a heading's, a table
       // cell's or a tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !opts?.cell && !item.revision;
-      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), out, inSpanBefore(out, item, lastSpan)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
     }
     i++;
   }
