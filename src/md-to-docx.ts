@@ -2733,8 +2733,10 @@ function wordTableTexts(xml: string): string[][] {
       let text = '';
       let fields = 0;
       for (const run of cell[1].matchAll(/<w:r(?:\s[^>]*)?>([\s\S]*?)<\/w:r>/g)) {
-        if (run[1].includes('w:fldCharType="begin"')) fields++;
-        else if (run[1].includes('w:fldCharType="end"')) fields = Math.max(0, fields - 1);
+        // The element, as text can't hold a <, which its attribute's can
+        const fieldChar = /<w:fldChar\s[^>]*w:fldCharType="(begin|end)"/.exec(run[1])?.[1];
+        if (fieldChar === 'begin') fields++;
+        else if (fieldChar === 'end') fields = Math.max(0, fields - 1);
         else if (fields === 0 && !run[1].includes('<w:vanish/>')) {
           for (const piece of run[1].matchAll(/<w:(t|delText)(?:\s[^>]*)?>([^<]*)<\/w:\1>|<w:(tab|noBreakHyphen|softHyphen)\/>/g)) {
             text += piece[3] ? { tab: '\t', noBreakHyphen: '\u2011', softHyphen: '\u00AD' }[piece[3]] : decodeHtmlEntities(piece[2]);

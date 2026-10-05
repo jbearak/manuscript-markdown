@@ -7033,6 +7033,26 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
   return lines.join(oneLine ? '' : '\n') + (deferredAll.length > 0 ? '\n\n' + deferredAll.join('\n') : '');
 }
 
+/** The keys of the HTML around tables export wrote, by the scope, first
+ *  row, text and count of tables alike before of the table each was written
+ *  with, which renderTable looks a table up by, once for each mapping, as
+ *  reading them all for each table took time in the square of their number */
+const tableHtmlAroundIndexes = new WeakMap<Map<string, [string, string, string, string, string, string]>, Map<string, string[]>>();
+function tableHtmlAroundIndex(mapping: Map<string, [string, string, string, string, string, string]>): Map<string, string[]> {
+  let index = tableHtmlAroundIndexes.get(mapping);
+  if (!index) {
+    index = new Map();
+    for (const [key, entry] of mapping) {
+      const id = entry[5] + '\n' + entry[2] + '\n' + entry[3] + '\n' + entry[4];
+      const keys = index.get(id);
+      if (keys) keys.push(key);
+      else index.set(id, [key]);
+    }
+    tableHtmlAroundIndexes.set(mapping, index);
+  }
+  return index;
+}
+
 type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string]>; usedTableHtmlAround?: Set<string>; tablesAlike?: Map<string, number>; tablesAlikeRendered?: Map<string, number>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem>; htmlCells?: boolean };
 
 /**
@@ -7744,11 +7764,14 @@ function renderTableOrFallback(
   const contents = tableContents(item.rows);
   const alikeBefore = renderOpts?.tablesAlikeRendered?.get(scope + '\n' + firstRow + '\n' + contents) ?? 0;
   renderOpts?.tablesAlikeRendered?.set(scope + '\n' + firstRow + '\n' + contents, alikeBefore + 1);
-  const unused = [...renderOpts?.tableHtmlAroundMapping?.entries() ?? []]
-    .filter(([key, entry]) => entry[2] === firstRow && entry[5] === scope && !renderOpts?.usedTableHtmlAround?.has(key));
-  const [aroundKey, around] = unused.find(([, entry]) => entry[3] === contents && entry[4] === String(alikeBefore))
-    ?? unused.find(([key, entry]) => key === String(tableIndex)
-      && (renderOpts?.tablesAlike?.get(scope + '\n' + entry[2] + '\n' + entry[3]) ?? 0) <= Number(entry[4])) ?? [];
+  const mapping = renderOpts?.tableHtmlAroundMapping;
+  const unused = (key: string | undefined) => key !== undefined && !renderOpts?.usedTableHtmlAround?.has(key)
+    && mapping?.get(key)?.[2] === firstRow && mapping.get(key)?.[5] === scope;
+  const edited = (key: string) => (renderOpts?.tablesAlike?.get(scope + '\n' + mapping!.get(key)![2] + '\n' + mapping!.get(key)![3]) ?? 0)
+    <= Number(mapping!.get(key)![4]);
+  const aroundKey = mapping && (tableHtmlAroundIndex(mapping).get(scope + '\n' + firstRow + '\n' + contents + '\n' + alikeBefore)?.find(unused)
+    ?? (tableIndex !== undefined && unused(String(tableIndex)) && edited(String(tableIndex)) ? String(tableIndex) : undefined));
+  const around = aroundKey !== undefined ? mapping?.get(aroundKey) : undefined;
   if (aroundKey !== undefined) renderOpts?.usedTableHtmlAround?.add(aroundKey);
   const r = (body: string) => {
     const before = around && detachedTableHtml(around[0]);

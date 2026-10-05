@@ -6243,6 +6243,8 @@ describe('HTML around a table in its block', () => {
     // for the first row
     ['a caption over a first row with a non-breaking hyphen', '<p>Cap</p>\n' + table('COVID\u201119') + '\n'],
     ['a caption over a first row with an optional hyphen', '<p>Cap</p>\n' + table('hy\u00ADphen') + '\n'],
+    // Which export took for a field's marker, and left out of the row
+    ['a caption over a first row with a field\'s marker as text', '<p>Cap</p>\n' + table('w:fldCharType="begin" a') + '\n'],
   ])('keeps %s', async (_name, md) => {
     // Export dropped the rest of a table's block with no warning
     const { warnings } = await convertMdToDocx(md);
@@ -6554,6 +6556,24 @@ describe('HTML around a table in its block', () => {
     const start = performance.now();
     await convertDocx(docx);
     expect(performance.now() - start).toBeLessThan(2000);
+  });
+
+  test('puts the HTML around many tables back in linear time', async () => {
+    // Each table read every entry of the HTML export kept
+    const { tableFirstRowText, tableContentsFingerprint } = await import('./table-metadata');
+    const content: ContentItem[] = [];
+    const around = new Map<string, [string, string, string, string, string, string]>();
+    const formats = new Map<string, string>();
+    for (let i = 0; i < 16000; i++) {
+      const text = 'a' + i;
+      content.push({ type: 'table', rows: [{ isHeader: false, cells: [{ paragraphs: [[{ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING }]] }] }] });
+      around.set(String(i), ['<div>', '</div>', tableFirstRowText([text]), tableContentsFingerprint([[text]]), '0', '']);
+      formats.set(String(i), 'html');
+    }
+    const start = performance.now();
+    const markdown = buildMarkdown(content, new Map(), { tableHtmlAroundMapping: around, tableFormatMapping: formats });
+    expect(performance.now() - start).toBeLessThan(1000);
+    expect(markdown.match(/<div>/g)?.length).toBe(16000);
   });
 
   test('warns of no HTML kept around a table in a list item, which is dropped', async () => {
