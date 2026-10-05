@@ -400,6 +400,12 @@ function isMarkdownBlockEdge(item: ContentItem | undefined): boolean {
   return item === undefined || isStructuralBoundaryItem(item) || (item.type === 'math' && !!item.display);
 }
 
+/** Whether `item` is display math in the paragraph of the text before it,
+ *  which the paragraph goes on in, on the lines after the text */
+function isInParagraphMath(item: ContentItem | undefined): boolean {
+  return item?.type === 'math' && item.display && !!item.inParagraph;
+}
+
 const ASCII_PUNCTUATION_RE = /[!-\/:-@[-`{-~]/;
 const WORD_CHARACTER_RE = /[\p{L}\p{N}]/u;
 
@@ -8629,7 +8635,7 @@ export function buildMarkdown(
     if (paragraphHeading) {
       const bodiesBreak = rendered.deferredComments.length > 0 ? /(\\?\n)+$/.exec(textOut)?.[0] ?? '' : '';
       textOut = textOut.slice(0, textOut.length - bodiesBreak.length).replace(HARD_BREAK, (_m, backslashes: string) => backslashes + '<br>') + bodiesBreak;
-    } else if (atEnd && rendered.deferredComments.length === 0) {
+    } else if (atEnd && rendered.deferredComments.length === 0 && !isInParagraphMath(mergedContent[rendered.nextIndex])) {
       textOut = textOut.replace(HARD_BREAK_AT_END, (_m, backslashes: string, whitespace: string) => backslashes + '<br>' + whitespace);
     }
     // An HTML block's indent, of up to three spaces, which markdown-it keeps
@@ -8725,9 +8731,11 @@ export function buildMarkdown(
       // The text of a part, from partStart, which ends its paragraph. Word
       // puts a space or tab after the note's mark, which goes, but not the
       // whitespace the note's text starts with after it. A line break at its
-      // end is <br>, as at a paragraph's end in the body.
-      const inlinePart = (text: string) => {
-        const broken = text.replace(HARD_BREAK_AT_END, (_m, backslashes: string, whitespace: string) => backslashes + '<br>' + whitespace);
+      // end is <br>, as at a paragraph's end in the body, but not before an
+      // equation in the paragraph (`beforeMath`), which the paragraph goes
+      // on in after it.
+      const inlinePart = (text: string, beforeMath = false) => {
+        const broken = beforeMath ? text : text.replace(HARD_BREAK_AT_END, (_m, backslashes: string, whitespace: string) => backslashes + '<br>' + whitespace);
         return partStart === 0
           ? keepParagraphWhitespace(broken.replace(/^[ \t]/, ''), true, true)
           : keepParagraphWhitespace(broken, isMarkdownBlockEdge(bodyMerged[partStart - 1]), true);
@@ -8758,7 +8766,7 @@ export function buildMarkdown(
           // Flush preceding inline content and keep display math as its own block part.
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
-            pushInline(inlinePart(part.text));
+            pushInline(inlinePart(part.text, !!item.inParagraph));
             deferredAll.push(...part.deferredComments);
           }
           const mathBlock = MATH_FENCE + '\n' + canonicalizeDisplayMathLatex(item.latex) + '\n' + MATH_FENCE;

@@ -5907,7 +5907,9 @@ describe('Whitespace at the edges of a paragraph', () => {
     expect(edited).not.toBe(xml);
     zip.file('word/document.xml', edited);
     const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
-    expect(markdown).toContain('p \\`\\`\\`a `x\\\n  y`');
+    // The code on each side of the line break, which a code span can't hold
+    expect(markdown).toContain('p \\`\\`\\`a `x`\\\n`  y`');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
   });
 
   test.each([
