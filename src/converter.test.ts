@@ -5771,6 +5771,18 @@ describe('HTML table cells', () => {
     expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(md);
   });
 
+  test('keeps a comment after one that ends at its --!> where Word splits its run after its <', async () => {
+    // The < went on the comment before, which inline Markdown reads to a -->
+    const md = table('      <p>a<!-- c --!><!-- d -->b</p>');
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const second = [...xml.matchAll(/(<w:r><w:rPr><w:vanish\/>(?:(?!<\/w:rPr>).)*<\/w:rPr>)<w:t>([^<]*)<\/w:t><\/w:r>/g)][1];
+    const split = second[1] + '<w:t>' + second[2].slice(0, 5) + '</w:t></w:r>' + second[1] + '<w:t>' + second[2].slice(5) + '</w:t></w:r>';
+    expect(second[2].slice(0, 5)).toBe('\u200B&lt;');
+    zip.file('word/document.xml', xml.slice(0, second.index) + split + xml.slice(second.index! + second[0].length));
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(md);
+  });
+
   test('writes a table whose cell has a comment with a blank line in it as no HTML table', async () => {
     // The blank line ended the table's HTML block, which exported as text
     const zip = await JSZip.loadAsync((await convertMdToDocx('<table><tr><td>a<!-- x y -->b</td><td>c</td></tr></table>\n')).docx);
@@ -8986,6 +8998,12 @@ describe('round-trip regression: images export cannot embed', () => {
     zip.file('word/document.xml', split);
     const markdown = (await convertDocx(new Uint8Array(await zip.generateAsync({ type: 'uint8array' })))).markdown;
     expect(markdown).toContain(md);
+  });
+
+  test('keeps a ZWSP in an HTML comment after a --!> in it', async () => {
+    // It read as the start of another hidden comment, and the rest went
+    const md = 'A <!-- a --!>\u200B b --> B\n';
+    expect((await roundTrip(md.trimEnd())).markdown).toBe(md);
   });
 
   test('reads an image after an HTML comment with no --> as its own', async () => {

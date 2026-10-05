@@ -92,33 +92,64 @@ const RAW_TEXT_NAME = '(?:script|style|textarea|title|xmp|iframe|noembed|noframe
 // Its start tag, with its name a group of the search's
 const RAW_TEXT_START = '<(' + RAW_TEXT_NAME + ')(?=[\\s/>])' + HTML_ATTRS + '>';
 
-/** An element whose text is no HTML, which runs to the end where it has no
- *  end tag, as the browser reads it, between tables, rows or cells */
-function rawTextElement(group: number): string {
-  return RAW_TEXT_START + '[\\s\\S]*?(?:<\\/\\' + group + '\\s*>|$)';
+const COMMENT_AT = new RegExp(HTML_COMMENT, 'y');
+const RAW_TEXT_AT = new RegExp(RAW_TEXT_START + '[\\s\\S]*?<\\/\\1\\s*>', 'iy');
+const RAW_TEXT_START_AT = new RegExp(RAW_TEXT_START, 'iy');
+const TAG_AT = new RegExp(HTML_TAG, 'y');
+
+/** The piece of `html` at `at`, as the browser reads it: a comment, or an
+ *  element whose text is no HTML, whole, to its end, so that a tag in it is
+ *  none; a tag; or else text, to the next <, or a < that starts none. One
+ *  with no end is `rest`, which runs to the end, past the end tag of what
+ *  holds it, which the browser ends there. */
+function htmlPieceAt(html: string, at: number): { end: number; kind: 'comment' | 'raw' | 'tag' | 'text'; rest?: true } {
+  if (html[at] !== '<') {
+    const next = html.indexOf('<', at + 1);
+    return { end: next === -1 ? html.length : next, kind: 'text' };
+  }
+  COMMENT_AT.lastIndex = at;
+  if (COMMENT_AT.test(html)) return { end: COMMENT_AT.lastIndex, kind: 'comment' };
+  if (html.startsWith('<!--', at)) return { end: html.length, kind: 'comment', rest: true };
+  RAW_TEXT_AT.lastIndex = at;
+  if (RAW_TEXT_AT.test(html)) return { end: RAW_TEXT_AT.lastIndex, kind: 'raw' };
+  RAW_TEXT_START_AT.lastIndex = at;
+  if (RAW_TEXT_START_AT.test(html)) return { end: html.length, kind: 'raw', rest: true };
+  TAG_AT.lastIndex = at;
+  if (TAG_AT.test(html)) return { end: TAG_AT.lastIndex, kind: 'tag' };
+  return { end: at + 1, kind: 'text' };
 }
 
-/** A piece of the HTML in a table, row or cell, as the search for its end
- *  reads it: a comment, an element whose text is no HTML, or a tag whole,
- *  so that an end tag in any of them ends nothing, or else a character.
- *  Each (?=(...))\N takes what it finds whole, as an atomic group would,
- *  and a < takes one of them, so the search has one way through the HTML.
- *  `group` is the number of its first group in the search's pattern. A
- *  comment, or an element whose text is no HTML, with no end isn't one, as
- *  it ends what holds it (see htmlRestInComment). */
-function htmlContentUnit(group: number): string {
-  return '(?:(?=(' + HTML_COMMENT + '))\\' + group
-    + '|(?=(' + RAW_TEXT_START + '[\\s\\S]*?<\\/\\' + (group + 2) + '\\s*>))\\' + (group + 1)
-    + '|(?=(<(?!' + RAW_TEXT_NAME + '[\\s/>])' + HTML_TAG_BODY + '))\\' + (group + 3)
-    + '|[^<]|<(?!!--)(?!' + HTML_TAG_BODY + '))';
-}
-
-/** A comment with no end, or an element whose text is no HTML with no end
- *  tag, which runs to the end, past the end tag of what holds it, which the
- *  browser ends there, so it goes with what holds it, whose search reads it
- *  whole. `group` is the number of its first group in the search's pattern. */
-function htmlRestInComment(group: number): string {
-  return '((?=<!--(?!-?>|[\\s\\S]*?--!?>)|' + RAW_TEXT_START + '(?![\\s\\S]*?<\\/\\' + (group + 1) + '\\s*>))[\\s\\S]*)';
+/** The elements whose start tags `name` finds in `html`, past the pieces
+ *  between them (see htmlPieceAt), with the comments among those in
+ *  `comments`: each one's name, attributes and content, to its end tag, or
+ *  else to the end, where a piece in it with no end runs to it, and where
+ *  it starts and ends. One with neither is none. A search for the end goes
+ *  piece by piece, so its cost is the content's length, and one that found
+ *  none past a point finds none past a later one. */
+function htmlElements(html: string, name: RegExp, comments?: string[]): Array<{ name: string; attrs: string; content: string; start: number; end: number }> {
+  const elements: Array<{ name: string; attrs: string; content: string; start: number; end: number }> = [];
+  // Where a search for each end tag found none from
+  const noEndFrom = new Map<string, number>();
+  for (let at = 0; at < html.length;) {
+    const start = at;
+    const piece = htmlPieceAt(html, at);
+    at = piece.end;
+    if (piece.kind === 'comment') comments?.push(html.slice(start, at));
+    const tag = piece.kind === 'tag' ? name.exec(html.slice(start, at)) : null;
+    if (!tag || at >= (noEndFrom.get(tag[1].toLowerCase()) ?? Infinity)) continue;
+    const endTag = '</' + tag[1].toLowerCase() + '>';
+    for (let k = at; k < html.length;) {
+      const inner = htmlPieceAt(html, k);
+      if (inner.rest || inner.kind === 'tag' && html.slice(k, inner.end).toLowerCase() === endTag) {
+        elements.push({ name: tag[1], attrs: html.slice(start + 1 + tag[1].length, at - 1), content: html.slice(at, inner.rest ? html.length : k), start, end: inner.end });
+        at = inner.end;
+        break;
+      }
+      k = inner.end;
+    }
+    if (elements[elements.length - 1]?.start !== start) noEndFrom.set(tag[1].toLowerCase(), at);
+  }
+  return elements;
 }
 
 export function extractHtmlTables(html: string): HtmlTableMeta[] {
@@ -126,17 +157,12 @@ export function extractHtmlTables(html: string): HtmlTableMeta[] {
   // Regex-based extraction intentionally does not support nested <table> blocks.
   // This parser targets simple manuscript tables (<table>/<tr>/<th>/<td>).
   // Not one in a comment, which the browser and Word's export of it hide,
-  // which the search goes past whole, to the end where no --> ends it, as
-  // it goes past an element whose text is no HTML, as a <script>, in which
-  // a <!-- is text, and each other tag, whose quoted attribute can hold
-  // one. Nor does a </table> in a comment in it end it (see htmlContentUnit).
-	const tableRegex = new RegExp(HTML_COMMENT_OR_REST + '|' + rawTextElement(1) + '|<table\\b(' + HTML_ATTRS + ')>(' + htmlContentUnit(4) + '*?)(?:<\\/table>|' + htmlRestInComment(8) + ')|' + HTML_TAG, 'gi');
-  let tableMatch: RegExpExecArray | null;
-  while ((tableMatch = tableRegex.exec(html)) !== null) {
-    if (tableMatch[3] === undefined) continue;
-    const attrs = tableMatch[2];
+  // nor in an element whose text is no HTML, as a <script>, nor a quoted
+  // attribute, and no </table> in one of them ends one (see htmlElements).
+  for (const table of htmlElements(html, /^<(table)(?=[\s/>])/i)) {
+    const attrs = table.attrs;
     const comments: string[] = [];
-    const rows = extractHtmlTableRows(tableMatch[3] + (tableMatch[8] ?? ''), comments);
+    const rows = extractHtmlTableRows(table.content, comments);
     // Invariant: only tables with rows are returned to callers, or with
     // comments that hide all of them, which a caller can't drop unseen.
     if (rows.length > 0 || comments.length > 0) {
@@ -199,15 +225,8 @@ function extractHtmlTableRows(tableHtml: string, comments: string[]): HtmlTableR
   const rows: HtmlTableRow[] = [];
   // Similarly, nested <tr> structures are out of scope for this lightweight parser.
   // Not one in a comment, as for a table (see extractHtmlTables).
-	const rowRegex = new RegExp(HTML_COMMENT_OR_REST + '|' + rawTextElement(1) + '|<tr\\b' + HTML_ATTRS + '>(' + htmlContentUnit(3) + '*?)(?:<\\/tr>|' + htmlRestInComment(7) + ')|' + HTML_TAG, 'gi');
-  let rowMatch: RegExpExecArray | null;
-  while ((rowMatch = rowRegex.exec(tableHtml)) !== null) {
-    if (rowMatch[0].startsWith('<!--')) {
-      comments.push(rowMatch[0]);
-      continue;
-    }
-    if (rowMatch[2] === undefined) continue;
-    const cells = extractHtmlTableCells(rowMatch[2] + (rowMatch[7] ?? ''), comments);
+  for (const row of htmlElements(tableHtml, /^<(tr)(?=[\s/>])/i, comments)) {
+    const cells = extractHtmlTableCells(row.content, comments);
     // Invariant: rows with no cells are skipped.
     if (cells.length > 0) {
       rows.push({
@@ -229,17 +248,10 @@ function extractHtmlTableCells(rowHtml: string, comments: string[]): Array<HtmlT
   const cells: Array<HtmlTableCell & { isHeader: boolean }> = [];
   // Nested table-cell tags are not supported; this matches flat <th>/<td> content only.
   // Not one in a comment, as for a table (see extractHtmlTables).
-	const cellRegex = new RegExp(HTML_COMMENT_OR_REST + '|' + rawTextElement(1) + '|<(th|td)\\b(' + HTML_ATTRS + ')>(' + htmlContentUnit(5) + '*?)(?:<\\/\\2>|' + htmlRestInComment(9) + ')|' + HTML_TAG, 'gi');
-  let cellMatch: RegExpExecArray | null;
-  while ((cellMatch = cellRegex.exec(rowHtml)) !== null) {
-    if (cellMatch[0].startsWith('<!--')) {
-      comments.push(cellMatch[0]);
-      continue;
-    }
-    if (cellMatch[2] === undefined) continue;
-    const isHeader = cellMatch[2].toLowerCase() === 'th';
-    const attrs = cellMatch[3];
-    const runs = parseHtmlCellRuns(cellMatch[4] + (cellMatch[9] ?? ''));
+  for (const cell of htmlElements(rowHtml, /^<(th|td)(?=[\s/>])/i, comments)) {
+    const isHeader = cell.name.toLowerCase() === 'th';
+    const attrs = cell.attrs;
+    const runs = parseHtmlCellRuns(cell.content);
     const colspan = parseInt(extractAttr(attrs, 'colspan') ?? '', 10) || undefined;
     const rowspan = parseInt(extractAttr(attrs, 'rowspan') ?? '', 10) || undefined;
     const kind = parseHtmlTableCellSourceKind(extractAttr(attrs, 'data-mm-kind'));

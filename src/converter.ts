@@ -3185,10 +3185,15 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
   if (pending && pending.at === target.length) runText = pending.text + runText;
   /** Where the hidden text after the comment whose <!-- ends at `from`
    *  starts, if anything does: after the first of its ends a ZWSP follows,
-   *  its --> or --!>, or the > or -> of an empty one, <!--> or <!---> */
+   *  its -->, or the > or -> of an empty one, <!--> or <!--->, or a --!>,
+   *  which ends a table's comment, as the browser reads it, but not one
+   *  inline Markdown reads to its -->, where what follows starts a payload */
   const afterComment = (text: string, from: number) => {
-    const ends = text.slice(from).matchAll(/^-?>|--!?>/g);
-    for (const end of ends) if (text[from + end.index + end[0].length] === '\u200B') return from + end.index + end[0].length;
+    for (const end of text.slice(from).matchAll(/^-?>|--!?>/g)) {
+      const at = from + end.index + end[0].length;
+      HIDDEN_PAYLOAD_AT.lastIndex = at;
+      if (end[0] === '--!>' ? HIDDEN_PAYLOAD_AT.test(text) : text[at] === '\u200B') return at;
+    }
     return -1;
   };
   let rest = runText;
@@ -3202,9 +3207,9 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
     const from = text.lastIndexOf('<!--') + 4;
     return text.includes('-->', from) || /^-?>/.test(text.slice(from));
   };
-  // Nor an image's after it, which a ZWSP starts
+  HIDDEN_PAYLOAD_AT.lastIndex = 0;
   if (continues && lastItem.type === 'html_comment' && !rest.replace(/^\u200B+/, '').trimStart().startsWith('<!--')
-      && !/^\u200B(?:!\[|<img\b)/i.test(rest) && !closed(lastItem.text)) {
+      && !HIDDEN_PAYLOAD_AT.test(rest) && !closed(lastItem.text)) {
     lastItem.text += rest.replace(/^\u200B+/, '');
     const end = afterComment(lastItem.text, lastItem.text.lastIndexOf('<!--') + 4);
     rest = end === -1 ? '' : lastItem.text.slice(end);
@@ -3236,6 +3241,11 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
     }
   }
 }
+
+// A hidden payload's start, at lastIndex: its ZWSP, and a comment's or an
+// image's start, or the start of one Word split off before it showed which,
+// or nothing yet, which none of a comment's own text is
+const HIDDEN_PAYLOAD_AT = /\u200B+(?:<!--|!\[|<img\b|(?:!|<|<!|<!-|<i|<im)?$)/iy;
 
 /** The start of hidden text whose run Word split before it showed what it
  *  is, as a ZWSP and !, which the next hidden run in the same place goes on */

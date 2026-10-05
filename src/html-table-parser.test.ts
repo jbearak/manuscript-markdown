@@ -126,6 +126,13 @@ describe('HTML table cell paragraphs', () => {
     expect(performance.now() - start).toBeLessThan(1000);
   });
 
+  test('reads a table of 100,000 rows', () => {
+    // Its search held a state for each piece of the table, which ran past
+    // the regex engine's stack, and read none, or threw in Node
+    const [table] = extractHtmlTables('<table>' + '<tr><td>a</td><td>b</td></tr>'.repeat(100000) + '</table>');
+    expect(table?.rows.length).toBe(100000);
+  });
+
   test('keeps an empty paragraph', () => {
     // A paragraph run only separated paragraphs with text
     const paragraph = { type: 'paragraph', text: '\n\n' };
