@@ -221,17 +221,18 @@ export function preprocessGridTablesWithSourceMap(markdown: string): GridTablePr
   return { output, sourceMap };
 }
 
-/**
- * The text of each column of a grid table's line, between its | signs under
- * the separator's + signs: by display columns, a wide character taking two,
- * as Pandoc reads a table and import pads one. Expand Table pads a table by
- * characters, so a line whose | signs are under the + signs by their
- * indices, and not by display columns, is read by indices. A line neither
- * lines up, as with a character whose width an editor counts otherwise, is
- * cut at the | nearest each + by display columns, or with too few, as a
- * cell spanning columns, at the + signs' display columns.
- */
-function gridLineCells(line: string, boundaries: number[]): string[] {
+/** A grid table's line by characters, with each one's display column and
+ *  its | signs, and the indices of those under the separator's + signs, by
+ *  display columns and by characters, -1 where none is */
+interface GridLine {
+  chars: string[];
+  columns: number[];
+  pipes: Array<{ k: number; column: number }>;
+  display: number[];
+  index: number[];
+}
+
+function gridLine(line: string, boundaries: number[]): GridLine {
   const chars: string[] = [];
   const columns: number[] = [];
   const display = new Map<number, number>();
@@ -254,23 +255,54 @@ function gridLineCells(line: string, boundaries: number[]): string[] {
     offset += ch.length;
   }
   const at = (columns: Map<number, number>) => boundaries.map(b => columns.get(b) ?? -1);
-  let cuts = at(display);
-  if (cuts.includes(-1)) {
-    const byIndex = at(index);
-    if (!byIndex.includes(-1)) {
-      cuts = byIndex;
-    } else if (pipes.length >= boundaries.length) {
-      let next = 0;
-      cuts = boundaries.map((b, c) => {
-        // The nearest | that leaves one for each + after
-        let best = next;
-        for (let p = next; p <= pipes.length - (boundaries.length - c); p++) {
-          if (Math.abs(pipes[p].column - b) < Math.abs(pipes[best].column - b)) best = p;
-        }
-        next = best + 1;
-        return pipes[best].k;
-      });
-    }
+  return { chars, columns, pipes, display: at(display), index: at(index) };
+}
+
+/** Whether a line's cuts are all under + signs and end at its last |, its
+ *  edge, and not at a | in its last cell's text */
+function fitsLine(line: GridLine, cuts: number[]): boolean {
+  return !cuts.includes(-1) && cuts[cuts.length - 1] === line.pipes[line.pipes.length - 1].k;
+}
+
+/**
+ * The text of each column of a grid table's line, between its | signs under
+ * the separator's + signs: by display columns, a wide character taking two,
+ * as Pandoc reads a table and import pads one. Expand Table pads a table by
+ * characters, so a line whose | signs are under the + signs by their
+ * indices, and not by display columns, is read by indices. A line neither
+ * lines up, as with a character whose width an editor counts otherwise, is
+ * cut at the | nearest each + by display columns, or with too few, as a
+ * cell spanning columns, at the + signs' display columns.
+ *
+ * A line can line up both ways, as with narrow characters outside the BMP
+ * and wide ones in it, where a | in a cell's text is under a +. The way that
+ * fits it (see fitsLine) wins, and where both do, the table's `layout`, the
+ * way its lines that fit one way alone are padded, and without one, the way
+ * whose edges have a space or the line's end on each side, as import and
+ * Expand Table write them, where a | in a cell's text can have text, and
+ * else characters, as a table was read before display columns were.
+ */
+function gridLineCells(line: GridLine, boundaries: number[], layout?: 'display' | 'characters'): string[] {
+  const { chars, columns, pipes } = line;
+  const padded = (cuts: number[]) => cuts.filter(k => (k === 0 || /[ \t]/.test(chars[k - 1]))
+    && (k === chars.length - 1 || /[ \t]/.test(chars[k + 1]))).length;
+  let cuts = line.display;
+  const byIndex = line.index;
+  const indexFits = fitsLine(line, byIndex) && (!fitsLine(line, cuts)
+    || (layout ? layout === 'characters' : padded(byIndex) >= padded(cuts)));
+  if (indexFits || cuts.includes(-1) && !byIndex.includes(-1)) {
+    cuts = byIndex;
+  } else if (cuts.includes(-1) && pipes.length >= boundaries.length) {
+    let next = 0;
+    cuts = boundaries.map((b, c) => {
+      // The nearest | that leaves one for each + after
+      let best = next;
+      for (let p = next; p <= pipes.length - (boundaries.length - c); p++) {
+        if (Math.abs(pipes[p].column - b) < Math.abs(pipes[best].column - b)) best = p;
+      }
+      next = best + 1;
+      return pipes[best].k;
+    });
   }
   if (cuts.includes(-1)) {
     return boundaries.slice(0, -1).map((b, c) => chars.filter((_ch, k) => columns[k] > b && columns[k] < boundaries[c + 1]).join(''));
@@ -297,17 +329,33 @@ function parseGridTable(lines: string[]): GridTableData | null {
   if (colBoundaries.length < 2) return null;
   const numCols = colBoundaries.length - 1;
 
+  const boundaries = colBoundaries.map(b => b + indent);
+  const gridLines = lines.map((line, li) => li > 0 && !GRID_TABLE_SEPARATOR_RE.test(line.trim()) ? gridLine(line, boundaries) : undefined);
+  // A table is padded one way: by display columns, as Pandoc and import pad
+  // one, or by characters, as Expand Table does, which its lines that fit
+  // one way alone show
+  let byDisplay = 0;
+  let byCharacters = 0;
+  for (const line of gridLines) {
+    if (!line) continue;
+    const display = fitsLine(line, line.display);
+    const index = fitsLine(line, line.index);
+    if (display && !index) byDisplay++;
+    if (index && !display) byCharacters++;
+  }
+
   // Collect rows: content lines between separator lines form a logical row.
   // The '=' separator marks all rows above it as header rows.
   const rows: Array<{ cells: string[]; header: boolean }> = [];
-  let currentContent: string[] = [];
+  let currentContent: GridLine[] = [];
 
   for (let li = 1; li < lines.length; li++) {
     const trimmed = lines[li].trim();
     if (GRID_TABLE_SEPARATOR_RE.test(trimmed)) {
       // This separator ends the current row
       if (currentContent.length > 0) {
-        const lineCells = currentContent.map(line => gridLineCells(line, colBoundaries.map(b => b + indent)));
+        const layout = byCharacters > byDisplay ? 'characters' : byDisplay > byCharacters ? 'display' : undefined;
+        const lineCells = currentContent.map(line => gridLineCells(line, boundaries, layout));
         const cells: string[] = [];
         for (let col = 0; col < numCols; col++) {
           const cellLines = lineCells.map(cells => cells[col].replace(/^[ \t]+/, '').replace(/[ \t]+$/, ''));
@@ -325,7 +373,7 @@ function parseGridTable(lines: string[]): GridTableData | null {
       }
       currentContent = [];
     } else if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
-      currentContent.push(lines[li]);
+      currentContent.push(gridLines[li]!);
     } else {
       return null;
     }

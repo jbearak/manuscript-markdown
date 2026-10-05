@@ -674,6 +674,35 @@ describe('parseMd grid tables', () => {
       ['a👍🏽', 'a🇺🇸', 'aที่นี่', 'a👨‍👩‍👧', 'a✔️', 'a✅', 'a☺', 'a\u00adb'].map((text, k) => [text, String(k)]));
   });
 
+  it.each([
+    ['an escaped |', '+----------+---------+\n| 𝑎𝑏𝑐𝑑 | x\\|中文文字 |\n+----------+---------+', ['𝑎𝑏𝑐𝑑', 'x|中文文字']],
+    ['a | in code', '+----------+----------+\n| 𝑎𝑏𝑐𝑑 | `x|中文文字` |\n+----------+----------+', ['𝑎𝑏𝑐𝑑', '`x|中文文字`']],
+    ['a | in its one cell', '+----------+\n| 中文文字 | a |\n+----------+', ['中文文字 | a']],
+    ['a spaced | in code', '+----------+-----------+\n| 𝑎𝑏𝑐𝑑 | ` | 中文文字` |\n+----------+-----------+', ['𝑎𝑏𝑐𝑑', '` | 中文文字`']],
+    ['a spaced | in code that ends in a backslash', '+----------+------------+\n| 𝑎𝑏𝑐𝑑 | ` | 中文文字\\` |\n+----------+------------+', ['𝑎𝑏𝑐𝑑', '` | 中文文字\\`']],
+    ['backticks in two cells', '+-------------+-----------+\n| 𝑎𝑏𝑐𝑑𝑒` | a` |中文文字文 |\n+-------------+-----------+', ['𝑎𝑏𝑐𝑑𝑒`', 'a` |中文文字文']],
+  ])('reads a grid table Expand Table pads by characters, with %s under a + by display columns', (_name, md, cells) => {
+    // Both ways lined up, and the | in the cell under the + was taken for
+    // the cell's edge, so the cells' text moved
+    const table = parseMd(md).find(t => t.type === 'table');
+    expect(table?.rows?.[0].cells.map(cell => cell.runs.map(run => run.code ? '`' + run.text + '`' : run.text).join(''))).toEqual(cells);
+  });
+
+  it.each([
+    ['characters', ['| 𝑎𝑏𝑐𝑑 | a | 中文文字 |', '| 中文' + ' '.repeat(7) + '| b' + ' '.repeat(8) + '|'], [['𝑎𝑏𝑐𝑑', 'a | 中文文字'], ['中文', 'b']]],
+    ['characters, with an edge that touches its text', ['| 𝑎𝑏𝑐𝑑a| a | 中文文字 |', '| 中文' + ' '.repeat(7) + '| b' + ' '.repeat(8) + '|'], [['𝑎𝑏𝑐𝑑a', 'a | 中文文字'], ['中文', 'b']]],
+    ['display columns', ['| 𝑎𝑏𝑐𝑑 | a | 中文文字 |', '| 中文' + ' '.repeat(5) + '| b' + ' '.repeat(8) + '|'], [['𝑎𝑏𝑐𝑑 | a', '中文文字'], ['中文', 'b']]],
+  ])('reads a line that lines up both ways, with a | in a cell under a +, as its table\'s other line padded by %s', (_name, lines, rows) => {
+    const sep = '+----------+----------+';
+    const table = parseMd([sep, ...lines.flatMap(line => [line, sep])].join('\n')).find(t => t.type === 'table');
+    expect(table?.rows?.map(row => row.cells.map(cell => cell.runs.map(run => run.text).join('')))).toEqual(rows);
+  });
+
+  it('keeps a grid table cell\'s edge right after a backslash at the cell\'s end', () => {
+    const table = parseMd('+-----+-----+\n| abc\\| b|  |\n+-----+-----+').find(t => t.type === 'table');
+    expect(table?.rows?.[0].cells.map(cell => cell.runs.map(run => run.text).join(''))).toEqual(['abc\\', 'b|']);
+  });
+
   it.each(['👍🏽', '🇺🇸', '👨‍👩‍👧', '✔️'])('keeps a | after %s in a grid table\'s cell', (emoji) => {
     // Each character's width was counted alone, as a skin tone two, so the
     // cell's | was taken for the one under the +
