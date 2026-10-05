@@ -4721,7 +4721,8 @@ function formattingEquals(a: RunFormatting, b: RunFormatting): boolean {
     a.underline === b.underline &&
     a.strikethrough === b.strikethrough &&
     a.highlight === b.highlight &&
-    a.highlightColor === b.highlightColor &&
+    // A color without a highlight, which Markdown doesn't show
+    (!a.highlight || a.highlightColor === b.highlightColor) &&
     a.superscript === b.superscript &&
     a.subscript === b.subscript &&
     a.code === b.code;
@@ -5038,11 +5039,13 @@ function delimiterKinds(markdown: string): Set<string> {
  * span: in ` ` and `b` the backtick would pair with the code's and turn the
  * space into code. Text is read as import writes it, with * escaped, except
  * a bare URL's and a plain citation's. Code keeps its text literal, and so
- * does math, except for a backtick, which Markdown reads before math. An &
- * never joins, since &am and p; would read as an entity. A bare URL or email
- * joins only across whitespace, since linkify finds one only between
- * boundaries, and so does a plain citation, whose text may end in one.
- * Images and display math keep their own spans.
+ * does math, except for a backtick, which Markdown reads before math. Text
+ * whose & would read with the other span's text as an entity, as &am and p;
+ * would, keeps apart from it (appendRevised), and a plain citation with an
+ * &, which Markdown reads as it is, never joins. A bare URL or email joins
+ * only across whitespace, since linkify finds one only between boundaries,
+ * and so does a plain citation, whose text may end in one. Images and
+ * display math keep their own spans.
  */
 function spanJoin(item: InlineRevisionItem): { join: SpanJoin; literal: Set<string> } {
   switch (item.type) {
@@ -5050,7 +5053,7 @@ function spanJoin(item: InlineRevisionItem): { join: SpanJoin; literal: Set<stri
       const bare = !!item.href && (item.text === item.href || item.href === 'mailto:' + item.text) && !hasFormatting(item.formatting);
       if (item.formatting.code && !item.href) return { join: 'seam', literal: new Set() };
       return {
-        join: item.text.includes('&') ? 'never' : bare ? 'space' : 'seam',
+        join: bare ? 'space' : 'seam',
         literal: delimiterKinds(bare ? item.text : escapeMarkdownChars(item.text)),
       };
     }
