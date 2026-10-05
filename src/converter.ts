@@ -621,7 +621,8 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter)
   // after it that no [ inside it closes at, or else in the runs `after` it,
   // at the ] after those the [s inside it that close there take; a [ in
   // those runs doesn't nest, as it may yet be escaped. Without them, it's
-  // escaped, as one of them could close it.
+  // escaped, as one of them could close it. One export reads as a
+  // citation, before a ( too, is a citation's, which the keys below decide.
   const closers: number[] = [];
   let openAfter = 0;
   for (let i = text.length - 1; i >= 0; i--) {
@@ -630,6 +631,7 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter)
     const close = closers[closers.length - 1];
     let opens: boolean;
     if (text[i + 1] === '^') opens = true;
+    else if (close !== undefined && /^-?@/.test(text.slice(i + 1, i + 3)) && citationEndInText(text, i) === close) opens = false;
     else if (close !== undefined) opens = '([{'.includes(text[close + 1] ?? (after?.first || ' '));
     else if (!after) opens = true;
     else {

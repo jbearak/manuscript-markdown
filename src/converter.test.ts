@@ -4935,8 +4935,6 @@ describe('Word text that reads as Markdown', () => {
     'a ==== b',
     // A citation whose items export gives back otherwise
     '[@a; see_also_x]', '[@a;@b]',
-    // A citation lookalike before a (, which export reads as one
-    '[@a](b)',
     // An autolink past the 256 characters the check read, or with a
     // no-break space, which markdown-it allows in one
     '<urn:' + 'x'.repeat(300) + '>', '<ab:c\u00a0d>',
@@ -5267,6 +5265,15 @@ describe('Word text that reads as Markdown', () => {
     // A key's _ took a backslash, which went in the key
     const markdown = await importText('A.\n\nP XX Q.\n\nB.', '[@_smith] and [see @smith_, p. 5]');
     expect(markdown).toBe('A.\n\nP [@_smith] and [see @smith_, p. 5] Q.\n\nB.\n');
+  });
+
+  test.each(['[@a](b)', '[-@a](b)', '[@a]{.underline}', '[@a][b]'])('writes %s with the citation export reads in it', async (text) => {
+    // Its [ was escaped as a link's, so a citation whose key is missing,
+    // which export writes as its text, came back as text, and stayed text
+    // once the bibliography had the key
+    const markdown = await importText('A.\n\nP XX Q.\n\nB.', text);
+    expect(markdown).toBe('A.\n\nP ' + text + ' Q.\n\nB.\n');
+    expect(await roundTrip(markdown)).toBe(markdown + '\nCitation data for @a was not found in the bibliography file.\n');
   });
 
   test('writes a line start of formatted text as it is', async () => {
