@@ -527,15 +527,20 @@ function buildCitationFieldCode(
     '<w:r><w:fldChar w:fldCharType="end"/></w:r>';
 }
 
+/** A citation's XML: a field for the keys the bibliography has, with
+ *  `extraRPr`, and its text for those it hasn't, with `textRPr`, the whole
+ *  rPr of the formatting around it, which Word shows on text as on any
+ *  other, and import reads back. */
 export function generateCitation(
   run: { keys?: string[]; locators?: Map<string, string>; text: string; suppressAuthorKeys?: Set<string>; prefixes?: string[] },
   entries: Map<string, BibtexEntry>,
   citeprocEngine?: CiteprocEngine,
   usedCitationIds?: Set<string>,
   itemIdMap?: Map<string, string | number>,
-  extraRPr?: string
+  extraRPr?: string,
+  textRPr?: string
 ): CitationResult {
-  const rPrOpen = extraRPr ? '<w:rPr>' + extraRPr + '</w:rPr>' : '';
+  const rPrOpen = textRPr ?? (extraRPr ? '<w:rPr>' + extraRPr + '</w:rPr>' : '');
   if (!run.keys || run.keys.length === 0) {
     return { xml: '<w:r>' + rPrOpen + textElements('[' + run.text + ']') + '</w:r>' };
   }
