@@ -7531,6 +7531,10 @@ describe('Track changes (CriticMarkup)', () => {
       // An anchor that ends at the break holds it, and export splits it there
       ['Prefix {--a{==b==}{>>c<<}\n\nd--} suffix', 'Prefix {--a--}{=={--b\n\n--}==}{>>c<<}{--d--} suffix'],
       ['Prefix {++a{==b==}{>>c<<}\n\nd++} suffix', 'Prefix {++a++}{=={++b\n\n++}==}{>>c<<}{++d++} suffix'],
+      // An anchor of a substitution's old side alone holds the break that
+      // opens its new side, a span of the break alone, which export kept
+      // in the span to split the anchor at, not moved before it
+      ['Prefix {~~{==x==}{>>c<<}~>\n\nb~~} suffix', 'Prefix {=={--x--}{++\n\n++}==}{>>c<<}{++b++} suffix'],
       ['{--### {>>c<<}--}', '{--### --}{>>c<<}'],
       ['{++### {>>c<<}++}', '{++### ++}{>>c<<}'],
     ])('keeps the revised paragraph mark of %j, beside a comment', async (md, expected) => {
