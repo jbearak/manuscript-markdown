@@ -6495,6 +6495,15 @@ describe('Code block round-trip', () => {
     expect(result.markdown.trim()).toBe(md);
   });
 
+  test.each([
+    ['a backtick', '~~~a`b\ncode\n~~~'],
+    ['a backtick, and tildes in its code', '~~~~~a`b\n~~~~ x\n~~~~~'],
+  ])('keeps a language with %s in a fence of tildes', async (_, md) => {
+    // A backtick fence, whose info string can't hold one, was text
+    const result = await convertDocx((await convertMdToDocx(md)).docx);
+    expect(result.markdown.trim()).toBe(md);
+  });
+
   test('keeps an empty paragraph a Word user adds after a code block', async () => {
     const zip = await JSZip.loadAsync((await convertMdToDocx('```\ncode\n```\n\n## H')).docx);
     const xml = await zip.file('word/document.xml')!.async('string');
