@@ -2057,8 +2057,9 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
   const keys = readsCitations ? new Set<number>() : undefined;
   let core = escapeSensitiveHtmlLikeTags(escapeMarkdownChars(edges[2], lineStart && !delimited, after, keys), keys);
   // A ~ at the edge of struck text would join the ~~ around it, which
-  // reads ~~~a~~ as ~ and struck a, where nothing comes between them
-  if (fmt.strikethrough && !fmt.superscript && !fmt.subscript && !fmt.highlight && !fmt.underline) {
+  // reads ~~~a~~ as ~ and struck a, where nothing comes between them, as a
+  // highlight does inside them, but not one around them (`highlightOuter`)
+  if (fmt.strikethrough && !fmt.superscript && !fmt.subscript && (!fmt.highlight || highlightOuter) && !fmt.underline) {
     core = core.replace(/^~/, '\\~').replace(/((?:^|[^\\])(?:\\\\)*)~$/, (_m, before: string) => before + '\\~');
   }
   const escaped = edges[1] + core + edges[3];
@@ -2179,7 +2180,13 @@ function flankClass(code: number): number {
  */
 function resolveEmphasis(markdown: string): string {
   if (!markdown.includes(EMPHASIS_CLOSE) && !markdown.includes(HIGHLIGHT_OPEN)) return markdown;
-  markdown = joinHighlights(markdown);
+  // Whitespace at a highlight's edge goes outside it, as before it held it,
+  // next to an = outside it, as of the text or another highlight's ==,
+  // which navigation and the grammar read with the highlight's own, so
+  // ==a ====b=={red} as no highlight, but not a comment's ==}
+  markdown = joinHighlights(markdown)
+    .replace(/([^\S\n]+)\u0006==(?==(?!=\}))/g, (_m, space: string) => '\u0006==' + space)
+    .replace(/(?<==)==\u0005([^\S\n]+)/g, (_m, space: string) => space + '==\u0005');
   const closeAt = new Map<number, number>();
   const opens: number[] = [];
   for (let i = 0; i < markdown.length; i++) {
@@ -4982,6 +4989,19 @@ function escapeBangBeforeLink(markdown: string, segment: ContentItem[], index: n
   return /(?:^|[^\\])(?:\\\\)*!$/.test(markdown) ? markdown.slice(0, -1) + '\\!' : markdown;
 }
 
+/** `markdown`, the Markdown of the item at `index`, with a } or {color} it
+ *  starts with escaped after a highlighted item, whose closing == would
+ *  read them as its own: ==a==} as CriticMarkup's ==}, which ends no
+ *  highlight, and ==a=={red} as its color. Where the highlight's == isn't
+ *  last, as in **==a==**}, the escape keeps the text as it is too. */
+function escapeAfterHighlight(markdown: string, segment: ContentItem[], index: number): string {
+  let k = index - 1;
+  while (k >= 0 && segment[k].type === 'text' && (segment[k] as ContentItem & { type: 'text' }).text === '') k--;
+  const before = segment[k];
+  if (k < 0 || !('formatting' in before) || !before.formatting?.highlight) return markdown;
+  return /^(?:\}|\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})/.test(markdown) ? '\\' + markdown : markdown;
+}
+
 /** A letter, digit or _, next to an inline equation's $, after which it
  *  opens no math, or before which it closes none */
 const WORD_NEXT_TO_MATH = /[A-Za-z0-9_]/;
@@ -6215,7 +6235,7 @@ function renderInlineRange(
       // An HTML block starts only a block's text, not a heading's, a table
       // cell's or a tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !opts?.cell && !item.revision;
-      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), segment, i), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
     }
     i++;
   }
@@ -6486,7 +6506,7 @@ function renderInlineRangeWithIds(
       // An HTML block starts only a block's text, not a heading's, a table
       // cell's or a tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !opts?.cell && !item.revision;
-      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), segment, i), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
     }
     i++;
   }

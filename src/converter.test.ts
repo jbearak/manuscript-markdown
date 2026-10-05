@@ -9113,7 +9113,8 @@ describe('Highlights across runs', () => {
     zip.file('word/document.xml', broken);
     return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
   };
-  const highlighted = (text: string, rPr = '') => '<w:r><w:rPr>' + rPr + '<w:highlight w:val="yellow"/></w:rPr><w:t xml:space="preserve">' + text + '</w:t></w:r>';
+  const highlighted = (text: string, rPr = '', color = 'yellow') => '<w:r><w:rPr>' + rPr + '<w:highlight w:val="' + color + '"/></w:rPr><w:t xml:space="preserve">' + text + '</w:t></w:r>';
+  const plain = (text: string) => '<w:r><w:t xml:space="preserve">' + text + '</w:t></w:r>';
 
   test.each([
     '==a *b* c==\n', '==a **b** `c` d=={red}\n', '==a <u>b</u> <sup>c</sup>==\n', '**==a==** b\n', '*==a==* ==b==\n',
@@ -9128,8 +9129,35 @@ describe('Highlights across runs', () => {
     ['a highlighted space at its start', '<w:r><w:t>a</w:t></w:r>' + highlighted(' b'), 'a== b==\n'],
     ['highlighted spaces alone', '<w:r><w:t>a</w:t></w:r>' + highlighted('  ') + '<w:r><w:t>b</w:t></w:r>', 'a==  ==b\n'],
     ['runs highlighted alike', highlighted('a ') + highlighted('b', '<w:i/>') + highlighted(' c'), '==a *b* c==\n'],
+    // Whose edge ~, which a highlight inside the ~~ kept from them, the ~~
+    // read as theirs once the highlight went around them
+    ['struck text with a ~ at its edge', highlighted('a ') + highlighted('~', '<w:strike/>'), '==a ~~\\~~~==\n'],
   ])('keeps Word\'s highlight with %s', async (_name, runs, md) => {
     // Its edge spaces went outside it, where Word showed them without it
+    expect(await fromWord(runs)).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    ['a }', highlighted('a ') + plain('}'), '==a ==\\}\n'],
+    ['a } with no space before it', highlighted('a') + plain('}'), '==a==\\}\n'],
+    ['a color in braces', highlighted('a ') + plain('{red}'), '==a ==\\{red}\n'],
+    ['a color in braces with no space before it', highlighted('a') + plain('{red}'), '==a==\\{red}\n'],
+  ])('escapes %s after a highlight', async (_name, runs, md) => {
+    // Its == read them as its own: ==a==} as CriticMarkup's ==}, which the
+    // preview and navigation read as no highlight, and ==a=={red} as its
+    // color, which lost the text
+    expect(await fromWord(runs)).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    ['another color\'s highlight', highlighted('a ') + highlighted('b', '', 'red'), '==a== ==b=={red}\n'],
+    ['another color\'s highlight before it', highlighted('a') + highlighted(' b', '', 'red'), '==a== ==b=={red}\n'],
+    ['an =', highlighted('a ') + plain('=b'), '==a== =b\n'],
+  ])('keeps a highlight\'s edge space outside it next to %s', async (_name, runs, md) => {
+    // Whose = ran into its ==, as in ==a ====b=={red}, which navigation and
+    // the grammar read as no highlight
     expect(await fromWord(runs)).toBe(md);
     expect(await roundTrip(md)).toBe(md);
   });
