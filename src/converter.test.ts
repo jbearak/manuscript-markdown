@@ -4302,6 +4302,16 @@ describe('Bare links', () => {
   });
 
   test.each([
+    ['a URL', '$x$[https\\://e.com](https://e.com)'],
+    ['an email address', '$x$[a\\@b.com](mailto:a@b.com)'],
+  ])('keeps a link to its address after inline math a link, %s', async (_name, md) => {
+    // Bare, its first letter kept the closing $ from closing the math
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    expect(await zip.file('word/document.xml')!.async('string')).toContain('<m:oMath>');
+    expect(await roundTrip(md)).toBe(md + '\n');
+  });
+
+  test.each([
     ['a link', '[ab](https://e.com)', '\\![ab](https://e.com)'],
     ['a link to its address, before a letter', '[https://e.com](https://e.com)x', '\\![https\\://e.com](https://e.com)x'],
     ['a link in a comment\'s range', '{==[ab](https://e.com)==}{>>c<<}', '{==\\![ab](https://e.com)==}{>>c<<}'],
