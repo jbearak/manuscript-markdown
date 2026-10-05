@@ -8398,6 +8398,19 @@ describe('Track changes (CriticMarkup)', () => {
       expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
     });
 
+    test('keeps a thematic break after a tracked mark', async () => {
+      // The break's text took the rule's place; the marks on its sides go,
+      // as Markdown has no break between a paragraph and a rule to track
+      const md = 'a\n\n---\n\nb\n';
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+      const xml = await zip.file('word/document.xml')!.async('string');
+      const mark = '<w:rPr><w:del w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"/></w:rPr>';
+      const tracked = xml.replace(/(<w:p [^>]*>)(<w:r><w:t>a<\/w:t>)/, '$1<w:pPr>' + mark + '</w:pPr>$2').replace('</w:pBdr>', '</w:pBdr>' + mark);
+      expect(tracked.split('w:id="99"').length).toBe(3);
+      zip.file('word/document.xml', tracked);
+      expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
+    });
+
     test('writes many tracked marks in linear time', () => {
       // Each read the content on its sides through all the others, moved
       // all the content after it, and read all the Markdown before it

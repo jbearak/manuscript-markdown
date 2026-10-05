@@ -8299,9 +8299,9 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
     }
     const container = breakContainer(para, 'after');
     if (!container || breakContainer(opening, 'before') !== container) continue;
-    // An indent override of the paragraph after, which the break's text
-    // in its place can't hold
-    if (para.indentOverride) continue;
+    // An indent override of the paragraph after, or its being a thematic
+    // break, which the break's text in its place can't hold
+    if (para.indentOverride || para.horizontalRule) continue;
     sides ??= contentAroundTrackedBreaks(content);
     const { before, after } = sides.get(k)!;
     if (!before?.survives || !after?.survives) continue;
