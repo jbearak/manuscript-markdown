@@ -2222,7 +2222,7 @@ function formatHrefForMarkdown(href: string): string {
  *  stays as it is, where a backslash would be text. */
 function markdownLink(text: string, href: string): string {
   const url = formatHrefForMarkdown(href);
-  const label = text.replace(/^(-?)@/, (_m, dash: string) => dash + '\\@');
+  const label = escapeTagLeftOpen(text.replace(/^(-?)@/, (_m, dash: string) => dash + '\\@'), url);
   const close = label.indexOf(']');
   if (close === -1 || citationEndInText('[' + label + '](' + url + ')', 0) === -1) return '[' + label + '](' + url + ')';
   // Each key before the ], at once, as the label is read once
@@ -2230,6 +2230,34 @@ function markdownLink(text: string, href: string): string {
   const keys = label.slice(0, close).replace(/(^|\s)(-?)@(?=[\p{L}\p{N}_])/gu, (key, space: string, dash: string, at: number) =>
     isInsideCodeRegion(1 + at + space.length + dash.length, code) ? key : space + dash + '\\@');
   return '[' + keys + label.slice(close) + '](' + url + ')';
+}
+
+// A tag's start, as far as an attribute's = and its value, unquoted or
+// with no closing quote, at the text's end, which the text after can go on
+const TAG_LEFT_OPEN_AT = /<[A-Za-z][A-Za-z0-9-]*\s(?:[^<>"']|"[^"]*"|'[^']*')*=\s*(?:[^\s"'=<>`]*|"[^"]*|'[^']*)$/y;
+
+/** A link's Markdown `text` with the < escaped of a tag it leaves open at
+ *  its end, as bold <span a=" before a link of "> to one place, which would
+ *  take the ](url) after it, and what follows to a >, as its attribute's.
+ *  From the left, as Markdown reads tags, each whole one taking the < in
+ *  it, but none in code or after a backslash. */
+function escapeTagLeftOpen(text: string, url: string): string {
+  let code: ReturnType<typeof computeCodeRegions> | undefined;
+  for (let i = text.indexOf('<'); i !== -1; i = text.indexOf('<', i + 1)) {
+    let slashes = 0;
+    while (text[i - 1 - slashes] === '\\') slashes++;
+    if (slashes % 2 === 1) continue;
+    code ??= computeCodeRegions('[' + text + '](' + url + ')');
+    if (isInsideCodeRegion(1 + i, code)) continue;
+    HTML_TAG_AT.lastIndex = i;
+    if (HTML_TAG_AT.test(text)) {
+      i = HTML_TAG_AT.lastIndex - 1;
+      continue;
+    }
+    TAG_LEFT_OPEN_AT.lastIndex = i;
+    if (TAG_LEFT_OPEN_AT.test(text)) return text.slice(0, i) + '\\' + text.slice(i);
+  }
+  return text;
 }
 
 // Comment extraction

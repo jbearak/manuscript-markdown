@@ -9064,8 +9064,41 @@ describe('Links of more than one run', () => {
     expect(replaced).not.toBe(xml);
     zip.file('word/document.xml', replaced);
     const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
-    expect(md).toBe('{--[**' + text + '**](https://e.com)--}{--[">](https://e.com)--}\n');
+    expect(md).toBe('{--[**\\' + text + '**](https://e.com)--}{--[">](https://e.com)--}\n');
     expect(await roundTrip(md.slice(0, -1))).toBe(md);
+  });
+
+  test.each([
+    ['a quoted value', '<span a="', '">'],
+    ['an unquoted value', '<span a=x', '>'],
+  ])('escapes a tag with %s left open in a link\'s text, which the link after it to one place could close', async (_name, first, second) => {
+    // The tag took the first link's ](url) and the second's [ as its
+    // attribute's, which export wrote as text
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const bold = (text: string) => '<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">' + text.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</w:t></w:r>';
+    const replaced = xml.replace(/(<w:hyperlink [^>]*>)<w:r><w:t>ab<\/w:t><\/w:r><\/w:hyperlink>/, (_m, open: string) =>
+      open + bold(first) + '</w:hyperlink>' + open + bold(second) + '</w:hyperlink>');
+    expect(replaced).not.toBe(xml);
+    zip.file('word/document.xml', replaced);
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(md).toBe('[**\\' + first + '**](https://e.com)[**' + second + '**](https://e.com)\n');
+    expect(await roundTrip(md.slice(0, -1))).toBe(md);
+  });
+
+  test.each([
+    ['in code, as it is', '<w:rStyle w:val="CodeChar"/>', '<span a="', '[`<span a="`](https://e.com)'],
+    ['inside a whole tag, as it is', '', '<a b="<span c=">', '[<a b="<span c=">](https://e.com)'],
+    ['after a backslash of the text, escaped', '', '\\<span a="', '[\\\\\\<span a="](https://e.com)'],
+  ])('writes the < of a tag left open in a link\'s text %s', async (_name, rPr, text, expected) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const replaced = xml.replace('<w:r><w:t>ab</w:t></w:r>', '<w:r><w:rPr>' + rPr + '</w:rPr><w:t xml:space="preserve">'
+      + text.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</w:t></w:r>');
+    expect(replaced).not.toBe(xml);
+    zip.file('word/document.xml', replaced);
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(md).toBe(expected + '\n');
   });
 
   test('keeps the spans of two deleted links apart where a tag one leaves open could close in the other', async () => {
@@ -9081,7 +9114,7 @@ describe('Links of more than one run', () => {
     expect(replaced).not.toBe(xml);
     zip.file('word/document.xml', replaced);
     const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
-    expect(md).toBe('{--[**a**<span a="](https://e.com) --}{--[**b**">](https://e.com)--}\n');
+    expect(md).toBe('{--[**a**\\<span a="](https://e.com) --}{--[**b**">](https://e.com)--}\n');
     expect(await roundTrip(md.slice(0, -1))).toBe(md);
   });
 
