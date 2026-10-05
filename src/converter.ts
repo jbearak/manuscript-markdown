@@ -2225,7 +2225,7 @@ function markdownLink(text: string, href: string): string {
   while (label.includes(']') && citationEndInText('[' + label + '](' + url + ')', 0) !== -1) {
     const key = /(?:^|\s)-?@[\p{L}\p{N}_]/u.exec(label.slice(0, label.indexOf(']')));
     if (!key) break;
-    const at = key.index + key[0].length - 2;
+    const at = key.index + key[0].indexOf('@');
     label = label.slice(0, at) + '\\' + label.slice(at);
   }
   return '[' + label + '](' + url + ')';
@@ -5719,17 +5719,17 @@ function linkGroup(
     }
     items.push(next);
   }
-  // A substitution the split cuts, of deletions before it and changes of
-  // the same author and time after it, is left to renderSubstitutionRun
-  // after the runs before it, as a span of its deletion could hold no --}
-  // in code, as {~~ can
-  const cut = inLink(start + items.length)?.revision;
-  if (cut) {
-    const ofCut = (item: ContentItem | undefined, type: RevisionInfo['type']) =>
-      isSubstitutionItem(item) && item.revision?.type === type && item.revision.author === cut.author && item.revision.date === cut.date;
+  // A substitution the group would cut, of deletions at its end and an
+  // insertion of the same author and time after a split or the link's end,
+  // is left to renderSubstitutionRun after the runs before it, as a span of
+  // its deletion could hold no --} in code, as {~~ can
+  const last = items[items.length - 1]?.revision;
+  if (last?.type === 'deletion') {
+    const ofLast = (item: ContentItem | undefined, type: RevisionInfo['type']) =>
+      isSubstitutionItem(item) && item.revision?.type === type && item.revision.author === last.author && item.revision.date === last.date;
     let k = start + items.length;
-    while (k < end && ofCut(segment[k], 'deletion')) k++;
-    if (k < end && ofCut(segment[k], 'addition')) while (items.length > 0 && ofCut(items[items.length - 1], 'deletion')) items.pop();
+    while (k < end && ofLast(segment[k], 'deletion')) k++;
+    if (k < end && ofLast(segment[k], 'addition')) while (items.length > 0 && ofLast(items[items.length - 1], 'deletion')) items.pop();
   }
   if (items.length < 2) return undefined;
   const href = first.href;
