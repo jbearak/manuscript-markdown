@@ -8106,21 +8106,9 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
   return deriveBlockquoteSpacingFromStructure(content);
 }
 
-/** Whether an item is still there after Word accepts (for a deletion) or
- *  rejects (for an addition) every change of the given type. */
-function survivesRevisions(item: ContentItem, type: RevisionInfo['type']): boolean {
-  if (item.type === 'text') return item.text.trim() !== '' && item.revision?.type !== type;
-  if (item.type === 'citation' || item.type === 'math' || item.type === 'footnote_ref' || item.type === 'image') {
-    return item.revision?.type !== type;
-  }
-  return false;
-}
-
 /** The inline content on each side of a tracked paragraph break: whether
- *  there is any, and whether any of it survives the break's revision type,
- *  as when Word accepts (for a deletion) or rejects (for an addition) every
- *  change of that type; undefined where a table or other block intervenes. */
-type TrackedBreakSide = { content: boolean; survives: boolean } | undefined;
+ *  there is any; undefined where a table or other block intervenes. */
+type TrackedBreakSide = { content: boolean } | undefined;
 
 /**
  * The content on each side of each tracked break in `content`, by the
@@ -8135,10 +8123,10 @@ type TrackedBreakSide = { content: boolean; survives: boolean } | undefined;
  * square of their number.
  */
 function contentAroundTrackedBreaks(content: ContentItem[]): Map<number, { before: TrackedBreakSide; after: TrackedBreakSide }> {
-  type Side = { content: boolean; survives: boolean; end: 'open' | 'block' | 'none' };
+  type Side = { content: boolean; end: 'open' | 'block' | 'none' };
   const types: RevisionInfo['type'][] = ['addition', 'deletion'];
-  const fresh = (): Side => ({ content: false, survives: false, end: 'none' });
-  const read = (side: Side): TrackedBreakSide => side.end === 'none' ? { content: side.content, survives: side.survives } : undefined;
+  const fresh = (): Side => ({ content: false, end: 'none' });
+  const read = (side: Side): TrackedBreakSide => side.end === 'none' ? { content: side.content } : undefined;
   const passes = (k: number, type: RevisionInfo['type']) => (content[k] as ParaItem).breakRevision?.type === type || opensNewSide(content, k);
   const sides = new Map<number, { before: TrackedBreakSide; after: TrackedBreakSide }>();
   // Before each break, from the start: a block before the content ends
@@ -8153,7 +8141,7 @@ function contentAroundTrackedBreaks(content: ContentItem[]): Map<number, { befor
       for (const type of types) state[type] = { ...fresh(), end: 'block' };
     } else {
       for (const type of types) {
-        if (state[type].end === 'none') state[type] = { content: true, survives: state[type].survives || survivesRevisions(item, type), end: 'none' };
+        if (state[type].end === 'none') state[type] = { content: true, end: 'none' };
       }
     }
   }
@@ -8173,7 +8161,7 @@ function contentAroundTrackedBreaks(content: ContentItem[]): Map<number, { befor
       for (const type of types) state[type] = { ...fresh(), end: 'block' };
     } else {
       for (const type of types) {
-        if (state[type].end !== 'block') state[type] = { content: true, survives: state[type].survives || survivesRevisions(item, type), end: 'none' };
+        if (state[type].end !== 'block') state[type] = { content: true, end: 'none' };
       }
     }
   }
@@ -8252,9 +8240,10 @@ function trackedBreakMarks(values: unknown): TrackedBreakMarks {
 }
 
 /** A paragraph break tracked in Word goes inside the CriticMarkup span as a
- *  blank line, as in {--end.\n\nStart--}, when content survives on both
- *  sides: otherwise accepting or rejecting the change leaves an empty
- *  paragraph, which Markdown drops anyway, and the plain break reads better.
+ *  blank line, as in {--end.\n\nStart--}, even where nothing of the change
+ *  is left on one side of it once accepted or rejected, as for a paragraph
+ *  deleted with its mark, {--a\n\n--}b, which export writes back as it was.
+ *  One whose mark Word doesn't track stays a span of its own, {--a--}.
  *  The break joins the span of the inline content before it in the same
  *  revision, or, opening the new side of a substitution, as in
  *  {~~a~>\n\nb~~}, its old side. After inline content in no revision or
@@ -8306,7 +8295,7 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
     if (para.indentOverride || para.horizontalRule) continue;
     sides ??= contentAroundTrackedBreaks(content);
     const { before, after } = sides.get(k)!;
-    if (!before?.survives || !after?.survives) continue;
+    if (!before || !after?.content) continue;
     joined ??= [];
     copy(last + 1);
     const prefix = linePrefix(para, opening);
@@ -8345,11 +8334,14 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
 
 /** Markdown with each tracked break from joinTrackedParagraphBreaks inside
  *  the spans before and after it, as in {++**a**\n\nmore++} rather than
- *  {++**a**++}{++\n\n++}{++more++}. */
+ *  {++**a**++}{++\n\n++}{++more++}, and the spaces and tabs the span has at
+ *  the next line's start, which export would drop there, as references, as
+ *  in {--a\n\n&#32;b--}. */
 function joinSpansAtTrackedBreaks(markdown: string, marks: TrackedBreakMarks): string {
   const boundary = '(?:\\+\\+\\}\\{\\+\\+|--\\}\\{--)?';
-  const marked = new RegExp(boundary + marks.start + '([^' + marks.end + ']*)' + marks.end + boundary, 'g');
-  return markdown.replace(marked, (_match, text: string) => text).split(marks.alone).join('');
+  const marked = new RegExp(boundary + marks.start + '([^' + marks.end + ']*)' + marks.end + boundary + '([ \\t]*)', 'g');
+  return markdown.replace(marked, (_match, text: string, whitespace: string) =>
+    text + whitespace.replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;')).split(marks.alone).join('');
 }
 
 export function buildMarkdown(

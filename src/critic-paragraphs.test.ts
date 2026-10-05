@@ -18,9 +18,8 @@ describe('paragraphs inside CriticMarkup additions', () => {
     for (const paragraph of paragraphs) expect(paragraph).toContain('<w:ins');
     const imported = await convertDocx(docx);
     const body = imported.markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
-    expect(body.split(/\n\s*\n/)).toHaveLength(2);
-    expect(body).toContain('{++This is a sentence.++}');
-    expect(body).toContain('{++This sentence is in another paragraph.');
+    // The break goes in the insertion, whose mark Word tracks
+    expect(body).toBe('{++This is a sentence.\n\nThis sentence is in another paragraph.++}');
   });
 
   it('renders the reported example as two preview paragraphs with original source maps', () => {
@@ -267,8 +266,11 @@ describe('tracked paragraph marks', () => {
     }
   });
 
-  it('keeps wholly inserted or deleted paragraphs as separate paragraphs on import', async () => {
-    expect(await roundTrip('{--Gone.\n\n--}Kept.')).toBe('{--Gone.--}\n\nKept.');
+  it('keeps a wholly deleted paragraph\'s mark in its deletion, and a break export leaves untracked as it is', async () => {
+    // The deletion came back as {--Gone.--} on a line of its own, whose mark
+    // export didn't track
+    expect(await roundTrip('{--Gone.\n\n--}Kept.')).toBe('{--Gone.\n\n--}Kept.');
+    // Export moves a break that opens a span with text outside it
     expect(await roundTrip('Kept.{++\n\nNew.++}')).toBe('Kept.\n\n{++New.++}');
   });
 });
