@@ -2621,14 +2621,26 @@ const QUOTE_BLOCK_WARNINGS: Partial<Record<MdToken['type'], string>> = {
 // and characters XML can't hold, which go (see removeCharactersXmlCantHold),
 // but not other spaces, as U+3000, which are text.
 const EMPTY_QUOTE_CODE_WARNING = 'Empty code block inside blockquote dropped during conversion';
+// A note holds paragraphs, display math and tables, which import reads back,
+// so other blocks in one are its paragraphs, but for a rule and an empty code
+// block, which would be empty paragraphs
+const NOTE_BLOCK_WARNINGS: Partial<Record<MdToken['type'], string>> = {
+  list_item: 'List inside a note exported as note paragraphs',
+  blockquote: 'Blockquote inside a note exported as note paragraphs',
+  heading: 'Heading inside a note exported as a note paragraph',
+  code_block: 'Code block inside a note exported as a note paragraph',
+  hr: 'Horizontal rule inside a note dropped during conversion',
+};
+const EMPTY_NOTE_CODE_WARNING = 'Empty code block inside a note dropped during conversion';
 const isBlank = (text: string): boolean => !/[^ \t\n]/.test(text.replace(NOT_XML_CHARACTER, ''));
 const isEmptyCodeBlock = (token: MdToken): boolean => token.type === 'code_block' && token.runs.every(run => isBlank(run.text));
 
-/** A code block's text in a quote, as a paragraph's: its lines, with line
- *  breaks between them, which a line end in Word's text isn't, but not
- *  before blank lines at its end, which a break can't end the paragraph
- *  with. Their characters XML can't hold stay, to go where they're counted. */
-function quotedCodeRuns(run: MdRun): MdRun[] {
+/** A code block's text as a paragraph's, in a quote or a note, which hold
+ *  no code block: its lines, with line breaks between them, which a line
+ *  end in Word's text isn't, but not before blank lines at its end, which a
+ *  break can't end the paragraph with. Their characters XML can't hold stay,
+ *  to go where they're counted. */
+function codeBlockLines(run: MdRun): MdRun[] {
   const lines = run.text.split('\n');
   let end = lines.length;
   while (end > 1 && isBlank(lines[end - 1])) end--;
@@ -2717,7 +2729,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
               ...t,
               listContinuation: undefined,
               trailingBlankLine: undefined,
-              ...(t.type === 'code_block' ? { runs: t.runs.flatMap(quotedCodeRuns) } : {}),
+              ...(t.type === 'code_block' ? { runs: t.runs.flatMap(codeBlockLines) } : {}),
             };
           quoted.push(kept);
         }
@@ -8071,6 +8083,20 @@ export async function convertMdToDocx(
       unformattedNotes.get(label));
     applyCustomStyleSentinels(bodyTokens, state.warnings);
     prescanCommentIds(bodyTokens, state);
+    const noteWarnings = new Set(bodyTokens.map(t => isEmptyCodeBlock(t) ? EMPTY_NOTE_CODE_WARNING : NOTE_BLOCK_WARNINGS[t.type]));
+    for (const warning of noteWarnings) {
+      if (warning) state.warnings.push(warning + ' (not supported). Move it outside the note for round-trip fidelity.');
+    }
+    const noteTokens = bodyTokens.flatMap((t): MdToken[] => {
+      if (t.type === 'hr' || isEmptyCodeBlock(t)) return [];
+      if (t.type === 'code_block') return [{ ...t, runs: t.runs.flatMap(codeBlockLines) }];
+      // An alert's text starts after the line end that follows its marker,
+      // and an empty list item, heading or alert is no paragraph, which
+      // import would drop
+      const start = t.alertLead ? t.runs.findIndex(run => run.type !== 'softbreak') : 0;
+      if (start === -1 || (t.type === 'list_item' || t.type === 'heading' || t.type === 'blockquote') && t.runs.length === 0) return [];
+      return [start > 0 ? { ...t, runs: t.runs.slice(start) } : t];
+    });
     // Generate paragraph OOXML for the note body
     const selfRefTag = state.notesMode === 'endnotes' ? 'w:endnoteRef' : 'w:footnoteRef';
     const pStyle = state.notesMode === 'endnotes' ? 'EndnoteText' : 'FootnoteText';
@@ -8087,8 +8113,8 @@ export async function convertMdToDocx(
     }
     const savedCustomStyle = state.activeCustomStyle;
     let isFirstContent = true;
-    for (let ti = 0; ti < bodyTokens.length; ti++) {
-      const t = bodyTokens[ti];
+    for (let ti = 0; ti < noteTokens.length; ti++) {
+      const t = noteTokens[ti];
       // Handle custom style sentinels inside footnotes
       if (t.customStyleOpen) { state.activeCustomStyle = t.customStyleOpen; continue; }
       if (t.customStyleClose) { state.activeCustomStyle = undefined; continue; }
@@ -8139,7 +8165,7 @@ export async function convertMdToDocx(
       }
     }
     state.activeCustomStyle = savedCustomStyle;
-    if (bodyTokens.length === 0 || isFirstContent) {
+    if (noteTokens.length === 0 || isFirstContent) {
       // No content tokens (empty body or all sentinels) — emit self-ref paragraph
       if (!bodyXml) bodyXml = '<w:p>' + paragraphPPr + selfRefRun + '</w:p>';
     }

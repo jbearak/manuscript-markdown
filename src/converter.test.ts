@@ -6611,6 +6611,48 @@ describe('Blocks a quote can\'t hold', () => {
   });
 });
 
+describe('Blocks a note can\'t hold', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  const note = (body: string) => 'T.[^1]\n\n[^1]: A.\n\n    ' + body.replace(/\n(?!\n)/g, '\n    ') + '\n';
+  test.each([
+    // Its line ends were in the paragraph's text, which Word shows as spaces
+    ['a code block', note('```\nc\n  d\n```'), note('c\\\n&#32;&#32;d'), 'Code block inside a note exported as a note paragraph'],
+    ['an indented code block', note('    c'), note('c'), 'Code block inside a note exported as a note paragraph'],
+    // Which left an empty paragraph
+    ['an empty code block', note('```\n```\n\nB.'), note('B.'), 'Empty code block inside a note dropped during conversion'],
+    ['a horizontal rule', note('---\n\nB.'), note('B.'), 'Horizontal rule inside a note dropped during conversion'],
+    ['a list', note('- a\n- b'), note('a\n\nb'), 'List inside a note exported as note paragraphs'],
+    ['a quote', note('> q'), note('q'), 'Blockquote inside a note exported as note paragraphs'],
+    ['a heading', note('# h'), note('h'), 'Heading inside a note exported as a note paragraph'],
+  ])('warns of %s', async (_name, md, expected, warning) => {
+    // Export changed each with no warning
+    const { docx, warnings } = await convertMdToDocx(md);
+    expect(warnings).toEqual([warning + ' (not supported). Move it outside the note for round-trip fidelity.']);
+    expect(strip((await convertDocx(docx)).markdown)).toBe(expected);
+  });
+
+  test.each([
+    ['an alert', note('> [!NOTE]\n> B.')],
+    ['an alert with its text after a blank line', note('> [!NOTE]\n>\n> B.')],
+    ['an empty list item', note('-\n- B.')],
+    ['an empty heading', note('#\n\nB.')],
+  ])('writes %s with no empty paragraph, or space before its text', async (_name, md) => {
+    // An empty list item, heading or alert left an empty paragraph, which
+    // import dropped, and an alert's text started with a space for the line
+    // end after its marker
+    const { docx } = await convertMdToDocx(md);
+    const xml = await (await JSZip.loadAsync(docx)).file('word/footnotes.xml')!.async('string');
+    const body = /<w:footnote [^>]*w:id="1"[^>]*>([\s\S]*?)<\/w:footnote>/.exec(xml)![1];
+    const paragraphs = [...body.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map(p => p[0].replace(/<w:pPr>[\s\S]*?<\/w:pPr>|<w:rPr>[\s\S]*?<\/w:rPr>/g, '').replace(/<[^>]+>/g, ''));
+    expect(paragraphs).toEqual(['A.', 'B.']);
+  });
+
+  test('writes a code block that starts a note as its lines', async () => {
+    const { docx } = await convertMdToDocx('T.[^1]\n\n[^1]: ```\n    a\n    b\n    ```\n');
+    expect(strip((await convertDocx(docx)).markdown)).toBe('T.[^1]\n\n[^1]:\n\n    a\\\n    b\n');
+  });
+});
+
 describe('Display math in a paragraph\'s text', () => {
   const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
   const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);

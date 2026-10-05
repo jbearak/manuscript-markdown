@@ -664,6 +664,8 @@ This has a footnote[^1] and a named one[^my-note].
     Second paragraph of the named footnote.
 ```
 
+A note holds paragraphs, display equations and tables. A list, quote, heading or code block in a note exports as the note's paragraphs, a code block's lines with line breaks between them, and a horizontal rule or empty code block is dropped, each with a warning. An alert's text goes without its marker, and an empty list item, heading or alert is no paragraph.
+
 The `notes` frontmatter field controls whether footnotes or endnotes are generated in the DOCX output. Default is `footnotes`. Only `endnotes` needs to be specified explicitly:
 
 ```yaml
