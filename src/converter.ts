@@ -3195,14 +3195,16 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
   const lastItem = target[target.length - 1];
   const continues = lastItem !== undefined && 'commentIds' in lastItem && !!lastItem.commentIds
     && commentSetsEqual(lastItem.commentIds, activeComments);
-  /** Whether a comment's text has its end: a --> after its <!--, the > or
-   *  -> of an empty one, or a --!> it ends with */
+  /** Whether a comment's text has its end: a --> after its <!--, or the >
+   *  or -> of an empty one. Not a --!>, which ends a table's comment, as the
+   *  browser reads it, but not one inline Markdown reads to its --> */
   const closed = (text: string) => {
     const from = text.lastIndexOf('<!--') + 4;
-    return text.includes('-->', from) || /^-?>/.test(text.slice(from)) || text.endsWith('--!>');
+    return text.includes('-->', from) || /^-?>/.test(text.slice(from));
   };
+  // Nor an image's after it, which a ZWSP starts
   if (continues && lastItem.type === 'html_comment' && !rest.replace(/^\u200B+/, '').trimStart().startsWith('<!--')
-      && !closed(lastItem.text)) {
+      && !/^\u200B(?:!\[|<img\b)/i.test(rest) && !closed(lastItem.text)) {
     lastItem.text += rest.replace(/^\u200B+/, '');
     const end = afterComment(lastItem.text, lastItem.text.lastIndexOf('<!--') + 4);
     rest = end === -1 ? '' : lastItem.text.slice(end);

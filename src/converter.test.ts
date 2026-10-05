@@ -8951,6 +8951,7 @@ describe('round-trip regression: images export cannot embed', () => {
     ['two HTML comments', 'A <!-- a --><!-- b --> B'],
     ['an HTML comment and an image', 'A <!-- a -->![y](n.png) B'],
     ['an image and an HTML comment', 'A ![y](n.png)<!-- a --> B'],
+    ['an empty HTML comment and another', 'A <!--><!-- b --> B'],
   ])('reads %s that Word joins in one run', async (_name, md) => {
     // Their ZWSPs went in the Markdown, or the image after a comment went
     // missing
@@ -8969,6 +8970,8 @@ describe('round-trip regression: images export cannot embed', () => {
     ['an image after its ZWSP', 'A ![alt](missing.png) b', 1],
     ['an image after its !', 'A ![alt](missing.png) b', 2],
     ['an HTML comment after its <', 'A <!-- c --> b', 2],
+    // Which a table's comment ends at, but not one inline Markdown reads
+    ['an HTML comment after a --!> in it', 'A <!-- a --!> b --> B', 12],
   ])('joins %s when Word splits its run', async (_name, md, at) => {
     // Without the start of its opener, the run before it was dropped
     const { docx } = await convertMdToDocx(md);
@@ -8983,6 +8986,15 @@ describe('round-trip regression: images export cannot embed', () => {
     zip.file('word/document.xml', split);
     const markdown = (await convertDocx(new Uint8Array(await zip.generateAsync({ type: 'uint8array' })))).markdown;
     expect(markdown).toContain(md);
+  });
+
+  test('reads an image after an HTML comment with no --> as its own', async () => {
+    // It went on the comment, which hadn't closed
+    const rPr = '<w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr>';
+    const docx = await buildSyntheticDocx(wrapDocumentXml('<w:p><w:r><w:t xml:space="preserve">A </w:t></w:r>'
+      + '<w:r>' + rPr + '<w:t>\u200B&lt;!-- c --!&gt;</w:t></w:r><w:r>' + rPr + '<w:t>\u200B![y](n.png)\u200B</w:t></w:r>'
+      + '<w:r><w:t xml:space="preserve"> B</w:t></w:r></w:p>'));
+    expect((await convertDocx(docx)).markdown).toContain('A <!-- c --!>![y](n.png) B');
   });
 
   test('keeps a ZWSP in an image\'s Markdown as a character reference', async () => {
