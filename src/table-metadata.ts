@@ -65,12 +65,16 @@ export function parseHtmlTableCellSourceKind(raw: string | undefined): HtmlTable
     : undefined;
 }
 
-/** Which table's text the cells' `cells` are, as export and import of the
- *  HTML around an HTML table both find it: the text of each cell that has
- *  any, spaces run together, hashed, so neither the empty cells Word pads a
- *  short row with nor a merge's count */
-export function tableContentsFingerprint(cells: string[]): string {
-  const text = cells.map(cell => cell.replace(/\s+/g, ' ').trim()).filter(Boolean).join('|');
+/** Which table's text the rows' cells' `rows` are, as export and import of
+ *  the HTML around an HTML table both find it: each cell's text, spaces run
+ *  together, row by row, but for the empty cells at a row's end, as Word
+ *  pads a short row with, hashed */
+export function tableContentsFingerprint(rows: string[][]): string {
+  const text = rows.map(cells => {
+    const texts = cells.map(cell => cell.replace(/\s+/g, ' ').trim());
+    while (texts.length > 0 && !texts[texts.length - 1]) texts.pop();
+    return texts.join('\u001f');
+  }).join('\u001e');
   let hash = 0x811c9dc5;
   for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 0x01000193);
   return text.length + ':' + (hash >>> 0).toString(16);

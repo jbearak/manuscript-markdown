@@ -6366,6 +6366,25 @@ describe('HTML around a table in its block', () => {
     expect(markdown).toContain('<p>z</p>');
   });
 
+  test('keeps the HTML around a table off one Word adds before it with its text in other cells', async () => {
+    // Each table's text without its empty cells was the same
+    const first = (md: string) => convertMdToDocx(md).then(({ docx }) => JSZip.loadAsync(docx));
+    const zip = await first('<div><p>Cap</p>\n<table><tr><th>H</th><th>I</th></tr><tr><td>a</td><td></td></tr></table>\n</div>\n');
+    const added = await (await first('<table><tr><th>H</th><th>I</th></tr><tr><td></td><td>a</td></tr></table>\n')).file('word/document.xml')!.async('string');
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace('<w:tbl>', /<w:tbl>[\s\S]*?<\/w:tbl>/.exec(added)![0] + '<w:p/><w:tbl>'));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown.startsWith('<table>')).toBe(true);
+    expect(markdown).toContain('<div><p>Cap</p>\n\n| H | I |\n| --- | --- |\n| a | |');
+  });
+
+  test('keeps the HTML around a table with a cell over two rows', async () => {
+    const md = '<div><p>Cap</p>\n<table><tr><td rowspan="2">A</td><td>b</td></tr><tr><td>c</td></tr></table>\n</div>\n';
+    const markdown = await roundTrip(md);
+    expect(markdown.startsWith('<div><p>Cap</p>\n<table>')).toBe(true);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
   test('keeps the HTML around a table Word edits, at its index', async () => {
     const zip = await JSZip.loadAsync((await convertMdToDocx('<div><p>Cap</p>\n<table><tr><td>H</td></tr><tr><td>a</td></tr></table>\n</div>\n')).docx);
     const xml = await zip.file('word/document.xml')!.async('string');
@@ -6383,6 +6402,12 @@ describe('HTML around a table in its block', () => {
     // A line of one tag doesn't start a block after text
     ['a line of one tag after text', '', '\n# Source\n<span>\n*x*\n',
       '', '\n\n\\# Source\n<span>\n\\*x\\*\n'],
+    // Which export reads as no directive, but which went as one
+    ['a comment that reads as no style\'s', '', '\n<!-- style -->\n', '', '\n\n<!-- style -->\n'],
+    // Which went with the style's comments
+    ['a style\'s text between its comments', '', '\n<!-- style: Title -->*Caption*<!-- /style -->\n', '', '\n\n\\*Caption\\*\n'],
+    // Which a line of its own made an embed's, and export added its table
+    ['no embed\'s comment on the table\'s line', '', '<!-- embed: t.csv -->\n', '', '\n'],
   ])('keeps %s around a table that leaves HTML, as it read', async (_name, beforeHtml, afterHtml, beforeMd, afterMd) => {
     // A comment that reads as no directive went, as one that does, and text
     // read as Markdown, as # Source as a heading

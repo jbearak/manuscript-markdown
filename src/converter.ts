@@ -13,7 +13,8 @@ import { computeCodeRegions, computeMarkdownRegions, isInsideCodeRegion } from '
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { citationEndInText, compareNoteLabels, customStyleId, htmlBlocksIn, linkifiedColons, linkifiedText, linkifyMatches, startsHtmlBlock } from './md-to-docx';
+import { citationEndInText, compareNoteLabels, customStyleId, directiveRest, htmlBlocksIn, linkifiedColons, linkifiedText, linkifyMatches, startsHtmlBlock } from './md-to-docx';
+import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { tableContentsFingerprint } from './table-metadata';
 import { publicStyleNameForZoteroId, zoteroStyleIdForName } from './csl-loader';
@@ -7541,7 +7542,7 @@ function tableFirstRow(rows: TableRow[]): string {
 
 /** A table's text, as export finds it (see tableContentsFingerprint) */
 function tableContents(rows: TableRow[]): string {
-  return tableContentsFingerprint(rows.flatMap(row => row.cells.map(tableCellText)));
+  return tableContentsFingerprint(rows.map(row => row.cells.map(tableCellText)));
 }
 
 /** A table's first row and text, which tables alike in both share */
@@ -7549,10 +7550,6 @@ function tableIdentity(rows: TableRow[]): string {
   return tableFirstRow(rows) + '\n' + tableContents(rows);
 }
 
-// A comment export reads as a directive in a block of its own, as
-// <!-- table-font-size: 11 --> or <!-- landscape -->, or a style's around
-// text on a line
-const EXPORT_DIRECTIVE_RE = /^<!--\s*(?:\/?(?:landscape|portrait|style)|references|bibliography|(?:no-)?indent|(?:style|table-(?:font-size|font|orientation|col-widths|digits|decimal-mark|digit-grouping))\s*:[\s\S]*)\s*-->$/i;
 const CHARACTER_REFERENCE_AT = /&(?:#\d{1,7}|#[xX][\da-fA-F]{1,6}|[A-Za-z][A-Za-z\d]{1,31});/y;
 
 /** A line of the HTML around a table as Markdown text that reads as it did
@@ -7579,23 +7576,29 @@ function htmlLineAsText(line: string): string {
 
 /** The HTML around a table as blocks of their own, as it goes around one in
  *  another format, which Markdown reads as it read none of the table's
- *  block: its HTML blocks as they are, but one export would read as a
- *  directive, which goes, and its other lines as text, as # Source would
- *  be a heading. A line may read otherwise once one before it does, as a
- *  line of one tag doesn't start a block after text, so it reads it again. */
+ *  block: its HTML blocks as they are, and its other lines as text, as
+ *  # Source would be a heading. A comment export would read as a directive,
+ *  as <!-- table-font-size: 11 --> or a line of an embed's, which none of
+ *  them was in the table's block, goes, but for the text a style's goes
+ *  around on its line. A line may read otherwise once one before it does,
+ *  as a line of one tag doesn't start a block after text, so it reads it
+ *  again. */
 function detachedTableHtml(html: string): string | undefined {
   let lines = html.split('\n').map(text => ({ text, escaped: false }));
   for (let changed = true; changed;) {
     changed = false;
-    // Each line in an HTML block, and whether the block is a directive
-    const inHtml = new Map<number, boolean>();
+    // Each line in an HTML block, with what's left of it where the block
+    // is a directive
+    const inHtml = new Map<number, string | undefined>();
     for (const block of htmlBlocksIn(lines.map(line => line.text).join('\n'))) {
-      for (let k = block.start; k < block.end; k++) inHtml.set(k, EXPORT_DIRECTIVE_RE.test(block.content.trim()));
+      const rest = directiveRest(block.content);
+      for (let k = block.start; k < block.end; k++) inHtml.set(k, rest === undefined || k === block.start ? rest : '');
     }
     lines = lines.flatMap((line, k) => {
-      if (inHtml.get(k)) {
+      const rest = inHtml.get(k) ?? (parseEmbedDirective(line.text) ? '' : undefined);
+      if (rest !== undefined) {
         changed = true;
-        return [];
+        return /\S/.test(rest) ? [{ text: htmlLineAsText(rest), escaped: true }] : [];
       }
       if (inHtml.has(k) || line.escaped || !/\S/.test(line.text)) return [line];
       changed = true;

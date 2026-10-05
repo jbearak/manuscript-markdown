@@ -28,6 +28,17 @@ export { extractHtmlTables } from './html-table-parser';
 // --- Orientation sentinel regexes (hoisted for cache-friendliness in the token loop) ---
 const ORIENTATION_OPEN_RE = /^<!--\s*(landscape|portrait)\s*-->$/i;
 const ORIENTATION_CLOSE_RE = /^<!--\s*\/(landscape|portrait)\s*-->$/i;
+// The other directives a comment alone in a paragraph is (see directiveRest)
+const TABLE_FONT_SIZE_RE = /^<!--\s*table-font-size:\s*(\d+(?:\.\d+)?)\s*-->$/;
+const TABLE_FONT_RE = /^<!--\s*table-font:\s*(.+?)\s*-->$/;
+const TABLE_ORIENTATION_RE = /^<!--\s*table-orientation:\s*(landscape|portrait)\s*-->$/i;
+const TABLE_COL_WIDTHS_RE = /^<!--\s*table-col-widths:\s*(.+?)\s*-->$/;
+const TABLE_NUMBER_FORMAT_RE = /^<!--\s*table-(digits|decimal-mark|digit-grouping):\s*(.+?)\s*-->$/i;
+const REFERENCES_RE = /^<!--\s*(?:references|bibliography)\s*-->$/i;
+const INDENT_RE = /^<!--\s*(no-indent|indent)\s*-->$/i;
+const INLINE_STYLE_RE = /^<!--\s*style:\s*(.+?)\s*-->([\s\S]*?)<!--\s*\/style\s*-->$/i;
+const STYLE_OPEN_RE = /^<!--\s*style:\s*(.+?)\s*-->$/i;
+const STYLE_CLOSE_RE = /^<!--\s*\/style\s*-->$/i;
 const IMAGE_DIMENSION_ATTR_RE = '(\\d+(?:\\.\\d+)?|\\.\\d+)\\s*(px|in|cm|mm|pt|pc)?';
 
 // --- Implementation notes ---
@@ -682,6 +693,18 @@ export function linkifiedText(address: string, email: boolean): string {
 export function startsHtmlBlock(text: string): boolean {
   citationTextMd ??= createMarkdownIt();
   return citationTextMd.parse(text, {})[0]?.type === 'html_block';
+}
+
+/** What of a comment, a block of its own, export doesn't read as a
+ *  directive, where it reads it as one: the text a style's goes around on
+ *  its line, as in <!-- style: Title -->Text<!-- /style -->, or else none.
+ *  Undefined where it reads it as none. */
+export function directiveRest(comment: string): string | undefined {
+  const text = comment.trim();
+  const inlineStyle = INLINE_STYLE_RE.exec(text);
+  if (inlineStyle) return inlineStyle[2];
+  return [ORIENTATION_OPEN_RE, ORIENTATION_CLOSE_RE, TABLE_FONT_SIZE_RE, TABLE_FONT_RE, TABLE_ORIENTATION_RE, TABLE_COL_WIDTHS_RE,
+    TABLE_NUMBER_FORMAT_RE, REFERENCES_RE, INDENT_RE, STYLE_OPEN_RE, STYLE_CLOSE_RE].some(re => re.test(text)) ? '' : undefined;
 }
 
 /** The HTML blocks export reads in Markdown `text`, not in a quote or list:
@@ -2036,8 +2059,8 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
     const run = result[i].runs[0];
     if (run.type !== 'html_comment') continue;
     const text = run.text.trim();
-    const fontSizeMatch = text.match(/^<!--\s*table-font-size:\s*(\d+(?:\.\d+)?)\s*-->$/);
-    const fontMatch = text.match(/^<!--\s*table-font:\s*(.+?)\s*-->$/);
+    const fontSizeMatch = text.match(TABLE_FONT_SIZE_RE);
+    const fontMatch = text.match(TABLE_FONT_RE);
     if (!fontSizeMatch && !fontMatch) continue;
     // Look for the next table token, skipping intervening HTML comment paragraphs.
     // Note: sentinel comments (landscape/portrait/references/bibliography) are still
@@ -2076,7 +2099,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
     const run = result[i].runs[0];
     if (run.type !== 'html_comment') continue;
     const text = run.text.trim();
-    const orientMatch = text.match(/^<!--\s*table-orientation:\s*(landscape|portrait)\s*-->$/i);
+    const orientMatch = text.match(TABLE_ORIENTATION_RE);
     if (!orientMatch) continue;
     // Forward scan: skip HTML comment paragraphs to find the table token.
     // Sentinel post-processing has not yet run, so sentinels are still plain
@@ -2100,7 +2123,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
     const run = result[i].runs[0];
     if (run.type !== 'html_comment') continue;
     const text = run.text.trim();
-    const cwMatch = text.match(/^<!--\s*table-col-widths:\s*(.+?)\s*-->$/);
+    const cwMatch = text.match(TABLE_COL_WIDTHS_RE);
     if (!cwMatch) continue;
     // Forward scan: skip HTML comment paragraphs to find the table token.
     // Sentinel post-processing has not yet run, so sentinels are still plain
@@ -2126,7 +2149,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
   for (let i = result.length - 1; i >= 0; i--) {
     if (result[i].type !== 'paragraph' || result[i].runs.length !== 1 || result[i].runs[0].type !== 'html_comment') continue;
     const text = result[i].runs[0].text.trim();
-    const match = text.match(/^<!--\s*table-(digits|decimal-mark|digit-grouping):\s*(.+?)\s*-->$/i);
+    const match = text.match(TABLE_NUMBER_FORMAT_RE);
     if (!match) continue;
     let target = i + 1;
     while (target < result.length && result[target].type === 'paragraph'
@@ -2275,7 +2298,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
       if (result[i].type !== 'paragraph' || result[i].runs.length !== 1) continue;
       const run = result[i].runs[0];
       if (run.type !== 'html_comment') continue;
-      if (!/^<!--\s*(?:references|bibliography)\s*-->$/i.test(run.text.trim())) continue;
+      if (!REFERENCES_RE.test(run.text.trim())) continue;
       if (markerCount === 0) {
         result.splice(i, 1, { type: 'paragraph', runs: [], bibliographyMarker: true });
       } else {
@@ -2293,7 +2316,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
     const run = result[i].runs[0];
     if (run.type !== 'html_comment') continue;
     const text = run.text.trim();
-    const indentMatch = text.match(/^<!--\s*(no-indent|indent)\s*-->$/i);
+    const indentMatch = text.match(INDENT_RE);
     if (!indentMatch) continue;
     const override = indentMatch[1].toLowerCase() as 'indent' | 'no-indent';
     // Forward scan: skip HTML comment paragraphs to find the next content paragraph
@@ -2337,7 +2360,7 @@ function applyCustomStyleSentinels(tokens: MdToken[], warnings?: string[], refer
     const text = run.text.trim();
 
     // Single-line inline style: <!-- style: X -->content<!-- /style -->
-    const inlineMatch = text.match(/^<!--\s*style:\s*(.+?)\s*-->([\s\S]*?)<!--\s*\/style\s*-->$/i);
+    const inlineMatch = text.match(INLINE_STYLE_RE);
     if (inlineMatch) {
       if (activeStyle && warnings) {
         warnings.push('Nested <!-- style: --> directives are not supported; outer style "' + activeStyle + '" closed implicitly.');
@@ -2368,7 +2391,7 @@ function applyCustomStyleSentinels(tokens: MdToken[], warnings?: string[], refer
       continue;
     }
 
-    const openMatch = text.match(/^<!--\s*style:\s*(.+?)\s*-->$/i);
+    const openMatch = text.match(STYLE_OPEN_RE);
     if (openMatch) {
       if (activeStyle && warnings) {
         warnings.push('Nested <!-- style: --> directives are not supported; outer style "' + activeStyle + '" closed implicitly.');
@@ -2378,7 +2401,7 @@ function applyCustomStyleSentinels(tokens: MdToken[], warnings?: string[], refer
       sentinel.blankLinesAfter = tokens[i].blankLinesAfter;
       tokens.splice(i, 1, sentinel);
       activeStyle = openMatch[1];
-    } else if (/^<!--\s*\/style\s*-->$/i.test(text)) {
+    } else if (STYLE_CLOSE_RE.test(text)) {
       if (activeStyle) {
         const sentinel: MdToken = { type: 'paragraph', runs: [], customStyleClose: true };
         sentinel.blankLinesBefore = tokens[i].blankLinesBefore;
@@ -4055,7 +4078,7 @@ function recordTableMetadata(token: MdToken, state: DocxGenState): void {
   // import counts too, but for one it writes as its embed directive, so the
   // HTML around a table goes back with it, and not with one alike before it
   const firstRow = tableFirstRow(token.rows ?? []);
-  const contents = tableContentsFingerprint((token.rows ?? []).flatMap(row => row.cells.map(cellText)));
+  const contents = tableContentsFingerprint((token.rows ?? []).map(row => row.cells.map(cellText)));
   const alikeBefore = state.tablesAlike.get(firstRow + '\n' + contents) ?? 0;
   if (!(token.embedIdx !== undefined && token.embedIdx < state.embedDirectives.length)) state.tablesAlike.set(firstRow + '\n' + contents, alikeBefore + 1);
   if (token.tableHtmlAround) {
