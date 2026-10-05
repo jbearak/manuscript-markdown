@@ -5660,7 +5660,8 @@ const startsBlock = (item: ContentItem | undefined): boolean =>
  * hyperlink's, though it goes to the same place, so [a **b** c](u)
  * and a link with a line break in it stay one link. A revision of the whole
  * link goes around it, from `item`'s, and one of part of it inside it.
- * Undefined where the link is one run.
+ * Its emphasis is left marked, for the range's resolveEmphasis, which reads
+ * the runs around the link too. Undefined where the link is one run.
  */
 function linkGroup(
   segment: ContentItem[], start: number, end: number, commentIds: ReadonlySet<string>,
@@ -5686,29 +5687,48 @@ function linkGroup(
     items.push(next);
   }
   if (items.length < 2) return undefined;
+  const href = first.href;
   const whole = items.every(item => revisionsEqual(item.revision, first.revision));
+  // The item at k as Markdown in the link's text, which reads the runs after
+  // it up to `to` as the rest of the text before the link's ](url), as a
+  // link of one run does
+  const itemText = (k: number, to: number): string => items[k].text === '\\\n' ? items[k].text
+    : markedFormatting(items[k].text, items[k].formatting, false, runsAfter(segment, start + k + 1, to).linkTo(href));
   let text = '';
   let span: RevisionSpan | undefined;
   for (let k = 0; k < items.length; k++) {
     const item = items[k];
-    const next = items[k + 1];
-    // A deletion and an insertion of one author and time, a substitution
-    if (!whole && item.revision?.type === 'deletion' && next?.revision?.type === 'addition'
-        && next.revision.author === item.revision.author && next.revision.date === item.revision.date) {
-      const substitution = tryRenderSubstitution({ ...item, href: undefined }, { ...next, href: undefined }, text);
-      if (substitution !== null) {
-        text += substitution;
+    // Deletions and then insertions of one author and time, a substitution
+    // of its sides, each whole, as renderSubstitutionRun writes one
+    const revision = item.revision;
+    if (!whole && revision?.type === 'deletion') {
+      const side = (j: number, type: RevisionInfo['type']) => j < items.length && items[j].revision?.type === type
+        && items[j].revision!.author === revision.author && items[j].revision!.date === revision.date;
+      let additions = k;
+      while (side(additions, 'deletion')) additions++;
+      let sideEnd = additions;
+      while (side(sideEnd, 'addition')) sideEnd++;
+      // Each side reads apart, and resolves apart (see tryRenderSubstitution)
+      const sideText = (from: number, to: number) => {
+        let markdown = '';
+        for (let j = from; j < to; j++) markdown += itemText(j, start + to);
+        return resolveEmphasis(markdown);
+      };
+      const oldText = sideText(k, additions);
+      const newText = sideText(additions, sideEnd);
+      if (oldText && newText && substitutionHolds(oldText, newText)) {
+        text += '{~~' + oldText + '~>' + newText + '~~}';
         span = undefined;
-        k++;
+        k = sideEnd - 1;
         continue;
       }
     }
-    const markdown = item.text === '\\\n' ? item.text : wrapWithFormatting(item.text, item.formatting);
+    const markdown = itemText(k, end);
     if (whole) text += markdown;
     else [text, span] = appendRevised(text, markdown, item, span);
   }
   return {
-    text: '[' + (whole ? text : joinRevisedSpans(text)) + '](' + formatHrefForMarkdown(first.href) + ')',
+    text: markdownLink(whole ? text : joinRevisedSpans(text), href),
     end: start + items.length,
     item: whole ? first : { ...first, revision: undefined },
   };

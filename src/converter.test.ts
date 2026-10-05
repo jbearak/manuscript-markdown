@@ -8916,6 +8916,19 @@ describe('Links of more than one run', () => {
     expect(await roundTrip(md)).toBe(md + '\n');
   });
 
+  test.each([
+    ['brackets', '[\\[a **b** c\\]](https://e.com)'],
+    ['formatting that is emphasis only as HTML there', '[a<b>b.</b>c](https://e.com)'],
+    ['an @ first, which would read as a citation', '[\\@user **name**](https://e.com)'],
+    ['a -@ first', '[-\\@user **name**](https://e.com)'],
+    ['a substitution of formatted text', '[{~~a **b** c~>d *e* f~~}](https://e.com)'],
+    ['a substitution of formatted text in part of it', '[x {~~a **b**~>d~~} y](https://e.com)'],
+  ])('writes a link of more than one run with %s as a link of one run', async (_name, md) => {
+    // Each run's Markdown read neither the link around it nor the runs
+    // beside it, and a substitution paired only the runs at its seam
+    expect(await roundTrip(md)).toBe(md + '\n');
+  });
+
   test('keeps a soft line break in a link in the link', async () => {
     expect(await roundTrip('[link\ntext](https://e.com)')).toBe('[link text](https://e.com)\n');
   });
