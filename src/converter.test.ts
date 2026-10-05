@@ -9353,6 +9353,35 @@ describe('Highlights across runs', () => {
     expect(buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim()).toBe(md);
   });
 
+  test.each([
+    ['a ~~ inside emphasis, which keeps it', [run('https://', { highlight: true, italic: true, strikethrough: true }), run('example.com', { highlight: true })],
+      '==<i>~~https\\://~~</i>example.com=='],
+    ['a ~~ inside emphasis, outside a highlight', [run('https://', { italic: true, strikethrough: true }), run('example.com')], '<i>~~https\\://~~</i>example.com'],
+    ['an escaped _ in a highlight', [run('https://', { highlight: true }), run('_', { highlight: true, strikethrough: true })], '==https\\://~~\\_~~=='],
+    ['an escaped _', [run('https://'), run('a_', { strikethrough: true })], 'https\\://~~a\\_~~'],
+    ['a highlight\'s color', [run('https://'), run('e.com', { highlight: true, highlightColor: 'red' }), run('e_x')], 'https\\://==e.com=={red}e_x'],
+    ['a ~~ that can\'t close, a tag', [run('https://'), run('~-', { code: true }), run('e-', { strikethrough: true }), run('Z')], 'https\\://`~-`<s>e-</s>Z'],
+    ['a ~~ that runs into the one before it, a tag', [run('x http://', { strikethrough: true }), run('e_x', { strikethrough: true, highlight: true }), run('Z')],
+      '~~x http\\://~~<s>==e_x==</s>Z'],
+    ['highlights that don\'t join', [run('http://'), run('~-', { highlight: true }), run('c ', { highlight: true, italic: true }), run('~', { highlight: true, code: true }), run('Z')],
+      'http\\://==~-==*==c ==*==`~`==Z'],
+  ])('escapes the scheme of a URL whose host goes on as the runs after it write it, past %s', async (_name, items, md) => {
+    // The host was read from the runs' text and delimiters, not their
+    // Markdown: with a ~~ as a tag where it wasn't, or as one where it was,
+    // which ends the host, as an escape's backslash or a color's { does, and
+    // after a _, which keeps a host from ending, linkify found none
+    const markdown = buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim();
+    expect(markdown).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim()).toBe(md);
+  });
+
+  test.each([
+    ['a space at the end of its run', [run('x http:// ', { highlight: true }), run('d e', { highlight: true, strikethrough: true }), run('Z')], '==x http:// ~~d e~~==Z'],
+    ['a ~~ that closes after it, a tag', [run('https://', { strikethrough: true }), run('example.com')], '<s>https://</s>example.com'],
+  ])('writes the scheme of a URL before %s as it is', (_name, items, md) => {
+    expect(buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim()).toBe(md);
+  });
+
   const keyless = (commentIds: string[] = [], revision?: RevisionInfo) =>
     ({ type: 'citation', text: '{1}', pandocKeys: [], commentIds: new Set(commentIds), formatting: DEFAULT_FORMATTING, ...(revision ? { revision } : {}) }) as ContentItem;
 
