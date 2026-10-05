@@ -5048,11 +5048,12 @@ function characterReference(c: string): string {
  * it starts with is escaped, as with the closing $ it reads as no math,
  * and a letter or digit is written as a reference, after which the $
  * closes none. Before one, to `end`, a letter, digit or _ it ends with is
- * a reference, after which the $ opens none. A tracked change's delimiters
- * keep them apart but in a span of items (`span`), as a comment's do, and
- * so does an emphasis or highlight the Markdown starts or ends with. Where
- * the text goes is read by position, not from the Markdown before it,
- * which reading would copy.
+ * a reference, after which the $ opens none, and a $ it ends with is
+ * escaped, as with the opening $ it reads as no math. A tracked change's
+ * delimiters keep them apart but in a span of items (`span`), as a
+ * comment's do, and so does an emphasis or highlight the Markdown starts
+ * or ends with. Where the text goes is read by position, not from the
+ * Markdown before it, which reading would copy.
  */
 function textNextToMath(markdown: string, segment: ContentItem[], index: number, end: number, afterMath: boolean, span = false, before = ''): string {
   const item = segment[index];
@@ -5067,7 +5068,7 @@ function textNextToMath(markdown: string, segment: ContentItem[], index: number,
   if (next?.type !== 'math' || next.display || !commentSetsEqual(item.commentIds, next.commentIds ?? NO_COMMENTS)
       || (!span && (item.revision || next.revision))) return markdown;
   const last = markdown[markdown.length - 1];
-  if (!WORD_NEXT_TO_MATH.test(last)) return markdown;
+  if (last !== '$' && !WORD_NEXT_TO_MATH.test(last)) return markdown;
   let slashes = 0;
   while (markdown[markdown.length - 2 - slashes] === '\\') slashes++;
   const own = slashes;
@@ -5076,6 +5077,7 @@ function textNextToMath(markdown: string, segment: ContentItem[], index: number,
   if (slashes === markdown.length - 1 && endsWithBackslash(segment, index)) {
     for (let p = before.length - 1; p >= 0 && before.charCodeAt(p) === 92; p--) slashes++;
   }
+  if (last === '$') return slashes % 2 === 0 ? markdown.slice(0, -1) + '\\$' : markdown;
   // An escaped _ goes with its backslash, and a backslash before a letter
   // or digit is doubled, as before the reference's & it would escape it
   if (slashes % 2 === 0) return markdown.slice(0, -1) + characterReference(last);
