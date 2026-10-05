@@ -6475,6 +6475,12 @@ describe('HTML around a table in its block', () => {
     // HTML runs together, but which made a line break
     ['a comment, dollar signs and spaces at a line\'s end across lines', '', '\nSource <!-- hidden\nsecret --> $a\nb$ and  \ncontinued\n', '',
       '\n\nSource <!-- hidden\nsecret --> \\$a\nb$ and\ncontinued\n'],
+    // Which escaped the reference or tag after it
+    ['a backslash before a character reference or a tag', '', '\nSource\\&amp; and a\\\\<b>b</b>\n', '',
+      '\n\nSource\\\\&amp; and a\\\\\\\\<b>b</b>\n'],
+    // Which export reads as no directive, but which went as one
+    ['comments with a value no table directive reads', '', '\nSource\n<!-- table-digits: TBD -->\n<!-- table-col-widths: TBD -->\n', '',
+      '\n\nSource\n<!-- table-digits: TBD -->\n<!-- table-col-widths: TBD -->\n'],
   ])('keeps %s around a table that leaves HTML, as it read', async (_name, beforeHtml, afterHtml, beforeMd, afterMd) => {
     // A comment that reads as no directive went, as one that does, and text
     // read as Markdown, as # Source as a heading
@@ -6485,6 +6491,22 @@ describe('HTML around a table in its block', () => {
     zip.file('word/document.xml', tracked);
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
     expect(markdown).toBe(beforeMd + '| {++XX++} | b |\n| --- | --- |' + afterMd);
+  });
+
+  test.each([
+    ['as HTML', false],
+    ['that leaves HTML', true],
+  ])('writes many lines of HTML after a table %s in linear time', async (_name, tracked) => {
+    // Each line's escape indexed all the lines after it, even for a table
+    // that kept the HTML
+    const md = '<div>\n<table><tr><td>XX</td><td>b</td></tr></table>\n' + Array.from({ length: 16000 }, (_, i) => 'line ' + i + ' $').join('\n') + '\n</div>\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    if (tracked) zip.file('word/document.xml', xml.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>'));
+    const docx = await zip.generateAsync({ type: 'uint8array' });
+    const start = performance.now();
+    await convertDocx(docx);
+    expect(performance.now() - start).toBeLessThan(2000);
   });
 
   test('warns of no HTML kept around a table in a list item, which is dropped', async () => {

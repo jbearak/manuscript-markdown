@@ -7592,10 +7592,18 @@ function htmlLinesAsText(lines: string[]): string[] {
     i = from - 1;
   }
   plain += text.slice(from);
-  const plainLines = plain.replace(/\[(?=[^\]]*@)/g, '\0').split('\n');
-  const escaped = plainLines.map((line, n) =>
-    escapeMarkdownChars(line, true, RunsAfter.of(n + 1 < plainLines.length ? '\n' + plainLines.slice(n + 1).join('\n') : '')).replace(/\0/g, '\\['));
-  return escaped.join('\n').split(mark).map((part, k) => part + (raws[k] ?? '')).join('').split('\n');
+  const masked = plain.replace(/\[(?=[^\]]*@)/g, '\0');
+  // The lines after each, from the line end before them
+  const index = indexText(masked);
+  let end = -1;
+  const escaped = masked.split('\n').map(line => {
+    end += line.length + 1;
+    return escapeMarkdownChars(line, true, new RunsAfter(index, Math.min(end, masked.length))).replace(/\0/g, '\\[');
+  });
+  // A \ before one of them, which escapeMarkdownChars leaves, as it escapes
+  // no character it doesn't see, but which would escape its < or &
+  return escaped.join('\n').split(mark).map((part, k) => (k < raws.length && part.endsWith('\\') ? part + '\\' : part) + (raws[k] ?? ''))
+    .join('').split('\n');
 }
 
 /** The HTML around a table as blocks of their own, as it goes around one in
@@ -7694,9 +7702,11 @@ function renderTableOrFallback(
     ?? unused.find(([key, entry]) => key === String(tableIndex)
       && (renderOpts?.tablesAlike?.get(scope + '\n' + entry[2] + '\n' + entry[3]) ?? 0) <= Number(entry[4])) ?? [];
   if (aroundKey !== undefined) renderOpts?.usedTableHtmlAround?.add(aroundKey);
-  const before = around && detachedTableHtml(around[0]);
-  const after = around && detachedTableHtml(around[1]);
-  const r = (body: string) => ({ directivePrefix: fontPrefix, body, ...(before ? { before } : {}), ...(after ? { after } : {}) });
+  const r = (body: string) => {
+    const before = around && detachedTableHtml(around[0]);
+    const after = around && detachedTableHtml(around[1]);
+    return { directivePrefix: fontPrefix, body, ...(before ? { before } : {}), ...(after ? { after } : {}) };
+  };
   const rHtml = (body: string) => ({ directivePrefix: '', body });
   // If the original format was HTML or font value is comment-unsafe, emit HTML
   // directly. A table that holds what HTML cells can't goes on as if it had

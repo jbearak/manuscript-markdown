@@ -698,13 +698,23 @@ export function startsHtmlBlock(text: string): boolean {
 /** What of a comment, a block of its own, export doesn't read as a
  *  directive, where it reads it as one: the text a style's goes around on
  *  its line, as in <!-- style: Title -->Text<!-- /style -->, or else none.
- *  Undefined where it reads it as none. */
+ *  Undefined where it reads it as none, as a table's with a value it
+ *  doesn't read (see parseMd). */
 export function directiveRest(comment: string): string | undefined {
   const text = comment.trim();
   const inlineStyle = INLINE_STYLE_RE.exec(text);
   if (inlineStyle) return inlineStyle[2];
-  return [ORIENTATION_OPEN_RE, ORIENTATION_CLOSE_RE, TABLE_FONT_SIZE_RE, TABLE_FONT_RE, TABLE_ORIENTATION_RE, TABLE_COL_WIDTHS_RE,
-    TABLE_NUMBER_FORMAT_RE, REFERENCES_RE, INDENT_RE, STYLE_OPEN_RE, STYLE_CLOSE_RE].some(re => re.test(text)) ? '' : undefined;
+  const fontSize = TABLE_FONT_SIZE_RE.exec(text);
+  const font = TABLE_FONT_RE.exec(text);
+  const colWidths = TABLE_COL_WIDTHS_RE.exec(text);
+  const format = TABLE_NUMBER_FORMAT_RE.exec(text);
+  const reads = fontSize ? parseFloat(fontSize[1]) > 0 && isFinite(parseFloat(fontSize[1]))
+    : font ? !!font[1].trim()
+    : colWidths ? parseColWidths(colWidths[1]) !== undefined
+    : format ? (format[1].toLowerCase() === 'digits' ? parseTableDigits(format[2])
+      : format[1].toLowerCase() === 'decimal-mark' ? parseTableDecimalMark(format[2]) : parseTableDigitGrouping(format[2])) !== undefined
+    : [ORIENTATION_OPEN_RE, ORIENTATION_CLOSE_RE, TABLE_ORIENTATION_RE, REFERENCES_RE, INDENT_RE, STYLE_OPEN_RE, STYLE_CLOSE_RE].some(re => re.test(text));
+  return reads ? '' : undefined;
 }
 
 /** The HTML blocks export reads in Markdown `text`, not in a quote or list:
