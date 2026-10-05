@@ -1784,13 +1784,31 @@ export function parseRunProperties(
   return formatting;
 }
 
+/** `text` as the whitespace and line breaks (a backslash and a line's end)
+ *  it starts with, the rest, and those it ends with. Read from each end, as
+ *  a regex with a lazy middle took time in the square of a run of
+ *  whitespace inside the text, and found none past some length. */
+function edgeWhitespace(text: string): [string, string, string] {
+  let start = 0;
+  while (start < text.length) {
+    if (text.startsWith('\\\n', start)) start += 2;
+    else if (/\s/.test(text[start])) start++;
+    else break;
+  }
+  let end = text.length;
+  while (end > start) {
+    if (end - 2 >= start && text.startsWith('\\\n', end - 2)) end -= 2;
+    else if (/\s/.test(text[end - 1])) end--;
+    else break;
+  }
+  return [text.slice(0, start), text.slice(start, end), text.slice(end)];
+}
+
 /** Apply formatting delimiters in nesting order, keeping edge whitespace
  *  outside markers, and line breaks, whose backslash before a closer would
  *  escape it */
 function wrapMarkdownDelimited(text: string, open: string, close = open, suffix = ''): string {
-  const match = text.match(/^((?:\s|\\\n)*)(.*?)((?:\s|\\\n)*)$/s);
-  if (!match) return open + text + close + suffix;
-  const [, leading, core, trailing] = match;
+  const [leading, core, trailing] = edgeWhitespace(text);
   if (!core) return text;
   return leading + open + core + close + suffix + trailing;
 }
@@ -1860,7 +1878,7 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
   // whitespace: a \ or { at its end would escape the closer or open with
   // it, as in **\** and =={==, which its end escapes, as nothing follows
   const edges = !fmt.superscript && !fmt.subscript && (fmt.highlight || !fmt.underline && (fmt.strikethrough || fmt.italic || fmt.bold))
-    ? /^((?:\s|\\\n)*)(.*?)((?:\s|\\\n)*)$/s.exec(result)!
+    ? ['', ...edgeWhitespace(result)]
     : ['', '', result, ''];
   // Not a tag in a citation's keys, which export reads as they are
   const keys = readsCitations ? new Set<number>() : undefined;
