@@ -30,11 +30,12 @@ export interface OrientationDiagnostic {
  * Inline uses (other content on the same line) return false.
  */
 function isStandaloneDirective(text: string, matchStart: number, matchEnd: number): boolean {
-  // Find line boundaries
+  // Find line boundaries: a line feed or carriage return, alone or both, as
+  // markdown-it and computeLineStarts read them
   let lineStart = matchStart;
-  while (lineStart > 0 && text[lineStart - 1] !== '\n') lineStart--;
+  while (lineStart > 0 && text[lineStart - 1] !== '\n' && text[lineStart - 1] !== '\r') lineStart--;
   let lineEnd = matchEnd;
-  while (lineEnd < text.length && text[lineEnd] !== '\n') lineEnd++;
+  while (lineEnd < text.length && text[lineEnd] !== '\n' && text[lineEnd] !== '\r') lineEnd++;
 
   // Check for non-whitespace before or after the match on the same line
   const before = text.slice(lineStart, matchStart);

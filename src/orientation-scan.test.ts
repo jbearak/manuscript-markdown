@@ -102,6 +102,19 @@ describe('scanOrientationDirectives', () => {
     expect(findings[0].kind).toBe('unclosed');
   });
 
+  it.each([
+    ['a carriage return alone', '\r'],
+    ['a carriage return and a line feed', '\r\n'],
+  ])('reads a directive on a line ended by %s as one', async (_name, end) => {
+    // Its line went on to the next line feed, past the text after it, so
+    // it was inline, and the close after it orphaned, though export, like
+    // markdown-it, read the line's end there and the directive
+    const text = 'A\n\n<!-- landscape -->' + end + 'B\n\n<!-- /landscape -->';
+    expect(scanOrientationDirectives(text)).toEqual([]);
+    const { convertMdToDocx } = await import('./md-to-docx');
+    expect((await convertMdToDocx(text)).warnings).toEqual([]);
+  });
+
   it('enforces single active orientation', () => {
     // landscape open then portrait open — portrait is nested because landscape is active.
     // The scanner keeps the original opener (landscape), so /portrait is crossed
