@@ -5412,6 +5412,15 @@ describe('Word text that reads as Markdown', () => {
     expect(performance.now() - start).toBeLessThan(1500);
   });
 
+  test('reads a long run of citations for tags in linear time', () => {
+    // Each citation's search for a < read the run to its end
+    const start = performance.now();
+    expect(wrapWithFormatting('[@a] '.repeat(300000), DEFAULT_FORMATTING)).toBe('[@a] '.repeat(300000));
+    // Some 300 ms here, near two seconds on a slower runner, and four
+    // seconds here read to the end for each citation
+    expect(performance.now() - start).toBeLessThan(3000);
+  });
+
   test('escapes a long run of [ in linear time', () => {
     // Each [ looked for its ] through the rest of the text
     const start = performance.now();
@@ -5435,6 +5444,59 @@ describe('Word text that reads as Markdown', () => {
     const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
     expect(xml).toMatch(new RegExp('<w:rPr>' + rPr.replace(/[\\/]/g, '\\$&') + '</w:rPr><w:t>\\[@a'));
     expect(strip((await convertDocx(docx)).markdown).split('\n')[0]).toBe(md);
+  });
+
+  test.each([
+    ['[@a<b>c]', 'a&lt;b&gt;c'], ['[@a<br>]', 'a&lt;br&gt;'], ['[@a, p<u>]', 'a'], ['[@a, <i>passim</i>]', 'a'],
+  ])('writes the tag in %s as it is', async (text, key) => {
+    // It was a reference, as for Word's text, which export, as it reads a
+    // citation's keys as they are, read as keys, at its ;
+    const markdown = await importText('A.\n\nP XX Q.\n\nB.', text);
+    expect(markdown).toBe('A.\n\nP ' + text + ' Q.\n\nB.\n');
+    expect(await roundTrip(markdown)).toBe(markdown + '\nCitation data for @' + key + ' was not found in the bibliography file.\n');
+  });
+
+  test.each([
+    ['[@a; <b>see</b> @b]', '[@a; \\<b>see\\</b> @b]'], ['[@a; s<br>e @b]', '[@a; s\\<br>e @b]'],
+  ])('writes the tag in the prefix of %s with its < escaped', async (text, md) => {
+    // It was a reference, whose ; export took for the end of an item
+    const markdown = await importText('A.\n\nP XX Q.\n\nB.', text);
+    expect(markdown).toBe('A.\n\nP ' + md + ' Q.\n\nB.\n');
+    expect((await exported(markdown)).text[1]).toBe('P ' + text + ' Q.');
+  });
+
+  const escapeXml = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  test.each([
+    ['a table', '<table><tr><td>y</td></tr></table>] Q.', '&lt;table&gt;&lt;tr&gt;&lt;td&gt;y&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;] Q.'],
+    ['a heading', '# y] Q.', '\\# y] Q.'],
+    ['a list item', '- y] Q.', '\\- y] Q.'],
+    ['a line break\'s tag', '<br>] Q.', '&lt;br&gt;] Q.'],
+  ])('writes a bracket of Word\'s with a line break in it before %s as text', async (_name, line, md) => {
+    // Export reads a citation's keys and locators as they are, a line break
+    // as a backslash and a line's end, and a line after it that starts a
+    // block as one, as a table, which took the text after it
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\nXX\n\nB.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace('<w:t>XX</w:t>', '<w:t>P [@a, x</w:t><w:br/><w:t xml:space="preserve">' + escapeXml(line) + '</w:t>'));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('A.\n\nP \\[@a, x\\\n' + md + '\n\nB.\n');
+    expect((await exported(markdown)).text[1]).toBe('P [@a, x\n' + line);
+  });
+
+  test.each(['[@a<br>]', '[@a, <i>p</i>]', '[@a; <b>see</b> @b]'])('writes the tag in %s in an HTML table\'s cell as text, where export reads no citation', async (text) => {
+    // A cell with a tracked change, in a table with merged cells, which
+    // only HTML holds, is written as its text
+    const zip = await JSZip.loadAsync((await convertMdToDocx('| {++x++} XX y | z |\n|---|---|\n| a | b |\n')).docx);
+    const xml = (await zip.file('word/document.xml')!.async('string')).replace(/<w:tr\b[\s\S]*?<\/w:tr>/, row => {
+      const [first, second] = [...row.matchAll(/<w:tc>[\s\S]*?<\/w:tc>/g)].map(match => match[0]);
+      return row.replace(first, first.replace('<w:tcPr>', '<w:tcPr><w:gridSpan w:val="2"/>')).replace(second, '');
+    });
+    expect(xml).toContain('<w:gridSpan w:val="2"/>');
+    zip.file('word/document.xml', xml.replace('XX', escapeXml(text)));
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toContain(' ' + text.replace(/</g, '&lt;').replace(/>/g, '&gt;') + ' y</p>');
+    expect((await exported(markdown)).text.some(cell => cell.endsWith(' ' + text + ' y'))).toBe(true);
   });
 
   test.each(['[@a](b)', '[-@a](b)', '[@a]{.underline}', '[@a][b]'])('writes %s with the citation export reads in it', async (text) => {

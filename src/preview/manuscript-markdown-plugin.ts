@@ -28,6 +28,7 @@ import { formatTableNumbers } from '../table-number-format';
 import { getDefaultColorScheme } from '../alert-colors';
 import { splitCriticMarkupInMath, type CriticMathPart } from '../critic-math';
 import { findDollarMathAt } from '../math-delimiters';
+import { CITATION_ITEM_START_RE, citationEnd, citationPrefixText } from '../citation-syntax';
 
 export interface ManuscriptMarkdownIt extends MarkdownIt {
   manuscriptColors?: ColorScheme;
@@ -1147,6 +1148,38 @@ function manuscriptMarkdownBlock(state: StateBlock, startLine: number, endLine: 
   return true;
 }
 
+/** A citation, as export reads one (see citationEnd), as the text export
+ *  takes it for: its keys and locators as they are, and each prefix with
+ *  its escapes decoded, so a tag, emphasis or CriticMarkup in one shows as
+ *  written, as in Word, not as HTML or formatting */
+function citationRule(state: StateInline, silent: boolean): boolean {
+  // Not where markdown-it scans a link's label, which it alone does
+  // silently, and which a token that takes a [ in it ends: a link around a
+  // citation stays a link
+  if (silent) return false;
+  const start = state.pos;
+  if (start + 2 >= state.posMax) return false;
+  const end = citationEnd(state, start);
+  if (end === -1) return false;
+  // With the line breaks CriticMarkup protected in it, before which a key
+  // starts as after a space
+  const items = restoreCriticLineBreaks(state.src.slice(start + 1, end)).split(';').map(item => {
+    const key = CITATION_ITEM_START_RE.exec(item);
+    return key ? citationPrefixText(state, item.slice(0, key.index)) + item.slice(key.index) : item;
+  });
+  // Text once the rules that read text tokens, as linkify, have run (see
+  // manuscript_citation_text)
+  const token = state.push('manuscript_citation', '', 0);
+  token.content = '[' + items.join(';') + ']';
+  // The line breaks CriticMarkup protected in it, which its text no longer
+  // holds, for the source lines after it (see addInlineContent)
+  const consumedBreakSourceOffsets = collectProtectedBreaks(state.src.slice(start, end + 1), inlineSourceOffset(state, start))
+    .map(sourceBreak => sourceBreak.sourceOffset);
+  if (consumedBreakSourceOffsets.length > 0) token.meta = { manuscriptCriticConsumedBreakSourceOffsets: consumedBreakSourceOffsets };
+  state.pos = end + 1;
+  return true;
+}
+
 /**
  * Inline rule for ==highlight== patterns (not CriticMarkup)
  * @param state - The inline parsing state
@@ -1881,6 +1914,9 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
   // Run after Manuscript Markdown to avoid conflicts with {==...==}
   md.inline.ruler.after('manuscript_markdown', 'manuscript_markdown_format_highlight', parseFormatHighlight);
 
+  // A citation is text to export, as it is here, where export reads one
+  md.inline.ruler.before('emphasis', 'manuscript_markdown_citation', citationRule);
+
   // Register core rule to associate comments with annotated elements
   // Runs after inline parsing to post-process the token stream
   md.core.ruler.after('inline', 'manuscript_markdown_autolink_literals', autolinkLiteralsRule);
@@ -1964,6 +2000,21 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
         token.map = [lineMap.remap(token.map[0]), lineMap.remap(token.map[1])];
       }
     }
+  });
+
+  // A citation is text, as to export, once linkify and the rules that read
+  // text tokens, which export runs on none in one, are done: the host's
+  // heading IDs and an image's alt text are made of text tokens alone.
+  // Whatever the source holds, as a grid table's cells, which preprocessing
+  // writes as a placeholder, have tokens of their own.
+  md.core.ruler.push('manuscript_citation_text', (state: StateCore) => {
+    const citationsAsText = (tokens: Token[] | null): void => {
+      for (const token of tokens ?? []) {
+        if (token.type === 'manuscript_citation') token.type = 'text';
+        citationsAsText(token.children);
+      }
+    };
+    citationsAsText(state.tokens);
   });
 
   // Register renderers for each Manuscript Markdown token type

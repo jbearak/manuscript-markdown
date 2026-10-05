@@ -2310,3 +2310,59 @@ describe('CriticMarkup inside inline equations', () => {
     expect(html).not.toContain('{++');
   });
 });
+
+describe('Citations in the preview', () => {
+  it.each([
+    ['a tag in a key', 'P [@a<b>c] Q.', '<p>P [@a&lt;b&gt;c] Q.</p>'],
+    ['a line break\'s tag in a key', 'P [@a<br>] Q.', '<p>P [@a&lt;br&gt;] Q.</p>'],
+    ['a tag in a locator', 'P [@a, <i>passim</i>] Q.', '<p>P [@a, &lt;i&gt;passim&lt;/i&gt;] Q.</p>'],
+    ['emphasis in a prefix after the first', 'P [@a; *see* @b] Q.', '<p>P [@a; *see* @b] Q.</p>'],
+    ['a comment in a key', 'P [@a {>>c<<}] Q.', '<p>P [@a {&gt;&gt;c&lt;&lt;}] Q.</p>'],
+    ['a URL in a prefix', 'P [see https://e.com @a] Q.', '<p>P [see https://e.com @a] Q.</p>'],
+  ])('shows %s as text, as export reads it', (_name, md, html) => {
+    // A tag showed as HTML, and emphasis as formatting, though export reads
+    // a citation's keys and locators as they are, and its prefixes as text
+    expect(renderWithPlugin(md, 'github')).toContain(html);
+  });
+
+  it.each([
+    ['a prefix\'s escapes decoded', 'P [see \\*x\\* @a] Q.', '<p>P [see *x* @a] Q.</p>'],
+    ['the Markdown around it', '[x](u) [@a] *y* [b]', '<p><a href="u">x</a> [@a] <em>y</em> [b]</p>'],
+    ['one in an insertion', '{++see [@a<b>c]++}', '<ins class="manuscript-markdown-addition">see [@a&lt;b&gt;c]</ins>'],
+    // Whose line break CriticMarkup protected, which the key after it
+    // didn't start after, so the prefix kept its escapes
+    ['a prefix before a key on the next line, in an insertion', '{++[@a; see \\*also\\*\n@b]++}', '[@a; see *also*\n@b]'],
+    ['one in an image\'s alt text', '![see [@a<b>]](x.png)', 'alt="see [@a&lt;b&gt;]"'],
+    ['one in the alt text of an image in an image\'s', '![![see [@a]](inner.png)](outer.png)', 'alt="see [@a]"'],
+    ['a link around it', '[see [@a<b>]](x)', '<a href="x">see [@a&lt;b&gt;]</a>'],
+    ['a reference link around it', '[see [@a]][r]\n\n[r]: x', '<a href="x">see [@a]</a>'],
+    // Whose source, a placeholder, has no @, which showed none as <>
+    ['a grid table around it, the only one', '+---------------+\n| [@smith2020]  |\n+---------------+\n', '<th>[@smith2020]</th>'],
+  ])('shows a citation with %s', (_name, md, html) => {
+    expect(renderWithPlugin(md, 'github')).toContain(html);
+  });
+
+  it('leaves a citation in a heading\'s text tokens, which the host makes its ID of', () => {
+    const tokens = blockMapMarkdownIt.parse('# Results [@smith2020]', {});
+    const inline = tokens[tokens.findIndex(token => token.type === 'heading_open') + 1];
+    expect(inline.children!.filter(token => token.type === 'text').map(token => token.content).join('')).toBe('Results [@smith2020]');
+  });
+
+  it.each([
+    ['## {++Cites [@a;\n@b]\nTail++}', [[0, 2], [2, 3]]],
+    ['## {++Cites [@a;\n@b]\nTail [@c;\n@d]\nEnd++}', [[0, 2], [2, 5]]],
+  ])('keeps the source lines after a citation across lines in CriticMarkup, in %j', (input, maps) => {
+    // The line break its text took was the next break's, which mapped the
+    // paragraph after it to a line before its own
+    expect(parseBlockMaps(input)).toEqual(maps as Array<[number, number]>);
+  });
+
+  it('reads a long run of [ with no ] in linear time', () => {
+    // Each [ searched to the end of the text for its ]
+    const start = performance.now();
+    expect(renderWithPlugin('[@a '.repeat(200000), 'github')).toContain('[@a [@a');
+    // Some 450 ms here, over a second on a slower runner, and three
+    // seconds here searched again from each [
+    expect(performance.now() - start).toBeLessThan(3000);
+  });
+});
