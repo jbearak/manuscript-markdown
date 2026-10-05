@@ -5783,6 +5783,27 @@ describe('HTML table cells', () => {
     expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(md);
   });
 
+  test.each([
+    ['ends at a --!>', 'a<!-- hidden --!>b', 'a<!-- hidden -->b'],
+    ['has no end', 'a<!-- x', 'a<!-- x</td></tr></table> -->'],
+  ])('hides a cell\'s comment that %s in a table that leaves HTML', async (_name, cell, expected) => {
+    // Inline Markdown read it as text, and showed it
+    const zip = await JSZip.loadAsync((await convertMdToDocx('<table><tr><td>XX</td><td>' + cell + '</td></tr></table>\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const tracked = xml.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>');
+    expect(tracked).not.toBe(xml);
+    zip.file('word/document.xml', tracked);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('| {++XX++} | ' + expected + ' |\n| --- | --- |');
+  });
+
+  test('keeps a table whose cell has a comment with no end as HTML, with an end', async () => {
+    // HTML held no such comment, and the table became a pipe table, which
+    // showed it
+    const markdown = await roundTrip('<table><tr><td>a<!-- x</td></tr></table>\n');
+    expect(markdown).toContain('<p>a<!-- x</td></tr></table> --></p>');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
   test('writes a table whose cell has a comment with a blank line in it as no HTML table', async () => {
     // The blank line ended the table's HTML block, which exported as text
     const zip = await JSZip.loadAsync((await convertMdToDocx('<table><tr><td>a<!-- x y -->b</td><td>c</td></tr></table>\n')).docx);
@@ -8984,6 +9005,8 @@ describe('round-trip regression: images export cannot embed', () => {
     ['an HTML comment after its <', 'A <!-- c --> b', 2],
     // Which a table's comment ends at, but not one inline Markdown reads
     ['an HTML comment after a --!> in it', 'A <!-- a --!> b --> B', 12],
+    // Which reads as a payload's start, but in a comment with no end yet
+    ['an HTML comment before a ZWSP and an image\'s Markdown in it', 'A <!-- a \u200B![y](n.png)\u200B tail --> B', 8],
   ])('joins %s when Word splits its run', async (_name, md, at) => {
     // Without the start of its opener, the run before it was dropped
     const { docx } = await convertMdToDocx(md);
@@ -9009,13 +9032,19 @@ describe('round-trip regression: images export cannot embed', () => {
     expect((await roundTrip(md)).markdown).toBe(md + '\n');
   });
 
+  test('keeps a ZWSP and an image\'s Markdown in a pipe cell\'s comment after a --!> in it', async () => {
+    // A --!> ended it, as in an HTML table's cell, and the rest went
+    const md = '| A |\n| --- |\n| B <!-- a --!>\u200B![y](n.png)\u200B tail --> C |';
+    expect((await roundTrip(md)).markdown).toBe(md + '\n');
+  });
+
   test('reads an image after an HTML comment with no --> as its own', async () => {
     // It went on the comment, which hadn't closed
     const rPr = '<w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr>';
     const docx = await buildSyntheticDocx(wrapDocumentXml('<w:p><w:r><w:t xml:space="preserve">A </w:t></w:r>'
       + '<w:r>' + rPr + '<w:t>\u200B&lt;!-- c --!&gt;</w:t></w:r><w:r>' + rPr + '<w:t>\u200B![y](n.png)\u200B</w:t></w:r>'
       + '<w:r><w:t xml:space="preserve"> B</w:t></w:r></w:p>'));
-    expect((await convertDocx(docx)).markdown).toContain('A <!-- c --!>![y](n.png) B');
+    expect((await convertDocx(docx)).markdown).toContain('A <!-- c -->![y](n.png) B');
   });
 
   test('keeps a ZWSP in an image\'s Markdown as a character reference', async () => {
