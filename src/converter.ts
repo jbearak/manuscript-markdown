@@ -9,7 +9,7 @@ import { keepParagraphEdgeWhitespace } from './html-entities';
 import htmlBlockNames from 'markdown-it/lib/common/html_blocks.mjs';
 import { HTML_OPEN_CLOSE_TAG_RE, HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import { isMdAsciiPunct, isPunctChar, isWhiteSpace } from 'markdown-it/lib/common/utils.mjs';
-import { computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
+import { computeCodeRegions, computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
@@ -2218,14 +2218,21 @@ function formatHrefForMarkdown(href: string): string {
  *  before a link's ( (see citationEnd). Export ends a citation at the
  *  first ], escaped too, so it reads the text before an escaped ] in the
  *  text as one where a key's @ comes after a space, as in [see @a\]](u),
- *  whose @ is escaped then, as one escaped starts no key. */
+ *  whose @ is escaped then, as one escaped starts no key. A key in code
+ *  stays as it is, where a backslash would be text. */
 function markdownLink(text: string, href: string): string {
   const url = formatHrefForMarkdown(href);
   let label = text.replace(/^(-?)@/, (_m, dash: string) => dash + '\\@');
   while (label.includes(']') && citationEndInText('[' + label + '](' + url + ')', 0) !== -1) {
-    const key = /(?:^|\s)-?@[\p{L}\p{N}_]/u.exec(label.slice(0, label.indexOf(']')));
-    if (!key) break;
-    const at = key.index + key[0].indexOf('@');
+    const code = computeCodeRegions('[' + label + '](' + url + ')');
+    const keys = /(?:^|\s)-?@[\p{L}\p{N}_]/gu;
+    const before = label.slice(0, label.indexOf(']'));
+    let at = -1;
+    for (let key = keys.exec(before); key && at === -1; key = keys.exec(before)) {
+      const i = key.index + key[0].indexOf('@');
+      if (!isInsideCodeRegion(i + 1, code)) at = i;
+    }
+    if (at === -1) break;
     label = label.slice(0, at) + '\\' + label.slice(at);
   }
   return '[' + label + '](' + url + ')';

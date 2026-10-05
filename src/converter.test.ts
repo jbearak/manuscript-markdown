@@ -8966,6 +8966,16 @@ describe('Links of more than one run', () => {
     expect(await roundTrip(md.slice(0, -1))).toBe(md);
   });
 
+  test('leaves the key in a link\'s code as it is, where a backslash would be text', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const replaced = xml.replace('<w:r><w:t>ab</w:t></w:r>',
+      '<w:r><w:rPr><w:rStyle w:val="CodeChar"/></w:rPr><w:t xml:space="preserve">see @user]</w:t></w:r>');
+    expect(replaced).not.toBe(xml);
+    zip.file('word/document.xml', replaced);
+    expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown).toBe('[`see @user]`](https://e.com)\n');
+  });
+
   test('writes a substitution a link\'s split cuts whole, after the link\'s runs before it', async () => {
     // The link's runs took the deletion, without the insertion after the
     // split, and a span of the deletion alone ended at the --} in its code
