@@ -5226,10 +5226,16 @@ function appendHighlightGroup(
   noteLabels?: Map<string, string>, precedingMarkdown = out,
 ): [string, RevisionSpan | undefined] {
   const items = segment.slice(start, end) as InlineRevisionItem[];
+  const text = renderHighlightGroup(segment, start, end, rangeEnd, precedingMarkdown, noteLabels, last);
+  return appendRevised(out, text, items[0], last, combinedSpanJoin(items));
+}
+
+/** How a span of `items` together joins others (see spanJoin): as the most
+ *  constrained of them, with the delimiters each has of its own */
+function combinedSpanJoin(items: InlineRevisionItem[]): { join: SpanJoin; literal: Set<string> } {
   const joins = items.map(item => spanJoin(item));
   const join: SpanJoin = joins.some(j => j.join === 'never') ? 'never' : joins.some(j => j.join === 'space') ? 'space' : 'seam';
-  const text = renderHighlightGroup(segment, start, end, rangeEnd, precedingMarkdown, noteLabels, last);
-  return appendRevised(out, text, items[0], last, { join, literal: new Set(joins.flatMap(j => [...j.literal])) });
+  return { join, literal: new Set(joins.flatMap(j => [...j.literal])) };
 }
 
 /** One item of a substitution's side as Markdown, after `precedingText`,
@@ -5712,7 +5718,7 @@ const startsBlock = (item: ContentItem | undefined): boolean =>
  */
 function linkGroup(
   segment: ContentItem[], start: number, end: number, commentIds: ReadonlySet<string>,
-): { text: string; end: number; item: InlineRevisionItem } | undefined {
+): { text: string; end: number; item: InlineRevisionItem; join: { join: SpanJoin; literal: Set<string> } } | undefined {
   const first = segment[start];
   if (first.type !== 'text' || !first.href || !commentSetsEqual(first.commentIds, commentIds)) return undefined;
   const inLink = (i: number): ContentItem & { type: 'text' } | undefined => {
@@ -5733,12 +5739,14 @@ function linkGroup(
     }
     items.push(next);
   }
-  if (items.length < 2) return undefined;
   // A tag one run leaves open, which the runs after could close, as bold
   // <span a=" before ">, would read as HTML across the formatting's
-  // delimiters between them in one link's text, so the runs stay links of
-  // their own, whose spans of a change come between them
-  if (items.some((item, k) => k < items.length - 1 && OPEN_TAG_AT_END_RE.test(item.text))) return undefined;
+  // delimiters between them in one link's text, so the link ends after it,
+  // where its spans of a change, kept apart by the tag's delimiters (see
+  // spanJoin), come between them
+  const open = items.findIndex((item, k) => k < items.length - 1 && OPEN_TAG_AT_END_RE.test(item.text));
+  if (open !== -1) items.splice(open + 1);
+  if (items.length < 2) return undefined;
   // A substitution the group would cut, of deletions, and insertions or
   // not, at its end and an insertion of the same author and time after a
   // split or the link's end, is left to renderSubstitutionRun after the runs
@@ -5809,6 +5817,8 @@ function linkGroup(
     text: markdownLink(whole ? text : joinRevisedSpans(text), href),
     end: start + items.length,
     item: whole ? first : { ...first, revision: undefined },
+    // How a span of the whole link joins others, by each of its runs
+    join: combinedSpanJoin(items),
   };
 }
 
@@ -6005,7 +6015,7 @@ function renderInlineRange(
         }
         const link = linkGroup(segment, j, segmentEnd, commentSet);
         if (link) {
-          [anchorText, anchorSpan] = appendRevised(anchorText, link.text, link.item, anchorSpan);
+          [anchorText, anchorSpan] = appendRevised(anchorText, link.text, link.item, anchorSpan, link.join);
           j = link.end;
           continue;
         }
@@ -6056,7 +6066,7 @@ function renderInlineRange(
 
     const link = linkGroup(segment, i, segmentEnd, NO_COMMENTS);
     if (link) {
-      [out, lastSpan] = appendRevised(out, link.text, link.item, lastSpan);
+      [out, lastSpan] = appendRevised(out, link.text, link.item, lastSpan, link.join);
       i = link.end;
       continue;
     }
@@ -6326,7 +6336,7 @@ function renderInlineRangeWithIds(
 
     const link = linkGroup(segment, i, segmentEnd, currentIds);
     if (link) {
-      [out, lastSpan] = appendRevised(out, link.text, link.item, lastSpan);
+      [out, lastSpan] = appendRevised(out, link.text, link.item, lastSpan, link.join);
       i = link.end;
       continue;
     }

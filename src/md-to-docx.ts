@@ -5853,42 +5853,62 @@ function generateDeletedCriticContent(
   }
 
   let xml = '';
+  // A link's runs, and its line breaks, go in one element, as generateRuns
+  // writes a link, but for the next link to the same place, which starts
+  // another; the element stays open while the link goes on
+  let link: { href: string; rId: string; xml: string } | undefined;
+  const close = () => {
+    if (link) xml += '<' + DELETED_LINK + ' rId="' + link.rId + '">' + link.xml + '</' + DELETED_LINK + '>';
+    link = undefined;
+  };
+  const emit = (runXml: string, run?: MdRun) => {
+    if (!run?.href) {
+      close();
+      xml += runXml;
+      return;
+    }
+    if (link?.href !== run.href || run.linkStart) {
+      close();
+      link = { href: run.href, rId: hyperlinkRelationshipId(run.href, state), xml: '' };
+    }
+    link.xml += runXml;
+  };
   for (const run of formattedRuns) {
     if (run.type === 'softbreak') {
       const merged = mergeRunFormatting(run, outer, forced);
       const rPr = generateRPr(merged, extraRPr);
-      xml += '<w:r>' + (rPr ? rPr : '') + delText(' ') + '</w:r>';
+      emit('<w:r>' + (rPr ? rPr : '') + delText(' ') + '</w:r>', run);
       continue;
     }
     if (run.type === 'hardbreak') {
-      xml += '<w:r><w:br/></w:r>';
+      emit('<w:r><w:br/></w:r>', run);
       continue;
     }
     if (run.type === 'math') {
-      xml += generateMathXml(run.text, !!run.display, warnings);
+      emit(generateMathXml(run.text, !!run.display, warnings));
       continue;
     }
     if (run.type === 'critic_add' || run.type === 'critic_del') {
-      xml += generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr, warnings, state, options);
+      emit(generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr, warnings, state, options));
       continue;
     }
     if (run.type === 'critic_sub') {
-      xml += generateDeletedCriticContent(run.oldRuns, run.text, run, {}, extraRPr, warnings, state, options);
-      if (run.newText) xml += generateDeletedCriticContent(run.newRuns, run.newText, run, {}, extraRPr, warnings, state, options);
+      emit(generateDeletedCriticContent(run.oldRuns, run.text, run, {}, extraRPr, warnings, state, options));
+      if (run.newText) emit(generateDeletedCriticContent(run.newRuns, run.newText, run, {}, extraRPr, warnings, state, options));
       continue;
     }
     if (run.type === 'critic_highlight' || run.type === 'critic_comment') {
       if (run.type === 'critic_highlight' && run.text) {
-        xml += generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr, warnings, state, options);
+        emit(generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr, warnings, state, options));
       }
       continue;
     }
     if (run.type === 'footnote_ref') {
-      xml += noteReferenceXml(run.footnoteLabel || '', state, 'deletion', highlightRPr(run));
+      emit(noteReferenceXml(run.footnoteLabel || '', state, 'deletion', highlightRPr(run)));
       continue;
     }
     if (run.type === 'image') {
-      xml += imageRunXml(run, state, options, true);
+      emit(imageRunXml(run, state, options, true));
       continue;
     }
     if (run.type === 'citation') {
@@ -5898,14 +5918,14 @@ function generateDeletedCriticContent(
       const literal = '[' + run.text + ']';
       const merged = mergeRunFormatting({ type: 'text', text: literal, highlight: run.highlight, highlightColor: run.highlightColor }, outer, forced);
       const rPr = generateRPr(merged, extraRPr);
-      xml += '<w:r>' + (rPr ? rPr : '') + delText(literal) + '</w:r>';
+      emit('<w:r>' + (rPr ? rPr : '') + delText(literal) + '</w:r>');
       continue;
     }
     if (run.type !== 'text' || !run.text) continue;
     const rPr = generateRPr(run, extraRPr);
-    const runXml = '<w:r>' + (rPr ? rPr : '') + delText(run.text) + '</w:r>';
-    xml += run.href ? '<' + DELETED_LINK + ' rId="' + hyperlinkRelationshipId(run.href, state) + '">' + runXml + '</' + DELETED_LINK + '>' : runXml;
+    emit('<w:r>' + (rPr ? rPr : '') + delText(run.text) + '</w:r>', run);
   }
+  close();
   return xml;
 }
 

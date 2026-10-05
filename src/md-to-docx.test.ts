@@ -1198,6 +1198,17 @@ describe('generateParagraph', () => {
     expect(xml.match(/<w:hyperlink /g)?.length).toBe(count);
   });
 
+  it.each([
+    ['a deleted link of several runs', '{--[a **b**\\\nc](https://e.com)--}', 1],
+    ['deleted links to one place', '{--[a](https://e.com)[b](https://e.com)--}', 2],
+  ])('writes %s as a hyperlink each', async (_name, md, count) => {
+    // Each run of a deleted link was a hyperlink of its own
+    const { docx } = await convertMdToDocx(md);
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml.match(/<w:hyperlink /g)?.length).toBe(count);
+  });
+
   it('generates softbreak as space', () => {
     const token: MdToken = {
       type: 'paragraph',

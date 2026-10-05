@@ -8911,6 +8911,8 @@ describe('Links of more than one run', () => {
     ['in a comment', '{==[a **b** c](https://e.com)==}{>>note<<}'],
     ['in a list item', '- [a **b** c](https://e.com)'],
     ['in a note', 'Text.[^1]\n\n[^1]: [a **b** c](https://e.com)'],
+    ['in a deletion', '{--[a **b** c](https://e.com)--}'],
+    ['with a line break, in a deletion', '{--[a\\\nb **c**](https://e.com)--}'],
   ])('keeps a link %s one link', async (_name, md) => {
     // Each run, and each side of a line break, was a link of its own
     expect(await roundTrip(md)).toBe(md + '\n');
@@ -9023,6 +9025,32 @@ describe('Links of more than one run', () => {
     const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
     expect(md).toBe('{--[**<span a="**](https://e.com)--}{--[">](https://e.com)--}\n');
     expect(await roundTrip(md.slice(0, -1))).toBe(md);
+  });
+
+  test('keeps the spans of two deleted links apart where a tag one leaves open could close in the other', async () => {
+    // A span of both, joined as their first runs could, read the tag across them as HTML
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    let id = 90;
+    const deleted = (text: string, bold = false) => '<w:del w:id="' + (id++) + '" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>'
+      + (bold ? '<w:rPr><w:b/></w:rPr>' : '') + '<w:delText xml:space="preserve">' + text + '</w:delText></w:r></w:del>';
+    const replaced = xml.replace(/<w:hyperlink ([^>]*)><w:r><w:t>ab<\/w:t><\/w:r><\/w:hyperlink>/, (_m, attrs: string) =>
+      '<w:hyperlink ' + attrs + '>' + deleted('a', true) + deleted('&lt;span a="') + '</w:hyperlink>' + deleted(' ')
+      + '<w:hyperlink ' + attrs + '>' + deleted('b', true) + deleted('"&gt;') + '</w:hyperlink>');
+    expect(replaced).not.toBe(xml);
+    zip.file('word/document.xml', replaced);
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(md).toBe('{--[**a**<span a="](https://e.com) --}{--[**b**">](https://e.com)--}\n');
+    expect(await roundTrip(md.slice(0, -1))).toBe(md);
+  });
+
+  test('writes a link of many runs with a tag left open near its end in linear time', () => {
+    // The link was taken apart at the tag and read again from each run after
+    const items: ContentItem[] = Array.from({ length: 32000 }, (_, k) => ({ type: 'text', text: k === 31997 ? '<span a="' : 'a',
+      href: 'https://e.com', link: 1, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, bold: k % 2 === 0 } }));
+    const start = performance.now();
+    buildMarkdown(items, new Map());
+    expect(performance.now() - start).toBeLessThan(1000);
   });
 
   test.each([
