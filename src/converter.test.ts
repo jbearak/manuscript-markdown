@@ -8986,6 +8986,23 @@ describe('Links of more than one run', () => {
     expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown).toBe('[`see @user]`](https://e.com)\n');
   });
 
+  test('writes a substitution in a link from a later deletion where one from the first doesn\'t hold', async () => {
+    // A struck } wrote a ~~} in the deletions' side, and the deletions after
+    // it took spans of their own, one ending at the --} in its code
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const revision = ' w:author="A" w:date="2024-01-01T00:00:00Z"';
+    const deleted = (id: number, rPr: string, text: string) => '<w:del w:id="' + id + '"' + revision + '><w:r><w:rPr>' + rPr + '</w:rPr>'
+      + '<w:delText xml:space="preserve">' + text + '</w:delText></w:r></w:del>';
+    const replaced = xml.replace('<w:r><w:t>ab</w:t></w:r>', deleted(91, '<w:strike/>', '}') + deleted(92, '<w:rStyle w:val="CodeChar"/>', 'a --} b')
+      + deleted(93, '<w:b/>', 'x') + '<w:ins w:id="94"' + revision + '><w:r><w:t>y</w:t></w:r></w:ins>');
+    expect(replaced).not.toBe(xml);
+    zip.file('word/document.xml', replaced);
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(md).toBe('[{--~~}~~--}{~~`a --} b`**x**~>y~~}](https://e.com)\n');
+    expect(await roundTrip(md.slice(0, -1))).toBe(md);
+  });
+
   test('writes a substitution a link\'s split cuts whole, after the link\'s runs before it', async () => {
     // The link's runs took the deletion, without the insertion after the
     // split, and a span of the deletion alone ended at the --} in its code

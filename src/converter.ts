@@ -5777,7 +5777,8 @@ function linkGroup(
   let span: RevisionSpan | undefined;
   // Where the deletions end that a substitution was tried from, which the
   // rest of them aren't tried from again, which would take time in the
-  // square of them
+  // square of them, but for the later starts that could hold where one
+  // doesn't
   let triedUntil = 0;
   for (let k = 0; k < items.length; k++) {
     const item = items[k];
@@ -5807,6 +5808,15 @@ function linkGroup(
         span = undefined;
         k = sideEnd - 1;
         continue;
+      }
+      // As renderSubstitutionRun's callers do, from a later start, where the
+      // insertions' side has no ~~}, after a deletion of strikethrough or a
+      // ~, as the ~> or ~~} of the deletions' side, as a struck }'s, starts
+      // with a ~. Dropping another leaves the rest of the side as it was.
+      if (oldText && newText && !newText.includes('~~}')) {
+        let retry = k + 1;
+        while (retry < additions && !items[retry - 1].formatting.strikethrough && !items[retry - 1].text.includes('~')) retry++;
+        triedUntil = retry;
       }
     }
     const markdown = itemText(k, runsAfter(segment, start + k + 1, end));
