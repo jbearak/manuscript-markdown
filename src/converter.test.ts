@@ -6341,6 +6341,19 @@ describe('HTML around a table in its block', () => {
     expect(markdown).toBe('<p>Cap A</p>\n' + table('A') + '\n\n' + table('A') + '\n');
   });
 
+  test.each([
+    ['other HTML', '<p>Cap A</p>\n', '<p>Cap B</p>\n', table('A') + '\n'],
+    ['the same HTML', '<p>Cap</p>\n', '<p>Cap</p>\n', '<p>Cap</p>\n' + table('A') + '\n'],
+  ])('gives the table Word leaves of two alike with %s around each the HTML only where it was the same', async (_name, first, second, expected) => {
+    // Which Word deleted is unknown, and the one left took the first's
+    const md = first + table('A') + '\n\n' + second + table('A') + '\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, ''));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe(expected);
+  });
+
   test('puts no HTML around a table after Word deletes one before it whose first row\'s text is alike, cut apart elsewhere', async () => {
     // Both first rows read as 2:A|B|C, and the table at the deleted one's
     // index took its caption
@@ -6639,10 +6652,14 @@ describe('HTML around a table in its block', () => {
     expect(again).toContain('<w:ins ');
   });
 
-  test('drops the HTML around a table that leaves HTML where a line of it alone would read as a Sources heading', async () => {
+  test.each([
+    ['as it is', 'Sources'],
+    ['in a character reference', '&#83;ources'],
+    ['in tags', '<span>Sources</span>'],
+  ])('drops the HTML around a table that leaves HTML where a line of it alone would read as a Sources heading %s', async (_name, line) => {
     // Word's paragraph of it read as the heading of a bibliography Word
     // holds as text on the next import, which dropped it and all after
-    const zip = await JSZip.loadAsync((await convertMdToDocx('<table><tr><td>XX</td><td>b</td></tr></table>\nSources\n\nAfter.\n')).docx);
+    const zip = await JSZip.loadAsync((await convertMdToDocx('<table><tr><td>XX</td><td>b</td></tr></table>\n' + line + '\n\nAfter.\n')).docx);
     const xml = await zip.file('word/document.xml')!.async('string');
     const tracked = xml.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>');
     expect(tracked).not.toBe(xml);
@@ -6677,6 +6694,8 @@ describe('HTML around a table in its block', () => {
     // Each line in a comment, or with a tag, was read to its end
     ['that leaves HTML, in a comment', true, (i: number) => i === 0 ? 'Source <!-- a' : '<div>' + i + ' <pre> x'],
     ['that leaves HTML, with a <pre> on each line', true, (i: number) => 'line ' + i + ' <b>b</b> <pre> x'],
+    // Each [ looked on to the end for an @ before its ]
+    ['that leaves HTML, with [s and no ] on each line', true, (i: number) => 'line ' + i + ' [a [b [c [d'],
   ])('writes many lines of HTML after a table %s in linear time', async (_name, tracked, line) => {
     // Each line's escape indexed all the lines after it, even for a table
     // that kept the HTML

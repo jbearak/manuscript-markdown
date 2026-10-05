@@ -8,7 +8,7 @@ import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './ima
 import { keepParagraphEdgeWhitespace } from './html-entities';
 import htmlBlockNames from 'markdown-it/lib/common/html_blocks.mjs';
 import { HTML_OPEN_CLOSE_TAG_RE, HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
-import { isMdAsciiPunct, isPunctChar, isWhiteSpace } from 'markdown-it/lib/common/utils.mjs';
+import { isMdAsciiPunct, isPunctChar, isWhiteSpace, unescapeAll } from 'markdown-it/lib/common/utils.mjs';
 import { computeCodeRegions, computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, readGridTableCells, type TableAlign } from './grid-table-preprocess';
@@ -7044,23 +7044,33 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
 
 /** The keys of the HTML around tables export wrote, by the scope, first
  *  row and text of the table each was written with and the count of tables
- *  alike before it (`nth`), and the count of tables alike export wrote
- *  (`written`), which renderTable looks a table up by, once for each
- *  mapping, as reading them all for each table took time in the square of
- *  their number */
-type TableHtmlAroundIndex = { nth: Map<string, string[]>; written: Map<string, number> };
+ *  alike before it (`nth`), the count of tables alike export wrote
+ *  (`written`), and those alike that export wrote all with the same HTML
+ *  around them (`same`), which renderTable looks a table up by, once for
+ *  each mapping, as reading them all for each table took time in the
+ *  square of their number */
+type TableHtmlAroundIndex = { nth: Map<string, string[]>; written: Map<string, number>; same: Set<string> };
 const tableHtmlAroundIndexes = new WeakMap<Map<string, [string, string, string, string, string, string, string]>, TableHtmlAroundIndex>();
 function tableHtmlAroundIndex(mapping: Map<string, [string, string, string, string, string, string, string]>): TableHtmlAroundIndex {
   let index = tableHtmlAroundIndexes.get(mapping);
   if (!index) {
-    index = { nth: new Map(), written: new Map() };
+    index = { nth: new Map(), written: new Map(), same: new Set() };
+    // Each one's HTML, or null where they differ, and their count
+    const around = new Map<string, string | null>();
+    const counts = new Map<string, number>();
     for (const [key, entry] of mapping) {
       const id = entry[5] + '\n' + entry[2] + '\n' + entry[3];
       const known = index.nth.get(id + '\n' + entry[4]);
       if (known) known.push(key);
       else index.nth.set(id + '\n' + entry[4], [key]);
       index.written.set(id, Number(entry[6]));
+      const html = JSON.stringify([entry[0], entry[1]]);
+      const seen = around.get(id);
+      around.set(id, seen === undefined || seen === html ? html : null);
+      counts.set(id, (counts.get(id) ?? 0) + 1);
     }
+    // But for one written with none
+    for (const [id, html] of around) if (html !== null && counts.get(id) === index.written.get(id)) index.same.add(id);
     tableHtmlAroundIndexes.set(mapping, index);
   }
   return index;
@@ -7624,7 +7634,15 @@ function htmlLinesAsText(lines: string[]): string[] {
     i = from - 1;
   }
   plain += text.slice(from);
-  const masked = plain.replace(/\[(?=[^\]]*@)/g, '\0');
+  // From the right, whether an @ comes before the next ], as looking on
+  // from each [ took time in the square of their number
+  const chars = plain.split('');
+  for (let i = chars.length - 1, at = false; i >= 0; i--) {
+    if (chars[i] === '[' && at) chars[i] = '\0';
+    else if (chars[i] === ']') at = false;
+    else if (chars[i] === '@') at = true;
+  }
+  const masked = chars.join('');
   // The lines after each, from the line end before them
   const index = indexText(masked);
   let end = -1;
@@ -7775,10 +7793,11 @@ function detachedTableHtml(html: string): string | undefined | null {
   let texts: string[] = [];
   // A paragraph of a line that would read as the Sources heading of a
   // bibliography Word holds as text, which import drops with all after it,
-  // as Word's paragraph does, whatever the Markdown wrote it as
+  // as Word's paragraph does, whatever the Markdown wrote it as: its text,
+  // with its character references read and its tags gone
   let sources = false;
   const endTexts = () => {
-    if (texts.length === 1 && SOURCES_HEADING_RE.test(texts[0].trim())) sources = true;
+    if (texts.length === 1 && SOURCES_HEADING_RE.test(unescapeAll(texts[0].replace(/<[^>]*>/g, '').replace(/\\/g, '\\\\')).trim())) sources = true;
     if (texts.length > 0) out.push(...htmlLinesAsText(texts));
     texts = [];
   };
@@ -7892,13 +7911,18 @@ function renderTableOrFallback(
   // edited one to be alike another, which of them was written with the
   // HTML is unknown: one whose own isn't still there takes that, one at
   // the index of one written alike that, and the others none, as HTML
-  // that goes with another table is worse than none
+  // that goes with another table is worse than none. Where there are
+  // fewer, as where Word deleted one, which went is unknown too: the
+  // others take the HTML by their order only where export wrote the same
+  // around all, and none otherwise.
   const index = mapping && tableHtmlAroundIndex(mapping);
   const identity = scope + '\n' + firstRow + '\n' + contents;
-  const extra = !!index && (renderOpts?.tablesAlike?.get(identity) ?? 0) > (index.written.get(identity) ?? 0);
+  const count = renderOpts?.tablesAlike?.get(identity) ?? 0;
+  const extra = !!index && count > (index.written.get(identity) ?? 0);
+  const fewer = !!index && count < (index.written.get(identity) ?? 0) && !index.same.has(identity);
   const at = tableIndex !== undefined ? mapping?.get(String(tableIndex)) : undefined;
   const atIndex = at && at[5] + '\n' + at[2] + '\n' + at[3] === identity && unused(String(tableIndex)) ? String(tableIndex) : undefined;
-  const aroundKey = index && (extra ? own ?? atIndex : index.nth.get(identity + '\n' + alikeBefore)?.find(unused) ?? own);
+  const aroundKey = index && (extra ? own ?? atIndex : fewer ? undefined : index.nth.get(identity + '\n' + alikeBefore)?.find(unused) ?? own);
   const around = aroundKey !== undefined ? mapping?.get(aroundKey) : undefined;
   if (aroundKey !== undefined) renderOpts?.usedTableHtmlAround?.add(aroundKey);
   const r = (body: string) => {
