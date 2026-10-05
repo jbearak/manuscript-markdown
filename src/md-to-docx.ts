@@ -6499,7 +6499,7 @@ function withoutCommentBodyLines(source: MdRun[], startsLine = true, endsLine = 
   // Text of bodies and range markers alone, which Word gets nothing of to
   // revise or highlight, so they take its run's place, where the lines
   // around them see them
-  const unseen = (runs: MdRun[] | undefined): runs is MdRun[] => !!runs?.length && runs.every(isCommentMarkerRun);
+  const unseen = (runs: MdRun[] | undefined): boolean => !!runs?.length && runs.every(isCommentMarkerRun);
   const side = { oldRuns: undefined, newRuns: undefined, newText: undefined };
   // Each side of a substitution stands for the whole of it, as accepted or rejected
   const runs = source.flatMap((run, i): MdRun[] => {
@@ -6514,11 +6514,14 @@ function withoutCommentBodyLines(source: MdRun[], startsLine = true, endsLine = 
     const newRuns = payload(run.newRuns);
     if (run.type === 'critic_sub' && (unseen(oldRuns) || unseen(newRuns))) {
       return [
-        ...(unseen(oldRuns) ? oldRuns : [{ ...run, ...side, type: 'critic_del' as const, innerRuns: oldRuns }]),
-        ...(unseen(newRuns) ? newRuns : run.newText ? [{ ...run, ...side, type: 'critic_add' as const, text: run.newText, innerRuns: newRuns }] : []),
+        ...(unseen(oldRuns) ? oldRuns! : run.text || oldRuns?.length
+          ? [{ ...run, ...side, type: 'critic_del' as const, innerRuns: oldRuns }] : []),
+        // A part of one split at display math holds its new text in newRuns alone
+        ...(unseen(newRuns) ? newRuns! : run.newText || newRuns?.length
+          ? [{ ...run, ...side, type: 'critic_add' as const, text: run.newText || '', innerRuns: newRuns }] : []),
       ];
     }
-    if (unseen(innerRuns)) return innerRuns;
+    if (unseen(innerRuns)) return innerRuns!;
     return [{
       ...run,
       ...(innerRuns ? { innerRuns } : {}),

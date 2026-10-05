@@ -7515,6 +7515,13 @@ describe('Track changes (CriticMarkup)', () => {
       expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(expected + '\n');
     });
 
+    test('keeps the new text of a substitution split at display math whose old text is a comment body', async () => {
+      const math = (tex: string) => '$' + '$' + tex + '$' + '$';
+      const { docx } = await convertMdToDocx('{#1}x{/1}\n\n{~~{#1>>c<<} ' + math('u') + '~>a ' + math('v') + '~~}');
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      expect(xml).toMatch(/<w:ins [^>]*><w:r><w:t xml:space="preserve">a /);
+    });
+
     test.each(['{++{#1>>c<<}++}', '{--{#1>>c<<}--}', '{~~{#1>>c<<}~>{#2>>d<<}~~}'])('writes no paragraph for %j after its own', async (body) => {
       // Word got an empty paragraph, as the revision hid the body
       const { docx } = await convertMdToDocx('{#1}x{/1}{#2}y{/2}\n\n' + body);
