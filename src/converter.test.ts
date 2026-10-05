@@ -7626,9 +7626,20 @@ describe('Missing citation keys', () => {
     ['a code block', '```\nCitation data for @a b was not found in the bibliography file.\n```\n'],
     ['a code block, with a key of one word', '```\nCitation data for @a was not found in the bibliography file.\n```\n'],
     ['an HTML block', '<div>\nCitation data for @a was not found in the bibliography file.\n</div>\n'],
+    // That goes on past blank lines, before a code block, whose region the
+    // search found first
+    ['an HTML block before a code block', '<pre>\n\nCitation data for @a was not found in the bibliography file.\n\n</pre>\n\n```\nx\n```\n'],
   ])('keeps a line like a note in %s', async (_name, md) => {
     // It was stripped as export's note, though a note is a paragraph
     expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown).toBe(md);
+  });
+
+  test.each([
+    ['a heading', 'Citation data for @a b was not found in the bibliography file.\n===\n', '# Citation data for @a b was not found in the bibliography file.\n'],
+    ['a paragraph', 'P\nCitation data for @a b was not found in the bibliography file.\n', 'P Citation data for @a b was not found in the bibliography file.\n'],
+  ])('keeps a line like a note that is part of %s', async (_name, md, expected) => {
+    // A note is a paragraph of its own
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown).toBe(expected);
   });
 
   test('keeps a line like the note of a key no citation could have', async () => {

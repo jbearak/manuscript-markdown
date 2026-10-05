@@ -14,7 +14,7 @@ import { formatTableNumbers, parseTableDigits, parseTableDecimalMark, parseTable
 import type { TableNumberFormat } from './table-metadata';
 import { alertColorsByScheme, getDefaultColorScheme } from './alert-colors';
 import { ZoteroBiblData, zoteroStyleFullId, getDisplayWidth } from './converter';
-import { computeMarkdownRegions, isInsideCodeRegion, type CodeRegion } from './code-regions';
+import { computeMarkdownRegions, isInsideCodeRegion, mergeRegions, type CodeRegion } from './code-regions';
 import { isGfmDisallowedRawHtml, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from './gfm';
 import { scanOrientationDirectives } from './orientation-scan';
 import { pixelsToEmu, isSupportedImageFormat, getImageContentType, readImageDimensions, computeMissingDimension, IMAGE_WARNINGS, parseImageDimension } from './image-utils';
@@ -7703,17 +7703,18 @@ export async function convertMdToDocx(
   // regenerates these from the actual unresolved citation keys, which run
   // to a comma, spaces and all, as in [@a b], and hold no ; or ], which end
   // an item or the citation.
-  // Not a line of code or HTML, which no note is.
+  // A note is a paragraph of its own, between blank lines, and not a line
+  // of code or HTML.
   const MISSING_KEY_LINE = /^Citation data for @[^,;\]]+ was not found in the bibliography file\.$/;
   const bodyLines = body.split('\n');
   let literalRegions: CodeRegion[] | undefined;
   let lineStart = 0;
   const bodyStripped = bodyLines
-    .filter(line => {
+    .filter((line, k) => {
       const start = lineStart;
       lineStart += line.length + 1;
-      if (!MISSING_KEY_LINE.test(line)) return true;
-      literalRegions ??= (regions => [...regions.codeRegions, ...regions.htmlRegions])(computeMarkdownRegions(body, { html: 'all' }));
+      if (!MISSING_KEY_LINE.test(line) || /\S/.test(bodyLines[k - 1] ?? '') || /\S/.test(bodyLines[k + 1] ?? '')) return true;
+      literalRegions ??= (regions => mergeRegions([...regions.codeRegions, ...regions.htmlRegions]))(computeMarkdownRegions(body, { html: 'all' }));
       return isInsideCodeRegion(start, literalRegions);
     })
     .join('\n')
