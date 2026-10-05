@@ -5771,14 +5771,17 @@ describe('HTML table cells', () => {
     expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(md);
   });
 
-  test('keeps a comment after one that ends at its --!> where Word splits its run after its <', async () => {
+  test.each([
+    ['its ZWSP', '\u200B'],
+    ['its <', '\u200B&lt;'],
+  ])('keeps a comment after one that ends at its --!> where Word splits its run after %s', async (_name, start) => {
     // The < went on the comment before, which inline Markdown reads to a -->
     const md = table('      <p>a<!-- c --!><!-- d -->b</p>');
     const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
     const xml = await zip.file('word/document.xml')!.async('string');
     const second = [...xml.matchAll(/(<w:r><w:rPr><w:vanish\/>(?:(?!<\/w:rPr>).)*<\/w:rPr>)<w:t>([^<]*)<\/w:t><\/w:r>/g)][1];
-    const split = second[1] + '<w:t>' + second[2].slice(0, 5) + '</w:t></w:r>' + second[1] + '<w:t>' + second[2].slice(5) + '</w:t></w:r>';
-    expect(second[2].slice(0, 5)).toBe('\u200B&lt;');
+    const split = second[1] + '<w:t>' + start + '</w:t></w:r>' + second[1] + '<w:t>' + second[2].slice(start.length) + '</w:t></w:r>';
+    expect(second[2].startsWith(start)).toBe(true);
     zip.file('word/document.xml', xml.slice(0, second.index) + split + xml.slice(second.index! + second[0].length));
     expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(md);
   });
@@ -9008,6 +9011,10 @@ describe('round-trip regression: images export cannot embed', () => {
     // Which reads as a payload's start, but in a comment with no end yet
     ['an HTML comment before a ZWSP and an image\'s Markdown in it', 'A <!-- a \u200B![y](n.png)\u200B tail --> B', 8],
     ['an HTML comment after a --!> in it before a ZWSP and an image\'s Markdown', 'A <!-- a --!>\u200B![y](n.png)\u200B tail --> B', 12],
+    // Which got an end, though the next ended it
+    ['an HTML comment before a <!-- in it', 'A <!-- a <!-- b --> C', 8],
+    // Which read as its end
+    ['an HTML comment after a <!---> in it', 'A <!-- a <!---> b --> C', 14],
   ])('joins %s when Word splits its run', async (_name, md, at) => {
     // Without the start of its opener, the run before it was dropped
     const { docx } = await convertMdToDocx(md);

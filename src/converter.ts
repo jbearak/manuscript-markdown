@@ -3175,10 +3175,11 @@ function readHiddenRun(runChildren: XmlNode[], rPrChildren: XmlNode[] | undefine
 /** A hidden comment as Markdown reads one: one an HTML table's cell held
  *  that the browser ended at a --!>, ended at a --> instead, as inline
  *  Markdown reads it on, and one with no end, which ran to the end of the
- *  cell, with one */
-function markdownComment(text: string): string {
+ *  cell, with one; but not one before another (`next`), which Word split it
+ *  from at an <!-- in it, and which ends it */
+function markdownComment(text: string, next?: ContentItem): string {
   const from = text.indexOf('<!--') + 4;
-  if (text.includes('-->', from) || /^-?>/.test(text.slice(from))) return text;
+  if (next?.type === 'html_comment' || text.includes('-->', from) || /^-?>/.test(text.slice(from))) return text;
   return text.endsWith('--!>') && text.length >= from + 4 ? text.slice(0, -4) + '-->' : text.trimEnd() + ' -->';
 }
 
@@ -3208,16 +3209,16 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
   const lastItem = target[target.length - 1];
   const continues = lastItem !== undefined && 'commentIds' in lastItem && !!lastItem.commentIds
     && commentSetsEqual(lastItem.commentIds, activeComments);
-  /** Whether a comment's text has its end: a --> after its <!--, or the >
-   *  or -> of an empty one. Not a --!>, which ends a comment in an HTML
-   *  table's cell, as the browser reads it, but not one inline Markdown
-   *  reads to its --> (see renderHtmlCellParagraph) */
-  const closed = (text: string) => {
-    const from = text.lastIndexOf('<!--') + 4;
-    return text.includes('-->', from) || /^-?>/.test(text.slice(from));
-  };
+  /** Whether a comment's text has its end: a --> after its last <!--, or,
+   *  after its own, the > or -> of an empty one. Not a --!>, which ends a
+   *  comment in an HTML table's cell, as the browser reads it, but not one
+   *  inline Markdown reads to its --> (see renderHtmlCellParagraph) */
+  const closed = (text: string) => text.includes('-->', text.lastIndexOf('<!--') + 4)
+    || /^-?>/.test(text.slice(text.indexOf('<!--') + 4));
+  // But for a ZWSP and the start of a payload alone, which the next hidden
+  // run shows the comment's or the next payload's (see pendingHiddenText)
   if (continues && lastItem.type === 'html_comment' && !rest.replace(/^\u200B+/, '').trimStart().startsWith('<!--')
-      && !closed(lastItem.text)) {
+      && !/^\u200B+(?:!|<|<!|<!-|<i|<im)?$/i.test(rest) && !closed(lastItem.text)) {
     // With a ZWSP it starts with, which is the comment's own, before which
     // Word split its run
     lastItem.text += rest;
@@ -6063,7 +6064,7 @@ function renderInlineRange(
 
     // html_comment: emit the raw <!-- ... --> syntax directly
     if (item.type === 'html_comment') {
-      out += markdownComment(item.text);
+      out += markdownComment(item.text, segment[i + 1]);
       if (item.commentIds.size > 0) {
         for (const cid of [...item.commentIds].sort()) {
           const c = comments.get(cid);
@@ -6409,7 +6410,7 @@ function renderInlineRangeWithIds(
         }
       }
       prevCommentIds = new Set(currentIds);
-      out += markdownComment(item.text);
+      out += markdownComment(item.text, segment[i + 1]);
       i++;
       continue;
     }
@@ -6520,12 +6521,12 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
   const split = items.flatMap((item): ContentItem[] => item.type === 'html_comment'
     ? item.text.split(/(?<=--!>)\u200B+(?=<!--)/).map(text => ({ ...item, text }))
     : [item]);
-  for (const item of split) {
+  for (const [k, item] of split.entries()) {
     // Not one with a blank line, which would end the table's HTML block.
     // One with no end, which ran to the end of the cell, gets one.
     if (item.type === 'html_comment' && item.commentIds.size === 0 && /^<!--(?:-?>|(?!-?>)(?:(?!--!?>)[\s\S])*(?:--!?>)?)$/.test(item.text)
       && !/(?:\r\n?|\n)[ \t]*(?:\r\n?|\n)/.test(item.text)) {
-      const html = item.text.endsWith('--!>') && item.text.length >= 8 ? item.text : markdownComment(item.text);
+      const html = item.text.endsWith('--!>') && item.text.length >= 8 ? item.text : markdownComment(item.text, split[k + 1]);
       pieces.push({ text: '', item: { type: 'text', text: '', commentIds: item.commentIds, formatting: DEFAULT_FORMATTING }, html, raw: true });
       continue;
     }
