@@ -5247,6 +5247,13 @@ describe('Word text that reads as Markdown', () => {
     expect(performance.now() - start).toBeLessThan(500);
   });
 
+  test('escapes a long run of URLs in linear time', () => {
+    // Each URL's check read the run to its end
+    const start = performance.now();
+    expect(wrapWithFormatting('a_' + 'https://e.com/'.repeat(4000), DEFAULT_FORMATTING)).toBe('a_' + 'https\\://e.com/'.repeat(4000));
+    expect(performance.now() - start).toBeLessThan(500);
+  });
+
   test('escapes a long run of [ in linear time', () => {
     // Each [ looked for its ] through the rest of the text
     const start = performance.now();
