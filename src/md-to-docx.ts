@@ -2649,25 +2649,24 @@ const QUOTE_BLOCK_WARNINGS: Partial<Record<MdToken['type'], string>> = {
 // and characters XML can't hold, which go (see removeCharactersXmlCantHold),
 // but not other spaces, as U+3000, which are text.
 const EMPTY_QUOTE_CODE_WARNING = 'Empty code block inside blockquote dropped during conversion';
-// A note holds paragraphs, display math and tables, which import reads back,
-// so other blocks in one are its paragraphs, but for a rule and an empty code
-// block, which would be empty paragraphs
+// A note holds paragraphs, display math, tables and code blocks, which import
+// reads back, so other blocks in one are its paragraphs, but for a rule and
+// an empty code block, which would be empty paragraphs
 const NOTE_BLOCK_WARNINGS: Partial<Record<MdToken['type'], string>> = {
   list_item: 'List inside a note exported as note paragraphs',
   blockquote: 'Blockquote inside a note exported as note paragraphs',
   heading: 'Heading inside a note exported as a note paragraph',
-  code_block: 'Code block inside a note exported as a note paragraph',
   hr: 'Horizontal rule inside a note dropped during conversion',
 };
 const EMPTY_NOTE_CODE_WARNING = 'Empty code block inside a note dropped during conversion';
 const isBlank = (text: string): boolean => !/[^ \t\n]/.test(text.replace(NOT_XML_CHARACTER, ''));
 const isEmptyCodeBlock = (token: MdToken): boolean => token.type === 'code_block' && token.runs.every(run => isBlank(run.text));
 
-/** A code block's text as a paragraph's, in a quote or a note, which hold
- *  no code block: its lines, with line breaks between them, which a line
- *  end in Word's text isn't, but not before blank lines at its end, which a
- *  break can't end the paragraph with. Their characters XML can't hold stay,
- *  to go where they're counted. */
+/** A code block's text as a paragraph's, in a quote, which holds no code
+ *  block: its lines, with line breaks between them, which a line end in
+ *  Word's text isn't, but not before blank lines at its end, which a break
+ *  can't end the paragraph with. Their characters XML can't hold stay, to go
+ *  where they're counted. */
 function codeBlockLines(run: MdRun): MdRun[] {
   const lines = run.text.split('\n');
   let end = lines.length;
@@ -8148,7 +8147,6 @@ export async function convertMdToDocx(
     }
     const noteTokens = bodyTokens.flatMap((t): MdToken[] => {
       if (t.type === 'hr' || isEmptyCodeBlock(t)) return [];
-      if (t.type === 'code_block') return [{ ...t, runs: t.runs.flatMap(codeBlockLines) }];
       // An alert's text starts after the line end that follows its marker,
       // and an empty list item, heading or alert is no paragraph, which
       // import would drop
@@ -8169,6 +8167,7 @@ export async function convertMdToDocx(
     const selfRefRun = marked ? bookmarkedSelfRef(unmarkedSelfRefRun, noteId, state) : unmarkedSelfRefRun;
     const savedCustomStyle = state.activeCustomStyle;
     let isFirstContent = true;
+    let afterCodeBlock = false;
     for (let ti = 0; ti < noteTokens.length; ti++) {
       const t = noteTokens[ti];
       // Handle custom style sentinels inside footnotes
@@ -8185,6 +8184,18 @@ export async function convertMdToDocx(
         : paragraphPPr;
       // Note paragraphs are all FootnoteText, so a heading's whole-heading mark doesn't apply
       const effectivePPr = t.type === 'heading' ? stylePPr : withParagraphMarkRevision(stylePPr, paragraphMarkRevision(t, state, options));
+      // A code block is code paragraphs, as in the body, which take the
+      // note's mark no more than a table does, and after one before it, an
+      // empty paragraph, which import ends the one before at
+      if (t.type === 'code_block') {
+        if (isFirstContent) bodyXml += '<w:p>' + paragraphPPr + selfRefRun + '</w:p>';
+        else if (afterCodeBlock) bodyXml += '<w:p>' + paragraphPPr + '</w:p>';
+        isFirstContent = false;
+        bodyXml += generateParagraph(t, state, options, bibEntries, citeprocEngine);
+        afterCodeBlock = true;
+        continue;
+      }
+      afterCodeBlock = false;
       if (isFirstContent) {
         isFirstContent = false;
         if (t.type === 'table') {

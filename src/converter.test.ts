@@ -6663,9 +6663,6 @@ describe('Blocks a note can\'t hold', () => {
   const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
   const note = (body: string) => 'T.[^1]\n\n[^1]: A.\n\n    ' + body.replace(/\n(?!\n)/g, '\n    ') + '\n';
   test.each([
-    // Its line ends were in the paragraph's text, which Word shows as spaces
-    ['a code block', note('```\nc\n  d\n```'), note('c\\\n&#32;&#32;d'), 'Code block inside a note exported as a note paragraph'],
-    ['an indented code block', note('    c'), note('c'), 'Code block inside a note exported as a note paragraph'],
     // Which left an empty paragraph
     ['an empty code block', note('```\n```\n\nB.'), note('B.'), 'Empty code block inside a note dropped during conversion'],
     ['a horizontal rule', note('---\n\nB.'), note('B.'), 'Horizontal rule inside a note dropped during conversion'],
@@ -6695,9 +6692,15 @@ describe('Blocks a note can\'t hold', () => {
     expect(paragraphs).toEqual(['A.', 'B.']);
   });
 
-  test('writes a code block that starts a note as its lines', async () => {
-    const { docx } = await convertMdToDocx('T.[^1]\n\n[^1]: ```\n    a\n    b\n    ```\n');
-    expect(strip((await convertDocx(docx)).markdown)).toBe('T.[^1]\n\n[^1]:\n\n    a\\\n    b\n');
+  test.each([
+    ['a code block', note('```\nc\n  d\n```'), note('```\nc\n  d\n```')],
+    ['an indented code block', note('    c'), note('```\nc\n```')],
+    ['a code block that starts it', 'T.[^1]\n\n[^1]: ```\n    a\n    b\n    ```\n', 'T.[^1]\n\n[^1]:\n\n    ```\n    a\n    b\n    ```\n'],
+  ])('keeps %s in a note a code block, with no warning', async (_name, md, expected) => {
+    // A note holds a code block, which it wrote as its lines in a paragraph
+    const { docx, warnings } = await convertMdToDocx(md);
+    expect(warnings).toEqual([]);
+    expect(strip((await convertDocx(docx)).markdown)).toBe(expected);
   });
 });
 
@@ -6922,6 +6925,27 @@ describe('Code block round-trip', () => {
     const docxResult = await convertMdToDocx(md);
     const result = await convertDocx(docxResult.docx);
     expect(result.markdown.trim()).toBe('```stata\ndisplay "hello"\n```');
+  });
+
+  test.each([
+    ['after its text', '[^a]: Note.\n\n    ```js\n    a\n    b\n    ```\n'],
+    ['first', '[^a]:\n\n    ```js\n    a\n    ```\n'],
+    ['before text', '[^a]: Note.\n\n    ```js\n    a\n    ```\n\n    After.\n'],
+    ['after another', '[^a]: Note.\n\n    ```js\n    a\n    ```\n\n    ```py\n    b\n    ```\n'],
+    ['by a table', '[^a]: Note.\n\n    ```js\n    a\n    ```\n\n    | x |\n    | --- |\n    | 1 |\n\n    ```py\n    b\n    ```\n'],
+    ['with an empty line', '[^a]: Note.\n\n    ```js\n    a\n    \n    b\n    ```\n'],
+  ])('keeps a code block in a note %s, and its language', async (_, note) => {
+    // Export wrote one as the note's text, its lines run together in Word,
+    // and import as text
+    const md = 'Text.[^a]\n\n' + note;
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown).toBe(md);
+  });
+
+  test('numbers code blocks in notes on from the body\'s, in the order of the notes\' labels', async () => {
+    const note = (label: string, lang: string) => '[^' + label + ']: Note.\n\n    ```' + lang + '\n    x\n    ```\n';
+    const text = '```r\nx\n```\n\nText[^b] and[^a].\n\n';
+    expect((await convertDocx((await convertMdToDocx(text + note('b', 'py') + '\n' + note('a', 'js'))).docx)).markdown)
+      .toBe(text + note('a', 'js') + '\n' + note('b', 'py'));
   });
 
   test('code block without language survives round-trip', async () => {
