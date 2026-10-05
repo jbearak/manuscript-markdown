@@ -9243,6 +9243,18 @@ describe('Highlights across runs', () => {
     expect(performance.now() - start).toBeLessThan(3000);
   });
 
+  test('writes a paragraph of many comments in linear time', () => {
+    // Each comment's text read which highlights join from its start to the
+    // paragraph's end, and kept what it read
+    const n = 20000;
+    const comments = new Map(Array.from({ length: n }, (_, k) => [String(k), { author: 'A', text: 'c', date: '' }]));
+    const items = Array.from({ length: 2 * n }, (_, k) => (
+      { type: 'text', text: k % 2 ? 'x' : ' a ', commentIds: new Set(k % 2 ? [String((k - 1) / 2)] : []), formatting: DEFAULT_FORMATTING }));
+    const start = performance.now();
+    buildMarkdown(items as ContentItem[], comments);
+    expect(performance.now() - start).toBeLessThan(3000);
+  });
+
   test('reads many runs highlighted alike in linear time', async () => {
     // Each run's highlight joins its neighbours' if theirs do, which is
     // read for the whole range at once

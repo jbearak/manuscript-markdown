@@ -6256,7 +6256,7 @@ function renderInlineRange(
         // producing {====text====} (highlight nested inside comment delimiters).
         const after = runsAfter(segment, j + 1, segmentEnd);
         let segText = textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(seg.text, seg.formatting, false, seg.href ? after.linkTo(seg.href) : after,
-          false, joinsHighlight(segment, j, i, segmentEnd)), anchorText, inSpanBefore(anchorText, seg, anchorSpan)), segment, j, segmentEnd), segment, j, segmentEnd, anchorText.length === anchorMathEnd, false, anchorText);
+          false, joinsHighlight(segment, j, startIndex, segmentEnd)), anchorText, inSpanBefore(anchorText, seg, anchorSpan)), segment, j, segmentEnd), segment, j, segmentEnd, anchorText.length === anchorMathEnd, false, anchorText);
         if (seg.href) {
           segText = bareLinkChoice(seg, markdownLink(segText, seg.href), '==}');
         }
