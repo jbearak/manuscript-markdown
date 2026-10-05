@@ -1090,11 +1090,12 @@ function footnoteBookmarkName(noteId: number): string {
  *  rest. Export makes notes' bodies in this order, so that the tables and
  *  code blocks in them take the indices import reads them back at. Ties
  *  break on the text, so the order doesn't depend on the order notes come in,
- *  which is their definitions' in export and their references' in import. */
+ *  which is their definitions' in export and their references' in import,
+ *  and the text compares in one locale, not the machine's. */
 export function compareNoteLabels(a: string, b: string): number {
   const na = parseInt(a, 10);
   const nb = parseInt(b, 10);
-  return (!isNaN(na) && !isNaN(nb) ? na - nb : 0) || a.localeCompare(b) || (a < b ? -1 : a > b ? 1 : 0);
+  return (!isNaN(na) && !isNaN(nb) ? na - nb : 0) || a.localeCompare(b, 'en') || (a < b ? -1 : a > b ? 1 : 0);
 }
 
 /** Extract footnote definitions from the markdown source and return cleaned markdown. */
@@ -8093,10 +8094,23 @@ export async function convertMdToDocx(
   // Notes go in the order import writes them back in, which their tables'
   // and code blocks' indices follow (see compareNoteLabels).
   state.inNoteBody = true;
-  for (const [label, bodyText] of [...footnoteDefs].sort(([a], [b]) => compareNoteLabels(a, b))) {
+  const noteDefs = [...footnoteDefs].sort(([a], [b]) => compareNoteLabels(a, b));
+  // A note only another note refers to gets its ID as that one is made, so
+  // one without an ID goes again after the rest, until no note has been made
+  // since it last went, which wrote a reference to a note that wasn't there
+  // where it came first
+  let notesMade = 0;
+  const notesMadeAtDeferral = new Map<string, number>();
+  for (let k = 0; k < noteDefs.length; k++) {
+    const [label, bodyText] = noteDefs[k];
     const noteId = state.footnoteLabelToId.get(label);
     if (noteId === undefined) {
-      state.warnings.push(`Footnote definition [^${label}] has no matching reference in the document.`);
+      if (notesMadeAtDeferral.get(label) === notesMade) {
+        state.warnings.push(`Footnote definition [^${label}] has no matching reference in the document.`);
+      } else {
+        notesMadeAtDeferral.set(label, notesMade);
+        noteDefs.push([label, bodyText]);
+      }
       continue;
     }
     // Parse the definition body into tokens and generate OOXML
@@ -8191,6 +8205,7 @@ export async function convertMdToDocx(
       if (!bodyXml) bodyXml = '<w:p>' + paragraphPPr + selfRefRun + '</w:p>';
     }
     state.footnoteEntries.push({ id: noteId, bodyXml });
+    notesMade++;
   }
   state.inNoteBody = false;
 
