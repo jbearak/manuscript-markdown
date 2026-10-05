@@ -4945,6 +4945,11 @@ describe('Word text that reads as Markdown', () => {
     // A URL or email address that the escape of what follows it ends, where
     // linkify found none before it was escaped
     'http://e.com_', 'a@b.co_',
+    // A URL after text with no space, which markdown-it's own linkify rule
+    // links where linkify's search doesn't, as after an escape of a letter
+    'a_https://e.com', '\u00e9https://e.com', '$https://e.com', '`https://e.com', 'x\\hhttps://e.com', 'x\\\\hhttps://e.com',
+    // One whose user, long as it is, comes before its host
+    'a_https://' + 'u'.repeat(600) + '@example.com/a',
   ])('keeps %s in a paragraph as text', async (text) => {
     // Import wrote Word's text as it was, and export read it as Markdown:
     // emphasis, code, a link, math, a tracked change, a comment, a
@@ -5241,6 +5246,13 @@ describe('Word text that reads as Markdown', () => {
     // each escape built it anew
     const start = performance.now();
     expect(wrapWithFormatting('$a$ '.repeat(25000), DEFAULT_FORMATTING, false, RunsAfter.of(' x'))).toBe('\\$a$ '.repeat(25000));
+    expect(performance.now() - start).toBeLessThan(500);
+  });
+
+  test('escapes a long run of URLs in linear time', () => {
+    // Each URL's check read the run to its end
+    const start = performance.now();
+    expect(wrapWithFormatting('a_' + 'https://e.com/'.repeat(1500), DEFAULT_FORMATTING)).toBe('a_' + 'https\\://e.com/'.repeat(1500));
     expect(performance.now() - start).toBeLessThan(500);
   });
 

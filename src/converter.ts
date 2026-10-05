@@ -13,7 +13,7 @@ import { computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
 import { findDollarMathAt } from './math-delimiters';
 import type { TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { citationEndInText, customStyleId, linkifiedText, linkifyMatches, startsHtmlBlock } from './md-to-docx';
+import { citationEndInText, customStyleId, linkifiedColons, linkifiedText, linkifyMatches, startsHtmlBlock } from './md-to-docx';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { publicStyleNameForZoteroId, zoteroStyleIdForName } from './csl-loader';
 import { extractZoteroKey } from './zotero-link';
@@ -707,8 +707,9 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter)
       from.set(markdown.length, k);
       markdown += text[k];
     }
-    for (const link of linkifyMatches(markdown)) {
-      const at = from.get(link.schema.endsWith(':') && link.schema !== 'mailto:' ? link.index + link.schema.length - 1 : markdown.indexOf('@', link.index));
+    const colons = [...linkifyMatches(markdown).map(link => link.schema.endsWith(':') && link.schema !== 'mailto:' ? link.index + link.schema.length - 1 : markdown.indexOf('@', link.index)), ...linkifiedColons(markdown)];
+    for (const colon of colons) {
+      const at = from.get(colon);
       if (at !== undefined && !keys.has(at) && !inTag.has(at)) escaped.add(at);
     }
   }
