@@ -1143,11 +1143,13 @@ export function extractFootnoteDefinitions(markdown: string): { cleaned: string;
     if (currentLabel !== undefined && line.trim() === '') {
       // Peek ahead: if the next line with text is indented, this is a
       // paragraph break within the footnote, however many blank lines come
-      // first, as markdown-it and Pandoc read a note
+      // first, as markdown-it and Pandoc read a note. The run of blank
+      // lines goes in at once, so it's read once.
       let next = i + 1;
       while (next < lines.length && lines[next].trim() === '') next++;
       if (next < lines.length && (lines[next].startsWith('    ') || lines[next].startsWith('\t'))) {
-        currentBody.push('');
+        for (; i < next; i++) currentBody.push('');
+        i--;
         continue;
       }
     }
