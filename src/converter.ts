@@ -4577,6 +4577,68 @@ function escapeBangBeforeLink(markdown: string, segment: ContentItem[], index: n
   return /(?:^|[^\\])(?:\\\\)*!$/.test(markdown) ? markdown.slice(0, -1) + '\\!' : markdown;
 }
 
+/** A letter, digit or _, next to an inline equation's $, after which it
+ *  opens no math, or before which it closes none */
+const WORD_NEXT_TO_MATH = /[A-Za-z0-9_]/;
+
+/** `c` as a character reference, which markdown-it reads as the character,
+ *  but math by the characters as written */
+function characterReference(c: string): string {
+  return '&#' + c.charCodeAt(0) + ';';
+}
+
+/**
+ * `markdown`, the Markdown of the text at `index`, kept apart from inline
+ * math right next to it, whose $ it would run into. After the equation,
+ * where `afterMath` (its closing $ ends the Markdown written before), a $
+ * it starts with is escaped, as with the closing $ it reads as no math,
+ * and a letter or digit is written as a reference, after which the $
+ * closes none. Before one, to `end`, a letter, digit or _ it ends with is
+ * a reference, after which the $ opens none. A tracked change's delimiters
+ * keep them apart but in a span of items (`span`), as a comment's do, and
+ * so does an emphasis or highlight the Markdown starts or ends with. Where
+ * the text goes is read by position, not from the Markdown before it,
+ * which reading would copy.
+ */
+function textNextToMath(markdown: string, segment: ContentItem[], index: number, end: number, afterMath: boolean, span = false, before = ''): string {
+  const item = segment[index];
+  if (item.type !== 'text' || item.href || markdown === '') return markdown;
+  if (afterMath && (span || !item.revision)) {
+    if (markdown[0] === '$') markdown = '\\' + markdown;
+    else if (WORD_NEXT_TO_MATH.test(markdown[0])) markdown = characterReference(markdown[0]) + markdown.slice(1);
+  }
+  let k = index + 1;
+  while (k < end && segment[k].type === 'text' && (segment[k] as ContentItem & { type: 'text' }).text === '') k++;
+  const next = k < end ? segment[k] : undefined;
+  if (next?.type !== 'math' || next.display || !commentSetsEqual(item.commentIds, next.commentIds ?? NO_COMMENTS)
+      || (!span && (item.revision || next.revision))) return markdown;
+  const last = markdown[markdown.length - 1];
+  if (!WORD_NEXT_TO_MATH.test(last)) return markdown;
+  let slashes = 0;
+  while (markdown[markdown.length - 2 - slashes] === '\\') slashes++;
+  const own = slashes;
+  // Those `before` ends with count too, as a citation's text can end with
+  // one, which is read only then, as reading it would copy it
+  if (slashes === markdown.length - 1 && endsWithBackslash(segment, index)) {
+    for (let p = before.length - 1; p >= 0 && before.charCodeAt(p) === 92; p--) slashes++;
+  }
+  // An escaped _ goes with its backslash, and a backslash before a letter
+  // or digit is doubled, as before the reference's & it would escape it
+  if (slashes % 2 === 0) return markdown.slice(0, -1) + characterReference(last);
+  return last === '_' && own > 0 ? markdown.slice(0, -2) + characterReference(last) : markdown.slice(0, -1) + '\\' + characterReference(last);
+}
+
+/** Whether the item before `index` in `segment`, past empty text, has text
+ *  that ends with a backslash */
+function endsWithBackslash(segment: ContentItem[], index: number): boolean {
+  for (let k = index - 1; k >= 0; k--) {
+    const item = segment[k];
+    if (!('text' in item) || typeof item.text !== 'string') return false;
+    if (item.text !== '') return item.text.endsWith('\\');
+  }
+  return false;
+}
+
 /**
  * `out` with `text`, the Markdown for `item`, appended as a span of the item's
  * revision, and the span it now ends with. The text joins `last` instead of
@@ -4828,14 +4890,16 @@ function renderHighlightGroup(
   segment: ContentItem[], start: number, end: number, rangeEnd: number, precedingMarkdown: string, noteLabels?: Map<string, string>, last?: RevisionSpan,
 ): string {
   let inner = '';
+  let mathEnd = -1;
   for (let g = start; g < end; g++) {
     const item = segment[g];
     if (item.type === 'text') {
-      inner += markedFormatting(item.text, { ...item.formatting, highlight: false }, false, runsAfter(segment, g + 1, rangeEnd));
+      inner += textNextToMath(markedFormatting(item.text, { ...item.formatting, highlight: false }, false, runsAfter(segment, g + 1, rangeEnd)), segment, g, end, inner.length === mathEnd, true, inner);
     } else if (item.type === 'footnote_ref') {
       inner += footnoteRefText(item, noteLabels);
     } else if (item.type === 'math') {
       inner += '$' + item.latex + '$';
+      mathEnd = inner.length;
     } else if (item.type === 'citation') {
       // A separator before the first item lands outside the highlight
       inner += item.pandocKeys.length > 0
@@ -4950,6 +5014,7 @@ function renderSubstitutionRun(
   // One side's items, with highlight groups in one highlight
   const sideText = (from: number, to: number) => {
     let text = '';
+    let mathEnd = -1;
     for (let j = from; j < to;) {
       const item = segment[j] as SubstitutionItem;
       const highlightEnd = highlightGroupEnd(segment, j, to, item.commentIds);
@@ -4957,7 +5022,8 @@ function renderSubstitutionRun(
         text += renderHighlightGroup(segment, j, highlightEnd, to, precedingText + text, noteLabels);
         j = highlightEnd;
       } else {
-        text += escapeBangBeforeLink(substitutionItemText(item, precedingText + text, noteLabels, runsAfter(segment, j + 1, to)), segment, j, to, true);
+        text += textNextToMath(escapeBangBeforeLink(substitutionItemText(item, precedingText + text, noteLabels, runsAfter(segment, j + 1, to)), segment, j, to, true), segment, j, to, text.length === mathEnd, true, text);
+        if (item.type === 'math' && !item.display) mathEnd = text.length;
         j++;
       }
     }
@@ -5261,13 +5327,15 @@ function emphasisGroup(
   }
   if (!segment.slice(start, groupEnd).some(item => item.type === 'math')) return undefined;
   let text = '';
+  let mathEnd = -1;
   for (let g = start; g < groupEnd; g++) {
     const item = segment[g];
     if (item.type === 'math') {
       text += '$' + item.latex + '$';
+      mathEnd = text.length;
     } else if (item.type === 'text') {
       // Inner formatting per item, all but the bold or italic around the group
-      text += markedFormatting(item.text, { ...item.formatting, bold: false, italic: false }, false, runsAfter(segment, g + 1, end));
+      text += textNextToMath(markedFormatting(item.text, { ...item.formatting, bold: false, italic: false }, false, runsAfter(segment, g + 1, end)), segment, g, groupEnd, text.length === mathEnd, true, text);
     }
   }
   if (first.formatting.italic) text = wrapEmphasis(text, '*', !first.formatting.bold);
@@ -5283,6 +5351,9 @@ function renderInlineRange(
   renderOpts?: RenderOpts
 ): { text: string; nextIndex: number; deferredComments: string[] } {
   let out = '';
+  // Where the Markdown ends with an inline equation's closing $, which text
+  // after it mustn't run into (textNextToMath)
+  let mathEnd = -1;
   let i = startIndex;
 
   // Determine if we should use ID-based syntax for this inline segment only
@@ -5358,7 +5429,10 @@ function renderInlineRange(
       // as part of a formatting group. If not, emit standalone.
       const mathText = item.display ? MATH_FENCE + '\n' + item.latex + '\n' + MATH_FENCE : '$' + item.latex + '$';
       if (item.display) out += wrapWithRevision(mathText, item.revision);
-      else [out, lastSpan] = appendRevised(out, mathText, item, lastSpan);
+      else {
+        [out, lastSpan] = appendRevised(out, mathText, item, lastSpan);
+        if (!item.revision) mathEnd = out.length;
+      }
       i++;
       continue;
     }
@@ -5400,6 +5474,7 @@ function renderInlineRange(
     if (item.type !== 'text' || item.commentIds.size > 0) {
       const commentSet = item.commentIds;
       let anchorText = '';
+      let anchorMathEnd = -1;
       let anchorSpan: RevisionSpan | undefined;
       let j = i;
       // The space import adds before a citation that opens the range goes
@@ -5425,6 +5500,7 @@ function renderInlineRange(
         }
         if (seg.type === 'math') {
           [anchorText, anchorSpan] = appendRevised(anchorText, '$' + seg.latex + '$', seg, anchorSpan);
+          if (!seg.revision) anchorMathEnd = anchorText.length;
           j++;
           continue;
         }
@@ -5452,7 +5528,7 @@ function renderInlineRange(
         // distinct: Word text that is both highlighted AND commented needs both layers,
         // producing {====text====} (highlight nested inside comment delimiters).
         const after = runsAfter(segment, j + 1, segmentEnd);
-        let segText = escapeBangBeforeLink(markedFormatting(seg.text, seg.formatting, false, seg.href ? after.linkTo(seg.href) : after), segment, j, segmentEnd);
+        let segText = textNextToMath(escapeBangBeforeLink(markedFormatting(seg.text, seg.formatting, false, seg.href ? after.linkTo(seg.href) : after), segment, j, segmentEnd), segment, j, segmentEnd, anchorText.length === anchorMathEnd, false, anchorText);
         if (seg.href) {
           segText = bareLinkChoice(seg, `[${segText}](${formatHrefForMarkdown(seg.href)})`, '==}');
         }
@@ -5502,7 +5578,7 @@ function renderInlineRange(
       // An HTML block starts only a block's text, not a heading's or a
       // tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !item.revision;
-      [out, lastSpan] = appendRevised(out, escapeBangBeforeLink(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart), segment, i, segmentEnd), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
     }
     i++;
   }
@@ -5525,6 +5601,9 @@ function renderInlineRangeWithIds(
   lastCommentItem?: Map<string, ContentItem>,
 ): { text: string; nextIndex: number; deferredComments: string[] } {
   let out = '';
+  // Where the Markdown ends with an inline equation's closing $, which text
+  // after it mustn't run into (textNextToMath)
+  let mathEnd = -1;
   let i = startIndex;
   let lastSpan: RevisionSpan | undefined;
   // A comment that spans paragraphs stays open from the one before
@@ -5641,7 +5720,10 @@ function renderInlineRangeWithIds(
 
       const mathText = item.display ? MATH_FENCE + '\n' + item.latex + '\n' + MATH_FENCE : '$' + item.latex + '$';
       if (item.display) out += wrapWithRevision(mathText, item.revision);
-      else [out, lastSpan] = appendRevised(out, mathText, item, lastSpan);
+      else {
+        [out, lastSpan] = appendRevised(out, mathText, item, lastSpan);
+        if (!item.revision) mathEnd = out.length;
+      }
       i++;
       continue;
     }
@@ -5758,7 +5840,7 @@ function renderInlineRangeWithIds(
       // An HTML block starts only a block's text, not a heading's or a
       // tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !item.revision;
-      [out, lastSpan] = appendRevised(out, escapeBangBeforeLink(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart), segment, i, segmentEnd), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
     }
     i++;
   }
