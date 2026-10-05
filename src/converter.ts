@@ -7559,21 +7559,24 @@ function tableIdentity(rows: TableRow[]): string {
 
 const CHARACTER_REFERENCE_AT = /&(?:#\d{1,7}|#[xX][\da-fA-F]{1,6}|[A-Za-z][A-Za-z\d]{1,31});/y;
 
-/** A line of the HTML around a table as Markdown text that reads as it did
- *  in the table's block: its tags, comments and character references, as
- *  markdown-it reads them, as they are, and the rest escaped, with no
- *  indent, which HTML runs together with the line end before. A citation's
- *  [, as any with an @ before its ], is escaped too, and what it holds as
- *  text, which escapeMarkdownChars keeps as a citation, as export writes
- *  one whose key is missing as its text, but which the HTML held as text.
- *  It's a \0 while the rest is escaped, which no Markdown holds, as
- *  markdown-it replaces one. */
-function htmlLineAsText(line: string): string {
-  const text = line.replace(/^[ \t]+/, '');
-  // Each of those as a character the line doesn't hold while the rest is
-  // escaped as a whole, so a $ or * pairs across them as Markdown reads it
-  let mark = 0xE000;
-  while (text.includes(String.fromCharCode(mark))) mark++;
+/** Lines of the HTML around a table, one after another, as Markdown text
+ *  that reads as it did in the table's block: their tags, comments and
+ *  character references, as markdown-it reads them, which can go on across
+ *  lines, as they are, and the rest escaped, with each line's $ or [ as the
+ *  lines after can close it, with no indent, which HTML runs together with
+ *  the line end before, nor whitespace at a line's end, which would make a
+ *  line break. A citation's [, as any with an @ before its ], is escaped
+ *  too, and what it holds as text, which escapeMarkdownChars keeps as a
+ *  citation, as export writes one whose key is missing as its text, but
+ *  which the HTML held as text. It's a \0 while the rest is escaped, which
+ *  no Markdown holds, as markdown-it replaces one. */
+function htmlLinesAsText(lines: string[]): string[] {
+  const text = lines.map(line => line.replace(/^[ \t]+|[ \t]+$/g, '')).join('\n');
+  // Each of those as a character the lines don't hold while the rest is
+  // escaped, so a $ or * pairs across them as Markdown reads it
+  let code = 0xE000;
+  while (text.includes(String.fromCharCode(code))) code++;
+  const mark = String.fromCharCode(code);
   const raws: string[] = [];
   let plain = '';
   let from = 0;
@@ -7583,14 +7586,16 @@ function htmlLineAsText(line: string): string {
     at.lastIndex = i;
     const raw = at.exec(text)?.[0];
     if (!raw) continue;
-    plain += text.slice(from, i) + String.fromCharCode(mark);
+    plain += text.slice(from, i) + mark;
     raws.push(raw);
     from = i + raw.length;
     i = from - 1;
   }
   plain += text.slice(from);
-  const escaped = escapeMarkdownChars(plain.replace(/\[(?=[^\]]*@)/g, '\0'), true).replace(/\0/g, '\\[');
-  return escaped.split(String.fromCharCode(mark)).map((part, k) => part + (raws[k] ?? '')).join('');
+  const plainLines = plain.replace(/\[(?=[^\]]*@)/g, '\0').split('\n');
+  const escaped = plainLines.map((line, n) =>
+    escapeMarkdownChars(line, true, RunsAfter.of(n + 1 < plainLines.length ? '\n' + plainLines.slice(n + 1).join('\n') : '')).replace(/\0/g, '\\['));
+  return escaped.join('\n').split(mark).map((part, k) => part + (raws[k] ?? '')).join('').split('\n');
 }
 
 /** The HTML around a table as blocks of their own, as it goes around one in
@@ -7613,15 +7618,26 @@ function detachedTableHtml(html: string): string | undefined {
       const rest = directiveRest(block.content);
       for (let k = block.start; k < block.end; k++) inHtml.set(k, rest === undefined || k === block.start ? rest : '');
     }
+    const restOf = (k: number) => inHtml.get(k) ?? (parseEmbedDirective(lines[k].text) ? '' : undefined);
+    const isText = (k: number) => restOf(k) === undefined && !inHtml.has(k) && !lines[k].escaped && /\S/.test(lines[k].text);
+    // The lines that are text, with those next to them
+    const texts = new Map<number, string>();
+    for (let k = 0; k < lines.length; k++) {
+      if (!isText(k)) continue;
+      let end = k;
+      while (end < lines.length && isText(end)) end++;
+      htmlLinesAsText(lines.slice(k, end).map(line => line.text)).forEach((text, n) => texts.set(k + n, text));
+      k = end - 1;
+    }
     lines = lines.flatMap((line, k) => {
-      const rest = inHtml.get(k) ?? (parseEmbedDirective(line.text) ? '' : undefined);
+      const rest = restOf(k);
       if (rest !== undefined) {
         changed = true;
-        return /\S/.test(rest) ? [{ text: htmlLineAsText(rest), escaped: true }] : [];
+        return /\S/.test(rest) ? [{ text: htmlLinesAsText([rest]).join('\n'), escaped: true }] : [];
       }
-      if (inHtml.has(k) || line.escaped || !/\S/.test(line.text)) return [line];
+      if (!texts.has(k)) return [line];
       changed = true;
-      return [{ text: htmlLineAsText(line.text), escaped: true }];
+      return [{ text: texts.get(k)!, escaped: true }];
     });
   }
   return lines.map(line => line.text).join('\n').replace(/\n{3,}/g, '\n\n').trim() || undefined;

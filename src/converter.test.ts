@@ -6471,6 +6471,10 @@ describe('HTML around a table in its block', () => {
     ['a citation as text', '', '\nSource [@smith2020; -@doe, p. 2] *x* [see @doe]\n', '', '\n\nSource \\[@smith2020; -@doe, p. 2] \\*x\\* \\[see @doe]\n'],
     // Which pair across one, which read as math
     ['dollar signs around a character reference', '', '\nSource $x &amp; y$ and *a <b>b</b> c*\n', '', '\n\nSource \\$x &amp; y$ and \\*a <b>b</b> c\\*\n'],
+    // Which went on across its lines, and the spaces at a line's end, which
+    // HTML runs together, but which made a line break
+    ['a comment, dollar signs and spaces at a line\'s end across lines', '', '\nSource <!-- hidden\nsecret --> $a\nb$ and  \ncontinued\n', '',
+      '\n\nSource <!-- hidden\nsecret --> \\$a\nb$ and\ncontinued\n'],
   ])('keeps %s around a table that leaves HTML, as it read', async (_name, beforeHtml, afterHtml, beforeMd, afterMd) => {
     // A comment that reads as no directive went, as one that does, and text
     // read as Markdown, as # Source as a heading
