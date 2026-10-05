@@ -459,6 +459,32 @@ describe('parseMd HTML tables', () => {
     expect(table?.rows?.[1].cells[1].runs[0].text).toBe('B');
   });
 
+  it.each([
+    ['after a table', '<table><tr><td>a</td></tr></table>\n<!-- <table><tr><td>b</td></tr></table> -->', ['table']],
+    // Which is a block of HTML with no table, kept as text
+    ['in a div', '<div><!-- <table><tr><td>b</td></tr></table> --></div>', ['<div><!-- <table><tr><td>b</td></tr></table> --></div>']],
+    ['before a table', '<!-- <table><tr><td>b</td></tr></table> --><table><tr><td>a</td></tr></table>', ['table']],
+    // That runs to the end, with no -->
+    ['with no end', '<!-- <table><tr><td>b</td></tr></table>', ['<!-- <table><tr><td>b</td></tr></table>']],
+    ['with no end in a div', '<div><!-- <table><tr><td>b</td></tr></table>', ['<div><!-- <table><tr><td>b</td></tr></table>']],
+  ])('reads no table in a comment %s', (_name, markdown, expected) => {
+    // A table commented out was one in Word
+    const tokens = parseMd(markdown);
+    expect(tokens.map(t => t.type === 'table' ? 'table' : t.runs.map(r => r.text).join(''))).toEqual(expected);
+    const table = tokens.find(t => t.type === 'table');
+    if (table) expect(table.rows?.[0].cells[0].runs[0].text).toBe('a');
+  });
+
+  it.each([
+    ['row', '<table>\n<!-- <tr><td>old</td></tr> -->\n<tr><td>a</td></tr>\n</table>'],
+    ['row with no end', '<table>\n<tr><td>a</td></tr>\n<!-- <tr><td>old</td></tr>\n</table>'],
+    ['cell', '<table><tr><!-- <td>old</td> --><td>a</td></tr></table>'],
+  ])('reads no %s in a comment', (_name, markdown) => {
+    // A row or cell commented out, which the preview hides, was one in Word
+    const table = parseMd(markdown).find(t => t.type === 'table');
+    expect(table?.rows?.map(row => row.cells.map(cell => cell.runs.map(run => run.text).join('')))).toEqual([['a']]);
+  });
+
   it('decodes entities and preserves inline formatting inside HTML table cells', () => {
     const markdown = '<table><tr><td><strong>A &amp; B</strong><br/>line</td></tr></table>';
     const tokens = parseMd(markdown);

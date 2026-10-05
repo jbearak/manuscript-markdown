@@ -6482,13 +6482,18 @@ function renderInlineRangeWithIds(
  * holds what a cell can't: a cell takes HTML formatting only (see HTML
  * Tables in the specification), so a comment, a tracked change, a
  * highlight, a citation, a note, math or an image would export as literal
- * text. Whitespace HTML collapses or trims is written as references.
+ * text. Whitespace HTML collapses or trims is written as references. An HTML
+ * comment, which a cell hides, stays one.
  */
 function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
   type TextItem = Extract<ContentItem, { type: 'text' }>;
   // The paragraph's text, with each line break as null
-  const pieces: Array<{ text: string; item: TextItem; html: string } | null> = [];
+  const pieces: Array<{ text: string; item: TextItem; html: string; raw?: boolean } | null> = [];
   for (const item of items) {
+    if (item.type === 'html_comment' && item.commentIds.size === 0 && /^<!--(?:(?!-->)[\s\S])*-->$/.test(item.text)) {
+      pieces.push({ text: '', item: { type: 'text', text: '', commentIds: item.commentIds, formatting: DEFAULT_FORMATTING }, html: item.text, raw: true });
+      continue;
+    }
     if (item.type !== 'text' || item.revision || item.commentIds.size > 0 || item.formatting.highlight) return undefined;
     item.text.split('\\\n').forEach((text, k) => {
       if (k > 0) pieces.push(null);
@@ -6500,10 +6505,13 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
   for (let k = 0; k < pieces.length; k++) {
     let end = k;
     while (end < pieces.length && pieces[end] !== null) end++;
-    const line = pieces.slice(k, end) as Array<{ text: string; item: TextItem; html: string }>;
+    const line = pieces.slice(k, end) as Array<{ text: string; item: TextItem; html: string; raw?: boolean }>;
     const characters = htmlLineCharacters(line.map(piece => piece.text).join(''));
     let at = 0;
-    for (const piece of line) piece.html = characters.slice(at, at += piece.text.length).join('');
+    for (const piece of line) {
+      const html = characters.slice(at, at += piece.text.length).join('');
+      if (!piece.raw) piece.html = html;
+    }
     k = end;
   }
   let html = '';
@@ -6521,6 +6529,11 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
     }
     const lineBreaks = breaks;
     breaks = 0;
+    // A comment goes in the formatting around it
+    if (piece.raw) {
+      html += '<br>'.repeat(lineBreaks) + piece.html;
+      return;
+    }
     const fmt = piece.item.formatting;
     const tags = [
       ...(piece.item.href ? ['<a href="' + escapeHtmlAttr(piece.item.href) + '">'] : []),

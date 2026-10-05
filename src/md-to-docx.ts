@@ -209,6 +209,9 @@ function mapHtmlTableRunToMdRun(run: HtmlTableRun): MdRun {
   if (run.type === 'paragraph') {
     return { type: 'hardbreak', text: '\n', cellParagraphBreak: true };
   }
+  if (run.type === 'html_comment') {
+    return { type: 'html_comment', text: run.text };
+  }
   return {
     type: 'text',
     text: run.text,

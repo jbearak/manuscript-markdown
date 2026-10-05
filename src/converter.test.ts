@@ -5737,6 +5737,9 @@ describe('HTML table cells', () => {
     ['a link whose target has an apostrophe', '      <p><a href="https://e.com/O\'Brien">o</a></p>'],
     ['whitespace HTML would collapse', '      <p>a&#9;b &#32;c</p>'],
     ['a space at the start of a line before formatting', '      <p>&#32;<b>x</b> &#32;<i>y</i><br>&#32;&#32;<b>&#32;z</b>&nbsp;</p>'],
+    // Which Word showed as text
+    ['a comment', '      <p>a<!-- c --> b</p>'],
+    ['comments alone and in formatting', '      <p><!-- c --></p>\n      <p><b>x<!-- d -->y</b></p>'],
   ])('keeps %s', async (_name, cell) => {
     // Import wrote Markdown in the cell, which exports as literal text, with
     // a backslash before each character Markdown would read, and more on
