@@ -7808,18 +7808,23 @@ export function buildMarkdown(
           codeLines.pop();
         }
 
-        // Compute fence length: must exceed any backtick run in the content
+        // Compute fence length: must exceed any run of its character in the
+        // content. Tildes where the language has a backtick, which a
+        // backtick fence's info string can't hold, and a space before a
+        // language that starts with the fence's character, which the fence
+        // would take.
+        const fenceChar = lang.includes('`') ? '~' : '`';
         let maxRun = 0;
         for (const line of codeLines) {
-          const matches = line.match(/`+/g);
+          const matches = line.match(fenceChar === '`' ? /`+/g : /~+/g);
           if (matches) {
             for (const m of matches) {
               if (m.length > maxRun) maxRun = m.length;
             }
           }
         }
-        const fence = '`'.repeat(Math.max(3, maxRun + 1));
-        output.push(fence + lang + '\n' + codeLines.join('\n') + '\n' + fence);
+        const fence = fenceChar.repeat(Math.max(3, maxRun + 1));
+        output.push(fence + (lang.startsWith(fenceChar) ? ' ' : '') + lang + '\n' + codeLines.join('\n') + '\n' + fence);
         codeBlockGroupIndex++;
         // Skip a plain separator para that was inserted during export between
         // consecutive code-block groups or before a blockquote group.  Only
