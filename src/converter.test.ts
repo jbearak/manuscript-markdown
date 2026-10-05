@@ -4984,6 +4984,15 @@ describe('Word text that reads as Markdown', () => {
     expect(await roundTrip(md)).toBe(md + '\n');
   });
 
+  test('keeps a backslash a citation\'s text ends with before a letter next to inline math', () => {
+    // The backslash escaped the & of the letter's reference
+    expect(buildMarkdown([
+      { type: 'citation', text: '\\', commentIds: new Set(), pandocKeys: [] },
+      { type: 'text', text: 'a', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
+      { type: 'math', latex: 'x', display: false, commentIds: new Set() },
+    ], new Map())).toBe('\\\\&#97;$x$');
+  });
+
   test.each([
     '<div>\nx\n</div>', '<script>x</script>', '<p>a</p>', '<details>\n<summary>s</summary>\nx\n</details>',
     '<span>x</span> y', 'a\\\n<span>x</span>',
