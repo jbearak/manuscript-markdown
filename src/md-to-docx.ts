@@ -2965,6 +2965,16 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
           const htmlTables = extractHtmlTables(htmlContent);
           if (htmlTables.length > 0) {
             for (const meta of htmlTables) {
+              // A comment between rows or cells hides them, as the preview
+              // does, but Word's table can't hold it
+              if (meta.comments && meta.rows.length > 0) {
+                warnings?.push('Comment between an HTML table\'s rows or cells dropped during conversion (not supported). Move it outside the table for round-trip fidelity.');
+              } else if (meta.comments) {
+                // Comments alone, which hide all its rows, as nothing shows
+                // in the preview, and as a block of comments, hidden in Word
+                warnings?.push('HTML table whose rows are all in comments exported as its comments (not supported). Move the comments outside the table for round-trip fidelity.');
+                result.push({ type: 'paragraph', runs: meta.comments.map(text => ({ type: 'html_comment' as const, text })) });
+              }
               if (meta.rows.length > 0) {
                 // Keep this mapping explicit so HtmlTableRun/MdRun shape changes
                 // cannot silently alter assignability behavior.

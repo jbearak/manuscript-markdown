@@ -1462,6 +1462,16 @@ describe('compactTable', () => {
 });
 
 describe('HTML table support for Expand/Compact Table', () => {
+  it.each([
+    ['row', '<table>\n<!-- <tr><td>old</td></tr> -->\n<tr><td>a</td></tr>\n</table>'],
+    ['cell', '<table><tr><!-- <td>old</td> --><td>a</td></tr></table>'],
+    ['rows alone', '<table><!-- <tr><td>old</td></tr> --></table>'],
+  ])('leaves a table with a %s in a comment unchanged', (_name, html) => {
+    // A pipe or grid table can't hold the comment, which was deleted
+    expect(reflowTable(html).newText).toBe(html);
+    expect(compactTable(html).newText).toBe(html);
+  });
+
   it('mixed text + HTML table selection remains unchanged', () => {
     const html = '<table><tr><th>Name</th></tr><tr><td>Alice</td></tr></table>';
     const mixed = 'Intro\n' + html + '\nOutro';

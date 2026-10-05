@@ -485,6 +485,36 @@ describe('parseMd HTML tables', () => {
     expect(table?.rows?.map(row => row.cells.map(cell => cell.runs.map(run => run.text).join('')))).toEqual([['a']]);
   });
 
+  it('warns of a comment between a table\'s rows, which Word\'s table can\'t hold', async () => {
+    const { warnings } = await convertMdToDocx('<table>\n<!-- <tr><td>old</td></tr> -->\n<tr><td>a</td></tr>\n</table>');
+    expect(warnings).toContain('Comment between an HTML table\'s rows or cells dropped during conversion (not supported). Move it outside the table for round-trip fidelity.');
+  });
+
+  it.each([
+    ['a row', '<table><!-- <tr><td>old</td></tr> --></table>', ['<!-- <tr><td>old</td></tr> -->']],
+    ['a cell', '<table><tr><!-- <td>old</td> --></tr></table>', ['<!-- <td>old</td> -->']],
+    ['rows', '<table>\n<!-- <tr><td>a</td></tr> -->\n<!-- <tr><td>b</td></tr> -->\n</table>', ['<!-- <tr><td>a</td></tr> -->', '<!-- <tr><td>b</td></tr> -->']],
+  ])('writes a table with only %s in comments as its comments', async (_name, markdown, comments) => {
+    // Which wrote the table's HTML as text, which Word showed, though the
+    // preview shows nothing
+    const tokens = parseMd(markdown);
+    expect(tokens.map(t => t.type)).toEqual(['paragraph']);
+    expect(tokens[0].runs).toEqual(comments.map(text => ({ type: 'html_comment', text })));
+    const { warnings } = await convertMdToDocx(markdown);
+    expect(warnings).toContain('HTML table whose rows are all in comments exported as its comments (not supported). Move the comments outside the table for round-trip fidelity.');
+  });
+
+  it.each([
+    ['between paragraphs', '<p>a</p><!-- c --><p>b</p>', ['a', '<!-- c -->', '\n', 'b']],
+    ['before a paragraph', '<!-- c --><p>a</p>', ['<!-- c -->', 'a']],
+    ['after a paragraph', '<p>a </p><!-- c -->', ['a', '<!-- c -->']],
+    ['before a paragraph, after one', '<p>a</p>\n<!-- c -->\n<p> b</p>', ['a', '<!-- c -->', '\n', 'b']],
+  ])('starts no paragraph of a cell for a comment %s', (_name, cell, texts) => {
+    // Which showed in Word as an empty paragraph, though the preview hides it
+    const table = parseMd('<table><tr><td>' + cell + '</td></tr></table>').find(t => t.type === 'table');
+    expect(table?.rows?.[0].cells[0].runs.map(run => run.text)).toEqual(texts);
+  });
+
   it('decodes entities and preserves inline formatting inside HTML table cells', () => {
     const markdown = '<table><tr><td><strong>A &amp; B</strong><br/>line</td></tr></table>';
     const tokens = parseMd(markdown);

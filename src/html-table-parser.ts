@@ -54,6 +54,7 @@ export interface HtmlTableMeta {
   digits?: TableDigits;
   decimalMark?: TableDecimalMark;
   digitGrouping?: TableDigitGrouping;
+  comments?: string[]; // the comments between its rows or cells, which hide what's in them
 }
 
 /** Parse data-col-widths attribute value (inline to avoid circular dependency with frontmatter.ts). */
@@ -82,10 +83,13 @@ export function extractHtmlTables(html: string): HtmlTableMeta[] {
   while ((tableMatch = tableRegex.exec(html)) !== null) {
     if (tableMatch[0].startsWith('<!--')) continue;
     const attrs = tableMatch[1];
-    const rows = extractHtmlTableRows(tableMatch[2]);
-    // Invariant: only non-empty row sets are returned to callers.
-    if (rows.length > 0) {
+    const comments: string[] = [];
+    const rows = extractHtmlTableRows(tableMatch[2], comments);
+    // Invariant: only tables with rows are returned to callers, or with
+    // comments that hide all of them, which a caller can't drop unseen.
+    if (rows.length > 0 || comments.length > 0) {
       const meta: HtmlTableMeta = { rows };
+      if (comments.length > 0) meta.comments = comments;
       const fontSizeMatch = attrs.match(/data-font-size\s*=\s*["']?(\d+(?:\.\d+)?)["']?/i);
       if (fontSizeMatch) {
         const n = parseFloat(fontSizeMatch[1]);
@@ -139,15 +143,18 @@ export function extractHtmlTables(html: string): HtmlTableMeta[] {
   return tables;
 }
 
-function extractHtmlTableRows(tableHtml: string): HtmlTableRow[] {
+function extractHtmlTableRows(tableHtml: string, comments: string[]): HtmlTableRow[] {
   const rows: HtmlTableRow[] = [];
   // Similarly, nested <tr> structures are out of scope for this lightweight parser.
   // Not one in a comment, as for a table (see extractHtmlTables).
 	const rowRegex = /<!--(?:[\s\S]*?-->|[\s\S]*$)|<tr\b(?:"[^"]*"|'[^']*'|[^'">])*?>([\s\S]*?)<\/tr>/gi;
   let rowMatch: RegExpExecArray | null;
   while ((rowMatch = rowRegex.exec(tableHtml)) !== null) {
-    if (rowMatch[0].startsWith('<!--')) continue;
-    const cells = extractHtmlTableCells(rowMatch[1]);
+    if (rowMatch[0].startsWith('<!--')) {
+      comments.push(rowMatch[0]);
+      continue;
+    }
+    const cells = extractHtmlTableCells(rowMatch[1], comments);
     // Invariant: rows with no cells are skipped.
     if (cells.length > 0) {
       rows.push({
@@ -165,14 +172,17 @@ function extractHtmlTableRows(tableHtml: string): HtmlTableRow[] {
   return rows;
 }
 
-function extractHtmlTableCells(rowHtml: string): Array<HtmlTableCell & { isHeader: boolean }> {
+function extractHtmlTableCells(rowHtml: string, comments: string[]): Array<HtmlTableCell & { isHeader: boolean }> {
   const cells: Array<HtmlTableCell & { isHeader: boolean }> = [];
   // Nested table-cell tags are not supported; this matches flat <th>/<td> content only.
   // Not one in a comment, as for a table (see extractHtmlTables).
 	const cellRegex = /<!--(?:[\s\S]*?-->|[\s\S]*$)|<(th|td)\b((?:"[^"]*"|'[^']*'|[^'">])*)>([\s\S]*?)<\/\1>/gi;
   let cellMatch: RegExpExecArray | null;
   while ((cellMatch = cellRegex.exec(rowHtml)) !== null) {
-    if (cellMatch[0].startsWith('<!--')) continue;
+    if (cellMatch[0].startsWith('<!--')) {
+      comments.push(cellMatch[0]);
+      continue;
+    }
     const isHeader = cellMatch[1].toLowerCase() === 'th';
     const attrs = cellMatch[2];
     const runs = parseHtmlCellRuns(cellMatch[3]);
@@ -245,12 +255,19 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
   let atParagraphStart = true;
   // A <br> at the end of a <p>, which stays, unlike one at the end of a cell
   const closedBreaks = new Set<HtmlTableRun>();
+  // The last run that shows, before any comments after it, which don't
+  const lastShown = () => {
+    let k = runs.length - 1;
+    while (k >= 0 && runs[k].type === 'html_comment') k--;
+    return k;
+  };
   const startParagraph = () => {
     if (paragraphs > 0) {
-      const last = runs[runs.length - 1];
+      const k = lastShown();
+      const last = runs[k];
       if (last?.type === 'text' && !last.code) {
         last.text = last.text.replace(/[ \t\r\n]+$/, '');
-        if (!last.text) runs.pop();
+        if (!last.text) runs.splice(k, 1);
       }
       runs.push({ type: 'paragraph', text: '\n\n' });
     }
@@ -292,9 +309,10 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
     if (match.index > lastIndex) emitText(cellHtml.slice(lastIndex, match.index));
     lastIndex = match.index + match[0].length;
 
-    // A comment, which the browser hides, as Word's export of it does
+    // A comment, which the browser hides, as Word's export of it does. It
+    // goes in the paragraph before it, or else the one after it, as it
+    // starts none, which would show as an empty one.
     if (match[0].startsWith('<!--')) {
-      startContent();
       runs.push({ type: 'html_comment', text: match[0] });
       continue;
     }
@@ -344,18 +362,20 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
   // source text until here, so whitespace written as a character reference,
   // such as &#9; or &nbsp;, neither collapses nor trims.
   if (runs.length > 0) {
-    const first = runs[0];
-    if (first.type === 'text' && !first.code) {
+    const k = runs.findIndex(run => run.type !== 'html_comment');
+    const first = runs[k];
+    if (first?.type === 'text' && !first.code) {
       first.text = first.text.replace(/^[ \t\r\n]+/, '');
-      if (!first.text) runs.shift();
+      if (!first.text) runs.splice(k, 1);
     }
   }
   if (runs.length > 0) {
-    const last = runs[runs.length - 1];
-    if (last.type === 'softbreak' && !closedBreaks.has(last)) runs.pop();
-    else if (last.type === 'text' && !last.code) {
+    const k = lastShown();
+    const last = runs[k];
+    if (last?.type === 'softbreak' && !closedBreaks.has(last)) runs.splice(k, 1);
+    else if (last?.type === 'text' && !last.code) {
       last.text = last.text.replace(/[ \t\r\n]+$/, '');
-      if (!last.text) runs.pop();
+      if (!last.text) runs.splice(k, 1);
     }
   }
   for (const run of runs) {

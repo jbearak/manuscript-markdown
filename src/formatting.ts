@@ -687,7 +687,9 @@ function convertHtmlTable(text: string, pad: boolean): string | null {
   if (!/^<table\b[\s\S]*<\/table>$/i.test(trimmed)) return null;
   const tables = extractHtmlTables(trimmed);
   // Subtle bug guard: mixed text/table selections must remain unchanged.
-  if (tables.length !== 1) return null;
+  // So must a table with a comment between its rows or cells, which a pipe
+  // or grid table can't hold, so that it isn't lost.
+  if (tables.length !== 1 || tables[0].comments) return null;
   const rows = tables[0].rows;
 
   // Reject colspan/rowspan
