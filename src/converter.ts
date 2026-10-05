@@ -6148,13 +6148,25 @@ function tryRenderPipeTable(table: { rows: TableRow[] }, maxLineWidth: number, c
                 ? { ...item, formatting: { ...item.formatting, bold: false } }
                 : item)
           : cell.paragraphs[0];
-        const r = renderInlineSegment(mergeConsecutiveRuns(items), comments, renderOpts);
-        if (r.text.includes('\n')) { rollback(); return null; }
+        // Its line breaks at its end too, which renderInlineSegment drops
+        // for a grid table's, as a cell of one line holds them as Word's
+        const r = renderInlineRange(mergeConsecutiveRuns(items), 0, comments, undefined, renderOpts);
+        // A line break, which a cell's one line can't hold, as <br>, which a
+        // cell reads as one, but not a line end in code, an equation or a
+        // comment, which isn't one
+        let text = '';
+        let from = 0;
+        for (const start of lineStartsAfterBreaks(r.text)) {
+          text += r.text.slice(from, start - 2) + '<br>';
+          from = start;
+        }
+        text += r.text.slice(from);
+        if (text.includes('\n')) { rollback(); return null; }
         // Escape pipes for GFM table cells, which take the backslash before
         // a pipe for the table's, and leave the rest to the cell's Markdown:
         // a backslash of Word's before it, which escapeMarkdownChars doubled,
         // or LaTeX's, as in $\|x\|$
-        const escaped = keepParagraphWhitespace(r.text, true, true).replace(/\|/g, '\\|');
+        const escaped = keepParagraphWhitespace(text, true, true).replace(/\|/g, '\\|');
         rowCells.push({ text: escaped, deferred: r.deferredComments });
       } else {
         rowCells.push({ text: '', deferred: [] });
