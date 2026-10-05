@@ -11,7 +11,7 @@ import { HTML_OPEN_CLOSE_TAG_RE, HTML_TAG_RE } from 'markdown-it/lib/common/html
 import { isMdAsciiPunct, isPunctChar, isWhiteSpace } from 'markdown-it/lib/common/utils.mjs';
 import { computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
 import { findDollarMathAt } from './math-delimiters';
-import { getDisplayWidth, type TableAlign } from './grid-table-preprocess';
+import { getDisplayWidth, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
 import { citationEndInText, compareNoteLabels, customStyleId, linkifiedColons, linkifiedText, linkifyMatches, startsHtmlBlock } from './md-to-docx';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
@@ -6485,6 +6485,16 @@ function tryRenderGridTable(
 
   // If something went wrong with rendering, rollback
   if (lines.length <= 2) {
+    rollback();
+    return null;
+  }
+  // The table reads back as written, or a | in a cell's text, under a + by
+  // characters where the line is padded by display columns, would move text
+  // between cells, so it isn't a grid table
+  const cellText = (text: string) => text.split('\n').map(line => line.replace(/^[ \t]+/, '').replace(/[ \t]+$/, '')).join('\n').replace(/\n+$/, '');
+  const read = readGridTableCells(lines);
+  if (!read || read.length !== rendered.length
+    || rendered.some((rowCells, ri) => rowCells.some((cell, c) => cellText(read[ri][c] ?? '') !== cellText(cell.lines.join('\n'))))) {
     rollback();
     return null;
   }

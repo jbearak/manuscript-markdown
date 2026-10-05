@@ -282,7 +282,8 @@ function fitsLine(line: GridLine, cuts: number[]): boolean {
  * way its lines that fit one way alone are padded, and without one, the way
  * whose edges have a space or the line's end on each side, as import and
  * Expand Table write them, where a | in a cell's text can have text, and
- * else characters, as a table was read before display columns were.
+ * else characters, as a table was read before display columns were. Import
+ * checks that a table it writes reads back so (see readGridTableCells).
  */
 function gridLineCells(line: GridLine, boundaries: number[], layout?: 'display' | 'characters'): string[] {
   const { chars, columns, pipes } = line;
@@ -310,6 +311,12 @@ function gridLineCells(line: GridLine, boundaries: number[], layout?: 'display' 
     return boundaries.slice(0, -1).map((b, c) => chars.filter((_ch, k) => columns[k] > b && columns[k] < boundaries[c + 1]).join(''));
   }
   return boundaries.slice(0, -1).map((_b, c) => chars.slice(cuts[c] + 1, cuts[c + 1]).join(''));
+}
+
+/** The text of each cell of each row of the grid table `lines`, as export
+ *  reads them, or null where they don't form one */
+export function readGridTableCells(lines: string[]): string[][] | null {
+  return parseGridTable(lines)?.rows.map(row => row.cells) ?? null;
 }
 
 /**
