@@ -200,6 +200,16 @@ describe('a citation after a paragraph or line break', () => {
   });
 
   it.each([
+    ['a deleted mark alone', 'a{--\n\n--}{++[@doe2020]++}\n\nEnd'],
+    ['a deleted mark at the end of a deletion', 'a{~~b\n\n~>[@doe2020]~~}\n\nEnd'],
+    ['one in a quote', '> a{--\n>\n> --}{++[@doe2020]++}\n\nEnd'],
+  ])('puts no space before a citation inserted after %s, which starts its paragraph in Word', async (_, md) => {
+    // With the change accepted the paragraphs join, so the citation came
+    // after text, and the space went at its paragraph's start in Word
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  it.each([
     ['a tracked paragraph mark alone', 'a{--\n\n--}b [@doe2020]'],
     ['a deletion across paragraphs', 'x [@doe2020] {--a\n\nb--} c'],
   ])('keeps %s into the last paragraph before the bibliography', async (_, md) => {

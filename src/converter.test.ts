@@ -8382,16 +8382,17 @@ describe('Track changes (CriticMarkup)', () => {
     });
 
     test('writes many tracked marks in linear time', () => {
-      // Each read the content on its sides through all the others
+      // Each read the content on its sides through all the others, moved
+      // all the content after it, and read all the Markdown before it
       const revision = { type: 'deletion' as const, author: 'A', date: '' };
       const content: ContentItem[] = [];
-      for (let i = 0; i < 32000; i++) {
+      for (let i = 0; i < 128000; i++) {
         content.push(i === 0 ? { type: 'para' } : { type: 'para', breakRevision: revision });
         content.push({ type: 'text', text: 'a' + i, commentIds: new Set(), formatting: DEFAULT_FORMATTING });
       }
       const start = performance.now();
       const markdown = buildMarkdown(content, new Map());
-      expect(performance.now() - start).toBeLessThan(2000);
+      expect(performance.now() - start).toBeLessThan(3000);
       expect(markdown.startsWith('a0{--\n\n--}a1{--\n\n--}a2')).toBe(true);
     });
 

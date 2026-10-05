@@ -1075,7 +1075,9 @@ export type ContentItem =
       link?: number;           // which w:hyperlink, so two to one place stay two links
       revision?: RevisionInfo;
     }
-  | { type: 'citation'; text: string; commentIds: Set<string>; pandocKeys: string[]; revision?: RevisionInfo; formatting?: RunFormatting }
+  // lineStart: the citation starts the paragraph after a tracked break,
+  // which some views of the change join to the text before it
+  | { type: 'citation'; text: string; commentIds: Set<string>; pandocKeys: string[]; revision?: RevisionInfo; formatting?: RunFormatting; lineStart?: boolean }
   | { type: 'table'; rows: TableRow[] }
   | {
       type: 'para';
@@ -5453,7 +5455,12 @@ function textEnd(markdown: string, from: number, end: number): number {
  *  line, after a line break or a tracked paragraph break. A view
  *  without the space then keeps the citation against its text, as Word has it
  *  there. */
-function citationSeparator(precedingMarkdown: string, revision: RevisionInfo | undefined, last?: RevisionSpan): string {
+function citationSeparator(precedingMarkdown: string, citation: Extract<ContentItem, { type: 'citation' }>, last?: RevisionSpan): string {
+  // Where Word starts a paragraph with it, as after a tracked break the
+  // view drops, as in a{--\n\n--}{++[@key]++}, a space would be one at the
+  // paragraph's start
+  if (citation.lineStart) return '';
+  const revision = citation.revision;
   const views = revision?.type === 'addition' ? [true] : revision?.type === 'deletion' ? [false] : [true, false];
   // The span the Markdown ends with gives its last character without a
   // scan, past the formatting its text ends in, before its ++} or --}
@@ -5562,9 +5569,9 @@ function renderHighlightGroup(
       inner += '$' + item.latex + '$';
       mathEnd = inner.length;
     } else if (item.type === 'citation') {
-      if (item.pandocKeys.length > 0 && g === start) lead = citationSeparator(precedingMarkdown, item.revision, last);
+      if (item.pandocKeys.length > 0 && g === start) lead = citationSeparator(precedingMarkdown, item, last);
       inner += item.pandocKeys.length > 0
-        ? (g === start ? '' : citationSeparator(inner, item.revision)) + '[' + item.pandocKeys.join('; ') + ']'
+        ? (g === start ? '' : citationSeparator(inner, item)) + '[' + item.pandocKeys.join('; ') + ']'
         : item.text;
     }
   }
@@ -5611,7 +5618,7 @@ function substitutionItemText(item: SubstitutionItem, precedingText: string, not
   }
   if (item.type === 'citation') {
     return item.pandocKeys.length > 0
-      ? citationSeparator(precedingText, item.revision) + '[' + item.pandocKeys.join('; ') + ']'
+      ? citationSeparator(precedingText, item) + '[' + item.pandocKeys.join('; ') + ']'
       : escapeAfterHighlight(item.text, precedingText);
   }
   return item.display
@@ -6292,7 +6299,7 @@ function renderInlineRange(
     if (item.type === 'citation' && item.commentIds.size === 0) {
       let citeText: string;
       if (item.pandocKeys.length > 0) {
-        const citeSep = citationSeparator(out, item.revision, lastSpan);
+        const citeSep = citationSeparator(out, item, lastSpan);
         citeText = citeSep + '[' + item.pandocKeys.join('; ') + ']';
       } else {
         // Text a highlight's == before it would take, as a {1} for a color
@@ -6360,7 +6367,7 @@ function renderInlineRange(
       let j = i;
       // The space import adds before a citation that opens the range goes
       // before the range, which Word's doesn't cover
-      const lead = item.type === 'citation' && item.pandocKeys.length > 0 ? citationSeparator(out, item.revision, lastSpan) : '';
+      const lead = item.type === 'citation' && item.pandocKeys.length > 0 ? citationSeparator(out, item, lastSpan) : '';
 
       while (j < segment.length) {
         const seg = segment[j];
@@ -6399,7 +6406,7 @@ function renderInlineRange(
         }
         if (seg.type === 'citation') {
           const citeText = seg.pandocKeys.length > 0
-            ? citationSeparator(anchorText || out + lead, seg.revision, anchorSpan) + '[' + seg.pandocKeys.join('; ') + ']'
+            ? citationSeparator(anchorText || out + lead, seg, anchorSpan) + '[' + seg.pandocKeys.join('; ') + ']'
             : escapeAfterHighlight(seg.text, anchorText, inSpanBefore(anchorText, seg, anchorSpan));
           [anchorText, anchorSpan] = appendRevised(anchorText, citeText, seg, anchorSpan);
           j++;
@@ -6469,7 +6476,9 @@ function renderInlineRange(
       // Markdown ends with a line break only after text that does, so it's
       // read only there, as reading it copies Markdown being built
       const prev = segment[i - 1];
-      const lineStart = (out === '' || prev?.type === 'text' && prev.text.endsWith('\n') && out.endsWith('\n')) && !(item.revision && opts?.nested);
+      // Nor after the span it ends with, as of a tracked break alone
+      const lineStart = (out === '' || prev?.type === 'text' && prev.text.endsWith('\n') && lastSpan?.end !== out.length && out.endsWith('\n'))
+        && !(item.revision && opts?.nested);
       // An HTML block starts only a block's text, not a heading's, a table
       // cell's or a tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !opts?.cell && !item.revision;
@@ -6590,7 +6599,7 @@ function renderInlineRangeWithIds(
 
       let citeText: string;
       if (item.pandocKeys.length > 0) {
-        const citeSep = citationSeparator(out, item.revision, lastSpan);
+        const citeSep = citationSeparator(out, item, lastSpan);
         citeText = citeSep + '[' + item.pandocKeys.join('; ') + ']';
       } else {
         // Text a highlight's == before it would take, as a {1} for a color
@@ -6741,7 +6750,9 @@ function renderInlineRangeWithIds(
       // Markdown ends with a line break only after text that does, so it's
       // read only there, as reading it copies Markdown being built
       const prev = segment[i - 1];
-      const lineStart = (out === '' || prev?.type === 'text' && prev.text.endsWith('\n') && out.endsWith('\n')) && !(item.revision && opts?.nested);
+      // Nor after the span it ends with, as of a tracked break alone
+      const lineStart = (out === '' || prev?.type === 'text' && prev.text.endsWith('\n') && lastSpan?.end !== out.length && out.endsWith('\n'))
+        && !(item.revision && opts?.nested);
       // An HTML block starts only a block's text, not a heading's, a table
       // cell's or a tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !opts?.cell && !item.revision;
@@ -8255,7 +8266,19 @@ function trackedBreakMarks(values: unknown): TrackedBreakMarks {
  *  so formatting, code and links close before it, and
  *  joinSpansAtTrackedBreaks then joins its span to the spans around it. */
 function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => TrackedBreakMarks, linePrefix: (para: ParaItem, opening: ParaItem | undefined) => string = () => ''): ContentItem[] {
+  // The content up to `copied`, and the breaks' in place of their
+  // paragraphs: inserting each into a copy of all of it moved what came
+  // after, in time in the square of the breaks' number
   let joined: ContentItem[] | undefined;
+  let copied = 0;
+  // The citations that start a paragraph after a break, by index
+  const lineStarts = new Set<number>();
+  const copy = (to: number) => {
+    for (; copied < to; copied++) {
+      const item = content[copied];
+      joined!.push(lineStarts.has(copied) && item.type === 'citation' ? { ...item, lineStart: true } : item);
+    }
+  };
   let sides: ReturnType<typeof contentAroundTrackedBreaks> | undefined;
   for (let k = 0; k < content.length; k++) {
     const para = content[k];
@@ -8282,7 +8305,8 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
     sides ??= contentAroundTrackedBreaks(content);
     const { before, after } = sides.get(k)!;
     if (!before?.survives || !after?.survives) continue;
-    joined ??= [...content];
+    joined ??= [];
+    copy(last + 1);
     const prefix = linePrefix(para, opening);
     // A break alone has no end mark, so it ends with the next line's start,
     // which what comes after reads, as a citation does to put no space there
@@ -8302,9 +8326,16 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
     const barrier: ContentItem[] = alone ? [{ type: 'text', text: '', commentIds: new Set(commentIds), formatting: DEFAULT_FORMATTING }] : [];
     // A comment's reference before it stays there, outside its span
     const points = content.slice(last + 1, k);
-    joined.splice(joined.length - content.length + last + 1, k - last, ...(alone ? [...points, item, ...barrier] : [item, ...points]));
+    joined.push(...(alone ? [...points, item, ...barrier] : [item, ...points]));
+    copied = k + 1;
+    // Past a comment's range's start
+    let first = k + 1;
+    for (let item = content[first]; item?.type === 'text' && item.text === '' && !item.revision; item = content[++first]);
+    if (content[first]?.type === 'citation') lineStarts.add(first);
   }
-  return joined ?? content;
+  if (!joined) return content;
+  copy(content.length);
+  return joined;
 }
 
 /** Markdown with each tracked break from joinTrackedParagraphBreaks inside
