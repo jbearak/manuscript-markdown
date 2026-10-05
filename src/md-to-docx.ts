@@ -123,7 +123,7 @@ export interface MdToken {
   tableDigits?: TableDigits;
   tableDecimalMark?: TableDecimalMark;
   tableDigitGrouping?: TableDigitGrouping;
-  tableHtmlAround?: [string, string, string, string]; // the HTML before and after an HTML table in its block, which Word doesn't show, and the table's first row and contents (see tableFirstRow)
+  tableHtmlAround?: [string, string]; // the HTML before and after an HTML table in its block, which Word doesn't show
   gridSourceColWidths?: number[]; // column char-widths inferred from +---+---+ source; persisted for round-trip fidelity and Word Online layout
   criticParaMark?: 'addition' | 'deletion'; // paragraph mark revision: a heading promoted from a full-paragraph {++### ...++} / {--### ...--} span, or a block split at a paragraph break inside a revision
   criticParaMarkRun?: MdRun; // the revision whose paragraph break ends this block; supplies author and date (default: the first run)
@@ -682,6 +682,14 @@ export function linkifiedText(address: string, email: boolean): string {
 export function startsHtmlBlock(text: string): boolean {
   citationTextMd ??= createMarkdownIt();
   return citationTextMd.parse(text, {})[0]?.type === 'html_block';
+}
+
+/** The HTML blocks export reads in Markdown `text`, not in a quote or list:
+ *  each one's lines, from `start` to before `end`, and its text */
+export function htmlBlocksIn(text: string): Array<{ start: number; end: number; content: string }> {
+  citationTextMd ??= createMarkdownIt();
+  return citationTextMd.parse(text, {}).flatMap(token => token.type === 'html_block' && token.level === 0 && token.map
+    ? [{ start: token.map[0], end: token.map[1], content: token.content }] : []);
 }
 
 function citationRule(state: StateInline, silent: boolean): boolean {
@@ -3034,10 +3042,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
                 // HTML on the table's lines on them, as it may end a block.
                 const before = k === 0 ? htmlContent.slice(0, meta.start).replace(/(^|\n)[ \t]*$/, '$1') : '';
                 const after = htmlContent.slice(meta.end, htmlTables[k + 1]?.start).replace(/\s+$/, '');
-                if (/\S/.test(before + after)) {
-                  tableToken.tableHtmlAround = [/\S/.test(before) ? before : '', /\S/.test(after) ? after : '', tableFirstRow(mappedRows),
-                    tableContentsFingerprint(mappedRows.flatMap(row => row.cells.map(cellText)))];
-                }
+                if (/\S/.test(before + after)) tableToken.tableHtmlAround = [/\S/.test(before) ? before : '', /\S/.test(after) ? after : ''];
                 result.push(tableToken);
               }
             }
@@ -3975,7 +3980,8 @@ export interface DocxGenState {
   tableDigits: Map<number, string>;
   tableDecimalMarks: Map<number, string>;
   tableDigitGroupings: Map<number, string>;
-  tableHtmlAround: Map<number, [string, string, string, string]>; // table index -> the HTML before and after it in its block, and its first row and contents
+  tableHtmlAround: Map<number, [string, string, string, string, string]>; // table index -> the HTML before and after it in its block, its first row and contents, and the count of tables alike in both before it
+  tablesAlike: Map<string, number>; // a table's first row and contents -> the tables so far with both
   fontOverrides?: FontOverrides;       // document-level font overrides for table default resolution
   listIndent: 'tab' | 'spaces'; // indentation style for nested list items
   consecutiveReplyParaIds: Set<string>; // parent paraIds whose replies were in consecutive format
@@ -4034,8 +4040,15 @@ function recordTableMetadata(token: MdToken, state: DocxGenState): void {
   if (token.tableDigits !== undefined) state.tableDigits.set(tableIndex, String(token.tableDigits));
   if (token.tableDecimalMark) state.tableDecimalMarks.set(tableIndex, token.tableDecimalMark);
   if (token.tableDigitGrouping) state.tableDigitGroupings.set(tableIndex, token.tableDigitGrouping);
+  // Its first row and text, and the tables before it with both, which
+  // import counts too, but for one it writes as its embed directive, so the
+  // HTML around a table goes back with it, and not with one alike before it
+  const firstRow = tableFirstRow(token.rows ?? []);
+  const contents = tableContentsFingerprint((token.rows ?? []).flatMap(row => row.cells.map(cellText)));
+  const alikeBefore = state.tablesAlike.get(firstRow + '\n' + contents) ?? 0;
+  if (!(token.embedIdx !== undefined && token.embedIdx < state.embedDirectives.length)) state.tablesAlike.set(firstRow + '\n' + contents, alikeBefore + 1);
   if (token.tableHtmlAround) {
-    state.tableHtmlAround.set(tableIndex, token.tableHtmlAround);
+    state.tableHtmlAround.set(tableIndex, [...token.tableHtmlAround, firstRow, contents, String(alikeBefore)]);
     if (!state.warnings.includes(HTML_AROUND_TABLE_WARNING)) state.warnings.push(HTML_AROUND_TABLE_WARNING);
   }
 }
@@ -8282,6 +8295,7 @@ export async function convertMdToDocx(
     tableDecimalMarks: new Map(),
     tableDigitGroupings: new Map(),
     tableHtmlAround: new Map(),
+    tablesAlike: new Map(),
     pipeTableAligned: new Map(),
     gridSourceColWidths: new Map(),
     fontOverrides,

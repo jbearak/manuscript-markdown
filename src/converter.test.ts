@@ -6328,6 +6328,51 @@ describe('HTML around a table in its block', () => {
     expect(markdown).toBe('| {++XX++} | b |\n| --- | --- |\n\nSource\n');
   });
 
+  test('keeps the HTML around a table off one alike in all its text before it with none', async () => {
+    // The first table took the second's, as it had the same text
+    const md = table('a') + '\n\n<div><p>Cap</p>\n' + table('a') + '\n</div>\n';
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('keeps the HTML around a table off one Word adds before it with the same first row', async () => {
+    // The added table took it, at the index of the one it was written with
+    const zip = await JSZip.loadAsync((await convertMdToDocx('<div><p>Cap</p>\n<table><tr><td>H</td></tr><tr><td>a</td></tr></table>\n</div>\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, tbl => tbl.replace('>a<', '>z<') + '<w:p/>' + tbl));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown.startsWith('<table>')).toBe(true);
+    expect(markdown).toContain('<div><p>Cap</p>\n\n| H |\n| --- |\n| a |');
+  });
+
+  test('keeps the HTML around a table Word edits, at its index', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('<div><p>Cap</p>\n<table><tr><td>H</td></tr><tr><td>a</td></tr></table>\n</div>\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace('>a<', '>z<'));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown.startsWith('<div><p>Cap</p>\n<table>')).toBe(true);
+    expect(markdown).toContain('<p>z</p>');
+  });
+
+  test.each([
+    ['comments that read as no directive', '<div>\n<!-- TODO: check -->\n', '\n<!-- Source: World Bank -->\n</div>\n',
+      '<div>\n<!-- TODO: check -->\n\n', '\n\n<!-- Source: World Bank -->\n</div>\n'],
+    ['text that would read as Markdown', '<div>\n', '\n# Source\n{++Source++} *x* [^1]\n</div>\n',
+      '<div>\n\n', '\n\n\\# Source\n\\{++Source+\\+} \\*x\\* \\[^1]\n</div>\n'],
+    // A line of one tag doesn't start a block after text
+    ['a line of one tag after text', '', '\n# Source\n<span>\n*x*\n',
+      '', '\n\n\\# Source\n<span>\n\\*x\\*\n'],
+  ])('keeps %s around a table that leaves HTML, as it read', async (_name, beforeHtml, afterHtml, beforeMd, afterMd) => {
+    // A comment that reads as no directive went, as one that does, and text
+    // read as Markdown, as # Source as a heading
+    const zip = await JSZip.loadAsync((await convertMdToDocx(beforeHtml + '<table><tr><td>XX</td><td>b</td></tr></table>' + afterHtml)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const tracked = xml.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>');
+    expect(tracked).not.toBe(xml);
+    zip.file('word/document.xml', tracked);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe(beforeMd + '| {++XX++} | b |\n| --- | --- |' + afterMd);
+  });
+
   test('warns of no HTML kept around a table in a list item, which is dropped', async () => {
     const { warnings } = await convertMdToDocx('- <p>Cap</p>\n  <table><tr><td>a</td></tr></table>\n');
     expect(warnings.some(w => w.startsWith('HTML around a table'))).toBe(false);
