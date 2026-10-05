@@ -3389,18 +3389,18 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
         } else if (itemTokens[j].type === 'inline' && !foundFirstParagraph) {
           runs = processInlineChildren([itemTokens[j]]);
           foundFirstParagraph = true;
-        } else if (itemTokens[j].type === 'html_block' && !/^\s*<(?:!--|\?|![A-Za-z]|!\[CDATA\[)/.test(itemTokens[j].content)) {
+        } else if (itemTokens[j].type === 'html_block' && !/^\s*<!--/.test(itemTokens[j].content)) {
           // An HTML block, as at the top level, the item's first paragraph if
           // it comes first, as in - <div>a</div>, which kept nothing, and a
           // continuation after a quote or sublist before it otherwise. Not a
-          // comment, a processing instruction, a declaration or CDATA, which
-          // import writes as text. Not a <pre>, <script>, <style> or
-          // <textarea> without its closing tag that more of the item follows,
-          // which markdown-it ended at a blank line in it, or a table, which
-          // an item can't hold
+          // comment, or a block that only its end ends, as a <pre> its
+          // </pre> or a processing instruction its ?>, without its end and
+          // with more of the item after it, which markdown-it ended at a
+          // blank line in the item. Not a table, which an item can't hold.
           const blocks = convertTokens([itemTokens[j]], 0, 0, warnings, sourceLines);
-          const raw = /^\s*<(script|pre|style|textarea)(?=[\s>]|$)/i.exec(itemTokens[j].content);
-          if ((raw && j < itemTokens.length - 1 && !new RegExp('</' + raw[1] + '>', 'i').test(itemTokens[j].content)) || blocks.some(block => block.type !== 'paragraph')) {
+          const raw = /^\s*<(?:(script|pre|style|textarea)(?=[\s>]|$)|(\?)|(!\[CDATA\[)|![A-Za-z])/i.exec(itemTokens[j].content);
+          const end = raw?.[1] ? new RegExp('</' + raw[1] + '>', 'i') : raw?.[2] ? /\?>/ : raw?.[3] ? /\]\]>/ : />/;
+          if ((raw && j < itemTokens.length - 1 && !end.test(itemTokens[j].content.slice(raw[0].length))) || blocks.some(block => block.type !== 'paragraph')) {
             warnings?.push(droppedListBlockWarning('HTML block'));
           } else if (!foundFirstParagraph && childSegments.length === 0 && blocks.length === 1) {
             runs = blocks[0].runs;

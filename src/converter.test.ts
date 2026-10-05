@@ -1445,6 +1445,11 @@ describe('HTML blocks in list items', () => {
     ['a <pre> with a blank line that has the item\'s indent', '- <pre>\n  a\n  \n  b\n  </pre>\n'],
     ['one with Markdown\'s characters and tags in it', '- <div data-x="*"><u>a</u> *b*</div>\n'],
     ['an HTML table with no rows, which is text, as at the top level', '- <table><caption>T</caption></table>\n'],
+    ['a processing instruction', '- <?x?>\n'],
+    ['one of more than one line that a marker ends', '- <?a\n  b?>\n'],
+    ['a declaration', '- <!DOCTYPE html>\n'],
+    ['CDATA', '- <![CDATA[x]]>\n'],
+    ['a custom element', '- <widget>\n  *raw*\n  </widget>\n'],
     // Which only a blank line ends, which took in the sublist without one
     ['one before a sublist', '- <div>a</div>\n\n  - b\n'],
     ['one under an item before a sublist', '1. a\n\n   <div>b</div>\n\n   1. c\n'],
@@ -1468,10 +1473,7 @@ describe('HTML blocks in list items', () => {
   test.each([
     ['a table', '- a\n\n  <table><tr><td>x</td></tr></table>\n'],
     ['a <pre> with a blank line in it', '- <pre>\n  a\n\n  b\n  </pre>\n'],
-    // Which import writes as text
-    ['a processing instruction', '- <?x?>\n'],
-    ['a declaration', '- <!DOCTYPE html>\n'],
-    ['CDATA', '- <![CDATA[x]]>\n'],
+    ['a processing instruction with a blank line in it', '- <?a\n\n  b?>\n'],
   ])('warns of %s, which it drops', async (_name, md) => {
     // A table isn't a paragraph an item can hold, and markdown-it ends a
     // <pre> at a blank line in an item, leaving its text as Markdown
@@ -4927,6 +4929,8 @@ describe('Word text that reads as Markdown', () => {
     '<span title="https://example.com">x</span>', '<a href="mailto:a@b.com">x</a>', '<span title="*a* [b] $c$ a_b ==c==">x</span> y',
     // Escapes in an HTML block, which Markdown keeps raw, were text there
     '<div>https://example.com</div>', '<pre>`code`</pre>', '<div>*a* [b] a_b</div>',
+    // Blocks of the other kinds markdown-it reads, but a comment
+    '<?xml version="1.0"?>', '<![CDATA[a*b* [c]]]>', '<!DOCTYPE html>', '<custom>\na*b*\n</custom>', '</custom>',
   ])('keeps the HTML %s as it is', async (md) => {
     // Import escaped a tag that started the paragraph or a line, which
     // export writes as text
@@ -4948,6 +4952,8 @@ describe('Word text that reads as Markdown', () => {
     ['formatting after it', 'A.\n\nXX **b**\n\nB.', '<div>'],
     ['a line break after it', 'A.\n\nXX\\\nb\n\nB.', '<div>'],
     ['no closing tag', 'A.\n\nXX\n\nB.', '<script>'],
+    ['no end', 'A.\n\nXX\n\nB.', '<?php echo 1;'],
+    ['a tag import writes as a reference', 'A.\n\nXX\n\nB.', '<b>'],
   ])('keeps an HTML block\'s tag at the start of a paragraph with %s as text', async (_name, md, text) => {
     // The paragraph's text was raw HTML, so its formatting, escapes and
     // line breaks, or the paragraphs after it, were text
