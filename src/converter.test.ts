@@ -9045,6 +9045,8 @@ describe('round-trip regression: images export cannot embed', () => {
     ['an HTML comment after a <!---> in it', 'A <!-- a <!---> b --> C', 14],
     // Which read as its end
     ['an HTML comment after an empty one', '<!--><!-- c -->', 12],
+    ['an HTML comment after an empty one, in its <!--', '<!--><!-- c -->', 7],
+    ['an HTML comment around an empty one, and after it', 'A <!-- a <!--->b --> B', [8, 16]],
   ])('joins %s when Word splits its run', async (_name, md, at) => {
     // Without the start of its opener, the run before it was dropped
     const { docx } = await convertMdToDocx(md);
@@ -9053,8 +9055,9 @@ describe('round-trip regression: images export cannot embed', () => {
     const rPr = '<w:r><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr>';
     const decode = (text: string) => text.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
     const encode = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const cuts = [0, ...[at].flat(), Infinity];
     const split = xml.replace(new RegExp(rPr + '<w:t>([^<]*)</w:t></w:r>'), (_m, text: string) =>
-      rPr + '<w:t>' + encode(decode(text).slice(0, at)) + '</w:t></w:r>' + rPr + '<w:t>' + encode(decode(text).slice(at)) + '</w:t></w:r>');
+      cuts.slice(1).map((cut, k) => rPr + '<w:t>' + encode(decode(text).slice(cuts[k], cut)) + '</w:t></w:r>').join(''));
     expect(split).not.toBe(xml);
     zip.file('word/document.xml', split);
     const markdown = (await convertDocx(new Uint8Array(await zip.generateAsync({ type: 'uint8array' })))).markdown;

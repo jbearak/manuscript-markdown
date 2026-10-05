@@ -3236,20 +3236,12 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
   const continues = lastItem !== undefined && 'commentIds' in lastItem && !!lastItem.commentIds
     && commentSetsEqual(lastItem.commentIds, activeComments);
   /** Whether a comment's text has its end: a --> after its last <!--, or
-   *  else an end for each comment in it inline Markdown reads, as an empty
-   *  one's > or ->. Not a --!>, which ends a comment in an HTML table's
-   *  cell, as the browser reads it, but not one inline Markdown reads to its
-   *  --> (see renderHtmlCellParagraph) */
-  const closed = (text: string) => {
-    if (text.includes('-->', text.lastIndexOf('<!--') + 4)) return true;
-    for (let at = text.indexOf('<!--'); at !== -1;) {
-      HTML_TAG_AT.lastIndex = at;
-      const comment = HTML_TAG_AT.exec(text)?.[0];
-      if (!comment) return false;
-      at = text.indexOf('<!--', at + comment.length);
-    }
-    return true;
-  };
+   *  the > or -> of an empty one that is all of it, <!--> or <!--->, but not
+   *  one in it, which may be in a comment Word split before it. Not a --!>,
+   *  which ends a comment in an HTML table's cell, as the browser reads it,
+   *  but not one inline Markdown reads to its --> (see
+   *  renderHtmlCellParagraph) */
+  const closed = (text: string) => text.includes('-->', text.lastIndexOf('<!--') + 4) || /^\s*<!---?>\s*$/.test(text);
   // But for a ZWSP and the start of a payload alone, which the next hidden
   // run shows the comment's or the next payload's (see pendingHiddenText)
   if (continues && lastItem.type === 'html_comment' && !rest.replace(/^\u200B+/, '').trimStart().startsWith('<!--')
