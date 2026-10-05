@@ -1651,20 +1651,18 @@ function splitRunsAtCriticParagraphs(runs: MdRun[]): CriticParagraphSplit | unde
         };
       }
     }
-    // A comment's anchor whose text holds tracked breaks, as import writes a
-    // comment that ends where one does, {=={--b\n\n--}==}{>>c<<}: the anchor
-    // and its comment keep the text before the first, and the rest goes on
-    // after it outside the anchor
+    // A comment's anchor whose text ends in tracked breaks, as import writes
+    // a comment that ends where one does, {=={--b\n\n--}==}{>>c<<}: the anchor
+    // and its comment, with their replies, keep the text before them
     if (!split && run.type === 'critic_highlight' && run.innerRuns && queue[index + 1]?.type === 'critic_comment') {
       const inner = splitRunsAtCriticParagraphs(run.innerRuns);
-      if (inner && inner.marks.every(mark => mark !== undefined)) {
-        const comment = queue[++index];
+      if (inner && inner.marks.every(mark => mark !== undefined) && inner.parts.slice(1).every(part => trimBreakRuns(part).length === 0)) {
+        const comments: MdRun[] = [];
+        while (queue[index + 1]?.type === 'critic_comment') comments.push(queue[++index]);
+        const innerRuns = trimBreakRuns(inner.parts[0]);
         split = {
-          parts: inner.parts.map((part, p) => {
-            const innerRuns = trimBreakRuns(part);
-            if (p > 0) return innerRuns;
-            return [...(innerRuns.length > 0 ? [{ ...run, text: innerRuns.map(innerRun => innerRun.text).join(''), innerRuns }] : []), comment];
-          }),
+          parts: [[...(innerRuns.length > 0 ? [{ ...run, text: innerRuns.map(innerRun => innerRun.text).join(''), innerRuns }] : []), ...comments],
+            ...inner.parts.slice(1).map(() => [])],
           marks: inner.marks,
         };
       }

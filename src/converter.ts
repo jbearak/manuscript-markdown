@@ -8992,12 +8992,15 @@ export function buildMarkdown(
       // fall back to a plain heading prefix.
       const openMatch = /^\{(\+\+|--)/.exec(textOut);
       const { marker, revType } = pendingHeadingCriticMarker;
+      // Comments, their anchors or range markers before the revision's text,
+      // or as all of the heading's
+      const afterComments = /^(?:\{==|\{#[^}\s]+\}|\{>>[\s\S]*?<<\})+(?:\{(\+\+|--)|$)/.exec(textOut);
       if (openMatch) {
         textOut = textOut.slice(0, openMatch[0].length) + marker + textOut.slice(openMatch[0].length);
-      } else if (/^(?:\{==|\{#[^}\s]+\}|\{>>[\s\S]*?<<\})+\{(\+\+|--)/.exec(textOut)?.[1] === (revType === 'addition' ? '++' : '--')) {
+      } else if (afterComments && (afterComments[1] ?? (revType === 'addition' ? '++' : '--')) === (revType === 'addition' ? '++' : '--')) {
         // After a comment's anchor or range marker, as in
-        // {=={--Heading--}==}{>>c<<}, the marker takes a span of its own,
-        // which export reads as the heading's too
+        // {=={--Heading--}==}{>>c<<}, or before nothing, as in {>>c<<}, the
+        // marker takes a span of its own, which export reads as the heading's
         textOut = (revType === 'addition' ? '{++' + marker + '++}' : '{--' + marker + '--}') + textOut;
       } else {
         textOut = marker + textOut;

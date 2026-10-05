@@ -7531,6 +7531,8 @@ describe('Track changes (CriticMarkup)', () => {
       // An anchor that ends at the break holds it, and export splits it there
       ['Prefix {--a{==b==}{>>c<<}\n\nd--} suffix', 'Prefix {--a--}{=={--b\n\n--}==}{>>c<<}{--d--} suffix'],
       ['Prefix {++a{==b==}{>>c<<}\n\nd++} suffix', 'Prefix {++a++}{=={++b\n\n++}==}{>>c<<}{++d++} suffix'],
+      ['{--### {>>c<<}--}', '{--### --}{>>c<<}'],
+      ['{++### {>>c<<}++}', '{++### ++}{>>c<<}'],
     ])('keeps the revised paragraph mark of %j, beside a comment', async (md, expected) => {
       // Import wrote the heading's marker before the comment's anchor, outside
       // any span, and ended the paragraph its comment ended as an untracked
@@ -7542,6 +7544,22 @@ describe('Track changes (CriticMarkup)', () => {
       expect(await roundTrip(md2)).toBe(md2);
       const xml = await (await JSZip.loadAsync((await convertMdToDocx(md2)).docx)).file('word/document.xml')!.async('string');
       expect(xml).toMatch(/<w:pPr>(?:(?!<\/w:pPr>).)*<w:rPr>(?:(?!<\/w:rPr>).)*<w:(?:del|ins) /);
+    });
+
+    test('keeps the replies of a comment whose anchor export splits at a tracked break', async () => {
+      // The replies went after the break, away from the comment they reply to
+      const md = 'Prefix {=={--a\n\n--}==}{>>c<<}{>>r<<}{--b--} suffix';
+      const { docx } = await convertMdToDocx(md);
+      const extended = await (await JSZip.loadAsync(docx)).file('word/commentsExtended.xml')!.async('string');
+      expect(extended).toContain('w15:paraIdParent');
+      expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(md + '\n');
+    });
+
+    test('keeps the text after a tracked break in its comment\'s anchor', async () => {
+      // Export ended the anchor at the break, so b went after the comment's range
+      const { docx } = await convertMdToDocx('{=={--a\n\nb--}==}{>>c<<}');
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      expect(xml).toMatch(/<w:delText>b<\/w:delText><\/w:r><\/w:del><w:commentRangeEnd /);
     });
 
     test('gives a revised heading\'s mark its revision\'s author, not a comment\'s before its text', async () => {
