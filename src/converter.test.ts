@@ -6686,7 +6686,7 @@ describe('buildMarkdown code block emission', () => {
     expect(md).toBe('```python\nprint("hi")\n```');
   });
 
-  test('trims trailing empty lines', () => {
+  test('keeps an empty line at the end, which Word shows', () => {
     const content: ContentItem[] = [
       { type: 'para', isCodeBlock: true },
       { type: 'text', text: 'code', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
@@ -6694,7 +6694,7 @@ describe('buildMarkdown code block emission', () => {
       { type: 'text', text: '', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
     ];
     const md = buildMarkdown(content, new Map());
-    expect(md).toBe('```\ncode\n```');
+    expect(md).toBe('```\ncode\n\n```');
   });
 
   test('emits consecutive code blocks with different languages', () => {
@@ -6713,6 +6713,16 @@ describe('buildMarkdown code block emission', () => {
 });
 
 describe('Code block round-trip', () => {
+  test.each([
+    ['an empty line', '```\na\n\n```'],
+    ['two empty lines', '```\na\n\n\n```'],
+    ['empty lines only', '```\n\n\n```'],
+  ])('keeps a code block that ends in %s', async (_, md) => {
+    // Word shows each as a line of the block, which import took off
+    const result = await convertDocx((await convertMdToDocx(md + '\n\nAfter.')).docx);
+    expect(result.markdown.trim()).toBe(md + '\n\nAfter.');
+  });
+
   test.each([
     ['a heading', '```\ncode\n```\n\n## H'],
     ['a level 4 heading', '```\ncode\n```\n\n#### H'],
