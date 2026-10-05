@@ -6589,6 +6589,15 @@ describe('Blocks a quote can\'t hold', () => {
     expect(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).toContain('<w:t>\u3000</w:t>');
   });
 
+  test.each([['U+3000', '\u3000', '&#12288;'], ['an em space', '\u2003', '&#8195;']])('keeps a code block\'s last line of %s, which markdown-it trims', async (_name, space, reference) => {
+    // Written as itself after the line's break, the paragraph's trim took
+    // it, and left the break's backslash as text
+    const md = '> x\\\n> ' + reference + '\n';
+    const { docx } = await convertMdToDocx('> ```\n> x\n> ' + space + '\n> ```\n');
+    expect(strip((await convertDocx(docx)).markdown)).toBe(md);
+    expect(strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown)).toBe(md);
+  });
+
   test('ends a code block\'s text before a last line of characters XML can\'t hold', async () => {
     // Its line break stayed when they went, and ended the paragraph
     const { docx, warnings } = await convertMdToDocx('> ```\n> x\n> \uFFFF\n> ```\n');
