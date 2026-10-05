@@ -237,9 +237,12 @@ const MARKDOWN_HTML_SENSITIVE_TAGS = new Set([
 
 const HTML_LIKE_TAG_RE = /<\/?([A-Za-z][A-Za-z0-9-]*)(?:\s[^<>]*?)?\/?>/;
 
-function escapeSensitiveHtmlLikeTags(text: string): string {
-  return text.replace(new RegExp(HTML_LIKE_TAG_RE.source, 'g'), (fullMatch, tagName: string) => {
-    if (!MARKDOWN_HTML_SENSITIVE_TAGS.has(tagName.toLowerCase())) return fullMatch;
+/** `text` with the tags export reads as formatting or a line break written
+ *  as text, but for one at a position in `raw`, which export reads as it is,
+ *  as in a citation's keys (see escapeMarkdownChars) */
+function escapeSensitiveHtmlLikeTags(text: string, raw?: Set<number>): string {
+  return text.replace(new RegExp(HTML_LIKE_TAG_RE.source, 'g'), (fullMatch, tagName: string, offset: number) => {
+    if (!MARKDOWN_HTML_SENSITIVE_TAGS.has(tagName.toLowerCase()) || raw?.has(offset)) return fullMatch;
     return fullMatch.replace(/</g, '&lt;').replace(/>/g, '&gt;');
   });
 }
@@ -597,9 +600,11 @@ function citationKeyRanges(text: string, open: number, close: number): Array<[nu
  * around the text, as an opening [ whose ] isn't in it, is escaped too.
  * The text starts a line where `lineStart` says so and after each line
  * break (a backslash and a line's end, which stays as it is), where a block
- * can start. Code is literal, and doesn't come here.
+ * can start. Code is literal, and doesn't come here. The positions in the
+ * Markdown of a citation's keys and locators, which export reads as they
+ * are, go in `raw`.
  */
-function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter): string {
+function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter, raw?: Set<number>): string {
   const escaped = new Set<number>();
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
@@ -808,9 +813,12 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter)
     }
     if (!escaped.has(i)) nearest = i;
   }
-  if (escaped.size === 0) return text;
   let result = '';
-  for (let i = 0; i < text.length; i++) result += (escaped.has(i) ? '\\' : '') + text[i];
+  for (let i = 0; i < text.length; i++) {
+    if (escaped.has(i)) result += '\\';
+    if (keys.has(i)) raw?.add(result.length);
+    result += text[i];
+  }
   return result;
 }
 
@@ -1829,7 +1837,9 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
   const edges = !fmt.superscript && !fmt.subscript && (fmt.highlight || !fmt.underline && (fmt.strikethrough || fmt.italic || fmt.bold))
     ? /^((?:\s|\\\n)*)(.*?)((?:\s|\\\n)*)$/s.exec(result)!
     : ['', '', result, ''];
-  let core = escapeSensitiveHtmlLikeTags(escapeMarkdownChars(edges[2], lineStart && !delimited, after));
+  // Not a tag in a citation's keys, which export reads as they are
+  const keys = new Set<number>();
+  let core = escapeSensitiveHtmlLikeTags(escapeMarkdownChars(edges[2], lineStart && !delimited, after, keys), keys);
   // A ~ at the edge of struck text would join the ~~ around it, which
   // reads ~~~a~~ as ~ and struck a, where nothing comes between them
   if (fmt.strikethrough && !fmt.superscript && !fmt.subscript && !fmt.highlight && !fmt.underline) {

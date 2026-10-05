@@ -5437,6 +5437,16 @@ describe('Word text that reads as Markdown', () => {
     expect(strip((await convertDocx(docx)).markdown).split('\n')[0]).toBe(md);
   });
 
+  test.each([
+    ['[@a<b>c]', 'a&lt;b&gt;c'], ['[@a<br>]', 'a&lt;br&gt;'], ['[@a, p<u>]', 'a'], ['[@a, <i>passim</i>]', 'a'],
+  ])('writes the tag in %s as it is', async (text, key) => {
+    // It was a reference, as for Word's text, which export, as it reads a
+    // citation's keys as they are, read as keys, at its ;
+    const markdown = await importText('A.\n\nP XX Q.\n\nB.', text);
+    expect(markdown).toBe('A.\n\nP ' + text + ' Q.\n\nB.\n');
+    expect(await roundTrip(markdown)).toBe(markdown + '\nCitation data for @' + key + ' was not found in the bibliography file.\n');
+  });
+
   test.each(['[@a](b)', '[-@a](b)', '[@a]{.underline}', '[@a][b]'])('writes %s with the citation export reads in it', async (text) => {
     // Its [ was escaped as a link's, so a citation whose key is missing,
     // which export writes as its text, came back as text, and stayed text
