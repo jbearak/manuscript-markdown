@@ -2171,6 +2171,20 @@ describe('HTML comment blank line round-trip', () => {
     const result = await convertDocx(buf);
     expect(result.markdown).toContain('<!--\nLine one\n-->');
   });
+
+  test.each([
+    ['a quote', '> a\n>\n> <!-- c -->\n>\n> b'],
+    ['a quote alone', '> <!-- c -->'],
+    ['a quote in a list item', '- a\n\n  > <!-- c -->'],
+    ['a heading', '# <!-- c -->'],
+    ['a quote, before one with blank lines before it', '> <!-- c -->\n\nA.\n\n\n<!-- d -->\n\nB.'],
+  ])('keeps one that starts a paragraph in %s', async (_name, md) => {
+    // Import wrote it as a comment of its own, on a line after a blank
+    // line, out of the quote or heading, and took the blank lines export
+    // keeps for the next one of its own as its
+    const markdown = (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
+    expect(markdown).toBe(md + '\n');
+  });
 });
 
 describe('Sentinel gap round-trip', () => {
