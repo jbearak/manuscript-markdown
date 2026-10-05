@@ -3153,7 +3153,7 @@ async function extractNotes(
  * Other hidden text, such as legacy metadata or the pieces of a split
  * \u200B-prefixed sentinel, stays hidden.
  */
-function readHiddenRun(runChildren: XmlNode[], rPrChildren: XmlNode[] | undefined, target: ContentItem[], activeComments: Set<string>, revision?: RevisionInfo): XmlNode[] {
+function readHiddenRun(runChildren: XmlNode[], rPrChildren: XmlNode[] | undefined, target: ContentItem[], activeComments: Set<string>, revision?: RevisionInfo, inTableCell = false): XmlNode[] {
   if (!rPrChildren || !isToggleOn(rPrChildren, 'w:vanish')) return runChildren;
   const fieldChildren = runChildren.filter((c) => c['w:fldChar'] !== undefined || c['w:instrText'] !== undefined);
   if (fieldChildren.length > 0) return fieldChildren;
@@ -3168,7 +3168,7 @@ function readHiddenRun(runChildren: XmlNode[], rPrChildren: XmlNode[] | undefine
       runText += '\n';
     }
   }
-  readHiddenText(runText, target, activeComments, revision);
+  readHiddenText(runText, target, activeComments, revision, inTableCell);
   return [];
 }
 
@@ -3178,18 +3178,19 @@ function readHiddenRun(runChildren: XmlNode[], rPrChildren: XmlNode[] | undefine
  * Markdown, up to a closing ZWSP, which the image keeps once it has it. Word
  * can split one between runs, or join several in one.
  */
-function readHiddenText(runText: string, target: ContentItem[], activeComments: Set<string>, revision?: RevisionInfo): void {
+function readHiddenText(runText: string, target: ContentItem[], activeComments: Set<string>, revision?: RevisionInfo, inTableCell = false): void {
   // The start of one Word split off before it showed which it is
   const pending = pendingHiddenText.get(target);
   pendingHiddenText.delete(target);
   if (pending && pending.at === target.length) runText = pending.text + runText;
   /** Where the hidden text after the comment whose <!-- ends at `from`
    *  starts, if anything does: after the first of its ends a ZWSP follows,
-   *  its -->, or the > or -> of an empty one, <!--> or <!--->, or a --!>,
-   *  which ends a table's comment, as the browser reads it, but not one
-   *  inline Markdown reads to its -->, where what follows starts a payload */
+   *  its -->, or the > or -> of an empty one, <!--> or <!--->. In a table's
+   *  cell, a --!> ends an HTML table's comment, as the browser reads it,
+   *  where what follows starts a payload, but nowhere does it end one that
+   *  inline Markdown reads to its --> */
   const afterComment = (text: string, from: number) => {
-    for (const end of text.slice(from).matchAll(/^-?>|--!?>/g)) {
+    for (const end of text.slice(from).matchAll(inTableCell ? /^-?>|--!?>/g : /^-?>|-->/g)) {
       const at = from + end.index + end[0].length;
       HIDDEN_PAYLOAD_AT.lastIndex = at;
       if (end[0] === '--!>' ? HIDDEN_PAYLOAD_AT.test(text) : text[at] === '\u200B') return at;
@@ -3590,7 +3591,7 @@ function parseNoteBody(
               break;
             }
           }
-          const walked = readHiddenRun(runChildren, rPrChildren, target, activeComments, currentRevision);
+          const walked = readHiddenRun(runChildren, rPrChildren, target, activeComments, currentRevision, inTableCell);
           fieldShows.run(runChildren, walked);
           walkNoteBody(walked, runFormatting, target, inTableCell, currentRevision);
         } else if (Array.isArray(node[key])) {
@@ -4403,7 +4404,7 @@ export async function extractDocumentContent(
             }
           }
 
-          const walked = readHiddenRun(runChildren, rPrChildren, target, activeComments, currentRevision);
+          const walked = readHiddenRun(runChildren, rPrChildren, target, activeComments, currentRevision, inTableCell);
           fieldShows.run(runChildren, walked);
           walk(walked, runFormatting, target, inTableCell, currentRevision);
         } else if (key === 'w:br') {

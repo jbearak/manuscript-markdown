@@ -9000,10 +9000,13 @@ describe('round-trip regression: images export cannot embed', () => {
     expect(markdown).toContain(md);
   });
 
-  test('keeps a ZWSP in an HTML comment after a --!> in it', async () => {
-    // It read as the start of another hidden comment, and the rest went
-    const md = 'A <!-- a --!>\u200B b --> B\n';
-    expect((await roundTrip(md.trimEnd())).markdown).toBe(md);
+  test.each([
+    ['text', 'A <!-- a --!>\u200B b --> B'],
+    ['an image\'s Markdown', 'A <!-- a --!>\u200B![y](n.png)\u200B tail --> B'],
+    ['a comment\'s start', 'A <!-- a --!>\u200B<!-- b --> B'],
+  ])('keeps a ZWSP and %s in an HTML comment after a --!> in it, which inline Markdown reads on', async (_name, md) => {
+    // It read as the start of another hidden payload, and the rest went
+    expect((await roundTrip(md)).markdown).toBe(md + '\n');
   });
 
   test('reads an image after an HTML comment with no --> as its own', async () => {
