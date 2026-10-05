@@ -8923,10 +8923,27 @@ describe('Links of more than one run', () => {
     ['a -@ first', '[-\\@user **name**](https://e.com)'],
     ['a substitution of formatted text', '[{~~a **b** c~>d *e* f~~}](https://e.com)'],
     ['a substitution of formatted text in part of it', '[x {~~a **b**~>d~~} y](https://e.com)'],
+    ['a ! before it and an insertion first in it', '\\![{++a++} b](https://e.com)'],
+    ['a ! before it and a deletion first in it', 'x\\![{--a--} **b**](https://e.com)'],
   ])('writes a link of more than one run with %s as a link of one run', async (_name, md) => {
     // Each run's Markdown read neither the link around it nor the runs
     // beside it, and a substitution paired only the runs at its seam
     expect(await roundTrip(md)).toBe(md + '\n');
+  });
+
+  test('writes a link of several deleted runs that an insertion replaces in a substitution', async () => {
+    // The link kept its runs from the substitution, so the insertion went
+    // in a span of its own, which the ++} in its code closed
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[a **b**](https://e.com)`cd`')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const revision = ' w:author="A" w:date="2024-01-01T00:00:00Z"';
+    const replaced = xml.replace(/(<w:hyperlink [^>]*>)([\s\S]*?)<\/w:hyperlink>(<w:r><w:rPr><w:rStyle w:val="CodeChar"\/><\/w:rPr>)<w:t>cd<\/w:t><\/w:r>/,
+      (_m, open: string, runs: string, code: string) => open + '<w:del w:id="91"' + revision + '>'
+        + runs.replace(/<w:t\b/g, '<w:delText').replace(/<\/w:t>/g, '</w:delText>') + '</w:del></w:hyperlink>'
+        + '<w:ins w:id="92"' + revision + '>' + code + '<w:t xml:space="preserve">c ++} d</w:t></w:r></w:ins>');
+    expect(replaced).not.toBe(xml);
+    zip.file('word/document.xml', replaced);
+    expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown).toBe('{~~[a **b**](https://e.com)~>`c ++} d`~~}\n');
   });
 
   test('keeps a link whose text starts with an inserted # a link, not a heading', async () => {

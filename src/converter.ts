@@ -4865,8 +4865,11 @@ function escapeBangBeforeLink(markdown: string, segment: ContentItem[], index: n
   let k = index + 1;
   while (k < end && segment[k].type === 'text' && (segment[k] as ContentItem & { type: 'text' }).text === '') k++;
   const next = segment[k];
+  // A tracked change's delimiters come between them, but for one of part of
+  // a link of several runs, which go inside its text, after its [
   if (k >= end || item.type !== 'text' || next.type !== 'text' || next.href === undefined
-    || !side && (item.revision || next.revision) || !commentSetsEqual(item.commentIds, next.commentIds)) return markdown;
+    || !side && (item.revision || next.revision && !partlyRevisedLinkAt(segment, k, end, next.commentIds))
+    || !commentSetsEqual(item.commentIds, next.commentIds)) return markdown;
   return /(?:^|[^\\])(?:\\\\)*!$/.test(markdown) ? markdown.slice(0, -1) + '\\!' : markdown;
 }
 
@@ -5310,6 +5313,13 @@ function renderSubstitutionRun(
     let mathEnd = -1;
     for (let j = from; j < to;) {
       const item = segment[j] as SubstitutionItem;
+      // A link of several runs stays one link, as outside a substitution
+      const link = item.type === 'text' ? linkGroup(segment, j, to, item.commentIds) : undefined;
+      if (link) {
+        text += link.text;
+        j = link.end;
+        continue;
+      }
       const highlightEnd = highlightGroupEnd(segment, j, to, item.commentIds);
       if (highlightEnd > j) {
         text += renderHighlightGroup(segment, j, highlightEnd, to, precedingText + text, noteLabels);
@@ -5753,6 +5763,13 @@ function linkGroup(
   };
 }
 
+/** Whether a link of several runs starts at `start` with tracked changes in
+ *  part of it, which linkGroup writes inside its text */
+function partlyRevisedLinkAt(segment: ContentItem[], start: number, end: number, commentIds: ReadonlySet<string>): boolean {
+  const link = linkGroup(segment, start, end, commentIds);
+  return !!link && !link.item.revision;
+}
+
 function renderInlineRange(
   segment: ContentItem[],
   startIndex: number,
@@ -5786,9 +5803,10 @@ function renderInlineRange(
 
     // Detect substitution: a deletion followed immediately by an addition
     // with identical author and date. Skip if either item has comments to
-    // avoid unbalancing comment markers, or is in a link, which keeps it.
+    // avoid unbalancing comment markers, or starts a link with changes in
+    // part of it, which keeps them.
     if (isSubstitutionItem(item) && item.revision?.type === 'deletion' && item.commentIds.size === 0
-        && !linkGroup(segment, i, segmentEnd, NO_COMMENTS)) {
+        && !partlyRevisedLinkAt(segment, i, segmentEnd, NO_COMMENTS)) {
       const run = renderSubstitutionRun(segment, i, segmentEnd, out, candidate => candidate.type !== 'para' && 'commentIds' in candidate && candidate.commentIds.size === 0, renderOpts?.noteLabels);
       if (run) {
         out += run.text;
@@ -6054,10 +6072,10 @@ function renderInlineRangeWithIds(
 
     // Detect substitution: a deletion followed immediately by an addition
     // with identical author and date. Skip if comment context differs to
-    // avoid unbalancing comment markers, or the item is in a link, which
-    // keeps it.
+    // avoid unbalancing comment markers, or the item starts a link with
+    // changes in part of it, which keeps them.
     if (isSubstitutionItem(item) && item.revision?.type === 'deletion'
-        && !(item.type === 'text' && linkGroup(segment, i, segmentEnd, item.commentIds))) {
+        && !(item.type === 'text' && partlyRevisedLinkAt(segment, i, segmentEnd, item.commentIds))) {
       const run = renderSubstitutionRun(segment, i, segmentEnd, out, candidate => candidate.type !== 'para' && 'commentIds' in candidate && commentSetsEqual(candidate.commentIds, prevCommentIds), noteLabels);
       if (run) {
         out += run.text;
