@@ -7699,8 +7699,9 @@ export async function convertMdToDocx(
   };
   // Strip previously-generated "Citation data for @key was not found" paragraphs
   // so they don't accumulate on successive round-trips. The missing-key mechanism
-  // regenerates these from the actual unresolved citation keys.
-  const MISSING_KEY_LINE = /^Citation data for @\S+ was not found in the bibliography file\.$/;
+  // regenerates these from the actual unresolved citation keys, which run
+  // to a comma, spaces and all, as in [@a b].
+  const MISSING_KEY_LINE = /^Citation data for @.+ was not found in the bibliography file\.$/;
   const bodyStripped = body.split('\n')
     .filter(line => !MISSING_KEY_LINE.test(line))
     .join('\n')

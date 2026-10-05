@@ -7609,6 +7609,20 @@ describe('extractBibData', () => {
   });
 });
 
+describe('Missing citation keys', () => {
+  test.each([
+    ['a space', 'P [@a b] Q', 'a b'],
+    ['a line end', 'P [@a\nb] Q', 'a b'],
+  ])('writes the note of a missing key with %s once', async (_name, md, key) => {
+    // The note for it, which export strips and writes anew, wasn't
+    // stripped, and another was added each round trip
+    const roundTrip = async (markdown: string) => (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    const once = await roundTrip(md);
+    expect(once).toBe(md + '\n\nCitation data for @' + key + ' was not found in the bibliography file.\n');
+    expect(await roundTrip(once)).toBe(once);
+  });
+});
+
 describe('extractBibliographyPath', () => {
   test('reads bibliography path from DOCX custom properties', async () => {
     const md = '---\nbibliography: ../correspondence.bib\ncsl: bmj\n---\n\nText [@key1].';
