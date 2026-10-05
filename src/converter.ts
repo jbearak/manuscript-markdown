@@ -407,15 +407,15 @@ const HARD_BREAKS_AT_END = /(?<!\\)((?:\\\\)*)(?:\\\n)+$/;
  * An empty item at the end of a paragraph's items in `target`, from `from`,
  * for the comments whose ranges start after its text, at its mark, and end
  * in a paragraph after it, which start there, as a zero-width one does, not
- * at the next one's text.
+ * at the next one's text. It has no formatting, which would write code's ``
+ * as text.
  */
 function startRangesAtMark(
-  target: ContentItem[], from: number, starts: Map<string, { target: ContentItem[]; index: number }>,
-  active: Set<string>, formatting: RunFormatting,
+  target: ContentItem[], from: number, starts: Map<string, { target: ContentItem[]; index: number }>, active: Set<string>,
 ): void {
   const empty = (id: string, index: number) => !target.slice(index).some(item => 'commentIds' in item && item.commentIds?.has(id));
   if ([...starts].some(([id, start]) => start.target === target && start.index >= from && active.has(id) && empty(id, start.index))) {
-    target.push({ type: 'text', text: '', formatting, commentIds: new Set(active), href: undefined });
+    target.push({ type: 'text', text: '', formatting: DEFAULT_FORMATTING, commentIds: new Set(active), href: undefined });
   }
 }
 
@@ -3330,8 +3330,9 @@ function parseNoteBody(
             const startInfo = commentStartTargetIndex.get(id);
             if (startInfo?.target === target
                 && !target.slice(startInfo.index).some(item => 'commentIds' in item && item.commentIds?.has(id))) {
-              // Zero-width comment range: emit a synthetic empty text item
-              target.push({ type: 'text', text: '', formatting: currentFormatting, commentIds: new Set(activeComments), href: undefined });
+              // Zero-width comment range: emit a synthetic empty text item,
+              // without formatting, which would write code's `` as text
+              target.push({ type: 'text', text: '', formatting: DEFAULT_FORMATTING, commentIds: new Set(activeComments), href: undefined });
             }
             commentStartTargetIndex.delete(id);
             activeComments.delete(id);
@@ -3545,7 +3546,7 @@ function parseNoteBody(
             if (first?.type === 'text') first.text = first.text.replace(/^[ \t]/, '');
           }
           if (!inTableCell && !isCodeBlock && target.length > lenBeforeContent) {
-            startRangesAtMark(target, lenBeforeContent, commentStartTargetIndex, activeComments, paraFormatting);
+            startRangesAtMark(target, lenBeforeContent, commentStartTargetIndex, activeComments);
           }
           // Display math in the paragraph goes on in it (see the document's)
           if (!inTableCell) {
@@ -4297,8 +4298,9 @@ export async function extractDocumentContent(
                 }
               }
               if (!found) {
-                // Zero-width comment range: emit a synthetic empty text item
-                target.push({ type: 'text', text: '', formatting: currentFormatting, commentIds: new Set(activeComments), href: undefined });
+                // Zero-width comment range: emit a synthetic empty text item,
+                // without formatting, which would write code's `` as text
+                target.push({ type: 'text', text: '', formatting: DEFAULT_FORMATTING, commentIds: new Set(activeComments), href: undefined });
               }
             }
             commentStartTargetIndex.delete(id);
@@ -4617,7 +4619,7 @@ export async function extractDocumentContent(
           walk(paraChildren, paraFormatting, target, inTableCell, currentRevision);
           const hasText = target.length > targetLenBeforePara + (needsPara ? 1 : 0);
           if (hasText && !inTableCell && !isCodeBlock && !inBibliographyField) {
-            startRangesAtMark(target, targetLenBeforePara, commentStartTargetIndex, activeComments, paraFormatting);
+            startRangesAtMark(target, targetLenBeforePara, commentStartTargetIndex, activeComments);
           }
           for (let k = targetLenBeforePara; k < target.length; k++) {
             const walked = target[k];
