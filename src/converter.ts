@@ -11,7 +11,7 @@ import { HTML_OPEN_CLOSE_TAG_RE, HTML_TAG_RE } from 'markdown-it/lib/common/html
 import { isMdAsciiPunct, isPunctChar, isWhiteSpace } from 'markdown-it/lib/common/utils.mjs';
 import { computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
 import { findDollarMathAt } from './math-delimiters';
-import type { TableAlign } from './grid-table-preprocess';
+import { getDisplayWidth, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
 import { citationEndInText, compareNoteLabels, customStyleId, linkifiedColons, linkifiedText, linkifyMatches, startsHtmlBlock } from './md-to-docx';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
@@ -6113,38 +6113,6 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
 }
 
 type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem> };
-
-// East Asian Wide / Fullwidth code-point ranges (UAX #11).  Characters in
-// these ranges occupy two terminal columns; everything else is treated as
-// single-width.  This is intentionally conservative — zero-width joiners,
-// combining marks, etc. are counted as width-1 which is acceptable for the
-// "does the pipe table fit?" heuristic.
-function isFullWidth(cp: number): boolean {
-  return (
-    (cp >= 0x1100 && cp <= 0x115f) ||  // Hangul Jamo
-    (cp >= 0x2e80 && cp <= 0x303e) ||  // CJK Radicals, Kangxi, Symbols
-    (cp >= 0x3040 && cp <= 0x33bf) ||  // Hiragana, Katakana, CJK compat
-    (cp >= 0x3400 && cp <= 0x4dbf) ||  // CJK Extension A
-    (cp >= 0x4e00 && cp <= 0xa4cf) ||  // CJK Unified, Yi
-    (cp >= 0xac00 && cp <= 0xd7af) ||  // Hangul Syllables
-    (cp >= 0xf900 && cp <= 0xfaff) ||  // CJK Compatibility Ideographs
-    (cp >= 0xfe10 && cp <= 0xfe6f) ||  // Vertical forms, CJK compat forms
-    (cp >= 0xff01 && cp <= 0xff60) ||  // Fullwidth Latin/Symbols
-    (cp >= 0xffe0 && cp <= 0xffe6) ||  // Fullwidth Signs
-    (cp >= 0x1f000 && cp <= 0x1fbff) || // Emoji & symbols
-    (cp >= 0x20000 && cp <= 0x2ffff) || // CJK Extension B–F
-    (cp >= 0x30000 && cp <= 0x3ffff)    // CJK Extension G+
-  );
-}
-
-export function getDisplayWidth(str: string): number {
-  let width = 0;
-  for (const ch of str) {
-    const cp = ch.codePointAt(0)!;
-    width += isFullWidth(cp) ? 2 : 1;
-  }
-  return width;
-}
 
 /**
  * Try to render a table as a GFM pipe table. Returns null if the table is

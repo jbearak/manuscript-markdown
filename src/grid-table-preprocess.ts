@@ -12,6 +12,38 @@ export interface GridTableData {
   aligns?: Array<TableAlign | null>; // each column's alignment, from the colons of the header's separator, or the top one
 }
 
+// East Asian Wide / Fullwidth code-point ranges (UAX #11).  Characters in
+// these ranges occupy two terminal columns; everything else is treated as
+// single-width.  This is intentionally conservative — zero-width joiners,
+// combining marks, etc. are counted as width-1 which is acceptable for the
+// "does the pipe table fit?" heuristic.
+function isFullWidth(cp: number): boolean {
+  return (
+    (cp >= 0x1100 && cp <= 0x115f) ||  // Hangul Jamo
+    (cp >= 0x2e80 && cp <= 0x303e) ||  // CJK Radicals, Kangxi, Symbols
+    (cp >= 0x3040 && cp <= 0x33bf) ||  // Hiragana, Katakana, CJK compat
+    (cp >= 0x3400 && cp <= 0x4dbf) ||  // CJK Extension A
+    (cp >= 0x4e00 && cp <= 0xa4cf) ||  // CJK Unified, Yi
+    (cp >= 0xac00 && cp <= 0xd7af) ||  // Hangul Syllables
+    (cp >= 0xf900 && cp <= 0xfaff) ||  // CJK Compatibility Ideographs
+    (cp >= 0xfe10 && cp <= 0xfe6f) ||  // Vertical forms, CJK compat forms
+    (cp >= 0xff01 && cp <= 0xff60) ||  // Fullwidth Latin/Symbols
+    (cp >= 0xffe0 && cp <= 0xffe6) ||  // Fullwidth Signs
+    (cp >= 0x1f000 && cp <= 0x1fbff) || // Emoji & symbols
+    (cp >= 0x20000 && cp <= 0x2ffff) || // CJK Extension B–F
+    (cp >= 0x30000 && cp <= 0x3ffff)    // CJK Extension G+
+  );
+}
+
+export function getDisplayWidth(str: string): number {
+  let width = 0;
+  for (const ch of str) {
+    const cp = ch.codePointAt(0)!;
+    width += isFullWidth(cp) ? 2 : 1;
+  }
+  return width;
+}
+
 /** The alignment a column's dashes in a separator set: :-- left, :-: center, --: right */
 export function separatorAlign(dashes: string): TableAlign | null {
   const left = dashes.startsWith(':');
@@ -147,6 +179,31 @@ export function preprocessGridTablesWithSourceMap(markdown: string): GridTablePr
 }
 
 /**
+ * The text of each column of a grid table's line, between the display
+ * columns of the separator's + signs, a wide character taking two, as Pandoc
+ * reads a table and import pads one. Expand Table pads a table by
+ * characters, so a line whose | signs are under the + signs by their
+ * indices, and not by display columns, is read by indices.
+ */
+function gridLineCells(line: string, boundaries: number[]): string[] {
+  const chars: string[] = [];
+  const display: number[] = [];
+  const index: number[] = [];
+  let width = 0;
+  let offset = 0;
+  for (const ch of line) {
+    chars.push(ch);
+    display.push(width);
+    index.push(offset);
+    width += getDisplayWidth(ch);
+    offset += ch.length;
+  }
+  const aligned = (columns: number[]) => boundaries.every(b => chars[columns.indexOf(b)] === '|');
+  const columns = aligned(display) || !aligned(index) ? display : index;
+  return boundaries.slice(0, -1).map((b, c) => chars.filter((_ch, k) => columns[k] > b && columns[k] < boundaries[c + 1]).join(''));
+}
+
+/**
  * Parse a block of grid table lines into structured data.
  * Returns null if the lines don't form a valid grid table.
  */
@@ -175,17 +232,10 @@ function parseGridTable(lines: string[]): GridTableData | null {
     if (GRID_TABLE_SEPARATOR_RE.test(trimmed)) {
       // This separator ends the current row
       if (currentContent.length > 0) {
+        const lineCells = currentContent.map(line => gridLineCells(line, colBoundaries.map(b => b + indent)));
         const cells: string[] = [];
         for (let col = 0; col < numCols; col++) {
-          const left = colBoundaries[col] + 1 + indent;
-          const right = colBoundaries[col + 1] + indent;
-          const cellLines: string[] = [];
-          for (const contentLine of currentContent) {
-            const raw = contentLine.length >= right
-              ? contentLine.slice(left, right)
-              : contentLine.slice(left);
-            cellLines.push(raw.replace(/^\s*\|?\s*/, '').replace(/\s*$/, ''));
-          }
+          const cellLines = lineCells.map(cells => cells[col].replace(/^\s*/, '').replace(/\s*$/, ''));
 
           cells.push(cellLines.join('\n'));
         }

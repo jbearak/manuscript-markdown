@@ -636,6 +636,22 @@ describe('parseMd grid tables', () => {
     expect(bodyRow?.cells).toHaveLength(2);
   });
 
+  it.each([
+    ['display columns, a wide character taking two', ['+------+-----+', '| x    | y   |', '+======+=====+', '| 中文 | b   |', '+------+-----+']],
+    ['characters, as Expand Table pads them', ['+-----+-----+', '| x   | y   |', '+=====+=====+', '| 中文  | b   |', '+-----+-----+']],
+  ])('reads the cells of a grid table padded by %s', (_name, lines) => {
+    // The cells were cut at the + signs' indices, so a wide character moved
+    // the text after it into the next cell, with the | between them
+    const table = parseMd(lines.join('\n')).find(t => t.type === 'table');
+    expect(table?.rows?.[1].cells.map(cell => cell.runs.map(run => run.text).join(''))).toEqual(['中文', 'b']);
+  });
+
+  it('keeps a | at the start of a grid table\'s cell', () => {
+    // It was taken for the | at the cell's edge
+    const table = parseMd('+-----+-----+\n| x   | y   |\n+=====+=====+\n| |a  | b|  |\n+-----+-----+').find(t => t.type === 'table');
+    expect(table?.rows?.[1].cells.map(cell => cell.runs.map(run => run.text).join(''))).toEqual(['|a', 'b|']);
+  });
+
   it('preprocessGridTables replaces grid tables with placeholders', () => {
     const markdown = 'Before\n\n+------+------+\n| H1   | H2   |\n+======+======+\n| A    | B    |\n+------+------+\n\nAfter';
     const result = preprocessGridTables(markdown);

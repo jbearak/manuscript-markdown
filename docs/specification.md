@@ -555,7 +555,7 @@ Grid tables use [Pandoc grid table syntax](https://pandoc.org/MANUAL.html#extens
 +----------+----------+
 ```
 
-- Column boundaries are defined by `+` positions in the separator line
+- Column boundaries are defined by `+` positions in the separator line, counted in display columns, where a wide character such as a CJK one takes two, as Pandoc counts them. A table whose `|` signs line up with the `+` signs by character count instead, as Expand Table pads one, is read that way
 - The `=` separator distinguishes header rows from body rows
 - A `:` at either end of a column's `=` in the header's separator sets its alignment, as in `+:===+===:+` (left, then right); a table without a header takes them in its top line
 - Multiple content lines between separators form a single logical row with multi-line cells

@@ -1023,6 +1023,17 @@ describe('Grid table renderer', () => {
 });
 
 describe('Grid table round-trip', () => {
+  test.each([
+    ['wide characters', '+------+-----+\n| x    | y   |\n+======+=====+\n| 中文 | b   |\n| c    | d   |\n+------+-----+'],
+    ['a | at the start of a cell', '+-----+-----+\n| x   | y   |\n+=====+=====+\n| |a  | b   |\n| c   | d   |\n+-----+-----+'],
+  ])('keeps a grid table with %s', async (_name, md) => {
+    // Import pads a cell by display width and writes a | in it as it is,
+    // while export cut the cells at the + signs' indices and took a | at a
+    // cell's start for its edge
+    const markdown = (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+    expect(markdown).toBe(md);
+  });
+
   test('grid table with multi-line cells round-trips through MD→DOCX→MD', async () => {
     const gridMd = [
       '+----------+----------+',
