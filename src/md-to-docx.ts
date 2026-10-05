@@ -693,9 +693,9 @@ export function linkifyMatches(text: string): Array<{ schema: string; index: num
   return citationTextMd.linkify.match(text) ?? [];
 }
 
-// How far past a URL's colon linkifiedColons reads it, which takes in any
-// host and user of a real link
-const LINKIFY_HOST_WINDOW = 512;
+// Where a URL's host ends at the latest, after the // after its colon: its
+// user and host hold no / or space
+const AUTHORITY_END_RE = /[\s/]/g;
 
 /** The colons of the URLs with // that markdown-it's own linkify rule links
  *  in Markdown `markdown`, as export reads it, which linkifyMatches can
@@ -715,9 +715,11 @@ export function linkifiedColons(markdown: string): number[] {
     while (markdown[start - 1 - backslashes] === '\\') backslashes++;
     if (backslashes % 2 === 1) start++;
     if (!/^[a-z]/i.test(markdown.slice(start, at))) continue;
-    // As far as a host and its user could go, which settles whether it's
-    // linked, not the whole URL, whose path each check would scan again
-    const link = citationTextMd.linkify.matchAtStart(markdown.slice(start, at + LINKIFY_HOST_WINDOW));
+    // To the end of its host, which settles whether it's linked, not the
+    // whole URL, whose path each check would scan again
+    AUTHORITY_END_RE.lastIndex = at + 3;
+    const end = AUTHORITY_END_RE.exec(markdown)?.index ?? markdown.length;
+    const link = citationTextMd.linkify.matchAtStart(markdown.slice(start, end));
     if (link && link.url.length > at - start) colons.push(at);
   }
   return colons;
