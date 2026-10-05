@@ -7719,23 +7719,27 @@ export async function convertMdToDocx(
   let notes: Set<number> | undefined;
   if (lines.some(line => NOTE_LINE.test(line))) {
     const md = citationTextMd ??= createMarkdownIt();
-    // Each line a note could be has a key of x there, as a key is opaque,
-    // so nothing in it, as CriticMarkup's <<}, pairs with what's outside
-    // it, and ends in its index between two of a private-use character the
-    // body lacks, past CriticMarkup's, so it's found again however the
-    // preprocessing moves and joins lines
+    // Each line a note could be ends in its index between two of a
+    // private-use character the body lacks, past CriticMarkup's, so it's
+    // found again however the preprocessing moves and joins lines. A
+    // CriticMarkup span's end in it, as <<}, ends none there, as one opened
+    // outside it may be a citation's, as in [@a<<}{>>b], whose note this
+    // is, while import escapes a note's {, as in \{>>b, so a span it opens
+    // makes it no note.
     let markCode = 0xE001;
     while (body.includes(String.fromCharCode(markCode))) markCode++;
     const mark = String.fromCharCode(markCode);
-    const markedNote = new RegExp('^Citation data for @x was not found in the bibliography file\\.' + mark + '(\\d+)' + mark + '$');
+    const markedIndex = new RegExp(mark + '(\\d+)' + mark + '$');
     const marked = lines.map((line, k) => NOTE_LINE.test(line)
-      ? 'Citation data for @x was not found in the bibliography file.' + mark + k + mark : line).join('\n');
+      ? line.trimEnd().replace(/(?:\+\+|--|~~|==|<<)\}/g, close => close.slice(0, 2)) + mark + k + mark : line);
     const parsed = md.parse(preprocessCriticMarkup(wrapBareLatexEnvironments(deLazifyBlockquotes(preprocessGridTables(
-      extractFootnoteDefinitions(marked).cleaned)))), {});
+      extractFootnoteDefinitions(marked.join('\n')).cleaned)))), {});
     notes = new Set(parsed.flatMap((token, t) => {
       if (token.type !== 'paragraph_open' || token.level !== 0 || !token.map || token.map[1] - token.map[0] !== 1) return [];
-      const index = markedNote.exec(parsed[t + 1]?.content ?? '');
-      if (!index) return [];
+      // The line alone
+      const content = parsed[t + 1]?.content ?? '';
+      const index = markedIndex.exec(content);
+      if (!index || content !== marked[Number(index[1])]) return [];
       const k = Number(index[1]);
       // Its key as export reads the line, in runs of plain text alone
       const children = md.parseInline(lines[k].trim(), {})[0]?.children?.filter(child => !isLinkifyToken(child));
