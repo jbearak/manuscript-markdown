@@ -3089,6 +3089,15 @@ describe('Full MD→DOCX footnote generation', () => {
     }
   });
 
+  it('keeps a comment whose body is in a note made before the one its range is in', async () => {
+    // Notes go in their labels' order, which made a, with the body, before
+    // b, with the range, which wasn't there for the body to find
+    const { convertDocx } = await import('./converter');
+    const { docx, warnings } = await convertMdToDocx('T[^b] and[^a].\n\n[^b]: {#c}B.{/c}\n\n[^a]: A.\n\n    {#c>>Comment text<<}\n');
+    expect(warnings).toEqual([]);
+    expect((await convertDocx(docx)).markdown).toContain('[^b]: {==B.==}{>>Comment text<<}');
+  });
+
   it('bookmarks a note a later one cross-references', async () => {
     // Notes go in their labels' order, which made a before b, whose
     // reference to a made a cross-reference, to a bookmark a didn't have
