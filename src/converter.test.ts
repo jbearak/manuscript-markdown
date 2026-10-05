@@ -5420,6 +5420,18 @@ describe('Word text that reads as Markdown', () => {
     expect(markdown).toBe('A.\n\nP [@_smith] and [see @smith_, p. 5] Q.\n\nB.\n');
   });
 
+  test.each([
+    ['*x [@a] y*', '<w:i/>'], ['**[@a]**', '<w:b/>'], ['<sup>[@a]</sup>', '<w:vertAlign w:val="superscript"/>'],
+    ['~~[@a]~~', '<w:strike/>'], ['<u>[@a]</u>', '<w:u w:val="single"/>'], ['*[@a; @b]*', '<w:i/>'],
+  ])('keeps the formatting around %s, whose key is missing', async (md, rPr) => {
+    // Export wrote its text with a highlight alone, so Word's text lost the
+    // rest, and import, which reads that text's formatting, wrote it without
+    const { docx } = await convertMdToDocx(md);
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml).toMatch(new RegExp('<w:rPr>' + rPr.replace(/[\\/]/g, '\\$&') + '</w:rPr><w:t>\\[@a'));
+    expect(strip((await convertDocx(docx)).markdown).split('\n')[0]).toBe(md);
+  });
+
   test.each(['[@a](b)', '[-@a](b)', '[@a]{.underline}', '[@a][b]'])('writes %s with the citation export reads in it', async (text) => {
     // Its [ was escaped as a link's, so a citation whose key is missing,
     // which export writes as its text, came back as text, and stayed text

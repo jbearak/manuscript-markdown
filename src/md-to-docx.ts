@@ -6174,7 +6174,8 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
     } else if (run.type === 'footnote_ref') {
       xml += noteReferenceXml(run.footnoteLabel || '', state, state.noteRevision, highlightRPr(run));
     } else if (run.type === 'citation') {
-      const result = generateCitation(run, bibEntries || new Map(), citeprocEngine, state.citationIds, state.citationItemIds, orderRPr(highlightRPr(run) + (state.tableRunRPrExtra || '')) || undefined);
+      const result = generateCitation(run, bibEntries || new Map(), citeprocEngine, state.citationIds, state.citationItemIds,
+        orderRPr(highlightRPr(run) + (state.tableRunRPrExtra || '')) || undefined, generateRPr(run, state.tableRunRPrExtra || undefined));
       xml += result.xml;
       if (result.warning) state.warnings.push(result.warning);
       if (result.missingKeys) {
