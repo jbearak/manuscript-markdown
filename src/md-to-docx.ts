@@ -680,6 +680,9 @@ function citationEnd(state: Pick<StateInline, 'src' | 'md' | 'env'>, start: numb
 }
 
 let citationTextMd: MarkdownIt | undefined;
+/** Markdown as export reads it, but with a URL as written, not a link
+ *  whose text linkify rewrites, as of a %5D, for a note's key */
+let noteKeyMd: MarkdownIt | undefined;
 /** The ] that ends the citation the [ at `start` in Markdown `text` opens,
  *  as export reads one, but without the document's link definitions, or -1 */
 export function citationEndInText(text: string, start: number): number {
@@ -7710,7 +7713,7 @@ export async function convertMdToDocx(
   // Lines end as markdown-it ends them. Its text is as Word shows it, with
   // import's escapes and character references, as of a key's < in
   // @a&lt;b, decoded, HTML export writes as text, as a key's <span>, but
-  // not a comment, break or formatting, and a URL linkify makes a link of.
+  // not a comment, break or formatting, and a URL as written.
   const MISSING_KEY_TEXT = /^Citation data for @[^,;\]]+ was not found in the bibliography file\.$/;
   // A line a note could be, whatever its key, and one export stripped by
   // the line alone before, of a key of no spaces
@@ -7744,7 +7747,8 @@ export async function convertMdToDocx(
       if (!index || content !== marked[Number(index[1])]) return [];
       const k = Number(index[1]);
       // Its key as export reads the line, in runs of plain text alone
-      const children = md.parseInline(lines[k].trim(), {})[0]?.children?.filter(child => !isLinkifyToken(child));
+      noteKeyMd ??= createMarkdownIt().disable('linkify');
+      const children = noteKeyMd.parseInline(lines[k].trim(), {})[0]?.children;
       const runs = children?.every(child => child.type === 'text' || child.type === 'html_inline') ? processInlineChildren(children) : [];
       return runs.every(run => run.type === 'text'
         && !(run.bold || run.italic || run.underline || run.strikethrough || run.superscript || run.subscript))

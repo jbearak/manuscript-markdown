@@ -7646,6 +7646,9 @@ describe('Missing citation keys', () => {
     // Whose key linkify makes a link of
     ['with a URL for a key', 'P [@https://example.com] Q\n\nCitation data for @https://example.com was not found in the bibliography file.\n',
       'P [@https://example.com] Q\n\nCitation data for @https\\://example.com was not found in the bibliography file.\n'],
+    // Whose ] linkify decoded
+    ['with a URL with %5D for a key', 'P [@https://example.com/a%5Db] Q\n\nCitation data for @https://example.com/a%5Db was not found in the bibliography file.\n',
+      'P [@https://example.com/a%5Db] Q\n\nCitation data for @https\\://example.com/a%5Db was not found in the bibliography file.\n'],
     // Which export reads as a paragraph of its own, after a grid table's border
     ['after a grid table', 'P [@a] Q\n\n+---+\n| a |\n+---+\nCitation data for @a was not found in the bibliography file.\n',
       'P [@a] Q\n\n+-----+\n| a   |\n+-----+\n\nCitation data for @a was not found in the bibliography file.\n'],
