@@ -3314,7 +3314,7 @@ function findClosingToken(tokens: ManuscriptToken[], start: number, closeType: s
 // continuation (e.g. a fenced code block indented under a list item).
 // Unsupported list child blocks are reported rather than silently lost.
 const DROPPED_LIST_BLOCK_TYPES = new Set([
-  'fence', 'code_block', 'html_block', 'blockquote_open', 'table_open',
+  'fence', 'code_block', 'html_block', 'blockquote_open', 'table_open', 'hr',
 ]);
 
 function droppedListBlockWarning(kind: string): string {
@@ -3343,10 +3343,17 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
       const itemMap = tokens[i].map;
       let itemRange: [number, number] | undefined = itemMap ? [itemMap[0], itemMap[0] + 1] : undefined;
       for (let j = 0; j < itemTokens.length; j++) {
-        if (itemTokens[j].type === 'paragraph_open') {
-          const paragraphClose = findClosingToken(itemTokens, j, 'paragraph_close');
+        if (itemTokens[j].type === 'paragraph_open' || itemTokens[j].type === 'heading_open') {
+          // A heading's text goes as a paragraph's, which is all an item holds
+          const heading = itemTokens[j].type === 'heading_open';
+          if (heading) {
+            warnings?.push('Heading inside list item exported as a paragraph (not supported). Move the heading outside the list for round-trip fidelity.');
+          }
+          const paragraphClose = findClosingToken(itemTokens, j, heading ? 'heading_close' : 'paragraph_close');
           const paragraphMap = itemTokens[j].map;
-          if (!foundFirstParagraph) {
+          // The item's own text only where nothing came before it, as a
+          // quote or sublist does in - > a, whose text after went before it
+          if (!foundFirstParagraph && childSegments.length === 0) {
             runs = processInlineChildren(itemTokens.slice(j + 1, paragraphClose));
             foundFirstParagraph = true;
             if (paragraphMap) itemRange = [paragraphMap[0], paragraphMap[1]];
@@ -3429,7 +3436,7 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
               })),
             });
           }
-        } else if (warnings && DROPPED_LIST_BLOCK_TYPES.has(itemTokens[j].type)
+        } else if (DROPPED_LIST_BLOCK_TYPES.has(itemTokens[j].type)
             // An empty comment between two numbered sublists, as import writes
             // it where Word starts the second over, which its numbering keeps
             && !(itemTokens[j].type === 'html_block' && /^\s*<!--\s*-->\s*$/.test(itemTokens[j].content)
@@ -3439,8 +3446,11 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
             : itemTokens[j].type === 'html_block' ? 'HTML block'
             : itemTokens[j].type === 'blockquote_open' ? 'Blockquote'
             : itemTokens[j].type === 'table_open' ? 'Table'
+            : itemTokens[j].type === 'hr' ? 'Horizontal rule'
             : 'Block element';
-          warnings.push(droppedListBlockWarning(kind));
+          warnings?.push(droppedListBlockWarning(kind));
+          // Past its cells, whose text went for the item's
+          if (itemTokens[j].type === 'table_open') j = findClosingToken(itemTokens, j, 'table_close');
         }
       }
 

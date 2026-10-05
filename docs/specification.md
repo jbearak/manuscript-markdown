@@ -924,7 +924,7 @@ CLI flag: `--always-use-comment-ids`
 
 ### List Item Block Content
 
-The Markdown-to-DOCX converter preserves the first paragraph, nested sublists, blockquote continuation blocks, and HTML blocks other than comments within a list item. Other block-level content in list continuation — such as fenced code blocks, indented code blocks, HTML comments, and tables, whether in Markdown or HTML — is still dropped during conversion and will not survive a round-trip. So is a `<pre>`, `<script>`, `<style>`, or `<textarea>` block with a blank line in it, which ends the block inside a list item.
+The Markdown-to-DOCX converter preserves the first paragraph, nested sublists, blockquote continuation blocks, and HTML blocks other than comments within a list item. Other block-level content in list continuation — such as fenced code blocks, indented code blocks, HTML comments, horizontal rules, and tables, whether in Markdown or HTML — is still dropped during conversion and will not survive a round-trip. A heading in a list item keeps its text as a paragraph but loses its level. Each of these gives a warning. So is a `<pre>`, `<script>`, `<style>`, or `<textarea>` block with a blank line in it, which ends the block inside a list item.
 
 The converter emits a warning when block content inside a list item is dropped.
 

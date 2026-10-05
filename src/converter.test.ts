@@ -1495,6 +1495,50 @@ describe('HTML blocks in list items', () => {
   });
 });
 
+describe('Blocks in list items', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+  const warningsOf = async (md: string) => (await convertMdToDocx(md)).warnings;
+
+  test.each([
+    ['a quote', '- > quote\n\n  after\n', '- \n  > quote\n\n  after\n'],
+    ['a sublist', '- - sub\n\n  after\n', '- \n  - sub\n\n  after\n'],
+  ])('keeps a paragraph after %s in an item where it was', async (_name, md, expected) => {
+    // Taken for the item's own text, it went before the quote or sublist
+    expect(await roundTrip(md)).toBe(expected);
+    expect(await roundTrip(expected)).toBe(expected);
+  });
+
+  test.each([
+    ['an item that is one', '- # h\n', '- h\n'],
+    ['one under an item', '- a\n\n  # h\n', '- a\n\n  h\n'],
+    ['a setext one', '- a\n  ---\n', '- a\n'],
+  ])('keeps the text of a heading in %s, with a warning', async (_name, md, expected) => {
+    // The heading's text was the item's, or went, with no warning
+    expect(await roundTrip(md)).toBe(expected);
+    expect(await warningsOf(md)).toEqual([
+      'Heading inside list item exported as a paragraph (not supported). Move the heading outside the list for round-trip fidelity.',
+    ]);
+  });
+
+  test('keeps the [ ] of a heading that starts an item as its text, not a task\'s box', () => {
+    // GFM reads a box only in a paragraph that starts the item
+    const [item] = parseMd('- # [ ] h\n');
+    expect(item.taskChecked).toBeUndefined();
+    expect(item.runs.map(run => run.text).join('')).toBe('[ ] h');
+  });
+
+  test('warns of a horizontal rule, which it drops', async () => {
+    expect(await warningsOf('- a\n\n  ---\n')).toEqual([
+      'Horizontal rule inside list item dropped during conversion (not supported). Move the content outside the list for round-trip fidelity.',
+    ]);
+  });
+
+  test('takes no text from a table it drops', async () => {
+    // Its first cell's text was the item's
+    expect(await roundTrip('- | x |\n  |---|\n  | 1 |\n')).toBe('- \n');
+  });
+});
+
 describe('Lists nested in lists of the other kind', () => {
   const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
 
