@@ -1041,22 +1041,28 @@ describe('Grid table round-trip', () => {
   ])('writes a grid table with %s that reads back as written', (_name, first, second) => {
     // A | in a cell under a + by characters, where the line is padded by
     // display columns, could be read as the cell's edge, moving text between
-    // cells, so such a table is HTML
+    // cells, so such a table is padded by characters
     const text = (t: string): ContentItem => t.startsWith('`')
       ? { type: 'text', text: t.slice(1, -1), commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, code: true } }
       : { type: 'text', text: t, commentIds: new Set(), formatting: DEFAULT_FORMATTING };
     const table = { type: 'table', rows: [{ isHeader: false, cells: [{ colspan: 1, paragraphs: [[text(first)], [text('x')]] }, { colspan: 1, paragraphs: [[text(second)]] }] }] } as unknown as ContentItem;
     const markdown = buildMarkdown([table], new Map());
-    if (markdown.startsWith('<table>')) return;
     const read = parseMd(markdown).find(token => token.type === 'table')?.rows?.[0].cells
       .map(cell => cell.runs.map(run => run.type === 'hardbreak' ? '\n' : run.code ? '`' + run.text + '`' : run.text).join('').replace(/\n+$/, ''));
     expect(read).toEqual([first + '\nx', second]);
   });
 
-  test('writes a grid table that would read back otherwise as HTML', () => {
-    const text = (t: string): ContentItem => ({ type: 'text', text: t, commentIds: new Set(), formatting: DEFAULT_FORMATTING });
-    const table = { type: 'table', rows: [{ isHeader: false, cells: [{ colspan: 1, paragraphs: [[text('中文文字')], [text('x')]] }, { colspan: 1, paragraphs: [[text('x | 𝑎𝑏𝑐𝑑')]] }] }] } as unknown as ContentItem;
-    expect(buildMarkdown([table], new Map())).toStartWith('<table>');
+  test('pads a grid table that would read back otherwise by characters, keeping a tracked change in it', async () => {
+    const text = (t: string, revision?: object): ContentItem => ({ type: 'text', text: t, commentIds: new Set(), formatting: DEFAULT_FORMATTING, ...(revision ? { revision } : {}) });
+    const table = { type: 'table', rows: [
+      { isHeader: false, cells: [{ colspan: 1, paragraphs: [[text('中文文字')], [text('x')]] }, { colspan: 1, paragraphs: [[text('x | 𝑎𝑏𝑐𝑑')]] }] },
+      { isHeader: false, cells: [{ colspan: 1, paragraphs: [[text('t', { type: 'addition', author: 'A', date: '2024-01-01T00:00:00Z' })]] }, { colspan: 1, paragraphs: [[text('y')]] }] },
+    ] } as unknown as ContentItem;
+    const markdown = buildMarkdown([table], new Map());
+    expect(markdown).toStartWith('+---------+--------------+\n| 中文文字    | x | 𝑎𝑏𝑐𝑑 |');
+    expect(markdown).toContain('| {++t++} | y            |');
+    const read = parseMd(markdown).find(token => token.type === 'table')?.rows?.map(row => row.cells.map(cell => cell.runs.map(run => run.type === 'hardbreak' ? '\n' : run.text).join('').replace(/\n+$/, '')));
+    expect(read).toEqual([['中文文字\nx', 'x | 𝑎𝑏𝑐𝑑'], ['t', 'y']]);
   });
 
   test('grid table with multi-line cells round-trips through MD→DOCX→MD', async () => {

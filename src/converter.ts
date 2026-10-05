@@ -6404,97 +6404,101 @@ function tryRenderGridTable(
     rendered.push(rowCells);
   }
 
-  // Compute column widths (minimum 3 for separator dashes, or source widths if available).
-  // sourceColWidths are inner widths (between +...+), which include 2 padding spaces;
-  // colWidths here are content widths (the renderer adds padding), so subtract 2.
-  const colWidths: number[] = Array(numCols).fill(3);
-  let validSourceWidths = false;
-  if (sourceColWidths && sourceColWidths.length === numCols) {
-    validSourceWidths = sourceColWidths.every(w => Number.isFinite(w) && w >= 0);
-  }
-  if (validSourceWidths) {
-    for (let c = 0; c < numCols; c++) {
-      const contentWidth = sourceColWidths![c] - 2;
-      if (contentWidth > colWidths[c]) colWidths[c] = contentWidth;
-    }
-  }
-  for (const rowCells of rendered) {
-    for (let c = 0; c < numCols; c++) {
-      for (const line of rowCells[c].lines) {
-        const w = getDisplayWidth(line);
-        if (w > colWidths[c]) colWidths[c] = w;
-      }
-    }
-  }
-
-  // Check width limit (separator line is always the widest)
-  if (maxLineWidth !== undefined && Number.isFinite(maxLineWidth)) {
-    const totalWidth = colWidths.reduce((s, w) => s + w + 3, 1);
-    if (totalWidth > maxLineWidth) { rollback(); return null; }
-  }
-
   // Find header boundary
   const headerEnd = rows.findIndex(r => !r.isHeader);
   const hasHeader = headerEnd > 0;
-
-  // Build separator line; each column's alignment goes as colons at the
-  // ends of its line under the header, or the top line without one
   const aligns = columnAlignments(rows, numCols);
-  const makeSep = (ch: string, aligned = false) =>
-    '+' + colWidths.map((w, c) => {
-      const align = aligned ? aligns[c] : undefined;
-      return (align === 'left' || align === 'center' ? ':' : ch) + ch.repeat(w)
-        + (align === 'right' || align === 'center' ? ':' : ch);
-    }).join('+') + '+';
+  const deferredAll = rendered.flatMap(rowCells => rowCells.flatMap(cell => cell.deferred));
 
-  const normalSep = makeSep('-');
-  const headerSep = makeSep('=', true);
-
-  // Build output lines
-  const lines: string[] = [];
-  const deferredAll: string[] = [];
-
-  lines.push(hasHeader ? normalSep : makeSep('-', true));
-
-  for (let ri = 0; ri < rendered.length; ri++) {
-    const rowCells = rendered[ri];
-    // Number of content lines in this row
-    const rowHeight = Math.max(...rowCells.map(c => c.lines.length));
-
-    for (let li = 0; li < rowHeight; li++) {
-      let line = '|';
+  // The table's lines, its cells padded to the widths `measure` counts: by
+  // display columns, as Pandoc pads a table, or by characters
+  const layOut = (measure: (text: string) => number): string[] | null => {
+    // Compute column widths (minimum 3 for separator dashes, or source widths if available).
+    // sourceColWidths are inner widths (between +...+), which include 2 padding spaces;
+    // colWidths here are content widths (the renderer adds padding), so subtract 2.
+    const colWidths: number[] = Array(numCols).fill(3);
+    let validSourceWidths = false;
+    if (sourceColWidths && sourceColWidths.length === numCols) {
+      validSourceWidths = sourceColWidths.every(w => Number.isFinite(w) && w >= 0);
+    }
+    if (validSourceWidths) {
       for (let c = 0; c < numCols; c++) {
-        const text = rowCells[c].lines[li] || '';
-        const pad = colWidths[c] - getDisplayWidth(text);
-        line += ' ' + text + ' '.repeat(pad + 1) + '|';
+        const contentWidth = sourceColWidths![c] - 2;
+        if (contentWidth > colWidths[c]) colWidths[c] = contentWidth;
       }
-      lines.push(line);
+    }
+    for (const rowCells of rendered) {
+      for (let c = 0; c < numCols; c++) {
+        for (const line of rowCells[c].lines) {
+          const w = measure(line);
+          if (w > colWidths[c]) colWidths[c] = w;
+        }
+      }
     }
 
-    for (const cell of rowCells) {
-      deferredAll.push(...cell.deferred);
+    // Check width limit (separator line is always the widest)
+    if (maxLineWidth !== undefined && Number.isFinite(maxLineWidth)) {
+      const totalWidth = colWidths.reduce((s, w) => s + w + 3, 1);
+      if (totalWidth > maxLineWidth) return null;
     }
 
-    // Separator after row
-    if (hasHeader && ri === headerEnd - 1) {
-      lines.push(headerSep);
-    } else {
-      lines.push(normalSep);
-    }
-  }
+    // Build separator line; each column's alignment goes as colons at the
+    // ends of its line under the header, or the top line without one
+    const makeSep = (ch: string, aligned = false) =>
+      '+' + colWidths.map((w, c) => {
+        const align = aligned ? aligns[c] : undefined;
+        return (align === 'left' || align === 'center' ? ':' : ch) + ch.repeat(w)
+          + (align === 'right' || align === 'center' ? ':' : ch);
+      }).join('+') + '+';
 
-  // If something went wrong with rendering, rollback
-  if (lines.length <= 2) {
-    rollback();
-    return null;
-  }
-  // The table reads back as written, or a | in a cell's text, under a + by
-  // characters where the line is padded by display columns, would move text
-  // between cells, so it isn't a grid table
+    const normalSep = makeSep('-');
+    const headerSep = makeSep('=', true);
+
+    // Build output lines
+    const lines: string[] = [];
+    lines.push(hasHeader ? normalSep : makeSep('-', true));
+
+    for (let ri = 0; ri < rendered.length; ri++) {
+      const rowCells = rendered[ri];
+      // Number of content lines in this row
+      const rowHeight = Math.max(...rowCells.map(c => c.lines.length));
+
+      for (let li = 0; li < rowHeight; li++) {
+        let line = '|';
+        for (let c = 0; c < numCols; c++) {
+          const text = rowCells[c].lines[li] || '';
+          const pad = colWidths[c] - measure(text);
+          line += ' ' + text + ' '.repeat(pad + 1) + '|';
+        }
+        lines.push(line);
+      }
+
+      // Separator after row
+      if (hasHeader && ri === headerEnd - 1) {
+        lines.push(headerSep);
+      } else {
+        lines.push(normalSep);
+      }
+    }
+
+    // If something went wrong with rendering, rollback
+    return lines.length <= 2 ? null : lines;
+  };
+
+  // Whether the table reads back as written, as export reads it
   const cellText = (text: string) => text.split('\n').map(line => line.replace(/^[ \t]+/, '').replace(/[ \t]+$/, '')).join('\n').replace(/\n+$/, '');
-  const read = readGridTableCells(lines);
-  if (!read || read.length !== rendered.length
-    || rendered.some((rowCells, ri) => rowCells.some((cell, c) => cellText(read[ri][c] ?? '') !== cellText(cell.lines.join('\n'))))) {
+  const readsBack = (lines: string[]) => {
+    const read = readGridTableCells(lines);
+    return !!read && read.length === rendered.length
+      && rendered.every((rowCells, ri) => rowCells.every((cell, c) => cellText(read[ri][c] ?? '') === cellText(cell.lines.join('\n'))));
+  };
+  // A line padded by display columns can line up by characters too, where a
+  // | in a cell's text is under a +, which export could take for the cell's
+  // edge, moving text between cells, so a table that doesn't read back as
+  // written is padded by characters, which does (see gridLineCells)
+  let lines = layOut(getDisplayWidth);
+  if (lines && !readsBack(lines)) lines = layOut(text => text.length);
+  if (!lines || !readsBack(lines)) {
     rollback();
     return null;
   }
