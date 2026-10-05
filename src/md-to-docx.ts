@@ -2590,6 +2590,10 @@ const NOTE_BLOCK_WARNINGS: Partial<Record<MdToken['type'], string>> = {
   hr: 'Horizontal rule inside a note dropped during conversion',
 };
 const EMPTY_NOTE_CODE_WARNING = 'Empty code block inside a note dropped during conversion';
+// A note has no sections, so an orientation directive does nothing in one,
+// and wrote an empty paragraph
+const NOTE_ORIENTATION_WARNING = 'Orientation directive inside a note ignored';
+const isOrientationDirective = (token: MdToken): boolean => !!(token.landscapeOpen || token.landscapeClose || token.portraitOpen || token.portraitClose);
 const isBlank = (text: string): boolean => !/[^ \t\n]/.test(text.replace(NOT_XML_CHARACTER, ''));
 const isEmptyCodeBlock = (token: MdToken): boolean => token.type === 'code_block' && token.runs.every(run => isBlank(run.text));
 
@@ -8124,12 +8128,13 @@ export async function convertMdToDocx(
     madeNotes.add(label);
     const { tokens: bodyTokens, warnings: parseWarnings } = parsedNotes.get(label)!;
     state.warnings.push(...parseWarnings);
-    const noteWarnings = new Set(bodyTokens.map(t => isEmptyCodeBlock(t) ? EMPTY_NOTE_CODE_WARNING : NOTE_BLOCK_WARNINGS[t.type]));
+    const noteWarnings = new Set(bodyTokens.map(t => isEmptyCodeBlock(t) ? EMPTY_NOTE_CODE_WARNING
+      : isOrientationDirective(t) ? NOTE_ORIENTATION_WARNING : NOTE_BLOCK_WARNINGS[t.type]));
     for (const warning of noteWarnings) {
       if (warning) state.warnings.push(warning + ' (not supported). Move it outside the note for round-trip fidelity.');
     }
     const noteTokens = bodyTokens.flatMap((t): MdToken[] => {
-      if (t.type === 'hr' || isEmptyCodeBlock(t)) return [];
+      if (t.type === 'hr' || isEmptyCodeBlock(t) || isOrientationDirective(t)) return [];
       // An alert's text starts after the line end that follows its marker,
       // and an empty list item, heading or alert is no paragraph, which
       // import would drop
