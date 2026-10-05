@@ -5446,9 +5446,10 @@ function renderInlineRange(
     }
 
     // Hard line breaks must not be wrapped in formatting markers (e.g. **\\\n**)
-    // because the backslash must be the final character on its line.
+    // because the backslash must be the final character on its line. A
+    // tracked change's delimiters can, as {--\\\n--}.
     if (item.text === '\\\n') {
-      out += '\\\n';
+      [out, lastSpan] = appendRevised(out, '\\\n', item, lastSpan);
       i++;
       continue;
     }
@@ -5700,9 +5701,10 @@ function renderInlineRangeWithIds(
     prevCommentIds = new Set(currentIds);
 
     // Hard line breaks must not be wrapped in formatting markers (e.g. **\\\n**)
-    // because the backslash must be the final character on its line.
+    // because the backslash must be the final character on its line. A
+    // tracked change's delimiters can, as {--\\\n--}.
     if (item.text === '\\\n') {
-      out += '\\\n';
+      [out, lastSpan] = appendRevised(out, '\\\n', item, lastSpan);
       i++;
       continue;
     }

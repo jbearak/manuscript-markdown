@@ -4267,6 +4267,19 @@ describe('Bare links', () => {
 });
 
 describe('w:br line break handling', () => {
+  test.each([
+    ['a deletion', 'a{--\\\n--} b'],
+    ['an insertion', 'a{++\\\n++} b'],
+    ['one that starts its paragraph', '{++\\\n++}b'],
+    ['a deletion in a quote', '> a{--\\\n> --} b'],
+    ['a substitution\'s side', 'a{~~\\\n~>x~~} b'],
+    ['one with comments, by ID', 'Seen {#1}a {#2}b{/1}{--\\\n--} c{/2} on.\n{#1>>one<<}\n{#2>>two<<}'],
+  ])('keeps a tracked change of a line break alone, %s', async (_name, md) => {
+    // Import wrote the break bare, without the change
+    const strip = (m: string) => m.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown)).toBe(md + '\n');
+  });
+
   test('w:br without type attribute emits backslash-newline', async () => {
     const xml = wrapDocumentXml(
       '<w:p><w:r><w:t>before</w:t></w:r><w:r><w:br/><w:t>after</w:t></w:r></w:p>'
