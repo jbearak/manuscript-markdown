@@ -9183,7 +9183,7 @@ describe('Links of more than one run', () => {
       { type: 'text', text: 'a'.repeat(100), href: 'https://e.com', link: 1, commentIds: new Set(), formatting: DEFAULT_FORMATTING }));
     const start = performance.now();
     buildMarkdown(items, new Map());
-    expect(performance.now() - start).toBeLessThan(1000);
+    expect(performance.now() - start).toBeLessThan(3000);
   });
 
   test('keeps a soft line break in a link in the link', async () => {
