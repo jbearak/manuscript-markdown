@@ -6856,6 +6856,8 @@ describe('buildMarkdown code block emission', () => {
 });
 
 describe('Code block round-trip', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+
   test.each([
     ['an empty line', '```\na\n\n```'],
     ['two empty lines', '```\na\n\n\n```'],
@@ -6946,6 +6948,29 @@ describe('Code block round-trip', () => {
     const text = '```r\nx\n```\n\nText[^b] and[^a].\n\n';
     expect((await convertDocx((await convertMdToDocx(text + note('b', 'py') + '\n' + note('a', 'js'))).docx)).markdown)
       .toBe(text + note('a', 'js') + '\n' + note('b', 'py'));
+  });
+
+  test('numbers code blocks in notes after one only another note refers to', async () => {
+    // Export numbered that one's in its label's turn, but import, which
+    // writes only the notes the text refers to, doesn't read it
+    const note = (label: string, lang: string, text = 'Note.') => '[^' + label + ']: ' + text + '\n\n    ```' + lang + '\n    x\n    ```\n';
+    const md = 'T[^a] and[^c].\n\n' + note('a', 'python', 'A[^b].') + '\n' + note('b', 'js') + '\n' + note('c', 'r');
+    expect(strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown))
+      .toBe('T[^a] and[^c].\n\n' + note('a', 'python', 'A.') + '\n' + note('c', 'r'));
+  });
+
+  test.each([
+    ['the body', '```py\nXX\nYY\n```\n', 'word/document.xml', '```py\nXX\nZZ\nYY\n```\n'],
+    ['a note', 'T.[^1]\n\n[^1]: A.\n\n    ```py\n    XX\n    YY\n    ```\n', 'word/footnotes.xml',
+      'T.[^1]\n\n[^1]: A.\n\n    ```py\n    XX\n    ZZ\n    YY\n    ```\n'],
+  ])('ends a code line at a line break of Word\'s in %s', async (_name, md, part, expected) => {
+    // It came back as Markdown's, \\ and a line end, which put a \\ in the code
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file(part)!.async('string');
+    const broken = xml.replace('<w:t>XX</w:t>', '<w:t>XX</w:t><w:br/><w:t>ZZ</w:t>');
+    expect(broken).not.toBe(xml);
+    zip.file(part, broken);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(expected);
   });
 
   test('drops Word\'s space after the note\'s mark in a code paragraph that holds it', async () => {

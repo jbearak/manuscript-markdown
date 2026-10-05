@@ -6733,7 +6733,14 @@ function codeBlockFence(content: ContentItem[], start: number, lang: string): { 
       break;
     }
     if (next.type === 'text') {
-      lineText += next.text;
+      // A line break of Word's, which reads as Markdown's, \ and a line end,
+      // ends a line of the code, which it is in Word, not a \ in it
+      const [first, ...rest] = next.text.split('\\\n');
+      lineText += first;
+      for (const part of rest) {
+        codeLines.push(lineText);
+        lineText = part;
+      }
     } else {
       // Non-para, non-text item (shouldn't typically occur inside a code block)
       break;
