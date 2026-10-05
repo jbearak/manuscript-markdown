@@ -8467,6 +8467,32 @@ describe('Track changes (CriticMarkup)', () => {
     });
 
     test.each([
+      ['a backslash at the end of the paragraph before', '<w:delText>foo\\</w:delText>', '<w:delText>b</w:delText>', 'x{--foo\\\\\n\nb--}y'],
+      ['spaces at the end of the paragraph before', '<w:delText xml:space="preserve">a  </w:delText>', '<w:delText>b</w:delText>', 'x{--a&#32;&#32;\n\nb--}y'],
+      ['a line break at the end of the paragraph before', '<w:delText>a</w:delText><w:br/>', '<w:delText>b</w:delText>', 'x{--a<br>\n\nb--}y'],
+      ['a line break at the start of the paragraph after', '<w:delText>a</w:delText>', '<w:br/><w:delText>b</w:delText>', 'x{--a\n\n\\\nb--}y'],
+    ])('keeps %s a deleted mark joins', async (_name, end, start, expected) => {
+      // Export read the \ and the line end after it as a line break, and
+      // dropped spaces or a line break at the paragraph break
+      const revision = 'w:author="A" w:date="2024-01-01T00:00:00Z"';
+      const body = '<w:p><w:pPr><w:rPr><w:del w:id="1" ' + revision + '/></w:rPr></w:pPr><w:r><w:t>x</w:t></w:r><w:del w:id="2" ' + revision + '><w:r>' + end
+        + '</w:r></w:del></w:p><w:p><w:del w:id="3" ' + revision + '><w:r>' + start + '</w:r></w:del><w:r><w:t>y</w:t></w:r></w:p>';
+      const md = (await convertDocx(await buildSyntheticDocx(wrapDocumentXml(body)))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+      expect(md).toBe(expected);
+      const runs = (xml: string) => [...xml.matchAll(/<w:(?:t|delText)[^>]*>([^<]*)<\/w:(?:t|delText)>|<w:br\/>|<w:p[ >]/g)].map(m => m[1] ?? (m[0] === '<w:br/>' ? '↵' : '¶')).join('');
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+      expect(runs(xml.slice(xml.indexOf('<w:body>')))).toBe(runs(body));
+    });
+
+    test('keeps a mail link after spaces at the start of the paragraph a deleted mark joins', async () => {
+      // The spaces, written as references after the link was written bare,
+      // kept export from reading the address as a link
+      const md = '{--a\n\n&#32;[x\\@example.com](mailto:x@example.com)--}y';
+      const roundTrip = (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+      expect(roundTrip).toBe(md);
+    });
+
+    test.each([
       ['with its mark', true, 'x\n\n{--a\n\n--}y'],
       ['without its mark', false, 'x\n\n{--a--}\n\ny'],
     ])('keeps a paragraph Word deleted whole %s', async (_name, tracked, expected) => {

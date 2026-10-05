@@ -1651,7 +1651,7 @@ function splitRunsAtCriticParagraphs(runs: MdRun[]): CriticParagraphSplit | unde
       if (inner) {
         split = {
           parts: inner.parts.map(part => {
-            const innerRuns = trimBreakRuns(part);
+            const innerRuns = trimBreakRuns(part, true);
             return innerRuns.length > 0
               ? [{ ...run, text: innerRuns.map(innerRun => innerRun.text).join(''), innerRuns }]
               : [];
@@ -1759,12 +1759,16 @@ function isBreakRun(run: MdRun): boolean {
   return run.type === 'softbreak' || run.type === 'hardbreak';
 }
 
-/** Remove edge breaks where the surrounding Word paragraph already supplies separation. */
-function trimBreakRuns(runs: MdRun[]): MdRun[] {
+/** Remove edge breaks where the surrounding Word paragraph already supplies
+ *  separation: soft ones alone (`soft`), as at a paragraph break in a
+ *  CriticMarkup span, where a hard one is Word's, as import writes a line
+ *  break at a paragraph's start or end there. */
+function trimBreakRuns(runs: MdRun[], soft = false): MdRun[] {
+  const trimmed = (run: MdRun) => soft ? run.type === 'softbreak' : isBreakRun(run);
   let start = 0;
   let end = runs.length;
-  while (start < end && isBreakRun(runs[start])) start++;
-  while (end > start && isBreakRun(runs[end - 1])) end--;
+  while (start < end && trimmed(runs[start])) start++;
+  while (end > start && trimmed(runs[end - 1])) end--;
   return runs.slice(start, end);
 }
 

@@ -5100,8 +5100,10 @@ function resolveBareLinks(markdown: string): string {
     // reading as one, is text before it bare
     const bang = /(?:^|[^\\])(?:\\\\)*\\!$/.test(before) ? before.slice(0, -2) + '!' : undefined;
     // Whitespace that may start a line, which keepParagraphWhitespace
-    // writes as references
-    const lineStart = (k === 0 ? /(?:^|\n)[ \t]+$/ : /\n[ \t]+$/).test(before);
+    // writes as references, as joinSpansAtTrackedBreaks does after a
+    // tracked break's end mark, a private-use character (see
+    // trackedBreakMarks)
+    const lineStart = (k === 0 ? /(?:^|[\n\uE000-\uF8FF])[ \t]+$/ : /[\n\uE000-\uF8FF][ \t]+$/).test(before);
     if (head !== undefined && bang !== undefined && bareLinkReadsBack(bang, address, closer, head, lineStart)) {
       chosen[k] = address;
       parts[4 * k] = bang;
@@ -8335,13 +8337,48 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
 /** Markdown with each tracked break from joinTrackedParagraphBreaks inside
  *  the spans before and after it, as in {++**a**\n\nmore++} rather than
  *  {++**a**++}{++\n\n++}{++more++}, and the spaces and tabs the span has at
- *  the next line's start, which export would drop there, as references, as
- *  in {--a\n\n&#32;b--}. */
+ *  the ends of the lines around it, which export would drop there, as
+ *  references, as in {--a\n\n&#32;b--}. */
 function joinSpansAtTrackedBreaks(markdown: string, marks: TrackedBreakMarks): string {
   const boundary = '(?:\\+\\+\\}\\{\\+\\+|--\\}\\{--)?';
   const marked = new RegExp(boundary + marks.start + '([^' + marks.end + ']*)' + marks.end + boundary + '([ \\t]*)', 'g');
-  return markdown.replace(marked, (_match, text: string, whitespace: string) =>
-    text + whitespace.replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;')).split(marks.alone).join('');
+  let out = '';
+  let from = 0;
+  for (const match of markdown.matchAll(marked)) {
+    // The text before ends the paragraph: a line break as \ before a line
+    // end, which Markdown drops there and keeps the \ as text, is <br>, as
+    // at a paragraph's end, and a backslash, which the mark kept from
+    // escaping anything, but which would make a line break of the line
+    // end, is escaped
+    let before = markdown.slice(from, match.index);
+    // From the end, each with the next line's prefix, as a quote's, after it
+    let end = before.length;
+    let breaks = 0;
+    for (;;) {
+      let line = end;
+      while (line > 0 && /[> \t]/.test(before[line - 1])) line--;
+      let slashes = 0;
+      if (before[line - 1] === '\n') while (before[line - 2 - slashes] === '\\') slashes++;
+      if (slashes % 2 === 0) break;
+      breaks++;
+      end = line - 2;
+    }
+    if (breaks > 0) {
+      before = before.slice(0, end) + '<br>'.repeat(breaks);
+    } else {
+      // Spaces and tabs at its end, which export would drop there, as
+      // references, after the backslash before them, escaped, which would
+      // escape the first
+      let space = before.length;
+      while (space > 0 && (before[space - 1] === ' ' || before[space - 1] === '\t')) space--;
+      let slashes = 0;
+      while (before[space - 1 - slashes] === '\\') slashes++;
+      before = before.slice(0, space) + (slashes % 2 ? '\\' : '') + before.slice(space).replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;');
+    }
+    out += before + match[1] + match[2].replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;');
+    from = match.index + match[0].length;
+  }
+  return (out + markdown.slice(from)).split(marks.alone).join('');
 }
 
 export function buildMarkdown(
