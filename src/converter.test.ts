@@ -8342,13 +8342,31 @@ describe('Track changes (CriticMarkup)', () => {
         + '<w:p>' + deletedMark + deletedRun('B') + '</w:p>'
         + '<w:p><w:r><w:t>C</w:t></w:r></w:p>',
       )).toBe('A {--x\n\nB\n\n--}C');
-      // Export moves a break that opens a span outside it, so a break with no
-      // deleted text before it stays an ordinary paragraph break
+      // A break with no deleted text before it is a span of its own, which
+      // export keeps, as it moves one that opens a span with text outside it
       expect(await body('<w:p>' + deletedMark + '<w:r><w:t>Hello</w:t></w:r></w:p><w:p><w:r><w:t>World</w:t></w:r></w:p>'))
-        .toBe('Hello\n\nWorld');
+        .toBe('Hello{--\n\n--}World');
       // A deleted heading's mark keeps its own handling
       expect(await body('<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:rPr><w:del w:id="1" w:author="A" w:date="2024-01-01T00:00:00Z"/></w:rPr></w:pPr>'
         + deletedRun('Gone') + '</w:p><w:p><w:r><w:t>Kept</w:t></w:r></w:p>')).toBe('{--# Gone--}\n\nKept');
+    });
+
+    test.each([
+      ['deleted after text', 'a{--\n\n--}b'],
+      ['inserted after text', 'a{++\n\n++}b'],
+      ['after an insertion', '{++a++}{--\n\n--}b'],
+      ['before a deletion', 'a{--\n\n--}{--b--}c'],
+      ['before an insertion', 'a{--\n\n--}{++X++}b'],
+      ['after a comment\'s reference', 'a{>>c<<}{--\n\n--}b'],
+      ['after a comment\'s range', '{==a==}{>>c<<}{--\n\n--}b'],
+      ['in a comment\'s range', 'a{#1}b{--\n\n--}c{/1}\n{#1>>note<<}'],
+      ['in a quote', '> a{--\n>\n> --}b'],
+      ['in a list item', '- a{--\n\n  --}b'],
+    ])('keeps a tracked paragraph mark %s in a span of its own', async (_name, md) => {
+      // It came back as a plain paragraph break: the span of the break alone
+      // was written only where it joined a span of the same revision before it
+      const roundTrip = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+      expect(roundTrip.replace(/^---\n[\s\S]*?\n---\n?/, '').trim()).toBe(md);
     });
 
     test('CriticMarkup inside math survives a round trip', async () => {

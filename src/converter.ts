@@ -8174,30 +8174,34 @@ function breakContainer(para: ParaItem | undefined, side: 'before' | 'after'): s
 interface TrackedBreakMarks {
   start: string;
   end: string;
+  /** In place of `start` for a break in a span of its own */
+  alone: string;
 }
 
-/** Two private-use characters that appear nowhere in `values`, which hold
+/** Three private-use characters that appear nowhere in `values`, which hold
  *  everything buildMarkdown renders, so no text in the document is taken
  *  for a mark. */
 function trackedBreakMarks(values: unknown): TrackedBreakMarks {
   const text = JSON.stringify(values, (_key, value: unknown) => value instanceof Map || value instanceof Set ? [...value] : value);
   const unused: string[] = [];
-  for (let code = 0xE000; unused.length < 2; code++) {
+  for (let code = 0xE000; unused.length < 3; code++) {
     const ch = String.fromCharCode(code);
     if (!text.includes(ch)) unused.push(ch);
   }
-  return { start: unused[0], end: unused[1] };
+  return { start: unused[0], end: unused[1], alone: unused[2] };
 }
 
 /** A paragraph break tracked in Word goes inside the CriticMarkup span as a
  *  blank line, as in {--end.\n\nStart--}, when content survives on both
  *  sides: otherwise accepting or rejecting the change leaves an empty
  *  paragraph, which Markdown drops anyway, and the plain break reads better.
- *  The break must follow inline content in the same revision, or, opening
- *  the new side of a substitution, as in {~~a~>\n\nb~~}, its old side.
- *  md-to-docx moves a break that opens a span outside it (see
- *  moveLeadingBreakOutsideCritic), so a span that starts with the break would
- *  not survive export. Both paragraphs must sit in the same list item or
+ *  The break joins the span of the inline content before it in the same
+ *  revision, or, opening the new side of a substitution, as in
+ *  {~~a~>\n\nb~~}, its old side. After inline content in no revision or
+ *  another, it is a span of its own, as in a{--\n\n--}b, which ends there:
+ *  md-to-docx moves a break that opens a span with text in it outside it
+ *  (see moveLeadingBreakOutsideCritic), but keeps a span of the break
+ *  alone. Both paragraphs must sit in the same list item or
  *  quote, and `linePrefix` gives the line prefix (quote markers, list indent)
  *  to start the line after the break, from the second paragraph and the one
  *  whose text the break joins it to. The break is plain text,
@@ -8210,13 +8214,13 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
     if (para.type !== 'para' || !para.breakRevision) continue;
     const revision = para.breakRevision;
     // A comment's reference alone, as of {--a{>>c<<}\n\nb--}, goes after
-    // the break, as one can't go in the span, and a span that starts with
-    // the break loses it
+    // a break that joins the span before it, as one can't go in the span,
+    // and a span that starts with the break loses it
     let last = k - 1;
     while (last >= 0 && isCommentPoint(content[last])) last--;
     const prev = content[last];
     if (!prev || !isInlineRevisionItem(prev)) continue;
-    if (!opensNewSide(content, k) && !revisionsEqual(prev.revision, revision)) continue;
+    const alone = !opensNewSide(content, k) && !revisionsEqual(prev.revision, revision);
     let opening: ParaItem | undefined;
     for (let j = k - 1; j >= 0 && !opening; j--) {
       const item = content[j];
@@ -8230,9 +8234,21 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
     if (!after?.some(item => survivesRevisions(item, revision.type))) continue;
     joined ??= [...content];
     const prefix = linePrefix(para, opening);
-    const text = marks().start + '\n' + prefix.trimEnd() + '\n' + prefix + marks().end;
-    joined.splice(last + 1, k - last, { type: 'text', text, commentIds: new Set(prev.commentIds), formatting: DEFAULT_FORMATTING, revision },
-      ...content.slice(last + 1, k));
+    const text = (alone ? marks().alone : marks().start) + '\n' + prefix.trimEnd() + '\n' + prefix + marks().end;
+    // A break in a span of its own is in a comment's range where the text
+    // on both sides is
+    const next = content[k + 1];
+    const commentIds = alone
+      ? new Set([...prev.commentIds].filter(id => next && 'commentIds' in next && next.commentIds?.has(id)))
+      : new Set(prev.commentIds);
+    const item: ContentItem = { type: 'text', text, commentIds, formatting: DEFAULT_FORMATTING, revision };
+    // and ends it: empty text in no revision keeps the text after from
+    // running into it, from joining its span, and from pairing with it as
+    // a substitution's new side
+    const barrier: ContentItem[] = alone ? [{ type: 'text', text: '', commentIds: new Set(commentIds), formatting: DEFAULT_FORMATTING }] : [];
+    // A comment's reference before it stays there, outside its span
+    const points = content.slice(last + 1, k);
+    joined.splice(joined.length - content.length + last + 1, k - last, ...(alone ? [...points, item, ...barrier] : [item, ...points]));
   }
   return joined ?? content;
 }
@@ -8243,7 +8259,8 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
 function joinSpansAtTrackedBreaks(markdown: string, marks: TrackedBreakMarks): string {
   const boundary = '(?:\\+\\+\\}\\{\\+\\+|--\\}\\{--)?';
   const marked = new RegExp(boundary + marks.start + '([^' + marks.end + ']*)' + marks.end + boundary, 'g');
-  return markdown.replace(marked, (_match, text: string) => text);
+  const alone = new RegExp(marks.alone + '([^' + marks.end + ']*)' + marks.end, 'g');
+  return markdown.replace(marked, (_match, text: string) => text).replace(alone, (_match, text: string) => text);
 }
 
 export function buildMarkdown(
@@ -8417,9 +8434,11 @@ export function buildMarkdown(
         if (displayBlock) paragraph++;
         // A tracked break joinTrackedParagraphBreaks put in the text ends a
         // paragraph too, where text after it goes on in the next, as a
-        // range of {++{#1}a\n\nb{/1}++} does, which {==...==} can't hold
-        const pieces = item.type === 'text' && breakMarks && item.text.includes(breakMarks.start)
-          ? item.text.split(breakMarks.start).map((piece, k) => k === 0 ? piece : piece.slice(piece.indexOf(breakMarks!.end) + 1))
+        // range of {++{#1}a\n\nb{/1}++} or {#1}a{++\n\n++}b{/1} does,
+        // which {==...==} can't hold
+        const pieces = item.type === 'text' && breakMarks && (item.text.includes(breakMarks.start) || item.text.includes(breakMarks.alone))
+          ? item.text.split(new RegExp('[' + breakMarks.start + breakMarks.alone + ']'))
+            .map((piece, k) => k === 0 ? piece : piece.slice(piece.indexOf(breakMarks!.end) + 1))
           : [''];
         for (let k = 0; k < pieces.length; k++) {
           if (k > 0) {

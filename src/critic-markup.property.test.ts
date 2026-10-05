@@ -131,7 +131,7 @@ function preprocessCriticMarkupReference(markdown: string): string {
         const separatorPos = markdown.indexOf('~>', contentStart);
         if (separatorPos === -1 || separatorPos >= closePos) return full;
       }
-      if (/^\s*$/.test(markdown.slice(contentStart, closePos))) return full;
+      if (/^\s*$/.test(markdown.slice(contentStart, closePos).replace(/(\r\n|\r|\n)[ \t]*(?:>[ \t]*)+/g, '$1'))) return full;
       const lineStart = Math.max(
         markdown.lastIndexOf('\n', offset - 1),
         markdown.lastIndexOf('\r', offset - 1),
