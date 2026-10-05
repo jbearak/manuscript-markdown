@@ -551,23 +551,30 @@ export class RunsAfter {
 /** The ranges of the keys and locators of the citation export reads in
  *  `text` from the [ at `open` to the ] at `close`, where its items, as
  *  export writes a citation whose key is missing as its text, give that
- *  text back; undefined where they don't, as for [@a,p. 2]. */
+ *  text back; undefined where they don't, as for [@a,p. 2]. Export runs a
+ *  prefix's spaces together, and keeps one locator and one - for each key,
+ *  the last, so [see  also @a] and [@a, p. 1; @a, p. 2] don't. */
 function citationKeyRanges(text: string, open: number, close: number): Array<[number, number]> | undefined {
   let offset = open + 1;
   const raw: Array<[number, number]> = [];
-  const items = text.slice(open + 1, close).split(';').map(part => {
+  const locators = new Map<string, string>();
+  const suppressed = new Set<string>();
+  const items = text.slice(open + 1, close).split(';').flatMap(part => {
     const item = part.trim();
     const start = /(^|\s)(-?)@/.exec(item);
-    const prefix = start ? item.slice(0, start.index).trim() : '';
+    const prefix = start ? item.slice(0, start.index).trim().replace(/\s+/g, ' ') : '';
     const rest = start ? item.slice(start.index + start[0].length).trim() : item;
     const comma = rest.indexOf(',');
     const key = comma === -1 ? rest : rest.slice(0, comma).trim();
-    const locator = comma === -1 ? '' : rest.slice(comma + 1).trim();
     if (start) raw.push([offset + part.indexOf(item) + start.index + start[1].length, offset + part.length]);
     offset += part.length + 1;
-    return rest ? (prefix ? prefix + ' ' : '') + (start?.[2] ?? '') + '@' + key + (locator ? ', ' + locator : '') : undefined;
+    if (!rest) return [];
+    if (comma !== -1) locators.set(key, rest.slice(comma + 1).trim());
+    if (start?.[2]) suppressed.add(key);
+    return [{ prefix, key }];
   });
-  return '[' + items.filter(item => item !== undefined).join('; ') + ']' === text.slice(open, close + 1) ? raw : undefined;
+  return '[' + items.map(({ prefix, key }) => (prefix ? prefix + ' ' : '') + (suppressed.has(key) ? '-@' : '@') + key
+    + (locators.get(key) ? ', ' + locators.get(key) : '')).join('; ') + ']' === text.slice(open, close + 1) ? raw : undefined;
 }
 
 /**

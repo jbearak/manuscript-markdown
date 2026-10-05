@@ -4935,6 +4935,9 @@ describe('Word text that reads as Markdown', () => {
     'a ==== b',
     // A citation whose items export gives back otherwise
     '[@a; see_also_x]', '[@a;@b]',
+    // Export runs a prefix's spaces together, and keeps one locator and one
+    // - for each key
+    '[@a; see  also @b]', '[@a, p. 1; @a, p. 2]', '[-@a; @a]', '[@a; see  also @b](b)',
     // One before a ( in brackets, whose ] closed the outer [ as a link's
     '[[@a,p. 2](https://e.com)]',
     // One after a !, which makes it an image
