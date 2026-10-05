@@ -5765,14 +5765,14 @@ describe('Whitespace at the edges of a paragraph', () => {
   });
 
   test('keeps the whitespace at the edges of a note\'s text after an equation in its paragraph', async () => {
-    // The text didn't count as the start of a paragraph, though Markdown
-    // puts it in one of its own
+    // Text after an equation in its paragraph goes on from the closing
+    // fence, as in the document's body, with its whitespace kept
     const fence = '$' + '$';
     const zip = await JSZip.loadAsync((await convertMdToDocx('T.[^1]\n\n[^1]: A.\n\n    ' + fence + '\n    x\n    ' + fence)).docx);
     const xml = await zip.file('word/footnotes.xml')!.async('string');
     zip.file('word/footnotes.xml', xml.replace('</m:oMathPara>', '</m:oMathPara><w:r><w:t xml:space="preserve">\tt\u00a0</w:t></w:r>'));
     const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
-    expect(markdown).toBe('T.[^1]\n\n[^1]: A.\n\n    ' + fence + '\n    x\n    ' + fence + '\n\n    &#9;t&nbsp;\n');
+    expect(markdown).toBe('T.[^1]\n\n[^1]: A.\n\n    ' + fence + '\n    x\n    ' + fence + '&#9;t&nbsp;\n');
     expect(await roundTrip(markdown)).toBe(markdown);
   });
 
