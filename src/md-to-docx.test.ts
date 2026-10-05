@@ -1994,6 +1994,13 @@ describe('CriticMarkup OOXML generation', () => {
     expect(state.comments[0].paraId).toMatch(/^[0-9A-F]{8}$/);
   });
 
+  it('takes an author\'s initials by character, not half of one outside the BMP', async () => {
+    const { docx } = await convertMdToDocx('Text {==a==}{>>@𠮷野 太郎 (2024-01-15 14:30) | note<<}');
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/comments.xml')!.async('string');
+    expect(xml).toContain('w:initials="𠮷太"');
+  });
+
   it('generates zero-width comment range for standalone comments', () => {
     const token: MdToken = {
       type: 'paragraph',

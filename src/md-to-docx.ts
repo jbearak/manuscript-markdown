@@ -7103,14 +7103,14 @@ function injectParaIds(xml: string, state: DocxGenState): string {
 
 
 function authorInitials(author: string): string {
+  // By character, not UTF-16 unit, which would take half of one outside
+  // the BMP, as 𠮷
   const initials = author
     .split(/\s+/)
     .map(part => part.trim())
     .filter(Boolean)
-    .map(part => part[0].toUpperCase())
-    .join('')
-    .slice(0, 8);
-  return initials;
+    .map(part => [...part][0].toUpperCase());
+  return initials.slice(0, 8).join('');
 }
 
 /**
