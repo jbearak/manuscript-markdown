@@ -2539,7 +2539,8 @@ function promoteCriticHeadingParagraph(runs: MdRun[]): MdToken | undefined {
   // from Word as several adjacent spans: {++### ++}{++**bold**++}...).
   if (!runs.every(r => r.type === kind && r.author === runs[0].author && r.date === runs[0].date)) return undefined;
   const run = runs[0];
-  if (!run.text || run.text.includes('\n')) return undefined;
+  // A link's text, as [{++# a++}{++ b++}](u), which a [ comes before
+  if (!run.text || run.text.includes('\n') || run.href) return undefined;
   const headingPrefix = matchCriticHeadingPrefix(run.text);
   if (!headingPrefix) return undefined;
   const prefix = headingPrefix.prefix;

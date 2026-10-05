@@ -8929,6 +8929,34 @@ describe('Links of more than one run', () => {
     expect(await roundTrip(md)).toBe(md + '\n');
   });
 
+  test('keeps a link whose text starts with an inserted # a link, not a heading', async () => {
+    // Export read the link's first run, {++# ++}, as an inserted heading's
+    const md = '[{++# 123++}{++ (fixed)++}](https://e.com)';
+    const { docx } = await convertMdToDocx(md);
+    expect(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).not.toContain('Heading1');
+    expect((await convertDocx(docx)).markdown).toBe('{++[# 123 (fixed)](https://e.com)++}\n');
+  });
+
+  test.each([
+    ['deleted runs', (k: number): ContentItem[] => [{ type: 'text', text: 'a', href: 'https://e.com', link: 1, commentIds: new Set(),
+      formatting: { ...DEFAULT_FORMATTING, bold: k % 2 === 0 }, revision: { type: 'deletion', author: 'A', date: '2024-01-01T00:00:00Z' } }]],
+    ['substitutions', (_k: number): ContentItem[] => [
+      { type: 'text', text: 'a', href: 'https://e.com', link: 1, commentIds: new Set(), formatting: DEFAULT_FORMATTING,
+        revision: { type: 'deletion', author: 'A', date: '2024-01-01T00:00:00Z' } },
+      { type: 'text', text: 'b', href: 'https://e.com', link: 1, commentIds: new Set(), formatting: DEFAULT_FORMATTING,
+        revision: { type: 'addition', author: 'A', date: '2024-01-01T00:00:00Z' } },
+      { type: 'text', text: ' ', href: 'https://e.com', link: 1, commentIds: new Set(), formatting: DEFAULT_FORMATTING }]],
+  ])('writes a link of many %s in linear time', (_name, runs) => {
+    // Each deleted run rendered the rest of its deletion, and each side of
+    // a substitution read the paragraph's runs up to its end
+    const items: ContentItem[] = [
+      { type: 'text', text: 'x ', href: 'https://e.com', link: 1, commentIds: new Set(), formatting: DEFAULT_FORMATTING },
+      ...Array.from({ length: 4000 }, (_, k) => runs(k)).flat()];
+    const start = performance.now();
+    buildMarkdown(items, new Map());
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+
   test('keeps a soft line break in a link in the link', async () => {
     expect(await roundTrip('[link\ntext](https://e.com)')).toBe('[link text](https://e.com)\n');
   });

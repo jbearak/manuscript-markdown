@@ -5689,33 +5689,40 @@ function linkGroup(
   if (items.length < 2) return undefined;
   const href = first.href;
   const whole = items.every(item => revisionsEqual(item.revision, first.revision));
-  // The item at k as Markdown in the link's text, which reads the runs after
-  // it up to `to` as the rest of the text before the link's ](url), as a
-  // link of one run does
-  const itemText = (k: number, to: number): string => items[k].text === '\\\n' ? items[k].text
-    : markedFormatting(items[k].text, items[k].formatting, false, runsAfter(segment, start + k + 1, to).linkTo(href));
+  // The item at k as Markdown in the link's text, which reads the runs
+  // `after` it as the rest of the text before the link's ](url), as a link
+  // of one run does
+  const itemText = (k: number, after: RunsAfter): string => items[k].text === '\\\n' ? items[k].text
+    : markedFormatting(items[k].text, items[k].formatting, false, after.linkTo(href));
   let text = '';
   let span: RevisionSpan | undefined;
+  // Where the deletions end that a substitution was tried from, which the
+  // rest of them aren't tried from again, which would take time in the
+  // square of them
+  let triedUntil = 0;
   for (let k = 0; k < items.length; k++) {
     const item = items[k];
     // Deletions and then insertions of one author and time, a substitution
     // of its sides, each whole, as renderSubstitutionRun writes one
     const revision = item.revision;
-    if (!whole && revision?.type === 'deletion') {
+    if (!whole && revision?.type === 'deletion' && k >= triedUntil) {
       const side = (j: number, type: RevisionInfo['type']) => j < items.length && items[j].revision?.type === type
         && items[j].revision!.author === revision.author && items[j].revision!.date === revision.date;
       let additions = k;
       while (side(additions, 'deletion')) additions++;
       let sideEnd = additions;
       while (side(sideEnd, 'addition')) sideEnd++;
-      // Each side reads apart, and resolves apart (see tryRenderSubstitution)
+      triedUntil = additions;
+      // Each side reads apart, its runs after each of its runs alone, and
+      // resolves apart (see tryRenderSubstitution)
       const sideText = (from: number, to: number) => {
+        const sideItems = items.slice(from, to);
         let markdown = '';
-        for (let j = from; j < to; j++) markdown += itemText(j, start + to);
+        for (let j = from; j < to; j++) markdown += itemText(j, runsAfter(sideItems, j - from + 1, sideItems.length));
         return resolveEmphasis(markdown);
       };
-      const oldText = sideText(k, additions);
-      const newText = sideText(additions, sideEnd);
+      const oldText = sideEnd > additions ? sideText(k, additions) : '';
+      const newText = oldText ? sideText(additions, sideEnd) : '';
       if (oldText && newText && substitutionHolds(oldText, newText)) {
         text += '{~~' + oldText + '~>' + newText + '~~}';
         span = undefined;
@@ -5723,7 +5730,7 @@ function linkGroup(
         continue;
       }
     }
-    const markdown = itemText(k, end);
+    const markdown = itemText(k, runsAfter(segment, start + k + 1, end));
     if (whole) text += markdown;
     else [text, span] = appendRevised(text, markdown, item, span);
   }
