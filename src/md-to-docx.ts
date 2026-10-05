@@ -680,6 +680,9 @@ function citationEnd(state: Pick<StateInline, 'src' | 'md' | 'env'>, start: numb
 }
 
 let citationTextMd: MarkdownIt | undefined;
+/** Markdown as export reads it, but with a URL as written, not a link
+ *  whose text linkify rewrites, as of a %5D, for a note's key */
+let noteKeyMd: MarkdownIt | undefined;
 /** The ] that ends the citation the [ at `start` in Markdown `text` opens,
  *  as export reads one, but without the document's link definitions, or -1 */
 export function citationEndInText(text: string, start: number): number {
@@ -7719,11 +7722,63 @@ export async function convertMdToDocx(
   };
   // Strip previously-generated "Citation data for @key was not found" paragraphs
   // so they don't accumulate on successive round-trips. The missing-key mechanism
-  // regenerates these from the actual unresolved citation keys.
-  const MISSING_KEY_LINE = /^Citation data for @\S+ was not found in the bibliography file\.$/;
-  const bodyStripped = body.split('\n')
-    .filter(line => !MISSING_KEY_LINE.test(line))
-    .join('\n')
+  // regenerates these from the actual unresolved citation keys, which run
+  // to a comma, spaces and all, as in [@a b], and hold no ; or ], which end
+  // an item or the citation.
+  // A note is a top-level paragraph of its own, as export reads one, not a
+  // line of one, of a list or quote, or of code or HTML: as parseMd reads
+  // the body, without the notes' definitions and after its preprocessing,
+  // where a line after a quote's, a grid table's or a definition is its own
+  // and a CriticMarkup span's lines are one.
+  // Lines end as markdown-it ends them. Its text is as Word shows it, with
+  // import's escapes and character references, as of a key's < in
+  // @a&lt;b, decoded, HTML export writes as text, as a key's <span>, but
+  // not a comment, break or formatting, and a URL as written.
+  const MISSING_KEY_TEXT = /^Citation data for @[^,;\]]+ was not found in the bibliography file\.$/;
+  // A line a note could be, whatever its key, and one export stripped by
+  // the line alone before, of a key of no spaces
+  const NOTE_LINE = /^Citation data for @.+ was not found in the bibliography file\.[ \t]*$/;
+  const BARE_NOTE_LINE = /^Citation data for @\S+ was not found in the bibliography file\.$/;
+  const bodyParts = body.split(/(\r\n?|\n)/);
+  const lines = bodyParts.filter((_part, k) => k % 2 === 0);
+  let notes: Set<number> | undefined;
+  if (lines.some(line => NOTE_LINE.test(line))) {
+    const md = citationTextMd ??= createMarkdownIt();
+    // Each line a note could be ends in its index between two of a
+    // private-use character the body lacks, past CriticMarkup's, so it's
+    // found again however the preprocessing moves and joins lines. A
+    // CriticMarkup span's end, as <<}, in a line export stripped before
+    // ends none there, as the span may be a citation's of its key, as in
+    // [@a<<}{>>b] before its note.
+    let markCode = 0xE001;
+    while (body.includes(String.fromCharCode(markCode))) markCode++;
+    const mark = String.fromCharCode(markCode);
+    const markedIndex = new RegExp(mark + '(\\d+)' + mark + '$');
+    const marked = lines.map((line, k) => NOTE_LINE.test(line)
+      ? (BARE_NOTE_LINE.test(line) ? line.replace(/(?:\+\+|--|~~|==|<<)\}/g, close => close.slice(0, 2)) : line.trimEnd()) + mark + k + mark
+      : line);
+    const parsed = md.parse(preprocessCriticMarkup(wrapBareLatexEnvironments(deLazifyBlockquotes(preprocessGridTables(
+      extractFootnoteDefinitions(marked.join('\n')).cleaned)))), {});
+    notes = new Set(parsed.flatMap((token, t) => {
+      if (token.type !== 'paragraph_open' || token.level !== 0 || !token.map || token.map[1] - token.map[0] !== 1) return [];
+      // The line alone
+      const content = parsed[t + 1]?.content ?? '';
+      const index = markedIndex.exec(content);
+      if (!index || content !== marked[Number(index[1])]) return [];
+      const k = Number(index[1]);
+      // Its key as export reads the line, in runs of plain text alone
+      noteKeyMd ??= createMarkdownIt().disable('linkify');
+      const children = noteKeyMd.parseInline(lines[k].trim(), {})[0]?.children;
+      const runs = children?.every(child => child.type === 'text' || child.type === 'html_inline') ? processInlineChildren(children) : [];
+      return runs.every(run => run.type === 'text'
+        && !(run.bold || run.italic || run.underline || run.strikethrough || run.superscript || run.subscript))
+        && MISSING_KEY_TEXT.test(runs.map(run => run.text).join('')) ? [k] : [];
+    }));
+  }
+  const bodyStripped = bodyParts
+    // A note's line, and the line end after it
+    .filter((_part, k) => !notes?.has((k - k % 2) / 2))
+    .join('')
     .replace(/\n{3,}$/, '\n'); // trim trailing excess blank lines from removed block
 
   // Extract footnote definitions before markdown parsing

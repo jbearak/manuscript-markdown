@@ -394,10 +394,12 @@ export function renderBibliography(engine: CiteprocEngine): { bibStart: string; 
 
 /**
  * Generate OOXML paragraphs for missing citation keys, to appear after the bibliography.
+ * A key's line ends are spaces, as Word shows them, so each paragraph is one
+ * line, which export finds to strip (see MISSING_KEY_LINE).
  */
 export function generateMissingKeysXml(missingKeys: string[]): string {
   return missingKeys.map(key =>
-    '<w:p><w:r><w:t xml:space="preserve">Citation data for @' + escapeXml(key) +
+    '<w:p><w:r><w:t xml:space="preserve">Citation data for @' + escapeXml(key.split('\n').map(line => line.trim()).join(' ')) +
     ' was not found in the bibliography file.</w:t></w:r></w:p>'
   ).join('');
 }

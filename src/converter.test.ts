@@ -7657,6 +7657,101 @@ describe('extractBibData', () => {
   });
 });
 
+describe('Missing citation keys', () => {
+  test.each([
+    ['a space', 'P [@a b] Q', 'a b'],
+    ['a line end', 'P [@a\nb] Q', 'a b'],
+    // Whose ` the note's escaped ` closed as a code span
+    ['a backtick', 'P [@a`b c] Q', 'a\\`b c'],
+    // Which import writes as it is, as HTML, which export writes as text
+    ['a tag', 'P [@a<span>] Q', 'a<span>'],
+    // Whose <<} CriticMarkup paired with the {>> in the citation
+    ['CriticMarkup\'s delimiters', 'P [@a<<}{>>b] Q', 'a<<}\\{>>b'],
+  ])('writes the note of a missing key with %s once', async (_name, md, key) => {
+    // The note for it, which export strips and writes anew, wasn't
+    // stripped, and another was added each round trip
+    const roundTrip = async (markdown: string) => (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    const once = await roundTrip(md);
+    expect(once).toBe(md + '\n\nCitation data for @' + key + ' was not found in the bibliography file.\n');
+    expect(await roundTrip(once)).toBe(once);
+  });
+
+  test.each([
+    // Which import writes on the line after the comment's end
+    ['after a comment', 'P [@a] Q\n\n<!--\nc\n-->\n', 'P [@a] Q\n\n<!--\nc\n-->\nCitation data for @a was not found in the bibliography file.\n'],
+    ['with carriage returns', 'P [@a] Q\r\n\r\nCitation data for @a was not found in the bibliography file.\r\n',
+      'P [@a] Q\n\nCitation data for @a was not found in the bibliography file.\n'],
+    // Whose key import wrote with a character reference, whose ; the search
+    // took for the end of a citation's item
+    ['with a reference in a key', 'P [@a] Q\n\nCitation data for @a&lt;b&gt;c was not found in the bibliography file.\n',
+      'P [@a] Q\n\nCitation data for @a was not found in the bibliography file.\n'],
+    // Which export reads as a paragraph of its own, after a quote, as markdown-it doesn't
+    ['after a quote', 'P [@a] Q\n\n> x\nCitation data for @a was not found in the bibliography file.\n',
+      'P [@a] Q\n\n> x\n\nCitation data for @a was not found in the bibliography file.\n'],
+    // Which export reads as a paragraph of its own, before a note's definition
+    ['before a note\'s definition', 'P [@a] Q[^1]\n\nCitation data for @a was not found in the bibliography file.\n[^1]: N\n',
+      'P [@a] Q[^1]\n\nCitation data for @a was not found in the bibliography file.\n\n[^1]: N\n'],
+    // Whose key linkify makes a link of
+    ['with a URL for a key', 'P [@https://example.com] Q\n\nCitation data for @https://example.com was not found in the bibliography file.\n',
+      'P [@https://example.com] Q\n\nCitation data for @https\\://example.com was not found in the bibliography file.\n'],
+    // Whose ] linkify decoded
+    ['with a URL with %5D for a key', 'P [@https://example.com/a%5Db] Q\n\nCitation data for @https://example.com/a%5Db was not found in the bibliography file.\n',
+      'P [@https://example.com/a%5Db] Q\n\nCitation data for @https\\://example.com/a%5Db was not found in the bibliography file.\n'],
+    // Which export reads as a paragraph of its own, after a grid table's border
+    ['after a grid table', 'P [@a] Q\n\n+---+\n| a |\n+---+\nCitation data for @a was not found in the bibliography file.\n',
+      'P [@a] Q\n\n+-----+\n| a   |\n+-----+\n\nCitation data for @a was not found in the bibliography file.\n'],
+  ])('writes the note of a missing key %s once', async (_name, md, expected) => {
+    // It wasn't stripped, as a line between blank lines, or one a line feed
+    // ends, and another was added
+    const roundTrip = async (markdown: string) => (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(await roundTrip(md)).toBe(expected);
+    expect(await roundTrip(expected)).toBe(expected);
+  });
+
+  test.each([
+    ['a code block', '```\nCitation data for @a b was not found in the bibliography file.\n```\n'],
+    ['a code block, with a key of one word', '```\nCitation data for @a was not found in the bibliography file.\n```\n'],
+    ['an HTML block', '<div>\nCitation data for @a was not found in the bibliography file.\n</div>\n'],
+    // That goes on past blank lines, before a code block, whose region the
+    // search found first
+    ['an HTML block before a code block', '<pre>\n\nCitation data for @a was not found in the bibliography file.\n\n</pre>\n\n```\nx\n```\n'],
+    // Which it opens or ends
+    ['a comment it opens', 'Citation data for @a b{>>c was not found in the bibliography file.\n\nf<<}\n'],
+    ['a comment it ends', 'P{>>c\n\nCitation data for @a b<<} was not found in the bibliography file.\n'],
+    // Whose lines export reads as one paragraph, the comment's
+    ['a comment', 'P{>>c\n\nCitation data for @a b was not found in the bibliography file.\n\nd<<} Q.\n'],
+  ])('keeps a line like a note in %s', async (_name, md) => {
+    // It was stripped as export's note, though a note is a paragraph
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown).toBe(md);
+  });
+
+  test.each([
+    ['a heading', 'Citation data for @a b was not found in the bibliography file.\n===\n', '# Citation data for @a b was not found in the bibliography file.\n'],
+    ['a paragraph', 'P\nCitation data for @a b was not found in the bibliography file.\n', 'P Citation data for @a b was not found in the bibliography file.\n'],
+  ])('keeps a line like a note that is part of %s', async (_name, md, expected) => {
+    // A note is a paragraph of its own
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown).toBe(expected);
+  });
+
+  test.each([
+    ['a comment', 'P\n\nCitation data for @a<!-- c --> was not found in the bibliography file.\n',
+      'P\n\nCitation data for @a<!-- c --> was not found in the bibliography file.\n'],
+    ['a break', 'P\n\nCitation data for @a<br> was not found in the bibliography file.\n',
+      'P\n\nCitation data for @a\\\n&#32;was not found in the bibliography file.\n'],
+    ['formatting', 'P\n\nCitation data for @a<u> was not found in the bibliography file.\n',
+      'P\n\nCitation data for @a<u> was not found in the bibliography file.</u>\n'],
+  ])('keeps a line like a note with %s, whose HTML export reads as no text of a key\'s', async (_name, md, expected) => {
+    // It was stripped, and the comment, break or formatting with it
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown).toBe(expected);
+  });
+
+  test('keeps a line like the note of a key no citation could have', async () => {
+    // A key ends at a comma, so it was no note of export's
+    const md = 'P\n\nCitation data for @Smith, Alice was not found in the bibliography file.\n';
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown).toBe(md);
+  });
+});
+
 describe('extractBibliographyPath', () => {
   test('reads bibliography path from DOCX custom properties', async () => {
     const md = '---\nbibliography: ../correspondence.bib\ncsl: bmj\n---\n\nText [@key1].';
