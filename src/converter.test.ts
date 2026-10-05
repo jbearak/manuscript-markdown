@@ -5873,6 +5873,20 @@ describe('Table alignment', () => {
     expect((await convertDocx((await convertMdToDocx(front + body)).docx)).markdown).toBe(front + expected);
   });
 
+  test.each([
+    ['numbers', '2', '1'],
+    ['names', 'b', 'a'],
+    ['labels of a number', '1b', '1a'],
+  ])('keeps each note\'s table settings when notes are defined out of the order of their %s', async (_name, first, second) => {
+    // Export numbered the tables in the order the notes were defined, and
+    // import in the order it writes them, by label
+    const note = (label: string, size: number, cell: string) =>
+      '[^' + label + ']: Note.\n\n    <!-- table-font-size: ' + size + ' -->\n    | ' + cell + ' |\n    | --- |\n    | 1 |\n';
+    const text = 'Text[^' + first + '] and[^' + second + '].\n\n';
+    expect(await roundTrip(text + note(first, 12, 'x') + '\n' + note(second, 7, 'y')))
+      .toBe(text + note(second, 7, 'y') + '\n' + note(first, 12, 'x'));
+  });
+
   test('keeps a padded pipe table without a closing pipe padded', async () => {
     // The last cell's padding, which a line can end in or not, counted
     expect(await roundTrip('Name  |Value\n:-----|----:\nAlpha |1\n')).toBe('| Name  | Value |\n|:------|------:|\n| Alpha | 1     |\n');

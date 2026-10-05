@@ -1086,6 +1086,17 @@ function footnoteBookmarkName(noteId: number): string {
   return '_Ref' + String(100000000 + noteId);
 }
 
+/** The order import writes notes in, by label: numbers by value, then the
+ *  rest. Export makes notes' bodies in this order, so that the tables and
+ *  code blocks in them take the indices import reads them back at. Ties
+ *  break on the text, so the order doesn't depend on the order notes come in,
+ *  which is their definitions' in export and their references' in import. */
+export function compareNoteLabels(a: string, b: string): number {
+  const na = parseInt(a, 10);
+  const nb = parseInt(b, 10);
+  return (!isNaN(na) && !isNaN(nb) ? na - nb : 0) || a.localeCompare(b) || (a < b ? -1 : a > b ? 1 : 0);
+}
+
 /** Extract footnote definitions from the markdown source and return cleaned markdown. */
 export function extractFootnoteDefinitions(markdown: string): { cleaned: string; definitions: Map<string, string> } {
   const definitions = new Map<string, string>();
@@ -8079,8 +8090,10 @@ export async function convertMdToDocx(
   // Build footnote/endnote body OOXML from definitions.
   // Set inNoteBody so hyperlinks/images route to note-scoped relationship maps
   // (footnotes.xml has its own .rels file, separate from document.xml.rels).
+  // Notes go in the order import writes them back in, which their tables'
+  // and code blocks' indices follow (see compareNoteLabels).
   state.inNoteBody = true;
-  for (const [label, bodyText] of footnoteDefs) {
+  for (const [label, bodyText] of [...footnoteDefs].sort(([a], [b]) => compareNoteLabels(a, b))) {
     const noteId = state.footnoteLabelToId.get(label);
     if (noteId === undefined) {
       state.warnings.push(`Footnote definition [^${label}] has no matching reference in the document.`);
