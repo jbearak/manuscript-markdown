@@ -35,6 +35,104 @@ describe('HTML table cell paragraphs', () => {
     ]);
   });
 
+  test.each([
+    ['a comment', 'a <!-- c --> b', [{ type: 'text', text: 'a ' }, { type: 'html_comment', text: '<!-- c -->' }, { type: 'text', text: 'b' }]],
+    ['a comment after a break', 'a<br><!-- c --> b', [{ type: 'text', text: 'a' }, { type: 'softbreak', text: '\n' }, { type: 'html_comment', text: '<!-- c -->' }, { type: 'text', text: 'b' }]],
+    ['a tag', 'a <b> b</b>', [{ type: 'text', text: 'a ' }, { type: 'text', text: 'b', bold: true }]],
+  ])('runs whitespace together across %s, as HTML does', (_name, cell, expected) => {
+    // Word showed two spaces where HTML shows one
+    expect(runs(cell)).toEqual(expected);
+  });
+
+  test('keeps a break that ends a paragraph before a comment', () => {
+    // The comment hid the break from the </p>, so it went as one ending the cell
+    expect(runs('<p>a<br><!-- c --></p>')).toEqual([{ type: 'text', text: 'a' }, { type: 'softbreak', text: '\n' }, { type: 'html_comment', text: '<!-- c -->' }]);
+  });
+
+  test.each([
+    ['a table\'s body', '<table><tbody title="<!--"><tr><td>a</td></tr></tbody></table>'],
+    ['a div around it', '<div title="<!--"><table><tr><td>a</td></tr></table></div>'],
+    ['a row', '<table><tr title="<!--"><td>a</td></tr></table>'],
+    ['a tag between cells', '<table><tr><span title="<!--"></span><td>a</td></tr></table>'],
+    ['a tag in a cell', '<table><tr><td><span title="<!-- >">a</span></td></tr></table>'],
+  ])('reads a table past a <!-- in an attribute of %s', (_name, html) => {
+    // Which read as a comment to the end, which hid the rows
+    expect(extractHtmlTables(html).map(table => table.rows.map(row => row.cells.map(cell => cell.runs.map(run => run.text).join(''))))).toEqual([[['a']]]);
+  });
+
+  test.each([
+    ['a cell', '<table><tr><td><!-- <td>old</td> -->b</td><td>c</td></tr></table>', [['<!-- <td>old</td> -->b', 'c']]],
+    ['a row', '<table><tr><td>a<!-- </tr><tr> --></td></tr><tr><td>b</td></tr></table>', [['a<!-- </tr><tr> -->'], ['b']]],
+    ['a table', '<table><tr><td>a<!-- </table> --></td></tr><tr><td>b</td></tr></table>', [['a<!-- </table> -->'], ['b']]],
+  ])('reads no end of %s in a comment in it', (_name, html, expected) => {
+    // Which ended it there, and lost the rest
+    expect(extractHtmlTables(html).map(table => table.rows.map(row => row.cells.map(cell => cell.runs.map(run => run.text).join('')))))
+      .toEqual([expected]);
+  });
+
+  test.each(['<!-->', '<!--->'])('reads %s as an empty comment, as the browser and markdown-it do', comment => {
+    // Which ran to the next --> or the end, and hid the rest of the table
+    const [table] = extractHtmlTables('<table><tr><td>a' + comment + 'b</td><td>c</td></tr>' + comment + '<tr><td>d</td></tr></table>');
+    expect(table.rows.map(row => row.cells.map(cell => cell.runs.map(run => run.type === 'html_comment' ? '[' + run.text + ']' : run.text).join(''))))
+      .toEqual([['a[' + comment + ']b', 'c'], ['d']]);
+    expect(table.comments).toEqual([comment]);
+  });
+
+  test('reads a comment to a --!>, at which the browser ends one', () => {
+    // Which ran to the end, and hid the rest of the table
+    const [table] = extractHtmlTables('<table><tr><td>a<!-- c --!>b</td><td>c</td></tr><!-- d --!><tr><td>e</td></tr></table>');
+    expect(table.rows.map(row => row.cells.map(cell => cell.runs.map(run => run.text).join('')))).toEqual([['a<!-- c --!>b', 'c'], ['e']]);
+    expect(table.comments).toEqual(['<!-- d --!>']);
+  });
+
+  test('reads the cells before a comment with no -->, which runs to the end, as one', () => {
+    // Which the browser ends the row and table at
+    const [table] = extractHtmlTables('<table><tr><td>a</td><!-- <td>b</td></tr></table>');
+    expect(table.rows.map(row => row.cells.map(cell => cell.runs.map(run => run.text).join('')))).toEqual([['a']]);
+    expect(table.comments).toEqual(['<!-- <td>b</td></tr></table>']);
+  });
+
+  test('reads a table with many <!-- and no --> in linear time', () => {
+    const start = performance.now();
+    extractHtmlTables('<table><tr><td>' + '<!--'.repeat(20000) + '</td></tr></table>');
+    extractHtmlTables('<table><tr>' + '<td>a<!-- c --><b title="<!--">x</b></td>'.repeat(2000) + '</tr></table>');
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+
+  test.each([
+    ['before a table', '<div><script>const s = "<!--";</script><table><tr><td>a</td></tr></table></div>', [['a']]],
+    ['in a cell', '<table><tr><td><script>"<!--"</script>a</td><td>b</td></tr></table>', [['"<!--"a', 'b']]],
+    ['between rows', '<table><tr><td>a</td></tr><style>/* </tr><!-- */</style><tr><td>b</td></tr></table>', [['a'], ['b']]],
+    ['with a cell\'s end tag in it', '<table><tr><td><SCRIPT>"</td>"</script>a</td></tr></table>', [['"</td>"a']]],
+  ])('reads a <!-- or an end tag in a <script> or a <style> %s as text', (_name, html, expected) => {
+    // A <!-- in one began a comment, which ran to the end, and hid the table
+    expect(extractHtmlTables(html).map(table => table.rows.map(row => row.cells.map(cell => cell.runs.map(run => run.text).join('')))))
+      .toEqual([expected]);
+  });
+
+  test('reads no table in a <script>', () => {
+    expect(extractHtmlTables('<script>"<table><tr><td>x</td></tr></table>"</script><table><tr><td>a</td></tr></table>')
+      .map(table => table.rows.map(row => row.cells.map(cell => cell.runs.map(run => run.text).join(''))))).toEqual([[['a']]]);
+  });
+
+  test.each([
+    ['a tag with no >', '<table><tr><td><' + 'a'.repeat(32000)],
+    ['many tags with no >', '<table><tr><td>' + '<a '.repeat(32000)],
+    ['many cells with no >', '<table><tr>' + '<td '.repeat(32000)],
+    ['many comments in a cell', '<table><tr><td>' + '<!-- c --> '.repeat(64000) + '</td></tr></table>'],
+  ])('reads %s in linear time', (_name, html) => {
+    const start = performance.now();
+    extractHtmlTables(html);
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+
+  test('reads a table of 100,000 rows', () => {
+    // Its search held a state for each piece of the table, which ran past
+    // the regex engine's stack, and read none, or threw in Node
+    const [table] = extractHtmlTables('<table>' + '<tr><td>a</td><td>b</td></tr>'.repeat(100000) + '</table>');
+    expect(table?.rows.length).toBe(100000);
+  });
+
   test('keeps an empty paragraph', () => {
     // A paragraph run only separated paragraphs with text
     const paragraph = { type: 'paragraph', text: '\n\n' };

@@ -3172,9 +3172,78 @@ function readHiddenRun(runChildren: XmlNode[], rPrChildren: XmlNode[] | undefine
   return [];
 }
 
+/** A hidden comment as inline Markdown reads one: one with no end, which
+ *  ran to the end of an HTML table's cell, with one, but not one before
+ *  another (`beforeComment`), which Word split it from at an <!-- in it,
+ *  and which ends it; and one the browser ended at a --!>, ended at a -->
+ *  instead, as inline Markdown reads it on. In a table's cell (`cell`), as
+ *  joinSplitComments joins one Word split, one the browser ended at a -->
+ *  after a -, which inline Markdown reads as text, ends at one it reads, as
+ *  does one that ends at a --!> before another, and one before another gets
+ *  an end. */
+function markdownComment(text: string, beforeComment = false, cell = false): string {
+  const from = text.indexOf('<!--') + 4;
+  if (/^-?>/.test(text.slice(from)) || cell && HTML_TAG_RE.exec(text.trimStart())?.[0] === text.trimStart()) return text;
+  const end = /--!?>$/.exec(text);
+  if (cell && end && end.index >= from) {
+    const body = text.slice(from, end.index);
+    return text.slice(0, from) + body + (body.endsWith('-') ? ' ' : '') + '-->';
+  }
+  if (text.includes('-->', from) || beforeComment && !cell) return text;
+  return end?.[0] === '--!>' && end.index >= from ? text.slice(0, -4) + '-->' : text.trimEnd() + ' -->';
+}
+
+/** The items of a table's cell with each comment that has no end joined
+ *  with the comments after it, which Word split it from at an <!-- in it,
+ *  up to the one an end is in, as one comment, where they're in the same
+ *  comments' ranges: its end as the browser reads it, a --!> too, in an
+ *  HTML table's cell (`browser`), or else as inline Markdown does, as
+ *  readHiddenText does. No range ends at an HTML comment (see
+ *  collectCommentSpans), so none loses its end. A ZWSP after the end the
+ *  browser read, which Word split from the comment after whose start it is,
+ *  goes with it. */
+function joinSplitComments(items: ContentItem[], browser: boolean): ContentItem[] {
+  const ended = browser ? (text: string) => /^\s*<!--(?:-?>|[\s\S]*?--!?>)/.test(text)
+    : (text: string) => text.includes('-->', text.lastIndexOf('<!--') + 4) || /^\s*<!---?>\s*$/.test(text);
+  const end = browser ? /--!?>/ : /-->/;
+  const out: ContentItem[] = [];
+  let joined = false;
+  // The texts of the comment at the end of `out` while it has no end, their
+  // last three characters, which can start one, and its comments' IDs
+  let open: { texts: string[]; tail: string; commentIds: Set<string> } | undefined;
+  const close = () => {
+    if (open && open.texts.length > 1) {
+      out[out.length - 1] = { ...out[out.length - 1] as Extract<ContentItem, { type: 'html_comment' }>, text: open.texts.join('') };
+      joined = true;
+    }
+    open = undefined;
+  };
+  for (const item of items) {
+    const last = out[out.length - 1];
+    if (browser && !open && last?.type === 'html_comment' && item.type === 'html_comment' && item.text.startsWith('<!--')
+        && /^\s*<!--(?:-?>|(?:(?!--!?>)[\s\S])*--!?>)\u200B+$/.test(last.text)) {
+      out[out.length - 1] = { ...last, text: last.text.replace(/\u200B+$/, '') };
+      joined = true;
+    }
+    if (open && item.type === 'html_comment' && commentSetsEqual(item.commentIds, open.commentIds)) {
+      open.texts.push(item.text);
+      if (end.test(open.tail + item.text)) close();
+      else open.tail = (open.tail + item.text).slice(-3);
+      continue;
+    }
+    close();
+    out.push(item);
+    if (item.type === 'html_comment' && !ended(item.text)) {
+      open = { texts: [item.text], tail: item.text.slice(-3), commentIds: item.commentIds };
+    }
+  }
+  close();
+  return joined ? out : items;
+}
+
 /**
  * The HTML comments and images export hid in a run's text, each after a
- * ZWSP: a comment up to its -->, and an image export couldn't embed, as its
+ * ZWSP: a comment up to its end, and an image export couldn't embed, as its
  * Markdown, up to a closing ZWSP, which the image keeps once it has it. Word
  * can split one between runs, or join several in one.
  */
@@ -3183,18 +3252,36 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
   const pending = pendingHiddenText.get(target);
   pendingHiddenText.delete(target);
   if (pending && pending.at === target.length) runText = pending.text + runText;
-  /** Where the hidden text after a comment's --> starts, if anything does */
+  /** Where the hidden text after the comment whose <!-- ends at `from`
+   *  starts, if anything does: after its first end, if a ZWSP follows it,
+   *  its first -->, or the > or -> of an empty one, <!--> or <!--->. Not a
+   *  --!>, which ends a comment in an HTML table's cell, as the browser
+   *  reads it, but not one inline Markdown reads to its --> (see
+   *  renderHtmlCellParagraph) */
   const afterComment = (text: string, from: number) => {
+    const empty = /^-?>/.exec(text.slice(from));
     const close = text.indexOf('-->', from);
-    return close !== -1 && text[close + 3] === '\u200B' ? close + 3 : -1;
+    const end = empty ? from + empty[0].length : close === -1 ? -1 : close + 3;
+    return end !== -1 && text[end] === '\u200B' ? end : -1;
   };
   let rest = runText;
   const lastItem = target[target.length - 1];
   const continues = lastItem !== undefined && 'commentIds' in lastItem && !!lastItem.commentIds
     && commentSetsEqual(lastItem.commentIds, activeComments);
+  /** Whether a comment's text has its end: a --> after its last <!--, or
+   *  the > or -> of an empty one that is all of it, <!--> or <!--->, but not
+   *  one in it, which may be in a comment Word split before it. Not a --!>,
+   *  which ends a comment in an HTML table's cell, as the browser reads it,
+   *  but not one inline Markdown reads to its --> (see
+   *  renderHtmlCellParagraph) */
+  const closed = (text: string) => text.includes('-->', text.lastIndexOf('<!--') + 4) || /^\s*<!---?>\s*$/.test(text);
+  // But for a ZWSP and the start of a payload alone, which the next hidden
+  // run shows the comment's or the next payload's (see pendingHiddenText)
   if (continues && lastItem.type === 'html_comment' && !rest.replace(/^\u200B+/, '').trimStart().startsWith('<!--')
-      && !lastItem.text.includes('-->', lastItem.text.lastIndexOf('<!--') + 4)) {
-    lastItem.text += rest.replace(/^\u200B+/, '');
+      && !/^\u200B+(?:!|<|<!|<!-|<i|<im)?$/i.test(rest) && !closed(lastItem.text)) {
+    // With a ZWSP it starts with, which is the comment's own, before which
+    // Word split its run
+    lastItem.text += rest;
     const end = afterComment(lastItem.text, lastItem.text.lastIndexOf('<!--') + 4);
     rest = end === -1 ? '' : lastItem.text.slice(end);
     if (end !== -1) lastItem.text = lastItem.text.slice(0, end);
@@ -5524,9 +5611,10 @@ function renderInlineSegment(
   segment: ContentItem[],
   comments: Map<string, Comment>,
   renderOpts?: RenderOpts,
-  opts?: InlineRangeOpts
+  opts?: InlineRangeOpts,
+  htmlCell = !!renderOpts?.htmlCells,
 ): { text: string; deferredComments: string[] } {
-  const result = renderInlineRange(segment, 0, comments, opts, renderOpts);
+  const result = renderInlineRange(joinSplitComments(segment, htmlCell), 0, comments, opts, renderOpts);
   return {
     // A line break at a cell's end is <br>, which a pipe table holds, as a
     // grid table's blank line there pads the cell to its row's height
@@ -6040,7 +6128,7 @@ function renderInlineRange(
 
     // html_comment: emit the raw <!-- ... --> syntax directly
     if (item.type === 'html_comment') {
-      out += item.text;
+      out += markdownComment(item.text, segment[i + 1]?.type === 'html_comment', opts?.cell);
       if (item.commentIds.size > 0) {
         for (const cid of [...item.commentIds].sort()) {
           const c = comments.get(cid);
@@ -6386,7 +6474,7 @@ function renderInlineRangeWithIds(
         }
       }
       prevCommentIds = new Set(currentIds);
-      out += item.text;
+      out += markdownComment(item.text, segment[i + 1]?.type === 'html_comment', opts?.cell);
       i++;
       continue;
     }
@@ -6485,13 +6573,28 @@ function renderInlineRangeWithIds(
  * holds what a cell can't: a cell takes HTML formatting only (see HTML
  * Tables in the specification), so a comment, a tracked change, a
  * highlight, a citation, a note, math or an image would export as literal
- * text. Whitespace HTML collapses or trims is written as references.
+ * text. Whitespace HTML collapses or trims is written as references. An HTML
+ * comment, which a cell hides, stays one.
  */
 function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
   type TextItem = Extract<ContentItem, { type: 'text' }>;
   // The paragraph's text, with each line break as null
-  const pieces: Array<{ text: string; item: TextItem; html: string } | null> = [];
-  for (const item of items) {
+  const pieces: Array<{ text: string; item: TextItem; html: string; raw?: boolean } | null> = [];
+  // A comment Word split, as one; and comments the browser ended at a --!>,
+  // which Word joined in one hidden run, as inline Markdown would read them
+  // as one (see readHiddenText)
+  const split = joinSplitComments(items, true).flatMap((item): ContentItem[] => item.type === 'html_comment'
+    ? item.text.split(/(?<=--!>)\u200B+(?=<!--)/).map(text => ({ ...item, text }))
+    : [item]);
+  for (const [k, item] of split.entries()) {
+    // Not one with a blank line, which would end the table's HTML block.
+    // One with no end, which ran to the end of the cell, gets one.
+    if (item.type === 'html_comment' && item.commentIds.size === 0 && /^<!--(?:-?>|(?!-?>)(?:(?!--!?>)[\s\S])*(?:--!?>)?)$/.test(item.text)
+      && !/(?:\r\n?|\n)[ \t]*(?:\r\n?|\n)/.test(item.text)) {
+      const html = item.text.endsWith('--!>') && item.text.length >= 8 ? item.text : markdownComment(item.text, split[k + 1]?.type === 'html_comment');
+      pieces.push({ text: '', item: { type: 'text', text: '', commentIds: item.commentIds, formatting: DEFAULT_FORMATTING }, html, raw: true });
+      continue;
+    }
     if (item.type !== 'text' || item.revision || item.commentIds.size > 0 || item.formatting.highlight) return undefined;
     item.text.split('\\\n').forEach((text, k) => {
       if (k > 0) pieces.push(null);
@@ -6503,10 +6606,13 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
   for (let k = 0; k < pieces.length; k++) {
     let end = k;
     while (end < pieces.length && pieces[end] !== null) end++;
-    const line = pieces.slice(k, end) as Array<{ text: string; item: TextItem; html: string }>;
+    const line = pieces.slice(k, end) as Array<{ text: string; item: TextItem; html: string; raw?: boolean }>;
     const characters = htmlLineCharacters(line.map(piece => piece.text).join(''));
     let at = 0;
-    for (const piece of line) piece.html = characters.slice(at, at += piece.text.length).join('');
+    for (const piece of line) {
+      const html = characters.slice(at, at += piece.text.length).join('');
+      if (!piece.raw) piece.html = html;
+    }
     k = end;
   }
   let html = '';
@@ -6524,6 +6630,11 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
     }
     const lineBreaks = breaks;
     breaks = 0;
+    // A comment goes in the formatting around it
+    if (piece.raw) {
+      html += '<br>'.repeat(lineBreaks) + piece.html;
+      return;
+    }
     const fmt = piece.item.formatting;
     const tags = [
       ...(piece.item.href ? ['<a href="' + escapeHtmlAttr(piece.item.href) + '">'] : []),
@@ -6597,7 +6708,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
         readsCitations = false;
         let rendered: ReturnType<typeof renderInlineSegment>;
         try {
-          rendered = renderInlineSegment(items, comments, renderOpts);
+          rendered = renderInlineSegment(items, comments, renderOpts, undefined, true);
         } finally {
           readsCitations = outerReadsCitations;
         }
@@ -6614,7 +6725,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
   return lines.join('\n') + (deferredAll.length > 0 ? '\n\n' + deferredAll.join('\n') : '');
 }
 
-type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem> };
+type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem>; htmlCells?: boolean };
 
 /**
  * Try to render a table as a GFM pipe table. Returns null if the table is
@@ -6674,7 +6785,7 @@ function tryRenderPipeTable(table: { rows: TableRow[] }, maxLineWidth: number, c
           : cell.paragraphs[0];
         // Its line breaks at its end too, which renderInlineSegment drops
         // for a grid table's, as a cell of one line holds them as Word's
-        const r = renderInlineRange(mergeConsecutiveRuns(items), 0, comments, { cell: true }, renderOpts);
+        const r = renderInlineRange(joinSplitComments(mergeConsecutiveRuns(items), !!renderOpts?.htmlCells), 0, comments, { cell: true }, renderOpts);
         // A line break, which a cell's one line can't hold, as <br>, which a
         // cell reads as one, but not a line end in code, an equation or a
         // comment, which isn't one
@@ -7128,8 +7239,9 @@ function renderTableOrFallback(
   tableIndex?: number,
 ): { directivePrefix: string; body: string } {
   // A cell holds no range that goes on past it, and a range open around the
-  // table, with no item in it, stays open for the text after
-  if (renderOpts?.openIdComments) renderOpts = { ...renderOpts, openIdComments: undefined };
+  // table, with no item in it, stays open for the text after. A cell's
+  // comments are the browser's where the table was HTML.
+  if (renderOpts?.openIdComments || storedFormat === 'html') renderOpts = { ...renderOpts, openIdComments: undefined, htmlCells: storedFormat === 'html' };
   const { fontPrefix, commentUnsafeFont: forceHtmlTable } = buildTableDirectivePrefix(renderOpts, tableIndex);
   let htmlFontAttrs = '';
   const isLandscapeTable = tableIndex !== undefined && renderOpts?.landscapeTableIndices?.has(tableIndex);

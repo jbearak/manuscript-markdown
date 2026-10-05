@@ -1462,6 +1462,38 @@ describe('compactTable', () => {
 });
 
 describe('HTML table support for Expand/Compact Table', () => {
+  it.each([
+    ['row', '<table>\n<!-- <tr><td>old</td></tr> -->\n<tr><td>a</td></tr>\n</table>'],
+    ['cell', '<table><tr><!-- <td>old</td> --><td>a</td></tr></table>'],
+    ['rows alone', '<table><!-- <tr><td>old</td></tr> --></table>'],
+    // Which made a line of the cell, or a | in it, which ended it
+    ['line end in a cell', '<table><tr><td>a<!-- one\ntwo -->b</td><td>q</td></tr></table>'],
+    ['| in a cell', '<table><tr><td>a<!-- x | y -->b</td><td>q</td></tr></table>'],
+    ['carriage return in a cell', '<table><tr><td>a<!-- x\ry -->b</td><td>q</td></tr></table>'],
+    // Which inline Markdown read as text, and showed
+    ['cell\'s end, with no -->,', '<table><tr><td>a<!-- old</td></tr></table>'],
+    ['--!> to end it, which only the browser reads,', '<table><tr><td>a<!-- old --!>b</td></tr></table>'],
+  ])('leaves a table with a %s in a comment unchanged', (_name, html) => {
+    // A pipe or grid table can't hold the comment, which was deleted
+    expect(reflowTable(html).newText).toBe(html);
+    expect(compactTable(html).newText).toBe(html);
+  });
+
+  it.each([
+    ['at a cell\'s end', '<table><tr><th>h</th></tr><tr><td>a<!-- c --></td></tr></table>', '| a<!-- c --> |'],
+    ['alone in a cell', '<table><tr><th>h</th></tr><tr><td><!-- c --></td></tr></table>', '| <!-- c --> |'],
+  ])('keeps a comment %s', (_name, html, row) => {
+    // It was taken for a line break, and went
+    expect(compactTable(html).newText.split('\n')).toContain(row);
+  });
+
+  it('leaves a table unchanged with a comment after it that a </table> in it ends', () => {
+    // The table was found alone, and the comment went
+    const html = '<table><tr><td>a</td></tr></table><!-- <table><tr><td>old</td></tr></table>';
+    expect(reflowTable(html).newText).toBe(html);
+    expect(compactTable(html).newText).toBe(html);
+  });
+
   it('mixed text + HTML table selection remains unchanged', () => {
     const html = '<table><tr><th>Name</th></tr><tr><td>Alice</td></tr></table>';
     const mixed = 'Intro\n' + html + '\nOutro';

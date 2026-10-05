@@ -3154,6 +3154,23 @@ describe('Emphasis between runs', () => {
     expect(buildMarkdown([table], new Map())).toContain('<p><code>a</code><b><code>b</code></b></p>');
   });
 
+  const inCell = (items: ContentItem[], colspan = 1) => [{ type: 'table', rows: [{ isHeader: false, cells: [{ colspan, paragraphs: [items] }] }] } as unknown as ContentItem];
+  test.each([
+    ['a paragraph', (items: ContentItem[]) => items, '<!-- c -->'],
+    ['a table\'s cell', inCell, '<!-- c -->'],
+    // Which Word split from each other at an <!-- in one
+    ['a paragraph, as pieces of one', (items: ContentItem[]) => items, ' <!-- c'],
+    ['a table\'s cell, as pieces of one', inCell, ' <!-- c'],
+    // Whose first piece was read again for each
+    ['an HTML table\'s cell, as pieces of one after a long one', (items: ContentItem[]) => inCell(items, 2), '<!-- c', '<!-- ' + 'a'.repeat(32000)],
+  ])('writes many HTML comments in %s in linear time', (_name, wrap, text, first = '<!-- a') => {
+    // Each comment joined the text of all those after it
+    const items = Array.from({ length: 32000 }, (_, i): ContentItem => ({ type: 'html_comment', text: i === 0 ? first : i === 31999 ? ' -->' : text, commentIds: new Set() }));
+    const start = performance.now();
+    buildMarkdown(wrap(items), new Map());
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+
   test('writes a long paragraph of formatted runs in linear time', () => {
     const items = Array.from({ length: 40000 }, (_, i) => run(i % 2 ? 'a.' : '.b', { bold: i % 3 === 0, italic: i % 5 === 0 }));
     const start = performance.now();
@@ -5737,6 +5754,15 @@ describe('HTML table cells', () => {
     ['a link whose target has an apostrophe', '      <p><a href="https://e.com/O\'Brien">o</a></p>'],
     ['whitespace HTML would collapse', '      <p>a&#9;b &#32;c</p>'],
     ['a space at the start of a line before formatting', '      <p>&#32;<b>x</b> &#32;<i>y</i><br>&#32;&#32;<b>&#32;z</b>&nbsp;</p>'],
+    // Which Word showed as text
+    ['a comment', '      <p>a<!-- c --> b</p>'],
+    ['comments alone and in formatting', '      <p><!-- c --></p>\n      <p><b>x<!-- d -->y</b></p>'],
+    // Whose </td> ended the cell, which lost what came after it
+    ['a comment with a cell\'s end in it', '      <p><!-- <td>old</td> -->b</p>'],
+    // Which hid the rest of the table, as it read no --> after them
+    ['an empty comment the browser ends at its >', '      <p>a<!-->b</p>'],
+    ['an empty comment the browser ends at its ->', '      <p>a<!--->b</p>'],
+    ['a comment the browser ends at its --!>', '      <p>a<!-- c --!>b</p>'],
   ])('keeps %s', async (_name, cell) => {
     // Import wrote Markdown in the cell, which exports as literal text, with
     // a backslash before each character Markdown would read, and more on
@@ -5744,6 +5770,129 @@ describe('HTML table cells', () => {
     const md = table(cell);
     expect(await roundTrip(md)).toBe(md);
     expect(await roundTrip(await roundTrip(md))).toBe(md);
+  });
+
+  test.each([
+    ['<!-->', '<!-- c -->'],
+    ['<!--->', '<!-- c -->'],
+    ['<!-- c --!>', '<!-- d -->'],
+  ])('keeps %s and %s in a cell that Word holds in one hidden run', async (first, second) => {
+    // The first went on to the second's -->, with the ZWSP before it, which
+    // made no comment HTML holds, and a pipe table that showed the ZWSP
+    const md = table('      <p>a' + first + second + 'b</p>');
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const joined = xml.replace(/(?<=&gt;)<\/w:t><\/w:r><w:r><w:rPr><w:vanish\/>(?:(?!<\/w:rPr>).)*<\/w:rPr><w:t>(?=\u200B)/, '');
+    expect(joined).not.toBe(xml);
+    zip.file('word/document.xml', joined);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(md);
+  });
+
+  test.each([
+    ['its ZWSP', '\u200B'],
+    ['its <', '\u200B&lt;'],
+  ])('keeps a comment after one that ends at its --!> where Word splits its run after %s', async (_name, start) => {
+    // The < went on the comment before, which inline Markdown reads to a -->
+    const md = table('      <p>a<!-- c --!><!-- d -->b</p>');
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const second = [...xml.matchAll(/(<w:r><w:rPr><w:vanish\/>(?:(?!<\/w:rPr>).)*<\/w:rPr>)<w:t>([^<]*)<\/w:t><\/w:r>/g)][1];
+    const split = second[1] + '<w:t>' + start + '</w:t></w:r>' + second[1] + '<w:t>' + second[2].slice(start.length) + '</w:t></w:r>';
+    expect(second[2].startsWith(start)).toBe(true);
+    zip.file('word/document.xml', xml.slice(0, second.index) + split + xml.slice(second.index! + second[0].length));
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(md);
+  });
+
+  test.each([
+    ['in HTML', false, table('      <p>a<!-- c --!><!-- d -->b</p>')],
+    ['in a table that leaves HTML', true, '| h |\n| --- |\n| {++a++}<!-- c --><!-- d -->b |'],
+  ])('keeps a comment after one that ends at its --!> where Word moves its ZWSP to the run before, %s', async (_name, tracked, expected) => {
+    // The ZWSP went on the comment before, which got an end after it, which
+    // showed in the cell
+    const zip = await JSZip.loadAsync((await convertMdToDocx(table('      <p>a<!-- c --!><!-- d -->b</p>'))).docx);
+    let xml = await zip.file('word/document.xml')!.async('string');
+    const split = xml.replace(/--!&gt;(<\/w:t><\/w:r><w:r><w:rPr><w:vanish\/>(?:(?!<\/w:rPr>).)*<\/w:rPr><w:t[^>]*>)\u200B/, (_match, between: string) => '--!&gt;\u200B' + between);
+    expect(split).not.toBe(xml);
+    xml = tracked ? split.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>a<\/w:t><\/w:r>)/, (_match, run: string) => '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>' + run + '</w:ins>') : split;
+    zip.file('word/document.xml', xml);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(expected);
+  });
+
+  test.each([
+    ['in HTML', false, table('      <p>a<!-- a <!--->b</p>')],
+    ['in a table that leaves HTML', true, '| h |\n| --- |\n| {++a++}<!-- a <!- -->b |'],
+  ])('keeps a cell\'s comment hidden that Word splits before an <!-- in it, %s', async (_name, tracked, expected) => {
+    // Its pieces were two comments, the second with a space before it, which
+    // HTML held as none, and inline Markdown read the first as text
+    const zip = await JSZip.loadAsync((await convertMdToDocx(table('      <p>a<!-- a <!--->b</p>'))).docx);
+    let xml = await zip.file('word/document.xml')!.async('string');
+    const split = xml.replace('\u200B&lt;!-- a &lt;!---&gt;', '\u200B&lt;!-- a</w:t></w:r><w:r><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr><w:t xml:space="preserve"> &lt;!---&gt;');
+    expect(split).not.toBe(xml);
+    xml = tracked ? split.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>a<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>') : split;
+    zip.file('word/document.xml', xml);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(expected);
+  });
+
+  test('keeps a pipe cell\'s comment hidden that Word splits before an <!-- in it after a --!>', async () => {
+    // A --!> ended its first piece, as it does an HTML table's comment, but
+    // not one inline Markdown reads, and the rest showed
+    const md = '| h |\n| --- |\n| a<!-- a --!><!---> secret -->b |';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const split = xml.replace('\u200B&lt;!-- a --!&gt;&lt;!---&gt; secret --&gt;', '\u200B&lt;!-- a --!&gt;</w:t></w:r><w:r><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr><w:t xml:space="preserve">&lt;!---&gt; secret --&gt;');
+    expect(split).not.toBe(xml);
+    zip.file('word/document.xml', split);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(md);
+  });
+
+  test('keeps a cell\'s comment hidden that Word splits before an <!-- in it, in a Word comment\'s range', async () => {
+    // Its pieces in the range weren't joined, and the space between showed
+    const md = '| h |\n| --- |\n| {#1}a<!-- old <!-- inside -->b{/1} |\n\n{#1>>note<<}';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const split = xml.replace('\u200B&lt;!-- old &lt;!-- inside --&gt;', '\u200B&lt;!-- old</w:t></w:r><w:r><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr><w:t xml:space="preserve"> &lt;!-- inside --&gt;');
+    expect(split).not.toBe(xml);
+    zip.file('word/document.xml', split);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(md);
+  });
+
+  test.each([
+    ['ends at a --!>', 'a<!-- hidden --!>b', 'a<!-- hidden -->b'],
+    ['has no end', 'a<!-- x', 'a<!-- x</td></tr></table> -->'],
+    ['ends at a --!> before an empty one', 'a<!-- hidden --!><!--->b', 'a<!-- hidden --><!--->b'],
+    ['ends at a --> after a -', 'a<!-- hidden --->b', 'a<!-- hidden - -->b'],
+  ])('hides a cell\'s comment that %s in a table that leaves HTML', async (_name, cell, expected) => {
+    // Inline Markdown read it as text, and showed it
+    const zip = await JSZip.loadAsync((await convertMdToDocx('<table><tr><td>XX</td><td>' + cell + '</td></tr></table>\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const tracked = xml.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>');
+    expect(tracked).not.toBe(xml);
+    zip.file('word/document.xml', tracked);
+    // A grid table, as a pipe table needs a header row
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown.split('\n')).toContain('| {++XX++} | ' + expected + ' |');
+    expect(markdown).not.toContain('<table');
+  });
+
+  test('keeps a table whose cell has a comment with no end as HTML, with an end', async () => {
+    // HTML held no such comment, and the table became a pipe table, which
+    // showed it
+    const markdown = await roundTrip('<table><tr><td>a<!-- x</td></tr></table>\n');
+    expect(markdown).toContain('<p>a<!-- x</td></tr></table> --></p>');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('writes a table whose cell has a comment with a blank line in it as no HTML table', async () => {
+    // The blank line ended the table's HTML block, which exported as text
+    const zip = await JSZip.loadAsync((await convertMdToDocx('<table><tr><td>a<!-- x y -->b</td><td>c</td></tr></table>\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const broken = xml.replace('x y --&gt;', 'x</w:t><w:br/><w:br/><w:t xml:space="preserve">y --&gt;');
+    expect(broken).not.toBe(xml);
+    zip.file('word/document.xml', broken);
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(md).not.toContain('<table>');
+    expect(md).toContain('a<!-- x');
+    expect((await roundTrip(md)).trim()).toBe(md.trim());
   });
 
   test('writes a cell\'s paragraphs as paragraphs of the Word cell', async () => {
@@ -8913,6 +9062,7 @@ describe('round-trip regression: images export cannot embed', () => {
     ['two HTML comments', 'A <!-- a --><!-- b --> B'],
     ['an HTML comment and an image', 'A <!-- a -->![y](n.png) B'],
     ['an image and an HTML comment', 'A ![y](n.png)<!-- a --> B'],
+    ['an empty HTML comment and another', 'A <!--><!-- b --> B'],
   ])('reads %s that Word joins in one run', async (_name, md) => {
     // Their ZWSPs went in the Markdown, or the image after a comment went
     // missing
@@ -8931,6 +9081,19 @@ describe('round-trip regression: images export cannot embed', () => {
     ['an image after its ZWSP', 'A ![alt](missing.png) b', 1],
     ['an image after its !', 'A ![alt](missing.png) b', 2],
     ['an HTML comment after its <', 'A <!-- c --> b', 2],
+    // Which a table's comment ends at, but not one inline Markdown reads
+    ['an HTML comment after a --!> in it', 'A <!-- a --!> b --> B', 12],
+    // Which reads as a payload's start, but in a comment with no end yet
+    ['an HTML comment before a ZWSP and an image\'s Markdown in it', 'A <!-- a \u200B![y](n.png)\u200B tail --> B', 8],
+    ['an HTML comment after a --!> in it before a ZWSP and an image\'s Markdown', 'A <!-- a --!>\u200B![y](n.png)\u200B tail --> B', 12],
+    // Which got an end, though the next ended it
+    ['an HTML comment before a <!-- in it', 'A <!-- a <!-- b --> C', 8],
+    // Which read as its end
+    ['an HTML comment after a <!---> in it', 'A <!-- a <!---> b --> C', 14],
+    // Which read as its end
+    ['an HTML comment after an empty one', '<!--><!-- c -->', 12],
+    ['an HTML comment after an empty one, in its <!--', '<!--><!-- c -->', 7],
+    ['an HTML comment around an empty one, and after it', 'A <!-- a <!--->b --> B', [8, 16]],
   ])('joins %s when Word splits its run', async (_name, md, at) => {
     // Without the start of its opener, the run before it was dropped
     const { docx } = await convertMdToDocx(md);
@@ -8939,12 +9102,40 @@ describe('round-trip regression: images export cannot embed', () => {
     const rPr = '<w:r><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr>';
     const decode = (text: string) => text.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
     const encode = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const cuts = [0, ...[at].flat(), Infinity];
     const split = xml.replace(new RegExp(rPr + '<w:t>([^<]*)</w:t></w:r>'), (_m, text: string) =>
-      rPr + '<w:t>' + encode(decode(text).slice(0, at)) + '</w:t></w:r>' + rPr + '<w:t>' + encode(decode(text).slice(at)) + '</w:t></w:r>');
+      cuts.slice(1).map((cut, k) => rPr + '<w:t>' + encode(decode(text).slice(cuts[k], cut)) + '</w:t></w:r>').join(''));
     expect(split).not.toBe(xml);
     zip.file('word/document.xml', split);
     const markdown = (await convertDocx(new Uint8Array(await zip.generateAsync({ type: 'uint8array' })))).markdown;
     expect(markdown).toContain(md);
+  });
+
+  test.each([
+    ['text', 'A <!-- a --!>\u200B b --> B'],
+    ['an image\'s Markdown', 'A <!-- a --!>\u200B![y](n.png)\u200B tail --> B'],
+    ['a comment\'s start', 'A <!-- a --!>\u200B<!-- b --> B'],
+  ])('keeps a ZWSP and %s in an HTML comment after a --!> in it, which inline Markdown reads on', async (_name, md) => {
+    // It read as the start of another hidden payload, and the rest went
+    expect((await roundTrip(md)).markdown).toBe(md + '\n');
+  });
+
+  test('keeps a comment block with trailing whitespace, with no other end', async () => {
+    // An end went on the comment, after its whitespace, which showed it
+    const md = '<!-- c -->  \n\nText.';
+    expect((await roundTrip(md)).markdown).toBe(md + '\n');
+  });
+
+  test('keeps a ZWSP after a ---> in an HTML comment, which inline Markdown reads on', async () => {
+    // It read as the comment's end, and the rest went
+    const md = 'A <!-- a ---> b --->\u200Btail --> B';
+    expect((await roundTrip(md)).markdown).toBe(md + '\n');
+  });
+
+  test('keeps a ZWSP and an image\'s Markdown in a pipe cell\'s comment after a --!> in it', async () => {
+    // A --!> ended it, as in an HTML table's cell, and the rest went
+    const md = '| A |\n| --- |\n| B <!-- a --!>\u200B![y](n.png)\u200B tail --> C |';
+    expect((await roundTrip(md)).markdown).toBe(md + '\n');
   });
 
   test('keeps a ZWSP in an image\'s Markdown as a character reference', async () => {
