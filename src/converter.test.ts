@@ -7638,6 +7638,12 @@ describe('Missing citation keys', () => {
     // Which export reads as a paragraph of its own, after a quote, as markdown-it doesn't
     ['after a quote', 'P [@a] Q\n\n> x\nCitation data for @a was not found in the bibliography file.\n',
       'P [@a] Q\n\n> x\n\nCitation data for @a was not found in the bibliography file.\n'],
+    // Which export reads as a paragraph of its own, before a note's definition
+    ['before a note\'s definition', 'P [@a] Q[^1]\n\nCitation data for @a was not found in the bibliography file.\n[^1]: N\n',
+      'P [@a] Q[^1]\n\nCitation data for @a was not found in the bibliography file.\n\n[^1]: N\n'],
+    // Whose key linkify makes a link of
+    ['with a URL for a key', 'P [@https://example.com] Q\n\nCitation data for @https://example.com was not found in the bibliography file.\n',
+      'P [@https://example.com] Q\n\nCitation data for @https\\://example.com was not found in the bibliography file.\n'],
     // Which export reads as a paragraph of its own, after a grid table's border
     ['after a grid table', 'P [@a] Q\n\n+---+\n| a |\n+---+\nCitation data for @a was not found in the bibliography file.\n',
       'P [@a] Q\n\n+-----+\n| a   |\n+-----+\n\nCitation data for @a was not found in the bibliography file.\n'],
