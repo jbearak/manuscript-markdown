@@ -1758,6 +1758,11 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
   // Apply in reverse nesting order (innermost to outermost)
   // Code is innermost — applied first
   if (fmt.code) {
+    // A line break, which a code span can't hold, goes between spans of the
+    // text on each side of it
+    if (text.includes('\\\n')) {
+      return text.split('\\\n').map(part => part && markedFormatting(part, fmt, lineStart, after, blockStart)).join('\\\n');
+    }
     // Find the longest run of consecutive backticks in the text
     let maxRun = 0;
     const backtickRuns = result.match(/`+/g);
@@ -8622,7 +8627,8 @@ export function buildMarkdown(
     // text, nor in a heading, which the line end ends, so there it's <br>,
     // which export reads as one. One before comment bodies goes, as below.
     if (paragraphHeading) {
-      textOut = textOut.replace(HARD_BREAK, (_m, backslashes: string) => backslashes + '<br>');
+      const bodiesBreak = rendered.deferredComments.length > 0 ? /(\\?\n)+$/.exec(textOut)?.[0] ?? '' : '';
+      textOut = textOut.slice(0, textOut.length - bodiesBreak.length).replace(HARD_BREAK, (_m, backslashes: string) => backslashes + '<br>') + bodiesBreak;
     } else if (atEnd && rendered.deferredComments.length === 0) {
       textOut = textOut.replace(HARD_BREAK_AT_END, (_m, backslashes: string, whitespace: string) => backslashes + '<br>' + whitespace);
     }

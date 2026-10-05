@@ -2896,7 +2896,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
               runs: [{ type: 'text', text: htmlContent.replace(/\n$/, '') }]
             });
           }
-        } else if (/^(?:<br\s*\/?>[ \t]*)+$/i.test(htmlContent.trim())) {
+        } else if (/^(?:<br\s*\/?>\s*)+$/i.test(htmlContent.trim())) {
           // Line breaks alone, as import writes a paragraph that is one,
           // which markdown-it reads as a block, not a paragraph's text
           result.push({

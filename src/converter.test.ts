@@ -4908,6 +4908,7 @@ describe('Line breaks a backslash can\'t hold', () => {
   const p = (runs: string, style?: string) => '<w:p>' + (style ? '<w:pPr><w:pStyle w:val="' + style + '"/></w:pPr>' : '') + runs + '</w:p>';
   const r = (inner: string, rPr = '') => '<w:r>' + rPr + inner + '</w:r>';
   const t = (text: string) => '<w:t xml:space="preserve">' + text + '</w:t>';
+  const code = '<w:rPr><w:rStyle w:val="CodeChar"/></w:rPr>';
 
   test.each([
     ['ends a paragraph', p(r(t('a') + '<w:br/>')), 'a<br>\n', 'a⏎'],
@@ -4917,11 +4918,37 @@ describe('Line breaks a backslash can\'t hold', () => {
     ['ends a heading', p(r(t('a') + '<w:br/>'), 'Heading1'), '# a<br>\n', 'a⏎'],
     // Which markdown-it reads as an HTML block, not a paragraph's text
     ['is all of a paragraph', p(r('<w:br/>')), '<br>\n', '⏎'],
+    // A code span can't hold one, so it goes between the code on each side
+    ['ends inline code that ends a paragraph', p(r(t('a') + '<w:br/>', code)), '`a`<br>\n', 'a⏎'],
+    ['is in inline code in a heading', p(r(t('a') + '<w:br/>' + t('b'), code), 'Heading1'), '# `a`<br>`b`\n', 'a⏎b'],
   ])('writes one that %s as <br>', async (_name, xml, md, text) => {
     // As a \ before a line end, it was a \ in the text at a paragraph's
     // end, and ended a heading, whose text after it was a paragraph
     expect(await imported(xml)).toBe(md);
     expect(await exportedText(md)).toBe(text);
+  });
+
+  test('keeps one in inline code between the code on each side', async () => {
+    // Inside the code span, the \ was code, and the line end a space
+    const md = await imported(p(r(t('a') + '<w:br/>' + t('b'), code)));
+    expect(md).toBe('`a`\\\n`b`\n');
+    expect(await exportedText(md)).toBe('a⏎b');
+  });
+
+  test('reads <br> tags on lines of their own in one block as line breaks', async () => {
+    // markdown-it reads them as one HTML block, which was text
+    expect(await exportedText('<br>\n<br/>\n\nX')).toBe('⏎⏎ | X');
+  });
+
+  test('drops one that ends a heading before its comments\' bodies', async () => {
+    // As an older export wrote between comment references, which a <br>
+    // would keep for good
+    const md = '# {#1}a {#2}b{/1} c{/2}\n{#1>>@A | x<<}\n{#2>>@A | y<<}\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const end = xml.indexOf('</w:p>');
+    zip.file('word/document.xml', xml.slice(0, end) + '<w:r><w:br/></w:r>' + xml.slice(end));
+    expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
   });
 
   test('reads a list item that is only a <br> as a line break', async () => {
