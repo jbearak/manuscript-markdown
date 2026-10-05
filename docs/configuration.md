@@ -34,5 +34,5 @@ All settings are under the `manuscriptMarkdown` namespace in VS Code settings.
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `tableIndent` | integer | `2` | Number of spaces per indent level for HTML tables in DOCX to Markdown conversion |
-| `pipeTableMaxLineWidth` | integer | `120` | Maximum line width for pipe tables in DOCX→MD conversion. Tables exceeding this width fall back to HTML. Set to `0` to always use HTML tables |
+| `pipeTableMaxLineWidth` | integer | `120` | Maximum line width for pipe tables in DOCX→MD conversion. Tables exceeding this width fall back to HTML. Set to `0` to always use HTML tables, but for a table whose cells hold what an HTML cell can't, such as a comment, which is a grid table |
 | `blockquoteStyle` | string | `"GitHub"` | Word paragraph style for blockquotes on MD→DOCX export: `Quote`, `IntenseQuote`, or `GitHub` |
