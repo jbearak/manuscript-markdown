@@ -4999,10 +4999,17 @@ function canonicalizeDisplayMathLatex(latex: string): string {
   return `\\begin{${envName}}\n${rows.join(' \\\\\n')}\n\\end{${envName}}`;
 }
 
+/** `text` in a span of `rev`. Text with the span's closer in it, as code,
+ *  math or a URL can have where an escape is text, would end the span
+ *  there, so it goes on one side of a substitution with nothing on the
+ *  other, which export reads as a change of that side alone, unless it has
+ *  a substitution's delimiters too. A bare link's choice holds the closer
+ *  it's read before (see bareLinkChoice), which isn't text. */
 function wrapWithRevision(text: string, rev?: RevisionInfo): string {
   if (!rev) return text;
-  if (rev.type === 'addition') return `{++${text}++}`;
-  if (rev.type === 'deletion') return `{--${text}--}`;
+  const holds = (closer: string) => text.includes(closer) && text.split(BARE_LINK + closer + BARE_LINK).join(BARE_LINK).includes(closer);
+  if (rev.type === 'addition') return holds('++}') && substitutionHolds('', text) ? '{~~~>' + text + '~~}' : `{++${text}++}`;
+  if (rev.type === 'deletion') return holds('--}') && substitutionHolds(text, '') ? '{~~' + text + '~>~~}' : `{--${text}--}`;
   return text;
 }
 
@@ -5282,15 +5289,18 @@ function appendRevised(
       : canJoinSpans(before.lastChar, text) || canJoinAtHighlight(before, text));
   // eslint-disable-next-line no-control-regex
   const highlightEnd = /([\u0006\u000F])==(?:\{[a-z0-9-]+\})?$/.exec(text)?.[1];
-  if (last && last.end === out.length && revisionsEqual(last.revision, revision) && seamSafe(last)) {
-    const joined = out + SPAN_JOIN + wrapWithRevision(text, revision).slice(3);
+  const span = wrapWithRevision(text, revision);
+  // A substitution holds the text with its closer in it, and nothing joins it
+  const own = span.startsWith('{~~');
+  if (!own && last && last.end === out.length && revisionsEqual(last.revision, revision) && seamSafe(last)) {
+    const joined = out + SPAN_JOIN + span.slice(3);
     return [joined, {
       revision, start: last.start, end: joined.length, lastChar: text.slice(-1),
       kinds: new Set([...last.kinds, ...kinds]), literal: new Set([...last.literal, ...literal]), join, highlightEnd,
     }];
   }
-  const wrapped = out + wrapWithRevision(text, revision);
-  return [wrapped, { revision, start: out.length, end: wrapped.length, lastChar: text.slice(-1), kinds, literal, join, highlightEnd }];
+  const wrapped = out + span;
+  return [wrapped, { revision, start: out.length, end: wrapped.length, lastChar: text.slice(-1), kinds, literal, join: own ? 'never' : join, highlightEnd }];
 }
 
 /** Delimiters that can pair with one of their kind in another span once

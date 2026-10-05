@@ -5861,6 +5861,26 @@ describe('Word text that reads as Markdown', () => {
   });
 
   test.each([
+    ['an insertion', 'x{~~~>`++}`~~}y', 'w:ins', ['++}']],
+    ['a deletion', 'x{~~`--}`~>~~}y', 'w:del', ['--}']],
+    ['a deletion in part of a link', 'x[a{~~`--}`~>~~}b](https://e.com)y', 'w:del', ['--}']],
+    ['an insertion at the end of a link', 'x[a{~~~>`++}`~~}](https://e.com)y', 'w:ins', ['++}']],
+    ['a deleted link', 'x{~~[`--}`](https://e.com)~>~~}y', 'w:del', ['--}']],
+    ['a deletion between two others', 'x{--a--}{~~`--}`~>~~}{--b--}y', 'w:del', ['a', '--}', 'b']],
+  ])('keeps the closer of %s in code in its text', async (_name, md, tag, texts) => {
+    // It ended the tracked change around it, as an escape in code is text,
+    // so it goes on one side of a substitution, and export wrote the empty
+    // other side as a change
+    const docx = (await convertMdToDocx(md)).docx;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const changed = [...xml.matchAll(new RegExp('<' + tag + '\\b[\\s\\S]*?</' + tag + '>', 'g'))]
+      .map(m => m[0].replace(/<[^>]+>/g, ''));
+    expect(changed).toEqual(texts);
+    expect(xml).not.toContain(tag === 'w:ins' ? '<w:del ' : '<w:ins ');
+    expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim()).toBe(md);
+  });
+
+  test.each([
     ['bold', '**XX**b', '\\ '],
     ['a highlight', '==XX==b', '{ '],
     ['strikethrough', '~~XX~~b', ')\\ '],

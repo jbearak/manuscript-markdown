@@ -28,6 +28,8 @@ Marks text as replaced. The `~>` separates old text from new text.
 This is {~~old text~>new text~~}.
 ```
 
+With one side empty, a substitution is a deletion or an insertion: `{~~old~>~~}` deletes `old`, and `{~~~>new~~}` inserts `new`. Import from DOCX writes a change this way when its text holds the change's own closer where a backslash can't escape it, as in code: `` {~~`--}`~>~~} ``.
+
 ### Comment `{>>text<<}`
 
 Adds a comment annotation. With author attribution enabled, comments support `@Author | text` (author only) and `@Author (Date) | text` (author + timestamp).
