@@ -6023,18 +6023,27 @@ function deletionXml(deletedXml: string, author: string, dateAttr: string, state
 /** The runs a link's hyperlink holds: its text, line breaks and tracked changes */
 const LINK_RUN_TYPES = new Set<MdRun['type']>(['text', 'softbreak', 'hardbreak', 'critic_add', 'critic_del', 'critic_sub']);
 
+/** Whether a run's tracked change holds a link to somewhere other than `href` */
+function holdsOtherLink(run: MdRun, href: string): boolean {
+  return [run.innerRuns, run.oldRuns, run.newRuns].some(runs =>
+    runs?.some(inner => inner.href !== undefined && inner.href !== href || holdsOtherLink(inner, href)));
+}
+
 export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine): string {
   let xml = '';
   for (let ri = 0; ri < inputRuns.length; ri++) {
     const run = inputRuns[ri];
     const nextRun = inputRuns[ri + 1];
-    if (run.href && LINK_RUN_TYPES.has(run.type)) {
+    if (run.href && LINK_RUN_TYPES.has(run.type) && !holdsOtherLink(run, run.href)) {
       // The link's runs, with its line breaks and tracked changes, go in one
       // hyperlink, as Word writes one, which import reads back as one link;
       // the next link to the same place starts another. Inside it, no run,
-      // nor one in a tracked change, is a link of its own.
+      // nor one in a tracked change, is a link of its own. A tracked change
+      // that holds a link to another place ends it, and goes as it would
+      // outside a link, which keeps that link.
       let end = ri + 1;
-      while (end < inputRuns.length && inputRuns[end].href === run.href && !inputRuns[end].linkStart && LINK_RUN_TYPES.has(inputRuns[end].type)) end++;
+      while (end < inputRuns.length && inputRuns[end].href === run.href && !inputRuns[end].linkStart && LINK_RUN_TYPES.has(inputRuns[end].type)
+        && !holdsOtherLink(inputRuns[end], run.href)) end++;
       const withoutLink = (linkRun: MdRun): MdRun => ({
         ...linkRun, href: undefined,
         ...(linkRun.innerRuns ? { innerRuns: linkRun.innerRuns.map(withoutLink) } : {}),

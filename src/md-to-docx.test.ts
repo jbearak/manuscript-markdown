@@ -1209,6 +1209,22 @@ describe('generateParagraph', () => {
     expect(xml.match(/<w:hyperlink /g)?.length).toBe(count);
   });
 
+  it.each([
+    ['an insertion', '[a {++[b](https://other.com)++} c](https://e.com)'],
+    ['a deletion', '[a {--[b](https://other.com)--} c](https://e.com)'],
+    ['a substitution', '[a {~~[b](https://other.com)~>x~~} c](https://e.com)'],
+  ])('keeps the link to another place in %s inside a link', async (_name, md) => {
+    // The link's hyperlink took the change's runs, without their own link
+    const { docx } = await convertMdToDocx(md);
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const rels = await zip.file('word/_rels/document.xml.rels')!.async('string');
+    const id = /Id="(rId\d+)"[^>]*Target="https:\/\/other\.com"/.exec(rels)?.[1];
+    expect(id).toBeDefined();
+    expect(xml).toMatch(new RegExp('<w:hyperlink r:id="' + id + '">(?:<w:del [^>]*>)?<w:r><w:(?:t|delText)>b</w:(?:t|delText)>'));
+  });
+
   it('generates softbreak as space', () => {
     const token: MdToken = {
       type: 'paragraph',
