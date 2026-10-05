@@ -1161,14 +1161,16 @@ function citationRule(state: StateInline, silent: boolean): boolean {
   if (start + 2 >= state.posMax) return false;
   const end = citationEnd(state, start);
   if (end === -1) return false;
-  const items = state.src.slice(start + 1, end).split(';').map(item => {
+  // With the line breaks CriticMarkup protected in it, before which a key
+  // starts as after a space
+  const items = restoreCriticLineBreaks(state.src.slice(start + 1, end)).split(';').map(item => {
     const key = CITATION_ITEM_START_RE.exec(item);
     return key ? citationPrefixText(state, item.slice(0, key.index)) + item.slice(key.index) : item;
   });
   // Text once the rules that read text tokens, as linkify, have run (see
   // manuscript_citation_text)
   const token = state.push('manuscript_citation', '', 0);
-  token.content = restoreCriticLineBreaks('[' + items.join(';') + ']');
+  token.content = '[' + items.join(';') + ']';
   // The line breaks CriticMarkup protected in it, which its text no longer
   // holds, for the source lines after it (see addInlineContent)
   const consumedBreakSourceOffsets = collectProtectedBreaks(state.src.slice(start, end + 1), inlineSourceOffset(state, start))
