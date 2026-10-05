@@ -6556,6 +6556,7 @@ describe('Blocks a quote can\'t hold', () => {
     // Which left an empty paragraph
     ['an empty code block', '> a\n>\n> ```\n>\n> ```\n>\n> b\n', '> a\n>\n> b\n', 'Empty code block inside blockquote dropped during conversion'],
     ['a code block that ends with a blank line', '> ```\n> x\n>\n> ```\n', '> x\n', 'Code block inside blockquote exported as a quote paragraph'],
+    ['a code block that ends with a line of spaces', '> ```\n> x\n>   \n> \t\n> ```\n', '> x\n', 'Code block inside blockquote exported as a quote paragraph'],
     ['a code block that starts with a blank line', '> a\n>\n> ```\n>\n> x\n> ```\n', '> a\n>\n> \\\n> x\n', 'Code block inside blockquote exported as a quote paragraph'],
     ['a code block of blank lines', '> a\n>\n> ```\n>\n>\n> ```\n>\n> b\n', '> a\n>\n> b\n', 'Empty code block inside blockquote dropped during conversion'],
     // Whose line read as an alert's marker
