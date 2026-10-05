@@ -7456,6 +7456,202 @@ describe('Track changes (CriticMarkup)', () => {
       expect(result.markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(md + '\n');
     });
 
+    test.each([
+      ['{--One {==a==}{>>c<<} end--}', '{--One --}{=={--a--}==}{>>c<<}{-- end--}'],
+      ['{--a {>>c<<} b--}', '{--a --}{>>c<<}{-- b--}'],
+      ['{--a {#1}b{/1} c--}\n{#1>>c<<}', '{--a --}{=={--b--}==}{>>c<<}{-- c--}'],
+      ['{#1>>c<<}{>>r<<}\n\n{--a {#1}b{/1} c--}', '{--a --}{=={--b--}==}{>>c<<}{>>r<<}{-- c--}'],
+      ['{~~a {==b==}{>>c<<} d~>x~~}', '{--a --}{=={--b--}==}{>>c<<}{-- d--}{++x++}'],
+      ['{--a {++b {>>c<<}++} d--}', '{--a b --}{>>c<<}{-- d--}'],
+      ['{++a {#1}b{/1} c++}\n{#1>>c<<}', '{++a ++}{=={++b++}==}{>>c<<}{++ c++}'],
+      ['{==b {#1}x{/1}==}{>>c<<}\n{#1>>d<<}', '{#1}b {#2}x{/1}{/2}\n{#1>>c<<}\n{#2>>d<<}'],
+      ['{--a {==b {#1}x{/1}==}{>>c<<}--}\n{#1>>d<<}', '{--a --}{#1}{--b --}{#2}{--x--}{/1}{/2}\n{#1>>c<<}\n{#2>>d<<}'],
+    ])('keeps the comment in %j', async (md, expected) => {
+      // Export skipped a comment in deleted text, and read {#id} and {/id} in
+      // a revision's text as literal text, so the comment was lost
+      const roundTrip = async (source: string) =>
+        (await convertDocx((await convertMdToDocx(source)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
+      const md2 = await roundTrip(md);
+      expect(md2).toBe(expected + '\n');
+      expect(await roundTrip(md2)).toBe(md2);
+    });
+
+    test.each([
+      ['{++{#1}x{/1}\n{#1>>c<<}++}', '{=={++x++}==}{>>c<<}'],
+      ['{--{#1}x{/1}\n{#1>>c<<}--}', '{=={--x--}==}{>>c<<}'],
+      ['{~~y~>{#1}x{/1}\n{#1>>c<<}~~}', '{--y--}{=={++x++}==}{>>c<<}'],
+      ['{=={#1}x{/1}\n{#1>>c<<}==}{>>d<<}', '{#1}{#2}x{/1}{/2}\n{#1>>d<<}\n{#2>>c<<}'],
+      ['{++a {--{#1}x{/1}\n{#1>>c<<}--}++}', '{++a ++}{=={--x--}==}{>>c<<}'],
+      ['{++{#1}x{/1} {#1>>c<<}++}', '{=={++x++}==}{>>c<<}'],
+      // A revision of a body alone has no text, so it's a body on its line
+      ['{#1}x{/1}\n{++{#1>>c<<}++}', '{==x==}{>>c<<}'],
+      ['{#1}x{/1}\n{--{#1>>c<<}--}', '{==x==}{>>c<<}'],
+    ])('drops the line break before a comment body on its own line in %j', async (md, expected) => {
+      // Only a paragraph's own lines lost it, so the break in a revision's
+      // text exported as a space, or with breaks: true as a line break
+      for (const front of ['', '---\nbreaks: true\n---\n\n']) {
+        const { docx } = await convertMdToDocx(front + md);
+        const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+        expect(xml).not.toContain('<w:br/>');
+        expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(expected + '\n');
+      }
+    });
+
+    test.each([
+      ['{++a {#1}x{/1}\n{#1>>c<<}\nb++}', '{++a ++}{=={++x++}==}{>>c<<}{++ b++}', '{++a ++}{=={++x++}==}{>>c<<}{++\\\nb++}'],
+      // As x\n{#1>>c<<}y keeps it, with the change marked as Word shows it
+      ['{~~{#1}x{/1}\n{#1>>c<<}~>y~~}', '{=={--x--}==}{>>c<<}{-- --}{++y++}', '{=={--x--}==}{>>c<<}{--\\\n--}{++y++}'],
+    ])('keeps one line break across a comment body on its own line in %j', async (md, plain, withBreaks) => {
+      for (const [front, expected] of [['', plain], ['---\nbreaks: true\n---\n\n', withBreaks]]) {
+        const { docx } = await convertMdToDocx(front + md);
+        expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(expected + '\n');
+      }
+    });
+
+    test.each([
+      ['{--### A {>>c<<}--}', '{--### A --}{>>c<<}'],
+      ['{--### A {#1}b{/1}--}\n{#1>>c<<}', '{--### A --}{=={--b--}==}{>>c<<}'],
+      ['{++### A {#1}b{/1}++}\n{#1>>c<<}', '{++### A ++}{=={++b++}==}{>>c<<}'],
+    ])('keeps the heading of %j, and its comment', async (md, expected) => {
+      // A comment between a revised heading's spans, as import writes it, or
+      // its body on a line after, made it text, with a literal ###
+      const roundTrip = async (source: string) =>
+        (await convertDocx((await convertMdToDocx(source)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
+      const md2 = await roundTrip(md);
+      expect(md2).toBe(expected + '\n');
+      expect(await roundTrip(md2)).toBe(md2);
+    });
+
+    test.each([
+      ['{--### {==Heading==}{>>comment<<}--}', '{--### --}{=={--Heading--}==}{>>comment<<}'],
+      ['{++### {==Heading==}{>>comment<<}++}', '{++### ++}{=={++Heading++}==}{>>comment<<}'],
+      ['Prefix {--a{>>c<<}\n\nb--} suffix', 'Prefix {--a\n\n--}{>>c<<}{--b--} suffix'],
+      ['Prefix {++a{>>c<<}\n\nb++} suffix', 'Prefix {++a\n\n++}{>>c<<}{++b++} suffix'],
+      ['Prefix {~~a{>>c<<}~>\n\nb~~} suffix', 'Prefix {~~a~>\n\n~~}{>>c<<}{++b++} suffix'],
+      // An anchor that ends at the break holds it, and export splits it there
+      ['Prefix {--a{==b==}{>>c<<}\n\nd--} suffix', 'Prefix {--a--}{=={--b\n\n--}==}{>>c<<}{--d--} suffix'],
+      ['Prefix {++a{==b==}{>>c<<}\n\nd++} suffix', 'Prefix {++a++}{=={++b\n\n++}==}{>>c<<}{++d++} suffix'],
+      // An anchor of a substitution's old side alone holds the break that
+      // opens its new side, a span of the break alone, which export kept
+      // in the span to split the anchor at, not moved before it
+      ['Prefix {~~{==x==}{>>c<<}~>\n\nb~~} suffix', 'Prefix {=={--x--}{++\n\n++}==}{>>c<<}{++b++} suffix'],
+      // A range with text on both sides of the break takes ID syntax, as one
+      // across an untracked break does, which {==...==} couldn't hold
+      ['P {++{#1}a\n\nb{/1}++} Q\n{#1>>c<<}', 'P {#1}{++a\n\nb++}{/1} Q\n{#1>>c<<}'],
+      ['P {--{#1}a\n\nb{/1}--} Q\n{#1>>c<<}', 'P {#1}{--a\n\nb--}{/1} Q\n{#1>>c<<}'],
+      ['{--### {>>c<<}--}', '{--### --}{>>c<<}'],
+      ['{++### {>>c<<}++}', '{++### ++}{>>c<<}'],
+    ])('keeps the revised paragraph mark of %j, beside a comment', async (md, expected) => {
+      // Import wrote the heading's marker before the comment's anchor, outside
+      // any span, and ended the paragraph its comment ended as an untracked
+      // one, so the next export lost the mark's revision
+      const roundTrip = async (source: string) =>
+        (await convertDocx((await convertMdToDocx(source)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
+      const md2 = await roundTrip(md);
+      expect(md2).toBe(expected + '\n');
+      expect(await roundTrip(md2)).toBe(md2);
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(md2)).docx)).file('word/document.xml')!.async('string');
+      expect(xml).toMatch(/<w:pPr>(?:(?!<\/w:pPr>).)*<w:rPr>(?:(?!<\/w:rPr>).)*<w:(?:del|ins) /);
+    });
+
+    test('keeps the replies of a comment whose anchor export splits at a tracked break', async () => {
+      // The replies went after the break, away from the comment they reply to
+      const md = 'Prefix {=={--a\n\n--}==}{>>c<<}{>>r<<}{--b--} suffix';
+      const { docx } = await convertMdToDocx(md);
+      const extended = await (await JSZip.loadAsync(docx)).file('word/commentsExtended.xml')!.async('string');
+      expect(extended).toContain('w15:paraIdParent');
+      expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(md + '\n');
+    });
+
+    test('keeps the text after a tracked break in its comment\'s anchor', async () => {
+      // Export ended the anchor at the break, so b went after the comment's range
+      const { docx } = await convertMdToDocx('{=={--a\n\nb--}==}{>>c<<}');
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      expect(xml).toMatch(/<w:delText>b<\/w:delText><\/w:r><\/w:del><w:commentRangeEnd /);
+    });
+
+    test.each([
+      ['{#1}x{/1}\n\n{++### ++}{++a\n\n{#1>>c<<}++}', '{==x==}{>>c<<}\n\n{++### a++}'],
+      ['{#1}x{/1}\n\n{++a\n\n{#1>>c<<}++}', '{==x==}{>>c<<}\n\n{++a++}'],
+    ])('keeps a comment body after a blank line in a revision in %j', async (md, expected) => {
+      // Dropping the break before the body took one of the blank line's two,
+      // so the split there took the body for the other
+      const { docx, warnings } = await convertMdToDocx(md);
+      expect(warnings).toEqual([]);
+      expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(expected + '\n');
+    });
+
+    test.each([
+      ['an untracked tail', [{ text: 'a', ids: ['1'], revision: 'addition' }, { text: ' tail' }], '### {=={++a++}==}{>>c<<} tail'],
+      ['an untracked tail without a comment', [{ text: 'a', revision: 'addition' }, { text: ' tail' }], '### {++a++} tail'],
+      ['a deletion', [{ text: 'a', ids: ['1'], revision: 'addition' }, { text: 'b', revision: 'deletion' }], '### {=={++a++}==}{>>c<<}{--b--}'],
+      ['its revision alone', [{ text: 'a', ids: ['1'], revision: 'addition' }], '{++### ++}{=={++a++}==}{>>c<<}'],
+    ] as Array<[string, Array<{ text: string; ids?: string[]; revision?: 'addition' | 'deletion' }>, string]>)(
+      'writes the marker of a heading whose mark is inserted, with %s, where export reads the heading back', (_name, runs, expected) => {
+      // A span of the marker made export read a heading with more than the
+      // revision as a paragraph, with a literal ###
+      const content: ContentItem[] = [
+        { type: 'para', headingLevel: 3, paraMarkRevision: { type: 'addition', author: 'A', date: '' } },
+        ...runs.map((run): ContentItem => ({ type: 'text', text: run.text, commentIds: new Set(run.ids ?? []), formatting: DEFAULT_FORMATTING,
+          ...(run.revision ? { revision: { type: run.revision, author: 'A', date: '' } } : {}) })),
+      ];
+      expect(buildMarkdown(content, new Map([['1', { author: '', date: '', text: 'c' }]]))).toBe(expected);
+    });
+
+    test('gives a revised heading\'s mark its revision\'s author, not a comment\'s before its text', async () => {
+      const { docx } = await convertMdToDocx('{++### ++}{>>@Alice (2024-01-01 12:00) | c<<}{++H++}', { authorName: 'Bob' });
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      expect(xml).toContain('<w:pStyle w:val="Heading3"/><w:rPr><w:ins w:id="0" w:author="Bob"/></w:rPr>');
+    });
+
+    test('drops the line breaks of comment body lines across a revision\'s end', async () => {
+      // Each revision's text lost its own, so the body line that ran on past
+      // its end kept the break after it
+      const { docx } = await convertMdToDocx('---\nbreaks: true\n---\n\n{++{#1}x{/1}\n{#1>>c<<}\n++}{#2>>d<<}\n{#2}y{/2}');
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      expect(xml.match(/<w:br\/>/g)).toHaveLength(1);
+    });
+
+    test.each([
+      ['<u>{++a {#1}x{/1} {#1>>c<<}++}</u>', '{++<u>a </u>++}{=={++<u>x</u>++}==}{>>c<<}{++<u> </u>++}'],
+      ['<u>a {#1}x{/1} {#1>>c<<}</u>', '<u>a </u>{==<u>x</u>==}{>>c<<}<u> </u>'],
+    ])('keeps the underlined space before a comment body in %j', async (md, expected) => {
+      // A revision's text lost it, as its runs don't hold the underline around it
+      const { docx } = await convertMdToDocx(md);
+      expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(expected + '\n');
+    });
+
+    test('drops the line break before a comment body on its own line after a revision that ends in one', async () => {
+      // The revision before it was no line break, though its text ended in one
+      const { docx } = await convertMdToDocx('---\nbreaks: true\n---\n\n{#1}x{/1}{++a\n++}{++{#1>>c<<}\nb++}');
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      expect(xml.match(/<w:br\/>/g)).toHaveLength(1);
+    });
+
+    test.each([
+      ['{--<u>{++a\n{>>c<<}b++}</u>--}', '<w:u w:val="single"/>'],
+      ['{--==x {++a\n{>>c<<}b++}==--}', '<w:highlight w:val="yellow"/>'],
+    ])('keeps the formatting of a deleted line break beside a comment in %j', async (md, rPr) => {
+      // The deletion around the break had the outer deletion's formatting alone
+      const { docx } = await convertMdToDocx(md);
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      expect(xml).toContain('<w:r><w:rPr>' + rPr + '</w:rPr><w:delText xml:space="preserve"> </w:delText></w:r>');
+    });
+
+    test('keeps the new text of a substitution split at display math whose old text is a comment body', async () => {
+      const math = (tex: string) => '$' + '$' + tex + '$' + '$';
+      const { docx } = await convertMdToDocx('{#1}x{/1}\n\n{~~{#1>>c<<} ' + math('u') + '~>a ' + math('v') + '~~}');
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      expect(xml).toMatch(/<w:ins [^>]*><w:r><w:t xml:space="preserve">a /);
+    });
+
+    test.each(['{++{#1>>c<<}++}', '{--{#1>>c<<}--}', '{~~{#1>>c<<}~>{#2>>d<<}~~}'])('writes no paragraph for %j after its own', async (body) => {
+      // Word got an empty paragraph, as the revision hid the body
+      const { docx } = await convertMdToDocx('{#1}x{/1}{#2}y{/2}\n\n' + body);
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      expect(xml.match(/<w:p[ >]/g)).toHaveLength(1);
+    });
+
     test('revision in footnote body', async () => {
       const docXml = wrapDocumentXml(
         '<w:p><w:r><w:t>Text</w:t></w:r>'

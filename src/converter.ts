@@ -7461,9 +7461,17 @@ type ParaItem = Extract<ContentItem, { type: 'para' }>;
  *  {~~a~>\n\nb~~}. */
 function opensNewSide(content: ContentItem[], index: number): boolean {
   const para = content[index];
-  const prev = content[index - 1];
+  // Past a comment's reference, as of {~~a{>>c<<}~>\n\nb~~}
+  let before = index - 1;
+  while (before >= 0 && isCommentPoint(content[before])) before--;
+  const prev = content[before];
   return para?.type === 'para' && para.breakRevision?.type === 'addition'
     && !!prev && isInlineRevisionItem(prev) && revisionsEqual(prev.revision, { ...para.breakRevision, type: 'deletion' });
+}
+
+/** A comment's reference with no text of its own around it, as {>>c<<} */
+function isCommentPoint(item: ContentItem | undefined): boolean {
+  return item?.type === 'text' && item.text === '' && item.commentIds.size > 0 && !item.revision;
 }
 
 /** Inline content that can sit in a CriticMarkup span. */
@@ -7534,7 +7542,12 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
     const para = content[k];
     if (para.type !== 'para' || !para.breakRevision) continue;
     const revision = para.breakRevision;
-    const prev = content[k - 1];
+    // A comment's reference alone, as of {--a{>>c<<}\n\nb--}, goes after
+    // the break, as one can't go in the span, and a span that starts with
+    // the break loses it
+    let last = k - 1;
+    while (last >= 0 && isCommentPoint(content[last])) last--;
+    const prev = content[last];
     if (!prev || !isInlineRevisionItem(prev)) continue;
     if (!opensNewSide(content, k) && !revisionsEqual(prev.revision, revision)) continue;
     let opening: ParaItem | undefined;
@@ -7551,7 +7564,8 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
     joined ??= [...content];
     const prefix = linePrefix(para, opening);
     const text = marks().start + '\n' + prefix.trimEnd() + '\n' + prefix + marks().end;
-    joined[k] = { type: 'text', text, commentIds: new Set(prev.commentIds), formatting: DEFAULT_FORMATTING, revision };
+    joined.splice(last + 1, k - last, { type: 'text', text, commentIds: new Set(prev.commentIds), formatting: DEFAULT_FORMATTING, revision },
+      ...content.slice(last + 1, k));
   }
   return joined ?? content;
 }
@@ -7731,12 +7745,24 @@ export function buildMarkdown(
           : item.type === 'math' ? !item.display || displayBlock
             : item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'image';
         if (displayBlock) paragraph++;
-        for (const id of marked && 'commentIds' in item ? item.commentIds ?? [] : []) {
-          const first = paragraphOf.get(id);
-          if (first === undefined) paragraphOf.set(id, paragraph);
-          else if (first !== paragraph) spanning.add(id);
-          if (table) inTable.add(id);
-          lastCommentItem.set(id, item);
+        // A tracked break joinTrackedParagraphBreaks put in the text ends a
+        // paragraph too, where text after it goes on in the next, as a
+        // range of {++{#1}a\n\nb{/1}++} does, which {==...==} can't hold
+        const pieces = item.type === 'text' && breakMarks && item.text.includes(breakMarks.start)
+          ? item.text.split(breakMarks.start).map((piece, k) => k === 0 ? piece : piece.slice(piece.indexOf(breakMarks!.end) + 1))
+          : [''];
+        for (let k = 0; k < pieces.length; k++) {
+          if (k > 0) {
+            paragraph++;
+            if (!pieces[k]) continue;
+          }
+          for (const id of marked && 'commentIds' in item ? item.commentIds ?? [] : []) {
+            const first = paragraphOf.get(id);
+            if (first === undefined) paragraphOf.set(id, paragraph);
+            else if (first !== paragraph) spanning.add(id);
+            if (table) inTable.add(id);
+            lastCommentItem.set(id, item);
+          }
         }
         if (displayBlock) paragraph++;
       }
@@ -7970,7 +7996,7 @@ export function buildMarkdown(
   // so a heading with no inline content (empty inserted paragraph) can still
   // be serialized as its own {++### ++} / {--### --} span instead of leaking
   // the marker into the next paragraph.
-  let pendingHeadingCriticMarker: { marker: string; revType: 'addition' | 'deletion' } | undefined;
+  let pendingHeadingCriticMarker: { marker: string; revType: 'addition' | 'deletion'; whole: boolean } | undefined;
   const flushPendingHeadingCriticMarker = () => {
     if (pendingHeadingCriticMarker === undefined) return;
     const { marker, revType } = pendingHeadingCriticMarker;
@@ -8436,9 +8462,24 @@ export function buildMarkdown(
           // Whole-paragraph insertion/deletion (paragraph mark carries
           // w:ins/w:del): the heading marker belongs inside the Critic span
           // ({++### heading++}), so defer it to the rendered inline text.
+          // Only where export reads all of it back as the revised heading:
+          // text of the mark's revision alone, beside comments. Otherwise a
+          // plain marker keeps the heading, though not its mark's revision.
+          const revType = item.paraMarkRevision.type;
+          let whole = true;
+          for (let j = i + 1; j < mergedContent.length; j++) {
+            const part = mergedContent[j];
+            if (!isInlineRevisionItem(part) && part.type !== 'html_comment') break;
+            if (isCommentPoint(part)) continue;
+            if (part.type === 'html_comment' || part.revision?.type !== revType) {
+              whole = false;
+              break;
+            }
+          }
           pendingHeadingCriticMarker = {
             marker: '#'.repeat(item.headingLevel) + ' ',
-            revType: item.paraMarkRevision.type,
+            revType,
+            whole,
           };
         } else {
           output.push('#'.repeat(item.headingLevel) + ' ');
@@ -8977,10 +9018,21 @@ export function buildMarkdown(
       // content doesn't start with a Critic addition/deletion (unexpected),
       // fall back to a plain heading prefix.
       const openMatch = /^\{(\+\+|--)/.exec(textOut);
-      if (openMatch) {
-        textOut = textOut.slice(0, openMatch[0].length) + pendingHeadingCriticMarker.marker + textOut.slice(openMatch[0].length);
+      const { marker, revType, whole } = pendingHeadingCriticMarker;
+      // Comments, their anchors or range markers before the revision's text,
+      // or as all of the heading's
+      const afterComments = /^(?:\{==|\{#[^}\s]+\}|\{>>[\s\S]*?<<\})+(?:\{(\+\+|--)|$)/.exec(textOut);
+      if (!whole) {
+        textOut = marker + textOut;
+      } else if (openMatch) {
+        textOut = textOut.slice(0, openMatch[0].length) + marker + textOut.slice(openMatch[0].length);
+      } else if (afterComments && (afterComments[1] ?? (revType === 'addition' ? '++' : '--')) === (revType === 'addition' ? '++' : '--')) {
+        // After a comment's anchor or range marker, as in
+        // {=={--Heading--}==}{>>c<<}, or before nothing, as in {>>c<<}, the
+        // marker takes a span of its own, which export reads as the heading's
+        textOut = (revType === 'addition' ? '{++' + marker + '++}' : '{--' + marker + '--}') + textOut;
       } else {
-        textOut = pendingHeadingCriticMarker.marker + textOut;
+        textOut = marker + textOut;
       }
       pendingHeadingCriticMarker = undefined;
     }

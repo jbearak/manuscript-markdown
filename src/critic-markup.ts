@@ -147,6 +147,11 @@ function moveLeadingBreakOutsideCritic(analysis: CriticLeadingBreakAnalysis): Cr
         const separatorPos = markdown.indexOf('~>', contentStart);
         if (separatorPos === -1 || separatorPos >= closePos) return full;
       }
+      // A span of the break alone, as import writes a tracked paragraph
+      // mark in a comment's anchor, {=={--x--}{++\n\n++}==}{>>c<<}, which
+      // the anchor splits at: moved out, it would leave the break untracked
+      // and the span empty
+      if (/^\s*$/.test(markdown.slice(contentStart, closePos))) return full;
       const lineStart = Math.max(
         markdown.lastIndexOf('\n', offset - 1),
         markdown.lastIndexOf('\r', offset - 1),

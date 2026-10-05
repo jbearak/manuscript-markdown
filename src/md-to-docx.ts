@@ -35,7 +35,7 @@ const IMAGE_DIMENSION_ATTR_RE = '(\\d+(?:\\.\\d+)?|\\.\\d+)\\s*(px|in|cm|mm|pt|p
 // - Numeric entities: use String.fromCodePoint() not String.fromCharCode() for
 //   supplementary-plane chars
 // - CriticMarkup recursive formatting: parse inner payloads with markdown-it
-//   (Critic/comment/citation/math/footnote rules disabled); carry structured
+//   (Critic/comment/citation/math/footnote rules included); carry structured
 //   inner runs on MdRun (innerRuns / oldRuns / newRuns)
 //
 // --- Word dirty-flag prevention ---
@@ -170,6 +170,7 @@ export interface MdRun {
   date?: string;            // for comments/revisions
   commentText?: string;     // for critic_comment: the comment body
   commentId?: string;       // for comment_range_start/end/body_with_id
+  reservedCommentId?: number; // for critic_highlight: its comment's ID, if prescanCommentIds gave it one
   footnoteLabel?: string;   // for footnote_ref: the [^label] label
   replies?: Array<{author?: string; date?: string; text: string; parentReply?: number}>; // nested replies for comment_body_with_id; parentReply: the index of the reply this one replies to
   consecutiveReplies?: true; // comment_body_with_id: its replies follow it, as in {#1>>a<<}{>>b<<}
@@ -890,13 +891,15 @@ function createMarkdownIt(): MarkdownIt {
 function createCriticInnerMarkdownIt(): MarkdownIt {
   const md = createMarkdownIt();
   md.inline.ruler.before('newline', 'critic_paragraph_break', criticParagraphBreakRule);
-  // Inner parsing should recurse into regular inline formatting, but not into
-  // other top-level custom syntaxes that carry separate document semantics.
-  // Citations stay enabled: inserted/new-side citations become Zotero fields,
+  // Inner parsing recurses into regular inline formatting and the custom
+  // syntaxes. Citations: inserted/new-side citations become Zotero fields,
   // deleted/old-side ones render as literal deleted text (see
-  // generateDeletedCriticContent). Footnote references stay enabled too, and
-  // become tracked note references (see noteReferenceXml).
-  md.inline.ruler.disable(['comment_range']);
+  // generateDeletedCriticContent). Footnote references become tracked note
+  // references (see noteReferenceXml). Comment range markers and bodies
+  // ({#id}, {/id}, {#id>>...<<}) count in a payload too, as in the preview.
+  // They were disabled here, so they became literal text and their comment
+  // was lost. In deleted text they go between w:dels (see
+  // deletionWithComments).
   return md;
 }
 
@@ -924,6 +927,11 @@ function toTextRunFromInner(run: MdRun, overrides?: Partial<MdRun>): MdRun {
     href: run.href,
     ...overrides,
   };
+}
+
+/** An {#id} or {/id} comment range marker, or an {#id>>...<<} comment body */
+function isCommentMarkerRun(run: MdRun): boolean {
+  return run.type === 'comment_range_start' || run.type === 'comment_range_end' || run.type === 'comment_body_with_id';
 }
 
 /** Preserve break metadata and flatten nested highlights into formatted Word runs. */
@@ -970,6 +978,13 @@ function normalizeCriticInnerRuns(runs: MdRun[]): MdRun[] {
     // Nested critic markup (e.g. {--...--} inside {==...==}) — pass through
     // so generateRuns can emit proper <w:ins>/<w:del> wrappers.
     if (run.type === 'critic_add' || run.type === 'critic_del' || run.type === 'critic_sub' || run.type === 'critic_comment') {
+      normalized.push(run);
+      continue;
+    }
+
+    // Comment range markers and bodies have no text, so the fallback below
+    // dropped them
+    if (isCommentMarkerRun(run)) {
       normalized.push(run);
       continue;
     }
@@ -1633,6 +1648,22 @@ function splitRunsAtCriticParagraphs(runs: MdRun[]): CriticParagraphSplit | unde
           }),
           // A break directly inside this revision is tracked by it
           marks: inner.marks.map(mark => mark ?? run),
+        };
+      }
+    }
+    // A comment's anchor whose text ends in tracked breaks, as import writes
+    // a comment that ends where one does, {=={--b\n\n--}==}{>>c<<}: the anchor
+    // and its comment, with their replies, keep the text before them
+    if (!split && run.type === 'critic_highlight' && run.innerRuns && queue[index + 1]?.type === 'critic_comment') {
+      const inner = splitRunsAtCriticParagraphs(run.innerRuns);
+      if (inner && inner.marks.every(mark => mark !== undefined) && inner.parts.slice(1).every(part => trimBreakRuns(part).length === 0)) {
+        const comments: MdRun[] = [];
+        while (queue[index + 1]?.type === 'critic_comment') comments.push(queue[++index]);
+        const innerRuns = trimBreakRuns(inner.parts[0]);
+        split = {
+          parts: [[...(innerRuns.length > 0 ? [{ ...run, text: innerRuns.map(innerRun => innerRun.text).join(''), innerRuns }] : []), ...comments],
+            ...inner.parts.slice(1).map(() => [])],
+          marks: inner.marks,
         };
       }
     }
@@ -2535,8 +2566,14 @@ function promoteCriticHeadingParagraph(runs: MdRun[]): MdToken | undefined {
   if (kind !== 'critic_add' && kind !== 'critic_del') return undefined;
   // Every run must be the same critic kind with matching author/date, so the
   // whole paragraph is one insertion/deletion (formatted payloads round-trip
-  // from Word as several adjacent spans: {++### ++}{++**bold**++}...).
-  if (!runs.every(r => r.type === kind && r.author === runs[0].author && r.date === runs[0].date)) return undefined;
+  // from Word as several adjacent spans: {++### ++}{++**bold**++}...). A
+  // comment, its range markers and body, and a comment's anchor around such
+  // spans go between them, as import writes a comment in a revised heading:
+  // {--### A --}{>>c<<} or {--### A --}{=={--b--}==}{>>c<<}.
+  const inSpan = (r: MdRun): boolean => r.type === kind && r.author === runs[0].author && r.date === runs[0].date
+    || r.type === 'critic_comment' || isCommentMarkerRun(r)
+    || r.type === 'critic_highlight' && !!r.innerRuns?.length && r.innerRuns.every(inSpan);
+  if (!runs.every(inSpan)) return undefined;
   const run = runs[0];
   if (!run.text || run.text.includes('\n')) return undefined;
   const headingPrefix = matchCriticHeadingPrefix(run.text);
@@ -2563,6 +2600,9 @@ function promoteCriticHeadingParagraph(runs: MdRun[]): MdToken | undefined {
     type: 'heading',
     level: headingPrefix.level,
     criticParaMark: kind === 'critic_add' ? 'addition' : 'deletion',
+    // The mark's author and date are the revision's, though a comment may
+    // come first once the marker's span goes
+    criticParaMarkRun: run,
     runs: promotedRuns,
   };
 }
@@ -2637,9 +2677,10 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
         const paragraphClose = findClosingToken(tokens, i, 'paragraph_close');
         const paraRuns = convertInlineTokens(tokens.slice(i + 1, paragraphClose));
         // Only promote at top level: nested contexts (blockquotes, lists) remap
-        // token types and would clobber the heading level.
+        // token types and would clobber the heading level. Comment bodies on
+        // lines of their own after the heading go with it, without the breaks.
         const promoted = listLevel === 0 && blockquoteLevel === 0
-          ? promoteCriticHeadingParagraph(paraRuns)
+          ? promoteCriticHeadingParagraph(withoutCommentBodyLines(paraRuns))
           : undefined;
         result.push(promoted ?? { type: 'paragraph', runs: paraRuns });
         i = paragraphClose + 1;
@@ -5788,7 +5829,7 @@ function formatCriticInnerRuns(runs: MdRun[] | undefined, outer: MdRun, forced: 
         : run);
       continue;
     }
-    if (run.type === 'math' || run.type === 'image') {
+    if (run.type === 'math' || run.type === 'image' || isCommentMarkerRun(run)) {
       formatted.push(run);
       continue;
     }
@@ -5822,6 +5863,54 @@ function generateInlineCriticContent(
   }
   const fallbackRun = mergeRunFormatting({ type: 'text', text: fallbackText }, outer, forced);
   return generateRun(fallbackText, generateRPr(fallbackRun, state.tableRunRPrExtra || undefined));
+}
+
+/** Whether runs hold a comment, a comment range marker or a comment body, at any depth */
+function hasCommentRuns(runs: MdRun[] | undefined): boolean {
+  return !!runs?.some(run => run.type === 'critic_comment' || isCommentMarkerRun(run)
+    || hasCommentRuns(run.innerRuns) || hasCommentRuns(run.oldRuns) || hasCommentRuns(run.newRuns));
+}
+
+/**
+ * Runs for generateRuns that delete `runs`, the payload of `deletion`, with
+ * `outer`'s formatting, and keep their comments, in the form import writes
+ * for a comment on deleted text, {--a --}{=={--b--}==}{>>c<<}: the text
+ * between comments deleted as `deletion` deletes it, a {==...==} anchor
+ * around its own deleted text, and a comment, range marker or body between
+ * the deletions, so its reference isn't deleted text.
+ * generateDeletedCriticContent skips comments, so a comment in a deletion or
+ * a substitution's old text was lost.
+ */
+function deletionWithComments(runs: MdRun[] | undefined, outer: MdRun, deletion: MdRun): MdRun[] {
+  const pieces: MdRun[] = [];
+  let deleted: MdRun[] = [];
+  const flush = () => {
+    if (deleted.length === 0) return;
+    pieces.push({ ...deletion, type: 'critic_del', text: deleted.map(run => run.text).join(''), innerRuns: deleted, oldRuns: undefined, newRuns: undefined, newText: undefined });
+    deleted = [];
+  };
+  const formatted = formatCriticInnerRuns(runs, outer) ?? [];
+  for (let i = 0; i < formatted.length; i++) {
+    const run = formatted[i];
+    if (run.type === 'critic_comment' || isCommentMarkerRun(run)) {
+      flush();
+      pieces.push(run);
+    } else if (run.type === 'critic_highlight' && (formatted[i + 1]?.type === 'critic_comment' || hasCommentRuns(run.innerRuns))) {
+      flush();
+      pieces.push({ ...run, innerRuns: deletionWithComments(run.innerRuns ?? [toTextRunFromInner(run)], run, deletion) });
+    } else if (hasCommentRuns(run.innerRuns) || hasCommentRuns(run.oldRuns) || hasCommentRuns(run.newRuns)) {
+      // A revision in a deletion is deleted with it, both sides of a substitution
+      flush();
+      pieces.push(...deletionWithComments(run.innerRuns, run, deletion),
+        ...deletionWithComments(run.oldRuns, run, deletion), ...deletionWithComments(run.newRuns, run, deletion));
+    } else {
+      // A break takes the formatting around it, as it would in `outer`, where
+      // the deletion it goes in has only `deletion`'s
+      deleted.push(isBreakRun(run) ? { ...mergeRunFormatting(run, outer), type: run.type } : run);
+    }
+  }
+  flush();
+  return pieces;
 }
 
 function generateDeletedCriticContent(
@@ -6013,12 +6102,18 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
       const contentXml = insertedContent(state, () => generateInlineCriticContent(run.innerRuns, run.text, run, state, options, bibEntries, citeprocEngine));
       xml += '<w:ins w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + contentXml + '</w:ins>';
+    } else if (run.type === 'critic_del' && hasCommentRuns(run.innerRuns)) {
+      xml += generateRuns(deletionWithComments(run.innerRuns, run, run), state, options, bibEntries, citeprocEngine);
     } else if (run.type === 'critic_del') {
       const author = run.author || options?.authorName || 'Unknown';
       const date = normalizeToUtcIso(run.date || '', state.timezone);
       const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
       const deletedXml = generateDeletedCriticContent(run.innerRuns, run.text, run, {}, state.tableRunRPrExtra || undefined, state.warnings, state, options);
       xml += deletionXml(deletedXml, author, dateAttr, state);
+    } else if (run.type === 'critic_sub' && hasCommentRuns(run.oldRuns)) {
+      const deletion: MdRun = { ...run, type: 'critic_del', innerRuns: run.oldRuns, oldRuns: undefined, newRuns: undefined, newText: undefined };
+      const addition: MdRun = { ...run, type: 'critic_add', text: run.newText || '', innerRuns: run.newRuns, oldRuns: undefined, newRuns: undefined, newText: undefined };
+      xml += generateRuns([deletion, addition], state, options, bibEntries, citeprocEngine);
     } else if (run.type === 'critic_sub') {
       const author = run.author || options?.authorName || 'Unknown';
       const date = normalizeToUtcIso(run.date || '', state.timezone);
@@ -6029,7 +6124,8 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       xml += '<w:ins w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + insertedXml + '</w:ins>';
     } else if (run.type === 'critic_highlight') {
       if (nextRun?.type === 'critic_comment') {
-        const commentId = state.commentId++;
+        const reserved = run.reservedCommentId;
+        const commentId = reserved !== undefined && !state.comments.some(comment => comment.id === reserved) ? reserved : state.commentId++;
         const author = nextRun.author ?? '';
         const date = normalizeToUtcIso(nextRun.date || '', state.timezone);
         const commentBody = nextRun.commentText || '';
@@ -6409,9 +6505,50 @@ function withParagraphMarkRevision(pPr: string, revision: string): string {
  * around lines that hold only bodies. Import writes the bodies on the lines
  * after their paragraph. A block of body lines keeps one break, joining the
  * lines on either side, unless it ends the paragraph or is all of it.
+ * The lines are those Word shows with changes marked, so a revision's or a
+ * highlight's text, as in {++x\n{#1>>c<<}++}, is read in its place, both
+ * sides of a substitution in turn, and a line can start in one revision and
+ * end in the next.
  */
-function withoutCommentBodyLines(runs: MdRun[]): MdRun[] {
-  if (!runs.some(run => run.type === 'comment_body_with_id')) return runs;
+function withoutCommentBodyLines(source: MdRun[]): MdRun[] {
+  type Side = 'innerRuns' | 'oldRuns' | 'newRuns';
+  const sidesOf = (run: MdRun): Side[] =>
+    run.type === 'critic_add' || run.type === 'critic_del' || run.type === 'critic_sub' || run.type === 'critic_highlight'
+      ? (['innerRuns', 'oldRuns', 'newRuns'] as const).filter(key => !!run[key]?.length)
+      : [];
+  const hasBody = (runs: MdRun[]): boolean => runs.some(run => run.type === 'comment_body_with_id'
+    || sidesOf(run).some(key => hasBody(run[key]!)));
+  if (!hasBody(source)) return source;
+  // Whitespace that shows, as code, a link or a mark, isn't padding, nor is
+  // text's in a revision or a highlight that shows it
+  const showsOwn = (run: MdRun) => !!(run.code || run.href || run.highlight || run.underline || run.strikethrough);
+  const shownRuns = new Set<MdRun>();
+  const shows = (run: MdRun) => shownRuns.has(run) || showsOwn(run);
+  // Each side of a revision or highlight goes between range markers of its
+  // own, which take no room, as `opens` and `closes` hold them
+  const opens = new Map<MdRun, { run: MdRun; key: Side; last: boolean }>();
+  const closes = new Set<MdRun>();
+  const runs: MdRun[] = [];
+  const flatten = (from: MdRun[], shown: boolean) => from.forEach((run, i) => {
+    const keys = sidesOf(run);
+    if (keys.length === 0) {
+      if (shown) shownRuns.add(run);
+      runs.push(run);
+      return;
+    }
+    // A highlight shows its whitespace, but not a comment's range
+    const inner = shown || showsOwn(run) || run.type === 'critic_highlight' && from[i + 1]?.type !== 'critic_comment';
+    keys.forEach((key, k) => {
+      const open: MdRun = { type: 'comment_range_start', text: '' };
+      const close: MdRun = { type: 'comment_range_end', text: '' };
+      opens.set(open, { run, key, last: k === keys.length - 1 });
+      closes.add(close);
+      runs.push(open);
+      flatten(run[key]!, inner);
+      runs.push(close);
+    });
+  });
+  flatten(source, false);
   const lines: MdRun[][] = [[]];
   const breaks: MdRun[] = [];
   for (const run of runs) {
@@ -6422,8 +6559,6 @@ function withoutCommentBodyLines(runs: MdRun[]): MdRun[] {
       lines[lines.length - 1].push(run);
     }
   }
-  // Whitespace that shows, as code, a link or a mark, isn't padding
-  const shows = (run: MdRun) => !!(run.code || run.href || run.highlight || run.underline || run.strikethrough);
   const blank = (run: MdRun) => run.type === 'text' && !run.text.trim() && !shows(run);
   // Range markers take no room, so they stay where they are
   const marker = (run: MdRun) => run.type === 'comment_range_start' || run.type === 'comment_range_end';
@@ -6451,10 +6586,16 @@ function withoutCommentBodyLines(runs: MdRun[]): MdRun[] {
     const bodies = (start: number, end: number) => line.slice(start, end).filter(run => run.type === 'comment_body_with_id' || marker(run));
     return [...(atHead ? bodies(0, head) : []), ...middle, ...(atTail ? bodies(tail, line.length) : [])];
   });
+  // A comment takes no room either, as an anchor's after its highlight
   const bodyLine = (line: MdRun[]) => line.some(run => run.type === 'comment_body_with_id')
-    && line.every(run => run.type === 'comment_body_with_id' || marker(run));
-  // Break k sits between lines k and k + 1
+    && line.every(run => run.type === 'comment_body_with_id' || marker(run) || run.type === 'critic_comment');
+  // Break k sits between lines k and k + 1. A blank line in a revision's
+  // text, two breaks, is a paragraph break that splitCriticParagraphs splits
+  // at, so neither of them goes.
   const dropped = new Set<number>();
+  const drop = (k: number) => {
+    if (!breaks[k].criticParagraphBreak && !breaks[k - 1]?.criticParagraphBreak) dropped.add(k);
+  };
   for (let first = 0; first < trimmed.length;) {
     if (!bodyLine(trimmed[first])) {
       first++;
@@ -6462,9 +6603,9 @@ function withoutCommentBodyLines(runs: MdRun[]): MdRun[] {
     }
     let last = first;
     while (last + 1 < trimmed.length && bodyLine(trimmed[last + 1])) last++;
-    for (let k = first; k < last; k++) dropped.add(k);
-    if (last + 1 < trimmed.length) dropped.add(last);
-    else if (first > 0) dropped.add(first - 1);
+    for (let k = first; k < last; k++) drop(k);
+    if (last + 1 < trimmed.length) drop(last);
+    else if (first > 0) drop(first - 1);
     first = last + 1;
   }
   const kept: MdRun[] = [];
@@ -6472,7 +6613,40 @@ function withoutCommentBodyLines(runs: MdRun[]): MdRun[] {
     kept.push(...line);
     if (k < breaks.length && !dropped.has(k)) kept.push(breaks[k]);
   });
-  return kept;
+  // Each revision and highlight back around its text, or its text in its
+  // place where that's only bodies and range markers, which Word gets
+  // nothing of to revise or highlight
+  const unseen = (side: MdRun[] | undefined) => !!side && side.every(isCommentMarkerRun);
+  const noSides = { oldRuns: undefined, newRuns: undefined, newText: undefined };
+  const rebuilt = (run: MdRun, done: Partial<Record<Side, MdRun[]>>): MdRun[] => {
+    if (run.type !== 'critic_sub') return unseen(done.innerRuns) ? done.innerRuns! : [{ ...run, ...done }];
+    if (!unseen(done.oldRuns) && !unseen(done.newRuns)) return [{ ...run, ...done }];
+    const oldRuns = done.oldRuns ?? run.oldRuns;
+    const newRuns = done.newRuns ?? run.newRuns;
+    return [
+      ...(unseen(done.oldRuns) ? done.oldRuns! : run.text || oldRuns?.length
+        ? [{ ...run, ...noSides, type: 'critic_del' as const, innerRuns: oldRuns }] : []),
+      // A part of one split at display math holds its new text in newRuns alone
+      ...(unseen(done.newRuns) ? done.newRuns! : run.newText || newRuns?.length
+        ? [{ ...run, ...noSides, type: 'critic_add' as const, text: run.newText || '', innerRuns: newRuns }] : []),
+    ];
+  };
+  const frames: Array<{ children: MdRun[]; open?: { run: MdRun; key: Side; last: boolean } }> = [{ children: [] }];
+  const done = new Map<MdRun, Partial<Record<Side, MdRun[]>>>();
+  for (const run of kept) {
+    const open = opens.get(run);
+    if (open) {
+      frames.push({ children: [], open });
+    } else if (closes.has(run)) {
+      const frame = frames.pop()!;
+      const sides = { ...done.get(frame.open!.run), [frame.open!.key]: frame.children };
+      done.set(frame.open!.run, sides);
+      if (frame.open!.last) frames[frames.length - 1].children.push(...rebuilt(frame.open!.run, sides));
+    } else {
+      frames[frames.length - 1].children.push(run);
+    }
+  }
+  return frames[0].children;
 }
 
 /** Paragraph XML with something import reads: a run, as text, deleted
@@ -7247,6 +7421,20 @@ function peopleXml(comments: CommentEntry[]): string {
  * stream. The document and each note are scanned before they're written.
  */
 function prescanCommentIds(tokens: MdToken[], state: DocxGenState): void {
+  const hasIdRange = (runs: MdRun[] | undefined): boolean => !!runs?.some(run => run.type === 'comment_range_start'
+    || hasIdRange(run.innerRuns) || hasIdRange(run.oldRuns) || hasIdRange(run.newRuns));
+  const prescanRuns = (runs: MdRun[] = []) => {
+    runs.forEach((run, i) => {
+      // A {==...==} anchor's comment gets its ID before the ID ranges in its
+      // text, as it starts first. Import closes ranges that end together in
+      // ID order, so with their IDs the other way round, the order of their
+      // {/id} markers flipped on each round trip.
+      if (run.type === 'critic_highlight' && runs[i + 1]?.type === 'critic_comment' && hasIdRange(run.innerRuns)) {
+        run.reservedCommentId = state.commentId++;
+      }
+      prescanRun(run);
+    });
+  };
   const prescanRun = (run: MdRun) => {
     if (run.type === 'comment_range_start') {
       const mdId = run.commentId || '';
@@ -7263,18 +7451,18 @@ function prescanCommentIds(tokens: MdToken[], state: DocxGenState): void {
         }
       }
     }
+    // Markers and bodies can be in a revision's or a highlight's text too
+    prescanRuns(run.innerRuns);
+    prescanRuns(run.oldRuns);
+    prescanRuns(run.newRuns);
   };
   for (const token of tokens) {
-    for (const run of token.runs) {
-      prescanRun(run);
-    }
+    prescanRuns(token.runs);
     // Also scan runs inside table cells
     if (token.rows) {
       for (const row of token.rows) {
         for (const cell of row.cells) {
-          for (const run of cell.runs) {
-            prescanRun(run);
-          }
+          prescanRuns(cell.runs);
         }
       }
     }
