@@ -717,6 +717,13 @@ export function directiveRest(comment: string): string | undefined {
   return reads ? '' : undefined;
 }
 
+/** Whether export reads Markdown `text` as one paragraph over all its lines */
+export function readsAsParagraph(text: string): boolean {
+  citationTextMd ??= createMarkdownIt();
+  const tokens = citationTextMd.parse(text, {});
+  return tokens.length === 3 && tokens[0].type === 'paragraph_open' && tokens[0].map?.[1] === text.split('\n').length;
+}
+
 /** The HTML blocks export reads in Markdown `text`, not in a quote or list:
  *  each one's lines, from `start` to before `end`, and its text */
 export function htmlBlocksIn(text: string): Array<{ start: number; end: number; content: string }> {

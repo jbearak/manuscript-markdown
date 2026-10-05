@@ -6621,8 +6621,7 @@ describe('HTML around a table in its block', () => {
     // Whose lines were text after the comment's block, which ended on its line
     ['a <pre> that goes on past a comment on its line', '', '\n<!-- note --><pre>if ready:\n    run()\n</pre>\n', '', '\n\n<!-- note -->\n<pre>if ready:\n    run()\n</pre>\n'],
     ['a <pre> that goes on past a directive on its line', '', '\n<!-- table-font-size: 11 --><pre>if ready:\n    run()\n</pre>\n', '', '\n\n<pre>if ready:\n    run()\n</pre>\n'],
-    // Which the line of a tag in it ended, and escaped
-    ['a comment over lines, one of which starts with a tag', '', '\nSource <!-- hidden\n<div>secret</div> -->\n', '', '\n\nSource <!-- hidden\n<div>secret</div> -->\n'],
+    ['a <pre> that goes on past the end of a comment over lines', '', '\n<!-- note\nend --><pre>if ready:\n    run()\n</pre>\n', '', '\n\n<!-- note\nend -->\n<pre>if ready:\n    run()\n</pre>\n'],
     ['a <pre> on a line of text in a comment', '', '\nSource <!-- a\nb <pre> -->\nc\n', '', '\n\nSource <!-- a\nb <pre> -->\nc\n'],
     // Which went as one, as between blocks
     ['blank lines in a <pre>', '<pre>a\n\n\nb</pre>', '', '<pre>a\n\n\nb</pre>\n\n', '\n'],
@@ -6707,9 +6706,13 @@ describe('HTML around a table in its block', () => {
     ['a <pre> around it', '<pre>\n', '\n</pre>\n'],
     ['a <pre> after it whose end is in a comment', '', '\nSource <pre><!-- </pre> -->\n    run()\n</pre>\n'],
     ['a <script> after it whose end is in a comment', '', '\n<span>a</span> <script>// </pre>\nrun()\n</script>\n'],
+    ['a comment over lines after text, one of which starts with a tag', '', '\nSource <!-- hidden\n<div>secret</div> -->\n'],
+    ['a comment over lines after text, one of which would be a heading', '', '\nSource <!-- hidden\n# Sources\nsecret -->\n'],
   ])('drops %s, which Markdown reads otherwise, from around a table that leaves HTML', async (_name, beforeHtml, afterHtml) => {
     // The <pre> before it, as a block of its own, went on over the table,
-    // and an end in a comment ended it early
+    // and an end in a comment ended it early. A line in a comment a line of
+    // text starts that starts a block, as a heading, ended the paragraph,
+    // and showed what the comment hid
     const zip = await JSZip.loadAsync((await convertMdToDocx(beforeHtml + '<table><tr><td>XX</td><td>b</td></tr></table>' + afterHtml)).docx);
     const xml = await zip.file('word/document.xml')!.async('string');
     const tracked = xml.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>');

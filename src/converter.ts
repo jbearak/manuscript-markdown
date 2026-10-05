@@ -13,7 +13,7 @@ import { computeCodeRegions, computeMarkdownRegions, isInsideCodeRegion } from '
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { citationEndInText, compareNoteLabels, customStyleId, directiveRest, htmlBlocksIn, linkifiedColons, linkifiedText, linkifyMatches, startsHtmlBlock } from './md-to-docx';
+import { citationEndInText, compareNoteLabels, customStyleId, directiveRest, htmlBlocksIn, linkifiedColons, linkifiedText, linkifyMatches, readsAsParagraph, startsHtmlBlock } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { tableContentsFingerprint, tableFirstRowText } from './table-metadata';
@@ -7804,9 +7804,15 @@ function detachedTableHtml(html: string): string | undefined | null {
   // as Word's paragraph does, whatever the Markdown wrote it as: its text,
   // with its character references read and its tags gone
   let sources = false;
+  // Or of lines a comment or tag goes on over, which aren't escaped, where
+  // one starts a block, as # Heading would, which ends the paragraph there
+  // and shows what the comment hid
+  let unread = false;
   const endTexts = () => {
     if (texts.length === 1 && SOURCES_HEADING_RE.test(unescapeAll(texts[0].replace(/<[^>]*>/g, '').replace(/\\/g, '\\\\')).trim())) sources = true;
-    if (texts.length > 0) out.push(...htmlLinesAsText(texts));
+    const text = htmlLinesAsText(texts);
+    if (texts.length > 1 && !readsAsParagraph(text.join('\n'))) unread = true;
+    if (texts.length > 0) out.push(...text);
     texts = [];
   };
   let inParagraph = false;
@@ -7841,12 +7847,14 @@ function detachedTableHtml(html: string): string | undefined | null {
       continue;
     }
     endTexts();
-    // A block that ends on its line before a <pre> on it does, as a comment
-    // before one, goes there, and the <pre> starts one of its own, as its
-    // lines would be text after the block, with their indents gone
-    const split = end === k + 1 && preformatted[k] > 0;
-    const block = split ? [line.slice(0, preformatted[k])] : lines.slice(k, end);
+    // A block that ends at a marker on its last line before a <pre> there
+    // does, as a comment before one, goes there, and the <pre> starts one
+    // of its own, as its lines would be text after the block, with their
+    // indents gone
     const marker = htmlBlockEndMarker(line.trimStart());
+    const split = !!marker && preformatted[end - 1] > 0;
+    const block = lines.slice(k, end);
+    if (split) block[block.length - 1] = block[block.length - 1].slice(0, preformatted[end - 1]);
     if (marker && !marker.test(block[block.length - 1])) return null;
     const rest = directiveRest(block.join('\n'));
     if (rest === undefined) {
@@ -7861,13 +7869,15 @@ function detachedTableHtml(html: string): string | undefined | null {
       out.push(htmlLinesAsText([rest]).join('\n'));
       inParagraph = true;
     }
+    k = end - 1;
     if (split) {
-      lines[k] = line.slice(preformatted[k]);
+      lines[k] = lines[k].slice(preformatted[k]);
+      inComment[k] = false;
       preformatted[k--] = -1;
-    } else k = end - 1;
+    }
   }
   endTexts();
-  if (sources) return null;
+  if (sources || unread) return null;
   return out.join('\n').trim() || undefined;
 }
 
