@@ -9237,12 +9237,17 @@ describe('Highlights across runs', () => {
 
   test('reads many runs in one tracked change in linear time', async () => {
     // The escape after a highlight read the Markdown before each run, which
-    // copied all of it
-    const md = '{++' + Array.from({ length: 80000 }, () => 'a *b* ').join('').trimEnd() + '++}\n';
-    const docx = (await convertMdToDocx(md)).docx;
-    const start = performance.now();
-    expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(md);
-    expect(performance.now() - start).toBeLessThan(3000);
+    // copied all of it. Four times the runs take about four times as long,
+    // not sixteen, however fast the machine is.
+    const time = async (runs: number) => {
+      const md = '{++' + Array.from({ length: runs }, () => 'a *b* ').join('').trimEnd() + '++}\n';
+      const docx = (await convertMdToDocx(md)).docx;
+      const start = performance.now();
+      expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(md);
+      return performance.now() - start;
+    };
+    const small = await time(10000);
+    expect(await time(40000) / small).toBeLessThan(8);
   });
 
   test('writes a paragraph of many comments in linear time', () => {
