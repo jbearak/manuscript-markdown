@@ -6626,6 +6626,22 @@ describe('Blocks a note can\'t hold', () => {
     expect(strip((await convertDocx(docx)).markdown)).toBe(expected);
   });
 
+  test.each([
+    ['an alert', note('> [!NOTE]\n> B.')],
+    ['an alert with its text after a blank line', note('> [!NOTE]\n>\n> B.')],
+    ['an empty list item', note('-\n- B.')],
+    ['an empty heading', note('#\n\nB.')],
+  ])('writes %s with no empty paragraph, or space before its text', async (_name, md) => {
+    // An empty list item, heading or alert left an empty paragraph, which
+    // import dropped, and an alert's text started with a space for the line
+    // end after its marker
+    const { docx } = await convertMdToDocx(md);
+    const xml = await (await JSZip.loadAsync(docx)).file('word/footnotes.xml')!.async('string');
+    const body = /<w:footnote [^>]*w:id="1"[^>]*>([\s\S]*?)<\/w:footnote>/.exec(xml)![1];
+    const paragraphs = [...body.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map(p => p[0].replace(/<w:pPr>[\s\S]*?<\/w:pPr>|<w:rPr>[\s\S]*?<\/w:rPr>/g, '').replace(/<[^>]+>/g, ''));
+    expect(paragraphs).toEqual(['A.', 'B.']);
+  });
+
   test('writes a code block that starts a note as its lines', async () => {
     const { docx } = await convertMdToDocx('T.[^1]\n\n[^1]: ```\n    a\n    b\n    ```\n');
     expect(strip((await convertDocx(docx)).markdown)).toBe('T.[^1]\n\n[^1]:\n\n    a\\\n    b\n');

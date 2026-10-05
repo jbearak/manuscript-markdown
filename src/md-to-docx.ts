@@ -8087,8 +8087,16 @@ export async function convertMdToDocx(
     for (const warning of noteWarnings) {
       if (warning) state.warnings.push(warning + ' (not supported). Move it outside the note for round-trip fidelity.');
     }
-    const noteTokens = bodyTokens.flatMap((t): MdToken[] => t.type === 'hr' || isEmptyCodeBlock(t) ? []
-      : t.type === 'code_block' ? [{ ...t, runs: t.runs.flatMap(codeBlockLines) }] : [t]);
+    const noteTokens = bodyTokens.flatMap((t): MdToken[] => {
+      if (t.type === 'hr' || isEmptyCodeBlock(t)) return [];
+      if (t.type === 'code_block') return [{ ...t, runs: t.runs.flatMap(codeBlockLines) }];
+      // An alert's text starts after the line end that follows its marker,
+      // and an empty list item, heading or alert is no paragraph, which
+      // import would drop
+      const start = t.alertLead ? t.runs.findIndex(run => run.type !== 'softbreak') : 0;
+      if (start === -1 || (t.type === 'list_item' || t.type === 'heading' || t.type === 'blockquote') && t.runs.length === 0) return [];
+      return [start > 0 ? { ...t, runs: t.runs.slice(start) } : t];
+    });
     // Generate paragraph OOXML for the note body
     const selfRefTag = state.notesMode === 'endnotes' ? 'w:endnoteRef' : 'w:footnoteRef';
     const pStyle = state.notesMode === 'endnotes' ? 'EndnoteText' : 'FootnoteText';
