@@ -6651,6 +6651,23 @@ describe('HTML around a table in its block', () => {
     expect(again.match(/<w:tbl>/g)).toHaveLength(1);
   });
 
+  test.each([
+    ['of one row', '\n    +---+---+\n    | a | b |\n    +---+---+\n', '\\+---+---+\n| a | b |\n\\+---+---+'],
+    ['with a header', '\n    +---+\n    | a |\n    +===+\n    | b |\n    +---+\n', '\\+---+\n| a |\n\\+===+\n| b |\n\\+---+'],
+  ])('keeps a grid table\'s lines %s indented as code in the HTML around a table that leaves HTML as text', async (_name, afterHtml, text) => {
+    // With their indents gone, they read as a table of their own, which the
+    // next export added to Word
+    const zip = await JSZip.loadAsync((await convertMdToDocx('<table><tr><td>XX</td><td>b</td></tr></table>' + afterHtml)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const tracked = xml.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>');
+    expect(tracked).not.toBe(xml);
+    zip.file('word/document.xml', tracked);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('+----------+-----+\n| {++XX++} | b   |\n+----------+-----+\n\n' + text + '\n');
+    const again = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    expect(again.match(/<w:tbl>/g)).toHaveLength(1);
+  });
+
   test('keeps a <!-- references --> at the end of a table\'s HTML block, which ends it', async () => {
     // Import took it for the marker of a bibliography at the end, and the
     // block went on over the text written after it
@@ -6665,6 +6682,18 @@ describe('HTML around a table in its block', () => {
     const md = '<div>\n\\begin{equation}\nx\n\\end{equation}\n<table><tr><td>a</td></tr></table>\n</div>\n';
     expect((await convertMdToDocx(md)).warnings).toContain('HTML around a table in an HTML block with a LaTeX environment dropped during conversion (not supported). Move the environment out of the block for round-trip fidelity.');
     expect(await roundTrip(md)).toBe(table('a') + '\n');
+  });
+
+  test.each([
+    ['in dollar signs already', '<div>\n$' + '$\\begin{equation}\nx\n\\end{equation}$' + '$\n<table><tr><td>a</td></tr></table>\n</div>\n'],
+    ['in dollar signs in a comment', '<div>\n<!--\n$' + '$\\begin{equation}x\\end{equation}$' + '$\n-->\n<table><tr><td>a</td></tr></table>\n</div>\n'],
+  ])('keeps the HTML around a table in a block with a LaTeX environment %s, which export leaves as it is', async (_name, md) => {
+    // It went, as one export wraps, though export added nothing to it
+    const { warnings } = await convertMdToDocx(md);
+    expect(warnings.some(w => w.includes('LaTeX environment'))).toBe(false);
+    const markdown = await roundTrip(md);
+    expect(markdown).toContain('<div>');
+    expect(await roundTrip(markdown)).toBe(markdown);
   });
 
   test('drops the HTML around tables a <pre> holds together in one block', async () => {

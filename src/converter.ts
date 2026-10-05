@@ -11,7 +11,7 @@ import { HTML_OPEN_CLOSE_TAG_RE, HTML_TAG_RE } from 'markdown-it/lib/common/html
 import { isMdAsciiPunct, isPunctChar, isWhiteSpace, unescapeAll } from 'markdown-it/lib/common/utils.mjs';
 import { computeCodeRegions, computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
 import { findDollarMathAt } from './math-delimiters';
-import { getDisplayWidth, readGridTableCells, type TableAlign } from './grid-table-preprocess';
+import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
 import { citationEndInText, compareNoteLabels, customStyleId, directiveRest, htmlBlocksIn, linkifiedColons, linkifiedText, linkifyMatches, readsAsParagraph, startsHtmlBlock } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
@@ -7661,9 +7661,11 @@ function htmlLinesAsText(lines: string[]): string[] {
   // A \ before one of them, which escapeMarkdownChars leaves, as it escapes
   // no character it doesn't see, but which would escape its < or &. A line
   // that would read as the Sources heading of a bibliography Word holds as
-  // text, which import drops with all after it, starts with a reference.
+  // text, which import drops with all after it, starts with a reference, and
+  // one that would read as a grid table's border, with the lines between
+  // as its rows, as one indented as code was, with a \.
   return escaped.join('\n').split(mark).map((part, k) => (k < raws.length && part.endsWith('\\') ? part + '\\' : part) + (raws[k] ?? ''))
-    .join('').split('\n').map(line => SOURCES_HEADING_RE.test(line) ? line.replace('S', '&#83;') : line);
+    .join('').split('\n').map(line => SOURCES_HEADING_RE.test(line) ? line.replace('S', '&#83;') : GRID_TABLE_SEPARATOR_RE.test(line) ? '\\' + line : line);
 }
 
 /** For each line of the HTML around a table, read as the browser read it

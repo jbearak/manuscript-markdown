@@ -1957,6 +1957,24 @@ function startsAdjacentList(item: MdToken, prevTopOrdered: boolean | undefined):
     && (!!item.ordered !== prevTopOrdered || (!!item.ordered && !!item.listStart));
 }
 
+/** Marks each HTML block in `tokens` that a bare LaTeX environment in
+ *  `text` was wrapped in as display math (`meta.wrappedLatex`), which the
+ *  block's text can't tell from dollar signs the Markdown has: by the lines
+ *  of `text` wrapped with a mark at the start of each, which are the parsed
+ *  text's (`lineCount` of them), or else by any line that starts as one */
+function markWrappedLatexBlocks(tokens: Token[], text: string, lineCount: number): void {
+  let code = 0xF8FF;
+  while (text.includes(String.fromCharCode(code))) code--;
+  const mark = String.fromCharCode(code);
+  const lines = preprocessCriticMarkup(wrapBareLatexEnvironments(text, mark)).split('\n');
+  for (const token of tokens) {
+    if (token.type !== 'html_block' || !token.map) continue;
+    const wraps = lines.length === lineCount ? lines.slice(token.map[0], token.map[1]).some(line => line.includes(mark))
+      : [...token.content.matchAll(/^[ ]{0,3}\$\$\\begin\{([a-zA-Z*]+)\}/gm)].some(match => DISPLAY_MATH_ENVIRONMENTS.has(match[1]));
+    if (wraps) token.meta = { ...token.meta, wrappedLatex: true };
+  }
+}
+
 /**
  * `tableNumberFormat` is the table number formatting `markdown` got, if it
  * changed anything, so that `originalText` can get it too: quote spacing
@@ -1977,6 +1995,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
   const env: { references?: Record<string, unknown>; documentLinkDefinitions?: Record<string, unknown> } =
     linkDefinitions ? { documentLinkDefinitions: linkDefinitions } : {};
   const tokens = md.parse(processed, env);
+  if (wrapped !== deLazified) markWrappedLatexBlocks(tokens, deLazified, processed.split('\n').length);
 
   const processedLines = processed.split('\n');
   // Number formatting can widen a table's cells past their padding, so
@@ -3072,8 +3091,8 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
           // So does a LaTeX environment at a line's start, which parseMd
           // wrapped in two dollar signs each side as display math, with its
           // blank lines gone, before the block was read, which the Markdown
-          // didn't hold
-          const wrappedLatex = [...htmlContent.matchAll(/^[ ]{0,3}\$\$\\begin\{([a-zA-Z*]+)\}/gm)].some(match => DISPLAY_MATH_ENVIRONMENTS.has(match[1]));
+          // didn't hold (see markWrappedLatexBlocks)
+          const wrappedLatex = !!token.meta?.wrappedLatex;
           if (wrappedLatex) warnings?.push(LATEX_HTML_AROUND_TABLES_WARNING);
           if (htmlTables.length > 0) {
             for (const [k, meta] of htmlTables.entries()) {

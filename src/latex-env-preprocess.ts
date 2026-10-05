@@ -144,7 +144,7 @@ function overlapsAnyZone(start: number, end: number, zones: Zone[]): boolean {
  * Blank lines inside the wrapped block are collapsed to single newlines so
  * markdown-it doesn't split them into separate paragraphs.
  */
-export function wrapBareLatexEnvironments(text: string): string {
+export function wrapBareLatexEnvironments(text: string, mark = ''): string {
 	// Fast path: no \begin{ means nothing to do
 	if (!text.includes('\\begin{')) return text;
 
@@ -199,7 +199,7 @@ export function wrapBareLatexEnvironments(text: string): string {
 	let result = text;
 	for (let i = replacements.length - 1; i >= 0; i--) {
 		const r = replacements[i];
-		result = result.slice(0, r.start) + r.replacement + result.slice(r.end);
+		result = result.slice(0, r.start) + mark + r.replacement + result.slice(r.end);
 	}
 
 	return result;
