@@ -688,8 +688,11 @@ function convertHtmlTable(text: string, pad: boolean): string | null {
   const tables = extractHtmlTables(trimmed);
   // Subtle bug guard: mixed text/table selections must remain unchanged.
   // So must a table with a comment between its rows or cells, which a pipe
-  // or grid table can't hold, so that it isn't lost.
-  if (tables.length !== 1 || tables[0].comments) return null;
+  // or grid table can't hold, so that it isn't lost, or one in a cell with
+  // a line end, which would make a line of the cell, or a |, which would end
+  // it or take a backslash.
+  if (tables.length !== 1 || tables[0].comments || tables[0].rows.some(row => row.cells.some(cell =>
+    cell.runs.some(run => run.type === 'html_comment' && /[\n|]/.test(run.text))))) return null;
   const rows = tables[0].rows;
 
   // Reject colspan/rowspan

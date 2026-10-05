@@ -1466,6 +1466,9 @@ describe('HTML table support for Expand/Compact Table', () => {
     ['row', '<table>\n<!-- <tr><td>old</td></tr> -->\n<tr><td>a</td></tr>\n</table>'],
     ['cell', '<table><tr><!-- <td>old</td> --><td>a</td></tr></table>'],
     ['rows alone', '<table><!-- <tr><td>old</td></tr> --></table>'],
+    // Which made a line of the cell, or a | in it, which ended it
+    ['line end in a cell', '<table><tr><td>a<!-- one\ntwo -->b</td><td>q</td></tr></table>'],
+    ['| in a cell', '<table><tr><td>a<!-- x | y -->b</td><td>q</td></tr></table>'],
   ])('leaves a table with a %s in a comment unchanged', (_name, html) => {
     // A pipe or grid table can't hold the comment, which was deleted
     expect(reflowTable(html).newText).toBe(html);

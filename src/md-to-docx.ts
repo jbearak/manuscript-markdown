@@ -2963,18 +2963,11 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
           });
         } else {
           const htmlTables = extractHtmlTables(htmlContent);
-          if (htmlTables.length > 0) {
+          if (htmlTables.some(meta => meta.rows.length > 0)) {
             for (const meta of htmlTables) {
               // A comment between rows or cells hides them, as the preview
               // does, but Word's table can't hold it
-              if (meta.comments && meta.rows.length > 0) {
-                warnings?.push('Comment between an HTML table\'s rows or cells dropped during conversion (not supported). Move it outside the table for round-trip fidelity.');
-              } else if (meta.comments) {
-                // Comments alone, which hide all its rows, as nothing shows
-                // in the preview, and as a block of comments, hidden in Word
-                warnings?.push('HTML table whose rows are all in comments exported as its comments (not supported). Move the comments outside the table for round-trip fidelity.');
-                result.push({ type: 'paragraph', runs: meta.comments.map(text => ({ type: 'html_comment' as const, text })) });
-              }
+              if (meta.comments) warnings?.push('Comment between an HTML table\'s rows or cells dropped during conversion (not supported). Move it outside the table for round-trip fidelity.');
               if (meta.rows.length > 0) {
                 // Keep this mapping explicit so HtmlTableRun/MdRun shape changes
                 // cannot silently alter assignability behavior.
@@ -2998,7 +2991,12 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
             }
           } else {
             // Preserve non-table raw HTML blocks as literal text so user content
-            // like <tag> is not silently dropped during MD→DOCX parsing.
+            // like <tag> is not silently dropped during MD→DOCX parsing. So is
+            // a block whose tables have their rows all in comments, which the
+            // preview shows nothing of, but Word's table can't hold, and
+            // hidden, would lose the rest of the block, and make a comment
+            // that reads as a directive one.
+            if (htmlTables.length > 0) warnings?.push('HTML table whose rows are all in comments exported as text (not supported). Move the comments outside the table for round-trip fidelity.');
             result.push({
               type: 'paragraph',
               runs: [{ type: 'text', text: htmlContent.replace(/\n$/, '') }]

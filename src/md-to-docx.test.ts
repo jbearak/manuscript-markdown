@@ -491,17 +491,24 @@ describe('parseMd HTML tables', () => {
   });
 
   it.each([
-    ['a row', '<table><!-- <tr><td>old</td></tr> --></table>', ['<!-- <tr><td>old</td></tr> -->']],
-    ['a cell', '<table><tr><!-- <td>old</td> --></tr></table>', ['<!-- <td>old</td> -->']],
-    ['rows', '<table>\n<!-- <tr><td>a</td></tr> -->\n<!-- <tr><td>b</td></tr> -->\n</table>', ['<!-- <tr><td>a</td></tr> -->', '<!-- <tr><td>b</td></tr> -->']],
-  ])('writes a table with only %s in comments as its comments', async (_name, markdown, comments) => {
-    // Which wrote the table's HTML as text, which Word showed, though the
-    // preview shows nothing
+    ['a row', '<table><!-- <tr><td>old</td></tr> --></table>'],
+    ['a cell', '<table><tr><!-- <td>old</td> --></tr></table>'],
+    ['rows, in a div with a caption,', '<div>\n<p>Cap</p>\n<table>\n<!-- <tr><td>a</td></tr> -->\n<!-- <tr><td>b</td></tr> -->\n</table>\n</div>'],
+  ])('writes a table with only %s in comments as text, as other HTML, with a warning', async (_name, markdown) => {
+    // Which Word's table can't hold, and hidden, lost the rest of the block
     const tokens = parseMd(markdown);
     expect(tokens.map(t => t.type)).toEqual(['paragraph']);
-    expect(tokens[0].runs).toEqual(comments.map(text => ({ type: 'html_comment', text })));
+    expect(tokens[0].runs).toEqual([{ type: 'text', text: markdown }]);
     const { warnings } = await convertMdToDocx(markdown);
-    expect(warnings).toContain('HTML table whose rows are all in comments exported as its comments (not supported). Move the comments outside the table for round-trip fidelity.');
+    expect(warnings).toContain('HTML table whose rows are all in comments exported as text (not supported). Move the comments outside the table for round-trip fidelity.');
+  });
+
+  it('applies no directive in a comment in a table with only comments', async () => {
+    // Which, as a comment of its own, set the next table's font size
+    const { docx } = await convertMdToDocx('<table><!-- table-font-size: 24 --></table>\n\n| a |\n| --- |\n| b |\n');
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml).not.toContain('<w:sz w:val="48"/>');
   });
 
   it.each([
