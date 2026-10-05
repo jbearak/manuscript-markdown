@@ -8996,6 +8996,22 @@ describe('Links of more than one run', () => {
     expect(await roundTrip(md.slice(0, -1))).toBe(md);
   });
 
+  test('writes a substitution whose insertion goes on after the link it starts in whole', async () => {
+    // The link's runs took the deletion and the insertion's start, and a
+    // span of the rest of the insertion ended at the ++} in its code
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com) z')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const revision = ' w:author="A" w:date="2024-01-01T00:00:00Z"';
+    const replaced = xml.replace('<w:r><w:t>ab</w:t></w:r></w:hyperlink>', '<w:del w:id="91"' + revision + '><w:r><w:delText>a</w:delText></w:r></w:del>'
+      + '<w:ins w:id="92"' + revision + '><w:r><w:t>b</w:t></w:r></w:ins></w:hyperlink>'
+      + '<w:ins w:id="93"' + revision + '><w:r><w:rPr><w:rStyle w:val="CodeChar"/></w:rPr><w:t xml:space="preserve">c ++} d</w:t></w:r></w:ins>');
+    expect(replaced).not.toBe(xml);
+    zip.file('word/document.xml', replaced);
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(md).toBe('{~~[a](https://e.com)~>[b](https://e.com)`c ++} d`~~} z\n');
+    expect(await roundTrip(md.slice(0, -1))).toBe(md);
+  });
+
   test('keeps a link whose text starts with an inserted # a link, not a heading', async () => {
     // Export read the link's first run, {++# ++}, as an inserted heading's
     const md = '[{++# 123++}{++ (fixed)++}](https://e.com)';

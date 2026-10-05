@@ -5719,17 +5719,23 @@ function linkGroup(
     }
     items.push(next);
   }
-  // A substitution the group would cut, of deletions at its end and an
-  // insertion of the same author and time after a split or the link's end,
-  // is left to renderSubstitutionRun after the runs before it, as a span of
-  // its deletion could hold no --} in code, as {~~ can
+  // A substitution the group would cut, of deletions, and insertions or
+  // not, at its end and an insertion of the same author and time after a
+  // split or the link's end, is left to renderSubstitutionRun after the runs
+  // before it, as a span of either side could hold no --} or ++} in code,
+  // as {~~ can
   const last = items[items.length - 1]?.revision;
-  if (last?.type === 'deletion') {
+  if (last) {
     const ofLast = (item: ContentItem | undefined, type: RevisionInfo['type']) =>
       isSubstitutionItem(item) && item.revision?.type === type && item.revision.author === last.author && item.revision.date === last.date;
+    let from = items.length;
+    while (from > 0 && ofLast(items[from - 1], 'addition')) from--;
+    const additions = from;
+    while (from > 0 && ofLast(items[from - 1], 'deletion')) from--;
     let k = start + items.length;
-    while (k < end && ofLast(segment[k], 'deletion')) k++;
-    if (k < end && ofLast(segment[k], 'addition')) while (items.length > 0 && ofLast(items[items.length - 1], 'deletion')) items.pop();
+    // More deletions can come after deletions, before the insertion
+    if (additions === items.length) while (k < end && ofLast(segment[k], 'deletion')) k++;
+    if (from < additions && k < end && ofLast(segment[k], 'addition')) items.splice(from);
   }
   if (items.length < 2) return undefined;
   const href = first.href;
