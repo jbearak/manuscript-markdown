@@ -5412,6 +5412,14 @@ describe('Word text that reads as Markdown', () => {
     expect(performance.now() - start).toBeLessThan(1500);
   });
 
+  test('reads a long run of citations for tags in linear time', () => {
+    // Each citation's search for a < read the run to its end
+    const start = performance.now();
+    expect(wrapWithFormatting('[@a] '.repeat(300000), DEFAULT_FORMATTING)).toBe('[@a] '.repeat(300000));
+    // Some 300 ms here, and four seconds read to the end for each citation
+    expect(performance.now() - start).toBeLessThan(1500);
+  });
+
   test('escapes a long run of [ in linear time', () => {
     // Each [ looked for its ] through the rest of the text
     const start = performance.now();

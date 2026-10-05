@@ -707,6 +707,9 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
   // bracket export would read as a citation is text.
   const keys = new Set<number>();
   const prefixTags = new Set<number>();
+  // The next < from the citation at hand, found once for the whole text,
+  // not again from each citation's [
+  let tag = text.indexOf('<');
   // As export reads one: an @ after the [ takes it to the next ], past any
   // [ before it, and whatever follows, as [@a[b] or [@a](b) do; any other
   // [ starts one only with no [ before its ] (see citationEnd)
@@ -725,10 +728,11 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
     for (const [start, end] of raw) for (let k = start; k < end; k++) keys.add(k);
     // A tag in a prefix, which export decodes, has its < escaped, not
     // written as a reference, whose ; would end an item
-    for (let k = text.indexOf('<', i); k !== -1 && k < close; k = text.indexOf('<', k + 1)) {
-      HTML_LIKE_TAG_AT.lastIndex = k;
+    while (tag !== -1 && tag < i) tag = text.indexOf('<', tag + 1);
+    for (; tag !== -1 && tag < close; tag = text.indexOf('<', tag + 1)) {
+      HTML_LIKE_TAG_AT.lastIndex = tag;
       const name = HTML_LIKE_TAG_AT.exec(text)?.[1];
-      if (!keys.has(k) && name && MARKDOWN_HTML_SENSITIVE_TAGS.has(name.toLowerCase())) prefixTags.add(k);
+      if (!keys.has(tag) && name && MARKDOWN_HTML_SENSITIVE_TAGS.has(name.toLowerCase())) prefixTags.add(tag);
     }
     i = close;
   }
