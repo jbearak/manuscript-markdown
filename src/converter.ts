@@ -7606,6 +7606,34 @@ function htmlLinesAsText(lines: string[]): string[] {
     .join('').split('\n');
 }
 
+// A comment as the browser reads it, to its end, if it has one, at lastIndex
+const BROWSER_COMMENT_AT = /<!--(?:-?>|[\s\S]*?(--!?>))/y;
+
+/** HTML from a table's block with each comment ending where the browser
+ *  read its end, as a block of its own would read on past it, over the
+ *  table: one the browser ended at a --!> ends at a --> instead, and one
+ *  with no end, which ran to the end of the block, gets one */
+function withMarkdownCommentEnds(html: string): string {
+  let out = '';
+  let from = 0;
+  for (let i = html.indexOf('<'); i !== -1; i = html.indexOf('<', i + 1)) {
+    if (html.startsWith('<!--', i)) {
+      BROWSER_COMMENT_AT.lastIndex = i;
+      const comment = BROWSER_COMMENT_AT.exec(html);
+      if (!comment) return out + html.slice(from).replace(/\s*$/, ' -->');
+      if (comment[1] === '--!>') {
+        out += html.slice(from, i + comment[0].length - 4) + '-->';
+        from = i + comment[0].length;
+      }
+      i += comment[0].length - 1;
+    } else {
+      HTML_TAG_AT.lastIndex = i;
+      i += (HTML_TAG_AT.exec(html)?.[0].length ?? 1) - 1;
+    }
+  }
+  return out + html.slice(from);
+}
+
 /** The HTML around a table as blocks of their own, as it goes around one in
  *  another format, which Markdown reads as it read none of the table's
  *  block: its HTML blocks as they are, and its other lines as text, as
@@ -7616,7 +7644,7 @@ function htmlLinesAsText(lines: string[]): string[] {
  *  as a line of one tag doesn't start a block after text, so it reads it
  *  again. */
 function detachedTableHtml(html: string): string | undefined {
-  let lines = html.split('\n').map(text => ({ text, escaped: false }));
+  let lines = withMarkdownCommentEnds(html).split('\n').map(text => ({ text, escaped: false }));
   for (let changed = true; changed;) {
     changed = false;
     // Each line in an HTML block, with what's left of it where the block

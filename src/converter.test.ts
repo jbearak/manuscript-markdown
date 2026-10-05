@@ -6479,6 +6479,9 @@ describe('HTML around a table in its block', () => {
     ['a backslash before a character reference or a tag', '', '\nSource\\&amp; and a\\\\<b>b</b>\n', '',
       '\n\nSource\\\\&amp; and a\\\\\\\\<b>b</b>\n'],
     // Which export reads as no directive, but which went as one
+    // Which the browser ended at a --!>, or at the end of the block, but
+    // which, a block of their own, read on over the table
+    ['comments the browser ends where Markdown reads no end', '<!-- cap --!>', ' <!-- open\n', '<!-- cap -->\n\n', '\n\n<!-- open -->\n'],
     ['comments with a value no table directive reads', '', '\nSource\n<!-- table-digits: TBD -->\n<!-- table-col-widths: TBD -->\n', '',
       '\n\nSource\n<!-- table-digits: TBD -->\n<!-- table-col-widths: TBD -->\n'],
   ])('keeps %s around a table that leaves HTML, as it read', async (_name, beforeHtml, afterHtml, beforeMd, afterMd) => {
