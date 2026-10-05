@@ -2100,8 +2100,10 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
       const lineNumAt = (offset: number): number => {
         if (!lineEnds) {
           lineEnds = [];
+          // A line feed or carriage return, alone or both, as the scanner
+          // reads them
           for (let i = 0; i < scanText.length; i++) {
-            if (scanText[i] === '\n') lineEnds.push(i);
+            if (scanText[i] === '\n' || (scanText[i] === '\r' && scanText[i + 1] !== '\n')) lineEnds.push(i);
           }
         }
         let lo = 0;
