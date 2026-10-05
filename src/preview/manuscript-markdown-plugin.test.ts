@@ -2335,6 +2335,15 @@ describe('Citations in the preview', () => {
     expect(renderWithPlugin(md, 'github')).toContain(html);
   });
 
+  it.each([
+    ['## {++Cites [@a;\n@b]\nTail++}', [[0, 2], [2, 3]]],
+    ['## {++Cites [@a;\n@b]\nTail [@c;\n@d]\nEnd++}', [[0, 2], [2, 5]]],
+  ])('keeps the source lines after a citation across lines in CriticMarkup, in %j', (input, maps) => {
+    // The line break its text took was the next break's, which mapped the
+    // paragraph after it to a line before its own
+    expect(parseBlockMaps(input)).toEqual(maps as Array<[number, number]>);
+  });
+
   it('reads a long run of [ with no ] in linear time', () => {
     // Each [ searched to the end of the text for its ]
     const start = performance.now();

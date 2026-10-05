@@ -1162,7 +1162,13 @@ function citationRule(state: StateInline, silent: boolean): boolean {
       const key = CITATION_ITEM_START_RE.exec(item);
       return key ? citationPrefixText(state, item.slice(0, key.index)) + item.slice(key.index) : item;
     });
-    state.push('manuscript_citation', '', 0).content = restoreCriticLineBreaks('[' + items.join(';') + ']');
+    const token = state.push('manuscript_citation', '', 0);
+    token.content = restoreCriticLineBreaks('[' + items.join(';') + ']');
+    // The line breaks CriticMarkup protected in it, which its text no longer
+    // holds, for the source lines after it (see addInlineContent)
+    const consumedBreakSourceOffsets = collectProtectedBreaks(state.src.slice(start, end + 1), inlineSourceOffset(state, start))
+      .map(sourceBreak => sourceBreak.sourceOffset);
+    if (consumedBreakSourceOffsets.length > 0) token.meta = { manuscriptCriticConsumedBreakSourceOffsets: consumedBreakSourceOffsets };
   }
   state.pos = end + 1;
   return true;
