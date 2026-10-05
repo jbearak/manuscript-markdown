@@ -6149,12 +6149,16 @@ function tryRenderPipeTable(table: { rows: TableRow[] }, maxLineWidth: number, c
                 : item)
           : cell.paragraphs[0];
         const r = renderInlineSegment(mergeConsecutiveRuns(items), comments, renderOpts);
-        if (r.text.includes('\n')) { rollback(); return null; }
+        // A line break, which a cell's one line can't hold, as <br>, which a
+        // cell reads as one, but not a line end after an even run of
+        // backslashes, as LaTeX's \\ in an equation, which isn't one
+        const text = r.text.replace(/(?<!\\)((?:\\\\)*)\\\n/g, (_m, pairs: string) => pairs + '<br>');
+        if (text.includes('\n')) { rollback(); return null; }
         // Escape pipes for GFM table cells, which take the backslash before
         // a pipe for the table's, and leave the rest to the cell's Markdown:
         // a backslash of Word's before it, which escapeMarkdownChars doubled,
         // or LaTeX's, as in $\|x\|$
-        const escaped = keepParagraphWhitespace(r.text, true, true).replace(/\|/g, '\\|');
+        const escaped = keepParagraphWhitespace(text, true, true).replace(/\|/g, '\\|');
         rowCells.push({ text: escaped, deferred: r.deferredComments });
       } else {
         rowCells.push({ text: '', deferred: [] });

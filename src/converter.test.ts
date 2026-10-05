@@ -8267,6 +8267,30 @@ describe('round-trip regression: pipe table alignment', () => {
   });
 });
 
+describe('Line breaks in a pipe table\'s cells', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
+
+  test.each([
+    '| a |\n| --- |\n| x<br>y |\n',
+    '| a<br>b | c |\n| --- | --- |\n| x<br><br>y | **p<br>q** |\n',
+    '| a |\n| --- |\n| `x`<br>`y` |\n',
+    '| a |\n| --- |\n| x\\\\<br>y |\n',
+    '| a |\n| --- |\n| x <br> y |\n',
+    '| a |\n| --- |\n| {++x<br>y++} |\n',
+  ])('keeps %j a pipe table', async (md) => {
+    // A line break made it an HTML table, as a cell's line can't hold the
+    // backslash and line end of one
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('writes no pipe table where an equation has a line end in it', () => {
+    // After LaTeX's \\, which isn't a line break
+    const cell = { paragraphs: [[{ type: 'math', latex: 'a \\\\\nb', display: false }]] };
+    const table = { type: 'table', rows: [{ isHeader: false, cells: [cell] }] } as unknown as ContentItem;
+    expect(buildMarkdown([table], new Map())).not.toStartWith('| ');
+  });
+});
+
 describe('XML entity limits', () => {
   test('a document with more than 10,000 standard entities converts', async () => {
     // Long manuscripts pass this easily: every Zotero field code is full of &quot;
