@@ -5647,9 +5647,9 @@ function emphasisGroup(
 }
 
 /** The start of a line that would start a block within a paragraph: a
- *  heading, list item, quote, code fence, HTML, display math, a table's
- *  row or a note's definition */
-const BLOCK_START_RE = /^[ \t]{0,3}(?:#{1,6}(?:[ \t]|$)|[-+*](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$)|>|```|~~~|<|\$\$|\||\[\^[^\]]*\]:)/;
+ *  heading, list item, quote, code fence, HTML, display math or a table's
+ *  row. Not a note's definition, as the [ of [^1] is escaped. */
+const BLOCK_START_RE = /^[ \t]{0,3}(?:#{1,6}(?:[ \t]|$)|[-+*](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$)|>|```|~~~|<|\$\$|\|)/;
 
 const startsBlock = (item: ContentItem | undefined): boolean =>
   item?.type === 'text' && BLOCK_START_RE.test(wrapWithFormatting(item.text, item.formatting));

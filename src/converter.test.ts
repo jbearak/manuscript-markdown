@@ -8946,7 +8946,6 @@ describe('Links of more than one run', () => {
     ['a heading', '<w:t>a</w:t><w:br/><w:t># x</w:t>', '[a](https://e.com)\\\n[# x](https://e.com)\n'],
     ['a list item', '<w:t>a</w:t><w:br/><w:t>b</w:t><w:br/><w:t>- c</w:t>', '[a\\\nb](https://e.com)\\\n[- c](https://e.com)\n'],
     ['an ordered list item', '<w:t>a</w:t><w:br/><w:t>1. x</w:t>', '[a](https://e.com)\\\n[1. x](https://e.com)\n'],
-    ['a note', '<w:t>a</w:t><w:br/><w:t>[^1]: x</w:t>', '[a](https://e.com)\\\n[[^1]: x](https://e.com)\n'],
     ['a heading, in formatting', '<w:t>a</w:t><w:br/><w:t>#</w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t> x</w:t>',
       '[a](https://e.com)\\\n[# *x*](https://e.com)\n'],
     ['text', '<w:t>a</w:t><w:br/><w:t>#x</w:t>', '[a\\\n#x](https://e.com)\n'],
@@ -8960,6 +8959,15 @@ describe('Links of more than one run', () => {
     zip.file('word/document.xml', broken);
     const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
     expect(md).toBe(expected);
+    expect(await roundTrip(md.slice(0, -1))).toBe(md);
+  });
+
+  test('keeps a link whole before a line that would start a note, whose [ is escaped', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace('<w:t>ab</w:t>', '<w:t>a</w:t><w:br/><w:t>[^1]: x</w:t>'));
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(md).toBe('[a\\\n\\[^1\\]: x](https://e.com)\n');
     expect(await roundTrip(md.slice(0, -1))).toBe(md);
   });
 
