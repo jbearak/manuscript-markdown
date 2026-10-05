@@ -5497,9 +5497,14 @@ describe('Word text that reads as Markdown', () => {
     ['a digit before it in a highlight', '==&#50;$x$ b=='],
     ['a letter after it in a comment\'s range', '{==the $x_i$&#115;==}{>>c<<}'],
     ['a letter after it in a substitution', '{~~$x$&#97;~>b~~}'],
+    ['a $ before it', 'a\\$$x$ b'],
+    ['a $ before it after a backslash', 'a\\\\\\$$x$ b'],
+    ['two $ before it', 'a\\$\\$$x$ b'],
+    ['a $ before it on a substitution\'s side', '{~~old~>a\\$$x$~~}'],
   ])('keeps inline math next to %s as math', async (_name, md) => {
     // Import wrote the character bare, by which the $ next to it opened or
-    // closed no math, and the equation came back as text
+    // closed no math, and the equation came back as text, or a $ before
+    // it, which ran into its own as $$
     const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
     expect(await zip.file('word/document.xml')!.async('string')).toContain('<m:oMath>');
     expect(await roundTrip(md)).toBe(md + '\n');
