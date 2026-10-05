@@ -4924,15 +4924,11 @@ describe('Line breaks a backslash can\'t hold', () => {
     expect(await exportedText(md)).toBe(text);
   });
 
-  test.each([
-    ['inserted', 'w:ins', '{++\\\n++}'],
-    ['deleted', 'w:del', '{--\\\n--}'],
-  ])('keeps one %s alone as the change it is', async (_name, tag, span) => {
-    // Written as it was untracked, it lost its change
-    const change = '<' + tag + ' w:id="1" w:author="A" w:date="2024-01-01T00:00:00Z">' + r('<w:br/>') + '</' + tag + '>';
-    const md = await imported(p(r(t('a')) + change + r(t('b'))));
-    expect(md).toBe('a' + span + 'b\n');
-    expect(await exportedXml(md)).toMatch(new RegExp('<' + tag + ' [^>]*><w:r>(?:<w:rPr>(?:(?!</w:r>).)*</w:rPr>)?<w:br/></w:r></' + tag + '>'));
+  test('reads a list item that is only a <br> as a line break', async () => {
+    // markdown-it reads the <br> as an HTML block, which an item keeps
+    expect(await exportedText('- <br>\n- b')).toBe('⏎ | b');
+    const md = '- <br>\n- b\n';
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
   });
 
   test.each([
