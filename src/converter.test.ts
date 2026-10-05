@@ -9233,6 +9233,43 @@ describe('Links in a tracked change', () => {
   });
 });
 
+describe('An & in a tracked change', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+
+  test.each([
+    ['an insertion of a space and emphasis', 'x {++ *&*++} y'],
+    ['an insertion of a word, a space and emphasis', 'x {++a *b&c*++} y'],
+    ['a deletion of a space and bold', 'x {-- **&**--} y'],
+    ['an insertion of an entity\'s text', 'x {++\u3000*\\&amp;*++} y'],
+  ])('keeps %s with an & one change', async (_name, md) => {
+    // An & split the change at each of its runs' edges, as &am and p; would
+    // read as an entity, which runs with Markdown between them can't
+    expect(await roundTrip(md)).toBe(md + '\n');
+  });
+
+  test.each([
+    ['&am', 'p;', 'x {++\\&amp;++}'],
+    ['a &a', 'mp;', 'x {++a \\&amp;++}'],
+    ['&#3', '8;', 'x {++\\&#38;++}'],
+    ['foo&bar@ex', 'ample.com', 'x {++foo&bar\\@example.com++}'],
+    ['foobar@ex', 'ample.com', 'x foobar\\@example.com', false],
+  ])('writes %s and %s, which Markdown shows nothing between, as one text', (a, b, expected, tracked = true) => {
+    // Runs whose formatting differs only in a highlight's color without the
+    // highlight, which Word's text never has, joined, and an entity or an
+    // email address formed where they met
+    const revision = tracked ? { type: 'addition' as const, author: 'A', date: '' } : undefined;
+    const text = (t: string, formatting: RunFormatting) => ({ type: 'text' as const, text: t, commentIds: new Set<string>(), formatting, revision });
+    const markdown = buildMarkdown([
+      { type: 'para' },
+      { type: 'text', text: 'x ', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
+      text(a, DEFAULT_FORMATTING),
+      text(b, { ...DEFAULT_FORMATTING, highlightColor: 'red' }),
+    ] as ContentItem[], new Map());
+    expect(markdown).toBe(expected);
+  });
+});
+
 describe('Links of more than one run', () => {
   const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
 
