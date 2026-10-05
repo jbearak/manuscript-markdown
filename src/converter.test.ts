@@ -7535,6 +7535,10 @@ describe('Track changes (CriticMarkup)', () => {
       // opens its new side, a span of the break alone, which export kept
       // in the span to split the anchor at, not moved before it
       ['Prefix {~~{==x==}{>>c<<}~>\n\nb~~} suffix', 'Prefix {=={--x--}{++\n\n++}==}{>>c<<}{++b++} suffix'],
+      // A range with text on both sides of the break takes ID syntax, as one
+      // across an untracked break does, which {==...==} couldn't hold
+      ['P {++{#1}a\n\nb{/1}++} Q\n{#1>>c<<}', 'P {#1}{++a\n\nb++}{/1} Q\n{#1>>c<<}'],
+      ['P {--{#1}a\n\nb{/1}--} Q\n{#1>>c<<}', 'P {#1}{--a\n\nb--}{/1} Q\n{#1>>c<<}'],
       ['{--### {>>c<<}--}', '{--### --}{>>c<<}'],
       ['{++### {>>c<<}++}', '{++### ++}{>>c<<}'],
     ])('keeps the revised paragraph mark of %j, beside a comment', async (md, expected) => {

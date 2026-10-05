@@ -7745,12 +7745,24 @@ export function buildMarkdown(
           : item.type === 'math' ? !item.display || displayBlock
             : item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'image';
         if (displayBlock) paragraph++;
-        for (const id of marked && 'commentIds' in item ? item.commentIds ?? [] : []) {
-          const first = paragraphOf.get(id);
-          if (first === undefined) paragraphOf.set(id, paragraph);
-          else if (first !== paragraph) spanning.add(id);
-          if (table) inTable.add(id);
-          lastCommentItem.set(id, item);
+        // A tracked break joinTrackedParagraphBreaks put in the text ends a
+        // paragraph too, where text after it goes on in the next, as a
+        // range of {++{#1}a\n\nb{/1}++} does, which {==...==} can't hold
+        const pieces = item.type === 'text' && breakMarks && item.text.includes(breakMarks.start)
+          ? item.text.split(breakMarks.start).map((piece, k) => k === 0 ? piece : piece.slice(piece.indexOf(breakMarks!.end) + 1))
+          : [''];
+        for (let k = 0; k < pieces.length; k++) {
+          if (k > 0) {
+            paragraph++;
+            if (!pieces[k]) continue;
+          }
+          for (const id of marked && 'commentIds' in item ? item.commentIds ?? [] : []) {
+            const first = paragraphOf.get(id);
+            if (first === undefined) paragraphOf.set(id, paragraph);
+            else if (first !== paragraph) spanning.add(id);
+            if (table) inTable.add(id);
+            lastCommentItem.set(id, item);
+          }
         }
         if (displayBlock) paragraph++;
       }
