@@ -468,6 +468,10 @@ interface TextIndex {
   nextDouble: number[];
   /** Where each run of two or more = starts */
   equals: number[];
+  /** Where each @, ; and [ is */
+  ats: number[];
+  semicolons: number[];
+  openers: number[];
 }
 
 /** `text`'s index, where a run of dollar signs ends at each of `bounds`,
@@ -477,8 +481,14 @@ function indexText(text: string, bounds: ReadonlySet<number> = new Set()): TextI
   const closers: number[] = [];
   const dollarRuns: Array<{ start: number; length: number }> = [];
   const equals: number[] = [];
+  const ats: number[] = [];
+  const semicolons: number[] = [];
+  const openers: number[] = [];
   for (let i = 0; i < text.length; i++) {
     if (text[i] === ']') closers.push(i);
+    else if (text[i] === '@') ats.push(i);
+    else if (text[i] === ';') semicolons.push(i);
+    else if (text[i] === '[') openers.push(i);
     else if (text[i] === '=' && text[i + 1] === '=' && text[i - 1] !== '=') equals.push(i);
     else if (text[i] === '$') {
       let length = 1;
@@ -493,7 +503,7 @@ function indexText(text: string, bounds: ReadonlySet<number> = new Set()): TextI
     nextSingle[k] = dollarRuns[k].length === 1 ? k : nextSingle[k + 1];
     nextDouble[k] = dollarRuns[k].length > 1 ? k : nextDouble[k + 1];
   }
-  return { text, closers, dollarRuns, dollarStarts: dollarRuns.map(run => run.start), nextSingle, nextDouble, equals };
+  return { text, closers, dollarRuns, dollarStarts: dollarRuns.map(run => run.start), nextSingle, nextDouble, equals, ats, semicolons, openers };
 }
 
 /** The first of `sorted` at or after `value` */
@@ -508,13 +518,53 @@ function lowerBound(sorted: number[], value: number): number {
   return low;
 }
 
+/** The items of a paragraph whose text an index reads, where each starts
+ *  in it, and which of them is the first of the runs after one */
+interface IndexedRuns {
+  offsets: number[];
+  items: ContentItem[];
+  at: number;
+}
+
+/** The most of the runs after one that a URL's host in it reads on into
+ *  (see RunsAfter.hostAfter): more than a host's 253 characters */
+const HOST_LOOKAHEAD = 256;
+
+/** The delimiters Markdown writes around a run's text for its formatting,
+ *  as wrapFormatting writes them, outermost first, to open and close it */
+function formattingDelimiters(fmt: RunFormatting): [string, string] {
+  const parts: Array<[string, string]> = [];
+  if (fmt.bold) parts.push(['**', '**']);
+  if (fmt.italic) parts.push(['*', '*']);
+  if (fmt.strikethrough) parts.push(['~~', '~~']);
+  if (fmt.underline) parts.push(['<u>', '</u>']);
+  if (fmt.highlight) parts.push(['==', '==']);
+  if (fmt.superscript) parts.push(['<sup>', '</sup>']);
+  else if (fmt.subscript) parts.push(['<sub>', '</sub>']);
+  if (fmt.code) parts.push(['`', '`']);
+  return [parts.map(part => part[0]).join(''), parts.map(part => part[1]).reverse().join('')];
+}
+
+/** Whether a run's text is all its Markdown is, with no delimiters around it */
+function isBareRun(item: ContentItem | undefined): item is ContentItem & { type: 'text' } {
+  return item?.type === 'text' && !item.href && !hasFormatting(item.formatting);
+}
+
+/** Whether any of `sorted` is from `from` to before `to` */
+function anyBetween(sorted: number[], from: number, to: number): boolean {
+  const k = lowerBound(sorted, from);
+  return k < sorted.length && sorted[k] < to;
+}
+
 /** The text of the runs after one in its paragraph, as escapeMarkdownChars
  *  reads it, from an index of the paragraph's text, which each of its runs
  *  reads from where it ends */
 export class RunsAfter {
   /** `prefix` comes before the runs, as a link's text has its ](url), and
-   *  `link` says the text is a link's */
-  constructor(private readonly index: TextIndex, private readonly from: number, private readonly prefix = '', readonly link = false) {}
+   *  `link` says the text is a link's. `runs` are the items the text is
+   *  of, where they're known, as they're not for a link's text. */
+  constructor(private readonly index: TextIndex, private readonly from: number, private readonly prefix = '', readonly link = false,
+    private readonly runs?: IndexedRuns) {}
 
   /** The runs after as text alone, where it's all there is */
   static of(text: string): RunsAfter {
@@ -566,6 +616,79 @@ export class RunsAfter {
       end = dollarRuns[run].start + dollarRuns[run].length;
     }
     return end < this.index.text.length ? text + '\u0001' : text;
+  }
+
+  /** Whether the citation export would read from a [ in the run before
+   *  these, which no ] after it there closes, to the first ] in these,
+   *  takes delimiters between the runs for its text, as it reads them as
+   *  they are, where it's known. Its keys and locators do, where its first
+   *  item's key starts in that run (`keyFirst`), as in [@a**b]**, and so
+   *  does the prefix of a first item that starts there and ends in these,
+   *  where formatting, a tracked change or a comment opens or closes in
+   *  the brackets but not both, as in [see **x @a]**, or one its first
+   *  item ends in, as in [see **x; y** @a]: export reads a prefix whose
+   *  formatting closes in it, as in [see *x* @a], as text. With no @ for a
+   *  key, or a [ before the ], it reads none. */
+  citationTakesDelimiters(keyFirst: boolean): boolean {
+    if (!this.runs || this.prefix) return false;
+    const { closers, ats, openers, semicolons } = this.index;
+    const c = lowerBound(closers, this.from);
+    if (c >= closers.length) return false;
+    if (keyFirst) return true;
+    const close = closers[c];
+    if (!anyBetween(ats, this.from, close) || anyBetween(openers, this.from, close)) return false;
+    const { offsets, items, at } = this.runs;
+    // The run with the ]
+    const last = lowerBound(offsets, close + 1) - 1;
+    const self = items[at - 1];
+    const closing = items[last];
+    if (!isBareRun(self) || !isBareRun(closing) || !revisionsEqual(self.revision, closing.revision)
+      || !commentSetsEqual(self.commentIds, closing.commentIds)) return true;
+    return anyBetween(semicolons, this.from, offsets[last]);
+  }
+
+  /** The Markdown the run before these and these write after its text, as
+   *  far as a URL's host at its end could go on into: its closing
+   *  delimiters, and each run's text in its own, to the first space or /
+   *  in it, which ends a host, and a space for anything else, as a tracked
+   *  change's or a comment's delimiters, a strikethrough's tag, or the
+   *  whitespace at a run's edge, which goes outside its delimiters, which
+   *  no host holds, at most `limit` characters of text in all. '' where
+   *  the runs aren't known, or the run before is a highlight's, whose text
+   *  export reads apart. */
+  hostAfter(limit: number): string {
+    if (!this.runs || this.prefix) return '';
+    const { items, at } = this.runs;
+    const self = items[at - 1];
+    if (self?.type !== 'text' || self.href || self.formatting.highlight) return '';
+    let previous: ContentItem & { type: 'text' } = self;
+    let markdown = '';
+    let read = 0;
+    for (let k = at; k <= items.length && read < limit; k++) {
+      const item = items[k];
+      const next: (ContentItem & { type: 'text' }) | undefined = item?.type === 'text' && !item.href && revisionsEqual(item.revision, previous.revision)
+        && commentSetsEqual(item.commentIds, previous.commentIds) ? item : undefined;
+      const open = next ? formattingDelimiters(next.formatting)[0] : '';
+      const following = next ? open + next.text : ' ';
+      // A ~~ that would close after punctuation, as after https://, before
+      // a letter, or open before punctuation after one, is a tag (see
+      // resolveEmphasis)
+      const tag = (inner: string, outer: string) => flankClass(inner.charCodeAt(0)) === FLANK_PUNCT
+        && flankClass(outer.charCodeAt(0)) === FLANK_OTHER;
+      const closing = formattingDelimiters(previous.formatting)[1];
+      const space = /\s$/.test(previous.text);
+      if (closing.startsWith('~~') && !space && tag(previous.text.slice(-1), following)) return markdown + ' ';
+      markdown += closing;
+      if (!next || space || /^\s/.test(next.text)) return markdown + ' ';
+      if (open.endsWith('~~') && tag(next.text, (markdown || previous.text).slice(-1))) return markdown + ' ';
+      const part = next.text.slice(0, limit - read);
+      const end = part.search(/[\s/]/);
+      if (end !== -1) return markdown + open + part.slice(0, end + 1);
+      markdown += open + part;
+      read += part.length;
+      previous = next;
+    }
+    return markdown;
   }
 }
 
@@ -682,13 +805,26 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
   // those runs doesn't nest, as it may yet be escaped. Without them, it's
   // escaped, as one of them could close it. One export reads as a
   // citation, before a ( too, whose items give its text back, stays one,
-  // as with the keys below, where no [ is in it.
+  // as with the keys below, where no [ is in it. One whose ] is in the runs
+  // after, which export would read as a citation that takes the delimiters
+  // between the runs for its text, is escaped too (see
+  // RunsAfter.citationTakesDelimiters).
   const closers: number[] = [];
   let openAfter = 0;
   // The nearest [ after the one at i, -1 for none
   let nextOpen = -1;
+  // The nearest ; and key's @ after a space, as in [see @a, after i, -1 for
+  // none, and whether a ] is
+  let nextSemicolon = -1;
+  let nextKey = -1;
+  let closerAfter = false;
   for (let i = text.length - 1; i >= 0; i--) {
-    if (text[i] === ']') closers.push(i);
+    if (text[i] === ']') {
+      closers.push(i);
+      closerAfter = true;
+    } else if (text[i] === ';') nextSemicolon = i;
+    else if (text[i] === '@' && /[\p{L}\p{N}_]/u.test(text[i + 1] ?? '')
+      && (/\s/.test(text[i - 1] ?? '') || text[i - 1] === '-' && /\s/.test(text[i - 2] ?? ''))) nextKey = text[i - 1] === '-' ? i - 1 : i;
     if (text[i] !== '[') continue;
     const inner = nextOpen;
     nextOpen = i;
@@ -706,6 +842,14 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
       // What follows the ] in the runs after
       const follows = after.afterCloser(openAfter);
       opens = follows !== undefined && '([{'.includes(follows || ' ');
+      // A citation to a ] in them, which export reads to the first ], past
+      // any [, where its keys start after the [, and otherwise only with no
+      // [ before its ] and its first item's key, if it ends here, here
+      if (!opens && !closerAfter) {
+        const direct = /^-?@/.test(text.slice(i + 1, i + 3));
+        const keyFirst = direct || nextKey !== -1 && (nextSemicolon === -1 || nextKey < nextSemicolon);
+        opens = (direct || inner === -1 && (keyFirst || nextSemicolon === -1)) && after.citationTakesDelimiters(keyFirst);
+      }
     }
     if (opens) escaped.add(i);
     else if (close !== undefined) closers.pop();
@@ -776,7 +920,15 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
       from.set(markdown.length, k);
       markdown += text[k];
     }
-    const colons = [...linkifyMatches(markdown).map(link => link.schema.endsWith(':') && link.schema !== 'mailto:' ? link.index + link.schema.length - 1 : markdown.indexOf('@', link.index)), ...linkifiedColons(markdown)];
+    const colonsIn = (markdown: string) => [...linkifyMatches(markdown).map(link => link.schema.endsWith(':') && link.schema !== 'mailto:' ? link.index + link.schema.length - 1 : markdown.indexOf('@', link.index)), ...linkifiedColons(markdown)];
+    const colons = colonsIn(markdown);
+    // A URL whose host goes on in the runs after, as https:// before struck
+    // e.com, where the delimiters between, as ~~, don't end it
+    const scheme = markdown.lastIndexOf('://');
+    if (after && scheme !== -1 && !/[\s/]/.test(markdown.slice(scheme + 3))) {
+      const host = after.hostAfter(HOST_LOOKAHEAD);
+      if (host) colons.push(...colonsIn(markdown + host).filter(colon => colon < markdown.length));
+    }
     for (const colon of colons) {
       const at = from.get(colon);
       if (at !== undefined && !keys.has(at) && !inTag.has(at)) escaped.add(at);
@@ -5369,7 +5521,7 @@ type InlineRangeOpts = { stopBeforeDisplayMath?: boolean; nested?: boolean; head
  *  serves each run's runsAfter, which would take time in the square of the
  *  runs each to build its own, and each starts at its paragraph, where one
  *  from the segment's start took time in the square of the paragraphs. */
-const runsTextIndexes = new WeakMap<ContentItem[], Map<number, { length: number; first: number; offsets: number[]; index: TextIndex }>>();
+const runsTextIndexes = new WeakMap<ContentItem[], Map<number, { length: number; first: number; offsets: number[]; index: TextIndex; items: ContentItem[] }>>();
 
 /** The runs of a segment from `start` to `end`, as escapeMarkdownChars
  *  reads the runs after a run */
@@ -5402,9 +5554,10 @@ function runsAfter(segment: ContentItem[], start: number, end: number): RunsAfte
       text += item.formatting.highlight ? '==' + run + '==' : run;
     }
     offsets.push(text.length);
-    byEnd.set(end, cached = { length: segment.length, first, offsets, index: indexText(text, new Set(offsets)) });
+    byEnd.set(end, cached = { length: segment.length, first, offsets, index: indexText(text, new Set(offsets)), items: segment.slice(first, end) });
   }
-  return new RunsAfter(cached.index, cached.offsets[start - cached.first]);
+  return new RunsAfter(cached.index, cached.offsets[start - cached.first], '', false,
+    { offsets: cached.offsets, items: cached.items, at: start - cached.first });
 }
 
 /** Whether an inline range stops before `item`, as at a paragraph's end */
