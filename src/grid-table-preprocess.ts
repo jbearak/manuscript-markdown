@@ -40,10 +40,10 @@ const PICTOGRAPHIC_RE = /^\p{Extended_Pictographic}$/u;
  * A string's width in the columns of a monospace editor, as Pandoc counts
  * them in a grid table: two for a wide character, as a CJK one, or an emoji,
  * and none for a combining mark or a format character, as a joiner or a soft
- * hyphen. An emoji's sequence counts as the emoji: a skin tone after it, or
- * an emoji a joiner joins to it, counts none, and a variation selector-16
- * makes a narrow character before it wide. A regional indicator counts one,
- * so a flag, two of them, counts two.
+ * hyphen. An emoji's sequence counts as the emoji: an emoji a joiner joins
+ * to it counts none, and a variation selector-16 after it, or a skin tone,
+ * makes it wide, as ☝🏽, where it's narrow, and else counts none. A regional
+ * indicator counts one, so a flag, two of them, counts two.
  */
 export function getDisplayWidth(str: string): number {
   let width = 0;
@@ -68,14 +68,16 @@ function characterWidths(str: string): number[] {
       base = ch;
       baseWidth = 1;
       joined = false;
-    } else if (cp === 0xfe0f) {
+    } else if (cp === 0xfe0f || cp >= 0x1f3fb && cp <= 0x1f3ff && PICTOGRAPHIC_RE.test(base)) {
+      // A variation selector-16, or a skin tone after an emoji, makes it
+      // wide, which stays the sequence's base, as a joiner after joins to it
       w = baseWidth === 1 ? 1 : 0;
       baseWidth += w;
     } else if (ZERO_WIDTH_RE.test(ch)) {
       w = 0;
       if (cp === 0x200d) joined = PICTOGRAPHIC_RE.test(base);
     } else {
-      w = (joined && PICTOGRAPHIC_RE.test(ch)) || (cp >= 0x1f3fb && cp <= 0x1f3ff && PICTOGRAPHIC_RE.test(base)) ? 0
+      w = joined && PICTOGRAPHIC_RE.test(ch) ? 0
         : cp >= 0x1f1e6 && cp <= 0x1f1ff ? 1
           : isFullWidth(cp) || EMOJI_PRESENTATION_RE.test(ch) ? 2 : 1;
       base = ch;
