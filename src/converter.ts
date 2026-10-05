@@ -5278,6 +5278,8 @@ function criticSpanStart(text: string, opener: string, closer: string, from: num
 function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = markdown.length): string {
   let end = to;
   while (end > from) {
+    end = textEnd(markdown, from, end);
+    if (end <= from) break;
     const closer = /(\+\+|--|~~|==|<<)\}$/.exec(markdown.slice(Math.max(from, end - 3), end));
     const start = closer ? criticSpanStart(markdown, CRITIC_OPENERS[closer[1]], closer[0], from, end) : -1;
     if (!closer || start < 0) return markdown[end - 1];
@@ -5297,6 +5299,22 @@ function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = mar
   return '';
 }
 
+/** A close of formatting at the end of Markdown, after the text it holds:
+ *  a highlight's or emphasis's, whose marks tell it from text's, or an
+ *  underline's or a script's tag */
+const FORMATTING_CLOSE_AT_END = /(?:[\u0006\u000F]==(?:\{[a-z0-9-]+\})?|\u0004(?:\*\*|\*|~~)|(?<!\\)<\/(?:u|sup|sub)>)$/;
+
+/** Where the text of `markdown` before `end` ends, past the closes of the
+ *  formatting around it, as a highlight's, which holds the whitespace at
+ *  its edges: ==a == */
+function textEnd(markdown: string, from: number, end: number): number {
+  for (;;) {
+    const close = FORMATTING_CLOSE_AT_END.exec(markdown.slice(Math.max(from, end - 72), end));
+    if (!close) return end;
+    end -= close[0].length;
+  }
+}
+
 /** The space import puts before a Pandoc citation: none when the text before
  *  it already ends with one in a view the citation shows in, so no view gets
  *  two, as in Seen {++a ++}[@key], or when there is none before it. A view
@@ -5304,11 +5322,13 @@ function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = mar
  *  there. */
 function citationSeparator(precedingMarkdown: string, revision: RevisionInfo | undefined, last?: RevisionSpan): string {
   const views = revision?.type === 'addition' ? [true] : revision?.type === 'deletion' ? [false] : [true, false];
-  // The span the Markdown ends with gives its last character without a scan
+  // The span the Markdown ends with gives its last character without a
+  // scan, past the formatting its text ends in, before its ++} or --}
   const span = last && last.end === precedingMarkdown.length ? last : undefined;
   // Nor at the start of a block, where there is no text to space it from
   return views.some(accepted => [' ', ''].includes(
-    span?.revision.type === (accepted ? 'addition' : 'deletion') ? span.lastChar
+    span?.revision.type === (accepted ? 'addition' : 'deletion')
+      ? precedingMarkdown[textEnd(precedingMarkdown, span.start, span.end - 3) - 1] ?? ''
       : lastVisibleChar(precedingMarkdown, accepted, 0, span ? span.start : precedingMarkdown.length)
   )) ? '' : ' ';
 }
@@ -5394,6 +5414,9 @@ function renderHighlightGroup(
   segment: ContentItem[], start: number, end: number, rangeEnd: number, precedingMarkdown: string, noteLabels?: Map<string, string>, last?: RevisionSpan,
 ): string {
   let inner = '';
+  // The separator before a citation that opens the group, which goes
+  // before the highlight, which would hold it
+  let lead = '';
   let mathEnd = -1;
   for (let g = start; g < end; g++) {
     const item = segment[g];
@@ -5405,14 +5428,13 @@ function renderHighlightGroup(
       inner += '$' + item.latex + '$';
       mathEnd = inner.length;
     } else if (item.type === 'citation') {
-      // A separator before the first item lands outside the highlight
+      if (item.pandocKeys.length > 0 && g === start) lead = citationSeparator(precedingMarkdown, item.revision, last);
       inner += item.pandocKeys.length > 0
-        ? (g === start ? citationSeparator(precedingMarkdown, item.revision, last) : citationSeparator(inner, item.revision))
-          + '[' + item.pandocKeys.join('; ') + ']'
+        ? (g === start ? '' : citationSeparator(inner, item.revision)) + '[' + item.pandocKeys.join('; ') + ']'
         : item.text;
     }
   }
-  return wrapHighlight(inner, highlightColorOf(segment[start]));
+  return lead + wrapHighlight(inner, highlightColorOf(segment[start]));
 }
 
 /** `out` with the highlight group from `start` to `end` appended as one span
@@ -5443,7 +5465,9 @@ function substitutionItemText(item: SubstitutionItem, precedingText: string, not
   const color = highlightColorOf(item);
   if (color && (item.type === 'footnote_ref' || item.type === 'citation')) {
     const text = substitutionItemText({ ...item, formatting: undefined }, precedingText, noteLabels, after);
-    return text.includes('==') ? text : wrapHighlight(text, color);
+    // The separator before a citation goes before the highlight
+    const lead = item.type === 'citation' && item.pandocKeys.length > 0 && text.startsWith(' ') ? ' ' : '';
+    return text.includes('==') ? text : lead + wrapHighlight(text.slice(lead.length), color);
   }
   if (item.type === 'footnote_ref') return footnoteRefText(item, noteLabels);
   if (item.type === 'text') {

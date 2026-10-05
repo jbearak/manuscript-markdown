@@ -9274,6 +9274,32 @@ describe('Highlights across runs', () => {
     expect(await fromWord(runs)).toBe(md);
     expect(await roundTrip(md)).toBe(md);
   });
+
+  const run = (text: string, formatting: Partial<RunFormatting> = {}, revision?: RevisionInfo) =>
+    ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting }, ...(revision ? { revision } : {}) }) as ContentItem;
+  const citation = (formatting: Partial<RunFormatting> = {}, revision?: RevisionInfo) =>
+    ({ type: 'citation', text: '(Doe 2020)', pandocKeys: ['@doe2020'], commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting }, ...(revision ? { revision } : {}) }) as ContentItem;
+  const inserted: RevisionInfo = { type: 'addition', author: 'A', date: '2024-01-01T00:00:00Z' };
+
+  test.each([
+    ['a highlight that ends in a space', [run('Seen '), run('a ', { highlight: true }), citation()], 'Seen ==a ==[@doe2020]'],
+    ['bold around a highlight that ends in a space', [run('Seen '), run('a ', { highlight: true, bold: true }), citation()], 'Seen **==a ==**[@doe2020]'],
+    ['an inserted highlight that ends in a space', [run('Seen '), run('a ', { highlight: true }, inserted), citation({}, inserted)], 'Seen {++==a ==++}{++[@doe2020]++}'],
+    ['underlined text that ends in a space', [run('Seen '), run('a ', { underline: true }), citation()], 'Seen <u>a </u>[@doe2020]'],
+  ])('puts no second space before a citation after %s', (_name, items, md) => {
+    // The space before the citation read the formatting's close as the text
+    // before it, and added one
+    expect(buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim()).toBe(md);
+  });
+
+  test.each([
+    ['', [run('Seen'), citation({ highlight: true })], 'Seen ==[@doe2020]=='],
+    [' in a substitution', [run('Seen'), run('x', {}, { ...inserted, type: 'deletion' }), citation({ highlight: true }, inserted)], 'Seen{~~x~> ==[@doe2020]==~~}'],
+  ])('puts the space before a highlighted citation outside its highlight%s', (_name, items, md) => {
+    // The highlight held it, as it holds its edge spaces, so export
+    // highlighted a space Word doesn't have
+    expect(buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim()).toBe(md);
+  });
 });
 
 describe('XML entity limits', () => {
