@@ -7539,7 +7539,7 @@ function pushWithHoistedPrefix(output: string[], directivePrefix: string, body: 
 }
 
 const tableCellText = (cell: TableRow['cells'][number]): string =>
-  cell.paragraphs.flat().map(item => item.type === 'text' ? item.text.replace(/\\\n/g, '') : '').join('');
+  cell.paragraphs.flat().map(item => item.type === 'text' ? item.text : '').join('');
 
 /** A table's first row's text, as export finds it (see tableFirstRowText) */
 function tableFirstRow(rows: TableRow[]): string {
@@ -7605,25 +7605,48 @@ function htmlLinesAsText(lines: string[]): string[] {
     .join('').split('\n');
 }
 
-// A comment as the browser reads it, to its end, if it has one, at lastIndex
 /** HTML from a table's block with each comment ending where the browser
- *  read its end, as a block of its own would read on past it, over the
- *  table: one the browser ended at a --!> ends at a --> instead, and one
- *  with no end, which ran to the end of the block, gets one. An <!-- in
- *  an element whose text is no HTML, as a <textarea>'s, starts none. */
+ *  read its end, as Markdown does, which a block of its own or a line of
+ *  text would read on past, over the table: one the browser ended at a --!>
+ *  ends at a --> instead, one whose text ends in a -, as at a --->, which
+ *  inline Markdown reads as none, gets a space before its end, and one with
+ *  no end, which ran to the end of the block, gets one. An <!-- in an
+ *  element whose text is no HTML, as a <textarea>'s, starts none. */
 function withMarkdownCommentEnds(html: string): string {
   let out = '';
   let from = 0;
   for (let i = 0; i < html.length;) {
     const piece = htmlPieceAt(html, i);
     if (piece.kind === 'comment' && piece.rest) return out + html.slice(from).replace(/\s*$/, ' -->');
-    if (piece.kind === 'comment' && html.startsWith('--!>', piece.end - 4)) {
-      out += html.slice(from, piece.end - 4) + '-->';
-      from = piece.end;
+    // But an empty one, <!--> or <!--->, which both read alike
+    if (piece.kind === 'comment' && !html.startsWith('<!-->', i) && !html.startsWith('<!--->', i)) {
+      const end = piece.end - (html.startsWith('--!>', piece.end - 4) ? 4 : 3);
+      const dash = end > i + 4 && html[end - 1] === '-';
+      if (dash || end === piece.end - 4) {
+        out += html.slice(from, end) + (dash ? ' ' : '') + '-->';
+        from = piece.end;
+      }
     }
     i = piece.end;
   }
   return out + html.slice(from);
+}
+
+/** Where the HTML block that starts at `lines[k]` ends, after its last
+ *  line, as markdown-it reads one, or -1 where none does: a line of one
+ *  tag starts none after a line of a paragraph (`inParagraph`). A line
+ *  indented as code starts one too, as the browser read its tag. */
+function htmlBlockEnd(lines: string[], k: number, inParagraph: boolean): number {
+  const text = lines[k].trimStart();
+  const ends = HTML_BLOCKS_WITH_END.find(([start]) => start.test(text))?.[1] ?? (HTML_BLOCK_IN_PARAGRAPH[1].test(text) ? /-->/ : undefined);
+  if (ends) {
+    for (let m = k; m < lines.length; m++) if (ends.test(lines[m])) return m + 1;
+    return lines.length;
+  }
+  if (!HTML_BLOCK_IN_PARAGRAPH[5].test(text) && (inParagraph || !HTML_TAG_LINE.test(text))) return -1;
+  let m = k + 1;
+  while (m < lines.length && /\S/.test(lines[m])) m++;
+  return m;
 }
 
 /** The HTML around a table as blocks of their own, as it goes around one in
@@ -7632,43 +7655,48 @@ function withMarkdownCommentEnds(html: string): string {
  *  # Source would be a heading. A comment export would read as a directive,
  *  as <!-- table-font-size: 11 --> or a line of an embed's, which none of
  *  them was in the table's block, goes, but for the text a style's goes
- *  around on its line. A line may read otherwise once one before it does,
- *  as a line of one tag doesn't start a block after text, so it reads it
- *  again. */
+ *  around on its line. Each line reads as it does in what's written, in
+ *  order, in which a line of text is a paragraph's, after which a line of
+ *  one tag starts no block. */
 function detachedTableHtml(html: string): string | undefined {
-  let lines = withMarkdownCommentEnds(html).split('\n').map(text => ({ text, escaped: false }));
-  for (let changed = true; changed;) {
-    changed = false;
-    // Each line in an HTML block, with what's left of it where the block
-    // is a directive
-    const inHtml = new Map<number, string | undefined>();
-    for (const block of htmlBlocksIn(lines.map(line => line.text).join('\n'))) {
-      const rest = directiveRest(block.content);
-      for (let k = block.start; k < block.end; k++) inHtml.set(k, rest === undefined || k === block.start ? rest : '');
-    }
-    const restOf = (k: number) => inHtml.get(k) ?? (parseEmbedDirective(lines[k].text) ? '' : undefined);
-    const isText = (k: number) => restOf(k) === undefined && !inHtml.has(k) && !lines[k].escaped && /\S/.test(lines[k].text);
-    // The lines that are text, with those next to them
-    const texts = new Map<number, string>();
-    for (let k = 0; k < lines.length; k++) {
-      if (!isText(k)) continue;
-      let end = k;
-      while (end < lines.length && isText(end)) end++;
-      htmlLinesAsText(lines.slice(k, end).map(line => line.text)).forEach((text, n) => texts.set(k + n, text));
-      k = end - 1;
-    }
-    lines = lines.flatMap((line, k) => {
-      const rest = restOf(k);
-      if (rest !== undefined) {
-        changed = true;
-        return /\S/.test(rest) ? [{ text: htmlLinesAsText([rest]).join('\n'), escaped: true }] : [];
+  const lines = withMarkdownCommentEnds(html).split('\n');
+  const out: string[] = [];
+  // The lines of text since the last that isn't, which escape together
+  let texts: string[] = [];
+  const endTexts = () => {
+    if (texts.length > 0) out.push(...htmlLinesAsText(texts));
+    texts = [];
+  };
+  let inParagraph = false;
+  for (let k = 0; k < lines.length; k++) {
+    const line = lines[k];
+    const end = /\S/.test(line) ? htmlBlockEnd(lines, k, inParagraph) : -1;
+    if (end === -1) {
+      if (parseEmbedDirective(line)) continue;
+      if (/\S/.test(line)) texts.push(line);
+      else {
+        endTexts();
+        out.push(line);
       }
-      if (!texts.has(k)) return [line];
-      changed = true;
-      return [{ text: texts.get(k)!, escaped: true }];
-    });
+      inParagraph = /\S/.test(line);
+      continue;
+    }
+    endTexts();
+    const block = lines.slice(k, end);
+    const rest = directiveRest(block.join('\n'));
+    if (rest === undefined) {
+      // With its indent as code gone
+      if (/^(?: {0,3}\t| {4})/.test(block[0])) block[0] = block[0].trimStart();
+      out.push(...block.filter(blockLine => !parseEmbedDirective(blockLine)));
+      inParagraph = false;
+    } else if (/\S/.test(rest)) {
+      out.push(htmlLinesAsText([rest]).join('\n'));
+      inParagraph = true;
+    }
+    k = end - 1;
   }
-  return lines.map(line => line.text).join('\n').replace(/\n{3,}/g, '\n\n').trim() || undefined;
+  endTexts();
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim() || undefined;
 }
 
 function renderTableOrFallback(
@@ -11282,8 +11310,10 @@ export async function convertDocx(
   }
 
   // Strip trailing <!-- references --> marker when bibliography is at the end of the
-  // document (default position) so we don't inject a marker that wasn't in the original.
-  markdown = markdown.replace(/\n*<!--\s*references\s*-->\s*$/, '');
+  // document (default position) so we don't inject a marker that wasn't in the original:
+  // a block of its own, after a blank line, as import writes it, not one in the block
+  // of a line before it, as the HTML around a table is.
+  markdown = markdown.replace(/(?:^|\n\n+)<!--\s*references\s*-->\s*$/, '');
 
   // Prepend YAML frontmatter if title or Zotero prefs were found
   const fm: Frontmatter = {};

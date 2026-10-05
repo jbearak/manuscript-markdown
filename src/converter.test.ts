@@ -6224,6 +6224,9 @@ describe('HTML around a table in its block', () => {
   test.each([
     ['a div and a caption', '<div>\n<p>Table 1.</p>\n' + table('a') + '\n</div>\n'],
     ['text after it', table('a') + '\nSource: World Bank,\n2020.\n'],
+    // Which import took for the marker it writes where the bibliography
+    // goes, at the end
+    ['a references comment after it at the end', table('a') + '\n<!-- references -->\n'],
     ['a comment and text after it', table('a') + '\n<!-- TODO: check -->\nSource.\n'],
     ['a table commented out before it', '<div><!-- ' + table('old').replace(/\n/g, ' ') + ' -->\n' + table('a') + '\n</div>\n'],
     ['HTML between two tables', table('a') + '\n<p>Between.</p>\n\n' + table('b') + '\n<p>After.</p>\n'],
@@ -6258,6 +6261,14 @@ describe('HTML around a table in its block', () => {
 
   test('drops a bibliography Word holds as text after its Sources heading still', async () => {
     expect(await roundTrip(table('a') + '\n\n# Sources\n\nDoe, J. 2020.\n')).toBe(table('a') + '\n');
+  });
+
+  test('keeps the HTML around a table whose first row has a line end after a backslash in its code', async () => {
+    // Export found the backslash and the line end in the first row, which
+    // import read as a line break, and the HTML went
+    const markdown = await roundTrip('<div><p>Cap</p>\n<table><tr><td><pre><code>a\\\nb</code></pre></td></tr></table>\n</div>\n');
+    expect(markdown.startsWith('<div><p>Cap</p>\n<table>')).toBe(true);
+    expect(markdown.endsWith('</table>\n</div>\n')).toBe(true);
   });
 
   test('applies no directive in a comment on a table\'s line, as markdown-it reads it', async () => {
@@ -6506,6 +6517,8 @@ describe('HTML around a table in its block', () => {
     // Which the browser ended at a --!>, or at the end of the block, but
     // which, a block of their own, read on over the table
     ['comments the browser ends where Markdown reads no end', '<!-- cap --!>', ' <!-- open\n', '<!-- cap -->\n\n', '\n\n<!-- open -->\n'],
+    // Which inline Markdown reads as no comment, and escaped
+    ['a comment the browser ends after a -', '', '\nSource <!-- secret ---> rest\n', '', '\n\nSource <!-- secret - --> rest\n'],
     // Which got an end, as a comment the browser read
     ['an <!-- in an element whose text is no HTML', '', '\n<textarea>a <!-- b --!> c</textarea>\n<textarea>literal <!-- here</textarea>\n', '',
       '\n\n<textarea>a <!-- b --!> c</textarea>\n<textarea>literal <!-- here</textarea>\n'],
@@ -6525,12 +6538,15 @@ describe('HTML around a table in its block', () => {
   });
 
   test.each([
-    ['as HTML', false],
-    ['that leaves HTML', true],
-  ])('writes many lines of HTML after a table %s in linear time', async (_name, tracked) => {
+    ['as HTML', false, (i: number) => 'line ' + i + ' $'],
+    ['that leaves HTML', true, (i: number) => 'line ' + i + ' $'],
+    // Each escaped heading made the line of one tag after it text, and
+    // the lines after it were read again
+    ['that leaves HTML, of headings and lines of one tag', true, (i: number) => i % 2 ? '<span>' : '# Source'],
+  ])('writes many lines of HTML after a table %s in linear time', async (_name, tracked, line) => {
     // Each line's escape indexed all the lines after it, even for a table
     // that kept the HTML
-    const md = '<div>\n<table><tr><td>XX</td><td>b</td></tr></table>\n' + Array.from({ length: 16000 }, (_, i) => 'line ' + i + ' $').join('\n') + '\n</div>\n';
+    const md = '<div>\n<table><tr><td>XX</td><td>b</td></tr></table>\n' + Array.from({ length: 16000 }, (_, i) => line(i)).join('\n') + '\n</div>\n';
     const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
     const xml = await zip.file('word/document.xml')!.async('string');
     if (tracked) zip.file('word/document.xml', xml.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>'));
