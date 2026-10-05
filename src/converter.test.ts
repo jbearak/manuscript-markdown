@@ -7562,6 +7562,17 @@ describe('Track changes (CriticMarkup)', () => {
       expect(xml).toMatch(/<w:delText>b<\/w:delText><\/w:r><\/w:del><w:commentRangeEnd /);
     });
 
+    test.each([
+      ['{#1}x{/1}\n\n{++### ++}{++a\n\n{#1>>c<<}++}', '{==x==}{>>c<<}\n\n{++### a++}'],
+      ['{#1}x{/1}\n\n{++a\n\n{#1>>c<<}++}', '{==x==}{>>c<<}\n\n{++a++}'],
+    ])('keeps a comment body after a blank line in a revision in %j', async (md, expected) => {
+      // Dropping the break before the body took one of the blank line's two,
+      // so the split there took the body for the other
+      const { docx, warnings } = await convertMdToDocx(md);
+      expect(warnings).toEqual([]);
+      expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(expected + '\n');
+    });
+
     test('gives a revised heading\'s mark its revision\'s author, not a comment\'s before its text', async () => {
       const { docx } = await convertMdToDocx('{++### ++}{>>@Alice (2024-01-01 12:00) | c<<}{++H++}', { authorName: 'Bob' });
       const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');

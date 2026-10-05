@@ -6589,8 +6589,13 @@ function withoutCommentBodyLines(source: MdRun[]): MdRun[] {
   // A comment takes no room either, as an anchor's after its highlight
   const bodyLine = (line: MdRun[]) => line.some(run => run.type === 'comment_body_with_id')
     && line.every(run => run.type === 'comment_body_with_id' || marker(run) || run.type === 'critic_comment');
-  // Break k sits between lines k and k + 1
+  // Break k sits between lines k and k + 1. A blank line in a revision's
+  // text, two breaks, is a paragraph break that splitCriticParagraphs splits
+  // at, so neither of them goes.
   const dropped = new Set<number>();
+  const drop = (k: number) => {
+    if (!breaks[k].criticParagraphBreak && !breaks[k - 1]?.criticParagraphBreak) dropped.add(k);
+  };
   for (let first = 0; first < trimmed.length;) {
     if (!bodyLine(trimmed[first])) {
       first++;
@@ -6598,9 +6603,9 @@ function withoutCommentBodyLines(source: MdRun[]): MdRun[] {
     }
     let last = first;
     while (last + 1 < trimmed.length && bodyLine(trimmed[last + 1])) last++;
-    for (let k = first; k < last; k++) dropped.add(k);
-    if (last + 1 < trimmed.length) dropped.add(last);
-    else if (first > 0) dropped.add(first - 1);
+    for (let k = first; k < last; k++) drop(k);
+    if (last + 1 < trimmed.length) drop(last);
+    else if (first > 0) drop(first - 1);
     first = last + 1;
   }
   const kept: MdRun[] = [];
