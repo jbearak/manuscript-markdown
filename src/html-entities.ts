@@ -20,7 +20,7 @@ const TRIMMED_SPACE = '\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\u
 const TRIMMED_RE = new RegExp('[' + TRIMMED_SPACE + ']', 'g');
 const HAS_TRIMMED_RE = new RegExp('[' + TRIMMED_SPACE + ']');
 const EDGE_START_RE = new RegExp('^[ \\t' + TRIMMED_SPACE + ']+');
-const EDGE_END_RE = new RegExp('[ \\t' + TRIMMED_SPACE + ']+$');
+const EDGE_RE = new RegExp('[ \\t' + TRIMMED_SPACE + ']');
 const NOT_EDGE_RE = new RegExp('[^ \\t' + TRIMMED_SPACE + ']');
 
 /**
@@ -39,11 +39,15 @@ export function keepParagraphEdgeWhitespace(text: string, atStart: boolean, atEn
 	if (!NOT_EDGE_RE.test(text)) return atStart && HAS_TRIMMED_RE.test(text) ? reference(text) : text;
 	let result = atStart ? text.replace(EDGE_START_RE, reference) : text;
 	// A backslash right before a reference would escape its &, so one before
-	// whitespace, which was text, is escaped itself
-	if (atEnd) result = result.replace(EDGE_END_RE, (whitespace, offset: number) => {
-		const kept = trimmed(whitespace);
-		const backslashes = kept.startsWith('&') ? /\\*$/.exec(result.slice(0, offset))![0].length : 0;
-		return (backslashes % 2 === 1 ? '\\' : '') + kept;
-	});
+	// whitespace, which was text, is escaped itself. From the end, as a
+	// regex for the whitespace there would scan each run of it before.
+	if (atEnd) {
+		let end = result.length;
+		while (end > 0 && EDGE_RE.test(result[end - 1])) end--;
+		const kept = trimmed(result.slice(end));
+		let backslashes = 0;
+		if (kept.startsWith('&')) while (backslashes < end && result[end - 1 - backslashes] === '\\') backslashes++;
+		result = result.slice(0, end) + (backslashes % 2 === 1 ? '\\' : '') + kept;
+	}
 	return result;
 }
