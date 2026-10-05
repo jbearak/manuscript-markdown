@@ -2310,3 +2310,35 @@ describe('CriticMarkup inside inline equations', () => {
     expect(html).not.toContain('{++');
   });
 });
+
+describe('Citations in the preview', () => {
+  it.each([
+    ['a tag in a key', 'P [@a<b>c] Q.', '<p>P [@a&lt;b&gt;c] Q.</p>'],
+    ['a line break\'s tag in a key', 'P [@a<br>] Q.', '<p>P [@a&lt;br&gt;] Q.</p>'],
+    ['a tag in a locator', 'P [@a, <i>passim</i>] Q.', '<p>P [@a, &lt;i&gt;passim&lt;/i&gt;] Q.</p>'],
+    ['emphasis in a prefix after the first', 'P [@a; *see* @b] Q.', '<p>P [@a; *see* @b] Q.</p>'],
+    ['a comment in a key', 'P [@a {>>c<<}] Q.', '<p>P [@a {&gt;&gt;c&lt;&lt;}] Q.</p>'],
+    ['a URL in a prefix', 'P [see https://e.com @a] Q.', '<p>P [see https://e.com @a] Q.</p>'],
+  ])('shows %s as text, as export reads it', (_name, md, html) => {
+    // A tag showed as HTML, and emphasis as formatting, though export reads
+    // a citation's keys and locators as they are, and its prefixes as text
+    expect(renderWithPlugin(md, 'github')).toContain(html);
+  });
+
+  it.each([
+    ['a prefix\'s escapes decoded', 'P [see \\*x\\* @a] Q.', '<p>P [see *x* @a] Q.</p>'],
+    ['the Markdown around it', '[x](u) [@a] *y* [b]', '<p><a href="u">x</a> [@a] <em>y</em> [b]</p>'],
+    ['one in an insertion', '{++see [@a<b>c]++}', '<ins class="manuscript-markdown-addition">see [@a&lt;b&gt;c]</ins>'],
+    ['one in an image\'s alt text', '![see [@a<b>]](x.png)', 'alt="see [@a&lt;b&gt;]"'],
+  ])('shows a citation with %s', (_name, md, html) => {
+    expect(renderWithPlugin(md, 'github')).toContain(html);
+  });
+
+  it('reads a long run of [ with no ] in linear time', () => {
+    // Each [ searched to the end of the text for its ]
+    const start = performance.now();
+    expect(renderWithPlugin('[@a '.repeat(200000), 'github')).toContain('[@a [@a');
+    // Some 450 ms here, and three seconds searched again from each [
+    expect(performance.now() - start).toBeLessThan(1500);
+  });
+});

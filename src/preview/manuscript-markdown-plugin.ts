@@ -28,6 +28,7 @@ import { formatTableNumbers } from '../table-number-format';
 import { getDefaultColorScheme } from '../alert-colors';
 import { splitCriticMarkupInMath, type CriticMathPart } from '../critic-math';
 import { findDollarMathAt } from '../math-delimiters';
+import { CITATION_ITEM_START_RE, citationEnd, citationPrefixText } from '../citation-syntax';
 
 export interface ManuscriptMarkdownIt extends MarkdownIt {
   manuscriptColors?: ColorScheme;
@@ -1147,6 +1148,26 @@ function manuscriptMarkdownBlock(state: StateBlock, startLine: number, endLine: 
   return true;
 }
 
+/** A citation, as export reads one (see citationEnd), as the text export
+ *  takes it for: its keys and locators as they are, and each prefix with
+ *  its escapes decoded, so a tag, emphasis or CriticMarkup in one shows as
+ *  written, as in Word, not as HTML or formatting */
+function citationRule(state: StateInline, silent: boolean): boolean {
+  const start = state.pos;
+  if (start + 2 >= state.posMax) return false;
+  const end = citationEnd(state, start);
+  if (end === -1) return false;
+  if (!silent) {
+    const items = state.src.slice(start + 1, end).split(';').map(item => {
+      const key = CITATION_ITEM_START_RE.exec(item);
+      return key ? citationPrefixText(state, item.slice(0, key.index)) + item.slice(key.index) : item;
+    });
+    state.push('manuscript_citation', '', 0).content = restoreCriticLineBreaks('[' + items.join(';') + ']');
+  }
+  state.pos = end + 1;
+  return true;
+}
+
 /**
  * Inline rule for ==highlight== patterns (not CriticMarkup)
  * @param state - The inline parsing state
@@ -1881,6 +1902,9 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
   // Run after Manuscript Markdown to avoid conflicts with {==...==}
   md.inline.ruler.after('manuscript_markdown', 'manuscript_markdown_format_highlight', parseFormatHighlight);
 
+  // A citation is text to export, as it is here, where export reads one
+  md.inline.ruler.before('emphasis', 'manuscript_markdown_citation', citationRule);
+
   // Register core rule to associate comments with annotated elements
   // Runs after inline parsing to post-process the token stream
   md.core.ruler.after('inline', 'manuscript_markdown_autolink_literals', autolinkLiteralsRule);
@@ -2069,6 +2093,14 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
 
   // Trusted internal style blocks injected by manuscript rules — bypass GFM filtering.
   md.renderer.rules.manuscript_style = (tokens, idx) => tokens[idx].content || '';
+  md.renderer.rules.manuscript_citation = (tokens, idx) => escapeHtmlText(tokens[idx].content);
+  // An image's alt text, which markdown-it makes of text tokens alone,
+  // keeps a citation's text
+  const renderImage = md.renderer.rules.image;
+  md.renderer.rules.image = (tokens, idx, options, env, self) => {
+    for (const child of tokens[idx].children ?? []) if (child.type === 'manuscript_citation') child.type = 'text';
+    return renderImage ? renderImage(tokens, idx, options, env, self) : self.renderToken(tokens, idx, options);
+  };
 
   // GFM task list rendering.
   md.renderer.rules.list_item_open = (tokens, idx, options, env, self) => {
