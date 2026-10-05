@@ -6468,7 +6468,7 @@ describe('HTML around a table in its block', () => {
     ['no embed\'s comment on the table\'s line', '', '<!-- embed: t.csv -->\n', '', '\n'],
     // Which read as a citation, which export writes as a field where the
     // bibliography holds its key
-    ['a citation as text', '', '\nSource [@smith2020; -@doe, p. 2] *x*\n', '', '\n\nSource \\[@smith2020; -@doe, p. 2] \\*x\\*\n'],
+    ['a citation as text', '', '\nSource [@smith2020; -@doe, p. 2] *x* [see @doe]\n', '', '\n\nSource \\[@smith2020; -@doe, p. 2] \\*x\\* \\[see @doe]\n'],
     // Which pair across one, which read as math
     ['dollar signs around a character reference', '', '\nSource $x &amp; y$ and *a <b>b</b> c*\n', '', '\n\nSource \\$x &amp; y$ and \\*a <b>b</b> c\\*\n'],
   ])('keeps %s around a table that leaves HTML, as it read', async (_name, beforeHtml, afterHtml, beforeMd, afterMd) => {

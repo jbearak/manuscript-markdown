@@ -7563,10 +7563,11 @@ const CHARACTER_REFERENCE_AT = /&(?:#\d{1,7}|#[xX][\da-fA-F]{1,6}|[A-Za-z][A-Za-
  *  in the table's block: its tags, comments and character references, as
  *  markdown-it reads them, as they are, and the rest escaped, with no
  *  indent, which HTML runs together with the line end before. A citation's
- *  [ is escaped too, and what it holds as text, which escapeMarkdownChars
- *  keeps as a citation, as export writes one whose key is missing as its
- *  text, but which the HTML held as text. It's a \0 while the rest is
- *  escaped, which no Markdown holds, as markdown-it replaces one. */
+ *  [, as any with an @ before its ], is escaped too, and what it holds as
+ *  text, which escapeMarkdownChars keeps as a citation, as export writes
+ *  one whose key is missing as its text, but which the HTML held as text.
+ *  It's a \0 while the rest is escaped, which no Markdown holds, as
+ *  markdown-it replaces one. */
 function htmlLineAsText(line: string): string {
   const text = line.replace(/^[ \t]+/, '');
   // Each of those as a character the line doesn't hold while the rest is
@@ -7588,7 +7589,7 @@ function htmlLineAsText(line: string): string {
     i = from - 1;
   }
   plain += text.slice(from);
-  const escaped = escapeMarkdownChars(plain.replace(/\[(?=-?@)/g, '\0'), true).replace(/\0/g, '\\[');
+  const escaped = escapeMarkdownChars(plain.replace(/\[(?=[^\]]*@)/g, '\0'), true).replace(/\0/g, '\\[');
   return escaped.split(String.fromCharCode(mark)).map((part, k) => part + (raws[k] ?? '')).join('');
 }
 
