@@ -5748,25 +5748,38 @@ describe('HTML table cells', () => {
     expect(markdown(2)).toStartWith('<table>\n  <tr>\n    <th colspan="2">');
   });
 
+  // A Word table, which import writes as a pipe table, a grid table, or
+  // HTML past their widths
+  const wordTable = (cell: ContentItem[], header = false) => [{ type: 'table', rows: [
+    { isHeader: true, cells: [{ paragraphs: [[cellText('x')]] }] },
+    { isHeader: header, cells: [{ paragraphs: [cell] }] },
+  ] }] as unknown as ContentItem[];
+  const cellText = (t: string, ids: string[] = [], formatting: Partial<RunFormatting> = {}, revision?: RevisionInfo) =>
+    ({ type: 'text', text: t, commentIds: new Set(ids), formatting: { ...DEFAULT_FORMATTING, ...formatting }, ...(revision ? { revision } : {}) }) as ContentItem;
+  const noWidth = { pipeTableMaxLineWidth: 0, gridTableMaxLineWidth: 0 };
+
   test.each([
-    ['a comment', '| x |\n|---|\n| a<br>b{==c==}{>>d<<} |', '+-----------------+\n| x               |\n+=================+\n| a               |\n| b{==c==}{>>d<<} |\n+-----------------+'],
-    ['a tracked change', '| x |\n|---|\n| {++a++}<br>b |', '+---------+\n| x       |\n+=========+\n| {++a++} |\n| b       |\n+---------+'],
-    ['a highlight, past the width of a grid table', '| ' + 'w'.repeat(130) + ' |\n|---|\n| ==a==<br>b |', '+' + '-'.repeat(132) + '+\n| ' + 'w'.repeat(130) + ' |\n+' + '='.repeat(132) + '+\n| ==a==' + ' '.repeat(125) + ' |\n| b' + ' '.repeat(129) + ' |\n+' + '-'.repeat(132) + '+'],
-  ])('writes a table with a line break and %s, which a pipe table or an HTML cell can\'t hold, as a grid table', async (_name, md, expected) => {
+    ['a comment', [cellText('a'), cellText('\\\n'), cellText('b'), cellText('c', ['0'])],
+      '+----------------------+\n| x                    |\n+======================+\n| a                    |\n| b{==c==}{>>@A | d<<} |\n+----------------------+'],
+    ['a tracked change', [cellText('a', [], {}, { type: 'addition', author: 'A', date: '2024-01-01T00:00:00Z' }), cellText('\\\n'), cellText('b')],
+      '+---------+\n| x       |\n+=========+\n| {++a++} |\n| b       |\n+---------+'],
+    ['a highlight', [cellText('a', [], { highlight: true }), cellText('\\\n'), cellText('b')],
+      '+-------+\n| x     |\n+=======+\n| ==a== |\n| b     |\n+-------+'],
+  ])('writes a table with a line break and %s, past the widths of a pipe table and a grid table, as a grid table', async (_name, cell, expected) => {
     // It became an HTML table, whose cell exported the comment, the change
     // or the highlight, and the \ of the line break, as literal text
-    const markdown = await roundTrip(md);
+    const markdown = buildMarkdown(wordTable(cell), new Map([['0', { author: 'A', text: 'd', date: '' }]]), noWidth);
     expect(markdown).toBe(expected);
-    expect(await roundTrip(markdown)).toBe(markdown);
+    expect(strip((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).trimEnd()).toBe(markdown);
   });
 
-  test('writes a table of a header row alone with a line break and a highlight as a grid table with its header', async () => {
+  test('writes a table of header rows alone with a line break and a highlight as a grid table with its header', async () => {
     // Its grid table had no header, so the next export lost the header's bold
-    const markdown = await roundTrip('| ==a==<br>b | c |\n|:---|---:|');
-    expect(markdown).toBe('+-------+-----+\n| ==a== | c   |\n| b     |     |\n+:======+====:+');
+    const markdown = buildMarkdown(wordTable([cellText('a', [], { highlight: true }), cellText('\\\n'), cellText('b')], true), new Map(), noWidth);
+    expect(markdown).toBe('+-------+\n| x     |\n+-------+\n| ==a== |\n| b     |\n+=======+');
     const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
-    expect(xml).toContain('<w:tblHeader/>');
-    expect(await roundTrip(markdown)).toBe(markdown);
+    expect(xml.match(/<w:tblHeader\/>/g)?.length).toBe(2);
+    expect(strip((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).trimEnd()).toBe(markdown);
   });
 
   test('keeps a table with a cell of paragraphs HTML, with a line width of 0, though another cell has a highlight', async () => {
