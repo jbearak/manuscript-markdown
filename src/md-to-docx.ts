@@ -2476,7 +2476,8 @@ function annotateBlockquoteAlert(tokens: MdToken[], level: number): MdToken[] {
   // blank lines into one paragraph).
   const expanded: MdToken[] = [];
   for (const token of tokens) {
-    if (token.type === 'blockquote' || token.runs.length === 0) {
+    // A code block's lines are code, not markers
+    if (token.type === 'blockquote' || token.type === 'code_block' || token.runs.length === 0) {
       expanded.push(token);
       continue;
     }
@@ -2521,7 +2522,7 @@ function annotateBlockquoteAlert(tokens: MdToken[], level: number): MdToken[] {
   interface Hit { idx: number; type: GfmAlertType; runs: MdRun[] }
   const hits: Hit[] = [];
   for (let idx = 0; idx < expanded.length; idx++) {
-    if (expanded[idx].type === 'blockquote' || expanded[idx].runs.length === 0) continue;
+    if (expanded[idx].type === 'blockquote' || expanded[idx].type === 'code_block' || expanded[idx].runs.length === 0) continue;
     const parsed = stripLeadingAlertMarker(expanded[idx].runs);
     if (parsed.alertType) {
       hits.push({ idx, type: parsed.alertType, runs: parsed.runs });
@@ -2615,10 +2616,10 @@ const QUOTE_BLOCK_WARNINGS: Partial<Record<MdToken['type'], string>> = {
   table: 'Table inside blockquote dropped during conversion',
   hr: 'Horizontal rule inside blockquote dropped during conversion',
 };
-// A code block with no text, which would be an empty paragraph, which a
-// quote can't hold in Markdown
+// A code block of blank lines alone, which would be an empty paragraph,
+// which a quote can't hold in Markdown
 const EMPTY_QUOTE_CODE_WARNING = 'Empty code block inside blockquote dropped during conversion';
-const isEmptyCodeBlock = (token: MdToken): boolean => token.type === 'code_block' && token.runs.every(run => !run.text.replace(/\n$/, ''));
+const isEmptyCodeBlock = (token: MdToken): boolean => token.type === 'code_block' && token.runs.every(run => !/\S/.test(run.text));
 
 function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel = 0, warnings?: string[], sourceLines?: string[]): MdToken[] {
   const result: MdToken[] = [];

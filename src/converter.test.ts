@@ -6555,6 +6555,10 @@ describe('Blocks a quote can\'t hold', () => {
     ['a code block of lines', '> a\n>\n> ```\n> c\n>   d\n>\n> e\n> ```\n', '> a\n>\n> c\\\n> &#32;&#32;d\\\n> \\\n> e\n', 'Code block inside blockquote exported as a quote paragraph'],
     // Which left an empty paragraph
     ['an empty code block', '> a\n>\n> ```\n>\n> ```\n>\n> b\n', '> a\n>\n> b\n', 'Empty code block inside blockquote dropped during conversion'],
+    ['a code block of blank lines', '> a\n>\n> ```\n>\n>\n> ```\n>\n> b\n', '> a\n>\n> b\n', 'Empty code block inside blockquote dropped during conversion'],
+    // Whose line read as an alert's marker
+    ['a code block with an alert\'s marker', '> a\n>\n> ```\n> x\n> [!NOTE]\n> ```\n', '> a\n>\n> x\\\n> \\[!NOTE]\n', 'Code block inside blockquote exported as a quote paragraph'],
+    ['a code block that starts with an alert\'s marker', '> a\n>\n> ```\n> [!NOTE]\n> ```\n', '> a\n>\n> \\[!NOTE]\n', 'Code block inside blockquote exported as a quote paragraph'],
     ['a table', '> a\n>\n> | t |\n> |---|\n> | u |\n>\n> b\n', '> a\n>\n> b\n', 'Table inside blockquote dropped during conversion'],
     ['an HTML table', '> a\n>\n> <table><tr><td>t</td></tr></table>\n>\n> b\n', '> a\n>\n> b\n', 'Table inside blockquote dropped during conversion'],
     ['a horizontal rule', '> a\n>\n> ---\n>\n> b\n', '> a\n>\n> b\n', 'Horizontal rule inside blockquote dropped during conversion'],
