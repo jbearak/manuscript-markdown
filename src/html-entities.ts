@@ -38,6 +38,12 @@ export function keepParagraphEdgeWhitespace(text: string, atStart: boolean, atEn
 	const reference = (whitespace: string) => trimmed(whitespace).replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;');
 	if (!NOT_EDGE_RE.test(text)) return atStart && HAS_TRIMMED_RE.test(text) ? reference(text) : text;
 	let result = atStart ? text.replace(EDGE_START_RE, reference) : text;
-	if (atEnd) result = result.replace(EDGE_END_RE, trimmed);
+	// A backslash right before a reference would escape its &, so one before
+	// whitespace, which was text, is escaped itself
+	if (atEnd) result = result.replace(EDGE_END_RE, (whitespace, offset: number) => {
+		const kept = trimmed(whitespace);
+		const backslashes = kept.startsWith('&') ? /\\*$/.exec(result.slice(0, offset))![0].length : 0;
+		return (backslashes % 2 === 1 ? '\\' : '') + kept;
+	});
 	return result;
 }

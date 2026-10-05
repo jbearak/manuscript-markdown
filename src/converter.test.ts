@@ -5906,6 +5906,11 @@ describe('Whitespace at the edges of a paragraph', () => {
     ['a no-break space', 'end\u00a0', 'A.\n\nend&nbsp;\n\nB.\n'],
     ['an ideographic space', 'end\u3000', 'A.\n\nend&#12288;\n\nB.\n'],
     ['a line separator', 'end\u2028', 'A.\n\nend&#8232;\n\nB.\n'],
+    // Whose reference's & the backslash escaped, which showed the reference
+    ['an ideographic space after a backslash', 'end\\\u3000', 'A.\n\nend\\\\&#12288;\n\nB.\n'],
+    ['an ideographic space after two backslashes', 'end\\\\\u3000', 'A.\n\nend\\\\\\\\&#12288;\n\nB.\n'],
+    ['a no-break space after a backslash', 'end\\\u00a0', 'A.\n\nend\\\\&nbsp;\n\nB.\n'],
+    ['an ideographic space after a backslash and a space', 'end\\ \u3000', 'A.\n\nend\\ &#12288;\n\nB.\n'],
   ])('keeps %s at the end of a paragraph', async (_name, text, expected) => {
     const markdown = await withText('A.\n\nXX\n\nB.', 'word/document.xml', text);
     expect(markdown).toBe(expected);
