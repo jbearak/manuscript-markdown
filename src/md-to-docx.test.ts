@@ -3004,6 +3004,26 @@ describe('extractFootnoteDefinitions', () => {
     expect(cleaned).toBe('T.\n\n' + block + '\n\nEnd.');
   });
 
+  it.each([
+    ['<pre>', 'T [^1] {>>Use this tag:\n<pre>\nfor the example.<<}'],
+    ['a fence', 'T [^1] {>>Use:\n```\nfor the example.<<}'],
+    ['<div> after a blank line', 'T [^1] {>>Use:\n\n<div>\n\nx<<}'],
+  ])('reads a definition after a comment with %s in it, which starts no block', (_name, before) => {
+    // The comment's text, which parseMd keeps on one line, read as an HTML
+    // block or fence to the end, which hid the definition
+    const { cleaned, definitions } = extractFootnoteDefinitions(before + '\n\n[^1]: Footnote.');
+    expect(definitions.get('1')).toBe('Footnote.');
+    expect(cleaned).toBe(before + '\n');
+  });
+
+  it('counts the lines of a comment whose opener ends a line, to find where HTML after it ends', () => {
+    // The definition right after the </pre> line, which ends the block
+    const before = 'T [^1] {>>\n<pre>\nx<<}\n\n<pre>\n[^2]: Not a note.\n</pre>';
+    const { cleaned, definitions } = extractFootnoteDefinitions(before + '\n[^1]: Footnote.');
+    expect([...definitions]).toEqual([['1', 'Footnote.']]);
+    expect(cleaned).toBe(before);
+  });
+
   it('reads a definition after fenced code after a bare carriage return, as a line end', () => {
     // markdown-it reads a bare \r as one, which put the fence's lines one
     // later, and the definition in them

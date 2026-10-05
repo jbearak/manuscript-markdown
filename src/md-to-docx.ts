@@ -1100,13 +1100,20 @@ export function extractFootnoteDefinitions(markdown: string): { cleaned: string;
   // markdown-it reads them, which hold no definition, as in <pre> or a
   // comment. Not a line like a fence that isn't one, as ```a`b, whose info
   // can't hold a backtick, or one indented as code, and not past a closing
-  // fence, which holds nothing after its marker.
+  // fence, which holds nothing after its marker. Nor a line in CriticMarkup,
+  // as parseMd reads it, whose line ends its placeholders hold, so <pre> in
+  // a comment starts no block; `starts` has the line each parsed one starts.
   const literal = new Set<number>();
   if (/^\[\^[a-zA-Z0-9_-]+\]:/m.test(source) && /^[ \t]*(?:`{3,}|~{3,}|<)/m.test(source)) {
+    const parsed = preprocessCriticMarkup(source, false);
+    const starts = [0];
+    for (const line of parsed.split('\n')) {
+      starts.push(starts[starts.length - 1] + line.split(LINE_PLACEHOLDER).length + 2 * (line.split(PARA_PLACEHOLDER).length - 1));
+    }
     citationTextMd ??= createMarkdownIt();
-    for (const token of citationTextMd.parse(source, {})) {
+    for (const token of citationTextMd.parse(parsed, {})) {
       if ((token.type === 'fence' || token.type === 'html_block') && token.map) {
-        for (let k = token.map[0]; k < token.map[1]; k++) literal.add(k);
+        for (let k = starts[token.map[0]]; k < starts[token.map[1]]; k++) literal.add(k);
       }
     }
   }
