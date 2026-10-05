@@ -711,9 +711,16 @@ describe('parseMd grid tables', () => {
     expect(table?.rows?.[0].cells.map(cell => cell.runs.map(run => run.text).join(''))).toEqual([text, 'b']);
   });
 
+  it('keeps a | in a grid table\'s cell after joined emoji Pandoc pads as the last of each', () => {
+    // 🏳 is narrow and 🌈 wide, and the sequence was counted as 🏳
+    const table = parseMd('+--------------------+--------------------+\n| 🏳\u200d🌈🏳\u200d🌈🏳\u200d🌈             | a|x                |\n+--------------------+--------------------+').find(t => t.type === 'table');
+    expect(table?.rows?.[0].cells.map(cell => cell.runs.map(run => run.text).join(''))).toEqual(['🏳\u200d🌈🏳\u200d🌈🏳\u200d🌈', 'a|x']);
+  });
+
   it.each([
     ['👍🏽', 2], ['☝🏽', 2], ['👩🏽‍💻', 2], ['🧑🏽‍🦰', 2], ['🇺🇸', 2], ['🇺', 1], ['ที่นี่', 2], ['e\u0301', 1], ['👨‍👩‍👧', 2], ['🏳️‍🌈', 2], ['✔️', 2], ['#️⃣', 2],
     ['✅', 2], ['⭐', 2], ['🅰', 1], ['🅰️', 2], ['🏽', 2], ['中', 2], ['１', 2], ['ｱ', 1], ['a\u00adb', 2], ['a\u200db', 2], ['☺\ufe0e', 1],
+    ['🏳\u200d🌈', 2], ['🌈\u200d🏳', 1], ['🌈\u200da', 1], ['🌈\u200d', 0], ['🇺🇸\u200d🌈', 3], ['☝\ufe0f🏽', 4], ['🌈🏽', 4], ['a🏽', 3], ['a\ufe0f', 1], ['⌚\ufe0f\u200da', 3], ['#\u200d🌈', 2],
   ])('counts %j as %d columns wide, as Pandoc does', (text, width) => {
     expect(getDisplayWidth(text)).toBe(width);
   });

@@ -33,17 +33,20 @@ function isFullWidth(cp: number): boolean {
 }
 
 const ZERO_WIDTH_RE = /^[\p{Mn}\p{Me}\p{Cf}]$/u;
+const EMOJI_RE = /^\p{Emoji}$/u;
 const EMOJI_PRESENTATION_RE = /^\p{Emoji_Presentation}$/u;
-const PICTOGRAPHIC_RE = /^\p{Extended_Pictographic}$/u;
+const MODIFIER_BASE_RE = /^\p{Emoji_Modifier_Base}$/u;
 
 /**
  * A string's width in the columns of a monospace editor, as Pandoc counts
  * them in a grid table: two for a wide character, as a CJK one, or an emoji,
- * and none for a combining mark or a format character, as a joiner or a soft
- * hyphen. An emoji's sequence counts as the emoji: an emoji a joiner joins
- * to it counts none, and a variation selector-16 after it, or a skin tone,
- * makes it wide, as ☝🏽, where it's narrow, and else counts none. A regional
- * indicator counts one, so a flag, two of them, counts two.
+ * and none for a combining mark or a format character, as a soft hyphen. A
+ * variation selector-16 after an emoji makes it wide, as ✔️, as does a skin
+ * tone after an emoji it modifies, as ☝🏽, where a skin tone after another
+ * character counts two. A joiner after an emoji, or after either of these,
+ * takes the emoji's width away, so a sequence it joins counts as its last
+ * emoji, as 🏳‍🌈, which counts two, as 🌈 does. A regional indicator counts
+ * one, so a flag, two of them, counts two.
  */
 export function getDisplayWidth(str: string): number {
   let width = 0;
@@ -55,35 +58,35 @@ export function getDisplayWidth(str: string): number {
  *  counts it in its sequence, as a skin tone counts none after an emoji */
 function characterWidths(str: string): number[] {
   const widths: number[] = [];
-  // The last character that isn't a mark, and what it counted
-  let base = '';
-  let baseWidth = 0;
-  let joined = false;
+  // The last character, and the first of those whose widths a joiner after
+  // them takes away: the last one that modifies none, and those modifying it
+  let last = '';
+  let start = 0;
   for (const ch of str) {
     const cp = ch.codePointAt(0)!;
     let w: number;
     if (cp < 0x7f) {
       // ASCII, which is most text, without the tests of its properties
       w = 1;
-      base = ch;
-      baseWidth = 1;
-      joined = false;
-    } else if (cp === 0xfe0f || cp >= 0x1f3fb && cp <= 0x1f3ff && PICTOGRAPHIC_RE.test(base)) {
-      // A variation selector-16, or a skin tone after an emoji, makes it
-      // wide, which stays the sequence's base, as a joiner after joins to it
-      w = baseWidth === 1 ? 1 : 0;
-      baseWidth += w;
-    } else if (ZERO_WIDTH_RE.test(ch)) {
+      start = widths.length;
+    } else if (cp === 0xfe0f && EMOJI_RE.test(last) && !EMOJI_PRESENTATION_RE.test(last)
+      || cp >= 0x1f3fb && cp <= 0x1f3ff && MODIFIER_BASE_RE.test(last)) {
+      // A variation selector-16 after a narrow emoji, or a skin tone after
+      // an emoji it modifies, makes it wide
+      w = 2 - widths[widths.length - 1];
+    } else if (cp === 0x200d && (EMOJI_RE.test(last) || last === '\ufe0f')) {
+      // A joiner after an emoji, or a variation selector or skin tone after
+      // one, takes its width away
+      for (let k = start; k < widths.length; k++) widths[k] = 0;
       w = 0;
-      if (cp === 0x200d) joined = PICTOGRAPHIC_RE.test(base);
+      start = widths.length;
     } else {
-      w = joined && PICTOGRAPHIC_RE.test(ch) ? 0
+      w = ZERO_WIDTH_RE.test(ch) ? 0
         : cp >= 0x1f1e6 && cp <= 0x1f1ff ? 1
           : isFullWidth(cp) || EMOJI_PRESENTATION_RE.test(ch) ? 2 : 1;
-      base = ch;
-      baseWidth = w;
-      joined = false;
+      start = widths.length;
     }
+    last = ch;
     widths.push(w);
   }
   return widths;
