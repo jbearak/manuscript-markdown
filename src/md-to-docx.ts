@@ -2687,7 +2687,18 @@ function codeBlockLines(run: MdRun): MdRun[] {
 
 const HTML_AROUND_TABLE_WARNING = 'HTML around a table in its HTML block not shown in Word (kept in the Markdown on round-trip).';
 
-const cellText = (cell: MdTableCell): string => cell.runs.filter(run => run.type === 'text').map(run => run.text).join('');
+/** A run's text as Word holds it, as import reads it in a table's cell: a
+ *  text run's, and the text of a tracked change, both sides of one that
+ *  substitutes, and of a highlight, but no math, citation or comment */
+const runText = (run: MdRun): string => {
+  const inner = (runs: MdRun[] | undefined, text: string) => runs ? runs.map(runText).join('') : text;
+  if (run.type === 'text') return run.text;
+  if (run.type === 'critic_add' || run.type === 'critic_del' || run.type === 'critic_highlight') return inner(run.innerRuns, run.text);
+  if (run.type === 'critic_sub') return inner(run.oldRuns, run.text) + inner(run.newRuns, run.newText ?? '');
+  return '';
+};
+
+const cellText = (cell: MdTableCell): string => cell.runs.map(runText).join('');
 
 /** A table's first row's text, which import compares with the table's, to
  *  put the HTML around it back with no other table, as one Word added or

@@ -6344,6 +6344,28 @@ describe('HTML around a table in its block', () => {
     expect(markdown).toContain('<div><p>Cap</p>\n\n| H |\n| --- |\n| a |');
   });
 
+  test.each(['{++a++}', '{--a--}', '{==a==}', '{~~a~>b~~}'])('keeps the HTML around a table off a table before it with %s', async cell => {
+    // Export didn't count the text of a tracked change or highlight, which
+    // import does, so the table before took the HTML as the first alike
+    const md = '| ' + cell + ' |\n| --- |\n\n<div><p>Cap</p>\n<table><tr><td>' + cell.replace(/[{}+=~>-]/g, '') + '</td></tr></table>\n</div>\n';
+    const markdown = await roundTrip(md);
+    expect(markdown.startsWith('| ')).toBe(true);
+    expect(markdown).toContain('\n\n<div><p>Cap</p>\n<table>');
+  });
+
+  test('keeps the HTML around a table Word edits, alike an embedded table, at its index', async () => {
+    // The embedded table, which export doesn't count, kept it from the table
+    const resolver = { readFile: () => new TextEncoder().encode('H\na\n'), resolveRelative: (_base: string, relative: string) => relative };
+    const md = '<!-- embed: t.csv headers=1 -->\n\n<div><p>Cap</p>\n<table><tr><th>H</th></tr><tr><td>a</td></tr></table>\n</div>\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md, { embedResolver: resolver, documentPath: '/doc/paper.md' })).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const last = xml.lastIndexOf('<w:tbl>');
+    zip.file('word/document.xml', xml.slice(0, last) + xml.slice(last).replace('>a<', '>z<'));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toContain('<div><p>Cap</p>\n<table>');
+    expect(markdown).toContain('<p>z</p>');
+  });
+
   test('keeps the HTML around a table Word edits, at its index', async () => {
     const zip = await JSZip.loadAsync((await convertMdToDocx('<div><p>Cap</p>\n<table><tr><td>H</td></tr><tr><td>a</td></tr></table>\n</div>\n')).docx);
     const xml = await zip.file('word/document.xml')!.async('string');

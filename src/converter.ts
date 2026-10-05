@@ -8809,11 +8809,16 @@ export function buildMarkdown(
   const noteLabels = options?.notes?.assignedLabels;
   // How many tables in the document have each first row and text, which
   // the HTML export wrote around one goes to no other while it's there (see
-  // renderTableOrFallback)
+  // renderTableOrFallback): those the body and then the notes render, by
+  // their indices, but one written as its embed directive, which export
+  // doesn't count
   const tablesAlike = new Map<string, number>();
   if (options?.tableHtmlAroundMapping) {
+    let index = 0;
     for (const item of [...mergedContent, ...noteEntries.flatMap(entry => entry.body)]) {
-      if (item.type === 'table') tablesAlike.set(tableIdentity(item.rows), (tablesAlike.get(tableIdentity(item.rows)) ?? 0) + 1);
+      if (item.type !== 'table') continue;
+      if (!options.embedDirectiveMapping?.get(String(index))) tablesAlike.set(tableIdentity(item.rows), (tablesAlike.get(tableIdentity(item.rows)) ?? 0) + 1);
+      index++;
     }
   }
   const renderOpts = {
