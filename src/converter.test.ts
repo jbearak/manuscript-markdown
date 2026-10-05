@@ -9172,6 +9172,37 @@ describe('Frontmatter settings round-trip', () => {
   });
 });
 
+describe('Links in a tracked change', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+
+  test.each([
+    ['before a word', 'x {++[a](https://e.com)b++} y'],
+    ['after a word', 'x {++b[a](https://e.com)++} y'],
+    ['before emphasis', 'x {++[a](https://e.com)*b*++} y'],
+    ['after emphasis', 'x {++*b*[a](https://e.com)++} y'],
+    ['after code', 'x {++`c`[a](https://e.com)++} y'],
+    ['after math', 'x {++$c$[a](https://e.com)++} y'],
+    ['before a link to one place', 'x {++[a](https://e.com)[b](https://e.com)++} y'],
+    ['in a deletion, before a word', 'x {--[a](https://e.com)b--} y'],
+    ['in a deletion, after a word', 'x {--b[a](https://e.com)--} y'],
+    ['in a deletion, before a link to one place', 'x {--[a](https://e.com)[b](https://e.com)--} y'],
+    ['in a substitution', 'x {~~[a](https://e.com)b~>c[d](https://e.com)~~} y'],
+  ])('keeps a change with a link %s one change', async (_name, md) => {
+    // The change was split at the link's ) or [, which bordered no syntax
+    expect(await roundTrip(md)).toBe(md + '\n');
+  });
+
+  test('keeps an insertion that ends in ! apart from a link after it, which would read as an image', async () => {
+    expect(await roundTrip('x {++b!++}{++[a](https://e.com)++} y')).toBe('x {++b!++}{++[a](https://e.com)++} y\n');
+  });
+
+  test('keeps two links to one place in an insertion two hyperlinks', async () => {
+    const { docx } = await convertMdToDocx('x {++[a](https://e.com)[b](https://e.com)++} y');
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml.match(/<w:hyperlink /g)?.length).toBe(2);
+  });
+});
+
 describe('Links of more than one run', () => {
   const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
 

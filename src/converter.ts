@@ -5079,7 +5079,8 @@ function spanJoin(item: InlineRevisionItem): { join: SpanJoin; literal: Set<stri
  * equation, code span, emphasis, strikethrough, highlight or HTML-like
  * formatting tag (</u>), and a closing bracket before a letter, a digit,
  * emphasis, strikethrough, a highlight or a tag, none of which can open a
- * link: before[^1]after, ==a==[^1]==b==, **==a==**[^1]**==b==**.
+ * link: before[^1]after, ==a==[^1]==b==, **==a==**[^1]**==b==**. A link
+ * joins a word, emphasis or another link on either side: [a](u)b[c](u).
  */
 function canJoinSpans(beforeEnd: string, after: string): boolean {
   const a = beforeEnd.slice(-1);
@@ -5089,6 +5090,10 @@ function canJoinSpans(beforeEnd: string, after: string): boolean {
   if (/[\p{L}\p{N}\]]/u.test(a) && /[\p{L}\p{N}]/u.test(b)) return true;
   if (a === ']' && /^(?:\*|==|~~|<)/.test(after)) return true;
   if (after.startsWith('[^') && /[\p{L}\p{N}.,;:?)\]$*`"'\u2019\u201D=}~>]/u.test(a)) return true;
+  // A link's ) before a letter, a digit, emphasis or another link, and its
+  // [ after one of those, a link's ), code or math, which make nothing more
+  // of either, as a ! before [ makes an image and a ] a reference
+  if (a === ')' && /[\p{L}\p{N}[*_]/u.test(b) || b === '[' && /[\p{L}\p{N})*_`$]/u.test(a)) return true;
   return (/[\])$*`]/.test(a) && /[.,;:!?)]/.test(b)) || (/[(\-/]/.test(a) && /[[$*`]/.test(b));
 }
 

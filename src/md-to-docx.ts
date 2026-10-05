@@ -6092,21 +6092,32 @@ function hyperlinkRelationshipId(href: string, state: DocxGenState): string {
 const DELETED_LINK = 'manuscriptDeletedLink';
 const DELETED_LINK_RE = new RegExp('<' + DELETED_LINK + ' rId="([^"]*)">([\\s\\S]*?)</' + DELETED_LINK + '>', 'g');
 
-/** Deleted content, from generateDeletedCriticContent, in w:del. A link's
- *  runs go in a w:del of their own inside its w:hyperlink, as Word writes
- *  a deleted link, since a w:del can't hold a w:hyperlink. */
-function deletionXml(deletedXml: string, author: string, dateAttr: string, state: DocxGenState): string {
-  const del = (content: string) => '<w:del w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + content + '</w:del>';
-  if (!deletedXml.includes('<' + DELETED_LINK + ' ')) return del(deletedXml);
+/** A hyperlink generateRuns writes, which holds no other */
+const HYPERLINK_RE = /<w:hyperlink r:id="([^"]*)">([\s\S]*?)<\/w:hyperlink>/g;
+
+/** A tracked change, `tag`, around `contentXml`, whose links, as `links`
+ *  finds them, each go in a hyperlink around a change of their own, as Word
+ *  writes a link in a change, since a w:ins or w:del holds only runs. */
+function trackedChangeXml(tag: 'w:ins' | 'w:del', contentXml: string, links: RegExp, author: string, dateAttr: string, state: DocxGenState): string {
+  const change = (content: string) => '<' + tag + ' w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + content + '</' + tag + '>';
   let xml = '';
   let last = 0;
-  for (const link of deletedXml.matchAll(DELETED_LINK_RE)) {
-    if (link.index > last) xml += del(deletedXml.slice(last, link.index));
-    xml += '<w:hyperlink r:id="' + link[1] + '">' + del(link[2]) + '</w:hyperlink>';
+  for (const link of contentXml.matchAll(links)) {
+    if (link.index > last) xml += change(contentXml.slice(last, link.index));
+    xml += '<w:hyperlink r:id="' + link[1] + '">' + change(link[2]) + '</w:hyperlink>';
     last = link.index + link[0].length;
   }
-  if (last < deletedXml.length) xml += del(deletedXml.slice(last));
-  return xml;
+  return last === 0 || last < contentXml.length ? xml + change(contentXml.slice(last)) : xml;
+}
+
+/** Deleted content, from generateDeletedCriticContent, in w:del */
+function deletionXml(deletedXml: string, author: string, dateAttr: string, state: DocxGenState): string {
+  return trackedChangeXml('w:del', deletedXml, DELETED_LINK_RE, author, dateAttr, state);
+}
+
+/** Inserted content, from generateRuns, in w:ins */
+function insertionXml(insertedXml: string, author: string, dateAttr: string, state: DocxGenState): string {
+  return trackedChangeXml('w:ins', insertedXml, HYPERLINK_RE, author, dateAttr, state);
 }
 
 /** The runs a link's hyperlink holds: its text, line breaks and tracked changes */
@@ -6156,7 +6167,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       const date = normalizeToUtcIso(run.date || '', state.timezone);
       const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
       const contentXml = insertedContent(state, () => generateInlineCriticContent(run.innerRuns, run.text, run, state, options, bibEntries, citeprocEngine));
-      xml += '<w:ins w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + contentXml + '</w:ins>';
+      xml += insertionXml(contentXml, author, dateAttr, state);
     } else if (run.type === 'critic_del' && hasCommentRuns(run.innerRuns)) {
       xml += generateRuns(deletionWithComments(run.innerRuns, run, run), state, options, bibEntries, citeprocEngine);
     } else if (run.type === 'critic_del') {
@@ -6176,7 +6187,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       const deletedXml = generateDeletedCriticContent(run.oldRuns, run.text, run, {}, state.tableRunRPrExtra || undefined, state.warnings, state, options);
       const insertedXml = insertedContent(state, () => generateInlineCriticContent(run.newRuns, run.newText || '', run, state, options, bibEntries, citeprocEngine));
       xml += deletionXml(deletedXml, author, dateAttr, state);
-      xml += '<w:ins w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + insertedXml + '</w:ins>';
+      xml += insertionXml(insertedXml, author, dateAttr, state);
     } else if (run.type === 'critic_highlight') {
       if (nextRun?.type === 'critic_comment') {
         const reserved = run.reservedCommentId;
