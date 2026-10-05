@@ -2094,11 +2094,17 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
   // Trusted internal style blocks injected by manuscript rules — bypass GFM filtering.
   md.renderer.rules.manuscript_style = (tokens, idx) => tokens[idx].content || '';
   md.renderer.rules.manuscript_citation = (tokens, idx) => escapeHtmlText(tokens[idx].content);
-  // An image's alt text, which markdown-it makes of text tokens alone,
-  // keeps a citation's text
+  // An image's alt text, which markdown-it makes of text tokens alone, and
+  // of an image's in it, keeps a citation's text
+  const citationsAsText = (children: Token[] | null): void => {
+    for (const child of children ?? []) {
+      if (child.type === 'manuscript_citation') child.type = 'text';
+      citationsAsText(child.children);
+    }
+  };
   const renderImage = md.renderer.rules.image;
   md.renderer.rules.image = (tokens, idx, options, env, self) => {
-    for (const child of tokens[idx].children ?? []) if (child.type === 'manuscript_citation') child.type = 'text';
+    citationsAsText(tokens[idx].children);
     return renderImage ? renderImage(tokens, idx, options, env, self) : self.renderToken(tokens, idx, options);
   };
 

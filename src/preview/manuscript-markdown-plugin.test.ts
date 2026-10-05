@@ -2330,6 +2330,7 @@ describe('Citations in the preview', () => {
     ['the Markdown around it', '[x](u) [@a] *y* [b]', '<p><a href="u">x</a> [@a] <em>y</em> [b]</p>'],
     ['one in an insertion', '{++see [@a<b>c]++}', '<ins class="manuscript-markdown-addition">see [@a&lt;b&gt;c]</ins>'],
     ['one in an image\'s alt text', '![see [@a<b>]](x.png)', 'alt="see [@a&lt;b&gt;]"'],
+    ['one in the alt text of an image in an image\'s', '![![see [@a]](inner.png)](outer.png)', 'alt="see [@a]"'],
   ])('shows a citation with %s', (_name, md, html) => {
     expect(renderWithPlugin(md, 'github')).toContain(html);
   });
