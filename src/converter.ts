@@ -7800,7 +7800,9 @@ export function buildMarkdown(
 
         // Compute fence length: must exceed any run of its character in the
         // content. Tildes where the language has a backtick, which a
-        // backtick fence's info string can't hold.
+        // backtick fence's info string can't hold, and a space before a
+        // language that starts with the fence's character, which the fence
+        // would take.
         const fenceChar = lang.includes('`') ? '~' : '`';
         let maxRun = 0;
         for (const line of codeLines) {
@@ -7812,7 +7814,7 @@ export function buildMarkdown(
           }
         }
         const fence = fenceChar.repeat(Math.max(3, maxRun + 1));
-        output.push(fence + lang + '\n' + codeLines.join('\n') + '\n' + fence);
+        output.push(fence + (lang.startsWith(fenceChar) ? ' ' : '') + lang + '\n' + codeLines.join('\n') + '\n' + fence);
         codeBlockGroupIndex++;
         // Skip a plain separator para that was inserted during export between
         // consecutive code-block groups or before a blockquote group.  Only

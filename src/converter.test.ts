@@ -6504,6 +6504,18 @@ describe('Code block round-trip', () => {
     expect(result.markdown.trim()).toBe(md);
   });
 
+  test('keeps a language that starts with a tilde and has a backtick out of its fence', async () => {
+    // The fence of tildes took its tilde, and the closing fence was shorter
+    const zip = await JSZip.loadAsync((await convertMdToDocx('```x\ncode\n```')).docx);
+    const xml = await zip.file('docProps/custom.xml')!.async('string');
+    const edited = xml.replace('{"0":"x"}', '{"0":"~a`b"}');
+    expect(edited).not.toBe(xml);
+    zip.file('docProps/custom.xml', edited);
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown.trim()).toBe('~~~ ~a`b\ncode\n~~~');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
   test('keeps an empty paragraph a Word user adds after a code block', async () => {
     const zip = await JSZip.loadAsync((await convertMdToDocx('```\ncode\n```\n\n## H')).docx);
     const xml = await zip.file('word/document.xml')!.async('string');
