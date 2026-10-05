@@ -6420,6 +6420,21 @@ describe('HTML around a table in its block', () => {
     expect(await roundTrip(markdown)).toBe(markdown);
   });
 
+  test.each([
+    ['a <pre> on a line of its own', '<pre>Caption\n<table><tr><td><pre><code>x</code></pre></td></tr></table>\n'],
+    ['a <pre> on the table\'s line', '<pre>Caption<table><tr><td><pre><code>x</code></pre></td></tr></table>\n'],
+    ['a processing instruction', '<?x a><table><tr><td>b?>c</td></tr></table>\n'],
+    ['a CDATA section', '<![CDATA[ a ]]x><table><tr><td>b]]>c</td></tr></table>\n'],
+  ])('drops %s before a table whose block a cell ended, which import writes otherwise', async (_name, md) => {
+    // The end went as the cell was written, and the block went on over the
+    // text after it, which Word then didn't show
+    const markdown = await roundTrip(md + '\nAfter.\n');
+    expect(markdown.startsWith('<table>')).toBe(true);
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    expect(xml).toContain('>After.</w:t>');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
   test('writes a table in Word whose block a comment starts and ends', async () => {
     // The block read as a comment, which hid the table, as import writes
     // the first of two tables on a line with a comment before each

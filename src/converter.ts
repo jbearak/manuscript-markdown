@@ -6975,8 +6975,7 @@ function htmlCellsHoldTable(table: { rows: TableRow[] }): boolean {
 function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comment>, indent: string = '  ', renderOpts?: RenderOpts, extraAttrs: string = '', around?: readonly string[]): string {
   // A block that starts as a comment, <pre> or the like ends on the line its
   // end is on, as the --> before the table, so the table goes on that line
-  const oneLine = /^[ \t]{0,3}(?:<(?:script|pre|style|textarea)(?=[\s>]|$)|<!--|<\?|<![A-Za-z]|<!\[CDATA\[)/i.test(around?.[0] ?? '');
-  if (oneLine) indent = '';
+  let oneLine = /^[ \t]{0,3}(?:<(?:script|pre|style|textarea)(?=[\s>]|$)|<!--|<\?|<![A-Za-z]|<!\[CDATA\[)/i.test(around?.[0] ?? '');
   const i1 = indent;  // tr level
   const i2 = indent + indent;  // td/th level
   const i3 = indent + indent + indent;  // content level
@@ -7030,7 +7029,15 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
   // around it, goes on over the line end.
   let after = around?.[1] ?? '';
   const ends = oneLine ? htmlBlockEndMarker((around?.[0] ?? '').trimStart()) : undefined;
-  if (oneLine && lines.slice(1).some(line => /[\r\n]/.test(line))
+  if (ends && !ends.test(lines.join('') + after)) {
+    // And where the block's end was in a cell, as a </pre> or ?> there,
+    // which goes as the cell is written, the block would go on over the
+    // text after the table, so the HTML around it goes, and the table is
+    // written as one with none
+    lines[0] = lines[0].slice((around?.[0] ?? '').length);
+    after = '';
+    oneLine = false;
+  } else if (oneLine && lines.slice(1).some(line => /[\r\n]/.test(line))
     && (!ends || ends.test(around?.[0] ?? '') || lines.slice(1).some(line => ends.test(line)))) {
     const before = detachedTableHtml(around?.[0] ?? '');
     lines[0] = (before ? before + '\n\n' : '') + lines[0].slice((around?.[0] ?? '').length);
@@ -7039,7 +7046,8 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
   lines.push('</table>' + after);
   // Comment bodies go after the table, as in a pipe table: a blank line in
   // one would end the table's HTML
-  return lines.join(oneLine ? '' : '\n') + (deferredAll.length > 0 ? '\n\n' + deferredAll.join('\n') : '');
+  return (oneLine ? lines.map((line, k) => k > 0 ? line.trimStart() : line).join('') : lines.join('\n'))
+    + (deferredAll.length > 0 ? '\n\n' + deferredAll.join('\n') : '');
 }
 
 /** The keys of the HTML around tables export wrote, by the scope, first
