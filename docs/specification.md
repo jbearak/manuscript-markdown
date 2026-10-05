@@ -556,7 +556,7 @@ Grid tables use [Pandoc grid table syntax](https://pandoc.org/MANUAL.html#extens
 ```
 
 - Column boundaries are defined by `+` positions in the separator line, counted in display columns as Pandoc counts them: a wide character, such as a CJK one or an emoji, takes two, and a combining mark none. An emoji sequence takes what Pandoc pads it to: a skin tone or a variation selector-16 makes the emoji before it wide, and emoji joined by joiners count as the last of them, so 🏳‍🌈 takes two. A table whose `|` signs line up with the `+` signs by character count instead, as Expand Table pads one, is read that way, and a line that lines up neither way is cut at its edges and at the `|` nearest each `+` between
-- The `=` separator distinguishes header rows from body rows
+- The `=` separator distinguishes header rows from body rows, so a table's header rows lead it. On DOCX import, a Word table with a header row after a body row is HTML, which keeps that row's header
 - A `:` at either end of a column's `=` in the header's separator sets its alignment, as in `+:===+===:+` (left, then right); a table without a header takes them in its top line
 - Multiple content lines between separators form a single logical row with multi-line cells. Blank lines at a cell's end pad it to its row's height, as Pandoc reads them, and aren't line breaks, though a `\` before them ends its line in one
 - Grid tables do not support colspan or rowspan (use HTML tables for spans)
@@ -604,7 +604,7 @@ When converting from DOCX to Markdown, the converter selects the simplest format
 2. **Grid table** — used when the original table was grid format and cells require multi-line content
 3. **HTML table** — fallback for tables with colspan, rowspan, multi-paragraph cells, or that exceed the configured line width
 
-A table whose cells hold what an HTML cell can't, such as a comment, a tracked change or a highlight, is a grid table of any width where it would otherwise be HTML, even with a line width of 0. That keeps its cells' content, but not a cell's own alignment, which a grid table holds only for a column. It stays HTML if it has merged cells, which only HTML holds, a cell of more than one paragraph, which a grid table's cell holds as lines, or a font or column widths with `-->`, which no directive's comment can hold.
+A table whose cells hold what an HTML cell can't, such as a comment, a tracked change or a highlight, is a grid table of any width where it would otherwise be HTML, even with a line width of 0. That keeps its cells' content, but not a cell's own alignment, which a grid table holds only for a column. It stays HTML if it has merged cells, which only HTML holds, a cell of more than one paragraph, which a grid table's cell holds as lines, a header row after a body row, which a grid table's header can't hold, or a font or column widths with `-->`, which no directive's comment can hold.
 
 ### Embedded Tables
 

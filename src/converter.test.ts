@@ -5782,6 +5782,21 @@ describe('HTML table cells', () => {
     expect(strip((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).trimEnd()).toBe(markdown);
   });
 
+  test.each([
+    ['', {}],
+    [', with a line width of 0, though a cell has a highlight', noWidth],
+  ])('keeps a table with a header row after a body row out of a grid table%s', async (_name, widths) => {
+    // A grid table's header is its leading rows, so export read the last
+    // row as a body row, without its header or its bold
+    const markdown = buildMarkdown([{ type: 'table', rows: [
+      { isHeader: true, cells: [{ paragraphs: [[cellText('x')]] }] },
+      { isHeader: false, cells: [{ paragraphs: [[cellText('a', [], { highlight: true }), cellText('\\\n'), cellText('b')]] }] },
+      { isHeader: true, cells: [{ paragraphs: [[cellText('y')]] }] },
+    ] }] as unknown as ContentItem[], new Map(), widths);
+    expect(markdown).toStartWith('<table>');
+    expect(markdown).toContain('    <th>\n      <p>y</p>\n    </th>');
+  });
+
   test('keeps a table with a cell of paragraphs HTML, with a line width of 0, though another cell has a highlight', async () => {
     // A grid table, which holds the highlight, wrote the paragraphs as
     // lines, which export read as one paragraph with line breaks

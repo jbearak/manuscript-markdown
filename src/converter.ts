@@ -6541,6 +6541,10 @@ function tryRenderGridTable(
       if (cell.rowspan && cell.rowspan > 1) return null;
     }
   }
+  // A grid table's header is its leading rows: a header row after a body
+  // row would lose its header, and the bold its header stripped
+  const firstBody = rows.findIndex(r => !r.isHeader);
+  if (firstBody !== -1 && rows.slice(firstBody).some(r => r.isHeader)) return null;
 
   const numCols = Math.max(...rows.map(r => r.cells.length));
 
@@ -6601,7 +6605,6 @@ function tryRenderGridTable(
 
   // Find header boundary: a table of header rows alone ends its header at
   // its last row, under +===+, which export reads as a header's
-  const firstBody = rows.findIndex(r => !r.isHeader);
   const headerEnd = firstBody === -1 ? rows.length : firstBody;
   const hasHeader = headerEnd > 0;
   const aligns = columnAlignments(rows, numCols);
