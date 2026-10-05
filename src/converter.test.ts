@@ -6361,7 +6361,7 @@ describe('HTML around a table in its block', () => {
     expect(tracked).not.toBe(xml);
     zip.file('word/document.xml', tracked);
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
-    expect(markdown).toBe('| {++XX++} | b |\n| --- | --- |\n');
+    expect(markdown).toBe('+----------+-----+\n| {++XX++} | b   |\n+----------+-----+\n');
   });
 
   test('keeps the HTML around a table off a table before it with the same first row and none', async () => {
@@ -6390,7 +6390,7 @@ describe('HTML around a table in its block', () => {
     expect(tracked).not.toBe(xml);
     zip.file('word/document.xml', tracked);
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
-    expect(markdown).toBe('| {++XX++} | b |\n| --- | --- |\n\nSource\n');
+    expect(markdown).toBe('+----------+-----+\n| {++XX++} | b   |\n+----------+-----+\n\nSource\n');
   });
 
   test('keeps the HTML around a table off one alike in all its text before it with none', async () => {
@@ -6406,7 +6406,7 @@ describe('HTML around a table in its block', () => {
     zip.file('word/document.xml', xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, tbl => tbl.replace('>a<', '>z<') + '<w:p/>' + tbl));
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
     expect(markdown.startsWith('<table>')).toBe(true);
-    expect(markdown).toContain('<div><p>Cap</p>\n\n| H |\n| --- |\n| a |');
+    expect(markdown).toContain('<div><p>Cap</p>\n\n+-----+\n| H   |\n+-----+\n| a   |\n+-----+');
   });
 
   test.each(['{++a++}', '{--a--}', '{==a==}', '{~~a~>b~~}'])('keeps the HTML around a table off a table before it with %s', async cell => {
@@ -6521,7 +6521,7 @@ describe('HTML around a table in its block', () => {
     expect(tracked).not.toBe(xml);
     zip.file('word/document.xml', tracked);
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
-    expect(markdown).toBe(beforeMd + '| {++XX++} | b |\n| --- | --- |' + afterMd);
+    expect(markdown).toBe(beforeMd + '+----------+-----+\n| {++XX++} | b   |\n+----------+-----+' + afterMd);
   });
 
   test.each([
