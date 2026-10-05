@@ -495,6 +495,13 @@ function criticMarkupRule(state: StateInline, silent: boolean): boolean {
         token.oldText = content.slice(0, sepPos);
         token.newText = content.slice(sepPos + 2);
       }
+      // One side alone, as import writes a change whose text has its span's
+      // closer, is a change of that side
+      if (!token.oldText !== !token.newText) {
+        token.criticType = token.oldText ? 'critic_del' : 'critic_add';
+        token.markup = token.oldText ? '{--' : '{++';
+        token.content = token.oldText || token.newText || '';
+      }
     }
 
     if (type === 'critic_comment') {
