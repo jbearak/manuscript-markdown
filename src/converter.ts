@@ -3174,14 +3174,14 @@ function readHiddenRun(runChildren: XmlNode[], rPrChildren: XmlNode[] | undefine
 
 /** A hidden comment as inline Markdown reads one: one with no end, which
  *  ran to the end of an HTML table's cell, with one, but not one before
- *  others (their text `after`), which Word split it from at an <!-- in it,
+ *  others (their text, `after` it), which Word split it from at an <!-- in it,
  *  and which end it; and one the browser ended at a --!>, ended at a -->
  *  instead, as inline Markdown reads it on. In a table's cell (`cell`), one
  *  the browser ended at a --> after a -, which inline Markdown reads as
  *  text, ends at one it reads, as does one that ends at a --!> before
  *  another, and one before others gets an end where inline Markdown reads
  *  none in them. */
-function markdownComment(text: string, after = '', cell = false): string {
+function markdownComment(text: string, after: () => string = () => '', cell = false): string {
   const from = text.indexOf('<!--') + 4;
   // The length of the comment inline Markdown reads at the start of `html`
   const read = (html: string) => HTML_TAG_RE.exec(html.trimStart())?.[0].length ?? 0;
@@ -3191,7 +3191,9 @@ function markdownComment(text: string, after = '', cell = false): string {
     const body = text.slice(from, end.index);
     return text.slice(0, from) + body + (body.endsWith('-') ? ' ' : '') + '-->';
   }
-  if (after && (!cell || read(text + after) > text.trimStart().length) || text.includes('-->', from)) return text;
+  if (text.includes('-->', from)) return text;
+  const following = after();
+  if (following && (!cell || read(text + following) > text.trimStart().length)) return text;
   return end?.[0] === '--!>' && end.index >= from ? text.slice(0, -4) + '-->' : text.trimEnd() + ' -->';
 }
 
@@ -3233,12 +3235,21 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
   const lastItem = target[target.length - 1];
   const continues = lastItem !== undefined && 'commentIds' in lastItem && !!lastItem.commentIds
     && commentSetsEqual(lastItem.commentIds, activeComments);
-  /** Whether a comment's text has its end: a --> after its last <!--, or,
-   *  after its own, the > or -> of an empty one. Not a --!>, which ends a
-   *  comment in an HTML table's cell, as the browser reads it, but not one
-   *  inline Markdown reads to its --> (see renderHtmlCellParagraph) */
-  const closed = (text: string) => text.includes('-->', text.lastIndexOf('<!--') + 4)
-    || /^-?>/.test(text.slice(text.indexOf('<!--') + 4));
+  /** Whether a comment's text has its end: a --> after its last <!--, or
+   *  else an end for each comment in it inline Markdown reads, as an empty
+   *  one's > or ->. Not a --!>, which ends a comment in an HTML table's
+   *  cell, as the browser reads it, but not one inline Markdown reads to its
+   *  --> (see renderHtmlCellParagraph) */
+  const closed = (text: string) => {
+    if (text.includes('-->', text.lastIndexOf('<!--') + 4)) return true;
+    for (let at = text.indexOf('<!--'); at !== -1;) {
+      HTML_TAG_AT.lastIndex = at;
+      const comment = HTML_TAG_AT.exec(text)?.[0];
+      if (!comment) return false;
+      at = text.indexOf('<!--', at + comment.length);
+    }
+    return true;
+  };
   // But for a ZWSP and the start of a payload alone, which the next hidden
   // run shows the comment's or the next payload's (see pendingHiddenText)
   if (continues && lastItem.type === 'html_comment' && !rest.replace(/^\u200B+/, '').trimStart().startsWith('<!--')
@@ -6088,7 +6099,7 @@ function renderInlineRange(
 
     // html_comment: emit the raw <!-- ... --> syntax directly
     if (item.type === 'html_comment') {
-      out += markdownComment(item.text, commentsFrom(segment, i + 1), opts?.cell);
+      out += markdownComment(item.text, () => commentsFrom(segment, i + 1), opts?.cell);
       if (item.commentIds.size > 0) {
         for (const cid of [...item.commentIds].sort()) {
           const c = comments.get(cid);
@@ -6434,7 +6445,7 @@ function renderInlineRangeWithIds(
         }
       }
       prevCommentIds = new Set(currentIds);
-      out += markdownComment(item.text, commentsFrom(segment, i + 1), opts?.cell);
+      out += markdownComment(item.text, () => commentsFrom(segment, i + 1), opts?.cell);
       i++;
       continue;
     }
@@ -6559,7 +6570,7 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
     // One with no end, which ran to the end of the cell, gets one.
     if (item.type === 'html_comment' && item.commentIds.size === 0 && /^<!--(?:-?>|(?!-?>)(?:(?!--!?>)[\s\S])*(?:--!?>)?)$/.test(item.text)
       && !/(?:\r\n?|\n)[ \t]*(?:\r\n?|\n)/.test(item.text)) {
-      const html = item.text.endsWith('--!>') && item.text.length >= 8 ? item.text : markdownComment(item.text, commentsFrom(split, k + 1));
+      const html = item.text.endsWith('--!>') && item.text.length >= 8 ? item.text : markdownComment(item.text, () => commentsFrom(split, k + 1));
       pieces.push({ text: '', item: { type: 'text', text: '', commentIds: item.commentIds, formatting: DEFAULT_FORMATTING }, html, raw: true });
       continue;
     }

@@ -3154,6 +3154,17 @@ describe('Emphasis between runs', () => {
     expect(buildMarkdown([table], new Map())).toContain('<p><code>a</code><b><code>b</code></b></p>');
   });
 
+  test.each([
+    ['a paragraph', (items: ContentItem[]) => items],
+    ['a table\'s cell', (items: ContentItem[]) => [{ type: 'table', rows: [{ isHeader: false, cells: [{ colspan: 1, paragraphs: [items] }] }] } as unknown as ContentItem]],
+  ])('writes many HTML comments in %s in linear time', (_name, wrap) => {
+    // Each comment joined the text of all those after it
+    const items = Array.from({ length: 32000 }, (): ContentItem => ({ type: 'html_comment', text: '<!-- c -->', commentIds: new Set() }));
+    const start = performance.now();
+    buildMarkdown(wrap(items), new Map());
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+
   test('writes a long paragraph of formatted runs in linear time', () => {
     const items = Array.from({ length: 40000 }, (_, i) => run(i % 2 ? 'a.' : '.b', { bold: i % 3 === 0, italic: i % 5 === 0 }));
     const start = performance.now();
@@ -9032,6 +9043,8 @@ describe('round-trip regression: images export cannot embed', () => {
     ['an HTML comment before a <!-- in it', 'A <!-- a <!-- b --> C', 8],
     // Which read as its end
     ['an HTML comment after a <!---> in it', 'A <!-- a <!---> b --> C', 14],
+    // Which read as its end
+    ['an HTML comment after an empty one', '<!--><!-- c -->', 12],
   ])('joins %s when Word splits its run', async (_name, md, at) => {
     // Without the start of its opener, the run before it was dropped
     const { docx } = await convertMdToDocx(md);
