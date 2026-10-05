@@ -2700,8 +2700,10 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
               listContinuation: undefined,
               trailingBlankLine: undefined,
               // A code block's text ends with its last line's end, and its
-              // others are line breaks, which a line end in Word's text isn't
-              ...(t.type === 'code_block' ? { runs: t.runs.flatMap(run => run.text.replace(/\n$/, '').split('\n')
+              // others are line breaks, which a line end in Word's text isn't,
+              // but for blank lines at its end, which a break can't end the
+              // paragraph with
+              ...(t.type === 'code_block' ? { runs: t.runs.flatMap(run => run.text.replace(/\n+$/, '').split('\n')
                 .flatMap((line, k): MdRun[] => [...(k > 0 ? [{ type: 'hardbreak' as const, text: '\n' }] : []), ...(line ? [{ ...run, text: line }] : [])])) } : {}),
             };
           quoted.push(kept);
