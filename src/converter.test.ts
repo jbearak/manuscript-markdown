@@ -6084,6 +6084,18 @@ describe('Whitespace at the edges of a paragraph', () => {
   });
 
   test.each([
+    ['spaces', 'a' + ' '.repeat(100000) + 'b\u3000', 'A.\n\na' + ' '.repeat(100000) + 'b&#12288;\n\nB.\n'],
+    ['backslashes', '\\'.repeat(100000) + 'b\u3000', 'A.\n\n' + '\\\\'.repeat(99999) + '\\b&#12288;\n\nB.\n'],
+  ])('reads a paragraph with a long run of %s in it in linear time', async (_name, text, expected) => {
+    // The whitespace at its end was found with a regex, which scanned each
+    // run of whitespace in it to its end, as one before the backslashes
+    // before it did each run of them
+    const start = performance.now();
+    expect(await withText('A.\n\nXX\n\nB.', 'word/document.xml', text)).toBe(expected);
+    expect(performance.now() - start).toBeLessThan(3000);
+  });
+
+  test.each([
     ['a paragraph', 'A.\n\np\\\nXX\n\nB.', 'word/document.xml', 'A.\n\np\\\n&#9;&#32;t\n\nB.\n'],
     ['a list item', '- p\\\n  XX\n- b', 'word/document.xml', '- p\\\n&#9;&#32;t\n- b\n'],
     ['a note', 'T.[^1]\n\n[^1]: A.\n\n    p\\\n    XX', 'word/footnotes.xml', 'T.[^1]\n\n[^1]: A.\n\n    p\\\n    &#9;&#32;t\n'],
