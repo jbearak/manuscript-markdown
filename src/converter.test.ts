@@ -3173,9 +3173,10 @@ describe('buildMarkdown', () => {
           const expectedText = texts.join('');
           // The paragraph's text starts its line, and nothing follows it,
           // and whitespace at its edges takes character references; a
-          // link's text is the link's alone, inside its brackets
+          // link's is as the link of one run of the text writes it, with
+          // the escapes its brackets need, as of a citation's @
           const expectedRendering = href
-            ? wrapWithFormatting(expectedText, formatting, false, RunsAfter.of('').linkTo(href))
+            ? buildMarkdown([{ type: 'text', text: expectedText, commentIds: new Set<string>(), formatting, href }], new Map()).trim()
             : keepParagraphEdgeWhitespace(wrapWithFormatting(expectedText, formatting, true, RunsAfter.of('')), true, true);
           
           // The result should contain the merged rendering for the combined text.
@@ -6244,7 +6245,8 @@ describe('Whitespace at the edges of a paragraph', () => {
   });
 
   test('leaves the whitespace in code after a line break as it is', async () => {
-    // A run of backticks before the code, which closes nothing, ended it
+    // A run of backticks before the code, which closes nothing, ended it.
+    // The code on each side of the break is its own span.
     const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\nXX\n\nB.')).docx);
     const xml = await zip.file('word/document.xml')!.async('string');
     const code = '<w:rPr><w:rStyle w:val="CodeChar"/></w:rPr>';
@@ -9087,5 +9089,369 @@ describe('Frontmatter settings round-trip', () => {
       const styles = await zip.file('word/styles.xml')!.async('string');
       zip.file('word/styles.xml', styles.replace(/(w:styleId="CodeBlock">[\s\S]*?)Consolas/, '$1Menlo').replace(/(w:styleId="CodeBlock">[\s\S]*?)Consolas/, '$1Menlo'));
     })).toBe('code-font: Menlo');
+  });
+});
+
+describe('Links of more than one run', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+
+  test.each([
+    ['with formatting', '[a **b** c](https://e.com)'],
+    ['with several kinds of formatting', '[a *b* `c` ~~d~~ e](https://e.com)'],
+    ['with a line break', '[link\\\ntext](https://e.com)'],
+    ['with a line break before formatting', '[a\\\n**b**](https://e.com)'],
+    ['with an insertion in part of it', '[a {++b++} c](https://e.com)'],
+    ['with a deletion in part of it', '[a {--b--} c](https://e.com)'],
+    ['with a substitution in part of it', '[a {~~b~>d~~} c](https://e.com)'],
+    ['that is a substitution', '[{~~b~>d~~}](https://e.com)'],
+    ['in an insertion', '{++[a **b** c](https://e.com)++}'],
+    ['in a comment', '{==[a **b** c](https://e.com)==}{>>note<<}'],
+    ['in a list item', '- [a **b** c](https://e.com)'],
+    ['in a note', 'Text.[^1]\n\n[^1]: [a **b** c](https://e.com)'],
+    ['in a deletion', '{--[a **b** c](https://e.com)--}'],
+    ['with a line break, in a deletion', '{--[a\\\nb **c**](https://e.com)--}'],
+  ])('keeps a link %s one link', async (_name, md) => {
+    // Each run, and each side of a line break, was a link of its own
+    expect(await roundTrip(md)).toBe(md + '\n');
+  });
+
+  test.each([
+    ['brackets', '[\\[a **b** c\\]](https://e.com)'],
+    ['formatting that is emphasis only as HTML there', '[a<b>b.</b>c](https://e.com)'],
+    ['an @ first, which would read as a citation', '[\\@user **name**](https://e.com)'],
+    ['a -@ first', '[-\\@user **name**](https://e.com)'],
+    ['a substitution of formatted text', '[{~~a **b** c~>d *e* f~~}](https://e.com)'],
+    ['a substitution of formatted text in part of it', '[x {~~a **b**~>d~~} y](https://e.com)'],
+    ['a ! before it and an insertion first in it', '\\![{++a++} b](https://e.com)'],
+    ['a ! before it and a deletion first in it', 'x\\![{--a--} **b**](https://e.com)'],
+  ])('writes a link of more than one run with %s as a link of one run', async (_name, md) => {
+    // Each run's Markdown read neither the link around it nor the runs
+    // beside it, and a substitution paired only the runs at its seam
+    expect(await roundTrip(md)).toBe(md + '\n');
+  });
+
+  test('writes a link of several deleted runs that an insertion replaces in a substitution', async () => {
+    // The link kept its runs from the substitution, so the insertion went
+    // in a span of its own, which the ++} in its code closed
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[a **b**](https://e.com)`cd`')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const revision = ' w:author="A" w:date="2024-01-01T00:00:00Z"';
+    const replaced = xml.replace(/(<w:hyperlink [^>]*>)([\s\S]*?)<\/w:hyperlink>(<w:r><w:rPr><w:rStyle w:val="CodeChar"\/><\/w:rPr>)<w:t>cd<\/w:t><\/w:r>/,
+      (_m, open: string, runs: string, code: string) => open + '<w:del w:id="91"' + revision + '>'
+        + runs.replace(/<w:t\b/g, '<w:delText').replace(/<\/w:t>/g, '</w:delText>') + '</w:del></w:hyperlink>'
+        + '<w:ins w:id="92"' + revision + '>' + code + '<w:t xml:space="preserve">c ++} d</w:t></w:r></w:ins>');
+    expect(replaced).not.toBe(xml);
+    zip.file('word/document.xml', replaced);
+    expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown).toBe('{~~[a **b**](https://e.com)~>`c ++} d`~~}\n');
+  });
+
+  test.each([
+    ['one run', '<w:r><w:t xml:space="preserve"> @user]</w:t></w:r>', '[ \\@user\\]](https://e.com)\n'],
+    ['runs', '<w:r><w:t xml:space="preserve"> </w:t></w:r><w:r><w:t>@user</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>]</w:t></w:r>',
+      '[ \\@user<b>\\]</b>](https://e.com)\n'],
+    ['one run, whose key starts outside the BMP', '<w:r><w:t xml:space="preserve">see @𝒜]</w:t></w:r>', '[see \\@𝒜\\]](https://e.com)\n'],
+  ])('escapes the key in a link\'s text of %s that reads as a citation before its escaped ]', async (_name, runs, expected) => {
+    // Export ends a citation at the first ], escaped too, which hid the
+    // link's ](, so the link was a citation
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const replaced = xml.replace('<w:r><w:t>ab</w:t></w:r>', runs);
+    expect(replaced).not.toBe(xml);
+    zip.file('word/document.xml', replaced);
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(md).toBe(expected);
+    expect(await roundTrip(md.slice(0, -1))).toBe(md);
+  });
+
+  test('escapes the many keys in a link\'s text that reads as a citation before its escaped ] in linear time', () => {
+    // Each key was escaped after a parse of the label, as it grew
+    const items: ContentItem[] = [' @user'.repeat(2000) + ']', 'x'].map((text, k) => ({ type: 'text', text,
+      href: 'https://e.com', link: 1, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, bold: k === 0 } }));
+    const start = performance.now();
+    const md = buildMarkdown(items, new Map());
+    expect(performance.now() - start).toBeLessThan(1000);
+    expect(md).toContain(' \\@user'.repeat(1999) + '\\]');
+  });
+
+  test('leaves the key in a link\'s code as it is, where a backslash would be text', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const replaced = xml.replace('<w:r><w:t>ab</w:t></w:r>',
+      '<w:r><w:rPr><w:rStyle w:val="CodeChar"/></w:rPr><w:t xml:space="preserve">see @user]</w:t></w:r>');
+    expect(replaced).not.toBe(xml);
+    zip.file('word/document.xml', replaced);
+    expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown).toBe('[`see @user]`](https://e.com)\n');
+  });
+
+  test('writes a substitution in a link from a later deletion where one from the first doesn\'t hold', async () => {
+    // A struck } wrote a ~~} in the deletions' side, and the deletions after
+    // it took spans of their own, one ending at the --} in its code
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const revision = ' w:author="A" w:date="2024-01-01T00:00:00Z"';
+    const deleted = (id: number, rPr: string, text: string) => '<w:del w:id="' + id + '"' + revision + '><w:r><w:rPr>' + rPr + '</w:rPr>'
+      + '<w:delText xml:space="preserve">' + text + '</w:delText></w:r></w:del>';
+    const replaced = xml.replace('<w:r><w:t>ab</w:t></w:r>', deleted(91, '<w:strike/>', '}') + deleted(92, '<w:rStyle w:val="CodeChar"/>', 'a --} b')
+      + deleted(93, '<w:b/>', 'x') + '<w:ins w:id="94"' + revision + '><w:r><w:t>y</w:t></w:r></w:ins>');
+    expect(replaced).not.toBe(xml);
+    zip.file('word/document.xml', replaced);
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(md).toBe('[{--~~}~~--}{~~`a --} b`**x**~>y~~}](https://e.com)\n');
+    expect(await roundTrip(md.slice(0, -1))).toBe(md);
+  });
+
+  test('writes a substitution a link\'s split cuts whole, after the link\'s runs before it', async () => {
+    // The link's runs took the deletion, without the insertion after the
+    // split, and a span of the deletion alone ended at the --} in its code
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const revision = ' w:author="A" w:date="2024-01-01T00:00:00Z"';
+    const replaced = xml.replace('<w:r><w:t>ab</w:t></w:r>', '<w:r><w:t xml:space="preserve">x </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>y</w:t></w:r>'
+      + '<w:del w:id="91"' + revision + '><w:r><w:rPr><w:rStyle w:val="CodeChar"/></w:rPr><w:delText xml:space="preserve">a --} b</w:delText></w:r></w:del>'
+      + '<w:ins w:id="92"' + revision + '><w:r><w:br/></w:r><w:r><w:t xml:space="preserve"># b</w:t></w:r></w:ins>');
+    expect(replaced).not.toBe(xml);
+    zip.file('word/document.xml', replaced);
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(md).toBe('[x **y**](https://e.com){~~[`a --} b`](https://e.com)~>[\\\n](https://e.com)[# b](https://e.com)~~}\n');
+    expect(await roundTrip(md.slice(0, -1))).toBe(md);
+  });
+
+  test('writes a substitution whose deletion ends a link and whose insertion follows it whole', async () => {
+    // The link's runs took the deletion, and a span of the deletion alone
+    // ended at the --} in its code
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com) z')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const revision = ' w:author="A" w:date="2024-01-01T00:00:00Z"';
+    const replaced = xml.replace('<w:r><w:t>ab</w:t></w:r></w:hyperlink>', '<w:r><w:t xml:space="preserve">x </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>y</w:t></w:r>'
+      + '<w:del w:id="91"' + revision + '><w:r><w:rPr><w:rStyle w:val="CodeChar"/></w:rPr><w:delText xml:space="preserve">a --} b</w:delText></w:r></w:del>'
+      + '</w:hyperlink><w:ins w:id="92"' + revision + '><w:r><w:t>c</w:t></w:r></w:ins>');
+    expect(replaced).not.toBe(xml);
+    zip.file('word/document.xml', replaced);
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(md).toBe('[x **y**](https://e.com){~~[`a --} b`](https://e.com)~>c~~} z\n');
+    expect(await roundTrip(md.slice(0, -1))).toBe(md);
+  });
+
+  test('writes a substitution whose insertion goes on after the link it starts in whole', async () => {
+    // The link's runs took the deletion and the insertion's start, and a
+    // span of the rest of the insertion ended at the ++} in its code
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com) z')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const revision = ' w:author="A" w:date="2024-01-01T00:00:00Z"';
+    const replaced = xml.replace('<w:r><w:t>ab</w:t></w:r></w:hyperlink>', '<w:del w:id="91"' + revision + '><w:r><w:delText>a</w:delText></w:r></w:del>'
+      + '<w:ins w:id="92"' + revision + '><w:r><w:t>b</w:t></w:r></w:ins></w:hyperlink>'
+      + '<w:ins w:id="93"' + revision + '><w:r><w:rPr><w:rStyle w:val="CodeChar"/></w:rPr><w:t xml:space="preserve">c ++} d</w:t></w:r></w:ins>');
+    expect(replaced).not.toBe(xml);
+    zip.file('word/document.xml', replaced);
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(md).toBe('{~~[a](https://e.com)~>[b](https://e.com)`c ++} d`~~} z\n');
+    expect(await roundTrip(md.slice(0, -1))).toBe(md);
+  });
+
+  test.each([
+    ['', '<span a="'],
+    [', whose quoted value holds a >', '<span a="a>b'],
+  ])('keeps the runs of a deleted link apart where one leaves a tag open%s', async (_name, text) => {
+    // One link's text read the tag across the bold's delimiters as HTML
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const replaced = xml.replace(/<w:hyperlink [^>]*><w:r><w:t>ab<\/w:t><\/w:r><\/w:hyperlink>/, link => '<w:del w:id="91" w:author="A" w:date="2024-01-01T00:00:00Z">'
+      + link.replace('<w:r><w:t>ab</w:t></w:r>', '<w:r><w:rPr><w:b/></w:rPr><w:delText>' + text.replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        + '</w:delText></w:r><w:r><w:delText>"&gt;</w:delText></w:r>') + '</w:del>');
+    expect(replaced).not.toBe(xml);
+    zip.file('word/document.xml', replaced);
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(md).toBe('{--[**\\' + text + '**](https://e.com)--}{--[">](https://e.com)--}\n');
+    expect(await roundTrip(md.slice(0, -1))).toBe(md);
+  });
+
+  test.each([
+    ['a quoted value', '<span a="', '">'],
+    ['an unquoted value', '<span a=x', '>'],
+  ])('escapes a tag with %s left open in a link\'s text, which the link after it to one place could close', async (_name, first, second) => {
+    // The tag took the first link's ](url) and the second's [ as its
+    // attribute's, which export wrote as text
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const bold = (text: string) => '<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">' + text.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</w:t></w:r>';
+    const replaced = xml.replace(/(<w:hyperlink [^>]*>)<w:r><w:t>ab<\/w:t><\/w:r><\/w:hyperlink>/, (_m, open: string) =>
+      open + bold(first) + '</w:hyperlink>' + open + bold(second) + '</w:hyperlink>');
+    expect(replaced).not.toBe(xml);
+    zip.file('word/document.xml', replaced);
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(md).toBe('[**\\' + first + '**](https://e.com)[**' + second + '**](https://e.com)\n');
+    expect(await roundTrip(md.slice(0, -1))).toBe(md);
+  });
+
+  test.each([
+    ['in code, as it is', '<w:rStyle w:val="CodeChar"/>', '<span a="', '[`<span a="`](https://e.com)'],
+    ['inside a whole tag, as it is', '', '<a b="<span c=">', '[<a b="<span c=">](https://e.com)'],
+    ['after a backslash of the text, escaped', '', '\\<span a="', '[\\\\\\<span a="](https://e.com)'],
+    // Whose closing == isn't an attribute's =, where markdown-it reads no tag
+    ['before a highlight\'s ==, as it is', '<w:highlight w:val="yellow"/>', '<A +', '[==<A +==](https://e.com)'],
+    ['with no attribute, as it is', '', '<span ', '[<span ](https://e.com)'],
+  ])('writes the < of a tag left open in a link\'s text %s', async (_name, rPr, text, expected) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const replaced = xml.replace('<w:r><w:t>ab</w:t></w:r>', '<w:r><w:rPr>' + rPr + '</w:rPr><w:t xml:space="preserve">'
+      + text.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</w:t></w:r>');
+    expect(replaced).not.toBe(xml);
+    zip.file('word/document.xml', replaced);
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(md).toBe(expected + '\n');
+  });
+
+  test('keeps the spans of two deleted links apart where a tag one leaves open could close in the other', async () => {
+    // A span of both, joined as their first runs could, read the tag across them as HTML
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    let id = 90;
+    const deleted = (text: string, bold = false) => '<w:del w:id="' + (id++) + '" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>'
+      + (bold ? '<w:rPr><w:b/></w:rPr>' : '') + '<w:delText xml:space="preserve">' + text + '</w:delText></w:r></w:del>';
+    const replaced = xml.replace(/<w:hyperlink ([^>]*)><w:r><w:t>ab<\/w:t><\/w:r><\/w:hyperlink>/, (_m, attrs: string) =>
+      '<w:hyperlink ' + attrs + '>' + deleted('a', true) + deleted('&lt;span a="') + '</w:hyperlink>' + deleted(' ')
+      + '<w:hyperlink ' + attrs + '>' + deleted('b', true) + deleted('"&gt;') + '</w:hyperlink>');
+    expect(replaced).not.toBe(xml);
+    zip.file('word/document.xml', replaced);
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(md).toBe('{--[**a**\\<span a="](https://e.com) --}{--[**b**">](https://e.com)--}\n');
+    expect(await roundTrip(md.slice(0, -1))).toBe(md);
+  });
+
+  test.each([
+    ['near its end', (k: number) => k === 31997 ? '<span a="' : 'a'],
+    ['in every other run', (k: number) => k % 2 === 0 ? '<span a="' : 'x'],
+  ])('writes a link of many runs with a tag left open %s in linear time', (_name, text) => {
+    // The link was read to its end and taken apart at the tag, and read
+    // again from each run after
+    const items: ContentItem[] = Array.from({ length: 32000 }, (_, k) => ({ type: 'text', text: text(k),
+      href: 'https://e.com', link: 1, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, bold: k % 2 === 0 } }));
+    const start = performance.now();
+    buildMarkdown(items, new Map());
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+
+  test.each([
+    ['links to one place', (k: number): Partial<ContentItem> => ({ href: 'https://e.com', link: k + 1, formatting: DEFAULT_FORMATTING })],
+    ['runs of other formatting by turns', (k: number): Partial<ContentItem> => ({ formatting: { ...DEFAULT_FORMATTING, bold: k % 2 === 0 } })],
+  ])('writes a deletion of many %s in linear time', (_name, fields) => {
+    // Each run tried a substitution from it, and each link read past it for
+    // one, each through the rest of the deletion
+    const items = Array.from({ length: 32000 }, (_, k) => ({ type: 'text', text: 'a', commentIds: new Set(),
+      revision: { type: 'deletion', author: 'A', date: '2024-01-01T00:00:00Z' }, ...fields(k) }) as ContentItem);
+    const start = performance.now();
+    buildMarkdown(items, new Map());
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+
+  test('keeps a link whose text starts with an inserted # a link, not a heading', async () => {
+    // Export read the link's first run, {++# ++}, as an inserted heading's
+    const md = '[{++# 123++}{++ (fixed)++}](https://e.com)';
+    const { docx } = await convertMdToDocx(md);
+    expect(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).not.toContain('Heading1');
+    expect((await convertDocx(docx)).markdown).toBe('{++[# 123 (fixed)](https://e.com)++}\n');
+  });
+
+  test.each([
+    ['deleted runs', (k: number): ContentItem[] => [{ type: 'text', text: 'a', href: 'https://e.com', link: 1, commentIds: new Set(),
+      formatting: { ...DEFAULT_FORMATTING, bold: k % 2 === 0 }, revision: { type: 'deletion', author: 'A', date: '2024-01-01T00:00:00Z' } }]],
+    ['substitutions', (_k: number): ContentItem[] => [
+      { type: 'text', text: 'a', href: 'https://e.com', link: 1, commentIds: new Set(), formatting: DEFAULT_FORMATTING,
+        revision: { type: 'deletion', author: 'A', date: '2024-01-01T00:00:00Z' } },
+      { type: 'text', text: 'b', href: 'https://e.com', link: 1, commentIds: new Set(), formatting: DEFAULT_FORMATTING,
+        revision: { type: 'addition', author: 'A', date: '2024-01-01T00:00:00Z' } },
+      { type: 'text', text: ' ', href: 'https://e.com', link: 1, commentIds: new Set(), formatting: DEFAULT_FORMATTING }]],
+  ])('writes a link of many %s in linear time', (_name, runs) => {
+    // Each deleted run rendered the rest of its deletion, and each side of
+    // a substitution read the paragraph's runs up to its end
+    const items: ContentItem[] = [
+      { type: 'text', text: 'x ', href: 'https://e.com', link: 1, commentIds: new Set(), formatting: DEFAULT_FORMATTING },
+      ...Array.from({ length: 4000 }, (_, k) => runs(k)).flat()];
+    const start = performance.now();
+    buildMarkdown(items, new Map());
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+
+  test('merges the runs of a link in linear time', () => {
+    // Each merge read whether the text so far ended with a line break,
+    // which flattened it
+    const items: ContentItem[] = Array.from({ length: 48000 }, () => (
+      { type: 'text', text: 'a'.repeat(100), href: 'https://e.com', link: 1, commentIds: new Set(), formatting: DEFAULT_FORMATTING }));
+    const start = performance.now();
+    buildMarkdown(items, new Map());
+    expect(performance.now() - start).toBeLessThan(3000);
+  });
+
+  test('keeps a soft line break in a link in the link', async () => {
+    expect(await roundTrip('[link\ntext](https://e.com)')).toBe('[link text](https://e.com)\n');
+  });
+
+  test.each([
+    ['to different places', '[a **b**](https://e.com)[c](https://f.com)'],
+    ['to one place', '[a](https://e.com)[b](https://e.com)'],
+    ['to one place, with formatting', '[**a**](https://e.com)[*b*](https://e.com)'],
+    ['to one place, in a comment', '{==[a](https://e.com)[b](https://e.com)==}{>>note<<}'],
+    ['to one place, with formatting, in a comment', '{==[**a**](https://e.com)[*b*](https://e.com)==}{>>note<<}'],
+  ])('keeps links %s apart', async (_name, md) => {
+    // Import joined runs of one place across the hyperlinks they were in
+    expect(await roundTrip(md)).toBe(md + '\n');
+  });
+
+  test.each([
+    ['code', '`ab`', '`a`\\\n`b`\n'],
+    ['code in a link', '[`ab`](https://e.com)', '[`a`\\\n`b`](https://e.com)\n'],
+  ])('keeps a line break in %s', async (_name, md, expected) => {
+    // A code span took the break in, and read it as a space
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const broken = xml.replace('<w:t>ab</w:t>', '<w:t>a</w:t><w:br/><w:t>b</w:t>');
+    expect(broken).not.toBe(xml);
+    zip.file('word/document.xml', broken);
+    expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown).toBe(expected);
+  });
+
+  test.each([
+    ['a heading', '<w:t>a</w:t><w:br/><w:t># x</w:t>', '[a](https://e.com)\\\n[# x](https://e.com)\n'],
+    ['a list item', '<w:t>a</w:t><w:br/><w:t>b</w:t><w:br/><w:t>- c</w:t>', '[a\\\nb](https://e.com)\\\n[- c](https://e.com)\n'],
+    ['an ordered list item', '<w:t>a</w:t><w:br/><w:t>1. x</w:t>', '[a](https://e.com)\\\n[1. x](https://e.com)\n'],
+    ['a heading, in formatting', '<w:t>a</w:t><w:br/><w:t>#</w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t> x</w:t>',
+      '[a](https://e.com)\\\n[# *x*](https://e.com)\n'],
+    ['text', '<w:t>a</w:t><w:br/><w:t>#x</w:t>', '[a\\\n#x](https://e.com)\n'],
+    ['nothing', '<w:t>a</w:t><w:br/>', '[a\\\n](https://e.com)\n'],
+    ['a LaTeX environment, after a bold break', '<w:t>a</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:br/></w:r><w:r><w:t>\\begin{align}x\\end{align}</w:t>',
+      '[a](https://e.com)\\\n[\\begin{align}x\\end{align}](https://e.com)\n'],
+  ])('splits a link before a line that would start %s', async (_name, runs, expected) => {
+    // One link's text ran across the line, which Markdown read as a block
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const broken = xml.replace('<w:t>ab</w:t>', runs);
+    expect(broken).not.toBe(xml);
+    zip.file('word/document.xml', broken);
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(md).toBe(expected);
+    expect(await roundTrip(md.slice(0, -1))).toBe(md);
+  });
+
+  test('keeps a link whole before a line that would start a note, whose [ is escaped', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace('<w:t>ab</w:t>', '<w:t>a</w:t><w:br/><w:t>[^1]: x</w:t>'));
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(md).toBe('[a\\\n\\[^1\\]: x](https://e.com)\n');
+    expect(await roundTrip(md.slice(0, -1))).toBe(md);
+  });
+
+  test('reads a Word hyperlink of several runs and a line break as one link', async () => {
+    const xml = '<?xml version="1.0"?>'
+      + '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+      + ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>'
+      + '<w:p><w:hyperlink r:id="rId1"><w:r><w:t xml:space="preserve">a </w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t>b</w:t><w:br/><w:t>c</w:t></w:r></w:hyperlink></w:p>'
+      + '</w:body></w:document>';
+    const rels = '<?xml version="1.0"?>'
+      + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      + '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://e.com" TargetMode="External"/>'
+      + '</Relationships>';
+    const result = await convertDocx(await buildSyntheticDocx(xml, { 'word/_rels/document.xml.rels': rels }));
+    expect(result.markdown).toBe('[a *b\\\nc*](https://e.com)\n');
   });
 });

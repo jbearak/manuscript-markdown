@@ -21,6 +21,7 @@ export interface HtmlTableRun {
   superscript?: boolean;
   subscript?: boolean;
   href?: string;
+  linkStart?: true; // the first run of an <a>, which a run of one before to the same place doesn't join
 }
 
 export interface HtmlTableCell {
@@ -225,6 +226,8 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
   let superscript = false;
   let subscript = false;
   let href: string | undefined;
+  // Whether the next text starts an <a>
+  let linkStart = false;
 
   // Each <p> starts a paragraph of the cell, as does content before any <p>
   // or after a </p>. A paragraph run separates two of them, so an empty <p>
@@ -267,7 +270,9 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
       ...(superscript ? { superscript } : {}),
       ...(subscript ? { subscript } : {}),
       ...(href ? { href } : {}),
+      ...(href && linkStart ? { linkStart: true as const } : {}),
     });
+    linkStart = false;
   };
 
   // Tokenize the HTML into tags and text segments
@@ -305,6 +310,7 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
       if (!isClose) {
         const hrefMatch = attrs.match(/href\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
         href = hrefMatch ? decodeHtmlEntities(hrefMatch[1] ?? hrefMatch[2]) : undefined;
+        linkStart = true;
       } else {
         href = undefined;
       }

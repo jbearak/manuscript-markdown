@@ -1155,6 +1155,76 @@ describe('generateParagraph', () => {
     expect(state.relationships.get('https://example.com')).toBe('rId4');
   });
 
+  it('writes a link\'s tracked change in its hyperlink, and the next link to the same place in another', () => {
+    const href = 'https://example.com';
+    const token: MdToken = {
+      type: 'paragraph',
+      runs: [
+        { type: 'text', text: 'a ', href, linkStart: true }, { type: 'critic_del', text: 'b', innerRuns: [{ type: 'text', text: 'b' }], href },
+        { type: 'text', text: 'c', href, linkStart: true },
+      ],
+    };
+    // A deletion went outside the hyperlink, without the link
+    expect(generateParagraph(token, createState()).replace(/ w:author="[^"]*"| w:date="[^"]*"/g, '')).toBe('<w:p><w:hyperlink r:id="rId4">'
+      + '<w:r><w:t xml:space="preserve">a </w:t></w:r><w:del w:id="0"><w:r><w:delText>b</w:delText></w:r></w:del>'
+      + '</w:hyperlink><w:hyperlink r:id="rId4"><w:r><w:t>c</w:t></w:r></w:hyperlink></w:p>');
+  });
+
+  it('writes a link\'s runs and line breaks in one hyperlink', () => {
+    const href = 'https://example.com';
+    const token: MdToken = {
+      type: 'paragraph',
+      runs: [
+        { type: 'text', text: 'a ', href }, { type: 'text', text: 'b', bold: true, href },
+        { type: 'softbreak', text: '\n', href }, { type: 'hardbreak', text: '\n', href },
+        { type: 'text', text: 'c', href }, { type: 'text', text: ' d' },
+      ],
+    };
+    // Each run, but not a line break, was a hyperlink of its own
+    expect(generateParagraph(token, createState())).toBe('<w:p><w:hyperlink r:id="rId4">'
+      + '<w:r><w:t xml:space="preserve">a </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>b</w:t></w:r>'
+      + '<w:r><w:t xml:space="preserve"> </w:t></w:r><w:r><w:br/></w:r><w:r><w:t>c</w:t></w:r>'
+      + '</w:hyperlink><w:r><w:t xml:space="preserve"> d</w:t></w:r></w:p>');
+  });
+
+  it.each([
+    ['two links to one place', '<a href="https://e.com">a</a><a href="https://e.com">b</a>', 2],
+    ['a link with formatting', '<a href="https://e.com">a <b>b</b></a>', 1],
+  ])('writes %s in an HTML table\'s cell as a hyperlink each', async (_name, cell, count) => {
+    // An <a>'s runs were a hyperlink each, and then two <a>s one
+    const { docx } = await convertMdToDocx('<table>\n<tr><td>' + cell + '</td><td>x</td></tr>\n</table>');
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml.match(/<w:hyperlink /g)?.length).toBe(count);
+  });
+
+  it.each([
+    ['a deleted link of several runs', '{--[a **b**\\\nc](https://e.com)--}', 1],
+    ['deleted links to one place', '{--[a](https://e.com)[b](https://e.com)--}', 2],
+  ])('writes %s as a hyperlink each', async (_name, md, count) => {
+    // Each run of a deleted link was a hyperlink of its own
+    const { docx } = await convertMdToDocx(md);
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml.match(/<w:hyperlink /g)?.length).toBe(count);
+  });
+
+  it.each([
+    ['an insertion', '[a {++[b](https://other.com)++} c](https://e.com)'],
+    ['a deletion', '[a {--[b](https://other.com)--} c](https://e.com)'],
+    ['a substitution', '[a {~~[b](https://other.com)~>x~~} c](https://e.com)'],
+  ])('keeps the link to another place in %s inside a link', async (_name, md) => {
+    // The link's hyperlink took the change's runs, without their own link
+    const { docx } = await convertMdToDocx(md);
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync(docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const rels = await zip.file('word/_rels/document.xml.rels')!.async('string');
+    const id = /Id="(rId\d+)"[^>]*Target="https:\/\/other\.com"/.exec(rels)?.[1];
+    expect(id).toBeDefined();
+    expect(xml).toMatch(new RegExp('<w:hyperlink r:id="' + id + '">(?:<w:del [^>]*>)?<w:r><w:(?:t|delText)>b</w:(?:t|delText)>'));
+  });
+
   it('generates softbreak as space', () => {
     const token: MdToken = {
       type: 'paragraph',

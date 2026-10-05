@@ -52,7 +52,14 @@ describe('HTML table cell paragraphs', () => {
   });
 
   test('reads a link whose target has the other quote in it', () => {
-    expect(runs('<a href="https://e.com/O\'Brien">o</a>')).toEqual([{ type: 'text', text: 'o', href: 'https://e.com/O\'Brien' }]);
+    expect(runs('<a href="https://e.com/O\'Brien">o</a>')).toEqual([{ type: 'text', text: 'o', href: 'https://e.com/O\'Brien', linkStart: true }]);
+  });
+
+  test('marks where each link starts, though the one before goes to the same place', () => {
+    expect(runs('<a href="u">a <b>b</b></a><a href="u">c</a>')).toEqual([
+      { type: 'text', text: 'a ', href: 'u', linkStart: true }, { type: 'text', text: 'b', bold: true, href: 'u' },
+      { type: 'text', text: 'c', href: 'u', linkStart: true },
+    ]);
   });
 
   test('keeps a line break in a paragraph, and the formatting around it', () => {

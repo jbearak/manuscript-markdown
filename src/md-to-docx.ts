@@ -146,6 +146,7 @@ export interface MdTableRow {
 
 export interface MdRun {
   criticParagraphBreak?: true; // first of two softbreaks representing a blank line inside a Critic payload
+  linkStart?: true; // first run of a link, where a hyperlink starts though the run before goes to the same place
   cellParagraphBreak?: true; // hardbreak between two of an HTML table cell's paragraphs, which generateTable splits on
   type: 'text' | 'critic_add' | 'critic_del' | 'critic_sub' | 'critic_highlight' | 'critic_comment' | 'citation' | 'math' | 'softbreak' | 'hardbreak' | 'comment_range_start' | 'comment_range_end' | 'comment_body_with_id' | 'footnote_ref' | 'html_comment' | 'image';
   text: string;
@@ -219,6 +220,7 @@ function mapHtmlTableRunToMdRun(run: HtmlTableRun): MdRun {
     ...(run.superscript ? { superscript: true } : {}),
     ...(run.subscript ? { subscript: true } : {}),
     ...(run.href ? { href: run.href } : {}),
+    ...(run.linkStart ? { linkStart: true } : {}),
   };
 }
 
@@ -925,6 +927,8 @@ function toTextRunFromInner(run: MdRun, overrides?: Partial<MdRun>): MdRun {
     subscript: run.subscript,
     code: run.code,
     href: run.href,
+    // Where a link starts, though the one before goes to the same place
+    ...(run.linkStart ? { linkStart: true } : {}),
     ...overrides,
   };
 }
@@ -959,14 +963,17 @@ function normalizeCriticInnerRuns(runs: MdRun[]): MdRun[] {
     // A {==...==} without a comment inside a Critic payload is preserved as
     // text runs with highlight flags, as it exports at the top level.
     if (run.type === 'critic_highlight') {
-      for (const inner of run.innerRuns ?? (run.text ? [toTextRunFromInner(run)] : [])) {
+      // A link that starts at the highlight starts at its first run only
+      const inners = run.innerRuns ?? (run.text ? [toTextRunFromInner(run)] : []);
+      inners.forEach((inner, k) => {
         normalized.push({
-          ...toTextRunFromInner(run),
+          ...toTextRunFromInner(run, { linkStart: undefined }),
           ...inner,
+          ...(k === 0 && run.linkStart ? { linkStart: true } : {}),
           highlight: true,
           highlightColor: run.highlightColor ?? inner.highlightColor,
         });
-      }
+      });
       continue;
     }
 
@@ -2575,7 +2582,8 @@ function promoteCriticHeadingParagraph(runs: MdRun[]): MdToken | undefined {
     || r.type === 'critic_highlight' && !!r.innerRuns?.length && r.innerRuns.every(inSpan);
   if (!runs.every(inSpan)) return undefined;
   const run = runs[0];
-  if (!run.text || run.text.includes('\n')) return undefined;
+  // A link's text, as [{++# a++}{++ b++}](u), which a [ comes before
+  if (!run.text || run.text.includes('\n') || run.href) return undefined;
   const headingPrefix = matchCriticHeadingPrefix(run.text);
   if (!headingPrefix) return undefined;
   const prefix = headingPrefix.prefix;
@@ -3081,6 +3089,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
     const name = match[2].toLowerCase();
     return openTags[name]?.pop() === true && closeFormat(HTML_FORMAT_TAGS[name], 'tag');
   };
+  let linkStartIndex = 0;
   
   for (let ti = 0; ti < tokens.length; ti++) {
     const token = tokens[ti];
@@ -3145,9 +3154,11 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
         
       case 'link_open':
         currentHref = token.attrGet('href') ?? undefined;
+        linkStartIndex = runs.length;
         break;
       case 'link_close':
         currentHref = undefined;
+        if (runs.length > linkStartIndex) runs[linkStartIndex] = { ...runs[linkStartIndex], linkStart: true };
         break;
         
       case 'html_inline': {
@@ -5931,42 +5942,62 @@ function generateDeletedCriticContent(
   }
 
   let xml = '';
+  // A link's runs, and its line breaks, go in one element, as generateRuns
+  // writes a link, but for the next link to the same place, which starts
+  // another; the element stays open while the link goes on
+  let link: { href: string; rId: string; xml: string } | undefined;
+  const close = () => {
+    if (link) xml += '<' + DELETED_LINK + ' rId="' + link.rId + '">' + link.xml + '</' + DELETED_LINK + '>';
+    link = undefined;
+  };
+  const emit = (runXml: string, run?: MdRun) => {
+    if (!run?.href) {
+      close();
+      xml += runXml;
+      return;
+    }
+    if (link?.href !== run.href || run.linkStart) {
+      close();
+      link = { href: run.href, rId: hyperlinkRelationshipId(run.href, state), xml: '' };
+    }
+    link.xml += runXml;
+  };
   for (const run of formattedRuns) {
     if (run.type === 'softbreak') {
       const merged = mergeRunFormatting(run, outer, forced);
       const rPr = generateRPr(merged, extraRPr);
-      xml += '<w:r>' + (rPr ? rPr : '') + delText(' ') + '</w:r>';
+      emit('<w:r>' + (rPr ? rPr : '') + delText(' ') + '</w:r>', run);
       continue;
     }
     if (run.type === 'hardbreak') {
-      xml += '<w:r><w:br/></w:r>';
+      emit('<w:r><w:br/></w:r>', run);
       continue;
     }
     if (run.type === 'math') {
-      xml += generateMathXml(run.text, !!run.display, warnings);
+      emit(generateMathXml(run.text, !!run.display, warnings));
       continue;
     }
     if (run.type === 'critic_add' || run.type === 'critic_del') {
-      xml += generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr, warnings, state, options);
+      emit(generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr, warnings, state, options));
       continue;
     }
     if (run.type === 'critic_sub') {
-      xml += generateDeletedCriticContent(run.oldRuns, run.text, run, {}, extraRPr, warnings, state, options);
-      if (run.newText) xml += generateDeletedCriticContent(run.newRuns, run.newText, run, {}, extraRPr, warnings, state, options);
+      emit(generateDeletedCriticContent(run.oldRuns, run.text, run, {}, extraRPr, warnings, state, options));
+      if (run.newText) emit(generateDeletedCriticContent(run.newRuns, run.newText, run, {}, extraRPr, warnings, state, options));
       continue;
     }
     if (run.type === 'critic_highlight' || run.type === 'critic_comment') {
       if (run.type === 'critic_highlight' && run.text) {
-        xml += generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr, warnings, state, options);
+        emit(generateDeletedCriticContent(run.innerRuns, run.text, run, {}, extraRPr, warnings, state, options));
       }
       continue;
     }
     if (run.type === 'footnote_ref') {
-      xml += noteReferenceXml(run.footnoteLabel || '', state, 'deletion', highlightRPr(run));
+      emit(noteReferenceXml(run.footnoteLabel || '', state, 'deletion', highlightRPr(run)));
       continue;
     }
     if (run.type === 'image') {
-      xml += imageRunXml(run, state, options, true);
+      emit(imageRunXml(run, state, options, true));
       continue;
     }
     if (run.type === 'citation') {
@@ -5976,14 +6007,14 @@ function generateDeletedCriticContent(
       const literal = '[' + run.text + ']';
       const merged = mergeRunFormatting({ type: 'text', text: literal, highlight: run.highlight, highlightColor: run.highlightColor }, outer, forced);
       const rPr = generateRPr(merged, extraRPr);
-      xml += '<w:r>' + (rPr ? rPr : '') + delText(literal) + '</w:r>';
+      emit('<w:r>' + (rPr ? rPr : '') + delText(literal) + '</w:r>');
       continue;
     }
     if (run.type !== 'text' || !run.text) continue;
     const rPr = generateRPr(run, extraRPr);
-    const runXml = '<w:r>' + (rPr ? rPr : '') + delText(run.text) + '</w:r>';
-    xml += run.href ? '<' + DELETED_LINK + ' rId="' + hyperlinkRelationshipId(run.href, state) + '">' + runXml + '</' + DELETED_LINK + '>' : runXml;
+    emit('<w:r>' + (rPr ? rPr : '') + delText(run.text) + '</w:r>', run);
   }
+  close();
   return xml;
 }
 
@@ -6078,18 +6109,42 @@ function deletionXml(deletedXml: string, author: string, dateAttr: string, state
   return xml;
 }
 
+/** The runs a link's hyperlink holds: its text, line breaks and tracked changes */
+const LINK_RUN_TYPES = new Set<MdRun['type']>(['text', 'softbreak', 'hardbreak', 'critic_add', 'critic_del', 'critic_sub']);
+
+/** Whether a run's tracked change holds a link to somewhere other than `href` */
+function holdsOtherLink(run: MdRun, href: string): boolean {
+  return [run.innerRuns, run.oldRuns, run.newRuns].some(runs =>
+    runs?.some(inner => inner.href !== undefined && inner.href !== href || holdsOtherLink(inner, href)));
+}
+
 export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine): string {
   let xml = '';
   for (let ri = 0; ri < inputRuns.length; ri++) {
     const run = inputRuns[ri];
     const nextRun = inputRuns[ri + 1];
-    if (run.type === 'text') {
+    if (run.href && LINK_RUN_TYPES.has(run.type) && !holdsOtherLink(run, run.href)) {
+      // The link's runs, with its line breaks and tracked changes, go in one
+      // hyperlink, as Word writes one, which import reads back as one link;
+      // the next link to the same place starts another. Inside it, no run,
+      // nor one in a tracked change, is a link of its own. A tracked change
+      // that holds a link to another place ends it, and goes as it would
+      // outside a link, which keeps that link.
+      let end = ri + 1;
+      while (end < inputRuns.length && inputRuns[end].href === run.href && !inputRuns[end].linkStart && LINK_RUN_TYPES.has(inputRuns[end].type)
+        && !holdsOtherLink(inputRuns[end], run.href)) end++;
+      const withoutLink = (linkRun: MdRun): MdRun => ({
+        ...linkRun, href: undefined,
+        ...(linkRun.innerRuns ? { innerRuns: linkRun.innerRuns.map(withoutLink) } : {}),
+        ...(linkRun.oldRuns ? { oldRuns: linkRun.oldRuns.map(withoutLink) } : {}),
+        ...(linkRun.newRuns ? { newRuns: linkRun.newRuns.map(withoutLink) } : {}),
+      });
+      const inner = generateRuns(inputRuns.slice(ri, end).map(withoutLink), state, options, bibEntries, citeprocEngine);
+      xml += '<w:hyperlink r:id="' + hyperlinkRelationshipId(run.href, state) + '">' + inner + '</w:hyperlink>';
+      ri = end - 1;
+    } else if (run.type === 'text') {
       const rPr = generateRPr(run, state.tableRunRPrExtra || undefined);
-      if (run.href) {
-        xml += '<w:hyperlink r:id="' + hyperlinkRelationshipId(run.href, state) + '">' + generateRun(run.text, rPr) + '</w:hyperlink>';
-      } else {
-        xml += generateRun(run.text, rPr);
-      }
+      xml += generateRun(run.text, rPr);
     } else if (run.type === 'softbreak') {
       const rPr = generateRPr(run, state.tableRunRPrExtra || undefined);
       xml += '<w:r>' + (rPr ? rPr : '') + '<w:t xml:space="preserve"> </w:t></w:r>';
