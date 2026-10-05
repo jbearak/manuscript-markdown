@@ -72,26 +72,49 @@ function parseColWidthsAttr(raw: string): number[] | 'equal' | 'auto' | undefine
   return nums;
 }
 
-// A tag, whose quoted attributes can hold a > or a <!--
-const HTML_TAG_BODY = '\\/?[A-Za-z][^\\s/>]*(?:"[^"]*"|\'[^\']*\'|[^\'">])*>';
+// A tag's attributes, whose quoted values can hold a > or a <!--. A < out
+// of quotes ends them, so that the search for a > from a < with none goes
+// no further than the next <, and each < is looked past once.
+const HTML_ATTRS = '(?:"[^"]*"|\'[^\']*\'|[^\'"<>])*';
+// A tag: its name, and then its attributes, which start where it ends, so
+// the search has one way to split them
+const HTML_TAG_BODY = '\\/?[A-Za-z][^\\s/<>]*(?:[\\s/]' + HTML_ATTRS + ')?>';
 const HTML_TAG = '<' + HTML_TAG_BODY;
+// An element whose text the browser reads as no HTML, as a <script>'s, in
+// which a <!-- or a </td> is text, to its end tag
+const RAW_TEXT_NAME = '(?:script|style|textarea|title|xmp|iframe|noembed|noframes)';
+
+// Its start tag, with its name a group of the search's
+const RAW_TEXT_START = '<(' + RAW_TEXT_NAME + ')(?=[\\s/>])' + HTML_ATTRS + '>';
+
+/** An element whose text is no HTML, which runs to the end where it has no
+ *  end tag, as the browser reads it, between a table's, row's or cell's */
+function rawTextElement(group: number): string {
+  return RAW_TEXT_START + '[\\s\\S]*?(?:<\\/\\' + group + '\\s*>|$)';
+}
 
 /** A piece of the HTML in a table, row or cell, as the search for its end
- *  reads it: a comment or a tag whole, so that an end tag in either ends
- *  nothing, or else a character. Each (?=(...))\N takes what it finds whole,
- *  as an atomic group would, and a < takes one of the three, so the search
- *  has one way through the HTML. `group` is the number of its first group
- *  in the search's pattern. A comment with no --> isn't one, as it ends
- *  what holds it (see HTML_REST_IN_COMMENT). */
+ *  reads it: a comment, an element whose text is no HTML, or a tag whole,
+ *  so that an end tag in any of them ends nothing, or else a character.
+ *  Each (?=(...))\N takes what it finds whole, as an atomic group would,
+ *  and a < takes one of them, so the search has one way through the HTML.
+ *  `group` is the number of its first group in the search's pattern. A
+ *  comment, or an element whose text is no HTML, with no end isn't one, as
+ *  it ends what holds it (see htmlRestInComment). */
 function htmlContentUnit(group: number): string {
-  return '(?:(?=(<!--[\\s\\S]*?-->))\\' + group + '|(?=(' + HTML_TAG + '))\\' + (group + 1)
+  return '(?:(?=(<!--[\\s\\S]*?-->))\\' + group
+    + '|(?=(' + RAW_TEXT_START + '[\\s\\S]*?<\\/\\' + (group + 2) + '\\s*>))\\' + (group + 1)
+    + '|(?=(<(?!' + RAW_TEXT_NAME + '[\\s/>])' + HTML_TAG_BODY + '))\\' + (group + 3)
     + '|[^<]|<(?!!--)(?!' + HTML_TAG_BODY + '))';
 }
 
-// A comment with no -->, which runs to the end, past the end tag of what
-// holds it, which the browser ends there, so it goes with what holds it,
-// whose search reads it as a comment
-const HTML_REST_IN_COMMENT = '((?=<!--(?![\\s\\S]*?-->))[\\s\\S]*)';
+/** A comment with no -->, or an element whose text is no HTML with no end
+ *  tag, which runs to the end, past the end tag of what holds it, which the
+ *  browser ends there, so it goes with what holds it, whose search reads it
+ *  whole. `group` is the number of its first group in the search's pattern. */
+function htmlRestInComment(group: number): string {
+  return '((?=<!--(?![\\s\\S]*?-->)|' + RAW_TEXT_START + '(?![\\s\\S]*?<\\/\\' + (group + 1) + '\\s*>))[\\s\\S]*)';
+}
 
 export function extractHtmlTables(html: string): HtmlTableMeta[] {
   const tables: HtmlTableMeta[] = [];
@@ -99,15 +122,16 @@ export function extractHtmlTables(html: string): HtmlTableMeta[] {
   // This parser targets simple manuscript tables (<table>/<tr>/<th>/<td>).
   // Not one in a comment, which the browser and Word's export of it hide,
   // which the search goes past whole, to the end where no --> ends it, as
-  // it goes past each other tag, whose quoted attribute can hold a <!--.
-  // Nor does a </table> in a comment in it end it (see htmlContentUnit).
-	const tableRegex = new RegExp('<!--(?:[\\s\\S]*?-->|[\\s\\S]*$)|<table\\b((?:"[^"]*"|\'[^\']*\'|[^\'">])*)>(' + htmlContentUnit(3) + '*?)(?:<\\/table>|' + HTML_REST_IN_COMMENT + ')|' + HTML_TAG, 'gi');
+  // it goes past an element whose text is no HTML, as a <script>, in which
+  // a <!-- is text, and each other tag, whose quoted attribute can hold
+  // one. Nor does a </table> in a comment in it end it (see htmlContentUnit).
+	const tableRegex = new RegExp('<!--(?:[\\s\\S]*?-->|[\\s\\S]*$)|' + rawTextElement(1) + '|<table\\b(' + HTML_ATTRS + ')>(' + htmlContentUnit(4) + '*?)(?:<\\/table>|' + htmlRestInComment(8) + ')|' + HTML_TAG, 'gi');
   let tableMatch: RegExpExecArray | null;
   while ((tableMatch = tableRegex.exec(html)) !== null) {
-    if (tableMatch[2] === undefined) continue;
-    const attrs = tableMatch[1];
+    if (tableMatch[3] === undefined) continue;
+    const attrs = tableMatch[2];
     const comments: string[] = [];
-    const rows = extractHtmlTableRows(tableMatch[2] + (tableMatch[5] ?? ''), comments);
+    const rows = extractHtmlTableRows(tableMatch[3] + (tableMatch[8] ?? ''), comments);
     // Invariant: only tables with rows are returned to callers, or with
     // comments that hide all of them, which a caller can't drop unseen.
     if (rows.length > 0 || comments.length > 0) {
@@ -170,15 +194,15 @@ function extractHtmlTableRows(tableHtml: string, comments: string[]): HtmlTableR
   const rows: HtmlTableRow[] = [];
   // Similarly, nested <tr> structures are out of scope for this lightweight parser.
   // Not one in a comment, as for a table (see extractHtmlTables).
-	const rowRegex = new RegExp('<!--(?:[\\s\\S]*?-->|[\\s\\S]*$)|<tr\\b(?:"[^"]*"|\'[^\']*\'|[^\'">])*?>(' + htmlContentUnit(2) + '*?)(?:<\\/tr>|' + HTML_REST_IN_COMMENT + ')|' + HTML_TAG, 'gi');
+	const rowRegex = new RegExp('<!--(?:[\\s\\S]*?-->|[\\s\\S]*$)|' + rawTextElement(1) + '|<tr\\b' + HTML_ATTRS + '>(' + htmlContentUnit(3) + '*?)(?:<\\/tr>|' + htmlRestInComment(7) + ')|' + HTML_TAG, 'gi');
   let rowMatch: RegExpExecArray | null;
   while ((rowMatch = rowRegex.exec(tableHtml)) !== null) {
     if (rowMatch[0].startsWith('<!--')) {
       comments.push(rowMatch[0]);
       continue;
     }
-    if (rowMatch[1] === undefined) continue;
-    const cells = extractHtmlTableCells(rowMatch[1] + (rowMatch[4] ?? ''), comments);
+    if (rowMatch[2] === undefined) continue;
+    const cells = extractHtmlTableCells(rowMatch[2] + (rowMatch[7] ?? ''), comments);
     // Invariant: rows with no cells are skipped.
     if (cells.length > 0) {
       rows.push({
@@ -200,17 +224,17 @@ function extractHtmlTableCells(rowHtml: string, comments: string[]): Array<HtmlT
   const cells: Array<HtmlTableCell & { isHeader: boolean }> = [];
   // Nested table-cell tags are not supported; this matches flat <th>/<td> content only.
   // Not one in a comment, as for a table (see extractHtmlTables).
-	const cellRegex = new RegExp('<!--(?:[\\s\\S]*?-->|[\\s\\S]*$)|<(th|td)\\b((?:"[^"]*"|\'[^\']*\'|[^\'">])*)>(' + htmlContentUnit(4) + '*?)(?:<\\/\\1>|' + HTML_REST_IN_COMMENT + ')|' + HTML_TAG, 'gi');
+	const cellRegex = new RegExp('<!--(?:[\\s\\S]*?-->|[\\s\\S]*$)|' + rawTextElement(1) + '|<(th|td)\\b(' + HTML_ATTRS + ')>(' + htmlContentUnit(5) + '*?)(?:<\\/\\2>|' + htmlRestInComment(9) + ')|' + HTML_TAG, 'gi');
   let cellMatch: RegExpExecArray | null;
   while ((cellMatch = cellRegex.exec(rowHtml)) !== null) {
     if (cellMatch[0].startsWith('<!--')) {
       comments.push(cellMatch[0]);
       continue;
     }
-    if (cellMatch[1] === undefined) continue;
-    const isHeader = cellMatch[1].toLowerCase() === 'th';
-    const attrs = cellMatch[2];
-    const runs = parseHtmlCellRuns(cellMatch[3] + (cellMatch[6] ?? ''));
+    if (cellMatch[2] === undefined) continue;
+    const isHeader = cellMatch[2].toLowerCase() === 'th';
+    const attrs = cellMatch[3];
+    const runs = parseHtmlCellRuns(cellMatch[4] + (cellMatch[9] ?? ''));
     const colspan = parseInt(extractAttr(attrs, 'colspan') ?? '', 10) || undefined;
     const rowspan = parseInt(extractAttr(attrs, 'rowspan') ?? '', 10) || undefined;
     const kind = parseHtmlTableCellSourceKind(extractAttr(attrs, 'data-mm-kind'));
@@ -280,21 +304,21 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
   let atParagraphStart = true;
   // A <br> at the end of a <p>, which stays, unlike one at the end of a cell
   const closedBreaks = new Set<HtmlTableRun>();
-  // The last run that shows, before any comments after it, which don't
-  const lastShown = () => {
-    let k = runs.length - 1;
-    while (k >= 0 && runs[k].type === 'html_comment') k--;
-    return k;
+  // The index of the last run that shows, before any comments after it,
+  // which don't, kept as each run is added, as a cell can hold many comments
+  let shown = -1;
+  const pushRun = (run: HtmlTableRun) => {
+    runs.push(run);
+    if (run.type !== 'html_comment') shown = runs.length - 1;
   };
   const startParagraph = () => {
     if (paragraphs > 0) {
-      const k = lastShown();
-      const last = runs[k];
+      const last = runs[shown];
       if (last?.type === 'text' && !last.code) {
         last.text = last.text.replace(/[ \t\r\n]+$/, '');
-        if (!last.text) runs.splice(k, 1);
+        if (!last.text) runs.splice(shown, 1);
       }
-      runs.push({ type: 'paragraph', text: '\n\n' });
+      pushRun({ type: 'paragraph', text: '\n\n' });
     }
     paragraphs++;
     paragraphClosed = false;
@@ -308,13 +332,13 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
     let text = code ? rawText : collapseHtmlWhitespace(rawText);
     // Whitespace runs together with a space the text before ends with, as
     // HTML has it, past tags and comments, which show nothing
-    const before = runs[lastShown()];
+    const before = runs[shown];
     if (!code && (paragraphClosed || atParagraphStart || before?.type === 'softbreak' || before?.type === 'text' && !before.code && before.text.endsWith(' '))) {
       text = text.replace(/^ /, '');
     }
     if (!text) return;
     startContent();
-    runs.push({
+    pushRun({
       type: 'text', text,
       ...(bold ? { bold } : {}),
       ...(italic ? { italic } : {}),
@@ -330,8 +354,9 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
   };
 
   // Tokenize the HTML into tags, comments, and text segments. A tag's
-  // quoted attribute can hold a > or a <!--.
-  const tagRegex = /<!--(?:[\s\S]*?-->|[\s\S]*$)|<(\/?)(\w+)\b((?:"[^"]*"|'[^']*'|[^'">])*)>/g;
+  // quoted attribute can hold a > or a <!--. An element whose text is no
+  // HTML, as a <script>, is text, as its tags were, and a <!-- in it too.
+  const tagRegex = new RegExp('<!--(?:[\\s\\S]*?-->|[\\s\\S]*$)|' + RAW_TEXT_START + '([\\s\\S]*?)(?:<\\/\\1\\s*>|$)|<(\\/?)(\\w+)\\b(' + HTML_ATTRS + ')>', 'gi');
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
@@ -344,16 +369,20 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
     // goes in the paragraph before it, or else the one after it, as it
     // starts none, which would show as an empty one.
     if (match[0].startsWith('<!--')) {
-      runs.push({ type: 'html_comment', text: match[0] });
+      pushRun({ type: 'html_comment', text: match[0] });
       continue;
     }
-    const isClose = match[1] === '/';
-    const tag = match[2].toLowerCase();
-    const attrs = match[3];
+    if (match[1] !== undefined) {
+      emitText(match[2]);
+      continue;
+    }
+    const isClose = match[3] === '/';
+    const tag = match[4].toLowerCase();
+    const attrs = match[5];
 
     if (tag === 'br') {
       startContent();
-      runs.push({ type: 'softbreak', text: '\n' });
+      pushRun({ type: 'softbreak', text: '\n' });
     } else if (tag === 'b' || tag === 'strong') {
       bold = !isClose;
     } else if (tag === 'i' || tag === 'em') {
@@ -377,7 +406,7 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
         href = undefined;
       }
     } else if (tag === 'p') {
-      const last = runs[lastShown()];
+      const last = runs[shown];
       if (!isClose) startParagraph();
       else {
         if (last?.type === 'softbreak') closedBreaks.add(last);
@@ -401,7 +430,8 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
     }
   }
   if (runs.length > 0) {
-    const k = lastShown();
+    let k = runs.length - 1;
+    while (k >= 0 && runs[k].type === 'html_comment') k--;
     const last = runs[k];
     if (last?.type === 'softbreak' && !closedBreaks.has(last)) runs.splice(k, 1);
     else if (last?.type === 'text' && !last.code) {
