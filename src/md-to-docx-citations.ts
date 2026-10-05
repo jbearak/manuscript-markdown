@@ -392,6 +392,12 @@ export function renderBibliography(engine: CiteprocEngine): { bibStart: string; 
   }
 }
 
+/** A key's or locator's text as Word shows it, where a line end in it,
+ *  and the spaces around it, is a space */
+function oneLine(text: string): string {
+  return text.split('\n').map(line => line.trim()).join(' ');
+}
+
 /**
  * Generate OOXML paragraphs for missing citation keys, to appear after the bibliography.
  * A key's line ends are spaces, as Word shows them, so each paragraph is one
@@ -399,7 +405,7 @@ export function renderBibliography(engine: CiteprocEngine): { bibStart: string; 
  */
 export function generateMissingKeysXml(missingKeys: string[]): string {
   return missingKeys.map(key =>
-    '<w:p><w:r><w:t xml:space="preserve">Citation data for @' + escapeXml(key.split('\n').map(line => line.trim()).join(' ')) +
+    '<w:p><w:r><w:t xml:space="preserve">Citation data for @' + escapeXml(oneLine(key)) +
     ' was not found in the bibliography file.</w:t></w:r></w:p>'
   ).join('');
 }
@@ -572,11 +578,14 @@ export function generateCitation(
     return { xml };
   }
 
+  // A key's and locator's line ends as spaces, as Word shows them and the
+  // key's note writes it, where import, which reads a line end in Word's
+  // text as one, wouldn't read [@a<line end>b] as a citation
   const missingText = '[' + missing.map(i => {
     const key = keys[i];
     const prefix = run.prefixes?.[i];
     const locator = run.locators?.get(key);
-    return (prefix ? prefix + ' ' : '') + (run.suppressAuthorKeys?.has(key) ? '-@' : '@') + key + (locator ? ', ' + locator : '');
+    return (prefix ? prefix + ' ' : '') + (run.suppressAuthorKeys?.has(key) ? '-@' : '@') + oneLine(key) + (locator ? ', ' + oneLine(locator) : '');
   }).join('; ') + ']';
 
   // Pure missing — emit @citekey references as plain text, preserving bracket format

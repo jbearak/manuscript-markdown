@@ -7825,7 +7825,6 @@ describe('extractBibData', () => {
 describe('Missing citation keys', () => {
   test.each([
     ['a space', 'P [@a b] Q', 'a b'],
-    ['a line end', 'P [@a\nb] Q', 'a b'],
     // Whose ` the note's escaped ` closed as a code span
     ['a backtick', 'P [@a`b c] Q', 'a\\`b c'],
     // Which import writes as it is, as HTML, which export writes as text
@@ -7842,6 +7841,10 @@ describe('Missing citation keys', () => {
   });
 
   test.each([
+    // Which export writes as a space, as Word shows it, where import reads
+    // the line end in Word's text as one, after which it read no citation
+    ['with a line end in its key', 'P [@a\nb] Q', 'P [@a b] Q\n\nCitation data for @a b was not found in the bibliography file.\n'],
+    ['with a line end in its locator', 'P [@a, p.\n2] Q', 'P [@a, p. 2] Q\n\nCitation data for @a was not found in the bibliography file.\n'],
     // Which import writes on the line after the comment's end
     ['after a comment', 'P [@a] Q\n\n<!--\nc\n-->\n', 'P [@a] Q\n\n<!--\nc\n-->\nCitation data for @a was not found in the bibliography file.\n'],
     ['with carriage returns', 'P [@a] Q\r\n\r\nCitation data for @a was not found in the bibliography file.\r\n',
