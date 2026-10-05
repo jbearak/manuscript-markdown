@@ -6391,6 +6391,22 @@ describe('HTML around a table in its block', () => {
     expect(again.slice(again.indexOf('<w:tbl>'))).not.toContain('<w:sz w:val="22"/>');
   });
 
+  test.each([
+    ['around it', '<pre>Caption<table><tr><td>a<!-- x y -->b</td></tr></table></pre>\n', '<pre>Caption<table><tr><td><p>a<!-- x\ny -->b</p></td></tr></table></pre>\n'],
+    ['with text after the table', '<pre>Caption\n<table><tr><td>a<!-- x y -->b</td></tr></table>\nNote</pre>\n', '<pre>Caption\n<table><tr><td><p>a<!-- x\ny -->b</p></td></tr></table>\nNote</pre>\n'],
+  ])('keeps a <pre> %s where Word adds a line end in a cell\'s comment', async (_name, md, expected) => {
+    // The line end doesn't end the <pre>'s block, but its start went, as
+    // for a block that ends before the table, and its end stayed
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const broken = xml.replace('&lt;!-- x y --&gt;', '&lt;!-- x</w:t><w:br/><w:t xml:space="preserve">y --&gt;');
+    expect(broken).not.toBe(xml);
+    zip.file('word/document.xml', broken);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe(expected);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
   test('writes a table in Word whose block a comment starts and ends', async () => {
     // The block read as a comment, which hid the table, as import writes
     // the first of two tables on a line with a comment before each
@@ -6589,6 +6605,20 @@ describe('HTML around a table in its block', () => {
     zip.file('word/document.xml', tracked);
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
     expect(markdown).toBe(beforeMd + '+----------+-----+\n| {++XX++} | b   |\n+----------+-----+' + afterMd);
+  });
+
+  test('keeps the end of a comment over lines that an embed\'s line ends before a table that leaves HTML', async () => {
+    // The embed's line went, as export would add its table, with the
+    // comment's end, and the comment went on over the table
+    const zip = await JSZip.loadAsync((await convertMdToDocx('<!-- hidden\n<!-- embed: t.csv --><table><tr><td>XX</td><td>b</td></tr></table>\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const tracked = xml.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>');
+    expect(tracked).not.toBe(xml);
+    zip.file('word/document.xml', tracked);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('<!-- hidden\n-->\n\n+----------+-----+\n| {++XX++} | b   |\n+----------+-----+\n');
+    const again = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    expect(again.match(/<w:tbl>/g)).toHaveLength(1);
   });
 
   test.each([

@@ -7023,13 +7023,20 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
     lines.push(i1 + '</tr>');
   }
   // But a line end in a cell, as in its comment, would end the block there,
-  // so the HTML before the table goes as blocks of its own, as it does
-  // around a table in another format, and the table starts one
-  if (oneLine && lines.slice(1).some(line => /[\r\n]/.test(line))) {
+  // where its end is before it or in the table, so the HTML before the
+  // table goes as blocks of its own, as it does around a table in another
+  // format, and the table starts one; and neither goes where that can't be
+  // read as it was. A block whose end is after the table, as a <pre>'s
+  // around it, goes on over the line end.
+  let after = around?.[1] ?? '';
+  const ends = oneLine ? htmlBlockEndMarker((around?.[0] ?? '').trimStart()) : undefined;
+  if (oneLine && lines.slice(1).some(line => /[\r\n]/.test(line))
+    && (!ends || ends.test(around?.[0] ?? '') || lines.slice(1).some(line => ends.test(line)))) {
     const before = detachedTableHtml(around?.[0] ?? '');
     lines[0] = (before ? before + '\n\n' : '') + lines[0].slice((around?.[0] ?? '').length);
+    if (before === null) after = '';
   }
-  lines.push('</table>' + (around?.[1] ?? ''));
+  lines.push('</table>' + after);
   // Comment bodies go after the table, as in a pipe table: a blank line in
   // one would end the table's HTML
   return lines.join(oneLine ? '' : '\n') + (deferredAll.length > 0 ? '\n\n' + deferredAll.join('\n') : '');
@@ -7754,7 +7761,7 @@ function htmlBlockEnd(lines: string[], k: number, inParagraph: boolean): number 
  *  # Source would be a heading. A comment export would read as a directive,
  *  as <!-- table-font-size: 11 --> or a line of an embed's, which none of
  *  them was in the table's block, goes, but for the text a style's goes
- *  around on its line. Each line reads as it does in what's written, in
+ *  around on its line, and the end of a comment an embed's line is in. Each line reads as it does in what's written, in
  *  order, in which a line of text is a paragraph's, after which a line of
  *  one tag starts no block. Null where it reads no more as it was, as a
  *  block that ends at a marker without one, which would go on over the
@@ -7777,7 +7784,12 @@ function detachedTableHtml(html: string): string | undefined | null {
     // start with
     const end = /\S/.test(line) && !(inComment[k] && texts.length > 0) ? htmlBlockEnd(lines, k, inParagraph) : -1;
     if (end === -1) {
-      if (parseEmbedDirective(line)) continue;
+      // An embed's line goes, as export would add its table, but for the end
+      // of a comment it's in, which would go on over the table without it
+      if (parseEmbedDirective(line)) {
+        if (inComment[k]) texts.push(line.slice(line.indexOf('-->')));
+        continue;
+      }
       // Which starts a line of its own, an HTML block to its end
       if (preformatted[k] > 0) {
         texts.push(line.slice(0, preformatted[k]));
@@ -7804,7 +7816,10 @@ function detachedTableHtml(html: string): string | undefined | null {
     if (rest === undefined) {
       // With its indent as code gone
       if (/^(?: {0,3}\t| {4})/.test(block[0])) block[0] = block[0].trimStart();
-      out.push(...block.filter(blockLine => !parseEmbedDirective(blockLine)));
+      for (let m = 0; m < block.length; m++) {
+        if (!parseEmbedDirective(block[m])) out.push(block[m]);
+        else if (inComment[k + m]) out.push(block[m].slice(block[m].indexOf('-->')));
+      }
       inParagraph = false;
     } else if (/\S/.test(rest)) {
       out.push(htmlLinesAsText([rest]).join('\n'));
