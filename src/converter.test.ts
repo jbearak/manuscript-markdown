@@ -6985,6 +6985,22 @@ describe('Code block round-trip', () => {
       .toBe('Text.[^a]\n\n[^a]:\n\n    ```\n    x = 1\n    ```\n');
   });
 
+  test.each([
+    ['a tracked change', '<w:del w:id="91" w:author="A" w:date="2026-01-01T00:00:00Z"><w:r><w:delText>old</w:delText></w:r></w:del>'
+      + '<w:ins w:id="92" w:author="A" w:date="2026-01-01T00:00:00Z"><w:r><w:t>new</w:t></w:r></w:ins>', '{~~old~>new~~}'],
+    ['a comment', '<w:commentRangeStart w:id="0"/><w:r><w:t>x</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>', '{==x==}'],
+  ])('keeps a code block in a note with %s as the note\'s paragraphs, which keep it', async (_name, runs, line) => {
+    // A code block can't hold it, which went, and a deletion's text with it
+    // as the code's
+    const zip = await JSZip.loadAsync((await convertMdToDocx('T.[^1]\n\n[^1]: ```\n    XX\n    b\n    ```\n\n    After.\n')).docx);
+    const xml = await zip.file('word/footnotes.xml')!.async('string');
+    const edited = xml.replace(/<w:r>(?:(?!<w:r>).)*?<w:t[^>]*>XX<\/w:t><\/w:r>/s, runs);
+    expect(edited).not.toBe(xml);
+    zip.file('word/footnotes.xml', edited);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown))
+      .toBe('T.[^1]\n\n[^1]: ' + line + '\n\n    b\n\n    After.\n');
+  });
+
   test('code block without language survives round-trip', async () => {
     const md = '```\nplain code\n```';
     const docxResult = await convertMdToDocx(md);

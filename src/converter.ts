@@ -8824,20 +8824,31 @@ export function buildMarkdown(
           bodyParts[paragraphPart] += text;
         }
       };
+      // The end of a code block whose lines go as the note's paragraphs
+      let annotatedCodeEnd = 0;
       for (let bi = 0; bi < bodyMerged.length; bi++) {
         const item = bodyMerged[bi];
-        if (item.type === 'para' && item.isCodeBlock) {
+        if (item.type === 'para' && item.isCodeBlock && bi >= annotatedCodeEnd) {
           // A code block, as in the body, which ends the text before it, and
           // the language export stored for it, as it numbers code blocks on
           // from the body's. The empty paragraph export writes between two
           // goes.
+          const code = codeBlockFence(bodyMerged, bi, codeBlockLangs?.get(String(codeBlockGroupIndex++)) || '');
+          // But one with a comment or tracked change, which a code block
+          // can't hold, goes as paragraphs, which keep them, as before
+          if (bodyMerged.slice(bi, code.end).some(line => line.type === 'para'
+            ? line.paraMarkRevision || line.breakRevision
+            : 'revision' in line && line.revision || 'commentIds' in line && line.commentIds.size > 0)) {
+            annotatedCodeEnd = code.end;
+            bi--;
+            continue;
+          }
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
             pushInline(inlinePart(part.text, false, part.deferredComments.length > 0));
             deferredAll.push(...part.deferredComments);
           }
           paragraphPart = undefined;
-          const code = codeBlockFence(bodyMerged, bi, codeBlockLangs?.get(String(codeBlockGroupIndex++)) || '');
           bodyParts.push(code.block);
           const sep = bodyMerged[code.end];
           const afterSep = bodyMerged[code.end + 1];
