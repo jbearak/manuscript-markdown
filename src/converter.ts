@@ -671,28 +671,31 @@ export class RunsAfter {
    *  change's or a comment's delimiters, a strikethrough's tag, or the
    *  whitespace at a run's edge, which goes outside its delimiters, which
    *  no host holds, at most `limit` characters of text in all. '' where
-   *  the runs aren't known, or the run before is a highlight's, whose text
-   *  export reads apart. */
+   *  the runs aren't known. A highlight's text export reads apart, but for
+   *  the runs highlighted alike after it, which it may join (see
+   *  joinHighlights), so their delimiters are read without it. */
   hostAfter(limit: number): string {
     if (!this.runs || this.prefix) return '';
     const { items, at } = this.runs;
     const self = items[at - 1];
-    if (self?.type !== 'text' || self.href || self.formatting.highlight) return '';
+    if (self?.type !== 'text' || self.href) return '';
+    const color = highlightColorOf(self);
+    const delimiters = (fmt: RunFormatting) => formattingDelimiters(color ? { ...fmt, highlight: false } : fmt);
     let previous: ContentItem & { type: 'text' } = self;
     let markdown = '';
     let read = 0;
     for (let k = at; k <= items.length && read < limit; k++) {
       const item = items[k];
       const next: (ContentItem & { type: 'text' }) | undefined = item?.type === 'text' && !item.href && revisionsEqual(item.revision, previous.revision)
-        && commentSetsEqual(item.commentIds, previous.commentIds) ? item : undefined;
-      const open = next ? formattingDelimiters(next.formatting)[0] : '';
+        && commentSetsEqual(item.commentIds, previous.commentIds) && (!color || highlightColorOf(item) === color) ? item : undefined;
+      const open = next ? delimiters(next.formatting)[0] : '';
       const following = next ? open + next.text : ' ';
       // A ~~ that would close after punctuation, as after https://, before
       // a letter, or open before punctuation after one, is a tag (see
       // resolveEmphasis)
       const tag = (inner: string, outer: string) => flankClass(inner.charCodeAt(0)) === FLANK_PUNCT
         && flankClass(outer.charCodeAt(0)) === FLANK_OTHER;
-      const closing = formattingDelimiters(previous.formatting)[1];
+      const closing = delimiters(previous.formatting)[1];
       const space = /\s$/.test(previous.text);
       if (closing.startsWith('~~') && !space && tag(previous.text.slice(-1), following)) return markdown + ' ';
       markdown += closing;

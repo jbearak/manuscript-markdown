@@ -9303,6 +9303,17 @@ describe('Highlights across runs', () => {
     expect(buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim()).toBe(md);
   });
 
+  test.each([
+    ['struck', [run('https://', { highlight: true, strikethrough: true }), run(' b', { highlight: true })], '==~~https\\://~~ b=='],
+    ['before its host', [run('https://', { highlight: true }), run('e.com', { highlight: true })], '==https\\://e.com=='],
+  ])('escapes the scheme of a URL in a highlight that joins the runs after it, %s', async (_name, items, md) => {
+    // Export's linkify read the joined highlight's text on past the run, as
+    // https://~~, which took the strikethrough's closer, or https://e.com
+    const markdown = buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim();
+    expect(markdown).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim()).toBe(md);
+  });
+
   const keyless = (commentIds: string[] = [], revision?: RevisionInfo) =>
     ({ type: 'citation', text: '{1}', pandocKeys: [], commentIds: new Set(commentIds), formatting: DEFAULT_FORMATTING, ...(revision ? { revision } : {}) }) as ContentItem;
 
