@@ -7712,30 +7712,37 @@ export async function convertMdToDocx(
   // @a&lt;b, decoded, HTML export writes as text, as a key's <span>, but
   // not a comment, break or formatting, and a URL linkify makes a link of.
   const MISSING_KEY_TEXT = /^Citation data for @[^,;\]]+ was not found in the bibliography file\.$/;
+  // A line a note could be, whatever its key
+  const NOTE_LINE = /^Citation data for @.+ was not found in the bibliography file\.[ \t]*$/;
   const bodyParts = body.split(/(\r\n?|\n)/);
+  const lines = bodyParts.filter((_part, k) => k % 2 === 0);
   let notes: Set<number> | undefined;
-  if (bodyParts.some((part, k) => k % 2 === 0 && part.startsWith('Citation data for @'))) {
-    citationTextMd ??= createMarkdownIt();
-    // Each line a note could be ends in its index between two of a
-    // private-use character the body lacks, past CriticMarkup's, so it's
-    // found again however the preprocessing moves and joins lines
+  if (lines.some(line => NOTE_LINE.test(line))) {
+    const md = citationTextMd ??= createMarkdownIt();
+    // Each line a note could be has a key of x there, as a key is opaque,
+    // so nothing in it, as CriticMarkup's <<}, pairs with what's outside
+    // it, and ends in its index between two of a private-use character the
+    // body lacks, past CriticMarkup's, so it's found again however the
+    // preprocessing moves and joins lines
     let markCode = 0xE001;
     while (body.includes(String.fromCharCode(markCode))) markCode++;
     const mark = String.fromCharCode(markCode);
-    const markedLine = new RegExp('^([^' + mark + ']*)' + mark + '(\\d+)' + mark + '$');
-    const marked = bodyParts.filter((_part, k) => k % 2 === 0)
-      .map((line, k) => line.startsWith('Citation data for @') ? line + mark + k + mark : line).join('\n');
-    const parsed = citationTextMd.parse(preprocessCriticMarkup(wrapBareLatexEnvironments(deLazifyBlockquotes(preprocessGridTables(
+    const markedNote = new RegExp('^Citation data for @x was not found in the bibliography file\\.' + mark + '(\\d+)' + mark + '$');
+    const marked = lines.map((line, k) => NOTE_LINE.test(line)
+      ? 'Citation data for @x was not found in the bibliography file.' + mark + k + mark : line).join('\n');
+    const parsed = md.parse(preprocessCriticMarkup(wrapBareLatexEnvironments(deLazifyBlockquotes(preprocessGridTables(
       extractFootnoteDefinitions(marked).cleaned)))), {});
     notes = new Set(parsed.flatMap((token, t) => {
       if (token.type !== 'paragraph_open' || token.level !== 0 || !token.map || token.map[1] - token.map[0] !== 1) return [];
-      const children = parsed[t + 1]?.children?.filter(child => !isLinkifyToken(child));
-      // Its runs as export reads them
+      const index = markedNote.exec(parsed[t + 1]?.content ?? '');
+      if (!index) return [];
+      const k = Number(index[1]);
+      // Its key as export reads the line, in runs of plain text alone
+      const children = md.parseInline(lines[k].trim(), {})[0]?.children?.filter(child => !isLinkifyToken(child));
       const runs = children?.every(child => child.type === 'text' || child.type === 'html_inline') ? processInlineChildren(children) : [];
-      const line = runs.every(run => run.type === 'text'
+      return runs.every(run => run.type === 'text'
         && !(run.bold || run.italic || run.underline || run.strikethrough || run.superscript || run.subscript))
-        ? markedLine.exec(runs.map(run => run.text).join('')) : null;
-      return line && MISSING_KEY_TEXT.test(line[1].trimEnd()) ? [Number(line[2])] : [];
+        && MISSING_KEY_TEXT.test(runs.map(run => run.text).join('')) ? [k] : [];
     }));
   }
   const bodyStripped = bodyParts

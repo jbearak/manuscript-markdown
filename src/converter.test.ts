@@ -7617,6 +7617,8 @@ describe('Missing citation keys', () => {
     ['a backtick', 'P [@a`b c] Q', 'a\\`b c'],
     // Which import writes as it is, as HTML, which export writes as text
     ['a tag', 'P [@a<span>] Q', 'a<span>'],
+    // Whose <<} CriticMarkup paired with the {>> in the citation
+    ['CriticMarkup\'s delimiters', 'P [@a<<}{>>b] Q', 'a<<}\\{>>b'],
   ])('writes the note of a missing key with %s once', async (_name, md, key) => {
     // The note for it, which export strips and writes anew, wasn't
     // stripped, and another was added each round trip
