@@ -5335,11 +5335,16 @@ interface CustomPropEntry {
 /** Chunk a string value into numbered custom properties: PREFIX_1, PREFIX_2, … */
 function chunkCustomProps(prefix: string, data: string, chunkSize = 240): CustomPropEntry[] {
   const props: CustomPropEntry[] = [];
-  for (let i = 0; i < data.length; i += chunkSize) {
+  for (let i = 0; i < data.length;) {
+    // A chunk ends between characters, not in the surrogate pair of one
+    // outside the BMP, as an emoji, which the XML can't hold half of
+    let end = Math.min(i + chunkSize, data.length);
+    if (end < data.length && /[\ud800-\udbff]/.test(data[end - 1])) end--;
     props.push({
       name: prefix + (props.length + 1),
-      value: data.slice(i, i + chunkSize),
+      value: data.slice(i, end),
     });
+    i = end;
   }
   return props;
 }
