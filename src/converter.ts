@@ -7845,14 +7845,11 @@ export function buildMarkdown(
           }
           i++;
         }
-        // Push the last collected line
+        // Push the last collected line. Empty lines at the end are the
+        // code's, as export writes no paragraph for the fence content's last
+        // line end, and Word shows them.
         if (!firstLine) {
           codeLines.push(lineText);
-        }
-
-        // Trim trailing empty lines (artifact of markdown-it's trailing \n in fence content)
-        while (codeLines.length > 0 && codeLines[codeLines.length - 1] === '') {
-          codeLines.pop();
         }
 
         // Compute fence length: must exceed any run of its character in the
