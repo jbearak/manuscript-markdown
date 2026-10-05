@@ -7522,6 +7522,24 @@ describe('Track changes (CriticMarkup)', () => {
       expect(await roundTrip(md2)).toBe(md2);
     });
 
+    test.each([
+      ['{--### {==Heading==}{>>comment<<}--}', '{--### --}{=={--Heading--}==}{>>comment<<}'],
+      ['{++### {==Heading==}{>>comment<<}++}', '{++### ++}{=={++Heading++}==}{>>comment<<}'],
+      ['Prefix {--a{>>c<<}\n\nb--} suffix', 'Prefix {--a\n\n--}{>>c<<}{--b--} suffix'],
+      ['Prefix {++a{>>c<<}\n\nb++} suffix', 'Prefix {++a\n\n++}{>>c<<}{++b++} suffix'],
+    ])('keeps the revised paragraph mark of %j, beside a comment', async (md, expected) => {
+      // Import wrote the heading's marker before the comment's anchor, outside
+      // any span, and ended the paragraph its comment ended as an untracked
+      // one, so the next export lost the mark's revision
+      const roundTrip = async (source: string) =>
+        (await convertDocx((await convertMdToDocx(source)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
+      const md2 = await roundTrip(md);
+      expect(md2).toBe(expected + '\n');
+      expect(await roundTrip(md2)).toBe(md2);
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(md2)).docx)).file('word/document.xml')!.async('string');
+      expect(xml).toMatch(/<w:pPr>(?:(?!<\/w:pPr>).)*<w:rPr>(?:(?!<\/w:rPr>).)*<w:(?:del|ins) /);
+    });
+
     test('drops the line breaks of comment body lines across a revision\'s end', async () => {
       // Each revision's text lost its own, so the body line that ran on past
       // its end kept the break after it

@@ -7466,6 +7466,11 @@ function opensNewSide(content: ContentItem[], index: number): boolean {
     && !!prev && isInlineRevisionItem(prev) && revisionsEqual(prev.revision, { ...para.breakRevision, type: 'deletion' });
 }
 
+/** A comment's reference with no text of its own around it, as {>>c<<} */
+function isCommentPoint(item: ContentItem | undefined): boolean {
+  return item?.type === 'text' && item.text === '' && item.commentIds.size > 0 && !item.revision;
+}
+
 /** Inline content that can sit in a CriticMarkup span. */
 function isInlineRevisionItem(item: ContentItem): item is Extract<ContentItem, { type: 'text' | 'citation' | 'math' | 'footnote_ref' | 'image' }> {
   return item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'image' || (item.type === 'math' && !item.display);
@@ -7534,7 +7539,12 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
     const para = content[k];
     if (para.type !== 'para' || !para.breakRevision) continue;
     const revision = para.breakRevision;
-    const prev = content[k - 1];
+    // A comment's reference alone, as of {--a{>>c<<}\n\nb--}, goes after
+    // the break, as one can't go in the span, and a span that starts with
+    // the break loses it
+    let last = k - 1;
+    while (last >= 0 && isCommentPoint(content[last])) last--;
+    const prev = content[last];
     if (!prev || !isInlineRevisionItem(prev)) continue;
     if (!opensNewSide(content, k) && !revisionsEqual(prev.revision, revision)) continue;
     let opening: ParaItem | undefined;
@@ -7551,7 +7561,8 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
     joined ??= [...content];
     const prefix = linePrefix(para, opening);
     const text = marks().start + '\n' + prefix.trimEnd() + '\n' + prefix + marks().end;
-    joined[k] = { type: 'text', text, commentIds: new Set(prev.commentIds), formatting: DEFAULT_FORMATTING, revision };
+    joined.splice(last + 1, k - last, { type: 'text', text, commentIds: new Set(prev.commentIds), formatting: DEFAULT_FORMATTING, revision },
+      ...content.slice(last + 1, k));
   }
   return joined ?? content;
 }
@@ -8977,10 +8988,16 @@ export function buildMarkdown(
       // content doesn't start with a Critic addition/deletion (unexpected),
       // fall back to a plain heading prefix.
       const openMatch = /^\{(\+\+|--)/.exec(textOut);
+      const { marker, revType } = pendingHeadingCriticMarker;
       if (openMatch) {
-        textOut = textOut.slice(0, openMatch[0].length) + pendingHeadingCriticMarker.marker + textOut.slice(openMatch[0].length);
+        textOut = textOut.slice(0, openMatch[0].length) + marker + textOut.slice(openMatch[0].length);
+      } else if (/^(?:\{==|\{#[^}\s]+\}|\{>>[\s\S]*?<<\})+\{(\+\+|--)/.exec(textOut)?.[1] === (revType === 'addition' ? '++' : '--')) {
+        // After a comment's anchor or range marker, as in
+        // {=={--Heading--}==}{>>c<<}, the marker takes a span of its own,
+        // which export reads as the heading's too
+        textOut = (revType === 'addition' ? '{++' + marker + '++}' : '{--' + marker + '--}') + textOut;
       } else {
-        textOut = pendingHeadingCriticMarker.marker + textOut;
+        textOut = marker + textOut;
       }
       pendingHeadingCriticMarker = undefined;
     }
