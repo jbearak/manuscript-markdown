@@ -9012,6 +9012,32 @@ describe('Links of more than one run', () => {
     expect(await roundTrip(md.slice(0, -1))).toBe(md);
   });
 
+  test('keeps the runs of a deleted link apart where one leaves a tag open', async () => {
+    // One link's text read the tag across the bold's delimiters as HTML
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const replaced = xml.replace(/<w:hyperlink [^>]*><w:r><w:t>ab<\/w:t><\/w:r><\/w:hyperlink>/, link => '<w:del w:id="91" w:author="A" w:date="2024-01-01T00:00:00Z">'
+      + link.replace('<w:r><w:t>ab</w:t></w:r>', '<w:r><w:rPr><w:b/></w:rPr><w:delText>&lt;span a="</w:delText></w:r><w:r><w:delText>"&gt;</w:delText></w:r>') + '</w:del>');
+    expect(replaced).not.toBe(xml);
+    zip.file('word/document.xml', replaced);
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(md).toBe('{--[**<span a="**](https://e.com)--}{--[">](https://e.com)--}\n');
+    expect(await roundTrip(md.slice(0, -1))).toBe(md);
+  });
+
+  test.each([
+    ['links to one place', (k: number): Partial<ContentItem> => ({ href: 'https://e.com', link: k + 1, formatting: DEFAULT_FORMATTING })],
+    ['runs of other formatting by turns', (k: number): Partial<ContentItem> => ({ formatting: { ...DEFAULT_FORMATTING, bold: k % 2 === 0 } })],
+  ])('writes a deletion of many %s in linear time', (_name, fields) => {
+    // Each run tried a substitution from it, and each link read past it for
+    // one, each through the rest of the deletion
+    const items = Array.from({ length: 32000 }, (_, k) => ({ type: 'text', text: 'a', commentIds: new Set(),
+      revision: { type: 'deletion', author: 'A', date: '2024-01-01T00:00:00Z' }, ...fields(k) }) as ContentItem);
+    const start = performance.now();
+    buildMarkdown(items, new Map());
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+
   test('keeps a link whose text starts with an inserted # a link, not a heading', async () => {
     // Export read the link's first run, {++# ++}, as an inserted heading's
     const md = '[{++# 123++}{++ (fixed)++}](https://e.com)';

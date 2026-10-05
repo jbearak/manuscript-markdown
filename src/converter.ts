@@ -5303,6 +5303,12 @@ function pairStandsAlone(segment: ContentItem[], index: number): boolean {
  * joinTrackedParagraphBreaks). Undefined unless both sides are there and one
  * has more than one item; tryRenderSubstitution renders a single pair.
  */
+/** Per segment, a run of deletions from whose start renderSubstitutionRun
+ *  found no insertion, which none later in it finds either, which keeps
+ *  import linear in a long deletion of runs that don't merge, as links to
+ *  one place */
+const substitutionlessRuns = new WeakMap<ContentItem[], { from: number; to: number; end: number }>();
+
 function renderSubstitutionRun(
   segment: ContentItem[],
   start: number,
@@ -5314,6 +5320,8 @@ function renderSubstitutionRun(
   const first = segment[start];
   const revision = isSubstitutionItem(first) ? first.revision : undefined;
   if (!revision) return undefined;
+  const known = substitutionlessRuns.get(segment);
+  if (known && known.end === end && known.from < start && start < known.to) return undefined;
   const side = (item: ContentItem | undefined, type: RevisionInfo['type']): item is SubstitutionItem =>
     isSubstitutionItem(item)
     && item.revision?.type === type && item.revision.author === revision.author && item.revision.date === revision.date
@@ -5346,6 +5354,12 @@ function renderSubstitutionRun(
   let k = start;
   while (k < end && side(segment[k], 'deletion')) k++;
   const deletions = k - start;
+  // Where nothing of the revision's author and time comes after the
+  // deletions, no start in them finds an insertion either
+  const after = segment[k];
+  if (k >= end || !(isSubstitutionItem(after) && after.revision?.author === revision.author && after.revision.date === revision.date)) {
+    substitutionlessRuns.set(segment, { from: start, to: k, end });
+  }
   while (k < end && side(segment[k], 'addition')) k++;
   const additions = k - start - deletions;
   if (deletions === 0 || additions === 0 || deletions + additions <= 2) return undefined;
@@ -5719,6 +5733,12 @@ function linkGroup(
     }
     items.push(next);
   }
+  if (items.length < 2) return undefined;
+  // A tag one run leaves open, which the runs after could close, as bold
+  // <span a=" before ">, would read as HTML across the formatting's
+  // delimiters between them in one link's text, so the runs stay links of
+  // their own, whose spans of a change come between them
+  if (items.some((item, k) => k < items.length - 1 && OPEN_TAG_AT_END_RE.test(item.text))) return undefined;
   // A substitution the group would cut, of deletions, and insertions or
   // not, at its end and an insertion of the same author and time after a
   // split or the link's end, is left to renderSubstitutionRun after the runs
@@ -5734,7 +5754,7 @@ function linkGroup(
     while (from > 0 && ofLast(items[from - 1], 'deletion')) from--;
     let k = start + items.length;
     // More deletions can come after deletions, before the insertion
-    if (additions === items.length) while (k < end && ofLast(segment[k], 'deletion')) k++;
+    if (additions === items.length && k < end && ofLast(segment[k], 'deletion')) k = Math.min(revisionRunEnd(segment, k), end);
     if (from < additions && k < end && ofLast(segment[k], 'addition')) items.splice(from);
   }
   if (items.length < 2) return undefined;
@@ -5790,6 +5810,27 @@ function linkGroup(
     end: start + items.length,
     item: whole ? first : { ...first, revision: undefined },
   };
+}
+
+/** A tag that the text leaves open at its end */
+const OPEN_TAG_AT_END_RE = /<\/?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?$/;
+
+/** Per segment, where the run of items of one revision that each index is
+ *  in ends, which linkGroup reads past a link for the rest of a
+ *  substitution, as reading it for each link would take time in the square
+ *  of the links */
+const revisionRunEnds = new WeakMap<ContentItem[], { length: number; ends: Map<number, number> }>();
+
+function revisionRunEnd(segment: ContentItem[], start: number): number {
+  let cached = revisionRunEnds.get(segment);
+  if (!cached || cached.length !== segment.length) revisionRunEnds.set(segment, cached = { length: segment.length, ends: new Map() });
+  const known = cached.ends.get(start);
+  if (known !== undefined) return known;
+  const revision = isSubstitutionItem(segment[start]) ? (segment[start] as SubstitutionItem).revision : undefined;
+  let k = start + 1;
+  while (k < segment.length && isSubstitutionItem(segment[k]) && revisionsEqual((segment[k] as SubstitutionItem).revision, revision)) k++;
+  for (let j = start; j < k; j++) cached.ends.set(j, k);
+  return k;
 }
 
 /** Whether a link of several runs starts at `start` with tracked changes in
