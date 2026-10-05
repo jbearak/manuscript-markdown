@@ -6236,6 +6236,10 @@ describe('HTML around a table in its block', () => {
     ['a comment on its line', '<!-- Table 1 --><table><tr><td><p>a</p></td></tr></table>\n'],
     ['a comment with a blank line', '<!-- TODO: check\n\nthe totals --><table><tr><td><p>a</p></td></tr></table>\n'],
     ['a pre on its line', '<pre>Table 1</pre><table><tr><td><p>a</p></td></tr></table>\n'],
+    // Which Word holds as an element of its own, which export didn't read
+    // for the first row
+    ['a caption over a first row with a non-breaking hyphen', '<p>Cap</p>\n' + table('COVID\u201119') + '\n'],
+    ['a caption over a first row with an optional hyphen', '<p>Cap</p>\n' + table('hy\u00ADphen') + '\n'],
   ])('keeps %s', async (_name, md) => {
     // Export dropped the rest of a table's block with no warning
     const { warnings } = await convertMdToDocx(md);
@@ -6280,6 +6284,19 @@ describe('HTML around a table in its block', () => {
     const markdown = await roundTrip('<p>Cap</p>\n<table><tr><td>A</td></tr><tr><td>b</td><td>c</td></tr></table>\n');
     expect(markdown.startsWith('<p>Cap</p>\n<table>')).toBe(true);
     expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps a table on the line of a comment before it where Word adds a line end in a cell\'s comment', async () => {
+    // The line end ended the block, and the next export cut the table there
+    const zip = await JSZip.loadAsync((await convertMdToDocx('<!-- Caption --><table><tr><td>a<!-- x y -->b</td></tr></table>\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const broken = xml.replace('&lt;!-- x y --&gt;', '&lt;!-- x</w:t><w:br/><w:t xml:space="preserve">y --&gt;');
+    expect(broken).not.toBe(xml);
+    zip.file('word/document.xml', broken);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    const again = await JSZip.loadAsync((await convertMdToDocx(markdown)).docx);
+    const texts = [...(await again.file('word/document.xml')!.async('string')).matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map(m => m[1]);
+    expect(texts).toEqual(['\u200B&lt;!-- Caption --&gt;', 'a', '\u200B&lt;!-- x', 'y --&gt;', 'b']);
   });
 
   test('writes a table in Word whose block a comment starts and ends', async () => {
@@ -6436,6 +6453,9 @@ describe('HTML around a table in its block', () => {
     ['a style\'s text between its comments', '', '\n<!-- style: Title -->*Caption*<!-- /style -->\n', '', '\n\n\\*Caption\\*\n'],
     // Which a line of its own made an embed's, and export added its table
     ['no embed\'s comment on the table\'s line', '', '<!-- embed: t.csv -->\n', '', '\n'],
+    // Which read as a citation, which export writes as a field where the
+    // bibliography holds its key
+    ['a citation as text', '', '\nSource [@smith2020; -@doe, p. 2] *x*\n', '', '\n\nSource \\[@smith2020; -@doe, p. 2] \\*x\\*\n'],
   ])('keeps %s around a table that leaves HTML, as it read', async (_name, beforeHtml, afterHtml, beforeMd, afterMd) => {
     // A comment that reads as no directive went, as one that does, and text
     // read as Markdown, as # Source as a heading

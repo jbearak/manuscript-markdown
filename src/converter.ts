@@ -7019,6 +7019,12 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
     }
     lines.push(i1 + '</tr>');
   }
+  // But a line end in a cell, as in its comment, would end the block there,
+  // so the HTML before the table goes on a line of its own, a block of its
+  // own, and the table starts one
+  if (oneLine && lines.slice(1).some(line => /[\r\n]/.test(line))) {
+    lines[0] = (around?.[0] ?? '') + '\n' + lines[0].slice((around?.[0] ?? '').length);
+  }
   lines.push('</table>' + (around?.[1] ?? ''));
   // Comment bodies go after the table, as in a pipe table: a blank line in
   // one would end the table's HTML
@@ -7555,9 +7561,15 @@ const CHARACTER_REFERENCE_AT = /&(?:#\d{1,7}|#[xX][\da-fA-F]{1,6}|[A-Za-z][A-Za-
 /** A line of the HTML around a table as Markdown text that reads as it did
  *  in the table's block: its tags, comments and character references, as
  *  markdown-it reads them, as they are, and the rest escaped, with no
- *  indent, which HTML runs together with the line end before */
+ *  indent, which HTML runs together with the line end before. A citation's
+ *  [ is escaped too, and what it holds as text, which escapeMarkdownChars
+ *  keeps as a citation, as export writes one whose key is missing as its
+ *  text, but which the HTML held as text. It's a \0 while the rest is
+ *  escaped, which no Markdown holds, as markdown-it replaces one. */
 function htmlLineAsText(line: string): string {
   const text = line.replace(/^[ \t]+/, '');
+  const asText = (part: string, lineStart: boolean) =>
+    escapeMarkdownChars(part.replace(/\[(?=-?@)/g, '\0'), lineStart).replace(/\0/g, '\\[');
   let out = '';
   let from = 0;
   for (let i = 0; i < text.length; i++) {
@@ -7566,12 +7578,12 @@ function htmlLineAsText(line: string): string {
     at.lastIndex = i;
     const raw = at.exec(text)?.[0];
     if (!raw) continue;
-    if (i > from) out += escapeMarkdownChars(text.slice(from, i), from === 0);
+    if (i > from) out += asText(text.slice(from, i), from === 0);
     out += raw;
     from = i + raw.length;
     i = from - 1;
   }
-  return out + (from < text.length ? escapeMarkdownChars(text.slice(from), from === 0) : '');
+  return out + (from < text.length ? asText(text.slice(from), from === 0) : '');
 }
 
 /** The HTML around a table as blocks of their own, as it goes around one in

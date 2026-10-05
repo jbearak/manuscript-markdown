@@ -2712,7 +2712,8 @@ const HTML_AROUND_TABLE_WARNING = 'HTML around a table in its HTML block not sho
 
 /** The text of each cell of each row of a table generateTable wrote, as
  *  import reads it (see tableCellText in converter.ts): its runs' text,
- *  shown or deleted, as a tracked change's, with a tab as one, but not a
+ *  shown or deleted, as a tracked change's, with a tab, non-breaking or
+ *  optional hyphen as the character Word's element for it is, but not a
  *  hidden run's, as an HTML comment's, or a field's, as a citation's, which
  *  import reads as what they are, and no cell that goes on a merge above */
 function wordTableTexts(xml: string): string[][] {
@@ -2725,8 +2726,8 @@ function wordTableTexts(xml: string): string[][] {
         if (run[1].includes('w:fldCharType="begin"')) fields++;
         else if (run[1].includes('w:fldCharType="end"')) fields = Math.max(0, fields - 1);
         else if (fields === 0 && !run[1].includes('<w:vanish/>')) {
-          for (const piece of run[1].matchAll(/<w:(t|delText)(?:\s[^>]*)?>([^<]*)<\/w:\1>|<w:tab\/>/g)) {
-            text += piece[2] === undefined ? '\t' : decodeHtmlEntities(piece[2]);
+          for (const piece of run[1].matchAll(/<w:(t|delText)(?:\s[^>]*)?>([^<]*)<\/w:\1>|<w:(tab|noBreakHyphen|softHyphen)\/>/g)) {
+            text += piece[3] ? { tab: '\t', noBreakHyphen: '\u2011', softHyphen: '\u00AD' }[piece[3]] : decodeHtmlEntities(piece[2]);
           }
         }
       }
