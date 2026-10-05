@@ -7664,8 +7664,9 @@ describe('Missing citation keys', () => {
     // That goes on past blank lines, before a code block, whose region the
     // search found first
     ['an HTML block before a code block', '<pre>\n\nCitation data for @a was not found in the bibliography file.\n\n</pre>\n\n```\nx\n```\n'],
-    // Which it opens, so it's the comment's, as import escapes a note's {
+    // Which it opens or ends
     ['a comment it opens', 'Citation data for @a b{>>c was not found in the bibliography file.\n\nf<<}\n'],
+    ['a comment it ends', 'P{>>c\n\nCitation data for @a b<<} was not found in the bibliography file.\n'],
     // Whose lines export reads as one paragraph, the comment's
     ['a comment', 'P{>>c\n\nCitation data for @a b was not found in the bibliography file.\n\nd<<} Q.\n'],
   ])('keeps a line like a note in %s', async (_name, md) => {

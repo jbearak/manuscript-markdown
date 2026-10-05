@@ -7712,8 +7712,10 @@ export async function convertMdToDocx(
   // @a&lt;b, decoded, HTML export writes as text, as a key's <span>, but
   // not a comment, break or formatting, and a URL linkify makes a link of.
   const MISSING_KEY_TEXT = /^Citation data for @[^,;\]]+ was not found in the bibliography file\.$/;
-  // A line a note could be, whatever its key
+  // A line a note could be, whatever its key, and one export stripped by
+  // the line alone before, of a key of no spaces
   const NOTE_LINE = /^Citation data for @.+ was not found in the bibliography file\.[ \t]*$/;
+  const BARE_NOTE_LINE = /^Citation data for @\S+ was not found in the bibliography file\.$/;
   const bodyParts = body.split(/(\r\n?|\n)/);
   const lines = bodyParts.filter((_part, k) => k % 2 === 0);
   let notes: Set<number> | undefined;
@@ -7722,16 +7724,16 @@ export async function convertMdToDocx(
     // Each line a note could be ends in its index between two of a
     // private-use character the body lacks, past CriticMarkup's, so it's
     // found again however the preprocessing moves and joins lines. A
-    // CriticMarkup span's end in it, as <<}, ends none there, as one opened
-    // outside it may be a citation's, as in [@a<<}{>>b], whose note this
-    // is, while import escapes a note's {, as in \{>>b, so a span it opens
-    // makes it no note.
+    // CriticMarkup span's end, as <<}, in a line export stripped before
+    // ends none there, as the span may be a citation's of its key, as in
+    // [@a<<}{>>b] before its note.
     let markCode = 0xE001;
     while (body.includes(String.fromCharCode(markCode))) markCode++;
     const mark = String.fromCharCode(markCode);
     const markedIndex = new RegExp(mark + '(\\d+)' + mark + '$');
     const marked = lines.map((line, k) => NOTE_LINE.test(line)
-      ? line.trimEnd().replace(/(?:\+\+|--|~~|==|<<)\}/g, close => close.slice(0, 2)) + mark + k + mark : line);
+      ? (BARE_NOTE_LINE.test(line) ? line.replace(/(?:\+\+|--|~~|==|<<)\}/g, close => close.slice(0, 2)) : line.trimEnd()) + mark + k + mark
+      : line);
     const parsed = md.parse(preprocessCriticMarkup(wrapBareLatexEnvironments(deLazifyBlockquotes(preprocessGridTables(
       extractFootnoteDefinitions(marked.join('\n')).cleaned)))), {});
     notes = new Set(parsed.flatMap((token, t) => {
