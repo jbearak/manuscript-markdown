@@ -487,7 +487,7 @@ Manuscript Markdown supports CommonMark plus the implemented [GitHub Flavored Ma
 - **Headings**: `# H1` through `###### H6`
 - **Lists**: bulleted (`- item`), numbered (`1. item`), task lists (`- [ ] item`, `- [x] item`). Blockquote continuation blocks and HTML blocks inside list items are preserved; see [List item limitations](#list-item-block-content) for the remaining unsupported block content.
 - **Links**: `[text](url)` plus autolink literals (bare URLs/emails)
-- **Code blocks**: fenced with triple backticks. Optional language annotation (e.g., `` ```stata ``) is preserved on round-trip via the `MANUSCRIPT_CODE_BLOCK_LANGS` custom property in the DOCX. In Word, code blocks use the "Code Block" paragraph style (Consolas, shaded background). Consecutive code blocks are separated by an empty paragraph to prevent merging.
+- **Code blocks**: fenced with triple backticks. Optional language annotation (e.g., `` ```stata ``) is preserved on round-trip via the `MANUSCRIPT_CODE_BLOCK_LANGS` custom property in the DOCX. In Word, code blocks use the "Code Block" paragraph style (Consolas, shaded background). Consecutive code blocks are separated by an empty paragraph to prevent merging. A code block in a footnote or endnote takes the same style, and the note's mark goes in a paragraph of its own when the note starts with one.
 - **Blockquotes**: `> quoted text`. A quote holds paragraphs, nested quotes, alerts, HTML blocks and display math; see [Blockquote limitations](#blockquote-block-content) for the rest.
 - **Tables**: pipe tables, grid tables, and HTML tables. See [Tables](#tables) for syntax, examples, and comparison.
 
@@ -664,7 +664,7 @@ This has a footnote[^1] and a named one[^my-note].
     Second paragraph of the named footnote.
 ```
 
-A note holds paragraphs, display equations and tables. A list, quote, heading or code block in a note exports as the note's paragraphs, a code block's lines with line breaks between them, and a horizontal rule or empty code block is dropped, each with a warning. An alert's text goes without its marker, and an empty list item, heading or alert is no paragraph.
+A note holds paragraphs, display equations, tables and code blocks. A list, quote or heading in a note exports as the note's paragraphs, and a horizontal rule or empty code block is dropped, each with a warning. An alert's text goes without its marker, and an empty list item, heading or alert is no paragraph.
 
 The `notes` frontmatter field controls whether footnotes or endnotes are generated in the DOCX output. Default is `footnotes`. Only `endnotes` needs to be specified explicitly:
 

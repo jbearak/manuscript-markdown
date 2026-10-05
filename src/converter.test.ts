@@ -6725,9 +6725,6 @@ describe('Blocks a note can\'t hold', () => {
   const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
   const note = (body: string) => 'T.[^1]\n\n[^1]: A.\n\n    ' + body.replace(/\n(?!\n)/g, '\n    ') + '\n';
   test.each([
-    // Its line ends were in the paragraph's text, which Word shows as spaces
-    ['a code block', note('```\nc\n  d\n```'), note('c\\\n&#32;&#32;d'), 'Code block inside a note exported as a note paragraph'],
-    ['an indented code block', note('    c'), note('c'), 'Code block inside a note exported as a note paragraph'],
     // Which left an empty paragraph
     ['an empty code block', note('```\n```\n\nB.'), note('B.'), 'Empty code block inside a note dropped during conversion'],
     ['a horizontal rule', note('---\n\nB.'), note('B.'), 'Horizontal rule inside a note dropped during conversion'],
@@ -6757,9 +6754,15 @@ describe('Blocks a note can\'t hold', () => {
     expect(paragraphs).toEqual(['A.', 'B.']);
   });
 
-  test('writes a code block that starts a note as its lines', async () => {
-    const { docx } = await convertMdToDocx('T.[^1]\n\n[^1]: ```\n    a\n    b\n    ```\n');
-    expect(strip((await convertDocx(docx)).markdown)).toBe('T.[^1]\n\n[^1]:\n\n    a\\\n    b\n');
+  test.each([
+    ['a code block', note('```\nc\n  d\n```'), note('```\nc\n  d\n```')],
+    ['an indented code block', note('    c'), note('```\nc\n```')],
+    ['a code block that starts it', 'T.[^1]\n\n[^1]: ```\n    a\n    b\n    ```\n', 'T.[^1]\n\n[^1]:\n\n    ```\n    a\n    b\n    ```\n'],
+  ])('keeps %s in a note a code block, with no warning', async (_name, md, expected) => {
+    // A note holds a code block, which it wrote as its lines in a paragraph
+    const { docx, warnings } = await convertMdToDocx(md);
+    expect(warnings).toEqual([]);
+    expect(strip((await convertDocx(docx)).markdown)).toBe(expected);
   });
 });
 
@@ -6915,6 +6918,8 @@ describe('buildMarkdown code block emission', () => {
 });
 
 describe('Code block round-trip', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+
   test.each([
     ['an empty line', '```\na\n\n```'],
     ['two empty lines', '```\na\n\n\n```'],
@@ -6984,6 +6989,104 @@ describe('Code block round-trip', () => {
     const docxResult = await convertMdToDocx(md);
     const result = await convertDocx(docxResult.docx);
     expect(result.markdown.trim()).toBe('```stata\ndisplay "hello"\n```');
+  });
+
+  test.each([
+    ['after its text', '[^a]: Note.\n\n    ```js\n    a\n    b\n    ```\n'],
+    ['first', '[^a]:\n\n    ```js\n    a\n    ```\n'],
+    ['before text', '[^a]: Note.\n\n    ```js\n    a\n    ```\n\n    After.\n'],
+    ['after another', '[^a]: Note.\n\n    ```js\n    a\n    ```\n\n    ```py\n    b\n    ```\n'],
+    ['by a table', '[^a]: Note.\n\n    ```js\n    a\n    ```\n\n    | x |\n    | --- |\n    | 1 |\n\n    ```py\n    b\n    ```\n'],
+    ['with an empty line', '[^a]: Note.\n\n    ```js\n    a\n    \n    b\n    ```\n'],
+  ])('keeps a code block in a note %s, and its language', async (_, note) => {
+    // Export wrote one as the note's text, its lines run together in Word,
+    // and import as text
+    const md = 'Text.[^a]\n\n' + note;
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown).toBe(md);
+  });
+
+  test('numbers code blocks in notes on from the body\'s, in the order of the notes\' labels', async () => {
+    const note = (label: string, lang: string) => '[^' + label + ']: Note.\n\n    ```' + lang + '\n    x\n    ```\n';
+    const text = '```r\nx\n```\n\nText[^b] and[^a].\n\n';
+    expect((await convertDocx((await convertMdToDocx(text + note('b', 'py') + '\n' + note('a', 'js'))).docx)).markdown)
+      .toBe(text + note('a', 'js') + '\n' + note('b', 'py'));
+  });
+
+  test('numbers code blocks in notes after one only another note refers to', async () => {
+    // Export numbered that one's in its label's turn, but import, which
+    // writes only the notes the text refers to, doesn't read it
+    const note = (label: string, lang: string, text = 'Note.') => '[^' + label + ']: ' + text + '\n\n    ```' + lang + '\n    x\n    ```\n';
+    const md = 'T[^a] and[^c].\n\n' + note('a', 'python', 'A[^b].') + '\n' + note('b', 'js') + '\n' + note('c', 'r');
+    expect(strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown))
+      .toBe('T[^a] and[^c].\n\n' + note('a', 'python', 'A.') + '\n' + note('c', 'r'));
+  });
+
+  test.each([
+    ['the body', '```py\nXX\nYY\n```\n', 'word/document.xml', '```py\nXX\nZZ\nYY\n```\n'],
+    ['a note', 'T.[^1]\n\n[^1]: A.\n\n    ```py\n    XX\n    YY\n    ```\n', 'word/footnotes.xml',
+      'T.[^1]\n\n[^1]: A.\n\n    ```py\n    XX\n    ZZ\n    YY\n    ```\n'],
+  ])('ends a code line at a line break of Word\'s in %s', async (_name, md, part, expected) => {
+    // It came back as Markdown's, \\ and a line end, which put a \\ in the code
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file(part)!.async('string');
+    const broken = xml.replace('<w:t>XX</w:t>', '<w:t>XX</w:t><w:br/><w:t>ZZ</w:t>');
+    expect(broken).not.toBe(xml);
+    zip.file(part, broken);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(expected);
+  });
+
+  test('drops Word\'s space after the note\'s mark in a code paragraph that holds it', async () => {
+    // A Word user made the note's first paragraph, its mark's, code
+    const zip = await JSZip.loadAsync((await convertMdToDocx('Text.[^a]\n\n[^a]: XX\n')).docx);
+    const xml = await zip.file('word/footnotes.xml')!.async('string');
+    const edited = xml.replace('<w:pStyle w:val="FootnoteText"/>', '<w:pStyle w:val="CodeBlock"/>')
+      .replace('<w:t>XX</w:t>', '<w:t xml:space="preserve"> x = 1</w:t>');
+    expect(edited).toContain('CodeBlock');
+    zip.file('word/footnotes.xml', edited);
+    expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)
+      .toBe('Text.[^a]\n\n[^a]:\n\n    ```\n    x = 1\n    ```\n');
+  });
+
+  test.each([
+    ['a tracked change', '<w:del w:id="91" w:author="A" w:date="2026-01-01T00:00:00Z"><w:r><w:delText>old</w:delText></w:r></w:del>'
+      + '<w:ins w:id="92" w:author="A" w:date="2026-01-01T00:00:00Z"><w:r><w:t>new</w:t></w:r></w:ins>', '{~~old~>new~~}'],
+    ['a comment', '<w:commentRangeStart w:id="0"/><w:r><w:t>x</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>', '{==x==}'],
+  ])('keeps a code block in a note with %s as the note\'s paragraphs, which keep it', async (_name, runs, line) => {
+    // A code block can't hold it, which went, and a deletion's text with it
+    // as the code's
+    const zip = await JSZip.loadAsync((await convertMdToDocx('T.[^1]\n\n[^1]: ```\n    XX\n    b\n    ```\n\n    After.\n')).docx);
+    const xml = await zip.file('word/footnotes.xml')!.async('string');
+    const edited = xml.replace(/<w:r>(?:(?!<w:r>).)*?<w:t[^>]*>XX<\/w:t><\/w:r>/s, runs);
+    expect(edited).not.toBe(xml);
+    zip.file('word/footnotes.xml', edited);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown))
+      .toBe('T.[^1]\n\n[^1]: ' + line + '\n\n    b\n\n    After.\n');
+  });
+
+  test.each([
+    // Which went as two, as the code's text took none
+    ['a comment across its lines', [
+      [/<w:r>(?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>/s, '<w:commentRangeStart w:id="0"/><w:r><w:t>XX</w:t></w:r>'],
+      [/<w:r>(?:(?!<w:r>).)*?<w:t>YY<\/w:t><\/w:r>/s, '<w:r><w:t>YY</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>'],
+    ], '    {#1}XX\n\n    YY{/1}'],
+    // Which ended the block, whose next lines took the next block's language
+    ['an equation', [[/<w:t>XX<\/w:t><\/w:r>/, '<w:t>XX</w:t></w:r><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath>']], '    X&#88;$x$\n\n    YY'],
+    // Which joins it to the paragraph before, whose deletion took the break
+    // in, but not into a code block
+    ['a tracked break before it', [
+      [/<w:pStyle w:val="FootnoteText"\/><\/w:pPr>/, '<w:pStyle w:val="FootnoteText"/><w:rPr><w:del w:id="93" w:author="A" w:date="2026-01-01T00:00:00Z"/></w:rPr></w:pPr>'],
+      [/<w:t>A\.<\/w:t><\/w:r>/, '<w:t xml:space="preserve">A. </w:t></w:r><w:del w:id="94" w:author="A" w:date="2026-01-01T00:00:00Z"><w:r><w:delText>cut</w:delText></w:r></w:del>'],
+    ], '[^1]:\n\n    A. {--cut\n    \n    --}XX\n\n    YY'],
+  ] as [string, [RegExp, string][], string][])('keeps a code block in a note with %s as the note\'s paragraphs, and the next its language', async (_name, edits, lines) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('T.[^1]\n\n[^1]: A.\n\n    ```py\n    XX\n    YY\n    ```\n\n    ```js\n    ZZ\n    ```\n')).docx);
+    let xml = await zip.file('word/footnotes.xml')!.async('string');
+    for (const [find, replacement] of edits) {
+      expect(xml).toMatch(find);
+      xml = xml.replace(find, replacement);
+    }
+    zip.file('word/footnotes.xml', xml);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown))
+      .toBe('T.[^1]\n\n' + (lines.startsWith('[^1]:') ? '' : '[^1]: A.\n\n') + lines + '\n\n    ```js\n    ZZ\n    ```\n');
   });
 
   test('code block without language survives round-trip', async () => {

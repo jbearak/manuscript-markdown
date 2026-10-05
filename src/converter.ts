@@ -3262,9 +3262,11 @@ function parseNoteBody(
           const paraChildren = asXmlNodes(node[key]);
           let paraFormatting = currentFormatting;
           let paraMarkRevision: RevisionInfo | undefined;
+          let isCodeBlock = false;
           for (const child of paraChildren) {
             if (child['w:pPr']) {
               const pPrChildren = asXmlNodes(child['w:pPr']);
+              isCodeBlock = !inTableCell && parseCodeBlockStyle(pPrChildren);
               const pRPrElement = pPrChildren.find((c) => c['w:rPr'] !== undefined);
               if (pRPrElement) {
                 const pRPrChildren = asXmlNodes(pRPrElement['w:rPr']);
@@ -3278,19 +3280,29 @@ function parseNoteBody(
               break;
             }
           }
-          // Push para separator for multi-paragraph notes (skip first)
-          const needsPara = inTableCell
-            ? true
-            : target.length > 0 && target[target.length - 1].type !== 'para';
+          // Push para separator for multi-paragraph notes (skip first). Each
+          // line of a code block has one, as in the document, an empty one
+          // too, and so does the paragraph after one.
+          const last = target[target.length - 1];
+          const needsPara = inTableCell || isCodeBlock
+            || (last !== undefined && (last.type !== 'para' || !!last.isCodeBlock));
           if (needsPara) {
             const paraItem: ContentItem = { type: 'para' };
             if (!inTableCell && precedingMark?.target === target && precedingMark.end === target.length) {
               paraItem.breakRevision = precedingMark.revision;
             }
+            if (isCodeBlock) paraItem.isCodeBlock = true;
             target.push(paraItem);
           }
           const lenBeforeContent = target.length;
+          const markBefore = skippedSelfRef;
           walkNoteBody(paraChildren, paraFormatting, target, inTableCell, currentRevision);
+          // Word's space after the note's mark, where a Word user made the
+          // paragraph that holds it code, goes, as it does before text
+          if (isCodeBlock && !markBefore && skippedSelfRef) {
+            const first = target.slice(lenBeforeContent).find(walked => walked.type !== 'text' || walked.text !== '');
+            if (first?.type === 'text') first.text = first.text.replace(/^[ \t]/, '');
+          }
           // Display math in the paragraph goes on in it (see the document's)
           if (!inTableCell) {
             for (let k = lenBeforeContent; k < target.length; k++) {
@@ -6737,6 +6749,102 @@ function paragraphHasContent(content: ContentItem[], paraIndex: number): boolean
 }
 
 /**
+ * Whether each of a note's code blocks, in order, goes as the note's
+ * paragraphs, which this makes them, as before export wrote code blocks in
+ * notes: one that holds what a code block can't, as a Word user may add, a
+ * comment, a tracked change, a link, or an item that isn't text, as an
+ * equation or image, or whose paragraph marks, or the one before it, are
+ * tracked, which a tracked break joins to the paragraph before it. The
+ * paragraphs read as text for comments' ranges and tracked breaks then.
+ */
+function demoteNoteCodeBlocks(body: ContentItem[]): boolean[] {
+  const demoted: boolean[] = [];
+  for (let i = 0; i < body.length; i++) {
+    const item = body[i];
+    if (item.type !== 'para' || !item.isCodeBlock) continue;
+    let end = i + 1;
+    // To a paragraph that isn't code, or a table, which ends one too
+    while (end < body.length && body[end].type !== 'table' && !(body[end].type === 'para' && !(body[end] as ParaItem).isCodeBlock)) end++;
+    const after = body[end];
+    const held = body.slice(i, end).some(line => line.type === 'para'
+      ? line.paraMarkRevision || line.breakRevision
+      : line.type !== 'text' || line.revision || line.commentIds.size > 0 || line.href !== undefined)
+      || after?.type === 'para' && !!after.breakRevision;
+    if (held) for (const line of body.slice(i, end)) if (line.type === 'para') line.isCodeBlock = false;
+    demoted.push(!!held);
+    i = end - 1;
+  }
+  return demoted;
+}
+
+/**
+ * The fenced block of the code-block paragraphs from content[start], in the
+ * given language, and the index of the item after them. Each code line in
+ * DOCX is a { type: 'para', isCodeBlock: true } with the line's text items
+ * after it; a para that isn't code ends the block.
+ */
+function codeBlockFence(content: ContentItem[], start: number, lang: string): { block: string; end: number } {
+  let i = start;
+  const codeLines: string[] = [];
+  let lineText = '';
+  let firstLine = true;
+  while (i < content.length) {
+    const next = content[i];
+    if (next.type === 'para' && next.isCodeBlock) {
+      if (!firstLine) {
+        codeLines.push(lineText);
+        lineText = '';
+      }
+      firstLine = false;
+      i++;
+      continue;
+    }
+    if (next.type === 'para' && !next.isCodeBlock) {
+      // Non-code-block para — separator between groups or end of block
+      break;
+    }
+    if (next.type === 'text') {
+      // A line break of Word's, which reads as Markdown's, \ and a line end,
+      // ends a line of the code, which it is in Word, not a \ in it
+      const [first, ...rest] = next.text.split('\\\n');
+      lineText += first;
+      for (const part of rest) {
+        codeLines.push(lineText);
+        lineText = part;
+      }
+    } else {
+      // Non-para, non-text item (shouldn't typically occur inside a code block)
+      break;
+    }
+    i++;
+  }
+  // Push the last collected line. Empty lines at the end are the
+  // code's, as export writes no paragraph for the fence content's last
+  // line end, and Word shows them.
+  if (!firstLine) {
+    codeLines.push(lineText);
+  }
+
+  // Compute fence length: must exceed any run of its character in the
+  // content. Tildes where the language has a backtick, which a
+  // backtick fence's info string can't hold, and a space before a
+  // language that starts with the fence's character, which the fence
+  // would take.
+  const fenceChar = lang.includes('`') ? '~' : '`';
+  let maxRun = 0;
+  for (const line of codeLines) {
+    const matches = line.match(fenceChar === '`' ? /`+/g : /~+/g);
+    if (matches) {
+      for (const m of matches) {
+        if (m.length > maxRun) maxRun = m.length;
+      }
+    }
+  }
+  const fence = fenceChar.repeat(Math.max(3, maxRun + 1));
+  return { block: fence + (lang.startsWith(fenceChar) ? ' ' : '') + lang + '\n' + codeLines.join('\n') + '\n' + fence, end: i };
+}
+
+/**
  * Export spaces a code block from what follows with an empty paragraph. A
  * plain paragraph after it fills that paragraph with its text; a heading,
  * list item or rule has a para item of its own, which the empty one would add blank
@@ -7377,6 +7485,9 @@ export function buildMarkdown(
   const noteEntries = [...(options?.notes?.map.values() ?? [])].sort((a, b) => compareNoteLabels(a.label, b.label));
   // Each note's content as it renders, which collectCommentSpans finds the
   // last item of a comment's range in
+  // Whether each of a note's code blocks goes as its paragraphs, before
+  // what reads code paragraphs apart from text
+  const noteCodeDemoted = new Map(noteEntries.map(entry => [entry, demoteNoteCodeBlocks(entry.body)]));
   const noteBodies = new Map(noteEntries.map(entry => [entry, mergeConsecutiveRuns(joinTrackedParagraphBreaks(entry.body, marks))]));
   collectCommentMetadata(mergedContent);
   for (const entry of noteEntries) collectCommentMetadata(entry.body);
@@ -7867,61 +7978,9 @@ export function buildMarkdown(
         lastBlockquoteLevel = undefined;
 
         const lang = codeBlockLangs?.get(String(codeBlockGroupIndex)) || '';
-        const codeLines: string[] = [];
-
-        // Collect text from consecutive code-block paragraphs.
-        // Each code line in DOCX is: { type: 'para', isCodeBlock: true } followed by
-        // optional { type: 'text', text: '...' }. Consecutive isCodeBlock paras are
-        // part of the same group; a non-isCodeBlock para (separator) ends the group.
-        let lineText = '';
-        let firstLine = true;
-        while (i < mergedContent.length) {
-          const next = mergedContent[i];
-          if (next.type === 'para' && next.isCodeBlock) {
-            if (!firstLine) {
-              codeLines.push(lineText);
-              lineText = '';
-            }
-            firstLine = false;
-            i++;
-            continue;
-          }
-          if (next.type === 'para' && !next.isCodeBlock) {
-            // Non-code-block para — separator between groups or end of block
-            break;
-          }
-          if (next.type === 'text') {
-            lineText += next.text;
-          } else {
-            // Non-para, non-text item (shouldn't typically occur inside a code block)
-            break;
-          }
-          i++;
-        }
-        // Push the last collected line. Empty lines at the end are the
-        // code's, as export writes no paragraph for the fence content's last
-        // line end, and Word shows them.
-        if (!firstLine) {
-          codeLines.push(lineText);
-        }
-
-        // Compute fence length: must exceed any run of its character in the
-        // content. Tildes where the language has a backtick, which a
-        // backtick fence's info string can't hold, and a space before a
-        // language that starts with the fence's character, which the fence
-        // would take.
-        const fenceChar = lang.includes('`') ? '~' : '`';
-        let maxRun = 0;
-        for (const line of codeLines) {
-          const matches = line.match(fenceChar === '`' ? /`+/g : /~+/g);
-          if (matches) {
-            for (const m of matches) {
-              if (m.length > maxRun) maxRun = m.length;
-            }
-          }
-        }
-        const fence = fenceChar.repeat(Math.max(3, maxRun + 1));
-        output.push(fence + (lang.startsWith(fenceChar) ? ' ' : '') + lang + '\n' + codeLines.join('\n') + '\n' + fence);
+        const code = codeBlockFence(mergedContent, i, lang);
+        i = code.end;
+        output.push(code.block);
         codeBlockGroupIndex++;
         // Skip a plain separator para that was inserted during export between
         // consecutive code-block groups or before a blockquote group.  Only
@@ -8839,8 +8898,37 @@ export function buildMarkdown(
           bodyParts[paragraphPart] += text;
         }
       };
+      // The note's code blocks, in order, each in the numbering export gave
+      // it, one that goes as paragraphs too (see demoteNoteCodeBlocks)
+      const demoted = noteCodeDemoted.get(entry)!;
+      let codeBlock = 0;
+      const skipDemoted = () => {
+        while (demoted[codeBlock]) { codeBlockGroupIndex++; codeBlock++; }
+      };
       for (let bi = 0; bi < bodyMerged.length; bi++) {
         const item = bodyMerged[bi];
+        if (item.type === 'para' && item.isCodeBlock) {
+          // A code block, as in the body, which ends the text before it, and
+          // the language export stored for it, as it numbers code blocks on
+          // from the body's. The empty paragraph export writes between two
+          // goes.
+          skipDemoted();
+          codeBlock++;
+          const code = codeBlockFence(bodyMerged, bi, codeBlockLangs?.get(String(codeBlockGroupIndex++)) || '');
+          if (bi > partStart) {
+            const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
+            pushInline(inlinePart(part.text, false, part.deferredComments.length > 0));
+            deferredAll.push(...part.deferredComments);
+          }
+          paragraphPart = undefined;
+          bodyParts.push(code.block);
+          const sep = bodyMerged[code.end];
+          const afterSep = bodyMerged[code.end + 1];
+          bi = sep?.type === 'para' && !sep.isCodeBlock && afterSep?.type === 'para' && afterSep.isCodeBlock ? code.end + 1 : code.end;
+          partStart = bi;
+          bi--;
+          continue;
+        }
         if (item.type === 'para') {
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
@@ -8931,6 +9019,7 @@ export function buildMarkdown(
           partStart = bi + 1;
         }
       }
+      skipDemoted();
       if (partStart < bodyMerged.length) {
         const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
         pushInline(inlinePart(part.text, false, part.deferredComments.length > 0));
