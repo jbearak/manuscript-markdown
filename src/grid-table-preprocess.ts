@@ -12,6 +12,86 @@ export interface GridTableData {
   aligns?: Array<TableAlign | null>; // each column's alignment, from the colons of the header's separator, or the top one
 }
 
+// East Asian Wide / Fullwidth code-point ranges (UAX #11).  Characters in
+// these ranges occupy two terminal columns, as do emoji (see getDisplayWidth).
+function isFullWidth(cp: number): boolean {
+  return (
+    (cp >= 0x1100 && cp <= 0x115f) ||  // Hangul Jamo
+    (cp >= 0x2e80 && cp <= 0x303e) ||  // CJK Radicals, Kangxi, Symbols
+    (cp >= 0x3040 && cp <= 0x33bf) ||  // Hiragana, Katakana, CJK compat
+    (cp >= 0x3400 && cp <= 0x4dbf) ||  // CJK Extension A
+    (cp >= 0x4e00 && cp <= 0xa4cf) ||  // CJK Unified, Yi
+    (cp >= 0xac00 && cp <= 0xd7af) ||  // Hangul Syllables
+    (cp >= 0xf900 && cp <= 0xfaff) ||  // CJK Compatibility Ideographs
+    (cp >= 0xfe10 && cp <= 0xfe6f) ||  // Vertical forms, CJK compat forms
+    (cp >= 0xff01 && cp <= 0xff60) ||  // Fullwidth Latin/Symbols
+    (cp >= 0xffe0 && cp <= 0xffe6) ||  // Fullwidth Signs
+    (cp >= 0x1f200 && cp <= 0x1f2ff) || // Enclosed Ideographic Supplement
+    (cp >= 0x20000 && cp <= 0x2ffff) || // CJK Extension B–F
+    (cp >= 0x30000 && cp <= 0x3ffff)    // CJK Extension G+
+  );
+}
+
+const ZERO_WIDTH_RE = /^[\p{Mn}\p{Me}\p{Cf}]$/u;
+const EMOJI_RE = /^\p{Emoji}$/u;
+const EMOJI_PRESENTATION_RE = /^\p{Emoji_Presentation}$/u;
+const MODIFIER_BASE_RE = /^\p{Emoji_Modifier_Base}$/u;
+
+/**
+ * A string's width in the columns of a monospace editor, as Pandoc counts
+ * them in a grid table: two for a wide character, as a CJK one, or an emoji,
+ * and none for a combining mark or a format character, as a soft hyphen. A
+ * variation selector-16 after an emoji makes it wide, as ✔️, as does a skin
+ * tone after an emoji it modifies, as ☝🏽, where a skin tone after another
+ * character counts two. A joiner after an emoji, or after either of these,
+ * takes the emoji's width away, so a sequence it joins counts as its last
+ * emoji, as 🏳‍🌈, which counts two, as 🌈 does. A regional indicator counts
+ * one, so a flag, two of them, counts two.
+ */
+export function getDisplayWidth(str: string): number {
+  let width = 0;
+  for (const w of characterWidths(str)) width += w;
+  return width;
+}
+
+/** The width of each character of `str`, by code point, as getDisplayWidth
+ *  counts it in its sequence, as a skin tone counts none after an emoji */
+function characterWidths(str: string): number[] {
+  const widths: number[] = [];
+  // The last character, and the first of those whose widths a joiner after
+  // them takes away: the last one that modifies none, and those modifying it
+  let last = '';
+  let start = 0;
+  for (const ch of str) {
+    const cp = ch.codePointAt(0)!;
+    let w: number;
+    if (cp < 0x7f) {
+      // ASCII, which is most text, without the tests of its properties
+      w = 1;
+      start = widths.length;
+    } else if (cp === 0xfe0f && EMOJI_RE.test(last) && !EMOJI_PRESENTATION_RE.test(last)
+      || cp >= 0x1f3fb && cp <= 0x1f3ff && MODIFIER_BASE_RE.test(last)) {
+      // A variation selector-16 after a narrow emoji, or a skin tone after
+      // an emoji it modifies, makes it wide
+      w = 2 - widths[widths.length - 1];
+    } else if (cp === 0x200d && (EMOJI_RE.test(last) || last === '\ufe0f')) {
+      // A joiner after an emoji, or a variation selector or skin tone after
+      // one, takes its width away
+      for (let k = start; k < widths.length; k++) widths[k] = 0;
+      w = 0;
+      start = widths.length;
+    } else {
+      w = ZERO_WIDTH_RE.test(ch) ? 0
+        : cp >= 0x1f1e6 && cp <= 0x1f1ff ? 1
+          : isFullWidth(cp) || EMOJI_PRESENTATION_RE.test(ch) ? 2 : 1;
+      start = widths.length;
+    }
+    last = ch;
+    widths.push(w);
+  }
+  return widths;
+}
+
 /** The alignment a column's dashes in a separator set: :-- left, :-: center, --: right */
 export function separatorAlign(dashes: string): TableAlign | null {
   const left = dashes.startsWith(':');
@@ -146,6 +226,107 @@ export function preprocessGridTablesWithSourceMap(markdown: string): GridTablePr
   return { output, sourceMap };
 }
 
+/** A grid table's line by characters, with each one's display column and
+ *  its | signs, and the indices of those under the separator's + signs, by
+ *  display columns and by characters, -1 where none is */
+interface GridLine {
+  chars: string[];
+  columns: number[];
+  pipes: Array<{ k: number; column: number }>;
+  display: number[];
+  index: number[];
+}
+
+function gridLine(line: string, boundaries: number[]): GridLine {
+  const chars: string[] = [];
+  const columns: number[] = [];
+  const display = new Map<number, number>();
+  const index = new Map<number, number>();
+  const pipes: Array<{ k: number; column: number }> = [];
+  // Each character's width in its sequence, as the padding counts it
+  const widths = characterWidths(line);
+  let width = 0;
+  let offset = 0;
+  for (const ch of line) {
+    const k = chars.length;
+    chars.push(ch);
+    columns.push(width);
+    if (ch === '|') {
+      display.set(width, k);
+      index.set(offset, k);
+      pipes.push({ k, column: width });
+    }
+    width += widths[k];
+    offset += ch.length;
+  }
+  const at = (columns: Map<number, number>) => boundaries.map(b => columns.get(b) ?? -1);
+  return { chars, columns, pipes, display: at(display), index: at(index) };
+}
+
+/** Whether a line's cuts are all under + signs and end at its last |, its
+ *  edge, and not at a | in its last cell's text */
+function fitsLine(line: GridLine, cuts: number[]): boolean {
+  return !cuts.includes(-1) && cuts[cuts.length - 1] === line.pipes[line.pipes.length - 1].k;
+}
+
+/**
+ * The text of each column of a grid table's line, between its | signs under
+ * the separator's + signs: by display columns, a wide character taking two,
+ * as Pandoc reads a table and import pads one. Expand Table pads a table by
+ * characters, so a line whose | signs are under the + signs by their
+ * indices, and not by display columns, is read by indices. A line neither
+ * lines up, as with a character whose width an editor counts otherwise, is
+ * cut at its edges and at the | nearest each + between by display columns,
+ * or with too few, as a cell spanning columns, at the + signs' display
+ * columns.
+ *
+ * A line can line up both ways, as with narrow characters outside the BMP
+ * and wide ones in it, where a | in a cell's text is under a +. The way that
+ * fits it (see fitsLine) wins, and where both do, the table's `layout`, the
+ * way its lines that fit one way alone are padded, and without one, the way
+ * whose edges have a space or the line's end on each side, as import and
+ * Expand Table write them, where a | in a cell's text can have text, and
+ * else characters, as a table was read before display columns were. Import
+ * checks that a table it writes reads back so (see readGridTableCells).
+ */
+function gridLineCells(line: GridLine, boundaries: number[], layout?: 'display' | 'characters'): string[] {
+  const { chars, columns, pipes } = line;
+  const padded = (cuts: number[]) => cuts.filter(k => (k === 0 || /[ \t]/.test(chars[k - 1]))
+    && (k === chars.length - 1 || /[ \t]/.test(chars[k + 1]))).length;
+  let cuts = line.display;
+  const byIndex = line.index;
+  const indexFits = fitsLine(line, byIndex) && (!fitsLine(line, cuts)
+    || (layout ? layout === 'characters' : padded(byIndex) >= padded(cuts)));
+  if (indexFits || cuts.includes(-1) && !byIndex.includes(-1)) {
+    cuts = byIndex;
+  } else if (cuts.includes(-1) && pipes.length >= boundaries.length) {
+    const last = boundaries.length - 1;
+    let next = 1;
+    cuts = boundaries.map((b, c) => {
+      // The line's first and last | are its edges, and between them, the
+      // nearest | that leaves one for each + after
+      if (c === 0) return pipes[0].k;
+      if (c === last) return pipes[pipes.length - 1].k;
+      let best = next;
+      for (let p = next; p < pipes.length - (last - c); p++) {
+        if (Math.abs(pipes[p].column - b) < Math.abs(pipes[best].column - b)) best = p;
+      }
+      next = best + 1;
+      return pipes[best].k;
+    });
+  }
+  if (cuts.includes(-1)) {
+    return boundaries.slice(0, -1).map((b, c) => chars.filter((_ch, k) => columns[k] > b && columns[k] < boundaries[c + 1]).join(''));
+  }
+  return boundaries.slice(0, -1).map((_b, c) => chars.slice(cuts[c] + 1, cuts[c + 1]).join(''));
+}
+
+/** The text of each cell of each row of the grid table `lines`, as export
+ *  reads them, or null where they don't form one */
+export function readGridTableCells(lines: string[]): string[][] | null {
+  return parseGridTable(lines)?.rows.map(row => row.cells) ?? null;
+}
+
 /**
  * Parse a block of grid table lines into structured data.
  * Returns null if the lines don't form a valid grid table.
@@ -165,27 +346,36 @@ function parseGridTable(lines: string[]): GridTableData | null {
   if (colBoundaries.length < 2) return null;
   const numCols = colBoundaries.length - 1;
 
+  const boundaries = colBoundaries.map(b => b + indent);
+  const gridLines = lines.map((line, li) => li > 0 && !GRID_TABLE_SEPARATOR_RE.test(line.trim()) ? gridLine(line, boundaries) : undefined);
+  // A table is padded one way: by display columns, as Pandoc and import pad
+  // one, or by characters, as Expand Table does, which its lines that fit
+  // one way alone show
+  let byDisplay = 0;
+  let byCharacters = 0;
+  for (const line of gridLines) {
+    if (!line) continue;
+    const display = fitsLine(line, line.display);
+    const index = fitsLine(line, line.index);
+    if (display && !index) byDisplay++;
+    if (index && !display) byCharacters++;
+  }
+
   // Collect rows: content lines between separator lines form a logical row.
   // The '=' separator marks all rows above it as header rows.
   const rows: Array<{ cells: string[]; header: boolean }> = [];
-  let currentContent: string[] = [];
+  let currentContent: GridLine[] = [];
 
   for (let li = 1; li < lines.length; li++) {
     const trimmed = lines[li].trim();
     if (GRID_TABLE_SEPARATOR_RE.test(trimmed)) {
       // This separator ends the current row
       if (currentContent.length > 0) {
+        const layout = byCharacters > byDisplay ? 'characters' : byDisplay > byCharacters ? 'display' : undefined;
+        const lineCells = currentContent.map(line => gridLineCells(line, boundaries, layout));
         const cells: string[] = [];
         for (let col = 0; col < numCols; col++) {
-          const left = colBoundaries[col] + 1 + indent;
-          const right = colBoundaries[col + 1] + indent;
-          const cellLines: string[] = [];
-          for (const contentLine of currentContent) {
-            const raw = contentLine.length >= right
-              ? contentLine.slice(left, right)
-              : contentLine.slice(left);
-            cellLines.push(raw.replace(/^\s*\|?\s*/, '').replace(/\s*$/, ''));
-          }
+          const cellLines = lineCells.map(cells => cells[col].replace(/^[ \t]+/, '').replace(/[ \t]+$/, ''));
 
           cells.push(cellLines.join('\n'));
         }
@@ -200,7 +390,7 @@ function parseGridTable(lines: string[]): GridTableData | null {
       }
       currentContent = [];
     } else if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
-      currentContent.push(lines[li]);
+      currentContent.push(gridLines[li]!);
     } else {
       return null;
     }

@@ -25,6 +25,8 @@ import {
   type DocxGenState
 } from './md-to-docx';
 import { type GfmAlertType } from './gfm';
+import { getDisplayWidth } from './grid-table-preprocess';
+import { compactTable } from './formatting';
 import { parseFrontmatter, serializeFrontmatter, parseColWidths, expandColWidths, colWidthsToPct } from './frontmatter';
 import { alertColorsByScheme, setDefaultColorScheme, getDefaultColorScheme, GITHUB_ALERT_COLORS, GUTTMACHER_ALERT_COLORS } from './alert-colors';
 
@@ -634,6 +636,113 @@ describe('parseMd grid tables', () => {
     // Multi-line cell: runs should contain the text
     const bodyRow = table?.rows?.[1];
     expect(bodyRow?.cells).toHaveLength(2);
+  });
+
+  it.each([
+    ['display columns, a wide character taking two', ['+------+-----+', '| x    | y   |', '+======+=====+', '| 中文 | b   |', '+------+-----+']],
+    ['characters, as Expand Table pads them', ['+-----+-----+', '| x   | y   |', '+=====+=====+', '| 中文  | b   |', '+-----+-----+']],
+  ])('reads the cells of a grid table padded by %s', (_name, lines) => {
+    // The cells were cut at the + signs' indices, so a wide character moved
+    // the text after it into the next cell, with the | between them
+    const table = parseMd(lines.join('\n')).find(t => t.type === 'table');
+    expect(table?.rows?.[1].cells.map(cell => cell.runs.map(run => run.text).join(''))).toEqual(['中文', 'b']);
+  });
+
+  it('keeps a | at the start of a grid table\'s cell', () => {
+    // It was taken for the | at the cell's edge
+    const table = parseMd('+-----+-----+\n| x   | y   |\n+=====+=====+\n| |a  | b|  |\n+-----+-----+').find(t => t.type === 'table');
+    expect(table?.rows?.[1].cells.map(cell => cell.runs.map(run => run.text).join(''))).toEqual(['|a', 'b|']);
+  });
+
+  it('keeps no-break and ideographic spaces at the edges of a grid table cell\'s line', () => {
+    // They went with the spaces and tabs padding the line
+    const table = parseMd('+-----+\n| x   |\n+=====+\n| \u00a0\u00a0b |\n| c\u3000 |\n+-----+').find(t => t.type === 'table');
+    expect(table?.rows?.[1].cells[0].runs.map(run => run.type === 'hardbreak' ? '\n' : run.text).join('')).toBe('\u00a0\u00a0b\nc\u3000');
+  });
+
+  it('reads the cells of a grid table Pandoc pads around emoji and combining marks', () => {
+    // Pandoc 3.11's padding, by display width, where a skin tone, a joiner's
+    // emoji, a flag's second letter and a mark count none, and a variation
+    // selector-16 makes a narrow character wide; each counted one, or a flag
+    // four, so a cell took the next one's |
+    const lines = ['+-------+----+', '| x     | y  |', '+=======+====+'];
+    for (const [k, text] of ['a👍🏽', 'a🇺🇸', 'aที่นี่', 'a👨‍👩‍👧', 'a✔️', 'a✅', 'a☺', 'a\u00adb'].entries()) {
+      lines.push('| ' + text + ' '.repeat(5 - getDisplayWidth(text)) + ' | ' + String(k).padEnd(2) + ' |', '+-------+----+');
+    }
+    const table = parseMd(lines.join('\n')).find(t => t.type === 'table');
+    expect(table?.rows?.slice(1).map(row => row.cells.map(cell => cell.runs.map(run => run.text).join('')))).toEqual(
+      ['a👍🏽', 'a🇺🇸', 'aที่นี่', 'a👨‍👩‍👧', 'a✔️', 'a✅', 'a☺', 'a\u00adb'].map((text, k) => [text, String(k)]));
+  });
+
+  it.each([
+    ['an escaped |', '+----------+---------+\n| 𝑎𝑏𝑐𝑑 | x\\|中文文字 |\n+----------+---------+', ['𝑎𝑏𝑐𝑑', 'x|中文文字']],
+    ['a | in code', '+----------+----------+\n| 𝑎𝑏𝑐𝑑 | `x|中文文字` |\n+----------+----------+', ['𝑎𝑏𝑐𝑑', '`x|中文文字`']],
+    ['a | in its one cell', '+----------+\n| 中文文字 | a |\n+----------+', ['中文文字 | a']],
+    ['a spaced | in code', '+----------+-----------+\n| 𝑎𝑏𝑐𝑑 | ` | 中文文字` |\n+----------+-----------+', ['𝑎𝑏𝑐𝑑', '` | 中文文字`']],
+    ['a spaced | in code that ends in a backslash', '+----------+------------+\n| 𝑎𝑏𝑐𝑑 | ` | 中文文字\\` |\n+----------+------------+', ['𝑎𝑏𝑐𝑑', '` | 中文文字\\`']],
+    ['backticks in two cells', '+-------------+-----------+\n| 𝑎𝑏𝑐𝑑𝑒` | a` |中文文字文 |\n+-------------+-----------+', ['𝑎𝑏𝑐𝑑𝑒`', 'a` |中文文字文']],
+  ])('reads a grid table Expand Table pads by characters, with %s under a + by display columns', (_name, md, cells) => {
+    // Both ways lined up, and the | in the cell under the + was taken for
+    // the cell's edge, so the cells' text moved
+    const table = parseMd(md).find(t => t.type === 'table');
+    expect(table?.rows?.[0].cells.map(cell => cell.runs.map(run => run.code ? '`' + run.text + '`' : run.text).join(''))).toEqual(cells);
+  });
+
+  it.each([
+    ['characters', ['| 𝑎𝑏𝑐𝑑 | a | 中文文字 |', '| 中文' + ' '.repeat(7) + '| b' + ' '.repeat(8) + '|'], [['𝑎𝑏𝑐𝑑', 'a | 中文文字'], ['中文', 'b']]],
+    ['characters, with an edge that touches its text', ['| 𝑎𝑏𝑐𝑑a| a | 中文文字 |', '| 中文' + ' '.repeat(7) + '| b' + ' '.repeat(8) + '|'], [['𝑎𝑏𝑐𝑑a', 'a | 中文文字'], ['中文', 'b']]],
+    ['display columns', ['| 𝑎𝑏𝑐𝑑 | a | 中文文字 |', '| 中文' + ' '.repeat(5) + '| b' + ' '.repeat(8) + '|'], [['𝑎𝑏𝑐𝑑 | a', '中文文字'], ['中文', 'b']]],
+  ])('reads a line that lines up both ways, with a | in a cell under a +, as its table\'s other line padded by %s', (_name, lines, rows) => {
+    const sep = '+----------+----------+';
+    const table = parseMd([sep, ...lines.flatMap(line => [line, sep])].join('\n')).find(t => t.type === 'table');
+    expect(table?.rows?.map(row => row.cells.map(cell => cell.runs.map(run => run.text).join('')))).toEqual(rows);
+  });
+
+  it('keeps a grid table cell\'s edge right after a backslash at the cell\'s end', () => {
+    const table = parseMd('+-----+-----+\n| abc\\| b|  |\n+-----+-----+').find(t => t.type === 'table');
+    expect(table?.rows?.[0].cells.map(cell => cell.runs.map(run => run.text).join(''))).toEqual(['abc\\', 'b|']);
+  });
+
+  it.each(['👍🏽', '🇺🇸', '👨‍👩‍👧', '✔️'])('keeps a | after %s in a grid table\'s cell', (emoji) => {
+    // Each character's width was counted alone, as a skin tone two, so the
+    // cell's | was taken for the one under the +
+    const text = emoji + ' |';
+    const table = parseMd('+------+-----+\n| ' + text + ' '.repeat(4 - getDisplayWidth(text)) + ' | b   |\n+------+-----+').find(t => t.type === 'table');
+    expect(table?.rows?.[0].cells.map(cell => cell.runs.map(run => run.text).join(''))).toEqual([text, 'b']);
+  });
+
+  it('keeps a | in a grid table\'s cell after joined emoji Pandoc pads as the last of each', () => {
+    // 🏳 is narrow and 🌈 wide, and the sequence was counted as 🏳
+    const table = parseMd('+--------------------+--------------------+\n| 🏳\u200d🌈🏳\u200d🌈🏳\u200d🌈             | a|x                |\n+--------------------+--------------------+').find(t => t.type === 'table');
+    expect(table?.rows?.[0].cells.map(cell => cell.runs.map(run => run.text).join(''))).toEqual(['🏳\u200d🌈🏳\u200d🌈🏳\u200d🌈', 'a|x']);
+  });
+
+  it.each([
+    ['👍🏽', 2], ['☝🏽', 2], ['👩🏽‍💻', 2], ['🧑🏽‍🦰', 2], ['🇺🇸', 2], ['🇺', 1], ['ที่นี่', 2], ['e\u0301', 1], ['👨‍👩‍👧', 2], ['🏳️‍🌈', 2], ['✔️', 2], ['#️⃣', 2],
+    ['✅', 2], ['⭐', 2], ['🅰', 1], ['🅰️', 2], ['🏽', 2], ['中', 2], ['１', 2], ['ｱ', 1], ['a\u00adb', 2], ['a\u200db', 2], ['☺\ufe0e', 1],
+    ['🏳\u200d🌈', 2], ['🌈\u200d🏳', 1], ['🌈\u200da', 1], ['🌈\u200d', 0], ['🇺🇸\u200d🌈', 3], ['☝\ufe0f🏽', 4], ['🌈🏽', 4], ['a🏽', 3], ['a\ufe0f', 1], ['⌚\ufe0f\u200da', 3], ['#\u200d🌈', 2],
+  ])('counts %j as %d columns wide, as Pandoc does', (text, width) => {
+    expect(getDisplayWidth(text)).toBe(width);
+  });
+
+  it('cuts a grid table\'s line that lines up neither way at the | nearest each +', () => {
+    // An emoji whose width an editor counts otherwise, two columns off
+    const table = parseMd('+-----+-----+\n| x   | y   |\n+=====+=====+\n| a| | b   |\n+-----+-----+\n| 🧑‍🦰   | c |\n+-----+-----+').find(t => t.type === 'table');
+    expect(table?.rows?.slice(1).map(row => row.cells.map(cell => cell.runs.map(run => run.text).join('')))).toEqual([['a|', 'b'], ['🧑‍🦰', 'c']]);
+  });
+
+  it('keeps a | in the last cell of a grid table\'s line that lines up neither way', () => {
+    // The | nearest the last + was in the cell's text, before the line's edge
+    const table = parseMd('+-----+\n| a|     |\n+-----+').find(t => t.type === 'table');
+    expect(table?.rows?.map(row => row.cells.map(cell => cell.runs.map(run => run.text).join('')))).toEqual([['a|']]);
+  });
+
+  it('reads the grid table Compact Table writes, with no padding', () => {
+    // Its | signs, under no + sign, were in the cells' text
+    const compact = compactTable('<table><tr><td>a<br>b</td><td>c<br>d</td></tr><tr><td>abcdef</td><td>e</td></tr></table>').newText;
+    expect(compact).toStartWith('+--------+---+\n| a | c |');
+    const table = parseMd(compact).find(t => t.type === 'table');
+    expect(table?.rows?.map(row => row.cells.map(cell => cell.runs.map(run => run.type === 'hardbreak' ? '\n' : run.text).join('')))).toEqual([['a\nb', 'c\nd'], ['abcdef', 'e']]);
   });
 
   it('preprocessGridTables replaces grid tables with placeholders', () => {

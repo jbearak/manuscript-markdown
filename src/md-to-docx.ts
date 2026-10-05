@@ -13,11 +13,11 @@ import { parseFrontmatter, maskFrontmatter, serializeFrontmatter, Frontmatter, n
 import { formatTableNumbers, parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping, type TableDigits, type TableDecimalMark, type TableDigitGrouping } from './table-number-format';
 import type { TableNumberFormat } from './table-metadata';
 import { alertColorsByScheme, getDefaultColorScheme } from './alert-colors';
-import { ZoteroBiblData, zoteroStyleFullId, getDisplayWidth } from './converter';
+import { ZoteroBiblData, zoteroStyleFullId } from './converter';
 import { isGfmDisallowedRawHtml, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from './gfm';
 import { scanOrientationDirectives } from './orientation-scan';
 import { pixelsToEmu, isSupportedImageFormat, getImageContentType, readImageDimensions, computeMissingDimension, IMAGE_WARNINGS, parseImageDimension } from './image-utils';
-import { preprocessGridTables, gridColumnAlign, GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData, type TableAlign } from './grid-table-preprocess';
+import { preprocessGridTables, gridColumnAlign, getDisplayWidth, GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData, type TableAlign } from './grid-table-preprocess';
 import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
 import { extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
