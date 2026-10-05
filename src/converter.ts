@@ -778,6 +778,16 @@ function citationKeyRanges(text: string, open: number, close: number): Array<[nu
     + (locators.get(key) ? ', ' + locators.get(key) : '')).join('; ') + ']' === text.slice(open, close + 1) ? raw : undefined;
 }
 
+/** A tracked break's end mark (see joinTrackedParagraphBreaks): a
+ *  private-use character after a line end and the next line's prefix, a
+ *  quote's markers or a list's indent. One of the document's own there
+ *  takes an escape after it that it doesn't need, which reads the same. */
+const TRACKED_BREAK_END_RE = /\n[> \t]*[\uE000-\uF8FF]/g;
+
+/** Whether text ends with a line break or a tracked break, so the text
+ *  after it in its span starts a line */
+const endsLine = (text: string): boolean => text.endsWith('\n') || /\n[> \t]*[\uE000-\uF8FF]$/.test(text);
+
 /**
  * Word's text as Markdown that reads as that text: a backslash goes before
  * each character Markdown would take for syntax, but only there, so most
@@ -832,10 +842,13 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
     const at = link.schema.endsWith(':') && link.schema !== 'mailto:' ? link.index + link.schema.length - 1 : text.indexOf('@', link.index);
     if (at >= link.index && at < link.lastIndex) escaped.add(at);
   }
-  // The start of each line: the text's, if it starts one, and each after a
-  // line break
+  // The start of each line: the text's, if it starts one, each after a
+  // line break, and each after a tracked break's end mark, a private-use
+  // character after its line end and the next line's prefix (see
+  // joinTrackedParagraphBreaks)
   const starts = lineStart ? [0] : [];
   for (let k = text.indexOf('\\\n'); k !== -1; k = text.indexOf('\\\n', k + 2)) starts.push(k + 2);
+  if (text.includes('\n')) for (const end of text.matchAll(TRACKED_BREAK_END_RE)) starts.push(end.index + end[0].length);
   for (const start of starts) {
     const end = text.indexOf('\\\n', start);
     const at = blockSyntaxAt(text, start, end === -1 ? text.length : end);
@@ -6480,8 +6493,12 @@ function renderInlineRange(
       // Markdown ends with a line break only after text that does, so it's
       // read only there, as reading it copies Markdown being built
       const prev = segment[i - 1];
-      // Nor after the span it ends with, as of a tracked break alone
-      const lineStart = (out === '' || prev?.type === 'text' && prev.text.endsWith('\n') && lastSpan?.end !== out.length && out.endsWith('\n'))
+      // Nor after the span it ends with, as of a tracked break alone, but
+      // in it, after a line break or a tracked break, where the text goes
+      // on in the same span
+      const lineStart = (out === '' || prev?.type === 'text' && (lastSpan?.end !== out.length
+        ? prev.text.endsWith('\n') && out.endsWith('\n')
+        : !!item.revision && !!lastSpan && revisionsEqual(lastSpan.revision, item.revision) && endsLine(prev.text)))
         && !(item.revision && opts?.nested);
       // An HTML block starts only a block's text, not a heading's, a table
       // cell's or a tracked change's, after its {++
@@ -6754,8 +6771,12 @@ function renderInlineRangeWithIds(
       // Markdown ends with a line break only after text that does, so it's
       // read only there, as reading it copies Markdown being built
       const prev = segment[i - 1];
-      // Nor after the span it ends with, as of a tracked break alone
-      const lineStart = (out === '' || prev?.type === 'text' && prev.text.endsWith('\n') && lastSpan?.end !== out.length && out.endsWith('\n'))
+      // Nor after the span it ends with, as of a tracked break alone, but
+      // in it, after a line break or a tracked break, where the text goes
+      // on in the same span
+      const lineStart = (out === '' || prev?.type === 'text' && (lastSpan?.end !== out.length
+        ? prev.text.endsWith('\n') && out.endsWith('\n')
+        : !!item.revision && !!lastSpan && revisionsEqual(lastSpan.revision, item.revision) && endsLine(prev.text)))
         && !(item.revision && opts?.nested);
       // An HTML block starts only a block's text, not a heading's, a table
       // cell's or a tracked change's, after its {++
