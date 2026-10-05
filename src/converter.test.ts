@@ -9170,6 +9170,14 @@ describe('Highlights across runs', () => {
     expect(await roundTrip(md)).toBe(md);
   });
 
+  test.each([
+    'P {====a=={red}==  ====}{>>c<<} Q\n', 'P {====  ====a=={red}==}{>>c<<} Q\n', 'P {====a== ==  =={red}==}{>>c<<} Q\n',
+  ])('keeps %j, highlights side by side in a comment, as it is', async (md) => {
+    // Highlighted spaces alone, which kept their highlight, side by side
+    // with another color's
+    expect(await roundTrip(md)).toBe(md);
+  });
+
   test('keeps a highlight\'s edge space outside it before a comment\'s ==}', async () => {
     // Which export read as one highlight in the comment, ==a=={red}==b ==
     const md = '{====a=={red}==b== ==}{>>c<<}\n';
