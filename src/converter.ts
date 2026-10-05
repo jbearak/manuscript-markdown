@@ -6574,15 +6574,17 @@ function tryRenderGridTable(
         // Split on newlines within a paragraph (e.g. hard breaks).
         // Strip the backslash of the break that ends each line but the last —
         // grid table cells treat bare newlines as hard breaks, so the
-        // backslash is redundant.
+        // backslash is redundant. A line of an equation or a comment, which
+        // ends in no break's backslash, as an odd run of them, stays as it is.
         const paraLines = keepParagraphWhitespace(r.text, true, true).split('\n');
-        cellLines.push(...paraLines.map((l, k) => k < paraLines.length - 1 ? gridLineBeforeBreak(l.replace(/\\$/, '')) : l));
+        cellLines.push(...paraLines.map((l, k) => k < paraLines.length - 1 && /(?<!\\)(?:\\\\)*\\$/.test(l) ? gridLineBeforeBreak(l.slice(0, -1)) : l));
         cellDeferred.push(...r.deferredComments);
       }
       // An empty paragraph at the cell's end is a line break there, <br>, as
-      // a blank line there pads the cell to its row's height
+      // a blank line there pads the cell to its row's height. One of spaces
+      // and tabs alone is too, which Word shows none of, and the padding takes.
       let endBreaks = 0;
-      while (cellLines.length > 1 && cellLines[cellLines.length - 1] === '') {
+      while (cellLines.length > 1 && /^[ \t]*$/.test(cellLines[cellLines.length - 1])) {
         cellLines.pop();
         endBreaks++;
       }

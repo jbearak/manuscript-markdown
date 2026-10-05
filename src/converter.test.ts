@@ -1041,6 +1041,29 @@ describe('Grid table round-trip', () => {
     expect(markdown).toBe(md);
   });
 
+  test('keeps the lines of an equation in a grid table cell as they are', async () => {
+    // Import took the \\ that ends the equation's line for a line break's
+    // backslash, and wrote the space at a line's end as a reference, which
+    // the equation then held
+    const md = '+-------+-----+\n| x     | y   |\n+=======+=====+\n| $a \\\\ | b   |\n| b$    |     |\n+-------+-----+';
+    const markdown = (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+    expect(markdown).toBe(md);
+    const cell = (paragraphs: ContentItem[][]) => ({ colspan: 1, paragraphs });
+    const text = (t: string): ContentItem => ({ type: 'text', text: t, commentIds: new Set(), formatting: DEFAULT_FORMATTING });
+    const table = { type: 'table', rows: [{ isHeader: true, cells: [cell([[text('x')]])] },
+      { isHeader: false, cells: [cell([[text('p '), { type: 'math', latex: 'a \nb', display: false } as ContentItem]])] }] } as unknown as ContentItem;
+    expect(buildMarkdown([table], new Map())).toContain('| p $a  |\n| b$    |');
+  });
+
+  test('writes a grid table cell\'s last paragraph of spaces alone as a line break', () => {
+    // It was a line of spaces, which export takes for the cell's padding
+    const cell = (paragraphs: ContentItem[][]) => ({ colspan: 1, paragraphs });
+    const text = (t: string): ContentItem => ({ type: 'text', text: t, commentIds: new Set(), formatting: DEFAULT_FORMATTING });
+    const table = { type: 'table', rows: [{ isHeader: true, cells: [cell([[text('x')]]), cell([[text('y')]])] },
+      { isHeader: false, cells: [cell([[text('a')], [text(' \t ')]]), cell([[text('b')], [text('c')]])] }] } as unknown as ContentItem;
+    expect(buildMarkdown([table], new Map())).toContain('| a<br> | b   |\n|       | c   |');
+  });
+
   test('keeps a backslash at the end of a grid table cell with fewer lines than its row', async () => {
     // Import dropped it as a line break's, and export read the blank line
     // after it as one, so the next round trip lost it too
