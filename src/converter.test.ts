@@ -9176,6 +9176,16 @@ describe('Highlights across runs', () => {
     expect(await roundTrip(md)).toBe(md);
   });
 
+  test('reads many runs in one tracked change in linear time', async () => {
+    // The escape after a highlight read the Markdown before each run, which
+    // copied all of it
+    const md = '{++' + Array.from({ length: 80000 }, () => 'a *b* ').join('').trimEnd() + '++}\n';
+    const docx = (await convertMdToDocx(md)).docx;
+    const start = performance.now();
+    expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(md);
+    expect(performance.now() - start).toBeLessThan(3000);
+  });
+
   test('reads many runs highlighted alike in linear time', async () => {
     // Each run's highlight joins its neighbours' if theirs do, which is
     // read for the whole range at once

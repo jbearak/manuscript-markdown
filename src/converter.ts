@@ -5032,17 +5032,20 @@ function escapeBangBeforeLink(markdown: string, segment: ContentItem[], index: n
  *  `before` it, which would read them as its own: ==a==} as CriticMarkup's
  *  ==}, which ends no highlight, and ==a=={red} as its color. After one
  *  with a color, as in ==a=={red}{blue}, the escape keeps the text as it
- *  is too. From the end of `before`, which may be long. */
-function escapeAfterHighlight(markdown: string, before: string): string {
+ *  is too. From the end of `before`, which may be long, and is read only
+ *  where the item's Markdown starts so, as reading it copies Markdown being
+ *  built: without the closer of the span it ends with where the item
+ *  joins that span (`inSpan`, see inSpanBefore). */
+function escapeAfterHighlight(markdown: string, before: string, inSpan = false): string {
   return /^(?:\}|\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})/.test(markdown)
-    && /==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?$/.test(before.slice(-64)) ? '\\' + markdown : markdown;
+    && /==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?$/.test(inSpan ? before.slice(-67, -3) : before.slice(-64)) ? '\\' + markdown : markdown;
 }
 
-/** `out`, the Markdown before `item`'s, as it reads once appendRevised
- *  joins the item to the span of its revision `out` ends with, without
- *  the span's closer */
-function joinedBefore(out: string, item: InlineRevisionItem, last: RevisionSpan | undefined): string {
-  return item.revision && last && last.end === out.length && revisionsEqual(last.revision, item.revision) ? out.slice(0, -3) : out;
+/** Whether `item` is of the revision of the span `out` ends with, which
+ *  appendRevised joins it to where it can, after which the Markdown before
+ *  the item's is `out` without the span's closer */
+function inSpanBefore(out: string, item: InlineRevisionItem, last: RevisionSpan | undefined): boolean {
+  return !!item.revision && !!last && last.end === out.length && revisionsEqual(last.revision, item.revision);
 }
 
 /** A letter, digit or _, next to an inline equation's $, after which it
@@ -6293,7 +6296,7 @@ function renderInlineRange(
       // An HTML block starts only a block's text, not a heading's, a table
       // cell's or a tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !opts?.cell && !item.revision;
-      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), joinedBefore(out, item, lastSpan)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), out, inSpanBefore(out, item, lastSpan)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
     }
     i++;
   }
@@ -6564,7 +6567,7 @@ function renderInlineRangeWithIds(
       // An HTML block starts only a block's text, not a heading's, a table
       // cell's or a tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !opts?.cell && !item.revision;
-      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), joinedBefore(out, item, lastSpan)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart, joinsHighlight(segment, i, startIndex, segmentEnd)), out, inSpanBefore(out, item, lastSpan)), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
     }
     i++;
   }
