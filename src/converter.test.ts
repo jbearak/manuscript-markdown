@@ -6551,6 +6551,17 @@ describe('Blocks a quote can\'t hold', () => {
     ['a heading', '> # h\n>\n> b\n', '> h\n>\n> b\n', 'Heading inside blockquote exported as a quote paragraph'],
     ['a code block', '> a\n>\n> ```\n> c\n> ```\n>\n> b\n', '> a\n>\n> c\n>\n> b\n', 'Code block inside blockquote exported as a quote paragraph'],
     ['a code block in a quote in a list item', '- a\n\n  > ```\n  > c\n  > ```\n', '- a\n\n  > c\n', 'Code block inside blockquote exported as a quote paragraph'],
+    // Its line ends were in the paragraph's text, which Word shows as spaces
+    ['a code block of lines', '> a\n>\n> ```\n> c\n>   d\n>\n> e\n> ```\n', '> a\n>\n> c\\\n> &#32;&#32;d\\\n> \\\n> e\n', 'Code block inside blockquote exported as a quote paragraph'],
+    // Which left an empty paragraph
+    ['an empty code block', '> a\n>\n> ```\n>\n> ```\n>\n> b\n', '> a\n>\n> b\n', 'Empty code block inside blockquote dropped during conversion'],
+    ['a code block that ends with a blank line', '> ```\n> x\n>\n> ```\n', '> x\n', 'Code block inside blockquote exported as a quote paragraph'],
+    ['a code block that ends with a line of spaces', '> ```\n> x\n>   \n> \t\n> ```\n', '> x\n', 'Code block inside blockquote exported as a quote paragraph'],
+    ['a code block that starts with a blank line', '> a\n>\n> ```\n>\n> x\n> ```\n', '> a\n>\n> \\\n> x\n', 'Code block inside blockquote exported as a quote paragraph'],
+    ['a code block of blank lines', '> a\n>\n> ```\n>\n>\n> ```\n>\n> b\n', '> a\n>\n> b\n', 'Empty code block inside blockquote dropped during conversion'],
+    // Whose line read as an alert's marker
+    ['a code block with an alert\'s marker', '> a\n>\n> ```\n> x\n> [!NOTE]\n> ```\n', '> a\n>\n> x\\\n> \\[!NOTE]\n', 'Code block inside blockquote exported as a quote paragraph'],
+    ['a code block that starts with an alert\'s marker', '> a\n>\n> ```\n> [!NOTE]\n> ```\n', '> a\n>\n> \\[!NOTE]\n', 'Code block inside blockquote exported as a quote paragraph'],
     ['a table', '> a\n>\n> | t |\n> |---|\n> | u |\n>\n> b\n', '> a\n>\n> b\n', 'Table inside blockquote dropped during conversion'],
     ['an HTML table', '> a\n>\n> <table><tr><td>t</td></tr></table>\n>\n> b\n', '> a\n>\n> b\n', 'Table inside blockquote dropped during conversion'],
     ['a horizontal rule', '> a\n>\n> ---\n>\n> b\n', '> a\n>\n> b\n', 'Horizontal rule inside blockquote dropped during conversion'],
@@ -6570,6 +6581,28 @@ describe('Blocks a quote can\'t hold', () => {
     const { docx, warnings } = await convertMdToDocx(md);
     expect(warnings).toEqual([warning + ' (not supported). Move it outside the quote for round-trip fidelity.']);
     expect(strip((await convertDocx(docx)).markdown)).toBe(expected);
+  });
+
+  test('keeps a code block of a space that is text', async () => {
+    // U+3000 read as a blank line's, and the block was dropped as empty
+    const { docx } = await convertMdToDocx('> ```\n> \u3000\n> ```\n');
+    expect(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).toContain('<w:t>\u3000</w:t>');
+  });
+
+  test.each([['U+3000', '\u3000', '&#12288;'], ['an em space', '\u2003', '&#8195;']])('keeps a code block\'s last line of %s, which markdown-it trims', async (_name, space, reference) => {
+    // Written as itself after the line's break, the paragraph's trim took
+    // it, and left the break's backslash as text
+    const md = '> x\\\n> ' + reference + '\n';
+    const { docx } = await convertMdToDocx('> ```\n> x\n> ' + space + '\n> ```\n');
+    expect(strip((await convertDocx(docx)).markdown)).toBe(md);
+    expect(strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown)).toBe(md);
+  });
+
+  test('ends a code block\'s text before a last line of characters XML can\'t hold', async () => {
+    // Its line break stayed when they went, and ended the paragraph
+    const { docx, warnings } = await convertMdToDocx('> ```\n> x\n> \uFFFF\n> ```\n');
+    expect(warnings).toContain('Removed 1 character a Word document can\'t hold, such as control characters');
+    expect(strip((await convertDocx(docx)).markdown)).toBe('> x\n');
   });
 });
 

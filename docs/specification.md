@@ -944,6 +944,6 @@ print("hello")
 
 ### Blockquote Block Content
 
-The Markdown-to-DOCX converter doesn't carry a list, heading, code block, table or horizontal rule inside a quote. It exports a list, heading or code block there as the quote's paragraphs, which keep its text but not its markers, and drops a table or horizontal rule. It emits a warning for each. A grid table's lines in a quote aren't a table, in the preview or in Word, but the quote's text.
+The Markdown-to-DOCX converter doesn't carry a list, heading, code block, table or horizontal rule inside a quote. It exports a list, heading or code block there as the quote's paragraphs, which keep its text but not its markers, a code block's lines as lines of one paragraph, and drops a table, a horizontal rule or an empty code block. It emits a warning for each. A grid table's lines in a quote aren't a table, in the preview or in Word, but the quote's text.
 
 To keep one through a round-trip, end the quote before it and start another after.

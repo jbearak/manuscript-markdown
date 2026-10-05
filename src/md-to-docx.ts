@@ -2476,7 +2476,8 @@ function annotateBlockquoteAlert(tokens: MdToken[], level: number): MdToken[] {
   // blank lines into one paragraph).
   const expanded: MdToken[] = [];
   for (const token of tokens) {
-    if (token.type === 'blockquote' || token.runs.length === 0) {
+    // A code block's lines are code, not markers
+    if (token.type === 'blockquote' || token.type === 'code_block' || token.runs.length === 0) {
       expanded.push(token);
       continue;
     }
@@ -2521,7 +2522,7 @@ function annotateBlockquoteAlert(tokens: MdToken[], level: number): MdToken[] {
   interface Hit { idx: number; type: GfmAlertType; runs: MdRun[] }
   const hits: Hit[] = [];
   for (let idx = 0; idx < expanded.length; idx++) {
-    if (expanded[idx].type === 'blockquote' || expanded[idx].runs.length === 0) continue;
+    if (expanded[idx].type === 'blockquote' || expanded[idx].type === 'code_block' || expanded[idx].runs.length === 0) continue;
     const parsed = stripLeadingAlertMarker(expanded[idx].runs);
     if (parsed.alertType) {
       hits.push({ idx, type: parsed.alertType, runs: parsed.runs });
@@ -2615,6 +2616,28 @@ const QUOTE_BLOCK_WARNINGS: Partial<Record<MdToken['type'], string>> = {
   table: 'Table inside blockquote dropped during conversion',
   hr: 'Horizontal rule inside blockquote dropped during conversion',
 };
+// A code block of blank lines alone, which would be an empty paragraph,
+// which a quote can't hold in Markdown. A blank line holds spaces and tabs,
+// and characters XML can't hold, which go (see removeCharactersXmlCantHold),
+// but not other spaces, as U+3000, which are text.
+const EMPTY_QUOTE_CODE_WARNING = 'Empty code block inside blockquote dropped during conversion';
+const isBlank = (text: string): boolean => !/[^ \t\n]/.test(text.replace(NOT_XML_CHARACTER, ''));
+const isEmptyCodeBlock = (token: MdToken): boolean => token.type === 'code_block' && token.runs.every(run => isBlank(run.text));
+
+/** A code block's text in a quote, as a paragraph's: its lines, with line
+ *  breaks between them, which a line end in Word's text isn't, but not
+ *  before blank lines at its end, which a break can't end the paragraph
+ *  with. Their characters XML can't hold stay, to go where they're counted. */
+function quotedCodeRuns(run: MdRun): MdRun[] {
+  const lines = run.text.split('\n');
+  let end = lines.length;
+  while (end > 1 && isBlank(lines[end - 1])) end--;
+  const rest = lines.slice(end).join('').replace(/[ \t]/g, '');
+  return [
+    ...lines.slice(0, end).flatMap((line, k): MdRun[] => [...(k > 0 ? [{ type: 'hardbreak' as const, text: '\n' }] : []), ...(line ? [{ ...run, text: line }] : [])]),
+    ...(rest ? [{ ...run, text: rest }] : []),
+  ];
+}
 
 function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel = 0, warnings?: string[], sourceLines?: string[]): MdToken[] {
   const result: MdToken[] = [];
@@ -2674,8 +2697,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
         // rule, which left an empty paragraph. An item's continuation is the
         // quote's, not indented as under the item, and a quote in the item,
         // whose level counts from the item's, one in this
-        for (const type of new Set(blockquoteTokens.map(t => t.type))) {
-          const warning = QUOTE_BLOCK_WARNINGS[type];
+        for (const warning of new Set(blockquoteTokens.map(t => isEmptyCodeBlock(t) ? EMPTY_QUOTE_CODE_WARNING : QUOTE_BLOCK_WARNINGS[t.type]))) {
           if (warning) warnings?.push(warning + ' (not supported). Move it outside the quote for round-trip fidelity.');
         }
         const quoted: MdToken[] = [];
@@ -2684,7 +2706,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
         // annotateBlockquoteSpacing)
         const span = (a: [number, number] | undefined, b: [number, number]): [number, number] => a ? [Math.min(a[0], b[0]), Math.max(a[1], b[1])] : b;
         for (const t of blockquoteTokens) {
-          if (t.type === 'table' || t.type === 'hr') {
+          if (t.type === 'table' || t.type === 'hr' || isEmptyCodeBlock(t)) {
             const previous = quoted[quoted.length - 1];
             if (t.sourceRange && previous) previous.droppedRange = span(previous.droppedRange, t.sourceRange);
             continue;
@@ -2695,8 +2717,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
               ...t,
               listContinuation: undefined,
               trailingBlankLine: undefined,
-              // A code block's text ends with its last line's end
-              ...(t.type === 'code_block' ? { runs: t.runs.map(run => ({ ...run, text: run.text.replace(/\n$/, '') })) } : {}),
+              ...(t.type === 'code_block' ? { runs: t.runs.flatMap(quotedCodeRuns) } : {}),
             };
           quoted.push(kept);
         }
