@@ -1153,23 +1153,27 @@ function manuscriptMarkdownBlock(state: StateBlock, startLine: number, endLine: 
  *  its escapes decoded, so a tag, emphasis or CriticMarkup in one shows as
  *  written, as in Word, not as HTML or formatting */
 function citationRule(state: StateInline, silent: boolean): boolean {
+  // Not where markdown-it scans a link's label, which it alone does
+  // silently, and which a token that takes a [ in it ends: a link around a
+  // citation stays a link
+  if (silent) return false;
   const start = state.pos;
   if (start + 2 >= state.posMax) return false;
   const end = citationEnd(state, start);
   if (end === -1) return false;
-  if (!silent) {
-    const items = state.src.slice(start + 1, end).split(';').map(item => {
-      const key = CITATION_ITEM_START_RE.exec(item);
-      return key ? citationPrefixText(state, item.slice(0, key.index)) + item.slice(key.index) : item;
-    });
-    const token = state.push('manuscript_citation', '', 0);
-    token.content = restoreCriticLineBreaks('[' + items.join(';') + ']');
-    // The line breaks CriticMarkup protected in it, which its text no longer
-    // holds, for the source lines after it (see addInlineContent)
-    const consumedBreakSourceOffsets = collectProtectedBreaks(state.src.slice(start, end + 1), inlineSourceOffset(state, start))
-      .map(sourceBreak => sourceBreak.sourceOffset);
-    if (consumedBreakSourceOffsets.length > 0) token.meta = { manuscriptCriticConsumedBreakSourceOffsets: consumedBreakSourceOffsets };
-  }
+  const items = state.src.slice(start + 1, end).split(';').map(item => {
+    const key = CITATION_ITEM_START_RE.exec(item);
+    return key ? citationPrefixText(state, item.slice(0, key.index)) + item.slice(key.index) : item;
+  });
+  // Text once the rules that read text tokens, as linkify, have run (see
+  // manuscript_citation_text)
+  const token = state.push('manuscript_citation', '', 0);
+  token.content = restoreCriticLineBreaks('[' + items.join(';') + ']');
+  // The line breaks CriticMarkup protected in it, which its text no longer
+  // holds, for the source lines after it (see addInlineContent)
+  const consumedBreakSourceOffsets = collectProtectedBreaks(state.src.slice(start, end + 1), inlineSourceOffset(state, start))
+    .map(sourceBreak => sourceBreak.sourceOffset);
+  if (consumedBreakSourceOffsets.length > 0) token.meta = { manuscriptCriticConsumedBreakSourceOffsets: consumedBreakSourceOffsets };
   state.pos = end + 1;
   return true;
 }
@@ -1996,6 +2000,19 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
     }
   });
 
+  // A citation is text, as to export, once linkify and the rules that read
+  // text tokens, which export runs on none in one, are done: the host's
+  // heading IDs and an image's alt text are made of text tokens alone
+  md.core.ruler.push('manuscript_citation_text', (state: StateCore) => {
+    const citationsAsText = (tokens: Token[] | null): void => {
+      for (const token of tokens ?? []) {
+        if (token.type === 'manuscript_citation') token.type = 'text';
+        citationsAsText(token.children);
+      }
+    };
+    if (state.src.includes('@')) citationsAsText(state.tokens);
+  });
+
   // Register renderers for each Manuscript Markdown token type
   for (const pattern of patterns) {
     md.renderer.rules[`manuscript_markdown_${pattern.name}_open`] = (tokens, idx) => {
@@ -2099,20 +2116,6 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
 
   // Trusted internal style blocks injected by manuscript rules — bypass GFM filtering.
   md.renderer.rules.manuscript_style = (tokens, idx) => tokens[idx].content || '';
-  md.renderer.rules.manuscript_citation = (tokens, idx) => escapeHtmlText(tokens[idx].content);
-  // An image's alt text, which markdown-it makes of text tokens alone, and
-  // of an image's in it, keeps a citation's text
-  const citationsAsText = (children: Token[] | null): void => {
-    for (const child of children ?? []) {
-      if (child.type === 'manuscript_citation') child.type = 'text';
-      citationsAsText(child.children);
-    }
-  };
-  const renderImage = md.renderer.rules.image;
-  md.renderer.rules.image = (tokens, idx, options, env, self) => {
-    citationsAsText(tokens[idx].children);
-    return renderImage ? renderImage(tokens, idx, options, env, self) : self.renderToken(tokens, idx, options);
-  };
 
   // GFM task list rendering.
   md.renderer.rules.list_item_open = (tokens, idx, options, env, self) => {
