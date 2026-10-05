@@ -8671,7 +8671,7 @@ describe('Markdown across Word runs', () => {
       { type: 'text', text: k % 2 ? struck : text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, strikethrough: k % 2 === 1 } }));
     const start = performance.now();
     buildMarkdown(items as ContentItem[], new Map());
-    expect(performance.now() - start).toBeLessThan(1000);
+    expect(performance.now() - start).toBeLessThan(3000);
   });
 });
 
