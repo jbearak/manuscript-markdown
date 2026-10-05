@@ -6730,6 +6730,7 @@ describe('HTML around a table in its block', () => {
     ['as it is', 'Sources'],
     ['in a character reference', '&#83;ources'],
     ['in tags', '<span>Sources</span>'],
+    ['in a style\'s comments', '<!-- style: Title -->Sources<!-- /style -->'],
   ])('drops the HTML around a table that leaves HTML where a line of it alone would read as a Sources heading %s', async (_name, line) => {
     // Word's paragraph of it read as the heading of a bibliography Word
     // holds as text on the next import, which dropped it and all after

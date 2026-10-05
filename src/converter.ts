@@ -7868,7 +7868,8 @@ function detachedTableHtml(html: string): string | undefined | null {
       }
       inParagraph = false;
     } else if (/\S/.test(rest)) {
-      out.push(htmlLinesAsText([rest]).join('\n'));
+      // Text, as the lines of text after it in its paragraph are
+      texts.push(...rest.split('\n'));
       inParagraph = true;
     }
     k = end - 1;
