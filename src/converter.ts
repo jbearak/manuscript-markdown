@@ -5388,9 +5388,10 @@ function mergeConsecutiveRuns(content: ContentItem[], markdown = true): ContentI
 function renderInlineSegment(
   segment: ContentItem[],
   comments: Map<string, Comment>,
-  renderOpts?: RenderOpts
+  renderOpts?: RenderOpts,
+  opts?: InlineRangeOpts
 ): { text: string; deferredComments: string[] } {
-  const result = renderInlineRange(segment, 0, comments, undefined, renderOpts);
+  const result = renderInlineRange(segment, 0, comments, opts, renderOpts);
   return {
     // A line break at a cell's end is <br>, which a pipe table holds, as a
     // grid table's blank line there pads the cell to its row's height
@@ -5513,8 +5514,9 @@ function formatCommentBodyWithId(cid: string, c: Comment, timezone?: string): st
 /** Where an inline range stops, whether its paragraph is in a quote or
  *  list, where export reads a revision's span starting with a heading's
  *  marker as text (see escapeMarkdownChars), as it doesn't at the top level,
- *  and whether it's a heading, whose text is inline */
-type InlineRangeOpts = { stopBeforeDisplayMath?: boolean; nested?: boolean; heading?: boolean };
+ *  whether it's a heading, whose text is inline, and whether it's a pipe or
+ *  grid table's cell, whose text is inline too */
+type InlineRangeOpts = { stopBeforeDisplayMath?: boolean; nested?: boolean; heading?: boolean; cell?: boolean };
 
 /** A segment's runs from the start of a paragraph to `end` as text, by
  *  `end`: their text, with anything else as a character that is no syntax,
@@ -5855,9 +5857,9 @@ function renderInlineRange(
       // read only there, as reading it copies Markdown being built
       const prev = segment[i - 1];
       const lineStart = (out === '' || prev?.type === 'text' && prev.text.endsWith('\n') && out.endsWith('\n')) && !(item.revision && opts?.nested);
-      // An HTML block starts only a block's text, not a heading's or a
-      // tracked change's, after its {++
-      const blockStart = lineStart && !opts?.heading && !item.revision;
+      // An HTML block starts only a block's text, not a heading's, a table
+      // cell's or a tracked change's, after its {++
+      const blockStart = lineStart && !opts?.heading && !opts?.cell && !item.revision;
       [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
     }
     i++;
@@ -6117,9 +6119,9 @@ function renderInlineRangeWithIds(
       // read only there, as reading it copies Markdown being built
       const prev = segment[i - 1];
       const lineStart = (out === '' || prev?.type === 'text' && prev.text.endsWith('\n') && out.endsWith('\n')) && !(item.revision && opts?.nested);
-      // An HTML block starts only a block's text, not a heading's or a
-      // tracked change's, after its {++
-      const blockStart = lineStart && !opts?.heading && !item.revision;
+      // An HTML block starts only a block's text, not a heading's, a table
+      // cell's or a tracked change's, after its {++
+      const blockStart = lineStart && !opts?.heading && !opts?.cell && !item.revision;
       [out, lastSpan] = appendRevised(out, textNextToMath(escapeBangBeforeLink(markedFormatting(item.text, item.formatting, lineStart, runsAfter(segment, i + 1, segmentEnd), blockStart), segment, i, segmentEnd), segment, i, segmentEnd, out.length === mathEnd, false, out), item, lastSpan);
     }
     i++;
@@ -6344,7 +6346,7 @@ function tryRenderPipeTable(table: { rows: TableRow[] }, maxLineWidth: number, c
           : cell.paragraphs[0];
         // Its line breaks at its end too, which renderInlineSegment drops
         // for a grid table's, as a cell of one line holds them as Word's
-        const r = renderInlineRange(mergeConsecutiveRuns(items), 0, comments, undefined, renderOpts);
+        const r = renderInlineRange(mergeConsecutiveRuns(items), 0, comments, { cell: true }, renderOpts);
         // A line break, which a cell's one line can't hold, as <br>, which a
         // cell reads as one, but not a line end in code, an equation or a
         // comment, which isn't one
@@ -6574,7 +6576,7 @@ function tryRenderGridTable(
                 ? { ...item, formatting: { ...item.formatting, bold: false } }
                 : item)
           : para;
-        const r = renderInlineSegment(mergeConsecutiveRuns(items), comments, renderOpts);
+        const r = renderInlineSegment(mergeConsecutiveRuns(items), comments, renderOpts, { cell: true });
         // Split on newlines within a paragraph (e.g. hard breaks).
         // Strip the backslash of the break that ends each line but the last —
         // grid table cells treat bare newlines as hard breaks, so the

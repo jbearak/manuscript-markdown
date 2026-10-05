@@ -5797,6 +5797,21 @@ describe('HTML table cells', () => {
     expect(markdown).toContain('    <th>\n      <p>y</p>\n    </th>');
   });
 
+  test.each([
+    ['a pipe table', {}],
+    ['a grid table', { pipeTableMaxLineWidth: 5 }],
+    ['a grid table, with a line width of 0, though a cell has a highlight', noWidth],
+  ])('escapes a cell\'s text that would be an HTML block in %s, whose cells read inline', async (_name, widths) => {
+    // Its text, as it starts the cell, went as it was, as an HTML block's
+    // would, and export read the cell's *b* as italic
+    const markdown = buildMarkdown([{ type: 'table', rows: [
+      { isHeader: true, cells: [{ paragraphs: [[cellText('x')]] }, { paragraphs: [[cellText('y')]] }] },
+      { isHeader: false, cells: [{ paragraphs: [[cellText('h', [], { highlight: true })]] }, { paragraphs: [[cellText('<div>a*b*</div>')]] }] },
+    ] }] as unknown as ContentItem[], new Map(), widths);
+    expect(markdown).toContain('\\<div>a\\*b\\*</div>');
+    expect(strip((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).trimEnd()).toBe(markdown);
+  });
+
   test('keeps a table with a cell of paragraphs HTML, with a line width of 0, though another cell has a highlight', async () => {
     // A grid table, which holds the highlight, wrote the paragraphs as
     // lines, which export read as one paragraph with line breaks
