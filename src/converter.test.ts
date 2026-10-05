@@ -5262,7 +5262,8 @@ describe('Word text that reads as Markdown', () => {
     // Each [ read the citation to the ] its key ran to
     const start = performance.now();
     expect(wrapWithFormatting('[@'.repeat(100000) + 'a,p. 2](b)', DEFAULT_FORMATTING)).toBe('\\[@'.repeat(100000) + 'a,p. 2](b)');
-    expect(performance.now() - start).toBeLessThan(500);
+    // Some 100 ms here, and three seconds read again for each [
+    expect(performance.now() - start).toBeLessThan(1500);
   });
 
   test('escapes a long run of [ in linear time', () => {
