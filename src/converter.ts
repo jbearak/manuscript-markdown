@@ -598,6 +598,18 @@ export class RunsAfter {
     return this.prefix[0] ?? this.index.text[this.from] ?? '';
   }
 
+  /** Whether an inline equation comes first, past empty runs, before which
+   *  a letter or digit at the end of the run before goes as a reference
+   *  (see textNextToMath) */
+  get mathFirst(): boolean {
+    if (this.prefix || !this.runs) return false;
+    const { items } = this.runs;
+    let k = this.runs.at;
+    while (items[k]?.type === 'text' && (items[k] as ContentItem & { type: 'text' }).text === '') k++;
+    const item = items[k];
+    return item?.type === 'math' && !item.display;
+  }
+
   /** Whether two = are next to each other, which can close a highlight */
   get hasEquals(): boolean {
     return this.prefix.includes('==') || lowerBound(this.index.equals, this.from) < this.index.equals.length;
@@ -790,7 +802,7 @@ function citationKeyRanges(text: string, open: number, close: number): Array<[nu
  * and locators, which export reads as they are, go in it, and a tag in a
  * prefix has its < escaped.
  */
-function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter, rawTags?: Set<number>): string {
+function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter, rawTags?: Set<number>, beforeMath = false): string {
   const escaped = new Set<number>();
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
@@ -997,8 +1009,11 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
   // their dollar signs, any of which can close math, whatever is around it,
   // and between them what is neither a space nor a word, as a delimiter
   let afterText: string | undefined;
+  // A letter or digit before an equation (`beforeMath`) goes as a
+  // reference, whose ; a $ before it can close math at (see textNextToMath)
+  const reference = beforeMath && WORD_NEXT_TO_MATH.test(text[text.length - 1] ?? '') ? text.length - 1 : -1;
   /** The kth character as Markdown has it, Word's backslash as \u0001 */
-  const char = (k: number) => text[k] === '\\' ? '\u0001' : text[k];
+  const char = (k: number) => text[k] === '\\' ? '\u0001' : k === reference ? ';' : text[k];
   /** The first character Markdown has for the kth, its escape if it has
    *  one, or of `rest` after the text, '' at the end */
   const read = (k: number, rest: string) => k < text.length ? (escaped.has(k) ? '\\' : char(k)) : rest[k - text.length] ?? '';
@@ -2098,7 +2113,7 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
     : ['', '', result, ''];
   // Not a tag in a citation's keys, which export reads as they are
   const keys = readsCitations ? new Set<number>() : undefined;
-  let core = escapeSensitiveHtmlLikeTags(escapeMarkdownChars(edges[2], lineStart && !delimited, after, keys), keys);
+  let core = escapeSensitiveHtmlLikeTags(escapeMarkdownChars(edges[2], lineStart && !delimited, after, keys, !delimited && !!after?.mathFirst), keys);
   // A ~ at the edge of struck text would join the ~~ around it, which
   // reads ~~~a~~ as ~ and struck a, where nothing comes between them, as a
   // highlight does inside them, but not one around them (`highlightOuter`)
@@ -5220,7 +5235,9 @@ function textNextToMath(markdown: string, segment: ContentItem[], index: number,
   if (item.type !== 'text' || item.href || markdown === '') return markdown;
   if (afterMath && (span || !item.revision)) {
     if (markdown[0] === '$') markdown = '\\' + markdown;
-    else if (WORD_NEXT_TO_MATH.test(markdown[0])) markdown = characterReference(markdown[0]) + markdown.slice(1);
+    // A $ after the letter or digit, which kept it from opening math, does
+    // after the reference's ;
+    else if (WORD_NEXT_TO_MATH.test(markdown[0])) markdown = characterReference(markdown[0]) + (markdown[1] === '$' ? '\\' : '') + markdown.slice(1);
   }
   let k = index + 1;
   while (k < end && segment[k].type === 'text' && (segment[k] as ContentItem & { type: 'text' }).text === '') k++;

@@ -5510,6 +5510,21 @@ describe('Word text that reads as Markdown', () => {
     expect(await roundTrip(md)).toBe(md + '\n');
   });
 
+  test.each([
+    ['after it', '$z$&#120;\\$a$'],
+    ['after it, with more after', '$z$&#49;\\$a$ b \\$c$'],
+    ['before it', '\\$a$&#120;$z$'],
+    ['before it, after one that can close at it', '\\$a \\$b$&#120;$z$'],
+    ['before an equation that starts with a backslash', 'a \\$b$&#120;$\\alpha$'],
+    ['on a substitution\'s side', 'q{~~y~>$z$&#120;\\$a$~~}'],
+  ])('keeps a $ next to the letter or digit beside inline math as text, %s', async (_name, md) => {
+    // The letter or digit, which kept the $ from opening or closing math, went
+    // as a reference, after or before whose ; it did
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    expect((await zip.file('word/document.xml')!.async('string')).match(/<m:oMath>/g)).toHaveLength(1);
+    expect(await roundTrip(md)).toBe(md + '\n');
+  });
+
   test('keeps a backslash a citation\'s text ends with before a letter next to inline math', () => {
     // The backslash escaped the & of the letter's reference
     expect(buildMarkdown([
