@@ -238,6 +238,10 @@ const MARKDOWN_HTML_SENSITIVE_TAGS = new Set([
 const HTML_LIKE_TAG_RE = /<\/?([A-Za-z][A-Za-z0-9-]*)(?:\s[^<>]*?)?\/?>/;
 const HTML_LIKE_TAG_AT = new RegExp(HTML_LIKE_TAG_RE.source, 'y');
 
+// Whether export reads a citation in the text markedFormatting writes: not
+// in an HTML table's cell, whose text it reads as it is (see renderHtmlTable)
+let readsCitations = true;
+
 /** `text` with the tags export reads as formatting or a line break written
  *  as text, but for one at a position in `raw`, which export reads as it is,
  *  as in a citation's keys (see escapeMarkdownChars) */
@@ -570,13 +574,19 @@ export class RunsAfter {
  *  export writes a citation whose key is missing as its text, give that
  *  text back; undefined where they don't, as for [@a,p. 2]. Export runs a
  *  prefix's spaces together, and keeps one locator and one - for each key,
- *  the last, so [see  also @a] and [@a, p. 1; @a, p. 2] don't. */
+ *  the last, so [see  also @a] and [@a, p. 1; @a, p. 2] don't, nor does
+ *  one with a line break in it. */
 function citationKeyRanges(text: string, open: number, close: number): Array<[number, number]> | undefined {
+  const inner = text.slice(open + 1, close);
+  // A line break, which export would read as a backslash and a line's end,
+  // and where a line in it that starts a block, as <table> or #, would read
+  // as one
+  if (inner.includes('\n')) return undefined;
   let offset = open + 1;
   const raw: Array<[number, number]> = [];
   const locators = new Map<string, string>();
   const suppressed = new Set<string>();
-  const items = text.slice(open + 1, close).split(';').flatMap(part => {
+  const items = inner.split(';').flatMap(part => {
     const item = part.trim();
     const start = /(^|\s)(-?)@/.exec(item);
     const prefix = start ? item.slice(0, start.index).trim().replace(/\s+/g, ' ') : '';
@@ -601,11 +611,12 @@ function citationKeyRanges(text: string, open: number, close: number): Array<[nu
  * around the text, as an opening [ whose ] isn't in it, is escaped too.
  * The text starts a line where `lineStart` says so and after each line
  * break (a backslash and a line's end, which stays as it is), where a block
- * can start. Code is literal, and doesn't come here. The positions in the
- * Markdown of a citation's keys and locators, which export reads as they
- * are, go in `raw`.
+ * can start. Code is literal, and doesn't come here. Where export reads
+ * a citation, as `rawTags` says, the positions in the Markdown of its keys
+ * and locators, which export reads as they are, go in it, and a tag in a
+ * prefix has its < escaped.
  */
-function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter, raw?: Set<number>): string {
+function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter, rawTags?: Set<number>): string {
   const escaped = new Set<number>();
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
@@ -728,8 +739,8 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
     for (const [start, end] of raw) for (let k = start; k < end; k++) keys.add(k);
     // A tag in a prefix, which export decodes, has its < escaped, not
     // written as a reference, whose ; would end an item
-    while (tag !== -1 && tag < i) tag = text.indexOf('<', tag + 1);
-    for (; tag !== -1 && tag < close; tag = text.indexOf('<', tag + 1)) {
+    while (rawTags && tag !== -1 && tag < i) tag = text.indexOf('<', tag + 1);
+    for (; rawTags && tag !== -1 && tag < close; tag = text.indexOf('<', tag + 1)) {
       HTML_LIKE_TAG_AT.lastIndex = tag;
       const name = HTML_LIKE_TAG_AT.exec(text)?.[1];
       if (!keys.has(tag) && name && MARKDOWN_HTML_SENSITIVE_TAGS.has(name.toLowerCase())) prefixTags.add(tag);
@@ -830,7 +841,7 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
   let result = '';
   for (let i = 0; i < text.length; i++) {
     if (escaped.has(i)) result += '\\';
-    if (keys.has(i) || prefixTags.has(i)) raw?.add(result.length);
+    if (keys.has(i) || prefixTags.has(i)) rawTags?.add(result.length);
     result += text[i];
   }
   return result;
@@ -1852,7 +1863,7 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
     ? /^((?:\s|\\\n)*)(.*?)((?:\s|\\\n)*)$/s.exec(result)!
     : ['', '', result, ''];
   // Not a tag in a citation's keys, which export reads as they are
-  const keys = new Set<number>();
+  const keys = readsCitations ? new Set<number>() : undefined;
   let core = escapeSensitiveHtmlLikeTags(escapeMarkdownChars(edges[2], lineStart && !delimited, after, keys), keys);
   // A ~ at the edge of struck text would join the ~~ around it, which
   // reads ~~~a~~ as ~ and struck a, where nothing comes between them
@@ -6067,8 +6078,15 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
           continue;
         }
         // In a table only HTML holds, such as one with merged cells, the
-        // rest exports as literal text
-        const rendered = renderInlineSegment(items, comments, renderOpts);
+        // rest exports as literal text, and a tag in a citation as one
+        const outerReadsCitations = readsCitations;
+        readsCitations = false;
+        let rendered: ReturnType<typeof renderInlineSegment>;
+        try {
+          rendered = renderInlineSegment(items, comments, renderOpts);
+        } finally {
+          readsCitations = outerReadsCitations;
+        }
         lines.push(i3 + '<p>' + keepParagraphWhitespace(rendered.text, true, true) + '</p>');
         deferredAll.push(...rendered.deferredComments);
       }
