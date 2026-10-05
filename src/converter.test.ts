@@ -8431,6 +8431,83 @@ describe('Track changes (CriticMarkup)', () => {
       expect(markdown.startsWith('a0{--\n\n--}a1{--\n\n--}a2')).toBe(true);
     });
 
+    test.each([
+      ['a deletion of a paragraph and the start of the next', '{--a\n\nb--}c'],
+      ['an insertion of a paragraph and the start of the next', '{++a\n\nb++}c'],
+      ['a deletion from a paragraph\'s end through the next', 'a{--b\n\nc--}'],
+      ['the same before another paragraph', 'a{--b\n\nc--}\n\ny'],
+      ['a substitution of two paragraphs', '{~~old\n\ntext~>new\n\ntext~~}\n\nz'],
+      ['a substitution of two paragraphs for two', '{~~a\n\nb~>c\n\nd~~}\n\nz'],
+    ])('keeps the paragraph marks of %s', async (_name, md) => {
+      // A paragraph that came back all in the change lost its tracked mark,
+      // or took one it didn't have, where the last paragraph's mark is the
+      // block's own
+      const marks = async (markdown: string) => {
+        const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+        return [...xml.matchAll(/<w:p>|<w:p [^>]*>/g)].map(p => /^<w:p[ >](?:(?!<\/w:p>).)*?<w:pPr>(?:(?!<\/w:pPr>).)*<w:rPr><w:(ins|del) /.exec(xml.slice(p.index))?.[1] ?? '');
+      };
+      const roundTrip = (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+      expect(await marks(roundTrip)).toEqual(await marks(md));
+    });
+
+    test.each([
+      ['spaces before its text', ' foo', 'Keep{--cut\n\n&#32;foo--}\n\nz'],
+      ['spaces alone', '  ', 'Keep{--cut\n\n&#32;&#32;--}\n\nz'],
+    ])('keeps a deleted paragraph\'s %s after a deleted mark', async (_name, text, expected) => {
+      // Export dropped the spaces at the start of the line after the break,
+      // and a paragraph of spaces alone with them
+      const revision = 'w:author="A" w:date="2024-01-01T00:00:00Z"';
+      const deleted = (t: string) => '<w:del w:id="2" ' + revision + '><w:r><w:delText xml:space="preserve">' + t + '</w:delText></w:r></w:del>';
+      const docx = await buildSyntheticDocx(wrapDocumentXml('<w:p><w:pPr><w:rPr><w:del w:id="1" ' + revision + '/></w:rPr></w:pPr><w:r><w:t>Keep</w:t></w:r>' + deleted('cut')
+        + '</w:p><w:p>' + deleted(text) + '</w:p><w:p><w:r><w:t>z</w:t></w:r></w:p>'));
+      const md = (await convertDocx(docx)).markdown;
+      expect(md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim()).toBe(expected);
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+      expect(xml).toContain('<w:delText xml:space="preserve">' + text + '</w:delText>');
+    });
+
+    test.each([
+      ['a backslash at the end of the paragraph before', '<w:delText>foo\\</w:delText>', '<w:delText>b</w:delText>', 'x{--foo\\\\\n\nb--}y'],
+      ['spaces at the end of the paragraph before', '<w:delText xml:space="preserve">a  </w:delText>', '<w:delText>b</w:delText>', 'x{--a&#32;&#32;\n\nb--}y'],
+      ['a line break at the end of the paragraph before', '<w:delText>a</w:delText><w:br/>', '<w:delText>b</w:delText>', 'x{--a<br>\n\nb--}y'],
+      ['a line break at the start of the paragraph after', '<w:delText>a</w:delText>', '<w:br/><w:delText>b</w:delText>', 'x{--a\n\n\\\nb--}y'],
+    ])('keeps %s a deleted mark joins', async (_name, end, start, expected) => {
+      // Export read the \ and the line end after it as a line break, and
+      // dropped spaces or a line break at the paragraph break
+      const revision = 'w:author="A" w:date="2024-01-01T00:00:00Z"';
+      const body = '<w:p><w:pPr><w:rPr><w:del w:id="1" ' + revision + '/></w:rPr></w:pPr><w:r><w:t>x</w:t></w:r><w:del w:id="2" ' + revision + '><w:r>' + end
+        + '</w:r></w:del></w:p><w:p><w:del w:id="3" ' + revision + '><w:r>' + start + '</w:r></w:del><w:r><w:t>y</w:t></w:r></w:p>';
+      const md = (await convertDocx(await buildSyntheticDocx(wrapDocumentXml(body)))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+      expect(md).toBe(expected);
+      const runs = (xml: string) => [...xml.matchAll(/<w:(?:t|delText)[^>]*>([^<]*)<\/w:(?:t|delText)>|<w:br\/>|<w:p[ >]/g)].map(m => m[1] ?? (m[0] === '<w:br/>' ? '↵' : '¶')).join('');
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+      expect(runs(xml.slice(xml.indexOf('<w:body>')))).toBe(runs(body));
+    });
+
+    test('keeps a mail link after spaces at the start of the paragraph a deleted mark joins', async () => {
+      // The spaces, written as references after the link was written bare,
+      // kept export from reading the address as a link
+      const md = '{--a\n\n&#32;[x\\@example.com](mailto:x@example.com)--}y';
+      const roundTrip = (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+      expect(roundTrip).toBe(md);
+    });
+
+    test.each([
+      ['with its mark', true, 'x\n\n{--a\n\n--}y'],
+      ['without its mark', false, 'x\n\n{--a--}\n\ny'],
+    ])('keeps a paragraph Word deleted whole %s', async (_name, tracked, expected) => {
+      // With its mark, it came back as {--a--} on a line of its own, whose
+      // mark export doesn't track, so accepting the deletion left an empty
+      // paragraph
+      const deletedMark = '<w:pPr><w:rPr><w:del w:id="1" w:author="A" w:date="2024-01-01T00:00:00Z"/></w:rPr></w:pPr>';
+      const docx = await buildSyntheticDocx(wrapDocumentXml('<w:p><w:r><w:t>x</w:t></w:r></w:p><w:p>' + (tracked ? deletedMark : '')
+        + '<w:del w:id="2" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r><w:delText>a</w:delText></w:r></w:del></w:p><w:p><w:r><w:t>y</w:t></w:r></w:p>'));
+      const md = (await convertDocx(docx)).markdown;
+      expect(md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim()).toBe(expected);
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+      expect(/<w:pPr><w:rPr><w:del [^>]*\/><\/w:rPr><\/w:pPr><w:del [^>]*><w:r><w:delText>a</.test(xml)).toBe(tracked);
+    });
+
     test('CriticMarkup inside math survives a round trip', async () => {
       const fence = '$'.repeat(2);
       for (const md of [
