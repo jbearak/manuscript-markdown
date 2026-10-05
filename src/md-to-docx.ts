@@ -11,7 +11,7 @@ import { isAbsolute, join, resolve } from 'path';
 import { parseBibtex, BibtexEntry } from './bibtex-parser';
 import { parseFrontmatter, maskFrontmatter, serializeFrontmatter, Frontmatter, noteTypeToNumber, type ColorScheme, type CustomStyleDef, parseColWidths, expandColWidths, colWidthsToPct } from './frontmatter';
 import { formatTableNumbers, parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping, type TableDigits, type TableDecimalMark, type TableDigitGrouping } from './table-number-format';
-import type { TableNumberFormat } from './table-metadata';
+import { tableContentsFingerprint, type TableNumberFormat } from './table-metadata';
 import { alertColorsByScheme, getDefaultColorScheme } from './alert-colors';
 import { ZoteroBiblData, zoteroStyleFullId } from './converter';
 import { isGfmDisallowedRawHtml, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from './gfm';
@@ -123,7 +123,7 @@ export interface MdToken {
   tableDigits?: TableDigits;
   tableDecimalMark?: TableDecimalMark;
   tableDigitGrouping?: TableDigitGrouping;
-  tableHtmlAround?: [string, string, string]; // the HTML before and after an HTML table in its block, which Word doesn't show, and the table's first row (see tableFirstRow)
+  tableHtmlAround?: [string, string, string, string]; // the HTML before and after an HTML table in its block, which Word doesn't show, and the table's first row and contents (see tableFirstRow)
   gridSourceColWidths?: number[]; // column char-widths inferred from +---+---+ source; persisted for round-trip fidelity and Word Online layout
   criticParaMark?: 'addition' | 'deletion'; // paragraph mark revision: a heading promoted from a full-paragraph {++### ...++} / {--### ...--} span, or a block split at a paragraph break inside a revision
   criticParaMarkRun?: MdRun; // the revision whose paragraph break ends this block; supplies author and date (default: the first run)
@@ -2679,13 +2679,25 @@ function codeBlockLines(run: MdRun): MdRun[] {
 
 const HTML_AROUND_TABLE_WARNING = 'HTML around a table in its HTML block not shown in Word (kept in the Markdown on round-trip).';
 
+const cellText = (cell: MdTableCell): string => cell.runs.filter(run => run.type === 'text').map(run => run.text).join('');
+
 /** A table's first row's text, which import compares with the table's, to
  *  put the HTML around it back with no other table, as one Word added or
  *  deleted would shift the tables' indices: its cells' count and text, as
- *  Word holds it, with no breaks, comments or math, and spaces run together */
+ *  Word holds it, with no breaks, comments or math, and spaces run together.
+ *  Its cells are those generateTable writes, to the grid's width, with an
+ *  empty one for each column the row doesn't reach. */
 function tableFirstRow(rows: MdTableRow[]): string {
-  const cells = rows[0]?.cells ?? [];
-  return cells.length + ':' + cells.map(cell => cell.runs.filter(run => run.type === 'text').map(run => run.text).join('').replace(/\s+/g, ' ').trim()).join('|');
+  const columns = tableGridColumns(rows);
+  const texts: string[] = [];
+  let gridCol = 0;
+  for (const cell of rows[0]?.cells ?? []) {
+    if (gridCol >= columns) break;
+    texts.push(cellText(cell).replace(/\s+/g, ' ').trim());
+    gridCol += cell.colspan || 1;
+  }
+  for (; gridCol < columns; gridCol++) texts.push('');
+  return texts.length + ':' + texts.join('|');
 }
 
 function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel = 0, warnings?: string[], sourceLines?: string[]): MdToken[] {
@@ -3023,7 +3035,8 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
                 const before = k === 0 ? htmlContent.slice(0, meta.start).replace(/(^|\n)[ \t]*$/, '$1') : '';
                 const after = htmlContent.slice(meta.end, htmlTables[k + 1]?.start).replace(/\s+$/, '');
                 if (/\S/.test(before + after)) {
-                  tableToken.tableHtmlAround = [/\S/.test(before) ? before : '', /\S/.test(after) ? after : '', tableFirstRow(mappedRows)];
+                  tableToken.tableHtmlAround = [/\S/.test(before) ? before : '', /\S/.test(after) ? after : '', tableFirstRow(mappedRows),
+                    tableContentsFingerprint(mappedRows.flatMap(row => row.cells.map(cellText)))];
                 }
                 result.push(tableToken);
               }
@@ -3962,7 +3975,7 @@ export interface DocxGenState {
   tableDigits: Map<number, string>;
   tableDecimalMarks: Map<number, string>;
   tableDigitGroupings: Map<number, string>;
-  tableHtmlAround: Map<number, [string, string, string]>; // table index -> the HTML before and after it in its block, and its first row
+  tableHtmlAround: Map<number, [string, string, string, string]>; // table index -> the HTML before and after it in its block, and its first row and contents
   fontOverrides?: FontOverrides;       // document-level font overrides for table default resolution
   listIndent: 'tab' | 'spaces'; // indentation style for nested list items
   consecutiveReplyParaIds: Set<string>; // parent paraIds whose replies were in consecutive format
@@ -7067,6 +7080,45 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
   return xml;
 }
 
+/** A table's grid columns, as its cells and their spans fill them, and the
+ *  columns rowspan cells from previous rows occupy, at least one */
+function tableGridColumns(rows: MdTableRow[]): number {
+  let totalCols = 0;
+  const simMerge = new Map<number, { remaining: number; colspan: number }>();
+  for (const row of rows) {
+    let gridCol = 0;
+    let ci = 0;
+    // Walk the grid for this row, skipping columns occupied by rowspan continuations
+    while (ci < row.cells.length) {
+      // Skip columns occupied by pending vertical merges
+      let pending = simMerge.get(gridCol);
+      while (pending && pending.remaining > 0) {
+        pending.remaining--;
+        if (pending.remaining === 0) simMerge.delete(gridCol);
+        gridCol += pending.colspan;
+        pending = simMerge.get(gridCol);
+      }
+      const cell = row.cells[ci++];
+      const cs = cell.colspan || 1;
+      const rs = cell.rowspan || 1;
+      if (rs > 1) {
+        simMerge.set(gridCol, { remaining: rs - 1, colspan: cs });
+      }
+      gridCol += cs;
+    }
+    // Skip any trailing columns still occupied by merges
+    let pending = simMerge.get(gridCol);
+    while (pending && pending.remaining > 0) {
+      pending.remaining--;
+      if (pending.remaining === 0) simMerge.delete(gridCol);
+      gridCol += pending.colspan;
+      pending = simMerge.get(gridCol);
+    }
+    if (gridCol > totalCols) totalCols = gridCol;
+  }
+  return totalCols || 1;
+}
+
 export function generateTable(token: MdToken, state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine): string {
   if (!token.rows) return '';
 
@@ -7107,42 +7159,7 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
 
   // Compute total grid columns by simulating grid occupancy (accounts for
   // columns implicitly occupied by rowspan cells from previous rows).
-  let totalCols = 0;
-  {
-    const simMerge = new Map<number, { remaining: number; colspan: number }>();
-    for (const row of token.rows) {
-      let gridCol = 0;
-      let ci = 0;
-      // Walk the grid for this row, skipping columns occupied by rowspan continuations
-      while (ci < row.cells.length) {
-        // Skip columns occupied by pending vertical merges
-        let pending = simMerge.get(gridCol);
-        while (pending && pending.remaining > 0) {
-          pending.remaining--;
-          if (pending.remaining === 0) simMerge.delete(gridCol);
-          gridCol += pending.colspan;
-          pending = simMerge.get(gridCol);
-        }
-        const cell = row.cells[ci++];
-        const cs = cell.colspan || 1;
-        const rs = cell.rowspan || 1;
-        if (rs > 1) {
-          simMerge.set(gridCol, { remaining: rs - 1, colspan: cs });
-        }
-        gridCol += cs;
-      }
-      // Skip any trailing columns still occupied by merges
-      let pending = simMerge.get(gridCol);
-      while (pending && pending.remaining > 0) {
-        pending.remaining--;
-        if (pending.remaining === 0) simMerge.delete(gridCol);
-        gridCol += pending.colspan;
-        pending = simMerge.get(gridCol);
-      }
-      if (gridCol > totalCols) totalCols = gridCol;
-    }
-  }
-  if (totalCols === 0) totalCols = 1;
+  const totalCols = tableGridColumns(token.rows);
 
   // Compute page text width in dxa for gridCol w:w attributes (required for Word Online).
   // Use landscape page width (pgSz.h) when the table lives in a landscape section or

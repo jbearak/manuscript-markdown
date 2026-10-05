@@ -15,6 +15,7 @@ import { getDisplayWidth, readGridTableCells, type TableAlign } from './grid-tab
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
 import { citationEndInText, compareNoteLabels, customStyleId, linkifiedColons, linkifiedText, linkifyMatches, startsHtmlBlock } from './md-to-docx';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
+import { tableContentsFingerprint } from './table-metadata';
 import { publicStyleNameForZoteroId, zoteroStyleIdForName } from './csl-loader';
 import { extractZoteroKey } from './zotero-link';
 import { DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
@@ -2804,18 +2805,18 @@ export async function extractTableDigitGroupingMapping(data: Uint8Array | JSZip)
 }
 
 /** Each HTML table's HTML before and after it in its block, which Word
- *  doesn't show, and its first row's text when export wrote it (see
- *  tableFirstRow) */
-export async function extractTableHtmlAroundMapping(data: Uint8Array | JSZip): Promise<Map<string, [string, string, string]> | null> {
+ *  doesn't show, and its first row's text and its contents when export
+ *  wrote it (see tableFirstRow and tableContentsFingerprint) */
+export async function extractTableHtmlAroundMapping(data: Uint8Array | JSZip): Promise<Map<string, [string, string, string, string]> | null> {
   const json = await extractChunkedCustomProp(data, 'MANUSCRIPT_TABLE_HTML_AROUND');
   if (!json) return null;
   try {
     const parsed: unknown = JSON.parse(json);
     if (!parsed || typeof parsed !== 'object') return null;
-    const mapping = new Map<string, [string, string, string]>();
+    const mapping = new Map<string, [string, string, string, string]>();
     for (const [index, around] of Object.entries(parsed)) {
-      if (Array.isArray(around) && around.length === 3 && around.every(part => typeof part === 'string')
-        && (around[0] || around[1])) mapping.set(index, [around[0], around[1], around[2]]);
+      if (Array.isArray(around) && around.length === 4 && around.every(part => typeof part === 'string')
+        && (around[0] || around[1])) mapping.set(index, [around[0], around[1], around[2], around[3]]);
     }
     return mapping.size > 0 ? mapping : null;
   } catch {
@@ -7023,7 +7024,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
   return lines.join(oneLine ? '' : '\n') + (deferredAll.length > 0 ? '\n\n' + deferredAll.join('\n') : '');
 }
 
-type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; tableHtmlAroundMapping?: Map<string, [string, string, string]>; usedTableHtmlAround?: Set<string>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem>; htmlCells?: boolean };
+type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; tableHtmlAroundMapping?: Map<string, [string, string, string, string]>; usedTableHtmlAround?: Set<string>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem>; htmlCells?: boolean };
 
 /**
  * Try to render a table as a GFM pipe table. Returns null if the table is
@@ -7528,13 +7529,19 @@ function pushWithHoistedPrefix(output: string[], directivePrefix: string, body: 
   output.push('\n' + body);
 }
 
+const tableCellText = (cell: TableRow['cells'][number]): string =>
+  cell.paragraphs.flat().map(item => item.type === 'text' ? item.text.replace(/\\\n/g, '') : '').join('');
+
 /** A table's first row's text, as export finds it (see tableFirstRow in
  *  md-to-docx.ts) */
 function tableFirstRow(rows: TableRow[]): string {
   const cells = rows[0]?.cells ?? [];
-  return cells.length + ':' + cells.map(cell => cell.paragraphs.flat().map(item => item.type === 'text' ? item.text.replace(/\\\n/g, '') : '')
-    .join('').replace(/\s+/g, ' ').trim()).join('|');
+  return cells.length + ':' + cells.map(cell => tableCellText(cell).replace(/\s+/g, ' ').trim()).join('|');
 }
+
+// A comment alone that reads as a directive, as <!-- table-font-size: 11 -->
+// or <!-- landscape -->: a word, or a word and a colon and what follows
+const DIRECTIVE_SHAPED_COMMENT_RE = /^<!--\s*[\w/-]+(?:\s*:(?:(?!-->)[\s\S])*)?\s*-->$/;
 
 function renderTableOrFallback(
   item: { rows: TableRow[] },
@@ -7568,20 +7575,22 @@ function renderTableOrFallback(
     if (isLandscapeTable) htmlFontAttrs += ' data-orientation="landscape"';
     if (isPortraitTable) htmlFontAttrs += ' data-orientation="portrait"';
   }
-  // The HTML around an HTML table in its block, if it's this table's, or
-  // else another's of its first row, as a table Word added or deleted
-  // before it shifts the indices, each once. It goes around a table in
-  // another format as blocks of its own, before its directives.
+  // The HTML around an HTML table in its block: the one the table's first
+  // row has, as the tables' indices shift where Word added or deleted one
+  // before it, or of those that share it, the one its contents have, each
+  // once. Tables alike in all their text take theirs in order. None goes
+  // where the table's contents change and its first row doesn't tell it
+  // from another's. It goes around a table in another format as blocks of
+  // its own, before its directives, but for a comment that would be one.
   const firstRow = tableFirstRow(item.rows);
-  const aroundMapping = renderOpts?.tableHtmlAroundMapping;
-  let aroundKey = tableIndex !== undefined && aroundMapping?.get(String(tableIndex))?.[2] === firstRow ? String(tableIndex) : undefined;
-  if (aroundKey === undefined || renderOpts?.usedTableHtmlAround?.has(aroundKey)) {
-    aroundKey = [...aroundMapping?.entries() ?? []].find(([key, entry]) => entry[2] === firstRow && !renderOpts?.usedTableHtmlAround?.has(key))?.[0];
-  }
-  const around = aroundKey !== undefined ? aroundMapping?.get(aroundKey) : undefined;
+  const unused = [...renderOpts?.tableHtmlAroundMapping?.entries() ?? []]
+    .filter(([key, entry]) => entry[2] === firstRow && !renderOpts?.usedTableHtmlAround?.has(key));
+  const contents = unused.length > 1 ? tableContentsFingerprint(item.rows.flatMap(row => row.cells.map(tableCellText))) : '';
+  const [aroundKey, around] = unused.length > 1 ? unused.find(([, entry]) => entry[3] === contents) ?? [] : unused[0] ?? [];
   if (aroundKey !== undefined) renderOpts?.usedTableHtmlAround?.add(aroundKey);
-  const before = around?.[0].replace(/\s+$/, '');
-  const after = around?.[1].replace(/^\s+/, '');
+  const inert = (html: string | undefined) => html && !DIRECTIVE_SHAPED_COMMENT_RE.test(html) ? html : undefined;
+  const before = inert(around?.[0].replace(/\s+$/, ''));
+  const after = inert(around?.[1].replace(/^\s+/, ''));
   const r = (body: string) => ({ directivePrefix: fontPrefix, body, ...(before ? { before } : {}), ...(after ? { after } : {}) });
   const rHtml = (body: string) => ({ directivePrefix: '', body });
   // If the original format was HTML or font value is comment-unsafe, emit HTML
@@ -8482,7 +8491,7 @@ function joinSpansAtTrackedBreaks(markdown: string, marks: TrackedBreakMarks): s
 export function buildMarkdown(
   content: ContentItem[],
   comments: Map<string, Comment>,
-  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, { label: string; body: ContentItem[]; noteKind: 'footnote' | 'endnote' }>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; tableHtmlAroundMapping?: Map<string, [string, string, string]> | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string },
+  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, { label: string; body: ContentItem[]; noteKind: 'footnote' | 'endnote' }>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; tableHtmlAroundMapping?: Map<string, [string, string, string, string]> | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string },
 ): string {
   let breakMarks: TrackedBreakMarks | undefined;
   const marks = () => breakMarks ??= trackedBreakMarks([content, [...comments.values()], options]);
