@@ -5651,8 +5651,16 @@ function emphasisGroup(
  *  row. Not a note's definition, as the [ of [^1] is escaped. */
 const BLOCK_START_RE = /^[ \t]{0,3}(?:#{1,6}(?:[ \t]|$)|[-+*](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$)|>|```|~~~|<|\$\$|\|)/;
 
+/** Whether a line of Markdown would start a block within a paragraph
+ *  (BLOCK_START_RE), or a LaTeX environment, which export reads as display
+ *  math (see wrapBareLatexEnvironments) */
+function startsBlockLine(markdown: string): boolean {
+  const environment = /^ {0,3}\\begin\{([a-zA-Z*]+)\}/.exec(markdown);
+  return BLOCK_START_RE.test(markdown) || !!environment && DISPLAY_MATH_ENVIRONMENTS.has(environment[1]);
+}
+
 const startsBlock = (item: ContentItem | undefined): boolean =>
-  item?.type === 'text' && BLOCK_START_RE.test(wrapWithFormatting(item.text, item.formatting));
+  item?.type === 'text' && startsBlockLine(wrapWithFormatting(item.text, item.formatting));
 
 /**
  * A Word hyperlink's runs from `start`, its text and line breaks, all in the
@@ -5682,7 +5690,7 @@ function linkGroup(
       for (let i = start + items.length + 1, item = inLink(i); item && item.text !== '\\\n'; item = inLink(++i)) {
         line += wrapWithFormatting(item.text, item.formatting);
       }
-      if (BLOCK_START_RE.test(line)) break;
+      if (startsBlockLine(line)) break;
     }
     items.push(next);
   }

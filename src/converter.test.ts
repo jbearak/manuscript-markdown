@@ -8965,6 +8965,8 @@ describe('Links of more than one run', () => {
     ['to different places', '[a **b**](https://e.com)[c](https://f.com)'],
     ['to one place', '[a](https://e.com)[b](https://e.com)'],
     ['to one place, with formatting', '[**a**](https://e.com)[*b*](https://e.com)'],
+    ['to one place, in a comment', '{==[a](https://e.com)[b](https://e.com)==}{>>note<<}'],
+    ['to one place, with formatting, in a comment', '{==[**a**](https://e.com)[*b*](https://e.com)==}{>>note<<}'],
   ])('keeps links %s apart', async (_name, md) => {
     // Import joined runs of one place across the hyperlinks they were in
     expect(await roundTrip(md)).toBe(md + '\n');
@@ -8991,6 +8993,8 @@ describe('Links of more than one run', () => {
       '[a](https://e.com)\\\n[# *x*](https://e.com)\n'],
     ['text', '<w:t>a</w:t><w:br/><w:t>#x</w:t>', '[a\\\n#x](https://e.com)\n'],
     ['nothing', '<w:t>a</w:t><w:br/>', '[a\\\n](https://e.com)\n'],
+    ['a LaTeX environment, after a bold break', '<w:t>a</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:br/></w:r><w:r><w:t>\\begin{align}x\\end{align}</w:t>',
+      '[a](https://e.com)\\\n[\\begin{align}x\\end{align}](https://e.com)\n'],
   ])('splits a link before a line that would start %s', async (_name, runs, expected) => {
     // One link's text ran across the line, which Markdown read as a block
     const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);

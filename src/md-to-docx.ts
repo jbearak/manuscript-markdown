@@ -923,6 +923,8 @@ function toTextRunFromInner(run: MdRun, overrides?: Partial<MdRun>): MdRun {
     subscript: run.subscript,
     code: run.code,
     href: run.href,
+    // Where a link starts, though the one before goes to the same place
+    ...(run.linkStart ? { linkStart: true } : {}),
     ...overrides,
   };
 }
@@ -952,14 +954,17 @@ function normalizeCriticInnerRuns(runs: MdRun[]): MdRun[] {
     // A {==...==} without a comment inside a Critic payload is preserved as
     // text runs with highlight flags, as it exports at the top level.
     if (run.type === 'critic_highlight') {
-      for (const inner of run.innerRuns ?? (run.text ? [toTextRunFromInner(run)] : [])) {
+      // A link that starts at the highlight starts at its first run only
+      const inners = run.innerRuns ?? (run.text ? [toTextRunFromInner(run)] : []);
+      inners.forEach((inner, k) => {
         normalized.push({
-          ...toTextRunFromInner(run),
+          ...toTextRunFromInner(run, { linkStart: undefined }),
           ...inner,
+          ...(k === 0 && run.linkStart ? { linkStart: true } : {}),
           highlight: true,
           highlightColor: run.highlightColor ?? inner.highlightColor,
         });
-      }
+      });
       continue;
     }
 
