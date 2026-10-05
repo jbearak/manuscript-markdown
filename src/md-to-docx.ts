@@ -5878,7 +5878,9 @@ function deletionWithComments(runs: MdRun[] | undefined, outer: MdRun, deletion:
       pieces.push(...deletionWithComments(run.innerRuns, run, deletion),
         ...deletionWithComments(run.oldRuns, run, deletion), ...deletionWithComments(run.newRuns, run, deletion));
     } else {
-      deleted.push(run);
+      // A break takes the formatting around it, as it would in `outer`, where
+      // the deletion it goes in has only `deletion`'s
+      deleted.push(isBreakRun(run) ? { ...mergeRunFormatting(run, outer), type: run.type } : run);
     }
   }
   flush();
@@ -6489,12 +6491,25 @@ function withoutCommentBodyLines(source: MdRun[], startsLine = true, endsLine = 
   // Whitespace that shows, as code, a link or a mark, isn't padding
   const shows = (run: MdRun) => shown || !!(run.code || run.href || run.highlight || run.underline || run.strikethrough);
   // A run starts or ends its line where only runs that take no room, as a
-  // comment, its range markers or a body, are between it and the line's edge
-  const roomless = (run: MdRun) => run.type === 'critic_comment' || isCommentMarkerRun(run);
+  // comment, its range markers, a body or a revision of them alone, are
+  // between it and the line's edge or a line break, which can end or start
+  // a revision's text, or each side of a substitution
+  const sidesOf = (run: MdRun) => [run.innerRuns, run.oldRuns, run.newRuns].filter((side): side is MdRun[] => !!side?.length);
+  const roomless = (run: MdRun): boolean => run.type === 'critic_comment' || isCommentMarkerRun(run)
+    || sidesOf(run).length > 0 && sidesOf(run).every(side => side.every(roomless));
+  // Whether runs from k, toward `step`, have a line break first, past those
+  // that take no room
+  const breakFrom = (runs: MdRun[], k: number, step: number): boolean => {
+    while (k >= 0 && k < runs.length && roomless(runs[k])) k += step;
+    if (k < 0 || k === runs.length) return false;
+    const sides = sidesOf(runs[k]);
+    return isBreakRun(runs[k])
+      || sides.length > 0 && sides.every(side => breakFrom(side, step < 0 ? side.length - 1 : 0, step));
+  };
   const edgeFrom = (i: number, step: number, atEdge: boolean) => {
     let j = i + step;
     while (j >= 0 && j < source.length && roomless(source[j])) j += step;
-    return j < 0 || j === source.length ? atEdge : isBreakRun(source[j]);
+    return j < 0 || j === source.length ? atEdge : breakFrom(source, j, step);
   };
   // Text of bodies and range markers alone, which Word gets nothing of to
   // revise or highlight, so they take its run's place, where the lines

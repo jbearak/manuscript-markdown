@@ -7515,6 +7515,23 @@ describe('Track changes (CriticMarkup)', () => {
       expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(expected + '\n');
     });
 
+    test('drops the line break before a comment body on its own line after a revision that ends in one', async () => {
+      // The revision before it was no line break, though its text ended in one
+      const { docx } = await convertMdToDocx('---\nbreaks: true\n---\n\n{#1}x{/1}{++a\n++}{++{#1>>c<<}\nb++}');
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      expect(xml.match(/<w:br\/>/g)).toHaveLength(1);
+    });
+
+    test.each([
+      ['{--<u>{++a\n{>>c<<}b++}</u>--}', '<w:u w:val="single"/>'],
+      ['{--==x {++a\n{>>c<<}b++}==--}', '<w:highlight w:val="yellow"/>'],
+    ])('keeps the formatting of a deleted line break beside a comment in %j', async (md, rPr) => {
+      // The deletion around the break had the outer deletion's formatting alone
+      const { docx } = await convertMdToDocx(md);
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      expect(xml).toContain('<w:r><w:rPr>' + rPr + '</w:rPr><w:delText xml:space="preserve"> </w:delText></w:r>');
+    });
+
     test('keeps the new text of a substitution split at display math whose old text is a comment body', async () => {
       const math = (tex: string) => '$' + '$' + tex + '$' + '$';
       const { docx } = await convertMdToDocx('{#1}x{/1}\n\n{~~{#1>>c<<} ' + math('u') + '~>a ' + math('v') + '~~}');
