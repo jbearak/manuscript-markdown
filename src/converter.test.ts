@@ -9314,6 +9314,45 @@ describe('Highlights across runs', () => {
     expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim()).toBe(md);
   });
 
+  const noteRef = { type: 'footnote_ref', noteId: '1', noteKind: 'footnote', commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, highlight: true } } as ContentItem;
+
+  test.each([
+    ['a highlight', [run('http://'), run(' b', { highlight: true })], 'http\\://== b=='],
+    ['a highlight after text', [run('x ftp://'), run('\tb', { highlight: true, highlightColor: 'red' })], 'x ftp\\://==\tb=={red}'],
+    ['struck text in a highlight', [run('https://'), run(' b', { highlight: true, strikethrough: true })], 'https\\://~~== b==~~'],
+    ['highlighted code', [run('http://'), run(' b', { highlight: true, code: true })], 'http\\://==` b`=='],
+    ['highlighted superscript', [run('http://'), run(' b', { highlight: true, superscript: true })], 'http\\://==<sup> b</sup>=='],
+    ['runs highlighted alike', [run('http://'), run(' b', { highlight: true, bold: true }), run('c', { highlight: true })], 'http\\://== **b**c=='],
+    ['runs highlighted alike with no space', [run('http://'), run('b', { highlight: true, underline: true }), run('c', { highlight: true })], 'http\\://==<u>b</u>c=='],
+    ['a highlighted note reference', [run('http://'), noteRef], 'http\\://==[^1]=='],
+    ['bold text and a note reference highlighted alike', [run('http://'), run('b', { highlight: true, bold: true }), noteRef], 'http\\://==**b**[^1]=='],
+  ])('escapes the scheme of a URL before %s, whose == goes before the text and the space at its start', async (_name, items, md) => {
+    // Export's linkify read the == on with the URL, as http://==, which took
+    // the highlight's opener, so the highlight's text lost it and came back
+    // with its closer as text, as http://== b\==
+    const markdown = buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim();
+    expect(markdown).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim()).toBe(md);
+  });
+
+  test.each([
+    ['a table\'s cell', '| h |\n|---|\n| XX |', '| h |\n| --- |\n| http\\://== b== |\n'],
+    ['a comment\'s range', 'P {==XX==}{>>c<<} Q', 'P {==http\\://== b====}{>>c<<} Q\n'],
+    ['a substitution', 'P {~~x~>XX~~} Q', 'P {~~x~>http\\://== b==~~} Q\n'],
+  ])('escapes the scheme of a URL before a highlight\'s space in %s', async (_name, template, md) => {
+    expect(await fromWord(plain('http://') + highlighted(' b'), template)).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    ['emphasis around it', [run('http://'), run(' b', { highlight: true, bold: true })], 'http://**== b==**'],
+    ['a space before it', [run('http://'), run(' b', { bold: true })], 'http:// **b**'],
+  ])('writes the scheme of a URL before a highlight or emphasis with %s as it is', (_name, items, md) => {
+    // Whose * ends the URL before the highlight's ==, as the space does
+    // before emphasis
+    expect(buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim()).toBe(md);
+  });
+
   const keyless = (commentIds: string[] = [], revision?: RevisionInfo) =>
     ({ type: 'citation', text: '{1}', pandocKeys: [], commentIds: new Set(commentIds), formatting: DEFAULT_FORMATTING, ...(revision ? { revision } : {}) }) as ContentItem;
 

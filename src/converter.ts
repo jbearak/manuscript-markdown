@@ -562,6 +562,20 @@ function formattingDelimiters(fmt: RunFormatting): [string, string] {
   return [parts.map(part => part[0]).join(''), parts.map(part => part[1]).reverse().join('')];
 }
 
+/** The delimiters Markdown writes before a run's text for its formatting,
+ *  as wrapFormatting writes them, outermost first, split at the whitespace
+ *  the text starts with: those before it and those after. Emphasis and
+ *  strikethrough leave the whitespace outside them (see
+ *  wrapMarkdownDelimited); a highlight, an underline's or a script's tag
+ *  and code hold it, so they and all around them go before it. A
+ *  highlight `around` the rest, as of a run that joins its neighbours'
+ *  (see joinsHighlight), comes first. */
+function openingDelimiters(fmt: RunFormatting, around = false): [string, string] {
+  const open = around && fmt.highlight ? '==' + formattingDelimiters({ ...fmt, highlight: false })[0] : formattingDelimiters(fmt)[0];
+  if (fmt.code || fmt.superscript || fmt.subscript || fmt.underline || (fmt.highlight && !around)) return [open, ''];
+  return fmt.highlight ? ['==', open.slice(2)] : ['', open];
+}
+
 /** Whether a run's text is all its Markdown is, with no delimiters around it */
 function isBareRun(item: ContentItem | undefined): item is ContentItem & { type: 'text' } {
   return item?.type === 'text' && !item.href && !hasFormatting(item.formatting);
@@ -668,12 +682,14 @@ export class RunsAfter {
    *  far as a URL's host at its end could go on into: its closing
    *  delimiters, and each run's text in its own, to the first space or /
    *  in it, which ends a host, and a space for anything else, as a tracked
-   *  change's or a comment's delimiters, a strikethrough's tag, or the
-   *  whitespace at a run's edge, which goes outside its delimiters, which
-   *  no host holds, at most `limit` characters of text in all. '' where
-   *  the runs aren't known. A highlight's text export reads apart, but for
-   *  the runs highlighted alike after it, which it may join (see
-   *  joinHighlights), so their delimiters are read without it. */
+   *  change's or a comment's delimiters, a strikethrough's tag, the
+   *  whitespace at a run's edge, which no host holds, after the delimiters
+   *  that hold it, as a highlight's (see openingDelimiters), or a
+   *  highlighted note reference or citation without keys, after its ==,
+   *  at most `limit` characters of text in all. '' where the runs aren't
+   *  known. A highlight's text export reads apart, but for the runs
+   *  highlighted alike after it, which it may join (see joinHighlights),
+   *  so their delimiters are read without it. */
   hostAfter(limit: number): string {
     if (!this.runs || this.prefix) return '';
     const { items, at } = this.runs;
@@ -681,6 +697,18 @@ export class RunsAfter {
     if (self?.type !== 'text' || self.href) return '';
     const color = highlightColorOf(self);
     const delimiters = (fmt: RunFormatting) => formattingDelimiters(color ? { ...fmt, highlight: false } : fmt);
+    // Whether the highlight of `run`, at k, goes around the rest of its
+    // formatting, its == first, as where it joins the runs after it (see
+    // joinsHighlight) or a note reference or citation (see
+    // renderHighlightGroup): read so wherever the item after it, past
+    // inline equations, is highlighted alike
+    const around = (run: ContentItem & { type: 'text' }, k: number): boolean => {
+      let after = items[k + 1];
+      for (let m = k + 2; after?.type === 'math' && !after.display; m++) after = items[m];
+      return (after?.type === 'text' || after?.type === 'citation' || after?.type === 'footnote_ref')
+        && highlightColorOf(after) === highlightColorOf(run) && revisionsEqual(after.revision, run.revision)
+        && commentSetsEqual(after.commentIds, run.commentIds);
+    };
     let previous: ContentItem & { type: 'text' } = self;
     let markdown = '';
     let read = 0;
@@ -688,7 +716,10 @@ export class RunsAfter {
       const item = items[k];
       const next: (ContentItem & { type: 'text' }) | undefined = item?.type === 'text' && !item.href && revisionsEqual(item.revision, previous.revision)
         && commentSetsEqual(item.commentIds, previous.commentIds) && (!color || highlightColorOf(item) === color) ? item : undefined;
-      const open = next ? delimiters(next.formatting)[0] : '';
+      // Its delimiters before the whitespace at its start, and after it
+      const [held, unheld] = !next ? ['', '']
+        : openingDelimiters(color ? { ...next.formatting, highlight: false } : next.formatting, !color && next.formatting.highlight && around(next, k));
+      const open = held + unheld;
       const following = next ? open + next.text : ' ';
       // A ~~ that would close after punctuation, as after https://, before
       // a letter, or open before punctuation after one, is a tag (see
@@ -699,8 +730,16 @@ export class RunsAfter {
       const space = /\s$/.test(previous.text);
       if (closing.startsWith('~~') && !space && tag(previous.text.slice(-1), following)) return markdown + ' ';
       markdown += closing;
-      if (!next || space || /^\s/.test(next.text)) return markdown + ' ';
-      if (open.endsWith('~~') && tag(next.text, (markdown || previous.text).slice(-1))) return markdown + ' ';
+      if (!next) {
+        // A highlighted note reference's or citation's ==, but for one with
+        // keys, which a space goes before (see citationSeparator)
+        const highlighted = !color && !space && (item?.type === 'footnote_ref' || (item?.type === 'citation' && item.pandocKeys.length === 0))
+          && !!highlightColorOf(item) && revisionsEqual(item.revision, previous.revision) && commentSetsEqual(item.commentIds, previous.commentIds);
+        return markdown + (highlighted ? '==' : '') + ' ';
+      }
+      if (space) return markdown + ' ';
+      if (/^\s/.test(next.text)) return markdown + held + ' ';
+      if (open.endsWith('~~') && tag(next.text, (markdown + open.slice(0, -2) || previous.text).slice(-1))) return markdown + ' ';
       const part = next.text.slice(0, limit - read);
       const end = part.search(/[\s/]/);
       if (end !== -1) return markdown + open + part.slice(0, end + 1);
