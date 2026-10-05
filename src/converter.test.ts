@@ -9105,8 +9105,8 @@ describe('Markdown across Word runs', () => {
 
 describe('Highlights across runs', () => {
   const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
-  const fromWord = async (runs: string) => {
-    const zip = await JSZip.loadAsync((await convertMdToDocx('XX')).docx);
+  const fromWord = async (runs: string, md = 'XX') => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
     const xml = await zip.file('word/document.xml')!.async('string');
     const broken = xml.replace(/<w:r>(?:(?!<w:r>).)*?<w:t[^>]*>XX<\/w:t><\/w:r>/s, runs);
     expect(broken).not.toBe(xml);
@@ -9171,11 +9171,40 @@ describe('Highlights across runs', () => {
   });
 
   test.each([
-    'P {====a=={red}==  ====}{>>c<<} Q\n', 'P {====  ====a=={red}==}{>>c<<} Q\n', 'P {====a== ==  =={red}==}{>>c<<} Q\n',
-  ])('keeps %j, highlights side by side in a comment, as it is', async (md) => {
-    // Highlighted spaces alone, which kept their highlight, side by side
-    // with another color's
+    ['before another color\'s', highlighted('  ') + highlighted('b', '', 'red'), 'XX', '&#32;&#32;==b=={red}\n'],
+    ['after another color\'s', highlighted('a', '', 'red') + highlighted('  ') + highlighted('b', '', 'blue'), 'XX', '==a=={red}  ==b=={blue}\n'],
+    ['at the end of a comment\'s text', highlighted('a', '', 'red') + highlighted('  '), 'P {==XX==}{>>c<<} Q', 'P {====a=={red}  ==}{>>c<<} Q\n'],
+    ['at the start of a comment\'s text', highlighted('  ') + highlighted('a', '', 'red'), 'P {==XX==}{>>c<<} Q', 'P {==  ==a=={red}==}{>>c<<} Q\n'],
+  ])('writes highlighted spaces alone without the highlight %s', async (_name, runs, template, md) => {
+    // Their == ran into the other highlight's, as in ==  ====b=={red},
+    // which navigation and the grammar read as no highlight, the other's
+    // either
+    expect(await fromWord(runs, template)).toBe(md);
     expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('keeps a highlight\'s edge space in a comment beside another color\'s', async () => {
+    const md = 'P {====a== ==  =={red}==}{>>c<<} Q\n';
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    ['a }', highlighted('a ') + highlighted('}', '<w:b/>'), '==a ==**==}==**\n'],
+    ['an =', highlighted('a ') + highlighted('b', '<w:i/>') + highlighted('=c'), '==a ==*==b==*===c==\n'],
+  ])('joins no highlight through %s', async (_name, runs, md) => {
+    // Which navigation and the grammar read no highlight around, so they
+    // read none around its neighbours' text either
+    expect(await fromWord(runs)).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('reads a highlighted run of many line breaks in linear time', async () => {
+    // A regex with a lazy middle found the breaks at its edges, which past
+    // some thousands of them found no match and threw
+    const start = performance.now();
+    expect(await fromWord('<w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>a</w:t>' + '<w:br/>'.repeat(16000) + '<w:t>b</w:t></w:r>'))
+      .toBe('==a' + '\\\n'.repeat(16000) + 'b==\n');
+    expect(performance.now() - start).toBeLessThan(3000);
   });
 
   test('keeps a highlight\'s edge space outside it before a comment\'s ==}', async () => {

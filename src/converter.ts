@@ -1994,10 +1994,15 @@ function markdownHighlightColor(fmt: RunFormatting): string | undefined {
  *  which emphasis keeps out (see wrapMarkdownDelimited). One that `joins`
  *  its neighbour's takes marks of its own (see joinHighlights). */
 function wrapHighlight(markdown: string, color: string | undefined, joins = false): string {
-  const [, leading, core, trailing] = /^((?:\\\n)*)(.*?)((?:\\\n)*)$/s.exec(markdown)!;
-  if (!core) return markdown;
-  return leading + '==' + (joins ? HIGHLIGHT_JOIN_OPEN : HIGHLIGHT_OPEN) + core + (joins ? HIGHLIGHT_JOIN_CLOSE : HIGHLIGHT_CLOSE) + '=='
-    + (color && color !== 'yellow' ? '{' + color + '}' : '') + trailing;
+  // The line breaks at its edges, from its ends, as a regex with a lazy
+  // middle would scan the text for each
+  let start = 0;
+  while (markdown.startsWith('\\\n', start)) start += 2;
+  let end = markdown.length;
+  while (end - 2 >= start && markdown.startsWith('\\\n', end - 2)) end -= 2;
+  if (start === end) return markdown;
+  return markdown.slice(0, start) + '==' + (joins ? HIGHLIGHT_JOIN_OPEN : HIGHLIGHT_OPEN) + markdown.slice(start, end)
+    + (joins ? HIGHLIGHT_JOIN_CLOSE : HIGHLIGHT_CLOSE) + '==' + (color && color !== 'yellow' ? '{' + color + '}' : '') + markdown.slice(end);
 }
 
 /** `text` as Markdown with Word's formatting. `lineStart` says the text
@@ -2121,7 +2126,10 @@ function joinsHighlight(segment: ContentItem[], i: number, start: number, end: n
   let joins = byRange.get(key);
   if (!joins) {
     const joinable = (item: ContentItem | undefined): item is ContentItem & { type: 'text' } =>
-      item?.type === 'text' && !!item.formatting.highlight && !item.href && item.text !== '\\\n' && !item.formatting.code;
+      item?.type === 'text' && !!item.formatting.highlight && !item.href && item.text !== '\\\n' && !item.formatting.code
+      // A } or =, which navigation and the grammar read no highlight
+      // around, as they would then read none around its neighbours' text
+      && !/[}=]/.test(item.text);
     const alike = (item: ContentItem & { type: 'text' }, other: ContentItem | undefined): boolean => joinable(other)
       && other.formatting.highlightColor === item.formatting.highlightColor
       && commentSetsEqual(other.commentIds, item.commentIds) && revisionsEqual(other.revision, item.revision);
@@ -2217,13 +2225,17 @@ function resolveEmphasis(markdown: string): string {
   // Whitespace at a highlight's edge goes outside it, as before it held it,
   // next to an = outside it, as of the text, another highlight's == or a
   // comment's ==}, which navigation and the grammar read with the
-  // highlight's own, so ==a ====b=={red} as no highlight, and export a
-  // comment's {====a=={red}==b ====} as one highlight in it. Not all of
-  // it, which would leave none. From where the whitespace starts, so each
-  // is read once.
+  // highlight's own, so ==a ====b=={red} as no highlight. Not all of it,
+  // which would leave none. From where the whitespace starts, so each is
+  // read once.
   markdown = joinHighlights(markdown)
     .replace(/(?<=[^\s\u0005])([^\S\n]+)\u0006==(?==)/g, (_m, space: string) => '\u0006==' + space)
-    .replace(/(?<==)==\u0005([^\S\n]+)(?=[^\s\u0006])/g, (_m, space: string) => space + '==\u0005');
+    .replace(/(?<==)==\u0005([^\S\n]+)(?=[^\s\u0006])/g, (_m, space: string) => space + '==\u0005')
+    // Whitespace a highlight holds alone next to another's ==, as in
+    // ==  ====b=={red}, goes without it, as before, where navigation and the
+    // grammar would read no highlight, the other's either
+    .replace(/(?<==)==\u0005([^\S\n]+)\u0006==(?:\{[a-z0-9-]+\})?|==\u0005([^\S\n]+)\u0006==(?==)/g,
+      (_m, before: string | undefined, after: string | undefined) => before ?? after ?? '');
   const closeAt = new Map<number, number>();
   const opens: number[] = [];
   for (let i = 0; i < markdown.length; i++) {
