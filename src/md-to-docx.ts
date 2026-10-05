@@ -2710,36 +2710,28 @@ function codeBlockLines(run: MdRun): MdRun[] {
 
 const HTML_AROUND_TABLE_WARNING = 'HTML around a table in its HTML block not shown in Word (kept in the Markdown on round-trip).';
 
-/** A run's text as Word holds it, as import reads it in a table's cell: a
- *  text run's, and the text of a tracked change, both sides of one that
- *  substitutes, and of a highlight, but no math, citation or comment */
-const runText = (run: MdRun): string => {
-  const inner = (runs: MdRun[] | undefined, text: string) => runs ? runs.map(runText).join('') : text;
-  if (run.type === 'text') return run.text;
-  if (run.type === 'critic_add' || run.type === 'critic_del' || run.type === 'critic_highlight') return inner(run.innerRuns, run.text);
-  if (run.type === 'critic_sub') return inner(run.oldRuns, run.text) + inner(run.newRuns, run.newText ?? '');
-  return '';
-};
-
-const cellText = (cell: MdTableCell): string => cell.runs.map(runText).join('');
-
-/** A table's first row's text, which import compares with the table's, to
- *  put the HTML around it back with no other table, as one Word added or
- *  deleted would shift the tables' indices: its cells' count and text, as
- *  Word holds it, with no breaks, comments or math, and spaces run together.
- *  Its cells are those generateTable writes, to the grid's width, with an
- *  empty one for each column the row doesn't reach. */
-function tableFirstRow(rows: MdTableRow[]): string {
-  const columns = tableGridColumns(rows);
-  const texts: string[] = [];
-  let gridCol = 0;
-  for (const cell of rows[0]?.cells ?? []) {
-    if (gridCol >= columns) break;
-    texts.push(cellText(cell).replace(/\s+/g, ' ').trim());
-    gridCol += cell.colspan || 1;
-  }
-  for (; gridCol < columns; gridCol++) texts.push('');
-  return texts.length + ':' + texts.join('|');
+/** The text of each cell of each row of a table generateTable wrote, as
+ *  import reads it (see tableCellText in converter.ts): its runs' text,
+ *  shown or deleted, as a tracked change's, with a tab as one, but not a
+ *  hidden run's, as an HTML comment's, or a field's, as a citation's, which
+ *  import reads as what they are, and no cell that goes on a merge above */
+function wordTableTexts(xml: string): string[][] {
+  return [...xml.matchAll(/<w:tr(?:\s[^>]*)?>([\s\S]*?)<\/w:tr>/g)].map(row => [...row[1].matchAll(/<w:tc(?:\s[^>]*)?>([\s\S]*?)<\/w:tc>/g)]
+    .filter(cell => !/<w:vMerge\/>/.test(cell[1]))
+    .map(cell => {
+      let text = '';
+      let fields = 0;
+      for (const run of cell[1].matchAll(/<w:r(?:\s[^>]*)?>([\s\S]*?)<\/w:r>/g)) {
+        if (run[1].includes('w:fldCharType="begin"')) fields++;
+        else if (run[1].includes('w:fldCharType="end"')) fields = Math.max(0, fields - 1);
+        else if (fields === 0 && !run[1].includes('<w:vanish/>')) {
+          for (const piece of run[1].matchAll(/<w:(t|delText)(?:\s[^>]*)?>([^<]*)<\/w:\1>|<w:tab\/>/g)) {
+            text += piece[2] === undefined ? '\t' : decodeHtmlEntities(piece[2]);
+          }
+        }
+      }
+      return text;
+    }));
 }
 
 function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel = 0, warnings?: string[], sourceLines?: string[]): MdToken[] {
@@ -4014,8 +4006,8 @@ export interface DocxGenState {
   tableDigits: Map<number, string>;
   tableDecimalMarks: Map<number, string>;
   tableDigitGroupings: Map<number, string>;
-  tableHtmlAround: Map<number, [string, string, string, string, string]>; // table index -> the HTML before and after it in its block, its first row and contents, and the count of tables alike in both before it
-  tablesAlike: Map<string, number>; // a table's first row and contents -> the tables so far with both
+  tableHtmlAround: Map<number, [string, string, string, string, string, string]>; // table index -> the HTML before and after it in its block, its first row and contents, the count of tables alike in both before it, and its note's kind and ID, or '' in the body
+  tablesAlike: Map<string, number>; // a table's note, first row and contents -> the tables so far with all three
   fontOverrides?: FontOverrides;       // document-level font overrides for table default resolution
   listIndent: 'tab' | 'spaces'; // indentation style for nested list items
   consecutiveReplyParaIds: Set<string>; // parent paraIds whose replies were in consecutive format
@@ -4074,17 +4066,24 @@ function recordTableMetadata(token: MdToken, state: DocxGenState): void {
   if (token.tableDigits !== undefined) state.tableDigits.set(tableIndex, String(token.tableDigits));
   if (token.tableDecimalMark) state.tableDecimalMarks.set(tableIndex, token.tableDecimalMark);
   if (token.tableDigitGrouping) state.tableDigitGroupings.set(tableIndex, token.tableDigitGrouping);
-  // Its first row and text, and the tables before it with both, which
-  // import counts too, but for one it writes as its embed directive, so the
-  // HTML around a table goes back with it, and not with one alike before it
-  const firstRow = tableFirstRow(token.rows ?? []);
-  const contents = tableContentsFingerprint((token.rows ?? []).map(row => row.cells.map(cellText)));
-  const alikeBefore = state.tablesAlike.get(firstRow + '\n' + contents) ?? 0;
-  if (!(token.embedIdx !== undefined && token.embedIdx < state.embedDirectives.length)) state.tablesAlike.set(firstRow + '\n' + contents, alikeBefore + 1);
-  if (token.tableHtmlAround) {
-    state.tableHtmlAround.set(tableIndex, [...token.tableHtmlAround, firstRow, contents, String(alikeBefore)]);
-    if (!state.warnings.includes(HTML_AROUND_TABLE_WARNING)) state.warnings.push(HTML_AROUND_TABLE_WARNING);
-  }
+  if (token.tableHtmlAround && !state.warnings.includes(HTML_AROUND_TABLE_WARNING)) state.warnings.push(HTML_AROUND_TABLE_WARNING);
+}
+
+/** Records the HTML around a table in its block with the table's identity,
+ *  which import finds the table by, to put the HTML back with no other, as
+ *  one Word added or deleted would shift the tables' indices: its first
+ *  row, as its cells' count and text, its text, as the Word table `xml`
+ *  holds it, and the count of tables alike in both before it in the body
+ *  or its note (`scope`), which import counts too, but for one it writes as
+ *  its embed directive */
+function recordTableIdentity(token: MdToken, xml: string, state: DocxGenState, scope: string): void {
+  const texts = wordTableTexts(xml);
+  const firstRow = (texts[0]?.length ?? 0) + ':' + (texts[0] ?? []).map(text => text.replace(/\s+/g, ' ').trim()).join('|');
+  const contents = tableContentsFingerprint(texts);
+  const key = scope + '\n' + firstRow + '\n' + contents;
+  const alikeBefore = state.tablesAlike.get(key) ?? 0;
+  if (!(token.embedIdx !== undefined && token.embedIdx < state.embedDirectives.length)) state.tablesAlike.set(key, alikeBefore + 1);
+  if (token.tableHtmlAround) state.tableHtmlAround.set(state.tableIndex, [...token.tableHtmlAround, firstRow, contents, String(alikeBefore), scope]);
 }
 
 interface CommentEntry {
@@ -7917,21 +7916,26 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     else if (token.type !== 'list_item' && !token.listContinuation) lastTopItem = undefined;
     if (token.type === 'table') {
       recordTableMetadata(token, state);
+      const table = () => {
+        const xml = generateTable(token, state, options, bibEntries, citeprocEngine);
+        recordTableIdentity(token, xml, state, '');
+        return xml;
+      };
       // Table-only landscape: wrap with section breaks (skip if already in fence-based landscape)
       if (token.tableOrientation === 'landscape' && !state.inLandscapeSection && !state.inPortraitSection) {
         state.landscapeTables.add(state.tableIndex);
         emitPortraitBreak();
-        body += generateTable(token, state, options, bibEntries, citeprocEngine);
+        body += table();
         emitLandscapeBreak();
       } else if (token.tableOrientation === 'portrait' && !state.inPortraitSection && !state.inLandscapeSection) {
         // Table-only portrait: wrap with portrait section breaks
         state.portraitTables.add(state.tableIndex);
         emitPortraitBreak();
-        body += generateTable(token, state, options, bibEntries, citeprocEngine);
+        body += table();
         state.portraitBreakOrdinals.add(state.sectionBreakOrdinal);
         emitPortraitBreak();
       } else {
-        body += generateTable(token, state, options, bibEntries, citeprocEngine);
+        body += table();
       }
       // Record embed directive for round-trip if this table came from an embed
       if (token.embedIdx !== undefined && token.embedIdx < state.embedDirectives.length) {
@@ -8532,6 +8536,8 @@ export async function convertMdToDocx(
     const selfRefTag = state.notesMode === 'endnotes' ? 'w:endnoteRef' : 'w:footnoteRef';
     const pStyle = state.notesMode === 'endnotes' ? 'EndnoteText' : 'FootnoteText';
     const refStyle = state.notesMode === 'endnotes' ? 'EndnoteReference' : 'FootnoteReference';
+    // The note's key on import, which counts the tables alike in it
+    const tableScope = (state.notesMode === 'endnotes' ? 'endnote' : 'footnote') + ':' + noteId;
     let bodyXml = '';
     const paragraphPPr = '<w:pPr><w:pStyle w:val="' + pStyle + '"/></w:pPr>';
     // If this footnote is cross-referenced, wrap the self-ref run in a bookmark
@@ -8575,7 +8581,9 @@ export async function convertMdToDocx(
         if (t.type === 'table') {
           recordTableMetadata(t, state);
           bodyXml += '<w:p>' + paragraphPPr + selfRefRun + '</w:p>';
-          bodyXml += generateTable(t, state, options, bibEntries, citeprocEngine);
+          const xml = generateTable(t, state, options, bibEntries, citeprocEngine);
+          recordTableIdentity(t, xml, state, tableScope);
+          bodyXml += xml;
           if (t.embedIdx !== undefined && t.embedIdx < state.embedDirectives.length) {
             state.embedDirectiveMap.set(state.tableIndex, t.embedIdx + '\t' + state.embedDirectives[t.embedIdx]);
           }
@@ -8594,7 +8602,9 @@ export async function convertMdToDocx(
       } else {
         if (t.type === 'table') {
           recordTableMetadata(t, state);
-          bodyXml += generateTable(t, state, options, bibEntries, citeprocEngine);
+          const xml = generateTable(t, state, options, bibEntries, citeprocEngine);
+          recordTableIdentity(t, xml, state, tableScope);
+          bodyXml += xml;
           if (t.embedIdx !== undefined && t.embedIdx < state.embedDirectives.length) {
             state.embedDirectiveMap.set(state.tableIndex, t.embedIdx + '\t' + state.embedDirectives[t.embedIdx]);
           }

@@ -2808,16 +2808,16 @@ export async function extractTableDigitGroupingMapping(data: Uint8Array | JSZip)
 /** Each HTML table's HTML before and after it in its block, which Word
  *  doesn't show, and its first row's text and its contents when export
  *  wrote it (see tableFirstRow and tableContentsFingerprint) */
-export async function extractTableHtmlAroundMapping(data: Uint8Array | JSZip): Promise<Map<string, [string, string, string, string, string]> | null> {
+export async function extractTableHtmlAroundMapping(data: Uint8Array | JSZip): Promise<Map<string, [string, string, string, string, string, string]> | null> {
   const json = await extractChunkedCustomProp(data, 'MANUSCRIPT_TABLE_HTML_AROUND');
   if (!json) return null;
   try {
     const parsed: unknown = JSON.parse(json);
     if (!parsed || typeof parsed !== 'object') return null;
-    const mapping = new Map<string, [string, string, string, string, string]>();
+    const mapping = new Map<string, [string, string, string, string, string, string]>();
     for (const [index, around] of Object.entries(parsed)) {
-      if (Array.isArray(around) && around.length === 5 && around.every(part => typeof part === 'string')
-        && (around[0] || around[1])) mapping.set(index, [around[0], around[1], around[2], around[3], around[4]]);
+      if (Array.isArray(around) && around.length === 6 && around.every(part => typeof part === 'string')
+        && (around[0] || around[1])) mapping.set(index, [around[0], around[1], around[2], around[3], around[4], around[5]]);
     }
     return mapping.size > 0 ? mapping : null;
   } catch {
@@ -7025,7 +7025,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
   return lines.join(oneLine ? '' : '\n') + (deferredAll.length > 0 ? '\n\n' + deferredAll.join('\n') : '');
 }
 
-type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string]>; usedTableHtmlAround?: Set<string>; tablesAlike?: Map<string, number>; tablesAlikeRendered?: Map<string, number>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem>; htmlCells?: boolean };
+type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string]>; usedTableHtmlAround?: Set<string>; tablesAlike?: Map<string, number>; tablesAlikeRendered?: Map<string, number>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem>; htmlCells?: boolean };
 
 /**
  * Try to render a table as a GFM pipe table. Returns null if the table is
@@ -7533,8 +7533,8 @@ function pushWithHoistedPrefix(output: string[], directivePrefix: string, body: 
 const tableCellText = (cell: TableRow['cells'][number]): string =>
   cell.paragraphs.flat().map(item => item.type === 'text' ? item.text.replace(/\\\n/g, '') : '').join('');
 
-/** A table's first row's text, as export finds it (see tableFirstRow in
- *  md-to-docx.ts) */
+/** A table's first row's text, as export finds it (see recordTableIdentity
+ *  in md-to-docx.ts) */
 function tableFirstRow(rows: TableRow[]): string {
   const cells = rows[0]?.cells ?? [];
   return cells.length + ':' + cells.map(cell => tableCellText(cell).replace(/\s+/g, ' ').trim()).join('|');
@@ -7615,6 +7615,7 @@ function renderTableOrFallback(
   renderOpts?: RenderOpts,
   storedFormat?: string,
   tableIndex?: number,
+  scope = '',
 ): { directivePrefix: string; body: string; before?: string; after?: string } {
   // A cell holds no range that goes on past it, and a range open around the
   // table, with no item in it, stays open for the text after. A cell's
@@ -7643,20 +7644,20 @@ function renderTableOrFallback(
   // The HTML around an HTML table in its block: the one export wrote with
   // the table, as the tables' indices shift where Word added or deleted one
   // before it, found by the table's first row and text and the count of
-  // tables alike in both before it, each once; or else, where Word edited
-  // the table, the one at its index, if its first row is the table's and
-  // the table it was written with, alike in both, isn't still there. It
-  // goes around a table in another format as blocks of their own, before
-  // its directives.
+  // tables alike in both before it in the body or its note (`scope`), each
+  // once; or else, where Word edited the table, the one at its index, if
+  // its first row is the table's and the table it was written with, alike
+  // in both, isn't still there. It goes around a table in another format as
+  // blocks of their own, before its directives.
   const firstRow = tableFirstRow(item.rows);
   const contents = tableContents(item.rows);
-  const alikeBefore = renderOpts?.tablesAlikeRendered?.get(firstRow + '\n' + contents) ?? 0;
-  renderOpts?.tablesAlikeRendered?.set(firstRow + '\n' + contents, alikeBefore + 1);
+  const alikeBefore = renderOpts?.tablesAlikeRendered?.get(scope + '\n' + firstRow + '\n' + contents) ?? 0;
+  renderOpts?.tablesAlikeRendered?.set(scope + '\n' + firstRow + '\n' + contents, alikeBefore + 1);
   const unused = [...renderOpts?.tableHtmlAroundMapping?.entries() ?? []]
-    .filter(([key, entry]) => entry[2] === firstRow && !renderOpts?.usedTableHtmlAround?.has(key));
+    .filter(([key, entry]) => entry[2] === firstRow && entry[5] === scope && !renderOpts?.usedTableHtmlAround?.has(key));
   const [aroundKey, around] = unused.find(([, entry]) => entry[3] === contents && entry[4] === String(alikeBefore))
     ?? unused.find(([key, entry]) => key === String(tableIndex)
-      && (renderOpts?.tablesAlike?.get(entry[2] + '\n' + entry[3]) ?? 0) <= Number(entry[4])) ?? [];
+      && (renderOpts?.tablesAlike?.get(scope + '\n' + entry[2] + '\n' + entry[3]) ?? 0) <= Number(entry[4])) ?? [];
   if (aroundKey !== undefined) renderOpts?.usedTableHtmlAround?.add(aroundKey);
   const before = around && detachedTableHtml(around[0]);
   const after = around && detachedTableHtml(around[1]);
@@ -8560,7 +8561,7 @@ function joinSpansAtTrackedBreaks(markdown: string, marks: TrackedBreakMarks): s
 export function buildMarkdown(
   content: ContentItem[],
   comments: Map<string, Comment>,
-  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, { label: string; body: ContentItem[]; noteKind: 'footnote' | 'endnote' }>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string]> | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string },
+  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, { label: string; body: ContentItem[]; noteKind: 'footnote' | 'endnote' }>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string]> | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string },
 ): string {
   let breakMarks: TrackedBreakMarks | undefined;
   const marks = () => breakMarks ??= trackedBreakMarks([content, [...comments.values()], options]);
@@ -8810,18 +8811,22 @@ export function buildMarkdown(
   for (const entry of noteEntries) detectGlobalOverlaps(entry.body);
 
   const noteLabels = options?.notes?.assignedLabels;
-  // How many tables in the document have each first row and text, which
-  // the HTML export wrote around one goes to no other while it's there (see
-  // renderTableOrFallback): those the body and then the notes render, by
-  // their indices, but one written as its embed directive, which export
-  // doesn't count
+  // How many tables the body and each note have with each first row and
+  // text, which the HTML export wrote around one goes to no other while
+  // it's there (see renderTableOrFallback): those the body and then the
+  // notes render, by their indices, but one written as its embed directive,
+  // which export doesn't count. A note's are by its key, as export's are.
+  const noteScopes = new Map([...options?.notes?.map ?? []].map(([key, entry]) => [entry, key]));
   const tablesAlike = new Map<string, number>();
   if (options?.tableHtmlAroundMapping) {
     let index = 0;
-    for (const item of [...mergedContent, ...noteEntries.flatMap(entry => entry.body)]) {
-      if (item.type !== 'table') continue;
-      if (!options.embedDirectiveMapping?.get(String(index))) tablesAlike.set(tableIdentity(item.rows), (tablesAlike.get(tableIdentity(item.rows)) ?? 0) + 1);
-      index++;
+    for (const [scope, items] of [['', mergedContent] as const, ...noteEntries.map(entry => [noteScopes.get(entry) ?? '', entry.body] as const)]) {
+      for (const item of items) {
+        if (item.type !== 'table') continue;
+        const key = scope + '\n' + tableIdentity(item.rows);
+        if (!options.embedDirectiveMapping?.get(String(index))) tablesAlike.set(key, (tablesAlike.get(key) ?? 0) + 1);
+        index++;
+      }
     }
   }
   const renderOpts = {
@@ -10264,7 +10269,7 @@ export function buildMarkdown(
             continue;
           } else {
             const noteStoredFormat = noteRenderOpts?.tableFormatMapping?.get(String(tableIndex));
-            const noteTableResult = renderTableOrFallback(item, comments, options, noteRenderOpts, noteStoredFormat, tableIndex);
+            const noteTableResult = renderTableOrFallback(item, comments, options, noteRenderOpts, noteStoredFormat, tableIndex, noteScopes.get(entry));
             if (noteTableResult.before) bodyParts.push(noteTableResult.before);
             if (noteTableResult.directivePrefix) {
               bodyParts.push(noteTableResult.directivePrefix.replace(/\n+$/, '') + '\n' + noteTableResult.body);

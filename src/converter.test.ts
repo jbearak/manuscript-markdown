@@ -6353,6 +6353,24 @@ describe('HTML around a table in its block', () => {
     expect(markdown).toContain('\n\n<div><p>Cap</p>\n<table>');
   });
 
+  test('keeps the HTML around a table off a table before it with a citation it has no entry for', async () => {
+    // Export didn't count the citation's text, which Word shows, and import
+    // reads, so the table before took the HTML as the first alike
+    const md = '| [@missing] |\n| --- |\n\n<div><p>Cap</p>\n<table><tr><td>[@missing]</td></tr></table>\n</div>\n';
+    const markdown = await roundTrip(md);
+    expect(markdown.startsWith('| ')).toBe(true);
+    expect(markdown).toContain('\n\n<div><p>Cap</p>\n<table>');
+  });
+
+  test('keeps the HTML around a table in a note off one alike in a note defined after it', async () => {
+    // Export counted the notes' tables in the order they're defined, and
+    // import in the order of their labels, so the first note's took it
+    const md = 'A[^1] B[^2].\n\n[^2]: Two.\n\n    <div>\n' + table('a', '    ') + '\n    </div>\n\n[^1]: One.\n\n' + table('a', '    ') + '\n';
+    const markdown = await roundTrip(md);
+    expect(markdown).toContain('[^1]: One.\n\n    <table>');
+    expect(markdown).toContain('[^2]: Two.\n\n    <div>\n' + table('a', '    ') + '\n    </div>');
+  });
+
   test('keeps the HTML around a table Word edits, alike an embedded table, at its index', async () => {
     // The embedded table, which export doesn't count, kept it from the table
     const resolver = { readFile: () => new TextEncoder().encode('H\na\n'), resolveRelative: (_base: string, relative: string) => relative };
