@@ -6300,6 +6300,23 @@ describe('HTML around a table in its block', () => {
     expect(markdown).toBe('<p>Cap B</p>\n<table>\n  <tr>\n    <td>\n      <p>H</p>\n    </td>\n  </tr>\n  <tr>\n    <td>\n      <p>b</p>\n    </td>\n  </tr>\n</table>\n');
   });
 
+  test.each([
+    ['the first to be alike the second', 'a', 'b'],
+    ['the second to be alike the first', 'b', 'a'],
+  ])('keeps the HTML around each of two tables with the same first row after Word edits %s', async (_name, from, to) => {
+    // The edited one took the HTML of the one it was now alike, and that
+    // one none
+    const md = '<p>Cap A</p>\n<table><tr><td>H</td></tr><tr><td>a</td></tr></table>\n\n<p>Cap B</p>\n<table><tr><td>H</td></tr><tr><td>b</td></tr></table>\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace('<w:t>' + from + '</w:t>', '<w:t>' + to + '</w:t>');
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    const table = (text: string) => '<table>\n  <tr>\n    <td>\n      <p>H</p>\n    </td>\n  </tr>\n  <tr>\n    <td>\n      <p>' + text + '</p>\n    </td>\n  </tr>\n</table>\n';
+    expect(markdown).toBe('<p>Cap A</p>\n' + table(from === 'a' ? 'b' : 'a') + '\n<p>Cap B</p>\n' + table(from === 'a' ? 'b' : 'a'));
+  });
+
   test('puts no HTML around a table after Word deletes one before it whose first row\'s text is alike, cut apart elsewhere', async () => {
     // Both first rows read as 2:A|B|C, and the table at the deleted one's
     // index took its caption
@@ -6533,6 +6550,11 @@ describe('HTML around a table in its block', () => {
     // Whose lines a paragraph's lost their indents
     ['a <pre> that goes on past a line of text', '', '\nSource <pre>if ready:\n    run()\n</pre> done\n', '', '\n\nSource\n<pre>if ready:\n    run()\n</pre> done\n'],
     ['a <pre> on a line of text that ends on it', '', '\nSource <pre>a</pre> <b>b</b>\n', '', '\n\nSource <pre>a</pre> <b>b</b>\n'],
+    // Which the line of a tag in it ended, and escaped
+    ['a comment over lines, one of which starts with a tag', '', '\nSource <!-- hidden\n<div>secret</div> -->\n', '', '\n\nSource <!-- hidden\n<div>secret</div> -->\n'],
+    ['a <pre> on a line of text in a comment', '', '\nSource <!-- a\nb <pre> -->\nc\n', '', '\n\nSource <!-- a\nb <pre> -->\nc\n'],
+    // Which went as one, as between blocks
+    ['blank lines in a <pre>', '<pre>a\n\n\nb</pre>', '', '<pre>a\n\n\nb</pre>\n\n', '\n'],
   ])('keeps %s around a table that leaves HTML, as it read', async (_name, beforeHtml, afterHtml, beforeMd, afterMd) => {
     // A comment that reads as no directive went, as one that does, and text
     // read as Markdown, as # Source as a heading
@@ -6551,6 +6573,9 @@ describe('HTML around a table in its block', () => {
     // Each escaped heading made the line of one tag after it text, and
     // the lines after it were read again
     ['that leaves HTML, of headings and lines of one tag', true, (i: number) => i % 2 ? '<span>' : '# Source'],
+    // Each line in a comment, or with a tag, was read to its end
+    ['that leaves HTML, in a comment', true, (i: number) => i === 0 ? 'Source <!-- a' : '<div>' + i + ' <pre> x'],
+    ['that leaves HTML, with a <pre> on each line', true, (i: number) => 'line ' + i + ' <b>b</b> <pre> x'],
   ])('writes many lines of HTML after a table %s in linear time', async (_name, tracked, line) => {
     // Each line's escape indexed all the lines after it, even for a table
     // that kept the HTML

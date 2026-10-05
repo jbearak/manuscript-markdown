@@ -7034,19 +7034,28 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
 }
 
 /** The keys of the HTML around tables export wrote, by the scope, first
- *  row, text and count of tables alike before of the table each was written
- *  with, which renderTable looks a table up by, once for each mapping, as
- *  reading them all for each table took time in the square of their number */
-const tableHtmlAroundIndexes = new WeakMap<Map<string, [string, string, string, string, string, string]>, Map<string, string[]>>();
-function tableHtmlAroundIndex(mapping: Map<string, [string, string, string, string, string, string]>): Map<string, string[]> {
+ *  row and text of the table each was written with (`alike`), in order,
+ *  and by those and the count of tables alike before it (`nth`), and the
+ *  count of tables alike export wrote, as far as the last with HTML around
+ *  it (`written`), which renderTable looks a table up by, once for each
+ *  mapping, as reading them all for each table took time in the square of
+ *  their number */
+type TableHtmlAroundIndex = { alike: Map<string, string[]>; nth: Map<string, string[]>; written: Map<string, number> };
+const tableHtmlAroundIndexes = new WeakMap<Map<string, [string, string, string, string, string, string]>, TableHtmlAroundIndex>();
+function tableHtmlAroundIndex(mapping: Map<string, [string, string, string, string, string, string]>): TableHtmlAroundIndex {
   let index = tableHtmlAroundIndexes.get(mapping);
   if (!index) {
-    index = new Map();
+    index = { alike: new Map(), nth: new Map(), written: new Map() };
+    const add = (keys: Map<string, string[]>, id: string, key: string) => {
+      const known = keys.get(id);
+      if (known) known.push(key);
+      else keys.set(id, [key]);
+    };
     for (const [key, entry] of mapping) {
-      const id = entry[5] + '\n' + entry[2] + '\n' + entry[3] + '\n' + entry[4];
-      const keys = index.get(id);
-      if (keys) keys.push(key);
-      else index.set(id, [key]);
+      const id = entry[5] + '\n' + entry[2] + '\n' + entry[3];
+      add(index.alike, id, key);
+      add(index.nth, id + '\n' + entry[4], key);
+      index.written.set(id, Math.max(index.written.get(id) ?? 0, Number(entry[4]) + 1));
     }
     tableHtmlAroundIndexes.set(mapping, index);
   }
@@ -7627,18 +7636,39 @@ function htmlLinesAsText(lines: string[]): string[] {
     .join('').split('\n').map(line => SOURCES_HEADING_RE.test(line) ? line.replace('S', '&#83;') : line);
 }
 
-/** Where on a line of text an element whose text keeps its whitespace, as a
- *  <pre>'s, starts that goes on past the line, or -1: on the line of text,
+/** For each line of the HTML around a table, read as the browser read it
+ *  in the table's block, whether it starts in a comment (`inComment`), and
+ *  where on it an element whose text keeps its whitespace, as a <pre>'s,
+ *  starts that goes on past it, or -1 (`preformatted`): on a line of text,
  *  its lines would be a paragraph's, with their indents gone. */
-function preformattedPastLine(line: string): number {
-  const ends = [...line.matchAll(new RegExp(HTML_BLOCKS_WITH_END[0][1].source, 'gi'))];
-  const lastEnd = ends.length > 0 ? ends[ends.length - 1].index : -1;
-  const start = new RegExp(HTML_BLOCKS_WITH_END[0][0].source.replace(/^\^/, ''), 'iy');
-  for (let i = 0; i < line.length; i = htmlPieceAt(line, i).end) {
-    start.lastIndex = i;
-    if (i > 0 && i > lastEnd && start.test(line)) return i;
+function detachedHtmlLines(lines: string[]): { inComment: boolean[]; preformatted: number[] } {
+  const text = lines.join('\n');
+  const starts: number[] = [];
+  for (let k = 0, at = 0; k < lines.length; at += lines[k++].length + 1) starts.push(at);
+  const inComment = lines.map(() => false);
+  const preformatted = lines.map(() => -1);
+  // The last end of such an element on each line, after which one starts
+  // none that goes on past it
+  const lastEnd = lines.map(() => -1);
+  let line = 0;
+  for (const match of text.matchAll(new RegExp(HTML_BLOCKS_WITH_END[0][1].source, 'gi'))) {
+    while (line + 1 < starts.length && starts[line + 1] <= match.index) line++;
+    lastEnd[line] = match.index;
   }
-  return -1;
+  const start = new RegExp(HTML_BLOCKS_WITH_END[0][0].source.replace(/^\^/, ''), 'iy');
+  line = 0;
+  for (let i = 0; i < text.length;) {
+    const piece = htmlPieceAt(text, i);
+    while (line + 1 < starts.length && starts[line + 1] <= i) line++;
+    start.lastIndex = i;
+    if (piece.kind === 'comment') {
+      for (let k = line + 1; k < starts.length && starts[k] < piece.end; k++) inComment[k] = true;
+    } else if (preformatted[line] === -1 && i > lastEnd[line] && start.test(text) && /\S/.test(text.slice(starts[line], i))) {
+      preformatted[line] = i - starts[line];
+    }
+    i = piece.end;
+  }
+  return { inComment, preformatted };
 }
 
 /** HTML from a table's block with each comment ending where the browser
@@ -7696,6 +7726,7 @@ function htmlBlockEnd(lines: string[], k: number, inParagraph: boolean): number 
  *  one tag starts no block. */
 function detachedTableHtml(html: string): string | undefined {
   const lines = withMarkdownCommentEnds(html).split('\n');
+  const { inComment, preformatted } = detachedHtmlLines(lines);
   const out: string[] = [];
   // The lines of text since the last that isn't, which escape together
   let texts: string[] = [];
@@ -7706,21 +7737,25 @@ function detachedTableHtml(html: string): string | undefined {
   let inParagraph = false;
   for (let k = 0; k < lines.length; k++) {
     const line = lines[k];
-    const end = /\S/.test(line) ? htmlBlockEnd(lines, k, inParagraph) : -1;
+    // A comment a line of text starts goes on in it, whatever its lines
+    // start with
+    const end = /\S/.test(line) && !(inComment[k] && texts.length > 0) ? htmlBlockEnd(lines, k, inParagraph) : -1;
     if (end === -1) {
       if (parseEmbedDirective(line)) continue;
       // Which starts a line of its own, an HTML block to its end
-      const preformatted = preformattedPastLine(line);
-      if (preformatted > 0) {
-        texts.push(line.slice(0, preformatted));
-        lines[k--] = line.slice(preformatted);
+      if (preformatted[k] > 0) {
+        texts.push(line.slice(0, preformatted[k]));
+        lines[k] = line.slice(preformatted[k]);
+        inComment[k] = false;
+        preformatted[k--] = -1;
         inParagraph = true;
         continue;
       }
       if (/\S/.test(line)) texts.push(line);
       else {
         endTexts();
-        out.push(line);
+        // One blank line between blocks, but those in a block as they are
+        if (out.length > 0 && out[out.length - 1] !== '') out.push('');
       }
       inParagraph = /\S/.test(line);
       continue;
@@ -7740,7 +7775,7 @@ function detachedTableHtml(html: string): string | undefined {
     k = end - 1;
   }
   endTexts();
-  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim() || undefined;
+  return out.join('\n').trim() || undefined;
 }
 
 function renderTableOrFallback(
@@ -7793,8 +7828,15 @@ function renderTableOrFallback(
     && mapping?.get(key)?.[2] === firstRow && mapping.get(key)?.[5] === scope;
   const edited = (key: string) => (renderOpts?.tablesAlike?.get(scope + '\n' + mapping!.get(key)![2] + '\n' + mapping!.get(key)![3]) ?? 0)
     <= Number(mapping!.get(key)![4]);
-  const aroundKey = mapping && (tableHtmlAroundIndex(mapping).get(scope + '\n' + firstRow + '\n' + contents + '\n' + alikeBefore)?.find(unused)
-    ?? (tableIndex !== undefined && unused(String(tableIndex)) && edited(String(tableIndex)) ? String(tableIndex) : undefined));
+  const own = tableIndex !== undefined && unused(String(tableIndex)) && edited(String(tableIndex)) ? String(tableIndex) : undefined;
+  // Where there are more tables alike than export wrote, as where Word
+  // edited one to be alike another, one whose own isn't still there takes
+  // that, and the others what's left of those written alike, in order
+  const index = mapping && tableHtmlAroundIndex(mapping);
+  const identity = scope + '\n' + firstRow + '\n' + contents;
+  const extra = !!index && (renderOpts?.tablesAlike?.get(identity) ?? 0) > (index.written.get(identity) ?? 0);
+  const aroundKey = index && (extra && own !== undefined ? own
+    : index.nth.get(identity + '\n' + alikeBefore)?.find(unused) ?? (extra ? index.alike.get(identity)?.find(unused) : undefined) ?? own);
   const around = aroundKey !== undefined ? mapping?.get(aroundKey) : undefined;
   if (aroundKey !== undefined) renderOpts?.usedTableHtmlAround?.add(aroundKey);
   const r = (body: string) => {
