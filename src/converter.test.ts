@@ -8347,13 +8347,88 @@ describe('Track changes (CriticMarkup)', () => {
         + '<w:p>' + deletedMark + deletedRun('B') + '</w:p>'
         + '<w:p><w:r><w:t>C</w:t></w:r></w:p>',
       )).toBe('A {--x\n\nB\n\n--}C');
-      // Export moves a break that opens a span outside it, so a break with no
-      // deleted text before it stays an ordinary paragraph break
+      // A break with no deleted text before it is a span of its own, which
+      // export keeps, as it moves one that opens a span with text outside it
       expect(await body('<w:p>' + deletedMark + '<w:r><w:t>Hello</w:t></w:r></w:p><w:p><w:r><w:t>World</w:t></w:r></w:p>'))
-        .toBe('Hello\n\nWorld');
+        .toBe('Hello{--\n\n--}World');
       // A deleted heading's mark keeps its own handling
       expect(await body('<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:rPr><w:del w:id="1" w:author="A" w:date="2024-01-01T00:00:00Z"/></w:rPr></w:pPr>'
         + deletedRun('Gone') + '</w:p><w:p><w:r><w:t>Kept</w:t></w:r></w:p>')).toBe('{--# Gone--}\n\nKept');
+    });
+
+    test.each([
+      ['deleted after text', 'a{--\n\n--}b'],
+      ['inserted after text', 'a{++\n\n++}b'],
+      ['after an insertion', '{++a++}{--\n\n--}b'],
+      ['before a deletion', 'a{--\n\n--}{--b--}c'],
+      ['before an insertion', 'a{--\n\n--}{++X++}b'],
+      ['after a comment\'s reference', 'a{>>c<<}{--\n\n--}b'],
+      ['after a comment\'s range', '{==a==}{>>c<<}{--\n\n--}b'],
+      ['in a comment\'s range', 'a{#1}b{--\n\n--}c{/1}\n{#1>>note<<}'],
+      ['at the start of a comment\'s range', 'A{#1}{--\n\n--}b{/1}\n{#1>>note<<}'],
+      ['in a quote', '> a{--\n>\n> --}b'],
+      ['in a list item', '- a{--\n\n  --}b'],
+    ])('keeps a tracked paragraph mark %s in a span of its own', async (_name, md) => {
+      // It came back as a plain paragraph break: the span of the break alone
+      // was written only where it joined a span of the same revision before it
+      const roundTrip = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+      expect(roundTrip.replace(/^---\n[\s\S]*?\n---\n?/, '').trim()).toBe(md);
+    });
+
+    test('keeps a comment over a tracked mark and an empty quoted paragraph after it one range', async () => {
+      // The break alone took the ranges the item right after it was in,
+      // which was the empty paragraph's, so the comment ended before the
+      // break and started again after it, and export wrote two
+      const revision = 'w:author="A" w:date="2024-01-01T00:00:00Z"';
+      const quote = (mark: boolean) => '<w:pPr><w:pStyle w:val="GitHubBlockquote"/>' + (mark ? '<w:rPr><w:del w:id="1" ' + revision + '/></w:rPr>' : '') + '</w:pPr>';
+      const docx = await buildSyntheticDocx(wrapDocumentXml(
+        '<w:p>' + quote(true) + '<w:commentRangeStart w:id="0"/><w:r><w:t>a</w:t></w:r></w:p><w:p>' + quote(true) + '</w:p>'
+        + '<w:p>' + quote(false) + '<w:r><w:t>b</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p>'),
+      { 'word/comments.xml': '<?xml version="1.0"?><w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:comment w:id="0" w:author="B" w:date="2024-01-01T00:00:00Z"><w:p><w:r><w:t>note</w:t></w:r></w:p></w:comment></w:comments>' });
+      const md = (await convertDocx(docx)).markdown;
+      expect(md).toContain('> {#1}a{--\n>\n> --}');
+      expect(md.match(/\{\/1\}/g)).toHaveLength(1);
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+      expect(xml.match(/<w:commentRangeStart /g)).toHaveLength(1);
+    });
+
+    test.each(['indent', 'no-indent'])('keeps the %s override of a paragraph after a tracked mark', async override => {
+      // The break's text took the paragraph's place, and the override went
+      const md = 'a\n\n<!-- ' + override + ' -->\nb\n';
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+      const xml = await zip.file('word/document.xml')!.async('string');
+      const tracked = xml.replace(/(<w:p [^>]*>)((?:(?!<\/w:p>).)*?<w:t>a<\/w:t>)/, '$1<w:pPr><w:rPr><w:del w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"/></w:rPr></w:pPr>$2');
+      expect(tracked).not.toBe(xml);
+      zip.file('word/document.xml', tracked);
+      expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
+    });
+
+    test('keeps a thematic break after a tracked mark', async () => {
+      // The break's text took the rule's place; the marks on its sides go,
+      // as Markdown has no break between a paragraph and a rule to track
+      const md = 'a\n\n---\n\nb\n';
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+      const xml = await zip.file('word/document.xml')!.async('string');
+      const mark = '<w:rPr><w:del w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"/></w:rPr>';
+      const tracked = xml.replace(/(<w:p [^>]*>)(<w:r><w:t>a<\/w:t>)/, '$1<w:pPr>' + mark + '</w:pPr>$2').replace('</w:pBdr>', '</w:pBdr>' + mark);
+      expect(tracked.split('w:id="99"').length).toBe(3);
+      zip.file('word/document.xml', tracked);
+      expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
+    });
+
+    test('writes many tracked marks in linear time', () => {
+      // Each read the content on its sides through all the others, moved
+      // all the content after it, and read all the Markdown before it
+      const revision = { type: 'deletion' as const, author: 'A', date: '' };
+      const content: ContentItem[] = [];
+      for (let i = 0; i < 128000; i++) {
+        content.push(i === 0 ? { type: 'para' } : { type: 'para', breakRevision: revision });
+        content.push({ type: 'text', text: 'a' + i, commentIds: new Set(), formatting: DEFAULT_FORMATTING });
+      }
+      const start = performance.now();
+      const markdown = buildMarkdown(content, new Map());
+      expect(performance.now() - start).toBeLessThan(3000);
+      expect(markdown.startsWith('a0{--\n\n--}a1{--\n\n--}a2')).toBe(true);
     });
 
     test('CriticMarkup inside math survives a round trip', async () => {

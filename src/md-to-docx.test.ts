@@ -2707,6 +2707,16 @@ describe('preprocessCriticMarkup', () => {
     }
   });
 
+  it('keeps a span of a paragraph break alone where it is, with a quote\'s markers', () => {
+    // The markers counted as text in it, and the break moved out of it,
+    // which left the span empty and the paragraph mark untracked
+    expect(preprocessCriticMarkup('a{--\n\n--}b')).toBe('a{--' + PARA_PLACEHOLDER + '--}b');
+    expect(preprocessCriticMarkup('> a{--\n>\n> --}b')).toBe('> a{--' + PARA_PLACEHOLDER + '--}b');
+    expect(preprocessCriticMarkup('> > a{++\n> >\n> > ++}b')).toBe('> > a{++' + PARA_PLACEHOLDER + '++}b');
+    // A > outside a quote is text, and the span's opener still moves
+    expect(preprocessCriticMarkup('a{++\n>++}')).toBe('a\n\n{++>++}');
+  });
+
   it('does not hoist or protect a substitution without its separator', () => {
     const input = 'Before{~~\nliteral~~}';
     expect(preprocessCriticMarkup(input)).toBe(input);

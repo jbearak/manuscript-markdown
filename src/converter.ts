@@ -1075,7 +1075,9 @@ export type ContentItem =
       link?: number;           // which w:hyperlink, so two to one place stay two links
       revision?: RevisionInfo;
     }
-  | { type: 'citation'; text: string; commentIds: Set<string>; pandocKeys: string[]; revision?: RevisionInfo; formatting?: RunFormatting }
+  // lineStart: the citation starts the paragraph after a tracked break,
+  // which some views of the change join to the text before it
+  | { type: 'citation'; text: string; commentIds: Set<string>; pandocKeys: string[]; revision?: RevisionInfo; formatting?: RunFormatting; lineStart?: boolean }
   | { type: 'table'; rows: TableRow[] }
   | {
       type: 'para';
@@ -5451,16 +5453,23 @@ function textEnd(markdown: string, from: number, end: number): number {
 
 /** The space import puts before a Pandoc citation: none when the text before
  *  it already ends with one in a view the citation shows in, so no view gets
- *  two, as in Seen {++a ++}[@key], or when there is none before it. A view
+ *  two, as in Seen {++a ++}[@key], or when there is none before it on its
+ *  line, after a line break or a tracked paragraph break. A view
  *  without the space then keeps the citation against its text, as Word has it
  *  there. */
-function citationSeparator(precedingMarkdown: string, revision: RevisionInfo | undefined, last?: RevisionSpan): string {
+function citationSeparator(precedingMarkdown: string, citation: Extract<ContentItem, { type: 'citation' }>, last?: RevisionSpan): string {
+  // Where Word starts a paragraph with it, as after a tracked break the
+  // view drops, as in a{--\n\n--}{++[@key]++}, a space would be one at the
+  // paragraph's start
+  if (citation.lineStart) return '';
+  const revision = citation.revision;
   const views = revision?.type === 'addition' ? [true] : revision?.type === 'deletion' ? [false] : [true, false];
   // The span the Markdown ends with gives its last character without a
   // scan, past the formatting its text ends in, before its ++} or --}
   const span = last && last.end === precedingMarkdown.length ? last : undefined;
-  // Nor at the start of a block, where there is no text to space it from
-  return views.some(accepted => [' ', ''].includes(
+  // Nor at the start of a block or a line, where there is no text to space
+  // it from, and a space at a line's start would be lost
+  return views.some(accepted => [' ', '', '\n'].includes(
     span?.revision.type === (accepted ? 'addition' : 'deletion')
       ? precedingMarkdown[textEnd(precedingMarkdown, span.start, span.end - 3) - 1] ?? ''
       : lastVisibleChar(precedingMarkdown, accepted, 0, span ? span.start : precedingMarkdown.length)
@@ -5562,9 +5571,9 @@ function renderHighlightGroup(
       inner += '$' + item.latex + '$';
       mathEnd = inner.length;
     } else if (item.type === 'citation') {
-      if (item.pandocKeys.length > 0 && g === start) lead = citationSeparator(precedingMarkdown, item.revision, last);
+      if (item.pandocKeys.length > 0 && g === start) lead = citationSeparator(precedingMarkdown, item, last);
       inner += item.pandocKeys.length > 0
-        ? (g === start ? '' : citationSeparator(inner, item.revision)) + '[' + item.pandocKeys.join('; ') + ']'
+        ? (g === start ? '' : citationSeparator(inner, item)) + '[' + item.pandocKeys.join('; ') + ']'
         : item.text;
     }
   }
@@ -5611,7 +5620,7 @@ function substitutionItemText(item: SubstitutionItem, precedingText: string, not
   }
   if (item.type === 'citation') {
     return item.pandocKeys.length > 0
-      ? citationSeparator(precedingText, item.revision) + '[' + item.pandocKeys.join('; ') + ']'
+      ? citationSeparator(precedingText, item) + '[' + item.pandocKeys.join('; ') + ']'
       : escapeAfterHighlight(item.text, precedingText);
   }
   return item.display
@@ -6292,7 +6301,7 @@ function renderInlineRange(
     if (item.type === 'citation' && item.commentIds.size === 0) {
       let citeText: string;
       if (item.pandocKeys.length > 0) {
-        const citeSep = citationSeparator(out, item.revision, lastSpan);
+        const citeSep = citationSeparator(out, item, lastSpan);
         citeText = citeSep + '[' + item.pandocKeys.join('; ') + ']';
       } else {
         // Text a highlight's == before it would take, as a {1} for a color
@@ -6360,7 +6369,7 @@ function renderInlineRange(
       let j = i;
       // The space import adds before a citation that opens the range goes
       // before the range, which Word's doesn't cover
-      const lead = item.type === 'citation' && item.pandocKeys.length > 0 ? citationSeparator(out, item.revision, lastSpan) : '';
+      const lead = item.type === 'citation' && item.pandocKeys.length > 0 ? citationSeparator(out, item, lastSpan) : '';
 
       while (j < segment.length) {
         const seg = segment[j];
@@ -6399,7 +6408,7 @@ function renderInlineRange(
         }
         if (seg.type === 'citation') {
           const citeText = seg.pandocKeys.length > 0
-            ? citationSeparator(anchorText || out + lead, seg.revision, anchorSpan) + '[' + seg.pandocKeys.join('; ') + ']'
+            ? citationSeparator(anchorText || out + lead, seg, anchorSpan) + '[' + seg.pandocKeys.join('; ') + ']'
             : escapeAfterHighlight(seg.text, anchorText, inSpanBefore(anchorText, seg, anchorSpan));
           [anchorText, anchorSpan] = appendRevised(anchorText, citeText, seg, anchorSpan);
           j++;
@@ -6469,7 +6478,9 @@ function renderInlineRange(
       // Markdown ends with a line break only after text that does, so it's
       // read only there, as reading it copies Markdown being built
       const prev = segment[i - 1];
-      const lineStart = (out === '' || prev?.type === 'text' && prev.text.endsWith('\n') && out.endsWith('\n')) && !(item.revision && opts?.nested);
+      // Nor after the span it ends with, as of a tracked break alone
+      const lineStart = (out === '' || prev?.type === 'text' && prev.text.endsWith('\n') && lastSpan?.end !== out.length && out.endsWith('\n'))
+        && !(item.revision && opts?.nested);
       // An HTML block starts only a block's text, not a heading's, a table
       // cell's or a tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !opts?.cell && !item.revision;
@@ -6590,7 +6601,7 @@ function renderInlineRangeWithIds(
 
       let citeText: string;
       if (item.pandocKeys.length > 0) {
-        const citeSep = citationSeparator(out, item.revision, lastSpan);
+        const citeSep = citationSeparator(out, item, lastSpan);
         citeText = citeSep + '[' + item.pandocKeys.join('; ') + ']';
       } else {
         // Text a highlight's == before it would take, as a {1} for a color
@@ -6741,7 +6752,9 @@ function renderInlineRangeWithIds(
       // Markdown ends with a line break only after text that does, so it's
       // read only there, as reading it copies Markdown being built
       const prev = segment[i - 1];
-      const lineStart = (out === '' || prev?.type === 'text' && prev.text.endsWith('\n') && out.endsWith('\n')) && !(item.revision && opts?.nested);
+      // Nor after the span it ends with, as of a tracked break alone
+      const lineStart = (out === '' || prev?.type === 'text' && prev.text.endsWith('\n') && lastSpan?.end !== out.length && out.endsWith('\n'))
+        && !(item.revision && opts?.nested);
       // An HTML block starts only a block's text, not a heading's, a table
       // cell's or a tracked change's, after its {++
       const blockStart = lineStart && !opts?.heading && !opts?.cell && !item.revision;
@@ -8103,24 +8116,68 @@ function survivesRevisions(item: ContentItem, type: RevisionInfo['type']): boole
   return false;
 }
 
-/** Inline content on one side of the paragraph break at `index`, through any
- *  further breaks tracked with the same type, since Word joins across those
- *  too, and through a break that opens the new side of a substitution, as in
- *  {~~a\n\nb~>\n\nc~~}, which the same CriticMarkup span holds. Undefined
- *  when a table or other block intervenes. */
-function contentAcrossTrackedBreaks(content: ContentItem[], index: number, step: 1 | -1, type: RevisionInfo['type']): ContentItem[] | undefined {
-  const items: ContentItem[] = [];
-  for (let k = index + step; k >= 0 && k < content.length; k += step) {
+/** The inline content on each side of a tracked paragraph break: whether
+ *  there is any, and whether any of it survives the break's revision type,
+ *  as when Word accepts (for a deletion) or rejects (for an addition) every
+ *  change of that type; undefined where a table or other block intervenes. */
+type TrackedBreakSide = { content: boolean; survives: boolean } | undefined;
+
+/**
+ * The content on each side of each tracked break in `content`, by the
+ * break's paragraph's index (see TrackedBreakSide). A side reads through any
+ * further breaks tracked with the same type, since Word joins across those
+ * too, and through a break that opens the new side of a substitution, as in
+ * {~~a\n\nb~>\n\nc~~}, which the same CriticMarkup span holds. After the
+ * break, a block after the paragraph's text, as the bibliography after the
+ * last paragraph, ends it, and a custom style block's close does; one right
+ * at the break intervenes. One pass each way, for both types at once:
+ * reading each break's sides across a run of breaks took time in the
+ * square of their number.
+ */
+function contentAroundTrackedBreaks(content: ContentItem[]): Map<number, { before: TrackedBreakSide; after: TrackedBreakSide }> {
+  type Side = { content: boolean; survives: boolean; end: 'open' | 'block' | 'none' };
+  const types: RevisionInfo['type'][] = ['addition', 'deletion'];
+  const fresh = (): Side => ({ content: false, survives: false, end: 'none' });
+  const read = (side: Side): TrackedBreakSide => side.end === 'none' ? { content: side.content, survives: side.survives } : undefined;
+  const passes = (k: number, type: RevisionInfo['type']) => (content[k] as ParaItem).breakRevision?.type === type || opensNewSide(content, k);
+  const sides = new Map<number, { before: TrackedBreakSide; after: TrackedBreakSide }>();
+  // Before each break, from the start: a block before the content ends
+  // the side with none, whatever comes between
+  let state = { addition: fresh(), deletion: fresh() };
+  for (let k = 0; k < content.length; k++) {
     const item = content[k];
-    // A custom style block closes after its last paragraph, which this ends
-    if (item.type === 'para' || (step === 1 && item.type === 'custom_style_close')) {
-      if (item.type === 'para' && (item.breakRevision?.type === type || opensNewSide(content, k))) continue;
-      return items;
+    if (item.type === 'para') {
+      if (item.breakRevision) sides.set(k, { before: read(state[item.breakRevision.type]), after: undefined });
+      for (const type of types) if (!passes(k, type)) state[type] = fresh();
+    } else if (isStructuralBoundaryItem(item) || (item.type === 'math' && item.display)) {
+      for (const type of types) state[type] = { ...fresh(), end: 'block' };
+    } else {
+      for (const type of types) {
+        if (state[type].end === 'none') state[type] = { content: true, survives: state[type].survives || survivesRevisions(item, type), end: 'none' };
+      }
     }
-    if (isStructuralBoundaryItem(item) || (item.type === 'math' && item.display)) return undefined;
-    items.push(item);
   }
-  return items;
+  // After each break, from the end: a block ends the side with what comes
+  // before it, if anything does, but display math has none
+  state = { addition: fresh(), deletion: fresh() };
+  for (let k = content.length - 1; k >= 0; k--) {
+    const item = content[k];
+    if (item.type === 'para') {
+      if (item.breakRevision) sides.get(k)!.after = read(state[item.breakRevision.type]);
+      for (const type of types) if (!passes(k, type)) state[type] = fresh();
+    } else if (item.type === 'custom_style_close') {
+      state = { addition: fresh(), deletion: fresh() };
+    } else if (isStructuralBoundaryItem(item)) {
+      for (const type of types) state[type] = { ...fresh(), end: 'open' };
+    } else if (item.type === 'math' && item.display) {
+      for (const type of types) state[type] = { ...fresh(), end: 'block' };
+    } else {
+      for (const type of types) {
+        if (state[type].end !== 'block') state[type] = { content: true, survives: state[type].survives || survivesRevisions(item, type), end: 'none' };
+      }
+    }
+  }
+  return sides;
 }
 
 type ParaItem = Extract<ContentItem, { type: 'para' }>;
@@ -8176,49 +8233,67 @@ function breakContainer(para: ParaItem | undefined, side: 'before' | 'after'): s
 interface TrackedBreakMarks {
   start: string;
   end: string;
+  /** In place of `start` for a break in a span of its own, which has no
+   *  `end` */
+  alone: string;
 }
 
-/** Two private-use characters that appear nowhere in `values`, which hold
+/** Three private-use characters that appear nowhere in `values`, which hold
  *  everything buildMarkdown renders, so no text in the document is taken
  *  for a mark. */
 function trackedBreakMarks(values: unknown): TrackedBreakMarks {
   const text = JSON.stringify(values, (_key, value: unknown) => value instanceof Map || value instanceof Set ? [...value] : value);
   const unused: string[] = [];
-  for (let code = 0xE000; unused.length < 2; code++) {
+  for (let code = 0xE000; unused.length < 3; code++) {
     const ch = String.fromCharCode(code);
     if (!text.includes(ch)) unused.push(ch);
   }
-  return { start: unused[0], end: unused[1] };
+  return { start: unused[0], end: unused[1], alone: unused[2] };
 }
 
 /** A paragraph break tracked in Word goes inside the CriticMarkup span as a
  *  blank line, as in {--end.\n\nStart--}, when content survives on both
  *  sides: otherwise accepting or rejecting the change leaves an empty
  *  paragraph, which Markdown drops anyway, and the plain break reads better.
- *  The break must follow inline content in the same revision, or, opening
- *  the new side of a substitution, as in {~~a~>\n\nb~~}, its old side.
- *  md-to-docx moves a break that opens a span outside it (see
- *  moveLeadingBreakOutsideCritic), so a span that starts with the break would
- *  not survive export. Both paragraphs must sit in the same list item or
+ *  The break joins the span of the inline content before it in the same
+ *  revision, or, opening the new side of a substitution, as in
+ *  {~~a~>\n\nb~~}, its old side. After inline content in no revision or
+ *  another, it is a span of its own, as in a{--\n\n--}b, which ends there:
+ *  md-to-docx moves a break that opens a span with text in it outside it
+ *  (see moveLeadingBreakOutsideCritic), but keeps a span of the break
+ *  alone. Both paragraphs must sit in the same list item or
  *  quote, and `linePrefix` gives the line prefix (quote markers, list indent)
  *  to start the line after the break, from the second paragraph and the one
  *  whose text the break joins it to. The break is plain text,
  *  so formatting, code and links close before it, and
  *  joinSpansAtTrackedBreaks then joins its span to the spans around it. */
 function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => TrackedBreakMarks, linePrefix: (para: ParaItem, opening: ParaItem | undefined) => string = () => ''): ContentItem[] {
+  // The content up to `copied`, and the breaks' in place of their
+  // paragraphs: inserting each into a copy of all of it moved what came
+  // after, in time in the square of the breaks' number
   let joined: ContentItem[] | undefined;
+  let copied = 0;
+  // The citations that start a paragraph after a break, by index
+  const lineStarts = new Set<number>();
+  const copy = (to: number) => {
+    for (; copied < to; copied++) {
+      const item = content[copied];
+      joined!.push(lineStarts.has(copied) && item.type === 'citation' ? { ...item, lineStart: true } : item);
+    }
+  };
+  let sides: ReturnType<typeof contentAroundTrackedBreaks> | undefined;
   for (let k = 0; k < content.length; k++) {
     const para = content[k];
     if (para.type !== 'para' || !para.breakRevision) continue;
     const revision = para.breakRevision;
     // A comment's reference alone, as of {--a{>>c<<}\n\nb--}, goes after
-    // the break, as one can't go in the span, and a span that starts with
-    // the break loses it
+    // a break that joins the span before it, as one can't go in the span,
+    // and a span that starts with the break loses it
     let last = k - 1;
     while (last >= 0 && isCommentPoint(content[last])) last--;
     const prev = content[last];
     if (!prev || !isInlineRevisionItem(prev)) continue;
-    if (!opensNewSide(content, k) && !revisionsEqual(prev.revision, revision)) continue;
+    const alone = !opensNewSide(content, k) && !revisionsEqual(prev.revision, revision);
     let opening: ParaItem | undefined;
     for (let j = k - 1; j >= 0 && !opening; j--) {
       const item = content[j];
@@ -8226,17 +8301,46 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
     }
     const container = breakContainer(para, 'after');
     if (!container || breakContainer(opening, 'before') !== container) continue;
-    const before = contentAcrossTrackedBreaks(content, k, -1, revision.type);
-    const after = contentAcrossTrackedBreaks(content, k, 1, revision.type);
-    if (!before?.some(item => survivesRevisions(item, revision.type))) continue;
-    if (!after?.some(item => survivesRevisions(item, revision.type))) continue;
-    joined ??= [...content];
+    // An indent override of the paragraph after, or its being a thematic
+    // break, which the break's text in its place can't hold
+    if (para.indentOverride || para.horizontalRule) continue;
+    sides ??= contentAroundTrackedBreaks(content);
+    const { before, after } = sides.get(k)!;
+    if (!before?.survives || !after?.survives) continue;
+    joined ??= [];
+    copy(last + 1);
     const prefix = linePrefix(para, opening);
-    const text = marks().start + '\n' + prefix.trimEnd() + '\n' + prefix + marks().end;
-    joined.splice(last + 1, k - last, { type: 'text', text, commentIds: new Set(prev.commentIds), formatting: DEFAULT_FORMATTING, revision },
-      ...content.slice(last + 1, k));
+    // A break alone has no end mark, so it ends with the next line's start,
+    // which what comes after reads, as a citation does to put no space there
+    const text = (alone ? marks().alone : marks().start) + '\n' + prefix.trimEnd() + '\n' + prefix + (alone ? '' : marks().end);
+    // A break in a span of its own is in a comment's range where the text
+    // on both sides is, past empty paragraphs, or a range that starts at
+    // the paragraph's mark, whose empty item (see startRangesAtMark) comes
+    // before it
+    let nextIndex = k + 1;
+    while (content[nextIndex]?.type === 'para') nextIndex++;
+    const next = content[nextIndex];
+    const commentIds = alone
+      ? new Set(content.slice(last, k).flatMap(item => 'commentIds' in item ? [...item.commentIds ?? []] : [])
+        .filter(id => next && 'commentIds' in next && next.commentIds?.has(id)))
+      : new Set(prev.commentIds);
+    const item: ContentItem = { type: 'text', text, commentIds, formatting: DEFAULT_FORMATTING, revision };
+    // and ends it: empty text in no revision keeps the text after from
+    // running into it, from joining its span, and from pairing with it as
+    // a substitution's new side
+    const barrier: ContentItem[] = alone ? [{ type: 'text', text: '', commentIds: new Set(commentIds), formatting: DEFAULT_FORMATTING }] : [];
+    // A comment's reference before it stays there, outside its span
+    const points = content.slice(last + 1, k);
+    joined.push(...(alone ? [...points, item, ...barrier] : [item, ...points]));
+    copied = k + 1;
+    // Past a comment's range's start
+    let first = k + 1;
+    for (let item = content[first]; item?.type === 'text' && item.text === '' && !item.revision; item = content[++first]);
+    if (content[first]?.type === 'citation') lineStarts.add(first);
   }
-  return joined ?? content;
+  if (!joined) return content;
+  copy(content.length);
+  return joined;
 }
 
 /** Markdown with each tracked break from joinTrackedParagraphBreaks inside
@@ -8245,7 +8349,7 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
 function joinSpansAtTrackedBreaks(markdown: string, marks: TrackedBreakMarks): string {
   const boundary = '(?:\\+\\+\\}\\{\\+\\+|--\\}\\{--)?';
   const marked = new RegExp(boundary + marks.start + '([^' + marks.end + ']*)' + marks.end + boundary, 'g');
-  return markdown.replace(marked, (_match, text: string) => text);
+  return markdown.replace(marked, (_match, text: string) => text).split(marks.alone).join('');
 }
 
 export function buildMarkdown(
@@ -8419,9 +8523,11 @@ export function buildMarkdown(
         if (displayBlock) paragraph++;
         // A tracked break joinTrackedParagraphBreaks put in the text ends a
         // paragraph too, where text after it goes on in the next, as a
-        // range of {++{#1}a\n\nb{/1}++} does, which {==...==} can't hold
-        const pieces = item.type === 'text' && breakMarks && item.text.includes(breakMarks.start)
-          ? item.text.split(breakMarks.start).map((piece, k) => k === 0 ? piece : piece.slice(piece.indexOf(breakMarks!.end) + 1))
+        // range of {++{#1}a\n\nb{/1}++} or {#1}a{++\n\n++}b{/1} does,
+        // which {==...==} can't hold
+        const pieces = item.type === 'text' && breakMarks && (item.text.includes(breakMarks.start) || item.text.includes(breakMarks.alone))
+          ? item.text.split(new RegExp('[' + breakMarks.start + breakMarks.alone + ']'))
+            .map((piece, k) => k === 0 ? piece : piece.slice(piece.indexOf(breakMarks!.end) + 1))
           : [''];
         for (let k = 0; k < pieces.length; k++) {
           if (k > 0) {
