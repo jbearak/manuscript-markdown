@@ -678,6 +678,8 @@ On DOCX import, the `notes` field is auto-detected from whether `word/footnotes.
 
 Named labels (e.g., `[^my-note]`) are preserved through DOCX round-trips via a `MANUSCRIPT_FOOTNOTE_IDS` mapping stored in `docProps/custom.xml`.
 
+DOCX import writes the notes in the order of their labels, numbered labels by value and then named ones, whatever order they were defined in. Labels of one number, as `1a` and `1b`, keep the order of their references. A table in a note keeps its own settings, as its font size, either way.
+
 A reference inside a highlight, `==as reported.[^1]==`, keeps its note too, and comes back from Word inside the highlight. See [Markdown in a highlight](#markdown-in-a-highlight).
 
 A reference can sit inside a tracked change. `{++as reported.[^1]++}` exports as a note inserted with its text, and `{--as reported.[^1]--}` as one deleted with it. When a label has more than one reference, Word's note belongs to one of them and the others cross-reference it. A reference outside any tracked change gets the note when there is one, so accepting or rejecting a change never takes the note from a reference that stays.

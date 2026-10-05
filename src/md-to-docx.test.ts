@@ -3071,6 +3071,43 @@ describe('Full MD→DOCX footnote generation', () => {
     expect(footnotesXml).toContain('A footnote.');
   });
 
+  it.each([
+    ['whose label comes first', 'Text[^outer].\n\n[^outer]: Outer[^inner].\n\n[^inner]: Inner.\n', ['Outer.', 'Inner.']],
+    ['defined first', 'Text[^a].\n\n[^b]: B.\n\n[^a]: A[^b].\n', ['A.', 'B.']],
+    ['through another', 'T[^c].\n\n[^a]: A.\n\n[^b]: B[^a].\n\n[^c]: C[^b].\n', ['C.', 'B.', 'A.']],
+  ])('writes a note only another refers to, %s', async (_name, md, texts) => {
+    // It got its ID only as the other was made, after its own turn, which
+    // left a reference to a note that wasn't there
+    const { docx, warnings } = await convertMdToDocx(md);
+    expect(warnings).toEqual([]);
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/footnotes.xml')!.async('string');
+    const notes = [...xml.matchAll(/<w:footnote w:id="(\d+)">([\s\S]*?)<\/w:footnote>/g)].filter(m => Number(m[1]) > 0);
+    expect(notes.map(m => m[2].replace(/<[^>]+>/g, ''))).toEqual(texts);
+    for (const ref of xml.matchAll(/<w:footnoteReference w:id="(\d+)"\/>/g)) {
+      expect(notes.some(m => m[1] === ref[1])).toBe(true);
+    }
+  });
+
+  it('keeps a comment whose body is in a note made before the one its range is in', async () => {
+    // Notes go in their labels' order, which made a, with the body, before
+    // b, with the range, which wasn't there for the body to find
+    const { convertDocx } = await import('./converter');
+    const { docx, warnings } = await convertMdToDocx('T[^b] and[^a].\n\n[^b]: {#c}B.{/c}\n\n[^a]: A.\n\n    {#c>>Comment text<<}\n');
+    expect(warnings).toEqual([]);
+    expect((await convertDocx(docx)).markdown).toContain('[^b]: {==B.==}{>>Comment text<<}');
+  });
+
+  it('bookmarks a note a later one cross-references', async () => {
+    // Notes go in their labels' order, which made a before b, whose
+    // reference to a made a cross-reference, to a bookmark a didn't have
+    const { docx } = await convertMdToDocx('T[^a] and[^b].\n\n[^b]: B[^a].\n\n[^a]: A.\n');
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/footnotes.xml')!.async('string');
+    const target = /NOTEREF (_Ref\d+)/.exec(xml)![1];
+    expect(xml).toMatch(new RegExp('<w:footnote w:id="1">[^]*?<w:bookmarkStart w:id="\\d+" w:name="' + target + '"/><w:r>[^]*?<w:footnoteRef/></w:r><w:bookmarkEnd'));
+  });
+
 	it('formats tables in note definitions with document numeric defaults', async () => {
 		const md = '---\ntable-digits: 1\ntable-decimal-mark: midpoint\n---\n\nSee note[^1].\n\n[^1]: <table><tr><td>12.34</td></tr></table>';
 		const { docx } = await convertMdToDocx(md);

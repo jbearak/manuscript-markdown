@@ -1086,6 +1086,26 @@ function footnoteBookmarkName(noteId: number): string {
   return '_Ref' + String(100000000 + noteId);
 }
 
+/** The order import writes notes in, by label: numbers by value, then the
+ *  rest by text, in one locale, not the machine's. Export makes notes'
+ *  bodies in this order, so that the tables and code blocks in them take the
+ *  indices import reads them back at. Labels of one number, as 1a and 1b,
+ *  tie, and keep the order of their first references, which import reads
+ *  them in, as it read the notes of documents that older versions wrote in
+ *  that order, and which export breaks the tie with. */
+export function compareNoteLabels(a: string, b: string): number {
+  const na = parseInt(a, 10);
+  const nb = parseInt(b, 10);
+  return !isNaN(na) && !isNaN(nb) ? na - nb : a.localeCompare(b, 'en');
+}
+
+/** A note's self-reference mark `selfRefRun` in the bookmark that
+ *  cross-references to note `noteId` point to (see noteReferenceXml) */
+function bookmarkedSelfRef(selfRefRun: string, noteId: number, state: DocxGenState): string {
+  const bkmkId = state.nextBookmarkId++;
+  return '<w:bookmarkStart w:id="' + bkmkId + '" w:name="' + footnoteBookmarkName(noteId) + '"/>' + selfRefRun + '<w:bookmarkEnd w:id="' + bkmkId + '"/>';
+}
+
 /** Extract footnote definitions from the markdown source and return cleaned markdown. */
 export function extractFootnoteDefinitions(markdown: string): { cleaned: string; definitions: Map<string, string> } {
   const definitions = new Map<string, string>();
@@ -7991,32 +8011,35 @@ export async function convertMdToDocx(
   // the order generateRuns reaches them. Deleted CriticMarkup content
   // ({--...--} innerRuns, {~~old~>...~~} oldRuns) renders citations as
   // literal deleted text, not fields, so its keys aren't registered.
+  type Reached = { label: string; tracked: boolean } | { keys: string[] };
+  const collectReached = (runs: MdRun[] | undefined, reached: Reached[], tracked: boolean, deleted: boolean) => {
+    for (const run of runs ?? []) {
+      if (run.type === 'footnote_ref') {
+        if (run.footnoteLabel) reached.push({ label: run.footnoteLabel, tracked });
+      } else if (run.type === 'citation') {
+        if (run.keys && !deleted) reached.push({ keys: run.keys });
+      } else if (run.type === 'critic_sub') {
+        collectReached(run.oldRuns, reached, true, true);
+        collectReached(run.newRuns, reached, true, deleted);
+      } else {
+        collectReached(run.innerRuns, reached, tracked || run.type === 'critic_add' || run.type === 'critic_del', deleted || run.type === 'critic_del');
+      }
+    }
+  };
+  const reachedIn = (tokenList: MdToken[]) => {
+    const reached: Reached[] = [];
+    for (const token of tokenList) {
+      collectReached(token.runs, reached, false, false);
+      for (const row of token.rows ?? []) {
+        for (const cell of row.cells) collectReached(cell.runs, reached, false, false);
+      }
+    }
+    return reached;
+  };
+  // The order of the labels' first references, tracked or not, which import
+  // writes notes in where their labels tie (see compareNoteLabels)
+  const firstReferences = new Map<string, number>();
   {
-    type Reached = { label: string; tracked: boolean } | { keys: string[] };
-    const collectReached = (runs: MdRun[] | undefined, reached: Reached[], tracked: boolean, deleted: boolean) => {
-      for (const run of runs ?? []) {
-        if (run.type === 'footnote_ref') {
-          if (run.footnoteLabel) reached.push({ label: run.footnoteLabel, tracked });
-        } else if (run.type === 'citation') {
-          if (run.keys && !deleted) reached.push({ keys: run.keys });
-        } else if (run.type === 'critic_sub') {
-          collectReached(run.oldRuns, reached, true, true);
-          collectReached(run.newRuns, reached, true, deleted);
-        } else {
-          collectReached(run.innerRuns, reached, tracked || run.type === 'critic_add' || run.type === 'critic_del', deleted || run.type === 'critic_del');
-        }
-      }
-    };
-    const reachedIn = (tokenList: MdToken[]) => {
-      const reached: Reached[] = [];
-      for (const token of tokenList) {
-        collectReached(token.runs, reached, false, false);
-        for (const row of token.rows ?? []) {
-          for (const cell of row.cells) collectReached(cell.runs, reached, false, false);
-        }
-      }
-      return reached;
-    };
     // Register only cited keys, in document order, so numeric styles number
     // citations by it, not by bib-file order. A note's citations come where
     // the reference that owns the note is.
@@ -8041,6 +8064,9 @@ export async function convertMdToDocx(
     // references that own them, so number each note where its owner is, and
     // a cross-reference's cached number is the one Word shows.
     const reached = reachedIn(tokens);
+    for (const item of reached) {
+      if ('label' in item && !firstReferences.has(item.label)) firstReferences.set(item.label, firstReferences.size);
+    }
     const untracked = new Set(reached.flatMap(item => 'label' in item && !item.tracked ? [item.label] : []));
     for (const item of reached) {
       if ('keys' in item) {
@@ -8079,18 +8105,43 @@ export async function convertMdToDocx(
   // Build footnote/endnote body OOXML from definitions.
   // Set inNoteBody so hyperlinks/images route to note-scoped relationship maps
   // (footnotes.xml has its own .rels file, separate from document.xml.rels).
+  // The notes the text reaches go in the order import writes them back in,
+  // which their tables' and code blocks' indices follow (see
+  // compareNoteLabels): the body's, whose first references break ties, and
+  // then those only another note refers to, which import doesn't write, as
+  // the notes before reach them, and so after the note that gives each its
+  // ID. All are parsed before any is made, so that a comment's range in one
+  // registers before its body in another, whatever their order.
   state.inNoteBody = true;
-  for (const [label, bodyText] of footnoteDefs) {
-    const noteId = state.footnoteLabelToId.get(label);
-    if (noteId === undefined) {
-      state.warnings.push(`Footnote definition [^${label}] has no matching reference in the document.`);
-      continue;
-    }
-    // Parse the definition body into tokens and generate OOXML
-    const bodyTokens = parseMd(bodyText, state.warnings, frontmatter.breaks ?? false, undefined, undefined, linkDefinitionsOf.get(tokens),
+  const noteQueue = [...footnoteDefs.keys()].filter(label => firstReferences.has(label))
+    .sort((a, b) => compareNoteLabels(a, b) || firstReferences.get(a)! - firstReferences.get(b)!);
+  const queuedNotes = new Set(noteQueue);
+  const parsedNotes = new Map<string, { tokens: MdToken[]; warnings: string[] }>();
+  for (let k = 0; k < noteQueue.length; k++) {
+    const label = noteQueue[k];
+    const warnings: string[] = [];
+    const noteBody = parseMd(footnoteDefs.get(label)!, warnings, frontmatter.breaks ?? false, undefined, undefined, linkDefinitionsOf.get(tokens),
       unformattedNotes.get(label));
-    applyCustomStyleSentinels(bodyTokens, state.warnings);
-    prescanCommentIds(bodyTokens, state);
+    applyCustomStyleSentinels(noteBody, warnings);
+    parsedNotes.set(label, { tokens: noteBody, warnings });
+    for (const item of reachedIn(noteBody)) {
+      if ('label' in item && footnoteDefs.has(item.label) && !queuedNotes.has(item.label)) {
+        queuedNotes.add(item.label);
+        noteQueue.push(item.label);
+      }
+    }
+  }
+  for (const { tokens: noteBody } of parsedNotes.values()) prescanCommentIds(noteBody, state);
+  const madeNotes = new Set<string>();
+  // The notes without a bookmark, which a later note can cross-reference
+  const unmarkedNotes: { label: string; noteId: number; entry: { id: number; bodyXml: string }; selfRefRun: string }[] = [];
+  for (const label of noteQueue) {
+    // One whose references write none, which gives no ID, isn't made
+    const noteId = state.footnoteLabelToId.get(label);
+    if (noteId === undefined) continue;
+    madeNotes.add(label);
+    const { tokens: bodyTokens, warnings: parseWarnings } = parsedNotes.get(label)!;
+    state.warnings.push(...parseWarnings);
     const noteWarnings = new Set(bodyTokens.map(t => isEmptyCodeBlock(t) ? EMPTY_NOTE_CODE_WARNING : NOTE_BLOCK_WARNINGS[t.type]));
     for (const warning of noteWarnings) {
       if (warning) state.warnings.push(warning + ' (not supported). Move it outside the note for round-trip fidelity.');
@@ -8113,12 +8164,9 @@ export async function convertMdToDocx(
     const paragraphPPr = '<w:pPr><w:pStyle w:val="' + pStyle + '"/></w:pPr>';
     // If this footnote is cross-referenced, wrap the self-ref run in a bookmark
     // so NOTEREF fields in the document body can point to it.
-    let selfRefRun = '<w:r><w:rPr><w:rStyle w:val="' + refStyle + '"/></w:rPr><' + selfRefTag + '/></w:r>';
-    if (state.footnoteCrossRefLabels.has(label)) {
-      const bkmkId = state.nextBookmarkId++;
-      const bkmkName = footnoteBookmarkName(noteId);
-      selfRefRun = '<w:bookmarkStart w:id="' + bkmkId + '" w:name="' + bkmkName + '"/>' + selfRefRun + '<w:bookmarkEnd w:id="' + bkmkId + '"/>';
-    }
+    const unmarkedSelfRefRun = '<w:r><w:rPr><w:rStyle w:val="' + refStyle + '"/></w:rPr><' + selfRefTag + '/></w:r>';
+    const marked = state.footnoteCrossRefLabels.has(label);
+    const selfRefRun = marked ? bookmarkedSelfRef(unmarkedSelfRefRun, noteId, state) : unmarkedSelfRefRun;
     const savedCustomStyle = state.activeCustomStyle;
     let isFirstContent = true;
     for (let ti = 0; ti < noteTokens.length; ti++) {
@@ -8177,7 +8225,17 @@ export async function convertMdToDocx(
       // No content tokens (empty body or all sentinels) — emit self-ref paragraph
       if (!bodyXml) bodyXml = '<w:p>' + paragraphPPr + selfRefRun + '</w:p>';
     }
-    state.footnoteEntries.push({ id: noteId, bodyXml });
+    const entry = { id: noteId, bodyXml };
+    state.footnoteEntries.push(entry);
+    if (!marked) unmarkedNotes.push({ label, noteId, entry, selfRefRun });
+  }
+  for (const label of footnoteDefs.keys()) {
+    if (!madeNotes.has(label)) state.warnings.push(`Footnote definition [^${label}] has no matching reference in the document.`);
+  }
+  // A note made before a later one cross-referenced it, as the order can
+  // put it, takes its bookmark now, which the reference points to
+  for (const { label, noteId, entry, selfRefRun } of unmarkedNotes) {
+    if (state.footnoteCrossRefLabels.has(label)) entry.bodyXml = entry.bodyXml.replace(selfRefRun, () => bookmarkedSelfRef(selfRefRun, noteId, state));
   }
   state.inNoteBody = false;
 

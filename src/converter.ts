@@ -13,7 +13,7 @@ import { computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
 import { findDollarMathAt } from './math-delimiters';
 import type { TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { citationEndInText, customStyleId, linkifiedColons, linkifiedText, linkifyMatches, startsHtmlBlock } from './md-to-docx';
+import { citationEndInText, compareNoteLabels, customStyleId, linkifiedColons, linkifiedText, linkifyMatches, startsHtmlBlock } from './md-to-docx';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { publicStyleNameForZoteroId, zoteroStyleIdForName } from './csl-loader';
 import { extractZoteroKey } from './zotero-link';
@@ -7332,12 +7332,7 @@ export function buildMarkdown(
     }
   }
   // Notes in the order they're written, after the body
-  const noteEntries = [...(options?.notes?.map.values() ?? [])].sort((a, b) => {
-    const na = parseInt(a.label, 10);
-    const nb = parseInt(b.label, 10);
-    if (!isNaN(na) && !isNaN(nb)) return na - nb;
-    return a.label.localeCompare(b.label);
-  });
+  const noteEntries = [...(options?.notes?.map.values() ?? [])].sort((a, b) => compareNoteLabels(a.label, b.label));
   // Each note's content as it renders, which collectCommentSpans finds the
   // last item of a comment's range in
   const noteBodies = new Map(noteEntries.map(entry => [entry, mergeConsecutiveRuns(joinTrackedParagraphBreaks(entry.body, marks))]));
