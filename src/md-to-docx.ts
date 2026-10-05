@@ -1089,19 +1089,25 @@ function footnoteBookmarkName(noteId: number): string {
 /** Extract footnote definitions from the markdown source and return cleaned markdown. */
 export function extractFootnoteDefinitions(markdown: string): { cleaned: string; definitions: Map<string, string> } {
   const definitions = new Map<string, string>();
-  const lines = markdown.split('\n');
+  // A bare \r ends a line, as markdown-it reads one, whose token maps count
+  // the lines below
+  const source = markdown.replace(/\r(?!\n)/g, '\n');
+  const lines = source.split('\n');
   const cleanedLines: string[] = [];
   let currentLabel: string | undefined;
   let currentBody: string[] = [];
-  // The lines of fenced code, its fences' too, as markdown-it reads them,
-  // which hold no definition. Not a line like a fence that isn't one, as
-  // ```a`b, whose info can't hold a backtick, or one indented as code, and
-  // not past a closing fence, which holds nothing after its marker.
-  const fenced = new Set<number>();
-  if (/^[ \t]*(?:`{3,}|~{3,})/m.test(markdown)) {
+  // The lines of fenced code and HTML blocks, their fences' too, as
+  // markdown-it reads them, which hold no definition, as in <pre> or a
+  // comment. Not a line like a fence that isn't one, as ```a`b, whose info
+  // can't hold a backtick, or one indented as code, and not past a closing
+  // fence, which holds nothing after its marker.
+  const literal = new Set<number>();
+  if (/^\[\^[a-zA-Z0-9_-]+\]:/m.test(source) && /^[ \t]*(?:`{3,}|~{3,}|<)/m.test(source)) {
     citationTextMd ??= createMarkdownIt();
-    for (const token of citationTextMd.parse(markdown, {})) {
-      if (token.type === 'fence' && token.map) for (let k = token.map[0]; k < token.map[1]; k++) fenced.add(k);
+    for (const token of citationTextMd.parse(source, {})) {
+      if ((token.type === 'fence' || token.type === 'html_block') && token.map) {
+        for (let k = token.map[0]; k < token.map[1]; k++) literal.add(k);
+      }
     }
   }
 
@@ -1120,20 +1126,9 @@ export function extractFootnoteDefinitions(markdown: string): { cleaned: string;
       currentBody.push(line.replace(/^(?: {4}|\t)/, ''));
       continue;
     }
-    if (fenced.has(i)) {
-      finishDefinition();
-      cleanedLines.push(line);
-      continue;
-    }
-    const defMatch = line.match(/^\[\^([a-zA-Z0-9_-]+)\]:\s?(.*)/);
-    if (defMatch) {
-      finishDefinition();
-      currentLabel = defMatch[1];
-      currentBody = [defMatch[2]];
-      continue;
-    }
-
-    // Blank line within a multi-paragraph footnote
+    // Blank line within a multi-paragraph footnote, which goes on in it
+    // though the lines around it read as a list's code, as after a list
+    // item with no blank line before the definition
     if (currentLabel !== undefined && line.trim() === '') {
       // Peek ahead: if the next line with text is indented, this is a
       // paragraph break within the footnote, however many blank lines come
@@ -1147,6 +1142,18 @@ export function extractFootnoteDefinitions(markdown: string): { cleaned: string;
         i--;
         continue;
       }
+    }
+    if (literal.has(i)) {
+      finishDefinition();
+      cleanedLines.push(line);
+      continue;
+    }
+    const defMatch = line.match(/^\[\^([a-zA-Z0-9_-]+)\]:\s?(.*)/);
+    if (defMatch) {
+      finishDefinition();
+      currentLabel = defMatch[1];
+      currentBody = [defMatch[2]];
+      continue;
     }
     finishDefinition();
     cleanedLines.push(line);
