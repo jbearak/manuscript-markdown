@@ -7769,13 +7769,12 @@ function inferOrderedMarkerWidth(
 
 /** A paragraph in the item at `context`'s level, which indents by that
  *  item's marker and the markers of the items it's in. A level Word skipped
- *  takes the width of the item's own kind of marker, as buildMarkdown
- *  indents the item by. */
+ *  has no item to indent by, as buildMarkdown nests an item right under the
+ *  open one above it. */
 function continuationOf(context: StructuralListContext, listContexts: Map<number, StructuralListContext>): ListContinuation {
   let indent = 0;
-  for (let k = 0; k <= context.level; k++) {
-    const item = listContexts.get(k) ?? context;
-    indent += item.level === k && item.markerWidth !== undefined ? item.markerWidth : item.type === 'bullet' ? 2 : 3;
+  for (const item of listContexts.values()) {
+    if (item.level <= context.level) indent += item.markerWidth ?? (item.type === 'bullet' ? 2 : 3);
   }
   return {
     type: context.type,
@@ -7983,7 +7982,9 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
         lastBlockquoteType = undefined;
         continue;
       }
-      if (item.listMeta) {
+      // A numbered heading is a heading, which ends a list, as buildMarkdown
+      // writes it
+      if (item.listMeta && !item.headingLevel) {
         clearListContextsFromLevel(listContexts, item.listMeta.level + 1);
         for (const level of [...listTypesByLevel.keys()]) {
           if (level > item.listMeta.level) listTypesByLevel.delete(level);
@@ -8015,6 +8016,13 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
         if (inferred) {
           item.blockquoteLevel = inferred.blockquoteLevel;
           if (inferred.listContinuation) item.listContinuation = inferred.listContinuation;
+        }
+        // A quote out of the list ends it, as buildMarkdown writes it, and a
+        // paragraph indented for an item after it is in no item
+        if (!item.listContinuation) {
+          listContexts.clear();
+          listTypesByLevel.clear();
+          orderedCounters.clear();
         }
         const currentType: GfmAlertType | 'plain' = item.alertType || 'plain';
         // A quote nested in a list and one outside it are separate groups, as
@@ -8248,6 +8256,9 @@ export function buildMarkdown(
   // The width of the marker of the open list item at each level, which the
   // items and paragraphs under it indent by
   let listMarkerWidths: number[] = [];
+  // The level Word gives the open list item at each level, which rises from
+  // each to the next, as Markdown can't skip one (see atOpenListDepth)
+  let listWordLevels: number[] = [];
   // listContinuationIndent and blockquotePrefix are declared further down
   // A quote paragraph's own lines take its prefix in the main loop below
   const mergedContent = mergeConsecutiveRuns(joinTrackedParagraphBreaks(content, marks, (para, opening) => (
@@ -8619,13 +8630,32 @@ export function buildMarkdown(
   let listContentEnd: number | undefined;
   let topOrderedNext: number | undefined;
   // What follows starts a new list, with its own indent sentinel
-  const endListContext = () => { lastListType = undefined; lastListLevel = undefined; listTypeByLevel.clear(); listMarkerWidths = []; };
-  /** The columns a list item at `level` indents by: its parents' markers, or
-   *  where they're unknown, 2 for a bullet and 3 for a number. */
-  const listItemIndent = (level: number, type?: 'bullet' | 'ordered') => {
+  const endListContext = () => { lastListType = undefined; lastListLevel = undefined; listTypeByLevel.clear(); listMarkerWidths = []; listWordLevels = []; };
+  /** The columns a list item at `level` indents by: its parents' markers */
+  const listItemIndent = (level: number) => {
     let columns = 0;
-    for (let k = 0; k < level; k++) columns += listMarkerWidths[k] ?? (type === 'bullet' ? 2 : 3);
+    for (let k = 0; k < level; k++) columns += listMarkerWidths[k];
     return columns;
+  };
+  /** A list item at the level Markdown can nest it at: under the open item
+   *  of the nearest level Word gives above its own, or at the top where no
+   *  list is open, as Markdown has no way to skip a level. Indented for the
+   *  level Word gives it, it would nest under another item, or read as
+   *  code. A paragraph in an item goes at that item's level, and where no
+   *  item is open, as after one with no text, in none. */
+  const atOpenListDepth = (item: ContentItem): ContentItem => {
+    if (item.type !== 'para' || item.headingLevel) return item;
+    const { listMeta, listContinuation } = item;
+    if (listMeta) {
+      const level = listWordLevels.filter(open => open < listMeta.level).length;
+      return level === listMeta.level ? item : { ...item, listMeta: { ...listMeta, level } };
+    }
+    if (listContinuation && listWordLevels.length === 0) return { ...item, listContinuation: undefined };
+    if (listContinuation) {
+      const level = Math.max(0, listWordLevels.filter(open => open <= listContinuation.level).length - 1);
+      return level === listContinuation.level ? item : { ...item, listContinuation: { ...listContinuation, level } };
+    }
+    return item;
   };
   let codeBlockGroupIndex = 0;
   let lastAlertParagraphKey: string | undefined;
@@ -8759,7 +8789,20 @@ export function buildMarkdown(
   }
 
   while (i < mergedContent.length) {
-    const item = mergedContent[i];
+    const wordItem = mergedContent[i];
+    // An item with no text ends at a blank line, which goes before anything
+    // after it but its sublist, or a quote in it right under its marker, and
+    // nothing after nests in it
+    if (lastListItemEmpty && wordItem.type === 'para' && (!wordItem.listMeta || wordItem.headingLevel)
+      && !(wordItem.blockquoteLevel && wordItem.listContinuation && blankLinesBeforeListQuote(wordItem) === 0)) {
+      listMarkerWidths = listMarkerWidths.slice(0, -1);
+      listWordLevels = listWordLevels.slice(0, -1);
+      lastListItemEmpty = false;
+    }
+    // The level Word gives a list item, and the item at the level Markdown
+    // nests it at, which every line written for it takes
+    const wordLevel = wordItem.type === 'para' ? wordItem.listMeta?.level : undefined;
+    const item = mergedContent[i] = atOpenListDepth(wordItem);
 
     // Compute incoming separator from the previous item (consumed once per iteration).
     // null means "no special handling, use default \n\n".
@@ -8829,10 +8872,7 @@ export function buildMarkdown(
         if (output.length > 0) {
           output.push('\n\n');
         }
-        lastListType = undefined;
-        lastListLevel = undefined;
-        listTypeByLevel.clear();
-        listMarkerWidths = [];
+        endListContext();
         lastAlertParagraphKey = undefined;
         pendingAlertPrefixStrip = undefined;
         pendingAlertInlinePrefixForHardBreak = undefined;
@@ -8857,7 +8897,8 @@ export function buildMarkdown(
         continue;
       }
 
-      const isCurrentList = item.listMeta !== undefined;
+      // A numbered heading is a heading, which ends a list
+      const isCurrentList = item.listMeta !== undefined && !item.headingLevel;
 
       if (output.length > 0) {
         const continuesBlockquoteGroup = item.blockquoteLevel !== undefined
@@ -9087,14 +9128,12 @@ export function buildMarkdown(
         if (item.listMeta) {
           // Emit sentinel only before the first item of a list block
           if (item.listBlockStart) {
-            // Indent the sentinel to match the list nesting level so it doesn't
-            // break an enclosing list as a top-level HTML block (CommonMark §4.6).
+            // Indent the sentinel as the item so it doesn't break an
+            // enclosing list as a top-level HTML block (CommonMark §4.6).
             const useTab = options?.listIndent === 'tab';
             const sentinelIndent = useTab
               ? '\t'.repeat(item.listMeta.level)
-              : item.listMeta.type === 'bullet'
-                ? ' '.repeat(2 * item.listMeta.level)
-                : ' '.repeat(3 * item.listMeta.level);
+              : ' '.repeat(listItemIndent(item.listMeta.level));
             output.push(sentinelIndent + '<!-- ' + item.indentOverride + ' -->\n');
           }
         } else if (!item.listContinuation) {
@@ -9151,7 +9190,7 @@ export function buildMarkdown(
         // Under the content of its parent items, whatever their markers
         const indent = useTab
           ? '\t'.repeat(item.listMeta.level)
-          : ' '.repeat(listItemIndent(item.listMeta.level, item.listMeta.type));
+          : ' '.repeat(listItemIndent(item.listMeta.level));
         // Per-level counters handle nested lists (see nextOrderedNumber)
         listTypeByLevel.set(item.listMeta.level, item.listMeta.type);
         const orderedNum = orderedItem?.number ?? 1;
@@ -9161,10 +9200,8 @@ export function buildMarkdown(
         // A task item's box is its text, which its sublists indent past only the marker of
         const marker = listMarker + (item.listMeta.taskChecked === undefined ? '' : item.listMeta.taskChecked ? '[x] ' : '[ ] ');
         if (item.listMeta.level === 0) topOrderedNext = item.listMeta.type === 'ordered' ? orderedNum + 1 : undefined;
-        // A level Word skipped keeps the width the item was indented by
-        const widths = listMarkerWidths.slice(0, item.listMeta.level);
-        for (let k = widths.length; k < item.listMeta.level; k++) widths.push(item.listMeta.type === 'bullet' ? 2 : 3);
-        listMarkerWidths = [...widths, listMarker.length];
+        listMarkerWidths = [...listMarkerWidths.slice(0, item.listMeta.level), listMarker.length];
+        listWordLevels = [...listWordLevels.slice(0, item.listMeta.level), wordLevel ?? item.listMeta.level];
         lastListItemEmpty = isEmptyListItem(i);
         output.push(indent + marker);
         listLinePrefix = listContinuationIndent({ type: item.listMeta.type, level: item.listMeta.level });
@@ -9243,9 +9280,17 @@ export function buildMarkdown(
       lastListLevel = isCurrentList
         ? item.listMeta!.level
         : item.listContinuation?.level;
+      // A paragraph in an item ends the items under it, which an item after
+      // it can't nest in
+      if (!isCurrentList && item.listContinuation) {
+        listMarkerWidths = listMarkerWidths.slice(0, item.listContinuation.level + 1);
+        listWordLevels = listWordLevels.slice(0, item.listContinuation.level + 1);
+      }
+      // Blank lines alone go on in the list, whose open items an item after
+      // them nests in, numbered as Word shows it
       if (!isCurrentList && !item.listContinuation) {
-        listTypeByLevel.clear();
-        listMarkerWidths = [];
+        if (isPlainEmptyParagraph(item) && !paragraphHasContent(mergedContent, i)) listTypeByLevel.clear();
+        else endListContext();
       }
 
       i++;
@@ -9361,10 +9406,7 @@ export function buildMarkdown(
         output.push('\n\n');
       }
       output.push('<!-- references -->');
-      lastListType = undefined;
-      lastListLevel = undefined;
-      listTypeByLevel.clear();
-      listMarkerWidths = [];
+      endListContext();
       lastAlertParagraphKey = undefined;
       pendingAlertPrefixStrip = undefined;
       pendingAlertInlinePrefixForHardBreak = undefined;
@@ -9445,10 +9487,7 @@ export function buildMarkdown(
         output.push(revisedMathBlock);
         // A top-level display math block breaks list flow. An indented list
         // continuation instead keeps the parent numbering context active.
-        lastListType = undefined;
-        lastListLevel = undefined;
-        listTypeByLevel.clear();
-        listMarkerWidths = [];
+        endListContext();
       }
       pendingAlertPrefixStrip = undefined;
       pendingAlertInlinePrefixForHardBreak = undefined;
@@ -9520,10 +9559,7 @@ export function buildMarkdown(
             break;
           }
         }
-        lastListType = undefined;
-        lastListLevel = undefined;
-        listTypeByLevel.clear();
-        listMarkerWidths = [];
+        endListContext();
         lastAlertParagraphKey = undefined;
         pendingAlertPrefixStrip = undefined;
         pendingAlertInlinePrefixForHardBreak = undefined;
@@ -9535,10 +9571,7 @@ export function buildMarkdown(
       const tableResult = renderTableOrFallback(item, comments, options, renderOpts, storedFormat, tableIndex);
       pushWithHoistedPrefix(output, tableResult.directivePrefix, tableResult.body);
       tableIndex++;
-      lastListType = undefined;
-      lastListLevel = undefined;
-      listTypeByLevel.clear();
-      listMarkerWidths = [];
+      endListContext();
       lastAlertParagraphKey = undefined;
       pendingAlertPrefixStrip = undefined;
       pendingAlertInlinePrefixForHardBreak = undefined;
