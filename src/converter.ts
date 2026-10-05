@@ -11490,8 +11490,13 @@ export async function convertDocx(
   // Strip trailing <!-- references --> marker when bibliography is at the end of the
   // document (default position) so we don't inject a marker that wasn't in the original:
   // a block of its own, after a blank line, as import writes it, not one in the block
-  // of a line before it, as the HTML around a table is.
-  markdown = markdown.replace(/(?:^|\n\n+)<!--\s*references\s*-->\s*$/, '');
+  // of a line before it, as the HTML around a table is, which a comment that
+  // the marker ends can go on in past a blank line.
+  const referencesMarker = /(?:^|\n\n+)<!--\s*references\s*-->\s*$/.exec(markdown);
+  if (referencesMarker) {
+    const line = markdown.slice(0, referencesMarker.index + referencesMarker[0].indexOf('<!--')).split('\n').length - 1;
+    if (!htmlBlocksIn(markdown).some(block => block.start < line && line < block.end)) markdown = markdown.slice(0, referencesMarker.index);
+  }
 
   // Prepend YAML frontmatter if title or Zotero prefs were found
   const fm: Frontmatter = {};

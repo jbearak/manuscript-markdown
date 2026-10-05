@@ -286,7 +286,7 @@ import { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup, findMatchin
 import { splitCriticMarkupInMath, type CriticMathPart } from './critic-math';
 import { findDollarMathAt } from './math-delimiters';
 import { CITATION_ITEM_START_RE, citationEnd, citationPrefixText } from './citation-syntax';
-import { wrapBareLatexEnvironments } from './latex-env-preprocess';
+import { DISPLAY_MATH_ENVIRONMENTS, wrapBareLatexEnvironments } from './latex-env-preprocess';
 export { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup };
 
 // Custom inline rules
@@ -2719,6 +2719,7 @@ function codeBlockLines(run: MdRun): MdRun[] {
 }
 
 const HTML_AROUND_TABLE_WARNING = 'HTML around a table in its HTML block not shown in Word (kept in the Markdown on round-trip).';
+const LATEX_HTML_AROUND_TABLES_WARNING = 'HTML around a table in an HTML block with a LaTeX environment dropped during conversion (not supported). Move the environment out of the block for round-trip fidelity.';
 const SHARED_HTML_AROUND_TABLES_WARNING = 'HTML around tables in one <pre> or similar HTML block dropped during conversion (not supported). Give each table a block of its own for round-trip fidelity.';
 
 /** The text of each cell of each row of a table generateTable wrote, as
@@ -3061,6 +3062,12 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
           const openerEnd = !opener ? undefined : opener[1] ? new RegExp('</' + opener[1] + '>', 'i') : opener[2] ? /-->/ : opener[3] ? /\?>/ : opener[4] ? /\]\]>/ : />/;
           const sharedOpener = htmlTables.length > 1 && !!openerEnd && !openerEnd.test(htmlContent.slice(0, htmlTables[0].start));
           if (sharedOpener) warnings?.push(SHARED_HTML_AROUND_TABLES_WARNING);
+          // So does a LaTeX environment at a line's start, which parseMd
+          // wrapped in two dollar signs each side as display math, with its
+          // blank lines gone, before the block was read, which the Markdown
+          // didn't hold
+          const wrappedLatex = [...htmlContent.matchAll(/^[ ]{0,3}\$\$\\begin\{([a-zA-Z*]+)\}/gm)].some(match => DISPLAY_MATH_ENVIRONMENTS.has(match[1]));
+          if (wrappedLatex) warnings?.push(LATEX_HTML_AROUND_TABLES_WARNING);
           if (htmlTables.length > 0) {
             for (const [k, meta] of htmlTables.entries()) {
               // A comment between rows or cells hides them, as the preview
@@ -3093,7 +3100,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
                 // HTML on the table's lines on them, as it may end a block.
                 const before = k === 0 ? htmlContent.slice(0, meta.start).replace(/(^|\n)[ \t]*$/, '$1') : '';
                 const after = htmlContent.slice(meta.end, htmlTables[k + 1]?.start).replace(/\s+$/, '');
-                if (/\S/.test(before + after) && !sharedOpener) tableToken.tableHtmlAround = [/\S/.test(before) ? before : '', /\S/.test(after) ? after : ''];
+                if (/\S/.test(before + after) && !sharedOpener && !wrappedLatex) tableToken.tableHtmlAround = [/\S/.test(before) ? before : '', /\S/.test(after) ? after : ''];
                 result.push(tableToken);
               }
             }

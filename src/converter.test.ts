@@ -6634,6 +6634,22 @@ describe('HTML around a table in its block', () => {
     expect(again.match(/<w:tbl>/g)).toHaveLength(1);
   });
 
+  test('keeps a <!-- references --> at the end of a table\'s HTML block, which ends it', async () => {
+    // Import took it for the marker of a bibliography at the end, and the
+    // block went on over the text written after it
+    const markdown = await roundTrip('<!-- caption --!><table><tr><td>a</td></tr></table>\n\n<!-- references -->\n');
+    expect(markdown).toBe('<!-- caption --!><table><tr><td><p>a</p></td></tr></table>\n\n<!-- references -->\n');
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown + '\nAfter.\n')).docx)).file('word/document.xml')!.async('string');
+    expect(xml).toContain('>After.</w:t>');
+  });
+
+  test('drops the HTML around a table in a block with a LaTeX environment, which export wraps as math', async () => {
+    // The HTML came back with the dollar signs export put around it
+    const md = '<div>\n\\begin{equation}\nx\n\\end{equation}\n<table><tr><td>a</td></tr></table>\n</div>\n';
+    expect((await convertMdToDocx(md)).warnings).toContain('HTML around a table in an HTML block with a LaTeX environment dropped during conversion (not supported). Move the environment out of the block for round-trip fidelity.');
+    expect(await roundTrip(md)).toBe(table('a') + '\n');
+  });
+
   test('drops the HTML around tables a <pre> holds together in one block', async () => {
     // The <pre> before the first went on over the second where it left
     // HTML, which export then read as HTML, and its tracked change went
