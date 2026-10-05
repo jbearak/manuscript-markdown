@@ -1958,6 +1958,13 @@ function formatHrefForMarkdown(href: string): string {
   return /[()\[\]\s]/.test(href) ? `<${href}>` : href;
 }
 
+/** A link of Markdown `text` to `href`, with a @ that starts the text,
+ *  after a - or not, escaped, as export reads [@ as a citation's, even
+ *  before a link's ( (see citationEnd) */
+function markdownLink(text: string, href: string): string {
+  return '[' + text.replace(/^(-?)@/, (_m, dash: string) => dash + '\\@') + '](' + formatHrefForMarkdown(href) + ')';
+}
+
 // Comment extraction
 
 /** The text a comment's paragraph shows: its runs' text, with a line break
@@ -4940,7 +4947,7 @@ function substitutionItemText(item: SubstitutionItem, precedingText: string, not
   if (item.type === 'text') {
     if (!item.href) return markedFormatting(item.text, item.formatting, false, after);
     const text = markedFormatting(item.text, item.formatting, false, (after ?? RunsAfter.of('')).linkTo(item.href));
-    return `[${text}](${formatHrefForMarkdown(item.href)})`;
+    return markdownLink(text, item.href);
   }
   if (item.type === 'citation') {
     return item.pandocKeys.length > 0
@@ -5533,7 +5540,7 @@ function renderInlineRange(
         const after = runsAfter(segment, j + 1, segmentEnd);
         let segText = textNextToMath(escapeBangBeforeLink(markedFormatting(seg.text, seg.formatting, false, seg.href ? after.linkTo(seg.href) : after), segment, j, segmentEnd), segment, j, segmentEnd, anchorText.length === anchorMathEnd, false, anchorText);
         if (seg.href) {
-          segText = bareLinkChoice(seg, `[${segText}](${formatHrefForMarkdown(seg.href)})`, '==}');
+          segText = bareLinkChoice(seg, markdownLink(segText, seg.href), '==}');
         }
         [anchorText, anchorSpan] = appendRevised(anchorText, segText, seg, anchorSpan);
         j++;
@@ -5572,7 +5579,7 @@ function renderInlineRange(
     if (item.href) {
       // Math can close past the link's text, in its URL or the runs after
       const formattedText = markedFormatting(item.text, item.formatting, false, runsAfter(segment, i + 1, segmentEnd).linkTo(item.href));
-      [out, lastSpan] = appendRevised(out, bareLinkChoice(item, '[' + formattedText + '](' + formatHrefForMarkdown(item.href) + ')'), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, bareLinkChoice(item, markdownLink(formattedText, item.href)), item, lastSpan);
     } else {
       // Markdown ends with a line break only after text that does, so it's
       // read only there, as reading it copies Markdown being built
@@ -5834,7 +5841,7 @@ function renderInlineRangeWithIds(
     if (item.href) {
       // Math can close past the link's text, in its URL or the runs after
       const formattedText = markedFormatting(item.text, item.formatting, false, runsAfter(segment, i + 1, segmentEnd).linkTo(item.href));
-      [out, lastSpan] = appendRevised(out, bareLinkChoice(item, '[' + formattedText + '](' + formatHrefForMarkdown(item.href) + ')'), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, bareLinkChoice(item, markdownLink(formattedText, item.href)), item, lastSpan);
     } else {
       // Markdown ends with a line break only after text that does, so it's
       // read only there, as reading it copies Markdown being built

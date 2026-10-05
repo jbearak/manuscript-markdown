@@ -4327,6 +4327,17 @@ describe('Bare links', () => {
     expect(await roundTrip(markdown.slice(0, -1))).toBe(markdown);
   });
 
+  test.each([
+    ['@', '[\\@x](https://e.com)'],
+    ['-@', '[-\\@x](https://e.com)'],
+    ['@ before a ;', '[\\@x; y](https://e.com)'],
+    ['@ in a comment\'s range', '{==[\\@](https://e.com)==}{>>c<<}'],
+    ['@ on a substitution\'s side', '{~~a~>[\\@x](https://e.com)~~}'],
+  ])('keeps a link whose text starts with %s a link', async (_name, md) => {
+    // Its [@ started a citation, which export reads before a link
+    expect(await roundTrip(md)).toBe(md + '\n');
+  });
+
   test('escapes a ! before a link on a substitution\'s side', async () => {
     // A side has no spans of its own to keep them apart
     const md = 'A {~~a~>Wow\\![x](https://e.com)~~} b';
