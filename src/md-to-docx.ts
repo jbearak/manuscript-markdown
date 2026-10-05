@@ -1093,9 +1093,17 @@ export function extractFootnoteDefinitions(markdown: string): { cleaned: string;
   const cleanedLines: string[] = [];
   let currentLabel: string | undefined;
   let currentBody: string[] = [];
-  let inFence = false;
-  let fenceChar = '';
-  let fenceLen = 0;
+  // The lines of fenced code, its fences' too, as markdown-it reads them,
+  // which hold no definition. Not a line like a fence that isn't one, as
+  // ```a`b, whose info can't hold a backtick, or one indented as code, and
+  // not past a closing fence, which holds nothing after its marker.
+  const fenced = new Set<number>();
+  if (/^[ \t]*(?:`{3,}|~{3,})/m.test(markdown)) {
+    citationTextMd ??= createMarkdownIt();
+    for (const token of citationTextMd.parse(markdown, {})) {
+      if (token.type === 'fence' && token.map) for (let k = token.map[0]; k < token.map[1]; k++) fenced.add(k);
+    }
+  }
 
   function finishDefinition() {
     if (currentLabel !== undefined) {
@@ -1112,22 +1120,8 @@ export function extractFootnoteDefinitions(markdown: string): { cleaned: string;
       currentBody.push(line.replace(/^(?: {4}|\t)/, ''));
       continue;
     }
-    const fenceMatch = line.match(/^(\s*)(`{3,}|~{3,})/);
-    if (fenceMatch) {
-      const marker = fenceMatch[2];
-      const markerChar = marker.charAt(0);
-      const markerLen = marker.length;
-      if (!inFence) {
-        inFence = true;
-        fenceChar = markerChar;
-        fenceLen = markerLen;
-      } else if (markerChar === fenceChar && markerLen >= fenceLen) {
-        inFence = false;
-      }
-      cleanedLines.push(line);
-      continue;
-    }
-    if (inFence) {
+    if (fenced.has(i)) {
+      finishDefinition();
       cleanedLines.push(line);
       continue;
     }

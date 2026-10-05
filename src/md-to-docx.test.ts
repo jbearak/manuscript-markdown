@@ -2962,6 +2962,26 @@ describe('extractFootnoteDefinitions', () => {
     expect(definitions.get('1')).toBe(body);
     expect(cleaned).toBe('\nBody.');
   });
+
+  it.each([
+    // Its info can't hold a backtick, so it's text, a code span's
+    ['a line of backticks with a backtick after them', 'One \\\n```c``c``` end'],
+    ['an indented line of backticks', '    ```'],
+    ['a line of tildes indented as code', '    ~~~ x'],
+  ])('reads a definition after %s, which opens no fenced code', (_name, before) => {
+    // The rest of the document was fenced code, and the definition in it
+    const { cleaned, definitions } = extractFootnoteDefinitions('T [^1]\n\n' + before + '\n\n[^1]: Note.');
+    expect(definitions.get('1')).toBe('Note.');
+    expect(cleaned).toBe('T [^1]\n\n' + before + '\n');
+  });
+
+  it('reads no definition in fenced code past a line of backticks with text after them', () => {
+    // Which closed the fence, though a closing fence holds nothing after its marker
+    const input = 'T [^1]\n\n```\nx\n``` js\n[^1]: Code.\n```\n\n[^1]: Note.';
+    const { cleaned, definitions } = extractFootnoteDefinitions(input);
+    expect(definitions.get('1')).toBe('Note.');
+    expect(cleaned).toBe('T [^1]\n\n```\nx\n``` js\n[^1]: Code.\n```\n');
+  });
 });
 
 describe('Footnote OOXML generation', () => {
