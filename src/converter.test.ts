@@ -671,7 +671,7 @@ describe('Pipe table rendering', () => {
   test('pipe characters in cell content are escaped', async () => {
     const result = await buildAndConvertTable(
       '<w:tbl>'
-      + '<w:tr>'
+      + '<w:tr><w:trPr><w:tblHeader/></w:trPr>'
       + '<w:tc><w:p><w:r><w:t>a|b</w:t></w:r></w:p></w:tc>'
       + '</w:tr>'
       + '</w:tbl>'
@@ -685,7 +685,7 @@ describe('Pipe table rendering', () => {
     // A literal \| in DOCX content has both characters escaped: \\ and \|.
     const result = await buildAndConvertTable(
       '<w:tbl>'
-      + '<w:tr>'
+      + '<w:tr><w:trPr><w:tblHeader/></w:trPr>'
       + '<w:tc><w:p><w:r><w:t>a\\|b</w:t></w:r></w:p></w:tc>'
       + '</w:tr>'
       + '</w:tbl>'
@@ -699,10 +699,10 @@ describe('Pipe table rendering', () => {
     expect(lines.length).toBe(1);
   });
 
-  // GFM pipe tables always have a header row; when the DOCX has no header
-  // signal, the first row is promoted to header. A round-trip will mark it
-  // as a header — this is an accepted trade-off vs falling back to HTML.
-  test('table without header row still renders as pipe table', async () => {
+  // GFM pipe tables always have a header row, which export makes the Word
+  // table's header, in bold, so a table without one is a grid table
+  // without one, rather than a pipe table whose first row becomes a header
+  test('writes a table without a header row as a grid table without one', async () => {
     const result = await buildAndConvertTable(
       '<w:tbl>'
       + '<w:tr>'
@@ -716,9 +716,10 @@ describe('Pipe table rendering', () => {
       + '</w:tbl>'
     );
 
-    expect(result.markdown).toContain('| A | B |');
-    expect(result.markdown).toContain('| --- | --- |');
-    expect(result.markdown).toContain('| C | D |');
+    expect(result.markdown).toContain('+-----+-----+\n| A   | B   |\n+-----+-----+\n| C   | D   |\n+-----+-----+');
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(result.markdown)).docx)).file('word/document.xml')!.async('string');
+    expect(xml).not.toContain('<w:tblHeader/>');
+    expect(xml).not.toContain('<w:b/>');
   });
 
   test('commented run in cell with HTML fallback emits comment body exactly once', async () => {
@@ -1991,7 +1992,7 @@ describe('Comments across paragraphs', () => {
     const markdown = buildMarkdown([
       text('P1', ['0']),
       { type: 'para' },
-      { type: 'table', rows: [{ cells: [{ paragraphs: [[text('x ', ['1']), text('y', ['1', '2']), text(' z', ['2'])]] }] }] },
+      { type: 'table', rows: [{ isHeader: true, cells: [{ paragraphs: [[text('x ', ['1']), text('y', ['1', '2']), text(' z', ['2'])]] }] }] },
       { type: 'para' },
       text('P2', ['0']),
     ] as ContentItem[], comments);
@@ -5975,7 +5976,7 @@ describe('Table alignment', () => {
     // It took six characters a column, and wrote a line past the limit
     const cell = (text: string) => '<w:tc><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>' + text + '</w:t></w:r></w:p></w:tc>';
     const xml = '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl>'
-      + '<w:tr>' + cell('a') + cell('b') + '</w:tr><w:tr>' + cell('1') + cell('2') + '</w:tr></w:tbl></w:body></w:document>';
+      + '<w:tr><w:trPr><w:tblHeader/></w:trPr>' + cell('a') + cell('b') + '</w:tr><w:tr>' + cell('1') + cell('2') + '</w:tr></w:tbl></w:body></w:document>';
     const docx = await buildSyntheticDocx(xml);
     const markdown = async (width: number) => (await convertDocx(docx, 'authorYearTitle', { pipeTableMaxLineWidth: width })).markdown;
     expect(await markdown(17)).toContain('| :---: | :---: |');
