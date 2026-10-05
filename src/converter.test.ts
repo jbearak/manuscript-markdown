@@ -7009,6 +7009,12 @@ describe('Code block round-trip', () => {
     ], '    {#1}XX\n\n    YY{/1}'],
     // Which ended the block, whose next lines took the next block's language
     ['an equation', [[/<w:t>XX<\/w:t><\/w:r>/, '<w:t>XX</w:t></w:r><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath>']], '    X&#88;$x$\n\n    YY'],
+    // Which joins it to the paragraph before, whose deletion took the break
+    // in, but not into a code block
+    ['a tracked break before it', [
+      [/<w:pStyle w:val="FootnoteText"\/><\/w:pPr>/, '<w:pStyle w:val="FootnoteText"/><w:rPr><w:del w:id="93" w:author="A" w:date="2026-01-01T00:00:00Z"/></w:rPr></w:pPr>'],
+      [/<w:t>A\.<\/w:t><\/w:r>/, '<w:t xml:space="preserve">A. </w:t></w:r><w:del w:id="94" w:author="A" w:date="2026-01-01T00:00:00Z"><w:r><w:delText>cut</w:delText></w:r></w:del>'],
+    ], '[^1]:\n\n    A. {--cut\n    \n    --}XX\n\n    YY'],
   ] as [string, [RegExp, string][], string][])('keeps a code block in a note with %s as the note\'s paragraphs, and the next its language', async (_name, edits, lines) => {
     const zip = await JSZip.loadAsync((await convertMdToDocx('T.[^1]\n\n[^1]: A.\n\n    ```py\n    XX\n    YY\n    ```\n\n    ```js\n    ZZ\n    ```\n')).docx);
     let xml = await zip.file('word/footnotes.xml')!.async('string');
@@ -7018,7 +7024,7 @@ describe('Code block round-trip', () => {
     }
     zip.file('word/footnotes.xml', xml);
     expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown))
-      .toBe('T.[^1]\n\n[^1]: A.\n\n' + lines + '\n\n    ```js\n    ZZ\n    ```\n');
+      .toBe('T.[^1]\n\n' + (lines.startsWith('[^1]:') ? '' : '[^1]: A.\n\n') + lines + '\n\n    ```js\n    ZZ\n    ```\n');
   });
 
   test('code block without language survives round-trip', async () => {

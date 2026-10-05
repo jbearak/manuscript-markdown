@@ -6711,7 +6711,8 @@ function paragraphHasContent(content: ContentItem[], paraIndex: number): boolean
  * paragraphs, which this makes them, as before export wrote code blocks in
  * notes: one that holds what a code block can't, as a Word user may add, a
  * comment, a tracked change, a link, or an item that isn't text, as an
- * equation or image, or whose last line's paragraph mark is tracked. The
+ * equation or image, or whose paragraph marks, or the one before it, are
+ * tracked, which a tracked break joins to the paragraph before it. The
  * paragraphs read as text for comments' ranges and tracked breaks then.
  */
 function demoteNoteCodeBlocks(body: ContentItem[]): boolean[] {
@@ -6724,7 +6725,7 @@ function demoteNoteCodeBlocks(body: ContentItem[]): boolean[] {
     while (end < body.length && body[end].type !== 'table' && !(body[end].type === 'para' && !(body[end] as ParaItem).isCodeBlock)) end++;
     const after = body[end];
     const held = body.slice(i, end).some(line => line.type === 'para'
-      ? line.paraMarkRevision || line.breakRevision && line !== item
+      ? line.paraMarkRevision || line.breakRevision
       : line.type !== 'text' || line.revision || line.commentIds.size > 0 || line.href !== undefined)
       || after?.type === 'para' && !!after.breakRevision;
     if (held) for (const line of body.slice(i, end)) if (line.type === 'para') line.isCodeBlock = false;
