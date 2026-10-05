@@ -7621,6 +7621,12 @@ describe('Missing citation keys', () => {
     expect(once).toBe(md + '\n\nCitation data for @' + key + ' was not found in the bibliography file.\n');
     expect(await roundTrip(once)).toBe(once);
   });
+
+  test('keeps a line like the note of a key no citation could have', async () => {
+    // A key ends at a comma, so it was no note of export's
+    const md = 'P\n\nCitation data for @Smith, Alice was not found in the bibliography file.\n';
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown).toBe(md);
+  });
 });
 
 describe('extractBibliographyPath', () => {
