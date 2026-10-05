@@ -9431,6 +9431,25 @@ describe('Track changes (CriticMarkup)', () => {
       expect(xml).toContain('<m:oMath>');
     });
 
+    test('keeps the $ of text after inline math on the new side of a substitution in a comment\'s range in ID syntax as text', async () => {
+      // The substitution, which now forms there, wrote the letter after the
+      // equation as a reference, after which the text's $a$ was math
+      const content: ContentItem[] = [
+        { type: 'para' } as any,
+        { type: 'text', text: 'q', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
+        { type: 'text', text: 'y', commentIds: new Set(['c1']), formatting: DEFAULT_FORMATTING, revision: delRev },
+        { type: 'math', latex: 'z', display: false, commentIds: new Set(['c1']), revision: addRev },
+        { type: 'text', text: 'x$a$', commentIds: new Set(['c1']), formatting: DEFAULT_FORMATTING, revision: addRev },
+        { type: 'text', text: 'w', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
+      ];
+      const comments = new Map([['c1', { author: 'R', text: 'review', date: '' } as any]]);
+      const md = buildMarkdown(content, comments, { alwaysUseCommentIds: true });
+      expect(md).toContain('{~~y~>$z$&#120;\\$a$~~}');
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+      expect(xml.match(/<m:oMath>/g)).toHaveLength(1);
+      expect(xml).toContain('<w:t>x$a$</w:t>');
+    });
+
     test('keeps the tracked mark of a paragraph whose deletion before it follows one in a comment\'s range', async () => {
       // The deletion and the insertion after the mark didn't pair, and the
       // break opened the insertion's span, which export moves it out of
