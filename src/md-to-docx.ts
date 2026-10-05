@@ -1270,7 +1270,7 @@ function findLines(source: string[], lineIndex: Map<string, number[]>, lines: st
 function annotateBlockquoteSpacing(tokens: MdToken[], parsedLines: string[], originalLines: string[]): void {
   // Its lines, from start, and from text, its first's own, as an alert's
   // marker's, past the lines of a block its quote dropped before it
-  interface Group { first: MdToken; start: number; text: number; end: number; markerLine: boolean }
+  interface Group { first: MdToken; start: number; text: number; end: number; markerLine: boolean; last: number }
   const groups: Array<Group | undefined> = [];
   const lineIndex = new Map<string, number[]>();
   originalLines.forEach((line, i) => {
@@ -1307,7 +1307,9 @@ function annotateBlockquoteSpacing(tokens: MdToken[], parsedLines: string[], ori
     if (!tokens[t].alertFirst) continue;
     let start = Infinity;
     let end = -Infinity;
+    let last = t;
     for (let k = t; k < tokens.length && tokens[k].type === 'blockquote'; k++) {
+      last = k;
       for (const range of [tokens[k].sourceRange, tokens[k].droppedRange]) {
         if (range) {
           start = Math.min(start, range[0]);
@@ -1328,6 +1330,7 @@ function annotateBlockquoteSpacing(tokens: MdToken[], parsedLines: string[], ori
       end: found + end - start - 1,
       // As in - > q: blank lines before it belong before the list item
       markerLine: !originalLines[found].trimStart().startsWith('>'),
+      last,
     });
   }
   // A bare > line after a group's text stays in the group
@@ -1355,7 +1358,11 @@ function annotateBlockquoteSpacing(tokens: MdToken[], parsedLines: string[], ori
     const below = blankRun(group.end + 1, 1);
     if (sharesNext) spacing.gapAfter = 0;
     else {
-      if (below.line < originalLines.length && !(next && !next.markerLine && below.line === next.start)) spacing.after = below.count;
+      // Not before definitions, of notes or links, with none of the body
+      // after them, after which import writes notes' after a blank line of
+      // its own
+      if (below.line < originalLines.length && group.last + 1 < tokens.length
+        && !(next && !next.markerLine && below.line === next.start)) spacing.after = below.count;
       if (next) spacing.gapAfter = !next.markerLine && below.line === next.start ? below.count : -1;
     }
     const alertMarker = originalLines[group.text].replace(LIST_MARKERS_RE, '').match(BLOCKQUOTE_ALERT_MARKER_RE);
