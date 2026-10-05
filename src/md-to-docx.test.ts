@@ -652,6 +652,12 @@ describe('parseMd grid tables', () => {
     expect(table?.rows?.[1].cells.map(cell => cell.runs.map(run => run.text).join(''))).toEqual(['|a', 'b|']);
   });
 
+  it('keeps no-break and ideographic spaces at the edges of a grid table cell\'s line', () => {
+    // They went with the spaces and tabs padding the line
+    const table = parseMd('+-----+\n| x   |\n+=====+\n| \u00a0\u00a0b |\n| c\u3000 |\n+-----+').find(t => t.type === 'table');
+    expect(table?.rows?.[1].cells[0].runs.map(run => run.type === 'hardbreak' ? '\n' : run.text).join('')).toBe('\u00a0\u00a0b\nc\u3000');
+  });
+
   it('preprocessGridTables replaces grid tables with placeholders', () => {
     const markdown = 'Before\n\n+------+------+\n| H1   | H2   |\n+======+======+\n| A    | B    |\n+------+------+\n\nAfter';
     const result = preprocessGridTables(markdown);

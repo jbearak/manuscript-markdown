@@ -235,7 +235,7 @@ function parseGridTable(lines: string[]): GridTableData | null {
         const lineCells = currentContent.map(line => gridLineCells(line, colBoundaries.map(b => b + indent)));
         const cells: string[] = [];
         for (let col = 0; col < numCols; col++) {
-          const cellLines = lineCells.map(cells => cells[col].replace(/^\s*/, '').replace(/\s*$/, ''));
+          const cellLines = lineCells.map(cells => cells[col].replace(/^[ \t]+/, '').replace(/[ \t]+$/, ''));
 
           cells.push(cellLines.join('\n'));
         }
