@@ -219,6 +219,7 @@ function mapHtmlTableRunToMdRun(run: HtmlTableRun): MdRun {
     ...(run.superscript ? { superscript: true } : {}),
     ...(run.subscript ? { subscript: true } : {}),
     ...(run.href ? { href: run.href } : {}),
+    ...(run.linkStart ? { linkStart: true } : {}),
   };
 }
 

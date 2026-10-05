@@ -1187,6 +1187,17 @@ describe('generateParagraph', () => {
       + '</w:hyperlink><w:r><w:t xml:space="preserve"> d</w:t></w:r></w:p>');
   });
 
+  it.each([
+    ['two links to one place', '<a href="https://e.com">a</a><a href="https://e.com">b</a>', 2],
+    ['a link with formatting', '<a href="https://e.com">a <b>b</b></a>', 1],
+  ])('writes %s in an HTML table\'s cell as a hyperlink each', async (_name, cell, count) => {
+    // An <a>'s runs were a hyperlink each, and then two <a>s one
+    const { docx } = await convertMdToDocx('<table>\n<tr><td>' + cell + '</td><td>x</td></tr>\n</table>');
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml.match(/<w:hyperlink /g)?.length).toBe(count);
+  });
+
   it('generates softbreak as space', () => {
     const token: MdToken = {
       type: 'paragraph',

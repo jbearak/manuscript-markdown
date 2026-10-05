@@ -8957,6 +8957,16 @@ describe('Links of more than one run', () => {
     expect(performance.now() - start).toBeLessThan(1000);
   });
 
+  test('merges the runs of a link in linear time', () => {
+    // Each merge read whether the text so far ended with a line break,
+    // which flattened it
+    const items: ContentItem[] = Array.from({ length: 48000 }, () => (
+      { type: 'text', text: 'a'.repeat(100), href: 'https://e.com', link: 1, commentIds: new Set(), formatting: DEFAULT_FORMATTING }));
+    const start = performance.now();
+    buildMarkdown(items, new Map());
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+
   test('keeps a soft line break in a link in the link', async () => {
     expect(await roundTrip('[link\ntext](https://e.com)')).toBe('[link text](https://e.com)\n');
   });

@@ -5373,6 +5373,9 @@ function mergeConsecutiveRuns(content: ContentItem[], markdown = true): ContentI
     }
 
     let mergedText = item.text;
+    // The merged text's last two characters, which reading from the text,
+    // which each merge flattens, would take time in the square of the runs
+    let tail = item.text.slice(-2);
     let j = i + 1;
     
     while (j < content.length) {
@@ -5384,12 +5387,13 @@ function mergeConsecutiveRuns(content: ContentItem[], markdown = true): ContentI
           // A link's line break before a line that would start a block
           // stays its own, where linkGroup splits the link
           (item.href !== undefined && (next.text === '\\\n' && startsBlock(content[j + 1])
-            || mergedText.endsWith('\\\n') && startsBlock(next))) ||
+            || tail === '\\\n' && startsBlock(next))) ||
           !commentSetsEqual(item.commentIds, next.commentIds) ||
           !revisionsEqual(item.revision, next.revision)) {
         break;
       }
       mergedText += next.text;
+      tail = next.text.length >= 2 ? next.text.slice(-2) : (tail + next.text).slice(-2);
       j++;
     }
 
