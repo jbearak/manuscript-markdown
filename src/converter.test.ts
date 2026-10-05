@@ -7001,6 +7001,26 @@ describe('Code block round-trip', () => {
       .toBe('T.[^1]\n\n[^1]: ' + line + '\n\n    b\n\n    After.\n');
   });
 
+  test.each([
+    // Which went as two, as the code's text took none
+    ['a comment across its lines', [
+      [/<w:r>(?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>/s, '<w:commentRangeStart w:id="0"/><w:r><w:t>XX</w:t></w:r>'],
+      [/<w:r>(?:(?!<w:r>).)*?<w:t>YY<\/w:t><\/w:r>/s, '<w:r><w:t>YY</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>'],
+    ], '    {#1}XX\n\n    YY{/1}'],
+    // Which ended the block, whose next lines took the next block's language
+    ['an equation', [[/<w:t>XX<\/w:t><\/w:r>/, '<w:t>XX</w:t></w:r><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath>']], '    X&#88;$x$\n\n    YY'],
+  ] as [string, [RegExp, string][], string][])('keeps a code block in a note with %s as the note\'s paragraphs, and the next its language', async (_name, edits, lines) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('T.[^1]\n\n[^1]: A.\n\n    ```py\n    XX\n    YY\n    ```\n\n    ```js\n    ZZ\n    ```\n')).docx);
+    let xml = await zip.file('word/footnotes.xml')!.async('string');
+    for (const [find, replacement] of edits) {
+      expect(xml).toMatch(find);
+      xml = xml.replace(find, replacement);
+    }
+    zip.file('word/footnotes.xml', xml);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown))
+      .toBe('T.[^1]\n\n[^1]: A.\n\n' + lines + '\n\n    ```js\n    ZZ\n    ```\n');
+  });
+
   test('code block without language survives round-trip', async () => {
     const md = '```\nplain code\n```';
     const docxResult = await convertMdToDocx(md);

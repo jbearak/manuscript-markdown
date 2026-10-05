@@ -6707,6 +6707,34 @@ function paragraphHasContent(content: ContentItem[], paraIndex: number): boolean
 }
 
 /**
+ * Whether each of a note's code blocks, in order, goes as the note's
+ * paragraphs, which this makes them, as before export wrote code blocks in
+ * notes: one that holds what a code block can't, as a Word user may add, a
+ * comment, a tracked change, a link, or an item that isn't text, as an
+ * equation or image, or whose last line's paragraph mark is tracked. The
+ * paragraphs read as text for comments' ranges and tracked breaks then.
+ */
+function demoteNoteCodeBlocks(body: ContentItem[]): boolean[] {
+  const demoted: boolean[] = [];
+  for (let i = 0; i < body.length; i++) {
+    const item = body[i];
+    if (item.type !== 'para' || !item.isCodeBlock) continue;
+    let end = i + 1;
+    // To a paragraph that isn't code, or a table, which ends one too
+    while (end < body.length && body[end].type !== 'table' && !(body[end].type === 'para' && !(body[end] as ParaItem).isCodeBlock)) end++;
+    const after = body[end];
+    const held = body.slice(i, end).some(line => line.type === 'para'
+      ? line.paraMarkRevision || line.breakRevision && line !== item
+      : line.type !== 'text' || line.revision || line.commentIds.size > 0 || line.href !== undefined)
+      || after?.type === 'para' && !!after.breakRevision;
+    if (held) for (const line of body.slice(i, end)) if (line.type === 'para') line.isCodeBlock = false;
+    demoted.push(!!held);
+    i = end - 1;
+  }
+  return demoted;
+}
+
+/**
  * The fenced block of the code-block paragraphs from content[start], in the
  * given language, and the index of the item after them. Each code line in
  * DOCX is a { type: 'para', isCodeBlock: true } with the line's text items
@@ -7414,6 +7442,9 @@ export function buildMarkdown(
   const noteEntries = [...(options?.notes?.map.values() ?? [])].sort((a, b) => compareNoteLabels(a.label, b.label));
   // Each note's content as it renders, which collectCommentSpans finds the
   // last item of a comment's range in
+  // Whether each of a note's code blocks goes as its paragraphs, before
+  // what reads code paragraphs apart from text
+  const noteCodeDemoted = new Map(noteEntries.map(entry => [entry, demoteNoteCodeBlocks(entry.body)]));
   const noteBodies = new Map(noteEntries.map(entry => [entry, mergeConsecutiveRuns(joinTrackedParagraphBreaks(entry.body, marks))]));
   collectCommentMetadata(mergedContent);
   for (const entry of noteEntries) collectCommentMetadata(entry.body);
@@ -8824,25 +8855,23 @@ export function buildMarkdown(
           bodyParts[paragraphPart] += text;
         }
       };
-      // The end of a code block whose lines go as the note's paragraphs
-      let annotatedCodeEnd = 0;
+      // The note's code blocks, in order, each in the numbering export gave
+      // it, one that goes as paragraphs too (see demoteNoteCodeBlocks)
+      const demoted = noteCodeDemoted.get(entry)!;
+      let codeBlock = 0;
+      const skipDemoted = () => {
+        while (demoted[codeBlock]) { codeBlockGroupIndex++; codeBlock++; }
+      };
       for (let bi = 0; bi < bodyMerged.length; bi++) {
         const item = bodyMerged[bi];
-        if (item.type === 'para' && item.isCodeBlock && bi >= annotatedCodeEnd) {
+        if (item.type === 'para' && item.isCodeBlock) {
           // A code block, as in the body, which ends the text before it, and
           // the language export stored for it, as it numbers code blocks on
           // from the body's. The empty paragraph export writes between two
           // goes.
+          skipDemoted();
+          codeBlock++;
           const code = codeBlockFence(bodyMerged, bi, codeBlockLangs?.get(String(codeBlockGroupIndex++)) || '');
-          // But one with a comment or tracked change, which a code block
-          // can't hold, goes as paragraphs, which keep them, as before
-          if (bodyMerged.slice(bi, code.end).some(line => line.type === 'para'
-            ? line.paraMarkRevision || line.breakRevision
-            : 'revision' in line && line.revision || 'commentIds' in line && line.commentIds.size > 0)) {
-            annotatedCodeEnd = code.end;
-            bi--;
-            continue;
-          }
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
             pushInline(inlinePart(part.text, false, part.deferredComments.length > 0));
@@ -8947,6 +8976,7 @@ export function buildMarkdown(
           partStart = bi + 1;
         }
       }
+      skipDemoted();
       if (partStart < bodyMerged.length) {
         const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
         pushInline(inlinePart(part.text, false, part.deferredComments.length > 0));
