@@ -8431,6 +8431,25 @@ describe('Track changes (CriticMarkup)', () => {
       expect(markdown.startsWith('a0{--\n\n--}a1{--\n\n--}a2')).toBe(true);
     });
 
+    test('escapes the lines of a deletion of many paragraphs in linear time', () => {
+      // Each line after a tracked break in the deletion's one run was read
+      // to the run's end. Eight times the paragraphs take about eight times
+      // as long, not sixty-four, however fast the machine is.
+      const revision = { type: 'deletion' as const, author: 'A', date: '' };
+      const time = (paragraphs: number) => {
+        const content: ContentItem[] = [];
+        for (let i = 0; i < paragraphs; i++) {
+          content.push(i === 0 ? { type: 'para' } : { type: 'para', breakRevision: revision });
+          content.push({ type: 'text', text: 'a' + i, commentIds: new Set(), formatting: DEFAULT_FORMATTING, revision });
+        }
+        const start = performance.now();
+        buildMarkdown(content, new Map());
+        return performance.now() - start;
+      };
+      const small = time(4000);
+      expect(time(32000) / small).toBeLessThan(16);
+    });
+
     test.each([
       ['a deletion of a paragraph and the start of the next', '{--a\n\nb--}c'],
       ['an insertion of a paragraph and the start of the next', '{++a\n\nb++}c'],

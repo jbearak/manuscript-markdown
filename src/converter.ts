@@ -850,8 +850,11 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
   for (let k = text.indexOf('\\\n'); k !== -1; k = text.indexOf('\\\n', k + 2)) starts.push(k + 2);
   if (text.includes('\n')) for (const end of text.matchAll(TRACKED_BREAK_END_RE)) starts.push(end.index + end[0].length);
   for (const start of starts) {
-    const end = text.indexOf('\\\n', start);
-    const at = blockSyntaxAt(text, start, end === -1 ? text.length : end);
+    // To its line's end, a line break's or a tracked break's, so each line
+    // is read alone and once
+    const newline = text.indexOf('\n', start);
+    const end = newline === -1 ? text.length : text[newline - 1] === '\\' ? newline - 1 : newline;
+    const at = blockSyntaxAt(text, start, end);
     if (at !== undefined) escaped.add(at);
   }
   // Every bracket in a link's text: a ] that a [ in it doesn't close would
