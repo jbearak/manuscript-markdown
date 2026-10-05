@@ -5890,12 +5890,15 @@ function tryRenderSubstitution(
 }
 
 /** Whether the deletion at `index` and the addition after it are each alone
- *  on their side, with no neighbour from the same revision. A longer side is
+ *  on their side, with no neighbour from the same revision that a side can
+ *  take (`eligible`, as for renderSubstitutionRun). A longer side is
  *  renderSubstitutionRun's; where it declines, as for two equations in a
- *  row, the items keep their own spans rather than pairing at the seam. */
-function pairStandsAlone(segment: ContentItem[], index: number): boolean {
+ *  row, the items keep their own spans rather than pairing at the seam. A
+ *  neighbour no side can take, as one in a comment's range, leaves the pair
+ *  alone. */
+function pairStandsAlone(segment: ContentItem[], index: number, eligible: (item: ContentItem) => boolean): boolean {
   const sameRevision = (item: ContentItem | undefined, neighbour: ContentItem) =>
-    !!item && isInlineRevisionItem(item) && isInlineRevisionItem(neighbour) && !!item.revision && revisionsEqual(item.revision, neighbour.revision);
+    !!item && isInlineRevisionItem(item) && isInlineRevisionItem(neighbour) && !!item.revision && revisionsEqual(item.revision, neighbour.revision) && eligible(item);
   return !sameRevision(segment[index - 1], segment[index]) && !sameRevision(segment[index + 2], segment[index + 1]);
 }
 
@@ -6533,7 +6536,8 @@ function renderInlineRange(
     // part of it, which keeps them.
     if (isSubstitutionItem(item) && item.revision?.type === 'deletion' && item.commentIds.size === 0
         && !partlyRevisedLinkAt(segment, i, segmentEnd, NO_COMMENTS)) {
-      const run = renderSubstitutionRun(segment, i, segmentEnd, out, candidate => candidate.type !== 'para' && 'commentIds' in candidate && candidate.commentIds.size === 0, renderOpts?.noteLabels);
+      const eligible = (candidate: ContentItem) => candidate.type !== 'para' && 'commentIds' in candidate && candidate.commentIds.size === 0;
+      const run = renderSubstitutionRun(segment, i, segmentEnd, out, eligible, renderOpts?.noteLabels);
       if (run) {
         out += run.text;
         i = run.nextIndex;
@@ -6545,7 +6549,7 @@ function renderInlineRange(
           next.revision.author === item.revision.author &&
           next.revision.date === item.revision.date &&
           next.commentIds.size === 0 &&
-          pairStandsAlone(segment, i)) {
+          pairStandsAlone(segment, i, eligible)) {
 
         const result = tryRenderSubstitution(item, next, out, renderOpts?.noteLabels);
         if (result !== null) {
@@ -6791,6 +6795,23 @@ function renderInlineRangeWithIds(
     deferred.push({ remappedId: remap(cid), body: formatCommentBodyWithId(remap(cid), c, timezone) });
   }
 
+  // Ends the comments open that aren't `currentIds` and starts those of
+  // them that aren't open, as before each item
+  function enterComments(currentIds: Set<string>): void {
+    for (const cid of [...prevCommentIds].sort()) {
+      if (!currentIds.has(cid)) {
+        out += `{/${remap(cid)}}`;
+        collectBody(cid);
+      }
+    }
+    for (const cid of [...currentIds].sort()) {
+      if (!prevCommentIds.has(cid)) {
+        out += `{#${remap(cid)}}`;
+      }
+    }
+    prevCommentIds = new Set(currentIds);
+  }
+
   while (i < segment.length) {
     const item = segment[i];
     if (i >= segmentEnd) break;
@@ -6798,10 +6819,14 @@ function renderInlineRangeWithIds(
     // Detect substitution: a deletion followed immediately by an addition
     // with identical author and date. Skip if comment context differs to
     // avoid unbalancing comment markers, or the item starts a link with
-    // changes in part of it, which keeps them.
+    // changes in part of it, which keeps them. The deletion's comments
+    // start first, as they would for it alone, so one can start where a
+    // comment's range ends.
     if (isSubstitutionItem(item) && item.revision?.type === 'deletion'
         && !(item.type === 'text' && partlyRevisedLinkAt(segment, i, segmentEnd, item.commentIds))) {
-      const run = renderSubstitutionRun(segment, i, segmentEnd, out, candidate => candidate.type !== 'para' && 'commentIds' in candidate && commentSetsEqual(candidate.commentIds, prevCommentIds), noteLabels);
+      enterComments(item.commentIds);
+      const eligible = (candidate: ContentItem) => candidate.type !== 'para' && 'commentIds' in candidate && commentSetsEqual(candidate.commentIds, prevCommentIds);
+      const run = renderSubstitutionRun(segment, i, segmentEnd, out, eligible, noteLabels);
       if (run) {
         out += run.text;
         i = run.nextIndex;
@@ -6814,7 +6839,7 @@ function renderInlineRangeWithIds(
           next.revision.date === item.revision.date &&
           commentSetsEqual(item.commentIds, prevCommentIds) &&
           commentSetsEqual(next.commentIds, prevCommentIds) &&
-          pairStandsAlone(segment, i)) {
+          pairStandsAlone(segment, i, eligible)) {
 
         const result = tryRenderSubstitution(item, next, out, noteLabels);
         if (result !== null) {
