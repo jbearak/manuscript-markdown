@@ -2803,6 +2803,26 @@ export async function extractTableDigitGroupingMapping(data: Uint8Array | JSZip)
   return extractIdMappingFromCustomXml(data, 'MANUSCRIPT_TABLE_DIGIT_GROUPINGS');
 }
 
+/** Each HTML table's HTML before and after it in its block, which Word
+ *  doesn't show, and its first row's text when export wrote it (see
+ *  tableFirstRow) */
+export async function extractTableHtmlAroundMapping(data: Uint8Array | JSZip): Promise<Map<string, [string, string, string]> | null> {
+  const json = await extractChunkedCustomProp(data, 'MANUSCRIPT_TABLE_HTML_AROUND');
+  if (!json) return null;
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (!parsed || typeof parsed !== 'object') return null;
+    const mapping = new Map<string, [string, string, string]>();
+    for (const [index, around] of Object.entries(parsed)) {
+      if (Array.isArray(around) && around.length === 3 && around.every(part => typeof part === 'string')
+        && (around[0] || around[1])) mapping.set(index, [around[0], around[1], around[2]]);
+    }
+    return mapping.size > 0 ? mapping : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function extractEmbedDirectiveMapping(data: Uint8Array | JSZip): Promise<Map<string, string> | null> {
   return extractIdMappingFromCustomXml(data, 'MANUSCRIPT_EMBED_DIRECTIVES');
 }
@@ -6947,11 +6967,16 @@ function htmlCellsHoldTable(table: { rows: TableRow[] }): boolean {
     cell.paragraphs.every(para => renderHtmlCellParagraph(para) !== undefined)));
 }
 
-function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comment>, indent: string = '  ', renderOpts?: RenderOpts, extraAttrs: string = ''): string {
+function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comment>, indent: string = '  ', renderOpts?: RenderOpts, extraAttrs: string = '', around?: readonly string[]): string {
+  // A block that starts as a comment, <pre> or the like ends on the line its
+  // end is on, as the --> before the table, so the table goes on that line
+  const oneLine = /^[ \t]{0,3}(?:<(?:script|pre|style|textarea)(?=[\s>]|$)|<!--|<\?|<![A-Za-z]|<!\[CDATA\[)/i.test(around?.[0] ?? '');
+  if (oneLine) indent = '';
   const i1 = indent;  // tr level
   const i2 = indent + indent;  // td/th level
   const i3 = indent + indent + indent;  // content level
-  const lines: string[] = ['<table' + extraAttrs + '>'];
+  // The HTML around the table in its block, as it was, on the table's lines
+  const lines: string[] = [(around?.[0] ?? '') + '<table' + extraAttrs + '>'];
   const deferredAll: string[] = [];
   for (let rowIdx = 0; rowIdx < table.rows.length; rowIdx++) {
     const row = table.rows[rowIdx];
@@ -6992,13 +7017,13 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
     }
     lines.push(i1 + '</tr>');
   }
-  lines.push('</table>');
+  lines.push('</table>' + (around?.[1] ?? ''));
   // Comment bodies go after the table, as in a pipe table: a blank line in
   // one would end the table's HTML
-  return lines.join('\n') + (deferredAll.length > 0 ? '\n\n' + deferredAll.join('\n') : '');
+  return lines.join(oneLine ? '' : '\n') + (deferredAll.length > 0 ? '\n\n' + deferredAll.join('\n') : '');
 }
 
-type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem>; htmlCells?: boolean };
+type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; tableHtmlAroundMapping?: Map<string, [string, string, string]>; usedTableHtmlAround?: Set<string>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem>; htmlCells?: boolean };
 
 /**
  * Try to render a table as a GFM pipe table. Returns null if the table is
@@ -7503,6 +7528,14 @@ function pushWithHoistedPrefix(output: string[], directivePrefix: string, body: 
   output.push('\n' + body);
 }
 
+/** A table's first row's text, as export finds it (see tableFirstRow in
+ *  md-to-docx.ts) */
+function tableFirstRow(rows: TableRow[]): string {
+  const cells = rows[0]?.cells ?? [];
+  return cells.length + ':' + cells.map(cell => cell.paragraphs.flat().map(item => item.type === 'text' ? item.text.replace(/\\\n/g, '') : '')
+    .join('').replace(/\s+/g, ' ').trim()).join('|');
+}
+
 function renderTableOrFallback(
   item: { rows: TableRow[] },
   comments: Map<string, Comment>,
@@ -7510,7 +7543,7 @@ function renderTableOrFallback(
   renderOpts?: RenderOpts,
   storedFormat?: string,
   tableIndex?: number,
-): { directivePrefix: string; body: string } {
+): { directivePrefix: string; body: string; before?: string; after?: string } {
   // A cell holds no range that goes on past it, and a range open around the
   // table, with no item in it, stays open for the text after. A cell's
   // comments are the browser's where the table was HTML.
@@ -7535,13 +7568,27 @@ function renderTableOrFallback(
     if (isLandscapeTable) htmlFontAttrs += ' data-orientation="landscape"';
     if (isPortraitTable) htmlFontAttrs += ' data-orientation="portrait"';
   }
-  const r = (body: string) => ({ directivePrefix: fontPrefix, body });
+  // The HTML around an HTML table in its block, if it's this table's, or
+  // else another's of its first row, as a table Word added or deleted
+  // before it shifts the indices, each once. It goes around a table in
+  // another format as blocks of its own, before its directives.
+  const firstRow = tableFirstRow(item.rows);
+  const aroundMapping = renderOpts?.tableHtmlAroundMapping;
+  let aroundKey = tableIndex !== undefined && aroundMapping?.get(String(tableIndex))?.[2] === firstRow ? String(tableIndex) : undefined;
+  if (aroundKey === undefined || renderOpts?.usedTableHtmlAround?.has(aroundKey)) {
+    aroundKey = [...aroundMapping?.entries() ?? []].find(([key, entry]) => entry[2] === firstRow && !renderOpts?.usedTableHtmlAround?.has(key))?.[0];
+  }
+  const around = aroundKey !== undefined ? aroundMapping?.get(aroundKey) : undefined;
+  if (aroundKey !== undefined) renderOpts?.usedTableHtmlAround?.add(aroundKey);
+  const before = around?.[0].replace(/\s+$/, '');
+  const after = around?.[1].replace(/^\s+/, '');
+  const r = (body: string) => ({ directivePrefix: fontPrefix, body, ...(before ? { before } : {}), ...(after ? { after } : {}) });
   const rHtml = (body: string) => ({ directivePrefix: '', body });
   // If the original format was HTML or font value is comment-unsafe, emit HTML
   // directly. A table that holds what HTML cells can't goes on as if it had
   // no stored format, to a format that can, unless it needs HTML.
   if ((storedFormat === 'html' && htmlCellsHoldTable(item)) || forceHtmlTable) {
-    return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs));
+    return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs, around));
   }
   // Parse stored grid source column widths for this table
   const gridSrcWidthsStr = tableIndex !== undefined ? renderOpts?.gridSourceColWidthsMapping?.get(String(tableIndex)) : undefined;
@@ -7556,7 +7603,7 @@ function renderTableOrFallback(
   if (storedFormat === 'grid') {
     const gridResult = tryRenderGridTable(item, comments, renderOpts, undefined, gridSrcWidths);
     if (gridResult !== null) return r(gridResult);
-    return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs));
+    return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs, around));
   }
   // When the original was a pipe table, skip the width check to preserve format
   const pipeMax = storedFormat === 'pipe' ? Infinity : (options?.pipeTableMaxLineWidth ?? 120);
@@ -7577,7 +7624,7 @@ function renderTableOrFallback(
     const gridResult = tryRenderGridTable(item, comments, renderOpts, undefined, gridSrcWidths);
     if (gridResult !== null) return r(gridResult);
   }
-  return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs));
+  return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs, around));
 }
 
 const PARAGRAPH_CONTENT_ELEMENTS = new Set([
@@ -8435,7 +8482,7 @@ function joinSpansAtTrackedBreaks(markdown: string, marks: TrackedBreakMarks): s
 export function buildMarkdown(
   content: ContentItem[],
   comments: Map<string, Comment>,
-  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, { label: string; body: ContentItem[]; noteKind: 'footnote' | 'endnote' }>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string },
+  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, { label: string; body: ContentItem[]; noteKind: 'footnote' | 'endnote' }>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; tableHtmlAroundMapping?: Map<string, [string, string, string]> | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string },
 ): string {
   let breakMarks: TrackedBreakMarks | undefined;
   const marks = () => breakMarks ??= trackedBreakMarks([content, [...comments.values()], options]);
@@ -8705,6 +8752,8 @@ export function buildMarkdown(
     tableDigitsMapping: options?.tableDigitsMapping ?? undefined,
     tableDecimalMarkMapping: options?.tableDecimalMarkMapping ?? undefined,
     tableDigitGroupingMapping: options?.tableDigitGroupingMapping ?? undefined,
+    tableHtmlAroundMapping: options?.tableHtmlAroundMapping ?? undefined,
+    usedTableHtmlAround: new Set<string>(),
     landscapeTableIndices: options?.landscapeTableIndices ?? undefined,
     portraitTableIndices: options?.portraitTableIndices ?? undefined,
     embedDirectiveMapping: options?.embedDirectiveMapping ?? undefined,
@@ -9757,7 +9806,12 @@ export function buildMarkdown(
       }
       const storedFormat = renderOpts?.tableFormatMapping?.get(String(tableIndex));
       const tableResult = renderTableOrFallback(item, comments, options, renderOpts, storedFormat, tableIndex);
-      pushWithHoistedPrefix(output, tableResult.directivePrefix, tableResult.body);
+      if (tableResult.before) {
+        output.push(tableResult.before + '\n\n' + tableResult.directivePrefix + tableResult.body);
+      } else {
+        pushWithHoistedPrefix(output, tableResult.directivePrefix, tableResult.body);
+      }
+      if (tableResult.after) output.push('\n\n' + tableResult.after);
       tableIndex++;
       endListContext();
       lastAlertParagraphKey = undefined;
@@ -10117,11 +10171,13 @@ export function buildMarkdown(
           } else {
             const noteStoredFormat = noteRenderOpts?.tableFormatMapping?.get(String(tableIndex));
             const noteTableResult = renderTableOrFallback(item, comments, options, noteRenderOpts, noteStoredFormat, tableIndex);
+            if (noteTableResult.before) bodyParts.push(noteTableResult.before);
             if (noteTableResult.directivePrefix) {
               bodyParts.push(noteTableResult.directivePrefix.replace(/\n+$/, '') + '\n' + noteTableResult.body);
             } else {
               bodyParts.push(noteTableResult.body);
             }
+            if (noteTableResult.after) bodyParts.push(noteTableResult.after);
           }
           tableIndex++;
           partStart = bi + 1;
@@ -10678,6 +10734,7 @@ export async function convertDocx(
     tableDigitsMapping,
     tableDecimalMarkMapping,
     tableDigitGroupingMapping,
+    tableHtmlAroundMapping,
     storedPipeTableMaxLineWidth,
     storedGridTableMaxLineWidth,
     storedListIndent,
@@ -10734,6 +10791,7 @@ export async function convertDocx(
     tableDigitsMapping: extractTableDigitsMapping(zip),
     tableDecimalMarkMapping: extractTableDecimalMarkMapping(zip),
     tableDigitGroupingMapping: extractTableDigitGroupingMapping(zip),
+    tableHtmlAroundMapping: extractTableHtmlAroundMapping(zip),
     storedPipeTableMaxLineWidth: extractPipeTableMaxLineWidth(zip),
     storedGridTableMaxLineWidth: extractGridTableMaxLineWidth(zip),
     storedListIndent: extractListIndent(zip),
@@ -11036,6 +11094,7 @@ export async function convertDocx(
     tableDigitsMapping,
     tableDecimalMarkMapping,
     tableDigitGroupingMapping,
+    tableHtmlAroundMapping,
     landscapeTableIndices: landscapeTableMapping,
     portraitTableIndices: portraitTableMapping,
     embedDirectiveMapping,

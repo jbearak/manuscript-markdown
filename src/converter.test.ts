@@ -6216,6 +6216,73 @@ describe('HTML table cells', () => {
   });
 });
 
+describe('HTML around a table in its block', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+  const table = (text: string, indent = '') => ['<table>', '  <tr>', '    <td>', '      <p>' + text + '</p>', '    </td>', '  </tr>', '</table>'].map(line => indent + line).join('\n');
+
+  test.each([
+    ['a div and a caption', '<div>\n<p>Table 1.</p>\n' + table('a') + '\n</div>\n'],
+    ['text after it', table('a') + '\nSource: World Bank,\n2020.\n'],
+    ['a comment and text after it', table('a') + '\n<!-- TODO: check -->\nSource.\n'],
+    ['a table commented out before it', '<div><!-- ' + table('old').replace(/\n/g, ' ') + ' -->\n' + table('a') + '\n</div>\n'],
+    ['HTML between two tables', table('a') + '\n<p>Between.</p>\n\n' + table('b') + '\n<p>After.</p>\n'],
+    ['a div in a note', 'A[^1].\n\n[^1]: Note.\n\n    <div>\n' + table('a', '    ') + '\n    </div>\n'],
+    // Whose line ends were taken for the indent
+    ['an indented caption and text', '<div class="t">\n  <p>Table 1.</p>\n' + table('a') + '\n  <p>Source: X.</p>\n</div>\n'],
+    ['a div on its lines', '<div>' + table('a') + '</div>\n'],
+    // A block a comment or <pre> starts ends on the line of its end, so
+    // the table stays on it
+    ['a comment on its line', '<!-- Table 1 --><table><tr><td><p>a</p></td></tr></table>\n'],
+    ['a comment with a blank line', '<!-- TODO: check\n\nthe totals --><table><tr><td><p>a</p></td></tr></table>\n'],
+    ['a pre on its line', '<pre>Table 1</pre><table><tr><td><p>a</p></td></tr></table>\n'],
+  ])('keeps %s', async (_name, md) => {
+    // Export dropped the rest of a table's block with no warning
+    const { warnings } = await convertMdToDocx(md);
+    expect(warnings).toContain('HTML around a table in its HTML block not shown in Word (kept in the Markdown on round-trip).');
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('applies no directive in a comment on a table\'s line, as markdown-it reads it', async () => {
+    // A line end import put after the comment made it the table's directive
+    const md = '<!-- table-font-size: 11 --><table><tr><td><p>a</p></td></tr></table>\n';
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(await roundTrip(md))).docx)).file('word/document.xml')!.async('string');
+    expect(xml.slice(xml.indexOf('<w:tbl>'))).not.toContain('<w:sz w:val="22"/>');
+  });
+
+  test('puts the HTML around a table back with the same table after Word deletes one before it', async () => {
+    // Another took the deleted table's, as the tables' indices shifted
+    const md = '<div>\n<p>Table 1.</p>\n<table><tr><td>A</td></tr></table>\n</div>\n\nText.\n\n<div>\n<p>Table 2.</p>\n<table><tr><td>B</td></tr></table>\n</div>\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, ''));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('Text.\n\n<div>\n<p>Table 2.</p>\n' + table('B') + '\n</div>\n');
+  });
+
+  test('warns of no HTML kept around a table in a list item, which is dropped', async () => {
+    const { warnings } = await convertMdToDocx('- <p>Cap</p>\n  <table><tr><td>a</td></tr></table>\n');
+    expect(warnings.some(w => w.startsWith('HTML around a table'))).toBe(false);
+  });
+
+  test('reads a table whose block starts with a div, after a directive, as the directive\'s', async () => {
+    const md = '<!-- table-font-size: 11 -->\n<div>\n<table><tr><td>a</td></tr></table>\n</div>\n';
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    expect(xml.slice(xml.indexOf('<w:tbl>'))).toContain('<w:sz w:val="22"/>');
+  });
+
+  test('writes the HTML around a table that leaves HTML, as for a tracked change, as blocks around it and its directives', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('<div>\n<p>Cap</p>\n<table data-font-size="11"><tr><th>h</th></tr><tr><td>XX</td></tr></table>\n</div>\n\nAfter.\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const tracked = xml.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>');
+    expect(tracked).not.toBe(xml);
+    zip.file('word/document.xml', tracked);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('<div>\n<p>Cap</p>\n\n<!-- table-font-size: 11 -->\n| h |\n| --- |\n| {++XX++} |\n\n</div>\n\nAfter.\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+});
+
 describe('Tabs', () => {
   const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
 

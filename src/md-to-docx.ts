@@ -123,6 +123,7 @@ export interface MdToken {
   tableDigits?: TableDigits;
   tableDecimalMark?: TableDecimalMark;
   tableDigitGrouping?: TableDigitGrouping;
+  tableHtmlAround?: [string, string, string]; // the HTML before and after an HTML table in its block, which Word doesn't show, and the table's first row (see tableFirstRow)
   gridSourceColWidths?: number[]; // column char-widths inferred from +---+---+ source; persisted for round-trip fidelity and Word Online layout
   criticParaMark?: 'addition' | 'deletion'; // paragraph mark revision: a heading promoted from a full-paragraph {++### ...++} / {--### ...--} span, or a block split at a paragraph break inside a revision
   criticParaMarkRun?: MdRun; // the revision whose paragraph break ends this block; supplies author and date (default: the first run)
@@ -2676,6 +2677,17 @@ function codeBlockLines(run: MdRun): MdRun[] {
   ];
 }
 
+const HTML_AROUND_TABLE_WARNING = 'HTML around a table in its HTML block not shown in Word (kept in the Markdown on round-trip).';
+
+/** A table's first row's text, which import compares with the table's, to
+ *  put the HTML around it back with no other table, as one Word added or
+ *  deleted would shift the tables' indices: its cells' count and text, as
+ *  Word holds it, with no breaks, comments or math, and spaces run together */
+function tableFirstRow(rows: MdTableRow[]): string {
+  const cells = rows[0]?.cells ?? [];
+  return cells.length + ':' + cells.map(cell => cell.runs.filter(run => run.type === 'text').map(run => run.text).join('').replace(/\s+/g, ' ').trim()).join('|');
+}
+
 function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel = 0, warnings?: string[], sourceLines?: string[]): MdToken[] {
   const result: MdToken[] = [];
   let i = 0;
@@ -2974,9 +2986,12 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
               : { type: 'hardbreak' as const, text: '\n' }),
           });
         } else {
-          const htmlTables = extractHtmlTables(htmlContent);
-          if (htmlTables.some(meta => meta.rows.length > 0)) {
-            for (const meta of htmlTables) {
+          // A table whose rows are all in comments, which nothing of shows,
+          // is HTML around a table that shows, as the rest of the block is
+          const allTables = extractHtmlTables(htmlContent);
+          const htmlTables = allTables.filter(meta => meta.rows.length > 0);
+          if (htmlTables.length > 0) {
+            for (const [k, meta] of htmlTables.entries()) {
               // A comment between rows or cells hides them, as the preview
               // does, but Word's table can't hold it
               if (meta.comments) warnings?.push('Comment between an HTML table\'s rows or cells dropped during conversion (not supported). Move it outside the table for round-trip fidelity.');
@@ -2998,6 +3013,18 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
                 if (meta.decimalMark) tableToken.tableDecimalMark = meta.decimalMark;
                 if (meta.digitGrouping) tableToken.tableDigitGrouping = meta.digitGrouping;
                 if (meta.embedIdx !== undefined) tableToken.embedIdx = meta.embedIdx;
+                // The rest of the block, as a caption in a <p> or a <div>
+                // around the table, which Word doesn't show, goes with the
+                // table it's next to, as an image's goes with it: the HTML
+                // before the first table, but the indent of the table's
+                // line, and after each to the next, but the line end and
+                // indent before that. Import writes it as it was, with the
+                // HTML on the table's lines on them, as it may end a block.
+                const before = k === 0 ? htmlContent.slice(0, meta.start).replace(/(^|\n)[ \t]*$/, '$1') : '';
+                const after = htmlContent.slice(meta.end, htmlTables[k + 1]?.start).replace(/\s+$/, '');
+                if (/\S/.test(before + after)) {
+                  tableToken.tableHtmlAround = [/\S/.test(before) ? before : '', /\S/.test(after) ? after : '', tableFirstRow(mappedRows)];
+                }
                 result.push(tableToken);
               }
             }
@@ -3008,7 +3035,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
             // preview shows nothing of, but Word's table can't hold, and
             // hidden, would lose the rest of the block, and make a comment
             // that reads as a directive one.
-            if (htmlTables.length > 0) warnings?.push('HTML table whose rows are all in comments exported as text (not supported). Move the comments outside the table for round-trip fidelity.');
+            if (allTables.length > 0) warnings?.push('HTML table whose rows are all in comments exported as text (not supported). Move the comments outside the table for round-trip fidelity.');
             result.push({
               type: 'paragraph',
               runs: [{ type: 'text', text: htmlContent.replace(/\n$/, '') }]
@@ -3935,6 +3962,7 @@ export interface DocxGenState {
   tableDigits: Map<number, string>;
   tableDecimalMarks: Map<number, string>;
   tableDigitGroupings: Map<number, string>;
+  tableHtmlAround: Map<number, [string, string, string]>; // table index -> the HTML before and after it in its block, and its first row
   fontOverrides?: FontOverrides;       // document-level font overrides for table default resolution
   listIndent: 'tab' | 'spaces'; // indentation style for nested list items
   consecutiveReplyParaIds: Set<string>; // parent paraIds whose replies were in consecutive format
@@ -3993,6 +4021,10 @@ function recordTableMetadata(token: MdToken, state: DocxGenState): void {
   if (token.tableDigits !== undefined) state.tableDigits.set(tableIndex, String(token.tableDigits));
   if (token.tableDecimalMark) state.tableDecimalMarks.set(tableIndex, token.tableDecimalMark);
   if (token.tableDigitGrouping) state.tableDigitGroupings.set(tableIndex, token.tableDigitGrouping);
+  if (token.tableHtmlAround) {
+    state.tableHtmlAround.set(tableIndex, token.tableHtmlAround);
+    if (!state.warnings.includes(HTML_AROUND_TABLE_WARNING)) state.warnings.push(HTML_AROUND_TABLE_WARNING);
+  }
 }
 
 interface CommentEntry {
@@ -8232,6 +8264,7 @@ export async function convertMdToDocx(
     tableDigits: new Map(),
     tableDecimalMarks: new Map(),
     tableDigitGroupings: new Map(),
+    tableHtmlAround: new Map(),
     pipeTableAligned: new Map(),
     gridSourceColWidths: new Map(),
     fontOverrides,
@@ -8716,6 +8749,9 @@ export async function convertMdToDocx(
   customProps.push(...imageFormatProps(state.imageFormats));
   customProps.push(...noteImageFormatProps(state.noteImageFormats));
   customProps.push(...tableFormatProps(state.tableFormats));
+  if (state.tableHtmlAround.size > 0) {
+    customProps.push(...chunkCustomProps('MANUSCRIPT_TABLE_HTML_AROUND_', JSON.stringify(Object.fromEntries(state.tableHtmlAround))));
+  }
   customProps.push(...pipeTableAlignedProps(state.pipeTableAligned));
   customProps.push(...gridSourceColWidthsProps(state.gridSourceColWidths));
   customProps.push(...tableFontSizeProps(state.tableFontSizes, fontOverrides?.tableSizeHp));
