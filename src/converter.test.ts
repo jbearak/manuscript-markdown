@@ -6158,6 +6158,25 @@ describe('Blockquote round-trip', () => {
     expect(result.markdown).toContain('Before paragraph.\n\n\n> Quoted line');
     expect(result.markdown).toContain('> Quoted line\n\n\nAfter paragraph.');
   });
+
+  test.each([
+    ['notes\' definitions', '> Q[^1]\n\n[^1]: Note.'],
+    ['notes\' definitions after a paragraph before it', 'P[^1]\n\n> Q\n\n[^1]: Note.'],
+    ['notes\' definitions after the next quote', '> A[^1]\n>\n> B\n\n[^1]: N.'],
+    ['a quote in a list item', '- a\n\n  > q[^1]\n\n[^1]: N.'],
+  ])('adds no blank lines between a quote the body ends with and %s', async (_name, md) => {
+    // Export read the blank line before the definitions as one before more
+    // of the body, and wrote an empty paragraph for it after the quote,
+    // which import wrote as blank lines before its own
+    const once = (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
+    expect(once).toBe(md + '\n');
+  });
+
+  test('keeps the blank lines after a quote before the body\'s text after definitions', async () => {
+    const md = '> Q\n\n[^1]: Note.\n\n\nP[^1]';
+    const once = (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
+    expect(once).toBe('> Q\n\nP[^1]\n\n[^1]: Note.\n');
+  });
 });
 
 describe('A quote after a deeper one', () => {
