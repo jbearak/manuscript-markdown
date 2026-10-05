@@ -3193,12 +3193,17 @@ function markdownComment(text: string, beforeComment = false, cell = false): str
   return end?.[0] === '--!>' && end.index >= from ? text.slice(0, -4) + '-->' : text.trimEnd() + ' -->';
 }
 
-/** The items of a table's cell with each comment the browser reads no end
- *  in joined with the comments after it, which Word split it from at an
- *  <!-- in it, which the browser reads on, up to the one an end is in, as
- *  one comment, where they're in the same comments' ranges. No range ends
- *  at an HTML comment (see collectCommentSpans), so none loses its end. */
-function joinSplitComments(items: ContentItem[]): ContentItem[] {
+/** The items of a table's cell with each comment that has no end joined
+ *  with the comments after it, which Word split it from at an <!-- in it,
+ *  up to the one an end is in, as one comment, where they're in the same
+ *  comments' ranges: its end as the browser reads it, a --!> too, in an
+ *  HTML table's cell (`browser`), or else as inline Markdown does, as
+ *  readHiddenText does. No range ends at an HTML comment (see
+ *  collectCommentSpans), so none loses its end. */
+function joinSplitComments(items: ContentItem[], browser: boolean): ContentItem[] {
+  const ended = browser ? (text: string) => /^\s*<!--(?:-?>|[\s\S]*?--!?>)/.test(text)
+    : (text: string) => text.includes('-->', text.lastIndexOf('<!--') + 4) || /^\s*<!---?>\s*$/.test(text);
+  const end = browser ? /--!?>/ : /-->/;
   const out: ContentItem[] = [];
   let joined = false;
   // The texts of the comment at the end of `out` while it has no end, their
@@ -3214,13 +3219,13 @@ function joinSplitComments(items: ContentItem[]): ContentItem[] {
   for (const item of items) {
     if (open && item.type === 'html_comment' && commentSetsEqual(item.commentIds, open.commentIds)) {
       open.texts.push(item.text);
-      if (/--!?>/.test(open.tail + item.text)) close();
+      if (end.test(open.tail + item.text)) close();
       else open.tail = (open.tail + item.text).slice(-3);
       continue;
     }
     close();
     out.push(item);
-    if (item.type === 'html_comment' && !/^\s*<!--(?:-?>|[\s\S]*?--!?>)/.test(item.text)) {
+    if (item.type === 'html_comment' && !ended(item.text)) {
       open = { texts: [item.text], tail: item.text.slice(-3), commentIds: item.commentIds };
     }
   }
@@ -5595,9 +5600,10 @@ function renderInlineSegment(
   segment: ContentItem[],
   comments: Map<string, Comment>,
   renderOpts?: RenderOpts,
-  opts?: InlineRangeOpts
+  opts?: InlineRangeOpts,
+  htmlCell = !!renderOpts?.htmlCells,
 ): { text: string; deferredComments: string[] } {
-  const result = renderInlineRange(joinSplitComments(segment), 0, comments, opts, renderOpts);
+  const result = renderInlineRange(joinSplitComments(segment, htmlCell), 0, comments, opts, renderOpts);
   return {
     // A line break at a cell's end is <br>, which a pipe table holds, as a
     // grid table's blank line there pads the cell to its row's height
@@ -6566,7 +6572,7 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
   // A comment Word split, as one; and comments the browser ended at a --!>,
   // which Word joined in one hidden run, as inline Markdown would read them
   // as one (see readHiddenText)
-  const split = joinSplitComments(items).flatMap((item): ContentItem[] => item.type === 'html_comment'
+  const split = joinSplitComments(items, true).flatMap((item): ContentItem[] => item.type === 'html_comment'
     ? item.text.split(/(?<=--!>)\u200B+(?=<!--)/).map(text => ({ ...item, text }))
     : [item]);
   for (const [k, item] of split.entries()) {
@@ -6691,7 +6697,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
         readsCitations = false;
         let rendered: ReturnType<typeof renderInlineSegment>;
         try {
-          rendered = renderInlineSegment(items, comments, renderOpts);
+          rendered = renderInlineSegment(items, comments, renderOpts, undefined, true);
         } finally {
           readsCitations = outerReadsCitations;
         }
@@ -6708,7 +6714,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
   return lines.join('\n') + (deferredAll.length > 0 ? '\n\n' + deferredAll.join('\n') : '');
 }
 
-type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem> };
+type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem>; htmlCells?: boolean };
 
 /**
  * Try to render a table as a GFM pipe table. Returns null if the table is
@@ -7222,8 +7228,9 @@ function renderTableOrFallback(
   tableIndex?: number,
 ): { directivePrefix: string; body: string } {
   // A cell holds no range that goes on past it, and a range open around the
-  // table, with no item in it, stays open for the text after
-  if (renderOpts?.openIdComments) renderOpts = { ...renderOpts, openIdComments: undefined };
+  // table, with no item in it, stays open for the text after. A cell's
+  // comments are the browser's where the table was HTML.
+  if (renderOpts?.openIdComments || storedFormat === 'html') renderOpts = { ...renderOpts, openIdComments: undefined, htmlCells: storedFormat === 'html' };
   const { fontPrefix, commentUnsafeFont: forceHtmlTable } = buildTableDirectivePrefix(renderOpts, tableIndex);
   let htmlFontAttrs = '';
   const isLandscapeTable = tableIndex !== undefined && renderOpts?.landscapeTableIndices?.has(tableIndex);

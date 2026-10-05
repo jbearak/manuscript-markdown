@@ -5816,6 +5816,18 @@ describe('HTML table cells', () => {
     expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(expected);
   });
 
+  test('keeps a pipe cell\'s comment hidden that Word splits before an <!-- in it after a --!>', async () => {
+    // A --!> ended its first piece, as it does an HTML table's comment, but
+    // not one inline Markdown reads, and the rest showed
+    const md = '| h |\n| --- |\n| a<!-- a --!><!---> secret -->b |';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const split = xml.replace('\u200B&lt;!-- a --!&gt;&lt;!---&gt; secret --&gt;', '\u200B&lt;!-- a --!&gt;</w:t></w:r><w:r><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr><w:t xml:space="preserve">&lt;!---&gt; secret --&gt;');
+    expect(split).not.toBe(xml);
+    zip.file('word/document.xml', split);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(md);
+  });
+
   test('keeps a cell\'s comment hidden that Word splits before an <!-- in it, in a Word comment\'s range', async () => {
     // Its pieces in the range weren't joined, and the space between showed
     const md = '| h |\n| --- |\n| {#1}a<!-- old <!-- inside -->b{/1} |\n\n{#1>>note<<}';
