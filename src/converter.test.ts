@@ -6282,6 +6282,16 @@ describe('HTML around a table in its block', () => {
     expect(await roundTrip(markdown)).toBe(markdown);
   });
 
+  test('writes a table in Word whose block a comment starts and ends', async () => {
+    // The block read as a comment, which hid the table, as import writes
+    // the first of two tables on a line with a comment before each
+    const md = '<!-- a --><table><tr><td>A</td></tr></table><!-- b --><table><tr><td>B</td></tr></table>\n';
+    const markdown = await roundTrip(md);
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    expect(xml.match(/<w:tbl>/g)).toHaveLength(2);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
   test('keeps a table whose rows are all commented out as HTML around a table beside it', async () => {
     const md = '<table><!-- <tr><td>old</td></tr> --></table>\n' + table('a') + '\n';
     expect(await roundTrip(md)).toBe(md);

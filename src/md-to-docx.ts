@@ -2959,7 +2959,9 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
           i++;
           break;
         }
-        if (/^<!--[\s\S]*?-->\s*$/.test(htmlContent.trim())) {
+        // Not a block that starts and ends with a comment but holds a table
+        // outside them, as import writes the HTML around a table on its lines
+        if (/^<!--[\s\S]*?-->\s*$/.test(htmlContent.trim()) && !extractHtmlTables(htmlContent).some(meta => meta.rows.length > 0)) {
           // Compute blank lines before this HTML comment using token.map
           const thisStart = token.map?.[0] ?? 0;
           // Find previous token's end line — scan backwards through markdown-it tokens
