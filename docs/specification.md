@@ -510,7 +510,7 @@ The `breaks: true` frontmatter setting changes the default behavior so that bare
 
 **Grid tables**: Within grid table cells, bare newlines are always treated as hard line breaks regardless of the `breaks` setting, since the grid structure makes every line placement deliberate.
 
-**DOCX→MD**: When converting from Word, line breaks (`<w:br/>`) are emitted as `\` + newline in the Markdown output, making the hard break intent explicit. Markdown can't hold that form at the end of a paragraph, where the `\` would be text, or in a heading, which would end at it, so there a line break is emitted as `<br>`. Export reads `<br>`, `<br/>`, and `<br />` as a line break in a paragraph's text, and on lines of their own, which markdown-it reads as an HTML block, where such tags are all the block holds. A `<br>` that is text in Word is escaped as `&lt;br&gt;`.
+**DOCX→MD**: When converting from Word, line breaks (`<w:br/>`) are emitted as `\` + newline in the Markdown output, making the hard break intent explicit. Markdown can't hold that form at the end of a paragraph, where the `\` would be text, or in a heading, which would end at it, so there a line break is emitted as `<br>`. So is one at the end of a table cell, which a pipe table can't hold as a line end, and where a grid table's blank lines pad the cell. Export reads `<br>`, `<br/>`, and `<br />` as a line break in a paragraph's text, and on lines of their own, which markdown-it reads as an HTML block, where such tags are all the block holds. A `<br>` that is text in Word is escaped as `&lt;br&gt;`.
 
 ### GitHub Flavored Markdown Extension Notes
 
@@ -558,7 +558,7 @@ Grid tables use [Pandoc grid table syntax](https://pandoc.org/MANUAL.html#extens
 - Column boundaries are defined by `+` positions in the separator line, counted in display columns as Pandoc counts them: a wide character, such as a CJK one or an emoji, takes two, and a combining mark none. An emoji sequence takes what Pandoc pads it to: a skin tone or a variation selector-16 makes the emoji before it wide, and emoji joined by joiners count as the last of them, so 🏳‍🌈 takes two. A table whose `|` signs line up with the `+` signs by character count instead, as Expand Table pads one, is read that way, and a line that lines up neither way is cut at its edges and at the `|` nearest each `+` between
 - The `=` separator distinguishes header rows from body rows
 - A `:` at either end of a column's `=` in the header's separator sets its alignment, as in `+:===+===:+` (left, then right); a table without a header takes them in its top line
-- Multiple content lines between separators form a single logical row with multi-line cells
+- Multiple content lines between separators form a single logical row with multi-line cells. Blank lines at a cell's end pad it to its row's height, as Pandoc reads them, and aren't line breaks, though a `\` before them ends its line in one
 - Grid tables do not support colspan or rowspan (use HTML tables for spans)
 - On round-trip, grid tables are stored with `sourceFormat: 'grid'` metadata so the format is preserved
 
