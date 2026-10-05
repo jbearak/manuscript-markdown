@@ -6299,6 +6299,19 @@ describe('HTML around a table in its block', () => {
     expect(texts).toEqual(['\u200B&lt;!-- Caption --&gt;', 'a', '\u200B&lt;!-- x', 'y --&gt;', 'b']);
   });
 
+  test('drops a comment that would read as a directive before a table on its line where Word adds a line end in a cell\'s comment', async () => {
+    // It went on a line of its own, where it read as the table's directive
+    const zip = await JSZip.loadAsync((await convertMdToDocx('<!-- table-font-size: 11 --><table><tr><td>a<!-- x y -->b</td></tr></table>\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const broken = xml.replace('&lt;!-- x y --&gt;', '&lt;!-- x</w:t><w:br/><w:t xml:space="preserve">y --&gt;');
+    expect(broken).not.toBe(xml);
+    zip.file('word/document.xml', broken);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('<table><tr><td><p>a<!-- x\ny -->b</p></td></tr></table>\n');
+    const again = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    expect(again.slice(again.indexOf('<w:tbl>'))).not.toContain('<w:sz w:val="22"/>');
+  });
+
   test('writes a table in Word whose block a comment starts and ends', async () => {
     // The block read as a comment, which hid the table, as import writes
     // the first of two tables on a line with a comment before each

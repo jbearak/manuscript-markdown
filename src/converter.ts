@@ -7020,10 +7020,11 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
     lines.push(i1 + '</tr>');
   }
   // But a line end in a cell, as in its comment, would end the block there,
-  // so the HTML before the table goes on a line of its own, a block of its
-  // own, and the table starts one
+  // so the HTML before the table goes as blocks of its own, as it does
+  // around a table in another format, and the table starts one
   if (oneLine && lines.slice(1).some(line => /[\r\n]/.test(line))) {
-    lines[0] = (around?.[0] ?? '') + '\n' + lines[0].slice((around?.[0] ?? '').length);
+    const before = detachedTableHtml(around?.[0] ?? '');
+    lines[0] = (before ? before + '\n\n' : '') + lines[0].slice((around?.[0] ?? '').length);
   }
   lines.push('</table>' + (around?.[1] ?? ''));
   // Comment bodies go after the table, as in a pipe table: a blank line in
