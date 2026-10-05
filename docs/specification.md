@@ -604,6 +604,8 @@ When converting from DOCX to Markdown, the converter selects the simplest format
 2. **Grid table** — used when the original table was grid format and cells require multi-line content
 3. **HTML table** — fallback for tables with colspan, rowspan, multi-paragraph cells, or that exceed the configured line width
 
+A table whose cells hold what an HTML cell can't, such as a comment, a tracked change or a highlight, is a grid table of any width where it would otherwise be HTML, unless it has merged cells, which only HTML holds.
+
 ### Embedded Tables
 
 Tables can also be embedded from external `.csv`, `.tsv`, `.xlsx`, and `.md` files using the `<!-- embed: -->` directive. Embedded tables support the same formatting directives as inline tables and are expanded into full tables on Word export. See [Embedded Tables](embedded-tables.md) for syntax, parameters, and examples.

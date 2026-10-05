@@ -387,7 +387,8 @@ describe('DOCX table conversion', () => {
       comments,
     );
 
-    // Force HTML so we can extract cell content from <p> tags
+    // Force HTML so we can extract cell content from <p> tags: a merged
+    // cell, which only HTML holds, as a grid table holds a comment
     const tableMarkdown = buildMarkdown(
       [
         {
@@ -395,7 +396,7 @@ describe('DOCX table conversion', () => {
           rows: [
             {
               isHeader: false,
-              cells: [{ paragraphs: [inlineItems as any[]] }],
+              cells: [{ paragraphs: [inlineItems as any[]], colspan: 2 }],
             },
           ],
         },
@@ -424,7 +425,7 @@ describe('DOCX table conversion', () => {
           rows: [
             {
               isHeader: false,
-              cells: [{ paragraphs: [inlineItems as any[]] }],
+              cells: [{ paragraphs: [inlineItems as any[]], colspan: 2 }],
             },
           ],
         },
@@ -729,7 +730,7 @@ describe('Pipe table rendering', () => {
     const result = await buildAndConvertTable(
       '<w:tbl>'
       + '<w:tr>'
-      + '<w:tc><w:p>'
+      + '<w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p>'
       + '<w:commentRangeStart w:id="1"/>'
       + '<w:r><w:t>annotated cell</w:t></w:r>'
       + '<w:commentRangeEnd w:id="1"/>'
@@ -742,7 +743,7 @@ describe('Pipe table rendering', () => {
       { 'word/comments.xml': commentsXml },
     );
 
-    // Multi-paragraph cell forces HTML fallback (both pipe and grid disabled)
+    // A merged cell forces HTML fallback, as a grid table holds a comment
     expect(result.markdown).toContain('<table>');
     // Comment body text appears exactly once
     const bodyMatches = result.markdown.match(/unique review note/g) || [];
@@ -5745,6 +5746,18 @@ describe('HTML table cells', () => {
     ] }] as ContentItem[], comments, { tableFormatMapping: new Map([['0', 'html']]) });
     expect(markdown(1)).toBe('| h |\n| --- |\n| a {==b==}{>>@A \\| c<<} |');
     expect(markdown(2)).toStartWith('<table>\n  <tr>\n    <th colspan="2">');
+  });
+
+  test.each([
+    ['a comment', '| x |\n|---|\n| a<br>b{==c==}{>>d<<} |', '+-----------------+\n| x               |\n+=================+\n| a               |\n| b{==c==}{>>d<<} |\n+-----------------+'],
+    ['a tracked change', '| x |\n|---|\n| {++a++}<br>b |', '+---------+\n| x       |\n+=========+\n| {++a++} |\n| b       |\n+---------+'],
+    ['a highlight, past the width of a grid table', '| ' + 'w'.repeat(130) + ' |\n|---|\n| ==a==<br>b |', '+' + '-'.repeat(132) + '+\n| ' + 'w'.repeat(130) + ' |\n+' + '='.repeat(132) + '+\n| ==a==' + ' '.repeat(125) + ' |\n| b' + ' '.repeat(129) + ' |\n+' + '-'.repeat(132) + '+'],
+  ])('writes a table with a line break and %s, which a pipe table or an HTML cell can\'t hold, as a grid table', async (_name, md, expected) => {
+    // It became an HTML table, whose cell exported the comment, the change
+    // or the highlight, and the \ of the line break, as literal text
+    const markdown = await roundTrip(md);
+    expect(markdown).toBe(expected);
+    expect(await roundTrip(markdown)).toBe(markdown);
   });
 });
 

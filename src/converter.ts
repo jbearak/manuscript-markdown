@@ -6850,6 +6850,12 @@ function renderTableOrFallback(
     const gridResult = tryRenderGridTable(item, comments, renderOpts, options?.gridTableMaxLineWidth, gridSrcWidths);
     if (gridResult !== null) return r(gridResult);
   }
+  // A table HTML cells can't hold, as one with a line break and a comment,
+  // is a grid table of any width, which holds it unless it merges cells
+  if (!htmlCellsHoldTable(item)) {
+    const gridResult = tryRenderGridTable(item, comments, renderOpts, undefined, gridSrcWidths);
+    if (gridResult !== null) return r(gridResult);
+  }
   return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs));
 }
 
