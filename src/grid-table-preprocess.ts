@@ -273,8 +273,9 @@ function fitsLine(line: GridLine, cuts: number[]): boolean {
  * characters, so a line whose | signs are under the + signs by their
  * indices, and not by display columns, is read by indices. A line neither
  * lines up, as with a character whose width an editor counts otherwise, is
- * cut at the | nearest each + by display columns, or with too few, as a
- * cell spanning columns, at the + signs' display columns.
+ * cut at its edges and at the | nearest each + between by display columns,
+ * or with too few, as a cell spanning columns, at the + signs' display
+ * columns.
  *
  * A line can line up both ways, as with narrow characters outside the BMP
  * and wide ones in it, where a | in a cell's text is under a +. The way that
@@ -296,11 +297,15 @@ function gridLineCells(line: GridLine, boundaries: number[], layout?: 'display' 
   if (indexFits || cuts.includes(-1) && !byIndex.includes(-1)) {
     cuts = byIndex;
   } else if (cuts.includes(-1) && pipes.length >= boundaries.length) {
-    let next = 0;
+    const last = boundaries.length - 1;
+    let next = 1;
     cuts = boundaries.map((b, c) => {
-      // The nearest | that leaves one for each + after
+      // The line's first and last | are its edges, and between them, the
+      // nearest | that leaves one for each + after
+      if (c === 0) return pipes[0].k;
+      if (c === last) return pipes[pipes.length - 1].k;
       let best = next;
-      for (let p = next; p <= pipes.length - (boundaries.length - c); p++) {
+      for (let p = next; p < pipes.length - (last - c); p++) {
         if (Math.abs(pipes[p].column - b) < Math.abs(pipes[best].column - b)) best = p;
       }
       next = best + 1;

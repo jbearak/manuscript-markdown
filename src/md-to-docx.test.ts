@@ -724,6 +724,12 @@ describe('parseMd grid tables', () => {
     expect(table?.rows?.slice(1).map(row => row.cells.map(cell => cell.runs.map(run => run.text).join('')))).toEqual([['a|', 'b'], ['🧑‍🦰', 'c']]);
   });
 
+  it('keeps a | in the last cell of a grid table\'s line that lines up neither way', () => {
+    // The | nearest the last + was in the cell's text, before the line's edge
+    const table = parseMd('+-----+\n| a|     |\n+-----+').find(t => t.type === 'table');
+    expect(table?.rows?.map(row => row.cells.map(cell => cell.runs.map(run => run.text).join('')))).toEqual([['a|']]);
+  });
+
   it('reads the grid table Compact Table writes, with no padding', () => {
     // Its | signs, under no + sign, were in the cells' text
     const compact = compactTable('<table><tr><td>a<br>b</td><td>c<br>d</td></tr><tr><td>abcdef</td><td>e</td></tr></table>').newText;
