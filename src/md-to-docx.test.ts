@@ -1222,7 +1222,21 @@ describe('generateParagraph', () => {
     const rels = await zip.file('word/_rels/document.xml.rels')!.async('string');
     const id = /Id="(rId\d+)"[^>]*Target="https:\/\/other\.com"/.exec(rels)?.[1];
     expect(id).toBeDefined();
-    expect(xml).toMatch(new RegExp('<w:hyperlink r:id="' + id + '">(?:<w:del [^>]*>)?<w:r><w:(?:t|delText)>b</w:(?:t|delText)>'));
+    expect(xml).toMatch(new RegExp('<w:hyperlink r:id="' + id + '"><w:(?:ins|del) [^>]*><w:r><w:(?:t|delText)>b</w:(?:t|delText)>'));
+  });
+
+  it.each([
+    ['an insertion', 'x {++[a](https://e.com)b++} y', 'w:ins'],
+    ['a deletion', 'x {--[a](https://e.com)b--} y', 'w:del'],
+    ['a substitution\'s insertion', 'x {~~b~>[a](https://e.com)c~~} y', 'w:ins'],
+    ['a substitution\'s deletion', 'x {~~[a](https://e.com)c~>b~~} y', 'w:del'],
+  ])('writes a link in %s as a hyperlink around a change of its own', async (_name, md, tag) => {
+    // An insertion held the hyperlink, which Word's schema doesn't allow
+    const { docx } = await convertMdToDocx(md);
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml).not.toMatch(/<w:(?:ins|del) [^>]*>(?:(?!<\/w:(?:ins|del)>).)*<w:hyperlink/);
+    expect(xml).toMatch(new RegExp('<w:hyperlink r:id="rId\\d+"><' + tag + ' [^>]*><w:r><w:(?:t|delText)>a</w:(?:t|delText)></w:r></' + tag + '></w:hyperlink><' + tag + ' '));
   });
 
   it('generates softbreak as space', () => {
