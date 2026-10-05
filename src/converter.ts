@@ -11276,10 +11276,14 @@ export async function convertDocx(
     sentinelGaps: sentinelGapMapping,
   });
 
-  // Strip Sources section if present (fallback for docs without ZOTERO_BIBL field codes)
+  // Strip Sources section if present (fallback for docs without ZOTERO_BIBL field codes):
+  // from a line not indented, as in a note, or in an HTML block, as the
+  // HTML around a table is
   if (!zoteroBiblData) {
     const lines = markdown.split('\n');
-    const sourcesIdx = lines.findIndex(l => SOURCES_HEADING_RE.test(l.trim()));
+    let inHtml: Set<number> | undefined;
+    const sourcesIdx = lines.findIndex((l, k) => SOURCES_HEADING_RE.test(l) && !(inHtml ??= new Set(htmlBlocksIn(markdown)
+      .flatMap(block => Array.from({ length: block.end - block.start }, (_, n) => block.start + n)))).has(k));
     if (sourcesIdx >= 0) {
       markdown = lines.slice(0, sourcesIdx).join('\n');
     }

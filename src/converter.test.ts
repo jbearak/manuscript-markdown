@@ -6247,6 +6247,19 @@ describe('HTML around a table in its block', () => {
     expect(await roundTrip(md)).toBe(md);
   });
 
+  test.each([
+    ['in its block', table('a') + '\n# Sources\n\nAfter.\n'],
+    ['in its block in a note', 'A[^1] B[^2].\n\n[^1]: Note.\n\n    <div>\n' + table('a', '    ') + '\n    Sources\n    </div>\n\n[^2]: Two.\n'],
+  ])('keeps the document after a Sources line in the HTML around a table %s', async (_name, md) => {
+    // Import took it for the heading of a bibliography Word held as text,
+    // and dropped the rest
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('drops a bibliography Word holds as text after its Sources heading still', async () => {
+    expect(await roundTrip(table('a') + '\n\n# Sources\n\nDoe, J. 2020.\n')).toBe(table('a') + '\n');
+  });
+
   test('applies no directive in a comment on a table\'s line, as markdown-it reads it', async () => {
     // A line end import put after the comment made it the table's directive
     const md = '<!-- table-font-size: 11 --><table><tr><td><p>a</p></td></tr></table>\n';
