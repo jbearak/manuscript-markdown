@@ -1141,9 +1141,16 @@ export function extractFootnoteDefinitions(markdown: string): { cleaned: string;
 
     // Blank line within a multi-paragraph footnote
     if (currentLabel !== undefined && line.trim() === '') {
-      // Peek ahead: if next line is indented, this is a paragraph break within the footnote
-      if (i + 1 < lines.length && (lines[i + 1].startsWith('    ') || lines[i + 1].startsWith('\t'))) {
-        currentBody.push('');
+      // Peek ahead: if the next line with text is indented, this is a
+      // paragraph break within the footnote, however many blank lines come
+      // first, as markdown-it and Pandoc read a note. The run of blank
+      // lines goes in at once, so it's read once, an indented one as the
+      // lines above, as its spaces can be code's.
+      let next = i + 1;
+      while (next < lines.length && lines[next].trim() === '') next++;
+      if (next < lines.length && (lines[next].startsWith('    ') || lines[next].startsWith('\t'))) {
+        for (; i < next; i++) currentBody.push(/^(?: {4}|\t)/.test(lines[i]) ? lines[i].replace(/^(?: {4}|\t)/, '') : '');
+        i--;
         continue;
       }
     }
