@@ -387,7 +387,8 @@ describe('DOCX table conversion', () => {
       comments,
     );
 
-    // Force HTML so we can extract cell content from <p> tags
+    // Force HTML so we can extract cell content from <p> tags: a merged
+    // cell, which only HTML holds, as a grid table holds a comment
     const tableMarkdown = buildMarkdown(
       [
         {
@@ -395,7 +396,7 @@ describe('DOCX table conversion', () => {
           rows: [
             {
               isHeader: false,
-              cells: [{ paragraphs: [inlineItems as any[]] }],
+              cells: [{ paragraphs: [inlineItems as any[]], colspan: 2 }],
             },
           ],
         },
@@ -424,7 +425,7 @@ describe('DOCX table conversion', () => {
           rows: [
             {
               isHeader: false,
-              cells: [{ paragraphs: [inlineItems as any[]] }],
+              cells: [{ paragraphs: [inlineItems as any[]], colspan: 2 }],
             },
           ],
         },
@@ -729,7 +730,7 @@ describe('Pipe table rendering', () => {
     const result = await buildAndConvertTable(
       '<w:tbl>'
       + '<w:tr>'
-      + '<w:tc><w:p>'
+      + '<w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p>'
       + '<w:commentRangeStart w:id="1"/>'
       + '<w:r><w:t>annotated cell</w:t></w:r>'
       + '<w:commentRangeEnd w:id="1"/>'
@@ -742,7 +743,7 @@ describe('Pipe table rendering', () => {
       { 'word/comments.xml': commentsXml },
     );
 
-    // Multi-paragraph cell forces HTML fallback (both pipe and grid disabled)
+    // A merged cell forces HTML fallback, as a grid table holds a comment
     expect(result.markdown).toContain('<table>');
     // Comment body text appears exactly once
     const bodyMatches = result.markdown.match(/unique review note/g) || [];
@@ -5746,6 +5747,84 @@ describe('HTML table cells', () => {
     ] }] as ContentItem[], comments, { tableFormatMapping: new Map([['0', 'html']]) });
     expect(markdown(1)).toBe('| h |\n| --- |\n| a {==b==}{>>@A \\| c<<} |');
     expect(markdown(2)).toStartWith('<table>\n  <tr>\n    <th colspan="2">');
+  });
+
+  // A Word table, which import writes as a pipe table, a grid table, or
+  // HTML past their widths
+  const wordTable = (cell: ContentItem[], header = false) => [{ type: 'table', rows: [
+    { isHeader: true, cells: [{ paragraphs: [[cellText('x')]] }] },
+    { isHeader: header, cells: [{ paragraphs: [cell] }] },
+  ] }] as unknown as ContentItem[];
+  const cellText = (t: string, ids: string[] = [], formatting: Partial<RunFormatting> = {}, revision?: RevisionInfo) =>
+    ({ type: 'text', text: t, commentIds: new Set(ids), formatting: { ...DEFAULT_FORMATTING, ...formatting }, ...(revision ? { revision } : {}) }) as ContentItem;
+  const noWidth = { pipeTableMaxLineWidth: 0, gridTableMaxLineWidth: 0 };
+
+  test.each([
+    ['a comment', [cellText('a'), cellText('\\\n'), cellText('b'), cellText('c', ['0'])],
+      '+----------------------+\n| x                    |\n+======================+\n| a                    |\n| b{==c==}{>>@A | d<<} |\n+----------------------+'],
+    ['a tracked change', [cellText('a', [], {}, { type: 'addition', author: 'A', date: '2024-01-01T00:00:00Z' }), cellText('\\\n'), cellText('b')],
+      '+---------+\n| x       |\n+=========+\n| {++a++} |\n| b       |\n+---------+'],
+    ['a highlight', [cellText('a', [], { highlight: true }), cellText('\\\n'), cellText('b')],
+      '+-------+\n| x     |\n+=======+\n| ==a== |\n| b     |\n+-------+'],
+  ])('writes a table with a line break and %s, past the widths of a pipe table and a grid table, as a grid table', async (_name, cell, expected) => {
+    // It became an HTML table, whose cell exported the comment, the change
+    // or the highlight, and the \ of the line break, as literal text
+    const markdown = buildMarkdown(wordTable(cell), new Map([['0', { author: 'A', text: 'd', date: '' }]]), noWidth);
+    expect(markdown).toBe(expected);
+    expect(strip((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).trimEnd()).toBe(markdown);
+  });
+
+  test('writes a table of header rows alone with a line break and a highlight as a grid table with its header', async () => {
+    // Its grid table had no header, so the next export lost the header's bold
+    const markdown = buildMarkdown(wordTable([cellText('a', [], { highlight: true }), cellText('\\\n'), cellText('b')], true), new Map(), noWidth);
+    expect(markdown).toBe('+-------+\n| x     |\n+-------+\n| ==a== |\n| b     |\n+=======+');
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    expect(xml.match(/<w:tblHeader\/>/g)?.length).toBe(2);
+    expect(strip((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).trimEnd()).toBe(markdown);
+  });
+
+  test.each([
+    ['', {}],
+    [', with a line width of 0, though a cell has a highlight', noWidth],
+  ])('keeps a table with a header row after a body row out of a grid table%s', async (_name, widths) => {
+    // A grid table's header is its leading rows, so export read the last
+    // row as a body row, without its header or its bold
+    const markdown = buildMarkdown([{ type: 'table', rows: [
+      { isHeader: true, cells: [{ paragraphs: [[cellText('x')]] }] },
+      { isHeader: false, cells: [{ paragraphs: [[cellText('a', [], { highlight: true }), cellText('\\\n'), cellText('b')]] }] },
+      { isHeader: true, cells: [{ paragraphs: [[cellText('y')]] }] },
+    ] }] as unknown as ContentItem[], new Map(), widths);
+    expect(markdown).toStartWith('<table>');
+    expect(markdown).toContain('    <th>\n      <p>y</p>\n    </th>');
+  });
+
+  test.each([
+    ['a pipe table', {}],
+    ['a grid table', { pipeTableMaxLineWidth: 5 }],
+    ['a grid table, with a line width of 0, though a cell has a highlight', noWidth],
+  ])('escapes a cell\'s text that would be an HTML block in %s, whose cells read inline', async (_name, widths) => {
+    // Its text, as it starts the cell, went as it was, as an HTML block's
+    // would, and export read the cell's *b* as italic
+    const markdown = buildMarkdown([{ type: 'table', rows: [
+      { isHeader: true, cells: [{ paragraphs: [[cellText('x')]] }, { paragraphs: [[cellText('y')]] }] },
+      { isHeader: false, cells: [{ paragraphs: [[cellText('h', [], { highlight: true })]] }, { paragraphs: [[cellText('<div>a*b*</div>')]] }] },
+    ] }] as unknown as ContentItem[], new Map(), widths);
+    expect(markdown).toContain('\\<div>a\\*b\\*</div>');
+    expect(strip((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).trimEnd()).toBe(markdown);
+  });
+
+  test('keeps a table with a cell of paragraphs HTML, with a line width of 0, though another cell has a highlight', async () => {
+    // A grid table, which holds the highlight, wrote the paragraphs as
+    // lines, which export read as one paragraph with line breaks
+    const widths = '---\npipe-table-max-line-width: 0\ngrid-table-max-line-width: 0\n---\n\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(widths + '| h | x |\n| --- | --- |\n| ==a== | XX |')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const two = xml.replace('<w:r><w:t>XX</w:t></w:r></w:p>', '<w:r><w:t>b</w:t></w:r></w:p><w:p><w:r><w:t>c</w:t></w:r></w:p>');
+    expect(two).not.toBe(xml);
+    zip.file('word/document.xml', two);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toStartWith('<table>');
+    expect(markdown).toContain('      <p>b</p>\n      <p>c</p>');
   });
 });
 
