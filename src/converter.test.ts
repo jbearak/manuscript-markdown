@@ -7638,6 +7638,9 @@ describe('Missing citation keys', () => {
     // Which export reads as a paragraph of its own, after a quote, as markdown-it doesn't
     ['after a quote', 'P [@a] Q\n\n> x\nCitation data for @a was not found in the bibliography file.\n',
       'P [@a] Q\n\n> x\n\nCitation data for @a was not found in the bibliography file.\n'],
+    // Which export reads as a paragraph of its own, after a grid table's border
+    ['after a grid table', 'P [@a] Q\n\n+---+\n| a |\n+---+\nCitation data for @a was not found in the bibliography file.\n',
+      'P [@a] Q\n\n+-----+\n| a   |\n+-----+\n\nCitation data for @a was not found in the bibliography file.\n'],
   ])('writes the note of a missing key %s once', async (_name, md, expected) => {
     // It wasn't stripped, as a line between blank lines, or one a line feed
     // ends, and another was added
@@ -7653,6 +7656,8 @@ describe('Missing citation keys', () => {
     // That goes on past blank lines, before a code block, whose region the
     // search found first
     ['an HTML block before a code block', '<pre>\n\nCitation data for @a was not found in the bibliography file.\n\n</pre>\n\n```\nx\n```\n'],
+    // Whose lines export reads as one paragraph, the comment's
+    ['a comment', 'P{>>c\n\nCitation data for @a b was not found in the bibliography file.\n\nd<<} Q.\n'],
   ])('keeps a line like a note in %s', async (_name, md) => {
     // It was stripped as export's note, though a note is a paragraph
     expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown).toBe(md);
