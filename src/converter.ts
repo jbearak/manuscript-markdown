@@ -2215,9 +2215,20 @@ function formatHrefForMarkdown(href: string): string {
 
 /** A link of Markdown `text` to `href`, with a @ that starts the text,
  *  after a - or not, escaped, as export reads [@ as a citation's, even
- *  before a link's ( (see citationEnd) */
+ *  before a link's ( (see citationEnd). Export ends a citation at the
+ *  first ], escaped too, so it reads the text before an escaped ] in the
+ *  text as one where a key's @ comes after a space, as in [see @a\]](u),
+ *  whose @ is escaped then, as one escaped starts no key. */
 function markdownLink(text: string, href: string): string {
-  return '[' + text.replace(/^(-?)@/, (_m, dash: string) => dash + '\\@') + '](' + formatHrefForMarkdown(href) + ')';
+  const url = formatHrefForMarkdown(href);
+  let label = text.replace(/^(-?)@/, (_m, dash: string) => dash + '\\@');
+  while (label.includes(']') && citationEndInText('[' + label + '](' + url + ')', 0) !== -1) {
+    const key = /(?:^|\s)-?@[\p{L}\p{N}_]/u.exec(label.slice(0, label.indexOf(']')));
+    if (!key) break;
+    const at = key.index + key[0].length - 2;
+    label = label.slice(0, at) + '\\' + label.slice(at);
+  }
+  return '[' + label + '](' + url + ')';
 }
 
 // Comment extraction
@@ -5707,6 +5718,18 @@ function linkGroup(
       if (startsBlockLine(line)) break;
     }
     items.push(next);
+  }
+  // A substitution the split cuts, of deletions before it and changes of
+  // the same author and time after it, is left to renderSubstitutionRun
+  // after the runs before it, as a span of its deletion could hold no --}
+  // in code, as {~~ can
+  const cut = inLink(start + items.length)?.revision;
+  if (cut) {
+    const ofCut = (item: ContentItem | undefined, type: RevisionInfo['type']) =>
+      isSubstitutionItem(item) && item.revision?.type === type && item.revision.author === cut.author && item.revision.date === cut.date;
+    let k = start + items.length;
+    while (k < end && ofCut(segment[k], 'deletion')) k++;
+    if (k < end && ofCut(segment[k], 'addition')) while (items.length > 0 && ofCut(items[items.length - 1], 'deletion')) items.pop();
   }
   if (items.length < 2) return undefined;
   const href = first.href;

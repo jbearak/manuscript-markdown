@@ -8946,6 +8946,39 @@ describe('Links of more than one run', () => {
     expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown).toBe('{~~[a **b**](https://e.com)~>`c ++} d`~~}\n');
   });
 
+  test.each([
+    ['one run', '<w:r><w:t xml:space="preserve"> @user]</w:t></w:r>', '[ \\@user\\]](https://e.com)\n'],
+    ['runs', '<w:r><w:t xml:space="preserve"> </w:t></w:r><w:r><w:t>@user</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>]</w:t></w:r>',
+      '[ \\@user<b>\\]</b>](https://e.com)\n'],
+  ])('escapes the key in a link\'s text of %s that reads as a citation before its escaped ]', async (_name, runs, expected) => {
+    // Export ends a citation at the first ], escaped too, which hid the
+    // link's ](, so the link was a citation
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const replaced = xml.replace('<w:r><w:t>ab</w:t></w:r>', runs);
+    expect(replaced).not.toBe(xml);
+    zip.file('word/document.xml', replaced);
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(md).toBe(expected);
+    expect(await roundTrip(md.slice(0, -1))).toBe(md);
+  });
+
+  test('writes a substitution a link\'s split cuts whole, after the link\'s runs before it', async () => {
+    // The link's runs took the deletion, without the insertion after the
+    // split, and a span of the deletion alone ended at the --} in its code
+    const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const revision = ' w:author="A" w:date="2024-01-01T00:00:00Z"';
+    const replaced = xml.replace('<w:r><w:t>ab</w:t></w:r>', '<w:r><w:t xml:space="preserve">x </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>y</w:t></w:r>'
+      + '<w:del w:id="91"' + revision + '><w:r><w:rPr><w:rStyle w:val="CodeChar"/></w:rPr><w:delText xml:space="preserve">a --} b</w:delText></w:r></w:del>'
+      + '<w:ins w:id="92"' + revision + '><w:r><w:br/></w:r><w:r><w:t xml:space="preserve"># b</w:t></w:r></w:ins>');
+    expect(replaced).not.toBe(xml);
+    zip.file('word/document.xml', replaced);
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(md).toBe('[x **y**](https://e.com){~~[`a --} b`](https://e.com)~>[\\\n](https://e.com)[# b](https://e.com)~~}\n');
+    expect(await roundTrip(md.slice(0, -1))).toBe(md);
+  });
+
   test('keeps a link whose text starts with an inserted # a link, not a heading', async () => {
     // Export read the link's first run, {++# ++}, as an inserted heading's
     const md = '[{++# 123++}{++ (fixed)++}](https://e.com)';
