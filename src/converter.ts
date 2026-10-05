@@ -236,6 +236,7 @@ const MARKDOWN_HTML_SENSITIVE_TAGS = new Set([
 ]);
 
 const HTML_LIKE_TAG_RE = /<\/?([A-Za-z][A-Za-z0-9-]*)(?:\s[^<>]*?)?\/?>/;
+const HTML_LIKE_TAG_AT = new RegExp(HTML_LIKE_TAG_RE.source, 'y');
 
 /** `text` with the tags export reads as formatting or a line break written
  *  as text, but for one at a position in `raw`, which export reads as it is,
@@ -705,6 +706,7 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
   // and its prefixes, which export decodes, keep their escapes. Any other
   // bracket export would read as a citation is text.
   const keys = new Set<number>();
+  const prefixTags = new Set<number>();
   // As export reads one: an @ after the [ takes it to the next ], past any
   // [ before it, and whatever follows, as [@a[b] or [@a](b) do; any other
   // [ starts one only with no [ before its ] (see citationEnd)
@@ -721,9 +723,17 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
       continue;
     }
     for (const [start, end] of raw) for (let k = start; k < end; k++) keys.add(k);
+    // A tag in a prefix, which export decodes, has its < escaped, not
+    // written as a reference, whose ; would end an item
+    for (let k = text.indexOf('<', i); k !== -1 && k < close; k = text.indexOf('<', k + 1)) {
+      HTML_LIKE_TAG_AT.lastIndex = k;
+      const name = HTML_LIKE_TAG_AT.exec(text)?.[1];
+      if (!keys.has(k) && name && MARKDOWN_HTML_SENSITIVE_TAGS.has(name.toLowerCase())) prefixTags.add(k);
+    }
     i = close;
   }
   for (const k of keys) escaped.delete(k);
+  for (const k of prefixTags) escaped.add(k);
   // An HTML tag Markdown keeps raw, which export writes as its text, takes
   // no escapes, which would be text there; a comment's or one
   // escapeSensitiveHtmlLikeTags writes as text has its < escaped
@@ -816,7 +826,7 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
   let result = '';
   for (let i = 0; i < text.length; i++) {
     if (escaped.has(i)) result += '\\';
-    if (keys.has(i)) raw?.add(result.length);
+    if (keys.has(i) || prefixTags.has(i)) raw?.add(result.length);
     result += text[i];
   }
   return result;

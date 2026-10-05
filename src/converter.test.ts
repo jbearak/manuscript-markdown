@@ -5447,6 +5447,15 @@ describe('Word text that reads as Markdown', () => {
     expect(await roundTrip(markdown)).toBe(markdown + '\nCitation data for @' + key + ' was not found in the bibliography file.\n');
   });
 
+  test.each([
+    ['[@a; <b>see</b> @b]', '[@a; \\<b>see\\</b> @b]'], ['[@a; s<br>e @b]', '[@a; s\\<br>e @b]'],
+  ])('writes the tag in the prefix of %s with its < escaped', async (text, md) => {
+    // It was a reference, whose ; export took for the end of an item
+    const markdown = await importText('A.\n\nP XX Q.\n\nB.', text);
+    expect(markdown).toBe('A.\n\nP ' + md + ' Q.\n\nB.\n');
+    expect((await exported(markdown)).text[1]).toBe('P ' + text + ' Q.');
+  });
+
   test.each(['[@a](b)', '[-@a](b)', '[@a]{.underline}', '[@a][b]'])('writes %s with the citation export reads in it', async (text) => {
     // Its [ was escaped as a link's, so a citation whose key is missing,
     // which export writes as its text, came back as text, and stayed text
