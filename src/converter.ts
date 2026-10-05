@@ -3199,7 +3199,9 @@ function markdownComment(text: string, beforeComment = false, cell = false): str
  *  comments' ranges: its end as the browser reads it, a --!> too, in an
  *  HTML table's cell (`browser`), or else as inline Markdown does, as
  *  readHiddenText does. No range ends at an HTML comment (see
- *  collectCommentSpans), so none loses its end. */
+ *  collectCommentSpans), so none loses its end. A ZWSP after the end the
+ *  browser read, which Word split from the comment after whose start it is,
+ *  goes with it. */
 function joinSplitComments(items: ContentItem[], browser: boolean): ContentItem[] {
   const ended = browser ? (text: string) => /^\s*<!--(?:-?>|[\s\S]*?--!?>)/.test(text)
     : (text: string) => text.includes('-->', text.lastIndexOf('<!--') + 4) || /^\s*<!---?>\s*$/.test(text);
@@ -3217,6 +3219,12 @@ function joinSplitComments(items: ContentItem[], browser: boolean): ContentItem[
     open = undefined;
   };
   for (const item of items) {
+    const last = out[out.length - 1];
+    if (browser && last?.type === 'html_comment' && item.type === 'html_comment' && item.text.startsWith('<!--')
+        && /^\s*<!--(?:-?>|(?:(?!--!?>)[\s\S])*--!?>)\u200B+$/.test(last.text)) {
+      out[out.length - 1] = { ...last, text: last.text.replace(/\u200B+$/, '') };
+      joined = true;
+    }
     if (open && item.type === 'html_comment' && commentSetsEqual(item.commentIds, open.commentIds)) {
       open.texts.push(item.text);
       if (end.test(open.tail + item.text)) close();

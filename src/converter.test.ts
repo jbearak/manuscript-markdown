@@ -5802,6 +5802,21 @@ describe('HTML table cells', () => {
   });
 
   test.each([
+    ['in HTML', false, table('      <p>a<!-- c --!><!-- d -->b</p>')],
+    ['in a table that leaves HTML', true, '| h |\n| --- |\n| {++a++}<!-- c --><!-- d -->b |'],
+  ])('keeps a comment after one that ends at its --!> where Word moves its ZWSP to the run before, %s', async (_name, tracked, expected) => {
+    // The ZWSP went on the comment before, which got an end after it, which
+    // showed in the cell
+    const zip = await JSZip.loadAsync((await convertMdToDocx(table('      <p>a<!-- c --!><!-- d -->b</p>'))).docx);
+    let xml = await zip.file('word/document.xml')!.async('string');
+    const split = xml.replace(/--!&gt;(<\/w:t><\/w:r><w:r><w:rPr><w:vanish\/>(?:(?!<\/w:rPr>).)*<\/w:rPr><w:t[^>]*>)\u200B/, (_match, between: string) => '--!&gt;\u200B' + between);
+    expect(split).not.toBe(xml);
+    xml = tracked ? split.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>a<\/w:t><\/w:r>)/, (_match, run: string) => '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>' + run + '</w:ins>') : split;
+    zip.file('word/document.xml', xml);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(expected);
+  });
+
+  test.each([
     ['in HTML', false, table('      <p>a<!-- a <!--->b</p>')],
     ['in a table that leaves HTML', true, '| h |\n| --- |\n| {++a++}<!-- a <!- -->b |'],
   ])('keeps a cell\'s comment hidden that Word splits before an <!-- in it, %s', async (_name, tracked, expected) => {
