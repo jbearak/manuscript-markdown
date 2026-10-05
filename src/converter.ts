@@ -401,6 +401,7 @@ export function keepParagraphWhitespace(text: string, atStart: boolean, atEnd: b
 // they end the text
 const HARD_BREAK = /(?<!\\)((?:\\\\)*)\\\n([ \t]+$)?/g;
 const HARD_BREAK_AT_END = /(?<!\\)((?:\\\\)*)\\\n$/;
+const HARD_BREAKS_AT_END = /(?<!\\)((?:\\\\)*)(?:\\\n)+$/;
 
 /** Whether text next to an item starts or ends a Markdown block there: at
  *  the end of the content, a paragraph break, a table, or a display
@@ -5391,10 +5392,10 @@ function renderInlineSegment(
 ): { text: string; deferredComments: string[] } {
   const result = renderInlineRange(segment, 0, comments, undefined, renderOpts);
   return {
-    // Keep parity with paragraph-level emission behavior. Export writes a
-    // grid table's cell with fewer lines than its row's with line breaks at
-    // its end, which it doesn't hold.
-    text: result.text.replace(/(\\?\n)+$/, ''),
+    // A line break at a cell's end is <br>, which a pipe table holds, as a
+    // grid table's blank line there pads the cell to its row's height
+    text: result.text.replace(HARD_BREAKS_AT_END, (breaks, backslashes: string) =>
+      backslashes + '<br>'.repeat((breaks.length - backslashes.length) / 2)),
     deferredComments: result.deferredComments,
   };
 }
@@ -6560,11 +6561,21 @@ function tryRenderGridTable(
           : para;
         const r = renderInlineSegment(mergeConsecutiveRuns(items), comments, renderOpts);
         // Split on newlines within a paragraph (e.g. hard breaks).
-        // Strip trailing backslash from each line — grid table cells treat
-        // bare newlines as hard breaks, so the backslash is redundant.
-        cellLines.push(...keepParagraphWhitespace(r.text, true, true).split('\n').map(l => l.replace(/\\$/, '')));
+        // Strip the backslash of the break that ends each line but the last —
+        // grid table cells treat bare newlines as hard breaks, so the
+        // backslash is redundant.
+        const paraLines = keepParagraphWhitespace(r.text, true, true).split('\n');
+        cellLines.push(...paraLines.map((l, k) => k < paraLines.length - 1 ? l.replace(/\\$/, '') : l));
         cellDeferred.push(...r.deferredComments);
       }
+      // An empty paragraph at the cell's end is a line break there, <br>, as
+      // a blank line there pads the cell to its row's height
+      let endBreaks = 0;
+      while (cellLines.length > 1 && cellLines[cellLines.length - 1] === '') {
+        cellLines.pop();
+        endBreaks++;
+      }
+      if (endBreaks > 0) cellLines[cellLines.length - 1] += '<br>'.repeat(endBreaks);
       if (cellLines.length === 0) cellLines.push('');
       rowCells.push({ lines: cellLines, deferred: cellDeferred });
     }

@@ -1024,6 +1024,24 @@ describe('Grid table renderer', () => {
 
 describe('Grid table round-trip', () => {
   test.each([
+    ['a pipe table', '| x |\n| --- |\n| a<br> |\n| **b**<br><br> |\n| <br> |'],
+    ['a grid table', '+-------+-----+\n| h     | x   |\n+=======+=====+\n| a<br> | b   |\n|       | c   |\n|       | d   |\n+-------+-----+'],
+  ])('keeps a line break at the end of a cell of %s', async (_name, md) => {
+    // Import dropped it, which a pipe table can't hold as a line end, and
+    // which export read from a grid table's blank lines padding a cell
+    const markdown = (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+    expect(markdown).toBe(md);
+  });
+
+  test('keeps a backslash at the end of a grid table cell with fewer lines than its row', async () => {
+    // Import dropped it as a line break's, and export read the blank line
+    // after it as one, so the next round trip lost it too
+    const md = '+-------+-----+\n| h     | x   |\n+=======+=====+\n| C:\\\\  | b   |\n|       | c   |\n+-------+-----+';
+    const markdown = (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+    expect(markdown).toBe(md);
+  });
+
+  test.each([
     ['wide characters', '+------+-----+\n| x    | y   |\n+======+=====+\n| 中文 | b   |\n| c    | d   |\n+------+-----+'],
     ['a | at the start of a cell', '+-----+-----+\n| x   | y   |\n+=====+=====+\n| |a  | b   |\n| c   | d   |\n+-----+-----+'],
   ])('keeps a grid table with %s', async (_name, md) => {

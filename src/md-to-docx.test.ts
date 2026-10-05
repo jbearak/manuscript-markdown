@@ -745,6 +745,12 @@ describe('parseMd grid tables', () => {
     expect(table?.rows?.map(row => row.cells.map(cell => cell.runs.map(run => run.type === 'hardbreak' ? '\n' : run.text).join('')))).toEqual([['a\nb', 'c\nd'], ['abcdef', 'e']]);
   });
 
+  it('reads no line breaks from the blank lines padding a grid table cell', () => {
+    // A cell with fewer lines than its row's ended in a line break for each
+    const table = parseMd('+-----+-----+\n| x   | y   |\n+=====+=====+\n| a   | b   |\n|     | c   |\n|     | d   |\n+-----+-----+').find(t => t.type === 'table');
+    expect(table?.rows?.[1].cells[0].runs.map(run => run.type)).toEqual(['text']);
+  });
+
   it('preprocessGridTables replaces grid tables with placeholders', () => {
     const markdown = 'Before\n\n+------+------+\n| H1   | H2   |\n+======+======+\n| A    | B    |\n+------+------+\n\nAfter';
     const result = preprocessGridTables(markdown);

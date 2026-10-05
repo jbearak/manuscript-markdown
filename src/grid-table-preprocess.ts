@@ -377,7 +377,9 @@ function parseGridTable(lines: string[]): GridTableData | null {
         for (let col = 0; col < numCols; col++) {
           const cellLines = lineCells.map(cells => cells[col].replace(/^[ \t]+/, '').replace(/[ \t]+$/, ''));
 
-          cells.push(cellLines.join('\n'));
+          // Blank lines at a cell's end pad it to its row's height, as Pandoc
+          // reads them, and aren't line breaks
+          cells.push(cellLines.join('\n').replace(/\n+$/, ''));
         }
         // header=false initially; we'll retroactively mark header rows below
         rows.push({ cells, header: false });
