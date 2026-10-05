@@ -552,6 +552,19 @@ describe('Overlapping comments: round-trip', () => {
     expect(roundtrip.markdown).toContain('{====text====}');
   });
 
+  test.each([
+    ['of two colors', '{====a=={red}==b====}'],
+    ['of another color after', '{====a====b=={red}==}'],
+    ['with text between them', '{====a== b ==c====}'],
+    ['after text', '{==a ==b====}'],
+  ])('keeps highlights side by side in a comment\'s text %s', async (_name, anchor) => {
+    // Export took its first == and last for one highlight around all of
+    // it, and the == between for another's, so ==a=={red}==b== was a
+    // yellow a{red}b
+    const { docx } = await convertMdToDocx(anchor + '{>>@alice | note<<}', { authorName: 'test' });
+    expect((await convertDocx(docx)).markdown).toContain(anchor + '{>>@alice');
+  });
+
   test('{==text==} without inner highlight round-trips without double-wrapping', async () => {
     const md = '{==text==}{>>@alice | note<<}';
     const { docx } = await convertMdToDocx(md, { authorName: 'test' });

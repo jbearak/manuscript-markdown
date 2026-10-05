@@ -3195,17 +3195,17 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
 
           // Only strip inner ==...== from critic_highlight — not critic_add/critic_del
           // where literal == characters in added/deleted text would be misinterpreted.
-          if (criticType === 'critic_highlight') {
-            const coloredMatch = text.match(/^==([\s\S]*)==\{([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\}$/);
-            const plainMatch = !coloredMatch && text.match(/^==([\s\S]*)==$/);
-
-            if (coloredMatch) {
-              text = coloredMatch[1];
+          // Only one highlight around all of it, whose closing == is its
+          // last, not highlights side by side, as in ==a=={red}==b==, which
+          // the content's own parse reads, as the preview does, and which
+          // stripped would read as one around a=={red}==b.
+          if (criticType === 'critic_highlight' && text.startsWith('==')) {
+            const close = findClosingHighlightMarker(text, 2, text.length);
+            const color = close === -1 ? undefined : /^\{([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)\}$/.exec(text.slice(close + 2))?.[1];
+            if (close !== -1 && (close + 2 === text.length || color)) {
+              text = text.slice(2, close);
               innerHighlight = true;
-              innerColor = coloredMatch[2];
-            } else if (plainMatch) {
-              text = plainMatch[1];
-              innerHighlight = true;
+              innerColor = color;
             }
           }
 
