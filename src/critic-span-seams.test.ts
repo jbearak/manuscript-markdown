@@ -187,3 +187,24 @@ describe('the space before a citation in a tracked change', () => {
     expect(buildMarkdown([{ type: 'para' }, commented, citation], comments).trim()).toEndWith('<<} [@doe2020]');
   });
 });
+
+describe('a citation after a paragraph or line break', () => {
+  it.each([
+    ['a tracked paragraph mark alone', 'a{--\n\n--}[@doe2020]\n\nEnd'],
+    ['one in a quote', '> a{--\n>\n> --}[@doe2020]\n\nEnd'],
+    ['a line break', 'a\\\n[@doe2020]'],
+  ])('puts no space after %s', async (_, md) => {
+    // The space before a citation went at the start of the line, where
+    // Word showed it before the citation
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  it.each([
+    ['a tracked paragraph mark alone', 'a{--\n\n--}b [@doe2020]'],
+    ['a deletion across paragraphs', 'x [@doe2020] {--a\n\nb--} c'],
+  ])('keeps %s into the last paragraph before the bibliography', async (_, md) => {
+    // The bibliography after it read as a block between the break and the
+    // paragraph's text, and the break came back as a plain one
+    expect(await roundTrip(md)).toBe(md);
+  });
+});

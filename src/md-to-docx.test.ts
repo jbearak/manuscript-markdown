@@ -2713,6 +2713,8 @@ describe('preprocessCriticMarkup', () => {
     expect(preprocessCriticMarkup('a{--\n\n--}b')).toBe('a{--' + PARA_PLACEHOLDER + '--}b');
     expect(preprocessCriticMarkup('> a{--\n>\n> --}b')).toBe('> a{--' + PARA_PLACEHOLDER + '--}b');
     expect(preprocessCriticMarkup('> > a{++\n> >\n> > ++}b')).toBe('> > a{++' + PARA_PLACEHOLDER + '++}b');
+    // A > outside a quote is text, and the span's opener still moves
+    expect(preprocessCriticMarkup('a{++\n>++}')).toBe('a\n\n{++>++}');
   });
 
   it('does not hoist or protect a substitution without its separator', () => {

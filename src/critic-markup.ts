@@ -150,10 +150,10 @@ function moveLeadingBreakOutsideCritic(analysis: CriticLeadingBreakAnalysis): Cr
       // A span of the break alone, as import writes a tracked paragraph
       // mark in a comment's anchor, {=={--x--}{++\n\n++}==}{>>c<<}, which
       // the anchor splits at, or after text in no revision or another, as
-      // a{--\n\n--}b, with a quote's markers, as > a{--\n>\n> --}b: moved
-      // out, it would leave the break untracked and the span empty
-      const inner = markdown.slice(contentStart, closePos).replace(/(\r\n|\r|\n)[ \t]*(?:>[ \t]*)+/g, '$1');
-      if (/^\s*$/.test(inner)) return full;
+      // a{--\n\n--}b, with the markers of the quote it's in, as
+      // > a{--\n>\n> --}b: moved out, it would leave the break untracked
+      // and the span empty
+      if (/^\s*$/.test(stripQuoteContinuationPrefixes(markdown.slice(contentStart, closePos), quoteDepthAt(markdown, offset)))) return full;
       const lineStart = Math.max(
         markdown.lastIndexOf('\n', offset - 1),
         markdown.lastIndexOf('\r', offset - 1),

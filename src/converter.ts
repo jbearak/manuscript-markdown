@@ -5449,7 +5449,8 @@ function textEnd(markdown: string, from: number, end: number): number {
 
 /** The space import puts before a Pandoc citation: none when the text before
  *  it already ends with one in a view the citation shows in, so no view gets
- *  two, as in Seen {++a ++}[@key], or when there is none before it. A view
+ *  two, as in Seen {++a ++}[@key], or when there is none before it on its
+ *  line, after a line break or a tracked paragraph break. A view
  *  without the space then keeps the citation against its text, as Word has it
  *  there. */
 function citationSeparator(precedingMarkdown: string, revision: RevisionInfo | undefined, last?: RevisionSpan): string {
@@ -5457,8 +5458,9 @@ function citationSeparator(precedingMarkdown: string, revision: RevisionInfo | u
   // The span the Markdown ends with gives its last character without a
   // scan, past the formatting its text ends in, before its ++} or --}
   const span = last && last.end === precedingMarkdown.length ? last : undefined;
-  // Nor at the start of a block, where there is no text to space it from
-  return views.some(accepted => [' ', ''].includes(
+  // Nor at the start of a block or a line, where there is no text to space
+  // it from, and a space at a line's start would be lost
+  return views.some(accepted => [' ', '', '\n'].includes(
     span?.revision.type === (accepted ? 'addition' : 'deletion')
       ? precedingMarkdown[textEnd(precedingMarkdown, span.start, span.end - 3) - 1] ?? ''
       : lastVisibleChar(precedingMarkdown, accepted, 0, span ? span.start : precedingMarkdown.length)
@@ -8115,7 +8117,10 @@ function contentAcrossTrackedBreaks(content: ContentItem[], index: number, step:
       if (item.type === 'para' && (item.breakRevision?.type === type || opensNewSide(content, k))) continue;
       return items;
     }
-    if (isStructuralBoundaryItem(item) || (item.type === 'math' && item.display)) return undefined;
+    // A block after the paragraph's text, as the bibliography after the
+    // last paragraph, ends it; one right at the break intervenes
+    if (isStructuralBoundaryItem(item)) return step === 1 && items.length > 0 ? items : undefined;
+    if (item.type === 'math' && item.display) return undefined;
     items.push(item);
   }
   return items;
@@ -8174,7 +8179,8 @@ function breakContainer(para: ParaItem | undefined, side: 'before' | 'after'): s
 interface TrackedBreakMarks {
   start: string;
   end: string;
-  /** In place of `start` for a break in a span of its own */
+  /** In place of `start` for a break in a span of its own, which has no
+   *  `end` */
   alone: string;
 }
 
@@ -8234,12 +8240,16 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
     if (!after?.some(item => survivesRevisions(item, revision.type))) continue;
     joined ??= [...content];
     const prefix = linePrefix(para, opening);
-    const text = (alone ? marks().alone : marks().start) + '\n' + prefix.trimEnd() + '\n' + prefix + marks().end;
+    // A break alone has no end mark, so it ends with the next line's start,
+    // which what comes after reads, as a citation does to put no space there
+    const text = (alone ? marks().alone : marks().start) + '\n' + prefix.trimEnd() + '\n' + prefix + (alone ? '' : marks().end);
     // A break in a span of its own is in a comment's range where the text
-    // on both sides is
+    // on both sides is, or a range that starts at the paragraph's mark,
+    // whose empty item (see startRangesAtMark) comes before it
     const next = content[k + 1];
     const commentIds = alone
-      ? new Set([...prev.commentIds].filter(id => next && 'commentIds' in next && next.commentIds?.has(id)))
+      ? new Set(content.slice(last, k).flatMap(item => 'commentIds' in item ? [...item.commentIds ?? []] : [])
+        .filter(id => next && 'commentIds' in next && next.commentIds?.has(id)))
       : new Set(prev.commentIds);
     const item: ContentItem = { type: 'text', text, commentIds, formatting: DEFAULT_FORMATTING, revision };
     // and ends it: empty text in no revision keeps the text after from
@@ -8259,8 +8269,7 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
 function joinSpansAtTrackedBreaks(markdown: string, marks: TrackedBreakMarks): string {
   const boundary = '(?:\\+\\+\\}\\{\\+\\+|--\\}\\{--)?';
   const marked = new RegExp(boundary + marks.start + '([^' + marks.end + ']*)' + marks.end + boundary, 'g');
-  const alone = new RegExp(marks.alone + '([^' + marks.end + ']*)' + marks.end, 'g');
-  return markdown.replace(marked, (_match, text: string) => text).replace(alone, (_match, text: string) => text);
+  return markdown.replace(marked, (_match, text: string) => text).split(marks.alone).join('');
 }
 
 export function buildMarkdown(

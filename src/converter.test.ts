@@ -8360,6 +8360,7 @@ describe('Track changes (CriticMarkup)', () => {
       ['after a comment\'s reference', 'a{>>c<<}{--\n\n--}b'],
       ['after a comment\'s range', '{==a==}{>>c<<}{--\n\n--}b'],
       ['in a comment\'s range', 'a{#1}b{--\n\n--}c{/1}\n{#1>>note<<}'],
+      ['at the start of a comment\'s range', 'A{#1}{--\n\n--}b{/1}\n{#1>>note<<}'],
       ['in a quote', '> a{--\n>\n> --}b'],
       ['in a list item', '- a{--\n\n  --}b'],
     ])('keeps a tracked paragraph mark %s in a span of its own', async (_name, md) => {
