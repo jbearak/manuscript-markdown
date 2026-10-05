@@ -645,16 +645,23 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter)
   // those runs doesn't nest, as it may yet be escaped. Without them, it's
   // escaped, as one of them could close it. One export reads as a
   // citation, before a ( too, whose items give its text back, stays one,
-  // as with the keys below.
+  // as with the keys below, where no [ is in it.
   const closers: number[] = [];
   let openAfter = 0;
+  // The nearest [ after the one at i, -1 for none
+  let nextOpen = -1;
   for (let i = text.length - 1; i >= 0; i--) {
     if (text[i] === ']') closers.push(i);
-    if (text[i] !== '[' || escaped.has(i)) continue;
+    if (text[i] !== '[') continue;
+    const inner = nextOpen;
+    nextOpen = i;
+    if (escaped.has(i)) continue;
     const close = closers[closers.length - 1];
     let opens: boolean;
     if (text[i + 1] === '^') opens = true;
-    else if (close !== undefined && /^-?@/.test(text.slice(i + 1, i + 3)) && citationEndInText(text, i) === close && citationKeyRanges(text, i, close)) opens = false;
+    // With no [ before its ], so each citation's text is read once
+    else if (close !== undefined && (inner === -1 || inner > close) && /^-?@/.test(text.slice(i + 1, i + 3))
+      && citationEndInText(text, i) === close && citationKeyRanges(text, i, close)) opens = false;
     else if (close !== undefined) opens = '([{'.includes(text[close + 1] ?? (after?.first || ' '));
     else if (!after) opens = true;
     else {
