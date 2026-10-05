@@ -3173,9 +3173,10 @@ describe('buildMarkdown', () => {
           const expectedText = texts.join('');
           // The paragraph's text starts its line, and nothing follows it,
           // and whitespace at its edges takes character references; a
-          // link's text is the link's alone, inside its brackets
+          // link's is as the link of one run of the text writes it, with
+          // the escapes its brackets need, as of a citation's @
           const expectedRendering = href
-            ? wrapWithFormatting(expectedText, formatting, false, RunsAfter.of('').linkTo(href))
+            ? buildMarkdown([{ type: 'text', text: expectedText, commentIds: new Set<string>(), formatting, href }], new Map()).trim()
             : keepParagraphEdgeWhitespace(wrapWithFormatting(expectedText, formatting, true, RunsAfter.of('')), true, true);
           
           // The result should contain the merged rendering for the combined text.
@@ -9090,6 +9091,9 @@ describe('Links of more than one run', () => {
     ['in code, as it is', '<w:rStyle w:val="CodeChar"/>', '<span a="', '[`<span a="`](https://e.com)'],
     ['inside a whole tag, as it is', '', '<a b="<span c=">', '[<a b="<span c=">](https://e.com)'],
     ['after a backslash of the text, escaped', '', '\\<span a="', '[\\\\\\<span a="](https://e.com)'],
+    // Whose closing == isn't an attribute's =, where markdown-it reads no tag
+    ['before a highlight\'s ==, as it is', '<w:highlight w:val="yellow"/>', '<A +', '[==<A +==](https://e.com)'],
+    ['with no attribute, as it is', '', '<span ', '[<span ](https://e.com)'],
   ])('writes the < of a tag left open in a link\'s text %s', async (_name, rPr, text, expected) => {
     const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
     const xml = await zip.file('word/document.xml')!.async('string');

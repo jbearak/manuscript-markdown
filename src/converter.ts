@@ -2233,8 +2233,13 @@ function markdownLink(text: string, href: string): string {
 }
 
 // A tag's start, as far as an attribute's = and its value, unquoted or
-// with no closing quote, at the text's end, which the text after can go on
-const TAG_LEFT_OPEN_AT = /<[A-Za-z][A-Za-z0-9-]*\s(?:[^<>"']|"[^"]*"|'[^']*')*=\s*(?:[^\s"'=<>`]*|"[^"]*|'[^']*)$/y;
+// with no closing quote, at the text's end, which the text after can go on,
+// its attributes as markdown-it reads them: not a highlight's ==, as in
+// ==<A +==, which no tag holds
+const TAG_ATTRIBUTE_NAME = '[A-Za-z_:][A-Za-z0-9_.:-]*';
+const TAG_LEFT_OPEN_AT = new RegExp('<[A-Za-z][A-Za-z0-9-]*(?:\\s+' + TAG_ATTRIBUTE_NAME
+  + '(?:\\s*=\\s*(?:[^"\'=<>`\\s]+|\'[^\']*\'|"[^"]*"))?)*\\s+' + TAG_ATTRIBUTE_NAME
+  + '\\s*=\\s*(?:[^"\'=<>`\\s]*|"[^"]*|\'[^\']*)$', 'y');
 
 /** A link's Markdown `text` with the < escaped of a tag it leaves open at
  *  its end, as bold <span a=" before a link of "> to one place, which would
