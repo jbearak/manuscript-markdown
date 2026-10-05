@@ -6728,6 +6728,8 @@ describe('Blocks a note can\'t hold', () => {
     // Which left an empty paragraph
     ['an empty code block', note('```\n```\n\nB.'), note('B.'), 'Empty code block inside a note dropped during conversion'],
     ['a horizontal rule', note('---\n\nB.'), note('B.'), 'Horizontal rule inside a note dropped during conversion'],
+    // Which a note, with no sections, can't hold, and which left two
+    ['an orientation directive', note('<!-- landscape -->\n\nB.\n\n<!-- /landscape -->'), note('B.'), 'Orientation directive inside a note ignored'],
     ['a list', note('- a\n- b'), note('a\n\nb'), 'List inside a note exported as note paragraphs'],
     ['a quote', note('> q'), note('q'), 'Blockquote inside a note exported as note paragraphs'],
     ['a heading', note('# h'), note('h'), 'Heading inside a note exported as a note paragraph'],
@@ -6743,6 +6745,7 @@ describe('Blocks a note can\'t hold', () => {
     ['an alert with its text after a blank line', note('> [!NOTE]\n>\n> B.')],
     ['an empty list item', note('-\n- B.')],
     ['an empty heading', note('#\n\nB.')],
+    ['an orientation directive', note('<!-- landscape -->\n\nB.\n\n<!-- /landscape -->')],
   ])('writes %s with no empty paragraph, or space before its text', async (_name, md) => {
     // An empty list item, heading or alert left an empty paragraph, which
     // import dropped, and an alert's text started with a space for the line
