@@ -2943,6 +2943,17 @@ describe('extractFootnoteDefinitions', () => {
     expect(definitions.get('1')).toBe('Here is code:\n\n```python\nprint(\"hello\")\n```');
     expect(cleaned).toBe('Body text.\n');
   });
+
+  it.each([
+    ['a paragraph', '[^1]: First.\n\n\n    Second.\n\nBody.', 'First.\n\n\nSecond.'],
+    ['code', '[^1]: Code:\n\n    ```python\n    a = 1\n\n\n    b = 2\n    ```\n\nBody.', 'Code:\n\n```python\na = 1\n\n\nb = 2\n```'],
+  ])('keeps %s in the note after two blank lines', (_name, input, body) => {
+    // The note ended at the second blank line, which markdown-it and Pandoc
+    // read past, and the rest became indented code in the body
+    const { cleaned, definitions } = extractFootnoteDefinitions(input);
+    expect(definitions.get('1')).toBe(body);
+    expect(cleaned).toBe('\nBody.');
+  });
 });
 
 describe('Footnote OOXML generation', () => {

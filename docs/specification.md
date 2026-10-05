@@ -652,7 +652,7 @@ Manuscript Markdown uses [Pandoc footnote syntax](https://pandoc.org/MANUAL.html
 
 - **Reference** (inline): `[^1]` or `[^my-note]` (named labels supported)
 - **Definition** (block, at end of document): `[^1]: Footnote text.`
-- **Multi-paragraph**: continuation lines indented 4 spaces
+- **Multi-paragraph**: continuation lines indented 4 spaces. Blank lines before one don't end the note, however many there are, as in Pandoc
 
 ```markdown
 This has a footnote[^1] and a named one[^my-note].
