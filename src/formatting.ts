@@ -712,7 +712,7 @@ function convertHtmlTable(text: string, pad: boolean): string | null {
     // table's blank lines there pad the cell to its row's height.
     cells: row.cells.map(cell => {
       let end = cell.runs.length;
-      while (end > 0 && cell.runs[end - 1].type !== 'text') end--;
+      while (end > 0 && cell.runs[end - 1].type !== 'text' && cell.runs[end - 1].type !== 'html_comment') end--;
       return runsToMarkdown(cell.runs.slice(0, end)).split('\n')
         .map(line => keepParagraphEdgeWhitespace(line, true, true)).join('\n') + '<br>'.repeat(cell.runs.length - end);
     }),
