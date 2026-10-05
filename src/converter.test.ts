@@ -8966,6 +8966,16 @@ describe('Links of more than one run', () => {
     expect(await roundTrip(md.slice(0, -1))).toBe(md);
   });
 
+  test('escapes the many keys in a link\'s text that reads as a citation before its escaped ] in linear time', () => {
+    // Each key was escaped after a parse of the label, as it grew
+    const items: ContentItem[] = [' @user'.repeat(2000) + ']', 'x'].map((text, k) => ({ type: 'text', text,
+      href: 'https://e.com', link: 1, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, bold: k === 0 } }));
+    const start = performance.now();
+    const md = buildMarkdown(items, new Map());
+    expect(performance.now() - start).toBeLessThan(1000);
+    expect(md).toContain(' \\@user'.repeat(1999) + '\\]');
+  });
+
   test('leaves the key in a link\'s code as it is, where a backslash would be text', async () => {
     const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
     const xml = await zip.file('word/document.xml')!.async('string');

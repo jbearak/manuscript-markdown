@@ -2222,20 +2222,14 @@ function formatHrefForMarkdown(href: string): string {
  *  stays as it is, where a backslash would be text. */
 function markdownLink(text: string, href: string): string {
   const url = formatHrefForMarkdown(href);
-  let label = text.replace(/^(-?)@/, (_m, dash: string) => dash + '\\@');
-  while (label.includes(']') && citationEndInText('[' + label + '](' + url + ')', 0) !== -1) {
-    const code = computeCodeRegions('[' + label + '](' + url + ')');
-    const keys = /(?:^|\s)-?@[\p{L}\p{N}_]/gu;
-    const before = label.slice(0, label.indexOf(']'));
-    let at = -1;
-    for (let key = keys.exec(before); key && at === -1; key = keys.exec(before)) {
-      const i = key.index + key[0].indexOf('@');
-      if (!isInsideCodeRegion(i + 1, code)) at = i;
-    }
-    if (at === -1) break;
-    label = label.slice(0, at) + '\\' + label.slice(at);
-  }
-  return '[' + label + '](' + url + ')';
+  const label = text.replace(/^(-?)@/, (_m, dash: string) => dash + '\\@');
+  const close = label.indexOf(']');
+  if (close === -1 || citationEndInText('[' + label + '](' + url + ')', 0) === -1) return '[' + label + '](' + url + ')';
+  // Each key before the ], at once, as the label is read once
+  const code = computeCodeRegions('[' + label + '](' + url + ')');
+  const keys = label.slice(0, close).replace(/(^|\s)(-?)@(?=[\p{L}\p{N}_])/gu, (key, space: string, dash: string, at: number) =>
+    isInsideCodeRegion(1 + at + space.length + dash.length, code) ? key : space + dash + '\\@');
+  return '[' + keys + label.slice(close) + '](' + url + ')';
 }
 
 // Comment extraction
