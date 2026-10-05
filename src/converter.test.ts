@@ -7464,6 +7464,8 @@ describe('Track changes (CriticMarkup)', () => {
       ['{~~a {==b==}{>>c<<} d~>x~~}', '{--a --}{=={--b--}==}{>>c<<}{-- d--}{++x++}'],
       ['{--a {++b {>>c<<}++} d--}', '{--a b --}{>>c<<}{-- d--}'],
       ['{++a {#1}b{/1} c++}\n{#1>>c<<}', '{++a ++}{=={++b++}==}{>>c<<}{++ c++}'],
+      ['{==b {#1}x{/1}==}{>>c<<}\n{#1>>d<<}', '{#1}b {#2}x{/1}{/2}\n{#1>>c<<}\n{#2>>d<<}'],
+      ['{--a {==b {#1}x{/1}==}{>>c<<}--}\n{#1>>d<<}', '{--a --}{#1}{--b --}{#2}{--x--}{/1}{/2}\n{#1>>c<<}\n{#2>>d<<}'],
     ])('keeps the comment in %j', async (md, expected) => {
       // Export skipped a comment in deleted text, and read {#id} and {/id} in
       // a revision's text as literal text, so the comment was lost

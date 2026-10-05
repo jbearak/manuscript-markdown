@@ -170,6 +170,7 @@ export interface MdRun {
   date?: string;            // for comments/revisions
   commentText?: string;     // for critic_comment: the comment body
   commentId?: string;       // for comment_range_start/end/body_with_id
+  reservedCommentId?: number; // for critic_highlight: its comment's ID, if prescanCommentIds gave it one
   footnoteLabel?: string;   // for footnote_ref: the [^label] label
   replies?: Array<{author?: string; date?: string; text: string; parentReply?: number}>; // nested replies for comment_body_with_id; parentReply: the index of the reply this one replies to
   consecutiveReplies?: true; // comment_body_with_id: its replies follow it, as in {#1>>a<<}{>>b<<}
@@ -6095,7 +6096,8 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       xml += '<w:ins w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + insertedXml + '</w:ins>';
     } else if (run.type === 'critic_highlight') {
       if (nextRun?.type === 'critic_comment') {
-        const commentId = state.commentId++;
+        const reserved = run.reservedCommentId;
+        const commentId = reserved !== undefined && !state.comments.some(comment => comment.id === reserved) ? reserved : state.commentId++;
         const author = nextRun.author ?? '';
         const date = normalizeToUtcIso(nextRun.date || '', state.timezone);
         const commentBody = nextRun.commentText || '';
@@ -7313,6 +7315,20 @@ function peopleXml(comments: CommentEntry[]): string {
  * stream. The document and each note are scanned before they're written.
  */
 function prescanCommentIds(tokens: MdToken[], state: DocxGenState): void {
+  const hasIdRange = (runs: MdRun[] | undefined): boolean => !!runs?.some(run => run.type === 'comment_range_start'
+    || hasIdRange(run.innerRuns) || hasIdRange(run.oldRuns) || hasIdRange(run.newRuns));
+  const prescanRuns = (runs: MdRun[] = []) => {
+    runs.forEach((run, i) => {
+      // A {==...==} anchor's comment gets its ID before the ID ranges in its
+      // text, as it starts first. Import closes ranges that end together in
+      // ID order, so with their IDs the other way round, the order of their
+      // {/id} markers flipped on each round trip.
+      if (run.type === 'critic_highlight' && runs[i + 1]?.type === 'critic_comment' && hasIdRange(run.innerRuns)) {
+        run.reservedCommentId = state.commentId++;
+      }
+      prescanRun(run);
+    });
+  };
   const prescanRun = (run: MdRun) => {
     if (run.type === 'comment_range_start') {
       const mdId = run.commentId || '';
@@ -7330,19 +7346,17 @@ function prescanCommentIds(tokens: MdToken[], state: DocxGenState): void {
       }
     }
     // Markers and bodies can be in a revision's or a highlight's text too
-    for (const inner of [...run.innerRuns ?? [], ...run.oldRuns ?? [], ...run.newRuns ?? []]) prescanRun(inner);
+    prescanRuns(run.innerRuns);
+    prescanRuns(run.oldRuns);
+    prescanRuns(run.newRuns);
   };
   for (const token of tokens) {
-    for (const run of token.runs) {
-      prescanRun(run);
-    }
+    prescanRuns(token.runs);
     // Also scan runs inside table cells
     if (token.rows) {
       for (const row of token.rows) {
         for (const cell of row.cells) {
-          for (const run of cell.runs) {
-            prescanRun(run);
-          }
+          prescanRuns(cell.runs);
         }
       }
     }
