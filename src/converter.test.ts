@@ -5759,6 +5759,29 @@ describe('HTML table cells', () => {
     expect(markdown).toBe(expected);
     expect(await roundTrip(markdown)).toBe(markdown);
   });
+
+  test('writes a table of a header row alone with a line break and a highlight as a grid table with its header', async () => {
+    // Its grid table had no header, so the next export lost the header's bold
+    const markdown = await roundTrip('| ==a==<br>b | c |\n|:---|---:|');
+    expect(markdown).toBe('+-------+-----+\n| ==a== | c   |\n| b     |     |\n+:======+====:+');
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    expect(xml).toContain('<w:tblHeader/>');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps a table with a cell of paragraphs HTML, with a line width of 0, though another cell has a highlight', async () => {
+    // A grid table, which holds the highlight, wrote the paragraphs as
+    // lines, which export read as one paragraph with line breaks
+    const widths = '---\npipe-table-max-line-width: 0\ngrid-table-max-line-width: 0\n---\n\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(widths + '| h | x |\n| --- | --- |\n| ==a== | XX |')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const two = xml.replace('<w:r><w:t>XX</w:t></w:r></w:p>', '<w:r><w:t>b</w:t></w:r></w:p><w:p><w:r><w:t>c</w:t></w:r></w:p>');
+    expect(two).not.toBe(xml);
+    zip.file('word/document.xml', two);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toStartWith('<table>');
+    expect(markdown).toContain('      <p>b</p>\n      <p>c</p>');
+  });
 });
 
 describe('Tabs', () => {

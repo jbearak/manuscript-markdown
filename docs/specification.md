@@ -604,7 +604,7 @@ When converting from DOCX to Markdown, the converter selects the simplest format
 2. **Grid table** — used when the original table was grid format and cells require multi-line content
 3. **HTML table** — fallback for tables with colspan, rowspan, multi-paragraph cells, or that exceed the configured line width
 
-A table whose cells hold what an HTML cell can't, such as a comment, a tracked change or a highlight, is a grid table of any width where it would otherwise be HTML, even with a line width of 0. That keeps its cells' content, but not a cell's own alignment, which a grid table holds only for a column. It stays HTML if it has merged cells, which only HTML holds, or a font or column widths with `-->`, which no directive's comment can hold.
+A table whose cells hold what an HTML cell can't, such as a comment, a tracked change or a highlight, is a grid table of any width where it would otherwise be HTML, even with a line width of 0. That keeps its cells' content, but not a cell's own alignment, which a grid table holds only for a column. It stays HTML if it has merged cells, which only HTML holds, a cell of more than one paragraph, which a grid table's cell holds as lines, or a font or column widths with `-->`, which no directive's comment can hold.
 
 ### Embedded Tables
 

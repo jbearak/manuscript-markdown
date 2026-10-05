@@ -6599,8 +6599,10 @@ function tryRenderGridTable(
     rendered.push(rowCells);
   }
 
-  // Find header boundary
-  const headerEnd = rows.findIndex(r => !r.isHeader);
+  // Find header boundary: a table of header rows alone ends its header at
+  // its last row, under +===+, which export reads as a header's
+  const firstBody = rows.findIndex(r => !r.isHeader);
+  const headerEnd = firstBody === -1 ? rows.length : firstBody;
   const hasHeader = headerEnd > 0;
   const aligns = columnAlignments(rows, numCols);
   const deferredAll = rendered.flatMap(rowCells => rowCells.flatMap(cell => cell.deferred));
@@ -6851,8 +6853,9 @@ function renderTableOrFallback(
     if (gridResult !== null) return r(gridResult);
   }
   // A table HTML cells can't hold, as one with a line break and a comment,
-  // is a grid table of any width, which holds it unless it merges cells
-  if (!htmlCellsHoldTable(item)) {
+  // is a grid table of any width, which holds it unless it merges cells, or
+  // has a cell of paragraphs, which a grid table's cell holds as lines
+  if (!htmlCellsHoldTable(item) && item.rows.every(row => row.cells.every(cell => cell.paragraphs.length <= 1))) {
     const gridResult = tryRenderGridTable(item, comments, renderOpts, undefined, gridSrcWidths);
     if (gridResult !== null) return r(gridResult);
   }
