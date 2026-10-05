@@ -6329,6 +6329,18 @@ describe('HTML around a table in its block', () => {
     expect(markdown.indexOf('<p>Cap B</p>')).toBeGreaterThan(markdown.indexOf('</table>'));
   });
 
+  test('puts the HTML around a table back with the same table after Word deletes one before it, with one alike it after it without any', async () => {
+    // Import counted the tables alike export wrote only as far as the one
+    // with HTML around it, took the second for one Word made, and gave it
+    // the HTML at its index
+    const md = table('X') + '\n\n<p>Cap A</p>\n' + table('A') + '\n\n' + table('A') + '\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, ''));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('<p>Cap A</p>\n' + table('A') + '\n\n' + table('A') + '\n');
+  });
+
   test('puts no HTML around a table after Word deletes one before it whose first row\'s text is alike, cut apart elsewhere', async () => {
     // Both first rows read as 2:A|B|C, and the table at the deleted one's
     // index took its caption
@@ -6621,18 +6633,39 @@ describe('HTML around a table in its block', () => {
     // Each table read every entry of the HTML export kept
     const { tableFirstRowText, tableContentsFingerprint } = await import('./table-metadata');
     const content: ContentItem[] = [];
-    const around = new Map<string, [string, string, string, string, string, string]>();
+    const around = new Map<string, [string, string, string, string, string, string, string]>();
     const formats = new Map<string, string>();
     for (let i = 0; i < 16000; i++) {
       const text = 'a' + i;
       content.push({ type: 'table', rows: [{ isHeader: false, cells: [{ paragraphs: [[{ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING }]] }] }] });
-      around.set(String(i), ['<div>', '</div>', tableFirstRowText([text]), tableContentsFingerprint([[text]]), '0', '']);
+      around.set(String(i), ['<div>', '</div>', tableFirstRowText([text]), tableContentsFingerprint([[text]]), '0', '', '1']);
       formats.set(String(i), 'html');
     }
     const start = performance.now();
     const markdown = buildMarkdown(content, new Map(), { tableHtmlAroundMapping: around, tableFormatMapping: formats });
     expect(performance.now() - start).toBeLessThan(1000);
     expect(markdown.match(/<div>/g)?.length).toBe(16000);
+  });
+
+  test('puts the HTML around many tables alike back in linear time', async () => {
+    // Each table looked for its index among the keys of all alike it
+    const { tableFirstRowText, tableContentsFingerprint } = await import('./table-metadata');
+    const time = (count: number) => {
+      const content: ContentItem[] = [];
+      const around = new Map<string, [string, string, string, string, string, string, string]>();
+      const formats = new Map<string, string>();
+      for (let i = 0; i < count; i++) {
+        content.push({ type: 'table', rows: [{ isHeader: false, cells: [{ paragraphs: [[{ type: 'text', text: 'a', commentIds: new Set(), formatting: DEFAULT_FORMATTING }]] }] }] });
+        around.set(String(i), ['<div>', '</div>', tableFirstRowText(['a']), tableContentsFingerprint([['a']]), String(i), '', String(count)]);
+        formats.set(String(i), 'html');
+      }
+      const start = performance.now();
+      const markdown = buildMarkdown(content, new Map(), { tableHtmlAroundMapping: around, tableFormatMapping: formats });
+      expect(markdown.match(/<div>/g)?.length).toBe(count);
+      return performance.now() - start;
+    };
+    time(1000);
+    expect(time(32000) / time(8000)).toBeLessThan(8);
   });
 
   test('warns of no HTML kept around a table in a list item, which is dropped', async () => {

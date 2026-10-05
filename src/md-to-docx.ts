@@ -4021,7 +4021,7 @@ export interface DocxGenState {
   tableDigits: Map<number, string>;
   tableDecimalMarks: Map<number, string>;
   tableDigitGroupings: Map<number, string>;
-  tableHtmlAround: Map<number, [string, string, string, string, string, string]>; // table index -> the HTML before and after it in its block, its first row and contents, the count of tables alike in both before it, and its note's kind and ID, or '' in the body
+  tableHtmlAround: Map<number, [string, string, string, string, string, string, string]>; // table index -> the HTML before and after it in its block, its first row and contents, the count of tables alike in both before it, its note's kind and ID, or '' in the body, and the count of tables alike in both export wrote in all
   tablesAlike: Map<string, number>; // a table's note, first row and contents -> the tables so far with all three
   fontOverrides?: FontOverrides;       // document-level font overrides for table default resolution
   listIndent: 'tab' | 'spaces'; // indentation style for nested list items
@@ -4090,7 +4090,7 @@ function recordTableMetadata(token: MdToken, state: DocxGenState): void {
  *  row, as its cells' count and text, its text, as the Word table `xml`
  *  holds it, and the count of tables alike in both before it in the body
  *  or its note (`scope`), which import counts too, but for one it writes as
- *  its embed directive */
+ *  its embed directive, and, once all are written, the count of them all */
 function recordTableIdentity(token: MdToken, xml: string, state: DocxGenState, scope: string): void {
   const texts = wordTableTexts(xml);
   const firstRow = tableFirstRowText(texts[0] ?? []);
@@ -4098,7 +4098,7 @@ function recordTableIdentity(token: MdToken, xml: string, state: DocxGenState, s
   const key = scope + '\n' + firstRow + '\n' + contents;
   const alikeBefore = state.tablesAlike.get(key) ?? 0;
   if (!(token.embedIdx !== undefined && token.embedIdx < state.embedDirectives.length)) state.tablesAlike.set(key, alikeBefore + 1);
-  if (token.tableHtmlAround) state.tableHtmlAround.set(state.tableIndex, [...token.tableHtmlAround, firstRow, contents, String(alikeBefore), scope]);
+  if (token.tableHtmlAround) state.tableHtmlAround.set(state.tableIndex, [...token.tableHtmlAround, firstRow, contents, String(alikeBefore), scope, '']);
 }
 
 interface CommentEntry {
@@ -8840,6 +8840,8 @@ export async function convertMdToDocx(
   customProps.push(...noteImageFormatProps(state.noteImageFormats));
   customProps.push(...tableFormatProps(state.tableFormats));
   if (state.tableHtmlAround.size > 0) {
+    // The count of tables alike export wrote in all, which is known only now
+    for (const around of state.tableHtmlAround.values()) around[6] = String(state.tablesAlike.get(around[5] + '\n' + around[2] + '\n' + around[3]) ?? 0);
     customProps.push(...chunkCustomProps('MANUSCRIPT_TABLE_HTML_AROUND_', JSON.stringify(Object.fromEntries(state.tableHtmlAround))));
   }
   customProps.push(...pipeTableAlignedProps(state.pipeTableAligned));
