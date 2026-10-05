@@ -7662,7 +7662,9 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
         lastBlockquoteType = undefined;
         continue;
       }
-      if (item.listMeta) {
+      // A numbered heading is a heading, which ends a list, as buildMarkdown
+      // writes it
+      if (item.listMeta && !item.headingLevel) {
         clearListContextsFromLevel(listContexts, item.listMeta.level + 1);
         for (const level of [...listTypesByLevel.keys()]) {
           if (level > item.listMeta.level) listTypesByLevel.delete(level);
@@ -7694,6 +7696,13 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
         if (inferred) {
           item.blockquoteLevel = inferred.blockquoteLevel;
           if (inferred.listContinuation) item.listContinuation = inferred.listContinuation;
+        }
+        // A quote out of the list ends it, as buildMarkdown writes it, and a
+        // paragraph indented for an item after it is in no item
+        if (!item.listContinuation) {
+          listContexts.clear();
+          listTypesByLevel.clear();
+          orderedCounters.clear();
         }
         const currentType: GfmAlertType | 'plain' = item.alertType || 'plain';
         // A quote nested in a list and one outside it are separate groups, as
@@ -8312,7 +8321,8 @@ export function buildMarkdown(
    *  of the nearest level Word gives above its own, or at the top where no
    *  list is open, as Markdown has no way to skip a level. Indented for the
    *  level Word gives it, it would nest under another item, or read as
-   *  code. A paragraph in an item goes at that item's level. */
+   *  code. A paragraph in an item goes at that item's level, and where no
+   *  item is open, as after one with no text, in none. */
   const atOpenListDepth = (item: ContentItem): ContentItem => {
     if (item.type !== 'para' || item.headingLevel) return item;
     const { listMeta, listContinuation } = item;
@@ -8320,7 +8330,8 @@ export function buildMarkdown(
       const level = listWordLevels.filter(open => open < listMeta.level).length;
       return level === listMeta.level ? item : { ...item, listMeta: { ...listMeta, level } };
     }
-    if (listContinuation && listWordLevels.length > 0) {
+    if (listContinuation && listWordLevels.length === 0) return { ...item, listContinuation: undefined };
+    if (listContinuation) {
       const level = Math.max(0, listWordLevels.filter(open => open <= listContinuation.level).length - 1);
       return level === listContinuation.level ? item : { ...item, listContinuation: { ...listContinuation, level } };
     }
@@ -8458,9 +8469,18 @@ export function buildMarkdown(
   }
 
   while (i < mergedContent.length) {
+    const wordItem = mergedContent[i];
+    // An item with no text ends at a blank line, which goes before anything
+    // after it but its sublist, or a quote in it right under its marker, and
+    // nothing after nests in it
+    if (lastListItemEmpty && wordItem.type === 'para' && (!wordItem.listMeta || wordItem.headingLevel)
+      && !(wordItem.blockquoteLevel && wordItem.listContinuation && blankLinesBeforeListQuote(wordItem) === 0)) {
+      listMarkerWidths = listMarkerWidths.slice(0, -1);
+      listWordLevels = listWordLevels.slice(0, -1);
+      lastListItemEmpty = false;
+    }
     // The level Word gives a list item, and the item at the level Markdown
     // nests it at, which every line written for it takes
-    const wordItem = mergedContent[i];
     const wordLevel = wordItem.type === 'para' ? wordItem.listMeta?.level : undefined;
     const item = mergedContent[i] = atOpenListDepth(wordItem);
 
@@ -8940,6 +8960,12 @@ export function buildMarkdown(
       lastListLevel = isCurrentList
         ? item.listMeta!.level
         : item.listContinuation?.level;
+      // A paragraph in an item ends the items under it, which an item after
+      // it can't nest in
+      if (!isCurrentList && item.listContinuation) {
+        listMarkerWidths = listMarkerWidths.slice(0, item.listContinuation.level + 1);
+        listWordLevels = listWordLevels.slice(0, item.listContinuation.level + 1);
+      }
       // Blank lines alone go on in the list, whose open items an item after
       // them nests in, numbered as Word shows it
       if (!isCurrentList && !item.listContinuation) {

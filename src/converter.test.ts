@@ -1756,6 +1756,15 @@ describe('List levels Word skips', () => {
     expect(await stable(await atLevels(md, levels))).toBe(md);
   });
 
+  test.each([
+    ['paragraph', '- a\n  - b\n\n  more\n  - c\n'],
+    ['quote', '- a\n  - b\n\n  > q\n\n  - c\n'],
+  ])('nests an item one level under an item whose %s ends the items under it', async (_name, md) => {
+    // Word's level 2 indented it under the item at level 1, which Markdown
+    // had ended, and it read as level 1
+    expect(await stable(await atLevels(md, [0, 1, 2]))).toBe(md);
+  });
+
   test('keeps the number Word shows an item after a level it skipped', async () => {
     // Word numbers it from 1 at its own level, where Markdown would go on
     // from the items at the level it skipped, which nest at the same depth
@@ -1788,17 +1797,50 @@ describe('List levels Word skips', () => {
     expect(await stable(await atLevels(md, levels))).toBe(expected);
   });
 
+  /** xml with para before its last paragraph */
+  const before = (xml: string, para: string) => xml.slice(0, xml.lastIndexOf('<w:p ')) + para + xml.slice(xml.lastIndexOf('<w:p '));
+
   test.each([
     ['at the next level', '9. a\n10. b\n    - c\n', [0, 0, 1], '9. a\n10. b\n\n\n\n    - c\n'],
     ['at a level after one Word skipped', '- a\n  - b\n', [0, 2], '- a\n\n\n\n  - b\n'],
   ])('nests an item after an empty paragraph in the item before, %s', async (_name, md, levels, expected) => {
     // The empty paragraph lost the width of the item's marker, and the item
     // indented for a bullet's left the numbered item
-    const docx = await atLevels(md, levels, xml => xml.slice(0, xml.lastIndexOf('<w:p ')) + '<w:p/>' + xml.slice(xml.lastIndexOf('<w:p ')));
+    const docx = await atLevels(md, levels, xml => before(xml, '<w:p/>'));
     const markdown = await imported(docx);
     expect(markdown).toBe(expected);
     // Export writes no empty paragraph between items
     expect(await imported((await convertMdToDocx(markdown)).docx)).toBe(md);
+  });
+
+  test.each([
+    ['an item at the next level after an empty paragraph', '10. x\n    - b\n', '10. \n\n\n\n- b\n', '10. \n\n- b\n', (xml: string) => before(xml, '<w:p/>')],
+    ['a paragraph in it', '10. x\n\n    more\n', '10. \n\nmore\n', '10. \n\nmore\n', (xml: string) => xml],
+    ['a quote in it after a blank line', '10. x\n\n    > q\n', '10. \n\n> q\n', '10. \n\n> q\n', (xml: string) => xml],
+  ])('ends an item with no text before %s, as the blank line does', async (_name, md, expected, again, edit) => {
+    // Indented under the item's marker after the blank line, it read as code
+    const markdown = await imported(await atLevels(md, [0, 1], xml => edit(xml.replace('<w:r><w:t>x</w:t></w:r>', ''))));
+    expect(markdown).toBe(expected);
+    expect(await imported((await convertMdToDocx(markdown)).docx)).toBe(again);
+  });
+
+  test('keeps a quote right under the marker of an item with no text in it', async () => {
+    const markdown = await imported(await atLevels('10. x\n    > q\n', [0], xml => xml.replace('<w:r><w:t>x</w:t></w:r>', '')));
+    expect(markdown).toBe('10. \n    > q\n');
+    expect(await imported((await convertMdToDocx(markdown)).docx)).toBe(markdown);
+  });
+
+  test.each([
+    ['a numbered heading', '# T\n\n- a\n\n  more\n', '# T\n\n- a\n\n## H\n\nmore\n', (xml: string) => before(xml,
+      '<w:p><w:pPr><w:pStyle w:val="Heading2"/><w:numPr><w:ilvl w:val="1"/><w:numId w:val="' + /<w:numId w:val="(\d+)"/.exec(xml)![1] + '"/></w:numPr></w:pPr><w:r><w:t>H</w:t></w:r></w:p>',
+    ).replace('w:left="720"', 'w:left="1440"')],
+    ['a quote out of the list', '- a\n  - b\n\n    more\n', '- a\n  - b\n\n> q\n\nmore\n', (xml: string) => before(xml,
+      '<w:p><w:pPr><w:pStyle w:val="GitHubBlockquote"/><w:ind w:left="240"/></w:pPr><w:r><w:t>q</w:t></w:r></w:p>')],
+  ])('writes a paragraph indented for an item after %s, which ends the list, in no item', async (_name, md, expected, edit) => {
+    // It took the indent of an item that Markdown had ended, which read as code
+    const markdown = await imported(await atLevels(md, [0, 1], edit));
+    expect(markdown).toBe(expected);
+    expect(await imported((await convertMdToDocx(markdown)).docx)).toBe(markdown);
   });
 
   test('puts an item after a numbered heading at the top', async () => {
