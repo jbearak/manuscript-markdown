@@ -7841,7 +7841,11 @@ function detachedTableHtml(html: string): string | undefined | null {
       continue;
     }
     endTexts();
-    const block = lines.slice(k, end);
+    // A block that ends on its line before a <pre> on it does, as a comment
+    // before one, goes there, and the <pre> starts one of its own, as its
+    // lines would be text after the block, with their indents gone
+    const split = end === k + 1 && preformatted[k] > 0;
+    const block = split ? [line.slice(0, preformatted[k])] : lines.slice(k, end);
     const marker = htmlBlockEndMarker(line.trimStart());
     if (marker && !marker.test(block[block.length - 1])) return null;
     const rest = directiveRest(block.join('\n'));
@@ -7857,7 +7861,10 @@ function detachedTableHtml(html: string): string | undefined | null {
       out.push(htmlLinesAsText([rest]).join('\n'));
       inParagraph = true;
     }
-    k = end - 1;
+    if (split) {
+      lines[k] = line.slice(preformatted[k]);
+      preformatted[k--] = -1;
+    } else k = end - 1;
   }
   endTexts();
   if (sources) return null;

@@ -6618,6 +6618,9 @@ describe('HTML around a table in its block', () => {
     // Whose lines a paragraph's lost their indents
     ['a <pre> that goes on past a line of text', '', '\nSource <pre>if ready:\n    run()\n</pre> done\n', '', '\n\nSource\n<pre>if ready:\n    run()\n</pre> done\n'],
     ['a <pre> on a line of text that ends on it', '', '\nSource <pre>a</pre> <b>b</b>\n', '', '\n\nSource <pre>a</pre> <b>b</b>\n'],
+    // Whose lines were text after the comment's block, which ended on its line
+    ['a <pre> that goes on past a comment on its line', '', '\n<!-- note --><pre>if ready:\n    run()\n</pre>\n', '', '\n\n<!-- note -->\n<pre>if ready:\n    run()\n</pre>\n'],
+    ['a <pre> that goes on past a directive on its line', '', '\n<!-- table-font-size: 11 --><pre>if ready:\n    run()\n</pre>\n', '', '\n\n<pre>if ready:\n    run()\n</pre>\n'],
     // Which the line of a tag in it ended, and escaped
     ['a comment over lines, one of which starts with a tag', '', '\nSource <!-- hidden\n<div>secret</div> -->\n', '', '\n\nSource <!-- hidden\n<div>secret</div> -->\n'],
     ['a <pre> on a line of text in a comment', '', '\nSource <!-- a\nb <pre> -->\nc\n', '', '\n\nSource <!-- a\nb <pre> -->\nc\n'],
