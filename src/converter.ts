@@ -561,6 +561,35 @@ export class RunsAfter {
   }
 }
 
+/** The ranges of the keys and locators of the citation export reads in
+ *  `text` from the [ at `open` to the ] at `close`, where its items, as
+ *  export writes a citation whose key is missing as its text, give that
+ *  text back; undefined where they don't, as for [@a,p. 2]. Export runs a
+ *  prefix's spaces together, and keeps one locator and one - for each key,
+ *  the last, so [see  also @a] and [@a, p. 1; @a, p. 2] don't. */
+function citationKeyRanges(text: string, open: number, close: number): Array<[number, number]> | undefined {
+  let offset = open + 1;
+  const raw: Array<[number, number]> = [];
+  const locators = new Map<string, string>();
+  const suppressed = new Set<string>();
+  const items = text.slice(open + 1, close).split(';').flatMap(part => {
+    const item = part.trim();
+    const start = /(^|\s)(-?)@/.exec(item);
+    const prefix = start ? item.slice(0, start.index).trim().replace(/\s+/g, ' ') : '';
+    const rest = start ? item.slice(start.index + start[0].length).trim() : item;
+    const comma = rest.indexOf(',');
+    const key = comma === -1 ? rest : rest.slice(0, comma).trim();
+    if (start) raw.push([offset + part.indexOf(item) + start.index + start[1].length, offset + part.length]);
+    offset += part.length + 1;
+    if (!rest) return [];
+    if (comma !== -1) locators.set(key, rest.slice(comma + 1).trim());
+    if (start?.[2]) suppressed.add(key);
+    return [{ prefix, key }];
+  });
+  return '[' + items.map(({ prefix, key }) => (prefix ? prefix + ' ' : '') + (suppressed.has(key) ? '-@' : '@') + key
+    + (locators.get(key) ? ', ' + locators.get(key) : '')).join('; ') + ']' === text.slice(open, close + 1) ? raw : undefined;
+}
+
 /**
  * Word's text as Markdown that reads as that text: a backslash goes before
  * each character Markdown would take for syntax, but only there, so most
@@ -634,15 +663,26 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter)
   // after it that no [ inside it closes at, or else in the runs `after` it,
   // at the ] after those the [s inside it that close there take; a [ in
   // those runs doesn't nest, as it may yet be escaped. Without them, it's
-  // escaped, as one of them could close it.
+  // escaped, as one of them could close it. One export reads as a
+  // citation, before a ( too, whose items give its text back, stays one,
+  // as with the keys below, where no [ is in it.
   const closers: number[] = [];
   let openAfter = 0;
+  // The nearest [ after the one at i, -1 for none
+  let nextOpen = -1;
   for (let i = text.length - 1; i >= 0; i--) {
     if (text[i] === ']') closers.push(i);
-    if (text[i] !== '[' || escaped.has(i)) continue;
+    if (text[i] !== '[') continue;
+    const inner = nextOpen;
+    nextOpen = i;
+    if (escaped.has(i)) continue;
     const close = closers[closers.length - 1];
     let opens: boolean;
     if (text[i + 1] === '^') opens = true;
+    // With no [ before its ], so each citation's text is read once, nor a
+    // ! before it, which makes it an image's
+    else if (close !== undefined && (inner === -1 || inner > close) && text[i - 1] !== '!' && /^-?@/.test(text.slice(i + 1, i + 3))
+      && citationEndInText(text, i) === close && citationKeyRanges(text, i, close)) opens = false;
     else if (close !== undefined) opens = '([{'.includes(text[close + 1] ?? (after?.first || ' '));
     else if (!after) opens = true;
     else {
@@ -670,22 +710,8 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter)
     const open = text.indexOf('[', i + 1);
     if (open !== -1 && open < close && !/^-?@/.test(text.slice(i + 1, i + 3))) continue;
     if (citationEndInText(text, i) !== close) continue;
-    const content = text.slice(i + 1, close);
-    let offset = i + 1;
-    const raw: Array<[number, number]> = [];
-    const items = content.split(';').map(part => {
-      const item = part.trim();
-      const start = /(^|\s)(-?)@/.exec(item);
-      const prefix = start ? item.slice(0, start.index).trim() : '';
-      const rest = start ? item.slice(start.index + start[0].length).trim() : item;
-      const comma = rest.indexOf(',');
-      const key = comma === -1 ? rest : rest.slice(0, comma).trim();
-      const locator = comma === -1 ? '' : rest.slice(comma + 1).trim();
-      if (start) raw.push([offset + part.indexOf(item) + start.index + start[1].length, offset + part.length]);
-      offset += part.length + 1;
-      return rest ? (prefix ? prefix + ' ' : '') + (start?.[2] ?? '') + '@' + key + (locator ? ', ' + locator : '') : undefined;
-    });
-    if ('[' + items.filter(item => item !== undefined).join('; ') + ']' !== text.slice(i, close + 1)) {
+    const raw = citationKeyRanges(text, i, close);
+    if (!raw) {
       escaped.add(i);
       continue;
     }

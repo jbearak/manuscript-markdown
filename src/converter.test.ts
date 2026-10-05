@@ -5073,8 +5073,13 @@ describe('Word text that reads as Markdown', () => {
     'a ==== b',
     // A citation whose items export gives back otherwise
     '[@a; see_also_x]', '[@a;@b]',
-    // A citation lookalike before a (, which export reads as one
-    '[@a](b)',
+    // Export runs a prefix's spaces together, and keeps one locator and one
+    // - for each key
+    '[@a; see  also @b]', '[@a, p. 1; @a, p. 2]', '[-@a; @a]', '[@a; see  also @b](b)',
+    // One before a ( in brackets, whose ] closed the outer [ as a link's
+    '[[@a,p. 2](https://e.com)]',
+    // One after a !, which makes it an image
+    '![@a](b)', '![@a][b]',
     // An autolink past the 256 characters the check read, or with a
     // no-break space, which markdown-it allows in one
     '<urn:' + 'x'.repeat(300) + '>', '<ab:c\u00a0d>',
@@ -5394,6 +5399,14 @@ describe('Word text that reads as Markdown', () => {
     expect(performance.now() - start).toBeLessThan(500);
   });
 
+  test('escapes a long run of citations\' [ before a ( in linear time', () => {
+    // Each [ read the citation to the ] its key ran to
+    const start = performance.now();
+    expect(wrapWithFormatting('[@'.repeat(100000) + 'a,p. 2](b)', DEFAULT_FORMATTING)).toBe('\\[@'.repeat(100000) + 'a,p. 2](b)');
+    // Some 100 ms here, and three seconds read again for each [
+    expect(performance.now() - start).toBeLessThan(1500);
+  });
+
   test('escapes a long run of [ in linear time', () => {
     // Each [ looked for its ] through the rest of the text
     const start = performance.now();
@@ -5405,6 +5418,15 @@ describe('Word text that reads as Markdown', () => {
     // A key's _ took a backslash, which went in the key
     const markdown = await importText('A.\n\nP XX Q.\n\nB.', '[@_smith] and [see @smith_, p. 5]');
     expect(markdown).toBe('A.\n\nP [@_smith] and [see @smith_, p. 5] Q.\n\nB.\n');
+  });
+
+  test.each(['[@a](b)', '[-@a](b)', '[@a]{.underline}', '[@a][b]'])('writes %s with the citation export reads in it', async (text) => {
+    // Its [ was escaped as a link's, so a citation whose key is missing,
+    // which export writes as its text, came back as text, and stayed text
+    // once the bibliography had the key
+    const markdown = await importText('A.\n\nP XX Q.\n\nB.', text);
+    expect(markdown).toBe('A.\n\nP ' + text + ' Q.\n\nB.\n');
+    expect(await roundTrip(markdown)).toBe(markdown + '\nCitation data for @a was not found in the bibliography file.\n');
   });
 
   test('writes a line start of formatted text as it is', async () => {
