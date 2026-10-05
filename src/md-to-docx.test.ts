@@ -2962,6 +2962,75 @@ describe('extractFootnoteDefinitions', () => {
     expect(definitions.get('1')).toBe(body);
     expect(cleaned).toBe('\nBody.');
   });
+
+  it.each([
+    // Its info can't hold a backtick, so it's text, a code span's
+    ['a line of backticks with a backtick after them', 'One \\\n```c``c``` end'],
+    ['an indented line of backticks', '    ```'],
+    ['a line of tildes indented as code', '    ~~~ x'],
+  ])('reads a definition after %s, which opens no fenced code', (_name, before) => {
+    // The rest of the document was fenced code, and the definition in it
+    const { cleaned, definitions } = extractFootnoteDefinitions('T [^1]\n\n' + before + '\n\n[^1]: Note.');
+    expect(definitions.get('1')).toBe('Note.');
+    expect(cleaned).toBe('T [^1]\n\n' + before + '\n');
+  });
+
+  it('reads no definition in fenced code past a line of backticks with text after them', () => {
+    // Which closed the fence, though a closing fence holds nothing after its marker
+    const input = 'T [^1]\n\n```\nx\n``` js\n[^1]: Code.\n```\n\n[^1]: Note.';
+    const { cleaned, definitions } = extractFootnoteDefinitions(input);
+    expect(definitions.get('1')).toBe('Note.');
+    expect(cleaned).toBe('T [^1]\n\n```\nx\n``` js\n[^1]: Code.\n```\n');
+  });
+
+  it('keeps a note\'s code going past a blank line, which reads as a list item\'s code', () => {
+    // The definition follows the item with no blank line, so markdown-it
+    // reads the note's fence as the item's, and the note ended at the blank
+    // line in it
+    const input = 'T [^1]\n\n- item\n[^1]: Code:\n\n    ```\n    a\n\n    b\n    ```\n\nBody.';
+    const { cleaned, definitions } = extractFootnoteDefinitions(input);
+    expect(definitions.get('1')).toBe('Code:\n\n```\na\n\nb\n```');
+    expect(cleaned).toBe('T [^1]\n\n- item\n\nBody.');
+  });
+
+  it.each([
+    ['a <pre> of fenced code', '<pre>\n```\n[^1]: Not a note.\n```\n</pre>'],
+    ['a <div>', '<div>\n[^1]: Not a note.\n</div>'],
+    ['a comment', '<!--\n[^1]: Not a note.\n-->'],
+  ])('reads no definition in %s, which markdown-it reads as HTML', (_name, block) => {
+    // It went to a note no reference had, and out of the HTML
+    const { cleaned, definitions } = extractFootnoteDefinitions('T.\n\n' + block + '\n\nEnd.');
+    expect(definitions.size).toBe(0);
+    expect(cleaned).toBe('T.\n\n' + block + '\n\nEnd.');
+  });
+
+  it.each([
+    ['<pre>', 'T [^1] {>>Use this tag:\n<pre>\nfor the example.<<}'],
+    ['a fence', 'T [^1] {>>Use:\n```\nfor the example.<<}'],
+    ['<div> after a blank line', 'T [^1] {>>Use:\n\n<div>\n\nx<<}'],
+  ])('reads a definition after a comment with %s in it, which starts no block', (_name, before) => {
+    // The comment's text, which parseMd keeps on one line, read as an HTML
+    // block or fence to the end, which hid the definition
+    const { cleaned, definitions } = extractFootnoteDefinitions(before + '\n\n[^1]: Footnote.');
+    expect(definitions.get('1')).toBe('Footnote.');
+    expect(cleaned).toBe(before + '\n');
+  });
+
+  it('counts the lines of a comment whose opener ends a line, to find where HTML after it ends', () => {
+    // The definition right after the </pre> line, which ends the block
+    const before = 'T [^1] {>>\n<pre>\nx<<}\n\n<pre>\n[^2]: Not a note.\n</pre>';
+    const { cleaned, definitions } = extractFootnoteDefinitions(before + '\n[^1]: Footnote.');
+    expect([...definitions]).toEqual([['1', 'Footnote.']]);
+    expect(cleaned).toBe(before);
+  });
+
+  it('reads a definition after fenced code after a bare carriage return, as a line end', () => {
+    // markdown-it reads a bare \r as one, which put the fence's lines one
+    // later, and the definition in them
+    const { cleaned, definitions } = extractFootnoteDefinitions('T [^1]\r```\nx\n```\n[^1]: Note.');
+    expect(definitions.get('1')).toBe('Note.');
+    expect(cleaned).toBe('T [^1]\n```\nx\n```');
+  });
 });
 
 describe('Footnote OOXML generation', () => {

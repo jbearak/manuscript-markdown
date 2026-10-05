@@ -310,9 +310,12 @@ function findNextCriticOpener(src: string, pos: number): CriticOpener | undefine
 /**
  * Preprocess markdown source: replace \n\n inside CriticMarkup spans with a
  * placeholder so markdown-it's block parser doesn't split them into separate
- * paragraphs.
+ * paragraphs. Without `moveLeadingBreaks`, a span's opener stranded at a
+ * line's end stays there, so each line end of the source is one of the
+ * result's or in its placeholders, one in a line's and two in a blank
+ * line's, which count the source's lines.
  */
-export function preprocessCriticMarkup(markdown: string): string {
+export function preprocessCriticMarkup(markdown: string, moveLeadingBreaks = true): string {
   // Fast path: if no CriticMarkup opening markers, return unchanged
   if (!markdown.includes('{++') && !markdown.includes('{--') &&
       !markdown.includes('{~~') && !markdown.includes('{>>') &&
@@ -320,7 +323,7 @@ export function preprocessCriticMarkup(markdown: string): string {
     return markdown;
   }
 
-  const analysis = LEADING_CRITIC_BREAK_RE.test(markdown)
+  const analysis = moveLeadingBreaks && LEADING_CRITIC_BREAK_RE.test(markdown)
     ? moveLeadingBreakOutsideCritic(computeCriticBlockAnalysis(markdown, true))
     : computeCriticBlockAnalysis(markdown);
   const { source: result, inertRegions } = analysis;
