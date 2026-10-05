@@ -2617,9 +2617,27 @@ const QUOTE_BLOCK_WARNINGS: Partial<Record<MdToken['type'], string>> = {
   hr: 'Horizontal rule inside blockquote dropped during conversion',
 };
 // A code block of blank lines alone, which would be an empty paragraph,
-// which a quote can't hold in Markdown
+// which a quote can't hold in Markdown. A blank line holds spaces and tabs,
+// and characters XML can't hold, which go (see removeCharactersXmlCantHold),
+// but not other spaces, as U+3000, which are text.
 const EMPTY_QUOTE_CODE_WARNING = 'Empty code block inside blockquote dropped during conversion';
-const isEmptyCodeBlock = (token: MdToken): boolean => token.type === 'code_block' && token.runs.every(run => !/\S/.test(run.text));
+const isBlank = (text: string): boolean => !/[^ \t\n]/.test(text.replace(NOT_XML_CHARACTER, ''));
+const isEmptyCodeBlock = (token: MdToken): boolean => token.type === 'code_block' && token.runs.every(run => isBlank(run.text));
+
+/** A code block's text in a quote, as a paragraph's: its lines, with line
+ *  breaks between them, which a line end in Word's text isn't, but not
+ *  before blank lines at its end, which a break can't end the paragraph
+ *  with. Their characters XML can't hold stay, to go where they're counted. */
+function quotedCodeRuns(run: MdRun): MdRun[] {
+  const lines = run.text.split('\n');
+  let end = lines.length;
+  while (end > 1 && isBlank(lines[end - 1])) end--;
+  const rest = lines.slice(end).join('').replace(/[ \t]/g, '');
+  return [
+    ...lines.slice(0, end).flatMap((line, k): MdRun[] => [...(k > 0 ? [{ type: 'hardbreak' as const, text: '\n' }] : []), ...(line ? [{ ...run, text: line }] : [])]),
+    ...(rest ? [{ ...run, text: rest }] : []),
+  ];
+}
 
 function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel = 0, warnings?: string[], sourceLines?: string[]): MdToken[] {
   const result: MdToken[] = [];
@@ -2699,12 +2717,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
               ...t,
               listContinuation: undefined,
               trailingBlankLine: undefined,
-              // A code block's text ends with its last line's end, and its
-              // others are line breaks, which a line end in Word's text isn't,
-              // but for blank lines at its end, or lines of whitespace alone,
-              // which a break can't end the paragraph with
-              ...(t.type === 'code_block' ? { runs: t.runs.flatMap(run => run.text.replace(/(?:\n[ \t]*)+$/, '').split('\n')
-                .flatMap((line, k): MdRun[] => [...(k > 0 ? [{ type: 'hardbreak' as const, text: '\n' }] : []), ...(line ? [{ ...run, text: line }] : [])])) } : {}),
+              ...(t.type === 'code_block' ? { runs: t.runs.flatMap(quotedCodeRuns) } : {}),
             };
           quoted.push(kept);
         }

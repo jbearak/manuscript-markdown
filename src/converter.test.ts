@@ -6582,6 +6582,19 @@ describe('Blocks a quote can\'t hold', () => {
     expect(warnings).toEqual([warning + ' (not supported). Move it outside the quote for round-trip fidelity.']);
     expect(strip((await convertDocx(docx)).markdown)).toBe(expected);
   });
+
+  test('keeps a code block of a space that is text', async () => {
+    // U+3000 read as a blank line's, and the block was dropped as empty
+    const { docx } = await convertMdToDocx('> ```\n> \u3000\n> ```\n');
+    expect(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).toContain('<w:t>\u3000</w:t>');
+  });
+
+  test('ends a code block\'s text before a last line of characters XML can\'t hold', async () => {
+    // Its line break stayed when they went, and ended the paragraph
+    const { docx, warnings } = await convertMdToDocx('> ```\n> x\n> \uFFFF\n> ```\n');
+    expect(warnings).toContain('Removed 1 character a Word document can\'t hold, such as control characters');
+    expect(strip((await convertDocx(docx)).markdown)).toBe('> x\n');
+  });
 });
 
 describe('Display math in a paragraph\'s text', () => {
