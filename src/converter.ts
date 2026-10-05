@@ -3196,13 +3196,14 @@ function markdownComment(text: string, beforeComment = false, cell = false): str
 /** The items of a table's cell with each comment the browser reads no end
  *  in joined with the comments after it, which Word split it from at an
  *  <!-- in it, which the browser reads on, up to the one an end is in, as
- *  one comment, where none is in a comment's range */
+ *  one comment, where they're in the same comments' ranges. No range ends
+ *  at an HTML comment (see collectCommentSpans), so none loses its end. */
 function joinSplitComments(items: ContentItem[]): ContentItem[] {
   const out: ContentItem[] = [];
   let joined = false;
-  // The texts of the comment at the end of `out` while it has no end, and
-  // their last three characters, which can start one
-  let open: { texts: string[]; tail: string } | undefined;
+  // The texts of the comment at the end of `out` while it has no end, their
+  // last three characters, which can start one, and its comments' IDs
+  let open: { texts: string[]; tail: string; commentIds: Set<string> } | undefined;
   const close = () => {
     if (open && open.texts.length > 1) {
       out[out.length - 1] = { ...out[out.length - 1] as Extract<ContentItem, { type: 'html_comment' }>, text: open.texts.join('') };
@@ -3211,16 +3212,16 @@ function joinSplitComments(items: ContentItem[]): ContentItem[] {
     open = undefined;
   };
   for (const item of items) {
-    if (item.type !== 'html_comment' || item.commentIds.size > 0) {
-      close();
-      out.push(item);
-    } else if (open) {
+    if (open && item.type === 'html_comment' && commentSetsEqual(item.commentIds, open.commentIds)) {
       open.texts.push(item.text);
       if (/--!?>/.test(open.tail + item.text)) close();
       else open.tail = (open.tail + item.text).slice(-3);
-    } else {
-      out.push(item);
-      if (!/^\s*<!--(?:-?>|[\s\S]*?--!?>)/.test(item.text)) open = { texts: [item.text], tail: item.text.slice(-3) };
+      continue;
+    }
+    close();
+    out.push(item);
+    if (item.type === 'html_comment' && !/^\s*<!--(?:-?>|[\s\S]*?--!?>)/.test(item.text)) {
+      open = { texts: [item.text], tail: item.text.slice(-3), commentIds: item.commentIds };
     }
   }
   close();
