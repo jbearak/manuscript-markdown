@@ -5745,6 +5745,7 @@ describe('HTML table cells', () => {
     // Which hid the rest of the table, as it read no --> after them
     ['an empty comment the browser ends at its >', '      <p>a<!-->b</p>'],
     ['an empty comment the browser ends at its ->', '      <p>a<!--->b</p>'],
+    ['a comment the browser ends at its --!>', '      <p>a<!-- c --!>b</p>'],
   ])('keeps %s', async (_name, cell) => {
     // Import wrote Markdown in the cell, which exports as literal text, with
     // a backslash before each character Markdown would read, and more on
@@ -5752,6 +5753,22 @@ describe('HTML table cells', () => {
     const md = table(cell);
     expect(await roundTrip(md)).toBe(md);
     expect(await roundTrip(await roundTrip(md))).toBe(md);
+  });
+
+  test.each([
+    ['<!-->', '<!-- c -->'],
+    ['<!--->', '<!-- c -->'],
+    ['<!-- c --!>', '<!-- d -->'],
+  ])('keeps %s and %s in a cell that Word holds in one hidden run', async (first, second) => {
+    // The first went on to the second's -->, with the ZWSP before it, which
+    // made no comment HTML holds, and a pipe table that showed the ZWSP
+    const md = table('      <p>a' + first + second + 'b</p>');
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const joined = xml.replace(/(?<=&gt;)<\/w:t><\/w:r><w:r><w:rPr><w:vanish\/>(?:(?!<\/w:rPr>).)*<\/w:rPr><w:t>(?=\u200B)/, '');
+    expect(joined).not.toBe(xml);
+    zip.file('word/document.xml', joined);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(md);
   });
 
   test('writes a table whose cell has a comment with a blank line in it as no HTML table', async () => {

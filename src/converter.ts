@@ -3174,7 +3174,7 @@ function readHiddenRun(runChildren: XmlNode[], rPrChildren: XmlNode[] | undefine
 
 /**
  * The HTML comments and images export hid in a run's text, each after a
- * ZWSP: a comment up to its -->, and an image export couldn't embed, as its
+ * ZWSP: a comment up to its end, and an image export couldn't embed, as its
  * Markdown, up to a closing ZWSP, which the image keeps once it has it. Word
  * can split one between runs, or join several in one.
  */
@@ -3183,17 +3183,26 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
   const pending = pendingHiddenText.get(target);
   pendingHiddenText.delete(target);
   if (pending && pending.at === target.length) runText = pending.text + runText;
-  /** Where the hidden text after a comment's --> starts, if anything does */
+  /** Where the hidden text after the comment whose <!-- ends at `from`
+   *  starts, if anything does: after the first of its ends a ZWSP follows,
+   *  its --> or --!>, or the > or -> of an empty one, <!--> or <!---> */
   const afterComment = (text: string, from: number) => {
-    const close = text.indexOf('-->', from);
-    return close !== -1 && text[close + 3] === '\u200B' ? close + 3 : -1;
+    const ends = text.slice(from).matchAll(/^-?>|--!?>/g);
+    for (const end of ends) if (text[from + end.index + end[0].length] === '\u200B') return from + end.index + end[0].length;
+    return -1;
   };
   let rest = runText;
   const lastItem = target[target.length - 1];
   const continues = lastItem !== undefined && 'commentIds' in lastItem && !!lastItem.commentIds
     && commentSetsEqual(lastItem.commentIds, activeComments);
+  /** Whether a comment's text has its end: a --> after its <!--, the > or
+   *  -> of an empty one, or a --!> it ends with */
+  const closed = (text: string) => {
+    const from = text.lastIndexOf('<!--') + 4;
+    return text.includes('-->', from) || /^-?>/.test(text.slice(from)) || text.endsWith('--!>');
+  };
   if (continues && lastItem.type === 'html_comment' && !rest.replace(/^\u200B+/, '').trimStart().startsWith('<!--')
-      && !lastItem.text.includes('-->', lastItem.text.lastIndexOf('<!--') + 4)) {
+      && !closed(lastItem.text)) {
     lastItem.text += rest.replace(/^\u200B+/, '');
     const end = afterComment(lastItem.text, lastItem.text.lastIndexOf('<!--') + 4);
     rest = end === -1 ? '' : lastItem.text.slice(end);
@@ -6491,7 +6500,7 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
   const pieces: Array<{ text: string; item: TextItem; html: string; raw?: boolean } | null> = [];
   for (const item of items) {
     // Not one with a blank line, which would end the table's HTML block
-    if (item.type === 'html_comment' && item.commentIds.size === 0 && /^<!--(?:-?>|(?!-?>)(?:(?!-->)[\s\S])*-->)$/.test(item.text)
+    if (item.type === 'html_comment' && item.commentIds.size === 0 && /^<!--(?:-?>|(?!-?>)(?:(?!--!?>)[\s\S])*--!?>)$/.test(item.text)
       && !/(?:\r\n?|\n)[ \t]*(?:\r\n?|\n)/.test(item.text)) {
       pieces.push({ text: '', item: { type: 'text', text: '', commentIds: item.commentIds, formatting: DEFAULT_FORMATTING }, html: item.text, raw: true });
       continue;

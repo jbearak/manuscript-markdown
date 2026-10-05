@@ -78,6 +78,13 @@ describe('HTML table cell paragraphs', () => {
     expect(table.comments).toEqual([comment]);
   });
 
+  test('reads a comment to a --!>, at which the browser ends one', () => {
+    // Which ran to the end, and hid the rest of the table
+    const [table] = extractHtmlTables('<table><tr><td>a<!-- c --!>b</td><td>c</td></tr><!-- d --!><tr><td>e</td></tr></table>');
+    expect(table.rows.map(row => row.cells.map(cell => cell.runs.map(run => run.text).join('')))).toEqual([['a<!-- c --!>b', 'c'], ['e']]);
+    expect(table.comments).toEqual(['<!-- d --!>']);
+  });
+
   test('reads the cells before a comment with no -->, which runs to the end, as one', () => {
     // Which the browser ends the row and table at
     const [table] = extractHtmlTables('<table><tr><td>a</td><!-- <td>b</td></tr></table>');

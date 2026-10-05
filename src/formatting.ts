@@ -1,5 +1,6 @@
 import { keepParagraphEdgeWhitespace } from './html-entities';
 import { extractHtmlTables, type HtmlTableRun } from './html-table-parser';
+import { HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import { separatorAlign, type TableAlign } from './grid-table-preprocess';
 
 export interface TextTransformation {
@@ -690,9 +691,10 @@ function convertHtmlTable(text: string, pad: boolean): string | null {
   // So must a table with a comment between its rows or cells, which a pipe
   // or grid table can't hold, so that it isn't lost, or one in a cell with
   // a line end, which would make a line of the cell, or a |, which would end
-  // it or take a backslash.
+  // it or take a backslash, or one inline Markdown doesn't read whole, as
+  // one with no end, whose text it would show.
   if (tables.length !== 1 || tables[0].comments || tables[0].rows.some(row => row.cells.some(cell =>
-    cell.runs.some(run => run.type === 'html_comment' && /[\r\n|]/.test(run.text))))) return null;
+    cell.runs.some(run => run.type === 'html_comment' && (/[\r\n|]/.test(run.text) || HTML_TAG_RE.exec(run.text)?.[0] !== run.text))))) return null;
   const rows = tables[0].rows;
 
   // Reject colspan/rowspan

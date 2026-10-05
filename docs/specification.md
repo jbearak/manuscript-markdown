@@ -585,7 +585,7 @@ HTML tables support the full range of table features including colspan, rowspan,
 
 A cell takes HTML formatting only. Markdown, CriticMarkup, comments, citations and math in a cell export as literal text. Each `<p>` in a cell exports as a paragraph of the Word cell, and `<br>` as a line break. A cell's `align="left"`, `"center"` or `"right"`, or a `text-align` style, sets its alignment.
 
-A table, row or cell commented out, as `<!-- <table>...</table> -->`, is none, as in the preview, and a comment in a cell is hidden in Word, as one in a paragraph is. Word's table can't hold a comment between its rows or cells, so DOCX export drops one, with a warning, and writes a block whose tables have their rows all commented out as text, as other HTML, with a warning. Expand Table and Compact Table leave a table with such a comment as it is, as they do one with a comment in a cell that holds a line end or a `|`.
+A table, row or cell commented out, as `<!-- <table>...</table> -->`, is none, as in the preview, and a comment in a cell is hidden in Word, as one in a paragraph is. Word's table can't hold a comment between its rows or cells, so DOCX export drops one, with a warning, and writes a block whose tables have their rows all commented out as text, as other HTML, with a warning. Expand Table and Compact Table leave a table with such a comment as it is, as they do one with a comment in a cell that holds a line end or a `|`, or that inline Markdown doesn't read as a comment, as one with no end.
 
 On DOCX import, a column whose cells share an alignment takes it in a pipe or grid table, and an HTML table's cell takes its own. A cell's alignment is its paragraphs', set on them or by their style or the table's.
 

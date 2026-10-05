@@ -72,10 +72,11 @@ function parseColWidthsAttr(raw: string): number[] | 'equal' | 'auto' | undefine
   return nums;
 }
 
-// A comment: to its -->, or an empty one that the browser and markdown-it
-// end sooner, <!--> or <!--->; or else, where none ends it, to the end
-const HTML_COMMENT = '<!--(?:-?>|[\\s\\S]*?-->)';
-const HTML_COMMENT_OR_REST = '<!--(?:-?>|[\\s\\S]*?-->|[\\s\\S]*$)';
+// A comment: to its --> or --!>, at which the browser ends one too, or an
+// empty one that the browser and markdown-it end sooner, <!--> or <!--->;
+// or else, where none ends it, to the end
+const HTML_COMMENT = '<!--(?:-?>|[\\s\\S]*?--!?>)';
+const HTML_COMMENT_OR_REST = '<!--(?:-?>|[\\s\\S]*?--!?>|[\\s\\S]*$)';
 // A tag's attributes, whose quoted values can hold a > or a <!--. A < out
 // of quotes ends them, so that the search for a > from a < with none goes
 // no further than the next <, and each < is looked past once.
@@ -92,7 +93,7 @@ const RAW_TEXT_NAME = '(?:script|style|textarea|title|xmp|iframe|noembed|noframe
 const RAW_TEXT_START = '<(' + RAW_TEXT_NAME + ')(?=[\\s/>])' + HTML_ATTRS + '>';
 
 /** An element whose text is no HTML, which runs to the end where it has no
- *  end tag, as the browser reads it, between a table's, row's or cell's */
+ *  end tag, as the browser reads it, between tables, rows or cells */
 function rawTextElement(group: number): string {
   return RAW_TEXT_START + '[\\s\\S]*?(?:<\\/\\' + group + '\\s*>|$)';
 }
@@ -112,12 +113,12 @@ function htmlContentUnit(group: number): string {
     + '|[^<]|<(?!!--)(?!' + HTML_TAG_BODY + '))';
 }
 
-/** A comment with no -->, or an element whose text is no HTML with no end
+/** A comment with no end, or an element whose text is no HTML with no end
  *  tag, which runs to the end, past the end tag of what holds it, which the
  *  browser ends there, so it goes with what holds it, whose search reads it
  *  whole. `group` is the number of its first group in the search's pattern. */
 function htmlRestInComment(group: number): string {
-  return '((?=<!--(?!-?>|[\\s\\S]*?-->)|' + RAW_TEXT_START + '(?![\\s\\S]*?<\\/\\' + (group + 1) + '\\s*>))[\\s\\S]*)';
+  return '((?=<!--(?!-?>|[\\s\\S]*?--!?>)|' + RAW_TEXT_START + '(?![\\s\\S]*?<\\/\\' + (group + 1) + '\\s*>))[\\s\\S]*)';
 }
 
 export function extractHtmlTables(html: string): HtmlTableMeta[] {
