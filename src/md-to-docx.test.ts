@@ -3770,6 +3770,8 @@ describe('Code block language custom properties', () => {
     const customXml = await zip.file('docProps/custom.xml')?.async('string');
     expect(customXml).toContain('ZOTERO_PREF_2');
     expect(customXml).not.toContain('\ufffd');
+    const { extractZoteroPrefs } = await import('./converter');
+    expect((await extractZoteroPrefs(result.docx))?.styleId).toBe('http://www.zotero.org/styles/' + 'a'.repeat(offset) + '📊'.repeat(150));
   });
 
   it('does not create custom property when no code block languages', async () => {
