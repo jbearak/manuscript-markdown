@@ -9044,9 +9044,13 @@ describe('Links of more than one run', () => {
     expect(await roundTrip(md.slice(0, -1))).toBe(md);
   });
 
-  test('writes a link of many runs with a tag left open near its end in linear time', () => {
-    // The link was taken apart at the tag and read again from each run after
-    const items: ContentItem[] = Array.from({ length: 32000 }, (_, k) => ({ type: 'text', text: k === 31997 ? '<span a="' : 'a',
+  test.each([
+    ['near its end', (k: number) => k === 31997 ? '<span a="' : 'a'],
+    ['in every other run', (k: number) => k % 2 === 0 ? '<span a="' : 'x'],
+  ])('writes a link of many runs with a tag left open %s in linear time', (_name, text) => {
+    // The link was read to its end and taken apart at the tag, and read
+    // again from each run after
+    const items: ContentItem[] = Array.from({ length: 32000 }, (_, k) => ({ type: 'text', text: text(k),
       href: 'https://e.com', link: 1, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, bold: k % 2 === 0 } }));
     const start = performance.now();
     buildMarkdown(items, new Map());

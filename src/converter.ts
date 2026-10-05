@@ -5738,14 +5738,13 @@ function linkGroup(
       if (startsBlockLine(line)) break;
     }
     items.push(next);
+    // A tag a run leaves open, which the runs after could close, as bold
+    // <span a=" before ">, would read as HTML across the formatting's
+    // delimiters between them in one link's text, so the link ends after
+    // it, where its spans of a change, kept apart by the tag's delimiters
+    // (see spanJoin), come between them
+    if (OPEN_TAG_AT_END_RE.test(next.text)) break;
   }
-  // A tag one run leaves open, which the runs after could close, as bold
-  // <span a=" before ">, would read as HTML across the formatting's
-  // delimiters between them in one link's text, so the link ends after it,
-  // where its spans of a change, kept apart by the tag's delimiters (see
-  // spanJoin), come between them
-  const open = items.findIndex((item, k) => k < items.length - 1 && OPEN_TAG_AT_END_RE.test(item.text));
-  if (open !== -1) items.splice(open + 1);
   if (items.length < 2) return undefined;
   // A substitution the group would cut, of deletions, and insertions or
   // not, at its end and an insertion of the same author and time after a
