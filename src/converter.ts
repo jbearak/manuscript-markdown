@@ -7568,9 +7568,12 @@ const CHARACTER_REFERENCE_AT = /&(?:#\d{1,7}|#[xX][\da-fA-F]{1,6}|[A-Za-z][A-Za-
  *  escaped, which no Markdown holds, as markdown-it replaces one. */
 function htmlLineAsText(line: string): string {
   const text = line.replace(/^[ \t]+/, '');
-  const asText = (part: string, lineStart: boolean) =>
-    escapeMarkdownChars(part.replace(/\[(?=-?@)/g, '\0'), lineStart).replace(/\0/g, '\\[');
-  let out = '';
+  // Each of those as a character the line doesn't hold while the rest is
+  // escaped as a whole, so a $ or * pairs across them as Markdown reads it
+  let mark = 0xE000;
+  while (text.includes(String.fromCharCode(mark))) mark++;
+  const raws: string[] = [];
+  let plain = '';
   let from = 0;
   for (let i = 0; i < text.length; i++) {
     const at = text[i] === '<' ? HTML_TAG_AT : text[i] === '&' ? CHARACTER_REFERENCE_AT : undefined;
@@ -7578,12 +7581,14 @@ function htmlLineAsText(line: string): string {
     at.lastIndex = i;
     const raw = at.exec(text)?.[0];
     if (!raw) continue;
-    if (i > from) out += asText(text.slice(from, i), from === 0);
-    out += raw;
+    plain += text.slice(from, i) + String.fromCharCode(mark);
+    raws.push(raw);
     from = i + raw.length;
     i = from - 1;
   }
-  return out + (from < text.length ? asText(text.slice(from), from === 0) : '');
+  plain += text.slice(from);
+  const escaped = escapeMarkdownChars(plain.replace(/\[(?=-?@)/g, '\0'), true).replace(/\0/g, '\\[');
+  return escaped.split(String.fromCharCode(mark)).map((part, k) => part + (raws[k] ?? '')).join('');
 }
 
 /** The HTML around a table as blocks of their own, as it goes around one in

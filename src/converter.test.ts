@@ -6456,6 +6456,8 @@ describe('HTML around a table in its block', () => {
     // Which read as a citation, which export writes as a field where the
     // bibliography holds its key
     ['a citation as text', '', '\nSource [@smith2020; -@doe, p. 2] *x*\n', '', '\n\nSource \\[@smith2020; -@doe, p. 2] \\*x\\*\n'],
+    // Which pair across one, which read as math
+    ['dollar signs around a character reference', '', '\nSource $x &amp; y$ and *a <b>b</b> c*\n', '', '\n\nSource \\$x &amp; y$ and \\*a <b>b</b> c\\*\n'],
   ])('keeps %s around a table that leaves HTML, as it read', async (_name, beforeHtml, afterHtml, beforeMd, afterMd) => {
     // A comment that reads as no directive went, as one that does, and text
     // read as Markdown, as # Source as a heading
