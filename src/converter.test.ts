@@ -6551,6 +6551,10 @@ describe('Blocks a quote can\'t hold', () => {
     ['a heading', '> # h\n>\n> b\n', '> h\n>\n> b\n', 'Heading inside blockquote exported as a quote paragraph'],
     ['a code block', '> a\n>\n> ```\n> c\n> ```\n>\n> b\n', '> a\n>\n> c\n>\n> b\n', 'Code block inside blockquote exported as a quote paragraph'],
     ['a code block in a quote in a list item', '- a\n\n  > ```\n  > c\n  > ```\n', '- a\n\n  > c\n', 'Code block inside blockquote exported as a quote paragraph'],
+    // Its line ends were in the paragraph's text, which Word shows as spaces
+    ['a code block of lines', '> a\n>\n> ```\n> c\n>   d\n>\n> e\n> ```\n', '> a\n>\n> c\\\n> &#32;&#32;d\\\n> \\\n> e\n', 'Code block inside blockquote exported as a quote paragraph'],
+    // Which left an empty paragraph
+    ['an empty code block', '> a\n>\n> ```\n>\n> ```\n>\n> b\n', '> a\n>\n> b\n', 'Empty code block inside blockquote dropped during conversion'],
     ['a table', '> a\n>\n> | t |\n> |---|\n> | u |\n>\n> b\n', '> a\n>\n> b\n', 'Table inside blockquote dropped during conversion'],
     ['an HTML table', '> a\n>\n> <table><tr><td>t</td></tr></table>\n>\n> b\n', '> a\n>\n> b\n', 'Table inside blockquote dropped during conversion'],
     ['a horizontal rule', '> a\n>\n> ---\n>\n> b\n', '> a\n>\n> b\n', 'Horizontal rule inside blockquote dropped during conversion'],
