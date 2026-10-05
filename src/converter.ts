@@ -3177,8 +3177,9 @@ function readHiddenRun(runChildren: XmlNode[], rPrChildren: XmlNode[] | undefine
  *  Markdown reads it on, and one with no end, which ran to the end of the
  *  cell, with one */
 function markdownComment(text: string): string {
-  if (text.endsWith('-->')) return text;
-  return text.endsWith('--!>') && text.length >= 8 ? text.slice(0, -4) + '-->' : text.trimEnd() + ' -->';
+  const from = text.indexOf('<!--') + 4;
+  if (text.includes('-->', from) || /^-?>/.test(text.slice(from))) return text;
+  return text.endsWith('--!>') && text.length >= from + 4 ? text.slice(0, -4) + '-->' : text.trimEnd() + ' -->';
 }
 
 /**
@@ -3208,17 +3209,15 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
   const continues = lastItem !== undefined && 'commentIds' in lastItem && !!lastItem.commentIds
     && commentSetsEqual(lastItem.commentIds, activeComments);
   /** Whether a comment's text has its end: a --> after its <!--, or the >
-   *  or -> of an empty one; or a --!> at its end, where what follows starts
-   *  a payload, as the next comment in an HTML table's cell does, though
-   *  inline Markdown reads one on past a --!> */
-  const closed = (text: string, after: string) => {
+   *  or -> of an empty one. Not a --!>, which ends a comment in an HTML
+   *  table's cell, as the browser reads it, but not one inline Markdown
+   *  reads to its --> (see renderHtmlCellParagraph) */
+  const closed = (text: string) => {
     const from = text.lastIndexOf('<!--') + 4;
-    HIDDEN_PAYLOAD_AT.lastIndex = 0;
-    return text.includes('-->', from) || /^-?>/.test(text.slice(from))
-      || text.length >= from + 4 && text.endsWith('--!>') && HIDDEN_PAYLOAD_AT.test(after);
+    return text.includes('-->', from) || /^-?>/.test(text.slice(from));
   };
   if (continues && lastItem.type === 'html_comment' && !rest.replace(/^\u200B+/, '').trimStart().startsWith('<!--')
-      && !closed(lastItem.text, rest)) {
+      && !closed(lastItem.text)) {
     // With a ZWSP it starts with, which is the comment's own, before which
     // Word split its run
     lastItem.text += rest;
@@ -3252,11 +3251,6 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
     }
   }
 }
-
-// A hidden payload's start, at lastIndex: its ZWSP, and a comment's or an
-// image's start, or the start of one Word split off before it showed which,
-// or nothing yet, which none of a comment's own text is
-const HIDDEN_PAYLOAD_AT = /\u200B+(?:<!--|!\[|<img\b|(?:!|<|<!|<!-|<i|<im)?$)/iy;
 
 /** The start of hidden text whose run Word split before it showed what it
  *  is, as a ZWSP and !, which the next hidden run in the same place goes on */

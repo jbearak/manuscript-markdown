@@ -9007,6 +9007,7 @@ describe('round-trip regression: images export cannot embed', () => {
     ['an HTML comment after a --!> in it', 'A <!-- a --!> b --> B', 12],
     // Which reads as a payload's start, but in a comment with no end yet
     ['an HTML comment before a ZWSP and an image\'s Markdown in it', 'A <!-- a \u200B![y](n.png)\u200B tail --> B', 8],
+    ['an HTML comment after a --!> in it before a ZWSP and an image\'s Markdown', 'A <!-- a --!>\u200B![y](n.png)\u200B tail --> B', 12],
   ])('joins %s when Word splits its run', async (_name, md, at) => {
     // Without the start of its opener, the run before it was dropped
     const { docx } = await convertMdToDocx(md);
@@ -9032,19 +9033,16 @@ describe('round-trip regression: images export cannot embed', () => {
     expect((await roundTrip(md)).markdown).toBe(md + '\n');
   });
 
+  test('keeps a comment block with trailing whitespace, with no other end', async () => {
+    // An end went on the comment, after its whitespace, which showed it
+    const md = '<!-- c -->  \n\nText.';
+    expect((await roundTrip(md)).markdown).toBe(md + '\n');
+  });
+
   test('keeps a ZWSP and an image\'s Markdown in a pipe cell\'s comment after a --!> in it', async () => {
     // A --!> ended it, as in an HTML table's cell, and the rest went
     const md = '| A |\n| --- |\n| B <!-- a --!>\u200B![y](n.png)\u200B tail --> C |';
     expect((await roundTrip(md)).markdown).toBe(md + '\n');
-  });
-
-  test('reads an image after an HTML comment with no --> as its own', async () => {
-    // It went on the comment, which hadn't closed
-    const rPr = '<w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr>';
-    const docx = await buildSyntheticDocx(wrapDocumentXml('<w:p><w:r><w:t xml:space="preserve">A </w:t></w:r>'
-      + '<w:r>' + rPr + '<w:t>\u200B&lt;!-- c --!&gt;</w:t></w:r><w:r>' + rPr + '<w:t>\u200B![y](n.png)\u200B</w:t></w:r>'
-      + '<w:r><w:t xml:space="preserve"> B</w:t></w:r></w:p>'));
-    expect((await convertDocx(docx)).markdown).toContain('A <!-- c -->![y](n.png) B');
   });
 
   test('keeps a ZWSP in an image\'s Markdown as a character reference', async () => {
