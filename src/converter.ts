@@ -6512,6 +6512,17 @@ function stripAlertLeadPrefix(text: string, alertType: GfmAlertType): string {
 
 
 /** Render a table as a grid table if possible; returns null if not feasible. */
+/** A grid table cell's line before a line break, with the spaces and tabs
+ *  at its end, which export trims as the line's padding, as references,
+ *  and a backslash before them, which would escape the &, escaped */
+function gridLineBeforeBreak(line: string): string {
+  const whitespace = /[ \t]+$/.exec(line);
+  if (!whitespace) return line;
+  const before = line.slice(0, whitespace.index);
+  const backslashes = /\\*$/.exec(before)![0].length;
+  return before + (backslashes % 2 === 1 ? '\\' : '') + whitespace[0].replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;');
+}
+
 function tryRenderGridTable(
   table: { rows: TableRow[] },
   comments: Map<string, Comment>,
@@ -6565,7 +6576,7 @@ function tryRenderGridTable(
         // grid table cells treat bare newlines as hard breaks, so the
         // backslash is redundant.
         const paraLines = keepParagraphWhitespace(r.text, true, true).split('\n');
-        cellLines.push(...paraLines.map((l, k) => k < paraLines.length - 1 ? l.replace(/\\$/, '') : l));
+        cellLines.push(...paraLines.map((l, k) => k < paraLines.length - 1 ? gridLineBeforeBreak(l.replace(/\\$/, '')) : l));
         cellDeferred.push(...r.deferredComments);
       }
       // An empty paragraph at the cell's end is a line break there, <br>, as

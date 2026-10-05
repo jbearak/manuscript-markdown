@@ -1033,6 +1033,14 @@ describe('Grid table round-trip', () => {
     expect(markdown).toBe(md);
   });
 
+  test('keeps spaces and tabs before a line break in a grid table cell', async () => {
+    // Export trims them from the line as its padding, and the backslash
+    // before them then made the line's end a line break
+    const md = '+---------------+-----+\n| x             | y   |\n+===============+=====+\n| a&#32;        | b   |\n| c             |     |\n+---------------+-----+\n| \\\\&#32;&#9;   | d   |\n| e             |     |\n+---------------+-----+';
+    const markdown = (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+    expect(markdown).toBe(md);
+  });
+
   test('keeps a backslash at the end of a grid table cell with fewer lines than its row', async () => {
     // Import dropped it as a line break's, and export read the blank line
     // after it as one, so the next round trip lost it too
