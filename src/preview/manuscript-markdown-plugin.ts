@@ -2002,7 +2002,9 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
 
   // A citation is text, as to export, once linkify and the rules that read
   // text tokens, which export runs on none in one, are done: the host's
-  // heading IDs and an image's alt text are made of text tokens alone
+  // heading IDs and an image's alt text are made of text tokens alone.
+  // Whatever the source holds, as a grid table's cells, which preprocessing
+  // writes as a placeholder, have tokens of their own.
   md.core.ruler.push('manuscript_citation_text', (state: StateCore) => {
     const citationsAsText = (tokens: Token[] | null): void => {
       for (const token of tokens ?? []) {
@@ -2010,7 +2012,7 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
         citationsAsText(token.children);
       }
     };
-    if (state.src.includes('@')) citationsAsText(state.tokens);
+    citationsAsText(state.tokens);
   });
 
   // Register renderers for each Manuscript Markdown token type
