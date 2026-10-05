@@ -2719,6 +2719,7 @@ function codeBlockLines(run: MdRun): MdRun[] {
 }
 
 const HTML_AROUND_TABLE_WARNING = 'HTML around a table in its HTML block not shown in Word (kept in the Markdown on round-trip).';
+const SHARED_HTML_AROUND_TABLES_WARNING = 'HTML around tables in one <pre> or similar HTML block dropped during conversion (not supported). Give each table a block of its own for round-trip fidelity.';
 
 /** The text of each cell of each row of a table generateTable wrote, as
  *  import reads it (see tableCellText in converter.ts): its runs' text,
@@ -3051,6 +3052,15 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
           // is HTML around a table that shows, as the rest of the block is
           const allTables = extractHtmlTables(htmlContent);
           const htmlTables = allTables.filter(meta => meta.rows.length > 0);
+          // A <pre> or the like before the first table, which only its end
+          // ends, that goes on past it holds the tables after too, which
+          // import can't keep it around where Word puts text between them or
+          // one leaves HTML, as the start would go on over that: the HTML
+          // around them goes
+          const opener = /^[ \t]*<(?:(script|pre|style|textarea)(?=[\s>]|$)|(!--)|(\?)|(!\[CDATA\[)|![A-Za-z])/i.exec(htmlContent);
+          const openerEnd = !opener ? undefined : opener[1] ? new RegExp('</' + opener[1] + '>', 'i') : opener[2] ? /-->/ : opener[3] ? /\?>/ : opener[4] ? /\]\]>/ : />/;
+          const sharedOpener = htmlTables.length > 1 && !!openerEnd && !openerEnd.test(htmlContent.slice(0, htmlTables[0].start));
+          if (sharedOpener) warnings?.push(SHARED_HTML_AROUND_TABLES_WARNING);
           if (htmlTables.length > 0) {
             for (const [k, meta] of htmlTables.entries()) {
               // A comment between rows or cells hides them, as the preview
@@ -3083,7 +3093,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
                 // HTML on the table's lines on them, as it may end a block.
                 const before = k === 0 ? htmlContent.slice(0, meta.start).replace(/(^|\n)[ \t]*$/, '$1') : '';
                 const after = htmlContent.slice(meta.end, htmlTables[k + 1]?.start).replace(/\s+$/, '');
-                if (/\S/.test(before + after)) tableToken.tableHtmlAround = [/\S/.test(before) ? before : '', /\S/.test(after) ? after : ''];
+                if (/\S/.test(before + after) && !sharedOpener) tableToken.tableHtmlAround = [/\S/.test(before) ? before : '', /\S/.test(after) ? after : ''];
                 result.push(tableToken);
               }
             }

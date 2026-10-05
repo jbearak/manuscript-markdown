@@ -6621,6 +6621,37 @@ describe('HTML around a table in its block', () => {
     expect(again.match(/<w:tbl>/g)).toHaveLength(1);
   });
 
+  test('drops the HTML around tables a <pre> holds together in one block', async () => {
+    // The <pre> before the first went on over the second where it left
+    // HTML, which export then read as HTML, and its tracked change went
+    const md = '<pre><table><tr><td>A</td></tr></table><table><tr><td>XX</td><td>b</td></tr></table></pre>\n';
+    const { docx, warnings } = await convertMdToDocx(md);
+    expect(warnings).toContain('HTML around tables in one <pre> or similar HTML block dropped during conversion (not supported). Give each table a block of its own for round-trip fidelity.');
+    const zip = await JSZip.loadAsync(docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const tracked = xml.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>');
+    expect(tracked).not.toBe(xml);
+    zip.file('word/document.xml', tracked);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe(table('A') + '\n\n+----------+-----+\n| {++XX++} | b   |\n+----------+-----+\n');
+    const again = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    expect(again.match(/<w:tbl>/g)).toHaveLength(2);
+    expect(again).toContain('<w:ins ');
+  });
+
+  test('drops the HTML around a table that leaves HTML where a line of it alone would read as a Sources heading', async () => {
+    // Word's paragraph of it read as the heading of a bibliography Word
+    // holds as text on the next import, which dropped it and all after
+    const zip = await JSZip.loadAsync((await convertMdToDocx('<table><tr><td>XX</td><td>b</td></tr></table>\nSources\n\nAfter.\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const tracked = xml.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>');
+    expect(tracked).not.toBe(xml);
+    zip.file('word/document.xml', tracked);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('+----------+-----+\n| {++XX++} | b   |\n+----------+-----+\n\nAfter.\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
   test.each([
     ['a <pre> around it', '<pre>\n', '\n</pre>\n'],
     ['a <pre> after it whose end is in a comment', '', '\nSource <pre><!-- </pre> -->\n    run()\n</pre>\n'],

@@ -7765,7 +7765,7 @@ function htmlBlockEnd(lines: string[], k: number, inParagraph: boolean): number 
  *  order, in which a line of text is a paragraph's, after which a line of
  *  one tag starts no block. Null where it reads no more as it was, as a
  *  block that ends at a marker without one, which would go on over the
- *  table (see detachedHtmlLines). */
+ *  table (see detachedHtmlLines), or a paragraph of a Sources line. */
 function detachedTableHtml(html: string): string | undefined | null {
   const lines = withMarkdownCommentEnds(html).split('\n');
   const { inComment, preformatted, unreadable } = detachedHtmlLines(lines);
@@ -7773,7 +7773,12 @@ function detachedTableHtml(html: string): string | undefined | null {
   const out: string[] = [];
   // The lines of text since the last that isn't, which escape together
   let texts: string[] = [];
+  // A paragraph of a line that would read as the Sources heading of a
+  // bibliography Word holds as text, which import drops with all after it,
+  // as Word's paragraph does, whatever the Markdown wrote it as
+  let sources = false;
   const endTexts = () => {
+    if (texts.length === 1 && SOURCES_HEADING_RE.test(texts[0].trim())) sources = true;
     if (texts.length > 0) out.push(...htmlLinesAsText(texts));
     texts = [];
   };
@@ -7828,6 +7833,7 @@ function detachedTableHtml(html: string): string | undefined | null {
     k = end - 1;
   }
   endTexts();
+  if (sources) return null;
   return out.join('\n').trim() || undefined;
 }
 
