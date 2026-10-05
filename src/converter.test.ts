@@ -9282,6 +9282,28 @@ describe('round-trip regression: image path preservation', () => {
     }
   });
 
+  test.each(['png', 'JPG'])('names an image Word names %s, an extension alone, as its media file', async name => {
+    // It took the name, from which export read no format, and left it out
+    const tmpDir = join(require('os').tmpdir(), 'mms-test-img-ext-' + Date.now());
+    const { mkdirSync, writeFileSync, rmSync } = require('fs');
+    mkdirSync(tmpDir, { recursive: true });
+    writeFileSync(join(tmpDir, 'x.png'), TINY_PNG);
+    try {
+      const JSZip = (await import('jszip')).default;
+      const zip = await JSZip.loadAsync((await convertMdToDocx('![a](x.png){width=100 height=100}', { sourceDir: tmpDir })).docx);
+      const xml = await zip.file('word/document.xml')!.async('string');
+      const named = xml.replace(/ name="x\.png"/, ' name="' + name + '"');
+      expect(named).not.toBe(xml);
+      zip.file('word/document.xml', named);
+      const result = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+      const source = /!\[a\]\(([^)]+)\)/.exec(result.markdown)![1];
+      expect(source).toMatch(/^[^.]+\.png$/);
+      expect([...result.images!.keys()]).toEqual([source]);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   test('writes no file for an image in a note nothing references', async () => {
     // A stale note's image took a file, and the name of the document's
     const tmpDir = join(require('os').tmpdir(), 'mms-test-img-stale-' + Date.now());

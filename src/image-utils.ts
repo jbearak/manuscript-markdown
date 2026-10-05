@@ -153,11 +153,15 @@ export function computeMissingDimension(
   return intrinsic;
 }
 
+/** The name Word gives an image (`docPrName`) where it ends with a format's
+ *  extension after a name, as export reads the file's format from it, or
+ *  else its media file's name: a name of the extension alone, as png, has
+ *  none */
 export function resolveImageFilename(docPrName: string | undefined, mediaFilename: string): string {
   if (!docPrName) return mediaFilename;
   
-  const ext = docPrName.split('.').pop()?.toLowerCase();
-  if (ext && isSupportedImageFormat(ext)) {
+  const dot = docPrName.lastIndexOf('.');
+  if (dot > 0 && isSupportedImageFormat(docPrName.slice(dot + 1).toLowerCase())) {
     return docPrName;
   }
   
