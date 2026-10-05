@@ -35,7 +35,7 @@ const IMAGE_DIMENSION_ATTR_RE = '(\\d+(?:\\.\\d+)?|\\.\\d+)\\s*(px|in|cm|mm|pt|p
 // - Numeric entities: use String.fromCodePoint() not String.fromCharCode() for
 //   supplementary-plane chars
 // - CriticMarkup recursive formatting: parse inner payloads with markdown-it
-//   (Critic/comment/citation/math/footnote rules disabled); carry structured
+//   (Critic/comment/citation/math/footnote rules included); carry structured
 //   inner runs on MdRun (innerRuns / oldRuns / newRuns)
 //
 // --- Word dirty-flag prevention ---
@@ -890,13 +890,15 @@ function createMarkdownIt(): MarkdownIt {
 function createCriticInnerMarkdownIt(): MarkdownIt {
   const md = createMarkdownIt();
   md.inline.ruler.before('newline', 'critic_paragraph_break', criticParagraphBreakRule);
-  // Inner parsing should recurse into regular inline formatting, but not into
-  // other top-level custom syntaxes that carry separate document semantics.
-  // Citations stay enabled: inserted/new-side citations become Zotero fields,
+  // Inner parsing recurses into regular inline formatting and the custom
+  // syntaxes. Citations: inserted/new-side citations become Zotero fields,
   // deleted/old-side ones render as literal deleted text (see
-  // generateDeletedCriticContent). Footnote references stay enabled too, and
-  // become tracked note references (see noteReferenceXml).
-  md.inline.ruler.disable(['comment_range']);
+  // generateDeletedCriticContent). Footnote references become tracked note
+  // references (see noteReferenceXml). Comment range markers and bodies
+  // ({#id}, {/id}, {#id>>...<<}) count in a payload too, as in the preview.
+  // They were disabled here, so they became literal text and their comment
+  // was lost. In deleted text they go between w:dels (see
+  // deletionWithComments).
   return md;
 }
 
@@ -924,6 +926,11 @@ function toTextRunFromInner(run: MdRun, overrides?: Partial<MdRun>): MdRun {
     href: run.href,
     ...overrides,
   };
+}
+
+/** An {#id} or {/id} comment range marker, or an {#id>>...<<} comment body */
+function isCommentMarkerRun(run: MdRun): boolean {
+  return run.type === 'comment_range_start' || run.type === 'comment_range_end' || run.type === 'comment_body_with_id';
 }
 
 /** Preserve break metadata and flatten nested highlights into formatted Word runs. */
@@ -970,6 +977,13 @@ function normalizeCriticInnerRuns(runs: MdRun[]): MdRun[] {
     // Nested critic markup (e.g. {--...--} inside {==...==}) — pass through
     // so generateRuns can emit proper <w:ins>/<w:del> wrappers.
     if (run.type === 'critic_add' || run.type === 'critic_del' || run.type === 'critic_sub' || run.type === 'critic_comment') {
+      normalized.push(run);
+      continue;
+    }
+
+    // Comment range markers and bodies have no text, so the fallback below
+    // dropped them
+    if (isCommentMarkerRun(run)) {
       normalized.push(run);
       continue;
     }
@@ -5788,7 +5802,7 @@ function formatCriticInnerRuns(runs: MdRun[] | undefined, outer: MdRun, forced: 
         : run);
       continue;
     }
-    if (run.type === 'math' || run.type === 'image') {
+    if (run.type === 'math' || run.type === 'image' || isCommentMarkerRun(run)) {
       formatted.push(run);
       continue;
     }
@@ -5822,6 +5836,52 @@ function generateInlineCriticContent(
   }
   const fallbackRun = mergeRunFormatting({ type: 'text', text: fallbackText }, outer, forced);
   return generateRun(fallbackText, generateRPr(fallbackRun, state.tableRunRPrExtra || undefined));
+}
+
+/** Whether runs hold a comment, a comment range marker or a comment body, at any depth */
+function hasCommentRuns(runs: MdRun[] | undefined): boolean {
+  return !!runs?.some(run => run.type === 'critic_comment' || isCommentMarkerRun(run)
+    || hasCommentRuns(run.innerRuns) || hasCommentRuns(run.oldRuns) || hasCommentRuns(run.newRuns));
+}
+
+/**
+ * Runs for generateRuns that delete `runs`, the payload of `deletion`, with
+ * `outer`'s formatting, and keep their comments, in the form import writes
+ * for a comment on deleted text, {--a --}{=={--b--}==}{>>c<<}: the text
+ * between comments deleted as `deletion` deletes it, a {==...==} anchor
+ * around its own deleted text, and a comment, range marker or body between
+ * the deletions, so its reference isn't deleted text.
+ * generateDeletedCriticContent skips comments, so a comment in a deletion or
+ * a substitution's old text was lost.
+ */
+function deletionWithComments(runs: MdRun[] | undefined, outer: MdRun, deletion: MdRun): MdRun[] {
+  const pieces: MdRun[] = [];
+  let deleted: MdRun[] = [];
+  const flush = () => {
+    if (deleted.length === 0) return;
+    pieces.push({ ...deletion, type: 'critic_del', text: deleted.map(run => run.text).join(''), innerRuns: deleted, oldRuns: undefined, newRuns: undefined, newText: undefined });
+    deleted = [];
+  };
+  const formatted = formatCriticInnerRuns(runs, outer) ?? [];
+  for (let i = 0; i < formatted.length; i++) {
+    const run = formatted[i];
+    if (run.type === 'critic_comment' || isCommentMarkerRun(run)) {
+      flush();
+      pieces.push(run);
+    } else if (run.type === 'critic_highlight' && (formatted[i + 1]?.type === 'critic_comment' || hasCommentRuns(run.innerRuns))) {
+      flush();
+      pieces.push({ ...run, innerRuns: deletionWithComments(run.innerRuns ?? [toTextRunFromInner(run)], run, deletion) });
+    } else if (hasCommentRuns(run.innerRuns) || hasCommentRuns(run.oldRuns) || hasCommentRuns(run.newRuns)) {
+      // A revision in a deletion is deleted with it, both sides of a substitution
+      flush();
+      pieces.push(...deletionWithComments(run.innerRuns, run, deletion),
+        ...deletionWithComments(run.oldRuns, run, deletion), ...deletionWithComments(run.newRuns, run, deletion));
+    } else {
+      deleted.push(run);
+    }
+  }
+  flush();
+  return pieces;
 }
 
 function generateDeletedCriticContent(
@@ -6013,12 +6073,18 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
       const contentXml = insertedContent(state, () => generateInlineCriticContent(run.innerRuns, run.text, run, state, options, bibEntries, citeprocEngine));
       xml += '<w:ins w:id="' + (state.commentId++) + '" w:author="' + escapeXml(author) + '"' + dateAttr + '>' + contentXml + '</w:ins>';
+    } else if (run.type === 'critic_del' && hasCommentRuns(run.innerRuns)) {
+      xml += generateRuns(deletionWithComments(run.innerRuns, run, run), state, options, bibEntries, citeprocEngine);
     } else if (run.type === 'critic_del') {
       const author = run.author || options?.authorName || 'Unknown';
       const date = normalizeToUtcIso(run.date || '', state.timezone);
       const dateAttr = date ? ' w:date="' + escapeXml(date) + '"' : '';
       const deletedXml = generateDeletedCriticContent(run.innerRuns, run.text, run, {}, state.tableRunRPrExtra || undefined, state.warnings, state, options);
       xml += deletionXml(deletedXml, author, dateAttr, state);
+    } else if (run.type === 'critic_sub' && hasCommentRuns(run.oldRuns)) {
+      const deletion: MdRun = { ...run, type: 'critic_del', innerRuns: run.oldRuns, oldRuns: undefined, newRuns: undefined, newText: undefined };
+      const addition: MdRun = { ...run, type: 'critic_add', text: run.newText || '', innerRuns: run.newRuns, oldRuns: undefined, newRuns: undefined, newText: undefined };
+      xml += generateRuns([deletion, addition], state, options, bibEntries, citeprocEngine);
     } else if (run.type === 'critic_sub') {
       const author = run.author || options?.authorName || 'Unknown';
       const date = normalizeToUtcIso(run.date || '', state.timezone);
@@ -7263,6 +7329,8 @@ function prescanCommentIds(tokens: MdToken[], state: DocxGenState): void {
         }
       }
     }
+    // Markers and bodies can be in a revision's or a highlight's text too
+    for (const inner of [...run.innerRuns ?? [], ...run.oldRuns ?? [], ...run.newRuns ?? []]) prescanRun(inner);
   };
   for (const token of tokens) {
     for (const run of token.runs) {

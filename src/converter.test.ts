@@ -7456,6 +7456,24 @@ describe('Track changes (CriticMarkup)', () => {
       expect(result.markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(md + '\n');
     });
 
+    test.each([
+      ['{--One {==a==}{>>c<<} end--}', '{--One --}{=={--a--}==}{>>c<<}{-- end--}'],
+      ['{--a {>>c<<} b--}', '{--a --}{>>c<<}{-- b--}'],
+      ['{--a {#1}b{/1} c--}\n{#1>>c<<}', '{--a --}{=={--b--}==}{>>c<<}{-- c--}'],
+      ['{#1>>c<<}{>>r<<}\n\n{--a {#1}b{/1} c--}', '{--a --}{=={--b--}==}{>>c<<}{>>r<<}{-- c--}'],
+      ['{~~a {==b==}{>>c<<} d~>x~~}', '{--a --}{=={--b--}==}{>>c<<}{-- d--}{++x++}'],
+      ['{--a {++b {>>c<<}++} d--}', '{--a b --}{>>c<<}{-- d--}'],
+      ['{++a {#1}b{/1} c++}\n{#1>>c<<}', '{++a ++}{=={++b++}==}{>>c<<}{++ c++}'],
+    ])('keeps the comment in %j', async (md, expected) => {
+      // Export skipped a comment in deleted text, and read {#id} and {/id} in
+      // a revision's text as literal text, so the comment was lost
+      const roundTrip = async (source: string) =>
+        (await convertDocx((await convertMdToDocx(source)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
+      const md2 = await roundTrip(md);
+      expect(md2).toBe(expected + '\n');
+      expect(await roundTrip(md2)).toBe(md2);
+    });
+
     test('revision in footnote body', async () => {
       const docXml = wrapDocumentXml(
         '<w:p><w:r><w:t>Text</w:t></w:r>'
