@@ -5048,15 +5048,23 @@ describe('Line breaks a backslash can\'t hold', () => {
     expect(await exportedText('<br>\n<br/>\n\nX')).toBe('⏎⏎ | X');
   });
 
-  test('drops one that ends a heading before its comments\' bodies', async () => {
-    // As an older export wrote between comment references, which a <br>
-    // would keep for good
-    const md = '# {#1}a {#2}b{/1} c{/2}\n{#1>>@A | x<<}\n{#2>>@A | y<<}\n';
+  test.each([
+    ['a paragraph', '{#1}a {#2}b{/1} c{/2}\n{#1>>@A | x<<}\n{#2>>@A | y<<}\n', 'word/document.xml'],
+    ['a heading', '# {#1}a {#2}b{/1} c{/2}\n{#1>>@A | x<<}\n{#2>>@A | y<<}\n', 'word/document.xml'],
+    ['a quote\'s paragraph', '> {#1}a {#2}b{/1} c{/2}\n> {#1>>@A | x<<}\n> {#2>>@A | y<<}\n', 'word/document.xml'],
+    ['a note\'s paragraph', 'T[^1]\n\n[^1]: {#1}a {#2}b{/1} c{/2}\n    {#1>>@A | x<<}\n    {#2>>@A | y<<}\n', 'word/footnotes.xml'],
+    ['a note\'s paragraph before another', 'T[^1]\n\n[^1]: {#1}a {#2}b{/1} c{/2}\n\n    d\n    {#1>>@A | x<<}\n    {#2>>@A | y<<}\n', 'word/footnotes.xml'],
+  ])('keeps one that ends %s with comments\' bodies after it', async (_name, md, part) => {
+    // The bodies' line end took it, as where an older export wrote one
+    // there, but so did one in Word, which is <br> where they don't go after
     const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
-    const xml = await zip.file('word/document.xml')!.async('string');
-    const end = xml.indexOf('</w:p>');
-    zip.file('word/document.xml', xml.slice(0, end) + '<w:r><w:br/></w:r>' + xml.slice(end));
-    expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
+    const xml = await zip.file(part)!.async('string');
+    const end = xml.indexOf('</w:p>', xml.indexOf('>a <'));
+    zip.file(part, xml.slice(0, end) + '<w:r><w:br/></w:r>' + xml.slice(end));
+    const expected = md.replace('c{/2}', 'c{/2}<br>');
+    const imported = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(imported).toBe(expected);
+    expect((await convertDocx((await convertMdToDocx(imported)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(expected);
   });
 
   test('keeps one after a \\ in a comment on a heading a \\ and a line end', async () => {
@@ -5088,17 +5096,6 @@ describe('Line breaks a backslash can\'t hold', () => {
     expect(exported).not.toContain('&lt;br');
     expect(exported).toContain('<w:br/>');
     expect(exported).toContain('<w:vanish/>');
-  });
-
-  test('drops one that ends a note\'s paragraph before its comments\' bodies', async () => {
-    // As in the document, where an older export wrote it between comment
-    // references, which a <br> would keep for good
-    const md = 'T[^1]\n\n[^1]: {#1}a {#2}b{/1} c{/2}\n    {#1>>@A | x<<}\n    {#2>>@A | y<<}\n';
-    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
-    const xml = await zip.file('word/footnotes.xml')!.async('string');
-    const end = xml.lastIndexOf('</w:p>');
-    zip.file('word/footnotes.xml', xml.slice(0, end) + '<w:r><w:br/></w:r>' + xml.slice(end));
-    expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
   });
 
   test('reads a list item that is only a <br> as a line break', async () => {
@@ -6985,6 +6982,9 @@ describe('Display math in a paragraph\'s text', () => {
     ['after an alert\'s marker on its line', '> [!NOTE] ' + math('> ') + '\n'],
     // Whose bodies go after the text, before it
     ['after overlapping comments in a quote', '> Seen {#1}a {#2}b{/1} c{/2}\n> {#1>>one<<}\n> {#2>>two<<}\n> ' + math('> ') + '\n'],
+    // The line break went with the line end before the bodies
+    ['after a line break and overlapping comments', 'Seen {#1}a {#2}b{/1} c{/2}\\\n{#1>>one<<}\n{#2>>two<<}\n' + math('') + '\n'],
+    ['after two line breaks and overlapping comments', 'Seen {#1}a {#2}b{/1} c{/2}\\\n\\\n{#1>>one<<}\n{#2>>two<<}\n' + math('') + '\n'],
     ['in a footnote', 'P[^1]\n\n[^1]:\n\n    Note\n    ' + math('    ') + '\n'],
     ['in a footnote\'s later paragraph', 'P[^1]\n\n[^1]: a\n\n    b\n    ' + math('    ') + '\n'],
     // Its line went after the break's line end, which left a blank line

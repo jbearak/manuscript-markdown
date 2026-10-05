@@ -9299,20 +9299,18 @@ export function buildMarkdown(
     // A line break as \ before a line end holds in a paragraph's text but
     // not at its end, where Markdown drops the line end and keeps the \ as
     // text, nor in a heading, which the line end ends, so there it's <br>,
-    // which export reads as one. One before comment bodies goes, as below.
-    // Spaces and tabs after the last, which keepParagraphWhitespace writes
-    // as references after a \ and a line end, are references after a <br>
-    // too, where they'd end the heading, which Markdown drops. A comment's
+    // which export reads as one, before comment bodies too. Spaces and tabs
+    // after the last, which keepParagraphWhitespace writes as references
+    // after a \ and a line end, are references after a <br> too, where
+    // they'd end the heading, which Markdown drops. A comment's
     // body, which takes a <br> as text, keeps its \ and line end, which
     // export reads in it in a heading too.
     if (paragraphHeading) {
-      const bodiesBreak = rendered.deferredComments.length > 0 ? /(\\?\n)+$/.exec(textOut)?.[0] ?? '' : '';
-      const heading = textOut.slice(0, textOut.length - bodiesBreak.length);
-      const breaks = new Set(lineStartsAfterBreaks(heading));
-      textOut = heading.replace(HARD_BREAK, (match: string, backslashes: string, whitespace: string | undefined, offset: number) =>
+      const breaks = new Set(lineStartsAfterBreaks(textOut));
+      textOut = textOut.replace(HARD_BREAK, (match: string, backslashes: string, whitespace: string | undefined, offset: number) =>
         !breaks.has(offset + backslashes.length + 2) ? match
-          : backslashes + '<br>' + (whitespace ?? '').replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;')) + bodiesBreak;
-    } else if (atEnd && rendered.deferredComments.length === 0 && !isInParagraphMath(mergedContent[rendered.nextIndex])) {
+          : backslashes + '<br>' + (whitespace ?? '').replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;'));
+    } else if (atEnd && !isInParagraphMath(mergedContent[rendered.nextIndex])) {
       textOut = textOut.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + '<br>');
     }
     // An HTML block's indent, of up to three spaces, which markdown-it keeps
@@ -9366,11 +9364,13 @@ export function buildMarkdown(
     // Not after a heading's text, which a line can't go on
     const mathFollows = !paragraphHeading && next?.type === 'math' && next.display && !!next.inParagraph;
     if (rendered.deferredComments.length > 0) {
-      // Strip trailing newlines (from <w:br/> between comment references in
-      // round-tripped DOCX), and a space before an equation, which the line
-      // end after the bodies is (see the math branch)
-      const text = textOut.replace(/(\\?\n)+$/, '');
-      output.push(mathFollows ? text.replace(/(?<!\\) $/, '') : text);
+      // Before an equation, whose line end is the one after the bodies (see
+      // the math branch), a line break is a \ before the bodies' line end,
+      // which export keeps, and the space export wrote before it goes
+      const text = mathFollows
+        ? textOut.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + '\\').replace(/(?<!\\) $/, '')
+        : textOut.replace(/(\\?\n)+$/, '');
+      output.push(text);
       output.push('\n');
       const bodies = rendered.deferredComments.join('\n').split('\n')
         .map(line => (line ? quoteLinePrefix : quoteLinePrefix.trimEnd()) + line).join('\n');
@@ -9421,10 +9421,9 @@ export function buildMarkdown(
       // whitespace the note's text starts with after it. A line break at its
       // end is <br>, as at a paragraph's end in the body, but not before an
       // equation in the paragraph (`beforeMath`), which the paragraph goes
-      // on in after it, and goes where comment bodies follow (`beforeBodies`),
-      // as in the body, where an older export wrote it between references.
-      const inlinePart = (text: string, beforeMath = false, beforeBodies = false) => {
-        const broken = beforeMath ? text : text.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + (beforeBodies ? '' : '<br>'));
+      // on in after it.
+      const inlinePart = (text: string, beforeMath = false) => {
+        const broken = beforeMath ? text : text.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + '<br>');
         return partStart === 0
           ? keepParagraphWhitespace(broken.replace(/^[ \t]/, ''), true, true)
           : keepParagraphWhitespace(broken, isMarkdownBlockEdge(bodyMerged[partStart - 1]), true);
@@ -9460,7 +9459,7 @@ export function buildMarkdown(
           const code = codeBlockFence(bodyMerged, bi, codeBlockLangs?.get(String(codeBlockGroupIndex++)) || '');
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
-            pushInline(inlinePart(part.text, false, part.deferredComments.length > 0));
+            pushInline(inlinePart(part.text));
             deferredAll.push(...part.deferredComments);
           }
           paragraphPart = undefined;
@@ -9475,7 +9474,7 @@ export function buildMarkdown(
         if (item.type === 'para') {
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
-            pushInline(inlinePart(part.text, false, part.deferredComments.length > 0));
+            pushInline(inlinePart(part.text));
             deferredAll.push(...part.deferredComments);
           }
           partStart = bi + 1;
@@ -9504,7 +9503,7 @@ export function buildMarkdown(
           // Flush preceding inline content
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
-            pushInline(inlinePart(part.text, false, part.deferredComments.length > 0));
+            pushInline(inlinePart(part.text));
             deferredAll.push(...part.deferredComments);
           }
           paragraphPart = undefined;
@@ -9565,7 +9564,7 @@ export function buildMarkdown(
       skipDemoted();
       if (partStart < bodyMerged.length) {
         const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
-        pushInline(inlinePart(part.text, false, part.deferredComments.length > 0));
+        pushInline(inlinePart(part.text));
         deferredAll.push(...part.deferredComments);
       }
       if (bodyParts.length === 0) {
