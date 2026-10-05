@@ -65,6 +65,13 @@ export function parseHtmlTableCellSourceKind(raw: string | undefined): HtmlTable
     : undefined;
 }
 
+/** A table's first row, as export and import of the HTML around an HTML
+ *  table both find it: its cells' count and each one's text, spaces run
+ *  together, apart as no cell's text can be, as a | can be in one */
+export function tableFirstRowText(cells: string[]): string {
+  return cells.length + ':' + cells.map(cell => cell.replace(/\s+/g, ' ').trim()).join('\u001f');
+}
+
 /** Which table's text the rows' cells' `rows` are, as export and import of
  *  the HTML around an HTML table both find it: each cell's text, spaces run
  *  together, row by row, but for the empty cells at a row's end, as Word

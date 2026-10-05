@@ -16,7 +16,8 @@ import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from '
 import { citationEndInText, compareNoteLabels, customStyleId, directiveRest, htmlBlocksIn, linkifiedColons, linkifiedText, linkifyMatches, startsHtmlBlock } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
-import { tableContentsFingerprint } from './table-metadata';
+import { tableContentsFingerprint, tableFirstRowText } from './table-metadata';
+import { htmlPieceAt } from './html-table-parser';
 import { publicStyleNameForZoteroId, zoteroStyleIdForName } from './csl-loader';
 import { extractZoteroKey } from './zotero-link';
 import { DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
@@ -7540,11 +7541,9 @@ function pushWithHoistedPrefix(output: string[], directivePrefix: string, body: 
 const tableCellText = (cell: TableRow['cells'][number]): string =>
   cell.paragraphs.flat().map(item => item.type === 'text' ? item.text.replace(/\\\n/g, '') : '').join('');
 
-/** A table's first row's text, as export finds it (see recordTableIdentity
- *  in md-to-docx.ts) */
+/** A table's first row's text, as export finds it (see tableFirstRowText) */
 function tableFirstRow(rows: TableRow[]): string {
-  const cells = rows[0]?.cells ?? [];
-  return cells.length + ':' + cells.map(cell => tableCellText(cell).replace(/\s+/g, ' ').trim()).join('|');
+  return tableFirstRowText((rows[0]?.cells ?? []).map(tableCellText));
 }
 
 /** A table's text, as export finds it (see tableContentsFingerprint) */
@@ -7607,29 +7606,22 @@ function htmlLinesAsText(lines: string[]): string[] {
 }
 
 // A comment as the browser reads it, to its end, if it has one, at lastIndex
-const BROWSER_COMMENT_AT = /<!--(?:-?>|[\s\S]*?(--!?>))/y;
-
 /** HTML from a table's block with each comment ending where the browser
  *  read its end, as a block of its own would read on past it, over the
  *  table: one the browser ended at a --!> ends at a --> instead, and one
- *  with no end, which ran to the end of the block, gets one */
+ *  with no end, which ran to the end of the block, gets one. An <!-- in
+ *  an element whose text is no HTML, as a <textarea>'s, starts none. */
 function withMarkdownCommentEnds(html: string): string {
   let out = '';
   let from = 0;
-  for (let i = html.indexOf('<'); i !== -1; i = html.indexOf('<', i + 1)) {
-    if (html.startsWith('<!--', i)) {
-      BROWSER_COMMENT_AT.lastIndex = i;
-      const comment = BROWSER_COMMENT_AT.exec(html);
-      if (!comment) return out + html.slice(from).replace(/\s*$/, ' -->');
-      if (comment[1] === '--!>') {
-        out += html.slice(from, i + comment[0].length - 4) + '-->';
-        from = i + comment[0].length;
-      }
-      i += comment[0].length - 1;
-    } else {
-      HTML_TAG_AT.lastIndex = i;
-      i += (HTML_TAG_AT.exec(html)?.[0].length ?? 1) - 1;
+  for (let i = 0; i < html.length;) {
+    const piece = htmlPieceAt(html, i);
+    if (piece.kind === 'comment' && piece.rest) return out + html.slice(from).replace(/\s*$/, ' -->');
+    if (piece.kind === 'comment' && html.startsWith('--!>', piece.end - 4)) {
+      out += html.slice(from, piece.end - 4) + '-->';
+      from = piece.end;
     }
+    i = piece.end;
   }
   return out + html.slice(from);
 }

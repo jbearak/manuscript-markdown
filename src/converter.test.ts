@@ -6287,6 +6287,18 @@ describe('HTML around a table in its block', () => {
     expect(markdown).toBe('<p>Cap B</p>\n<table>\n  <tr>\n    <td>\n      <p>H</p>\n    </td>\n  </tr>\n  <tr>\n    <td>\n      <p>b</p>\n    </td>\n  </tr>\n</table>\n');
   });
 
+  test('puts no HTML around a table after Word deletes one before it whose first row\'s text is alike, cut apart elsewhere', async () => {
+    // Both first rows read as 2:A|B|C, and the table at the deleted one's
+    // index took its caption
+    const second = '<table>\n  <tr>\n    <td>\n      <p>A</p>\n    </td>\n    <td>\n      <p>B|C</p>\n    </td>\n  </tr>\n</table>\n';
+    const md = '<div>\n<p>Table 1.</p>\n<table><tr><td>A|B</td><td>C</td></tr></table>\n</div>\n\nText.\n\n' + second;
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, ''));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('Text.\n\n' + second);
+  });
+
   test('keeps the HTML around tables alike in all their text in order', async () => {
     const md = '<p>Cap A</p>\n' + table('a') + '\n\n<p>Cap B</p>\n' + table('a') + '\n';
     expect(await roundTrip(md)).toBe(md);
@@ -6491,10 +6503,13 @@ describe('HTML around a table in its block', () => {
     // Which escaped the reference or tag after it
     ['a backslash before a character reference or a tag', '', '\nSource\\&amp; and a\\\\<b>b</b>\n', '',
       '\n\nSource\\\\&amp; and a\\\\\\\\<b>b</b>\n'],
-    // Which export reads as no directive, but which went as one
     // Which the browser ended at a --!>, or at the end of the block, but
     // which, a block of their own, read on over the table
     ['comments the browser ends where Markdown reads no end', '<!-- cap --!>', ' <!-- open\n', '<!-- cap -->\n\n', '\n\n<!-- open -->\n'],
+    // Which got an end, as a comment the browser read
+    ['an <!-- in an element whose text is no HTML', '', '\n<textarea>a <!-- b --!> c</textarea>\n<textarea>literal <!-- here</textarea>\n', '',
+      '\n\n<textarea>a <!-- b --!> c</textarea>\n<textarea>literal <!-- here</textarea>\n'],
+    // Which export reads as no directive, but which went as one
     ['comments with a value no table directive reads', '', '\nSource\n<!-- table-digits: TBD -->\n<!-- table-col-widths: TBD -->\n', '',
       '\n\nSource\n<!-- table-digits: TBD -->\n<!-- table-col-widths: TBD -->\n'],
   ])('keeps %s around a table that leaves HTML, as it read', async (_name, beforeHtml, afterHtml, beforeMd, afterMd) => {

@@ -11,7 +11,7 @@ import { isAbsolute, join, resolve } from 'path';
 import { parseBibtex, BibtexEntry } from './bibtex-parser';
 import { parseFrontmatter, maskFrontmatter, serializeFrontmatter, Frontmatter, noteTypeToNumber, type ColorScheme, type CustomStyleDef, parseColWidths, expandColWidths, colWidthsToPct } from './frontmatter';
 import { formatTableNumbers, parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping, type TableDigits, type TableDecimalMark, type TableDigitGrouping } from './table-number-format';
-import { tableContentsFingerprint, type TableNumberFormat } from './table-metadata';
+import { tableContentsFingerprint, tableFirstRowText, type TableNumberFormat } from './table-metadata';
 import { alertColorsByScheme, getDefaultColorScheme } from './alert-colors';
 import { ZoteroBiblData, zoteroStyleFullId } from './converter';
 import { isGfmDisallowedRawHtml, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from './gfm';
@@ -4091,7 +4091,7 @@ function recordTableMetadata(token: MdToken, state: DocxGenState): void {
  *  its embed directive */
 function recordTableIdentity(token: MdToken, xml: string, state: DocxGenState, scope: string): void {
   const texts = wordTableTexts(xml);
-  const firstRow = (texts[0]?.length ?? 0) + ':' + (texts[0] ?? []).map(text => text.replace(/\s+/g, ' ').trim()).join('|');
+  const firstRow = tableFirstRowText(texts[0] ?? []);
   const contents = tableContentsFingerprint(texts);
   const key = scope + '\n' + firstRow + '\n' + contents;
   const alikeBefore = state.tablesAlike.get(key) ?? 0;
