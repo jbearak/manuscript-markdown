@@ -1985,6 +1985,36 @@ describe('Comments across paragraphs', () => {
     expect(await roundTrip(md)).toBe(md);
   });
 
+  test.each([
+    ['a paragraph', 'A{#1}\n\nb{/1} c.\n' + body(1, 'p') + '\n'],
+    ['a heading', '# A{#1}\n\nb{/1} c.\n' + body(1, 'h') + '\n'],
+    ['a list item', '- A{#1}\n- b{/1} c.\n' + body(1, 'l') + '\n'],
+    ['a quoted paragraph', '> A{#1}\n>\n> b{/1} c.\n> ' + body(1, 'q') + '\n'],
+    ['a paragraph that ends in an insertion', '{++A++}{#1}\n\nb{/1} c.\n' + body(1, 'i') + '\n'],
+    ['a paragraph, with another comment', 'A{#1}{#2}\n\nb{/1} c{/2}.\n' + body(1, 'one') + '\n' + body(2, 'two') + '\n'],
+    ['a paragraph before an equation', 'A{#1}\n\n' + MATH_FENCE + '\nx\n' + MATH_FENCE + '\n\nB{/1}\n' + body(1, 'm') + '\n'],
+    ['a footnote\'s paragraph', 'Text.[^1]\n\n[^1]: A{#1}\n\n    b{/1} c.\n    ' + body(1, 'n') + '\n'],
+  ])('keeps one that starts at the end of %s', async (_name, md) => {
+    // It started at the next paragraph's text, as the paragraph mark it
+    // started on had no item to hold it
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    ['a range that starts at its end', 'A{#1}\n\nb{/1}\n' + body(1, 'p') + '\n', '`A`{#1}\n\nb{/1}\n' + body(1, 'p') + '\n'],
+    ['a comment at a point in it', 'A {>>@A (2024-01-15 10:30) | c<<} b\n', '`A `{>>@A (2024-01-15 10:30) | c<<}` b`\n'],
+  ])('writes no code for %s where the paragraph\'s mark is code', async (_name, md, expected) => {
+    // The empty item that holds it took the mark's formatting, and wrote
+    // code's `` as text
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const p = xml.indexOf('<w:p', xml.indexOf('<w:body>'));
+    const open = xml.indexOf('>', p) + 1;
+    zip.file('word/document.xml', xml.slice(0, open) + '<w:pPr><w:rPr><w:rStyle w:val="CodeChar"/></w:rPr></w:pPr>' + xml.slice(open));
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(expected);
+  });
+
   test('keeps a range open around a table whose cells have comments of their own', () => {
     // A cell's comments in ID syntax closed it in the cell, and it opened again after
     const comments = new Map([['0', { author: 'A', text: 'c', date: '' }], ['1', { author: 'B', text: 'd', date: '' }], ['2', { author: 'C', text: 'e', date: '' }]]);
