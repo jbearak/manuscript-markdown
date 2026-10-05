@@ -699,9 +699,15 @@ function convertHtmlTable(text: string, pad: boolean): string | null {
 
   // Convert cells to markdown text
   const mdRows: { cells: string[]; header: boolean }[] = rows.map(row => ({
-    // A cell's edges keep the whitespace its HTML wrote as references
-    cells: row.cells.map(cell => runsToMarkdown(cell.runs).split('\n')
-      .map(line => keepParagraphEdgeWhitespace(line, true, true)).join('\n')),
+    // A cell's edges keep the whitespace its HTML wrote as references. A
+    // line break or an empty paragraph at its end is <br>, as a grid
+    // table's blank lines there pad the cell to its row's height.
+    cells: row.cells.map(cell => {
+      let end = cell.runs.length;
+      while (end > 0 && cell.runs[end - 1].type !== 'text') end--;
+      return runsToMarkdown(cell.runs.slice(0, end)).split('\n')
+        .map(line => keepParagraphEdgeWhitespace(line, true, true)).join('\n') + '<br>'.repeat(cell.runs.length - end);
+    }),
     header: row.header,
   }));
 

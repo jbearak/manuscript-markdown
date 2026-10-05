@@ -561,6 +561,17 @@ describe('grid table support for Expand Table and Compact Table', () => {
       .toBe('| h |\n| --- |\n| a b c |');
   });
 
+  it.each([
+    ['a line break', '<td>a<br><br></td>'],
+    ['a line break at a paragraph\'s end', '<td><p>a<br></p></td>'],
+    ['an empty paragraph', '<td><p>a</p><p></p></td>'],
+  ])('reflowTable writes %s at the end of an HTML cell as <br>', (_name, cell) => {
+    // A grid table's blank lines at a cell's end pad it to its row's height,
+    // and aren't line breaks
+    expect(reflowTable('<table><tr>' + cell + '<td>b<br>c</td></tr></table>').newText)
+      .toBe('+-------+---+\n| a<br> | b |\n|       | c |\n+-------+---+');
+  });
+
   it('compactTable compacts Pandoc-style grid tables while preserving separator style', () => {
     const input = [
       '+------------+-------+',
