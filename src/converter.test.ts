@@ -1985,6 +1985,21 @@ describe('Comments across paragraphs', () => {
     expect(await roundTrip(md)).toBe(md);
   });
 
+  test.each([
+    ['a paragraph', 'A{#1}\n\nb{/1} c.\n' + body(1, 'p') + '\n'],
+    ['a heading', '# A{#1}\n\nb{/1} c.\n' + body(1, 'h') + '\n'],
+    ['a list item', '- A{#1}\n- b{/1} c.\n' + body(1, 'l') + '\n'],
+    ['a quoted paragraph', '> A{#1}\n>\n> b{/1} c.\n> ' + body(1, 'q') + '\n'],
+    ['a paragraph that ends in an insertion', '{++A++}{#1}\n\nb{/1} c.\n' + body(1, 'i') + '\n'],
+    ['a paragraph, with another comment', 'A{#1}{#2}\n\nb{/1} c{/2}.\n' + body(1, 'one') + '\n' + body(2, 'two') + '\n'],
+    ['a paragraph before an equation', 'A{#1}\n\n' + MATH_FENCE + '\nx\n' + MATH_FENCE + '\n\nB{/1}\n' + body(1, 'm') + '\n'],
+    ['a footnote\'s paragraph', 'Text.[^1]\n\n[^1]: A{#1}\n\n    b{/1} c.\n    ' + body(1, 'n') + '\n'],
+  ])('keeps one that starts at the end of %s', async (_name, md) => {
+    // It started at the next paragraph's text, as the paragraph mark it
+    // started on had no item to hold it
+    expect(await roundTrip(md)).toBe(md);
+  });
+
   test('keeps a range open around a table whose cells have comments of their own', () => {
     // A cell's comments in ID syntax closed it in the cell, and it opened again after
     const comments = new Map([['0', { author: 'A', text: 'c', date: '' }], ['1', { author: 'B', text: 'd', date: '' }], ['2', { author: 'C', text: 'e', date: '' }]]);
