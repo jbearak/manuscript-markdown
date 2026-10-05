@@ -5039,17 +5039,18 @@ function escapeBangBeforeLink(markdown: string, segment: ContentItem[], index: n
   return /(?:^|[^\\])(?:\\\\)*!$/.test(markdown) ? markdown.slice(0, -1) + '\\!' : markdown;
 }
 
-/** `markdown`, the Markdown of an item, with a } or {color} it starts with
- *  escaped after a highlight's closing == at the end of the Markdown
+/** `markdown`, the Markdown of an item, with a }, = or {color} it starts
+ *  with escaped after a highlight's closing == at the end of the Markdown
  *  `before` it, which would read them as its own: ==a==} as CriticMarkup's
- *  ==}, which ends no highlight, and ==a=={red} as its color. After one
- *  with a color, as in ==a=={red}{blue}, the escape keeps the text as it
- *  is too. From the end of `before`, which may be long, and is read only
+ *  ==}, which ends no highlight, ==a=={red} as its color, and ==a===b as
+ *  no highlight, as navigation and the grammar read it, but not the ==
+ *  that opens a highlight. After one with a color, as in ==a=={red}{blue},
+ *  the escape keeps the text as it is too. From the end of `before`, which may be long, and is read only
  *  where the item's Markdown starts so, as reading it copies Markdown being
  *  built: without the closer of the span it ends with where the item
  *  joins that span (`inSpan`, see inSpanBefore). */
 function escapeAfterHighlight(markdown: string, before: string, inSpan = false): string {
-  return /^(?:\}|\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})/.test(markdown)
+  return /^(?:\}|=(?!=[\u0005\u000E])|\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})/.test(markdown)
     && /==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?$/.test(inSpan ? before.slice(-67, -3) : before.slice(-64)) ? '\\' + markdown : markdown;
 }
 
@@ -5435,8 +5436,10 @@ function combinedSpanJoin(items: InlineRevisionItem[]): { join: SpanJoin; litera
 }
 
 /** One item of a substitution's side as Markdown, after `precedingText`,
- *  before the rest of its side, `after` (see escapeMarkdownChars). */
-function substitutionItemText(item: SubstitutionItem, precedingText: string, noteLabels?: Map<string, string>, after?: RunsAfter): string {
+ *  before the rest of its side, `after` (see escapeMarkdownChars), with
+ *  its highlight around the rest of its formatting where it joins its
+ *  neighbours' (`joinsHighlight`, see joinHighlights). */
+function substitutionItemText(item: SubstitutionItem, precedingText: string, noteLabels?: Map<string, string>, after?: RunsAfter, joinsHighlight = false): string {
   const color = highlightColorOf(item);
   if (color && (item.type === 'footnote_ref' || item.type === 'citation')) {
     const text = substitutionItemText({ ...item, formatting: undefined }, precedingText, noteLabels, after);
@@ -5444,7 +5447,7 @@ function substitutionItemText(item: SubstitutionItem, precedingText: string, not
   }
   if (item.type === 'footnote_ref') return footnoteRefText(item, noteLabels);
   if (item.type === 'text') {
-    if (!item.href) return escapeAfterHighlight(markedFormatting(item.text, item.formatting, false, after), precedingText);
+    if (!item.href) return escapeAfterHighlight(markedFormatting(item.text, item.formatting, false, after, false, joinsHighlight), precedingText);
     const text = markedFormatting(item.text, item.formatting, false, (after ?? RunsAfter.of('')).linkTo(item.href));
     return markdownLink(text, item.href);
   }
@@ -5546,7 +5549,8 @@ function renderSubstitutionRun(
         text += renderHighlightGroup(segment, j, highlightEnd, to, precedingText + text, noteLabels);
         j = highlightEnd;
       } else {
-        text += textNextToMath(escapeBangBeforeLink(substitutionItemText(item, precedingText + text, noteLabels, runsAfter(segment, j + 1, to)), segment, j, to, true), segment, j, to, text.length === mathEnd, true, text);
+        text += textNextToMath(escapeBangBeforeLink(substitutionItemText(item, precedingText + text, noteLabels, runsAfter(segment, j + 1, to),
+          joinsHighlight(segment, j, from, to)), segment, j, to, true), segment, j, to, text.length === mathEnd, true, text);
         if (item.type === 'math' && !item.display) mathEnd = text.length;
         j++;
       }
@@ -6251,7 +6255,8 @@ function renderInlineRange(
         // distinct: Word text that is both highlighted AND commented needs both layers,
         // producing {====text====} (highlight nested inside comment delimiters).
         const after = runsAfter(segment, j + 1, segmentEnd);
-        let segText = textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(seg.text, seg.formatting, false, seg.href ? after.linkTo(seg.href) : after), anchorText), segment, j, segmentEnd), segment, j, segmentEnd, anchorText.length === anchorMathEnd, false, anchorText);
+        let segText = textNextToMath(escapeBangBeforeLink(escapeAfterHighlight(markedFormatting(seg.text, seg.formatting, false, seg.href ? after.linkTo(seg.href) : after,
+          false, joinsHighlight(segment, j, i, segmentEnd)), anchorText, inSpanBefore(anchorText, seg, anchorSpan)), segment, j, segmentEnd), segment, j, segmentEnd, anchorText.length === anchorMathEnd, false, anchorText);
         if (seg.href) {
           segText = bareLinkChoice(seg, markdownLink(segText, seg.href), '==}');
         }

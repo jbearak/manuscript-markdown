@@ -9213,6 +9213,26 @@ describe('Highlights across runs', () => {
     expect(await roundTrip(md)).toBe(md);
   });
 
+  test.each([
+    ['an =', highlighted('b') + plain('=c'), '==b==\\=c\n'],
+    ['an = after an edge space', highlighted('a ') + plain('=b'), '==a ==\\=b\n'],
+    ['an = after a joined highlight', highlighted('a ') + highlighted('b', '<w:b/>') + plain('=c'), '==a **b**==\\=c\n'],
+    ['==', highlighted('b') + plain('==c'), '==b==\\==c\n'],
+  ])('escapes %s after a highlight', async (_name, runs, md) => {
+    // Which navigation and the grammar read with the highlight's ==, as in
+    // ==b===c, as no highlight
+    expect(await fromWord(runs)).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    '{=={++==a *b*==++}==}{>>c<<}\n', '{~~==a *b*==~>x~~}\n', '{~~x~>==a *b*==~~}\n',
+  ])('joins the highlights of runs alike in %j', async (md) => {
+    // In a comment's text or a substitution's side, each run had a
+    // highlight of its own, and an insertion's split in two at them
+    expect(await roundTrip(md)).toBe(md);
+  });
+
   test('reads many runs in one tracked change in linear time', async () => {
     // The escape after a highlight read the Markdown before each run, which
     // copied all of it
@@ -9236,7 +9256,6 @@ describe('Highlights across runs', () => {
   test.each([
     ['another color\'s highlight', highlighted('a ') + highlighted('b', '', 'red'), '==a== ==b=={red}\n'],
     ['another color\'s highlight before it', highlighted('a') + highlighted(' b', '', 'red'), '==a== ==b=={red}\n'],
-    ['an =', highlighted('a ') + plain('=b'), '==a== =b\n'],
   ])('keeps a highlight\'s edge space outside it next to %s', async (_name, runs, md) => {
     // Whose = ran into its ==, as in ==a ====b=={red}, which navigation and
     // the grammar read as no highlight

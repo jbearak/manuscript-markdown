@@ -786,7 +786,7 @@ Standard Markdown highlight syntax with an optional color suffix:
 
 A highlight's content is Markdown. Emphasis, code, equations, citations and footnote references inside `==...==` export to Word as they do elsewhere. The highlight covers code, a citation and a footnote reference mark, but not an equation.
 
-On DOCX import, highlighted code, citations and footnote references come back inside the highlight, with any equations between them: `==see [@smith2020]==`, `==as reported.[^1]==`, `==a $x$ b==`, also inside a tracked change, `{++==as reported.[^1]==++}`. Emphasis comes back inside the highlight too, `==a *b* c==`, but a tracked change comes back in a highlight of its own: `==a *b* {++c++}==` comes back as `==a *b* =={++==c==++}`. A highlight keeps the spaces at its edges, which Word highlights: `==a ==b`.
+On DOCX import, highlighted code, citations and footnote references come back inside the highlight, with any equations between them: `==see [@smith2020]==`, `==as reported.[^1]==`, `==a $x$ b==`, also inside a tracked change, `{++==as reported.[^1]==++}`. Emphasis comes back inside the highlight too, `==a *b* c==`, but a tracked change comes back in a highlight of its own: `==a *b* {++c++}==` comes back as `==a *b* =={++==c==++}`. A highlight keeps the spaces at its edges, which Word highlights: `==a ==b`. Text right after a highlight that its `==` would take, a `}`, an `=` or a color such as `{red}`, is escaped: `==b==\=c`.
 
 #### Nesting with CriticMarkup
 
