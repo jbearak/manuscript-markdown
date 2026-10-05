@@ -5602,13 +5602,19 @@ describe('Word text that reads as Markdown', () => {
 
   test('writes a paragraph of many links in linear time', () => {
     // Each run read whether the Markdown before it ended a line, which
-    // copied it, as it ended with a link's concatenated syntax
-    const items = Array.from({ length: 80000 }, (_, k) => [
-      { type: 'text', text: 't' + k, href: 'https://e.com/' + k, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING } },
-      { type: 'text', text: ' ', commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING } }]).flat();
-    const start = performance.now();
-    buildMarkdown(items as ContentItem[], new Map());
-    expect(performance.now() - start).toBeLessThan(1000);
+    // copied it, as it ended with a link's concatenated syntax. Eight times
+    // the links take about eight times as long, not sixty-four, however
+    // fast the machine is.
+    const time = (links: number) => {
+      const items = Array.from({ length: links }, (_, k) => [
+        { type: 'text', text: 't' + k, href: 'https://e.com/' + k, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING } },
+        { type: 'text', text: ' ', commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING } }]).flat();
+      const start = performance.now();
+      buildMarkdown(items as ContentItem[], new Map());
+      return performance.now() - start;
+    };
+    const small = time(10000);
+    expect(time(80000) / small).toBeLessThan(16);
   });
 
   test('escapes many paragraphs in linear time', () => {
