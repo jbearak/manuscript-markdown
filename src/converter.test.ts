@@ -8370,6 +8370,23 @@ describe('Track changes (CriticMarkup)', () => {
       expect(roundTrip.replace(/^---\n[\s\S]*?\n---\n?/, '').trim()).toBe(md);
     });
 
+    test('keeps a comment over a tracked mark and an empty quoted paragraph after it one range', async () => {
+      // The break alone took the ranges the item right after it was in,
+      // which was the empty paragraph's, so the comment ended before the
+      // break and started again after it, and export wrote two
+      const revision = 'w:author="A" w:date="2024-01-01T00:00:00Z"';
+      const quote = (mark: boolean) => '<w:pPr><w:pStyle w:val="GitHubBlockquote"/>' + (mark ? '<w:rPr><w:del w:id="1" ' + revision + '/></w:rPr>' : '') + '</w:pPr>';
+      const docx = await buildSyntheticDocx(wrapDocumentXml(
+        '<w:p>' + quote(true) + '<w:commentRangeStart w:id="0"/><w:r><w:t>a</w:t></w:r></w:p><w:p>' + quote(true) + '</w:p>'
+        + '<w:p>' + quote(false) + '<w:r><w:t>b</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p>'),
+      { 'word/comments.xml': '<?xml version="1.0"?><w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:comment w:id="0" w:author="B" w:date="2024-01-01T00:00:00Z"><w:p><w:r><w:t>note</w:t></w:r></w:p></w:comment></w:comments>' });
+      const md = (await convertDocx(docx)).markdown;
+      expect(md).toContain('> {#1}a{--\n>\n> --}');
+      expect(md.match(/\{\/1\}/g)).toHaveLength(1);
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+      expect(xml.match(/<w:commentRangeStart /g)).toHaveLength(1);
+    });
+
     test.each(['indent', 'no-indent'])('keeps the %s override of a paragraph after a tracked mark', async override => {
       // The break's text took the paragraph's place, and the override went
       const md = 'a\n\n<!-- ' + override + ' -->\nb\n';

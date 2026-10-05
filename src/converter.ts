@@ -8312,9 +8312,12 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
     // which what comes after reads, as a citation does to put no space there
     const text = (alone ? marks().alone : marks().start) + '\n' + prefix.trimEnd() + '\n' + prefix + (alone ? '' : marks().end);
     // A break in a span of its own is in a comment's range where the text
-    // on both sides is, or a range that starts at the paragraph's mark,
-    // whose empty item (see startRangesAtMark) comes before it
-    const next = content[k + 1];
+    // on both sides is, past empty paragraphs, or a range that starts at
+    // the paragraph's mark, whose empty item (see startRangesAtMark) comes
+    // before it
+    let nextIndex = k + 1;
+    while (content[nextIndex]?.type === 'para') nextIndex++;
+    const next = content[nextIndex];
     const commentIds = alone
       ? new Set(content.slice(last, k).flatMap(item => 'commentIds' in item ? [...item.commentIds ?? []] : [])
         .filter(id => next && 'commentIds' in next && next.commentIds?.has(id)))
