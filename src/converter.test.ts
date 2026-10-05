@@ -4898,6 +4898,144 @@ describe('HTML comments in notes', () => {
   });
 });
 
+describe('Line breaks a backslash can\'t hold', () => {
+  const imported = async (xml: string) => (await convertDocx(await buildSyntheticDocx(wrapDocumentXml(xml)))).markdown
+    .replace(/^---\n[\s\S]*?\n---\n?/, '');
+  const exportedXml = async (md: string) => (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+  // Each paragraph's text, with a line break as ⏎
+  const exportedText = async (md: string) => [...(await exportedXml(md)).matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)]
+    .map(p => p[0].replace(/<w:br\/>/g, '⏎').replace(/<[^>]+>/g, '')).join(' | ');
+  const p = (runs: string, style?: string) => '<w:p>' + (style ? '<w:pPr><w:pStyle w:val="' + style + '"/></w:pPr>' : '') + runs + '</w:p>';
+  const r = (inner: string, rPr = '') => '<w:r>' + rPr + inner + '</w:r>';
+  const t = (text: string) => '<w:t xml:space="preserve">' + text + '</w:t>';
+  const code = '<w:rPr><w:rStyle w:val="CodeChar"/></w:rPr>';
+
+  test.each([
+    ['ends a paragraph', p(r(t('a') + '<w:br/>')), 'a<br>\n', 'a⏎'],
+    ['ends bold text that ends a paragraph', p(r(t('a') + '<w:br/>', '<w:rPr><w:b/></w:rPr>')), '**a**<br>\n', 'a⏎'],
+    ['ends a paragraph after another', p(r(t('a') + '<w:br/><w:br/>')), 'a\\\n<br>\n', 'a⏎⏎'],
+    ['is in a heading', p(r(t('a') + '<w:br/>' + t('b')), 'Heading1'), '# a<br>b\n', 'a⏎b'],
+    ['ends a heading', p(r(t('a') + '<w:br/>'), 'Heading1'), '# a<br>\n', 'a⏎'],
+    // Which markdown-it reads as an HTML block, not a paragraph's text
+    ['is all of a paragraph', p(r('<w:br/>')), '<br>\n', '⏎'],
+    // A code span can't hold one, so it goes between the code on each side
+    ['ends inline code that ends a paragraph', p(r(t('a') + '<w:br/>', code)), '`a`<br>\n', 'a⏎'],
+    ['is in inline code in a heading', p(r(t('a') + '<w:br/>' + t('b'), code), 'Heading1'), '# `a`<br>`b`\n', 'a⏎b'],
+  ])('writes one that %s as <br>', async (_name, xml, md, text) => {
+    // As a \ before a line end, it was a \ in the text at a paragraph's
+    // end, and ended a heading, whose text after it was a paragraph
+    expect(await imported(xml)).toBe(md);
+    expect(await exportedText(md)).toBe(text);
+  });
+
+  test.each([
+    ['a paragraph', p(r(t('a') + '<w:br/>' + t('  '))), 'a\\\n&#32;&#32;\n'],
+    ['a heading', p(r(t('a') + '<w:br/>' + t('  ')), 'Heading1'), '# a<br>&#32;&#32;\n'],
+  ])('keeps the spaces after one at the end of %s', async (_name, xml, md) => {
+    // After a <br>, they were at the end, where Markdown drops them
+    expect(await imported(xml)).toBe(md);
+    expect(await exportedText(md)).toBe('a⏎  ');
+  });
+
+  test('keeps one in inline code between the code on each side', async () => {
+    // Inside the code span, the \ was code, and the line end a space
+    const md = await imported(p(r(t('a') + '<w:br/>' + t('b'), code)));
+    expect(md).toBe('`a`\\\n`b`\n');
+    expect(await exportedText(md)).toBe('a⏎b');
+  });
+
+  test('reads <br> tags on lines of their own in one block as line breaks', async () => {
+    // markdown-it reads them as one HTML block, which was text
+    expect(await exportedText('<br>\n<br/>\n\nX')).toBe('⏎⏎ | X');
+  });
+
+  test('drops one that ends a heading before its comments\' bodies', async () => {
+    // As an older export wrote between comment references, which a <br>
+    // would keep for good
+    const md = '# {#1}a {#2}b{/1} c{/2}\n{#1>>@A | x<<}\n{#2>>@A | y<<}\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const end = xml.indexOf('</w:p>');
+    zip.file('word/document.xml', xml.slice(0, end) + '<w:r><w:br/></w:r>' + xml.slice(end));
+    expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
+  });
+
+  test('keeps one after a \\ in a comment on a heading a \\ and a line end', async () => {
+    // As <br> in the comment's body, it was text there
+    const zip = await JSZip.loadAsync((await convertMdToDocx('# H {==x==}{>>a b<<} end')).docx);
+    const xml = await zip.file('word/comments.xml')!.async('string');
+    const edited = xml.replace('a b', 'a\\</w:t></w:r><w:r><w:br/></w:r><w:r><w:t>b');
+    expect(edited).not.toBe(xml);
+    zip.file('word/comments.xml', edited);
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(md).toBe('# H {==x==}{>>a\\\nb<<} end\n');
+    const comments = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/comments.xml')!.async('string');
+    const body = comments.slice(comments.indexOf('<w:comment '), comments.indexOf('</w:comment>'));
+    expect(body.replace(/<w:rPr>[\s\S]*?<\/w:rPr>/g, '').replace(/<w:br\/>/g, '\n').replace(/<[^>]+>/g, '')).toBe('a\\\nb');
+  });
+
+  test.each([
+    ['all of', 'A\n\n<!-- c -->\n\nB', 'A\n\n<!-- c --><br>\n\nB\n'],
+    ['after text in', 'A\n\nx <!-- c -->\n\nB', 'A\n\nx <!-- c --><br>\n\nB\n'],
+  ])('keeps one after a comment that is %s a paragraph', async (_name, source, md) => {
+    // markdown-it read the comment and the <br> as one block, which was text
+    const zip = await JSZip.loadAsync((await convertMdToDocx(source)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const end = xml.indexOf('</w:p>', xml.indexOf('c --'));
+    zip.file('word/document.xml', xml.slice(0, end) + '<w:r><w:br/></w:r>' + xml.slice(end));
+    const imported = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(imported).toBe(md);
+    const exported = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    expect(exported).not.toContain('&lt;br');
+    expect(exported).toContain('<w:br/>');
+    expect(exported).toContain('<w:vanish/>');
+  });
+
+  test('drops one that ends a note\'s paragraph before its comments\' bodies', async () => {
+    // As in the document, where an older export wrote it between comment
+    // references, which a <br> would keep for good
+    const md = 'T[^1]\n\n[^1]: {#1}a {#2}b{/1} c{/2}\n    {#1>>@A | x<<}\n    {#2>>@A | y<<}\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/footnotes.xml')!.async('string');
+    const end = xml.lastIndexOf('</w:p>');
+    zip.file('word/footnotes.xml', xml.slice(0, end) + '<w:r><w:br/></w:r>' + xml.slice(end));
+    expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
+  });
+
+  test('reads a list item that is only a <br> as a line break', async () => {
+    // markdown-it reads the <br> as an HTML block, which an item keeps
+    expect(await exportedText('- <br>\n- b')).toBe('⏎ | b');
+    const md = '- <br>\n- b\n';
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
+  });
+
+  test.each([
+    ['its first', 'T.[^1]\n\n[^1]: a **XX**', 'T.[^1]\n\n[^1]: a <br>\n'],
+    ['a later one', 'T.[^1]\n\n[^1]: a\n\n    b **XX**', 'T.[^1]\n\n[^1]: a\n\n    b <br>\n'],
+    ['all of one', 'T.[^1]\n\n[^1]: **XX**', 'T.[^1]\n\n[^1]: <br>\n'],
+  ])('writes one that ends a note\'s paragraph, %s, as <br>', async (_name, source, md) => {
+    // A note's text was rendered apart from the document's, with its
+    // break as a \ before a line end, which export read as a \
+    const zip = await JSZip.loadAsync((await convertMdToDocx(source)).docx);
+    const xml = await zip.file('word/footnotes.xml')!.async('string');
+    const edited = xml.replace(/<w:r><w:rPr>(?:(?!<\/w:r>).)*<\/w:rPr><w:t>XX<\/w:t><\/w:r>/, '<w:r><w:br/></w:r>');
+    expect(edited).not.toBe(xml);
+    zip.file('word/footnotes.xml', edited);
+    const imported = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(imported).toBe(md);
+    const notes = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/footnotes.xml')!.async('string');
+    expect(notes).toContain('<w:br/>');
+    expect(notes).not.toContain('&lt;br');
+  });
+
+  test('escapes a <br> tag in Word\'s text, which export reads as a line break', async () => {
+    const md = await imported(p(r(t('a&lt;br&gt;b&lt;br/&gt;c&lt;BR /&gt;'))));
+    expect(md).toBe('a&lt;br&gt;b&lt;br/&gt;c&lt;BR /&gt;\n');
+    expect(await exportedText(md)).toBe('a&lt;br&gt;b&lt;br/&gt;c&lt;BR /&gt;');
+    expect(await exportedText('a<br>b<br/>c<BR >d')).toBe('a⏎b⏎c⏎d');
+  });
+});
+
 describe('Word text that reads as Markdown', () => {
   const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
   /** The Markdown for md's export, with its text XX in `part` replaced by text */
@@ -5820,7 +5958,9 @@ describe('Whitespace at the edges of a paragraph', () => {
     expect(edited).not.toBe(xml);
     zip.file('word/document.xml', edited);
     const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
-    expect(markdown).toContain('p \\`\\`\\`a `x\\\n  y`');
+    // The code on each side of the line break, which a code span can't hold
+    expect(markdown).toContain('p \\`\\`\\`a `x`\\\n`  y`');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
   });
 
   test.each([

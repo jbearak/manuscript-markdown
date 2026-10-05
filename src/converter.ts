@@ -232,9 +232,10 @@ const MARKDOWN_HTML_SENSITIVE_TAGS = new Set([
   'colgroup',
   'col',
   'img',
+  'br',
 ]);
 
-const HTML_LIKE_TAG_RE = /<\/?([A-Za-z][A-Za-z0-9-]*)(?:\s[^<>]*?)?>/;
+const HTML_LIKE_TAG_RE = /<\/?([A-Za-z][A-Za-z0-9-]*)(?:\s[^<>]*?)?\/?>/;
 
 function escapeSensitiveHtmlLikeTags(text: string): string {
   return text.replace(new RegExp(HTML_LIKE_TAG_RE.source, 'g'), (fullMatch, tagName: string) => {
@@ -387,11 +388,23 @@ export function keepParagraphWhitespace(text: string, atStart: boolean, atEnd: b
   return keepParagraphEdgeWhitespace(text, atStart, atEnd);
 }
 
+// A line break as Markdown writes one, a \ that isn't escaped before a line
+// end, with the escaped ones before it, and the spaces and tabs after it if
+// they end the text
+const HARD_BREAK = /(?<!\\)((?:\\\\)*)\\\n([ \t]+$)?/g;
+const HARD_BREAK_AT_END = /(?<!\\)((?:\\\\)*)\\\n$/;
+
 /** Whether text next to an item starts or ends a Markdown block there: at
  *  the end of the content, a paragraph break, a table, or a display
  *  equation, which is a block of its own in Markdown. */
 function isMarkdownBlockEdge(item: ContentItem | undefined): boolean {
   return item === undefined || isStructuralBoundaryItem(item) || (item.type === 'math' && !!item.display);
+}
+
+/** Whether `item` is display math in the paragraph of the text before it,
+ *  which the paragraph goes on in, on the lines after the text */
+function isInParagraphMath(item: ContentItem | undefined): boolean {
+  return item?.type === 'math' && item.display && !!item.inParagraph;
 }
 
 const ASCII_PUNCTUATION_RE = /[!-\/:-@[-`{-~]/;
@@ -1752,6 +1765,11 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
   // Apply in reverse nesting order (innermost to outermost)
   // Code is innermost — applied first
   if (fmt.code) {
+    // A line break, which a code span can't hold, goes between spans of the
+    // text on each side of it
+    if (text.includes('\\\n')) {
+      return text.split('\\\n').map(part => part && markedFormatting(part, fmt, lineStart, after, blockStart)).join('\\\n');
+    }
     // Find the longest run of consecutive backticks in the text
     let maxRun = 0;
     const backtickRuns = result.match(/`+/g);
@@ -5126,7 +5144,9 @@ function renderInlineSegment(
 ): { text: string; deferredComments: string[] } {
   const result = renderInlineRange(segment, 0, comments, undefined, renderOpts);
   return {
-    // Keep parity with paragraph-level emission behavior.
+    // Keep parity with paragraph-level emission behavior. Export writes a
+    // grid table's cell with fewer lines than its row's with line breaks at
+    // its end, which it doesn't hold.
     text: result.text.replace(/(\\?\n)+$/, ''),
     deferredComments: result.deferredComments,
   };
@@ -8609,6 +8629,25 @@ export function buildMarkdown(
     pendingAlertInlinePrefixForHardBreak = undefined;
     const atStart = isMarkdownBlockEdge(mergedContent[i - 1]);
     const atEnd = isMarkdownBlockEdge(mergedContent[rendered.nextIndex]);
+    // A line break as \ before a line end holds in a paragraph's text but
+    // not at its end, where Markdown drops the line end and keeps the \ as
+    // text, nor in a heading, which the line end ends, so there it's <br>,
+    // which export reads as one. One before comment bodies goes, as below.
+    // Spaces and tabs after the last, which keepParagraphWhitespace writes
+    // as references after a \ and a line end, are references after a <br>
+    // too, where they'd end the heading, which Markdown drops. A comment's
+    // body, which takes a <br> as text, keeps its \ and line end, which
+    // export reads in it in a heading too.
+    if (paragraphHeading) {
+      const bodiesBreak = rendered.deferredComments.length > 0 ? /(\\?\n)+$/.exec(textOut)?.[0] ?? '' : '';
+      const heading = textOut.slice(0, textOut.length - bodiesBreak.length);
+      const breaks = new Set(lineStartsAfterBreaks(heading));
+      textOut = heading.replace(HARD_BREAK, (match: string, backslashes: string, whitespace: string | undefined, offset: number) =>
+        !breaks.has(offset + backslashes.length + 2) ? match
+          : backslashes + '<br>' + (whitespace ?? '').replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;')) + bodiesBreak;
+    } else if (atEnd && rendered.deferredComments.length === 0 && !isInParagraphMath(mergedContent[rendered.nextIndex])) {
+      textOut = textOut.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + '<br>');
+    }
     // An HTML block's indent, of up to three spaces, which markdown-it keeps
     // in its text, and a reference would make a paragraph's
     const htmlIndent = ownLine && atStart ? /^ {1,3}(?=<)/.exec(textOut)?.[0] ?? '' : '';
@@ -8701,10 +8740,17 @@ export function buildMarkdown(
       let partStart = 0;
       // The text of a part, from partStart, which ends its paragraph. Word
       // puts a space or tab after the note's mark, which goes, but not the
-      // whitespace the note's text starts with after it.
-      const inlinePart = (text: string) => partStart === 0
-        ? keepParagraphWhitespace(text.replace(/^[ \t]/, ''), true, true)
-        : keepParagraphWhitespace(text, isMarkdownBlockEdge(bodyMerged[partStart - 1]), true);
+      // whitespace the note's text starts with after it. A line break at its
+      // end is <br>, as at a paragraph's end in the body, but not before an
+      // equation in the paragraph (`beforeMath`), which the paragraph goes
+      // on in after it, and goes where comment bodies follow (`beforeBodies`),
+      // as in the body, where an older export wrote it between references.
+      const inlinePart = (text: string, beforeMath = false, beforeBodies = false) => {
+        const broken = beforeMath ? text : text.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + (beforeBodies ? '' : '<br>'));
+        return partStart === 0
+          ? keepParagraphWhitespace(broken.replace(/^[ \t]/, ''), true, true)
+          : keepParagraphWhitespace(broken, isMarkdownBlockEdge(bodyMerged[partStart - 1]), true);
+      };
       // The part that holds the paragraph's text and display math so far,
       // which an equation in the paragraph goes on in, on the next line, and
       // text after one from its closing fence, as in the document
@@ -8722,7 +8768,7 @@ export function buildMarkdown(
         if (item.type === 'para') {
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
-            pushInline(inlinePart(part.text));
+            pushInline(inlinePart(part.text, false, part.deferredComments.length > 0));
             deferredAll.push(...part.deferredComments);
           }
           partStart = bi + 1;
@@ -8731,7 +8777,7 @@ export function buildMarkdown(
           // Flush preceding inline content and keep display math as its own block part.
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
-            pushInline(inlinePart(part.text));
+            pushInline(inlinePart(part.text, !!item.inParagraph));
             deferredAll.push(...part.deferredComments);
           }
           const mathBlock = MATH_FENCE + '\n' + canonicalizeDisplayMathLatex(item.latex) + '\n' + MATH_FENCE;
@@ -8751,7 +8797,7 @@ export function buildMarkdown(
           // Flush preceding inline content
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
-            pushInline(inlinePart(part.text));
+            pushInline(inlinePart(part.text, false, part.deferredComments.length > 0));
             deferredAll.push(...part.deferredComments);
           }
           paragraphPart = undefined;
@@ -8811,7 +8857,7 @@ export function buildMarkdown(
       }
       if (partStart < bodyMerged.length) {
         const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
-        pushInline(inlinePart(part.text));
+        pushInline(inlinePart(part.text, false, part.deferredComments.length > 0));
         deferredAll.push(...part.deferredComments);
       }
       if (bodyParts.length === 0) {

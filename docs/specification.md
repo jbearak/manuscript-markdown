@@ -510,7 +510,7 @@ The `breaks: true` frontmatter setting changes the default behavior so that bare
 
 **Grid tables**: Within grid table cells, bare newlines are always treated as hard line breaks regardless of the `breaks` setting, since the grid structure makes every line placement deliberate.
 
-**DOCX→MD**: When converting from Word, line breaks (`<w:br/>`) are always emitted as `\` + newline in the Markdown output, making the hard break intent explicit.
+**DOCX→MD**: When converting from Word, line breaks (`<w:br/>`) are emitted as `\` + newline in the Markdown output, making the hard break intent explicit. Markdown can't hold that form at the end of a paragraph, where the `\` would be text, or in a heading, which would end at it, so there a line break is emitted as `<br>`. Export reads `<br>`, `<br/>`, and `<br />` as a line break in a paragraph's text, and on lines of their own, which markdown-it reads as an HTML block, where such tags are all the block holds. A `<br>` that is text in Word is escaped as `&lt;br&gt;`.
 
 ### GitHub Flavored Markdown Extension Notes
 
