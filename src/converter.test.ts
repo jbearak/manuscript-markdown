@@ -8466,6 +8466,25 @@ describe('Track changes (CriticMarkup)', () => {
       expect(markdown.startsWith('a0{--\n\n--}a1{--\n\n--}a2')).toBe(true);
     });
 
+    test('escapes the lines of a deletion of many paragraphs in linear time', () => {
+      // Each line after a tracked break in the deletion's one run was read
+      // to the run's end. Eight times the paragraphs take about eight times
+      // as long, not sixty-four, however fast the machine is.
+      const revision = { type: 'deletion' as const, author: 'A', date: '' };
+      const time = (paragraphs: number) => {
+        const content: ContentItem[] = [];
+        for (let i = 0; i < paragraphs; i++) {
+          content.push(i === 0 ? { type: 'para' } : { type: 'para', breakRevision: revision });
+          content.push({ type: 'text', text: 'a' + i, commentIds: new Set(), formatting: DEFAULT_FORMATTING, revision });
+        }
+        const start = performance.now();
+        buildMarkdown(content, new Map());
+        return performance.now() - start;
+      };
+      const small = time(4000);
+      expect(time(32000) / small).toBeLessThan(16);
+    });
+
     test.each([
       ['a deletion of a paragraph and the start of the next', '{--a\n\nb--}c'],
       ['an insertion of a paragraph and the start of the next', '{++a\n\nb++}c'],
@@ -8525,6 +8544,39 @@ describe('Track changes (CriticMarkup)', () => {
       const md = '{--a\n\n&#32;[x\\@example.com](mailto:x@example.com)--}y';
       const roundTrip = (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
       expect(roundTrip).toBe(md);
+    });
+
+    test.each([
+      ['a quote\'s marker after a deleted mark that joins', '', '<w:delText>&gt; q</w:delText><w:br/><w:delText>b</w:delText>', 'x{--a\n\n\\> q\\\nb--}y'],
+      ['a quote\'s marker after a deleted mark that joins in a quote', 'GitHubBlockquote', '<w:delText>&gt; q</w:delText><w:br/><w:delText>b</w:delText>', '> x{--a\n>\n> \\> q\\\n> b--}y'],
+      ['a list item\'s marker after a deleted mark that joins', '', '<w:delText>- m</w:delText>', 'x{--a\n\n\\- m--}y'],
+      ['a heading\'s marker after a deleted mark that joins', '', '<w:delText># t</w:delText>', 'x{--a\n\n\\# t--}y'],
+    ])('escapes %s', async (_name, style, start, expected) => {
+      // The mark kept escaping from seeing the start of a line, and export
+      // read a > there as a quote's, which ended at the line break after.
+      // A paragraph with text, past the quote's border paragraphs
+      const revision = 'w:author="A" w:date="2024-01-01T00:00:00Z"';
+      const pStyle = style ? '<w:pStyle w:val="' + style + '"/>' : '';
+      const body = '<w:p><w:pPr>' + pStyle + '<w:rPr><w:del w:id="1" ' + revision + '/></w:rPr></w:pPr><w:r><w:t>x</w:t></w:r><w:del w:id="2" ' + revision + '><w:r><w:delText>a</w:delText>'
+        + '</w:r></w:del></w:p><w:p>' + (pStyle ? '<w:pPr>' + pStyle + '</w:pPr>' : '') + '<w:del w:id="3" ' + revision + '><w:r>' + start + '</w:r></w:del><w:r><w:t>y</w:t></w:r></w:p>';
+      const md = (await convertDocx(await buildSyntheticDocx(wrapDocumentXml(body)))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+      expect(md).toBe(expected);
+      const runs = (xml: string) => [...xml.matchAll(/<w:(?:t|delText)[^>]*>([^<]*)<\/w:(?:t|delText)>|<w:br\/>|<w:p[ >](?=(?:(?!<\/w:p>).)*?<w:(?:t|delText)[ >])/g)].map(m => m[1] ?? (m[0] === '<w:br/>' ? '↵' : '¶')).join('');
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+      expect(runs(xml.slice(xml.indexOf('<w:body>')))).toBe(runs(body));
+    });
+
+    test('escapes a quote\'s marker at the start of a line after a line break in a deleted run of other formatting', async () => {
+      // Its text was written after the span the run before it ended, though
+      // it went on in that span, and export read the > as a quote's
+      const revision = 'w:author="A" w:date="2024-01-01T00:00:00Z"';
+      const body = '<w:p><w:r><w:t>x</w:t></w:r><w:del w:id="1" ' + revision + '><w:r><w:rPr><w:b/></w:rPr><w:delText>a</w:delText><w:br/></w:r>'
+        + '<w:r><w:delText>&gt; q</w:delText><w:br/><w:delText>b</w:delText></w:r></w:del><w:r><w:t>y</w:t></w:r></w:p>';
+      const md = (await convertDocx(await buildSyntheticDocx(wrapDocumentXml(body)))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+      expect(md).toBe('x{--**a**\\\n\\> q\\\nb--}y');
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+      expect(xml.match(/<w:p[ >]/g)).toHaveLength(1);
+      expect(xml.match(/<w:br\/>/g)).toHaveLength(2);
     });
 
     test.each([
