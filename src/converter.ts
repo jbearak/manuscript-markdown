@@ -5822,8 +5822,9 @@ function linkGroup(
   };
 }
 
-/** A tag that the text leaves open at its end */
-const OPEN_TAG_AT_END_RE = /<\/?[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?$/;
+/** A tag that the text leaves open at its end, whose quoted values, the
+ *  last's unclosed, can hold a < or > */
+const OPEN_TAG_AT_END_RE = /<\/?[A-Za-z][A-Za-z0-9-]*(?:\s(?:[^<>"']|"[^"]*"|'[^']*')*(?:"[^"]*|'[^']*)?)?$/;
 
 /** Per segment, where the run of items of one revision that each index is
  *  in ends, which linkGroup reads past a link for the rest of a

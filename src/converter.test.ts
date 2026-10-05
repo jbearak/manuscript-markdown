@@ -9034,16 +9034,20 @@ describe('Links of more than one run', () => {
     expect(await roundTrip(md.slice(0, -1))).toBe(md);
   });
 
-  test('keeps the runs of a deleted link apart where one leaves a tag open', async () => {
+  test.each([
+    ['', '<span a="'],
+    [', whose quoted value holds a >', '<span a="a>b'],
+  ])('keeps the runs of a deleted link apart where one leaves a tag open%s', async (_name, text) => {
     // One link's text read the tag across the bold's delimiters as HTML
     const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
     const xml = await zip.file('word/document.xml')!.async('string');
     const replaced = xml.replace(/<w:hyperlink [^>]*><w:r><w:t>ab<\/w:t><\/w:r><\/w:hyperlink>/, link => '<w:del w:id="91" w:author="A" w:date="2024-01-01T00:00:00Z">'
-      + link.replace('<w:r><w:t>ab</w:t></w:r>', '<w:r><w:rPr><w:b/></w:rPr><w:delText>&lt;span a="</w:delText></w:r><w:r><w:delText>"&gt;</w:delText></w:r>') + '</w:del>');
+      + link.replace('<w:r><w:t>ab</w:t></w:r>', '<w:r><w:rPr><w:b/></w:rPr><w:delText>' + text.replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        + '</w:delText></w:r><w:r><w:delText>"&gt;</w:delText></w:r>') + '</w:del>');
     expect(replaced).not.toBe(xml);
     zip.file('word/document.xml', replaced);
     const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
-    expect(md).toBe('{--[**<span a="**](https://e.com)--}{--[">](https://e.com)--}\n');
+    expect(md).toBe('{--[**' + text + '**](https://e.com)--}{--[">](https://e.com)--}\n');
     expect(await roundTrip(md.slice(0, -1))).toBe(md);
   });
 
