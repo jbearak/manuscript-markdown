@@ -7613,6 +7613,8 @@ describe('Missing citation keys', () => {
   test.each([
     ['a space', 'P [@a b] Q', 'a b'],
     ['a line end', 'P [@a\nb] Q', 'a b'],
+    // Whose ` the note's escaped ` closed as a code span
+    ['a backtick', 'P [@a`b c] Q', 'a\\`b c'],
   ])('writes the note of a missing key with %s once', async (_name, md, key) => {
     // The note for it, which export strips and writes anew, wasn't
     // stripped, and another was added each round trip
@@ -7620,6 +7622,19 @@ describe('Missing citation keys', () => {
     const once = await roundTrip(md);
     expect(once).toBe(md + '\n\nCitation data for @' + key + ' was not found in the bibliography file.\n');
     expect(await roundTrip(once)).toBe(once);
+  });
+
+  test.each([
+    // Which import writes on the line after the comment's end
+    ['after a comment', 'P [@a] Q\n\n<!--\nc\n-->\n', 'P [@a] Q\n\n<!--\nc\n-->\nCitation data for @a was not found in the bibliography file.\n'],
+    ['with carriage returns', 'P [@a] Q\r\n\r\nCitation data for @a was not found in the bibliography file.\r\n',
+      'P [@a] Q\n\nCitation data for @a was not found in the bibliography file.\n'],
+  ])('writes the note of a missing key %s once', async (_name, md, expected) => {
+    // It wasn't stripped, as a line between blank lines, or one a line feed
+    // ends, and another was added
+    const roundTrip = async (markdown: string) => (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(await roundTrip(md)).toBe(expected);
+    expect(await roundTrip(expected)).toBe(expected);
   });
 
   test.each([

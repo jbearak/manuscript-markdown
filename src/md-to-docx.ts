@@ -14,7 +14,6 @@ import { formatTableNumbers, parseTableDigits, parseTableDecimalMark, parseTable
 import type { TableNumberFormat } from './table-metadata';
 import { alertColorsByScheme, getDefaultColorScheme } from './alert-colors';
 import { ZoteroBiblData, zoteroStyleFullId, getDisplayWidth } from './converter';
-import { computeMarkdownRegions, isInsideCodeRegion, mergeRegions, type CodeRegion } from './code-regions';
 import { isGfmDisallowedRawHtml, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from './gfm';
 import { scanOrientationDirectives } from './orientation-scan';
 import { pixelsToEmu, isSupportedImageFormat, getImageContentType, readImageDimensions, computeMissingDimension, IMAGE_WARNINGS, parseImageDimension } from './image-utils';
@@ -7703,21 +7702,24 @@ export async function convertMdToDocx(
   // regenerates these from the actual unresolved citation keys, which run
   // to a comma, spaces and all, as in [@a b], and hold no ; or ], which end
   // an item or the citation.
-  // A note is a paragraph of its own, between blank lines, and not a line
-  // of code or HTML.
+  // A note is a top-level paragraph of its own, as export reads one, not a
+  // line of one, of a list or quote, or of code or HTML. Lines end as
+  // markdown-it ends them.
   const MISSING_KEY_LINE = /^Citation data for @[^,;\]]+ was not found in the bibliography file\.$/;
-  const bodyLines = body.split('\n');
-  let literalRegions: CodeRegion[] | undefined;
-  let lineStart = 0;
-  const bodyStripped = bodyLines
-    .filter((line, k) => {
-      const start = lineStart;
-      lineStart += line.length + 1;
-      if (!MISSING_KEY_LINE.test(line) || /\S/.test(bodyLines[k - 1] ?? '') || /\S/.test(bodyLines[k + 1] ?? '')) return true;
-      literalRegions ??= (regions => mergeRegions([...regions.codeRegions, ...regions.htmlRegions]))(computeMarkdownRegions(body, { html: 'all' }));
-      return isInsideCodeRegion(start, literalRegions);
+  const bodyParts = body.split(/(\r\n?|\n)/);
+  let notes: Set<number> | undefined;
+  if (bodyParts.some((part, k) => k % 2 === 0 && MISSING_KEY_LINE.test(part))) {
+    citationTextMd ??= createMarkdownIt();
+    notes = new Set(citationTextMd.parse(body, {}).flatMap(token =>
+      token.type === 'paragraph_open' && token.level === 0 && token.map && token.map[1] - token.map[0] === 1 ? [token.map[0]] : []));
+  }
+  const bodyStripped = bodyParts
+    // A note's line, and the line end after it
+    .filter((part, k) => {
+      const line = k - k % 2;
+      return !(notes?.has(line / 2) && MISSING_KEY_LINE.test(bodyParts[line]));
     })
-    .join('\n')
+    .join('')
     .replace(/\n{3,}$/, '\n'); // trim trailing excess blank lines from removed block
 
   // Extract footnote definitions before markdown parsing
