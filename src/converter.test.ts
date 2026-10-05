@@ -7629,6 +7629,10 @@ describe('Missing citation keys', () => {
     ['after a comment', 'P [@a] Q\n\n<!--\nc\n-->\n', 'P [@a] Q\n\n<!--\nc\n-->\nCitation data for @a was not found in the bibliography file.\n'],
     ['with carriage returns', 'P [@a] Q\r\n\r\nCitation data for @a was not found in the bibliography file.\r\n',
       'P [@a] Q\n\nCitation data for @a was not found in the bibliography file.\n'],
+    // Whose key import wrote with a character reference, whose ; the search
+    // took for the end of a citation's item
+    ['with a reference in a key', 'P [@a] Q\n\nCitation data for @a&lt;b&gt;c was not found in the bibliography file.\n',
+      'P [@a] Q\n\nCitation data for @a was not found in the bibliography file.\n'],
   ])('writes the note of a missing key %s once', async (_name, md, expected) => {
     // It wasn't stripped, as a line between blank lines, or one a line feed
     // ends, and another was added
