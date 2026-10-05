@@ -7575,20 +7575,27 @@ function renderTableOrFallback(
     if (isLandscapeTable) htmlFontAttrs += ' data-orientation="landscape"';
     if (isPortraitTable) htmlFontAttrs += ' data-orientation="portrait"';
   }
-  // The HTML around an HTML table in its block: the one the table's first
-  // row has, as the tables' indices shift where Word added or deleted one
-  // before it, or of those that share it, the one its contents have, each
-  // once. Tables alike in all their text take theirs in order. None goes
-  // where the table's contents change and its first row doesn't tell it
-  // from another's. It goes around a table in another format as blocks of
-  // its own, before its directives, but for a comment that would be one.
+  // The HTML around an HTML table in its block: the one export wrote with
+  // the table's first row and text, as the tables' indices shift where Word
+  // added or deleted one before it, each once, and tables alike in all
+  // their text take theirs in order, or else, where Word edited the table,
+  // the one at its index, if its first row is the table's. A table with
+  // none that shares the first row of one with some doesn't take its. It
+  // goes around a table in another format as blocks of its own, before its
+  // directives.
   const firstRow = tableFirstRow(item.rows);
+  const contents = tableContentsFingerprint(item.rows.flatMap(row => row.cells.map(tableCellText)));
   const unused = [...renderOpts?.tableHtmlAroundMapping?.entries() ?? []]
     .filter(([key, entry]) => entry[2] === firstRow && !renderOpts?.usedTableHtmlAround?.has(key));
-  const contents = unused.length > 1 ? tableContentsFingerprint(item.rows.flatMap(row => row.cells.map(tableCellText))) : '';
-  const [aroundKey, around] = unused.length > 1 ? unused.find(([, entry]) => entry[3] === contents) ?? [] : unused[0] ?? [];
+  const [aroundKey, around] = unused.find(([, entry]) => entry[3] === contents)
+    ?? unused.find(([key]) => key === String(tableIndex)) ?? [];
   if (aroundKey !== undefined) renderOpts?.usedTableHtmlAround?.add(aroundKey);
-  const inert = (html: string | undefined) => html && !DIRECTIVE_SHAPED_COMMENT_RE.test(html) ? html : undefined;
+  // A comment alone on its lines, which a block of its own would make a
+  // directive, as <!-- table-font-size: 11 --> or <!-- style: Title -->
+  // would, though it was none in the table's block, goes
+  const inert = (html: string | undefined) => html
+    ?.replace(/(^|\n)[ ]{0,3}(<!--(?:(?!-->)[\s\S])*-->)[ \t]*(?=\n|$)/g, (line, _start: string, comment: string) => DIRECTIVE_SHAPED_COMMENT_RE.test(comment) ? '' : line)
+    .replace(/^\n/, '') || undefined;
   const before = inert(around?.[0].replace(/\s+$/, ''));
   const after = inert(around?.[1].replace(/^\s+/, ''));
   const r = (body: string) => ({ directivePrefix: fontPrefix, body, ...(before ? { before } : {}), ...(after ? { after } : {}) });

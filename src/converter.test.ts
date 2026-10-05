@@ -6299,6 +6299,35 @@ describe('HTML around a table in its block', () => {
     expect(markdown).toBe('| {++XX++} | b |\n| --- | --- |\n');
   });
 
+  test('keeps the HTML around a table off a table before it with the same first row and none', async () => {
+    // The first table took the second's, as no other had its first row
+    const md = table('H') + '\n\n<p>Cap B</p>\n' + table('H').replace('</table>', '<tr><td><p>b</p></td></tr></table>');
+    const markdown = await roundTrip(md + '\n');
+    expect(markdown.startsWith(table('H') + '\n\n<p>Cap B</p>\n<table>')).toBe(true);
+  });
+
+  test.each([
+    ['in a div with a caption and text', '<div>\n<p>Cap</p>\n<table>\n<!-- <tr><td>old</td></tr> -->\n</table>\n<p>Source</p>\n</div>\n'],
+    ['with a comment that reads as a directive, before a table', '<table><!-- table-font-size: 40 --></table>\n' + table('a') + '\n'],
+  ])('keeps a table whose rows are all commented out %s', async (_name, md) => {
+    // Its comments alone came back, and one set the next table's font size
+    const { docx } = await convertMdToDocx(md);
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml).not.toContain('<w:sz w:val="80"/>');
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('writes no line of a comment that would be a directive in the HTML around a table that leaves HTML', async () => {
+    // A block of its own, it styled the text after it
+    const zip = await JSZip.loadAsync((await convertMdToDocx('<table><tr><td>XX</td><td>b</td></tr></table>\n<!-- style: Title -->\nSource\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const tracked = xml.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>');
+    expect(tracked).not.toBe(xml);
+    zip.file('word/document.xml', tracked);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('| {++XX++} | b |\n| --- | --- |\n\nSource\n');
+  });
+
   test('warns of no HTML kept around a table in a list item, which is dropped', async () => {
     const { warnings } = await convertMdToDocx('- <p>Cap</p>\n  <table><tr><td>a</td></tr></table>\n');
     expect(warnings.some(w => w.startsWith('HTML around a table'))).toBe(false);
