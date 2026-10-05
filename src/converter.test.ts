@@ -5416,8 +5416,9 @@ describe('Word text that reads as Markdown', () => {
     // Each citation's search for a < read the run to its end
     const start = performance.now();
     expect(wrapWithFormatting('[@a] '.repeat(300000), DEFAULT_FORMATTING)).toBe('[@a] '.repeat(300000));
-    // Some 300 ms here, and four seconds read to the end for each citation
-    expect(performance.now() - start).toBeLessThan(1500);
+    // Some 300 ms here, near two seconds on a slower runner, and four
+    // seconds here read to the end for each citation
+    expect(performance.now() - start).toBeLessThan(3000);
   });
 
   test('escapes a long run of [ in linear time', () => {
