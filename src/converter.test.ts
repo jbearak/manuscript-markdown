@@ -8370,6 +8370,31 @@ describe('Track changes (CriticMarkup)', () => {
       expect(roundTrip.replace(/^---\n[\s\S]*?\n---\n?/, '').trim()).toBe(md);
     });
 
+    test.each(['indent', 'no-indent'])('keeps the %s override of a paragraph after a tracked mark', async override => {
+      // The break's text took the paragraph's place, and the override went
+      const md = 'a\n\n<!-- ' + override + ' -->\nb\n';
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+      const xml = await zip.file('word/document.xml')!.async('string');
+      const tracked = xml.replace(/(<w:p [^>]*>)((?:(?!<\/w:p>).)*?<w:t>a<\/w:t>)/, '$1<w:pPr><w:rPr><w:del w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"/></w:rPr></w:pPr>$2');
+      expect(tracked).not.toBe(xml);
+      zip.file('word/document.xml', tracked);
+      expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
+    });
+
+    test('writes many tracked marks in linear time', () => {
+      // Each read the content on its sides through all the others
+      const revision = { type: 'deletion' as const, author: 'A', date: '' };
+      const content: ContentItem[] = [];
+      for (let i = 0; i < 32000; i++) {
+        content.push(i === 0 ? { type: 'para' } : { type: 'para', breakRevision: revision });
+        content.push({ type: 'text', text: 'a' + i, commentIds: new Set(), formatting: DEFAULT_FORMATTING });
+      }
+      const start = performance.now();
+      const markdown = buildMarkdown(content, new Map());
+      expect(performance.now() - start).toBeLessThan(2000);
+      expect(markdown.startsWith('a0{--\n\n--}a1{--\n\n--}a2')).toBe(true);
+    });
+
     test('CriticMarkup inside math survives a round trip', async () => {
       const fence = '$'.repeat(2);
       for (const md of [

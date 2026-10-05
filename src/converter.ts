@@ -8103,27 +8103,68 @@ function survivesRevisions(item: ContentItem, type: RevisionInfo['type']): boole
   return false;
 }
 
-/** Inline content on one side of the paragraph break at `index`, through any
- *  further breaks tracked with the same type, since Word joins across those
- *  too, and through a break that opens the new side of a substitution, as in
- *  {~~a\n\nb~>\n\nc~~}, which the same CriticMarkup span holds. Undefined
- *  when a table or other block intervenes. */
-function contentAcrossTrackedBreaks(content: ContentItem[], index: number, step: 1 | -1, type: RevisionInfo['type']): ContentItem[] | undefined {
-  const items: ContentItem[] = [];
-  for (let k = index + step; k >= 0 && k < content.length; k += step) {
+/** The inline content on each side of a tracked paragraph break: whether
+ *  there is any, and whether any of it survives the break's revision type,
+ *  as when Word accepts (for a deletion) or rejects (for an addition) every
+ *  change of that type; undefined where a table or other block intervenes. */
+type TrackedBreakSide = { content: boolean; survives: boolean } | undefined;
+
+/**
+ * The content on each side of each tracked break in `content`, by the
+ * break's paragraph's index (see TrackedBreakSide). A side reads through any
+ * further breaks tracked with the same type, since Word joins across those
+ * too, and through a break that opens the new side of a substitution, as in
+ * {~~a\n\nb~>\n\nc~~}, which the same CriticMarkup span holds. After the
+ * break, a block after the paragraph's text, as the bibliography after the
+ * last paragraph, ends it, and a custom style block's close does; one right
+ * at the break intervenes. One pass each way, for both types at once:
+ * reading each break's sides across a run of breaks took time in the
+ * square of their number.
+ */
+function contentAroundTrackedBreaks(content: ContentItem[]): Map<number, { before: TrackedBreakSide; after: TrackedBreakSide }> {
+  type Side = { content: boolean; survives: boolean; end: 'open' | 'block' | 'none' };
+  const types: RevisionInfo['type'][] = ['addition', 'deletion'];
+  const fresh = (): Side => ({ content: false, survives: false, end: 'none' });
+  const read = (side: Side): TrackedBreakSide => side.end === 'none' ? { content: side.content, survives: side.survives } : undefined;
+  const passes = (k: number, type: RevisionInfo['type']) => (content[k] as ParaItem).breakRevision?.type === type || opensNewSide(content, k);
+  const sides = new Map<number, { before: TrackedBreakSide; after: TrackedBreakSide }>();
+  // Before each break, from the start: a block before the content ends
+  // the side with none, whatever comes between
+  let state = { addition: fresh(), deletion: fresh() };
+  for (let k = 0; k < content.length; k++) {
     const item = content[k];
-    // A custom style block closes after its last paragraph, which this ends
-    if (item.type === 'para' || (step === 1 && item.type === 'custom_style_close')) {
-      if (item.type === 'para' && (item.breakRevision?.type === type || opensNewSide(content, k))) continue;
-      return items;
+    if (item.type === 'para') {
+      if (item.breakRevision) sides.set(k, { before: read(state[item.breakRevision.type]), after: undefined });
+      for (const type of types) if (!passes(k, type)) state[type] = fresh();
+    } else if (isStructuralBoundaryItem(item) || (item.type === 'math' && item.display)) {
+      for (const type of types) state[type] = { ...fresh(), end: 'block' };
+    } else {
+      for (const type of types) {
+        if (state[type].end === 'none') state[type] = { content: true, survives: state[type].survives || survivesRevisions(item, type), end: 'none' };
+      }
     }
-    // A block after the paragraph's text, as the bibliography after the
-    // last paragraph, ends it; one right at the break intervenes
-    if (isStructuralBoundaryItem(item)) return step === 1 && items.length > 0 ? items : undefined;
-    if (item.type === 'math' && item.display) return undefined;
-    items.push(item);
   }
-  return items;
+  // After each break, from the end: a block ends the side with what comes
+  // before it, if anything does, but display math has none
+  state = { addition: fresh(), deletion: fresh() };
+  for (let k = content.length - 1; k >= 0; k--) {
+    const item = content[k];
+    if (item.type === 'para') {
+      if (item.breakRevision) sides.get(k)!.after = read(state[item.breakRevision.type]);
+      for (const type of types) if (!passes(k, type)) state[type] = fresh();
+    } else if (item.type === 'custom_style_close') {
+      state = { addition: fresh(), deletion: fresh() };
+    } else if (isStructuralBoundaryItem(item)) {
+      for (const type of types) state[type] = { ...fresh(), end: 'open' };
+    } else if (item.type === 'math' && item.display) {
+      for (const type of types) state[type] = { ...fresh(), end: 'block' };
+    } else {
+      for (const type of types) {
+        if (state[type].end !== 'block') state[type] = { content: true, survives: state[type].survives || survivesRevisions(item, type), end: 'none' };
+      }
+    }
+  }
+  return sides;
 }
 
 type ParaItem = Extract<ContentItem, { type: 'para' }>;
@@ -8215,6 +8256,7 @@ function trackedBreakMarks(values: unknown): TrackedBreakMarks {
  *  joinSpansAtTrackedBreaks then joins its span to the spans around it. */
 function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => TrackedBreakMarks, linePrefix: (para: ParaItem, opening: ParaItem | undefined) => string = () => ''): ContentItem[] {
   let joined: ContentItem[] | undefined;
+  let sides: ReturnType<typeof contentAroundTrackedBreaks> | undefined;
   for (let k = 0; k < content.length; k++) {
     const para = content[k];
     if (para.type !== 'para' || !para.breakRevision) continue;
@@ -8234,10 +8276,12 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
     }
     const container = breakContainer(para, 'after');
     if (!container || breakContainer(opening, 'before') !== container) continue;
-    const before = contentAcrossTrackedBreaks(content, k, -1, revision.type);
-    const after = contentAcrossTrackedBreaks(content, k, 1, revision.type);
-    if (!before?.some(item => survivesRevisions(item, revision.type))) continue;
-    if (!after?.some(item => survivesRevisions(item, revision.type))) continue;
+    // An indent override of the paragraph after, which the break's text
+    // in its place can't hold
+    if (para.indentOverride) continue;
+    sides ??= contentAroundTrackedBreaks(content);
+    const { before, after } = sides.get(k)!;
+    if (!before?.survives || !after?.survives) continue;
     joined ??= [...content];
     const prefix = linePrefix(para, opening);
     // A break alone has no end mark, so it ends with the next line's start,
