@@ -8277,15 +8277,22 @@ describe('Line breaks in a pipe table\'s cells', () => {
     '| a |\n| --- |\n| x\\\\<br>y |\n',
     '| a |\n| --- |\n| x <br> y |\n',
     '| a |\n| --- |\n| {++x<br>y++} |\n',
+    '| a |\n| --- |\n| `x`<br>$y$<br>{>>c<<} |\n',
+    // Line breaks at a cell's end, which Word shows as its blank lines
+    '| a |\n| --- |\n| x<br>y<br><br> |\n',
+    '| a |\n| --- |\n| x<br> |\n',
   ])('keeps %j a pipe table', async (md) => {
     // A line break made it an HTML table, as a cell's line can't hold the
     // backslash and line end of one
     expect(await roundTrip(md)).toBe(md);
   });
 
-  test('writes no pipe table where an equation has a line end in it', () => {
-    // After LaTeX's \\, which isn't a line break
-    const cell = { paragraphs: [[{ type: 'math', latex: 'a \\\\\nb', display: false }]] };
+  test.each([
+    ['after LaTeX\'s \\\\', 'a \\\\\nb'],
+    ['after a backslash in a LaTeX comment', 'a % c \\\nb'],
+  ])('writes no pipe table where an equation has a line end in it, %s', (_name, latex) => {
+    // Which isn't a line break
+    const cell = { paragraphs: [[{ type: 'math', latex, display: false }]] };
     const table = { type: 'table', rows: [{ isHeader: false, cells: [cell] }] } as unknown as ContentItem;
     expect(buildMarkdown([table], new Map())).not.toStartWith('| ');
   });
