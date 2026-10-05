@@ -514,7 +514,7 @@ The `breaks: true` frontmatter setting changes the default behavior so that bare
 
 ### GitHub Flavored Markdown Extension Notes
 
-- **Autolink literals** are enabled in parser and preview (for example, `https://example.com` is linkified without explicit `[]()` markup).
+- **Autolink literals** are enabled in parser and preview (for example, `https://example.com` is linkified without explicit `[]()` markup). A URL that is text in Word, not a link, comes back from DOCX with its colon escaped, `https\://example.com`, so it stays text, also where its formatting changes inside it, as a plain `https://` before a struck `example.com` does: `https\://~~example.com~~`.
 - **Strikethrough** uses standard GitHub `~~text~~` behavior.
 - **Task list items** are parsed semantically as checkbox list items, not only plain text prefixes. As in GFM, the box must be plain text at the very start of the item: `` - `[ ] a` ``, `- **[ ] a**`, `- [[ ] a](url)` and `- \[ ] a` are ordinary list items. An alert's marker, likewise, must be plain text at the start of a quote's line: `` > `[!NOTE]` `` and `> \[!NOTE]` are ordinary quotes.
 - **Disallowed raw HTML** follows the GitHub extension set (`title`, `textarea`, `style`, `xmp`, `iframe`, `noembed`, `noframes`, `script`, `plaintext`) and is treated as literal text in preview/conversion paths.
@@ -618,7 +618,7 @@ Manuscript Markdown uses [Pandoc citation syntax](https://pandoc.org/MANUAL.html
 - Suppress author: `[-@smith2020]`
 - With prefix: `[e.g., @smith2020; @jones2021]`, or per item: `[@smith2020; see also @jones2021]`
 
-Separate keys with semicolons even after a prefix. Write `[e.g., @smith2020; @jones2021]`, not `[e.g., @smith2020 and @jones2021]`. A citation with a prefix keeps its keys in the order written, even when the style would otherwise sort them, so a leading "e.g.," stays first. A prefix is plain text. Punctuation such as `=` or `<` is fine, but if the text before the first key contains Markdown formatting, such as code, emphasis, or CriticMarkup, the brackets stay ordinary text. To keep a character literal, escape it with a backslash, as in `[see \*also\* @smith2020]`. Keys and locators are read as written, so a tag such as `<b>` in one is text, and the preview shows a citation as text too.
+Separate keys with semicolons even after a prefix. Write `[e.g., @smith2020; @jones2021]`, not `[e.g., @smith2020 and @jones2021]`. A citation with a prefix keeps its keys in the order written, even when the style would otherwise sort them, so a leading "e.g.," stays first. A prefix is plain text. Punctuation such as `=` or `<` is fine, but if the text before the first key contains Markdown formatting, such as code, emphasis, or CriticMarkup, the brackets stay ordinary text. To keep a character literal, escape it with a backslash, as in `[see \*also\* @smith2020]`. Keys and locators are read as written, so a tag such as `<b>` in one is text, and the preview shows a citation as text too. On DOCX import, Word's text that reads as a citation stays one only where it is all one run of formatting. Where formatting, a tracked change or a comment changes inside it, export would take the delimiters for the key's, locator's or prefix's text, so its `[` is escaped: plain `[@smith2020, p. ` before a bold `2` and a plain `]` comes back as `\[@smith2020, p. **2**]`.
 
 Citations reference entries in a companion `.bib` file (see [BibTeX Companion File](#bibtex-companion-file) below).
 

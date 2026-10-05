@@ -8609,6 +8609,72 @@ describe('Line breaks in a pipe table\'s cells', () => {
   });
 });
 
+describe('Markdown across Word runs', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n/, '');
+  const run = (text: string, rPr = '') => '<w:r>' + (rPr ? '<w:rPr>' + rPr + '</w:rPr>' : '') + '<w:t xml:space="preserve">' + text + '</w:t></w:r>';
+  /** The document export makes of XX, with its run as `runs` */
+  const withRuns = async (runs: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('XX')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace(/<w:r>(?:(?!<w:r>).)*?<w:t[^>]*>XX<\/w:t><\/w:r>/s, runs);
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    return zip.generateAsync({ type: 'uint8array' });
+  };
+  /** The body's runs, their text and formatting, and its links */
+  const shown = async (docx: Uint8Array) => {
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const body = xml.slice(xml.indexOf('<w:body>'), xml.lastIndexOf('<w:sectPr'));
+    return [...body.matchAll(/<w:hyperlink\b|<w:r>([\s\S]*?)<\/w:r>/g)].map(([r, inner]) => r === '<w:hyperlink' ? 'link'
+      : (inner.match(/<w:(?:b|i|strike|highlight|rStyle)\b[^>]*>/g) ?? []).join('') + (inner.match(/<w:t[^>]*>([^<]*)<\/w:t>/)?.[1] ?? ''));
+  };
+
+  test.each([
+    ['a citation\'s key', run('[@a') + run('b]', '<w:b/>'), '\\[@a**b]**'],
+    ['a citation\'s key in italic', run('[@a') + run('b]', '<w:i/>'), '\\[@a*b]*'],
+    ['a citation\'s locator', run('[@a, p. ') + run('2', '<w:b/>') + run(']'), '\\[@a, p. **2**]'],
+    ['a citation\'s prefix, whose formatting the ] ends', run('[see ') + run('x @a]', '<w:b/>'), '\\[see **x @a]**'],
+    ['a citation\'s prefix, whose formatting the [ starts', run('x [see', '<w:b/>') + run(' y @a]'), '**x \\[see** y @a]'],
+    ['a citation\'s later prefix', run('[@a; see ') + run('x', '<w:i/>') + run(' @b]'), '\\[@a; see *x* @b]'],
+    ['a URL\'s host', run('https://') + run('e.com', '<w:strike/>'), 'https\\://~~e.com~~'],
+    ['a highlighted URL\'s host', run('https://') + run('e.com', '<w:highlight w:val="yellow"/>'), 'https\\://==e.com=='],
+    ['a URL\'s host in code', run('https://') + run('e.com', '<w:rStyle w:val="CodeChar"/>'), 'https\\://`e.com`'],
+    ['a URL\'s host with a run struck', run('https://') + run('e', '<w:strike/>') + run('.com'), 'https\\://~~e~~.com'],
+    ['a URL in the delimiters of its strikethrough', run('https://', '<w:strike/>') + run(' e.com'), '~~https\\://~~ e.com'],
+  ])('keeps Word\'s text as text where Markdown would read %s across runs', async (_name, runs, md) => {
+    // Export read the delimiters between the runs as part of the citation's
+    // text, as the key a**b, or linkify as part of the URL's
+    const docx = await withRuns(runs);
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(md + '\n');
+    expect(await shown((await convertMdToDocx(markdown)).docx)).toEqual(await shown(docx));
+  });
+
+  test('keeps a citation across runs in a tracked change as text', async () => {
+    const markdown = strip((await convertDocx(await withRuns(run('[@a')
+      + '<w:ins w:id="91" w:author="A" w:date="2026-01-01T00:00:00Z">' + run('b]') + '</w:ins>'))).markdown);
+    expect(markdown).toBe('\\[@a{++b]++}\n');
+    expect(strip((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown)).toBe(markdown);
+  });
+
+  test.each([
+    // A prefix whose formatting closes in it, which export reads as text
+    '[see *x* @a]\n', '[x **y** @a] and [see `c` @b]\n', '[see {++x++} @a]\n', '{==[see *x* @a]==}{>>c<<}\n',
+    // A host its delimiters end
+    'https://**e.com**\n', 'https://{++e.com++}\n',
+  ])('keeps %j as it is', async (md) => {
+    expect(strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown)).toBe(md);
+  });
+
+  test.each([['[@a', 'b]'], ['[see ', 'x @a]'], ['https://', 'e']])('escapes runs of %j and struck %j in linear time', (text, struck) => {
+    const items = Array.from({ length: 32000 }, (_, k) => (
+      { type: 'text', text: k % 2 ? struck : text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, strikethrough: k % 2 === 1 } }));
+    const start = performance.now();
+    buildMarkdown(items as ContentItem[], new Map());
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+});
+
 describe('XML entity limits', () => {
   test('a document with more than 10,000 standard entities converts', async () => {
     // Long manuscripts pass this easily: every Zotero field code is full of &quot;
