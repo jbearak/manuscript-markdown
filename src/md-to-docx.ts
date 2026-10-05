@@ -6477,8 +6477,35 @@ function withParagraphMarkRevision(pPr: string, revision: string): string {
  * around lines that hold only bodies. Import writes the bodies on the lines
  * after their paragraph. A block of body lines keeps one break, joining the
  * lines on either side, unless it ends the paragraph or is all of it.
+ * A revision's or a highlight's text loses them too, as in
+ * {++x\n{#1>>c<<}++}, where its edges are its line's only if it starts or
+ * ends one: `startsLine` and `endsLine` say whether the runs do.
  */
-function withoutCommentBodyLines(runs: MdRun[]): MdRun[] {
+function withoutCommentBodyLines(source: MdRun[], startsLine = true, endsLine = true): MdRun[] {
+  const hasBody = (runs: MdRun[] | undefined): boolean => !!runs?.some(run => run.type === 'comment_body_with_id'
+    || hasBody(run.innerRuns) || hasBody(run.oldRuns) || hasBody(run.newRuns));
+  if (!hasBody(source)) return source;
+  // A run starts or ends its line where only runs that take no room, as a
+  // comment, its range markers or a body, are between it and the line's edge
+  const roomless = (run: MdRun) => run.type === 'critic_comment' || isCommentMarkerRun(run);
+  const edgeFrom = (i: number, step: number, atEdge: boolean) => {
+    let j = i + step;
+    while (j >= 0 && j < source.length && roomless(source[j])) j += step;
+    return j < 0 || j === source.length ? atEdge : isBreakRun(source[j]);
+  };
+  // Each side of a substitution stands for the whole of it, as accepted or rejected
+  const runs = source.map((run, i) => {
+    if (!hasBody(run.innerRuns) && !hasBody(run.oldRuns) && !hasBody(run.newRuns)) return run;
+    const starts = edgeFrom(i, -1, startsLine);
+    const ends = edgeFrom(i, 1, endsLine);
+    const payload = (inner: MdRun[] | undefined) => inner && withoutCommentBodyLines(inner, starts, ends);
+    return {
+      ...run,
+      ...(run.innerRuns ? { innerRuns: payload(run.innerRuns) } : {}),
+      ...(run.oldRuns ? { oldRuns: payload(run.oldRuns) } : {}),
+      ...(run.newRuns ? { newRuns: payload(run.newRuns) } : {}),
+    };
+  });
   if (!runs.some(run => run.type === 'comment_body_with_id')) return runs;
   const lines: MdRun[][] = [[]];
   const breaks: MdRun[] = [];
@@ -6496,16 +6523,20 @@ function withoutCommentBodyLines(runs: MdRun[]): MdRun[] {
   // Range markers take no room, so they stay where they are
   const marker = (run: MdRun) => run.type === 'comment_range_start' || run.type === 'comment_range_end';
   const edge = (run: MdRun) => run.type === 'comment_body_with_id' || blank(run) || marker(run);
-  const edgeBodies = (line: MdRun[]) => {
+  // Whether line k starts or ends its line in the paragraph, not where the
+  // runs are a payload with more of the line before or after it
+  const startsAt = (k: number) => k > 0 || startsLine;
+  const endsAt = (k: number) => k < lines.length - 1 || endsLine;
+  const edgeBodies = (line: MdRun[], k: number) => {
     // Bodies, markers and blank text from the start of the line, and from its end
     let head = 0;
-    while (head < line.length && edge(line[head])) head++;
+    while (startsAt(k) && head < line.length && edge(line[head])) head++;
     let tail = line.length;
-    while (tail > head && edge(line[tail - 1])) tail--;
+    while (endsAt(k) && tail > head && edge(line[tail - 1])) tail--;
     return { head, tail };
   };
-  const trimmed = lines.map(line => {
-    const { head, tail } = edgeBodies(line);
+  const trimmed = lines.map((line, k) => {
+    const { head, tail } = edgeBodies(line, k);
     const hasBody = (from: number, to: number) => line.slice(from, to).some(run => run.type === 'comment_body_with_id');
     const atHead = hasBody(0, head);
     const atTail = hasBody(tail, line.length);
@@ -6519,17 +6550,18 @@ function withoutCommentBodyLines(runs: MdRun[]): MdRun[] {
     const bodies = (start: number, end: number) => line.slice(start, end).filter(run => run.type === 'comment_body_with_id' || marker(run));
     return [...(atHead ? bodies(0, head) : []), ...middle, ...(atTail ? bodies(tail, line.length) : [])];
   });
-  const bodyLine = (line: MdRun[]) => line.some(run => run.type === 'comment_body_with_id')
+  const bodyLine = (line: MdRun[], k: number) => startsAt(k) && endsAt(k)
+    && line.some(run => run.type === 'comment_body_with_id')
     && line.every(run => run.type === 'comment_body_with_id' || marker(run));
   // Break k sits between lines k and k + 1
   const dropped = new Set<number>();
   for (let first = 0; first < trimmed.length;) {
-    if (!bodyLine(trimmed[first])) {
+    if (!bodyLine(trimmed[first], first)) {
       first++;
       continue;
     }
     let last = first;
-    while (last + 1 < trimmed.length && bodyLine(trimmed[last + 1])) last++;
+    while (last + 1 < trimmed.length && bodyLine(trimmed[last + 1], last + 1)) last++;
     for (let k = first; k < last; k++) dropped.add(k);
     if (last + 1 < trimmed.length) dropped.add(last);
     else if (first > 0) dropped.add(first - 1);

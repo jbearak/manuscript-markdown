@@ -7476,6 +7476,33 @@ describe('Track changes (CriticMarkup)', () => {
       expect(await roundTrip(md2)).toBe(md2);
     });
 
+    test.each([
+      ['{++{#1}x{/1}\n{#1>>c<<}++}', '{=={++x++}==}{>>c<<}'],
+      ['{--{#1}x{/1}\n{#1>>c<<}--}', '{=={--x--}==}{>>c<<}'],
+      ['{~~{#1}x{/1}\n{#1>>c<<}~>y~~}', '{=={--x--}==}{>>c<<}{++y++}'],
+      ['{~~y~>{#1}x{/1}\n{#1>>c<<}~~}', '{--y--}{=={++x++}==}{>>c<<}'],
+      ['{=={#1}x{/1}\n{#1>>c<<}==}{>>d<<}', '{#1}{#2}x{/1}{/2}\n{#1>>d<<}\n{#2>>c<<}'],
+      ['{++a {--{#1}x{/1}\n{#1>>c<<}--}++}', '{++a ++}{=={--x--}==}{>>c<<}'],
+      ['{++{#1}x{/1} {#1>>c<<}++}', '{=={++x++}==}{>>c<<}'],
+    ])('drops the line break before a comment body on its own line in %j', async (md, expected) => {
+      // Only a paragraph's own lines lost it, so the break in a revision's
+      // text exported as a space, or with breaks: true as a line break
+      for (const front of ['', '---\nbreaks: true\n---\n\n']) {
+        const { docx } = await convertMdToDocx(front + md);
+        const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+        expect(xml).not.toContain('<w:br/>');
+        expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(expected + '\n');
+      }
+    });
+
+    test.each([
+      ['', '{++a ++}{=={++x++}==}{>>c<<}{++ b++}'],
+      ['---\nbreaks: true\n---\n\n', '{++a ++}{=={++x++}==}{>>c<<}{++\\\nb++}'],
+    ])('keeps one line break across a comment body on its own line in a revision, after %j', async (front, expected) => {
+      const { docx } = await convertMdToDocx(front + '{++a {#1}x{/1}\n{#1>>c<<}\nb++}');
+      expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(expected + '\n');
+    });
+
     test('revision in footnote body', async () => {
       const docXml = wrapDocumentXml(
         '<w:p><w:r><w:t>Text</w:t></w:r>'
