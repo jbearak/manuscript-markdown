@@ -47,6 +47,14 @@ const PICTOGRAPHIC_RE = /^\p{Extended_Pictographic}$/u;
  */
 export function getDisplayWidth(str: string): number {
   let width = 0;
+  for (const w of characterWidths(str)) width += w;
+  return width;
+}
+
+/** The width of each character of `str`, by code point, as getDisplayWidth
+ *  counts it in its sequence, as a skin tone counts none after an emoji */
+function characterWidths(str: string): number[] {
+  const widths: number[] = [];
   // The last character that isn't a mark, and what it counted
   let base = '';
   let baseWidth = 0;
@@ -74,9 +82,9 @@ export function getDisplayWidth(str: string): number {
       baseWidth = w;
       joined = false;
     }
-    width += w;
+    widths.push(w);
   }
-  return width;
+  return widths;
 }
 
 /** The alignment a column's dashes in a separator set: :-- left, :-: center, --: right */
@@ -229,6 +237,8 @@ function gridLineCells(line: string, boundaries: number[]): string[] {
   const display = new Map<number, number>();
   const index = new Map<number, number>();
   const pipes: Array<{ k: number; column: number }> = [];
+  // Each character's width in its sequence, as the padding counts it
+  const widths = characterWidths(line);
   let width = 0;
   let offset = 0;
   for (const ch of line) {
@@ -240,7 +250,7 @@ function gridLineCells(line: string, boundaries: number[]): string[] {
       index.set(offset, k);
       pipes.push({ k, column: width });
     }
-    width += getDisplayWidth(ch);
+    width += widths[k];
     offset += ch.length;
   }
   const at = (columns: Map<number, number>) => boundaries.map(b => columns.get(b) ?? -1);

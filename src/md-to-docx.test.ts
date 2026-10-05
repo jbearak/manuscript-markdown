@@ -674,6 +674,14 @@ describe('parseMd grid tables', () => {
       ['a👍🏽', 'a🇺🇸', 'aที่นี่', 'a👨‍👩‍👧', 'a✔️', 'a✅', 'a☺', 'a\u00adb'].map((text, k) => [text, String(k)]));
   });
 
+  it.each(['👍🏽', '🇺🇸', '👨‍👩‍👧', '✔️'])('keeps a | after %s in a grid table\'s cell', (emoji) => {
+    // Each character's width was counted alone, as a skin tone two, so the
+    // cell's | was taken for the one under the +
+    const text = emoji + ' |';
+    const table = parseMd('+------+-----+\n| ' + text + ' '.repeat(4 - getDisplayWidth(text)) + ' | b   |\n+------+-----+').find(t => t.type === 'table');
+    expect(table?.rows?.[0].cells.map(cell => cell.runs.map(run => run.text).join(''))).toEqual([text, 'b']);
+  });
+
   it.each([
     ['👍🏽', 2], ['🇺🇸', 2], ['🇺', 1], ['ที่นี่', 2], ['e\u0301', 1], ['👨‍👩‍👧', 2], ['🏳️‍🌈', 2], ['✔️', 2], ['#️⃣', 2],
     ['✅', 2], ['⭐', 2], ['🅰', 1], ['🅰️', 2], ['🏽', 2], ['中', 2], ['１', 2], ['ｱ', 1], ['a\u00adb', 2], ['a\u200db', 2], ['☺\ufe0e', 1],
