@@ -6948,6 +6948,18 @@ describe('Code block round-trip', () => {
       .toBe(text + note('a', 'js') + '\n' + note('b', 'py'));
   });
 
+  test('drops Word\'s space after the note\'s mark in a code paragraph that holds it', async () => {
+    // A Word user made the note's first paragraph, its mark's, code
+    const zip = await JSZip.loadAsync((await convertMdToDocx('Text.[^a]\n\n[^a]: XX\n')).docx);
+    const xml = await zip.file('word/footnotes.xml')!.async('string');
+    const edited = xml.replace('<w:pStyle w:val="FootnoteText"/>', '<w:pStyle w:val="CodeBlock"/>')
+      .replace('<w:t>XX</w:t>', '<w:t xml:space="preserve"> x = 1</w:t>');
+    expect(edited).toContain('CodeBlock');
+    zip.file('word/footnotes.xml', edited);
+    expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)
+      .toBe('Text.[^a]\n\n[^a]:\n\n    ```\n    x = 1\n    ```\n');
+  });
+
   test('code block without language survives round-trip', async () => {
     const md = '```\nplain code\n```';
     const docxResult = await convertMdToDocx(md);

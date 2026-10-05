@@ -3260,7 +3260,14 @@ function parseNoteBody(
             target.push(paraItem);
           }
           const lenBeforeContent = target.length;
+          const markBefore = skippedSelfRef;
           walkNoteBody(paraChildren, paraFormatting, target, inTableCell, currentRevision);
+          // Word's space after the note's mark, where a Word user made the
+          // paragraph that holds it code, goes, as it does before text
+          if (isCodeBlock && !markBefore && skippedSelfRef) {
+            const first = target.slice(lenBeforeContent).find(walked => walked.type !== 'text' || walked.text !== '');
+            if (first?.type === 'text') first.text = first.text.replace(/^[ \t]/, '');
+          }
           // Display math in the paragraph goes on in it (see the document's)
           if (!inTableCell) {
             for (let k = lenBeforeContent; k < target.length; k++) {
