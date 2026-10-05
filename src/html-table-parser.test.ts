@@ -35,6 +35,31 @@ describe('HTML table cell paragraphs', () => {
     ]);
   });
 
+  test.each([
+    ['a comment', 'a <!-- c --> b', [{ type: 'text', text: 'a ' }, { type: 'html_comment', text: '<!-- c -->' }, { type: 'text', text: 'b' }]],
+    ['a comment after a break', 'a<br><!-- c --> b', [{ type: 'text', text: 'a' }, { type: 'softbreak', text: '\n' }, { type: 'html_comment', text: '<!-- c -->' }, { type: 'text', text: 'b' }]],
+    ['a tag', 'a <b> b</b>', [{ type: 'text', text: 'a ' }, { type: 'text', text: 'b', bold: true }]],
+  ])('runs whitespace together across %s, as HTML does', (_name, cell, expected) => {
+    // Word showed two spaces where HTML shows one
+    expect(runs(cell)).toEqual(expected);
+  });
+
+  test('keeps a break that ends a paragraph before a comment', () => {
+    // The comment hid the break from the </p>, so it went as one ending the cell
+    expect(runs('<p>a<br><!-- c --></p>')).toEqual([{ type: 'text', text: 'a' }, { type: 'softbreak', text: '\n' }, { type: 'html_comment', text: '<!-- c -->' }]);
+  });
+
+  test.each([
+    ['a table\'s body', '<table><tbody title="<!--"><tr><td>a</td></tr></tbody></table>'],
+    ['a div around it', '<div title="<!--"><table><tr><td>a</td></tr></table></div>'],
+    ['a row', '<table><tr title="<!--"><td>a</td></tr></table>'],
+    ['a tag between cells', '<table><tr><span title="<!--"></span><td>a</td></tr></table>'],
+    ['a tag in a cell', '<table><tr><td><span title="<!-- >">a</span></td></tr></table>'],
+  ])('reads a table past a <!-- in an attribute of %s', (_name, html) => {
+    // Which read as a comment to the end, which hid the rows
+    expect(extractHtmlTables(html).map(table => table.rows.map(row => row.cells.map(cell => cell.runs.map(run => run.text).join(''))))).toEqual([[['a']]]);
+  });
+
   test('keeps an empty paragraph', () => {
     // A paragraph run only separated paragraphs with text
     const paragraph = { type: 'paragraph', text: '\n\n' };

@@ -77,11 +77,12 @@ export function extractHtmlTables(html: string): HtmlTableMeta[] {
   // Regex-based extraction intentionally does not support nested <table> blocks.
   // This parser targets simple manuscript tables (<table>/<tr>/<th>/<td>).
   // Not one in a comment, which the browser and Word's export of it hide,
-  // which the search goes past whole, to the end where no --> ends it.
-	const tableRegex = /<!--(?:[\s\S]*?-->|[\s\S]*$)|<table\b((?:"[^"]*"|'[^']*'|[^'">])*)>([\s\S]*?)<\/table>/gi;
+  // which the search goes past whole, to the end where no --> ends it, as
+  // it goes past each other tag, whose quoted attribute can hold a <!--.
+	const tableRegex = /<!--(?:[\s\S]*?-->|[\s\S]*$)|<table\b((?:"[^"]*"|'[^']*'|[^'">])*)>([\s\S]*?)<\/table>|<\/?[A-Za-z][^\s/>]*(?:"[^"]*"|'[^']*'|[^'">])*>/gi;
   let tableMatch: RegExpExecArray | null;
   while ((tableMatch = tableRegex.exec(html)) !== null) {
-    if (tableMatch[0].startsWith('<!--')) continue;
+    if (tableMatch[2] === undefined) continue;
     const attrs = tableMatch[1];
     const comments: string[] = [];
     const rows = extractHtmlTableRows(tableMatch[2], comments);
@@ -147,13 +148,14 @@ function extractHtmlTableRows(tableHtml: string, comments: string[]): HtmlTableR
   const rows: HtmlTableRow[] = [];
   // Similarly, nested <tr> structures are out of scope for this lightweight parser.
   // Not one in a comment, as for a table (see extractHtmlTables).
-	const rowRegex = /<!--(?:[\s\S]*?-->|[\s\S]*$)|<tr\b(?:"[^"]*"|'[^']*'|[^'">])*?>([\s\S]*?)<\/tr>/gi;
+	const rowRegex = /<!--(?:[\s\S]*?-->|[\s\S]*$)|<tr\b(?:"[^"]*"|'[^']*'|[^'">])*?>([\s\S]*?)<\/tr>|<\/?[A-Za-z][^\s/>]*(?:"[^"]*"|'[^']*'|[^'">])*>/gi;
   let rowMatch: RegExpExecArray | null;
   while ((rowMatch = rowRegex.exec(tableHtml)) !== null) {
     if (rowMatch[0].startsWith('<!--')) {
       comments.push(rowMatch[0]);
       continue;
     }
+    if (rowMatch[1] === undefined) continue;
     const cells = extractHtmlTableCells(rowMatch[1], comments);
     // Invariant: rows with no cells are skipped.
     if (cells.length > 0) {
@@ -176,13 +178,14 @@ function extractHtmlTableCells(rowHtml: string, comments: string[]): Array<HtmlT
   const cells: Array<HtmlTableCell & { isHeader: boolean }> = [];
   // Nested table-cell tags are not supported; this matches flat <th>/<td> content only.
   // Not one in a comment, as for a table (see extractHtmlTables).
-	const cellRegex = /<!--(?:[\s\S]*?-->|[\s\S]*$)|<(th|td)\b((?:"[^"]*"|'[^']*'|[^'">])*)>([\s\S]*?)<\/\1>/gi;
+	const cellRegex = /<!--(?:[\s\S]*?-->|[\s\S]*$)|<(th|td)\b((?:"[^"]*"|'[^']*'|[^'">])*)>([\s\S]*?)<\/\1>|<\/?[A-Za-z][^\s/>]*(?:"[^"]*"|'[^']*'|[^'">])*>/gi;
   let cellMatch: RegExpExecArray | null;
   while ((cellMatch = cellRegex.exec(rowHtml)) !== null) {
     if (cellMatch[0].startsWith('<!--')) {
       comments.push(cellMatch[0]);
       continue;
     }
+    if (cellMatch[1] === undefined) continue;
     const isHeader = cellMatch[1].toLowerCase() === 'th';
     const attrs = cellMatch[2];
     const runs = parseHtmlCellRuns(cellMatch[3]);
@@ -281,7 +284,12 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
   };
   const emitText = (rawText: string) => {
     let text = code ? rawText : collapseHtmlWhitespace(rawText);
-    if (!code && (paragraphClosed || atParagraphStart || runs[runs.length - 1]?.type === 'softbreak')) text = text.replace(/^ /, '');
+    // Whitespace runs together with a space the text before ends with, as
+    // HTML has it, past tags and comments, which show nothing
+    const before = runs[lastShown()];
+    if (!code && (paragraphClosed || atParagraphStart || before?.type === 'softbreak' || before?.type === 'text' && !before.code && before.text.endsWith(' '))) {
+      text = text.replace(/^ /, '');
+    }
     if (!text) return;
     startContent();
     runs.push({
@@ -299,8 +307,9 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
     linkStart = false;
   };
 
-  // Tokenize the HTML into tags, comments, and text segments
-  const tagRegex = /<!--(?:[\s\S]*?-->|[\s\S]*$)|<(\/?)(\w+)\b([^>]*)>/g;
+  // Tokenize the HTML into tags, comments, and text segments. A tag's
+  // quoted attribute can hold a > or a <!--.
+  const tagRegex = /<!--(?:[\s\S]*?-->|[\s\S]*$)|<(\/?)(\w+)\b((?:"[^"]*"|'[^']*'|[^'">])*)>/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
@@ -346,7 +355,7 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
         href = undefined;
       }
     } else if (tag === 'p') {
-      const last = runs[runs.length - 1];
+      const last = runs[lastShown()];
       if (!isClose) startParagraph();
       else {
         if (last?.type === 'softbreak') closedBreaks.add(last);
