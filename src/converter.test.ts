@@ -5740,6 +5740,8 @@ describe('HTML table cells', () => {
     // Which Word showed as text
     ['a comment', '      <p>a<!-- c --> b</p>'],
     ['comments alone and in formatting', '      <p><!-- c --></p>\n      <p><b>x<!-- d -->y</b></p>'],
+    // Whose </td> ended the cell, which lost what came after it
+    ['a comment with a cell\'s end in it', '      <p><!-- <td>old</td> -->b</p>'],
   ])('keeps %s', async (_name, cell) => {
     // Import wrote Markdown in the cell, which exports as literal text, with
     // a backslash before each character Markdown would read, and more on
@@ -5747,6 +5749,19 @@ describe('HTML table cells', () => {
     const md = table(cell);
     expect(await roundTrip(md)).toBe(md);
     expect(await roundTrip(await roundTrip(md))).toBe(md);
+  });
+
+  test('writes a table whose cell has a comment with a blank line in it as no HTML table', async () => {
+    // The blank line ended the table's HTML block, which exported as text
+    const zip = await JSZip.loadAsync((await convertMdToDocx('<table><tr><td>a<!-- x y -->b</td><td>c</td></tr></table>\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const broken = xml.replace('x y --&gt;', 'x</w:t><w:br/><w:br/><w:t xml:space="preserve">y --&gt;');
+    expect(broken).not.toBe(xml);
+    zip.file('word/document.xml', broken);
+    const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(md).not.toContain('<table>');
+    expect(md).toContain('a<!-- x');
+    expect((await roundTrip(md)).trim()).toBe(md.trim());
   });
 
   test('writes a cell\'s paragraphs as paragraphs of the Word cell', async () => {

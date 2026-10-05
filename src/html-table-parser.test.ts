@@ -60,6 +60,30 @@ describe('HTML table cell paragraphs', () => {
     expect(extractHtmlTables(html).map(table => table.rows.map(row => row.cells.map(cell => cell.runs.map(run => run.text).join(''))))).toEqual([[['a']]]);
   });
 
+  test.each([
+    ['a cell', '<table><tr><td><!-- <td>old</td> -->b</td><td>c</td></tr></table>', [['<!-- <td>old</td> -->b', 'c']]],
+    ['a row', '<table><tr><td>a<!-- </tr><tr> --></td></tr><tr><td>b</td></tr></table>', [['a<!-- </tr><tr> -->'], ['b']]],
+    ['a table', '<table><tr><td>a<!-- </table> --></td></tr><tr><td>b</td></tr></table>', [['a<!-- </table> -->'], ['b']]],
+  ])('reads no end of %s in a comment in it', (_name, html, expected) => {
+    // Which ended it there, and lost the rest
+    expect(extractHtmlTables(html).map(table => table.rows.map(row => row.cells.map(cell => cell.runs.map(run => run.text).join('')))))
+      .toEqual([expected]);
+  });
+
+  test('reads the cells before a comment with no -->, which runs to the end, as one', () => {
+    // Which the browser ends the row and table at
+    const [table] = extractHtmlTables('<table><tr><td>a</td><!-- <td>b</td></tr></table>');
+    expect(table.rows.map(row => row.cells.map(cell => cell.runs.map(run => run.text).join('')))).toEqual([['a']]);
+    expect(table.comments).toEqual(['<!-- <td>b</td></tr></table>']);
+  });
+
+  test('reads a table with many <!-- and no --> in linear time', () => {
+    const start = performance.now();
+    extractHtmlTables('<table><tr><td>' + '<!--'.repeat(20000) + '</td></tr></table>');
+    extractHtmlTables('<table><tr>' + '<td>a<!-- c --><b title="<!--">x</b></td>'.repeat(2000) + '</tr></table>');
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+
   test('keeps an empty paragraph', () => {
     // A paragraph run only separated paragraphs with text
     const paragraph = { type: 'paragraph', text: '\n\n' };

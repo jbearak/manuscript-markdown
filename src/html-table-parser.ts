@@ -72,6 +72,27 @@ function parseColWidthsAttr(raw: string): number[] | 'equal' | 'auto' | undefine
   return nums;
 }
 
+// A tag, whose quoted attributes can hold a > or a <!--
+const HTML_TAG_BODY = '\\/?[A-Za-z][^\\s/>]*(?:"[^"]*"|\'[^\']*\'|[^\'">])*>';
+const HTML_TAG = '<' + HTML_TAG_BODY;
+
+/** A piece of the HTML in a table, row or cell, as the search for its end
+ *  reads it: a comment or a tag whole, so that an end tag in either ends
+ *  nothing, or else a character. Each (?=(...))\N takes what it finds whole,
+ *  as an atomic group would, and a < takes one of the three, so the search
+ *  has one way through the HTML. `group` is the number of its first group
+ *  in the search's pattern. A comment with no --> isn't one, as it ends
+ *  what holds it (see HTML_REST_IN_COMMENT). */
+function htmlContentUnit(group: number): string {
+  return '(?:(?=(<!--[\\s\\S]*?-->))\\' + group + '|(?=(' + HTML_TAG + '))\\' + (group + 1)
+    + '|[^<]|<(?!!--)(?!' + HTML_TAG_BODY + '))';
+}
+
+// A comment with no -->, which runs to the end, past the end tag of what
+// holds it, which the browser ends there, so it goes with what holds it,
+// whose search reads it as a comment
+const HTML_REST_IN_COMMENT = '((?=<!--(?![\\s\\S]*?-->))[\\s\\S]*)';
+
 export function extractHtmlTables(html: string): HtmlTableMeta[] {
   const tables: HtmlTableMeta[] = [];
   // Regex-based extraction intentionally does not support nested <table> blocks.
@@ -79,13 +100,14 @@ export function extractHtmlTables(html: string): HtmlTableMeta[] {
   // Not one in a comment, which the browser and Word's export of it hide,
   // which the search goes past whole, to the end where no --> ends it, as
   // it goes past each other tag, whose quoted attribute can hold a <!--.
-	const tableRegex = /<!--(?:[\s\S]*?-->|[\s\S]*$)|<table\b((?:"[^"]*"|'[^']*'|[^'">])*)>([\s\S]*?)<\/table>|<\/?[A-Za-z][^\s/>]*(?:"[^"]*"|'[^']*'|[^'">])*>/gi;
+  // Nor does a </table> in a comment in it end it (see htmlContentUnit).
+	const tableRegex = new RegExp('<!--(?:[\\s\\S]*?-->|[\\s\\S]*$)|<table\\b((?:"[^"]*"|\'[^\']*\'|[^\'">])*)>(' + htmlContentUnit(3) + '*?)(?:<\\/table>|' + HTML_REST_IN_COMMENT + ')|' + HTML_TAG, 'gi');
   let tableMatch: RegExpExecArray | null;
   while ((tableMatch = tableRegex.exec(html)) !== null) {
     if (tableMatch[2] === undefined) continue;
     const attrs = tableMatch[1];
     const comments: string[] = [];
-    const rows = extractHtmlTableRows(tableMatch[2], comments);
+    const rows = extractHtmlTableRows(tableMatch[2] + (tableMatch[5] ?? ''), comments);
     // Invariant: only tables with rows are returned to callers, or with
     // comments that hide all of them, which a caller can't drop unseen.
     if (rows.length > 0 || comments.length > 0) {
@@ -148,7 +170,7 @@ function extractHtmlTableRows(tableHtml: string, comments: string[]): HtmlTableR
   const rows: HtmlTableRow[] = [];
   // Similarly, nested <tr> structures are out of scope for this lightweight parser.
   // Not one in a comment, as for a table (see extractHtmlTables).
-	const rowRegex = /<!--(?:[\s\S]*?-->|[\s\S]*$)|<tr\b(?:"[^"]*"|'[^']*'|[^'">])*?>([\s\S]*?)<\/tr>|<\/?[A-Za-z][^\s/>]*(?:"[^"]*"|'[^']*'|[^'">])*>/gi;
+	const rowRegex = new RegExp('<!--(?:[\\s\\S]*?-->|[\\s\\S]*$)|<tr\\b(?:"[^"]*"|\'[^\']*\'|[^\'">])*?>(' + htmlContentUnit(2) + '*?)(?:<\\/tr>|' + HTML_REST_IN_COMMENT + ')|' + HTML_TAG, 'gi');
   let rowMatch: RegExpExecArray | null;
   while ((rowMatch = rowRegex.exec(tableHtml)) !== null) {
     if (rowMatch[0].startsWith('<!--')) {
@@ -156,7 +178,7 @@ function extractHtmlTableRows(tableHtml: string, comments: string[]): HtmlTableR
       continue;
     }
     if (rowMatch[1] === undefined) continue;
-    const cells = extractHtmlTableCells(rowMatch[1], comments);
+    const cells = extractHtmlTableCells(rowMatch[1] + (rowMatch[4] ?? ''), comments);
     // Invariant: rows with no cells are skipped.
     if (cells.length > 0) {
       rows.push({
@@ -178,7 +200,7 @@ function extractHtmlTableCells(rowHtml: string, comments: string[]): Array<HtmlT
   const cells: Array<HtmlTableCell & { isHeader: boolean }> = [];
   // Nested table-cell tags are not supported; this matches flat <th>/<td> content only.
   // Not one in a comment, as for a table (see extractHtmlTables).
-	const cellRegex = /<!--(?:[\s\S]*?-->|[\s\S]*$)|<(th|td)\b((?:"[^"]*"|'[^']*'|[^'">])*)>([\s\S]*?)<\/\1>|<\/?[A-Za-z][^\s/>]*(?:"[^"]*"|'[^']*'|[^'">])*>/gi;
+	const cellRegex = new RegExp('<!--(?:[\\s\\S]*?-->|[\\s\\S]*$)|<(th|td)\\b((?:"[^"]*"|\'[^\']*\'|[^\'">])*)>(' + htmlContentUnit(4) + '*?)(?:<\\/\\1>|' + HTML_REST_IN_COMMENT + ')|' + HTML_TAG, 'gi');
   let cellMatch: RegExpExecArray | null;
   while ((cellMatch = cellRegex.exec(rowHtml)) !== null) {
     if (cellMatch[0].startsWith('<!--')) {
@@ -188,7 +210,7 @@ function extractHtmlTableCells(rowHtml: string, comments: string[]): Array<HtmlT
     if (cellMatch[1] === undefined) continue;
     const isHeader = cellMatch[1].toLowerCase() === 'th';
     const attrs = cellMatch[2];
-    const runs = parseHtmlCellRuns(cellMatch[3]);
+    const runs = parseHtmlCellRuns(cellMatch[3] + (cellMatch[6] ?? ''));
     const colspan = parseInt(extractAttr(attrs, 'colspan') ?? '', 10) || undefined;
     const rowspan = parseInt(extractAttr(attrs, 'rowspan') ?? '', 10) || undefined;
     const kind = parseHtmlTableCellSourceKind(extractAttr(attrs, 'data-mm-kind'));
