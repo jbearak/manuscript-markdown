@@ -8731,8 +8731,10 @@ export function buildMarkdown(
           const mathBlock = MATH_FENCE + '\n' + canonicalizeDisplayMathLatex(item.latex) + '\n' + MATH_FENCE;
           const commented = displayMathWithComments(item.revision ? wrapWithRevision(mathBlock, item.revision) : mathBlock, item);
           if (item.inParagraph && paragraphPart !== undefined) {
-            // In place of the space export wrote for the line's end
-            bodyParts[paragraphPart] = bodyParts[paragraphPart].replace(/(?<!\\) $/, '') + '\n' + commented.block;
+            // In place of the space export wrote for the line's end, or after
+            // the line end of a line break that ends the text
+            const text = bodyParts[paragraphPart].replace(/(?<!\\) $/, '');
+            bodyParts[paragraphPart] = text + (text.endsWith('\n') ? '' : '\n') + commented.block;
           } else {
             bodyParts.push(commented.block);
             paragraphPart = item.inParagraph ? bodyParts.length - 1 : undefined;
