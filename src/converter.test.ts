@@ -6547,6 +6547,18 @@ describe('HTML around a table in its block', () => {
     expect(markdown).toContain('<p>z</p>');
   });
 
+  test.each([
+    ['its own', '<div><p>Cap</p>\n<table><tr><td>a</td></tr></table>\n</div>\n', '<div><p>Cap</p>\n<table>\n  <tr>\n    <td>\n      <p>a</p>\n    </td>\n  </tr>\n</table>\n</div>\n'],
+    ['none', '<table><tr><td>a</td></tr></table>\n', table('a') + '\n'],
+  ])('gives a table alike an embedded one with HTML around it %s', async (_name, after, expected) => {
+    // Export kept the embedded table's HTML, which import, writing its
+    // embed directive, left for the table alike it
+    const resolver = { readFile: () => new TextEncoder().encode('<table><tr><td>a</td></tr></table><p>Embedded note</p>\n'), resolveRelative: (_base: string, relative: string) => relative };
+    const md = '<!-- embed: t.md -->\n\n' + after;
+    const { docx } = await convertMdToDocx(md, { embedResolver: resolver, documentPath: '/doc/paper.md' });
+    expect(strip((await convertDocx(docx)).markdown)).toBe('<!-- embed: t.md -->\n\n' + expected);
+  });
+
   test('keeps the HTML around a table off one Word adds before it with its text in other cells', async () => {
     // Each table's text without its empty cells was the same
     const first = (md: string) => convertMdToDocx(md).then(({ docx }) => JSZip.loadAsync(docx));

@@ -4133,14 +4133,16 @@ function recordTableMetadata(token: MdToken, state: DocxGenState): void {
  *  row, as its cells' count and text, its text, as the Word table `xml`
  *  holds it, and the count of tables alike in both before it in the body
  *  or its note (`scope`), which import counts too, but for one it writes as
- *  its embed directive, and, once all are written, the count of them all */
+ *  its embed directive, whose HTML it doesn't write either, and, once all
+ *  are written, the count of them all */
 function recordTableIdentity(token: MdToken, xml: string, state: DocxGenState, scope: string): void {
   const texts = wordTableTexts(xml);
   const firstRow = tableFirstRowText(texts[0] ?? []);
   const contents = tableContentsFingerprint(texts);
   const key = scope + '\n' + firstRow + '\n' + contents;
   const alikeBefore = state.tablesAlike.get(key) ?? 0;
-  if (!(token.embedIdx !== undefined && token.embedIdx < state.embedDirectives.length)) state.tablesAlike.set(key, alikeBefore + 1);
+  if (token.embedIdx !== undefined && token.embedIdx < state.embedDirectives.length) return;
+  state.tablesAlike.set(key, alikeBefore + 1);
   if (token.tableHtmlAround) state.tableHtmlAround.set(state.tableIndex, [...token.tableHtmlAround, firstRow, contents, String(alikeBefore), scope, '']);
 }
 
