@@ -5789,6 +5789,8 @@ describe('HTML table cells', () => {
   test.each([
     ['ends at a --!>', 'a<!-- hidden --!>b', 'a<!-- hidden -->b'],
     ['has no end', 'a<!-- x', 'a<!-- x</td></tr></table> -->'],
+    ['ends at a --!> before an empty one', 'a<!-- hidden --!><!--->b', 'a<!-- hidden --><!--->b'],
+    ['ends at a --> after a -', 'a<!-- hidden --->b', 'a<!-- hidden - -->b'],
   ])('hides a cell\'s comment that %s in a table that leaves HTML', async (_name, cell, expected) => {
     // Inline Markdown read it as text, and showed it
     const zip = await JSZip.loadAsync((await convertMdToDocx('<table><tr><td>XX</td><td>' + cell + '</td></tr></table>\n')).docx);

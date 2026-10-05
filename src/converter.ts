@@ -3172,15 +3172,23 @@ function readHiddenRun(runChildren: XmlNode[], rPrChildren: XmlNode[] | undefine
   return [];
 }
 
-/** A hidden comment as Markdown reads one: one an HTML table's cell held
- *  that the browser ended at a --!>, ended at a --> instead, as inline
- *  Markdown reads it on, and one with no end, which ran to the end of the
- *  cell, with one; but not one before another (`next`), which Word split it
- *  from at an <!-- in it, and which ends it */
-function markdownComment(text: string, next?: ContentItem): string {
+/** A hidden comment as inline Markdown reads one: one with no end, which
+ *  ran to the end of an HTML table's cell, with one, but not one before
+ *  another (`next`), which Word split it from at an <!-- in it, and which
+ *  ends it; and one the browser ended at a --!>, ended at a --> instead, as
+ *  inline Markdown reads it on. In a table's cell (`cell`), one the browser
+ *  ended at a --> after a -, which inline Markdown reads as text, ends at
+ *  one it reads, as does one that ends at a --!> before another. */
+function markdownComment(text: string, next?: ContentItem, cell = false): string {
   const from = text.indexOf('<!--') + 4;
-  if (next?.type === 'html_comment' || text.includes('-->', from) || /^-?>/.test(text.slice(from))) return text;
-  return text.endsWith('--!>') && text.length >= from + 4 ? text.slice(0, -4) + '-->' : text.trimEnd() + ' -->';
+  if (/^-?>/.test(text.slice(from)) || cell && HTML_TAG_RE.exec(text.trimStart())?.[0] === text.trimStart()) return text;
+  const end = /--!?>$/.exec(text);
+  if (cell && end && end.index >= from) {
+    const body = text.slice(from, end.index);
+    return text.slice(0, from) + body + (body.endsWith('-') ? ' ' : '') + '-->';
+  }
+  if (next?.type === 'html_comment' || text.includes('-->', from)) return text;
+  return end?.[0] === '--!>' && end.index >= from ? text.slice(0, -4) + '-->' : text.trimEnd() + ' -->';
 }
 
 /**
@@ -6064,7 +6072,7 @@ function renderInlineRange(
 
     // html_comment: emit the raw <!-- ... --> syntax directly
     if (item.type === 'html_comment') {
-      out += markdownComment(item.text, segment[i + 1]);
+      out += markdownComment(item.text, segment[i + 1], opts?.cell);
       if (item.commentIds.size > 0) {
         for (const cid of [...item.commentIds].sort()) {
           const c = comments.get(cid);
@@ -6410,7 +6418,7 @@ function renderInlineRangeWithIds(
         }
       }
       prevCommentIds = new Set(currentIds);
-      out += markdownComment(item.text, segment[i + 1]);
+      out += markdownComment(item.text, segment[i + 1], opts?.cell);
       i++;
       continue;
     }
