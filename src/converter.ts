@@ -990,14 +990,18 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
   }
   // A URL or email address linkify finds in the text as escaped, which an
   // escape can end where linkify found none in Word's text, as the \ in
-  // http://e.com\_ ends http://e.com
+  // http://e.com\_ ends http://e.com. A tag ends the text linkify reads
+  // too, as one Markdown keeps raw or one written as references, &lt; and
+  // &gt;, which are tokens of their own, so a < or > is a space here: in
+  // https://e.com1.<span> linkify finds no URL, but it links https://e.com1
+  // in https://e.com1. before the tag.
   if (/[:@]/.test(text)) {
     let markdown = '';
     const from = new Map<number, number>();
     for (let k = 0; k < text.length; k++) {
       if (escaped.has(k)) markdown += '\\';
       from.set(markdown.length, k);
-      markdown += text[k];
+      markdown += text[k] === '<' || text[k] === '>' ? ' ' : text[k];
     }
     const colonsIn = (markdown: string) => [...linkifyMatches(markdown).map(link => link.schema.endsWith(':') && link.schema !== 'mailto:' ? link.index + link.schema.length - 1 : markdown.indexOf('@', link.index)), ...linkifiedColons(markdown)];
     const colons = colonsIn(markdown);
