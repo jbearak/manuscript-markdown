@@ -1498,6 +1498,7 @@ export type ContentItem =
       spacerShaped?: boolean; // its only property is w:spacing after="0", as on the empty paragraph export puts after a code block
       horizontalRule?: boolean; // an empty paragraph with only a bottom border, as export writes a thematic break
       taskLevel?: number; // 0-based level of an indented paragraph shaped like a bulleted task item (see markTaskListItems)
+      unnumberedListLevel?: number; // the Word level of a list paragraph Word shows no number for (see parseListMeta)
       generatedListContinuation?: boolean; // explicit Manuscript continuation paragraph style
       blockquoteIndentUnitTwips?: 240 | 720; // base indent unit for blockquote styles
       blockquoteStyle?: BlockquoteStyle; // Quote, IntenseQuote or GitHub style of a quote that isn't an alert
@@ -1945,7 +1946,7 @@ export async function extractNoteImageFormatMapping(data: Uint8Array | JSZip): P
 }
 
 export interface NumberingLevelDef {
-  type: 'bullet' | 'ordered';
+  type: 'bullet' | 'ordered' | 'none'; // none: Word shows no number (w:numFmt none)
   start?: number; // w:start, where the level's count begins
   restart?: number; // w:lvlRestart: the level, from 1, at or above which a paragraph starts this one over, or 0 for none
   style?: string; // w:pStyle: the paragraph style the level is linked to
@@ -2020,6 +2021,12 @@ export function wordListCounter(defs: NumberingDefs, instances: NumberingInstanc
       for (const [abstractNumId, list] of lists) if (list.restartsAfterBreak) lists.delete(abstractNumId);
     },
   });
+}
+
+/** A list level's kind, by its w:numFmt: bullets, no number, which Word
+ *  shows for none (ECMA-376 Part 1 §17.18.59), or else numbers */
+function levelType(numFmt: string): NumberingLevelDef['type'] {
+  return numFmt === 'bullet' || numFmt === 'none' ? numFmt : 'ordered';
 }
 
 /** The numbering instance and level a w:numPr gives, where it gives them */
@@ -2113,7 +2120,7 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
       // The level's own, not one in its w:pPr, which Word ignores
       const style = lvl.find(child => child['w:pStyle'] !== undefined);
       levels.set(ilvl, {
-        type: val === 'bullet' ? 'bullet' : 'ordered', ...(isNaN(start) ? {} : { start }), ...(restart >= 0 ? { restart } : {}),
+        type: levelType(val), ...(isNaN(start) ? {} : { start }), ...(restart >= 0 ? { restart } : {}),
         ...(style ? { style: getAttr(style, 'val') } : {}),
       });
     }
@@ -2184,7 +2191,7 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
       const style = lvlChildren.find(child => child['w:pStyle'] !== undefined);
       const levels = numberingDefs.get(numId);
       const level = levels?.get(ilvl);
-      const type = numFmt ? (getAttr(numFmt, 'val') === 'bullet' ? 'bullet' : 'ordered') : level?.type;
+      const type = numFmt ? levelType(getAttr(numFmt, 'val')) : level?.type;
       if (levels && type && (numFmt || style)) {
         numberingDefs.set(numId, new Map(levels).set(ilvl, { ...level, type, ...(style ? { style: getAttr(style, 'val') } : {}) }));
       }
@@ -2311,8 +2318,12 @@ function parseListContinuationStyle(pPrChildren: XmlNode[]): boolean {
     && getAttr(pStyleElement, 'val').toLowerCase() === 'manuscriptlistcontinuation';
 }
 
+/** A paragraph of a list at a level Word shows no number for (w:numFmt
+ *  none), and the level */
+export interface UnnumberedListParagraph { unnumberedLevel: number }
+
 /** A paragraph's list item, where its w:numPr or its style's numbers it */
-export function parseListMeta(pPrChildren: XmlNode[], numberingDefs: NumberingDefs, numberingStartOverrides?: NumberingStartOverrides, countListItem?: WordListCounter, styleNumbering?: StyleNumbering): ListMeta | undefined {
+export function parseListMeta(pPrChildren: XmlNode[], numberingDefs: NumberingDefs, numberingStartOverrides?: NumberingStartOverrides, countListItem?: WordListCounter, styleNumbering?: StyleNumbering): ListMeta | UnnumberedListParagraph | undefined {
   // The paragraph's style, or the default where it names none or one
   // styles.xml doesn't have, as Word reads it
   const pStyle = pPrChildren.find(child => child['w:pStyle'] !== undefined);
@@ -2354,12 +2365,21 @@ export function parseListMeta(pPrChildren: XmlNode[], numberingDefs: NumberingDe
 
   const startNumber = numberingStartOverrides?.get(numId)?.get(ilvl);
   const counted = countListItem?.(numId, level);
+  // A paragraph at a level Word shows no number for still starts the levels
+  // under it over ([MS-DOC] 2.4.6.4), but it's no list item. Word shows the
+  // level's w:lvlText there with no number in it, which import drops, as
+  // for any level
+  if (def.type === 'none') return { unnumberedLevel: level };
   return {
     type: def.type,
     level,
     ...(startNumber !== undefined ? { startNumber } : {}),
     ...(def.type === 'ordered' && counted ? { wordNumber: counted.number, wordStarts: counted.starts } : {}),
   };
+}
+
+function listParagraph(parsed: ListMeta | UnnumberedListParagraph | undefined): { listMeta?: ListMeta; unnumberedListLevel?: number } {
+  return parsed && 'unnumberedLevel' in parsed ? { unnumberedListLevel: parsed.unnumberedLevel } : { listMeta: parsed };
 }
 
 async function loadZip(data: Uint8Array): Promise<JSZip> {
@@ -5969,6 +5989,7 @@ export async function extractDocumentContent(
           // Process paragraph - extract heading level, list metadata, and title style
           let headingLevel: number | undefined;
           let listMeta: ListMeta | undefined;
+          let unnumberedListLevel: number | undefined;
           let isTitle = false;
           let blockquoteLevel: number | undefined;
           let blockquoteIndentUnitTwips: 240 | 720 | undefined;
@@ -6047,7 +6068,7 @@ export async function extractDocumentContent(
               }
 
               headingLevel = parseHeadingLevel(pPrChildren);
-              listMeta = parseListMeta(pPrChildren, numberingDefs, numberingStartOverrides, countListItem, numberingResult.styles);
+              ({ listMeta, unnumberedListLevel } = listParagraph(parseListMeta(pPrChildren, numberingDefs, numberingStartOverrides, countListItem, numberingResult.styles)));
               isTitle = parseTitleStyle(pPrChildren);
               const blockquoteInfo = parseBlockquoteInfo(pPrChildren);
               blockquoteLevel = blockquoteInfo.level;
@@ -6087,7 +6108,7 @@ export async function extractDocumentContent(
           }
           // One with no w:pPr has the default style, which can number it
           if (!paraChildren.some(child => child['w:pPr'])) {
-            listMeta = parseListMeta([], numberingDefs, numberingStartOverrides, countListItem, numberingResult.styles);
+            ({ listMeta, unnumberedListLevel } = listParagraph(parseListMeta([], numberingDefs, numberingStartOverrides, countListItem, numberingResult.styles)));
           }
           if (isSpacerParagraph) {
             // Keep a structural-only boundary so adjacent same-type alerts remain
@@ -6133,9 +6154,10 @@ export async function extractDocumentContent(
             prevItem.generatedListContinuation === true ||
             prevItem.customStyleName !== undefined ||
             prevItem.horizontalRule === true ||
-            prevItem.taskLevel !== undefined
+            prevItem.taskLevel !== undefined ||
+            prevItem.unnumberedListLevel !== undefined
           );
-          const needsPara = inTableCell || (headingLevel || listMeta || isTitle || blockquoteLevel || isCodeBlock || generatedListContinuation || customStyle || horizontalRule || taskLevel !== undefined)
+          const needsPara = inTableCell || (headingLevel || listMeta || isTitle || blockquoteLevel || isCodeBlock || generatedListContinuation || customStyle || horizontalRule || taskLevel !== undefined || unnumberedListLevel !== undefined)
             ? true
             : target.length > 0 && (prevItem!.type !== 'para' || prevIsCodeBlockPara || prevIsStructuralPara);
 
@@ -6166,6 +6188,10 @@ export async function extractDocumentContent(
             if (spacerShaped) paraItem.spacerShaped = true;
             if (horizontalRule) paraItem.horizontalRule = true;
             if (taskLevel !== undefined) paraItem.taskLevel = taskLevel;
+            // Only a paragraph that's nothing else goes in an item for it
+            if (unnumberedListLevel !== undefined && !headingLevel && !isTitle && !blockquoteLevel && !isCodeBlock && !generatedListContinuation && !customStyle) {
+              paraItem.unnumberedListLevel = unnumberedListLevel;
+            }
             if (paraMarkRevision && headingLevel) paraItem.paraMarkRevision = paraMarkRevision;
             if (takesTrackedBreak && precedingMark?.target === target && precedingMark.end === targetLenBeforePara) {
               paraItem.breakRevision = precedingMark.revision;
@@ -6236,6 +6262,12 @@ export async function extractDocumentContent(
               ) {
                 prevItem.emptyParagraphCount += paraItem.emptyParagraphCount;
                 if (paraItem.blankParagraphs) prevItem.blankParagraphs = (prevItem.blankParagraphs ?? 0) + paraItem.blankParagraphs;
+                // Each at a level Word shows no number for ends the items
+                // under the one it's in, so together they end those under
+                // the shallowest one's
+                if (paraItem.unnumberedListLevel !== undefined) {
+                  prevItem.unnumberedListLevel = Math.min(prevItem.unnumberedListLevel ?? Infinity, paraItem.unnumberedListLevel);
+                }
                 target.splice(targetLenBeforePara, 1);
               }
             }
@@ -10881,6 +10913,16 @@ function annotateStructuralParagraphMetadata(content: ContentItem[], blockquoteP
         continue;
       }
 
+      // A paragraph at a list level Word shows no number for is one of the
+      // item above it, which Word indents it under. An empty one, which
+      // buildMarkdown writes as a blank line, still ends the items under
+      // that one, as Word does, and with no item above it, every item
+      if (item.unnumberedListLevel !== undefined) {
+        const parent = Math.max(-1, ...[...listContexts.keys()].filter(level => level < item.unnumberedListLevel!));
+        if (parent >= 0 && paragraphHasContent(content, i)) item.listContinuation = continuationOf(listContexts.get(parent)!, listContexts);
+        else endItemsUnder(parent);
+      }
+
       if (item.generatedListContinuation && item.paragraphLeftIndentTwips !== undefined) {
         const continuationLevel = item.paragraphLeftIndentTwips / 720 - 1;
         const context = listContexts.get(continuationLevel);
@@ -11945,6 +11987,18 @@ export function buildMarkdown(
     }
     return item;
   };
+  /** Ends the items under the open one at Markdown's list `level` */
+  const endItemsUnder = (level: number) => {
+    listMarkerWidths = listMarkerWidths.slice(0, level + 1);
+    listWordLevels = listWordLevels.slice(0, level + 1);
+  };
+  /** Ends the items under the open one of the nearest Word level above
+   *  `wordLevel`, as an empty paragraph at a level Word shows no number for
+   *  does, which is a blank line in that item, or every item, where none is
+   *  open above it */
+  const endItemsAboveWordLevel = (wordLevel: number) => {
+    endItemsUnder(listWordLevels.filter(open => open < wordLevel).length - 1);
+  };
   let codeBlockGroupIndex = 0;
   let lastAlertParagraphKey: string | undefined;
   let pendingAlertPrefixStrip: GfmAlertType | undefined;
@@ -12200,6 +12254,13 @@ export function buildMarkdown(
         // drop them. A tracked mark before one is in the text before it (see
         // joinTrackedParagraphBreaks)
         if (nextPara && (nextPara.listMeta || nextPara.headingLevel || nextPara.isCodeBlock || nextPara.isTitle || nextPara.horizontalRule)) {
+          // One at a list level Word shows no number for still ends the
+          // items under the one it's in, which an item after it would nest
+          // in, as a paragraph with text does
+          for (let k = i; k < nextStructuralIdx; k++) {
+            const skipped = mergedContent[k];
+            if (skipped.type === 'para' && skipped.unnumberedListLevel !== undefined) endItemsAboveWordLevel(skipped.unnumberedListLevel);
+          }
           i = nextStructuralIdx;
           continue;
         }
@@ -12618,14 +12679,22 @@ export function buildMarkdown(
         : item.listContinuation?.level;
       // A paragraph in an item ends the items under it, which an item after
       // it can't nest in
-      if (!isCurrentList && item.listContinuation) {
-        listMarkerWidths = listMarkerWidths.slice(0, item.listContinuation.level + 1);
-        listWordLevels = listWordLevels.slice(0, item.listContinuation.level + 1);
-      }
+      if (!isCurrentList && item.listContinuation) endItemsUnder(item.listContinuation.level);
       // Blank lines alone go on in the list, whose open items an item after
       // them nests in, numbered as Word shows it
       if (!isCurrentList && !item.listContinuation) {
-        if (isPlainEmptyParagraph(item) && !paragraphHasContent(mergedContent, i)) listTypeByLevel.clear();
+        if (isPlainEmptyParagraph(item) && !paragraphHasContent(mergedContent, i)) {
+          // One at a level Word shows no number for ends the items under the
+          // one it's in, whose lists go on, numbered on
+          if (item.unnumberedListLevel !== undefined) {
+            endItemsAboveWordLevel(item.unnumberedListLevel);
+            for (const level of [...listTypeByLevel.keys()]) {
+              if (level >= listWordLevels.length) listTypeByLevel.delete(level);
+            }
+          } else {
+            listTypeByLevel.clear();
+          }
+        }
         else endListContext();
       }
 
