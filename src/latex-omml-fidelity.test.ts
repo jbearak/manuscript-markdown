@@ -5,9 +5,11 @@
 
 import { describe, test, expect } from 'bun:test';
 import { XMLParser } from 'fast-xml-parser';
+import JSZip from 'jszip';
 import { latexToOmml, trackedLatexToOmml, CRITIC_INSERTION_COMMAND, CRITIC_DELETION_COMMAND } from './latex-to-omml';
 import { ommlToLatex } from './omml';
 import { convertMdToDocx } from './md-to-docx';
+import { convertDocx } from './converter';
 import { parserOptions, roundTrip } from './test-omml-helpers';
 
 const run = (t: string) => '<m:r><m:t>' + t + '</m:t></m:r>';
@@ -555,5 +557,29 @@ describe('tracked changes inside an equation', () => {
     const seen: string[] = [];
     expect(latexToOmml('a' + CRITIC_INSERTION_COMMAND + '{b}', cmd => seen.push(cmd))).toContain('mmCriticIns');
     expect(seen).toEqual([CRITIC_INSERTION_COMMAND]);
+  });
+});
+
+describe('spaces Word keeps in an equation', () => {
+  const kept = (t: string) => '<m:r><m:t xml:space="preserve">' + t + '</m:t></m:r>';
+
+  test('source whitespace, which LaTeX ignores, goes without, so Word drops it too', () => {
+    expect(latexToOmml('a + b')).toBe(run('a') + run(' ') + run('+') + run(' ') + run('b'));
+  });
+
+  // A \left( alone, which Word can't track in place, reads back as its delimiter
+  test.each([
+    ['an insertion', '$a{++ ++}b$', '<w:ins w:id="0" w:author="Unknown">' + kept(' ') + '</w:ins>', '$a{++ ++}b$'],
+    ['a deletion', '$a{-- --}b$', '<w:del w:id="0" w:author="Unknown">' + kept(' ') + '</w:del>', '$a{-- --}b$'],
+    ['a substitution', '$a{~~ ~>x~~}b$', '<w:del w:id="0" w:author="Unknown">' + kept(' ') + '</w:del>', '$a{~~ ~>x~~}b$'],
+    ['an equation replaced by whitespace', '${~~\\left(~> ~~}$', '<w:ins w:id="1" w:author="Unknown">' + kept(' ') + '</w:ins>', '${~~(~> ~~}$'],
+  ])('a change of only whitespace keeps it in Word: %s', async (_name, md, expected, readBack) => {
+    const docx = (await convertMdToDocx(md + '\n')).docx;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml).toContain(expected);
+    expect(xml).not.toMatch(/<m:t>(?:\s[^<]*|[^<]*\s)<\/m:t>/);
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(markdown).toContain(readBack + '\n');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
   });
 });

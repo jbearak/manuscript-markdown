@@ -1204,5 +1204,17 @@ export function trackedLatexToOmml(latex: string, track: TrackChange, onUnknownC
   if (!latex.trim()) {
     return '';
   }
-  return new Parser(tokenize(latex), onUnknownCommand, 'math', track).parseExpression(false);
+  return keepWhitespaceChanges(new Parser(tokenize(latex), onUnknownCommand, 'math', track).parseExpression(false));
+}
+
+/** A tracked change of only whitespace, as {++ ++} is, with
+ *  xml:space="preserve", which Word otherwise drops: the whitespace is what
+ *  it changes, so Word keeps it rather than leave the change empty. */
+const WHITESPACE_CHANGE_RE = /(<w:(ins|del)\b[^>]*>)((?:<m:r><m:t>\s+<\/m:t><\/m:r>)+)(?=<\/w:\2>)/g;
+
+/** `omml` keeping each tracked change of only whitespace in Word (see
+ *  WHITESPACE_CHANGE_RE). */
+function keepWhitespaceChanges(omml: string): string {
+  return omml.replace(WHITESPACE_CHANGE_RE, (_change, open: string, _element: string, runs: string) =>
+    open + runs.replace(/<m:t>/g, '<m:t xml:space="preserve">'));
 }
