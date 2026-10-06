@@ -9018,6 +9018,88 @@ describe('Whitespace at the edges of a paragraph', () => {
   });
 
   test.each([
+    ['spaces', '  ', '\tB.', 'T.[^1]\n\n[^1]: &#9;B.\n'],
+    ['a space', ' ', '  B.', 'T.[^1]\n\n[^1]: &#32;&#32;B.\n'],
+    ['a tab', '\t', '\tB.', 'T.[^1]\n\n[^1]: &#9;B.\n'],
+    ['nothing more', '', '\tB.', 'T.[^1]\n\n[^1]: &#9;B.\n'],
+  ])('keeps the whitespace that starts a note\'s paragraph after its mark\'s of %s', async (_name, first, text, expected) => {
+    // The mark's paragraph left nothing, so the next one's text started the
+    // note, and import took its first space or tab for the one Word puts
+    // after the mark
+    const zip = await JSZip.loadAsync((await convertMdToDocx('T.[^1]\n\n[^1]: XX\n\n    YY')).docx);
+    const xml = await zip.file('word/footnotes.xml')!.async('string');
+    const run = (t: string) => t === '\t' ? '<w:r><w:tab/></w:r>' : t === '' ? '' : '<w:r><w:t xml:space="preserve">' + t.replace('\t', '</w:t><w:tab/><w:t>') + '</w:t></w:r>';
+    const edited = xml.replace('<w:r><w:t>XX</w:t></w:r>', run(first)).replace('<w:r><w:t>YY</w:t></w:r>', run(text));
+    expect(edited).not.toContain('XX');
+    expect(edited).not.toContain('YY');
+    zip.file('word/footnotes.xml', edited);
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toBe(expected);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['hidden, before a paragraph of spaces alone', 'footnotes', 'hidden', '  ', '\tB.', '[^1]: &#9;B.\n'],
+    ['missing, before a paragraph of spaces alone', 'footnotes', 'missing', '  ', '\tB.', '[^1]: &#9;B.\n'],
+    ['hidden, in an empty paragraph of an endnote', 'endnotes', 'hidden', '', '\tB.', '[^1]: &#9;B.\n'],
+    ['missing, before an endnote\'s paragraph of spaces alone', 'endnotes', 'missing', ' ', '  B.', '[^1]: &#32;&#32;B.\n'],
+    ['missing, before text', 'footnotes', 'missing', ' A.', 'B.', '[^1]: &#32;A.\n\n    B.\n'],
+    ['after a space', 'footnotes', 'after a space', 'A.', 'B.', '[^1]: &#32;A.\n\n    B.\n'],
+  ])('keeps the whitespace that starts a note whose mark is %s', async (_name, notes, mark, first, text, expected) => {
+    // Import took the first space or tab of the note's text for the one Word
+    // puts after the mark, though no mark came before it
+    const front = notes === 'endnotes' ? '---\nnotes: endnotes\n---\n\n' : '';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(front + 'T.[^1]\n\n[^1]: XX\n\n    YY')).docx);
+    const part = 'word/' + notes + '.xml';
+    const xml = await zip.file(part)!.async('string');
+    const tag = notes === 'endnotes' ? 'w:endnoteRef' : 'w:footnoteRef';
+    const markRun = new RegExp('<w:r><w:rPr>(<w:rStyle w:val="\\w+"/>)</w:rPr><' + tag + '/></w:r>');
+    const marks: Record<string, string> = {
+      hidden: '<w:r><w:rPr>$1<w:vanish/></w:rPr><' + tag + '/></w:r>',
+      missing: '',
+      'after a space': '<w:r><w:t xml:space="preserve"> </w:t></w:r>$&',
+    };
+    const run = (t: string) => t === '' ? '' : '<w:r><w:t xml:space="preserve">' + t.replace('\t', '</w:t><w:tab/><w:t>') + '</w:t></w:r>';
+    expect(xml).toMatch(markRun);
+    const edited = xml.replace(markRun, marks[mark]).replace('<w:r><w:t>XX</w:t></w:r>', run(first)).replace('<w:r><w:t>YY</w:t></w:r>', run(text));
+    expect(edited).not.toContain('XX');
+    expect(edited).not.toContain('YY');
+    zip.file(part, edited);
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toBe(front + 'T.[^1]\n\n' + expected);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['a deletion, in a footnote', 'footnotes', 'del', '[^1]:\n\n    {--\n    \n    --}B.\n'],
+    ['an insertion, in a footnote', 'footnotes', 'ins', '[^1]:\n\n    {++\n    \n    ++}B.\n'],
+    ['a comment\'s start, in a footnote', 'footnotes', 'comment', '[^1]: {#1}\n\n    B.{/1}\n    {#1>>@A (2024-01-15 10:30) | c<<}\n'],
+    ['a deletion, in an endnote', 'endnotes', 'del', '[^1]:\n\n    {--\n    \n    --}B.\n'],
+    ['an insertion, in an endnote', 'endnotes', 'ins', '[^1]:\n\n    {++\n    \n    ++}B.\n'],
+    ['a comment\'s start, in an endnote', 'endnotes', 'comment', '[^1]: {#1}\n\n    B.{/1}\n    {#1>>@A (2024-01-15 10:30) | c<<}\n'],
+  ])('keeps %s at the end of a note\'s paragraph that holds only its reference mark and a space', async (_name, notes, how, expected) => {
+    // The space went, and the paragraph held nothing more, so its tracked
+    // mark and the comment that starts there went with it. (Export can't
+    // write a break or a comment's start where a note's text starts yet.)
+    const front = notes === 'endnotes' ? '---\nnotes: endnotes\n---\n\n' : '';
+    const body = how === 'comment' ? '{#1}B.{/1}\n    {#1>>@A (2024-01-15 10:30) | c<<}' : 'B.';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(front + 'T.[^1]\n\n[^1]: XX\n\n    ' + body)).docx);
+    const part = 'word/' + notes + '.xml';
+    const xml = await zip.file(part)!.async('string');
+    const style = notes === 'endnotes' ? 'EndnoteText' : 'FootnoteText';
+    const tag = notes === 'endnotes' ? 'w:endnoteRef' : 'w:footnoteRef';
+    const mark = how === 'comment' ? '' : '<w:rPr><w:' + how + ' w:id="91" w:author="A" w:date="2024-01-01T00:00:00Z"/></w:rPr>';
+    let edited = xml.replace(new RegExp('<w:pPr><w:pStyle w:val="' + style + '"/></w:pPr>(<w:r><w:rPr><w:rStyle w:val="\\w+"/></w:rPr><' + tag + '/></w:r>)<w:r><w:t>XX</w:t></w:r>'),
+      '<w:pPr><w:pStyle w:val="' + style + '"/>' + mark + '</w:pPr>$1<w:r><w:t xml:space="preserve"> </w:t></w:r>' + (how === 'comment' ? '<w:commentRangeStart w:id="0"/>' : ''));
+    if (how === 'comment') edited = edited.replace(/<w:commentRangeStart w:id="0"\/>(?=(?:(?!<\/w:p>).)*<w:t>B)/, '');
+    expect(edited).not.toContain('XX');
+    expect(edited.match(/<w:commentRangeStart/g)?.length ?? 0).toBe(how === 'comment' ? 1 : 0);
+    zip.file(part, edited);
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toBe(front + 'T.[^1]\n\n' + expected);
+  });
+
+  test.each([
     ['a table cell', '| a | b |\n| --- | --- |\n| XX | 2 |', '| a | b |\n| --- | --- |\n| &#9;t&nbsp; | 2 |\n'],
     ['an HTML table cell', '<table>\n  <tr>\n    <td>\n      <p>XX</p>\n    </td>\n  </tr>\n</table>',
       '<table>\n  <tr>\n    <td>\n      <p>&#9;t&nbsp;</p>\n    </td>\n  </tr>\n</table>\n'],

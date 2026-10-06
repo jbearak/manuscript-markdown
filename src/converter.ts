@@ -552,7 +552,13 @@ function dropBlankParagraphText(target: ContentItem[], from: number): boolean {
 /** Whether `item` is spaces and tabs alone, or nothing, that Markdown writes
  *  as they are (see dropBlankParagraphText) */
 function isBlankText(item: ContentItem): item is Extract<ContentItem, { type: 'text' }> {
-  return item.type === 'text' && /^[ \t]*$/.test(item.text) && item.commentIds.size === 0 && !item.revision && !item.href
+  return isPlainText(item) && /^[ \t]*$/.test(item.text);
+}
+
+/** Whether `item` is text whose whitespace Markdown writes as it is, in no
+ *  change, comment's range, link or formatting written around it */
+function isPlainText(item: ContentItem): item is Extract<ContentItem, { type: 'text' }> {
+  return item.type === 'text' && item.commentIds.size === 0 && !item.revision && !item.href
     && !item.formatting.underline && !item.formatting.strikethrough && !item.formatting.highlight
     && !item.formatting.code && !item.formatting.superscript && !item.formatting.subscript;
 }
@@ -3949,6 +3955,13 @@ function parseNoteBody(
   // Determine self-ref tag: w:footnoteRef or w:endnoteRef
   const selfRefTag = tagName === 'w:footnote' ? 'w:footnoteRef' : 'w:endnoteRef';
   let skippedSelfRef = false;
+  // Where the text after the note's mark starts, where the mark starts the
+  // note's text, as Word puts it, with a space or tab after it
+  let afterMark: number | undefined;
+  const passMark = (target: ContentItem[]) => {
+    skippedSelfRef = true;
+    if (target === content && content.every(item => item.type === 'text' && item.text === '')) afterMark = content.length;
+  };
 
   // Field-tracking state (only used when context is provided)
   let inField = false;
@@ -3981,7 +3994,7 @@ function parseNoteBody(
         if (key === ':@') continue;
 
         if (key === selfRefTag && !skippedSelfRef) {
-          skippedSelfRef = true;
+          passMark(target);
           continue;
         } else if (key === 'w:commentRangeStart') {
           const id = getAttr(node, 'id');
@@ -4210,13 +4223,32 @@ function parseNoteBody(
           const lenBeforeContent = target.length;
           const markBefore = skippedSelfRef;
           walkNoteBody(paraChildren, paraFormatting, target, inTableCell, currentRevision);
-          // Word's space after the note's mark, where a Word user made the
-          // paragraph that holds it code, goes, as it does before text
+          // Whether the paragraph held anything, after which comments that
+          // start at its mark go (see startRangesAtMark), though it held only
+          // the space or tab after the note's mark, which goes below
+          const walkedContent = target.length > lenBeforeContent;
+          // Word's space or tab after the note's mark, which export writes
+          // before text that starts with whitespace, goes, but no other
+          // whitespace the note's text starts with: not a paragraph's after
+          // the mark's, where that left nothing, nor any where there's no
+          // mark. One a change, a comment's range or formatting is written
+          // around stays, as text's, but not where a Word user made the
+          // mark's paragraph code.
           if (isCodeBlock && !markBefore && skippedSelfRef) {
             const first = target.slice(lenBeforeContent).find(walked => walked.type !== 'text' || walked.text !== '');
             if (first?.type === 'text') first.text = first.text.replace(/^[ \t]/, '');
+          } else if (!isCodeBlock && !markBefore && afterMark !== undefined) {
+            let at = afterMark;
+            const empty = (item: ContentItem | undefined) => item?.type === 'text' && item.text === '' && item.commentIds.size === 0;
+            while (empty(target[at])) at++;
+            const first = target[at];
+            if (first && isPlainText(first) && /^[ \t]/.test(first.text)) {
+              // Empty, it holds the place of a tracked mark (see trackedParaMark)
+              if (first.text.length === 1 && !paraMarkRevision) target.splice(at, 1);
+              else target[at] = { ...first, text: first.text.slice(1) };
+            }
           }
-          if (!inTableCell && !isCodeBlock && target.length > lenBeforeContent) {
+          if (!inTableCell && !isCodeBlock && walkedContent) {
             startRangesAtMark(target, lenBeforeContent, commentStartTargetIndex, activeComments);
           }
           // As in the document's body (see dropBlankParagraphText)
@@ -4243,6 +4275,9 @@ function parseNoteBody(
             }
           }
           const walked = readHiddenRun(runChildren, rPrChildren, target, activeComments, currentRevision);
+          // A hidden mark is still the note's, which Word's space or tab
+          // after it follows
+          if (walked !== runChildren && !skippedSelfRef && runChildren.some(child => child[selfRefTag] !== undefined)) passMark(target);
           fieldShows.run(runChildren, walked);
           walkNoteBody(walked, runFormatting, target, inTableCell, currentRevision);
         } else if (Array.isArray(node[key])) {
@@ -11518,22 +11553,21 @@ export function buildMarkdown(
       const bodyParts: string[] = [];
       const deferredAll: string[] = [];
       let partStart = 0;
-      // The text of a part, from partStart, which ends its paragraph. Word
-      // puts a space or tab after the note's mark, which goes, but not the
-      // whitespace the note's text starts with after it. A line break at its
-      // end is <br>, as at a paragraph's end in the body, but not before an
-      // equation in the paragraph (`beforeMath`), which the paragraph goes
-      // on in after it, unless a highlight's == comes after it (see
-      // HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END), and where whitespace
-      // alone keeps the space export wrote for its line end as it is, as in
-      // the body.
+      // The text of a part, from partStart, which ends its paragraph. Word's
+      // space or tab after the note's mark went on import (see
+      // parseNoteBody), so whitespace at its start is the text's. A line
+      // break at its end is <br>, as at a paragraph's end in the body, but
+      // not before an equation in the paragraph (`beforeMath`), which the
+      // paragraph goes on in after it, unless a highlight's == comes after
+      // it (see HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END), and where
+      // whitespace alone keeps the space export wrote for its line end as it
+      // is, as in the body.
       const inlinePart = (text: string, beforeMath = false) => {
         const broken = (beforeMath ? text : text.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + '<br>'))
           .replace(HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END, (_m, backslashes: string, close: string) => backslashes + '<br>' + close);
-        const own = partStart === 0 ? broken.replace(/^[ \t]/, '') : broken;
         const atStart = partStart === 0 || isMarkdownBlockEdge(bodyMerged[partStart - 1]);
-        return beforeMath && /^[ \t]* $/.test(own) ? keepParagraphWhitespace(own.slice(0, -1), atStart, true) + ' '
-          : keepParagraphWhitespace(own, atStart, true);
+        return beforeMath && /^[ \t]* $/.test(broken) ? keepParagraphWhitespace(broken.slice(0, -1), atStart, true) + ' '
+          : keepParagraphWhitespace(broken, atStart, true);
       };
       // The part that holds the paragraph's text and display math so far,
       // which an equation in the paragraph goes on in, on the next line, and
