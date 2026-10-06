@@ -13687,6 +13687,55 @@ describe('Links of more than one run', () => {
     expect((await convertDocx(docx)).markdown).toBe(md);
   });
 
+  const code = (t: string) => '<w:r><w:rPr><w:rStyle w:val="CodeChar"/></w:rPr><w:t xml:space="preserve">' + t + '</w:t></w:r>';
+  const italic = (t: string) => '<w:r><w:rPr><w:i/></w:rPr><w:t xml:space="preserve">' + t + '</w:t></w:r>';
+  const struck = (t: string) => '<w:r><w:rPr><w:strike/></w:rPr><w:t xml:space="preserve">' + t + '</w:t></w:r>';
+  test.each([
+    ['a deletion of all of it before an insertion', text('x ') + link(deleted(code('a --} b') + italic('~&gt;'))) + inserted(text('c')),
+      'x [{~~`a --} b`~>~~}{--*~>*--}](https://e.com){++c++} y\n'],
+    ['a deletion of all of it', text('x ') + link(deleted(code('a --} b') + italic('~&gt;'))),
+      'x [{~~`a --} b`~>~~}{--*~>*--}](https://e.com) y\n'],
+    ['a deletion of all of it ending in code that ends in the closer, before an insertion', text('x ') + link(deleted(italic('~&gt;') + code('a --}'))) + inserted(text('c')),
+      'x [{--*~>*--}{~~`a --}`~>~~}](https://e.com){++c++} y\n'],
+    ['a deletion of all of it with a ~~} in code, before an insertion', text('x ') + link(deleted(code('a --} b') + text(' ') + code('~~}'))) + inserted(text('c')),
+      'x [{~~`a --} b`~>~~}{-- `~~}`--}](https://e.com){++c++} y\n'],
+    ['an insertion of all of it with a ~~} in code', text('x ') + link(inserted(code('a ++} b') + text(' ') + code('~~}'))),
+      'x [{~~~>`a ++} b`~~}{++ `~~}`++}](https://e.com) y\n'],
+    ['a deletion of all of it, after a !', text('x !') + link(deleted(code('a --} b') + italic('~&gt;'))),
+      'x \\![{~~`a --} b`~>~~}{--*~>*--}](https://e.com) y\n'],
+    // Whose ~~ the marks of emphasis kept from the } or > after them, as
+    // a substitution's side is written once they resolve
+    ['a struck } before code, in a deletion of all of it before an insertion', text('x ') + link(deleted(struck('}') + code('a --}'))) + inserted(text('c')),
+      'x [{--~~}~~--}{~~`a --}`~>~~}](https://e.com){++c++} y\n'],
+    ['a struck > before code, in a deletion of all of it', text('x ') + link(deleted(struck('&gt;a') + code('a --}'))),
+      'x [{--~~>a~~--}{~~`a --}`~>~~}](https://e.com) y\n'],
+    ['a struck } before code, in an insertion of all of it', text('x ') + link(inserted(struck('}') + code('a ++}'))),
+      'x [{++~~}~~++}{~~~>`a ++}`~~}](https://e.com) y\n'],
+  ])('puts the change of a link with %s in spans of its runs inside the link, where no span around it holds the closer in its code', async (_name, runs, expected) => {
+    // The span around the link ended at the closer in its code, and export
+    // wrote the rest of the link as text, which lost the code and the link.
+    // Before an insertion, the link's runs went in links of their own.
+    const word = await wordWithLinks('<w:p>' + runs + text(' y') + '</w:p>');
+    const md = (await convertDocx(word)).markdown;
+    expect(md).toBe(expected);
+    const docx = (await convertMdToDocx(md)).docx;
+    // Each run in a change of its own
+    const joined = async (docx: Uint8Array) => (await hyperlinksOf(docx)).map(link => link.replace(/-\}\{-|\+\}\{\+/g, ''));
+    expect(await joined(docx)).toEqual(await joined(word));
+    expect((await convertDocx(docx)).markdown).toBe(md);
+  });
+
+  test('keeps a deletion of all of a link with the closer in its code around it, where the ~> of its marked emphasis is a tag\'s', async () => {
+    // The ~~ of the struck .b's marks, which resolve as <s>, before the >
+    // read as a ~> that the substitution around the link couldn't hold
+    const word = await wordWithLinks('<w:p>' + text('x ') + link(deleted(text('x') + struck('.b') + text('&gt;') + code('a --}'))) + text(' y') + '</w:p>');
+    const md = (await convertDocx(word)).markdown;
+    expect(md).toBe('x {~~[x<s>.b</s>>`a --}`](https://e.com)~>~~} y\n');
+    const docx = (await convertMdToDocx(md)).docx;
+    expect(await hyperlinksOf(docx)).toEqual(await hyperlinksOf(word));
+    expect((await convertDocx(docx)).markdown).toBe(md);
+  });
+
   test('keeps a link whole before a line that would start a note, whose [ is escaped', async () => {
     const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
     const xml = await zip.file('word/document.xml')!.async('string');

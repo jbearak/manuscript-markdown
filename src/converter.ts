@@ -5499,13 +5499,14 @@ function canonicalizeDisplayMathLatex(latex: string): string {
  *  there, so it goes on one side of a substitution with nothing on the
  *  other, which export reads as a change of that side alone, unless it has
  *  a substitution's delimiters too, where code comes in pieces (see
- *  codePiecesInRevision). A bare link's choice holds the closer it's read
- *  before (see bareLinkChoice), which isn't text. */
+ *  codePiecesInRevision), as written once its emphasis resolves, where a
+ *  struck } or > reads as ~~} or ~~>. A bare link's choice holds the
+ *  closer it's read before (see bareLinkChoice), which isn't text. */
 function wrapWithRevision(text: string, rev?: RevisionInfo): string {
   if (!rev) return text;
   const holds = (closer: string) => text.includes(closer) && text.split(BARE_LINK + closer + BARE_LINK).join(BARE_LINK).includes(closer);
-  if (rev.type === 'addition') return holds('++}') && substitutionHolds('', text) ? '{~~~>' + text + '~~}' : `{++${text}++}`;
-  if (rev.type === 'deletion') return holds('--}') && substitutionHolds(text, '') ? '{~~' + text + '~>~~}' : `{--${text}--}`;
+  if (rev.type === 'addition') return holds('++}') && substitutionHolds('', resolveEmphasis(text)) ? '{~~~>' + text + '~~}' : `{++${text}++}`;
+  if (rev.type === 'deletion') return holds('--}') && substitutionHolds(resolveEmphasis(text), '') ? '{~~' + text + '~>~~}' : `{--${text}--}`;
   return text;
 }
 
@@ -5517,8 +5518,8 @@ function wrapWithRevision(text: string, rev?: RevisionInfo): string {
  *  its own, as in {--`a-`--}{--`-}b~>c`--}, which export reads as runs of
  *  the change side by side, and import joins again. */
 function codePiecesInRevision(text: string, rev: RevisionInfo): string[] {
+  if (revisionSpanHolds(text, rev)) return [text];
   const closer = rev.type === 'addition' ? '++}' : '--}';
-  if (!text.includes(closer) || (rev.type === 'addition' ? substitutionHolds('', text) : substitutionHolds(text, ''))) return [text];
   const pieces: string[] = [];
   let from = 0;
   for (let at = text.indexOf(closer); at !== -1; at = text.indexOf(closer, at + closer.length)) {
@@ -5527,6 +5528,17 @@ function codePiecesInRevision(text: string, rev: RevisionInfo): string[] {
   }
   pieces.push(text.slice(from));
   return pieces;
+}
+
+/** Whether the span of `rev` that wrapWithRevision writes around `text`,
+ *  which holds no bare link's choice, holds it whole: a closer of the span
+ *  in the text ends it there, and the substitution with nothing on its
+ *  other side that holds one can't hold a ~> on its old side or a ~~},
+ *  as written once the text's emphasis resolves */
+function revisionSpanHolds(text: string, rev: RevisionInfo): boolean {
+  if (!text.includes(rev.type === 'addition' ? '++}' : '--}')) return true;
+  const resolved = resolveEmphasis(text);
+  return rev.type === 'addition' ? substitutionHolds('', resolved) : substitutionHolds(resolved, '');
 }
 
 type InlineRevisionItem = Extract<ContentItem, { type: 'text' | 'citation' | 'math' | 'footnote_ref' | 'image' }>;
@@ -6911,7 +6923,8 @@ const startsBlock = (item: ContentItem | undefined): boolean =>
  * and a link with a line break in it stay one link. A revision of the whole
  * link goes around it, from `item`'s, and one of part of it inside it, as
  * a deletion at its end does where its insertion comes after the link,
- * which Word keeps out of the hyperlink.
+ * which Word keeps out of the hyperlink, and each run's of one of all of it
+ * where no span around it holds its text.
  * Its emphasis is left marked, for the range's resolveEmphasis, which reads
  * the runs around the link too. Undefined where the link is one run.
  */
@@ -6947,12 +6960,24 @@ function linkGroup(
   }
   if (items.length < 2) return undefined;
   const href = first.href;
-  const whole = items.every(item => revisionsEqual(item.revision, first.revision));
   // The item at k as Markdown in the link's text, which reads the runs
   // `after` it as the rest of the text before the link's ](url), as a link
   // of one run does
   const itemText = (k: number, after: RunsAfter): string => items[k].text === '\\\n' ? lineBreakText()
     : markedFormatting(items[k].text, items[k].formatting, false, after.linkTo(href));
+  // A revision of the whole link goes around it, but where its span would
+  // end at its closer in the link's code, and a substitution with nothing
+  // on its other side can't hold the link either, as one whose old side
+  // has a ~>, each run's goes inside the link, as for one of part of it
+  if (items.every(item => revisionsEqual(item.revision, first.revision))) {
+    let markdown = '';
+    for (let k = 0; k < items.length; k++) markdown += itemText(k, runsAfter(segment, start + k + 1, end));
+    const link = markdownLink(markdown, href);
+    if (!first.revision || revisionSpanHolds(link, first.revision)) {
+      // How a span of the whole link joins others, by each of its runs
+      return { text: link, end: start + items.length, item: first, join: combinedSpanJoin(items) };
+    }
+  }
   let text = '';
   let span: RevisionSpan | undefined;
   // Where the deletions end that a substitution was tried from, which the
@@ -6965,7 +6990,7 @@ function linkGroup(
     // Deletions and then insertions of one author and time, a substitution
     // of its sides, each whole, as renderSubstitutionRun writes one
     const revision = item.revision;
-    if (!whole && revision?.type === 'deletion' && k >= triedUntil) {
+    if (revision?.type === 'deletion' && k >= triedUntil) {
       const side = (j: number, type: RevisionInfo['type']) => j < items.length && items[j].revision?.type === type
         && items[j].revision!.author === revision.author && items[j].revision!.date === revision.date;
       let additions = k;
@@ -6999,15 +7024,12 @@ function linkGroup(
         triedUntil = retry;
       }
     }
-    const markdown = itemText(k, runsAfter(segment, start + k + 1, end));
-    if (whole) text += markdown;
-    else [text, span] = appendRevised(text, markdown, item, span);
+    [text, span] = appendRevised(text, itemText(k, runsAfter(segment, start + k + 1, end)), item, span);
   }
   return {
-    text: markdownLink(whole ? text : joinRevisedSpans(text), href),
+    text: markdownLink(joinRevisedSpans(text), href),
     end: start + items.length,
-    item: whole ? first : { ...first, revision: undefined },
-    // How a span of the whole link joins others, by each of its runs
+    item: { ...first, revision: undefined },
     join: combinedSpanJoin(items),
   };
 }
