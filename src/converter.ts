@@ -6909,7 +6909,9 @@ const startsBlock = (item: ContentItem | undefined): boolean =>
  * comments `commentIds`, as one Markdown link around them, but not the next
  * hyperlink's, though it goes to the same place, so [a **b** c](u)
  * and a link with a line break in it stay one link. A revision of the whole
- * link goes around it, from `item`'s, and one of part of it inside it.
+ * link goes around it, from `item`'s, and one of part of it inside it, as
+ * a deletion at its end does where its insertion comes after the link,
+ * which Word keeps out of the hyperlink.
  * Its emphasis is left marked, for the range's resolveEmphasis, which reads
  * the runs around the link too. Undefined where the link is one run.
  */
@@ -6942,25 +6944,6 @@ function linkGroup(
     // it, where its spans of a change, kept apart by the tag's delimiters
     // (see spanJoin), come between them
     if (OPEN_TAG_AT_END_RE.test(next.text)) break;
-  }
-  if (items.length < 2) return undefined;
-  // A substitution the group would cut, of deletions, and insertions or
-  // not, at its end and an insertion of the same author and time after a
-  // split or the link's end, is left to renderSubstitutionRun after the runs
-  // before it, as a span of either side could hold no --} or ++} in code,
-  // as {~~ can
-  const last = items[items.length - 1]?.revision;
-  if (last) {
-    const ofLast = (item: ContentItem | undefined, type: RevisionInfo['type']) =>
-      isSubstitutionItem(item) && item.revision?.type === type && item.revision.author === last.author && item.revision.date === last.date;
-    let from = items.length;
-    while (from > 0 && ofLast(items[from - 1], 'addition')) from--;
-    const additions = from;
-    while (from > 0 && ofLast(items[from - 1], 'deletion')) from--;
-    let k = start + items.length;
-    // More deletions can come after deletions, before the insertion
-    if (additions === items.length && k < end && ofLast(segment[k], 'deletion')) k = Math.min(revisionRunEnd(segment, k), end);
-    if (from < additions && k < end && ofLast(segment[k], 'addition')) items.splice(from);
   }
   if (items.length < 2) return undefined;
   const href = first.href;
@@ -7032,24 +7015,6 @@ function linkGroup(
 /** A tag that the text leaves open at its end, whose quoted values, the
  *  last's unclosed, can hold a < or > */
 const OPEN_TAG_AT_END_RE = /<\/?[A-Za-z][A-Za-z0-9-]*(?:\s(?:[^<>"']|"[^"]*"|'[^']*')*(?:"[^"]*|'[^']*)?)?$/;
-
-/** Per segment, where the run of items of one revision that each index is
- *  in ends, which linkGroup reads past a link for the rest of a
- *  substitution, as reading it for each link would take time in the square
- *  of the links */
-const revisionRunEnds = new WeakMap<ContentItem[], { length: number; ends: Map<number, number> }>();
-
-function revisionRunEnd(segment: ContentItem[], start: number): number {
-  let cached = revisionRunEnds.get(segment);
-  if (!cached || cached.length !== segment.length) revisionRunEnds.set(segment, cached = { length: segment.length, ends: new Map() });
-  const known = cached.ends.get(start);
-  if (known !== undefined) return known;
-  const revision = isSubstitutionItem(segment[start]) ? (segment[start] as SubstitutionItem).revision : undefined;
-  let k = start + 1;
-  while (k < segment.length && isSubstitutionItem(segment[k]) && revisionsEqual((segment[k] as SubstitutionItem).revision, revision)) k++;
-  for (let j = start; j < k; j++) cached.ends.set(j, k);
-  return k;
-}
 
 /** Whether a link of several runs starts at `start` with tracked changes in
  *  part of it, which linkGroup writes inside its text */
