@@ -5343,30 +5343,31 @@ function withoutUnusedNums(xml: string, used: Set<number>): string {
 }
 
 /**
- * A numbering instance that starts a level over, at `start`. A sublist's
- * starts its numbered ancestors' levels at their items' numbers too, which
- * a label such as %1.%2 shows, since the instance counts them on its own.
+ * A numbering instance that starts a level over, at `start`, at its first
+ * paragraph, which is at that level. It overrides no other level: Word
+ * counts the instances of one abstract numbering as one, so a sublist's
+ * instance shows its parents' numbers in a label such as %1.%2 as they are,
+ * and an override of a higher level would number the lists it isn't in.
  */
-type NumberingOverride = { numId: number; ilvl: number; start: number; ancestors?: { ilvl: number; start: number }[] };
+type NumberingOverride = { numId: number; ilvl: number; start: number };
 
 /**
  * The w:num of a numbering override. It keeps the level overrides of the
  * instance it copies, by level, which a template can format its lists with
- * in place of their abstract numbering.
+ * in place of their abstract numbering, without their starts. A level
+ * override left with nothing in it goes too, as Word reads one as a start
+ * of 0 (tdf#153104).
  */
 function numberingOverrideXml(o: NumberingOverride, abstractNumId: string,
     durableId: boolean, levelOverrides = new Map<number, string>()): string {
-  const starts = new Map([...(o.ancestors ?? []).map(a => [a.ilvl, a.start] as const), [o.ilvl, o.start]]);
-  const levels = [...new Set([...levelOverrides.keys(), ...starts.keys()])].sort((a, b) => a - b);
+  const formats = new Map([...levelOverrides].map(([ilvl, inner]) =>
+    [ilvl, inner.replace(/<w:startOverride\b[^>]*(?:\/>|>[\s\S]*?<\/w:startOverride>)/g, '')] as const));
+  const levels = [...new Set([...formats.keys(), o.ilvl])].filter(ilvl => ilvl === o.ilvl || formats.get(ilvl)?.trim())
+    .sort((a, b) => a - b);
   return '<w:num w:numId="' + o.numId + '"' + (durableId ? ' w16cid:durableId="' + Math.floor(Math.random() * 2000000000) + '"' : '') + '>' +
     '<w:abstractNumId w:val="' + abstractNumId + '"/>' +
-    levels.map(ilvl => {
-      const inner = levelOverrides.get(ilvl) ?? '';
-      const start = starts.get(ilvl);
-      return '<w:lvlOverride w:ilvl="' + ilvl + '">' + (start !== undefined
-        ? '<w:startOverride w:val="' + start + '"/>' + inner.replace(/<w:startOverride\b[^>]*(?:\/>|>[\s\S]*?<\/w:startOverride>)/g, '')
-        : inner) + '</w:lvlOverride>';
-    }).join('') +
+    levels.map(ilvl => '<w:lvlOverride w:ilvl="' + ilvl + '">'
+      + (ilvl === o.ilvl ? '<w:startOverride w:val="' + o.start + '"/>' : '') + (formats.get(ilvl) ?? '') + '</w:lvlOverride>').join('') +
     '</w:num>\n';
 }
 
@@ -7062,9 +7063,7 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
             state.activeListStartOverrides.set(ilvl, 2);
           } else {
             const overrideNumId = (state.firstOverrideNumId ?? 3) + state.listStartOverrides.length;
-            const ancestors = (state.listItemNumbers ?? []).slice(0, ilvl).flatMap((number, level) =>
-              number !== undefined ? [{ ilvl: level, start: number }] : []);
-            state.listStartOverrides.push({ numId: overrideNumId, ilvl, start, ...(ancestors.length > 0 ? { ancestors } : {}) });
+            state.listStartOverrides.push({ numId: overrideNumId, ilvl, start });
             state.activeListStartOverrides.set(ilvl, overrideNumId);
           }
           state.usedOrderedNumId = true;

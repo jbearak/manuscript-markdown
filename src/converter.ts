@@ -1695,6 +1695,7 @@ export async function extractNoteImageFormatMapping(data: Uint8Array | JSZip): P
 export interface NumberingLevelDef {
   type: 'bullet' | 'ordered';
   start?: number; // w:start, where the level's count begins
+  restart?: number; // w:lvlRestart: the level, from 1, at or above which a paragraph starts this one over, or 0 for none
 }
 
 export type NumberingDefs = Map<string, Map<string, NumberingLevelDef>>;
@@ -1714,35 +1715,49 @@ export interface WordListCounter {
 
 /**
  * Counts list paragraphs as Word numbers them. The instances of an abstract
- * numbering share its count, so a list goes on across the paragraphs between
- * its parts, even in two w:num elements, except at a level an instance
- * overrides the start of: that level counts on its own, from that start. A
- * level starts over after any higher level.
+ * numbering share one count, so a list goes on across the paragraphs between
+ * its parts, even in two w:num elements, and an instance's start override
+ * starts that count over for all of them: ECMA-376 Part 1 §17.9.26 numbers
+ * numIds 5, 5, 6, 5, where 6 starts level 0 over at 1, as 1, 2, 1, 2. An
+ * override applies once, at the instance's first paragraph at its level, as
+ * [MS-DOC] 2.4.6.4 has it (step 10, which only paragraphs at the level
+ * reach), and as docx4j and LibreOffice apply it; later paragraphs of the
+ * instance at that level go on. A level starts
+ * over after any higher level, or as its w:lvlRestart has it: after the
+ * level it gives or a higher one, or never for 0 ([MS-OI29500] 2.1.282; one
+ * that gives a lower level is ignored, ECMA-376 Part 1 §17.9.10). A
+ * higher level with no count, as before a list's first paragraph at it,
+ * counts from its start there, or the instance's override for it, as if a
+ * paragraph had used it, so that its next paragraph is one more: Word
+ * numbers a list of 1.1, 1.2 and a top-level item as 1.1, 1.2, 2, where the
+ * instance starts both levels at 1 (tdf#153104).
  */
 export function wordListCounter(defs: NumberingDefs, instances: NumberingInstances): WordListCounter {
-  // abstractNumId → the shared count by level, and each instance's own;
-  // `deep` holds the counts with a level under the top one, for the next
-  // higher level to start over, without going through every instance
-  const lists = new Map<string, { shared: number[]; own: Map<string, number[]>; deep: Set<number[]>; restartsAfterBreak: boolean }>();
+  // abstractNumId → its count by level; numId:level where an instance has
+  // had a paragraph at a level, which used its start override there
+  const lists = new Map<string, { levels: number[]; restartsAfterBreak: boolean }>();
+  const used = new Set<string>();
   const count = (numId: string, ilvl: number): { number: number; starts: boolean } | undefined => {
     const instance = instances.get(numId);
     if (!instance) return undefined;
     let list = lists.get(instance.abstractNumId);
-    if (!list) lists.set(instance.abstractNumId, list = { shared: [], own: new Map(), deep: new Set(), restartsAfterBreak: false });
+    if (!list) lists.set(instance.abstractNumId, list = { levels: [], restartsAfterBreak: false });
     if (instance.restartsAfterBreak) list.restartsAfterBreak = true;
-    const override = instance.overrides.get(String(ilvl));
-    let levels = list.shared;
-    if (override !== undefined) {
-      levels = list.own.get(numId) ?? [];
-      list.own.set(numId, levels);
+    const override = (level: number) => used.has(numId + ':' + level) ? undefined : instance.overrides.get(String(level));
+    const start = (level: number) => override(level) ?? defs.get(numId)?.get(String(level))?.start ?? 1;
+    const { levels } = list;
+    for (let level = 0; level < ilvl; level++) {
+      if (levels[level] !== undefined) continue;
+      levels[level] = start(level);
+      used.add(numId + ':' + level);
     }
-    const starts = levels[ilvl] === undefined;
-    levels[ilvl] = starts ? override ?? defs.get(numId)?.get(String(ilvl))?.start ?? 1 : levels[ilvl] + 1;
-    for (const deeper of list.deep) {
-      if (deeper.length > ilvl + 1) deeper.length = ilvl + 1;
-      if (deeper.length <= 1) list.deep.delete(deeper);
+    const starts = levels[ilvl] === undefined || override(ilvl) !== undefined;
+    levels[ilvl] = starts ? start(ilvl) : levels[ilvl] + 1;
+    used.add(numId + ':' + ilvl);
+    for (let level = ilvl + 1; level < levels.length; level++) {
+      const restart = defs.get(numId)?.get(String(level))?.restart;
+      if (restart === undefined || restart > level || ilvl < restart) delete levels[level];
     }
-    if (levels.length > 1) list.deep.add(levels);
     return { number: levels[ilvl], starts };
   };
   return Object.assign(count, {
@@ -1780,7 +1795,11 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
         const val = getAttr(numFmtNodes[0], 'val');
         const startNodes = findAllDeep(lvl, 'w:start');
         const start = startNodes.length > 0 ? parseInt(getAttr(startNodes[0], 'val'), 10) : NaN;
-        levels.set(ilvl, { type: val === 'bullet' ? 'bullet' : 'ordered', ...(isNaN(start) ? {} : { start }) });
+        // Word ignores one in an instance's level override ([MS-OI29500]
+        // 2.1.282 b), so only the abstract numbering's counts
+        const restartNodes = findAllDeep(lvl, 'w:lvlRestart');
+        const restart = restartNodes.length > 0 ? parseInt(getAttr(restartNodes[0], 'val'), 10) : NaN;
+        levels.set(ilvl, { type: val === 'bullet' ? 'bullet' : 'ordered', ...(isNaN(start) ? {} : { start }), ...(restart >= 0 ? { restart } : {}) });
       }
     }
 
@@ -1969,8 +1988,11 @@ export function parseListMeta(pPrChildren: XmlNode[], numberingDefs: NumberingDe
   const def = levels.get(ilvl);
   if (!def) return undefined;
 
+  // Word won't open a file that defines a level above 8 ([MS-OI29500] on
+  // Part 1 §17.9.6), so a paragraph at one has none it numbers by, and
+  // counting the levels up to it would take as long as the level is high
   const level = parseInt(ilvl, 10);
-  if (isNaN(level) || level < 0) return undefined;
+  if (isNaN(level) || level < 0 || level > 8) return undefined;
 
   const startNumber = numberingStartOverrides?.get(numId)?.get(ilvl);
   const counted = countListItem?.(numId, level);
