@@ -5136,9 +5136,10 @@ describe('portrait sections', () => {
       ];
       const state = makeState();
       const xml = generateDocumentXml(tokens, state);
-      // 3 breaks: landscapeOpen portrait break, landscapeClose landscape break (skip portraitOpen), portraitClose portrait break
+      // 2 breaks: landscapeClose landscape break (skip portraitOpen), portraitClose portrait break.
+      // The landscape section opens the document, so it needs no break before it.
       const nextPageCount = (xml.match(/<w:type w:val="nextPage"\/>/g) || []).length;
-      expect(nextPageCount).toBe(3);
+      expect(nextPageCount).toBe(2);
     });
 
     it('does not emit blank page between portrait close and landscape open', () => {
@@ -5152,9 +5153,10 @@ describe('portrait sections', () => {
       ];
       const state = makeState();
       const xml = generateDocumentXml(tokens, state);
-      // 3 breaks: portraitOpen portrait break, portraitClose portrait break (skip landscapeOpen), landscapeClose landscape break
+      // 2 breaks: portraitClose portrait break (skip landscapeOpen), landscapeClose landscape break.
+      // The portrait section opens the document, so it needs no break before it.
       const nextPageCount = (xml.match(/<w:type w:val="nextPage"\/>/g) || []).length;
-      expect(nextPageCount).toBe(3);
+      expect(nextPageCount).toBe(2);
     });
 
     it('emits section breaks for table-only portrait', () => {

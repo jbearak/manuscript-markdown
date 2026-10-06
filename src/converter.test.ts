@@ -13129,6 +13129,33 @@ describe('A section at the start of the document', () => {
     expect(await roundTrip(md)).toBe(md);
   });
 
+  test.each([
+    ['a landscape section', '<!-- landscape -->\n\nText.\n\n<!-- /landscape -->\n\nAfter.'],
+    ['a portrait section', '<!-- portrait -->\n\nText.\n\n<!-- /portrait -->\n\nAfter.'],
+    ['a table with its own section', '<!-- table-orientation: landscape -->\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nAfter.'],
+    ['a landscape section of a table alone', '<!-- landscape -->\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n<!-- /landscape -->\n\nAfter.'],
+    ['a landscape section after a references marker with nothing to list', '<!-- references -->\n\n<!-- landscape -->\n\nText.\n\n<!-- /landscape -->\n\nAfter.'],
+  ])('starts %s on the first page, with no empty section before it', async (_, md) => {
+    // A break before it ended an empty first section, a blank first page
+    const { docx } = await convertMdToDocx(md);
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const body = xml.slice(xml.indexOf('<w:body>'));
+    const content = body.search(/>Text\.<|<w:tbl>/);
+    expect(content).toBeGreaterThan(-1);
+    expect(body.indexOf('<w:sectPr')).toBeGreaterThan(content);
+    const md1 = (await convertDocx(docx)).markdown;
+    expect(strip(md1)).toBe(strip(md));
+    expect((await convertDocx((await convertMdToDocx(md1)).docx)).markdown).toBe(md1);
+  });
+
+  test('ends a title before a section that opens the body', async () => {
+    const md = '---\ntitle: Title\n---\n<!-- landscape -->\n\nText.\n\n<!-- /landscape -->\n\nAfter.';
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    expect(xml.indexOf('<w:sectPr')).toBeGreaterThan(xml.indexOf('Title'));
+    expect(xml.indexOf('<w:sectPr')).toBeLessThan(xml.indexOf('Text.'));
+    expect(strip(await roundTrip(md))).toBe(strip(md));
+  });
+
   test('adds no blank line before display math that opens it', async () => {
     // Without the custom property for sentinel gaps, as for a Word document
     const fence = '$' + '$';

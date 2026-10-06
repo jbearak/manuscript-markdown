@@ -8208,7 +8208,10 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   }
 
   let prevToken: MdToken | undefined;
-  let preserveCloseForNextToken = false;
+  // The document's start, before a title, starts a section as a close does,
+  // so a section that opens the document needs no break before it, which
+  // would end an empty section, a blank first page
+  let preserveCloseForNextToken = body === '';
   // Whether a bibliography marker is all that's written since a section
   // ended, before the next section starts
   let biblAtSectionStart = false;
