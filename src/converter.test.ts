@@ -10066,6 +10066,27 @@ describe('Track changes (CriticMarkup)', () => {
     });
 
     test.each([
+      ['a <br> at the end of its range', 'x{#1}a<br>{/1}{#1>>c<<}', 1, 'x{==a\\\n==}{>>c<<}'],
+      ['a \\ at the end of its range', 'x{#1}a\\\n{/1}{#1>>c<<}', 1, 'x{==a\\\n==}{>>c<<}'],
+      ['a <br> at the end of the second of two ranges that overlap', 'x{#1}a{#2}b{/1}c<br>{/2}{#1>>c<<}{#2>>d<<}', 1,
+        'x{#1}a{#2}b{/1}c\\\n{/2}\n{#1>>c<<}\n{#2>>d<<}'],
+      ['a <br> after its range', 'x{#1}a{/1}<br>{#1>>c<<}', 1, 'x{==a==}{>>c<<}<br>'],
+      ['a <br> after the bodies', 'x{#1}a<br>{/1}{#1>>c<<}<br>y', 2, 'x{==a\\\n==}{>>c<<}\\\ny'],
+      ['a \\ after a body on its own line', 'x{#1}a{/1}\n{#1>>c<<}\\\ny', 1, 'x{==a==}{>>c<<}\\\ny'],
+      ['a <br> at the end of its range in a table\'s cell', '| a | b |\n|---|---|\n| x{#1}a<br>{/1}{#1>>c<<} | y |', 1,
+        '| a | b |\n| --- | --- |\n| x{==a<br>==}{>>c<<} | y |'],
+    ])('keeps %s beside a comment body, which Word shows', async (_name, md, count, expected) => {
+      // Export dropped it as the newline import writes before a body's line
+      const { docx } = await convertMdToDocx(md);
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      expect(xml.match(/<w:br\/>/g)).toHaveLength(count);
+      const back = (await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
+      expect(back).toBe(expected + '\n');
+      const again = (await convertDocx((await convertMdToDocx(back)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
+      expect(again).toBe(back);
+    });
+
+    test.each([
       ['{--<u>{++a\n{>>c<<}b++}</u>--}', '<w:u w:val="single"/>'],
       ['{--==x {++a\n{>>c<<}b++}==--}', '<w:highlight w:val="yellow"/>'],
     ])('keeps the formatting of a deleted line break beside a comment in %j', async (md, rPr) => {

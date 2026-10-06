@@ -882,7 +882,7 @@ Standard CriticMarkup comment syntax (`{==text==}{>>comment<<}`) does not suppor
 
 The `#id` appears between `{` and `>>`, extending the existing comment syntax. Author attribution uses `@Author (Date) | text` format — see [Comment Attribution](#comment-attribution).
 
-A body can go on the lines after its paragraph, in a paragraph of its own, or at either end of a line. It adds no text to Word: the line breaks and spaces around it, and a paragraph that holds only bodies, don't export. On DOCX import, bodies go on the lines after their paragraph, inside its quote if it has one, or after a blank line below a table. An HTML table's cells don't take comment syntax (see [HTML Tables](#html-tables)).
+A body can go on the lines after its paragraph, in a paragraph of its own, or at either end of a line. It adds no text to Word: the line ends and spaces around it, and a paragraph that holds only bodies, don't export. A line break written as one, a `\` or a `<br>`, does, as at the end of a range before its body, `{#1}a<br>{/1}{#1>>note<<}`, though a line end in `breaks` mode or a grid table's cell doesn't. On DOCX import, bodies go on the lines after their paragraph, inside its quote if it has one, or after a blank line below a table. An HTML table's cells don't take comment syntax (see [HTML Tables](#html-tables)).
 
 #### Examples
 
