@@ -452,8 +452,10 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
     while (j < regionEnd - 3) { // need at least ==X== (4 chars from j)
       // Look for == that is NOT preceded by { at j-1 in the original text
       if (text.charCodeAt(j) === 0x3D && j + 1 < regionEnd && text.charCodeAt(j + 1) === 0x3D) {
-        // Check negative lookbehind: not preceded by { or =
-        if (isBlockedPredecessor(j, regionEnd)) {
+        // Check negative lookbehind: not preceded by { or =, but for the
+        // = of a comment's {== before the region, which masking makes a
+        // space (see maskCriticDelimiters), as in {====a====}
+        if (j > regionStart && isBlockedPredecessor(j, regionEnd)) {
           j++;
           continue;
         }
