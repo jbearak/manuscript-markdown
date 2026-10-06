@@ -13,7 +13,7 @@ import { computeCodeRegions, computeMarkdownRegions, isInsideCodeRegion } from '
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { citationEndInText, compareNoteLabels, customStyleId, directiveRest, htmlBlocksIn, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, readsAsParagraph, readsCommentsInline, startsHtmlBlock } from './md-to-docx';
+import { citationEndInText, compareNoteLabels, customStyleId, directiveRest, htmlBlocksIn, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, readsAsParagraph, readsCommentsInline, startsHtmlBlock } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { matchTables, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
@@ -11647,7 +11647,14 @@ export function buildMarkdown(
     // comment, as export splits it at each one's first -->, so a paragraph
     // mustn't merge those; others, as Word split, it may
     const blockKeepsRuns = isLineBreakBlock(textOut) && payloads.every(payload => /^<!--(?:(?!-->)[\s\S])*-->$/.test(payload));
-    const inline = () => (isLineBreakBlock(textOut) || /^[ \t]*<!--/.test(textOut) && !items.every(item => item.type === 'html_comment'))
+    // Text the runs hold outside their comments, read together as Word may
+    // split one, which a paragraph would show, the block keeps hidden in
+    // its run, with the rest of the paragraph, where that's spaces and tabs
+    // and the block is the comments' (see annotateHtmlCommentIndices)
+    const hidesText = /\S/.test(outsideComments(payloads.join('')))
+      && items.every(item => item.type === 'html_comment' || item.type === 'text' && /^[ \t]*$/.test(item.text))
+      && /^<!--[\s\S]*?-->\s*$/.test(textOut.trim());
+    const inline = () => !hidesText && (isLineBreakBlock(textOut) || /^[ \t]*<!--/.test(textOut) && !items.every(item => item.type === 'html_comment'))
       && readsCommentsInline(referenced, payloads, !blockKeepsRuns);
     // Whitespace alone before an equation in the paragraph keeps the space
     // export wrote for its line end as it is, which the math branch takes

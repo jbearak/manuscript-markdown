@@ -753,6 +753,15 @@ function withoutEach(text: string, parts: string[]): string {
   return rest + text.slice(at);
 }
 
+/** What of `text`, a comment's hidden run, inline Markdown doesn't read
+ *  as HTML comments, which a paragraph would show, as the x of
+ *  <!-- a -->x<!-- b --> */
+export function outsideComments(text: string): string {
+  const md = citationTextMd ??= createMarkdownIt();
+  return withoutEach(text, (md.parseInline(text, {})[0]?.children ?? [])
+    .filter(child => child.type === 'html_inline' && child.content.startsWith('<!--')).map(child => child.content));
+}
+
 /** Whether export reads Markdown `text` as one paragraph whose HTML
  *  comments are those inline Markdown reads in each of `payloads`, the
  *  comments' hidden runs, read alone, as in &#32;<!-- a --><!-- b -->c with

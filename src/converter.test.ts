@@ -6299,6 +6299,41 @@ describe('Line breaks a backslash can\'t hold', () => {
     expect((await convertDocx(exported)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md1);
   });
 
+  test.each([
+    ['a paragraph', 'XX', comment(' <!-- a -->XYZ<!-- b -->') + r(t(' ')) + comment('<!-- c -->'), ' <!-- a -->XYZ<!-- b --> <!-- c -->'],
+    ['a quote\'s paragraph', '> XX', r('<w:tab/>') + comment('<!-- a -->XYZ<!-- b -->'), '> \t<!-- a -->XYZ<!-- b -->'],
+    ['an item\'s paragraph after its first', '- a\n\n  XX', r(t(' ')) + comment('<!-- a -->XYZ<!-- b -->'), '- a\n\n   <!-- a -->XYZ<!-- b -->'],
+  ])('keeps text outside the comments in a hidden run hidden in %s', async (_name, source, runs, md) => {
+    // With references before the comments, a paragraph read them, and
+    // showed the text between them
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\n' + source + '\n\nB.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace(/<w:r>(?:(?!<w:r>)[\s\S])*?>XX<\/w:t><\/w:r>/, runs);
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    const md1 = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(md1).toBe('A.\n\n' + md + '\n\nB.\n');
+    const exported = (await convertMdToDocx(md1)).docx;
+    const paragraphs = await texts(exported);
+    expect(paragraphs.some(text => /\[[^\]]*XYZ[^\]]*\]/.test(text))).toBe(true);
+    expect(paragraphs.some(text => text.replace(/\[[^\]]*\]/g, '').includes('XYZ'))).toBe(false);
+    const md2 = (await convertDocx(exported)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(md2).toBe(md1);
+    expect(await texts((await convertMdToDocx(md2)).docx)).toEqual(paragraphs);
+  });
+
+  test('keeps a tab before a hidden run of comments with only a space between them out of the run', async () => {
+    // A paragraph shows the space, where the block would hide the tab
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\n> XX\n\nB.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace(/<w:r>(?:(?!<w:r>)[\s\S])*?>XX<\/w:t><\/w:r>/, r('<w:tab/>') + comment('<!-- a --> <!-- b -->'));
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    const md1 = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(md1).toBe('A.\n\n> &#9;<!-- a --> <!-- b -->\n\nB.\n');
+    expect((await convertDocx((await convertMdToDocx(md1)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md1);
+  });
+
   test('keeps one in inline code between the code on each side', async () => {
     // Inside the code span, the \ was code, and the line end a space
     const md = await imported(p(r(t('a') + '<w:br/>' + t('b'), code)));
