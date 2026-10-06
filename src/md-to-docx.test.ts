@@ -4875,6 +4875,28 @@ describe('landscape sections', () => {
       expect(nextPageCount).toBe(2);
     });
 
+    it.each([
+      ['landscape', 'Intro\n\n<!-- landscape -->\n\nWide\n\n<!-- /landscape -->\n\nAfter'],
+      ['portrait', 'Intro\n\n<!-- portrait -->\n\nTall\n\n<!-- /portrait -->\n\nAfter'],
+    ])('writes the properties of each section a %s block makes in the order CT_SectPr has them', async (_name, md) => {
+      // Its w:type came after w:cols, out of the schema's order
+      const ORDER = ['headerReference|footerReference', 'footnotePr', 'endnotePr', 'type', 'pgSz', 'pgMar', 'paperSrc', 'pgBorders',
+        'lnNumType', 'pgNumType', 'cols', 'formProt', 'vAlign', 'noEndnote', 'titlePg', 'textDirection', 'bidi', 'rtlGutter',
+        'docGrid', 'printerSettings', 'sectPrChange'];
+      const rank = (name: string) => ORDER.findIndex(names => names.split('|').includes(name));
+      const JSZip = (await import('jszip')).default;
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+      const xml = await zip.file('word/document.xml')!.async('string');
+      const sectPrs = [...xml.matchAll(/<w:sectPr\b[^>]*>([\s\S]*?)<\/w:sectPr>/g)].map(match => match[1]);
+      expect(sectPrs).toHaveLength(3);
+      for (const sectPr of sectPrs) {
+        const ranks = [...sectPr.matchAll(/<w:(\w+)\b/g)].map(match => rank(match[1]));
+        expect(ranks).not.toContain(-1);
+        expect(ranks).toEqual([...ranks].sort((a, b) => a - b));
+      }
+      expect(xml.match(/<w:type w:val="nextPage"\/>/g)).toHaveLength(2);
+    });
+
     it('does not emit blank portrait page between consecutive landscape blocks', () => {
       const tokens: MdToken[] = [
         { type: 'paragraph', runs: [{ type: 'text', text: 'Before' }] },
