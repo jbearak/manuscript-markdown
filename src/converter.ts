@@ -5670,10 +5670,13 @@ function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = mar
 }
 
 /** A close of formatting at the end of Markdown, after the text it holds:
- *  a highlight's or emphasis's, whose marks tell it from text's, or an
- *  underline's, a strikethrough's (see wrapStrikethrough) or a script's tag */
+ *  a highlight's, whose marks tell it from text's, which can be unescaped,
+ *  emphasis's, marked or not, as one inside another's isn't, nor any once
+ *  resolveSide resolves them, as text's are escaped, as \* and \~~, or an
+ *  underline's, a strikethrough's (see wrapStrikethrough), a script's tag,
+ *  or one resolveEmphasis writes for emphasis, as text's are references */
 // eslint-disable-next-line no-control-regex
-const FORMATTING_CLOSE_AT_END = /(?:[\u0006\u000F]==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?|\u0004(?:\*\*|\*|~~)|(?<!\\)<\/(?:u|s|sup|sub)>)$/;
+const FORMATTING_CLOSE_AT_END = /(?:[\u0006\u000F]==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?|(?:\u0004|(?<!\\))(?:\*\*|\*|~~)|<\/(?:u|s|sup|sub|b|i)>)$/;
 
 /** As FORMATTING_CLOSE_AT_END, in an HTML table's cell, where htmlCellRun
  *  writes each tag of formatting, and text's as references */
@@ -5876,10 +5879,13 @@ function substitutionItemText(item: SubstitutionItem, precedingText: string, not
  *  == has no mark. */
 function resolveSide(markdown: string): string {
   const resolved = resolveEmphasis(markdown);
+  // Its last, or the last before the closes of the formatting around it,
+  // as in **==a ==**, which citationSeparator reads past (see textEnd)
   // eslint-disable-next-line no-control-regex
-  const close = /[\u0006\u000F](==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?)$/.exec(markdown)?.[1];
+  const close = /[\u0006\u000F](==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?)(?:\u0004?(?:\*\*|\*|~~)|<\/(?:u|s)>)*$/.exec(markdown)?.[1];
+  const end = /(?:\*\*|\*|~~|<\/(?:u|s|b|i)>)*$/.exec(resolved)!.index;
   // Unless resolving dropped the highlight, as of whitespace alone
-  return close && resolved.endsWith(close) ? resolved.slice(0, -close.length) + HIGHLIGHT_CLOSE + close : resolved;
+  return close && resolved.endsWith(close, end) ? resolved.slice(0, end - close.length) + HIGHLIGHT_CLOSE + resolved.slice(end - close.length) : resolved;
 }
 
 /** Whether `{~~old~>new~~}` reads back as these sides: CriticMarkup splits at
@@ -6397,8 +6403,9 @@ function emphasisGroup(
 
 /** The start of a line that would start a block within a paragraph: a
  *  heading, list item, quote, code fence, HTML, display math or a table's
- *  row. Not a note's definition, as the [ of [^1] is escaped. */
-const BLOCK_START_RE = /^[ \t]{0,3}(?:#{1,6}(?:[ \t]|$)|[-+*](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$)|>|```|~~~|<|\$\$|\|)/;
+ *  row. Not a note's definition, as the [ of [^1] is escaped, nor a tag of
+ *  formatting, which starts no block, as <s>b </s> (see wrapStrikethrough). */
+const BLOCK_START_RE = /^[ \t]{0,3}(?:#{1,6}(?:[ \t]|$)|[-+*](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$)|>|```|~~~|<(?!\/?(?:u|s|sup|sub|b|i)>)|\$\$|\|)/;
 
 /** Whether a line of Markdown would start a block within a paragraph
  *  (BLOCK_START_RE), or a LaTeX environment, which export reads as display

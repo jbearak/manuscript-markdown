@@ -3532,6 +3532,22 @@ describe('buildMarkdown', () => {
     expect(xml).toMatch(/<w:strike\/>[\s\S]*?<w:t xml:space="preserve"> \*<\/w:t>/);
   });
 
+  test.each([
+    ['struck text that ends in a space', { strikethrough: true }, 'b ', '[~~a~~\\\n<s>b </s>](https://e.com)'],
+    ['underlined text', { underline: true }, 'b', '[a\\\n<u>b</u>](https://e.com)'],
+  ])('keeps a line of a link that starts with %s in the link', async (_name, formatting, text, md) => {
+    // Its tag at the line's start read as one of HTML, which starts a
+    // block, so the link split before it, and its line break went outside
+    const link = (text: string, fmt: Partial<RunFormatting>): ContentItem =>
+      ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...fmt }, href: 'https://e.com' });
+    const first = formatting.strikethrough ? formatting : {};
+    const markdown = buildMarkdown([link('a', first), link('\\\n', {}), link(text, formatting)], new Map());
+    expect(markdown.trim()).toBe(md);
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    expect(xml.match(/<w:hyperlink /g)).toHaveLength(1);
+    expect(xml).toMatch(/<w:hyperlink [^>]*>(?:(?!<\/w:hyperlink>)[\s\S])*<w:br\/>(?:(?!<\/w:hyperlink>)[\s\S])*>b ?<\/w:t>/);
+  });
+
   test('text without href outputs as plain text (unresolvable hyperlink fallback)', () => {
     const content = [{
       type: 'text' as const,
@@ -10999,13 +11015,27 @@ describe('Markdown across Word runs', () => {
     expect(await shown((await convertMdToDocx(markdown)).docx)).toEqual(await shown(docx));
   });
 
-  test('puts no second space before a citation after struck text that ends in a space', () => {
-    // The space was read before the </s>, as text's
+  test.each([
+    ['struck', [{ strikethrough: true }], '<s>see </s>[@doe2020]'],
+    ['struck, bold and italic', [{ strikethrough: true, bold: true, italic: true }], '***<s>see </s>***[@doe2020]'],
+    ['highlighted, bold and italic', [{ highlight: true, bold: true, italic: true }], '***==see ==***[@doe2020]'],
+    ['underlined, bold and italic', [{ underline: true, bold: true, italic: true }], '***<u>see </u>***[@doe2020]'],
+    ['struck and bold on a substitution\'s new side', [{}, { strikethrough: true, bold: true }], '{~~x~>**<s>see </s>**~~}[@doe2020]'],
+    ['highlighted and bold on a substitution\'s new side', [{}, { highlight: true, bold: true }], '{~~x~>**==see ==**~~}[@doe2020]'],
+    ['struck and bold on a substitution\'s old side', [{ strikethrough: true, bold: true }, {}], '{~~**<s>see </s>**~>x~~}[@doe2020]'],
+  ])('puts no second space before a citation after a space at the end of text %s', (_name, formats, md) => {
+    // The space was read before the </s>, as text's, and before the closes
+    // of emphasis inside the outermost, which aren't marked, nor any once a
+    // substitution's side is resolved
+    const revision = (type: 'deletion' | 'addition') => formats.length > 1 ? { revision: { type, author: 'A', date: '' } } : {};
     const items: ContentItem[] = [
-      { type: 'text', text: 'see ', commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, strikethrough: true } },
+      ...formats.map((formatting, i) => ({
+        type: 'text' as const, text: !!formatting.strikethrough || !!formatting.highlight || !!formatting.underline ? 'see ' : 'x',
+        commentIds: new Set<string>(), formatting: { ...DEFAULT_FORMATTING, ...formatting }, ...revision(i === 0 ? 'deletion' : 'addition'),
+      })),
       { type: 'citation', text: '(Doe 2020)', commentIds: new Set(), pandocKeys: ['@doe2020'] },
     ];
-    expect(buildMarkdown(items, new Map()).trim()).toBe('<s>see </s>[@doe2020]');
+    expect(buildMarkdown(items, new Map()).trim()).toBe(md);
   });
 
   test.each([
