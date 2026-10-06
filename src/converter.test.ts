@@ -8415,11 +8415,92 @@ describe('Track changes (CriticMarkup)', () => {
       ['at the start of a comment\'s range', 'A{#1}{--\n\n--}b{/1}\n{#1>>note<<}'],
       ['in a quote', '> a{--\n>\n> --}b'],
       ['in a list item', '- a{--\n\n  --}b'],
+      // A span in a link ends with it, so the break opened the span after,
+      // which export moves it out of
+      ['after a deletion in part of a link', 'x[a{--h--}](https://e.com){--\n\n--}{--n--}y'],
+      ['after an insertion in part of a link', 'x[a{++h++}](https://e.com){++\n\n++}{++n++}y'],
     ])('keeps a tracked paragraph mark %s in a span of its own', async (_name, md) => {
       // It came back as a plain paragraph break: the span of the break alone
       // was written only where it joined a span of the same revision before it
       const roundTrip = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
       expect(roundTrip.replace(/^---\n[\s\S]*?\n---\n?/, '').trim()).toBe(md);
+    });
+
+    test.each([
+      ['text', false, 'x{--\\{++\n\nn--}y'],
+      ['a citation without keys', true, 'x{--abc{++\n\nn--}y'],
+    ])('joins a tracked paragraph mark to the span of a deletion of %s that ends in {++', (_name, citation, expected) => {
+      // Its {, escaped or as a citation writes it, read as the span's
+      // opener, before the break, as an insertion's
+      const deleted: RevisionInfo = { type: 'deletion', author: 'A', date: '' };
+      const run = (text: string, revision?: RevisionInfo): ContentItem =>
+        ({ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING, ...(revision ? { revision } : {}) });
+      const end: ContentItem = citation ? { type: 'citation', text: 'abc{++', commentIds: new Set(), pandocKeys: [], revision: deleted } : run('{++', deleted);
+      expect(buildMarkdown([
+        { type: 'para' }, run('x'), end, { type: 'para', breakRevision: deleted }, run('n', deleted), run('y'),
+      ], new Map()).trim()).toBe(expected);
+    });
+
+    test.each([[false], [true]])('keeps a change\'s text that starts with a private-use character and a line end as it is, with a tracked mark after it: %p', (mark) => {
+      // Read as a tracked break's start, its span took a mark it kept
+      const deleted: RevisionInfo = { type: 'deletion', author: 'A', date: '' };
+      const run = (text: string, revision?: RevisionInfo): ContentItem =>
+        ({ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING, ...(revision ? { revision } : {}) });
+      const md = buildMarkdown([
+        { type: 'para' }, run('x'), run('\uE000\ny', deleted),
+        ...(mark ? [{ type: 'para', breakRevision: deleted } as ContentItem, run('n', deleted)] : []),
+      ], new Map());
+      expect(md).not.toContain('\uFFFE');
+    });
+
+    test('joins a tracked paragraph mark after a change to part of a link a comment\'s range splits to its span', async () => {
+      // Each run of the link is a link of its own, inside the span, which
+      // goes on past the break
+      const deleted: RevisionInfo = { type: 'deletion', author: 'A', date: '' };
+      const run = (text: string, extra: Partial<Extract<ContentItem, { type: 'text' }>> = {}): ContentItem =>
+        ({ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING, ...extra });
+      const md = buildMarkdown([
+        { type: 'para' }, run('x'),
+        run('a', { href: 'https://e.com', link: 1, commentIds: new Set(['c1']) }), run('h', { href: 'https://e.com', link: 1, revision: deleted }),
+        { type: 'para', breakRevision: deleted }, run('n', { revision: deleted }), run('y'),
+      ], new Map([['c1', { author: 'R', text: 'note', date: '' }]])).trim();
+      expect(md).toBe('x{==[a](https://e.com)==}{>>@R | note<<}{--[h](https://e.com)\n\nn--}y');
+      const roundTrip = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+      expect(roundTrip.replace(/^---\n[\s\S]*?\n---\n?/, '').trim()).toBe(md);
+    });
+
+    test('keeps a deleted line break of a link after the runs of it a comment\'s range ends in, with a substitution\'s break', async () => {
+      // The runs before the comment's end are one link, without the line
+      // break, which is one of its own, whose span the break and the
+      // insertion after it join as a substitution
+      const deleted: RevisionInfo = { type: 'deletion', author: 'A', date: '' };
+      const run = (text: string, extra: Partial<Extract<ContentItem, { type: 'text' }>> = {}): ContentItem =>
+        ({ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING, ...extra });
+      const md = buildMarkdown([
+        { type: 'para' }, run('x'),
+        run('a', { href: 'https://e.com', link: 1, commentIds: new Set(['c1']) }), run('b', { href: 'https://e.com', link: 1, commentIds: new Set(['c1']) }),
+        run('\\\n', { href: 'https://e.com', link: 1, revision: deleted }),
+        { type: 'para', breakRevision: deleted }, run('n', { revision: { ...deleted, type: 'addition' } }), run('y'),
+      ], new Map([['c1', { author: 'R', text: 'note', date: '' }]])).trim();
+      expect(md).toBe('x{==[ab](https://e.com)==}{>>@R | note<<}{~~[\\\n](https://e.com)\n\n~>n~~}y');
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+      expect(xml.match(/<w:br\/>/g)).toHaveLength(1);
+    });
+
+    test('keeps a deleted line break of a link whose runs are one merged, before a tracked mark', async () => {
+      // The runs, merged, are one link, without the line break, which is a
+      // span of its own with the break
+      const deleted: RevisionInfo = { type: 'deletion', author: 'A', date: '' };
+      const run = (text: string, extra: Partial<Extract<ContentItem, { type: 'text' }>> = {}): ContentItem =>
+        ({ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING, ...extra });
+      const md = buildMarkdown([
+        { type: 'para' }, run('x'),
+        run('<sp', { href: 'https://e.com', link: 1 }), run('an a="', { href: 'https://e.com', link: 1 }), run('\\\n', { href: 'https://e.com', link: 1, revision: deleted }),
+        { type: 'para', breakRevision: deleted }, run('y'),
+      ], new Map()).trim();
+      expect(md).toBe('x[\\<span a="](https://e.com){--<br>\n\n--}y');
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+      expect(xml.match(/<w:br\/>/g)).toHaveLength(1);
     });
 
     test('keeps a comment over a tracked mark and an empty quoted paragraph after it one range', async () => {

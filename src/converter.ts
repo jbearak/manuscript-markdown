@@ -5069,6 +5069,17 @@ type RevisionSpan = {
  *  excludes. */
 const SPAN_JOIN = '\uFFFF';
 
+/** Marks, after its opener, a span appendRevised opened with a tracked
+ *  paragraph break (see joinTrackedParagraphBreaks), which no span before
+ *  it took, for joinSpansAtTrackedBreaks, which drops it. A Word document
+ *  can't hold U+FFFE either. */
+const SPAN_AT_BREAK = '\uFFFE';
+
+/** The mark that starts the text of each tracked paragraph break of the
+ *  Markdown buildMarkdown is building, if it has any, which no text in the
+ *  document has (see trackedBreakMarks), for appendRevised */
+let trackedBreakStart: string | undefined;
+
 /** Rendered Markdown with the spans appendRevised joined run together. */
 function joinRevisedSpans(markdown: string): string {
   return markdown.includes(SPAN_JOIN) ? markdown.replace(/(?:\+\+|--)\}\uFFFF/g, '') : markdown;
@@ -5336,7 +5347,8 @@ function appendRevised(
       kinds: new Set([...last.kinds, ...kinds]), literal: new Set([...last.literal, ...literal]), join, highlightEnd,
     }];
   }
-  const wrapped = out + span;
+  const atBreak = !own && trackedBreakStart !== undefined && text.startsWith(trackedBreakStart + '\n');
+  const wrapped = out + (atBreak ? span.slice(0, 3) + SPAN_AT_BREAK + span.slice(3) : span);
   return [wrapped, { revision, start: out.length, end: wrapped.length, lastChar: text.slice(-1), kinds, literal, join: own ? 'never' : join, highlightEnd }];
 }
 
@@ -8396,7 +8408,7 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
  *  references, as in {--a\n\n&#32;b--}. */
 function joinSpansAtTrackedBreaks(markdown: string, marks: TrackedBreakMarks): string {
   const boundary = '(?:\\+\\+\\}\\{\\+\\+|--\\}\\{--)?';
-  const marked = new RegExp(boundary + marks.start + '([^' + marks.end + ']*)' + marks.end + boundary + '([ \\t]*)', 'g');
+  const marked = new RegExp('(' + boundary + ')(' + SPAN_AT_BREAK + '?)' + marks.start + '([^' + marks.end + ']*)' + marks.end + boundary + '([ \\t]*)', 'g');
   let out = '';
   let from = 0;
   for (const match of markdown.matchAll(marked)) {
@@ -8430,10 +8442,19 @@ function joinSpansAtTrackedBreaks(markdown: string, marks: TrackedBreakMarks): s
       while (before[space - 1 - slashes] === '\\') slashes++;
       before = before.slice(0, space) + (slashes % 2 ? '\\' : '') + before.slice(space).replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;');
     }
-    out += before + match[1] + match[2].replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;');
-    from = match.index + match[0].length;
+    // A break that opened its span, which the span before it, as one in a
+    // link, didn't take, nor joins here, ends it, as it would be lost there:
+    // md-to-docx moves a break that opens a span with text in it out of the
+    // span (see moveLeadingBreakOutsideCritic). Its mark tells its opener
+    // from text's, as a citation without keys writes its text as it is.
+    const opener = !match[1] && match[2] ? before.slice(-3) : '';
+    const closer = opener.slice(1) + '}';
+    const after = match.index + match[0].length;
+    const split = opener && !markdown.startsWith(closer, after) ? closer + opener : '';
+    out += before + match[3] + split + match[4].replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;');
+    from = after;
   }
-  return (out + markdown.slice(from)).split(marks.alone).join('');
+  return (out + markdown.slice(from)).split(marks.alone).join('').split(SPAN_AT_BREAK).join('');
 }
 
 export function buildMarkdown(
@@ -8442,7 +8463,11 @@ export function buildMarkdown(
   options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, { label: string; body: ContentItem[]; noteKind: 'footnote' | 'endnote' }>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string },
 ): string {
   let breakMarks: TrackedBreakMarks | undefined;
-  const marks = () => breakMarks ??= trackedBreakMarks([content, [...comments.values()], options]);
+  trackedBreakStart = undefined;
+  const marks = () => {
+    if (!breakMarks) trackedBreakStart = (breakMarks = trackedBreakMarks([content, [...comments.values()], options])).start;
+    return breakMarks;
+  };
   // The width of the marker of the open list item at each level, which the
   // items and paragraphs under it indent by
   let listMarkerWidths: number[] = [];
@@ -10158,6 +10183,7 @@ export function buildMarkdown(
     }
   }
 
+  trackedBreakStart = undefined;
   return breakMarks ? joinSpansAtTrackedBreaks(output.join(''), breakMarks) : output.join('');
 }
 
