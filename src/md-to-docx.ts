@@ -21,7 +21,7 @@ import { preprocessGridTables, gridColumnAlign, getDisplayWidth, GRID_TABLE_PLAC
 import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
 import { extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
-import { decodeHtmlCharacterReferences } from './html-entities';
+import { decodeHtmlAttribute } from './html-entities';
 import { matchCriticHeadingPrefix } from './critic-markup';
 import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, type TemplateSections } from './template-sections';
 export { preprocessGridTables } from './grid-table-preprocess';
@@ -46,7 +46,7 @@ const IMAGE_DIMENSION_ATTR_RE = '(\\d+(?:\\.\\d+)?|\\.\\d+)\\s*(px|in|cm|mm|pt|p
 // --- Implementation notes ---
 // - decodeXmlText(): decode &amp; after other named entities to avoid over-decoding;
 //   HTML's own references, as an <img>'s alt's, read as the browser reads
-//   them (see decodeHtmlCharacterReferences)
+//   them (see decodeHtmlAttribute)
 // - Numeric entities: use String.fromCodePoint() not String.fromCharCode() for
 //   supplementary-plane chars
 // - CriticMarkup recursive formatting: parse inner payloads with markdown-it
@@ -3169,8 +3169,8 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
               runs: [{
                 type: 'image' as const,
                 text: '',
-                imageSrc: decodeHtmlCharacterReferences(srcMatch[1]),
-                imageAlt: altMatch ? decodeHtmlCharacterReferences(altMatch[1]) : '',
+                imageSrc: decodeHtmlAttribute(srcMatch[1]),
+                imageAlt: altMatch ? decodeHtmlAttribute(altMatch[1]) : '',
                 imageWidth: width,
                 imageHeight: height,
                 imageSyntax: 'html' as const,
@@ -3478,8 +3478,8 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
             runs.push({
               type: 'image',
               text: '',
-              imageSrc: decodeHtmlCharacterReferences(srcMatch[1]),
-              imageAlt: altMatch ? decodeHtmlCharacterReferences(altMatch[1]) : '',
+              imageSrc: decodeHtmlAttribute(srcMatch[1]),
+              imageAlt: altMatch ? decodeHtmlAttribute(altMatch[1]) : '',
               imageWidth: width,
               imageHeight: height,
               imageSyntax: 'html',

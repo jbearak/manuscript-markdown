@@ -43,6 +43,21 @@ export function decodeHtmlCharacterReferences(text: string): string {
 	return text.replace(REFERENCE_RE, reference => reference[1] === '#' ? decodeHtmlNumericReference(reference) : unescapeAll(reference));
 }
 
+/** An attribute's value with its character references read as the browser
+ *  reads them there, where a named one is read only by a whole name: &notit;
+ *  is ¬it; in text, as HTML reads &not, a legacy name, without its ;, but
+ *  in an attribute, where a letter or digit follows that name, it stays as
+ *  it is, as in src="cover&notit;.png" */
+export function decodeHtmlAttribute(value: string): string {
+	return value.replace(REFERENCE_RE, reference => {
+		if (reference[1] === '#') return decodeHtmlNumericReference(reference);
+		const decoded = unescapeAll(reference);
+		// What follows a name read in part is the rest of the reference, to its
+		// ;, which a whole one's character is only as &semi;
+		return decoded.endsWith(';') && decoded !== ';' ? reference : decoded;
+	});
+}
+
 // The whitespace besides spaces and tabs that markdown-it trims from a
 // paragraph's ends, as JavaScript's trim does: a no-break space, U+3000 as
 // a Japanese paragraph starts with, and others, but not line ends, which a

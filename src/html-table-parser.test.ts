@@ -189,6 +189,12 @@ describe('HTML table cell paragraphs', () => {
     expect(runs('<p>&#9;a &#32;b&nbsp;</p>')).toEqual([{ type: 'text', text: '\ta  b ' }]);
   });
 
+  test('reads a named reference in an attribute only by a whole name, as the browser does', () => {
+    // href read &notit; as ¬it;, by &not, which HTML reads without its ; in
+    // text, but not in an attribute, where a letter follows it
+    expect(runs('<a href="x&notit;y&not;z&copy;">t&notit;</a>')).toEqual([{ type: 'text', text: 't\u00acit;', href: 'x&notit;y\u00acz\u00a9', linkStart: true }]);
+  });
+
   test('reads a reference once, so the text one writes stays text', () => {
     // &#38; made an & of the next reference, which read as one too
     expect(runs('&#38;#x80; &#38;#128; &amp;#128;')).toEqual([{ type: 'text', text: '&#x80; &#128; &#128;' }]);

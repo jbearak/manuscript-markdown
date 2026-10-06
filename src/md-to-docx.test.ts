@@ -5945,6 +5945,13 @@ describe('Character references in HTML', () => {
     expect(image?.imageSrc).toBe('a€.png');
   });
 
+  it('reads a named reference in an <img>\'s src or alt only by a whole name, as the browser does in an attribute', () => {
+    // &notit; read as ¬it;, by &not, which HTML reads without its ; in text
+    const image = parseMd('<img src="cover&notit;.png" alt="a&notit;b &not; &notin;">').flatMap(token => token.runs ?? []).find(run => run.type === 'image');
+    expect(image?.imageSrc).toBe('cover&notit;.png');
+    expect(image?.imageAlt).toBe('a&notit;b \u00ac \u2209');
+  });
+
   it.each([['&#128;'], ['&#150;'], ['&#0;']])('reads %s in Markdown as markdown-it does, in the preview and in Word', async (reference) => {
     // Markdown's own text isn't HTML, so U+FFFD for a control character's
     const md = '| h |\n| --- |\n| a' + reference + 'b |';

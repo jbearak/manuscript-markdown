@@ -1,4 +1,4 @@
-import { decodeHtmlCharacterReferences as decodeHtmlEntities } from './html-entities';
+import { decodeHtmlAttribute, decodeHtmlCharacterReferences as decodeHtmlEntities } from './html-entities';
 import {
   parseHtmlTableCellSourceKind,
   parseTableDigits,
@@ -181,7 +181,7 @@ export function extractHtmlTables(html: string): HtmlTableMeta[] {
       const fontMatch = attrs.match(/data-font\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"]+))/i);
       const fontVal = fontMatch ? (fontMatch[1] ?? fontMatch[2] ?? fontMatch[3]) : undefined;
       if (fontVal) {
-        const normalized = decodeHtmlEntities(fontVal).trim().replace(/\s+/g, ' ');
+        const normalized = decodeHtmlAttribute(fontVal).trim().replace(/\s+/g, ' ');
         if (normalized) meta.font = normalized;
       }
       // data-orientation: "landscape" or "portrait"
@@ -286,7 +286,7 @@ function extractAttr(attrs: string, name: string): string | undefined {
   for (const match of attrs.matchAll(/([^\s"'>\/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g)) {
     if (match[1].toLowerCase() !== name.toLowerCase()) continue;
     const value = match[2] ?? match[3] ?? match[4];
-    return value === undefined ? undefined : decodeHtmlEntities(value);
+    return value === undefined ? undefined : decodeHtmlAttribute(value);
   }
   return undefined;
 }
@@ -426,7 +426,7 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
     } else if (tag === 'a') {
       if (!isClose) {
         const hrefMatch = attrs.match(/href\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
-        href = hrefMatch ? decodeHtmlEntities(hrefMatch[1] ?? hrefMatch[2]) : undefined;
+        href = hrefMatch ? decodeHtmlAttribute(hrefMatch[1] ?? hrefMatch[2]) : undefined;
         linkStart = true;
       } else {
         href = undefined;

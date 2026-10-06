@@ -1,7 +1,7 @@
 import { GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData } from './grid-table-preprocess';
 import type { HtmlTableCellSource } from './html-table-parser';
 import { computeCodeRegions } from './code-regions';
-import { decodeHtmlCharacterReferences, HTML_CHARACTER_REFERENCE } from './html-entities';
+import { decodeHtmlAttribute, decodeHtmlCharacterReferences, HTML_CHARACTER_REFERENCE } from './html-entities';
 import { isGfmDisallowedRawHtml } from './gfm';
 import {
   MAX_TABLE_DIGITS,
@@ -786,7 +786,7 @@ function buildHtmlStructuralIndex(markdown: string, codeRegions: SourceRange[], 
 function parseHtmlTableFormat(openingTag: string): Partial<TableNumberFormat> {
 	const attr = (name: string): string | undefined => {
 		const match = openingTag.match(new RegExp('\\b' + name + '\\s*=\\s*(?:"([^"]*)"|\\\'([^\\\']*)\\\'|([^\\s>]+))', 'i'));
-		return match ? decodeHtmlCharacterReferences(match[1] ?? match[2] ?? match[3]) : undefined;
+		return match ? decodeHtmlAttribute(match[1] ?? match[2] ?? match[3]) : undefined;
 	};
 	return {
 		digits: parseTableDigits(attr('data-digits') ?? ''),
@@ -1113,7 +1113,7 @@ function formatIndexedHtmlRange(source: string, start: number, end: number, form
 function parseHtmlCellSource(openingTag: string): HtmlTableCellSource | undefined {
 	const attr = (name: string): string | undefined => {
 		const match = openingTag.match(new RegExp('\\b' + name + '\\s*=\\s*(?:"([^"]*)"|\\\'([^\\\']*)\\\'|([^\\s>]+))', 'i'));
-		return match ? decodeHtmlCharacterReferences(match[1] ?? match[2] ?? match[3]) : undefined;
+		return match ? decodeHtmlAttribute(match[1] ?? match[2] ?? match[3]) : undefined;
 	};
 	const kind = parseHtmlTableCellSourceKind(attr('data-mm-kind'));
 	if (!kind) return undefined;
