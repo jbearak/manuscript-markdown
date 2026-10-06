@@ -5777,3 +5777,22 @@ describe('Line breaks in tracked changes and comments', () => {
     expect(await back(md)).toBe(md);
   });
 });
+
+describe('Line breaks in an HTML table\'s cell', () => {
+  const TABLE = '<table><tr><td colspan="2">h</td></tr><tr><td>XX</td><td>z</td></tr></table>';
+  const documentXml = async (cell: string) => {
+    const zip = await (await import('jszip')).default.loadAsync((await convertMdToDocx(TABLE.replace('XX', cell))).docx);
+    return zip.file('word/document.xml')!.async('string');
+  };
+
+  it.each([
+    ['underlined', 'x<u>a<br>b</u>y', '<w:u w:val="single"/>'],
+    ['struck', 'x<s><br>a</s>y', '<w:strike/>'],
+    ['in code', 'x<code>a<br>b</code>y', '<w:rStyle w:val="CodeChar"/>'],
+  ])('gives a line break %s the formatting around it', async (_name, cell, rPr) => {
+    // It went plain, where Word shows the formatting on it
+    const xml = await documentXml(cell);
+    expect(xml).toMatch(new RegExp('<w:r><w:rPr>(?:(?!</w:rPr>).)*' + rPr + '(?:(?!</w:rPr>).)*</w:rPr><w:br/></w:r>'));
+    expect(xml).not.toContain('<w:r><w:br/></w:r>');
+  });
+});

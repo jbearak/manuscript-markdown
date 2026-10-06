@@ -215,9 +215,6 @@ function imageMarkdownSource(token: ManuscriptToken, alt: string, attrs: string 
 }
 
 function mapHtmlTableRunToMdRun(run: HtmlTableRun): MdRun {
-  if (run.type === 'softbreak') {
-    return { type: 'hardbreak', text: '\n' };
-  }
   if (run.type === 'paragraph') {
     return { type: 'hardbreak', text: '\n', cellParagraphBreak: true };
   }
@@ -225,8 +222,8 @@ function mapHtmlTableRunToMdRun(run: HtmlTableRun): MdRun {
     return { type: 'html_comment', text: run.text };
   }
   return {
-    type: 'text',
-    text: run.text,
+    // A line break in the formatting around it, as text
+    ...(run.type === 'softbreak' ? { type: 'hardbreak' as const, text: '\n' } : { type: 'text' as const, text: run.text }),
     ...(run.bold ? { bold: true } : {}),
     ...(run.italic ? { italic: true } : {}),
     ...(run.underline ? { underline: true } : {}),

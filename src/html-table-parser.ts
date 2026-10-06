@@ -347,6 +347,15 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
     if (paragraphs === 0 || paragraphClosed) startParagraph();
     atParagraphStart = false;
   };
+  const formatting = (): Partial<HtmlTableRun> => ({
+    ...(bold ? { bold } : {}),
+    ...(italic ? { italic } : {}),
+    ...(underline ? { underline } : {}),
+    ...(strikethrough ? { strikethrough } : {}),
+    ...(code ? { code } : {}),
+    ...(superscript ? { superscript } : {}),
+    ...(subscript ? { subscript } : {}),
+  });
   const emitText = (rawText: string) => {
     let text = code ? rawText : collapseHtmlWhitespace(rawText);
     // Whitespace runs together with a space the text before ends with, as
@@ -359,13 +368,7 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
     startContent();
     pushRun({
       type: 'text', text,
-      ...(bold ? { bold } : {}),
-      ...(italic ? { italic } : {}),
-      ...(underline ? { underline } : {}),
-      ...(strikethrough ? { strikethrough } : {}),
-      ...(code ? { code } : {}),
-      ...(superscript ? { superscript } : {}),
-      ...(subscript ? { subscript } : {}),
+      ...formatting(),
       ...(href ? { href } : {}),
       ...(href && linkStart ? { linkStart: true as const } : {}),
     });
@@ -401,7 +404,9 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
 
     if (tag === 'br') {
       startContent();
-      pushRun({ type: 'softbreak', text: '\n' });
+      // In the formatting around it, as text, which Word shows on it, as an
+      // underline, as export reads a line break in Markdown
+      pushRun({ type: 'softbreak', text: '\n', ...formatting() });
     } else if (tag === 'b' || tag === 'strong') {
       bold = !isClose;
     } else if (tag === 'i' || tag === 'em') {

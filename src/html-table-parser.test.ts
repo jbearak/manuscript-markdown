@@ -149,6 +149,14 @@ describe('HTML table cell paragraphs', () => {
     expect(runs('a<br>')).toEqual([{ type: 'text', text: 'a' }]);
   });
 
+  test('gives a line break the formatting around it', () => {
+    // As text, which Word shows on it, as an underline
+    expect(runs('<u>a<br></u><s><b><br>b</b></s>')).toEqual([
+      { type: 'text', text: 'a', underline: true }, { type: 'softbreak', text: '\n', underline: true },
+      { type: 'softbreak', text: '\n', bold: true, strikethrough: true }, { type: 'text', text: 'b', bold: true, strikethrough: true },
+    ]);
+  });
+
   test('reads a link whose target has the other quote in it', () => {
     expect(runs('<a href="https://e.com/O\'Brien">o</a>')).toEqual([{ type: 'text', text: 'o', href: 'https://e.com/O\'Brien', linkStart: true }]);
   });
@@ -163,7 +171,7 @@ describe('HTML table cell paragraphs', () => {
   test('keeps a line break in a paragraph, and the formatting around it', () => {
     expect(runs('<p><b>a<br>b</b></p>')).toEqual([
       { type: 'text', text: 'a', bold: true },
-      { type: 'softbreak', text: '\n' },
+      { type: 'softbreak', text: '\n', bold: true },
       { type: 'text', text: 'b', bold: true },
     ]);
   });
