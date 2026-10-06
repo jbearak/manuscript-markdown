@@ -4153,6 +4153,10 @@ function parseNoteBody(
   }
 
   walkNoteBody(noteChildren);
+  // As in extractDocumentContent: the last paragraph's tracked mark
+  if (trackedParaMark?.target === content && trackedParaMark.end === content.length) {
+    content.push({ type: 'para', breakRevision: trackedParaMark.revision });
+  }
   return content;
 }
 
@@ -5321,6 +5325,11 @@ export async function extractDocumentContent(
   }
 
   walk(parsed);
+  // The last paragraph's tracked mark, which no paragraph after it takes,
+  // goes on an empty one, as an empty paragraph after it would take it
+  if (trackedParaMark?.target === content && trackedParaMark.end === content.length) {
+    content.push({ type: 'para', breakRevision: trackedParaMark.revision });
+  }
   return { content, zoteroBiblData, imageEntries: imageFiles.entries.length > 0 ? imageFiles.entries : undefined };
 }
 

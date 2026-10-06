@@ -9727,7 +9727,8 @@ describe('Track changes (CriticMarkup)', () => {
 
     test.each([
       ['{#1}x{/1}\n\n{++### ++}{++a\n\n{#1>>c<<}++}', '{==x==}{>>c<<}\n\n{++### a++}'],
-      ['{#1}x{/1}\n\n{++a\n\n{#1>>c<<}++}', '{==x==}{>>c<<}\n\n{++a++}'],
+      // The paragraph's tracked mark, the last's, is the break in the span
+      ['{#1}x{/1}\n\n{++a\n\n{#1>>c<<}++}', '{==x==}{>>c<<}\n\n{++a\n\n++}'],
     ])('keeps a comment body after a blank line in a revision in %j', async (md, expected) => {
       // Dropping the break before the body took one of the blank line's two,
       // so the split there took the body for the other
@@ -10393,6 +10394,36 @@ describe('Track changes (CriticMarkup)', () => {
       expect(imported).toBe(expected);
       expect(after).toEqual(before);
       expect(again).toBe(imported);
+    });
+
+    test.each([
+      ['a paragraph', 'a\n\nb\n', ['b'], 'del', 'a\n\nb{--\n\n--}\n'],
+      ['a paragraph inserted whole', 'a\n\n{++b++}\n', ['b'], 'ins', 'a\n\n{++b\n\n++}\n'],
+      ['the only paragraph', '{--b--}\n', ['b'], 'del', '{--b\n\n--}\n'],
+      ['a list item', 'a\n\n- b\n', ['b'], 'ins', 'a\n\n- b{++\n\n  ++}\n'],
+      ['a quote', 'a\n\n> b\n', ['b'], 'del', 'a\n\n> b{--\n>\n> --}\n'],
+    ] as const)('keeps the tracked mark of %s at the end of the document', async (_name, md, texts, type, expected) => {
+      // No paragraph after it took it as the break before it
+      const { imported, before, after, again } = await tripTrackedMarks(md, [...texts], type);
+      expect(imported).toBe(expected);
+      expect(after).toEqual(before);
+      expect(again).toBe(imported);
+    });
+
+    test('keeps the tracked mark of a note\'s last paragraph', async () => {
+      // No paragraph after it took it as the break before it
+      const zip = await JSZip.loadAsync((await convertMdToDocx('x[^1]\n\n[^1]: a\n\n    b\n')).docx);
+      const notes = await zip.file('word/footnotes.xml')!.async('string');
+      const tracked = notes.replace(/(<w:p(?: [^>]*)?><w:pPr>(?:(?!<\/w:pPr>).)*?)(<\/w:pPr>(?:(?!<\/w:p>).)*?<w:t>b<\/w:t>)/,
+        '$1<w:rPr><w:del w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"/></w:rPr>$2');
+      expect(tracked).not.toBe(notes);
+      zip.file('word/footnotes.xml', tracked);
+      const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+      expect(md).toBe('x[^1]\n\n[^1]: a\n\n    b{--\n    \n    --}\n');
+      const exported = (await convertMdToDocx(md)).docx;
+      const exportedNotes = await (await JSZip.loadAsync(exported)).file('word/footnotes.xml')!.async('string');
+      expect(exportedNotes).toMatch(/<w:rPr><w:del [^>]*\/><\/w:rPr><\/w:pPr>(?:(?!<\/w:p>).)*?<w:t>b<\/w:t>/);
+      expect((await convertDocx(exported)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
     });
 
     test('writes many tracked marks in linear time', () => {
