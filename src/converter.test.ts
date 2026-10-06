@@ -5765,6 +5765,24 @@ describe('Word text that reads as Markdown', () => {
     expect(buildMarkdown(items, new Map()).trim()).toBe(md);
   });
 
+  test('escapes a citation in Word\'s text of one export doesn\'t know, though it knows the inner one\'s key', async () => {
+    // Its [ was escaped, so export read the inner one as a citation
+    const { line, markdown } = await importCited('[@a[@b]', '[@b]');
+    expect(line).toBe('P \\[@a\\[@b] Q.');
+    expect((await exported(markdown)).text[1]).toBe('P [@a[@b] Q.');
+  });
+
+  test('escapes Word\'s text of many citations one inside another in linear time', () => {
+    // Each [ of one export doesn't know read the text to its ] again
+    const time = (n: number) => {
+      const start = performance.now();
+      buildMarkdown([{ type: 'text', text: '[@a'.repeat(n) + ']', commentIds: new Set(), formatting: DEFAULT_FORMATTING }], new Map());
+      return performance.now() - start;
+    };
+    const small = time(5000);
+    expect(time(20000) / small).toBeLessThan(8);
+  });
+
   test('reads the keys of deleted text of many [ in linear time', () => {
     // Four times the text takes about four times as long, not sixteen
     const time = (n: number) => {

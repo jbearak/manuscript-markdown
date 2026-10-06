@@ -1090,8 +1090,15 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
     if (open !== -1 && open < close && !/^-?@/.test(text.slice(i + 1, i + 3))) continue;
     if (citationEndInText(text, i) !== close) continue;
     const raw = citationKeyRanges(text, i, close);
-    if (!raw || !citationKnown(text, i, close)) {
+    if (!raw) {
       escaped.add(i);
+      continue;
+    }
+    // Text, as is each [ in it, which export would read as a citation's once
+    // the first is escaped, as in [@a[@b]
+    if (!citationKnown(text, i, close)) {
+      for (let k = i; k !== -1 && k < close; k = text.indexOf('[', k + 1)) escaped.add(k);
+      i = close;
       continue;
     }
     for (const [start, end] of raw) for (let k = start; k < end; k++) keys.add(k);
