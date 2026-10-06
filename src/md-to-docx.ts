@@ -6024,7 +6024,13 @@ function formatCriticInnerRuns(runs: MdRun[] | undefined, outer: MdRun, forced: 
   if (!runs || runs.length === 0) return undefined;
   const formatted: MdRun[] = [];
   for (const run of runs) {
-    if (run.type === 'softbreak' || run.type === 'hardbreak') {
+    // A line break takes the formatting around it, as its text does, which
+    // Word shows on it, as a highlight or an underline, as of {====a\\\nb====}
+    if (run.type === 'hardbreak') {
+      formatted.push({ ...mergeRunFormatting(run, outer, forced), type: 'hardbreak', text: run.text });
+      continue;
+    }
+    if (run.type === 'softbreak') {
       formatted.push(run);
       continue;
     }
@@ -6169,7 +6175,8 @@ function generateDeletedCriticContent(
       continue;
     }
     if (run.type === 'hardbreak') {
-      emit('<w:r><w:br/></w:r>', run);
+      const rPr = generateRPr(run, extraRPr);
+      emit('<w:r>' + (rPr ? rPr : '') + '<w:br/></w:r>', run);
       continue;
     }
     if (run.type === 'math') {
