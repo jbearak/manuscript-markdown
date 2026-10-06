@@ -10848,6 +10848,18 @@ describe('Markdown across Word runs', () => {
     expect(await shown((await convertMdToDocx(markdown)).docx)).toEqual(await shown(docx));
   });
 
+  test.each([
+    ['an email address', run('x@y.com='), 'x\\@y.com\\===note=='],
+    ['an email address in a sentence', run('mail x@y.com='), 'mail x\\@y.com\\===note=='],
+  ])('keeps %s before an = before a highlight as text', async (_name, runs, md) => {
+    // The = went escaped, before the highlight's ==, which ended the text
+    // linkify read, where it found the address
+    const docx = await withRuns(runs + run('note', '<w:highlight w:val="yellow"/>'));
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(md + '\n');
+    expect(await shown((await convertMdToDocx(markdown)).docx)).toEqual(await shown(docx));
+  });
+
   test('keeps a citation across runs in a tracked change as text', async () => {
     const markdown = strip((await convertDocx(await withRuns(run('[@a')
       + '<w:ins w:id="91" w:author="A" w:date="2026-01-01T00:00:00Z">' + run('b]') + '</w:ins>'))).markdown);

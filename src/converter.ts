@@ -1031,6 +1031,12 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
     }
     const colonsIn = (markdown: string) => [...linkifyMatches(markdown).map(link => link.schema.endsWith(':') && link.schema !== 'mailto:' ? link.index + link.schema.length - 1 : markdown.indexOf('@', link.index)), ...linkifiedColons(markdown)];
     const colons = colonsIn(markdown);
+    // An = at the end before another, as a highlight's ==, which
+    // resolveEmphasis escapes there, so it ends the text linkify reads, as
+    // in x@y.com\===a==
+    if (after?.first === '=' && /(?:^|[^\\])(?:\\\\)*=$/.test(markdown)) {
+      colons.push(...colonsIn(markdown.slice(0, -1) + '\\=').filter(colon => colon < markdown.length - 1));
+    }
     // A URL whose host goes on in the runs after, as https:// before struck
     // e.com, where the delimiters between, as ~~, don't end it, in any way
     // they may be written
