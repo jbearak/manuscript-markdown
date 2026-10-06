@@ -6966,8 +6966,9 @@ function linkGroup(
   const href = first.href;
   // The item at k as Markdown in the link's text, which reads the runs
   // `after` it as the rest of the text before the link's ](url), as a link
-  // of one run does
-  const itemText = (k: number, after: RunsAfter): string => items[k].text === '\\\n' ? lineBreakText()
+  // of one run does. A line break goes in the formatting Word shows on it
+  // (see showsOnBreak), as outside a link.
+  const itemText = (k: number, after: RunsAfter): string => items[k].text === '\\\n' && !showsOnBreak(items[k].formatting) ? lineBreakText()
     : markedFormatting(items[k].text, items[k].formatting, false, after.linkTo(href));
   // A revision of the whole link goes around it, but where its span would
   // end at its closer in the link's code, and a substitution with nothing

@@ -13662,6 +13662,49 @@ describe('Links of more than one run', () => {
     });
   });
 
+  describe('A line break in a link that Word shows formatting on', () => {
+    const formattedBreak = (rPr: string) => '<w:r><w:rPr>' + rPr + '</w:rPr><w:br/></w:r>';
+    const underlined = formattedBreak('<w:u w:val="single"/>');
+    const highlighted = formattedBreak('<w:highlight w:val="yellow"/>');
+    const struckBreak = formattedBreak('<w:strike/>');
+    // The formatting of each line break of a document's body
+    const breakFormatting = async (docx: Uint8Array) => {
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      return [...xml.matchAll(/<w:r>(?:<w:rPr>([\s\S]*?)<\/w:rPr>)?<w:br\/><\/w:r>/g)].map(([, rPr]) =>
+        [...(rPr ?? '').matchAll(/<w:(u|highlight|strike)\b/g)].map(match => match[1]).join(','));
+    };
+
+    test.each([
+      ['underlined, between text', text('x ') + link(text('a') + underlined + text('b')) + text(' y'), 'x [a<u>\\\n</u>b](https://e.com) y\n', 'u'],
+      ['highlighted, at the link\'s end', text('x ') + link(text('a') + highlighted) + text('y'), 'x [a==\\\n==](https://e.com)y\n', 'highlight'],
+      ['underlined, at the link\'s start', text('x') + link(underlined + text('a')) + text(' y'), 'x[<u>\\\n</u>a](https://e.com) y\n', 'u'],
+      ['struck, between text', text('x ') + link(text('a') + struckBreak + text('b')) + text(' y'), 'x [a<s>\\\n</s>b](https://e.com) y\n', 'strike'],
+      ['struck, at the link\'s end', text('x ') + link(text('a') + struckBreak) + text('y'), 'x [a<s>\\\n</s>](https://e.com)y\n', 'strike'],
+      // Whose == the link's ](url) keeps from a line alone, which would
+      // read as a heading's underline, so it needs no <br>
+      ['highlighted, at the end of a link that ends the paragraph', text('x ') + link(text('a') + highlighted), 'x [a==\\\n==](https://e.com)\n', 'highlight'],
+    ])('keeps a line break in a link in its formatting and the hyperlink, %s', async (_name, runs, expected, formatting) => {
+      // The break lost its formatting in the link, though not outside one
+      const word = await wordWithLinks('<w:p>' + runs + '</w:p>');
+      const md = (await convertDocx(word)).markdown;
+      expect(md).toBe(expected);
+      const docx = (await convertMdToDocx(md)).docx;
+      expect(await hyperlinksOf(docx)).toEqual(await hyperlinksOf(word));
+      expect(await breakFormatting(docx)).toEqual([formatting]);
+      expect((await convertDocx(docx)).markdown).toBe(md);
+    });
+
+    test('keeps an underlined line break before a line that would start a heading in its formatting, at the end of the link the line splits', async () => {
+      const word = await wordWithLinks('<w:p>' + text('x ') + link(text('a') + underlined + text('# b')) + text(' y') + '</w:p>');
+      const md = (await convertDocx(word)).markdown;
+      expect(md).toBe('x [a<u>\\\n</u>](https://e.com)[# b](https://e.com) y\n');
+      const docx = (await convertMdToDocx(md)).docx;
+      expect(await hyperlinksOf(docx)).toEqual(['https://e.com a⏎', 'https://e.com # b']);
+      expect(await breakFormatting(docx)).toEqual(['u']);
+      expect((await convertDocx(docx)).markdown).toBe(md);
+    });
+  });
+
   test.each([
     ['a deletion at its end, and the insertion after it', link(text('a ') + deleted(text('b'))) + inserted(text('c')),
       'x [a {--b--}](https://e.com){++c++} y\n'],
