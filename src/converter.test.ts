@@ -9241,6 +9241,26 @@ describe('Track changes (CriticMarkup)', () => {
       expect(md.trim()).toBe('{~~old~>new~~}');
     });
 
+    test.each([
+      ['a quote\'s marker', '> q'],
+      ['a list item\'s marker', '- q'],
+      ['a heading\'s marker', '# q'],
+      ['an ordered list item\'s marker', '1. q'],
+      ['a list item\'s + marker', '+ q'],
+      ['an HTML block\'s tag', '<div>'],
+    ])('keeps %s at the start of a line after a line break on a side of a substitution of several runs as text', async (_name, line) => {
+      // It went unescaped there, where it starts a block, so Word's one
+      // paragraph came back as two
+      const run = (text: string, revision: RevisionInfo, bold = false): ContentItem =>
+        ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, bold }, revision });
+      const md = buildMarkdown([{ type: 'para' } as any, run('q ', undefined as any), run('old', delRev), run('a\\\n', addRev, true), run(line + '\\\n', addRev), run('z', addRev)], new Map());
+      expect(md).toContain('{~~');
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+      const body = xml.slice(xml.indexOf('<w:body>'), xml.indexOf('<w:sectPr'));
+      expect(body.match(/<w:p[ >]/g)).toHaveLength(1);
+      expect(body.replace(/<w:br\/>/g, '↵').replace(/<[^>]+>/g, '').trim()).toBe('q olda↵' + line.replace('<', '&lt;').replace('>', '&gt;') + '↵z');
+    });
+
     test('substitution with formatting', () => {
       const content: ContentItem[] = [
         { type: 'para' } as any,
