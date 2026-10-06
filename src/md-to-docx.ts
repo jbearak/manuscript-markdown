@@ -10539,11 +10539,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   // that ends the document, with nothing after its break, has the body's
   // properties, as Word writes the last section's, and no break, which
   // would leave the last section empty, a blank last page. Its page is
-  // turned to its fence's orientation where the template's isn't, and it
-  // starts on a new page, as its break did, where the template's last
-  // section starts on the same page, or an odd or even one: the template's
-  // w:type becomes nextPage in its place, and no w:type is a new page
-  // already, as a tracked change's old properties keep theirs. Not where
+  // turned to its fence's orientation where the template's isn't. Not where
   // the section is empty, whose break is all it has, nor where it's the
   // only one, whose orientation import reads as the page's (see
   // extractDocumentContent in converter.ts). Hidden paragraphs alone after
@@ -10560,13 +10556,20 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     if (hiddenTail) state.hiddenAfterSections = new Map([[state.sectionBreakOrdinal - 1, hiddenXml.length]]);
     const landscape = lastBreak === landscapeBreak;
     if (landscape || isLandscapeSectPr(closingSectPr)) closingSectPr = fencedBodySectPrXml(landscape, pgSz, margins, state.templateSectPr, state.rsid);
-    closingSectPr = nextPageSectPrXml(closingSectPr);
   } else if (state.sectionBreakOrdinal > 0 && state.templateSectPr && isLandscapeSectPr(closingSectPr)) {
     // Import reads the last section's orientation from these properties, so
     // where they're a template's landscape page, which no fence set, a custom
     // property says so, by the number of breaks before the section
     state.templatePageSection = state.sectionBreakOrdinal;
   }
+  // The last section, after a break, starts on a new page, as each section
+  // export adds does, where the template's last section starts on the same
+  // page, or an odd or even one, which would run it on after a fence's
+  // section, or leave a blank page before it: the template's w:type
+  // becomes nextPage in its place, and no w:type is a new page already, as
+  // a tracked change's old properties keep theirs. Not where the section is
+  // empty, after a break that ends the document.
+  if (body.includes(breakEnd) && !body.endsWith(breakEnd)) closingSectPr = nextPageSectPrXml(closingSectPr);
   ({ body, closingSectPr } = withTemplateSectPrs(body, closingSectPr, state.templateSections));
   // Each reference again to a note shows the number Word gives the note,
   // which the notes, written after, show too (see withNoteNumbers)

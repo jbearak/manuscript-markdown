@@ -1160,7 +1160,7 @@ describe('a template\'s page numbering, title page and references held in markup
       });
     };
     for (const [md, expected] of [
-      [LANDSCAPE_MD, ['nextPage 12240 15840 ', 'nextPage 15840 12240 landscape', 'continuous 12240 15840 ']],
+      [LANDSCAPE_MD, ['nextPage 12240 15840 ', 'nextPage 15840 12240 landscape', 'nextPage 12240 15840 ']],
       ['Intro\n\n<!-- landscape -->\n\nWide\n\n<!-- /landscape -->', ['nextPage 12240 15840 ', 'nextPage 15840 12240 landscape']],
     ] as Array<[string, string[]]>) {
       const word1 = (await convertMdToDocx(md, { templateDocx })).docx;

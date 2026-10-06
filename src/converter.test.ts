@@ -17798,6 +17798,47 @@ describe('A template\'s section properties on the sections export adds', () => {
     expect((await convertDocx(docx2)).markdown).toBe(md1);
   });
 
+  test.each([
+    ['continuous', 'a portrait section', 'A.\n\n<!-- portrait -->\n\nB.\n\n<!-- /portrait -->\n\nC.\n'],
+    ['oddPage', 'a landscape section', 'A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n\nC.\n'],
+    ['continuous', 'a table\'s own section', 'A.\n\n<!-- table-orientation: landscape -->\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nC.\n'],
+  ])('starts the last section on a new page where the template\'s last section starts %s, after %s', async (type, _, md) => {
+    // The last section took the template's w:type, so it ran on after the
+    // section before it, on its page, or after a blank one
+    const zip = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const at = xml.lastIndexOf('<w:pgSz');
+    zip.file('word/document.xml', xml.slice(0, at) + '<w:type w:val="' + type + '"/>' + xml.slice(at));
+    const templateDocx = await zip.generateAsync({ type: 'uint8array' });
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    const out = await documentXml(docx);
+    expect(out).not.toContain(type);
+    expect(out.slice(out.lastIndexOf('<w:sectPr'))).toMatch(/^<w:sectPr\b[^>]*><w:type w:val="nextPage"\/><w:pgSz\b/);
+    const md1 = (await convertDocx(docx)).markdown;
+    expect(strip(md1)).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(md1, { templateDocx })).docx)).markdown).toBe(md1);
+  });
+
+  test('starts the last section on a new page where an extension\'s wrapper whose content Word reads holds the template\'s break type, after a portrait section', async () => {
+    // Word reads the wrapper's content, which mc:ProcessContent names, as
+    // the sectPr's own, so a continuous break in it ran the last section
+    // on after the fence's, on its page
+    const zip = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const open = xml.lastIndexOf('<w:sectPr'), at = xml.lastIndexOf('<w:pgSz');
+    zip.file('word/document.xml', xml.slice(0, open) + '<w:sectPr xmlns:ext="urn:example:ext" mc:Ignorable="ext" mc:ProcessContent="ext:wrap"' + xml.slice(open + '<w:sectPr'.length, at)
+      + '<ext:wrap><w:type w:val="continuous"/></ext:wrap>' + xml.slice(at));
+    const templateDocx = await zip.generateAsync({ type: 'uint8array' });
+    const md = 'A.\n\n<!-- portrait -->\n\nB.\n\n<!-- /portrait -->\n\nC.\n';
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    const out = await documentXml(docx);
+    expect(out).not.toContain('continuous');
+    expect(out.slice(out.lastIndexOf('<w:sectPr'))).toMatch(/^<w:sectPr\b[^>]*>(?:<ext:wrap>)?<w:type w:val="nextPage"\/>(?:<\/ext:wrap>)?<w:pgSz\b/);
+    const md1 = (await convertDocx(docx)).markdown;
+    expect(strip(md1)).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(md1, { templateDocx })).docx)).markdown).toBe(md1);
+  });
+
   const MAIN = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
   // The prefixes of the elements and attributes no declaration in scope binds
   const unbound = (xml: string) => {
@@ -17968,6 +18009,15 @@ describe('A template\'s section properties on the sections export adds', () => {
         expect(inner).not.toContain('mc:AlternateContent');
       }
     });
+  });
+
+  test('keeps the template\'s break type in a document of one section', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const at = xml.lastIndexOf('<w:pgSz');
+    zip.file('word/document.xml', xml.slice(0, at) + '<w:type w:val="continuous"/>' + xml.slice(at));
+    const { docx } = await convertMdToDocx('A.\n\nB.\n', { templateDocx: await zip.generateAsync({ type: 'uint8array' }) });
+    expect(await documentXml(docx)).toContain('<w:type w:val="continuous"/>');
   });
 
   // A note in each of three sections, and two references again, to the

@@ -5757,6 +5757,33 @@ describe('landscape sections', () => {
       expect(XMLValidator.validate(xml)).toBe(true);
     });
 
+    it('starts the last section after a fence on a new page where markup compatibility\'s alternatives hold the template\'s break type', () => {
+      // The choice's break type became nextPage, and the fallback's, which
+      // Word reads, as the choice needs a namespace Word doesn't understand,
+      // stayed an even page, which can leave a blank page before it
+      const state = makeState();
+      state.templateSectPr = '<w:sectPr>' + alternatives('<w:type w:val="continuous"/>', '<w:type w:val="evenPage"/>', 'x') + letter + letterMargins + '<w:cols w:space="720"/></w:sectPr>';
+      const xml = generateDocumentXml(parseMd('A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n\nC.'), state);
+      // The last section's properties, the template's own, keep its alternatives
+      expect(xml.slice(xml.lastIndexOf('<w:sectPr'))).toStartWith('<w:sectPr>' + alternatives('<w:type w:val="nextPage"/>', '<w:type w:val="nextPage"/>', 'x') + letter + letterMargins);
+    });
+
+    it('starts the last section after a fence on a new page where an extension\'s wrapper whose content Word reads holds the template\'s break type', () => {
+      // The break type became nextPage only in markup compatibility's
+      // alternatives, so the wrapper's, which mc:ProcessContent names and
+      // Word reads as the sectPr's own, ran the last section on after the
+      // fence's, on its page. A tracked change's old one stays
+      const state = makeState();
+      const open = '<w:sectPr xmlns:ext="urn:example:ext" mc:Ignorable="ext" mc:ProcessContent="ext:wrap">';
+      const change = '<w:sectPrChange w:id="1" w:author="A"><w:sectPr><w:type w:val="evenPage"/></w:sectPr></w:sectPrChange>';
+      state.templateSectPr = open + '<ext:wrap><w:type w:val="continuous"/></ext:wrap>' + letter + letterMargins + '<w:cols w:space="720"/>'
+        + '<ext:wrap>' + change + '</ext:wrap></w:sectPr>';
+      const xml = generateDocumentXml(parseMd('A.\n\n<!-- portrait -->\n\nB.\n\n<!-- /portrait -->\n\nC.'), state);
+      expect(xml).not.toContain('continuous');
+      expect(xml.slice(xml.lastIndexOf('<w:sectPr ')).replace(/<\/w:body>[\s\S]*/, '').trim()).toBe(open + '<ext:wrap><w:type w:val="nextPage"/></ext:wrap>' + letter + letterMargins + '<w:cols w:space="720"/>'
+        + '<ext:wrap>' + change + '</ext:wrap></w:sectPr>');
+    });
+
     it.each([
       ['its page', alternatives('<w:pgSz w:w="12240" w:h="15840"/>') + letterMargins + '<w:cols w:space="720"/>'],
       ['its page, margins and columns, in one choice', alternatives('<w:pgSz w:w="12240" w:h="15840"/>' + letterMargins + '<w:cols w:space="720"/>')],
