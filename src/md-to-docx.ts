@@ -8489,6 +8489,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       const portraitBreakOrdinals = [...state.portraitBreakOrdinals];
       state.portraitBreakOrdinals.clear();
       for (const ordinal of portraitBreakOrdinals) state.portraitBreakOrdinals.add(ordinal + biblBreakOrdinals.filter(b => b <= ordinal).length);
+      // And they count among the breaks, which number the last section
+      state.sectionBreakOrdinal += biblBreakOrdinals.length;
     } else {
       body = body.split(BIBL_BREAK_PLACEHOLDER).join('');
       state.referencesBeforeSections = biblBreakOrdinals;

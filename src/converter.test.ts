@@ -13249,6 +13249,19 @@ describe('A section at the end of the document', () => {
       expect((await convertDocx((await convertMdToDocx(md1, { templateDocx })).docx)).markdown).toBe(md1);
     });
 
+    test('reads the last section after a bibliography with a section of its own unfenced', async () => {
+      // Export counted the bibliography's break in no section's number, so
+      // the custom property named the section before the last one
+      const templateDocx = await landscapeTemplate();
+      const bibtex = '@article{key1, author={Smith, John}, title={Title}, journal={J}, year={2020}}';
+      const md = '---\ncsl: apa\n---\nA [@key1].\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n\n<!-- references -->\n\n<!-- landscape -->\n\nC.\n\n<!-- /landscape -->\n\nD.\n';
+      const { docx } = await convertMdToDocx(md, { bibtex, templateDocx });
+      expect(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).toContain('Smith, J. (2020)');
+      const md1 = (await convertDocx(docx)).markdown;
+      expect(strip(md1)).toBe(strip(md));
+      expect((await convertDocx((await convertMdToDocx(md1, { bibtex, templateDocx })).docx)).markdown).toBe(md1);
+    });
+
     test('turns the template\'s page for a portrait section that ends the document', async () => {
       // Export gave the section the template's landscape page, which import
       // read back as a landscape section
