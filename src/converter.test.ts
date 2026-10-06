@@ -1676,6 +1676,11 @@ describe('Ordered list numbering', () => {
     ['a sublist\'s level at 0', withLevelStart(1, 0), '1. a\n   1. x\n2. b\n   1. y'],
     ['the top level at 3', withLevelStart(0, 3), '1. a\n2. b'],
     ['its numbered lists\' instance at 5', withStartOverride(0, 5), '1. a\n2. b'],
+    // Below 0, which export read as no start or override at all
+    ['its numbered lists\' instance at -1', withStartOverride(0, -1), '1. a\n2. b'],
+    ['its numbered lists\' instance at -1 and the top level at 3', (numbering: string) => withStartOverride(0, -1)(withLevelStart(0, 3)(numbering)), '3. a\n4. b'],
+    ['the top level at -1', withLevelStart(0, -1), '1. a\n2. b'],
+    ['a sublist\'s level at -1 in its numbered lists\' instance', withStartOverride(1, -1), '1. a\n   1. x\n2. b\n   1. y'],
   ])('numbers a list as the Markdown does where a template starts %s', async (_name, edit, md) => {
     const templateDocx = await templateWithNumbering(edit);
     const once = await roundTripWith(md, templateDocx);

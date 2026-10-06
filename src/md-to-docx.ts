@@ -5503,16 +5503,18 @@ function templateListLevels(xml: string | undefined, numId: number, styleNumIds 
   const levels: ListLevels = { starts: new Map(), restarts: new Map(), startOverrides: new Map(), numberedByStyles };
   const abstractNum = childNodes(numbering?.root, 'w:numbering')
     .find(n => 'w:abstractNum' in n && intAttr(n, 'w:abstractNumId') === abstractNumId);
-  // The w:val of the `name` in each `element` of `nodes`, by level, or `otherwise` where it has none
-  const values = (nodes: OrderedXmlNode[], element: string, name: string, into: Map<number, number>, otherwise?: number) => {
+  // The w:val of the `name` in each `element` of `nodes`, by level, or
+  // `otherwise` where it has none. A start or start override can be below
+  // 0, which no Markdown list starts at, so the list gets its own start.
+  const values = (nodes: OrderedXmlNode[], element: string, name: string, into: Map<number, number>, otherwise?: number, least = -Infinity) => {
     for (const node of nodes.filter(n => element in n)) {
       const child = childNodes(node, element).find(n => name in n);
       const ilvl = intAttr(node, 'w:ilvl'), value = child ? intAttr(child, 'w:val') : otherwise ?? NaN;
-      if (Number.isInteger(ilvl) && value >= 0) into.set(ilvl, value);
+      if (Number.isInteger(ilvl) && Number.isInteger(value) && value >= least) into.set(ilvl, value);
     }
   };
   values(childNodes(abstractNum, 'w:abstractNum'), 'w:lvl', 'w:start', levels.starts, 0);
-  values(childNodes(abstractNum, 'w:abstractNum'), 'w:lvl', 'w:lvlRestart', levels.restarts);
+  values(childNodes(abstractNum, 'w:abstractNum'), 'w:lvl', 'w:lvlRestart', levels.restarts, undefined, 0);
   values(instance, 'w:lvlOverride', 'w:startOverride', levels.startOverrides);
   for (const node of instance.filter(n => 'w:lvlOverride' in n)) {
     const ilvl = intAttr(node, 'w:ilvl');
