@@ -1326,12 +1326,16 @@ describe('Ordered list numbering', () => {
   });
 
   test('gives no warning for the comment between two sublists', async () => {
-    // Export drops it on purpose, as it does any HTML block in an item
+    // Export drops it on purpose, as Word's numbering keeps it
     const { warnings } = await convertMdToDocx('1. parent\n   1. a\n\n   <!-- -->\n\n   1. b');
     expect(warnings).toEqual([]);
-    expect((await convertMdToDocx('- parent\n\n  <!-- c -->')).warnings).toHaveLength(1);
-    // Between bullet lists, nothing keeps the two apart in Word
-    expect((await convertMdToDocx('1. parent\n   - a\n\n   <!-- -->\n\n   - b')).warnings).toHaveLength(1);
+    // Another comment in an item is a hidden paragraph, which export dropped
+    // with a warning, as one between bullet lists, which nothing else keeps
+    // apart in Word
+    expect((await convertMdToDocx('- parent\n\n  <!-- c -->')).warnings).toEqual([]);
+    const bullets = '1. parent\n   - a\n\n   <!-- -->\n\n   - b';
+    expect((await convertMdToDocx(bullets)).warnings).toEqual([]);
+    expect(await roundTrip(bullets)).toBe('1. parent\n   - a\n\n   <!-- -->\n   - b');
   });
 
   test.each([
@@ -1563,6 +1567,48 @@ describe('HTML blocks in list items', () => {
     // Taken for the item's own text, it went before the quote
     expect(await roundTrip(md)).toBe(expected);
     expect(await roundTrip(expected)).toBe(expected);
+  });
+
+  test.each([
+    ['that is an item', '- <!-- c -->\n- b\n'],
+    ['under an item', '- a\n\n  <!-- c -->\n'],
+    ['of more than one line under an item', '- a\n\n  <!-- c\n  d -->\n'],
+    ['under an item before HTML', '- a\n\n  <!-- c -->\n\n  <div>b</div>\n'],
+    ['under an item in a sublist', '1. a\n   - b\n\n     <!-- c -->\n'],
+    // Which export counted among those of their own, so the next took the
+    // blank lines of the one before
+    ['under an item before one of its own with blank lines after it', '- a\n\n  <!-- c -->\n\n<!-- c -->\n\n\nP.\n'],
+  ])('keeps a comment %s, hidden', async (_name, md) => {
+    // Export dropped a block that starts with a comment in an item
+    expect(await roundTrip(md)).toBe(md);
+    expect((await convertMdToDocx(md)).warnings).toEqual([]);
+  });
+
+  test.each([
+    ['under an item', '- a\n\n  <!-- c --><div>b</div>\n', '- a\n\n  \\<!-- c --><div>b</div>\n'],
+    ['under an item, with a space before the HTML', '- a\n\n  <!-- c --> <div>b</div>\n', '- a\n\n  \\<!-- c --> <div>b</div>\n'],
+    ['under an item, indented past it', '- a\n\n   <!-- c --><div>b</div>\n', '- a\n\n  &#32;\\<!-- c --><div>b</div>\n'],
+    ['that is an item', '- <!-- c --><div>b</div>\n', '- \\<!-- c --><div>b</div>\n'],
+  ])('keeps a block a comment starts %s as text, as at the top level', async (_name, md, expected) => {
+    // Export dropped it, with the HTML after the comment
+    expect((await convertMdToDocx(md)).warnings).toEqual([]);
+    expect(await roundTrip(md)).toBe(expected);
+    expect(await roundTrip(expected)).toBe(expected);
+  });
+
+  test.each([
+    ['an item', '- a<!-- c -->\n- b', '<w:r><w:t>a</w:t></w:r>', '', '- <!-- c -->\n- b\n'],
+    ['a paragraph under an item', '- a\n\n  b', '<w:r><w:t>b</w:t></w:r>', '<w:r><w:rPr><w:vanish/></w:rPr><w:t>&lt;!-- c --&gt;</w:t></w:r>', '- a\n\n  <!-- c -->\n'],
+  ])('keeps %s of a hidden comment from Word', async (_name, md, run, hidden, expected) => {
+    // Import wrote its comment, which export dropped, with a warning
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    expect(xml).toContain(run);
+    zip.file('word/document.xml', xml.replace(run, hidden));
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toBe(expected);
+    expect((await convertMdToDocx(markdown)).warnings).toEqual([]);
+    expect(await roundTrip(markdown)).toBe(markdown);
   });
 
   test.each([
