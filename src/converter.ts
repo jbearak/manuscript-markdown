@@ -3335,7 +3335,12 @@ export async function extractPortraitTableMapping(data: Uint8Array | JSZip): Pro
 }
 
 export async function extractPortraitBreakOrdinals(data: Uint8Array | JSZip): Promise<Set<number> | null> {
-  const json = await extractChunkedCustomProp(data, 'MANUSCRIPT_PORTRAIT_BREAKS_');
+  return extractBreakOrdinals(data, 'MANUSCRIPT_PORTRAIT_BREAKS_');
+}
+
+/** The section breaks' ordinals the custom property `prefix` lists */
+async function extractBreakOrdinals(data: Uint8Array | JSZip, prefix: string): Promise<Set<number> | null> {
+  const json = await extractChunkedCustomProp(data, prefix);
   if (!json) return null;
   try {
     const arr = JSON.parse(json);
@@ -4927,6 +4932,8 @@ export async function extractDocumentContent(
     /** The image files the conversion writes, which the notes' images share */
     imageFiles?: ImageFiles;
     portraitBreakOrdinals?: Set<number>;
+    /** The sections, by the ordinal of the break that ends each, a references marker before their opening fence starts */
+    referencesBeforeSections?: Set<number>;
     customStyles?: Record<string, CustomStyleDef>;
     /** Bookmark name → "noteKind:noteId" for resolving NOTEREF cross-reference fields. */
     footnoteCrossRefMap?: Map<string, string>;
@@ -4994,6 +5001,7 @@ export async function extractDocumentContent(
   let sectionBreakOrdinal = 0; // counter for paragraph-level sectPr occurrences
   let afterSectionBreak = false; // the last paragraph ended a section
   const portraitBreakOrdinals = options?.portraitBreakOrdinals;
+  const referencesBeforeSections = options?.referencesBeforeSections;
   // The tracked mark before the empty carrier that ended the section before,
   // which Markdown drops, unless this section's fence puts its opener there
   let markBeforeSection: RevisionInfo | undefined;
@@ -5002,16 +5010,22 @@ export async function extractDocumentContent(
   // opener would leave it on the line of. Display math and HTML comments
   // write their own line breaks. The mark before the section goes before
   // the opener, as the break that ends the paragraph before (see
-  // joinTrackedParagraphBreaks), on an empty paragraph.
-  const endSection = (target: ContentItem[], fence: 'landscape' | 'portrait' | undefined): void => {
+  // joinTrackedParagraphBreaks), on an empty paragraph. A references marker
+  // export wrote at the start of the section, as it had nothing to list,
+  // goes between that mark and the opener, where it came before the
+  // opener, as a custom property says.
+  const endSection = (target: ContentItem[], fence: 'landscape' | 'portrait' | undefined, ordinal = sectionBreakOrdinal - 1): void => {
     const markBefore = markBeforeSection;
     markBeforeSection = undefined;
     if (fence) {
-      const first = target[sectionStartIndex];
+      const marker = target[sectionStartIndex]?.type === 'para' ? sectionStartIndex + 1 : sectionStartIndex;
+      const at = referencesBeforeSections?.has(ordinal) && target[marker]?.type === 'bibliography_marker' ? marker + 1 : sectionStartIndex;
+      const first = target[at];
       const opener: ContentItem = { type: fence === 'landscape' ? 'landscape_open' : 'portrait_open' };
-      target.splice(sectionStartIndex, 0, ...(markBefore ? [{ type: 'para', breakRevision: markBefore } as ContentItem] : []),
+      target.splice(at, 0,
         ...(first && !isStructuralBoundaryItem(first) && !(first.type === 'math' && first.display) && first.type !== 'html_comment'
           ? [opener, { type: 'para' } as ContentItem] : [opener]));
+      if (markBefore) target.splice(sectionStartIndex, 0, { type: 'para', breakRevision: markBefore });
       target.push({ type: fence === 'landscape' ? 'landscape_close' : 'portrait_close' });
     }
     sectionStartIndex = target.length;
@@ -12665,6 +12679,7 @@ export async function convertDocx(
     landscapeTableMapping,
     portraitTableMapping,
     portraitBreaks,
+    referencesBeforeSections,
     explicitTableFontSize,
     storedFieldOrder,
     htmlCommentAfterGapMapping,
@@ -12726,6 +12741,7 @@ export async function convertDocx(
     landscapeTableMapping: extractLandscapeTableMapping(zip),
     portraitTableMapping: extractPortraitTableMapping(zip),
     portraitBreaks: extractPortraitBreakOrdinals(zip),
+    referencesBeforeSections: extractBreakOrdinals(zip, 'MANUSCRIPT_REFERENCES_BEFORE_SECTIONS_'),
     explicitTableFontSize: extractExplicitTableFontSize(zip),
     storedFieldOrder: extractFrontmatterFieldOrder(zip),
     htmlCommentAfterGapMapping: extractHtmlCommentAfterGapMapping(zip),
@@ -12803,7 +12819,7 @@ export async function convertDocx(
   const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, images: { relationships: fnRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: footnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts };
   const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, images: { relationships: enRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: endnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts };
 
-  const { content: docContent, zoteroBiblData, leadingBlankParagraphs } = await extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, relationshipMap: docRels, replyIds, commentBodies, imageRelationships: imageRels, imageFolder: options?.imageFolder, imageFiles, portraitBreakOrdinals: portraitBreaks ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined, styleLayouts });
+  const { content: docContent, zoteroBiblData, leadingBlankParagraphs } = await extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, relationshipMap: docRels, replyIds, commentBodies, imageRelationships: imageRels, imageFolder: options?.imageFolder, imageFiles, portraitBreakOrdinals: portraitBreaks ?? undefined, referencesBeforeSections: referencesBeforeSections ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined, styleLayouts });
   // The notes the document references, in its order, which are the ones it
   // shows; their images take names after its own, footnotes' first
   const refOrder = noteReferences(docContent);

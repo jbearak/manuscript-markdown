@@ -87,6 +87,9 @@ const IMAGE_DIMENSION_ATTR_RE = '(\\d+(?:\\.\\d+)?|\\.\\d+)\\s*(px|in|cm|mm|pt|p
 
 // Placeholder for deferred bibliography insertion (NUL bytes cannot appear in valid XML)
 const BIBL_PLACEHOLDER = '\x00MANUSCRIPT_BIBL_MARKER\x00';
+// Placeholder for the break that gives a bibliography between two sections a
+// section of its own, written only where the bibliography shows something
+const BIBL_BREAK_PLACEHOLDER = '\x00MANUSCRIPT_BIBL_BREAK\x00';
 
 // Types for the parsed token stream
 export type TableFormat = 'pipe' | 'html' | 'grid';
@@ -1715,6 +1718,13 @@ export function portraitTableProps(portraitTables: Set<number>): CustomPropEntry
 export function portraitBreakProps(portraitBreakOrdinals: Set<number>): CustomPropEntry[] {
   if (portraitBreakOrdinals.size === 0) return [];
   return chunkCustomProps('MANUSCRIPT_PORTRAIT_BREAKS_', JSON.stringify([...portraitBreakOrdinals]));
+}
+
+/** The sections, by the ordinal of the break that ends each, a references
+ *  marker before their opening fence is written at the start of */
+export function referencesBeforeSectionsProps(ordinals: number[] | undefined): CustomPropEntry[] {
+  if (!ordinals?.length) return [];
+  return chunkCustomProps('MANUSCRIPT_REFERENCES_BEFORE_SECTIONS_', JSON.stringify(ordinals));
 }
 
 export function embedDirectiveProps(mapping: Map<number, string>): CustomPropEntry[] {
@@ -4226,6 +4236,7 @@ export interface DocxGenState {
   inPortraitSection: boolean;   // tracks current portrait fence state during generation
   sectionBreakOrdinal: number;  // counter for paragraph-level sectPr emissions (for portrait round-trip)
   portraitBreakOrdinals: Set<number>; // ordinals of portrait-fence close section breaks
+  referencesBeforeSections?: number[]; // ordinals of the breaks ending the sections a references marker before their opening fence is written at the start of
   templateSectPr?: string;      // trailing <w:sectPr> from template document.xml
   templateSections?: TemplateSections; // the template's, whose headers, footers and page numbering the sectPrs written take
   wroteSectPr?: boolean; // whether a sectPr was written, after which none starts the document
@@ -8198,6 +8209,16 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
 
   let prevToken: MdToken | undefined;
   let preserveCloseForNextToken = false;
+  // Whether a bibliography marker is all that's written since a section
+  // ended, before the next section starts
+  let biblAtSectionStart = false;
+  // The ordinals the breaks would have that give such a bibliography its own
+  // section, where it shows something, the next break's
+  const biblBreakOrdinals: number[] = [];
+  const emitBiblBreak = (): void => {
+    body += BIBL_BREAK_PLACEHOLDER;
+    biblBreakOrdinals.push(state.sectionBreakOrdinal);
+  };
   // Track before-gap for each sentinel type (sequential index → blankLinesBefore)
   let sentinelLoIdx = 0, sentinelLcIdx = 0, sentinelPoIdx = 0, sentinelPcIdx = 0;
   let sentinelCsoIdx = 0, sentinelCscIdx = 0;
@@ -8230,14 +8251,22 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     // to avoid an empty intermediate section that renders as a blank page.
     const prevWasClose: boolean = !!preserveCloseForNextToken;
     preserveCloseForNextToken = false;
+    const biblFirst = biblAtSectionStart;
+    biblAtSectionStart = false;
 
     // Bibliography marker: emit placeholder that will be replaced after the loop
-    // once all citedKeys have been collected.
-    // Preserve close-sentinel status across the marker for the
-    // consecutive-section-block invariant (e.g. <!-- /landscape --><!-- references --><!-- landscape -->).
+    // once all citedKeys have been collected. Between two sections, as in
+    // <!-- /landscape --><!-- references --><!-- landscape -->, a bibliography
+    // that shows something gets a section of its own, as other content there
+    // does, so it isn't in the second. One with nothing to list, an empty
+    // field, which Word shows nothing of, gets none, which would be a blank
+    // page: the next section starts with it, as before the close-sentinel
+    // status preserved across it, and a custom property puts the marker
+    // back before the section's opening fence on import.
     if (token.bibliographyMarker) {
       body += BIBL_PLACEHOLDER;
       preserveCloseForNextToken = !!prevWasClose;
+      biblAtSectionStart = prevWasClose && !state.inLandscapeSection && !state.inPortraitSection;
       if (prevToken?.type === 'heading') state.afterHeading = true;
       prevToken = undefined;
       continue;
@@ -8259,6 +8288,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       sentinelCsoIdx++;
       state.activeCustomStyle = token.customStyleOpen;
       preserveCloseForNextToken = !!prevWasClose;
+      biblAtSectionStart = biblFirst;
       if (prevToken?.type === 'heading') state.afterHeading = true;
       prevToken = undefined;
       continue;
@@ -8270,6 +8300,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       state.activeCustomStyle = undefined;
       // Not a section boundary — just thread close-status through (unlike landscapeClose/portraitClose which set true)
       preserveCloseForNextToken = !!prevWasClose;
+      biblAtSectionStart = biblFirst;
       if (prevToken?.type === 'heading') state.afterHeading = true;
       prevToken = undefined;
       continue;
@@ -8282,6 +8313,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       sentinelLoIdx++;
       if (!prevWasClose) {
         emitPortraitBreak();
+      } else if (biblFirst) {
+        emitBiblBreak();
       }
       state.inLandscapeSection = true;
       preserveCloseForNextToken = !!prevWasClose;
@@ -8309,6 +8342,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       sentinelPoIdx++;
       if (!prevWasClose) {
         emitPortraitBreak();
+      } else if (biblFirst) {
+        emitBiblBreak();
       }
       state.inPortraitSection = true;
       preserveCloseForNextToken = !!prevWasClose;
@@ -8382,6 +8417,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       if (token.tableOrientation === 'landscape' && !state.inLandscapeSection && !state.inPortraitSection) {
         state.landscapeTables.add(state.tableIndex);
         if (!prevWasClose) emitPortraitBreak();
+        else if (biblFirst) emitBiblBreak();
         body += table();
         emitLandscapeBreak();
         preserveCloseForNextToken = true;
@@ -8389,6 +8425,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         // Table-only portrait: wrap with portrait section breaks
         state.portraitTables.add(state.tableIndex);
         if (!prevWasClose) emitPortraitBreak();
+        else if (biblFirst) emitBiblBreak();
         body += table();
         state.portraitBreakOrdinals.add(state.sectionBreakOrdinal);
         emitPortraitBreak();
@@ -8464,6 +8501,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     || hasBiblMarker && !body.endsWith(BIBL_PLACEHOLDER)) {
     biblXml += generateBibliographyXml(citeprocEngine, options?.zoteroBiblData, frontmatter?.bibliographyHangingIndent);
   }
+  // An empty field is one hidden paragraph, which Word shows nothing of
+  const biblShows = biblXml !== '' && !biblXml.startsWith('<w:p>' + HIDDEN_PARAGRAPH_PPR) || state.missingKeys.size > 0;
   if (state.missingKeys.size > 0) {
     biblXml += generateMissingKeysXml([...state.missingKeys]);
   }
@@ -8471,6 +8510,20 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     body = body.split(BIBL_PLACEHOLDER).join(biblXml);
   } else {
     body += biblXml;
+  }
+  // A bibliography between two sections that shows something ends a section
+  // of its own, which moves each break after it on by one. One that doesn't
+  // starts the next section, which import reads back before its fence.
+  if (biblBreakOrdinals.length > 0) {
+    if (biblShows) {
+      body = body.split(BIBL_BREAK_PLACEHOLDER).join('<w:p><w:pPr>' + portraitSectPrXml(pgSz, margins, state.rsid) + '</w:pPr></w:p>');
+      const portraitBreakOrdinals = [...state.portraitBreakOrdinals];
+      state.portraitBreakOrdinals.clear();
+      for (const ordinal of portraitBreakOrdinals) state.portraitBreakOrdinals.add(ordinal + biblBreakOrdinals.filter(b => b <= ordinal).length);
+    } else {
+      body = body.split(BIBL_BREAK_PLACEHOLDER).join('');
+      state.referencesBeforeSections = biblBreakOrdinals;
+    }
   }
 
   // Store sentinel gap metadata on state for custom property emission
@@ -9342,6 +9395,7 @@ export async function convertMdToDocx(
   customProps.push(...landscapeTableProps(state.landscapeTables));
   customProps.push(...portraitTableProps(state.portraitTables));
   customProps.push(...portraitBreakProps(state.portraitBreakOrdinals));
+  customProps.push(...referencesBeforeSectionsProps(state.referencesBeforeSections));
   customProps.push(...listIndentProps(state));
   customProps.push(...consecutiveReplyProps(state));
   customProps.push(...htmlCommentGapProps(state.htmlCommentGaps));

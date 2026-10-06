@@ -13044,6 +13044,50 @@ describe('Landscape section round-trip', () => {
     expect((await convertDocx((await convertMdToDocx(md1)).docx)).markdown).toBe(md1);
   });
 
+  test.each([
+    ['between two landscape sections', 'A\n\n<!-- landscape -->\n\nB\n\n<!-- /landscape -->\n\n<!-- references -->\n\n<!-- landscape -->\n\nC\n\n<!-- /landscape -->\n\nD\n'],
+    ['between two portrait sections', 'A\n\n<!-- portrait -->\n\nB\n\n<!-- /portrait -->\n\n<!-- references -->\n\n<!-- portrait -->\n\nC\n\n<!-- /portrait -->\n\nD\n'],
+    ['between a table\'s own section and a landscape section', 'A\n\n<!-- table-orientation: landscape -->\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n<!-- references -->\n\n<!-- landscape -->\n\nC\n\n<!-- /landscape -->\n\nD\n'],
+    ['between a landscape section and a table\'s own section', 'A\n\n<!-- landscape -->\n\nB\n\n<!-- /landscape -->\n\n<!-- references -->\n\n<!-- table-orientation: landscape -->\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nD\n'],
+    ['between two landscape sections that end the body, before the notes', 'A[^1]\n\n<!-- landscape -->\n\nB\n\n<!-- /landscape -->\n\n<!-- references -->\n\n<!-- landscape -->\n\nC\n\n<!-- /landscape -->\n\n[^1]: Note.\n'],
+    ['first in a landscape section after another', 'A\n\n<!-- landscape -->\n\nB\n\n<!-- /landscape -->\n\n<!-- landscape -->\n\n<!-- references -->\n\nC\n\n<!-- /landscape -->\n\nD\n'],
+  ])('keeps a references marker %s in its place', async (_, md) => {
+    // Export put the bibliography between two sections in the second, where
+    // import read it back. With nothing to list, it still starts the second,
+    // with no section of its own, which would be a blank page.
+    const strip = (s: string) => s.replace(/^---\n[\s\S]*?\n---\n/, '');
+    const breaks = async (md: string) => ((await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string'))
+      .match(/<\/w:sectPr><\/w:pPr>/g) ?? []).length;
+    expect(await breaks(md)).toBe(await breaks(md.replace('<!-- references -->\n\n', '')));
+    const md1 = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+    expect(strip(md1)).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(md1)).docx)).markdown).toBe(md1);
+  });
+
+  test.each([
+    ['between two landscape sections', '<!-- landscape -->\n\nB\n\n<!-- /landscape -->\n\n<!-- references -->\n\n<!-- landscape -->\n\nC\n\n<!-- /landscape -->'],
+    ['between a landscape section and two portrait ones', '<!-- landscape -->\n\nB\n\n<!-- /landscape -->\n\n<!-- references -->\n\n<!-- portrait -->\n\nC\n\n<!-- /portrait -->\n\n<!-- portrait -->\n\nE\n\n<!-- /portrait -->'],
+  ])('gives a bibliography with entries %s a portrait section of its own', async (_, sections) => {
+    const md = '---\ncsl: apa\n---\nA [@key1].\n\n' + sections + '\n\nD\n';
+    const bibtex = '@article{key1, author={Smith, John}, title={Title}, journal={J}, year={2020}}';
+    const xmlOf = async (md: string) => (await (await JSZip.loadAsync((await convertMdToDocx(md, { bibtex })).docx)).file('word/document.xml')!.async('string'));
+    const xml = await xmlOf(md);
+    const entry = xml.indexOf('Smith, J. (2020)');
+    expect(entry).toBeGreaterThan(-1);
+    // The section the entries end is portrait, and the landscape one
+    // before them ends before them
+    const sectionEnd = xml.indexOf('<w:sectPr', entry);
+    expect(xml.slice(sectionEnd, xml.indexOf('</w:sectPr>', sectionEnd))).not.toContain('landscape');
+    expect(xml.lastIndexOf('w:orient="landscape"', entry)).toBeLessThan(xml.indexOf('ADDIN ZOTERO_BIBL'));
+    const breaks = (xml: string) => (xml.match(/<\/w:sectPr><\/w:pPr>/g) ?? []).length;
+    expect(breaks(xml)).toBe(breaks(await xmlOf(md.replace('<!-- references -->\n\n', ''))) + 1);
+    // The portrait fences after it are still fences
+    const strip = (s: string) => s.replace(/^---\n[\s\S]*?\n---\n/, '');
+    const md1 = (await convertDocx((await convertMdToDocx(md, { bibtex })).docx)).markdown;
+    expect(strip(md1)).toBe(strip(md));
+    expect((await convertDocx((await convertMdToDocx(md1, { bibtex })).docx)).markdown).toBe(md1);
+  });
+
   test('landscape DOCX section produces body sectPr with page dimensions', async () => {
     const md = '<!-- landscape -->\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n<!-- /landscape -->';
     const { docx } = await convertMdToDocx(md);
