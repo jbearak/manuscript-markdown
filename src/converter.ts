@@ -9024,6 +9024,20 @@ function dropCodeBlockSeparators(content: ContentItem[]): void {
   }
 }
 
+/**
+ * Export keeps tables apart with an empty paragraph, as Word joins tables
+ * with nothing between them into one, which is nothing in Markdown: the
+ * one alone between two tables goes, as a Word user's does, so the next
+ * table goes on in the HTML block of the one before it, where it can. A
+ * note's paragraph is plain (`plain`) but for code and a tracked break.
+ */
+function dropTableSeparators(content: ContentItem[], plain: (item: Extract<ContentItem, { type: 'para' }>) => boolean): void {
+  for (let i = 1; i + 1 < content.length; i++) {
+    const item = content[i];
+    if (content[i - 1].type === 'table' && content[i + 1].type === 'table' && item.type === 'para' && plain(item)) content.splice(i, 1);
+  }
+}
+
 function isPlainEmptyParagraph(item: Extract<ContentItem, { type: 'para' }>): boolean {
   return !item.headingLevel
     && !item.listMeta
@@ -12236,6 +12250,8 @@ export async function convertDocx(
   // A task item is a list item, which the code block's spacer goes before
   markTaskListItems(docContent);
   dropCodeBlockSeparators(docContent);
+  dropTableSeparators(docContent, item => isPlainEmptyParagraph(item) && item.emptyParagraphCount === 1 && !item.paraMarkRevision);
+  for (const note of [...footnotes.values(), ...endnotes.values()]) dropTableSeparators(note.content, item => !item.isCodeBlock && !item.breakRevision);
   const {
     derivedBlockquoteGaps,
     derivedBlockquotePreContentBlankLines,

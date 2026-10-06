@@ -8023,10 +8023,13 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     else if (token.type !== 'list_item' && !token.listContinuation) lastTopItem = undefined;
     if (token.type === 'table') {
       recordTableMetadata(token, state);
+      // After a table with nothing between them in Word, as a directive's
+      // comment is none, an empty paragraph, as Word joins tables with none
+      // between them into one, which import reads as nothing
       const table = () => {
         const xml = generateTable(token, state, options, bibEntries, citeprocEngine);
         recordTableIdentity(token, xml, state, '');
-        return xml;
+        return (body.endsWith('</w:tbl>') ? '<w:p/>' : '') + xml;
       };
       // Table-only landscape: wrap with section breaks (skip if already in fence-based landscape)
       if (token.tableOrientation === 'landscape' && !state.inLandscapeSection && !state.inPortraitSection) {
@@ -8720,6 +8723,8 @@ export async function convertMdToDocx(
       } else {
         if (t.type === 'table') {
           recordTableMetadata(t, state);
+          // And after a table, an empty paragraph, as in the body
+          if (bodyXml.endsWith('</w:tbl>')) bodyXml += '<w:p>' + paragraphPPr + '</w:p>';
           const xml = generateTable(t, state, options, bibEntries, citeprocEngine);
           recordTableIdentity(t, xml, state, tableScope);
           bodyXml += xml;

@@ -7658,7 +7658,8 @@ describe('HTML around a table in its block', () => {
   test('writes a table after another in their HTML block as a block of its own where Word puts a paragraph between them', async () => {
     const zip = await JSZip.loadAsync((await convertMdToDocx('<div>\n' + table('a') + '\n<p>B</p>\n' + table('b') + '\n</div>\n')).docx);
     const xml = await zip.file('word/document.xml')!.async('string');
-    const between = xml.replace('</w:tbl><w:tbl>', '</w:tbl><w:p><w:r><w:t>Mid</w:t></w:r></w:p><w:tbl>');
+    // The paragraph export writes between the tables, with text in it
+    const between = xml.replace(/<\/w:tbl><w:p\b[^>]*\/><w:tbl>/, '</w:tbl><w:p><w:r><w:t>Mid</w:t></w:r></w:p><w:tbl>');
     expect(between).not.toBe(xml);
     zip.file('word/document.xml', between);
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
@@ -8188,6 +8189,47 @@ describe('HTML around a table in its block', () => {
     zip.file('word/document.xml', tracked);
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
     expect(markdown).toBe('<div>\n<p>Cap</p>\n\n<!-- table-font-size: 11 -->\n| h |\n| --- |\n| {++XX++} |\n\n</div>\n\nAfter.\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+});
+
+describe('tables next to each other', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+  const parts = async (docx: Uint8Array) => {
+    const zip = await JSZip.loadAsync(docx);
+    return (await zip.file('word/document.xml')!.async('string')) + ((await zip.file('word/footnotes.xml')?.async('string')) ?? '');
+  };
+  const pipe = (text: string, indent = '') => [indent + '| ' + text + ' |', indent + '| --- |', indent + '| ' + text + text + ' |'].join('\n');
+
+  test.each([
+    ['two tables', pipe('a') + '\n\n' + pipe('b') + '\n'],
+    ['a table after one with a directive', pipe('a') + '\n\n<!-- table-font-size: 11 -->\n' + pipe('b') + '\n'],
+    ['two tables in a landscape section', '<!-- landscape -->\n' + pipe('a') + '\n\n' + pipe('b') + '\n<!-- /landscape -->\n\nAfter.\n'],
+    ['two tables in a note', 'Text[^1].\n\n[^1]: Note.\n\n' + pipe('a', '    ') + '\n\n' + pipe('b', '    ') + '\n'],
+    ['two tables in an HTML block', '<div>\n<table>\n  <tr>\n    <td>\n      <p>a</p>\n    </td>\n  </tr>\n</table>\n<table>\n  <tr>\n    <td>\n      <p>b</p>\n    </td>\n  </tr>\n</table>\n</div>\n'],
+    ['two tables in a note\'s HTML block', 'Text[^1].\n\n[^1]: Note.\n\n    <div>\n    <table>\n      <tr>\n        <td>\n          <p>a</p>\n        </td>\n      </tr>\n    </table>\n    <table>\n      <tr>\n        <td>\n          <p>b</p>\n        </td>\n      </tr>\n    </table>\n    </div>\n'],
+  ])('keeps %s apart in Word with a paragraph, which import reads as nothing', async (_name, md) => {
+    // Export wrote them with nothing between them, which Word joins
+    const { docx } = await convertMdToDocx(md);
+    const xml = await parts(docx);
+    expect(xml).not.toContain('</w:tbl><w:tbl>');
+    expect(xml).toMatch(/<\/w:tbl><w:p\b[^>]*(?:\/>|>(?:<w:pPr>(?:(?!<\/w:p>)[\s\S])*<\/w:pPr>)?<\/w:p>)<w:tbl>/);
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(md);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps tables a Word user kept apart with an empty paragraph apart', async () => {
+    // Import read them with a blank line between, which export wrote as
+    // tables with nothing between them
+    const zip = await JSZip.loadAsync((await convertMdToDocx('X')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const tbl = (text: string) => '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>' + text + '</w:t></w:r></w:p></w:tc></w:tr></w:tbl>';
+    zip.file('word/document.xml', xml.slice(0, xml.indexOf('<w:body>') + 8) + tbl('a') + '<w:p/>' + tbl('b') + xml.slice(xml.lastIndexOf('<w:sectPr')));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('+-----+\n| a   |\n+-----+\n\n+-----+\n| b   |\n+-----+\n');
+    expect(await parts((await convertMdToDocx(markdown)).docx)).not.toContain('</w:tbl><w:tbl>');
     expect(await roundTrip(markdown)).toBe(markdown);
   });
 });
