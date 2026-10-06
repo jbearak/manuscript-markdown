@@ -1,7 +1,7 @@
 import { GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData } from './grid-table-preprocess';
 import type { HtmlTableCellSource } from './html-table-parser';
 import { computeCodeRegions } from './code-regions';
-import { decodeNumericHtmlEntity } from './html-entities';
+import { decodeHtmlNumericReference, HTML_NUMERIC_REFERENCE } from './html-entities';
 import { isGfmDisallowedRawHtml } from './gfm';
 import {
   MAX_TABLE_DIGITS,
@@ -816,7 +816,7 @@ function firstOverlappingRange(ranges: SourceRange[], start: number): number {
 function decodeHtmlTextWithOffsets(raw: string, stats?: TableNumberFormatScanStats): { decoded: string; decodedToRaw: Uint32Array } {
 	const offsets = [0];
 	let decoded = '';
-	const tokenRe = /&(?:#\d+|#x[0-9a-f]+|nbsp|lt|gt|quot|apos|amp);|[\s\S]/gi;
+	const tokenRe = new RegExp(HTML_REFERENCE + '|[\\s\\S]', 'gi');
 	let match: RegExpExecArray | null;
 	while ((match = tokenRe.exec(raw)) !== null) {
 		const value = decodeHtmlText(match[0]);
@@ -1129,11 +1129,15 @@ function diffCharacterEdits(before: string, after: string): Array<{ start: numbe
 	return edits;
 }
 
+const HTML_REFERENCE = HTML_NUMERIC_REFERENCE + '|&(?:nbsp|lt|gt|quot|apos|amp);';
+const HTML_REFERENCE_RE = new RegExp(HTML_REFERENCE, 'gi');
+const NAMED_REFERENCES: Record<string, string> = { nbsp: '\u00a0', lt: '<', gt: '>', quot: '"', apos: "'", amp: '&' };
+
+/** Text's character references as the browser reads them, as the HTML
+ *  table parser does, in one pass */
 function decodeHtmlText(raw: string): string {
-	return raw.replace(/&#(\d+);/g, (entity, code) => decodeNumericHtmlEntity(entity, code, 10))
-		.replace(/&#x([0-9a-f]+);/gi, (entity, code) => decodeNumericHtmlEntity(entity, code, 16))
-		.replace(/&nbsp;/gi, '\u00a0').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"')
-		.replace(/&#39;|&apos;/gi, "'").replace(/&amp;/gi, '&');
+	return raw.replace(HTML_REFERENCE_RE, reference => reference[1] === '#' ? decodeHtmlNumericReference(reference)
+		: NAMED_REFERENCES[reference.slice(1, -1).toLowerCase()]);
 }
 
 function encodeHtmlText(value: string): string {

@@ -481,6 +481,13 @@ describe('table number formatting', () => {
 		expect(formatTableNumbers(narrow, { digits: 1 }).output).toContain('1\u202f234.5');
 	});
 
+	test('reads a currency sign written as a numeric reference as the browser does', () => {
+		// &#128; read as U+0080, before which the value was no number, though
+		// the browser shows it as €, as it does &#128 with no ;
+		const html = '<table><tr><td>&#128;1234.5</td><td>&#128 7</td></tr></table>';
+		expect(formatTableNumbers(html, { digits: 2 }).output).toBe('<table><tr><td>&#128;1234.50</td><td>&#128 7.00</td></tr></table>');
+	});
+
 	test('keeps surviving digits in their original HTML runs when grouping is removed', () => {
 		const html = '<table><tr><td><b>1</b>&nbsp;<i>234</i>.50</td></tr></table>';
 		const output = formatTableNumbers(html, { digitGrouping: 'none', decimalMark: 'midpoint' }).output;

@@ -188,6 +188,11 @@ describe('HTML table cell paragraphs', () => {
   test('keeps whitespace written as references, which HTML neither collapses nor trims', () => {
     expect(runs('<p>&#9;a &#32;b&nbsp;</p>')).toEqual([{ type: 'text', text: '\ta  b ' }]);
   });
+
+  test('reads a reference once, so the text one writes stays text', () => {
+    // &#38; made an & of the next reference, which read as one too
+    expect(runs('&#38;#x80; &#38;#128; &amp;#128;')).toEqual([{ type: 'text', text: '&#x80; &#128; &#128;' }]);
+  });
 });
 
 describe('HTML table cell alignment', () => {
