@@ -4038,8 +4038,10 @@ export interface DocxGenState {
   warnings: string[];
   hasList: boolean;
   listStartOverrides: NumberingOverride[]; // ordered lists after the first
-  firstOverrideNumId?: number; // numIds below it are 1 and 2, for bullets and numbers, and a template's styles' (default 3)
-  usedOrderedNumId?: boolean; // whether an ordered list has used numId 2, so the next needs its own
+  firstOverrideNumId?: number; // numIds below it are bullets', numbers', and a template's styles' and headers' (default 3)
+  bulletNumId?: number; // the numId bullets take (default 1; see listNumIds)
+  decimalNumId?: number; // the numId numbers take (default 2)
+  usedOrderedNumId?: boolean; // whether an ordered list has used numbers' numId, so the next needs its own
   hasComments: boolean;
   hasFootnotes: boolean;
   hasEndnotes: boolean;
@@ -5328,24 +5330,86 @@ function parseTemplateNumbering(xml: string): { root: OrderedXmlNode; nums: Orde
 }
 
 /**
- * The numIds of a template's numbering the document can use: 1 and 2, for
- * bullets and numbers, those its styles use, and those of its headers and
- * footers, which export copies. The rest numbered the template's own text,
- * as a previous export's start overrides did where the template is that
- * export, and go, so that each save doesn't add more.
+ * The numIds of a template's numbering its styles use, and its headers and
+ * footers, which export copies. The document can use these, and the ones its
+ * bullets and numbers take (see listNumIds). The rest numbered the
+ * template's own text, as a previous export's start overrides did where the
+ * template is that export, and go, so that each save doesn't add more.
  */
-function templateNumIdsInUse(templateStyles?: Uint8Array, headerNumIds: Iterable<number> = []): Set<number> {
-  const used = new Set([1, 2, ...headerNumIds]);
-  if (!templateStyles) return used;
-  const styles = decodeXml(templateStyles);
-  for (const m of styles.matchAll(/<w:numId\b[^>]*?\bw:val\s*=\s*["'](\d+)["']/g)) used.add(parseInt(m[1], 10));
+function templateNumIdsInUse(templateStyles?: string, headerNumIds: Iterable<number> = []): Set<number> {
+  const used = new Set(headerNumIds);
+  for (const m of (templateStyles ?? '').matchAll(/<w:numId\b[^>]*?\bw:val\s*=\s*["'](\d+)["']/g)) used.add(parseInt(m[1], 10));
   return used;
 }
 
+const NUM_ELEMENT = /<w:num\b[^>]*?\bw:numId\s*=\s*["'](\d+)["'][^>]*?(?:\/>|>[\s\S]*?<\/w:num\s*>)\s*/g;
+
 /** A template's numbering without the instances the document can't use. */
 function withoutUnusedNums(xml: string, used: Set<number>): string {
-  return xml.replace(/<w:num\b[^>]*?\bw:numId\s*=\s*["'](\d+)["'][^>]*?(?:\/>|>[\s\S]*?<\/w:num\s*>)\s*/g,
-    (num, numId: string) => used.has(parseInt(numId, 10)) ? num : '');
+  return xml.replace(NUM_ELEMENT, (num, numId: string) => used.has(parseInt(numId, 10)) ? num : '');
+}
+
+type ListKind = 'bullet' | 'decimal';
+
+/**
+ * The numIds export's bullets and numbers take in a template's numbering,
+ * and those it writes its own definitions at. Each kind takes 1 or 2 where
+ * the template's instance there has its format, a bullet or a number at its
+ * first level, or where nothing of the template's uses it. Otherwise it
+ * takes the first numId after 2 whose instance has its format and starts no
+ * level over, or that nothing uses. So the template's headers, footers and
+ * styles keep their numbering, and the next export, with this one as the
+ * template, takes the same numIds.
+ */
+function listNumIds(numberingXml: string | undefined, stylesXml: string | undefined, inUse: Set<number>): { bullet: number; decimal: number; own: Map<number, ListKind> } {
+  const own = new Map<number, ListKind>();
+  const numbering = numberingXml === undefined ? undefined : parseTemplateNumbering(numberingXml);
+  if (!numbering) return { bullet: 1, decimal: 2, own };
+  const abstractNums = childNodes(numbering.root, 'w:numbering').filter(n => 'w:abstractNum' in n);
+  const instance = (numId: number) => numbering.nums.find(n => intAttr(n, 'w:numId') === numId);
+  const formatOf = (level: OrderedXmlNode | undefined) => level && childNodes(level, 'w:lvl').find(n => 'w:numFmt' in n)?.[':@']?.['@_w:val'];
+  /** An instance's format at its first level: its own, its abstract
+   *  numbering's, or that of the numbering style the abstract one links to */
+  const firstLevelFormat = (numId: number, seen = new Set<number>()): string | undefined => {
+    const num = instance(numId);
+    if (!num || seen.has(numId)) return undefined;
+    seen.add(numId);
+    const children = childNodes(num, 'w:num');
+    for (const o of children.filter(n => 'w:lvlOverride' in n && intAttr(n, 'w:ilvl') === 0)) {
+      const format = formatOf(childNodes(o, 'w:lvlOverride').find(n => 'w:lvl' in n));
+      if (format) return format;
+    }
+    const abstractNumId = children.find(n => 'w:abstractNumId' in n);
+    const abstractNum = abstractNumId && abstractNums.find(a => intAttr(a, 'w:abstractNumId') === intAttr(abstractNumId, 'w:val'));
+    const definition = childNodes(abstractNum, 'w:abstractNum');
+    const format = formatOf(definition.find(n => 'w:lvl' in n && intAttr(n, 'w:ilvl') === 0));
+    if (format) return format;
+    const link = definition.find(n => 'w:numStyleLink' in n)?.[':@']?.['@_w:val'];
+    const style = link && new RegExp('<w:style\\b[^>]*?\\bw:styleId\\s*=\\s*["\']' + link.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '["\'][^>]*>([\\s\\S]*?)<\\/w:style\\s*>').exec(stylesXml ?? '');
+    const linked = style && /<w:numId\b[^>]*?\bw:val\s*=\s*["'](\d+)["']/.exec(style[1]);
+    return linked ? firstLevelFormat(parseInt(linked[1], 10), seen) : undefined;
+  };
+  const hasFormat = (numId: number, kind: ListKind) => {
+    const format = firstLevelFormat(numId);
+    return kind === 'bullet' ? format === 'bullet' : format !== undefined && format !== 'bullet' && format !== 'none';
+  };
+  const startsOver = (numId: number) => childNodes(instance(numId), 'w:num').some(n => 'w:lvlOverride' in n && childNodes(n, 'w:lvlOverride').some(o => 'w:startOverride' in o));
+  const taken = new Set<number>();
+  const pick = (preferred: number, kind: ListKind): number => {
+    for (let numId = preferred; ; numId = numId === preferred ? 3 : numId + 1) {
+      if (taken.has(numId)) continue;
+      if (instance(numId) && hasFormat(numId, kind) && (numId === preferred || !startsOver(numId))) {
+        taken.add(numId);
+        return numId;
+      }
+      if (!inUse.has(numId)) {
+        own.set(numId, kind);
+        taken.add(numId);
+        return numId;
+      }
+    }
+  };
+  return { bullet: pick(1, 'bullet'), decimal: pick(2, 'decimal'), own };
 }
 
 /**
@@ -5377,11 +5441,11 @@ function numberingOverrideXml(o: NumberingOverride, abstractNumId: string,
     '</w:num>\n';
 }
 
-/** A template's numbering with start overrides added as instances like its
- *  numId 2, or undefined when it has none. */
-function withNumberingOverrides(xml: string, startOverrides: NumberingOverride[]): string | undefined {
+/** A template's numbering with start overrides added as instances like the
+ *  one numbers take, `numId`, or undefined when it has none. */
+function withNumberingOverrides(xml: string, startOverrides: NumberingOverride[], numId: number): string | undefined {
   const numbering = parseTemplateNumbering(xml);
-  const instance = childNodes(numbering?.nums.find(n => intAttr(n, 'w:numId') === 2), 'w:num');
+  const instance = childNodes(numbering?.nums.find(n => intAttr(n, 'w:numId') === numId), 'w:num');
   const abstractNum = instance.find(n => 'w:abstractNumId' in n);
   const abstractNumId = abstractNum && intAttr(abstractNum, 'w:val');
   // w:num entries go before numIdMacAtCleanup, which ends the part
@@ -5424,22 +5488,22 @@ function defaultAbstractNumXml(kind: 'bullet' | 'decimal', abstractNumId: number
 }
 
 /**
- * A template's numbering with export's bullets and numbers, numIds 1 and 2,
- * where it lacks them, so that its own definitions, which its headers and
- * styles can use, stay
+ * A template's numbering with export's own bullets and numbers at the
+ * numIds listNumIds gives them, in place of any instance of the template's
+ * there, so that its other definitions, which its headers and styles can
+ * use, stay
  */
-function withDefaultNums(xml: string): string {
+function withOwnNums(xml: string, own: Map<number, ListKind>): string {
+  if (own.size === 0) return xml;
+  xml = xml.replace(NUM_ELEMENT, (num, numId: string) => own.has(parseInt(numId, 10)) ? '' : num);
   const numbering = parseTemplateNumbering(xml);
   if (!numbering) return xml;
-  const present = new Set(numbering.nums.map(n => intAttr(n, 'w:numId')));
-  const missing = [1, 2].filter(numId => !present.has(numId));
-  if (missing.length === 0) return xml;
   const abstractNumIds = childNodes(numbering.root, 'w:numbering').filter(n => 'w:abstractNum' in n).map(n => intAttr(n, 'w:abstractNumId'));
   let next = Math.max(-1, ...abstractNumIds.filter(Number.isInteger)) + 1;
   const declares = (prefix: string) => numbering.root[':@']?.['@_xmlns:' + prefix] !== undefined;
   let abstractNums = '', nums = '';
-  for (const numId of missing) {
-    abstractNums += defaultAbstractNumXml(numId === 1 ? 'bullet' : 'decimal', next, declares('w15'));
+  for (const [numId, kind] of own) {
+    abstractNums += defaultAbstractNumXml(kind, next, declares('w15'));
     nums += '<w:num w:numId="' + numId + '"' + (declares('w16cid') ? ' w16cid:durableId="' + Math.floor(Math.random() * 2000000000) + '"' : '') +
       '><w:abstractNumId w:val="' + next + '"/></w:num>\n';
     next++;
@@ -7085,7 +7149,7 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
         const leftIndent = 720 * (token.level || 1);
         pPr = '<w:pPr><w:ind w:left="' + leftIndent + '" w:hanging="360"/></w:pPr>';
       } else {
-        let numId = token.ordered ? '2' : '1';
+        let numId = String(token.ordered ? state.decimalNumId ?? 2 : state.bulletNumId ?? 1);
         const ilvl = (token.level || 1) - 1;
         // Word counts on through every paragraph of a numbering instance, so
         // each ordered list after the first gets one of its own, which
@@ -7099,7 +7163,7 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
           if (parentNumId !== undefined && start === 1) {
             state.activeListStartOverrides.set(ilvl, parentNumId);
           } else if (!state.usedOrderedNumId && start === 1) {
-            state.activeListStartOverrides.set(ilvl, 2);
+            state.activeListStartOverrides.set(ilvl, state.decimalNumId ?? 2);
           } else {
             const overrideNumId = (state.firstOverrideNumId ?? 3) + state.listStartOverrides.length;
             state.listStartOverrides.push({ numId: overrideNumId, ilvl, start });
@@ -8425,6 +8489,12 @@ export async function convertMdToDocx(
   }
   // The template's headers and footers take document.xml's first relationships
   const templateRelCount = templateSections?.relationships.length ?? 0;
+  // The numbering of a template's styles and headers, and the numIds the
+  // document's lists take in it
+  const templateNumbering = templateParts?.has('word/numbering.xml') ? decodeXml(templateParts.get('word/numbering.xml')!) : undefined;
+  const templateStyles = templateParts?.has('word/styles.xml') ? decodeXml(templateParts.get('word/styles.xml')!) : undefined;
+  const numIdsInUse = templateNumIdsInUse(templateStyles, templateSections?.numIds);
+  const listNumbering = listNumIds(templateNumbering, templateStyles, numIdsInUse);
 
   const hasTheme = true; // always include a theme (template or default)
 
@@ -8457,7 +8527,9 @@ export async function convertMdToDocx(
     warnings: [...earlyWarnings],
     hasList: false,
     listStartOverrides: [],
-    firstOverrideNumId: Math.max(...templateNumIdsInUse(templateParts?.get('word/styles.xml'), templateSections?.numIds)) + 1,
+    bulletNumId: listNumbering.bullet,
+    decimalNumId: listNumbering.decimal,
+    firstOverrideNumId: Math.max(2, ...numIdsInUse, listNumbering.bullet, listNumbering.decimal) + 1,
     usedOrderedNumId: false,
     hasComments: false,
     hasFootnotes: false,
@@ -8916,17 +8988,19 @@ export async function convertMdToDocx(
   zip.file('word/fontTable.xml', fontTableXml());
 
   // Handle numbering - use template as base but ensure bullet/decimal definitions exist.
-  // Export's bullets and numbers join a template's numbering that lacks
-  // them, and start overrides join it as instances of the abstract
-  // numbering its numId 2 uses. Only a template without numbering, or with
-  // numbering that doesn't parse, gets fresh numbering.
+  // Export's bullets and numbers join a template's numbering where it has
+  // none in their format (see listNumIds), and start overrides join it as
+  // instances of the abstract numbering numbers take. Only a template
+  // without numbering, or with numbering that doesn't parse, gets fresh
+  // numbering.
   let numberingFromTemplate = false;
   if (hasNumbering) {
-    const templateNumbering = templateParts?.get('word/numbering.xml');
-    const used = templateNumbering && withoutUnusedNums(decodeXml(templateNumbering),
-      templateNumIdsInUse(templateParts?.get('word/styles.xml'), templateSections?.numIds));
-    const complete = used && (state.hasList ? withDefaultNums(used) : used);
-    const numbering = complete && (state.listStartOverrides.length === 0 ? complete : withNumberingOverrides(complete, state.listStartOverrides));
+    const used = templateNumbering !== undefined ? withoutUnusedNums(templateNumbering,
+      new Set([...numIdsInUse, listNumbering.bullet, listNumbering.decimal])) : undefined;
+    const complete = used !== undefined ? (state.hasList ? withOwnNums(used, listNumbering.own) : used) : undefined;
+    const numbering = complete !== undefined
+      ? (state.listStartOverrides.length === 0 ? complete : withNumberingOverrides(complete, state.listStartOverrides, listNumbering.decimal))
+      : undefined;
     numberingFromTemplate = !!numbering;
     zip.file('word/numbering.xml', numbering ? asUtf8(numbering) : numberingXml(state.listStartOverrides));
   }

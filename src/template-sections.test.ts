@@ -448,3 +448,50 @@ describe('a template\'s headers and footers', () => {
     }
   });
 });
+
+/** Markdown without its frontmatter */
+const body = (markdown: string) => markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
+/** An instance's abstract numbering's first level's format */
+const firstLevelFormat = (numbering: string, numId: string) => {
+  const abstractNumId = new RegExp('<w:num w:numId="' + numId + '"[^>]*><w:abstractNumId w:val="(\\d+)"/>').exec(numbering)?.[1];
+  const abstractNum = new RegExp('<w:abstractNum w:abstractNumId="' + abstractNumId + '"[^>]*>([\\s\\S]*?)</w:abstractNum>').exec(numbering)?.[1];
+  return /<w:lvl w:ilvl="0"[^>]*>[\s\S]*?<w:numFmt w:val="(\w+)"/.exec(abstractNum ?? '')?.[1];
+};
+
+describe('a template\'s numbering', () => {
+  /** A template whose numbering's numIds 1 and 2 are formatted by `edit` */
+  const listTemplate = async (edit: (numbering: string) => string) => editTemplate((await convertMdToDocx('- a\n\n1. b')).docx, 'word/numbering.xml', edit);
+  const decimalAt1 = (numbering: string) => numbering.replace(/(<w:num w:numId="1"[^>]*>)<w:abstractNumId w:val="0"\/>/, '$1<w:abstractNumId w:val="1"/>');
+
+  it.each([
+    ['numbers at numId 1', decimalAt1, '- bullet\n\n1. one\n2. two'],
+    ['numbers at numId 1 and no numId 2', (numbering: string) => decimalAt1(numbering).replace(/<w:num w:numId="2"[^>]*>[\s\S]*?<\/w:num>\s*/, ''), '- bullet\n\n8. item'],
+    ['bullets at numId 2', (numbering: string) => numbering.replace(/(<w:num w:numId="2"[^>]*>)<w:abstractNumId w:val="1"\/>/, '$1<w:abstractNumId w:val="0"/>'), '1. one\n2. two\n\n- bullet'],
+  ])('gives bullets and numbers their own where it has %s', async (_name, edit, md) => {
+    const { docx } = await convertMdToDocx(md, { templateDocx: await listTemplate(edit) });
+    expect(await packageProblems(docx)).toEqual([]);
+    expect(body((await convertDocx(docx)).markdown)).toBe(md + '\n');
+  });
+
+  it('gives bullets their own numbering, not the header\'s numbers at numId 1, the same on the next export', async () => {
+    let templateDocx = await editTemplate(await headerTemplate({ headerList: 'direct' }), 'word/numbering.xml',
+      numbering => decimalAt1(numbering).replace(/<w:num w:numId="2"[^>]*>[\s\S]*?<\/w:num>\s*/, ''));
+    templateDocx = await editTemplate(templateDocx, 'word/header3.xml', xml => xml.replace('<w:numId w:val="3"/>', '<w:numId w:val="1"/>'));
+    const md = '- bullet\n\n8. item';
+    const first = (await convertMdToDocx(md, { templateDocx })).docx;
+    const second = (await convertMdToDocx(md, { templateDocx: first })).docx;
+    for (const docx of [first, second]) {
+      expect(await packageProblems(docx)).toEqual([]);
+      expect(body((await convertDocx(docx)).markdown)).toBe(md + '\n');
+      const zip = await JSZip.loadAsync(docx);
+      const numbering = (await textOf(zip, 'word/numbering.xml'))!;
+      // The header's list keeps the template's numbers
+      expect((await textOf(zip, 'word/header3.xml'))!).toContain('<w:numId w:val="1"/>');
+      expect(firstLevelFormat(numbering, '1')).toBe('decimal');
+      const bullet = /<w:numId w:val="(\d+)"\/>/.exec((await textOf(zip, 'word/document.xml'))!)![1];
+      expect(firstLevelFormat(numbering, bullet)).toBe('bullet');
+    }
+    const numbering = async (docx: Uint8Array) => (await textOf(await JSZip.loadAsync(docx), 'word/numbering.xml'))!.match(/<w:(abstractNum|num) /g);
+    expect(await numbering(second)).toEqual(await numbering(first));
+  });
+});

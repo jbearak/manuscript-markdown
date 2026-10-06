@@ -262,7 +262,7 @@ When using **Export to Word with Template**, the converter extracts styling part
 
 - `word/styles.xml` — heading fonts, body text formatting, spacing
 - `word/theme/theme1.xml` — theme colors and fonts
-- `word/numbering.xml` — list definitions, with the images of its picture bullets. Export adds its own bullet and number definitions where the template's numbering lacks them.
+- `word/numbering.xml` — list definitions, with the images of its picture bullets. Bullets take the template's numId 1 and numbers its numId 2 where those are a bullet and a number. Where they aren't, export adds its own definitions and leaves the template's in place for its headers, footers and styles.
 - the page setup of its last section, such as its page size and margins
 - its headers and footers, with their images, their fields such as a page number, and their lists' numbering
 
