@@ -5052,10 +5052,30 @@ describe('Bare links', () => {
     ['a backslash before an address', 'a\\\\[mailto:a@b.com](mailto:a@b.com)', 'a\\\\[mailto:a\\@b.com](mailto:a@b.com)'],
     ['a space that starts the paragraph before an address', '&#32;[mailto:a@b.com](mailto:a@b.com)', '&#32;[mailto:a\\@b.com](mailto:a@b.com)'],
     ['a space that starts a line before an address', 'a\\\n&#32;[a@b.com](mailto:a@b.com)', 'a\\\n&#32;[a\\@b.com](mailto:a@b.com)'],
+    ['a no-break space that starts the paragraph before an address', '&nbsp;[a@b.com](mailto:a@b.com)', '&nbsp;[a\\@b.com](mailto:a@b.com)'],
+    // A reference after it, as for whitespace that ends the paragraph,
+    // which linkify reads a URL on into, as https://e.com/a&nbsp
+    ['a no-break space that ends the paragraph after its path', '[https://e.com/a](https://e.com/a)&nbsp;', '[https\\://e.com/a](https://e.com/a)&nbsp;'],
+    ['an ideographic space that ends the paragraph after its path', '[https://e.com/a](https://e.com/a)&#12288;', '[https\\://e.com/a](https://e.com/a)&#12288;'],
   ])('writes a link next to %s in link syntax', async (_name, md, expected) => {
     // Written bare, linkify read the link with the text next to it, or
     // didn't read it as a link
     expect(await roundTrip(md)).toBe(expected + '\n');
+  });
+
+  test('writes a link next to a space that ends a line in a grid table\'s cell in link syntax', async () => {
+    // A grid cell's lines are trimmed, so the space before the line break
+    // went as a reference, which linkify read the URL on into, as
+    // https://e.com/a&#32
+    const grid = (link: string) => {
+      const line = '| ' + link + '&#32; |';
+      const border = '+' + '-'.repeat(line.length - 2) + '+';
+      const row = (text: string) => '| ' + text.padEnd(line.length - 4) + ' |';
+      return [border, row('h'), border.replace(/-/g, '='), line, row('x'), border].join('\n');
+    };
+    const expected = grid('[https\\://e.com/a](https://e.com/a)');
+    expect(await roundTrip(grid('[https://e.com/a](https://e.com/a)'))).toBe(expected + '\n');
+    expect(await roundTrip(expected)).toBe(expected + '\n');
   });
 
   test.each([
@@ -5076,6 +5096,9 @@ describe('Bare links', () => {
     // A ! before it, escaped for a link's [, isn't, and an escaped & starts
     // no reference
     'a!mailto:a@b.com', 'a\\&#33;mailto:a@b.com', '&#32;https://e.com',
+    // A reference that starts the paragraph before a URL with //, and one
+    // after a host or an address, which ends its text
+    '&nbsp;https://e.com', 'https://e.com&nbsp;', 'a@b.com&#12288;',
     // A break in the markup after it, which export read as part of the URL
     'https://e.com/a{~~\\\n~>x~~}', 'https://e.com/a{++x\\\ny++}',
   ])('keeps %s bare', async (md) => {

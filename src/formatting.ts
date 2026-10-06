@@ -1,5 +1,5 @@
-import { keepParagraphEdgeWhitespace } from './html-entities';
-import { extractHtmlTables, type HtmlTableRun } from './html-table-parser';
+import { extractHtmlTables, type HtmlTableCell } from './html-table-parser';
+import { DEFAULT_FORMATTING, markdownTable, type ContentItem, type TableCell } from './converter';
 import MarkdownIt from 'markdown-it';
 import { HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import { separatorAlign, type TableAlign } from './grid-table-preprocess';
@@ -691,61 +691,40 @@ function formatGridContentRow(cells: string[], columnWidths: number[], pad: bool
   return '| ' + rendered.join(' | ') + ' |';
 }
 
-function runsToMarkdown(runs: HtmlTableRun[]): string {
-  let result = '';
-  for (const run of runs) {
-    if (run.type === 'softbreak') {
-      result += '\n';
-      continue;
-    }
-    if (run.type === 'hardbreak') {
-      // Grid table cells treat bare newlines as hard breaks, so no backslash needed.
-      result += '\n';
-      continue;
-    }
-    if (run.type !== 'text') {
-      result += run.text;
-      continue;
-    }
-    let t = run.text;
-    if (run.code) {
-      // Subtle bug guard: a fixed `` fence breaks content like ``test``.
-      const backtickRuns = t.match(/`+/g) ?? [];
-      const maxBacktickRun = backtickRuns.reduce((max, runText) => Math.max(max, runText.length), 0);
-      const fence = '`'.repeat(maxBacktickRun + 1);
-      const needsPadding = t.startsWith('`') || t.endsWith('`');
-      const codeSpan = needsPadding ? fence + ' ' + t + ' ' + fence : fence + t + fence;
-      result += run.href ? '[' + codeSpan + '](' + formatHrefForMarkdown(run.href) + ')' : codeSpan;
-      continue;
-    }
-    // Emphasis can't open before whitespace or close after it, so the
-    // whitespace at the run's edges goes outside it, but inside the
-    // formatting that can hold it
-    const [, lead, core, trail] = /^([ \t\u00a0]*)([\s\S]*?)([ \t\u00a0]*)$/.exec(t)!;
-    t = core;
-    if (t && run.bold) t = '**' + t + '**';
-    if (t && run.italic) t = '*' + t + '*';
-    if (t && run.strikethrough) t = '~~' + t + '~~';
-    t = lead + t + trail;
-    if (run.underline) t = '[' + t + ']{.underline}';
-    if (run.superscript) t = '<sup>' + t + '</sup>';
-    if (run.subscript) t = '<sub>' + t + '</sub>';
-    if (run.href) t = '[' + t + '](' + formatHrefForMarkdown(run.href) + ')';
-    result += t;
+/** A character XML 1.0 can't hold: a control character other than a tab
+ *  or line end, or U+FFFE or U+FFFF. Word's text can't hold one, so export
+ *  drops it, import's writers take some for marks of their own, as U+0007
+ *  for a bare link's, and Markdown reads one written as a reference, as
+ *  &#7;, as U+FFFD, so a cell with one can't be written as it is. */
+const NOT_XML_CHARACTER = /[^\t\n\r\u0020-\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}]/u;
+
+/** An HTML table's cell as Word's, as export reads it: its runs, with
+ *  each <a> a link of its own, numbered from `links`, and each <br> a line
+ *  break, in the link of the <a> it's in, or undefined where a run is one a
+ *  Word cell can't hold as it is, as code's line end, which shows as a
+ *  space, or one with a character XML can't hold, in its text, its link's
+ *  URL or a comment */
+function htmlCellAsWord(cell: HtmlTableCell, links: { count: number }): TableCell | undefined {
+  const paragraphs: ContentItem[][] = [[]];
+  let link = 0;
+  for (const run of cell.runs) {
+    const para = paragraphs[paragraphs.length - 1];
+    if (NOT_XML_CHARACTER.test(run.text) || run.href && NOT_XML_CHARACTER.test(run.href)) return undefined;
+    if (run.linkStart) link = ++links.count;
+    const linked = run.href ? { href: run.href, link } : {};
+    // A line break's the formatting around it, as text's, which Word shows
+    // on it, as an underline
+    const formatting = { ...DEFAULT_FORMATTING, bold: !!run.bold, italic: !!run.italic, underline: !!run.underline, strikethrough: !!run.strikethrough, code: !!run.code, superscript: !!run.superscript, subscript: !!run.subscript };
+    if (run.type === 'paragraph') paragraphs.push([]);
+    else if (run.type === 'softbreak' || run.type === 'hardbreak') {
+      para.push({ type: 'text', text: '\\\n', commentIds: new Set(), formatting, ...linked });
+    } else if (run.type === 'html_comment') {
+      para.push({ type: 'html_comment', text: run.text, commentIds: new Set() });
+    } else if (run.type === 'text' && !/[\r\n]/.test(run.text)) {
+      para.push({ type: 'text', text: run.text, commentIds: new Set(), formatting, ...linked });
+    } else return undefined;
   }
-  return result;
-}
-
-function formatHrefForMarkdown(href: string): string {
-  return /[()\[\]\s]/.test(href) ? `<${href}>` : href;
-}
-
-function escapePipesForMarkdownTableCell(text: string): string {
-  // Ensure each literal pipe has an odd number of preceding backslashes so
-  // splitOnPipes treats it as cell content, not a delimiter.
-  return text.replace(/(\\*)\|/g, (_m, slashes: string) => {
-    return slashes.length % 2 === 0 ? slashes + '\\|' : slashes + '|';
-  });
+  return { paragraphs };
 }
 
 function convertHtmlTable(text: string, pad: boolean): string | null {
@@ -761,145 +740,39 @@ function convertHtmlTable(text: string, pad: boolean): string | null {
   // one with no end, whose text it would show.
   if (tables.length !== 1 || tables[0].start !== 0 || tables[0].end !== trimmed.length || tables[0].comments || tables[0].rows.some(row => row.cells.some(cell =>
     cell.runs.some(run => run.type === 'html_comment' && (/[\r\n|]/.test(run.text) || HTML_TAG_RE.exec(run.text)?.[0] !== run.text))))) return null;
-  const rows = tables[0].rows;
 
-  // Reject colspan/rowspan
-  for (const row of rows) {
-    for (const cell of row.cells) {
-      if ((cell.colspan && cell.colspan > 1) || (cell.rowspan && cell.rowspan > 1)) return null;
-    }
+  // The table as Word's, as export reads the HTML, which import writes as
+  // a pipe or grid table, as it reads back the same, so a cell's text,
+  // which is literal in HTML, takes an escape wherever it would read as
+  // Markdown, as *a* or [@key]. A table neither holds as it is, as one
+  // with merged cells or a cell of paragraphs, stays HTML.
+  const links = { count: 0 };
+  const cells: TableCell[][] = [];
+  for (const row of tables[0].rows) {
+    const rowCells = row.cells.map(cell => cell.colspan && cell.colspan > 1 || cell.rowspan && cell.rowspan > 1 ? undefined : htmlCellAsWord(cell, links));
+    if (rowCells.some(cell => cell === undefined)) return null;
+    cells.push(rowCells as TableCell[]);
   }
-
-  // Convert cells to markdown text
-  const mdRows: { cells: string[]; header: boolean }[] = rows.map(row => ({
-    // A cell's edges keep the whitespace its HTML wrote as references. A
-    // line break or an empty paragraph at its end is <br>, as a grid
-    // table's blank lines there pad the cell to its row's height.
-    cells: row.cells.map(cell => {
-      let end = cell.runs.length;
-      while (end > 0 && cell.runs[end - 1].type !== 'text' && cell.runs[end - 1].type !== 'html_comment') end--;
-      return runsToMarkdown(cell.runs.slice(0, end)).split('\n')
-        .map(line => keepParagraphEdgeWhitespace(line, true, true)).join('\n') + '<br>'.repeat(cell.runs.length - end);
-    }),
-    header: row.header,
-  }));
-
-  // Check if any cell contains newlines → grid table
-  const hasMultiLine = mdRows.some(row => row.cells.some(c => c.includes('\n')));
-
-  if (hasMultiLine) {
-    return buildGridTable(mdRows, pad);
-  }
-  return buildPipeTable(mdRows, pad);
-}
-
-function buildPipeTable(mdRows: { cells: string[]; header: boolean }[], pad: boolean): string {
-  if (mdRows.length === 0) return '';
-  const colCount = Math.max(...mdRows.map(r => r.cells.length));
-  if (colCount <= 0) return '';
-  // Escape pipes in cell text
-  const escaped = mdRows.map(row => ({
-    ...row,
-    cells: Array.from({ length: colCount }, (_, i) =>
-      escapePipesForMarkdownTableCell(row.cells[i] ?? '')
-    ),
-  }));
-  if (escaped.length === 0) return '';
-  // Preserve source order: only leading header-flagged rows are header rows.
+  // Its leading header rows are a grid table's header, and a pipe table's
+  // is its first row, header row or not, so one of more header rows is a
+  // grid table, as is one with a line break before a cell's last text,
+  // which a line of its own holds, and else a pipe table, which holds a
+  // break as <br>
   let headerEnd = 0;
-  while (headerEnd < escaped.length && escaped[headerEnd].header) headerEnd++;
-  if (headerEnd === 0) headerEnd = 1;
-  const finalHeader = escaped.slice(0, headerEnd);
-  const finalBody = escaped.slice(headerEnd);
-
-  const allRows = [...finalHeader, ...finalBody];
-
-  if (pad) {
-    const colWidths = new Array(colCount).fill(3);
-    for (const row of allRows) {
-      for (let i = 0; i < colCount; i++) {
-        colWidths[i] = Math.max(colWidths[i], row.cells[i].length);
-      }
-    }
-    const lines: string[] = [];
-    for (const row of finalHeader) {
-      lines.push(formatContentRow(row.cells, colWidths));
-    }
-    lines.push(formatSeparatorRow(colWidths));
-    for (const row of finalBody) {
-      lines.push(formatContentRow(row.cells, colWidths));
-    }
-    return lines.join('\n');
-  } else {
-    const fmtRow = (cells: string[]): string => {
-      let line = '|';
-      for (const cell of cells) {
-        line += (cell.length === 0 ? ' |' : ' ' + cell + ' |');
-      }
-      return line;
-    };
-    const lines: string[] = [];
-    for (const row of finalHeader) {
-      lines.push(fmtRow(row.cells));
-    }
-    const sepCells = Array.from({ length: colCount }, () => '---');
-    lines.push(fmtRow(sepCells));
-    for (const row of finalBody) {
-      lines.push(fmtRow(row.cells));
-    }
-    return lines.join('\n');
-  }
-}
-
-function buildGridTable(mdRows: { cells: string[]; header: boolean }[], pad: boolean): string {
-  if (mdRows.length === 0) return '';
-  const colCount = Math.max(...mdRows.map(r => r.cells.length));
-  if (colCount <= 0) return '';
-  // Split each cell into lines
-  const splitRows = mdRows.map(row => ({
-    header: row.header,
-    cellLines: Array.from({ length: colCount }, (_, i) =>
-      escapePipesForMarkdownTableCell(row.cells[i] ?? '').split('\n')
-    ),
+  while (headerEnd < cells.length && tables[0].rows[headerEnd].header) headerEnd++;
+  const isBreak = (item: ContentItem) => item.type === 'text' && item.text === '\\\n';
+  const lined = cells.some(row => row.some(cell => {
+    const items = cell.paragraphs[0];
+    let end = items.length;
+    while (end > 0 && isBreak(items[end - 1])) end--;
+    return items.slice(0, end).some(isBreak);
   }));
-
-  // Compute column widths
-  const colWidths = new Array(colCount).fill(1);
-  for (const row of splitRows) {
-    for (let c = 0; c < colCount; c++) {
-      for (const line of row.cellLines[c]) {
-        colWidths[c] = Math.max(colWidths[c], line.length);
-      }
-    }
-  }
-
-  const borderRow = (style: GridBorderStyle): string => formatGridBorderRow(colWidths, style);
-
-  const lines: string[] = [];
-  for (let r = 0; r < splitRows.length; r++) {
-    const row = splitRows[r];
-    const prevIsHeader = r > 0 && splitRows[r - 1].header;
-    // Border before this row
-    if (r === 0) {
-      lines.push(borderRow('dash'));
-    } else {
-      lines.push(borderRow(prevIsHeader && !row.header ? 'equal' : 'dash'));
-    }
-    // Content lines for this row
-    const maxLines = Math.max(...row.cellLines.map(cl => cl.length));
-    for (let l = 0; l < maxLines; l++) {
-      const cells = row.cellLines.map((cl, c) => {
-        const text = cl[l] ?? '';
-        return pad ? text.padEnd(colWidths[c]) : text;
-      });
-      lines.push('| ' + cells.join(' | ') + ' |');
-    }
-  }
-  // Final border
-  const lastIsHeader = splitRows[splitRows.length - 1]?.header;
-  lines.push(borderRow(lastIsHeader ? 'equal' : 'dash'));
-
-  return lines.join('\n');
+  const pipe = () => headerEnd > 1 ? null : markdownTable(cells.map((row, ri) => ({ isHeader: ri === 0, cells: row })), 'pipe');
+  const grid = () => markdownTable(cells.map((row, ri) => ({ isHeader: ri < headerEnd, cells: row })), 'grid');
+  const markdown = lined ? grid() ?? pipe() : pipe() ?? grid();
+  if (markdown === null) return null;
+  // Padded as Expand Table pads a pipe table, as a grid table is
+  return pad && markdown.startsWith('|') ? reflowTable(markdown).newText : markdown;
 }
 
 /**
