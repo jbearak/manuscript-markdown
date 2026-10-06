@@ -2298,7 +2298,7 @@ function wrapFormatting(markdown: string, fmt: RunFormatting, highlightOuter = f
   }
   if (fmt.highlight && !highlightOuter) result = wrapHighlight(result, markdownHighlightColor(fmt));
   if (fmt.underline) result = `<u>${result}</u>`;
-  if (fmt.strikethrough) result = wrapEmphasis(result, '~~', !fmt.italic && !fmt.bold);
+  if (fmt.strikethrough) result = wrapStrikethrough(result, !fmt.italic && !fmt.bold);
   if (fmt.italic) result = wrapEmphasis(result, '*', !fmt.bold);
   if (fmt.bold) result = wrapEmphasis(result, '**');
   // A highlight that joins its neighbour's goes around the rest, so that
@@ -2391,6 +2391,20 @@ const HIGHLIGHT_JOIN_CLOSE = '\u000F';
 const EMPHASIS_BY_MARK: Record<string, { delimiter: string; tag: string }> = {
   '\u0001': { delimiter: '**', tag: 'b' }, '\u0002': { delimiter: '*', tag: 'i' }, '\u0003': { delimiter: '~~', tag: 's' },
 };
+
+/** `markdown` struck: in ~~ (see wrapEmphasis), or in <s> where it has
+ *  whitespace at its edges, which Word shows struck, as ~~ keeps it outside
+ *  (see wrapMarkdownDelimited), or is whitespace alone, but for the line
+ *  breaks at its edges, which go outside, as a highlight's do */
+function wrapStrikethrough(markdown: string, marked: boolean): string {
+  // From its ends, as a regex with a lazy middle would scan the text for each
+  let start = 0;
+  while (markdown.startsWith('\\\n', start)) start += 2;
+  let end = markdown.length;
+  while (end - 2 >= start && markdown.startsWith('\\\n', end - 2)) end -= 2;
+  if (start === end || !/^[^\S\n]|[^\S\n]$/.test(markdown.slice(start, end))) return wrapEmphasis(markdown, '~~', marked);
+  return markdown.slice(0, start) + '<s>' + markdown.slice(start, end) + '</s>' + markdown.slice(end);
+}
 
 /** `markdown` in emphasis or strikethrough, its delimiters marked for
  *  resolveEmphasis unless `marked` is false, as for one inside another. */
@@ -5663,10 +5677,13 @@ function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = mar
 }
 
 /** A close of formatting at the end of Markdown, after the text it holds:
- *  a highlight's or emphasis's, whose marks tell it from text's, or an
- *  underline's or a script's tag */
+ *  a highlight's, whose marks tell it from text's, which can be unescaped,
+ *  emphasis's, marked or not, as one inside another's isn't, nor any once
+ *  resolveSide resolves them, as text's are escaped, as \* and \~~, or an
+ *  underline's, a strikethrough's (see wrapStrikethrough), a script's tag,
+ *  or one resolveEmphasis writes for emphasis, as text's are references */
 // eslint-disable-next-line no-control-regex
-const FORMATTING_CLOSE_AT_END = /(?:[\u0006\u000F]==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?|\u0004(?:\*\*|\*|~~)|(?<!\\)<\/(?:u|sup|sub)>)$/;
+const FORMATTING_CLOSE_AT_END = /(?:[\u0006\u000F]==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?|(?:\u0004|(?<!\\))(?:\*\*|\*|~~)|<\/(?:u|s|sup|sub|b|i)>)$/;
 
 /** As FORMATTING_CLOSE_AT_END, in an HTML table's cell, where htmlCellRun
  *  writes each tag of formatting, and text's as references */
@@ -5869,10 +5886,27 @@ function substitutionItemText(item: SubstitutionItem, precedingText: string, not
  *  == has no mark. */
 function resolveSide(markdown: string): string {
   const resolved = resolveEmphasis(markdown);
+  // Its last, or the last before the closes of the formatting around it,
+  // as in **==a ==**, which citationSeparator reads past (see textEnd)
   // eslint-disable-next-line no-control-regex
-  const close = /[\u0006\u000F](==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?)$/.exec(markdown)?.[1];
+  const close = /[\u0006\u000F](==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?)$/.exec(markdown.slice(0, closesStart(markdown)))?.[1];
+  if (!close) return resolved;
+  const end = closesStart(resolved);
   // Unless resolving dropped the highlight, as of whitespace alone
-  return close && resolved.endsWith(close) ? resolved.slice(0, -close.length) + HIGHLIGHT_CLOSE + close : resolved;
+  return resolved.endsWith(close, end) ? resolved.slice(0, end - close.length) + HIGHLIGHT_CLOSE + resolved.slice(end - close.length) : resolved;
+}
+
+/** Where the closes of emphasis and the tags of formatting at the end of
+ *  `markdown` start, marked or not, read back from its end, as a regex
+ *  with * and ** in a repeat would try each way to split a run of * */
+function closesStart(markdown: string): number {
+  let end = markdown.length;
+  for (;;) {
+    if (markdown[end - 1] === '*' || markdown[end - 1] === EMPHASIS_CLOSE) end--;
+    else if (markdown.startsWith('~~', end - 2)) end -= 2;
+    else if (/^<\/[usbi]>$/.test(markdown.slice(Math.max(0, end - 4), end))) end -= 4;
+    else return end;
+  }
 }
 
 /** Whether `{~~old~>new~~}` reads back as these sides: CriticMarkup splits at
@@ -6390,8 +6424,9 @@ function emphasisGroup(
 
 /** The start of a line that would start a block within a paragraph: a
  *  heading, list item, quote, code fence, HTML, display math or a table's
- *  row. Not a note's definition, as the [ of [^1] is escaped. */
-const BLOCK_START_RE = /^[ \t]{0,3}(?:#{1,6}(?:[ \t]|$)|[-+*](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$)|>|```|~~~|<|\$\$|\|)/;
+ *  row. Not a note's definition, as the [ of [^1] is escaped, nor a tag of
+ *  formatting, which starts no block, as <s>b </s> (see wrapStrikethrough). */
+const BLOCK_START_RE = /^[ \t]{0,3}(?:#{1,6}(?:[ \t]|$)|[-+*](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$)|>|```|~~~|<(?!\/?(?:u|s|sup|sub|b|i)>)|\$\$|\|)/;
 
 /** Whether a line of Markdown would start a block within a paragraph
  *  (BLOCK_START_RE), or a LaTeX environment, which export reads as display
