@@ -2048,11 +2048,14 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
             searchFrom = li + 1;
             break;
           }
-          // For multi-line: verify all subsequent lines match
+          // For multi-line: verify all subsequent lines match, but for the
+          // indent of a list item's lines, which its comment's text doesn't
+          // have, so it doesn't match a later one alike instead
+          const line = (text: string) => tok.listContinuation ? text.trim() : text;
           let allMatch = li + commentLines.length <= origLines.length;
           if (allMatch) {
             for (let ci = 1; ci < commentLines.length; ci++) {
-              if (origLines[li + ci] !== commentLines[ci]) {
+              if (line(origLines[li + ci]) !== line(commentLines[ci])) {
                 allMatch = false;
                 break;
               }

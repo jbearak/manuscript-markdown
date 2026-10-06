@@ -1581,6 +1581,11 @@ describe('HTML blocks in list items', () => {
     // Whole, with the HTML between, as at the top level
     ['that is an item and ends a block with HTML in it', '- <!-- c --><div>b</div><!-- d -->\n'],
     ['under an item that ends a block with HTML in it', '- a\n\n  <!-- c --><div>b</div><!-- d -->\n'],
+    // Whose lines, with the item's indent, the next one alike matched, so it
+    // took the blank line export puts before a grid table
+    ['of more than one line under an item before one alike right before a grid table',
+      '- a\n\n  <!-- c\n  d -->\n\n<!-- c\nd -->\n+-----+\n| x   |\n+=====+\n| y   |\n+-----+\n'],
+    ['under an item before one alike right before a grid table', '- a\n\n  <!-- c -->\n\n<!-- c -->\n+-----+\n| x   |\n+=====+\n| y   |\n+-----+\n'],
   ])('keeps a comment %s, hidden', async (_name, md) => {
     // Export dropped a block that starts with a comment in an item
     expect(await roundTrip(md)).toBe(md);
