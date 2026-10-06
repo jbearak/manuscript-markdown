@@ -2967,7 +2967,7 @@ describe('extractDocumentContent', () => {
     expect(result.markdown).toBe('*Italic* Plain\n');
   });
 
-  test('run boundary hoists trailing whitespace outside strikethrough delimiters', async () => {
+  test('run boundary keeps trailing whitespace inside strikethrough, as Word strikes it', async () => {
     const JSZip = (await import('jszip')).default;
     const zip = new JSZip();
     zip.file('[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"></Types>');
@@ -2986,7 +2986,8 @@ describe('extractDocumentContent', () => {
 </w:document>`);
     const buf = await zip.generateAsync({ type: 'uint8array' });
     const result = await convertDocx(buf);
-    expect(result.markdown).toBe('~~Strike~~ Plain\n');
+    // In <s>, as ~~ can't close after a space
+    expect(result.markdown).toBe('<s>Strike </s>Plain\n');
   });
 
   test('run boundary keeps trailing whitespace inside highlight delimiters, as Word highlights it', async () => {
@@ -3087,14 +3088,20 @@ describe('wrapWithFormatting', () => {
     expect(wrapWithFormatting('Bold ', { ...DEFAULT_FORMATTING, bold: true })).toBe('**Bold** ');
     expect(wrapWithFormatting(' Bold', { ...DEFAULT_FORMATTING, italic: true })).toBe(' *Bold*');
     expect(wrapWithFormatting(' Bold ', { ...DEFAULT_FORMATTING, bold: true, italic: true })).toBe(' ***Bold*** ');
-    expect(wrapWithFormatting('Strike ', { ...DEFAULT_FORMATTING, strikethrough: true })).toBe('~~Strike~~ ');
     expect(wrapWithFormatting('   ', { ...DEFAULT_FORMATTING, bold: true })).toBe('   ');
-    expect(wrapWithFormatting('   ', { ...DEFAULT_FORMATTING, strikethrough: true })).toBe('   ');
     // But a highlight's, which == holds, and Word shows the highlight on
     expect(wrapWithFormatting(' Mark ', { ...DEFAULT_FORMATTING, highlight: true })).toBe('== Mark ==');
     expect(wrapWithFormatting(' Mark ', { ...DEFAULT_FORMATTING, highlight: true, highlightColor: 'green' })).toBe('== Mark =={green}');
     expect(wrapWithFormatting('   ', { ...DEFAULT_FORMATTING, highlight: true, highlightColor: 'green' })).toBe('==   =={green}');
     expect(wrapWithFormatting('a\\\n', { ...DEFAULT_FORMATTING, highlight: true })).toBe('==a==\\\n');
+    // And strikethrough's, which Word shows too, in <s>, as ~~ can't close
+    // after whitespace, but not line breaks
+    expect(wrapWithFormatting('Strike ', { ...DEFAULT_FORMATTING, strikethrough: true })).toBe('<s>Strike </s>');
+    expect(wrapWithFormatting(' Strike', { ...DEFAULT_FORMATTING, strikethrough: true })).toBe('<s> Strike</s>');
+    expect(wrapWithFormatting('   ', { ...DEFAULT_FORMATTING, strikethrough: true })).toBe('<s>   </s>');
+    expect(wrapWithFormatting('a \\\n', { ...DEFAULT_FORMATTING, strikethrough: true })).toBe('<s>a </s>\\\n');
+    expect(wrapWithFormatting('a\\\n', { ...DEFAULT_FORMATTING, strikethrough: true })).toBe('~~a~~\\\n');
+    expect(wrapWithFormatting('Strike ', { ...DEFAULT_FORMATTING, strikethrough: true, bold: true })).toBe('**<s>Strike </s>**');
   });
 
   // Property 1: Formatting wrapping produces correct delimiters
@@ -3110,8 +3117,14 @@ describe('wrapWithFormatting', () => {
           const result = wrapWithFormatting(text, fmt);
 
           // A highlight holds whitespace alone too, which Word shows it on
-          if ((formatType === 'bold' || formatType === 'italic' || formatType === 'strikethrough') && text.trim().length === 0) {
+          if ((formatType === 'bold' || formatType === 'italic') && text.trim().length === 0) {
             expect(result).toBe(text);
+            return;
+          }
+          // Strikethrough holds the whitespace at its edges, which Word
+          // shows it on, in <s>, as ~~ can't hold it
+          if (formatType === 'strikethrough' && /^\s|\s$/.test(text)) {
+            expect(result).toMatch(/^<s>[\s\S]*<\/s>$/);
             return;
           }
 
@@ -10955,6 +10968,31 @@ describe('Markdown across Word runs', () => {
     const markdown = strip((await convertDocx(docx)).markdown);
     expect(markdown).toBe(md + '\n');
     expect(await shown((await convertMdToDocx(markdown)).docx)).toEqual(await shown(docx));
+  });
+
+  test.each([
+    ['at its end', run('a ', '<w:strike/>') + run('b'), '<s>a </s>b'],
+    ['at its start', run('a') + run(' b', '<w:strike/>'), 'a<s> b</s>'],
+    ['alone', run('a') + run(' ', '<w:strike/>') + run('b'), 'a<s> </s>b'],
+    ['alone at the paragraph\'s start', run('  ', '<w:strike/>') + run('b'), '<s>  </s>b'],
+    ['at the paragraph\'s end', run('a ', '<w:strike/>'), '<s>a </s>'],
+    ['in bold', run('a ', '<w:b/><w:strike/>') + run('b'), '<b><s>a </s></b>b'],
+    ['after a backslash', run('a\\ ', '<w:strike/>') + run('b'), '<s>a\\\\ </s>b'],
+  ])('keeps the strikethrough of whitespace %s', async (_name, runs, md) => {
+    // It went outside the ~~, which can't hold it, or the run went plain
+    const docx = await withRuns(runs);
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(md + '\n');
+    expect(await shown((await convertMdToDocx(markdown)).docx)).toEqual(await shown(docx));
+  });
+
+  test('puts no second space before a citation after struck text that ends in a space', () => {
+    // The space was read before the </s>, as text's
+    const items: ContentItem[] = [
+      { type: 'text', text: 'see ', commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, strikethrough: true } },
+      { type: 'citation', text: '(Doe 2020)', commentIds: new Set(), pandocKeys: ['@doe2020'] },
+    ];
+    expect(buildMarkdown(items, new Map()).trim()).toBe('<s>see </s>[@doe2020]');
   });
 
   test.each([
