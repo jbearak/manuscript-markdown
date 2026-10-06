@@ -3386,9 +3386,9 @@ describe('Full MD→DOCX footnote generation', () => {
   });
 
   it.each([
-    ['whose label comes first', 'Text[^outer].\n\n[^outer]: Outer[^inner].\n\n[^inner]: Inner.\n', ['Outer.', 'Inner.']],
-    ['defined first', 'Text[^a].\n\n[^b]: B.\n\n[^a]: A[^b].\n', ['A.', 'B.']],
-    ['through another', 'T[^c].\n\n[^a]: A.\n\n[^b]: B[^a].\n\n[^c]: C[^b].\n', ['C.', 'B.', 'A.']],
+    ['whose label comes first', 'Text[^outer].\n\n[^outer]: Outer[^inner].\n\n[^inner]: Inner.\n', [' Outer.', ' Inner.']],
+    ['defined first', 'Text[^a].\n\n[^b]: B.\n\n[^a]: A[^b].\n', [' A.', ' B.']],
+    ['through another', 'T[^c].\n\n[^a]: A.\n\n[^b]: B[^a].\n\n[^c]: C[^b].\n', [' C.', ' B.', ' A.']],
   ])('writes a note only another refers to, %s', async (_name, md, texts) => {
     // It got its ID only as the other was made, after its own turn, which
     // left a reference to a note that wasn't there

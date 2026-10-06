@@ -1395,6 +1395,8 @@ interface NoteBodyContext {
   numberingStartOverrides?: NumberingStartOverrides;
   format: CitationKeyFormat;
   replyIds?: Set<string>;
+  /** See extractDocumentContent's */
+  commentBodies?: ReadonlySet<string>;
   styleLayouts?: StyleLayouts;
 }
 
@@ -4010,9 +4012,11 @@ function parseNoteBody(
   let linkCount = 0;
   // As in extractDocumentContent: a tracked paragraph mark, for breakRevision
   let trackedParaMark: { revision: RevisionInfo; target: ContentItem[]; end: number } | undefined;
-  // As in extractDocumentContent: the comments whose ranges are open, but not replies
+  // As in extractDocumentContent: the comments whose ranges are open, but
+  // not replies or those without a body
   const activeComments = new Set<string>();
   const commentStartTargetIndex = new Map<string, { target: ContentItem[]; index: number }>();
+  const hasRange = (id: string) => !context?.replyIds?.has(id) && (!context?.commentBodies || context.commentBodies.has(id));
 
   function walkNoteBody(
     nodes: XmlNode[],
@@ -4030,13 +4034,13 @@ function parseNoteBody(
           continue;
         } else if (key === 'w:commentRangeStart') {
           const id = getAttr(node, 'id');
-          if (!context?.replyIds?.has(id)) {
+          if (hasRange(id)) {
             activeComments.add(id);
             commentStartTargetIndex.set(id, { target, index: target.length });
           }
         } else if (key === 'w:commentRangeEnd') {
           const id = getAttr(node, 'id');
-          if (!context?.replyIds?.has(id)) {
+          if (hasRange(id)) {
             const startInfo = commentStartTargetIndex.get(id);
             if (startInfo?.target === target
                 && !target.slice(startInfo.index).some(item => 'commentIds' in item && item.commentIds?.has(id))) {
@@ -4886,6 +4890,11 @@ export async function extractDocumentContent(
     numberingInstances?: NumberingInstances;
     relationshipMap?: Map<string, string>;
     replyIds?: Set<string>;
+    /** The IDs of the comments comments.xml has a body for. Word shows
+     *  nothing of another's range, which alone would read as a highlight,
+     *  {==a==}, which export writes as one, and which whitespace decisions
+     *  such as dropBlankParagraphText's would count as commented text. */
+    commentBodies?: ReadonlySet<string>;
     imageRelationships?: Map<string, string>;
     imageFolder?: string;
     /** The image files the conversion writes, which the notes' images share */
@@ -4919,8 +4928,12 @@ export async function extractDocumentContent(
   let citationIdx = 0;
 
   const content: ContentItem[] = [];
+  // The comments whose ranges are open, but not replies or those without a
+  // body (see commentBodies)
   const activeComments = new Set<string>();
   const commentStartTargetIndex = new Map<string, { target: ContentItem[], index: number }>();
+  const commentBodies = options?.commentBodies;
+  const hasRange = (id: string) => !replyIds?.has(id) && (!commentBodies || commentBodies.has(id));
   let inField = false;
   let inCitationField = false;
   let inBibliographyField = false;
@@ -5087,13 +5100,13 @@ export async function extractDocumentContent(
           if (Array.isArray(node[key])) walk(node[key], currentFormatting, target, inTableCell, rev);
         } else if (key === 'w:commentRangeStart') {
           const id = getAttr(node, 'id');
-          if (!replyIds?.has(id)) {
+          if (hasRange(id)) {
             activeComments.add(id);
             commentStartTargetIndex.set(id, { target, index: target.length });
           }
         } else if (key === 'w:commentRangeEnd') {
           const id = getAttr(node, 'id');
-          if (!replyIds?.has(id)) {
+          if (hasRange(id)) {
             // Check if any content item was created with this comment ID
             const startInfo = commentStartTargetIndex.get(id);
             if (startInfo && startInfo.target === target) {
@@ -12469,6 +12482,7 @@ export async function convertDocx(
 
   // Group reply comments under their parents and get IDs to exclude from ranges
   const replyIds = groupCommentThreads(comments, threads);
+  const commentBodies = new Set(comments.keys());
 
   // Mark parent comments whose replies were originally in consecutive format
   if (consecutiveReplyParaIds && consecutiveReplyParaIds.size > 0) {
@@ -12505,10 +12519,10 @@ export async function convertDocx(
   // relationships are each part's own
   const imageFiles: ImageFiles = { entries: [], filenames: new Map() };
   const imageFolder = options?.imageFolder ?? '';
-  const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, images: { relationships: fnRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: footnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, styleLayouts };
-  const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, images: { relationships: enRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: endnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, styleLayouts };
+  const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, images: { relationships: fnRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: footnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts };
+  const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, images: { relationships: enRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: endnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts };
 
-  const { content: docContent, zoteroBiblData, leadingBlankParagraphs } = await extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, relationshipMap: docRels, replyIds, imageRelationships: imageRels, imageFolder: options?.imageFolder, imageFiles, portraitBreakOrdinals: portraitBreaks ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined, styleLayouts });
+  const { content: docContent, zoteroBiblData, leadingBlankParagraphs } = await extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, relationshipMap: docRels, replyIds, commentBodies, imageRelationships: imageRels, imageFolder: options?.imageFolder, imageFiles, portraitBreakOrdinals: portraitBreaks ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined, styleLayouts });
   // The notes the document references, in its order, which are the ones it
   // shows; their images take names after its own, footnotes' first
   const refOrder = noteReferences(docContent);

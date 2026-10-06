@@ -685,6 +685,8 @@ This has a footnote[^1] and a named one[^my-note].
     Second paragraph of the named footnote.
 ```
 
+In Word, a note's text follows its mark and a space, as Word writes a note. Import takes off the space or tab right after the mark, and no other whitespace the note's text starts with, so a note that starts with spaces keeps them, as `[^1]: &#32;&#32;a`.
+
 A note holds paragraphs, display equations, tables and code blocks. Export warns of each block a note can't hold: a list, quote or heading exports as the note's paragraphs, a horizontal rule or empty code block is dropped, and an orientation directive is ignored, as a note has no sections. An alert's text goes without its marker, and an empty list item, heading or alert is no paragraph.
 
 The `notes` frontmatter field controls whether footnotes or endnotes are generated in the DOCX output. Default is `footnotes`. Only `endnotes` needs to be specified explicitly:
@@ -856,7 +858,7 @@ Comments can include author name and timestamp:
 {>>@alice (2024-01-15 14:30) | This needs revision<<}
 ```
 
-A blank line in a comment's text separates two of the Word comment's paragraphs, and a single line's end is a line break. In a quote, each of the comment's lines after the first starts with the quote's `>`. On DOCX import, a comment in a table cell whose text has more than one line takes [ID syntax](#overlapping-comments), with its body below the table, because a pipe table's cell can't hold a line's end.
+A blank line in a comment's text separates two of the Word comment's paragraphs, and a single line's end is a line break. In a quote, each of the comment's lines after the first starts with the quote's `>`. On DOCX import, a comment in a table cell whose text has more than one line takes [ID syntax](#overlapping-comments), with its body below the table, because a pipe table's cell can't hold a line's end. A range whose comment the file has no body for, which Word shows nothing of, imports as its text alone, as `{==text==}` with no comment after it would be a highlight.
 
 #### Configuration
 
