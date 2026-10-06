@@ -10697,7 +10697,7 @@ describe('Track changes (CriticMarkup)', () => {
 
     test('keeps a deleted line break of a link whose runs are one merged, before a tracked mark', async () => {
       // The runs, merged, are one link, without the line break, which is a
-      // span of its own with the break
+      // span of its own with the break, in a link of its own
       const deleted: RevisionInfo = { type: 'deletion', author: 'A', date: '' };
       const run = (text: string, extra: Partial<Extract<ContentItem, { type: 'text' }>> = {}): ContentItem =>
         ({ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING, ...extra });
@@ -10706,7 +10706,7 @@ describe('Track changes (CriticMarkup)', () => {
         run('<sp', { href: 'https://e.com', link: 1 }), run('an a="', { href: 'https://e.com', link: 1 }), run('\\\n', { href: 'https://e.com', link: 1, revision: deleted }),
         { type: 'para', breakRevision: deleted }, run('y'),
       ], new Map()).trim();
-      expect(md).toBe('x[\\<span a="](https://e.com){--<br>\n\n--}y');
+      expect(md).toBe('x[\\<span a="](https://e.com){--[\\\n](https://e.com)\n\n--}y');
       const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
       expect(xml.match(/<w:br\/>/g)).toHaveLength(1);
     });
@@ -13237,6 +13237,11 @@ describe('An & in a tracked change', () => {
 
 describe('Links of more than one run', () => {
   const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+  // The line breaks of a document's body that are in no hyperlink
+  const breaksOutsideLinks = async (docx: Uint8Array) => {
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    return xml.replace(/<w:hyperlink\b[\s\S]*?<\/w:hyperlink>/g, '').match(/<w:br\/>/g)?.length ?? 0;
+  };
 
   test.each([
     ['with formatting', '[a **b** c](https://e.com)'],
@@ -13554,17 +13559,19 @@ describe('Links of more than one run', () => {
   });
 
   test.each([
-    ['a heading', '<w:t>a</w:t><w:br/><w:t># x</w:t>', '[a](https://e.com)\\\n[# x](https://e.com)\n'],
-    ['a list item', '<w:t>a</w:t><w:br/><w:t>b</w:t><w:br/><w:t>- c</w:t>', '[a\\\nb](https://e.com)\\\n[- c](https://e.com)\n'],
-    ['an ordered list item', '<w:t>a</w:t><w:br/><w:t>1. x</w:t>', '[a](https://e.com)\\\n[1. x](https://e.com)\n'],
+    ['a heading', '<w:t>a</w:t><w:br/><w:t># x</w:t>', '[a\\\n](https://e.com)[# x](https://e.com)\n'],
+    ['a list item', '<w:t>a</w:t><w:br/><w:t>b</w:t><w:br/><w:t>- c</w:t>', '[a\\\nb\\\n](https://e.com)[- c](https://e.com)\n'],
+    ['an ordered list item', '<w:t>a</w:t><w:br/><w:t>1. x</w:t>', '[a\\\n](https://e.com)[1. x](https://e.com)\n'],
     ['a heading, in formatting', '<w:t>a</w:t><w:br/><w:t>#</w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t> x</w:t>',
-      '[a](https://e.com)\\\n[# *x*](https://e.com)\n'],
+      '[a\\\n](https://e.com)[# *x*](https://e.com)\n'],
     ['text', '<w:t>a</w:t><w:br/><w:t>#x</w:t>', '[a\\\n#x](https://e.com)\n'],
     ['nothing', '<w:t>a</w:t><w:br/>', '[a\\\n](https://e.com)\n'],
     ['a LaTeX environment, after a bold break', '<w:t>a</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:br/></w:r><w:r><w:t>\\begin{align}x\\end{align}</w:t>',
-      '[a](https://e.com)\\\n[\\begin{align}x\\end{align}](https://e.com)\n'],
-  ])('splits a link before a line that would start %s', async (_name, runs, expected) => {
-    // One link's text ran across the line, which Markdown read as a block
+      '[a\\\n](https://e.com)[\\begin{align}x\\end{align}](https://e.com)\n'],
+    ['a heading, after a break that starts the link', '<w:br/><w:t># x</w:t>', '[\\\n](https://e.com)[# x](https://e.com)\n'],
+  ])('splits a link after the line break before a line that would start %s', async (_name, runs, expected) => {
+    // One link's text ran across the line, which Markdown read as a block,
+    // and the break before it went between the links, out of the hyperlink
     const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
     const xml = await zip.file('word/document.xml')!.async('string');
     const broken = xml.replace('<w:t>ab</w:t>', runs);
@@ -13572,7 +13579,51 @@ describe('Links of more than one run', () => {
     zip.file('word/document.xml', broken);
     const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
     expect(md).toBe(expected);
-    expect(await roundTrip(md.slice(0, -1))).toBe(md);
+    const docx = (await convertMdToDocx(md.slice(0, -1))).docx;
+    expect(await breaksOutsideLinks(docx)).toBe(0);
+    expect((await convertDocx(docx)).markdown).toBe(md);
+  });
+
+  describe('A line break in a link of its own', () => {
+    // A Word document of `body`, whose hyperlinks r:id="L" go to
+    // https://e.com, with comments 0 and 1
+    const wordWithLinks = async (body: string) => {
+      const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com) {==c==}{>>note<<} {==d==}{>>other<<}')).docx);
+      const xml = await zip.file('word/document.xml')!.async('string');
+      const id = /<w:hyperlink r:id="(rId\d+)"/.exec(xml)![1];
+      zip.file('word/document.xml', xml.replace(/<w:body>[\s\S]*?(?=<w:sectPr)/, () => '<w:body>' + body.replace(/r:id="L"/g, 'r:id="' + id + '"')));
+      return zip.generateAsync({ type: 'uint8array' });
+    };
+    const text = (t: string) => '<w:r><w:t xml:space="preserve">' + t + '</w:t></w:r>';
+    const lineBreak = '<w:r><w:br/></w:r>';
+    const link = (runs: string) => '<w:hyperlink r:id="L">' + runs + '</w:hyperlink>';
+    const start = (id: number) => '<w:commentRangeStart w:id="' + id + '"/>';
+    const end = (id: number) => '<w:commentRangeEnd w:id="' + id + '"/>';
+    const reference = (id: number) => '<w:r><w:commentReference w:id="' + id + '"/></w:r>';
+    const inserted = (runs: string) => '<w:ins w:id="9" w:author="A" w:date="2024-01-01T00:00:00Z">' + runs + '</w:ins>';
+
+    test.each([
+      ['that is all of the link', text('x') + link(lineBreak) + text('y'), 'x[\\\n](https://e.com)y\n'],
+      ['at the link\'s end, after a comment\'s range over the rest',
+        text('x ') + link(start(0) + text('a') + end(0) + lineBreak) + reference(0) + text('y'),
+        'x {==[a](https://e.com)==}{>>note<<}[\\\n](https://e.com)y\n'],
+      ['at the link\'s start, before a comment\'s range over the rest',
+        text('x') + link(lineBreak + start(0) + text('a')) + end(0) + reference(0) + text(' y'),
+        'x[\\\n](https://e.com){==[a](https://e.com)==}{>>note<<} y\n'],
+      ['at the link\'s end, after a comment\'s range in another\'s',
+        text('x ') + start(1) + link(start(0) + text('a') + end(0) + lineBreak) + reference(0) + end(1) + reference(1) + text('y'),
+        'x {#2}{#1}[a](https://e.com){/2}[\\\n](https://e.com){/1}y\n{#1>>other<<}\n{#2>>note<<}\n'],
+      ['inserted, at the link\'s end, after a comment\'s range over the rest',
+        text('x ') + link(inserted(start(0) + text('a') + end(0) + lineBreak)) + reference(0) + text('y'),
+        'x {=={++[a](https://e.com)++}==}{>>note<<}{++[\\\n](https://e.com)++}y\n'],
+    ])('keeps a line break %s in the hyperlink', async (_name, runs, expected) => {
+      // A break alone of a link's runs was written as a break, out of the link
+      const md = (await convertDocx(await wordWithLinks('<w:p>' + runs + '</w:p>'))).markdown;
+      expect(md).toBe(expected);
+      const docx = (await convertMdToDocx(md)).docx;
+      expect(await breaksOutsideLinks(docx)).toBe(0);
+      expect((await convertDocx(docx)).markdown).toBe(md);
+    });
   });
 
   test('keeps a link whole before a line that would start a note, whose [ is escaped', async () => {

@@ -344,6 +344,13 @@ function syntaxText(markdown: string): string {
   return readsMarkdown ? markdown : htmlLineCharacters(markdown).join('');
 }
 
+/** A run of a line break alone as Markdown, in a link of its own where it's
+ *  a link's, as where it's all of the link's runs or a comment's range
+ *  leaves it out of the rest, which keeps it in the hyperlink */
+function lineBreakRun(item: { href?: string }): string {
+  return item.href ? markdownLink(lineBreakText(), item.href) : lineBreakText();
+}
+
 /** `text` with the tags export reads as formatting or a line break written
  *  as text, but for one at a position in `raw`, which export reads as it is,
  *  as in a citation's keys (see escapeMarkdownChars) */
@@ -6918,16 +6925,17 @@ function linkGroup(
   };
   const items: Array<ContentItem & { type: 'text' }> = [];
   for (let next = first; next; next = inLink(start + items.length)!) {
+    items.push(next);
     if (next.text === '\\\n') {
       // A line of the link that would start a block, which Markdown reads
-      // before the link, starts a link of its own after the break
+      // before the link, starts a link of its own after the break, which
+      // ends this one, so the line starts with its ](url)
       let line = '';
-      for (let i = start + items.length + 1, item = inLink(i); item && item.text !== '\\\n'; item = inLink(++i)) {
+      for (let i = start + items.length, item = inLink(i); item && item.text !== '\\\n'; item = inLink(++i)) {
         line += wrapWithFormatting(item.text, item.formatting);
       }
       if (startsBlockLine(line)) break;
     }
-    items.push(next);
     // A tag a run leaves open, which the runs after could close, as bold
     // <span a=" before ">, would read as HTML across the formatting's
     // delimiters between them in one link's text, so the link ends after
@@ -7273,9 +7281,9 @@ function renderInlineRange(
     // whose closer after a line's start doesn't close it. A tracked change's
     // delimiters can, as {--\\\n--}, and the formatting Word shows on a
     // break, a highlight, an underline or a strikethrough, as ==\\\n==
-    // (see showsOnBreak).
+    // (see showsOnBreak), and a link's brackets.
     if (item.text === '\\\n' && !showsOnBreak(item.formatting)) {
-      [out, lastSpan] = appendRevised(out, lineBreakText(), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, lineBreakRun(item), item, lastSpan);
       i++;
       continue;
     }
@@ -7566,9 +7574,9 @@ function renderInlineRangeWithIds(
     // whose closer after a line's start doesn't close it. A tracked change's
     // delimiters can, as {--\\\n--}, and the formatting Word shows on a
     // break, a highlight, an underline or a strikethrough, as ==\\\n==
-    // (see showsOnBreak).
+    // (see showsOnBreak), and a link's brackets.
     if (item.text === '\\\n' && !showsOnBreak(item.formatting)) {
-      [out, lastSpan] = appendRevised(out, lineBreakText(), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, lineBreakRun(item), item, lastSpan);
       i++;
       continue;
     }
