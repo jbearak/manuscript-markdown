@@ -1575,6 +1575,63 @@ describe('Ordered list numbering', () => {
     expect(new Set(numIdsOf(await documentXml(docx))).size).toBe(1);
   });
 
+  const roundTripWith = async (md: string, templateDocx: Uint8Array) =>
+    strip((await convertDocx((await convertMdToDocx(md, { templateDocx })).docx)).markdown);
+
+  test.each([
+    ['after its parent', 1, 1, '1. p\n   1. x\n2. q\n   1. y'],
+    ['after its parent, below another level', 2, 2, '1. a\n   1. b\n      1. x\n   2. c\n      1. y'],
+    // Word ignores a level below it, and starts it over after any above
+    ['after a level below it', 1, 3, '1. p\n   1. x\n2. q\n   1. y'],
+  ])('numbers a sublist in its parent\'s instance where a template starts its level over %s', async (_name, ilvl, restart, md) => {
+    const templateDocx = await templateWithNumbering(withLvlRestart(ilvl, restart));
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    expect(new Set(numIdsOf(await documentXml(docx))).size).toBe(1);
+    expect(await roundTripWith(md, templateDocx)).toBe(md);
+  });
+
+  test.each([
+    // Word would go on from the sublist before
+    ['never', 1, 0, '1. a\n   1. x\n   2. y\n2. b\n   1. z'],
+    ['only after a level above its parent\'s', 2, 1, '1. a\n   1. b\n      1. x\n   2. c\n      1. y'],
+    // The Markdown going on, which a sublist's own start keeps either way
+    ['never, where the Markdown goes on', 1, 0, '1. a\n   1. x\n   2. y\n2. b\n\n   3. z'],
+    ['after its parent, where the Markdown goes on', 1, 1, '1. a\n   1. x\n   2. y\n2. b\n\n   3. z'],
+  ])('numbers a sublist as the Markdown does where a template starts its level over %s', async (_name, ilvl, restart, md) => {
+    const templateDocx = await templateWithNumbering(withLvlRestart(ilvl, restart));
+    const once = await roundTripWith(md, templateDocx);
+    expect(once).toBe(md);
+    expect(await roundTripWith(once, templateDocx)).toBe(md);
+  });
+
+  test('numbers a sublist as the Markdown does where a template\'s numbers take a numId other than 2, which never starts its level over', async () => {
+    // The template's numId 2 is a bullet a style uses, so numbers take its
+    // numId 3, whose abstract numbering has the level go on
+    const templateZip = await JSZip.loadAsync(await templateWithNumbering(numbering => withLvlRestart(1, 0)(numbering)
+      .replace(/(<w:num w:numId="2"[^>]*><w:abstractNumId w:val=")1("\/>)/, (_m: string, open: string, close: string) => open + '0' + close)
+      .replace('</w:numbering>', '<w:num w:numId="3"><w:abstractNumId w:val="1"/></w:num></w:numbering>')));
+    templateZip.file('word/styles.xml', (await templateZip.file('word/styles.xml')!.async('string')).replace('</w:styles>',
+      '<w:style w:type="paragraph" w:styleId="Listed"><w:name w:val="Listed"/><w:pPr><w:numPr><w:numId w:val="2"/></w:numPr></w:pPr></w:style></w:styles>'));
+    const templateDocx = await templateZip.generateAsync({ type: 'uint8array' });
+    const md = '1. a\n   1. x\n   2. y\n2. b\n   1. z';
+    expect(numIdsOf(await documentXml((await convertMdToDocx(md, { templateDocx })).docx))[0]).toBe('3');
+    expect(await roundTripWith(md, templateDocx)).toBe(md);
+  });
+
+  test.each([
+    ['under one parent', '1. a\n   1. b\n      1. c'],
+    ['under two', '1. a\n   1. b\n      1. c\n2. d\n   1. e\n      1. f'],
+  ])('starts a sublist of a sublist in its own instance where its parent\'s has none of numId 2\'s start override for it: %s', async (_name, md) => {
+    // Its level starts at 5, which numId 2 starts at 1, and the level above
+    // never starts over, so that sublist starts in an instance of its own
+    const templateDocx = await templateWithNumbering(numbering => withLvlRestart(1, 0)(numbering)
+      .replace(/(<w:abstractNum w:abstractNumId="1"[^]*?<w:lvl w:ilvl="2"[^>]*>)<w:start w:val="1"\/>/, (_match, lvl: string) => lvl + '<w:start w:val="5"/>')
+      .replace(/(<w:num w:numId="2"[^>]*><w:abstractNumId w:val="1"\/>)/, (instance: string) => instance + '<w:lvlOverride w:ilvl="2"><w:startOverride w:val="1"/></w:lvlOverride>'));
+    const once = await roundTripWith(md, templateDocx);
+    expect(once).toBe(md);
+    expect(await roundTripWith(once, templateDocx)).toBe(md);
+  });
+
   // The level overrides of the instance of the list's paragraph at `index`
   const levelOverridesOf = async (docx: Uint8Array, index: number) => {
     const numId = numIdsOf(await documentXml(docx))[index];
