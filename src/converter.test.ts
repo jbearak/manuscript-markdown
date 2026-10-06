@@ -1578,6 +1578,9 @@ describe('HTML blocks in list items', () => {
     // Which export counted among those of their own, so the next took the
     // blank lines of the one before
     ['under an item before one of its own with blank lines after it', '- a\n\n  <!-- c -->\n\n<!-- c -->\n\n\nP.\n'],
+    // Whole, with the HTML between, as at the top level
+    ['that is an item and ends a block with HTML in it', '- <!-- c --><div>b</div><!-- d -->\n'],
+    ['under an item that ends a block with HTML in it', '- a\n\n  <!-- c --><div>b</div><!-- d -->\n'],
   ])('keeps a comment %s, hidden', async (_name, md) => {
     // Export dropped a block that starts with a comment in an item
     expect(await roundTrip(md)).toBe(md);
