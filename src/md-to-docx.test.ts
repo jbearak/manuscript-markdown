@@ -5849,3 +5849,32 @@ describe('Line breaks in an HTML table\'s cell', () => {
     expect(xml.replace(/<w:hyperlink\b[\s\S]*?<\/w:hyperlink>/g, '')).not.toContain('<w:br/>');
   });
 });
+
+describe('Comments a paragraph reads inline', () => {
+  it('reads a hidden run of many comments in linear time', async () => {
+    // Taking each comment out of all the run's text in turn took time in
+    // the square of their number. Four times the comments take about four
+    // times as long, not sixteen: the fastest of five runs at each size, by
+    // turns, which a pause for garbage collection slows neither more than
+    // the other.
+    const { readsCommentsInline } = await import('./md-to-docx');
+    const run = (n: number) => {
+      const payload = Array.from({ length: n }, (_, i) => '<!-- c' + i + ' -->').join(' '.repeat(100));
+      return () => readsCommentsInline('&#32;' + payload, [payload]);
+    };
+    const small = run(4000);
+    const large = run(16000);
+    const time = (work: () => unknown) => {
+      const start = performance.now();
+      work();
+      return performance.now() - start;
+    };
+    let smallTime = Infinity;
+    let largeTime = Infinity;
+    for (let k = 0; k < 5; k++) {
+      largeTime = Math.min(largeTime, time(large));
+      smallTime = Math.min(smallTime, time(small));
+    }
+    expect(largeTime / smallTime).toBeLessThan(8);
+  }, 60000);
+});

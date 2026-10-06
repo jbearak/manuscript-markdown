@@ -747,19 +747,43 @@ export function readsAsParagraph(text: string): boolean {
   return tokens.length === 3 && tokens[0].type === 'paragraph_open' && tokens[0].map?.[1] === text.split('\n').length;
 }
 
-/** Whether export reads Markdown `text` as one paragraph of `tags`, HTML
- *  tags and comments each read inline as one, and whitespace, as
- *  &#32;<!-- c --><br>, not as text, as a comment with a blank line in it,
- *  nor as other tags, as a comment that ends in ---> and the one after it,
- *  which inline Markdown reads as one */
-export function readsAsInlineHtml(text: string, tags: string[]): boolean {
-  citationTextMd ??= createMarkdownIt();
-  const tokens = citationTextMd.parse(text, {});
+/** `text` without each of `parts`, which it holds in order, each found
+ *  after the one before, in one pass, as taking each out of all the text
+ *  in turn took time in the square of their number */
+function withoutEach(text: string, parts: string[]): string {
+  let rest = '';
+  let at = 0;
+  for (const part of parts) {
+    const found = text.indexOf(part, at);
+    if (found === -1) continue;
+    rest += text.slice(at, found);
+    at = found + part.length;
+  }
+  return rest + text.slice(at);
+}
+
+/** Whether export reads Markdown `text` as one paragraph whose HTML
+ *  comments are those inline Markdown reads in each of `payloads`, the
+ *  comments' hidden runs, read alone, as in &#32;<!-- a --><!-- b -->c with
+ *  one run of both, or, where runs may merge (`merge`), whose comments hold
+ *  the runs' text and no more, as one that ends in ---> does the run after
+ *  it that Word split from it. Not as text, as a comment with a blank line
+ *  in it, nor where a comment takes in text between runs, as one that ends
+ *  in ---> does a space before the next run */
+export function readsCommentsInline(text: string, payloads: string[], merge = false): boolean {
+  const md = citationTextMd ??= createMarkdownIt();
+  const tokens = md.parse(text, {});
   if (tokens.length !== 3 || tokens[0].type !== 'paragraph_open' || tokens[0].map?.[1] !== text.split('\n').length) return false;
-  const children = tokens[1].children ?? [];
-  const html = children.filter(child => child.type === 'html_inline');
-  return children.every(child => child.type === 'html_inline' || child.type === 'text' && !child.content.trim())
-    && html.length === tags.length && html.every((child, k) => child.content === tags[k]);
+  const comments = (children: Token[] | null) => (children ?? [])
+    .filter(child => child.type === 'html_inline' && child.content.startsWith('<!--')).map(child => child.content);
+  const read = comments(tokens[1].children);
+  const alone = payloads.map(payload => comments(md.parseInline(payload, {})[0]?.children ?? null));
+  // Each run's comments hold every <!-- in it, as one that ends in --->
+  // with nothing after it doesn't, which would be text
+  const whole = alone.every((found, k) => !withoutEach(payloads[k], found).includes('<!--'));
+  const expected = alone.flat();
+  return whole && read.length === expected.length && read.every((comment, k) => comment === expected[k])
+    || merge && read.join('') === payloads.join('');
 }
 
 /** The HTML blocks export reads in Markdown `text`, not in a quote or list:

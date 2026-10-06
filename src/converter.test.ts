@@ -2882,9 +2882,13 @@ describe('HTML comment blank line round-trip', () => {
     expect(await texts((await convertMdToDocx(imported)).docx)).toEqual(await texts(docx));
   });
 
-  test('keeps the indent of one of its own in its hidden run', async () => {
+  test.each([
+    ' <!-- c -->',
+    // Which a paragraph would read as one comment, as the run holds them
+    ' <!-- a ---> <!-- c -->',
+  ])('keeps the indent of %s in its hidden run', async (comments) => {
     // Where export writes it, which import writes back as the indent
-    const md = 'A.\n\n <!-- c -->\n\nB.';
+    const md = 'A.\n\n' + comments + '\n\nB.';
     expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md + '\n');
   });
 
@@ -6111,6 +6115,14 @@ describe('Line breaks a backslash can\'t hold', () => {
     // would be four of
     ['a tab and a comment with a blank line in it before one that ends a quote\'s paragraph', '> XX', r('<w:tab/>') + comment('<!-- a\n\nb -->') + r('<w:br/>'), '> \t<!-- a\n>\n> b --><br>'],
     ['a space, a tab and a comment with a blank line in it before one that ends a quote\'s paragraph', '> XX', r(t(' ') + '<w:tab/>') + comment('<!-- a\n\nb -->') + r('<w:br/>'), '>  \t<!-- a\n>\n> b --><br>'],
+    // Which a paragraph reads, as it does the text after it, which the
+    // comment's block would read as text with it
+    ['a space, a comment and text before one that ends a paragraph', 'XX', r(t(' ')) + comment('<!-- c -->') + r(t('a') + '<w:br/>'), '&#32;<!-- c -->a<br>'],
+    ['a space before a comment and text', 'XX', r(t(' ')) + comment('<!-- c -->') + r(t('a')), '&#32;<!-- c -->a'],
+    ['a space before a comment and code that looks like one', 'XX', r(t(' ')) + comment('<!-- c -->') + r(t('&lt;!-- d --&gt;'), code), '&#32;<!-- c -->`<!-- d -->`'],
+    ['a space before a comment, a \\ and a comment', 'XX', r(t(' ')) + comment('<!-- c -->') + r(t('\\')) + comment('<!-- d -->'), '&#32;<!-- c -->\\\\<!-- d -->'],
+    ['a tab, a comment and text before one that ends a quote\'s paragraph', '> XX', r('<w:tab/>') + comment('<!-- c -->') + r(t('a') + '<w:br/>'), '> &#9;<!-- c -->a<br>'],
+    ['a space, a comment and text before one that ends an item\'s paragraph after its first', '- a\n\n  XX', r(t(' ')) + comment('<!-- c -->') + r(t('a') + '<w:br/>'), '- a\n\n  &#32;<!-- c -->a<br>'],
     // Which a paragraph reads with the next as one, and the space between
     ['a space, a comment that ends in --->, a space and a comment before one that ends a paragraph', 'XX', r(t(' ')) + comment('<!-- a --->') + r(t(' ')) + comment('<!-- c -->') + r('<w:br/>'), ' <!-- a ---> <!-- c --><br>'],
     ['a space and a comment that ends in ---> and another before one that ends a paragraph', 'XX', r(t(' ')) + comment('<!-- a --->') + comment('<!-- c -->') + r('<w:br/>'), ' <!-- a ---><!-- c --><br>'],
@@ -6180,6 +6192,47 @@ describe('Line breaks a backslash can\'t hold', () => {
     const md1 = (await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
     expect(md1).toBe(source);
     expect(await texts((await convertMdToDocx(md1)).docx)).toEqual(await texts(docx));
+  });
+
+  test.each([
+    '> &#9;<!-- c -->a<br>',
+    '&#32;<!-- c -->a<br>',
+  ])('keeps the reference before a comment and text in %s', async (md) => {
+    // Import wrote it raw, which made an HTML block, whose text the
+    // comment and <br> were
+    const source = 'A.\n\n' + md + '\n\nB.\n';
+    const docx = (await convertMdToDocx(source)).docx;
+    const md1 = (await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(md1).toBe(source);
+    expect(await texts((await convertMdToDocx(md1)).docx)).toEqual(await texts(docx));
+  });
+
+  // The rest of a comment's hidden run, which Word split from it, with no ZWSP
+  const rest = (text: string) => r(t(text.replace(/</g, '&lt;').replace(/>/g, '&gt;')), '<w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr>');
+  test.each([
+    ['a space before a run of two comments', 'XX', r(t(' ')) + comment('<!-- a --><!-- b -->'), '&#32;<!-- a --><!-- b -->'],
+    ['a tab before a run of two comments in a quote', '> XX', r('<w:tab/>') + comment('<!-- a --><!-- b -->'), '> &#9;<!-- a --><!-- b -->'],
+    ['a tab before a run of two comments and text in an item\'s paragraph after its first', '- a\n\n  XX', r('<w:tab/>') + comment('<!-- a --><!-- b -->') + r(t('z')), '- a\n\n  &#9;<!-- a --><!-- b -->z'],
+    // Which a paragraph reads as one comment, with the space in the run
+    ['a tab before a comment that ends in ---> and the run Word split from it in a quote', '> XX', r('<w:tab/>') + comment('<!-- a --->') + rest(' <!-- c -->'), '> &#9;<!-- a ---> <!-- c -->'],
+    ['a space before a run of two comments Word split in the second', 'XX', r(t(' ')) + comment('<!-- a --><!-- b') + rest(' -->'), '&#32;<!-- a --><!-- b -->'],
+  ])('keeps %s out of the hidden run', async (_name, source, runs, md) => {
+    // Raw, as an HTML block's indent, it went into the run, where export
+    // puts one, as import read a run of more than one comment as other
+    // than the comments a paragraph reads in it
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\n' + source + '\n\nB.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace(/<w:r>(?:(?!<w:r>)[\s\S])*?>XX<\/w:t><\/w:r>/, runs);
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    const docx = await zip.generateAsync({ type: 'uint8array' });
+    const md1 = (await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(md1).toBe('A.\n\n' + md + '\n\nB.\n');
+    // With each comment in a run of its own, after a ZWSP, as export writes one
+    const merged = async (docx: Uint8Array) => (await texts(docx)).map(text => text.replace(/\]\[/g, '').replace(/\u200B/g, ''));
+    const exported = (await convertMdToDocx(md1)).docx;
+    expect(await merged(exported)).toEqual(await merged(docx));
+    expect((await convertDocx(exported)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md1);
   });
 
   test('keeps one in inline code between the code on each side', async () => {

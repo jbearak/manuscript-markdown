@@ -13,7 +13,7 @@ import { computeCodeRegions, computeMarkdownRegions, isInsideCodeRegion } from '
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { citationEndInText, compareNoteLabels, customStyleId, directiveRest, htmlBlocksIn, isCommentBlock, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, readsAsInlineHtml, readsAsParagraph, startsHtmlBlock } from './md-to-docx';
+import { citationEndInText, compareNoteLabels, customStyleId, directiveRest, htmlBlocksIn, isCommentBlock, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, readsAsParagraph, readsCommentsInline, startsHtmlBlock } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { matchTables, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
@@ -515,16 +515,10 @@ const HARD_BREAK_AT_END = /(?<!\\)((?:\\\\)*)\\\n$/;
 // underline (see wrapHighlight)
 const HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END = /(?<!\\)((?:\\\\)*)\\\n(==[ \t]*)$/;
 const HARD_BREAKS_AT_END = /(?<!\\)((?:\\\\)*)(?:\\\n)+$/;
-// HTML comments alone, as export splits a block of them
-const HTML_COMMENTS = /^(?:<!--(?:(?!-->)[\s\S])*-->)+$/;
 // HTML comments that start a paragraph's text, after its indent, each with
 // the spaces and tabs after it, and the line breaks after them that end it,
 // with the spaces and tabs between them
 const COMMENTS_BEFORE_BREAKS = /^([ \t]*(?:<!--(?:(?!-->)[\s\S])*-->[ \t]*)+)((?:\\\n[ \t]*)*\\\n)$/;
-// Each HTML comment and <br> in a paragraph's text, a comment as import
-// writes one: to its first -->, or empty, as <!--> and <!--->, which
-// markdownComment keeps as they are
-const COMMENT_OR_BREAK_TAGS = /<!--(?:-?>|(?:(?!-->)[\s\S])*-->)|<br\s*\/?>/gi;
 
 /** The column a line's text ends at, as Markdown counts them, a tab going
  *  on to the next stop, every four columns */
@@ -11677,13 +11671,15 @@ export function buildMarkdown(
     // goes on to the next stop, every four columns from the line's start,
     // past the prefix written on it, so after a quote's > and space a tab
     // is two, as export reads it, but at the margin four, which makes code.
-    // Before comments, line breaks or both, which a paragraph reads too,
-    // it's references, as a space before a line break that ends the
-    // paragraph is &#32;<br>, since export puts a block of comments' indent
-    // in the first one's hidden run. Not where that run held it, as export
-    // wrote it, nor before a comment a paragraph would read as text, as one
-    // with a blank line in it, which only the block holds, or as more than
-    // it, as one that ends in ---> with the next.
+    // Before line breaks, and comments a paragraph reads too, with whatever
+    // follows them, it's references, as a space before a line break that
+    // ends the paragraph is &#32;<br>, and a tab before a comment and text
+    // &#9;<!-- c -->a, whose block would show them as text, and since export
+    // puts a block of comments' indent in the first one's hidden run. Not
+    // where that run held it, with the paragraph's comments' runs all it
+    // holds, as export wrote them, nor before a comment a paragraph would
+    // read as text, as one with a blank line in it, which only the block
+    // holds, or as more than it, as one that ends in ---> with the next.
     const indent = ownLine && atStart ? /^[ \t]+(?=<)/.exec(textOut)?.[0] ?? '' : '';
     let indentColumns = 0;
     if (indent) {
@@ -11697,9 +11693,14 @@ export function buildMarkdown(
     }
     const htmlIndent = indentColumns <= 3 ? indent : '';
     const referenced = keepParagraphWhitespace(textOut, atStart, atEnd);
-    const inline = () => (isLineBreakBlock(textOut) || HTML_COMMENTS.test(textOut.trim())
-      && !mergedContent.slice(i, rendered.nextIndex).some(item => item.type === 'html_comment' && /^\s/.test(item.text)))
-      && readsAsInlineHtml(referenced, referenced.match(COMMENT_OR_BREAK_TAGS) ?? []);
+    const items = mergedContent.slice(i, rendered.nextIndex);
+    const payloads = items.flatMap((item, k) => item.type === 'html_comment' ? [markdownComment(item.text, items[k + 1]?.type === 'html_comment')] : []);
+    // A block of comments and line breaks gives back runs that are each one
+    // comment, as export splits it at each one's first -->, so a paragraph
+    // mustn't merge those; others, as Word split, it may
+    const blockKeepsRuns = isLineBreakBlock(textOut) && payloads.every(payload => /^<!--(?:(?!-->)[\s\S])*-->$/.test(payload));
+    const inline = () => (isLineBreakBlock(textOut) || /^[ \t]*<!--/.test(textOut) && !items.every(item => item.type === 'html_comment'))
+      && readsCommentsInline(referenced, payloads, !blockKeepsRuns);
     // Whitespace alone before an equation in the paragraph keeps the space
     // export wrote for its line end as it is, which the math branch takes
     // off, as it does after other text, or it would gain one each round trip
