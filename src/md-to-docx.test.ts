@@ -5945,6 +5945,17 @@ describe('Character references in HTML', () => {
     expect(image?.imageSrc).toBe('a€.png');
   });
 
+  it('reads a line end written as a reference in an HTML cell as whitespace HTML collapses, however it is written', async () => {
+    // &NewLine; and &#10 without its ; were line ends in the cell's text,
+    // which Compact Table made a grid table's lines of, as line breaks
+    const html = '<table><tr><th>h</th></tr><tr><td>a&NewLine;b&#10c&#XA;d&#13e &#0010; f&#100;g</td></tr></table>';
+    expect(await wordCell(html)).toBe('a b c d e fdg');
+    const compacted = (await import('./formatting')).compactTable(html).newText;
+    expect(compacted.split('\n')).toHaveLength(3);
+    expect(await previewCell(compacted)).toBe('a b c d e fdg');
+    expect(await wordCell(compacted)).toBe('a b c d e fdg');
+  });
+
   it('reads a named reference in an <img>\'s src or alt only by a whole name, as the browser does in an attribute', () => {
     // &notit; read as ¬it;, by &not, which HTML reads without its ; in text
     const image = parseMd('<img src="cover&notit;.png" alt="a&notit;b &not; &notin;">').flatMap(token => token.runs ?? []).find(run => run.type === 'image');

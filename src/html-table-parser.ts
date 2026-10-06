@@ -295,10 +295,11 @@ function extractAttr(attrs: string, name: string): string | undefined {
  * A cell's source text with its whitespace collapsed, as HTML lays it out.
  * A space or tab written as a character reference stays, since import
  * writes them for whitespace a cell would otherwise lose; a line break so
- * written is the end of a line like any other.
+ * written is the end of a line like any other, however it's written, as
+ * &#10;, &#xA, without its ;, as the browser reads one, or &NewLine;.
  */
 function collapseHtmlWhitespace(rawText: string): string {
-  return rawText.replace(/&#(?:0*1[03]|x0*[ad]);/gi, ' ').replace(/[ \t\r\n]+/g, ' ');
+  return rawText.replace(/&#(?:0*1[03](?![0-9])|[xX]0*[aAdD](?![0-9a-fA-F]));?|&NewLine;/g, ' ').replace(/[ \t\r\n]+/g, ' ');
 }
 
 function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
