@@ -2168,19 +2168,22 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
  *  and citationSeparator read there (see markedFormatting's edges). A space
  *  HTML would drop or run together is a reference: one at the start of a
  *  line after a line break, or of the run's text inside its tags, and all
- *  but the last of a run of spaces. So is a brace, or an = next to another
- *  or at the run's edge, which the grammar and navigation would read as
- *  CriticMarkup or a highlight with the == around it. */
+ *  but the last of a run of spaces, which citationSeparator reads (and see
+ *  renderHtmlTable for one across runs). So is a brace, a ~, a backtick,
+ *  and an = next to another or at the run's edge, which the grammar and
+ *  navigation would read as CriticMarkup, strikethrough, code, or a
+ *  highlight with the == around it. */
 function htmlCellRun(text: string, fmt: RunFormatting, joins = false): string {
   const moves = !fmt.superscript && !fmt.subscript && (fmt.highlight || !fmt.underline && (fmt.strikethrough || fmt.italic || fmt.bold));
   const [lead, core, trail] = moves ? edgeWhitespace(text) : ['', text, ''];
   const tagged = fmt.code || fmt.superscript || fmt.subscript || fmt.underline || fmt.strikethrough || fmt.italic || fmt.bold;
-  const html = (part: string, inTags: boolean) => part.split('\\\n').map((line, k, lines) => line.replace(/ +|[^ ]/g, (c, i: number) => {
-    if (c[0] === ' ') return '&#32;'.repeat(i === 0 && (k > 0 || inTags) ? c.length : c.length - 1) + (i === 0 && (k > 0 || inTags) ? '' : ' ');
+  const html = (part: string, inTags = false) => part.split('\\\n').map((line, k, lines) => line.replace(/ +|[^ ]/g, (c, i: number) => {
+    if (c[0] === ' ') return i === 0 && (k > 0 || inTags) ? '&#32;'.repeat(c.length) : '&#32;'.repeat(c.length - 1) + ' ';
     return c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '\t' ? '&#9;' : c === '\u00a0' ? '&nbsp;'
-      : c === '{' ? '&#123;' : c === '}' ? '&#125;'
+      : c === '{' ? '&#123;' : c === '}' ? '&#125;' : c === '~' ? '&#126;' : c === '`' ? '&#96;'
         : c === '=' && (line[i - 1] === '=' || line[i + 1] === '=' || k === 0 && i === 0 || k === lines.length - 1 && i === line.length - 1) ? '&#61;' : c;
   })).join('<br>');
+  if (!core) return html(lead + trail);
   let inner = html(core, !!tagged);
   if (fmt.code) inner = '<code>' + inner + '</code>';
   if (fmt.superscript) inner = '<sup>' + inner + '</sup>';
@@ -2189,8 +2192,8 @@ function htmlCellRun(text: string, fmt: RunFormatting, joins = false): string {
   if (fmt.strikethrough) inner = '<s>' + inner + '</s>';
   if (fmt.italic) inner = '<i>' + inner + '</i>';
   if (fmt.bold) inner = '<b>' + inner + '</b>';
-  if (fmt.highlight && core) inner = wrapHighlight(inner, markdownHighlightColor(fmt), joins);
-  return html(lead, false) + inner + html(trail, false);
+  if (fmt.highlight) inner = wrapHighlight(inner, markdownHighlightColor(fmt), joins);
+  return html(lead) + inner + html(trail);
 }
 
 /** `markdown`, a run's text, in the tags and delimiters of its formatting
@@ -7065,7 +7068,9 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
         } finally {
           readsMarkdown = outerReadsMarkdown;
         }
-        lines.push(i3 + '<p>' + keepParagraphWhitespace(rendered.text, true, true) + '</p>');
+        // A space after one across the tags of runs, which HTML runs together
+        const spaced = rendered.text.replace(/ ((?:<\/?[a-z]+>)*) /g, (_m, tags: string) => ' ' + tags + '&#32;');
+        lines.push(i3 + '<p>' + keepParagraphWhitespace(spaced, true, true) + '</p>');
         deferredAll.push(...rendered.deferredComments);
       }
       lines.push(i2 + '</' + tag + '>');

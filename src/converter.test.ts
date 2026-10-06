@@ -5922,6 +5922,25 @@ describe('Word text that reads as Markdown', () => {
     expect(cell).toBe('==' + text + '=={++x++}');
   });
 
+  test('keeps the spaces of runs that end and start with one in an HTML table\'s cell that holds what HTML can\'t', async () => {
+    // HTML ran them together across the runs' tags
+    const run = (text: string, formatting: Partial<RunFormatting> = {}): ContentItem => ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting } });
+    const { text: cell } = await fallbackCell([run('  ', { bold: true }), run(' a'), run('b ', { italic: true }), run(' c'), insertedRun]);
+    expect(cell).toBe('   ab  c{++x++}');
+  });
+
+  test.each([
+    ['backticks', '`a', 'b`', '&#96;a{++x++}b&#96;'],
+    ['tildes', '~~a', 'b~~', '&#126;&#126;a{++x++}b&#126;&#126;'],
+  ])('writes the %s of text in an HTML table\'s cell that holds what HTML can\'t as references', async (_name, before, after, expected) => {
+    // Navigation read them as code around the change, which it skipped, or
+    // as strikethrough, a change of its own
+    const run = (text: string): ContentItem => ({ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING });
+    const { markdown, text: cell } = await fallbackCell([run(before), insertedRun, run(after)]);
+    expect(markdown).toContain('<p>' + expected + '</p>');
+    expect(cell).toBe(before + '{++x++}' + after);
+  });
+
   test('writes text that reads as CriticMarkup in an HTML table\'s cell that holds what HTML can\'t with its braces as references', async () => {
     // Navigation and the grammar read it as a change
     const { markdown } = await fallbackCell([{ type: 'text', text: '{++a++} ', commentIds: new Set(), formatting: DEFAULT_FORMATTING }, insertedRun]);
