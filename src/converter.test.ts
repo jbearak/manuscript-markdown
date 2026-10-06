@@ -11058,6 +11058,28 @@ describe('Highlights across runs', () => {
     expect(await roundTrip(md)).toBe(md);
   });
 
+  const exported = '<w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>}x</w:t></w:r>';
+
+  test.each([
+    ['a comment over it', highlighted('}x'), 'P {==XX==}{>>c<<} Q', 'P {====\\}x====}{>>c<<} Q\n',
+      '<w:commentRangeStart w:id="0"/>' + exported + '<w:commentRangeEnd w:id="0"/>', ['c']],
+    ['a comment over text before it', plain('a') + highlighted('}x'), 'P {==XX==}{>>c<<} Q', 'P {==a==\\}x====}{>>c<<} Q\n',
+      '<w:commentRangeStart w:id="0"/><w:r><w:t>a</w:t></w:r>' + exported + '<w:commentRangeEnd w:id="0"/>', ['c']],
+    ['comments over it in ID syntax', highlighted('}x'), 'P {#1}{#2}XX{/2}{/1} Q\n{#1>>c<<}\n{#2>>d<<}', 'P {#1}{#2}==\\}x=={/1}{/2} Q\n{#1>>c<<}\n{#2>>d<<}\n',
+      '<w:commentRangeStart w:id="0"/><w:commentRangeStart w:id="1"/>' + exported + '<w:commentRangeEnd w:id="0"/>', ['c', 'd']],
+    ['no comment', highlighted('}x'), 'XX', '==\\}x==\n', '>' + exported + '</w:p>', []],
+  ])('escapes a } that starts a highlight\'s text with %s', async (_name, runs, template, md, xml, bodies) => {
+    // Its == and the } read as CriticMarkup's ==}, which ended the comment's
+    // range there, as in {====}x====}, which Word showed as x} with neither
+    // the comment nor the highlight
+    expect(await fromWord(runs, template)).toBe(md);
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    expect(await zip.file('word/document.xml')!.async('string')).toContain(xml);
+    const comments = await zip.file('word/comments.xml')?.async('string') ?? '';
+    expect([...comments.matchAll(/<w:t>([^<]*)<\/w:t>/g)].map(m => m[1])).toEqual(bodies);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
   test.each([
     '{++==a ==b++}\n', '{++a== b==++}\n', '{--==a ==b--}\n', '{++==a==b++}\n', '{++==a *b*==++}\n', '{++a==b *c*==++}\n',
   ])('keeps %j one tracked change', async (md) => {
@@ -11136,7 +11158,7 @@ describe('Highlights across runs', () => {
   });
 
   test.each([
-    ['a }', highlighted('a ') + highlighted('}', '<w:b/>'), '==a ==**==}==**\n'],
+    ['a }', highlighted('a ') + highlighted('}', '<w:b/>'), '==a ==**==\\}==**\n'],
     ['an =', highlighted('a ') + highlighted('b', '<w:i/>') + highlighted('=c'), '==a ==*==b==*===c==\n'],
   ])('joins no highlight through %s', async (_name, runs, md) => {
     // Which navigation and the grammar read no highlight around, so they
@@ -11302,6 +11324,19 @@ describe('Highlights across runs', () => {
     // The highlight held it, as it holds its edge spaces, so export
     // highlighted a space Word doesn't have
     expect(buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim()).toBe(md);
+  });
+
+  test.each([
+    ['a } at its start', [run('Seen '), run('}x', { highlight: true }), citation({ highlight: true })], 'Seen ==\\}x [@doe2020]=='],
+    ['a { at its end before a line break', [run('Seen '), citation({ highlight: true }), run('a{\\\n', { highlight: true }), run('b')], 'Seen ==[@doe2020]a\\{==\\\nb'],
+    ['a { after an escaped backslash at its end before a line break', [run('Seen '), citation({ highlight: true }), run('a\\{\\\n', { highlight: true }), run('b')], 'Seen ==[@doe2020]a\\\\\\{==\\\nb'],
+  ])('escapes %s in a highlight of a citation and text', async (_name, items, md) => {
+    // Which read with the highlight's == as CriticMarkup's ==} or {==, as in
+    // ==[@doe2020]a{==, which export read as no highlight. The line break,
+    // which the text holds, kept its end from escaping the {.
+    const markdown = buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim();
+    expect(markdown).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toStartWith(md + '\n');
   });
 
   test.each([
