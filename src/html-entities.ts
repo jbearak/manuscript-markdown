@@ -28,6 +28,16 @@ export function decodeHtmlNumericReference(reference: string): string {
 	return String.fromCodePoint(WINDOWS_1252.get(codePoint) ?? codePoint);
 }
 
+const NAMED_REFERENCES: Record<string, string> = { '&nbsp;': '\u00a0', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'", '&amp;': '&' };
+const REFERENCE_RE = new RegExp(HTML_NUMERIC_REFERENCE + '|&(?:nbsp|lt|gt|quot|apos|amp);', 'g');
+
+/** HTML's text, or an attribute's value, with its character references read
+ *  as the browser reads them, in one pass, so that &#38;#128; is &#128;, as
+ *  text */
+export function decodeHtmlCharacterReferences(text: string): string {
+	return text.replace(REFERENCE_RE, reference => reference[1] === '#' ? decodeHtmlNumericReference(reference) : NAMED_REFERENCES[reference]);
+}
+
 // The whitespace besides spaces and tabs that markdown-it trims from a
 // paragraph's ends, as JavaScript's trim does: a no-break space, U+3000 as
 // a Japanese paragraph starts with, and others, but not line ends, which a

@@ -1,4 +1,4 @@
-import { decodeHtmlNumericReference, HTML_NUMERIC_REFERENCE } from './html-entities';
+import { decodeHtmlCharacterReferences as decodeHtmlEntities } from './html-entities';
 import {
   parseHtmlTableCellSourceKind,
   parseTableDigits,
@@ -475,13 +475,4 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
   }
 
   return runs;
-}
-
-const NAMED_REFERENCES: Record<string, string> = { '&nbsp;': '\u00a0', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'", '&amp;': '&' };
-const REFERENCE_RE = new RegExp(HTML_NUMERIC_REFERENCE + '|&(?:nbsp|lt|gt|quot|apos|amp);', 'g');
-
-/** Text's character references as the browser reads them, in one pass, so
- *  that &#38;#128; is &#128;, as text */
-function decodeHtmlEntities(text: string): string {
-  return text.replace(REFERENCE_RE, reference => reference[1] === '#' ? decodeHtmlNumericReference(reference) : NAMED_REFERENCES[reference]);
 }

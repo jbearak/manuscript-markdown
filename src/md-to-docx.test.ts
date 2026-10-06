@@ -5921,6 +5921,16 @@ describe('Character references in HTML', () => {
     expect(await wordCell(compacted)).toBe('a' + shown + 'b');
   });
 
+  it.each([
+    ['a block of its own', '<img src="a&#128;.png" alt="&#128; &#x110000; &#150;">'],
+    ['a paragraph', 'x <img src="a&#128;.png" alt="&#128; &#x110000; &#150;"> y'],
+  ])('reads an <img>\'s alt and src in %s as the browser does', (_name, md) => {
+    // Export read &#128; as U+0080, and threw on &#x110000;
+    const image = parseMd(md).flatMap(token => token.runs ?? []).find(run => run.type === 'image');
+    expect(image?.imageAlt).toBe('€ \uFFFD –');
+    expect(image?.imageSrc).toBe('a€.png');
+  });
+
   it.each([['&#128;'], ['&#150;'], ['&#0;']])('reads %s in Markdown as markdown-it does, in the preview and in Word', async (reference) => {
     // Markdown's own text isn't HTML, so U+FFFD for a control character's
     const md = '| h |\n| --- |\n| a' + reference + 'b |';
