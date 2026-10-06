@@ -2239,7 +2239,7 @@ function joinsHighlight(segment: ContentItem[], i: number, start: number, end: n
 function joinHighlights(markdown: string): string {
   if (!markdown.includes(HIGHLIGHT_JOIN_OPEN)) return markdown;
   // eslint-disable-next-line no-control-regex
-  return markdown.replace(/\u000F==(\{[a-z0-9-]+\})?==\u000E(?=[^\u000F]*\u000F==(\{[a-z0-9-]+\})?)/g,
+  return markdown.replace(/\u000F==(\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?==\u000E(?=[^\u000F]*\u000F==(\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?)/g,
     (seam, color: string | undefined, nextColor: string | undefined) => color === nextColor ? '' : seam)
     // eslint-disable-next-line no-control-regex
     .replace(/\u000E/g, HIGHLIGHT_OPEN).replace(/\u000F/g, HIGHLIGHT_CLOSE);
@@ -2313,7 +2313,7 @@ function resolveEmphasis(markdown: string): string {
     // ==  ====b=={red}, goes without it, as before, where navigation and the
     // grammar would read no highlight, the other's either
     // eslint-disable-next-line no-control-regex
-    .replace(/(?<==)==\u0005([^\S\n]+)\u0006==(?:\{[a-z0-9-]+\})?|==\u0005([^\S\n]+)\u0006==(?==)/g,
+    .replace(/(?<==)==\u0005([^\S\n]+)\u0006==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?|==\u0005([^\S\n]+)\u0006==(?==)/g,
       (_m, before: string | undefined, after: string | undefined) => before ?? after ?? '');
   const closeAt = new Map<number, number>();
   const opens: number[] = [];
@@ -5361,7 +5361,7 @@ function appendRevised(
       ? /\s/.test(before.lastChar) || /^\s/.test(text)
       : canJoinSpans(before.lastChar, text) || canJoinAtHighlight(before, text));
   // eslint-disable-next-line no-control-regex
-  const highlightEnd = /([\u0006\u000F])==(?:\{[a-z0-9-]+\})?$/.exec(text)?.[1];
+  const highlightEnd = /([\u0006\u000F])==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?$/.exec(text)?.[1];
   const span = wrapWithRevision(text, revision);
   // A substitution holds the text with its closer in it, and nothing joins it
   const own = span.startsWith('{~~');
@@ -5524,7 +5524,7 @@ function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = mar
  *  a highlight's or emphasis's, whose marks tell it from text's, or an
  *  underline's or a script's tag */
 // eslint-disable-next-line no-control-regex
-const FORMATTING_CLOSE_AT_END = /(?:[\u0006\u000F]==(?:\{[a-z0-9-]+\})?|\u0004(?:\*\*|\*|~~)|(?<!\\)<\/(?:u|sup|sub)>)$/;
+const FORMATTING_CLOSE_AT_END = /(?:[\u0006\u000F]==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?|\u0004(?:\*\*|\*|~~)|(?<!\\)<\/(?:u|sup|sub)>)$/;
 
 /** Where the text of `markdown` before `end` ends, past the closes of the
  *  formatting around it, as a highlight's, which holds the whitespace at
