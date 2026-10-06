@@ -5842,6 +5842,223 @@ describe('Word text that reads as Markdown', () => {
     expect((await exported(markdown)).text.some(cell => cell.endsWith(' ' + text + ' y'))).toBe(true);
   });
 
+  /** `md`, a pipe table, with the two cells of its row with XX in them one,
+   *  as Word merges them, and `xml` in place of XX, as import writes it, as
+   *  an HTML table, which alone holds one */
+  const mergedCellTable = async (md: string, xml: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const document = (await zip.file('word/document.xml')!.async('string')).replace(/<w:tr\b(?:(?!<\/w:tr>)[\s\S])*?XX[\s\S]*?<\/w:tr>/, row => {
+      const [first, second] = [...row.matchAll(/<w:tc>[\s\S]*?<\/w:tc>/g)].map(match => match[0]);
+      return row.replace(first, first.replace('<w:tcPr>', '<w:tcPr><w:gridSpan w:val="2"/>')).replace(second, '');
+    });
+    expect(document).toContain('<w:gridSpan w:val="2"/>');
+    zip.file('word/document.xml', document.replace('XX', xml));
+    return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+  };
+
+  test.each([
+    ['Markdown syntax', '*a* `b` [c](d) $e$ ==f== \\g'],
+    ['an HTML tag', '<span>a</span>'],
+    ['an entity', '&amp; &lt;'],
+    ['spaces HTML runs together', 'a  b   c'],
+    ['CriticMarkup and a highlight', '{++a++} b==c=='],
+    ['a line break', 'a\nb'],
+  ])('keeps %s in an HTML table\'s cell that holds what HTML can\'t as its text', async (_name, text) => {
+    // Export reads the cell as HTML, where its escapes were text, its tags
+    // tags, its spaces one, and its line break a backslash and a space
+    const xml = escapeXml(text).replace('\n', '</w:t><w:br/><w:t xml:space="preserve">');
+    const markdown = await mergedCellTable('| {++x++} XX y | z |\n|---|---|\n| a | b |\n', xml);
+    expect((await exported(markdown)).text.some(cell => cell.endsWith(' ' + text + ' y'))).toBe(true);
+  });
+
+  test('keeps the formatting of the text in an HTML table\'s cell that holds what HTML can\'t', async () => {
+    // Its delimiters, as **, were text there
+    const markdown = await mergedCellTable('| a | b |\n|---|---|\n| {++x++} **XX** *y* `z` | w |\n', 'bold');
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    const cell = /<w:tc>(?:(?!<\/w:tc>)[\s\S])*?bold[\s\S]*?<\/w:tc>/.exec(xml)![0];
+    expect(cell).toMatch(/<w:b\/>[\s\S]*?<w:t[^>]*>bold<\/w:t>/);
+    expect(cell).toMatch(/<w:i\/>[\s\S]*?<w:t[^>]*>y<\/w:t>/);
+    // The tracked change, which HTML can't hold, as its text
+    expect(cell.replace(/<[^>]+>/g, '')).toBe('{++x++} bold y z');
+  });
+
+  const insertedRun: ContentItem = { type: 'text', text: 'x', commentIds: new Set(), formatting: DEFAULT_FORMATTING, revision: { type: 'addition', author: 'A', date: '' } };
+
+  /** Import's Markdown for a table with merged cells, whose first row's
+   *  one cell has `runs`, with a tracked change, which HTML can't hold, and
+   *  Word's text of that cell when export reads it back, with ↵ for a line
+   *  break */
+  const fallbackCell = async (runs: ContentItem[]) => {
+    const run = (text: string): ContentItem => ({ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING });
+    const markdown = buildMarkdown([{
+      type: 'table',
+      rows: [
+        { isHeader: false, cells: [{ paragraphs: [runs], colspan: 2 }] },
+        { isHeader: false, cells: [{ paragraphs: [[run('b')]] }, { paragraphs: [[run('c')]] }] },
+      ],
+    } as ContentItem], new Map());
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    return { markdown, text: xml.slice(xml.indexOf('<w:tc>'), xml.indexOf('</w:tc>')).replace(/<w:br\/>/g, '↵').replace(/<[^>]+>/g, '') };
+  };
+
+  test.each([
+    ['bold at the cell\'s start', ' a', { bold: true }, ' a{++x++}'],
+    ['underlined at the cell\'s start', '  a', { underline: true }, '  a{++x++}'],
+    ['after a line break', 'a\\\n  b', {}, 'a↵  b{++x++}'],
+  ])('keeps the spaces of a run %s in an HTML table\'s cell that holds what HTML can\'t', async (_name, text, formatting, expected) => {
+    // HTML dropped them at the edge of the tags of its formatting, or a line
+    const { text: cell } = await fallbackCell([{ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting } }, insertedRun]);
+    expect(cell).toBe(expected);
+  });
+
+  test.each([
+    ['ends in an =', 'a=', '==a&#61;=='],
+    ['has two =', 'a==b', '==a&#61;&#61;b=='],
+    ['has an = before an = at its end', 'a=b=', '==a&#61;b&#61;=='],
+    ['has an = before a space at its end', 'a= ', '==a&#61; =='],
+  ])('writes a highlighted run that %s in an HTML table\'s cell that holds what HTML can\'t with a highlight\'s ==', async (_name, text, highlight) => {
+    // Its = ran into the highlight's ==, which the grammar and navigation
+    // read as none, or as a shorter one
+    const { markdown, text: cell } = await fallbackCell([{ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, highlight: true } }, insertedRun]);
+    expect(markdown).toContain('<p>' + highlight + '{++x++}</p>');
+    expect(cell).toBe('==' + text + '=={++x++}');
+  });
+
+  test('keeps the spaces of runs that end and start with one in an HTML table\'s cell that holds what HTML can\'t', async () => {
+    // HTML ran them together across the runs' tags
+    const run = (text: string, formatting: Partial<RunFormatting> = {}): ContentItem => ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting } });
+    const { text: cell } = await fallbackCell([run('  ', { bold: true }), run(' a'), run('b ', { italic: true }), run(' c'), insertedRun]);
+    expect(cell).toBe('   ab  c{++x++}');
+  });
+
+  test.each([
+    ['backticks', '`a', 'b`', '&#96;a{++x++}b&#96;'],
+    ['tildes', '~~a', 'b~~', '&#126;&#126;a{++x++}b&#126;&#126;'],
+  ])('writes the %s of text in an HTML table\'s cell that holds what HTML can\'t as references', async (_name, before, after, expected) => {
+    // Navigation read them as code around the change, which it skipped, or
+    // as strikethrough, a change of its own
+    const run = (text: string): ContentItem => ({ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING });
+    const { markdown, text: cell } = await fallbackCell([run(before), insertedRun, run(after)]);
+    expect(markdown).toContain('<p>' + expected + '</p>');
+    expect(cell).toBe(before + '{++x++}' + after);
+  });
+
+  test.each([
+    ['a bold run after a line break', [['a\\\n', {}], [' b', { bold: true }]], 'a↵ b{++x++}'],
+    ['an underlined space before a citation', [['a', {}], [' ', { underline: true }]], 'a [@smith2020]{++x++}'],
+    ['a line break before a citation', [['a\\\n', {}]], 'a↵[@smith2020]{++x++}'],
+    ['code that ends in a space before a citation', [['a ', { code: true }]], 'a [@smith2020]{++x++}'],
+    ['a long run of spaces in bold', [['a' + ' '.repeat(25000) + 'b', { bold: true }]], 'a' + ' '.repeat(25000) + 'b{++x++}'],
+  ])('keeps the spaces of %s in an HTML table\'s cell that holds what HTML can\'t', async (_name, runs, expected) => {
+    // HTML dropped one at a line's start the run before ended, the
+    // separator put a second before a citation after one as a reference or
+    // a tag it didn't know, or one at a line's start after a <br>, and the
+    // edges of a long run read in time in its square failed
+    const items: ContentItem[] = (runs as [string, Partial<RunFormatting>][]).map(([text, formatting]) =>
+      ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting } }));
+    if ((expected as string).includes('[@')) items.push({ type: 'citation', text: '(Smith 2020)', commentIds: new Set(), pandocKeys: ['@smith2020'] });
+    const { text: cell } = await fallbackCell([...items, insertedRun]);
+    expect(cell).toBe(expected);
+  });
+
+  test('keeps the space between the runs of a joined highlight in an HTML table\'s cell that holds what HTML can\'t inside it', async () => {
+    // Outside both runs' ==, it split the highlight in two
+    const highlighted = (text: string, formatting: Partial<RunFormatting>): ContentItem =>
+      ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, highlight: true, ...formatting } });
+    const { markdown } = await fallbackCell([highlighted('a ', { bold: true }), highlighted('b', { italic: true }), insertedRun]);
+    expect(markdown).toContain('<p>==<b>a</b> <i>b</i>=={++x++}</p>');
+  });
+
+  test('writes text that reads as CriticMarkup in an HTML table\'s cell that holds what HTML can\'t with its braces as references', async () => {
+    // Navigation and the grammar read it as a change
+    const { markdown } = await fallbackCell([{ type: 'text', text: '{++a++} ', commentIds: new Set(), formatting: DEFAULT_FORMATTING }, insertedRun]);
+    expect(markdown).toContain('<p>&#123;++a++&#125; {++x++}</p>');
+  });
+
+  test.each([
+    ['underlined', { underline: true }, '<u>a </u>'],
+    ['bold and underlined', { bold: true, underline: true }, '<b><u>a </u></b>'],
+  ])('puts no second space before a citation after a space %s in an HTML table\'s cell that holds what HTML can\'t', async (_name, formatting, run) => {
+    // A reference for the space, or a tag the separator didn't know, hid
+    // it from the separator
+    const { markdown } = await fallbackCell([
+      { type: 'text', text: 'a ', commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting } },
+      { type: 'citation', text: '(Smith 2020)', commentIds: new Set(), pandocKeys: ['@smith2020'] },
+      insertedRun,
+    ]);
+    expect(markdown).toContain('<p>' + run + '[@smith2020]{++x++}</p>');
+  });
+
+  test('keeps the spaces of an HTML comment in an HTML table\'s cell that holds what HTML can\'t as they are', async () => {
+    // Export keeps a comment's text as it is, references and all
+    const { markdown } = await fallbackCell([
+      { type: 'text', text: 'a ', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
+      { type: 'html_comment', text: '<!-- b  c -->', commentIds: new Set() } as ContentItem,
+      insertedRun,
+    ]);
+    expect(markdown).toContain('<!-- b  c -->');
+  });
+
+  test('joins the highlights of runs formatted otherwise in an HTML table\'s cell that holds what HTML can\'t', async () => {
+    // As one == around both, which the grammar and navigation read as one
+    const highlighted = (text: string, formatting: Partial<RunFormatting>): ContentItem =>
+      ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, highlight: true, ...formatting } });
+    const { markdown } = await fallbackCell([highlighted('a', { bold: true }), highlighted('b', { italic: true }), insertedRun]);
+    expect(markdown).toContain('<p>==<b>a</b><i>b</i>=={++x++}</p>');
+  });
+
+  test.each([
+    ['a bold word before a period', [['word', { bold: true }], ['.', {}]], '{++word.++}'],
+    ['a period before an underlined word', [['.', {}], ['word', { underline: true }]], '{++.word++}'],
+    // Its &, < and > as XML writes them
+    ['an ampersand before a letter in superscript', [['a&', {}], ['b', { superscript: true }]], '{++a&amp;b++}'],
+    ['a letter before one highlighted', [['a', {}], ['b', { highlight: true }]], '{++a==b==++}'],
+    ['a bold space before text of a tag', [['a ', { bold: true }], ['<b>a</b>', {}]], '{++a &lt;b&gt;a&lt;/b&gt;++}'],
+    ['text of a tag before a bold letter', [['<b>a</b>', {}], ['a', { bold: true }]], '{++&lt;b&gt;a&lt;/b&gt;a++}'],
+  ])('joins the change of %s in an HTML table\'s cell that holds what HTML can\'t', async (_name, runs, expected) => {
+    // The tags and references of its runs, read as Markdown's delimiters
+    // and text, split it, which then came back with a second span's braces
+    const revision: RevisionInfo = { type: 'addition', author: 'A', date: '' };
+    const items = (runs as [string, Partial<RunFormatting>][]).map(([text, formatting]): ContentItem =>
+      ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting }, revision }));
+    const { text: cell } = await fallbackCell(items);
+    expect(cell).toBe(expected);
+  });
+
+  test.each([
+    ['at the cell\'s start', [['\\\n', {}]], '↵{++x++}'],
+    ['in bold after text', [['a', {}], ['\\\n', { bold: true }]], 'a↵{++x++}'],
+  ])('keeps a line break in a run of its own %s in an HTML table\'s cell that holds what HTML can\'t', async (_name, runs, expected) => {
+    // It went as Markdown's backslash, which came back as text
+    const items = (runs as [string, Partial<RunFormatting>][]).map(([text, formatting]): ContentItem =>
+      ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting } }));
+    const { text: cell } = await fallbackCell([...items, insertedRun]);
+    expect(cell).toBe(expected);
+  });
+
+  test('keeps the strikethrough of the spaces at the edges of a run in an HTML table\'s cell that holds what HTML can\'t', async () => {
+    // They went outside its tags, as Markdown's delimiters keep them
+    const { markdown } = await fallbackCell([
+      { type: 'text', text: 'a', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
+      { type: 'text', text: ' b\t', commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, strikethrough: true } },
+      insertedRun,
+    ]);
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    const cell = xml.slice(xml.indexOf('<w:tc>'), xml.indexOf('</w:tc>'));
+    const struck = [...cell.matchAll(/<w:r>(?:(?!<\/w:r>)[\s\S])*?<w:strike\/>(?:(?!<\/w:r>)[\s\S])*?<\/w:r>/g)]
+      .map(run => run[0].replace(/<w:tab\/>/g, '\t').replace(/<[^>]+>/g, '')).join('');
+    expect(struck).toBe(' b\t');
+  });
+
+  test('keeps a link of a line break and bold text after it one link in an HTML table\'s cell that holds what HTML can\'t', async () => {
+    // The bold text's tag read as an HTML block's start, which the link
+    // split at, and its URL came back twice
+    const link = (text: string, formatting: Partial<RunFormatting>): ContentItem =>
+      ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting }, href: 'https://e.com' });
+    const { markdown } = await fallbackCell([link('a', { underline: true }), link('\\\n', {}), link('b', { bold: true }), insertedRun]);
+    expect(markdown.split('https://e.com')).toHaveLength(2);
+  });
+
   test.each(['[@a](b)', '[-@a](b)', '[@a]{.underline}', '[@a][b]'])('writes %s with the citation export reads in it', async (text) => {
     // Its [ was escaped as a link's, so a citation whose key is missing,
     // which export writes as its text, came back as text, and stayed text

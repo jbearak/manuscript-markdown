@@ -241,9 +241,14 @@ const MARKDOWN_HTML_SENSITIVE_TAGS = new Set([
 const HTML_LIKE_TAG_RE = /<\/?([A-Za-z][A-Za-z0-9-]*)(?:\s[^<>]*?)?\/?>/;
 const HTML_LIKE_TAG_AT = new RegExp(HTML_LIKE_TAG_RE.source, 'y');
 
-// Whether export reads a citation in the text markedFormatting writes: not
-// in an HTML table's cell, whose text it reads as it is (see renderHtmlTable)
-let readsCitations = true;
+// Whether export reads the text markedFormatting writes as Markdown: not in
+// an HTML table's cell, which it reads as HTML (see renderHtmlTable)
+let readsMarkdown = true;
+
+/** A run's line break as export reads it there */
+function lineBreakText(): string {
+  return readsMarkdown ? '\\\n' : '<br>';
+}
 
 /** `text` with the tags export reads as formatting or a line break written
  *  as text, but for one at a position in `raw`, which export reads as it is,
@@ -2091,6 +2096,7 @@ export function wrapWithFormatting(text: string, fmt: RunFormatting, lineStart =
  *  bold, italic or strikethrough marked for resolveEmphasis, and its
  *  highlight around the rest where `highlightOuter` (see joinsHighlight). */
 function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, after?: RunsAfter, blockStart = lineStart, highlightOuter = false): string {
+  if (!readsMarkdown) return htmlCellRun(text, fmt, highlightOuter);
   let result = text;
 
   // Apply in reverse nesting order (innermost to outermost)
@@ -2135,7 +2141,7 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
     ? ['', ...edgeWhitespace(result)]
     : ['', '', result, ''];
   // Not a tag in a citation's keys, which export reads as they are
-  const keys = readsCitations ? new Set<number>() : undefined;
+  const keys = new Set<number>();
   let core = escapeSensitiveHtmlLikeTags(escapeMarkdownChars(edges[2], lineStart && !delimited, after, keys, !delimited && !!after?.mathFirst), keys);
   // A ~ at the edge of struck text would join the ~~ around it, which
   // reads ~~~a~~ as ~ and struck a, where nothing comes between them, as a
@@ -2156,6 +2162,76 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
   // The backslash of an escaped =, not one of an escaped backslash's
   if (fmt.highlight && /==|=\s*$/.test(text)) result = result.replace(/((?:\\\\)*)\\?=/g, (_m, pairs: string) => pairs + '&#61;');
   return wrapFormatting(result, fmt, highlightOuter);
+}
+
+/** A run's text and formatting as HTML, as renderHtmlCellParagraph writes
+ *  them, for a cell's paragraph it can't write, whose escapes export would
+ *  read as text, as it would a line break's backslash. Its tags go as
+ *  wrapFormatting writes delimiters: bold's and italic's inside the
+ *  whitespace at the edges of what they hold, and a highlight's ==, as
+ *  text, which has no tag, around the rest where it joins its neighbours'
+ *  (`joins`), with the whitespace inside, which joinHighlights,
+ *  keepHtmlCellSpaces and citationSeparator read there. A brace, a ~, a backtick, and an = next
+ *  to another or at the run's edge, or any in a highlight, which the
+ *  grammar and navigation would read as CriticMarkup, strikethrough, code,
+ *  or a highlight with the == around it, or no highlight, are references. */
+function htmlCellRun(text: string, fmt: RunFormatting, joins = false): string {
+  let html = text.split('\\\n').map((line, k, lines) => line.replace(/[^ ]/g, (c, i: number) =>
+    c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '\t' ? '&#9;' : c === '\u00a0' ? '&nbsp;'
+      : c === '{' ? '&#123;' : c === '}' ? '&#125;' : c === '~' ? '&#126;' : c === '`' ? '&#96;'
+        : c === '=' && (fmt.highlight || line[i - 1] === '=' || line[i + 1] === '=' || k === 0 && i === 0 || k === lines.length - 1 && i === line.length - 1) ? '&#61;' : c,
+  )).join('<br>');
+  // Around what's between the `edges` at each end, unless that's nothing,
+  // read from the ends, as a regex with a lazy middle would scan the text
+  // for each
+  const wrap = (edges: string[], around: (core: string) => string) => {
+    let start = 0;
+    for (let edge; (edge = edges.find(e => html.startsWith(e, start)));) start += edge.length;
+    let end = html.length;
+    for (let edge; (edge = edges.find(e => end - e.length >= start && html.endsWith(e, end)));) end -= edge.length;
+    if (start < end) html = html.slice(0, start) + around(html.slice(start, end)) + html.slice(end);
+  };
+  const breaks = ['<br>'];
+  const blank = [' ', '&#9;', '&nbsp;', '<br>'];
+  if (fmt.code) html = '<code>' + html + '</code>';
+  if (fmt.superscript) html = '<sup>' + html + '</sup>';
+  else if (fmt.subscript) html = '<sub>' + html + '</sub>';
+  if (fmt.highlight && !joins) wrap(breaks, core => wrapHighlight(core, markdownHighlightColor(fmt)));
+  if (fmt.underline) html = '<u>' + html + '</u>';
+  // Around the whitespace, which Word shows struck, as Markdown can't
+  if (fmt.strikethrough) html = '<s>' + html + '</s>';
+  if (fmt.italic) wrap(blank, core => '<i>' + core + '</i>');
+  if (fmt.bold) wrap(blank, core => '<b>' + core + '</b>');
+  if (fmt.highlight && joins) wrap(breaks, core => wrapHighlight(core, markdownHighlightColor(fmt), true));
+  return html;
+}
+
+/** A cell's paragraph's HTML with the spaces HTML would drop or run
+ *  together, as export reads it, as references: those at the start of a
+ *  line, a space after a space, and those at the paragraph's end, past the
+ *  tags there. A comment, which export keeps as it is, stays as it is. */
+function keepHtmlCellSpaces(html: string): string {
+  let out = '';
+  let lineStart = true;
+  let afterSpace = false;
+  for (const [token] of html.matchAll(/<!--(?:(?!--!?>)[\s\S])*(?:--!?>|$)|<br>|<\/?[a-z]+>| |[^ <]+|</gi)) {
+    if (token === ' ') {
+      out += lineStart || afterSpace ? '&#32;' : ' ';
+      afterSpace = true;
+    } else {
+      out += token;
+      if (token === '<br>') lineStart = true;
+      if (token === '<br>' || !/^<(?:!--|\/?[a-z]+>)/i.test(token)) afterSpace = false;
+      if (token !== '<br>' && !/^<(?:!--|\/?[a-z]+>)/i.test(token)) lineStart = false;
+    }
+  }
+  // From the end, past the closing tags there, as a regex for the spaces
+  // would scan each run of them before
+  let tags = out.length;
+  for (let close; (close = /<\/[a-z]+>$/i.exec(out.slice(Math.max(0, tags - 12), tags)));) tags -= close[0].length;
+  let spaces = tags;
+  while (out[spaces - 1] === ' ') spaces--;
+  return out.slice(0, spaces) + '&#32;'.repeat(tags - spaces) + out.slice(tags);
 }
 
 /** `markdown`, a run's text, in the tags and delimiters of its formatting
@@ -5355,8 +5431,10 @@ function appendRevised(
   const disjoint = (a: Set<string>, b: Set<string>) => ![...a].some(kind => b.has(kind));
   const seamSafe = (before: RevisionSpan) =>
     text !== '' && join !== 'never' && before.join !== 'never'
-    // A delimiter of the text's own could pair with one of its kind in the other span
-    && disjoint(literal, before.kinds) && disjoint(before.literal, kinds)
+    // A delimiter of the text's own could pair with one of its kind in the
+    // other span, but for in an HTML table's cell, where text's is a
+    // reference or text (see canJoinSpans)
+    && (!readsMarkdown || disjoint(literal, before.kinds) && disjoint(before.literal, kinds))
     && (join === 'space' || before.join === 'space'
       ? /\s/.test(before.lastChar) || /^\s/.test(text)
       : canJoinSpans(before.lastChar, text) || canJoinAtHighlight(before, text));
@@ -5451,6 +5529,10 @@ function canJoinSpans(beforeEnd: string, after: string): boolean {
   const a = beforeEnd.slice(-1);
   const b = after.charAt(0);
   if (!a || !b) return false;
+  // In an HTML table's cell that holds what HTML can't, the runs are HTML,
+  // whose tags and references read as they do next to anything, and what
+  // Markdown would read at the seam is text
+  if (!readsMarkdown) return true;
   if (/\s/.test(a) || /\s/.test(b)) return true;
   if (/[\p{L}\p{N}\]]/u.test(a) && /[\p{L}\p{N}]/u.test(b)) return true;
   if (a === ']' && /^(?:\*|==|~~|<)/.test(after)) return true;
@@ -5503,7 +5585,7 @@ function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = mar
     if (end <= from) break;
     const closer = /(\+\+|--|~~|==|<<)\}$/.exec(markdown.slice(Math.max(from, end - 3), end));
     const start = closer ? criticSpanStart(markdown, CRITIC_OPENERS[closer[1]], closer[0], from, end) : -1;
-    if (!closer || start < 0) return markdown[end - 1];
+    if (!closer || start < 0) return charBefore(markdown, end);
     const inner = start + 3;
     const innerEnd = end - 3;
     const separator = closer[1] === '~~' ? markdown.indexOf('~>', inner) : -1;
@@ -5526,12 +5608,23 @@ function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = mar
 // eslint-disable-next-line no-control-regex
 const FORMATTING_CLOSE_AT_END = /(?:[\u0006\u000F]==(?:\{[a-z0-9-]+\})?|\u0004(?:\*\*|\*|~~)|(?<!\\)<\/(?:u|sup|sub)>)$/;
 
+/** As FORMATTING_CLOSE_AT_END, in an HTML table's cell, where htmlCellRun
+ *  writes each tag of formatting, and text's as references */
+// eslint-disable-next-line no-control-regex
+const HTML_CELL_CLOSE_AT_END = /(?:[\u0006\u000F]==(?:\{[a-z0-9-]+\})?|<\/(?:u|sup|sub|b|i|s|code)>)$/;
+
+/** The character before `end` in `markdown`, a line break's as a line end,
+ *  as a <br> in an HTML table's cell (see htmlCellRun) */
+function charBefore(markdown: string, end: number): string {
+  return !readsMarkdown && markdown.endsWith('<br>', end) ? '\n' : markdown[end - 1] ?? '';
+}
+
 /** Where the text of `markdown` before `end` ends, past the closes of the
  *  formatting around it, as a highlight's, which holds the whitespace at
  *  its edges: ==a == */
 function textEnd(markdown: string, from: number, end: number): number {
   for (;;) {
-    const close = FORMATTING_CLOSE_AT_END.exec(markdown.slice(Math.max(from, end - 72), end));
+    const close = (readsMarkdown ? FORMATTING_CLOSE_AT_END : HTML_CELL_CLOSE_AT_END).exec(markdown.slice(Math.max(from, end - 72), end));
     if (!close) return end;
     end -= close[0].length;
   }
@@ -5557,7 +5650,7 @@ function citationSeparator(precedingMarkdown: string, citation: Extract<ContentI
   // it from, and a space at a line's start would be lost
   return views.some(accepted => [' ', '', '\n'].includes(
     span?.revision.type === (accepted ? 'addition' : 'deletion')
-      ? precedingMarkdown[textEnd(precedingMarkdown, span.start, span.end - 3) - 1] ?? ''
+      ? charBefore(precedingMarkdown, textEnd(precedingMarkdown, span.start, span.end - 3))
       : lastVisibleChar(precedingMarkdown, accepted, 0, span ? span.start : precedingMarkdown.length)
   )) ? '' : ' ';
 }
@@ -6154,8 +6247,10 @@ const BLOCK_START_RE = /^[ \t]{0,3}(?:#{1,6}(?:[ \t]|$)|[-+*](?:[ \t]|$)|\d{1,9}
 
 /** Whether a line of Markdown would start a block within a paragraph
  *  (BLOCK_START_RE), or a LaTeX environment, which export reads as display
- *  math (see wrapBareLatexEnvironments) */
+ *  math (see wrapBareLatexEnvironments). None does in an HTML table's cell,
+ *  which export reads as HTML, whose tags start a run's. */
 function startsBlockLine(markdown: string): boolean {
+  if (!readsMarkdown) return false;
   const environment = /^ {0,3}\\begin\{([a-zA-Z*]+)\}/.exec(markdown);
   return BLOCK_START_RE.test(markdown) || !!environment && DISPLAY_MATH_ENVIRONMENTS.has(environment[1]);
 }
@@ -6226,7 +6321,7 @@ function linkGroup(
   // The item at k as Markdown in the link's text, which reads the runs
   // `after` it as the rest of the text before the link's ](url), as a link
   // of one run does
-  const itemText = (k: number, after: RunsAfter): string => items[k].text === '\\\n' ? items[k].text
+  const itemText = (k: number, after: RunsAfter): string => items[k].text === '\\\n' ? lineBreakText()
     : markedFormatting(items[k].text, items[k].formatting, false, after.linkTo(href));
   let text = '';
   let span: RevisionSpan | undefined;
@@ -6543,7 +6638,7 @@ function renderInlineRange(
     // because the backslash must be the final character on its line. A
     // tracked change's delimiters can, as {--\\\n--}.
     if (item.text === '\\\n') {
-      [out, lastSpan] = appendRevised(out, '\\\n', item, lastSpan);
+      [out, lastSpan] = appendRevised(out, lineBreakText(), item, lastSpan);
       i++;
       continue;
     }
@@ -6820,7 +6915,7 @@ function renderInlineRangeWithIds(
     // because the backslash must be the final character on its line. A
     // tracked change's delimiters can, as {--\\\n--}.
     if (item.text === '\\\n') {
-      [out, lastSpan] = appendRevised(out, '\\\n', item, lastSpan);
+      [out, lastSpan] = appendRevised(out, lineBreakText(), item, lastSpan);
       i++;
       continue;
     }
@@ -7021,16 +7116,16 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
           continue;
         }
         // In a table only HTML holds, such as one with merged cells, the
-        // rest exports as literal text, and a tag in a citation as one
-        const outerReadsCitations = readsCitations;
-        readsCitations = false;
+        // rest exports as literal text, and its runs as HTML
+        const outerReadsMarkdown = readsMarkdown;
+        readsMarkdown = false;
         let rendered: ReturnType<typeof renderInlineSegment>;
         try {
           rendered = renderInlineSegment(items, comments, renderOpts, undefined, true);
         } finally {
-          readsCitations = outerReadsCitations;
+          readsMarkdown = outerReadsMarkdown;
         }
-        lines.push(i3 + '<p>' + keepParagraphWhitespace(rendered.text, true, true) + '</p>');
+        lines.push(i3 + '<p>' + keepParagraphWhitespace(keepHtmlCellSpaces(rendered.text), true, true) + '</p>');
         deferredAll.push(...rendered.deferredComments);
       }
       lines.push(i2 + '</' + tag + '>');
