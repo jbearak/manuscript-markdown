@@ -206,6 +206,16 @@ DOCX: comment starts inside the code run and ends after it
 {==`calculateTotal` and related logic==}{>>needs refactoring<<}
 ```
 
+**Comment on a citation's or cross-reference's text**
+
+A citation, or a reference to a note that Word holds as a cross-reference to it, is one item in Markdown, with no text of its own a comment could start or end in. A comment Word anchors inside the text it shows for one, as on the citation's text or the note's number alone, takes in the whole citation or reference.
+
+DOCX: comment on `Smith 2020` inside the citation `(Smith 2020)`
+
+```markdown
+{==[@smith2020]==}{>>check the year<<}
+```
+
 ## Export to Word
 
 The converter also supports exporting Markdown back to DOCX, completing the round-trip workflow: DOCX → Markdown (edit) → DOCX (submit).
