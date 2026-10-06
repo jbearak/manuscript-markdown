@@ -1789,13 +1789,20 @@ function splitCriticParagraphs(tokens: MdToken[]): MdToken[] {
       }
       const segment = criticBlockSegment(token, runs, segments.length);
       // The last part ends where the block does, so it keeps the block's own
-      // mark. So does a heading: import reads a revised heading mark as a
-      // wholly inserted or deleted heading, as promoteCriticHeadingParagraph writes it.
-      if (k === split.parts.length - 1 || segment.type === 'heading') {
+      // mark
+      if (k === split.parts.length - 1) {
         segments.push(segment);
         return;
       }
+      // A break in a revision tracks a heading's mark too, which import
+      // writes as the break after its text, # a{++\n\n++}b, where the
+      // text isn't all in the revision. One that is, {++# a++}, keeps its
+      // own mark at a break in none (see promoteCriticHeadingParagraph)
       const mark = split.marks[k];
+      if (!mark && segment.type === 'heading') {
+        segments.push(segment);
+        return;
+      }
       segments.push({
         ...segment,
         criticParaMark: mark ? (mark.type === 'critic_add' ? 'addition' : 'deletion') : undefined,

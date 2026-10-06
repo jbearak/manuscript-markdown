@@ -195,13 +195,20 @@ describe('tracked paragraph marks', () => {
     expect(await roundTrip('x {~~a\n\n~>\n\nc~~} y')).toBe('x {--a--}\n\n{++c++} y');
   });
 
-  it('leaves a heading split by a revision without a paragraph-mark revision', async () => {
-    // Import reads a revised heading mark as a wholly inserted heading, which
-    // would move the # inside the span
+  it('tracks the mark of a heading a revision splits', async () => {
+    // A heading's break was left untracked, as import read a revised heading
+    // mark only as a wholly revised heading. It writes one all in the
+    // revision so, and the mark of one that isn't as the break after its text
     const paragraphs = await documentParagraphs('# {++a\n\nb++} y');
     expect(paragraphs[0]).toContain('w:val="Heading1"');
-    expect(paragraphs[0]).not.toContain('<w:rPr><w:ins ');
-    expect(await roundTrip('# {++a\n\nb++} y')).toBe('# {++a++}\n\n{++b++} y');
+    expect(paragraphs[0]).toContain('<w:rPr><w:ins ');
+    expect(paragraphs[1]).not.toMatch(/<w:pPr>.*<w:rPr><w:(?:ins|del) /);
+    expect(await roundTrip('# {++a\n\nb++} y')).toBe('{++# a++}\n\n{++b++} y');
+    for (const md of ['# a{++\n\n++}b', '# a{--x\n\ny--}b', '## a {++c\n\n++}\n\n- d']) {
+      const [heading] = await documentParagraphs(md);
+      expect(heading).toMatch(/<w:pStyle w:val="Heading\d"\/><w:rPr><w:(?:ins|del) /);
+      expect(await roundTrip(md)).toBe(md);
+    }
   });
 
   it('keeps a formatted substitution whole, across a break or not', async () => {
