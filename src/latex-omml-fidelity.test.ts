@@ -582,4 +582,45 @@ describe('spaces Word keeps in an equation', () => {
     expect(markdown).toContain(readBack + '\n');
     expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
   });
+
+  const equationXml = async (docx: Uint8Array) => {
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    return xml.slice(xml.indexOf('<m:oMath>'), xml.indexOf('</m:oMath>'));
+  };
+
+  // Without its marks, a change is the equation where it's accepted, or for a
+  // deletion rejected
+  test.each([
+    ['an insertion', '$a{++ \\quad ++}b$'],
+    ['a deletion', '$a{-- \\quad --}b$'],
+    ['a thin space', '$a{++ \\, ++}b$'],
+    ['a spacing command alone', '$1{++\\quad++}2$'],
+  ])('the whitespace around a spacing command in a change is the source\'s, which Word drops: %s', async (_name, md) => {
+    const docx = (await convertMdToDocx(md + '\n')).docx;
+    const xml = await equationXml(docx);
+    const unmarked = md.replace(/\{(\+\+|--)(.*?)\1\}/, (_change, _mark, content: string) => content);
+    expect(xml.replace(/<\/?w:(?:ins|del)\b[^>]*>/g, '')).toBe(await equationXml((await convertMdToDocx(unmarked + '\n')).docx));
+    expect(xml).not.toContain('xml:space');
+    const markdown = (await convertDocx(docx)).markdown;
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect(await equationXml(again)).toBe(xml);
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  // Word has no form for these, so the change comes back as its padding
+  test.each([
+    ['a negative thin space', '$a{++ \\! ++}b$'],
+    ['a command Word ignores', '$a{-- \\displaystyle --}b$'],
+  ])('the whitespace around a command that gives nothing in a change is the source\'s, which Word drops: %s', async (_name, md) => {
+    const docx = (await convertMdToDocx(md + '\n')).docx;
+    const xml = await equationXml(docx);
+    const unmarked = md.replace(/\{(\+\+|--)(.*?)\1\}/, (_change, _mark, content: string) => content);
+    expect(xml.replace(/<\/?w:(?:ins|del)\b[^>]*>/g, '')).toBe(await equationXml((await convertMdToDocx(unmarked + '\n')).docx));
+    expect(xml).not.toContain('xml:space');
+  });
+
+  test('an equation replaced by only a space that Word keeps, such as an em space, goes without xml:space="preserve"', async () => {
+    const xml = await equationXml((await convertMdToDocx('${~~\\left(~>\u2003~~}$\n')).docx);
+    expect(xml).toContain('<w:ins w:id="1" w:author="Unknown"><m:r><m:t>\u2003</m:t></m:r></w:ins>');
+  });
 });

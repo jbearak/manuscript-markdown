@@ -1045,10 +1045,12 @@ function equationViewLatex(parts: CriticMathPart[], accepted: boolean): string {
 }
 
 /** The OMML of one view of an equation (see equationViewLatex). LaTeX that's
- *  only whitespace, as {++ ++} accepted is, is a run of it that Word keeps,
- *  where equationOmml gives nothing, as for an empty equation. */
+ *  only whitespace, as {++ ++} accepted is, is a run of it, where equationOmml
+ *  gives nothing, as for an empty equation. Word keeps it with
+ *  xml:space="preserve", which a space such as an em space doesn't need. */
 function equationViewOmml(latex: string, warnings?: string[]): string {
-  return latex && !latex.trim() ? '<m:r><m:t xml:space="preserve">' + latex + '</m:t></m:r>' : equationOmml(latex, warnings);
+  if (!latex || latex.trim()) return equationOmml(latex, warnings);
+  return '<m:r>' + (/^[ \t\r\n]+$/.test(latex) ? '<m:t xml:space="preserve">' : '<m:t>') + latex + '</m:t></m:r>';
 }
 
 /** `omml` with adjacent runs of the same properties joined, which Word shows

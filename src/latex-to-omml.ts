@@ -462,8 +462,16 @@ class Parser {
 
   private parseCommand(cmd: string): string {
     if (this.track && (cmd === CRITIC_INSERTION_COMMAND || cmd === CRITIC_DELETION_COMMAND)) {
+      const start = this.pos;
       const omml = this.parseGroup();
-      return omml && this.track(cmd === CRITIC_INSERTION_COMMAND ? 'w:ins' : 'w:del', omml);
+      const change = omml && this.track(cmd === CRITIC_INSERTION_COMMAND ? 'w:ins' : 'w:del', omml);
+      // Marked for keepWhitespaceChanges where the source is only whitespace,
+      // which the OMML alone can't tell from padding around a command that
+      // gives none, as \! does
+      const source = this.tokens.slice(start, this.pos);
+      const onlyWhitespace = source.some(token => token.type === 'text') &&
+        source.every(token => token.type === 'lbrace' || token.type === 'rbrace' || (token.type === 'text' && /^[ \t\r\n]*$/.test(token.value)));
+      return onlyWhitespace ? change.replace(/^<w:(?:ins|del)\b/, open => open + WHITESPACE_CHANGE_MARK) : change;
     }
 
     const escaped = this.mode === 'math' ? undefined : TEXT_ESCAPES.get(cmd);
@@ -1207,14 +1215,20 @@ export function trackedLatexToOmml(latex: string, track: TrackChange, onUnknownC
   return keepWhitespaceChanges(new Parser(tokenize(latex), onUnknownCommand, 'math', track).parseExpression(false));
 }
 
-/** A tracked change of only whitespace, as {++ ++} is, with
- *  xml:space="preserve", which Word otherwise drops: the whitespace is what
- *  it changes, so Word keeps it rather than leave the change empty. */
-const WHITESPACE_CHANGE_RE = /(<w:(ins|del)\b[^>]*>)((?:<m:r><m:t>\s+<\/m:t><\/m:r>)+)(?=<\/w:\2>)/g;
+/** The mark on the w:ins or w:del of a tracked change whose source is only
+ *  whitespace, as {++ ++} is (see keepWhitespaceChanges) */
+const WHITESPACE_CHANGE_MARK = ' mm:whitespace=""';
 
-/** `omml` keeping each tracked change of only whitespace in Word (see
- *  WHITESPACE_CHANGE_RE). */
+/** A marked tracked change (see WHITESPACE_CHANGE_MARK) */
+const WHITESPACE_CHANGE_RE = /(<w:(ins|del)) mm:whitespace=""([^>]*>)((?:<m:r><m:t>[ \t\r\n]+<\/m:t><\/m:r>)*)(?=<\/w:\2>)/g;
+
+/** `omml` with the runs of each tracked change whose source is only
+ *  whitespace given xml:space="preserve", which Word otherwise drops: the
+ *  whitespace is what it changes, so Word keeps it rather than leave the
+ *  change empty. The whitespace around a command, as in {++ \quad ++} or
+ *  {++ \! ++}, is the source's padding, which Word drops, as it does where the
+ *  change is accepted. */
 function keepWhitespaceChanges(omml: string): string {
-  return omml.replace(WHITESPACE_CHANGE_RE, (_change, open: string, _element: string, runs: string) =>
-    open + runs.replace(/<m:t>/g, '<m:t xml:space="preserve">'));
+  return omml.replace(WHITESPACE_CHANGE_RE, (_change, open: string, _element: string, rest: string, runs: string) =>
+    open + rest + runs.replace(/<m:t>/g, '<m:t xml:space="preserve">'));
 }
