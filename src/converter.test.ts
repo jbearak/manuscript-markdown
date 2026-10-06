@@ -2038,6 +2038,35 @@ describe('Where Word list numbering comes from', () => {
     expect(await imported([[pStyle('ListNumber'), 'a'], [numPr(2, 0), 'x']], { styles: listStyles, numbering: linkedToListNumber })).toBe(md);
   });
 
+  // A list style, as Word's built-in multilevel lists are: abstract
+  // numberings 8 and 9 link to it (w:numStyleLink), with instances 5 and 6.
+  // Its definition is the numbered list's abstract numbering, which the
+  // numbering style's instance or the definition's w:styleLink gives
+  const listStyle = (via: 'instance' | 'styleLink') => ({
+    styles: withStyles(via === 'instance' ? '<w:style w:type="numbering" w:styleId="MyList"><w:name w:val="MyList"/><w:pPr>' + numPr(2) + '</w:pPr></w:style>' : ''),
+    numbering: (xml: string) => xml
+      .replace(/(<w:abstractNum w:abstractNumId="1"[^>]*>)/, (match: string) => match + (via === 'styleLink' ? '<w:styleLink w:val="MyList"/>' : ''))
+      .replace('<w:num ', () => [8, 9].map(id => '<w:abstractNum w:abstractNumId="' + id + '"><w:multiLevelType w:val="multilevel"/><w:numStyleLink w:val="MyList"/></w:abstractNum>').join('') + '<w:num ')
+      .replace('</w:numbering>', () => '<w:num w:numId="5"><w:abstractNumId w:val="8"/></w:num><w:num w:numId="6"><w:abstractNumId w:val="9"/></w:num></w:numbering>'),
+  });
+
+  test.each(['instance', 'styleLink'] as const)('numbers a list that links to a list style by its definition, found by its %s', async (via) => {
+    const md = '1. a\n2. b\n   1. x';
+    expect(await imported([[numPr(5, 0), 'a'], [numPr(5, 0), 'b'], [numPr(5, 1), 'x']], listStyle(via))).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    // Word numbers them 1 2, 1 2, 3, as docx4j measured it
+    ['and its definition\'s', 2, '1. a\n2. b\n\n<!-- -->\n\n1. x\n2. y\n3. c'],
+    // As docx4j counts them, which nothing measured
+    ['and another that links to it', 6, '1. a\n2. b\n\n<!-- -->\n\n1. x\n2. y\n3. c'],
+  ])('counts a list that links to a list style apart from the style\'s other lists: %s', async (_name, other, md) => {
+    const paragraphs: [string, string][] = [[numPr(other, 0), 'a'], [numPr(other, 0), 'b'], [numPr(5, 0), 'x'], [numPr(5, 0), 'y'], [numPr(other, 0), 'c']];
+    expect(await imported(paragraphs, listStyle('instance'))).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
   test('keeps a heading its style numbers a heading, which Word counts in its list', async () => {
     const styles = (xml: string) => xml.replace(/(<w:style [^>]*w:styleId="Heading1">[^]*?<w:pPr>)/, (match: string) => match + numPr(2));
     const md = '# H\n\n2. a';

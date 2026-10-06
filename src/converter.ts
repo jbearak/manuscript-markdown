@@ -1887,12 +1887,20 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
   // Build abstractNumId → levels map
   const abstractNums = new Map<string, Map<string, NumberingLevelDef>>();
   const restartingAfterBreak = new Set<string>();
+  // abstractNumId → the list style its w:numStyleLink names, and a list
+  // style → the abstractNumId whose w:styleLink names it
+  const numStyleLinks = new Map<string, string>();
+  const styleLinks = new Map<string, string>();
   for (const node of findAllDeep(parsed, 'w:abstractNum')) {
     const abstractNum = asXmlNodes(node['w:abstractNum']);
     if (abstractNum.length === 0) continue;
 
     const abstractNumId = getAttr(node, 'abstractNumId');
     if (['1', 'true', 'on'].includes(String(node[':@']?.['@_w15:restartNumberingAfterBreak'] ?? ''))) restartingAfterBreak.add(abstractNumId);
+    const numStyleLink = abstractNum.find(child => child['w:numStyleLink'] !== undefined);
+    if (numStyleLink) numStyleLinks.set(abstractNumId, getAttr(numStyleLink, 'val'));
+    const styleLink = abstractNum.find(child => child['w:styleLink'] !== undefined);
+    if (styleLink && !styleLinks.has(getAttr(styleLink, 'val'))) styleLinks.set(getAttr(styleLink, 'val'), abstractNumId);
     const levels = new Map<string, NumberingLevelDef>();
 
     for (const lvlNode of findAllDeep(abstractNum, 'w:lvl')) {
@@ -1921,16 +1929,33 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
     abstractNums.set(abstractNumId, levels);
   }
 
-  // Resolve numId → abstractNumId, and read lvlOverride/startOverride
-  for (const node of findAllDeep(parsed, 'w:num')) {
+  const nums = findAllDeep(parsed, 'w:num').map(node => {
     const num = asXmlNodes(node['w:num']);
+    const abstractNumIdNode = findAllDeep(num, 'w:abstractNumId')[0];
+    return { numId: getAttr(node, 'numId'), num, abstractNumId: abstractNumIdNode ? getAttr(abstractNumIdNode, 'val') : undefined };
+  });
+
+  // An abstract numbering that links to a list style (w:numStyleLink), as
+  // Word's built-in multilevel lists do, has the levels of the style's
+  // definition: the abstract numbering of the instance the style's w:numPr
+  // gives, or else the one whose w:styleLink names the style (ECMA-376
+  // Part 1 §17.9.21, §17.9.27), as LibreOffice finds it. Its paragraphs
+  // count apart from the definition's, as docx4j measured Word, and from
+  // another's that links to the style
+  const abstractNumIds = new Map(nums.map(({ numId, abstractNumId }) => [numId, abstractNumId]));
+  for (const [abstractNumId, style] of numStyleLinks) {
+    const styleNumId = styles.styles.get(style)?.reference.numId;
+    const definition = [styleNumId === undefined ? undefined : abstractNumIds.get(styleNumId), styleLinks.get(style)]
+      .find(id => id !== undefined && !numStyleLinks.has(id) && abstractNums.has(id));
+    if (definition !== undefined) abstractNums.set(abstractNumId, abstractNums.get(definition)!);
+  }
+
+  // Resolve numId → abstractNumId, and read lvlOverride/startOverride
+  for (const { numId, num, abstractNumId } of nums) {
     if (num.length === 0) continue;
 
-    const numId = getAttr(node, 'numId');
-    const abstractNumIdNodes = findAllDeep(num, 'w:abstractNumId');
     const instance = { abstractNumId: '', overrides: new Map<string, number>(), restartsAfterBreak: false };
-    if (abstractNumIdNodes.length > 0) {
-      const abstractNumId = getAttr(abstractNumIdNodes[0], 'val');
+    if (abstractNumId !== undefined) {
       instance.abstractNumId = abstractNumId;
       instance.restartsAfterBreak = restartingAfterBreak.has(abstractNumId);
       instances.set(numId, instance);
