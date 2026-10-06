@@ -4044,6 +4044,8 @@ export interface DocxGenState {
   bulletNumId?: number; // the numId bullets take (default 1; see listNumIds)
   decimalNumId?: number; // the numId numbers take (default 2)
   usedOrderedNumId?: boolean; // whether an ordered list has used numbers' numId, so the next needs its own
+  listLevelRestarts?: Map<number, number>; // ilvl → the w:lvlRestart of the template's numbered lists' level, where it has one
+  listStartOverrideLevels?: Set<number>; // the levels the template's instance for numbers starts over with a start override
   hasComments: boolean;
   hasFootnotes: boolean;
   hasEndnotes: boolean;
@@ -5444,13 +5446,51 @@ function numberingOverrideXml(o: NumberingOverride, abstractNumId: string,
     '</w:num>\n';
 }
 
+/** The children of the instance of a template's numbering numbered lists
+ *  take, `numId`, and the abstract numbering it numbers them by */
+function orderedListInstance(numbering: { nums: OrderedXmlNode[] } | undefined, numId: number): { instance: OrderedXmlNode[]; abstractNumId?: number } {
+  const instance = childNodes(numbering?.nums.find(n => intAttr(n, 'w:numId') === numId), 'w:num');
+  const abstractNum = instance.find(n => 'w:abstractNumId' in n);
+  return { instance, abstractNumId: abstractNum && intAttr(abstractNum, 'w:val') };
+}
+
+/**
+ * The w:lvlRestart of each level of a template's numbered lists that has
+ * one: the level, from 1, at or above which a paragraph starts that level
+ * over, or 0 for none. Word ignores one in an instance's level override
+ * ([MS-OI29500] 2.1.282), so these come from the abstract numbering alone.
+ */
+function listLevelRestarts(xml: string | undefined, numId: number): Map<number, number> {
+  const restarts = new Map<number, number>();
+  const numbering = xml === undefined ? undefined : parseTemplateNumbering(xml);
+  const { abstractNumId } = orderedListInstance(numbering, numId);
+  const abstractNum = childNodes(numbering?.root, 'w:numbering')
+    .find(n => 'w:abstractNum' in n && intAttr(n, 'w:abstractNumId') === abstractNumId);
+  for (const lvl of childNodes(abstractNum, 'w:abstractNum').filter(n => 'w:lvl' in n)) {
+    const restart = childNodes(lvl, 'w:lvl').find(n => 'w:lvlRestart' in n);
+    const ilvl = intAttr(lvl, 'w:ilvl'), value = restart ? intAttr(restart, 'w:val') : NaN;
+    if (Number.isInteger(ilvl) && value >= 0) restarts.set(ilvl, value);
+  }
+  return restarts;
+}
+
+/**
+ * The levels the instance of a template's numbering numbered lists take,
+ * `numId`, starts over at its first paragraph at each, with a start
+ * override, or with a level override with nothing in it, which Word reads
+ * as a start of 0 (tdf#153104).
+ */
+function listStartOverrideLevels(xml: string | undefined, numId: number): Set<number> {
+  const { instance } = orderedListInstance(xml === undefined ? undefined : parseTemplateNumbering(xml), numId);
+  return new Set(instance.filter(n => 'w:lvlOverride' in n && (childNodes(n, 'w:lvlOverride').every(c => '#text' in c)
+    || childNodes(n, 'w:lvlOverride').some(c => 'w:startOverride' in c))).map(n => intAttr(n, 'w:ilvl')).filter(Number.isInteger));
+}
+
 /** A template's numbering with start overrides added as instances like the
  *  one numbers take, `numId`, or undefined when it has none. */
 function withNumberingOverrides(xml: string, startOverrides: NumberingOverride[], numId: number): string | undefined {
   const numbering = parseTemplateNumbering(xml);
-  const instance = childNodes(numbering?.nums.find(n => intAttr(n, 'w:numId') === numId), 'w:num');
-  const abstractNum = instance.find(n => 'w:abstractNumId' in n);
-  const abstractNumId = abstractNum && intAttr(abstractNum, 'w:val');
+  const { instance, abstractNumId } = orderedListInstance(numbering, numId);
   // w:num entries go before numIdMacAtCleanup, which ends the part
   const at = /<w:numIdMacAtCleanup\b/.exec(xml)?.index ?? [...xml.matchAll(/<\/w:numbering\s*>/g)].pop()?.index;
   if (!numbering || abstractNumId === undefined || !Number.isInteger(abstractNumId) || at === undefined) return undefined;
@@ -7161,12 +7201,21 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
         // each ordered list after the first gets one of its own, which
         // starts at its own number. Its items share it. The first sublist of
         // a numbered item stays in its parent's instance, which Word starts
-        // over after each parent item, so a template can number it as 2.1.
+        // over after each parent item, so a template can number it as 2.1,
+        // unless the template's w:lvlRestart has the level go on there: 0,
+        // or a level above the parent's. One below the level is ignored.
+        // A sublist in an instance export wrote starts where the abstract
+        // numbering starts its level, not at the override for it of the
+        // instance numbers take, so where that has one, the sublist gets its
+        // own start.
         const parentNumId = ilvl > 0 && state.listItemNumbers?.length === ilvl && state.listItemNumbers[ilvl - 1] !== undefined
           ? state.activeListStartOverrides.get(ilvl - 1) : undefined;
+        const restart = state.listLevelRestarts?.get(ilvl);
+        const sharesParent = (restart === undefined || restart >= ilvl)
+          && (parentNumId === (state.decimalNumId ?? 2) || !state.listStartOverrideLevels?.has(ilvl));
         if (token.ordered && (token.listStart || !state.activeListStartOverrides.has(ilvl))) {
           const start = token.startNumber ?? 1;
-          if (parentNumId !== undefined && start === 1) {
+          if (parentNumId !== undefined && start === 1 && sharesParent) {
             state.activeListStartOverrides.set(ilvl, parentNumId);
           } else if (!state.usedOrderedNumId && start === 1) {
             state.activeListStartOverrides.set(ilvl, state.decimalNumId ?? 2);
@@ -8525,6 +8574,9 @@ export async function convertMdToDocx(
   // Reserve max optional slots to avoid hyperlink rId collisions.
   const rIdOffset = templateRelCount + 3 + 6 + (hasTheme ? 1 : 0) + 3; // +6 optional rels (foot/end/commentsExtended/commentsIds/commentsExtensible/people), +3 fixed settings/webSettings/fontTable
 
+  // The numbering numbers take, where it is the template's, and not export's
+  // own (see withOwnNums)
+  const listTemplateNumbering = listNumbering.own.has(listNumbering.decimal) ? undefined : templateNumbering;
   const state: DocxGenState = {
     commentId: 0,
     comments: [],
@@ -8539,6 +8591,8 @@ export async function convertMdToDocx(
     decimalNumId: listNumbering.decimal,
     firstOverrideNumId: Math.max(2, ...numIdsInUse, listNumbering.bullet, listNumbering.decimal) + 1,
     usedOrderedNumId: false,
+    listLevelRestarts: listLevelRestarts(listTemplateNumbering, listNumbering.decimal),
+    listStartOverrideLevels: listStartOverrideLevels(listTemplateNumbering, listNumbering.decimal),
     hasComments: false,
     hasFootnotes: false,
     hasEndnotes: false,
