@@ -592,15 +592,16 @@ interface TextIndex {
   ats: number[];
   semicolons: number[];
   openers: number[];
-  /** Where each note reference is, whose [^1] ends a citation before it */
-  notes: number[];
+  /** Where each note reference and citation is, whose [ before its ]
+   *  ends a citation before it, as [^1] and [@b] do */
+  bracketed: number[];
 }
 
 /** `text`'s index, where a run of dollar signs ends at each of `bounds`,
  *  the starts of runs, between which formatting's or a span's delimiters
- *  can come, with note references at `notes`, and the last == that isn't
- *  in it at `laterEquals` */
-function indexText(text: string, bounds: ReadonlySet<number> = new Set(), notes: number[] = [], laterEquals = -1): TextIndex {
+ *  can come, with note references and citations at `bracketed`, and the
+ *  last == that isn't in it at `laterEquals` */
+function indexText(text: string, bounds: ReadonlySet<number> = new Set(), bracketed: number[] = [], laterEquals = -1): TextIndex {
   const closers: number[] = [];
   const dollarRuns: Array<{ start: number; length: number }> = [];
   const equals: number[] = [];
@@ -626,7 +627,7 @@ function indexText(text: string, bounds: ReadonlySet<number> = new Set(), notes:
     nextSingle[k] = dollarRuns[k].length === 1 ? k : nextSingle[k + 1];
     nextDouble[k] = dollarRuns[k].length > 1 ? k : nextDouble[k + 1];
   }
-  return { text, closers, dollarRuns, dollarStarts: dollarRuns.map(run => run.start), nextSingle, nextDouble, equals, laterEquals, ats, semicolons, openers, notes };
+  return { text, closers, dollarRuns, dollarStarts: dollarRuns.map(run => run.start), nextSingle, nextDouble, equals, laterEquals, ats, semicolons, openers, bracketed };
 }
 
 /** The first of `sorted` at or after `value` */
@@ -770,14 +771,15 @@ export class RunsAfter {
    *  item ends in, as in [see **x; y** @a]: export reads a prefix whose
    *  formatting closes in it, as in [see *x* @a], as text. With no @ for a
    *  key, or a [ before the ], it reads none. A note reference's [^1] is
-   *  one with a [ before its ], which ends the citation of keys first, as
-   *  in [@a[^1], taking the reference. */
-  citationTakesDelimiters(keyFirst: boolean): boolean {
+   *  one with a [ before its ], and so is a citation's [@b]: where one
+   *  comes first, the citation is one whose key comes right after its [
+   *  (`direct`), which takes it, as [@a[^1] and [@a [@b] do, and no other. */
+  citationTakesDelimiters(keyFirst: boolean, direct: boolean): boolean {
     if (!this.runs || this.prefix) return false;
-    const { closers, ats, openers, semicolons, notes } = this.index;
+    const { closers, ats, openers, semicolons, bracketed } = this.index;
     const c = lowerBound(closers, this.from);
-    const n = lowerBound(notes, this.from);
-    if (n < notes.length && (c >= closers.length || notes[n] < closers[c])) return keyFirst;
+    const n = lowerBound(bracketed, this.from);
+    if (n < bracketed.length && (c >= closers.length || bracketed[n] < closers[c])) return direct;
     if (c >= closers.length) return false;
     if (keyFirst) return true;
     const close = closers[c];
@@ -1083,7 +1085,7 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
       if (!opens && !closerAfter) {
         const direct = /^-?@/.test(text.slice(i + 1, i + 3));
         const keyFirst = direct || nextKey !== -1 && (nextSemicolon === -1 || nextKey < nextSemicolon);
-        opens = (direct || inner === -1 && (keyFirst || nextSemicolon === -1)) && after.citationTakesDelimiters(keyFirst);
+        opens = (direct || inner === -1 && (keyFirst || nextSemicolon === -1)) && after.citationTakesDelimiters(keyFirst, direct);
       }
     }
     if (opens) escaped.add(i);
@@ -6433,19 +6435,19 @@ function runsAfter(segment: ContentItem[], start: number, end: number): RunsAfte
     let first = Math.min(start, end);
     while (first > 0 && !endsInlineRange(segment[first - 1]) && !isInParagraphMath(segment[first - 1])) first--;
     const offsets: number[] = [];
-    const notes: number[] = [];
+    const bracketed: number[] = [];
     let text = '';
     for (let k = first; k < end; k++) {
       offsets.push(text.length);
       const item = segment[k];
-      if (item.type === 'footnote_ref') notes.push(text.length);
+      if (item.type === 'footnote_ref' || item.type === 'citation') bracketed.push(text.length);
       text += indexedText(item);
     }
     offsets.push(text.length);
     const marks = laterEqualsAfter.get(segment);
     let laterEquals = -1;
     for (let k = first; k < end; k++) if (marks?.has(k)) laterEquals = offsets[k + 1 - first];
-    byEnd.set(end, cached = { length: segment.length, first, offsets, index: indexText(text, new Set(offsets), notes, laterEquals), items: segment.slice(first, end) });
+    byEnd.set(end, cached = { length: segment.length, first, offsets, index: indexText(text, new Set(offsets), bracketed, laterEquals), items: segment.slice(first, end) });
   }
   return new RunsAfter(cached.index, cached.offsets[start - cached.first], '', false,
     { offsets: cached.offsets, items: cached.items, at: start - cached.first });

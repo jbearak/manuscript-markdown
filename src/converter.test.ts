@@ -11674,6 +11674,49 @@ describe('Markdown across Word runs', () => {
     expect(xml).toContain('[@key');
   });
 
+  /** A Zotero citation of Doe's book, as a field */
+  const zoteroField = (rPr = '') => '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> ADDIN ZOTERO_ITEM CSL_CITATION '
+    + '{"citationItems":[{"id":1,"itemData":{"id":1,"type":"book","title":"T","author":[{"family":"Doe","given":"J"}],"issued":{"date-parts":[["2020"]]}}}]} '
+    + '</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>' + run('(Doe 2020)', rPr) + '<w:r><w:fldChar w:fldCharType="end"/></w:r>';
+  const inserted = (runs: string) => '<w:ins w:id="91" w:author="A" w:date="2026-01-01T00:00:00Z">' + runs + '</w:ins>';
+
+  test.each([
+    ['[@a ', run('[@a ') + zoteroField(), '\\[@a [@doe2020t]'],
+    ['[@a', run('[@a') + zoteroField(), '\\[@a [@doe2020t]'],
+    ['[@', run('[@') + zoteroField(), '\\[@ [@doe2020t]'],
+    ['[-@a ', run('[-@a ') + zoteroField(), '\\[-@a [@doe2020t]'],
+    ['[@a; ', run('[@a; ') + zoteroField(), '\\[@a; [@doe2020t]'],
+    ['[@a, p. 2 ', run('[@a, p. 2 ') + zoteroField(), '\\[@a, p. 2 [@doe2020t]'],
+    ['[@a in bold', run('[@a', '<w:b/>') + zoteroField(), '**\\[@a** [@doe2020t]'],
+    ['[@a before a highlighted citation', run('[@a ') + zoteroField('<w:highlight w:val="yellow"/>'), '\\[@a ==[@doe2020t]=='],
+    ['[@a before an inserted citation', run('[@a ') + inserted(zoteroField()), '\\[@a {++[@doe2020t]++}'],
+    ['[@a inserted with the citation', inserted(run('[@a ') + zoteroField()), '{++\\[@a [@doe2020t]++}'],
+    ['[@a before two citations', run('[@a ') + zoteroField() + run(' and ') + zoteroField(), '\\[@a [@doe2020t] and [@doe2020t]'],
+  ])('keeps the [ of text %j before a citation as text', async (_name, runs, md) => {
+    // Export read from the [ to the citation's ], as one citation of the
+    // key a [@doe2020t, which took the citation
+    const docx = await withRuns(run('x ') + runs);
+    const { markdown, bibtex } = await convertDocx(docx);
+    expect(strip(markdown)).toBe('x ' + md + '\n');
+    const again = (await convertMdToDocx(markdown, { bibtex })).docx;
+    expect(await (await JSZip.loadAsync(again)).file('word/document.xml')!.async('string')).toContain('ZOTERO_ITEM CSL_CITATION');
+    expect(strip((await convertDocx(again)).markdown).replace(/^\n+/, '')).toBe('x ' + md + '\n');
+  });
+
+  test('keeps the [ of text before a citation in a note as text', () => {
+    const text = (value: string): ContentItem => ({ type: 'text', text: value, commentIds: new Set(), formatting: DEFAULT_FORMATTING });
+    const citation: ContentItem = { type: 'citation', text: '(Doe 2020)', commentIds: new Set(), pandocKeys: ['@doe2020'] };
+    const notes = { map: new Map([['footnote:1', { label: '1', body: [{ type: 'para' } as ContentItem, text('y [@a '), citation], noteKind: 'footnote' as const }]]), assignedLabels: new Map([['footnote:1', '1']]) };
+    const out = buildMarkdown([{ type: 'para' } as ContentItem, text('q'), { type: 'footnote_ref', noteId: '1', noteKind: 'footnote', commentIds: new Set() } as ContentItem], new Map(), { notes });
+    expect(out.split('\n\n[^1]: ')[1].trim()).toBe('y \\[@a [@doe2020]');
+  });
+
+  test.each(['x \\[@a [@doe2020]\n', 'x \\[-@a; [@doe2020]\n', 'x [see @a, [@doe2020]\n', 'x @a [@doe2020]\n'])('keeps %j as it is', async (md) => {
+    const bibtex = '@book{doe2020,\n  author = {Doe, J},\n  title = {T},\n  year = {2020},\n}\n';
+    const { markdown } = await convertDocx((await convertMdToDocx(md, { bibtex })).docx);
+    expect(strip(markdown).replace(/^\n+/, '')).toBe(md);
+  });
+
   test('keeps the [ of text that starts an image around a note reference as text', () => {
     // Read as its ], the reference's left the [ before it unescaped
     const run = (text: string): ContentItem => ({ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING });
