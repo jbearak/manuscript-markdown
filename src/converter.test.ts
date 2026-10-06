@@ -6087,6 +6087,10 @@ describe('Line breaks a backslash can\'t hold', () => {
     ['a space and a comment that ends in ---> before one that ends a paragraph', 'XX', r(t(' ')) + comment('<!-- a --->') + r('<w:br/>'), ' <!-- a ---><br>'],
     ['a space and a comment with a heading\'s line in it before one that ends a paragraph', 'XX', r(t(' ')) + comment('<!-- a\n# h -->') + r('<w:br/>'), ' <!-- a\n# h --><br>'],
     ['a space and a comment with a blank line in it before one that ends a quote\'s paragraph', '> XX', r(t(' ')) + comment('<!-- a\n\nb -->') + r('<w:br/>'), '>  <!-- a\n>\n> b --><br>'],
+    // After a comment, whose block they were text in
+    ['a comment and a space before one that ends a paragraph', 'XX', comment('<!-- c -->') + r(t(' ') + '<w:br/>'), '<!-- c --> <br>'],
+    ['a comment and a tab before one that ends a paragraph', 'XX', comment('<!-- c -->') + r('<w:tab/><w:br/>'), '<!-- c -->\t<br>'],
+    ['a space between comments before one that ends a paragraph', 'XX', comment('<!-- c -->') + r(t(' ')) + comment('<!-- d -->') + r('<w:br/>'), '<!-- c --> <!-- d --><br>'],
     ['a space before one that ends a quote\'s paragraph', '> XX', r(t(' ') + '<w:br/>'), '> &#32;<br>'],
     ['a space before one that ends an item\'s paragraph after its first', '- a\n\n  XX', r(t(' ') + '<w:br/>'), '- a\n\n  &#32;<br>'],
     ['a tab before one that ends a paragraph', 'XX', r('<w:tab/><w:br/>'), '&#9;<br>'],

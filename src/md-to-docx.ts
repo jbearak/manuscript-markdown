@@ -696,11 +696,17 @@ export function startsHtmlBlock(text: string): boolean {
   return citationTextMd.parse(text, {})[0]?.type === 'html_block';
 }
 
+// HTML comments, each with the spaces and tabs after it, from a block's start
+const COMMENTS_AT_START_RE = /^(?:<!--(?:(?!-->)[\s\S])*-->[ \t]*)*/;
+
 /** Whether export reads an HTML block's text as line breaks, alone or after
- *  comments, not as text, with the spaces before them as text */
+ *  comments and the spaces and tabs after them, not as text, with the
+ *  spaces before them as text */
 export function isLineBreakBlock(content: string): boolean {
   const text = content.trim();
-  return /^(?:<br\s*\/?>\s*)+$/i.test(text) || /^(?:<!--(?:(?!-->)[\s\S])*-->)+(?:<br\s*\/?>)+$/i.test(text);
+  if (/^(?:<br\s*\/?>\s*)+$/i.test(text)) return true;
+  const comments = COMMENTS_AT_START_RE.exec(text)![0];
+  return comments !== '' && /^(?:<br\s*\/?>)+$/i.test(text.slice(comments.length));
 }
 
 /** What of a comment, a block of its own, export doesn't read as a
@@ -3139,15 +3145,20 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
           // break ends, which markdown-it reads as the comments' block. Its
           // indent, which markdown-it keeps in its text, is text, as in
           // another block, as import writes a paragraph's spaces before a
-          // comment only a block holds.
+          // comment only a block holds. So are spaces and tabs after a
+          // comment, as import writes a paragraph's after one before a line
+          // break that ends it, as in <!-- c --> <br>.
           const indent = /^[ \t]*/.exec(htmlContent)![0];
+          const text = htmlContent.trim();
+          const comments = COMMENTS_AT_START_RE.exec(text)![0];
           result.push({
             type: 'paragraph',
             runs: [
               ...(indent ? [{ type: 'text' as const, text: indent }] : []),
-              ...htmlContent.trim().match(/<!--(?:(?!-->)[\s\S])*-->|<br\s*\/?>/gi)!.map(tag => tag.startsWith('<!--')
-                ? { type: 'html_comment' as const, text: tag }
-                : { type: 'hardbreak' as const, text: '\n' }),
+              ...(comments.match(/<!--(?:(?!-->)[\s\S])*-->|[ \t]+/g) ?? []).map(part => part.startsWith('<!--')
+                ? { type: 'html_comment' as const, text: part }
+                : { type: 'text' as const, text: part }),
+              ...text.slice(comments.length).match(/<br\s*\/?>/gi)!.map(() => ({ type: 'hardbreak' as const, text: '\n' })),
             ],
           });
         } else {
