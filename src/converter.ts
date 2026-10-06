@@ -1171,8 +1171,8 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
     const colonsIn = (markdown: string) => [...linkifyMatches(markdown).map(link => link.schema.endsWith(':') && link.schema !== 'mailto:' ? link.index + link.schema.length - 1 : markdown.indexOf('@', link.index)), ...linkifiedColons(markdown)];
     const colons = colonsIn(markdown);
     // An = at the end before another, as a highlight's ==, which
-    // resolveEmphasis escapes there, so it ends the text linkify reads, as
-    // in x@y.com\===a==
+    // resolveEmphasis writes as a reference there, so it ends the text
+    // linkify reads, as an escape does, as in x@y.com&#61;==a==
     if (after?.first === '=' && /(?:^|[^\\])(?:\\\\)*=$/.test(markdown)) {
       colons.push(...colonsIn(markdown.slice(0, -1) + '\\=').filter(colon => colon < markdown.length - 1));
     }
@@ -2522,7 +2522,8 @@ const EMPHASIS_OPEN = { '**': '\u0001', '*': '\u0002', '~~': '\u0003' } as const
 const EMPHASIS_CLOSE = '\u0004';
 /** The marks wrapHighlight puts after a highlight's opening == and before
  *  its closing one, so that resolveEmphasis can tell an = of the text
- *  before it, which would run into its ==, from another's closing == */
+ *  before it, which would run into its ==, from another's closing ==,
+ *  which gets its color there */
 const HIGHLIGHT_OPEN = '\u0005';
 const HIGHLIGHT_CLOSE = '\u0006';
 /** The marks of a highlight that joins its neighbour's (see joinHighlights) */
@@ -2585,23 +2586,13 @@ function resolveEmphasis(markdown: string): string {
   // kept it (see resolveSide)
   if (!markdown.includes(EMPHASIS_CLOSE) && !markdown.includes(HIGHLIGHT_OPEN) && !markdown.includes(HIGHLIGHT_JOIN_OPEN)
     && !markdown.includes(HIGHLIGHT_CLOSE)) return markdown;
-  // Whitespace at a highlight's edge goes outside it, as before it held it,
-  // next to an = outside it, as of the text, another highlight's == or a
-  // comment's ==}, which navigation and the grammar read with the
-  // highlight's own, so ==a ====b=={red} as no highlight. Not all of it,
-  // which would leave none. From where the whitespace starts, so each is
-  // read once.
-  markdown = joinHighlights(markdown)
-    // eslint-disable-next-line no-control-regex
-    .replace(/(?<=[^\s\u0005])([^\S\n]+)\u0006==(?==)/g, (_m, space: string) => '\u0006==' + space)
-    // eslint-disable-next-line no-control-regex
-    .replace(/(?<==)==\u0005([^\S\n]+)(?=[^\s\u0006])/g, (_m, space: string) => space + '==\u0005')
-    // Whitespace a highlight holds alone next to another's ==, as in
-    // ==  ====b=={red}, goes without it, as before, where navigation and the
-    // grammar would read no highlight, the other's either
-    // eslint-disable-next-line no-control-regex
-    .replace(/(?<==)==\u0005([^\S\n]+)\u0006==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?|==\u0005([^\S\n]+)\u0006==(?==)/g,
-      (_m, before: string | undefined, after: string | undefined) => before ?? after ?? '');
+  // A highlight of the default color right before another's == gets its
+  // color, whose } keeps their == apart, as in ==a =={yellow}==b=={red}.
+  // Navigation and the grammar read ==a ====b=={red} as no highlight. The
+  // text's = before one is a reference (below). A comment's {== or ==}
+  // next to one needs neither, as they read the comment's range whole.
+  // eslint-disable-next-line no-control-regex
+  markdown = joinHighlights(markdown).replace(/\u0006==(?===\u0005)/g, '\u0006=={yellow}');
   const closeAt = new Map<number, number>();
   const opens: number[] = [];
   for (let i = 0; i < markdown.length; i++) {
@@ -2666,15 +2657,17 @@ function resolveEmphasis(markdown: string): string {
       from = i + 1 + (closer ? closer.delimiter.length : 0);
     } else if (code === 5) {
       // The text's = before a highlight's == would open it a character
-      // early, unless escaped: a===b== highlights =b. Another's closing ==
-      // doesn't, as the highlight before closes there first, nor does a
-      // comment's {==, which its range starts after.
+      // early, as a===b== highlights =b. Escaped, as in a\===b==, it keeps
+      // navigation and the grammar from reading the highlight, so it's a
+      // reference, a&#61;==b==, with no backslash where escaped, as after
+      // another highlight (see escapeAfterHighlight). A comment's {== stays,
+      // as its range starts after it.
       const start = i - 2;
       let slashes = 0;
       while (markdown[start - 2 - slashes] === '\\') slashes++;
-      const delimiter = markdown[start - 2] === '=' && (markdown[start - 3] === HIGHLIGHT_CLOSE || markdown[start - 3] === '{');
+      const delimiter = markdown[start - 2] === '=' && markdown[start - 3] === '{';
       const before = markdown.slice(from, start);
-      parts.push(before.endsWith('=') && slashes % 2 === 0 && !delimiter ? before.slice(0, -1) + '\\=' : before);
+      parts.push(before.endsWith('=') && !delimiter ? before.slice(0, -1 - slashes % 2) + '&#61;' : before);
       parts.push('==');
       from = i + 1;
     } else if (code === 6) {
@@ -6041,8 +6034,7 @@ function resolveSide(markdown: string): string {
   const close = /[\u0006\u000F](==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?)$/.exec(markdown.slice(0, closesStart(markdown)))?.[1];
   if (!close) return resolved;
   const end = closesStart(resolved);
-  // Unless resolving dropped the highlight, as of whitespace alone
-  return resolved.endsWith(close, end) ? resolved.slice(0, end - close.length) + HIGHLIGHT_CLOSE + resolved.slice(end - close.length) : resolved;
+  return resolved.slice(0, end - close.length) + HIGHLIGHT_CLOSE + resolved.slice(end - close.length);
 }
 
 /** Where the closes of emphasis and the tags of formatting at the end of
@@ -6062,15 +6054,6 @@ function closesStart(markdown: string): number {
  *  the first ~> and ends at the first ~~}. */
 function substitutionHolds(oldText: string, newText: string): boolean {
   return !oldText.includes('~>') && !(oldText + '~>' + newText).includes('~~}');
-}
-
-/** Whether resolving a side's emphasis (`side`, before resolveEmphasis)
- *  moves whitespace out of a highlight next to an = outside it, or drops a
- *  highlight that holds only whitespace there. The side's items in spans of
- *  their own keep it, as appendRevised starts a span at the seam. */
-function sideMovesHighlightedSpace(side: string): boolean {
-  // eslint-disable-next-line no-control-regex
-  return /[^\S\n]\u0006==(?==)|(?<==)==\u0005[^\S\n]/.test(joinHighlights(side));
 }
 
 /** Render a CriticMarkup substitution `{~~old~>new~~}` when a deletion and
@@ -6183,16 +6166,6 @@ function renderSubstitutionRun(
   if (deletions === 0 || additions === 0 || deletions + additions <= 2) return undefined;
   const oldSide = sideText(start, start + deletions);
   const newSide = sideText(start + deletions, k);
-  // Not where a side holds a run of a link, which linkGroup leaves to the
-  // substitution, and which in a span of its own can lose its link, as a
-  // line break does, or read as an image's text after a !
-  const linked = segment.slice(start, k).some(item => item.type === 'text' && !!item.href);
-  if (!linked && (sideMovesHighlightedSpace(oldSide) || sideMovesHighlightedSpace(newSide))) {
-    // The rest of the deletions go in spans too, rather than build sides
-    // from each, which would take time in the square of them
-    substitutionlessRuns.set(segment, { from: start, to: start + deletions, end });
-    return undefined;
-  }
   // Resolved apart, before the check (see tryRenderSubstitution)
   const oldText = resolveSide(oldSide);
   const newText = resolveSide(newSide);

@@ -3384,17 +3384,20 @@ describe('Emphasis between runs', () => {
   });
 
   test.each([
-    ['an = before a highlight', [run('a='), run('b', { highlight: true })], 'a\\===b=='],
-    ['an = between highlights', [run('a', { highlight: true }), run('='), run('b', { highlight: true, highlightColor: 'red' })], '==a==\\===b=={red}'],
-  ])('escapes %s, which would open it a character early', (_name, items, markdown) => {
+    ['an = before a highlight', [run('a='), run('b', { highlight: true })], 'a&#61;==b=='],
+    ['an = between highlights', [run('a', { highlight: true }), run('='), run('b', { highlight: true, highlightColor: 'red' })], '==a==&#61;==b=={red}'],
+  ])('writes %s as a reference, which would open it a character early', (_name, items, markdown) => {
+    // Escaped, as a\===b==, navigation and the grammar read no highlight
     const written = buildMarkdown(items, new Map());
     expect(written).toBe(markdown);
     expect(characters(written)).toEqual(expectedCharacters(items));
   });
 
-  test('keeps highlights side by side as they are', () => {
+  test('keeps highlights side by side apart with the first one\'s color', () => {
+    // Their == ran together, as ==yellow====cyan=={turquoise}, which
+    // navigation and the grammar read as no highlight
     const items = [run('yellow', { highlight: true }), run('cyan', { highlight: true, highlightColor: 'cyan' })];
-    expect(buildMarkdown(items, new Map())).toBe('==yellow====cyan=={turquoise}');
+    expect(buildMarkdown(items, new Map())).toBe('==yellow=={yellow}==cyan=={turquoise}');
   });
 
   test('keeps code beside highlighted code with an == apart, with the highlights between them', () => {
@@ -3931,8 +3934,9 @@ describe('highlightColor extraction', () => {
     ];
 
     const result = buildMarkdown(content, new Map());
-    // Should produce two separate highlight spans: plain yellow + colored cyan→turquoise
-    expect(result).toBe('==yellow====cyan=={turquoise}');
+    // Should produce two separate highlight spans: yellow, whose color keeps
+    // their == apart, + colored cyan→turquoise
+    expect(result).toBe('==yellow=={yellow}==cyan=={turquoise}');
   });
 });
 
@@ -11637,11 +11641,11 @@ describe('Markdown across Word runs', () => {
   });
 
   test.each([
-    ['an email address', run('x@y.com='), 'x\\@y.com\\===note=='],
-    ['an email address in a sentence', run('mail x@y.com='), 'mail x\\@y.com\\===note=='],
+    ['an email address', run('x@y.com='), 'x\\@y.com&#61;==note=='],
+    ['an email address in a sentence', run('mail x@y.com='), 'mail x\\@y.com&#61;==note=='],
   ])('keeps %s before an = before a highlight as text', async (_name, runs, md) => {
-    // The = went escaped, before the highlight's ==, which ended the text
-    // linkify read, where it found the address
+    // The = went as a reference, before the highlight's ==, which ended the
+    // text linkify read, where it found the address
     const docx = await withRuns(runs + run('note', '<w:highlight w:val="yellow"/>'));
     const markdown = strip((await convertDocx(docx)).markdown);
     expect(markdown).toBe(md + '\n');
@@ -11745,13 +11749,37 @@ describe('Markdown across Word runs', () => {
 
 describe('Highlights across runs', () => {
   const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
-  const fromWord = async (runs: string, md = 'XX', part = 'word/document.xml') => {
+  /** The document export makes of `md`, with its run of XX in `part` as `runs` */
+  const withRuns = async (runs: string, md = 'XX', part = 'word/document.xml') => {
     const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
     const xml = await zip.file(part)!.async('string');
     const broken = xml.replace(/<w:r>(?:(?!<w:r>).)*?<w:t[^>]*>XX<\/w:t><\/w:r>/s, runs);
     expect(broken).not.toBe(xml);
     zip.file(part, broken);
-    return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
+    return zip.generateAsync({ type: 'uint8array' });
+  };
+  const markdownOf = async (docx: Uint8Array) => (await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
+  const fromWord = async (runs: string, md = 'XX', part = 'word/document.xml') => markdownOf(await withRuns(runs, md, part));
+  /** The runs of a document's `part` as Word shows them: each one's text
+   *  after its formatting, and a + or - in a tracked change, with the text
+   *  of those alike side by side joined */
+  const shownRuns = async (docx: Uint8Array, part = 'word/document.xml') => {
+    const xml = await (await JSZip.loadAsync(docx)).file(part)!.async('string');
+    const shown: string[] = [];
+    let change = '';
+    let last: string | undefined;
+    for (const [tag, inner] of xml.matchAll(/<\/?w:(?:ins|del)\b[^>]*>|<w:r>([\s\S]*?)<\/w:r>/g)) {
+      if (inner === undefined) {
+        change = tag.startsWith('</') ? '' : tag.startsWith('<w:ins') ? '+' : '-';
+        continue;
+      }
+      const format = change + (inner.match(/<w:(?:b|i|strike|highlight)\b[^>]*>|<w:rStyle w:val="CodeChar"\/>/g) ?? []).sort().join('');
+      const text = [...inner.matchAll(/<w:(?:t|delText)\b[^>]*>([^<]*)<|<w:tab\/>/g)].map(m => m[1] ?? '\t').join('');
+      if (format === last) shown[shown.length - 1] += text;
+      else shown.push(format + text);
+      last = format;
+    }
+    return shown;
   };
   const highlighted = (text: string, rPr = '', color = 'yellow') => '<w:r><w:rPr>' + rPr + '<w:highlight w:val="' + color + '"/></w:rPr><w:t xml:space="preserve">' + text + '</w:t></w:r>';
   const plain = (text: string) => '<w:r><w:t xml:space="preserve">' + text + '</w:t></w:r>';
@@ -11833,15 +11861,18 @@ describe('Highlights across runs', () => {
   });
 
   test.each([
-    ['before another color\'s', highlighted('  ') + highlighted('b', '', 'red'), 'XX', '&#32;&#32;==b=={red}\n'],
-    ['after another color\'s', highlighted('a', '', 'red') + highlighted('  ') + highlighted('b', '', 'blue'), 'XX', '==a=={red}  ==b=={blue}\n'],
-    ['at the end of a comment\'s text', highlighted('a', '', 'red') + highlighted('  '), 'P {==XX==}{>>c<<} Q', 'P {====a=={red}  ==}{>>c<<} Q\n'],
-    ['at the start of a comment\'s text', highlighted('  ') + highlighted('a', '', 'red'), 'P {==XX==}{>>c<<} Q', 'P {==  ==a=={red}==}{>>c<<} Q\n'],
-  ])('writes highlighted spaces alone without the highlight %s', async (_name, runs, template, md) => {
-    // Their == ran into the other highlight's, as in ==  ====b=={red},
-    // which navigation and the grammar read as no highlight, the other's
-    // either
-    expect(await fromWord(runs, template)).toBe(md);
+    ['before another color\'s', highlighted('  ') + highlighted('b', '', 'red'), 'XX', '==  =={yellow}==b=={red}\n'],
+    ['after another color\'s', highlighted('a', '', 'red') + highlighted('  ') + highlighted('b', '', 'blue'), 'XX', '==a=={red}==  =={yellow}==b=={blue}\n'],
+    ['after an =', plain('a=') + highlighted('  ') + plain('b'), 'XX', 'a&#61;==  ==b\n'],
+    ['at the end of a comment\'s text', highlighted('a', '', 'red') + highlighted('  '), 'P {==XX==}{>>c<<} Q', 'P {====a=={red}==  ====}{>>c<<} Q\n'],
+    ['at the start of a comment\'s text', highlighted('  ') + highlighted('a', '', 'red'), 'P {==XX==}{>>c<<} Q', 'P {====  =={yellow}==a=={red}==}{>>c<<} Q\n'],
+  ])('keeps the highlight of spaces alone %s', async (_name, runs, template, md) => {
+    // They went without it where its == ran into the other highlight's, as
+    // in ==  ====b=={red}, or the text's =, which navigation and the grammar
+    // read as no highlight, the other's either
+    const docx = await withRuns(runs, template);
+    expect(await markdownOf(docx)).toBe(md);
+    expect(await shownRuns((await convertMdToDocx(md)).docx)).toEqual(await shownRuns(docx));
     expect(await roundTrip(md)).toBe(md);
   });
 
@@ -11849,21 +11880,25 @@ describe('Highlights across runs', () => {
     + (tag === 'del' ? runs.replace(/w:t\b/g, 'w:delText') : runs) + '</w:' + tag + '>';
 
   test.each([
-    ['an = before it on the old side', tracked('del', plain('=') + highlighted(' ')) + tracked('ins', plain('new')), '{--\\=--}{--== ==--}{++new++}\n'],
-    ['an = before it on the new side', tracked('del', plain('old')) + tracked('ins', plain('=') + highlighted(' ') + plain('new')), '{--old--}{++=++}{++== ==new++}\n'],
-    ['an = before a tab', tracked('del', plain('old')) + tracked('ins', plain('=') + highlighted('\t') + plain('new')), '{--old--}{++=++}{++==\t==new++}\n'],
-    ['an = before it and text', tracked('del', plain('old')) + tracked('ins', plain('=') + highlighted(' y')), '{--old--}{++=++}{++== y==++}\n'],
-    ['another color\'s highlight after it', tracked('del', plain('old')) + tracked('ins', highlighted('y ') + highlighted('z', '', 'red')), '{--old--}{++==y ==++}{++==z=={red}++}\n'],
-    ['another color\'s highlight before it', tracked('del', plain('old')) + tracked('ins', highlighted('y') + highlighted(' z', '', 'red')), '{--old--}{++==y==++}{++== z=={red}++}\n'],
-  ])('keeps the highlight of whitespace on a side of a substitution next to %s', async (_name, runs, md) => {
-    // The side's whitespace went out of its highlight, or with it, as
-    // {~~= ~>new~~}, where spans of their own keep the = apart
-    expect(await fromWord(runs)).toBe(md);
+    ['an = before it on the old side', tracked('del', plain('=') + highlighted(' ')) + tracked('ins', plain('new')), '{~~&#61;== ==~>new~~}\n'],
+    ['an = before it on the new side', tracked('del', plain('old')) + tracked('ins', plain('=') + highlighted(' ') + plain('new')), '{~~old~>&#61;== ==new~~}\n'],
+    ['an = before a tab', tracked('del', plain('old')) + tracked('ins', plain('=') + highlighted('\t') + plain('new')), '{~~old~>&#61;==\t==new~~}\n'],
+    ['an = before it and text', tracked('del', plain('old')) + tracked('ins', plain('=') + highlighted(' y')), '{~~old~>&#61;== y==~~}\n'],
+    ['another color\'s highlight after it', tracked('del', plain('old')) + tracked('ins', highlighted('y ') + highlighted('z', '', 'red')), '{~~old~>==y =={yellow}==z=={red}~~}\n'],
+    ['another color\'s highlight before it', tracked('del', plain('old')) + tracked('ins', highlighted('y') + highlighted(' z', '', 'red')), '{~~old~>==y=={yellow}== z=={red}~~}\n'],
+  ])('writes a substitution with the highlight of whitespace on a side next to %s', async (_name, runs, md) => {
+    // Resolving the side moved the whitespace out of its highlight, or the
+    // highlight with it, so the side's items went in spans of their own, as
+    // {--\=--}{--== ==--}{++new++}
+    const docx = await withRuns(runs);
+    expect(await markdownOf(docx)).toBe(md);
+    expect(await shownRuns((await convertMdToDocx(md)).docx)).toEqual(await shownRuns(docx));
     expect(await roundTrip(md)).toBe(md);
   });
 
   test.each([['new', 'addition'], ['old', 'deletion']] as const)('writes many deletions before a highlighted space after an = on the %s side in linear time', (_side, type) => {
     // Each start in the deletions built its sides again, which each declined
+    // where resolving them moved the space out of its highlight
     const item = (text: string, revision: 'addition' | 'deletion', formatting: Partial<RunFormatting> = {}) => (
       { type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting }, revision: { type: revision, author: 'A', date: '' } });
     const items = [
@@ -11871,7 +11906,7 @@ describe('Highlights across runs', () => {
       item('=', type), item(' ', type, { highlight: true }), item('n', 'addition'),
     ];
     const start = performance.now();
-    expect(buildMarkdown(items as ContentItem[], new Map())).toEndWith('{' + (type === 'addition' ? '++' : '--') + '== ==' + (type === 'addition' ? 'n++}' : '--}{++n++}'));
+    expect(buildMarkdown(items as ContentItem[], new Map())).toEndWith(type === 'addition' ? '**~>&#61;== ==n~~}' : '**&#61;== ==~>n~~}');
     expect(performance.now() - start).toBeLessThan(3000);
   });
 
@@ -12030,13 +12065,37 @@ describe('Highlights across runs', () => {
     expect(performance.now() - start).toBeLessThan(3000);
   });
 
+  const cell = '| h |\n|---|\n| XX |';
+  const note = 'P[^1]\n\n[^1]: XX';
+  const comment = 'P {==XX==}{>>c<<} Q';
+
   test.each([
-    ['another color\'s highlight', highlighted('a ') + highlighted('b', '', 'red'), '==a== ==b=={red}\n'],
-    ['another color\'s highlight before it', highlighted('a') + highlighted(' b', '', 'red'), '==a== ==b=={red}\n'],
-  ])('keeps a highlight\'s edge space outside it next to %s', async (_name, runs, md) => {
-    // Whose = ran into its ==, as in ==a ====b=={red}, which navigation and
-    // the grammar read as no highlight
-    expect(await fromWord(runs)).toBe(md);
+    ['an =', plain('a=') + highlighted(' b'), 'XX', 'a&#61;== b==\n'],
+    ['an = with no space', plain('a=') + highlighted('b'), 'XX', 'a&#61;==b==\n'],
+    ['an = after another highlight', highlighted('a') + plain('=') + highlighted(' b', '', 'red'), 'XX', '==a==&#61;== b=={red}\n'],
+    ['an = before runs highlighted alike', plain('x=') + highlighted(' a') + highlighted('b', '<w:b/>'), 'XX', 'x&#61;== a**b**==\n'],
+    ['another color\'s highlight', highlighted('a ') + highlighted('b', '', 'red'), 'XX', '==a =={yellow}==b=={red}\n'],
+    ['another color\'s highlight before it', highlighted('a') + highlighted(' b', '', 'red'), 'XX', '==a=={yellow}== b=={red}\n'],
+    ['another color\'s highlight with no space', highlighted('a') + highlighted('b', '', 'red'), 'XX', '==a=={yellow}==b=={red}\n'],
+    ['highlighted code', highlighted('a ') + highlighted('b', '<w:rStyle w:val="CodeChar"/>'), 'XX', '==a =={yellow}==`b`==\n'],
+    ['highlighted code before it', highlighted('b', '<w:rStyle w:val="CodeChar"/>') + highlighted(' a'), 'XX', '==`b`=={yellow}== a==\n'],
+    ['an = in a table\'s cell', plain('a=') + highlighted(' b'), cell, '| h |\n| --- |\n| a&#61;== b== |\n'],
+    ['another color\'s highlight in a table\'s cell', highlighted('a ') + highlighted('b', '', 'red'), cell, '| h |\n| --- |\n| ==a =={yellow}==b=={red} |\n'],
+    ['an = in a note', plain('a=') + highlighted(' b'), note, 'P[^1]\n\n[^1]: a&#61;== b==\n'],
+    ['another color\'s highlight in a note', highlighted('a ') + highlighted('b', '', 'red'), note, 'P[^1]\n\n[^1]: ==a =={yellow}==b=={red}\n'],
+    ['an = in a comment\'s text', plain('a=') + highlighted(' b'), comment, 'P {==a&#61;== b====}{>>c<<} Q\n'],
+    ['another color\'s highlight in a comment\'s text', highlighted('a ') + highlighted('b', '', 'red'), comment, 'P {====a =={yellow}==b=={red}==}{>>c<<} Q\n'],
+    // Which navigation and the grammar read whole
+    ['a comment\'s {==', highlighted(' a') + plain(' x'), comment, 'P {==== a== x==}{>>c<<} Q\n'],
+    ['a comment\'s ==}', plain('x ') + highlighted('a '), comment, 'P {==x ==a ====}{>>c<<} Q\n'],
+  ])('keeps a highlight and its edge space next to %s', async (_name, runs, template, md) => {
+    // The space went outside the highlight where an = ran into its ==, as in
+    // ==a ====b=={red} and a=== b==, which navigation and the grammar read
+    // as no highlight, as they did with no space or with the = escaped
+    const part = template === note ? 'word/footnotes.xml' : 'word/document.xml';
+    const docx = await withRuns(runs, template, part);
+    expect(await markdownOf(docx)).toBe(md);
+    expect(await shownRuns((await convertMdToDocx(md)).docx, part)).toEqual(await shownRuns(docx, part));
     expect(await roundTrip(md)).toBe(md);
   });
 
@@ -12160,6 +12219,23 @@ describe('Highlights across runs', () => {
     const markdown = buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim();
     expect(markdown).toBe(md);
     expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim()).toBe(md);
+  });
+
+  const yellow = '<w:highlight w:val="yellow"/>';
+
+  test.each([
+    ['an =', [run('x='), run(' a', { highlight: true }), noteRef], 'x&#61;== a[^1]==', ['x=', yellow + ' a']],
+    ['an = with no space', [run('x='), noteRef, run(' a', { highlight: true })], 'x&#61;==[^1] a==', ['x=', yellow + ' a']],
+    ['another color\'s highlight', [noteRef, run('a ', { highlight: true }), run('b', { highlight: true, highlightColor: 'red' })], '==[^1]a =={yellow}==b=={red}',
+      [yellow + 'a ', '<w:highlight w:val="red"/>b']],
+  ])('keeps a highlight with a note reference in it and its edge space next to %s', async (_name, items, md, runs) => {
+    // The space went outside the highlight where the = ran into its ==, as
+    // x= ==a[^1]==, which navigation and the grammar read as no highlight
+    // with the =, as they did x\===[^1] a==
+    expect(buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim()).toBe(md);
+    const withNote = md + '\n\n[^1]: n\n';
+    expect(await shownRuns((await convertMdToDocx(withNote)).docx)).toEqual(runs);
+    expect(await roundTrip(withNote)).toBe(withNote);
   });
 
   test.each([
