@@ -10709,6 +10709,91 @@ describe('Track changes (CriticMarkup)', () => {
       expect(again).toBe(imported);
     });
 
+    test.each([
+      ['a paragraph', 'a\n\n| x |\n|---|\n| y |\n\nz\n', ['a'], 'del', 'a{--\n\n--}\n\n| x |\n| --- |\n| y |\n\nz\n'],
+      ['a list item', '- a\n\n| x |\n|---|\n| y |\n', ['a'], 'ins', '- a{++\n\n  ++}\n\n| x |\n| --- |\n| y |\n'],
+      ['a heading', '# a\n\n| x |\n|---|\n| y |\n', ['a'], 'ins', '# a{++\n\n++}\n\n| x |\n| --- |\n| y |\n'],
+      ['each of two paragraphs', 'a\n\n| x |\n|---|\n| y |\n\nb\n\n| x |\n|---|\n| y |\n', ['a', 'b'], 'del',
+        'a{--\n\n--}\n\n| x |\n| --- |\n| y |\n\nb{--\n\n--}\n\n| x |\n| --- |\n| y |\n'],
+    ] as const)('keeps the tracked mark of %s before a table', async (_name, md, texts, type, expected) => {
+      // The table's paragraphs, which take no break, dropped it
+      const { imported, before, after, again } = await tripTrackedMarks(md, [...texts], type);
+      expect(imported).toBe(expected);
+      expect(after).toEqual(before);
+      expect(again).toBe(imported);
+    });
+
+    test.each([
+      ['at the end of a custom style block', '<!-- style: Foo -->\na\n<!-- /style -->\n\nz\n', ['a'], 'del', '<!-- style: foo -->\na{--\n\n--}\n<!-- /style -->\n\nz\n'],
+      ['before a custom style block', 'z\n\n<!-- style: Foo -->\na\n<!-- /style -->\n', ['z'], 'ins', 'z{++\n\n++}\n\n<!-- style: foo -->\na\n<!-- /style -->\n'],
+      ['at the end of a custom style block before another', '<!-- style: Foo -->\na\n<!-- /style -->\n\n<!-- style: Bar -->\nb\n<!-- /style -->\n', ['a'], 'del',
+        '<!-- style: foo -->\na{--\n\n--}\n<!-- /style -->\n\n<!-- style: bar -->\nb\n<!-- /style -->\n'],
+      ['at the end of the document in a custom style block', 'z\n\n<!-- style: Foo -->\na\n<!-- /style -->\n', ['a'], 'ins', 'z\n\n<!-- style: foo -->\na{++\n\n++}\n<!-- /style -->\n'],
+      ['before a table in a custom style block', '<!-- style: Foo -->\na\n<!-- /style -->\n\n| x |\n|---|\n| y |\n', ['a'], 'del',
+        '<!-- style: foo -->\na{--\n\n--}\n<!-- /style -->\n\n| x |\n| --- |\n| y |\n'],
+    ] as const)('keeps the tracked mark of a paragraph %s', async (_name, md, texts, type, expected) => {
+      // The block's sentinel between the break and the text before it
+      // kept the break from it
+      const { imported, before, after, again } = await tripTrackedMarks(md, [...texts], type);
+      expect(imported).toBe(expected);
+      expect(after).toEqual(before);
+      expect(again).toBe(imported);
+    });
+
+    test.each([
+      ['before a landscape section', 'a\n\n<!-- landscape -->\nb\n<!-- /landscape -->\n', ['a'], 'del', 'a{--\n\n--}\n\n<!-- landscape -->\nb\n<!-- /landscape -->\n'],
+      ['at the end of a landscape section', 'z\n\n<!-- landscape -->\nb\n<!-- /landscape -->\n\nc\n', ['b'], 'ins', 'z\n\n<!-- landscape -->\nb{++\n\n++}\n<!-- /landscape -->\n\nc\n'],
+      ['at the end of a landscape section before another', '<!-- landscape -->\na\n<!-- /landscape -->\n\n<!-- landscape -->\nb\n<!-- /landscape -->\n', ['a'], 'del',
+        '<!-- landscape -->\na{--\n\n--}\n<!-- /landscape -->\n\n<!-- landscape -->\nb\n<!-- /landscape -->\n'],
+    ] as const)('keeps the tracked mark of a paragraph %s', async (_name, md, texts, type, expected) => {
+      // The empty paragraph that holds the section's break, which export
+      // writes after it, dropped it
+      const { imported, before, after, again } = await tripTrackedMarks(md, [...texts], type);
+      expect(imported).toBe(expected);
+      expect(after).toEqual(before);
+      expect(again).toBe(imported);
+    });
+
+    test('drops the tracked mark of a paragraph before a section break Markdown drops', async () => {
+      // As the paragraph after would take it, joining the two once accepted
+      // where Word joins the paragraph to the break's empty paragraph
+      const zip = await JSZip.loadAsync(await withTrackedMarks('a\n\n<!-- landscape -->\nb\n<!-- /landscape -->\n', ['a'], 'del'));
+      const xml = await zip.file('word/document.xml')!.async('string');
+      const portrait = xml.replace(/<w:pgSz w:w="(\d+)" w:h="(\d+)" w:orient="landscape"\/>/g, (_m, w: string, h: string) => '<w:pgSz w:w="' + h + '" w:h="' + w + '"/>');
+      expect(portrait).not.toBe(xml);
+      zip.file('word/document.xml', portrait);
+      const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+      expect(md).toBe('a\n\nb\n');
+    });
+
+    test('keeps the tracked mark of a paragraph before a rule that holds a section break', async () => {
+      // The rule, which Word can move a section's break onto, didn't take it
+      const zip = await JSZip.loadAsync(await withTrackedMarks('a\n\n---\n\n<!-- landscape -->\nb\n<!-- /landscape -->\n', ['a'], 'del'));
+      const xml = await zip.file('word/document.xml')!.async('string');
+      const merged = xml.replace(/(<w:pBdr><w:bottom [^>]*\/><\/w:pBdr>)<\/w:pPr><\/w:p><w:p\b[^>]*><w:pPr>(<w:sectPr[\s\S]*?<\/w:sectPr>)<\/w:pPr><\/w:p>/, '$1$2</w:pPr></w:p>');
+      expect(merged).not.toBe(xml);
+      zip.file('word/document.xml', merged);
+      const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+      expect(md).toBe('a{--\n\n--}\n\n---\n\n<!-- landscape -->\nb\n<!-- /landscape -->\n');
+      expect(await trackedMarksOf((await convertMdToDocx(md)).docx)).toEqual(['a ¶del', 'b']);
+    });
+
+    test('keeps the tracked mark of a note\'s paragraph before a table', async () => {
+      // As in the document's body
+      const zip = await JSZip.loadAsync((await convertMdToDocx('x[^1]\n\n[^1]: a\n\n    | p |\n    |---|\n    | q |\n')).docx);
+      const notes = await zip.file('word/footnotes.xml')!.async('string');
+      const tracked = notes.replace(/(<w:p(?: [^>]*)?><w:pPr>(?:(?!<\/w:pPr>).)*?)(<\/w:pPr>(?:(?!<\/w:p>).)*?<w:t>a<\/w:t>)/,
+        '$1<w:rPr><w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"/></w:rPr>$2');
+      expect(tracked).not.toBe(notes);
+      zip.file('word/footnotes.xml', tracked);
+      const md = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+      expect(md).toBe('x[^1]\n\n[^1]:\n\n    a{++\n    \n    ++}\n\n    | p |\n    | --- |\n    | q |\n');
+      const exported = (await convertMdToDocx(md)).docx;
+      const exportedNotes = await (await JSZip.loadAsync(exported)).file('word/footnotes.xml')!.async('string');
+      expect(exportedNotes).toMatch(/<w:rPr><w:ins [^>]*\/><\/w:rPr><\/w:pPr>(?:(?!<\/w:p>).)*?<w:t>a<\/w:t>/);
+      expect((await convertDocx(exported)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
+    });
+
     test('keeps the tracked mark of a note\'s last paragraph', async () => {
       // No paragraph after it took it as the break before it
       const zip = await JSZip.loadAsync((await convertMdToDocx('x[^1]\n\n[^1]: a\n\n    b\n')).docx);

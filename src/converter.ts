@@ -3984,6 +3984,7 @@ function parseNoteBody(
 
         // --- Tables ---
         } else if (key === 'w:tbl' && context && !inTableCell) {
+          const markBefore = trackedParaMark;
           const tblChildren = asXmlNodes(node[key]);
           const rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> }> = [];
           const firstRowHeaderByLook = tableHasFirstRowHeader(tblChildren);
@@ -4024,7 +4025,11 @@ function parseNoteBody(
           }
           const rows = computeRowspans(rawRows);
           if (rows.length > 0) {
+            // As in extractDocumentContent: a tracked mark before the table
+            if (markBefore?.target === target && markBefore.end === target.length) target.push({ type: 'para', breakRevision: markBefore.revision });
             target.push({ type: 'table', rows });
+          } else {
+            trackedParaMark = markBefore;
           }
 
         // --- Math ---
@@ -4801,15 +4806,22 @@ export async function extractDocumentContent(
   let sectionBreakOrdinal = 0; // counter for paragraph-level sectPr occurrences
   let afterSectionBreak = false; // the last paragraph ended a section
   const portraitBreakOrdinals = options?.portraitBreakOrdinals;
+  // The tracked mark before the empty carrier that ended the section before,
+  // which Markdown drops, unless this section's fence puts its opener there
+  let markBeforeSection: RevisionInfo | undefined;
   // Ends the section at the end of `target`, fencing it if it's landscape or a
   // portrait fence. A plain first paragraph has no para item, which the
   // opener would leave it on the line of. Display math and HTML comments
-  // write their own line breaks.
+  // write their own line breaks. The mark before the section goes before
+  // the opener, as the break that ends the paragraph before (see
+  // joinTrackedParagraphBreaks), on an empty paragraph.
   const endSection = (target: ContentItem[], fence: 'landscape' | 'portrait' | undefined): void => {
+    const markBefore = markBeforeSection;
+    markBeforeSection = undefined;
     if (fence) {
       const first = target[sectionStartIndex];
       const opener: ContentItem = { type: fence === 'landscape' ? 'landscape_open' : 'portrait_open' };
-      target.splice(sectionStartIndex, 0,
+      target.splice(sectionStartIndex, 0, ...(markBefore ? [{ type: 'para', breakRevision: markBefore } as ContentItem] : []),
         ...(first && !isStructuralBoundaryItem(first) && !(first.type === 'math' && first.display) && first.type !== 'html_comment'
           ? [opener, { type: 'para' } as ContentItem] : [opener]));
       target.push({ type: fence === 'landscape' ? 'landscape_close' : 'portrait_close' });
@@ -4974,6 +4986,7 @@ export async function extractDocumentContent(
           currentHref = prevHref;
           currentLink = prevLink;
         } else if (key === 'w:tbl' && !inTableCell) {
+          const markBefore = trackedParaMark;
           const tblChildren = asXmlNodes(node[key]);
           const rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> }> = [];
           const firstRowHeaderByLook = tableHasFirstRowHeader(tblChildren);
@@ -5015,7 +5028,13 @@ export async function extractDocumentContent(
           }
           const rows = computeRowspans(rawRows);
           if (rows.length > 0) {
+            // A tracked mark before the table is the break that ends the
+            // paragraph before it (see joinTrackedParagraphBreaks), which an
+            // empty paragraph takes, as one before the table would
+            if (markBefore?.target === target && markBefore.end === target.length) target.push({ type: 'para', breakRevision: markBefore.revision });
             target.push({ type: 'table', rows });
+          } else {
+            trackedParaMark = markBefore;
           }
         } else if (key === 'w:r') {
           // Process run - extract formatting from w:rPr
@@ -5149,11 +5168,21 @@ export async function extractDocumentContent(
                   sectionFence = fence ?? 'none';
                 } else {
                   // An empty section-break carrier, whose children can still
-                  // hold comment ranges, and which can be a rule
+                  // hold comment ranges, and which can be a rule. A tracked
+                  // mark before one Markdown keeps, as a rule or a section's
+                  // fence, is the break that ends the paragraph before it
+                  // (see joinTrackedParagraphBreaks), which the rule, or an
+                  // empty paragraph, takes. Markdown keeps one that ends a
+                  // section before a fenced one as the fence's opener (see
+                  // endSection), and drops it, and the mark, otherwise, as
+                  // the paragraph after would take it in its place
                   const rule = isRuleCarrier(pPrChildren);
-                  if (rule) target.push({ type: 'para', horizontalRule: true });
+                  const markBefore = precedingMark?.target === target && precedingMark.end === target.length ? precedingMark.revision : undefined;
+                  const breakRevision = fence || rule ? markBefore : undefined;
+                  if (rule || breakRevision) target.push({ type: 'para', ...(rule ? { horizontalRule: true } : {}), ...(breakRevision ? { breakRevision } : {}) });
                   if (fence || rule) walk(paraChildren, paraFormatting, target, inTableCell, currentRevision);
                   endSection(target, fence);
+                  if (!fence && !rule) markBeforeSection = markBefore;
                   isSectionBreakHandled = true;
                   break;
                 }
@@ -12288,6 +12317,17 @@ export async function convertDocx(
         || item.type === 'bibliography_marker';
       if (!isStructural) continue;
       const styleName = (item.type === 'para' && item.customStyleName) ? item.customStyleName : undefined;
+      // A tracked mark before a paragraph a style block starts or ends at is
+      // the break that ends the paragraph before it, which the block keeps
+      // from joining the text after (see joinTrackedParagraphBreaks): it
+      // stays before the sentinels, on an empty paragraph, or on the one it
+      // is on where that holds nothing else, which then doesn't end the style
+      if (item.type === 'para' && item.breakRevision && (styleName ? styleName !== activeStyle : activeStyle)) {
+        const { breakRevision, ...para } = item;
+        if (Object.keys(para).length === 1 && !paragraphHasContent(docContent, i)) continue;
+        docContent.splice(i, 1, { type: 'para', breakRevision }, para);
+        i++;
+      }
       if (styleName && styleName !== activeStyle) {
         // Close previous style if open
         if (activeStyle) {
