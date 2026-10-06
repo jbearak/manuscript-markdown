@@ -5973,7 +5973,11 @@ function renderSubstitutionRun(
   if (deletions === 0 || additions === 0 || deletions + additions <= 2) return undefined;
   const oldSide = sideText(start, start + deletions);
   const newSide = sideText(start + deletions, k);
-  if (sideMovesHighlightedSpace(oldSide) || sideMovesHighlightedSpace(newSide)) {
+  // Not where a side holds a run of a link, which linkGroup leaves to the
+  // substitution, and which in a span of its own can lose its link, as a
+  // line break does, or read as an image's text after a !
+  const linked = segment.slice(start, k).some(item => item.type === 'text' && !!item.href);
+  if (!linked && (sideMovesHighlightedSpace(oldSide) || sideMovesHighlightedSpace(newSide))) {
     // The rest of the deletions go in spans too, rather than build sides
     // from each, which would take time in the square of them
     substitutionlessRuns.set(segment, { from: start, to: start + deletions, end });

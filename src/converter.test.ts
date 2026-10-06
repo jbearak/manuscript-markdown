@@ -11023,6 +11023,19 @@ describe('Highlights across runs', () => {
   });
 
   test.each([
+    ['a line break of a link', [['a', undefined, {}, true], ['\\\n', 'deletion', {}, true], ['=', 'addition'], [' ', 'addition', { highlight: true }], ['n', 'addition']], '[a](https://e.com){~~[\\\n](https://e.com)~>'],
+    ['a link after a !', [['!'], ['=', 'deletion', {}, true], [' ', 'deletion', { highlight: true }, true], ['n', 'addition', {}, true], ['x', 'addition']], '!{~~['],
+  ] as const)('keeps a substitution with %s on a side by a highlighted space next to an =', (_name, runs, part) => {
+    // In spans of their own, the break went outside the link, and the link
+    // after the ! read as an image
+    const items = runs.map(([text, revision, formatting, linked]: readonly [string, ('addition' | 'deletion')?, Partial<RunFormatting>?, boolean?]) => ({
+      type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting },
+      ...(revision ? { revision: { type: revision, author: 'A', date: '' } } : {}), ...(linked ? { href: 'https://e.com', link: 1 } : {}),
+    }));
+    expect(buildMarkdown(items as ContentItem[], new Map())).toContain(part);
+  });
+
+  test.each([
     ['text\'s = after it', tracked('del', plain('old')) + tracked('ins', highlighted('y ') + plain('=')), '{~~old~>==y ==\\=~~}\n'],
     ['text between it and an =', tracked('del', plain('old')) + tracked('ins', plain('=x') + highlighted(' y')), '{~~old~>=x== y==~~}\n'],
   ])('writes a substitution with a highlighted space next to %s', async (_name, runs, md) => {
