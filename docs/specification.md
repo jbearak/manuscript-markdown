@@ -858,7 +858,7 @@ Comments can include author name and timestamp:
 {>>@alice (2024-01-15 14:30) | This needs revision<<}
 ```
 
-A blank line in a comment's text separates two of the Word comment's paragraphs, and a single line's end is a line break. In a quote, each of the comment's lines after the first starts with the quote's `>`. On DOCX import, a comment in a table cell whose text has more than one line takes [ID syntax](#overlapping-comments), with its body below the table, because a pipe table's cell can't hold a line's end.
+A blank line in a comment's text separates two of the Word comment's paragraphs, and a single line's end is a line break. In a quote, each of the comment's lines after the first starts with the quote's `>`. On DOCX import, a comment in a table cell whose text has more than one line takes [ID syntax](#overlapping-comments), with its body below the table, because a pipe table's cell can't hold a line's end. A range whose comment the file has no body for, which Word shows nothing of, imports as its text alone, as `{==text==}` with no comment after it would be a highlight.
 
 #### Configuration
 
