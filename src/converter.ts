@@ -520,11 +520,19 @@ const HTML_COMMENTS = /^(?:<!--(?:(?!-->)[\s\S])*-->)+$/;
 // HTML comments that start a paragraph's text, after its indent, each with
 // the spaces and tabs after it, and the line breaks after them that end it,
 // with the spaces and tabs between them
-const COMMENTS_BEFORE_BREAKS = /^( {0,3}(?:<!--(?:(?!-->)[\s\S])*-->[ \t]*)+)((?:\\\n[ \t]*)*\\\n)$/;
+const COMMENTS_BEFORE_BREAKS = /^([ \t]*(?:<!--(?:(?!-->)[\s\S])*-->[ \t]*)+)((?:\\\n[ \t]*)*\\\n)$/;
 // Each HTML comment and <br> in a paragraph's text, a comment as import
 // writes one: to its first -->, or empty, as <!--> and <!--->, which
 // markdownComment keeps as they are
 const COMMENT_OR_BREAK_TAGS = /<!--(?:-?>|(?:(?!-->)[\s\S])*-->)|<br\s*\/?>/gi;
+
+/** The column a line's text ends at, as Markdown counts them, a tab going
+ *  on to the next stop, every four columns */
+function columnAfter(line: string): number {
+  let column = 0;
+  for (const c of line) column = c === '\t' ? column + 4 - column % 4 : column + 1;
+  return column;
+}
 
 /**
  * An empty item at the end of a paragraph's items in `target`, from `from`,
@@ -11662,16 +11670,30 @@ export function buildMarkdown(
     // too, as == alone on the last line would read as a heading's
     // underline, before an equation in the paragraph as well
     textOut = textOut.replace(HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END, (_m, backslashes: string, close: string) => backslashes + '<br>' + close);
-    // An HTML block's indent, of up to three spaces, which markdown-it keeps
-    // in its text, and a reference would make a paragraph's. Before
-    // comments, line breaks or both, which a paragraph reads too, it's
-    // references, as a space before a line break that ends the paragraph is
-    // &#32;<br>, since export puts a block of comments' indent in the first
-    // one's hidden run. Not where that run held it, as export wrote it, nor
-    // before a comment a paragraph would read as text, as one with a blank
-    // line in it, which only the block holds, or as more than it, as one
-    // that ends in ---> with the next.
-    const htmlIndent = ownLine && atStart ? /^ {1,3}(?=<)/.exec(textOut)?.[0] ?? '' : '';
+    // An HTML block's indent, of up to three columns, which markdown-it keeps
+    // in its text, and a reference would make a paragraph's. A tab in it
+    // goes on to the next stop, every four columns from the line's start,
+    // past the prefix written on it, so after a quote's > and space a tab
+    // is two, as export reads it, but at the margin four, which makes code.
+    // Before comments, line breaks or both, which a paragraph reads too,
+    // it's references, as a space before a line break that ends the
+    // paragraph is &#32;<br>, since export puts a block of comments' indent
+    // in the first one's hidden run. Not where that run held it, as export
+    // wrote it, nor before a comment a paragraph would read as text, as one
+    // with a blank line in it, which only the block holds, or as more than
+    // it, as one that ends in ---> with the next.
+    const indent = ownLine && atStart ? /^[ \t]+(?=<)/.exec(textOut)?.[0] ?? '' : '';
+    let indentColumns = 0;
+    if (indent) {
+      let line = '';
+      for (let k = output.length - 1; k >= 0; k--) {
+        const end = output[k].lastIndexOf('\n');
+        line = output[k].slice(end + 1) + line;
+        if (end !== -1) break;
+      }
+      indentColumns = columnAfter(line + indent) - columnAfter(line);
+    }
+    const htmlIndent = indentColumns <= 3 ? indent : '';
     const referenced = keepParagraphWhitespace(textOut, atStart, atEnd);
     const inline = () => (isLineBreakBlock(textOut) || HTML_COMMENTS.test(textOut.trim())
       && !mergedContent.slice(i, rendered.nextIndex).some(item => item.type === 'html_comment' && /^\s/.test(item.text)))
@@ -11680,7 +11702,7 @@ export function buildMarkdown(
     // export wrote for its line end as it is, which the math branch takes
     // off, as it does after other text, or it would gain one each round trip
     textOut = mathFollows && /^[ \t]* $/.test(textOut) ? keepParagraphWhitespace(textOut.slice(0, -1), atStart, atEnd) + ' '
-      : htmlIndent && startsHtmlBlock(textOut) && !inline()
+      : htmlIndent && startsHtmlBlock(' '.repeat(indentColumns) + textOut.slice(htmlIndent.length)) && !inline()
         ? htmlIndent + keepParagraphWhitespace(textOut.slice(htmlIndent.length), true, atEnd)
         : referenced;
     if (paragraphHeading) {

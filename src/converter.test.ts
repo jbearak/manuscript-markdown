@@ -6093,6 +6093,10 @@ describe('Line breaks a backslash can\'t hold', () => {
     ['a space and a comment that ends in ---> before one that ends a paragraph', 'XX', r(t(' ')) + comment('<!-- a --->') + r('<w:br/>'), ' <!-- a ---><br>'],
     ['a space and a comment with a heading\'s line in it before one that ends a paragraph', 'XX', r(t(' ')) + comment('<!-- a\n# h -->') + r('<w:br/>'), ' <!-- a\n# h --><br>'],
     ['a space and a comment with a blank line in it before one that ends a quote\'s paragraph', '> XX', r(t(' ')) + comment('<!-- a\n\nb -->') + r('<w:br/>'), '>  <!-- a\n>\n> b --><br>'],
+    // Two columns past the quote's > and space, which a tab at the margin
+    // would be four of
+    ['a tab and a comment with a blank line in it before one that ends a quote\'s paragraph', '> XX', r('<w:tab/>') + comment('<!-- a\n\nb -->') + r('<w:br/>'), '> \t<!-- a\n>\n> b --><br>'],
+    ['a space, a tab and a comment with a blank line in it before one that ends a quote\'s paragraph', '> XX', r(t(' ') + '<w:tab/>') + comment('<!-- a\n\nb -->') + r('<w:br/>'), '>  \t<!-- a\n>\n> b --><br>'],
     // Which a paragraph reads with the next as one, and the space between
     ['a space, a comment that ends in --->, a space and a comment before one that ends a paragraph', 'XX', r(t(' ')) + comment('<!-- a --->') + r(t(' ')) + comment('<!-- c -->') + r('<w:br/>'), ' <!-- a ---> <!-- c --><br>'],
     ['a space and a comment that ends in ---> and another before one that ends a paragraph', 'XX', r(t(' ')) + comment('<!-- a --->') + comment('<!-- c -->') + r('<w:br/>'), ' <!-- a ---><!-- c --><br>'],
@@ -6144,6 +6148,19 @@ describe('Line breaks a backslash can\'t hold', () => {
     '> <!-- c --> <br><br>',
   ])('keeps them in %s, after comments', async (md) => {
     // Import wrote the first as a \ and a line end, the comments' block's text
+    const source = 'A.\n\n' + md + '\n\nB.\n';
+    const docx = (await convertMdToDocx(source)).docx;
+    const md1 = (await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(md1).toBe(source);
+    expect(await texts((await convertMdToDocx(md1)).docx)).toEqual(await texts(docx));
+  });
+
+  test.each([
+    '> \t<!-- a\n>\n> b --><br>',
+    '>  \t<!-- a\n>\n> b --><br>',
+  ])('keeps a tab before a comment only an HTML block holds in %s', async (md) => {
+    // Import wrote it as a reference, &#9;, which made a paragraph, which
+    // read the comment as text
     const source = 'A.\n\n' + md + '\n\nB.\n';
     const docx = (await convertMdToDocx(source)).docx;
     const md1 = (await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
