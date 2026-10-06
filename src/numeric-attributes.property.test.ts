@@ -145,10 +145,11 @@ const CODE = '```python\nprint("code")\n```\n\nAfter the code.\n';
 // A quote the body ends with, which export pads with a spacer paragraph
 // before the notes' definitions
 const QUOTE = '> A quote at the end.[^1]\n\n[^1]: Its note.\n';
-// The document's size, its headings' and its title's, a table's, and a
-// custom style's spacing and indent
+// The document's size, its headings' and its title's, other than export
+// gives them at that size, a table's, and a custom style's spacing and
+// indent
 const SIZES = '---\nfont-size: 12\nstyles:\n  pullquote:\n    font-size: 13\n    spacing-before: 12\n    spacing-after: 6\n    paragraph-indent: 0.25\n'
-  + 'header-font-size: [17.5, 14, 13, 12, 11, 10]\ntitle-font-size: 30.5\n---\n\n<!-- style: pullquote -->\n\nStyled text.\n\n<!-- /style -->\n\n'
+  + 'header-font-size: [18.5, 14, 13, 12, 11, 10]\ntitle-font-size: 30\n---\n\n<!-- style: pullquote -->\n\nStyled text.\n\n<!-- /style -->\n\n'
   + '<!-- table-font-size: 7 -->\n| A | B |\n| --- | --- |\n| a | b |\n';
 const DOCUMENTS: Record<string, string> = {
   'lists': LISTS + '\n' + TASKS,
