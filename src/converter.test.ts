@@ -407,7 +407,8 @@ describe('DOCX table conversion', () => {
 
     const paraMatch = tableMarkdown.match(/<p>([\s\S]*?)<\/p>/);
     expect(paraMatch).not.toBeNull();
-    expect(paraMatch?.[1]).toBe(bodyMarkdown);
+    // The link as its tag, which export reads in the cell's HTML
+    expect(paraMatch?.[1]).toBe(bodyMarkdown.replace('[ link](<https://example.com/a(b)>)', '<a href="https://example.com/a(b)"> link</a>'));
   });
 
   test('emits deferred ID comment bodies after an HTML table', () => {
@@ -6057,6 +6058,49 @@ describe('Word text that reads as Markdown', () => {
       ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting }, href: 'https://e.com' });
     const { markdown } = await fallbackCell([link('a', { underline: true }), link('\\\n', {}), link('b', { bold: true }), insertedRun]);
     expect(markdown.split('https://e.com')).toHaveLength(2);
+  });
+
+  test.each([
+    ['a link', [['see ', {}], ['site', {}, 'https://e.com/a?b=1&c=2']], 'see site{++x++}'],
+    ['a link in bold', [['see ', {}], ['site', { bold: true }, 'https://e.com/a?b=1&c=2']], 'see site{++x++}'],
+    ['a bare link', [['https://e.com/a?b=1&c=2', {}, 'https://e.com/a?b=1&c=2']], 'https://e.com/a?b=1&amp;c=2{++x++}'],
+    ['a link after a !', [['see!', {}], ['site', {}, 'https://e.com/a?b=1&c=2']], 'see!site{++x++}'],
+    ['a link of runs', [['see ', {}], ['s', {}, 'https://e.com/a?b=1&c=2'], ['ite', { italic: true }, 'https://e.com/a?b=1&c=2']], 'see site{++x++}'],
+    ['a link that starts with a space after one', [['see ', {}], [' site', {}, 'https://e.com/a?b=1&c=2']], 'see  site{++x++}'],
+    ['a link that starts with a space after a line break', [['see\\\n', {}], [' site', {}, 'https://e.com/a?b=1&c=2']], 'see↵ site{++x++}'],
+  ])('keeps %s in an HTML table\'s cell that holds what HTML can\'t', async (_name, runs, expected) => {
+    // It went as Markdown's link, whose brackets and URL came back as text
+    const items = (runs as [string, Partial<RunFormatting>, string?][]).map(([text, formatting, href]): ContentItem =>
+      ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting }, ...(href ? { href } : {}) }));
+    const { markdown, text: cell } = await fallbackCell([...items, insertedRun]);
+    expect(cell).toBe(expected);
+    const zip = await JSZip.loadAsync((await convertMdToDocx(markdown)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const links = [...xml.slice(xml.indexOf('<w:tc>'), xml.indexOf('</w:tc>')).matchAll(/<w:hyperlink r:id="([^"]+)"[\s\S]*?<\/w:hyperlink>/g)];
+    expect(links).toHaveLength(1);
+    expect(links[0][0].replace(/<[^>]+>/g, '')).toBe(items.filter(item => 'href' in item).map(item => (item as { text: string }).text.replace(/&/g, '&amp;')).join(''));
+    const rels = await zip.file('word/_rels/document.xml.rels')!.async('string');
+    expect(rels).toContain('Id="' + links[0][1] + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://e.com/a?b=1&amp;c=2"');
+  });
+
+  test('puts no second space before a citation after a link that ends in one in an HTML table\'s cell that holds what HTML can\'t', async () => {
+    // The separator read the link's closing tag as text before the citation
+    const { text: cell } = await fallbackCell([
+      { type: 'text', text: 'site ', commentIds: new Set(), formatting: DEFAULT_FORMATTING, href: 'https://e.com' },
+      { type: 'citation', text: '(Smith 2020)', commentIds: new Set(), pandocKeys: ['@smith2020'] },
+      insertedRun,
+    ]);
+    expect(cell).toBe('site [@smith2020]{++x++}');
+  });
+
+  test('keeps a link inserted in an HTML table\'s cell that holds what HTML can\'t', async () => {
+    const { markdown, text: cell } = await fallbackCell([
+      { type: 'text', text: 'see ', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
+      { type: 'text', text: 'site', commentIds: new Set(), formatting: DEFAULT_FORMATTING, href: 'https://e.com', revision: { type: 'addition', author: 'A', date: '' } },
+    ]);
+    expect(cell).toBe('see {++site++}');
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    expect(xml.slice(xml.indexOf('<w:tc>'), xml.indexOf('</w:tc>'))).toMatch(/<w:hyperlink [^>]*>(?:(?!<\/w:hyperlink>)[\s\S])*site/);
   });
 
   test.each(['[@a](b)', '[-@a](b)', '[@a]{.underline}', '[@a][b]'])('writes %s with the citation export reads in it', async (text) => {

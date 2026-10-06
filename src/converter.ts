@@ -2214,15 +2214,16 @@ function keepHtmlCellSpaces(html: string): string {
   let out = '';
   let lineStart = true;
   let afterSpace = false;
-  for (const [token] of html.matchAll(/<!--(?:(?!--!?>)[\s\S])*(?:--!?>|$)|<br>|<\/?[a-z]+>| |[^ <]+|</gi)) {
+  // A tag, as a link's, with its attributes, whose values hold no < or >
+  for (const [token] of html.matchAll(/<!--(?:(?!--!?>)[\s\S])*(?:--!?>|$)|<br>|<\/?[a-z]+(?: [^<>]*)?>| |[^ <]+|</gi)) {
     if (token === ' ') {
       out += lineStart || afterSpace ? '&#32;' : ' ';
       afterSpace = true;
     } else {
       out += token;
       if (token === '<br>') lineStart = true;
-      if (token === '<br>' || !/^<(?:!--|\/?[a-z]+>)/i.test(token)) afterSpace = false;
-      if (token !== '<br>' && !/^<(?:!--|\/?[a-z]+>)/i.test(token)) lineStart = false;
+      if (token === '<br>' || !/^<(?:!--|\/?[a-z]+[ >])/i.test(token)) afterSpace = false;
+      if (token !== '<br>' && !/^<(?:!--|\/?[a-z]+[ >])/i.test(token)) lineStart = false;
     }
   }
   // From the end, past the closing tags there, as a regex for the spaces
@@ -2487,6 +2488,9 @@ function formatHrefForMarkdown(href: string): string {
  *  whose @ is escaped then, as one escaped starts no key. A key in code
  *  stays as it is, where a backslash would be text. */
 function markdownLink(text: string, href: string): string {
+  // In an HTML table's cell, which export reads as HTML, its tag, as
+  // renderHtmlCellParagraph writes it
+  if (!readsMarkdown) return '<a href="' + escapeHtmlAttr(href) + '">' + text + '</a>';
   const url = formatHrefForMarkdown(href);
   const label = escapeTagLeftOpen(text.replace(/^(-?)@/, (_m, dash: string) => dash + '\\@'), url);
   const close = label.indexOf(']');
@@ -5204,7 +5208,8 @@ const BARE_LINK = '\u0007';
  * after it.
  */
 function bareLinkChoice(item: ContentItem, link: string, rangeCloser = ''): string {
-  if (item.type !== 'text' || !item.href || hasFormatting(item.formatting)
+  // Linkify reads no address in an HTML table's cell
+  if (!readsMarkdown || item.type !== 'text' || !item.href || hasFormatting(item.formatting)
     || item.text !== item.href && item.href !== 'mailto:' + item.text) return link;
   const closer = item.revision ? (item.revision.type === 'addition' ? '++}' : '--}') : rangeCloser;
   return BARE_LINK + link + BARE_LINK + item.text + BARE_LINK + closer + BARE_LINK;
@@ -5317,8 +5322,9 @@ function escapeBangBeforeLink(markdown: string, segment: ContentItem[], index: n
   while (k < end && segment[k].type === 'text' && (segment[k] as ContentItem & { type: 'text' }).text === '') k++;
   const next = segment[k];
   // A tracked change's delimiters come between them, but for one of part of
-  // a link of several runs, which go inside its text, after its [
-  if (k >= end || item.type !== 'text' || next.type !== 'text' || next.href === undefined
+  // a link of several runs, which go inside its text, after its [. In an
+  // HTML table's cell, a link is its tag, which a ! makes nothing of.
+  if (!readsMarkdown || k >= end || item.type !== 'text' || next.type !== 'text' || next.href === undefined
     || !side && (item.revision || next.revision && !partlyRevisedLinkAt(segment, k, end, next.commentIds))
     || !commentSetsEqual(item.commentIds, next.commentIds)) return markdown;
   return /(?:^|[^\\])(?:\\\\)*!$/.test(markdown) ? markdown.slice(0, -1) + '\\!' : markdown;
@@ -5611,7 +5617,7 @@ const FORMATTING_CLOSE_AT_END = /(?:[\u0006\u000F]==(?:\{[a-z0-9-]+\})?|\u0004(?
 /** As FORMATTING_CLOSE_AT_END, in an HTML table's cell, where htmlCellRun
  *  writes each tag of formatting, and text's as references */
 // eslint-disable-next-line no-control-regex
-const HTML_CELL_CLOSE_AT_END = /(?:[\u0006\u000F]==(?:\{[a-z0-9-]+\})?|<\/(?:u|sup|sub|b|i|s|code)>)$/;
+const HTML_CELL_CLOSE_AT_END = /(?:[\u0006\u000F]==(?:\{[a-z0-9-]+\})?|<\/(?:u|sup|sub|b|i|s|code|a)>)$/;
 
 /** The character before `end` in `markdown`, a line break's as a line end,
  *  as a <br> in an HTML table's cell (see htmlCellRun) */
