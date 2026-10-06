@@ -11317,11 +11317,10 @@ export function buildMarkdown(
     }
 
     if (item.type === 'landscape_open') {
-      const gapKey = 'lo' + sentinelLoIdx;
-      sentinelLoIdx++;
       // Check if this is a single-table landscape section (table-only, no title/notes).
       // If the custom property says so, suppress the fences and let the table's
-      // data-orientation attribute handle it instead.
+      // data-orientation attribute handle it instead. Export numbers only the
+      // fences' gaps, so such a section takes no number.
       if (renderOpts?.landscapeTableIndices?.has(tableIndex)) {
         // Peek ahead: landscape_open → table → landscape_close
         const nextItem = i + 1 < mergedContent.length ? mergedContent[i + 1] : undefined;
@@ -11334,6 +11333,8 @@ export function buildMarkdown(
           continue;
         }
       }
+      const gapKey = 'lo' + sentinelLoIdx;
+      sentinelLoIdx++;
       if (emitSentinelSep(gapKey)) {
         // gap metadata handled it
       } else if (incomingSep !== null) {
@@ -11349,13 +11350,13 @@ export function buildMarkdown(
       continue;
     }
     if (item.type === 'landscape_close') {
-      const gapKey = 'lc' + sentinelLcIdx;
-      sentinelLcIdx++;
       if (skipNextLandscapeClose) {
         skipNextLandscapeClose = false;
         i++;
         continue;
       }
+      const gapKey = 'lc' + sentinelLcIdx;
+      sentinelLcIdx++;
       if (emitSentinelSep(gapKey)) {
         // gap metadata handled it
       } else if (incomingSep !== null) {
@@ -11372,8 +11373,6 @@ export function buildMarkdown(
     }
 
     if (item.type === 'portrait_open') {
-      const gapKey = 'po' + sentinelPoIdx;
-      sentinelPoIdx++;
       if (renderOpts?.portraitTableIndices?.has(tableIndex)) {
         const nextItem = i + 1 < mergedContent.length ? mergedContent[i + 1] : undefined;
         const afterTable = i + 2 < mergedContent.length ? mergedContent[i + 2] : undefined;
@@ -11383,6 +11382,8 @@ export function buildMarkdown(
           continue;
         }
       }
+      const gapKey = 'po' + sentinelPoIdx;
+      sentinelPoIdx++;
       if (emitSentinelSep(gapKey)) {
         // gap metadata handled it
       } else if (incomingSep !== null) {
@@ -11398,13 +11399,13 @@ export function buildMarkdown(
       continue;
     }
     if (item.type === 'portrait_close') {
-      const gapKey = 'pc' + sentinelPcIdx;
-      sentinelPcIdx++;
       if (skipNextPortraitClose) {
         skipNextPortraitClose = false;
         i++;
         continue;
       }
+      const gapKey = 'pc' + sentinelPcIdx;
+      sentinelPcIdx++;
       if (emitSentinelSep(gapKey)) {
         // gap metadata handled it
       } else if (incomingSep !== null) {

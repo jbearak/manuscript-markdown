@@ -13013,6 +13013,18 @@ describe('Landscape section round-trip', () => {
     expect(result.markdown).toContain('| A |');
   });
 
+  test.each([
+    ['landscape', 'A\n\n<!-- table-orientation: landscape -->\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n<!-- landscape -->\n\nC\n\n<!-- /landscape -->\n\nD\n'],
+    ['portrait', 'A\n\n<!-- table-orientation: portrait -->\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n<!-- portrait -->\n\nC\n\n<!-- /portrait -->\n\nD\n'],
+  ])('keeps the blank lines around the fences after a table with its own %s section', async (_, md) => {
+    // Import numbered the table's section among the fences, whose blank
+    // lines export numbers alone, and took the next fences' for it
+    const strip = (s: string) => s.replace(/^---\n[\s\S]*?\n---\n/, '');
+    const md1 = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+    expect(strip(md1)).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(md1)).docx)).markdown).toBe(md1);
+  });
+
   test('landscape DOCX section produces body sectPr with page dimensions', async () => {
     const md = '<!-- landscape -->\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n<!-- /landscape -->';
     const { docx } = await convertMdToDocx(md);
