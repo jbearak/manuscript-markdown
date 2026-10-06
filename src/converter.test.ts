@@ -11693,6 +11693,37 @@ describe('CriticMarkup over a line break in source export keeps as it is', () =>
   });
 });
 
+describe('CriticMarkup over a line break in a link\'s destination', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+
+  test.each([
+    ['in angle brackets', '[a](<u{++x\ny++}>)\n', '\\[a](<u{++x y++}>)\n'],
+    ['of a reference', '[a][r]\n\n[r]: u{++x\ny++}\n', '\\[a][r]\n\n\\[r]: u{++x y++}\n'],
+    ['of an autolink', 'z <http://e.com/{++x\ny++}>\n', 'z <http://e.com/{++x y++}>\n'],
+    ['of an image', '![a](p{++x\ny++}.png)\n', '!\\[a](p{++x y++}.png)\n'],
+  ])('reads a destination %s with it as text, as Markdown reads one with a line end', async (_name, md, expected) => {
+    // Read as a link to a URL with the placeholder the line break was
+    // written as in it, which went to Word, and import wrote out
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    for (const part of ['word/document.xml', 'word/_rels/document.xml.rels']) {
+      const xml = await zip.file(part)!.async('string');
+      expect(xml).not.toContain('\uE000');
+      expect(xml).not.toContain('%EE%80%80');
+    }
+    const once = await roundTrip(md);
+    expect(once).toBe(expected);
+    expect(await roundTrip(once)).toBe(once);
+  });
+
+  test('keeps a link to a URL with the private-use character a placeholder starts with', async () => {
+    // Read as text, as one with a placeholder in it
+    const md = '[a](doc%EE%80%80.md)\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    expect(await zip.file('word/_rels/document.xml.rels')!.async('string')).toContain('Target="doc%EE%80%80.md"');
+    expect(await roundTrip(md)).toBe(md);
+  });
+});
+
 describe('Track changes (CriticMarkup)', () => {
   const AUTHOR = 'Test Author';
   const DATE = '2024-01-15T10:30:00Z';
