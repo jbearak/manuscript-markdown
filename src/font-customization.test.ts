@@ -1251,11 +1251,19 @@ describe('heading and title styles based on another style', () => {
 });
 
 describe('the styles export takes from a template', () => {
-  /** styles.xml of export with `fields` and a template of export's own whose styles' content is replaced */
+  /** styles.xml of export with `fields` and a template of export's own whose
+   *  styles' content is replaced, a style ID of rPrDefault or pPrDefault
+   *  giving the document defaults' properties */
   async function exportedStyles(fields: string, ...replaced: Array<[string, string]>): Promise<{ styles: string; docx: Uint8Array }> {
     const zip = await JSZip.loadAsync((await convertMdToDocx('# One\n\n## Two\n')).docx);
     let styles = await zip.file('word/styles.xml')!.async('string');
     for (const [id, inner] of replaced) {
+      const defaults = /^(r|p)PrDefault$/.exec(id);
+      if (defaults) {
+        styles = styles.replace(new RegExp('(<w:' + id + '>)(?:<w:' + defaults[1] + 'Pr>[\\s\\S]*?</w:' + defaults[1] + 'Pr>)?'),
+          (_match, open: string) => open + '<w:' + defaults[1] + 'Pr>' + inner + '</w:' + defaults[1] + 'Pr>');
+        continue;
+      }
       styles = styles.replace(new RegExp('(<w:style\\b[^>]*w:styleId="' + id + '"[^>]*>)[\\s\\S]*?(</w:style>)'),
         (_match, open: string, close: string) => open + inner + close);
     }
@@ -1277,5 +1285,234 @@ describe('the styles export takes from a template', () => {
     const { styles } = await exportedStyles(fields, [id, head + rPr]);
     expect(extractStyleBlock(styles, id)).toMatch(/^<w:style\b[^>]*>/);
     expect(extractStyleBlock(styles, id)!.replace(/^<w:style\b[^>]*>/, '')).toBe(head + pPr + rPr + '</w:style>');
+  });
+
+  const heading = (level: number, inner: string): [string, string] => ['Heading' + level, '<w:name w:val="heading ' + level + '"/>' + inner];
+  // These headings may take their size from Normal, which import may give as
+  // header-font-size, and export then writes into each style on a second trip
+  const noSize = (block: string | null) => block?.replace(/<w:sz(?:Cs)? w:val="\d+"\/>/g, '').replace('<w:rPr></w:rPr>', '');
+  const boldH1 = heading(1, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/></w:rPr>');
+  const fullH1 = heading(1, '<w:basedOn w:val="Normal"/><w:pPr><w:jc w:val="center"/><w:outlineLvl w:val="0"/></w:pPr>' +
+    '<w:rPr><w:b/><w:i/><w:u w:val="single"/><w:smallCaps/></w:rPr>');
+  const onH1 = (inner: string) => heading(2, '<w:basedOn w:val="Heading1"/>' + inner);
+
+  // Word shows what a style's base turns on where the style doesn't set it,
+  // so taking the style's own away isn't enough
+  it.each([
+    ['bold', 'header-font-style: [bold, normal]', [boldH1, onH1('<w:pPr><w:outlineLvl w:val="1"/></w:pPr>')], 'Heading2',
+      '<w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b w:val="0"/></w:rPr>'],
+    ['bold, beside the style\'s own color', 'header-font-style: [bold, italic]', [boldH1, onH1('<w:rPr><w:color w:val="FF0000"/></w:rPr>')], 'Heading2',
+      '<w:rPr><w:b w:val="0"/><w:i/><w:color w:val="FF0000"/></w:rPr>'],
+    ['each font style and centering', 'header-font-style: [bold-italic-underline-smallcaps-center, allcaps]', [fullH1, onH1('<w:pPr><w:outlineLvl w:val="1"/></w:pPr>')], 'Heading2',
+      '<w:pPr><w:jc w:val="left"/><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b w:val="0"/><w:i w:val="0"/><w:caps/><w:smallCaps w:val="0"/><w:u w:val="none"/></w:rPr>'],
+    // Heading 1 is bold and centered once restyled, and Heading 2 takes that
+    ['centering, where the style has no pPr', 'header-font-style: [bold-center, bold]', [fullH1, onH1('')], 'Heading2',
+      '<w:pPr><w:jc w:val="left"/></w:pPr><w:rPr><w:b/></w:rPr>'],
+    // w:jc goes before w:textDirection and w:textAlignment in a pPr
+    ['centering, where the style has a text alignment and no outline level', 'header-font-style: [bold-center, bold]',
+      [fullH1, onH1('<w:pPr><w:textDirection w:val="lrTb"/><w:textAlignment w:val="center"/></w:pPr>')], 'Heading2',
+      '<w:pPr><w:jc w:val="left"/><w:textDirection w:val="lrTb"/><w:textAlignment w:val="center"/></w:pPr><w:rPr><w:b/></w:rPr>'],
+    // A container with nothing in it, self-closing, is one to fill
+    ['bold, where the style has an empty rPr', 'header-font-style: [bold, normal]', [boldH1, onH1('<w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr/>')], 'Heading2',
+      '<w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b w:val="0"/></w:rPr>'],
+    ['centering, where the style has an empty pPr', 'header-font-style: [bold-center, bold]', [fullH1, onH1('<w:pPr/>')], 'Heading2',
+      '<w:pPr><w:jc w:val="left"/></w:pPr><w:rPr><w:b/></w:rPr>'],
+    ['bold, for the title', 'title: T\ntitle-font-style: italic', [boldH1, ['Title', '<w:name w:val="Title"/><w:basedOn w:val="Heading1"/>']], 'Title',
+      '<w:rPr><w:b w:val="0"/><w:i/></w:rPr>'],
+    ['bold, from the document defaults', 'header-font-style: [bold, italic]', [['rPrDefault', '<w:b/>'], heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr>')], 'Heading2',
+      '<w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b w:val="0"/><w:i/></w:rPr>'],
+    ['italic, from Normal', 'header-font-style: bold-underline',
+      [['Normal', '<w:name w:val="Normal"/><w:rPr><w:i/></w:rPr>'], heading(1, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr>')], 'Heading1',
+      '<w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:i w:val="0"/><w:u w:val="single"/></w:rPr>'],
+    ['italic, from a style that isn\'t a heading', 'header-font-style: bold-underline',
+      [['Quote', '<w:name w:val="Quote"/><w:basedOn w:val="Normal"/><w:rPr><w:i/></w:rPr>'], heading(2, '<w:basedOn w:val="Quote"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr>')], 'Heading2',
+      '<w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:i w:val="0"/><w:u w:val="single"/></w:rPr>'],
+  ] as Array<[string, string, Array<[string, string]>, string, string]>)('a heading or title whose font style turns off what its base turns on writes the off: %s', async (_name, fields, replaced, id, expected) => {
+    const { convertDocx } = await import('./converter');
+    const { styles, docx } = await exportedStyles(fields, ...replaced);
+    expect(extractStyleBlock(styles, id)!.replace(/^<w:style\b[^>]*>[\s\S]*?<w:basedOn w:val="[^"]*"\/>/, '')).toBe(expected + '</w:style>');
+    const { markdown } = await convertDocx(docx);
+    const fieldsBack = parseFrontmatter(markdown).metadata;
+    const fieldsSent = parseFrontmatter('---\n' + fields + '\n---\n').metadata;
+    expect(fieldsBack.headerFontStyle).toEqual(fieldsSent.headerFontStyle);
+    // A title the fields leave alone shows what Normal does
+    if (fieldsSent.titleFontStyle) expect(fieldsBack.titleFontStyle).toEqual(fieldsSent.titleFontStyle);
+    // Export to Word, which takes the Word file as its template
+    const again = (await convertMdToDocx(markdown, { templateDocx: docx })).docx;
+    expect(noSize(extractStyleBlock(await (await JSZip.loadAsync(again)).file('word/styles.xml')!.async('string'), id))).toBe(noSize(extractStyleBlock(styles, id)));
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  // Word writes run properties in schema order and reorders others on open,
+  // marking the document changed, so what export writes into a template's
+  // style, the offs among it, goes in that order with what the style has
+  const orderedHeading = (level: number, rPr: string) => heading(level, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="' + (level - 1) + '"/></w:pPr><w:rPr>' + rPr + '</w:rPr>');
+  it.each([
+    ['all caps over small caps', 'header-font-style: [smallcaps, allcaps]', [orderedHeading(1, '<w:smallCaps/>'), onH1('<w:pPr><w:outlineLvl w:val="1"/></w:pPr>')], 'Heading2',
+      '<w:caps/><w:smallCaps w:val="0"/>'],
+    ['a font, the font style and a size among the style\'s own', 'header-font: Georgia\nheader-font-size: 20\nheader-font-style: [italic-underline-allcaps, normal]',
+      [orderedHeading(1, '<w:b/><w:smallCaps/><w:color w:val="2F5496"/><w:sz w:val="32"/><w:szCs w:val="32"/><w:lang w:val="en-US"/>')], 'Heading1',
+      '<w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/><w:i/><w:caps/><w:color w:val="2F5496"/><w:sz w:val="40"/><w:szCs w:val="40"/><w:u w:val="single"/><w:lang w:val="en-US"/>'],
+    // A size other than its base's, which it would otherwise take from it
+    ['the offs a style with no rPr gets, with a font and size', 'header-font: Georgia\nheader-font-size: [20, 18]\nheader-font-style: [bold-italic-underline-smallcaps, allcaps]',
+      [orderedHeading(1, '<w:b/><w:i/><w:smallCaps/><w:u w:val="single"/>'), heading(2, '<w:basedOn w:val="Heading1"/>')], 'Heading2',
+      '<w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/><w:b w:val="0"/><w:i w:val="0"/><w:caps/><w:smallCaps w:val="0"/><w:sz w:val="36"/><w:szCs w:val="36"/><w:u w:val="none"/>'],
+  ] as Array<[string, string, Array<[string, string]>, string, string]>)('the rPr export writes into a template\'s heading goes in schema order: %s', async (_name, fields, replaced, id, expected) => {
+    const { convertDocx } = await import('./converter');
+    const { styles, docx } = await exportedStyles(fields, ...replaced);
+    // The style's rPr, last in it
+    expect(/<w:rPr>([\s\S]*)<\/w:rPr><\/w:style>$/.exec(extractStyleBlock(styles, id)!.replace(/<w:pPr>[\s\S]*?<\/w:pPr>/, ''))?.[1]).toBe(expected);
+    const { markdown } = await convertDocx(docx);
+    expect(parseFrontmatter(markdown).metadata.headerFontStyle).toEqual(parseFrontmatter('---\n' + fields + '\n---\n').metadata.headerFontStyle);
+    const again = (await convertMdToDocx(markdown, { templateDocx: docx })).docx;
+    expect(noSize(extractStyleBlock(await (await JSZip.loadAsync(again)).file('word/styles.xml')!.async('string'), id))).toBe(noSize(extractStyleBlock(styles, id)));
+  });
+
+  // The style's own off stands for the explicit off, as it comes
+  it('a heading that turns off itself what its base turns on keeps its own off, once and in order', async () => {
+    const { convertDocx } = await import('./converter');
+    const { styles, docx } = await exportedStyles('header-font-style: [bold, bold-underline]', ['Normal', '<w:name w:val="Normal"/><w:qFormat/><w:rPr><w:i/></w:rPr>'],
+      heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:i w:val="false"/><w:b/></w:rPr>'));
+    expect(extractStyleBlock(styles, 'Heading2')).toContain('<w:rPr><w:b/><w:i w:val="false"/><w:u w:val="single"/></w:rPr>');
+    const { markdown } = await convertDocx(docx);
+    expect(parseFrontmatter(markdown).metadata.headerFontStyle).toEqual(['bold', 'bold-underline']);
+    const again = (await convertMdToDocx(markdown, { templateDocx: docx })).docx;
+    expect(noSize(extractStyleBlock(await (await JSZip.loadAsync(again)).file('word/styles.xml')!.async('string'), 'Heading2'))).toBe(noSize(extractStyleBlock(styles, 'Heading2')));
+  });
+
+  // <w:b></w:b> turns bold on as <w:b/> does
+  it('a heading based on a Normal bold as <w:b></w:b> keeps its style with the document as its template', async () => {
+    const { convertDocx } = await import('./converter');
+    const zip = await JSZip.loadAsync((await convertMdToDocx('# One\n\n## Two\n')).docx);
+    const stylesOf = async (docx: Uint8Array) => (await JSZip.loadAsync(docx)).file('word/styles.xml')!.async('string');
+    zip.file('word/styles.xml', (await zip.file('word/styles.xml')!.async('string'))
+      .replace(/(<w:style\b[^>]*w:styleId="Normal"[^>]*>)[\s\S]*?(<\/w:style>)/, (_match, open: string, close: string) => open + '<w:name w:val="Normal"/><w:qFormat/><w:rPr><w:b></w:b></w:rPr>' + close)
+      .replace(/(<w:style\b[^>]*w:styleId="Heading2"[^>]*>)[\s\S]*?(<\/w:style>)/, (_match, open: string, close: string) => open + heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr>')[1] + close));
+    const original = await zip.generateAsync({ type: 'uint8array' });
+    const { markdown } = await convertDocx(original);
+    expect(parseFrontmatter(markdown).metadata.headerFontStyle).toBeUndefined();
+    const again = (await convertMdToDocx(markdown, { templateDocx: original })).docx;
+    expect(noSize(extractStyleBlock(await stylesOf(again), 'Heading2'))).toBe(noSize(extractStyleBlock(await stylesOf(original), 'Heading2')));
+  });
+
+  // w:basedOn may have any whitespace before w:val
+  it('a heading based on a bold heading named across a line break turns its bold off', async () => {
+    const { convertDocx } = await import('./converter');
+    const { styles, docx } = await exportedStyles('header-font-style: [bold, normal]', boldH1, heading(2, '<w:basedOn\n  w:val="Heading1"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr>'));
+    expect(extractStyleBlock(styles, 'Heading2')).toContain('<w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b w:val="0"/></w:rPr>');
+    const { markdown } = await convertDocx(docx);
+    expect(parseFrontmatter(markdown).metadata.headerFontStyle).toEqual(['bold', 'normal']);
+    const again = (await convertMdToDocx(markdown, { templateDocx: docx })).docx;
+    expect(noSize(extractStyleBlock(await (await JSZip.loadAsync(again)).file('word/styles.xml')!.async('string'), 'Heading2'))).toBe(noSize(extractStyleBlock(styles, 'Heading2')));
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  /** A template of export's own whose styles' content is replaced, as
+   *  exportedStyles does, then changed by `edit`, and the styles export
+   *  gives with `fields` and the template, with the Word file */
+  async function exportedWith(fields: string, edit: (styles: string) => string, ...replaced: Array<[string, string]>): Promise<{ styles: string; docx: Uint8Array }> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('# One\n\n## Two\n')).docx);
+    let styles = await zip.file('word/styles.xml')!.async('string');
+    for (const [id, inner] of replaced) {
+      const style = new RegExp('(<w:style\\b[^>]*w:styleId="' + id + '"[^>]*>)[\\s\\S]*?(</w:style>)');
+      expect(styles).toMatch(style);
+      styles = styles.replace(style, (_match, open: string, close: string) => open + inner + close);
+    }
+    zip.file('word/styles.xml', edit(styles));
+    const docx = (await convertMdToDocx('---\n' + fields + '\n---\n\n# One\n\n## Two\n', { templateDocx: await zip.generateAsync({ type: 'uint8array' }) })).docx;
+    return { styles: await (await JSZip.loadAsync(docx)).file('word/styles.xml')!.async('string'), docx };
+  }
+
+  // A style is found as import finds it: by the template's ID for a built-in
+  // style, which Word in another language gives one, as `berschrift1` for
+  // Heading 1, and with a style written as <w:style .../> before it, which the
+  // next </w:style> doesn't close
+  const GERMAN: Record<string, string> = { Normal: 'Standard', Heading1: 'berschrift1', Heading2: 'berschrift2' };
+  const german = (styles: string) => styles.replace(/(w:styleId="|<w:(?:basedOn|next|link) w:val=")([A-Za-z0-9]+)"/g,
+    (match, before: string, id: string) => GERMAN[id] ? before + GERMAN[id] + '"' : match);
+  const plainBeforeHeading1 = (styles: string) => styles.replace(/<w:style\b[^>]*w:styleId="Heading1"/, style => '<w:style w:type="paragraph" w:styleId="Plain"/>' + style);
+  // Spelled as XML may spell it, with whitespace around each =, single
+  // quotes and a line break
+  const respelledHeading1 = (styles: string) => styles.replace('<w:style w:type="paragraph" w:styleId="Heading1">', '<w:style w:type = \'paragraph\'\n  w:styleId = \'Heading1\'>');
+  it.each([
+    ['German Word\'s IDs for the headings', german, onH1('<w:pPr><w:outlineLvl w:val="1"/></w:pPr>'), 'berschrift2',
+      '<w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b w:val="0"/></w:rPr>'],
+    ['a base after a style written as <w:style .../>', plainBeforeHeading1, onH1('<w:pPr><w:outlineLvl w:val="1"/></w:pPr>'), 'Heading2',
+      '<w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b w:val="0"/></w:rPr>'],
+    // Which turns nothing on, though the bold heading after it does
+    ['a base written as <w:style .../>', plainBeforeHeading1, heading(2, '<w:basedOn w:val="Plain"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr>'), 'Heading2',
+      '<w:pPr><w:outlineLvl w:val="1"/></w:pPr>'],
+    ['a base whose tag has its attributes spelled otherwise', respelledHeading1, onH1('<w:pPr><w:outlineLvl w:val="1"/></w:pPr>'), 'Heading2',
+      '<w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b w:val="0"/></w:rPr>'],
+    ['a base named with its value spelled otherwise', (styles: string) => styles, heading(2, '<w:basedOn w:val = \'Heading1\'/><w:pPr><w:outlineLvl w:val="1"/></w:pPr>'), 'Heading2',
+      '<w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b w:val="0"/></w:rPr>'],
+    // Over a bold Normal, so the heading needs no off of its own
+    ['a base that turns bold off with its value spelled otherwise', (styles: string) => styles
+      .replace(/(<w:style\b[^>]*w:styleId="Normal"[^>]*>[\s\S]*?<w:rPr>)/, (_match, before: string) => before + '<w:b/>')
+      .replace(/(<w:style\b[^>]*w:styleId="Quote"[^>]*>[\s\S]*?)(<\/w:style>)/, (_match, style: string, close: string) => style + '<w:rPr><w:b w:val = \'0\'/></w:rPr>' + close),
+      heading(2, '<w:basedOn w:val="Quote"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr>'), 'Heading2', '<w:pPr><w:outlineLvl w:val="1"/></w:pPr>'],
+    // Heading 1 is bold once restyled, as its font style, by its English ID, says
+    ['German Word\'s IDs, for a base export makes bold', german, onH1('<w:pPr><w:outlineLvl w:val="1"/></w:pPr>'), 'berschrift2',
+      '<w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b w:val="0"/></w:rPr>', heading(1, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr>')],
+  ] as Array<[string, (styles: string) => string, [string, string], string, string, [string, string]?]>)('a heading whose base is found as import finds it writes the off its base needs: %s', async (_name, edit, heading2, id, expected, heading1 = boldH1) => {
+    const { convertDocx } = await import('./converter');
+    const fields = 'header-font-style: [bold, normal]';
+    const { styles, docx } = await exportedWith(fields, edit, heading1, heading2);
+    expect(extractStyleBlock(styles, id)!.replace(/^<w:style\b[^>]*>[\s\S]*?<w:basedOn\b[^>]*\/>/, '')).toBe(expected + '</w:style>');
+    const { markdown } = await convertDocx(docx);
+    expect(parseFrontmatter(markdown).metadata.headerFontStyle).toEqual(['bold', 'normal']);
+    const again = (await convertMdToDocx(markdown, { templateDocx: docx })).docx;
+    expect(noSize(extractStyleBlock(await (await JSZip.loadAsync(again)).file('word/styles.xml')!.async('string'), id))).toBe(noSize(extractStyleBlock(styles, id)));
+  });
+
+  // A tracked change's record of what a style was isn't what Word shows
+  const pPrChange = '<w:pPrChange w:id="1" w:author="A"><w:pPr><w:jc w:val="center"/></w:pPr></w:pPrChange>';
+  const rPrChange = '<w:rPrChange w:id="2" w:author="A"><w:rPr><w:b/><w:i/></w:rPr></w:rPrChange>';
+  it.each([
+    ['a Normal', [['Normal', '<w:name w:val="Normal"/><w:qFormat/><w:pPr>' + pPrChange + '</w:pPr><w:rPr>' + rPrChange + '</w:rPr>']]],
+    ['the document defaults', [['pPrDefault', pPrChange], ['rPrDefault', rPrChange]]],
+  ] as Array<[string, Array<[string, string]>]>)('headings over %s with bold, italic and centering only in a tracked change\'s record get no off', async (_name, replaced) => {
+    const { convertDocx } = await import('./converter');
+    const { styles, docx } = await exportedStyles('header-font-style: [italic, normal]', ...replaced);
+    for (const id of ['Heading1', 'Heading2']) {
+      expect(extractStyleBlock(styles, id)).not.toMatch(/<w:[bi] w:val="0"\/>|<w:jc w:val="left"\/>/);
+    }
+    const { markdown } = await convertDocx(docx);
+    expect(parseFrontmatter(markdown).metadata.headerFontStyle).toEqual(['italic', 'normal']);
+    const again = (await convertMdToDocx(markdown, { templateDocx: docx })).docx;
+    const stylesAgain = await (await JSZip.loadAsync(again)).file('word/styles.xml')!.async('string');
+    for (const id of ['Heading1', 'Heading2']) expect(noSize(extractStyleBlock(stylesAgain, id))).toBe(noSize(extractStyleBlock(styles, id)));
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  // A tracked change's record of a style's properties holds a pPr or rPr,
+  // which may be empty, and goes as it was
+  it('a heading whose tracked changes record empty properties keeps them', async () => {
+    const { convertDocx } = await import('./converter');
+    const pPrChange = '<w:pPrChange w:id="1" w:author="A"><w:pPr/></w:pPrChange>';
+    const rPrChange = '<w:rPrChange w:id="2" w:author="A"><w:rPr/></w:rPrChange>';
+    const { styles, docx } = await exportedStyles('header-font-style: [bold, bold-italic]',
+      heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/>' + pPrChange + '</w:pPr><w:rPr><w:b/>' + rPrChange + '</w:rPr>'));
+    expect(extractStyleBlock(styles, 'Heading2')).toContain(pPrChange);
+    expect(extractStyleBlock(styles, 'Heading2')).toContain(rPrChange);
+    const { markdown } = await convertDocx(docx);
+    expect(parseFrontmatter(markdown).metadata.headerFontStyle).toEqual(['bold', 'bold-italic']);
+    const again = (await convertMdToDocx(markdown, { templateDocx: docx })).docx;
+    expect(noSize(extractStyleBlock(await (await JSZip.loadAsync(again)).file('word/styles.xml')!.async('string'), 'Heading2'))).toBe(noSize(extractStyleBlock(styles, 'Heading2')));
+  });
+
+  it.each([
+    // Export's own styles, based on Normal, which turns nothing on
+    ['header-font-style: normal', []],
+    ['header-font-style: [italic, normal, center]', []],
+    ['title: T\ntitle-font-style: normal', []],
+    // A base this export restyles, which no longer turns them on
+    ['header-font-style: normal', [fullH1, onH1('<w:pPr><w:outlineLvl w:val="1"/></w:pPr>')]],
+    ['header-font-style: [bold, bold]', [fullH1, onH1('<w:pPr><w:outlineLvl w:val="1"/></w:pPr>')]],
+  ] as Array<[string, Array<[string, string]>]>)('writes no off where the base doesn\'t turn the property on: %s', async (fields, replaced) => {
+    const { styles } = await exportedStyles(fields, ...replaced);
+    for (const id of ['Heading1', 'Heading2', 'Heading3', 'Heading4', 'Heading5', 'Heading6', 'Title']) {
+      expect(extractStyleBlock(styles, id) ?? '').not.toMatch(/<w:(?:b|i|smallCaps|caps) w:val="0"\/>|<w:u w:val="none"\/>|<w:jc w:val="left"\/>/);
+    }
   });
 });

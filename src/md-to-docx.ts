@@ -20,6 +20,8 @@ import { pixelsToEmu, isSupportedImageFormat, getImageContentType, readImageDime
 import { preprocessGridTables, gridColumnAlign, getDisplayWidth, GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData, type TableAlign } from './grid-table-preprocess';
 import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
+import { findStyleElement } from './style-element';
+import { xmlAttribute, xmlStartTag } from './xml-elements';
 import { cellParagraphMarkAt, extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
 import { decodeHtmlAttribute } from './html-entities';
 import { matchCriticHeadingPrefix } from './critic-markup';
@@ -5280,6 +5282,35 @@ const CODE_STYLE_IDS = new Set(['CodeChar', 'CodeBlock']);
 // Style IDs that receive table font/size overrides
 const TABLE_STYLE_IDS = new Set(['TableParagraph']);
 
+/** A property of a heading or title font style: the element that turns it
+ *  on, the one that turns it off, and whether a font style such as
+ *  bold-center wants it. */
+interface FontStyleProperty { tag: string; on: string; off: string; wanted: (fontStyle: string) => boolean }
+
+/** The run properties a heading or title font style sets, in the order export
+ *  writes them. smallcaps holds allcaps's letters, so allcaps is caps only
+ *  without it. */
+const FONT_STYLE_RUN_PROPERTIES: FontStyleProperty[] = [
+  { tag: 'w:b', on: '<w:b/>', off: '<w:b w:val="0"/>', wanted: style => style.includes('bold') },
+  { tag: 'w:i', on: '<w:i/>', off: '<w:i w:val="0"/>', wanted: style => style.includes('italic') },
+  { tag: 'w:u', on: '<w:u w:val="single"/>', off: '<w:u w:val="none"/>', wanted: style => style.includes('underline') },
+  { tag: 'w:smallCaps', on: '<w:smallCaps/>', off: '<w:smallCaps w:val="0"/>', wanted: style => style.includes('smallcaps') },
+  { tag: 'w:caps', on: '<w:caps/>', off: '<w:caps w:val="0"/>', wanted: style => style.includes('allcaps') && !style.includes('smallcaps') },
+];
+
+/** Centering, the paragraph property of a heading or title font style */
+const FONT_STYLE_CENTERING: FontStyleProperty = { tag: 'w:jc', on: '<w:jc w:val="center"/>', off: '<w:jc w:val="left"/>', wanted: style => style.includes('center') };
+
+/** Whether a font style property's element turns it on: w:jc when it centers,
+ *  w:u unless it's none, and the others unless w:val turns them off, as
+ *  import reads them (see extractStyle in converter.ts). */
+function fontStylePropertyOn(property: FontStyleProperty, element: string): boolean {
+  const val = xmlAttribute(element, 'w:val');
+  if (property === FONT_STYLE_CENTERING) return val === 'center';
+  if (property.tag === 'w:u') return val !== 'none';
+  return val === undefined || val === 'true' || val === '1' || val === 'on';
+}
+
 /** A style's content with a pPr added where the schema orders a style's
  *  children: after its name, base and the like, and before its rPr and table
  *  properties. */
@@ -5484,6 +5515,69 @@ export function applyFontOverridesToTemplate(
   // Collect all style IDs we want to modify
   const allTargetIds = new Set([...BODY_STYLE_IDS, ...CODE_STYLE_IDS, ...TABLE_STYLE_IDS]);
 
+  // The template's styles as they come, for what a style inherits, each
+  // found as import finds it (see findStyleElement), by the template's ID for
+  // a built-in style; with its ID, or a built-in style's English ID, which
+  // a heading's font style goes by; and without a tracked change's record of
+  // what it was, which Word doesn't show (w:rPrChange, w:pPrChange)
+  const withoutFormatChanges = (part: string) => part.replace(/<w:(rPrChange|pPrChange)\b[^>]*?(?:\/>|>[\s\S]*?<\/w:\1>)/g, '');
+  const templateXml = xml;
+  const builtInIds = new Map([...ids].map(([builtInId, id]) => [id, builtInId]));
+  const templateStyles = new Map<string, { id: string; block: string } | undefined>();
+  const templateStyle = (id: string) => {
+    if (!templateStyles.has(id)) {
+      const found = findStyleElement(templateXml, id, ids);
+      const ownId = found ? xmlAttribute(xmlStartTag(found.element, 'w:style')?.tag ?? '', 'w:styleId') ?? id : id;
+      templateStyles.set(id, found && { id: builtInIds.get(ownId) ?? ownId, block: withoutFormatChanges(found.element) });
+    }
+    return templateStyles.get(id);
+  };
+  // The document defaults' run and paragraph properties, the base of every
+  // style, without one too
+  const docDefaults = withoutFormatChanges(/<w:docDefaults\b[\s\S]*?<\/w:docDefaults>/.exec(xml)?.[0] ?? '');
+  const defaultProperties = (property: FontStyleProperty) => property === FONT_STYLE_CENTERING
+    ? /<w:pPrDefault>\s*<w:pPr>([\s\S]*?)<\/w:pPr>/.exec(docDefaults)?.[1] ?? ''
+    : /<w:rPrDefault>\s*<w:rPr>([\s\S]*?)<\/w:rPr>/.exec(docDefaults)?.[1] ?? '';
+  const fontStyleOf = (styleId: string) =>
+    /^Heading[1-6]$/.test(styleId) ? overrides.headingStyles?.get(styleId) : styleId === 'Title' ? overrides.titleStyles?.[0] : undefined;
+  /**
+   * Whether the styles a style is based on (w:basedOn), or else the document
+   * defaults, turn a font style property on, which Word shows where the style
+   * doesn't set it. The nearest that sets it decides, as import reads it (see
+   * inheritedStyle in converter.ts), and a heading or title restyled here
+   * sets it as its font style says.
+   */
+  const inheritsOn = (styleId: string, property: FontStyleProperty): boolean => {
+    const element = new RegExp('<' + property.tag + '\\b[^>]*>');
+    const seen = new Set([styleId]);
+    // Its attributes as XML may spell them, as import reads them
+    const basedOn = (id: string) => {
+      const base = xmlStartTag(templateStyle(id)?.block ?? '', 'w:basedOn');
+      return base && xmlAttribute(base.tag, 'w:val');
+    };
+    for (let id = basedOn(styleId); id !== undefined; id = basedOn(id)) {
+      const style = templateStyle(id);
+      if (style === undefined || seen.has(style.id)) break;
+      seen.add(style.id);
+      const { block } = style;
+      const fontStyle = fontStyleOf(style.id);
+      if (fontStyle !== undefined) return property.wanted(fontStyle);
+      const properties = property === FONT_STYLE_CENTERING
+        ? /<w:pPr\b[^>]*>([\s\S]*?)<\/w:pPr>/.exec(block)?.[1]
+        : /<w:rPr\b[^>]*>([\s\S]*?)<\/w:rPr>/.exec(block.replace(/<w:pPr\b[^>]*>[\s\S]*?<\/w:pPr>/, ''))?.[1];
+      const found = element.exec(properties ?? '');
+      if (found) return fontStylePropertyOn(property, found[0]);
+    }
+    const found = element.exec(defaultProperties(property));
+    return found !== null && fontStylePropertyOn(property, found[0]);
+  };
+  /** A font style's run properties: each it wants, and for one it leaves
+   *  out, the style's own off (`ownOff`), or else an explicit off where the
+   *  style's base turns it on, which removing the style's own leaves. */
+  const fontStyleRunElements = (styleId: string, fontStyle: string, ownOff = new Map<FontStyleProperty, string>()) => orderRPr(FONT_STYLE_RUN_PROPERTIES
+    .map(property => property.wanted(fontStyle) ? property.on
+      : ownOff.get(property) ?? (inheritsOn(styleId, property) ? property.off : '')).join(''));
+
   for (const styleId of allTargetIds) {
     // Find the <w:style ...w:styleId="ID"...> ... </w:style> block, by the
     // template's ID for a built-in style
@@ -5537,6 +5631,11 @@ export function applyFontOverridesToTemplate(
 
     // Nothing to do for this style
     if (font === undefined && sizeHp === undefined && fontStyleOverride === undefined) continue;
+    // An empty pPr or rPr, self-closing, goes, for what's written here to go
+    // in a container of its own, once, or nowhere (dirty-flag invariant #5),
+    // but not one a tracked change records, which needs it
+    innerContent = innerContent.replace(/<w:(rPrChange|pPrChange)\b[^>]*?(?:\/>|>[\s\S]*?<\/w:\1>)|<w:[pr]Pr\b[^>]*\/>/g,
+      (element, change?: string) => change ? element : '');
 
     // Build the replacement fragments
     const rFontsEl = font !== undefined
@@ -5551,21 +5650,23 @@ export function applyFontOverridesToTemplate(
 
     // Apply center alignment override to <w:pPr> for headings and title
     if (fontStyleOverride !== undefined) {
-      const wantsCenter = fontStyleOverride.includes('center');
+      // Centered, or left where the style's base centers it
+      const jc = FONT_STYLE_CENTERING.wanted(fontStyleOverride) ? FONT_STYLE_CENTERING.on
+        : inheritsOn(styleId, FONT_STYLE_CENTERING) ? FONT_STYLE_CENTERING.off : '';
       const pPrMatch = /(<w:pPr\b[^>]*>)([\s\S]*?)(<\/w:pPr>)/.exec(innerContent);
       if (pPrMatch) {
         let pPrContent = pPrMatch[2];
-        // Remove any existing w:jc element, then insert before outlineLvl (schema order: spacing → ind → jc → outlineLvl).
-        // A font style that isn't centered keeps one that doesn't center,
-        // which may undo the centering of the style's base
-        pPrContent = pPrContent.replace(/<w:jc\b[^>]*(?:\/>|><\/w:jc>)/g, jc => !wantsCenter && !/\bw:val="center"/.test(jc) ? jc : '');
-        if (wantsCenter) {
-          const outlineLvlIdx = pPrContent.indexOf('<w:outlineLvl');
-          if (outlineLvlIdx !== -1) {
-            pPrContent = pPrContent.slice(0, outlineLvlIdx) + '<w:jc w:val="center"/>' + pPrContent.slice(outlineLvlIdx);
-          } else {
-            pPrContent = pPrContent + '<w:jc w:val="center"/>';
-          }
+        // Remove any existing w:jc element, then insert it before what the
+        // schema puts after it: spacing → ind → jc → textDirection →
+        // textAlignment → outlineLvl and the rest.
+        // A font style that isn't centered keeps the style's own w:jc that
+        // doesn't center, which may undo the centering of its base, in place
+        // of an explicit off
+        pPrContent = pPrContent.replace(/<w:jc\b[^>]*(?:\/>|><\/w:jc>)/g, element =>
+          !FONT_STYLE_CENTERING.wanted(fontStyleOverride) && !fontStylePropertyOn(FONT_STYLE_CENTERING, element) ? element : '');
+        if (jc && !/<w:jc\b/.test(pPrContent)) {
+          const at = /<w:(?:textDirection|textAlignment|textboxTightWrap|outlineLvl|divId|cnfStyle|rPr|sectPr|pPrChange)\b/.exec(pPrContent)?.index ?? pPrContent.length;
+          pPrContent = pPrContent.slice(0, at) + jc + pPrContent.slice(at);
         }
         // A pPr that held only the w:jc goes with it (dirty-flag invariant #5),
         // but not one that holds a tracked change's record, which needs it,
@@ -5573,9 +5674,9 @@ export function applyFontOverridesToTemplate(
         const [ownPPr, pPrRecord] = splitRecord(pPrContent, 'pPrChange');
         const newPPr = ownPPr.trim() || pPrRecord ? pPrMatch[1] + ownPPr + pPrRecord + pPrMatch[3] : '';
         innerContent = innerContent.slice(0, pPrMatch.index) + newPPr + innerContent.slice(pPrMatch.index + pPrMatch[0].length);
-      } else if (wantsCenter) {
+      } else if (jc) {
         // No pPr block — insert one
-        innerContent = withStylePPr(innerContent, '<w:pPr><w:jc w:val="center"/></w:pPr>');
+        innerContent = withStylePPr(innerContent, '<w:pPr>' + jc + '</w:pPr>');
       }
     }
 
@@ -5621,28 +5722,21 @@ export function applyFontOverridesToTemplate(
       // Apply font-style overrides (bold, italic, underline) for headings and title
       if (fontStyleOverride !== undefined) {
         // Remove existing b, i, u, smallCaps, caps elements (all toggle forms: self-closing, with attributes, open+close),
-        // noting one that turns off what the font style leaves out, which may
-        // undo what the style's base turns on, to write again in order
-        const on: Record<string, string> = { 'w:b': '<w:b/>', 'w:i': '<w:i/>', 'w:u': '<w:u w:val="single"/>', 'w:smallCaps': '<w:smallCaps/>', 'w:caps': '<w:caps/>' };
-        const wanted = (tag: string) => tag === 'w:b' ? fontStyleOverride.includes('bold')
-          : tag === 'w:i' ? fontStyleOverride.includes('italic')
-          : tag === 'w:u' ? fontStyleOverride.includes('underline')
-          : tag === 'w:smallCaps' ? fontStyleOverride.includes('smallcaps')
-          : fontStyleOverride.includes('allcaps') && !fontStyleOverride.includes('smallcaps');
-        const turnsOff = (tag: string, element: string) => {
-          const val = /\bw:val="([^"]*)"/.exec(element)?.[1];
-          return tag === 'w:u' ? val === 'none' : val === '0' || val === 'false' || val === 'off';
-        };
-        const ownOff = new Map<string, string>();
-        for (const tag of Object.keys(on)) {
-          rPrContent = rPrContent.replace(new RegExp('<' + tag + '\\b[^>]*(?:/>|></' + tag + '>)', 'g'), element => {
-            if (!wanted(tag) && turnsOff(tag, element)) ownOff.set(tag, element);
+        // noting one that turns off what the font style leaves out, which
+        // may undo what the style's base turns on, to write again in order
+        const ownOff = new Map<FontStyleProperty, string>();
+        for (const property of FONT_STYLE_RUN_PROPERTIES) {
+          rPrContent = rPrContent.replace(new RegExp('<' + property.tag + '\\b[^>]*(?:/>|></' + property.tag + '>)', 'g'), element => {
+            if (!property.wanted(fontStyleOverride) && !fontStylePropertyOn(property, element)) ownOff.set(property, element);
             return '';
           });
         }
-        // Add new style elements at the start
-        rPrContent = Object.keys(on).map(tag => wanted(tag) ? on[tag] : ownOff.get(tag) ?? '').join('') + rPrContent;
+        rPrContent = fontStyleRunElements(styleId, fontStyleOverride, ownOff) + rPrContent;
       }
+      // What's written here, the font style's offs among it, in schema order
+      // with what the style has, as Word writes run properties and reorders
+      // others on open, marking the document changed (see orderRPr)
+      rPrContent = orderRPr(rPrContent);
 
       // An rPr that held only what the style override removed goes with it
       // (dirty-flag invariant #5), but not one that holds a tracked change's
@@ -5653,18 +5747,11 @@ export function applyFontOverridesToTemplate(
       innerContent = innerContent.slice(0, matchStart) + newRPr + innerContent.slice(matchEnd);
     } else {
       // No <w:rPr> section — insert one
-      let rPrContent = '';
-      if (fontStyleOverride !== undefined && fontStyleOverride !== 'normal') {
-        if (fontStyleOverride.includes('bold')) rPrContent += '<w:b/>';
-        if (fontStyleOverride.includes('italic')) rPrContent += '<w:i/>';
-        if (fontStyleOverride.includes('underline')) rPrContent += '<w:u w:val="single"/>';
-        if (fontStyleOverride.includes('smallcaps')) rPrContent += '<w:smallCaps/>';
-        else if (fontStyleOverride.includes('allcaps')) rPrContent += '<w:caps/>';
-      }
+      let rPrContent = fontStyleOverride !== undefined ? fontStyleRunElements(styleId, fontStyleOverride) : '';
       if (rFontsEl !== undefined) rPrContent += rFontsEl;
       if (szEl !== undefined) rPrContent += szEl;
       if (szCsEl !== undefined) rPrContent += szCsEl;
-      if (rPrContent) innerContent = innerContent + '<w:rPr>' + rPrContent + '</w:rPr>';
+      if (rPrContent) innerContent = innerContent + '<w:rPr>' + orderRPr(rPrContent) + '</w:rPr>';
     }
 
     innerContent = records.restore(innerContent);
