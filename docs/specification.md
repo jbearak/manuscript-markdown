@@ -124,6 +124,8 @@ Valid font style values: `bold`, `italic`, `underline`, `smallcaps`, `allcaps`, 
 
 On import, `header-font-style` and `title-font-style` give the font style each heading and title style shows in Word, including what a style inherits from the style it's based on, or else from the document defaults, where it doesn't set bold, italic, underline, caps or alignment itself. A style that turns on small caps and inherits all caps, or the reverse, reads as `allcaps`. Export also writes each title's font style on its runs and its centering on its paragraph, which Word shows over the Title style's, so `title-font-style` gives each title what it sets itself first: a toggle all its runs set alike, and the alignment of its paragraph. On export with a template, a heading or title style keeps its own explicit off, such as `<w:i w:val="0"/>` or a `<w:jc>` that doesn't center, for what its font style leaves out.
 
+Likewise, `header-font`, `header-font-size`, `title-font` and `title-font-size` give the font and size each heading and title style shows in Word, inherited the same way where the style doesn't set them, and Word's 10pt where nothing does. A size appears only where some heading, or the title, shows one other than export would give it without that key: its default, scaled by `font-size` if there is one. In `header-font`, a heading whose font has no name in the document, as a theme font has none, even with a font named beside it that Word doesn't show, gets the font export gives a heading without one, `font` or else Calibri, so the other headings keep their places.
+
 ### Font Customization Example
 
 ```yaml

@@ -1088,12 +1088,13 @@ describe('heading and title styles based on another style', () => {
     expect((await convertDocx(again)).markdown).toBe(markdown);
   });
 
-  // Export keeps a template style's reset of what its base turns on
+  // Export keeps a template style's reset of what its base turns on. The
+  // sizes are export's, so the frontmatter has none
   it.each([
-    ['italic', [['Normal', '<w:name w:val="Normal"/><w:qFormat/><w:rPr><w:i/></w:rPr>'],
-      heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:i w:val="0"/></w:rPr>')]],
-    ['centering', [['Normal', '<w:name w:val="Normal"/><w:qFormat/><w:pPr><w:jc w:val="center"/></w:pPr>'],
-      heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:jc w:val="left"/><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/></w:rPr>')]],
+    ['italic', [['Normal', '<w:name w:val="Normal"/><w:qFormat/><w:rPr><w:i/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr>'],
+      heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:i w:val="0"/><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr>')]],
+    ['centering', [['Normal', '<w:name w:val="Normal"/><w:qFormat/><w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr>'],
+      heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:jc w:val="left"/><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr>')]],
   ] as Array<[string, Array<[string, string]>]>)('a heading that turns off the %s its base turns on keeps that with the document as its template', async (_name, replaced) => {
     const { convertDocx } = await import('./converter');
     const original = await withStyles(...replaced);
@@ -1185,6 +1186,64 @@ describe('heading and title styles based on another style', () => {
     expect(extractStyleBlock(styles, 'Heading2')).toContain('<w:rPr><w:b/><w:i w:val="0"/><w:u w:val="single"/></w:rPr>');
     expect(parseFrontmatter((await convertDocx(docx)).markdown).metadata.headerFontStyle?.[1]).toBe('bold-underline');
   });
+
+  // The size and font a heading or title shows come through its base too,
+  // and the frontmatter gives one only where export would give another
+  it.each([
+    ['a size and font from the heading it\'s based on',
+      [['Normal', '<w:name w:val="Normal"/><w:rPr><w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/><w:sz w:val="22"/></w:rPr>'],
+        heading(1, '<w:basedOn w:val="Normal"/><w:rPr><w:b/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="40"/></w:rPr>'),
+        heading(2, '<w:basedOn w:val="Heading1"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr>')],
+      { font: 'Georgia', headerFont: ['Arial', 'Arial', 'Georgia'], headerFontSize: [20, 20, 12, 11, 10, 9] }],
+    ['a size from the document defaults',
+      [['rPrDefault', '<w:sz w:val="24"/>'], ['Normal', '<w:name w:val="Normal"/>'], heading(5, '<w:basedOn w:val="Normal"/><w:rPr><w:b/></w:rPr>')],
+      { headerFontSize: [16, 13, 12, 12, 12, 9] }],
+    ['a title\'s size from the heading it\'s based on',
+      [heading(1, '<w:basedOn w:val="Normal"/><w:rPr><w:b/><w:sz w:val="40"/></w:rPr>'), ['Title', '<w:name w:val="Title"/><w:basedOn w:val="Heading1"/>']],
+      { headerFontSize: [20, 13, 12, 11, 10, 9], titleFontSize: [20], titleFontStyle: ['bold'] }],
+    // A theme font has no name here, and reads as the body's
+    ['a theme font on a heading based on one with a font',
+      [['Normal', '<w:name w:val="Normal"/><w:rPr><w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/><w:sz w:val="22"/></w:rPr>'],
+        heading(1, '<w:basedOn w:val="Normal"/><w:rPr><w:b/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr>'),
+        heading(2, '<w:basedOn w:val="Heading1"/><w:rPr><w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/></w:rPr>')],
+      { font: 'Georgia', headerFont: ['Arial', 'Georgia'], headerFontSize: [11, 11, 12, 11, 10, 9] }],
+    // A heading whose font has no name here takes the one export gives a
+    // heading without one, so the others keep their places
+    ['a font from a base that isn\'t a heading, beside the body\'s theme font',
+      [['Normal', '<w:name w:val="Normal"/><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"/><w:sz w:val="22"/></w:rPr>'],
+        ['Quote', '<w:name w:val="Quote"/><w:basedOn w:val="Normal"/><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr>'],
+        heading(2, '<w:basedOn w:val="Quote"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:sz w:val="26"/></w:rPr>')],
+      { headerFont: ['Calibri', 'Arial', 'Calibri'] }],
+    // Word shows a w:asciiTheme over a w:ascii beside it
+    ['a theme font from a base that isn\'t a heading, with a font named beside it',
+      [['Normal', '<w:name w:val="Normal"/><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"/><w:sz w:val="22"/></w:rPr>'],
+        ['Quote', '<w:name w:val="Quote"/><w:basedOn w:val="Normal"/><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/></w:rPr>'],
+        heading(2, '<w:basedOn w:val="Quote"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:sz w:val="26"/></w:rPr>')],
+      {}],
+    ['a font on Heading 1 alone, beside the body\'s theme font',
+      [['Normal', '<w:name w:val="Normal"/><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"/><w:sz w:val="22"/></w:rPr>'],
+        heading(1, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="32"/></w:rPr>')],
+      { headerFont: ['Arial', 'Calibri'] }],
+    // w:basedOn may have any whitespace before w:val
+    ['a size from a heading named across a line break',
+      [heading(1, '<w:basedOn w:val="Normal"/><w:rPr><w:b/><w:sz w:val="40"/></w:rPr>'), heading(2, '<w:basedOn\n  w:val="Heading1"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr>')],
+      { headerFontSize: [20, 20, 12, 11, 10, 9] }],
+  ] as Array<[string, Array<[string, string]>, Record<string, unknown>]>)('%s reads back', async (_name, replaced, expected) => {
+    const { convertDocx } = await import('./converter');
+    const { markdown } = await convertDocx(await withStyles(...replaced));
+    const { metadata } = parseFrontmatter(markdown);
+    for (const key of ['font', 'fontSize', 'headerFont', 'headerFontSize', 'titleFontSize', 'titleFontStyle'] as const) expect([key, metadata[key]]).toEqual([key, expected[key]]);
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  it.each(['font-size: 12', 'font-size: 10\ntitle: T', 'font: Georgia\nfont-size: 13\nheader-font-size: [20, 16]'])(
+    'a body font size, which export scales the headings and title by, adds no size for them: %s', async (fields) => {
+      const { convertDocx } = await import('./converter');
+      const md = '---\n' + fields + '\n---\n\n# One\n\n###### Six\n';
+      const { markdown } = await convertDocx((await convertMdToDocx(md)).docx);
+      expect(markdown.slice(0, markdown.indexOf('\n---\n', 4) + 5)).toBe('---\n' + fields + '\n---\n');
+    });
 
   it('a heading based on a bold heading stays bold without the template', async () => {
     const { convertDocx } = await import('./converter');
