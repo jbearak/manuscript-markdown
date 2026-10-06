@@ -264,7 +264,7 @@ When using **Export to Word with Template**, the converter extracts styling part
 - `word/theme/theme1.xml` — theme colors and fonts
 - `word/numbering.xml` — list definitions, with the images of its picture bullets. Bullets take the template's numId 1 and numbers its numId 2 where those are a bullet and a number. Where they aren't, export adds its own definitions and leaves the template's in place for its headers, footers and styles.
 - the page setup of its last section, such as its page size and margins
-- its headers and footers, with their images, their fields such as a page number, and their lists' numbering
+- its headers and footers, with their images, their fields such as a page number, and their lists' numbering. A DOCPROPERTY field keeps the custom property it shows. A field that shows a built-in property, such as Title or Author, shows the exported document's.
 
 The template controls appearance while the Markdown controls content.
 

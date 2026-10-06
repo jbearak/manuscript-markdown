@@ -5681,6 +5681,8 @@ function appPropsXml(): string {
 interface CustomPropEntry {
   name: string;
   value: string;
+  /** Its value's type, vt:lpwstr's lpwstr unless a template's property has another */
+  type?: string;
 }
 
 /** Chunk a string value into numbered custom properties: PREFIX_1, PREFIX_2, … */
@@ -5709,7 +5711,8 @@ function customPropsXml(properties: CustomPropEntry[]): string {
     // Use minimal escaping for text content: only <, >, & need escaping.
     // escapeXml() also escapes " as &quot; which is valid but causes Word to
     // decode it on open and mark the document as modified.
-    xml += '<vt:lpwstr>' + properties[i].value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</vt:lpwstr>';
+    const type = 'vt:' + (properties[i].type ?? 'lpwstr');
+    xml += '<' + type + '>' + properties[i].value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</' + type + '>';
     xml += '</property>\n';
   }
   xml += '</Properties>';
@@ -9125,6 +9128,10 @@ export async function convertMdToDocx(
   customProps.push(...bibKeyOrderProps(bibEntries));
   customProps.push(...bibDataProps(options?.bibtex));
   customProps.push(...bibliographyPathProps(frontmatter));
+  // The template's properties its copied headers' and footers' fields show,
+  // after export's own, which keep their pids
+  const ownProps = new Set(customProps.map(p => p.name.toLowerCase()));
+  customProps.push(...(templateSections?.customProperties ?? []).filter(p => !ownProps.has(p.name.toLowerCase())));
   const hasCustomProps = customProps.length > 0;
   if (hasCustomProps) {
     zip.file('docProps/custom.xml', customPropsXml(customProps));

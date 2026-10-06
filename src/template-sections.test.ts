@@ -495,3 +495,36 @@ describe('a template\'s numbering', () => {
     expect(await numbering(second)).toEqual(await numbering(first));
   });
 });
+
+describe('a template header\'s DOCPROPERTY fields', () => {
+  it('keep the custom properties they show, after export\'s own', async () => {
+    let templateDocx = await headerTemplate();
+    // A complex field whose code is in pieces, and a simple field
+    templateDocx = await editTemplate(templateDocx, 'word/header2.xml', xml => xml.replace('<w:r><w:t>FIRST HEADER</w:t></w:r>',
+      '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> DOCPROPERTY </w:instrText></w:r>' +
+      '<w:r><w:instrText>ClientName</w:instrText></w:r><w:r><w:instrText xml:space="preserve"> \\* MERGEFORMAT </w:instrText></w:r>' +
+      '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Acme</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>'));
+    templateDocx = await editTemplate(templateDocx, 'word/footer2.xml', xml => xml.replace('<w:r><w:t>FIRST FOOTER</w:t></w:r>',
+      '<w:fldSimple w:instr=" DOCPROPERTY &quot;Project Code&quot; "><w:r><w:t>42</w:t></w:r></w:fldSimple>'));
+    const property = (pid: number, name: string, value: string) => '<property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="' + pid + '" name="' + name + '">' + value + '</property>';
+    templateDocx = await editTemplate(templateDocx, 'docProps/custom.xml', () => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+      '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">' +
+      property(2, 'ClientName', '<vt:lpwstr>Acme &amp; Sons "Ltd" &#x2019;</vt:lpwstr>') + property(3, 'Project Code', '<vt:i4>42</vt:i4>') +
+      property(4, 'Unshown', '<vt:lpwstr>x</vt:lpwstr>') + '</Properties>');
+    templateDocx = await editTemplate(templateDocx, '_rels/.rels', xml => xml.replace('</Relationships>',
+      '<Relationship Id="rId9" Type="' + REL + 'custom-properties" Target="docProps/custom.xml"/></Relationships>'));
+    templateDocx = await editTemplate(templateDocx, '[Content_Types].xml', xml => xml.replace('</Types>',
+      '<Override PartName="/docProps/custom.xml" ContentType="application/vnd.openxmlformats-officedocument.custom-properties+xml"/></Types>'));
+    expect(await packageProblems(templateDocx)).toEqual([]);
+
+    const { docx } = await convertMdToDocx('---\ncsl: apa\n---\n\nHello', { templateDocx });
+    expect(await packageProblems(docx)).toEqual([]);
+    const custom = (await textOf(await JSZip.loadAsync(docx), 'docProps/custom.xml'))!;
+    const properties = [...custom.matchAll(/<property [^>]*pid="(\d+)" name="([^"]*)">(.*?)<\/property>/g)];
+    expect(properties.map(m => m[1])).toEqual(properties.map((_, i) => String(i + 2)));
+    expect(properties.slice(-2).map(m => m[2] + '=' + m[3])).toEqual(['ClientName=<vt:lpwstr>Acme &amp; Sons "Ltd" \u2019</vt:lpwstr>', 'Project Code=<vt:i4>42</vt:i4>']);
+    expect(properties.slice(0, -2).every(m => /^(MANUSCRIPT|ZOTERO)_/.test(m[2]))).toBe(true);
+    expect(properties.length).toBeGreaterThan(2);
+    expect(custom).not.toContain('Unshown');
+  });
+});

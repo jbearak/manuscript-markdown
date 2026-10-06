@@ -32,7 +32,9 @@
 //   (see `numIds`) and the styles use, and with that numbering the parts
 //   it names, as a picture bullet's image (see md-to-docx.ts). Export
 //   writes its own comments and notes, so a reference to one of the
-//   template's goes.
+//   template's goes. It writes its own custom properties too, so a
+//   DOCPROPERTY field's property goes with them (see customProperties).
+//   The core and app properties, as Title or Company, stay export's.
 
 import type JSZip from 'jszip';
 import { XMLBuilder, XMLParser } from 'fast-xml-parser';
@@ -87,6 +89,9 @@ export interface TemplateSections {
   numIds: Set<number>;
   /** The relationships of the template's numbering, which go with it */
   numberingRels?: Rels;
+  /** The template's custom properties that the parts' DOCPROPERTY fields
+   *  show, each with its type, as vt:lpwstr's lpwstr, and its value */
+  customProperties: Array<{ name: string; type: string; value: string }>;
 }
 
 type XmlNode = Record<string, unknown> & { ':@'?: Record<string, string> };
@@ -102,13 +107,17 @@ const ORDERED_OPTIONS = {
   suppressEmptyNode: true,
 };
 
-/** A package part (relationships, content types, settings) as data, its prefixes dropped */
+/** A package part (relationships, content types, settings, custom
+ *  properties) as data, its prefixes dropped, its text as it is, with
+ *  its character references, as &#x2019;, read too */
 const partParser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: '@_',
   removeNSPrefix: true,
   parseTagValue: false,
   parseAttributeValue: false,
+  trimValues: false,
+  htmlEntities: true,
 });
 
 /** The attributes of each child of a part's root named `name` */
@@ -228,6 +237,35 @@ function parseSectPr(xml: string): XmlNode | undefined {
   }
 }
 
+const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+const decodeEntities = (text: string) => text.replace(/&(amp|lt|gt|quot|apos);|&#(x[0-9a-f]+|\d+);/gi,
+  (_, name: string | undefined, code: string | undefined) => name ? ENTITIES[name.toLowerCase()] : String.fromCodePoint(code![0] === 'x' || code![0] === 'X' ? parseInt(code!.slice(1), 16) : parseInt(code!, 10)));
+
+/** The properties a part's DOCPROPERTY fields name, simple fields' and
+ *  those whose code runs hold, in pieces, between begin and separate */
+function docPropertyNames(xml: string): string[] {
+  const codes: string[] = [];
+  for (const m of xml.matchAll(/<w:fldSimple\b[^>]*?\sw:instr\s*=\s*(["'])([\s\S]*?)\1/g)) codes.push(decodeEntities(m[2]));
+  const open: Array<{ code: string; done: boolean }> = [];
+  for (const m of xml.matchAll(/<w:fldChar\b[^>]*?\sw:fldCharType\s*=\s*["'](begin|separate|end)["']|<w:instrText\b[^>]*>([^<]*)<\/w:instrText\s*>/g)) {
+    const field = open[open.length - 1];
+    if (m[1] === 'begin') {
+      open.push({ code: '', done: false });
+    } else if (m[1] === undefined) {
+      if (field && !field.done) field.code += decodeEntities(m[2]);
+    } else if (field) {
+      // A field's code ends at its separator, or at its end without one
+      if (!field.done) codes.push(field.code);
+      field.done = true;
+      if (m[1] === 'end') open.pop();
+    }
+  }
+  return codes.flatMap(code => {
+    const name = /^\s*DOCPROPERTY\s+(?:"([^"]*)"|(\S+))/i.exec(code);
+    return name ? [name[1] ?? name[2]] : [];
+  });
+}
+
 const NUM_ID = /<w:numId\b[^>]*?\sw:val\s*=\s*(["'])(\d+)\1/g;
 /** A reference to a comment or a note, which the template's other parts hold */
 const COMMENT_OR_NOTE = /<w:(commentRangeStart|commentRangeEnd|commentReference|footnoteReference|endnoteReference)\b[^>]*?(?:\/>|>[\s\S]*?<\/w:\1\s*>)/g;
@@ -236,7 +274,8 @@ const DOC_PR_ID = /(<wp:docPr\b[^>]*?\sid\s*=\s*)(["'])\d+\2/g;
 /** A template's headers and footers, the parts they name, and its trailing
  *  sectPr, and the parts its numbering names */
 export async function readTemplateSections(zip: JSZip): Promise<TemplateSections> {
-  const result: TemplateSections = { references: '', titlePg: false, evenAndOddHeaders: false, relationships: [], parts: new Map(), numIds: new Set() };
+  const result: TemplateSections = { references: '', titlePg: false, evenAndOddHeaders: false, relationships: [], parts: new Map(), numIds: new Set(), customProperties: [] };
+  const shownProperties = new Set<string>();
   const read = async (path: string) => {
     const file = zip.file(path);
     return file ? decodeXml(await file.async('uint8array')) : undefined;
@@ -266,7 +305,10 @@ export async function readTemplateSections(zip: JSZip): Promise<TemplateSections
     result.parts.set(path, part);
     if (/\.xml$/i.test(path) || /xml$/.test(part.contentType ?? '')) {
       part.xml = decodeXml(part.data);
-      if (!numberingOnly) for (const m of part.xml.matchAll(NUM_ID)) result.numIds.add(parseInt(m[2], 10));
+      if (!numberingOnly) {
+        for (const m of part.xml.matchAll(NUM_ID)) result.numIds.add(parseInt(m[2], 10));
+        for (const name of docPropertyNames(part.xml)) shownProperties.add(name.toLowerCase());
+      }
     }
     part.rels = await relsOf(zip, path);
     for (const relationship of part.rels?.relationships ?? []) {
@@ -330,6 +372,14 @@ export async function readTemplateSections(zip: JSZip): Promise<TemplateSections
   result.numberingRels = await relsOf(zip, 'word/numbering.xml');
   for (const relationship of result.numberingRels?.relationships ?? []) {
     if (relationship.path) await take(relationship.path, true);
+  }
+
+  // A property a field shows, which the template, not export, holds
+  for (const property of elementsOf(await read('docProps/custom.xml'), 'Properties', 'property')) {
+    const name = property['@_name'];
+    const type = Object.keys(property).find(key => !key.startsWith('@_') && key !== '#text');
+    const value = type && property[type];
+    if (typeof name === 'string' && shownProperties.has(name.toLowerCase()) && typeof value === 'string') result.customProperties.push({ name, type: type!, value });
   }
 
   const [evenAndOdd] = elementsOf(await read('word/settings.xml'), 'settings', 'evenAndOddHeaders');
