@@ -823,9 +823,10 @@ export function generateFallbackText(keys: string[], entries: Map<string, Bibtex
 
 /**
  * Generate OOXML for a ZOTERO_BIBL field code with rendered bibliography.
+ * Without an engine, the field is empty, and marks the bibliography's place.
  */
 export function generateBibliographyXml(
-  citeprocEngine: CiteprocEngine,
+  citeprocEngine: CiteprocEngine | undefined,
   biblData?: { uncited?: unknown[]; omitted?: unknown[]; custom?: unknown[] },
   hangingIndent?: boolean
 ): string {
@@ -835,7 +836,7 @@ export function generateBibliographyXml(
     custom: biblData?.custom || [],
   });
 
-  const bib = renderBibliography(citeprocEngine);
+  const bib = citeprocEngine && renderBibliography(citeprocEngine);
 
   // Generate bibliography paragraphs with proper formatting
   let bibParagraphs = '';
