@@ -13,7 +13,7 @@ import { computeCodeRegions, computeMarkdownRegions, isInsideCodeRegion } from '
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, htmlBlocksIn, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, startsHtmlBlock } from './md-to-docx';
+import { blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, htmlBlocksIn, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, showsAsText, startsHtmlBlock } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { matchTables, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
@@ -248,6 +248,12 @@ const HTML_LIKE_TAG_AT = new RegExp(HTML_LIKE_TAG_RE.source, 'y');
 // an HTML table's cell, which it reads as HTML (see renderHtmlTable)
 let readsMarkdown = true;
 
+// The run markedFormatting last wrote escaped that is an HTML block as it
+// is, and its escaped text, as it wrote it, which buildMarkdown writes as it
+// is only where export reads the paragraph as written as its text (see
+// checkedHtmlBlock)
+let htmlBlockRun: { raw: string; escaped: string } | undefined;
+
 // The keys export knows of: those of the document's citations and its
 // bibliography, those whose citation data it found missing, as the notes
 // it writes at the document's end say, as "Citation data for @a was not
@@ -382,16 +388,70 @@ const HTML_TAG_LINE = new RegExp(HTML_OPEN_CLOSE_TAG_RE.source + '\\s*$');
 
 /** Whether text is an HTML block that ends in it, which Markdown reads as it
  *  is: one of a block's tag or that starts with a line of one tag, which a
- *  blank line ends, or one that ends at a marker with it. Not a comment,
- *  which export reads as the converter's own, nor a line of a tag import
- *  writes as a reference (see escapeSensitiveHtmlLikeTags) */
+ *  blank line ends, or one that ends at a marker with it, as a comment's.
+ *  One that starts with a comment, which export would read as the
+ *  converter's own, or holds a tag import writes as a reference (see
+ *  escapeSensitiveHtmlLikeTags), which export would read as formatting, a
+ *  table or an image, only where export shows it as text all the same, as
+ *  it does <!-- c --><pre>a</pre>, or a line of <b> before more lines. */
 function isHtmlBlock(text: string): boolean {
   const withEnd = HTML_BLOCKS_WITH_END.find(([start]) => start.test(text));
-  if (withEnd) return withEnd[1].test(text);
-  const line = text.split('\n', 1)[0];
-  const tag = HTML_LIKE_TAG_RE.exec(line);
-  return HTML_BLOCK_IN_PARAGRAPH[5].test(text)
-    || HTML_TAG_LINE.test(line) && !(tag && MARKDOWN_HTML_SENSITIVE_TAGS.has(tag[1].toLowerCase()));
+  const comment = HTML_BLOCK_IN_PARAGRAPH[1].test(text);
+  const block = withEnd ? withEnd[1].test(text)
+    : comment ? text.includes('-->')
+      : HTML_BLOCK_IN_PARAGRAPH[5].test(text) || HTML_TAG_LINE.test(text.split('\n', 1)[0]);
+  if (!block) return false;
+  const sensitive = [...text.matchAll(new RegExp(HTML_LIKE_TAG_RE.source, 'g'))].some(tag => MARKDOWN_HTML_SENSITIVE_TAGS.has(tag[1].toLowerCase()));
+  return !comment && !sensitive || showsAsText(text);
+}
+
+/** The text of the last line of `parts`, joined */
+function lastLine(parts: string[]): string {
+  let line = '';
+  for (let k = parts.length - 1; k >= 0; k--) {
+    const end = parts[k].lastIndexOf('\n');
+    if (end !== -1) return parts[k].slice(end + 1) + line;
+    line = parts[k] + line;
+  }
+  return line;
+}
+
+// The Markdown of the quotes and list items a line's prefix starts or goes
+// on in, before what's in them
+const CONTAINER_PREFIX = /^(?:[ \t]*(?:>[ \t]?|(?:[-+*]|\d{1,9}[.)])(?=[ \t]|$)))*[ \t]*/;
+
+/**
+ * A paragraph's text, `text`, as `write` writes it, the whitespace at its
+ * edges as references. Where the paragraph is all one run markedFormatting
+ * wrote escaped that is an HTML block as it is (see htmlBlockRun), it's
+ * that, as it is, where export reads it, after what `linePrefix()`, the
+ * Markdown before it in its paragraph, from its line's start or that of an
+ * alert's marker's line before it, has in the quote or list item it
+ * starts, as that text. Not with more in the paragraph, as a comment, which
+ * the block would show as its text. After a task's box or an alert's
+ * marker, on its line or the next, which no <b> interrupts, Markdown reads
+ * the HTML inline, and export drops a tag such as <b>, and a reference at
+ * its edge, as for a no-break space, leaves a tag inline or goes in the
+ * block's text as it is. Before lines after it in its paragraph
+ * (`linesAfter`), as an equation's or comment bodies', it's escaped too,
+ * as export reads no block with a line after it as one paragraph: a block
+ * a blank line ends, as <b>'s, takes the line in as its text, and one that
+ * ends at a marker, as a comment's or a </pre>, leaves it a block of its
+ * own, which splits Word's paragraph. Where the block is open, `opened`
+ * gets the escaped text, to write in its place where the next block goes
+ * on the line after it.
+ */
+function checkedHtmlBlock(text: string, write: (text: string) => string, linePrefix: () => string, linesAfter = false, opened?: (escaped: string) => void): string {
+  const block = htmlBlockRun;
+  htmlBlockRun = undefined;
+  const markdown = write(text);
+  if (block?.escaped !== text) return markdown;
+  const raw = write(block.raw);
+  const prefix = linePrefix().split('\n').map(line => line.replace(CONTAINER_PREFIX, '')).join('\n');
+  const open = !HTML_BLOCK_ENDS_AT_MARKER.test(raw.trimStart());
+  if (linesAfter || !showsAsText(prefix + raw, block.raw)) return markdown;
+  if (open) opened?.(markdown);
+  return raw;
 }
 
 // An HTML tag, comment or the like, as markdown-it reads one, from an offset
@@ -2674,14 +2734,22 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
   // A paragraph that is an HTML block, as export writes one, reads as it is,
   // escapes and all, so it takes none, as in <div>https://e.com</div>,
   // unless a line break of Word's would read as a backslash in it. Up to
-  // three spaces can come before it, which buildMarkdown writes as they are
-  const htmlBlock = !delimited && blockStart && !result.includes('\\\n') && isHtmlBlock(result.replace(/^ {1,3}(?=<)/, '')) && after?.first === '';
-  result = htmlBlock ? result : escaped;
-
+  // three spaces can come before it, which buildMarkdown writes as they are.
+  // The run is escaped here, and buildMarkdown writes it as it is only where
+  // it's all of its paragraph and export reads that as written, after its
+  // line's prefix, as its text (see checkedHtmlBlock)
+  const htmlBlock = !delimited && blockStart && !result.includes('\\\n') && after?.first === '' && isHtmlBlock(result.replace(/^ {1,3}(?=<)/, ''));
   // An = as a reference, without the backslash of an escaped =, not one of
   // an escaped backslash's
-  if (references) result = result.replace(/((?:\\\\)*)\\?=/g, (_m, pairs: string) => pairs + '&#61;');
-  return wrapFormatting(result, fmt, highlightOuter);
+  const written = (text: string) => wrapFormatting(references ? text.replace(/((?:\\\\)*)\\?=/g, (_m, pairs: string) => pairs + '&#61;') : text, fmt, highlightOuter);
+  if (!htmlBlock) return written(escaped);
+  // Escaped, its line ends, which are its text's own, as Word's line breaks
+  // aren't in a block (above), are references, which keep them in Word,
+  // where Markdown would read a line's start as syntax, as a heading's #
+  // or a list's marker, and export a line end in a paragraph as a space.
+  // No backslash comes before one, which a line break's would be.
+  htmlBlockRun = { raw: written(result), escaped: written(escaped.replace(/\n/g, '&#10;')) };
+  return htmlBlockRun.escaped;
 }
 
 /** A run's text and formatting as HTML, as renderHtmlCellParagraph writes
@@ -8473,9 +8541,10 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
   // But a line end in a cell, as in its comment, would end the block there,
   // where its end is before it or in the table, so the HTML before the
   // table goes as blocks of its own, as it does around a table in another
-  // format, and the table starts one; and neither goes where that can't be
-  // read as it was. A block whose end is after the table, as a <pre>'s
-  // around it, goes on over the line end.
+  // format, and the table starts one, on lines of its own, as the next
+  // import writes a table with no HTML before it; and neither goes where
+  // that can't be read as it was. A block whose end is after the table, as
+  // a <pre>'s around it, goes on over the line end.
   let after = around?.[1] ?? '';
   const ends = oneLine ? htmlBlockEndMarker((around?.[0] ?? '').trimStart()) : undefined;
   if (ends && !ends.test(lines.join('') + after)) {
@@ -8491,6 +8560,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
     const before = detachedTableHtml(around?.[0] ?? '');
     lines[0] = (before ? before + '\n\n' : '') + lines[0].slice((around?.[0] ?? '').length);
     if (before === null) after = '';
+    oneLine = false;
   }
   lines.push('</table>' + after);
   // Comment bodies go after the table, as in a pipe table: a blank line in
@@ -11271,6 +11341,27 @@ export function buildMarkdown(
     if (existing < desired) output.push('\n'.repeat(desired - existing));
   }
 
+  // The paragraphs' HTML blocks that a blank line ends, as checkedHtmlBlock
+  // kept them: where each is in output, its escaped text, which goes in its
+  // place where the next block goes on the line after it, in its quote or
+  // list item or at the top level, as a comment, directive or quote with no
+  // blank line before it does, which the block would read as its text, and
+  // what the lines of its quote or list item start with (see
+  // paragraphLinePrefix). Not where that line leaves them, as a list's next
+  // item does, which ends the block. Which it is shows once text follows
+  // it, as the line ends before may yet be taken out, as for a comment's
+  // gap, and the line has more than that prefix, or ends.
+  let openHtmlBlocks: Array<{ index: number; escaped: string; prefix: string }> = [];
+  function closeHtmlBlocks(): void {
+    openHtmlBlocks = openHtmlBlocks.filter(({ index, escaped, prefix }) => {
+      const after = output.slice(index + 1).join('');
+      const next = /^\n([^\n]*)(\n?)/.exec(after);
+      if (!/\S/.test(after) || next && !next[2] && prefix.trimEnd().startsWith(next[1].trimEnd())) return true;
+      if (next && next[1].startsWith(prefix) && /\S/.test(next[1].slice(prefix.length))) output[index] = escaped;
+      return false;
+    });
+  }
+
   // Emit separator before a sentinel using stored gap metadata.
   // Returns true if a gap-aware separator was emitted, false otherwise.
   function emitSentinelSep(gapKey: string): boolean {
@@ -11312,6 +11403,7 @@ export function buildMarkdown(
   }
 
   while (i < mergedContent.length) {
+    closeHtmlBlocks();
     const wordItem = mergedContent[i];
     const tableJoin = lastTableJoin;
     lastTableJoin = undefined;
@@ -12216,44 +12308,49 @@ export function buildMarkdown(
     // them, which export trims, nor before a comment a paragraph would
     // read as text, as one with a blank line in it, which only the block
     // holds, or as more than it, as one that ends in ---> with the next.
-    const indent = ownLine && atStart ? /^[ \t]+(?=<)/.exec(textOut)?.[0] ?? '' : '';
-    let indentColumns = 0;
-    if (indent) {
-      let line = '';
-      for (let k = output.length - 1; k >= 0; k--) {
-        const end = output[k].lastIndexOf('\n');
-        line = output[k].slice(end + 1) + line;
-        if (end !== -1) break;
-      }
-      indentColumns = columnAfter(line + indent) - columnAfter(line);
-    }
-    const htmlIndent = indentColumns <= 3 ? indent : '';
-    const referenced = keepParagraphWhitespace(textOut, atStart, atEnd);
     const items = mergedContent.slice(i, rendered.nextIndex);
-    const payloads = items.flatMap((item, k) => item.type === 'html_comment' ? [markdownComment(item.text, items[k + 1]?.type === 'html_comment')] : []);
-    // A block of comments and line breaks gives back runs that are each one
-    // comment, as export splits it at each one's first -->, so a paragraph
-    // mustn't merge those; others, as Word split, it may
-    const blockKeepsRuns = isLineBreakBlock(textOut) && payloads.every(payload => payload.startsWith('<!--') && payload.indexOf('-->', 4) === payload.length - 3);
-    // Text the runs hold outside their comments, read together as Word may
-    // split one, which a paragraph would show, the block keeps hidden in
-    // its run, with the rest of the paragraph, where that's spaces and tabs
-    // and the block is the comments' (see annotateHtmlCommentIndices)
-    const commentsAlone = items.every(item => item.type === 'html_comment' || item.type === 'text' && /^[ \t]*$/.test(item.text));
-    const hidesText = /\S/.test(outsideComments(payloads.join(''))) && commentsAlone
-      && /^<!--[\s\S]*?-->\s*$/.test(textOut.trim());
-    const runHoldsIndent = commentsAlone && items[0]?.type === 'html_comment' && /^[ \t]/.test(items[0].text);
-    const inline = () => !hidesText && (isLineBreakBlock(textOut) || /^[ \t]*<!--/.test(textOut) && !runHoldsIndent)
-      && readsCommentsInline(referenced, payloads, !blockKeepsRuns);
-    // Whitespace alone before an equation in the paragraph keeps the space
-    // export wrote for its line end as it is, which the math branch takes
-    // off, as it does after other text, or it would gain one each round trip
-    textOut = mathFollows && /^[ \t]* $/.test(textOut) ? keepParagraphWhitespace(textOut.slice(0, -1), atStart, atEnd) + ' '
-      : htmlIndent && startsHtmlBlock(' '.repeat(indentColumns) + textOut.slice(htmlIndent.length)) && !inline()
-        ? htmlIndent + keepParagraphWhitespace(textOut.slice(htmlIndent.length), true, atEnd)
-        : referenced;
-    if (atEnd && !isInParagraphMath(next)) textOut = withoutEndSpaces(textOut);
-    if (mathFollows) textOut = beforeParagraphMath(textOut);
+    const withEdges = (text: string) => {
+      const indent = ownLine && atStart ? /^[ \t]+(?=<)/.exec(text)?.[0] ?? '' : '';
+      let indentColumns = 0;
+      if (indent) {
+        const line = lastLine(output);
+        indentColumns = columnAfter(line + indent) - columnAfter(line);
+      }
+      const htmlIndent = indentColumns <= 3 ? indent : '';
+      const referenced = keepParagraphWhitespace(text, atStart, atEnd);
+      const payloads = items.flatMap((item, k) => item.type === 'html_comment' ? [markdownComment(item.text, items[k + 1]?.type === 'html_comment')] : []);
+      // A block of comments and line breaks gives back runs that are each one
+      // comment, as export splits it at each one's first -->, so a paragraph
+      // mustn't merge those; others, as Word split, it may
+      const blockKeepsRuns = isLineBreakBlock(text) && payloads.every(payload => payload.startsWith('<!--') && payload.indexOf('-->', 4) === payload.length - 3);
+      // Text the runs hold outside their comments, read together as Word may
+      // split one, which a paragraph would show, the block keeps hidden in
+      // its run, with the rest of the paragraph, where that's spaces and tabs
+      // and the block is the comments' (see annotateHtmlCommentIndices)
+      const commentsAlone = items.every(item => item.type === 'html_comment' || item.type === 'text' && /^[ \t]*$/.test(item.text));
+      const hidesText = /\S/.test(outsideComments(payloads.join(''))) && commentsAlone
+        && /^<!--[\s\S]*?-->\s*$/.test(text.trim());
+      const runHoldsIndent = commentsAlone && items[0]?.type === 'html_comment' && /^[ \t]/.test(items[0].text);
+      const inline = () => !hidesText && (isLineBreakBlock(text) || /^[ \t]*<!--/.test(text) && !runHoldsIndent)
+        && readsCommentsInline(referenced, payloads, !blockKeepsRuns);
+      // Whitespace alone before an equation in the paragraph keeps the space
+      // export wrote for its line end as it is, which the math branch takes
+      // off, as it does after other text, or it would gain one each round trip
+      const edged = mathFollows && /^[ \t]* $/.test(text) ? keepParagraphWhitespace(text.slice(0, -1), atStart, atEnd) + ' '
+        : htmlIndent && startsHtmlBlock(' '.repeat(indentColumns) + text.slice(htmlIndent.length)) && !inline()
+          ? htmlIndent + keepParagraphWhitespace(text.slice(htmlIndent.length), true, atEnd)
+          : referenced;
+      const ended = atEnd && !isInParagraphMath(next) ? withoutEndSpaces(edged) : edged;
+      return mathFollows ? beforeParagraphMath(ended) : ended;
+    };
+    // Its paragraph's Markdown goes on from an alert's marker's line where
+    // the text starts on the next (see alertMarkerLineEnd), and on to the
+    // lines of an equation in it and comment bodies after it. A block it
+    // opens is open to the next block (see openHtmlBlocks)
+    const paragraphStart = alertMarkerLineEnd ?? output.length;
+    let opensBlock: string | undefined;
+    textOut = checkedHtmlBlock(textOut, withEdges, () => lastLine(output.slice(0, paragraphStart)) + output.slice(paragraphStart).join(''),
+      mathFollows || rendered.deferredComments.length > 0, escaped => { opensBlock = escaped; });
     // Track standalone HTML comment paragraphs for gap metadata and keep the
     // blank lines a para item wrote before them, where export reads what
     // import wrote as one: a block that starts and ends with a comment, as
@@ -12359,20 +12456,25 @@ export function buildMarkdown(
       }
       pendingHeadingCriticMarker = undefined;
     }
-    // The line after a tracked break that ends a list item's text takes
-    // the item's indent (see joinTrackedParagraphBreaks)
-    if (breakMarks && listLinePrefix) textOut = textOut.split(breakMarks.indent).join(listLinePrefix);
-    // A quote's continuation lines, as of a comment's body, take its prefix,
-    // without which a line break in the body reads as a paragraph break
-    if (quoteLinePrefix) {
-      textOut = textOut.replace(/\n(?=([\s\S]))/g, (_m, next: string) =>
-        '\n' + (next === '\n' ? quoteLinePrefix.trimEnd() : quoteLinePrefix));
-    } else if (listLinePrefix && /^ {0,3}</.test(textOut) && textOut.includes('\n') && startsHtmlBlock(textOut)) {
+    // The paragraph's lines after its first, as of the escaped text of a
+    // block it opens too
+    const prefixLines = (text: string): string => {
+      // The line after a tracked break that ends a list item's text takes
+      // the item's indent (see joinTrackedParagraphBreaks)
+      if (breakMarks && listLinePrefix) text = text.split(breakMarks.indent).join(listLinePrefix);
+      // A quote's continuation lines, as of a comment's body, take its prefix,
+      // without which a line break in the body reads as a paragraph break
+      if (quoteLinePrefix) {
+        return text.replace(/\n(?=([\s\S]))/g, (_m, next: string) =>
+          '\n' + (next === '\n' ? quoteLinePrefix.trimEnd() : quoteLinePrefix));
+      }
       // A paragraph's lines stay in it without, and a comment's body would
       // take the indent as its text. A blank line too, which a <pre> can
       // hold, and which ends the item's block at the margin
-      textOut = textOut.replace(/\n(?=[\s\S])/g, '\n' + listLinePrefix);
-    }
+      return listLinePrefix && /^ {0,3}</.test(text) && text.includes('\n') && startsHtmlBlock(text)
+        ? text.replace(/\n(?=[\s\S])/g, '\n' + listLinePrefix) : text;
+    };
+    textOut = prefixLines(textOut);
     listHtmlBlockOpen = !!listLinePrefix && startsHtmlBlock(textOut) && !HTML_BLOCK_ENDS_AT_MARKER.test(textOut.trimStart());
     if (rendered.deferredComments.length > 0) {
       // Before an equation, whose line end is the one after the bodies (see
@@ -12388,6 +12490,7 @@ export function buildMarkdown(
       output.push(bodies);
       if (deferredCommentQuote) quotedBodies = { text: bodies, ...deferredCommentQuote };
     } else {
+      if (opensBlock !== undefined) openHtmlBlocks.push({ index: output.length, escaped: prefixLines(opensBlock), prefix: currentPara ? paragraphLinePrefix(currentPara) : '' });
       output.push(textOut);
       // Nothing follows an alert's marker in its paragraph, which takes the
       // place of the marker's space or line end
@@ -12409,6 +12512,7 @@ export function buildMarkdown(
   }
   // Trailing empty revised heading: serialize its deferred marker.
   flushPendingHeadingCriticMarker();
+  closeHtmlBlocks();
 
   // Leave out a <!-- references --> marker the body ends with, where export
   // puts the bibliography without one, at the end of the document, which in
@@ -12462,12 +12566,18 @@ export function buildMarkdown(
       // whitespace alone keeps the space export wrote for its line end as it
       // is, as in the body.
       const inlinePart = (text: string, beforeMath = false) => {
-        const broken = (beforeMath ? text : text.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + '<br>'))
-          .replace(HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END, (_m, backslashes: string, close: string) => backslashes + '<br>' + close);
-        const atStart = partStart === 0 || isMarkdownBlockEdge(bodyMerged[partStart - 1]);
-        return beforeMath && /^[ \t]* $/.test(broken) ? keepParagraphWhitespace(broken.slice(0, -1), atStart, true) + ' '
-          : beforeMath ? beforeParagraphMath(keepParagraphWhitespace(broken, atStart, true))
-            : withoutEndSpaces(keepParagraphWhitespace(broken, atStart, true));
+        const write = (text: string) => {
+          const broken = (beforeMath ? text : text.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + '<br>'))
+            .replace(HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END, (_m, backslashes: string, close: string) => backslashes + '<br>' + close);
+          const atStart = partStart === 0 || isMarkdownBlockEdge(bodyMerged[partStart - 1]);
+          return beforeMath && /^[ \t]* $/.test(broken) ? keepParagraphWhitespace(broken.slice(0, -1), atStart, true) + ' '
+            : beforeMath ? beforeParagraphMath(keepParagraphWhitespace(broken, atStart, true))
+              : withoutEndSpaces(keepParagraphWhitespace(broken, atStart, true));
+        };
+        // After the label or the part's indent, which a block can start
+        // after, or on the line of the equation the text goes on after,
+        // and before the lines of one in the paragraph after it
+        return checkedHtmlBlock(text, write, () => paragraphPart === undefined ? '' : lastLine([bodyParts[paragraphPart]]), beforeMath);
       };
       // The part that holds the paragraph's text and display math so far,
       // which an equation in the paragraph goes on in, on the next line, and

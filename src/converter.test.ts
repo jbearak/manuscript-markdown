@@ -2175,15 +2175,16 @@ describe('HTML blocks in list items', () => {
   });
 
   test.each([
-    ['under an item', '- a\n\n  <!-- c --><div>b</div>\n', '- a\n\n  \\<!-- c --><div>b</div>\n'],
-    ['under an item, with a space before the HTML', '- a\n\n  <!-- c --> <div>b</div>\n', '- a\n\n  \\<!-- c --> <div>b</div>\n'],
-    ['under an item, indented past it', '- a\n\n   <!-- c --><div>b</div>\n', '- a\n\n  &#32;\\<!-- c --><div>b</div>\n'],
-    ['that is an item', '- <!-- c --><div>b</div>\n', '- \\<!-- c --><div>b</div>\n'],
-  ])('keeps a block a comment starts %s as text, as at the top level', async (_name, md, expected) => {
-    // Export dropped it, with the HTML after the comment
+    ['under an item', '- a\n\n  <!-- c --><div>b</div>\n'],
+    ['under an item, with a space before the HTML', '- a\n\n  <!-- c --> <div>b</div>\n'],
+    ['under an item, indented past it', '- a\n\n   <!-- c --><div>b</div>\n'],
+    ['that is an item', '- <!-- c --><div>b</div>\n'],
+  ])('keeps a block a comment starts %s, which Word shows as text, as at the top level', async (_name, md) => {
+    // Export dropped it, with the HTML after the comment, and import wrote
+    // the text Word shows with its comment escaped, as text
     expect((await convertMdToDocx(md)).warnings).toEqual([]);
-    expect(await roundTrip(md)).toBe(expected);
-    expect(await roundTrip(expected)).toBe(expected);
+    expect(await roundTrip(md)).toBe(md);
+    expect(await roundTrip(await roundTrip(md))).toBe(md);
   });
 
   test.each([
@@ -9508,9 +9509,29 @@ describe('HTML around a table in its block', () => {
     expect(broken).not.toBe(xml);
     zip.file('word/document.xml', broken);
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
-    expect(markdown).toBe('<table><tr><td><p>a<!-- x\ny -->b</p></td></tr></table>\n');
+    expect(markdown).toBe('<table>\n  <tr>\n    <td>\n      <p>a<!-- x\ny -->b</p>\n    </td>\n  </tr>\n</table>\n');
     const again = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
     expect(again.slice(again.indexOf('<w:tbl>'))).not.toContain('<w:sz w:val="22"/>');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['a comment', '<!-- c -->', '<!-- c -->\n\n'],
+    ['a comment and text', '<!-- c -->Cap', '<!-- c -->Cap\n\n'],
+    ['a <pre>', '<pre>a</pre>', '<pre>a</pre>\n\n'],
+    ['a processing instruction', '<?x?>', '<?x?>\n\n'],
+  ])('writes a table after %s on its line on lines of its own where Word adds a line end in a cell\'s comment', async (_name, before, beforeMd) => {
+    // The HTML before it went as a block of its own, but the table went on
+    // one line, as with that HTML in its block, which the next import wrote
+    // on lines of its own, as a table with no HTML before it
+    const zip = await JSZip.loadAsync((await convertMdToDocx(before + '<table><tr><td>a<!-- x y -->b</td></tr></table>\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const broken = xml.replace('&lt;!-- x y --&gt;', '&lt;!-- x</w:t><w:br/><w:t xml:space="preserve">y --&gt;');
+    expect(broken).not.toBe(xml);
+    zip.file('word/document.xml', broken);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe(beforeMd + '<table>\n  <tr>\n    <td>\n      <p>a<!-- x\ny -->b</p>\n    </td>\n  </tr>\n</table>\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
   });
 
   test.each([
@@ -17313,6 +17334,189 @@ describe('HTML comments between Word runs', () => {
     const docx = await withRuns(runs, template);
     const markdown = strip((await convertDocx(docx)).markdown);
     expect(markdown).toBe(md + '\n');
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect(await shown(again)).toEqual(await shown(docx));
+    expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
+  });
+});
+
+describe('HTML blocks Word shows as text', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n/, '');
+  /** The body's text, as Word shows it, by paragraph, and its tables */
+  const shown = async (docx: Uint8Array) => {
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const body = xml.slice(xml.indexOf('<w:body>'), xml.lastIndexOf('<w:sectPr'));
+    return [...body.matchAll(/<w:tbl>|<w:p[ >][\s\S]*?<\/w:p>/g)].map(([p]) => p === '<w:tbl>' ? p
+      : [...p.matchAll(/<w:r>([\s\S]*?)<\/w:r>/g)].filter(([, run]) => !run.includes('<w:vanish/>'))
+        .map(([, run]) => [...run.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>|<w:br\/>/g)].map(([t, text]) => text ?? t).join('')).join(''));
+  };
+
+  test.each([
+    ['a comment and HTML after it on its line', '<!-- c --><pre>a</pre>\n'],
+    ['a comment and HTML after a space', '<!-- c --> <div>a</div>\n'],
+    ['a comment and text after it', '<!-- c -->text\n'],
+    ['a comment over lines and HTML after it', '<!-- a\nb --> <span>x</span>\n'],
+    ['a comment that alone would be a directive, and HTML after it', '<!-- table-font-size: 11 --><pre>a</pre>\n'],
+    ['a comment and an image\'s tag after it', '<!-- c --><img src="x.png">\n'],
+    ['a line of <b> before more lines', '<b>\nbold text\n</b>\n'],
+    ['a line of <del> before more lines', '<del>\nx\n</del>\n'],
+    ['a line of <sup> before more lines', '<sup>\nx\n</sup>\n'],
+    ['a line of </b> before more lines', '</b>\nx\n'],
+    ['a line of <b> with attributes before more lines', '<b class="x">\nt\n</b>\n'],
+    ['a line of <br> before more lines', '<br>\ntext\n'],
+    ['a line of <b> alone', '<b>\n'],
+    ['a line of <b> alone before a blank line and a comment', '<b>\n\n<!-- c -->\n'],
+  ])('keeps a block of %s as it was', async (_name, md) => {
+    // Export shows it as its text, which import wrote as text, its comment
+    // or tag escaped, which the preview showed, and the next export read as
+    // a paragraph, whose lines Word ran together
+    const docx = (await convertMdToDocx(md)).docx;
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(md);
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect(await shown(again)).toEqual(await shown(docx));
+    expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['a table', '<table><tr><td>a</td></tr></table>', '&lt;table&gt;&lt;tr&gt;&lt;td&gt;a&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;\n'],
+    ['a comment and a table', '<!-- c --><table><tr><td>a</td></tr></table>', '\\<!-- c -->&lt;table&gt;&lt;tr&gt;&lt;td&gt;a&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;\n'],
+    ['a comment', '<!-- c -->', '\\<!-- c -->\n'],
+    ['an image\'s tag', '<img src="x.png">', '&lt;img src="x.png"&gt;\n'],
+  ])('keeps Word\'s text of %s as text', async (_name, text, md) => {
+    // Written as it is, a table's read as one, which export made of it
+    const zip = await JSZip.loadAsync((await convertMdToDocx('XX')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace(/<w:t>XX<\/w:t>/, '<w:t>' + text.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</w:t>');
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    const docx = await zip.generateAsync({ type: 'uint8array' });
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(md);
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect(await shown(again)).toEqual(await shown(docx));
+    expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['after a task\'s box', '- [ ] &lt;b&gt;\n', '- [ ] &lt;b&gt;\n'],
+    ['of a comment and HTML after a task\'s box', '- [ ] &lt;!-- c --&gt;&lt;pre&gt;a&lt;/pre&gt;\n', '- [ ] \\<!-- c --><pre>a</pre>\n'],
+    ['of a <div> holding a <b> after a task\'s box', '- [ ] &lt;div&gt;&lt;b&gt;x&lt;/b&gt;&lt;/div&gt;\n', '- [ ] \\<div>&lt;b&gt;x&lt;/b&gt;</div>\n'],
+    ['after an alert\'s marker with no label', '---\ncallout-labels: false\n---\n\n> [!NOTE] &lt;b&gt;\n', '> [!NOTE] &lt;b&gt;\n'],
+    ['on the line after an alert\'s marker with no label', '---\ncallout-labels: false\n---\n\n> [!NOTE]\n> &lt;b&gt;\n', '> [!NOTE]\n> &lt;b&gt;\n'],
+    ['before a no-break space', '&lt;b&gt;&nbsp;\n', '&lt;b&gt;&nbsp;\n'],
+    ['of a comment and HTML before a no-break space', '&lt;!-- c --&gt;&lt;pre&gt;a&lt;/pre&gt;&nbsp;\n', '\\<!-- c --><pre>a</pre>&nbsp;\n'],
+    ['of a <div> before a no-break space', '&lt;div&gt;x&lt;/div&gt;&nbsp;\n', '\\<div>x</div>&nbsp;\n'],
+    ['after a space in a list item', '- &#32;&lt;b&gt;\n', '- &#32;&lt;b&gt;\n'],
+    ['before a no-break space in a later paragraph of a list item', '- a\n\n  &lt;b&gt;&nbsp;\n', '- a\n\n  &lt;b&gt;&nbsp;\n'],
+    ['before a no-break space in a note', 'A[^1]\n\n[^1]: &lt;b&gt;&nbsp;\n', 'A[^1]\n\n[^1]: &lt;b&gt;&nbsp;\n'],
+    ['after a space in a note', 'A[^1]\n\n[^1]: &#32;&lt;b&gt;\n', 'A[^1]\n\n[^1]: &#32;&lt;b&gt;\n'],
+  ])('keeps Word\'s HTML %s as text, which Markdown would read inline or with a reference in it', async (_name, md, back) => {
+    // As the line's prefix or the edge's reference leaves it, a tag export
+    // drops, or text with the reference's own
+    const docx = (await convertMdToDocx(md)).docx;
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(back);
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect(await shown(again)).toEqual(await shown(docx));
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  test.each([
+    ['a <b>', '&lt;b&gt;{>>c<<}\n', '&lt;b&gt;{>>c<<}\n'],
+    ['a <div>', '&lt;div&gt;x&lt;/div&gt;{>>c<<}\n', '\\<div>x</div>{>>c<<}\n'],
+    ['a comment and HTML', '&lt;!-- c --&gt;&lt;pre&gt;a&lt;/pre&gt;{>>n<<}\n', '\\<!-- c --><pre>a</pre>{>>n<<}\n'],
+    ['a <b> in a list item', '- &lt;b&gt;{>>c<<}\n', '- &lt;b&gt;{>>c<<}\n'],
+    ...([
+      ['a heading\'s #', '# h', '# h'],
+      ['a list\'s marker', '- i', '- i'],
+      ['a numbered list\'s marker', '1. i', '1. i'],
+      ['a quote\'s >', '&gt; q', '> q'],
+      ['a fence', '```', '\\`\\`\\`'],
+      ['a thematic break', '---', '---'],
+      ['a heading\'s underline', '===', '==='],
+      ['a table\'s row', '| a |', '| a |'],
+      ['a <pre>', '&lt;pre&gt;', '<pre>'],
+      ['code\'s indent', '    c', '    c'],
+    ] as const).map(([name, line, back]) => ['a <div> over lines, with ' + name + ' at a line\'s start',
+      '&lt;div&gt;&#10;' + line + '&#10;&lt;/div&gt;{>>c<<}\n', '\\<div>&#10;' + back + '&#10;</div>{>>c<<}\n']),
+    ['a <div> over lines in a list item', '- &lt;div&gt;&#10;# h&#10;&lt;/div&gt;{>>c<<}\n', '- \\<div>&#10;# h&#10;</div>{>>c<<}\n'],
+  ])('keeps Word\'s text of %s as text with a comment on it', async (_name, md, back) => {
+    // The comment went in the block, which showed it as text, or dropped
+    // the <b>, as a tag a comment's text goes on after. Escaped, a line end
+    // of Word's text read the line after as Markdown, as a heading, or
+    // went as a space.
+    const docx = (await convertMdToDocx(md)).docx;
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(back);
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect(await shown(again)).toEqual(await shown(docx));
+    expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['a comment', '&lt;b&gt;\n<!-- c -->\n'],
+    ['a directive', '&lt;b&gt;\n<!-- table-font-size: 11 -->\n'],
+    ['a section\'s fence', '&lt;b&gt;\n<!-- landscape -->\n\nb\n\n<!-- /landscape -->\n'],
+    ['a section\'s closing fence', 'a\n\n<!-- landscape -->\n&lt;b&gt;\n<!-- /landscape -->\n'],
+    ['a quote', '&lt;b&gt;\n> q\n'],
+    ['an equation in its paragraph', '&lt;b&gt;\n$$\nE\n$$\n'],
+    ['an equation in its paragraph in a note', 'A[^1]\n\n[^1]: x\n\n    &lt;b&gt;\n    $$\n    E\n    $$\n'],
+    ['a quote in its list item', '- &lt;b&gt;\n  > q\n'],
+    ['a quote in its item of a sublist', '- a\n  - &lt;b&gt;\n    > q\n'],
+    ['a quote in a later paragraph of its list item', '- a\n\n  &lt;b&gt;\n  > q\n'],
+    ['a quote in its quote', '> &lt;b&gt;\n> > q\n'],
+  ])('keeps Word\'s text of a <b> as text before %s on the line after it', async (_name, md) => {
+    // The block a line of <b> starts, which a blank line ends, took the
+    // line in as its text, which the next export showed, a comment's or
+    // a fence's, whose section it lost, or an equation's
+    const docx = (await convertMdToDocx(md)).docx;
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(md);
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect(await shown(again)).toEqual(await shown(docx));
+    expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
+  });
+
+  const inParagraphMath = (prefix: string) => '\n' + prefix + '$' + '$\n' + prefix + 'E\n' + prefix + '$' + '$\n';
+  test.each([
+    ['a comment and text', '&lt;!-- c --&gt;text', '\\<!-- c -->text', ''],
+    ['a <pre>', '&lt;pre&gt;a&lt;/pre&gt;', '\\<pre>a</pre>', ''],
+    ['a comment and HTML', '&lt;!-- c --&gt;&lt;pre&gt;a&lt;/pre&gt;', '\\<!-- c --><pre>a</pre>', ''],
+    ['a processing instruction', '&lt;?x?&gt;', '\\<?x?>', ''],
+    ['a comment and text in a quote', '> &lt;!-- c --&gt;text', '> \\<!-- c -->text', '> '],
+    ['a <pre> in a list item', '- &lt;pre&gt;a&lt;/pre&gt;', '- \\<pre>a</pre>', '  '],
+    ['a comment and text in a note', 'A[^1]\n\n[^1]: x\n\n    &lt;!-- c --&gt;text', 'A[^1]\n\n[^1]: x\n\n    \\<!-- c -->text', '    '],
+  ])('keeps Word\'s text of %s as text before an equation in its paragraph', async (_name, text, back, prefix) => {
+    // A block that ends at its marker, as it is, left the equation a block
+    // of its own, which split Word's paragraph in two
+    const docx = (await convertMdToDocx(text + inParagraphMath(prefix))).docx;
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(back + inParagraphMath(prefix));
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect(await shown(again)).toEqual(await shown(docx));
+    expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
+  });
+
+  test('keeps a block that ends at its marker as it was before an equation after a blank line', async () => {
+    const md = '<pre>a</pre>\n' + inParagraphMath('');
+    expect(strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown)).toBe(md);
+  });
+
+  test.each([
+    ['in a quote', '> <b>\n'],
+    ['in a list item', '- <b>\n'],
+    ['in a later paragraph of a list item', '- a\n\n  <b>\n'],
+    ['of more than one line in a quote', '> <b>\n> bold text\n> </b>\n'],
+    ['of more than one line in a later paragraph of a list item', '- a\n\n  <b>\n  bold text\n  </b>\n'],
+    ['in a note', 'A[^1]\n\n[^1]: <b>\n'],
+    ['before its list\'s next item', '- <b>\n- next\n'],
+    ['before a blank line in its quote', '> <b>\n>\n> q\n'],
+    ['before a blank line and a quote in its list item', '- <b>\n\n  > q\n'],
+  ])('keeps a block of a <b> %s as it was', async (_name, md) => {
+    const docx = (await convertMdToDocx(md)).docx;
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(md);
     const again = (await convertMdToDocx(markdown)).docx;
     expect(await shown(again)).toEqual(await shown(docx));
     expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
