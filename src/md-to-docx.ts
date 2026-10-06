@@ -176,6 +176,7 @@ export interface MdRun {
   href?: string;            // hyperlink URL
   escapedBracket?: true;    // text that starts with \[, whose [ is text and not a task's box or an alert's marker
   taskBoxLength?: number;   // of the task's box that starts the text and the whitespace after it the source holds as it is (see task_box_whitespace)
+  alertMarkerLength?: number; // of the alert's marker that starts the text and the whitespace after it the source holds as it is (see alert_marker_whitespace)
   // CriticMarkup specific
   newText?: string;         // for substitutions: {~~old~>new~~}
   innerRuns?: MdRun[];      // parsed inner formatting for critic_add/del/highlight
@@ -950,6 +951,27 @@ function createMarkdownIt(): MarkdownIt {
       let last = 0;
       while (children[last + 1]?.type === 'text' || children[last + 1]?.type === 'text_special') last++;
       children[last].meta = { ...children[last].meta, taskBoxLength: box[0].length };
+    }
+  });
+  // An alert's marker takes the whitespace after it in the source, but not
+  // a reference after that, as &#32;, as import writes the whitespace the
+  // alert's text starts with, which text_join joins to it. The length of the
+  // marker and its whitespace goes in the meta of the last token of the run
+  // text_join joins, as above.
+  md.core.ruler.before('text_join', 'alert_marker_whitespace', state => {
+    for (const block of state.tokens) {
+      const children = block.type === 'inline' ? block.children ?? [] : [];
+      const isText = (token: Token | undefined) => token?.type === 'text' || token?.type === 'text_special';
+      for (let i = 0; i < children.length; i++) {
+        // A marker starts the paragraph or a line (see holdsMarker)
+        if (i > 0 && children[i - 1].type !== 'softbreak' && children[i - 1].type !== 'hardbreak') continue;
+        const marker = children[i].type === 'text' ? /^\[![A-Za-z]+\][ \t]+/.exec(children[i].content) : null;
+        if (!marker || children[i + 1]?.type !== 'text_special') continue;
+        let last = i;
+        while (isText(children[last + 1])) last++;
+        children[last].meta = { ...children[last].meta, alertMarkerLength: marker[0].length };
+        i = last;
+      }
     }
   });
   md.core.ruler.after('block', 'document_link_definitions', state => {
@@ -2557,11 +2579,14 @@ function stripLeadingAlertMarker(runs: MdRun[]): { alertType?: GfmAlertType; run
   const firstTextIdx = runs.findIndex(run => run.type === 'text' && run.text.length > 0);
   if (firstTextIdx === -1) return { runs };
   const firstText = runs[firstTextIdx];
-  const parsed = holdsMarker(runs, firstTextIdx) ? parseGfmAlertMarker(firstText.text) : undefined;
+  // The marker, with only the whitespace the source holds as it is after it
+  const markerLength = firstText.alertMarkerLength ?? firstText.text.length;
+  const parsed = holdsMarker(runs, firstTextIdx) ? parseGfmAlertMarker(firstText.text.slice(0, markerLength)) : undefined;
   if (!parsed) return { runs };
+  const rest = parsed.rest + firstText.text.slice(markerLength);
   const nextRuns = [...runs];
-  if (parsed.rest.length > 0) {
-    nextRuns[firstTextIdx] = { ...firstText, text: parsed.rest };
+  if (rest.length > 0) {
+    nextRuns[firstTextIdx] = { ...firstText, text: rest, alertMarkerLength: undefined };
   } else {
     nextRuns.splice(firstTextIdx, 1);
   }
@@ -3292,6 +3317,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
             href: currentHref,
             ...(token.meta?.escapedBracket ? { escapedBracket: true as const } : {}),
             ...(token.meta?.taskBoxLength ? { taskBoxLength: token.meta.taskBoxLength as number } : {}),
+            ...(token.meta?.alertMarkerLength ? { alertMarkerLength: token.meta.alertMarkerLength as number } : {}),
           });
         }
         break;
