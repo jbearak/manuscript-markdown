@@ -10650,11 +10650,16 @@ export function buildMarkdown(
   // Before a quote group with no blank line before it, after another. Where
   // it's the shallower, in the same list item or none, the source had a
   // line that ended the deeper one's paragraph, as a bare >, without which
-  // its text continues that one. Out of the item, its indent ends that.
+  // its text continues that one. Out of the item, its indent ends that. So
+  // does one at the same level, unless an alert's marker starts it: a
+  // nested one takes the bare > of the quote around it, and one at the top
+  // a blank line, as Markdown has nothing between two quotes there.
   function adjoiningQuoteGroups(item: Extract<ContentItem, { type: 'para' }>): string {
-    const shallower = lastBlockquoteLevel !== undefined && item.blockquoteLevel !== undefined && item.blockquoteLevel < lastBlockquoteLevel
-      && lastBlockquoteListLevel === item.listContinuation?.level;
-    return shallower ? blockquotePrefix(item).trimEnd() + '\n' : '';
+    const level = item.blockquoteLevel;
+    if (lastBlockquoteLevel === undefined || level === undefined || lastBlockquoteListLevel !== item.listContinuation?.level) return '';
+    if (level < lastBlockquoteLevel) return blockquotePrefix(item).trimEnd() + '\n';
+    if (level > lastBlockquoteLevel || item.alertType) return '';
+    return level > 1 ? blockquotePrefix({ ...item, blockquoteLevel: level - 1 }).trimEnd() + '\n' : '\n';
   }
 
   // What a paragraph's lines after its first start with: its quote's >, or
