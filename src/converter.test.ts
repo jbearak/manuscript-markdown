@@ -7526,7 +7526,7 @@ describe('HTML around a table in its block', () => {
 
   test.each([
     ['deletes a grid table before it', '+---+\n| P |\n+===+\n| p |\n+---+\n\n', (xml: string) => xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, ''), ''],
-    ['adds a table before it', '', (xml: string) => xml.replace('<w:tbl>', '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>New</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/><w:tbl>'), table('New') + '\n\n'],
+    ['adds a table before it', '', (xml: string) => xml.replace('<w:tbl>', '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>New</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/><w:tbl>'), '+-----+\n| New |\n+-----+\n\n'],
   ])('keeps a table HTML with the HTML around it on its lines where Word %s', async (_name, other, edit, added) => {
     // It took the format export wrote at its index, another table's, and
     // the HTML went around it as blocks, which the next export showed as text
@@ -7792,7 +7792,7 @@ describe('HTML around a table in its block', () => {
     const xml = await zip.file('word/document.xml')!.async('string');
     zip.file('word/document.xml', xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, tbl => tbl.replace('>a<', '>z<') + '<w:p/>' + tbl));
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
-    expect(markdown.startsWith('<table>')).toBe(true);
+    expect(markdown.startsWith('+-----+\n| H   |\n+-----+\n| z   |\n+-----+\n\n<div>')).toBe(true);
     expect(markdown.slice(markdown.indexOf('<div>'))).toBe('<div><p>Cap</p>\n<table>\n  <tr>\n    <td>\n      <p>H</p>\n    </td>\n  </tr>\n  <tr>\n    <td>\n      <p>a</p>\n    </td>\n  </tr>\n</table>\n</div>\n');
   });
 
@@ -7856,7 +7856,7 @@ describe('HTML around a table in its block', () => {
     const xml = await zip.file('word/document.xml')!.async('string');
     zip.file('word/document.xml', xml.replace('<w:tbl>', /<w:tbl>[\s\S]*?<\/w:tbl>/.exec(added)![0] + '<w:p/><w:tbl>'));
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
-    expect(markdown.startsWith('<table>')).toBe(true);
+    expect(markdown.startsWith('| H | I |\n| --- | --- |\n| | a |\n\n<div>')).toBe(true);
     expect(markdown.slice(markdown.indexOf('<div>'))).toBe('<div><p>Cap</p>\n<table>\n  <tr>\n    <th>\n      <p>H</p>\n    </th>\n    <th>\n      <p>I</p>\n    </th>\n  </tr>\n  <tr>\n    <td>\n      <p>a</p>\n    </td>\n    <td>\n      <p></p>\n    </td>\n  </tr>\n</table>\n</div>\n');
   });
 
@@ -8168,6 +8168,69 @@ describe('HTML around a table in its block', () => {
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
     expect(markdown).toBe('<div>\n<p>Cap</p>\n\n<!-- table-font-size: 11 -->\n| h |\n| --- |\n| {++XX++} |\n\n</div>\n\nAfter.\n');
     expect(await roundTrip(markdown)).toBe(markdown);
+  });
+});
+
+describe('a table\'s settings where Word adds or deletes a table before it', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  const resolver = { readFile: () => new TextEncoder().encode('H\na\n'), resolveRelative: (_base: string, relative: string) => relative };
+  const options = { embedResolver: resolver, documentPath: '/doc/paper.md' };
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md, options)).docx)).markdown);
+  const afterWord = async (md: string, edit: (xml: string) => string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md, options)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', edit(xml));
+    return strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+  };
+  const deleteFirst = (xml: string) => xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, '');
+  const addFirst = (xml: string) => xml.replace('<w:tbl>', '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>New</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/><w:tbl>');
+  const table = (text: string, attrs = '', indent = '') => ['<table' + attrs + '>', '  <tr>', '    <td>', '      <p>' + text + '</p>', '    </td>', '  </tr>', '</table>'].map(line => indent + line).join('\n');
+  const pipe = '| P |\n| --- |\n| p |\n\n';
+  const cases: [string, string, string][] = [
+    ['a font size and the HTML around it', pipe, '<div>\n<p>Cap</p>\n' + table('A', ' data-font-size="11"') + '\n</div>\n'],
+    ['its HTML format', pipe, table('A') + '\n'],
+    ['its directives', table('Z') + '\n\n', '<!-- table-font-size: 11 -->\n<!-- table-col-widths: 2 1 -->\n| P | Q |\n| --- | --- |\n| p | q |\n'],
+    ['its number format', pipe, '<!-- table-digits: 2 -->\n| A | B |\n| --- | --- |\n| x | 1.234 |\n'],
+    ['its grid table\'s columns', pipe, '+----------+-----+\n| G        | H   |\n+==========+=====+\n| g        | h   |\n+----------+-----+\n'],
+    ['its pipe table\'s aligned columns', table('Z') + '\n\n', '| Name | V   |\n|------|-----|\n| a    | b   |\n'],
+    ['its orientation', pipe, table('L', ' data-orientation="landscape"') + '\n\nAfter.\n'],
+    ['its embed directive', pipe, '<!-- embed: t.csv headers=1 -->\n\nAfter.\n'],
+    ['a note\'s table its font size', pipe, 'Text[^1].\n\n[^1]: Note.\n\n' + table('N', ' data-font-size="11"', '    ') + '\n'],
+  ];
+
+  test.each(cases)('keeps %s where Word deletes a table before it', async (_name, before, md) => {
+    // It took the settings export wrote at its index, the deleted table's
+    expect(await roundTrip(before + md)).toBe(before + md);
+    const markdown = await afterWord(before + md, deleteFirst);
+    expect(markdown).toBe(md);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each(cases)('keeps %s where Word adds a table before it, which takes none', async (_name, before, md) => {
+    // The added table took the settings export wrote at its index, and
+    // each after it the one's before it
+    const markdown = await afterWord(before + md, addFirst);
+    expect(markdown).toBe('+-----+\n| New |\n+-----+\n\n' + before + md);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps the settings and HTML around a table Word edits where it deletes a table before it', async () => {
+    // Its text, and the index, matched no table export wrote
+    const md = '<div>\n<p>Cap</p>\n<table data-font-size="11">\n  <tr>\n    <td>\n      <p>H</p>\n    </td>\n  </tr>\n  <tr>\n    <td>\n      <p>a</p>\n    </td>\n  </tr>\n</table>\n</div>\n';
+    const markdown = await afterWord(pipe + md, xml => deleteFirst(xml).replace('>a<', '>z<'));
+    expect(markdown).toBe(md.replace('<p>a</p>', '<p>z</p>'));
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('takes a table\'s settings by its index from a document that has no tables\' identities', async () => {
+    // As export wrote before it wrote them
+    const md = pipe + table('A', ' data-font-size="11"') + '\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const custom = await zip.file('docProps/custom.xml')!.async('string');
+    const without = custom.replace(/<property [^>]*name="MANUSCRIPT_TABLE_IDENTITIES_\d+"[^>]*>[\s\S]*?<\/property>/g, '');
+    expect(without).not.toBe(custom);
+    zip.file('docProps/custom.xml', without);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(md);
   });
 });
 
