@@ -370,7 +370,7 @@ styles:
 |----------|-------------|
 | `font` | Font family. |
 | `font-size` | Font size in points. |
-| `font-style` | Same [font style values](#heading-and-title-font-configuration) as `header-font-style`. Since custom styles inherit from Normal, the default is already non-bold — `normal` is rarely needed here. |
+| `font-style` | Same [font style values](#heading-and-title-font-configuration) as `header-font-style`. Since custom styles inherit from Normal, the default is already non-bold — `normal` is rarely needed here. A font style is the whole of the style's: where a template's Normal is bold, italic or centered, a custom style with a font style that leaves that out turns it off. Without a font style, a custom style shows what Normal does. |
 | `spacing-before` | Spacing before the paragraph in points. |
 | `spacing-after` | Spacing after the paragraph in points. |
 | `paragraph-indent` | First-line paragraph indentation in inches (for example `0.5`) or `none` to explicitly suppress inherited indent. |

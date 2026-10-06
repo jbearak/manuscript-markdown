@@ -1515,4 +1515,42 @@ describe('the styles export takes from a template', () => {
       expect(extractStyleBlock(styles, id) ?? '').not.toMatch(/<w:(?:b|i|smallCaps|caps) w:val="0"\/>|<w:u w:val="none"\/>|<w:jc w:val="left"\/>/);
     }
   });
+
+  // A custom style is based on the template's Normal
+  it.each([
+    ['bold', 'bold', '<w:pPr><w:jc w:val="left"/></w:pPr>\n<w:rPr><w:b/><w:i w:val="0"/></w:rPr>\n', (styles: string) => styles],
+    ['italic-center', 'italic-center', '<w:pPr><w:jc w:val="center"/></w:pPr>\n<w:rPr><w:i/></w:rPr>\n', (styles: string) => styles],
+    // Found as import finds it
+    ['bold, with German Word\'s ID for Normal', 'bold', '<w:pPr><w:jc w:val="left"/></w:pPr>\n<w:rPr><w:b/><w:i w:val="0"/></w:rPr>\n', german],
+    // In schema order, as Word writes run properties
+    ['allcaps, beside a Normal in small caps too', 'allcaps', '<w:pPr><w:jc w:val="left"/></w:pPr>\n<w:rPr><w:i w:val="0"/><w:caps/><w:smallCaps w:val="0"/></w:rPr>\n',
+      (styles: string) => styles.replace(/(<w:style\b[^>]*w:styleId="Normal"[\s\S]*?)<w:rPr><w:i\/><\/w:rPr>/, (_match, before: string) => before + '<w:rPr><w:i/><w:smallCaps/></w:rPr>')],
+  ])('a custom style whose font style, %s, leaves out what the template\'s Normal turns on turns it off', async (_name, fontStyle, expected, edit) => {
+    const { convertDocx } = await import('./converter');
+    const fields = 'styles:\n  epigraph:\n    font-style: ' + fontStyle;
+    const normal: [string, string] = ['Normal', '<w:name w:val="Normal"/><w:qFormat/><w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:i/></w:rPr>'];
+    const zip = await JSZip.loadAsync((await convertMdToDocx('# One\n')).docx);
+    zip.file('word/styles.xml', edit((await zip.file('word/styles.xml')!.async('string'))
+      .replace(/(<w:style\b[^>]*w:styleId="Normal"[^>]*>)[\s\S]*?(<\/w:style>)/, (_match, open: string, close: string) => open + normal[1] + close)));
+    const templateDocx = await zip.generateAsync({ type: 'uint8array' });
+    const md = '---\n' + fields + '\n---\n\n<!-- style: epigraph -->\n\nStyled\n\n<!-- /style -->\n';
+    const docx = (await convertMdToDocx(md, { templateDocx })).docx;
+    const styles = await (await JSZip.loadAsync(docx)).file('word/styles.xml')!.async('string');
+    expect(extractStyleBlock(styles, 'MsCustomEpigraph')!.replace(/^[\s\S]*<w:basedOn w:val="(?:Normal|Standard)"\/>\n/, '')).toBe(expected + '</w:style>');
+    const { markdown } = await convertDocx(docx);
+    expect(parseFrontmatter(markdown).metadata.styles?.epigraph?.fontStyle).toBe(fontStyle);
+    const again = (await convertMdToDocx(markdown, { templateDocx: docx })).docx;
+    expect(extractStyleBlock(await (await JSZip.loadAsync(again)).file('word/styles.xml')!.async('string'), 'MsCustomEpigraph')).toBe(extractStyleBlock(styles, 'MsCustomEpigraph'));
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  it('a custom style without a font style takes what Normal has', async () => {
+    const md = '---\nstyles:\n  epigraph:\n    spacing-before: 12\n---\n\n<!-- style: epigraph -->\n\nStyled\n\n<!-- /style -->\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx('# One\n')).docx);
+    zip.file('word/styles.xml', (await zip.file('word/styles.xml')!.async('string'))
+      .replace(/(<w:style\b[^>]*w:styleId="Normal"[^>]*>)[\s\S]*?(<\/w:style>)/, (_match, open: string, close: string) => open + '<w:name w:val="Normal"/><w:rPr><w:i/></w:rPr>' + close));
+    const docx = (await convertMdToDocx(md, { templateDocx: await zip.generateAsync({ type: 'uint8array' }) })).docx;
+    const styles = await (await JSZip.loadAsync(docx)).file('word/styles.xml')!.async('string');
+    expect(extractStyleBlock(styles, 'MsCustomEpigraph')).not.toMatch(/w:val="(?:0|left|none)"/);
+  });
 });

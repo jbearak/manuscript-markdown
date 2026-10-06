@@ -5540,22 +5540,21 @@ export function applyFontOverridesToTemplate(
     : /<w:rPrDefault>\s*<w:rPr>([\s\S]*?)<\/w:rPr>/.exec(docDefaults)?.[1] ?? '';
   const fontStyleOf = (styleId: string) =>
     /^Heading[1-6]$/.test(styleId) ? overrides.headingStyles?.get(styleId) : styleId === 'Title' ? overrides.titleStyles?.[0] : undefined;
+  // Its attributes as XML may spell them, as import reads them
+  const basedOn = (id: string) => {
+    const base = xmlStartTag(templateStyle(id)?.block ?? '', 'w:basedOn');
+    return base && xmlAttribute(base.tag, 'w:val');
+  };
   /**
-   * Whether the styles a style is based on (w:basedOn), or else the document
-   * defaults, turn a font style property on, which Word shows where the style
-   * doesn't set it. The nearest that sets it decides, as import reads it (see
-   * inheritedStyle in converter.ts), and a heading or title restyled here
-   * sets it as its font style says.
+   * Whether a style, or else the styles it's based on (w:basedOn) or the
+   * document defaults, turn a font style property on, which Word shows where
+   * a style doesn't set it. The nearest that sets it decides, as import reads
+   * it (see inheritedStyle in converter.ts), and a heading or title restyled
+   * here sets it as its font style says.
    */
-  const inheritsOn = (styleId: string, property: FontStyleProperty): boolean => {
+  const turnsOn = (first: string | undefined, property: FontStyleProperty, seen = new Set<string>()): boolean => {
     const element = new RegExp('<' + property.tag + '\\b[^>]*>');
-    const seen = new Set([styleId]);
-    // Its attributes as XML may spell them, as import reads them
-    const basedOn = (id: string) => {
-      const base = xmlStartTag(templateStyle(id)?.block ?? '', 'w:basedOn');
-      return base && xmlAttribute(base.tag, 'w:val');
-    };
-    for (let id = basedOn(styleId); id !== undefined; id = basedOn(id)) {
+    for (let id = first; id !== undefined; id = basedOn(id)) {
       const style = templateStyle(id);
       if (style === undefined || seen.has(style.id)) break;
       seen.add(style.id);
@@ -5571,6 +5570,8 @@ export function applyFontOverridesToTemplate(
     const found = element.exec(defaultProperties(property));
     return found !== null && fontStylePropertyOn(property, found[0]);
   };
+  /** Whether what a style is based on turns a font style property on */
+  const inheritsOn = (styleId: string, property: FontStyleProperty) => turnsOn(basedOn(styleId), property, new Set([styleId]));
   /** A font style's run properties: each it wants, and for one it leaves
    *  out, the style's own off (`ownOff`), or else an explicit off where the
    *  style's base turns it on, which removing the style's own leaves. */
@@ -5775,7 +5776,7 @@ export function applyFontOverridesToTemplate(
       const sid = customStyleId(name);
       if (seenIds.has(sid)) continue;
       seenIds.add(sid);
-      const newStyleXml = customStyleXml(name, def, bodyFontStr, localSzPair);
+      const newStyleXml = customStyleXml(name, def, bodyFontStr, localSzPair, property => turnsOn('Normal', property));
       // Replace existing custom style or inject new one
       const existingRe = new RegExp('<w:style\\b[^>]*w:styleId="' + sid + '"[^>]*>[\\s\\S]*?</w:style>\\n?');
       if (existingRe.test(xml)) {
@@ -5989,12 +5990,18 @@ function customStyleDisplayName(name: string): string {
   return 'Custom: ' + name;
 }
 
-/** Generate OOXML for a custom paragraph style definition. */
+/**
+ * Generate OOXML for a custom paragraph style definition, based on Normal.
+ * Its font style, where it has one, is the whole of it: `normalTurnsOn` says
+ * what a template's Normal turns on, which the style turns off where its font
+ * style leaves it out.
+ */
 function customStyleXml(
   name: string,
   def: import('./frontmatter').CustomStyleDef,
   bodyFontStr: string,
   szPairFn: (hp: number) => string,
+  normalTurnsOn: (property: FontStyleProperty) => boolean = () => false,
 ): string {
   const styleId = customStyleId(name);
   const displayName = customStyleDisplayName(name);
@@ -6009,25 +6016,18 @@ function customStyleXml(
   const indentEl = def.paragraphIndent !== undefined
     ? '<w:ind w:firstLine="' + (def.paragraphIndent === 'none' ? '0' : Math.round(def.paragraphIndent * 1440)) + '"/>'
     : '';
-  const jcEl = def.fontStyle?.includes('center') ? '<w:jc w:val="center"/>' : '';
+  const fontStyleElement = (property: FontStyleProperty) => def.fontStyle === undefined ? ''
+    : property.wanted(def.fontStyle) ? property.on : normalTurnsOn(property) ? property.off : '';
+  const jcEl = fontStyleElement(FONT_STYLE_CENTERING);
   const pPr = (spacingEl || indentEl || jcEl) ? '<w:pPr>' + spacingEl + indentEl + jcEl + '</w:pPr>\n' : '';
 
-  // rPr: style flags + font + size (ordering: style flags → rFonts → sz per dirty-flag invariant #4)
-  const fs = def.fontStyle ?? '';
-  let styleStr = '';
-  if (fs && fs !== 'normal') {
-    if (fs.includes('bold')) styleStr += '<w:b/>';
-    if (fs.includes('italic')) styleStr += '<w:i/>';
-    if (fs.includes('underline')) styleStr += '<w:u w:val="single"/>';
-    // smallcaps/allcaps: else-if because 'smallcaps' contains 'allcaps' as substring
-    if (fs.includes('smallcaps')) styleStr += '<w:smallCaps/>';
-    else if (fs.includes('allcaps')) styleStr += '<w:caps/>';
-  }
+  // rPr: style flags, font and size, in schema order (see orderRPr)
+  const styleStr = FONT_STYLE_RUN_PROPERTIES.map(fontStyleElement).join('');
   const fontStr = def.font
     ? '<w:rFonts w:ascii="' + escapeXml(def.font) + '" w:hAnsi="' + escapeXml(def.font) + '"/>'
     : bodyFontStr;
   const szStr = def.fontSize !== undefined ? szPairFn(Math.round(def.fontSize * 2)) : '';
-  const rPrInner = styleStr + fontStr + szStr;
+  const rPrInner = orderRPr(styleStr + fontStr + szStr);
   const rPr = rPrInner ? '<w:rPr>' + rPrInner + '</w:rPr>\n' : '';
 
   return '<w:style w:type="paragraph" w:customStyle="1" w:styleId="' + styleId + '">\n' +
