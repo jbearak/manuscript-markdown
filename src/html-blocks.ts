@@ -1,0 +1,65 @@
+// How export reads markdown-it's HTML blocks, which the orientation scan
+// reads the same way, so the language server flags what export does.
+
+import type Token from 'markdown-it/lib/token.mjs';
+import { isGfmDisallowedRawHtml } from './gfm';
+import { GRID_TABLE_PLACEHOLDER_PREFIX } from './grid-table-preprocess';
+import { extractHtmlTables } from './html-table-parser';
+
+// HTML comments, each with the spaces and tabs after it, from a block's start
+export const COMMENTS_AT_START_RE = /^(?:<!--(?:(?!-->)[\s\S])*-->[ \t]*)*/;
+
+/** Whether export reads an HTML block's text as line breaks, alone or after
+ *  comments, with the spaces and tabs after each comment and between the
+ *  breaks after them, not as text, with the spaces before them as text */
+export function isLineBreakBlock(content: string): boolean {
+  const text = content.trim();
+  if (/^(?:<br\s*\/?>\s*)+$/i.test(text)) return true;
+  const comments = COMMENTS_AT_START_RE.exec(text)![0];
+  return comments !== '' && /^<br\s*\/?>(?:[ \t]*<br\s*\/?>)*$/i.test(text.slice(comments.length));
+}
+
+export type HtmlBlockKind = 'grid' | 'comment' | 'raw' | 'image' | 'breaks' | 'tables' | 'text';
+
+/**
+ * What export makes of an HTML block, `content` (see convertTokens in
+ * md-to-docx.ts): a grid table, from its placeholder; comments alone, which
+ * hold no table; HTML that GFM disallows, kept as text; an image; line
+ * breaks, alone or after comments; one or more tables, with rows outside
+ * comments; or else text.
+ */
+export function htmlBlockKind(content: string): HtmlBlockKind {
+  const trimmed = content.trim();
+  if (trimmed.startsWith(GRID_TABLE_PLACEHOLDER_PREFIX)) return 'grid';
+  const tables = () => extractHtmlTables(content).some(meta => meta.rows.length > 0);
+  if (/^<!--[\s\S]*?-->\s*$/.test(trimmed) && !tables()) return 'comment';
+  if (isGfmDisallowedRawHtml(content)) return 'raw';
+  if (/^<img\s/i.test(trimmed)) return 'image';
+  if (isLineBreakBlock(content)) return 'breaks';
+  return tables() ? 'tables' : 'text';
+}
+
+/**
+ * What a list item makes of its HTML block `tokens[j]`, among the item's
+ * tokens, where export reads it as one or more tables, `holdsTables` (see
+ * extractListItems in md-to-docx.ts):
+ * - skipped: an empty comment between two numbered sublists, as import
+ *   writes it where Word starts the second over, which their numbering keeps;
+ * - dropped: a table, which an item can't hold, or a block that only its end
+ *   ends, as a <pre> its </pre>, a comment its --> or a processing
+ *   instruction its ?>, without its end and with more of the item after it,
+ *   which markdown-it ended at a blank line in the item;
+ * - kept: the item's text if it comes first, or a continuation otherwise.
+ * A comment after the item's text that reads as a directive, which the item
+ * can't hold, goes too, as extractListItems reads it.
+ */
+export function listItemHtmlBlock(tokens: Token[], j: number, holdsTables: () => boolean): 'skipped' | 'dropped' | 'kept' {
+  const content = tokens[j].content;
+  if (/^\s*<!--\s*-->\s*$/.test(content) && tokens[j - 1]?.type === 'ordered_list_close' && tokens[j + 1]?.type === 'ordered_list_open') return 'skipped';
+  const tables = holdsTables();
+  const more = !!tokens[j + 1] && tokens[j + 1].type !== 'list_item_close';
+  // A comment's end can take the dashes of its start, as in <!-->
+  const raw = /^\s*<(?:(script|pre|style|textarea)(?=[\s>]|$)|(\?)|(!\[CDATA\[)|(!(?=--))|![A-Za-z])/i.exec(content);
+  const end = raw?.[1] ? new RegExp('</' + raw[1] + '>', 'i') : raw?.[2] ? /\?>/ : raw?.[3] ? /\]\]>/ : raw?.[4] ? /-->/ : />/;
+  return (raw && more && !end.test(content.slice(raw[0].length))) || tables ? 'dropped' : 'kept';
+}

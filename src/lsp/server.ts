@@ -654,12 +654,13 @@ async function getCachedCslStyleNames(): Promise<string[]> {
 
 function validateOrientationDirectives(doc: TextDocument): void {
 	const text = maskFrontmatter(doc.getText());
-	const codeRegions = computeCodeRegions(text);
-	const findings = scanOrientationDirectives(text, codeRegions);
+	const findings = scanOrientationDirectives(text);
 	const diagnostics: Diagnostic[] = [];
 
 	for (const f of findings) {
 		let message: string;
+		// One export drops or ignores, with a warning as export's
+		let severity: DiagnosticSeverity = DiagnosticSeverity.Error;
 		switch (f.kind) {
 			case 'nested':
 				message = 'Nested <!-- ' + f.directiveName + ' --> \u2014 <!-- ' + (f.relatedName ?? f.directiveName) + ' --> is still active.';
@@ -673,9 +674,17 @@ function validateOrientationDirectives(doc: TextDocument): void {
 			case 'unclosed':
 				message = 'Unclosed <!-- ' + f.directiveName + ' --> \u2014 no matching <!-- /' + f.directiveName + ' --> before end of file.';
 				break;
+			case 'list-item':
+				message = '<!-- ' + (f.close ? '/' : '') + f.directiveName + ' --> inside a list item dropped during conversion (not supported). Move it outside the list for round-trip fidelity.';
+				severity = DiagnosticSeverity.Warning;
+				break;
+			case 'note':
+				message = '<!-- ' + (f.close ? '/' : '') + f.directiveName + ' --> inside a note ignored, as a note has no sections (not supported). Move it outside the note for round-trip fidelity.';
+				severity = DiagnosticSeverity.Warning;
+				break;
 		}
 		diagnostics.push({
-			severity: DiagnosticSeverity.Error,
+			severity,
 			range: Range.create(doc.positionAt(f.start), doc.positionAt(f.end)),
 			message,
 			source: 'manuscript-markdown',

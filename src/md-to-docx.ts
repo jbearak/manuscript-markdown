@@ -22,6 +22,9 @@ import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
 import { extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
 import { matchCriticHeadingPrefix } from './critic-markup';
+import { COMMENTS_AT_START_RE, htmlBlockKind, listItemHtmlBlock } from './html-blocks';
+export { isLineBreakBlock } from './html-blocks';
+import { preprocessBlocks } from './block-preprocess';
 import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, type TemplateSections } from './template-sections';
 export { preprocessGridTables } from './grid-table-preprocess';
 export { extractHtmlTables } from './html-table-parser';
@@ -697,19 +700,6 @@ export function linkifiedText(address: string, email: boolean): string {
 export function startsHtmlBlock(text: string): boolean {
   citationTextMd ??= createMarkdownIt();
   return citationTextMd.parse(text, {})[0]?.type === 'html_block';
-}
-
-// HTML comments, each with the spaces and tabs after it, from a block's start
-const COMMENTS_AT_START_RE = /^(?:<!--(?:(?!-->)[\s\S])*-->[ \t]*)*/;
-
-/** Whether export reads an HTML block's text as line breaks, alone or after
- *  comments, with the spaces and tabs after each comment and between the
- *  breaks after them, not as text, with the spaces before them as text */
-export function isLineBreakBlock(content: string): boolean {
-  const text = content.trim();
-  if (/^(?:<br\s*\/?>\s*)+$/i.test(text)) return true;
-  const comments = COMMENTS_AT_START_RE.exec(text)![0];
-  return comments !== '' && /^<br\s*\/?>(?:[ \t]*<br\s*\/?>)*$/i.test(text.slice(comments.length));
 }
 
 /** What of a comment, a block of its own, export doesn't read as a
@@ -2100,13 +2090,9 @@ function markWrappedLatexBlocks(tokens: Token[], text: string, lineCount: number
  */
 export function parseMd(markdown: string, warnings?: string[], breaks = false, originalText?: string, tableNumberFormat?: TableNumberFormat, linkDefinitions?: Record<string, unknown>, unformatted?: string): MdToken[] {
   const md = createMarkdownIt();
-  // Preserve explicit source semantics for blockquotes by disabling markdown-it
-  // lazy continuation behavior (where a non-`>` line can be absorbed into a
-  // preceding blockquote paragraph). For roundtrip fidelity we treat a missing
-  // `>` as a hard blockquote boundary
-  const gridProcessed = preprocessGridTables(markdown);
-  const deLazified = deLazifyBlockquotes(gridProcessed);
-  const wrapped = wrapBareLatexEnvironments(deLazified);
+  // Grid tables, quotes without lazy continuation, and bare LaTeX
+  // environments, as the orientation scan reads them too
+  const { deLazified, output: wrapped } = preprocessBlocks(markdown);
   const processed = preprocessCriticMarkup(wrapped);
   const env: { references?: Record<string, unknown>; documentLinkDefinitions?: Record<string, unknown> } =
     linkDefinitions ? { documentLinkDefinitions: linkDefinitions } : {};
@@ -2118,7 +2104,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
   // whether a table's columns line up reads its lines from before it,
   // `unformatted`, which differ from these in cell text alone
   const unformattedLines = unformatted === undefined ? undefined
-    : preprocessCriticMarkup(wrapBareLatexEnvironments(deLazifyBlockquotes(preprocessGridTables(unformatted)))).split('\n');
+    : preprocessCriticMarkup(preprocessBlocks(unformatted).output).split('\n');
   const sourceLines = unformattedLines?.length === processedLines.length ? unformattedLines : processedLines;
   const result = splitCriticParagraphs(splitCriticDisplayMathParagraphs(convertTokens(tokens, 0, 0, warnings, sourceLines)));
   annotateBlockquoteBoundaries(result);
@@ -2373,6 +2359,11 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
           case 'unclosed':
             warnings.push('Unclosed <!-- ' + f.directiveName + ' --> (opened near line ' + line + ') \u2014 no matching <!-- /' + f.directiveName + ' --> found.');
             break;
+          // A list item's, which extractListItems drops, and a note's, which
+          // the note's body ignores, each with a warning of its own
+          case 'list-item':
+          case 'note':
+            break;
         }
       }
     }
@@ -2573,67 +2564,6 @@ function applyCustomStyleSentinels(tokens: MdToken[], warnings?: string[], refer
     }
   }
 }
-
-function deLazifyBlockquotes(markdown: string): string {
-  const lines = markdown.split('\n');
-  const out: string[] = [];
-  let inBlockquoteRun = false;
-  let fenceChar: '`' | '~' | null = null;
-  let fenceLen = 0;
-
-  for (const line of lines) {
-    const fenceMatch = line.match(/^ {0,3}([`~]{3,})/);
-    if (fenceMatch) {
-      const run = fenceMatch[1];
-      const runChar = run[0] as '`' | '~';
-      // Invariant: de-lazification must not inject blank lines inside fenced
-      // code blocks, or code content roundtrip fidelity is corrupted.
-      if (!fenceChar) {
-        if (inBlockquoteRun) {
-          out.push('');
-          inBlockquoteRun = false;
-        }
-        fenceChar = runChar;
-        fenceLen = run.length;
-      } else if (runChar === fenceChar && run.length >= fenceLen) {
-        fenceChar = null;
-        fenceLen = 0;
-      }
-      out.push(line);
-      continue;
-    }
-    if (fenceChar) {
-      out.push(line);
-      continue;
-    }
-    const isBlank = line.trim() === '';
-    const isBlockquoteLine = /^ {0,3}>/.test(line);
-
-    if (isBlockquoteLine) {
-      inBlockquoteRun = true;
-      out.push(line);
-      continue;
-    }
-
-    if (isBlank) {
-      inBlockquoteRun = false;
-      out.push(line);
-      continue;
-    }
-
-    if (inBlockquoteRun) {
-      // Insert a blank line to end the previous blockquote before this
-      // non-blank, non-`>` line.
-      out.push('');
-      inBlockquoteRun = false;
-    }
-
-    out.push(line);
-  }
-
-  return out.join('\n');
-}
-
 
 /**
  * Whether runs[r] can hold a task's box or an alert's marker, as GFM reads
@@ -3094,7 +3024,9 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
       
       case 'html_block': {
         const htmlContent = token.content || '';
-        if (htmlContent.trim().startsWith(GRID_TABLE_PLACEHOLDER_PREFIX)) {
+        // What the block is, as the orientation scan reads it too
+        const kind = htmlBlockKind(htmlContent);
+        if (kind === 'grid') {
           const b64 = htmlContent.trim().slice(GRID_TABLE_PLACEHOLDER_PREFIX.length, -4); // strip prefix and ' -->'
           try {
             const jsonStr = Buffer.from(b64, 'base64').toString();
@@ -3130,7 +3062,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
         }
         // Not a block that starts and ends with a comment but holds a table
         // outside them, as import writes the HTML around a table on its lines
-        if (/^<!--[\s\S]*?-->\s*$/.test(htmlContent.trim()) && !extractHtmlTables(htmlContent).some(meta => meta.rows.length > 0)) {
+        if (kind === 'comment') {
           // Compute blank lines before this HTML comment using token.map
           const thisStart = token.map?.[0] ?? 0;
           // Find previous token's end line — scan backwards through markdown-it tokens
@@ -3160,12 +3092,12 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
             blankLinesAfter: blankLinesAfterVal,
             runs: [{ type: 'html_comment' as const, text: htmlContent.replace(/\n$/, '') }]
           });
-        } else if (isGfmDisallowedRawHtml(htmlContent)) {
+        } else if (kind === 'raw') {
           result.push({
             type: 'paragraph',
             runs: [{ type: 'text', text: htmlContent.replace(/\n$/, '') }]
           });
-        } else if (/^<img\s/i.test(htmlContent.trim())) {
+        } else if (kind === 'image') {
           const srcMatch = htmlContent.match(/src\s*=\s*["']([^"']+)["']/);
           const altMatch = htmlContent.match(/alt\s*=\s*["']([^"']*?)["']/);
           const width = parseHtmlImageDimension(htmlContent, 'width');
@@ -3191,7 +3123,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
               runs: [{ type: 'text', text: htmlContent.replace(/\n$/, '') }]
             });
           }
-        } else if (isLineBreakBlock(htmlContent)) {
+        } else if (kind === 'breaks') {
           // Line breaks alone, as import writes a paragraph that is one,
           // which markdown-it reads as a block, not a paragraph's text, or
           // after comments, as import writes a paragraph of comments a line
@@ -3808,29 +3740,22 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
           runs = processInlineChildren([itemTokens[j]]);
           foundFirstParagraph = true;
         } else if (itemTokens[j].type === 'html_block') {
-          // An empty comment between two numbered sublists, as import writes
-          // it where Word starts the second over, which its numbering keeps
-          if (/^\s*<!--\s*-->\s*$/.test(itemTokens[j].content)
-            && itemTokens[j - 1]?.type === 'ordered_list_close' && itemTokens[j + 1]?.type === 'ordered_list_open') continue;
           // An HTML block, as at the top level, the item's first paragraph if
           // it comes first, as in - <div>a</div>, which kept nothing, and a
           // continuation after a quote or sublist before it otherwise. So is
           // a comment, hidden, and a block one starts, as
           // <!-- c --><div>a</div>, as text, which export dropped with the
           // rest of the block, but not a comment after the item's text that
-          // reads as a directive, which the item can't hold. Not a block that
-          // only its end ends, as a <pre> its </pre>, a comment its --> or a
-          // processing instruction its ?>, without its end and with more of
-          // the item after it, which markdown-it ended at a blank line in the
-          // item. Not a table, which an item can't hold.
-          const blocks = convertTokens([itemTokens[j]], 0, 0, warnings, sourceLines);
+          // reads as a directive, which the item can't hold. Not a block
+          // listItemHtmlBlock drops, which the orientation scan reads the
+          // same way, so a block after it can still be the item's text.
+          let blocks: MdToken[] = [];
+          const fate = listItemHtmlBlock(itemTokens, j, () => (blocks = convertTokens([itemTokens[j]], 0, 0, warnings, sourceLines)).some(block => block.type !== 'paragraph'));
+          if (fate === 'skipped') continue;
           const first = !foundFirstParagraph && childSegments.length === 0 && blocks.length === 1;
           const directive = !first && blocks.length === 1 && blocks[0].runs.length === 1 && blocks[0].runs[0].type === 'html_comment'
             && directiveRest(blocks[0].runs[0].text) !== undefined;
-          // A comment's end can take the dashes of its start, as in <!-->
-          const raw = /^\s*<(?:(script|pre|style|textarea)(?=[\s>]|$)|(\?)|(!\[CDATA\[)|(!(?=--))|![A-Za-z])/i.exec(itemTokens[j].content);
-          const end = raw?.[1] ? new RegExp('</' + raw[1] + '>', 'i') : raw?.[2] ? /\?>/ : raw?.[3] ? /\]\]>/ : raw?.[4] ? /-->/ : />/;
-          if ((raw && j < itemTokens.length - 1 && !end.test(itemTokens[j].content.slice(raw[0].length))) || blocks.some(block => block.type !== 'paragraph') || directive) {
+          if (fate === 'dropped' || directive) {
             warnings?.push(droppedListBlockWarning('HTML block'));
           } else if (first) {
             runs = blocks[0].runs;
@@ -8598,8 +8523,7 @@ export async function convertMdToDocx(
     const marked = lines.map((line, k) => NOTE_LINE.test(line)
       ? (BARE_NOTE_LINE.test(line) ? line.replace(/(?:\+\+|--|~~|==|<<)\}/g, close => close.slice(0, 2)) : line.trimEnd()) + mark + k + mark
       : line);
-    const parsed = md.parse(preprocessCriticMarkup(wrapBareLatexEnvironments(deLazifyBlockquotes(preprocessGridTables(
-      extractFootnoteDefinitions(marked.join('\n')).cleaned)))), {});
+    const parsed = md.parse(preprocessCriticMarkup(preprocessBlocks(extractFootnoteDefinitions(marked.join('\n')).cleaned).output), {});
     notes = new Set(parsed.flatMap((token, t) => {
       if (token.type !== 'paragraph_open' || token.level !== 0 || !token.map || token.map[1] - token.map[0] !== 1) return [];
       // The line alone
