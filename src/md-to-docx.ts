@@ -5362,7 +5362,12 @@ function parseTemplateNumbering(xml: string): { root: OrderedXmlNode; nums: Orde
  * template is that export, and go, so that each save doesn't add more.
  */
 function templateNumIdsInUse(templateStyles?: string, headerNumIds: Iterable<number> = []): Set<number> {
-  const used = new Set(headerNumIds);
+  return new Set([...headerNumIds, ...styleNumIds(templateStyles)]);
+}
+
+/** The numIds a template's styles number their paragraphs with */
+function styleNumIds(templateStyles?: string): Set<number> {
+  const used = new Set<number>();
   for (const m of (templateStyles ?? '').matchAll(/<w:numId\b[^>]*?\bw:val\s*=\s*["'](\d+)["']/g)) used.add(parseInt(m[1], 10));
   return used;
 }
@@ -5479,6 +5484,7 @@ type ListLevels = {
   starts: Map<number, number>; // the abstract numbering's w:start, or 0 for a level without one (ECMA-376 Part 1 §17.9.25)
   restarts: Map<number, number>; // w:lvlRestart: the level, from 1, at or above which a paragraph starts the level over, or 0 for none
   startOverrides: Map<number, number>; // the instance numbers take's, which Word applies at its first paragraph at each level
+  numberedByStyles: boolean; // whether the template's styles number paragraphs in the same count, with an instance of the same abstract numbering
 };
 
 /**
@@ -5489,10 +5495,12 @@ type ListLevels = {
  * over with its start overrides, where one with nothing in it starts its
  * level at 0 (tdf#153104).
  */
-function templateListLevels(xml: string | undefined, numId: number): ListLevels {
-  const levels: ListLevels = { starts: new Map(), restarts: new Map(), startOverrides: new Map() };
+function templateListLevels(xml: string | undefined, numId: number, styleNumIds = new Set<number>()): ListLevels {
   const numbering = xml === undefined ? undefined : parseTemplateNumbering(xml);
   const { instance, abstractNumId } = orderedListInstance(numbering, numId);
+  const numberedByStyles = abstractNumId !== undefined && (numbering?.nums ?? []).some(num => styleNumIds.has(intAttr(num, 'w:numId'))
+    && childNodes(num, 'w:num').some(n => 'w:abstractNumId' in n && intAttr(n, 'w:val') === abstractNumId));
+  const levels: ListLevels = { starts: new Map(), restarts: new Map(), startOverrides: new Map(), numberedByStyles };
   const abstractNum = childNodes(numbering?.root, 'w:numbering')
     .find(n => 'w:abstractNum' in n && intAttr(n, 'w:abstractNumId') === abstractNumId);
   // The w:val of the `name` in each `element` of `nodes`, by level, or `otherwise` where it has none
@@ -7235,7 +7243,9 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
         // parent's instance, only where Word would start it at its number:
         // from the level's start, or that instance's start override for the
         // level, which Word applies at its first paragraph there, so a
-        // sublist in it needs both to agree.
+        // sublist in it needs both to agree. Paragraphs the template's styles
+        // number in the same count, as headings can be, would move it on
+        // before either, so with those each list gets its own start.
         const parentNumId = ilvl > 0 && state.listItemNumbers?.length === ilvl && state.listItemNumbers[ilvl - 1] !== undefined
           ? state.activeListStartOverrides.get(ilvl - 1) : undefined;
         const levels = state.templateListLevels;
@@ -7244,10 +7254,10 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
         const levelStart = levels?.starts.get(ilvl) ?? 1, startOverride = levels?.startOverrides.get(ilvl);
         if (token.ordered && (token.listStart || !state.activeListStartOverrides.has(ilvl))) {
           const start = token.startNumber ?? 1;
-          if (parentNumId !== undefined && startsAfterParent && start === levelStart
+          if (parentNumId !== undefined && !levels?.numberedByStyles && startsAfterParent && start === levelStart
             && (parentNumId !== (state.decimalNumId ?? 2) || (startOverride ?? start) === start)) {
             state.activeListStartOverrides.set(ilvl, parentNumId);
-          } else if (!state.usedOrderedNumId && start === (startOverride ?? levelStart)) {
+          } else if (!state.usedOrderedNumId && !levels?.numberedByStyles && start === (startOverride ?? levelStart)) {
             state.activeListStartOverrides.set(ilvl, state.decimalNumId ?? 2);
           } else {
             const overrideNumId = (state.firstOverrideNumId ?? 3) + state.listStartOverrides.length;
@@ -8624,7 +8634,7 @@ export async function convertMdToDocx(
     decimalNumId: listNumbering.decimal,
     firstOverrideNumId: Math.max(2, ...numIdsInUse, listNumbering.bullet, listNumbering.decimal) + 1,
     usedOrderedNumId: false,
-    templateListLevels: templateListLevels(listTemplateNumbering, listNumbering.decimal),
+    templateListLevels: templateListLevels(listTemplateNumbering, listNumbering.decimal, styleNumIds(templateStyles)),
     hasComments: false,
     hasFootnotes: false,
     hasEndnotes: false,

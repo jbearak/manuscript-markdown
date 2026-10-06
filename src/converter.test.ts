@@ -1709,11 +1709,21 @@ describe('Ordered list numbering', () => {
     expect(await roundTripWith(md, templateDocx)).toBe(md);
   });
 
-  test('starts a list in its own instance where a template has an empty level override in the instance it would share', async () => {
+  test.each([
     // Word reads one with nothing in it as a start of 0 (tdf#153104)
-    const templateDocx = await templateWithNumbering(numbering => withLevelStart(0, 3)(numbering)
-      .replace(/(<w:num w:numId="2"[^>]*><w:abstractNumId w:val="1"\/>)/, (instance: string) => instance + '<w:lvlOverride w:ilvl="0"/>'));
-    const md = '3. a\n4. b';
+    ['an empty level override in the instance it would share', false],
+    // A heading's number moves the count on before the list
+    ['headings numbered in the same count', true],
+  ])('starts a list in its own instance where a template has %s', async (_name, headings) => {
+    const templateZip = await JSZip.loadAsync(await templateWithNumbering(numbering => headings
+      ? withLevelStart(0, 3)(numbering).replace('</w:numbering>', '<w:num w:numId="5"><w:abstractNumId w:val="1"/></w:num></w:numbering>')
+      : withLevelStart(0, 3)(numbering).replace(/(<w:num w:numId="2"[^>]*><w:abstractNumId w:val="1"\/>)/, (instance: string) => instance + '<w:lvlOverride w:ilvl="0"/>')));
+    if (headings) {
+      const styles = await templateZip.file('word/styles.xml')!.async('string');
+      templateZip.file('word/styles.xml', styles.replace(/(<w:style [^>]*w:styleId="Heading1"[^]*?<w:pPr>)/, (style: string) => style + '<w:numPr><w:numId w:val="5"/></w:numPr>'));
+    }
+    const templateDocx = await templateZip.generateAsync({ type: 'uint8array' });
+    const md = '# H\n\n3. a\n4. b';
     const { docx } = await convertMdToDocx(md, { templateDocx });
     expect(await levelOverridesOf(docx, 0)).toBe('<w:lvlOverride w:ilvl="0"><w:startOverride w:val="3"/></w:lvlOverride>');
     expect(await roundTripWith(md, templateDocx)).toBe(md);
@@ -1793,7 +1803,8 @@ describe('Ordered list numbering', () => {
     const merged = await (await JSZip.loadAsync(docx)).file('word/numbering.xml')!.async('string');
     expect(merged).toContain('<w:num w:numId="7">');
     expect(merged).not.toContain('<w:num w:numId="8">');
-    expect(numIdsOf(await documentXml(docx))[1]).toBe('8');
+    // Its style numbers in the lists' count, so each list starts in a numbering of its own
+    expect(numIdsOf(await documentXml(docx))).toEqual(['8', '9']);
   });
 
   test.each([
