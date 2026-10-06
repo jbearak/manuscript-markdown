@@ -8364,8 +8364,10 @@ function escapeRegExp(value: string): string {
 // generateParagraph (`GLYPH + ' ' + Title + <w:br/>`) as well as bold-wrapped,
 // colon-suffixed, and bare-title variants.  The plain-glyph-title pattern
 // is checked first (most common roundtrip case) so we don't rely on the
-// more permissive regexes for the happy path.
-function stripAlertLeadPrefix(text: string, alertType: GfmAlertType): string {
+// more permissive regexes for the happy path. With `inline`, of an alert
+// whose text export wrote on its marker's line, no space after the line
+// break is export's, so the text keeps the whitespace it starts with.
+function stripAlertLeadPrefix(text: string, alertType: GfmAlertType, inline = false): string {
   // 1. Standard [!TYPE] marker (e.g. from a re-imported markdown)
   const marker = parseGfmAlertMarker(text.trimStart());
   if (marker?.type === alertType) {
@@ -8381,13 +8383,13 @@ function stripAlertLeadPrefix(text: string, alertType: GfmAlertType): string {
   //    most common roundtrip format — check it before the bold-wrapped
   //    and colon-suffixed variants.
   const exactPlain = new RegExp(
-    '^\\s*(?:' + glyphAlternation + ') ' + escapeRegExp(title) + '(?:\\\\?\\n ?| )'
+    '^\\s*(?:' + glyphAlternation + ') ' + escapeRegExp(title) + (inline ? '(?:\\\\?\\n| )' : '(?:\\\\?\\n ?| )')
   );
   if (exactPlain.test(text)) return text.replace(exactPlain, '');
 
   // 3. Bold-wrapped: **GLYPH Title** or __GLYPH Title__
   const titleCore = '(?:' + glyphAlternation + ')\\s*' + escapeRegExp(title);
-  const boldWrapped = text.match(/^\s*(\*\*|__)(.+?)\1[ \t]?(?:\\?\n ?)?/);
+  const boldWrapped = text.match(inline ? /^\s*(\*\*|__)(.+?)\1[ \t]?(?:\\?\n)?/ : /^\s*(\*\*|__)(.+?)\1[ \t]?(?:\\?\n ?)?/);
   if (boldWrapped) {
     const inner = boldWrapped[2].trim();
     if (new RegExp('^' + titleCore + '\\s*[:：-]?$').test(inner)) {
@@ -11548,12 +11550,14 @@ export function buildMarkdown(
     let strippedAlertLeadHadHardBreak = false;
     let textOut = rendered.text;
     if (pendingAlertPrefixStrip) {
+      // Text on the marker's line has no space of export's before it
+      const inlineMarker = options?.blockquoteAlertInlineByGroup?.get(currentPara?.blockquoteGroupIndex ?? -1) === true;
       if (options?.calloutLabels === false) {
         // Marker-only alerts retain one parser-introduced leading space when the
         // generated label/break is absent; remove only that known artifact.
-        if (textOut.startsWith(' ')) textOut = textOut.slice(1);
+        if (!inlineMarker && textOut.startsWith(' ')) textOut = textOut.slice(1);
       } else {
-        textOut = stripAlertLeadPrefix(rendered.text, pendingAlertPrefixStrip);
+        textOut = stripAlertLeadPrefix(rendered.text, pendingAlertPrefixStrip, inlineMarker);
         const removedLen = rendered.text.length - textOut.length;
         if (removedLen > 0 && rendered.text.slice(0, removedLen).includes('\n')) {
           strippedAlertLeadHadHardBreak = true;

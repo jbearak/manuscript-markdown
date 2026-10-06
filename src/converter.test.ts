@@ -9428,6 +9428,31 @@ describe('Whitespace at the edges of a paragraph', () => {
     expect(await roundTrip(markdown)).toBe(markdown);
   });
 
+  describe.each([
+    ['shown', ''],
+    ['hidden', '---\ncallout-labels: false\n---\n\n'],
+  ])('with alert labels %s', (_labels, frontmatter) => {
+    test.each([
+      ['a space', '> [!NOTE] &#32;a\n', ' a'],
+      ['two spaces', '> [!NOTE] &#32;&#32;a\n', '  a'],
+      ['a tab', '> [!NOTE] &#9;a\n', '\ta'],
+      ['a space before bold text', '> [!NOTE] &#32;**a**\n', ' a'],
+      ['a space after a later line\'s marker', '> x\n> [!TIP] &#32;b\n', ' b'],
+      ['a space in a quote in a quote', '> > [!NOTE] &#32;a\n', ' a'],
+    ])('keeps %s written as a reference that starts an alert\'s text on its marker\'s line', async (_name, md, text) => {
+      // The marker took the whitespace after it, written as it is and as
+      // references, and import the space after the label's line break
+      const { docx } = await convertMdToDocx(frontmatter + md);
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      const lead = /<w:pStyle w:val="GitHub(?:Note|Tip)"\/>.*?<\/w:p>/.exec(xml)![0];
+      const runs = lead.includes('<w:br/>') ? lead.slice(lead.indexOf('<w:br/>')) : lead;
+      expect([...runs.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>|<w:tab\/>/g)].map(match => match[1] ?? '\t').join('')).toBe(text);
+      const markdown = await roundTrip(frontmatter + md);
+      expect(markdown).toBe(frontmatter + md);
+      expect(await roundTrip(markdown)).toBe(markdown);
+    });
+  });
+
   test('keeps the whitespace at the edges of a note\'s text after an equation in its paragraph', async () => {
     // Text after an equation in its paragraph goes on from the closing
     // fence, as in the document's body, with its whitespace kept
