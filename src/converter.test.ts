@@ -1545,6 +1545,17 @@ describe('Ordered list numbering', () => {
     expect(await roundTrip(md)).toBe(md);
   });
 
+  test.each([
+    ['an empty element', '<w:lvlOverride w:ilvl="0"/>'],
+    ['an element pair', '<w:lvlOverride w:ilvl="0"></w:lvlOverride>'],
+  ])('reads an instance\'s level override with nothing in it, written as %s, as a start of 0', async (_name, override) => {
+    // Word numbers the level from 0 (tdf#153104), as export reads a
+    // template's, where import read the level's own start
+    const md = '0. a\n1. b';
+    expect(await wordList('<w:num w:numId="6"><w:abstractNumId w:val="1"/>' + override + '</w:num>', [[6, 0, 'a'], [6, 0, 'b']])).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
   // Numbering whose level `ilvl` of the numbered lists has a w:lvlRestart of `restart`
   const withLvlRestart = (ilvl: number, restart: number) => (numbering: string) => numbering.replace(new RegExp('(<w:abstractNum w:abstractNumId="1"[^]*?<w:lvl w:ilvl="'
     + ilvl + '"[^>]*><w:start w:val="1"/><w:numFmt w:val="decimal"/>)'), (match: string) => match + '<w:lvlRestart w:val="' + restart + '"/>');
@@ -1653,6 +1664,105 @@ describe('Ordered list numbering', () => {
     return new RegExp('<w:num w:numId="' + numId + '"[^>]*><w:abstractNumId w:val="1"/>([^]*?)</w:num>').exec(numbering)?.[1];
   };
 
+  // Numbering whose level `ilvl` of the numbered lists starts at `start`, or
+  // has no w:start for undefined, or whose numId 2 starts that level over at it
+  const withLevelStart = (ilvl: number, start?: number) => (numbering: string) => numbering.replace(new RegExp('(<w:abstractNum w:abstractNumId="1"[^]*?<w:lvl w:ilvl="'
+    + ilvl + '"[^>]*>)<w:start w:val="1"/>'), (_match, lvl: string) => lvl + (start === undefined ? '' : '<w:start w:val="' + start + '"/>'));
+  const withStartOverride = (ilvl: number, start: number) => (numbering: string) => numbering.replace(/(<w:num w:numId="2"[^>]*><w:abstractNumId w:val="1"\/>)/,
+    (instance: string) => instance + '<w:lvlOverride w:ilvl="' + ilvl + '"><w:startOverride w:val="' + start + '"/></w:lvlOverride>');
+
+  test.each([
+    // Word would number it from the template
+    ['a sublist\'s level at 0', withLevelStart(1, 0), '1. a\n   1. x\n2. b\n   1. y'],
+    ['the top level at 3', withLevelStart(0, 3), '1. a\n2. b'],
+    ['its numbered lists\' instance at 5', withStartOverride(0, 5), '1. a\n2. b'],
+    // Below 0, which export read as no start or override at all
+    ['its numbered lists\' instance at -1', withStartOverride(0, -1), '1. a\n2. b'],
+    ['its numbered lists\' instance at -1 and the top level at 3', (numbering: string) => withStartOverride(0, -1)(withLevelStart(0, 3)(numbering)), '3. a\n4. b'],
+    ['the top level at -1', withLevelStart(0, -1), '1. a\n2. b'],
+    ['a sublist\'s level at -1 in its numbered lists\' instance', withStartOverride(1, -1), '1. a\n   1. x\n2. b\n   1. y'],
+  ])('numbers a list as the Markdown does where a template starts %s', async (_name, edit, md) => {
+    const templateDocx = await templateWithNumbering(edit);
+    const once = await roundTripWith(md, templateDocx);
+    expect(once).toBe(md);
+    expect(await roundTripWith(once, templateDocx)).toBe(md);
+  });
+
+  test.each([
+    ['at 1', (numbering: string) => numbering, '1. p\n   1. x\n2. q\n   1. y'],
+    ['its instance at 1', withStartOverride(0, 1), '1. p\n   1. x\n2. q\n   1. y'],
+    ['a sublist\'s level at 2', withLevelStart(1, 2), '1. a\n\n   2. x\n2. b\n\n   2. y'],
+    ['the top level at 3', withLevelStart(0, 3), '3. a\n4. b'],
+    ['its numbered lists\' instance at 5', withStartOverride(0, 5), '5. a\n6. b'],
+  ])('numbers a list in the instance it can share where a template starts it %s', async (_name, edit, md) => {
+    const templateDocx = await templateWithNumbering(edit);
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    expect([...new Set(numIdsOf(await documentXml(docx)))]).toEqual(['2']);
+    expect(await roundTripWith(md, templateDocx)).toBe(md);
+  });
+
+  test.each([
+    // Word starts it at 0 (ECMA-376 Part 1 §17.9.25)
+    ['a level without a start', withLevelStart(1)],
+    // Which Word applies at the instance's first paragraph at the level
+    ['an override at its level in the instance it would share', withStartOverride(1, 5)],
+  ])('starts a sublist over in its own instance where a template has %s', async (_name, edit) => {
+    const templateDocx = await templateWithNumbering(edit);
+    const md = '1. a\n   1. x\n2. b';
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    expect(await levelOverridesOf(docx, 1)).toBe('<w:lvlOverride w:ilvl="1"><w:startOverride w:val="1"/></w:lvlOverride>');
+    expect(await roundTripWith(md, templateDocx)).toBe(md);
+  });
+
+  test.each([
+    // Word reads one with nothing in it as a start of 0 (tdf#153104)
+    ['an empty level override in the instance it would share', false],
+    // A heading's number moves the count on before the list
+    ['headings numbered in the same count', true],
+  ])('starts a list in its own instance where a template has %s', async (_name, headings) => {
+    const templateZip = await JSZip.loadAsync(await templateWithNumbering(numbering => headings
+      ? withLevelStart(0, 3)(numbering).replace('</w:numbering>', '<w:num w:numId="5"><w:abstractNumId w:val="1"/></w:num></w:numbering>')
+      : withLevelStart(0, 3)(numbering).replace(/(<w:num w:numId="2"[^>]*><w:abstractNumId w:val="1"\/>)/, (instance: string) => instance + '<w:lvlOverride w:ilvl="0"/>')));
+    if (headings) {
+      const styles = await templateZip.file('word/styles.xml')!.async('string');
+      templateZip.file('word/styles.xml', styles.replace(/(<w:style [^>]*w:styleId="Heading1"[^]*?<w:pPr>)/, (style: string) => style + '<w:numPr><w:numId w:val="5"/></w:numPr>'));
+    }
+    const templateDocx = await templateZip.generateAsync({ type: 'uint8array' });
+    const md = '# H\n\n3. a\n4. b';
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    expect(await levelOverridesOf(docx, 0)).toBe('<w:lvlOverride w:ilvl="0"><w:startOverride w:val="3"/></w:lvlOverride>');
+    expect(await roundTripWith(md, templateDocx)).toBe(md);
+  });
+
+  test('shares the instance with an empty level override in a template with a list that starts at 0', async () => {
+    // Word starts it at 0 there, which import read as the level's start
+    const templateDocx = await templateWithNumbering(numbering => withLevelStart(0, 3)(numbering)
+      .replace(/(<w:num w:numId="2"[^>]*><w:abstractNumId w:val="1"\/>)/, (instance: string) => instance + '<w:lvlOverride w:ilvl="0"/>'));
+    const md = '0. a\n1. b';
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    expect(numIdsOf(await documentXml(docx))).toEqual(['2', '2']);
+    const once = await roundTripWith(md, templateDocx);
+    expect(once).toBe(md);
+    expect(await roundTripWith(once, templateDocx)).toBe(md);
+  });
+
+  test.each([
+    ['at 1', (numbering: string) => numbering, '- x\n\n1. a\n2. b'],
+    ['at 3', withLevelStart(0, 3), '- x\n\n3. a\n4. b'],
+  ])('starts a list after bullets in its own instance where a template\'s bullets count with its numbers, which start %s', async (_name, edit, md) => {
+    // Bullets in an instance of the numbers' abstract numbering, as a level
+    // override makes a bullet's, moved the count of the numbers' instance
+    // on, which the list took
+    const templateDocx = await templateWithNumbering(numbering => edit(numbering).replace(/(<w:num w:numId="1"[^>]*>)<w:abstractNumId w:val="0"\/>/,
+      (_match, num: string) => num + '<w:abstractNumId w:val="1"/><w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/></w:lvl></w:lvlOverride>'));
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    expect(numIdsOf(await documentXml(docx))[0]).toBe('1');
+    expect(await levelOverridesOf(docx, 1)).toBe('<w:lvlOverride w:ilvl="0"><w:startOverride w:val="' + md.slice(md.indexOf('\n\n') + 2, md.indexOf('.')) + '"/></w:lvlOverride>');
+    // As Word numbers it. Import reads the bullet as its abstract
+    // numbering's number, not the level override's bullet.
+    expect((await convertDocx(docx)).markdown).toEndWith(md.slice(md.indexOf('\n\n') + 2) + '\n');
+  });
+
   test.each([
     // An override of the parents' levels would number their lists, as Word
     // counts the instances of a list as one, which gives %1.%2 2.1 without it
@@ -1715,7 +1825,8 @@ describe('Ordered list numbering', () => {
     const merged = await (await JSZip.loadAsync(docx)).file('word/numbering.xml')!.async('string');
     expect(merged).toContain('<w:num w:numId="7">');
     expect(merged).not.toContain('<w:num w:numId="8">');
-    expect(numIdsOf(await documentXml(docx))[1]).toBe('8');
+    // Its style numbers in the lists' count, so each list starts in a numbering of its own
+    expect(numIdsOf(await documentXml(docx))).toEqual(['8', '9']);
   });
 
   test.each([
