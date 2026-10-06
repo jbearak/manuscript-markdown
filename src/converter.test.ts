@@ -13196,6 +13196,41 @@ describe('Formatting Word shows on whitespace', () => {
     expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
   });
 
+  const item = (text: string, formatting: Partial<RunFormatting> = {}, revision?: RevisionInfo) =>
+    ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting }, ...(revision ? { revision } : {}) }) as ContentItem;
+  const citation = (revision?: RevisionInfo) =>
+    ({ type: 'citation', text: '(Doe 2020)', pandocKeys: ['@doe2020'], commentIds: new Set(), ...(revision ? { revision } : {}) }) as ContentItem;
+  const inserted: RevisionInfo = { type: 'addition', author: 'A', date: '2024-01-01T00:00:00Z' };
+
+  test.each([
+    ['code that ends in a space', [item('Seen '), item('a ', { code: true }), citation()], 'Seen `a `[@doe2020]'],
+    ['code with spaces at both ends, which pad its backticks', [item('Seen '), item(' a ', { code: true }), citation()], 'Seen `  a  `[@doe2020]'],
+    ['code that ends in a space after a backtick', [item('Seen '), item('a` ', { code: true }), citation()], 'Seen ``a` ``[@doe2020]'],
+    ['highlighted code that ends in a space', [item('Seen '), item('a ', { code: true, highlight: true }), citation()], 'Seen ==`a `==[@doe2020]'],
+    ['inserted code that ends in a space', [item('Seen '), item('a ', { code: true }, inserted), citation(inserted)], 'Seen {++`a `[@doe2020]++}'],
+  ])('puts no second space before a citation after %s', (_name, items, md) => {
+    // The backtick that closes the code read as the text before the
+    // citation, not the space in it, which export writes
+    expect(buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim()).toBe(md);
+  });
+
+  test.each([
+    ['code that ends in a backtick, which pads it', [item('Seen '), item('a`', { code: true }), citation()], 'Seen `` a` `` [@doe2020]'],
+    ['code that ends in a backslash', [item('Seen '), item('a\\', { code: true }), citation()], 'Seen `a\\` [@doe2020]'],
+  ])('puts a space before a citation after %s', (_name, items, md) => {
+    expect(buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim()).toBe(md);
+  });
+
+  test('reads code that ends in a space before a citation back as it is', async () => {
+    // Word got a second space, between the code and the citation
+    const bibtex = '@article{doe2020,\n  author = {Doe, Jane},\n  title = {Title},\n  journal = {J},\n  year = {2020}\n}\n';
+    const md = 'Seen `a `[@doe2020] here.\n';
+    const { docx } = await convertMdToDocx(md, { bibtex });
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml).not.toContain('<w:t xml:space="preserve"> </w:t>');
+    expect(strip((await convertDocx(docx)).markdown).trimStart()).toBe(md);
+  });
+
   test('writes <br> before the == of a highlight that ends the text before an equation', async () => {
     // == alone on the line before it read as a heading's underline
     const md = 'x==a<br>==\n$$\nE\n$$\n';

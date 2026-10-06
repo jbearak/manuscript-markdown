@@ -5841,7 +5841,7 @@ function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = mar
     if (end <= from) break;
     const closer = /(\+\+|--|~~|==|<<)\}$/.exec(markdown.slice(Math.max(from, end - 3), end));
     const start = closer ? criticSpanStart(markdown, CRITIC_OPENERS[closer[1]], closer[0], from, end) : -1;
-    if (!closer || start < 0) return charBefore(markdown, end);
+    if (!closer || start < 0) return lastTextChar(markdown, from, end);
     const inner = start + 3;
     const innerEnd = end - 3;
     const separator = closer[1] === '~~' ? markdown.indexOf('~>', inner) : -1;
@@ -5878,6 +5878,36 @@ function charBefore(markdown: string, end: number): string {
   return !readsMarkdown && markdown.endsWith('<br>', end) ? '\n' : markdown[end - 1] ?? '';
 }
 
+/** The last character of the text of `markdown` from `from` to `end`: the
+ *  one before `end` (see charBefore), or the last of the code a code span
+ *  that ends there holds, inside its backticks and the spaces that pad
+ *  them (see markedFormatting), as the space of `a `, which export writes
+ *  as the code's */
+function lastTextChar(markdown: string, from: number, end: number): string {
+  if (!readsMarkdown || markdown[end - 1] !== '`') return charBefore(markdown, end);
+  let fenceStart = end - 1;
+  while (fenceStart > from && markdown[fenceStart - 1] === '`') fenceStart--;
+  // Not an escaped backtick of text's
+  let slashes = 0;
+  while (fenceStart - 1 - slashes >= from && markdown[fenceStart - 1 - slashes] === '\\') slashes++;
+  if (slashes % 2 === 1) return charBefore(markdown, end);
+  // The span opens at the nearest run of as many backticks before, as the
+  // code holds no run of them
+  const fence = end - fenceStart;
+  for (let k = fenceStart - 1; k >= from; k--) {
+    if (markdown[k] !== '`') continue;
+    let runStart = k;
+    while (runStart > from && markdown[runStart - 1] === '`') runStart--;
+    if (k + 1 - runStart === fence) {
+      const code = markdown.slice(k + 1, fenceStart);
+      const padded = code.startsWith(' ') && code.endsWith(' ') && /[^ ]/.test(code);
+      return (padded ? code[code.length - 2] : code[code.length - 1]) ?? '';
+    }
+    k = runStart;
+  }
+  return charBefore(markdown, end);
+}
+
 /** Where the text of `markdown` before `end` ends, past the closes of the
  *  formatting around it, as a highlight's, which holds the whitespace at
  *  its edges: ==a == */
@@ -5909,7 +5939,7 @@ function citationSeparator(precedingMarkdown: string, citation: Extract<ContentI
   // it from, and a space at a line's start would be lost
   return views.some(accepted => [' ', '', '\n'].includes(
     span?.revision.type === (accepted ? 'addition' : 'deletion')
-      ? charBefore(precedingMarkdown, textEnd(precedingMarkdown, span.start, span.end - 3))
+      ? lastTextChar(precedingMarkdown, span.start, textEnd(precedingMarkdown, span.start, span.end - 3))
       : lastVisibleChar(precedingMarkdown, accepted, 0, span ? span.start : precedingMarkdown.length)
   )) ? '' : ' ';
 }
