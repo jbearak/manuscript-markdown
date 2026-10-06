@@ -3154,6 +3154,16 @@ describe('wrapWithFormatting', () => {
   });
 
   // Property 3: Combined formatting nesting order is consistent
+  test.each([
+    [{ bold: true, italic: true }, ' '],
+    [{ italic: true, strikethrough: true }, '*<s> </s>*'],
+    [{ bold: true, strikethrough: true }, '**<s> </s>**'],
+  ])('wraps whitespace alone with %j as %j', (fmt, expected) => {
+    // The property expected struck whitespace bare, which it found only
+    // where fast-check made a string of whitespace alone
+    expect(wrapWithFormatting(' ', { ...DEFAULT_FORMATTING, ...fmt })).toBe(expected);
+  });
+
   test('property: combined formatting nesting order is consistent', () => {
     fc.assert(
       fc.property(
@@ -3171,10 +3181,13 @@ describe('wrapWithFormatting', () => {
         (text, fmt) => {
           let result = wrapWithFormatting(text, fmt);
 
+          // Bold or italic whitespace alone is bare, but struck whitespace
+          // keeps its strike in <s>, which Word shows
           if (
             !fmt.code
             && text.trim().length === 0
-            && (fmt.bold || fmt.italic || fmt.strikethrough)
+            && (fmt.bold || fmt.italic)
+            && !fmt.strikethrough
             && !fmt.highlight
             && !fmt.underline
             && !fmt.superscript
