@@ -712,6 +712,19 @@ describe('Font customization unit tests', () => {
       expect(fontSizeLine).toBeLessThan(sentinelLine);
     });
 
+    it.each([
+      ['a blank line', 'A\n\n<!-- table-font-size: 7 -->\n\n<!-- c -->\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nD\n'],
+      ['no blank line', 'A\n\n<!-- table-font-size: 7 -->\n<!-- c -->\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nD\n'],
+      ['two comments, each with its gap', 'A\n\n<!-- table-font: Arial -->\n<!-- table-col-widths: 2 1 -->\n\n\n<!-- c -->\n<!-- d -->\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n'],
+      ['the comment first in the document', '<!-- table-font-size: 7 -->\n\n<!-- c -->\n| a | b |\n| --- | --- |\n| 1 | 2 |\n'],
+    ])('directives before a comment before a table keep their place with %s between', async (_name, markdown) => {
+      const { convertDocx } = await import('./converter');
+      const trip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+      const first = await trip(markdown);
+      expect(first).toBe(markdown);
+      expect(await trip(first)).toBe(first);
+    });
+
     it('auto directive overrides frontmatter default', async () => {
       const markdown = '---\ntable-col-widths: 2 1\n---\n\n<!-- table-col-widths: auto -->\n\n| A | B |\n|---|---|\n| 1 | 2 |';
       const result = await convertMdToDocx(markdown);
