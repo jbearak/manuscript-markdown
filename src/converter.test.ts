@@ -1979,6 +1979,52 @@ describe('Task list round-trip', () => {
   test('keeps a paragraph that only starts with a box', async () => {
     expect(await roundTrip('☐ not a task')).toBe('☐ not a task');
   });
+
+  /** Each paragraph's text in docx, with a tracked mark's type before it */
+  const paragraphs = async (docx: Uint8Array) => {
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    return [...xml.matchAll(/<w:p[ >](?:(?!<\/w:p>).)*<\/w:p>/g)].map(([p]) => {
+      const mark = /<w:pPr>(?:(?!<\/w:pPr>).)*<w:(ins|del) /.exec(p)?.[1];
+      const text = [...p.matchAll(/<w:(?:t|delText)(?: [^>]*)?>([^<]*)<|<w:tab\/>/g)].map(m => m[1] ?? '\t').join('');
+      return (mark ? mark + ': ' : '') + text;
+    }).filter(text => text !== '');
+  };
+
+  test.each([
+    ['spaces', '- [ ] &#32;&#32;t', '☐   t'],
+    ['a tab', '- [ ] &#9;t', '☐ \tt'],
+    ['a no-break space', '- [ ] &nbsp;t', '☐ \u00a0t'],
+    ['spaces after a checked box', '- [x] &#32;t', '☒  t'],
+    ['spaces in a numbered item', '1. [ ] &#32;t', '☐  t'],
+  ])('keeps %s at the start of a task item\'s text', async (_name, md, word) => {
+    // The box took them, as references, with the space after it
+    const { docx } = await convertMdToDocx(md);
+    expect(await paragraphs(docx)).toEqual([word]);
+    expect(strip((await convertDocx(docx)).markdown)).toBe(md);
+  });
+
+  test.each([
+    ['deleted', '- [ ] XX\n\n  c', 'del', '- [ ] &#32;&#32;{--\n\n  --}c', ['del: ☐   ', 'c']],
+    ['inserted', '- [ ] XX\n\n  c', 'ins', '- [ ] &#32;&#32;{++\n\n  ++}c', ['ins: ☐   ', 'c']],
+    ['deleted, before another item', '- [ ] XX\n- [ ] c', 'del', '- [ ] &#32;&#32;{--\n\n  --}\n- [ ] c', ['del: ☐   ', '☐ c']],
+  ])('keeps the spaces alone after a task item\'s box whose paragraph\'s mark is %s', async (_name, md, type, expected, word) => {
+    // The box took them, and the tracked break after them with them, as it
+    // then opened the item's text
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace(/(<w:ind w:left="720" w:hanging="360"\/>)(<\/w:pPr>)/,
+      '$1<w:rPr><w:' + type + ' w:id="91" w:author="A" w:date="2024-01-01T00:00:00Z"/></w:rPr>$2')
+      .replace('<w:r><w:t>XX</w:t></w:r>', '<w:r><w:t xml:space="preserve">  </w:t></w:r>');
+    expect(edited).not.toContain('XX');
+    zip.file('word/document.xml', edited);
+    const docx = await zip.generateAsync({ type: 'uint8array' });
+    expect(await paragraphs(docx)).toEqual(word);
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(expected);
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect(await paragraphs(again)).toEqual(word);
+    expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
+  });
 });
 
 describe('List indent round-trip', () => {

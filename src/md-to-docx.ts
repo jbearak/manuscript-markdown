@@ -173,6 +173,7 @@ export interface MdRun {
   code?: boolean;           // inline code
   href?: string;            // hyperlink URL
   escapedBracket?: true;    // text that starts with \[, whose [ is text and not a task's box or an alert's marker
+  taskBoxLength?: number;   // of the task's box that starts the text and the whitespace after it the source holds as it is (see task_box_whitespace)
   // CriticMarkup specific
   newText?: string;         // for substitutions: {~~old~>new~~}
   innerRuns?: MdRun[];      // parsed inner formatting for critic_add/del/highlight
@@ -931,6 +932,21 @@ function createMarkdownIt(): MarkdownIt {
         children[last].meta = { ...children[last].meta, escapedBracket: true };
         i = last;
       }
+    }
+  });
+  // A task's box takes the whitespace after it in the source, as GFM reads
+  // it there, but not a reference after that, as &#32;, as import writes the
+  // whitespace an item's text starts with, which text_join joins to it. The
+  // length of the box and its whitespace goes in the meta of the last token
+  // of the run text_join joins, as above.
+  md.core.ruler.before('text_join', 'task_box_whitespace', state => {
+    for (const block of state.tokens) {
+      const children = block.type === 'inline' ? block.children ?? [] : [];
+      const box = children[0]?.type === 'text' ? /^\[[ xX]\][ \t]+/.exec(children[0].content) : null;
+      if (!box || children[1]?.type !== 'text_special') continue;
+      let last = 0;
+      while (children[last + 1]?.type === 'text' || children[last + 1]?.type === 'text_special') last++;
+      children[last].meta = { ...children[last].meta, taskBoxLength: box[0].length };
     }
   });
   md.core.ruler.after('block', 'document_link_definitions', state => {
@@ -3271,6 +3287,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
             ...formatStack,
             href: currentHref,
             ...(token.meta?.escapedBracket ? { escapedBracket: true as const } : {}),
+            ...(token.meta?.taskBoxLength ? { taskBoxLength: token.meta.taskBoxLength as number } : {}),
           });
         }
         break;
@@ -3767,13 +3784,16 @@ function extractTaskListItem(runs: MdRun[]): { checked: boolean; runs: MdRun[] }
   const firstTextIdx = runs.findIndex(run => run.type === 'text' && run.text.length > 0);
   if (firstTextIdx === -1) return undefined;
   const firstTextRun = runs[firstTextIdx];
-  const parsed = holdsMarker(runs, firstTextIdx) ? parseTaskListMarker(firstTextRun.text) : undefined;
+  // The box, with only the whitespace the source holds as it is after it
+  const boxLength = firstTextRun.taskBoxLength ?? firstTextRun.text.length;
+  const parsed = holdsMarker(runs, firstTextIdx) ? parseTaskListMarker(firstTextRun.text.slice(0, boxLength)) : undefined;
   if (!parsed) return undefined;
+  const rest = parsed.rest + firstTextRun.text.slice(boxLength);
   const updatedRuns = [...runs];
-  if (parsed.rest.length === 0) {
+  if (rest.length === 0) {
     updatedRuns.splice(firstTextIdx, 1);
   } else {
-    updatedRuns[firstTextIdx] = { ...firstTextRun, text: parsed.rest };
+    updatedRuns[firstTextIdx] = { ...firstTextRun, text: rest, taskBoxLength: undefined };
   }
   return { checked: parsed.checked, runs: updatedRuns };
 }
