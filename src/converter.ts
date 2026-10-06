@@ -968,9 +968,10 @@ const endsLine = (text: string): boolean => text.endsWith('\n') || /\n[> \t]*[\u
  * can start. Code is literal, and doesn't come here. Where export reads
  * a citation, as `rawTags` says, the positions in the Markdown of its keys
  * and locators, which export reads as they are, go in it, and a tag in a
- * prefix has its < escaped.
+ * prefix has its < escaped. Where the text's = go as references
+ * (`equalsAsReferences`, see markedFormatting), linkify reads them so.
  */
-function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter, rawTags?: Set<number>, beforeMath = false): string {
+function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter, rawTags?: Set<number>, beforeMath = false, equalsAsReferences = false): string {
   const escaped = new Set<number>();
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
@@ -1159,14 +1160,17 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
   // too, as one Markdown keeps raw or one written as references, &lt; and
   // &gt;, which are tokens of their own, so a < or > is a space here: in
   // https://e.com1.<span> linkify finds no URL, but it links https://e.com1
-  // in https://e.com1. before the tag.
+  // in https://e.com1. before the tag. So is an = written as &#61;, without
+  // its escape: linkify finds no address in x@y.com=, but links x@y.com in
+  // x@y.com&#61;.
   if (/[:@]/.test(text)) {
     let markdown = '';
     const from = new Map<number, number>();
     for (let k = 0; k < text.length; k++) {
-      if (escaped.has(k)) markdown += '\\';
+      const reference = equalsAsReferences && text[k] === '=';
+      if (escaped.has(k) && !reference) markdown += '\\';
       from.set(markdown.length, k);
-      markdown += text[k] === '<' || text[k] === '>' ? ' ' : text[k];
+      markdown += text[k] === '<' || text[k] === '>' || reference ? ' ' : text[k];
     }
     const colonsIn = (markdown: string) => [...linkifyMatches(markdown).map(link => link.schema.endsWith(':') && link.schema !== 'mailto:' ? link.index + link.schema.length - 1 : markdown.indexOf('@', link.index)), ...linkifiedColons(markdown)];
     const colons = colonsIn(markdown);
@@ -2335,7 +2339,10 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
     : ['', '', result, ''];
   // Not a tag in a citation's keys, which export reads as they are
   const keys = new Set<number>();
-  let core = escapeSensitiveHtmlLikeTags(escapeMarkdownChars(edges[2], lineStart && !delimited, after, keys, !delimited && !!after?.mathFirst), keys);
+  // An = that could join a highlight's closing ==, which no backslash
+  // keeps from it, goes as a reference (below)
+  const references = fmt.highlight && /==|=\s*$/.test(text);
+  let core = escapeSensitiveHtmlLikeTags(escapeMarkdownChars(edges[2], lineStart && !delimited, after, keys, !delimited && !!after?.mathFirst, references), keys);
   // A ~ at the edge of struck text would join the ~~ around it, which
   // reads ~~~a~~ as ~ and struck a, where nothing comes between them, as a
   // highlight does inside them, but not one around them (`highlightOuter`)
@@ -2350,10 +2357,9 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
   const htmlBlock = !delimited && blockStart && !result.includes('\\\n') && isHtmlBlock(result.replace(/^ {1,3}(?=<)/, '')) && after?.first === '';
   result = htmlBlock ? result : escaped;
 
-  // An = that could join a highlight's closing ==, which no backslash
-  // keeps from it, as a reference
-  // The backslash of an escaped =, not one of an escaped backslash's
-  if (fmt.highlight && /==|=\s*$/.test(text)) result = result.replace(/((?:\\\\)*)\\?=/g, (_m, pairs: string) => pairs + '&#61;');
+  // An = as a reference, without the backslash of an escaped =, not one of
+  // an escaped backslash's
+  if (references) result = result.replace(/((?:\\\\)*)\\?=/g, (_m, pairs: string) => pairs + '&#61;');
   return wrapFormatting(result, fmt, highlightOuter);
 }
 

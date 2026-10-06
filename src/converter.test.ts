@@ -11762,14 +11762,17 @@ describe('Highlights across runs', () => {
   const fromWord = async (runs: string, md = 'XX', part = 'word/document.xml') => markdownOf(await withRuns(runs, md, part));
   /** The runs of a document's `part` as Word shows them: each one's text
    *  after its formatting, and a + or - in a tracked change, with the text
-   *  of those alike side by side joined */
+   *  of those alike side by side joined, and its links */
   const shownRuns = async (docx: Uint8Array, part = 'word/document.xml') => {
     const xml = await (await JSZip.loadAsync(docx)).file(part)!.async('string');
     const shown: string[] = [];
     let change = '';
     let last: string | undefined;
-    for (const [tag, inner] of xml.matchAll(/<\/?w:(?:ins|del)\b[^>]*>|<w:r>([\s\S]*?)<\/w:r>/g)) {
-      if (inner === undefined) {
+    for (const [tag, inner] of xml.matchAll(/<\/?w:(?:ins|del)\b[^>]*>|<w:hyperlink\b|<w:r>([\s\S]*?)<\/w:r>/g)) {
+      if (tag === '<w:hyperlink') {
+        shown.push('link');
+        last = undefined;
+      } else if (inner === undefined) {
         change = tag.startsWith('</') ? '' : tag.startsWith('<w:ins') ? '+' : '-';
         continue;
       }
@@ -11908,6 +11911,22 @@ describe('Highlights across runs', () => {
     const start = performance.now();
     expect(buildMarkdown(items as ContentItem[], new Map())).toEndWith(type === 'addition' ? '**~>&#61;== ==n~~}' : '**&#61;== ==~>n~~}');
     expect(performance.now() - start).toBeLessThan(3000);
+  });
+
+  test.each([
+    ['alone', highlighted('x@y.com=', '', 'red'), '==x\\@y.com&#61;=={red}\n'],
+    ['on a substitution\'s old side', tracked('del', highlighted('a ') + highlighted('x@y.com=', '', 'red')) + tracked('ins', highlighted('new')),
+      '{~~==a =={yellow}==x\\@y.com&#61;=={red}~>==new==~~}\n'],
+    ['on a substitution\'s new side', tracked('del', plain('old')) + tracked('ins', highlighted('a ') + highlighted('x@y.com=', '', 'red')),
+      '{~~old~>==a =={yellow}==x\\@y.com&#61;=={red}~~}\n'],
+  ])('keeps an email address before an = in a highlight %s as text', async (_name, runs, md) => {
+    // Linkify found no address in x@y.com=, so its @ went unescaped, but the
+    // = went as a reference, which ends the text linkify reads, so export
+    // linked x@y.com
+    const docx = await withRuns(runs);
+    expect(await markdownOf(docx)).toBe(md);
+    expect(await shownRuns((await convertMdToDocx(md)).docx)).toEqual(await shownRuns(docx));
+    expect(await roundTrip(md)).toBe(md);
   });
 
   test.each([
