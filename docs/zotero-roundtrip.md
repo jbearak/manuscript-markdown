@@ -25,7 +25,7 @@ The converter preserves Zotero citation identity through the entire cycle:
 
 At each step:
 
-1. **DOCX → Markdown**: Zotero field codes are parsed. Each citation's item key and URI are saved to BibTeX. Citation text becomes `[@key]` syntax. Document preferences (CSL style, locale, Zotero note type) become YAML frontmatter.
+1. **DOCX → Markdown**: Zotero field codes are parsed, in the body, footnotes and endnotes alike. Each cited item gets one key, wherever it's cited, and its item key and URI are saved to BibTeX. Citation text becomes `[@key]` syntax. Document preferences (CSL style, locale, Zotero note type) become YAML frontmatter.
 2. **Editing**: You work with standard Pandoc citation syntax in Markdown. The BibTeX file holds the Zotero metadata alongside the bibliographic data.
 3. **Markdown → DOCX**: Citations are reconstructed as Zotero `ADDIN ZOTERO_ITEM` field codes. The CSL style formats visible citation text and bibliography. Document preferences are written back so Zotero recognizes the file.
 

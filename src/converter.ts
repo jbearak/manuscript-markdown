@@ -53,7 +53,8 @@ import { DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
 // - Year: only set issued.date-parts when year is fully numeric; never emit [[null]]
 //
 // Citations:
-// - buildCitationKeyMap: accepts existingKeys?: Set<string> to prevent cross-scope ambiguity
+// - buildCitationKeyMap: one map for the body's and the notes' citations, so no
+//   two items share a key and each gets a .bib entry, wherever it's cited
 //
 // Footnotes:
 // - Multi-line indent: use block form when bodyParts[0] is multi-line; indent all
@@ -149,6 +150,8 @@ export interface CitationMetadata {
   fullItemData: Record<string, unknown>;
   zoteroKey?: string;
   zoteroUri?: string;
+  zoteroUris?: string[];  // all the URIs the field lists for the item, its own first (see citedItems)
+  itemId?: string;        // the item's ID in the field (see itemIdentifier)
   locator?: string;
   citationKey?: string;   // CSL citation-key preserved for round-trip
   suppressAuthor?: boolean; // [-@key] Pandoc suppress-author form
@@ -1345,7 +1348,9 @@ interface NoteBodyContext {
   /** The IDs of the notes the document references, which only have images:
    *  another's would take a file, and a name, for an image nothing shows */
   referenced?: ReadonlySet<string>;
+  /** The Zotero citations of the notes' part, in order */
   zoteroCitations: ZoteroCitation[];
+  /** The key of each item the document cites, in its body or its notes */
   keyMap: Map<string, string>;
   numberingDefs: NumberingDefs;
   numberingStartOverrides?: NumberingStartOverrides;
@@ -3582,23 +3587,8 @@ async function extractNotes(
   const parsed = await readZipXml(zip, xmlPath);
   if (!parsed) return notes;
 
-  // When context is provided, extract Zotero citations from the notes XML
-  // (separate from the document-level citations) and build a file-scoped
-  // context with a shared citation counter across all notes in this file.
-  let fileContext: NoteBodyContext | undefined;
-  if (context) {
-    const noteCitations = extractZoteroCitationsFromParsed(parsed);
-    const noteKeyMap = buildCitationKeyMap(noteCitations, context.format, new Set(context.keyMap.values()));
-    // Merge document-level keyMap with note-specific keys
-    const mergedKeyMap = new Map([...noteKeyMap, ...context.keyMap]);
-    fileContext = {
-      ...context,
-      zoteroCitations: noteCitations,
-      keyMap: mergedKeyMap,
-    };
-  }
-
-  // Shared citation counter across all notes in this file
+  // The context's citations are this file's, in order (see convertDocx),
+  // which one counter runs through across all its notes
   const citationCounter = { idx: 0 };
 
   for (const node of findAllDeep(parsed, tagName)) {
@@ -3612,7 +3602,7 @@ async function extractNotes(
     const noteChildren = node[tagName];
     if (!Array.isArray(noteChildren)) continue;
 
-    const noteContext = fileContext?.referenced && !fileContext.referenced.has(id) ? { ...fileContext, images: undefined } : fileContext;
+    const noteContext = context?.referenced && !context.referenced.has(id) ? { ...context, images: undefined } : context;
     const content = parseNoteBody(noteChildren, tagName, noteContext, citationCounter);
     notes.set(id, { id, content });
   }
@@ -4265,12 +4255,19 @@ function extractZoteroCitationsFromInstructions(instructions: string[]): ZoteroC
           }
         }
 
-        // Extract Zotero URI and key
+        // The item's ID, which Zotero finds it by where the field has no URI
+        const itemId = item.id ?? d.id;
+        if (typeof itemId === 'string' || typeof itemId === 'number') {
+          result.itemId = String(itemId);
+        }
+
+        // Extract Zotero URI and key, and the item's other URIs
         const uris = item.uris ?? item.uri ?? [];
-        const uriValue = Array.isArray(uris) ? uris[0] : uris;
-        const uri = uriValue == null ? '' : String(uriValue);
+        const uriValues = (Array.isArray(uris) ? uris : [uris]).filter(value => value != null).map(String).filter(Boolean);
+        const uri = uriValues[0];
         if (uri) {
           result.zoteroUri = uri;
+          result.zoteroUris = uriValues;
           const zKey = extractZoteroKey(uri);
           if (zKey) {
             result.zoteroKey = zKey;
@@ -4308,9 +4305,11 @@ function extractZoteroCitationsFromInstructions(instructions: string[]): ZoteroC
   return citations;
 }
 
-export async function extractZoteroCitations(data: Uint8Array | JSZip): Promise<ZoteroCitation[]> {
+/** The Zotero citations of a part, the document's body unless `path` names
+ *  another, as its footnotes. */
+export async function extractZoteroCitations(data: Uint8Array | JSZip, path = 'word/document.xml'): Promise<ZoteroCitation[]> {
   const zip = data instanceof JSZip ? data : await loadZip(data);
-  const parsed = await readZipXml(zip, 'word/document.xml');
+  const parsed = await readZipXml(zip, path);
   if (!parsed) { return []; }
   return extractZoteroCitationsFromParsed(parsed);
 }
@@ -4330,52 +4329,94 @@ export function generateCitationKey(
   return `${cleanSurname}${cleanYear}${firstWord}`;
 }
 
-/**
- * Build a map from Zotero item URI (or title+year as fallback) to citation key.
- * Returns a function that maps a ZoteroCitation to its pandoc keys.
- */
+/** Build a map from the identifier of each field's item (see itemIdentifier)
+ *  to its item's citation key, one for each item (see citedItems). */
 export function buildCitationKeyMap(
   allCitations: ZoteroCitation[],
   format: CitationKeyFormat = 'authorYearTitle',
-  existingKeys?: Set<string>
 ): Map<string, string> {
   const keyMap = new Map<string, string>(); // itemId -> citationKey
-  const seen = new Set<string>(existingKeys);
+  const seen = new Set<string>();
   let numericCounter = 1;
 
-  for (const citation of allCitations) {
-    for (const meta of citation.items) {
-      const itemId = itemIdentifier(meta);
-      if (keyMap.has(itemId)) { continue; }
-
-      if (format === 'numeric') {
-        keyMap.set(itemId, String(numericCounter++));
-        continue;
-      }
-
+  for (const { meta, ids, citationKey } of citedItems(allCitations)) {
+    let key: string;
+    if (format === 'numeric') {
+      key = String(numericCounter++);
+    } else if (citationKey && !seen.has(citationKey)) {
       // Prefer stored citation-key from round-trip or Zotero
-      if (meta.citationKey && !seen.has(meta.citationKey)) {
-        seen.add(meta.citationKey);
-        keyMap.set(itemId, meta.citationKey);
-        continue;
-      }
-
+      key = citationKey;
+    } else {
       const surname = getSurname(meta);
       const baseKey = generateCitationKey(surname, meta.year, meta.title, format);
-      let key = baseKey;
+      key = baseKey;
       let counter = 2;
       while (seen.has(key)) { key = `${baseKey}${counter++}`; }
-      seen.add(key);
-      keyMap.set(itemId, key);
     }
+    seen.add(key);
+    for (const id of ids) keyMap.set(id, key);
   }
   return keyMap;
 }
 
+/** The items the citations cite, each once, in the order they first come.
+ *  Fields whose URIs overlap cite one item, as Zotero lists an item's
+ *  earlier URIs, from before a sync or a merge, after its own, and so,
+ *  without a URI, do fields whose identifiers match (see itemIdentifier).
+ *  Each comes with its fields' identifiers, the first citation key one has,
+ *  and the field whose data its key and .bib entry take: the one with the
+ *  most, the first of those, as a field can have less, or none. */
+function citedItems(citations: ZoteroCitation[]): Array<{ meta: CitationMetadata; ids: Set<string>; citationKey?: string }> {
+  // A field's item's names: each of its URIs, else its identifier
+  const names = (meta: CitationMetadata) => meta.zoteroUris?.length ? meta.zoteroUris.map(uri => 'uri:' + uri) : [itemIdentifier(meta)];
+  // Union-find over the names, which the fields that list two join
+  const parent = new Map<string, string>();
+  const find = (name: string): string => {
+    let root = name;
+    while (parent.get(root) !== root) root = parent.get(root)!;
+    for (let next = name; next !== root;) { const up = parent.get(next)!; parent.set(next, root); next = up; }
+    return root;
+  };
+  const fields = citations.flatMap(citation => citation.items);
+  for (const meta of fields) {
+    const [first, ...rest] = names(meta);
+    for (const name of [first, ...rest]) if (!parent.has(name)) parent.set(name, name);
+    for (const name of rest) parent.set(find(name), find(first));
+  }
+  const items = new Map<string, { meta: CitationMetadata; ids: Set<string>; citationKey?: string }>();
+  for (const meta of fields) {
+    const root = find(names(meta)[0]);
+    const item = items.get(root);
+    if (!item) {
+      items.set(root, { meta, ids: new Set([itemIdentifier(meta)]), citationKey: meta.citationKey });
+      continue;
+    }
+    item.ids.add(itemIdentifier(meta));
+    item.citationKey ??= meta.citationKey;
+    if (itemDataSize(meta) > itemDataSize(item.meta)) item.meta = meta;
+  }
+  return [...items.values()];
+}
+
+/** How much of its item's data a field holds: the fields of its itemData
+ *  with a value, not an empty list of authors or a date with no parts */
+function itemDataSize(meta: CitationMetadata): number {
+  const holds = (value: unknown): boolean => Array.isArray(value) ? value.some(holds)
+    : value !== null && typeof value === 'object' ? Object.values(value).some(holds)
+    : value != null && value !== '';
+  return Object.values(meta.fullItemData).filter(holds).length;
+}
+
+/** What tells one field's item from another's: its URI, which Zotero finds
+ *  an item by, else its ID in the field, as Zotero falls back to. Without
+ *  either, its DOI, else its title, year and authors, so that items alike in
+ *  title and year don't share a key. Fields whose other URIs overlap cite
+ *  one item too (see citedItems). */
 export function itemIdentifier(meta: CitationMetadata): string {
-  // Use DOI if available, otherwise title+year
+  if (meta.zoteroUri) return 'uri:' + meta.zoteroUri;
+  if (meta.itemId) return 'id:' + meta.itemId;
   if (meta.doi) { return `doi:${meta.doi}`; }
-  return `${meta.title}::${meta.year}`;
+  return `${meta.title}::${meta.year}::` + JSON.stringify(meta.authors);
 }
 
 function getSurname(meta: CitationMetadata): string {
@@ -11462,83 +11503,79 @@ export function generateBibTeX(
   const entryByKey = originalKeyOrder ? new Map<string, string>() : null;
   const emitted = new Set<string>();
 
-  for (const citation of zoteroCitations) {
-    for (const meta of citation.items) {
-      const id = itemIdentifier(meta);
-      if (emitted.has(id)) { continue; }
-      emitted.add(id);
+  // Each item once, with the data of its field that has the most
+  for (const { meta, ids } of citedItems(zoteroCitations)) {
+    const key = [...ids].map(id => keyMap.get(id)).find(k => k !== undefined);
+    if (!key || emitted.has(key)) { continue; }
+    emitted.add(key);
 
-      const key = keyMap.get(id);
-      if (!key) { continue; }
+    const authorStr = meta.authors.map(serializeAuthor).join(' and ');
 
-      const authorStr = meta.authors.map(serializeAuthor).join(' and ');
+    const genre = meta.fullItemData.genre;
+    const entryType = mapCSLTypeToBibtex(meta.type, typeof genre === 'string' ? genre : undefined);
+    const fields: string[] = [];
+    const alreadyEmitted = new Set<string>();
 
-      const genre = meta.fullItemData.genre;
-      const entryType = mapCSLTypeToBibtex(meta.type, typeof genre === 'string' ? genre : undefined);
-      const fields: string[] = [];
-      const alreadyEmitted = new Set<string>();
+    if (authorStr) { fields.push(`  author = {${authorStr}}`); alreadyEmitted.add('author'); }
+    if (meta.title) { fields.push(`  title = {{${escapeBibtex(meta.title)}}}`); alreadyEmitted.add('title'); }
 
-      if (authorStr) { fields.push(`  author = {${authorStr}}`); alreadyEmitted.add('author'); }
-      if (meta.title) { fields.push(`  title = {{${escapeBibtex(meta.title)}}}`); alreadyEmitted.add('title'); }
-
-      // Emit container-title as journal or booktitle depending on entry type
-      if (meta.journal) {
-        if (entryType === 'incollection' || entryType === 'inproceedings') {
-          fields.push(`  booktitle = {${escapeBibtex(meta.journal)}}`);
-        } else {
-          fields.push(`  journal = {${escapeBibtex(meta.journal)}}`);
-        }
-        alreadyEmitted.add('container-title');
+    // Emit container-title as journal or booktitle depending on entry type
+    if (meta.journal) {
+      if (entryType === 'incollection' || entryType === 'inproceedings') {
+        fields.push(`  booktitle = {${escapeBibtex(meta.journal)}}`);
+      } else {
+        fields.push(`  journal = {${escapeBibtex(meta.journal)}}`);
       }
-
-      if (meta.volume) { fields.push(`  volume = {${escapeBibtex(meta.volume)}}`); alreadyEmitted.add('volume'); }
-      if (meta.pages) { fields.push(`  pages = {${escapeBibtex(meta.pages)}}`); alreadyEmitted.add('page'); }
-      if (meta.year) { fields.push(`  year = {${escapeBibtex(meta.year)}}`); alreadyEmitted.add('issued'); }
-      if (meta.doi) { fields.push(`  doi = {${meta.doi}}`); alreadyEmitted.add('DOI'); }
-
-      // Editor from fullItemData
-      const editorData = meta.fullItemData?.editor;
-      if (Array.isArray(editorData) && editorData.length > 0) {
-        const editorStr = editorData.map(serializeAuthor).join(' and ');
-        if (editorStr) { fields.push(`  editor = {${editorStr}}`); }
-        alreadyEmitted.add('editor');
-      }
-
-      // Institution for techreport entries: prefer explicit x-institution
-      // (BibTeX roundtrip), then fall back to publisher (Zotero maps its
-      // "Institution" field to CSL publisher for report types).
-      if (entryType === 'techreport') {
-        const xInstitution = meta.fullItemData?.['x-institution'];
-        if (typeof xInstitution === 'string' && xInstitution) {
-          fields.push(`  institution = {${escapeBibtex(xInstitution)}}`);
-        } else {
-          const pub = meta.fullItemData?.publisher;
-          if (typeof pub === 'string' && pub) {
-            fields.push(`  institution = {${escapeBibtex(pub)}}`);
-            alreadyEmitted.add('publisher');
-          }
-        }
-      }
-
-      // Additional CSL→BibTeX fields from fullItemData
-      for (const [cslField, bibtexField] of Object.entries(CSL_TO_BIBTEX)) {
-        if (alreadyEmitted.has(cslField)) continue;
-        if (cslField === 'editor') continue; // handled above
-        const val = meta.fullItemData?.[cslField];
-        if (val != null && (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean')) {
-          const strVal = String(val);
-          fields.push(`  ${bibtexField} = {${VERBATIM_CSL_FIELDS.has(cslField) ? strVal : escapeBibtex(strVal)}}`);
-          alreadyEmitted.add(cslField);
-        }
-      }
-
-      if (meta.zoteroKey) { fields.push(`  zotero-key = {${meta.zoteroKey}}`); }
-      if (meta.zoteroUri) { fields.push(`  zotero-uri = {${meta.zoteroUri}}`); }
-
-      const entryStr = `@${entryType}{${key},\n${fields.join(',\n')},\n}`;
-      entries.push(entryStr);
-      if (entryByKey) entryByKey.set(key, entryStr);
+      alreadyEmitted.add('container-title');
     }
+
+    if (meta.volume) { fields.push(`  volume = {${escapeBibtex(meta.volume)}}`); alreadyEmitted.add('volume'); }
+    if (meta.pages) { fields.push(`  pages = {${escapeBibtex(meta.pages)}}`); alreadyEmitted.add('page'); }
+    if (meta.year) { fields.push(`  year = {${escapeBibtex(meta.year)}}`); alreadyEmitted.add('issued'); }
+    if (meta.doi) { fields.push(`  doi = {${meta.doi}}`); alreadyEmitted.add('DOI'); }
+
+    // Editor from fullItemData
+    const editorData = meta.fullItemData?.editor;
+    if (Array.isArray(editorData) && editorData.length > 0) {
+      const editorStr = editorData.map(serializeAuthor).join(' and ');
+      if (editorStr) { fields.push(`  editor = {${editorStr}}`); }
+      alreadyEmitted.add('editor');
+    }
+
+    // Institution for techreport entries: prefer explicit x-institution
+    // (BibTeX roundtrip), then fall back to publisher (Zotero maps its
+    // "Institution" field to CSL publisher for report types).
+    if (entryType === 'techreport') {
+      const xInstitution = meta.fullItemData?.['x-institution'];
+      if (typeof xInstitution === 'string' && xInstitution) {
+        fields.push(`  institution = {${escapeBibtex(xInstitution)}}`);
+      } else {
+        const pub = meta.fullItemData?.publisher;
+        if (typeof pub === 'string' && pub) {
+          fields.push(`  institution = {${escapeBibtex(pub)}}`);
+          alreadyEmitted.add('publisher');
+        }
+      }
+    }
+
+    // Additional CSL→BibTeX fields from fullItemData
+    for (const [cslField, bibtexField] of Object.entries(CSL_TO_BIBTEX)) {
+      if (alreadyEmitted.has(cslField)) continue;
+      if (cslField === 'editor') continue; // handled above
+      const val = meta.fullItemData?.[cslField];
+      if (val != null && (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean')) {
+        const strVal = String(val);
+        fields.push(`  ${bibtexField} = {${VERBATIM_CSL_FIELDS.has(cslField) ? strVal : escapeBibtex(strVal)}}`);
+        alreadyEmitted.add(cslField);
+      }
+    }
+
+    if (meta.zoteroKey) { fields.push(`  zotero-key = {${meta.zoteroKey}}`); }
+    if (meta.zoteroUri) { fields.push(`  zotero-uri = {${meta.zoteroUri}}`); }
+
+    const entryStr = `@${entryType}{${key},\n${fields.join(',\n')},\n}`;
+    entries.push(entryStr);
+    if (entryByKey) entryByKey.set(key, entryStr);
   }
 
   // Reorder output to match original key order when provided (used by Layer 2 caller)
@@ -11881,6 +11918,8 @@ export async function convertDocx(
   const {
     comments,
     zoteroCitations,
+    footnoteCitations,
+    endnoteCitations,
     zoteroPrefs,
     author,
     commentIdMapping,
@@ -11938,6 +11977,8 @@ export async function convertDocx(
   } = await allNamed({
     comments: extractComments(zip),
     zoteroCitations: extractZoteroCitations(zip),
+    footnoteCitations: extractZoteroCitations(zip, 'word/footnotes.xml'),
+    endnoteCitations: extractZoteroCitations(zip, 'word/endnotes.xml'),
     zoteroPrefs: extractZoteroPrefs(zip),
     author: extractAuthor(zip),
     commentIdMapping: extractCommentIdMapping(zip),
@@ -12020,7 +12061,10 @@ export async function convertDocx(
     }
   }
 
-  const keyMap = buildCitationKeyMap(zoteroCitations, format);
+  // One key for each item, wherever it's cited, and a .bib entry for it: the
+  // body's items take theirs first, then the footnotes', then the endnotes'
+  const allCitations = [...zoteroCitations, ...footnoteCitations, ...endnoteCitations];
+  const keyMap = buildCitationKeyMap(allCitations, format);
 
   // Parse note-specific rels and numbering for footnote/endnote body parsing
   const [numberingResult, docRelsParsed, fnRelsParsed, enRelsParsed] = await Promise.all([
@@ -12043,8 +12087,8 @@ export async function convertDocx(
   // relationships are each part's own
   const imageFiles: ImageFiles = { entries: [], filenames: new Map() };
   const imageFolder = options?.imageFolder ?? '';
-  const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, images: { relationships: fnRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, styleLayouts };
-  const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, images: { relationships: enRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, styleLayouts };
+  const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, images: { relationships: fnRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: footnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, styleLayouts };
+  const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, images: { relationships: enRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: endnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, styleLayouts };
 
   const { content: docContent, zoteroBiblData } = await extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, relationshipMap: docRels, replyIds, imageRelationships: imageRels, imageFolder: options?.imageFolder, imageFiles, portraitBreakOrdinals: portraitBreaks ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined, styleLayouts });
   // The notes the document references, in its order, which are the ones it
@@ -12441,7 +12485,7 @@ export async function convertDocx(
     // Layer 1: stored .bib is authoritative — preserve verbatim.
     // Only append genuinely new Zotero entries (citations added in Word).
     const storedKeys = new Set(parseBibtex(storedBibData).keys());
-    const generated = generateBibTeX(zoteroCitations, keyMap);
+    const generated = generateBibTeX(allCitations, keyMap);
     // Let the parser delimit the entries.  Splitting on blank lines would cut
     // an entry in half the moment a field value contains one — `abstract` and
     // `note` come through from Zotero verbatim and routinely do — and the
@@ -12455,10 +12499,10 @@ export async function convertDocx(
       : storedBibData;
   } else if (bibKeyOrder) {
     // Layer 2: regenerate but sort to match original key order
-    bibtex = generateBibTeX(zoteroCitations, keyMap, bibKeyOrder);
+    bibtex = generateBibTeX(allCitations, keyMap, bibKeyOrder);
   } else {
     // Layer 3: backward compatible — generate from Zotero citations
-    bibtex = generateBibTeX(zoteroCitations, keyMap);
+    bibtex = generateBibTeX(allCitations, keyMap);
   }
 
   // Post-processing: merge with on-disk .bib — preserves all existing entries/fields.
