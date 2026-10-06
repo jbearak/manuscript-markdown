@@ -500,6 +500,10 @@ export function keepParagraphWhitespace(text: string, atStart: boolean, atEnd: b
 // they end the text
 const HARD_BREAK = /(?<!\\)((?:\\\\)*)\\\n([ \t]+$)?/g;
 const HARD_BREAK_AT_END = /(?<!\\)((?:\\\\)*)\\\n$/;
+// One before the == of a highlight that ends the text, but for spaces and
+// tabs, which alone on the text's last line would read as a heading's
+// underline (see wrapHighlight)
+const HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END = /(?<!\\)((?:\\\\)*)\\\n(==[ \t]*)$/;
 const HARD_BREAKS_AT_END = /(?<!\\)((?:\\\\)*)(?:\\\n)+$/;
 
 /**
@@ -2240,30 +2244,20 @@ function markdownHighlightColor(fmt: RunFormatting): string | undefined {
 
 /** `markdown` in a highlight of a Markdown color: ==a==, or ==a=={red}. The
  *  highlight holds the whitespace at its edges, which Word shows it on, as
- *  == reads as a highlight next to whitespace too, but not line breaks,
- *  which emphasis keeps out (see wrapMarkdownDelimited). One that `joins`
+ *  == reads as a highlight next to whitespace too, and line breaks, as in
+ *  ==a\\\n==b, whose == after a line's start closes it, as emphasis's
+ *  can't (see wrapMarkdownDelimited); alone on a paragraph's last line it
+ *  would read as a heading's underline, so a line break before it there is
+ *  <br> (see HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END). One that `joins`
  *  its neighbour's takes marks of its own (see joinHighlights). */
 function wrapHighlight(markdown: string, color: string | undefined, joins = false): string {
-  // The line breaks at its edges, from its ends, as a regex with a lazy
-  // middle would scan the text for each
-  let start = 0;
-  while (markdown.startsWith('\\\n', start)) start += 2;
-  let end = markdown.length;
-  while (end - 2 >= start && markdown.startsWith('\\\n', end - 2)) end -= 2;
-  if (start === end) return markdown;
+  if (!markdown) return markdown;
   // A } it starts with is escaped, which would read with its == as
   // CriticMarkup's ==}, which ends a comment's range around it, as in
-  // {====}a====}, and so is a { it ends with, which would read with its ==
-  // as {==. The text's end escapes that { (see escapeMarkdownChars), but
-  // not before a line break, which a highlight group's text can hold (see
-  // renderHighlightGroup). A backslash before it escapes it, unless escaped
-  // itself.
-  let slashes = 0;
-  if (markdown[end - 1] === '{') while (markdown[end - 2 - slashes] === '\\') slashes++;
-  const brace = markdown[end - 1] === '{' && slashes % 2 === 0 ? 1 : 0;
-  return markdown.slice(0, start) + '==' + (joins ? HIGHLIGHT_JOIN_OPEN : HIGHLIGHT_OPEN) + (markdown[start] === '}' ? '\\' : '')
-    + markdown.slice(start, end - brace) + (brace ? '\\{' : '')
-    + (joins ? HIGHLIGHT_JOIN_CLOSE : HIGHLIGHT_CLOSE) + '==' + (color && color !== 'yellow' ? '{' + color + '}' : '') + markdown.slice(end);
+  // {====}a====}. A { it ends with, which would read with its == as {==,
+  // the text's end escapes (see escapeMarkdownChars).
+  return '==' + (joins ? HIGHLIGHT_JOIN_OPEN : HIGHLIGHT_OPEN) + (markdown[0] === '}' ? '\\' : '') + markdown
+    + (joins ? HIGHLIGHT_JOIN_CLOSE : HIGHLIGHT_CLOSE) + '==' + (color && color !== 'yellow' ? '{' + color + '}' : '');
 }
 
 /** `text` as Markdown with Word's formatting. `lineStart` says the text
@@ -2285,9 +2279,13 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
   // Code is innermost — applied first
   if (fmt.code) {
     // A line break, which a code span can't hold, goes between spans of the
-    // text on each side of it
-    if (text.includes('\\\n')) {
-      return text.split('\\\n').map(part => part && markedFormatting(part, fmt, lineStart, after, blockStart, highlightOuter)).join('\\\n');
+    // text on each side of it, in the rest of the formatting around them,
+    // which Word shows on it too, as a highlight's, ==`a`\\\n`b`==, or in
+    // the highlight of the spans an == in the code splits it into (see
+    // below), ==`a`\\\n`x =`=={yellow}==`=y`=={yellow}
+    if (text.includes('\\\n') && !(fmt.highlight && text.includes('=='))) {
+      const spans = text.split('\\\n').map(part => part && markedFormatting(part, { ...DEFAULT_FORMATTING, code: true })).join('\\\n');
+      return wrapFormatting(spans, fmt, highlightOuter);
     }
     // Code keeps its formatting, which **`code`** and ==`code`== export.
     // An == in it would close the highlight, even in code, so it goes in
@@ -2462,8 +2460,8 @@ const highlightJoins = new WeakMap<ContentItem[], Map<string, boolean[]>>();
 /** Whether the highlight of the text item at `i` joins its neighbours' in
  *  segment[start, end): it's one of two or more side by side highlighted
  *  alike, with nothing between them in Markdown, in the same comments and
- *  revision, outside a link, and not a line break, which goes outside a
- *  highlight, nor code, which navigation reads no highlight around. Their
+ *  revision, outside a link, and not code, which navigation reads no
+ *  highlight around. Their
  *  highlight goes around the rest of their formatting then; one alone
  *  keeps it inside, as **==a==** has it, as do they all next to a
  *  highlight of its own, as of another color, which one around the rest
@@ -2476,7 +2474,7 @@ function joinsHighlight(segment: ContentItem[], i: number, start: number, end: n
   let joins = byRange.get(key);
   if (!joins) {
     const joinable = (item: ContentItem | undefined): item is ContentItem & { type: 'text' } =>
-      item?.type === 'text' && !!item.formatting.highlight && !item.href && item.text !== '\\\n' && !item.formatting.code
+      item?.type === 'text' && !!item.formatting.highlight && !item.href && !item.formatting.code
       // A } or =, which navigation and the grammar read no highlight
       // around, as they would then read none around its neighbours' text
       && !/[}=]/.test(item.text);
@@ -2487,7 +2485,6 @@ function joinsHighlight(segment: ContentItem[], i: number, start: number, end: n
     // change's or a comment's delimiters or a link's brackets would be
     const abuts = (item: ContentItem & { type: 'text' }, other: ContentItem | undefined): boolean => !!other
       && 'formatting' in other && !!other.formatting?.highlight && !('href' in other && other.href)
-      && !(other.type === 'text' && other.text === '\\\n')
       && commentSetsEqual(other.commentIds, item.commentIds) && revisionsEqual(other.revision, item.revision);
     joins = new Array<boolean>(end - start).fill(false);
     for (let k = start; k < end;) {
@@ -2541,18 +2538,20 @@ const EMPHASIS_BY_MARK: Record<string, { delimiter: string; tag: string }> = {
   '\u0001': { delimiter: '**', tag: 'b' }, '\u0002': { delimiter: '*', tag: 'i' }, '\u0003': { delimiter: '~~', tag: 's' },
 };
 
+/** Whether Word shows formatting `fmt` on a line break, as it does a
+ *  highlight's, an underline's or a strikethrough's, which ==, <u> and <s>
+ *  hold around one, but not bold's or italic's, which it doesn't show, nor
+ *  code's, which a code span can't hold */
+function showsOnBreak(fmt: RunFormatting): boolean {
+  return fmt.highlight || fmt.underline || fmt.strikethrough;
+}
+
 /** `markdown` struck: in ~~ (see wrapEmphasis), or in <s> where it has
- *  whitespace at its edges, which Word shows struck, as ~~ keeps it outside
- *  (see wrapMarkdownDelimited), or is whitespace alone, but for the line
- *  breaks at its edges, which go outside, as a highlight's do */
+ *  whitespace or a line break at its edges, which Word shows struck, as ~~
+ *  keeps them outside (see wrapMarkdownDelimited), or is whitespace alone */
 function wrapStrikethrough(markdown: string, marked: boolean): string {
-  // From its ends, as a regex with a lazy middle would scan the text for each
-  let start = 0;
-  while (markdown.startsWith('\\\n', start)) start += 2;
-  let end = markdown.length;
-  while (end - 2 >= start && markdown.startsWith('\\\n', end - 2)) end -= 2;
-  if (start === end || !/^[^\S\n]|[^\S\n]$/.test(markdown.slice(start, end))) return wrapEmphasis(markdown, '~~', marked);
-  return markdown.slice(0, start) + '<s>' + markdown.slice(start, end) + '</s>' + markdown.slice(end);
+  if (!markdown || !/^\s|^\\\n|\s$/.test(markdown)) return wrapEmphasis(markdown, '~~', marked);
+  return '<s>' + markdown + '</s>';
 }
 
 /** `markdown` in emphasis or strikethrough, its delimiters marked for
@@ -5842,7 +5841,7 @@ function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = mar
     if (end <= from) break;
     const closer = /(\+\+|--|~~|==|<<)\}$/.exec(markdown.slice(Math.max(from, end - 3), end));
     const start = closer ? criticSpanStart(markdown, CRITIC_OPENERS[closer[1]], closer[0], from, end) : -1;
-    if (!closer || start < 0) return charBefore(markdown, end);
+    if (!closer || start < 0) return lastTextChar(markdown, from, end);
     const inner = start + 3;
     const innerEnd = end - 3;
     const separator = closer[1] === '~~' ? markdown.indexOf('~>', inner) : -1;
@@ -5879,6 +5878,36 @@ function charBefore(markdown: string, end: number): string {
   return !readsMarkdown && markdown.endsWith('<br>', end) ? '\n' : markdown[end - 1] ?? '';
 }
 
+/** The last character of the text of `markdown` from `from` to `end`: the
+ *  one before `end` (see charBefore), or the last of the code a code span
+ *  that ends there holds, inside its backticks and the spaces that pad
+ *  them (see markedFormatting), as the space of `a `, which export writes
+ *  as the code's */
+function lastTextChar(markdown: string, from: number, end: number): string {
+  if (!readsMarkdown || markdown[end - 1] !== '`') return charBefore(markdown, end);
+  let fenceStart = end - 1;
+  while (fenceStart > from && markdown[fenceStart - 1] === '`') fenceStart--;
+  // Not an escaped backtick of text's
+  let slashes = 0;
+  while (fenceStart - 1 - slashes >= from && markdown[fenceStart - 1 - slashes] === '\\') slashes++;
+  if (slashes % 2 === 1) return charBefore(markdown, end);
+  // The span opens at the nearest run of as many backticks before, as the
+  // code holds no run of them
+  const fence = end - fenceStart;
+  for (let k = fenceStart - 1; k >= from; k--) {
+    if (markdown[k] !== '`') continue;
+    let runStart = k;
+    while (runStart > from && markdown[runStart - 1] === '`') runStart--;
+    if (k + 1 - runStart === fence) {
+      const code = markdown.slice(k + 1, fenceStart);
+      const padded = code.startsWith(' ') && code.endsWith(' ') && /[^ ]/.test(code);
+      return (padded ? code[code.length - 2] : code[code.length - 1]) ?? '';
+    }
+    k = runStart;
+  }
+  return charBefore(markdown, end);
+}
+
 /** Where the text of `markdown` before `end` ends, past the closes of the
  *  formatting around it, as a highlight's, which holds the whitespace at
  *  its edges: ==a == */
@@ -5910,7 +5939,7 @@ function citationSeparator(precedingMarkdown: string, citation: Extract<ContentI
   // it from, and a space at a line's start would be lost
   return views.some(accepted => [' ', '', '\n'].includes(
     span?.revision.type === (accepted ? 'addition' : 'deletion')
-      ? charBefore(precedingMarkdown, textEnd(precedingMarkdown, span.start, span.end - 3))
+      ? lastTextChar(precedingMarkdown, span.start, textEnd(precedingMarkdown, span.start, span.end - 3))
       : lastVisibleChar(precedingMarkdown, accepted, 0, span ? span.start : precedingMarkdown.length)
   )) ? '' : ' ';
 }
@@ -5972,7 +6001,7 @@ function highlightGroupEnd(segment: ContentItem[], start: number, end: number, c
   const joins = (item: ContentItem) =>
     (item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || (item.type === 'math' && !item.display))
     && revisionsEqual(item.revision, first.revision) && commentSetsEqual(item.commentIds, commentIds)
-    && !(item.type === 'text' && (item.href || item.text === '\\\n')) && !source(item).includes('==');
+    && !(item.type === 'text' && item.href) && !source(item).includes('==');
   if (!joins(first)) return start;
   const groupless = grouplessRuns.get(segment);
   if (groupless && groupless.from < start && start < groupless.to) return start;
@@ -6270,6 +6299,19 @@ function codeSpansMeet(a: ContentItem, b: ContentItem): boolean {
   return a.type === 'text' && b.type === 'text' && a.formatting.code && !a.href && !b.href && formattingEquals(a.formatting, b.formatting);
 }
 
+/**
+ * Whether code and line breaks beside it, one with `formatting` and `text`
+ * and the other `next`, read as one run of code: Markdown can't hold code's
+ * style on a line break, so export writes the break between the code spans
+ * it splits the code at (see markedFormatting) in the rest of the code's
+ * formatting, as a highlight, which it shows on the break.
+ */
+function breaksJoinCode(formatting: RunFormatting, text: string, next: Extract<ContentItem, { type: 'text' }>): boolean {
+  const breaks = (t: string) => /^(?:\\\n)+$/.test(t);
+  return (formatting.code ? !next.formatting.code && breaks(next.text) : next.formatting.code && breaks(text))
+    && formattingEquals({ ...formatting, code: false }, { ...next.formatting, code: false });
+}
+
 /** A citation without keys as a run of its text, as export reads it back,
  *  highlighted as it is, which the runs beside it read and join */
 function keylessCitationRun(item: ContentItem): ContentItem {
@@ -6284,10 +6326,11 @@ function keylessCitationRun(item: ContentItem): ContentItem {
   };
 }
 
-/** Joins runs that read as one, formatted alike. Where export reads
- *  Markdown, code in a tracked change that no span of it can hold goes in
- *  runs of its pieces (see codePiecesInRevision). */
-function mergeConsecutiveRuns(items: ContentItem[]): ContentItem[] {
+/** Joins runs that read as one, formatted alike, and in Markdown
+ *  (`markdown`), code and the line breaks beside it (see breaksJoinCode).
+ *  Where export reads Markdown, code in a tracked change that no span of it
+ *  can hold goes in runs of its pieces (see codePiecesInRevision). */
+function mergeConsecutiveRuns(items: ContentItem[], markdown = readsMarkdown): ContentItem[] {
   const content = items.map(keylessCitationRun);
   const merged: ContentItem[] = [];
   let i = 0;
@@ -6302,6 +6345,8 @@ function mergeConsecutiveRuns(items: ContentItem[]): ContentItem[] {
     }
 
     let mergedText = item.text;
+    // Code's, where line breaks start the run (see breaksJoinCode)
+    let formatting = item.formatting;
     // The merged text's last two characters, which reading from the text,
     // which each merge flattens, would take time in the square of the runs
     let tail = item.text.slice(-2);
@@ -6310,7 +6355,7 @@ function mergeConsecutiveRuns(items: ContentItem[]): ContentItem[] {
     while (j < content.length) {
       const next = content[j];
       if (next.type !== 'text' ||
-          !formattingEquals(item.formatting, next.formatting) ||
+          !formattingEquals(formatting, next.formatting) && !(markdown && breaksJoinCode(formatting, mergedText, next)) ||
           item.href !== next.href ||
           item.link !== next.link ||
           // A link's line break before a line that would start a block
@@ -6321,19 +6366,20 @@ function mergeConsecutiveRuns(items: ContentItem[]): ContentItem[] {
           !revisionsEqual(item.revision, next.revision)) {
         break;
       }
+      if (next.formatting.code && !formatting.code) formatting = next.formatting;
       mergedText += next.text;
       tail = next.text.length >= 2 ? next.text.slice(-2) : (tail + next.text).slice(-2);
       j++;
     }
 
-    const pieces = readsMarkdown && item.revision && item.formatting.code && item.href === undefined
+    const pieces = readsMarkdown && item.revision && formatting.code && item.href === undefined
       ? codePiecesInRevision(mergedText, item.revision) : [mergedText];
     for (const text of pieces) {
       merged.push({
         type: 'text',
         text,
         commentIds: item.commentIds,
-        formatting: item.formatting,
+        formatting,
         href: item.href,
         ...(item.link !== undefined ? { link: item.link } : {}),
         ...(item.revision ? { revision: item.revision } : {}),
@@ -7070,10 +7116,12 @@ function renderInlineRange(
       continue;
     }
 
-    // Hard line breaks must not be wrapped in formatting markers (e.g. **\\\n**)
-    // because the backslash must be the final character on its line. A
-    // tracked change's delimiters can, as {--\\\n--}.
-    if (item.text === '\\\n') {
+    // Hard line breaks must not be wrapped in emphasis (e.g. **\\\n**),
+    // whose closer after a line's start doesn't close it. A tracked change's
+    // delimiters can, as {--\\\n--}, and the formatting Word shows on a
+    // break, a highlight, an underline or a strikethrough, as ==\\\n==
+    // (see showsOnBreak).
+    if (item.text === '\\\n' && !showsOnBreak(item.formatting)) {
       [out, lastSpan] = appendRevised(out, lineBreakText(), item, lastSpan);
       i++;
       continue;
@@ -7361,10 +7409,12 @@ function renderInlineRangeWithIds(
       continue;
     }
 
-    // Hard line breaks must not be wrapped in formatting markers (e.g. **\\\n**)
-    // because the backslash must be the final character on its line. A
-    // tracked change's delimiters can, as {--\\\n--}.
-    if (item.text === '\\\n') {
+    // Hard line breaks must not be wrapped in emphasis (e.g. **\\\n**),
+    // whose closer after a line's start doesn't close it. A tracked change's
+    // delimiters can, as {--\\\n--}, and the formatting Word shows on a
+    // break, a highlight, an underline or a strikethrough, as ==\\\n==
+    // (see showsOnBreak).
+    if (item.text === '\\\n' && !showsOnBreak(item.formatting)) {
       [out, lastSpan] = appendRevised(out, lineBreakText(), item, lastSpan);
       i++;
       continue;
@@ -7437,8 +7487,9 @@ function renderInlineRangeWithIds(
  */
 function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
   type TextItem = Extract<ContentItem, { type: 'text' }>;
-  // The paragraph's text, with each line break as null
-  const pieces: Array<{ text: string; item: TextItem; html: string; raw?: boolean } | null> = [];
+  // The paragraph's text, with each line break as null, but one in
+  // formatting Word shows on it, which goes in that (see showsOnBreak)
+  const pieces: Array<{ text: string; item: TextItem; html: string; raw?: boolean; br?: boolean } | null> = [];
   // A comment Word split, as one; and comments the browser ended at a --!>,
   // which Word joined in one hidden run, as inline Markdown would read them
   // as one (see readHiddenText)
@@ -7456,7 +7507,7 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
     }
     if (item.type !== 'text' || item.revision || item.commentIds.size > 0 || item.formatting.highlight) return undefined;
     item.text.split('\\\n').forEach((text, k) => {
-      if (k > 0) pieces.push(null);
+      if (k > 0) pieces.push(showsOnBreak(item.formatting) ? { text: '', item, html: '<br>', br: true } : null);
       if (text) pieces.push({ text, item, html: '' });
     });
   }
@@ -7464,7 +7515,7 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
   // line keeps can straddle two pieces
   for (let k = 0; k < pieces.length; k++) {
     let end = k;
-    while (end < pieces.length && pieces[end] !== null) end++;
+    while (end < pieces.length && pieces[end] !== null && !pieces[end]!.br) end++;
     const line = pieces.slice(k, end) as Array<{ text: string; item: TextItem; html: string; raw?: boolean }>;
     const characters = htmlLineCharacters(line.map(piece => piece.text).join(''));
     let at = 0;
@@ -7585,7 +7636,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
           ? para.map(item => item.type === 'text' && item.formatting?.bold
             ? { ...item, formatting: { ...item.formatting, bold: false } }
             : item)
-          : para);
+          : para, false);
         const html = renderHtmlCellParagraph(items);
         if (html !== undefined) {
           lines.push(i3 + '<p>' + html + '</p>');
@@ -11003,6 +11054,10 @@ export function buildMarkdown(
     } else if (atEnd && !isInParagraphMath(mergedContent[rendered.nextIndex])) {
       textOut = textOut.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + '<br>');
     }
+    // A line break before the == of a highlight that ends the text is <br>
+    // too, as == alone on the last line would read as a heading's
+    // underline, before an equation in the paragraph as well
+    textOut = textOut.replace(HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END, (_m, backslashes: string, close: string) => backslashes + '<br>' + close);
     // An HTML block's indent, of up to three spaces, which markdown-it keeps
     // in its text, and a reference would make a paragraph's
     const htmlIndent = ownLine && atStart ? /^ {1,3}(?=<)/.exec(textOut)?.[0] ?? '' : '';
@@ -11129,9 +11184,11 @@ export function buildMarkdown(
       // whitespace the note's text starts with after it. A line break at its
       // end is <br>, as at a paragraph's end in the body, but not before an
       // equation in the paragraph (`beforeMath`), which the paragraph goes
-      // on in after it.
+      // on in after it, unless a highlight's == comes after it (see
+      // HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END).
       const inlinePart = (text: string, beforeMath = false) => {
-        const broken = beforeMath ? text : text.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + '<br>');
+        const broken = (beforeMath ? text : text.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + '<br>'))
+          .replace(HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END, (_m, backslashes: string, close: string) => backslashes + '<br>' + close);
         return partStart === 0
           ? keepParagraphWhitespace(broken.replace(/^[ \t]/, ''), true, true)
           : keepParagraphWhitespace(broken, isMarkdownBlockEdge(bodyMerged[partStart - 1]), true);

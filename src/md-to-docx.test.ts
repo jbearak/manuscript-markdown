@@ -5752,3 +5752,52 @@ describe('Characters XML can\'t hold', () => {
     expect(await (await JSZip.loadAsync(docx)).file('word/theme/theme1.xml')!.async('uint8array')).toEqual(utf16);
   });
 });
+
+describe('Line breaks in tracked changes and comments', () => {
+  const documentXml = async (md: string) => {
+    const zip = await (await import('jszip')).default.loadAsync((await convertMdToDocx(md)).docx);
+    return zip.file('word/document.xml')!.async('string');
+  };
+
+  it.each([
+    ['deleted, underlined', 'x{--<u>a\\\nb</u>--}y', '<w:u w:val="single"/>'],
+    ['deleted, highlighted', 'x{--==a\\\nb==--}y', '<w:highlight w:val="yellow"/>'],
+    ['deleted in a highlight', '==x{--a\\\nb--}y==', '<w:highlight w:val="yellow"/>'],
+    ['inserted in an underline', '<u>x{++a\\\nb++}y</u>', '<w:u w:val="single"/>'],
+    ['highlighted in a comment\'s range', 'x{====a\\\nb====}{>>c<<}y', '<w:highlight w:val="yellow"/>'],
+    ['struck on a substitution\'s old side', 'x{~~<s>a\\\nb</s>~>c~~}y', '<w:strike/>'],
+  ])('gives a line break %s the formatting around it', async (_name, md, rPr) => {
+    // It went plain, where Word shows the formatting on it
+    const xml = await documentXml(md);
+    expect(xml).toMatch(new RegExp('<w:r><w:rPr>(?:(?!</w:rPr>).)*' + rPr + '(?:(?!</w:rPr>).)*</w:rPr><w:br/></w:r>'));
+    expect(xml).not.toContain('<w:r><w:br/></w:r>');
+  });
+
+  it.each([
+    'x{--<u>a\\\nb</u>--}y\n', 'x{--==a\\\nb==--}y\n', 'x{====a\\\nb====}{>>c<<}y\n', 'x{~~<u>a\\\nb</u>~><u>c\\\nd</u>~~}y\n',
+  ])('reads %j back from Word as it is', async (md) => {
+    // Its break came back outside the formatting, which split the span
+    const { convertDocx } = await import('./converter');
+    const back = async (markdown: string) => (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
+    expect(await back(md)).toBe(md);
+  });
+});
+
+describe('Line breaks in an HTML table\'s cell', () => {
+  const TABLE = '<table><tr><td colspan="2">h</td></tr><tr><td>XX</td><td>z</td></tr></table>';
+  const documentXml = async (cell: string) => {
+    const zip = await (await import('jszip')).default.loadAsync((await convertMdToDocx(TABLE.replace('XX', cell))).docx);
+    return zip.file('word/document.xml')!.async('string');
+  };
+
+  it.each([
+    ['underlined', 'x<u>a<br>b</u>y', '<w:u w:val="single"/>'],
+    ['struck', 'x<s><br>a</s>y', '<w:strike/>'],
+    ['in code', 'x<code>a<br>b</code>y', '<w:rStyle w:val="CodeChar"/>'],
+  ])('gives a line break %s the formatting around it', async (_name, cell, rPr) => {
+    // It went plain, where Word shows the formatting on it
+    const xml = await documentXml(cell);
+    expect(xml).toMatch(new RegExp('<w:r><w:rPr>(?:(?!</w:rPr>).)*' + rPr + '(?:(?!</w:rPr>).)*</w:rPr><w:br/></w:r>'));
+    expect(xml).not.toContain('<w:r><w:br/></w:r>');
+  });
+});

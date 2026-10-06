@@ -215,9 +215,6 @@ function imageMarkdownSource(token: ManuscriptToken, alt: string, attrs: string 
 }
 
 function mapHtmlTableRunToMdRun(run: HtmlTableRun): MdRun {
-  if (run.type === 'softbreak') {
-    return { type: 'hardbreak', text: '\n' };
-  }
   if (run.type === 'paragraph') {
     return { type: 'hardbreak', text: '\n', cellParagraphBreak: true };
   }
@@ -225,8 +222,8 @@ function mapHtmlTableRunToMdRun(run: HtmlTableRun): MdRun {
     return { type: 'html_comment', text: run.text };
   }
   return {
-    type: 'text',
-    text: run.text,
+    // A line break in the formatting around it, as text
+    ...(run.type === 'softbreak' ? { type: 'hardbreak' as const, text: '\n' } : { type: 'text' as const, text: run.text }),
     ...(run.bold ? { bold: true } : {}),
     ...(run.italic ? { italic: true } : {}),
     ...(run.underline ? { underline: true } : {}),
@@ -6024,7 +6021,13 @@ function formatCriticInnerRuns(runs: MdRun[] | undefined, outer: MdRun, forced: 
   if (!runs || runs.length === 0) return undefined;
   const formatted: MdRun[] = [];
   for (const run of runs) {
-    if (run.type === 'softbreak' || run.type === 'hardbreak') {
+    // A line break takes the formatting around it, as its text does, which
+    // Word shows on it, as a highlight or an underline, as of {====a\\\nb====}
+    if (run.type === 'hardbreak') {
+      formatted.push({ ...mergeRunFormatting(run, outer, forced), type: 'hardbreak', text: run.text });
+      continue;
+    }
+    if (run.type === 'softbreak') {
       formatted.push(run);
       continue;
     }
@@ -6169,7 +6172,8 @@ function generateDeletedCriticContent(
       continue;
     }
     if (run.type === 'hardbreak') {
-      emit('<w:r><w:br/></w:r>', run);
+      const rPr = generateRPr(run, extraRPr);
+      emit('<w:r>' + (rPr ? rPr : '') + '<w:br/></w:r>', run);
       continue;
     }
     if (run.type === 'math') {
