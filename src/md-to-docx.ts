@@ -6131,6 +6131,32 @@ function bibliographyPathProps(fm: Frontmatter): CustomPropEntry[] {
   return [{ name: 'MANUSCRIPT_BIBLIOGRAPHY_PATH', value: fm.bibliography }];
 }
 
+/** Whether a paragraph is among the body paragraphs whose indexes indent
+ *  overrides keep, from its parts in order: export's runs, as Word gets
+ *  them, or the items import read from Word. It is if Word shows any of
+ *  them. An HTML comment is a hidden run, and a Word comment's range and
+ *  body take no room, but a space between two comments shows, and so does
+ *  a range that holds nothing here: one that ends here is a comment at a
+ *  point, and one that goes on past a paragraph of comments starts at its
+ *  mark, as import reads each, with an item of its own (see
+ *  startRangesAtMark). Export's count and import's both come from this, so
+ *  they agree. */
+export function countsForIndent(parts: Iterable<{ type: string; commentId?: string }>): boolean {
+  // The HTML comments so far, as at the start of each range still open
+  let comments = 0;
+  const startedAt = new Map<string | undefined, number>();
+  for (const part of parts) {
+    if (part.type === 'html_comment') comments++;
+    else if (part.type === 'comment_range_start') startedAt.set(part.commentId, comments);
+    else if (part.type === 'comment_range_end') {
+      if (startedAt.get(part.commentId) === comments) return true;
+      startedAt.delete(part.commentId);
+    } else if (part.type !== 'comment_body_with_id') return true;
+  }
+  if (comments > 0) for (const at of startedAt.values()) if (at === comments) return true;
+  return false;
+}
+
 /** Whether a paragraph is HTML comments with the ID syntax of a Word comment
  *  on them, as import writes one Word put a comment on, {#1}<!-- c -->{/1}
  *  with the comment's body on the next line, which is among comments of
@@ -8540,9 +8566,10 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       state.afterHeading = prevToken?.type === 'heading' || (!prevToken && state.afterHeading);
       const paragraphXml = generateParagraph(token, state, options, bibEntries, citeprocEngine);
       // Track body paragraph index for indent override round-trip. Import
-      // counts the paragraphs that show something, so one whose only image
-      // couldn't be read doesn't count.
-      if (token.type === 'paragraph' && token.runs.length > 0 && !token.runs.every(r => r.type === 'html_comment') && !isCommentBodyParagraph(token)
+      // counts the paragraphs that show something, by countsForIndent as
+      // here; one whose only image couldn't be read has no run, so it
+      // doesn't count.
+      if (token.type === 'paragraph' && countsForIndent(withoutCommentBodyLines(token.runs)) && !isCommentBodyParagraph(token)
           && PARAGRAPH_CONTENT_RE.test(paragraphXml)) {
         if (token.indentOverride) {
           state.indentOverrides.set(state.bodyParagraphIndex, token.indentOverride);

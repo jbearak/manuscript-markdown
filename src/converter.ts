@@ -13,7 +13,7 @@ import { computeCodeRegions, computeMarkdownRegions, isInsideCodeRegion } from '
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, customStyleId, directiveRest, htmlBlocksIn, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, startsHtmlBlock } from './md-to-docx';
+import { blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, htmlBlocksIn, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, startsHtmlBlock } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { matchTables, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
@@ -540,6 +540,33 @@ function columnAfter(line: string): number {
   let column = 0;
   for (const c of line) column = c === '\t' ? column + 4 - column % 4 : column + 1;
   return column;
+}
+
+/** Whether the last line of `output`, before the line ends after it, is an
+ *  HTML comment of its own, as Markdown reads one, whose HTML block ends at
+ *  that line, after a quote's > or an indent: back from the end, to that
+ *  line's start alone */
+function afterCommentLine(output: string[]): boolean {
+  let line = '';
+  for (let k = output.length - 1; k >= 0; k--) {
+    const piece = k === output.length - 1 || line === '' ? output[k].replace(/\n+$/, '') : output[k];
+    const start = piece.lastIndexOf('\n');
+    line = piece.slice(start + 1) + line;
+    if (start !== -1 || (line !== '' && k === 0)) break;
+  }
+  return /^(?:[ \t]*>)*[ \t]*<!--(?:(?!-->)[\s\S])*-->[ \t]*$/.test(line);
+}
+
+/** Whether an item of `target` from `index`, where a comment's range
+ *  started, is in the range, `id`'s, or the one before, an HTML comment that
+ *  the rest of its hidden run, which Word split after the range's start,
+ *  joined (see readHiddenText), which is then in the range all of it */
+function rangeHolds(target: ContentItem[], index: number, id: string): boolean {
+  for (let k = Math.max(0, index - 1); k < target.length; k++) {
+    const item = target[k];
+    if ('commentIds' in item && item.commentIds?.has(id)) return true;
+  }
+  return false;
 }
 
 /**
@@ -4119,9 +4146,21 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
    *  renderHtmlCellParagraph) */
   const closed = (text: string) => text.includes('-->', text.lastIndexOf('<!--') + 4) || /^\s*<!---?>\s*$/.test(text);
   // But for a ZWSP and the start of a payload alone, which the next hidden
-  // run shows the comment's or the next payload's (see pendingHiddenText)
-  if (continues && lastItem.type === 'html_comment' && !rest.replace(/^\u200B+/, '').trimStart().startsWith('<!--')
+  // run shows the comment's or the next payload's (see pendingHiddenText).
+  // In a Word comment's range or out of it too, where Word started or
+  // ended the range in the comment, which is then in the range all of it,
+  // as Markdown can't start or end one in a comment. With a <!-- that starts
+  // the rest, as of <!-- x<!-- a -->, which Word split before the second,
+  // whose comment goes on to the first -->, as export starts each payload
+  // with a ZWSP, which the rest of one doesn't have, though Word may move
+  // it to the end of the run before. Across a range's edge, only the rest
+  // of the run, with no ZWSP, as the next payload there, a comment or an
+  // image's ![...] or <img>, is one of its own, which the range is on.
+  const newPayload = rest.startsWith('\u200B') || lastItem?.type === 'html_comment' && lastItem.text.endsWith('\u200B');
+  if (lastItem?.type === 'html_comment'
+      && (continues ? !(/^\u200B*\s*<!--/.test(rest) && newPayload) : !newPayload)
       && !/^\u200B+(?:!|<|<!|<!-|<i|<im)?$/i.test(rest) && !closed(lastItem.text)) {
+    for (const id of activeComments) lastItem.commentIds.add(id);
     // With a ZWSP it starts with, which is the comment's own, before which
     // Word split its run
     lastItem.text += rest;
@@ -4249,8 +4288,7 @@ function parseNoteBody(
 
   function endComment(id: string, target: ContentItem[]): void {
     const startInfo = commentStartTargetIndex.get(id);
-    if (startInfo?.target === target
-        && !target.slice(startInfo.index).some(item => 'commentIds' in item && item.commentIds?.has(id))) {
+    if (startInfo?.target === target && !rangeHolds(target, startInfo.index, id)) {
       // Zero-width comment range: emit a synthetic empty text item,
       // without formatting, which would write code's `` as text
       target.push({ type: 'text', text: '', formatting: DEFAULT_FORMATTING, commentIds: new Set(activeComments), href: undefined });
@@ -5315,15 +5353,7 @@ export async function extractDocumentContent(
     // Check if any content item was created with this comment ID
     const startInfo = commentStartTargetIndex.get(id);
     if (startInfo && startInfo.target === target) {
-      let found = false;
-      for (let ci = startInfo.index; ci < target.length; ci++) {
-        const item = target[ci];
-        if ('commentIds' in item && item.commentIds?.has(id)) {
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
+      if (!rangeHolds(target, startInfo.index, id)) {
         // Zero-width comment range: emit a synthetic empty text item,
         // without formatting, which would write code's `` as text
         target.push({ type: 'text', text: '', formatting: DEFAULT_FORMATTING, commentIds: new Set(activeComments), href: undefined });
@@ -10595,6 +10625,9 @@ export function buildMarkdown(
   // other content, which goes in one: only ID syntax keeps them whole
   const overUnanchored = new Set<string>();
   const overAnchored = new Set<string>();
+  // Comments over an HTML comment outside a table, which ID syntax may
+  // keep (see where they take it)
+  const overHtmlComment = new Set<string>();
   function collectCommentMetadata(items: ContentItem[], inTable = false): void {
     // The end of the text each comment's anchor has so far, as ==} can
     // straddle two of the runs Word splits text into
@@ -10614,6 +10647,7 @@ export function buildMarkdown(
             if (!commentIdRemap.has(id)) {
               commentIdRemap.set(id, assignRemappedId(id));
             }
+            if (item.type === 'html_comment' && !inTable) overHtmlComment.add(id);
             (item.type === 'html_comment' ? overUnanchored : overAnchored).add(id);
             // A citation without keys goes as text (see keylessCitationRun),
             // though not yet in a note or a table's cell
@@ -10797,6 +10831,99 @@ export function buildMarkdown(
   }
   detectGlobalOverlaps(mergedContent);
   for (const entry of noteEntries) detectGlobalOverlaps(entry.body);
+  // Over an HTML comment, a range takes ID syntax, as {#1}<!-- a -->{/1},
+  // where the paragraph that holds it, as written, reads back as one
+  // paragraph with its comments inline, each as its hidden run holds it,
+  // as export reads it (see readsCommentsInline): with no ID syntax, a
+  // paragraph that starts with the comment and its body is an HTML block,
+  // which shows them. Not in a table's cell, which starts no block, and in
+  // an HTML table's shows ID syntax as text and loses the body after the
+  // table. Nor a paragraph that starts with a comment no ID syntax starts
+  // before, which is an HTML block to its line's end, nor one that holds a
+  // comment a paragraph doesn't read whole, as one with a blank line, a
+  // line of *** or ---, a line that starts with <!--, or an end of --->,
+  // which only an HTML block holds as they are, so the range goes as it
+  // did, after the block, as does the rest of it, unless another reason
+  // puts it in ID syntax. Which changes how another paragraph it's in
+  // reads, so until each does.
+  const idOverComments = new Set(overHtmlComment);
+  const rangeStarts = new Map<string, ContentItem>();
+  const rangeEnds = new Map<string, ContentItem>();
+  const commentParagraphs: ContentItem[][] = [];
+  for (const items of [mergedContent, ...noteEntries.map(entry => entry.body)]) {
+    let paragraph: ContentItem[] = [];
+    for (const item of [...items, undefined]) {
+      if (!item || item.type === 'para' || item.type === 'table') {
+        if (paragraph.some(entry => entry.type === 'html_comment' && [...entry.commentIds ?? []].some(id => overHtmlComment.has(id)))) commentParagraphs.push(paragraph);
+        paragraph = [];
+        continue;
+      }
+      paragraph.push(item);
+      for (const id of 'commentIds' in item ? item.commentIds ?? [] : []) {
+        if (!rangeStarts.has(id)) rangeStarts.set(id, item);
+        rangeEnds.set(id, item);
+      }
+    }
+  }
+  const inIdSyntax = (id: string) => !!options?.alwaysUseCommentIds || forceIdCommentIds.has(id) || idOverComments.has(id);
+  // The paragraph as it's written, its comments as they are, with ID
+  // syntax around ranges, and an x for each word of its text and anything
+  // else, which a paragraph reads as text, as its text is escaped to be,
+  // with its line ends, after which a comment would start a line. Not one
+  // whose comments' hidden runs hold text outside them, which their HTML
+  // block hid, but which a paragraph shows, as <!-- b -->c<!-- d -->.
+  const readsBack = (paragraph: ContentItem[]): boolean => {
+    let text = '';
+    const payloads: string[] = [];
+    // Whether the text is at a line's start, but for ID syntax's openers
+    // after it, and whether one of those ends it, as each item adds to it
+    let lineStart = true;
+    let afterOpener = false;
+    const add = (piece: string) => {
+      if (!piece) return;
+      text += piece;
+      const end = piece.lastIndexOf('\n');
+      lineStart = end !== -1 && end === piece.length - 1;
+      afterOpener = false;
+    };
+    for (let k = 0; k < paragraph.length; k++) {
+      const item = paragraph[k];
+      const ids = 'commentIds' in item ? [...item.commentIds ?? []].filter(inIdSyntax) : [];
+      for (const id of ids) {
+        if (rangeStarts.get(id) !== item) continue;
+        text += '{#' + id + '}';
+        afterOpener = true;
+      }
+      if (item.type === 'html_comment') {
+        const payload = markdownComment(item.text, paragraph[k + 1]?.type === 'html_comment');
+        // Text outside its comments, which their HTML block hid, but which
+        // a paragraph shows
+        if (/\S/.test(outsideComments(payload))) return false;
+        payloads.push(payload);
+        // But for the indent export put in its run, which goes after ID
+        // syntax at the line's start (see where it's dropped)
+        add(afterOpener && lineStart ? payload.replace(/^[ \t]+/, '') : payload);
+      } else if (item.type === 'text') {
+        add(item.text.replace(/\S+/g, 'x').replace(lineStart ? /^[ \t]+/ : /(?!)/, 'x'));
+      } else if (item.type === 'math' && item.display) {
+        add('\n' + MATH_FENCE + '\nx\n' + MATH_FENCE);
+      } else {
+        add('x');
+      }
+      for (const id of ids) if (rangeEnds.get(id) === item) add('{/' + id + '}');
+    }
+    return readsCommentsInline(text, payloads);
+  };
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const paragraph of commentParagraphs) {
+      const ids = paragraph.flatMap(item => item.type === 'html_comment' ? [...item.commentIds ?? []].filter(id => idOverComments.has(id)) : []);
+      if (ids.length === 0 || readsBack(paragraph)) continue;
+      for (const id of ids) idOverComments.delete(id);
+      changed = true;
+    }
+  }
+  for (const id of idOverComments) forceIdCommentIds.add(id);
 
   const noteLabels = options?.notes?.assignedLabels;
   // The tables the body and then the notes render, by their indices, each
@@ -11078,6 +11205,8 @@ export function buildMarkdown(
   const htmlCommentAfterGaps = options?.htmlCommentAfterGaps;
   let htmlCommentIndex = 0;
   let lastRenderedHtmlCommentIndex: number | undefined;
+  // Whether that comment went in ID syntax, a paragraph (see where it is set)
+  let lastHtmlCommentIsParagraph = false;
   // The gap a comment first in the document had, which there's nothing to
   // put before, but which directives hoisted above it go before
   let documentStartCommentGap: number | undefined;
@@ -11170,7 +11299,7 @@ export function buildMarkdown(
     if (lastRenderedHtmlCommentIndex !== undefined) {
       const gapCount = htmlCommentAfterGaps?.get(lastRenderedHtmlCommentIndex);
       if (gapCount !== undefined) {
-        incomingSep = '\n' + '\n'.repeat(gapCount);
+        incomingSep = '\n' + '\n'.repeat(lastHtmlCommentIsParagraph ? Math.max(1, gapCount) : gapCount);
       }
       lastRenderedHtmlCommentIndex = undefined;
     } else if (lastWasSectionSentinel) {
@@ -12097,13 +12226,23 @@ export function buildMarkdown(
     // run adds to, in its comments' runs, which Word may split, before them
     // too in ID syntax, {#1}<!-- c -->{/1}, which export counts as well (see
     // isCommentsWithIds), but not with a space or tab between the syntax and
-    // the comments, which its paragraph keeps as text.
+    // the comments, which its paragraph keeps as text. There, as markdown-it
+    // reads a paragraph's, an empty one, <!--> or <!--->, is a comment too,
+    // but not as a block, which export reads as text.
     const solid = items.filter(entry => entry.type !== 'text' || /[^ \t]/.test(entry.text));
+    const ownComments = items.map((entry, k) => entry.type === 'text' ? entry.text
+      : entry.type === 'html_comment' ? markdownComment(entry.text, items[k + 1]?.type === 'html_comment') : '').join('').trim();
     if (amongOwnComments && solid[0]?.type === 'html_comment' && solid[solid.length - 1].type === 'html_comment'
       && items.every(entry => entry.type !== 'text' || !entry.text.includes('\n'))
       && /^[ \t]*(?:\{#[^}\s]+\})*<!--/.test(textOut) && /-->(?:\{\/[^}\s]+\}|\{>>(?:(?!<<\})[\s\S])*<<\})*[ \t]*$/.test(textOut)
-      && /^<!--[\s\S]*?-->\s*$/.test(items.map((entry, k) => entry.type === 'text' ? entry.text
-        : entry.type === 'html_comment' ? markdownComment(entry.text, items[k + 1]?.type === 'html_comment') : '').join('').trim())) {
+      && (/^<!--[\s\S]*?-->\s*$/.test(ownComments) || /^[ \t]*\{#/.test(textOut) && /^<!---?>$/.test(ownComments))) {
+      // In ID syntax, {#1}<!-- c -->{/1}, the comments are a paragraph, not
+      // an HTML block, which a line end alone joins to the paragraphs around
+      // it, so a blank line at least goes on each side, where its block had
+      // none, as in a\n<!-- c -->\nb, but for a comment's own line before
+      // it, whose HTML block ends there, and one after it, which starts one
+      const paragraph = /^[ \t]*\{#/.test(textOut);
+      lastHtmlCommentIsParagraph = paragraph;
       // A blank line, where export stored none
       if (output.length === 0) documentStartCommentGap = htmlCommentGaps?.get(htmlCommentIndex) ?? 1;
       if (output.length > 0) {
@@ -12113,7 +12252,8 @@ export function buildMarkdown(
           // already contributed newlines to the output (via the para separator
           // chain).  Count existing trailing newlines and only add the delta so
           // the total matches the original source gap.
-          const gapCount = htmlCommentGaps?.get(htmlCommentIndex);
+          const savedGap = htmlCommentGaps?.get(htmlCommentIndex);
+          const gapCount = savedGap === 0 && paragraph && !afterCommentLine(output) ? 1 : savedGap;
           if (gapCount !== undefined) {
             const desiredNewlines = gapCount + 1; // gapCount blank lines = gapCount+1 \n
             // Count trailing newlines already in output
@@ -13208,21 +13348,18 @@ export async function convertDocx(
   // non-heading, non-title, non-code, non-list, non-blockquote para items that
   // have inline content following them (i.e. not empty separator paragraphs).
   if (storedIndentOverrides) {
-    // Whether inline content other than HTML comments starts at index from
-    const hasNonCommentContent = (from: number): boolean => {
-      for (let j = from; j < docContent.length; j++) {
-        if (isStructuralBoundaryItem(docContent[j])) return false;
-        if (docContent[j].type !== 'html_comment') return true;
-      }
-      return false;
-    };
+    // Whether the paragraph whose inline content starts at index from
+    // counts, by the rule export's count used
+    const counts = (from: number): boolean => countsForIndent((function* () {
+      for (let j = from; j < docContent.length && !isStructuralBoundaryItem(docContent[j]); j++) yield docContent[j];
+    })());
     // Paragraphs of spaces and tabs alone, which import made empty ones,
     // count as export counted them (see blankParagraphs)
     let bodyIdx = leadingBlankParagraphs ?? 0;
     let firstIdx = 0;
     // A plain first paragraph has no para item, since one only separates it
     // from what's before: its inline content starts docContent
-    if (hasNonCommentContent(0)) {
+    if (counts(0)) {
       const override = storedIndentOverrides.get(bodyIdx);
       if (override) {
         docContent.unshift({ type: 'para', indentOverride: override as 'indent' | 'no-indent' });
@@ -13238,7 +13375,7 @@ export async function convertDocx(
       if (!isNumberedParagraphKind(item)) continue;
       // Skip empty separator paragraphs. One that empty paragraphs merged
       // into still counts when the paragraph's content follows.
-      if (!hasNonCommentContent(ci + 1)) { continue; }
+      if (!counts(ci + 1)) { continue; }
       const override = storedIndentOverrides.get(bodyIdx);
       if (override) item.indentOverride = override as 'indent' | 'no-indent';
       bodyIdx++;
