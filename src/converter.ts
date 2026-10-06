@@ -5788,8 +5788,9 @@ function combinedSpanJoin(items: InlineRevisionItem[]): { join: SpanJoin; litera
 /** One item of a substitution's side as Markdown, after `precedingText`,
  *  before the rest of its side, `after` (see escapeMarkdownChars), with
  *  its highlight around the rest of its formatting where it joins its
- *  neighbours' (`joinsHighlight`, see joinHighlights). */
-function substitutionItemText(item: SubstitutionItem, precedingText: string, noteLabels?: Map<string, string>, after?: RunsAfter, joinsHighlight = false): string {
+ *  neighbours' (`joinsHighlight`, see joinHighlights), at the start of a
+ *  line where an item of the side before it ends one (`lineStart`). */
+function substitutionItemText(item: SubstitutionItem, precedingText: string, noteLabels?: Map<string, string>, after?: RunsAfter, joinsHighlight = false, lineStart = false): string {
   const color = highlightColorOf(item);
   if (color && (item.type === 'footnote_ref' || item.type === 'citation')) {
     const text = substitutionItemText({ ...item, formatting: undefined }, precedingText, noteLabels, after);
@@ -5799,7 +5800,7 @@ function substitutionItemText(item: SubstitutionItem, precedingText: string, not
   }
   if (item.type === 'footnote_ref') return footnoteRefText(item, noteLabels);
   if (item.type === 'text') {
-    if (!item.href) return escapeAfterHighlight(markedFormatting(item.text, item.formatting, false, after, false, joinsHighlight), precedingText);
+    if (!item.href) return escapeAfterHighlight(markedFormatting(item.text, item.formatting, lineStart, after, false, joinsHighlight), precedingText);
     const text = markedFormatting(item.text, item.formatting, false, (after ?? RunsAfter.of('')).linkTo(item.href));
     return markdownLink(text, item.href);
   }
@@ -5901,8 +5902,11 @@ function renderSubstitutionRun(
         text += renderHighlightGroup(segment, j, highlightEnd, to, precedingText + text, noteLabels);
         j = highlightEnd;
       } else {
+        // After a line break in the side, as the span of one would have it
+        const prev = segment[j - 1];
+        const lineStart = j > from && prev.type === 'text' && endsLine(prev.text);
         text += textNextToMath(escapeBangBeforeLink(substitutionItemText(item, precedingText + text, noteLabels, runsAfter(segment, j + 1, to),
-          joinsHighlight(segment, j, from, to)), segment, j, to, true), segment, j, to, text.length === mathEnd, true, text);
+          joinsHighlight(segment, j, from, to), lineStart), segment, j, to, true), segment, j, to, text.length === mathEnd, true, text);
         if (item.type === 'math' && !item.display) mathEnd = text.length;
         j++;
       }
