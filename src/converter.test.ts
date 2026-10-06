@@ -8954,7 +8954,7 @@ describe('Track changes (CriticMarkup)', () => {
       ['{--a {>>c<<} b--}', '{--a --}{>>c<<}{-- b--}'],
       ['{--a {#1}b{/1} c--}\n{#1>>c<<}', '{--a --}{=={--b--}==}{>>c<<}{-- c--}'],
       ['{#1>>c<<}{>>r<<}\n\n{--a {#1}b{/1} c--}', '{--a --}{=={--b--}==}{>>c<<}{>>r<<}{-- c--}'],
-      ['{~~a {==b==}{>>c<<} d~>x~~}', '{--a --}{=={--b--}==}{>>c<<}{-- d--}{++x++}'],
+      ['{~~a {==b==}{>>c<<} d~>x~~}', '{--a --}{=={--b--}==}{>>c<<}{~~ d~>x~~}'],
       ['{--a {++b {>>c<<}++} d--}', '{--a b --}{>>c<<}{-- d--}'],
       ['{++a {#1}b{/1} c++}\n{#1>>c<<}', '{++a ++}{=={++b++}==}{>>c<<}{++ c++}'],
       ['{==b {#1}x{/1}==}{>>c<<}\n{#1>>d<<}', '{#1}b {#2}x{/1}{/2}\n{#1>>c<<}\n{#2>>d<<}'],
@@ -8993,7 +8993,7 @@ describe('Track changes (CriticMarkup)', () => {
     test.each([
       ['{++a {#1}x{/1}\n{#1>>c<<}\nb++}', '{++a ++}{=={++x++}==}{>>c<<}{++ b++}', '{++a ++}{=={++x++}==}{>>c<<}{++\\\nb++}'],
       // As x\n{#1>>c<<}y keeps it, with the change marked as Word shows it
-      ['{~~{#1}x{/1}\n{#1>>c<<}~>y~~}', '{=={--x--}==}{>>c<<}{-- --}{++y++}', '{=={--x--}==}{>>c<<}{--\\\n--}{++y++}'],
+      ['{~~{#1}x{/1}\n{#1>>c<<}~>y~~}', '{=={--x--}==}{>>c<<}{~~ ~>y~~}', '{=={--x--}==}{>>c<<}{~~\\\n~>y~~}'],
     ])('keeps one line break across a comment body on its own line in %j', async (md, plain, withBreaks) => {
       for (const [front, expected] of [['', plain], ['---\nbreaks: true\n---\n\n', withBreaks]]) {
         const { docx } = await convertMdToDocx(front + md);
@@ -9394,6 +9394,93 @@ describe('Track changes (CriticMarkup)', () => {
       expect(md).toContain('{--old--}');
       expect(md).toContain('{++new++}');
       expect(md).not.toContain('{~~');
+    });
+
+    test.each([
+      ['a deletion in a comment\'s range before it', true, false],
+      ['an insertion in a comment\'s range after it', false, false],
+      ['a deletion in a comment\'s range before it, in ID syntax', true, true],
+      ['an insertion in a comment\'s range after it, in ID syntax', false, true],
+    ])('writes a substitution next to %s', (_name, before, ids) => {
+      // The neighbour of its revision kept the pair from standing alone,
+      // though no side could take it, and in ID syntax a pair whose
+      // comments weren't those open didn't pair
+      const text = (t: string, revision: typeof delRev, commented = false): ContentItem =>
+        ({ type: 'text', text: t, commentIds: new Set(commented ? ['c1'] : []), formatting: DEFAULT_FORMATTING, revision });
+      const content: ContentItem[] = before
+        ? [{ type: 'para' } as any, text('d', delRev, true), text('old', delRev), text('new', addRev)]
+        : [{ type: 'para' } as any, text('old', delRev), text('new', addRev), text('n', addRev, true)];
+      const comments = new Map([['c1', { author: 'R', text: 'review', date: '' } as any]]);
+      expect(buildMarkdown(content, comments, { alwaysUseCommentIds: ids })).toContain('{~~old~>new~~}');
+    });
+
+    test('keeps inline math after a $ on the new side of a substitution after a comment\'s range in ID syntax', async () => {
+      // The substitution, which now forms there, ran the $ into the
+      // equation's own
+      const content: ContentItem[] = [
+        { type: 'para' } as any,
+        { type: 'text', text: 'commented', commentIds: new Set(['c1']), formatting: DEFAULT_FORMATTING },
+        { type: 'text', text: 'old', commentIds: new Set(), formatting: DEFAULT_FORMATTING, revision: delRev },
+        { type: 'text', text: 'a$', commentIds: new Set(), formatting: DEFAULT_FORMATTING, revision: addRev },
+        { type: 'math', latex: 'z', display: false, commentIds: new Set(), revision: addRev },
+      ];
+      const comments = new Map([['c1', { author: 'R', text: 'review', date: '' } as any]]);
+      const md = buildMarkdown(content, comments, { alwaysUseCommentIds: true });
+      expect(md).toContain('{~~old~>a\\$$z$~~}');
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+      expect(xml).toContain('<m:oMath>');
+    });
+
+    test('keeps the $ of text after inline math on the new side of a substitution in a comment\'s range in ID syntax as text', async () => {
+      // The substitution, which now forms there, wrote the letter after the
+      // equation as a reference, after which the text's $a$ was math
+      const content: ContentItem[] = [
+        { type: 'para' } as any,
+        { type: 'text', text: 'q', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
+        { type: 'text', text: 'y', commentIds: new Set(['c1']), formatting: DEFAULT_FORMATTING, revision: delRev },
+        { type: 'math', latex: 'z', display: false, commentIds: new Set(['c1']), revision: addRev },
+        { type: 'text', text: 'x$a$', commentIds: new Set(['c1']), formatting: DEFAULT_FORMATTING, revision: addRev },
+        { type: 'text', text: 'w', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
+      ];
+      const comments = new Map([['c1', { author: 'R', text: 'review', date: '' } as any]]);
+      const md = buildMarkdown(content, comments, { alwaysUseCommentIds: true });
+      expect(md).toContain('{~~y~>$z$&#120;\\$a$~~}');
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+      expect(xml.match(/<m:oMath>/g)).toHaveLength(1);
+      expect(xml).toContain('<w:t>x$a$</w:t>');
+    });
+
+    test('keeps inline math after a citation without keys on the old side of a substitution in a comment\'s range in ID syntax', async () => {
+      // The substitution, which now forms there, wrote the citation's digit
+      // before the equation's $, which then didn't open it
+      const content: ContentItem[] = [
+        { type: 'para' } as any,
+        { type: 'citation', text: '1', commentIds: new Set(['c1']), pandocKeys: [], revision: delRev },
+        { type: 'math', latex: 'z', display: false, commentIds: new Set(['c1']), revision: delRev },
+        { type: 'text', text: 'new', commentIds: new Set(['c1']), formatting: DEFAULT_FORMATTING, revision: addRev },
+      ];
+      const comments = new Map([['c1', { author: 'R', text: 'review', date: '' } as any]]);
+      const md = buildMarkdown(content, comments, { alwaysUseCommentIds: true });
+      expect(md).toContain('~>new~~}');
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+      expect(xml).toContain('<m:oMath>');
+      expect(xml).toContain('<w:delText>1</w:delText>');
+    });
+
+    test('keeps the tracked mark of a paragraph whose deletion before it follows one in a comment\'s range', async () => {
+      // The deletion and the insertion after the mark didn't pair, and the
+      // break opened the insertion's span, which export moves it out of
+      const revision = 'w:author="A" w:date="2024-01-01T00:00:00Z"';
+      const docx = await buildSyntheticDocx(wrapDocumentXml(
+        '<w:p><w:pPr><w:rPr><w:ins w:id="1" ' + revision + '/></w:rPr></w:pPr><w:r><w:t>x</w:t></w:r><w:commentRangeStart w:id="0"/>'
+        + '<w:del w:id="2" ' + revision + '><w:r><w:delText>d</w:delText></w:r></w:del><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>'
+        + '<w:del w:id="3" ' + revision + '><w:r><w:delText>g</w:delText></w:r></w:del></w:p>'
+        + '<w:p><w:ins w:id="4" ' + revision + '><w:r><w:t xml:space="preserve">i </w:t></w:r></w:ins><w:r><w:t>a</w:t></w:r></w:p><w:p><w:r><w:t>c</w:t></w:r></w:p>'),
+      { 'word/comments.xml': '<?xml version="1.0"?><w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:comment w:id="0" w:author="B" w:date="2024-01-01T00:00:00Z"><w:p><w:r><w:t>note</w:t></w:r></w:p></w:comment></w:comments>' });
+      const md = (await convertDocx(docx)).markdown;
+      expect(md).toContain('{~~g~>\n\ni ~~}a');
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+      expect(/<w:p[ >](?:(?!<\/w:p>).)*?<w:rPr><w:ins (?:(?!<\/w:p>).)*?<w:t>x<\/w:t>/.test(xml)).toBe(true);
     });
 
     test('mixed revisions in same paragraph', () => {
