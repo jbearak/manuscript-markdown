@@ -1249,3 +1249,33 @@ describe('heading and title styles based on another style', () => {
     expect(extractStyleBlock(styles, 'Heading2')).toContain('<w:b/>');
   });
 });
+
+describe('the styles export takes from a template', () => {
+  /** styles.xml of export with `fields` and a template of export's own whose styles' content is replaced */
+  async function exportedStyles(fields: string, ...replaced: Array<[string, string]>): Promise<{ styles: string; docx: Uint8Array }> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('# One\n\n## Two\n')).docx);
+    let styles = await zip.file('word/styles.xml')!.async('string');
+    for (const [id, inner] of replaced) {
+      styles = styles.replace(new RegExp('(<w:style\\b[^>]*w:styleId="' + id + '"[^>]*>)[\\s\\S]*?(</w:style>)'),
+        (_match, open: string, close: string) => open + inner + close);
+    }
+    zip.file('word/styles.xml', styles);
+    const templateDocx = await zip.generateAsync({ type: 'uint8array' });
+    const docx = (await convertMdToDocx('---\n' + fields + '\n---\n\n# One\n\n## Two\n', { templateDocx })).docx;
+    return { styles: await (await JSZip.loadAsync(docx)).file('word/styles.xml')!.async('string'), docx };
+  }
+
+  // A style's children go name, base and the like, pPr, then rPr
+  it.each([
+    ['centering a title', 'title: T\ntitle-font-style: center', 'Title', '<w:name w:val="Title"/><w:basedOn w:val="Normal"/>', '<w:rPr><w:sz w:val="56"/></w:rPr>',
+      '<w:pPr><w:jc w:val="center"/></w:pPr>'],
+    ['line spacing on Normal', 'line-spacing: double', 'Normal', '<w:name w:val="Normal"/><w:qFormat/>', '<w:rPr><w:sz w:val="24"/></w:rPr>',
+      '<w:pPr><w:spacing w:after="0" w:line="480" w:lineRule="auto"/></w:pPr>'],
+    ['the bibliography\'s hanging indent', '', 'Bibliography', '<w:name w:val="Bibliography"/><w:basedOn w:val="Normal"/>', '<w:rPr><w:i/></w:rPr>',
+      '<w:pPr><w:ind w:left="720" w:hanging="720"/></w:pPr>'],
+  ])('the pPr export adds to a style without one for %s goes in schema order', async (_name, fields, id, head, rPr, pPr) => {
+    const { styles } = await exportedStyles(fields, [id, head + rPr]);
+    expect(extractStyleBlock(styles, id)).toMatch(/^<w:style\b[^>]*>/);
+    expect(extractStyleBlock(styles, id)!.replace(/^<w:style\b[^>]*>/, '')).toBe(head + pPr + rPr + '</w:style>');
+  });
+});

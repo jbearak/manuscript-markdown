@@ -5280,6 +5280,15 @@ const CODE_STYLE_IDS = new Set(['CodeChar', 'CodeBlock']);
 // Style IDs that receive table font/size overrides
 const TABLE_STYLE_IDS = new Set(['TableParagraph']);
 
+/** A style's content with a pPr added where the schema orders a style's
+ *  children: after its name, base and the like, and before its rPr and table
+ *  properties. */
+function withStylePPr(inner: string, pPr: string): string {
+  const at = inner.search(/<w:(?:rPr|tblPr|trPr|tcPr|tblStylePr)\b/);
+  const end = at === -1 ? inner.length : at;
+  return inner.slice(0, end) + pPr + inner.slice(end);
+}
+
 /**
  * Apply font overrides to a template's word/styles.xml content.
  * Decodes the raw bytes, finds <w:style> elements by w:styleId,
@@ -5565,8 +5574,8 @@ export function applyFontOverridesToTemplate(
         const newPPr = ownPPr.trim() || pPrRecord ? pPrMatch[1] + ownPPr + pPrRecord + pPrMatch[3] : '';
         innerContent = innerContent.slice(0, pPrMatch.index) + newPPr + innerContent.slice(pPrMatch.index + pPrMatch[0].length);
       } else if (wantsCenter) {
-        // No pPr block — insert one at the start
-        innerContent = '<w:pPr><w:jc w:val="center"/></w:pPr>' + innerContent;
+        // No pPr block — insert one
+        innerContent = withStylePPr(innerContent, '<w:pPr><w:jc w:val="center"/></w:pPr>');
       }
     }
 
@@ -5735,7 +5744,7 @@ function applyLineSpacingToTemplate(stylesXml: string, lineSpacingFm: string | n
           : newSpacing + pPrMatch[2];
         inner = inner.slice(0, pPrMatch.index) + pPrMatch[1] + insertContent + pPrMatch[3] + inner.slice(pPrMatch.index + pPrMatch[0].length);
       } else {
-        inner = '<w:pPr>' + newSpacing + '</w:pPr>' + inner;
+        inner = withStylePPr(inner, '<w:pPr>' + newSpacing + '</w:pPr>');
       }
     }
     xml = xml.slice(0, normalMatch.index) + normalMatch[1] + inner + normalMatch[3] + xml.slice(normalMatch.index + normalMatch[0].length);
@@ -5803,7 +5812,7 @@ function applyLineSpacingToTemplate(stylesXml: string, lineSpacingFm: string | n
         inner = inner.slice(0, pPrMatch.index) + pPrMatch[1] + pPrContent + pPrMatch[3] + inner.slice(pPrMatch.index + pPrMatch[0].length);
       } else if (wantHanging) {
         // No pPr exists yet — add one
-        inner = '<w:pPr><w:ind w:left="720" w:hanging="720"/></w:pPr>' + inner;
+        inner = withStylePPr(inner, '<w:pPr><w:ind w:left="720" w:hanging="720"/></w:pPr>');
       }
       xml = xml.slice(0, bibMatch.index) + bibMatch[1] + inner + bibMatch[3] + xml.slice(bibMatch.index + bibMatch[0].length);
     }
