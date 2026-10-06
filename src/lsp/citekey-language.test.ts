@@ -96,6 +96,24 @@ describe('findCitekeyAtOffset', () => {
 		expect(findCitekeyAtOffset(text, atOffset)).toBe('smith2020');
 		expect(findCitekeyAtOffset(text, keyOffset)).toBe('smith2020');
 	});
+
+	test('reads no citation whose ] or [ is in code, as scanCitationUsages does', () => {
+		// A [ or ] in code bounds no citation, which a scan of the text from
+		// the [ to the ] alone, whose ` it didn't close, read as one
+		for (const [text, offset] of [['[@a` ]`', 1], ['`a [`@b ]', 5]] as const) {
+			expect(scanCitationUsages(text)).toEqual([]);
+			expect(findCitekeyAtOffset(text, offset)).toBeUndefined();
+			expect(findCitekeyAtOffset(text, offset + 1)).toBeUndefined();
+		}
+	});
+
+	test('finds a key that code follows with the cursor just past it, as scanCitationUsages does', () => {
+		// The cursor is in the code, but on the key's end, as just before a ]
+		const text = '[@n`x`]';
+		expect(scanCitationUsages(text).map((u) => [u.key, u.keyEnd])).toEqual([['n', 3]]);
+		expect(findCitekeyAtOffset(text, 3)).toBe('n');
+		expect(findCitekeyAtOffset(text, 4)).toBeUndefined();
+	});
 });
 
 describe('getCompletionContextAtOffset', () => {
