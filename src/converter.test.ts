@@ -13736,6 +13736,64 @@ describe('Links of more than one run', () => {
     expect((await convertDocx(docx)).markdown).toBe(md);
   });
 
+  test.each([
+    ['a deletion of all of it', text('x ') + link(deleted(code('a --} ~&gt; b'))),
+      'x [{--`a -`--}{--`-} ~> b`--}](https://e.com) y\n'],
+    ['an insertion of all of it', text('x ') + link(inserted(code('a ++} ~~} b'))),
+      'x [{++`a +`++}{++`+} ~~} b`++}](https://e.com) y\n'],
+    ['the closer at its end, in a deletion of all of it', text('x ') + link(deleted(code('~&gt; a --}'))),
+      'x [{--`~> a -`--}{--`-}`--}](https://e.com) y\n'],
+    ['more of the link after it, in a deletion of all of it before an insertion', text('x ') + link(deleted(code('a --} ~&gt; b') + italic('q'))) + inserted(text('c')),
+      'x [{--`a -`--}{--`-} ~> b`--}{--*q*--}](https://e.com){++c++} y\n'],
+    ['part of the link before it, in a deletion of the rest', text('x ') + link(text('p ') + deleted(code('a --} ~&gt; b'))),
+      'x [p {--`a -`--}{--`-} ~> b`--}](https://e.com) y\n'],
+    ['a deletion before it, in an insertion of all of it', text('x ') + deleted(text('z')) + link(inserted(code('a ++} ~~} b'))),
+      'x {--z--}[{++`a +`++}{++`+} ~~} b`++}](https://e.com) y\n'],
+  ])('splits code with a change\'s closer and a ~> or ~~} in a link into pieces in spans inside the link, with %s', async (_name, runs, expected) => {
+    // A span around the link ended at the closer in its code, and export
+    // wrote the rest of the link as text
+    const word = await wordWithLinks('<w:p>' + runs + text(' y') + '</w:p>');
+    const md = (await convertDocx(word)).markdown;
+    expect(md).toBe(expected);
+    const docx = (await convertMdToDocx(md)).docx;
+    // The code's pieces in runs of their own
+    const joined = async (docx: Uint8Array) => (await hyperlinksOf(docx)).map(link => link.replace(/-\}\{-|\+\}\{\+/g, ''));
+    expect(await joined(docx)).toEqual(await joined(word));
+    expect((await convertDocx(docx)).markdown).toBe(md);
+  });
+
+  test('keeps a deletion of all of a link around it where a line break in code ends it before a line that would start a block', async () => {
+    // The code and the break, which stays apart from the line after it,
+    // read as pieces of code, in spans of their own, which the next trip
+    // didn't keep
+    const codeBreak = '<w:r><w:rPr><w:rStyle w:val="CodeChar"/></w:rPr><w:br/></w:r>';
+    const word = await wordWithLinks('<w:p>' + text('x ') + link(deleted(code('a') + codeBreak + text('# b'))) + text(' y') + '</w:p>');
+    const md = (await convertDocx(word)).markdown;
+    expect(md).toBe('x {--[`a`\\\n](https://e.com)[# b](https://e.com)--} y\n');
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown).toBe(md);
+  });
+
+  test('writes many pieces of deleted code in a link before an insertion in it in linear time', () => {
+    // Each start in the pieces built the substitution's sides again. Twice
+    // the pieces take about twice as long, not four times.
+    const time = (n: number) => {
+      const item = (text: string, type: 'addition' | 'deletion', code: boolean) => ({
+        type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, code }, href: 'https://e.com', link: 1,
+        revision: { type, author: 'A', date: '' },
+      });
+      const items = [item('a --} ~> '.repeat(n), 'deletion', true), item('c', 'addition', false)] as ContentItem[];
+      let best = Infinity;
+      for (let k = 0; k < 3; k++) {
+        const start = performance.now();
+        expect(buildMarkdown(items, new Map())).toEndWith('{--`-} ~> `--}{++c++}](https://e.com)');
+        best = Math.min(best, performance.now() - start);
+      }
+      return best;
+    };
+    const small = time(2000);
+    expect(time(4000) / small).toBeLessThan(3);
+  });
+
   test('keeps a link whole before a line that would start a note, whose [ is escaped', async () => {
     const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
     const xml = await zip.file('word/document.xml')!.async('string');

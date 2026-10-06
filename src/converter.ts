@@ -6464,11 +6464,14 @@ function renderSubstitutionRun(
   return { text: '{~~' + oldText + '~>' + newText + '~~}', nextIndex: k };
 }
 
-/** Whether `a` and `b`, side by side, are code formatted alike, as the
- *  pieces of code a span can't hold whole are (see codePiecesInRevision),
- *  whose backticks would run together with nothing between them */
+/** Whether `a` and `b`, side by side, are code formatted alike, in no
+ *  link or in one, as the pieces of code a span can't hold whole are (see
+ *  codePiecesInRevision), whose backticks would run together with nothing
+ *  between them. A line break, which a link keeps apart from a line after
+ *  it that would start a block (see mergeConsecutiveRuns), has none. */
 function codeSpansMeet(a: ContentItem, b: ContentItem): boolean {
-  return a.type === 'text' && b.type === 'text' && a.formatting.code && !a.href && !b.href && formattingEquals(a.formatting, b.formatting);
+  return a.type === 'text' && b.type === 'text' && a.formatting.code && a.href === b.href && a.link === b.link
+    && a.text !== '\\\n' && b.text !== '\\\n' && formattingEquals(a.formatting, b.formatting);
 }
 
 /**
@@ -6501,7 +6504,8 @@ function keylessCitationRun(item: ContentItem): ContentItem {
 /** Joins runs that read as one, formatted alike, and in Markdown
  *  (`markdown`), code and the line breaks beside it (see breaksJoinCode).
  *  Where export reads Markdown, code in a tracked change that no span of it
- *  can hold goes in runs of its pieces (see codePiecesInRevision). */
+ *  can hold goes in runs of its pieces (see codePiecesInRevision), in a
+ *  link too, whose text then holds a span of each (see linkGroup). */
 function mergeConsecutiveRuns(items: ContentItem[], markdown = readsMarkdown): ContentItem[] {
   const content = items.map(keylessCitationRun);
   const merged: ContentItem[] = [];
@@ -6544,7 +6548,7 @@ function mergeConsecutiveRuns(items: ContentItem[], markdown = readsMarkdown): C
       j++;
     }
 
-    const pieces = readsMarkdown && item.revision && formatting.code && item.href === undefined
+    const pieces = readsMarkdown && item.revision && formatting.code
       ? codePiecesInRevision(mergedText, item.revision) : [mergedText];
     for (const text of pieces) {
       merged.push({
@@ -6968,8 +6972,10 @@ function linkGroup(
   // A revision of the whole link goes around it, but where its span would
   // end at its closer in the link's code, and a substitution with nothing
   // on its other side can't hold the link either, as one whose old side
-  // has a ~>, each run's goes inside the link, as for one of part of it
-  if (items.every(item => revisionsEqual(item.revision, first.revision))) {
+  // has a ~>, each run's goes inside the link, as for one of part of it.
+  // So does it where pieces of code meet, whose backticks would run
+  // together in one span.
+  if (items.every((item, k) => revisionsEqual(item.revision, first.revision) && (k === 0 || !codeSpansMeet(items[k - 1], item)))) {
     let markdown = '';
     for (let k = 0; k < items.length; k++) markdown += itemText(k, runsAfter(segment, start + k + 1, end));
     const link = markdownLink(markdown, href);
@@ -6998,6 +7004,14 @@ function linkGroup(
       let sideEnd = additions;
       while (side(sideEnd, 'addition')) sideEnd++;
       triedUntil = additions;
+      // Pieces of code a span can't hold whole (see codePiecesInRevision)
+      // side by side on one side would run their backticks together, as in
+      // renderSubstitutionRun, so the starts up to the first of the last two
+      // on the old side, or all of them where those are on the new side,
+      // aren't tried, rather than build sides from each
+      let meet = sideEnd > additions ? sideEnd - 1 : k;
+      while (meet > k && (meet === additions || !codeSpansMeet(items[meet - 1], items[meet]))) meet--;
+      if (meet > k) triedUntil = Math.min(meet, additions);
       // Each side reads apart, its runs after each of its runs alone, and
       // resolves apart (see tryRenderSubstitution)
       const sideText = (from: number, to: number) => {
@@ -7006,7 +7020,7 @@ function linkGroup(
         for (let j = from; j < to; j++) markdown += itemText(j, runsAfter(sideItems, j - from + 1, sideItems.length));
         return resolveEmphasis(markdown);
       };
-      const oldText = sideEnd > additions ? sideText(k, additions) : '';
+      const oldText = sideEnd > additions && meet === k ? sideText(k, additions) : '';
       const newText = oldText ? sideText(additions, sideEnd) : '';
       if (oldText && newText && substitutionHolds(oldText, newText)) {
         text += '{~~' + oldText + '~>' + newText + '~~}';

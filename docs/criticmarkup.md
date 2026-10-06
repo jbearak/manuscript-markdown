@@ -28,7 +28,7 @@ Marks text as replaced. The `~>` separates old text from new text.
 This is {~~old text~>new text~~}.
 ```
 
-With one side empty, a substitution is a deletion or an insertion: `{~~old~>~~}` deletes `old`, and `{~~~>new~~}` inserts `new`. Import from DOCX writes a change this way when its text holds the change's own closer where a backslash can't escape it, as in code: `` {~~`--}`~>~~} ``. Where that side can't hold the code either, as the old side can't hold a `~>`, nor either side a `~~}`, the code goes in pieces split inside each closer, each in a change of its own: `` {--`a -`--}{--`-} b ~> c`--} ``, which export writes as the same deleted code. A change of all of a link that no change around the link can hold goes inside it, a change for each of the link's runs: `` [{~~`--}`~>~~}{--*~>*--}](https://example.com) ``.
+With one side empty, a substitution is a deletion or an insertion: `{~~old~>~~}` deletes `old`, and `{~~~>new~~}` inserts `new`. Import from DOCX writes a change this way when its text holds the change's own closer where a backslash can't escape it, as in code: `` {~~`--}`~>~~} ``. Where that side can't hold the code either, as the old side can't hold a `~>`, nor either side a `~~}`, the code goes in pieces split inside each closer, each in a change of its own: `` {--`a -`--}{--`-} b ~> c`--} ``, which export writes as the same deleted code. A change of all of a link that no change around the link can hold goes inside it, a change for each of the link's runs, or each piece of its code: `` [{~~`--}`~>~~}{--*~>*--}](https://example.com) ``.
 
 ### Comment `{>>text<<}`
 
