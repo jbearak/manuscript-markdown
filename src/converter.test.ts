@@ -14479,6 +14479,27 @@ describe('Formatting Word shows on whitespace', () => {
     expect(strip((await convertDocx(docx)).markdown).trimStart()).toBe(md);
   });
 
+  const B = '<w:b/>';
+  const around = (change: string) => run('x ') + change + run(' y');
+  test.each([
+    ['at the end of bold', around(revision('ins', run('a^', B))), 'x {++**a**\\\n++} y'],
+    ['after bold', around(revision('ins', run('a', B) + run('^'))), 'x {++**a**\\\n++} y'],
+    ['between bold', around(revision('ins', run('a', B) + run('^') + run('b', B))), 'x {++**a**\\\n**b**++} y'],
+    ['after italic, in a deletion', around(revision('del', run('a', '<w:i/>') + run('^'))), 'x {--*a*\\\n--} y'],
+    ['after bold, at the paragraph\'s end', run('x ') + revision('ins', run('a', B) + run('^')), 'x {++**a**\\\n++}'],
+    ['at the end of bold code', around(revision('ins', run('a^', CODE + B))), 'x {++**`a`**\\\n++} y'],
+    ['after bold code', around(revision('ins', run('a', CODE + B) + run('^'))), 'x {++**`a`**\\\n++} y'],
+    ['after italic code, in a deletion', around(revision('del', run('a', CODE + '<w:i/>') + run('^'))), 'x {--*`a`*\\\n--} y'],
+    ['after struck code', around(revision('ins', run('a', CODE + S) + run('^'))), 'x {++~~`a`~~\\\n++} y'],
+  ])('keeps a line break %s in its tracked change\'s span', async (_name, runs, md) => {
+    // The span a line break started couldn't join one that ended in
+    // emphasis, so the break, which export writes after bold, not in it,
+    // came back in a span of its own: {++**a**++}{++\\\n++}
+    const markdown = strip((await convertDocx(await withRuns(runs))).markdown);
+    expect(markdown).toBe(md + '\n');
+    expect(strip((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown)).toBe(markdown);
+  });
+
   // A table with merged cells, which only HTML holds
   const TABLE = '<table>\n  <tr>\n    <td colspan="2">\n      <p>h</p>\n    </td>\n  </tr>\n  <tr>\n    <td>\n      <p>XX</p>\n    </td>\n    <td>\n      <p>z</p>\n    </td>\n  </tr>\n</table>';
   test.each([
