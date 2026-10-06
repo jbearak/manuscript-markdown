@@ -2176,13 +2176,18 @@ function htmlCellRun(text: string, fmt: RunFormatting, joins = false): string {
       : c === '{' ? '&#123;' : c === '}' ? '&#125;' : c === '~' ? '&#126;' : c === '`' ? '&#96;'
         : c === '=' && (line[i - 1] === '=' || line[i + 1] === '=' || k === 0 && i === 0 || k === lines.length - 1 && i === line.length - 1) ? '&#61;' : c,
   )).join('<br>');
-  // Around what's between `edges`, unless that's nothing
-  const wrap = (edges: RegExp, around: (core: string) => string) => {
-    const [, lead, core, trail] = edges.exec(html)!;
-    if (core) html = lead + around(core) + trail;
+  // Around what's between the `edges` at each end, unless that's nothing,
+  // read from the ends, as a regex with a lazy middle would scan the text
+  // for each
+  const wrap = (edges: string[], around: (core: string) => string) => {
+    let start = 0;
+    for (let edge; (edge = edges.find(e => html.startsWith(e, start)));) start += edge.length;
+    let end = html.length;
+    for (let edge; (edge = edges.find(e => end - e.length >= start && html.endsWith(e, end)));) end -= edge.length;
+    if (start < end) html = html.slice(0, start) + around(html.slice(start, end)) + html.slice(end);
   };
-  const breaks = /^((?:<br>)*)([\s\S]*?)((?:<br>)*)$/;
-  const blank = /^((?: |&#9;|&nbsp;|<br>)*)([\s\S]*?)((?: |&#9;|&nbsp;|<br>)*)$/;
+  const breaks = ['<br>'];
+  const blank = [' ', '&#9;', '&nbsp;', '<br>'];
   if (fmt.code) html = '<code>' + html + '</code>';
   if (fmt.superscript) html = '<sup>' + html + '</sup>';
   else if (fmt.subscript) html = '<sub>' + html + '</sub>';
@@ -5562,7 +5567,7 @@ function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = mar
     if (end <= from) break;
     const closer = /(\+\+|--|~~|==|<<)\}$/.exec(markdown.slice(Math.max(from, end - 3), end));
     const start = closer ? criticSpanStart(markdown, CRITIC_OPENERS[closer[1]], closer[0], from, end) : -1;
-    if (!closer || start < 0) return markdown[end - 1];
+    if (!closer || start < 0) return charBefore(markdown, end);
     const inner = start + 3;
     const innerEnd = end - 3;
     const separator = closer[1] === '~~' ? markdown.indexOf('~>', inner) : -1;
@@ -5581,17 +5586,27 @@ function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = mar
 
 /** A close of formatting at the end of Markdown, after the text it holds:
  *  a highlight's or emphasis's, whose marks tell it from text's, or an
- *  underline's or a script's tag, or bold's, italic's or strikethrough's,
- *  as htmlCellRun writes them, which text writes as references */
+ *  underline's or a script's tag */
 // eslint-disable-next-line no-control-regex
-const FORMATTING_CLOSE_AT_END = /(?:[\u0006\u000F]==(?:\{[a-z0-9-]+\})?|\u0004(?:\*\*|\*|~~)|(?<!\\)<\/(?:u|sup|sub|b|i|s)>)$/;
+const FORMATTING_CLOSE_AT_END = /(?:[\u0006\u000F]==(?:\{[a-z0-9-]+\})?|\u0004(?:\*\*|\*|~~)|(?<!\\)<\/(?:u|sup|sub)>)$/;
+
+/** As FORMATTING_CLOSE_AT_END, in an HTML table's cell, where htmlCellRun
+ *  writes each tag of formatting, and text's as references */
+// eslint-disable-next-line no-control-regex
+const HTML_CELL_CLOSE_AT_END = /(?:[\u0006\u000F]==(?:\{[a-z0-9-]+\})?|<\/(?:u|sup|sub|b|i|s|code)>)$/;
+
+/** The character before `end` in `markdown`, a line break's as a line end,
+ *  as a <br> in an HTML table's cell (see htmlCellRun) */
+function charBefore(markdown: string, end: number): string {
+  return !readsMarkdown && markdown.endsWith('<br>', end) ? '\n' : markdown[end - 1] ?? '';
+}
 
 /** Where the text of `markdown` before `end` ends, past the closes of the
  *  formatting around it, as a highlight's, which holds the whitespace at
  *  its edges: ==a == */
 function textEnd(markdown: string, from: number, end: number): number {
   for (;;) {
-    const close = FORMATTING_CLOSE_AT_END.exec(markdown.slice(Math.max(from, end - 72), end));
+    const close = (readsMarkdown ? FORMATTING_CLOSE_AT_END : HTML_CELL_CLOSE_AT_END).exec(markdown.slice(Math.max(from, end - 72), end));
     if (!close) return end;
     end -= close[0].length;
   }
@@ -5617,7 +5632,7 @@ function citationSeparator(precedingMarkdown: string, citation: Extract<ContentI
   // it from, and a space at a line's start would be lost
   return views.some(accepted => [' ', '', '\n'].includes(
     span?.revision.type === (accepted ? 'addition' : 'deletion')
-      ? precedingMarkdown[textEnd(precedingMarkdown, span.start, span.end - 3) - 1] ?? ''
+      ? charBefore(precedingMarkdown, textEnd(precedingMarkdown, span.start, span.end - 3))
       : lastVisibleChar(precedingMarkdown, accepted, 0, span ? span.start : precedingMarkdown.length)
   )) ? '' : ' ';
 }

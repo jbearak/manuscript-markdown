@@ -5944,9 +5944,14 @@ describe('Word text that reads as Markdown', () => {
   test.each([
     ['a bold run after a line break', [['a\\\n', {}], [' b', { bold: true }]], 'a↵ b{++x++}'],
     ['an underlined space before a citation', [['a', {}], [' ', { underline: true }]], 'a [@smith2020]{++x++}'],
+    ['a line break before a citation', [['a\\\n', {}]], 'a↵[@smith2020]{++x++}'],
+    ['code that ends in a space before a citation', [['a ', { code: true }]], 'a [@smith2020]{++x++}'],
+    ['a long run of spaces in bold', [['a' + ' '.repeat(25000) + 'b', { bold: true }]], 'a' + ' '.repeat(25000) + 'b{++x++}'],
   ])('keeps the spaces of %s in an HTML table\'s cell that holds what HTML can\'t', async (_name, runs, expected) => {
-    // HTML dropped one at a line's start the run before ended, and the
-    // separator put a second before a citation after one as a reference
+    // HTML dropped one at a line's start the run before ended, the
+    // separator put a second before a citation after one as a reference or
+    // a tag it didn't know, or one at a line's start after a <br>, and the
+    // edges of a long run read in time in its square failed
     const items: ContentItem[] = (runs as [string, Partial<RunFormatting>][]).map(([text, formatting]) =>
       ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting } }));
     if ((expected as string).includes('[@')) items.push({ type: 'citation', text: '(Smith 2020)', commentIds: new Set(), pandocKeys: ['@smith2020'] });
