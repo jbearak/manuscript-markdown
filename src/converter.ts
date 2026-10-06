@@ -3958,6 +3958,7 @@ function parseNoteBody(
 
         // --- Tables ---
         } else if (key === 'w:tbl' && context && !inTableCell) {
+          const markBefore = trackedParaMark;
           const tblChildren = asXmlNodes(node[key]);
           const rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> }> = [];
           const firstRowHeaderByLook = tableHasFirstRowHeader(tblChildren);
@@ -3998,7 +3999,11 @@ function parseNoteBody(
           }
           const rows = computeRowspans(rawRows);
           if (rows.length > 0) {
+            // As in extractDocumentContent: a tracked mark before the table
+            if (markBefore?.target === target && markBefore.end === target.length) target.push({ type: 'para', breakRevision: markBefore.revision });
             target.push({ type: 'table', rows });
+          } else {
+            trackedParaMark = markBefore;
           }
 
         // --- Math ---
@@ -4948,6 +4953,7 @@ export async function extractDocumentContent(
           currentHref = prevHref;
           currentLink = prevLink;
         } else if (key === 'w:tbl' && !inTableCell) {
+          const markBefore = trackedParaMark;
           const tblChildren = asXmlNodes(node[key]);
           const rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> }> = [];
           const firstRowHeaderByLook = tableHasFirstRowHeader(tblChildren);
@@ -4989,7 +4995,13 @@ export async function extractDocumentContent(
           }
           const rows = computeRowspans(rawRows);
           if (rows.length > 0) {
+            // A tracked mark before the table is the break that ends the
+            // paragraph before it (see joinTrackedParagraphBreaks), which an
+            // empty paragraph takes, as one before the table would
+            if (markBefore?.target === target && markBefore.end === target.length) target.push({ type: 'para', breakRevision: markBefore.revision });
             target.push({ type: 'table', rows });
+          } else {
+            trackedParaMark = markBefore;
           }
         } else if (key === 'w:r') {
           // Process run - extract formatting from w:rPr
