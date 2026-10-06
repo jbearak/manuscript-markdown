@@ -14,6 +14,7 @@ import {
   type CriticType,
 } from '../test-helpers';
 import { LINE_PLACEHOLDER, PARA_PLACEHOLDER, matchCriticHeadingPrefix } from '../critic-markup';
+import { parseMd } from '../md-to-docx';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -583,10 +584,13 @@ describe('Manuscript Markdown Plugin Property Tests', () => {
     }
 
     it('should preserve line breaks in substitution patterns', () => {
+      // An == on one line and an == on a later one make a format highlight
+      const substitutionLines = fc.array(fc.string({ minLength: 1, maxLength: 30 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && hasNoSpecialSyntax(s) && s.trim().length > 0), { minLength: 2, maxLength: 3 })
+        .filter(lines => hasNoSpecialSyntax(lines.join('\n')));
       fc.assert(
         fc.property(
-          fc.array(fc.string({ minLength: 1, maxLength: 30 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && hasNoSpecialSyntax(s) && s.trim().length > 0), { minLength: 2, maxLength: 3 }),
-          fc.array(fc.string({ minLength: 1, maxLength: 30 }).filter(s => !s.includes('{') && !s.includes('}') && !s.includes('~') && !s.includes('>') && hasNoSpecialSyntax(s) && s.trim().length > 0), { minLength: 2, maxLength: 3 }),
+          substitutionLines,
+          substitutionLines,
           (oldLines, newLines) => {
             const output = renderWithPlugin('{~~' + oldLines.join('\n') + '~>' + newLines.join('\n') + '~~}');
             expect(output).toContain('manuscript-markdown-deletion');
@@ -597,6 +601,20 @@ describe('Manuscript Markdown Plugin Property Tests', () => {
         ),
         { numRuns: 100 }
       );
+    });
+
+    it('renders an == and an == on a later line of a substitution as a format highlight of the line break, as export does', () => {
+      // The property above once drew these lines, which its filter now leaves
+      // out: Word's highlighted space imports as == ==, so the =='s are the
+      // highlight's, not text
+      const oldText = '== \n==\n(';
+      expect(hasNoSpecialSyntax(oldText)).toBe(false);
+      const input = '{~~' + oldText + '~>(\n#~~}';
+      expect(renderWithPlugin(input)).toContain('<del class="manuscript-markdown-deletion"><mark class="manuscript-markdown-format-highlight"> \n</mark>\n(</del>'
+        + '<ins class="manuscript-markdown-addition">(\n#</ins>');
+      const [substitution] = parseMd(input)[0].runs;
+      expect(substitution.oldRuns?.map(run => [run.type, run.text, !!run.highlight]))
+        .toEqual([['softbreak', '\n', true], ['softbreak', '\n', false], ['text', '(', false]]);
     });
   });
 
@@ -1280,7 +1298,8 @@ describe('Property 4: Empty line preservation', () => {
       fc.constant('')
     ),
     { minLength: 3, maxLength: 6 }
-  ).filter(lines => lines.some(line => line === '') && lines.some(line => line.trim().length > 0));
+  ).filter(lines => lines.some(line => line === '') && lines.some(line => line.trim().length > 0) &&
+    hasNoSpecialSyntax(lines.join('\n')));
 
   for (const type of SIMPLE_CRITIC_TYPES) {
     const arb = criticLinesArbitrary(multilineTextWithEmptyLines, type);
@@ -1330,7 +1349,7 @@ describe('Property 3: Multi-line preview rendering (multiline-Manuscript Markdow
       s.trim().length > 0
     ),
     { minLength: 2, maxLength: 5 }
-  );
+  ).filter(lines => hasNoSpecialSyntax(lines.join('\n')));
 
   for (const type of SIMPLE_CRITIC_TYPES) {
     const arb = criticLinesArbitrary(multilineText, type);

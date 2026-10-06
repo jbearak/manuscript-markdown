@@ -16,9 +16,11 @@ export function stripHtmlTags(str: string): string {
   return str.replace(/<[^>]+>/g, '');
 }
 
-/** Filter out strings with Markdown or HTML special characters that would be transformed. */
+/** Filter out strings with Markdown or HTML special characters that would be transformed.
+ *  An == with a later == is a format highlight, whatever lies between them (a
+ *  space or a line break too), so a test that joins lines checks the joined text. */
 export const hasNoSpecialSyntax = (s: string) => {
-  return !/[\\`*_\[\]&<>"']/.test(s);
+  return !/[\\`*_\[\]&<>"']/.test(s) && !/==[\s\S]*==/.test(s);
 };
 
 /** Create a MarkdownIt instance with the Manuscript Markdown plugin. */
