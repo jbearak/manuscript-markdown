@@ -1355,7 +1355,7 @@ export type ContentItem =
       blockquoteStyle?: BlockquoteStyle; // Quote, IntenseQuote or GitHub style of a quote that isn't an alert
       emptyParagraphCount?: number; // count of collapsed consecutive empty paragraphs
       indentOverride?: 'indent' | 'no-indent'; // per-paragraph indent override for round-trip
-      blankParagraphs?: number; // paragraphs of spaces and tabs alone it stands for (see dropBlankParagraphText), which count among export's paragraphs
+      blankParagraphs?: number; // paragraphs of spaces and tabs alone it stands for (see dropBlankParagraphText), which count among export's paragraphs, or that a cleanup dropped before it (see dropCodeBlockSeparators)
       listBlockStart?: boolean; // the first item of a list block, which a list indent override goes before
       paraMarkRevision?: RevisionInfo; // w:ins/w:del on the paragraph mark (pPr > rPr) — whole paragraph inserted/deleted
       breakRevision?: RevisionInfo; // w:ins/w:del on the previous paragraph's mark, which is the break before this one
@@ -5457,7 +5457,7 @@ export async function extractDocumentContent(
           } else if (needsPara) {
             const paraItem = target[targetLenBeforePara];
             // Which export numbered (see blankParagraphs)
-            if (blank && paraItem?.type === 'para') paraItem.blankParagraphs = 1;
+            if (blank && paraItem?.type === 'para' && isNumberedParagraphKind(paraItem)) paraItem.blankParagraphs = 1;
             // A rule has nothing to show, though it can hold a zero-width comment
             if (paraItem?.type === 'para' && paraItem.horizontalRule
                 && target.slice(targetLenBeforePara + 1).some(item => item.type !== 'text' || item.text !== '')) {
@@ -9191,6 +9191,8 @@ function dropCodeBlockSeparators(content: ContentItem[]): void {
     const next = content[i + 1];
     if (afterCodeBlock && item.spacerShaped && isPlainEmptyParagraph(item) && item.emptyParagraphCount === 1
         && next?.type === 'para' && (next.headingLevel || next.listMeta || next.horizontalRule)) {
+      // One of spaces and tabs alone, which export numbered, still counts
+      if (item.blankParagraphs) next.blankParagraphs = (next.blankParagraphs ?? 0) + item.blankParagraphs;
       content.splice(i, 1);
       i--;
       afterCodeBlock = false;
@@ -9206,12 +9208,24 @@ function dropCodeBlockSeparators(content: ContentItem[]): void {
  * one alone between two tables goes, as a Word user's does, so the next
  * table goes on in the HTML block of the one before it, where it can. A
  * note's paragraph is plain (`plain`) but for code and a tracked break.
+ * One of spaces and tabs alone, which export numbered, still counts, with
+ * the next paragraph's (see blankParagraphs).
  */
 function dropTableSeparators(content: ContentItem[], plain: (item: Extract<ContentItem, { type: 'para' }>) => boolean): void {
   for (let i = 1; i + 1 < content.length; i++) {
     const item = content[i];
-    if (content[i - 1].type === 'table' && content[i + 1].type === 'table' && item.type === 'para' && plain(item)) content.splice(i, 1);
+    if (content[i - 1].type === 'table' && content[i + 1].type === 'table' && item.type === 'para' && plain(item)) {
+      const next = item.blankParagraphs ? content.slice(i + 1).find(after => after.type === 'para') : undefined;
+      if (next?.type === 'para') next.blankParagraphs = (next.blankParagraphs ?? 0) + item.blankParagraphs!;
+      content.splice(i, 1);
+    }
   }
+}
+
+/** Whether export numbers a paragraph of this kind among the body's, for
+ *  indent overrides, where it has text (see blankParagraphs) */
+function isNumberedParagraphKind(item: ParaItem): boolean {
+  return !item.headingLevel && !item.isTitle && !item.isCodeBlock && !item.listMeta && !item.blockquoteLevel && !item.horizontalRule;
 }
 
 function isPlainEmptyParagraph(item: Extract<ContentItem, { type: 'para' }>): boolean {
@@ -12483,9 +12497,10 @@ export async function convertDocx(
     }
     for (let ci = firstIdx; ci < docContent.length; ci++) {
       const item = docContent[ci];
-      if (item.type !== 'para' || item.headingLevel || item.isTitle || item.isCodeBlock
-          || item.listMeta || item.blockquoteLevel || item.horizontalRule) continue;
+      if (item.type !== 'para') continue;
+      // Of any kind, as a heading holds those of a code block's spacer
       bodyIdx += item.blankParagraphs ?? 0;
+      if (!isNumberedParagraphKind(item)) continue;
       // Skip empty separator paragraphs. One that empty paragraphs merged
       // into still counts when the paragraph's content follows.
       if (!hasNonCommentContent(ci + 1)) { continue; }

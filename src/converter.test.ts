@@ -9256,6 +9256,30 @@ describe('Whitespace at the edges of a paragraph', () => {
       expect(markdown).toBe(expected);
       expect(await roundTrip(markdown)).toBe(markdown);
     });
+
+    test.each([
+      ['a heading', '# H'], ['a list item', '- l'], ['a rule', '---'],
+    ])('keeps the indent override after a code block\'s spacer of spaces alone before %s', async (_name, next) => {
+      // Spaces in place of the text, in the paragraph that took the place of
+      // the spacer before it too. Import dropped the spacer before the
+      // heading, list item or rule, and the count of the paragraph export
+      // numbered with it, so the override went to the paragraph after B.
+      const md = '```\nc\n```\n\nXX\n\n' + next + '\n\n<!-- no-indent -->\nB.\n\nC.\n';
+      const markdown = await withXml(md, 'word/document.xml', [/<\/w:pPr><\/w:p><w:p [^>]*><w:r><w:t>XX<\/w:t><\/w:r>/, '</w:pPr>' + spaces]);
+      expect(markdown).toBe('```\nc\n```\n\n' + next + '\n\n<!-- no-indent -->\nB.\n\nC.\n');
+      expect(await roundTrip(markdown)).toBe(markdown);
+    });
+
+    test('keeps the indent override after a paragraph of spaces alone between two tables', async () => {
+      // Import dropped the paragraph between the tables, as it does export's
+      // empty one, and its count with it, so the override went to the
+      // paragraph after B
+      const table = (head: string) => '| ' + head + ' |\n| --- |\n| 1 |\n\n';
+      const md = 'A.\n\n' + table('a') + 'XX\n\n' + table('b') + 'B.\n\n<!-- no-indent -->\nC.\n\nD.\n';
+      const markdown = await withXml(md, 'word/document.xml', ['<w:r><w:t>XX</w:t></w:r>', spaces]);
+      expect(markdown).toBe('A.\n\n' + table('a') + table('b') + 'B.\n\n<!-- no-indent -->\nC.\n\nD.\n');
+      expect(await roundTrip(markdown)).toBe(markdown);
+    });
   });
 
   test.each([
