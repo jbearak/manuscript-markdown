@@ -245,3 +245,39 @@ describe('refreshed CSL rendering', () => {
     ]);
   });
 });
+
+describe('Bibliography entries as a browser shows them', () => {
+  // citeproc writes line ends and indentation around a numbered entry's
+  // divs, which HTML shows nothing of, and Word showed as spaces in its text
+  /** Each bibliography paragraph's text, as Word shows it */
+  async function bibliographyTexts(docx: Uint8Array): Promise<string[]> {
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const paragraphs = xml.match(/<w:p\b[^>]*>(?:(?!<\/w:p>)[\s\S])*?<w:pStyle w:val="Bibliography"\/>[\s\S]*?<\/w:p>/g) ?? [];
+    return paragraphs.map(paragraph => (paragraph.match(/<w:t(?:\s[^>]*)?>[^<]*<\/w:t>|<w:tab\/>|<w:br\/>/g) ?? [])
+      .map(part => part === '<w:tab/>' ? '\t' : part === '<w:br/>' ? '\n' : part.replace(/<[^>]*>/g, ''))
+      .join(''));
+  }
+
+  test.each(BUNDLED_STYLES.map(style => [style]))('writes the entries of %s with no space at their edges, and a number in the margin before a tab', async (style) => {
+    const markdown = '---\ncsl: ' + style + '\n---\n\nA [@article2024; @book2021; @web2023].\n';
+    const { docx } = await convertMdToDocx(markdown, { bibtex: REPRESENTATIVE_BIBTEX });
+    const texts = await bibliographyTexts(docx);
+    expect(texts).toHaveLength(3);
+    for (const text of texts) {
+      expect(text).not.toMatch(/^\s|\s$|[ \n\r]{2}|[\n\r]/);
+      // A style that puts the number in the margin has the text after a tab
+      expect(text).toMatch(loadStyle(style).includes('second-field-align') ? /^\S+\t\S[^\t]*$/ : /^[^\t]*$/);
+    }
+    const again = await convertMdToDocx((await convertDocx(docx)).markdown, { bibtex: REPRESENTATIVE_BIBTEX });
+    expect(await bibliographyTexts(again.docx)).toEqual(texts);
+  });
+
+  test.each([
+    ['apa', 'Morgan, E. (2021). <i>The Very Long History of Example Scholarship</i> (2nd ed.). Example University Press.'],
+    ['ieee', '[1]\tE. Morgan, <i>The Very Long History of Example Scholarship</i>, 2nd ed. Boston: Example University Press, 2021.'],
+  ])('writes a tab or line end in an entry\'s data as the space a browser shows, in %s', async (style, expected) => {
+    const bibtex = REPRESENTATIVE_BIBTEX.replace('The Very Long History', 'The\tVery Long\nHistory');
+    const { docx } = await convertMdToDocx('---\ncsl: ' + style + '\n---\n\nA [@book2021].\n', { bibtex });
+    expect(await bibliographyTexts(docx)).toEqual([expected.replace(/<\/?i>/g, '')]);
+  });
+});
