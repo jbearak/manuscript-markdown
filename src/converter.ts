@@ -2017,11 +2017,43 @@ async function loadZip(data: Uint8Array): Promise<JSZip> {
   return JSZip.loadAsync(data);
 }
 
+/**
+ * XML with its numeric character references written as the characters they
+ * stand for, as an XML parser reads them, where fast-xml-parser leaves them
+ * as text, as &#x25CF; for a bullet. Word writes characters as they are, but
+ * other tools write references. One pass, so &#38;#x41; stays the text
+ * &#x41;. A reference to a character markup reads, as &#60;, becomes its
+ * entity, and one to a character XML can't hold stays as it is. One to a
+ * carriage return becomes &#xD;, which the parser reads (see readZipXml),
+ * as it would turn the character into a line feed with the line ends it
+ * normalizes. A CDATA section or a comment holds none.
+ */
+function decodeCharacterReferences(xml: string): string {
+  if (!xml.includes('&#')) return xml;
+  return xml.replace(/<!\[CDATA\[[\s\S]*?\]\]>|<!--[\s\S]*?-->|&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));/g, (match, hex?: string, dec?: string) => {
+    if (hex === undefined && dec === undefined) return match;
+    const code = hex !== undefined ? parseInt(hex, 16) : parseInt(dec!, 10);
+    switch (code) {
+      case 0x26: return '&amp;';
+      case 0x3C: return '&lt;';
+      case 0x3E: return '&gt;';
+      case 0x22: return '&quot;';
+      case 0x27: return '&apos;';
+      case 0xD: return '&#xD;';
+    }
+    const xmlCharacter = code === 0x9 || code === 0xA || code >= 0x20 && code <= 0xD7FF
+      || code >= 0xE000 && code <= 0xFFFD || code >= 0x10000 && code <= 0x10FFFF;
+    return xmlCharacter ? String.fromCodePoint(code) : match;
+  });
+}
+
 async function readZipXml(zip: JSZip, path: string): Promise<XmlNode[] | null> {
   const file = zip.file(path);
   if (!file) { return null; }
-  const xml = await file.async('string');
-  const parsed: unknown = new XMLParser(parserOptions).parse(xml);
+  const xml = decodeCharacterReferences(await file.async('string'));
+  const parser = new XMLParser(parserOptions);
+  parser.addEntity('#xD', '\r');
+  const parsed: unknown = parser.parse(xml);
   return asXmlNodes(parsed);
 }
 

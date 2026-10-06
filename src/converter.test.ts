@@ -3200,6 +3200,42 @@ describe('extractDocumentContent', () => {
   });
 });
 
+describe('Numeric character references in Word\'s XML', () => {
+  // Read as the characters they stand for, as an XML parser reads them,
+  // where import kept them as text, as \&#x25CF; for a bullet
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  const importWith = async (docx: Uint8Array, path: string, from: string, to: string) => {
+    const zip = await JSZip.loadAsync(docx);
+    const xml = await zip.file(path)!.async('string');
+    expect(xml).toContain(from);
+    zip.file(path, xml.replace(from, to));
+    return strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+  };
+
+  test.each([
+    ['characters', 'a&#x25CF;b&#233;c&#X1F600;d&#9;e', 'a\u25CFb\u00E9c\u{1F600}d\te'],
+    ['characters markup reads', 'x&#60;y&#38;z&#62;&#x22;&#39;', 'x&lt;y&amp;z&gt;"\''],
+    ['a reference written as text', '&#38;#x41; &amp;#233;', '&amp;#x41; &amp;#233;'],
+  ])('reads %s in text as the characters themselves', async (_name, references, characters) => {
+    const { docx } = await convertMdToDocx('PLACEHOLDER');
+    const markdown = await importWith(docx, 'word/document.xml', 'PLACEHOLDER', references);
+    expect(markdown).toBe(await importWith(docx, 'word/document.xml', 'PLACEHOLDER', characters));
+    expect(markdown).not.toContain('&#x25CF;');
+  });
+
+  test('reads a carriage return as one, which the line ends XML reads as line feeds aren\'t', async () => {
+    // Decoded before parsing, it became a line feed with them
+    const { docx } = await convertMdToDocx('PLACEHOLDER');
+    expect(await importWith(docx, 'word/document.xml', 'PLACEHOLDER', 'a&#13;b&#xd;&#10;c&#38;#13;')).toBe('a\rb\r\nc\\&#13;\n');
+  });
+
+  test('reads them in an attribute, as a link\'s target', async () => {
+    const { docx } = await convertMdToDocx('[x](https://example.org/AB)');
+    expect(await importWith(docx, 'word/_rels/document.xml.rels', 'https://example.org/AB', 'https://example.org/&#x41;&#66;'))
+      .toBe('[x](https://example.org/AB)\n');
+  });
+});
+
 describe('convertDocx (end-to-end)', () => {
   test('produces expected markdown', async () => {
     const result = await convertDocx(sampleData);
