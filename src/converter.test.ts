@@ -35,7 +35,7 @@ import {
   extractCalloutLabels,
 } from './converter';
 import { parseBibtex } from './bibtex-parser';
-import { convertMdToDocx, parseMd } from './md-to-docx';
+import { annotateHtmlCommentIndices, convertMdToDocx, parseMd } from './md-to-docx';
 import { GRID_TABLE_PLACEHOLDER_PREFIX } from './grid-table-preprocess';
 import { keepParagraphEdgeWhitespace } from './html-entities';
 import { extractAllDecorationRanges } from './highlight-colors';
@@ -2899,11 +2899,75 @@ describe('HTML comment blank line round-trip', () => {
     '<!-- c --> <!-- e --><br>',
     '<!-- c --><br><br>',
     '<!-- c --><br> <br>',
+    // Paragraphs, whose space Word shows before the comment's run
+    '&#32;<!-- c -->',
+    '&#32;<!-- c -->a',
   ])('keeps the blank lines around one of its own after %s', async (before) => {
     // Import counted the paragraph before among comments of their own, as
     // export doesn't, so the next took the blank lines of the one after it
     const md = 'A.\n\n' + before + '\n\n<!-- d -->\nB.\n';
     expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
+  });
+
+  test('keeps the blank lines around ones of their own after one Word put a comment on', async () => {
+    // Import didn't count it, whose Markdown the comment's syntax is in, so
+    // the ones after it took the blank lines of the ones after them
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\n<!-- a -->\n\n\n<!-- b -->\n\n\n\n<!-- c -->\n\nB {==x==}{>>@A (2024-01-15 10:30) | note<<}.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    // The comment's range and reference, moved from x to <!-- a -->'s run
+    const start = '<w:commentRangeStart w:id="0"/>';
+    const end = '<w:commentRangeEnd w:id="0"/>';
+    const reference = /<w:r>(?:(?!<w:r>)[\s\S])*?<w:commentReference w:id="0"\/><\/w:r>/.exec(xml)![0];
+    const edited = xml.replace(start, '').replace(end, '').replace(reference, '')
+      .replace(/<w:r><w:rPr><w:vanish\/>(?:(?!<w:r>)[\s\S])*?&lt;!-- a --&gt;<\/w:t><\/w:r>/, run => start + run + end + reference);
+    expect(edited).toContain(end + reference);
+    zip.file('word/document.xml', edited);
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(markdown).toBe('A.\n\n<!-- a -->{>>@A (2024-01-15 10:30) | note<<}\n\n\n<!-- b -->\n\n\n\n<!-- c -->\n\nB x.\n');
+  });
+
+  test('keeps the blank lines around ones of their own after one whose run Word split', async () => {
+    // Export wrote them as one run, a paragraph it counts
+    const md = 'A.\n\n<!-- c --><!-- d -->\n\n\n<!-- e -->\n\n\n\n<!-- f -->\n\nB.\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace('&lt;!-- c --&gt;&lt;!-- d --&gt;</w:t></w:r>',
+      '&lt;!-- c --&gt;</w:t></w:r><w:r><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr><w:t>&lt;!-- d --&gt;</w:t></w:r>');
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
+  });
+
+  // A comment's hidden run, as export writes one
+  const hidden = (text: string) => '<w:r><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr>'
+    + ('<w:t xml:space="preserve">\u200B' + text.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</w:t>').replace(/\n/g, '</w:t><w:br/><w:t xml:space="preserve">') + '</w:r>';
+  const visible = (inner: string) => '<w:r>' + inner + '</w:r>';
+  const space = visible('<w:t xml:space="preserve"> </w:t>');
+  test.each([
+    ['a space after it', hidden('<!-- a -->') + space, true],
+    ['a tab after it', hidden('<!-- a -->') + visible('<w:tab/>'), true],
+    ['a space between it and another', hidden('<!-- a -->') + space + hidden('<!-- z -->'), true],
+    ['spaces around one only a block holds', space + hidden('<!-- a\n\nz -->') + space, true],
+    // Which import writes as a reference, before which export reads a paragraph
+    ['a space before it', space + hidden('<!-- a -->'), false],
+    ['text after it', hidden('<!-- a -->') + visible('<w:t>x</w:t>'), false],
+  ])('counts one with %s among comments of their own where export does what import writes', async (_name, runs, counts) => {
+    // Import didn't count one with a space or tab Word put after its run,
+    // which export trims, so the ones after it took the blank lines of the
+    // ones after them
+    const md = 'A.\n\n<!-- a -->\n\n\n<!-- b -->\n\n\n\n<!-- c -->\n\nB.\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace(/<w:r><w:rPr><w:vanish\/>(?:(?!<w:r>)[\s\S])*?&lt;!-- a --&gt;<\/w:t><\/w:r>/, runs);
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    // Export counts what import wrote for it, a comment of its own or not
+    const tokens = parseMd(markdown);
+    annotateHtmlCommentIndices(tokens);
+    expect(tokens.filter(token => token.htmlCommentIndex !== undefined).length).toBe(counts ? 3 : 2);
+    // And the ones after it keep their blank lines where import counts it too
+    expect(markdown.endsWith('\n\n\n<!-- b -->\n\n\n\n<!-- c -->\n\nB.\n')).toBe(counts);
   });
 });
 
