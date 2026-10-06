@@ -405,7 +405,8 @@ function translateRun(children: XmlNode[]): string {
   // Extract text from m:t nodes
   const text = extractText(children);
   if (!text) return '';
-  return runTextLatex(text, style, script);
+  const preserved = children.some(child => child['m:t'] !== undefined && (child[':@'] as Record<string, string> | undefined)?.['@_xml:space'] === 'preserve');
+  return runTextLatex(text, style, script, 'math', preserved);
 }
 
 /** Where a run's text goes: into the equation, or into an \operatorname name. */
@@ -426,12 +427,14 @@ type RunContext = 'math' | 'name';
  *   (see textModeLatex): \mathrm{} drops spaces and reads ' as a prime.
  * - Any other styled run is math in a group, \mathrm{} or an alphabet such
  *   as \mathbf{}. # $ % & _ { } take a backslash. ~ ^ \ have no math escape,
- *   so a run with one goes in \text{} inside the group.
+ *   so a run with one goes in \text{} inside the group. A space at an edge
+ *   that xml:space="preserve" keeps goes in \text{} of its own, which keeps
+ *   it too, and one without it, which Word drops, stays out of \text{}.
  *
  * In a group, a command ends with {} before a letter, since a space there
  * would export as a space; bare math keeps the readable space.
  */
-function runTextLatex(text: string, style: string, script: string, context: RunContext = 'math'): string {
+function runTextLatex(text: string, style: string, script: string, context: RunContext = 'math', preserved = false): string {
   if (text.charAt(0) === '\u200B') return hiddenCommentLatex(text);
   if (context === 'name') return unicodeToLatex(escapeLatex(text), false, '{}');
 
@@ -441,8 +444,14 @@ function runTextLatex(text: string, style: string, script: string, context: RunC
   const group = alphabet ?? (style === 'p' ? '\\mathrm' : '');
   if (!group) return mathLatex(text, ' ');
   if (!alphabet && /[\s'#$%&_{}~^\\]/.test(text)) return textModeLatex(text);
-  if (/[~^\\]/.test(text)) return group + '{\\text{' + escapeLatex(text) + '}}';
-  return group + '{' + mathLatex(text.replace(/[#$%&_{}]/g, ch => '\\' + ch), '{}') + '}';
+  // Word drops a space at an edge without xml:space="preserve", and keeps one
+  // with it, which goes in \text{}, as \text{} keeps it, beside the math
+  const [, lead, core, trail] = /^([ \t\r\n]*)([\s\S]*?)([ \t\r\n]*)$/.exec(text)!;
+  if (/[~^\\]/.test(text)) return group + '{\\text{' + escapeLatex(preserved ? text : core) + '}}';
+  const math = (source: string) => source ? mathLatex(source.replace(/[#$%&_{}]/g, ch => '\\' + ch), '{}') : '';
+  if (!preserved || !(lead || trail)) return group + '{' + math(text) + '}';
+  const kept = (space: string) => space ? '\\text{' + space + '}' : '';
+  return group + '{' + kept(lead) + math(core) + kept(trail) + '}';
 }
 
 /** A hidden comment run (text after a \u200B marker) as its LaTeX comment. */

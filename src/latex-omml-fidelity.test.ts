@@ -573,6 +573,7 @@ describe('spaces Word keeps in an equation', () => {
     ['a deletion', '$a{-- --}b$', '<w:del w:id="0" w:author="Unknown">' + kept(' ') + '</w:del>', '$a{-- --}b$'],
     ['a substitution', '$a{~~ ~>x~~}b$', '<w:del w:id="0" w:author="Unknown">' + kept(' ') + '</w:del>', '$a{~~ ~>x~~}b$'],
     ['an equation replaced by whitespace', '${~~\\left(~> ~~}$', '<w:ins w:id="1" w:author="Unknown">' + kept(' ') + '</w:ins>', '${~~(~> ~~}$'],
+    ['a control space', '$a{++\\ ++}b$', '<w:ins w:id="0" w:author="Unknown">' + kept(' ') + '</w:ins>', '$a{++ ++}b$'],
   ])('a change of only whitespace keeps it in Word: %s', async (_name, md, expected, readBack) => {
     const docx = (await convertMdToDocx(md + '\n')).docx;
     const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
@@ -622,5 +623,91 @@ describe('spaces Word keeps in an equation', () => {
   test('an equation replaced by only a space that Word keeps, such as an em space, goes without xml:space="preserve"', async () => {
     const xml = await equationXml((await convertMdToDocx('${~~\\left(~>\u2003~~}$\n')).docx);
     expect(xml).toContain('<w:ins w:id="1" w:author="Unknown"><m:r><m:t>\u2003</m:t></m:r></w:ins>');
+  });
+
+  const styledSpace = (rPr: string) => '<m:r><m:rPr>' + rPr + '</m:rPr><m:t xml:space="preserve"> </m:t></m:r>';
+  test.each([
+    ['\\mathbf{}', '$\\mathbf{a{++ ++}b}$', '<w:ins w:id="0" w:author="Unknown">' + styledSpace('<m:sty m:val="b"/>') + '</w:ins>'],
+    ['\\mathcal{}', '$\\mathcal{A{-- --}B}$', '<w:del w:id="0" w:author="Unknown">' + styledSpace('<m:scr m:val="script"/><m:sty m:val="p"/>') + '</w:del>'],
+    ['\\mathbb{}', '$\\mathbb{R{~~ ~>x~~}R}$', '<w:del w:id="0" w:author="Unknown">' + styledSpace('<m:scr m:val="double-struck"/><m:sty m:val="p"/>') + '</w:del>'],
+    ['a \\mathbf{} of its own, as import writes the first', '$a{++\\mathbf{ }++}b$', '<w:ins w:id="0" w:author="Unknown">' + styledSpace('<m:sty m:val="b"/>') + '</w:ins>'],
+    // \text{} preserves its spaces itself
+    ['\\text{}', '$\\text{a{++ ++}b}$', '<m:t>a</m:t></m:r><w:ins w:id="0" w:author="Unknown">' + styledSpace('<m:sty m:val="p"/>') + '</w:ins><m:r>'],
+    ['\\mathbf{}, of a control space', '$\\mathbf{a{++\\ ++}b}$', '<w:ins w:id="0" w:author="Unknown">' + styledSpace('<m:sty m:val="b"/>') + '</w:ins>'],
+    ['\\mathbf{}, of a \\text{ }', '$\\mathbf{a{++\\text{ }++}b}$', '<w:ins w:id="0" w:author="Unknown">' + styledSpace('<m:sty m:val="b"/>') + '</w:ins>'],
+    ['\\text{}, a deletion', '$\\text{a{-- --}b}$', '<m:t>a</m:t></m:r><w:del w:id="0" w:author="Unknown">' + styledSpace('<m:sty m:val="p"/>') + '</w:del><m:r>'],
+    ['\\text{}, beside another change', '$\\text{a{++ ++}b} + c{++x++}$',
+      '<w:ins w:id="0" w:author="Unknown">' + styledSpace('<m:sty m:val="p"/>') + '</w:ins>' + '<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>b</m:t></m:r>' +
+      '<m:r><m:t> </m:t></m:r><m:r><m:t>+</m:t></m:r><m:r><m:t> </m:t></m:r><m:r><m:t>c</m:t></m:r><w:ins w:id="1" w:author="Unknown"><m:r><m:t>x</m:t></m:r></w:ins>'],
+  ])('a change of only whitespace keeps it in Word in %s', async (_name, md, expected) => {
+    const docx = (await convertMdToDocx(md + '\n')).docx;
+    const xml = await equationXml(docx);
+    expect(xml).toContain(expected);
+    expect(xml).not.toContain('mm:whitespace');
+    const markdown = (await convertDocx(docx)).markdown;
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect(await equationXml(again)).toBe(xml);
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  // A style around \text{} writes its text again, as one run, which keeps
+  // the space \text{} keeps at an edge, and not the source's spaces
+  test.each([
+    ['\\mathbf{\\text{ }}', '<m:r><m:rPr><m:sty m:val="b"/></m:rPr><m:t xml:space="preserve"> </m:t></m:r>'],
+    ['\\mathrm{\\text{ x}}', '<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t xml:space="preserve"> x</m:t></m:r>'],
+    ['\\mathbf{ a }', '<m:r><m:rPr><m:sty m:val="b"/></m:rPr><m:t> a </m:t></m:r>'],
+    ['\\mathbf{a\\text{ }b}', '<m:r><m:rPr><m:sty m:val="b"/></m:rPr><m:t>a b</m:t></m:r>'],
+    // The source's space at the other edge, which Word drops, goes
+    ['\\mathbf{\\text{ x} }', '<m:r><m:rPr><m:sty m:val="b"/></m:rPr><m:t xml:space="preserve"> x</m:t></m:r>'],
+    ['\\mathbf{ \\text{x }}', '<m:r><m:rPr><m:sty m:val="b"/></m:rPr><m:t xml:space="preserve">x </m:t></m:r>'],
+    ['\\mathbf{\\text{ } }', '<m:r><m:rPr><m:sty m:val="b"/></m:rPr><m:t xml:space="preserve"> </m:t></m:r>'],
+    // and past a kept space, up to the text
+    ['\\mathbf{\\text{ } x}', '<m:r><m:rPr><m:sty m:val="b"/></m:rPr><m:t xml:space="preserve"> x</m:t></m:r>'],
+    ['\\mathbf{x \\text{ }}', '<m:r><m:rPr><m:sty m:val="b"/></m:rPr><m:t xml:space="preserve">x </m:t></m:r>'],
+  ])('a style around \\text{} keeps the space at an edge that \\text{} keeps: %s', (latex, omml) => {
+    expect(latexToOmml(latex)).toBe(omml);
+  });
+
+  // A space Word drops stays one it drops through a second trip
+  test('a styled run with a tilde and a space Word drops keeps it dropped through Word', async () => {
+    const docx = (await convertMdToDocx('$\\mathbf{ \\text{\\textasciitilde{}}}$\n')).docx;
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(await equationXml((await convertMdToDocx(markdown)).docx)).not.toContain('xml:space');
+  });
+
+  // Import gives such a run's space in \text{}, which keeps it again
+  // Only the space goes in \text{}, so the rest stays math in the style
+  test.each([
+    ['$\\mathbf{\\text{ x}}$', '$\\mathbf{\\text{ }x}$'],
+    ['$\\mathbb{\\text{x }}$', '$\\mathbb{x\\text{ }}$'],
+    ['$\\mathbb{R\\text{ }}$', '$\\mathbb{R\\text{ }}$'],
+    ['$\\mathbf{\\text{ }\\alpha}$', '$\\mathbf{\\text{ }\\alpha}$'],
+    ['$\\mathbf{\\text{ }}$', '$\\mathbf{\\text{ }}$'],
+    ['$a{++\\mathbf{\\text{ x}}++}b$', '$a{++\\mathbf{\\text{ }x}++}b$'],
+    ['$\\mathbf{a{++\\text{ x}++}b}$', '$\\mathbf{a}{++\\mathbf{\\text{ }x}++}\\mathbf{b}$'],
+    // The source's spaces, which Word drops, come back as they went
+    ['$\\mathbf{ x }$', '$\\mathbf{ x }$'],
+  ])('a styled run with a space Word keeps at an edge reads back with it: %s', async (md, readBack) => {
+    const docx = (await convertMdToDocx(md + '\n')).docx;
+    const xml = await equationXml(docx);
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(markdown).toBe(readBack + '\n');
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect(await equationXml(again)).toBe(xml);
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  test.each([
+    ['bold', '<m:sty m:val="b"/>', ' x', true, '\\mathbf{\\text{ }x}'],
+    ['double-struck', '<m:scr m:val="double-struck"/><m:sty m:val="p"/>', 'R ', true, '\\mathbb{R\\text{ }}'],
+    ['bold, beside a Greek letter', '<m:sty m:val="b"/>', ' \u03B1 ', true, '\\mathbf{\\text{ }\\alpha\\text{ }}'],
+    ['bold, only a space', '<m:sty m:val="b"/>', ' ', true, '\\mathbf{\\text{ }}'],
+    ['bold, with a tilde, which goes in \\text{} with the space', '<m:sty m:val="b"/>', ' ~', true, '\\mathbf{\\text{ \\textasciitilde{}}}'],
+    // Word drops a space at an edge without xml:space="preserve"
+    ['bold, with a tilde, without xml:space="preserve"', '<m:sty m:val="b"/>', ' ~', false, '\\mathbf{\\text{\\textasciitilde{}}}'],
+    ['bold, without xml:space="preserve"', '<m:sty m:val="b"/>', ' x', false, '\\mathbf{ x}'],
+    ['bold, a space inside', '<m:sty m:val="b"/>', 'x y', true, '\\mathbf{x y}'],
+  ])('a run in a style with a space Word keeps at an edge reads as \\text{} in it: %s', (_name, rPr, text, kept, latex) => {
+    expect(importOmml('<m:r><m:rPr>' + rPr + '</m:rPr><m:t' + (kept ? ' xml:space="preserve"' : '') + '>' + text + '</m:t></m:r>')).toBe(latex);
   });
 });
