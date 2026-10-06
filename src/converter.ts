@@ -539,11 +539,14 @@ function startRangesAtMark(
  * with the same Markdown as Word's empty paragraph there. Text Markdown
  * writes in tags or delimiters, as underlined text or code, or with a
  * comment, a tracked change or a link, stays, as does a no-break space,
- * which a Word user keeps an empty line with.
+ * which a Word user keeps an empty line with. Returns whether it dropped
+ * them.
  */
-function dropBlankParagraphText(target: ContentItem[], from: number): void {
+function dropBlankParagraphText(target: ContentItem[], from: number): boolean {
   const items = target.slice(from);
-  if (items.some(item => item.type === 'text' && item.text !== '') && items.every(isBlankText)) target.length = from;
+  if (!items.some(item => item.type === 'text' && item.text !== '') || !items.every(isBlankText)) return false;
+  target.length = from;
+  return true;
 }
 
 /** Whether `item` is spaces and tabs alone, or nothing, that Markdown writes
@@ -1346,6 +1349,7 @@ export type ContentItem =
       blockquoteStyle?: BlockquoteStyle; // Quote, IntenseQuote or GitHub style of a quote that isn't an alert
       emptyParagraphCount?: number; // count of collapsed consecutive empty paragraphs
       indentOverride?: 'indent' | 'no-indent'; // per-paragraph indent override for round-trip
+      blankParagraphs?: number; // paragraphs of spaces and tabs alone it stands for (see dropBlankParagraphText), which count among export's paragraphs
       listBlockStart?: boolean; // the first item of a list block, which a list indent override goes before
       paraMarkRevision?: RevisionInfo; // w:ins/w:del on the paragraph mark (pPr > rPr) — whole paragraph inserted/deleted
       breakRevision?: RevisionInfo; // w:ins/w:del on the previous paragraph's mark, which is the break before this one
@@ -4205,8 +4209,6 @@ function parseNoteBody(
           const lenBeforeContent = target.length;
           const markBefore = skippedSelfRef;
           walkNoteBody(paraChildren, paraFormatting, target, inTableCell, currentRevision);
-          // As in the document's body (see dropBlankParagraphText)
-          if (!inTableCell && !isCodeBlock) dropBlankParagraphText(target, lenBeforeContent);
           // Word's space after the note's mark, where a Word user made the
           // paragraph that holds it code, goes, as it does before text
           if (isCodeBlock && !markBefore && skippedSelfRef) {
@@ -4216,6 +4218,8 @@ function parseNoteBody(
           if (!inTableCell && !isCodeBlock && target.length > lenBeforeContent) {
             startRangesAtMark(target, lenBeforeContent, commentStartTargetIndex, activeComments);
           }
+          // As in the document's body (see dropBlankParagraphText)
+          if (!inTableCell && !isCodeBlock && !paraMarkRevision) dropBlankParagraphText(target, lenBeforeContent);
           // Display math in the paragraph goes on in it (see the document's)
           if (!inTableCell) {
             for (let k = lenBeforeContent; k < target.length; k++) {
@@ -4666,6 +4670,9 @@ function drawingImages(
 
 export interface DocumentContentResult {
   content: ContentItem[];
+  /** Paragraphs of spaces and tabs alone before the content, which count
+   *  among export's paragraphs (see dropBlankParagraphText) */
+  leadingBlankParagraphs?: number;
   zoteroBiblData?: ZoteroBiblData;
   imageEntries?: ImageExtractionEntry[];
 }
@@ -4869,6 +4876,9 @@ export async function extractDocumentContent(
   // Set after a paragraph whose mark is tracked: where its content ended,
   // so the next paragraph's para item can record the revision as breakRevision.
   let trackedParaMark: { revision: RevisionInfo; target: ContentItem[]; end: number } | undefined;
+  // Paragraphs of spaces and tabs alone before the content, which no para
+  // item stands for (see blankParagraphs)
+  let leadingBlankParagraphs = 0;
   const crossRefMap = options?.footnoteCrossRefMap;
 
   // Section detection state
@@ -5378,10 +5388,6 @@ export async function extractDocumentContent(
             target.push(paraItem);
           }
           walk(paraChildren, paraFormatting, target, inTableCell, currentRevision);
-          // A paragraph of spaces and tabs alone is an empty one, but not in
-          // a table's cell, whose empty paragraph keeps its place, so the
-          // whitespace keeps it too, nor in code
-          if (!inTableCell && !isCodeBlock) dropBlankParagraphText(target, targetLenBeforePara + (needsPara ? 1 : 0));
           const hasText = target.length > targetLenBeforePara + (needsPara ? 1 : 0);
           if (hasText && !inTableCell && !isCodeBlock && !inBibliographyField) {
             startRangesAtMark(target, targetLenBeforePara, commentStartTargetIndex, activeComments);
@@ -5390,6 +5396,14 @@ export async function extractDocumentContent(
             const walked = target[k];
             if (walked.type === 'math' && walked.display) walked.inParagraph = true;
           }
+          // A paragraph of spaces and tabs alone is an empty one, but not in
+          // a table's cell, whose empty paragraph keeps its place, so the
+          // whitespace keeps it too, nor in code, nor where its mark is
+          // tracked, or a comment's range starts at its mark, which the item
+          // startRangesAtMark added holds, as an empty paragraph would lose
+          // them
+          const blank = !inTableCell && !isCodeBlock && !paraMarkRevision
+            && dropBlankParagraphText(target, targetLenBeforePara + (needsPara ? 1 : 0));
           // If walking this paragraph's children entered a bibliography field
           // (i.e. the field-begin + separate markers were in this paragraph),
           // remove the para we just pushed — it would become a trailing blank line.
@@ -5397,6 +5411,8 @@ export async function extractDocumentContent(
             target.splice(targetLenBeforePara, 1);
           } else if (needsPara) {
             const paraItem = target[targetLenBeforePara];
+            // Which export numbered (see blankParagraphs)
+            if (blank && paraItem?.type === 'para') paraItem.blankParagraphs = 1;
             // A rule has nothing to show, though it can hold a zero-width comment
             if (paraItem?.type === 'para' && paraItem.horizontalRule
                 && target.slice(targetLenBeforePara + 1).some(item => item.type !== 'text' || item.text !== '')) {
@@ -5428,6 +5444,7 @@ export async function extractDocumentContent(
                 !prevItem.customStyleName
               ) {
                 prevItem.emptyParagraphCount += paraItem.emptyParagraphCount;
+                if (paraItem.blankParagraphs) prevItem.blankParagraphs = (prevItem.blankParagraphs ?? 0) + paraItem.blankParagraphs;
                 target.splice(targetLenBeforePara, 1);
               }
             }
@@ -5454,6 +5471,9 @@ export async function extractDocumentContent(
               !prevItem.customStyleName
             ) {
               prevItem.emptyParagraphCount += 1;
+              if (blank) prevItem.blankParagraphs = (prevItem.blankParagraphs ?? 0) + 1;
+            } else if (blank && !prevItem && target === content) {
+              leadingBlankParagraphs++;
             }
           }
           if (paraMarkRevision && canJoinTrackedBreak && !inBibliographyField && target.length > targetLenBeforePara) {
@@ -5505,7 +5525,7 @@ export async function extractDocumentContent(
   if (trackedParaMark?.target === content && trackedParaMark.end === content.length) {
     content.push({ type: 'para', breakRevision: trackedParaMark.revision });
   }
-  return { content, zoteroBiblData, imageEntries: imageFiles.entries.length > 0 ? imageFiles.entries : undefined };
+  return { content, zoteroBiblData, imageEntries: imageFiles.entries.length > 0 ? imageFiles.entries : undefined, leadingBlankParagraphs };
 }
 
 // Markdown generation
@@ -12361,7 +12381,7 @@ export async function convertDocx(
   const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, images: { relationships: fnRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: footnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, styleLayouts };
   const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, images: { relationships: enRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: endnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, styleLayouts };
 
-  const { content: docContent, zoteroBiblData } = await extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, relationshipMap: docRels, replyIds, imageRelationships: imageRels, imageFolder: options?.imageFolder, imageFiles, portraitBreakOrdinals: portraitBreaks ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined, styleLayouts });
+  const { content: docContent, zoteroBiblData, leadingBlankParagraphs } = await extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, relationshipMap: docRels, replyIds, imageRelationships: imageRels, imageFolder: options?.imageFolder, imageFiles, portraitBreakOrdinals: portraitBreaks ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined, styleLayouts });
   // The notes the document references, in its order, which are the ones it
   // shows; their images take names after its own, footnotes' first
   const refOrder = noteReferences(docContent);
@@ -12399,22 +12419,25 @@ export async function convertDocx(
       }
       return false;
     };
-    let bodyIdx = 0;
+    // Paragraphs of spaces and tabs alone, which import made empty ones,
+    // count as export counted them (see blankParagraphs)
+    let bodyIdx = leadingBlankParagraphs ?? 0;
     let firstIdx = 0;
     // A plain first paragraph has no para item, since one only separates it
     // from what's before: its inline content starts docContent
     if (hasNonCommentContent(0)) {
-      const override = storedIndentOverrides.get(0);
+      const override = storedIndentOverrides.get(bodyIdx);
       if (override) {
         docContent.unshift({ type: 'para', indentOverride: override as 'indent' | 'no-indent' });
         firstIdx = 1;
       }
-      bodyIdx = 1;
+      bodyIdx++;
     }
     for (let ci = firstIdx; ci < docContent.length; ci++) {
       const item = docContent[ci];
       if (item.type !== 'para' || item.headingLevel || item.isTitle || item.isCodeBlock
           || item.listMeta || item.blockquoteLevel || item.horizontalRule) continue;
+      bodyIdx += item.blankParagraphs ?? 0;
       // Skip empty separator paragraphs. One that empty paragraphs merged
       // into still counts when the paragraph's content follows.
       if (!hasNonCommentContent(ci + 1)) { continue; }

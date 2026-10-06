@@ -9090,6 +9090,59 @@ describe('Whitespace at the edges of a paragraph', () => {
     expect(await withText(md, part, ' \t ')).toBe(empty);
   });
 
+  describe('but not what an empty paragraph would lose', () => {
+    /** The Markdown of md's export, with `from` in part replaced by `to` */
+    const withXml = async (md: string, part: string, from: string | RegExp, to: string) => {
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+      const xml = await zip.file(part)!.async('string');
+      expect(xml.replace(from, to)).not.toBe(xml);
+      zip.file(part, xml.replace(from, to));
+      return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    };
+    const spaces = '<w:r><w:t xml:space="preserve">  </w:t></w:r>';
+    const revision = 'w:id="91" w:author="A" w:date="2024-01-01T00:00:00Z"';
+
+    test.each([
+      ['deleted', 'A.\n\nXX\n\nB.', 'word/document.xml', /(<w:p [^>]*>)<w:r><w:t>XX<\/w:t><\/w:r>/,
+        '$1<w:pPr><w:rPr><w:del ' + revision + '/></w:rPr></w:pPr>', 'A.\n\n&#32;&#32;{--\n\n--}B.\n'],
+      ['inserted', 'A.\n\nXX\n\nB.', 'word/document.xml', /(<w:p [^>]*>)<w:r><w:t>XX<\/w:t><\/w:r>/,
+        '$1<w:pPr><w:rPr><w:ins ' + revision + '/></w:rPr></w:pPr>', 'A.\n\n&#32;&#32;{++\n\n++}B.\n'],
+      ['deleted, in a note', 'T.[^1]\n\n[^1]: A.\n\n    XX\n\n    B.', 'word/footnotes.xml', /<\/w:pPr><w:r><w:t>XX<\/w:t><\/w:r>/,
+        '<w:rPr><w:del ' + revision + '/></w:rPr></w:pPr>', 'T.[^1]\n\n[^1]: A.\n\n    &#32;&#32;{--\n    \n    --}B.\n'],
+    ])('keeps a paragraph of spaces alone whose mark is %s', async (_name, md, part, from, to, expected) => {
+      // Its text went, and the tracked mark with it, which the next
+      // paragraph didn't take, as it had no para item of its own
+      const markdown = await withXml(md, part, from, to + spaces);
+      expect(markdown).toBe(expected);
+      expect(await roundTrip(markdown)).toBe(markdown);
+    });
+
+    test.each([
+      ['the body', 'A.\n\nXX{#1}\n\nb{/1} c.\n', 'word/document.xml', 'A.\n\n&#32;&#32;{#1}\n\nb{/1} c.\n', ''],
+      ['a note', 'T.[^1]\n\n[^1]: A.\n\n    XX{#1}\n\n    b{/1} c.\n', 'word/footnotes.xml', 'T.[^1]\n\n[^1]: A.\n\n    &#32;&#32;{#1}\n\n    b{/1} c.\n', '    '],
+    ])('keeps a comment that starts at the end of a paragraph of spaces alone in %s', async (_name, md, part, expected, indent) => {
+      // The paragraph lost its text, and with it the item that holds the
+      // start at its mark, so the comment started at the next paragraph's
+      const body = indent + '{#1>>@A (2024-01-15 10:30) | c<<}\n';
+      const markdown = await withXml(md + body, part, '<w:r><w:t>XX</w:t></w:r>', spaces);
+      expect(markdown).toBe(expected + body);
+      expect(await roundTrip(markdown)).toBe(markdown);
+    });
+
+    test.each([
+      ['after another', 'A.\n\nXX\n\n<!-- no-indent -->\nB.\n\nC.', spaces, 'A.\n\n<!-- no-indent -->\nB.\n\nC.\n'],
+      ['after an empty one', 'A.\n\nXX\n\n<!-- no-indent -->\nB.\n\nC.', '</w:p><w:p>' + spaces, 'A.\n\n<!-- no-indent -->\nB.\n\nC.\n'],
+      ['first', 'XX\n\n<!-- no-indent -->\nB.\n\nC.', spaces, '<!-- no-indent -->\nB.\n\nC.\n'],
+      ['after a heading', '# H\n\nXX\n\n<!-- no-indent -->\nB.\n\nC.', spaces, '# H\n\n<!-- no-indent -->\nB.\n\nC.\n'],
+    ])('keeps the indent override of the paragraph after one of spaces alone %s', async (_name, md, to, expected) => {
+      // Export numbered the paragraph, which import no longer counted, so
+      // the next paragraph's override went to the one after it
+      const markdown = await withXml(md, 'word/document.xml', '<w:r><w:t>XX</w:t></w:r>', to);
+      expect(markdown).toBe(expected);
+      expect(await roundTrip(markdown)).toBe(markdown);
+    });
+  });
+
   test.each([
     ['a table cell', '| a | b |\n| --- | --- |\n| XX | 2 |', '| a | b |\n| --- | --- |\n| &#32;&#32; | 2 |\n'],
     ['an HTML table cell', '<table>\n  <tr>\n    <td>\n      <p>q</p>\n      <p>XX</p>\n    </td>\n  </tr>\n</table>',
