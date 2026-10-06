@@ -5849,3 +5849,48 @@ describe('Line breaks in an HTML table\'s cell', () => {
     expect(xml.replace(/<w:hyperlink\b[\s\S]*?<\/w:hyperlink>/g, '')).not.toContain('<w:br/>');
   });
 });
+
+describe('Comments a paragraph reads inline', () => {
+  // The fastest of five runs of each, by turns, which a pause for garbage
+  // collection slows neither more than the other, and the large's time over
+  // the small's
+  const growth = (small: () => unknown, large: () => unknown) => {
+    const time = (work: () => unknown) => {
+      const start = performance.now();
+      work();
+      return performance.now() - start;
+    };
+    let smallTime = Infinity;
+    let largeTime = Infinity;
+    for (let k = 0; k < 5; k++) {
+      largeTime = Math.min(largeTime, time(large));
+      smallTime = Math.min(smallTime, time(small));
+    }
+    return largeTime / smallTime;
+  };
+  // A hidden run of `n` comments with 100 spaces between them
+  const payload = (n: number) => Array.from({ length: n }, (_, i) => '<!-- c' + i + ' -->').join(' '.repeat(100));
+
+  it('reads a hidden run of many comments in linear time', async () => {
+    // Taking each comment out of all the run's text in turn took time in
+    // the square of their number. Four times the comments take about four
+    // times as long, not sixteen.
+    const { readsCommentsInline } = await import('./md-to-docx');
+    const run = (n: number) => {
+      const text = payload(n);
+      return () => readsCommentsInline('&#32;' + text, [text]);
+    };
+    expect(growth(run(4000), run(16000))).toBeLessThan(8);
+  }, 60000);
+
+  it('finds the text outside the comments of a hidden run of many in linear time', async () => {
+    // Import reads it in each paragraph's runs. Taking each comment out of
+    // all the text in turn took time in the square of their number.
+    const { outsideComments } = await import('./md-to-docx');
+    const run = (n: number) => {
+      const text = payload(n);
+      return () => outsideComments(text);
+    };
+    expect(growth(run(4000), run(16000))).toBeLessThan(8);
+  }, 60000);
+});

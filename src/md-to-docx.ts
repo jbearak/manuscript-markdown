@@ -696,6 +696,19 @@ export function startsHtmlBlock(text: string): boolean {
   return citationTextMd.parse(text, {})[0]?.type === 'html_block';
 }
 
+// HTML comments, each with the spaces and tabs after it, from a block's start
+const COMMENTS_AT_START_RE = /^(?:<!--(?:(?!-->)[\s\S])*-->[ \t]*)*/;
+
+/** Whether export reads an HTML block's text as line breaks, alone or after
+ *  comments, with the spaces and tabs after each comment and between the
+ *  breaks after them, not as text, with the spaces before them as text */
+export function isLineBreakBlock(content: string): boolean {
+  const text = content.trim();
+  if (/^(?:<br\s*\/?>\s*)+$/i.test(text)) return true;
+  const comments = COMMENTS_AT_START_RE.exec(text)![0];
+  return comments !== '' && /^<br\s*\/?>(?:[ \t]*<br\s*\/?>)*$/i.test(text.slice(comments.length));
+}
+
 /** What of a comment, a block of its own, export doesn't read as a
  *  directive, where it reads it as one: the text a style's goes around on
  *  its line, as in <!-- style: Title -->Text<!-- /style -->, or else none.
@@ -723,6 +736,54 @@ export function readsAsParagraph(text: string): boolean {
   citationTextMd ??= createMarkdownIt();
   const tokens = citationTextMd.parse(text, {});
   return tokens.length === 3 && tokens[0].type === 'paragraph_open' && tokens[0].map?.[1] === text.split('\n').length;
+}
+
+/** `text` without each of `parts`, which it holds in order, each found
+ *  after the one before, in one pass, as taking each out of all the text
+ *  in turn took time in the square of their number */
+function withoutEach(text: string, parts: string[]): string {
+  let rest = '';
+  let at = 0;
+  for (const part of parts) {
+    const found = text.indexOf(part, at);
+    if (found === -1) continue;
+    rest += text.slice(at, found);
+    at = found + part.length;
+  }
+  return rest + text.slice(at);
+}
+
+/** What of `text`, a comment's hidden run, inline Markdown doesn't read
+ *  as HTML comments, which a paragraph would show, as the x of
+ *  <!-- a -->x<!-- b --> */
+export function outsideComments(text: string): string {
+  const md = citationTextMd ??= createMarkdownIt();
+  return withoutEach(text, (md.parseInline(text, {})[0]?.children ?? [])
+    .filter(child => child.type === 'html_inline' && child.content.startsWith('<!--')).map(child => child.content));
+}
+
+/** Whether export reads Markdown `text` as one paragraph whose HTML
+ *  comments are those inline Markdown reads in each of `payloads`, the
+ *  comments' hidden runs, read alone, as in &#32;<!-- a --><!-- b -->c with
+ *  one run of both, or, where runs may merge (`merge`), whose comments hold
+ *  the runs' text and no more, as one that ends in ---> does the run after
+ *  it that Word split from it. Not as text, as a comment with a blank line
+ *  in it, nor where a comment takes in text between runs, as one that ends
+ *  in ---> does a space before the next run */
+export function readsCommentsInline(text: string, payloads: string[], merge = false): boolean {
+  const md = citationTextMd ??= createMarkdownIt();
+  const tokens = md.parse(text, {});
+  if (tokens.length !== 3 || tokens[0].type !== 'paragraph_open' || tokens[0].map?.[1] !== text.split('\n').length) return false;
+  const comments = (children: Token[] | null) => (children ?? [])
+    .filter(child => child.type === 'html_inline' && child.content.startsWith('<!--')).map(child => child.content);
+  const read = comments(tokens[1].children);
+  const alone = payloads.map(payload => comments(md.parseInline(payload, {})[0]?.children ?? null));
+  // Each run's comments hold every <!-- in it, as one that ends in --->
+  // with nothing after it doesn't, which would be text
+  const whole = alone.every((found, k) => !withoutEach(payloads[k], found).includes('<!--'));
+  const expected = alone.flat();
+  return whole && read.length === expected.length && read.every((comment, k) => comment === expected[k])
+    || merge && read.join('') === payloads.join('');
 }
 
 /** The HTML blocks export reads in Markdown `text`, not in a quote or list:
@@ -2081,8 +2142,13 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
     const origLines = (originalText ?? markdown).split('\n');
     let searchFrom = 0; // track position to handle duplicate comment text
     for (const tok of result) {
-      if (tok.type !== 'paragraph' || tok.runs.length !== 1 || tok.runs[0].type !== 'html_comment') continue;
-      const commentText = tok.runs[0].text.trim();
+      const withIds = isCommentsWithIds(tok);
+      if (!withIds && (tok.type !== 'paragraph' || tok.runs.length !== 1 || tok.runs[0].type !== 'html_comment')) continue;
+      if (withIds && !tok.sourceRange) continue;
+      // One with the ID syntax of a Word comment on its comments is its
+      // paragraph's lines as parsed, which a span with a blank line in it
+      // changes, so it isn't found
+      const commentText = withIds ? processedLines.slice(tok.sourceRange![0], tok.sourceRange![1]).join('\n').trim() : tok.runs[0].text.trim();
       const commentLines = commentText.split('\n');
       // Find this comment's line in the original markdown (starting after previous match)
       let commentLine = -1;
@@ -3115,16 +3181,30 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
               runs: [{ type: 'text', text: htmlContent.replace(/\n$/, '') }]
             });
           }
-        } else if (/^(?:<br\s*\/?>\s*)+$/i.test(htmlContent.trim()) || /^(?:<!--(?:(?!-->)[\s\S])*-->)+(?:<br\s*\/?>)+$/i.test(htmlContent.trim())) {
+        } else if (isLineBreakBlock(htmlContent)) {
           // Line breaks alone, as import writes a paragraph that is one,
           // which markdown-it reads as a block, not a paragraph's text, or
           // after comments, as import writes a paragraph of comments a line
-          // break ends, which markdown-it reads as the comments' block
+          // break ends, which markdown-it reads as the comments' block. Its
+          // indent, which markdown-it keeps in its text, is text, as in
+          // another block, as import writes a paragraph's spaces before a
+          // comment only a block holds. So are spaces and tabs after a
+          // comment and between the line breaks after one, as import writes
+          // a paragraph's there, as in <!-- c --> <br> <br>, but not between
+          // line breaks alone.
+          const indent = /^[ \t]*/.exec(htmlContent)![0];
+          const text = htmlContent.trim();
+          const parts = COMMENTS_AT_START_RE.exec(text)![0]
+            ? text.match(/<!--(?:(?!-->)[\s\S])*-->|<br\s*\/?>|[ \t]+/gi)!
+            : text.match(/<br\s*\/?>/gi)!;
           result.push({
             type: 'paragraph',
-            runs: htmlContent.trim().match(/<!--(?:(?!-->)[\s\S])*-->|<br\s*\/?>/gi)!.map(tag => tag.startsWith('<!--')
-              ? { type: 'html_comment' as const, text: tag }
-              : { type: 'hardbreak' as const, text: '\n' }),
+            runs: [
+              ...(indent ? [{ type: 'text' as const, text: indent }] : []),
+              ...parts.map(part => part.startsWith('<!--') ? { type: 'html_comment' as const, text: part }
+                : part.startsWith('<') ? { type: 'hardbreak' as const, text: '\n' }
+                : { type: 'text' as const, text: part }),
+            ],
           });
         } else {
           // A table whose rows are all in comments, which nothing of shows,
@@ -6006,6 +6086,22 @@ function bibliographyPathProps(fm: Frontmatter): CustomPropEntry[] {
   return [{ name: 'MANUSCRIPT_BIBLIOGRAPHY_PATH', value: fm.bibliography }];
 }
 
+/** Whether a paragraph is HTML comments with the ID syntax of a Word comment
+ *  on them, as import writes one Word put a comment on, {#1}<!-- c -->{/1}
+ *  with the comment's body on the next line, which is among comments of
+ *  their own, as the block of the comments alone is, with the spaces and
+ *  tabs between them, but not one between the syntax and the first or
+ *  last, which the paragraph keeps as text. Only the line end before a
+ *  body goes with it; one in a range, as between two openers, is a space
+ *  in Word, as import writes it. */
+function isCommentsWithIds(token: MdToken): boolean {
+  if (token.type !== 'paragraph' || token.listContinuation) return false;
+  const runs = token.runs.filter((run, k) => run.type !== 'comment_range_start' && run.type !== 'comment_range_end'
+    && run.type !== 'comment_body_with_id' && !(run.type === 'softbreak' && token.runs[k + 1]?.type === 'comment_body_with_id'));
+  return runs.length < token.runs.length && runs[0]?.type === 'html_comment' && runs[runs.length - 1].type === 'html_comment'
+    && runs.every(run => run.type === 'html_comment' || run.type === 'softbreak' || run.type === 'text' && /^[ \t]*$/.test(run.text));
+}
+
 /** Assign sequential htmlCommentIndex to each HTML comment token and return
  *  maps from index → blankLinesBefore/After count (only for non-default values). */
 export function annotateHtmlCommentIndices(tokens: MdToken[]): { beforeGaps: Map<number, number>; afterGaps: Map<number, number> } {
@@ -6017,7 +6113,8 @@ export function annotateHtmlCommentIndices(tokens: MdToken[]): { beforeGaps: Map
     const isHtmlComment = token.type === 'paragraph'
       && token.runs.length === 1
       && token.runs[0].type === 'html_comment'
-      && !token.listContinuation;
+      && !token.listContinuation
+      || isCommentsWithIds(token);
     if (isHtmlComment) {
       token.htmlCommentIndex = idx;
       if (token.blankLinesBefore !== undefined && token.blankLinesBefore !== 1) {

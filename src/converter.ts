@@ -13,7 +13,7 @@ import { computeCodeRegions, computeMarkdownRegions, isInsideCodeRegion } from '
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { citationEndInText, compareNoteLabels, customStyleId, directiveRest, htmlBlocksIn, linkifiedColons, linkifiedText, linkifyMatches, readsAsParagraph, startsHtmlBlock } from './md-to-docx';
+import { citationEndInText, compareNoteLabels, customStyleId, directiveRest, htmlBlocksIn, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, readsAsParagraph, readsCommentsInline, startsHtmlBlock } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { matchTables, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
@@ -515,6 +515,18 @@ const HARD_BREAK_AT_END = /(?<!\\)((?:\\\\)*)\\\n$/;
 // underline (see wrapHighlight)
 const HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END = /(?<!\\)((?:\\\\)*)\\\n(==[ \t]*)$/;
 const HARD_BREAKS_AT_END = /(?<!\\)((?:\\\\)*)(?:\\\n)+$/;
+// HTML comments that start a paragraph's text, after its indent, each with
+// the spaces and tabs after it, and the line breaks after them that end it,
+// with the spaces and tabs between them
+const COMMENTS_BEFORE_BREAKS = /^([ \t]*(?:<!--(?:(?!-->)[\s\S])*-->[ \t]*)+)((?:\\\n[ \t]*)*\\\n)$/;
+
+/** The column a line's text ends at, as Markdown counts them, a tab going
+ *  on to the next stop, every four columns */
+function columnAfter(line: string): number {
+  let column = 0;
+  for (const c of line) column = c === '\t' ? column + 4 - column % 4 : column + 1;
+  return column;
+}
 
 /**
  * An empty item at the end of a paragraph's items in `target`, from `from`,
@@ -11577,67 +11589,22 @@ export function buildMarkdown(
       continue;
     }
 
-    // Track standalone HTML comment paragraphs for gap metadata and emit their
-    // separator. A leading comment in an alert paragraph is inline content;
-    // pendingAlertPrefixStrip means its blockquote prefix was already emitted.
-    // So is one in a quote, list item or heading, after the line's prefix,
-    // which export doesn't count among them (annotateHtmlCommentIndices)
-    if (item.type === 'html_comment' && !pendingAlertPrefixStrip && !paragraphNested && !paragraphHeading) {
-      // A blank line, where export stored none
-      if (output.length === 0) documentStartCommentGap = htmlCommentGaps?.get(htmlCommentIndex) ?? 1;
-      if (output.length > 0) {
-        if (incomingSep !== null) {
-          output.push(incomingSep);
-        } else {
-          // Use before-gap metadata for this html_comment.
-          // The empty para marker that precedes the html_comment item may have
-          // already contributed newlines to the output (via the para separator
-          // chain).  Count existing trailing newlines and only add the delta so
-          // the total matches the original source gap.
-          const gapCount = htmlCommentGaps?.get(htmlCommentIndex);
-          if (gapCount !== undefined) {
-            const desiredNewlines = gapCount + 1; // gapCount blank lines = gapCount+1 \n
-            // Count trailing newlines already in output
-            let existingNewlines = 0;
-            for (let oi = output.length - 1; oi >= 0; oi--) {
-              const s = output[oi];
-              let j = s.length - 1;
-              while (j >= 0 && s[j] === '\n') { existingNewlines++; j--; }
-              if (j >= 0) break; // hit non-newline content, stop
-            }
-            const needed = desiredNewlines - existingNewlines;
-            if (needed > 0) {
-              output.push('\n'.repeat(needed));
-            } else if (needed < 0) {
-              // Too many trailing newlines — trim excess from the output tail
-              let toRemove = -needed;
-              while (toRemove > 0 && output.length > 0) {
-                const last = output[output.length - 1];
-                let trailingNL = 0;
-                for (let j = last.length - 1; j >= 0 && last[j] === '\n'; j--) trailingNL++;
-                if (trailingNL === 0) break;
-                const removeFromThis = Math.min(toRemove, trailingNL);
-                if (removeFromThis === last.length) {
-                  output.pop();
-                } else {
-                  output[output.length - 1] = last.slice(0, last.length - removeFromThis);
-                }
-                toRemove -= removeFromThis;
-              }
-            }
-          } else if (!output[output.length - 1].endsWith('\n\n')) {
-            output.push('\n\n');
-          }
-        }
-      }
-      lastRenderedHtmlCommentIndex = htmlCommentIndex;
-      htmlCommentIndex++;
-    }
-
     const rendered = renderInlineRange(mergedContent, i, comments, { stopBeforeDisplayMath: true, nested: paragraphNested, heading: paragraphHeading }, renderOpts);
     if (rendered.nextIndex <= i) {
       throw new Error('Invariant violated: renderInlineRange did not advance index');
     }
+    // A leading comment in an alert paragraph is inline content;
+    // pendingAlertPrefixStrip means its blockquote prefix was already emitted.
+    // So is one in a quote, list item or heading, after the line's prefix,
+    // which export doesn't count among the comments of their own that take
+    // an index for their blank lines (annotateHtmlCommentIndices).
+    const amongOwnComments = !pendingAlertPrefixStrip && !paragraphNested && !paragraphHeading;
+    // One no para item started, as one a comment starts that starts a
+    // section, as the first paragraph has none, writes the separator the
+    // fence before it left, a block of comments alone or not, and before its
+    // indent's columns are counted on the line it's on
+    if (output.length > 0 && incomingSep !== null) output.push(incomingSep);
+
     rendered.deferredComments.unshift(...pendingEquationBodies.splice(0));
     let textOut = rendered.text;
     // With the label hidden, export writes neither it nor the line end after
@@ -11687,22 +11654,133 @@ export function buildMarkdown(
         !breaks.has(offset + backslashes.length + 2) ? match
           : backslashes + '<br>' + (whitespace ?? '').replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;'));
     } else if (atEnd && !isInParagraphMath(mergedContent[rendered.nextIndex])) {
-      textOut = textOut.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + '<br>');
+      // After comments alone, which start an HTML block, a \ and line end
+      // are the block's text, so each line break is <br>, which export
+      // reads there (see isLineBreakBlock)
+      const comments = COMMENTS_BEFORE_BREAKS.exec(textOut);
+      textOut = comments ? comments[1] + comments[2].replace(/\\\n/g, '<br>')
+        : textOut.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + '<br>');
     }
     // A line break before the == of a highlight that ends the text is <br>
     // too, as == alone on the last line would read as a heading's
     // underline, before an equation in the paragraph as well
     textOut = textOut.replace(HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END, (_m, backslashes: string, close: string) => backslashes + '<br>' + close);
-    // An HTML block's indent, of up to three spaces, which markdown-it keeps
-    // in its text, and a reference would make a paragraph's
-    const htmlIndent = ownLine && atStart ? /^ {1,3}(?=<)/.exec(textOut)?.[0] ?? '' : '';
+    // An HTML block's indent, of up to three columns, which markdown-it keeps
+    // in its text, and a reference would make a paragraph's. A tab in it
+    // goes on to the next stop, every four columns from the line's start,
+    // past the prefix written on it, so after a quote's > and space a tab
+    // is two, as export reads it, but at the margin four, which makes code.
+    // Before line breaks, and comments a paragraph reads too, with whatever
+    // follows them, it's references, as a space before a line break that
+    // ends the paragraph is &#32;<br>, and a tab before a comment and text
+    // &#9;<!-- c -->a, whose block would show them as text, and since export
+    // puts a block of comments' indent in the first one's hidden run. Not
+    // where that run held it, with the paragraph's comments' runs all it
+    // holds, as export wrote them, but for spaces and tabs Word put after
+    // them, which export trims, nor before a comment a paragraph would
+    // read as text, as one with a blank line in it, which only the block
+    // holds, or as more than it, as one that ends in ---> with the next.
+    const indent = ownLine && atStart ? /^[ \t]+(?=<)/.exec(textOut)?.[0] ?? '' : '';
+    let indentColumns = 0;
+    if (indent) {
+      let line = '';
+      for (let k = output.length - 1; k >= 0; k--) {
+        const end = output[k].lastIndexOf('\n');
+        line = output[k].slice(end + 1) + line;
+        if (end !== -1) break;
+      }
+      indentColumns = columnAfter(line + indent) - columnAfter(line);
+    }
+    const htmlIndent = indentColumns <= 3 ? indent : '';
+    const referenced = keepParagraphWhitespace(textOut, atStart, atEnd);
+    const items = mergedContent.slice(i, rendered.nextIndex);
+    const payloads = items.flatMap((item, k) => item.type === 'html_comment' ? [markdownComment(item.text, items[k + 1]?.type === 'html_comment')] : []);
+    // A block of comments and line breaks gives back runs that are each one
+    // comment, as export splits it at each one's first -->, so a paragraph
+    // mustn't merge those; others, as Word split, it may
+    const blockKeepsRuns = isLineBreakBlock(textOut) && payloads.every(payload => /^<!--(?:(?!-->)[\s\S])*-->$/.test(payload));
+    // Text the runs hold outside their comments, read together as Word may
+    // split one, which a paragraph would show, the block keeps hidden in
+    // its run, with the rest of the paragraph, where that's spaces and tabs
+    // and the block is the comments' (see annotateHtmlCommentIndices)
+    const commentsAlone = items.every(item => item.type === 'html_comment' || item.type === 'text' && /^[ \t]*$/.test(item.text));
+    const hidesText = /\S/.test(outsideComments(payloads.join(''))) && commentsAlone
+      && /^<!--[\s\S]*?-->\s*$/.test(textOut.trim());
+    const runHoldsIndent = commentsAlone && items[0]?.type === 'html_comment' && /^[ \t]/.test(items[0].text);
+    const inline = () => !hidesText && (isLineBreakBlock(textOut) || /^[ \t]*<!--/.test(textOut) && !runHoldsIndent)
+      && readsCommentsInline(referenced, payloads, !blockKeepsRuns);
     // Whitespace alone before an equation in the paragraph keeps the space
     // export wrote for its line end as it is, which the math branch takes
     // off, as it does after other text, or it would gain one each round trip
     textOut = mathFollows && /^[ \t]* $/.test(textOut) ? keepParagraphWhitespace(textOut.slice(0, -1), atStart, atEnd) + ' '
-      : htmlIndent && startsHtmlBlock(textOut)
+      : htmlIndent && startsHtmlBlock(' '.repeat(indentColumns) + textOut.slice(htmlIndent.length)) && !inline()
         ? htmlIndent + keepParagraphWhitespace(textOut.slice(htmlIndent.length), true, atEnd)
-        : keepParagraphWhitespace(textOut, atStart, atEnd);
+        : referenced;
+    // Track standalone HTML comment paragraphs for gap metadata and keep the
+    // blank lines a para item wrote before them, where export reads what
+    // import wrote as one: a block that starts and ends with a comment, as
+    // parseMd trims it, so with the spaces and tabs of a raw indent and of
+    // its end, as Word puts after the run, but not a reference before it,
+    // which makes a paragraph, nor line breaks or text after the comment.
+    // Its items say which, not its Markdown, which a comment Word put on the
+    // run adds to, in its comments' runs, which Word may split, before them
+    // too in ID syntax, {#1}<!-- c -->{/1}, which export counts as well (see
+    // isCommentsWithIds), but not with a space or tab between the syntax and
+    // the comments, which its paragraph keeps as text.
+    const solid = items.filter(entry => entry.type !== 'text' || /[^ \t]/.test(entry.text));
+    if (amongOwnComments && solid[0]?.type === 'html_comment' && solid[solid.length - 1].type === 'html_comment'
+      && items.every(entry => entry.type !== 'text' || !entry.text.includes('\n'))
+      && /^[ \t]*(?:\{#[^}\s]+\})*<!--/.test(textOut) && /-->(?:\{\/[^}\s]+\}|\{>>(?:(?!<<\})[\s\S])*<<\})*[ \t]*$/.test(textOut)
+      && /^<!--[\s\S]*?-->\s*$/.test(items.map((entry, k) => entry.type === 'text' ? entry.text
+        : entry.type === 'html_comment' ? markdownComment(entry.text, items[k + 1]?.type === 'html_comment') : '').join('').trim())) {
+      // A blank line, where export stored none
+      if (output.length === 0) documentStartCommentGap = htmlCommentGaps?.get(htmlCommentIndex) ?? 1;
+      if (output.length > 0) {
+        if (incomingSep === null) {
+          // Use before-gap metadata for this html_comment.
+          // The empty para marker that precedes the html_comment item may have
+          // already contributed newlines to the output (via the para separator
+          // chain).  Count existing trailing newlines and only add the delta so
+          // the total matches the original source gap.
+          const gapCount = htmlCommentGaps?.get(htmlCommentIndex);
+          if (gapCount !== undefined) {
+            const desiredNewlines = gapCount + 1; // gapCount blank lines = gapCount+1 \n
+            // Count trailing newlines already in output
+            let existingNewlines = 0;
+            for (let oi = output.length - 1; oi >= 0; oi--) {
+              const s = output[oi];
+              let j = s.length - 1;
+              while (j >= 0 && s[j] === '\n') { existingNewlines++; j--; }
+              if (j >= 0) break; // hit non-newline content, stop
+            }
+            const needed = desiredNewlines - existingNewlines;
+            if (needed > 0) {
+              output.push('\n'.repeat(needed));
+            } else if (needed < 0) {
+              // Too many trailing newlines — trim excess from the output tail
+              let toRemove = -needed;
+              while (toRemove > 0 && output.length > 0) {
+                const last = output[output.length - 1];
+                let trailingNL = 0;
+                for (let j = last.length - 1; j >= 0 && last[j] === '\n'; j--) trailingNL++;
+                if (trailingNL === 0) break;
+                const removeFromThis = Math.min(toRemove, trailingNL);
+                if (removeFromThis === last.length) {
+                  output.pop();
+                } else {
+                  output[output.length - 1] = last.slice(0, last.length - removeFromThis);
+                }
+                toRemove -= removeFromThis;
+              }
+            }
+          } else if (!output[output.length - 1].endsWith('\n\n')) {
+            output.push('\n\n');
+          }
+        }
+      }
+      lastRenderedHtmlCommentIndex = htmlCommentIndex;
+      htmlCommentIndex++;
+    }
     if (paragraphHeading) {
       // A run of # that ends a heading's text, after a space or tab or as
       // all of it, is its closing sequence to Markdown, which drops it
