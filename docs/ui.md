@@ -128,9 +128,9 @@ Export and document-setting commands. See [Converter](converter.md) for details 
 | | **Citations & Notes** — bibliography, CSL style, locale, citation placement, notes, bibliography indentation, and Zotero sync |
 | | **Code Blocks** — font, size, colors, and inset |
 
-> **Export to Word** converts the Markdown file to `.docx`. If a `.docx` with the same name already exists, its paragraph and formatting styles are automatically reused as a template — so fonts, spacing, and colors you previously set in Word are preserved.
+> **Export to Word** converts the Markdown file to `.docx`. If a `.docx` with the same name already exists, its paragraph and formatting styles, and its headers and footers, are automatically reused as a template — so fonts, spacing, colors, and page numbers you previously set in Word are preserved.
 >
-> **Export to Word with Template** first opens a file picker so you can choose any `.docx` file whose paragraph formatting styles (fonts, sizes, spacing, colors) will be applied to the exported document.
+> **Export to Word with Template** first opens a file picker so you can choose any `.docx` file whose paragraph formatting styles (fonts, sizes, spacing, colors), and headers and footers, will be applied to the exported document.
 >
 > Each settings submenu contains one item per supported YAML frontmatter field. Choosing an item inserts that field if it is missing, or selects its current value if it already exists. Available values are shown automatically when the field has predefined choices. If no frontmatter exists, a block is created automatically. **Typography → Callout Labels** inserts or selects `callout-labels`; labels default to `true`, and setting the field to `false` hides callout type labels in preview and DOCX output while preserving callout styling.
 
@@ -248,7 +248,7 @@ Once complete, the Markdown file opens in the editor. If a `.bib` file was gener
 
 ### Export to Word (MD → DOCX)
 
-The output is saved with the same base name as the source file (e.g., `report.md` → `report.docx`). If a `.docx` with the same name already exists, its styles are automatically reused as a template so that fonts, spacing, and colors you set in Word are preserved.
+The output is saved with the same base name as the source file (e.g., `report.md` → `report.docx`). If a `.docx` with the same name already exists, its styles, and its headers and footers, are automatically reused as a template so that fonts, spacing, colors, and page numbers you set in Word are preserved.
 
 **No active file** — if no Markdown file is open: `"No active Markdown file"`
 

@@ -22,6 +22,7 @@ import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
 import { extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
 import { matchCriticHeadingPrefix } from './critic-markup';
+import { readTemplateSections, withSectionHeaders, addTemplateSectionParts, type TemplateSections } from './template-sections';
 export { preprocessGridTables } from './grid-table-preprocess';
 export { extractHtmlTables } from './html-table-parser';
 
@@ -3851,7 +3852,7 @@ function parseMarkdownImageDimension(attrs: string, attrName: 'width' | 'height'
 
 interface TemplateParts {
   parts: Map<string, Uint8Array>;
-  templateSectPr?: string; // trailing <w:sectPr> from template document.xml
+  sections: TemplateSections; // trailing <w:sectPr> from template document.xml, and its headers and footers
 }
 
 /** A character XML 1.0 can't hold: a control character other than a tab
@@ -3904,29 +3905,13 @@ async function extractTemplateParts(templateDocx: Uint8Array): Promise<TemplateP
     }
   }
 
-  // Extract the document-level <w:sectPr> (direct child of <w:body>)
-  // to preserve template page layout (size, margins, orientation).
-  let templateSectPr: string | undefined;
-  const docFile = zip.file('word/document.xml');
-  if (docFile) {
-    const docXml = await docFile.async('string');
-    // Invariant: reuse ONLY the trailing body-level sectPr (the final <w:sectPr>
-    // before </w:body>). Paragraph-level section breaks may contain <w:sectPr>
-    // inside <w:pPr>; selecting from an earlier sectPr corrupts template reuse.
-    const bodyCloseIdx = docXml.lastIndexOf('</w:body>');
-    if (bodyCloseIdx !== -1) {
-      const beforeBodyClose = docXml.slice(0, bodyCloseIdx);
-      const sectPrStart = beforeBodyClose.lastIndexOf('<w:sectPr');
-      if (sectPrStart !== -1) {
-        const sectPrEnd = beforeBodyClose.indexOf('</w:sectPr>', sectPrStart);
-        if (sectPrEnd !== -1) {
-          templateSectPr = beforeBodyClose.slice(sectPrStart, sectPrEnd + '</w:sectPr>'.length);
-        }
-      }
-    }
-  }
-
-  return { parts, templateSectPr };
+  // The document-level <w:sectPr> (direct child of <w:body>), to preserve
+  // template page layout (size, margins, orientation), and the headers and
+  // footers its sections show (see template-sections.ts).
+  // Invariant: reuse ONLY the trailing body-level sectPr (the final <w:sectPr>
+  // before </w:body>). Paragraph-level section breaks may contain <w:sectPr>
+  // inside <w:pPr>; selecting from an earlier sectPr corrupts template reuse.
+  return { parts, sections: await readTemplateSections(zip) };
 }
 
 export interface MdToDocxOptions {
@@ -4023,10 +4008,20 @@ function landscapeSectPrXml(pgSz: PageSize, margins: string, rsid?: string): str
     '<w:cols w:space="720"/></w:sectPr>';
 }
 
+/** A sectPr with the template's headers and footers, if it is the first
+ *  written: the sections after it take them from it */
+function withTemplateHeaders(sectPr: string, state: DocxGenState): string {
+  const headers = state.sectionHeaders;
+  if (!headers) return sectPr;
+  state.sectionHeaders = undefined;
+  return withSectionHeaders(sectPr, headers.references, headers.titlePg);
+}
+
 /** Build the final body-level sectPr (no <w:type>, direct child of <w:body>). */
 function bodyClosingSectPrXml(pgSz: PageSize, margins: string, templateSectPr?: string, rsid?: string): string {
-  // If we have an unmodified template sectPr, reuse it as-is to preserve
-  // any additional properties (headers, footers, columns, etc.)
+  // If we have a template sectPr, reuse it as-is to preserve any additional
+  // properties (columns, etc.). It comes without its headers and footers,
+  // which the first sectPr written takes (see withTemplateHeaders)
   if (templateSectPr) return templateSectPr;
   return '<w:sectPr' + (rsid ? ' w:rsidR="' + rsid + '"' : '') + '><w:pgSz w:w="' + pgSz.w + '" w:h="' + pgSz.h + '"/>' +
     '<w:pgMar ' + margins + '/>' +
@@ -4100,6 +4095,7 @@ export interface DocxGenState {
   sectionBreakOrdinal: number;  // counter for paragraph-level sectPr emissions (for portrait round-trip)
   portraitBreakOrdinals: Set<number>; // ordinals of portrait-fence close section breaks
   templateSectPr?: string;      // trailing <w:sectPr> from template document.xml
+  sectionHeaders?: { references: string; titlePg: boolean }; // the template's, for the first sectPr written, which takes them
   pipeTableAligned: Map<number, boolean>; // table index -> whether pipe table was column-aligned
   gridSourceColWidths: Map<number, number[]>; // table index -> original grid table column char-widths
   sentinelGaps: Record<string, number>; // before-gap for landscape/portrait sentinels (e.g. "pc0" → blankLinesBefore for first portrait_close)
@@ -4230,10 +4226,12 @@ interface ContentTypesOptions {
   hasCommentsExtensible?: boolean;
   hasPeople?: boolean;
   imageExtensions?: Set<string>;
+  templateDefaults?: Map<string, string>; // extension -> content type, for the template's headers and footers
+  templateOverrides?: Map<string, string>; // part path -> content type, likewise
 }
 
 function contentTypesXml(opts: ContentTypesOptions): string {
-  const { hasList, hasComments, hasTheme, hasCustomProps, hasFootnotes, hasEndnotes, hasCommentsExtended, hasCommentsIds, hasCommentsExtensible, hasPeople, imageExtensions } = opts;
+  const { hasList, hasComments, hasTheme, hasCustomProps, hasFootnotes, hasEndnotes, hasCommentsExtended, hasCommentsIds, hasCommentsExtensible, hasPeople, imageExtensions, templateDefaults, templateOverrides } = opts;
   let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
   xml += '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n';
   xml += '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n';
@@ -4243,6 +4241,9 @@ function contentTypesXml(opts: ContentTypesOptions): string {
       const ct = getImageContentType(ext);
       if (ct) xml += '<Default Extension="' + ext + '" ContentType="' + ct + '"/>\n';
     }
+  }
+  for (const [ext, ct] of templateDefaults ?? []) {
+    xml += '<Default Extension="' + escapeXml(ext) + '" ContentType="' + escapeXml(ct) + '"/>\n';
   }
   xml += '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>\n';
   xml += '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>\n';
@@ -4280,6 +4281,9 @@ function contentTypesXml(opts: ContentTypesOptions): string {
   xml += '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>\n';
   if (hasCustomProps) {
     xml += '<Override PartName="/docProps/custom.xml" ContentType="application/vnd.openxmlformats-officedocument.custom-properties+xml"/>\n';
+  }
+  for (const [part, ct] of templateOverrides ?? []) {
+    xml += '<Override PartName="/' + escapeXml(part) + '" ContentType="' + escapeXml(ct) + '"/>\n';
   }
   xml += '</Types>';
   return xml;
@@ -5437,12 +5441,14 @@ function numberingXml(startOverrides?: NumberingOverride[]): string {
     '</w:numbering>';
 }
 
-function settingsXml(rsid: string, hasFootnotes?: boolean, hasEndnotes?: boolean, hasThreadedComments?: boolean): string {
+function settingsXml(rsid: string, hasFootnotes?: boolean, hasEndnotes?: boolean, hasThreadedComments?: boolean, evenAndOddHeaders?: boolean): string {
   const ignorable = hasThreadedComments ? 'w14 w15 w16se w16cid w16 w16cex w16sdtdh w16du' : 'w14 w15';
   let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
     '<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:w16="http://schemas.microsoft.com/office/word/2018/wordml" xmlns:w16cex="http://schemas.microsoft.com/office/word/2018/wordml/cex" xmlns:w16cid="http://schemas.microsoft.com/office/word/2016/wordml/cid" xmlns:w16du="http://schemas.microsoft.com/office/word/2023/wordml/word16du" xmlns:w16sdtdh="http://schemas.microsoft.com/office/word/2020/wordml/sdtdatahash" xmlns:w16se="http://schemas.microsoft.com/office/word/2015/wordml/symex" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="' + ignorable + '">\n' +
     '<w:zoom w:percent="100"/>\n' +
     '<w:defaultTabStop w:val="720"/>\n' +
+    // A template's even-page headers, which Word shows only with this
+    (evenAndOddHeaders ? '<w:evenAndOddHeaders/>\n' : '') +
     '<w:characterSpacingControl w:val="doNotCompress"/>\n' +
     // Prevent Word Online from showing hidden text (w:vanish runs used for HTML comments).
     // Without this, Word Desktop may save its "Show Hidden Text" preference into the file,
@@ -5852,14 +5858,19 @@ interface DocumentRelsOptions {
   hasCommentsExtensible?: boolean;
   hasPeople?: boolean;
   imageRelationships?: Map<string, { rId: string; mediaPath: string }>;
+  templateRelationships?: Array<{ type: string; target: string; external: boolean }>; // rId1 to rIdN, the template's headers' and footers'
 }
 
 function documentRelsXml(opts: DocumentRelsOptions): string {
-  const { relationships, hasList, hasComments, hasTheme, hasFootnotes, hasEndnotes, hasCommentsExtended, hasCommentsIds, hasCommentsExtensible, hasPeople, imageRelationships } = opts;
+  const { relationships, hasList, hasComments, hasTheme, hasFootnotes, hasEndnotes, hasCommentsExtended, hasCommentsIds, hasCommentsExtensible, hasPeople, imageRelationships, templateRelationships } = opts;
   let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
   xml += '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n';
   // All rIds must be sequential with no gaps — see dirty-flag invariant #6.
   let nextFixed = 1;
+  for (const relationship of templateRelationships ?? []) {
+    xml += '<Relationship Id="rId' + nextFixed + '" Type="' + escapeXml(relationship.type) + '" Target="' + escapeXml(relationship.target) + '"' + (relationship.external ? ' TargetMode="External"' : '') + '/>\n';
+    nextFixed++;
+  }
   xml += '<Relationship Id="rId' + nextFixed + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>\n';
   nextFixed++;
 
@@ -7855,11 +7866,11 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
 
   // Helper: emit a portrait section break paragraph and increment ordinal
   function emitPortraitBreak(): void {
-    body += '<w:p><w:pPr>' + portraitSectPrXml(pgSz, margins, state.rsid) + '</w:pPr></w:p>';
+    body += '<w:p><w:pPr>' + withTemplateHeaders(portraitSectPrXml(pgSz, margins, state.rsid), state) + '</w:pPr></w:p>';
     state.sectionBreakOrdinal++;
   }
   function emitLandscapeBreak(): void {
-    body += '<w:p><w:pPr>' + landscapeSectPrXml(pgSz, margins, state.rsid) + '</w:pPr></w:p>';
+    body += '<w:p><w:pPr>' + withTemplateHeaders(landscapeSectPrXml(pgSz, margins, state.rsid), state) + '</w:pPr></w:p>';
     state.sectionBreakOrdinal++;
   }
 
@@ -8138,7 +8149,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   state.sentinelGaps = sentinelGaps;
 
   // Append body-closing sectPr (preserves template page layout)
-  const closingSectPr = bodyClosingSectPrXml(pgSz, margins, state.templateSectPr, state.rsid);
+  const closingSectPr = withTemplateHeaders(bodyClosingSectPrXml(pgSz, margins, state.templateSectPr, state.rsid), state);
 
   return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
     '<w:document xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wpi="http://schemas.microsoft.com/office/word/2010/wordprocessingInk" xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" mc:Ignorable="w14 w15 wp14">\n' +
@@ -8379,12 +8390,14 @@ export async function convertMdToDocx(
 
   // Extract template parts if provided
   let templateParts: Map<string, Uint8Array> | undefined;
-  let templateSectPr: string | undefined;
+  let templateSections: TemplateSections | undefined;
   if (options?.templateDocx) {
     const extracted = await extractTemplateParts(options.templateDocx);
     templateParts = extracted.parts;
-    templateSectPr = extracted.templateSectPr;
+    templateSections = extracted.sections;
   }
+  // The template's headers and footers take document.xml's first relationships
+  const templateRelCount = templateSections?.relationships.length ?? 0;
 
   const hasTheme = true; // always include a theme (template or default)
 
@@ -8402,10 +8415,10 @@ export async function convertMdToDocx(
 
   const notesMode = frontmatter.notes === 'endnotes' ? 'endnotes' as const : 'footnotes' as const;
 
-  // Reserve rId slots: 1=styles, 2=numbering, 3=comments,
-  // 4+=optional notes/comment-thread rels/theme/settings/webSettings/fontTable.
+  // Reserve rId slots: the template's headers and footers, then styles,
+  // numbering, comments, optional notes/comment-thread rels/theme/settings/webSettings/fontTable.
   // Reserve max optional slots to avoid hyperlink rId collisions.
-  const rIdOffset = 3 + 6 + (hasTheme ? 1 : 0) + 3; // +6 optional rels (foot/end/commentsExtended/commentsIds/commentsExtensible/people), +3 fixed settings/webSettings/fontTable
+  const rIdOffset = templateRelCount + 3 + 6 + (hasTheme ? 1 : 0) + 3; // +6 optional rels (foot/end/commentsExtended/commentsIds/commentsExtensible/people), +3 fixed settings/webSettings/fontTable
 
   const state: DocxGenState = {
     commentId: 0,
@@ -8479,7 +8492,8 @@ export async function convertMdToDocx(
     inPortraitSection: false,
     sectionBreakOrdinal: 0,
     portraitBreakOrdinals: new Set(),
-    templateSectPr,
+    templateSectPr: templateSections?.sectPr,
+    sectionHeaders: templateSections && { references: templateSections.references, titlePg: templateSections.titlePg },
     sentinelGaps: {},
     customStyles: frontmatter.styles,
     activeListStartOverrides: new Map(),
@@ -8786,7 +8800,7 @@ export async function convertMdToDocx(
   // Dirty-flag invariant #6: rIds must be sequential with no gaps.
   // rIdOffset reserved max slots for optional rels; now that all hasX flags are known,
   // compute actual fixed count and remap dynamic rIds to close any gap.
-  const actualFixedCount = 1 /* styles */ +
+  const actualFixedCount = templateRelCount + 1 /* styles */ +
     (state.hasList ? 1 : 0) +
     (state.hasComments ? 1 : 0) +
     (hasNotes ? 2 : 0) /* both footnotes + endnotes always included together */ +
@@ -8863,7 +8877,7 @@ export async function convertMdToDocx(
 
   // Always use generated settings.xml to guarantee compatibilityMode >= 15
   // (template settings.xml may have compatibilityMode < 15, causing "unreadable content" errors)
-  zip.file('word/settings.xml', settingsXml(state.rsid, hasNotes, hasNotes, hasThreadedComments));
+  zip.file('word/settings.xml', settingsXml(state.rsid, hasNotes, hasNotes, hasThreadedComments, templateSections?.evenAndOddHeaders));
   zip.file('word/webSettings.xml', webSettingsXml());
 
   // Always include fontTable.xml
@@ -9017,6 +9031,15 @@ export async function convertMdToDocx(
     zip.file('word/' + mediaPath, data);
   }
 
+  // The template's headers and footers, after the parts export writes,
+  // whose names they then don't take
+  const extensionTypes = new Map<string, string>([['rels', 'application/vnd.openxmlformats-package.relationships+xml'], ['xml', 'application/xml']]);
+  for (const ext of state.imageExtensions) {
+    const ct = getImageContentType(ext);
+    if (ct) extensionTypes.set(ext.toLowerCase(), ct);
+  }
+  const templateCopy = templateSections && addTemplateSectionParts(zip, templateSections, state.nextImageDocPrId, extensionTypes);
+
   zip.file('[Content_Types].xml', contentTypesXml({
     hasList: state.hasList,
     hasComments: state.hasComments,
@@ -9029,6 +9052,8 @@ export async function convertMdToDocx(
     hasCommentsExtensible,
     hasPeople,
     imageExtensions: state.imageExtensions.size > 0 ? state.imageExtensions : undefined,
+    templateDefaults: templateCopy?.defaults,
+    templateOverrides: templateCopy?.overrides,
   }));
   zip.file('_rels/.rels', relsXml(hasCustomProps));
   zip.file('word/_rels/document.xml.rels', documentRelsXml({
@@ -9043,6 +9068,7 @@ export async function convertMdToDocx(
     hasCommentsExtensible,
     hasPeople,
     imageRelationships: state.imageRelationships.size > 0 ? state.imageRelationships : undefined,
+    templateRelationships: templateCopy?.relationships,
   }));
 
   // Check for comment range markers without corresponding bodies
