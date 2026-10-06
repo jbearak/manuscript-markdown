@@ -1868,13 +1868,15 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
       }
     }
 
-    // Read w:lvlOverride → w:startOverride
+    // Read w:lvlOverride → w:startOverride. One with nothing in it starts
+    // its level at 0, as Word numbers it (tdf#153104), and as export reads
+    // a template's (see templateListLevels in md-to-docx.ts)
     for (const lvlOverrideNode of findAllDeep(num, 'w:lvlOverride')) {
       const ilvl = getAttr(lvlOverrideNode, 'ilvl');
       const lvlOverride = asXmlNodes(lvlOverrideNode['w:lvlOverride']);
-      if (lvlOverride.length === 0) continue;
-      for (const startNode of findAllDeep(lvlOverride, 'w:startOverride')) {
-        const startVal = parseInt(getAttr(startNode, 'val'), 10);
+      const starts = lvlOverride.every(node => '#text' in node) ? [0]
+        : findAllDeep(lvlOverride, 'w:startOverride').map(startNode => parseInt(getAttr(startNode, 'val'), 10));
+      for (const startVal of starts) {
         if (!isNaN(startVal)) instance.overrides.set(ilvl, startVal);
         if (!isNaN(startVal) && startVal !== 1) {
           if (!startOverrides.has(numId)) startOverrides.set(numId, new Map());
