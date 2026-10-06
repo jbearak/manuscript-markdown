@@ -934,15 +934,16 @@ function createMarkdownIt(): MarkdownIt {
       }
     }
   });
-  // A task's box takes the whitespace after it in the source, as GFM reads
-  // it there, but not a reference after that, as &#32;, as import writes the
-  // whitespace an item's text starts with, which text_join joins to it. The
-  // length of the box and its whitespace goes in the meta of the last token
-  // of the run text_join joins, as above.
+  // A task's box takes the whitespace after it in the source, as
+  // parseTaskListMarker reads it, a no-break space too, but not a reference
+  // after that, as &#32;, as import writes the whitespace an item's text
+  // starts with, which text_join joins to it. The length of the box and its
+  // whitespace goes in the meta of the last token of the run text_join
+  // joins, as above.
   md.core.ruler.before('text_join', 'task_box_whitespace', state => {
     for (const block of state.tokens) {
       const children = block.type === 'inline' ? block.children ?? [] : [];
-      const box = children[0]?.type === 'text' ? /^\[[ xX]\][ \t]+/.exec(children[0].content) : null;
+      const box = children[0]?.type === 'text' ? /^\[[ xX]\]\s+/.exec(children[0].content) : null;
       if (!box || children[1]?.type !== 'text_special') continue;
       let last = 0;
       while (children[last + 1]?.type === 'text' || children[last + 1]?.type === 'text_special') last++;

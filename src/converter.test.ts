@@ -2004,6 +2004,15 @@ describe('Task list round-trip', () => {
   });
 
   test.each([
+    ['a no-break space before an escape', '- [ ] \u00a0todo\\!', '☐ todo!'],
+    ['an em space before an escape', '- [ ] \u2003todo\\!', '☐ todo!'],
+    ['a no-break space before a reference', '- [ ] \u00a0&#32;todo', '☐  todo'],
+  ])('takes %s after a task item\'s box with the box, as it does without one', async (_name, md, word) => {
+    // An escape or a reference after it took only spaces and tabs as the box's
+    expect(await paragraphs((await convertMdToDocx(md)).docx)).toEqual([word]);
+  });
+
+  test.each([
     ['deleted', '- [ ] XX\n\n  c', 'del', '- [ ] &#32;&#32;{--\n\n  --}c', ['del: ☐   ', 'c']],
     ['inserted', '- [ ] XX\n\n  c', 'ins', '- [ ] &#32;&#32;{++\n\n  ++}c', ['ins: ☐   ', 'c']],
     ['deleted, before another item', '- [ ] XX\n- [ ] c', 'del', '- [ ] &#32;&#32;{--\n\n  --}\n- [ ] c', ['del: ☐   ', '☐ c']],
