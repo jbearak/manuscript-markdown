@@ -5845,6 +5845,37 @@ describe('Comments in notes', () => {
   ])('keeps %s', async (_name, md) => {
     expect(await roundTrip(md)).toBe(md);
   });
+
+  const body = (id: number, text: string, who = 'A') => '{#' + id + '>>@' + who + ' (2024-01-15 10:30) | ' + text + '<<}';
+  const overlapping = (first: number, text = 'A') => text + ' {#' + first + '}b {#' + (first + 1) + '}c{/' + first + '} d{/' + (first + 1) + '}.\n    '
+    + body(first, 'one') + '\n    ' + body(first + 1, 'two', 'B') + '\n';
+  const fence = '$' + '$';
+  /** The Word parts of docx a note or a comment shows in */
+  const wordParts = async (docx: Uint8Array) => {
+    const zip = await JSZip.loadAsync(docx);
+    return Promise.all(['word/document.xml', 'word/footnotes.xml', 'word/endnotes.xml', 'word/comments.xml']
+      .map(async part => (await zip.file(part)?.async('string'))?.replace(/ w14:\w+="[^"]*"| w:rsid\w*="[^"]*"/g, '')));
+  };
+
+  test.each([
+    ['a note\'s first paragraph', 'T.[^1]\n\n[^1]: ' + overlapping(1) + '\n    E.\n'],
+    ['a note\'s second paragraph of three', 'T.[^1]\n\n[^1]: A.\n\n    ' + overlapping(1, 'B') + '\n    F.\n'],
+    ['each of a note\'s paragraphs', 'T.[^1]\n\n[^1]: ' + overlapping(1) + '\n    ' + overlapping(3, 'E')],
+    ['a comment over two of a note\'s paragraphs', 'T.[^1]\n\n[^1]: {#1}A.\n\n    B.{/1}\n    ' + body(1, 'c') + '\n\n    C.\n'],
+    ['a comment with a reply', 'T.[^1]\n\n[^1]: A {#1}b {#2}c{/1} d{/2}.\n    ' + body(1, 'one') + '{>>@B (2024-01-15 11:30) | reply<<}\n    ' + body(2, 'two', 'B') + '\n\n    E.\n'],
+    ['a paragraph before a code block', 'T.[^1]\n\n[^1]: ' + overlapping(1) + '\n    ```js\n    x\n    ```\n'],
+    ['an equation', 'T.[^1]\n\n[^1]: A.\n\n    {#1}' + fence + '\n    x\n    ' + fence + '{/1}\n    ' + body(1, 'c') + '\n\n    B.\n'],
+    ['an endnote\'s first paragraph', '---\nnotes: endnotes\n---\n\nT.[^1]\n\n[^1]: ' + overlapping(1) + '\n    E.\n'],
+  ])('writes the bodies of comments in ID syntax in %s after their paragraph', async (_name, md) => {
+    // They went at the note's end, after all its paragraphs, as the
+    // document's go after their paragraph
+    const { docx } = await convertMdToDocx(md);
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(markdown).toBe(md);
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect(await wordParts(again)).toEqual(await wordParts(docx));
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
 });
 
 describe('A comment comments.xml has no body for', () => {
@@ -6030,7 +6061,7 @@ describe('Line breaks a backslash can\'t hold', () => {
     ['a heading', '# {#1}a {#2}b{/1} c{/2}\n{#1>>@A | x<<}\n{#2>>@A | y<<}\n', 'word/document.xml'],
     ['a quote\'s paragraph', '> {#1}a {#2}b{/1} c{/2}\n> {#1>>@A | x<<}\n> {#2>>@A | y<<}\n', 'word/document.xml'],
     ['a note\'s paragraph', 'T[^1]\n\n[^1]: {#1}a {#2}b{/1} c{/2}\n    {#1>>@A | x<<}\n    {#2>>@A | y<<}\n', 'word/footnotes.xml'],
-    ['a note\'s paragraph before another', 'T[^1]\n\n[^1]: {#1}a {#2}b{/1} c{/2}\n\n    d\n    {#1>>@A | x<<}\n    {#2>>@A | y<<}\n', 'word/footnotes.xml'],
+    ['a note\'s paragraph before another', 'T[^1]\n\n[^1]: {#1}a {#2}b{/1} c{/2}\n    {#1>>@A | x<<}\n    {#2>>@A | y<<}\n\n    d\n', 'word/footnotes.xml'],
   ])('keeps one that ends %s with comments\' bodies after it', async (_name, md, part) => {
     // The bodies' line end took it, as where an older export wrote one
     // there, but so did one in Word, which is <br> where they don't go after
@@ -10481,7 +10512,7 @@ describe('Code block round-trip', () => {
     ['a comment across its lines', [
       [/<w:r>(?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>/s, '<w:commentRangeStart w:id="0"/><w:r><w:t>XX</w:t></w:r>'],
       [/<w:r>(?:(?!<w:r>).)*?<w:t>YY<\/w:t><\/w:r>/s, '<w:r><w:t>YY</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>'],
-    ], '    {#1}XX\n\n    YY{/1}', '    {#1>>@A | c<<}\n'],
+    ], '    {#1}XX\n\n    YY{/1}\n    {#1>>@A | c<<}'],
     // Which ended the block, whose next lines took the next block's language
     ['an equation', [[/<w:t>XX<\/w:t><\/w:r>/, '<w:t>XX</w:t></w:r><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath>']], '    X&#88;$x$\n\n    YY'],
     // Which joins it to the paragraph before, whose deletion took the break

@@ -11767,7 +11767,16 @@ export function buildMarkdown(
       const bodyMerged = noteBodies.get(entry)!;
       // Render body, splitting on para/table markers for multi-paragraph footnotes
       const bodyParts: string[] = [];
-      const deferredAll: string[] = [];
+      // The comment bodies that go after each part, as after their
+      // paragraph in the body: those of a paragraph's comments go after the
+      // part that ends it (see endParagraph)
+      const partBodies: string[][] = [];
+      let paragraphBodies: string[] = [];
+      const endParagraph = () => {
+        if (paragraphBodies.length === 0 || bodyParts.length === 0) return;
+        (partBodies[bodyParts.length - 1] ??= []).push(...paragraphBodies);
+        paragraphBodies = [];
+      };
       let partStart = 0;
       // The text of a part, from partStart, which ends its paragraph. Word's
       // space or tab after the note's mark went on import (see
@@ -11820,8 +11829,9 @@ export function buildMarkdown(
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
             pushInline(inlinePart(part.text));
-            deferredAll.push(...part.deferredComments);
+            paragraphBodies.push(...part.deferredComments);
           }
+          endParagraph();
           paragraphPart = undefined;
           bodyParts.push(code.block);
           const sep = bodyMerged[code.end];
@@ -11835,8 +11845,9 @@ export function buildMarkdown(
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
             pushInline(inlinePart(part.text));
-            deferredAll.push(...part.deferredComments);
+            paragraphBodies.push(...part.deferredComments);
           }
+          endParagraph();
           partStart = bi + 1;
           paragraphPart = undefined;
         } else if (item.type === 'math' && item.display) {
@@ -11844,7 +11855,7 @@ export function buildMarkdown(
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
             pushInline(inlinePart(part.text, !!item.inParagraph));
-            deferredAll.push(...part.deferredComments);
+            paragraphBodies.push(...part.deferredComments);
           }
           const mathBlock = MATH_FENCE + '\n' + canonicalizeDisplayMathLatex(item.latex) + '\n' + MATH_FENCE;
           const commented = displayMathWithComments(item.revision ? wrapWithRevision(mathBlock, item.revision) : mathBlock, item);
@@ -11854,18 +11865,20 @@ export function buildMarkdown(
             const text = bodyParts[paragraphPart].replace(/(?<!\\) $/, '');
             bodyParts[paragraphPart] = text + (text.endsWith('\n') ? '' : '\n') + commented.block;
           } else {
+            if (!item.inParagraph) endParagraph();
             bodyParts.push(commented.block);
             paragraphPart = item.inParagraph ? bodyParts.length - 1 : undefined;
           }
-          deferredAll.push(...commented.bodies);
+          paragraphBodies.push(...commented.bodies);
           partStart = bi + 1;
         } else if (item.type === 'table') {
           // Flush preceding inline content
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
             pushInline(inlinePart(part.text));
-            deferredAll.push(...part.deferredComments);
+            paragraphBodies.push(...part.deferredComments);
           }
+          endParagraph();
           paragraphPart = undefined;
           const noteRawEmbedValue = noteRenderOpts?.embedDirectiveMapping?.get(String(tableIndex));
           if (noteRawEmbedValue) {
@@ -11932,25 +11945,24 @@ export function buildMarkdown(
       if (partStart < bodyMerged.length) {
         const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
         pushInline(inlinePart(part.text));
-        deferredAll.push(...part.deferredComments);
+        paragraphBodies.push(...part.deferredComments);
       }
       if (bodyParts.length === 0) {
         bodyParts.push('');
       }
+      endParagraph();
       const indent4 = (s: string) => s.split('\n').map(l => '    ' + l).join('\n');
+      // On the lines after the part, as in the body (see deferredComments)
+      const withBodies = (pi: number) => partBodies[pi] ? '\n' + partBodies[pi].map(l => indent4(l)).join('\n') : '';
       const first = bodyParts[0].replace(/^\s+/, '');
       if (first.includes('\n')) {
         // Block form: label on its own line, blank line, then indented body
-        output.push(`[^${entry.label}]:\n\n` + indent4(first));
+        output.push(`[^${entry.label}]:\n\n` + indent4(first) + withBodies(0));
       } else {
-        output.push(`[^${entry.label}]: ${first}`);
+        output.push(`[^${entry.label}]: ${first}` + withBodies(0));
       }
       for (let pi = 1; pi < bodyParts.length; pi++) {
-        output.push('\n\n' + indent4(bodyParts[pi]));
-      }
-      if (deferredAll.length > 0) {
-        output.push('\n');
-        output.push(deferredAll.map(l => indent4(l)).join('\n'));
+        output.push('\n\n' + indent4(bodyParts[pi]) + withBodies(pi));
       }
     }
   }
