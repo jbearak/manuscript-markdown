@@ -13252,6 +13252,26 @@ describe('A section at the end of the document', () => {
   });
 
   test.each([
+    ['<w:sectPr/>'],
+    ['<w:sectPr w:rsidR="00AB12CD"/>'],
+  ])('turns the page of a template whose properties are an empty element, %s, for a landscape section that ends the document', async (sectPr) => {
+    // The landscape page went inside the element's tag, which made the
+    // document's XML unreadable
+    const zip = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const at = xml.lastIndexOf('<w:sectPr');
+    zip.file('word/document.xml', xml.slice(0, at) + sectPr + xml.slice(xml.indexOf('</w:sectPr>', at) + '</w:sectPr>'.length));
+    const templateDocx = await zip.generateAsync({ type: 'uint8array' });
+    const md = 'A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n';
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    const out = await documentXml(docx);
+    expect(out.slice(out.lastIndexOf('<w:sectPr'))).toMatch(/^<w:sectPr\b[^>/]*><w:pgSz w:w="15840" w:h="12240" w:orient="landscape"\/><\/w:sectPr>\s*<\/w:body>/);
+    const md1 = (await convertDocx(docx)).markdown;
+    expect(strip(md1)).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(md1, { templateDocx })).docx)).markdown).toBe(md1);
+  });
+
+  test.each([
     ['a portrait section', 'A.\n\n<!-- portrait -->\n\nB.\n\n<!-- /portrait -->\n'],
     ['a landscape section', 'A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n'],
   ])('keeps the break of a tracked change\'s old properties in the template for %s that ends the document', async (_, md) => {

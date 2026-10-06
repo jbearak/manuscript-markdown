@@ -4108,12 +4108,30 @@ function withTemplateSectPrs(body: string, closingSectPr: string, sections?: Tem
   return { body, closingSectPr: withTemplate(closingSectPr) };
 }
 
+// A sectPr's page size, written as an empty element or with a closing tag
+const PG_SZ_RE = /<w:pgSz\b[^>]*?(?:\/>|>[\s\S]*?<\/w:pgSz>)/;
+// The first of a sectPr's children CT_SectPr puts after w:pgSz
+const AFTER_PG_SZ_RE = /<w:(?:pgMar|paperSrc|pgBorders|lnNumType|pgNumType|cols|formProt|vAlign|noEndnote|titlePg|textDirection|bidi|rtlGutter|docGrid|printerSettings|sectPrChange)\b/;
+
 /** Build the final body-level sectPr of a section a fence ends: the
- *  template's, if any, with its page turned to the fence's orientation, or
- *  else one of its own */
+ *  template's, if any, with its page turned to the fence's orientation, in
+ *  place of its w:pgSz, or where CT_SectPr puts one, as its other
+ *  properties stay, or else one of its own. Not in a tracked change's old
+ *  properties, w:sectPrChange, last, which hold a w:sectPr of their own. A
+ *  template's with no properties, an empty element, gets a closing tag for
+ *  the page to go before. */
 function fencedBodySectPrXml(landscape: boolean, pgSz: PageSize, margins: string, templateSectPr?: string, rsid?: string): string {
   const fencePgSz = landscape ? '<w:pgSz w:w="' + pgSz.h + '" w:h="' + pgSz.w + '" w:orient="landscape"/>' : '<w:pgSz w:w="' + pgSz.w + '" w:h="' + pgSz.h + '"/>';
-  if (templateSectPr && /<w:pgSz\b[^>]*\/>/.test(templateSectPr)) return templateSectPr.replace(/<w:pgSz\b[^>]*\/>/, () => fencePgSz);
+  if (templateSectPr) {
+    templateSectPr = templateSectPr.replace(/^(<w:sectPr\b[^>]*?)\/>$/, (_, open: string) => open + '></w:sectPr>');
+    const change = templateSectPr.indexOf('<w:sectPrChange');
+    const own = change === -1 ? templateSectPr.slice(0, templateSectPr.lastIndexOf('</w:sectPr>')) : templateSectPr.slice(0, change);
+    const page = PG_SZ_RE.exec(own);
+    if (page) return own.slice(0, page.index) + fencePgSz + templateSectPr.slice(page.index + page[0].length);
+    const after = own.search(AFTER_PG_SZ_RE);
+    const at = after === -1 ? own.length : after;
+    return templateSectPr.slice(0, at) + fencePgSz + templateSectPr.slice(at);
+  }
   return '<w:sectPr' + (rsid ? ' w:rsidR="' + rsid + '"' : '') + '>' + fencePgSz +
     '<w:pgMar ' + margins + '/>' +
     '<w:cols w:space="720"/></w:sectPr>';
