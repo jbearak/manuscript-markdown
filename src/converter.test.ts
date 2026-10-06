@@ -14980,3 +14980,55 @@ describe('Formatting Word shows on whitespace', () => {
     expect(strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown)).toBe(md);
   });
 });
+
+describe('HTML comments between Word runs', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n/, '');
+  const run = (text: string, rPr = '') => '<w:r>' + (rPr ? '<w:rPr>' + rPr + '</w:rPr>' : '') + '<w:t xml:space="preserve">' + text + '</w:t></w:r>';
+  /** A comment, as export writes one: a hidden run of its text after a
+   *  zero-width space */
+  const comment = (text: string) => '<w:r><w:rPr><w:vanish/></w:rPr><w:t xml:space="preserve">​' + text.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</w:t></w:r>';
+  /** The document export makes of `md`, with its run of XX as `runs` */
+  const withRuns = async (runs: string, md = 'XX') => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace(/<w:r>(?:(?!<w:r>).)*?<w:t[^>]*>XX<\/w:t><\/w:r>/s, runs);
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    return zip.generateAsync({ type: 'uint8array' });
+  };
+  /** The body as Word shows it: each run's text, but for hidden ones, with
+   *  its emphasis, highlight and style, and its equations and links */
+  const shown = async (docx: Uint8Array) => {
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const body = xml.slice(xml.indexOf('<w:body>'), xml.lastIndexOf('<w:sectPr'));
+    return [...body.matchAll(/<m:oMath\b|<w:hyperlink\b|<w:r>([\s\S]*?)<\/w:r>/g)]
+      .filter(([, inner]) => !inner?.includes('<w:vanish/>'))
+      .map(([r, inner]) => inner === undefined ? r : (inner.match(/<w:(?:b|i|highlight|rStyle)\b[^>]*>/g) ?? []).join('')
+        + [...inner.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map(m => m[1]).join(''))
+      .filter(Boolean);
+  };
+
+  test.each([
+    ['a $ before one with a $', run('A cost $') + comment('<!-- x$ -->') + run(' B'), 'A cost \\$<!-- x$ --> B'],
+    ['a $ before one with a $, at the paragraph\'s end', run('A cost $') + comment('<!-- x$ -->'), 'A cost \\$<!-- x$ -->'],
+    ['a $ before two, the second with a $', run('A $') + comment('<!-- x -->') + comment('<!-- y$ -->') + run(' B'), 'A \\$<!-- x --><!-- y$ --> B'],
+    ['a $ in italic before one with a $', run('A ') + run('cost $', '<w:i/>') + comment('<!-- x$ -->') + run(' B'), 'A *cost \\$*<!-- x$ --> B'],
+    ['an == before one with an ==', run('A ==a') + comment('<!-- x== -->') + run(' B'), 'A \\==a<!-- x== --> B'],
+    ['a citation\'s [@ before one with a ]', run('A [@doe2020t') + comment('<!-- ] -->') + run(' B'), 'A \\[@doe2020t<!-- ] --> B'],
+    ['a $ before one with a $, in a table\'s cell', run('A cost $') + comment('<!-- x$ -->') + run(' B'), '| a |\n| --- |\n| A cost \\$<!-- x$ --> B |', '| a |\n|---|\n| XX |'],
+    // Which a link's text reads past, as markdown-it does its label
+    ['a [ before one with a ], before ](b)', run('A [a') + comment('<!-- ] -->') + run('](b) B'), 'A \\[a<!-- ] -->](b) B'],
+    ['a [ before one with a [, before ](b)', run('A [a') + comment('<!-- [ -->') + run('](b) B'), 'A \\[a<!-- [ -->](b) B'],
+    ['a [ before one with ](c)', run('A [a') + comment('<!-- ](c) -->') + run(' B'), 'A [a<!-- ](c) --> B'],
+  ])('keeps %s as text', async (_name, runs, md, template = 'XX') => {
+    // The comment's text was left out of what the runs before it read
+    // after them, so they didn't escape the $, == or [ that export pairs
+    // with one in it: math, a highlight or a citation, as in $<!-- x$ -->
+    const docx = await withRuns(runs, template);
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(md + '\n');
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect(await shown(again)).toEqual(await shown(docx));
+    expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
+  });
+});
