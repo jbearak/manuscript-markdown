@@ -1751,7 +1751,9 @@ export function wordListCounter(defs: NumberingDefs, instances: NumberingInstanc
     if (!list) lists.set(instance.abstractNumId, list = { levels: [], restartsAfterBreak: false });
     if (instance.restartsAfterBreak) list.restartsAfterBreak = true;
     const override = (level: number) => used.has(numId + ':' + level) ? undefined : instance.overrides.get(String(level));
-    const start = (level: number) => override(level) ?? defs.get(numId)?.get(String(level))?.start ?? 1;
+    // A level with no w:start starts at 0, as Word numbers it (ECMA-376
+    // 17.9.25)
+    const start = (level: number) => override(level) ?? defs.get(numId)?.get(String(level))?.start ?? 0;
     const { levels } = list;
     for (let level = 0; level < ilvl; level++) {
       if (levels[level] !== undefined) continue;

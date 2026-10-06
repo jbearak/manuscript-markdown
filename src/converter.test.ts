@@ -1315,6 +1315,12 @@ describe('Ordered list numbering', () => {
     ['a numbered list after a bulleted one with a sentinel', '- b\n\n<!-- no-indent -->\n1. c', undefined],
     ['nested lists', '1. a\n   1. x\n   2. y\n2. b\n   1. z', undefined],
     ['a list that starts at 3', '1. a\n\nP.\n\n3. c', undefined],
+    // Whose start of 0 read as none, so it started at 1
+    ['a list that starts at 0', '0. a\n1. b', undefined],
+    ['a list that starts at 0 after another', '1. a\n\nP.\n\n0. c\n1. d', undefined],
+    ['a sublist that starts at 0', '1. a\n\n   0. x\n   1. y', undefined],
+    ['a sublist that starts at 0 in a bullet', '- a\n\n  0. x\n  1. y', undefined],
+    ['a list and its sublist that start at 0', '0. a\n\n   0. x', undefined],
     ['a list after another delimiter that goes on', '1. a\n\n2) b', '1. a\n\n<!-- -->\n\n2. b'],
     ['a sublist after a comment', '1. parent\n   1. a\n\n   <!-- -->\n\n   1. b', undefined],
     ['sentinels around a quote in an item', '<!-- no-indent -->\n1. a\n\n   > q\n2. b\n\nP.\n\n<!-- indent -->\n1. c', undefined],
@@ -1323,6 +1329,13 @@ describe('Ordered list numbering', () => {
     // Markdown starts each list over; Word has to as well
     expect(await roundTrip(md)).toBe(back ?? md);
     expect(await roundTrip(back ?? md)).toBe(back ?? md);
+  });
+
+  test('starts a list at 0 in Word where the Markdown does', async () => {
+    const { docx } = await convertMdToDocx('0. a\n1. b');
+    const numbering = await (await JSZip.loadAsync(docx)).file('word/numbering.xml')!.async('string');
+    const [numId] = numIdsOf(await documentXml(docx));
+    expect(numbering).toMatch(new RegExp('<w:num w:numId="' + numId + '"[^>]*>[^]*?<w:lvlOverride w:ilvl="0"><w:startOverride w:val="0"/>'));
   });
 
   test('gives no warning for the comment between two sublists', async () => {
@@ -1364,6 +1377,21 @@ describe('Ordered list numbering', () => {
     zip.file('word/document.xml', xml.replace(/<w:numId w:val="\d+"\/>/g, '<w:numId w:val="' + first + '"/>'));
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
     expect(markdown).toBe('1. a\n2. b\n\nPara.\n\n3. c');
+  });
+
+  test.each([
+    ['a list', '1. a\n2. b', '0. a\n1. b'],
+    ['a list and its sublist', '1. a\n\n   1. x\n   2. y', '0. a\n\n   0. x\n   1. y'],
+  ])('numbers %s whose levels have no w:start from 0, as Word does', async (_name, md, expected) => {
+    // It numbered them from 1, which Word shows only where w:start says so
+    const { docx } = await convertMdToDocx(md);
+    const zip = await JSZip.loadAsync(docx);
+    const numbering = await zip.file('word/numbering.xml')!.async('string');
+    expect(numbering).toContain('<w:start w:val="1"/>');
+    zip.file('word/numbering.xml', numbering.replace(/<w:start w:val="1"\/>/g, ''));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe(expected);
+    expect(await roundTrip(markdown)).toBe(markdown);
   });
 
   test('keeps apart two lists Word numbers separately', async () => {
