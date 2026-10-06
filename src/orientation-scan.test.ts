@@ -235,6 +235,21 @@ describe('scanOrientationDirectives', () => {
     });
   });
 
+  it.each([
+    ['an insertion of two paragraphs', 'A\n\n{++B\n\n<!-- landscape -->\n\nC++}\n\nD', []],
+    ['a comment of two paragraphs', 'A\n\n{>>B\n\n<!-- landscape -->\n\nC<<}\n\nD', []],
+    ['a deletion of two paragraphs, with a close after it', 'A\n\n{--B\n\n<!-- landscape -->\n\nC--}\n\n<!-- /landscape -->\n\nD', ['orphaned']],
+  ])('reads a directive on a line of its own in %s as its text, as export does', async (_, text, kinds) => {
+    // Export reads the span's paragraphs as one, so the comment is no block
+    // of its own, but the scan read it as an opener
+    expect(scanOrientationDirectives(text).map(f => f.kind)).toEqual(kinds);
+    const { convertMdToDocx } = await import('./md-to-docx');
+    const { docx, warnings } = await convertMdToDocx(text);
+    expect(warnings.filter(w => w.includes('landscape'))).toHaveLength(kinds.length);
+    const JSZip = (await import('jszip')).default;
+    expect(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).not.toContain('</w:sectPr></w:pPr>');
+  });
+
   it('enforces single active orientation', () => {
     // landscape open then portrait open — portrait is nested because landscape is active.
     // The scanner keeps the original opener (landscape), so /portrait is crossed

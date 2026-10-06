@@ -1,6 +1,7 @@
 import MarkdownIt from 'markdown-it';
 import type Token from 'markdown-it/lib/token.mjs';
 import { computeLineStarts } from './code-regions';
+import { LINE_PLACEHOLDER, PARA_PLACEHOLDER, preprocessCriticMarkup } from './critic-markup';
 import { htmlBlockKind, listItemHtmlBlock } from './html-blocks';
 import { preprocessBlocks } from './block-preprocess';
 
@@ -48,19 +49,27 @@ const NOTE_CONTINUATION_RE = /^(?: {4}|\t)/;
  * one in fenced or indented code, in a paragraph, or in an HTML block with
  * more in it, which export keeps as text or a comment, nor the first block of
  * a list item, which is the item's text, nor one in a quote, which keeps it as
- * a comment. In a note's body, `inNote`, one at its top level is the note's,
- * which has no sections. `lineOffset` gives the offset in the scanned text of
- * a line of `source`, from which the directive is found.
+ * a comment, nor one in a CriticMarkup span, which is the span's text. In a
+ * note's body, `inNote`, one at its top level is the note's, which has no
+ * sections. `lineOffset` gives the offset in the scanned text of a line of
+ * `source`, from which the directive is found.
  */
 function blockDirectives(source: string, text: string, lineOffset: (line: number) => number, inNote: boolean): Directive[] {
   const tokens: Token[] = [];
   // The block parser alone, which reads a carriage return as a line end, as
   // markdown-it's core does, over the lines export reads, after its grid
   // tables, quotes and LaTeX environments, as a grid table's placeholder,
-  // which ends a list it was indented in, with the line of `source` each
-  // comes from
+  // which ends a list it was indented in, with a CriticMarkup span's line
+  // ends in its placeholders; `starts` has the line of the preprocessed
+  // blocks each one starts, and `blocks.lines` the line of `source` each of
+  // those comes from (see extractFootnoteDefinitions in md-to-docx.ts)
   const blocks = preprocessBlocks(source.replace(/\r\n?/g, '\n'));
-  blockParser.block.parse(blocks.output, blockParser, {}, tokens);
+  const parsed = preprocessCriticMarkup(blocks.output, false);
+  const starts = [0];
+  for (const line of parsed.split('\n')) {
+    starts.push(starts[starts.length - 1] + line.split(LINE_PLACEHOLDER).length + 2 * (line.split(PARA_PLACEHOLDER).length - 1));
+  }
+  blockParser.block.parse(parsed, blockParser, {}, tokens);
   const directives: Directive[] = [];
   // The open list items and quotes, an item with whether a block that ends
   // its text, or one after it, came yet (see extractListItems in md-to-docx.ts)
@@ -86,7 +95,7 @@ function blockDirectives(source: string, text: string, lineOffset: (line: number
     const m = DIRECTIVE_BLOCK_RE.exec(token.content.trim());
     if (!m) continue;
     if (first || containers.some(container => !container.item)) continue;
-    DIRECTIVE_RE.lastIndex = lineOffset(blocks.lines[token.map[0]]);
+    DIRECTIVE_RE.lastIndex = lineOffset(blocks.lines[starts[token.map[0]]]);
     const found = DIRECTIVE_RE.exec(text);
     if (!found) continue;
     directives.push({
