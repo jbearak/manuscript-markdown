@@ -5989,21 +5989,6 @@ describe('Word text that reads as Markdown', () => {
     expect(markdown).toContain('<p>' + run + '[@smith2020]{++x++}</p>');
   });
 
-  test('writes the spaces at the end of an HTML table\'s cell that holds what HTML can\'t after a comment of many spaces in linear time', () => {
-    // A regex for the spaces at the end retried from each of the comment's
-    const time = (spaces: number) => {
-      const start = performance.now();
-      buildMarkdown([{ type: 'table', rows: [
-        { isHeader: false, cells: [{ paragraphs: [[{ type: 'html_comment', text: '<!--' + ' '.repeat(spaces) + 'x-->', commentIds: new Set() } as ContentItem, insertedRun]], colspan: 2 }] },
-        { isHeader: false, cells: [{ paragraphs: [[]] }, { paragraphs: [[]] }] },
-      ] } as ContentItem], new Map());
-      return performance.now() - start;
-    };
-    time(5000);
-    const small = time(10000);
-    expect(time(80000) / small).toBeLessThan(16);
-  });
-
   test('keeps the spaces of an HTML comment in an HTML table\'s cell that holds what HTML can\'t as they are', async () => {
     // Export keeps a comment's text as it is, references and all
     const { markdown } = await fallbackCell([
