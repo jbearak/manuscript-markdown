@@ -1961,6 +1961,13 @@ describe('Grid table preview', () => {
     expect(html).toContain('<th style="text-align:left">H1</th>');
     expect(html).toContain('<td style="text-align:right">B</td>');
   });
+
+  it('shows a grid table\'s lines in an HTML block as its text, as a pipe table\'s', () => {
+    // The grid table split the block, and its </div> closed the preview's
+    const html = renderWithPlugin('<div>\n<table><tr><td>a</td></tr></table>\n+---+\n| g |\n+===+\n| b |\n+---+\n</div>\n');
+    expect(html).toContain('<div data-line="0"><div>\n<table><tr><td>a</td></tr></table>\n+---+\n| g |\n+===+\n| b |\n+---+\n</div>\n</div>');
+    expect(html).not.toContain('<th>');
+  });
 });
 
 describe('Embed preview document resolution', () => {

@@ -11,7 +11,7 @@ import { isAbsolute, join, resolve } from 'path';
 import { parseBibtex, BibtexEntry } from './bibtex-parser';
 import { parseFrontmatter, maskFrontmatter, serializeFrontmatter, Frontmatter, noteTypeToNumber, type ColorScheme, type CustomStyleDef, parseColWidths, expandColWidths, colWidthsToPct } from './frontmatter';
 import { formatTableNumbers, parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping, type TableDigits, type TableDecimalMark, type TableDigitGrouping } from './table-number-format';
-import { tableContentsFingerprint, tableFirstRowText, type TableNumberFormat } from './table-metadata';
+import { tableContentsFingerprint, tableFirstRowText, tableIdentity, type TableIdentity, type TableNumberFormat } from './table-metadata';
 import { alertColorsByScheme, getDefaultColorScheme } from './alert-colors';
 import { ZoteroBiblData, zoteroStyleFullId } from './converter';
 import { isGfmDisallowedRawHtml, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from './gfm';
@@ -4084,6 +4084,7 @@ export interface DocxGenState {
   tableDigitGroupings: Map<number, string>;
   tableHtmlAround: Map<number, [string, string, string, string, string, string, string]>; // table index -> the HTML before and after it in its block, its first row and contents, the count of tables alike in both before it, its note's kind and ID, or '' in the body, and the count of tables alike in both export wrote in all
   tablesAlike: Map<string, number>; // a table's note, first row and contents -> the tables so far with all three
+  tableIdentities: TableIdentity[]; // table index -> its note, first row and contents, which import finds its settings by
   fontOverrides?: FontOverrides;       // document-level font overrides for table default resolution
   listIndent: 'tab' | 'spaces'; // indentation style for nested list items
   consecutiveReplyParaIds: Set<string>; // parent paraIds whose replies were in consecutive format
@@ -4147,16 +4148,18 @@ function recordTableMetadata(token: MdToken, state: DocxGenState): void {
   if (token.tableHtmlAround && /\S/.test(token.tableHtmlAround.join('')) && !state.warnings.includes(HTML_AROUND_TABLE_WARNING)) state.warnings.push(HTML_AROUND_TABLE_WARNING);
 }
 
-/** Records the HTML around a table in its block with the table's identity,
- *  which import finds the table by, to put the HTML back with no other, as
- *  one Word added or deleted would shift the tables' indices: its first
- *  row, as its cells' count and text, its text, as the Word table `xml`
- *  holds it, and the count of tables alike in both before it in the body
- *  or its note (`scope`), which import counts too, but for one it writes as
- *  its embed directive, whose HTML it doesn't write either, and, once all
- *  are written, the count of them all */
+/** Records a table's identity, which import finds its settings by, as its
+ *  format and font, which recordTableMetadata records by its index, as one
+ *  Word added or deleted would shift the tables' indices; and the HTML
+ *  around it in its block with its identity, to put the HTML back with no
+ *  other: its first row, as its cells' count and text, its text, as the
+ *  Word table `xml` holds it, and the count of tables alike in both before
+ *  it in the body or its note (`scope`), which import counts too, but for
+ *  one it writes as its embed directive, whose HTML it doesn't write
+ *  either, and, once all are written, the count of them all */
 function recordTableIdentity(token: MdToken, xml: string, state: DocxGenState, scope: string): void {
   const texts = wordTableTexts(xml);
+  state.tableIdentities[state.tableIndex] = tableIdentity(texts, scope);
   const firstRow = tableFirstRowText(texts[0] ?? []);
   const contents = tableContentsFingerprint(texts);
   const key = scope + '\n' + firstRow + '\n' + contents;
@@ -8020,10 +8023,13 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     else if (token.type !== 'list_item' && !token.listContinuation) lastTopItem = undefined;
     if (token.type === 'table') {
       recordTableMetadata(token, state);
+      // After a table with nothing between them in Word, as a directive's
+      // comment is none, an empty paragraph, as Word joins tables with none
+      // between them into one, which import reads as nothing
       const table = () => {
         const xml = generateTable(token, state, options, bibEntries, citeprocEngine);
         recordTableIdentity(token, xml, state, '');
-        return xml;
+        return (body.endsWith('</w:tbl>') ? '<w:p/>' : '') + xml;
       };
       // Table-only landscape: wrap with section breaks (skip if already in fence-based landscape)
       if (token.tableOrientation === 'landscape' && !state.inLandscapeSection && !state.inPortraitSection) {
@@ -8448,6 +8454,7 @@ export async function convertMdToDocx(
     tableDigitGroupings: new Map(),
     tableHtmlAround: new Map(),
     tablesAlike: new Map(),
+    tableIdentities: [],
     pipeTableAligned: new Map(),
     gridSourceColWidths: new Map(),
     fontOverrides,
@@ -8716,6 +8723,8 @@ export async function convertMdToDocx(
       } else {
         if (t.type === 'table') {
           recordTableMetadata(t, state);
+          // And after a table, an empty paragraph, as in the body
+          if (bodyXml.endsWith('</w:tbl>')) bodyXml += '<w:p>' + paragraphPPr + '</w:p>';
           const xml = generateTable(t, state, options, bibEntries, citeprocEngine);
           recordTableIdentity(t, xml, state, tableScope);
           bodyXml += xml;
@@ -8939,6 +8948,7 @@ export async function convertMdToDocx(
   customProps.push(...imageFormatProps(state.imageFormats));
   customProps.push(...noteImageFormatProps(state.noteImageFormats));
   customProps.push(...tableFormatProps(state.tableFormats));
+  if (state.tableIdentities.length > 0) customProps.push(...chunkCustomProps('MANUSCRIPT_TABLE_IDENTITIES_', JSON.stringify(state.tableIdentities)));
   if (state.tableHtmlAround.size > 0) {
     // The count of tables alike export wrote in all, which is known only now
     for (const around of state.tableHtmlAround.values()) around[6] = String(state.tablesAlike.get(around[5] + '\n' + around[2] + '\n' + around[3]) ?? 0);

@@ -7514,6 +7514,27 @@ describe('HTML around a table in its block', () => {
     expect(xml.slice(xml.indexOf('<w:tbl>'))).not.toContain('<w:sz w:val="22"/>');
   });
 
+  test('keeps a grid table\'s lines in a table\'s HTML block as the HTML after it, as a pipe table\'s', async () => {
+    // The grid table split the block, and Word showed its </div> as text
+    const md = '<div>\n' + table('a') + '\n+-----+\n| g   |\n+=====+\n| b   |\n+-----+\n</div>\n';
+    const { docx, warnings } = await convertMdToDocx(md);
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml.match(/<w:tbl>/g)?.length).toBe(1);
+    expect(xml).not.toContain('&lt;/div&gt;');
+    expect(warnings.some(warning => warning.startsWith('HTML around a table'))).toBe(true);
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(md);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps a grid table in a comment in the comment', async () => {
+    // Its placeholder went in the comment, and import wrote it as text
+    const md = '<!--\n+---+\n| a |\n+---+\n-->\n\nText.\n';
+    const markdown = await roundTrip(md);
+    expect(markdown).toBe(md);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
   test('puts the HTML around a table back with the same table after Word deletes one before it', async () => {
     // Another took the deleted table's, as the tables' indices shifted
     const md = '<div>\n<p>Table 1.</p>\n<table><tr><td>A</td></tr></table>\n</div>\n\nText.\n\n<div>\n<p>Table 2.</p>\n<table><tr><td>B</td></tr></table>\n</div>\n';
@@ -7526,7 +7547,7 @@ describe('HTML around a table in its block', () => {
 
   test.each([
     ['deletes a grid table before it', '+---+\n| P |\n+===+\n| p |\n+---+\n\n', (xml: string) => xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, ''), ''],
-    ['adds a table before it', '', (xml: string) => xml.replace('<w:tbl>', '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>New</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/><w:tbl>'), table('New') + '\n\n'],
+    ['adds a table before it', '', (xml: string) => xml.replace('<w:tbl>', '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>New</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/><w:tbl>'), '+-----+\n| New |\n+-----+\n\n'],
   ])('keeps a table HTML with the HTML around it on its lines where Word %s', async (_name, other, edit, added) => {
     // It took the format export wrote at its index, another table's, and
     // the HTML went around it as blocks, which the next export showed as text
@@ -7637,7 +7658,8 @@ describe('HTML around a table in its block', () => {
   test('writes a table after another in their HTML block as a block of its own where Word puts a paragraph between them', async () => {
     const zip = await JSZip.loadAsync((await convertMdToDocx('<div>\n' + table('a') + '\n<p>B</p>\n' + table('b') + '\n</div>\n')).docx);
     const xml = await zip.file('word/document.xml')!.async('string');
-    const between = xml.replace('</w:tbl><w:tbl>', '</w:tbl><w:p><w:r><w:t>Mid</w:t></w:r></w:p><w:tbl>');
+    // The paragraph export writes between the tables, with text in it
+    const between = xml.replace(/<\/w:tbl><w:p\b[^>]*\/><w:tbl>/, '</w:tbl><w:p><w:r><w:t>Mid</w:t></w:r></w:p><w:tbl>');
     expect(between).not.toBe(xml);
     zip.file('word/document.xml', between);
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
@@ -7792,7 +7814,7 @@ describe('HTML around a table in its block', () => {
     const xml = await zip.file('word/document.xml')!.async('string');
     zip.file('word/document.xml', xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, tbl => tbl.replace('>a<', '>z<') + '<w:p/>' + tbl));
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
-    expect(markdown.startsWith('<table>')).toBe(true);
+    expect(markdown.startsWith('+-----+\n| H   |\n+-----+\n| z   |\n+-----+\n\n<div>')).toBe(true);
     expect(markdown.slice(markdown.indexOf('<div>'))).toBe('<div><p>Cap</p>\n<table>\n  <tr>\n    <td>\n      <p>H</p>\n    </td>\n  </tr>\n  <tr>\n    <td>\n      <p>a</p>\n    </td>\n  </tr>\n</table>\n</div>\n');
   });
 
@@ -7856,7 +7878,7 @@ describe('HTML around a table in its block', () => {
     const xml = await zip.file('word/document.xml')!.async('string');
     zip.file('word/document.xml', xml.replace('<w:tbl>', /<w:tbl>[\s\S]*?<\/w:tbl>/.exec(added)![0] + '<w:p/><w:tbl>'));
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
-    expect(markdown.startsWith('<table>')).toBe(true);
+    expect(markdown.startsWith('| H | I |\n| --- | --- |\n| | a |\n\n<div>')).toBe(true);
     expect(markdown.slice(markdown.indexOf('<div>'))).toBe('<div><p>Cap</p>\n<table>\n  <tr>\n    <th>\n      <p>H</p>\n    </th>\n    <th>\n      <p>I</p>\n    </th>\n  </tr>\n  <tr>\n    <td>\n      <p>a</p>\n    </td>\n    <td>\n      <p></p>\n    </td>\n  </tr>\n</table>\n</div>\n');
   });
 
@@ -8168,6 +8190,110 @@ describe('HTML around a table in its block', () => {
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
     expect(markdown).toBe('<div>\n<p>Cap</p>\n\n<!-- table-font-size: 11 -->\n| h |\n| --- |\n| {++XX++} |\n\n</div>\n\nAfter.\n');
     expect(await roundTrip(markdown)).toBe(markdown);
+  });
+});
+
+describe('tables next to each other', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+  const parts = async (docx: Uint8Array) => {
+    const zip = await JSZip.loadAsync(docx);
+    return (await zip.file('word/document.xml')!.async('string')) + ((await zip.file('word/footnotes.xml')?.async('string')) ?? '');
+  };
+  const pipe = (text: string, indent = '') => [indent + '| ' + text + ' |', indent + '| --- |', indent + '| ' + text + text + ' |'].join('\n');
+
+  test.each([
+    ['two tables', pipe('a') + '\n\n' + pipe('b') + '\n'],
+    ['a table after one with a directive', pipe('a') + '\n\n<!-- table-font-size: 11 -->\n' + pipe('b') + '\n'],
+    ['two tables in a landscape section', '<!-- landscape -->\n' + pipe('a') + '\n\n' + pipe('b') + '\n<!-- /landscape -->\n\nAfter.\n'],
+    ['two tables in a note', 'Text[^1].\n\n[^1]: Note.\n\n' + pipe('a', '    ') + '\n\n' + pipe('b', '    ') + '\n'],
+    ['two tables in an HTML block', '<div>\n<table>\n  <tr>\n    <td>\n      <p>a</p>\n    </td>\n  </tr>\n</table>\n<table>\n  <tr>\n    <td>\n      <p>b</p>\n    </td>\n  </tr>\n</table>\n</div>\n'],
+    ['two tables in a note\'s HTML block', 'Text[^1].\n\n[^1]: Note.\n\n    <div>\n    <table>\n      <tr>\n        <td>\n          <p>a</p>\n        </td>\n      </tr>\n    </table>\n    <table>\n      <tr>\n        <td>\n          <p>b</p>\n        </td>\n      </tr>\n    </table>\n    </div>\n'],
+  ])('keeps %s apart in Word with a paragraph, which import reads as nothing', async (_name, md) => {
+    // Export wrote them with nothing between them, which Word joins
+    const { docx } = await convertMdToDocx(md);
+    const xml = await parts(docx);
+    expect(xml).not.toContain('</w:tbl><w:tbl>');
+    expect(xml).toMatch(/<\/w:tbl><w:p\b[^>]*(?:\/>|>(?:<w:pPr>(?:(?!<\/w:p>)[\s\S])*<\/w:pPr>)?<\/w:p>)<w:tbl>/);
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(md);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps tables a Word user kept apart with an empty paragraph apart', async () => {
+    // Import read them with a blank line between, which export wrote as
+    // tables with nothing between them
+    const zip = await JSZip.loadAsync((await convertMdToDocx('X')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const tbl = (text: string) => '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>' + text + '</w:t></w:r></w:p></w:tc></w:tr></w:tbl>';
+    zip.file('word/document.xml', xml.slice(0, xml.indexOf('<w:body>') + 8) + tbl('a') + '<w:p/>' + tbl('b') + xml.slice(xml.lastIndexOf('<w:sectPr')));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('+-----+\n| a   |\n+-----+\n\n+-----+\n| b   |\n+-----+\n');
+    expect(await parts((await convertMdToDocx(markdown)).docx)).not.toContain('</w:tbl><w:tbl>');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+});
+
+describe('a table\'s settings where Word adds or deletes a table before it', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  const resolver = { readFile: () => new TextEncoder().encode('H\na\n'), resolveRelative: (_base: string, relative: string) => relative };
+  const options = { embedResolver: resolver, documentPath: '/doc/paper.md' };
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md, options)).docx)).markdown);
+  const afterWord = async (md: string, edit: (xml: string) => string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md, options)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', edit(xml));
+    return strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+  };
+  const deleteFirst = (xml: string) => xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, '');
+  const addFirst = (xml: string) => xml.replace('<w:tbl>', '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>New</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/><w:tbl>');
+  const table = (text: string, attrs = '', indent = '') => ['<table' + attrs + '>', '  <tr>', '    <td>', '      <p>' + text + '</p>', '    </td>', '  </tr>', '</table>'].map(line => indent + line).join('\n');
+  const pipe = '| P |\n| --- |\n| p |\n\n';
+  const cases: [string, string, string][] = [
+    ['a font size and the HTML around it', pipe, '<div>\n<p>Cap</p>\n' + table('A', ' data-font-size="11"') + '\n</div>\n'],
+    ['its HTML format', pipe, table('A') + '\n'],
+    ['its directives', table('Z') + '\n\n', '<!-- table-font-size: 11 -->\n<!-- table-col-widths: 2 1 -->\n| P | Q |\n| --- | --- |\n| p | q |\n'],
+    ['its number format', pipe, '<!-- table-digits: 2 -->\n| A | B |\n| --- | --- |\n| x | 1.234 |\n'],
+    ['its grid table\'s columns', pipe, '+----------+-----+\n| G        | H   |\n+==========+=====+\n| g        | h   |\n+----------+-----+\n'],
+    ['its pipe table\'s aligned columns', table('Z') + '\n\n', '| Name | V   |\n|------|-----|\n| a    | b   |\n'],
+    ['its orientation', pipe, table('L', ' data-orientation="landscape"') + '\n\nAfter.\n'],
+    ['its embed directive', pipe, '<!-- embed: t.csv headers=1 -->\n\nAfter.\n'],
+    ['a note\'s table its font size', pipe, 'Text[^1].\n\n[^1]: Note.\n\n' + table('N', ' data-font-size="11"', '    ') + '\n'],
+  ];
+
+  test.each(cases)('keeps %s where Word deletes a table before it', async (_name, before, md) => {
+    // It took the settings export wrote at its index, the deleted table's
+    expect(await roundTrip(before + md)).toBe(before + md);
+    const markdown = await afterWord(before + md, deleteFirst);
+    expect(markdown).toBe(md);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each(cases)('keeps %s where Word adds a table before it, which takes none', async (_name, before, md) => {
+    // The added table took the settings export wrote at its index, and
+    // each after it the one's before it
+    const markdown = await afterWord(before + md, addFirst);
+    expect(markdown).toBe('+-----+\n| New |\n+-----+\n\n' + before + md);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps the settings and HTML around a table Word edits where it deletes a table before it', async () => {
+    // Its text, and the index, matched no table export wrote
+    const md = '<div>\n<p>Cap</p>\n<table data-font-size="11">\n  <tr>\n    <td>\n      <p>H</p>\n    </td>\n  </tr>\n  <tr>\n    <td>\n      <p>a</p>\n    </td>\n  </tr>\n</table>\n</div>\n';
+    const markdown = await afterWord(pipe + md, xml => deleteFirst(xml).replace('>a<', '>z<'));
+    expect(markdown).toBe(md.replace('<p>a</p>', '<p>z</p>'));
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('takes a table\'s settings by its index from a document that has no tables\' identities', async () => {
+    // As export wrote before it wrote them
+    const md = pipe + table('A', ' data-font-size="11"') + '\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const custom = await zip.file('docProps/custom.xml')!.async('string');
+    const without = custom.replace(/<property [^>]*name="MANUSCRIPT_TABLE_IDENTITIES_\d+"[^>]*>[\s\S]*?<\/property>/g, '');
+    expect(without).not.toBe(custom);
+    zip.file('docProps/custom.xml', without);
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(md);
   });
 });
 
