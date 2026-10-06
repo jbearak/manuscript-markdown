@@ -10066,6 +10066,18 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
   let lastBlockquoteLevel: number | undefined;
   let lastBlockquoteType: GfmAlertType | 'plain' | undefined;
   let lastBlockquoteListLevel: number | undefined;
+  // The items under one at `level` end, as at an item there, or at a
+  // paragraph or quote in the item, as buildMarkdown writes them, which
+  // nothing after nests in
+  const endItemsUnder = (level: number) => {
+    clearListContextsFromLevel(listContexts, level + 1);
+    for (const deeper of [...listTypesByLevel.keys()]) {
+      if (deeper > level) listTypesByLevel.delete(deeper);
+    }
+    for (const deeper of [...orderedCounters.keys()]) {
+      if (deeper > level) orderedCounters.delete(deeper);
+    }
+  };
 
   for (let i = 0; i < content.length; i++) {
     const item = content[i];
@@ -10080,13 +10092,7 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
       // A numbered heading is a heading, which ends a list, as buildMarkdown
       // writes it
       if (item.listMeta && !item.headingLevel) {
-        clearListContextsFromLevel(listContexts, item.listMeta.level + 1);
-        for (const level of [...listTypesByLevel.keys()]) {
-          if (level > item.listMeta.level) listTypesByLevel.delete(level);
-        }
-        for (const level of [...orderedCounters.keys()]) {
-          if (level > item.listMeta.level) orderedCounters.delete(level);
-        }
+        endItemsUnder(item.listMeta.level);
         const markerWidth = inferOrderedMarkerWidth(
           item.listMeta,
           orderedCounters,
@@ -10118,6 +10124,8 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
           listContexts.clear();
           listTypesByLevel.clear();
           orderedCounters.clear();
+        } else {
+          endItemsUnder(item.listContinuation.level);
         }
         const currentType: GfmAlertType | 'plain' = item.alertType || 'plain';
         // A quote nested in a list and one outside it are separate groups, as
@@ -10154,6 +10162,7 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
           const { indent } = continuationOf(context, listContexts);
           if (indent !== undefined) item.listContinuation.indent = indent;
         }
+        endItemsUnder(item.listContinuation.level);
         currentBlockquoteGroupIndex = undefined;
         lastBlockquoteLevel = undefined;
         lastBlockquoteType = undefined;

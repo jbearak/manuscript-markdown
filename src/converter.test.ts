@@ -2268,6 +2268,17 @@ describe('Blocks in list items', () => {
     // Its first cell's text was the item's
     expect(await roundTrip('- | x |\n  |---|\n  | 1 |\n')).toBe('- \n');
   });
+
+  test.each([
+    ['a paragraph', '1. a\n   1. x\n\n   text\n   > > > q\n'],
+    ['a quote', '1. a\n   1. x\n\n   > q\n\n   > > > r\n'],
+    ['a paragraph, in a bullet list', '- a\n  - x\n\n  text\n  > > q\n'],
+    ['a paragraph, after two sublists', '1. a\n   1. x\n      1. y\n\n   text\n   > > > q\n'],
+  ])('keeps a quote in Word\'s Quote style in an item after %s, which ends the sublists before it', async (_name, body) => {
+    // Indented as in the sublist, it went in it, at fewer levels
+    const md = '---\nblockquote-style: Quote\n---\n\n' + body;
+    expect(await roundTrip(md)).toBe(md);
+  });
 });
 
 describe('Lists nested in lists of the other kind', () => {
