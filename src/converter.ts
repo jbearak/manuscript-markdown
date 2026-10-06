@@ -2392,7 +2392,10 @@ function flankClass(code: number): number {
  * range's Markdown starts and ends one.
  */
 function resolveEmphasis(markdown: string): string {
-  if (!markdown.includes(EMPHASIS_CLOSE) && !markdown.includes(HIGHLIGHT_OPEN) && !markdown.includes(HIGHLIGHT_JOIN_OPEN)) return markdown;
+  // A highlight's close alone has its mark where a substitution's side
+  // kept it (see resolveSide)
+  if (!markdown.includes(EMPHASIS_CLOSE) && !markdown.includes(HIGHLIGHT_OPEN) && !markdown.includes(HIGHLIGHT_JOIN_OPEN)
+    && !markdown.includes(HIGHLIGHT_CLOSE)) return markdown;
   // Whitespace at a highlight's edge goes outside it, as before it held it,
   // next to an = outside it, as of the text, another highlight's == or a
   // comment's ==}, which navigation and the grammar read with the
@@ -5823,6 +5826,19 @@ function substitutionItemText(item: SubstitutionItem, precedingText: string, not
     : '$' + item.latex + '$';
 }
 
+/** A substitution's side, `markdown`, resolved apart (see resolveEmphasis),
+ *  but for the mark of the closing == of a highlight it ends with, which
+ *  lastVisibleChar reads past to the whitespace the highlight holds, as it
+ *  does in the rest of a paragraph, whose resolveEmphasis drops it. Text's
+ *  == has no mark. */
+function resolveSide(markdown: string): string {
+  const resolved = resolveEmphasis(markdown);
+  // eslint-disable-next-line no-control-regex
+  const close = /[\u0006\u000F](==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?)$/.exec(markdown)?.[1];
+  // Unless resolving dropped the highlight, as of whitespace alone
+  return close && resolved.endsWith(close) ? resolved.slice(0, -close.length) + HIGHLIGHT_CLOSE + close : resolved;
+}
+
 /** Whether `{~~old~>new~~}` reads back as these sides: CriticMarkup splits at
  *  the first ~> and ends at the first ~~}. */
 function substitutionHolds(oldText: string, newText: string): boolean {
@@ -5844,8 +5860,8 @@ function tryRenderSubstitution(
   if (deletion.type !== addition.type && (display(deletion) || display(addition))) return null;
   // Each side reads apart, so its emphasis resolves apart, and before the
   // check, as a mark hid the ~> of a struck >a: {~~~~>a~~~>b~~}
-  const oldText = resolveEmphasis(substitutionItemText(deletion, precedingText, noteLabels));
-  const newText = resolveEmphasis(substitutionItemText(addition, precedingText, noteLabels));
+  const oldText = resolveSide(substitutionItemText(deletion, precedingText, noteLabels));
+  const newText = resolveSide(substitutionItemText(addition, precedingText, noteLabels));
   if (oldText && newText && substitutionHolds(oldText, newText)) {
     return '{~~' + oldText + '~>' + newText + '~~}';
   }
@@ -5935,8 +5951,8 @@ function renderSubstitutionRun(
   const additions = k - start - deletions;
   if (deletions === 0 || additions === 0 || deletions + additions <= 2) return undefined;
   // Resolved apart, before the check (see tryRenderSubstitution)
-  const oldText = resolveEmphasis(sideText(start, start + deletions));
-  const newText = resolveEmphasis(sideText(start + deletions, k));
+  const oldText = resolveSide(sideText(start, start + deletions));
+  const newText = resolveSide(sideText(start + deletions, k));
   if (!oldText || !newText) return undefined;
   if (!substitutionHolds(oldText, newText)) return undefined;
   // Two inline equations in a row on one side would run their dollar signs
