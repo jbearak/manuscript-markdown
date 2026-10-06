@@ -13579,6 +13579,67 @@ describe('Highlights across runs', () => {
     expect(time(2 * size) / time(size)).toBeLessThan(3);
   }, 30000);
 
+  test('keeps a substitution from after an equation and an empty run before struck text resolving writes as <s>', () => {
+    // The run before the struck text was taken to write alike from each
+    // start, past the equation, after which its letter is a reference
+    const items = [
+      revised('>a', 'deletion', { strikethrough: true }), deletedMath('x'), revised('', 'deletion', { bold: true }), revised('c', 'deletion'),
+      revised('}.', 'deletion', { strikethrough: true }), revised('new', 'addition'),
+    ];
+    expect(buildMarkdown(items, new Map())).toBe('{--~~>a~~--}{--$x$--}{~~c<s>}.</s>~>new~~}');
+  });
+
+  test.each([
+    ['', '{--~~>a~~--}{--**x**--}{--~~>a~~--}{--**x**--}{++c++}'],
+    [' in a link', '[{--~~>a~~--}{--**x**--}{--~~>a~~--}{~~**x**~>c~~}](https://e.com)'],
+  ])('writes many deletions of struck text that starts with > between bold ones before an insertion%s in linear time', (link, end) => {
+    // Resolving writes each struck run's ~~ before its > as a ~>, which
+    // kept the starts before the last from a substitution only where all
+    // the runs before it wrote alike, as struck ones don't, or in a link,
+    // only up to the first, so each start built its sides again
+    const inLink = (item: ContentItem): ContentItem => (link ? { ...item, href: 'https://e.com', link: 1 } as ContentItem : item);
+    const items = (n: number) => [
+      ...Array.from({ length: n }, () => [revised('>a', 'deletion', { strikethrough: true }), revised('x', 'deletion', { bold: true })]).flat(),
+      revised('c', 'addition'),
+    ].map(inLink);
+    const time = (n: number) => {
+      const content = items(n);
+      let fastest = Infinity;
+      for (let k = 0; k < 5; k++) {
+        const start = performance.now();
+        buildMarkdown(content, new Map());
+        fastest = Math.min(fastest, performance.now() - start);
+      }
+      return fastest;
+    };
+    expect(buildMarkdown(items(2), new Map())).toBe(end);
+    // About 2 in linear time, and 4 in time in the square of the deletions
+    expect(time(2000) / time(1000)).toBeLessThan(3);
+  }, 60000);
+
+  test('writes many deletions before an empty one and struck text that starts with > before an insertion in linear time', () => {
+    // The empty run writes nothing, so the run before the struck one is
+    // the last that writes, which was taken to be the empty one, so that
+    // no start was kept from a substitution and each built its sides again
+    const items = (n: number) => [
+      ...Array.from({ length: n }, () => [revised('d', 'deletion'), revised('d', 'deletion', { bold: true })]).flat(),
+      revised('', 'deletion', { italic: true }), revised('>a', 'deletion', { strikethrough: true }), revised('new', 'addition'),
+    ];
+    const time = (n: number) => {
+      const content = items(n);
+      let fastest = Infinity;
+      for (let k = 0; k < 5; k++) {
+        const start = performance.now();
+        buildMarkdown(content, new Map());
+        fastest = Math.min(fastest, performance.now() - start);
+      }
+      return fastest;
+    };
+    expect(buildMarkdown(items(2), new Map())).toBe('{--d--}{--**d**--}{--d--}{--**d**--}{----}{--~~>a~~--}{++new++}');
+    // About 2 in linear time, and 4 in time in the square of the deletions
+    expect(time(2000) / time(1000)).toBeLessThan(3);
+  }, 120000);
+
   test.each([
     ['a link\'s line break', '{--~~>a~~--}{~~[\\\n](https://e.com)<s>>b.</s>c~>new~~}\n'],
     ['an equation', '{--~~>a~~--}{--$x$--}{~~c<s>}.</s>~>new~~}\n'],

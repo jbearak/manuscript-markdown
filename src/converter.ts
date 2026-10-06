@@ -6540,12 +6540,33 @@ function substitutionHolds(oldText: string, newText: string): boolean {
 }
 
 /** Whether a side's item writes the same Markdown wherever the side
- *  starts before it, and ends with what resolving reads alike before the
- *  next: text that isn't a link's, highlighted, struck or at a line's end,
- *  as a run after an equation, which is written as a reference, or one
- *  whose closing ~~ may be written as </s>, isn't */
+ *  starts before it, after an item that changes none of it (see
+ *  readsAlikeBefore), and ends with what resolving reads alike before the
+ *  next: text that isn't a link's, highlighted, struck, empty or at a
+ *  line's end. One whose closing ~~ may be written as </s> isn't. */
 function writesAlike(item: ContentItem): boolean {
-  return item.type === 'text' && !item.href && !item.formatting.highlight && !item.formatting.strikethrough && !endsLine(item.text);
+  return item.type === 'text' && item.text !== '' && !item.href && !item.formatting.highlight && !item.formatting.strikethrough
+    && !endsLine(item.text);
+}
+
+/** Whether resolving reads the Markdown before the item at `i` of a side
+ *  that starts at `start` alike from each start up to the item: the
+ *  side's start, or the end of the item before, which is all of it that
+ *  resolving reads, where that one writes alike (see writesAlike) after an
+ *  item that leaves its end as it is. An equation, after which a letter is
+ *  written as a reference, or a line's end, after which spaces are, would
+ *  change all of an item of one letter or of spaces. Empty runs write
+ *  nothing, so it looks past them for both. */
+function readsAlikeBefore(segment: ContentItem[], start: number, i: number): boolean {
+  const empty = (k: number) => segment[k].type === 'text' && (segment[k] as ContentItem & { type: 'text' }).text === '';
+  let j = i - 1;
+  while (j >= start && empty(j)) j--;
+  if (j < start) return true;
+  if (!writesAlike(segment[j])) return false;
+  let k = j - 1;
+  while (k >= start && empty(k)) k--;
+  const earlier = k >= start ? segment[k] : undefined;
+  return !(earlier?.type === 'math' && !earlier.display) && !(earlier?.type === 'text' && endsLine(earlier.text));
 }
 
 /** The item whose Markdown holds the start of the last ~> or ~~} of a
@@ -6710,15 +6731,15 @@ function renderSubstitutionRun(
     // To the item the side's last ~> or ~~} starts in, as written before
     // resolving, which doesn't write one where there was none, or else as
     // resolving writes it, as where a mark it drops kept one apart, as in
-    // struck text that starts with >: ~~\u0003>a. That one only where the
-    // items before it write alike from any start (see writesAlike), as
-    // resolving it reads the Markdown before it.
+    // struck text that starts with >: ~~\u0003>a. That one only where
+    // resolving reads the Markdown before it alike from each start up to
+    // it (see readsAlikeBefore), as it does the item's delimiters by it.
     const at = Math.max(oldSide.lastIndexOf('~>'), oldSide.lastIndexOf('~~}'));
     let item = starts.length - 1;
     while (item > 0 && (starts[item] === undefined || starts[item] > at)) item--;
     if (at === -1) {
       item = resolvedCloserItem(oldSide, starts);
-      if (segment.slice(start, start + item).some(before => !writesAlike(before))) item = -1;
+      if (item !== -1 && !readsAlikeBefore(segment, start, start + item)) item = -1;
     }
     return declineTo(item === -1 ? start : start + item + 1);
   }
@@ -7309,15 +7330,23 @@ function linkGroup(
       // before holds, as dropping a run leaves the rest of the side as it
       // was, as renderSubstitutionRun declines them, rather than build the
       // side again from each. Where resolving wrote it, as of a struck >a,
-      // after a deletion of strikethrough or a ~, as the ~> or ~~} of the
-      // side, as a struck }'s, starts with a ~.
+      // past the run it starts in as resolving writes it, where the run
+      // before ends alike from each start, as all but struck text does,
+      // whose closing ~~ may be written as </s>, as a link's runs are
+      // written alike after any. Or else after a deletion of strikethrough
+      // or a ~, as the ~> or ~~} of the side, as a struck }'s, starts with
+      // a ~.
       if (oldText && newText && !newText.includes('~~}')) {
         const at = Math.max(oldSide.lastIndexOf('~>'), oldSide.lastIndexOf('~~}'));
         let retry = k + 1;
+        const resolvedRun = at === -1 ? resolvedCloserItem(oldSide, starts) : -1;
         if (at !== -1) {
           let run = starts.length - 1;
           while (run > 0 && starts[run] > at) run--;
           retry = k + run + 1;
+        } else if (resolvedRun !== -1 && (resolvedRun === 0
+            || !items[k + resolvedRun - 1].formatting.strikethrough && items[k + resolvedRun - 1].text !== '')) {
+          retry = k + resolvedRun + 1;
         } else {
           while (retry < additions && !items[retry - 1].formatting.strikethrough && !items[retry - 1].text.includes('~')) retry++;
         }
