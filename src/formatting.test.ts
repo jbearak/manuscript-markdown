@@ -1593,6 +1593,42 @@ describe('HTML table support for Expand/Compact Table', () => {
     expect(previewRows(reflowTable(html).newText)).toEqual(previewRows(html));
   });
 
+  // Import's writers' marks, as U+0007 for a bare link's, and other
+  // characters XML can't hold
+  const NOT_XML = [0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0xE, 0xF, 0xFFFE, 0xFFFF, 0x0, 0x8, 0x1F];
+  it.each(NOT_XML.flatMap(code => {
+    const ch = String.fromCharCode(code);
+    const hex = code.toString(16).toUpperCase().padStart(4, '0');
+    return [
+      // The parser reads &#0; as U+FFFD
+      ...code === 0 ? [] : [[hex, 'a reference in text', 'a&#' + code + ';b']],
+      [hex, 'text', 'a' + ch + 'b'],
+      [hex, 'bold text', '<b>a' + ch + '</b>b'],
+      [hex, 'code', '<code>a' + ch + '</code>'],
+      [hex, 'a link', '<a href="u">x' + ch + '</a>'],
+      [hex, 'a link\'s URL', '<a href="u' + ch + 'v">x</a>'],
+      [hex, 'a comment', 'a<!-- c' + ch + ' -->b'],
+    ];
+  }))('leaves a table as HTML with U+%s, which XML can\'t hold, in %s in a cell', (_hex, _name, cell) => {
+    // Import's writers took it for a mark, so Expand Table and Compact Table
+    // threw, wrote == or emphasis, or dropped it, and Markdown can't write it
+    // as a reference, which it reads as U+FFFD
+    const html = '<table><tr><th>h</th></tr><tr><td>' + cell + '</td></tr></table>';
+    expect(compactTable(html).newText).toBe(html);
+    expect(reflowTable(html).newText).toBe(html);
+  });
+
+  it.each([
+    ['a private-use character', '&#xE000;', '\uE000'],
+    ['an object replacement character', '&#xFFFC;', '\uFFFC'],
+  ])('Compact Table and Expand Table keep %s in an HTML cell, which Word\'s text holds', (_name, reference, ch) => {
+    const html = '<table><tr><th>h</th></tr><tr><td>a' + reference + '<br>' + reference + '<b>b' + reference + '</b> <a href="u">c' + reference + '</a></td></tr></table>';
+    const compacted = compactTable(html).newText;
+    expect(compacted).toBe('+-----------------+\n| h               |\n+=================+\n| a' + ch + '              |\n| ' + ch + '**b' + ch + '** [c' + ch + '](u) |\n+-----------------+');
+    expect(previewRows(compacted)).toEqual(previewRows(html));
+    expect(previewRows(reflowTable(compacted).newText)).toEqual(previewRows(html));
+  });
+
   it.each([
     ['at its end', '&#91;^1] *a* <a href="u">x<br></a>y', '+----------------+\n| h              |\n+================+\n| \\[^1] \\*a\\* [x |\n| ](u)y          |\n+----------------+'],
     ['in it', '<a href="u">x<br>z</a>', '+-------+\n| h     |\n+=======+\n| [x    |\n| z](u) |\n+-------+'],
