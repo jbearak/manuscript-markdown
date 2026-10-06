@@ -13169,6 +13169,33 @@ describe('Formatting Word shows on whitespace', () => {
     await roundTrip(runs, md);
   });
 
+  const CODE = '<w:rStyle w:val="CodeChar"/>';
+  test.each([
+    ['highlighted code', run('x') + run('a^b', CODE + HL) + run('y'), 'x==`a`\\\n`b`==y', HL],
+    ['highlighted code, at its end', run('x') + run('a^', CODE + HL) + run('y'), 'x==`a`\\\n==y', HL],
+    ['highlighted code, alone', run('x') + run('^', CODE + HL) + run('y'), 'x==\\\n==y', HL],
+    ['highlighted code, at the paragraph\'s end', run('x') + run('a^', CODE + HL), 'x==`a`<br>==', HL],
+    ['underlined code', run('x') + run('a^b', CODE + U) + run('y'), 'x<u>`a`\\\n`b`</u>y', U],
+    ['struck code, at its start', run('x') + run('^a', CODE + S) + run('y'), 'x<s>\\\n`a`</s>y', S],
+    ['highlighted code, in a tracked deletion', run('x') + revision('del', run('a^b', CODE + HL)) + run('y'), 'x{--==`a`\\\n`b`==--}y', HL],
+    // In the highlight of the spans an == splits the code into
+    ['highlighted code with an == in it', run('x') + run('a^x ==y', CODE + HL) + run('z'), 'x==`a`\\\n`x =`=={yellow}==`=y`=={yellow}z', HL],
+    ['underlined, highlighted code with an == in it, at its end', run('x') + run('x ==y^', CODE + U + HL) + run('z'), 'x<u>==`x =`=={yellow}==`=y`\\\n=={yellow}</u>z', HL + U],
+  ])('keeps the formatting of a line break in %s', async (_name, runs, md, rPr) => {
+    // The break went between spans of the code in their formatting each,
+    // which left it out, as ==`a`==\\\n==`b`==. Markdown can't hold code's
+    // style on it.
+    const docx = await withRuns(runs);
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(md + '\n');
+    const again = (await convertMdToDocx(markdown)).docx;
+    const xml = await (await JSZip.loadAsync(again)).file('word/document.xml')!.async('string');
+    expect(xml).toContain('<w:r><w:rPr>' + rPr + '</w:rPr><w:br/></w:r>');
+    // Export writes the break in a run of its own, without code's style,
+    // which reads back as the code's
+    expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
+  });
+
   test('writes <br> before the == of a highlight that ends the text before an equation', async () => {
     // == alone on the line before it read as a heading's underline
     const md = 'x==a<br>==\n$$\nE\n$$\n';

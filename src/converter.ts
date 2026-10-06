@@ -2279,9 +2279,13 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
   // Code is innermost — applied first
   if (fmt.code) {
     // A line break, which a code span can't hold, goes between spans of the
-    // text on each side of it
-    if (text.includes('\\\n')) {
-      return text.split('\\\n').map(part => part && markedFormatting(part, fmt, lineStart, after, blockStart, highlightOuter)).join('\\\n');
+    // text on each side of it, in the rest of the formatting around them,
+    // which Word shows on it too, as a highlight's, ==`a`\\\n`b`==, or in
+    // the highlight of the spans an == in the code splits it into (see
+    // below), ==`a`\\\n`x =`=={yellow}==`=y`=={yellow}
+    if (text.includes('\\\n') && !(fmt.highlight && text.includes('=='))) {
+      const spans = text.split('\\\n').map(part => part && markedFormatting(part, { ...DEFAULT_FORMATTING, code: true })).join('\\\n');
+      return wrapFormatting(spans, fmt, highlightOuter);
     }
     // Code keeps its formatting, which **`code`** and ==`code`== export.
     // An == in it would close the highlight, even in code, so it goes in
@@ -6265,6 +6269,19 @@ function codeSpansMeet(a: ContentItem, b: ContentItem): boolean {
   return a.type === 'text' && b.type === 'text' && a.formatting.code && !a.href && !b.href && formattingEquals(a.formatting, b.formatting);
 }
 
+/**
+ * Whether code and line breaks beside it, one with `formatting` and `text`
+ * and the other `next`, read as one run of code: Markdown can't hold code's
+ * style on a line break, so export writes the break between the code spans
+ * it splits the code at (see markedFormatting) in the rest of the code's
+ * formatting, as a highlight, which it shows on the break.
+ */
+function breaksJoinCode(formatting: RunFormatting, text: string, next: Extract<ContentItem, { type: 'text' }>): boolean {
+  const breaks = (t: string) => /^(?:\\\n)+$/.test(t);
+  return (formatting.code ? !next.formatting.code && breaks(next.text) : next.formatting.code && breaks(text))
+    && formattingEquals({ ...formatting, code: false }, { ...next.formatting, code: false });
+}
+
 /** A citation without keys as a run of its text, as export reads it back,
  *  highlighted as it is, which the runs beside it read and join */
 function keylessCitationRun(item: ContentItem): ContentItem {
@@ -6279,10 +6296,11 @@ function keylessCitationRun(item: ContentItem): ContentItem {
   };
 }
 
-/** Joins runs that read as one, formatted alike. Where export reads
- *  Markdown, code in a tracked change that no span of it can hold goes in
- *  runs of its pieces (see codePiecesInRevision). */
-function mergeConsecutiveRuns(items: ContentItem[]): ContentItem[] {
+/** Joins runs that read as one, formatted alike, and in Markdown
+ *  (`markdown`), code and the line breaks beside it (see breaksJoinCode).
+ *  Where export reads Markdown, code in a tracked change that no span of it
+ *  can hold goes in runs of its pieces (see codePiecesInRevision). */
+function mergeConsecutiveRuns(items: ContentItem[], markdown = readsMarkdown): ContentItem[] {
   const content = items.map(keylessCitationRun);
   const merged: ContentItem[] = [];
   let i = 0;
@@ -6297,6 +6315,8 @@ function mergeConsecutiveRuns(items: ContentItem[]): ContentItem[] {
     }
 
     let mergedText = item.text;
+    // Code's, where line breaks start the run (see breaksJoinCode)
+    let formatting = item.formatting;
     // The merged text's last two characters, which reading from the text,
     // which each merge flattens, would take time in the square of the runs
     let tail = item.text.slice(-2);
@@ -6305,7 +6325,7 @@ function mergeConsecutiveRuns(items: ContentItem[]): ContentItem[] {
     while (j < content.length) {
       const next = content[j];
       if (next.type !== 'text' ||
-          !formattingEquals(item.formatting, next.formatting) ||
+          !formattingEquals(formatting, next.formatting) && !(markdown && breaksJoinCode(formatting, mergedText, next)) ||
           item.href !== next.href ||
           item.link !== next.link ||
           // A link's line break before a line that would start a block
@@ -6316,19 +6336,20 @@ function mergeConsecutiveRuns(items: ContentItem[]): ContentItem[] {
           !revisionsEqual(item.revision, next.revision)) {
         break;
       }
+      if (next.formatting.code && !formatting.code) formatting = next.formatting;
       mergedText += next.text;
       tail = next.text.length >= 2 ? next.text.slice(-2) : (tail + next.text).slice(-2);
       j++;
     }
 
-    const pieces = readsMarkdown && item.revision && item.formatting.code && item.href === undefined
+    const pieces = readsMarkdown && item.revision && formatting.code && item.href === undefined
       ? codePiecesInRevision(mergedText, item.revision) : [mergedText];
     for (const text of pieces) {
       merged.push({
         type: 'text',
         text,
         commentIds: item.commentIds,
-        formatting: item.formatting,
+        formatting,
         href: item.href,
         ...(item.link !== undefined ? { link: item.link } : {}),
         ...(item.revision ? { revision: item.revision } : {}),
@@ -7584,7 +7605,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
           ? para.map(item => item.type === 'text' && item.formatting?.bold
             ? { ...item, formatting: { ...item.formatting, bold: false } }
             : item)
-          : para);
+          : para, false);
         const html = renderHtmlCellParagraph(items);
         if (html !== undefined) {
           lines.push(i3 + '<p>' + html + '</p>');
