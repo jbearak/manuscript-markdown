@@ -7247,6 +7247,46 @@ describe('HTML around a table in its block', () => {
     expect(markdown).toBe('Text.\n\n' + second);
   });
 
+  test.each([
+    ['on the next line', table('a') + '\n' + table('b') + '\n'],
+    ['in a div', '<div>\n' + table('a') + '\n' + table('b') + '\n</div>\n'],
+    ['with HTML between', '<div>\n<p>A</p>\n' + table('a') + '\n<p>B</p>\n' + table('b') + '\n<p>C</p>\n</div>\n'],
+    ['with a comment between', table('a') + '\n<!-- c -->\n' + table('b') + '\n'],
+    ['on the line of text after it', table('a') + ' x ' + table('b') + '\n'],
+    ['after spaces at its line\'s end', table('a') + '  \n' + table('b') + '\n'],
+    ['of three', table('a') + '\n' + table('b') + '\n' + table('c') + '\n'],
+    ['in a note', 'A[^1].\n\n[^1]: Note.\n\n    <div>\n' + table('a', '    ') + '\n' + table('b', '    ') + '\n    </div>\n'],
+  ])('keeps a table after another in their HTML block %s', async (_name, md) => {
+    // A blank line went before it, which split the block in two
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('warns of no HTML around tables in one block with none but the line end between them', async () => {
+    const { warnings } = await convertMdToDocx(table('a') + '\n' + table('b') + '\n');
+    expect(warnings.some(w => w.startsWith('HTML around a table'))).toBe(false);
+  });
+
+  test('writes a table after another in their HTML block as a block of its own where Word puts a paragraph between them', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('<div>\n' + table('a') + '\n<p>B</p>\n' + table('b') + '\n</div>\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const between = xml.replace('</w:tbl><w:tbl>', '</w:tbl><w:p><w:r><w:t>Mid</w:t></w:r></w:p><w:tbl>');
+    expect(between).not.toBe(xml);
+    zip.file('word/document.xml', between);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('<div>\n' + table('a') + '\n<p>B</p>\n\nMid\n\n' + table('b') + '\n</div>\n');
+  });
+
+  test('writes a table after another on the line of a comment that starts their block as a block of its own', async () => {
+    // The block ends on the comment's line, so the rest of the table there
+    // would be text after it
+    const md = '<!-- c --><table><tr><td><p>a</p></td></tr></table> <table><tr><td><p>b</p></td></tr></table>\n';
+    const markdown = await roundTrip(md);
+    expect(markdown).toBe('<!-- c --><table><tr><td><p>a</p></td></tr></table>\n\n' + table('b') + '\n');
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    expect(xml.match(/<w:tbl>/g)).toHaveLength(2);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
   test('keeps the HTML around tables alike in all their text in order', async () => {
     const md = '<p>Cap A</p>\n' + table('a') + '\n\n<p>Cap B</p>\n' + table('a') + '\n';
     expect(await roundTrip(md)).toBe(md);
