@@ -689,8 +689,8 @@ export class RunsAfter {
    *  delimiters, and each run's Markdown as markedFormatting writes it,
    *  escapes, whitespace and all, to the first space or / in it, which ends
    *  a host, and a space for anything else, as a tracked change's or a
-   *  comment's delimiters, or a highlighted note reference or citation
-   *  without keys, after its ==, at most `limit` characters in all. Where a
+   *  comment's delimiters, or a highlighted note reference, after its ==,
+   *  at most `limit` characters in all. Where a
    *  ~~ that opens a run may be written as a tag, which ends a host (see
    *  resolveEmphasis), as where it runs into the ~~ before it, the Markdown
    *  up to it as well. None where the runs aren't known. A highlight's text
@@ -728,9 +728,9 @@ export class RunsAfter {
       const item = items[k];
       if (item?.type !== 'text' || item.href || !revisionsEqual(item.revision, self.revision)
         || !commentSetsEqual(item.commentIds, self.commentIds) || (color && highlightColorOf(item) !== color)) {
-        // A highlighted note reference's or citation's ==, but for one with
-        // keys, which a space goes before (see citationSeparator)
-        const highlighted = !color && (item?.type === 'footnote_ref' || (item?.type === 'citation' && item.pandocKeys.length === 0))
+        // A highlighted note reference's ==, but not a citation's, which a
+        // space goes before (see citationSeparator)
+        const highlighted = !color && item?.type === 'footnote_ref'
           && !!highlightColorOf(item) && revisionsEqual(item.revision, self.revision) && commentSetsEqual(item.commentIds, self.commentIds);
         end = (highlighted ? '==' : '') + ' ';
         break;
@@ -5502,14 +5502,12 @@ function delimiterKinds(markdown: string): Set<string> {
  * (`literal`), which appendRevised keeps from meeting their kind in the other
  * span: in ` ` and `b` the backtick would pair with the code's and turn the
  * space into code. Text is read as import writes it, with * escaped, except
- * a bare URL's and a plain citation's. Code keeps its text literal, and so
- * does math, except for a backtick, which Markdown reads before math. Text
- * whose & would read with the other span's text as an entity, as &am and p;
- * would, keeps apart from it (appendRevised), and a plain citation with an
- * &, which Markdown reads as it is, never joins. A bare URL or email joins
- * only across whitespace, since linkify finds one only between boundaries,
- * and so does a plain citation, whose text may end in one. Images and
- * display math keep their own spans.
+ * a bare URL's. Code keeps its text literal, and so does math, except for a
+ * backtick, which Markdown reads before math. Text whose & would read with
+ * the other span's text as an entity, as &am and p; would, keeps apart from
+ * it (appendRevised). A bare URL or email joins only across whitespace,
+ * since linkify finds one only between boundaries. Images and display math
+ * keep their own spans.
  */
 function spanJoin(item: InlineRevisionItem): { join: SpanJoin; literal: Set<string> } {
   switch (item.type) {
@@ -5522,8 +5520,7 @@ function spanJoin(item: InlineRevisionItem): { join: SpanJoin; literal: Set<stri
       };
     }
     case 'citation':
-      if (item.pandocKeys.length > 0) return { join: 'seam', literal: new Set() };
-      return { join: item.text.includes('&') ? 'never' : 'space', literal: delimiterKinds(item.text) };
+      return { join: 'seam', literal: new Set() };
     case 'math':
       return { join: item.display ? 'never' : 'seam', literal: new Set(item.latex.includes('`') ? ['`'] : []) };
     case 'footnote_ref':
@@ -5726,7 +5723,7 @@ function highlightGroupEnd(segment: ContentItem[], start: number, end: number, c
   // An == in an item would close the highlight, even in code or an equation
   const source = (item: SubstitutionItem) =>
     item.type === 'text' ? item.text : item.type === 'math' ? item.latex
-      : item.type === 'citation' ? (item.pandocKeys.length > 0 ? item.pandocKeys.join('; ') : item.text) : '';
+      : item.type === 'citation' ? item.pandocKeys.join('; ') : '';
   const joins = (item: ContentItem) =>
     (item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || (item.type === 'math' && !item.display))
     && revisionsEqual(item.revision, first.revision) && commentSetsEqual(item.commentIds, commentIds)
@@ -5774,10 +5771,8 @@ function renderHighlightGroup(
       inner += '$' + item.latex + '$';
       mathEnd = inner.length;
     } else if (item.type === 'citation') {
-      if (item.pandocKeys.length > 0 && g === start) lead = citationSeparator(precedingMarkdown, item, last);
-      inner += item.pandocKeys.length > 0
-        ? (g === start ? '' : citationSeparator(inner, item)) + '[' + item.pandocKeys.join('; ') + ']'
-        : item.text;
+      if (g === start) lead = citationSeparator(precedingMarkdown, item, last);
+      inner += (g === start ? '' : citationSeparator(inner, item)) + '[' + item.pandocKeys.join('; ') + ']';
     }
   }
   return lead + wrapHighlight(inner, highlightColorOf(segment[start]));
@@ -5813,7 +5808,7 @@ function substitutionItemText(item: SubstitutionItem, precedingText: string, not
   if (color && (item.type === 'footnote_ref' || item.type === 'citation')) {
     const text = substitutionItemText({ ...item, formatting: undefined }, precedingText, noteLabels, after);
     // The separator before a citation goes before the highlight
-    const lead = item.type === 'citation' && item.pandocKeys.length > 0 && text.startsWith(' ') ? ' ' : '';
+    const lead = item.type === 'citation' && text.startsWith(' ') ? ' ' : '';
     return text.includes('==') ? text : lead + wrapHighlight(text.slice(lead.length), color);
   }
   if (item.type === 'footnote_ref') return footnoteRefText(item, noteLabels);
@@ -5822,11 +5817,7 @@ function substitutionItemText(item: SubstitutionItem, precedingText: string, not
     const text = markedFormatting(item.text, item.formatting, false, (after ?? RunsAfter.of('')).linkTo(item.href));
     return markdownLink(text, item.href);
   }
-  if (item.type === 'citation') {
-    return item.pandocKeys.length > 0
-      ? citationSeparator(precedingText, item) + '[' + item.pandocKeys.join('; ') + ']'
-      : escapeAfterHighlight(item.text, precedingText);
-  }
+  if (item.type === 'citation') return citationSeparator(precedingText, item) + '[' + item.pandocKeys.join('; ') + ']';
   return item.display
     ? MATH_FENCE + '\n' + canonicalizeDisplayMathLatex(item.latex) + '\n' + MATH_FENCE
     : '$' + item.latex + '$';
@@ -5972,9 +5963,24 @@ function sameCodeSpan(formatting: RunFormatting, text: string, next: Extract<Con
     && (kept === '' || !(text + next.text).includes('==')) && formattingEquals(rest(formatting), rest(next.formatting));
 }
 
+/** A citation without keys as a run of its text, as export reads it back,
+ *  highlighted as it is, which the runs beside it read and join */
+function keylessCitationRun(item: ContentItem): ContentItem {
+  if (item.type !== 'citation' || item.pandocKeys.length > 0) return item;
+  const highlight = item.formatting?.highlight ? { highlight: true, highlightColor: item.formatting.highlightColor } : {};
+  return {
+    type: 'text',
+    text: item.text,
+    commentIds: item.commentIds,
+    formatting: { ...DEFAULT_FORMATTING, ...highlight },
+    ...(item.revision ? { revision: item.revision } : {}),
+  };
+}
+
 /** Joins runs that read as one. In HTML, which keeps the rest of code's
  *  formatting, only runs formatted alike do (`markdown` false). */
-function mergeConsecutiveRuns(content: ContentItem[], markdown = true): ContentItem[] {
+function mergeConsecutiveRuns(items: ContentItem[], markdown = true): ContentItem[] {
+  const content = items.map(keylessCitationRun);
   const merged: ContentItem[] = [];
   let i = 0;
 
@@ -6508,14 +6514,7 @@ function renderInlineRange(
 
     // A citation in a comment's range goes in its anchor, below
     if (item.type === 'citation' && item.commentIds.size === 0) {
-      let citeText: string;
-      if (item.pandocKeys.length > 0) {
-        const citeSep = citationSeparator(out, item, lastSpan);
-        citeText = citeSep + '[' + item.pandocKeys.join('; ') + ']';
-      } else {
-        // Text a highlight's == before it would take, as a {1} for a color
-        citeText = escapeAfterHighlight(item.text, out, inSpanBefore(out, item, lastSpan));
-      }
+      const citeText = citationSeparator(out, item, lastSpan) + '[' + item.pandocKeys.join('; ') + ']';
       [out, lastSpan] = appendRevised(out, citeText, item, lastSpan);
       i++;
       continue;
@@ -6578,7 +6577,7 @@ function renderInlineRange(
       let j = i;
       // The space import adds before a citation that opens the range goes
       // before the range, which Word's doesn't cover
-      const lead = item.type === 'citation' && item.pandocKeys.length > 0 ? citationSeparator(out, item, lastSpan) : '';
+      const lead = item.type === 'citation' ? citationSeparator(out, item, lastSpan) : '';
 
       while (j < segment.length) {
         const seg = segment[j];
@@ -6616,9 +6615,7 @@ function renderInlineRange(
           continue;
         }
         if (seg.type === 'citation') {
-          const citeText = seg.pandocKeys.length > 0
-            ? citationSeparator(anchorText || out + lead, seg, anchorSpan) + '[' + seg.pandocKeys.join('; ') + ']'
-            : escapeAfterHighlight(seg.text, anchorText, inSpanBefore(anchorText, seg, anchorSpan));
+          const citeText = citationSeparator(anchorText || out + lead, seg, anchorSpan) + '[' + seg.pandocKeys.join('; ') + ']';
           [anchorText, anchorSpan] = appendRevised(anchorText, citeText, seg, anchorSpan);
           j++;
           continue;
@@ -6812,14 +6809,7 @@ function renderInlineRangeWithIds(
       }
       prevCommentIds = new Set(currentIds);
 
-      let citeText: string;
-      if (item.pandocKeys.length > 0) {
-        const citeSep = citationSeparator(out, item, lastSpan);
-        citeText = citeSep + '[' + item.pandocKeys.join('; ') + ']';
-      } else {
-        // Text a highlight's == before it would take, as a {1} for a color
-        citeText = escapeAfterHighlight(item.text, out, inSpanBefore(out, item, lastSpan));
-      }
+      const citeText = citationSeparator(out, item, lastSpan) + '[' + item.pandocKeys.join('; ') + ']';
       [out, lastSpan] = appendRevised(out, citeText, item, lastSpan);
       i++;
       continue;
@@ -9003,7 +8993,7 @@ function joinSpansAtTrackedBreaks(markdown: string, marks: TrackedBreakMarks): s
     // link, didn't take, nor joins here, ends it, as it would be lost there:
     // md-to-docx moves a break that opens a span with text in it out of the
     // span (see moveLeadingBreakOutsideCritic). Its mark tells its opener
-    // from text's, as a citation without keys writes its text as it is.
+    // from text's.
     const opener = !match[1] && match[2] ? before.slice(-3) : '';
     const closer = opener.slice(1) + '}';
     const after = match.index + match[0].length;
@@ -9090,7 +9080,10 @@ export function buildMarkdown(
               commentIdRemap.set(id, assignRemappedId(id));
             }
             (item.type === 'html_comment' ? overUnanchored : overAnchored).add(id);
-            const text = item.type === 'text' ? (anchorEnds.get(id) ?? '') + item.text : '';
+            // A citation without keys goes as text (see keylessCitationRun),
+            // though not yet in a note or a table's cell
+            const text = item.type === 'text' || item.type === 'citation' && item.pandocKeys.length === 0
+              ? (anchorEnds.get(id) ?? '') + item.text : '';
             if (text.includes('==}')) holdsAnchorEnd = true;
             anchorEnds.set(id, text.slice(-2));
           }
