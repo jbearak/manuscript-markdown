@@ -1520,6 +1520,18 @@ describe('Ordered list numbering', () => {
     expect(await roundTrip(md)).toBe(md);
   });
 
+  test('starts a level over at its list\'s start after a parent, after an instance\'s override started it', async () => {
+    // [MS-DOC] 2.4.6.4 starts a level over at its list's start (steps 3 and
+    // 8), which an instance's start override changes only with a level of
+    // its own (Determining List Formatting of a Paragraph, steps 6 and 7),
+    // and LibreOffice does the same. ECMA-376 Part 1's 2008 edition had the
+    // override apply wherever w:lvlRestart starts the level over, as docx4j
+    // does; its 2016 edition (§17.9.26) no longer says so
+    const md = '1. a\n\n   7. x\n2. b\n   1. y';
+    expect(await wordList(instance(6, [[1, 7]]), [[6, 0, 'a'], [6, 1, 'x'], [6, 0, 'b'], [6, 1, 'y']])).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
   test.each([
     // Word numbers a list of 1.1 and a top-level item as 1.1, 2
     ['its start', '', '- a\n  1. b\n\n2. c'],
