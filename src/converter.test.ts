@@ -11063,18 +11063,34 @@ describe('Track changes (CriticMarkup)', () => {
 
     test('writes many tracked marks in linear time', () => {
       // Each read the content on its sides through all the others, moved
-      // all the content after it, and read all the Markdown before it
+      // all the content after it, and read all the Markdown before it.
+      // Eight times the marks take about eight times as long, not
+      // sixty-four, however fast the machine is, where a bound on the time
+      // failed on slower runners. The fastest of three runs, which a pause
+      // for garbage collection doesn't slow.
       const revision = { type: 'deletion' as const, author: 'A', date: '' };
-      const content: ContentItem[] = [];
-      for (let i = 0; i < 128000; i++) {
-        content.push(i === 0 ? { type: 'para' } : { type: 'para', breakRevision: revision });
-        content.push({ type: 'text', text: 'a' + i, commentIds: new Set(), formatting: DEFAULT_FORMATTING });
-      }
-      const start = performance.now();
-      const markdown = buildMarkdown(content, new Map());
-      expect(performance.now() - start).toBeLessThan(3000);
-      expect(markdown.startsWith('a0{--\n\n--}a1{--\n\n--}a2')).toBe(true);
-    });
+      const contentOf = (marks: number) => {
+        const content: ContentItem[] = [];
+        for (let i = 0; i < marks; i++) {
+          content.push(i === 0 ? { type: 'para' } : { type: 'para', breakRevision: revision });
+          content.push({ type: 'text', text: 'a' + i, commentIds: new Set(), formatting: DEFAULT_FORMATTING });
+        }
+        return content;
+      };
+      const time = (marks: number) => {
+        const content = contentOf(marks);
+        let fastest = Infinity;
+        for (let run = 0; run < 3; run++) {
+          const start = performance.now();
+          buildMarkdown(content, new Map());
+          fastest = Math.min(fastest, performance.now() - start);
+        }
+        return fastest;
+      };
+      expect(buildMarkdown(contentOf(3), new Map())).toStartWith('a0{--\n\n--}a1{--\n\n--}a2');
+      const large = time(64000);
+      expect(large / time(8000)).toBeLessThan(24);
+    }, 30000);
 
     test('escapes the lines of a deletion of many paragraphs in linear time', () => {
       // Each line after a tracked break in the deletion's one run was read
