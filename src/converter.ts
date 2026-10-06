@@ -2091,7 +2091,7 @@ export function wrapWithFormatting(text: string, fmt: RunFormatting, lineStart =
  *  bold, italic or strikethrough marked for resolveEmphasis, and its
  *  highlight around the rest where `highlightOuter` (see joinsHighlight). */
 function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, after?: RunsAfter, blockStart = lineStart, highlightOuter = false): string {
-  if (!readsMarkdown) return htmlCellRun(text, fmt);
+  if (!readsMarkdown) return htmlCellRun(text, fmt, highlightOuter);
   let result = text;
 
   // Apply in reverse nesting order (innermost to outermost)
@@ -2162,11 +2162,18 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
 /** A run's text and formatting as HTML, as renderHtmlCellParagraph writes
  *  them, for a cell's paragraph it can't write: escapes, which export
  *  would read as text there, as would a line break's backslash, and spaces
- *  HTML would collapse, as references (see htmlLineCharacters). A
- *  highlight, which has no tag, goes as its ==, as text. */
-function htmlCellRun(text: string, fmt: RunFormatting): string {
-  let html = text.split('\\\n').map(line => line.split('').map((c, i) => c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;'
-    : c === '\t' ? '&#9;' : c === '\u00a0' ? '&nbsp;' : c === ' ' && line[i - 1] === ' ' ? '&#32;' : c).join('')).join('<br>');
+ *  HTML would collapse or drop as references (see htmlLineCharacters): one
+ *  after another, and one at an end of a line of the run that a <br> or
+ *  its formatting's tags keep from the paragraph's edges, which
+ *  keepParagraphWhitespace reads. A highlight, which has no tag, goes as
+ *  its ==, as text, around the rest where it joins its neighbours'
+ *  (`joins`). */
+function htmlCellRun(text: string, fmt: RunFormatting, joins = false): string {
+  const tagged = fmt.code || fmt.superscript || fmt.subscript || fmt.underline || fmt.strikethrough || fmt.italic || fmt.bold;
+  const lines = text.split('\\\n');
+  let html = lines.map((line, k) => line.split('').map((c, i) => c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;'
+    : c === '\t' ? '&#9;' : c === '\u00a0' ? '&nbsp;'
+      : c === ' ' && (line[i - 1] === ' ' || i === 0 && (tagged || k > 0) || i === line.length - 1 && (tagged || k < lines.length - 1)) ? '&#32;' : c).join('')).join('<br>');
   if (fmt.code) html = '<code>' + html + '</code>';
   if (fmt.superscript) html = '<sup>' + html + '</sup>';
   else if (fmt.subscript) html = '<sub>' + html + '</sub>';
@@ -2174,7 +2181,7 @@ function htmlCellRun(text: string, fmt: RunFormatting): string {
   if (fmt.strikethrough) html = '<s>' + html + '</s>';
   if (fmt.italic) html = '<i>' + html + '</i>';
   if (fmt.bold) html = '<b>' + html + '</b>';
-  return fmt.highlight ? wrapHighlight(html, markdownHighlightColor(fmt)) : html;
+  return fmt.highlight ? wrapHighlight(html, markdownHighlightColor(fmt), joins) : html;
 }
 
 /** `markdown`, a run's text, in the tags and delimiters of its formatting
