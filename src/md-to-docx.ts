@@ -8503,10 +8503,14 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   // Append body-closing sectPr (preserves template page layout). A section
   // that ends the document, with nothing after its break, has the body's
   // properties, as Word writes the last section's, and no break, which
-  // would leave the last section empty, a blank last page, with the page
-  // turned to its fence's orientation where the template's isn't. Not where
-  // the section is empty, whose break is all it has, nor where it's the only
-  // one, whose orientation import reads as the page's (see
+  // would leave the last section empty, a blank last page. Its page is
+  // turned to its fence's orientation where the template's isn't, and it
+  // starts on a new page, as its break did, where the template's last
+  // section starts on the same page, or an odd or even one: the template's
+  // w:type becomes nextPage in its place, and no w:type is a new page
+  // already, as a tracked change's old properties keep theirs. Not where
+  // the section is empty, whose break is all it has, nor where it's the
+  // only one, whose orientation import reads as the page's (see
   // extractDocumentContent in converter.ts).
   let closingSectPr = bodyClosingSectPrXml(pgSz, margins, state.templateSectPr, state.rsid);
   const lastBreak = body.endsWith(landscapeBreak) ? landscapeBreak : body.endsWith(portraitBreak) ? portraitBreak : undefined;
@@ -8516,6 +8520,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     body = beforeLastBreak;
     const landscape = lastBreak === landscapeBreak;
     if (landscape || isLandscapeSectPr(closingSectPr)) closingSectPr = fencedBodySectPrXml(landscape, pgSz, margins, state.templateSectPr, state.rsid);
+    const own = ownSectPrXml(closingSectPr);
+    closingSectPr = own.replace(/<w:type\b[^>]*?(?:\/>|>[\s\S]*?<\/w:type>)/, () => '<w:type w:val="nextPage"/>') + closingSectPr.slice(own.length);
   } else if (state.sectionBreakOrdinal > 0 && state.templateSectPr && isLandscapeSectPr(closingSectPr)) {
     // Import reads the last section's orientation from these properties, so
     // where they're a template's landscape page, which no fence set, a custom

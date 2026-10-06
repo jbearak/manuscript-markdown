@@ -13229,6 +13229,50 @@ describe('A section at the end of the document', () => {
     expect(strip((await convertDocx((await convertMdToDocx(md, { templateDocx })).docx)).markdown)).toBe(md);
   });
 
+  test.each([
+    ['a portrait section', 'continuous', 'A.\n\n<!-- portrait -->\n\nB.\n\n<!-- /portrait -->\n'],
+    ['a landscape section', 'continuous', 'A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n'],
+    ['a portrait section', 'oddPage', 'A.\n\n<!-- portrait -->\n\nB.\n\n<!-- /portrait -->\n'],
+  ])('starts %s that ends the document on a new page where the template\'s last section starts %s', async (_, type, md) => {
+    // It took the template's w:type with its other properties, which put
+    // it on the page before, or after a blank one
+    const zip = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const at = xml.lastIndexOf('<w:pgSz');
+    zip.file('word/document.xml', xml.slice(0, at) + '<w:type w:val="' + type + '"/>' + xml.slice(at));
+    const templateDocx = await zip.generateAsync({ type: 'uint8array' });
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    const out = await documentXml(docx);
+    const bodySectPr = out.slice(out.lastIndexOf('<w:sectPr'));
+    expect(bodySectPr).not.toContain(type);
+    expect(bodySectPr).toMatch(/<w:type w:val="nextPage"\/><w:pgSz\b/);
+    const md1 = (await convertDocx(docx)).markdown;
+    expect(strip(md1)).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(md1, { templateDocx })).docx)).markdown).toBe(md1);
+  });
+
+  test.each([
+    ['a portrait section', 'A.\n\n<!-- portrait -->\n\nB.\n\n<!-- /portrait -->\n'],
+    ['a landscape section', 'A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n'],
+  ])('keeps the break of a tracked change\'s old properties in the template for %s that ends the document', async (_, md) => {
+    // Where the template's own properties had no w:type, the old ones' became
+    // nextPage, which rejecting the change would have restored
+    const zip = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const at = xml.lastIndexOf('</w:sectPr>');
+    const change = '<w:sectPrChange w:id="1" w:author="A" w:date="2024-01-01T00:00:00Z"><w:sectPr><w:type w:val="continuous"/><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:sectPrChange>';
+    zip.file('word/document.xml', xml.slice(0, at) + change + xml.slice(at));
+    const templateDocx = await zip.generateAsync({ type: 'uint8array' });
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    const out = await documentXml(docx);
+    const bodySectPr = out.slice(out.lastIndexOf('<w:sectPr', out.indexOf('<w:sectPrChange')));
+    expect(bodySectPr.slice(0, bodySectPr.indexOf('<w:sectPrChange'))).not.toContain('<w:type');
+    expect(bodySectPr).toContain(change + '</w:sectPr>');
+    const md1 = (await convertDocx(docx)).markdown;
+    expect(strip(md1)).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(md1, { templateDocx })).docx)).markdown).toBe(md1);
+  });
+
   describe('with a landscape template', () => {
     const landscapeTemplate = async () => {
       const zip = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
