@@ -1,7 +1,9 @@
 import { keepParagraphEdgeWhitespace } from './html-entities';
 import { extractHtmlTables, type HtmlTableRun } from './html-table-parser';
+import MarkdownIt from 'markdown-it';
 import { HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import { separatorAlign, type TableAlign } from './grid-table-preprocess';
+import { LINE_PLACEHOLDER, PARA_PLACEHOLDER, preprocessCriticMarkup } from './critic-markup';
 
 export interface TextTransformation {
   newText: string;
@@ -421,12 +423,67 @@ export function parseAlignment(cell: string): ColumnAlignment {
   }
 }
 
+/** Reads where a document's tables are, as the preview and export do, with
+ * no inline parsing, which tables' places don't need */
+const tableBlockParser = new MarkdownIt({ html: true }).disable('inline');
+
+/** A table's lines in a document: its first, its separator's, and the one
+ * after its last */
+export interface TableLines {
+  start: number;
+  separator: number;
+  end: number;
+}
+
+/**
+ * Where a document's `lines` hold tables, as markdown-it reads them after
+ * CriticMarkup's preprocessing, as the preview and export do. Its
+ * placeholders hold a span's line ends, so a table's sample in a comment
+ * starts no table; `starts` has the source's line each parsed one starts.
+ */
+export function documentTables(lines: string[]): TableLines[] {
+  const parsed = preprocessCriticMarkup(lines.join('\n'), false);
+  const starts = [0];
+  for (const line of parsed.split('\n')) {
+    starts.push(starts[starts.length - 1] + line.split(LINE_PLACEHOLDER).length + 2 * (line.split(PARA_PLACEHOLDER).length - 1));
+  }
+  const tables: TableLines[] = [];
+  for (const token of tableBlockParser.parse(parsed, {})) {
+    // The delimiter row comes right after the header
+    if (token.type === 'table_open' && token.map) {
+      tables.push({ start: starts[token.map[0]], separator: starts[token.map[0] + 1], end: starts[token.map[1]] });
+    }
+  }
+  return tables;
+}
+
+/**
+ * Which of the lines from `start` to `end` of a document's `lines`, counting
+ * those that aren't blank, is the separator of the table of its `tables`
+ * they're in, or -1 where it's outside them; undefined where they're in no
+ * table, for parseTable to find the separator in their text. So a
+ * selection that starts at the separator, or below it, isn't read as a
+ * table of its own, whose second row, of dashes and colons too, would be
+ * taken for it, and lines before the table, as a paragraph's or an indented
+ * code block's, aren't taken for its header.
+ */
+export function tableSeparatorIndex(tables: TableLines[], lines: string[], start: number, end: number): number | undefined {
+  const table = tables.find(table => end >= table.start && start < table.end);
+  if (!table) return undefined;
+  if (table.separator < start || table.separator > end) return -1;
+  let index = 0;
+  for (let i = start; i < table.separator; i++) if (lines[i].trim().length > 0) index++;
+  return index;
+}
+
 /**
  * Parses markdown table text into structured data
  * @param text - The table text to parse
+ * @param separatorIndex - Which of its rows is the separator, or -1 for none,
+ *   where the caller knows from the table around the text
  * @returns ParsedTable object with rows and column widths, or null if not a valid table
  */
-export function parseTable(text: string): ParsedTable | null {
+export function parseTable(text: string, separatorIndex?: number): ParsedTable | null {
   const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
   
   if (lines.length === 0) {
@@ -438,9 +495,17 @@ export function parseTable(text: string): ParsedTable | null {
     return null;
   }
   
+  // The separator is the second row, as GFM reads a table, or the first,
+  // where the text starts at it, as a selection from it down does, unless
+  // the caller found it in the table around the text (see
+  // tableSeparatorIndex). Another row of dashes and colons is text, as the
+  // preview and export read it, which reflowing must keep, not rewrite as
+  // the separator, as | -:- | as | --- |, nor take the table's alignments from.
+  separatorIndex ??= lines.length > 1 && isSeparatorRow(lines[1]) ? 1 : isSeparatorRow(lines[0]) ? 0 : -1;
+
   // Parse each line into a TableRow
-  const rows: TableRow[] = lines.map(line => {
-    const isSep = isSeparatorRow(line);
+  const rows: TableRow[] = lines.map((line, index) => {
+    const isSep = index === separatorIndex;
     
     // Extract cells by splitting on unescaped | and removing first/last empty elements
     const parts = splitOnPipes(line);
@@ -842,8 +907,8 @@ function buildGridTable(mdRows: { cells: string[]; header: boolean }[], pad: boo
  * Each cell is trimmed and separated by ` | ` with no extra padding.
  * Separator row uses minimal `---` (with alignment colons preserved).
  */
-export function compactTable(text: string): TextTransformation {
-  const parsed = parseTable(text);
+export function compactTable(text: string, separatorIndex?: number): TextTransformation {
+  const parsed = parseTable(text, separatorIndex);
   if (parsed) {
     const { rows, columnWidths, alignments } = parsed;
     const columnCount = columnWidths.length;
@@ -905,8 +970,8 @@ export function compactTable(text: string): TextTransformation {
  * @param text - The table text to reflow
  * @returns TextTransformation with the reflowed table
  */
-export function reflowTable(text: string): TextTransformation {
-  const parsed = parseTable(text);
+export function reflowTable(text: string, separatorIndex?: number): TextTransformation {
+  const parsed = parseTable(text, separatorIndex);
   
   if (parsed) {
     const { rows, columnWidths, alignments } = parsed;
