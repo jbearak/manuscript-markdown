@@ -521,6 +521,10 @@ const HTML_COMMENTS = /^(?:<!--(?:(?!-->)[\s\S])*-->)+$/;
 // the spaces and tabs after it, and the line breaks after them that end it,
 // with the spaces and tabs between them
 const COMMENTS_BEFORE_BREAKS = /^( {0,3}(?:<!--(?:(?!-->)[\s\S])*-->[ \t]*)+)((?:\\\n[ \t]*)*\\\n)$/;
+// Each HTML comment and <br> in a paragraph's text, a comment as import
+// writes one: to its first -->, or empty, as <!--> and <!--->, which
+// markdownComment keeps as they are
+const COMMENT_OR_BREAK_TAGS = /<!--(?:-?>|(?:(?!-->)[\s\S])*-->)|<br\s*\/?>/gi;
 
 /**
  * An empty item at the end of a paragraph's items in `target`, from `from`,
@@ -11665,12 +11669,13 @@ export function buildMarkdown(
     // &#32;<br>, since export puts a block of comments' indent in the first
     // one's hidden run. Not where that run held it, as export wrote it, nor
     // before a comment a paragraph would read as text, as one with a blank
-    // line in it, which only the block holds.
+    // line in it, which only the block holds, or as more than it, as one
+    // that ends in ---> with the next.
     const htmlIndent = ownLine && atStart ? /^ {1,3}(?=<)/.exec(textOut)?.[0] ?? '' : '';
     const referenced = keepParagraphWhitespace(textOut, atStart, atEnd);
     const inline = () => (isLineBreakBlock(textOut) || HTML_COMMENTS.test(textOut.trim())
       && !mergedContent.slice(i, rendered.nextIndex).some(item => item.type === 'html_comment' && /^\s/.test(item.text)))
-      && readsAsInlineHtml(referenced);
+      && readsAsInlineHtml(referenced, referenced.match(COMMENT_OR_BREAK_TAGS) ?? []);
     // Whitespace alone before an equation in the paragraph keeps the space
     // export wrote for its line end as it is, which the math branch takes
     // off, as it does after other text, or it would gain one each round trip

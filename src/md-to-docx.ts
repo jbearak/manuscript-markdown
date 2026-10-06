@@ -738,14 +738,19 @@ export function readsAsParagraph(text: string): boolean {
   return tokens.length === 3 && tokens[0].type === 'paragraph_open' && tokens[0].map?.[1] === text.split('\n').length;
 }
 
-/** Whether export reads Markdown `text` as one paragraph of HTML tags and
- *  comments, each one inline, and whitespace, as &#32;<!-- c --><br>, not
- *  as text, as a comment with a blank line in it or that ends in ---> */
-export function readsAsInlineHtml(text: string): boolean {
+/** Whether export reads Markdown `text` as one paragraph of `tags`, HTML
+ *  tags and comments each read inline as one, and whitespace, as
+ *  &#32;<!-- c --><br>, not as text, as a comment with a blank line in it,
+ *  nor as other tags, as a comment that ends in ---> and the one after it,
+ *  which inline Markdown reads as one */
+export function readsAsInlineHtml(text: string, tags: string[]): boolean {
   citationTextMd ??= createMarkdownIt();
   const tokens = citationTextMd.parse(text, {});
-  return tokens.length === 3 && tokens[0].type === 'paragraph_open' && tokens[0].map?.[1] === text.split('\n').length
-    && (tokens[1].children ?? []).every(child => child.type === 'html_inline' || child.type === 'text' && !child.content.trim());
+  if (tokens.length !== 3 || tokens[0].type !== 'paragraph_open' || tokens[0].map?.[1] !== text.split('\n').length) return false;
+  const children = tokens[1].children ?? [];
+  const html = children.filter(child => child.type === 'html_inline');
+  return children.every(child => child.type === 'html_inline' || child.type === 'text' && !child.content.trim())
+    && html.length === tags.length && html.every((child, k) => child.content === tags[k]);
 }
 
 /** The HTML blocks export reads in Markdown `text`, not in a quote or list:
