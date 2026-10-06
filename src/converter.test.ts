@@ -10898,6 +10898,20 @@ describe('Highlights across runs', () => {
     expect(buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim()).toBe(md);
   });
 
+  test.each(['{red-}', '{-red}'])('puts a space before a citation after a highlight that ends in a space and text %s, which is no color', (text) => {
+    // It read the text as the highlight's color, and the space before it
+    // as the text before the citation, as with {x}, which is escaped
+    expect(buildMarkdown([{ type: 'para' }, run('Seen '), run('a ', { highlight: true }), run(text), citation()] as ContentItem[], new Map()).trim())
+      .toBe('Seen ==a ==' + text + ' [@doe2020]');
+  });
+
+  test('joins the highlights of runs formatted otherwise before text in braces that is no color', () => {
+    // It read the text as the next highlight's color, which no other had,
+    // and wrote two, as ==**a**====*b*=={red-}, as before {x}, escaped
+    expect(buildMarkdown([{ type: 'para' }, run('x '), run('a', { highlight: true, bold: true }), run('b', { highlight: true, italic: true }), run('{red-}')] as ContentItem[], new Map()).trim())
+      .toBe('x ==**a**<i>b</i>=={red-}');
+  });
+
   test.each([
     ['', [run('Seen'), citation({ highlight: true })], 'Seen ==[@doe2020]=='],
     [' in a substitution', [run('Seen'), run('x', {}, { ...inserted, type: 'deletion' }), citation({ highlight: true }, inserted)], 'Seen{~~x~> ==[@doe2020]==~~}'],
