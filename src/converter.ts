@@ -4934,6 +4934,8 @@ export async function extractDocumentContent(
     portraitBreakOrdinals?: Set<number>;
     /** The sections, by the ordinal of the break that ends each, a references marker before their opening fence starts */
     referencesBeforeSections?: Set<number>;
+    /** The last section, by the number of breaks before it, where its landscape page is the template's, which no fence set */
+    templatePageSections?: Set<number>;
     customStyles?: Record<string, CustomStyleDef>;
     /** Bookmark name → "noteKind:noteId" for resolving NOTEREF cross-reference fields. */
     footnoteCrossRefMap?: Map<string, string>;
@@ -5002,6 +5004,7 @@ export async function extractDocumentContent(
   let afterSectionBreak = false; // the last paragraph ended a section
   const portraitBreakOrdinals = options?.portraitBreakOrdinals;
   const referencesBeforeSections = options?.referencesBeforeSections;
+  const templatePageSections = options?.templatePageSections;
   // The tracked mark before the empty carrier that ended the section before,
   // which Markdown drops, unless this section's fence puts its opener there
   let markBeforeSection: RevisionInfo | undefined;
@@ -5029,6 +5032,20 @@ export async function extractDocumentContent(
       target.push({ type: fence === 'landscape' ? 'landscape_close' : 'portrait_close' });
     }
     sectionStartIndex = target.length;
+  };
+  // The fence of the section whose properties, `sectPrChildren`, are its
+  // break's, the `ordinal`th, or the body's: landscape where its page is,
+  // and portrait where export wrote a portrait fence's break
+  const sectionFenceOf = (sectPrChildren: XmlNode[], ordinal: number): 'landscape' | 'portrait' | undefined => {
+    const pgSzNode = sectPrChildren.find((c) => c['w:pgSz'] !== undefined);
+    let isLandscapeSect = false;
+    if (pgSzNode) {
+      const orient = getAttr(pgSzNode, 'orient');
+      const w = parseInt(getAttr(pgSzNode, 'w') || '0', 10);
+      const h = parseInt(getAttr(pgSzNode, 'h') || '0', 10);
+      isLandscapeSect = orient === 'landscape' || (w > 0 && h > 0 && w > h);
+    }
+    return isLandscapeSect ? 'landscape' : portraitBreakOrdinals?.has(ordinal) ? 'portrait' : undefined;
   };
 
   function walk(
@@ -5352,17 +5369,7 @@ export async function extractDocumentContent(
               if (sectPrNode && !inTableCell) {
                 const currentOrdinal = sectionBreakOrdinal++;
                 afterSectionBreak = true;
-                const sectPrChildren = asXmlNodes(sectPrNode['w:sectPr']);
-                const pgSzNode = sectPrChildren.find((c) => c['w:pgSz'] !== undefined);
-                let isLandscapeSect = false;
-                if (pgSzNode) {
-                  const orient = getAttr(pgSzNode, 'orient');
-                  const w = parseInt(getAttr(pgSzNode, 'w') || '0', 10);
-                  const h = parseInt(getAttr(pgSzNode, 'h') || '0', 10);
-                  isLandscapeSect = orient === 'landscape' || (w > 0 && h > 0 && w > h);
-                }
-                const fence = isLandscapeSect ? 'landscape' as const
-                  : portraitBreakOrdinals?.has(currentOrdinal) ? 'portrait' as const : undefined;
+                const fence = sectionFenceOf(asXmlNodes(sectPrNode['w:sectPr']), currentOrdinal);
                 if (paragraphCarriesContent(paraChildren)) {
                   // Word attaches the break to the section's last paragraph
                   // when nothing else carries it: read that paragraph as any
@@ -5655,6 +5662,19 @@ export async function extractDocumentContent(
   // goes on an empty one, as an empty paragraph after it would take it
   if (trackedParaMark?.target === content && trackedParaMark.end === content.length) {
     content.push({ type: 'para', breakRevision: trackedParaMark.revision });
+  }
+  // The last section's properties are the body's own, after its paragraphs,
+  // as Word writes a document that ends with a landscape section. Not a
+  // document of one section, whose orientation is its page's, as a
+  // template's, which no fence sets, nor a last section export gave a
+  // template's landscape page, as a custom property says, by the number of
+  // breaks before it, so one after a break Word adds is read as its page is.
+  const documentNode = asXmlNodes(parsed).find(node => node['w:document'] !== undefined);
+  const bodyNode = documentNode && asXmlNodes(documentNode['w:document']).find(node => node['w:body'] !== undefined);
+  const bodySectPr = bodyNode && asXmlNodes(bodyNode['w:body']).find(node => node['w:sectPr'] !== undefined);
+  if (bodySectPr && sectionBreakOrdinal > 0 && content.length > sectionStartIndex) {
+    const fence = templatePageSections?.has(sectionBreakOrdinal) ? undefined : sectionFenceOf(asXmlNodes(bodySectPr['w:sectPr']), sectionBreakOrdinal);
+    endSection(content, fence, sectionBreakOrdinal);
   }
   return { content, zoteroBiblData, imageEntries: imageFiles.entries.length > 0 ? imageFiles.entries : undefined, leadingBlankParagraphs };
 }
@@ -12680,6 +12700,7 @@ export async function convertDocx(
     portraitTableMapping,
     portraitBreaks,
     referencesBeforeSections,
+    templatePageSections,
     explicitTableFontSize,
     storedFieldOrder,
     htmlCommentAfterGapMapping,
@@ -12742,6 +12763,7 @@ export async function convertDocx(
     portraitTableMapping: extractPortraitTableMapping(zip),
     portraitBreaks: extractPortraitBreakOrdinals(zip),
     referencesBeforeSections: extractBreakOrdinals(zip, 'MANUSCRIPT_REFERENCES_BEFORE_SECTIONS_'),
+    templatePageSections: extractBreakOrdinals(zip, 'MANUSCRIPT_TEMPLATE_PAGE_SECTIONS_'),
     explicitTableFontSize: extractExplicitTableFontSize(zip),
     storedFieldOrder: extractFrontmatterFieldOrder(zip),
     htmlCommentAfterGapMapping: extractHtmlCommentAfterGapMapping(zip),
@@ -12819,7 +12841,7 @@ export async function convertDocx(
   const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, images: { relationships: fnRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: footnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts };
   const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, images: { relationships: enRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: endnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts };
 
-  const { content: docContent, zoteroBiblData, leadingBlankParagraphs } = await extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, relationshipMap: docRels, replyIds, commentBodies, imageRelationships: imageRels, imageFolder: options?.imageFolder, imageFiles, portraitBreakOrdinals: portraitBreaks ?? undefined, referencesBeforeSections: referencesBeforeSections ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined, styleLayouts });
+  const { content: docContent, zoteroBiblData, leadingBlankParagraphs } = await extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, relationshipMap: docRels, replyIds, commentBodies, imageRelationships: imageRels, imageFolder: options?.imageFolder, imageFiles, portraitBreakOrdinals: portraitBreaks ?? undefined, referencesBeforeSections: referencesBeforeSections ?? undefined, templatePageSections: templatePageSections ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined, styleLayouts });
   // The notes the document references, in its order, which are the ones it
   // shows; their images take names after its own, footnotes' first
   const refOrder = noteReferences(docContent);

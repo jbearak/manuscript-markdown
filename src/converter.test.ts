@@ -13166,6 +13166,85 @@ describe('A section at the start of the document', () => {
   });
 });
 
+describe('A section at the end of the document', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  const landscapeSectPr = '<w:sectPr><w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/><w:cols w:space="720"/></w:sectPr>';
+  const portraitSectPr = '<w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/><w:cols w:space="720"/></w:sectPr>';
+
+  test('reads a Word document whose last section is landscape, which has the body\'s properties', async () => {
+    // As Word writes one: the section before ends at its last paragraph, and
+    // the last section's properties are the body's, which import didn't read
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\nB.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const bodySectPr = xml.lastIndexOf('<w:sectPr');
+    zip.file('word/document.xml', (xml.slice(0, bodySectPr) + landscapeSectPr + xml.slice(xml.indexOf('</w:sectPr>', bodySectPr) + '</w:sectPr>'.length))
+      .replace(/(<w:p\b[^>]*>)(<w:r><w:t>A\.<\/w:t>)/, (_m, p, r) => p + '<w:pPr>' + portraitSectPr + '</w:pPr>' + r));
+    zip.remove('docProps/custom.xml');
+    const md1 = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(md1).toBe('A.\n\n<!-- landscape -->\nB.\n\n<!-- /landscape -->\n');
+    expect(strip((await convertDocx((await convertMdToDocx(md1)).docx)).markdown)).toBe(md1);
+  });
+
+  test('reads a document of one section as its page, with no fences, as a landscape template\'s', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<w:pgSz w:w="12240" w:h="15840"\/>/, () => '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>'));
+    const templateDocx = await zip.generateAsync({ type: 'uint8array' });
+    const md = 'A.\n\nB.\n';
+    expect(strip((await convertDocx((await convertMdToDocx(md, { templateDocx })).docx)).markdown)).toBe(md);
+  });
+
+  describe('with a landscape template', () => {
+    const landscapeTemplate = async () => {
+      const zip = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+      const xml = await zip.file('word/document.xml')!.async('string');
+      zip.file('word/document.xml', xml.replace(/<w:pgSz w:w="12240" w:h="15840"\/>/, () => '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>'));
+      return zip.generateAsync({ type: 'uint8array' });
+    };
+
+    test.each([
+      ['after a portrait section', '<!-- portrait -->\n\nA.\n\n<!-- /portrait -->\n\nB.\n'],
+      ['after a landscape section', 'A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n\nC.\n'],
+    ])('reads the last section %s, which takes the template\'s page, unfenced', async (_, md) => {
+      // Import fenced the last section as landscape, the template's page,
+      // though the Markdown hadn't
+      const templateDocx = await landscapeTemplate();
+      const md1 = (await convertDocx((await convertMdToDocx(md, { templateDocx })).docx)).markdown;
+      expect(strip(md1)).toBe(md);
+      expect((await convertDocx((await convertMdToDocx(md1, { templateDocx })).docx)).markdown).toBe(md1);
+    });
+
+    test('still fences a last section a break added in Word starts', async () => {
+      const templateDocx = await landscapeTemplate();
+      const zip = await JSZip.loadAsync((await convertMdToDocx('<!-- portrait -->\n\nA.\n\n<!-- /portrait -->\n\nB.\n\nC.\n', { templateDocx })).docx);
+      const xml = await zip.file('word/document.xml')!.async('string');
+      // A portrait break on B., as Word puts it there, so C. is a section of
+      // its own, the template's landscape page
+      const portraitSectPr = /<w:sectPr\b(?:(?!<\/w:sectPr>).)*<\/w:sectPr>/.exec(xml)![0];
+      zip.file('word/document.xml', xml.replace(/(<w:p\b[^>]*>)(<w:r>(?:(?!<\/w:p>).)*>B\.<)/, (_m, open, rest) => open + '<w:pPr>' + portraitSectPr + '</w:pPr>' + rest));
+      const md = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+      expect(md).toContain('B.\n\n<!-- landscape -->');
+      expect(md).toMatch(/C\.\n+<!-- \/landscape -->\n$/);
+    });
+  });
+
+  test('reads the template\'s own page, not a tracked change\'s old one, as the last section\'s', async () => {
+    // Export read the old landscape page in a template with no page of its
+    // own as the last section's and said so in a custom property
+    const zip = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = (await zip.file('word/document.xml')!.async('string')).replace(/<w:pgSz w:w="12240" w:h="15840"\/>/, '');
+    const at = xml.lastIndexOf('</w:sectPr>');
+    zip.file('word/document.xml', xml.slice(0, at) + '<w:sectPrChange w:id="1" w:author="A" w:date="2024-01-01T00:00:00Z"><w:sectPr><w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/></w:sectPr></w:sectPrChange>' + xml.slice(at));
+    const templateDocx = await zip.generateAsync({ type: 'uint8array' });
+    const md = 'A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n\nC.\n';
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    expect(await (await JSZip.loadAsync(docx)).file('docProps/custom.xml')?.async('string') ?? '').not.toContain('MANUSCRIPT_TEMPLATE_PAGE_SECTIONS_');
+    const md1 = (await convertDocx(docx)).markdown;
+    expect(strip(md1)).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(md1, { templateDocx })).docx)).markdown).toBe(md1);
+  });
+});
+
 describe('A section break on the last paragraph of its section', () => {
   const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
   // Moves each section break from its empty carrier onto the paragraph

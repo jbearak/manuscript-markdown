@@ -4050,6 +4050,23 @@ export function parseTemplatePgSz(sectPrXml: string | undefined): PageSize {
   return w <= h ? { w, h } : { w: h, h: w };
 }
 
+/** A sectPr's own properties, before its last child, w:sectPrChange, a
+ *  tracked change's old properties, which hold a w:sectPr of their own */
+function ownSectPrXml(sectPrXml: string): string {
+  const change = sectPrXml.indexOf('<w:sectPrChange');
+  return change === -1 ? sectPrXml : sectPrXml.slice(0, change);
+}
+
+/** Whether a sectPr's page is landscape, as import reads it: turned, or
+ *  wider than it's tall. Its own page, not a tracked change's old one */
+function isLandscapeSectPr(sectPrXml: string): boolean {
+  const m = ownSectPrXml(sectPrXml).match(/<w:pgSz\b([^/>]*)\/?>/);
+  if (!m) return false;
+  const w = parseInt(m[1].match(/w:w="(\d+)"/)?.[1] ?? '0', 10);
+  const h = parseInt(m[1].match(/w:h="(\d+)"/)?.[1] ?? '0', 10);
+  return /w:orient="landscape"/.test(m[1]) || w > 0 && h > 0 && w > h;
+}
+
 /** Parse w:pgMar from a sectPr XML string, returning the raw attribute string. */
 function parseTemplateMargins(sectPrXml: string | undefined): string {
   if (!sectPrXml) return DEFAULT_MARGINS;
@@ -4167,6 +4184,7 @@ export interface DocxGenState {
   sectionBreakOrdinal: number;  // counter for paragraph-level sectPr emissions (for portrait round-trip)
   portraitBreakOrdinals: Set<number>; // ordinals of portrait-fence close section breaks
   referencesBeforeSections?: number[]; // ordinals of the breaks ending the sections a references marker before their opening fence is written at the start of
+  templatePageSection?: number; // the last section's ordinal, the number of breaks before it, where it takes the template's landscape page, which no fence set
   templateSectPr?: string;      // trailing <w:sectPr> from template document.xml
   templateSections?: TemplateSections; // the template's, whose headers, footers and page numbering the sectPrs written take
   wroteSectPr?: boolean; // whether a sectPr was written, after which none starts the document
@@ -8463,7 +8481,14 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   state.sentinelGaps = sentinelGaps;
 
   // Append body-closing sectPr (preserves template page layout)
-  const closingSectPr = withTemplateSectPr(bodyClosingSectPrXml(pgSz, margins, state.templateSectPr, state.rsid), state);
+  const bodySectPr = bodyClosingSectPrXml(pgSz, margins, state.templateSectPr, state.rsid);
+  // Import reads the last section's orientation from these properties, so
+  // where they're a template's landscape page, which no fence set, a custom
+  // property says so, by the number of breaks before the section
+  if (state.sectionBreakOrdinal > 0 && bodySectPr === state.templateSectPr && isLandscapeSectPr(bodySectPr)) {
+    state.templatePageSection = state.sectionBreakOrdinal;
+  }
+  const closingSectPr = withTemplateSectPr(bodySectPr, state);
 
   return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
     '<w:document xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wpi="http://schemas.microsoft.com/office/word/2010/wordprocessingInk" xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" mc:Ignorable="w14 w15 wp14">\n' +
@@ -9328,6 +9353,9 @@ export async function convertMdToDocx(
   customProps.push(...portraitTableProps(state.portraitTables));
   customProps.push(...portraitBreakProps(state.portraitBreakOrdinals));
   customProps.push(...referencesBeforeSectionsProps(state.referencesBeforeSections));
+  if (state.templatePageSection !== undefined) {
+    customProps.push(...chunkCustomProps('MANUSCRIPT_TEMPLATE_PAGE_SECTIONS_', JSON.stringify([state.templatePageSection])));
+  }
   customProps.push(...listIndentProps(state));
   customProps.push(...consecutiveReplyProps(state));
   customProps.push(...htmlCommentGapProps(state.htmlCommentGaps));
