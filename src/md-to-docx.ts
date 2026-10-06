@@ -2142,8 +2142,13 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
     const origLines = (originalText ?? markdown).split('\n');
     let searchFrom = 0; // track position to handle duplicate comment text
     for (const tok of result) {
-      if (tok.type !== 'paragraph' || tok.runs.length !== 1 || tok.runs[0].type !== 'html_comment') continue;
-      const commentText = tok.runs[0].text.trim();
+      const withIds = isCommentsWithIds(tok);
+      if (!withIds && (tok.type !== 'paragraph' || tok.runs.length !== 1 || tok.runs[0].type !== 'html_comment')) continue;
+      if (withIds && !tok.sourceRange) continue;
+      // One with the ID syntax of a Word comment on its comments is its
+      // paragraph's lines as parsed, which a span with a blank line in it
+      // changes, so it isn't found
+      const commentText = withIds ? processedLines.slice(tok.sourceRange![0], tok.sourceRange![1]).join('\n').trim() : tok.runs[0].text.trim();
       const commentLines = commentText.split('\n');
       // Find this comment's line in the original markdown (starting after previous match)
       let commentLine = -1;
@@ -6061,6 +6066,22 @@ function bibliographyPathProps(fm: Frontmatter): CustomPropEntry[] {
   return [{ name: 'MANUSCRIPT_BIBLIOGRAPHY_PATH', value: fm.bibliography }];
 }
 
+/** Whether a paragraph is HTML comments with the ID syntax of a Word comment
+ *  on them, as import writes one Word put a comment on, {#1}<!-- c -->{/1}
+ *  with the comment's body on the next line, which is among comments of
+ *  their own, as the block of the comments alone is, with the spaces and
+ *  tabs between them, but not one between the syntax and the first or
+ *  last, which the paragraph keeps as text. Only the line end before a
+ *  body goes with it; one in a range, as between two openers, is a space
+ *  in Word, as import writes it. */
+function isCommentsWithIds(token: MdToken): boolean {
+  if (token.type !== 'paragraph' || token.listContinuation) return false;
+  const runs = token.runs.filter((run, k) => run.type !== 'comment_range_start' && run.type !== 'comment_range_end'
+    && run.type !== 'comment_body_with_id' && !(run.type === 'softbreak' && token.runs[k + 1]?.type === 'comment_body_with_id'));
+  return runs.length < token.runs.length && runs[0]?.type === 'html_comment' && runs[runs.length - 1].type === 'html_comment'
+    && runs.every(run => run.type === 'html_comment' || run.type === 'softbreak' || run.type === 'text' && /^[ \t]*$/.test(run.text));
+}
+
 /** Assign sequential htmlCommentIndex to each HTML comment token and return
  *  maps from index → blankLinesBefore/After count (only for non-default values). */
 export function annotateHtmlCommentIndices(tokens: MdToken[]): { beforeGaps: Map<number, number>; afterGaps: Map<number, number> } {
@@ -6072,7 +6093,8 @@ export function annotateHtmlCommentIndices(tokens: MdToken[]): { beforeGaps: Map
     const isHtmlComment = token.type === 'paragraph'
       && token.runs.length === 1
       && token.runs[0].type === 'html_comment'
-      && !token.listContinuation;
+      && !token.listContinuation
+      || isCommentsWithIds(token);
     if (isHtmlComment) {
       token.htmlCommentIndex = idx;
       if (token.blankLinesBefore !== undefined && token.blankLinesBefore !== 1) {

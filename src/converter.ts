@@ -11675,10 +11675,14 @@ export function buildMarkdown(
     // its end, as Word puts after the run, but not a reference before it,
     // which makes a paragraph, nor line breaks or text after the comment.
     // Its items say which, not its Markdown, which a comment Word put on the
-    // run adds to, in its comments' runs, which Word may split.
+    // run adds to, in its comments' runs, which Word may split, before them
+    // too in ID syntax, {#1}<!-- c -->{/1}, which export counts as well (see
+    // isCommentsWithIds), but not with a space or tab between the syntax and
+    // the comments, which its paragraph keeps as text.
     const solid = items.filter(entry => entry.type !== 'text' || /[^ \t]/.test(entry.text));
     if (amongOwnComments && solid[0]?.type === 'html_comment' && solid[solid.length - 1].type === 'html_comment'
-      && items.every(entry => entry.type !== 'text' || !entry.text.includes('\n')) && /^[ \t]*<!--/.test(textOut)
+      && items.every(entry => entry.type !== 'text' || !entry.text.includes('\n'))
+      && /^[ \t]*(?:\{#[^}\s]+\})*<!--/.test(textOut) && /-->(?:\{\/[^}\s]+\}|\{>>(?:(?!<<\})[\s\S])*<<\})*[ \t]*$/.test(textOut)
       && /^<!--[\s\S]*?-->\s*$/.test(items.map((entry, k) => entry.type === 'text' ? entry.text
         : entry.type === 'html_comment' ? markdownComment(entry.text, items[k + 1]?.type === 'html_comment') : '').join('').trim())) {
       // A blank line, where export stored none
