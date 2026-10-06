@@ -695,7 +695,10 @@ export class RunsAfter {
    *  resolveEmphasis), as where it runs into the ~~ before it, the Markdown
    *  up to it as well. None where the runs aren't known. A highlight's text
    *  export reads apart, but for the runs highlighted alike after it, which
-   *  it may join (see joinHighlights), so they're read without it. */
+   *  it may join (see joinHighlights), so they're read without it. A run of
+   *  the revision that may start a span of its own, where appendRevised
+   *  can't join their seam, is read both ways: after the span's delimiters,
+   *  which end a host, and joined. */
   hostAfter(limit: number): string[] {
     if (!this.runs || this.prefix) return [];
     const { items, at, offsets } = this.runs;
@@ -718,6 +721,9 @@ export class RunsAfter {
     // reads the runs after it without their runs, so this reads no further.
     let written = '';
     let end = '';
+    const closers = formattingDelimiters(formatting(self))[1];
+    // The runs' Markdown up to each seam a span may start at
+    const splits: string[] = [];
     for (let k = at; written.length < limit; k++) {
       const item = items[k];
       if (item?.type !== 'text' || item.href || !revisionsEqual(item.revision, self.revision)
@@ -731,36 +737,48 @@ export class RunsAfter {
       }
       const fmt = formatting(item);
       const run = markedFormatting(item.text, fmt, false, new RunsAfter(this.index, offsets[k + 1]), false, !color && !!fmt.highlight && around(item, k));
+      if (self.revision) {
+        const before = closers + written;
+        const kinds = delimiterKinds(before + self.text);
+        if (!canJoinSpans(before.slice(-1) || self.text.slice(-1), run) || [...delimiterKinds(run)].some(kind => kinds.has(kind))) splits.push(written);
+      }
       written += run;
       if (/[\s/]/.test(run)) break;
     }
-    const markdown = formattingDelimiters(formatting(self))[1] + joinHighlights(written) + end;
-    // A ~~ that would close after punctuation, as after https://, before a
-    // letter, or open before punctuation after one, is a tag, where it's
-    // marked, outside emphasis, which keeps it as it is, as in
-    // <i>~~https://~~</i>
-    const tag = (inner: string, outer: string) => flankClass(inner.charCodeAt(0)) === FLANK_PUNCT
-      && flankClass(outer.charCodeAt(0)) === FLANK_OTHER;
-    const own = formatting(self);
-    if (markdown.startsWith('~~') && !own.italic && !own.bold && tag(self.text.slice(-1), markdown.slice(2))) return [];
-    const ends: string[] = [];
-    let host = '';
-    for (let i = 0; i < markdown.length && host.length < limit; i++) {
-      const c = markdown[i];
-      if (/[\s/]/.test(c)) return [...ends, host + c];
-      if (c === EMPHASIS_OPEN['~~']) {
-        // One that can't open is a tag, and one that can may be, as where
-        // it can't close
-        let inner = i + 1;
-        while (markdown[inner] === '~') inner++;
-        if (tag(markdown[inner] ?? ' ', i >= 3 ? markdown[i - 3] : self.text.slice(-1))) return [...ends, host.slice(0, -2) + ' '];
-        ends.push(host.slice(0, -2) + ' ');
-      } else if (c.charCodeAt(0) > 6) {
-        host += c;
-      }
-    }
-    return [...ends, host];
+    return [closers + joinHighlights(written) + end, ...splits.map(split => closers + joinHighlights(split) + ' ')]
+      .flatMap(markdown => hostsIn(markdown, self.text, formatting(self), limit));
   }
+
+}
+
+/** The hosts `markdown`, written after a run's `text` in its formatting
+ *  `own`, may go on into, at most `limit` characters (see
+ *  RunsAfter.hostAfter) */
+function hostsIn(markdown: string, text: string, own: RunFormatting, limit: number): string[] {
+  // A ~~ that would close after punctuation, as after https://, before a
+  // letter, or open before punctuation after one, is a tag, where it's
+  // marked, outside emphasis, which keeps it as it is, as in
+  // <i>~~https://~~</i>
+  const tag = (inner: string, outer: string) => flankClass(inner.charCodeAt(0)) === FLANK_PUNCT
+    && flankClass(outer.charCodeAt(0)) === FLANK_OTHER;
+  if (markdown.startsWith('~~') && !own.italic && !own.bold && tag(text.slice(-1), markdown.slice(2))) return [];
+  const ends: string[] = [];
+  let host = '';
+  for (let i = 0; i < markdown.length && host.length < limit; i++) {
+    const c = markdown[i];
+    if (/[\s/]/.test(c)) return [...ends, host + c];
+    if (c === EMPHASIS_OPEN['~~']) {
+      // One that can't open is a tag, and one that can may be, as where it
+      // can't close
+      let inner = i + 1;
+      while (markdown[inner] === '~') inner++;
+      if (tag(markdown[inner] ?? ' ', i >= 3 ? markdown[i - 3] : text.slice(-1))) return [...ends, host.slice(0, -2) + ' '];
+      ends.push(host.slice(0, -2) + ' ');
+    } else if (c.charCodeAt(0) > 6) {
+      host += c;
+    }
+  }
+  return [...ends, host];
 }
 
 /** The ranges of the keys and locators of the citation export reads in
