@@ -12676,6 +12676,210 @@ describe('Line feeds in Word\'s text', () => {
   });
 });
 
+describe('An empty paragraph whose mark is tracked', () => {
+  /** md's export, with each paragraph of XX alone in part emptied, and its
+   *  mark in a revision of `type`, by `author` */
+  async function emptied(md: string, part: string, type: 'ins' | 'del', author = 'w:author="A" w:date="2024-01-01T00:00:00Z"'): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    let id = 90;
+    const xml = (await zip.file(part)!.async('string')).replace(/(<w:p\b[^>]*>)(?:<w:pPr>((?:(?!<\/w:pPr>).)*)<\/w:pPr>)?<w:r><w:t>XX<\/w:t><\/w:r><\/w:p>/g,
+      (_m, open: string, pPr = '') => open + '<w:pPr>' + pPr + '<w:rPr><w:' + type + ' w:id="' + id++ + '" ' + author + '/></w:rPr></w:pPr></w:p>');
+    expect(id).toBeGreaterThan(90);
+    zip.file(part, xml);
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  /** Each paragraph of part: its style, list, the revision its mark is in,
+   *  and its text */
+  async function paragraphs(docx: Uint8Array, part: string): Promise<string[]> {
+    const xml = await (await JSZip.loadAsync(docx)).file(part)!.async('string');
+    return [...xml.matchAll(/<w:p\b[^>]*>(?:(?!<\/w:p>).)*<\/w:p>/g)].map(([p]) => {
+      const pPr = /<w:pPr>((?:(?!<\/w:pPr>).)*)<\/w:pPr>/.exec(p)?.[1] ?? '';
+      const mark = /<w:rPr>(?:(?!<\/w:rPr>).)*<w:(ins|del)\b/.exec(pPr)?.[1];
+      const text = [...p.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(t => t[1]).join('');
+      return (/<w:pStyle w:val="(\w+)"/.exec(pPr)?.[1] ?? '') + (pPr.includes('<w:numPr>') ? ' list' : '') + (mark ? ' ' + mark : '') + ' ' + JSON.stringify(text);
+    });
+  }
+
+  test.each([
+    ['inserted', 'A\n\nXX\n\nB', 'ins', 'A\n\n{++\n\n++}B\n'],
+    ['deleted', 'A\n\nXX\n\nB', 'del', 'A\n\n{--\n\n--}B\n'],
+    ['inserted, twice', 'A\n\nXX\n\nXX\n\nB', 'ins', 'A\n\n{++\n\n\n\n++}B\n'],
+    ['inserted, first', 'XX\n\nB', 'ins', '{++\n\n++}B\n'],
+    ['inserted, last', 'A\n\nXX', 'ins', 'A\n\n{++\n\n++}\n'],
+    ['inserted, before a list item', 'A\n\nXX\n\n- B', 'ins', 'A\n\n{++\n\n++}\n\n- B\n'],
+    ['inserted, before a heading', 'A\n\nXX\n\n# H', 'ins', 'A\n\n{++\n\n++}\n\n# H\n'],
+    ['inserted, after a code block', '```\nx\n```\n\nXX\n\nB', 'ins', '```\nx\n```\n\n{++\n\n++}B\n'],
+    ['inserted, in a list item', '- a\n\n  XX\n\n  b', 'ins', '- a\n\n  {++\n\n  ++}b\n'],
+    ['deleted, as a list item', '- a\n- XX\n\n  b', 'del', '- a\n- {--\n\n  --}b\n'],
+    ['inserted, in a quote', '> a\n>\n> XX\n>\n> b', 'ins', '> a\n>\n> {++\n>\n> ++}b\n'],
+    ['inserted, twice, in a quote', '> a\n>\n> XX\n>\n> XX\n>\n> b', 'ins', '> a\n>\n> {++\n>\n>\n>\n> ++}b\n'],
+    ['inserted, twice, in a list item', '- a\n\n  XX\n\n  XX\n\n  b', 'ins', '- a\n\n  {++\n\n\n\n  ++}b\n'],
+  ])('keeps one whose mark is %s', async (_name, md, type, expected) => {
+    // Import dropped the paragraph, and its mark with it, as the paragraph
+    // after took no break with no para item of its own
+    await roundTrips(md, 'word/document.xml', await emptied(md, 'word/document.xml', type as 'ins' | 'del'), expected);
+  });
+
+  test('keeps one in the span of the mark before it, in the same revision', async () => {
+    // Export writes that mark with this author, and no date
+    const md = 'A{++\n\n++}\n\nXX\n\nB';
+    await roundTrips(md, 'word/document.xml', await emptied(md, 'word/document.xml', 'ins', 'w:author="Unknown"'), 'A{++\n\n\n\n++}B\n');
+  });
+
+  test('keeps no space before a deleted citation after one in the span of the mark before it', async () => {
+    // The break that went on in that span didn't note that the citation
+    // starts its line, which then took a space from the text before the
+    // span, as {-- [@smith2020]--}
+    const bibtex = '@article{smith2020,\n  author = {Smith, Alice},\n  title = {{Effects}},\n  journal = {J},\n  year = {2020},\n}\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A\n\nXX\n\n[@smith2020] b', { bibtex })).docx);
+    let id = 90;
+    const xml = (await zip.file('word/document.xml')!.async('string'))
+      .replace(/(<w:p\b[^>]*>)(<w:r><w:t>(A|XX)<\/w:t><\/w:r>)<\/w:p>/g, (_m, open: string, run: string, text: string) =>
+        open + '<w:pPr><w:rPr><w:ins w:id="' + id++ + '" w:author="A" w:date="2024-01-01T00:00:00Z"/></w:rPr></w:pPr>' + (text === 'A' ? run : '') + '</w:p>')
+      // A Word user deleted the citation
+      .replace(/<w:r><w:fldChar w:fldCharType="begin"\/><\/w:r><w:r><w:instrText[^>]*> ADDIN ZOTERO_ITEM(?:(?!<w:fldChar w:fldCharType="end"\/>).)*<w:fldChar w:fldCharType="end"\/><\/w:r>/, field =>
+        '<w:del w:id="' + id++ + '" w:author="B" w:date="2024-01-02T00:00:00Z">' + field.replace(/<w:t>([^<]*)<\/w:t>/g, '<w:delText>$1</w:delText>') + '</w:del>');
+    expect(id).toBe(93);
+    zip.file('word/document.xml', xml);
+    const first = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    expect(first.markdown).toStartWith('A{++\n\n\n\n++}{--[@smith2020]--} b\n');
+    expect((await convertDocx((await convertMdToDocx(first.markdown, { bibtex: first.bibtex })).docx)).markdown).toBe(first.markdown);
+  });
+
+  /** That `docx` imports as `expected`, which exports to the paragraphs and
+   *  marks of `docx` in `part` again, and imports as itself */
+  async function roundTrips(md: string, part: string, docx: Uint8Array, expected: string) {
+    const once = (await convertDocx(docx)).markdown;
+    expect(once).toBe(expected);
+    // Export dropped an empty paragraph a span's break ends
+    const again = (await convertMdToDocx(once)).docx;
+    expect(await paragraphs(again, part)).toEqual(await paragraphs(docx, part));
+    expect((await convertDocx(again)).markdown).toBe(once);
+  }
+
+  test.each([
+    ['inserted', '{++A\n\n++}XX\n\nB', 'ins', '{++A\n\n++}{++\n\n++}B\n'],
+    ['inserted, twice', '{++A\n\n++}XX\n\nXX\n\nB', 'ins', '{++A\n\n++}{++\n\n\n\n++}B\n'],
+    ['deleted', '{--A\n\n--}XX\n\nB', 'del', '{--A\n\n--}{--\n\n--}B\n'],
+    ['inserted, in bold', '{++**A**\n\n++}XX\n\nB', 'ins', '{++**A**\n\n++}{++\n\n++}B\n'],
+    ['inserted, before a list item', '{++A\n\n++}XX\n\n- B', 'ins', '{++A\n\n++}{++\n\n++}\n\n- B\n'],
+    ['inserted, in a quote', '> {++A\n>\n> ++}XX\n>\n> B', 'ins', '> {++A\n>\n> ++}{++\n>\n> ++}B\n'],
+  ])('keeps one after text %s in the revision of its mark', async (_name, md, type, expected) => {
+    // Its break went on in the span of that text, {++A\n\n\n\n++}B, which
+    // export reads as the text and its paragraph's mark, with no paragraph
+    // for the blank line more
+    await roundTrips(md, 'word/document.xml', await emptied(md, 'word/document.xml', type as 'ins' | 'del', 'w:author="Unknown"'), expected);
+  });
+
+  test.each([
+    ['after the mark of one with text', 'A{++\n\n++}XX\n\n&#32;', 'w:author="Unknown"', 'A{++\n\n\n\n++}&#32;\n'],
+    ['after another', 'A\n\nXX\n\nXX\n\n&#32;', undefined, 'A\n\n{++\n\n\n\n++}&#32;\n'],
+    ['after another, of a tab', 'A\n\nXX\n\nXX\n\n&#9;', undefined, 'A\n\n{++\n\n\n\n++}&#9;\n'],
+  ])('keeps a paragraph of whitespace after one %s in its span', async (_name, md, author, expected) => {
+    // Only the span of one break alone was taken for one that keeps the
+    // whitespace after it, which went with the paragraph
+    await roundTrips(md, 'word/document.xml', await emptied(md, 'word/document.xml', 'ins', author), expected);
+  });
+
+  test.each([
+    ['after the mark of a paragraph of text', 'A{++\n\n++}{>>note<<}{++\n\n++}B\n'],
+    ['after another', 'A\n\n{++\n\n++}{>>note<<}{++\n\n++}B\n'],
+    ['after another, deleted', 'A\n\n{--\n\n--}{>>note<<}{--\n\n--}B\n'],
+    ['twice', 'A{++\n\n++}{>>note<<}{++\n\n++}{>>n2<<}{++\n\n++}B\n'],
+  ])('keeps a comment on one whose mark is in the revision of the mark before it, %s', async (_name, md) => {
+    // Its break went on in the span before the comment, which then went to
+    // the paragraph after it
+    const strip = (markdown: string) => markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+    /** Each paragraph of the document, with whether a comment is on it */
+    const commented = async (docx: Uint8Array) => [...(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string'))
+      .matchAll(/<w:p\b[^>]*>(?:(?!<\/w:p>).)*<\/w:p>/g)].map(([p]) => p.includes('<w:commentReference'));
+    const docx = (await convertMdToDocx(md)).docx;
+    const once = strip((await convertDocx(docx)).markdown);
+    expect(once).toBe(md);
+    const again = (await convertMdToDocx(once)).docx;
+    expect(await paragraphs(again, 'word/document.xml')).toEqual(await paragraphs(docx, 'word/document.xml'));
+    expect(await commented(again)).toEqual(await commented(docx));
+  });
+
+  test('imports many empty paragraphs whose marks alternate authors in about the time of those of one', async () => {
+    // A break in a span of its own looked past the empty paragraphs after
+    // it for the next item, which for each read the rest of them again
+    const mark = (author: string) => '<w:pPr><w:rPr><w:ins w:id="9" w:author="' + author + '" w:date="2024-01-01T00:00:00Z"/></w:rPr></w:pPr>';
+    const docx = (alternate: boolean) => buildSyntheticDocx(wrapDocumentXml('<w:p><w:r><w:t>A</w:t></w:r></w:p>'
+      + Array.from({ length: 40000 }, (_, k) => '<w:p>' + mark(alternate && k % 2 === 1 ? 'B' : 'A') + '</w:p>').join('')
+      + '<w:p><w:r><w:t>B</w:t></w:r></w:p>'));
+    const [one, alternating] = [await docx(false), await docx(true)];
+    const time = async (doc: Uint8Array) => {
+      const start = performance.now();
+      await convertDocx(doc);
+      return performance.now() - start;
+    };
+    expect(await time(alternating) / await time(one)).toBeLessThan(2.5);
+  }, 30000);
+
+  test.each([
+    ['inserted', 'T[^1]\n\n[^1]: a\n\n    XX\n\n    b', 'ins', 'T[^1]\n\n[^1]: a\n\n    {++\n    \n    ++}b\n'],
+    ['deleted, twice', 'T[^1]\n\n[^1]: a\n\n    XX\n\n    XX\n\n    b', 'del', 'T[^1]\n\n[^1]: a\n\n    {--\n    \n    \n    \n    --}b\n'],
+  ])('keeps one in a note whose mark is %s', async (_name, md, type, expected) => {
+    await roundTrips(md, 'word/footnotes.xml', await emptied(md, 'word/footnotes.xml', type as 'ins' | 'del'), expected);
+  });
+
+  test.each([
+    ['<br>', '{++\n\n<br>++}B', [' "B"']],
+    ['<br>, after a paragraph', 'A\n\n{++\n\n<br>++}B', [' "A"', ' "B"']],
+    ['a \\ at a line\'s end', 'A\n\n{++\n\n\\\n++}B', [' "A"', ' "B"']],
+  ])('exports none for a span of a paragraph break and a line break of %s', async (_name, md, expected) => {
+    // Its line break counted as a break alone, which gave the span an
+    // empty paragraph with its mark, before the line break's
+    const docx = (await convertMdToDocx(md)).docx;
+    expect(await paragraphs(docx, 'word/document.xml')).toEqual(expected);
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml).toMatch(/<w:ins\b[^>]*><w:r>(?:<w:rPr>(?:(?!<\/w:rPr>).)*<\/w:rPr>)?<w:br\/><\/w:r><\/w:ins>(?:(?!<\/w:p>).)*>B</);
+  });
+
+  test.each([
+    ['a no-break space', '{++\n\n&nbsp;++}B', [' "\u00a0B"']],
+    ['a no-break space, after a paragraph', 'A\n\n{++\n\n&nbsp;++}B', [' "A"', ' "\u00a0B"']],
+    ['an ideographic space', 'A\n\n{++\n\n\u3000++}B', [' "A"', ' "\u3000B"']],
+    ['a space of code', '{++\n\n` `++}B', [' " B"']],
+    ['a space of code, after a paragraph', 'A\n\n{++\n\n` `++}B', [' "A"', ' " B"']],
+    ['a space of a reference', 'A\n\n{++\n\n&#32;++}B', [' "A"', ' " B"']],
+    ['a tab of a reference', 'A\n\n{++\n\n&#9;++}B', [' "A"', ' "B"']],
+    ['a bold space of a reference', 'A\n\n{++\n\n**&#32;**++}B', [' "A"', ' " B"']],
+  ])('exports none for a span of a paragraph break and whitespace that is text, %s', async (_name, md, expected) => {
+    // It counted as whitespace, which gave the span an empty paragraph with
+    // its mark, before the one of its text
+    expect(await paragraphs((await convertMdToDocx(md)).docx, 'word/document.xml')).toEqual(expected);
+  });
+
+  test('imports many empty paragraphs whose marks are tracked in about the time of as many with text', async () => {
+    // Each break that went on in the span before copied that span, and the
+    // ends of the document read its run of line ends again from each
+    const mark = '<w:pPr><w:rPr><w:ins w:id="9" w:author="A" w:date="2024-01-01T00:00:00Z"/></w:rPr></w:pPr>';
+    const docx = (text: string) => buildSyntheticDocx(wrapDocumentXml('<w:p><w:r><w:t>A</w:t></w:r></w:p>'
+      + ('<w:p>' + mark + text + '</w:p>').repeat(40000) + '<w:p><w:r><w:t>B</w:t></w:r></w:p>'));
+    const [empty, text] = [await docx(''), await docx('<w:r><w:t>x</w:t></w:r>')];
+    const time = async (doc: Uint8Array) => {
+      const start = performance.now();
+      await convertDocx(doc);
+      return performance.now() - start;
+    };
+    expect(await time(empty) / await time(text)).toBeLessThan(2);
+  }, 30000);
+
+  test('exports a span of many empty paragraphs in about the time of as many with text', () => {
+    // Each read the span's runs again for whether it held breaks alone
+    const time = (md: string) => {
+      const start = performance.now();
+      parseMd(md);
+      return performance.now() - start;
+    };
+    const text = time('A\n\n{++' + 'x\n\n'.repeat(20000) + '++}B');
+    expect(time('A\n\n{++' + '\n\n'.repeat(20000) + '++}B') / text).toBeLessThan(2);
+  });
+});
+
 describe('DOCX footnote cross-reference import', () => {
   function wrapCustomPropsXml(props: Record<string, string>): string {
     let xml = '<?xml version="1.0"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">';
@@ -14822,7 +15026,8 @@ describe('Track changes (CriticMarkup)', () => {
         + '<w:p>' + quote(false) + '<w:r><w:t>b</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p>'),
       { 'word/comments.xml': '<?xml version="1.0"?><w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:comment w:id="0" w:author="B" w:date="2024-01-01T00:00:00Z"><w:p><w:r><w:t>note</w:t></w:r></w:p></w:comment></w:comments>' });
       const md = (await convertDocx(docx)).markdown;
-      expect(md).toContain('> {#1}a{--\n>\n> --}');
+      // With the empty paragraph's own mark, in the same revision
+      expect(md).toContain('> {#1}a{--\n>\n>\n>\n> --}b{/1}');
       expect(md.match(/\{\/1\}/g)).toHaveLength(1);
       const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
       expect(xml.match(/<w:commentRangeStart /g)).toHaveLength(1);
