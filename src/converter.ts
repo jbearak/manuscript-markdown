@@ -1756,6 +1756,7 @@ export interface NumberingLevelDef {
   type: 'bullet' | 'ordered';
   start?: number; // w:start, where the level's count begins
   restart?: number; // w:lvlRestart: the level, from 1, at or above which a paragraph starts this one over, or 0 for none
+  style?: string; // w:pStyle: the paragraph style the level is linked to
 }
 
 export type NumberingDefs = Map<string, Map<string, NumberingLevelDef>>;
@@ -1829,12 +1830,59 @@ export function wordListCounter(defs: NumberingDefs, instances: NumberingInstanc
   });
 }
 
-export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: NumberingDefs; startOverrides: NumberingStartOverrides; instances: NumberingInstances }> {
+/** The numbering instance and level a w:numPr gives, where it gives them */
+interface NumberingReference { numId?: string; ilvl?: string }
+
+/** A style's numbering: the numId and ilvl of its w:numPr, each its own or
+ *  else its base's, as Word inherits them one by one, and the IDs of the
+ *  style and its bases */
+interface StyleNumberingEntry { reference: NumberingReference; lineage: string[] }
+
+/** Each style's numbering, by style ID, and the default paragraph style */
+export interface StyleNumbering { styles: Map<string, StyleNumberingEntry>; defaultStyle?: string }
+
+function numberingReference(pPrChildren: XmlNode[]): NumberingReference | undefined {
+  const numPr = pPrChildren.find(child => child['w:numPr'] !== undefined);
+  if (!numPr) return undefined;
+  const reference: NumberingReference = {};
+  for (const child of asXmlNodes(numPr['w:numPr'])) {
+    if (child['w:numId'] !== undefined) reference.numId = getAttr(child, 'val');
+    if (child['w:ilvl'] !== undefined) reference.ilvl = getAttr(child, 'val');
+  }
+  return reference;
+}
+
+async function parseStyleNumbering(zip: JSZip): Promise<StyleNumbering> {
+  const numbering: StyleNumbering = { styles: new Map() };
+  const parsed = await readZipXml(zip, 'word/styles.xml');
+  if (!parsed) return numbering;
+  const own = new Map<string, { reference?: NumberingReference; basedOn: string }>();
+  for (const node of findAllDeep(parsed, 'w:style')) {
+    const children = asXmlNodes(node['w:style']);
+    const id = getAttr(node, 'styleId');
+    const pPr = children.find(c => c['w:pPr'] !== undefined);
+    const basedOn = children.find(c => c['w:basedOn'] !== undefined);
+    own.set(id, { reference: pPr ? numberingReference(asXmlNodes(pPr['w:pPr'])) : undefined, basedOn: basedOn ? getAttr(basedOn, 'val') : '' });
+    if (getAttr(node, 'type') === 'paragraph' && ['1', 'true', 'on'].includes(getAttr(node, 'default'))) numbering.defaultStyle ??= id;
+  }
+  const resolve = (id: string, seen: Set<string>): StyleNumberingEntry => {
+    const style = own.get(id);
+    if (!style || seen.has(id)) return { reference: {}, lineage: [] };
+    seen.add(id);
+    const base = resolve(style.basedOn, seen);
+    return { reference: { ...base.reference, ...style.reference }, lineage: [id, ...base.lineage] };
+  };
+  for (const id of own.keys()) numbering.styles.set(id, resolve(id, new Set()));
+  return numbering;
+}
+
+export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: NumberingDefs; startOverrides: NumberingStartOverrides; instances: NumberingInstances; styles: StyleNumbering }> {
   const numberingDefs: NumberingDefs = new Map();
   const startOverrides: NumberingStartOverrides = new Map();
   const instances: NumberingInstances = new Map();
   const parsed = await readZipXml(zip, 'word/numbering.xml');
-  if (!parsed) { return { defs: numberingDefs, startOverrides, instances }; }
+  if (!parsed) { return { defs: numberingDefs, startOverrides, instances, styles: { styles: new Map() } }; }
+  const styles = await parseStyleNumbering(zip);
 
   // Build abstractNumId → levels map
   const abstractNums = new Map<string, Map<string, NumberingLevelDef>>();
@@ -1862,7 +1910,12 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
       // 2.1.282 b), so only the abstract numbering's counts
       const restartNodes = findAllDeep(lvl, 'w:lvlRestart');
       const restart = restartNodes.length > 0 ? parseInt(getAttr(restartNodes[0], 'val'), 10) : NaN;
-      levels.set(ilvl, { type: val === 'bullet' ? 'bullet' : 'ordered', ...(isNaN(start) ? {} : { start }), ...(restart >= 0 ? { restart } : {}) });
+      // The level's own, not one in its w:pPr, which Word ignores
+      const style = lvl.find(child => child['w:pStyle'] !== undefined);
+      levels.set(ilvl, {
+        type: val === 'bullet' ? 'bullet' : 'ordered', ...(isNaN(start) ? {} : { start }), ...(restart >= 0 ? { restart } : {}),
+        ...(style ? { style: getAttr(style, 'val') } : {}),
+      });
     }
 
     abstractNums.set(abstractNumId, levels);
@@ -1905,7 +1958,7 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
     }
   }
 
-  return { defs: numberingDefs, startOverrides, instances };
+  return { defs: numberingDefs, startOverrides, instances, styles };
 }
 
 export function parseHeadingLevel(pPrChildren: XmlNode[]): number | undefined {
@@ -2025,35 +2078,40 @@ function parseListContinuationStyle(pPrChildren: XmlNode[]): boolean {
     && getAttr(pStyleElement, 'val').toLowerCase() === 'manuscriptlistcontinuation';
 }
 
-export function parseListMeta(pPrChildren: XmlNode[], numberingDefs: NumberingDefs, numberingStartOverrides?: NumberingStartOverrides, countListItem?: WordListCounter): ListMeta | undefined {
-  const numPrElement = pPrChildren.find(child => child['w:numPr'] !== undefined);
-  if (!numPrElement) return undefined;
-
-  const numPr = numPrElement['w:numPr'];
-  if (!Array.isArray(numPr)) return undefined;
-
-  let numId = '';
-  let ilvl = '';
-
-  for (const child of numPr) {
-    if (child['w:numId']) {
-      numId = getAttr(child, 'val');
-    }
-    if (child['w:ilvl']) {
-      ilvl = getAttr(child, 'val');
-    }
-  }
-
-  if (!numId) return undefined;
-  // One that gives no level numbers its paragraph at level 0, as
-  // LibreOffice and docx4j read it, where ECMA-376 gives no default
-  ilvl ||= '0';
+/** A paragraph's list item, where its w:numPr or its style's numbers it */
+export function parseListMeta(pPrChildren: XmlNode[], numberingDefs: NumberingDefs, numberingStartOverrides?: NumberingStartOverrides, countListItem?: WordListCounter, styleNumbering?: StyleNumbering): ListMeta | undefined {
+  // The paragraph's style, or the default where it names none or one
+  // styles.xml doesn't have, as Word reads it
+  const pStyle = pPrChildren.find(child => child['w:pStyle'] !== undefined);
+  const style = (pStyle ? styleNumbering?.styles.get(getAttr(pStyle, 'val')) : undefined)
+    ?? styleNumbering?.styles.get(styleNumbering.defaultStyle ?? '');
+  // The paragraph's own numId and ilvl come before its style's, each by
+  // itself, as a numId alone puts it in another list at its style's level,
+  // as LibreOffice reads them. Word reads a style's ilvl, which ECMA-376
+  // Part 1 §17.3.1.19 has it ignore ([MS-OI29500] 2.1.50)
+  const own = numberingReference(pPrChildren);
+  const reference = { ...style?.reference, ...own };
+  const numId = reference.numId;
+  // A numId of 0 takes away its style's numbering (ECMA-376 Part 1 §17.9.18)
+  if (!numId || numId === '0') return undefined;
 
   const levels = numberingDefs.get(numId);
   if (!levels) return undefined;
+  // One that gives no level numbers its paragraph at the level linked to its
+  // style, or the nearest base of it that one is linked to, as ECMA-376 Part
+  // 1 §17.9.23 has a style that gives a numId alone take its level, and
+  // mammoth reads it. Else at level 0, as LibreOffice and docx4j read it,
+  // where ECMA-376 gives no default
+  const ilvl = reference.ilvl
+    || style?.lineage.flatMap(id => [...levels].filter(([, def]) => def.style === id).map(([linked]) => linked))[0]
+    || '0';
 
   const def = levels.get(ilvl);
   if (!def) return undefined;
+  // Word neither numbers nor counts a paragraph its style puts at a level
+  // linked to another style, one that isn't the paragraph's or a base of it,
+  // as docx4j measured Word; its own numId always numbers it
+  if (own?.numId === undefined && def.style !== undefined && !style?.lineage.includes(def.style)) return undefined;
 
   // Word won't open a file that defines a level above 8 ([MS-OI29500] on
   // Part 1 §17.9.6), so a paragraph at one has none it numbers by, and
@@ -4934,6 +4992,7 @@ export async function extractDocumentContent(
     numberingDefs?: NumberingDefs;
     numberingStartOverrides?: NumberingStartOverrides;
     numberingInstances?: NumberingInstances;
+    numberingStyles?: StyleNumbering;
     relationshipMap?: Map<string, string>;
     replyIds?: Set<string>;
     /** The IDs of the comments comments.xml has a body for. Word shows
@@ -4963,7 +5022,7 @@ export async function extractDocumentContent(
   // Parse relationships and numbering definitions
   const relationshipMap = options?.relationshipMap ?? await parseRelationships(zip);
   const numberingResult = options?.numberingDefs
-    ? { defs: options.numberingDefs, startOverrides: options.numberingStartOverrides ?? new Map(), instances: options.numberingInstances ?? new Map() }
+    ? { defs: options.numberingDefs, startOverrides: options.numberingStartOverrides ?? new Map(), instances: options.numberingInstances ?? new Map(), styles: options.numberingStyles ?? { styles: new Map() } }
     : await parseNumberingDefinitions(zip);
   const numberingDefs = numberingResult.defs;
   const numberingStartOverrides = numberingResult.startOverrides;
@@ -5424,7 +5483,7 @@ export async function extractDocumentContent(
               }
 
               headingLevel = parseHeadingLevel(pPrChildren);
-              listMeta = parseListMeta(pPrChildren, numberingDefs, numberingStartOverrides, countListItem);
+              listMeta = parseListMeta(pPrChildren, numberingDefs, numberingStartOverrides, countListItem, numberingResult.styles);
               isTitle = parseTitleStyle(pPrChildren);
               const blockquoteInfo = parseBlockquoteInfo(pPrChildren);
               blockquoteLevel = blockquoteInfo.level;
@@ -5461,6 +5520,10 @@ export async function extractDocumentContent(
               }
               break;
             }
+          }
+          // One with no w:pPr has the default style, which can number it
+          if (!paraChildren.some(child => child['w:pPr'])) {
+            listMeta = parseListMeta([], numberingDefs, numberingStartOverrides, countListItem, numberingResult.styles);
           }
           if (isSpacerParagraph) {
             // Keep a structural-only boundary so adjacent same-type alerts remain
@@ -12855,6 +12918,7 @@ export async function convertDocx(
   const numberingDefs = numberingResult.defs;
   const numberingStartOverrides = numberingResult.startOverrides;
   const numberingInstances = numberingResult.instances;
+  const numberingStyles = numberingResult.styles;
   const docRels = docRelsParsed.hyperlinks;
   const imageRels = docRelsParsed.images;
 
@@ -12868,7 +12932,7 @@ export async function convertDocx(
   const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, images: { relationships: fnRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: footnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts };
   const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, images: { relationships: enRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: endnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts };
 
-  const { content: docContent, zoteroBiblData, leadingBlankParagraphs } = await extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, relationshipMap: docRels, replyIds, commentBodies, imageRelationships: imageRels, imageFolder: options?.imageFolder, imageFiles, portraitBreakOrdinals: portraitBreaks ?? undefined, referencesBeforeSections: referencesBeforeSections ?? undefined, templatePageSections: templatePageSections ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined, styleLayouts });
+  const { content: docContent, zoteroBiblData, leadingBlankParagraphs } = await extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, numberingStyles, relationshipMap: docRels, replyIds, commentBodies, imageRelationships: imageRels, imageFolder: options?.imageFolder, imageFiles, portraitBreakOrdinals: portraitBreaks ?? undefined, referencesBeforeSections: referencesBeforeSections ?? undefined, templatePageSections: templatePageSections ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined, styleLayouts });
   // The notes the document references, in its order, which are the ones it
   // shows; their images take names after its own, footnotes' first
   const refOrder = noteReferences(docContent);
