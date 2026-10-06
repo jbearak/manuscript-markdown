@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'bun:test';
+import JSZip from 'jszip';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import {
   stylesXml,
   resolveFontOverrides,
@@ -805,5 +808,86 @@ describe('styles with other whitespace before an attribute', () => {
     zip.file('word/styles.xml', (await zip.file('word/styles.xml')!.async('string')).split(from).join(to));
     const { metadata } = parseFrontmatter((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
     expect([metadata.headerFontSize, metadata.headerFontStyle, metadata.styles?.pullquote?.font]).toEqual([[20], ['bold-underline-center'], 'Georgia']);
+  });
+});
+
+describe('empty run and paragraph properties', () => {
+  // Word strips an empty w:rPr or w:pPr on open and marks the document
+  // changed (dirty-flag invariant #5)
+  const EMPTY_PROPERTIES = /<w:(rPr|pPr)(?:\s*\/>|>\s*<\/w:\1>)/;
+  const body = '# One\n\n#### Four\n\n###### Six\n\nText *i* `code`[^1]\n\n[^1]: Note.\n\n> quote\n\n```\ncode\n```\n\n' +
+    '| a | b |\n|---|---|\n| 1 | 2 |\n\n<!-- style: epigraph -->\n\nStyled\n\n<!-- /style -->\n';
+  const frontmatters = [
+    '',
+    'font: Georgia\nfont-size: 12\ncode-font: Menlo\ntable-font: Arial\nheader-font: Palatino',
+    'header-font-style: normal',
+    'header-font-style: center',
+    'header-font-style: italic, normal, center, normal',
+    'title-font-style: normal\ntitle-font-size: 20',
+    'line-spacing: double\nparagraph-indent: none\nblockquote-style: Quote',
+    'styles:\n  epigraph:\n    spacing-before: 12',
+    'styles:\n  epigraph:\n    font-style: normal',
+    'styles:\n  epigraph:\n    font-style: center\n    paragraph-indent: none',
+  ];
+  const markdown = (fields: string) => '---\ntitle: Title\n' + fields + '\n---\n\n' + body;
+
+  /** A template whose Title holds only a centering pPr, which a title style
+   *  that isn't centered removes, and whose Heading 2 has no rPr */
+  async function barePropertiesTemplate(): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(markdown(''))).docx);
+    const style = (id: string, inner: string) => (xml: string) => xml.replace(
+      new RegExp('(<w:style\\b[^>]*w:styleId="' + id + '"[^>]*>)[\\s\\S]*?(</w:style>)'),
+      (_match, open: string, close: string) => open + inner + close);
+    const styles = [
+      style('Title', '<w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:pPr><w:jc w:val="center"/></w:pPr>'),
+      style('Heading2', '<w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr>'),
+    ].reduce((xml, edit) => edit(xml), await zip.file('word/styles.xml')!.async('string'));
+    zip.file('word/styles.xml', styles);
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  async function emptyProperties(md: string, templateDocx?: Uint8Array): Promise<string[]> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md, templateDocx ? { templateDocx } : undefined)).docx);
+    const found: string[] = [];
+    for (const part of ['word/styles.xml', 'word/document.xml']) {
+      const xml = await zip.file(part)!.async('string');
+      for (const style of xml.match(/<w:style\b[\s\S]*?<\/w:style>|<w:body>[\s\S]*<\/w:body>/g) ?? []) {
+        if (EMPTY_PROPERTIES.test(style)) found.push(part + ': ' + (/w:styleId="([^"]*)"/.exec(style)?.[1] ?? 'body'));
+      }
+    }
+    return found;
+  }
+
+  it('none in styles.xml or document.xml, with or without a template', async () => {
+    const templates: Array<[string, Uint8Array | undefined]> = [
+      ['no template', undefined],
+      ['export\'s own', (await convertMdToDocx(markdown(''))).docx],
+      ['bare properties', await barePropertiesTemplate()],
+      ['sample.docx', new Uint8Array(readFileSync(join(__dirname, '..', 'test', 'fixtures', 'sample.docx')))],
+    ];
+    const found: string[] = [];
+    for (const [name, template] of templates) {
+      for (const fields of frontmatters) {
+        for (const empty of await emptyProperties(markdown(fields), template)) found.push(name + ' | ' + JSON.stringify(fields) + ' | ' + empty);
+      }
+    }
+    expect(found).toEqual([]);
+  });
+
+  it.each(['normal', 'center', 'italic, normal, center, normal'])('heading font style %s, which leaves Heading 4 no rPr, reads back', async (style) => {
+    const { convertDocx } = await import('./converter');
+    const md = '---\nheader-font-style: ' + style + '\n---\n\n#### Four\n';
+    for (const templateDocx of [undefined, (await convertMdToDocx(markdown(''))).docx]) {
+      const { markdown: back } = await convertDocx((await convertMdToDocx(md, templateDocx ? { templateDocx } : undefined)).docx);
+      expect(parseFrontmatter(back).metadata.headerFontStyle).toEqual(parseFrontmatter(md).metadata.headerFontStyle);
+    }
+  });
+
+  it('a heading or title style that changes nothing else keeps its other properties', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(markdown('title-font-style: italic\nheader-font-style: normal'), { templateDocx: await barePropertiesTemplate() })).docx);
+    const styles = await zip.file('word/styles.xml')!.async('string');
+    expect(extractStyleBlock(styles, 'Title')).toBe('<w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:rPr><w:i/></w:rPr></w:style>');
+    expect(extractStyleBlock(styles, 'Heading2')).toBe('<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr></w:style>');
+    expect(extractStyleBlock(styles, 'Heading4')).not.toContain('<w:rPr');
   });
 });

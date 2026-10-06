@@ -14303,7 +14303,8 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   }
 
   // Helper: find a style block by styleId and extract rPr content, of a
-  // paragraph style but with `anyType` (see styleBlock)
+  // paragraph style but with `anyType` (see styleBlock): '' for a style with
+  // none, as export writes a heading's that sets nothing, and null for no style
   function getStyleRPr(id: string, anyType = false): string | null {
     const block = styleBlock(id, anyType);
     if (block === null) return null;
@@ -14312,7 +14313,7 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
     const rPrStart = block.indexOf('<w:rPr>', pPrEnd !== -1 ? pPrEnd : 0);
     const rPrEnd = block.indexOf('</w:rPr>', rPrStart !== -1 ? rPrStart : 0);
     if (rPrStart !== -1 && rPrEnd !== -1) return block.substring(rPrStart, rPrEnd + '</w:rPr>'.length);
-    return null;
+    return '';
   }
 
   function extractAttr(rpr: string, prefix: string): string | null {
@@ -14395,7 +14396,7 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
 
   for (const id of ids) {
     const rpr = getStyleRPr(id);
-    if (rpr) {
+    if (rpr !== null) {
       fonts.push(extractFont(rpr));
       sizes.push(extractSizeHp(rpr));
       styles.push(extractStyle(rpr, getStylePPr(id)));
@@ -14436,7 +14437,7 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
 
   // Title extraction
   const titleRpr = getStyleRPr('Title');
-  if (titleRpr) {
+  if (titleRpr !== null) {
     const tFont = extractFont(titleRpr);
     if (tFont && tFont !== bodyFont) result.titleFont = [tFont];
     const tSizeHp = extractSizeHp(titleRpr);
