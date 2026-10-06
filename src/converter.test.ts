@@ -7156,6 +7156,21 @@ describe('HTML around a table in its block', () => {
     expect(markdown).toBe('Text.\n\n<div>\n<p>Table 2.</p>\n' + table('B') + '\n</div>\n');
   });
 
+  test.each([
+    ['deletes a grid table before it', '+---+\n| P |\n+===+\n| p |\n+---+\n\n', (xml: string) => xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, ''), ''],
+    ['adds a table before it', '', (xml: string) => xml.replace('<w:tbl>', '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>New</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/><w:tbl>'), table('New') + '\n\n'],
+  ])('keeps a table HTML with the HTML around it on its lines where Word %s', async (_name, other, edit, added) => {
+    // It took the format export wrote at its index, another table's, and
+    // the HTML went around it as blocks, which the next export showed as text
+    const md = '<div>\n<p>Cap</p>\n' + table('A') + '\n</div>\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(other + md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', edit(xml));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe(added + md);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
   test('puts the HTML around a table back with the same table after Word deletes one before it with the same first row', async () => {
     // The first row matched the deleted table's, which took the index
     const md = '<p>Cap A</p>\n<table><tr><td>H</td></tr><tr><td>a</td></tr></table>\n\n<p>Cap B</p>\n<table><tr><td>H</td></tr><tr><td>b</td></tr></table>\n';
@@ -7370,7 +7385,7 @@ describe('HTML around a table in its block', () => {
     zip.file('word/document.xml', xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, tbl => tbl.replace('>a<', '>z<') + '<w:p/>' + tbl));
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
     expect(markdown.startsWith('<table>')).toBe(true);
-    expect(markdown).toContain('<div><p>Cap</p>\n\n+-----+\n| H   |\n+-----+\n| a   |\n+-----+');
+    expect(markdown.slice(markdown.indexOf('<div>'))).toBe('<div><p>Cap</p>\n<table>\n  <tr>\n    <td>\n      <p>H</p>\n    </td>\n  </tr>\n  <tr>\n    <td>\n      <p>a</p>\n    </td>\n  </tr>\n</table>\n</div>\n');
   });
 
   test.each(['{++a++}', '{--a--}', '{==a==}', '{~~a~>b~~}'])('keeps the HTML around a table off a table before it with %s', async cell => {
@@ -7434,7 +7449,7 @@ describe('HTML around a table in its block', () => {
     zip.file('word/document.xml', xml.replace('<w:tbl>', /<w:tbl>[\s\S]*?<\/w:tbl>/.exec(added)![0] + '<w:p/><w:tbl>'));
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
     expect(markdown.startsWith('<table>')).toBe(true);
-    expect(markdown).toContain('<div><p>Cap</p>\n\n| H | I |\n| --- | --- |\n| a | |');
+    expect(markdown.slice(markdown.indexOf('<div>'))).toBe('<div><p>Cap</p>\n<table>\n  <tr>\n    <th>\n      <p>H</p>\n    </th>\n    <th>\n      <p>I</p>\n    </th>\n  </tr>\n  <tr>\n    <td>\n      <p>a</p>\n    </td>\n    <td>\n      <p></p>\n    </td>\n  </tr>\n</table>\n</div>\n');
   });
 
   test('keeps the HTML around a table with a cell over two rows', async () => {

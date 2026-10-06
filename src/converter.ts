@@ -8416,10 +8416,6 @@ function renderTableOrFallback(
   tableIndex?: number,
   scope = '',
 ): { directivePrefix: string; body: string; before?: string; after?: string } {
-  // A cell holds no range that goes on past it, and a range open around the
-  // table, with no item in it, stays open for the text after. A cell's
-  // comments are the browser's where the table was HTML.
-  if (renderOpts?.openIdComments || storedFormat === 'html') renderOpts = { ...renderOpts, openIdComments: undefined, htmlCells: storedFormat === 'html' };
   const { fontPrefix, commentUnsafeFont: forceHtmlTable } = buildTableDirectivePrefix(renderOpts, tableIndex);
   let htmlFontAttrs = '';
   const isLandscapeTable = tableIndex !== undefined && renderOpts?.landscapeTableIndices?.has(tableIndex);
@@ -8476,6 +8472,14 @@ function renderTableOrFallback(
   const aroundKey = index && (extra ? own ?? atIndex : fewer ? undefined : index.nth.get(identity + '\n' + alikeBefore)?.find(unused) ?? own);
   const around = aroundKey !== undefined ? mapping?.get(aroundKey) : undefined;
   if (aroundKey !== undefined) renderOpts?.usedTableHtmlAround?.add(aroundKey);
+  // A table that takes it was HTML, and stays HTML with the HTML on its
+  // lines, though the format export wrote at its index, where Word added or
+  // deleted a table before it, is another table's
+  if (around) storedFormat = 'html';
+  // A cell holds no range that goes on past it, and a range open around the
+  // table, with no item in it, stays open for the text after. A cell's
+  // comments are the browser's where the table was HTML.
+  if (renderOpts?.openIdComments || storedFormat === 'html') renderOpts = { ...renderOpts, openIdComments: undefined, htmlCells: storedFormat === 'html' };
   const r = (body: string) => {
     // Neither, where one can't be read as it was, as a <pre> before the
     // table and its end after it
