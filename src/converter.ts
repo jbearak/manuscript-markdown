@@ -16,7 +16,7 @@ import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from '
 import { blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, customStyleId, directiveRest, htmlBlocksIn, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, startsHtmlBlock } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
-import { matchTables, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
+import { matchTables, paragraphStartFingerprint, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
 import { htmlPieceAt } from './html-table-parser';
 import { publicStyleNameForZoteroId, zoteroStyleIdForName } from './csl-loader';
 import { extractZoteroKey } from './zotero-link';
@@ -92,6 +92,30 @@ export async function extractBlockquotePreContentBlankLineMapping(data: Uint8Arr
       // groups in source) in addition to non-negative blank-line counts.
       if (isNaN(groupIdx) || typeof count !== 'number' || !Number.isInteger(count) || count < -1) continue;
       mapping.set(groupIdx, count);
+    }
+    return mapping.size > 0 ? mapping : null;
+  } catch {
+    return null;
+  }
+}
+/** Where export put the quote groups whose indent reads as in a deeper list
+ *  item, by group index: the list level (0 in none) and the quote levels
+ *  (see blockquoteListPlaces in md-to-docx.ts) */
+export async function extractBlockquoteListLevelMapping(data: Uint8Array | JSZip): Promise<Map<number, BlockquotePlace> | null> {
+  const mappingJson = await extractChunkedCustomProp(data, 'MANUSCRIPT_BLOCKQUOTE_LIST_LEVELS');
+  if (!mappingJson) return null;
+  try {
+    const parsedJson = JSON.parse(mappingJson);
+    if (!parsedJson || typeof parsedJson !== 'object') return null;
+    const mapping = new Map<number, BlockquotePlace>();
+    for (const [key, place] of Object.entries(parsedJson)) {
+      const groupIdx = parseInt(key, 10);
+      if (isNaN(groupIdx) || !Array.isArray(place) || place.length !== 6) continue;
+      const [listLevel, level, start, paragraphs, groups, order] = place;
+      if (!Number.isInteger(listLevel) || listLevel < 0 || !Number.isInteger(level) || level < 1 || typeof start !== 'string'
+          || !Number.isInteger(paragraphs) || paragraphs < 1 || !Number.isInteger(groups) || groups < 1
+          || !Number.isInteger(order) || order < 0 || order >= groups) continue;
+      mapping.set(groupIdx, [listLevel, level, start, paragraphs, groups, order]);
     }
     return mapping.size > 0 ? mapping : null;
   } catch {
@@ -9904,6 +9928,20 @@ function inferListContinuationForBlockquote(
   return fallback;
 }
 
+/** A quote at the list level and quote levels export recorded for it, where
+ *  its indent is still theirs and the item, at that level, is open */
+function recordedBlockquotePlace(
+  item: Extract<ContentItem, { type: 'para' }>,
+  [listLevel, level]: BlockquotePlace,
+  listContexts: Map<number, StructuralListContext>,
+): { blockquoteLevel: number; listContinuation?: ListContinuation } | undefined {
+  const unit = item.blockquoteIndentUnitTwips;
+  if (unit === undefined || item.paragraphLeftIndentTwips !== unit * level + 720 * listLevel) return undefined;
+  if (listLevel === 0) return { blockquoteLevel: level };
+  const context = listContexts.get(listLevel - 1);
+  return context && { blockquoteLevel: level, listContinuation: continuationOf(context, listContexts) };
+}
+
 function alertGlyphForType(alertType: GfmAlertType): string | undefined {
   for (const [glyph, type] of Object.entries(ALERT_GLYPH_TO_TYPE)) {
     if (type === alertType) return glyph;
@@ -10052,7 +10090,103 @@ function deriveBlockquoteSpacingFromStructure(content: ContentItem[]): {
   };
 }
 
-function annotateStructuralParagraphMetadata(content: ContentItem[]): {
+/** A quote group's list level and quote level, as export records them where
+ *  its indent doesn't tell them, the fingerprint of its start, the number of
+ *  its paragraphs, the number of groups with that start and number, and its
+ *  place among those groups (see blockquoteListLevelProps in md-to-docx.ts) */
+type BlockquotePlace = [listLevel: number, level: number, start: string, paragraphs: number, groups: number, order: number];
+
+/** The text of the paragraph at `index` in content, as export finds it in
+ *  the paragraph it writes (see wordText there), past the label export
+ *  writes at the start of an alert's */
+function authoredParagraphText(content: ContentItem[], index: number, alertType: GfmAlertType | undefined): string {
+  const glyph = alertType !== undefined ? alertGlyphForType(alertType) : undefined;
+  // The label is the paragraph's first text, in bold
+  let label = alertType !== undefined && glyph ? glyph + ' ' + gfmAlertTitle(alertType) : undefined;
+  let text = '';
+  for (let j = index + 1; j < content.length && !isStructuralBoundaryItem(content[j]); j++) {
+    const item = content[j];
+    if (item.type !== 'text') continue;
+    if (label && item.formatting.bold && item.text.trim() === label) {
+      label = undefined;
+      continue;
+    }
+    label = undefined;
+    text += item.text;
+  }
+  return text;
+}
+
+/** The fingerprint of the start of the quote group whose first paragraph is
+ *  content[index], and the number of its paragraphs, as export takes them
+ *  (see blockquoteListLevelProps in md-to-docx.ts): the start of the first
+ *  of its paragraphs with text past an alert's label, which tells nothing
+ *  of which alert it is. Its paragraphs are those after it of the same
+ *  indent and kind, up to a spacer or another alert's label, as
+ *  annotateStructuralParagraphMetadata groups them. With the index of the
+ *  item after them */
+function quoteGroupIdentity(content: ContentItem[], index: number, first: ParaItem): [key: string, end: number] {
+  const blank = paragraphStartFingerprint('');
+  let start = paragraphStartFingerprint(authoredParagraphText(content, index, first.alertType));
+  let paragraphs = 1;
+  let j = index + 1;
+  for (; j < content.length; j++) {
+    const item = content[j];
+    if (item.type !== 'para') {
+      if (isStructuralBoundaryItem(item)) break;
+      continue;
+    }
+    if (item.isBlockquoteSpacer || !item.blockquoteLevel || item.paragraphLeftIndentTwips !== first.paragraphLeftIndentTwips
+      || (item.alertType || 'plain') !== (first.alertType || 'plain')
+      || (item.alertType !== undefined && paragraphStartsWithExportedAlertLead(content, j, item.alertType))) break;
+    paragraphs++;
+    if (start === blank) start = paragraphStartFingerprint(authoredParagraphText(content, j, item.alertType));
+  }
+  return [paragraphs + ':' + start, j];
+}
+
+/** The quote group whose first paragraph is at each index in content, as
+ *  its start and number of paragraphs (see quoteGroupIdentity) and its
+ *  place among the groups with them, with the number of those groups */
+function quoteGroupIdentities(content: ContentItem[]): Map<number, { key: string; order: number; count: () => number }> {
+  const counts = new Map<string, number>();
+  const groups = new Map<number, { key: string; order: number; count: () => number }>();
+  for (let i = 0; i < content.length;) {
+    const item = content[i];
+    if (item.type !== 'para' || !item.blockquoteLevel || item.isBlockquoteSpacer) {
+      i++;
+      continue;
+    }
+    const [key, end] = quoteGroupIdentity(content, i, item);
+    groups.set(i, { key, order: counts.get(key) ?? 0, count: () => counts.get(key)! });
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    i = end;
+  }
+  return groups;
+}
+
+/** The places export recorded for quote groups (`places`), by each one's
+ *  start and number of paragraphs and its place among the groups with them
+ *  (see recordedQuoteGroupPlace) */
+function quoteGroupPlacesByIdentity(places: Map<number, BlockquotePlace>): Map<string, BlockquotePlace> {
+  return new Map([...places.values()].map(place => [place[3] + ':' + place[2] + '#' + place[5], place]));
+}
+
+/** The place export recorded for the quote group whose first paragraph is
+ *  content[index], of those in `places` (see quoteGroupPlacesByIdentity):
+ *  the one recorded for a group with its start and number of paragraphs,
+ *  at its place among those groups, where there are as many in content as
+ *  in what export wrote. Not by the group's index, which a group Word added
+ *  before it, with other text, moves on, and gives it the record of the
+ *  group before it. Where Word added one with the same, neither can be told
+ *  apart, and none has a record */
+function recordedQuoteGroupPlace(places: Map<string, BlockquotePlace>, groups: Map<number, { key: string; order: number; count: () => number }>, index: number): BlockquotePlace | undefined {
+  const group = groups.get(index);
+  const place = group && places.get(group.key + '#' + group.order);
+  return place && place[4] === group.count() ? place : undefined;
+}
+
+function annotateStructuralParagraphMetadata(content: ContentItem[], blockquotePlaces?: Map<number, BlockquotePlace> | null): {
   derivedBlockquoteGaps: Map<number, number>;
   derivedBlockquotePreContentBlankLines: Map<number, number>;
   derivedBlockquotePostContentBlankLines: Map<number, number>;
@@ -10066,6 +10200,13 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
   let lastBlockquoteLevel: number | undefined;
   let lastBlockquoteType: GfmAlertType | 'plain' | undefined;
   let lastBlockquoteListLevel: number | undefined;
+  // The last quote's indent, and the place export recorded for its group
+  let lastBlockquoteIndent: number | undefined;
+  let lastBlockquotePlace: BlockquotePlace | undefined;
+  // The quote groups by the index of each one's first paragraph, and the
+  // records by group, where there are records (see recordedQuoteGroupPlace)
+  let quoteGroups: ReturnType<typeof quoteGroupIdentities> | undefined;
+  let placesByIdentity: Map<string, BlockquotePlace> | undefined;
   // The items under one at `level` end, as at an item there, or at a
   // paragraph or quote in the item, as buildMarkdown writes them, which
   // nothing after nests in
@@ -10113,7 +10254,20 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
       }
 
       if (item.blockquoteLevel) {
-        const inferred = inferListContinuationForBlockquote(item, listContexts);
+        // Where export recorded the group, which its indent reads as in a
+        // deeper item, it goes there, unless Word moved it, or added one
+        // with the same text (see recordedQuoteGroupPlace). A quote of the
+        // same indent and kind as the last one is in its group
+        const exportedLead = item.alertType !== undefined && paragraphStartsWithExportedAlertLead(content, i, item.alertType);
+        const inGroup = currentBlockquoteGroupIndex !== undefined && item.paragraphLeftIndentTwips === lastBlockquoteIndent
+          && (item.alertType || 'plain') === lastBlockquoteType && !exportedLead;
+        const recorded = inGroup ? lastBlockquotePlace
+          : blockquotePlaces ? recordedQuoteGroupPlace(placesByIdentity ??= quoteGroupPlacesByIdentity(blockquotePlaces), quoteGroups ??= quoteGroupIdentities(content), i)
+            : undefined;
+        const placed = recorded && recordedBlockquotePlace(item, recorded, listContexts);
+        lastBlockquotePlace = placed ? recorded : undefined;
+        lastBlockquoteIndent = item.paragraphLeftIndentTwips;
+        const inferred = placed || inferListContinuationForBlockquote(item, listContexts);
         if (inferred) {
           item.blockquoteLevel = inferred.blockquoteLevel;
           if (inferred.listContinuation) item.listContinuation = inferred.listContinuation;
@@ -10135,7 +10289,7 @@ function annotateStructuralParagraphMetadata(content: ContentItem[]): {
           || item.blockquoteLevel !== lastBlockquoteLevel
           || currentType !== lastBlockquoteType
           || listLevel !== lastBlockquoteListLevel
-          || (item.alertType !== undefined && paragraphStartsWithExportedAlertLead(content, i, item.alertType));
+          || exportedLead;
         if (startsNewGroup) {
           currentBlockquoteGroupIndex = nextBlockquoteGroupIndex++;
         }
@@ -13049,6 +13203,7 @@ export async function convertDocx(
     blockquoteGapMapping,
     blockquotePreContentBlankLineMapping,
     blockquotePostContentBlankLineMapping,
+    blockquoteListLevelMapping,
     blockquoteAlertStyleMapping,
     imageFormatMapping,
     noteImageFormatMapping,
@@ -13114,6 +13269,7 @@ export async function convertDocx(
     blockquoteGapMapping: extractBlockquoteGapMapping(zip),
     blockquotePreContentBlankLineMapping: extractBlockquotePreContentBlankLineMapping(zip),
     blockquotePostContentBlankLineMapping: extractBlockquotePostContentBlankLineMapping(zip),
+    blockquoteListLevelMapping: extractBlockquoteListLevelMapping(zip),
     blockquoteAlertStyleMapping: extractBlockquoteAlertStyleMapping(zip),
     imageFormatMapping: extractImageFormatMapping(zip),
     noteImageFormatMapping: extractNoteImageFormatMapping(zip),
@@ -13239,7 +13395,7 @@ export async function convertDocx(
     derivedBlockquoteGaps,
     derivedBlockquotePreContentBlankLines,
     derivedBlockquotePostContentBlankLines,
-  } = annotateStructuralParagraphMetadata(docContent);
+  } = annotateStructuralParagraphMetadata(docContent, blockquoteListLevelMapping);
   // Spacer markers have served their sole purpose as grouping boundaries; remove
   // them before all later structural scans and Markdown rendering.
   for (let i = docContent.length - 1; i >= 0; i--) {

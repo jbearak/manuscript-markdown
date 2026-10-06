@@ -11,7 +11,7 @@ import { isAbsolute, join, resolve } from 'path';
 import { parseBibtex, BibtexEntry } from './bibtex-parser';
 import { parseFrontmatter, maskFrontmatter, serializeFrontmatter, Frontmatter, noteTypeToNumber, type ColorScheme, type CustomStyleDef, parseColWidths, expandColWidths, colWidthsToPct } from './frontmatter';
 import { formatTableNumbers, parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping, type TableDigits, type TableDecimalMark, type TableDigitGrouping } from './table-number-format';
-import { tableContentsFingerprint, tableFirstRowText, tableIdentity, type TableIdentity, type TableNumberFormat } from './table-metadata';
+import { paragraphStartFingerprint, tableContentsFingerprint, tableFirstRowText, tableIdentity, type TableIdentity, type TableNumberFormat } from './table-metadata';
 import { alertColorsByScheme, getDefaultColorScheme } from './alert-colors';
 import { ZoteroBiblData, zoteroStyleFullId } from './converter';
 import { isGfmDisallowedRawHtml, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from './gfm';
@@ -1590,6 +1590,83 @@ function blockquoteSpacingMaps(tokens: MdToken[]) {
   return maps;
 }
 
+/**
+ * The quote groups import would read in a deeper list item than they're in,
+ * by group index, with the list level each is in (0 in none) and its quote
+ * levels, which import places it by (see MANUSCRIPT_BLOCKQUOTE_LIST_LEVELS).
+ * A quote's indent is its list item's and a step for each of its levels, so
+ * one right after a sublist, in the item above it or in no list, has the
+ * indent of one with fewer levels in the sublist, which import takes. A
+ * quote style's step is a list level's, and GitHub's a third of one. Import
+ * has a deeper item open where an item, or a paragraph or quote in one, was
+ * last, and none after another block or a quote in no list (see
+ * annotateStructuralParagraphMetadata in converter.ts).
+ */
+function blockquoteListPlaces(tokens: MdToken[]): Map<number, BlockquotePlace> {
+  const places = new Map<number, BlockquotePlace>();
+  // The depth of the deepest item import has open
+  let open = 0;
+  for (const token of tokens) {
+    const listLevel = token.listContinuation?.level ?? 0;
+    if (token.type === 'blockquote') {
+      const group = token.blockquoteGroupIndex;
+      // One of one level in no list has no indent to read
+      if (group !== undefined && !places.has(group) && open > listLevel && ((token.level || 1) > 1 || listLevel > 0)) {
+        places.set(group, [listLevel, token.level || 1]);
+      }
+      open = listLevel;
+    } else if (token.type === 'list_item') {
+      open = token.level || 1;
+    } else if (token.listContinuation) {
+      open = listLevel;
+    } else if (!(token.type === 'paragraph' && token.runs.length > 0 && token.runs.every(run => run.type === 'html_comment'))) {
+      // A comment's hidden paragraph may leave the items open
+      open = 0;
+    }
+  }
+  return places;
+}
+
+/** A quote group's list level and quote level */
+type BlockquotePlace = [listLevel: number, level: number];
+
+/** What tells import a quote group is the one export wrote, not one Word
+ *  added before it, which takes its index: the fingerprint of its first
+ *  paragraph with text, past an alert's label, which tells nothing of
+ *  which alert it is (see paragraphStartFingerprint), and the number of its
+ *  paragraphs. Once its first paragraph is written */
+interface QuoteGroupIdentity { start?: string; paragraphs: number }
+
+/** The start of a paragraph with no text, which a later paragraph of its
+ *  group replaces as the group's start */
+const blankParagraphStart = paragraphStartFingerprint('');
+
+/** The place of each group in `places`, with what tells import it's that
+ *  group, the number of groups that it tells of, as a quote Word added
+ *  with the same text tells of the one export wrote too, and import then
+ *  can't tell which is which, and the group's place among them, as one
+ *  Word added with other text before them moves each one's index to the
+ *  next one's */
+export function blockquoteListLevelProps(places: Map<number, BlockquotePlace>, identities: Map<number, QuoteGroupIdentity>): CustomPropEntry[] {
+  const key = (identity: QuoteGroupIdentity) => identity.paragraphs + ':' + identity.start;
+  const groups = new Map<string, number>();
+  const orders = new Map<number, number>();
+  for (const [index, identity] of [...identities].sort(([a], [b]) => a - b)) {
+    if (identity.paragraphs === 0) continue;
+    orders.set(index, groups.get(key(identity)) ?? 0);
+    groups.set(key(identity), (groups.get(key(identity)) ?? 0) + 1);
+  }
+  const mapping: Record<string, [number, number, string, number, number, number]> = {};
+  for (const [index, [listLevel, level]] of places) {
+    const identity = identities.get(index);
+    if (identity?.start !== undefined && identity.paragraphs > 0) {
+      mapping[String(index)] = [listLevel, level, identity.start, identity.paragraphs, groups.get(key(identity))!, orders.get(index)!];
+    }
+  }
+  if (Object.keys(mapping).length === 0) return [];
+  return chunkCustomProps('MANUSCRIPT_BLOCKQUOTE_LIST_LEVELS_', JSON.stringify(mapping));
+}
+
 // Assign a sequential blockquoteGroupIndex to each blockquote token so the
 // gap map can be correlated during docx→md conversion.  Groups are delimited
 // by alertFirst/alertLast boundaries set by annotateBlockquoteBoundaries.
@@ -2852,22 +2929,26 @@ const SHARED_HTML_AROUND_TABLES_WARNING = 'HTML around tables in one <pre> or si
 function wordTableTexts(xml: string): string[][] {
   return [...xml.matchAll(/<w:tr(?:\s[^>]*)?>([\s\S]*?)<\/w:tr>/g)].map(row => [...row[1].matchAll(/<w:tc(?:\s[^>]*)?>([\s\S]*?)<\/w:tc>/g)]
     .filter(cell => !/<w:vMerge\/>/.test(cell[1]))
-    .map(cell => {
-      let text = '';
-      let fields = 0;
-      for (const run of cell[1].matchAll(/<w:r(?:\s[^>]*)?>([\s\S]*?)<\/w:r>/g)) {
-        // The element, as text can't hold a <, which its attribute's can
-        const fieldChar = /<w:fldChar\s[^>]*w:fldCharType="(begin|end)"/.exec(run[1])?.[1];
-        if (fieldChar === 'begin') fields++;
-        else if (fieldChar === 'end') fields = Math.max(0, fields - 1);
-        else if (fields === 0 && !run[1].includes('<w:vanish/>')) {
-          for (const piece of run[1].matchAll(/<w:(t|delText)(?:\s[^>]*)?>([^<]*)<\/w:\1>|<w:(tab|noBreakHyphen|softHyphen)\/>/g)) {
-            text += piece[3] ? { tab: '\t', noBreakHyphen: '\u2011', softHyphen: '\u00AD' }[piece[3]] : decodeXmlText(piece[2]);
-          }
-        }
+    .map(cell => wordText(cell[1])));
+}
+
+/** The text of the runs in `xml`, as import reads it, but for a field's and
+ *  hidden text, as a comment's */
+function wordText(xml: string): string {
+  let text = '';
+  let fields = 0;
+  for (const run of xml.matchAll(/<w:r(?:\s[^>]*)?>([\s\S]*?)<\/w:r>/g)) {
+    // The element, as text can't hold a <, which its attribute's can
+    const fieldChar = /<w:fldChar\s[^>]*w:fldCharType="(begin|end)"/.exec(run[1])?.[1];
+    if (fieldChar === 'begin') fields++;
+    else if (fieldChar === 'end') fields = Math.max(0, fields - 1);
+    else if (fields === 0 && !run[1].includes('<w:vanish/>')) {
+      for (const piece of run[1].matchAll(/<w:(t|delText)(?:\s[^>]*)?>([^<]*)<\/w:\1>|<w:(tab|noBreakHyphen|softHyphen)\/>/g)) {
+        text += piece[3] ? { tab: '\t', noBreakHyphen: '\u2011', softHyphen: '\u00AD' }[piece[3]] : decodeXmlText(piece[2]);
       }
-      return text;
-    }));
+    }
+  }
+  return text;
 }
 
 function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel = 0, warnings?: string[], sourceLines?: string[]): MdToken[] {
@@ -4236,6 +4317,8 @@ export interface DocxGenState {
   blockquotePreContentBlankLines: Map<number, number>; // blank lines before group when previous non-blank source line is non-blockquote content
   blockquotePostContentBlankLines: Map<number, number>; // blank lines after group when next non-blank line is non-blockquote content
   blockquoteAlertMarkerInlineByGroup: Map<number, boolean>; // alert group index -> inline marker style
+  blockquotePlaces: Map<number, BlockquotePlace>; // the place of a quote group its indent doesn't tell, by group index (see blockquoteListPlaces)
+  blockquoteIdentities: Map<number, QuoteGroupIdentity>; // what tells import each quote group is the one written, by group index
   // Image tracking
   imageRelationships: Map<string, { rId: string; mediaPath: string }>; // dedup key (absPath + '\0' + syntax) -> { rId, media path }
   imageMediaPaths: Map<string, string>; // absPath -> mediaPath (for binary dedup across syntaxes)
@@ -8549,6 +8632,23 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         }
         state.bodyParagraphIndex++;
       }
+      // The group's start is its first paragraph with text past an alert's
+      // label, which tells nothing of which alert it is: Word can add
+      // another alert of the kind before it, whose label alone is the same
+      const group = token.type === 'blockquote' ? token.blockquoteGroupIndex : undefined;
+      if (group !== undefined) {
+        let identity = state.blockquoteIdentities.get(group);
+        if (!identity) state.blockquoteIdentities.set(group, identity = { paragraphs: 0 });
+        if (identity.start === undefined || identity.start === blankParagraphStart) {
+          const label = token.alertType && token.alertLead && options?.calloutLabels !== false ? ALERT_GLYPH_BY_TYPE[token.alertType] + ' ' + gfmAlertTitle(token.alertType) : '';
+          const text = wordText(paragraphXml);
+          identity.start = paragraphStartFingerprint(label && text.startsWith(label) ? text.slice(label.length) : text);
+        }
+        // The quote's paragraph, in its style, which an alert's hidden
+        // label alone doesn't get, and not the spacers around it, which
+        // have none
+        if (paragraphXml.includes('<w:pStyle ')) identity.paragraphs++;
+      }
       body += paragraphXml;
       // A hidden paragraph after a section ends, with nothing else since,
       // leaves the next section to start before it. Not one in a list, nor
@@ -8825,6 +8925,7 @@ export async function convertMdToDocx(
   // Number quote groups and collect the source spacing parseMd recorded on them
   annotateBlockquoteGroupIndices(tokens);
   const blockquoteSpacing = blockquoteSpacingMaps(tokens);
+  const blockquotePlaces = blockquoteListPlaces(tokens);
   const blockquoteGaps = blockquoteSpacing.gaps;
   const blockquotePreContentBlankLines = blockquoteSpacing.before;
   const blockquotePostContentBlankLines = blockquoteSpacing.after;
@@ -9009,6 +9110,8 @@ export async function convertMdToDocx(
     blockquotePreContentBlankLines,
     blockquotePostContentBlankLines,
     blockquoteAlertMarkerInlineByGroup,
+    blockquotePlaces,
+    blockquoteIdentities: new Map(),
     imageRelationships: new Map(),
     imageMediaPaths: new Map(),
     imageBinaries: new Map(),
@@ -9519,6 +9622,7 @@ export async function convertMdToDocx(
   customProps.push(...blockquotePreContentBlankLineProps(state.blockquotePreContentBlankLines));
   customProps.push(...blockquotePostContentBlankLineProps(state.blockquotePostContentBlankLines));
   customProps.push(...blockquoteAlertMarkerStyleProps(state.blockquoteAlertMarkerInlineByGroup));
+  customProps.push(...blockquoteListLevelProps(state.blockquotePlaces, state.blockquoteIdentities));
   if (explicitCalloutLabels !== undefined) {
     customProps.push({ name: 'MANUSCRIPT_CALLOUT_LABELS', value: String(explicitCalloutLabels) });
   }

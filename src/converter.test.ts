@@ -2279,6 +2279,130 @@ describe('Blocks in list items', () => {
     const md = '---\nblockquote-style: Quote\n---\n\n' + body;
     expect(await roundTrip(md)).toBe(md);
   });
+
+  test.each([
+    ['in the item above the sublist', 'Quote', '1. a\n   1. x\n\n   > > > q\n'],
+    ['out of the list', 'Quote', '1. a\n\n> > q\n'],
+    ['out of a bullet list, after its sublist', 'Quote', '- a\n  - x\n\n> > > q\n'],
+    ['in a bullet item above its sublist', 'IntenseQuote', '- a\n  - x\n\n  > > q\n'],
+    ['out of the list, four levels deep', 'GitHub', '1. a\n\n> > > > q\n'],
+    // Whose records tell of two quotes each, as export wrote two
+    ['out of each of two lists, with the same text', 'Quote', '1. a\n\n> > q\n\n2. b\n\n> > q\n'],
+  ])('keeps a quote right after a list where it is, %s, in Word\'s %s style', async (_name, style, body) => {
+    // Its indent, the same as a quote's at fewer levels in the item before
+    // it, put it in that item
+    const md = style === 'GitHub' ? body : '---\nblockquote-style: ' + style + '\n---\n\n' + body;
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  // The Markdown of a Word document of `body`, made from export's document
+  // of `md`, with its styles and numbering
+  const imported = async (md: string, body: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<w:body>[\s\S]*?(?=<w:sectPr)/, () => '<w:body>' + body));
+    return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+  };
+
+  test('reads a quote after an item at a level Word skips to where it is, the next time too', async () => {
+    // At the indent of a quote in the item, as Markdown nests the item, it
+    // went in the item the next time
+    const markdown = await imported('---\nblockquote-style: Quote\n---\n\n1. a\n\n> q\n',
+      '<w:p><w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="2"/></w:numPr></w:pPr><w:r><w:t>a</w:t></w:r></w:p>'
+      + '<w:p><w:pPr><w:pStyle w:val="Quote"/><w:ind w:left="1440"/></w:pPr><w:r><w:t>q</w:t></w:r></w:p>');
+    expect(markdown).toBe('---\nblockquote-style: Quote\n---\n\n1. a\n\n> > q\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('reads a quote Word moved from where export put it by its indent', async () => {
+    const md = '---\nblockquote-style: Quote\n---\n\n1. a\n   1. x\n\n   > > > q\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace('<w:pStyle w:val="Quote"/><w:spacing w:after="0"/><w:ind w:left="2880"/>', () => '<w:pStyle w:val="Quote"/><w:spacing w:after="0"/><w:ind w:left="2160"/>'));
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toBe('---\nblockquote-style: Quote\n---\n\n1. a\n   1. x\n\n      > q\n');
+  });
+
+  /** The Markdown of the Quote-style export of 1. a, then > > q after the
+   *  list, with `edit` made to its XML */
+  const editedQuoteAfterList = async (edit: (xml: string) => string) => {
+    const md = '---\nblockquote-style: Quote\n---\n\n1. a\n\n> > q, quoted at a length past what import compares\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = edit(xml);
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+  };
+
+  test.each([
+    ['other text', 'x'],
+    // Which tells of the quote export placed as well as that one does, so
+    // import can't tell which is which, and two such quotes where export
+    // wrote one
+    ['the text of the one export placed', 'q, quoted at a length past what import compares'],
+  ])('reads a quote Word added before one export placed, with %s, by its indent', async (_name, text) => {
+    // The place export recorded for the quote went to the one Word added,
+    // which it took out of the item to two levels
+    const added = '<w:p><w:pPr><w:pStyle w:val="Quote"/><w:ind w:left="1440"/></w:pPr><w:r><w:t>' + text + '</w:t></w:r></w:p>';
+    const markdown = await editedQuoteAfterList(xml => xml.replace('<w:t>a</w:t></w:r></w:p>', () => '<w:t>a</w:t></w:r></w:p>' + added));
+    expect(markdown).toStartWith('---\nblockquote-style: Quote\n---\n\n1. a\n\n   > ' + text + '\n');
+  });
+
+  test('keeps quotes with the same text where export put them after a quote Word added before them', async () => {
+    // An item's quote and a quote after the list with the same indent and
+    // text: the list level export recorded for the second, by its index,
+    // went to the first, which the added quote gave that index, and took it
+    // out of its item
+    const md = '---\nblockquote-style: Quote\n---\n\nintro\n\n- item\n\n  > q\n\n> > q\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const added = '<w:p><w:pPr><w:pStyle w:val="Quote"/></w:pPr><w:r><w:t>other</w:t></w:r></w:p><w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p>';
+    const edited = xml.replace(/<w:p [^>]*>(?:(?!<\/w:p>).)*<w:t>intro<\/w:t>/, match => added + match);
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toStartWith('---\nblockquote-style: Quote\n---\n\n> other\n\nintro\n\n- item\n');
+    expect(markdown).toEndWith('\n  > q\n\n> > q\n');
+  });
+
+  test('reads a quote whose start Word changed by its indent', async () => {
+    // The text no longer tells it's the quote export recorded the place of
+    const markdown = await editedQuoteAfterList(xml => xml.replace('<w:t>q, quoted', () => '<w:t>r, quoted'));
+    expect(markdown).toBe('---\nblockquote-style: Quote\n---\n\n1. a\n\n   > r, quoted at a length past what import compares\n');
+  });
+
+  test('keeps a quote where it is with its text changed past its start', async () => {
+    const markdown = await editedQuoteAfterList(xml => xml.replace('compares</w:t>', () => 'checks</w:t>'));
+    expect(markdown).toBe('---\nblockquote-style: Quote\n---\n\n1. a\n\n> > q, quoted at a length past what import checks\n');
+  });
+
+  const labelOnlyAlert = '1. a\n\n> > > > [!NOTE]\n> > > >\n> > > > body\n';
+
+  test('reads an alert Word added before one export placed whose first paragraph is its label alone by its indent', async () => {
+    // The label alone, the same for any alert of the kind, told import the
+    // added alert was the one export recorded the place of
+    const zip = await JSZip.loadAsync((await convertMdToDocx(labelOnlyAlert)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const paragraph = (text: string) => new RegExp('<w:p [^>]*><w:pPr><w:pStyle w:val="GitHubNote"/>(?:(?!</w:p>).)*' + text + '(?:(?!</w:p>).)*</w:p>').exec(xml)?.[0] ?? '';
+    const added = paragraph('※ Note') + paragraph('<w:t>body</w:t>').replace('<w:t>body</w:t>', '<w:t>other</w:t>');
+    expect(added).toContain('<w:t>other</w:t>');
+    zip.file('word/document.xml', xml.replace('<w:t>a</w:t></w:r></w:p>', () => '<w:t>a</w:t></w:r></w:p>' + added));
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toStartWith('1. a\n\n   > [!NOTE]\n   >\n   > other\n');
+  });
+
+  test.each([
+    ['shown', '', labelOnlyAlert, labelOnlyAlert],
+    // Its blank line goes as it does in a list item
+    ['hidden', '---\ncallout-labels: false\n---\n\n', labelOnlyAlert, '1. a\n\n> > > > [!NOTE]\n> > > > body\n'],
+  ])('keeps an alert whose first paragraph is its label alone where it is after a list, with labels %s', async (_name, frontmatter, body, expected) => {
+    // With its label hidden, export leaves the first paragraph out, and the
+    // record had that paragraph's empty start, which Word hasn't
+    const markdown = await roundTrip(frontmatter + body);
+    expect(markdown).toBe(frontmatter + expected);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
 });
 
 describe('Lists nested in lists of the other kind', () => {

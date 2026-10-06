@@ -83,6 +83,16 @@ function fingerprint(text: string): string {
   return text.length + ':' + (hash >>> 0).toString(16);
 }
 
+/** The start of a paragraph's text, as export finds it in the paragraph it
+ *  writes and import in the paragraph it reads (see identityCellText), its
+ *  first 32 characters, hashed, which edits past them leave alone. Import
+ *  applies the place export records for a quote group only to a group whose
+ *  start this is, of its first paragraph with text past an alert's label
+ *  (see blockquoteListLevelProps in md-to-docx.ts) */
+export function paragraphStartFingerprint(text: string): string {
+  return fingerprint(identityCellText(text).slice(0, 32));
+}
+
 /** Which table's text the rows' cells' `rows` are, as both find it: each
  *  cell's text, row by row, but for the empty cells at a row's end, as Word
  *  pads a short row with, hashed */
