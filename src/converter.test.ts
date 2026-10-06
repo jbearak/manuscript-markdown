@@ -13450,6 +13450,118 @@ describe('Highlights across runs', () => {
     expect(await roundTrip(md)).toBe(md);
   });
 
+  /** The document export makes of `template`, with its run of XX as `runs`,
+   *  which hold its note's reference in place of its own */
+  const withNoteIn = async (runs: string, template = 'XX[^1]\n\n[^1]: N') => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(template)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const reference = '<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="1"/></w:r>';
+    expect(xml).toContain(reference);
+    const moved = xml.replace(reference, '').replace(/<w:r>(?:(?!<w:r>).)*?<w:t[^>]*>XX<\/w:t><\/w:r>/s, runs);
+    zip.file('word/document.xml', moved);
+    return zip.generateAsync({ type: 'uint8array' });
+  };
+  const highlightedNote = '<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/><w:highlight w:val="yellow"/></w:rPr><w:footnoteReference w:id="1"/></w:r>';
+  const struck = (text: string) => highlighted(text, '<w:strike/>');
+
+  test.each([
+    ['a struck } and code with a deletion\'s closer', 'XX[^1]', tracked('del', struck('}') + code('a --}') + highlightedNote),
+      '{--~~==\\}==~~--}{~~==`a --}`[^1]==~>~~}'],
+    ['a struck } and code with an insertion\'s closer', 'XX[^1]', tracked('ins', struck('}') + code('a ++}') + highlightedNote),
+      '{++~~==\\}==~~++}{~~~>==`a ++}`[^1]==~~}'],
+    ['code with the closer, then a struck }', 'XX[^1]', tracked('del', code('a --}') + struck('}') + highlightedNote),
+      '{~~==`a --}`==~>~~}{--==~~}~~[^1]==--}'],
+    ['a > after struck text and code with the closer', 'XX[^1]', tracked('del', highlightedNote + struck('a') + highlighted('&gt;') + code('a --}')),
+      '{--==[^1]~~a~~>==--}{~~==`a --}`==~>~~}'],
+    ['text with a ~> and code with the closer', 'XX[^1]', tracked('del', highlighted('a ~&gt; b') + code('c --}') + highlightedNote),
+      '{--==a ~> b==--}{~~==`c --}`[^1]==~>~~}'],
+    ['a struck } and code with the closer before an insertion', 'XX[^1]', tracked('del', struck('}') + code('a --}') + highlightedNote) + tracked('ins', plain('c')),
+      '{~~~~==\\}==~~==`a --}`[^1]==~>c~~}'],
+    ['a struck } and code with the closer in a comment\'s range', 'P {==XX==}{>>c<<} Q[^1]', tracked('del', struck('}') + code('a --}') + highlightedNote),
+      'P {=={--~~==\\}==~~--}{~~==`a --}`[^1]==~>~~}==}{>>c<<} Q'],
+  ])('keeps a tracked change\'s highlight with a note reference, %s, in spans the change\'s can hold', async (_name, template, runs, md) => {
+    // Its one span had the closer and what a substitution can't hold, as
+    // {~~==~~}~~`a --}`[^1]==~>~~}, whose ~~} ended it, and Word lost the
+    // change and the highlight of the text after
+    const docx = await withNoteIn(runs, template + '\n\n[^1]: N');
+    const withNote = md + '\n\n[^1]: N\n';
+    expect(await markdownOf(docx)).toBe(withNote);
+    expect(await shownRuns((await convertMdToDocx(withNote)).docx)).toEqual(await shownRuns(docx));
+    expect(await roundTrip(withNote)).toBe(withNote);
+  });
+
+  test('keeps a tracked change\'s highlight with a note reference in one span where it holds a struck } that reads as a tag', async () => {
+    // Whose } can't close a ~~ before the letter after it
+    const docx = await withNoteIn(tracked('del', struck('}') + highlighted('b') + code('a --}') + highlightedNote));
+    const md = '{~~==<s>}</s>b`a --}`[^1]==~>~~}\n\n[^1]: N\n';
+    expect(await markdownOf(docx)).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    ['text', highlightedNote + highlighted('a='), '==[^1]a&#61;=='],
+    ['an = alone', highlightedNote + highlighted('='), '==[^1]&#61;=='],
+    ['text with a backslash', highlightedNote + highlighted('a\\='), '==[^1]a\\\\&#61;=='],
+    ['text of another color', highlightedNote.replace('yellow', 'red') + highlighted('a=', '', 'red'), '==[^1]a&#61;=={red}'],
+    ['text after an equation', highlighted('b') + '<m:oMath><m:r><m:t>q</m:t></m:r></m:oMath>' + highlighted('a=') + plain(' ') + highlightedNote, '==&#98;$q$&#97;&#61;== ==[^1]=='],
+    ['text before an equation', highlightedNote + highlighted('a=') + '<m:oMath><m:r><m:t>q</m:t></m:r></m:oMath>', '==[^1]a&#61;==$q$'],
+    ['text in an insertion', tracked('ins', highlightedNote + highlighted('a=')), '{++==[^1]a&#61;==++}'],
+    ['text before =b', highlightedNote + highlighted('a=') + plain('=b'), '==[^1]a&#61;==\\=b'],
+  ])('keeps the highlight of %s that ends in = after a note reference', async (_name, runs, md) => {
+    // The = ran into the highlight's closing ==, as in ==[^1]a===, which
+    // export read as the highlight's closer, and the = after it without it
+    const docx = await withNoteIn(runs);
+    const withNote = md + '\n\n[^1]: N\n';
+    expect(await markdownOf(docx)).toBe(withNote);
+    expect(await shownRuns((await convertMdToDocx(withNote)).docx)).toEqual(await shownRuns(docx));
+    expect(await roundTrip(withNote)).toBe(withNote);
+  });
+
+  test('writes a long run in a tracked change\'s highlight that its span can\'t hold whole in linear time', () => {
+    // Each group the span held in it was found from the run's whole length
+    const deleted = { type: 'deletion', author: 'A', date: '' } as const;
+    const item = (text: string, formatting: Partial<RunFormatting> = {}) =>
+      ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, highlight: true, ...formatting }, revision: deleted });
+    const note = (k: number) =>
+      ({ type: 'footnote_ref', noteId: String(k), noteKind: 'footnote', commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, highlight: true }, revision: deleted });
+    const time = (n: number) => {
+      const items = [{ type: 'para' }, ...Array.from({ length: n }, (_, k) => [item('}', { strikethrough: true }), item(' b'), item('c --}', { code: true }), note(k + 1)]).flat()];
+      let fastest = Infinity;
+      for (let run = 0; run < 5; run++) {
+        const start = performance.now();
+        const markdown = buildMarkdown(items as ContentItem[], new Map());
+        expect(markdown.slice(markdown.lastIndexOf('{--~~'))).toBe('{--~~==\\}==~~--}{--== b==--}{~~==`c --}`[^' + n + ']==~>~~}');
+        fastest = Math.min(fastest, performance.now() - start);
+      }
+      return fastest;
+    };
+    const small = time(400);
+    expect(time(800) / small).toBeLessThan(3);
+  });
+
+  test('writes the = that ends a highlight after a note reference and many backslashes in linear time', () => {
+    // A regex found the backslashes before the = from each of them in turn,
+    // and past some thousands of them gave up, which left the = as it was
+    const highlight = { ...DEFAULT_FORMATTING, highlight: true };
+    const time = (n: number) => {
+      const items = Array.from({ length: 5 }, (_, k) => [{ type: 'para' },
+        { type: 'footnote_ref', noteId: String(k + 1), noteKind: 'footnote', commentIds: new Set(), formatting: highlight },
+        { type: 'text', text: '\\'.repeat(n) + 'a=', commentIds: new Set(), formatting: highlight }]).flat();
+      let fastest = Infinity;
+      for (let run = 0; run < 3; run++) {
+        const start = performance.now();
+        const markdown = buildMarkdown(items as ContentItem[], new Map());
+        fastest = Math.min(fastest, performance.now() - start);
+        expect(markdown.endsWith('a&#61;==')).toBe(true);
+      }
+      return fastest;
+    };
+    const small = time(4000);
+    expect(time(8000) / small).toBeLessThan(3);
+    // Where the regex gave up
+    time(16000);
+  });
+
   test('reads a highlighted run of many line breaks in linear time', async () => {
     // A regex with a lazy middle found the breaks at its edges, which past
     // some thousands of them found no match and threw
