@@ -5521,6 +5521,10 @@ function canJoinSpans(beforeEnd: string, after: string): boolean {
   const a = beforeEnd.slice(-1);
   const b = after.charAt(0);
   if (!a || !b) return false;
+  // In an HTML table's cell that holds what HTML can't, the runs are HTML,
+  // whose tags and references read as they do next to anything, and what
+  // Markdown would read at the seam is text
+  if (!readsMarkdown) return true;
   if (/\s/.test(a) || /\s/.test(b)) return true;
   if (/[\p{L}\p{N}\]]/u.test(a) && /[\p{L}\p{N}]/u.test(b)) return true;
   if (a === ']' && /^(?:\*|==|~~|<)/.test(after)) return true;

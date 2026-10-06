@@ -6022,6 +6022,22 @@ describe('Word text that reads as Markdown', () => {
     expect(markdown).toContain('<p>==<b>a</b><i>b</i>=={++x++}</p>');
   });
 
+  test.each([
+    ['a bold word before a period', [['word', { bold: true }], ['.', {}]], '{++word.++}'],
+    ['a period before an underlined word', [['.', {}], ['word', { underline: true }]], '{++.word++}'],
+    // Its & as XML writes it
+    ['an ampersand before a letter in superscript', [['a&', {}], ['b', { superscript: true }]], '{++a&amp;b++}'],
+    ['a letter before one highlighted', [['a', {}], ['b', { highlight: true }]], '{++a==b==++}'],
+  ])('joins the change of %s in an HTML table\'s cell that holds what HTML can\'t', async (_name, runs, expected) => {
+    // The tags and references of its runs, read as Markdown's delimiters
+    // and text, split it, which then came back with a second span's braces
+    const revision: RevisionInfo = { type: 'addition', author: 'A', date: '' };
+    const items = (runs as [string, Partial<RunFormatting>][]).map(([text, formatting]): ContentItem =>
+      ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting }, revision }));
+    const { text: cell } = await fallbackCell(items);
+    expect(cell).toBe(expected);
+  });
+
   test.each(['[@a](b)', '[-@a](b)', '[@a]{.underline}', '[@a][b]'])('writes %s with the citation export reads in it', async (text) => {
     // Its [ was escaped as a link's, so a citation whose key is missing,
     // which export writes as its text, came back as text, and stayed text
