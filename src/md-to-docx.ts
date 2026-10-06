@@ -8090,12 +8090,12 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   // Keep imported Zotero metadata even when there are no live citation fields.
   // A marker with no entries to list, or no citeproc engine, still gets the
   // field, empty, which import reads back as the marker, so the marker keeps
-  // its place, and the missing-key notes after it theirs. At the end, where
-  // the bibliography goes anyway, import drops the marker, so there it gets
-  // none, unless footnote or endnote definitions, which import writes last,
-  // follow it.
+  // its place, and the missing-key notes after it theirs. At the end of the
+  // body, where the bibliography goes anyway, import drops the marker, even
+  // before the notes' definitions, which Markdown writes after the body, so
+  // there it gets none.
   if (citeprocEngine && (state.citedKeys.size > 0 || options?.zoteroBiblData)
-    || hasBiblMarker && (!body.endsWith(BIBL_PLACEHOLDER) || state.hasFootnotes || state.hasEndnotes)) {
+    || hasBiblMarker && !body.endsWith(BIBL_PLACEHOLDER)) {
     biblXml += generateBibliographyXml(citeprocEngine, options?.zoteroBiblData, frontmatter?.bibliographyHangingIndent);
   }
   if (state.missingKeys.size > 0) {

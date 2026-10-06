@@ -11092,6 +11092,20 @@ export function buildMarkdown(
   // Trailing empty revised heading: serialize its deferred marker.
   flushPendingHeadingCriticMarker();
 
+  // Leave out a <!-- references --> marker the body ends with, where export
+  // puts the bibliography without one, at the end of the document, which in
+  // Markdown only the notes' definitions follow, so as not to add a marker
+  // that wasn't in the original: a block of its own, after a blank line, as
+  // import writes it, not one in the block of a line before it, as the HTML
+  // around a table is, which a comment that the marker ends can go on in
+  // past a blank line.
+  const body = output.join('');
+  const endingMarker = /(?:^|\n\n+)<!--\s*references\s*-->\s*$/.exec(body);
+  if (endingMarker) {
+    const line = body.slice(0, endingMarker.index + endingMarker[0].indexOf('<!--')).split('\n').length - 1;
+    if (!htmlBlocksIn(body).some(block => block.start < line && line < block.end)) output.splice(0, output.length, body.slice(0, endingMarker.index));
+  }
+
   // Append footnote definitions
   if (options?.notes) {
     // A note's images take the notes' image format mapping for its part, as
@@ -12225,17 +12239,6 @@ export async function convertDocx(
     if (sourcesIdx >= 0) {
       markdown = lines.slice(0, sourcesIdx).join('\n');
     }
-  }
-
-  // Strip trailing <!-- references --> marker when bibliography is at the end of the
-  // document (default position) so we don't inject a marker that wasn't in the original:
-  // a block of its own, after a blank line, as import writes it, not one in the block
-  // of a line before it, as the HTML around a table is, which a comment that
-  // the marker ends can go on in past a blank line.
-  const referencesMarker = /(?:^|\n\n+)<!--\s*references\s*-->\s*$/.exec(markdown);
-  if (referencesMarker) {
-    const line = markdown.slice(0, referencesMarker.index + referencesMarker[0].indexOf('<!--')).split('\n').length - 1;
-    if (!htmlBlocksIn(markdown).some(block => block.start < line && line < block.end)) markdown = markdown.slice(0, referencesMarker.index);
   }
 
   // Prepend YAML frontmatter if title or Zotero prefs were found

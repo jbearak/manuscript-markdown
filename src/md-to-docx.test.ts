@@ -5214,12 +5214,16 @@ describe('bibliography marker', () => {
       ['in a landscape section',
         'A.\n\n<!-- landscape -->\n\nX [@a].\n\n<!-- references -->\n\nY.\n\n<!-- /landscape -->\n\nB.',
         'A.\n\n<!-- landscape -->\n\nX [@a].\n\n<!-- references -->\n\n' + note + '\n\nY.\n\n<!-- /landscape -->\n\nB.'],
-      ['at the end, before the notes\' definitions', 'A.[^1]\n\n<!-- references -->\n\n[^1]: Note.', 'A.[^1]\n\n<!-- references -->\n\n[^1]: Note.'],
       ['spelled bibliography, as references', 'A.\n\n<!-- bibliography -->\n\nB.', 'A.\n\n<!-- references -->\n\nB.'],
     ])('MD→DOCX→MD keeps the marker %s, and the next round trip all of it', async (_, md, expected) => {
       const once = await roundTrip(md);
       expect(once).toBe(expected);
       expect(await roundTrip(once)).toBe(expected);
+    });
+
+    it('MD→DOCX→MD leaves out the marker at the end of the body, before the notes\' definitions, where the bibliography goes anyway', async () => {
+      expect(await roundTrip('A.[^1]\n\n<!-- references -->\n\n[^1]: Note.')).toBe('A.[^1]\n\n[^1]: Note.');
+      expect(await roundTrip('A.[^1]\n\n[^1]: Note.')).toBe('A.[^1]\n\n[^1]: Note.');
     });
 
     it('MD→DOCX→MD keeps the marker with a bibliography that has none of the cited keys', async () => {
@@ -5245,6 +5249,7 @@ describe('bibliography marker', () => {
       // Where the bibliography goes anyway, import drops the marker, and the
       // next export would drop the field
       expect(await documentXml((await convertMdToDocx('A.\n\n<!-- references -->')).docx)).not.toContain('ZOTERO_BIBL');
+      expect(await documentXml((await convertMdToDocx('A.[^1]\n\n<!-- references -->\n\n[^1]: Note.')).docx)).not.toContain('ZOTERO_BIBL');
     });
 
     it('writes the empty field as one hidden paragraph, which Word shows nothing of', async () => {

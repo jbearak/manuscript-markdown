@@ -873,6 +873,86 @@ describe('Bibliography marker placement', () => {
     expect(mdResult.markdown).not.toContain('<!-- bibliography -->');
   });
 
+  describe('with notes, whose definitions Markdown writes after the body', () => {
+    const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md, { bibtex: SAMPLE_BIBTEX })).docx)).markdown;
+    const fm = '---\ncsl: apa\n---\n\n';
+
+    test.each([
+      ['a footnote', fm + 'Text [@smith2020effects].[^1]\n\n[^1]: Note.\n'],
+      ['an endnote', '---\ncsl: apa\nnotes: endnotes\n---\n\nText [@smith2020effects].[^1]\n\n[^1]: Note.\n'],
+      ['notes that cite', fm + 'Text [@smith2020effects].[^1] More.[^2]\n\n[^1]: Note [@jones2019urban].\n\n[^2]: Another.\n'],
+      ['a table last', fm + 'Text [@smith2020effects].[^1]\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n[^1]: Note.\n'],
+      ['a list last', fm + 'Text [@smith2020effects].[^1]\n\n- a\n- b\n\n[^1]: Note.\n'],
+      ['a code block last', fm + 'Text [@smith2020effects].[^1]\n\n```\ncode\n```\n\n[^1]: Note.\n'],
+      ['a quote last', fm + 'Text [@smith2020effects].[^1]\n\n> Quote.\n\n[^1]: Note.\n'],
+      ['an HTML comment last', fm + 'Text [@smith2020effects].[^1]\n\n<!-- trailing -->\n\n[^1]: Note.\n'],
+      ['a comment on the last paragraph', fm + 'Text [@smith2020effects].[^1] {==Last==}{>>@A (2024-01-15 10:30) | c<<}\n\n[^1]: Note.\n'],
+    ])('adds no marker where export put the bibliography by itself, at the end of a document with %s', async (_name, md) => {
+      const once = await roundTrip(md);
+      expect(once).toBe(md);
+      expect(await roundTrip(once)).toBe(md);
+    });
+
+    test.each([
+      ['before the last paragraph', fm + 'Text [@smith2020effects].[^1]\n\n<!-- references -->\n\nAfter.\n\n[^1]: Note.\n'],
+      ['before an HTML comment that ends the body', fm + 'Text [@smith2020effects].[^1]\n\n<!-- references -->\n\n<!-- trailing -->\n\n[^1]: Note.\n'],
+    ])('keeps a marker %s', async (_name, md) => {
+      const once = await roundTrip(md);
+      expect(once).toBe(md);
+      expect(await roundTrip(once)).toBe(md);
+    });
+
+    test('a marker right before the notes, where export puts the bibliography anyway, comes back without it', async () => {
+      // Word has the bibliography at the end of the body either way, so
+      // import can't tell the marker from export's own placement
+      const md = fm + 'Text [@smith2020effects].[^1]\n\n[^1]: Note.\n';
+      const marked = fm + 'Text [@smith2020effects].[^1]\n\n<!-- references -->\n\n[^1]: Note.\n';
+      expect(await roundTrip(marked)).toBe(md);
+      expect(await roundTrip(md)).toBe(md);
+    });
+
+    test('a note style without a bibliography, whose empty field export puts at the end, comes back without a marker', async () => {
+      const tmpDir = mkdtempSync(join(tmpdir(), 'csl-test-'));
+      try {
+        const style = join(tmpDir, 'notes-only.csl');
+        writeFileSync(style, '<?xml version="1.0" encoding="utf-8"?>\n'
+          + '<style xmlns="http://purl.org/net/xbiblio/csl" class="note" version="1.0" default-locale="en-US">'
+          + '<info><title>Notes only</title><id>http://www.zotero.org/styles/notes-only</id><updated>2024-01-01T00:00:00+00:00</updated></info>'
+          + '<citation><layout suffix="."><names variable="author"><name/></names><text variable="title" prefix=", "/></layout></citation>'
+          + '</style>');
+        const md = '---\ncsl: ' + style + '\n---\n\nText.[^1]\n\n[^1]: See [@smith2020effects].\n';
+        const { docx } = await convertMdToDocx(md, { bibtex: SAMPLE_BIBTEX });
+        const JSZip = (await import('jszip')).default;
+        expect(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).toContain('ZOTERO_BIBL');
+        const once = (await convertDocx(docx)).markdown;
+        expect(once).toBe(md);
+        expect(await roundTrip(once)).toBe(md);
+      } finally {
+        rmSync(tmpDir, { recursive: true });
+      }
+    });
+
+    test('a Word document with footnotes and endnotes, its bibliography at the end, comes in without a marker', async () => {
+      const JSZip = (await import('jszip')).default;
+      const md = fm + 'Text [@smith2020effects].[^1] More.[^2]\n\n[^1]: One.\n\n[^2]: Two.\n';
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md, { bibtex: SAMPLE_BIBTEX })).docx);
+      // The second note made an endnote, as Word can have both
+      const documentXml = await zip.file('word/document.xml')!.async('string');
+      const footnotesXml = await zip.file('word/footnotes.xml')!.async('string');
+      const second = /<w:footnote w:id="2">[\s\S]*?<\/w:footnote>/.exec(footnotesXml)![0];
+      const root = /<w:footnotes [^>]*>/.exec(footnotesXml)![0];
+      zip.file('word/document.xml', documentXml.replace('<w:footnoteReference w:id="2"/>', '<w:endnoteReference w:id="2"/>'));
+      zip.file('word/footnotes.xml', footnotesXml.replace(second, ''));
+      zip.file('word/endnotes.xml', root.replace('<w:footnotes', '<w:endnotes')
+        + second.replace(/w:footnote\b/g, 'w:endnote').replace(/w:footnoteRef\b/g, 'w:endnoteRef') + '</w:endnotes>');
+      expect(documentXml.lastIndexOf('ZOTERO_BIBL')).toBeGreaterThan(documentXml.lastIndexOf('More.'));
+
+      const imported = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+      expect(imported.markdown).toBe(md);
+      expect(await roundTrip(imported.markdown)).toBe(md);
+    });
+  });
+
   test('<!-- bibliography --> alias round-trips as <!-- references -->', async () => {
     const md = '---\ncsl: apa\n---\n\nMain text [@smith2020effects].\n\n<!-- bibliography -->\n\nAfter bib.\n';
     const docxResult = await convertMdToDocx(md, { bibtex: SAMPLE_BIBTEX });
