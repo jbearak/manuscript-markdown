@@ -10610,8 +10610,8 @@ export function buildMarkdown(
   let mathInParagraph: { prefix: string; sameLine: boolean; quoted: boolean } | undefined;
   // The paragraph whose text is being written
   let currentPara: Extract<ContentItem, { type: 'para' }> | undefined;
-  // Where the line end after an alert's marker is in output, which goes
-  // where nothing follows the marker in its paragraph
+  // Where the space or line end after an alert's marker is in output, which
+  // goes where nothing follows the marker in its paragraph
   let alertMarkerLineEnd: number | undefined;
   // Comment bodies from a display equation that text follows in its Word
   // paragraph, which go after that text
@@ -11161,7 +11161,15 @@ export function buildMarkdown(
             if (nextIsDisplayMath) output.push(itemPrefix);
             output.push(toGfmAlertMarker(item.alertType));
             const isInlineMarker = options?.blockquoteAlertInlineByGroup?.get(item.blockquoteGroupIndex ?? -1) === true;
-            if (isInlineMarker) {
+            // Nothing goes after the marker in a paragraph with nothing in
+            // it, as one of spaces alone with its label hidden (see
+            // dropBlankParagraphText), and text that writes nothing, as
+            // spaces alone after the label, takes out the space or line end
+            // after it (see alertMarkerLineEnd)
+            if (!next || isStructuralBoundaryItem(next)) {
+              pendingAlertInlinePrefixForHardBreak = undefined;
+            } else if (isInlineMarker) {
+              if (!nextIsDisplayMath) alertMarkerLineEnd = output.length;
               output.push(nextIsDisplayMath ? '\n' : ' ');
               pendingAlertInlinePrefixForHardBreak = item.listContinuation ? itemPrefix : undefined;
             } else {
@@ -11717,7 +11725,7 @@ export function buildMarkdown(
     } else {
       output.push(textOut);
       // Nothing follows an alert's marker in its paragraph, which takes the
-      // place of the marker's line end
+      // place of the marker's space or line end
       if (alertMarkerLineEnd !== undefined && textOut === '' && !mathFollows) output[alertMarkerLineEnd] = '';
     }
     // An equation in the paragraph goes on in it, after the comments' bodies

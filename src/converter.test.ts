@@ -10126,6 +10126,48 @@ describe('A quote after a deeper one', () => {
   });
 });
 
+describe('An alert with nothing after its marker', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+  const hidden = '---\ncallout-labels: false\n---\n\n';
+
+  test.each([
+    ['spaces alone on its marker\'s line', '> [!NOTE] &#32;\n', '> [!NOTE]\n'],
+    ['a tab alone on its marker\'s line', '> [!TIP] &#9;\n', '> [!TIP]\n'],
+    ['spaces alone on the line after its marker', '> [!NOTE]\n> &#32;\n', '> [!NOTE]\n'],
+    ['spaces alone before another alert', '> [!CAUTION] &#32;\n> [!WARNING] &#32;\n', '> [!CAUTION]\n> [!WARNING]\n'],
+    ['spaces alone in a list item', '- x\n\n  > [!NOTE] &#32;\n', '- x\n\n  > [!NOTE]\n'],
+  ])('writes the marker alone for %s, with its label shown or hidden', async (_name, md, expected) => {
+    // Import wrote the space after the marker that text on its line goes
+    // after, or, with the label hidden, the line end and quote's prefix
+    // text on the next line goes after, which the next export read as the
+    // marker alone, as Markdown reads spaces alone as nothing
+    for (const frontmatter of ['', hidden]) {
+      const once = await roundTrip(frontmatter + md);
+      expect(strip(once)).toBe(expected);
+      expect(await roundTrip(once)).toBe(once);
+    }
+  });
+
+  test('writes the marker alone for spaces alone before a later paragraph', async () => {
+    const once = await roundTrip('> [!IMPORTANT] &#32;&#32;\n>\n> a\n');
+    expect(strip(once)).toBe('> [!IMPORTANT]\n>\n> a\n');
+    expect(await roundTrip(once)).toBe(once);
+  });
+
+  test.each([
+    ['alone', '> [!NOTE]\n'],
+    ['before a nested quote', '> [!NOTE]\n> > nested\n'],
+    ['before a paragraph', '> [!NOTE]\n\na\n'],
+    ['before a table', '> [!NOTE]\n\n| a |\n| --- |\n| b |\n'],
+    ['before another alert', '> [!NOTE]\n> [!TIP]\n'],
+  ])('keeps an alert\'s marker %s where its label is hidden', async (_name, md) => {
+    // Its paragraph has nothing in Word, after which import wrote the
+    // marker's line end and a quote's prefix, a line of the quote
+    expect(strip(await roundTrip(hidden + md))).toBe(md);
+  });
+});
+
 describe('Blocks a quote can\'t hold', () => {
   const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
 
