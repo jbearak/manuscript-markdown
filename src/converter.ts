@@ -5356,14 +5356,35 @@ function canonicalizeDisplayMathLatex(latex: string): string {
  *  math or a URL can have where an escape is text, would end the span
  *  there, so it goes on one side of a substitution with nothing on the
  *  other, which export reads as a change of that side alone, unless it has
- *  a substitution's delimiters too. A bare link's choice holds the closer
- *  it's read before (see bareLinkChoice), which isn't text. */
+ *  a substitution's delimiters too, where code comes in pieces (see
+ *  codePiecesInRevision). A bare link's choice holds the closer it's read
+ *  before (see bareLinkChoice), which isn't text. */
 function wrapWithRevision(text: string, rev?: RevisionInfo): string {
   if (!rev) return text;
   const holds = (closer: string) => text.includes(closer) && text.split(BARE_LINK + closer + BARE_LINK).join(BARE_LINK).includes(closer);
   if (rev.type === 'addition') return holds('++}') && substitutionHolds('', text) ? '{~~~>' + text + '~~}' : `{++${text}++}`;
   if (rev.type === 'deletion') return holds('--}') && substitutionHolds(text, '') ? '{~~' + text + '~>~~}' : `{--${text}--}`;
   return text;
+}
+
+/** The text of code in a tracked change in pieces that spans of the change
+ *  can hold. Code with the span's closer in it goes on one side of a
+ *  substitution (see wrapWithRevision), which can't hold a ~> on the old
+ *  side or a ~~} on either; with those too, it splits between the closer's
+ *  first two characters, into code spans of their own, each in a span of
+ *  its own, as in {--`a-`--}{--`-}b~>c`--}, which export reads as runs of
+ *  the change side by side, and import joins again. */
+function codePiecesInRevision(text: string, rev: RevisionInfo): string[] {
+  const closer = rev.type === 'addition' ? '++}' : '--}';
+  if (!text.includes(closer) || (rev.type === 'addition' ? substitutionHolds('', text) : substitutionHolds(text, ''))) return [text];
+  const pieces: string[] = [];
+  let from = 0;
+  for (let at = text.indexOf(closer); at !== -1; at = text.indexOf(closer, at + closer.length)) {
+    pieces.push(text.slice(from, at + 1));
+    from = at + 1;
+  }
+  pieces.push(text.slice(from));
+  return pieces;
 }
 
 type InlineRevisionItem = Extract<ContentItem, { type: 'text' | 'citation' | 'math' | 'footnote_ref' | 'image' }>;
@@ -5939,13 +5960,17 @@ function highlightGroupEnd(segment: ContentItem[], start: number, end: number, c
   let j = start + 1;
   for (; j < end && joins(segment[j]); j++) {
     if (segment[j].type === 'math') continue;
-    if (highlightColorOf(segment[j]) !== color) break;
+    // Nor pieces of code whose backticks would run together in one span
+    if (highlightColorOf(segment[j]) !== color || codeSpansMeet(segment[j - 1], segment[j])) break;
     groupEnd = j + 1;
   }
   if (segment.slice(start, groupEnd).some(item => item.type !== 'text')) return groupEnd;
-  // The run ends at j, unless `end` cut it short
+  // The run ends at j, unless `end` cut it short, as it does before a piece
+  // of code that meets the one before it
   const next = segment[j];
-  if (!next || !joins(next) || (next.type !== 'math' && highlightColorOf(next) !== color)) grouplessRuns.set(segment, { from: start, to: j });
+  if (!next || !joins(next) || (next.type !== 'math' && highlightColorOf(next) !== color) || codeSpansMeet(segment[j - 1], next)) {
+    grouplessRuns.set(segment, { from: start, to: j });
+  }
   return start;
 }
 
@@ -6171,6 +6196,18 @@ function renderSubstitutionRun(
   }
   while (k < end && side(segment[k], 'addition')) k++;
   const additions = k - start - deletions;
+  // Pieces of code a span can't hold whole (see codePiecesInRevision) side
+  // by side on one side would run their backticks together, where spans of
+  // their own keep them apart. So would they from each later start in the
+  // deletions up to the first of the last two on the old side, or in all of
+  // them where those are on the new side. Those go in spans too, rather
+  // than build sides from each, which would take time in the square of the
+  // deletions.
+  for (let j = k - 1; additions > 0 && j > start; j--) {
+    if (j === start + deletions || !codeSpansMeet(segment[j - 1], segment[j])) continue;
+    substitutionlessRuns.set(segment, { from: start, to: Math.min(j, start + deletions), end });
+    return undefined;
+  }
   if (deletions === 0 || additions === 0 || deletions + additions <= 2) return undefined;
   const starts: number[] = [];
   const oldSide = sideText(start, start + deletions, starts);
@@ -6206,6 +6243,13 @@ function renderSubstitutionRun(
   return { text: '{~~' + oldText + '~>' + newText + '~~}', nextIndex: k };
 }
 
+/** Whether `a` and `b`, side by side, are code formatted alike, as the
+ *  pieces of code a span can't hold whole are (see codePiecesInRevision),
+ *  whose backticks would run together with nothing between them */
+function codeSpansMeet(a: ContentItem, b: ContentItem): boolean {
+  return a.type === 'text' && b.type === 'text' && a.formatting.code && !a.href && !b.href && formattingEquals(a.formatting, b.formatting);
+}
+
 /** A citation without keys as a run of its text, as export reads it back,
  *  highlighted as it is, which the runs beside it read and join */
 function keylessCitationRun(item: ContentItem): ContentItem {
@@ -6220,7 +6264,9 @@ function keylessCitationRun(item: ContentItem): ContentItem {
   };
 }
 
-/** Joins runs that read as one, formatted alike */
+/** Joins runs that read as one, formatted alike. Where export reads
+ *  Markdown, code in a tracked change that no span of it can hold goes in
+ *  runs of its pieces (see codePiecesInRevision). */
 function mergeConsecutiveRuns(items: ContentItem[]): ContentItem[] {
   const content = items.map(keylessCitationRun);
   const merged: ContentItem[] = [];
@@ -6260,15 +6306,19 @@ function mergeConsecutiveRuns(items: ContentItem[]): ContentItem[] {
       j++;
     }
 
-    merged.push({
-      type: 'text',
-      text: mergedText,
-      commentIds: item.commentIds,
-      formatting: item.formatting,
-      href: item.href,
-      ...(item.link !== undefined ? { link: item.link } : {}),
-      ...(item.revision ? { revision: item.revision } : {}),
-    });
+    const pieces = readsMarkdown && item.revision && item.formatting.code && item.href === undefined
+      ? codePiecesInRevision(mergedText, item.revision) : [mergedText];
+    for (const text of pieces) {
+      merged.push({
+        type: 'text',
+        text,
+        commentIds: item.commentIds,
+        formatting: item.formatting,
+        href: item.href,
+        ...(item.link !== undefined ? { link: item.link } : {}),
+        ...(item.revision ? { revision: item.revision } : {}),
+      });
+    }
     i = j;
   }
 
