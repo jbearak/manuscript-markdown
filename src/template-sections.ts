@@ -29,6 +29,10 @@
 // - A reference goes if the template lacks its relationship or part, or
 //   its relationship is of another type. Kept, it would name nothing, or a
 //   part export writes for something else.
+// - The trailing sectPr's other relationship IDs, as its printer
+//   settings', get document.xml's, those in a tracked change's old
+//   properties, w:sectPrChange, too. An element whose relationship or part
+//   the template lacks goes.
 // - The parts read as XML, by the XML parser, in the encoding their BOM or
 //   declaration names. A part export doesn't change goes as it came; one it
 //   changes goes as UTF-8.
@@ -439,17 +443,24 @@ export async function readTemplateSections(zip: JSZip): Promise<TemplateSections
     };
 
     // The trailing sectPr, whose other relationships, as its printer
-    // settings', get their IDs, or go with what names them
-    const kept: XmlNode[] = [];
-    for (const node of childrenOf(last)) {
-      const name = nameOf(node);
-      if (name === 'w:headerReference' || name === 'w:footerReference' || name === 'w:titlePg' || name === 'w:pgNumType') continue;
-      const templateId = node[':@']?.['@_r:id'];
-      const id = templateId === undefined ? undefined : await idFor(templateId);
-      if (templateId === undefined) kept.push(node);
-      else if (id) kept.push({ ...node, ':@': { ...node[':@'], '@_r:id': id } });
-    }
-    result.sectPr = builder.build([{ 'w:sectPr': kept, ':@': last[':@'] }]) as string;
+    // settings', get their IDs, or go with what names them. So do those in
+    // a tracked change's old properties, w:sectPrChange, which can name
+    // printer settings too, and which kept the template's IDs, naming
+    // another of the document's parts or none
+    const withIds = async (nodes: XmlNode[]): Promise<XmlNode[]> => {
+      const kept: XmlNode[] = [];
+      for (const node of nodes) {
+        const name = nameOf(node);
+        const templateId = node[':@']?.['@_r:id'];
+        const id = templateId === undefined ? undefined : await idFor(templateId);
+        if (templateId !== undefined && !id) continue;
+        const children = node[name];
+        kept.push({ ...node, ...(Array.isArray(children) ? { [name]: await withIds(children as XmlNode[]) } : {}), ...(id ? { ':@': { ...node[':@'], '@_r:id': id } } : {}) });
+      }
+      return kept;
+    };
+    const own = childrenOf(last).filter(node => !['w:headerReference', 'w:footerReference', 'w:titlePg', 'w:pgNumType'].includes(nameOf(node)));
+    result.sectPr = builder.build([{ 'w:sectPr': await withIds(own), ':@': last[':@'] }]) as string;
   }
 
   // What the numbering names, as a picture bullet's image, after the

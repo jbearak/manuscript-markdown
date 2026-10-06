@@ -288,6 +288,54 @@ describe('a template\'s headers and footers', () => {
     expect(await out.file('word/' + attr(relationship!, 'Target'))!.async('uint8array')).toEqual(settings);
   });
 
+  it.each([
+    ['the section\'s own', 'rId12'],
+    ['others of their own', 'rId13'],
+    ['none', 'rId99'],
+  ])('give the printer settings a tracked change to the last section names, %s, the export\'s IDs', async (_name, oldId) => {
+    // The change kept the template's ID, which named another of the
+    // export's parts, or none
+    const zip = await JSZip.loadAsync(await headerTemplate());
+    const settings = new Uint8Array([7, 7, 7]), oldSettings = new Uint8Array([8, 8]);
+    const rels = await zip.file('word/_rels/document.xml.rels')!.async('string');
+    zip.file('word/_rels/document.xml.rels', rels.replace('</Relationships>', '<Relationship Id="rId12" Type="' + REL + 'printerSettings" Target="printerSettings/printerSettings1.bin"/>'
+      + '<Relationship Id="rId13" Type="' + REL + 'printerSettings" Target="printerSettings/printerSettings2.bin"/></Relationships>'));
+    zip.file('word/printerSettings/printerSettings1.bin', settings);
+    zip.file('word/printerSettings/printerSettings2.bin', oldSettings);
+    const types = await zip.file('[Content_Types].xml')!.async('string');
+    zip.file('[Content_Types].xml', types.replace('<Default ', '<Default Extension="bin" ContentType="' + WML + 'printerSettings"/><Default '));
+    const change = (id: string) => '<w:sectPrChange w:id="1" w:author="A" w:date="2024-01-01T00:00:00Z"><w:sectPr><w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>'
+      + (id ? '<w:printerSettings r:id="' + id + '"/>' : '') + '</w:sectPr></w:sectPrChange>';
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace('<w:docGrid w:linePitch="360"/></w:sectPr>', '<w:docGrid w:linePitch="360"/><w:printerSettings r:id="rId12"/>' + change(oldId) + '</w:sectPr>'));
+    let templateDocx = await zip.generateAsync({ type: 'uint8array' });
+    for (let md of ['[a link](https://example.com)', LANDSCAPE_MD]) {
+      // Through Word and back, and again with the export as the template,
+      // which changes nothing
+      const markdown: string[] = [];
+      for (let trip = 0; trip < 2; trip++) {
+        const { docx } = await convertMdToDocx(md, { templateDocx });
+        expect(await packageProblems(docx)).toEqual([]);
+        const out = await JSZip.loadAsync(docx);
+        const documentXml = await out.file('word/document.xml')!.async('string');
+        const outRels = [...(await out.file('word/_rels/document.xml.rels')!.async('string')).matchAll(/<Relationship\b[^>]*>/g)].map(([tag]) => tag);
+        const partOf = async (id: string) => {
+          const relationship = outRels.find(tag => attr(tag, 'Id') === id);
+          expect(relationship && attr(relationship, 'Type')).toBe(REL + 'printerSettings');
+          return out.file('word/' + attr(relationship!, 'Target'))!.async('uint8array');
+        };
+        const [own, old] = [...documentXml.matchAll(/<w:printerSettings r:id="(\w+)"\/>/g)].map(m => m[1]);
+        expect(await partOf(own)).toEqual(settings);
+        if (oldId === 'rId99') expect(documentXml).toContain(change('') + '</w:sectPr>');
+        else expect(await partOf(old)).toEqual(oldId === 'rId12' ? settings : oldSettings);
+        md = (await convertDocx(docx)).markdown;
+        markdown.push(md);
+        templateDocx = docx;
+      }
+      expect(markdown[1]).toBe(markdown[0]);
+    }
+  });
+
   it('come from the last section\'s own properties, not those a tracked change to them holds', async () => {
     const zip = await JSZip.loadAsync(await headerTemplate());
     // Word keeps the section's earlier properties, a landscape page without
