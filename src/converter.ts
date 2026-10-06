@@ -5168,8 +5168,11 @@ export async function extractDocumentContent(
 
           const targetLenBeforePara = target.length;
           // Paragraphs whose tracked mark can become a break inside a CriticMarkup
-          // span (see joinTrackedParagraphBreaks); headings keep paraMarkRevision
-          const canJoinTrackedBreak = !inTableCell && !headingLevel && !isTitle && !isCodeBlock;
+          // span (see joinTrackedParagraphBreaks); headings keep paraMarkRevision.
+          // A block takes the break before it even where it can't join the
+          // text before, which the break then ends
+          const takesTrackedBreak = !inTableCell && !isTitle;
+          const canJoinTrackedBreak = takesTrackedBreak && !headingLevel && !isCodeBlock;
           if (needsPara) {
             const paraItem: ContentItem = { type: 'para' };
             if (headingLevel) paraItem.headingLevel = headingLevel;
@@ -5187,7 +5190,7 @@ export async function extractDocumentContent(
             if (horizontalRule) paraItem.horizontalRule = true;
             if (taskLevel !== undefined) paraItem.taskLevel = taskLevel;
             if (paraMarkRevision && headingLevel) paraItem.paraMarkRevision = paraMarkRevision;
-            if (canJoinTrackedBreak && precedingMark?.target === target && precedingMark.end === targetLenBeforePara) {
+            if (takesTrackedBreak && precedingMark?.target === target && precedingMark.end === targetLenBeforePara) {
               paraItem.breakRevision = precedingMark.revision;
             }
             target.push(paraItem);
@@ -9249,19 +9252,23 @@ interface TrackedBreakMarks {
   /** In place of `start` for a break in a span of its own, which has no
    *  `end` */
   alone: string;
+  /** In place of the indent of a list item's text after a break that ends
+   *  it, which buildMarkdown knows once it writes the item, at the level
+   *  it can nest it at (see atOpenListDepth) */
+  indent: string;
 }
 
-/** Three private-use characters that appear nowhere in `values`, which hold
+/** Four private-use characters that appear nowhere in `values`, which hold
  *  everything buildMarkdown renders, so no text in the document is taken
  *  for a mark. */
 function trackedBreakMarks(values: unknown): TrackedBreakMarks {
   const text = JSON.stringify(values, (_key, value: unknown) => value instanceof Map || value instanceof Set ? [...value] : value);
   const unused: string[] = [];
-  for (let code = 0xE000; unused.length < 3; code++) {
+  for (let code = 0xE000; unused.length < 4; code++) {
     const ch = String.fromCharCode(code);
     if (!text.includes(ch)) unused.push(ch);
   }
-  return { start: unused[0], end: unused[1], alone: unused[2] };
+  return { start: unused[0], end: unused[1], alone: unused[2], indent: unused[3] };
 }
 
 /** A paragraph break tracked in Word goes inside the CriticMarkup span as a
@@ -9278,7 +9285,12 @@ function trackedBreakMarks(values: unknown): TrackedBreakMarks {
  *  alone. Both paragraphs must sit in the same list item or
  *  quote, and `linePrefix` gives the line prefix (quote markers, list indent)
  *  to start the line after the break, from the second paragraph and the one
- *  whose text the break joins it to. The break is plain text,
+ *  whose text the break joins it to. Where the paragraph after can't take
+ *  the text before the break, as a list item, a heading, a rule or a
+ *  paragraph out of the quote, or there's no text after it, the break ends
+ *  its own paragraph's text, as in a{--\n\n--} before - b, which export
+ *  reads as that paragraph's tracked mark, with the line prefix of that
+ *  paragraph. The break is plain text,
  *  so formatting, code and links close before it, and
  *  joinSpansAtTrackedBreaks then joins its span to the spans around it. */
 function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => TrackedBreakMarks, linePrefix: (para: ParaItem, opening: ParaItem | undefined) => string = () => ''): ContentItem[] {
@@ -9307,26 +9319,30 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
     while (last >= 0 && isCommentPoint(content[last])) last--;
     const prev = content[last];
     if (!prev || !isInlineRevisionItem(prev)) continue;
-    const alone = !opensNewSide(content, k) && !revisionsEqual(prev.revision, revision);
     let opening: ParaItem | undefined;
     for (let j = k - 1; j >= 0 && !opening; j--) {
       const item = content[j];
       if (item.type === 'para') opening = item;
     }
-    const container = breakContainer(para, 'after');
-    if (!container || breakContainer(opening, 'before') !== container) continue;
-    // An indent override of the paragraph after, or its being a thematic
-    // break, which the break's text in its place can't hold
-    if (para.indentOverride || para.horizontalRule) continue;
     sides ??= contentAroundTrackedBreaks(content);
     const { before, after } = sides.get(k)!;
-    if (!before || !after?.content) continue;
+    if (!before) continue;
+    const container = breakContainer(para, 'after');
+    // Not to a paragraph with an indent override, or that is a thematic
+    // break, which the break's text in its place can't hold
+    const joins = !!container && breakContainer(opening, 'before') === container
+      && !para.indentOverride && !para.horizontalRule && !!after?.content;
+    // Else the break ends its paragraph, though not code's or a title's
+    if (!joins && (opening?.isCodeBlock || opening?.isTitle)) continue;
+    const alone = !(joins && opensNewSide(content, k)) && !revisionsEqual(prev.revision, revision);
     joined ??= [];
     copy(last + 1);
-    const prefix = linePrefix(para, opening);
+    // A list item's own indent, which buildMarkdown knows once it writes
+    // the item, goes in for its mark after a break that ends its text
+    const prefix = joins ? linePrefix(para, opening) : opening?.listMeta ? marks().indent : opening ? linePrefix(opening, opening) : '';
     // A break alone has no end mark, so it ends with the next line's start,
     // which what comes after reads, as a citation does to put no space there
-    const text = (alone ? marks().alone : marks().start) + '\n' + prefix.trimEnd() + '\n' + prefix + (alone ? '' : marks().end);
+    const text = (alone ? marks().alone : marks().start) + '\n' + (prefix === marks().indent ? '' : prefix.trimEnd()) + '\n' + prefix + (alone ? '' : marks().end);
     // A break in a span of its own is in a comment's range where the text
     // on both sides is, past empty paragraphs, or a range that starts at
     // the paragraph's mark, whose empty item (see startRangesAtMark) comes
@@ -9342,11 +9358,13 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
     // and ends it: empty text in no revision keeps the text after from
     // running into it, from joining its span, and from pairing with it as
     // a substitution's new side
-    const barrier: ContentItem[] = alone ? [{ type: 'text', text: '', commentIds: new Set(commentIds), formatting: DEFAULT_FORMATTING }] : [];
+    const barrier: ContentItem[] = alone && joins ? [{ type: 'text', text: '', commentIds: new Set(commentIds), formatting: DEFAULT_FORMATTING }] : [];
     // A comment's reference before it stays there, outside its span
     const points = content.slice(last + 1, k);
     joined.push(...(alone ? [...points, item, ...barrier] : [item, ...points]));
-    copied = k + 1;
+    // The paragraph after a break that ends its own stays
+    copied = joins ? k + 1 : k;
+    if (!joins) continue;
     // Past a comment's range's start
     let first = k + 1;
     for (let item = content[first]; item?.type === 'text' && item.text === '' && !item.revision; item = content[++first]);
@@ -9410,7 +9428,7 @@ function joinSpansAtTrackedBreaks(markdown: string, marks: TrackedBreakMarks): s
     out += before + match[3] + split + match[4].replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;');
     from = after;
   }
-  return (out + markdown.slice(from)).split(marks.alone).join('').split(SPAN_AT_BREAK).join('');
+  return (out + markdown.slice(from)).split(marks.alone).join('').split(marks.indent).join('').split(SPAN_AT_BREAK).join('');
 }
 
 export function buildMarkdown(
@@ -9435,13 +9453,10 @@ export function buildMarkdown(
   // The level Word gives the open list item at each level, which rises from
   // each to the next, as Markdown can't skip one (see atOpenListDepth)
   let listWordLevels: number[] = [];
-  // listContinuationIndent and blockquotePrefix are declared further down
+  // paragraphLinePrefix is declared further down
   // A quote paragraph's own lines take its prefix in the main loop below
   const mergedContent = mergeConsecutiveRuns(joinTrackedParagraphBreaks(content, marks, (para, opening) => (
-    opening && prefixesQuoteLines(opening) ? ''
-      : para.blockquoteLevel ? blockquotePrefix(para)
-        : para.listContinuation ? listContinuationIndent(para.listContinuation)
-          : ''
+    opening && prefixesQuoteLines(opening) ? '' : paragraphLinePrefix(para)
   )));
 
   // Build 1-indexed comment ID remap (order of first appearance in document)
@@ -10945,6 +10960,9 @@ export function buildMarkdown(
       }
       pendingHeadingCriticMarker = undefined;
     }
+    // The line after a tracked break that ends a list item's text takes
+    // the item's indent (see joinTrackedParagraphBreaks)
+    if (breakMarks && listLinePrefix) textOut = textOut.split(breakMarks.indent).join(listLinePrefix);
     // A quote's continuation lines, as of a comment's body, take its prefix,
     // without which a line break in the body reads as a paragraph break
     if (quoteLinePrefix) {

@@ -10300,19 +10300,21 @@ describe('Track changes (CriticMarkup)', () => {
     });
 
     test.each(['indent', 'no-indent'])('keeps the %s override of a paragraph after a tracked mark', async override => {
-      // The break's text took the paragraph's place, and the override went
+      // The break's text took the paragraph's place, and the override went.
+      // The break ends the paragraph before
       const md = 'a\n\n<!-- ' + override + ' -->\nb\n';
       const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
       const xml = await zip.file('word/document.xml')!.async('string');
       const tracked = xml.replace(/(<w:p [^>]*>)((?:(?!<\/w:p>).)*?<w:t>a<\/w:t>)/, '$1<w:pPr><w:rPr><w:del w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"/></w:rPr></w:pPr>$2');
       expect(tracked).not.toBe(xml);
       zip.file('word/document.xml', tracked);
-      expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
+      expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md.replace('a', 'a{--\n\n--}'));
     });
 
     test('keeps a thematic break after a tracked mark', async () => {
-      // The break's text took the rule's place; the marks on its sides go,
-      // as Markdown has no break between a paragraph and a rule to track
+      // The break's text took the rule's place. The mark before the rule
+      // ends the paragraph before; the rule's own goes, as Markdown has no
+      // break after a rule to track
       const md = 'a\n\n---\n\nb\n';
       const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
       const xml = await zip.file('word/document.xml')!.async('string');
@@ -10320,7 +10322,63 @@ describe('Track changes (CriticMarkup)', () => {
       const tracked = xml.replace(/(<w:p [^>]*>)(<w:r><w:t>a<\/w:t>)/, '$1<w:pPr>' + mark + '</w:pPr>$2').replace('</w:pBdr>', '</w:pBdr>' + mark);
       expect(tracked.split('w:id="99"').length).toBe(3);
       zip.file('word/document.xml', tracked);
-      expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
+      expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe('a{--\n\n--}\n\n---\n\nb\n');
+    });
+
+    // The Word document `md` exports, with Word's changes A's, and the marks
+    // of the paragraphs whose text is each of `texts` tracked as `type`
+    async function withTrackedMarks(md: string, texts: string[], type: 'ins' | 'del'): Promise<Uint8Array> {
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+      const revision = 'w:author="A" w:date="2024-01-01T00:00:00Z"';
+      let xml = (await zip.file('word/document.xml')!.async('string')).replace(/w:author="Unknown"/g, revision);
+      texts.forEach((text, k) => {
+        const mark = '<w:rPr><w:' + type + ' w:id="9' + k + '" ' + revision + '/></w:rPr>';
+        const tracked = xml.replace(new RegExp('(<w:p(?: [^>]*)?>)(?:<w:pPr>((?:(?!</w:pPr>).)*)</w:pPr>)?((?:(?!</w:p>).)*?<w:(?:t|delText)>' + text + '</w:(?:t|delText)>)'),
+          (_m, open: string, pPr: string | undefined, rest: string) => open + '<w:pPr>' + (pPr ?? '') + mark + '</w:pPr>' + rest);
+        expect(tracked).not.toBe(xml);
+        xml = tracked;
+      });
+      zip.file('word/document.xml', xml);
+      return zip.generateAsync({ type: 'uint8array' });
+    }
+
+    // Each paragraph with text or a tracked mark: its text and its mark's revision
+    async function trackedMarksOf(docx: Uint8Array): Promise<string[]> {
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      return [...xml.matchAll(/<w:p(?: [^>]*)?>((?:(?!<\/w:p>).)*)<\/w:p>/g)].flatMap(([, p]) => {
+        const text = [...p.matchAll(/<w:(?:t|delText)(?: [^>]*)?>([^<]*)</g)].map(t => t[1]).join('');
+        const mark = /^<w:pPr>(?:(?!<\/w:pPr>).)*<w:rPr><w:(ins|del) /.exec(p)?.[1];
+        return text || mark ? [text + (mark ? ' ¶' + mark : '')] : [];
+      });
+    }
+
+    // Word → Markdown → Word → Markdown for the document withTrackedMarks makes
+    async function tripTrackedMarks(md: string, texts: string[], type: 'ins' | 'del') {
+      const strip = (markdown: string) => markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+      const docx = await withTrackedMarks(md, texts, type);
+      const imported = strip((await convertDocx(docx)).markdown);
+      const exported = (await convertMdToDocx(imported)).docx;
+      return { imported, before: await trackedMarksOf(docx), after: await trackedMarksOf(exported), again: strip((await convertDocx(exported)).markdown) };
+    }
+
+    test.each([
+      ['before a list item', 'a\n\n- item\n', ['a'], 'del', 'a{--\n\n--}\n\n- item\n'],
+      ['between list items', '- one\n- two\n', ['one'], 'ins', '- one{++\n\n  ++}\n- two\n'],
+      ['after a list', '- one\n\nbody\n', ['one'], 'del', '- one{--\n\n  --}\n\nbody\n'],
+      ['of a list item inserted whole', '- one\n- {++two++}\n- three\n', ['two'], 'ins', '- one\n- {++two\n\n  ++}\n- three\n'],
+      ['between nested list items', '1. one\n   1. two\n2. three\n', ['two'], 'del', '1. one\n   1. two{--\n\n      --}\n2. three\n'],
+      // Indented as the item's text, whatever the markers' widths
+      ['after a list item under a numbered one', '1. one\n   - two\n2. three\n', ['two'], 'ins', '1. one\n   - two{++\n\n     ++}\n2. three\n'],
+      ['after a list item with a wide number', '10. one\n11. two\n', ['one'], 'del', '10. one{--\n\n    --}\n11. two\n'],
+      ['before a thematic break', 'a\n\n---\n\nb\n', ['a'], 'del', 'a{--\n\n--}\n\n---\n\nb\n'],
+      ['before a heading', 'a\n\n# Head\n', ['a'], 'ins', 'a{++\n\n++}\n\n# Head\n'],
+      ['before a code block', 'a\n\n```\nx\n```\n', ['a'], 'del', 'a{--\n\n--}\n\n```\nx\n```\n'],
+    ] as const)('keeps a tracked paragraph mark %s, as a break at the end of its paragraph', async (_name, md, texts, type, expected) => {
+      // The break, which can't join the text after it, was dropped
+      const { imported, before, after, again } = await tripTrackedMarks(md, [...texts], type);
+      expect(imported).toBe(expected);
+      expect(after).toEqual(before);
+      expect(again).toBe(imported);
     });
 
     test('writes many tracked marks in linear time', () => {
