@@ -11094,12 +11094,19 @@ describe('Highlights across runs', () => {
   const citation = (formatting: Partial<RunFormatting> = {}, revision?: RevisionInfo) =>
     ({ type: 'citation', text: '(Doe 2020)', pandocKeys: ['@doe2020'], commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting }, ...(revision ? { revision } : {}) }) as ContentItem;
   const inserted: RevisionInfo = { type: 'addition', author: 'A', date: '2024-01-01T00:00:00Z' };
+  const deleted: RevisionInfo = { ...inserted, type: 'deletion' };
 
   test.each([
     ['a highlight that ends in a space', [run('Seen '), run('a ', { highlight: true }), citation()], 'Seen ==a ==[@doe2020]'],
     ['bold around a highlight that ends in a space', [run('Seen '), run('a ', { highlight: true, bold: true }), citation()], 'Seen **==a ==**[@doe2020]'],
     ['an inserted highlight that ends in a space', [run('Seen '), run('a ', { highlight: true }, inserted), citation({}, inserted)], 'Seen {++==a ==++}{++[@doe2020]++}'],
     ['underlined text that ends in a space', [run('Seen '), run('a ', { underline: true }), citation()], 'Seen <u>a </u>[@doe2020]'],
+    // A substitution's sides are resolved apart, so their highlights' ==
+    // have no marks
+    ['a substitution whose new side ends in a highlighted space', [run('Seen '), run('x', {}, deleted), run('a ', { highlight: true }, inserted), citation()], 'Seen {~~x~>==a ==~~}[@doe2020]'],
+    ['a substitution whose old side ends in a highlighted space', [run('Seen '), run('a ', { highlight: true }, deleted), run('y', {}, inserted), citation()], 'Seen {~~==a ==~>y~~}[@doe2020]'],
+    ['a substitution whose new side ends in a space highlighted in a color', [run('Seen '), run('x', {}, deleted), run('a ', { highlight: true, highlightColor: 'red' }, inserted), citation()], 'Seen {~~x~>==a =={red}~~}[@doe2020]'],
+    ['a substitution whose new side ends in a highlighted space after an escaped backslash', [run('Seen '), run('x', {}, deleted), run('a\\', {}, inserted), run('b ', { highlight: true }, inserted), citation()], 'Seen {~~x~>a\\\\==b ==~~}[@doe2020]'],
   ])('puts no second space before a citation after %s', (_name, items, md) => {
     // The space before the citation read the formatting's close as the text
     // before it, and added one
@@ -11118,6 +11125,36 @@ describe('Highlights across runs', () => {
     // and wrote two, as ==**a**====*b*=={red-}, as before {x}, escaped
     expect(buildMarkdown([{ type: 'para' }, run('x '), run('a', { highlight: true, bold: true }), run('b', { highlight: true, italic: true }), run('{red-}')] as ContentItem[], new Map()).trim())
       .toBe('x ==**a**<i>b</i>=={red-}');
+  });
+
+  test.each([
+    ['text', run('a==', {}, inserted), 'a\\=='],
+    ['a citation without keys', { type: 'citation', text: 'Smith 2020 ==', pandocKeys: [], commentIds: new Set(), revision: inserted } as ContentItem, 'Smith 2020 \\=='],
+  ])('puts a space before a citation after a substitution whose side ends in %s\'s ==, which it escapes', (_name, item, side) => {
+    expect(buildMarkdown([{ type: 'para' }, run('Seen '), run('x', {}, deleted), item, citation()] as ContentItem[], new Map()).trim())
+      .toBe('Seen {~~x~>' + side + '~~} [@doe2020]');
+  });
+
+  test.each([
+    ['== after a space', [run('a ==', {}, inserted)]],
+    ['== and a color after a space', [run('a =={red}', {}, inserted)]],
+    ['== and a color after a space, after a highlight', [run('b ', { highlight: true }, inserted), run('a =={red}', {}, inserted)]],
+    ['== and a color after a space, after code\'s ==', [run('==', { code: true }, inserted), run('a =={red}', {}, inserted)]],
+    ['== and a color after a space, after a link with == in its URL', [{ ...run('b', {}, inserted), href: 'https://e.com/?token==' } as ContentItem, run('a =={red}', {}, inserted)]],
+    ['== and a color after a space, after math with ==', [{ type: 'math', latex: 'a==b', display: false, commentIds: new Set(), revision: inserted } as ContentItem, run(' a =={red}', {}, inserted)]],
+    ['== and a color no highlight takes, after a highlighted space', [run('a ', { highlight: true }, inserted), run('{red-}', {}, inserted)]],
+  ])('puts a space before a citation after a substitution whose side ends in text\'s %s, which opens no highlight', (_name, items) => {
+    // It read the == as a highlight's close, though none opened, as the
+    // close of one before it or code's == did, and the space before it as
+    // the side's last
+    const md = buildMarkdown([{ type: 'para' }, run('Seen '), run('x', {}, deleted), ...items, citation()] as ContentItem[], new Map()).trim();
+    expect(md).toEndWith('~~} [@doe2020]');
+  });
+
+  test('puts no second space before a citation after a substitution whose side ends in a highlighted space after code\'s ==', () => {
+    // Code's == is text, which opens no highlight and closes none
+    const md = buildMarkdown([{ type: 'para' }, run('Seen '), run('x', {}, deleted), run('==', { code: true }, inserted), run('b ', { highlight: true }, inserted), citation()] as ContentItem[], new Map()).trim();
+    expect(md).toEndWith('==b ==~~}[@doe2020]');
   });
 
   test.each([
