@@ -1799,17 +1799,17 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
       if (lvl.length === 0) continue;
 
       const ilvl = getAttr(lvlNode, 'ilvl');
+      // A level with no w:numFmt is decimal (ECMA-376 17.9.17), as Word
+      // numbers it
       const numFmtNodes = findAllDeep(lvl, 'w:numFmt');
-      if (numFmtNodes.length > 0) {
-        const val = getAttr(numFmtNodes[0], 'val');
-        const startNodes = findAllDeep(lvl, 'w:start');
-        const start = startNodes.length > 0 ? parseInt(getAttr(startNodes[0], 'val'), 10) : NaN;
-        // Word ignores one in an instance's level override ([MS-OI29500]
-        // 2.1.282 b), so only the abstract numbering's counts
-        const restartNodes = findAllDeep(lvl, 'w:lvlRestart');
-        const restart = restartNodes.length > 0 ? parseInt(getAttr(restartNodes[0], 'val'), 10) : NaN;
-        levels.set(ilvl, { type: val === 'bullet' ? 'bullet' : 'ordered', ...(isNaN(start) ? {} : { start }), ...(restart >= 0 ? { restart } : {}) });
-      }
+      const val = numFmtNodes.length > 0 ? getAttr(numFmtNodes[0], 'val') : 'decimal';
+      const startNodes = findAllDeep(lvl, 'w:start');
+      const start = startNodes.length > 0 ? parseInt(getAttr(startNodes[0], 'val'), 10) : NaN;
+      // Word ignores one in an instance's level override ([MS-OI29500]
+      // 2.1.282 b), so only the abstract numbering's counts
+      const restartNodes = findAllDeep(lvl, 'w:lvlRestart');
+      const restart = restartNodes.length > 0 ? parseInt(getAttr(restartNodes[0], 'val'), 10) : NaN;
+      levels.set(ilvl, { type: val === 'bullet' ? 'bullet' : 'ordered', ...(isNaN(start) ? {} : { start }), ...(restart >= 0 ? { restart } : {}) });
     }
 
     abstractNums.set(abstractNumId, levels);
