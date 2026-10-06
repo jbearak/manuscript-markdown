@@ -7594,11 +7594,13 @@ function tryRenderGridTable(
   const rows = table.rows;
   if (rows.length === 0) return null;
 
-  // Grid tables don't support colspan/rowspan
+  // Grid tables don't support colspan/rowspan, nor a cell of paragraphs,
+  // whose lines export reads as one paragraph with line breaks
   for (const row of rows) {
     for (const cell of row.cells) {
       if (cell.colspan && cell.colspan > 1) return null;
       if (cell.rowspan && cell.rowspan > 1) return null;
+      if (cell.paragraphs.length > 1) return null;
     }
   }
   // A grid table's header is its leading rows: a header row after a body
@@ -7618,7 +7620,7 @@ function tryRenderGridTable(
     }
   };
 
-  // Render all cells: each cell may have multiple paragraphs → multiple lines
+  // Render all cells: a cell's line breaks → multiple lines
   const rendered: { lines: string[]; deferred: string[] }[][] = [];
   for (const row of rows) {
     const rowCells: { lines: string[]; deferred: string[] }[] = [];
@@ -7644,9 +7646,9 @@ function tryRenderGridTable(
         cellLines.push(...paraLines.map((l, k) => k < paraLines.length - 1 && /(?<!\\)(?:\\\\)*\\$/.test(l) ? gridLineBeforeBreak(l.slice(0, -1)) : l));
         cellDeferred.push(...r.deferredComments);
       }
-      // An empty paragraph at the cell's end is a line break there, <br>, as
-      // a blank line there pads the cell to its row's height. One of spaces
-      // and tabs alone is too, which Word shows none of, and the padding takes.
+      // A line break at the cell's end is <br> there, as the blank line after
+      // it would pad the cell to its row's height. One before spaces and tabs
+      // alone is too, which Word shows none of, and the padding takes.
       let endBreaks = 0;
       while (cellLines.length > 1 && /^[ \t]*$/.test(cellLines[cellLines.length - 1])) {
         cellLines.pop();
@@ -8267,7 +8269,7 @@ function renderTableOrFallback(
   // A table HTML cells can't hold, as one with a line break and a comment,
   // is a grid table of any width, which holds it unless it merges cells, or
   // has a cell of paragraphs, which a grid table's cell holds as lines
-  if (!htmlCellsHoldTable(item) && item.rows.every(row => row.cells.every(cell => cell.paragraphs.length <= 1))) {
+  if (!htmlCellsHoldTable(item)) {
     const gridResult = tryRenderGridTable(item, comments, renderOpts, undefined, gridSrcWidths);
     if (gridResult !== null) return r(gridResult);
   }
