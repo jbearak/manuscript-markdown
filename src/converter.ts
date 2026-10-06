@@ -330,12 +330,13 @@ function lineBreakText(): string {
   return readsMarkdown ? '\\\n' : '<br>';
 }
 
-/** Syntax, CriticMarkup's, as export reads it there: in an HTML table's
- *  cell, which holds it as text, as import writes that text when it comes
- *  back (see htmlLineCharacters), with its <, > and & as references, but
- *  for those of its delimiters, so a tag in a comment's body stays text,
- *  and it reads back as written. A body in ID syntax goes after the table,
- *  where export reads Markdown, as it is. */
+/** Syntax, CriticMarkup's, a citation's or an image's, as export reads it
+ *  there: in an HTML table's cell, which holds it as text, as import writes
+ *  that text when it comes back (see htmlLineCharacters), with its <, > and
+ *  & as references, but for those of CriticMarkup's delimiters, so a tag in
+ *  a comment's body, a citation's locator or an image's alt text stays
+ *  text, and it reads back as written. A body in ID syntax goes after the
+ *  table, where export reads Markdown, as it is. */
 function syntaxText(markdown: string): string {
   return readsMarkdown ? markdown : htmlLineCharacters(markdown).join('');
 }
@@ -3784,17 +3785,18 @@ const pendingHiddenText = new WeakMap<ContentItem[], { text: string; at: number 
 
 /** The Markdown of an image export couldn't embed, without its closing ZWSP */
 /** An image's Markdown: its own, as an embed wrote it, an <img> tag where
- *  it came from one, or else ![alt](src) with its size */
+ *  it came from one, or else ![alt](src) with its size, as export reads it
+ *  there (see syntaxText) */
 function imageMarkdown(item: ContentItem & { type: 'image' }, imageFormatMapping?: Map<string, string>): string {
-  if (item.markdown !== undefined) return unembeddedImageMarkdown(item.markdown);
+  if (item.markdown !== undefined) return syntaxText(unembeddedImageMarkdown(item.markdown));
   if (imageFormatMapping?.get(item.rId) === 'html') {
-    return '<img src="' + escapeHtmlAttr(item.src) + '" alt="' + escapeHtmlAttr(item.alt) + '"'
+    return syntaxText('<img src="' + escapeHtmlAttr(item.src) + '" alt="' + escapeHtmlAttr(item.alt) + '"'
       + (item.widthPx > 0 ? ' width="' + item.widthPx + '"' : '')
-      + (item.heightPx > 0 ? ' height="' + item.heightPx + '"' : '') + '>';
+      + (item.heightPx > 0 ? ' height="' + item.heightPx + '"' : '') + '>');
   }
   const safeAlt = item.alt.replace(/\\/g, '\\\\').replace(/\]/g, '\\]');
   const size = [...(item.widthPx > 0 ? ['width=' + item.widthPx] : []), ...(item.heightPx > 0 ? ['height=' + item.heightPx] : [])];
-  return '![' + safeAlt + '](' + formatHrefForMarkdown(item.src) + ')' + (size.length ? '{' + size.join(' ') + '}' : '');
+  return syntaxText('![' + safeAlt + '](' + formatHrefForMarkdown(item.src) + ')' + (size.length ? '{' + size.join(' ') + '}' : ''));
 }
 
 function unembeddedImageMarkdown(markdown: string): string {
@@ -5871,6 +5873,12 @@ function footnoteRefText(item: ContentItem & { type: 'footnote_ref' }, noteLabel
   return '[^' + (noteLabels?.get(item.noteKind + ':' + item.noteId) ?? item.noteId) + ']';
 }
 
+/** A citation as Markdown, its keys in brackets, as export reads it there
+ *  (see syntaxText) */
+function citationText(item: ContentItem & { type: 'citation' }): string {
+  return syntaxText('[' + item.pandocKeys.join('; ') + ']');
+}
+
 /** A note reference's or citation's run formatting, kept when highlighted:
  *  its highlight is the formatting import writes back. */
 function highlightOnly(formatting: RunFormatting | undefined): { formatting?: RunFormatting } {
@@ -5949,7 +5957,7 @@ function renderHighlightGroup(
       mathEnd = inner.length;
     } else if (item.type === 'citation') {
       if (g === start) lead = citationSeparator(precedingMarkdown, item, last);
-      inner += (g === start ? '' : citationSeparator(inner, item)) + '[' + item.pandocKeys.join('; ') + ']';
+      inner += (g === start ? '' : citationSeparator(inner, item)) + citationText(item);
     }
   }
   return lead + wrapHighlight(inner, highlightColorOf(segment[start]));
@@ -5994,7 +6002,7 @@ function substitutionItemText(item: SubstitutionItem, precedingText: string, not
     const text = markedFormatting(item.text, item.formatting, false, (after ?? RunsAfter.of('')).linkTo(item.href));
     return markdownLink(text, item.href);
   }
-  if (item.type === 'citation') return citationSeparator(precedingText, item) + '[' + item.pandocKeys.join('; ') + ']';
+  if (item.type === 'citation') return citationSeparator(precedingText, item) + citationText(item);
   return item.display
     ? MATH_FENCE + '\n' + canonicalizeDisplayMathLatex(item.latex) + '\n' + MATH_FENCE
     : '$' + item.latex + '$';
@@ -6844,7 +6852,7 @@ function renderInlineRange(
 
     // A citation in a comment's range goes in its anchor, below
     if (item.type === 'citation' && item.commentIds.size === 0) {
-      const citeText = citationSeparator(out, item, lastSpan) + '[' + item.pandocKeys.join('; ') + ']';
+      const citeText = citationSeparator(out, item, lastSpan) + citationText(item);
       [out, lastSpan] = appendRevised(out, citeText, item, lastSpan);
       i++;
       continue;
@@ -6945,7 +6953,7 @@ function renderInlineRange(
           continue;
         }
         if (seg.type === 'citation') {
-          const citeText = citationSeparator(anchorText || out + lead, seg, anchorSpan) + '[' + seg.pandocKeys.join('; ') + ']';
+          const citeText = citationSeparator(anchorText || out + lead, seg, anchorSpan) + citationText(seg);
           [anchorText, anchorSpan] = appendRevised(anchorText, citeText, seg, anchorSpan);
           j++;
           continue;
@@ -7160,7 +7168,7 @@ function renderInlineRangeWithIds(
       }
       prevCommentIds = new Set(currentIds);
 
-      const citeText = citationSeparator(out, item, lastSpan) + '[' + item.pandocKeys.join('; ') + ']';
+      const citeText = citationSeparator(out, item, lastSpan) + citationText(item);
       [out, lastSpan] = appendRevised(out, citeText, item, lastSpan);
       i++;
       continue;

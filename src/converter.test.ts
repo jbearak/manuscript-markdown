@@ -6940,10 +6940,10 @@ describe('HTML table cells', () => {
 
   // A table whose cell of runs `cell` is merged across two columns, which
   // only HTML holds, as import writes it
-  const mergedCell = (cell: ContentItem[], comments = new Map<string, { author: string; text: string; date: string }>()) => buildMarkdown([{ type: 'table', rows: [
+  const mergedCell = (cell: ContentItem[], comments = new Map<string, { author: string; text: string; date: string }>(), options: Parameters<typeof buildMarkdown>[2] = {}) => buildMarkdown([{ type: 'table', rows: [
     { isHeader: true, cells: [{ paragraphs: [[cellText('h')]], colspan: 2 }] },
     { isHeader: false, cells: [{ paragraphs: [cell], colspan: 2 }] },
-  ] }] as unknown as ContentItem[], comments);
+  ] }] as unknown as ContentItem[], comments, options);
 
   test.each([
     ['its {>> and <<}', 'c', 'c'],
@@ -7018,6 +7018,35 @@ describe('HTML table cells', () => {
 
   const citationItem = (keys: string[], extra: object = {}) =>
     ({ type: 'citation', text: '(Smith 2020)', commentIds: new Set(), pandocKeys: keys, ...extra }) as unknown as ContentItem;
+  const imageItem = (extra: object = {}) =>
+    ({ type: 'image', rId: 'rId9', src: 'media/a.png', alt: 'x<b>y & z', widthPx: 0, heightPx: 0, commentIds: new Set(), ...extra }) as ContentItem;
+
+  test.each([
+    ['a citation', [citationItem(['@smith2020, p. <b>3 & 4'])], {},
+      '[@smith2020, p. &lt;b&gt;3 &amp; 4]', '[@smith2020, p. <b>3 & 4]'],
+    ['a citation in a comment\'s range', [citationItem(['@smith2020, p. <b>3'], { commentIds: new Set(['0']) })], {},
+      '{==[@smith2020, p. &lt;b&gt;3]==}{>>@A | c<<}', '{==[@smith2020, p. <b>3]==}{>>@A | c<<}'],
+    ['a highlighted citation', [citationItem(['@smith2020, p. <b>3'], { formatting: { ...DEFAULT_FORMATTING, highlight: true } })], {},
+      '==[@smith2020, p. &lt;b&gt;3]==', '==[@smith2020, p. <b>3]=='],
+    ['a substitution of citations', [citationItem(['@smith2020, p. <b>3'], { revision: deleted }), citationItem(['@jones2021'], { revision: inserted })], {},
+      '{~~[@smith2020, p. &lt;b&gt;3]~>[@jones2021]~~}', '{~~[@smith2020, p. <b>3]~>[@jones2021]~~}'],
+    ['an image', [imageItem()], {},
+      '![x&lt;b&gt;y &amp; z](media/a.png)', '![x<b>y & z](media/a.png)'],
+    ['an image from an <img>', [imageItem()], { imageFormatMapping: new Map([['rId9', 'html']]) },
+      '&lt;img src="media/a.png" alt="x&amp;lt;b&amp;gt;y &amp;amp; z"&gt;', '<img src="media/a.png" alt="x&lt;b&gt;y &amp; z">'],
+    ['an image export couldn\'t embed', [imageItem({ markdown: '![x<b>y](missing.png)' })], {},
+      '![x&lt;b&gt;y](missing.png)', '![x<b>y](missing.png)'],
+  ])('writes %s in a merged cell as the text it exports as', async (_name, items, options, html, text) => {
+    // Export read a tag in its keys or alt text as one, as a <b> that made
+    // the rest of the cell bold, or an <img> as one, which a cell drops, and
+    // a reference as its character, which the next import wrote as one
+    const markdown = mergedCell([cellText('a '), ...items], new Map([['0', { author: 'A', text: 'c', date: '' }]]), options);
+    expect(markdown).toContain('<p>a ' + html + '</p>');
+    const { cell, paragraphs } = await exportedCell(markdown, 1);
+    expect(cell).not.toContain('<w:b/>');
+    expect(paragraphs).toEqual(['a ' + text]);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
 
   test('writes a comment and a substitution in a merged cell with delimiters the editor reads', async () => {
     // Their > and < as references, which export reads as text as it does
