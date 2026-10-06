@@ -10232,6 +10232,21 @@ describe('Blockquote round-trip', () => {
     expect(markdown).not.toContain('10. Clinical phrasing:\n    > [!NOTE] This is a note.');
   });
 
+  test.each([
+    ['a bullet item', '- x\n\n  > [!NOTE] a\n'],
+    ['an ordered item', '1. x\n\n   > [!TIP] a\n'],
+    ['an item with a wider marker', '10. x\n\n    > [!WARNING] a\n'],
+    ['a sublist\'s item', '- x\n  - y\n\n    > [!CAUTION] a\n'],
+    ['an item, before a later paragraph', '- x\n\n  > [!IMPORTANT] a\n  >\n  > b\n'],
+  ])('keeps text on an alert\'s marker\'s line in %s, with its label shown or hidden', async (_name, md) => {
+    // Import took the line break export writes after the label for one the
+    // text started with, and wrote the marker on a line of its own
+    for (const frontmatter of ['', '---\ncallout-labels: false\n---\n\n']) {
+      const { docx } = await convertMdToDocx(frontmatter + md);
+      expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(md);
+    }
+  });
+
   test('metadata-free DOCX preserves blank lines around blockquotes structurally', async () => {
     const xml = wrapDocumentXml(
       '<w:p><w:r><w:t>Before paragraph.</w:t></w:r></w:p>'
@@ -10291,6 +10306,48 @@ describe('A quote after a deeper one', () => {
     // The indent ends the deeper quote
     const { docx } = await convertMdToDocx(md);
     expect(strip((await convertDocx(docx)).markdown)).toBe(md);
+  });
+});
+
+describe('An alert with nothing after its marker', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+  const hidden = '---\ncallout-labels: false\n---\n\n';
+
+  test.each([
+    ['spaces alone on its marker\'s line', '> [!NOTE] &#32;\n', '> [!NOTE]\n'],
+    ['a tab alone on its marker\'s line', '> [!TIP] &#9;\n', '> [!TIP]\n'],
+    ['spaces alone on the line after its marker', '> [!NOTE]\n> &#32;\n', '> [!NOTE]\n'],
+    ['spaces alone before another alert', '> [!CAUTION] &#32;\n> [!WARNING] &#32;\n', '> [!CAUTION]\n> [!WARNING]\n'],
+    ['spaces alone in a list item', '- x\n\n  > [!NOTE] &#32;\n', '- x\n\n  > [!NOTE]\n'],
+  ])('writes the marker alone for %s, with its label shown or hidden', async (_name, md, expected) => {
+    // Import wrote the space after the marker that text on its line goes
+    // after, or, with the label hidden, the line end and quote's prefix
+    // text on the next line goes after, which the next export read as the
+    // marker alone, as Markdown reads spaces alone as nothing
+    for (const frontmatter of ['', hidden]) {
+      const once = await roundTrip(frontmatter + md);
+      expect(strip(once)).toBe(expected);
+      expect(await roundTrip(once)).toBe(once);
+    }
+  });
+
+  test('writes the marker alone for spaces alone before a later paragraph', async () => {
+    const once = await roundTrip('> [!IMPORTANT] &#32;&#32;\n>\n> a\n');
+    expect(strip(once)).toBe('> [!IMPORTANT]\n>\n> a\n');
+    expect(await roundTrip(once)).toBe(once);
+  });
+
+  test.each([
+    ['alone', '> [!NOTE]\n'],
+    ['before a nested quote', '> [!NOTE]\n> > nested\n'],
+    ['before a paragraph', '> [!NOTE]\n\na\n'],
+    ['before a table', '> [!NOTE]\n\n| a |\n| --- |\n| b |\n'],
+    ['before another alert', '> [!NOTE]\n> [!TIP]\n'],
+  ])('keeps an alert\'s marker %s where its label is hidden', async (_name, md) => {
+    // Its paragraph has nothing in Word, after which import wrote the
+    // marker's line end and a quote's prefix, a line of the quote
+    expect(strip(await roundTrip(hidden + md))).toBe(md);
   });
 });
 
