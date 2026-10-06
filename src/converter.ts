@@ -515,6 +515,8 @@ const HARD_BREAK_AT_END = /(?<!\\)((?:\\\\)*)\\\n$/;
 // underline (see wrapHighlight)
 const HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END = /(?<!\\)((?:\\\\)*)\\\n(==[ \t]*)$/;
 const HARD_BREAKS_AT_END = /(?<!\\)((?:\\\\)*)(?:\\\n)+$/;
+// HTML comments alone, as export splits a block of them
+const HTML_COMMENTS = /^(?:<!--(?:(?!-->)[\s\S])*-->)+$/;
 
 /**
  * An empty item at the end of a paragraph's items in `target`, from `from`,
@@ -11648,18 +11650,23 @@ export function buildMarkdown(
     // underline, before an equation in the paragraph as well
     textOut = textOut.replace(HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END, (_m, backslashes: string, close: string) => backslashes + '<br>' + close);
     // An HTML block's indent, of up to three spaces, which markdown-it keeps
-    // in its text, and a reference would make a paragraph's. Before line
-    // breaks, alone or after comments, which a paragraph reads too, it's
-    // references, so a space before a line break that ends the paragraph is
-    // &#32;<br>, unless a paragraph would read a comment as text, as one
-    // with a blank line in it, which only the block holds
+    // in its text, and a reference would make a paragraph's. Before
+    // comments, line breaks or both, which a paragraph reads too, it's
+    // references, as a space before a line break that ends the paragraph is
+    // &#32;<br>, since export puts a block of comments' indent in the first
+    // one's hidden run. Not where that run held it, as export wrote it, nor
+    // before a comment a paragraph would read as text, as one with a blank
+    // line in it, which only the block holds.
     const htmlIndent = ownLine && atStart ? /^ {1,3}(?=<)/.exec(textOut)?.[0] ?? '' : '';
     const referenced = keepParagraphWhitespace(textOut, atStart, atEnd);
+    const inline = () => (isLineBreakBlock(textOut) || HTML_COMMENTS.test(textOut.trim())
+      && !mergedContent.slice(i, rendered.nextIndex).some(item => item.type === 'html_comment' && /^\s/.test(item.text)))
+      && readsAsInlineHtml(referenced);
     // Whitespace alone before an equation in the paragraph keeps the space
     // export wrote for its line end as it is, which the math branch takes
     // off, as it does after other text, or it would gain one each round trip
     textOut = mathFollows && /^[ \t]* $/.test(textOut) ? keepParagraphWhitespace(textOut.slice(0, -1), atStart, atEnd) + ' '
-      : htmlIndent && startsHtmlBlock(textOut) && !(isLineBreakBlock(textOut) && readsAsInlineHtml(referenced))
+      : htmlIndent && startsHtmlBlock(textOut) && !inline()
         ? htmlIndent + keepParagraphWhitespace(textOut.slice(htmlIndent.length), true, atEnd)
         : referenced;
     if (paragraphHeading) {

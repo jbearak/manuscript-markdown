@@ -2856,6 +2856,37 @@ describe('HTML comment blank line round-trip', () => {
     const markdown = (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
     expect(markdown).toBe(md + '\n');
   });
+
+  test.each([
+    ['a paragraph', 'XX', '&#32;<!-- c -->'],
+    ['a quote\'s paragraph', '> XX', '> &#32;<!-- c -->'],
+    ['an item\'s paragraph after its first', '- a\n\n  XX', '- a\n\n  &#32;<!-- c -->'],
+  ])('keeps a space before one that ends %s out of its hidden run', async (_name, source, md) => {
+    // Raw, as an HTML block's indent, it went into the run, where export
+    // puts one, or was gone with the block in an item
+    // Each paragraph's runs' text, a hidden one's in []
+    const texts = async (docx: Uint8Array) => [...(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string'))
+      .matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map(p => [...p[0].matchAll(/<w:r[ >][\s\S]*?<\/w:r>/g)].map(run => {
+        const text = run[0].replace(/<w:rPr>[\s\S]*?<\/w:rPr>/, '').replace(/<[^>]+>/g, '');
+        return run[0].includes('<w:vanish/>') ? '[' + text + ']' : text;
+      }).join(''));
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\n' + source + '\n\nB.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace(/<w:r>(?:(?!<w:r>)[\s\S])*?>XX<\/w:t><\/w:r>/, '<w:r><w:t xml:space="preserve"> </w:t></w:r>'
+      + '<w:r><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr><w:t>\u200B&lt;!-- c --&gt;</w:t></w:r>');
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    const docx = await zip.generateAsync({ type: 'uint8array' });
+    const imported = (await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(imported).toBe('A.\n\n' + md + '\n\nB.\n');
+    expect(await texts((await convertMdToDocx(imported)).docx)).toEqual(await texts(docx));
+  });
+
+  test('keeps the indent of one of its own in its hidden run', async () => {
+    // Where export writes it, which import writes back as the indent
+    const md = 'A.\n\n <!-- c -->\n\nB.';
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md + '\n');
+  });
 });
 
 describe('Sentinel gap round-trip', () => {
