@@ -142,8 +142,8 @@ const utf16 = (xml: string) => {
 /**
  * What Word would repair in a package: a part without a content type, a
  * relationship to no part, a reference to no relationship or to one of
- * another type, document.xml's relationship IDs out of sequence, a drawing
- * ID twice, XML that isn't well-formed
+ * another type, a part's relationship IDs out of sequence, a drawing ID
+ * twice, XML that isn't well-formed
  */
 async function packageProblems(docx: Uint8Array): Promise<string[]> {
   const zip = await JSZip.loadAsync(docx);
@@ -169,10 +169,8 @@ async function packageProblems(docx: Uint8Array): Promise<string[]> {
       rels.set(attr(tag, 'Id')!, attr(tag, 'Type')!.slice(attr(tag, 'Type')!.lastIndexOf('/') + 1));
       if (attr(tag, 'TargetMode') !== 'External' && !files.includes(resolveTarget(path, attr(tag, 'Target')!))) problems.push(relsPathOf(path) + ' targets no part: ' + attr(tag, 'Target'));
     }
-    if (path === 'word/document.xml') {
-      const ids = [...rels.keys()].map(id => parseInt(id.slice(3), 10)).sort((a, b) => a - b);
-      if (ids.some((n, i) => n !== i + 1)) problems.push('document.xml relationship IDs ' + ids.join(','));
-    }
+    const ids = [...rels.keys()].map(id => /^rId\d+$/.test(id) ? parseInt(id.slice(3), 10) : NaN).sort((a, b) => a - b);
+    if (ids.some((n, i) => n !== i + 1)) problems.push(path + ' relationship IDs ' + [...rels.keys()].join(','));
     for (const [tag, element] of xml.matchAll(/<\w+:(\w+)\b[^>]*\sr:(?:id|embed|link)="[^"]*"[^>]*>/g)) {
       const id = /\sr:(?:id|embed|link)="([^"]*)"/.exec(tag)![1];
       const type = rels.get(id);
@@ -426,6 +424,36 @@ describe('a template\'s headers and footers', () => {
     expect(await packageProblems(docx)).toEqual([]);
     const numbering = (await textOf(await JSZip.loadAsync(docx), 'word/numbering.xml'))!;
     expect(numbering).toContain('<w:num w:numId="3"><w:abstractNumId w:val="7"/></w:num>');
+  });
+
+  it('number each part\'s relationships from rId1, and its references to them with them', async () => {
+    // A header and the numbering whose relationships skip IDs, as a tool
+    // other than Word writes them. The header names them by r:embed, by
+    // another prefix for the relationships namespace, and by VML's o:relid.
+    const namespace = REL.slice(0, -1);
+    let templateDocx = await editTemplate(await headerTemplate({ headerList: 'direct', pictureBullet: true }), 'word/_rels/header1.xml.rels', xml => xml.replace('Id="rId1"', 'Id="rId4"')
+      .replace('</Relationships>', '<Relationship Id="rId9" Type="' + REL + 'image" Target="media/image1.png"/><Relationship Id="rId7" Type="' + REL + 'hyperlink" Target="https://example.com/" TargetMode="External"/></Relationships>'));
+    templateDocx = await editTemplate(templateDocx, 'word/header1.xml', xml => xml.replace('r:embed="rId1"', 'r:embed="rId4"').replace('<w:r><w:t>RUNNING HEAD</w:t></w:r>',
+      '<w:hyperlink xmlns:rel="' + namespace + '" rel:id = \'rId7\'><w:r><w:t>RUNNING HEAD</w:t></w:r></w:hyperlink>' +
+      // An ID as text and as a bookmark's name, which stay
+      '<w:bookmarkStart w:id="0" w:name="rId7"/><w:r><w:t>r:id="rId9"</w:t></w:r><w:bookmarkEnd w:id="0"/>' +
+      '<w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml" xmlns:office="urn:schemas-microsoft-com:office:office"><v:shape id="s" style="width:9pt;height:9pt"><v:imagedata office:relid="rId9"/></v:shape></w:pict></w:r>'));
+    templateDocx = await editTemplate(templateDocx, 'word/_rels/numbering.xml.rels', xml => xml.replace('Id="rId1"', 'Id="rId3"'));
+    templateDocx = await editTemplate(templateDocx, 'word/numbering.xml', xml => xml.replace('r:id="rId1"', 'r:id="rId3"'));
+    const word1 = (await convertMdToDocx('Hello', { templateDocx })).docx;
+    expect(await packageProblems(word1)).toEqual([]);
+    const zip = await JSZip.loadAsync(word1);
+    const rels = [...(await textOf(zip, 'word/_rels/header1.xml.rels'))!.matchAll(/<Relationship Id="(\w+)" Type="[^"]*\/(\w+)" Target="([^"]*)"/g)].map(m => m.slice(1).join(' '));
+    expect(rels).toEqual(['rId1 image media/image1.png', 'rId2 hyperlink https://example.com/', 'rId3 image media/image1.png']);
+    const header = (await textOf(zip, 'word/header1.xml'))!;
+    for (const reference of ['r:embed="rId1"', 'rel:id = \'rId2\'', 'office:relid="rId3"', 'w:name="rId7"', '<w:t>r:id="rId9"</w:t>']) expect(header).toContain(reference);
+    expect((await textOf(zip, 'word/_rels/numbering.xml.rels'))!).toContain('Id="rId1"');
+    expect((await textOf(zip, 'word/numbering.xml'))!).toContain('<v:imagedata r:id="rId1"');
+    // The next export changes them no more
+    const word2 = await JSZip.loadAsync((await convertMdToDocx('Hello', { templateDocx: word1 })).docx);
+    for (const path of ['word/header1.xml', 'word/_rels/header1.xml.rels', 'word/_rels/numbering.xml.rels']) {
+      expect(await word2.file(path)!.async('string')).toBe(await zip.file(path)!.async('string'));
+    }
   });
 
   it('keep the image of a header list\'s picture bullet', async () => {

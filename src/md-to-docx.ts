@@ -22,7 +22,7 @@ import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
 import { extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
 import { matchCriticHeadingPrefix } from './critic-markup';
-import { readTemplateSections, withTemplateSection, addTemplateSectionParts, decodeXml, asUtf8, type TemplateSections } from './template-sections';
+import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, type TemplateSections } from './template-sections';
 export { preprocessGridTables } from './grid-table-preprocess';
 export { extractHtmlTables } from './html-table-parser';
 
@@ -8494,9 +8494,11 @@ export async function convertMdToDocx(
   }
   // The template's headers and footers take document.xml's first relationships
   const templateRelCount = templateSections?.relationships.length ?? 0;
-  // The numbering of a template's styles and headers, and the numIds the
-  // document's lists take in it
-  const templateNumbering = templateParts?.has('word/numbering.xml') ? decodeXml(templateParts.get('word/numbering.xml')!) : undefined;
+  // The numbering of a template's styles and headers, its references to its
+  // relationships, as a picture bullet's image, numbered from rId1 as its
+  // relationships go with it, and the numIds the document's lists take in it
+  const templateNumbering = templateParts?.has('word/numbering.xml')
+    ? withRelationshipIds(decodeXml(templateParts.get('word/numbering.xml')!), templateSections?.numberingRels?.ids) : undefined;
   const templateStyles = templateParts?.has('word/styles.xml') ? decodeXml(templateParts.get('word/styles.xml')!) : undefined;
   const numIdsInUse = templateNumIdsInUse(templateStyles, templateSections?.numIds);
   const listNumbering = listNumIds(templateNumbering, templateStyles, numIdsInUse);

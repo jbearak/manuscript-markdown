@@ -32,6 +32,11 @@
 // - The parts read as XML, by the XML parser, in the encoding their BOM or
 //   declaration names. A part export doesn't change goes as it came; one it
 //   changes goes as UTF-8.
+// - A copied part's relationships, and the numbering's, are rId1 to rIdN
+//   (dirty-flag invariant #6). Where the template's skip some, export
+//   numbers them over and rewrites the part's references to them, each
+//   attribute in the relationships namespace, whatever its prefix, and
+//   VML's o:relid (see withRelationshipIds).
 // - What a copied part names in the template's other parts stays named.
 //   Export keeps the template's styles whole. With a header or footer it
 //   writes the template's numbering, which keeps the instances the parts
@@ -70,7 +75,12 @@ interface TemplatePart {
 }
 
 /** A relationships part, as the template holds it, and its relationships */
-interface Rels { data: Uint8Array; relationships: Relationship[] }
+interface Rels {
+  data: Uint8Array;
+  relationships: Relationship[];
+  /** Their new IDs, where they aren't rId1 to rIdN already (see sequentialIds) */
+  ids?: Map<string, string>;
+}
 
 export interface TemplateRelationship {
   type: string;
@@ -211,7 +221,58 @@ const escapeAttr = (value: string) => value.replace(/&/g, '&amp;').replace(/</g,
 /** A part's relationships part, if it has one */
 async function relsOf(zip: JSZip, path: string): Promise<Rels | undefined> {
   const data = await zip.file(relsPathOf(path))?.async('uint8array');
-  return data && { data, relationships: relationshipsOf(path, decodeXml(data)) };
+  if (!data) return undefined;
+  const relationships = relationshipsOf(path, decodeXml(data));
+  return { data, relationships, ids: sequentialIds(relationships) };
+}
+
+/**
+ * New IDs for a part's relationships, rId1 up in the order of their
+ * numbers, if they aren't rId1 to rIdN already. A part from a tool other
+ * than Word can skip some, as rId7 with no rId1, and Word, which numbers
+ * them without gaps (dirty-flag invariant #6), renumbers them on open.
+ */
+function sequentialIds(relationships: Relationship[]): Map<string, string> | undefined {
+  const number = (r: Relationship) => /^rId[1-9]\d*$/.test(r.id) ? parseInt(r.id.slice(3), 10) : Infinity;
+  const sorted = [...relationships].sort((a, b) => number(a) - number(b) || 0);
+  if (sorted.every((r, i) => number(r) === i + 1)) return undefined;
+  return new Map(sorted.map((r, i) => [r.id, 'rId' + (i + 1)]));
+}
+
+/** The relationships namespace, transitional and strict, whose attributes,
+ *  as r:id, r:embed or a diagram's r:dm, name a part's relationships */
+const RELATIONSHIPS_NAMESPACES = new Set(['http://schemas.openxmlformats.org/officeDocument/2006/relationships', 'http://purl.oclc.org/ooxml/officeDocument/relationships']);
+/** VML's office namespace, whose relid attribute names one too */
+const OFFICE_NAMESPACE = 'urn:schemas-microsoft-com:office:office';
+/** A start tag, or a comment or CDATA section, whose text holds no tag */
+const TAG = /<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<[^\s!?/>][^\s/>]*(?:\s+[^\s=/>]+\s*=\s*(?:"[^"]*"|'[^']*'))*\s*\/?>/g;
+/** A tag's attribute, its prefix apart, matched whole so that none is found in another's value */
+const ATTRIBUTE = /(\s)(?:([^\s=/>:]+):)?([^\s=/>]+)(\s*=\s*)(?:"([^"]*)"|'([^']*)')/g;
+
+/**
+ * A part's XML with the relationship IDs its attributes name changed to
+ * their new `ids`: those of the attributes in the relationships namespace,
+ * by whatever prefix the part binds it to, and of VML's o:relid. Text and
+ * other attributes stay, though their value is an old ID.
+ */
+export function withRelationshipIds(xml: string, ids: Map<string, string> | undefined): string {
+  if (!ids) return xml;
+  const relationshipPrefixes = new Set<string>(), officePrefixes = new Set<string>();
+  for (const [tag] of xml.matchAll(TAG)) {
+    for (const [, , prefix, name, , double, single] of tag.matchAll(ATTRIBUTE)) {
+      const namespace = prefix === 'xmlns' ? decodeEntities(double ?? single) : undefined;
+      if (namespace !== undefined && RELATIONSHIPS_NAMESPACES.has(namespace)) relationshipPrefixes.add(name);
+      else if (namespace === OFFICE_NAMESPACE) officePrefixes.add(name);
+    }
+  }
+  return xml.replace(TAG, tag => tag.startsWith('<!') ? tag : tag.replace(ATTRIBUTE,
+    (attribute, space: string, prefix: string | undefined, name: string, equals: string, double: string | undefined, single: string | undefined) => {
+      const id = ids.get(decodeEntities(double ?? single!));
+      const namesOne = prefix !== undefined && (relationshipPrefixes.has(prefix) || officePrefixes.has(prefix) && name === 'relid');
+      if (id === undefined || !namesOne) return attribute;
+      const quote = double === undefined ? "'" : '"';
+      return space + prefix + ':' + name + equals + quote + id + quote;
+    }));
 }
 
 /** A relationships part */
@@ -467,18 +528,28 @@ export function addTemplateSectionParts(
     for (let n = m[2] ? parseInt(m[2], 10) : 1; taken(free); n++) free = m[1] + n + (m[3] ?? '');
     paths.set(path, free);
   }
-  /** A part's relationships, at its path in the export, their targets the parts' there */
-  const addRels = (target: string, rels: Rels) => {
+  /** A part's relationships, at its path in the export, their targets the
+   *  parts' there, and their IDs, if `ids` gives new ones, in its order */
+  const addRels = (target: string, rels: Rels, ids: Map<string, string> | undefined) => {
     const moved = (r: Relationship) => r.path === undefined || !paths.has(r.path) || paths.get(r.path) === r.path ? undefined : paths.get(r.path);
-    zip.file(relsPathOf(target), !rels.relationships.some(moved) ? rels.data
-      : relsXml(rels.relationships.map(r => moved(r) ? { ...r, target: relativeTarget(target, moved(r)!) } : r)));
+    if (!ids && !rels.relationships.some(moved)) {
+      zip.file(relsPathOf(target), rels.data);
+      return;
+    }
+    const relationships = rels.relationships.map(r => ({ ...r, id: ids?.get(r.id) ?? r.id, target: moved(r) ? relativeTarget(target, moved(r)!) : r.target }));
+    if (ids) relationships.sort((a, b) => parseInt(a.id.slice(3), 10) - parseInt(b.id.slice(3), 10));
+    zip.file(relsPathOf(target), relsXml(relationships));
   };
   const defaults = new Map<string, string>(), overrides = new Map<string, string>();
   for (const [path, part] of parts) {
     const target = paths.get(path)!;
-    const xml = part.xml?.replace(COMMENT_OR_NOTE, '').replace(DOC_PR_ID, (_, before: string, quote: string) => before + quote + (nextDocPrId++) + quote);
+    // New IDs for its relationships, which only an XML part, whose
+    // references to them export rewrites, takes
+    const ids = part.xml === undefined ? undefined : part.rels?.ids;
+    const xml = part.xml === undefined ? undefined : withRelationshipIds(part.xml, ids)
+      .replace(COMMENT_OR_NOTE, '').replace(DOC_PR_ID, (_, before: string, quote: string) => before + quote + (nextDocPrId++) + quote);
     zip.file(target, xml !== undefined && xml !== part.xml ? asUtf8(xml) : part.data);
-    if (part.rels) addRels(target, part.rels);
+    if (part.rels) addRels(target, part.rels, ids);
     if (!part.contentType) continue;
     const ext = target.slice(target.lastIndexOf('.') + 1).toLowerCase();
     const known = extensionTypes.get(ext) ?? defaults.get(ext);
@@ -488,7 +559,9 @@ export function addTemplateSectionParts(
       overrides.set(target, part.contentType);
     }
   }
-  if (templateNumbering && sections.numberingRels) addRels('word/numbering.xml', sections.numberingRels);
+  // The numbering's references to its relationships take their new IDs in
+  // md-to-docx.ts, which writes it
+  if (templateNumbering && sections.numberingRels) addRels('word/numbering.xml', sections.numberingRels, sections.numberingRels.ids);
   const relationships = sections.relationships.map(r => r.external ? r : { ...r, target: relativeTarget('word/document.xml', paths.get(r.target) ?? r.target) });
   return { relationships, defaults, overrides };
 }
