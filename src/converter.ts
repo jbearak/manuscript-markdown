@@ -2110,7 +2110,18 @@ function wrapHighlight(markdown: string, color: string | undefined, joins = fals
   let end = markdown.length;
   while (end - 2 >= start && markdown.startsWith('\\\n', end - 2)) end -= 2;
   if (start === end) return markdown;
-  return markdown.slice(0, start) + '==' + (joins ? HIGHLIGHT_JOIN_OPEN : HIGHLIGHT_OPEN) + markdown.slice(start, end)
+  // A } it starts with is escaped, which would read with its == as
+  // CriticMarkup's ==}, which ends a comment's range around it, as in
+  // {====}a====}, and so is a { it ends with, which would read with its ==
+  // as {==. The text's end escapes that { (see escapeMarkdownChars), but
+  // not before a line break, which a highlight group's text can hold (see
+  // renderHighlightGroup). A backslash before it escapes it, unless escaped
+  // itself.
+  let slashes = 0;
+  if (markdown[end - 1] === '{') while (markdown[end - 2 - slashes] === '\\') slashes++;
+  const brace = markdown[end - 1] === '{' && slashes % 2 === 0 ? 1 : 0;
+  return markdown.slice(0, start) + '==' + (joins ? HIGHLIGHT_JOIN_OPEN : HIGHLIGHT_OPEN) + (markdown[start] === '}' ? '\\' : '')
+    + markdown.slice(start, end - brace) + (brace ? '\\{' : '')
     + (joins ? HIGHLIGHT_JOIN_CLOSE : HIGHLIGHT_CLOSE) + '==' + (color && color !== 'yellow' ? '{' + color + '}' : '') + markdown.slice(end);
 }
 
