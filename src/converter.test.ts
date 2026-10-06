@@ -5803,6 +5803,15 @@ describe('Word text that reads as Markdown', () => {
     expect((await roundTrip(md)).split('\n')).toContain(line);
   });
 
+  test.each([
+    ['a table', '| x |\n|---|\n| 1 |'],
+    ['a landscape section', '<!-- landscape -->\n\nB.\n\n<!-- /landscape -->'],
+  ])('keeps a citation whose key is missing a citation where the note of its missing data comes before %s', async (_name, block) => {
+    // A table or a section's marker starts no paragraph, so the note's
+    // paragraph didn't end, and its key went unread
+    expect((await roundTrip('A [@a].\n\n<!-- references -->\n\n' + block)).split('\n')).toContain('A [@a].');
+  });
+
   test('keeps Word\'s text of a citation whose key the bibliography has a citation', async () => {
     // As export writes a deleted citation
     const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\nP XX Q.')).docx);

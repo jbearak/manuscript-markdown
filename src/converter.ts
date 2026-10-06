@@ -274,6 +274,11 @@ function missingCitationKeys(content: ContentItem[]): Set<string> {
     if (item.type === 'para') {
       end();
       text = '';
+    } else if (endsInlineRange(item)) {
+      // A table, a section's or a style's marker or the bibliography's
+      // starts no para item, but ends the paragraph before it
+      end();
+      text = undefined;
     } else if (text !== undefined) {
       text = item.type === 'text' && !item.href && !item.revision && !hasFormatting(item.formatting) ? text + item.text : undefined;
     }
