@@ -5539,6 +5539,77 @@ describe('Word text that reads as Markdown', () => {
   });
 
   test.each([
+    ['emphasis', '', '*a* b', ''],
+    ['inline math', '', '$a$ b', ''],
+    ['a link', '', '[x](https://e.com) b', ''],
+    ['a highlight', '', '==a== b', ''],
+    ['a code span', '', '`a` b', ''],
+    ['a list item\'s marker', '', '- a', ''],
+    ['inline math with a $ before it', 'q $', '$a$', ' w'],
+    ['the end of an HTML tag before it', 'q <span title="', '*a*">', 'x</span>'],
+    ['the end of a URL before a tag', 'https://e.com', '1.', '<span>'],
+  ])('keeps the text of a citation without keys that reads as %s as text', async (_name, before, text, after) => {
+    // The citation's text went as it was, as Markdown, which the runs
+    // beside it didn't read
+    const run = (value: string): ContentItem => ({ type: 'text', text: value, commentIds: new Set(), formatting: DEFAULT_FORMATTING });
+    const md = buildMarkdown([
+      ...(before ? [run(before)] : []),
+      { type: 'citation', text, commentIds: new Set(), pandocKeys: [] },
+      ...(after ? [run(after)] : []),
+    ], new Map());
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    expect([...xml.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(match => match[1]).join(''))
+      .toBe((before + text + after).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'));
+    expect(xml).not.toMatch(/<m:oMath>|<w:hyperlink|<w:i\/>|<w:highlight|<w:numPr>|<w:rStyle/);
+  });
+
+  test('keeps the text of a citation without keys in an HTML table\'s cell that holds what HTML can\'t as its text', async () => {
+    // Export reads the cell as HTML, where the citation's escapes were text
+    const run = (value: string): ContentItem => ({ type: 'text', text: value, commentIds: new Set(), formatting: DEFAULT_FORMATTING });
+    const md = buildMarkdown([{
+      type: 'table',
+      rows: [
+        { isHeader: false, cells: [{ paragraphs: [[{ type: 'citation', text: '*a* <b>', commentIds: new Set(), pandocKeys: [] }, run(' '), { type: 'math', latex: 'y', display: false, commentIds: new Set() }]], colspan: 2 }] },
+        { isHeader: false, cells: [{ paragraphs: [[run('b')]] }, { paragraphs: [[run('c')]] }] },
+      ],
+    } as ContentItem], new Map());
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    expect(xml.slice(xml.indexOf('<w:tc>'), xml.indexOf('</w:tc>')).replace(/<[^>]+>/g, '')).toBe('*a* &lt;b&gt; $y$');
+  });
+
+  test.each([
+    ['after it', 'mc', [], false, 'q $z$&#49; w'],
+    ['before it', 'cm', [], false, 'q &#49;$z$ w'],
+    ['after it in a comment\'s range', 'mc', ['c1'], false, 'q {==$z$&#49;==}{>>@R | note<<} w'],
+    ['before it in a comment\'s range in ID syntax', 'cm', ['c1'], true, 'q {#1}&#49;$z${/1} w\n{#1>>@R | note<<}'],
+    ['after it in a highlight', 'hmc', [], false, 'q ==&#97;$z$&#49;== w'],
+    ['after it on a substitution\'s side', 'dmc', [], false, 'q {~~old~>$z$&#49;~~} w'],
+  ])('keeps inline math next to a citation without keys whose text is a digit, %s, as math', async (_name, kinds, ids, alwaysUseCommentIds, expected) => {
+    // The citation's text went as it was, as a digit by which the $ next to
+    // it opened or closed no math, and the equation came back as text
+    const highlighted = (kinds as string).startsWith('h') ? { ...DEFAULT_FORMATTING, highlight: true } : DEFAULT_FORMATTING;
+    const deleted: RevisionInfo = { type: 'deletion', author: 'A', date: '' };
+    const revision: RevisionInfo | undefined = (kinds as string).startsWith('d') ? { ...deleted, type: 'addition' } : undefined;
+    const commentIds = () => new Set(ids as string[]);
+    const items = [...(kinds as string)].map((kind): ContentItem => {
+      if (kind === 'h') return { type: 'text', text: 'a', commentIds: commentIds(), formatting: highlighted };
+      if (kind === 'd') return { type: 'text', text: 'old', commentIds: commentIds(), formatting: DEFAULT_FORMATTING, revision: deleted };
+      if (kind === 'm') return { type: 'math', latex: 'z', display: false, commentIds: commentIds(), revision };
+      return { type: 'citation', text: '1', commentIds: commentIds(), pandocKeys: [], formatting: highlighted, revision };
+    });
+    const content: ContentItem[] = [
+      { type: 'text', text: 'q ', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
+      ...items,
+      { type: 'text', text: ' w', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
+    ];
+    const comments = new Map([['c1', { author: 'R', text: 'note', date: '' } as any]]);
+    const md = buildMarkdown(content, comments, { alwaysUseCommentIds: alwaysUseCommentIds as boolean });
+    expect(md.trim()).toBe(expected);
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    expect(xml.match(/<m:oMath>/g)).toHaveLength(1);
+  });
+
+  test.each([
     '<div>\nx\n</div>', '<script>x</script>', '<p>a</p>', '<details>\n<summary>s</summary>\nx\n</details>',
     '<span>x</span> y', 'a\\\n<span>x</span>',
     // Escapes in a tag, which Markdown keeps raw, were text there
@@ -9375,10 +9446,11 @@ describe('Track changes (CriticMarkup)', () => {
 
     test.each([
       ['text', false, 'x{--\\{++\n\nn--}y'],
-      ['a citation without keys', true, 'x{--abc{++\n\nn--}y'],
+      ['a citation without keys', true, 'x{--abc\\{++\n\nn--}y'],
     ])('joins a tracked paragraph mark to the span of a deletion of %s that ends in {++', (_name, citation, expected) => {
-      // Its {, escaped or as a citation writes it, read as the span's
-      // opener, before the break, as an insertion's
+      // Its escaped {, which a citation without keys is written as text
+      // with too, read as the span's opener, before the break, as an
+      // insertion's
       const deleted: RevisionInfo = { type: 'deletion', author: 'A', date: '' };
       const run = (text: string, revision?: RevisionInfo): ContentItem =>
         ({ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING, ...(revision ? { revision } : {}) });

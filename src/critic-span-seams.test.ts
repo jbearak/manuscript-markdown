@@ -23,6 +23,7 @@ const text = (value: string, revision: RevisionInfo | undefined = added, formatt
 const plain = (value: string): ContentItem => ({ type: 'text', text: value, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING } });
 const math = (latex: string, revision: RevisionInfo = added): ContentItem =>
   ({ type: 'math', latex, display: false, commentIds: new Set(), revision });
+const plainCitation = (value: string): ContentItem => ({ type: 'citation', text: value, commentIds: new Set(), pandocKeys: [], revision: added });
 const render = (items: ContentItem[]) => buildMarkdown([{ type: 'para' }, ...items], new Map()).trim();
 
 describe('one revision across citations, equations and formatting', () => {
@@ -109,22 +110,15 @@ describe('one revision across citations, equations and formatting', () => {
   });
 
   it.each([
-    ['stars', '*a ', 'b*'],
-    ['the halves of an HTML tag', '<a ', 'b>'],
-  ])('keeps plain citations apart whose %s would pair', (_, first, second) => {
-    const plainCitation = (value: string): ContentItem => ({ type: 'citation', text: value, commentIds: new Set(), pandocKeys: [], revision: added });
-    expect(render([plainCitation(first), plainCitation(second)])).toBe('{++' + first + '++}{++' + second + '++}');
-  });
-
-  it('joins a plain citation, whose text may hold a URL, only across whitespace', () => {
-    const plainCitation: ContentItem = { type: 'citation', text: 'https://example.com', commentIds: new Set(), pandocKeys: [], revision: added };
-    expect(render([plainCitation, text('suffix')])).toBe('{++https://example.com++}{++suffix++}');
-    expect(render([plainCitation, text(' more')])).toBe('{++https://example.com more++}');
-  });
-
-  it('keeps an & apart, which could form an entity across the seam', () => {
-    const plainCitation: ContentItem = { type: 'citation', text: 'p; y', commentIds: new Set(), pandocKeys: [], revision: added };
-    expect(render([text('x &am'), plainCitation])).toBe('{++x &am++}{++p; y++}');
+    // A run of its text, which export reads it back as, joins the runs
+    // beside it, and is escaped with them
+    ['the stars of two', [plainCitation('*a '), plainCitation('b*')], '{++\\*a b\\*++}'],
+    ['the halves of an HTML tag in two', [plainCitation('<a '), plainCitation('b>')], '{++<a b>++}'],
+    ['a URL before text', [plainCitation('https://example.com'), text('suffix')], '{++https\\://example.comsuffix++}'],
+    ['a URL before a space', [plainCitation('https://example.com'), text(' more')], '{++https\\://example.com more++}'],
+    ['an entity after text', [text('x &am'), plainCitation('p; y')], '{++x \\&amp; y++}'],
+  ])('writes plain citations as the text they are, as with %s', (_, items, expected) => {
+    expect(render(items as ContentItem[])).toBe(expected);
   });
 
   it('joins code whose text has a delimiter, which stays literal', () => {
