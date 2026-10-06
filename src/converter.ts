@@ -1695,6 +1695,7 @@ export async function extractNoteImageFormatMapping(data: Uint8Array | JSZip): P
 export interface NumberingLevelDef {
   type: 'bullet' | 'ordered';
   start?: number; // w:start, where the level's count begins
+  restart?: number; // w:lvlRestart: the level, from 1, at or above which a paragraph starts this one over, or 0 for none
 }
 
 export type NumberingDefs = Map<string, Map<string, NumberingLevelDef>>;
@@ -1722,12 +1723,14 @@ export interface WordListCounter {
  * [MS-DOC] 2.4.6.4 has it (step 10, which only paragraphs at the level
  * reach), and as docx4j and LibreOffice apply it; later paragraphs of the
  * instance at that level go on. A level starts
- * over after any higher level ([MS-OI29500] 2.1.282). A higher level with no
- * count, as before a list's first paragraph at it, counts from its start
- * there, or the instance's override for it, as if a paragraph had used it,
- * so that its next paragraph is one more: Word numbers a list of 1.1, 1.2
- * and a top-level item as 1.1, 1.2, 2, where the instance starts both
- * levels at 1 (tdf#153104).
+ * over after any higher level, or as its w:lvlRestart has it: after the
+ * level it gives or a higher one, or never for 0 ([MS-OI29500] 2.1.282; one
+ * that gives a lower level is ignored, ECMA-376 Part 1 §17.9.10). A
+ * higher level with no count, as before a list's first paragraph at it,
+ * counts from its start there, or the instance's override for it, as if a
+ * paragraph had used it, so that its next paragraph is one more: Word
+ * numbers a list of 1.1, 1.2 and a top-level item as 1.1, 1.2, 2, where the
+ * instance starts both levels at 1 (tdf#153104).
  */
 export function wordListCounter(defs: NumberingDefs, instances: NumberingInstances): WordListCounter {
   // abstractNumId → its count by level; numId:level where an instance has
@@ -1751,7 +1754,10 @@ export function wordListCounter(defs: NumberingDefs, instances: NumberingInstanc
     const starts = levels[ilvl] === undefined || override(ilvl) !== undefined;
     levels[ilvl] = starts ? start(ilvl) : levels[ilvl] + 1;
     used.add(numId + ':' + ilvl);
-    levels.length = ilvl + 1;
+    for (let level = ilvl + 1; level < levels.length; level++) {
+      const restart = defs.get(numId)?.get(String(level))?.restart;
+      if (restart === undefined || restart > level || ilvl < restart) delete levels[level];
+    }
     return { number: levels[ilvl], starts };
   };
   return Object.assign(count, {
@@ -1789,7 +1795,11 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
         const val = getAttr(numFmtNodes[0], 'val');
         const startNodes = findAllDeep(lvl, 'w:start');
         const start = startNodes.length > 0 ? parseInt(getAttr(startNodes[0], 'val'), 10) : NaN;
-        levels.set(ilvl, { type: val === 'bullet' ? 'bullet' : 'ordered', ...(isNaN(start) ? {} : { start }) });
+        // Word ignores one in an instance's level override ([MS-OI29500]
+        // 2.1.282 b), so only the abstract numbering's counts
+        const restartNodes = findAllDeep(lvl, 'w:lvlRestart');
+        const restart = restartNodes.length > 0 ? parseInt(getAttr(restartNodes[0], 'val'), 10) : NaN;
+        levels.set(ilvl, { type: val === 'bullet' ? 'bullet' : 'ordered', ...(isNaN(start) ? {} : { start }), ...(restart >= 0 ? { restart } : {}) });
       }
     }
 
