@@ -9080,7 +9080,10 @@ export function buildMarkdown(
               commentIdRemap.set(id, assignRemappedId(id));
             }
             (item.type === 'html_comment' ? overUnanchored : overAnchored).add(id);
-            const text = item.type === 'text' ? (anchorEnds.get(id) ?? '') + item.text : '';
+            // A citation without keys goes as text (see keylessCitationRun),
+            // though not yet in a note or a table's cell
+            const text = item.type === 'text' || item.type === 'citation' && item.pandocKeys.length === 0
+              ? (anchorEnds.get(id) ?? '') + item.text : '';
             if (text.includes('==}')) holdsAnchorEnd = true;
             anchorEnds.set(id, text.slice(-2));
           }

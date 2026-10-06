@@ -2041,6 +2041,26 @@ describe('Comments over equations', () => {
     expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown).toBe(expected);
   });
 
+  test.each([['a table cell'], ['a footnote']])('writes a comment over ==} split between a citation without keys and text in %s in ID syntax', (where) => {
+    // The citation, which goes as text there too, wasn't read as text for
+    // the anchor's end, which then closed early
+    const comments = new Map([['c1', { author: 'A', text: 'c', date: '' }]]);
+    const ids = new Set(['c1']);
+    const runs: ContentItem[] = [
+      { type: 'citation', text: 'x ==', pandocKeys: [], commentIds: ids },
+      { type: 'text', text: '} y', commentIds: ids, formatting: DEFAULT_FORMATTING },
+    ];
+    const md = where === 'a footnote'
+      ? buildMarkdown([{ type: 'para' }, { type: 'text', text: 'Body', commentIds: new Set(), formatting: DEFAULT_FORMATTING }, { type: 'footnote_ref', noteId: '1', noteKind: 'footnote', commentIds: new Set() }] as ContentItem[], comments, {
+        notes: { map: new Map([['footnote:1', { label: '1', body: [{ type: 'para' } as ContentItem, ...runs], noteKind: 'footnote' as const }]]), assignedLabels: new Map([['footnote:1', '1']]) },
+      })
+      : buildMarkdown([{ type: 'table', rows: [
+        { isHeader: true, cells: [{ paragraphs: [[{ type: 'text', text: 'a', commentIds: new Set(), formatting: DEFAULT_FORMATTING } as ContentItem]] }] },
+        { isHeader: false, cells: [{ paragraphs: [runs] }] },
+      ] } as ContentItem], comments);
+    expect(md).toContain('{#1}x ==} y{/1}');
+  });
+
   test('writes a comment over text with ==} in a footnote in ID syntax', async () => {
     const markdown = await roundTrip('Text.[^1]\n\n[^1]: A {==x \\=\\=} y==}{>>@A (2024-01-15 10:30) | c<<} z.');
     expect(markdown).toBe('Text.[^1]\n\n[^1]: A {#1}x ==} y{/1} z.\n    {#1>>@A (2024-01-15 10:30) | c<<}\n');
