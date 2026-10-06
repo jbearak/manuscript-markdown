@@ -6129,12 +6129,14 @@ function renderSubstitutionRun(
     isSubstitutionItem(item)
     && item.revision?.type === type && item.revision.author === revision.author && item.revision.date === revision.date
     && eligible(item);
-  // One side's items, with highlight groups in one highlight
-  const sideText = (from: number, to: number) => {
+  // One side's items, with highlight groups in one highlight, and where
+  // each item's or group's Markdown starts in it (`starts`)
+  const sideText = (from: number, to: number, starts: number[] = []) => {
     let text = '';
     let mathEnd = -1;
     for (let j = from; j < to;) {
       const item = segment[j] as SubstitutionItem;
+      starts[j - from] = text.length;
       // A link of several runs stays one link, as outside a substitution
       const link = item.type === 'text' ? linkGroup(segment, j, to, item.commentIds) : undefined;
       if (link) {
@@ -6170,18 +6172,36 @@ function renderSubstitutionRun(
   while (k < end && side(segment[k], 'addition')) k++;
   const additions = k - start - deletions;
   if (deletions === 0 || additions === 0 || deletions + additions <= 2) return undefined;
-  const oldSide = sideText(start, start + deletions);
+  const starts: number[] = [];
+  const oldSide = sideText(start, start + deletions, starts);
   const newSide = sideText(start + deletions, k);
+  // Where the sides can't be written, neither can those of a later start
+  // in the deletions whose old side still holds what keeps them from it, or
+  // of any where that's in the new side. Those starts go in spans too,
+  // rather than build sides from each, which would take time in the square
+  // of the deletions.
+  const declineTo = (to: number) => {
+    if (to > start + 1) substitutionlessRuns.set(segment, { from: start, to, end });
+    return undefined;
+  };
   // Resolved apart, before the check (see tryRenderSubstitution)
   const oldText = resolveSide(oldSide);
   const newText = resolveSide(newSide);
-  if (!oldText || !newText) return undefined;
-  if (!substitutionHolds(oldText, newText)) return undefined;
+  if (!newText || newText.includes('~~}') || !oldText) return declineTo(start + deletions);
+  if (!substitutionHolds(oldText, newText)) {
+    // To the item the side's last ~> or ~~} starts in, as written before
+    // resolving, which doesn't write one where there was none
+    const at = Math.max(oldSide.lastIndexOf('~>'), oldSide.lastIndexOf('~~}'));
+    let item = starts.length - 1;
+    while (item > 0 && (starts[item] === undefined || starts[item] > at)) item--;
+    return declineTo(at === -1 ? start : start + item + 1);
+  }
   // Two inline equations in a row on one side would run their dollar signs
-  // together and read as one, where spans of their own keep them apart
-  for (let j = start + 1; j < k; j++) {
+  // together and read as one, where spans of their own keep them apart. To
+  // the first of the last two on the old side.
+  for (let j = k - 1; j > start; j--) {
     const [a, b] = [segment[j - 1], segment[j]];
-    if (j !== start + deletions && a.type === 'math' && !a.display && b.type === 'math' && !b.display) return undefined;
+    if (j !== start + deletions && a.type === 'math' && !a.display && b.type === 'math' && !b.display) return declineTo(j > start + deletions ? start + deletions : j);
   }
   return { text: '{~~' + oldText + '~>' + newText + '~~}', nextIndex: k };
 }

@@ -11914,6 +11914,28 @@ describe('Highlights across runs', () => {
   });
 
   test.each([
+    ['an = and a highlighted space', [['=', {}], [' ', { highlight: true }], ['n', {}]], '{++=++}{++== ==n++}'],
+    ['text', [['new', {}]], '{++new++}'],
+  ] as const)('writes many deletions that end in a ~> before an insertion of %s in linear time', (_name, added, md) => {
+    // The ~>, which would split the substitution, kept each start in the
+    // deletions from one, and each built its sides again. Four times the
+    // deletions take about four times as long, not sixteen.
+    const item = (text: string, revision: 'addition' | 'deletion', formatting: Partial<RunFormatting> = {}) => (
+      { type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting }, revision: { type: revision, author: 'A', date: '' } });
+    const time = (n: number) => {
+      const items = [
+        ...Array.from({ length: n }, (_, k) => item('d', 'deletion', { bold: k % 2 === 1 })), item('x~>', 'deletion'),
+        ...added.map(([text, formatting]) => item(text, 'addition', formatting)),
+      ];
+      const start = performance.now();
+      expect(buildMarkdown(items as ContentItem[], new Map())).toEndWith('{--x~>--}' + md);
+      return performance.now() - start;
+    };
+    const small = time(1000);
+    expect(time(4000) / small).toBeLessThan(8);
+  });
+
+  test.each([
     ['alone', highlighted('x@y.com=', '', 'red'), '==x\\@y.com&#61;=={red}\n'],
     ['on a substitution\'s old side', tracked('del', highlighted('a ') + highlighted('x@y.com=', '', 'red')) + tracked('ins', highlighted('new')),
       '{~~==a =={yellow}==x\\@y.com&#61;=={red}~>==new==~~}\n'],
