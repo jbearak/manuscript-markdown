@@ -1734,6 +1734,63 @@ describe('Ordered list numbering', () => {
   });
 });
 
+describe('Empty Word paragraphs before a block', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+  // The Markdown of a document of the paragraphs in `body`. Export's
+  // numbering numbers with instance 1 a bullet list and with instance 2 a
+  // numbered one
+  const imported = async (body: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('1. a')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<w:body>[\s\S]*?(?=<w:sectPr)/, () => '<w:body>' + body));
+    return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+  };
+  const p = (text: string, pPr = '') => '<w:p>' + (pPr ? '<w:pPr>' + pPr + '</w:pPr>' : '') + (text ? '<w:r><w:t>' + text + '</w:t></w:r>' : '') + '</w:p>';
+  const item = (text: string, numId = 2, ilvl = 0) => p(text, '<w:numPr><w:ilvl w:val="' + ilvl + '"/><w:numId w:val="' + numId + '"/></w:numPr>');
+  const heading = (text: string, level: number) => p(text, '<w:pStyle w:val="Heading' + level + '"/>');
+  const empty = '<w:p/>';
+
+  test.each([
+    ['list items', item('a') + empty + item('b'), '1. a\n2. b'],
+    ['bullet list items', item('a', 1) + empty + empty + item('b', 1), '- a\n- b'],
+    ['an item and its sublist', item('a') + empty + item('x', 2, 1), '1. a\n   1. x'],
+    ['a paragraph and a list', p('A') + empty + item('b'), 'A\n\n1. b'],
+    ['a list and a heading', item('a') + empty + heading('G', 2), '1. a\n\n## G'],
+    ['a heading and a list', heading('H', 1) + empty + item('b', 1), '# H\n\n- b'],
+    ['a paragraph and a heading', p('A') + empty + empty + heading('G', 2), 'A\n\n## G'],
+    ['a paragraph and a code block', p('A') + empty + p('code', '<w:pStyle w:val="CodeBlock"/>'), 'A\n\n```\ncode\n```'],
+    ['a list and a rule', item('a') + empty + p('', '<w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="auto"/></w:pBdr>') + p('B'), '1. a\n\n---\n\nB'],
+  ])('reads an empty paragraph between %s as the blank line between them', async (_name, body, md) => {
+    // As one before a paragraph: export reads more blank lines as one, so
+    // the next trip would drop them
+    const markdown = await imported(body);
+    expect(strip(markdown)).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  const revision = (kind: string, id: number) => '<w:' + kind + ' w:id="' + id + '" w:author="X" w:date="2024-01-01T00:00:00Z"';
+  const markTracked = (kind: string) => '<w:rPr>' + revision(kind, 1) + '/></w:rPr>';
+  const tracked = (kind: string, text: string, pPr = '') => '<w:p><w:pPr>' + pPr + markTracked(kind) + '</w:pPr>'
+    + revision(kind, 2) + '><w:r><w:' + (kind === 'del' ? 'delText' : 't') + '>' + text + '</w:' + (kind === 'del' ? 'delText' : 't') + '></w:r></w:' + kind + '></w:p>';
+
+  test.each([
+    ['a paragraph mark inserted and a heading', p('A', markTracked('ins')) + empty + heading('G', 2), 'A{++\n\n++}\n\n## G'],
+    ['an item inserted and an item', tracked('ins', 'a', '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="2"/></w:numPr>') + empty + item('b'), '1. {++a\n\n   ++}\n2. b'],
+    ['a paragraph deleted and a list', tracked('del', 'A') + empty + item('b'), '{--A\n\n--}\n\n1. b'],
+  ])('reads an empty paragraph between %s as the blank line between them', async (_name, body, md) => {
+    // The tracked mark is in the text before it
+    const markdown = await imported(body);
+    expect(strip(markdown)).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  test('keeps a list item with no text between items', async () => {
+    const markdown = await imported(item('a') + item('') + item('b'));
+    expect(strip(markdown)).toBe('1. a\n2. \n3. b');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+});
+
 describe('HTML blocks in list items', () => {
   const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
 
@@ -2075,20 +2132,20 @@ describe('List levels Word skips', () => {
   const before = (xml: string, para: string) => xml.slice(0, xml.lastIndexOf('<w:p ')) + para + xml.slice(xml.lastIndexOf('<w:p '));
 
   test.each([
-    ['at the next level', '9. a\n10. b\n    - c\n', [0, 0, 1], '9. a\n10. b\n\n\n\n    - c\n'],
-    ['at a level after one Word skipped', '- a\n  - b\n', [0, 2], '- a\n\n\n\n  - b\n'],
-  ])('nests an item after an empty paragraph in the item before, %s', async (_name, md, levels, expected) => {
+    ['at the next level', '9. a\n10. b\n    - c\n', [0, 0, 1]],
+    ['at a level after one Word skipped', '- a\n  - b\n', [0, 2]],
+  ])('nests an item after an empty paragraph in the item before, %s', async (_name, md, levels) => {
     // The empty paragraph lost the width of the item's marker, and the item
-    // indented for a bullet's left the numbered item
+    // indented for a bullet's left the numbered item. It's the blank line
+    // before the item, which export reads as none, as it writes no empty
+    // paragraph between items
     const docx = await atLevels(md, levels, xml => before(xml, '<w:p/>'));
-    const markdown = await imported(docx);
-    expect(markdown).toBe(expected);
-    // Export writes no empty paragraph between items
-    expect(await imported((await convertMdToDocx(markdown)).docx)).toBe(md);
+    expect(await imported(docx)).toBe(md);
+    expect(await imported((await convertMdToDocx(md)).docx)).toBe(md);
   });
 
   test.each([
-    ['an item at the next level after an empty paragraph', '10. x\n    - b\n', '10. \n\n\n\n- b\n', '10. \n\n- b\n', (xml: string) => before(xml, '<w:p/>')],
+    ['an item at the next level after an empty paragraph', '10. x\n    - b\n', '10. \n\n- b\n', '10. \n\n- b\n', (xml: string) => before(xml, '<w:p/>')],
     ['a paragraph in it', '10. x\n\n    more\n', '10. \n\nmore\n', '10. \n\nmore\n', (xml: string) => xml],
     ['a quote in it after a blank line', '10. x\n\n    > q\n', '10. \n\n> q\n', '10. \n\n> q\n', (xml: string) => xml],
   ])('ends an item with no text before %s, as the blank line does', async (_name, md, expected, again, edit) => {
@@ -10441,12 +10498,15 @@ describe('Code block round-trip', () => {
     expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
   });
 
-  test('keeps an empty paragraph a Word user adds after a code block', async () => {
+  test('reads an empty paragraph a Word user adds after a code block as the blank line before the heading', async () => {
+    // As it reads one before any heading: export reads more blank lines as
+    // one, so the next trip would drop them
     const zip = await JSZip.loadAsync((await convertMdToDocx('```\ncode\n```\n\n## H')).docx);
     const xml = await zip.file('word/document.xml')!.async('string');
     zip.file('word/document.xml', xml.replace(/<w:p\b[^>]*><w:pPr><w:spacing w:after="0"\/><\/w:pPr><\/w:p>/, '<w:p/>'));
     const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
-    expect(markdown.trim()).toBe('```\ncode\n```\n\n\n\n## H');
+    expect(markdown.trim()).toBe('```\ncode\n```\n\n## H');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
   });
 
   test('keeps an empty paragraph that follows a table, not the code block', async () => {
