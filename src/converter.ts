@@ -9048,9 +9048,13 @@ function markTaskListItems(content: ContentItem[]): void {
       remove -= take;
     });
     // Spaces and tabs alone after the box leave the item empty, as they
-    // would a paragraph (see dropBlankParagraphText)
+    // would a paragraph (see dropBlankParagraphText), but not where its mark
+    // is tracked, the break before the next paragraph, whose text accepting
+    // it puts after them
     let end = i + 1;
     while (end < content.length && !isStructuralBoundaryItem(content[end])) end++;
+    const next = content[end];
+    if (next?.type === 'para' && next.breakRevision) continue;
     const rest = content.slice(i + 1, end);
     if (rest.every(isBlankText)) rest.forEach((text, k) => { content[i + 1 + k] = { ...text, text: '' }; });
   }

@@ -9280,6 +9280,20 @@ describe('Whitespace at the edges of a paragraph', () => {
       expect(markdown).toBe('A.\n\n' + table('a') + table('b') + 'B.\n\n<!-- no-indent -->\nC.\n\nD.\n');
       expect(await roundTrip(markdown)).toBe(markdown);
     });
+
+    test.each([
+      ['deleted', '- [ ] XX\n\n  c', 'del', '- [ ] &#32;&#32;{--\n\n  --}c\n'],
+      ['inserted', '- [ ] XX\n\n  c', 'ins', '- [ ] &#32;&#32;{++\n\n  ++}c\n'],
+      ['deleted, before another item', '- [ ] XX\n- [ ] c', 'del', '- [ ] &#32;&#32;{--\n\n  --}\n- [ ] c\n'],
+    ])('keeps the spaces alone after a task item\'s box whose paragraph\'s mark is %s', async (_name, md, type, expected) => {
+      // Import made the item an empty one, but accepting the break the mark
+      // is puts the next paragraph's text after them. (Export takes
+      // whitespace after the box for the box's, so they don't go back to
+      // Word.)
+      const markdown = await withXml(md, 'word/document.xml',
+        [/(<w:ind w:left="720" w:hanging="360"\/>)(<\/w:pPr>)/, '$1' + rPr(type) + '$2'], ['<w:r><w:t>XX</w:t></w:r>', spaces]);
+      expect(markdown).toBe(expected);
+    });
   });
 
   test.each([
