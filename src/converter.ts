@@ -13,7 +13,7 @@ import { computeCodeRegions, computeMarkdownRegions, isInsideCodeRegion } from '
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { citationEndInText, compareNoteLabels, customStyleId, directiveRest, htmlBlocksIn, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, readsAsInlineHtml, readsAsParagraph, startsHtmlBlock } from './md-to-docx';
+import { citationEndInText, compareNoteLabels, customStyleId, directiveRest, htmlBlocksIn, isCommentBlock, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, readsAsInlineHtml, readsAsParagraph, startsHtmlBlock } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { matchTables, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
@@ -11544,12 +11544,18 @@ export function buildMarkdown(
       continue;
     }
 
+    const rendered = renderInlineRange(mergedContent, i, comments, { stopBeforeDisplayMath: true, nested: paragraphNested, heading: paragraphHeading }, renderOpts);
+    if (rendered.nextIndex <= i) {
+      throw new Error('Invariant violated: renderInlineRange did not advance index');
+    }
     // Track standalone HTML comment paragraphs for gap metadata and emit their
     // separator. A leading comment in an alert paragraph is inline content;
     // pendingAlertPrefixStrip means its blockquote prefix was already emitted.
     // So is one in a quote, list item or heading, after the line's prefix,
-    // which export doesn't count among them (annotateHtmlCommentIndices)
-    if (item.type === 'html_comment' && !pendingAlertPrefixStrip && !paragraphNested && !paragraphHeading) {
+    // which export doesn't count among them (annotateHtmlCommentIndices), and
+    // one that line breaks or text follow, which export reads as a paragraph
+    // of more than the comment
+    if (item.type === 'html_comment' && !pendingAlertPrefixStrip && !paragraphNested && !paragraphHeading && isCommentBlock(rendered.text)) {
       // A blank line, where export stored none
       if (output.length === 0) documentStartCommentGap = htmlCommentGaps?.get(htmlCommentIndex) ?? 1;
       if (output.length > 0) {
@@ -11601,10 +11607,6 @@ export function buildMarkdown(
       htmlCommentIndex++;
     }
 
-    const rendered = renderInlineRange(mergedContent, i, comments, { stopBeforeDisplayMath: true, nested: paragraphNested, heading: paragraphHeading }, renderOpts);
-    if (rendered.nextIndex <= i) {
-      throw new Error('Invariant violated: renderInlineRange did not advance index');
-    }
     rendered.deferredComments.unshift(...pendingEquationBodies.splice(0));
     let strippedAlertLeadHadHardBreak = false;
     let textOut = rendered.text;

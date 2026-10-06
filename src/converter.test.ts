@@ -2887,6 +2887,20 @@ describe('HTML comment blank line round-trip', () => {
     const md = 'A.\n\n <!-- c -->\n\nB.';
     expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md + '\n');
   });
+
+  test.each([
+    '<!-- c --><br>',
+    '<!-- c --> <br>',
+    '<!-- c -->\t<br>',
+    '<!-- c --> <!-- e --><br>',
+    '<!-- c --><br><br>',
+    '<!-- c --><br> <br>',
+  ])('keeps the blank lines around one of its own after %s', async (before) => {
+    // Import counted the paragraph before among comments of their own, as
+    // export doesn't, so the next took the blank lines of the one after it
+    const md = 'A.\n\n' + before + '\n\n<!-- d -->\nB.\n';
+    expect((await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md);
+  });
 });
 
 describe('Sentinel gap round-trip', () => {
