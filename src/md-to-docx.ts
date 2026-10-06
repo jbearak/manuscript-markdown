@@ -2048,11 +2048,14 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
             searchFrom = li + 1;
             break;
           }
-          // For multi-line: verify all subsequent lines match
+          // For multi-line: verify all subsequent lines match, but for the
+          // indent of a list item's lines, which its comment's text doesn't
+          // have, so it doesn't match a later one alike instead
+          const line = (text: string) => tok.listContinuation ? text.trim() : text;
           let allMatch = li + commentLines.length <= origLines.length;
           if (allMatch) {
             for (let ci = 1; ci < commentLines.length; ci++) {
-              if (origLines[li + ci] !== commentLines[ci]) {
+              if (line(origLines[li + ci]) !== line(commentLines[ci])) {
                 allMatch = false;
                 break;
               }
@@ -3569,7 +3572,7 @@ function findClosingToken(tokens: ManuscriptToken[], start: number, closeType: s
 // continuation (e.g. a fenced code block indented under a list item).
 // Unsupported list child blocks are reported rather than silently lost.
 const DROPPED_LIST_BLOCK_TYPES = new Set([
-  'fence', 'code_block', 'html_block', 'blockquote_open', 'table_open', 'hr',
+  'fence', 'code_block', 'blockquote_open', 'table_open', 'hr',
 ]);
 
 function droppedListBlockWarning(kind: string): string {
@@ -3659,20 +3662,32 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
         } else if (itemTokens[j].type === 'inline' && !foundFirstParagraph) {
           runs = processInlineChildren([itemTokens[j]]);
           foundFirstParagraph = true;
-        } else if (itemTokens[j].type === 'html_block' && !/^\s*<!--/.test(itemTokens[j].content)) {
+        } else if (itemTokens[j].type === 'html_block') {
+          // An empty comment between two numbered sublists, as import writes
+          // it where Word starts the second over, which its numbering keeps
+          if (/^\s*<!--\s*-->\s*$/.test(itemTokens[j].content)
+            && itemTokens[j - 1]?.type === 'ordered_list_close' && itemTokens[j + 1]?.type === 'ordered_list_open') continue;
           // An HTML block, as at the top level, the item's first paragraph if
           // it comes first, as in - <div>a</div>, which kept nothing, and a
-          // continuation after a quote or sublist before it otherwise. Not a
-          // comment, or a block that only its end ends, as a <pre> its
-          // </pre> or a processing instruction its ?>, without its end and
-          // with more of the item after it, which markdown-it ended at a
-          // blank line in the item. Not a table, which an item can't hold.
+          // continuation after a quote or sublist before it otherwise. So is
+          // a comment, hidden, and a block one starts, as
+          // <!-- c --><div>a</div>, as text, which export dropped with the
+          // rest of the block, but not a comment after the item's text that
+          // reads as a directive, which the item can't hold. Not a block that
+          // only its end ends, as a <pre> its </pre>, a comment its --> or a
+          // processing instruction its ?>, without its end and with more of
+          // the item after it, which markdown-it ended at a blank line in the
+          // item. Not a table, which an item can't hold.
           const blocks = convertTokens([itemTokens[j]], 0, 0, warnings, sourceLines);
-          const raw = /^\s*<(?:(script|pre|style|textarea)(?=[\s>]|$)|(\?)|(!\[CDATA\[)|![A-Za-z])/i.exec(itemTokens[j].content);
-          const end = raw?.[1] ? new RegExp('</' + raw[1] + '>', 'i') : raw?.[2] ? /\?>/ : raw?.[3] ? /\]\]>/ : />/;
-          if ((raw && j < itemTokens.length - 1 && !end.test(itemTokens[j].content.slice(raw[0].length))) || blocks.some(block => block.type !== 'paragraph')) {
+          const first = !foundFirstParagraph && childSegments.length === 0 && blocks.length === 1;
+          const directive = !first && blocks.length === 1 && blocks[0].runs.length === 1 && blocks[0].runs[0].type === 'html_comment'
+            && directiveRest(blocks[0].runs[0].text) !== undefined;
+          // A comment's end can take the dashes of its start, as in <!-->
+          const raw = /^\s*<(?:(script|pre|style|textarea)(?=[\s>]|$)|(\?)|(!\[CDATA\[)|(!(?=--))|![A-Za-z])/i.exec(itemTokens[j].content);
+          const end = raw?.[1] ? new RegExp('</' + raw[1] + '>', 'i') : raw?.[2] ? /\?>/ : raw?.[3] ? /\]\]>/ : raw?.[4] ? /-->/ : />/;
+          if ((raw && j < itemTokens.length - 1 && !end.test(itemTokens[j].content.slice(raw[0].length))) || blocks.some(block => block.type !== 'paragraph') || directive) {
             warnings?.push(droppedListBlockWarning('HTML block'));
-          } else if (!foundFirstParagraph && childSegments.length === 0 && blocks.length === 1) {
+          } else if (first) {
             runs = blocks[0].runs;
             foundFirstParagraph = true;
             const htmlMap = itemTokens[j].map;
@@ -3691,14 +3706,9 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
               })),
             });
           }
-        } else if (DROPPED_LIST_BLOCK_TYPES.has(itemTokens[j].type)
-            // An empty comment between two numbered sublists, as import writes
-            // it where Word starts the second over, which its numbering keeps
-            && !(itemTokens[j].type === 'html_block' && /^\s*<!--\s*-->\s*$/.test(itemTokens[j].content)
-              && itemTokens[j - 1]?.type === 'ordered_list_close' && itemTokens[j + 1]?.type === 'ordered_list_open')) {
+        } else if (DROPPED_LIST_BLOCK_TYPES.has(itemTokens[j].type)) {
           const kind = itemTokens[j].type === 'fence' ? 'Code block'
             : itemTokens[j].type === 'code_block' ? 'Indented code block'
-            : itemTokens[j].type === 'html_block' ? 'HTML block'
             : itemTokens[j].type === 'blockquote_open' ? 'Blockquote'
             : itemTokens[j].type === 'table_open' ? 'Table'
             : itemTokens[j].type === 'hr' ? 'Horizontal rule'
@@ -5770,9 +5780,11 @@ export function annotateHtmlCommentIndices(tokens: MdToken[]): { beforeGaps: Map
   const afterGaps = new Map<number, number>();
   let idx = 0;
   for (const token of tokens) {
+    // Not one in a list item, which import writes after the item's indent
     const isHtmlComment = token.type === 'paragraph'
       && token.runs.length === 1
-      && token.runs[0].type === 'html_comment';
+      && token.runs[0].type === 'html_comment'
+      && !token.listContinuation;
     if (isHtmlComment) {
       token.htmlCommentIndex = idx;
       if (token.blankLinesBefore !== undefined && token.blankLinesBefore !== 1) {
@@ -7081,7 +7093,11 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
   // completely hidden; without this, Word Online may show the paragraph after
   // Word Desktop saves its "Show Hidden Text" preference into settings.xml.
   if (token.type === 'paragraph' && token.runs.length > 0 && token.runs.every(r => r.type === 'html_comment')) {
-    pPr = HIDDEN_PARAGRAPH_PPR;
+    // One in a list item keeps a continuation's style and indent, which
+    // import reads it in the item by
+    pPr = token.listContinuation
+      ? '<w:pPr><w:pStyle w:val="ManuscriptListContinuation"/><w:spacing w:after="0" w:line="1" w:lineRule="exact"/><w:ind w:left="' + 720 * token.listContinuation.level + '"/><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr></w:pPr>'
+      : HIDDEN_PARAGRAPH_PPR;
   }
 
   if (token.type === 'code_block') {
