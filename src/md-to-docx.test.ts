@@ -5613,6 +5613,162 @@ describe('landscape sections', () => {
       expect(XMLValidator.validate(xml)).toBe(true);
     });
 
+    it.each([
+      ['its own break, page, headers, title page, page numbering, printer settings and tracked change',
+        '<w:sectPr w:rsidR="00112233"><w:headerReference w:type="default" r:id="rId99"/><w:footnotePr><w:pos w:val="beneathText"/></w:footnotePr><w:type w:val="continuous"/>'
+        + '<w:pgSz w:w="11906" w:h="16838" w:code="9"/><w:pgMar w:top="1000" w:right="1000" w:bottom="1000" w:left="1000" w:header="700" w:footer="700" w:gutter="0"/>'
+        + '<w:lnNumType w:countBy="5"/><w:pgNumType w:start="5"/><w:cols w:num="2" w:space="720"><w:col w:w="4000" w:space="720"/><w:col w:w="4000"/></w:cols><w:vAlign w:val="center"/><w:titlePg/>'
+        + '<w:docGrid w:linePitch="360"/><w:printerSettings r:id="rId98"/><w:sectPrChange w:id="1" w:author="A" w:date="2024-01-01T00:00:00Z"><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:sectPrChange></w:sectPr>',
+        '<w:footnotePr><w:pos w:val="beneathText"/></w:footnotePr><w:type w:val="nextPage"/>{page}<w:pgMar w:top="1000" w:right="1000" w:bottom="1000" w:left="1000" w:header="700" w:footer="700" w:gutter="0"/>'
+        + '<w:lnNumType w:countBy="5"/><w:cols w:num="2" w:space="720"><w:col w:w="4000" w:space="720"/><w:col w:w="4000"/></w:cols><w:vAlign w:val="center"/><w:docGrid w:linePitch="360"/>'],
+      // One-inch margins, which export fits the content to, where it has
+      // none, and one column, as Word writes it, which Word would add
+      ['no properties, an empty element', '<w:sectPr/>', '<w:type w:val="nextPage"/>{page}<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/><w:cols w:space="720"/>'],
+    ])('gives a section break the template\'s section properties but %s', (_, templateSectPr, properties) => {
+      // A break had a page, margins and one column of its own. Headers,
+      // footers, the title page and page numbering are the first
+      // section's, which withTemplateSectPrs gives it
+      const state = makeState();
+      state.templateSectPr = templateSectPr;
+      const xml = generateDocumentXml(parseMd('A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n\nC.'), state);
+      const breaks = [...xml.matchAll(/<w:pPr><w:sectPr\b[^>]*>([\s\S]*?)<\/w:sectPr><\/w:pPr>/g)].map(match => match[1]);
+      const { w, h } = parseTemplatePgSz(templateSectPr);
+      expect(breaks).toEqual([properties.replace('{page}', '<w:pgSz w:w="' + w + '" w:h="' + h + '"/>'),
+        properties.replace('{page}', '<w:pgSz w:w="' + h + '" w:h="' + w + '" w:orient="landscape"/>')]);
+      expect(XMLValidator.validate(xml)).toBe(true);
+    });
+
+    const letterMargins = '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>';
+    it.each([
+      ['properties CT_SectPr puts after columns, which it goes before', '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>' + letterMargins + '<w:lnNumType w:countBy="1"/><w:vAlign w:val="center"/><w:docGrid w:linePitch="360"/></w:sectPr>',
+        '<w:type w:val="nextPage"/>{page}' + letterMargins + '<w:lnNumType w:countBy="1"/><w:cols w:space="720"/><w:vAlign w:val="center"/><w:docGrid w:linePitch="360"/>'],
+      ['none after them', '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>' + letterMargins + '</w:sectPr>',
+        '<w:type w:val="nextPage"/>{page}' + letterMargins + '<w:cols w:space="720"/>'],
+    ])('gives a section break one column, as Word writes it, where the template\'s section properties have no columns but %s', (_, templateSectPr, properties) => {
+      // A break took the template's properties without columns, which Word
+      // adds on open, marking the document changed (dirty-flag invariant 11)
+      const state = makeState();
+      state.templateSectPr = templateSectPr;
+      const xml = generateDocumentXml(parseMd('A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n\nC.'), state);
+      const breaks = [...xml.matchAll(/<w:pPr><w:sectPr\b[^>]*>([\s\S]*?)<\/w:sectPr><\/w:pPr>/g)].map(match => match[1]);
+      expect(breaks).toEqual([properties.replace('{page}', '<w:pgSz w:w="12240" w:h="15840"/>'),
+        properties.replace('{page}', '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>')]);
+      expect(XMLValidator.validate(xml)).toBe(true);
+    });
+
+    // Markup compatibility's alternatives: a choice that needs what Word
+    // understands, w14, which it reads, or one that needs a namespace it
+    // doesn't, and a fallback
+    const alternatives = (choice: string, fallback = choice, requires = 'w14') => '<mc:AlternateContent><mc:Choice Requires="' + requires + '"'
+      + (requires === 'w14' ? '' : ' xmlns:' + requires + '="urn:example:' + requires + '"') + '>' + choice + '</mc:Choice>'
+      + (fallback ? '<mc:Fallback>' + fallback + '</mc:Fallback>' : '') + '</mc:AlternateContent>';
+    const a4 = '<w:pgSz w:w="11906" w:h="16838"/>';
+    const letter = '<w:pgSz w:w="12240" w:h="15840"/>';
+    it.each([
+      ['columns', letter + letterMargins + alternatives('<w:cols w:num="3" w:space="720"/>', '<w:cols w:num="2" w:space="720"/>'),
+        '<w:type w:val="nextPage"/>{page}' + letterMargins + '<w:cols w:num="3" w:space="720"/>'],
+      ['columns, whose choice needs a namespace Word doesn\'t understand', letter + letterMargins + alternatives('<w:cols w:num="3" w:space="720"/>', '<w:cols w:num="2" w:space="720"/>', 'x'),
+        '<w:type w:val="nextPage"/>{page}' + letterMargins + '<w:cols w:num="2" w:space="720"/>'],
+      ['columns, whose choice needs such a namespace, with no fallback', letter + letterMargins + alternatives('<w:cols w:num="3" w:space="720"/>', '', 'x'),
+        '<w:type w:val="nextPage"/>{page}' + letterMargins + '<w:cols w:space="720"/>'],
+      ['margins and columns, in one choice', letter + alternatives(letterMargins + '<w:cols w:num="2" w:space="720"/>'),
+        '<w:type w:val="nextPage"/>{page}' + letterMargins + '<w:cols w:num="2" w:space="720"/>'],
+      ['margins', letter + alternatives(letterMargins) + '<w:cols w:space="720"/>',
+        '<w:type w:val="nextPage"/>{page}' + letterMargins + '<w:cols w:space="720"/>'],
+      ['footnote settings', letter + letterMargins + '<w:cols w:space="720"/>' + alternatives('<w:footnotePr><w:numFmt w:val="lowerRoman"/></w:footnotePr>'),
+        '<w:footnotePr><w:numFmt w:val="lowerRoman"/></w:footnotePr><w:type w:val="nextPage"/>{page}' + letterMargins + '<w:cols w:space="720"/>'],
+      ['page', alternatives(letter) + letterMargins + '<w:cols w:space="720"/>',
+        '<w:type w:val="nextPage"/>{page}' + letterMargins + '<w:cols w:space="720"/>'],
+      ['page, whose choice, A4, needs a namespace Word doesn\'t understand', alternatives(a4, letter, 'x') + letterMargins + '<w:cols w:space="720"/>',
+        '<w:type w:val="nextPage"/>{page}' + letterMargins + '<w:cols w:space="720"/>'],
+      ['columns with an extension\'s attribute, whose namespace the choice declares', letter + letterMargins
+        + '<mc:AlternateContent><mc:Choice Requires="w14" xmlns:ext="urn:example:ext"><w:cols w:num="2" w:space="720" ext:x="1"/></mc:Choice></mc:AlternateContent>',
+        '<w:type w:val="nextPage"/>{page}' + letterMargins + '<w:cols w:num="2" w:space="720" ext:x="1" xmlns:ext="urn:example:ext"/>'],
+      ['extension, in the default namespace, which the choice declares', letter + letterMargins + '<w:cols w:space="720"/>'
+        + '<mc:AlternateContent><mc:Choice Requires="w14" xmlns="urn:example:ext"><extra/></mc:Choice></mc:AlternateContent>',
+        '<w:type w:val="nextPage"/>{page}' + letterMargins + '<w:cols w:space="720"/><extra xmlns="urn:example:ext"/>'],
+      ['columns, in alternatives in the choice', letter + letterMargins + alternatives(alternatives('<w:cols w:num="3" w:space="720"/>', '<w:cols w:num="2" w:space="720"/>', 'x'), '<w:cols w:space="720"/>'),
+        '<w:type w:val="nextPage"/>{page}' + letterMargins + '<w:cols w:num="2" w:space="720"/>'],
+      ['columns of their own widths, which alternatives in the columns hold', letter + letterMargins
+        + '<w:cols w:num="2" w:space="720" w:equalWidth="0">' + alternatives('<w:col w:w="4320" w:space="720"/><w:col w:w="4320"/>') + '</w:cols>',
+        '<w:type w:val="nextPage"/>{page}' + letterMargins + '<w:cols w:num="2" w:space="720" w:equalWidth="0"><w:col w:w="4320" w:space="720"/><w:col w:w="4320"/></w:cols>'],
+    ])('takes the template\'s %s, held in markup compatibility\'s alternatives, as Word reads them, in a section break', (_, children, properties) => {
+      // A break took the alternatives as some other property, so it added
+      // columns or margins of its own beside them, or kept a page beside its
+      // own, or put note settings after the page, against CT_SectPr; and it
+      // took the size of the first page in them, which Word doesn't read
+      // where it needs what Word doesn't understand; and it took both
+      // alternatives' columns in its columns as four, too wide for the
+      // text, so it scaled them down to a quarter each
+      const state = makeState();
+      state.templateSectPr = '<w:sectPr>' + children + '</w:sectPr>';
+      const xml = generateDocumentXml(parseMd('A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n\nC.'), state);
+      const breaks = [...xml.matchAll(/<w:pPr><w:sectPr\b[^>]*>([\s\S]*?)<\/w:sectPr><\/w:pPr>/g)].map(match => match[1]);
+      expect(breaks).toEqual([properties.replace('{page}', letter), properties.replace('{page}', '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>')]);
+    });
+
+    it('reads the template\'s page from markup compatibility\'s alternatives whose choice declares the namespace it needs, in a section break', () => {
+      // The choice's declaration, on the page out of it, hid it from
+      // export, so a break had Letter's page
+      const state = makeState();
+      state.templateSectPr = '<w:sectPr><mc:AlternateContent><mc:Choice xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" Requires="w14">' + a4 + '</mc:Choice>'
+        + '<mc:Fallback>' + letter + '</mc:Fallback></mc:AlternateContent>' + letterMargins + '<w:cols w:space="720"/></w:sectPr>';
+      const xml = generateDocumentXml(parseMd('A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n\nC.'), state);
+      const breaks = [...xml.matchAll(/<w:pPr><w:sectPr\b[^>]*>([\s\S]*?)<\/w:sectPr><\/w:pPr>/g)].map(match => match[1]);
+      expect(breaks).toEqual(['<w:type w:val="nextPage"/>' + a4 + letterMargins + '<w:cols w:space="720"/>',
+        '<w:type w:val="nextPage"/><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>' + letterMargins + '<w:cols w:space="720"/>']);
+    });
+
+    it('takes the template\'s columns out of an extension\'s wrapper whose content Word reads, in each section a fence starts or ends the document with', () => {
+      // A break took the wrapper, which markup compatibility's
+      // mc:ProcessContent names, for some other property, so it added one
+      // column of its own beside the columns in it, which Word reads as
+      // the sectPr's own: two
+      const state = makeState();
+      const open = '<w:sectPr xmlns:ext="urn:example:ext" mc:Ignorable="ext" mc:ProcessContent="ext:wrap">';
+      state.templateSectPr = open + letter + letterMargins + '<ext:wrap><w:cols w:num="2" w:space="720"/></ext:wrap></w:sectPr>';
+      const xml = generateDocumentXml(parseMd('A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n\nC.\n\n<!-- landscape -->\n\nD.\n\n<!-- /landscape -->'), state);
+      const sectPrs = [...xml.matchAll(/<w:sectPr\b[^>]*>([\s\S]*?)<\/w:sectPr>/g)].map(match => match[1]);
+      const turned = '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>';
+      expect(sectPrs).toEqual([letter, turned, letter].map(page => '<w:type w:val="nextPage"/>' + page + letterMargins + '<w:cols w:num="2" w:space="720"/>')
+        .concat(turned + letterMargins + '<w:cols w:num="2" w:space="720"/>'));
+      expect(xml.slice(xml.lastIndexOf('<w:sectPr'))).toStartWith(open);
+    });
+
+    const W14 = 'http://schemas.microsoft.com/office/word/2010/wordml';
+    it.each([
+      ['bind its prefix to another namespace, and another prefix to it', '<w:cols w:num="2" w:space="720" xmlns:x="' + W14 + '" xmlns:z="urn:example:a" z:y="1"/>',
+        '<w:cols w:num="2" w:space="720" xmlns:x="' + W14 + '" xmlns:z="urn:example:a" z:y="1" mc:Ignorable="z"/>'],
+      ['bind its prefix to another namespace, and a column of them another prefix to it', '<w:cols w:num="2" w:space="720" w:equalWidth="0" xmlns:x="' + W14 + '">'
+        + '<w:col w:w="4320" w:space="720" xmlns:z="urn:example:a" z:y="1"/><w:col w:w="4320"/></w:cols>',
+        '<w:cols w:num="2" w:space="720" w:equalWidth="0" xmlns:x="' + W14 + '" xmlns:ns1="urn:example:a" mc:Ignorable="ns1">'
+        + '<w:col w:w="4320" w:space="720" xmlns:z="urn:example:a" z:y="1"/><w:col w:w="4320"/></w:cols>'],
+    ])('keeps ignorable on columns out of markup compatibility\'s alternatives the namespace the alternatives make ignorable, where the columns %s', (_, cols, lifted) => {
+      // The columns took the alternatives' prefix as ignorable, which names
+      // another namespace there, so the alternatives' namespace, which the
+      // columns use, wasn't ignorable, and Word, which doesn't understand
+      // it, wouldn't open the document
+      const state = makeState();
+      state.templateSectPr = '<w:sectPr>' + letter + letterMargins + '<mc:AlternateContent><mc:Choice Requires="w14" xmlns:x="urn:example:a" mc:Ignorable="x">' + cols
+        + '</mc:Choice></mc:AlternateContent></w:sectPr>';
+      const xml = generateDocumentXml(parseMd('A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n\nC.'), state);
+      const breaks = [...xml.matchAll(/<w:pPr><w:sectPr\b[^>]*>([\s\S]*?)<\/w:sectPr><\/w:pPr>/g)].map(match => match[1]);
+      expect(breaks).toEqual([letter, '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>'].map(page => '<w:type w:val="nextPage"/>' + page + letterMargins + lifted));
+      expect(XMLValidator.validate(xml)).toBe(true);
+    });
+
+    it.each([
+      ['its page', alternatives('<w:pgSz w:w="12240" w:h="15840"/>') + letterMargins + '<w:cols w:space="720"/>'],
+      ['its page, margins and columns, in one choice', alternatives('<w:pgSz w:w="12240" w:h="15840"/>' + letterMargins + '<w:cols w:space="720"/>')],
+    ])('turns the template\'s page in a section a fence ends the document with, where markup compatibility\'s alternatives hold %s', (_, children) => {
+      // The page in the choice turned, and the fallback's stayed upright
+      const state = makeState();
+      state.templateSectPr = '<w:sectPr>' + children + '</w:sectPr>';
+      const xml = generateDocumentXml(parseMd('A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->'), state);
+      const sectPrs = [...xml.matchAll(/<w:sectPr\b[^>]*>([\s\S]*?)<\/w:sectPr>/g)].map(match => match[1]);
+      expect(sectPrs[sectPrs.length - 1]).toBe('<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>' + letterMargins + '<w:cols w:space="720"/>');
+    });
+
     it('preserves template sectPr as body closing', () => {
       const tokens: MdToken[] = [{ type: 'paragraph', runs: [{ type: 'text', text: 'Test' }] }];
       const state = makeState();

@@ -31,7 +31,7 @@ export { commentsEnd, isLineBreakBlock } from './html-blocks';
 import { preprocessBlocks } from './block-preprocess';
 import { maxOf, pushAll } from './arrays';
 import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, relatedPartPath, type TemplateSections } from './template-sections';
-import { EXPORT_CONTEXT, EXPORT_IGNORABLE, EXPORT_NAMESPACES, WORDPROCESSINGML, attributeNamed, buildOrdered, childrenOf, contextIn, effectiveSectPr, elementsIn, isElement, isNamed, mapProperties, moved, nameOf, parseOrdered, scopeIn, sectPrPropertyOf, sectPrRank, type Context, type Scope, type XmlNode } from './scoped-xml';
+import { EXPORT_CONTEXT, EXPORT_IGNORABLE, EXPORT_NAMESPACES, MARKUP_COMPATIBILITY, WORDPROCESSINGML, attributeNamed, attributesOf, buildOrdered, childrenOf, contextIn, effectiveSectPr, elementsIn, isElement, isNamed, mapProperties, moved, nameOf, parseOrdered, scopeIn, sectPrPropertyOf, sectPrRank, type Context, type Scope, type XmlNode } from './scoped-xml';
 export { preprocessGridTables } from './grid-table-preprocess';
 export { extractHtmlTables } from './html-table-parser';
 
@@ -4820,32 +4820,74 @@ function parseTemplateMargins(sectPrXml: string | undefined): string {
   return built.slice(('<' + nameOf(margins)).length, -'/>'.length).trim();
 }
 
+/** The namespace declarations of a sectPr, and its markup compatibility
+ *  attributes, as mc:Ignorable, which say how to read the namespaces its
+ *  children use, each with its space before it */
+function sectPrNamespaces(sectPr: XmlNode): string {
+  const compatibility = new Set(attributesOf(sectPr, EXPORT_NAMESPACES).filter(({ namespace }) => namespace === MARKUP_COMPATIBILITY).map(({ key }) => key));
+  return Object.entries(sectPr[':@'] ?? {}).filter(([key]) => key === '@_xmlns' || key.startsWith('@_xmlns:') || compatibility.has(key))
+    .map(([key, value]) => ' ' + key.slice('@_'.length) + '="' + escapeXml(value) + '"').join('');
+}
+
+// The start of export's document, whose namespaces, EXPORT_NAMESPACES, a
+// template's sectPr, which goes in it, is read with
+const DOCUMENT_START = '<w:document' + [...EXPORT_NAMESPACES].map(([prefix, namespace]) => ' xmlns:' + prefix + '="' + namespace + '"').join('') + ' mc:Ignorable="' + EXPORT_IGNORABLE.join(' ') + '">';
+
 /** A sectPr, parsed, as Word reads it in export's document (see
  *  effectiveSectPr): under export's prefixes, with each of markup
  *  compatibility's alternatives and wrappers in it in place of what Word
- *  reads of them, as Word writes it on save, so that each property is one,
- *  its own child, in its place. None where it isn't a sectPr. */
+ *  reads of them, as Word writes it on save, and as each section export
+ *  writes from it has them, so that each property is one, in its place,
+ *  and its columns are those Word shows. None where it isn't a sectPr. */
 function resolvedSectPr(sectPrXml: string): XmlNode | undefined {
   const sectPr = parseOrdered(sectPrXml)?.find(isElement);
   return sectPr && isNamed(sectPr, EXPORT_NAMESPACES, WORDPROCESSINGML, 'sectPr') ? effectiveSectPr(sectPr, EXPORT_CONTEXT) : undefined;
 }
 
+// The template's section properties a section break doesn't take: its own
+// break and page; the headers, footers, title page and page number start
+// only the first section takes (see withTemplateSectPrs); a tracked
+// change's old properties; and the printer settings, which name a
+// relationship of the template's
+const NOT_COPIED = new Set(['type', 'pgSz', 'headerReference', 'footerReference', 'titlePg', 'pgNumType', 'sectPrChange', 'printerSettings']);
+// The children CT_SectPr puts before w:type (ECMA-376 Part 1 §17.6.17)
+const BEFORE_TYPE = new Set(['headerReference', 'footerReference', 'footnotePr', 'endnotePr']);
 /** Whether CT_SectPr puts a section property after another */
 const isAfter = (property: string, other: string) => sectPrRank(property) > sectPrRank(other);
-
-/** Build a portrait sectPr XML element for section breaks. */
-function portraitSectPrXml(pgSz: PageSize, margins: string, rsid?: string): string {
+/**
+ * Build the sectPr of a section break, which ends a section on a new page,
+ * the fence's orientation. With a template, it has the template's own
+ * section properties, as Word gives a section it inserts the properties of
+ * the one it splits, so each section has the template's columns, line
+ * numbers, document grid and note settings, with the page turned. Without
+ * one, a page of the size and margins given.
+ */
+function sectionBreakSectPrXml(landscape: boolean, pgSz: PageSize, margins: string, rsid?: string, templateSectPr?: string): string {
+  // Of markup compatibility's alternatives, those Word reads
+  const sectPr = templateSectPr ? resolvedSectPr(templateSectPr) : undefined;
+  // The namespaces the template's sectPr declares, which its children can
+  // use, and how to read them
+  const open = '<w:sectPr' + (sectPr ? sectPrNamespaces(sectPr) : '') + (rsid ? ' w:rsidR="' + rsid + '"' : '') + '>';
+  const page = landscape ? '<w:pgSz w:w="' + pgSz.h + '" w:h="' + pgSz.w + '" w:orient="landscape"/>' : '<w:pgSz w:w="' + pgSz.w + '" w:h="' + pgSz.h + '"/>';
   // w:type goes before w:pgSz, as CT_SectPr orders them
-  return '<w:sectPr' + (rsid ? ' w:rsidR="' + rsid + '"' : '') + '><w:type w:val="nextPage"/>' +
-    '<w:pgSz w:w="' + pgSz.w + '" w:h="' + pgSz.h + '"/>' +
-    '<w:pgMar ' + margins + '/>' +
-    '<w:cols w:space="720"/></w:sectPr>';
-}
-
-/** Build a landscape sectPr XML element for section breaks. */
-function landscapeSectPrXml(pgSz: PageSize, margins: string, rsid?: string): string {
-  return '<w:sectPr' + (rsid ? ' w:rsidR="' + rsid + '"' : '') + '><w:type w:val="nextPage"/>' +
-    '<w:pgSz w:w="' + pgSz.h + '" w:h="' + pgSz.w + '" w:orient="landscape"/>' +
+  if (sectPr) {
+    const property = (child: InScope) => sectPrPropertyOf(child.node, child.scope);
+    const copied = elementsIn(sectPr, EXPORT_NAMESPACES).filter(child => !NOT_COPIED.has(property(child)));
+    // The margins export fits the section's content to, one inch, where the
+    // template has none of its own, right after the page, as CT_SectPr has them
+    const pageMargins = copied.some(child => property(child) === 'pgMar') ? '' : '<w:pgMar ' + margins + '/>';
+    const after = copied.filter(child => !BEFORE_TYPE.has(property(child))).map(child => child.node);
+    // And one column, as Word writes it, where the template gives none,
+    // which Word would add on open, marking the document changed (see
+    // dirty-flag invariant 11), before the children CT_SectPr puts after it
+    if (!copied.some(child => property(child) === 'cols')) {
+      const at = after.findIndex(child => isAfter(sectPrPropertyOf(child, scopeIn(sectPr, EXPORT_NAMESPACES)), 'cols'));
+      after.splice(at === -1 ? after.length : at, 0, parseOrdered('<w:cols w:space="720"/>')![0]);
+    }
+    return open + buildOrdered(copied.filter(child => BEFORE_TYPE.has(property(child))).map(child => child.node)) + '<w:type w:val="nextPage"/>' + page + pageMargins +
+      buildOrdered(after) + '</w:sectPr>';
+  }
+  return open + '<w:type w:val="nextPage"/>' + page +
     '<w:pgMar ' + margins + '/>' +
     '<w:cols w:space="720"/></w:sectPr>';
 }
@@ -4882,8 +4924,7 @@ function fencedBodySectPrXml(landscape: boolean, pgSz: PageSize, margins: string
     const page = children.findIndex(child => property(child) === 'pgSz');
     const after = children.findIndex(child => isAfter(property(child), 'pgSz'));
     const at = after === -1 ? children.length : after;
-    const withPage = page !== -1 ? children.map((child, i) => i === page ? turned : child) : [...children.slice(0, at), turned, ...children.slice(at)];
-    return buildOrdered([{ ...sectPr, [nameOf(sectPr)]: withPage }]);
+    return buildOrdered([{ ...sectPr, [nameOf(sectPr)]: page !== -1 ? children.map((child, i) => i === page ? turned : child) : [...children.slice(0, at), turned, ...children.slice(at)] }]);
   }
   return '<w:sectPr' + (rsid ? ' w:rsidR="' + rsid + '"' : '') + '>' + fencePgSz +
     '<w:pgMar ' + margins + '/>' +
@@ -4989,6 +5030,8 @@ export interface DocxGenState {
   portraitTables: Set<number>;  // table indices that have data-orientation="portrait"
   inLandscapeSection: boolean;  // tracks current landscape state during generation
   inPortraitSection: boolean;   // tracks current portrait fence state during generation
+  noteNumbering?: NoteNumbering; // how Word numbers the notes (see noteNumberingOf)
+  noteNumbers?: Map<number, string>; // the number Word shows for each note the body references, by ID, which a reference again shows (see noteNumbersIn)
   sectionBreakOrdinal: number;  // counter for paragraph-level sectPr emissions (for portrait round-trip)
   portraitBreakOrdinals: Set<number>; // ordinals of portrait-fence close section breaks
   referencesBeforeSections?: number[]; // ordinals of the breaks ending the sections a references marker before their opening fence is written at the start of
@@ -7967,6 +8010,92 @@ function insertedContent(state: DocxGenState, generate: () => string): string {
   }
 }
 
+// The number a reference again shows for a note until the note's number
+// is known, where the document is written (see withNoteNumbers): the note's
+// ID between NULs, which no XML holds, as BIBL_BREAK_PLACEHOLDER
+const NOTE_NUMBER_MARK = '\x00MANUSCRIPT_NOTE_NUMBER_';
+const noteNumberMark = (noteId: number) => NOTE_NUMBER_MARK + noteId + '\x00';
+
+/** How Word numbers the document's notes, from the template's section
+ *  properties, which each section has (see sectionBreakSectPrXml): its
+ *  w:footnotePr, or w:endnotePr for endnotes, as Word reads it, their
+ *  format, w:numFmt, start, w:numStart, and where they start again,
+ *  w:numRestart (ECMA-376 Part 1 §17.11.11, §17.11.17 to §17.11.20). Word
+ *  numbers endnotes in lowercase roman numerals where nothing says how,
+ *  footnotes in decimal ([MS-OI29500] Part 1 Section 17.11.17), and notes
+ *  in a bullet format in decimal. Export's settings say none of this. */
+interface NoteNumbering { format: string; start: number; restart: string }
+function noteNumberingOf(state: DocxGenState): NoteNumbering {
+  const endnotes = state.notesMode === 'endnotes';
+  const notePr = sectPrPropertyIn(state.templateSectPr, endnotes ? 'endnotePr' : 'footnotePr');
+  const value = (local: string) => {
+    const child = notePr && elementsIn(notePr.node, notePr.scope).find(child => isNamed(child.node, child.scope, WORDPROCESSINGML, local));
+    return child && wAttributeOf(child, 'val');
+  };
+  const format = value('numFmt') ?? (endnotes ? 'lowerRoman' : 'decimal');
+  // An integer as import reads one, with a sign too
+  const start = xmlInteger(value('numStart')) ?? 1;
+  return { format: format === 'bullet' ? 'decimal' : format, start, restart: value('numRestart') ?? 'continuous' };
+}
+
+/** A note's number, `n`, as a note number format shows it: in decimal,
+ *  roman numerals, letters, which Word repeats past z, as aa, or the
+ *  symbols of the Chicago Manual of Style, *, †, ‡ and §, which Word
+ *  repeats past them, as **. Others, which notes seldom have, in decimal */
+export function noteNumberText(n: number, format: string): string {
+  if (n < 1) return String(n);
+  if (format === 'lowerRoman' || format === 'upperRoman') {
+    let roman = '', rest = n;
+    for (const [value, numeral] of [[1000, 'M'], [900, 'CM'], [500, 'D'], [400, 'CD'], [100, 'C'], [90, 'XC'], [50, 'L'], [40, 'XL'], [10, 'X'], [9, 'IX'], [5, 'V'], [4, 'IV'], [1, 'I']] as const) {
+      for (; rest >= value; rest -= value) roman += numeral;
+    }
+    return format === 'lowerRoman' ? roman.toLowerCase() : roman;
+  }
+  if (format === 'lowerLetter' || format === 'upperLetter') {
+    const letter = String.fromCharCode((format === 'lowerLetter' ? 97 : 65) + (n - 1) % 26);
+    return letter.repeat(Math.floor((n - 1) / 26) + 1);
+  }
+  if (format === 'chicago') return '*\u2020\u2021\u00A7'[(n - 1) % 4].repeat(Math.floor((n - 1) / 4) + 1);
+  if (format === 'decimalZero') return n < 10 ? '0' + n : String(n);
+  return String(n);
+}
+
+/** The number Word shows for each note a document's body references, by
+ *  its ID: in the order of the references that own them, from the start,
+ *  and from the start again in each section where the numbering restarts
+ *  in each, or on each page, of which a section has at least one, since
+ *  export can't know where its pages end. A section ends with the
+ *  paragraph whose properties hold its sectPr */
+function noteNumbersIn(bodyXml: string, numbering: NoteNumbering): Map<number, string> {
+  const numbers = new Map<number, string>();
+  let section = 0, ending = false, noteSection = 0, count = 0;
+  for (const [tag, id] of bodyXml.matchAll(/<w:(?:footnote|endnote)Reference\b[^>]*?\sw:id="(\d+)"[^>]*>|<\/w:sectPr>\s*<\/w:pPr>|<\/w:p>/g)) {
+    if (id !== undefined) {
+      if (numbering.restart !== 'continuous' && section !== noteSection) count = 0;
+      noteSection = section;
+      if (!numbers.has(Number(id))) numbers.set(Number(id), noteNumberText(numbering.start + count++, numbering.format));
+    } else if (tag.startsWith('</w:sectPr')) {
+      ending = true;
+    } else if (ending) {
+      section++;
+      ending = false;
+    }
+  }
+  return numbers;
+}
+
+/** XML with the number each reference again to a note shows, in place of
+ *  its mark (see noteNumberMark): the note's (see noteNumbersIn), or, for
+ *  a note no reference in the body owns, as a note in a note, the one its
+ *  ID would have */
+function withNoteNumbers(xml: string, numbers: ReadonlyMap<number, string>, numbering: NoteNumbering): string {
+  const [before, ...marked] = xml.split(NOTE_NUMBER_MARK);
+  return before + marked.map(part => {
+    const end = part.indexOf('\x00'), id = Number(part.slice(0, end));
+    return (numbers.get(id) ?? noteNumberText(numbering.start + id - 1, numbering.format)) + part.slice(end + 1);
+  }).join('');
+}
+
 /**
  * A reference to the note `label`, inside a tracked change of `revision` or
  * none. The reference that owns the note gets Word's note reference; any
@@ -8000,7 +8129,8 @@ function noteReferenceXml(label: string, state: DocxGenState, revision?: 'additi
   return '<w:r>' + rPr + '<w:fldChar w:fldCharType="begin"/></w:r>'
     + '<w:r>' + rPr + '<' + instrTag + ' xml:space="preserve"> NOTEREF ' + bkmkName + ' \\f \\h </' + instrTag + '></w:r>'
     + '<w:r>' + rPr + '<w:fldChar w:fldCharType="separate"/></w:r>'
-    + '<w:r>' + rPr + (revision === 'deletion' ? delText(String(noteId)) : '<w:t>' + noteId + '</w:t>') + '</w:r>'
+    // The note's number, once it's known (see withNoteNumbers)
+    + '<w:r>' + rPr + (revision === 'deletion' ? delText(noteNumberMark(noteId)) : '<w:t>' + noteNumberMark(noteId) + '</w:t>') + '</w:r>'
     + '<w:r>' + rPr + '<w:fldChar w:fldCharType="end"/></w:r>';
 }
 
@@ -9812,8 +9942,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   const margins = parseTemplateMargins(state.templateSectPr);
 
   // The section break paragraphs, each empty but for its section's properties
-  const portraitBreak = '<w:p><w:pPr>' + portraitSectPrXml(pgSz, margins, state.rsid) + '</w:pPr></w:p>';
-  const landscapeBreak = '<w:p><w:pPr>' + landscapeSectPrXml(pgSz, margins, state.rsid) + '</w:pPr></w:p>';
+  const portraitBreak = '<w:p><w:pPr>' + sectionBreakSectPrXml(false, pgSz, margins, state.rsid, state.templateSectPr) + '</w:pPr></w:p>';
+  const landscapeBreak = '<w:p><w:pPr>' + sectionBreakSectPrXml(true, pgSz, margins, state.rsid, state.templateSectPr) + '</w:pPr></w:p>';
   // Helper: emit a portrait section break paragraph and increment ordinal
   function emitPortraitBreak(): void {
     body += portraitBreak;
@@ -10383,7 +10513,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   // starts the next section, which import reads back before its fence.
   if (biblBreakOrdinals.length > 0) {
     if (biblShows) {
-      body = body.split(BIBL_BREAK_PLACEHOLDER).join('<w:p><w:pPr>' + portraitSectPrXml(pgSz, margins, state.rsid) + '</w:pPr></w:p>');
+      body = body.split(BIBL_BREAK_PLACEHOLDER).join(portraitBreak);
       const portraitBreakOrdinals = [...state.portraitBreakOrdinals];
       state.portraitBreakOrdinals.clear();
       for (const ordinal of portraitBreakOrdinals) state.portraitBreakOrdinals.add(ordinal + biblBreakOrdinals.filter(b => b <= ordinal).length);
@@ -10438,9 +10568,14 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     state.templatePageSection = state.sectionBreakOrdinal;
   }
   ({ body, closingSectPr } = withTemplateSectPrs(body, closingSectPr, state.templateSections));
+  // Each reference again to a note shows the number Word gives the note,
+  // which the notes, written after, show too (see withNoteNumbers)
+  state.noteNumbering = noteNumberingOf(state);
+  state.noteNumbers = noteNumbersIn(body, state.noteNumbering);
+  body = withNoteNumbers(body, state.noteNumbers, state.noteNumbering);
 
   return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
-    '<w:document' + [...EXPORT_NAMESPACES].map(([prefix, namespace]) => ' xmlns:' + prefix + '="' + namespace + '"').join('') + ' mc:Ignorable="' + EXPORT_IGNORABLE.join(' ') + '">\n' +
+    DOCUMENT_START + '\n' +
     '<w:body>\n' + body + '\n' + closingSectPr + '\n</w:body>\n' +
     '</w:document>';
 }
@@ -11165,6 +11300,9 @@ export async function convertMdToDocx(
   for (const { label, noteId, entry, selfRefRun } of unmarkedNotes) {
     if (state.footnoteCrossRefLabels.has(label)) entry.bodyXml = entry.bodyXml.replace(selfRefRun, () => bookmarkedSelfRef(selfRefRun, noteId, state));
   }
+  // A reference again to a note in a note shows the note's number, as one
+  // in the body does
+  for (const entry of state.footnoteEntries) entry.bodyXml = withNoteNumbers(entry.bodyXml, state.noteNumbers ?? new Map(), state.noteNumbering ?? noteNumberingOf(state));
   state.inNoteBody = false;
 
   // Warn for orphaned references (use footnoteLabelToId, not the pre-body-processing

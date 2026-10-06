@@ -216,6 +216,60 @@ async function sectionHeaders(docx: Uint8Array): Promise<string[]> {
   return sections;
 }
 
+const MARKUP_COMPATIBILITY = 'http://schemas.openxmlformats.org/markup-compatibility/2006';
+/**
+ * What a namespace-aware reader finds wrong with a part's names: a prefix
+ * no declaration in scope binds, on an element, an attribute, or in one of
+ * markup compatibility's lists of prefixes, and a name in one of the
+ * examples' namespaces, urn:example:..., which no consumer knows, where it
+ * isn't ignorable. And each such name, by its local name and namespace.
+ */
+function namespaceProblems(xml: string): { problems: string[]; names: Array<[string, string]> } {
+  const problems: string[] = [];
+  const names: Array<[string, string]> = [];
+  const open: Array<{ scope: Map<string, string>; ignorable: Set<string> }> = [{ scope: new Map([['xml', 'http://www.w3.org/XML/1998/namespace']]), ignorable: new Set() }];
+  for (const [, close, name, attributeText, empty] of xml.matchAll(/<(\/?)([^\s/>!?]+)((?:\s+[^\s=/>]+\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*(\/?)>/g)) {
+    if (close) { open.pop(); continue; }
+    const parent = open[open.length - 1];
+    const scope = new Map(parent.scope);
+    const attributes = [...attributeText.matchAll(/\s([^\s=/>]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)].map(([, qname, double, single]) => [qname, double ?? single] as const);
+    for (const [qname, value] of attributes) {
+      if (qname === 'xmlns') scope.set('', value);
+      else if (qname.startsWith('xmlns:')) scope.set(qname.slice('xmlns:'.length), value);
+    }
+    /** A name's namespace and local name, or none where it has no prefix and is an attribute's */
+    const resolve = (qname: string, attribute: boolean): [string, string] | undefined => {
+      const colon = qname.indexOf(':');
+      if (colon === -1) return attribute || !scope.has('') ? undefined : [scope.get('')!, qname];
+      const namespace = scope.get(qname.slice(0, colon));
+      if (namespace === undefined) problems.push(qname + ' is unbound');
+      return namespace === undefined ? undefined : [namespace, qname.slice(colon + 1)];
+    };
+    const ignorable = new Set(parent.ignorable);
+    const element = resolve(name, false);
+    for (const [qname, value] of attributes) {
+      if (qname === 'xmlns' || qname.startsWith('xmlns:')) continue;
+      const attribute = resolve(qname, true);
+      const isList = attribute?.[0] === MARKUP_COMPATIBILITY && ['Ignorable', 'MustUnderstand', 'ProcessContent', 'PreserveElements', 'PreserveAttributes'].includes(attribute[1])
+        || !qname.includes(':') && qname === 'Requires' && element?.[0] === MARKUP_COMPATIBILITY && element[1] === 'Choice';
+      if (!isList) continue;
+      for (const token of value.split(/\s+/).filter(Boolean)) {
+        const prefix = token.includes(':') ? token.slice(0, token.indexOf(':')) : token;
+        if (!scope.has(prefix)) problems.push(qname + ' names ' + prefix + ', which is unbound');
+        else if (attribute?.[1] === 'Ignorable') ignorable.add(scope.get(prefix)!);
+      }
+    }
+    for (const [namespace, local] of [element, ...attributes.filter(([qname]) => qname !== 'xmlns' && !qname.startsWith('xmlns:')).map(([qname]) => resolve(qname, true))]
+      .filter((resolved): resolved is [string, string] => resolved !== undefined)) {
+      if (!namespace.startsWith('urn:example:')) continue;
+      names.push([local, namespace]);
+      if (!ignorable.has(namespace)) problems.push(local + ' in ' + namespace + ' is not ignorable');
+    }
+    if (!empty) open.push({ scope, ignorable });
+  }
+  return { problems, names };
+}
+
 const ALL_HEADERS = 'header:even=EVEN HEADER header:default=RUNNING HEAD footer:even=EVEN FOOTER footer:default=Page { PAGE }1 header:first=FIRST HEADER footer:first=FIRST FOOTER';
 
 describe('a template\'s headers and footers', () => {
@@ -260,6 +314,81 @@ describe('a template\'s headers and footers', () => {
     expect(await packageProblems(docx)).toEqual([]);
     expect(await sectionHeaders(docx)).toEqual(['landscape titlePg header:even=EVEN HEADER header:default=LANDSCAPE HEADER footer:even=EVEN FOOTER ' +
       'footer:default=LANDSCAPE FOOTER header:first=FIRST HEADER footer:first=FIRST FOOTER']);
+  });
+
+  it.each([['paragraph', 'w:p'], ['paragraph\'s properties', 'w:pPr']])('take a section\'s references by the prefixes its %s binds, not the document element\'s', async (_, element) => {
+    // r, which the document element binds to another namespace and the
+    // section's paragraph to the relationships', got a prefix of its own
+    // there, so its references named no relationship, and its even and
+    // first-page headers and footers were dropped
+    const templateDocx = await editTemplate(await headerTemplate({ landscapeLast: true }), 'word/document.xml', xml => xml
+      .replace(/(<w:document\b[^>]*?) xmlns:r="[^"]*"/, (_, open: string) => open + ' xmlns:r="urn:example:other"')
+      .replace('<w:p><w:pPr><w:sectPr ', () => element === 'w:p' ? '<w:p xmlns:r="' + REL.slice(0, -1) + '"><w:pPr><w:sectPr ' : '<w:p><w:pPr xmlns:r="' + REL.slice(0, -1) + '"><w:sectPr ')
+      .replace('<w:sectPr w:rsidR="00A1B2C3">', () => '<w:sectPr xmlns:r="' + REL.slice(0, -1) + '" w:rsidR="00A1B2C3">'));
+    const { docx } = await convertMdToDocx('Hello', { templateDocx });
+    expect(await packageProblems(docx)).toEqual([]);
+    expect(await sectionHeaders(docx)).toEqual(['landscape titlePg header:even=EVEN HEADER header:default=LANDSCAPE HEADER footer:even=EVEN FOOTER ' +
+      'footer:default=LANDSCAPE FOOTER header:first=FIRST HEADER footer:first=FIRST FOOTER']);
+  });
+
+  // Each place a template can bind a prefix, the one it uses for an
+  // extension's namespace or one of export's it binds to that namespace,
+  // and each section property export takes that can use it
+  const bindings = ['the document element', 'the body', 'the section\'s paragraph', 'the section\'s paragraph\'s properties', 'the sectPr', 'the property itself'] as const;
+  const properties = [
+    ['a reference the last section takes from an earlier one', 'first', /<w:headerReference w:type="even"/],
+    ['the last section\'s reference', 'last', /<w:headerReference w:type="default"/],
+    ['columns', 'last', /<w:cols\b/],
+    ['the document grid', 'last', /<w:docGrid\b/],
+    ['page numbering', 'last', /<w:pgNumType\b/],
+    ['an element of the extension\'s', 'last', /<PREFIX:extra\b/],
+  ] as const;
+  const cases = bindings.flatMap(binding => properties.flatMap(([property, section, element]) =>
+    // A paragraph holds only an earlier section's properties
+    (['ext', 'mc'] as const).flatMap(prefix => /paragraph/.test(binding) && section === 'last' ? [] : [[binding, property, prefix, section, element] as const])));
+  it.each(cases)('go with the namespace their template binds where it binds it on %s, for %s, with prefix %s', async (binding, _, prefix, section, element) => {
+    // A reference an earlier section's sectPr held went in the first
+    // section with a prefix for a namespace that sectPr declared, which
+    // nothing in the export did
+    const MCE = 'http://schemas.openxmlformats.org/markup-compatibility/2006';
+    // The prefix bound to the extension's namespace, ignorable, and, where
+    // it's mc, another for markup compatibility
+    const declarations = prefix === 'ext' ? 'xmlns:ext="urn:example:ext" mc:Ignorable="ext"' : 'xmlns:mc="urn:example:ext" xmlns:mce="' + MCE + '" mce:Ignorable="mc"';
+    const template = await editTemplate(await headerTemplate({ landscapeLast: true }), 'word/document.xml', xml => {
+      const at = section === 'first' ? xml.indexOf('<w:sectPr') : xml.lastIndexOf('<w:sectPr');
+      const end = xml.indexOf('</w:sectPr>', at);
+      let sectPr = xml.slice(at, end).replace(/<w:cols\b/, () => '<w:pgNumType w:fmt="lowerRoman"/><w:cols')
+        + (element.source.includes('PREFIX') ? '<' + prefix + ':extra/>' : '');
+      const target = new RegExp(element.source.replace('PREFIX', prefix));
+      sectPr = sectPr.replace(target, open => open + (binding === 'the property itself' ? ' ' + declarations : '') + ' ' + prefix + ':flag="1"');
+      if (binding === 'the sectPr') sectPr = sectPr.replace('<w:sectPr ', () => '<w:sectPr ' + declarations + ' ');
+      xml = xml.slice(0, at) + sectPr + xml.slice(end);
+      // Markup compatibility's prefix, where the template binds mc to the extension's namespace elsewhere,
+      // in place of the document element's own declaration of it
+      xml = xml.replace(' xmlns:mc="' + MCE + '"', () => '').replace('<w:document ', () => '<w:document ' + (binding !== 'the document element' ? 'xmlns:mc="' + MCE + '"' : prefix === 'ext' ? 'xmlns:mc="' + MCE + '" ' + declarations : declarations) + ' ');
+      if (binding === 'the body') xml = xml.replace('<w:body>', () => '<w:body ' + declarations + '>');
+      if (binding === 'the section\'s paragraph') xml = xml.replace('<w:p><w:pPr><w:sectPr', () => '<w:p ' + declarations + '><w:pPr><w:sectPr');
+      if (binding === 'the section\'s paragraph\'s properties') xml = xml.replace('<w:p><w:pPr><w:sectPr', () => '<w:p><w:pPr ' + declarations + '><w:sectPr');
+      return xml;
+    });
+    // The extension's names the template has, by where they are, which are its own
+    expect(namespaceProblems((await textOf(await JSZip.loadAsync(template), 'word/document.xml'))!).problems).toEqual([]);
+    for (const md of ['Hello', LANDSCAPE_MD]) {
+      const { docx } = await convertMdToDocx(md, { templateDocx: template });
+      expect(await packageProblems(docx)).toEqual([]);
+      const { problems, names } = namespaceProblems((await textOf(await JSZip.loadAsync(docx), 'word/document.xml'))!);
+      expect(problems).toEqual([]);
+      // Each of the extension's names in its namespace, and the property's
+      // flag, and the element, where export takes the section's own
+      expect(names.every(([, namespace]) => namespace === 'urn:example:ext')).toBe(true);
+      expect(names.some(([name]) => name === 'flag')).toBe(true);
+      // The inherited reference still names the even header
+      const zip = await JSZip.loadAsync(docx);
+      const firstSectPr = /<w:sectPr\b[\s\S]*?<\/w:sectPr>/.exec((await textOf(zip, 'word/document.xml'))!)![0];
+      const id = /<w:headerReference\b(?=[^>]*\sw:type="even")[^>]*\sr:id="([^"]*)"/.exec(firstSectPr)?.[1];
+      const target = new RegExp('<Relationship\\b(?=[^>]*\\sId="' + id + '")[^>]*\\sTarget="([^"]*)"').exec((await textOf(zip, 'word/_rels/document.xml.rels'))!)?.[1];
+      expect(await textOf(zip, 'word/' + target)).toContain('EVEN HEADER');
+    }
   });
 
   it('keep their images apart from the Markdown\'s, whose names they had', async () => {
