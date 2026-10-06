@@ -10723,6 +10723,19 @@ describe('Markdown across Word runs', () => {
     expect(await shown((await convertMdToDocx(markdown)).docx)).toEqual(await shown(docx));
   });
 
+  test.each([
+    ['struck, before a digit', run('https://', '<w:strike/>') + run('1'), '{++~~https\\://~~++}{++1++}'],
+    ['struck, before a letter', run('https://', '<w:strike/>') + run('e.com'), '{++~~https\\://~~++}{++e.com++}'],
+    ['in code, before a letter', run('https://', '<w:rStyle w:val="CodeChar"/>') + run('e.com'), '{++`https://`++}{++e.com++}'],
+  ])('keeps a URL\'s scheme %s in the same insertion, in a span of its own, as text', async (_name, runs, md) => {
+    // Linkify read the text after it as the host, as if the spans joined,
+    // though the span's delimiters came between, and read them as the host
+    const docx = await withRuns('<w:ins w:id="91" w:author="A" w:date="2026-01-01T00:00:00Z">' + runs + '</w:ins>');
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(md + '\n');
+    expect(await shown((await convertMdToDocx(markdown)).docx)).toEqual(await shown(docx));
+  });
+
   test('keeps a citation across runs in a tracked change as text', async () => {
     const markdown = strip((await convertDocx(await withRuns(run('[@a')
       + '<w:ins w:id="91" w:author="A" w:date="2026-01-01T00:00:00Z">' + run('b]') + '</w:ins>'))).markdown);
