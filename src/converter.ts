@@ -13,7 +13,7 @@ import { computeCodeRegions, computeMarkdownRegions, isInsideCodeRegion } from '
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { citationEndInText, compareNoteLabels, customStyleId, directiveRest, htmlBlocksIn, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, readsAsParagraph, startsHtmlBlock } from './md-to-docx';
+import { citationEndInText, compareNoteLabels, customStyleId, directiveRest, htmlBlocksIn, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, readsAsInlineHtml, readsAsParagraph, startsHtmlBlock } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { matchTables, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
@@ -11648,18 +11648,20 @@ export function buildMarkdown(
     // underline, before an equation in the paragraph as well
     textOut = textOut.replace(HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END, (_m, backslashes: string, close: string) => backslashes + '<br>' + close);
     // An HTML block's indent, of up to three spaces, which markdown-it keeps
-    // in its text, and a reference would make a paragraph's, but not a
-    // block of line breaks, alone or after comments, which export reads
-    // without its indent, so a space before a line break that ends the
-    // paragraph is &#32;<br>
+    // in its text, and a reference would make a paragraph's. Before line
+    // breaks, alone or after comments, which a paragraph reads too, it's
+    // references, so a space before a line break that ends the paragraph is
+    // &#32;<br>, unless a paragraph would read a comment as text, as one
+    // with a blank line in it, which only the block holds
     const htmlIndent = ownLine && atStart ? /^ {1,3}(?=<)/.exec(textOut)?.[0] ?? '' : '';
+    const referenced = keepParagraphWhitespace(textOut, atStart, atEnd);
     // Whitespace alone before an equation in the paragraph keeps the space
     // export wrote for its line end as it is, which the math branch takes
     // off, as it does after other text, or it would gain one each round trip
     textOut = mathFollows && /^[ \t]* $/.test(textOut) ? keepParagraphWhitespace(textOut.slice(0, -1), atStart, atEnd) + ' '
-      : htmlIndent && startsHtmlBlock(textOut) && !isLineBreakBlock(textOut)
+      : htmlIndent && startsHtmlBlock(textOut) && !(isLineBreakBlock(textOut) && readsAsInlineHtml(referenced))
         ? htmlIndent + keepParagraphWhitespace(textOut.slice(htmlIndent.length), true, atEnd)
-        : keepParagraphWhitespace(textOut, atStart, atEnd);
+        : referenced;
     if (paragraphHeading) {
       // A run of # that ends a heading's text, after a space or tab or as
       // all of it, is its closing sequence to Markdown, which drops it

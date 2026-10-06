@@ -697,7 +697,7 @@ export function startsHtmlBlock(text: string): boolean {
 }
 
 /** Whether export reads an HTML block's text as line breaks, alone or after
- *  comments, not as text, without the spaces before them */
+ *  comments, not as text, with the spaces before them as text */
 export function isLineBreakBlock(content: string): boolean {
   const text = content.trim();
   return /^(?:<br\s*\/?>\s*)+$/i.test(text) || /^(?:<!--(?:(?!-->)[\s\S])*-->)+(?:<br\s*\/?>)+$/i.test(text);
@@ -730,6 +730,16 @@ export function readsAsParagraph(text: string): boolean {
   citationTextMd ??= createMarkdownIt();
   const tokens = citationTextMd.parse(text, {});
   return tokens.length === 3 && tokens[0].type === 'paragraph_open' && tokens[0].map?.[1] === text.split('\n').length;
+}
+
+/** Whether export reads Markdown `text` as one paragraph of HTML tags and
+ *  comments, each one inline, and whitespace, as &#32;<!-- c --><br>, not
+ *  as text, as a comment with a blank line in it or that ends in ---> */
+export function readsAsInlineHtml(text: string): boolean {
+  citationTextMd ??= createMarkdownIt();
+  const tokens = citationTextMd.parse(text, {});
+  return tokens.length === 3 && tokens[0].type === 'paragraph_open' && tokens[0].map?.[1] === text.split('\n').length
+    && (tokens[1].children ?? []).every(child => child.type === 'html_inline' || child.type === 'text' && !child.content.trim());
 }
 
 /** The HTML blocks export reads in Markdown `text`, not in a quote or list:
@@ -3126,12 +3136,19 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
           // Line breaks alone, as import writes a paragraph that is one,
           // which markdown-it reads as a block, not a paragraph's text, or
           // after comments, as import writes a paragraph of comments a line
-          // break ends, which markdown-it reads as the comments' block
+          // break ends, which markdown-it reads as the comments' block. Its
+          // indent, which markdown-it keeps in its text, is text, as in
+          // another block, as import writes a paragraph's spaces before a
+          // comment only a block holds.
+          const indent = /^[ \t]*/.exec(htmlContent)![0];
           result.push({
             type: 'paragraph',
-            runs: htmlContent.trim().match(/<!--(?:(?!-->)[\s\S])*-->|<br\s*\/?>/gi)!.map(tag => tag.startsWith('<!--')
-              ? { type: 'html_comment' as const, text: tag }
-              : { type: 'hardbreak' as const, text: '\n' }),
+            runs: [
+              ...(indent ? [{ type: 'text' as const, text: indent }] : []),
+              ...htmlContent.trim().match(/<!--(?:(?!-->)[\s\S])*-->|<br\s*\/?>/gi)!.map(tag => tag.startsWith('<!--')
+                ? { type: 'html_comment' as const, text: tag }
+                : { type: 'hardbreak' as const, text: '\n' }),
+            ],
           });
         } else {
           // A table whose rows are all in comments, which nothing of shows,

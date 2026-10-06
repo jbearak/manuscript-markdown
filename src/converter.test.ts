@@ -6044,11 +6044,18 @@ describe('Line breaks a backslash can\'t hold', () => {
     expect(await exportedText(md)).toBe('a⏎  ');
   });
 
-  const hidden = '<w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr>';
+  // A comment's hidden run, as export writes one, its line ends line breaks
+  const comment = (text: string) => r(t('\u200B' + text.replace(/</g, '&lt;').replace(/>/g, '&gt;'))
+    .replace(/\n/g, '</w:t><w:br/><w:t xml:space="preserve">'), '<w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr>');
   test.each([
     ['a space before one that ends a paragraph', 'XX', r(t(' ') + '<w:br/>'), '&#32;<br>'],
     ['spaces before one that ends a paragraph', 'XX', r(t('   ') + '<w:br/>'), '&#32;&#32;&#32;<br>'],
-    ['a space and a comment before one that ends a paragraph', 'XX', r(t(' ')) + r(t('​&lt;!-- c --&gt;'), hidden) + r('<w:br/>'), '&#32;<!-- c --><br>'],
+    ['a space and a comment before one that ends a paragraph', 'XX', r(t(' ')) + comment('<!-- c -->') + r('<w:br/>'), '&#32;<!-- c --><br>'],
+    // Which only an HTML block holds
+    ['a space and a comment with a blank line in it before one that ends a paragraph', 'XX', r(t(' ')) + comment('<!-- a\n\nb -->') + r('<w:br/>'), ' <!-- a\n\nb --><br>'],
+    ['a space and a comment that ends in ---> before one that ends a paragraph', 'XX', r(t(' ')) + comment('<!-- a --->') + r('<w:br/>'), ' <!-- a ---><br>'],
+    ['a space and a comment with a heading\'s line in it before one that ends a paragraph', 'XX', r(t(' ')) + comment('<!-- a\n# h -->') + r('<w:br/>'), ' <!-- a\n# h --><br>'],
+    ['a space and a comment with a blank line in it before one that ends a quote\'s paragraph', '> XX', r(t(' ')) + comment('<!-- a\n\nb -->') + r('<w:br/>'), '>  <!-- a\n>\n> b --><br>'],
     ['a space before one that ends a quote\'s paragraph', '> XX', r(t(' ') + '<w:br/>'), '> &#32;<br>'],
     ['a space before one that ends an item\'s paragraph after its first', '- a\n\n  XX', r(t(' ') + '<w:br/>'), '- a\n\n  &#32;<br>'],
     ['a tab before one that ends a paragraph', 'XX', r('<w:tab/><w:br/>'), '&#9;<br>'],
@@ -6059,9 +6066,14 @@ describe('Line breaks a backslash can\'t hold', () => {
     ['a space before one that ends a table\'s cell', '| a |\n| --- |\n| XX |', r(t(' ') + '<w:br/>'), '| a |\n| --- |\n| &#32;<br> |'],
   ])('keeps %s', async (_name, source, runs, md) => {
     // Raw before a <br>, alone or after comments, the spaces were an HTML
-    // block's indent, which export drops, as it reads the block as line breaks
+    // block's indent, which export dropped, and as references before a
+    // comment only the block holds, the comment was text
+    // Each paragraph's runs' text, a hidden one's in [], with a line break as ⏎
     const texts = async (docx: Uint8Array) => [...(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string'))
-      .matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map(p => p[0].replace(/<w:br\/>/g, '⏎').replace(/<w:tab\/>/g, '\t').replace(/<[^>]+>/g, ''));
+      .matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map(p => [...p[0].matchAll(/<w:r[ >][\s\S]*?<\/w:r>/g)].map(run => {
+        const text = run[0].replace(/<w:rPr>[\s\S]*?<\/w:rPr>/, '').replace(/<w:br\/>/g, '⏎').replace(/<w:tab\/>/g, '\t').replace(/<[^>]+>/g, '');
+        return run[0].includes('<w:vanish/>') ? '[' + text + ']' : text;
+      }).join(''));
     const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\n' + source + '\n\nB.')).docx);
     const xml = await zip.file('word/document.xml')!.async('string');
     const edited = xml.replace(/<w:r>(?:(?!<w:r>)[\s\S])*?>XX<\/w:t><\/w:r>/, runs);
