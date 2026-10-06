@@ -29,15 +29,24 @@ const pageField = '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrTex
  * odd headers. `shuffled` numbers its relationships as an older Word does,
  * the headers' among the IDs export gives its own parts. `landscapeLast`
  * adds a landscape section, the last, with its own default header and footer.
+ * `headerList` numbers the even header's paragraph with the template's
+ * numId 3, which nothing else uses.
  */
-async function headerTemplate(opts: { shuffled?: boolean; landscapeLast?: boolean } = {}): Promise<Uint8Array> {
+async function headerTemplate(opts: { shuffled?: boolean; landscapeLast?: boolean; headerList?: boolean } = {}): Promise<Uint8Array> {
   const base = await JSZip.loadAsync((await convertMdToDocx('Template text')).docx);
   const zip = new JSZip();
   for (const path of ['word/styles.xml', 'word/theme/theme1.xml', 'word/fontTable.xml', 'word/webSettings.xml', 'docProps/core.xml', 'docProps/app.xml', '_rels/.rels']) {
     zip.file(path, await base.file(path)!.async('uint8array'));
   }
+  if (opts.headerList) {
+    const numbering = await (await JSZip.loadAsync((await convertMdToDocx('- a\n\n1. b')).docx)).file('word/numbering.xml')!.async('string');
+    zip.file('word/numbering.xml', numbering
+      .replace('<w:num ', '<w:abstractNum w:abstractNumId="7"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="upperRoman"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum>\n<w:num ')
+      .replace('</w:numbering>', '<w:num w:numId="3"><w:abstractNumId w:val="7"/></w:num>\n</w:numbering>'));
+  }
   zip.file('word/settings.xml', (await base.file('word/settings.xml')!.async('string')).replace('<w:characterSpacingControl', '<w:evenAndOddHeaders/><w:characterSpacingControl'));
   const rels: Array<[string, string]> = [['styles', 'styles.xml'], ['settings', 'settings.xml'], ['webSettings', 'webSettings.xml'],
+    ...(opts.headerList ? [['numbering', 'numbering.xml']] as Array<[string, string]> : []),
     ['header', 'header1.xml'], ['header', 'header2.xml'], ['footer', 'footer1.xml'], ['footer', 'footer2.xml'], ['header', 'header3.xml'], ['footer', 'footer3.xml'],
     ...(opts.landscapeLast ? [['header', 'header4.xml'], ['footer', 'footer4.xml']] as Array<[string, string]> : []),
     ['fontTable', 'fontTable.xml'], ['theme', 'theme/theme1.xml']];
@@ -48,7 +57,9 @@ async function headerTemplate(opts: { shuffled?: boolean; landscapeLast?: boolea
   zip.file('word/_rels/header1.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="' + REL + 'image" Target="media/image1.png"/></Relationships>');
   zip.file('word/media/image1.png', PNG);
   zip.file('word/header2.xml', part('hdr', para('FIRST HEADER', 'Header')));
-  zip.file('word/header3.xml', part('hdr', para('EVEN HEADER', 'Header')));
+  zip.file('word/header3.xml', part('hdr', opts.headerList
+    ? '<w:p><w:pPr><w:pStyle w:val="Header"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="3"/></w:numPr></w:pPr><w:r><w:t>EVEN HEADER</w:t></w:r></w:p>'
+    : para('EVEN HEADER', 'Header')));
   zip.file('word/footer1.xml', part('ftr', '<w:p><w:pPr><w:pStyle w:val="Footer"/></w:pPr><w:r><w:t xml:space="preserve">Page </w:t></w:r>' + pageField + '</w:p>'));
   zip.file('word/footer2.xml', part('ftr', para('FIRST FOOTER', 'Footer')));
   zip.file('word/footer3.xml', part('ftr', para('EVEN FOOTER', 'Footer')));
@@ -74,6 +85,7 @@ async function headerTemplate(opts: { shuffled?: boolean; landscapeLast?: boolea
     '<Default Extension="png" ContentType="image/png"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>' +
     override('document.xml', WML + 'document.main+xml') + override('styles.xml', WML + 'styles+xml') + override('settings.xml', WML + 'settings+xml') +
     override('webSettings.xml', WML + 'webSettings+xml') + override('fontTable.xml', WML + 'fontTable+xml') + override('theme/theme1.xml', 'application/vnd.openxmlformats-officedocument.theme+xml') +
+    (opts.headerList ? override('numbering.xml', WML + 'numbering+xml') : '') +
     rels.filter(([type]) => type === 'header' || type === 'footer').map(([type, target]) => override(target, WML + type + '+xml')).join('') +
     '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>' +
     '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>');
@@ -92,6 +104,24 @@ function resolveTarget(source: string, target: string): string {
   return segments.join('/');
 }
 const relsPathOf = (path: string) => path.replace(/[^/]+$/, name => '_rels/' + name + '.rels');
+/** A part's text, UTF-16 by its BOM */
+async function textOf(zip: JSZip, path: string): Promise<string | undefined> {
+  const bytes = await zip.file(path)?.async('uint8array');
+  return bytes && new TextDecoder(bytes[0] === 0xFF && bytes[1] === 0xFE ? 'utf-16le' : 'utf-8').decode(bytes);
+}
+/** A template with one of its parts changed */
+async function editTemplate(docx: Uint8Array, path: string, edit: (xml: string) => string | Uint8Array): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(docx);
+  zip.file(path, edit((await textOf(zip, path))!));
+  return zip.generateAsync({ type: 'uint8array' });
+}
+/** Text in UTF-16, as some tools write XML */
+const utf16 = (xml: string) => {
+  const bytes = new Uint8Array(2 + xml.length * 2);
+  bytes.set([0xFF, 0xFE]);
+  for (let i = 0; i < xml.length; i++) bytes.set([xml.charCodeAt(i) & 0xFF, xml.charCodeAt(i) >> 8], 2 + i * 2);
+  return bytes;
+};
 
 /**
  * What Word would repair in a package: a part without a content type, a
@@ -103,7 +133,7 @@ async function packageProblems(docx: Uint8Array): Promise<string[]> {
   const zip = await JSZip.loadAsync(docx);
   const problems: string[] = [];
   const files = Object.keys(zip.files).filter(path => !zip.files[path].dir);
-  const types = await zip.file('[Content_Types].xml')!.async('string');
+  const types = (await textOf(zip, '[Content_Types].xml'))!;
   const defaults = new Set([...types.matchAll(/<Default\b[^>]*>/g)].map(([tag]) => attr(tag, 'Extension')!.toLowerCase()));
   const overrides = new Map([...types.matchAll(/<Override\b[^>]*>/g)].map(([tag]) => [attr(tag, 'PartName')!.slice(1), attr(tag, 'ContentType')!]));
   for (const path of files) {
@@ -112,11 +142,13 @@ async function packageProblems(docx: Uint8Array): Promise<string[]> {
   }
   for (const path of overrides.keys()) if (!files.includes(path)) problems.push('a content type for no part ' + path);
   const docPrIds = new Set<string>();
+  const numIds = new Set([...(await textOf(zip, 'word/numbering.xml') ?? '').matchAll(/<w:num w:numId="(\d+)"/g)].map(m => m[1]));
   for (const path of files.filter(path => /\.xml$/.test(path))) {
-    const xml = await zip.file(path)!.async('string');
+    const xml = (await textOf(zip, path))!;
     if (XMLValidator.validate(xml) !== true) problems.push(path + ' is not well-formed');
+    for (const [, numId] of xml.matchAll(/<w:numId w:val="(\d+)"/g)) if (!numIds.has(numId)) problems.push(path + ': numId ' + numId + ' has no numbering');
     const rels = new Map<string, string>();
-    const relsXml = await zip.file(relsPathOf(path))?.async('string');
+    const relsXml = await textOf(zip, relsPathOf(path));
     for (const [tag] of relsXml?.matchAll(/<Relationship\b[^>]*>/g) ?? []) {
       rels.set(attr(tag, 'Id')!, attr(tag, 'Type')!.slice(attr(tag, 'Type')!.lastIndexOf('/') + 1));
       if (attr(tag, 'TargetMode') !== 'External' && !files.includes(resolveTarget(path, attr(tag, 'Target')!))) problems.push(relsPathOf(path) + ' targets no part: ' + attr(tag, 'Target'));
@@ -142,15 +174,15 @@ async function packageProblems(docx: Uint8Array): Promise<string[]> {
 /** Each section's orientation and title page, and the text of each header and footer its references name */
 async function sectionHeaders(docx: Uint8Array): Promise<string[]> {
   const zip = await JSZip.loadAsync(docx);
-  const xml = await zip.file('word/document.xml')!.async('string');
-  const relsXml = await zip.file('word/_rels/document.xml.rels')!.async('string');
+  const xml = (await textOf(zip, 'word/document.xml'))!;
+  const relsXml = (await textOf(zip, 'word/_rels/document.xml.rels'))!;
   const targets = new Map([...relsXml.matchAll(/<Relationship\b[^>]*>/g)].map(([tag]) => [attr(tag, 'Id')!, attr(tag, 'Target')!]));
   const sections: string[] = [];
   for (const [sectPr] of xml.matchAll(/<w:sectPr\b[\s\S]*?<\/w:sectPr>/g)) {
     let section = (sectPr.includes('w:orient="landscape"') ? 'landscape' : 'portrait') + (sectPr.includes('<w:titlePg/>') ? ' titlePg' : '');
     for (const [, kind, type, id] of sectPr.matchAll(/<w:(header|footer)Reference w:type="(\w+)" r:id="(\w+)"\/>/g)) {
       const target = targets.get(id);
-      const text = target && await zip.file('word/' + target)?.async('string');
+      const text = target && await textOf(zip, 'word/' + target);
       section += ' ' + kind + ':' + type + '=' + (text === undefined ? '(none)' : text.replace(/<w:instrText[^>]*>([^<]*)<\/w:instrText>/g, '{$1}').replace(/<[^>]+>/g, '').trim());
     }
     sections.push(section);
@@ -281,6 +313,78 @@ describe('a template\'s headers and footers', () => {
       for (const path of parts(zip1)) {
         expect(await zip3.file(path)!.async('string')).toBe(await zip1.file(path)!.async('string'));
       }
+    }
+  });
+
+  it('keep the numbering of a header\'s list, which export neither drops nor gives a list of its own', async () => {
+    const templateDocx = await headerTemplate({ headerList: true });
+    const numId3 = /<w:num w:numId="3"[^>]*>[\s\S]*?<\/w:num>/;
+    for (const md of ['Hello', '8. item']) {
+      const { docx } = await convertMdToDocx(md, { templateDocx });
+      expect(await packageProblems(docx)).toEqual([]);
+      const numbering = (await textOf(await JSZip.loadAsync(docx), 'word/numbering.xml'))!;
+      expect(numId3.exec(numbering)?.[0]).toBe('<w:num w:numId="3"><w:abstractNumId w:val="7"/></w:num>');
+    }
+  });
+
+  it('drop a header\'s references to the template\'s comments and notes, which export doesn\'t keep', async () => {
+    const templateDocx = await editTemplate(await headerTemplate(), 'word/header2.xml', xml => xml.replace('<w:r><w:t>FIRST HEADER</w:t></w:r>',
+      '<w:commentRangeStart w:id="0"/><w:r><w:t>FIRST HEADER</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r><w:r><w:footnoteReference w:id="1"></w:footnoteReference></w:r>'));
+    const { docx } = await convertMdToDocx('Text[^1]\n\n[^1]: A note.', { templateDocx });
+    expect(await packageProblems(docx)).toEqual([]);
+    const header = (await textOf(await JSZip.loadAsync(docx), 'word/header2.xml'))!;
+    expect(header).toContain('FIRST HEADER');
+    expect(header).not.toMatch(/<w:(comment\w+|footnoteReference)\b/);
+  });
+
+  it('come from references with an end tag', async () => {
+    const templateDocx = await editTemplate(await headerTemplate(), 'word/document.xml',
+      xml => xml.replace(/(<w:headerReference w:type="default" r:id="\w+")\/>/, '$1></w:headerReference>'));
+    const { docx } = await convertMdToDocx('Hello', { templateDocx });
+    expect(await packageProblems(docx)).toEqual([]);
+    expect(await sectionHeaders(docx)).toEqual(['portrait titlePg ' + ALL_HEADERS]);
+  });
+
+  it('come from XML whose attributes have single quotes and space around =', async () => {
+    const requote = (xml: string) => xml.replace(/ ([\w:]+)="([^"]*)"/g, (_, name: string, value: string) => ' ' + name + ' = \'' + value + '\'');
+    let templateDocx = await headerTemplate();
+    for (const path of ['word/_rels/document.xml.rels', '[Content_Types].xml', 'word/document.xml', 'word/settings.xml']) {
+      templateDocx = await editTemplate(templateDocx, path, xml => xml.replace(/(<\?xml[^>]*>\s*<[^>]*>)([\s\S]*)$/, (_, head: string, rest: string) => head + requote(rest)));
+    }
+    const { docx } = await convertMdToDocx('Hello', { templateDocx });
+    expect(await packageProblems(docx)).toEqual([]);
+    expect(await sectionHeaders(docx)).toEqual(['portrait titlePg ' + ALL_HEADERS]);
+    expect((await textOf(await JSZip.loadAsync(docx), 'word/settings.xml'))!).toContain('<w:evenAndOddHeaders/>');
+  });
+
+  it('come from parts in UTF-16, which go as they came', async () => {
+    let templateDocx = await headerTemplate();
+    const asUtf16 = (xml: string) => utf16(xml.replace('encoding="UTF-8"', 'encoding="UTF-16"'));
+    for (const path of ['word/_rels/header1.xml.rels', 'word/header1.xml', 'word/footer1.xml']) templateDocx = await editTemplate(templateDocx, path, asUtf16);
+    const { docx } = await convertMdToDocx('Hello', { templateDocx });
+    expect(await packageProblems(docx)).toEqual([]);
+    expect(await sectionHeaders(docx)).toEqual(['portrait titlePg ' + ALL_HEADERS]);
+    const [template, zip] = await Promise.all([JSZip.loadAsync(templateDocx), JSZip.loadAsync(docx)]);
+    expect(await zip.file('word/media/image1.png')!.async('uint8array')).toEqual(PNG);
+    for (const path of ['word/_rels/header1.xml.rels', 'word/header1.xml', 'word/footer1.xml']) {
+      expect(await zip.file(path)!.async('uint8array')).toEqual(await template.file(path)!.async('uint8array'));
+    }
+  });
+
+  it('go as UTF-8 from a part in UTF-16 that export changes', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'template-sections-'));
+    try {
+      writeFileSync(join(dir, 'a.png'), PNG);
+      const templateDocx = await editTemplate(await headerTemplate(), 'word/header1.xml', xml => utf16(xml.replace('encoding="UTF-8"', 'encoding="UTF-16"')));
+      // The Markdown's image takes the header's drawing ID, which then changes
+      const { docx } = await convertMdToDocx('![a](a.png)', { templateDocx, sourceDir: dir });
+      expect(await packageProblems(docx)).toEqual([]);
+      const header = await (await JSZip.loadAsync(docx)).file('word/header1.xml')!.async('string');
+      expect(header).toStartWith('<?xml version="1.0" encoding="UTF-8"');
+      expect(header).toContain('<wp:docPr id="2"');
+      expect(header).toContain('RUNNING HEAD');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

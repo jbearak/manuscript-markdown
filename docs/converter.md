@@ -264,7 +264,7 @@ When using **Export to Word with Template**, the converter extracts styling part
 - `word/theme/theme1.xml` — theme colors and fonts
 - `word/numbering.xml` — list definitions
 - the page setup of its last section, such as its page size and margins
-- its headers and footers, with their images and fields such as a page number
+- its headers and footers, with their images, their fields such as a page number, and their lists' numbering
 
 The template controls appearance while the Markdown controls content.
 

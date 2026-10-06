@@ -5329,12 +5329,13 @@ function parseTemplateNumbering(xml: string): { root: OrderedXmlNode; nums: Orde
 
 /**
  * The numIds of a template's numbering the document can use: 1 and 2, for
- * bullets and numbers, and those its styles use. The rest numbered the
- * template's own text, as a previous export's start overrides did where the
- * template is that export, and go, so that each save doesn't add more.
+ * bullets and numbers, those its styles use, and those of its headers and
+ * footers, which export copies. The rest numbered the template's own text,
+ * as a previous export's start overrides did where the template is that
+ * export, and go, so that each save doesn't add more.
  */
-function templateNumIdsInUse(templateStyles?: Uint8Array): Set<number> {
-  const used = new Set([1, 2]);
+function templateNumIdsInUse(templateStyles?: Uint8Array, headerNumIds: Iterable<number> = []): Set<number> {
+  const used = new Set([1, 2, ...headerNumIds]);
   if (!templateStyles) return used;
   const styles = new TextDecoder('utf-8').decode(templateStyles);
   for (const m of styles.matchAll(/<w:numId\b[^>]*?\bw:val\s*=\s*["'](\d+)["']/g)) used.add(parseInt(m[1], 10));
@@ -8430,7 +8431,7 @@ export async function convertMdToDocx(
     warnings: [...earlyWarnings],
     hasList: false,
     listStartOverrides: [],
-    firstOverrideNumId: Math.max(...templateNumIdsInUse(templateParts?.get('word/styles.xml'))) + 1,
+    firstOverrideNumId: Math.max(...templateNumIdsInUse(templateParts?.get('word/styles.xml'), templateSections?.numIds)) + 1,
     usedOrderedNumId: false,
     hasComments: false,
     hasFootnotes: false,
@@ -8797,11 +8798,15 @@ export async function convertMdToDocx(
   // Word requires both footnotes.xml and endnotes.xml whenever either is present.
   const hasNotes = state.hasFootnotes || state.hasEndnotes;
 
+  // The template's numbering, for the lists of its headers and footers,
+  // goes with them, though the Markdown has no list
+  const hasNumbering = state.hasList || !!(templateParts?.has('word/numbering.xml') && templateSections?.numIds.size);
+
   // Dirty-flag invariant #6: rIds must be sequential with no gaps.
   // rIdOffset reserved max slots for optional rels; now that all hasX flags are known,
   // compute actual fixed count and remap dynamic rIds to close any gap.
   const actualFixedCount = templateRelCount + 1 /* styles */ +
-    (state.hasList ? 1 : 0) +
+    (hasNumbering ? 1 : 0) +
     (state.hasComments ? 1 : 0) +
     (hasNotes ? 2 : 0) /* both footnotes + endnotes always included together */ +
     (hasCommentsExtended ? 1 : 0) +
@@ -8887,10 +8892,10 @@ export async function convertMdToDocx(
   // Start overrides join the template's numbering as instances of the
   // abstract numbering its numId 2 uses. A template without one gets fresh
   // numbering, which discards its custom list formats.
-  if (state.hasList) {
+  if (hasNumbering) {
     const templateNumbering = templateParts?.get('word/numbering.xml');
     const used = templateNumbering && withoutUnusedNums(new TextDecoder('utf-8').decode(templateNumbering),
-      templateNumIdsInUse(templateParts?.get('word/styles.xml')));
+      templateNumIdsInUse(templateParts?.get('word/styles.xml'), templateSections?.numIds));
     const merged = used && withNumberingOverrides(used, state.listStartOverrides);
     if (used && state.listStartOverrides.length === 0) {
       zip.file('word/numbering.xml', used);
@@ -9041,7 +9046,7 @@ export async function convertMdToDocx(
   const templateCopy = templateSections && addTemplateSectionParts(zip, templateSections, state.nextImageDocPrId, extensionTypes);
 
   zip.file('[Content_Types].xml', contentTypesXml({
-    hasList: state.hasList,
+    hasList: hasNumbering,
     hasComments: state.hasComments,
     hasTheme,
     hasCustomProps,
@@ -9058,7 +9063,7 @@ export async function convertMdToDocx(
   zip.file('_rels/.rels', relsXml(hasCustomProps));
   zip.file('word/_rels/document.xml.rels', documentRelsXml({
     relationships: state.relationships,
-    hasList: state.hasList,
+    hasList: hasNumbering,
     hasComments: state.hasComments,
     hasTheme,
     hasFootnotes: hasNotes,
