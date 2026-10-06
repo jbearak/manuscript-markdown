@@ -135,6 +135,31 @@ describe('generateCitation', () => {
     expect(result.xml).toContain('(Smith 2020, p. 20)');
   });
 
+  it.each([
+    ['p.', 'p. 2\n0'],
+    ['pp.', 'pp. 2\n0'],
+  ])('reads the page of a locator after %s over a line break without its label', (_label, locator) => {
+    // The label stayed in it, where import wrote another before it, as p. p.
+    const entries = new Map<string, BibtexEntry>([['smith2020', {
+      type: 'article',
+      key: 'smith2020',
+      fields: new Map([['author', 'Smith, John'], ['year', '2020']]),
+    }]]);
+    const run = { keys: ['smith2020'], locators: new Map([['smith2020', locator]]), text: 'smith2020, ' + locator };
+    const result = generateCitation(run, entries, undefined, new Set<string>(), new Map<string, string | number>());
+    expect(result.xml).toContain('&quot;locator&quot;:&quot;2\\n0&quot;');
+    expect(result.xml).toContain('&quot;label&quot;:&quot;page&quot;');
+  });
+
+  it('keeps the label of a page locator over a line break once', async () => {
+    const { convertMdToDocx } = await import('./md-to-docx');
+    const { convertDocx } = await import('./converter');
+    const bibtex = '@article{smith2020,\n  author = {Smith, Jane},\n  title = {T},\n  journal = {J},\n  year = {2020},\n}';
+    const md = 'A [@smith2020, p. 1\n2] b.';
+    const markdown = (await convertDocx((await convertMdToDocx(md, { bibtex })).docx)).markdown;
+    expect(markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(md + '\n');
+  });
+
   it('produces single field code with multiple keys', () => {
     const entries = new Map<string, BibtexEntry>();
     entries.set('smith2020', {
