@@ -12090,6 +12090,51 @@ describe('Highlights across runs', () => {
     expect(performance.now() - start).toBeLessThan(3000);
   });
 
+  const revised = (text: string, type: 'addition' | 'deletion', formatting: Partial<RunFormatting> = {}, commentIds = new Set<string>()): ContentItem => (
+    { type: 'text', text, commentIds, formatting: { ...DEFAULT_FORMATTING, ...formatting }, revision: { type, author: 'A', date: '' } });
+  const deletedMath = (latex: string): ContentItem => ({ type: 'math', latex, display: false, commentIds: new Set(), revision: { type: 'deletion', author: 'A', date: '' } });
+
+  test.each([
+    // Whose ~> or ~~} its ~~ makes, once resolving drops the mark after it
+    ['struck text starting with > at the old side\'s end', [revised('>y', 'deletion', { strikethrough: true }), revised('n', 'addition')], 1000, '{--**d**--}{--~~>y~~--}{++n++}'],
+    ['struck text starting with } at the old side\'s end', [revised('}y', 'deletion', { strikethrough: true }), revised('n', 'addition')], 1000, '{--**d**--}{--~~}y~~--}{++n++}'],
+    ['an insertion in a comment\'s range', [revised('n', 'addition', {}, new Set(['1']))], 8000, '{--**d**--}{=={++n++}==}'],
+    ['a deletion in a comment\'s range', [revised('z', 'deletion', {}, new Set(['1'])), revised('n', 'addition')], 8000, '{--**d**--}{=={--z--}==}{++n++}'],
+    ['a ~~} on the new side', [revised('n', 'addition', { strikethrough: true }), revised('}', 'addition')], 1000, '{++~~n~~++}{++}++}'],
+    ['two equations in a row on the old side', [deletedMath('x'), deletedMath('y'), revised('n', 'addition')], 1000, '{--$x$--}{--$y$--}{++n++}'],
+    ['an empty new side', [revised('', 'addition'), revised('', 'addition')], 1000, '{--**d**--}{++++}'],
+  ] as const)('writes many deletions before %s, from which no substitution holds, in linear time', (_name, tail, size, end) => {
+    // Each start in the deletions built its sides again, or read to their
+    // end again, and declined as the first had
+    const items = (n: number) => [...Array.from({ length: n }, (_, k) => revised('d', 'deletion', { bold: k % 2 === 1 })), ...tail];
+    // The fastest of a few runs, which a pause for garbage collection
+    // doesn't slow
+    const time = (n: number) => {
+      const content = items(n);
+      let fastest = Infinity;
+      for (let k = 0; k < 5; k++) {
+        const start = performance.now();
+        buildMarkdown(content, new Map());
+        fastest = Math.min(fastest, performance.now() - start);
+      }
+      return fastest;
+    };
+    expect(buildMarkdown(items(size), new Map())).toEndWith(end);
+    // About 2 in linear time, and 4 in time in the square of the deletions
+    expect(time(2 * size) / time(size)).toBeLessThan(3);
+  }, 30000);
+
+  test.each([
+    ['a link\'s line break', '{--~~>a~~--}{~~[\\\n](https://e.com)<s>>b.</s>c~>new~~}\n'],
+    ['an equation', '{--~~>a~~--}{--$x$--}{~~c<s>}.</s>~>new~~}\n'],
+  ])('keeps a substitution from after struck text that starts with > and %s, before struck text resolving writes as <s>', async (_name, md) => {
+    // The later struck text's ~~ before its > or }, which resolving writes
+    // as <s> where text comes before or after it, was taken for a ~> or ~~}
+    // that kept each start before it from a substitution, as the first's
+    // is, so the runs went in spans, where the link lost its line break
+    expect(await roundTrip(md)).toBe(md);
+  });
+
   test.each([
     ['an = and a highlighted space', [['=', {}], [' ', { highlight: true }], ['n', {}]], '{++=++}{++== ==n++}'],
     ['text', [['new', {}]], '{++new++}'],

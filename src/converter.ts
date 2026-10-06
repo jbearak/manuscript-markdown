@@ -2585,13 +2585,20 @@ function flankClass(code: number): number {
  * outside it, as in *a***b**. Delimiters inside a run's outermost border it,
  * or once that's HTML, its tag, which are punctuation, so only the
  * outermost is marked. The text's start and end read as a line's, as a
- * range's Markdown starts and ends one.
+ * range's Markdown starts and ends one. Where `track` asks, where each of
+ * its positions in `markdown`, in order, goes in what this writes, but for
+ * text with a highlight, whose marks this rewrites.
  */
-function resolveEmphasis(markdown: string): string {
+function resolveEmphasis(markdown: string, track?: { positions: number[]; resolved: number[] }): string {
   // A highlight's close alone has its mark where a substitution's side
   // kept it (see resolveSide)
   if (!markdown.includes(EMPHASIS_CLOSE) && !markdown.includes(HIGHLIGHT_OPEN) && !markdown.includes(HIGHLIGHT_JOIN_OPEN)
-    && !markdown.includes(HIGHLIGHT_CLOSE)) return markdown;
+    && !markdown.includes(HIGHLIGHT_CLOSE)) {
+    if (track) track.resolved = [...track.positions];
+    return markdown;
+  }
+  // eslint-disable-next-line no-control-regex
+  if (track && /[\u0005\u0006\u000E\u000F]/.test(markdown)) track = undefined;
   // A highlight of the default color right before another's == gets its
   // color, whose } keeps their == apart, as in ==a =={yellow}==b=={red}.
   // Navigation and the grammar read ==a ====b=={red} as no highlight. The
@@ -2612,6 +2619,16 @@ function resolveEmphasis(markdown: string): string {
   const closers = new Map<number, { delimiter: string; text: string }>();
   const writtenEnds = new Map<number, number>();
   const parts: string[] = [];
+  // Each tracked position, as the part of the text written as it is that
+  // takes it, and where in that part, or where it starts for one in what
+  // isn't written as it is, before it
+  const tracked: Array<[number, number]> = [];
+  const pushText = (start: number, end: number) => {
+    while (track && tracked.length < track.positions.length && track.positions[tracked.length] <= end) {
+      tracked.push([parts.length, Math.max(0, track.positions[tracked.length] - start)]);
+    }
+    parts.push(markdown.slice(start, end));
+  };
   let from = 0;
   for (let i = 0; i < markdown.length; i++) {
     const code = markdown.charCodeAt(i);
@@ -2619,7 +2636,7 @@ function resolveEmphasis(markdown: string): string {
       const { delimiter, tag } = EMPHASIS_BY_MARK[markdown[i]];
       const marker = delimiter[0];
       const start = i - delimiter.length;
-      parts.push(markdown.slice(from, start));
+      pushText(from, start);
       from = i + 1;
       const close = closeAt.get(i);
       if (close === undefined) {
@@ -2654,7 +2671,7 @@ function resolveEmphasis(markdown: string): string {
       parts.push(html ? '<' + tag + '>' : delimiter);
       closers.set(close, { delimiter, text: html ? '</' + tag + '>' : delimiter });
     } else if (code === 4) {
-      parts.push(markdown.slice(from, i));
+      pushText(from, i);
       const closer = closers.get(i);
       if (closer) {
         parts.push(closer.text);
@@ -2677,11 +2694,20 @@ function resolveEmphasis(markdown: string): string {
       parts.push('==');
       from = i + 1;
     } else if (code === 6) {
-      parts.push(markdown.slice(from, i));
+      pushText(from, i);
       from = i + 1;
     }
   }
-  parts.push(markdown.slice(from));
+  pushText(from, markdown.length);
+  if (track) {
+    const offsets: number[] = [];
+    let length = 0;
+    for (const part of parts) {
+      offsets.push(length);
+      length += part.length;
+    }
+    track.resolved = tracked.map(([part, offset]) => offsets[part] + offset);
+  }
   return parts.join('');
 }
 
@@ -6107,6 +6133,36 @@ function substitutionHolds(oldText: string, newText: string): boolean {
   return !oldText.includes('~>') && !(oldText + '~>' + newText).includes('~~}');
 }
 
+/** Whether a side's item writes the same Markdown wherever the side
+ *  starts before it, and ends with what resolving reads alike before the
+ *  next: text that isn't a link's, highlighted, struck or at a line's end,
+ *  as a run after an equation, which is written as a reference, or one
+ *  whose closing ~~ may be written as </s>, isn't */
+function writesAlike(item: ContentItem): boolean {
+  return item.type === 'text' && !item.href && !item.formatting.highlight && !item.formatting.strikethrough && !endsLine(item.text);
+}
+
+/** The item whose Markdown holds the start of the last ~> or ~~} of a
+ *  side as resolving writes it (see resolveSide), where `starts` says
+ *  where each item starts in `side` before resolving, or -1, as where a
+ *  highlight's marks, which resolving rewrites, keep it from telling */
+function resolvedCloserItem(side: string, starts: number[]): number {
+  const items: number[] = [];
+  const positions: number[] = [];
+  for (let item = 0; item < starts.length; item++) {
+    if (starts[item] === undefined) continue;
+    items.push(item);
+    positions.push(starts[item]);
+  }
+  const track = { positions, resolved: [] as number[] };
+  const resolved = resolveEmphasis(side, track);
+  const at = Math.max(resolved.lastIndexOf('~>'), resolved.lastIndexOf('~~}'));
+  if (at === -1 || track.resolved.length !== positions.length) return -1;
+  let k = items.length - 1;
+  while (k > 0 && track.resolved[k] > at) k--;
+  return items[k];
+}
+
 /** Render a CriticMarkup substitution `{~~old~>new~~}` when a deletion and
  *  an addition are adjacent with matching author/date. The two can differ in
  *  type, as when export writes a deleted citation as its [@key] text.
@@ -6208,10 +6264,9 @@ function renderSubstitutionRun(
   let k = start;
   while (k < end && side(segment[k], 'deletion')) k++;
   const deletions = k - start;
-  // Where nothing of the revision's author and time comes after the
-  // deletions, no start in them finds an insertion either
-  const after = segment[k];
-  if (k >= end || !(isSubstitutionItem(after) && after.revision?.author === revision.author && after.revision.date === revision.date)) {
+  // Where no insertion a side can take comes right after the deletions, as
+  // where one in a comment's range does, no start in them finds one either
+  if (k >= end || !side(segment[k], 'addition')) {
     substitutionlessRuns.set(segment, { from: start, to: k, end });
   }
   while (k < end && side(segment[k], 'addition')) k++;
@@ -6247,11 +6302,19 @@ function renderSubstitutionRun(
   if (!newText || newText.includes('~~}') || !oldText) return declineTo(start + deletions);
   if (!substitutionHolds(oldText, newText)) {
     // To the item the side's last ~> or ~~} starts in, as written before
-    // resolving, which doesn't write one where there was none
+    // resolving, which doesn't write one where there was none, or else as
+    // resolving writes it, as where a mark it drops kept one apart, as in
+    // struck text that starts with >: ~~\u0003>a. That one only where the
+    // items before it write alike from any start (see writesAlike), as
+    // resolving it reads the Markdown before it.
     const at = Math.max(oldSide.lastIndexOf('~>'), oldSide.lastIndexOf('~~}'));
     let item = starts.length - 1;
     while (item > 0 && (starts[item] === undefined || starts[item] > at)) item--;
-    return declineTo(at === -1 ? start : start + item + 1);
+    if (at === -1) {
+      item = resolvedCloserItem(oldSide, starts);
+      if (segment.slice(start, start + item).some(before => !writesAlike(before))) item = -1;
+    }
+    return declineTo(item === -1 ? start : start + item + 1);
   }
   // Two inline equations in a row on one side would run their dollar signs
   // together and read as one, where spans of their own keep them apart. To
