@@ -488,6 +488,13 @@ describe('table number formatting', () => {
 		expect(formatTableNumbers(html, { digits: 2 }).output).toBe('<table><tr><td>&#128;1234.50</td><td>&#128 7.00</td></tr></table>');
 	});
 
+	test('reads a currency sign written by its name as the browser does', () => {
+		// Only &nbsp;, &lt;, &gt;, &quot;, &apos; and &amp; were read, so
+		// &euro; was text, before which the value was no number
+		const html = '<table><tr><td>&euro;1234.5</td><td>&pound;7</td></tr></table>';
+		expect(formatTableNumbers(html, { digits: 2 }).output).toBe('<table><tr><td>&euro;1234.50</td><td>&pound;7.00</td></tr></table>');
+	});
+
 	test('keeps surviving digits in their original HTML runs when grouping is removed', () => {
 		const html = '<table><tr><td><b>1</b>&nbsp;<i>234</i>.50</td></tr></table>';
 		const output = formatTableNumbers(html, { digitGrouping: 'none', decimalMark: 'midpoint' }).output;

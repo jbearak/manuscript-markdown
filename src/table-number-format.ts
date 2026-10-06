@@ -1,7 +1,7 @@
 import { GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData } from './grid-table-preprocess';
 import type { HtmlTableCellSource } from './html-table-parser';
 import { computeCodeRegions } from './code-regions';
-import { decodeHtmlNumericReference, HTML_NUMERIC_REFERENCE } from './html-entities';
+import { decodeHtmlCharacterReferences, HTML_CHARACTER_REFERENCE } from './html-entities';
 import { isGfmDisallowedRawHtml } from './gfm';
 import {
   MAX_TABLE_DIGITS,
@@ -786,7 +786,7 @@ function buildHtmlStructuralIndex(markdown: string, codeRegions: SourceRange[], 
 function parseHtmlTableFormat(openingTag: string): Partial<TableNumberFormat> {
 	const attr = (name: string): string | undefined => {
 		const match = openingTag.match(new RegExp('\\b' + name + '\\s*=\\s*(?:"([^"]*)"|\\\'([^\\\']*)\\\'|([^\\s>]+))', 'i'));
-		return match ? decodeHtmlText(match[1] ?? match[2] ?? match[3]) : undefined;
+		return match ? decodeHtmlCharacterReferences(match[1] ?? match[2] ?? match[3]) : undefined;
 	};
 	return {
 		digits: parseTableDigits(attr('data-digits') ?? ''),
@@ -816,10 +816,10 @@ function firstOverlappingRange(ranges: SourceRange[], start: number): number {
 function decodeHtmlTextWithOffsets(raw: string, stats?: TableNumberFormatScanStats): { decoded: string; decodedToRaw: Uint32Array } {
 	const offsets = [0];
 	let decoded = '';
-	const tokenRe = new RegExp(HTML_REFERENCE + '|[\\s\\S]', 'gi');
+	const tokenRe = new RegExp(HTML_CHARACTER_REFERENCE + '|[\\s\\S]', 'g');
 	let match: RegExpExecArray | null;
 	while ((match = tokenRe.exec(raw)) !== null) {
-		const value = decodeHtmlText(match[0]);
+		const value = decodeHtmlCharacterReferences(match[0]);
 		decoded += value;
 		for (let index = 0; index < value.length; index++) offsets.push(tokenRe.lastIndex);
 	}
@@ -1078,7 +1078,7 @@ function formatIndexedHtmlRange(source: string, start: number, end: number, form
 function parseHtmlCellSource(openingTag: string): HtmlTableCellSource | undefined {
 	const attr = (name: string): string | undefined => {
 		const match = openingTag.match(new RegExp('\\b' + name + '\\s*=\\s*(?:"([^"]*)"|\\\'([^\\\']*)\\\'|([^\\s>]+))', 'i'));
-		return match ? decodeHtmlText(match[1] ?? match[2] ?? match[3]) : undefined;
+		return match ? decodeHtmlCharacterReferences(match[1] ?? match[2] ?? match[3]) : undefined;
 	};
 	const kind = parseHtmlTableCellSourceKind(attr('data-mm-kind'));
 	if (!kind) return undefined;
@@ -1127,17 +1127,6 @@ function diffCharacterEdits(before: string, after: string): Array<{ start: numbe
 	}
 	flush();
 	return edits;
-}
-
-const HTML_REFERENCE = HTML_NUMERIC_REFERENCE + '|&(?:nbsp|lt|gt|quot|apos|amp);';
-const HTML_REFERENCE_RE = new RegExp(HTML_REFERENCE, 'gi');
-const NAMED_REFERENCES: Record<string, string> = { nbsp: '\u00a0', lt: '<', gt: '>', quot: '"', apos: "'", amp: '&' };
-
-/** Text's character references as the browser reads them, as the HTML
- *  table parser does, in one pass */
-function decodeHtmlText(raw: string): string {
-	return raw.replace(HTML_REFERENCE_RE, reference => reference[1] === '#' ? decodeHtmlNumericReference(reference)
-		: NAMED_REFERENCES[reference.slice(1, -1).toLowerCase()]);
 }
 
 function encodeHtmlText(value: string): string {

@@ -603,7 +603,7 @@ Per-table overrides use `data-` attributes directly on the `<table>` element (`d
 </table>
 ```
 
-A numeric character reference in an HTML table, in a cell's text, a link's URL or an attribute, or in an `<img>`'s `src` or `alt`, reads as the browser reads it, so Word shows what the preview does: one from `&#128;` to `&#159;` as the Windows-1252 character HTML takes it for, as `&#128;` for €, but for the five Windows-1252 has none for, one without its `;`, as `&#128`, or with an `X`, as `&#X80;`, too, and one to no character, as `&#0;`, a surrogate or one past U+10FFFF, as U+FFFD. Markdown's own text, outside HTML, reads one as markdown-it does, so `&#128;` there is U+FFFD, in the preview and in Word.
+A character reference in an HTML table, in a cell's text, a link's URL or an attribute, or in an `<img>`'s `src` or `alt`, reads as the browser reads it, so Word shows what the preview does: a named one by any of HTML's names, as `&copy;` for ©, with its `;`, and a numeric one from `&#128;` to `&#159;` as the Windows-1252 character HTML takes it for, as `&#128;` for €, but for the five Windows-1252 has none for, one without its `;`, as `&#128`, or with an `X`, as `&#X80;`, too, and one to no character, as `&#0;`, a surrogate or one past U+10FFFF, as U+FFFD. Markdown's own text, outside HTML, reads one as markdown-it does, so `&#128;` there is U+FFFD, in the preview and in Word.
 
 ### Format Selection on DOCX→MD Conversion
 

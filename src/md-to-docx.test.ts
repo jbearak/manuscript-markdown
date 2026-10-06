@@ -5897,13 +5897,14 @@ describe('Comments a paragraph reads inline', () => {
 
 describe('Character references in HTML', () => {
   // A table's body cell's text in Word, and in the preview, as markdown-it
-  // writes a Markdown table, whose text holds no & or <
+  // writes a Markdown table
   const wordCell = async (md: string) => {
     const zip = await (await import('jszip')).default.loadAsync((await convertMdToDocx(md)).docx);
     const row = [...(await zip.file('word/document.xml')!.async('string')).matchAll(/<w:tr\b[\s\S]*?<\/w:tr>/g)][1][0];
-    return [...row.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)].map(m => m[1]).join('');
+    return unescape([...row.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)].map(m => m[1]).join(''));
   };
-  const previewCell = async (md: string) => /<td>([^<]*)<\/td>/.exec((await import('./test-helpers')).renderWithPlugin(md))![1];
+  const previewCell = async (md: string) => unescape(/<td>([^<]*)<\/td>/.exec((await import('./test-helpers')).renderWithPlugin(md))![1]);
+  const unescape = (xml: string) => xml.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
 
   it.each([
     ['&#128;', '€'], ['&#x80;', '€'], ['&#X9F;', 'Ÿ'], ['&#150;', '–'], ['&#153;', '™'], ['&#128', '€'],
@@ -5914,6 +5915,19 @@ describe('Character references in HTML', () => {
     // for the five it has none for, as &#129;, and one to no character as
     // U+FFFD, and one without its ; or with an X too. Export read &#128; as
     // U+0080, which Word showed as nothing, and Compact Table wrote it so.
+    const html = '<table><tr><th>h</th></tr><tr><td>a' + reference + 'b</td></tr></table>';
+    expect(await wordCell(html)).toBe('a' + shown + 'b');
+    const compacted = (await import('./formatting')).compactTable(html).newText;
+    expect(await previewCell(compacted)).toBe('a' + shown + 'b');
+    expect(await wordCell(compacted)).toBe('a' + shown + 'b');
+  });
+
+  it.each([
+    ['&copy;', '©'], ['&mdash;', '—'], ['&euro;', '€'], ['&frac12;', '½'], ['&AMP;', '&'], ['&nbsp;', '\u00a0'],
+    ['&NBSP;', '&NBSP;'], ['&nosuch;', '&nosuch;'],
+  ])('reads %s in an HTML cell by HTML\'s names, as the browser does, in Word and in Compact Table', async (reference, shown) => {
+    // Export read only &nbsp;, &lt;, &gt;, &quot;, &apos; and &amp;, so Word
+    // showed &copy; as it was written
     const html = '<table><tr><th>h</th></tr><tr><td>a' + reference + 'b</td></tr></table>';
     expect(await wordCell(html)).toBe('a' + shown + 'b');
     const compacted = (await import('./formatting')).compactTable(html).newText;

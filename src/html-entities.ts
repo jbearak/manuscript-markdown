@@ -1,3 +1,5 @@
+import { unescapeAll } from 'markdown-it/lib/common/utils.mjs';
+
 /** A numeric character reference in HTML: its digits, decimal, or
  *  hexadecimal after an x or X, and the ; after them, which the browser
  *  reads one without too, as &#128 */
@@ -28,14 +30,17 @@ export function decodeHtmlNumericReference(reference: string): string {
 	return String.fromCodePoint(WINDOWS_1252.get(codePoint) ?? codePoint);
 }
 
-const NAMED_REFERENCES: Record<string, string> = { '&nbsp;': '\u00a0', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'", '&amp;': '&' };
-const REFERENCE_RE = new RegExp(HTML_NUMERIC_REFERENCE + '|&(?:nbsp|lt|gt|quot|apos|amp);', 'g');
+/** A character reference in HTML: a numeric one, or a named one, as &copy;,
+ *  with its ; */
+export const HTML_CHARACTER_REFERENCE = HTML_NUMERIC_REFERENCE + '|&[A-Za-z][A-Za-z0-9]{1,31};';
+const REFERENCE_RE = new RegExp(HTML_CHARACTER_REFERENCE, 'g');
 
 /** HTML's text, or an attribute's value, with its character references read
- *  as the browser reads them, in one pass, so that &#38;#128; is &#128;, as
- *  text */
+ *  as the browser reads them, a named one by any of HTML's names, as &copy;
+ *  for ©, as markdown-it reads one, in one pass, so that &#38;#128; is
+ *  &#128;, as text */
 export function decodeHtmlCharacterReferences(text: string): string {
-	return text.replace(REFERENCE_RE, reference => reference[1] === '#' ? decodeHtmlNumericReference(reference) : NAMED_REFERENCES[reference]);
+	return text.replace(REFERENCE_RE, reference => reference[1] === '#' ? decodeHtmlNumericReference(reference) : unescapeAll(reference));
 }
 
 // The whitespace besides spaces and tabs that markdown-it trims from a
