@@ -12237,6 +12237,17 @@ export async function convertDocx(
         || item.type === 'bibliography_marker';
       if (!isStructural) continue;
       const styleName = (item.type === 'para' && item.customStyleName) ? item.customStyleName : undefined;
+      // A tracked mark before a paragraph a style block starts or ends at is
+      // the break that ends the paragraph before it, which the block keeps
+      // from joining the text after (see joinTrackedParagraphBreaks): it
+      // stays before the sentinels, on an empty paragraph, or on the one it
+      // is on where that holds nothing else, which then doesn't end the style
+      if (item.type === 'para' && item.breakRevision && (styleName ? styleName !== activeStyle : activeStyle)) {
+        const { breakRevision, ...para } = item;
+        if (Object.keys(para).length === 1 && !paragraphHasContent(docContent, i)) continue;
+        docContent.splice(i, 1, { type: 'para', breakRevision }, para);
+        i++;
+      }
       if (styleName && styleName !== activeStyle) {
         // Close previous style if open
         if (activeStyle) {

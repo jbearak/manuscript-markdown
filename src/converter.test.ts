@@ -10723,6 +10723,23 @@ describe('Track changes (CriticMarkup)', () => {
       expect(again).toBe(imported);
     });
 
+    test.each([
+      ['at the end of a custom style block', '<!-- style: Foo -->\na\n<!-- /style -->\n\nz\n', ['a'], 'del', '<!-- style: foo -->\na{--\n\n--}\n<!-- /style -->\n\nz\n'],
+      ['before a custom style block', 'z\n\n<!-- style: Foo -->\na\n<!-- /style -->\n', ['z'], 'ins', 'z{++\n\n++}\n\n<!-- style: foo -->\na\n<!-- /style -->\n'],
+      ['at the end of a custom style block before another', '<!-- style: Foo -->\na\n<!-- /style -->\n\n<!-- style: Bar -->\nb\n<!-- /style -->\n', ['a'], 'del',
+        '<!-- style: foo -->\na{--\n\n--}\n<!-- /style -->\n\n<!-- style: bar -->\nb\n<!-- /style -->\n'],
+      ['at the end of the document in a custom style block', 'z\n\n<!-- style: Foo -->\na\n<!-- /style -->\n', ['a'], 'ins', 'z\n\n<!-- style: foo -->\na{++\n\n++}\n<!-- /style -->\n'],
+      ['before a table in a custom style block', '<!-- style: Foo -->\na\n<!-- /style -->\n\n| x |\n|---|\n| y |\n', ['a'], 'del',
+        '<!-- style: foo -->\na{--\n\n--}\n<!-- /style -->\n\n| x |\n| --- |\n| y |\n'],
+    ] as const)('keeps the tracked mark of a paragraph %s', async (_name, md, texts, type, expected) => {
+      // The block's sentinel between the break and the text before it
+      // kept the break from it
+      const { imported, before, after, again } = await tripTrackedMarks(md, [...texts], type);
+      expect(imported).toBe(expected);
+      expect(after).toEqual(before);
+      expect(again).toBe(imported);
+    });
+
     test('keeps the tracked mark of a note\'s paragraph before a table', async () => {
       // As in the document's body
       const zip = await JSZip.loadAsync((await convertMdToDocx('x[^1]\n\n[^1]: a\n\n    | p |\n    |---|\n    | q |\n')).docx);
