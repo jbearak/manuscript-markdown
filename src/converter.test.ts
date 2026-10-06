@@ -1504,16 +1504,34 @@ describe('Ordered list numbering', () => {
     expect(new Set(numIdsOf(await documentXml(docx))).size).toBe(1);
   });
 
-  test('starts a restarted sublist\'s numbered ancestors at their items\' numbers', async () => {
-    // Its instance counts them on its own, so a label such as %1.%2 shows 2.1
-    const md = '1. a\n\n<!-- -->\n\n1. b\n2. c\n   1. x\n\n   <!-- -->\n\n   1. y';
-    const { docx } = await convertMdToDocx(md);
-    const y = numIdsOf(await documentXml(docx))[4];
+  // The level overrides of the instance of the list's paragraph at `index`
+  const levelOverridesOf = async (docx: Uint8Array, index: number) => {
+    const numId = numIdsOf(await documentXml(docx))[index];
     const numbering = await (await JSZip.loadAsync(docx)).file('word/numbering.xml')!.async('string');
-    const instance = new RegExp('<w:num w:numId="' + y + '"[^>]*>([^]*?)</w:num>').exec(numbering)?.[1];
-    expect(instance).toBe('<w:abstractNumId w:val="1"/><w:lvlOverride w:ilvl="0"><w:startOverride w:val="2"/></w:lvlOverride>'
-      + '<w:lvlOverride w:ilvl="1"><w:startOverride w:val="1"/></w:lvlOverride>');
+    return new RegExp('<w:num w:numId="' + numId + '"[^>]*><w:abstractNumId w:val="1"/>([^]*?)</w:num>').exec(numbering)?.[1];
+  };
+
+  test.each([
+    // An override of the parents' levels would number their lists, as Word
+    // counts the instances of a list as one, which gives %1.%2 2.1 without it
+    ['a restarted sublist', '1. a\n\n<!-- -->\n\n1. b\n2. c\n   1. x\n\n   <!-- -->\n\n   1. y', 4, 1],
+    ['a numbered list in a bullet list in a numbered one', '1. a\n   - b\n     1. c\n     2. d\n2. e', 2, 2],
+  ])('starts only its own level over in the numbering of %s', async (_name, md, index, ilvl) => {
+    const { docx } = await convertMdToDocx(md);
+    expect(await levelOverridesOf(docx, index)).toBe('<w:lvlOverride w:ilvl="' + ilvl + '"><w:startOverride w:val="1"/></w:lvlOverride>');
     expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('keeps a template\'s level formats in a sublist\'s numbering without their starts', async () => {
+    const lvl = '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1)"/><w:lvlJc w:val="left"/></w:lvl>';
+    const templateDocx = await templateWithNumbering(numbering => numbering.replace(/(<w:num w:numId="2"[^>]*><w:abstractNumId w:val="1"\/>)/,
+      '$1<w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/>' + lvl + '</w:lvlOverride><w:lvlOverride w:ilvl="1"><w:startOverride w:val="1"/></w:lvlOverride>'));
+    const md = '1. a\n   - b\n     1. c\n2. d';
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    // A level override with nothing in it would start its level at 0
+    expect(await levelOverridesOf(docx, 2)).toBe('<w:lvlOverride w:ilvl="0">' + lvl + '</w:lvlOverride>'
+      + '<w:lvlOverride w:ilvl="2"><w:startOverride w:val="1"/></w:lvlOverride>');
+    expect(strip((await convertDocx(docx)).markdown)).toBe(md);
   });
 
   test('puts no break before a numbered list after a bullet list at its level', async () => {
