@@ -700,13 +700,13 @@ export function startsHtmlBlock(text: string): boolean {
 const COMMENTS_AT_START_RE = /^(?:<!--(?:(?!-->)[\s\S])*-->[ \t]*)*/;
 
 /** Whether export reads an HTML block's text as line breaks, alone or after
- *  comments and the spaces and tabs after them, not as text, with the
- *  spaces before them as text */
+ *  comments, with the spaces and tabs after each comment and between the
+ *  breaks after them, not as text, with the spaces before them as text */
 export function isLineBreakBlock(content: string): boolean {
   const text = content.trim();
   if (/^(?:<br\s*\/?>\s*)+$/i.test(text)) return true;
   const comments = COMMENTS_AT_START_RE.exec(text)![0];
-  return comments !== '' && /^(?:<br\s*\/?>)+$/i.test(text.slice(comments.length));
+  return comments !== '' && /^<br\s*\/?>(?:[ \t]*<br\s*\/?>)*$/i.test(text.slice(comments.length));
 }
 
 /** What of a comment, a block of its own, export doesn't read as a
@@ -3146,19 +3146,21 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
           // indent, which markdown-it keeps in its text, is text, as in
           // another block, as import writes a paragraph's spaces before a
           // comment only a block holds. So are spaces and tabs after a
-          // comment, as import writes a paragraph's after one before a line
-          // break that ends it, as in <!-- c --> <br>.
+          // comment and between the line breaks after one, as import writes
+          // a paragraph's there, as in <!-- c --> <br> <br>, but not between
+          // line breaks alone.
           const indent = /^[ \t]*/.exec(htmlContent)![0];
           const text = htmlContent.trim();
-          const comments = COMMENTS_AT_START_RE.exec(text)![0];
+          const parts = COMMENTS_AT_START_RE.exec(text)![0]
+            ? text.match(/<!--(?:(?!-->)[\s\S])*-->|<br\s*\/?>|[ \t]+/gi)!
+            : text.match(/<br\s*\/?>/gi)!;
           result.push({
             type: 'paragraph',
             runs: [
               ...(indent ? [{ type: 'text' as const, text: indent }] : []),
-              ...(comments.match(/<!--(?:(?!-->)[\s\S])*-->|[ \t]+/g) ?? []).map(part => part.startsWith('<!--')
-                ? { type: 'html_comment' as const, text: part }
+              ...parts.map(part => part.startsWith('<!--') ? { type: 'html_comment' as const, text: part }
+                : part.startsWith('<') ? { type: 'hardbreak' as const, text: '\n' }
                 : { type: 'text' as const, text: part }),
-              ...text.slice(comments.length).match(/<br\s*\/?>/gi)!.map(() => ({ type: 'hardbreak' as const, text: '\n' })),
             ],
           });
         } else {

@@ -6075,6 +6075,12 @@ describe('Line breaks a backslash can\'t hold', () => {
     expect(await exportedText(md)).toBe('a⏎  ');
   });
 
+  // Each paragraph's runs' text, a hidden one's in [], with a line break as ⏎
+  const texts = async (docx: Uint8Array) => [...(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string'))
+    .matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map(p => [...p[0].matchAll(/<w:r[ >][\s\S]*?<\/w:r>/g)].map(run => {
+      const text = run[0].replace(/<w:rPr>[\s\S]*?<\/w:rPr>/, '').replace(/<w:br\/>/g, '⏎').replace(/<w:tab\/>/g, '\t').replace(/<[^>]+>/g, '');
+      return run[0].includes('<w:vanish/>') ? '[' + text + ']' : text;
+    }).join(''));
   // A comment's hidden run, as export writes one, its line ends line breaks
   const comment = (text: string) => r(t('\u200B' + text.replace(/</g, '&lt;').replace(/>/g, '&gt;'))
     .replace(/\n/g, '</w:t><w:br/><w:t xml:space="preserve">'), '<w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr>');
@@ -6091,6 +6097,14 @@ describe('Line breaks a backslash can\'t hold', () => {
     ['a comment and a space before one that ends a paragraph', 'XX', comment('<!-- c -->') + r(t(' ') + '<w:br/>'), '<!-- c --> <br>'],
     ['a comment and a tab before one that ends a paragraph', 'XX', comment('<!-- c -->') + r('<w:tab/><w:br/>'), '<!-- c -->\t<br>'],
     ['a space between comments before one that ends a paragraph', 'XX', comment('<!-- c -->') + r(t(' ')) + comment('<!-- d -->') + r('<w:br/>'), '<!-- c --> <!-- d --><br>'],
+    // Where a \ and line end before the last were text in the comments' block
+    ['a comment before two that end a paragraph', 'XX', comment('<!-- c -->') + r('<w:br/><w:br/>'), '<!-- c --><br><br>'],
+    ['a comment and a space before two that end a paragraph', 'XX', comment('<!-- c -->') + r(t(' ') + '<w:br/><w:br/>'), '<!-- c --> <br><br>'],
+    ['a comment and a tab before three that end a paragraph', 'XX', comment('<!-- c -->') + r('<w:tab/><w:br/><w:br/><w:br/>'), '<!-- c -->\t<br><br><br>'],
+    ['a space between comments before two that end a paragraph', 'XX', comment('<!-- c -->') + r(t(' ')) + comment('<!-- d -->') + r('<w:br/><w:br/>'), '<!-- c --> <!-- d --><br><br>'],
+    ['a space between two that end a paragraph after a comment', 'XX', comment('<!-- c -->') + r('<w:br/>' + t(' ') + '<w:br/>'), '<!-- c --><br> <br>'],
+    ['a space, a comment and a space before two that end a paragraph', 'XX', r(t(' ')) + comment('<!-- c -->') + r(t(' ') + '<w:br/><w:br/>'), '&#32;<!-- c --> <br><br>'],
+    ['a comment before two that end a quote\'s paragraph', '> XX', comment('<!-- c -->') + r('<w:br/><w:br/>'), '> <!-- c --><br><br>'],
     ['a space before one that ends a quote\'s paragraph', '> XX', r(t(' ') + '<w:br/>'), '> &#32;<br>'],
     ['a space before one that ends an item\'s paragraph after its first', '- a\n\n  XX', r(t(' ') + '<w:br/>'), '- a\n\n  &#32;<br>'],
     ['a tab before one that ends a paragraph', 'XX', r('<w:tab/><w:br/>'), '&#9;<br>'],
@@ -6103,12 +6117,6 @@ describe('Line breaks a backslash can\'t hold', () => {
     // Raw before a <br>, alone or after comments, the spaces were an HTML
     // block's indent, which export dropped, and as references before a
     // comment only the block holds, the comment was text
-    // Each paragraph's runs' text, a hidden one's in [], with a line break as ⏎
-    const texts = async (docx: Uint8Array) => [...(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string'))
-      .matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map(p => [...p[0].matchAll(/<w:r[ >][\s\S]*?<\/w:r>/g)].map(run => {
-        const text = run[0].replace(/<w:rPr>[\s\S]*?<\/w:rPr>/, '').replace(/<w:br\/>/g, '⏎').replace(/<w:tab\/>/g, '\t').replace(/<[^>]+>/g, '');
-        return run[0].includes('<w:vanish/>') ? '[' + text + ']' : text;
-      }).join(''));
     const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\n' + source + '\n\nB.')).docx);
     const xml = await zip.file('word/document.xml')!.async('string');
     const edited = xml.replace(/<w:r>(?:(?!<w:r>)[\s\S])*?>XX<\/w:t><\/w:r>/, runs);
@@ -6117,6 +6125,24 @@ describe('Line breaks a backslash can\'t hold', () => {
     const docx = await zip.generateAsync({ type: 'uint8array' });
     const md1 = (await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
     expect(md1).toBe('A.\n\n' + md + '\n\nB.\n');
+    const exported = (await convertMdToDocx(md1)).docx;
+    expect(await texts(exported)).toEqual(await texts(docx));
+    expect((await convertDocx(exported)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md1);
+  });
+
+  test.each([
+    '<!-- c --><br><br>',
+    '<!-- c --> <br><br>',
+    '<!-- c -->\t<br><br>',
+    '<!-- c --> <!-- d --> <br><br>',
+    '<!-- c --><br> <br>',
+    '> <!-- c --> <br><br>',
+  ])('keeps them in %s, after comments', async (md) => {
+    // Import wrote the first as a \ and a line end, the comments' block's text
+    const source = 'A.\n\n' + md + '\n\nB.\n';
+    const docx = (await convertMdToDocx(source)).docx;
+    const md1 = (await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(md1).toBe(source);
     expect(await texts((await convertMdToDocx(md1)).docx)).toEqual(await texts(docx));
   });
 

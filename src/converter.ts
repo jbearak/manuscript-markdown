@@ -517,6 +517,10 @@ const HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END = /(?<!\\)((?:\\\\)*)\\\n(==[ \t]
 const HARD_BREAKS_AT_END = /(?<!\\)((?:\\\\)*)(?:\\\n)+$/;
 // HTML comments alone, as export splits a block of them
 const HTML_COMMENTS = /^(?:<!--(?:(?!-->)[\s\S])*-->)+$/;
+// HTML comments that start a paragraph's text, after its indent, each with
+// the spaces and tabs after it, and the line breaks after them that end it,
+// with the spaces and tabs between them
+const COMMENTS_BEFORE_BREAKS = /^( {0,3}(?:<!--(?:(?!-->)[\s\S])*-->[ \t]*)+)((?:\\\n[ \t]*)*\\\n)$/;
 
 /**
  * An empty item at the end of a paragraph's items in `target`, from `from`,
@@ -11643,7 +11647,12 @@ export function buildMarkdown(
         !breaks.has(offset + backslashes.length + 2) ? match
           : backslashes + '<br>' + (whitespace ?? '').replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;'));
     } else if (atEnd && !isInParagraphMath(mergedContent[rendered.nextIndex])) {
-      textOut = textOut.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + '<br>');
+      // After comments alone, which start an HTML block, a \ and line end
+      // are the block's text, so each line break is <br>, which export
+      // reads there (see isLineBreakBlock)
+      const comments = COMMENTS_BEFORE_BREAKS.exec(textOut);
+      textOut = comments ? comments[1] + comments[2].replace(/\\\n/g, '<br>')
+        : textOut.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + '<br>');
     }
     // A line break before the == of a highlight that ends the text is <br>
     // too, as == alone on the last line would read as a heading's
