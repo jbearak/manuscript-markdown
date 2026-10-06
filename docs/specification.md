@@ -391,7 +391,7 @@ All paragraphs between the opening and closing directives receive the named styl
 
 #### Round-Trip
 
-Custom styles are preserved through DOCX round-trips. On export, each style is created as a Word paragraph style (basedOn Normal) with a `MsCustomXxx` style ID. The style definitions are stored in the `MANUSCRIPT_CUSTOM_STYLES` custom property in `docProps/custom.xml`. On import, the custom property is read back and the style definitions are emitted in the frontmatter `styles` block, with `<!-- style: name -->` / `<!-- /style -->` directives re-emitted around the styled paragraphs.
+Custom styles are preserved through DOCX round-trips. On export, each style is created as a Word paragraph style (basedOn Normal) with a `MsCustomXxx` style ID. The style definitions are stored in the `MANUSCRIPT_CUSTOM_STYLES` custom property in `docProps/custom.xml`. On import, the custom property is read back and the style definitions are emitted in the frontmatter `styles` block, with `<!-- style: name -->` / `<!-- /style -->` directives re-emitted around the styled paragraphs. An HTML comment on lines of its own in the block, which Word hides with its paragraph, keeps the block's style too, so it comes back inside the block.
 
 ### Line Spacing and Paragraph Indent
 

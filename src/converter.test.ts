@@ -2816,6 +2816,23 @@ describe('Sentinel gap round-trip', () => {
     expect(markdown).toBe(md);
   });
 
+  test.each([
+    ['all of a style block', '<!-- style: quote -->\n<!-- a -->\n<!-- /style -->\n\nB.\n'],
+    ['all of a style block, after blank lines', '<!-- style: quote -->\n\n\n<!-- a -->\n<!-- /style -->\n\nB.\n'],
+    ['all of a style block with another', 'A.\n\n<!-- style: quote -->\n<!-- a -->\n<!-- b -->\n<!-- /style -->\n\nB.\n'],
+    ['at the start of a style block', 'A.\n\n<!-- style: quote -->\n<!-- a -->\n\nText.\n<!-- /style -->\n\nB.\n'],
+    ['at the end of a style block', '<!-- style: quote -->\nText.\n\n<!-- a -->\n<!-- /style -->\n\nB.\n'],
+  ])('keeps an HTML comment of its own %s in the block, and hidden', async (_name, md) => {
+    // Export hid its paragraph without the block's style, so import ended
+    // the block before it, or wrote none where it was all of the block
+    const docx = (await convertMdToDocx(md)).docx;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml).toContain('<w:pPr><w:pStyle w:val="MsCustomQuote"/><w:spacing w:after="0" w:line="1" w:lineRule="exact"/><w:rPr><w:vanish/>');
+    let markdown = md;
+    for (let i = 0; i < 2; i++) markdown = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(markdown).toBe(md);
+  });
+
   test('keeps a section after a paragraph of whitespace on a line of its own', async () => {
     const md = '&nbsp;\n\n<!-- landscape -->\n\nWide.\n\n<!-- /landscape -->\n';
     const markdown = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;

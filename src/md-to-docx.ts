@@ -7288,10 +7288,13 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
   // Word Desktop saves its "Show Hidden Text" preference into settings.xml.
   if (token.type === 'paragraph' && token.runs.length > 0 && token.runs.every(r => r.type === 'html_comment')) {
     // One in a list item keeps a continuation's style and indent, which
-    // import reads it in the item by
+    // import reads it in the item by, and one in a style block the block's
+    // style, which import reads the block by
     pPr = token.listContinuation
       ? '<w:pPr><w:pStyle w:val="ManuscriptListContinuation"/><w:spacing w:after="0" w:line="1" w:lineRule="exact"/><w:ind w:left="' + 720 * token.listContinuation.level + '"/><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr></w:pPr>'
-      : HIDDEN_PARAGRAPH_PPR;
+      : state.activeCustomStyle
+        ? '<w:pPr><w:pStyle w:val="' + customStyleId(state.activeCustomStyle) + '"/>' + HIDDEN_PARAGRAPH_PPR.slice('<w:pPr>'.length)
+        : HIDDEN_PARAGRAPH_PPR;
   }
 
   if (token.type === 'code_block') {
