@@ -11339,8 +11339,9 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   return result;
 }
 
-/** The style most of the body's quotes are in, the first's on a tie, which
- *  export writes them all in; GitHub, its default, needs no setting. */
+/** The style most of the body's quote paragraphs are in, the first's on a
+ *  tie, which export writes them all in, so the fewest change, however
+ *  they group in quotes; GitHub, its default, needs no setting. */
 function inferredBlockquoteStyle(content: ContentItem[]): BlockquoteStyle | undefined {
   const counts = new Map<BlockquoteStyle, number>();
   for (const item of content) {
