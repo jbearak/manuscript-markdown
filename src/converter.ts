@@ -7268,6 +7268,21 @@ function htmlLineCharacters(line: string): string[] {
       : c === ' ' && (i < lead || line[i - 1] === ' ') ? '&#32;' : c);
 }
 
+/** An equation in an HTML table's cell as a run of its Markdown, which the
+ *  cell exports as text, with its line ends as line breaks, as a newline
+ *  there would read as a space, and a blank line would end the table */
+function mathCellRun(item: ContentItem): ContentItem {
+  if (item.type !== 'math') return item;
+  const markdown = item.display ? MATH_FENCE + '\n' + item.latex + '\n' + MATH_FENCE : '$' + item.latex + '$';
+  return {
+    type: 'text',
+    text: markdown.replace(/\r\n?|\n/g, '\\\n'),
+    commentIds: item.commentIds ?? new Set(),
+    formatting: DEFAULT_FORMATTING,
+    ...(item.revision ? { revision: item.revision } : {}),
+  };
+}
+
 /** Whether every cell of a table takes HTML (see renderHtmlCellParagraph) */
 function htmlCellsHoldTable(table: { rows: TableRow[] }): boolean {
   return table.rows.every(row => row.cells.every(cell =>
@@ -7307,16 +7322,20 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
           continue;
         }
         // In a table only HTML holds, such as one with merged cells, the
-        // rest exports as literal text, and its runs as HTML
+        // rest exports as literal text, and its runs as HTML, an equation's
+        // too, whose < would read as a tag's
         const outerReadsMarkdown = readsMarkdown;
         readsMarkdown = false;
         let rendered: ReturnType<typeof renderInlineSegment>;
         try {
-          rendered = renderInlineSegment(items, comments, renderOpts, undefined, true);
+          rendered = renderInlineSegment(mergeConsecutiveRuns(items.map(mathCellRun), false), comments, renderOpts, undefined, true);
         } finally {
           readsMarkdown = outerReadsMarkdown;
         }
-        lines.push(i3 + '<p>' + keepParagraphWhitespace(keepHtmlCellSpaces(rendered.text), true, true) + '</p>');
+        // But not a blank line, as in an HTML comment, which would end the
+        // table's HTML block there, so the lines around it join
+        const text = rendered.text.replace(/(?:\r\n?|\n)[ \t]*(?=\r|\n)/g, '');
+        lines.push(i3 + '<p>' + keepParagraphWhitespace(keepHtmlCellSpaces(text), true, true) + '</p>');
         deferredAll.push(...rendered.deferredComments);
       }
       lines.push(i2 + '</' + tag + '>');
@@ -7636,11 +7655,13 @@ function tryRenderGridTable(
   const rows = table.rows;
   if (rows.length === 0) return null;
 
-  // Grid tables don't support colspan/rowspan
+  // Grid tables don't support colspan/rowspan, nor a cell of paragraphs,
+  // whose lines export reads as one paragraph with line breaks
   for (const row of rows) {
     for (const cell of row.cells) {
       if (cell.colspan && cell.colspan > 1) return null;
       if (cell.rowspan && cell.rowspan > 1) return null;
+      if (cell.paragraphs.length > 1) return null;
     }
   }
   // A grid table's header is its leading rows: a header row after a body
@@ -7660,7 +7681,7 @@ function tryRenderGridTable(
     }
   };
 
-  // Render all cells: each cell may have multiple paragraphs → multiple lines
+  // Render all cells: a cell's line breaks → multiple lines
   const rendered: { lines: string[]; deferred: string[] }[][] = [];
   for (const row of rows) {
     const rowCells: { lines: string[]; deferred: string[] }[] = [];
@@ -7686,9 +7707,9 @@ function tryRenderGridTable(
         cellLines.push(...paraLines.map((l, k) => k < paraLines.length - 1 && /(?<!\\)(?:\\\\)*\\$/.test(l) ? gridLineBeforeBreak(l.slice(0, -1)) : l));
         cellDeferred.push(...r.deferredComments);
       }
-      // An empty paragraph at the cell's end is a line break there, <br>, as
-      // a blank line there pads the cell to its row's height. One of spaces
-      // and tabs alone is too, which Word shows none of, and the padding takes.
+      // A line break at the cell's end is <br> there, as the blank line after
+      // it would pad the cell to its row's height. One before spaces and tabs
+      // alone is too, which Word shows none of, and the padding takes.
       let endBreaks = 0;
       while (cellLines.length > 1 && /^[ \t]*$/.test(cellLines[cellLines.length - 1])) {
         cellLines.pop();
@@ -8309,7 +8330,7 @@ function renderTableOrFallback(
   // A table HTML cells can't hold, as one with a line break and a comment,
   // is a grid table of any width, which holds it unless it merges cells, or
   // has a cell of paragraphs, which a grid table's cell holds as lines
-  if (!htmlCellsHoldTable(item) && item.rows.every(row => row.cells.every(cell => cell.paragraphs.length <= 1))) {
+  if (!htmlCellsHoldTable(item)) {
     const gridResult = tryRenderGridTable(item, comments, renderOpts, undefined, gridSrcWidths);
     if (gridResult !== null) return r(gridResult);
   }

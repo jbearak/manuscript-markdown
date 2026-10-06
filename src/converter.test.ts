@@ -132,7 +132,7 @@ describe('DOCX table conversion', () => {
     expect(result.markdown).not.toContain('<p></p>');
   });
 
-  test('renders DOCX table with multi-paragraph cell as grid table', async () => {
+  test('renders DOCX table with multi-paragraph cell as HTML table though grid enabled', async () => {
     const xml = wrapDocumentXml(
       '<w:tbl>'
       + '<w:tblPr><w:tblLook w:firstRow=\"1\"/></w:tblPr>'
@@ -152,13 +152,11 @@ describe('DOCX table conversion', () => {
     const buf = await buildSyntheticDocx(xml);
     const result = await convertDocx(buf);
 
-    // Grid table with separate lines for each paragraph
-    expect(result.markdown).toMatch(/^\+-+\+-+\+$/m);
-    expect(result.markdown).toContain('first paragraph');
-    expect(result.markdown).toContain('second paragraph');
-    // Both paragraphs appear on separate lines in the grid cell
-    expect(result.markdown).toMatch(/first paragraph.*\n.*second paragraph/);
-    expect(result.markdown).not.toContain('<table>');
+    // A grid table's cell holds paragraphs as lines, which export reads as
+    // one paragraph with line breaks
+    expect(result.markdown).not.toMatch(/^\+-+\+-+\+$/m);
+    expect(result.markdown).toContain('<table>');
+    expect(result.markdown).toContain('<p>first paragraph</p>\n      <p>second paragraph</p>');
   });
 
   test('preserves comments, highlights, citations, and math inside table cells', async () => {
@@ -570,7 +568,7 @@ describe('Pipe table rendering', () => {
     expect(result.markdown).toContain('rowspan="2"');
   });
 
-  test('table with multi-paragraph cell falls back to grid', async () => {
+  test('table with multi-paragraph cell falls back to HTML', async () => {
     const result = await buildAndConvertTable(
       '<w:tbl>'
       + '<w:tr>'
@@ -582,10 +580,10 @@ describe('Pipe table rendering', () => {
       + '</w:tbl>'
     );
 
-    expect(result.markdown).toContain('+');
-    expect(result.markdown).toContain('para one');
-    expect(result.markdown).toContain('para two');
-    expect(result.markdown).not.toContain('<table>');
+    // A grid table's lines would export as one paragraph
+    expect(result.markdown).toContain('<table>');
+    expect(result.markdown).toContain('<p>para one</p>');
+    expect(result.markdown).toContain('<p>para two</p>');
   });
 
   test('line width exceeding pipe limit falls back to grid', async () => {
@@ -969,11 +967,11 @@ describe('Table format metadata round-trip', () => {
 
 describe('Grid table renderer', () => {
   test('grid table is produced for multi-line cells when format is grid', async () => {
-    // Build a table with multi-line cells using HTML (which supports multiple paragraphs)
+    // Build a table with multi-line cells using HTML (whose <br> is a line break)
     const htmlMd = [
       '<table>',
       '<tr><th>Header 1</th><th>Header 2</th></tr>',
-      '<tr><td><p>Line 1</p><p>Line 2</p></td><td>Single</td></tr>',
+      '<tr><td>Line 1<br>Line 2</td><td>Single</td></tr>',
       '</table>',
     ].join('\n');
     const { docx } = await convertMdToDocx(htmlMd);
@@ -1006,7 +1004,7 @@ describe('Grid table renderer', () => {
         type: 'table',
         rows: [
           { isHeader: true, cells: [{ paragraphs: [[{ type: 'text', text: 'H1', commentIds: new Set(), formatting: DEFAULT_FORMATTING }]] }, { paragraphs: [[{ type: 'text', text: 'H2', commentIds: new Set(), formatting: DEFAULT_FORMATTING }]] }] },
-          { isHeader: false, cells: [{ paragraphs: [[{ type: 'text', text: 'A', commentIds: new Set(), formatting: DEFAULT_FORMATTING }], [{ type: 'text', text: 'B', commentIds: new Set(), formatting: DEFAULT_FORMATTING }]] }, { paragraphs: [[{ type: 'text', text: 'C', commentIds: new Set(), formatting: DEFAULT_FORMATTING }]] }] },
+          { isHeader: false, cells: [{ paragraphs: [[{ type: 'text', text: 'A', commentIds: new Set(), formatting: DEFAULT_FORMATTING }, { type: 'text', text: '\\\n', commentIds: new Set(), formatting: DEFAULT_FORMATTING }, { type: 'text', text: 'B', commentIds: new Set(), formatting: DEFAULT_FORMATTING }]] }, { paragraphs: [[{ type: 'text', text: 'C', commentIds: new Set(), formatting: DEFAULT_FORMATTING }]] }] },
         ],
       },
     ];
@@ -1058,13 +1056,15 @@ describe('Grid table round-trip', () => {
     expect(buildMarkdown([table], new Map())).toContain('| p $a  |\n| b$    |');
   });
 
-  test('writes a grid table cell\'s last paragraph of spaces alone as a line break', () => {
-    // It was a line of spaces, which export takes for the cell's padding
+  test('writes a cell\'s last paragraph of spaces alone as HTML, not a grid table\'s line break', () => {
+    // A grid table wrote it as a line break, as a line of spaces would be the
+    // cell's padding, and the cell's paragraphs as lines, which export read
+    // as one paragraph
     const cell = (paragraphs: ContentItem[][]) => ({ colspan: 1, paragraphs });
     const text = (t: string): ContentItem => ({ type: 'text', text: t, commentIds: new Set(), formatting: DEFAULT_FORMATTING });
     const table = { type: 'table', rows: [{ isHeader: true, cells: [cell([[text('x')]]), cell([[text('y')]])] },
       { isHeader: false, cells: [cell([[text('a')], [text(' \t ')]]), cell([[text('b')], [text('c')]])] }] } as unknown as ContentItem;
-    expect(buildMarkdown([table], new Map())).toContain('| a<br> | b   |\n|       | c   |');
+    expect(buildMarkdown([table], new Map())).toContain('      <p>a</p>\n      <p>&#32;&#9;&#32;</p>');
   });
 
   test('keeps a backslash at the end of a grid table cell with fewer lines than its row', async () => {
@@ -1097,7 +1097,7 @@ describe('Grid table round-trip', () => {
     const text = (t: string): ContentItem => t.startsWith('`')
       ? { type: 'text', text: t.slice(1, -1), commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, code: true } }
       : { type: 'text', text: t, commentIds: new Set(), formatting: DEFAULT_FORMATTING };
-    const table = { type: 'table', rows: [{ isHeader: false, cells: [{ colspan: 1, paragraphs: [[text(first)], [text('x')]] }, { colspan: 1, paragraphs: [[text(second)]] }] }] } as unknown as ContentItem;
+    const table = { type: 'table', rows: [{ isHeader: false, cells: [{ colspan: 1, paragraphs: [[text(first), text('\\\n'), text('x')]] }, { colspan: 1, paragraphs: [[text(second)]] }] }] } as unknown as ContentItem;
     const markdown = buildMarkdown([table], new Map());
     const read = parseMd(markdown).find(token => token.type === 'table')?.rows?.[0].cells
       .map(cell => cell.runs.map(run => run.type === 'hardbreak' ? '\n' : run.code ? '`' + run.text + '`' : run.text).join('').replace(/\n+$/, ''));
@@ -1107,7 +1107,7 @@ describe('Grid table round-trip', () => {
   test('pads a grid table that would read back otherwise by characters, keeping a tracked change in it', async () => {
     const text = (t: string, revision?: object): ContentItem => ({ type: 'text', text: t, commentIds: new Set(), formatting: DEFAULT_FORMATTING, ...(revision ? { revision } : {}) });
     const table = { type: 'table', rows: [
-      { isHeader: false, cells: [{ colspan: 1, paragraphs: [[text('中文文字')], [text('x')]] }, { colspan: 1, paragraphs: [[text('x | 𝑎𝑏𝑐𝑑')]] }] },
+      { isHeader: false, cells: [{ colspan: 1, paragraphs: [[text('中文文字'), text('\\\n'), text('x')]] }, { colspan: 1, paragraphs: [[text('x | 𝑎𝑏𝑐𝑑')]] }] },
       { isHeader: false, cells: [{ colspan: 1, paragraphs: [[text('t', { type: 'addition', author: 'A', date: '2024-01-01T00:00:00Z' })]] }, { colspan: 1, paragraphs: [[text('y')]] }] },
     ] } as unknown as ContentItem;
     const markdown = buildMarkdown([table], new Map());
@@ -6645,6 +6645,96 @@ describe('HTML table cells', () => {
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
     expect(markdown).toStartWith('<table>');
     expect(markdown).toContain('      <p>b</p>\n      <p>c</p>');
+  });
+
+  // The Markdown of a table of one cell, XX, as Word edited it to end with
+  // `edited`: Word's own, with no format stored, or a grid table export wrote
+  const wordCell = async (md: string | undefined, edited: string) => {
+    const docx = md !== undefined ? (await convertMdToDocx(md)).docx
+      : await buildSyntheticDocx(wrapDocumentXml('<w:tbl><w:tr><w:tc><w:p><w:r><w:t>XX</w:t></w:r></w:p></w:tc></w:tr></w:tbl>'));
+    const zip = await JSZip.loadAsync(docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const cell = xml.replace('<w:r><w:t>XX</w:t></w:r></w:p>', edited);
+    expect(cell).not.toBe(xml);
+    zip.file('word/document.xml', cell);
+    return strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+  };
+  // The first cell export writes, and its paragraphs' text, a line break's as \n
+  const exportedCell = async (md: string) => {
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    const cell = xml.split('<w:tc>')[1].split('</w:tc>')[0];
+    return { cell, paragraphs: cell.split(/<w:p[ >]/).slice(1).map(p => [...p.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>|<w:br\/>/g)].map(m => m[1] ?? '\n').join('')) };
+  };
+  const sources = [['Word\'s own table', undefined], ['a grid table', '+-----+\n| XX  |\n+-----+']] as const;
+
+  test.each(sources)('keeps a cell of two paragraphs of %s as HTML, which keeps them', async (_name, md) => {
+    // A grid table wrote them as lines of its cell, which export read as one
+    // paragraph with a line break
+    const markdown = await wordCell(md, '<w:r><w:t>a</w:t></w:r></w:p><w:p><w:r><w:t>b</w:t></w:r></w:p>');
+    expect(markdown).toBe('<table>\n  <tr>\n    <td>\n      <p>a</p>\n      <p>b</p>\n    </td>\n  </tr>\n</table>');
+    expect((await exportedCell(markdown)).paragraphs).toEqual(['a', 'b']);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each(sources)('keeps a cell of %s with a line break as lines of a grid table', async (_name, md) => {
+    const markdown = await wordCell(md, '<w:r><w:t>a</w:t><w:br/><w:t>b</w:t></w:r></w:p>');
+    expect(markdown).toBe('+-----+\n| a   |\n| b   |\n+-----+');
+    expect((await exportedCell(markdown)).paragraphs).toEqual(['a\nb']);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps == in each of a cell\'s two paragraphs as text', async () => {
+    // Neither paragraph's == closed in it, so import wrote them as they were,
+    // but export read the grid table cell's lines as one, where they did
+    const markdown = await wordCell(undefined, '<w:r><w:t>a==b</w:t></w:r></w:p><w:p><w:r><w:t>c==d</w:t></w:r></w:p>');
+    const { cell, paragraphs } = await exportedCell(markdown);
+    expect(paragraphs).toEqual(['a==b', 'c==d']);
+    expect(cell).not.toContain('<w:highlight');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps a cell of two paragraphs, one with a tracked change, HTML, which shows the change as text', async () => {
+    // A grid table holds the change, but not the paragraphs, and HTML the
+    // paragraphs, but not the change
+    const markdown = await wordCell(undefined, '<w:r><w:t>a</w:t></w:r></w:p><w:p><w:ins w:id="1" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r><w:t>b</w:t></w:r></w:ins></w:p>');
+    expect(markdown).toBe('<table>\n  <tr>\n    <td>\n      <p>a</p>\n      <p>{++b++}</p>\n    </td>\n  </tr>\n</table>');
+    const { cell, paragraphs } = await exportedCell(markdown);
+    expect(paragraphs).toEqual(['a', '{++b++}']);
+    expect(cell).not.toContain('<w:ins');
+  });
+
+  // A table only HTML holds, whose cell, which HTML can't hold, has `items`
+  const htmlOnlyTables: Array<[string, (items: ContentItem[]) => ContentItem[]]> = [
+    ['a cell of paragraphs', items => [{ type: 'table', rows: [
+      { isHeader: false, cells: [{ paragraphs: [items, [cellText('c')]] }] },
+    ] }] as unknown as ContentItem[]],
+    ['merged cells', items => [{ type: 'table', rows: [
+      { isHeader: false, cells: [{ paragraphs: [[cellText('m')]], colspan: 2 }] },
+      { isHeader: false, cells: [{ paragraphs: [items] }, { paragraphs: [[cellText('c')]] }] },
+    ] }] as unknown as ContentItem[]],
+  ];
+
+  test.each(htmlOnlyTables)('writes a comment with a blank line in a cell of a table with %s without it', async (_name, table) => {
+    // The blank line ended the table's HTML block, and export read the rest
+    // of the table as text
+    const markdown = buildMarkdown(table([cellText('a '), { type: 'html_comment', text: '<!-- x\n\ny -->', commentIds: new Set() }, cellText(' b')]), new Map());
+    expect(markdown).toContain('      <p>a <!-- x\ny -->&#32;b</p>');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each(htmlOnlyTables)('escapes an equation in a cell of a table with %s, which exports it as text', async (_name, table) => {
+    // Export read its <b> as a tag, which dropped the b and made the text
+    // after it bold
+    const markdown = buildMarkdown(table([cellText('p '), { type: 'math', latex: 'a<b>c', display: false, commentIds: new Set() }, cellText(' q')]), new Map());
+    expect(markdown).toContain('      <p>p $a&lt;b&gt;c$ q</p>');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('writes a display equation of lines in a cell of a table only HTML holds with line breaks', async () => {
+    // HTML read its line ends as spaces, and the blank line ended the table
+    const markdown = buildMarkdown(htmlOnlyTables[0][1]([{ type: 'math', latex: 'a \\\\\n\nb', display: true, inParagraph: true, commentIds: new Set() } as ContentItem]), new Map());
+    expect(markdown).toContain('      <p>' + '$'.repeat(2) + '<br>a \\\\<br><br>b<br>' + '$'.repeat(2) + '</p>');
+    expect(await roundTrip(markdown)).toBe(markdown);
   });
 });
 
