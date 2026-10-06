@@ -2489,6 +2489,175 @@ function nodeText(children: XmlNode[]): string {
 }
 
 /**
+ * A part's w:t and w:delText text with its line ends as line feeds, which
+ * import reads in each paragraph's text (see readParagraphLineFeeds, and
+ * commentParagraphText): XML reads a carriage return in the file as a line
+ * feed, but one by reference stays itself. One that ends a w:t stays a
+ * carriage return, which a line feed starting the next can pair with (see
+ * readCarriageReturns).
+ */
+function readLineEnds(nodes: XmlNode[]): void {
+  for (const node of nodes) {
+    for (const key of Object.keys(node)) {
+      const children = node[key];
+      if (key === ':@' || !Array.isArray(children)) continue;
+      if (key === 'w:t' || key === 'w:delText') {
+        for (const child of children) {
+          if (child['#text'] === undefined) continue;
+          const text = String(child['#text']);
+          child['#text'] = text.replace(/\r\n|\r(?!$)/g, '\n');
+        }
+      } else {
+        readLineEnds(children);
+      }
+    }
+  }
+}
+
+// The items whose line feeds a paragraph read, as one in a text box does
+// inside another, which then leaves them as they are
+const LINE_FEEDS_READ = new WeakSet<ContentItem>();
+
+/**
+ * The line feeds of Word's text in what import wrote for a paragraph, from
+ * `start` in `target`: the space Word shows, as LibreOffice reads it after
+ * Word (tdf#108806), since Word writes a line's end as w:br or w:cr, never
+ * in its text. Not where that is an HTML block of its own, as export writes
+ * one, and the paragraph can be one (`block`), where import writes the text
+ * as it is (see markedFormatting), on the lines Markdown keeps it raw by,
+ * or, with a comment's point after it, escaped, with its line feeds as
+ * references (see htmlBlockText).
+ * Read from what import wrote, it leaves out what writes nothing, as an
+ * empty run, and what import leaves out, as a note's mark and the space
+ * after it.
+ */
+function readParagraphLineFeeds(target: ContentItem[], start: number, block: boolean): void {
+  const items = target.slice(start);
+  readCarriageReturns(items);
+  const text = block ? htmlBlockText(items) : undefined;
+  if (text !== undefined) {
+    // A line feed at the end of its text ends its last line, as the
+    // paragraph's end does, where import writes it as it is: not before a
+    // comment's point, where it's a reference too
+    let k = target.length - 1;
+    while (k > start && !(target[k] as { text?: string }).text) k--;
+    const last = target[k];
+    if (last.type === 'text' && text.endsWith('\n') && !target.slice(k + 1).some(item => item.type === 'text' && item.commentIds.size > 0)) {
+      last.text = last.text.slice(0, -1);
+      if (!last.text) target.splice(k, 1);
+    }
+  } else {
+    const own = items.filter(item => !LINE_FEEDS_READ.has(item));
+    for (const item of own) {
+      if (item.type === 'citation') item.text = item.text.replace(/\n/g, ' ');
+    }
+    readTextLineFeeds(own, block);
+  }
+  for (const item of target.slice(start)) LINE_FEEDS_READ.add(item);
+}
+
+/** The carriage returns readLineEnds leaves in a paragraph's `items`, each
+ *  at the end of a w:t's text, as line feeds: with a line feed that starts
+ *  the next text, as Word's runs split a line's end as XML writes one, one
+ *  line feed, as in one w:t, not two. Not where a tracked change or a
+ *  comment holds one and not the other, which accepting or rejecting, or
+ *  the comment's range, keeps apart, so where a deletion holds the carriage
+ *  return, the line feed stays when it's accepted. */
+function readCarriageReturns(items: ContentItem[]): void {
+  items.forEach((item, k) => {
+    if (item.type !== 'text' && item.type !== 'citation' && item.type !== 'html_comment') return;
+    const next = items[k + 1];
+    if (item.type === 'text' && item.text.endsWith('\r') && next?.type === 'text' && next.text.startsWith('\n')
+      && revisionsEqual(item.revision, next.revision) && commentSetsEqual(item.commentIds, next.commentIds)) next.text = next.text.slice(1);
+    item.text = item.text.replace(/\r\n?/g, '\n');
+  });
+}
+
+// Each start or end of an element in Word's text, as markdown-it reads one
+const ELEMENT_TAG_IN_WORD_TEXT = new RegExp(HTML_OPEN_CLOSE_TAG_RE.source.replace(/^\^/, ''), 'g');
+
+/** Whether import writes the text of two items next to each other, but
+ *  for their formatting's delimiters: text of the same link, change and
+ *  comments, as Word's runs alike, or the parts of a run's text a tab or a
+ *  hyphen of Word's splits. Not a line break of Word's. */
+function writtenTogether(a: ContentItem, b: ContentItem): boolean {
+  return a.type === 'text' && b.type === 'text' && b.text !== '\\\n'
+    && a.href === b.href && a.link === b.link && revisionsEqual(a.revision, b.revision) && commentSetsEqual(a.commentIds, b.commentIds);
+}
+
+/**
+ * The line feeds of a paragraph's text items, shown or deleted, as spaces,
+ * but in a tag import writes raw, where its paragraph can hold lines
+ * (`lines`), as export writes a tag in Markdown over lines, as
+ * <a href="a\n  b">: an element's start or end, but not one import writes
+ * as text, as export would read it as formatting or the like (see
+ * escapeSensitiveHtmlLikeTags), nor one in code, where a line end would be
+ * one in text, which Markdown reads as a space. A tag is read in the text of
+ * the items import writes together, as one Word's runs split, or a tab in
+ * it. Not a hidden HTML comment's, whose line ends are its own.
+ */
+function readTextLineFeeds(items: ContentItem[], lines: boolean): void {
+  for (let i = 0; i < items.length; i++) {
+    const first = items[i];
+    if (first.type !== 'text' || first.text === '\\\n') continue;
+    // Of the same formatting, but for whitespace whose formatting writes no
+    // delimiters, as a line feed in bold alone, which import writes as it
+    // is (see markedFormatting)
+    let formatting = writesNoDelimiters(first.text, first.formatting) ? undefined : first.formatting;
+    let end = i + 1;
+    for (; end < items.length && writtenTogether(items[end - 1], items[end]); end++) {
+      const item = items[end] as Extract<ContentItem, { type: 'text' }>;
+      if (writesNoDelimiters(item.text, item.formatting)) continue;
+      if (formatting && !formattingEquals(formatting, item.formatting)) break;
+      formatting = item.formatting;
+    }
+    const group = items.slice(i, end) as Array<Extract<ContentItem, { type: 'text' }>>;
+    i = end - 1;
+    const text = group.map(item => item.text).join('');
+    if (!text.includes('\n')) continue;
+    // The offsets of the line feeds in tags
+    const kept = new Set<number>();
+    if (lines && !formatting?.code) {
+      for (const tag of text.matchAll(ELEMENT_TAG_IN_WORD_TEXT)) {
+        const name = /^<\/?([A-Za-z][A-Za-z0-9-]*)/.exec(tag[0]);
+        if (!name || MARKDOWN_HTML_SENSITIVE_TAGS.has(name[1].toLowerCase())) continue;
+        for (let k = tag[0].indexOf('\n'); k !== -1; k = tag[0].indexOf('\n', k + 1)) kept.add(tag.index + k);
+      }
+    }
+    let at = 0;
+    for (const item of group) {
+      const from = at;
+      item.text = item.text.replace(/\n/g, (lineFeed: string, offset: number) => kept.has(from + offset) ? lineFeed : ' ');
+      at += item.text.length;
+    }
+  }
+}
+
+/** The text of a paragraph's `items` where it's an HTML block of its own,
+ *  as markdown-it reads it, with its line feeds: plain text, in no
+ *  formatting, link, tracked change or comment, nor a line break of Word's,
+ *  which import writes apart from it. A comment's point can come after it,
+ *  where import writes the text escaped, as the comment would go in the
+ *  block, with its line feeds as references (see markedFormatting), which
+ *  are no line's end, and which Markdown shows as Word does, as spaces. */
+function htmlBlockText(items: ContentItem[]): string | undefined {
+  let text = '';
+  // The runs before a comment's points, which write no text
+  let end = items.length;
+  for (let last = items[end - 1]; isBareRun(last) && last.text === '' && !last.revision; last = items[end - 1]) end--;
+  for (const item of items.slice(0, end)) {
+    if (item.type !== 'text' || item.text === '\\\n' || hasFormatting(item.formatting) || item.href !== undefined
+      || item.revision || item.commentIds.size > 0) return undefined;
+    text += item.text;
+  }
+  if (!text.includes('\n')) return undefined;
+  const blocks = htmlBlocksIn(text);
+  // Its lines as markdown-it counts them, which a line feed ends, so one at
+  // the end starts none
+  return blocks.length === 1 && blocks[0].start === 0 && blocks[0].end === text.replace(/\n$/, '').split('\n').length ? text : undefined;
+}
+
+/**
  * Walk the parsed XML tree and extract complete field instructions by
  * accumulating w:instrText fragments between w:fldChar begin and
  * separate/end markers.  Returns one concatenated instruction string
@@ -2642,6 +2811,15 @@ function edgeWhitespace(text: string): [string, string, string] {
   return [text.slice(0, start), text.slice(start, end), text.slice(end)];
 }
 
+/** Whether markedFormatting writes `text` in formatting `fmt` with no
+ *  delimiters: whitespace alone, in bold or italic alone, which go outside
+ *  it (see wrapMarkdownDelimited), and nothing of their own around it, as
+ *  code, a highlight, an underline, a strikethrough or a script has */
+function writesNoDelimiters(text: string, fmt: RunFormatting): boolean {
+  return !fmt.code && !fmt.highlight && !fmt.underline && !fmt.strikethrough && !fmt.superscript && !fmt.subscript
+    && !edgeWhitespace(text)[1];
+}
+
 /** Apply formatting delimiters in nesting order, keeping edge whitespace
  *  outside markers, and line breaks, whose backslash before a closer would
  *  escape it */
@@ -2737,6 +2915,9 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
     return wrapFormatting(result, fmt, highlightOuter);
   }
 
+  // Whitespace in bold or italic alone, which import writes as it is, and
+  // reads line feeds in a tag over (see readTextLineFeeds)
+  if (writesNoDelimiters(text, fmt)) return text;
   // Escape markdown-sensitive characters so they round-trip faithfully.
   // Only applies to non-code text (code is already fenced with backticks
   // above), and before the tags, whose &lt; it would take for Word's text.
@@ -3202,9 +3383,22 @@ function escapeTagLeftOpen(text: string, url: string): string {
 
 // Comment extraction
 
+// A line break of Word's in a comment's paragraph while its text is read,
+// a character XML can't hold, so Word's text has none
+const COMMENT_LINE_BREAK = '\u0000';
+
 /** The text a comment's paragraph shows: its runs' text, with a line break
- *  as a line's end, without deleted runs or a paragraph inside it */
+ *  as a line's end, without deleted runs or a paragraph inside it. A line
+ *  feed or carriage return in Word's text (see readLineEnds) is the space
+ *  Word shows, and a carriage return and the line feed after it one, though
+ *  runs split them, as their text is read whole. */
 function commentParagraphText(nodes: XmlNode[]): string {
+  return commentParagraphRuns(nodes).replace(/\r\n?|\n/g, ' ').split(COMMENT_LINE_BREAK).join('\n');
+}
+
+/** A comment's paragraph's text, as commentParagraphText reads it, with its
+ *  line breaks as COMMENT_LINE_BREAK */
+function commentParagraphRuns(nodes: XmlNode[]): string {
   let text = '';
   for (const node of nodes) {
     for (const key of Object.keys(node)) {
@@ -3215,9 +3409,9 @@ function commentParagraphText(nodes: XmlNode[]): string {
       } else if (key === 'w:sym') {
         text += symbolCharacter(node) ?? '';
       } else if (key === 'w:cr' || (key === 'w:br' && [undefined, '', 'textWrapping'].includes(node[':@']?.['@_w:type']))) {
-        text += '\n';
+        text += COMMENT_LINE_BREAK;
       } else if (!['w:del', 'w:moveFrom', 'w:pPr', 'w:rPr', 'w:p'].includes(key) && key !== ':@' && Array.isArray(node[key])) {
-        text += commentParagraphText(node[key]);
+        text += commentParagraphRuns(node[key]);
       }
     }
   }
@@ -3237,6 +3431,7 @@ export async function extractComments(data: Uint8Array | JSZip): Promise<Map<str
   const zip = data instanceof JSZip ? data : await loadZip(data);
   const parsed = await readZipXml(zip, 'word/comments.xml');
   if (!parsed) { return comments; }
+  readLineEnds(parsed);
 
   for (const node of findAllDeep(parsed, 'w:comment')) {
     const id = getAttr(node, 'id');
@@ -4086,6 +4281,7 @@ async function extractNotes(
   const notes = new Map<string, FootnoteBody>();
   const parsed = await readZipXml(zip, xmlPath);
   if (!parsed) return { notes, withImages: () => {} };
+  readLineEnds(parsed);
 
   // The context's citations are this file's, in order (see convertDocx),
   // which one counter runs through across all its notes
@@ -4837,6 +5033,8 @@ function parseNoteBody(
               else target[at] = { ...first, text: first.text.slice(1) };
             }
           }
+          // A note's paragraph reads no heading's or title's style
+          readParagraphLineFeeds(target, lenBeforeContent, !inTableCell && !isCodeBlock);
           if (!inTableCell && !isCodeBlock && walkedContent) {
             startRangesAtMark(target, lenBeforeContent, commentStartTargetIndex, activeComments);
           }
@@ -5508,6 +5706,7 @@ export async function extractDocumentContent(
   const zip = data instanceof JSZip ? data : await loadZip(data);
   const parsed = await readZipXml(zip, 'word/document.xml');
   if (!parsed) { return { content: [] }; }
+  readLineEnds(parsed);
 
   // Parse relationships and numbering definitions
   const relationshipMap = options?.relationshipMap ?? await parseRelationships(zip);
@@ -6162,6 +6361,7 @@ export async function extractDocumentContent(
             target.push(paraItem);
           }
           walk(paraChildren, paraFormatting, target, inTableCell, currentRevision);
+          readParagraphLineFeeds(target, targetLenBeforePara + (needsPara ? 1 : 0), !inTableCell && !headingLevel && !isTitle && !isCodeBlock);
           const hasText = target.length > targetLenBeforePara + (needsPara ? 1 : 0);
           if (hasText && !inTableCell && !isCodeBlock && !inBibliographyField) {
             startRangesAtMark(target, targetLenBeforePara, commentStartTargetIndex, activeComments);
