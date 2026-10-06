@@ -134,7 +134,7 @@ export interface MdToken {
   tableDigits?: TableDigits;
   tableDecimalMark?: TableDecimalMark;
   tableDigitGrouping?: TableDigitGrouping;
-  tableHtmlAround?: [string, string]; // the HTML before and after an HTML table in its block, which Word doesn't show
+  tableHtmlAround?: [string, string]; // the HTML before and after an HTML table in its block, which Word doesn't show, and the line end or spaces before the next table in it
   gridSourceColWidths?: number[]; // column char-widths inferred from +---+---+ source; persisted for round-trip fidelity and Word Online layout
   criticParaMark?: 'addition' | 'deletion'; // paragraph mark revision: a heading promoted from a full-paragraph {++### ...++} / {--### ...--} span, or a block split at a paragraph break inside a revision
   criticParaMarkRun?: MdRun; // the revision whose paragraph break ends this block; supplies author and date (default: the first run)
@@ -3124,12 +3124,16 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
                 // around the table, which Word doesn't show, goes with the
                 // table it's next to, as an image's goes with it: the HTML
                 // before the first table, but the indent of the table's
-                // line, and after each to the next, but the line end and
-                // indent before that. Import writes it as it was, with the
-                // HTML on the table's lines on them, as it may end a block.
+                // line, and after each to the next, but the indent of its
+                // line, or to the block's end, but the line end that ends
+                // it. Import writes it as it was, with the HTML on the
+                // table's lines on them, as it may end a block, and the next
+                // table on from the line end or spaces before it, in the
+                // block, where nothing came between them in Word.
+                const next = htmlTables[k + 1];
                 const before = k === 0 ? htmlContent.slice(0, meta.start).replace(/(^|\n)[ \t]*$/, '$1') : '';
-                const after = htmlContent.slice(meta.end, htmlTables[k + 1]?.start).replace(/\s+$/, '');
-                if (/\S/.test(before + after) && !sharedOpener && !wrappedLatex) tableToken.tableHtmlAround = [/\S/.test(before) ? before : '', /\S/.test(after) ? after : ''];
+                const after = next ? htmlContent.slice(meta.end, next.start).replace(/(^|\n)[ \t]*$/, '$1') : htmlContent.slice(meta.end).replace(/\s+$/, '');
+                if ((/\S/.test(before + after) || (next && after)) && !sharedOpener && !wrappedLatex) tableToken.tableHtmlAround = [/\S/.test(before) ? before : '', after];
                 result.push(tableToken);
               }
             }
@@ -4134,7 +4138,9 @@ function recordTableMetadata(token: MdToken, state: DocxGenState): void {
   if (token.tableDigits !== undefined) state.tableDigits.set(tableIndex, String(token.tableDigits));
   if (token.tableDecimalMark) state.tableDecimalMarks.set(tableIndex, token.tableDecimalMark);
   if (token.tableDigitGrouping) state.tableDigitGroupings.set(tableIndex, token.tableDigitGrouping);
-  if (token.tableHtmlAround && !state.warnings.includes(HTML_AROUND_TABLE_WARNING)) state.warnings.push(HTML_AROUND_TABLE_WARNING);
+  // But for the line end or spaces before another table, which Word doesn't
+  // need to show
+  if (token.tableHtmlAround && /\S/.test(token.tableHtmlAround.join('')) && !state.warnings.includes(HTML_AROUND_TABLE_WARNING)) state.warnings.push(HTML_AROUND_TABLE_WARNING);
 }
 
 /** Records the HTML around a table in its block with the table's identity,

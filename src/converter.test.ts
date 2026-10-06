@@ -7239,6 +7239,21 @@ describe('HTML around a table in its block', () => {
     expect(markdown).toBe('Text.\n\n<div>\n<p>Table 2.</p>\n' + table('B') + '\n</div>\n');
   });
 
+  test.each([
+    ['deletes a grid table before it', '+---+\n| P |\n+===+\n| p |\n+---+\n\n', (xml: string) => xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, ''), ''],
+    ['adds a table before it', '', (xml: string) => xml.replace('<w:tbl>', '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>New</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/><w:tbl>'), table('New') + '\n\n'],
+  ])('keeps a table HTML with the HTML around it on its lines where Word %s', async (_name, other, edit, added) => {
+    // It took the format export wrote at its index, another table's, and
+    // the HTML went around it as blocks, which the next export showed as text
+    const md = '<div>\n<p>Cap</p>\n' + table('A') + '\n</div>\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(other + md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', edit(xml));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe(added + md);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
   test('puts the HTML around a table back with the same table after Word deletes one before it with the same first row', async () => {
     // The first row matched the deleted table's, which took the index
     const md = '<p>Cap A</p>\n<table><tr><td>H</td></tr><tr><td>a</td></tr></table>\n\n<p>Cap B</p>\n<table><tr><td>H</td></tr><tr><td>b</td></tr></table>\n';
@@ -7313,6 +7328,46 @@ describe('HTML around a table in its block', () => {
     zip.file('word/document.xml', xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, ''));
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
     expect(markdown).toBe('Text.\n\n' + second);
+  });
+
+  test.each([
+    ['on the next line', table('a') + '\n' + table('b') + '\n'],
+    ['in a div', '<div>\n' + table('a') + '\n' + table('b') + '\n</div>\n'],
+    ['with HTML between', '<div>\n<p>A</p>\n' + table('a') + '\n<p>B</p>\n' + table('b') + '\n<p>C</p>\n</div>\n'],
+    ['with a comment between', table('a') + '\n<!-- c -->\n' + table('b') + '\n'],
+    ['on the line of text after it', table('a') + ' x ' + table('b') + '\n'],
+    ['after spaces at its line\'s end', table('a') + '  \n' + table('b') + '\n'],
+    ['of three', table('a') + '\n' + table('b') + '\n' + table('c') + '\n'],
+    ['in a note', 'A[^1].\n\n[^1]: Note.\n\n    <div>\n' + table('a', '    ') + '\n' + table('b', '    ') + '\n    </div>\n'],
+  ])('keeps a table after another in their HTML block %s', async (_name, md) => {
+    // A blank line went before it, which split the block in two
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('warns of no HTML around tables in one block with none but the line end between them', async () => {
+    const { warnings } = await convertMdToDocx(table('a') + '\n' + table('b') + '\n');
+    expect(warnings.some(w => w.startsWith('HTML around a table'))).toBe(false);
+  });
+
+  test('writes a table after another in their HTML block as a block of its own where Word puts a paragraph between them', async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('<div>\n' + table('a') + '\n<p>B</p>\n' + table('b') + '\n</div>\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const between = xml.replace('</w:tbl><w:tbl>', '</w:tbl><w:p><w:r><w:t>Mid</w:t></w:r></w:p><w:tbl>');
+    expect(between).not.toBe(xml);
+    zip.file('word/document.xml', between);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('<div>\n' + table('a') + '\n<p>B</p>\n\nMid\n\n' + table('b') + '\n</div>\n');
+  });
+
+  test('writes a table after another on the line of a comment that starts their block as a block of its own', async () => {
+    // The block ends on the comment's line, so the rest of the table there
+    // would be text after it
+    const md = '<!-- c --><table><tr><td><p>a</p></td></tr></table> <table><tr><td><p>b</p></td></tr></table>\n';
+    const markdown = await roundTrip(md);
+    expect(markdown).toBe('<!-- c --><table><tr><td><p>a</p></td></tr></table>\n\n' + table('b') + '\n');
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    expect(xml.match(/<w:tbl>/g)).toHaveLength(2);
+    expect(await roundTrip(markdown)).toBe(markdown);
   });
 
   test('keeps the HTML around tables alike in all their text in order', async () => {
@@ -7453,7 +7508,7 @@ describe('HTML around a table in its block', () => {
     zip.file('word/document.xml', xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, tbl => tbl.replace('>a<', '>z<') + '<w:p/>' + tbl));
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
     expect(markdown.startsWith('<table>')).toBe(true);
-    expect(markdown).toContain('<div><p>Cap</p>\n\n+-----+\n| H   |\n+-----+\n| a   |\n+-----+');
+    expect(markdown.slice(markdown.indexOf('<div>'))).toBe('<div><p>Cap</p>\n<table>\n  <tr>\n    <td>\n      <p>H</p>\n    </td>\n  </tr>\n  <tr>\n    <td>\n      <p>a</p>\n    </td>\n  </tr>\n</table>\n</div>\n');
   });
 
   test.each(['{++a++}', '{--a--}', '{==a==}', '{~~a~>b~~}'])('keeps the HTML around a table off a table before it with %s', async cell => {
@@ -7517,7 +7572,7 @@ describe('HTML around a table in its block', () => {
     zip.file('word/document.xml', xml.replace('<w:tbl>', /<w:tbl>[\s\S]*?<\/w:tbl>/.exec(added)![0] + '<w:p/><w:tbl>'));
     const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
     expect(markdown.startsWith('<table>')).toBe(true);
-    expect(markdown).toContain('<div><p>Cap</p>\n\n| H | I |\n| --- | --- |\n| a | |');
+    expect(markdown.slice(markdown.indexOf('<div>'))).toBe('<div><p>Cap</p>\n<table>\n  <tr>\n    <th>\n      <p>H</p>\n    </th>\n    <th>\n      <p>I</p>\n    </th>\n  </tr>\n  <tr>\n    <td>\n      <p>a</p>\n    </td>\n    <td>\n      <p></p>\n    </td>\n  </tr>\n</table>\n</div>\n');
   });
 
   test('keeps the HTML around a table with a cell over two rows', async () => {

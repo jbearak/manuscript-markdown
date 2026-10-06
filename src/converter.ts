@@ -7483,10 +7483,15 @@ function htmlCellsHoldTable(table: { rows: TableRow[] }): boolean {
     cell.paragraphs.every(para => renderHtmlCellParagraph(para) !== undefined)));
 }
 
+/** The start of an HTML block before a table that ends on the line its end
+ *  marker is on, as a comment's or a <pre>'s, so the table goes on that line
+ *  (see renderHtmlTable) */
+const TABLE_BLOCK_ENDS_AT_MARKER_RE = /^[ \t]{0,3}(?:<(?:script|pre|style|textarea)(?=[\s>]|$)|<!--|<\?|<![A-Za-z]|<!\[CDATA\[)/i;
+
 function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comment>, indent: string = '  ', renderOpts?: RenderOpts, extraAttrs: string = '', around?: readonly string[]): string {
   // A block that starts as a comment, <pre> or the like ends on the line its
   // end is on, as the --> before the table, so the table goes on that line
-  let oneLine = /^[ \t]{0,3}(?:<(?:script|pre|style|textarea)(?=[\s>]|$)|<!--|<\?|<![A-Za-z]|<!\[CDATA\[)/i.test(around?.[0] ?? '');
+  let oneLine = TABLE_BLOCK_ENDS_AT_MARKER_RE.test(around?.[0] ?? '');
   const i1 = indent;  // tr level
   const i2 = indent + indent;  // td/th level
   const i3 = indent + indent + indent;  // content level
@@ -8418,11 +8423,7 @@ function renderTableOrFallback(
   storedFormat?: string,
   tableIndex?: number,
   scope = '',
-): { directivePrefix: string; body: string; before?: string; after?: string } {
-  // A cell holds no range that goes on past it, and a range open around the
-  // table, with no item in it, stays open for the text after. A cell's
-  // comments are the browser's where the table was HTML.
-  if (renderOpts?.openIdComments || storedFormat === 'html') renderOpts = { ...renderOpts, openIdComments: undefined, htmlCells: storedFormat === 'html' };
+): { directivePrefix: string; body: string; before?: string; after?: string; join?: string } {
   const { fontPrefix, commentUnsafeFont: forceHtmlTable } = buildTableDirectivePrefix(renderOpts, tableIndex);
   let htmlFontAttrs = '';
   const isLandscapeTable = tableIndex !== undefined && renderOpts?.landscapeTableIndices?.has(tableIndex);
@@ -8479,20 +8480,39 @@ function renderTableOrFallback(
   const aroundKey = index && (extra ? own ?? atIndex : fewer ? undefined : index.nth.get(identity + '\n' + alikeBefore)?.find(unused) ?? own);
   const around = aroundKey !== undefined ? mapping?.get(aroundKey) : undefined;
   if (aroundKey !== undefined) renderOpts?.usedTableHtmlAround?.add(aroundKey);
+  // The line end or spaces export kept at the end of the HTML after a table
+  // that another followed in its block, which the next table goes on from,
+  // in the block, where it's the next item (see buildMarkdown), and which
+  // goes otherwise
+  const join = around?.[1].match(/\s+$/)?.[0];
+  const html = around && [around[0], join ? around[1].slice(0, -join.length) : around[1]];
+  // A table that takes it was HTML, and stays HTML with the HTML on its
+  // lines, though the format export wrote at its index, where Word added or
+  // deleted a table before it, is another table's
+  if (around) storedFormat = 'html';
+  // A cell holds no range that goes on past it, and a range open around the
+  // table, with no item in it, stays open for the text after. A cell's
+  // comments are the browser's where the table was HTML.
+  if (renderOpts?.openIdComments || storedFormat === 'html') renderOpts = { ...renderOpts, openIdComments: undefined, htmlCells: storedFormat === 'html' };
   const r = (body: string) => {
     // Neither, where one can't be read as it was, as a <pre> before the
     // table and its end after it
-    let before = around && detachedTableHtml(around[0], renderOpts?.breaks);
-    let after = around && detachedTableHtml(around[1], renderOpts?.breaks);
+    let before = html && detachedTableHtml(html[0], renderOpts?.breaks);
+    let after = html && detachedTableHtml(html[1], renderOpts?.breaks);
     if (before === null || after === null) before = after = undefined;
     return { directivePrefix: fontPrefix, body, ...(before ? { before } : {}), ...(after ? { after } : {}) };
   };
-  const rHtml = (body: string) => ({ directivePrefix: '', body });
+  // Which an HTML table passes on where the HTML after it ends what's
+  // written, with no comment bodies after it, in a block that ends at a
+  // blank line, not on the line of a marker, as a comment's, which the next
+  // table's lines would go on past
+  const rHtml = (body: string) => ({ directivePrefix: '', body,
+    ...(join !== undefined && body.endsWith('</table>' + html![1]) && !TABLE_BLOCK_ENDS_AT_MARKER_RE.test(html![0]) ? { join } : {}) });
   // If the original format was HTML or font value is comment-unsafe, emit HTML
   // directly. A table that holds what HTML cells can't goes on as if it had
   // no stored format, to a format that can, unless it needs HTML.
   if ((storedFormat === 'html' && htmlCellsHoldTable(item)) || forceHtmlTable) {
-    return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs, around));
+    return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs, html));
   }
   // Parse stored grid source column widths for this table
   const gridSrcWidthsStr = tableIndex !== undefined ? renderOpts?.gridSourceColWidthsMapping?.get(String(tableIndex)) : undefined;
@@ -8507,7 +8527,7 @@ function renderTableOrFallback(
   if (storedFormat === 'grid') {
     const gridResult = tryRenderGridTable(item, comments, renderOpts, undefined, gridSrcWidths);
     if (gridResult !== null) return r(gridResult);
-    return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs, around));
+    return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs, html));
   }
   // When the original was a pipe table, skip the width check to preserve format
   const pipeMax = storedFormat === 'pipe' ? Infinity : (options?.pipeTableMaxLineWidth ?? 120);
@@ -8528,7 +8548,7 @@ function renderTableOrFallback(
     const gridResult = tryRenderGridTable(item, comments, renderOpts, undefined, gridSrcWidths);
     if (gridResult !== null) return r(gridResult);
   }
-  return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs, around));
+  return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs, html));
 }
 
 const PARAGRAPH_CONTENT_ELEMENTS = new Set([
@@ -9910,6 +9930,10 @@ export function buildMarkdown(
   const htmlCommentAfterGaps = options?.htmlCommentAfterGaps;
   let htmlCommentIndex = 0;
   let lastRenderedHtmlCommentIndex: number | undefined;
+  // The line end or spaces an HTML table's HTML ended with before the next
+  // table in its block, which that one goes on from as the next item (see
+  // renderTableOrFallback)
+  let lastTableJoin: string | undefined;
   let lastWasSectionSentinel = false; // true after landscape/portrait open/close rendering
   let lastSentinelAfterGapKey: string | undefined; // after-gap key of the last rendered sentinel
   let skipNextLandscapeClose = false;
@@ -9973,6 +9997,8 @@ export function buildMarkdown(
 
   while (i < mergedContent.length) {
     const wordItem = mergedContent[i];
+    const tableJoin = lastTableJoin;
+    lastTableJoin = undefined;
     // An item with no text ends at a blank line, which goes before anything
     // after it but its sublist, or a quote in it right under its marker, and
     // nothing after nests in it
@@ -10752,12 +10778,16 @@ export function buildMarkdown(
       }
       const storedFormat = renderOpts?.tableFormatMapping?.get(String(tableIndex));
       const tableResult = renderTableOrFallback(item, comments, options, renderOpts, storedFormat, tableIndex);
+      // One that goes on in the HTML block of the table before it, with
+      // nothing between them in Word, and no HTML before it of its own
+      if (tableJoin !== undefined && output[output.length - 1] === '\n\n' && tableResult.body.startsWith('<table')) output[output.length - 1] = tableJoin;
       if (tableResult.before) {
         output.push(tableResult.before + '\n\n' + tableResult.directivePrefix + tableResult.body);
       } else {
         pushWithHoistedPrefix(output, tableResult.directivePrefix, tableResult.body);
       }
       if (tableResult.after) output.push('\n\n' + tableResult.after);
+      lastTableJoin = tableResult.join;
       tableIndex++;
       endListContext();
       lastAlertParagraphKey = undefined;
@@ -11014,6 +11044,9 @@ export function buildMarkdown(
       const skipDemoted = () => {
         while (demoted[codeBlock]) { codeBlockGroupIndex++; codeBlock++; }
       };
+      // The line end or spaces an HTML table's HTML ended with before the
+      // next table in its block, and the table's item, as in the body
+      let noteTableJoin: { join: string; at: number } | undefined;
       for (let bi = 0; bi < bodyMerged.length; bi++) {
         const item = bodyMerged[bi];
         if (item.type === 'para' && item.isCodeBlock) {
@@ -11118,13 +11151,18 @@ export function buildMarkdown(
           } else {
             const noteStoredFormat = noteRenderOpts?.tableFormatMapping?.get(String(tableIndex));
             const noteTableResult = renderTableOrFallback(item, comments, options, noteRenderOpts, noteStoredFormat, tableIndex, noteScopes.get(entry));
-            if (noteTableResult.before) bodyParts.push(noteTableResult.before);
-            if (noteTableResult.directivePrefix) {
-              bodyParts.push(noteTableResult.directivePrefix.replace(/\n+$/, '') + '\n' + noteTableResult.body);
+            if (noteTableJoin?.at === bi - 1 && noteTableResult.body.startsWith('<table')) {
+              bodyParts[bodyParts.length - 1] += noteTableJoin.join + noteTableResult.body;
             } else {
-              bodyParts.push(noteTableResult.body);
+              if (noteTableResult.before) bodyParts.push(noteTableResult.before);
+              if (noteTableResult.directivePrefix) {
+                bodyParts.push(noteTableResult.directivePrefix.replace(/\n+$/, '') + '\n' + noteTableResult.body);
+              } else {
+                bodyParts.push(noteTableResult.body);
+              }
+              if (noteTableResult.after) bodyParts.push(noteTableResult.after);
             }
-            if (noteTableResult.after) bodyParts.push(noteTableResult.after);
+            noteTableJoin = noteTableResult.join !== undefined ? { join: noteTableResult.join, at: bi } : undefined;
           }
           tableIndex++;
           partStart = bi + 1;
