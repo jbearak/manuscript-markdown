@@ -5897,7 +5897,10 @@ function applyLineSpacingToTemplate(stylesXml: string, lineSpacingFm: string | n
               : pPrContent + indEl;
           }
         }
-        inner = inner.slice(0, pPrMatch.index) + pPrMatch[1] + pPrContent + pPrMatch[3] + inner.slice(pPrMatch.index + pPrMatch[0].length);
+        // A pPr that held only the indent goes, as Word strips an empty one
+        // (dirty-flag invariant #5)
+        const pPr = pPrContent.trim() ? pPrMatch[1] + pPrContent + pPrMatch[3] : '';
+        inner = inner.slice(0, pPrMatch.index) + pPr + inner.slice(pPrMatch.index + pPrMatch[0].length);
       } else if (wantHanging) {
         // No pPr exists yet — add one
         inner = withStylePPr(inner, '<w:pPr><w:ind w:left="720" w:hanging="720"/></w:pPr>');

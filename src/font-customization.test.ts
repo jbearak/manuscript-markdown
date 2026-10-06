@@ -1287,6 +1287,22 @@ describe('the styles export takes from a template', () => {
     expect(extractStyleBlock(styles, id)!.replace(/^<w:style\b[^>]*>/, '')).toBe(head + pPr + rPr + '</w:style>');
   });
 
+  // Word strips an empty pPr
+  it.each([
+    ['only the indent', '<w:pPr><w:ind w:left="720" w:hanging="720"/></w:pPr>', ''],
+    ['the indent and spacing', '<w:pPr><w:spacing w:after="200"/><w:ind w:left="720" w:hanging="720"/></w:pPr>', '<w:pPr><w:spacing w:after="200"/></w:pPr>'],
+  ])('a template\'s bibliography style with %s keeps no empty pPr without its hanging indent', async (_name, pPr, expected) => {
+    const { convertDocx } = await import('./converter');
+    const head = '<w:name w:val="Bibliography"/><w:basedOn w:val="Normal"/>';
+    const { styles, docx } = await exportedStyles('bibliography-hanging-indent: false', ['Bibliography', head + pPr]);
+    expect(extractStyleBlock(styles, 'Bibliography')!.replace(/^<w:style\b[^>]*>/, '')).toBe(head + expected + '</w:style>');
+    const { markdown } = await convertDocx(docx);
+    expect(parseFrontmatter(markdown).metadata.bibliographyHangingIndent).toBe(false);
+    const again = (await convertMdToDocx(markdown, { templateDocx: docx })).docx;
+    expect(extractStyleBlock(await (await JSZip.loadAsync(again)).file('word/styles.xml')!.async('string'), 'Bibliography')).toBe(extractStyleBlock(styles, 'Bibliography'));
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
   const heading = (level: number, inner: string): [string, string] => ['Heading' + level, '<w:name w:val="heading ' + level + '"/>' + inner];
   // These headings may take their size from Normal, which import may give as
   // header-font-size, and export then writes into each style on a second trip
