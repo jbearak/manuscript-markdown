@@ -1747,6 +1747,23 @@ describe('Ordered list numbering', () => {
   });
 
   test.each([
+    ['at 1', (numbering: string) => numbering, '- x\n\n1. a\n2. b'],
+    ['at 3', withLevelStart(0, 3), '- x\n\n3. a\n4. b'],
+  ])('starts a list after bullets in its own instance where a template\'s bullets count with its numbers, which start %s', async (_name, edit, md) => {
+    // Bullets in an instance of the numbers' abstract numbering, as a level
+    // override makes a bullet's, moved the count of the numbers' instance
+    // on, which the list took
+    const templateDocx = await templateWithNumbering(numbering => edit(numbering).replace(/(<w:num w:numId="1"[^>]*>)<w:abstractNumId w:val="0"\/>/,
+      (_match, num: string) => num + '<w:abstractNumId w:val="1"/><w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/></w:lvl></w:lvlOverride>'));
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    expect(numIdsOf(await documentXml(docx))[0]).toBe('1');
+    expect(await levelOverridesOf(docx, 1)).toBe('<w:lvlOverride w:ilvl="0"><w:startOverride w:val="' + md.slice(md.indexOf('\n\n') + 2, md.indexOf('.')) + '"/></w:lvlOverride>');
+    // As Word numbers it. Import reads the bullet as its abstract
+    // numbering's number, not the level override's bullet.
+    expect((await convertDocx(docx)).markdown).toEndWith(md.slice(md.indexOf('\n\n') + 2) + '\n');
+  });
+
+  test.each([
     // An override of the parents' levels would number their lists, as Word
     // counts the instances of a list as one, which gives %1.%2 2.1 without it
     ['a restarted sublist', '1. a\n\n<!-- -->\n\n1. b\n2. c\n   1. x\n\n   <!-- -->\n\n   1. y', 4, 1],

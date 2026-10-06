@@ -4064,7 +4064,7 @@ export interface DocxGenState {
   firstOverrideNumId?: number; // numIds below it are bullets', numbers', and a template's styles' and headers' (default 3)
   bulletNumId?: number; // the numId bullets take (default 1; see listNumIds)
   decimalNumId?: number; // the numId numbers take (default 2)
-  usedOrderedNumId?: boolean; // whether an ordered list has used numbers' numId, so the next needs its own
+  usedOrderedNumId?: boolean; // whether an ordered list, or a bullet in the same count, has used numbers' numId, so the next needs its own
   templateListLevels?: ListLevels; // how Word numbers the template's numbered lists, by level
   hasComments: boolean;
   hasFootnotes: boolean;
@@ -5485,6 +5485,7 @@ type ListLevels = {
   restarts: Map<number, number>; // w:lvlRestart: the level, from 1, at or above which a paragraph starts the level over, or 0 for none
   startOverrides: Map<number, number>; // the instance numbers take's, which Word applies at its first paragraph at each level
   numberedByStyles: boolean; // whether the template's styles number paragraphs in the same count, with an instance of the same abstract numbering
+  bulletsCount: boolean; // whether bullets take an instance of the same abstract numbering, so their paragraphs move the count on
 };
 
 /**
@@ -5493,14 +5494,17 @@ type ListLevels = {
  * ([MS-OI29500] 2.1.292 and 2.1.282), so they come from the abstract
  * numbering alone, and the instance numbers take, `numId`, starts a level
  * over with its start overrides, where one with nothing in it starts its
- * level at 0 (tdf#153104).
+ * level at 0 (tdf#153104). Bullets, `bulletNumId` where they take the
+ * template's instance, can take one of the same abstract numbering, as a
+ * level override makes its first level a bullet's.
  */
-function templateListLevels(xml: string | undefined, numId: number, styleNumIds = new Set<number>()): ListLevels {
+function templateListLevels(xml: string | undefined, numId: number, styleNumIds = new Set<number>(), bulletNumId?: number): ListLevels {
   const numbering = xml === undefined ? undefined : parseTemplateNumbering(xml);
   const { instance, abstractNumId } = orderedListInstance(numbering, numId);
   const numberedByStyles = abstractNumId !== undefined && (numbering?.nums ?? []).some(num => styleNumIds.has(intAttr(num, 'w:numId'))
     && childNodes(num, 'w:num').some(n => 'w:abstractNumId' in n && intAttr(n, 'w:val') === abstractNumId));
-  const levels: ListLevels = { starts: new Map(), restarts: new Map(), startOverrides: new Map(), numberedByStyles };
+  const bulletsCount = abstractNumId !== undefined && bulletNumId !== undefined && orderedListInstance(numbering, bulletNumId).abstractNumId === abstractNumId;
+  const levels: ListLevels = { starts: new Map(), restarts: new Map(), startOverrides: new Map(), numberedByStyles, bulletsCount };
   const abstractNum = childNodes(numbering?.root, 'w:numbering')
     .find(n => 'w:abstractNum' in n && intAttr(n, 'w:abstractNumId') === abstractNumId);
   // The w:val of the `name` in each `element` of `nodes`, by level, or
@@ -7247,10 +7251,14 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
         // level, which Word applies at its first paragraph there, so a
         // sublist in it needs both to agree. Paragraphs the template's styles
         // number in the same count, as headings can be, would move it on
-        // before either, so with those each list gets its own start.
+        // before either, so with those each list gets its own start, and
+        // bullets in the same count move it on for the lists after them. A
+        // sublist in its parent's instance starts over after the parent, past
+        // any bullets before it.
         const parentNumId = ilvl > 0 && state.listItemNumbers?.length === ilvl && state.listItemNumbers[ilvl - 1] !== undefined
           ? state.activeListStartOverrides.get(ilvl - 1) : undefined;
         const levels = state.templateListLevels;
+        if (!token.ordered && levels?.bulletsCount) state.usedOrderedNumId = true;
         const restart = levels?.restarts.get(ilvl);
         const startsAfterParent = restart === undefined || restart >= ilvl;
         const levelStart = levels?.starts.get(ilvl) ?? 1, startOverride = levels?.startOverrides.get(ilvl);
@@ -8636,7 +8644,8 @@ export async function convertMdToDocx(
     decimalNumId: listNumbering.decimal,
     firstOverrideNumId: Math.max(2, ...numIdsInUse, listNumbering.bullet, listNumbering.decimal) + 1,
     usedOrderedNumId: false,
-    templateListLevels: templateListLevels(listTemplateNumbering, listNumbering.decimal, styleNumIds(templateStyles)),
+    templateListLevels: templateListLevels(listTemplateNumbering, listNumbering.decimal, styleNumIds(templateStyles),
+      listNumbering.own.has(listNumbering.bullet) ? undefined : listNumbering.bullet),
     hasComments: false,
     hasFootnotes: false,
     hasEndnotes: false,
