@@ -4008,18 +4008,19 @@ function parseTemplateMargins(sectPrXml: string | undefined): string {
 
 /** Build a portrait sectPr XML element for section breaks. */
 function portraitSectPrXml(pgSz: PageSize, margins: string, rsid?: string): string {
-  return '<w:sectPr' + (rsid ? ' w:rsidR="' + rsid + '"' : '') + '><w:pgSz w:w="' + pgSz.w + '" w:h="' + pgSz.h + '"/>' +
+  // w:type goes before w:pgSz, as CT_SectPr orders them
+  return '<w:sectPr' + (rsid ? ' w:rsidR="' + rsid + '"' : '') + '><w:type w:val="nextPage"/>' +
+    '<w:pgSz w:w="' + pgSz.w + '" w:h="' + pgSz.h + '"/>' +
     '<w:pgMar ' + margins + '/>' +
-    '<w:cols w:space="720"/>' +
-    '<w:type w:val="nextPage"/></w:sectPr>';
+    '<w:cols w:space="720"/></w:sectPr>';
 }
 
 /** Build a landscape sectPr XML element for section breaks. */
 function landscapeSectPrXml(pgSz: PageSize, margins: string, rsid?: string): string {
-  return '<w:sectPr' + (rsid ? ' w:rsidR="' + rsid + '"' : '') + '><w:pgSz w:w="' + pgSz.h + '" w:h="' + pgSz.w + '" w:orient="landscape"/>' +
+  return '<w:sectPr' + (rsid ? ' w:rsidR="' + rsid + '"' : '') + '><w:type w:val="nextPage"/>' +
+    '<w:pgSz w:w="' + pgSz.h + '" w:h="' + pgSz.w + '" w:orient="landscape"/>' +
     '<w:pgMar ' + margins + '/>' +
-    '<w:cols w:space="720"/>' +
-    '<w:type w:val="nextPage"/></w:sectPr>';
+    '<w:cols w:space="720"/></w:sectPr>';
 }
 
 /** Build the final body-level sectPr (no <w:type>, direct child of <w:body>). */
