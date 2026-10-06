@@ -6971,6 +6971,25 @@ describe('HTML table cells', () => {
   });
 
   test.each([
+    ['at a link\'s end', '      <p>x <a href="https://e.com">a<br></a>y</p>', 0],
+    ['at a link\'s start', '      <p>x<a href="https://e.com"><br>a</a> y</p>', 0],
+    ['in a link', '      <p>x <a href="https://e.com">a<br>b</a> y</p>', 0],
+    ['that is all of a link', '      <p>x<a href="https://e.com"><br></a>y</p>', 0],
+    ['at the end of a link that ends a paragraph', '      <p>x <a href="https://e.com"><b>a</b><br></a></p>', 0],
+    ['between two links to one place', '      <p><a href="https://e.com">a</a><br><a href="https://e.com">b</a></p>', 1],
+  ] as const)('keeps a line break %s in the hyperlink it\'s in', async (_name, cell, outside) => {
+    // Export ended the hyperlink at the break, and import wrote a break at
+    // a link's edge out of the link, and one between links to one place in
+    // one link of both
+    const md = table(cell);
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+    expect(xml.match(/<w:hyperlink /g)).toHaveLength(cell.match(/<a /g)!.length);
+    expect(xml.replace(/<w:hyperlink\b[\s\S]*?<\/w:hyperlink>/g, '').match(/<w:br\/>/g)?.length ?? 0).toBe(outside);
+    expect(await roundTrip(md)).toBe(md);
+    expect(await roundTrip(await roundTrip(md))).toBe(md);
+  });
+
+  test.each([
     ['<!-->', '<!-- c -->'],
     ['<!--->', '<!-- c -->'],
     ['<!-- c --!>', '<!-- d -->'],

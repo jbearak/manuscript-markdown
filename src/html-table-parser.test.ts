@@ -168,6 +168,15 @@ describe('HTML table cell paragraphs', () => {
     ]);
   });
 
+  test('reads a line break in a link as the link\'s, which starts it where it comes first', () => {
+    // A break in a link was no link's, so the link's hyperlink ended at it
+    expect(runs('<a href="u">a<br>b</a><br><a href="u"><br>c</a>')).toEqual([
+      { type: 'text', text: 'a', href: 'u', linkStart: true }, { type: 'softbreak', text: '\n', href: 'u' }, { type: 'text', text: 'b', href: 'u' },
+      { type: 'softbreak', text: '\n' },
+      { type: 'softbreak', text: '\n', href: 'u', linkStart: true }, { type: 'text', text: 'c', href: 'u' },
+    ]);
+  });
+
   test('keeps a line break in a paragraph, and the formatting around it', () => {
     expect(runs('<p><b>a<br>b</b></p>')).toEqual([
       { type: 'text', text: 'a', bold: true },

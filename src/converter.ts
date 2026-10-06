@@ -7613,9 +7613,11 @@ function renderInlineRangeWithIds(
  */
 function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
   type TextItem = Extract<ContentItem, { type: 'text' }>;
-  // The paragraph's text, with each line break as null, but one in
-  // formatting Word shows on it, which goes in that (see showsOnBreak)
-  const pieces: Array<{ text: string; item: TextItem; html: string; raw?: boolean; br?: boolean } | null> = [];
+  type TextPiece = { text: string; item: TextItem; html: string; raw?: boolean; br?: boolean };
+  // The paragraph's text, with each line break as the item it's in, but
+  // one in formatting Word shows on it, which goes in that as a piece of
+  // its own (`br`, see showsOnBreak)
+  const pieces: Array<TextPiece | { lineBreak: TextItem }> = [];
   // A comment Word split, as one; and comments the browser ended at a --!>,
   // which Word joined in one hidden run, as inline Markdown would read them
   // as one (see readHiddenText)
@@ -7633,7 +7635,7 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
     }
     if (item.type !== 'text' || item.revision || item.commentIds.size > 0 || item.formatting.highlight) return undefined;
     item.text.split('\\\n').forEach((text, k) => {
-      if (k > 0) pieces.push(showsOnBreak(item.formatting) ? { text: '', item, html: '<br>', br: true } : null);
+      if (k > 0) pieces.push(showsOnBreak(item.formatting) ? { text: '', item, html: '<br>', br: true } : { lineBreak: item });
       if (text) pieces.push({ text, item, html: '' });
     });
   }
@@ -7641,8 +7643,8 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
   // line keeps can straddle two pieces
   for (let k = 0; k < pieces.length; k++) {
     let end = k;
-    while (end < pieces.length && pieces[end] !== null && !pieces[end]!.br) end++;
-    const line = pieces.slice(k, end) as Array<{ text: string; item: TextItem; html: string; raw?: boolean }>;
+    while (end < pieces.length && !('lineBreak' in pieces[end]) && !(pieces[end] as TextPiece).br) end++;
+    const line = pieces.slice(k, end) as TextPiece[];
     const characters = htmlLineCharacters(line.map(piece => piece.text).join(''));
     let at = 0;
     for (const piece of line) {
@@ -7658,22 +7660,46 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
   const closeTo = (depth: number) => {
     while (open.length > depth) html += '</' + /^<(\w+)/.exec(open.pop()!)![1] + '>';
   };
-  let breaks = 0;
+  const linkTag = (href: string) => '<a href="' + escapeHtmlAttr(href) + '">';
+  // How many of the tags open a piece of `tags` keeps
+  const kept = (tags: string[]) => {
+    let depth = 0;
+    while (depth < open.length && depth < tags.length && open[depth] === tags[depth]) depth++;
+    return depth;
+  };
+  // The line breaks before a piece, which go after the tags it doesn't keep
+  // close and before its own open, but in the link they're in, as Word's
+  // hyperlink holds them, and out of any other
+  let breaks: TextItem[] = [];
+  const writeBreaks = (tags: string[]) => {
+    for (const item of breaks) {
+      const link = item.href !== undefined ? linkTag(item.href) : undefined;
+      if (link !== undefined && open[0] === link) closeTo(Math.max(1, kept(tags)));
+      else {
+        closeTo(link === undefined && !open[0]?.startsWith('<a ') ? kept(tags) : 0);
+        if (link !== undefined) {
+          html += link;
+          open = [link];
+        }
+      }
+      html += '<br>';
+    }
+    breaks = [];
+  };
   pieces.forEach(piece => {
-    if (piece === null) {
-      breaks++;
+    if ('lineBreak' in piece) {
+      breaks.push(piece.lineBreak);
       return;
     }
-    const lineBreaks = breaks;
-    breaks = 0;
     // A comment goes in the formatting around it
     if (piece.raw) {
-      html += '<br>'.repeat(lineBreaks) + piece.html;
+      writeBreaks(open);
+      html += piece.html;
       return;
     }
     const fmt = piece.item.formatting;
     const tags = [
-      ...(piece.item.href ? ['<a href="' + escapeHtmlAttr(piece.item.href) + '">'] : []),
+      ...(piece.item.href ? [linkTag(piece.item.href)] : []),
       ...(fmt.bold ? ['<b>'] : []),
       ...(fmt.italic ? ['<i>'] : []),
       ...(fmt.strikethrough ? ['<s>'] : []),
@@ -7681,14 +7707,15 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
       ...(fmt.superscript ? ['<sup>'] : fmt.subscript ? ['<sub>'] : []),
       ...(fmt.code ? ['<code>'] : []),
     ];
-    let kept = 0;
-    while (kept < open.length && kept < tags.length && open[kept] === tags[kept]) kept++;
-    closeTo(kept);
-    html += '<br>'.repeat(lineBreaks) + tags.slice(kept).join('') + piece.html;
+    writeBreaks(tags);
+    const depth = kept(tags);
+    closeTo(depth);
+    html += tags.slice(depth).join('') + piece.html;
     open = tags;
   });
+  writeBreaks([]);
   closeTo(0);
-  return html + '<br>'.repeat(breaks);
+  return html;
 }
 
 /** A line of a cell's text as HTML, a string for each of its characters.
