@@ -6649,6 +6649,23 @@ describe('HTML around a table in its block', () => {
     expect(markdown).toBe(beforeMd + '+----------+-----+\n| {++XX++} | b   |\n+----------+-----+' + afterMd);
   });
 
+  test.each([
+    ['text', '\nSource:\n2020.\n', 'Source: 2020.'],
+    ['a comment over lines', '\nSource <!-- a\nb --> x\n2020.\n', 'Source <!-- a\nb --> x 2020.'],
+  ])('joins the lines of %s around a table that leaves HTML with spaces where line ends are line breaks', async (_name, afterHtml, text) => {
+    // HTML read each line end as a space, which the next export made a line
+    // break. A comment's are in its hidden run, as ever.
+    const zip = await JSZip.loadAsync((await convertMdToDocx('---\nbreaks: true\n---\n\n<table><tr><td>XX</td><td>b</td></tr></table>' + afterHtml)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const tracked = xml.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>');
+    expect(tracked).not.toBe(xml);
+    zip.file('word/document.xml', tracked);
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(strip(markdown).trimStart()).toBe('+----------+-----+\n| {++XX++} | b   |\n+----------+-----+\n\n' + text + '\n');
+    const again = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    expect(again.slice(again.indexOf('</w:tbl>')).replace(/<w:r><w:rPr><w:vanish\/>[\s\S]*?<\/w:r>/g, '')).not.toContain('<w:br/>');
+  });
+
   test('keeps the end of a comment over lines that an embed\'s line ends before a table that leaves HTML', async () => {
     // The embed's line went, as export would add its table, with the
     // comment's end, and the comment went on over the table

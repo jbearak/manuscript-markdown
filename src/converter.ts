@@ -7039,7 +7039,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
     oneLine = false;
   } else if (oneLine && lines.slice(1).some(line => /[\r\n]/.test(line))
     && (!ends || ends.test(around?.[0] ?? '') || lines.slice(1).some(line => ends.test(line)))) {
-    const before = detachedTableHtml(around?.[0] ?? '');
+    const before = detachedTableHtml(around?.[0] ?? '', renderOpts?.breaks);
     lines[0] = (before ? before + '\n\n' : '') + lines[0].slice((around?.[0] ?? '').length);
     if (before === null) after = '';
   }
@@ -7084,7 +7084,7 @@ function tableHtmlAroundIndex(mapping: Map<string, [string, string, string, stri
   return index;
 }
 
-type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]>; usedTableHtmlAround?: Set<string>; tablesAlike?: Map<string, number>; tablesAlikeRendered?: Map<string, number>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem>; htmlCells?: boolean };
+type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]>; usedTableHtmlAround?: Set<string>; tablesAlike?: Map<string, number>; tablesAlikeRendered?: Map<string, number>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; breaks?: boolean; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem>; htmlCells?: boolean };
 
 /**
  * Try to render a table as a GFM pipe table. Returns null if the table is
@@ -7619,8 +7619,10 @@ const CHARACTER_REFERENCE_AT = /&(?:#\d{1,7}|#[xX][\da-fA-F]{1,6}|[A-Za-z][A-Za-
  *  too, and what it holds as text, which escapeMarkdownChars keeps as a
  *  citation, as export writes one whose key is missing as its text, but
  *  which the HTML held as text. It's a \0 while the rest is escaped, which
- *  no Markdown holds, as markdown-it replaces one. */
-function htmlLinesAsText(lines: string[]): string[] {
+ *  no Markdown holds, as markdown-it replaces one. Where a line end is a
+ *  line break (`breaks`), as with breaks: true, the lines go on one, with a
+ *  space between, as HTML reads a line end, but those in a tag or comment. */
+function htmlLinesAsText(lines: string[], breaks = false): string[] {
   const text = lines.map(line => line.replace(/^[ \t]+|[ \t]+$/g, '')).join('\n');
   // Each of those as a character the lines don't hold while the rest is
   // escaped, so a $ or * pairs across them as Markdown reads it
@@ -7642,6 +7644,7 @@ function htmlLinesAsText(lines: string[]): string[] {
     i = from - 1;
   }
   plain += text.slice(from);
+  if (breaks) plain = plain.replace(/\n/g, ' ');
   // From the right, whether an @ comes before the next ], as looking on
   // from each [ took time in the square of their number
   const chars = plain.split('');
@@ -7789,12 +7792,14 @@ function htmlBlockEnd(lines: string[], k: number, inParagraph: boolean): number 
  *  # Source would be a heading. A comment export would read as a directive,
  *  as <!-- table-font-size: 11 --> or a line of an embed's, which none of
  *  them was in the table's block, goes, but for the text a style's goes
- *  around on its line, and the end of a comment an embed's line is in. Each line reads as it does in what's written, in
- *  order, in which a line of text is a paragraph's, after which a line of
- *  one tag starts no block. Null where it reads no more as it was, as a
- *  block that ends at a marker without one, which would go on over the
- *  table (see detachedHtmlLines), or a paragraph of a Sources line. */
-function detachedTableHtml(html: string): string | undefined | null {
+ *  around on its line, and the end of a comment an embed's line is in.
+ *  Each line reads as it does in what's written, in order, in which a line
+ *  of text is a paragraph's, after which a line of one tag starts no block,
+ *  and a paragraph's lines go on one where a line end is a line break
+ *  (`breaks`). Null where it reads no more as it was, as a block that ends
+ *  at a marker without one, which would go on over the table (see
+ *  detachedHtmlLines), or a paragraph of a Sources line. */
+function detachedTableHtml(html: string, breaks = false): string | undefined | null {
   const lines = withMarkdownCommentEnds(html).split('\n');
   const { inComment, preformatted, unreadable } = detachedHtmlLines(lines);
   if (unreadable) return null;
@@ -7812,7 +7817,7 @@ function detachedTableHtml(html: string): string | undefined | null {
   let unread = false;
   const endTexts = () => {
     if (texts.length === 1 && SOURCES_HEADING_RE.test(unescapeAll(texts[0].replace(/<[^>]*>/g, '').replace(/\\/g, '\\\\')).trim())) sources = true;
-    const text = htmlLinesAsText(texts);
+    const text = htmlLinesAsText(texts, breaks);
     if (texts.length > 1 && !readsAsParagraph(text.join('\n'))) unread = true;
     if (texts.length > 0) out.push(...text);
     texts = [];
@@ -7956,8 +7961,8 @@ function renderTableOrFallback(
   const r = (body: string) => {
     // Neither, where one can't be read as it was, as a <pre> before the
     // table and its end after it
-    let before = around && detachedTableHtml(around[0]);
-    let after = around && detachedTableHtml(around[1]);
+    let before = around && detachedTableHtml(around[0], renderOpts?.breaks);
+    let after = around && detachedTableHtml(around[1], renderOpts?.breaks);
     if (before === null || after === null) before = after = undefined;
     return { directivePrefix: fontPrefix, body, ...(before ? { before } : {}), ...(after ? { after } : {}) };
   };
@@ -8860,7 +8865,7 @@ function joinSpansAtTrackedBreaks(markdown: string, marks: TrackedBreakMarks): s
 export function buildMarkdown(
   content: ContentItem[],
   comments: Map<string, Comment>,
-  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, { label: string; body: ContentItem[]; noteKind: 'footnote' | 'endnote' }>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]> | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string },
+  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, { label: string; body: ContentItem[]; noteKind: 'footnote' | 'endnote' }>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]> | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string; breaks?: boolean },
 ): string {
   let breakMarks: TrackedBreakMarks | undefined;
   const marks = () => breakMarks ??= trackedBreakMarks([content, [...comments.values()], options]);
@@ -9131,6 +9136,7 @@ export function buildMarkdown(
   const renderOpts = {
     alwaysUseCommentIds: options?.alwaysUseCommentIds,
     timezone: options?.timezone,
+    breaks: options?.breaks,
     commentIdRemap,
     forceIdCommentIds,
     emittedIdCommentBodies,
@@ -11470,6 +11476,9 @@ export async function convertDocx(
     tableIndent: options?.tableIndent,
     // Comment dates in the offset the frontmatter will declare, which export reads them in
     timezone: storedSettings?.timezone,
+    // Whether a line end is a line break, as in what the HTML around a
+    // table is written as
+    breaks: storedSettings?.breaks,
     alwaysUseCommentIds: options?.alwaysUseCommentIds,
     pipeTableMaxLineWidth: resolvedPipeTableMaxLineWidth,
     gridTableMaxLineWidth: resolvedGridTableMaxLineWidth,
