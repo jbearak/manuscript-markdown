@@ -11496,6 +11496,41 @@ describe('Frontmatter settings round-trip', () => {
       zip.file('word/styles.xml', styles.replace(/(w:styleId="CodeBlock">[\s\S]*?)Consolas/, '$1Menlo').replace(/(w:styleId="CodeBlock">[\s\S]*?)Consolas/, '$1Menlo'));
     })).toBe('code-font: Menlo');
   });
+
+  // A document from Word, with no stored settings
+  const fromWord = (...paragraphs: [string, string?][]) => buildSyntheticDocx(wrapDocumentXml(paragraphs.map(([text, style]) => '<w:p>'
+    + (style ? '<w:pPr><w:pStyle w:val="' + style + '"/></w:pPr>' : '') + '<w:r><w:t>' + text + '</w:t></w:r></w:p>').join('')));
+  const paragraphStyles = async (docx: Uint8Array) => {
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    return [...xml.matchAll(/<w:pStyle w:val="([^"]+)"/g)].map(m => m[1]);
+  };
+
+  test.each(['Quote', 'IntenseQuote'])('keeps the %s style of a quote from Word', async (style) => {
+    const { markdown } = await convertDocx(await fromWord(['Start.'], ['q', style]));
+    expect(markdown).toBe('---\nblockquote-style: ' + style + '\n---\n\nStart.\n\n> q\n');
+    expect(await paragraphStyles((await convertMdToDocx(markdown)).docx)).toEqual([style]);
+  });
+
+  test('takes the style most quotes from Word are in, the first on a tie, and not an alert\'s', async () => {
+    const frontmatter = async (...paragraphs: [string, string?][]) =>
+      /^---\n([\s\S]*?)\n---/.exec((await convertDocx(await fromWord(...paragraphs))).markdown)?.[1] ?? '';
+    expect(await frontmatter(['a', 'IntenseQuote'], ['b'], ['c', 'Quote'], ['d'], ['e', 'Quote'])).toBe('blockquote-style: Quote');
+    expect(await frontmatter(['a', 'IntenseQuote'], ['b'], ['c', 'Quote'])).toBe('blockquote-style: IntenseQuote');
+    expect(await frontmatter(['a', 'GitHubNote'], ['b', 'GitHubNote'], ['c'], ['d', 'Quote'])).toBe('blockquote-style: Quote');
+  });
+
+  test('adds no blockquote-style for quotes in GitHub\'s style', async () => {
+    expect((await convertDocx(await fromWord(['Start.'], ['q', 'GitHubBlockquote']))).markdown).toBe('Start.\n\n> q\n');
+    expect((await convertDocx((await convertMdToDocx('Start.\n\n> q\n')).docx)).markdown).toBe('Start.\n\n> q\n');
+  });
+
+  test('keeps a stored blockquote-style over the style of the quotes', async () => {
+    expect(await frontmatterOf('---\nblockquote-style: IntenseQuote\n---\n\n> q', async zip => {
+      // As if the quote were restyled in Word
+      const xml = await zip.file('word/document.xml')!.async('string');
+      zip.file('word/document.xml', xml.replace(/w:val="IntenseQuote"/g, 'w:val="Quote"'));
+    })).toBe('blockquote-style: IntenseQuote');
+  });
 });
 
 describe('Links in a tracked change', () => {

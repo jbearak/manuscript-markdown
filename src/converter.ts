@@ -2,7 +2,7 @@ import JSZip from 'jszip';
 import { XMLParser } from 'fast-xml-parser';
 import { asXmlNodes, ommlToLatex, type XmlNode } from './omml';
 import { resolveMarkdownColor } from './highlight-colors';
-import { FRONTMATTER_OPENING_RE, Frontmatter, NotesMode, parseFrontmatter, serializeFrontmatter, noteTypeFromNumber, parseColWidths, type CustomStyleDef } from './frontmatter';
+import { FRONTMATTER_OPENING_RE, Frontmatter, NotesMode, parseFrontmatter, serializeFrontmatter, noteTypeFromNumber, parseColWidths, type BlockquoteStyle, type CustomStyleDef } from './frontmatter';
 import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType } from './gfm';
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
 import { keepParagraphEdgeWhitespace } from './html-entities';
@@ -1170,6 +1170,7 @@ export type ContentItem =
       taskLevel?: number; // 0-based level of an indented paragraph shaped like a bulleted task item (see markTaskListItems)
       generatedListContinuation?: boolean; // explicit Manuscript continuation paragraph style
       blockquoteIndentUnitTwips?: 240 | 720; // base indent unit for blockquote styles
+      blockquoteStyle?: BlockquoteStyle; // Quote, IntenseQuote or GitHub style of a quote that isn't an alert
       emptyParagraphCount?: number; // count of collapsed consecutive empty paragraphs
       indentOverride?: 'indent' | 'no-indent'; // per-paragraph indent override for round-trip
       listBlockStart?: boolean; // the first item of a list block, which a list indent override goes before
@@ -1746,23 +1747,26 @@ function parseParagraphLeftIndentTwips(pPrChildren: XmlNode[]): number | undefin
   return !isNaN(left) && left > 0 ? left : undefined;
 }
 
-function parseBlockquoteInfo(pPrChildren: XmlNode[]): { level?: number; indentUnitTwips?: 240 | 720 } {
+function parseBlockquoteInfo(pPrChildren: XmlNode[]): { level?: number; indentUnitTwips?: 240 | 720; style?: BlockquoteStyle } {
   const pStyleElement = pPrChildren.find(child => child['w:pStyle'] !== undefined);
   if (!pStyleElement) return {};
   const val = getAttr(pStyleElement, 'val').toLowerCase();
   const isAlertStyle = ALERT_STYLE_TO_TYPE[val] !== undefined;
   const isGithubBlockquoteStyle = val === 'github' || val === 'githubblockquote';
   if (val !== 'quote' && val !== 'intensequote' && !isGithubBlockquoteStyle && !isAlertStyle) return {};
+  // The blockquote-style export writes the quote in; an alert has its own
+  const style: BlockquoteStyle | undefined = isAlertStyle ? undefined
+    : isGithubBlockquoteStyle ? 'GitHub' : val === 'quote' ? 'Quote' : 'IntenseQuote';
 
   // Extract left indent to determine nesting level
   const indentUnitTwips: 240 | 720 = (isGithubBlockquoteStyle || isAlertStyle) ? 240 : 720;
   const left = parseParagraphLeftIndentTwips(pPrChildren);
   if (left !== undefined) {
     if (left > 0) {
-      return { level: Math.max(1, Math.round(left / indentUnitTwips)), indentUnitTwips };
+      return { level: Math.max(1, Math.round(left / indentUnitTwips)), indentUnitTwips, style };
     }
   }
-  return { level: 1, indentUnitTwips };
+  return { level: 1, indentUnitTwips, style };
 }
 
 export function parseBlockquoteLevel(pPrChildren: XmlNode[]): number | undefined {
@@ -4833,6 +4837,7 @@ export async function extractDocumentContent(
           let isTitle = false;
           let blockquoteLevel: number | undefined;
           let blockquoteIndentUnitTwips: 240 | 720 | undefined;
+          let blockquoteStyle: BlockquoteStyle | undefined;
           let alertType: GfmAlertType | undefined;
           let isCodeBlock = false;
           let generatedListContinuation = false;
@@ -4912,6 +4917,7 @@ export async function extractDocumentContent(
               const blockquoteInfo = parseBlockquoteInfo(pPrChildren);
               blockquoteLevel = blockquoteInfo.level;
               blockquoteIndentUnitTwips = blockquoteInfo.indentUnitTwips;
+              blockquoteStyle = blockquoteInfo.style;
               alertType = parseAlertType(pPrChildren);
               isCodeBlock = parseCodeBlockStyle(pPrChildren);
               generatedListContinuation = parseListContinuationStyle(pPrChildren);
@@ -4998,6 +5004,7 @@ export async function extractDocumentContent(
             if (isTitle) paraItem.isTitle = true;
             if (blockquoteLevel) paraItem.blockquoteLevel = blockquoteLevel;
             if (blockquoteIndentUnitTwips) paraItem.blockquoteIndentUnitTwips = blockquoteIndentUnitTwips;
+            if (blockquoteStyle) paraItem.blockquoteStyle = blockquoteStyle;
             if (alertType) paraItem.alertType = alertType;
             if (isCodeBlock) paraItem.isCodeBlock = true;
             if (generatedListContinuation) paraItem.generatedListContinuation = true;
@@ -11332,6 +11339,19 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   return result;
 }
 
+/** The style most of the body's quotes are in, the first's on a tie, which
+ *  export writes them all in; GitHub, its default, needs no setting. */
+function inferredBlockquoteStyle(content: ContentItem[]): BlockquoteStyle | undefined {
+  const counts = new Map<BlockquoteStyle, number>();
+  for (const item of content) {
+    if (item.type === 'para' && item.blockquoteStyle) counts.set(item.blockquoteStyle, (counts.get(item.blockquoteStyle) ?? 0) + 1);
+  }
+  // A Map keeps the order the styles first appear in
+  let most: BlockquoteStyle | undefined;
+  for (const [style, count] of counts) if (most === undefined || count > counts.get(most)!) most = style;
+  return most === 'GitHub' ? undefined : most;
+}
+
 export async function convertDocx(
   data: Uint8Array,
   format: CitationKeyFormat = 'authorYearTitle',
@@ -11880,6 +11900,9 @@ export async function convertDocx(
     fm.colors ??= storedSettings.colors;
     fm.breaks ??= storedSettings.breaks;
   }
+  // Without a stored setting, as in a document from Word, the style its
+  // quotes are in, which export would otherwise write as GitHub's
+  fm.blockquoteStyle ??= inferredBlockquoteStyle(docContent);
   const frontmatterStr = serializeFrontmatter(fm, storedFieldOrder ?? undefined);
   if (frontmatterStr) {
     // Restore the original number of blank lines after frontmatter.
