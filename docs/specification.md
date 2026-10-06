@@ -638,7 +638,7 @@ Main text [@smith2020].
 ## Appendix
 ```
 
-In Word, the marker is the bibliography's `ZOTERO_BIBL` field, which is empty when there are no entries to list, as without a `.bib` file or when it has none of the cited keys. DOCX import writes the field back as `<!-- references -->`, before the notes, which export drops and writes again from the citations. A marker at the end of the document, where the bibliography goes anyway, gets no empty field, and import leaves out a marker there.
+In Word, the marker is the bibliography's `ZOTERO_BIBL` field. When there are no entries to list, as without a `.bib` file or when it has none of the cited keys, the field is empty, in a hidden paragraph that takes no space, so Word shows nothing at the marker. DOCX import writes the field back as `<!-- references -->`, before the notes, which export drops and writes again from the citations. A marker at the end of the document, where the bibliography goes anyway, gets no empty field, and import leaves out a marker there.
 
 ### BibTeX Companion File
 

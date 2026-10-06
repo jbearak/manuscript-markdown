@@ -5246,6 +5246,22 @@ describe('bibliography marker', () => {
       // next export would drop the field
       expect(await documentXml((await convertMdToDocx('A.\n\n<!-- references -->')).docx)).not.toContain('ZOTERO_BIBL');
     });
+
+    it('writes the empty field as one hidden paragraph, which Word shows nothing of', async () => {
+      // It was two paragraphs, as around a bibliography's entries, which Word
+      // showed as blank lines where the Markdown has a comment alone
+      const JSZip = (await import('jszip')).default;
+      const { docx } = await convertMdToDocx('A [@a].\n\n<!-- references -->\n\nB.');
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      const paragraphs = xml.match(/<w:p [^>]*>.*?<\/w:p>/g)!.map(paragraph => paragraph.replace(/^<w:p [^>]*>/, ''));
+      expect(paragraphs).toHaveLength(4);
+      expect(paragraphs[1]).toBe(
+        '<w:pPr><w:spacing w:after="0" w:line="1" w:lineRule="exact"/><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr></w:pPr>'
+        + '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+        + '<w:r><w:instrText xml:space="preserve"> ADDIN ZOTERO_BIBL {&quot;uncited&quot;:[],&quot;omitted&quot;:[],&quot;custom&quot;:[]} CSL_BIBLIOGRAPHY </w:instrText></w:r>'
+        + '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>');
+      expect(paragraphs[2]).toContain(note);
+    });
   });
 });
 

@@ -821,6 +821,10 @@ export function generateFallbackText(keys: string[], entries: Map<string, Bibtex
   return '(' + parts.join('; ') + ')';
 }
 
+/** The properties of a paragraph Word shows nothing of: no space, and a
+ *  hidden mark, as of a paragraph of HTML comments alone (see generateParagraph) */
+export const HIDDEN_PARAGRAPH_PPR = '<w:pPr><w:spacing w:after="0" w:line="1" w:lineRule="exact"/><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr></w:pPr>';
+
 /**
  * Generate OOXML for a ZOTERO_BIBL field code with rendered bibliography.
  * Without an engine, the field is empty, and marks the bibliography's place.
@@ -856,11 +860,16 @@ export function generateBibliographyXml(
   // document uses non-single line spacing (the instrText is hidden in normal
   // view but the paragraph break still occupies vertical space).
   const fieldPPr = '<w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>';
-  return '<w:p>' + fieldPPr + '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+  const fieldStart = '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
     '<w:r><w:instrText xml:space="preserve"> ADDIN ZOTERO_BIBL ' + escapeXml(biblPayload) + ' CSL_BIBLIOGRAPHY </w:instrText></w:r>' +
-    '<w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>' +
+    '<w:r><w:fldChar w:fldCharType="separate"/></w:r>';
+  const fieldEnd = '<w:r><w:fldChar w:fldCharType="end"/></w:r>';
+  // With no entries, the field is one hidden paragraph, which Word shows
+  // nothing of, and Zotero's Refresh ignores, as it does any empty bibliography
+  if (!bibParagraphs) return '<w:p>' + HIDDEN_PARAGRAPH_PPR + fieldStart + fieldEnd + '</w:p>';
+  return '<w:p>' + fieldPPr + fieldStart + '</w:p>' +
     bibParagraphs +
-    '<w:p>' + fieldPPr + '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>';
+    '<w:p>' + fieldPPr + fieldEnd + '</w:p>';
 }
 
 /**
