@@ -561,6 +561,13 @@ describe('grid table support for Expand Table and Compact Table', () => {
       .toBe('| h |\n| --- |\n| a b c |');
   });
 
+  it('compactTable keeps an HTML cell of whitespace alone written as references', () => {
+    // The parser decoded it, and the Markdown cell trimmed it. The
+    // whitespace of the HTML's layout stays out.
+    expect(compactTable('<table><tr><th>h</th></tr><tr><td>&#32;&#9;</td></tr></table>').newText).toBe('| h |\n| --- |\n| &#32;&#9; |');
+    expect(compactTable('<table><tr><th>h</th></tr><tr><td> </td></tr></table>').newText).toBe('| h |\n| --- |\n| |');
+  });
+
   it.each([
     ['a line break', '<td>a<br><br></td>'],
     ['a line break at a paragraph\'s end', '<td><p>a<br></p></td>'],
