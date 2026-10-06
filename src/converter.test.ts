@@ -5754,6 +5754,37 @@ describe('Word text that reads as Markdown', () => {
     expect(await roundTrip(md)).toBe(md + '\n');
   });
 
+  test.each([
+    ['split across its runs', ['[@smith', '2020]'], '{--[@smith2020]--}'],
+    ['with a [ in its key', ['[@a[b]'], '{--[@a[b]--}'],
+    ['after a [ of text', ['[x [see @a]'], '{--[x [see @a]--}'],
+  ])('keeps a deleted citation %s a citation', (_name, texts, md) => {
+    // Its keys were read from each run alone, and to a [ in a key
+    const revision = { type: 'deletion' as const, author: 'A', date: '' };
+    const items: ContentItem[] = texts.map(text => ({ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING, revision }));
+    expect(buildMarkdown(items, new Map()).trim()).toBe(md);
+  });
+
+  test('reads the keys of deleted text of many [ in linear time', () => {
+    // Four times the text takes about four times as long, not sixteen
+    const time = (n: number) => {
+      const revision = { type: 'deletion' as const, author: 'A', date: '' };
+      const start = performance.now();
+      buildMarkdown([{ type: 'text', text: '['.repeat(n) + '@a]', commentIds: new Set(), formatting: DEFAULT_FORMATTING, revision }], new Map());
+      return performance.now() - start;
+    };
+    const small = time(20000);
+    expect(time(80000) / small).toBeLessThan(8);
+  });
+
+  test.each([
+    ['in a note, whose missing data export doesn\'t note', 'Text[^1].\n\n[^1]: [@a]', '[^1]: [@a]'],
+    ['after a note of its missing data in the first paragraph', '<!-- references -->\n\n[@a]', '[@a]'],
+  ])('keeps a citation whose key is missing %s a citation', async (_name, md, line) => {
+    // It went escaped, as text of a key export didn't know
+    expect((await roundTrip(md)).split('\n')).toContain(line);
+  });
+
   test('keeps Word\'s text of a citation whose key the bibliography has a citation', async () => {
     // As export writes a deleted citation
     const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\nP XX Q.')).docx);
