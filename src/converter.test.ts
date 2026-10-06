@@ -5401,6 +5401,9 @@ describe('Word text that reads as Markdown', () => {
     'a_https://e.com', '\u00e9https://e.com', '$https://e.com', '`https://e.com', 'x\\hhttps://e.com', 'x\\\\hhttps://e.com',
     // One whose user, long as it is, comes before its host
     'a_https://' + 'u'.repeat(600) + '@example.com/a',
+    // A URL before a tag, raw or written as references, which ends the
+    // text linkify reads, where linkify found none in the text with it
+    'https://e.com1.<span>', 'https://e.com.<b>x</b>', 'a@b.co.<span>',
   ])('keeps %s in a paragraph as text', async (text) => {
     // Import wrote Word's text as it was, and export read it as Markdown:
     // emphasis, code, a link, math, a tracked change, a comment, a
