@@ -449,6 +449,49 @@ describe('a template\'s headers and footers', () => {
   });
 });
 
+/** Each section's pgNumType, which goes between its pgMar and its cols, or '' */
+async function pageNumbering(docx: Uint8Array): Promise<string[]> {
+  const xml = (await textOf(await JSZip.loadAsync(docx), 'word/document.xml'))!;
+  return [...xml.matchAll(/<w:sectPr\b[\s\S]*?<\/w:sectPr>/g)].map(([sectPr]) => {
+    const pgNumType = /<w:pgNumType\b[^>]*>/.exec(sectPr)?.[0] ?? '';
+    return !pgNumType || /<w:pgMar\b[^>]*\/><w:pgNumType\b[^>]*\/><w:cols\b/.test(sectPr) ? pgNumType : 'out of place: ' + pgNumType;
+  });
+}
+
+describe('a template\'s page numbering', () => {
+  /** A template whose sections' page numbering is `pgNumType` */
+  const numberedTemplate = async (pgNumType: string) =>
+    editTemplate(await headerTemplate(), 'word/document.xml', xml => xml.replace('<w:cols ', pgNumType + '<w:cols '));
+
+  it('counts on through the sections export adds, which take its format, from the start the first section takes', async () => {
+    const format = 'w:fmt="lowerRoman" w:chapStyle="1" w:chapSep="emDash"';
+    for (const [pgNumType, first, others] of [
+      // The footer's PAGE field showed 1, 2 and 1, which the last section's restart gave
+      ['<w:pgNumType w:start="1"/>', '<w:pgNumType w:start="1"/>', ''],
+      ['<w:pgNumType ' + format.replace(' ', ' w:start="3" ') + '/>', '<w:pgNumType ' + format.replace(' ', ' w:start="3" ') + '/>', '<w:pgNumType ' + format + '/>'],
+    ]) {
+      const templateDocx = await numberedTemplate(pgNumType);
+      const word1 = (await convertMdToDocx(LANDSCAPE_MD, { templateDocx })).docx;
+      expect(await packageProblems(word1)).toEqual([]);
+      expect(await pageNumbering(word1)).toEqual([first, others, others]);
+      // A document of one section keeps the start in it
+      expect(await pageNumbering((await convertMdToDocx('Hello', { templateDocx })).docx)).toEqual([first]);
+      // And so does the next export, whose template has the start in its first section
+      expect(await pageNumbering((await convertMdToDocx('Hello', { templateDocx: word1 })).docx)).toEqual([first]);
+      const md1 = (await convertDocx(word1)).markdown;
+      const word2 = (await convertMdToDocx(md1, { templateDocx: word1 })).docx;
+      expect(await pageNumbering(word2)).toEqual(await pageNumbering(word1));
+    }
+  });
+
+  it('starts where the template\'s last section does, if its first section doesn\'t say', async () => {
+    const templateDocx = await editTemplate(await headerTemplate({ landscapeLast: true }), 'word/document.xml',
+      xml => xml.replace(/(<w:cols [^>]*\/><w:docGrid [^>]*\/><\/w:sectPr><\/w:body>)/, '<w:pgNumType w:fmt="upperLetter" w:start="5"/>$1'));
+    const { docx } = await convertMdToDocx(LANDSCAPE_MD, { templateDocx });
+    expect(await pageNumbering(docx)).toEqual(['<w:pgNumType w:fmt="upperLetter" w:start="5"/>', '<w:pgNumType w:fmt="upperLetter"/>', '<w:pgNumType w:fmt="upperLetter"/>']);
+  });
+});
+
 /** Markdown without its frontmatter */
 const body = (markdown: string) => markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
 /** An instance's abstract numbering's first level's format */

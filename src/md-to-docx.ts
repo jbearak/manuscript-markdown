@@ -22,7 +22,7 @@ import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
 import { extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
 import { matchCriticHeadingPrefix } from './critic-markup';
-import { readTemplateSections, withSectionHeaders, addTemplateSectionParts, decodeXml, asUtf8, type TemplateSections } from './template-sections';
+import { readTemplateSections, withTemplateSection, addTemplateSectionParts, decodeXml, asUtf8, type TemplateSections } from './template-sections';
 export { preprocessGridTables } from './grid-table-preprocess';
 export { extractHtmlTables } from './html-table-parser';
 
@@ -4008,20 +4008,21 @@ function landscapeSectPrXml(pgSz: PageSize, margins: string, rsid?: string): str
     '<w:cols w:space="720"/></w:sectPr>';
 }
 
-/** A sectPr with the template's headers and footers, if it is the first
- *  written: the sections after it take them from it */
-function withTemplateHeaders(sectPr: string, state: DocxGenState): string {
-  const headers = state.sectionHeaders;
-  if (!headers) return sectPr;
-  state.sectionHeaders = undefined;
-  return withSectionHeaders(sectPr, headers.references, headers.titlePg);
+/** A sectPr with the template's page number format, and, if it is the
+ *  first written, its page number start, headers and footers: the sections
+ *  after it take them from it */
+function withTemplateSectPr(sectPr: string, state: DocxGenState): string {
+  if (!state.templateSections) return sectPr;
+  const first = !state.wroteSectPr;
+  state.wroteSectPr = true;
+  return withTemplateSection(sectPr, state.templateSections, first);
 }
 
 /** Build the final body-level sectPr (no <w:type>, direct child of <w:body>). */
 function bodyClosingSectPrXml(pgSz: PageSize, margins: string, templateSectPr?: string, rsid?: string): string {
   // If we have a template sectPr, reuse it as-is to preserve any additional
-  // properties (columns, etc.). It comes without its headers and footers,
-  // which the first sectPr written takes (see withTemplateHeaders)
+  // properties (columns, etc.). It comes without its headers, footers and
+  // page numbering, which withTemplateSectPr gives it
   if (templateSectPr) return templateSectPr;
   return '<w:sectPr' + (rsid ? ' w:rsidR="' + rsid + '"' : '') + '><w:pgSz w:w="' + pgSz.w + '" w:h="' + pgSz.h + '"/>' +
     '<w:pgMar ' + margins + '/>' +
@@ -4097,7 +4098,8 @@ export interface DocxGenState {
   sectionBreakOrdinal: number;  // counter for paragraph-level sectPr emissions (for portrait round-trip)
   portraitBreakOrdinals: Set<number>; // ordinals of portrait-fence close section breaks
   templateSectPr?: string;      // trailing <w:sectPr> from template document.xml
-  sectionHeaders?: { references: string; titlePg: boolean }; // the template's, for the first sectPr written, which takes them
+  templateSections?: TemplateSections; // the template's, whose headers, footers and page numbering the sectPrs written take
+  wroteSectPr?: boolean; // whether a sectPr was written, after which none starts the document
   pipeTableAligned: Map<number, boolean>; // table index -> whether pipe table was column-aligned
   gridSourceColWidths: Map<number, number[]>; // table index -> original grid table column char-widths
   sentinelGaps: Record<string, number>; // before-gap for landscape/portrait sentinels (e.g. "pc0" → blankLinesBefore for first portrait_close)
@@ -7960,11 +7962,11 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
 
   // Helper: emit a portrait section break paragraph and increment ordinal
   function emitPortraitBreak(): void {
-    body += '<w:p><w:pPr>' + withTemplateHeaders(portraitSectPrXml(pgSz, margins, state.rsid), state) + '</w:pPr></w:p>';
+    body += '<w:p><w:pPr>' + withTemplateSectPr(portraitSectPrXml(pgSz, margins, state.rsid), state) + '</w:pPr></w:p>';
     state.sectionBreakOrdinal++;
   }
   function emitLandscapeBreak(): void {
-    body += '<w:p><w:pPr>' + withTemplateHeaders(landscapeSectPrXml(pgSz, margins, state.rsid), state) + '</w:pPr></w:p>';
+    body += '<w:p><w:pPr>' + withTemplateSectPr(landscapeSectPrXml(pgSz, margins, state.rsid), state) + '</w:pPr></w:p>';
     state.sectionBreakOrdinal++;
   }
 
@@ -8243,7 +8245,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   state.sentinelGaps = sentinelGaps;
 
   // Append body-closing sectPr (preserves template page layout)
-  const closingSectPr = withTemplateHeaders(bodyClosingSectPrXml(pgSz, margins, state.templateSectPr, state.rsid), state);
+  const closingSectPr = withTemplateSectPr(bodyClosingSectPrXml(pgSz, margins, state.templateSectPr, state.rsid), state);
 
   return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
     '<w:document xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wpi="http://schemas.microsoft.com/office/word/2010/wordprocessingInk" xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" mc:Ignorable="w14 w15 wp14">\n' +
@@ -8595,7 +8597,7 @@ export async function convertMdToDocx(
     sectionBreakOrdinal: 0,
     portraitBreakOrdinals: new Set(),
     templateSectPr: templateSections?.sectPr,
-    sectionHeaders: templateSections && { references: templateSections.references, titlePg: templateSections.titlePg },
+    templateSections,
     sentinelGaps: {},
     customStyles: frontmatter.styles,
     activeListStartOverrides: new Map(),

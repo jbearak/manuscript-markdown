@@ -20,6 +20,12 @@
 //   the template's first section's, whose first page is the document's. So
 //   a previous export, whose first section holds the references, gives back
 //   the same ones.
+// - Each section export writes takes the page number format of the
+//   template's last section, and only the first takes its start, the
+//   template's first section's or else its last's. A start in a later
+//   section would number that section's pages over, so the template's
+//   trailing sectPr goes without its pgNumType, which each sectPr gets in
+//   its schema place.
 // - A reference goes if the template lacks its relationship or part, or
 //   its relationship is of another type. Kept, it would name nothing, or a
 //   part export writes for something else.
@@ -74,12 +80,15 @@ export interface TemplateRelationship {
 }
 
 export interface TemplateSections {
-  /** The template's trailing sectPr without its header and footer references
-   *  or title page setting, its other relationship IDs renumbered */
+  /** The template's trailing sectPr without its header and footer references,
+   *  title page setting or page numbering, its other relationship IDs renumbered */
   sectPr?: string;
   /** The references the export's first section takes, with IDs from rId1 */
   references: string;
   titlePg: boolean;
+  /** The pgNumType the export's first section takes, and the one its other
+   *  sections take, which has no start, or '' for none */
+  pgNumType: { first: string; others: string };
   /** The template's settings show different headers on even pages */
   evenAndOddHeaders: boolean;
   /** document.xml's relationships rId1 to rIdN */
@@ -274,7 +283,7 @@ const DOC_PR_ID = /(<wp:docPr\b[^>]*?\sid\s*=\s*)(["'])\d+\2/g;
 /** A template's headers and footers, the parts they name, and its trailing
  *  sectPr, and the parts its numbering names */
 export async function readTemplateSections(zip: JSZip): Promise<TemplateSections> {
-  const result: TemplateSections = { references: '', titlePg: false, evenAndOddHeaders: false, relationships: [], parts: new Map(), numIds: new Set(), customProperties: [] };
+  const result: TemplateSections = { references: '', titlePg: false, pgNumType: { first: '', others: '' }, evenAndOddHeaders: false, relationships: [], parts: new Map(), numIds: new Set(), customProperties: [] };
   const shownProperties = new Set<string>();
   const read = async (path: string) => {
     const file = zip.file(path);
@@ -353,12 +362,27 @@ export async function readTemplateSections(zip: JSZip): Promise<TemplateSections
     }
     result.titlePg = !!sectPrs[0] && childrenOf(sectPrs[0]).some(node => nameOf(node) === 'w:titlePg' && isOn(node[':@']?.['@_w:val']));
 
+    // The page number format of the last section, as its numerals, which
+    // each section export writes takes, and the start, which only the first
+    // takes, so that the pages count on through the sections export adds.
+    // The start is the first section's, whose first page is the document's,
+    // as a previous export writes it, or else the last's.
+    const pageNumbersOf = (sectPr: XmlNode | undefined) => sectPr && childrenOf(sectPr).find(node => nameOf(node) === 'w:pgNumType')?.[':@'];
+    const { '@_w:start': lastStart, ...format } = pageNumbersOf(last) ?? {};
+    const start = pageNumbersOf(sectPrs[0])?.['@_w:start'] ?? lastStart;
+    const pgNumType = (attributes: Record<string, string>) => Object.keys(attributes).length === 0 ? '' : builder.build([{ 'w:pgNumType': [], ':@': attributes }]) as string;
+    // Its attributes in the schema's order, which Word writes: fmt, start, chapStyle, chapSep
+    result.pgNumType = {
+      first: pgNumType({ ...(format['@_w:fmt'] === undefined ? {} : { '@_w:fmt': format['@_w:fmt'] }), ...(start === undefined ? {} : { '@_w:start': start }), ...format }),
+      others: pgNumType(format),
+    };
+
     // The trailing sectPr, whose other relationships, as its printer
     // settings', get their IDs, or go with what names them
     const kept: XmlNode[] = [];
     for (const node of childrenOf(last)) {
       const name = nameOf(node);
-      if (name === 'w:headerReference' || name === 'w:footerReference' || name === 'w:titlePg') continue;
+      if (name === 'w:headerReference' || name === 'w:footerReference' || name === 'w:titlePg' || name === 'w:pgNumType') continue;
       const templateId = node[':@']?.['@_r:id'];
       const id = templateId === undefined ? undefined : await idFor(templateId);
       if (templateId === undefined) kept.push(node);
@@ -387,25 +411,35 @@ export async function readTemplateSections(zip: JSZip): Promise<TemplateSections
   return result;
 }
 
+/** sectPr's children after pgNumType, which pgNumType goes before, in CT_SectPr's order (ECMA-376) */
+const AFTER_PG_NUM_TYPE = /<w:(?:cols|formProt|vAlign|noEndnote|titlePg|textDirection|bidi|rtlGutter|docGrid|printerSettings|sectPrChange)(?=[\s/>])/;
 /** sectPr's children after titlePg, which titlePg goes before */
 const AFTER_TITLE_PG = /<w:(?:textDirection|bidi|rtlGutter|docGrid|printerSettings|sectPrChange)\b/;
 
-/** A sectPr export writes, with the template's header and footer references and title page setting */
-export function withSectionHeaders(sectPr: string, references: string, titlePg: boolean): string {
-  if (!references && !titlePg) return sectPr;
+/** A sectPr with `element` among its own children, before the first that
+ *  `before` finds, or after them, and before a tracked change to them */
+function withChild(sectPr: string, element: string, before: RegExp): string {
   const open = /^<w:sectPr\b[^>]*?(\/?)>/.exec(sectPr);
-  if (!open) return sectPr;
-  let xml = open[1] ? open[0].slice(0, -2) + '>' + '</w:sectPr>' : sectPr;
-  const openEnd = open[1] ? open[0].length - 1 : open[0].length;
-  xml = xml.slice(0, openEnd) + references + xml.slice(openEnd);
-  if (titlePg) {
-    const change = xml.indexOf('<w:sectPrChange');
-    const own = change < 0 ? xml : xml.slice(0, change);
-    const after = AFTER_TITLE_PG.exec(own);
-    const at = after ? after.index : change < 0 ? own.lastIndexOf('</w:sectPr>') : change;
-    xml = xml.slice(0, at) + '<w:titlePg/>' + xml.slice(at);
-  }
-  return xml;
+  if (!open || !element) return sectPr;
+  const xml = open[1] ? open[0].slice(0, -2) + '>' + '</w:sectPr>' : sectPr;
+  const start = open[1] ? open[0].length - 1 : open[0].length;
+  const change = xml.indexOf('<w:sectPrChange', start);
+  const own = xml.slice(start, change < 0 ? xml.lastIndexOf('</w:sectPr>') : change);
+  const at = start + (before.exec(own)?.index ?? own.length);
+  return xml.slice(0, at) + element + xml.slice(at);
+}
+
+/**
+ * A sectPr export writes, with the template's page number format, and, if
+ * it is the document's first section, the start of its page numbers, its
+ * header and footer references and its title page setting. The sections
+ * after the first take its headers and footers and count its pages on.
+ */
+export function withTemplateSection(sectPr: string, sections: TemplateSections, first: boolean): string {
+  sectPr = withChild(sectPr, first ? sections.pgNumType.first : sections.pgNumType.others, AFTER_PG_NUM_TYPE);
+  if (!first) return sectPr;
+  sectPr = withChild(sectPr, sections.references, /^/);
+  return sections.titlePg ? withChild(sectPr, '<w:titlePg/>', AFTER_TITLE_PG) : sectPr;
 }
 
 /**
