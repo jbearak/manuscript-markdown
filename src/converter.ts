@@ -7427,13 +7427,19 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
  *  HTML collapses a run of spaces and drops those at a line's start, so a
  *  space after another, or at the start of a line with text, is a reference,
  *  as is a tab or no-break space. A line of spaces alone is empty, as a
- *  paragraph is (see keepParagraphEdgeWhitespace). */
+ *  paragraph is (see keepParagraphEdgeWhitespace). The > and < of the {>>,
+ *  <<} and ~> of CriticMarkup, which export reads as text there, as no tag
+ *  starts with them, stay as they are, so the editor and navigation read a
+ *  comment or a substitution's sides there as they do the rest of its
+ *  CriticMarkup. */
 function htmlLineCharacters(line: string): string[] {
   if (!/[^ ]/.test(line)) return line.split('');
   const lead = /^[ \t\u00a0]*/.exec(line)![0].length;
-  return line.split('').map((c, i) => c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;'
-    : c === '\t' ? '&#9;' : c === '\u00a0' ? '&nbsp;'
-      : c === ' ' && (i < lead || line[i - 1] === ' ') ? '&#32;' : c);
+  return line.split('').map((c, i) => c === '&' ? '&amp;'
+    : c === '<' ? (line.startsWith('<}', i + 1) || line[i - 1] === '<' && line[i + 1] === '}' ? c : '&lt;')
+      : c === '>' ? (line[i - 1] === '~' || line[i - 1] === '{' && line[i + 1] === '>' || line.startsWith('{>', i - 2) ? c : '&gt;')
+        : c === '\t' ? '&#9;' : c === '\u00a0' ? '&nbsp;'
+          : c === ' ' && (i < lead || line[i - 1] === ' ') ? '&#32;' : c);
 }
 
 /** An equation in an HTML table's cell as a run of its Markdown, which the
