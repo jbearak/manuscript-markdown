@@ -10310,6 +10310,24 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
   return joined;
 }
 
+/** Whether `text` before `at` ends with the closer of a tracked break's
+ *  span, as joinSpansAtTrackedBreaks finds one, after the break's end mark,
+ *  or a break alone and the line prefixes after it, a list item's indent's
+ *  mark too, which it takes for one */
+function afterTrackedBreakSpan(text: string, at: number, marks: TrackedBreakMarks): boolean {
+  const closer = text.slice(at - 3, at);
+  if (closer !== '--}' && closer !== '++}') return false;
+  let k = at - 3;
+  if (text[k - 1] === marks.end) return true;
+  const prefix = (ch: string | undefined) => ch === '>' || ch === ' ' || ch === '\t' || ch === marks.indent;
+  for (let line = 0; line < 2; line++) {
+    while (k > 0 && prefix(text[k - 1])) k--;
+    if (text[k - 1] !== '\n') return false;
+    k--;
+  }
+  return text[k - 1] === marks.alone;
+}
+
 /** Markdown with each tracked break from joinTrackedParagraphBreaks inside
  *  the spans before and after it, as in {++**a**\n\nmore++} rather than
  *  {++**a**++}{++\n\n++}{++more++}, and the spaces and tabs the span has at
@@ -10385,6 +10403,24 @@ export function buildMarkdown(
   const marks = () => {
     if (!breakMarks) trackedBreakStart = (breakMarks = trackedBreakMarks([content, [...comments.values()], options])).start;
     return breakMarks;
+  };
+  // A paragraph's text without the spaces and tabs at its end, which Word
+  // shows nothing for (see keepParagraphEdgeWhitespace) and Markdown drops,
+  // and two of which before a line that goes on, as a comment's body in ID
+  // syntax does, make a line break. A backslash before them, which was
+  // text, is escaped, as it would make one too. Those after a tracked
+  // break's span stay, as the text of the paragraph after it, which
+  // joinSpansAtTrackedBreaks writes as references, and so do those of an
+  // HTML block, which keeps them and its backslashes as they are, as one
+  // the text starts with or one a line of it after a line break starts.
+  const withoutEndSpaces = (text: string): string => {
+    let space = text.length;
+    while (space > 0 && (text[space - 1] === ' ' || text[space - 1] === '\t')) space--;
+    if (space === text.length || (breakMarks && afterTrackedBreakSpan(text, space, breakMarks))
+        || (text.includes('<') && isInsideCodeRegion(Math.max(space - 1, 0), computeMarkdownRegions(text, { includeCode: false, html: 'all' }).htmlRegions))) return text;
+    let slashes = 0;
+    while (slashes < space && text[space - 1 - slashes] === '\\') slashes++;
+    return text.slice(0, space) + (slashes % 2 === 1 ? '\\' : '');
   };
   // The width of the marker of the open list item at each level, which the
   // items and paragraphs under it indent by
@@ -11911,6 +11947,7 @@ export function buildMarkdown(
       : htmlIndent && startsHtmlBlock(' '.repeat(indentColumns) + textOut.slice(htmlIndent.length)) && !inline()
         ? htmlIndent + keepParagraphWhitespace(textOut.slice(htmlIndent.length), true, atEnd)
         : referenced;
+    if (atEnd && !isInParagraphMath(next)) textOut = withoutEndSpaces(textOut);
     // Track standalone HTML comment paragraphs for gap metadata and keep the
     // blank lines a para item wrote before them, where export reads what
     // import wrote as one: a block that starts and ends with a comment, as
@@ -12111,7 +12148,8 @@ export function buildMarkdown(
           .replace(HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END, (_m, backslashes: string, close: string) => backslashes + '<br>' + close);
         const atStart = partStart === 0 || isMarkdownBlockEdge(bodyMerged[partStart - 1]);
         return beforeMath && /^[ \t]* $/.test(broken) ? keepParagraphWhitespace(broken.slice(0, -1), atStart, true) + ' '
-          : keepParagraphWhitespace(broken, atStart, true);
+          : beforeMath ? keepParagraphWhitespace(broken, atStart, true)
+            : withoutEndSpaces(keepParagraphWhitespace(broken, atStart, true));
       };
       // The part that holds the paragraph's text and display math so far,
       // which an equation in the paragraph goes on in, on the next line, and
