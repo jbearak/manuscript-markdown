@@ -22,7 +22,7 @@ import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
 import { extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
 import { matchCriticHeadingPrefix } from './critic-markup';
-import { readTemplateSections, withSectionHeaders, addTemplateSectionParts, type TemplateSections } from './template-sections';
+import { readTemplateSections, withSectionHeaders, addTemplateSectionParts, decodeXml, asUtf8, type TemplateSections } from './template-sections';
 export { preprocessGridTables } from './grid-table-preprocess';
 export { extractHtmlTables } from './html-table-parser';
 
@@ -5337,7 +5337,7 @@ function parseTemplateNumbering(xml: string): { root: OrderedXmlNode; nums: Orde
 function templateNumIdsInUse(templateStyles?: Uint8Array, headerNumIds: Iterable<number> = []): Set<number> {
   const used = new Set([1, 2, ...headerNumIds]);
   if (!templateStyles) return used;
-  const styles = new TextDecoder('utf-8').decode(templateStyles);
+  const styles = decodeXml(templateStyles);
   for (const m of styles.matchAll(/<w:numId\b[^>]*?\bw:val\s*=\s*["'](\d+)["']/g)) used.add(parseInt(m[1], 10));
   return used;
 }
@@ -5398,43 +5398,69 @@ function withNumberingOverrides(xml: string, startOverrides: NumberingOverride[]
   return xml.slice(0, at) + startOverrides.map(o => numberingOverrideXml(o, String(abstractNumId), durableId, levelOverrides)).join('') + xml.slice(at);
 }
 
-function numberingXml(startOverrides?: NumberingOverride[]): string {
-  // Generate random identifiers that Word expects on numbering definitions.
-  // Without these, Word adds them on open, marking the document as modified.
-  function lvlsWithTplc(lvls: string[]): string {
-    return lvls.map((lvl, i) => {
-      const tplc = randomHex8();
-      return lvl.replace('<w:lvl w:ilvl="' + i + '">', '<w:lvl w:ilvl="' + i + '" w:tplc="' + tplc + '">');
-    }).join('\n');
+/** Level definitions with the random identifiers Word expects on them.
+ *  Without these, Word adds them on open, marking the document as modified. */
+function lvlsWithTplc(lvls: string[]): string {
+  return lvls.map((lvl, i) => {
+    const tplc = randomHex8();
+    return lvl.replace('<w:lvl w:ilvl="' + i + '">', '<w:lvl w:ilvl="' + i + '" w:tplc="' + tplc + '">');
+  }).join('\n');
+}
+
+/** Export's abstract numbering for bullets or numbers, at `abstractNumId`.
+ *  `w15` says whether the part declares the namespace of its attribute. */
+function defaultAbstractNumXml(kind: 'bullet' | 'decimal', abstractNumId: number, w15 = true): string {
+  const lvls = Array.from({length: 9}, (_, i) => {
+    const indent = (i + 1) * 720;
+    const format = kind === 'bullet' ? '<w:numFmt w:val="bullet"/><w:lvlText w:val="•"/>' : '<w:numFmt w:val="decimal"/><w:lvlText w:val="%' + (i + 1) + '."/>';
+    return '<w:lvl w:ilvl="' + i + '"><w:start w:val="1"/>' + format + '<w:lvlJc w:val="left"/><w:pPr><w:ind w:left="' + indent + '" w:hanging="360"/></w:pPr></w:lvl>';
+  });
+  return '<w:abstractNum w:abstractNumId="' + abstractNumId + '"' + (w15 ? ' w15:restartNumberingAfterBreak="0"' : '') + '>\n' +
+    '<w:nsid w:val="' + randomHex8() + '"/>\n' +
+    '<w:multiLevelType w:val="hybridMultilevel"/>\n' +
+    '<w:tmpl w:val="' + randomHex8() + '"/>\n' +
+    lvlsWithTplc(lvls) + '\n' +
+    '</w:abstractNum>\n';
+}
+
+/**
+ * A template's numbering with export's bullets and numbers, numIds 1 and 2,
+ * where it lacks them, so that its own definitions, which its headers and
+ * styles can use, stay
+ */
+function withDefaultNums(xml: string): string {
+  const numbering = parseTemplateNumbering(xml);
+  if (!numbering) return xml;
+  const present = new Set(numbering.nums.map(n => intAttr(n, 'w:numId')));
+  const missing = [1, 2].filter(numId => !present.has(numId));
+  if (missing.length === 0) return xml;
+  const abstractNumIds = childNodes(numbering.root, 'w:numbering').filter(n => 'w:abstractNum' in n).map(n => intAttr(n, 'w:abstractNumId'));
+  let next = Math.max(-1, ...abstractNumIds.filter(Number.isInteger)) + 1;
+  const declares = (prefix: string) => numbering.root[':@']?.['@_xmlns:' + prefix] !== undefined;
+  let abstractNums = '', nums = '';
+  for (const numId of missing) {
+    abstractNums += defaultAbstractNumXml(numId === 1 ? 'bullet' : 'decimal', next, declares('w15'));
+    nums += '<w:num w:numId="' + numId + '"' + (declares('w16cid') ? ' w16cid:durableId="' + Math.floor(Math.random() * 2000000000) + '"' : '') +
+      '><w:abstractNumId w:val="' + next + '"/></w:num>\n';
+    next++;
   }
+  // Abstract numbering goes before the instances, which go before
+  // numIdMacAtCleanup, which ends the part
+  const end = /<w:numIdMacAtCleanup\b/.exec(xml)?.index ?? [...xml.matchAll(/<\/w:numbering\s*>/g)].pop()?.index;
+  const lastAbstract = [...xml.matchAll(/<\/w:abstractNum\s*>\s*/g)].pop();
+  const abstractAt = lastAbstract ? lastAbstract.index! + lastAbstract[0].length : /<w:num\b/.exec(xml)?.index ?? end;
+  if (end === undefined || abstractAt === undefined) return xml;
+  return xml.slice(0, abstractAt) + abstractNums + xml.slice(abstractAt, end) + nums + xml.slice(end);
+}
 
-  const bulletLvls = Array.from({length: 9}, (_, i) => {
-    const indent = (i + 1) * 720;
-    return '<w:lvl w:ilvl="' + i + '"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="' + indent + '" w:hanging="360"/></w:pPr></w:lvl>';
-  });
-
-  const decimalLvls = Array.from({length: 9}, (_, i) => {
-    const indent = (i + 1) * 720;
-    return '<w:lvl w:ilvl="' + i + '"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%' + (i + 1) + '."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="' + indent + '" w:hanging="360"/></w:pPr></w:lvl>';
-  });
-
+function numberingXml(startOverrides?: NumberingOverride[]): string {
   const durableId1 = Math.floor(Math.random() * 2000000000);
   const durableId2 = Math.floor(Math.random() * 2000000000);
 
   return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
     '<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:w16cid="http://schemas.microsoft.com/office/word/2016/wordml/cid" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="w15 w16cid">\n' +
-    '<w:abstractNum w:abstractNumId="0" w15:restartNumberingAfterBreak="0">\n' +
-    '<w:nsid w:val="' + randomHex8() + '"/>\n' +
-    '<w:multiLevelType w:val="hybridMultilevel"/>\n' +
-    '<w:tmpl w:val="' + randomHex8() + '"/>\n' +
-    lvlsWithTplc(bulletLvls) + '\n' +
-    '</w:abstractNum>\n' +
-    '<w:abstractNum w:abstractNumId="1" w15:restartNumberingAfterBreak="0">\n' +
-    '<w:nsid w:val="' + randomHex8() + '"/>\n' +
-    '<w:multiLevelType w:val="hybridMultilevel"/>\n' +
-    '<w:tmpl w:val="' + randomHex8() + '"/>\n' +
-    lvlsWithTplc(decimalLvls) + '\n' +
-    '</w:abstractNum>\n' +
+    defaultAbstractNumXml('bullet', 0) +
+    defaultAbstractNumXml('decimal', 1) +
     '<w:num w:numId="1" w16cid:durableId="' + durableId1 + '"><w:abstractNumId w:val="0"/></w:num>\n' +
     '<w:num w:numId="2" w16cid:durableId="' + durableId2 + '"><w:abstractNumId w:val="1"/></w:num>\n' +
     // Emit extra w:num entries for ordered lists with their own start
@@ -8798,9 +8824,10 @@ export async function convertMdToDocx(
   // Word requires both footnotes.xml and endnotes.xml whenever either is present.
   const hasNotes = state.hasFootnotes || state.hasEndnotes;
 
-  // The template's numbering, for the lists of its headers and footers,
-  // goes with them, though the Markdown has no list
-  const hasNumbering = state.hasList || !!(templateParts?.has('word/numbering.xml') && templateSections?.numIds.size);
+  // The template's numbering goes with its headers and footers, whose
+  // lists, directly or through their styles, can use it, though the
+  // Markdown has no list
+  const hasNumbering = state.hasList || !!(templateParts?.has('word/numbering.xml') && templateSections?.references);
 
   // Dirty-flag invariant #6: rIds must be sequential with no gaps.
   // rIdOffset reserved max slots for optional rels; now that all hasX flags are known,
@@ -8889,21 +8916,19 @@ export async function convertMdToDocx(
   zip.file('word/fontTable.xml', fontTableXml());
 
   // Handle numbering - use template as base but ensure bullet/decimal definitions exist.
-  // Start overrides join the template's numbering as instances of the
-  // abstract numbering its numId 2 uses. A template without one gets fresh
-  // numbering, which discards its custom list formats.
+  // Export's bullets and numbers join a template's numbering that lacks
+  // them, and start overrides join it as instances of the abstract
+  // numbering its numId 2 uses. Only a template without numbering, or with
+  // numbering that doesn't parse, gets fresh numbering.
+  let numberingFromTemplate = false;
   if (hasNumbering) {
     const templateNumbering = templateParts?.get('word/numbering.xml');
-    const used = templateNumbering && withoutUnusedNums(new TextDecoder('utf-8').decode(templateNumbering),
+    const used = templateNumbering && withoutUnusedNums(decodeXml(templateNumbering),
       templateNumIdsInUse(templateParts?.get('word/styles.xml'), templateSections?.numIds));
-    const merged = used && withNumberingOverrides(used, state.listStartOverrides);
-    if (used && state.listStartOverrides.length === 0) {
-      zip.file('word/numbering.xml', used);
-    } else if (merged) {
-      zip.file('word/numbering.xml', merged);
-    } else {
-      zip.file('word/numbering.xml', numberingXml(state.listStartOverrides));
-    }
+    const complete = used && (state.hasList ? withDefaultNums(used) : used);
+    const numbering = complete && (state.listStartOverrides.length === 0 ? complete : withNumberingOverrides(complete, state.listStartOverrides));
+    numberingFromTemplate = !!numbering;
+    zip.file('word/numbering.xml', numbering ? asUtf8(numbering) : numberingXml(state.listStartOverrides));
   }
 
   // Include theme: template theme if available, otherwise default
@@ -9043,7 +9068,7 @@ export async function convertMdToDocx(
     const ct = getImageContentType(ext);
     if (ct) extensionTypes.set(ext.toLowerCase(), ct);
   }
-  const templateCopy = templateSections && addTemplateSectionParts(zip, templateSections, state.nextImageDocPrId, extensionTypes);
+  const templateCopy = templateSections && addTemplateSectionParts(zip, templateSections, state.nextImageDocPrId, extensionTypes, numberingFromTemplate);
 
   zip.file('[Content_Types].xml', contentTypesXml({
     hasList: hasNumbering,

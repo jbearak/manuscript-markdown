@@ -12,8 +12,9 @@ const WML = 'application/vnd.openxmlformats-officedocument.wordprocessingml.';
 const NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="' + REL.slice(0, -1) + '" ' +
   'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
   'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"';
-// A 1x1 PNG
+// A 1x1 PNG, and another, a picture bullet's
 const PNG = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='), c => c.charCodeAt(0));
+const BULLET = new Uint8Array([...PNG, 1, 2]);
 const LANDSCAPE_MD = 'Intro\n\n<!-- landscape -->\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n<!-- /landscape -->\n\nAfter';
 
 const para = (text: string, style: string) => '<w:p><w:pPr><w:pStyle w:val="' + style + '"/></w:pPr><w:r><w:t>' + text + '</w:t></w:r></w:p>';
@@ -30,9 +31,11 @@ const pageField = '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrTex
  * the headers' among the IDs export gives its own parts. `landscapeLast`
  * adds a landscape section, the last, with its own default header and footer.
  * `headerList` numbers the even header's paragraph with the template's
- * numId 3, which nothing else uses.
+ * numId 3, which nothing else uses, directly or through its style, a style
+ * based on one that numbers. `pictureBullet` bullets that list with an
+ * image the numbering names.
  */
-async function headerTemplate(opts: { shuffled?: boolean; landscapeLast?: boolean; headerList?: boolean } = {}): Promise<Uint8Array> {
+async function headerTemplate(opts: { shuffled?: boolean; landscapeLast?: boolean; headerList?: 'direct' | 'style'; pictureBullet?: boolean } = {}): Promise<Uint8Array> {
   const base = await JSZip.loadAsync((await convertMdToDocx('Template text')).docx);
   const zip = new JSZip();
   for (const path of ['word/styles.xml', 'word/theme/theme1.xml', 'word/fontTable.xml', 'word/webSettings.xml', 'docProps/core.xml', 'docProps/app.xml', '_rels/.rels']) {
@@ -40,9 +43,22 @@ async function headerTemplate(opts: { shuffled?: boolean; landscapeLast?: boolea
   }
   if (opts.headerList) {
     const numbering = await (await JSZip.loadAsync((await convertMdToDocx('- a\n\n1. b')).docx)).file('word/numbering.xml')!.async('string');
+    const level = opts.pictureBullet ? '<w:numFmt w:val="bullet"/><w:lvlText w:val="\uF0B7"/><w:lvlPicBulletId w:val="0"/>' : '<w:numFmt w:val="upperRoman"/><w:lvlText w:val="%1."/>';
     zip.file('word/numbering.xml', numbering
-      .replace('<w:num ', '<w:abstractNum w:abstractNumId="7"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="upperRoman"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum>\n<w:num ')
-      .replace('</w:numbering>', '<w:num w:numId="3"><w:abstractNumId w:val="7"/></w:num>\n</w:numbering>'));
+      .replace('<w:abstractNum ', (opts.pictureBullet ? '<w:numPicBullet w:numPicBulletId="0"><w:pict><v:shape id="_x0000_i1025" type="#_x0000_t75" style="width:9pt;height:9pt">' +
+        '<v:imagedata r:id="rId1" o:title=""/></v:shape></w:pict></w:numPicBullet>\n' : '') + '<w:abstractNum ')
+      .replace('<w:num ', '<w:abstractNum w:abstractNumId="7"><w:lvl w:ilvl="0"><w:start w:val="1"/>' + level + '</w:lvl></w:abstractNum>\n<w:num ')
+      .replace('</w:numbering>', '<w:num w:numId="3"><w:abstractNumId w:val="7"/></w:num>\n</w:numbering>')
+      .replace('<w:numbering ', '<w:numbering xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="' + REL.slice(0, -1) + '" '));
+    if (opts.pictureBullet) {
+      zip.file('word/_rels/numbering.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="' + REL + 'image" Target="media/image2.png"/></Relationships>');
+      zip.file('word/media/image2.png', BULLET);
+    }
+    if (opts.headerList === 'style') {
+      zip.file('word/styles.xml', (await base.file('word/styles.xml')!.async('string')).replace('</w:styles>',
+        '<w:style w:type="paragraph" w:styleId="HeaderListBase"><w:name w:val="Header List Base"/><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="3"/></w:numPr></w:pPr></w:style>' +
+        '<w:style w:type="paragraph" w:styleId="HeaderList"><w:name w:val="Header List"/><w:basedOn w:val="HeaderListBase"/></w:style></w:styles>'));
+    }
   }
   zip.file('word/settings.xml', (await base.file('word/settings.xml')!.async('string')).replace('<w:characterSpacingControl', '<w:evenAndOddHeaders/><w:characterSpacingControl'));
   const rels: Array<[string, string]> = [['styles', 'styles.xml'], ['settings', 'settings.xml'], ['webSettings', 'webSettings.xml'],
@@ -57,9 +73,9 @@ async function headerTemplate(opts: { shuffled?: boolean; landscapeLast?: boolea
   zip.file('word/_rels/header1.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="' + REL + 'image" Target="media/image1.png"/></Relationships>');
   zip.file('word/media/image1.png', PNG);
   zip.file('word/header2.xml', part('hdr', para('FIRST HEADER', 'Header')));
-  zip.file('word/header3.xml', part('hdr', opts.headerList
+  zip.file('word/header3.xml', part('hdr', opts.headerList === 'direct'
     ? '<w:p><w:pPr><w:pStyle w:val="Header"/><w:numPr><w:ilvl w:val="0"/><w:numId w:val="3"/></w:numPr></w:pPr><w:r><w:t>EVEN HEADER</w:t></w:r></w:p>'
-    : para('EVEN HEADER', 'Header')));
+    : para('EVEN HEADER', opts.headerList === 'style' ? 'HeaderList' : 'Header')));
   zip.file('word/footer1.xml', part('ftr', '<w:p><w:pPr><w:pStyle w:val="Footer"/></w:pPr><w:r><w:t xml:space="preserve">Page </w:t></w:r>' + pageField + '</w:p>'));
   zip.file('word/footer2.xml', part('ftr', para('FIRST FOOTER', 'Footer')));
   zip.file('word/footer3.xml', part('ftr', para('EVEN FOOTER', 'Footer')));
@@ -317,7 +333,7 @@ describe('a template\'s headers and footers', () => {
   });
 
   it('keep the numbering of a header\'s list, which export neither drops nor gives a list of its own', async () => {
-    const templateDocx = await headerTemplate({ headerList: true });
+    const templateDocx = await headerTemplate({ headerList: 'direct' });
     const numId3 = /<w:num w:numId="3"[^>]*>[\s\S]*?<\/w:num>/;
     for (const md of ['Hello', '8. item']) {
       const { docx } = await convertMdToDocx(md, { templateDocx });
@@ -383,6 +399,50 @@ describe('a template\'s headers and footers', () => {
       expect(header).toStartWith('<?xml version="1.0" encoding="UTF-8"');
       expect(header).toContain('<wp:docPr id="2"');
       expect(header).toContain('RUNNING HEAD');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keep a header\'s numbering where the template\'s numbering lacks export\'s bullets and numbers', async () => {
+    // The template's numbering has no numId 2, which numbered lists take
+    const templateDocx = await editTemplate(await headerTemplate({ headerList: 'direct' }), 'word/numbering.xml',
+      xml => xml.replace(/<w:num w:numId="2"[^>]*>[\s\S]*?<\/w:num>\s*/, ''));
+    for (const md of ['8. item', '- a\n\n1. b\n\n3. c']) {
+      const { docx } = await convertMdToDocx(md, { templateDocx });
+      expect(await packageProblems(docx)).toEqual([]);
+      const numbering = (await textOf(await JSZip.loadAsync(docx), 'word/numbering.xml'))!;
+      expect(/<w:num w:numId="3"[^>]*>[\s\S]*?<\/w:num>/.exec(numbering)?.[0]).toBe('<w:num w:numId="3"><w:abstractNumId w:val="7"/></w:num>');
+      // Export's numbers, as an abstract numbering of their own
+      const abstractNumId = /<w:num w:numId="2"[^>]*><w:abstractNumId w:val="(\d+)"\/>/.exec(numbering)?.[1];
+      expect(abstractNumId).toBe('8');
+      expect(numbering).toMatch(new RegExp('<w:abstractNum w:abstractNumId="8"[^>]*>[\\s\\S]*?<w:numFmt w:val="decimal"/>'));
+    }
+  });
+
+  it('keep the numbering a header\'s list takes through its style', async () => {
+    const { docx } = await convertMdToDocx('Hello', { templateDocx: await headerTemplate({ headerList: 'style' }) });
+    // The style's numId has its numbering
+    expect(await packageProblems(docx)).toEqual([]);
+    const numbering = (await textOf(await JSZip.loadAsync(docx), 'word/numbering.xml'))!;
+    expect(numbering).toContain('<w:num w:numId="3"><w:abstractNumId w:val="7"/></w:num>');
+  });
+
+  it('keep the image of a header list\'s picture bullet', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'template-sections-'));
+    try {
+      writeFileSync(join(dir, 'a.png'), PNG);
+      writeFileSync(join(dir, 'b.png'), PNG);
+      const templateDocx = await headerTemplate({ headerList: 'direct', pictureBullet: true });
+      // The Markdown's images take the template's images' names
+      for (const md of ['Hello', '![a](a.png)\n\n![b](b.png)\n\n- c']) {
+        const { docx } = await convertMdToDocx(md, { templateDocx, sourceDir: dir });
+        expect(await packageProblems(docx)).toEqual([]);
+        const zip = await JSZip.loadAsync(docx);
+        const target = /Target="([^"]+)"/.exec((await textOf(zip, 'word/_rels/numbering.xml.rels'))!)![1];
+        expect(await zip.file('word/' + target)!.async('uint8array')).toEqual(BULLET);
+        expect((await textOf(zip, 'word/numbering.xml'))!).toContain('<w:numPicBullet w:numPicBulletId="0">');
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -26,10 +26,13 @@
 // - The parts read as XML, by the XML parser, in the encoding their BOM or
 //   declaration names. A part export doesn't change goes as it came; one it
 //   changes goes as UTF-8.
-// - What a copied part names in the template's other parts stays named:
-//   export keeps the template's styles, and the numbering instances the
-//   parts use (see `numIds`). Export writes its own comments and notes, so
-//   a reference to one of the template's goes.
+// - What a copied part names in the template's other parts stays named.
+//   Export keeps the template's styles whole. With a header or footer it
+//   writes the template's numbering, which keeps the instances the parts
+//   (see `numIds`) and the styles use, and with that numbering the parts
+//   it names, as a picture bullet's image (see md-to-docx.ts). Export
+//   writes its own comments and notes, so a reference to one of the
+//   template's goes.
 
 import type JSZip from 'jszip';
 import { XMLBuilder, XMLParser } from 'fast-xml-parser';
@@ -53,8 +56,13 @@ interface TemplatePart {
   /** Whether the template types it by its extension */
   byExtension: boolean;
   /** Its relationships part, as the template holds it */
-  rels?: { data: Uint8Array; relationships: Relationship[] };
+  rels?: Rels;
+  /** Only the numbering names it, so it goes only with the template's numbering */
+  numberingOnly: boolean;
 }
+
+/** A relationships part, as the template holds it, and its relationships */
+interface Rels { data: Uint8Array; relationships: Relationship[] }
 
 export interface TemplateRelationship {
   type: string;
@@ -77,6 +85,8 @@ export interface TemplateSections {
   parts: Map<string, TemplatePart>;
   /** The numbering instances the parts use, which the template's numbering keeps */
   numIds: Set<number>;
+  /** The relationships of the template's numbering, which go with it */
+  numberingRels?: Rels;
 }
 
 type XmlNode = Record<string, unknown> & { ':@'?: Record<string, string> };
@@ -114,7 +124,7 @@ function elementsOf(xml: string | undefined, root: string, name: string): Record
 }
 
 /** An XML part's text, in the encoding its BOM or declaration names */
-function decodeXml(bytes: Uint8Array): string {
+export function decodeXml(bytes: Uint8Array): string {
   let encoding = 'utf-8';
   if (bytes[0] === 0xFF && bytes[1] === 0xFE || bytes[0] === 0x3C && bytes[1] === 0) encoding = 'utf-16le';
   else if (bytes[0] === 0xFE && bytes[1] === 0xFF || bytes[0] === 0 && bytes[1] === 0x3C) encoding = 'utf-16be';
@@ -132,7 +142,7 @@ function decodeXml(bytes: Uint8Array): string {
 }
 
 /** XML text as export writes it, in UTF-8, which its declaration then says */
-const asUtf8 = (xml: string) => xml.replace(/^(<\?xml\b[^>]*?\sencoding\s*=\s*)(["'])[^"']*\2/, (_, before: string, quote: string) => before + quote + 'UTF-8' + quote);
+export const asUtf8 = (xml: string) => xml.replace(/^(<\?xml\b[^>]*?\sencoding\s*=\s*)(["'])[^"']*\2/, (_, before: string, quote: string) => before + quote + 'UTF-8' + quote);
 
 /** Whether an on-off property that is present is on: its w:val isn't "0", "false" or "off" */
 const isOn = (val: unknown) => typeof val !== 'string' || !/^(?:0|false|off)$/.test(val);
@@ -180,6 +190,12 @@ function relationshipsOf(source: string, xml: string | undefined): Relationship[
 
 const escapeAttr = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
+/** A part's relationships part, if it has one */
+async function relsOf(zip: JSZip, path: string): Promise<Rels | undefined> {
+  const data = await zip.file(relsPathOf(path))?.async('uint8array');
+  return data && { data, relationships: relationshipsOf(path, decodeXml(data)) };
+}
+
 /** A relationships part */
 const relsXml = (relationships: Relationship[]) => '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
   '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
@@ -217,20 +233,14 @@ const NUM_ID = /<w:numId\b[^>]*?\sw:val\s*=\s*(["'])(\d+)\1/g;
 const COMMENT_OR_NOTE = /<w:(commentRangeStart|commentRangeEnd|commentReference|footnoteReference|endnoteReference)\b[^>]*?(?:\/>|>[\s\S]*?<\/w:\1\s*>)/g;
 const DOC_PR_ID = /(<wp:docPr\b[^>]*?\sid\s*=\s*)(["'])\d+\2/g;
 
-/** A template's headers and footers, the parts they name, and its trailing sectPr */
+/** A template's headers and footers, the parts they name, and its trailing
+ *  sectPr, and the parts its numbering names */
 export async function readTemplateSections(zip: JSZip): Promise<TemplateSections> {
   const result: TemplateSections = { references: '', titlePg: false, evenAndOddHeaders: false, relationships: [], parts: new Map(), numIds: new Set() };
   const read = async (path: string) => {
     const file = zip.file(path);
     return file ? decodeXml(await file.async('uint8array')) : undefined;
   };
-  const documentXml = await read('word/document.xml');
-  if (!documentXml) return result;
-  const bodyClose = documentXml.lastIndexOf('</w:body>');
-  const sectPrs = sectPrsOf(bodyClose < 0 ? documentXml : documentXml.slice(0, bodyClose)).map(parseSectPr);
-  const last = sectPrs[sectPrs.length - 1];
-  if (!last) return result;
-
   const types = await read('[Content_Types].xml');
   const overrides = new Map<string, string>(), defaults = new Map<string, string>();
   for (const o of elementsOf(types, 'Types', 'Override')) {
@@ -239,10 +249,10 @@ export async function readTemplateSections(zip: JSZip): Promise<TemplateSections
   for (const d of elementsOf(types, 'Types', 'Default')) {
     if (typeof d['@_Extension'] === 'string' && typeof d['@_ContentType'] === 'string') defaults.set(d['@_Extension'].toLowerCase(), d['@_ContentType']);
   }
-  const documentRels = new Map(relationshipsOf('word/document.xml', await read('word/_rels/document.xml.rels')).map(r => [r.id, r]));
 
-  /** Take a part, and the parts it names, for copying */
-  const take = async (path: string): Promise<void> => {
+  /** Take a part, and the parts it names, for copying. Those only the
+   *  numbering names go only with it. */
+  const take = async (path: string, numberingOnly = false): Promise<void> => {
     if (result.parts.has(path)) return;
     const file = zip.file(path);
     if (!file) return;
@@ -251,63 +261,76 @@ export async function readTemplateSections(zip: JSZip): Promise<TemplateSections
       data: await file.async('uint8array'),
       contentType: override ?? defaults.get(path.slice(path.lastIndexOf('.') + 1).toLowerCase()),
       byExtension: override === undefined,
+      numberingOnly,
     };
     result.parts.set(path, part);
     if (/\.xml$/i.test(path) || /xml$/.test(part.contentType ?? '')) {
       part.xml = decodeXml(part.data);
-      for (const m of part.xml.matchAll(NUM_ID)) result.numIds.add(parseInt(m[2], 10));
+      if (!numberingOnly) for (const m of part.xml.matchAll(NUM_ID)) result.numIds.add(parseInt(m[2], 10));
     }
-    const rels = zip.file(relsPathOf(path));
-    if (!rels) return;
-    const data = await rels.async('uint8array');
-    part.rels = { data, relationships: relationshipsOf(path, decodeXml(data)) };
-    for (const relationship of part.rels.relationships) {
+    part.rels = await relsOf(zip, path);
+    for (const relationship of part.rels?.relationships ?? []) {
+      if (relationship.path) await take(relationship.path, numberingOnly);
+    }
+  };
+
+  const documentXml = await read('word/document.xml') ?? '';
+  const bodyClose = documentXml.lastIndexOf('</w:body>');
+  const sectPrs = sectPrsOf(bodyClose < 0 ? documentXml : documentXml.slice(0, bodyClose)).map(parseSectPr);
+  const last = sectPrs[sectPrs.length - 1];
+  if (last) {
+    const documentRels = new Map(relationshipsOf('word/document.xml', await read('word/_rels/document.xml.rels')).map(r => [r.id, r]));
+    /** A template relationship's ID among document.xml's, or none if it names
+     *  nothing, or something other than a part of `type` */
+    const ids = new Map<string, string>();
+    const idFor = async (templateId: string | undefined, type?: string): Promise<string | undefined> => {
+      const relationship = templateId === undefined ? undefined : documentRels.get(templateId);
+      if (!relationship || relationship.path !== undefined && !zip.file(relationship.path)) return undefined;
+      if (type && !relationship.type.endsWith('/' + type)) return undefined;
+      if (ids.has(relationship.id)) return ids.get(relationship.id);
       if (relationship.path) await take(relationship.path);
-    }
-  };
-  /** A template relationship's ID among document.xml's, or none if it names
-   *  nothing, or something other than a part of `type` */
-  const ids = new Map<string, string>();
-  const idFor = async (templateId: string | undefined, type?: string): Promise<string | undefined> => {
-    const relationship = templateId === undefined ? undefined : documentRels.get(templateId);
-    if (!relationship || relationship.path !== undefined && !zip.file(relationship.path)) return undefined;
-    if (type && !relationship.type.endsWith('/' + type)) return undefined;
-    if (ids.has(relationship.id)) return ids.get(relationship.id);
-    if (relationship.path) await take(relationship.path);
-    result.relationships.push({ type: relationship.type, target: relationship.path ?? relationship.target, external: relationship.external });
-    const id = 'rId' + result.relationships.length;
-    ids.set(relationship.id, id);
-    return id;
-  };
-  const builder = new XMLBuilder(ORDERED_OPTIONS);
+      result.relationships.push({ type: relationship.type, target: relationship.path ?? relationship.target, external: relationship.external });
+      const id = 'rId' + result.relationships.length;
+      ids.set(relationship.id, id);
+      return id;
+    };
+    const builder = new XMLBuilder(ORDERED_OPTIONS);
 
-  // Each type of reference as the last section shows it
-  const references = new Map<string, XmlNode>();
-  for (const sectPr of sectPrs) {
-    for (const node of sectPr ? childrenOf(sectPr) : []) {
+    // Each type of reference as the last section shows it
+    const references = new Map<string, XmlNode>();
+    for (const sectPr of sectPrs) {
+      for (const node of sectPr ? childrenOf(sectPr) : []) {
+        const name = nameOf(node);
+        if (name === 'w:headerReference' || name === 'w:footerReference') references.set(name + ':' + (node[':@']?.['@_w:type'] ?? 'default'), node);
+      }
+    }
+    for (const node of references.values()) {
       const name = nameOf(node);
-      if (name === 'w:headerReference' || name === 'w:footerReference') references.set(name + ':' + (node[':@']?.['@_w:type'] ?? 'default'), node);
+      const id = await idFor(node[':@']?.['@_r:id'], name === 'w:headerReference' ? 'header' : 'footer');
+      if (id) result.references += builder.build([{ [name]: [], ':@': { ...node[':@'], '@_r:id': id } }]);
     }
-  }
-  for (const node of references.values()) {
-    const name = nameOf(node);
-    const id = await idFor(node[':@']?.['@_r:id'], name === 'w:headerReference' ? 'header' : 'footer');
-    if (id) result.references += builder.build([{ [name]: [], ':@': { ...node[':@'], '@_r:id': id } }]);
-  }
-  result.titlePg = !!sectPrs[0] && childrenOf(sectPrs[0]).some(node => nameOf(node) === 'w:titlePg' && isOn(node[':@']?.['@_w:val']));
+    result.titlePg = !!sectPrs[0] && childrenOf(sectPrs[0]).some(node => nameOf(node) === 'w:titlePg' && isOn(node[':@']?.['@_w:val']));
 
-  // The trailing sectPr, whose other relationships, as its printer
-  // settings', get their IDs, or go with what names them
-  const kept: XmlNode[] = [];
-  for (const node of childrenOf(last)) {
-    const name = nameOf(node);
-    if (name === 'w:headerReference' || name === 'w:footerReference' || name === 'w:titlePg') continue;
-    const templateId = node[':@']?.['@_r:id'];
-    const id = templateId === undefined ? undefined : await idFor(templateId);
-    if (templateId === undefined) kept.push(node);
-    else if (id) kept.push({ ...node, ':@': { ...node[':@'], '@_r:id': id } });
+    // The trailing sectPr, whose other relationships, as its printer
+    // settings', get their IDs, or go with what names them
+    const kept: XmlNode[] = [];
+    for (const node of childrenOf(last)) {
+      const name = nameOf(node);
+      if (name === 'w:headerReference' || name === 'w:footerReference' || name === 'w:titlePg') continue;
+      const templateId = node[':@']?.['@_r:id'];
+      const id = templateId === undefined ? undefined : await idFor(templateId);
+      if (templateId === undefined) kept.push(node);
+      else if (id) kept.push({ ...node, ':@': { ...node[':@'], '@_r:id': id } });
+    }
+    result.sectPr = builder.build([{ 'w:sectPr': kept, ':@': last[':@'] }]) as string;
   }
-  result.sectPr = builder.build([{ 'w:sectPr': kept, ':@': last[':@'] }]) as string;
+
+  // What the numbering names, as a picture bullet's image, after the
+  // sections' parts, which some of it can be too
+  result.numberingRels = await relsOf(zip, 'word/numbering.xml');
+  for (const relationship of result.numberingRels?.relationships ?? []) {
+    if (relationship.path) await take(relationship.path, true);
+  }
 
   const [evenAndOdd] = elementsOf(await read('word/settings.xml'), 'settings', 'evenAndOddHeaders');
   result.evenAndOddHeaders = evenAndOdd !== undefined && isOn(evenAndOdd['@_val']);
@@ -336,7 +359,8 @@ export function withSectionHeaders(sectPr: string, references: string, titlePg: 
 }
 
 /**
- * Copy the parts a template's sections name into the export, each at its
+ * Copy the parts a template's sections name into the export, and, if the
+ * export's numbering is the template's, the parts that names, each at its
  * template path or, where export has a part there, as its images, the next
  * free name like it. A drawing's ID, which the document's drawings share,
  * continues from `nextDocPrId`. Returns document.xml's relationships, with
@@ -348,27 +372,29 @@ export function addTemplateSectionParts(
   sections: TemplateSections,
   nextDocPrId: number,
   extensionTypes: Map<string, string>,
+  templateNumbering: boolean,
 ): { relationships: TemplateRelationship[]; defaults: Map<string, string>; overrides: Map<string, string> } {
   const paths = new Map<string, string>();
   const taken = (path: string) => zip.file(path) !== null || [...paths.values()].includes(path);
-  for (const path of sections.parts.keys()) {
+  const parts = [...sections.parts].filter(([, part]) => templateNumbering || !part.numberingOnly);
+  for (const [path] of parts) {
     let free = path;
     const m = /^(.*?)(\d*)(\.[^./]*)?$/.exec(path)!;
     for (let n = m[2] ? parseInt(m[2], 10) : 1; taken(free); n++) free = m[1] + n + (m[3] ?? '');
     paths.set(path, free);
   }
+  /** A part's relationships, at its path in the export, their targets the parts' there */
+  const addRels = (target: string, rels: Rels) => {
+    const moved = (r: Relationship) => r.path === undefined || !paths.has(r.path) || paths.get(r.path) === r.path ? undefined : paths.get(r.path);
+    zip.file(relsPathOf(target), !rels.relationships.some(moved) ? rels.data
+      : relsXml(rels.relationships.map(r => moved(r) ? { ...r, target: relativeTarget(target, moved(r)!) } : r)));
+  };
   const defaults = new Map<string, string>(), overrides = new Map<string, string>();
-  for (const [path, part] of sections.parts) {
+  for (const [path, part] of parts) {
     const target = paths.get(path)!;
     const xml = part.xml?.replace(COMMENT_OR_NOTE, '').replace(DOC_PR_ID, (_, before: string, quote: string) => before + quote + (nextDocPrId++) + quote);
     zip.file(target, xml !== undefined && xml !== part.xml ? asUtf8(xml) : part.data);
-    if (part.rels) {
-      const relationships = part.rels.relationships;
-      const movedPath = (r: Relationship) => r.path === undefined ? undefined : paths.get(r.path);
-      const moved = relationships.some(r => movedPath(r) !== undefined && movedPath(r) !== r.path);
-      zip.file(relsPathOf(target), !moved ? part.rels.data : relsXml(relationships.map(r =>
-        movedPath(r) !== undefined && movedPath(r) !== r.path ? { ...r, target: relativeTarget(target, movedPath(r)!) } : r)));
-    }
+    if (part.rels) addRels(target, part.rels);
     if (!part.contentType) continue;
     const ext = target.slice(target.lastIndexOf('.') + 1).toLowerCase();
     const known = extensionTypes.get(ext) ?? defaults.get(ext);
@@ -378,6 +404,7 @@ export function addTemplateSectionParts(
       overrides.set(target, part.contentType);
     }
   }
+  if (templateNumbering && sections.numberingRels) addRels('word/numbering.xml', sections.numberingRels);
   const relationships = sections.relationships.map(r => r.external ? r : { ...r, target: relativeTarget('word/document.xml', paths.get(r.target) ?? r.target) });
   return { relationships, defaults, overrides };
 }
