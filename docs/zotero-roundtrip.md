@@ -114,7 +114,7 @@ zotero-notes: in-text
 | `locale` | Optional locale override (e.g., `en-US`, `en-GB`). Defaults to the style's own locale. |
 | `zotero-notes` | Optional Zotero note type: `in-text` (default), `footnotes`, or `endnotes`. Legacy alias: `note-type`. Legacy numeric values (0, 1, 2) are still accepted. |
 
-You can also add or modify this frontmatter manually. When a nonempty bibliography is loaded, omitting `csl` uses the bundled APA style for citations and the reference list. Set `csl` to choose another style.
+You can also add or modify this frontmatter manually. When a nonempty bibliography is loaded, omitting `csl` uses the bundled APA style for citations and the reference list. Set `csl` to choose another style. Export writes APA to Zotero's document preferences, so Zotero can manage the file, and notes that the Markdown had no `csl`. Import then leaves `csl` out again, unless the preferences in Word name another style, as after a change in Zotero's Document Preferences.
 
 APA is the default because it is bundled and works offline, and its author–year citations stay close to the converter's earlier plain-text fallback. This gives documents a formatted reference list without requiring a style selection first. Use the style required by your journal or collaborators by setting `csl`, for example `csl: vancouver` for numbered citations.
 

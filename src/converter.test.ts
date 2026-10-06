@@ -5528,7 +5528,7 @@ describe('HTML comments in notes', () => {
       zip.file(part, hidden);
     }
     const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
-    expect(markdown).toContain('\nSee [@smith2020].[^1]\n');
+    expect(markdown.split('\n')).toContain('See [@smith2020].[^1]');
     expect(markdown).toContain('\n[^1]: See [@smith2020].\n');
     expect(markdown).not.toContain('secret');
   });
@@ -5546,7 +5546,7 @@ describe('HTML comments in notes', () => {
       zip.file(part, hidden);
     }
     const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
-    expect(markdown).toContain('\nA  b.[^1]\n');
+    expect(markdown.split('\n')).toContain('A  b.[^1]');
     expect(markdown).toContain('\n[^1]: N  b.\n');
   });
 
