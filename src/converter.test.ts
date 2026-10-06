@@ -5982,6 +5982,35 @@ describe('Word text that reads as Markdown', () => {
     expect(await roundTrip(markdown)).toBe(markdown);
   });
 
+  const run = (text: string, rPr = '') => '<w:r>' + (rPr ? '<w:rPr>' + rPr + '</w:rPr>' : '') + '<w:t>' + text + '</w:t></w:r>';
+  const change = (tag: string, xml: string) => '<w:' + tag + ' w:id="90" w:author="A" w:date="2024-01-01T00:00:00Z">'
+    + (tag === 'del' ? xml.replace(/w:t>/g, 'w:delText>') : xml) + '</w:' + tag + '>';
+  const two = '$' + '$';
+  test.each([
+    ['bold and struck', run('$x') + run('$', '<w:b/>') + run(two, '<w:strike/>')],
+    ['in code and italic', run('$x') + run('$', '<w:rStyle w:val="CodeChar"/>') + run(two, '<w:i/>')],
+    ['plain and bold, after italic ones', run('$x', '<w:i/>') + run('$') + run(two, '<w:b/>')],
+    ['inserted and deleted', run('$x') + change('ins', run('$')) + change('del', run(two, '<w:b/>'))],
+    ['underlined and superscript, before an equation', run('$x') + run('$', '<w:u w:val="single"/>')
+      + run(two, '<w:vertAlign w:val="superscript"/>') + '<m:oMath><m:r><m:t>(y)</m:t></m:r></m:oMath>'],
+  ])('keeps a dollar sign before ones in runs side by side, %s, as text', async (_name, runs) => {
+    // The runs' dollar signs ran together in the index of the runs after,
+    // as three, which close no math, so the first wasn't escaped, and
+    // opened math at the next, which Markdown keeps apart from the others,
+    // or at the equation's, which was text then
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\nXX\n\nB.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace('<w:r><w:t>XX</w:t></w:r>', () => runs);
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    const equation = runs.includes('<m:oMath>');
+    const exportedXml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    expect(exportedXml.match(/<m:oMath>/g) ?? []).toHaveLength(equation ? 1 : 0);
+    expect((await exported(markdown)).text).toEqual(['A.', '$x$' + two + (equation ? '(y)' : ''), 'B.']);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
   test.each(['[x](y)', '[^1]', '[@x]', 'a]b', 'a[b', '[a]', '$x', '!'].flatMap(text => [
     [text, 'P [XX](https://e.com/a$b) Q.'],
     [text, 'P {==[XX](https://e.com/a$b)==}{>>c<<} Q.'],

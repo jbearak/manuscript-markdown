@@ -739,7 +739,9 @@ export class RunsAfter {
    *  after one at the start, which a $ before can join, the first two or
    *  more, which close $$. Those between, which close neither, are left
    *  out, and runs of more than three signs are three, which close the
-   *  same. */
+   *  same. Two side by side in Word's text, which are in runs of their own
+   *  (see indexText), have \u0001 between them too, for the delimiters
+   *  Markdown has between those runs. */
   dollars(): string {
     const { dollarRuns, nextSingle, nextDouble } = this.index;
     const k = lowerBound(this.index.dollarStarts, this.from);
@@ -749,7 +751,8 @@ export class RunsAfter {
     let text = this.prefix.includes('$') ? this.prefix : this.prefix ? '\u0001' : '';
     let end = this.from;
     for (const run of [...kept].sort((a, b) => a - b)) {
-      if (dollarRuns[run].start > end) text += '\u0001';
+      // As in **$**~~\$\$~~
+      if (dollarRuns[run].start > end || end > this.from) text += '\u0001';
       text += '$'.repeat(Math.min(dollarRuns[run].length, 3));
       end = dollarRuns[run].start + dollarRuns[run].length;
     }
