@@ -11038,6 +11038,19 @@ describe('Markdown across Word runs', () => {
     expect(buildMarkdown(items, new Map()).trim()).toBe(md);
   });
 
+  test('writes a substitution whose side is code of many * in linear time', () => {
+    // A regex for the closes at the side's end tried each way to split the
+    // run of * into * and **, before it found the code's `
+    const revision = (type: 'deletion' | 'addition') => ({ type, author: 'A', date: '' });
+    const start = performance.now();
+    const items: ContentItem[] = [
+      { type: 'text', text: 'x', commentIds: new Set(), formatting: DEFAULT_FORMATTING, revision: revision('deletion') },
+      { type: 'text', text: '*'.repeat(60), commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, code: true }, revision: revision('addition') },
+    ];
+    expect(buildMarkdown(items, new Map()).trim()).toBe('{~~x~>`' + '*'.repeat(60) + '`~~}');
+    expect(performance.now() - start).toBeLessThan(500);
+  });
+
   test.each([
     ['struck, before a digit', run('https://', '<w:strike/>') + run('1'), '{++~~https\\://~~++}{++1++}'],
     ['struck, before a letter', run('https://', '<w:strike/>') + run('e.com'), '{++~~https\\://~~++}{++e.com++}'],

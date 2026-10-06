@@ -5882,10 +5882,24 @@ function resolveSide(markdown: string): string {
   // Its last, or the last before the closes of the formatting around it,
   // as in **==a ==**, which citationSeparator reads past (see textEnd)
   // eslint-disable-next-line no-control-regex
-  const close = /[\u0006\u000F](==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?)(?:\u0004?(?:\*\*|\*|~~)|<\/(?:u|s)>)*$/.exec(markdown)?.[1];
-  const end = /(?:\*\*|\*|~~|<\/(?:u|s|b|i)>)*$/.exec(resolved)!.index;
+  const close = /[\u0006\u000F](==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?)$/.exec(markdown.slice(0, closesStart(markdown)))?.[1];
+  if (!close) return resolved;
+  const end = closesStart(resolved);
   // Unless resolving dropped the highlight, as of whitespace alone
-  return close && resolved.endsWith(close, end) ? resolved.slice(0, end - close.length) + HIGHLIGHT_CLOSE + resolved.slice(end - close.length) : resolved;
+  return resolved.endsWith(close, end) ? resolved.slice(0, end - close.length) + HIGHLIGHT_CLOSE + resolved.slice(end - close.length) : resolved;
+}
+
+/** Where the closes of emphasis and the tags of formatting at the end of
+ *  `markdown` start, marked or not, read back from its end, as a regex
+ *  with * and ** in a repeat would try each way to split a run of * */
+function closesStart(markdown: string): number {
+  let end = markdown.length;
+  for (;;) {
+    if (markdown[end - 1] === '*' || markdown[end - 1] === EMPHASIS_CLOSE) end--;
+    else if (markdown.startsWith('~~', end - 2)) end -= 2;
+    else if (/^<\/[usbi]>$/.test(markdown.slice(Math.max(0, end - 4), end))) end -= 4;
+    else return end;
+  }
 }
 
 /** Whether `{~~old~>new~~}` reads back as these sides: CriticMarkup splits at
