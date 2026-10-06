@@ -2044,7 +2044,10 @@ export function parseListMeta(pPrChildren: XmlNode[], numberingDefs: NumberingDe
     }
   }
 
-  if (!numId || !ilvl) return undefined;
+  if (!numId) return undefined;
+  // One that gives no level numbers its paragraph at level 0, as
+  // LibreOffice and docx4j read it, where ECMA-376 gives no default
+  ilvl ||= '0';
 
   const levels = numberingDefs.get(numId);
   if (!levels) return undefined;

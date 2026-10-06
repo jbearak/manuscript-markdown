@@ -1931,6 +1931,32 @@ describe('Empty Word paragraphs before a block', () => {
   });
 });
 
+describe('Where Word list numbering comes from', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+  // The Markdown of a document of [pPr, text] paragraphs, with `styles` added
+  // to styles.xml and `numbering` edited. Export's numbering numbers with
+  // instance 1 a bullet list and with instance 2 a numbered one
+  const imported = async (paragraphs: [string, string][], { styles = '', numbering = (xml: string) => xml } = {}) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('1. a')).docx);
+    zip.file('word/numbering.xml', numbering(await zip.file('word/numbering.xml')!.async('string')));
+    zip.file('word/styles.xml', (await zip.file('word/styles.xml')!.async('string')).replace('</w:styles>', () => styles + '</w:styles>'));
+    const body = paragraphs.map(([pPr, text]) => '<w:p>' + (pPr ? '<w:pPr>' + pPr + '</w:pPr>' : '') + '<w:r><w:t>' + text + '</w:t></w:r></w:p>').join('');
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<w:body>[\s\S]*?(?=<w:sectPr)/, () => '<w:body>' + body));
+    return strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+  };
+  const numPr = (numId: number, ilvl?: number) => '<w:numPr>' + (ilvl === undefined ? '' : '<w:ilvl w:val="' + ilvl + '"/>') + '<w:numId w:val="' + numId + '"/></w:numPr>';
+
+  test.each([
+    ['bulleted', 1, '- a\n- b'],
+    ['numbered', 2, '1. a\n2. b'],
+  ])('reads a %s paragraph whose numbering gives no level at level 0', async (_name, numId, md) => {
+    expect(await imported([[numPr(numId), 'a'], [numPr(numId), 'b']])).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+});
+
 describe('HTML blocks in list items', () => {
   const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
 
