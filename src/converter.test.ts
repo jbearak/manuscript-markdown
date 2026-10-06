@@ -5748,6 +5748,12 @@ describe('Word text that reads as Markdown', () => {
     expect(await roundTrip(markdown)).toBe(markdown);
   });
 
+  test.each(['a {--[@zz]--} b', 'a {~~[@zz]~>b~~} c', 'a {~~[see @zz, p. 2]~>b~~} c'])('keeps %s, whose deleted citation export notes no missing key of, as it is', async (md) => {
+    // Export writes a deleted citation as its text, and notes no missing
+    // data of its key, so only the deletion says it's a citation's
+    expect(await roundTrip(md)).toBe(md + '\n');
+  });
+
   test('keeps Word\'s text of a citation whose key the bibliography has a citation', async () => {
     // As export writes a deleted citation
     const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\nP XX Q.')).docx);

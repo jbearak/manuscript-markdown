@@ -246,9 +246,10 @@ const HTML_LIKE_TAG_AT = new RegExp(HTML_LIKE_TAG_RE.source, 'y');
 let readsMarkdown = true;
 
 // The keys export knows of: those of the document's citations and its
-// bibliography, and those whose citation data it found missing, as the
-// notes it writes at the document's end say, as "Citation data for @a was
-// not found in the bibliography file.". It writes a citation of them as its
+// bibliography, those whose citation data it found missing, as the notes
+// it writes at the document's end say, as "Citation data for @a was not
+// found in the bibliography file.", and those of a deletion's citations,
+// whose missing data it doesn't note. It writes a citation of them as its
 // text where it can't write the citation, as for a missing key or in a
 // deletion, so that text, as [@a], stays a citation (see citationKnown)
 let knownCitationKeys: ReadonlySet<string> = new Set();
@@ -273,6 +274,23 @@ function missingCitationKeys(content: ContentItem[]): Set<string> {
     }
   }
   end();
+  return keys;
+}
+
+/** The keys of the text of citations in deletions in `contents`, their
+ *  tables' cells and all, as [@a] */
+function deletedCitationKeys(contents: ContentItem[][]): Set<string> {
+  const keys = new Set<string>();
+  const read = (content: ContentItem[]) => {
+    for (const item of content) {
+      if (item.type === 'text' && item.revision?.type === 'deletion') {
+        for (const bracket of item.text.matchAll(/\[([^[\]\n]*)\]/g)) for (const key of bracketKeys(bracket[1])) keys.add(key);
+      } else if (item.type === 'table') {
+        for (const row of item.rows) for (const cell of row.cells) cell.paragraphs.forEach(read);
+      }
+    }
+  };
+  contents.forEach(read);
   return keys;
 }
 
@@ -865,13 +883,19 @@ function citationKeyRanges(text: string, open: number, close: number): Array<[nu
  *  citation of another key export would take for one, and note missing,
  *  so it's text. */
 function citationKnown(text: string, open: number, close: number): boolean {
-  return text.slice(open + 1, close).split(';').some(part => {
+  return bracketKeys(text.slice(open + 1, close)).some(key => knownCitationKeys.has(key));
+}
+
+/** The keys of the citation between brackets whose text is `inner`, as
+ *  citationKeyRanges reads them */
+function bracketKeys(inner: string): string[] {
+  return inner.split(';').flatMap(part => {
     const item = part.trim();
     const start = /(^|\s)-?@/.exec(item);
-    if (!start) return false;
+    if (!start) return [];
     const rest = item.slice(start.index + start[0].length).trim();
     const comma = rest.indexOf(',');
-    return knownCitationKeys.has(comma === -1 ? rest : rest.slice(0, comma).trim());
+    return [comma === -1 ? rest : rest.slice(0, comma).trim()];
   });
 }
 
@@ -9252,7 +9276,10 @@ export function buildMarkdown(
 ): string {
   let breakMarks: TrackedBreakMarks | undefined;
   trackedBreakStart = undefined;
-  knownCitationKeys = new Set([...options?.citationKeys ?? [], ...missingCitationKeys(content)]);
+  knownCitationKeys = new Set([
+    ...options?.citationKeys ?? [], ...missingCitationKeys(content),
+    ...deletedCitationKeys([content, ...[...options?.notes?.map.values() ?? []].map(note => note.body)]),
+  ]);
   const marks = () => {
     if (!breakMarks) trackedBreakStart = (breakMarks = trackedBreakMarks([content, [...comments.values()], options])).start;
     return breakMarks;
