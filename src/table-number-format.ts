@@ -813,15 +813,33 @@ function firstOverlappingRange(ranges: SourceRange[], start: number): number {
 	return low;
 }
 
+/** How many of the characters a named reference reads as, `value`, are the
+ *  rest of it after a name read in part, as text: 4 of £123; for &pound123;,
+ *  which the browser reads by &pound, a legacy name, or all but the & where
+ *  it reads no name, as &foo; is text, and none for one read whole */
+function unreadLength(reference: string, value: string): number {
+	if (reference[1] === '#' || !value.endsWith(';') || value === ';') return 0;
+	let read = 1;
+	while (!reference.endsWith(value.slice(read))) read++;
+	return value.length - read;
+}
+
 function decodeHtmlTextWithOffsets(raw: string, stats?: TableNumberFormatScanStats): { decoded: string; decodedToRaw: Uint32Array } {
 	const offsets = [0];
 	let decoded = '';
 	const tokenRe = new RegExp(HTML_CHARACTER_REFERENCE + '|[\\s\\S]', 'g');
 	let match: RegExpExecArray | null;
 	while ((match = tokenRe.exec(raw)) !== null) {
-		const value = decodeHtmlCharacterReferences(match[0]);
+		const token = match[0];
+		const value = decodeHtmlCharacterReferences(token);
 		decoded += value;
-		for (let index = 0; index < value.length; index++) offsets.push(tokenRe.lastIndex);
+		// The rest of a name read in part keeps its characters' places, so an
+		// edit to them lands before the ;
+		const rest = unreadLength(token, value);
+		const read = value.length - rest;
+		const readEnd = tokenRe.lastIndex - rest;
+		for (let index = 0; index < read; index++) offsets.push(readEnd);
+		for (let index = 1; index <= rest; index++) offsets.push(readEnd + index);
 	}
 	if (stats) {
 		stats.decodedPiecesMapped++;
@@ -964,10 +982,26 @@ function planHtmlVisibleChange(segment: HtmlVisibleSegment, formatted: string,
 /** `edits`, after a ; at the end of each numeric reference without one that
  *  the edits would run on into a digit, or a ; that would end it, as
  *  dropping the space of &#x31 234 would make &#x31234, which the browser
- *  reads as U+31234, not 1234 */
+ *  reads as U+31234, not 1234, and at the end of each name read in part
+ *  that the edits would change the rest of, as &pound123; is £123;, by
+ *  &pound, to the browser, which reads &pound123.00; as £123.00;, but
+ *  which export reads as no reference, since its ; isn't right after the
+ *  name, and &pound;123.00; as both read it */
 function terminateReferencesBefore(source: string, segment: HtmlVisibleSegment, edits: SourceEdit[]): SourceEdit[] {
 	const editsAt = new Map<number, SourceEdit[]>();
 	for (const edit of edits) editsAt.set(edit.start, [...editsAt.get(edit.start) ?? [], edit]);
+	const ordered = [...edits].sort((a, b) => a.start - b.start);
+	// The first of the edits in order that starts at or after `position`
+	const firstFrom = (position: number): number => {
+		let low = 0;
+		let high = ordered.length;
+		while (low < high) {
+			const middle = (low + high) >>> 1;
+			if (ordered[middle].start < position) low = middle + 1;
+			else high = middle;
+		}
+		return low;
+	};
 	// The character at `position` once the edits are made, as
 	// applySourceEdits makes them: the inserts there in order, or else what
 	// follows the most they delete
@@ -983,7 +1017,19 @@ function terminateReferencesBefore(source: string, segment: HtmlVisibleSegment, 
 		// Read as decodeHtmlTextWithOffsets reads them
 		for (const reference of source.slice(piece.sourceStart, piece.sourceEnd).matchAll(new RegExp(HTML_CHARACTER_REFERENCE, 'g'))) {
 			const end = piece.sourceStart + reference.index + reference[0].length;
-			if (reference[0][1] !== '#' || reference[0].endsWith(';') || !editsAt.has(end)) continue;
+			if (reference[0][1] !== '#') {
+				const value = decodeHtmlCharacterReferences(reference[0]);
+				const nameEnd = end - (value === reference[0] ? 0 : unreadLength(reference[0], value));
+				const next = firstFrom(nameEnd);
+				// Where an edit takes in the name's end too, it writes the name's
+				// character as text, which leaves no reference
+				if (nameEnd < end && next < ordered.length && ordered[next].start < end
+					&& !(next > 0 && ordered[next - 1].end > nameEnd)) {
+					terminations.push({ start: nameEnd, end: nameEnd, insert: ';' });
+				}
+				continue;
+			}
+			if (reference[0].endsWith(';') || !editsAt.has(end)) continue;
 			const next = characterAt(end);
 			if (next !== undefined && (/[xX]/.test(reference[0][2]) ? /[0-9a-fA-F;]/ : /[0-9;]/).test(next)) {
 				terminations.push({ start: end, end, insert: ';' });

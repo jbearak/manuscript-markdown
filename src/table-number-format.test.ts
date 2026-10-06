@@ -503,6 +503,26 @@ describe('table number formatting', () => {
 		expect(formatTableNumbers(html, { digits: 2 }).output).toBe('<table><tr><td>&euro;1234.50</td><td>&pound;7.00</td></tr></table>');
 	});
 
+	test('edits the digits after a name read in part where they are, before the reference\'s ;', () => {
+		// The browser reads &pound123; as £123;, &pound, a legacy name, and the
+		// rest as text, which had each character at the reference's end, so
+		// .00 went after the ; to show £123;.00
+		const html = '<table><tr><td>&pound123;</td><td>&yen7;</td></tr></table>';
+		expect(formatTableNumbers(html, { digits: 2 }).output).toBe('<table><tr><td>&pound;123.00;</td><td>&yen;7.00;</td></tr></table>');
+	});
+
+	test('ends a name read in part with its ; where it edits the digits after the name, which export reads as the browser does', async () => {
+		// The browser reads &pound123.00; as £123.00;, by &pound, but a
+		// named reference needs its ; right after the name, or the . kept it
+		// from being one, to export, which wrote it as it was
+		const table = '<table><tr><td>&pound123;</td><td>&yen7;</td><td>&pound1234;</td></tr></table>';
+		const markdown = '---\ntable-digits: 2\ntable-digit-grouping: thin-space\n---\n\n' + table + '\n';
+		const JSZip = (await import('jszip')).default;
+		const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+		const cells = [...xml.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(match => match[1]);
+		expect(cells).toEqual(['\u00a3123.00;', '\u00a57.00;', '\u00a31\u202f234.00;']);
+	});
+
 	test('keeps surviving digits in their original HTML runs when grouping is removed', () => {
 		const html = '<table><tr><td><b>1</b>&nbsp;<i>234</i>.50</td></tr></table>';
 		const output = formatTableNumbers(html, { digitGrouping: 'none', decimalMark: 'midpoint' }).output;
