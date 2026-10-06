@@ -5941,6 +5941,27 @@ describe('Word text that reads as Markdown', () => {
     expect(cell).toBe(before + '{++x++}' + after);
   });
 
+  test.each([
+    ['a bold run after a line break', [['a\\\n', {}], [' b', { bold: true }]], 'a↵ b{++x++}'],
+    ['an underlined space before a citation', [['a', {}], [' ', { underline: true }]], 'a [@smith2020]{++x++}'],
+  ])('keeps the spaces of %s in an HTML table\'s cell that holds what HTML can\'t', async (_name, runs, expected) => {
+    // HTML dropped one at a line's start the run before ended, and the
+    // separator put a second before a citation after one as a reference
+    const items: ContentItem[] = (runs as [string, Partial<RunFormatting>][]).map(([text, formatting]) =>
+      ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting } }));
+    if ((expected as string).includes('[@')) items.push({ type: 'citation', text: '(Smith 2020)', commentIds: new Set(), pandocKeys: ['@smith2020'] });
+    const { text: cell } = await fallbackCell([...items, insertedRun]);
+    expect(cell).toBe(expected);
+  });
+
+  test('keeps the space between the runs of a joined highlight in an HTML table\'s cell that holds what HTML can\'t inside it', async () => {
+    // Outside both runs' ==, it split the highlight in two
+    const highlighted = (text: string, formatting: Partial<RunFormatting>): ContentItem =>
+      ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, highlight: true, ...formatting } });
+    const { markdown } = await fallbackCell([highlighted('a ', { bold: true }), highlighted('b', { italic: true }), insertedRun]);
+    expect(markdown).toContain('<p>==<b>a</b> <i>b</i>=={++x++}</p>');
+  });
+
   test('writes text that reads as CriticMarkup in an HTML table\'s cell that holds what HTML can\'t with its braces as references', async () => {
     // Navigation and the grammar read it as a change
     const { markdown } = await fallbackCell([{ type: 'text', text: '{++a++} ', commentIds: new Set(), formatting: DEFAULT_FORMATTING }, insertedRun]);
