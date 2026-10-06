@@ -1594,6 +1594,19 @@ describe('HTML table support for Expand/Compact Table', () => {
   });
 
   it.each([
+    ['at its end', '&#91;^1] *a* <a href="u">x<br></a>y', '+----------------+\n| h              |\n+================+\n| \\[^1] \\*a\\* [x |\n| ](u)y          |\n+----------------+'],
+    ['in it', '<a href="u">x<br>z</a>', '+-------+\n| h     |\n+=======+\n| [x    |\n| z](u) |\n+-------+'],
+    ['at its start', 'a<a href="u"><br>x</a>', '+-------+\n| h     |\n+=======+\n| a[    |\n| x](u) |\n+-------+'],
+    ['after it', '<a href="u">x</a><br>y', '+--------+\n| h      |\n+========+\n| [x](u) |\n| y      |\n+--------+'],
+  ])('Compact Table and Expand Table keep a line break %s in an HTML cell\'s link where it is', (_name, cell, compacted) => {
+    // It was no link's, so the link ended before it, or was two links
+    const html = '<table><tr><th>h</th></tr><tr><td>' + cell + '</td></tr></table>';
+    expect(compactTable(html).newText).toBe(compacted);
+    expect(previewRows(compacted)).toEqual(previewRows(html));
+    expect(previewRows(reflowTable(compacted).newText)).toEqual(previewRows(html));
+  });
+
+  it.each([
     ['row', '<table>\n<!-- <tr><td>old</td></tr> -->\n<tr><td>a</td></tr>\n</table>'],
     ['cell', '<table><tr><!-- <td>old</td> --><td>a</td></tr></table>'],
     ['rows alone', '<table><!-- <tr><td>old</td></tr> --></table>'],

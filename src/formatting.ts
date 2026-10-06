@@ -693,8 +693,8 @@ function formatGridContentRow(cells: string[], columnWidths: number[], pad: bool
 
 /** An HTML table's cell as Word's, as export reads it: its runs, with
  *  each <a> a link of its own, numbered from `links`, and each <br> a line
- *  break, or undefined where a run is one a Word cell can't hold as it is,
- *  as code's line end, which shows as a space */
+ *  break, in the link of the <a> it's in, or undefined where a run is one a
+ *  Word cell can't hold as it is, as code's line end, which shows as a space */
 function htmlCellAsWord(cell: HtmlTableCell, links: { count: number }): TableCell | undefined {
   const paragraphs: ContentItem[][] = [[]];
   let link = 0;

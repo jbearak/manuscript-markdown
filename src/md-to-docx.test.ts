@@ -5837,4 +5837,15 @@ describe('Line breaks in an HTML table\'s cell', () => {
     expect(xml).toMatch(new RegExp('<w:r><w:rPr>(?:(?!</w:rPr>).)*' + rPr + '(?:(?!</w:rPr>).)*</w:rPr><w:br/></w:r>'));
     expect(xml).not.toContain('<w:r><w:br/></w:r>');
   });
+
+  it.each([
+    ['at its end', '<a href="https://e.org">a<br></a>y'],
+    ['at its start', 'x<a href="https://e.org"><br>a</a>'],
+    ['in it', '<a href="https://e.org">a<br>b</a>'],
+  ])('keeps a line break %s in a link\'s hyperlink', async (_name, cell) => {
+    // It was no link's, so the hyperlink ended at it
+    const xml = await documentXml(cell);
+    expect(xml.match(/<w:hyperlink /g)).toHaveLength(1);
+    expect(xml.replace(/<w:hyperlink\b[\s\S]*?<\/w:hyperlink>/g, '')).not.toContain('<w:br/>');
+  });
 });
