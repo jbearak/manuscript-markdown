@@ -9064,7 +9064,65 @@ describe('Whitespace at the edges of a paragraph', () => {
   });
 
   test('leaves a paragraph of spaces alone, an empty paragraph to Markdown', async () => {
-    expect(await withText('A.\n\nXX\n\nB.', 'word/document.xml', '   ')).not.toContain('&#32;');
+    // Import wrote the spaces on a line of their own, which the next import
+    // didn't, as Markdown reads them as a blank line
+    const markdown = await withText('A.\n\nXX\n\nB.', 'word/document.xml', '   ');
+    expect(markdown).toBe('A.\n\nB.\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['a list item', '- a\n- XX\n- b', 'word/document.xml'],
+    ['a task item', '- [ ] a\n- [ ] XX', 'word/document.xml'],
+    ['a list item\'s later paragraph', '- a\n\n  XX\n- b', 'word/document.xml'],
+    ['a quote', '> a\n>\n> XX\n>\n> b', 'word/document.xml'],
+    ['an alert, after its label', '> [!NOTE]\n> XX', 'word/document.xml'],
+    ['a heading', '# XX\n\nB.', 'word/document.xml'],
+    ['a note\'s first paragraph', 'T.[^1]\n\n[^1]: XX\n\n    B.', 'word/footnotes.xml'],
+    ['a note\'s later paragraph', 'T.[^1]\n\n[^1]: A.\n\n    XX\n\n    B.', 'word/footnotes.xml'],
+  ])('writes a paragraph of spaces and tabs alone in %s as the empty paragraph there', async (_name, md, part) => {
+    // Import wrote them as they were, which the next import didn't, as
+    // Markdown reads them as a blank line or as nothing
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file(part)!.async('string');
+    zip.file(part, xml.replace('<w:r><w:t>XX</w:t></w:r>', ''));
+    const empty = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(await withText(md, part, ' \t ')).toBe(empty);
+  });
+
+  test.each([
+    ['a table cell', '| a | b |\n| --- | --- |\n| XX | 2 |', '| a | b |\n| --- | --- |\n| &#32;&#32; | 2 |\n'],
+    ['an HTML table cell', '<table>\n  <tr>\n    <td>\n      <p>q</p>\n      <p>XX</p>\n    </td>\n  </tr>\n</table>',
+      '<table>\n  <tr>\n    <td>\n      <p>q</p>\n      <p>&#32;&#32;</p>\n    </td>\n  </tr>\n</table>\n'],
+    ['a grid table cell', '+-----+-----+\n| x   | y   |\n+=====+=====+\n| XX  | b   |\n+-----+-----+',
+      '+------------+-----+\n| x          | y   |\n+============+=====+\n| &#32;&#32; | b   |\n+------------+-----+\n'],
+  ])('keeps a paragraph of spaces alone in %s, where an empty one keeps its place', async (_name, md, expected) => {
+    // Written as they were, the cell trimmed them, or HTML collapsed them
+    const markdown = await withText(md, 'word/document.xml', '  ');
+    expect(markdown).toBe(expected);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps a line of spaces alone after a line break in an HTML table cell', async () => {
+    // HTML dropped them at the end of the paragraph, after the <br>
+    const md = '<table>\n  <tr>\n    <td>\n      <p>q<br>XX</p>\n    </td>\n  </tr>\n</table>';
+    const markdown = await withText(md, 'word/document.xml', '  ');
+    expect(markdown).toBe('<table>\n  <tr>\n    <td>\n      <p>q<br>&#32;&#32;</p>\n    </td>\n  </tr>\n</table>\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['its paragraph', 'A.\n\nXX\n' + '$' + '$\nx\n' + '$' + '$\n\nB.', 'word/document.xml', 'A.\n\n&#32;&#32;\n' + '$' + '$\nx\n' + '$' + '$\n\nB.\n'],
+    ['a note\'s paragraph', 'T.[^1]\n\n[^1]: A.\n\n    XX\n    ' + '$' + '$\n    x\n    ' + '$' + '$',
+      'word/footnotes.xml', 'T.[^1]\n\n[^1]: A.\n\n    &#32;&#32;\n    ' + '$' + '$\n    x\n    ' + '$' + '$\n'],
+  ])('keeps whitespace alone before an equation in %s', async (_name, md, part, expected) => {
+    // Written as it was, Markdown read it as a blank line, which ended the
+    // paragraph before the equation. The space export writes for the line
+    // end before the equation stays out of the references, or each round
+    // trip would add one.
+    const markdown = await withText(md, part, '  ');
+    expect(markdown).toBe(expected);
+    expect(await roundTrip(markdown)).toBe(markdown);
   });
 });
 

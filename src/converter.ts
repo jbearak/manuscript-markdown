@@ -532,6 +532,28 @@ function startRangesAtMark(
   }
 }
 
+/**
+ * Drops a paragraph's items in `target`, from `from`, where they are spaces
+ * and tabs alone, as plain, bold or italic text, which Markdown writes as
+ * they are and reads as a blank line, so that the paragraph is an empty one,
+ * with the same Markdown as Word's empty paragraph there. Text Markdown
+ * writes in tags or delimiters, as underlined text or code, or with a
+ * comment, a tracked change or a link, stays, as does a no-break space,
+ * which a Word user keeps an empty line with.
+ */
+function dropBlankParagraphText(target: ContentItem[], from: number): void {
+  const items = target.slice(from);
+  if (items.some(item => item.type === 'text' && item.text !== '') && items.every(isBlankText)) target.length = from;
+}
+
+/** Whether `item` is spaces and tabs alone, or nothing, that Markdown writes
+ *  as they are (see dropBlankParagraphText) */
+function isBlankText(item: ContentItem): item is Extract<ContentItem, { type: 'text' }> {
+  return item.type === 'text' && /^[ \t]*$/.test(item.text) && item.commentIds.size === 0 && !item.revision && !item.href
+    && !item.formatting.underline && !item.formatting.strikethrough && !item.formatting.highlight
+    && !item.formatting.code && !item.formatting.superscript && !item.formatting.subscript;
+}
+
 /** Whether text next to an item starts or ends a Markdown block there: at
  *  the end of the content, a paragraph break, a table, or a display
  *  equation, which is a block of its own in Markdown. */
@@ -4183,6 +4205,8 @@ function parseNoteBody(
           const lenBeforeContent = target.length;
           const markBefore = skippedSelfRef;
           walkNoteBody(paraChildren, paraFormatting, target, inTableCell, currentRevision);
+          // As in the document's body (see dropBlankParagraphText)
+          if (!inTableCell && !isCodeBlock) dropBlankParagraphText(target, lenBeforeContent);
           // Word's space after the note's mark, where a Word user made the
           // paragraph that holds it code, goes, as it does before text
           if (isCodeBlock && !markBefore && skippedSelfRef) {
@@ -5354,6 +5378,10 @@ export async function extractDocumentContent(
             target.push(paraItem);
           }
           walk(paraChildren, paraFormatting, target, inTableCell, currentRevision);
+          // A paragraph of spaces and tabs alone is an empty one, but not in
+          // a table's cell, whose empty paragraph keeps its place, so the
+          // whitespace keeps it too, nor in code
+          if (!inTableCell && !isCodeBlock) dropBlankParagraphText(target, targetLenBeforePara + (needsPara ? 1 : 0));
           const hasText = target.length > targetLenBeforePara + (needsPara ? 1 : 0);
           if (hasText && !inTableCell && !isCodeBlock && !inBibliographyField) {
             startRangesAtMark(target, targetLenBeforePara, commentStartTargetIndex, activeComments);
@@ -7798,15 +7826,14 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
 
 /** A line of a cell's text as HTML, a string for each of its characters.
  *  HTML collapses a run of spaces and drops those at a line's start, so a
- *  space after another, or at the start of a line with text, is a reference,
- *  as is a tab or no-break space. A line of spaces alone is empty, as a
- *  paragraph is (see keepParagraphEdgeWhitespace). The > and < of the {>>,
- *  <<} and ~> of CriticMarkup, which export reads as text there, as no tag
- *  starts with them, stay as they are, so the editor and navigation read a
- *  comment or a substitution's sides there as they do the rest of its
- *  CriticMarkup. */
+ *  space after another, or at the start of a line, is a reference, as is a
+ *  tab or no-break space. So a line of spaces alone is all references, as
+ *  an empty one keeps its place in a cell too (see
+ *  keepParagraphEdgeWhitespace). The > and < of the {>>, <<} and ~> of
+ *  CriticMarkup, which export reads as text there, as no tag starts with
+ *  them, stay as they are, so the editor and navigation read a comment or a
+ *  substitution's sides there as they do the rest of its CriticMarkup. */
 function htmlLineCharacters(line: string): string[] {
-  if (!/[^ ]/.test(line)) return line.split('');
   const lead = /^[ \t\u00a0]*/.exec(line)![0].length;
   return line.split('').map((c, i) => c === '&' ? '&amp;'
     : c === '<' ? (line.startsWith('<}', i + 1) || line[i - 1] === '<' && line[i + 1] === '}' ? c : '&lt;')
@@ -8955,6 +8982,12 @@ function markTaskListItems(content: ContentItem[]): void {
       content[i + 1 + k] = { ...text, text: text.text.slice(take) };
       remove -= take;
     });
+    // Spaces and tabs alone after the box leave the item empty, as they
+    // would a paragraph (see dropBlankParagraphText)
+    let end = i + 1;
+    while (end < content.length && !isStructuralBoundaryItem(content[end])) end++;
+    const rest = content.slice(i + 1, end);
+    if (rest.every(isBlankText)) rest.forEach((text, k) => { content[i + 1 + k] = { ...text, text: '' }; });
   }
 }
 
@@ -11282,6 +11315,10 @@ export function buildMarkdown(
           strippedAlertLeadHadHardBreak = true;
         }
       }
+      // Spaces and tabs alone after the label leave the alert empty, as they
+      // would a paragraph (see dropBlankParagraphText), unless an equation
+      // goes on in it
+      if (/^[ \t]+$/.test(textOut) && !isInParagraphMath(mergedContent[rendered.nextIndex])) textOut = '';
     }
     if (pendingAlertInlinePrefixForHardBreak !== undefined && (textOut.startsWith('\n') || textOut.startsWith('\\\n') || strippedAlertLeadHadHardBreak)) {
       const markerIdx = output.length - 1;
@@ -11301,6 +11338,9 @@ export function buildMarkdown(
     pendingAlertInlinePrefixForHardBreak = undefined;
     const atStart = isMarkdownBlockEdge(mergedContent[i - 1]);
     const atEnd = isMarkdownBlockEdge(mergedContent[rendered.nextIndex]);
+    const next = mergedContent[rendered.nextIndex];
+    // Not after a heading's text, which a line can't go on
+    const mathFollows = !paragraphHeading && next?.type === 'math' && next.display && !!next.inParagraph;
     // A line break as \ before a line end holds in a paragraph's text but
     // not at its end, where Markdown drops the line end and keeps the \ as
     // text, nor in a heading, which the line end ends, so there it's <br>,
@@ -11325,9 +11365,13 @@ export function buildMarkdown(
     // An HTML block's indent, of up to three spaces, which markdown-it keeps
     // in its text, and a reference would make a paragraph's
     const htmlIndent = ownLine && atStart ? /^ {1,3}(?=<)/.exec(textOut)?.[0] ?? '' : '';
-    textOut = htmlIndent && startsHtmlBlock(textOut)
-      ? htmlIndent + keepParagraphWhitespace(textOut.slice(htmlIndent.length), true, atEnd)
-      : keepParagraphWhitespace(textOut, atStart, atEnd);
+    // Whitespace alone before an equation in the paragraph keeps the space
+    // export wrote for its line end as it is, which the math branch takes
+    // off, as it does after other text, or it would gain one each round trip
+    textOut = mathFollows && /^[ \t]* $/.test(textOut) ? keepParagraphWhitespace(textOut.slice(0, -1), atStart, atEnd) + ' '
+      : htmlIndent && startsHtmlBlock(textOut)
+        ? htmlIndent + keepParagraphWhitespace(textOut.slice(htmlIndent.length), true, atEnd)
+        : keepParagraphWhitespace(textOut, atStart, atEnd);
     if (paragraphHeading) {
       // A run of # that ends a heading's text, after a space or tab or as
       // all of it, is its closing sequence to Markdown, which drops it
@@ -11372,9 +11416,6 @@ export function buildMarkdown(
       textOut = textOut.replace(/\n(?=[\s\S])/g, '\n' + listLinePrefix);
     }
     listHtmlBlockOpen = !!listLinePrefix && startsHtmlBlock(textOut) && !HTML_BLOCK_ENDS_AT_MARKER.test(textOut.trimStart());
-    const next = mergedContent[rendered.nextIndex];
-    // Not after a heading's text, which a line can't go on
-    const mathFollows = !paragraphHeading && next?.type === 'math' && next.display && !!next.inParagraph;
     if (rendered.deferredComments.length > 0) {
       // Before an equation, whose line end is the one after the bodies (see
       // the math branch), a line break is a \ before the bodies' line end,
@@ -11449,13 +11490,16 @@ export function buildMarkdown(
       // end is <br>, as at a paragraph's end in the body, but not before an
       // equation in the paragraph (`beforeMath`), which the paragraph goes
       // on in after it, unless a highlight's == comes after it (see
-      // HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END).
+      // HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END), and where whitespace
+      // alone keeps the space export wrote for its line end as it is, as in
+      // the body.
       const inlinePart = (text: string, beforeMath = false) => {
         const broken = (beforeMath ? text : text.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + '<br>'))
           .replace(HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END, (_m, backslashes: string, close: string) => backslashes + '<br>' + close);
-        return partStart === 0
-          ? keepParagraphWhitespace(broken.replace(/^[ \t]/, ''), true, true)
-          : keepParagraphWhitespace(broken, isMarkdownBlockEdge(bodyMerged[partStart - 1]), true);
+        const own = partStart === 0 ? broken.replace(/^[ \t]/, '') : broken;
+        const atStart = partStart === 0 || isMarkdownBlockEdge(bodyMerged[partStart - 1]);
+        return beforeMath && /^[ \t]* $/.test(own) ? keepParagraphWhitespace(own.slice(0, -1), atStart, true) + ' '
+          : keepParagraphWhitespace(own, atStart, true);
       };
       // The part that holds the paragraph's text and display math so far,
       // which an equation in the paragraph goes on in, on the next line, and

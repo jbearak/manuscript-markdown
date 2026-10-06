@@ -18,7 +18,6 @@ export function decodeNumericHtmlEntity(entity: string, digits: string, radix: 1
 // paragraph's text in Word doesn't hold
 const TRIMMED_SPACE = '\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff';
 const TRIMMED_RE = new RegExp('[' + TRIMMED_SPACE + ']', 'g');
-const HAS_TRIMMED_RE = new RegExp('[' + TRIMMED_SPACE + ']');
 const EDGE_START_RE = new RegExp('^[ \\t' + TRIMMED_SPACE + ']+');
 const EDGE_RE = new RegExp('[ \\t' + TRIMMED_SPACE + ']');
 const NOT_EDGE_RE = new RegExp('[^ \\t' + TRIMMED_SPACE + ']');
@@ -29,14 +28,18 @@ const NOT_EDGE_RE = new RegExp('[^ \\t' + TRIMMED_SPACE + ']');
  * the start of a paragraph, or reads four spaces or a tab there as indented
  * code, and markdown-it trims other whitespace at either end too, as a
  * no-break space or U+3000. At the end, only that other whitespace counts,
- * since Word shows no spaces or tabs there. A paragraph of spaces alone
- * stays as it is, an empty paragraph to Markdown.
+ * since Word shows no spaces or tabs there. A paragraph of spaces and tabs
+ * alone is an empty one to Markdown, and import makes it one (see
+ * dropBlankParagraphText in converter.ts), so whitespace alone that starts
+ * the text here is in a table's cell, where an empty paragraph keeps its
+ * place, or in a paragraph with more in it, as an equation, and is all
+ * references.
  */
 export function keepParagraphEdgeWhitespace(text: string, atStart: boolean, atEnd: boolean): string {
 	const trimmed = (whitespace: string) => whitespace.replace(TRIMMED_RE,
 		c => c === '\u00a0' ? '&nbsp;' : '&#' + c.charCodeAt(0) + ';');
 	const reference = (whitespace: string) => trimmed(whitespace).replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;');
-	if (!NOT_EDGE_RE.test(text)) return atStart && HAS_TRIMMED_RE.test(text) ? reference(text) : text;
+	if (!NOT_EDGE_RE.test(text)) return atStart ? reference(text) : text;
 	let result = atStart ? text.replace(EDGE_START_RE, reference) : text;
 	// A backslash right before a reference would escape its &, so one before
 	// whitespace, which was text, is escaped itself. From the end, as a
