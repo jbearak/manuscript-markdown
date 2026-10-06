@@ -124,6 +124,7 @@ export interface MdToken {
   alertType?: GfmAlertType; // for GFM alerts in blockquotes
   alertLead?: boolean;      // first blockquote paragraph carrying alert header
   alertHasBodyParagraph?: boolean; // another same-level alert paragraph carries block content
+  blankAlertLead?: true;    // alert lead of spaces or tabs alone that import drops (see annotateBlankAlertLeads)
   alertFirst?: boolean;     // first paragraph in an alert block (for spacing)
   alertLast?: boolean;      // last paragraph in an alert block (for spacing)
   blockquoteGroupIndex?: number; // sequential index of the blockquote group this token belongs to
@@ -1481,7 +1482,9 @@ function moveHiddenAlertLeadComments(tokens: MdToken[]): void {
       continue;
     }
     const body = tokens[i + 1];
-    body.runs = [...lead.runs, ...body.runs];
+    // Spaces and tabs alone show nothing in the lead, but would at the
+    // start of the body's text, where import keeps them
+    if (!lead.blankAlertLead) body.runs = [...lead.runs, ...body.runs];
     lead.runs = [];
   }
 }
@@ -1534,6 +1537,119 @@ interface BlockquoteSpacing {
 }
 
 const BLOCKQUOTE_ALERT_MARKER_RE = /^(?:>\s*)+\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\](.*)$/i;
+
+/** Whether a run is spaces and tabs alone that Markdown writes as they are,
+ *  as plain, bold or italic text, which import drops from a paragraph (see
+ *  dropBlankParagraphText in converter.ts) */
+function isBlankText(run: MdRun): boolean {
+  return run.type === 'text' && /^[ \t]*$/.test(run.text) && !run.underline && !run.strikethrough && !run.highlight
+    && !run.superscript && !run.subscript && !run.code && !run.href;
+}
+
+/**
+ * Marks each alert's first paragraph that holds spaces or tabs alone, which
+ * import drops (see dropBlankParagraphText in converter.ts), but for where
+ * it keeps them (see keptBlankParagraphs), once parseMd has the blocks Word
+ * gets, as a directive Word gets no paragraph for. Its marker's line holds
+ * no text, as &#32;, which import wrote before nothing, and the next
+ * paragraph's text after it where the label is hidden. With the label
+ * hidden, export leaves the paragraph out (see moveHiddenAlertLeadComments),
+ * so its marker is alone, as for an empty one (see annotateBlockquoteSpacing).
+ */
+function annotateBlankAlertLeads(tokens: MdToken[]): void {
+  const kept = keptBlankParagraphs(tokens);
+  for (const lead of tokens) {
+    if (!lead.alertLead || kept.has(lead) || !lead.runs.every(isBlankText)) continue;
+    lead.blankAlertLead = true;
+    const spacing = lead.blockquoteSpacing;
+    // Where the marker's line was found (see annotateBlockquoteSpacing)
+    if (spacing?.alertInline === undefined) continue;
+    spacing.alertInline = false;
+    if (lead.alertHasBodyParagraph) spacing.alertAlone = true;
+  }
+}
+
+/**
+ * The tokens whose spaces and tabs alone import keeps as the paragraph's
+ * text, as dropBlankParagraphText in converter.ts doesn't drop them: where
+ * its mark or that of the paragraph Word gets before it is a tracked change,
+ * or an ID comment's range from a token before it is open at its start. An
+ * ID's range runs from its first {#id} to its last {/id}, as export gives
+ * every one of them the ID's one Word comment (see prescanCommentIds), whose
+ * range Word reads from its first start to its last end. The paragraph
+ * Word gets before it is past those Word gets none for (see
+ * paragraphsBefore).
+ */
+function keptBlankParagraphs(tokens: MdToken[]): Set<MdToken> {
+  const ranges = new Map<string, { first: number; last: number }>();
+  const walk = (runs: MdRun[] = [], at: number) => {
+    for (const run of runs) {
+      if (run.type === 'comment_range_start' || run.type === 'comment_range_end') {
+        const id = run.commentId || '';
+        const range = ranges.get(id) ?? { first: Infinity, last: -1 };
+        if (run.type === 'comment_range_start') range.first = Math.min(range.first, at);
+        else range.last = Math.max(range.last, at);
+        ranges.set(id, range);
+      }
+      walk(run.innerRuns, at);
+      walk(run.oldRuns, at);
+      walk(run.newRuns, at);
+    }
+  };
+  tokens.forEach((token, at) => {
+    walk(token.runs, at);
+    for (const row of token.rows ?? []) for (const cell of row.cells) walk(cell.runs, at);
+  });
+  // How many ranges are open at each token's start, from the token after
+  // each one's first start to its last end
+  const opens = new Array<number>(tokens.length + 1).fill(0);
+  for (const { first, last } of ranges.values()) {
+    if (first < last) {
+      opens[first + 1]++;
+      opens[last + 1]--;
+    }
+  }
+  const before = paragraphsBefore(tokens);
+  const kept = new Set<MdToken>();
+  let open = 0;
+  tokens.forEach((token, at) => {
+    open += opens[at];
+    if (open > 0 || token.criticParaMark || before[at]?.criticParaMark) kept.add(token);
+  });
+  return kept;
+}
+
+/**
+ * For each token, the one whose paragraph Word gets last before it, as
+ * generateDocumentXml writes them, found in one pass: past a paragraph of
+ * comment bodies only, which it leaves out (see commentBodiesOmitted), and a
+ * style's directive, for which it writes none (see isStyleDirective), and
+ * past quote paragraphs of comment bodies only, which go into the paragraph
+ * of their quote before them where it takes them (see
+ * withQuoteCommentBodiesMerged), or else stay, as a blank alert's lead takes
+ * none. Their quote is that paragraph's where it's a quote's paragraph that
+ * ends no alert, as no other block is between (see
+ * annotateBlockquoteGroupIndices, which runs later).
+ */
+function paragraphsBefore(tokens: MdToken[]): Array<MdToken | undefined> {
+  const omitsCommentBodies = commentBodiesOmitted(tokens);
+  const before: Array<MdToken | undefined> = [];
+  // The last token Word gets a paragraph for, and the last block
+  // generateDocumentXml reads, for whether it writes comment bodies between
+  // two lists. It reads none after a directive, which is no list's, so a
+  // directive gives the same answer
+  let last: MdToken | undefined;
+  let prev: MdToken | undefined;
+  tokens.forEach((token, at) => {
+    before.push(last);
+    if (omitsCommentBodies(at, prev)) return;
+    prev = token;
+    if (isStyleDirective(token)) return;
+    if (isQuoteCommentBodies(token) && last?.type === 'blockquote' && !last.alertLast && takesQuoteCommentBodies(last)) return;
+    last = token;
+  });
+  return before;
+}
 
 /** Markdown source without its complete ID comment bodies ({#id>>...<<}). */
 function withoutCommentBodies(src: string): string {
@@ -1694,8 +1810,12 @@ function annotateBlockquoteSpacing(tokens: MdToken[], parsedLines: string[], ori
       if (next) spacing.gapAfter = !next.markerLine && below.line === next.start ? below.count : -1;
     }
     const alertMarker = originalLines[group.text].replace(LIST_MARKERS_RE, '').match(BLOCKQUOTE_ALERT_MARKER_RE);
-    // A comment body on the marker line shows nothing, and import writes it below
+    // A comment body on the marker line shows nothing, and import writes it
+    // below. Nor does a paragraph of spaces alone, which import drops (see
+    // annotateBlankAlertLeads)
     if (alertMarker) spacing.alertInline = withoutCommentBodies(alertMarker[2]).trim().length > 0;
+    // A marker the alert's first paragraph is none of the text of, or one of
+    // spaces alone (see annotateBlankAlertLeads)
     if (alertMarker && group.first.alertLead && group.first.alertHasBodyParagraph && group.first.runs.length === 0) spacing.alertAlone = true;
     group.first.blockquoteSpacing = spacing;
   });
@@ -2776,6 +2896,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
   }
 
   applyCustomStyleSentinels(result, warnings, env.references);
+  annotateBlankAlertLeads(result);
 
   if (env.references) linkDefinitionsOf.set(result, env.references);
   return result;
@@ -7777,10 +7898,47 @@ function isHiddenParagraph(token: MdToken): boolean {
   return token.type === 'paragraph' && token.runs.length > 0 && token.runs.every(r => r.type === 'html_comment');
 }
 
+/** Whether a quote's paragraph holds only comment bodies, which
+ *  withQuoteCommentBodiesMerged moves into one by it */
+function isQuoteCommentBodies(token: MdToken): boolean {
+  return token.type === 'blockquote' && !token.alertLead && holdsOnlyCommentBodies(token);
+}
+
+/** Whether a quote's paragraph takes the comment bodies of the paragraphs of
+ *  its quote by it (see withQuoteCommentBodiesMerged): an alert's lead only
+ *  where it shows text, as one that doesn't collapses */
+function takesQuoteCommentBodies(token: MdToken): boolean {
+  return !token.alertLead || token.runs.some(run => run.type !== 'comment_body_with_id' && !isNonRenderingAlertLeadRun(run));
+}
+
 /** Whether a paragraph holds only comment bodies, which generateDocumentXml
  *  registers without writing the paragraph. */
 function isCommentBodyParagraph(token: MdToken): boolean {
   return token.type === 'paragraph' && holdsOnlyCommentBodies(token);
+}
+
+/**
+ * Whether the token at an index of `tokens`, after block `prev`, is a
+ * paragraph of comment bodies only that Word doesn't get, as
+ * generateDocumentXml writes them. Alone between two lists, it's an empty
+ * paragraph, which import reads as the end of the first.
+ */
+function commentBodiesOmitted(tokens: MdToken[]): (ti: number, prev: MdToken | undefined) => boolean {
+  // For each index, the first token from it on that isn't such a paragraph,
+  // found at once, so a run of them is read once
+  const past = new Int32Array(tokens.length + 1);
+  past[tokens.length] = tokens.length;
+  for (let i = tokens.length - 1; i >= 0; i--) past[i] = isCommentBodyParagraph(tokens[i]) ? past[i + 1] : i;
+  return (ti, prev) => past[ti] !== ti && !(!tokens[ti].listContinuation
+    && (prev?.type === 'list_item' || !!prev?.listContinuation)
+    && tokens[past[ti + 1]]?.type === 'list_item');
+}
+
+/** Whether a token is a custom style's directive, <!-- style: X --> or
+ *  <!-- /style -->, which sets the style of the paragraphs after it, and
+ *  for which generateDocumentXml writes no paragraph */
+function isStyleDirective(token: MdToken): boolean {
+  return !!token.customStyleOpen || !!token.customStyleClose;
 }
 
 /**
@@ -7793,12 +7951,11 @@ function isCommentBodyParagraph(token: MdToken): boolean {
 function withQuoteCommentBodiesMerged(tokens: MdToken[]): MdToken[] {
   const merged: MdToken[] = [];
   const sameQuote = (other: MdToken | undefined, token: MdToken): other is MdToken =>
-    other?.type === 'blockquote' && other.blockquoteGroupIndex === token.blockquoteGroupIndex
-    && (!other.alertLead || other.runs.some(run => run.type !== 'comment_body_with_id' && !isNonRenderingAlertLeadRun(run)));
+    other?.type === 'blockquote' && other.blockquoteGroupIndex === token.blockquoteGroupIndex && takesQuoteCommentBodies(other);
   const lineBreak: MdRun = { type: 'softbreak', text: '\n' };
   let carried: MdToken | undefined;
   for (const token of tokens) {
-    const bodiesOnly = token.type === 'blockquote' && !token.alertLead && holdsOnlyCommentBodies(token);
+    const bodiesOnly = isQuoteCommentBodies(token);
     if (carried && sameQuote(token, carried)) {
       const joined = { ...token, runs: [...carried.runs, lineBreak, ...token.runs], alertFirst: token.alertFirst || carried.alertFirst };
       // Bodies go on until the quote shows something
@@ -8659,19 +8816,7 @@ function prescanCommentIds(tokens: MdToken[], state: DocxGenState): void {
 
 export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine, frontmatter?: Frontmatter): string {
   tokens = withQuoteCommentBodiesMerged(tokens);
-  // The token after index ti, past paragraphs of comment bodies only
-  const pastCommentBodies = (ti: number): MdToken | undefined => {
-    let next = ti + 1;
-    while (next < tokens.length && isCommentBodyParagraph(tokens[next])) next++;
-    return tokens[next];
-  };
-  // Whether the token at index ti, after block prev, is a paragraph of comment
-  // bodies only that Word doesn't get. Alone between two lists, it's an empty
-  // paragraph, which import reads as the end of the first.
-  const omitsCommentBodies = (ti: number, prev: MdToken | undefined): boolean =>
-    isCommentBodyParagraph(tokens[ti]) && !(!tokens[ti].listContinuation
-      && (prev?.type === 'list_item' || !!prev?.listContinuation)
-      && pastCommentBodies(ti)?.type === 'list_item');
+  const omitsCommentBodies = commentBodiesOmitted(tokens);
   // The block Word gets after the one at index ti
   const nextBlock = (ti: number): MdToken | undefined => {
     let next = ti + 1;
@@ -8824,38 +8969,27 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     }
 
     // Custom style sentinels: update active custom style state (no OOXML output,
-    // just a state flag that generateParagraph reads).
-    if (token.customStyleOpen) {
-      // Validate that the style is declared in frontmatter
-      if (frontmatter?.styles && !frontmatter.styles[token.customStyleOpen]) {
+    // just a state flag that generateParagraph reads), for which Word gets no
+    // paragraph (see isStyleDirective).
+    if (isStyleDirective(token)) {
+      if (token.customStyleOpen && frontmatter?.styles && !frontmatter.styles[token.customStyleOpen]) {
+        // Validate that the style is declared in frontmatter
         state.warnings.push('Custom style "' + token.customStyleOpen + '" used in <!-- style: --> directive but not declared in frontmatter styles.');
-        preserveCloseForNextToken = !!prevWasClose;
-        hiddenAtSectionStart = hiddenBefore;
-        hiddenXml = hiddenXmlBefore;
-        if (prevToken?.type === 'heading') state.afterHeading = true;
-        prevToken = undefined;
-        continue;
+      } else if (token.customStyleOpen) {
+        if (token.blankLinesBefore !== undefined) sentinelGaps['cso' + sentinelCsoIdx] = token.blankLinesBefore;
+        if (token.blankLinesAfter !== undefined) sentinelGaps['csoa' + sentinelCsoIdx] = token.blankLinesAfter;
+        sentinelCsoIdx++;
+        state.activeCustomStyle = token.customStyleOpen;
+        biblAtSectionStart = biblFirst;
+      } else {
+        if (token.blankLinesBefore !== undefined) sentinelGaps['csc' + sentinelCscIdx] = token.blankLinesBefore;
+        if (token.blankLinesAfter !== undefined) sentinelGaps['csca' + sentinelCscIdx] = token.blankLinesAfter;
+        sentinelCscIdx++;
+        state.activeCustomStyle = undefined;
+        biblAtSectionStart = biblFirst;
       }
-      if (token.blankLinesBefore !== undefined) sentinelGaps['cso' + sentinelCsoIdx] = token.blankLinesBefore;
-      if (token.blankLinesAfter !== undefined) sentinelGaps['csoa' + sentinelCsoIdx] = token.blankLinesAfter;
-      sentinelCsoIdx++;
-      state.activeCustomStyle = token.customStyleOpen;
-      preserveCloseForNextToken = !!prevWasClose;
-      biblAtSectionStart = biblFirst;
-      hiddenAtSectionStart = hiddenBefore;
-      hiddenXml = hiddenXmlBefore;
-      if (prevToken?.type === 'heading') state.afterHeading = true;
-      prevToken = undefined;
-      continue;
-    }
-    if (token.customStyleClose) {
-      if (token.blankLinesBefore !== undefined) sentinelGaps['csc' + sentinelCscIdx] = token.blankLinesBefore;
-      if (token.blankLinesAfter !== undefined) sentinelGaps['csca' + sentinelCscIdx] = token.blankLinesAfter;
-      sentinelCscIdx++;
-      state.activeCustomStyle = undefined;
       // Not a section boundary — just thread close-status through (unlike landscapeClose/portraitClose which set true)
       preserveCloseForNextToken = !!prevWasClose;
-      biblAtSectionStart = biblFirst;
       hiddenAtSectionStart = hiddenBefore;
       hiddenXml = hiddenXmlBefore;
       if (prevToken?.type === 'heading') state.afterHeading = true;
