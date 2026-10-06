@@ -2160,28 +2160,37 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
 }
 
 /** A run's text and formatting as HTML, as renderHtmlCellParagraph writes
- *  them, for a cell's paragraph it can't write: escapes, which export
- *  would read as text there, as would a line break's backslash, and spaces
- *  HTML would collapse or drop as references (see htmlLineCharacters): one
- *  after another, and one at an end of a line of the run that a <br> or
- *  its formatting's tags keep from the paragraph's edges, which
- *  keepParagraphWhitespace reads. A highlight, which has no tag, goes as
- *  its ==, as text, around the rest where it joins its neighbours'
- *  (`joins`). */
+ *  them, for a cell's paragraph it can't write, whose escapes export would
+ *  read as text, as it would a line break's backslash. A highlight, which
+ *  has no tag, goes as its ==, as text, around the rest where it joins its
+ *  neighbours' (`joins`), and so its edge whitespace goes outside it, as
+ *  bold's, italic's and strikethrough's does, which keepParagraphWhitespace
+ *  and citationSeparator read there (see markedFormatting's edges). A space
+ *  HTML would drop or run together is a reference: one at the start of a
+ *  line after a line break, or of the run's text inside its tags, and all
+ *  but the last of a run of spaces. So is a brace, or an = next to another
+ *  or at the run's edge, which the grammar and navigation would read as
+ *  CriticMarkup or a highlight with the == around it. */
 function htmlCellRun(text: string, fmt: RunFormatting, joins = false): string {
+  const moves = !fmt.superscript && !fmt.subscript && (fmt.highlight || !fmt.underline && (fmt.strikethrough || fmt.italic || fmt.bold));
+  const [lead, core, trail] = moves ? edgeWhitespace(text) : ['', text, ''];
   const tagged = fmt.code || fmt.superscript || fmt.subscript || fmt.underline || fmt.strikethrough || fmt.italic || fmt.bold;
-  const lines = text.split('\\\n');
-  let html = lines.map((line, k) => line.split('').map((c, i) => c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;'
-    : c === '\t' ? '&#9;' : c === '\u00a0' ? '&nbsp;'
-      : c === ' ' && (line[i - 1] === ' ' || i === 0 && (tagged || k > 0) || i === line.length - 1 && (tagged || k < lines.length - 1)) ? '&#32;' : c).join('')).join('<br>');
-  if (fmt.code) html = '<code>' + html + '</code>';
-  if (fmt.superscript) html = '<sup>' + html + '</sup>';
-  else if (fmt.subscript) html = '<sub>' + html + '</sub>';
-  if (fmt.underline) html = '<u>' + html + '</u>';
-  if (fmt.strikethrough) html = '<s>' + html + '</s>';
-  if (fmt.italic) html = '<i>' + html + '</i>';
-  if (fmt.bold) html = '<b>' + html + '</b>';
-  return fmt.highlight ? wrapHighlight(html, markdownHighlightColor(fmt), joins) : html;
+  const html = (part: string, inTags: boolean) => part.split('\\\n').map((line, k, lines) => line.replace(/ +|[^ ]/g, (c, i: number) => {
+    if (c[0] === ' ') return '&#32;'.repeat(i === 0 && (k > 0 || inTags) ? c.length : c.length - 1) + (i === 0 && (k > 0 || inTags) ? '' : ' ');
+    return c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '\t' ? '&#9;' : c === '\u00a0' ? '&nbsp;'
+      : c === '{' ? '&#123;' : c === '}' ? '&#125;'
+        : c === '=' && (line[i - 1] === '=' || line[i + 1] === '=' || k === 0 && i === 0 || k === lines.length - 1 && i === line.length - 1) ? '&#61;' : c;
+  })).join('<br>');
+  let inner = html(core, !!tagged);
+  if (fmt.code) inner = '<code>' + inner + '</code>';
+  if (fmt.superscript) inner = '<sup>' + inner + '</sup>';
+  else if (fmt.subscript) inner = '<sub>' + inner + '</sub>';
+  if (fmt.underline) inner = '<u>' + inner + '</u>';
+  if (fmt.strikethrough) inner = '<s>' + inner + '</s>';
+  if (fmt.italic) inner = '<i>' + inner + '</i>';
+  if (fmt.bold) inner = '<b>' + inner + '</b>';
+  if (fmt.highlight && core) inner = wrapHighlight(inner, markdownHighlightColor(fmt), joins);
+  return html(lead, false) + inner + html(trail, false);
 }
 
 /** `markdown`, a run's text, in the tags and delimiters of its formatting

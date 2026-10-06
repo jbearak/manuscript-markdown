@@ -5861,6 +5861,7 @@ describe('Word text that reads as Markdown', () => {
     ['an HTML tag', '<span>a</span>'],
     ['an entity', '&amp; &lt;'],
     ['spaces HTML runs together', 'a  b   c'],
+    ['CriticMarkup and a highlight', '{++a++} b==c=='],
     ['a line break', 'a\nb'],
   ])('keeps %s in an HTML table\'s cell that holds what HTML can\'t as its text', async (_name, text) => {
     // Export reads the cell as HTML, where its escapes were text, its tags
@@ -5901,14 +5902,40 @@ describe('Word text that reads as Markdown', () => {
   };
 
   test.each([
-    ['bold at the cell\'s start', ' a', { bold: true }, false, ' a{++x++}'],
-    ['italic at the cell\'s end', 'a ', { italic: true }, true, '{++x++}a '],
-    ['after a line break', 'a\\\n  b', {}, false, 'a↵  b{++x++}'],
-  ])('keeps the spaces of a run %s in an HTML table\'s cell that holds what HTML can\'t', async (_name, text, formatting, last, expected) => {
+    ['bold at the cell\'s start', ' a', { bold: true }, ' a{++x++}'],
+    ['underlined at the cell\'s start', '  a', { underline: true }, '  a{++x++}'],
+    ['after a line break', 'a\\\n  b', {}, 'a↵  b{++x++}'],
+  ])('keeps the spaces of a run %s in an HTML table\'s cell that holds what HTML can\'t', async (_name, text, formatting, expected) => {
     // HTML dropped them at the edge of the tags of its formatting, or a line
-    const item: ContentItem = { type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting } };
-    const { text: cell } = await fallbackCell(last ? [insertedRun, item] : [item, insertedRun]);
+    const { text: cell } = await fallbackCell([{ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting } }, insertedRun]);
     expect(cell).toBe(expected);
+  });
+
+  test.each([
+    ['ends in an =', 'a=', '==a&#61;=='],
+    ['has two =', 'a==b', '==a&#61;&#61;b=='],
+  ])('writes a highlighted run that %s in an HTML table\'s cell that holds what HTML can\'t with a highlight\'s ==', async (_name, text, highlight) => {
+    // Its = ran into the highlight's ==, which the grammar and navigation
+    // read as none, or as a shorter one
+    const { markdown, text: cell } = await fallbackCell([{ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, highlight: true } }, insertedRun]);
+    expect(markdown).toContain('<p>' + highlight + '{++x++}</p>');
+    expect(cell).toBe('==' + text + '=={++x++}');
+  });
+
+  test('writes text that reads as CriticMarkup in an HTML table\'s cell that holds what HTML can\'t with its braces as references', async () => {
+    // Navigation and the grammar read it as a change
+    const { markdown } = await fallbackCell([{ type: 'text', text: '{++a++} ', commentIds: new Set(), formatting: DEFAULT_FORMATTING }, insertedRun]);
+    expect(markdown).toContain('<p>&#123;++a++&#125; {++x++}</p>');
+  });
+
+  test('puts no second space before a citation after an underlined space in an HTML table\'s cell that holds what HTML can\'t', async () => {
+    // A reference for the space hid it from the separator
+    const { markdown } = await fallbackCell([
+      { type: 'text', text: 'a ', commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, underline: true } },
+      { type: 'citation', text: '(Smith 2020)', commentIds: new Set(), pandocKeys: ['@smith2020'] },
+      insertedRun,
+    ]);
+    expect(markdown).toContain('<p><u>a </u>[@smith2020]{++x++}</p>');
   });
 
   test('joins the highlights of runs formatted otherwise in an HTML table\'s cell that holds what HTML can\'t', async () => {
