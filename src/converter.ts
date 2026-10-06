@@ -11548,6 +11548,11 @@ export function buildMarkdown(
     // which export doesn't count among the comments of their own that take
     // an index for their blank lines (annotateHtmlCommentIndices).
     const amongOwnComments = !pendingAlertPrefixStrip && !paragraphNested && !paragraphHeading;
+    // One no para item started, as one a comment starts that starts a
+    // section, as the first paragraph has none, writes the separator the
+    // fence before it left, a block of comments alone or not, and before its
+    // indent's columns are counted on the line it's on
+    if (output.length > 0 && incomingSep !== null) output.push(incomingSep);
 
     rendered.deferredComments.unshift(...pendingEquationBodies.splice(0));
     let strippedAlertLeadHadHardBreak = false;
@@ -11663,14 +11668,14 @@ export function buildMarkdown(
       : htmlIndent && startsHtmlBlock(' '.repeat(indentColumns) + textOut.slice(htmlIndent.length)) && !inline()
         ? htmlIndent + keepParagraphWhitespace(textOut.slice(htmlIndent.length), true, atEnd)
         : referenced;
-    // Track standalone HTML comment paragraphs for gap metadata and emit their
-    // separator, where export reads what import wrote as one: a block that
-    // starts and ends with a comment, as parseMd trims it, so with the spaces
-    // and tabs of a raw indent and of its end, as Word puts after the run,
-    // but not a reference before it, which makes a paragraph, nor line breaks
-    // or text after the comment. Its items say which, not its Markdown, which
-    // a comment Word put on the run adds to, in its comments' runs, which
-    // Word may split.
+    // Track standalone HTML comment paragraphs for gap metadata and keep the
+    // blank lines a para item wrote before them, where export reads what
+    // import wrote as one: a block that starts and ends with a comment, as
+    // parseMd trims it, so with the spaces and tabs of a raw indent and of
+    // its end, as Word puts after the run, but not a reference before it,
+    // which makes a paragraph, nor line breaks or text after the comment.
+    // Its items say which, not its Markdown, which a comment Word put on the
+    // run adds to, in its comments' runs, which Word may split.
     const solid = items.filter(entry => entry.type !== 'text' || /[^ \t]/.test(entry.text));
     if (amongOwnComments && solid[0]?.type === 'html_comment' && solid[solid.length - 1].type === 'html_comment'
       && items.every(entry => entry.type !== 'text' || !entry.text.includes('\n')) && /^[ \t]*<!--/.test(textOut)
@@ -11679,9 +11684,7 @@ export function buildMarkdown(
       // A blank line, where export stored none
       if (output.length === 0) documentStartCommentGap = htmlCommentGaps?.get(htmlCommentIndex) ?? 1;
       if (output.length > 0) {
-        if (incomingSep !== null) {
-          output.push(incomingSep);
-        } else {
+        if (incomingSep === null) {
           // Use before-gap metadata for this html_comment.
           // The empty para marker that precedes the html_comment item may have
           // already contributed newlines to the output (via the para separator

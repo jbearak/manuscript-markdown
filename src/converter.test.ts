@@ -3003,6 +3003,18 @@ describe('Sentinel gap round-trip', () => {
     expect(markdown).toBe(md);
   });
 
+  test.each([
+    ['a landscape section', '<!-- landscape -->\n\n<!-- a --><br>\n\n<!-- /landscape -->\n\nAfter.\n'],
+    ['a tight landscape section', '<!-- landscape -->\n<!-- a --><br>\n<!-- /landscape -->\n'],
+    ['a portrait section', '<!-- portrait -->\n\n<!-- a --> <!-- b --><br>\n\n<!-- /portrait -->\n\nAfter.\n'],
+  ])('keeps the line end after the fence of %s that starts the document before a comment and a line break', async (_name, md) => {
+    // Only a comment of its own wrote it, which has no para item there,
+    // so the line went on after the fence, which then wasn't one
+    let markdown = md;
+    for (let i = 0; i < 2; i++) markdown = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+    expect(markdown).toBe(md);
+  });
+
   test('keeps a section after a paragraph of whitespace on a line of its own', async () => {
     const md = '&nbsp;\n\n<!-- landscape -->\n\nWide.\n\n<!-- /landscape -->\n';
     const markdown = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
@@ -6332,6 +6344,27 @@ describe('Line breaks a backslash can\'t hold', () => {
     const md1 = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
     expect(md1).toBe('A.\n\n> &#9;<!-- a --> <!-- b -->\n\nB.\n');
     expect((await convertDocx((await convertMdToDocx(md1)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md1);
+  });
+
+  test.each([
+    ['a landscape section', '<!-- landscape -->\n\nXX\n\n<!-- /landscape -->', '<!-- landscape -->\n\n&#9;<!-- a -->\n\n<!-- /landscape -->'],
+    ['a landscape section with no blank lines in it', '<!-- landscape -->\nXX\n<!-- /landscape -->', '<!-- landscape -->\n&#9;<!-- a -->\n<!-- /landscape -->'],
+    ['a portrait section', '<!-- portrait -->\n\nXX\n\n<!-- /portrait -->', '<!-- portrait -->\n\n&#9;<!-- a -->\n\n<!-- /portrait -->'],
+  ])('counts the columns of a tab in the hidden run of a comment that starts %s that starts the document from the margin', async (_name, source, md) => {
+    // From the end of the fence, as the line end after it, which a para item
+    // writes for others, came after, so as two, raw, which made the comment
+    // code
+    const zip = await JSZip.loadAsync((await convertMdToDocx(source + '\n\nB.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace(/<w:r>(?:(?!<w:r>)[\s\S])*?>XX<\/w:t><\/w:r>/,
+      r(t('\u200B') + '<w:tab/>' + t('&lt;!-- a --&gt;'), '<w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr>'));
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    const md1 = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(md1).toBe(md + '\n\nB.\n');
+    const exported = (await convertMdToDocx(md1)).docx;
+    expect(await texts(exported)).toContain('\t[\u200B&lt;!-- a --&gt;]');
+    expect((await convertDocx(exported)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toBe(md1);
   });
 
   test('keeps one in inline code between the code on each side', async () => {
