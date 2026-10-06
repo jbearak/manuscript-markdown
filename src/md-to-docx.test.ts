@@ -504,7 +504,7 @@ describe('parseMd HTML tables', () => {
     // Which Word's table can't hold, and hidden, lost the rest of the block
     const tokens = parseMd(markdown);
     expect(tokens.map(t => t.type)).toEqual(['paragraph']);
-    expect(tokens[0].runs).toEqual([{ type: 'text', text: markdown }]);
+    expect(tokens[0].runs).toEqual([{ type: 'text', text: markdown, rawHtml: true }]);
     const { warnings } = await convertMdToDocx(markdown);
     expect(warnings).toContain('HTML table whose rows are all in comments exported as text (not supported). Move the comments outside the table for round-trip fidelity.');
   });
@@ -4864,7 +4864,7 @@ describe('landscape sections', () => {
         {
           type: 'paragraph',
           sourceRange: [0, 3],
-          runs: [{ type: 'text', text: '<div>\n<!-- landscape -->\n</div>' }],
+          runs: [{ type: 'text', text: '<div>\n<!-- landscape -->\n</div>', rawHtml: true }],
         },
       ]);
     });

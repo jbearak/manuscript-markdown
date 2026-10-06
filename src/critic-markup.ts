@@ -356,6 +356,40 @@ function findNextCriticOpener(src: string, pos: number): CriticOpener | undefine
  * result's or in its placeholders, one in a line's and two in a blank
  * line's, which count the source's lines.
  */
+/** The CriticMarkup spans of `source` in one pass from the left: from an
+ *  opener not escaped nor in code or an HTML block, to its closer, the first
+ *  after it but for a comment's, which is past its replies. */
+function* criticSpans(source: string, inertRegions: CodeRegion[]): IterableIterator<{ start: number; contentStart: number; closeIdx: number }> {
+  let searchFrom = 0;
+  while (true) {
+    const candidate = findNextCriticOpener(source, searchFrom);
+    if (!candidate) return;
+
+    const contentStart = candidate.index + candidate.open.length;
+    searchFrom = contentStart;
+    if (isInsideCodeRegion(candidate.index, inertRegions) || isEscapedAt(source, candidate.index)) continue;
+    const closeIdx = candidate.nested
+      ? findMatchingClose(source, contentStart)
+      : source.indexOf(candidate.close, contentStart);
+    if (closeIdx === -1) continue;
+    if (candidate.open === '{~~') {
+      const separatorPos = source.indexOf('~>', contentStart);
+      if (separatorPos === -1 || separatorPos >= closeIdx) continue;
+    }
+    yield { start: candidate.index, contentStart, closeIdx };
+    searchFrom = closeIdx + candidate.close.length;
+  }
+}
+
+/** The payloads of the CriticMarkup spans in `markdown`, as [start, end),
+ *  whose line ends preprocessCriticMarkup keeps from markdown-it's block
+ *  parse, and with them the indent after each, which a list item's
+ *  paragraph's would lose */
+export function criticPayloadRanges(markdown: string): Array<[number, number]> {
+  if (!/\{(?:\+\+|--|~~|==|>>|#)/.test(markdown)) return [];
+  return [...criticSpans(markdown, computeCriticBlockAnalysis(markdown).inertRegions)].map(({ contentStart, closeIdx }) => [contentStart, closeIdx]);
+}
+
 export function preprocessCriticMarkup(markdown: string, moveLeadingBreaks = true): string {
   // Fast path: if no CriticMarkup opening markers, return unchanged
   if (!markdown.includes('{++') && !markdown.includes('{--') &&
@@ -370,43 +404,18 @@ export function preprocessCriticMarkup(markdown: string, moveLeadingBreaks = tru
   const { source: result, inertRegions } = analysis;
   const segments: string[] = [];
   let lastPos = 0;
-  let searchFrom = 0;
-  while (true) {
-    const candidate = findNextCriticOpener(result, searchFrom);
-    if (!candidate) break;
-
-    const contentStart = candidate.index + candidate.open.length;
-    if (isInsideCodeRegion(candidate.index, inertRegions) || isEscapedAt(result, candidate.index)) {
-      searchFrom = contentStart;
-      continue;
-    }
-    const closeIdx = candidate.nested
-      ? findMatchingClose(result, contentStart)
-      : result.indexOf(candidate.close, contentStart);
-    if (closeIdx === -1) {
-      searchFrom = contentStart;
-      continue;
-    }
-    if (candidate.open === '{~~') {
-      const separatorPos = result.indexOf('~>', contentStart);
-      if (separatorPos === -1 || separatorPos >= closeIdx) {
-        searchFrom = contentStart;
-        continue;
-      }
-    }
-
+  for (const { start, contentStart, closeIdx } of criticSpans(result, inertRegions)) {
     const content = result.slice(contentStart, closeIdx);
     // Single-line spans need no transformation. Besides avoiding needless
     // allocations, this prevents quoteDepthAt from searching backward through
     // an ever-growing single line for every span.
     if (/[\r\n]/.test(content)) {
-      const withoutQuotePrefixes = stripQuoteContinuationPrefixes(content, quoteDepthAt(result, candidate.index));
+      const withoutQuotePrefixes = stripQuoteContinuationPrefixes(content, quoteDepthAt(result, start));
       const protectedContent = protectLineBreaks(withoutQuotePrefixes);
       segments.push(result.slice(lastPos, contentStart));
       segments.push(protectedContent);
       lastPos = closeIdx;
     }
-    searchFrom = closeIdx + candidate.close.length;
   }
   if (segments.length > 0) segments.push(result.slice(lastPos));
 
