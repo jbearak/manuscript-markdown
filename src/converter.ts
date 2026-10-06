@@ -5936,7 +5936,10 @@ function spanJoin(item: InlineRevisionItem): { join: SpanJoin; literal: Set<stri
  * formatting tag (</u>), and a closing bracket before a letter, a digit,
  * emphasis, strikethrough, a highlight or a tag, none of which can open a
  * link: before[^1]after, ==a==[^1]==b==, **==a==**[^1]**==b==**. A link
- * joins a word, emphasis or another link on either side: [a](u)b[c](u).
+ * joins a word, emphasis or another link on either side: [a](u)b[c](u). A
+ * line break's \ joins after anything, as it reads as one at any line's
+ * end, and ends nothing before it: {++**a**\\\n++}, where Word's bold
+ * stops before the break, as export writes it.
  */
 function canJoinSpans(beforeEnd: string, after: string): boolean {
   const a = beforeEnd.slice(-1);
@@ -5946,7 +5949,7 @@ function canJoinSpans(beforeEnd: string, after: string): boolean {
   // whose tags and references read as they do next to anything, and what
   // Markdown would read at the seam is text
   if (!readsMarkdown) return true;
-  if (/\s/.test(a) || /\s/.test(b)) return true;
+  if (/\s/.test(a) || /\s/.test(b) || after.startsWith('\\\n')) return true;
   if (/[\p{L}\p{N}\]]/u.test(a) && /[\p{L}\p{N}]/u.test(b)) return true;
   if (a === ']' && /^(?:\*|==|~~|<)/.test(after)) return true;
   if (after.startsWith('[^') && /[\p{L}\p{N}.,;:?)\]$*`"'\u2019\u201D=}~>]/u.test(a)) return true;
