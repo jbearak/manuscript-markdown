@@ -838,6 +838,22 @@ describe('parseMd grid tables', () => {
     const result = preprocessGridTables(markdown);
     expect(result).toBe(markdown);
   });
+
+  it.each([
+    ['in a <div> after a table', '<div>\n<table><tr><td>a</td></tr></table>\n+---+\n| g |\n+---+\n</div>'],
+    ['right after a <div>', '<div>\n+---+\n| g |\n+---+\n</div>'],
+    ['in a comment', '<!--\n+---+\n| g |\n+---+\n-->'],
+    ['in a list item\'s <div>', '- <div>\n  +---+\n  | g |\n  +---+\n  </div>'],
+  ])('preprocessGridTables leaves a grid table %s as the HTML block\'s text, as markdown-it reads it', (_name, markdown) => {
+    // The placeholder and the blank lines around it split the block
+    expect(preprocessGridTables(markdown)).toBe(markdown);
+  });
+
+  it('preprocessGridTables replaces a grid table after an HTML block\'s blank line', () => {
+    const result = preprocessGridTables('<div>\n\n+---+\n| g |\n+---+\n\n</div>');
+    expect(result).toContain('<!-- MANUSCRIPT_GRID_TABLE:');
+    expect(result).not.toContain('+---+');
+  });
 });
 
 describe('generateRun', () => {

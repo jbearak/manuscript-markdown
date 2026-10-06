@@ -1,5 +1,7 @@
 // Shared grid table preprocessing — used by both md-to-docx and the preview plugin.
 
+import { computeMarkdownRegions, isInsideCodeRegion, type CodeRegion } from './code-regions';
+
 // A colon at either end of a column's dashes sets its alignment, as in +:==+==:+
 export const GRID_TABLE_SEPARATOR_RE = /^\+:?[-=]+:?(\+:?[-=]+:?)*\+$/;
 export const GRID_TABLE_PLACEHOLDER_PREFIX = '<!-- MANUSCRIPT_GRID_TABLE:';
@@ -140,6 +142,12 @@ export function preprocessGridTablesWithSourceMap(markdown: string): GridTablePr
   let i = 0;
   let fenceChar: '`' | '~' | null = null;
   let fenceLen = 0;
+  // The HTML blocks markdown-it reads, as a <div> and the lines after it to
+  // a blank line, which a grid table's lines in are text of, as a pipe
+  // table's are, found once, where there's a grid table
+  let htmlRegions: CodeRegion[] | undefined;
+  const inHtmlBlock = (offset: number) => markdown.includes('<')
+    && isInsideCodeRegion(offset, htmlRegions ??= computeMarkdownRegions(markdown, { includeCode: false, html: 'all' }).htmlRegions);
 
   while (i < lines.length) {
     // Track fenced code blocks to avoid false grid table detection inside them
@@ -180,7 +188,7 @@ export function preprocessGridTablesWithSourceMap(markdown: string): GridTablePr
       // Validate: must start and end with separator, have at least 3 lines
       if (tableLines.length >= 3 && GRID_TABLE_SEPARATOR_RE.test(tableLines[tableLines.length - 1].trim())) {
         const parsed = parseGridTable(tableLines);
-        if (parsed && parsed.rows.length > 0) {
+        if (parsed && parsed.rows.length > 0 && !inHtmlBlock(lineOffsets[start])) {
           const json = JSON.stringify(parsed);
           // Base64-encode to prevent cell content containing '-->' from
           // breaking the HTML comment wrapper.

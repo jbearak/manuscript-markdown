@@ -562,6 +562,7 @@ Grid tables use [Pandoc grid table syntax](https://pandoc.org/MANUAL.html#extens
 - A `:` at either end of a column's `=` in the header's separator sets its alignment, as in `+:===+===:+` (left, then right); a table without a header takes them in its top line
 - Multiple content lines between separators form a single logical row with multi-line cells. Blank lines at a cell's end pad it to its row's height, as Pandoc reads them, and aren't line breaks, though a `\` before them ends its line in one
 - Grid tables do not support colspan or rowspan (use HTML tables for spans)
+- A grid table's lines in an HTML block, as on the lines after a `<div>` or a `</table>` before a blank line, or in a comment, are the block's text, as markdown-it reads them and a pipe table's there, and not a table, in the preview or in Word. A blank line before the table ends the block, so `<div>`, a blank line and then the table make a table
 - On round-trip, grid tables are stored with `sourceFormat: 'grid'` metadata so the format is preserved
 
 The line-width threshold for grid tables is controlled by the `grid-table-max-line-width` frontmatter field (defaults to `pipe-table-max-line-width`).

@@ -7514,6 +7514,27 @@ describe('HTML around a table in its block', () => {
     expect(xml.slice(xml.indexOf('<w:tbl>'))).not.toContain('<w:sz w:val="22"/>');
   });
 
+  test('keeps a grid table\'s lines in a table\'s HTML block as the HTML after it, as a pipe table\'s', async () => {
+    // The grid table split the block, and Word showed its </div> as text
+    const md = '<div>\n' + table('a') + '\n+-----+\n| g   |\n+=====+\n| b   |\n+-----+\n</div>\n';
+    const { docx, warnings } = await convertMdToDocx(md);
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml.match(/<w:tbl>/g)?.length).toBe(1);
+    expect(xml).not.toContain('&lt;/div&gt;');
+    expect(warnings.some(warning => warning.startsWith('HTML around a table'))).toBe(true);
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(md);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps a grid table in a comment in the comment', async () => {
+    // Its placeholder went in the comment, and import wrote it as text
+    const md = '<!--\n+---+\n| a |\n+---+\n-->\n\nText.\n';
+    const markdown = await roundTrip(md);
+    expect(markdown).toBe(md);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
   test('puts the HTML around a table back with the same table after Word deletes one before it', async () => {
     // Another took the deleted table's, as the tables' indices shifted
     const md = '<div>\n<p>Table 1.</p>\n<table><tr><td>A</td></tr></table>\n</div>\n\nText.\n\n<div>\n<p>Table 2.</p>\n<table><tr><td>B</td></tr></table>\n</div>\n';
