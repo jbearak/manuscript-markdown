@@ -8039,7 +8039,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
     oneLine = false;
   } else if (oneLine && lines.slice(1).some(line => /[\r\n]/.test(line))
     && (!ends || ends.test(around?.[0] ?? '') || lines.slice(1).some(line => ends.test(line)))) {
-    const before = detachedTableHtml(around?.[0] ?? '', renderOpts?.breaks);
+    const before = detachedTableHtml(around?.[0] ?? '');
     lines[0] = (before ? before + '\n\n' : '') + lines[0].slice((around?.[0] ?? '').length);
     if (before === null) after = '';
   }
@@ -8643,10 +8643,12 @@ const CHARACTER_REFERENCE_AT = /&(?:#\d{1,7}|#[xX][\da-fA-F]{1,6}|[A-Za-z][A-Za-
  *  too, and what it holds as text, which escapeMarkdownChars keeps as a
  *  citation, as export writes one whose key is missing as its text, but
  *  which the HTML held as text. It's a \0 while the rest is escaped, which
- *  no Markdown holds, as markdown-it replaces one. Where a line end is a
- *  line break (`breaks`), as with breaks: true, the lines go on one, with a
- *  space between, as HTML reads a line end, but those in a tag or comment. */
-function htmlLinesAsText(lines: string[], breaks = false): string[] {
+ *  no Markdown holds, as markdown-it replaces one. The lines go on one, with
+ *  a space between, as HTML reads a line end, but those in a tag or comment:
+ *  Word holds the paragraph's line ends as spaces, which the next import
+ *  reads as none, and where a line end is a line break, as with breaks:
+ *  true, export would make one a line break. */
+function htmlLinesAsText(lines: string[]): string[] {
   const text = lines.join('\n');
   // Each of those as a character the lines don't hold while the rest is
   // escaped, so a $ or * pairs across them as Markdown reads it
@@ -8668,8 +8670,7 @@ function htmlLinesAsText(lines: string[], breaks = false): string[] {
     i = from - 1;
   }
   plain += text.slice(from);
-  plain = plain.split('\n').map(line => line.replace(/^[ \t]+|[ \t]+$/g, '')).join('\n');
-  if (breaks) plain = plain.replace(/\n/g, ' ');
+  plain = plain.split('\n').map(line => line.replace(/^[ \t]+|[ \t]+$/g, '')).join(' ');
   // From the right, whether an @ comes before the next ], as looking on
   // from each [ took time in the square of their number
   const chars = plain.split('');
@@ -8820,11 +8821,10 @@ function htmlBlockEnd(lines: string[], k: number, inParagraph: boolean): number 
  *  around on its line, and the end of a comment an embed's line is in.
  *  Each line reads as it does in what's written, in order, in which a line
  *  of text is a paragraph's, after which a line of one tag starts no block,
- *  and a paragraph's lines go on one where a line end is a line break
- *  (`breaks`). Null where it reads no more as it was, as a block that ends
+ *  and a paragraph's lines go on one (see htmlLinesAsText). Null where it reads no more as it was, as a block that ends
  *  at a marker without one, which would go on over the table (see
  *  detachedHtmlLines), or a paragraph of a Sources line. */
-function detachedTableHtml(html: string, breaks = false): string | undefined | null {
+function detachedTableHtml(html: string): string | undefined | null {
   const lines = withMarkdownCommentEnds(html).split('\n');
   const { inComment, preformatted, unreadable } = detachedHtmlLines(lines);
   if (unreadable) return null;
@@ -8844,7 +8844,7 @@ function detachedTableHtml(html: string, breaks = false): string | undefined | n
   const endTexts = () => {
     const shown = unescapeAll(texts.join('\n').replace(/<!--[\s\S]*?-->|<[^>]*>/g, '').replace(/\\/g, '\\\\'));
     if (SOURCES_HEADING_RE.test(shown.replace(/\s+/g, ' ').trim())) sources = true;
-    const text = htmlLinesAsText(texts, breaks);
+    const text = htmlLinesAsText(texts);
     if (texts.length > 1 && !readsAsParagraph(text.join('\n'))) unread = true;
     if (texts.length > 0) out.push(...text);
     texts = [];
@@ -9000,8 +9000,8 @@ function renderTableOrFallback(
   const r = (body: string) => {
     // Neither, where one can't be read as it was, as a <pre> before the
     // table and its end after it
-    let before = html && detachedTableHtml(html[0], renderOpts?.breaks);
-    let after = html && detachedTableHtml(html[1], renderOpts?.breaks);
+    let before = html && detachedTableHtml(html[0]);
+    let after = html && detachedTableHtml(html[1]);
     if (before === null || after === null) before = after = undefined;
     return { directivePrefix: fontPrefix, body, ...(before ? { before } : {}), ...(after ? { after } : {}) };
   };

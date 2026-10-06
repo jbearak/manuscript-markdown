@@ -8104,10 +8104,10 @@ describe('HTML around a table in its block', () => {
     ['comments that read as no directive', '<div>\n<!-- TODO: check -->\n', '\n<!-- Source: World Bank -->\n</div>\n',
       '<div>\n<!-- TODO: check -->\n\n', '\n\n<!-- Source: World Bank -->\n</div>\n'],
     ['text that would read as Markdown', '<div>\n', '\n# Source\n{++Source++} *x* [^1]\n</div>\n',
-      '<div>\n\n', '\n\n\\# Source\n\\{++Source+\\+} \\*x\\* \\[^1]\n</div>\n'],
+      '<div>\n\n', '\n\n\\# Source \\{++Source+\\+} \\*x\\* \\[^1]\n</div>\n'],
     // A line of one tag doesn't start a block after text
     ['a line of one tag after text', '', '\n# Source\n<span>\n*x*\n',
-      '', '\n\n\\# Source\n<span>\n\\*x\\*\n'],
+      '', '\n\n\\# Source <span> \\*x\\*\n'],
     // Which export reads as no directive, but which went as one
     ['a comment that reads as no style\'s', '', '\n<!-- style -->\n', '', '\n\n<!-- style -->\n'],
     // Which went with the style's comments
@@ -8122,7 +8122,7 @@ describe('HTML around a table in its block', () => {
     // Which went on across its lines, and the spaces at a line's end, which
     // HTML runs together, but which made a line break
     ['a comment, dollar signs and spaces at a line\'s end across lines', '', '\nSource <!-- hidden\nsecret --> $a\nb$ and  \ncontinued\n', '',
-      '\n\nSource <!-- hidden\nsecret --> \\$a\nb$ and\ncontinued\n'],
+      '\n\nSource <!-- hidden\nsecret --> \\$a b$ and continued\n'],
     // Which escaped the reference or tag after it
     ['a backslash before a character reference or a tag', '', '\nSource\\&amp; and a\\\\<b>b</b>\n', '',
       '\n\nSource\\\\&amp; and a\\\\\\\\<b>b</b>\n'],
@@ -8139,7 +8139,7 @@ describe('HTML around a table in its block', () => {
       '\n\nSource\n<!-- table-digits: TBD -->\n<!-- table-col-widths: TBD -->\n'],
     // Which read as the heading of a bibliography Word holds as text, which
     // import dropped with all after it
-    ['a line that would read as a Sources heading', '', '\nSources\nWorld Bank\n\nAfter.\n', '', '\n\n&#83;ources\nWorld Bank\n\nAfter.\n'],
+    ['a line that would read as a Sources heading', '', '\nSources\nWorld Bank\n\nAfter.\n', '', '\n\nSources World Bank\n\nAfter.\n'],
     // Whose lines a paragraph's lost their indents
     ['a <pre> that goes on past a line of text', '', '\nSource <pre>if ready:\n    run()\n</pre> done\n', '', '\n\nSource\n<pre>if ready:\n    run()\n</pre> done\n'],
     ['a <pre> on a line of text that ends on it', '', '\nSource <pre>a</pre> <b>b</b>\n', '', '\n\nSource <pre>a</pre> <b>b</b>\n'],
@@ -8150,7 +8150,7 @@ describe('HTML around a table in its block', () => {
     ['a <pre> that goes on past a comment on its line', '', '\n<!-- note --><pre>if ready:\n    run()\n</pre>\n', '', '\n\n<!-- note -->\n<pre>if ready:\n    run()\n</pre>\n'],
     ['a <pre> that goes on past a directive on its line', '', '\n<!-- table-font-size: 11 --><pre>if ready:\n    run()\n</pre>\n', '', '\n\n<pre>if ready:\n    run()\n</pre>\n'],
     ['a <pre> that goes on past the end of a comment over lines', '', '\n<!-- note\nend --><pre>if ready:\n    run()\n</pre>\n', '', '\n\n<!-- note\nend -->\n<pre>if ready:\n    run()\n</pre>\n'],
-    ['a <pre> on a line of text in a comment', '', '\nSource <!-- a\nb <pre> -->\nc\n', '', '\n\nSource <!-- a\nb <pre> -->\nc\n'],
+    ['a <pre> on a line of text in a comment', '', '\nSource <!-- a\nb <pre> -->\nc\n', '', '\n\nSource <!-- a\nb <pre> --> c\n'],
     // Which went as one, as between blocks
     ['blank lines in a <pre>', '<pre>a\n\n\nb</pre>', '', '<pre>a\n\n\nb</pre>\n\n', '\n'],
   ])('keeps %s around a table that leaves HTML, as it read', async (_name, beforeHtml, afterHtml, beforeMd, afterMd) => {
@@ -8197,8 +8197,8 @@ describe('HTML around a table in its block', () => {
   });
 
   test.each([
-    ['of one row', '\n    +---+---+\n    | a | b |\n    +---+---+\n', '\\+---+---+\n| a | b |\n\\+---+---+'],
-    ['with a header', '\n    +---+\n    | a |\n    +===+\n    | b |\n    +---+\n', '\\+---+\n| a |\n\\+===+\n| b |\n\\+---+'],
+    ['of one row', '\n    +---+---+\n    | a | b |\n    +---+---+\n', '+---+---+ | a | b | +---+---+'],
+    ['with a header', '\n    +---+\n    | a |\n    +===+\n    | b |\n    +---+\n', '+---+ | a | +===+ | b | +---+'],
   ])('keeps a grid table\'s lines %s indented as code in the HTML around a table that leaves HTML as text', async (_name, afterHtml, text) => {
     // With their indents gone, they read as a table of their own, which the
     // next export added to Word
@@ -8211,6 +8211,23 @@ describe('HTML around a table in its block', () => {
     expect(markdown).toBe('+----------+-----+\n| {++XX++} | b   |\n+----------+-----+\n\n' + text + '\n');
     const again = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
     expect(again.match(/<w:tbl>/g)).toHaveLength(1);
+  });
+
+  test.each([
+    ['a grid table\'s', '\n+---+---+\n| x | y |\n+---+---+\n\nD\n', '+---+---+ | x | y | +---+---+\n\nD\n'],
+    ['text\'s', '\nSource:\nWorld Bank,\n2020.\n', 'Source: World Bank, 2020.\n'],
+    ['formatting\'s', '\n*a\nb* and `c\nd`\n', '\\*a b\\* and \\`c d\\`\n'],
+  ])('joins %s lines in the HTML after a table that leaves HTML, as Word does the next time', async (_name, afterHtml, text) => {
+    // Word held them as one paragraph with a space at each line end, which
+    // the next trip wrote on one line
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A\n\n<table><tr><td>XX</td><td>b</td></tr></table>' + afterHtml)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const tracked = xml.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>');
+    expect(tracked).not.toBe(xml);
+    zip.file('word/document.xml', tracked);
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(strip(markdown)).toBe('A\n\n+----------+-----+\n| {++XX++} | b   |\n+----------+-----+\n\n' + text);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
   });
 
   test('keeps a <!-- references --> at the end of a table\'s HTML block, which ends it', async () => {
