@@ -149,6 +149,8 @@ Configurable via `manuscriptMarkdown.citationKeyFormat`:
 | `authorYear` | `smith2020` | Author surname + year |
 | `numeric` | `1`, `2`, `3` | Sequential numbers |
 
+Each cited item gets one key, wherever it's cited. Import tells Zotero items apart by their URI, or by their ID where a field has no URI, as Zotero does. Fields that share any URI cite one item, as after a sync or a merge, where Zotero lists an item's earlier URIs after its own. Citations of one item share its key and its `.bib` entry, which takes the data of the field that has the most, as a field can have less or none. When two items would get the same key, as with the same author, year and title, the second gets a number after it, as in `smith2020effects2`.
+
 ## Usage
 
 1. Right-click a `.docx` file in VS Code Explorer

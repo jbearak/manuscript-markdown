@@ -150,6 +150,8 @@ export interface CitationMetadata {
   fullItemData: Record<string, unknown>;
   zoteroKey?: string;
   zoteroUri?: string;
+  zoteroUris?: string[];  // all the URIs the field lists for the item, its own first (see citedItems)
+  itemId?: string;        // the item's ID in the field (see itemIdentifier)
   locator?: string;
   citationKey?: string;   // CSL citation-key preserved for round-trip
   suppressAuthor?: boolean; // [-@key] Pandoc suppress-author form
@@ -4254,12 +4256,19 @@ function extractZoteroCitationsFromInstructions(instructions: string[]): ZoteroC
           }
         }
 
-        // Extract Zotero URI and key
+        // The item's ID, which Zotero finds it by where the field has no URI
+        const itemId = item.id ?? d.id;
+        if (typeof itemId === 'string' || typeof itemId === 'number') {
+          result.itemId = String(itemId);
+        }
+
+        // Extract Zotero URI and key, and the item's other URIs
         const uris = item.uris ?? item.uri ?? [];
-        const uriValue = Array.isArray(uris) ? uris[0] : uris;
-        const uri = uriValue == null ? '' : String(uriValue);
+        const uriValues = (Array.isArray(uris) ? uris : [uris]).filter(value => value != null).map(String).filter(Boolean);
+        const uri = uriValues[0];
         if (uri) {
           result.zoteroUri = uri;
+          result.zoteroUris = uriValues;
           const zKey = extractZoteroKey(uri);
           if (zKey) {
             result.zoteroKey = zKey;
@@ -4321,10 +4330,8 @@ export function generateCitationKey(
   return `${cleanSurname}${cleanYear}${firstWord}`;
 }
 
-/**
- * Build a map from Zotero item URI (or title+year as fallback) to citation key.
- * Returns a function that maps a ZoteroCitation to its pandoc keys.
- */
+/** Build a map from the identifier of each field's item (see itemIdentifier)
+ *  to its item's citation key, one for each item (see citedItems). */
 export function buildCitationKeyMap(
   allCitations: ZoteroCitation[],
   format: CitationKeyFormat = 'authorYearTitle',
@@ -4333,39 +4340,84 @@ export function buildCitationKeyMap(
   const seen = new Set<string>();
   let numericCounter = 1;
 
-  for (const citation of allCitations) {
-    for (const meta of citation.items) {
-      const itemId = itemIdentifier(meta);
-      if (keyMap.has(itemId)) { continue; }
-
-      if (format === 'numeric') {
-        keyMap.set(itemId, String(numericCounter++));
-        continue;
-      }
-
+  for (const { meta, ids, citationKey } of citedItems(allCitations)) {
+    let key: string;
+    if (format === 'numeric') {
+      key = String(numericCounter++);
+    } else if (citationKey && !seen.has(citationKey)) {
       // Prefer stored citation-key from round-trip or Zotero
-      if (meta.citationKey && !seen.has(meta.citationKey)) {
-        seen.add(meta.citationKey);
-        keyMap.set(itemId, meta.citationKey);
-        continue;
-      }
-
+      key = citationKey;
+    } else {
       const surname = getSurname(meta);
       const baseKey = generateCitationKey(surname, meta.year, meta.title, format);
-      let key = baseKey;
+      key = baseKey;
       let counter = 2;
       while (seen.has(key)) { key = `${baseKey}${counter++}`; }
-      seen.add(key);
-      keyMap.set(itemId, key);
     }
+    seen.add(key);
+    for (const id of ids) keyMap.set(id, key);
   }
   return keyMap;
 }
 
+/** The items the citations cite, each once, in the order they first come.
+ *  Fields whose URIs overlap cite one item, as Zotero lists an item's
+ *  earlier URIs, from before a sync or a merge, after its own, and so,
+ *  without a URI, do fields whose identifiers match (see itemIdentifier).
+ *  Each comes with its fields' identifiers, the first citation key one has,
+ *  and the field whose data its key and .bib entry take: the one with the
+ *  most, the first of those, as a field can have less, or none. */
+function citedItems(citations: ZoteroCitation[]): Array<{ meta: CitationMetadata; ids: Set<string>; citationKey?: string }> {
+  // A field's item's names: each of its URIs, else its identifier
+  const names = (meta: CitationMetadata) => meta.zoteroUris?.length ? meta.zoteroUris.map(uri => 'uri:' + uri) : [itemIdentifier(meta)];
+  // Union-find over the names, which the fields that list two join
+  const parent = new Map<string, string>();
+  const find = (name: string): string => {
+    let root = name;
+    while (parent.get(root) !== root) root = parent.get(root)!;
+    for (let next = name; next !== root;) { const up = parent.get(next)!; parent.set(next, root); next = up; }
+    return root;
+  };
+  const fields = citations.flatMap(citation => citation.items);
+  for (const meta of fields) {
+    const [first, ...rest] = names(meta);
+    for (const name of [first, ...rest]) if (!parent.has(name)) parent.set(name, name);
+    for (const name of rest) parent.set(find(name), find(first));
+  }
+  const items = new Map<string, { meta: CitationMetadata; ids: Set<string>; citationKey?: string }>();
+  for (const meta of fields) {
+    const root = find(names(meta)[0]);
+    const item = items.get(root);
+    if (!item) {
+      items.set(root, { meta, ids: new Set([itemIdentifier(meta)]), citationKey: meta.citationKey });
+      continue;
+    }
+    item.ids.add(itemIdentifier(meta));
+    item.citationKey ??= meta.citationKey;
+    if (itemDataSize(meta) > itemDataSize(item.meta)) item.meta = meta;
+  }
+  return [...items.values()];
+}
+
+/** How much of its item's data a field holds: the fields of its itemData
+ *  with a value, not an empty list of authors or a date with no parts */
+function itemDataSize(meta: CitationMetadata): number {
+  const holds = (value: unknown): boolean => Array.isArray(value) ? value.some(holds)
+    : value !== null && typeof value === 'object' ? Object.values(value).some(holds)
+    : value != null && value !== '';
+  return Object.values(meta.fullItemData).filter(holds).length;
+}
+
+/** What tells one field's item from another's: its URI, which Zotero finds
+ *  an item by, else its ID in the field, as Zotero falls back to. Without
+ *  either, its DOI, else its title, year and authors, so that items alike in
+ *  title and year don't share a key. Fields whose other URIs overlap cite
+ *  one item too (see citedItems). */
 export function itemIdentifier(meta: CitationMetadata): string {
-  // Use DOI if available, otherwise title+year
+  if (meta.zoteroUri) return 'uri:' + meta.zoteroUri;
+  if (meta.itemId) return 'id:' + meta.itemId;
   if (meta.doi) { return `doi:${meta.doi}`; }
-  return `${meta.title}::${meta.year}`;
+  return `${meta.title}::${meta.year}::` + JSON.stringify(meta.authors);
 }
 
 function getSurname(meta: CitationMetadata): string {
@@ -11380,83 +11432,79 @@ export function generateBibTeX(
   const entryByKey = originalKeyOrder ? new Map<string, string>() : null;
   const emitted = new Set<string>();
 
-  for (const citation of zoteroCitations) {
-    for (const meta of citation.items) {
-      const id = itemIdentifier(meta);
-      if (emitted.has(id)) { continue; }
-      emitted.add(id);
+  // Each item once, with the data of its field that has the most
+  for (const { meta, ids } of citedItems(zoteroCitations)) {
+    const key = [...ids].map(id => keyMap.get(id)).find(k => k !== undefined);
+    if (!key || emitted.has(key)) { continue; }
+    emitted.add(key);
 
-      const key = keyMap.get(id);
-      if (!key) { continue; }
+    const authorStr = meta.authors.map(serializeAuthor).join(' and ');
 
-      const authorStr = meta.authors.map(serializeAuthor).join(' and ');
+    const genre = meta.fullItemData.genre;
+    const entryType = mapCSLTypeToBibtex(meta.type, typeof genre === 'string' ? genre : undefined);
+    const fields: string[] = [];
+    const alreadyEmitted = new Set<string>();
 
-      const genre = meta.fullItemData.genre;
-      const entryType = mapCSLTypeToBibtex(meta.type, typeof genre === 'string' ? genre : undefined);
-      const fields: string[] = [];
-      const alreadyEmitted = new Set<string>();
+    if (authorStr) { fields.push(`  author = {${authorStr}}`); alreadyEmitted.add('author'); }
+    if (meta.title) { fields.push(`  title = {{${escapeBibtex(meta.title)}}}`); alreadyEmitted.add('title'); }
 
-      if (authorStr) { fields.push(`  author = {${authorStr}}`); alreadyEmitted.add('author'); }
-      if (meta.title) { fields.push(`  title = {{${escapeBibtex(meta.title)}}}`); alreadyEmitted.add('title'); }
-
-      // Emit container-title as journal or booktitle depending on entry type
-      if (meta.journal) {
-        if (entryType === 'incollection' || entryType === 'inproceedings') {
-          fields.push(`  booktitle = {${escapeBibtex(meta.journal)}}`);
-        } else {
-          fields.push(`  journal = {${escapeBibtex(meta.journal)}}`);
-        }
-        alreadyEmitted.add('container-title');
+    // Emit container-title as journal or booktitle depending on entry type
+    if (meta.journal) {
+      if (entryType === 'incollection' || entryType === 'inproceedings') {
+        fields.push(`  booktitle = {${escapeBibtex(meta.journal)}}`);
+      } else {
+        fields.push(`  journal = {${escapeBibtex(meta.journal)}}`);
       }
-
-      if (meta.volume) { fields.push(`  volume = {${escapeBibtex(meta.volume)}}`); alreadyEmitted.add('volume'); }
-      if (meta.pages) { fields.push(`  pages = {${escapeBibtex(meta.pages)}}`); alreadyEmitted.add('page'); }
-      if (meta.year) { fields.push(`  year = {${escapeBibtex(meta.year)}}`); alreadyEmitted.add('issued'); }
-      if (meta.doi) { fields.push(`  doi = {${meta.doi}}`); alreadyEmitted.add('DOI'); }
-
-      // Editor from fullItemData
-      const editorData = meta.fullItemData?.editor;
-      if (Array.isArray(editorData) && editorData.length > 0) {
-        const editorStr = editorData.map(serializeAuthor).join(' and ');
-        if (editorStr) { fields.push(`  editor = {${editorStr}}`); }
-        alreadyEmitted.add('editor');
-      }
-
-      // Institution for techreport entries: prefer explicit x-institution
-      // (BibTeX roundtrip), then fall back to publisher (Zotero maps its
-      // "Institution" field to CSL publisher for report types).
-      if (entryType === 'techreport') {
-        const xInstitution = meta.fullItemData?.['x-institution'];
-        if (typeof xInstitution === 'string' && xInstitution) {
-          fields.push(`  institution = {${escapeBibtex(xInstitution)}}`);
-        } else {
-          const pub = meta.fullItemData?.publisher;
-          if (typeof pub === 'string' && pub) {
-            fields.push(`  institution = {${escapeBibtex(pub)}}`);
-            alreadyEmitted.add('publisher');
-          }
-        }
-      }
-
-      // Additional CSL→BibTeX fields from fullItemData
-      for (const [cslField, bibtexField] of Object.entries(CSL_TO_BIBTEX)) {
-        if (alreadyEmitted.has(cslField)) continue;
-        if (cslField === 'editor') continue; // handled above
-        const val = meta.fullItemData?.[cslField];
-        if (val != null && (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean')) {
-          const strVal = String(val);
-          fields.push(`  ${bibtexField} = {${VERBATIM_CSL_FIELDS.has(cslField) ? strVal : escapeBibtex(strVal)}}`);
-          alreadyEmitted.add(cslField);
-        }
-      }
-
-      if (meta.zoteroKey) { fields.push(`  zotero-key = {${meta.zoteroKey}}`); }
-      if (meta.zoteroUri) { fields.push(`  zotero-uri = {${meta.zoteroUri}}`); }
-
-      const entryStr = `@${entryType}{${key},\n${fields.join(',\n')},\n}`;
-      entries.push(entryStr);
-      if (entryByKey) entryByKey.set(key, entryStr);
+      alreadyEmitted.add('container-title');
     }
+
+    if (meta.volume) { fields.push(`  volume = {${escapeBibtex(meta.volume)}}`); alreadyEmitted.add('volume'); }
+    if (meta.pages) { fields.push(`  pages = {${escapeBibtex(meta.pages)}}`); alreadyEmitted.add('page'); }
+    if (meta.year) { fields.push(`  year = {${escapeBibtex(meta.year)}}`); alreadyEmitted.add('issued'); }
+    if (meta.doi) { fields.push(`  doi = {${meta.doi}}`); alreadyEmitted.add('DOI'); }
+
+    // Editor from fullItemData
+    const editorData = meta.fullItemData?.editor;
+    if (Array.isArray(editorData) && editorData.length > 0) {
+      const editorStr = editorData.map(serializeAuthor).join(' and ');
+      if (editorStr) { fields.push(`  editor = {${editorStr}}`); }
+      alreadyEmitted.add('editor');
+    }
+
+    // Institution for techreport entries: prefer explicit x-institution
+    // (BibTeX roundtrip), then fall back to publisher (Zotero maps its
+    // "Institution" field to CSL publisher for report types).
+    if (entryType === 'techreport') {
+      const xInstitution = meta.fullItemData?.['x-institution'];
+      if (typeof xInstitution === 'string' && xInstitution) {
+        fields.push(`  institution = {${escapeBibtex(xInstitution)}}`);
+      } else {
+        const pub = meta.fullItemData?.publisher;
+        if (typeof pub === 'string' && pub) {
+          fields.push(`  institution = {${escapeBibtex(pub)}}`);
+          alreadyEmitted.add('publisher');
+        }
+      }
+    }
+
+    // Additional CSL→BibTeX fields from fullItemData
+    for (const [cslField, bibtexField] of Object.entries(CSL_TO_BIBTEX)) {
+      if (alreadyEmitted.has(cslField)) continue;
+      if (cslField === 'editor') continue; // handled above
+      const val = meta.fullItemData?.[cslField];
+      if (val != null && (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean')) {
+        const strVal = String(val);
+        fields.push(`  ${bibtexField} = {${VERBATIM_CSL_FIELDS.has(cslField) ? strVal : escapeBibtex(strVal)}}`);
+        alreadyEmitted.add(cslField);
+      }
+    }
+
+    if (meta.zoteroKey) { fields.push(`  zotero-key = {${meta.zoteroKey}}`); }
+    if (meta.zoteroUri) { fields.push(`  zotero-uri = {${meta.zoteroUri}}`); }
+
+    const entryStr = `@${entryType}{${key},\n${fields.join(',\n')},\n}`;
+    entries.push(entryStr);
+    if (entryByKey) entryByKey.set(key, entryStr);
   }
 
   // Reorder output to match original key order when provided (used by Layer 2 caller)

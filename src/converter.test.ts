@@ -2721,21 +2721,21 @@ describe('extractZoteroCitations', () => {
 });
 
 describe('buildCitationKeyMap', () => {
-  test('generates unique keys and deduplicates by DOI', async () => {
+  test('generates unique keys and deduplicates by URI', async () => {
     const citations = await extractZoteroCitations(sampleData);
     const keyMap = buildCitationKeyMap(citations);
-    expect(keyMap.size).toBe(3); // Smith appears twice but same DOI
-    expect(keyMap.get('doi:10.1234/test.2020.001')).toBe('smith2020effects');
-    expect(keyMap.get('doi:10.1234/test.2019.002')).toBe('jones2019urban');
-    expect(keyMap.get('doi:10.1234/test.2021.003')).toBe('davis2021advances');
+    expect(keyMap.size).toBe(3); // Smith appears twice but same URI
+    expect(keyMap.get('uri:http://zotero.org/users/0/items/AAAA1111')).toBe('smith2020effects');
+    expect(keyMap.get('uri:http://zotero.org/users/0/items/BBBB2222')).toBe('jones2019urban');
+    expect(keyMap.get('uri:http://zotero.org/users/0/items/CCCC3333')).toBe('davis2021advances');
   });
 
   test('supports authorYear format', async () => {
     const citations = await extractZoteroCitations(sampleData);
     const keyMap = buildCitationKeyMap(citations, 'authorYear');
-    expect(keyMap.get('doi:10.1234/test.2020.001')).toBe('smith2020');
-    expect(keyMap.get('doi:10.1234/test.2019.002')).toBe('jones2019');
-    expect(keyMap.get('doi:10.1234/test.2021.003')).toBe('davis2021');
+    expect(keyMap.get('uri:http://zotero.org/users/0/items/AAAA1111')).toBe('smith2020');
+    expect(keyMap.get('uri:http://zotero.org/users/0/items/BBBB2222')).toBe('jones2019');
+    expect(keyMap.get('uri:http://zotero.org/users/0/items/CCCC3333')).toBe('davis2021');
   });
 
   test('supports numeric format', async () => {
@@ -5260,14 +5260,16 @@ describe('DOCX footnote extraction', () => {
 /** A Zotero field citing each item, as Zotero writes it: with the item's URI
  *  (when it has one), its ID, and its data. */
 function zoteroFieldXml(items: Array<{ family: string; title: string; uri?: string; id?: number }>): string {
-  const payload = JSON.stringify({
-    citationItems: items.map((item, k) => ({
-      id: item.id ?? k + 1,
-      ...(item.uri ? { uris: [item.uri] } : {}),
-      itemData: { id: item.id ?? k + 1, type: 'book', title: item.title, author: [{ family: item.family, given: 'J' }], issued: { 'date-parts': [['2020']] } },
-    })),
-    properties: { plainCitation: '(x)' },
-  });
+  return zoteroFieldOf(items.map((item, k) => ({
+    id: item.id ?? k + 1,
+    ...(item.uri ? { uris: [item.uri] } : {}),
+    itemData: { id: item.id ?? k + 1, type: 'book', title: item.title, author: [{ family: item.family, given: 'J' }], issued: { 'date-parts': [['2020']] } },
+  })));
+}
+
+/** A Zotero field with these citation items, as Zotero writes them */
+function zoteroFieldOf(citationItems: object[]): string {
+  const payload = JSON.stringify({ citationItems, properties: { plainCitation: '(x)' } });
   return '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
     + '<w:r><w:instrText xml:space="preserve"> ADDIN ZOTERO_ITEM CSL_CITATION ' + payload.replace(/&/g, '&amp;').replace(/</g, '&lt;') + ' </w:instrText></w:r>'
     + '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
@@ -5356,6 +5358,123 @@ describe('Zotero citations in notes', () => {
     const third = await convertDocx(docx3);
     expect(third.markdown).toBe(second.markdown);
     expect(third.bibtex).toBe(second.bibtex);
+  });
+});
+
+describe('Zotero items with the same title and year', () => {
+  const doe = { family: 'Doe', title: 'T', uri: 'http://zotero.org/users/1/items/AAAAAAA1', id: 1 };
+  const roe = { family: 'Roe', title: 'T', uri: 'http://zotero.org/users/1/items/AAAAAAA2', id: 2 };
+  const body = (fields: string[]) => wrapDocumentXml('<w:p><w:r><w:t xml:space="preserve">x </w:t></w:r>'
+    + fields.join('<w:r><w:t xml:space="preserve"> and </w:t></w:r>') + '</w:p>');
+
+  test('keys two items apart by their URIs, and one item cited twice once', async () => {
+    const result = await convertDocx(await buildSyntheticDocx(body([zoteroFieldXml([doe]), zoteroFieldXml([roe]), zoteroFieldXml([doe])])));
+    expect(result.markdown).toBe('x [@doe2020t] and [@roe2020t] and [@doe2020t]\n');
+    const bib = parseBibtex(result.bibtex);
+    expect([...bib.keys()]).toEqual(['doe2020t', 'roe2020t']);
+    expect(bib.get('doe2020t')?.fields.get('zotero-uri')).toBe(doe.uri);
+    expect(bib.get('roe2020t')?.fields.get('zotero-uri')).toBe(roe.uri);
+  });
+
+  test('keys two items apart by their IDs where the fields have no URIs', async () => {
+    const [d, r] = [{ ...doe, uri: undefined }, { ...roe, uri: undefined }];
+    const result = await convertDocx(await buildSyntheticDocx(body([zoteroFieldXml([d]), zoteroFieldXml([r]), zoteroFieldXml([d])])));
+    expect(result.markdown).toBe('x [@doe2020t] and [@roe2020t] and [@doe2020t]\n');
+    expect([...parseBibtex(result.bibtex).keys()]).toEqual(['doe2020t', 'roe2020t']);
+  });
+
+  test('keys two items apart by their authors without a URI, an ID or a DOI', () => {
+    const meta = (family: string): ZoteroCitation['items'][number] => ({ authors: [{ family, given: 'J' }], title: 'T', year: '2020', journal: '', volume: '', pages: '', doi: '', type: 'book', fullItemData: {} });
+    const citations: ZoteroCitation[] = [{ plainCitation: '', items: [meta('Doe')] }, { plainCitation: '', items: [meta('Roe')] }, { plainCitation: '', items: [meta('Doe')] }];
+    const keyMap = buildCitationKeyMap(citations);
+    expect(citations.map(c => citationPandocKeys(c, keyMap))).toEqual([['@doe2020t'], ['@roe2020t'], ['@doe2020t']]);
+    expect([...parseBibtex(generateBibTeX(citations, keyMap)).keys()]).toEqual(['doe2020t', 'roe2020t']);
+  });
+
+  test('keeps each item\'s Zotero field, with its URI and data, from Word to Markdown to Word', async () => {
+    const first = await convertDocx(await buildSyntheticDocx(body([zoteroFieldXml([doe]), zoteroFieldXml([roe])])));
+    expect(first.markdown).toBe('x [@doe2020t] and [@roe2020t]\n');
+
+    const docx2 = (await convertMdToDocx(first.markdown, { bibtex: first.bibtex })).docx;
+    const items = (await zoteroFieldItems(docx2, 'word/document.xml')).map(([item]) => [item.uris?.[0], item.itemData.author?.[0].family, item.itemData.title]);
+    expect(items).toEqual([[doe.uri, 'Doe', 'T'], [roe.uri, 'Roe', 'T']]);
+
+    // A second trip changes nothing
+    const second = await convertDocx(docx2);
+    expect(second.markdown).toContain('x [@doe2020t] and [@roe2020t]\n');
+    expect(second.bibtex).toBe(first.bibtex);
+    const docx3 = (await convertMdToDocx(second.markdown, { bibtex: second.bibtex })).docx;
+    expect(await zoteroFieldItems(docx3, 'word/document.xml')).toEqual(await zoteroFieldItems(docx2, 'word/document.xml'));
+    const third = await convertDocx(docx3);
+    expect(third.markdown).toBe(second.markdown);
+    expect(third.bibtex).toBe(second.bibtex);
+  });
+});
+
+describe('Zotero items cited in more than one field', () => {
+  const body = (fields: string[]) => wrapDocumentXml('<w:p><w:r><w:t xml:space="preserve">x </w:t></w:r>'
+    + fields.join('<w:r><w:t xml:space="preserve"> and </w:t></w:r>') + '</w:p>');
+  const doeData = { type: 'book', title: 'T', author: [{ family: 'Doe', given: 'J' }], issued: { 'date-parts': [['2020']] }, DOI: '10.1/t' };
+  const [old, synced, other] = ['http://zotero.org/users/local/abc/items/AAAAAAA1', 'http://zotero.org/users/1/items/AAAAAAA1', 'http://zotero.org/groups/2/items/AAAAAAA1'];
+
+  test.each([
+    ['its URI', { id: 1, uris: [synced] }, { id: 1, uris: [synced], itemData: { id: 1, ...doeData } }],
+    ['its ID', { id: 7 }, { id: 7, itemData: { id: 7, ...doeData } }],
+    ['its DOI', { itemData: { type: 'book', DOI: '10.1/t' } }, { itemData: doeData }],
+  ])('takes an item\'s key and entry from the field with its data, where another field of it, by %s, has less', async (_name, sparse, full) => {
+    const result = await convertDocx(await buildSyntheticDocx(body([zoteroFieldOf([sparse]), zoteroFieldOf([full])])));
+    expect(result.markdown).toBe('x [@doe2020t] and [@doe2020t]\n');
+    const bib = parseBibtex(result.bibtex);
+    expect([...bib.keys()]).toEqual(['doe2020t']);
+    expect(bib.get('doe2020t')?.fields.get('author')).toBe('Doe, J');
+    expect(bib.get('doe2020t')?.fields.get('title')).toBe('T');
+  });
+
+  test('takes an item\'s key and entry from the field with its data, where a later field of it has more fields, empty', async () => {
+    const empty = { id: 1, type: 'book', title: 'T', author: [], editor: [], translator: [], 'collection-editor': [], issued: {} };
+    const fields = [zoteroFieldOf([{ id: 1, uris: [synced], itemData: { id: 1, ...doeData } }]), zoteroFieldOf([{ id: 1, uris: [synced], itemData: empty }])];
+    const result = await convertDocx(await buildSyntheticDocx(body(fields)));
+    expect(result.markdown).toBe('x [@doe2020t] and [@doe2020t]\n');
+    const bib = parseBibtex(result.bibtex);
+    expect([...bib.keys()]).toEqual(['doe2020t']);
+    expect(bib.get('doe2020t')?.fields.get('author')).toBe('Doe, J');
+    expect(bib.get('doe2020t')?.fields.get('year')).toBe('2020');
+  });
+
+  test.each([
+    ['a URI in common', [[old, synced], [synced]]],
+    ['URIs in common through a third field', [[old, synced], [other], [synced, other]]],
+  ])('keys an item once whose fields list its URIs differently, with %s', async (_name, uriLists) => {
+    const fields = uriLists.map(uris => zoteroFieldOf([{ id: 1, uris, itemData: { id: 1, ...doeData } }]));
+    const first = await convertDocx(await buildSyntheticDocx(body(fields)));
+    expect(first.markdown).toBe('x ' + uriLists.map(() => '[@doe2020t]').join(' and ') + '\n');
+    const bib = parseBibtex(first.bibtex);
+    expect([...bib.keys()]).toEqual(['doe2020t']);
+    expect(bib.get('doe2020t')?.fields.get('zotero-uri')).toBe(old);
+
+    // Export writes the item's URI in each field, and its text alike in each
+    const docx2 = (await convertMdToDocx(first.markdown, { bibtex: first.bibtex })).docx;
+    const items = await zoteroFieldItems(docx2, 'word/document.xml');
+    expect(items.map(([item]) => item.uris)).toEqual(uriLists.map(() => [old]));
+    const xml = await (await JSZip.loadAsync(docx2)).file('word/document.xml')!.async('string');
+    expect(new Set([...xml.matchAll(/&quot;plainCitation&quot;:&quot;(.*?)&quot;/g)].map(m => m[1]))).toEqual(new Set(['(Doe, 2020)']));
+    const second = await convertDocx(docx2);
+    expect(second.markdown).toContain('x ' + uriLists.map(() => '[@doe2020t]').join(' and ') + '\n');
+    expect(second.bibtex).toBe(first.bibtex);
+  });
+
+  test('keeps an item\'s data from Word to Markdown to Word where its first field has none', async () => {
+    const first = await convertDocx(await buildSyntheticDocx(body([zoteroFieldOf([{ id: 1, uris: [synced] }]), zoteroFieldOf([{ id: 1, uris: [synced], itemData: { id: 1, ...doeData } }])])));
+    const docx2 = (await convertMdToDocx(first.markdown, { bibtex: first.bibtex })).docx;
+    const xml = await (await JSZip.loadAsync(docx2)).file('word/document.xml')!.async('string');
+    expect([...xml.matchAll(/&quot;plainCitation&quot;:&quot;(.*?)&quot;/g)].map(m => m[1])).toEqual(['(Doe, 2020)', '(Doe, 2020)']);
+    expect((await zoteroFieldItems(docx2, 'word/document.xml')).map(([item]) => item.itemData.author?.[0].family)).toEqual(['Doe', 'Doe']);
+    // A second trip changes nothing
+    const second = await convertDocx(docx2);
+    expect(second.bibtex).toBe(first.bibtex);
+    const docx3 = (await convertMdToDocx(second.markdown, { bibtex: second.bibtex })).docx;
+    expect(await zoteroFieldItems(docx3, 'word/document.xml')).toEqual(await zoteroFieldItems(docx2, 'word/document.xml'));
+    expect((await convertDocx(docx3)).markdown).toBe(second.markdown);
   });
 });
 
