@@ -9091,12 +9091,15 @@ describe('Whitespace at the edges of a paragraph', () => {
   });
 
   describe('but not what an empty paragraph would lose', () => {
-    /** The Markdown of md's export, with `from` in part replaced by `to` */
-    const withXml = async (md: string, part: string, from: string | RegExp, to: string) => {
+    /** The Markdown of md's export, with each `from` in part replaced by its `to` */
+    const withXml = async (md: string, part: string, ...edits: [string | RegExp, string][]) => {
       const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
-      const xml = await zip.file(part)!.async('string');
-      expect(xml.replace(from, to)).not.toBe(xml);
-      zip.file(part, xml.replace(from, to));
+      let xml = await zip.file(part)!.async('string');
+      for (const [from, to] of edits) {
+        expect(xml.replace(from, to)).not.toBe(xml);
+        xml = xml.replace(from, to);
+      }
+      zip.file(part, xml);
       return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
     };
     const spaces = '<w:r><w:t xml:space="preserve">  </w:t></w:r>';
@@ -9112,7 +9115,37 @@ describe('Whitespace at the edges of a paragraph', () => {
     ])('keeps a paragraph of spaces alone whose mark is %s', async (_name, md, part, from, to, expected) => {
       // Its text went, and the tracked mark with it, which the next
       // paragraph didn't take, as it had no para item of its own
-      const markdown = await withXml(md, part, from, to + spaces);
+      const markdown = await withXml(md, part, [from, to + spaces]);
+      expect(markdown).toBe(expected);
+      expect(await roundTrip(markdown)).toBe(markdown);
+    });
+
+    // The paragraph's pPr, which a w:rPr goes at the end of, before its text
+    const markOf = (text: string) => new RegExp('(<w:pPr>(?:(?!</w:pPr>).)*)(</w:pPr><w:r><w:t>' + text + '</w:t>)');
+    // Or a pPr of its own
+    const ownMarkOf = (text: string) => new RegExp('(<w:p [^>]*>)(<w:r><w:t>' + text + '</w:t>)');
+    const rPr = (type: string) => '<w:rPr><w:' + type + ' ' + revision + '/></w:rPr>';
+    test.each([
+      ['deleted, in a quote', '> a\n>\n> XX\n>\n> b', 'word/document.xml', markOf('a'), '$1' + rPr('del') + '$2', spaces,
+        '> a{--\n>\n> --}&#32;&#32;\n>\n> b\n'],
+      ['inserted, in a quote', '> a\n>\n> XX\n>\n> b', 'word/document.xml', markOf('a'), '$1' + rPr('ins') + '$2', spaces,
+        '> a{++\n>\n> ++}&#32;&#32;\n>\n> b\n'],
+      ['deleted', 'A.\n\nXX\n\nB.', 'word/document.xml', ownMarkOf('A\\.'), '$1<w:pPr>' + rPr('del') + '</w:pPr>$2',
+        '<w:r><w:tab/></w:r>', 'A.{--\n\n--}&#9;\n\nB.\n'],
+      ['deleted, in a list item', '- a\n\n  XX\n\n- b', 'word/document.xml', markOf('a'), '$1' + rPr('del') + '$2', spaces,
+        '- a{--\n\n  --}&#32;&#32;\n- b\n'],
+      ['deleted with its text', 'A.\n\nXX\n\nB.', 'word/document.xml', /(<w:p [^>]*>)<w:r><w:t>A\.<\/w:t><\/w:r>/,
+        '$1<w:pPr>' + rPr('del') + '</w:pPr><w:del w:id="92" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r><w:delText>A.</w:delText></w:r></w:del>',
+        spaces, '{--A.\n\n--}&#32;&#32;\n\nB.\n'],
+      ['inserted, in a note', 'T.[^1]\n\n[^1]: A.\n\n    XX\n\n    B.', 'word/footnotes.xml',
+        /(<w:pPr>(?:(?!<\/w:pPr>).)*)(<\/w:pPr>(?:<w:r>(?:(?!<\/w:r>).)*<\/w:r>)*<w:r><w:t>A\.<\/w:t>)/, '$1' + rPr('ins') + '$2', spaces,
+        'T.[^1]\n\n[^1]:\n\n    A.{++\n    \n    ++}&#32;&#32;\n\n    B.\n'],
+    ])('keeps a paragraph of spaces or tabs alone after one whose mark is %s', async (_name, md, part, mark, to, blank, expected) => {
+      // The paragraph lost its text, which the tracked break before it
+      // joins to the paragraph before, so the break went with it. Written
+      // as they were, at the line's end, export dropped them after the
+      // span, and the next import the break the same way.
+      const markdown = await withXml(md, part, [mark, to], ['<w:r><w:t>XX</w:t></w:r>', blank]);
       expect(markdown).toBe(expected);
       expect(await roundTrip(markdown)).toBe(markdown);
     });
@@ -9124,7 +9157,7 @@ describe('Whitespace at the edges of a paragraph', () => {
       // The paragraph lost its text, and with it the item that holds the
       // start at its mark, so the comment started at the next paragraph's
       const body = indent + '{#1>>@A (2024-01-15 10:30) | c<<}\n';
-      const markdown = await withXml(md + body, part, '<w:r><w:t>XX</w:t></w:r>', spaces);
+      const markdown = await withXml(md + body, part, ['<w:r><w:t>XX</w:t></w:r>', spaces]);
       expect(markdown).toBe(expected + body);
       expect(await roundTrip(markdown)).toBe(markdown);
     });
@@ -9137,7 +9170,7 @@ describe('Whitespace at the edges of a paragraph', () => {
     ])('keeps the indent override of the paragraph after one of spaces alone %s', async (_name, md, to, expected) => {
       // Export numbered the paragraph, which import no longer counted, so
       // the next paragraph's override went to the one after it
-      const markdown = await withXml(md, 'word/document.xml', '<w:r><w:t>XX</w:t></w:r>', to);
+      const markdown = await withXml(md, 'word/document.xml', ['<w:r><w:t>XX</w:t></w:r>', to]);
       expect(markdown).toBe(expected);
       expect(await roundTrip(markdown)).toBe(markdown);
     });

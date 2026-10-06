@@ -4198,11 +4198,12 @@ function parseNoteBody(
           const last = target[target.length - 1];
           const needsPara = inTableCell || isCodeBlock
             || (last !== undefined && (last.type !== 'para' || !!last.isCodeBlock));
+          // The tracked mark of the paragraph before, which this one's text
+          // joins to it
+          const trackedBreak = !inTableCell && precedingMark?.target === target && precedingMark.end === target.length;
           if (needsPara) {
             const paraItem: ContentItem = { type: 'para' };
-            if (!inTableCell && precedingMark?.target === target && precedingMark.end === target.length) {
-              paraItem.breakRevision = precedingMark.revision;
-            }
+            if (trackedBreak) paraItem.breakRevision = precedingMark.revision;
             if (isCodeBlock) paraItem.isCodeBlock = true;
             target.push(paraItem);
           }
@@ -4219,7 +4220,7 @@ function parseNoteBody(
             startRangesAtMark(target, lenBeforeContent, commentStartTargetIndex, activeComments);
           }
           // As in the document's body (see dropBlankParagraphText)
-          if (!inTableCell && !isCodeBlock && !paraMarkRevision) dropBlankParagraphText(target, lenBeforeContent);
+          if (!inTableCell && !isCodeBlock && !paraMarkRevision && !trackedBreak) dropBlankParagraphText(target, lenBeforeContent);
           // Display math in the paragraph goes on in it (see the document's)
           if (!inTableCell) {
             for (let k = lenBeforeContent; k < target.length; k++) {
@@ -5358,6 +5359,9 @@ export async function extractDocumentContent(
             : target.length > 0 && (prevItem!.type !== 'para' || prevIsCodeBlockPara || prevIsStructuralPara);
 
           const targetLenBeforePara = target.length;
+          // Whether the tracked mark of the paragraph before is a break this
+          // one's text joins to it
+          let trackedBreak = false;
           // Paragraphs whose tracked mark can become a break inside a CriticMarkup
           // span (see joinTrackedParagraphBreaks); headings keep paraMarkRevision
           // too, for one whose text is all in the revision, {++# a++}. A
@@ -5384,6 +5388,11 @@ export async function extractDocumentContent(
             if (paraMarkRevision && headingLevel) paraItem.paraMarkRevision = paraMarkRevision;
             if (takesTrackedBreak && precedingMark?.target === target && precedingMark.end === targetLenBeforePara) {
               paraItem.breakRevision = precedingMark.revision;
+              // A list item, a heading or code never joins it (see
+              // breakContainer). Whether another's container is the one
+              // before's, a later pass finds, with which paragraphs continue
+              // a list.
+              trackedBreak = breakContainer(paraItem, 'after') !== undefined;
             }
             target.push(paraItem);
           }
@@ -5398,11 +5407,12 @@ export async function extractDocumentContent(
           }
           // A paragraph of spaces and tabs alone is an empty one, but not in
           // a table's cell, whose empty paragraph keeps its place, so the
-          // whitespace keeps it too, nor in code, nor where its mark is
-          // tracked, or a comment's range starts at its mark, which the item
-          // startRangesAtMark added holds, as an empty paragraph would lose
-          // them
-          const blank = !inTableCell && !isCodeBlock && !paraMarkRevision
+          // whitespace keeps it too, nor in code, nor where its mark or the
+          // one before it is tracked, which joins its text to the paragraph
+          // before (see joinTrackedParagraphBreaks), or a comment's range
+          // starts at its mark, which the item startRangesAtMark added holds,
+          // as an empty paragraph would lose them
+          const blank = !inTableCell && !isCodeBlock && !paraMarkRevision && !trackedBreak
             && dropBlankParagraphText(target, targetLenBeforePara + (needsPara ? 1 : 0));
           // If walking this paragraph's children entered a bibliography field
           // (i.e. the field-begin + separate markers were in this paragraph),
@@ -9818,8 +9828,12 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
  *  the spans before and after it, as in {++**a**\n\nmore++} rather than
  *  {++**a**++}{++\n\n++}{++more++}, and the spaces and tabs the span has at
  *  the ends of the lines around it, which export would drop there, as
- *  references, as in {--a\n\n&#32;b--}. */
-function joinSpansAtTrackedBreaks(markdown: string, marks: TrackedBreakMarks): string {
+ *  references, as in {--a\n\n&#32;b--}, and after a span the break ends,
+ *  where they end the line, as a paragraph of them after a tracked mark
+ *  does in a{--\n\n--}&#32;. */
+function joinSpansAtTrackedBreaks(text: string, marks: TrackedBreakMarks): string {
+  const markdown = text.replace(new RegExp('(' + marks.end + '|' + marks.alone + '\\n[> \\t]*\\n[> \\t]*)((?:--|\\+\\+)\\})([ \\t]+)(?=\\n|$)', 'g'),
+    (_m, mark: string, closer: string, whitespace: string) => mark + closer + whitespace.replace(/[ \t]/g, c => c === ' ' ? '&#32;' : '&#9;'));
   const boundary = '(?:\\+\\+\\}\\{\\+\\+|--\\}\\{--)?';
   const marked = new RegExp('(' + boundary + ')(' + SPAN_AT_BREAK + '?)' + marks.start + '([^' + marks.end + ']*)' + marks.end + boundary + '([ \\t]*)', 'g');
   let out = '';
