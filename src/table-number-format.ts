@@ -961,6 +961,39 @@ function planHtmlVisibleChange(segment: HtmlVisibleSegment, formatted: string,
 		formatted.slice(prefix, formatted.length - suffix), stats);
 }
 
+/** `edits`, after a ; at the end of each numeric reference without one that
+ *  the edits would run on into a digit, or a ; that would end it, as
+ *  dropping the space of &#x31 234 would make &#x31234, which the browser
+ *  reads as U+31234, not 1234 */
+function terminateReferencesBefore(source: string, segment: HtmlVisibleSegment, edits: SourceEdit[]): SourceEdit[] {
+	const editsAt = new Map<number, SourceEdit[]>();
+	for (const edit of edits) editsAt.set(edit.start, [...editsAt.get(edit.start) ?? [], edit]);
+	// The character at `position` once the edits are made, as
+	// applySourceEdits makes them: the inserts there in order, or else what
+	// follows the most they delete
+	const characterAt = (position: number): string | undefined => {
+		const at = editsAt.get(position);
+		if (!at) return source[position];
+		const insert = at.map(edit => edit.insert).join('');
+		const end = Math.max(...at.map(edit => edit.end));
+		return insert ? insert[0] : end > position ? characterAt(end) : source[position];
+	};
+	const terminations: SourceEdit[] = [];
+	for (const piece of segment.pieces) {
+		// Read as decodeHtmlTextWithOffsets reads them
+		for (const reference of source.slice(piece.sourceStart, piece.sourceEnd).matchAll(new RegExp(HTML_CHARACTER_REFERENCE, 'g'))) {
+			const end = piece.sourceStart + reference.index + reference[0].length;
+			if (reference[0][1] !== '#' || reference[0].endsWith(';') || !editsAt.has(end)) continue;
+			const next = characterAt(end);
+			if (next !== undefined && (/[xX]/.test(reference[0][2]) ? /[0-9a-fA-F;]/ : /[0-9;]/).test(next)) {
+				terminations.push({ start: end, end, insert: ';' });
+			}
+		}
+	}
+	// First, as applySourceEdits joins the inserts at one place in order
+	return [...terminations, ...edits];
+}
+
 function applySourceEdits(source: string, rangeStart: number, rangeEnd: number, edits: SourceEdit[],
 	stats?: TableNumberFormatScanStats): string {
 	if (edits.length === 0) return source.slice(rangeStart, rangeEnd);
@@ -1047,7 +1080,9 @@ function formatSingleIndexedTable(table: IndexedHtmlTable, source: string, baseF
 			const segment = segments[segmentIndex];
 			const formatted = segments.length === 1 ? formatTypedCell(cellSource, segment.text, effective, warnings)
 				: formatTextCell(segment.text, effective, warnings);
-			if (formatted !== segment.text) edits.push(...planHtmlVisibleChange(segment, formatted, index.stats));
+			if (formatted !== segment.text) {
+				edits.push(...terminateReferencesBefore(source, segment, planHtmlVisibleChange(segment, formatted, index.stats)));
+			}
 		}
 	}
 	recordTableWarnings();

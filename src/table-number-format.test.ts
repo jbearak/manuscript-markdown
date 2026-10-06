@@ -488,6 +488,14 @@ describe('table number formatting', () => {
 		expect(formatTableNumbers(html, { digits: 2 }).output).toBe('<table><tr><td>&#128;1234.50</td><td>&#128 7.00</td></tr></table>');
 	});
 
+	test('ends a numeric reference without its ; that a value\'s edit would run on into digits', () => {
+		// Dropping the space made &#x31234 and &#49234, which the browser reads
+		// as U+31234 and U+C052
+		const html = (a: string, b: string, c: string) => '<table><tr><td>' + a + '</td><td>' + b + '</td><td>' + c + '</td></tr></table>';
+		expect(formatTableNumbers(html('&#x31 234.5', '&#49 234.5', '&#49'), { digitGrouping: 'none', digits: 2 }).output)
+			.toBe(html('&#x31;234.50', '&#49;234.50', '&#49.00'));
+	});
+
 	test('reads a currency sign written by its name as the browser does', () => {
 		// Only &nbsp;, &lt;, &gt;, &quot;, &apos; and &amp; were read, so
 		// &euro; was text, before which the value was no number
