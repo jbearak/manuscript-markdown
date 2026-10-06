@@ -330,6 +330,16 @@ function lineBreakText(): string {
   return readsMarkdown ? '\\\n' : '<br>';
 }
 
+/** Syntax, CriticMarkup's, as export reads it there: in an HTML table's
+ *  cell, which holds it as text, as import writes that text when it comes
+ *  back (see htmlLineCharacters), with its <, > and & as references, but
+ *  for those of its delimiters, so a tag in a comment's body stays text,
+ *  and it reads back as written. A body in ID syntax goes after the table,
+ *  where export reads Markdown, as it is. */
+function syntaxText(markdown: string): string {
+  return readsMarkdown ? markdown : htmlLineCharacters(markdown).join('');
+}
+
 /** `text` with the tags export reads as formatting or a line break written
  *  as text, but for one at a position in `raw`, which export reads as it is,
  *  as in a citation's keys (see escapeMarkdownChars) */
@@ -6875,7 +6885,7 @@ function renderInlineRange(
         for (const cid of [...item.commentIds].sort()) {
           const c = comments.get(cid);
           if (!c) { continue; }
-          out += formatCommentBody(cid, c, renderOpts?.timezone);
+          out += syntaxText(formatCommentBody(cid, c, renderOpts?.timezone));
         }
       }
       i++;
@@ -6965,7 +6975,7 @@ function renderInlineRange(
       for (const cid of [...commentSet].sort()) {
         const c = comments.get(cid);
         if (!c) { continue; }
-        out += formatCommentBody(cid, c, renderOpts?.timezone);
+        out += syntaxText(formatCommentBody(cid, c, renderOpts?.timezone));
       }
 
       i = j;

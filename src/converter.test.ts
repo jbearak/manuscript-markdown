@@ -38,6 +38,7 @@ import { parseBibtex } from './bibtex-parser';
 import { convertMdToDocx, parseMd } from './md-to-docx';
 import { GRID_TABLE_PLACEHOLDER_PREFIX } from './grid-table-preprocess';
 import { keepParagraphEdgeWhitespace } from './html-entities';
+import { extractAllDecorationRanges } from './highlight-colors';
 
 const fixturesDir = join(__dirname, '..', 'test', 'fixtures');
 const sampleData = new Uint8Array(readFileSync(join(fixturesDir, 'sample.docx')));
@@ -6946,13 +6947,29 @@ describe('HTML table cells', () => {
 
   test.each([
     ['its {>> and <<}', 'c', 'c'],
+    ['a tag in its body', 'x<b>y', 'x&lt;b&gt;y'],
+    ['a reference in its body', 'x &amp; y', 'x &amp;amp; y'],
+    ['a tab in its body', 'x\ty', 'x&#9;y'],
   ])('writes a comment in a merged cell as the text it exports as, with %s', async (_name, body, html) => {
-    // The next import wrote the >> and << it read as text as references
+    // Export read a tag in its body as one, as a <b> that made the rest of
+    // the cell bold, and the next import wrote the >> and << it read as
+    // text as references
     const markdown = mergedCell([cellText('a '), cellText('b', ['0'])], new Map([['0', { author: 'A', text: body, date: '' }]]));
     expect(markdown).toContain('<p>a {==b==}{>>@A | ' + html + '<<}</p>');
     const { cell, paragraphs } = await exportedCell(markdown, 1);
     expect(cell).not.toContain('<w:b/>');
     expect(paragraphs).toEqual(['a {==b==}{>>@A | ' + body + '<<}']);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('writes the body of a comment over an HTML comment in a merged cell as the text it exports as', async () => {
+    // Export read the tag in it as one
+    const comment = { type: 'html_comment', text: '<!-- x -->', commentIds: new Set(['0']) } as ContentItem;
+    const markdown = mergedCell([cellText('a '), comment], new Map([['0', { author: 'A', text: 'y<b>z', date: '' }]]));
+    expect(markdown).toContain('<p>a <!-- x -->{>>@A | y&lt;b&gt;z<<}</p>');
+    const { cell, paragraphs } = await exportedCell(markdown, 1);
+    expect(cell).not.toContain('<w:b/>');
+    expect(paragraphs[0]).toEndWith('{>>@A | y<b>z<<}');
     expect(await roundTrip(markdown)).toBe(markdown);
   });
 
@@ -7001,6 +7018,21 @@ describe('HTML table cells', () => {
 
   const citationItem = (keys: string[], extra: object = {}) =>
     ({ type: 'citation', text: '(Smith 2020)', commentIds: new Set(), pandocKeys: keys, ...extra }) as unknown as ContentItem;
+
+  test('writes a comment and a substitution in a merged cell with delimiters the editor reads', async () => {
+    // Their > and < as references, which export reads as text as it does
+    // them as they are, hid the comment and the substitution's sides from
+    // the editor and navigation
+    const markdown = mergedCell([cellText('a '), cellText('b', [], {}, deleted), cellText('c', [], {}, inserted), cellText('d', ['0'])], new Map([['0', { author: 'A', text: 'x<b>y', date: '' }]]));
+    expect(markdown).toContain('<p>a {~~b~>c~~}{==d==}{>>@A | x&lt;b&gt;y<<}</p>');
+    const ranges = extractAllDecorationRanges(markdown, 'yellow');
+    const texts = (list: Array<{ start: number; end: number }>) => list.map(range => markdown.slice(range.start, range.end));
+    expect([texts(ranges.substitutionOld), texts(ranges.substitutionNew), texts(ranges.comments)]).toEqual([['b'], ['c'], ['@A | x&lt;b&gt;y']]);
+    const { cell, paragraphs } = await exportedCell(markdown, 1);
+    expect(cell).not.toContain('<w:b/>');
+    expect(paragraphs).toEqual(['a {~~b~>c~~}{==d==}{>>@A | x<b>y<<}']);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
 
   test('keeps a deleted citation whose locator has a ~> out of a substitution in a merged cell', async () => {
     // The next import wrote its > as a reference, as it does text's there,
