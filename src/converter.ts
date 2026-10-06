@@ -5973,7 +5973,12 @@ function renderSubstitutionRun(
   if (deletions === 0 || additions === 0 || deletions + additions <= 2) return undefined;
   const oldSide = sideText(start, start + deletions);
   const newSide = sideText(start + deletions, k);
-  if (sideMovesHighlightedSpace(oldSide) || sideMovesHighlightedSpace(newSide)) return undefined;
+  if (sideMovesHighlightedSpace(oldSide) || sideMovesHighlightedSpace(newSide)) {
+    // The rest of the deletions go in spans too, rather than build sides
+    // from each, which would take time in the square of them
+    substitutionlessRuns.set(segment, { from: start, to: start + deletions, end });
+    return undefined;
+  }
   // Resolved apart, before the check (see tryRenderSubstitution)
   const oldText = resolveSide(oldSide);
   const newText = resolveSide(newSide);

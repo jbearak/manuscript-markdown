@@ -11009,6 +11009,19 @@ describe('Highlights across runs', () => {
     expect(await roundTrip(md)).toBe(md);
   });
 
+  test.each([['new', 'addition'], ['old', 'deletion']] as const)('writes many deletions before a highlighted space after an = on the %s side in linear time', (_side, type) => {
+    // Each start in the deletions built its sides again, which each declined
+    const item = (text: string, revision: 'addition' | 'deletion', formatting: Partial<RunFormatting> = {}) => (
+      { type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting }, revision: { type: revision, author: 'A', date: '' } });
+    const items = [
+      ...Array.from({ length: 32000 }, (_, k) => item('d', 'deletion', { bold: k % 2 === 1 })),
+      item('=', type), item(' ', type, { highlight: true }), item('n', 'addition'),
+    ];
+    const start = performance.now();
+    expect(buildMarkdown(items as ContentItem[], new Map())).toEndWith('{' + (type === 'addition' ? '++' : '--') + '== ==' + (type === 'addition' ? 'n++}' : '--}{++n++}'));
+    expect(performance.now() - start).toBeLessThan(3000);
+  });
+
   test.each([
     ['text\'s = after it', tracked('del', plain('old')) + tracked('ins', highlighted('y ') + plain('=')), '{~~old~>==y ==\\=~~}\n'],
     ['text between it and an =', tracked('del', plain('old')) + tracked('ins', plain('=x') + highlighted(' y')), '{~~old~>=x== y==~~}\n'],
