@@ -160,6 +160,7 @@ export interface MdRun {
   criticParagraphBreak?: true; // first of two softbreaks representing a blank line inside a Critic payload
   linkStart?: true; // first run of a link, where a hyperlink starts though the run before goes to the same place
   cellParagraphBreak?: true; // hardbreak between two of an HTML table cell's paragraphs, which generateTable splits on
+  newline?: true; // hardbreak a newline made, in breaks mode or a grid table's cell, which a line of comment bodies drops as a softbreak
   type: 'text' | 'critic_add' | 'critic_del' | 'critic_sub' | 'critic_highlight' | 'critic_comment' | 'citation' | 'math' | 'softbreak' | 'hardbreak' | 'comment_range_start' | 'comment_range_end' | 'comment_body_with_id' | 'footnote_ref' | 'html_comment' | 'image';
   text: string;
   bold?: boolean;
@@ -1646,7 +1647,7 @@ export function pipeTableAlignedProps(aligned: Map<number, boolean>): CustomProp
 function promoteSoftbreaks(runs: MdRun[]): void {
   for (let i = 0; i < runs.length; i++) {
     if (runs[i].type === 'softbreak') {
-      runs[i] = { ...runs[i], type: 'hardbreak' };
+      runs[i] = { ...runs[i], type: 'hardbreak', newline: true };
     }
     if (runs[i].innerRuns) promoteSoftbreaks(runs[i].innerRuns!);
     if (runs[i].oldRuns) promoteSoftbreaks(runs[i].oldRuns!);
@@ -6780,10 +6781,11 @@ function withParagraphMarkRevision(pPr: string, revision: string): string {
 /**
  * A paragraph's runs without the spaces and line breaks around comment
  * bodies ({#id>>...<<}) at either end of a line, which Word would show: the
- * spaces between such bodies and the text beside them, and the line breaks
- * around lines that hold only bodies. Import writes the bodies on the lines
- * after their paragraph. A block of body lines keeps one break, joining the
- * lines on either side, unless it ends the paragraph or is all of it.
+ * spaces between such bodies and the text beside them, and the line ends
+ * around lines that hold only bodies, but not a line break written as a \
+ * or a <br>. Import writes the bodies on the lines after their paragraph.
+ * A block of body lines keeps one break, joining the lines on either side,
+ * unless it ends the paragraph or is all of it.
  * The lines are those Word shows with changes marked, so a revision's or a
  * highlight's text, as in {++x\n{#1>>c<<}++}, is read in its place, both
  * sides of a substitution in turn, and a line can start in one revision and
@@ -6870,10 +6872,14 @@ function withoutCommentBodyLines(source: MdRun[]): MdRun[] {
     && line.every(run => run.type === 'comment_body_with_id' || marker(run) || run.type === 'critic_comment');
   // Break k sits between lines k and k + 1. A blank line in a revision's
   // text, two breaks, is a paragraph break that splitCriticParagraphs splits
-  // at, so neither of them goes.
+  // at, so neither of them goes. Nor does a line break written as one, a \
+  // or a <br>, which Word shows, as at the end of a range before its body,
+  // in {#1}a<br>{/1}{#1>>c<<}, but a newline only, which import writes
+  // before a body's line.
+  const written = (k: number) => breaks[k]?.type === 'hardbreak' && !breaks[k].newline;
   const dropped = new Set<number>();
   const drop = (k: number) => {
-    if (!breaks[k].criticParagraphBreak && !breaks[k - 1]?.criticParagraphBreak) dropped.add(k);
+    if (!written(k) && !breaks[k].criticParagraphBreak && !breaks[k - 1]?.criticParagraphBreak) dropped.add(k);
   };
   for (let first = 0; first < trimmed.length;) {
     if (!bodyLine(trimmed[first])) {
@@ -6883,8 +6889,12 @@ function withoutCommentBodyLines(source: MdRun[]): MdRun[] {
     let last = first;
     while (last + 1 < trimmed.length && bodyLine(trimmed[last + 1])) last++;
     for (let k = first; k < last; k++) drop(k);
-    if (last + 1 < trimmed.length) drop(last);
-    else if (first > 0) drop(first - 1);
+    if (last + 1 < trimmed.length) {
+      drop(last);
+      // The break that joins the lines on either side is a line break
+      // written as one there, if any is
+      if (first > 0 && breaks.slice(first, last + 1).some((_, i) => written(first + i))) drop(first - 1);
+    } else if (first > 0) drop(first - 1);
     first = last + 1;
   }
   const kept: MdRun[] = [];
