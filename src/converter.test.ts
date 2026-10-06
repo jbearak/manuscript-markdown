@@ -6600,6 +6600,62 @@ describe('Word text that reads as Markdown', () => {
   });
 
   test.each([
+    ['a deletion', 'P {--`XX`--} Q.', 'a --} b ~> c', 'w:del', 'P {--`a -`--}{--`-} b ~> c`--} Q.'],
+    ['a deletion, before a ~~}', 'P {--`XX`--} Q.', 'a --} b ~~} c', 'w:del', 'P {--`a -`--}{--`-} b ~~} c`--} Q.'],
+    ['a deletion, after a ~>', 'P {--`XX`--} Q.', '~>--}--}', 'w:del', 'P {--`~>-`--}{--`-}-`--}{--`-}`--} Q.'],
+    ['an insertion, before a ~~}', 'P {++`XX`++} Q.', 'a ++} b ~~} c', 'w:ins', 'P {++`a +`++}{++`+} b ~~} c`++} Q.'],
+    ['a deletion, in bold', 'P {--**`XX`**--} Q.', 'a --} b ~> c', 'w:del', 'P {--**`a -`**--}{--**`-} b ~> c`**--} Q.'],
+    // Each piece of highlighted code with an == in it goes in spans split
+    // between the two =
+    ['a deletion, highlighted, with an ==', 'P {--==`XX`==--} Q.', 'a==b --} c ~> d', 'w:del',
+      'P {--==`a=`=={yellow}==`=b -`=={yellow}--}{--==`-} c ~> d`==--} Q.'],
+    ['a deletion in a comment\'s range', 'P {=={--`XX`--}==}{>>c<<} Q.', 'a --} b ~> c', 'w:del',
+      'P {=={--`a -`--}{--`-} b ~> c`--}==}{>>c<<} Q.'],
+    // Its last pieces, which hold no ~>, were a side of the substitution,
+    // where their backticks ran together
+    ['a deletion before an insertion', 'P {~~`XX`~>b~~} Q.', '~>--}--}', 'w:del', 'P {--`~>-`--}{--`-}-`--}{--`-}`--}{++b++} Q.'],
+    // The highlight's group held the pieces, whose backticks ran together
+    ['a deletion in a highlight with an equation', 'P {--==`XX`$x$&#122;==--} Q.', 'a --} b ~> c', 'w:del',
+      'P {--==`a -`==--}{--==`-} b ~> c`$x$&#122;==--} Q.'],
+  ])('keeps code with the closer of %s in its text', async (_name, md, text, tag, expected) => {
+    // A substitution with one side, which holds the closer, can't hold a ~>
+    // on the old side, or a ~~}, so the change ended at the closer, and the
+    // code's backticks were text, as were the rest of its delimiters
+    const markdown = await importText('A.\n\n' + md + '\n\nB.', text);
+    expect(markdown).toBe('A.\n\n' + expected + '\n\nB.\n');
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    // In runs of code side by side in the change, as Word shows it
+    const runs = [...xml.matchAll(new RegExp('<' + tag + '\\b[\\s\\S]*?</' + tag + '>', 'g'))].flatMap(m => m[0].match(/<w:r>[\s\S]*?<\/w:r>/g) ?? []);
+    const code = runs.filter(run => run.includes('<w:rStyle w:val="CodeChar"/>'));
+    expect(code.map(run => run.replace(/<[^>]+>/g, '').replace(/&gt;/g, '>')).join('')).toBe(text);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  const revised = (text: string, type: 'addition' | 'deletion', formatting: Partial<RunFormatting> = {}): ContentItem => (
+    { type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting }, revision: { type, author: 'A', date: '2024-01-01T00:00:00Z' } });
+
+  test('writes deleted code of many closers and a ~> before an insertion in linear time', () => {
+    // Each piece of the code tried a substitution from it, which built the
+    // rest of the deletion as its old side before it declined: about 13 s
+    const items = [revised('a --} '.repeat(12000) + '~>', 'deletion', { code: true }), revised('b', 'addition')];
+    const start = performance.now();
+    expect(buildMarkdown(items, new Map())).toEndWith('{--`-} a -`--}{--`-} ~>`--}{++b++}');
+    expect(performance.now() - start).toBeLessThan(2000);
+  });
+
+  test('writes a deleted highlight of many runs before code of its closer and a ~> in linear time', () => {
+    // Each run read on to the code's pieces for a group, which text of
+    // another color there would have kept it from: about 8 s
+    const items = [
+      ...Array.from({ length: 32000 }, (_, k) => revised('a', 'deletion', { highlight: true, bold: k % 2 === 1 })),
+      revised('a --} b ~> c', 'deletion', { highlight: true, code: true }),
+    ];
+    const start = performance.now();
+    expect(buildMarkdown(items, new Map())).toEndWith('{--**==a==**--}{--==`a -`==--}{--==`-} b ~> c`==--}');
+    expect(performance.now() - start).toBeLessThan(2000);
+  });
+
+  test.each([
     ['bold', '**XX**b', '\\ '],
     ['a highlight', '==XX==b', '{ '],
     ['strikethrough', '~~XX~~b', ')\\ '],
