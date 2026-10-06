@@ -6630,6 +6630,9 @@ describe('HTML around a table in its block', () => {
     // Whose lines a paragraph's lost their indents
     ['a <pre> that goes on past a line of text', '', '\nSource <pre>if ready:\n    run()\n</pre> done\n', '', '\n\nSource\n<pre>if ready:\n    run()\n</pre> done\n'],
     ['a <pre> on a line of text that ends on it', '', '\nSource <pre>a</pre> <b>b</b>\n', '', '\n\nSource <pre>a</pre> <b>b</b>\n'],
+    // Whose spaces at the start of a line in it went, as a line's, which
+    // changed where the link goes
+    ['a tag whose attribute goes on over lines', '', '\nSource <a href="docs/a\n    b">link</a>\n', '', '\n\nSource <a href="docs/a\n    b">link</a>\n'],
     // Whose lines were text after the comment's block, which ended on its line
     ['a <pre> that goes on past a comment on its line', '', '\n<!-- note --><pre>if ready:\n    run()\n</pre>\n', '', '\n\n<!-- note -->\n<pre>if ready:\n    run()\n</pre>\n'],
     ['a <pre> that goes on past a directive on its line', '', '\n<!-- table-font-size: 11 --><pre>if ready:\n    run()\n</pre>\n', '', '\n\n<pre>if ready:\n    run()\n</pre>\n'],
@@ -6748,6 +6751,8 @@ describe('HTML around a table in its block', () => {
     ['in a character reference', '&#83;ources'],
     ['in tags', '<span>Sources</span>'],
     ['in a style\'s comments', '<!-- style: Title -->Sources<!-- /style -->'],
+    // Which the next round trip took out, as they hold nothing
+    ['with empty tags on the next line', 'Sources\n<b></b>'],
   ])('drops the HTML around a table that leaves HTML where a line of it alone would read as a Sources heading %s', async (_name, line) => {
     // Word's paragraph of it read as the heading of a bibliography Word
     // holds as text on the next import, which dropped it and all after

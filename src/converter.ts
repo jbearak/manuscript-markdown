@@ -7615,7 +7615,8 @@ const CHARACTER_REFERENCE_AT = /&(?:#\d{1,7}|#[xX][\da-fA-F]{1,6}|[A-Za-z][A-Za-
  *  lines, as they are, and the rest escaped, with each line's $ or [ as the
  *  lines after can close it, with no indent, which HTML runs together with
  *  the line end before, nor whitespace at a line's end, which would make a
- *  line break. A citation's [, as any with an @ before its ], is escaped
+ *  line break, but in a tag or comment over lines, as in an attribute's
+ *  value, which keeps it. A citation's [, as any with an @ before its ], is escaped
  *  too, and what it holds as text, which escapeMarkdownChars keeps as a
  *  citation, as export writes one whose key is missing as its text, but
  *  which the HTML held as text. It's a \0 while the rest is escaped, which
@@ -7623,7 +7624,7 @@ const CHARACTER_REFERENCE_AT = /&(?:#\d{1,7}|#[xX][\da-fA-F]{1,6}|[A-Za-z][A-Za-
  *  line break (`breaks`), as with breaks: true, the lines go on one, with a
  *  space between, as HTML reads a line end, but those in a tag or comment. */
 function htmlLinesAsText(lines: string[], breaks = false): string[] {
-  const text = lines.map(line => line.replace(/^[ \t]+|[ \t]+$/g, '')).join('\n');
+  const text = lines.join('\n');
   // Each of those as a character the lines don't hold while the rest is
   // escaped, so a $ or * pairs across them as Markdown reads it
   let code = 0xE000;
@@ -7644,6 +7645,7 @@ function htmlLinesAsText(lines: string[], breaks = false): string[] {
     i = from - 1;
   }
   plain += text.slice(from);
+  plain = plain.split('\n').map(line => line.replace(/^[ \t]+|[ \t]+$/g, '')).join('\n');
   if (breaks) plain = plain.replace(/\n/g, ' ');
   // From the right, whether an @ comes before the next ], as looking on
   // from each [ took time in the square of their number
@@ -7806,17 +7808,19 @@ function detachedTableHtml(html: string, breaks = false): string | undefined | n
   const out: string[] = [];
   // The lines of text since the last that isn't, which escape together
   let texts: string[] = [];
-  // A paragraph of a line that would read as the Sources heading of a
-  // bibliography Word holds as text, which import drops with all after it,
-  // as Word's paragraph does, whatever the Markdown wrote it as: its text,
-  // with its character references read and its tags gone
+  // A paragraph that would read as the Sources heading of a bibliography
+  // Word holds as text, which import drops with all after it, as Word's
+  // paragraph does, whatever the Markdown wrote it as: its text, with its
+  // character references read, its comments and tags gone, as an empty
+  // one's would be on the next round trip, and its lines run together
   let sources = false;
   // Or of lines a comment or tag goes on over, which aren't escaped, where
   // one starts a block, as # Heading would, which ends the paragraph there
   // and shows what the comment hid
   let unread = false;
   const endTexts = () => {
-    if (texts.length === 1 && SOURCES_HEADING_RE.test(unescapeAll(texts[0].replace(/<[^>]*>/g, '').replace(/\\/g, '\\\\')).trim())) sources = true;
+    const shown = unescapeAll(texts.join('\n').replace(/<!--[\s\S]*?-->|<[^>]*>/g, '').replace(/\\/g, '\\\\'));
+    if (SOURCES_HEADING_RE.test(shown.replace(/\s+/g, ' ').trim())) sources = true;
     const text = htmlLinesAsText(texts, breaks);
     if (texts.length > 1 && !readsAsParagraph(text.join('\n'))) unread = true;
     if (texts.length > 0) out.push(...text);
