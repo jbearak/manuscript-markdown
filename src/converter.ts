@@ -11549,19 +11549,15 @@ export function buildMarkdown(
     rendered.deferredComments.unshift(...pendingEquationBodies.splice(0));
     let strippedAlertLeadHadHardBreak = false;
     let textOut = rendered.text;
-    if (pendingAlertPrefixStrip) {
+    // With the label hidden, export writes neither it nor the line end after
+    // the marker, so all of the text is the alert's (see hidesAlertLabel)
+    if (pendingAlertPrefixStrip && options?.calloutLabels !== false) {
       // Text on the marker's line has no space of export's before it
       const inlineMarker = options?.blockquoteAlertInlineByGroup?.get(currentPara?.blockquoteGroupIndex ?? -1) === true;
-      if (options?.calloutLabels === false) {
-        // Marker-only alerts retain one parser-introduced leading space when the
-        // generated label/break is absent; remove only that known artifact.
-        if (!inlineMarker && textOut.startsWith(' ')) textOut = textOut.slice(1);
-      } else {
-        textOut = stripAlertLeadPrefix(rendered.text, pendingAlertPrefixStrip, inlineMarker);
-        const removedLen = rendered.text.length - textOut.length;
-        if (removedLen > 0 && rendered.text.slice(0, removedLen).includes('\n')) {
-          strippedAlertLeadHadHardBreak = true;
-        }
+      textOut = stripAlertLeadPrefix(rendered.text, pendingAlertPrefixStrip, inlineMarker);
+      const removedLen = rendered.text.length - textOut.length;
+      if (removedLen > 0 && rendered.text.slice(0, removedLen).includes('\n')) {
+        strippedAlertLeadHadHardBreak = true;
       }
       // Spaces and tabs alone after the label leave the alert empty, as they
       // would a paragraph (see dropBlankParagraphText), unless an equation

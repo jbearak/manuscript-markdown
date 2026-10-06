@@ -9453,6 +9453,17 @@ describe('Whitespace at the edges of a paragraph', () => {
     });
   });
 
+  test.each([
+    ['a space', '&#32;a'],
+    ['two spaces', '&#32;&#32;a'],
+  ])('keeps %s that starts an alert\'s text after its marker\'s line, with its label hidden', async (_name, text) => {
+    // Import took a space off it as export's, which writes none there
+    const md = '---\ncallout-labels: false\n---\n\n> [!NOTE]\n> ' + text + '\n';
+    const markdown = await roundTrip(md);
+    expect(markdown).toBe(md);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
   test('keeps the whitespace at the edges of a note\'s text after an equation in its paragraph', async () => {
     // Text after an equation in its paragraph goes on from the closing
     // fence, as in the document's body, with its whitespace kept
