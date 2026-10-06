@@ -2269,6 +2269,23 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
     if (text.includes('\\\n')) {
       return text.split('\\\n').map(part => part && markedFormatting(part, fmt, lineStart, after, blockStart, highlightOuter)).join('\\\n');
     }
+    // Code keeps its formatting, which **`code`** and ==`code`== export.
+    // An == in it would close the highlight, even in code, so it goes in
+    // spans highlighted apart, split between the two =, inside the rest of
+    // its formatting, each with its color named, yellow too, as in
+    // ==`x =`=={yellow}==`=`=={yellow}: navigation, the grammar and the
+    // editor's decorations read no highlight around code with an =, and
+    // would pair a closing == before no color with the next ==. Export
+    // writes a run for each span, formatted alike, which Word shows as
+    // one: no Markdown holds the code in one highlight, but CriticMarkup's
+    // {==...==}, which marks a comment's text and holds no color.
+    if (fmt.highlight && text.includes('==')) {
+      const color = markdownHighlightColor(fmt) ?? 'yellow';
+      const code = { ...DEFAULT_FORMATTING, code: true, superscript: fmt.superscript, subscript: fmt.subscript };
+      const spans = text.split(/(?<==)(?==)/)
+        .map(part => wrapHighlight(markedFormatting(part, code), color) + (color === 'yellow' ? '{yellow}' : '')).join('');
+      return wrapFormatting(spans, { ...fmt, superscript: false, subscript: false, highlight: false });
+    }
     // Find the longest run of consecutive backticks in the text
     let maxRun = 0;
     const backtickRuns = result.match(/`+/g);
@@ -2285,9 +2302,7 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
     const hasLeadingTrailingSpaces = result.startsWith(' ') && result.endsWith(' ') && /[^ ]/.test(result);
     const needsPadding = result.startsWith('`') || result.endsWith('`') || hasLeadingTrailingSpaces;
     result = needsPadding ? `${fence} ${result} ${fence}` : `${fence}${result}${fence}`;
-    // Code keeps its formatting, which **`code`** and ==`code`== export,
-    // but for a highlight that an == in it would close
-    return wrapFormatting(result, fmt.highlight && text.includes('==') ? { ...fmt, highlight: false } : fmt, highlightOuter);
+    return wrapFormatting(result, fmt, highlightOuter);
   }
 
   // Escape markdown-sensitive characters so they round-trip faithfully.
@@ -6169,21 +6184,6 @@ function renderSubstitutionRun(
   return { text: '{~~' + oldText + '~>' + newText + '~~}', nextIndex: k };
 }
 
-/**
- * Whether code with `formatting` and `text` writes the code span `next`
- * does, so that one span holds both, as two side by side would run their
- * backticks into one: code keeps the rest of a run's formatting, but drops
- * its highlight where an == in it would close that, unless together they'd
- * have an == that neither has.
- */
-function sameCodeSpan(formatting: RunFormatting, text: string, next: Extract<ContentItem, { type: 'text' }>): boolean {
-  const highlight = (f: RunFormatting, t: string) => f.highlight && !t.includes('==') ? f.highlightColor ?? 'yellow' : '';
-  const rest = (f: RunFormatting): RunFormatting => ({ ...f, highlight: false, highlightColor: undefined });
-  const kept = highlight(formatting, text);
-  return formatting.code && next.formatting.code && kept === highlight(next.formatting, next.text)
-    && (kept === '' || !(text + next.text).includes('==')) && formattingEquals(rest(formatting), rest(next.formatting));
-}
-
 /** A citation without keys as a run of its text, as export reads it back,
  *  highlighted as it is, which the runs beside it read and join */
 function keylessCitationRun(item: ContentItem): ContentItem {
@@ -6198,9 +6198,8 @@ function keylessCitationRun(item: ContentItem): ContentItem {
   };
 }
 
-/** Joins runs that read as one. In HTML, which keeps the rest of code's
- *  formatting, only runs formatted alike do (`markdown` false). */
-function mergeConsecutiveRuns(items: ContentItem[], markdown = true): ContentItem[] {
+/** Joins runs that read as one, formatted alike */
+function mergeConsecutiveRuns(items: ContentItem[]): ContentItem[] {
   const content = items.map(keylessCitationRun);
   const merged: ContentItem[] = [];
   let i = 0;
@@ -6223,7 +6222,7 @@ function mergeConsecutiveRuns(items: ContentItem[], markdown = true): ContentIte
     while (j < content.length) {
       const next = content[j];
       if (next.type !== 'text' ||
-          !formattingEquals(item.formatting, next.formatting) && !(markdown && sameCodeSpan(item.formatting, mergedText, next)) ||
+          !formattingEquals(item.formatting, next.formatting) ||
           item.href !== next.href ||
           item.link !== next.link ||
           // A link's line break before a line that would start a block
@@ -7483,7 +7482,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
           ? para.map(item => item.type === 'text' && item.formatting?.bold
             ? { ...item, formatting: { ...item.formatting, bold: false } }
             : item)
-          : para, false);
+          : para);
         const html = renderHtmlCellParagraph(items);
         if (html !== undefined) {
           lines.push(i3 + '<p>' + html + '</p>');
@@ -7496,7 +7495,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
         readsMarkdown = false;
         let rendered: ReturnType<typeof renderInlineSegment>;
         try {
-          rendered = renderInlineSegment(mergeConsecutiveRuns(items.map(mathCellRun), false), comments, renderOpts, undefined, true);
+          rendered = renderInlineSegment(mergeConsecutiveRuns(items.map(mathCellRun)), comments, renderOpts, undefined, true);
         } finally {
           readsMarkdown = outerReadsMarkdown;
         }
