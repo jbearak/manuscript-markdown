@@ -626,6 +626,20 @@ Separate keys with semicolons even after a prefix. Write `[e.g., @smith2020; @jo
 
 Citations reference entries in a companion `.bib` file (see [BibTeX Companion File](#bibtex-companion-file) below).
 
+### Bibliography Placement
+
+DOCX export puts the bibliography at the end of the document, followed by a note for each cited key the `.bib` file lacks, as `Citation data for @key was not found in the bibliography file.` A `<!-- references -->` comment in a paragraph of its own, or `<!-- bibliography -->`, puts them there instead. Only the first marker counts.
+
+```markdown
+Main text [@smith2020].
+
+<!-- references -->
+
+## Appendix
+```
+
+In Word, the marker is the bibliography's `ZOTERO_BIBL` field. When there are no entries to list, as without a `.bib` file or when it has none of the cited keys, the field is empty, in a hidden paragraph that takes no space, so Word shows nothing at the marker. DOCX import writes the field back as `<!-- references -->`, before the notes, which export drops and writes again from the citations. A marker at the end of the document, where the bibliography goes anyway, gets no empty field, and import leaves out a marker there.
+
 ### BibTeX Companion File
 
 By default, citations reference a companion `.bib` file with the same base name as the Markdown file (e.g., `paper.md` uses `paper.bib`). You can override this by specifying a `bibliography` field in the YAML frontmatter:

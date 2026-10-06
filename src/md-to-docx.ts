@@ -4,7 +4,7 @@ import { imagePathsWithSpaces } from './image-paths';
 import { codeSpansOfSpaces } from './code-spans';
 import type Token from 'markdown-it/lib/token.mjs';
 import type StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
-import { escapeXml, escapeXmlText, textElements, orderRPr, generateCitation, generateMathXml, generateTrackedMathXml, trackedEquationLatex, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, type CiteprocEngine } from './md-to-docx-citations';
+import { escapeXml, escapeXmlText, textElements, orderRPr, generateCitation, generateMathXml, generateTrackedMathXml, trackedEquationLatex, createCiteprocEngineLocal, createCiteprocEngineAsync, generateBibliographyXml, generateMissingKeysXml, HIDDEN_PARAGRAPH_PPR, type CiteprocEngine } from './md-to-docx-citations';
 import { downloadStyle, resolveCslCachePath } from './csl-loader';
 import { existsSync, readFileSync } from 'fs';
 import { isAbsolute, join, resolve } from 'path';
@@ -7081,7 +7081,7 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
   // completely hidden; without this, Word Online may show the paragraph after
   // Word Desktop saves its "Show Hidden Text" preference into settings.xml.
   if (token.type === 'paragraph' && token.runs.length > 0 && token.runs.every(r => r.type === 'html_comment')) {
-    pPr = '<w:pPr><w:spacing w:after="0" w:line="1" w:lineRule="exact"/><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr></w:pPr>';
+    pPr = HIDDEN_PARAGRAPH_PPR;
   }
 
   if (token.type === 'code_block') {
@@ -8059,7 +8059,14 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   const hasBiblMarker = body.includes(BIBL_PLACEHOLDER);
   let biblXml = '';
   // Keep imported Zotero metadata even when there are no live citation fields.
-  if (citeprocEngine && (state.citedKeys.size > 0 || options?.zoteroBiblData)) {
+  // A marker with no entries to list, or no citeproc engine, still gets the
+  // field, empty, which import reads back as the marker, so the marker keeps
+  // its place, and the missing-key notes after it theirs. At the end, where
+  // the bibliography goes anyway, import drops the marker, so there it gets
+  // none, unless footnote or endnote definitions, which import writes last,
+  // follow it.
+  if (citeprocEngine && (state.citedKeys.size > 0 || options?.zoteroBiblData)
+    || hasBiblMarker && (!body.endsWith(BIBL_PLACEHOLDER) || state.hasFootnotes || state.hasEndnotes)) {
     biblXml += generateBibliographyXml(citeprocEngine, options?.zoteroBiblData, frontmatter?.bibliographyHangingIndent);
   }
   if (state.missingKeys.size > 0) {

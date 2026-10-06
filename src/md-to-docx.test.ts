@@ -5186,13 +5186,81 @@ describe('bibliography marker', () => {
       ];
       const state = makeState();
       const xml = generateDocumentXml(tokens, state);
-      // With no citeproc engine, the placeholder is just stripped — no bibliography XML.
-      // But the "After" paragraph should still appear after the marker position.
+      // With no citeproc engine, the marker still gets the bibliography's
+      // field, empty, which import reads back as the marker
       expect(xml).toContain('Before');
       expect(xml).toContain('After');
       const beforeIdx = xml.indexOf('Before');
+      const fieldIdx = xml.indexOf('ADDIN ZOTERO_BIBL');
       const afterIdx = xml.indexOf('After');
-      expect(beforeIdx).toBeLessThan(afterIdx);
+      expect(beforeIdx).toBeLessThan(fieldIdx);
+      expect(fieldIdx).toBeLessThan(afterIdx);
+    });
+  });
+
+  describe('with no bibliography entries', () => {
+    // Export wrote nothing at the marker, so import lost it, and the notes on
+    // missing keys export wrote there went to the end on the next round trip
+    const note = 'Citation data for @a was not found in the bibliography file.';
+    const roundTrip = async (md: string, bibtex?: string) => {
+      const { convertDocx } = await import('./converter');
+      return (await convertDocx((await convertMdToDocx(md, { bibtex })).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+    };
+
+    it.each([
+      ['with nothing to list', 'A.\n\n<!-- references -->\n\nB.', 'A.\n\n<!-- references -->\n\nB.'],
+      ['before the notes on missing keys', 'A [@a].\n\n<!-- references -->\n\nB.', 'A [@a].\n\n<!-- references -->\n\n' + note + '\n\nB.'],
+      ['first in the document', '<!-- references -->\n\n[@a]', '<!-- references -->\n\n' + note + '\n\n[@a]'],
+      ['in a landscape section',
+        'A.\n\n<!-- landscape -->\n\nX [@a].\n\n<!-- references -->\n\nY.\n\n<!-- /landscape -->\n\nB.',
+        'A.\n\n<!-- landscape -->\n\nX [@a].\n\n<!-- references -->\n\n' + note + '\n\nY.\n\n<!-- /landscape -->\n\nB.'],
+      ['at the end, before the notes\' definitions', 'A.[^1]\n\n<!-- references -->\n\n[^1]: Note.', 'A.[^1]\n\n<!-- references -->\n\n[^1]: Note.'],
+      ['spelled bibliography, as references', 'A.\n\n<!-- bibliography -->\n\nB.', 'A.\n\n<!-- references -->\n\nB.'],
+    ])('MD→DOCX→MD keeps the marker %s, and the next round trip all of it', async (_, md, expected) => {
+      const once = await roundTrip(md);
+      expect(once).toBe(expected);
+      expect(await roundTrip(once)).toBe(expected);
+    });
+
+    it('MD→DOCX→MD keeps the marker with a bibliography that has none of the cited keys', async () => {
+      const bibtex = '@article{key1, author={Smith}, title={Title}, journal={J}, year={2020}}';
+      expect(await roundTrip('A.\n\n<!-- references -->\n\nB.', bibtex)).toBe('A.\n\n<!-- references -->\n\nB.');
+      expect(await roundTrip('A [@a].\n\n<!-- references -->\n\nB.', bibtex))
+        .toBe('A [@a].\n\n<!-- references -->\n\n' + note + '\n\nB.');
+    });
+
+    it('DOCX→MD→DOCX writes the empty field again, and a marker at the end gets none', async () => {
+      const { convertDocx } = await import('./converter');
+      const JSZip = (await import('jszip')).default;
+      // Without the revision IDs, which each export draws anew
+      const documentXml = async (docx: Uint8Array) =>
+        (await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).replace(/ w:rsid\w*="\w+"/g, '');
+      const { docx } = await convertMdToDocx('A [@a].\n\n<!-- references -->\n\nB.');
+      const xml = await documentXml(docx);
+      const fieldIdx = xml.indexOf('ADDIN ZOTERO_BIBL');
+      expect(fieldIdx).toBeGreaterThan(xml.indexOf('>A '));
+      expect(fieldIdx).toBeLessThan(xml.indexOf(note));
+      expect(xml.indexOf(note)).toBeLessThan(xml.indexOf('>B.<'));
+      expect(await documentXml((await convertMdToDocx((await convertDocx(docx)).markdown)).docx)).toBe(xml);
+      // Where the bibliography goes anyway, import drops the marker, and the
+      // next export would drop the field
+      expect(await documentXml((await convertMdToDocx('A.\n\n<!-- references -->')).docx)).not.toContain('ZOTERO_BIBL');
+    });
+
+    it('writes the empty field as one hidden paragraph, which Word shows nothing of', async () => {
+      // It was two paragraphs, as around a bibliography's entries, which Word
+      // showed as blank lines where the Markdown has a comment alone
+      const JSZip = (await import('jszip')).default;
+      const { docx } = await convertMdToDocx('A [@a].\n\n<!-- references -->\n\nB.');
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      const paragraphs = xml.match(/<w:p [^>]*>.*?<\/w:p>/g)!.map(paragraph => paragraph.replace(/^<w:p [^>]*>/, ''));
+      expect(paragraphs).toHaveLength(4);
+      expect(paragraphs[1]).toBe(
+        '<w:pPr><w:spacing w:after="0" w:line="1" w:lineRule="exact"/><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr></w:pPr>'
+        + '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+        + '<w:r><w:instrText xml:space="preserve"> ADDIN ZOTERO_BIBL {&quot;uncited&quot;:[],&quot;omitted&quot;:[],&quot;custom&quot;:[]} CSL_BIBLIOGRAPHY </w:instrText></w:r>'
+        + '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>');
+      expect(paragraphs[2]).toContain(note);
     });
   });
 });
