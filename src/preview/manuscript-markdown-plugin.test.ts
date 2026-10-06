@@ -700,6 +700,18 @@ describe('GFM behavior in preview plugin', () => {
   });
 
   it.each([
+    ['a comment', 'z <!-- {++x\ny++} -->', 'z <!-- {++x\ny++} -->'],
+    ['a comment, with a paragraph break', 'z <!-- {--x\n\ny--} -->', 'z <!-- {--x\n\ny--} -->'],
+    ['a tag\'s attribute', 'z <span title="{++x\ny++}">q</span>', '<span title="{++x\ny++}">'],
+  ])('writes the line break of CriticMarkup in %s, not its placeholder', (_name, md, html) => {
+    // Raw HTML kept the placeholder the line break was written as before
+    // markdown-it read the text
+    const output = renderWithPlugin(md);
+    expect(output).toContain(html);
+    expect(output).not.toContain('\uE000');
+  });
+
+  it.each([
     ['- `[ ] a`', '<code>[ ] a</code>'], ['- **[ ] a**', '<strong>[ ] a</strong>'], ['- [[ ] a](https://e.com)', '>[ ] a</a>'],
     ['> **[!NOTE]**', '<strong>[!NOTE]</strong>'], ['> a\n> **[!TIP]**', '<strong>[!TIP]</strong>'],
     ['- first\n\n  [ ] second', '[ ] second'],

@@ -1,4 +1,5 @@
 import type MarkdownIt from 'markdown-it';
+import type Token from 'markdown-it/lib/token.mjs';
 import { type CodeRegion, computeMarkdownRegions, isInsideCodeRegion, mergeRegions } from './code-regions';
 import { computeDollarMathRegions, isEscapedAt } from './math-delimiters';
 
@@ -24,6 +25,22 @@ export function criticBreaksEndLinks(md: MarkdownIt): void {
   linkify.test = text => test.call(linkify, spaced(text));
   linkify.match = text => match.call(linkify, spaced(text));
   linkify.matchAtStart = text => matchAtStart.call(linkify, spaced(text));
+}
+
+/** Put back the line breaks preprocessCriticMarkup wrote as placeholders
+ * in CriticMarkup's text in raw inline HTML, as in a comment, z <!-- {++x,
+ * a line break and y++} -->, or a tag's attribute, which hold the text as
+ * it is, and which kept the placeholders, where Word export hid them in the
+ * comment's run and the preview wrote them in its HTML. Preview and Word
+ * export must install the same rule. */
+export function criticBreaksInRawHtml(md: MarkdownIt): void {
+  const restore = (tokens: readonly Token[]) => {
+    for (const token of tokens) {
+      if (token.type === 'html_inline') token.content = restoreCriticLineBreaks(token.content);
+      if (token.children) restore(token.children);
+    }
+  };
+  md.core.ruler.after('inline', 'critic_breaks_in_raw_html', state => restore(state.tokens));
 }
 
 export type CriticBreakKind = 'line' | 'paragraph';

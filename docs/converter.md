@@ -93,7 +93,7 @@ During export, HTML comments are encoded as invisible runs in the Word document 
 <w:r><w:rPr><w:vanish/></w:rPr><w:t xml:space="preserve">​<!-- comment --></w:t></w:r>
 ```
 
-The `<w:vanish/>` run property makes the text invisible in Word's UI, and a zero-width space (`U+200B`) prefix marks the run as a comment carrier. The comment text (including `<!-- -->` delimiters) is preserved exactly, with special characters XML-escaped.
+The `<w:vanish/>` run property makes the text invisible in Word's UI, and a zero-width space (`U+200B`) prefix marks the run as a comment carrier. The comment text (including `<!-- -->` delimiters) is preserved exactly, with special characters XML-escaped. That includes CriticMarkup in a comment over a line break, as `z <!-- {++x` then `y++} -->`, whose line breaks the comment keeps; the preview writes them too.
 
 ### DOCX to Markdown
 

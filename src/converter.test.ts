@@ -11637,6 +11637,44 @@ describe('Inline code round-trip', () => {
 // Track changes (CriticMarkup)
 // ---------------------------------------------------------------------------
 
+describe('CriticMarkup over a line break in raw inline HTML', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+
+  test.each([
+    ['an insertion in a comment', 'z <!-- {++x\ny++} -->\n'],
+    ['a deletion in a comment', 'z <!-- {--x\ny--} -->\n'],
+    ['a substitution in a comment', 'z <!-- {~~x\ny~>w~~} -->\n'],
+    ['a highlight in a comment', 'z <!-- {==x\ny==} -->\n'],
+    ['a comment in a comment', 'z <!-- {>>x\ny<<} -->\n'],
+    ['a comment\'s body in a comment', 'z <!-- {#1>>x\ny<<} -->\n'],
+    ['a paragraph break in a comment', 'z <!-- {++x\n\ny++} -->\n'],
+    ['an insertion after a line in a comment', 'z <!-- a\n{++x\ny++} -->\n'],
+    ['insertions in two comments', 'z <!-- {++x\ny++} --> w <!-- {--p\nq--} -->\n'],
+    ['an insertion in a comment in a list item', '- z <!-- {++x\ny++} -->\n'],
+    ['an insertion in a comment in a quote', '> z <!-- {++x\n> y++} -->\n'],
+    ['an insertion in a comment in a heading', '# h <!-- {++x\ny++} -->\n'],
+    ['an insertion in a tag\'s attribute', 'z <span title="{++x\ny++}">q</span>\n'],
+  ])('keeps the line break of %s', async (_name, md) => {
+    // Export read it as the placeholder the CriticMarkup's line breaks
+    // were written as before markdown-it read the text, which went in the
+    // hidden run, and import wrote it out as text
+    const { docx } = await convertMdToDocx(md);
+    expect(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).not.toContain('\uE000');
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('keeps the line break of an insertion in a comment in a note', async () => {
+    const md = 'a[^1]\n\n[^1]: z <!-- {++x\n    y++} -->\n';
+    const { docx } = await convertMdToDocx(md);
+    expect(await (await JSZip.loadAsync(docx)).file('word/footnotes.xml')!.async('string')).not.toContain('\uE000');
+    // On the lines after the definition's, as import writes a note whose
+    // first paragraph is over more than one line
+    const once = await roundTrip(md);
+    expect(once).toBe('a[^1]\n\n[^1]:\n\n    z <!-- {++x\n    y++} -->\n');
+    expect(await roundTrip(once)).toBe(once);
+  });
+});
+
 describe('Track changes (CriticMarkup)', () => {
   const AUTHOR = 'Test Author';
   const DATE = '2024-01-15T10:30:00Z';
