@@ -5257,6 +5257,108 @@ describe('DOCX footnote extraction', () => {
   });
 });
 
+/** A Zotero field citing each item, as Zotero writes it: with the item's URI
+ *  (when it has one), its ID, and its data. */
+function zoteroFieldXml(items: Array<{ family: string; title: string; uri?: string; id?: number }>): string {
+  const payload = JSON.stringify({
+    citationItems: items.map((item, k) => ({
+      id: item.id ?? k + 1,
+      ...(item.uri ? { uris: [item.uri] } : {}),
+      itemData: { id: item.id ?? k + 1, type: 'book', title: item.title, author: [{ family: item.family, given: 'J' }], issued: { 'date-parts': [['2020']] } },
+    })),
+    properties: { plainCitation: '(x)' },
+  });
+  return '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+    + '<w:r><w:instrText xml:space="preserve"> ADDIN ZOTERO_ITEM CSL_CITATION ' + payload.replace(/&/g, '&amp;').replace(/</g, '&lt;') + ' </w:instrText></w:r>'
+    + '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+    + '<w:r><w:t>(x)</w:t></w:r>'
+    + '<w:r><w:fldChar w:fldCharType="end"/></w:r>';
+}
+
+/** The items of each Zotero field in a part of a .docx */
+async function zoteroFieldItems(docx: Uint8Array, part: string): Promise<Array<Array<{ uris?: string[]; itemData: { title?: string; author?: Array<{ family?: string }> } }>>> {
+  const xml = await (await JSZip.loadAsync(docx)).file(part)?.async('string') ?? '';
+  return [...xml.matchAll(/ZOTERO_ITEM CSL_CITATION (.*?) ?<\/w:instrText>/g)].map(m =>
+    JSON.parse(m[1].replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')).citationItems);
+}
+
+const noteXml = (kind: 'footnote' | 'endnote', content: string) =>
+  wrapNotesXml(kind === 'footnote' ? 'footnotes' : 'endnotes', '<w:' + kind + ' w:id="1"><w:p><w:r><w:t xml:space="preserve">n </w:t></w:r>' + content + '</w:p></w:' + kind + '>');
+
+describe('Zotero citations in notes', () => {
+  const doe = { family: 'Doe', title: 'T', uri: 'http://zotero.org/users/1/items/AAAAAAA1' };
+  const roe = { family: 'Roe', title: 'U', uri: 'http://zotero.org/users/1/items/AAAAAAA2' };
+  const poe = { family: 'Poe', title: 'V', uri: 'http://zotero.org/users/1/items/AAAAAAA3' };
+
+  test('gives an item only a note cites a .bib entry, and one an item the body cites too', async () => {
+    const docx = await buildSyntheticDocx(wrapDocumentXml('<w:p><w:r><w:t xml:space="preserve">a </w:t></w:r>' + zoteroFieldXml([doe])
+      + '<w:r><w:footnoteReference w:id="1"/></w:r><w:r><w:endnoteReference w:id="1"/></w:r></w:p>'), {
+      'word/footnotes.xml': noteXml('footnote', zoteroFieldXml([doe]) + '<w:r><w:t xml:space="preserve"> </w:t></w:r>' + zoteroFieldXml([roe])),
+      'word/endnotes.xml': noteXml('endnote', zoteroFieldXml([poe])),
+    });
+    const result = await convertDocx(docx);
+    expect(result.markdown).toBe('a [@doe2020t][^1][^2]\n\n[^1]: n [@doe2020t] [@roe2020u]\n\n[^2]: n [@poe2020v]\n');
+    const bib = parseBibtex(result.bibtex);
+    expect([...bib.keys()]).toEqual(['doe2020t', 'roe2020u', 'poe2020v']);
+    expect(bib.get('roe2020u')?.fields.get('zotero-uri')).toBe(roe.uri);
+    expect(bib.get('poe2020v')?.fields.get('zotero-uri')).toBe(poe.uri);
+  });
+
+  test('gives items in footnotes and endnotes keys no other item has', async () => {
+    const one = { family: 'Doe', title: 'Thing one', uri: 'http://zotero.org/users/1/items/AAAAAAA4' };
+    const two = { family: 'Doe', title: 'Thing two', uri: 'http://zotero.org/users/1/items/AAAAAAA5' };
+    const docx = await buildSyntheticDocx(wrapDocumentXml('<w:p><w:r><w:t xml:space="preserve">a </w:t></w:r>' + zoteroFieldXml([roe])
+      + '<w:r><w:footnoteReference w:id="1"/></w:r><w:r><w:endnoteReference w:id="1"/></w:r></w:p>'), {
+      'word/footnotes.xml': noteXml('footnote', zoteroFieldXml([one])),
+      'word/endnotes.xml': noteXml('endnote', zoteroFieldXml([two])),
+    });
+    const result = await convertDocx(docx);
+    expect(result.markdown).toBe('a [@roe2020u][^1][^2]\n\n[^1]: n [@doe2020thing]\n\n[^2]: n [@doe2020thing2]\n');
+    expect([...parseBibtex(result.bibtex).keys()]).toEqual(['roe2020u', 'doe2020thing', 'doe2020thing2']);
+    const numeric = await convertDocx(docx, 'numeric');
+    expect(numeric.markdown).toBe('a [@1][^1][^2]\n\n[^1]: n [@2]\n\n[^2]: n [@3]\n');
+    expect([...parseBibtex(numeric.bibtex).keys()]).toEqual(['1', '2', '3']);
+  });
+
+  test('adds an item a note cites in Word to the .bib export stored', async () => {
+    const bibtex = '@book{doe2020t,\n  author = {Doe, J},\n  title = {{T}},\n  year = {2020},\n}\n';
+    const exported = await JSZip.loadAsync((await convertMdToDocx('a [@doe2020t][^1]\n\n[^1]: NOTE\n', { bibtex })).docx);
+    const footnotes = await exported.file('word/footnotes.xml')!.async('string');
+    // A citation of another item, as Zotero inserts it into the note
+    exported.file('word/footnotes.xml', footnotes.replace(/<w:t>NOTE<\/w:t><\/w:r>/, '<w:t xml:space="preserve">n </w:t></w:r>' + zoteroFieldXml([roe])));
+    const result = await convertDocx(await exported.generateAsync({ type: 'uint8array' }));
+    expect(result.markdown).toContain('[^1]: n [@roe2020u]\n');
+    expect([...parseBibtex(result.bibtex).keys()]).toEqual(['doe2020t', 'roe2020u']);
+    expect(result.bibtex.startsWith(bibtex)).toBe(true);
+  });
+
+  test.each([['a footnote', 'footnote'], ['an endnote', 'endnote']] as const)('keeps a Zotero field only %s has, with its item, from Word to Markdown to Word', async (_name, kind) => {
+    const part = 'word/' + kind + 's.xml';
+    const docx = await buildSyntheticDocx(wrapDocumentXml('<w:p><w:r><w:t>a</w:t></w:r><w:r><w:' + kind + 'Reference w:id="1"/></w:r></w:p>'), {
+      [part]: noteXml(kind, zoteroFieldXml([roe])),
+    });
+    const first = await convertDocx(docx);
+    expect(first.markdown).toContain('[^1]: n [@roe2020u]\n');
+    expect([...parseBibtex(first.bibtex).keys()]).toEqual(['roe2020u']);
+
+    const docx2 = (await convertMdToDocx(first.markdown, { bibtex: first.bibtex })).docx;
+    const [[item]] = await zoteroFieldItems(docx2, part);
+    expect(item.uris).toEqual([roe.uri]);
+    expect(item.itemData.title).toBe('U');
+    expect(item.itemData.author?.[0].family).toBe('Roe');
+
+    // A second trip changes nothing
+    const second = await convertDocx(docx2);
+    expect(second.markdown).toContain('[^1]: n [@roe2020u]\n');
+    expect(second.bibtex).toBe(first.bibtex);
+    const docx3 = (await convertMdToDocx(second.markdown, { bibtex: second.bibtex })).docx;
+    expect(await zoteroFieldItems(docx3, part)).toEqual(await zoteroFieldItems(docx2, part));
+    const third = await convertDocx(docx3);
+    expect(third.markdown).toBe(second.markdown);
+    expect(third.bibtex).toBe(second.bibtex);
+  });
+});
+
 describe('Comments in notes', () => {
   const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
 

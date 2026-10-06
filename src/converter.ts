@@ -53,7 +53,8 @@ import { DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
 // - Year: only set issued.date-parts when year is fully numeric; never emit [[null]]
 //
 // Citations:
-// - buildCitationKeyMap: accepts existingKeys?: Set<string> to prevent cross-scope ambiguity
+// - buildCitationKeyMap: one map for the body's and the notes' citations, so no
+//   two items share a key and each gets a .bib entry, wherever it's cited
 //
 // Footnotes:
 // - Multi-line indent: use block form when bodyParts[0] is multi-line; indent all
@@ -1341,7 +1342,9 @@ interface NoteBodyContext {
   /** The IDs of the notes the document references, which only have images:
    *  another's would take a file, and a name, for an image nothing shows */
   referenced?: ReadonlySet<string>;
+  /** The Zotero citations of the notes' part, in order */
   zoteroCitations: ZoteroCitation[];
+  /** The key of each item the document cites, in its body or its notes */
   keyMap: Map<string, string>;
   numberingDefs: NumberingDefs;
   numberingStartOverrides?: NumberingStartOverrides;
@@ -3583,23 +3586,8 @@ async function extractNotes(
   const parsed = await readZipXml(zip, xmlPath);
   if (!parsed) return notes;
 
-  // When context is provided, extract Zotero citations from the notes XML
-  // (separate from the document-level citations) and build a file-scoped
-  // context with a shared citation counter across all notes in this file.
-  let fileContext: NoteBodyContext | undefined;
-  if (context) {
-    const noteCitations = extractZoteroCitationsFromParsed(parsed);
-    const noteKeyMap = buildCitationKeyMap(noteCitations, context.format, new Set(context.keyMap.values()));
-    // Merge document-level keyMap with note-specific keys
-    const mergedKeyMap = new Map([...noteKeyMap, ...context.keyMap]);
-    fileContext = {
-      ...context,
-      zoteroCitations: noteCitations,
-      keyMap: mergedKeyMap,
-    };
-  }
-
-  // Shared citation counter across all notes in this file
+  // The context's citations are this file's, in order (see convertDocx),
+  // which one counter runs through across all its notes
   const citationCounter = { idx: 0 };
 
   for (const node of findAllDeep(parsed, tagName)) {
@@ -3613,7 +3601,7 @@ async function extractNotes(
     const noteChildren = node[tagName];
     if (!Array.isArray(noteChildren)) continue;
 
-    const noteContext = fileContext?.referenced && !fileContext.referenced.has(id) ? { ...fileContext, images: undefined } : fileContext;
+    const noteContext = context?.referenced && !context.referenced.has(id) ? { ...context, images: undefined } : context;
     const content = parseNoteBody(noteChildren, tagName, noteContext, citationCounter);
     notes.set(id, { id, content });
   }
@@ -4309,9 +4297,11 @@ function extractZoteroCitationsFromInstructions(instructions: string[]): ZoteroC
   return citations;
 }
 
-export async function extractZoteroCitations(data: Uint8Array | JSZip): Promise<ZoteroCitation[]> {
+/** The Zotero citations of a part, the document's body unless `path` names
+ *  another, as its footnotes. */
+export async function extractZoteroCitations(data: Uint8Array | JSZip, path = 'word/document.xml'): Promise<ZoteroCitation[]> {
   const zip = data instanceof JSZip ? data : await loadZip(data);
-  const parsed = await readZipXml(zip, 'word/document.xml');
+  const parsed = await readZipXml(zip, path);
   if (!parsed) { return []; }
   return extractZoteroCitationsFromParsed(parsed);
 }
@@ -4338,10 +4328,9 @@ export function generateCitationKey(
 export function buildCitationKeyMap(
   allCitations: ZoteroCitation[],
   format: CitationKeyFormat = 'authorYearTitle',
-  existingKeys?: Set<string>
 ): Map<string, string> {
   const keyMap = new Map<string, string>(); // itemId -> citationKey
-  const seen = new Set<string>(existingKeys);
+  const seen = new Set<string>();
   let numericCounter = 1;
 
   for (const citation of allCitations) {
@@ -11810,6 +11799,8 @@ export async function convertDocx(
   const {
     comments,
     zoteroCitations,
+    footnoteCitations,
+    endnoteCitations,
     zoteroPrefs,
     author,
     commentIdMapping,
@@ -11867,6 +11858,8 @@ export async function convertDocx(
   } = await allNamed({
     comments: extractComments(zip),
     zoteroCitations: extractZoteroCitations(zip),
+    footnoteCitations: extractZoteroCitations(zip, 'word/footnotes.xml'),
+    endnoteCitations: extractZoteroCitations(zip, 'word/endnotes.xml'),
     zoteroPrefs: extractZoteroPrefs(zip),
     author: extractAuthor(zip),
     commentIdMapping: extractCommentIdMapping(zip),
@@ -11949,7 +11942,10 @@ export async function convertDocx(
     }
   }
 
-  const keyMap = buildCitationKeyMap(zoteroCitations, format);
+  // One key for each item, wherever it's cited, and a .bib entry for it: the
+  // body's items take theirs first, then the footnotes', then the endnotes'
+  const allCitations = [...zoteroCitations, ...footnoteCitations, ...endnoteCitations];
+  const keyMap = buildCitationKeyMap(allCitations, format);
 
   // Parse note-specific rels and numbering for footnote/endnote body parsing
   const [numberingResult, docRelsParsed, fnRelsParsed, enRelsParsed] = await Promise.all([
@@ -11972,8 +11968,8 @@ export async function convertDocx(
   // relationships are each part's own
   const imageFiles: ImageFiles = { entries: [], filenames: new Map() };
   const imageFolder = options?.imageFolder ?? '';
-  const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, images: { relationships: fnRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, styleLayouts };
-  const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, images: { relationships: enRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, styleLayouts };
+  const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, images: { relationships: fnRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: footnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, styleLayouts };
+  const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, images: { relationships: enRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: endnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, styleLayouts };
 
   const { content: docContent, zoteroBiblData } = await extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, relationshipMap: docRels, replyIds, imageRelationships: imageRels, imageFolder: options?.imageFolder, imageFiles, portraitBreakOrdinals: portraitBreaks ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined, styleLayouts });
   // The notes the document references, in its order, which are the ones it
@@ -12381,7 +12377,7 @@ export async function convertDocx(
     // Layer 1: stored .bib is authoritative — preserve verbatim.
     // Only append genuinely new Zotero entries (citations added in Word).
     const storedKeys = new Set(parseBibtex(storedBibData).keys());
-    const generated = generateBibTeX(zoteroCitations, keyMap);
+    const generated = generateBibTeX(allCitations, keyMap);
     // Let the parser delimit the entries.  Splitting on blank lines would cut
     // an entry in half the moment a field value contains one — `abstract` and
     // `note` come through from Zotero verbatim and routinely do — and the
@@ -12395,10 +12391,10 @@ export async function convertDocx(
       : storedBibData;
   } else if (bibKeyOrder) {
     // Layer 2: regenerate but sort to match original key order
-    bibtex = generateBibTeX(zoteroCitations, keyMap, bibKeyOrder);
+    bibtex = generateBibTeX(allCitations, keyMap, bibKeyOrder);
   } else {
     // Layer 3: backward compatible — generate from Zotero citations
-    bibtex = generateBibTeX(zoteroCitations, keyMap);
+    bibtex = generateBibTeX(allCitations, keyMap);
   }
 
   // Post-processing: merge with on-disk .bib — preserves all existing entries/fields.
