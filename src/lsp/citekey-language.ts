@@ -154,13 +154,15 @@ export function pathsEqual(a: string, b: string): boolean {
 }
 
 export function scanCitationUsages(text: string): CitekeyUsage[] {
-	const usages: CitekeyUsage[] = [];
-	const codeRegions = computeCodeRegions(text);
-
 	// Neutralize code regions so the bracket regex can't start matching from
 	// inside a code span (e.g. `[ ` [@a] — the `[` inside backticks must not
 	// anchor a bracket group that extends past the code span).
-	const scanText = blankCodeRegions(text, codeRegions);
+	return scanBlankedCitationUsages(blankCodeRegions(text, computeCodeRegions(text)));
+}
+
+/** The citekeys in `scanText`, whose code regions are already blanked. */
+function scanBlankedCitationUsages(scanText: string): CitekeyUsage[] {
+	const usages: CitekeyUsage[] = [];
 	let citationMatch: RegExpExecArray | null;
 
 	CITATION_SEGMENT_RE.lastIndex = 0;
@@ -208,8 +210,12 @@ export function findUsagesForKey(text: string, key: string): CitekeyUsage[] {
 
 export function findCitekeyAtOffset(text: string, offset: number): string | undefined {
 	if (offset < 0 || offset >= text.length) return undefined;
-	const codeRegions = computeCodeRegions(text);
-	if (isInsideCodeRegion(offset, codeRegions)) return undefined;
+	// The brackets and keys of the text with its code blanked, as
+	// scanCitationUsages reads them: a ] in code ends no citation, and code
+	// the scanned segment cuts in two is still code. And not undefined at
+	// once where the offset is in code, since a cursor there can be just
+	// past a key that code follows.
+	const scanText = blankCodeRegions(text, computeCodeRegions(text));
 	const maxScanDistance = 500;
 	let scanStart = offset;
 	let scanEnd = offset;
@@ -217,19 +223,19 @@ export function findCitekeyAtOffset(text: string, offset: number): string | unde
 	// Prefer a nearby bracket-bounded scan (can span newlines).
 	// Walk backward past unclosed '[' to find the outermost one, since
 	// the citation regex [^\]]*@[^\]]*] can match inner '[' characters.
-	let openBracket = text.lastIndexOf('[', offset);
+	let openBracket = scanText.lastIndexOf('[', offset);
 	while (openBracket > 0) {
-		const prevOpen = text.lastIndexOf('[', openBracket - 1);
-		const prevClose = text.lastIndexOf(']', openBracket - 1);
+		const prevOpen = scanText.lastIndexOf('[', openBracket - 1);
+		const prevClose = scanText.lastIndexOf(']', openBracket - 1);
 		if (prevOpen !== -1 && prevOpen > prevClose && (offset - prevOpen) <= maxScanDistance) {
 			openBracket = prevOpen;
 		} else {
 			break;
 		}
 	}
-	const closeBracketBefore = text.lastIndexOf(']', Math.max(0, offset - 1));
+	const closeBracketBefore = scanText.lastIndexOf(']', Math.max(0, offset - 1));
 	if (openBracket !== -1 && openBracket > closeBracketBefore && (offset - openBracket) <= maxScanDistance) {
-		const closeBracket = text.indexOf(']', offset);
+		const closeBracket = scanText.indexOf(']', offset);
 		if (closeBracket !== -1 && (closeBracket - offset) <= maxScanDistance) {
 			scanStart = openBracket;
 			scanEnd = closeBracket + 1;
@@ -238,19 +244,19 @@ export function findCitekeyAtOffset(text: string, offset: number): string | unde
 
 	// Fallback: same-line bounded scan when no nearby bracket segment is found.
 	if (scanStart === offset && scanEnd === offset) {
-		while (scanStart > 0 && text[scanStart - 1] !== '[' && text[scanStart - 1] !== '\n') {
+		while (scanStart > 0 && scanText[scanStart - 1] !== '[' && scanText[scanStart - 1] !== '\n') {
 			scanStart--;
 		}
-		if (scanStart > 0 && text[scanStart - 1] === '[') scanStart--;
+		if (scanStart > 0 && scanText[scanStart - 1] === '[') scanStart--;
 
-		while (scanEnd < text.length && text[scanEnd] !== ']' && text[scanEnd] !== '\n') {
+		while (scanEnd < text.length && scanText[scanEnd] !== ']' && scanText[scanEnd] !== '\n') {
 			scanEnd++;
 		}
-		if (scanEnd < text.length && text[scanEnd] === ']') scanEnd++;
+		if (scanEnd < text.length && scanText[scanEnd] === ']') scanEnd++;
 	}
 
-	const segment = text.slice(scanStart, scanEnd);
-	for (const usage of scanCitationUsages(segment)) {
+	const segment = scanText.slice(scanStart, scanEnd);
+	for (const usage of scanBlankedCitationUsages(segment)) {
 		const absStart = usage.keyStart + scanStart;
 		const absEnd = usage.keyEnd + scanStart;
 		if (offset >= absStart - 1 && offset <= absEnd) {
