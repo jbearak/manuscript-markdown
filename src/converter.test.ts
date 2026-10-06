@@ -6799,33 +6799,43 @@ describe('HTML around a table in its block', () => {
     ['that leaves HTML, with [s and no ] on each line', true, (i: number) => 'line ' + i + ' [a [b [c [d'],
   ])('writes many lines of HTML after a table %s in linear time', async (_name, tracked, line) => {
     // Each line's escape indexed all the lines after it, even for a table
-    // that kept the HTML
-    const md = '<div>\n<table><tr><td>XX</td><td>b</td></tr></table>\n' + Array.from({ length: 16000 }, (_, i) => line(i)).join('\n') + '\n</div>\n';
-    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
-    const xml = await zip.file('word/document.xml')!.async('string');
-    if (tracked) zip.file('word/document.xml', xml.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>'));
-    const docx = await zip.generateAsync({ type: 'uint8array' });
-    const start = performance.now();
-    await convertDocx(docx);
-    expect(performance.now() - start).toBeLessThan(2000);
+    // that kept the HTML. Four times the lines take about four times as
+    // long, not sixteen, however fast the machine is.
+    const time = async (lines: number) => {
+      const md = '<div>\n<table><tr><td>XX</td><td>b</td></tr></table>\n' + Array.from({ length: lines }, (_, i) => line(i)).join('\n') + '\n</div>\n';
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+      const xml = await zip.file('word/document.xml')!.async('string');
+      if (tracked) zip.file('word/document.xml', xml.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>'));
+      const docx = await zip.generateAsync({ type: 'uint8array' });
+      const start = performance.now();
+      await convertDocx(docx);
+      return performance.now() - start;
+    };
+    await time(500);
+    const small = await time(2000);
+    expect(await time(8000) / small).toBeLessThan(8);
   });
 
   test('puts the HTML around many tables back in linear time', async () => {
     // Each table read every entry of the HTML export kept
     const { tableFirstRowText, tableContentsFingerprint } = await import('./table-metadata');
-    const content: ContentItem[] = [];
-    const around = new Map<string, [string, string, string, string, string, string, string]>();
-    const formats = new Map<string, string>();
-    for (let i = 0; i < 16000; i++) {
-      const text = 'a' + i;
-      content.push({ type: 'table', rows: [{ isHeader: false, cells: [{ paragraphs: [[{ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING }]] }] }] });
-      around.set(String(i), ['<div>', '</div>', tableFirstRowText([text]), tableContentsFingerprint([[text]]), '0', '', '1']);
-      formats.set(String(i), 'html');
-    }
-    const start = performance.now();
-    const markdown = buildMarkdown(content, new Map(), { tableHtmlAroundMapping: around, tableFormatMapping: formats });
-    expect(performance.now() - start).toBeLessThan(1000);
-    expect(markdown.match(/<div>/g)?.length).toBe(16000);
+    const time = (count: number) => {
+      const content: ContentItem[] = [];
+      const around = new Map<string, [string, string, string, string, string, string, string]>();
+      const formats = new Map<string, string>();
+      for (let i = 0; i < count; i++) {
+        const text = 'a' + i;
+        content.push({ type: 'table', rows: [{ isHeader: false, cells: [{ paragraphs: [[{ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING }]] }] }] });
+        around.set(String(i), ['<div>', '</div>', tableFirstRowText([text]), tableContentsFingerprint([[text]]), '0', '', '1']);
+        formats.set(String(i), 'html');
+      }
+      const start = performance.now();
+      const markdown = buildMarkdown(content, new Map(), { tableHtmlAroundMapping: around, tableFormatMapping: formats });
+      expect(markdown.match(/<div>/g)?.length).toBe(count);
+      return performance.now() - start;
+    };
+    time(1000);
+    expect(time(32000) / time(8000)).toBeLessThan(8);
   });
 
   test('puts the HTML around many tables alike back in linear time', async () => {
