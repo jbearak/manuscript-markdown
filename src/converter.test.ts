@@ -13837,6 +13837,31 @@ describe('Links of more than one run', () => {
     expect(time(4000) / small).toBeLessThan(3);
   });
 
+  test('tries a substitution in a link from later deletions of many runs with a ~> in linear time', () => {
+    // Each start past a run with a ~ built the deletions' side again,
+    // though a ~> later in it kept each from holding. Twice the runs take
+    // about twice as long, not four times.
+    const time = (n: number) => {
+      const item = (text: string, type: 'addition' | 'deletion', formatting: Partial<RunFormatting>) => ({
+        type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting }, href: 'https://e.com', link: 1,
+        revision: { type, author: 'A', date: '' },
+      });
+      const items = [
+        ...Array.from({ length: n }, () => [item('~>', 'deletion', { italic: true }), item('x', 'deletion', { bold: true })]).flat(),
+        item('c', 'addition', {}),
+      ] as ContentItem[];
+      let best = Infinity;
+      for (let k = 0; k < 3; k++) {
+        const start = performance.now();
+        expect(buildMarkdown(items, new Map())).toEndWith('{--*~>*--}{~~**x**~>c~~}](https://e.com)');
+        best = Math.min(best, performance.now() - start);
+      }
+      return best;
+    };
+    const small = time(500);
+    expect(time(1000) / small).toBeLessThan(3);
+  });
+
   test('keeps a link whole before a line that would start a note, whose [ is escaped', async () => {
     const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
     const xml = await zip.file('word/document.xml')!.async('string');

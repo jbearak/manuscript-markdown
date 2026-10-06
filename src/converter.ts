@@ -7014,15 +7014,21 @@ function linkGroup(
       while (meet > k && (meet === additions || !codeSpansMeet(items[meet - 1], items[meet]))) meet--;
       if (meet > k) triedUntil = Math.min(meet, additions);
       // Each side reads apart, its runs after each of its runs alone, and
-      // resolves apart (see tryRenderSubstitution)
-      const sideText = (from: number, to: number) => {
+      // resolves apart (see tryRenderSubstitution), and where each of its
+      // runs starts in it before resolving (`starts`)
+      const sideMarkdown = (from: number, to: number, starts: number[] = []) => {
         const sideItems = items.slice(from, to);
         let markdown = '';
-        for (let j = from; j < to; j++) markdown += itemText(j, runsAfter(sideItems, j - from + 1, sideItems.length));
-        return resolveEmphasis(markdown);
+        for (let j = from; j < to; j++) {
+          starts.push(markdown.length);
+          markdown += itemText(j, runsAfter(sideItems, j - from + 1, sideItems.length));
+        }
+        return markdown;
       };
-      const oldText = sideEnd > additions && meet === k ? sideText(k, additions) : '';
-      const newText = oldText ? sideText(additions, sideEnd) : '';
+      const starts: number[] = [];
+      const oldSide = sideEnd > additions && meet === k ? sideMarkdown(k, additions, starts) : '';
+      const oldText = resolveEmphasis(oldSide);
+      const newText = oldText ? resolveEmphasis(sideMarkdown(additions, sideEnd)) : '';
       if (oldText && newText && substitutionHolds(oldText, newText)) {
         text += '{~~' + oldText + '~>' + newText + '~~}';
         span = undefined;
@@ -7030,12 +7036,23 @@ function linkGroup(
         continue;
       }
       // As renderSubstitutionRun's callers do, from a later start, where the
-      // insertions' side has no ~~}, after a deletion of strikethrough or a
-      // ~, as the ~> or ~~} of the deletions' side, as a struck }'s, starts
-      // with a ~. Dropping another leaves the rest of the side as it was.
+      // insertions' side has no ~~}: past the run the deletions' side's last
+      // ~> or ~~} starts in, as written before resolving, which every start
+      // before holds, as dropping a run leaves the rest of the side as it
+      // was, as renderSubstitutionRun declines them, rather than build the
+      // side again from each. Where resolving wrote it, as of a struck >a,
+      // after a deletion of strikethrough or a ~, as the ~> or ~~} of the
+      // side, as a struck }'s, starts with a ~.
       if (oldText && newText && !newText.includes('~~}')) {
+        const at = Math.max(oldSide.lastIndexOf('~>'), oldSide.lastIndexOf('~~}'));
         let retry = k + 1;
-        while (retry < additions && !items[retry - 1].formatting.strikethrough && !items[retry - 1].text.includes('~')) retry++;
+        if (at !== -1) {
+          let run = starts.length - 1;
+          while (run > 0 && starts[run] > at) run--;
+          retry = k + run + 1;
+        } else {
+          while (retry < additions && !items[retry - 1].formatting.strikethrough && !items[retry - 1].text.includes('~')) retry++;
+        }
         triedUntil = retry;
       }
     }
