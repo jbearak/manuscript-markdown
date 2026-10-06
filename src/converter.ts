@@ -2,7 +2,7 @@ import JSZip from 'jszip';
 import { XMLParser } from 'fast-xml-parser';
 import { asXmlNodes, ommlToLatex, type XmlNode } from './omml';
 import { resolveMarkdownColor } from './highlight-colors';
-import { FRONTMATTER_OPENING_RE, Frontmatter, NotesMode, parseFrontmatter, serializeFrontmatter, noteTypeFromNumber, parseColWidths, type BlockquoteStyle, type CustomStyleDef } from './frontmatter';
+import { FRONTMATTER_OPENING_RE, Frontmatter, NotesMode, parseFrontmatter, serializeFrontmatter, noteTypeFromNumber, noteTypeToNumber, parseColWidths, type BlockquoteStyle, type CustomStyleDef } from './frontmatter';
 import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType } from './gfm';
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
 import { keepParagraphEdgeWhitespace } from './html-entities';
@@ -3472,6 +3472,11 @@ export async function extractParagraphIndent(data: Uint8Array | JSZip): Promise<
 
 export async function extractBibliographyHangingIndent(data: Uint8Array | JSZip): Promise<string | null> {
   return extractStringCustomProp(data, 'MANUSCRIPT_BIBLIOGRAPHY_HANGING_INDENT');
+}
+
+/** The style export chose for frontmatter without one (see defaultCslProps) */
+export async function extractDefaultCsl(data: Uint8Array | JSZip): Promise<string | null> {
+  return extractStringCustomProp(data, 'MANUSCRIPT_DEFAULT_CSL');
 }
 
 /** The settings export stored as frontmatter text (see frontmatterSettingsProps) */
@@ -11858,6 +11863,7 @@ export async function convertDocx(
     storedBibHangingIndent,
     storedCalloutLabels,
     storedSettings,
+    storedDefaultCsl,
     storedIndentOverrides,
     storedListIndentOverrides,
     embedDirectiveMapping,
@@ -11915,6 +11921,7 @@ export async function convertDocx(
     storedBibHangingIndent: extractBibliographyHangingIndent(zip),
     storedCalloutLabels: extractCalloutLabels(zip),
     storedSettings: extractFrontmatterSettings(zip),
+    storedDefaultCsl: extractDefaultCsl(zip),
     storedIndentOverrides: extractIndentOverrides(zip),
     storedListIndentOverrides: extractListIndentOverrides(zip),
     embedDirectiveMapping: extractEmbedDirectiveMapping(zip),
@@ -12247,7 +12254,10 @@ export async function convertDocx(
     fm.author = author;
   }
   if (zoteroPrefs) {
-    fm.csl = zoteroStyleShortName(zoteroPrefs.styleId);
+    // Not the style export chose for frontmatter without one, unless Zotero's
+    // preferences in Word have another
+    const csl = zoteroStyleShortName(zoteroPrefs.styleId);
+    if (csl !== storedDefaultCsl) fm.csl = csl;
     // Only emit locale when it differs from the default (en-US)
     if (zoteroPrefs.locale && zoteroPrefs.locale !== 'en-US') {
       fm.locale = zoteroPrefs.locale;
@@ -12346,10 +12356,12 @@ export async function convertDocx(
   }
   if (storedSettings) {
     // Where the document shows a setting, it wins: Zotero's preferences, and
-    // the kind of notes it has
-    if (!zoteroPrefs) {
-      fm.locale ??= storedSettings.locale;
-      fm.zoteroNotes ??= storedSettings.zoteroNotes;
+    // the kind of notes it has. Where Zotero's agree with the stored one, it
+    // stays as written, as en-US or in-text, Zotero's defaults, which import
+    // otherwise leaves out.
+    if (!zoteroPrefs || storedSettings.locale === (zoteroPrefs.locale ?? 'en-US')) fm.locale = storedSettings.locale ?? fm.locale;
+    if (!zoteroPrefs || storedSettings.zoteroNotes && noteTypeToNumber(storedSettings.zoteroNotes) === (zoteroPrefs.noteType ?? 0)) {
+      fm.zoteroNotes = storedSettings.zoteroNotes ?? fm.zoteroNotes;
     }
     if (storedSettings.notes === 'endnotes' ? footnotes.size === 0 : endnotes.size === 0) fm.notes ??= storedSettings.notes;
     fm.timezone ??= storedSettings.timezone;

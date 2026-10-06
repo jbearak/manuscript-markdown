@@ -5637,6 +5637,13 @@ function zoteroCustomProps(fm: Frontmatter): CustomPropEntry[] {
   return chunkCustomProps('ZOTERO_PREF_', prefData);
 }
 
+/** The style export chose for frontmatter without one, which Zotero's
+ *  preferences hold all the same, so that import, finding them the same,
+ *  writes no `csl` the Markdown didn't have. */
+function defaultCslProps(defaultCsl: string | undefined): CustomPropEntry[] {
+  return defaultCsl ? [{ name: 'MANUSCRIPT_DEFAULT_CSL', value: defaultCsl }] : [];
+}
+
 function commentIdMappingProps(commentIdMap: Map<string, number>): CustomPropEntry[] {
   if (commentIdMap.size === 0) return [];
   const mapping: Record<string, string> = {};
@@ -8288,8 +8295,11 @@ export async function convertMdToDocx(
   }
 
   // A bibliography file is sufficient to request formatted references. Use a
-  // bundled default when no style was selected, and record it in Zotero prefs.
-  if (!frontmatter.csl && bibEntries && bibEntries.size > 0) frontmatter.csl = 'apa';
+  // bundled default when no style was selected, and record it in Zotero prefs,
+  // and that it was the default, which import leaves out of the frontmatter
+  // (see defaultCslProps).
+  const defaultCsl = !frontmatter.csl && bibEntries && bibEntries.size > 0 ? 'apa' : undefined;
+  if (defaultCsl) frontmatter.csl = defaultCsl;
   if (frontmatter.csl && bibEntries) {
     let styleName = frontmatter.csl;
 
@@ -8902,6 +8912,7 @@ export async function convertMdToDocx(
   if (frontmatter.csl) {
     customProps.push(...zoteroCustomProps(frontmatter));
   }
+  customProps.push(...defaultCslProps(defaultCsl));
   customProps.push(...commentIdMappingProps(state.commentIdMap));
   customProps.push(...footnoteIdMappingProps(state.footnoteLabelToId, !!state.trackedNoteReference));
   customProps.push(...footnoteCrossRefProps(state.footnoteCrossRefLabels, state.footnoteLabelToId, state.notesMode));

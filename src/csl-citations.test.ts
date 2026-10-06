@@ -559,6 +559,46 @@ describe('DOCX→MD→DOCX roundtrip', () => {
     expect(mdResult.zoteroPrefs?.styleId).toContain('apa');
   });
 
+  describe('keeps the frontmatter as written, with a .bib file or without', () => {
+    const roundTrip = async (md: string, bibtex?: string) => (await convertDocx((await convertMdToDocx(md, { bibtex })).docx)).markdown;
+
+    test.each([
+      ['no frontmatter and no citations', 'Some text.\n'],
+      ['citations but no csl', 'Some text [@smith2020effects].\n'],
+      ['a csl but no citations', '---\ncsl: chicago-author-date\n---\n\nSome text.\n'],
+      ['a csl and citations', '---\ncsl: chicago-author-date\n---\n\nSome text [@smith2020effects].\n'],
+      ['a locale alone', '---\nlocale: fr-FR\n---\n\nSome text.\n'],
+      ['a locale and citations', '---\nlocale: fr-FR\n---\n\nSome text [@smith2020effects].\n'],
+      ['zotero-notes alone', '---\nzotero-notes: footnotes\n---\n\nSome text.\n'],
+      ['zotero-notes and citations', '---\nzotero-notes: footnotes\n---\n\nSome text [@smith2020effects].\n'],
+      ['Zotero\'s default locale and note type', '---\nlocale: en-US\nzotero-notes: in-text\n---\n\nSome text [@smith2020effects].\n'],
+      ['a csl with Zotero\'s default locale and note type', '---\ncsl: apa\nlocale: en-US\nzotero-notes: in-text\n---\n\nSome text [@smith2020effects].\n'],
+      ['a title and citations', '---\ntitle: A\n---\n\nSome text [@smith2020effects].\n'],
+    ])('with %s', async (_name, md) => {
+      for (const bibtex of [SAMPLE_BIBTEX, undefined]) {
+        // Without a .bib, a citation comes back with the note of its missing data
+        if (!bibtex && md.includes('[@')) continue;
+        const once = await roundTrip(md, bibtex);
+        expect(once).toBe(md);
+        expect(await roundTrip(once, bibtex)).toBe(md);
+      }
+    });
+
+    test('but takes the style, locale and note type Zotero\'s preferences in Word have', async () => {
+      const JSZip = (await import('jszip')).default;
+      for (const md of ['Some text [@smith2020effects].\n', '---\nlocale: fr-FR\nzotero-notes: footnotes\n---\n\nSome text [@smith2020effects].\n']) {
+        const zip = await JSZip.loadAsync((await convertMdToDocx(md, { bibtex: SAMPLE_BIBTEX })).docx);
+        const custom = await zip.file('docProps/custom.xml')!.async('string');
+        // As Zotero's Document Preferences write them
+        const changed = custom.replace('styles/apa', 'styles/chicago-author-date').replace(/"locale":"[^"]*"/, '"locale":"de-DE"').replace(/"noteType":\d/, '"noteType":2');
+        expect(changed).not.toBe(custom);
+        zip.file('docProps/custom.xml', changed);
+        const result = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+        expect(parseFrontmatter(result.markdown).metadata).toMatchObject({ csl: 'chicago-author-date', locale: 'de-DE', zoteroNotes: 'endnotes' });
+      }
+    });
+  });
+
   test('roundtrip preserves citation prefixes', async () => {
     const md = '---\ncsl: apa\n---\n\nSome text [e.g., @smith2020effects; see also @jones2019urban, p. 4].\n';
     const docxResult = await convertMdToDocx(md, { bibtex: SAMPLE_BIBTEX });
