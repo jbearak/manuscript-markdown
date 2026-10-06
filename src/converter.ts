@@ -241,9 +241,9 @@ const MARKDOWN_HTML_SENSITIVE_TAGS = new Set([
 const HTML_LIKE_TAG_RE = /<\/?([A-Za-z][A-Za-z0-9-]*)(?:\s[^<>]*?)?\/?>/;
 const HTML_LIKE_TAG_AT = new RegExp(HTML_LIKE_TAG_RE.source, 'y');
 
-// Whether export reads a citation in the text markedFormatting writes: not
-// in an HTML table's cell, whose text it reads as it is (see renderHtmlTable)
-let readsCitations = true;
+// Whether export reads the text markedFormatting writes as Markdown: not in
+// an HTML table's cell, which it reads as HTML (see renderHtmlTable)
+let readsMarkdown = true;
 
 /** `text` with the tags export reads as formatting or a line break written
  *  as text, but for one at a position in `raw`, which export reads as it is,
@@ -2091,6 +2091,7 @@ export function wrapWithFormatting(text: string, fmt: RunFormatting, lineStart =
  *  bold, italic or strikethrough marked for resolveEmphasis, and its
  *  highlight around the rest where `highlightOuter` (see joinsHighlight). */
 function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, after?: RunsAfter, blockStart = lineStart, highlightOuter = false): string {
+  if (!readsMarkdown) return htmlCellRun(text, fmt);
   let result = text;
 
   // Apply in reverse nesting order (innermost to outermost)
@@ -2135,7 +2136,7 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
     ? ['', ...edgeWhitespace(result)]
     : ['', '', result, ''];
   // Not a tag in a citation's keys, which export reads as they are
-  const keys = readsCitations ? new Set<number>() : undefined;
+  const keys = new Set<number>();
   let core = escapeSensitiveHtmlLikeTags(escapeMarkdownChars(edges[2], lineStart && !delimited, after, keys, !delimited && !!after?.mathFirst), keys);
   // A ~ at the edge of struck text would join the ~~ around it, which
   // reads ~~~a~~ as ~ and struck a, where nothing comes between them, as a
@@ -2156,6 +2157,24 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
   // The backslash of an escaped =, not one of an escaped backslash's
   if (fmt.highlight && /==|=\s*$/.test(text)) result = result.replace(/((?:\\\\)*)\\?=/g, (_m, pairs: string) => pairs + '&#61;');
   return wrapFormatting(result, fmt, highlightOuter);
+}
+
+/** A run's text and formatting as HTML, as renderHtmlCellParagraph writes
+ *  them, for a cell's paragraph it can't write: escapes, which export
+ *  would read as text there, as would a line break's backslash, and spaces
+ *  HTML would collapse, as references (see htmlLineCharacters). A
+ *  highlight, which has no tag, goes as its ==, as text. */
+function htmlCellRun(text: string, fmt: RunFormatting): string {
+  let html = text.split('\\\n').map(line => line.split('').map((c, i) => c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;'
+    : c === '\t' ? '&#9;' : c === '\u00a0' ? '&nbsp;' : c === ' ' && line[i - 1] === ' ' ? '&#32;' : c).join('')).join('<br>');
+  if (fmt.code) html = '<code>' + html + '</code>';
+  if (fmt.superscript) html = '<sup>' + html + '</sup>';
+  else if (fmt.subscript) html = '<sub>' + html + '</sub>';
+  if (fmt.underline) html = '<u>' + html + '</u>';
+  if (fmt.strikethrough) html = '<s>' + html + '</s>';
+  if (fmt.italic) html = '<i>' + html + '</i>';
+  if (fmt.bold) html = '<b>' + html + '</b>';
+  return fmt.highlight ? wrapHighlight(html, markdownHighlightColor(fmt)) : html;
 }
 
 /** `markdown`, a run's text, in the tags and delimiters of its formatting
@@ -7021,14 +7040,14 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
           continue;
         }
         // In a table only HTML holds, such as one with merged cells, the
-        // rest exports as literal text, and a tag in a citation as one
-        const outerReadsCitations = readsCitations;
-        readsCitations = false;
+        // rest exports as literal text, and its runs as HTML
+        const outerReadsMarkdown = readsMarkdown;
+        readsMarkdown = false;
         let rendered: ReturnType<typeof renderInlineSegment>;
         try {
           rendered = renderInlineSegment(items, comments, renderOpts, undefined, true);
         } finally {
-          readsCitations = outerReadsCitations;
+          readsMarkdown = outerReadsMarkdown;
         }
         lines.push(i3 + '<p>' + keepParagraphWhitespace(rendered.text, true, true) + '</p>');
         deferredAll.push(...rendered.deferredComments);

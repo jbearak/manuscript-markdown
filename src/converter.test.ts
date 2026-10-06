@@ -5842,6 +5842,45 @@ describe('Word text that reads as Markdown', () => {
     expect((await exported(markdown)).text.some(cell => cell.endsWith(' ' + text + ' y'))).toBe(true);
   });
 
+  /** `md`, a pipe table, with the two cells of its row with XX in them one,
+   *  as Word merges them, and `xml` in place of XX, as import writes it, as
+   *  an HTML table, which alone holds one */
+  const mergedCellTable = async (md: string, xml: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const document = (await zip.file('word/document.xml')!.async('string')).replace(/<w:tr\b(?:(?!<\/w:tr>)[\s\S])*?XX[\s\S]*?<\/w:tr>/, row => {
+      const [first, second] = [...row.matchAll(/<w:tc>[\s\S]*?<\/w:tc>/g)].map(match => match[0]);
+      return row.replace(first, first.replace('<w:tcPr>', '<w:tcPr><w:gridSpan w:val="2"/>')).replace(second, '');
+    });
+    expect(document).toContain('<w:gridSpan w:val="2"/>');
+    zip.file('word/document.xml', document.replace('XX', xml));
+    return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+  };
+
+  test.each([
+    ['Markdown syntax', '*a* `b` [c](d) $e$ ==f== \\g'],
+    ['an HTML tag', '<span>a</span>'],
+    ['an entity', '&amp; &lt;'],
+    ['spaces HTML runs together', 'a  b   c'],
+    ['a line break', 'a\nb'],
+  ])('keeps %s in an HTML table\'s cell that holds what HTML can\'t as its text', async (_name, text) => {
+    // Export reads the cell as HTML, where its escapes were text, its tags
+    // tags, its spaces one, and its line break a backslash and a space
+    const xml = escapeXml(text).replace('\n', '</w:t><w:br/><w:t xml:space="preserve">');
+    const markdown = await mergedCellTable('| {++x++} XX y | z |\n|---|---|\n| a | b |\n', xml);
+    expect((await exported(markdown)).text.some(cell => cell.endsWith(' ' + text + ' y'))).toBe(true);
+  });
+
+  test('keeps the formatting of the text in an HTML table\'s cell that holds what HTML can\'t', async () => {
+    // Its delimiters, as **, were text there
+    const markdown = await mergedCellTable('| a | b |\n|---|---|\n| {++x++} **XX** *y* `z` | w |\n', 'bold');
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    const cell = /<w:tc>(?:(?!<\/w:tc>)[\s\S])*?bold[\s\S]*?<\/w:tc>/.exec(xml)![0];
+    expect(cell).toMatch(/<w:b\/>[\s\S]*?<w:t[^>]*>bold<\/w:t>/);
+    expect(cell).toMatch(/<w:i\/>[\s\S]*?<w:t[^>]*>y<\/w:t>/);
+    // The tracked change, which HTML can't hold, as its text
+    expect(cell.replace(/<[^>]+>/g, '')).toBe('{++x++} bold y z');
+  });
+
   test.each(['[@a](b)', '[-@a](b)', '[@a]{.underline}', '[@a][b]'])('writes %s with the citation export reads in it', async (text) => {
     // Its [ was escaped as a link's, so a citation whose key is missing,
     // which export writes as its text, came back as text, and stayed text
