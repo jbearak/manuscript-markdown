@@ -3185,12 +3185,14 @@ describe('wrapWithFormatting', () => {
           }
 
           // When code is true, the backtick fence is innermost, and the
-          // rest goes around it, but for a highlight an == in it would close
+          // rest goes around it, around each span of it split at an ==,
+          // which would close a highlight
           if (fmt.code) {
-            const fenced = wrapWithFormatting(text, { ...DEFAULT_FORMATTING, code: true });
-            expect(result).toContain(fenced);
-            result = result.replace(fenced, 'x');
-            if (text.includes('==')) expect(result).not.toContain('==');
+            for (const part of fmt.highlight ? text.split(/(?<==)(?==)/) : [text]) {
+              const fenced = wrapWithFormatting(part, { ...DEFAULT_FORMATTING, code: true });
+              expect(result).toContain(fenced);
+              result = result.replace(fenced, 'x');
+            }
           }
 
           // Check nesting order without assuming wrappers begin at column 0,
@@ -3327,9 +3329,12 @@ describe('Emphasis between runs', () => {
     expect(buildMarkdown(items, new Map())).toBe('==yellow====cyan=={turquoise}');
   });
 
-  test('writes code beside code with a highlight with ==, which code drops, as one span', () => {
-    // Their backticks ran into one: `a``b`
-    expect(buildMarkdown([run(':) ', { code: true }), run('$==', { code: true, highlight: true })], new Map())).toBe('`:) $==`');
+  test('keeps code beside highlighted code with an == apart, with the highlights between them', () => {
+    // One span held both, without the highlight, which the == would close
+    const items = [run(':) ', { code: true }), run('$==', { code: true, highlight: true })];
+    const written = buildMarkdown(items, new Map());
+    expect(written).toBe('`:) `==`$=`=={yellow}==`=`=={yellow}');
+    expect(characters(written)).toEqual(expectedCharacters(items));
   });
 
   test('keeps code beside bold code apart, with the bold between them', () => {
@@ -11220,12 +11225,12 @@ describe('Markdown across Word runs', () => {
 
 describe('Highlights across runs', () => {
   const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
-  const fromWord = async (runs: string, md = 'XX') => {
+  const fromWord = async (runs: string, md = 'XX', part = 'word/document.xml') => {
     const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
-    const xml = await zip.file('word/document.xml')!.async('string');
+    const xml = await zip.file(part)!.async('string');
     const broken = xml.replace(/<w:r>(?:(?!<w:r>).)*?<w:t[^>]*>XX<\/w:t><\/w:r>/s, runs);
     expect(broken).not.toBe(xml);
-    zip.file('word/document.xml', broken);
+    zip.file(part, broken);
     return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n/, '');
   };
   const highlighted = (text: string, rPr = '', color = 'yellow') => '<w:r><w:rPr>' + rPr + '<w:highlight w:val="' + color + '"/></w:rPr><w:t xml:space="preserve">' + text + '</w:t></w:r>';
@@ -11383,6 +11388,53 @@ describe('Highlights across runs', () => {
     // Which navigation and the grammar read no highlight around, so they
     // read none around its neighbours' text either
     expect(await fromWord(runs)).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  const code = (text: string, rPr = '', color = 'yellow') => highlighted(text, '<w:rStyle w:val="CodeChar"/>' + rPr, color);
+  /** Highlighted code as export writes it, a run of each text */
+  const codeRuns = (texts: string[], rPr = '', color = 'yellow', t = 'w:t') => texts.map(text =>
+    '<w:r><w:rPr><w:rStyle w:val="CodeChar"/>' + rPr + '<w:highlight w:val="' + color + '"/></w:rPr><' + t + '>' + text + '</' + t + '></w:r>').join('');
+  const exportedPart = async (md: string, part = 'word/document.xml') =>
+    (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file(part)!.async('string');
+
+  test.each([
+    ['an == in it', code('x =='), '==`x =`=={yellow}==`=`=={yellow}\n', codeRuns(['x =', '='])],
+    ['an == at its start', code('==x'), '==`=`=={yellow}==`=x`=={yellow}\n', codeRuns(['=', '=x'])],
+    ['= alone', code('==='), '==`=`=={yellow}==`=`=={yellow}==`=`=={yellow}\n', codeRuns(['=', '=', '='])],
+    ['a } after an ==', code('a==}b'), '==`a=`=={yellow}==`=}b`=={yellow}\n', codeRuns(['a=', '=}b'])],
+    ['an == in another color', code('x ==', '', 'red'), '==`x =`=={red}==`=`=={red}\n', codeRuns(['x =', '='], '', 'red')],
+    ['an == in bold', code('x ==', '<w:b/>'), '**==`x =`=={yellow}==`=`=={yellow}**\n', codeRuns(['x =', '='], '<w:b/>')],
+    ['an == before highlighted text', code('x ==') + highlighted(' b'), '==`x =`=={yellow}==`=`=={yellow}== b==\n', codeRuns(['x =', '='])],
+    ['an == after runs highlighted alike', highlighted('a ') + highlighted('b', '<w:i/>') + plain(' ') + code('x =='),
+      '==a *b*== ==`x =`=={yellow}==`=`=={yellow}\n', codeRuns(['x =', '='])],
+  ])('keeps the highlight of code with %s', async (_name, runs, md, exported) => {
+    // Code dropped it, which the == would close, even in code, as in
+    // ==`x ==`==, and export wrote it without
+    expect(await fromWord(runs)).toBe(md);
+    expect(await exportedPart(md)).toContain(exported);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    ['an insertion', tracked('ins', code('x ==')), 'XX', '{++==`x =`=={yellow}==`=`=={yellow}++}\n', codeRuns(['x =', '='])],
+    ['a deletion', tracked('del', code('x ==')), 'XX', '{--==`x =`=={yellow}==`=`=={yellow}--}\n', codeRuns(['x =', '='], '', 'yellow', 'w:delText')],
+    ['a substitution\'s side', tracked('del', plain('old')) + tracked('ins', code('x ==')), 'XX', '{~~old~>==`x =`=={yellow}==`=`=={yellow}~~}\n',
+      codeRuns(['x =', '='])],
+    ['a comment\'s text', code('x =='), 'P {==XX==}{>>c<<} Q', 'P {====`x =`=={yellow}==`=`=={yellow}==}{>>c<<} Q\n', codeRuns(['x =', '='])],
+    ['a table\'s cell', code('x =='), '| a | b |\n|---|---|\n| XX | z |', '| a | b |\n| --- | --- |\n| ==`x =`=={yellow}==`=`=={yellow} | z |\n',
+      codeRuns(['x =', '='])],
+    ['a note', code('x =='), 'P[^1]\n\n[^1]: XX', 'P[^1]\n\n[^1]: ==`x =`=={yellow}==`=`=={yellow}\n', codeRuns(['x =', '=']), 'word/footnotes.xml'],
+  ])('keeps the highlight of code with an == in %s', async (_name, runs, template, md, exported, part = 'word/document.xml') => {
+    expect(await fromWord(runs, template, part)).toBe(md);
+    expect(await exportedPart(md, part)).toContain(exported);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('keeps the highlight of code with an == beside a highlighted note reference', async () => {
+    // Which go in one highlight but for the code, whose == would close it
+    const md = 'P ==a[^1]== ==`x =`=={yellow}==`=`=={yellow}\n\n[^1]: N\n';
+    expect(await exportedPart(md)).toContain(codeRuns(['x =', '=']));
     expect(await roundTrip(md)).toBe(md);
   });
 

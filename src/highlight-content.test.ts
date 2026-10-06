@@ -104,14 +104,17 @@ describe('a highlight read back', () => {
     expect(await imported(docx)).toBe(text + note);
   });
 
-  it('leaves out code with an == in it, which would close it', async () => {
+  it('leaves out code with an == in it, which would close it, and highlights it apart', async () => {
     const { docx } = await exportParts('Seen ==x `a = b` y[^1]== and ==`c = d`== on.\n\n[^1]: Note.');
-    // Word can highlight such code, though Markdown can't
+    // Word can highlight such code, though one highlight in Markdown can't
     const zip = await JSZip.loadAsync(docx);
     const xml = await zip.file('word/document.xml')!.async('string');
     zip.file('word/document.xml', xml.replace('>a = b<', '>a == b<').replace('>c = d<', '>c == d<'));
     const back = await imported(await zip.generateAsync({ type: 'uint8array' }));
-    expect(back).toBe('Seen ==x ==`a == b`== y[^1]== and `c == d` on.\n\n[^1]: Note.');
+    // In highlights split at the ==, which the space before them goes
+    // outside of, as next to any highlight's ==
+    expect(back).toBe('Seen ==x== ==`a =`=={yellow}==`= b`=={yellow}== y[^1]== and ==`c =`=={yellow}==`= d`=={yellow} on.\n\n[^1]: Note.');
+    expect(await imported((await exportParts(back)).docx)).toBe(back);
   });
 
   it('keeps a citation whose text has an == in it, which Markdown doesn\'t show', async () => {
