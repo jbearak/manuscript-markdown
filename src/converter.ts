@@ -6247,8 +6247,10 @@ const BLOCK_START_RE = /^[ \t]{0,3}(?:#{1,6}(?:[ \t]|$)|[-+*](?:[ \t]|$)|\d{1,9}
 
 /** Whether a line of Markdown would start a block within a paragraph
  *  (BLOCK_START_RE), or a LaTeX environment, which export reads as display
- *  math (see wrapBareLatexEnvironments) */
+ *  math (see wrapBareLatexEnvironments). None does in an HTML table's cell,
+ *  which export reads as HTML, whose tags start a run's. */
 function startsBlockLine(markdown: string): boolean {
+  if (!readsMarkdown) return false;
   const environment = /^ {0,3}\\begin\{([a-zA-Z*]+)\}/.exec(markdown);
   return BLOCK_START_RE.test(markdown) || !!environment && DISPLAY_MATH_ENVIRONMENTS.has(environment[1]);
 }

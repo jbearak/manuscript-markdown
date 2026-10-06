@@ -6050,6 +6050,15 @@ describe('Word text that reads as Markdown', () => {
     expect(struck).toBe(' b\t');
   });
 
+  test('keeps a link of a line break and bold text after it one link in an HTML table\'s cell that holds what HTML can\'t', async () => {
+    // The bold text's tag read as an HTML block's start, which the link
+    // split at, and its URL came back twice
+    const link = (text: string, formatting: Partial<RunFormatting>): ContentItem =>
+      ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting }, href: 'https://e.com' });
+    const { markdown } = await fallbackCell([link('a', { underline: true }), link('\\\n', {}), link('b', { bold: true }), insertedRun]);
+    expect(markdown.split('https://e.com')).toHaveLength(2);
+  });
+
   test.each(['[@a](b)', '[-@a](b)', '[@a]{.underline}', '[@a][b]'])('writes %s with the citation export reads in it', async (text) => {
     // Its [ was escaped as a link's, so a citation whose key is missing,
     // which export writes as its text, came back as text, and stayed text
