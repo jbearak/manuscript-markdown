@@ -2167,14 +2167,14 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
  *  tag, around the rest where it joins its neighbours' (`joins`), with the
  *  whitespace inside, which joinHighlights, keepHtmlCellSpaces and
  *  citationSeparator read there. A brace, a ~, a backtick, and an = next
- *  to another or at the run's edge, which the grammar and navigation would
- *  read as CriticMarkup, strikethrough, code, or a highlight with the ==
- *  around it, are references. */
+ *  to another or at the run's edge, or any in a highlight, which the
+ *  grammar and navigation would read as CriticMarkup, strikethrough, code,
+ *  or a highlight with the == around it, or no highlight, are references. */
 function htmlCellRun(text: string, fmt: RunFormatting, joins = false): string {
   let html = text.split('\\\n').map((line, k, lines) => line.replace(/[^ ]/g, (c, i: number) =>
     c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '\t' ? '&#9;' : c === '\u00a0' ? '&nbsp;'
       : c === '{' ? '&#123;' : c === '}' ? '&#125;' : c === '~' ? '&#126;' : c === '`' ? '&#96;'
-        : c === '=' && (line[i - 1] === '=' || line[i + 1] === '=' || k === 0 && i === 0 || k === lines.length - 1 && i === line.length - 1) ? '&#61;' : c,
+        : c === '=' && (fmt.highlight || line[i - 1] === '=' || line[i + 1] === '=' || k === 0 && i === 0 || k === lines.length - 1 && i === line.length - 1) ? '&#61;' : c,
   )).join('<br>');
   // Around what's between the `edges` at each end, unless that's nothing,
   // read from the ends, as a regex with a lazy middle would scan the text
@@ -2219,7 +2219,13 @@ function keepHtmlCellSpaces(html: string): string {
       if (token !== '<br>' && !/^<(?:!--|\/?[a-z]+>)/i.test(token)) lineStart = false;
     }
   }
-  return out.replace(/( +)((?:<\/[a-z]+>)*)$/i, (_m, spaces: string, tags: string) => '&#32;'.repeat(spaces.length) + tags);
+  // From the end, past the closing tags there, as a regex for the spaces
+  // would scan each run of them before
+  let tags = out.length;
+  for (let close; (close = /<\/[a-z]+>$/i.exec(out.slice(Math.max(0, tags - 12), tags)));) tags -= close[0].length;
+  let spaces = tags;
+  while (out[spaces - 1] === ' ') spaces--;
+  return out.slice(0, spaces) + '&#32;'.repeat(tags - spaces) + out.slice(tags);
 }
 
 /** `markdown`, a run's text, in the tags and delimiters of its formatting

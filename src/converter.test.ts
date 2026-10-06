@@ -5914,6 +5914,8 @@ describe('Word text that reads as Markdown', () => {
   test.each([
     ['ends in an =', 'a=', '==a&#61;=='],
     ['has two =', 'a==b', '==a&#61;&#61;b=='],
+    ['has an = before an = at its end', 'a=b=', '==a&#61;b&#61;=='],
+    ['has an = before a space at its end', 'a= ', '==a&#61; =='],
   ])('writes a highlighted run that %s in an HTML table\'s cell that holds what HTML can\'t with a highlight\'s ==', async (_name, text, highlight) => {
     // Its = ran into the highlight's ==, which the grammar and navigation
     // read as none, or as a shorter one
@@ -5985,6 +5987,21 @@ describe('Word text that reads as Markdown', () => {
       insertedRun,
     ]);
     expect(markdown).toContain('<p>' + run + '[@smith2020]{++x++}</p>');
+  });
+
+  test('writes the spaces at the end of an HTML table\'s cell that holds what HTML can\'t after a comment of many spaces in linear time', () => {
+    // A regex for the spaces at the end retried from each of the comment's
+    const time = (spaces: number) => {
+      const start = performance.now();
+      buildMarkdown([{ type: 'table', rows: [
+        { isHeader: false, cells: [{ paragraphs: [[{ type: 'html_comment', text: '<!--' + ' '.repeat(spaces) + 'x-->', commentIds: new Set() } as ContentItem, insertedRun]], colspan: 2 }] },
+        { isHeader: false, cells: [{ paragraphs: [[]] }, { paragraphs: [[]] }] },
+      ] } as ContentItem], new Map());
+      return performance.now() - start;
+    };
+    time(5000);
+    const small = time(10000);
+    expect(time(80000) / small).toBeLessThan(16);
   });
 
   test('keeps the spaces of an HTML comment in an HTML table\'s cell that holds what HTML can\'t as they are', async () => {
