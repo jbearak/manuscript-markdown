@@ -5986,6 +5986,66 @@ describe('Word text that reads as Markdown', () => {
     expect(time(40000) / small).toBeLessThan(8);
   });
 
+  const fence = '$' + '$';
+  test.each([
+    ['an inline equation', 'XX $x==y$', 'a\\==b $x==y$', ['a==b x==y']],
+    ['a display equation its paragraph goes on in', 'XX\n' + fence + '\nx==y\n' + fence, 'a\\==b\n' + fence + '\nx==y\n' + fence, ['a==b \nx==y\n']],
+    ['the text after a display equation its paragraph goes on in', 'XX\n' + fence + '\nx\n' + fence + ' c==d',
+      'a\\==b\n' + fence + '\nx\n' + fence + '&#32;c==d', ['a==b \nx\n c==d']],
+    ['the body of a comment on a display equation its paragraph goes on in', 'XX\n{#1}' + fence + '\nx\n' + fence + '{/1}\n{#1>>x==y<<}',
+      'a\\==b\n{#1}' + fence + '\nx\n' + fence + '{/1}\n{#1>>x==y<<}', ['a==b \nx\n']],
+    ['an inline equation in a comment\'s range', '{==XX $x==y$==}{>>c<<}', '{==a\\==b $x==y$==}{>>c<<}', ['a==b x==y']],
+    ['a display equation in a comment\'s range', '{#1}XX\n' + fence + '\nx==y\n' + fence + '{/1}\n{#1>>c<<}',
+      '{#1}a\\==b\n' + fence + '\nx==y\n' + fence + '{/1}\n{#1>>c<<}', ['a==b \nx==y\n']],
+    ['an inline equation in a pipe table\'s cell', '| h |\n| --- |\n| XX $x==y$ |', '| h |\n| --- |\n| a\\==b $x==y$ |', ['h', 'a==b x==y']],
+    ['an inline equation in a grid table\'s cell', '+-------------+-----+\n| h           | x   |\n+=============+=====+\n| XX $x==y$   | b   |\n+-------------+-----+',
+      '+--------------+-----+\n| h            | x   |\n+==============+=====+\n| a\\==b $x==y$ | b   |\n+--------------+-----+', ['h', 'x', 'a==b x==y', 'b']],
+    ['a display equation in a grid table\'s cell', '+----------+\n| h        |\n+==========+\n| XX ' + fence + '    |\n| x==y     |\n| ' + fence + '       |\n+----------+',
+      '+----------+\n| h        |\n+==========+\n| a\\==b ' + fence + ' |\n| x==y     |\n| ' + fence + '       |\n+----------+', ['h', 'a==b \nx==y\n']],
+  ])('keeps text\'s == as text before an == in %s', async (_name, md, expected, text) => {
+    // Export read a highlight from the text's == to the next, in an
+    // equation's LaTeX, which Markdown has as it is, or past a display
+    // equation, as the text read the runs after it with each equation as no
+    // syntax, and only up to a display equation, past which the paragraph
+    // goes on. The LaTeX stays as it was.
+    const markdown = await importText('A.\n\n' + md + '\n\nB.', 'a==b');
+    expect(markdown).toBe('A.\n\n' + expected + '\n\nB.\n');
+    expect((await exported(markdown)).text).toEqual(['A.', ...text, 'B.']);
+    const zip = await JSZip.loadAsync((await convertMdToDocx(markdown)).docx);
+    expect(await zip.file('word/document.xml')!.async('string')).not.toContain('<w:highlight');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['an inline equation', 'XX $x==y$', ' a\\==b $x==y$', 'a==b x==y'],
+    ['a display equation its paragraph goes on in', 'XX\n    ' + fence + '\n    x==y\n    ' + fence,
+      '\n\n    a\\==b\n    ' + fence + '\n    x==y\n    ' + fence, 'a==b \nx==y\n'],
+  ])('keeps a note\'s text\'s == as text before an == in %s', async (_name, md, expected, text) => {
+    // As in the document's text
+    const markdown = await importText('T.[^1]\n\n[^1]: ' + md, 'a==b', 'word/footnotes.xml');
+    expect(markdown).toBe('T.[^1]\n\n[^1]:' + expected + '\n');
+    expect((await exported(markdown, 'word/footnotes.xml')).text).toEqual([text]);
+    const zip = await JSZip.loadAsync((await convertMdToDocx(markdown)).docx);
+    expect(await zip.file('word/footnotes.xml')!.async('string')).not.toContain('<w:highlight');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('escapes a paragraph with many display equations in linear time', () => {
+    // The runs before each equation would read the paragraph from it to its
+    // end for ==, and the runs after it read it from its start. Four times
+    // the equations take about four times as long, not sixteen, however
+    // fast the machine is.
+    const time = (n: number) => {
+      const run = (text: string) => ({ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING });
+      const items = [...Array.from({ length: n }, () => [run('a==b'), { type: 'math', latex: 'x', display: true, inParagraph: true, commentIds: new Set() }]).flat(), run('c==d')];
+      const start = performance.now();
+      expect(buildMarkdown(items as ContentItem[], new Map())).toStartWith('a\\==b\n' + fence + '\nx\n' + fence + 'a\\==b\n');
+      return performance.now() - start;
+    };
+    const small = time(5000);
+    expect(time(20000) / small).toBeLessThan(8);
+  });
+
   test('escapes bold text with math in it for the syntax in its paragraph alone', async () => {
     // It read the runs after it to the end of the document, so a == in a
     // later paragraph escaped one in it, as a highlight's text did
