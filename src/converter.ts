@@ -5431,8 +5431,10 @@ function appendRevised(
   const disjoint = (a: Set<string>, b: Set<string>) => ![...a].some(kind => b.has(kind));
   const seamSafe = (before: RevisionSpan) =>
     text !== '' && join !== 'never' && before.join !== 'never'
-    // A delimiter of the text's own could pair with one of its kind in the other span
-    && disjoint(literal, before.kinds) && disjoint(before.literal, kinds)
+    // A delimiter of the text's own could pair with one of its kind in the
+    // other span, but for in an HTML table's cell, where text's is a
+    // reference or text (see canJoinSpans)
+    && (!readsMarkdown || disjoint(literal, before.kinds) && disjoint(before.literal, kinds))
     && (join === 'space' || before.join === 'space'
       ? /\s/.test(before.lastChar) || /^\s/.test(text)
       : canJoinSpans(before.lastChar, text) || canJoinAtHighlight(before, text));

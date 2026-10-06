@@ -6010,9 +6010,11 @@ describe('Word text that reads as Markdown', () => {
   test.each([
     ['a bold word before a period', [['word', { bold: true }], ['.', {}]], '{++word.++}'],
     ['a period before an underlined word', [['.', {}], ['word', { underline: true }]], '{++.word++}'],
-    // Its & as XML writes it
+    // Its &, < and > as XML writes them
     ['an ampersand before a letter in superscript', [['a&', {}], ['b', { superscript: true }]], '{++a&amp;b++}'],
     ['a letter before one highlighted', [['a', {}], ['b', { highlight: true }]], '{++a==b==++}'],
+    ['a bold space before text of a tag', [['a ', { bold: true }], ['<b>a</b>', {}]], '{++a &lt;b&gt;a&lt;/b&gt;++}'],
+    ['text of a tag before a bold letter', [['<b>a</b>', {}], ['a', { bold: true }]], '{++&lt;b&gt;a&lt;/b&gt;a++}'],
   ])('joins the change of %s in an HTML table\'s cell that holds what HTML can\'t', async (_name, runs, expected) => {
     // The tags and references of its runs, read as Markdown's delimiters
     // and text, split it, which then came back with a second span's braces
