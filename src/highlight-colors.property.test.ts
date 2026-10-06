@@ -51,6 +51,8 @@ const coloredHighlight = fc.tuple(safeContent, fc.constantFrom(...VALID_COLOR_ID
 const nestedHighlightInAddition = safeContent.map(s => `{++text ==` + s + `== more++}`);
 const nestedHighlightInDeletion = safeContent.map(s => `{--text ==` + s + `== more--}`);
 const nestedHighlightInCritic = safeContent.map(s => `{==text ==` + s + `== more==}`);
+// Right at the {==, whose = would keep the == from opening but for masking
+const highlightAtCriticStart = safeContent.map(s => `{====` + s + `== more==}`);
 const nestedHighlightInComment = safeContent.map(s => `{>>text ==` + s + `== more<<}`);
 const nestedHighlightInIdComment = fc.tuple(safeId, safeContent).map(([id, s]) => `{#` + id + `>>text ==` + s + `== more<<}`);
 const nestedColoredInAddition = fc.tuple(safeContent, fc.constantFrom(...VALID_COLOR_IDS)).map(
@@ -74,6 +76,7 @@ const mixedTextGen = fc.array(
     { weight: 2, arbitrary: nestedHighlightInAddition },
     { weight: 2, arbitrary: nestedHighlightInDeletion },
     { weight: 2, arbitrary: nestedHighlightInCritic },
+    { weight: 1, arbitrary: highlightAtCriticStart },
     { weight: 1, arbitrary: nestedHighlightInComment },
     { weight: 1, arbitrary: nestedHighlightInIdComment },
     { weight: 1, arbitrary: nestedColoredInAddition },
@@ -135,6 +138,18 @@ describe('Nested highlight extraction', () => {
     expect(yellow.length).toBe(1);
     const hlText = text.slice(yellow[0].start, yellow[0].end);
     expect(hlText).toBe('==highlighted==');
+  });
+
+  test.each([
+    ['{====a====}{>>c<<}', 'yellow', '==a=='],
+    ['x {====a== b==}{>>c<<}', 'yellow', '==a=='],
+    ['{====a=={red}==}{>>c<<}', 'red', '==a=={red}'],
+  ])('format highlight right at the start of a critic highlight, %j, for editor decorations too', (text, color, highlighted) => {
+    // The = of the {== before it kept the decorations from reading its ==
+    // as an opener, as the preview and extractHighlightRanges do
+    for (const highlights of [extractHighlightRanges(text, 'yellow'), extractAllDecorationRanges(text, 'yellow').highlights]) {
+      expect((highlights.get(color) ?? []).map(r => text.slice(r.start, r.end))).toEqual([highlighted]);
+    }
   });
 
   test('critic inside format highlight', () => {
