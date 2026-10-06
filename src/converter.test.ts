@@ -10064,6 +10064,21 @@ describe('Blockquote round-trip', () => {
     expect(markdown).not.toContain('10. Clinical phrasing:\n    > [!NOTE] This is a note.');
   });
 
+  test.each([
+    ['a bullet item', '- x\n\n  > [!NOTE] a\n'],
+    ['an ordered item', '1. x\n\n   > [!TIP] a\n'],
+    ['an item with a wider marker', '10. x\n\n    > [!WARNING] a\n'],
+    ['a sublist\'s item', '- x\n  - y\n\n    > [!CAUTION] a\n'],
+    ['an item, before a later paragraph', '- x\n\n  > [!IMPORTANT] a\n  >\n  > b\n'],
+  ])('keeps text on an alert\'s marker\'s line in %s, with its label shown or hidden', async (_name, md) => {
+    // Import took the line break export writes after the label for one the
+    // text started with, and wrote the marker on a line of its own
+    for (const frontmatter of ['', '---\ncallout-labels: false\n---\n\n']) {
+      const { docx } = await convertMdToDocx(frontmatter + md);
+      expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(md);
+    }
+  });
+
   test('metadata-free DOCX preserves blank lines around blockquotes structurally', async () => {
     const xml = wrapDocumentXml(
       '<w:p><w:r><w:t>Before paragraph.</w:t></w:r></w:p>'

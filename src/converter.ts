@@ -10597,11 +10597,12 @@ export function buildMarkdown(
   let codeBlockGroupIndex = 0;
   let lastAlertParagraphKey: string | undefined;
   let pendingAlertPrefixStrip: GfmAlertType | undefined;
-  // Fallback for imports without alert-style metadata: stripAlertLeadPrefix can
-  // consume a hard line break after the glyph/title lead (e.g. "※ Note" + w:br).
-  // If we've already emitted an inline marker (`> [!TYPE] `), rewrite it to the
-  // marker-only form (`> [!TYPE]\n> ...`) so callout/paragraph boundaries stay
-  // stable on DOCX -> MD conversion.
+  // The quote's prefix in a list item, after which an inline marker
+  // (`> [!TYPE] `) becomes the marker-only form (`> [!TYPE]\n> ...`) where
+  // the text after the label starts with a line break of its own, but not
+  // where the line break is the label's, which stripAlertLeadPrefix takes:
+  // export writes one after the label whether the text was on the marker's
+  // line or not, which the alert-style metadata says.
   let pendingAlertInlinePrefixForHardBreak: string | undefined;
   let pendingDisplayMathContainer: { prefix: string; type: 'list' | 'blockquote' } | undefined;
   // Display math next in the paragraph just written, after its text or on
@@ -11596,7 +11597,6 @@ export function buildMarkdown(
       throw new Error('Invariant violated: renderInlineRange did not advance index');
     }
     rendered.deferredComments.unshift(...pendingEquationBodies.splice(0));
-    let strippedAlertLeadHadHardBreak = false;
     let textOut = rendered.text;
     // With the label hidden, export writes neither it nor the line end after
     // the marker, so all of the text is the alert's (see hidesAlertLabel)
@@ -11604,16 +11604,12 @@ export function buildMarkdown(
       // Text on the marker's line has no space of export's before it
       const inlineMarker = options?.blockquoteAlertInlineByGroup?.get(currentPara?.blockquoteGroupIndex ?? -1) === true;
       textOut = stripAlertLeadPrefix(rendered.text, pendingAlertPrefixStrip, inlineMarker);
-      const removedLen = rendered.text.length - textOut.length;
-      if (removedLen > 0 && rendered.text.slice(0, removedLen).includes('\n')) {
-        strippedAlertLeadHadHardBreak = true;
-      }
       // Spaces and tabs alone after the label leave the alert empty, as they
       // would a paragraph (see dropBlankParagraphText), unless an equation
       // goes on in it
       if (/^[ \t]+$/.test(textOut) && !isInParagraphMath(mergedContent[rendered.nextIndex])) textOut = '';
     }
-    if (pendingAlertInlinePrefixForHardBreak !== undefined && (textOut.startsWith('\n') || textOut.startsWith('\\\n') || strippedAlertLeadHadHardBreak)) {
+    if (pendingAlertInlinePrefixForHardBreak !== undefined && (textOut.startsWith('\n') || textOut.startsWith('\\\n'))) {
       const markerIdx = output.length - 1;
       const continuationPrefix = '\n' + pendingAlertInlinePrefixForHardBreak;
       if (markerIdx >= 0 && output[markerIdx].endsWith(' ')) {
