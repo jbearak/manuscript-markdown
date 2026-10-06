@@ -22,6 +22,7 @@ import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
 import { extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
 import { matchCriticHeadingPrefix } from './critic-markup';
+import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, type TemplateSections } from './template-sections';
 export { preprocessGridTables } from './grid-table-preprocess';
 export { extractHtmlTables } from './html-table-parser';
 
@@ -3852,7 +3853,7 @@ function parseMarkdownImageDimension(attrs: string, attrName: 'width' | 'height'
 
 interface TemplateParts {
   parts: Map<string, Uint8Array>;
-  templateSectPr?: string; // trailing <w:sectPr> from template document.xml
+  sections: TemplateSections; // trailing <w:sectPr> from template document.xml, and its headers and footers
 }
 
 /** A character XML 1.0 can't hold: a control character other than a tab
@@ -3905,29 +3906,13 @@ async function extractTemplateParts(templateDocx: Uint8Array): Promise<TemplateP
     }
   }
 
-  // Extract the document-level <w:sectPr> (direct child of <w:body>)
-  // to preserve template page layout (size, margins, orientation).
-  let templateSectPr: string | undefined;
-  const docFile = zip.file('word/document.xml');
-  if (docFile) {
-    const docXml = await docFile.async('string');
-    // Invariant: reuse ONLY the trailing body-level sectPr (the final <w:sectPr>
-    // before </w:body>). Paragraph-level section breaks may contain <w:sectPr>
-    // inside <w:pPr>; selecting from an earlier sectPr corrupts template reuse.
-    const bodyCloseIdx = docXml.lastIndexOf('</w:body>');
-    if (bodyCloseIdx !== -1) {
-      const beforeBodyClose = docXml.slice(0, bodyCloseIdx);
-      const sectPrStart = beforeBodyClose.lastIndexOf('<w:sectPr');
-      if (sectPrStart !== -1) {
-        const sectPrEnd = beforeBodyClose.indexOf('</w:sectPr>', sectPrStart);
-        if (sectPrEnd !== -1) {
-          templateSectPr = beforeBodyClose.slice(sectPrStart, sectPrEnd + '</w:sectPr>'.length);
-        }
-      }
-    }
-  }
-
-  return { parts, templateSectPr };
+  // The document-level <w:sectPr> (direct child of <w:body>), to preserve
+  // template page layout (size, margins, orientation), and the headers and
+  // footers its sections show (see template-sections.ts).
+  // Invariant: reuse ONLY the trailing body-level sectPr (the final <w:sectPr>
+  // before </w:body>). Paragraph-level section breaks may contain <w:sectPr>
+  // inside <w:pPr>; selecting from an earlier sectPr corrupts template reuse.
+  return { parts, sections: await readTemplateSections(zip) };
 }
 
 export interface MdToDocxOptions {
@@ -4024,10 +4009,21 @@ function landscapeSectPrXml(pgSz: PageSize, margins: string, rsid?: string): str
     '<w:cols w:space="720"/></w:sectPr>';
 }
 
+/** A sectPr with the template's page number format, and, if it is the
+ *  first written, its page number start, headers and footers: the sections
+ *  after it take them from it */
+function withTemplateSectPr(sectPr: string, state: DocxGenState): string {
+  if (!state.templateSections) return sectPr;
+  const first = !state.wroteSectPr;
+  state.wroteSectPr = true;
+  return withTemplateSection(sectPr, state.templateSections, first);
+}
+
 /** Build the final body-level sectPr (no <w:type>, direct child of <w:body>). */
 function bodyClosingSectPrXml(pgSz: PageSize, margins: string, templateSectPr?: string, rsid?: string): string {
-  // If we have an unmodified template sectPr, reuse it as-is to preserve
-  // any additional properties (headers, footers, columns, etc.)
+  // If we have a template sectPr, reuse it as-is to preserve any additional
+  // properties (columns, etc.). It comes without its headers, footers and
+  // page numbering, which withTemplateSectPr gives it
   if (templateSectPr) return templateSectPr;
   return '<w:sectPr' + (rsid ? ' w:rsidR="' + rsid + '"' : '') + '><w:pgSz w:w="' + pgSz.w + '" w:h="' + pgSz.h + '"/>' +
     '<w:pgMar ' + margins + '/>' +
@@ -4044,8 +4040,10 @@ export interface DocxGenState {
   warnings: string[];
   hasList: boolean;
   listStartOverrides: NumberingOverride[]; // ordered lists after the first
-  firstOverrideNumId?: number; // numIds below it are 1 and 2, for bullets and numbers, and a template's styles' (default 3)
-  usedOrderedNumId?: boolean; // whether an ordered list has used numId 2, so the next needs its own
+  firstOverrideNumId?: number; // numIds below it are bullets', numbers', and a template's styles' and headers' (default 3)
+  bulletNumId?: number; // the numId bullets take (default 1; see listNumIds)
+  decimalNumId?: number; // the numId numbers take (default 2)
+  usedOrderedNumId?: boolean; // whether an ordered list has used numbers' numId, so the next needs its own
   hasComments: boolean;
   hasFootnotes: boolean;
   hasEndnotes: boolean;
@@ -4101,6 +4099,8 @@ export interface DocxGenState {
   sectionBreakOrdinal: number;  // counter for paragraph-level sectPr emissions (for portrait round-trip)
   portraitBreakOrdinals: Set<number>; // ordinals of portrait-fence close section breaks
   templateSectPr?: string;      // trailing <w:sectPr> from template document.xml
+  templateSections?: TemplateSections; // the template's, whose headers, footers and page numbering the sectPrs written take
+  wroteSectPr?: boolean; // whether a sectPr was written, after which none starts the document
   pipeTableAligned: Map<number, boolean>; // table index -> whether pipe table was column-aligned
   gridSourceColWidths: Map<number, number[]>; // table index -> original grid table column char-widths
   sentinelGaps: Record<string, number>; // before-gap for landscape/portrait sentinels (e.g. "pc0" → blankLinesBefore for first portrait_close)
@@ -4231,10 +4231,12 @@ interface ContentTypesOptions {
   hasCommentsExtensible?: boolean;
   hasPeople?: boolean;
   imageExtensions?: Set<string>;
+  templateDefaults?: Map<string, string>; // extension -> content type, for the template's headers and footers
+  templateOverrides?: Map<string, string>; // part path -> content type, likewise
 }
 
 function contentTypesXml(opts: ContentTypesOptions): string {
-  const { hasList, hasComments, hasTheme, hasCustomProps, hasFootnotes, hasEndnotes, hasCommentsExtended, hasCommentsIds, hasCommentsExtensible, hasPeople, imageExtensions } = opts;
+  const { hasList, hasComments, hasTheme, hasCustomProps, hasFootnotes, hasEndnotes, hasCommentsExtended, hasCommentsIds, hasCommentsExtensible, hasPeople, imageExtensions, templateDefaults, templateOverrides } = opts;
   let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
   xml += '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n';
   xml += '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n';
@@ -4244,6 +4246,9 @@ function contentTypesXml(opts: ContentTypesOptions): string {
       const ct = getImageContentType(ext);
       if (ct) xml += '<Default Extension="' + ext + '" ContentType="' + ct + '"/>\n';
     }
+  }
+  for (const [ext, ct] of templateDefaults ?? []) {
+    xml += '<Default Extension="' + escapeXml(ext) + '" ContentType="' + escapeXml(ct) + '"/>\n';
   }
   xml += '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>\n';
   xml += '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>\n';
@@ -4281,6 +4286,9 @@ function contentTypesXml(opts: ContentTypesOptions): string {
   xml += '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>\n';
   if (hasCustomProps) {
     xml += '<Override PartName="/docProps/custom.xml" ContentType="application/vnd.openxmlformats-officedocument.custom-properties+xml"/>\n';
+  }
+  for (const [part, ct] of templateOverrides ?? []) {
+    xml += '<Override PartName="/' + escapeXml(part) + '" ContentType="' + escapeXml(ct) + '"/>\n';
   }
   xml += '</Types>';
   return xml;
@@ -5325,23 +5333,86 @@ function parseTemplateNumbering(xml: string): { root: OrderedXmlNode; nums: Orde
 }
 
 /**
- * The numIds of a template's numbering the document can use: 1 and 2, for
- * bullets and numbers, and those its styles use. The rest numbered the
+ * The numIds of a template's numbering its styles use, and its headers and
+ * footers, which export copies. The document can use these, and the ones its
+ * bullets and numbers take (see listNumIds). The rest numbered the
  * template's own text, as a previous export's start overrides did where the
  * template is that export, and go, so that each save doesn't add more.
  */
-function templateNumIdsInUse(templateStyles?: Uint8Array): Set<number> {
-  const used = new Set([1, 2]);
-  if (!templateStyles) return used;
-  const styles = new TextDecoder('utf-8').decode(templateStyles);
-  for (const m of styles.matchAll(/<w:numId\b[^>]*?\bw:val\s*=\s*["'](\d+)["']/g)) used.add(parseInt(m[1], 10));
+function templateNumIdsInUse(templateStyles?: string, headerNumIds: Iterable<number> = []): Set<number> {
+  const used = new Set(headerNumIds);
+  for (const m of (templateStyles ?? '').matchAll(/<w:numId\b[^>]*?\bw:val\s*=\s*["'](\d+)["']/g)) used.add(parseInt(m[1], 10));
   return used;
 }
 
+const NUM_ELEMENT = /<w:num\b[^>]*?\bw:numId\s*=\s*["'](\d+)["'][^>]*?(?:\/>|>[\s\S]*?<\/w:num\s*>)\s*/g;
+
 /** A template's numbering without the instances the document can't use. */
 function withoutUnusedNums(xml: string, used: Set<number>): string {
-  return xml.replace(/<w:num\b[^>]*?\bw:numId\s*=\s*["'](\d+)["'][^>]*?(?:\/>|>[\s\S]*?<\/w:num\s*>)\s*/g,
-    (num, numId: string) => used.has(parseInt(numId, 10)) ? num : '');
+  return xml.replace(NUM_ELEMENT, (num, numId: string) => used.has(parseInt(numId, 10)) ? num : '');
+}
+
+type ListKind = 'bullet' | 'decimal';
+
+/**
+ * The numIds export's bullets and numbers take in a template's numbering,
+ * and those it writes its own definitions at. Each kind takes 1 or 2 where
+ * the template's instance there has its format, a bullet or a number at its
+ * first level, or where nothing of the template's uses it. Otherwise it
+ * takes the first numId after 2 whose instance has its format and starts no
+ * level over, or that nothing uses. So the template's headers, footers and
+ * styles keep their numbering, and the next export, with this one as the
+ * template, takes the same numIds.
+ */
+function listNumIds(numberingXml: string | undefined, stylesXml: string | undefined, inUse: Set<number>): { bullet: number; decimal: number; own: Map<number, ListKind> } {
+  const own = new Map<number, ListKind>();
+  const numbering = numberingXml === undefined ? undefined : parseTemplateNumbering(numberingXml);
+  if (!numbering) return { bullet: 1, decimal: 2, own };
+  const abstractNums = childNodes(numbering.root, 'w:numbering').filter(n => 'w:abstractNum' in n);
+  const instance = (numId: number) => numbering.nums.find(n => intAttr(n, 'w:numId') === numId);
+  const formatOf = (level: OrderedXmlNode | undefined) => level && childNodes(level, 'w:lvl').find(n => 'w:numFmt' in n)?.[':@']?.['@_w:val'];
+  /** An instance's format at its first level: its own, its abstract
+   *  numbering's, or that of the numbering style the abstract one links to */
+  const firstLevelFormat = (numId: number, seen = new Set<number>()): string | undefined => {
+    const num = instance(numId);
+    if (!num || seen.has(numId)) return undefined;
+    seen.add(numId);
+    const children = childNodes(num, 'w:num');
+    for (const o of children.filter(n => 'w:lvlOverride' in n && intAttr(n, 'w:ilvl') === 0)) {
+      const format = formatOf(childNodes(o, 'w:lvlOverride').find(n => 'w:lvl' in n));
+      if (format) return format;
+    }
+    const abstractNumId = children.find(n => 'w:abstractNumId' in n);
+    const abstractNum = abstractNumId && abstractNums.find(a => intAttr(a, 'w:abstractNumId') === intAttr(abstractNumId, 'w:val'));
+    const definition = childNodes(abstractNum, 'w:abstractNum');
+    const format = formatOf(definition.find(n => 'w:lvl' in n && intAttr(n, 'w:ilvl') === 0));
+    if (format) return format;
+    const link = definition.find(n => 'w:numStyleLink' in n)?.[':@']?.['@_w:val'];
+    const style = link && new RegExp('<w:style\\b[^>]*?\\bw:styleId\\s*=\\s*["\']' + link.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '["\'][^>]*>([\\s\\S]*?)<\\/w:style\\s*>').exec(stylesXml ?? '');
+    const linked = style && /<w:numId\b[^>]*?\bw:val\s*=\s*["'](\d+)["']/.exec(style[1]);
+    return linked ? firstLevelFormat(parseInt(linked[1], 10), seen) : undefined;
+  };
+  const hasFormat = (numId: number, kind: ListKind) => {
+    const format = firstLevelFormat(numId);
+    return kind === 'bullet' ? format === 'bullet' : format !== undefined && format !== 'bullet' && format !== 'none';
+  };
+  const startsOver = (numId: number) => childNodes(instance(numId), 'w:num').some(n => 'w:lvlOverride' in n && childNodes(n, 'w:lvlOverride').some(o => 'w:startOverride' in o));
+  const taken = new Set<number>();
+  const pick = (preferred: number, kind: ListKind): number => {
+    for (let numId = preferred; ; numId = numId === preferred ? 3 : numId + 1) {
+      if (taken.has(numId)) continue;
+      if (instance(numId) && hasFormat(numId, kind) && (numId === preferred || !startsOver(numId))) {
+        taken.add(numId);
+        return numId;
+      }
+      if (!inUse.has(numId)) {
+        own.set(numId, kind);
+        taken.add(numId);
+        return numId;
+      }
+    }
+  };
+  return { bullet: pick(1, 'bullet'), decimal: pick(2, 'decimal'), own };
 }
 
 /**
@@ -5373,11 +5444,11 @@ function numberingOverrideXml(o: NumberingOverride, abstractNumId: string,
     '</w:num>\n';
 }
 
-/** A template's numbering with start overrides added as instances like its
- *  numId 2, or undefined when it has none. */
-function withNumberingOverrides(xml: string, startOverrides: NumberingOverride[]): string | undefined {
+/** A template's numbering with start overrides added as instances like the
+ *  one numbers take, `numId`, or undefined when it has none. */
+function withNumberingOverrides(xml: string, startOverrides: NumberingOverride[], numId: number): string | undefined {
   const numbering = parseTemplateNumbering(xml);
-  const instance = childNodes(numbering?.nums.find(n => intAttr(n, 'w:numId') === 2), 'w:num');
+  const instance = childNodes(numbering?.nums.find(n => intAttr(n, 'w:numId') === numId), 'w:num');
   const abstractNum = instance.find(n => 'w:abstractNumId' in n);
   const abstractNumId = abstractNum && intAttr(abstractNum, 'w:val');
   // w:num entries go before numIdMacAtCleanup, which ends the part
@@ -5394,43 +5465,69 @@ function withNumberingOverrides(xml: string, startOverrides: NumberingOverride[]
   return xml.slice(0, at) + startOverrides.map(o => numberingOverrideXml(o, String(abstractNumId), durableId, levelOverrides)).join('') + xml.slice(at);
 }
 
-function numberingXml(startOverrides?: NumberingOverride[]): string {
-  // Generate random identifiers that Word expects on numbering definitions.
-  // Without these, Word adds them on open, marking the document as modified.
-  function lvlsWithTplc(lvls: string[]): string {
-    return lvls.map((lvl, i) => {
-      const tplc = randomHex8();
-      return lvl.replace('<w:lvl w:ilvl="' + i + '">', '<w:lvl w:ilvl="' + i + '" w:tplc="' + tplc + '">');
-    }).join('\n');
+/** Level definitions with the random identifiers Word expects on them.
+ *  Without these, Word adds them on open, marking the document as modified. */
+function lvlsWithTplc(lvls: string[]): string {
+  return lvls.map((lvl, i) => {
+    const tplc = randomHex8();
+    return lvl.replace('<w:lvl w:ilvl="' + i + '">', '<w:lvl w:ilvl="' + i + '" w:tplc="' + tplc + '">');
+  }).join('\n');
+}
+
+/** Export's abstract numbering for bullets or numbers, at `abstractNumId`.
+ *  `w15` says whether the part declares the namespace of its attribute. */
+function defaultAbstractNumXml(kind: 'bullet' | 'decimal', abstractNumId: number, w15 = true): string {
+  const lvls = Array.from({length: 9}, (_, i) => {
+    const indent = (i + 1) * 720;
+    const format = kind === 'bullet' ? '<w:numFmt w:val="bullet"/><w:lvlText w:val="•"/>' : '<w:numFmt w:val="decimal"/><w:lvlText w:val="%' + (i + 1) + '."/>';
+    return '<w:lvl w:ilvl="' + i + '"><w:start w:val="1"/>' + format + '<w:lvlJc w:val="left"/><w:pPr><w:ind w:left="' + indent + '" w:hanging="360"/></w:pPr></w:lvl>';
+  });
+  return '<w:abstractNum w:abstractNumId="' + abstractNumId + '"' + (w15 ? ' w15:restartNumberingAfterBreak="0"' : '') + '>\n' +
+    '<w:nsid w:val="' + randomHex8() + '"/>\n' +
+    '<w:multiLevelType w:val="hybridMultilevel"/>\n' +
+    '<w:tmpl w:val="' + randomHex8() + '"/>\n' +
+    lvlsWithTplc(lvls) + '\n' +
+    '</w:abstractNum>\n';
+}
+
+/**
+ * A template's numbering with export's own bullets and numbers at the
+ * numIds listNumIds gives them, in place of any instance of the template's
+ * there, so that its other definitions, which its headers and styles can
+ * use, stay
+ */
+function withOwnNums(xml: string, own: Map<number, ListKind>): string {
+  if (own.size === 0) return xml;
+  xml = xml.replace(NUM_ELEMENT, (num, numId: string) => own.has(parseInt(numId, 10)) ? '' : num);
+  const numbering = parseTemplateNumbering(xml);
+  if (!numbering) return xml;
+  const abstractNumIds = childNodes(numbering.root, 'w:numbering').filter(n => 'w:abstractNum' in n).map(n => intAttr(n, 'w:abstractNumId'));
+  let next = Math.max(-1, ...abstractNumIds.filter(Number.isInteger)) + 1;
+  const declares = (prefix: string) => numbering.root[':@']?.['@_xmlns:' + prefix] !== undefined;
+  let abstractNums = '', nums = '';
+  for (const [numId, kind] of own) {
+    abstractNums += defaultAbstractNumXml(kind, next, declares('w15'));
+    nums += '<w:num w:numId="' + numId + '"' + (declares('w16cid') ? ' w16cid:durableId="' + Math.floor(Math.random() * 2000000000) + '"' : '') +
+      '><w:abstractNumId w:val="' + next + '"/></w:num>\n';
+    next++;
   }
+  // Abstract numbering goes before the instances, which go before
+  // numIdMacAtCleanup, which ends the part
+  const end = /<w:numIdMacAtCleanup\b/.exec(xml)?.index ?? [...xml.matchAll(/<\/w:numbering\s*>/g)].pop()?.index;
+  const lastAbstract = [...xml.matchAll(/<\/w:abstractNum\s*>\s*/g)].pop();
+  const abstractAt = lastAbstract ? lastAbstract.index! + lastAbstract[0].length : /<w:num\b/.exec(xml)?.index ?? end;
+  if (end === undefined || abstractAt === undefined) return xml;
+  return xml.slice(0, abstractAt) + abstractNums + xml.slice(abstractAt, end) + nums + xml.slice(end);
+}
 
-  const bulletLvls = Array.from({length: 9}, (_, i) => {
-    const indent = (i + 1) * 720;
-    return '<w:lvl w:ilvl="' + i + '"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="' + indent + '" w:hanging="360"/></w:pPr></w:lvl>';
-  });
-
-  const decimalLvls = Array.from({length: 9}, (_, i) => {
-    const indent = (i + 1) * 720;
-    return '<w:lvl w:ilvl="' + i + '"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%' + (i + 1) + '."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="' + indent + '" w:hanging="360"/></w:pPr></w:lvl>';
-  });
-
+function numberingXml(startOverrides?: NumberingOverride[]): string {
   const durableId1 = Math.floor(Math.random() * 2000000000);
   const durableId2 = Math.floor(Math.random() * 2000000000);
 
   return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
     '<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:w16cid="http://schemas.microsoft.com/office/word/2016/wordml/cid" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="w15 w16cid">\n' +
-    '<w:abstractNum w:abstractNumId="0" w15:restartNumberingAfterBreak="0">\n' +
-    '<w:nsid w:val="' + randomHex8() + '"/>\n' +
-    '<w:multiLevelType w:val="hybridMultilevel"/>\n' +
-    '<w:tmpl w:val="' + randomHex8() + '"/>\n' +
-    lvlsWithTplc(bulletLvls) + '\n' +
-    '</w:abstractNum>\n' +
-    '<w:abstractNum w:abstractNumId="1" w15:restartNumberingAfterBreak="0">\n' +
-    '<w:nsid w:val="' + randomHex8() + '"/>\n' +
-    '<w:multiLevelType w:val="hybridMultilevel"/>\n' +
-    '<w:tmpl w:val="' + randomHex8() + '"/>\n' +
-    lvlsWithTplc(decimalLvls) + '\n' +
-    '</w:abstractNum>\n' +
+    defaultAbstractNumXml('bullet', 0) +
+    defaultAbstractNumXml('decimal', 1) +
     '<w:num w:numId="1" w16cid:durableId="' + durableId1 + '"><w:abstractNumId w:val="0"/></w:num>\n' +
     '<w:num w:numId="2" w16cid:durableId="' + durableId2 + '"><w:abstractNumId w:val="1"/></w:num>\n' +
     // Emit extra w:num entries for ordered lists with their own start
@@ -5438,12 +5535,14 @@ function numberingXml(startOverrides?: NumberingOverride[]): string {
     '</w:numbering>';
 }
 
-function settingsXml(rsid: string, hasFootnotes?: boolean, hasEndnotes?: boolean, hasThreadedComments?: boolean): string {
+function settingsXml(rsid: string, hasFootnotes?: boolean, hasEndnotes?: boolean, hasThreadedComments?: boolean, evenAndOddHeaders?: boolean): string {
   const ignorable = hasThreadedComments ? 'w14 w15 w16se w16cid w16 w16cex w16sdtdh w16du' : 'w14 w15';
   let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
     '<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:w16="http://schemas.microsoft.com/office/word/2018/wordml" xmlns:w16cex="http://schemas.microsoft.com/office/word/2018/wordml/cex" xmlns:w16cid="http://schemas.microsoft.com/office/word/2016/wordml/cid" xmlns:w16du="http://schemas.microsoft.com/office/word/2023/wordml/word16du" xmlns:w16sdtdh="http://schemas.microsoft.com/office/word/2020/wordml/sdtdatahash" xmlns:w16se="http://schemas.microsoft.com/office/word/2015/wordml/symex" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="' + ignorable + '">\n' +
     '<w:zoom w:percent="100"/>\n' +
     '<w:defaultTabStop w:val="720"/>\n' +
+    // A template's even-page headers, which Word shows only with this
+    (evenAndOddHeaders ? '<w:evenAndOddHeaders/>\n' : '') +
     '<w:characterSpacingControl w:val="doNotCompress"/>\n' +
     // Prevent Word Online from showing hidden text (w:vanish runs used for HTML comments).
     // Without this, Word Desktop may save its "Show Hidden Text" preference into the file,
@@ -5585,6 +5684,8 @@ function appPropsXml(): string {
 interface CustomPropEntry {
   name: string;
   value: string;
+  /** Its value's type, vt:lpwstr's lpwstr unless a template's property has another */
+  type?: string;
 }
 
 /** Chunk a string value into numbered custom properties: PREFIX_1, PREFIX_2, … */
@@ -5613,7 +5714,8 @@ function customPropsXml(properties: CustomPropEntry[]): string {
     // Use minimal escaping for text content: only <, >, & need escaping.
     // escapeXml() also escapes " as &quot; which is valid but causes Word to
     // decode it on open and mark the document as modified.
-    xml += '<vt:lpwstr>' + properties[i].value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</vt:lpwstr>';
+    const type = 'vt:' + (properties[i].type ?? 'lpwstr');
+    xml += '<' + type + '>' + properties[i].value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</' + type + '>';
     xml += '</property>\n';
   }
   xml += '</Properties>';
@@ -5853,14 +5955,19 @@ interface DocumentRelsOptions {
   hasCommentsExtensible?: boolean;
   hasPeople?: boolean;
   imageRelationships?: Map<string, { rId: string; mediaPath: string }>;
+  templateRelationships?: Array<{ type: string; target: string; external: boolean }>; // rId1 to rIdN, the template's headers' and footers'
 }
 
 function documentRelsXml(opts: DocumentRelsOptions): string {
-  const { relationships, hasList, hasComments, hasTheme, hasFootnotes, hasEndnotes, hasCommentsExtended, hasCommentsIds, hasCommentsExtensible, hasPeople, imageRelationships } = opts;
+  const { relationships, hasList, hasComments, hasTheme, hasFootnotes, hasEndnotes, hasCommentsExtended, hasCommentsIds, hasCommentsExtensible, hasPeople, imageRelationships, templateRelationships } = opts;
   let xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
   xml += '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n';
   // All rIds must be sequential with no gaps — see dirty-flag invariant #6.
   let nextFixed = 1;
+  for (const relationship of templateRelationships ?? []) {
+    xml += '<Relationship Id="rId' + nextFixed + '" Type="' + escapeXml(relationship.type) + '" Target="' + escapeXml(relationship.target) + '"' + (relationship.external ? ' TargetMode="External"' : '') + '/>\n';
+    nextFixed++;
+  }
   xml += '<Relationship Id="rId' + nextFixed + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>\n';
   nextFixed++;
 
@@ -7048,7 +7155,7 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
         const leftIndent = 720 * (token.level || 1);
         pPr = '<w:pPr><w:ind w:left="' + leftIndent + '" w:hanging="360"/></w:pPr>';
       } else {
-        let numId = token.ordered ? '2' : '1';
+        let numId = String(token.ordered ? state.decimalNumId ?? 2 : state.bulletNumId ?? 1);
         const ilvl = (token.level || 1) - 1;
         // Word counts on through every paragraph of a numbering instance, so
         // each ordered list after the first gets one of its own, which
@@ -7062,7 +7169,7 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
           if (parentNumId !== undefined && start === 1) {
             state.activeListStartOverrides.set(ilvl, parentNumId);
           } else if (!state.usedOrderedNumId && start === 1) {
-            state.activeListStartOverrides.set(ilvl, 2);
+            state.activeListStartOverrides.set(ilvl, state.decimalNumId ?? 2);
           } else {
             const overrideNumId = (state.firstOverrideNumId ?? 3) + state.listStartOverrides.length;
             state.listStartOverrides.push({ numId: overrideNumId, ilvl, start });
@@ -7856,11 +7963,11 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
 
   // Helper: emit a portrait section break paragraph and increment ordinal
   function emitPortraitBreak(): void {
-    body += '<w:p><w:pPr>' + portraitSectPrXml(pgSz, margins, state.rsid) + '</w:pPr></w:p>';
+    body += '<w:p><w:pPr>' + withTemplateSectPr(portraitSectPrXml(pgSz, margins, state.rsid), state) + '</w:pPr></w:p>';
     state.sectionBreakOrdinal++;
   }
   function emitLandscapeBreak(): void {
-    body += '<w:p><w:pPr>' + landscapeSectPrXml(pgSz, margins, state.rsid) + '</w:pPr></w:p>';
+    body += '<w:p><w:pPr>' + withTemplateSectPr(landscapeSectPrXml(pgSz, margins, state.rsid), state) + '</w:pPr></w:p>';
     state.sectionBreakOrdinal++;
   }
 
@@ -8139,7 +8246,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   state.sentinelGaps = sentinelGaps;
 
   // Append body-closing sectPr (preserves template page layout)
-  const closingSectPr = bodyClosingSectPrXml(pgSz, margins, state.templateSectPr, state.rsid);
+  const closingSectPr = withTemplateSectPr(bodyClosingSectPrXml(pgSz, margins, state.templateSectPr, state.rsid), state);
 
   return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
     '<w:document xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wpi="http://schemas.microsoft.com/office/word/2010/wordprocessingInk" xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" mc:Ignorable="w14 w15 wp14">\n' +
@@ -8380,12 +8487,22 @@ export async function convertMdToDocx(
 
   // Extract template parts if provided
   let templateParts: Map<string, Uint8Array> | undefined;
-  let templateSectPr: string | undefined;
+  let templateSections: TemplateSections | undefined;
   if (options?.templateDocx) {
     const extracted = await extractTemplateParts(options.templateDocx);
     templateParts = extracted.parts;
-    templateSectPr = extracted.templateSectPr;
+    templateSections = extracted.sections;
   }
+  // The template's headers and footers take document.xml's first relationships
+  const templateRelCount = templateSections?.relationships.length ?? 0;
+  // The numbering of a template's styles and headers, its references to its
+  // relationships, as a picture bullet's image, numbered from rId1 as its
+  // relationships go with it, and the numIds the document's lists take in it
+  const templateNumbering = templateParts?.has('word/numbering.xml')
+    ? withRelationshipIds(decodeXml(templateParts.get('word/numbering.xml')!), templateSections?.numberingRels?.ids) : undefined;
+  const templateStyles = templateParts?.has('word/styles.xml') ? decodeXml(templateParts.get('word/styles.xml')!) : undefined;
+  const numIdsInUse = templateNumIdsInUse(templateStyles, templateSections?.numIds);
+  const listNumbering = listNumIds(templateNumbering, templateStyles, numIdsInUse);
 
   const hasTheme = true; // always include a theme (template or default)
 
@@ -8403,10 +8520,10 @@ export async function convertMdToDocx(
 
   const notesMode = frontmatter.notes === 'endnotes' ? 'endnotes' as const : 'footnotes' as const;
 
-  // Reserve rId slots: 1=styles, 2=numbering, 3=comments,
-  // 4+=optional notes/comment-thread rels/theme/settings/webSettings/fontTable.
+  // Reserve rId slots: the template's headers and footers, then styles,
+  // numbering, comments, optional notes/comment-thread rels/theme/settings/webSettings/fontTable.
   // Reserve max optional slots to avoid hyperlink rId collisions.
-  const rIdOffset = 3 + 6 + (hasTheme ? 1 : 0) + 3; // +6 optional rels (foot/end/commentsExtended/commentsIds/commentsExtensible/people), +3 fixed settings/webSettings/fontTable
+  const rIdOffset = templateRelCount + 3 + 6 + (hasTheme ? 1 : 0) + 3; // +6 optional rels (foot/end/commentsExtended/commentsIds/commentsExtensible/people), +3 fixed settings/webSettings/fontTable
 
   const state: DocxGenState = {
     commentId: 0,
@@ -8418,7 +8535,9 @@ export async function convertMdToDocx(
     warnings: [...earlyWarnings],
     hasList: false,
     listStartOverrides: [],
-    firstOverrideNumId: Math.max(...templateNumIdsInUse(templateParts?.get('word/styles.xml'))) + 1,
+    bulletNumId: listNumbering.bullet,
+    decimalNumId: listNumbering.decimal,
+    firstOverrideNumId: Math.max(2, ...numIdsInUse, listNumbering.bullet, listNumbering.decimal) + 1,
     usedOrderedNumId: false,
     hasComments: false,
     hasFootnotes: false,
@@ -8480,7 +8599,8 @@ export async function convertMdToDocx(
     inPortraitSection: false,
     sectionBreakOrdinal: 0,
     portraitBreakOrdinals: new Set(),
-    templateSectPr,
+    templateSectPr: templateSections?.sectPr,
+    templateSections,
     sentinelGaps: {},
     customStyles: frontmatter.styles,
     activeListStartOverrides: new Map(),
@@ -8784,11 +8904,16 @@ export async function convertMdToDocx(
   // Word requires both footnotes.xml and endnotes.xml whenever either is present.
   const hasNotes = state.hasFootnotes || state.hasEndnotes;
 
+  // The template's numbering goes with its headers and footers, whose
+  // lists, directly or through their styles, can use it, though the
+  // Markdown has no list
+  const hasNumbering = state.hasList || !!(templateParts?.has('word/numbering.xml') && templateSections?.references);
+
   // Dirty-flag invariant #6: rIds must be sequential with no gaps.
   // rIdOffset reserved max slots for optional rels; now that all hasX flags are known,
   // compute actual fixed count and remap dynamic rIds to close any gap.
-  const actualFixedCount = 1 /* styles */ +
-    (state.hasList ? 1 : 0) +
+  const actualFixedCount = templateRelCount + 1 /* styles */ +
+    (hasNumbering ? 1 : 0) +
     (state.hasComments ? 1 : 0) +
     (hasNotes ? 2 : 0) /* both footnotes + endnotes always included together */ +
     (hasCommentsExtended ? 1 : 0) +
@@ -8864,28 +8989,28 @@ export async function convertMdToDocx(
 
   // Always use generated settings.xml to guarantee compatibilityMode >= 15
   // (template settings.xml may have compatibilityMode < 15, causing "unreadable content" errors)
-  zip.file('word/settings.xml', settingsXml(state.rsid, hasNotes, hasNotes, hasThreadedComments));
+  zip.file('word/settings.xml', settingsXml(state.rsid, hasNotes, hasNotes, hasThreadedComments, templateSections?.evenAndOddHeaders));
   zip.file('word/webSettings.xml', webSettingsXml());
 
   // Always include fontTable.xml
   zip.file('word/fontTable.xml', fontTableXml());
 
   // Handle numbering - use template as base but ensure bullet/decimal definitions exist.
-  // Start overrides join the template's numbering as instances of the
-  // abstract numbering its numId 2 uses. A template without one gets fresh
-  // numbering, which discards its custom list formats.
-  if (state.hasList) {
-    const templateNumbering = templateParts?.get('word/numbering.xml');
-    const used = templateNumbering && withoutUnusedNums(new TextDecoder('utf-8').decode(templateNumbering),
-      templateNumIdsInUse(templateParts?.get('word/styles.xml')));
-    const merged = used && withNumberingOverrides(used, state.listStartOverrides);
-    if (used && state.listStartOverrides.length === 0) {
-      zip.file('word/numbering.xml', used);
-    } else if (merged) {
-      zip.file('word/numbering.xml', merged);
-    } else {
-      zip.file('word/numbering.xml', numberingXml(state.listStartOverrides));
-    }
+  // Export's bullets and numbers join a template's numbering where it has
+  // none in their format (see listNumIds), and start overrides join it as
+  // instances of the abstract numbering numbers take. Only a template
+  // without numbering, or with numbering that doesn't parse, gets fresh
+  // numbering.
+  let numberingFromTemplate = false;
+  if (hasNumbering) {
+    const used = templateNumbering !== undefined ? withoutUnusedNums(templateNumbering,
+      new Set([...numIdsInUse, listNumbering.bullet, listNumbering.decimal])) : undefined;
+    const complete = used !== undefined ? (state.hasList ? withOwnNums(used, listNumbering.own) : used) : undefined;
+    const numbering = complete !== undefined
+      ? (state.listStartOverrides.length === 0 ? complete : withNumberingOverrides(complete, state.listStartOverrides, listNumbering.decimal))
+      : undefined;
+    numberingFromTemplate = !!numbering;
+    zip.file('word/numbering.xml', numbering ? asUtf8(numbering) : numberingXml(state.listStartOverrides));
   }
 
   // Include theme: template theme if available, otherwise default
@@ -9008,6 +9133,10 @@ export async function convertMdToDocx(
   customProps.push(...bibKeyOrderProps(bibEntries));
   customProps.push(...bibDataProps(options?.bibtex));
   customProps.push(...bibliographyPathProps(frontmatter));
+  // The template's properties its copied headers' and footers' fields show,
+  // after export's own, which keep their pids
+  const ownProps = new Set(customProps.map(p => p.name.toLowerCase()));
+  customProps.push(...(templateSections?.customProperties ?? []).filter(p => !ownProps.has(p.name.toLowerCase())));
   const hasCustomProps = customProps.length > 0;
   if (hasCustomProps) {
     zip.file('docProps/custom.xml', customPropsXml(customProps));
@@ -9018,8 +9147,17 @@ export async function convertMdToDocx(
     zip.file('word/' + mediaPath, data);
   }
 
+  // The template's headers and footers, after the parts export writes,
+  // whose names they then don't take
+  const extensionTypes = new Map<string, string>([['rels', 'application/vnd.openxmlformats-package.relationships+xml'], ['xml', 'application/xml']]);
+  for (const ext of state.imageExtensions) {
+    const ct = getImageContentType(ext);
+    if (ct) extensionTypes.set(ext.toLowerCase(), ct);
+  }
+  const templateCopy = templateSections && addTemplateSectionParts(zip, templateSections, state.nextImageDocPrId, extensionTypes, numberingFromTemplate);
+
   zip.file('[Content_Types].xml', contentTypesXml({
-    hasList: state.hasList,
+    hasList: hasNumbering,
     hasComments: state.hasComments,
     hasTheme,
     hasCustomProps,
@@ -9030,11 +9168,13 @@ export async function convertMdToDocx(
     hasCommentsExtensible,
     hasPeople,
     imageExtensions: state.imageExtensions.size > 0 ? state.imageExtensions : undefined,
+    templateDefaults: templateCopy?.defaults,
+    templateOverrides: templateCopy?.overrides,
   }));
   zip.file('_rels/.rels', relsXml(hasCustomProps));
   zip.file('word/_rels/document.xml.rels', documentRelsXml({
     relationships: state.relationships,
-    hasList: state.hasList,
+    hasList: hasNumbering,
     hasComments: state.hasComments,
     hasTheme,
     hasFootnotes: hasNotes,
@@ -9044,6 +9184,7 @@ export async function convertMdToDocx(
     hasCommentsExtensible,
     hasPeople,
     imageRelationships: state.imageRelationships.size > 0 ? state.imageRelationships : undefined,
+    templateRelationships: templateCopy?.relationships,
   }));
 
   // Check for comment range markers without corresponding bodies

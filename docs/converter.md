@@ -262,7 +262,10 @@ When using **Export to Word with Template**, the converter extracts styling part
 
 - `word/styles.xml` — heading fonts, body text formatting, spacing
 - `word/theme/theme1.xml` — theme colors and fonts
-- `word/numbering.xml` — list definitions
-- `word/settings.xml` — document-level settings
+- `word/numbering.xml` — list definitions, with the images of its picture bullets. Bullets take the template's numId 1 and numbers its numId 2 where those are a bullet and a number. Where they aren't, export adds its own definitions and leaves the template's in place for its headers, footers and styles.
+- the page setup of its last section, such as its page size, margins and page number format
+- its headers and footers, with their images, their fields such as a page number, and their lists' numbering. A DOCPROPERTY field keeps the custom property it shows. A field that shows a built-in property, such as Title or Author, shows the exported document's.
 
 The template controls appearance while the Markdown controls content.
+
+Export takes the headers and footers that the template's last section shows, its first-page and even-page ones included. The first page gets its own header and footer if the template's first section has a different first page, and even pages get theirs if the template turns even-page headers on. The headers and footers start on the document's first page, the only one treated as a first page, and continue through the sections that orientation directives add. Those sections take the page number format too, and their pages count on from the document's first page, which takes the page number start of the template's first section, or else of its last. Import doesn't put headers and footers in the Markdown, so a document keeps them through Word → Markdown → Word only when the export's template has them. **Export to Word** uses the existing `.docx` as that template.
