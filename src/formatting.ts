@@ -712,16 +712,16 @@ function htmlCellAsWord(cell: HtmlTableCell, links: { count: number }): TableCel
     if (NOT_XML_CHARACTER.test(run.text) || run.href && NOT_XML_CHARACTER.test(run.href)) return undefined;
     if (run.linkStart) link = ++links.count;
     const linked = run.href ? { href: run.href, link } : {};
+    // A line break's the formatting around it, as text's, which Word shows
+    // on it, as an underline
+    const formatting = { ...DEFAULT_FORMATTING, bold: !!run.bold, italic: !!run.italic, underline: !!run.underline, strikethrough: !!run.strikethrough, code: !!run.code, superscript: !!run.superscript, subscript: !!run.subscript };
     if (run.type === 'paragraph') paragraphs.push([]);
     else if (run.type === 'softbreak' || run.type === 'hardbreak') {
-      para.push({ type: 'text', text: '\\\n', commentIds: new Set(), formatting: DEFAULT_FORMATTING, ...linked });
+      para.push({ type: 'text', text: '\\\n', commentIds: new Set(), formatting, ...linked });
     } else if (run.type === 'html_comment') {
       para.push({ type: 'html_comment', text: run.text, commentIds: new Set() });
     } else if (run.type === 'text' && !/[\r\n]/.test(run.text)) {
-      para.push({
-        type: 'text', text: run.text, commentIds: new Set(), ...linked,
-        formatting: { ...DEFAULT_FORMATTING, bold: !!run.bold, italic: !!run.italic, underline: !!run.underline, strikethrough: !!run.strikethrough, code: !!run.code, superscript: !!run.superscript, subscript: !!run.subscript },
-      });
+      para.push({ type: 'text', text: run.text, commentIds: new Set(), formatting, ...linked });
     } else return undefined;
   }
   return { paragraphs };

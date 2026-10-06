@@ -1593,6 +1593,23 @@ describe('HTML table support for Expand/Compact Table', () => {
     expect(previewRows(reflowTable(html).newText)).toEqual(previewRows(html));
   });
 
+  it.each([
+    ['<b>a<br>b</b>', '| **a |\n| b** |'],
+    ['<i>a<br>b</i>', '| *a  |\n| b*  |'],
+    ['<u>a<br>b</u>', '| <u>a  |\n| b</u> |'],
+    ['<s>a<br>b</s>', '| ~~a |\n| b~~ |'],
+    ['<sup>a<br>b</sup>', '| <sup>a  |\n| b</sup> |'],
+    ['<u>a<br></u>b<br>c', '| <u>a  |\n| </u>b |\n| c     |'],
+  ])('Compact Table and Expand Table keep the formatting around a line break in an HTML cell on it, in %s', (cell, lines) => {
+    // It was the text's on each side of it, and not its, which Word shows
+    // on it, as an underline
+    const html = '<table><tr><th>h</th></tr><tr><td>' + cell + '</td></tr></table>';
+    const compacted = compactTable(html).newText;
+    expect(compacted.split('\n').slice(3, -1).join('\n')).toBe(lines);
+    expect(previewRows(compacted)).toEqual(previewRows(html));
+    expect(previewRows(reflowTable(compacted).newText)).toEqual(previewRows(html));
+  });
+
   // Import's writers' marks, as U+0007 for a bare link's, and other
   // characters XML can't hold
   const NOT_XML = [0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0xE, 0xF, 0xFFFE, 0xFFFF, 0x0, 0x8, 0x1F];
