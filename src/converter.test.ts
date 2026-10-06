@@ -3510,6 +3510,29 @@ describe('A Word comment on an HTML comment', () => {
     expect(strip((await convertDocx(exported)).markdown)).toBe(md1);
   });
 
+  test.each([
+    ['a paragraph of its own', ' <!-- a -->', '', '{#1}<!-- a -->{/1}\n' + body],
+    ['a paragraph of its own with a space Word put after it', ' <!-- a -->', ' ', '{#1}<!-- a -->{/1}\n' + body],
+    ['a list item\'s later paragraph', '- a\n\n   <!-- a -->', '', '- a\n\n  {#1}<!-- a -->{/1}\n' + body],
+    ['a list item\'s later paragraph with a space Word put after it', '- a\n\n   <!-- a -->', ' ', '- a\n\n  {#1}<!-- a -->{/1}\n' + body],
+  ])('drops the indent export put in its hidden run on %s', async (_name, source, after, md) => {
+    // ID syntax makes the paragraph one, not an HTML block with an indent,
+    // so the indent went as text before the comment, which Word showed
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\n' + source + '\n\nB {==z==}{>>@A (2024-01-15 10:30) | note<<}.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    expect(xml).toContain('\u200B &lt;!-- a --&gt;');
+    const reference = /<w:r>(?:(?!<w:r>)[\s\S])*?<w:commentReference w:id="0"\/><\/w:r>/.exec(xml)![0];
+    const edited = xml.replace(start, '').replace(end, '').replace(reference, '')
+      .replace(/<w:r><w:rPr><w:vanish\/>(?:(?!<w:r>)[\s\S])*?&lt;!-- a --&gt;<\/w:t><\/w:r>/, run => start + run + end + reference + (after && visible(after)));
+    zip.file('word/document.xml', edited);
+    const md1 = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(md1).toBe('A.\n\n' + md + '\n\nB z.\n');
+    const exported = (await convertMdToDocx(md1)).docx;
+    expect(await paragraphs(exported)).toContain('«[<!-- a -->]»†');
+    // Without the space Word put at the paragraph's end, which Markdown drops
+    expect(strip((await convertDocx(exported)).markdown)).toBe(md1);
+  });
+
   test('keeps one on one that starts a note\'s paragraph, and the HTML comment hidden', async () => {
     const zip = await JSZip.loadAsync((await convertMdToDocx('T.[^1]\n\n[^1]: XX {==z==}{>>@A (2024-01-15 10:30) | note<<}')).docx);
     const xml = await zip.file('word/footnotes.xml')!.async('string');

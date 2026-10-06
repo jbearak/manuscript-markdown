@@ -8158,7 +8158,11 @@ function renderInlineRangeWithIds(
     if (item.type === 'html_comment') {
       const currentIds = item.commentIds;
       enterComments(currentIds);
-      out += markdownComment(item.text, segment[i + 1]?.type === 'html_comment', opts?.cell);
+      // Without the indent export put in its hidden run, where ID syntax
+      // starts the paragraph, which it makes one rather than an HTML block
+      // whose indent that was, so the indent would be text Word shows
+      const text = /^(?:\{#[^}\s]+\})+$/.test(out) ? item.text.replace(/^[ \t]+/, '') : item.text;
+      out += markdownComment(text, segment[i + 1]?.type === 'html_comment', opts?.cell);
       i++;
       continue;
     }
