@@ -5947,14 +5947,28 @@ describe('Word text that reads as Markdown', () => {
     expect(markdown).toContain('<p>&#123;++a++&#125; {++x++}</p>');
   });
 
-  test('puts no second space before a citation after an underlined space in an HTML table\'s cell that holds what HTML can\'t', async () => {
-    // A reference for the space hid it from the separator
+  test.each([
+    ['underlined', { underline: true }, '<u>a </u>'],
+    ['bold and underlined', { bold: true, underline: true }, '<b><u>a </u></b>'],
+  ])('puts no second space before a citation after a space %s in an HTML table\'s cell that holds what HTML can\'t', async (_name, formatting, run) => {
+    // A reference for the space, or a tag the separator didn't know, hid
+    // it from the separator
     const { markdown } = await fallbackCell([
-      { type: 'text', text: 'a ', commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, underline: true } },
+      { type: 'text', text: 'a ', commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting } },
       { type: 'citation', text: '(Smith 2020)', commentIds: new Set(), pandocKeys: ['@smith2020'] },
       insertedRun,
     ]);
-    expect(markdown).toContain('<p><u>a </u>[@smith2020]{++x++}</p>');
+    expect(markdown).toContain('<p>' + run + '[@smith2020]{++x++}</p>');
+  });
+
+  test('keeps the spaces of an HTML comment in an HTML table\'s cell that holds what HTML can\'t as they are', async () => {
+    // Export keeps a comment's text as it is, references and all
+    const { markdown } = await fallbackCell([
+      { type: 'text', text: 'a ', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
+      { type: 'html_comment', text: '<!-- b  c -->', commentIds: new Set() } as ContentItem,
+      insertedRun,
+    ]);
+    expect(markdown).toContain('<!-- b  c -->');
   });
 
   test('joins the highlights of runs formatted otherwise in an HTML table\'s cell that holds what HTML can\'t', async () => {

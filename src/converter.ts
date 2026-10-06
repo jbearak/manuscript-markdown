@@ -5560,9 +5560,10 @@ function lastVisibleChar(markdown: string, accepted: boolean, from = 0, to = mar
 
 /** A close of formatting at the end of Markdown, after the text it holds:
  *  a highlight's or emphasis's, whose marks tell it from text's, or an
- *  underline's or a script's tag */
+ *  underline's or a script's tag, or bold's, italic's or strikethrough's,
+ *  as htmlCellRun writes them, which text writes as references */
 // eslint-disable-next-line no-control-regex
-const FORMATTING_CLOSE_AT_END = /(?:[\u0006\u000F]==(?:\{[a-z0-9-]+\})?|\u0004(?:\*\*|\*|~~)|(?<!\\)<\/(?:u|sup|sub)>)$/;
+const FORMATTING_CLOSE_AT_END = /(?:[\u0006\u000F]==(?:\{[a-z0-9-]+\})?|\u0004(?:\*\*|\*|~~)|(?<!\\)<\/(?:u|sup|sub|b|i|s)>)$/;
 
 /** Where the text of `markdown` before `end` ends, past the closes of the
  *  formatting around it, as a highlight's, which holds the whitespace at
@@ -7068,8 +7069,10 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
         } finally {
           readsMarkdown = outerReadsMarkdown;
         }
-        // A space after one across the tags of runs, which HTML runs together
-        const spaced = rendered.text.replace(/ ((?:<\/?[a-z]+>)*) /g, (_m, tags: string) => ' ' + tags + '&#32;');
+        // A space after one across the tags of runs, which HTML runs together,
+        // but not in a comment, which export keeps as it is
+        const spaced = rendered.text.replace(/<!--(?:(?!--!?>)[\s\S])*(?:--!?>|$)| ((?:<\/?[a-z]+>)*) /g,
+          (match, tags: string | undefined) => tags === undefined ? match : ' ' + tags + '&#32;');
         lines.push(i3 + '<p>' + keepParagraphWhitespace(spaced, true, true) + '</p>');
         deferredAll.push(...rendered.deferredComments);
       }
