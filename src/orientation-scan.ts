@@ -43,6 +43,20 @@ const NOTE_DEFINITION_RE = /^\[\^[a-zA-Z0-9_-]+\]:\s?/;
 const NOTE_CONTINUATION_RE = /^(?: {4}|\t)/;
 
 /**
+ * `source` with each CriticMarkup span's line ends in its placeholders, as
+ * export reads it, and the line of `source` each of its lines starts, and
+ * the line past its end (see extractFootnoteDefinitions in md-to-docx.ts).
+ */
+function withCriticMarkup(source: string): { parsed: string; starts: number[] } {
+  const parsed = preprocessCriticMarkup(source, false);
+  const starts = [0];
+  for (const line of parsed.split('\n')) {
+    starts.push(starts[starts.length - 1] + line.split(LINE_PLACEHOLDER).length + 2 * (line.split(PARA_PLACEHOLDER).length - 1));
+  }
+  return { parsed, starts };
+}
+
+/**
  * The orientation directives in `source`, each an HTML block of its own, as
  * markdown-it reads them, and where export reads each: at the top level, as
  * a directive, or in a list item, which drops one after the item's text. Not
@@ -59,16 +73,10 @@ function blockDirectives(source: string, text: string, lineOffset: (line: number
   // The block parser alone, which reads a carriage return as a line end, as
   // markdown-it's core does, over the lines export reads, after its grid
   // tables, quotes and LaTeX environments, as a grid table's placeholder,
-  // which ends a list it was indented in, with a CriticMarkup span's line
-  // ends in its placeholders; `starts` has the line of the preprocessed
-  // blocks each one starts, and `blocks.lines` the line of `source` each of
-  // those comes from (see extractFootnoteDefinitions in md-to-docx.ts)
+  // which ends a list it was indented in, with the line of `source` each
+  // comes from
   const blocks = preprocessBlocks(source.replace(/\r\n?/g, '\n'));
-  const parsed = preprocessCriticMarkup(blocks.output, false);
-  const starts = [0];
-  for (const line of parsed.split('\n')) {
-    starts.push(starts[starts.length - 1] + line.split(LINE_PLACEHOLDER).length + 2 * (line.split(PARA_PLACEHOLDER).length - 1));
-  }
+  const { parsed, starts } = withCriticMarkup(blocks.output);
   blockParser.block.parse(parsed, blockParser, {}, tokens);
   const directives: Directive[] = [];
   // The open list items and quotes, an item with whether a block that ends
@@ -118,14 +126,17 @@ function blockDirectives(source: string, text: string, lineOffset: (line: number
 function directivesOf(text: string): Directive[] {
   const lineStarts = computeLineStarts(text);
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
-  // The lines of fenced code and HTML blocks, which hold no definition
+  // The lines of fenced code and HTML blocks, which hold no definition, as
+  // export reads them, past CriticMarkup, a fence's marker in a span of more
+  // than one line its text, which starts no code
   const literal = new Set<number>();
   if (lines.some(line => NOTE_DEFINITION_RE.test(line))) {
     const tokens: Token[] = [];
-    blockParser.block.parse(lines.join('\n'), blockParser, {}, tokens);
+    const { parsed, starts } = withCriticMarkup(lines.join('\n'));
+    blockParser.block.parse(parsed, blockParser, {}, tokens);
     for (const token of tokens) {
       if ((token.type === 'fence' || token.type === 'html_block') && token.map) {
-        for (let k = token.map[0]; k < token.map[1]; k++) literal.add(k);
+        for (let k = starts[token.map[0]]; k < starts[token.map[1]]; k++) literal.add(k);
       }
     }
   }

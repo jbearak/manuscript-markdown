@@ -233,6 +233,15 @@ describe('scanOrientationDirectives', () => {
     it('reads a definition-like line in fenced code as code', () => {
       expect(scanOrientationDirectives('```\n[^1]: <!-- landscape -->\n```\n')).toEqual([]);
     });
+
+    it('reads a definition-like line in fenced code after a CriticMarkup span with a fence\'s marker as code, as export does', async () => {
+      // The scan read the span's marker as a fence's, which the code's
+      // opening one closed, so the line was a note's
+      const text = '{++a\n```\nb++}\n\n```\n[^1]: <!-- landscape -->\n```\n\nText.\n';
+      expect(scanOrientationDirectives(text)).toEqual([]);
+      const { convertMdToDocx } = await import('./md-to-docx');
+      expect((await convertMdToDocx(text)).warnings.filter(w => w.includes('landscape'))).toEqual([]);
+    });
   });
 
   it.each([
