@@ -13231,6 +13231,23 @@ describe('Formatting Word shows on whitespace', () => {
     expect(strip((await convertDocx(docx)).markdown).trimStart()).toBe(md);
   });
 
+  // A table with merged cells, which only HTML holds
+  const TABLE = '<table>\n  <tr>\n    <td colspan="2">\n      <p>h</p>\n    </td>\n  </tr>\n  <tr>\n    <td>\n      <p>XX</p>\n    </td>\n    <td>\n      <p>z</p>\n    </td>\n  </tr>\n</table>';
+  test.each([
+    ['underlined, at a run\'s end', run('x') + run('a^', U) + run('b'), 'x<u>a<br></u>b'],
+    ['struck, at a run\'s start', run('x') + run('^a', S) + run('b'), 'x<s><br>a</s>b'],
+    ['underlined, alone', run('x') + run('^', U) + run('y'), 'x<u><br></u>y'],
+    ['underlined, at the paragraph\'s end', run('x') + run('a^', U), 'x<u>a<br></u>'],
+    ['underlined, twice', run('x') + run('a^^', U) + run('y'), 'x<u>a<br><br></u>y'],
+    ['underlined and bold', run('x') + run('a^', U + '<w:b/>') + run('b'), 'x<b><u>a<br></u></b>b'],
+    ['struck, after struck code', run('x') + run('a', CODE + S) + run('^', S) + run('b'), 'x<s><code>a</code><br></s>b'],
+    // Which, unlike Markdown's, holds it
+    ['in struck code', run('x') + run('a^', CODE + S) + run('b'), 'x<s><code>a<br></code></s>b'],
+  ])('keeps the formatting of a line break %s in an HTML table\'s cell', async (_name, runs, html) => {
+    // The break went outside the formatting, and export gave it none
+    await roundTrip(runs, TABLE.replace('XX', html), TABLE);
+  });
+
   test('writes <br> before the == of a highlight that ends the text before an equation', async () => {
     // == alone on the line before it read as a heading's underline
     const md = 'x==a<br>==\n$$\nE\n$$\n';

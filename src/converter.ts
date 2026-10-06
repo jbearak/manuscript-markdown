@@ -7487,8 +7487,9 @@ function renderInlineRangeWithIds(
  */
 function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
   type TextItem = Extract<ContentItem, { type: 'text' }>;
-  // The paragraph's text, with each line break as null
-  const pieces: Array<{ text: string; item: TextItem; html: string; raw?: boolean } | null> = [];
+  // The paragraph's text, with each line break as null, but one in
+  // formatting Word shows on it, which goes in that (see showsOnBreak)
+  const pieces: Array<{ text: string; item: TextItem; html: string; raw?: boolean; br?: boolean } | null> = [];
   // A comment Word split, as one; and comments the browser ended at a --!>,
   // which Word joined in one hidden run, as inline Markdown would read them
   // as one (see readHiddenText)
@@ -7506,7 +7507,7 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
     }
     if (item.type !== 'text' || item.revision || item.commentIds.size > 0 || item.formatting.highlight) return undefined;
     item.text.split('\\\n').forEach((text, k) => {
-      if (k > 0) pieces.push(null);
+      if (k > 0) pieces.push(showsOnBreak(item.formatting) ? { text: '', item, html: '<br>', br: true } : null);
       if (text) pieces.push({ text, item, html: '' });
     });
   }
@@ -7514,7 +7515,7 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
   // line keeps can straddle two pieces
   for (let k = 0; k < pieces.length; k++) {
     let end = k;
-    while (end < pieces.length && pieces[end] !== null) end++;
+    while (end < pieces.length && pieces[end] !== null && !pieces[end]!.br) end++;
     const line = pieces.slice(k, end) as Array<{ text: string; item: TextItem; html: string; raw?: boolean }>;
     const characters = htmlLineCharacters(line.map(piece => piece.text).join(''));
     let at = 0;
