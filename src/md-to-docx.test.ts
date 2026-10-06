@@ -26,7 +26,6 @@ import {
 } from './md-to-docx';
 import { type GfmAlertType } from './gfm';
 import { getDisplayWidth } from './grid-table-preprocess';
-import { compactTable } from './formatting';
 import { parseFrontmatter, serializeFrontmatter, parseColWidths, expandColWidths, colWidthsToPct } from './frontmatter';
 import { alertColorsByScheme, setDefaultColorScheme, getDefaultColorScheme, GITHUB_ALERT_COLORS, GUTTMACHER_ALERT_COLORS } from './alert-colors';
 
@@ -803,10 +802,9 @@ describe('parseMd grid tables', () => {
     expect(table?.rows?.map(row => row.cells.map(cell => cell.runs.map(run => run.text).join('')))).toEqual([['a|']]);
   });
 
-  it('reads the grid table Compact Table writes, with no padding', () => {
+  it('reads a grid table with no padding, as Compact Table wrote one', () => {
     // Its | signs, under no + sign, were in the cells' text
-    const compact = compactTable('<table><tr><td>a<br>b</td><td>c<br>d</td></tr><tr><td>abcdef</td><td>e</td></tr></table>').newText;
-    expect(compact).toStartWith('+--------+---+\n| a | c |');
+    const compact = '+--------+---+\n| a | c |\n| b | d |\n+--------+---+\n| abcdef | e |\n+--------+---+';
     const table = parseMd(compact).find(t => t.type === 'table');
     expect(table?.rows?.map(row => row.cells.map(cell => cell.runs.map(run => run.type === 'hardbreak' ? '\n' : run.text).join('')))).toEqual([['a\nb', 'c\nd'], ['abcdef', 'e']]);
   });

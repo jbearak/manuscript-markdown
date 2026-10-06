@@ -8513,6 +8513,29 @@ function tryRenderGridTable(
   return result;
 }
 
+/**
+ * A table as import writes one that leaves HTML, as a pipe table, unpadded,
+ * or a grid table, of any width, or null where it can't. Expand Table and
+ * Compact Table write an HTML table so, whose text is literal, as Word's
+ * is, so it takes an escape wherever a pipe or grid cell would read it as
+ * Markdown, and a citation's brackets are escaped too, as of a key export
+ * doesn't know. A comment in a cell is one the browser reads, as in an
+ * HTML table's cell.
+ */
+export function markdownTable(rows: TableRow[], kind: 'pipe' | 'grid'): string | null {
+  const outerKeys = knownCitationKeys;
+  const outerNoted = citationsNoted;
+  knownCitationKeys = new Set();
+  citationsNoted = true;
+  try {
+    const renderOpts: RenderOpts = { htmlCells: true };
+    return kind === 'pipe' ? tryRenderPipeTable({ rows }, Infinity, new Map(), renderOpts) : tryRenderGridTable({ rows }, new Map(), renderOpts);
+  } finally {
+    knownCitationKeys = outerKeys;
+    citationsNoted = outerNoted;
+  }
+}
+
 /** Render a table as a grid table, GFM pipe table, or HTML fallback, depending on feasibility and stored format.
  *  Returns { directivePrefix, body } so callers can position directives before preceding HTML comments. */
 /**

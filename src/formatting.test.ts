@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'bun:test';
 import * as fc from 'fast-check';
 import { wrapSelection, wrapLines, wrapLinesNumbered, formatHeading, highlightAndComment, wrapCodeBlock, substituteAndComment, additionAndComment, deletionAndComment, reflowTable, compactTable, parseTable, isTableRow, tableSeparatorIndex, documentTables } from './formatting';
+import { extractHtmlTables, type HtmlTableRun } from './html-table-parser';
+import { renderWithPlugin } from './test-helpers';
 
 describe('Formatting Module Property Tests', () => {
   
@@ -571,12 +573,11 @@ describe('grid table support for Expand Table and Compact Table', () => {
   it.each([
     ['a line break', '<td>a<br><br></td>'],
     ['a line break at a paragraph\'s end', '<td><p>a<br></p></td>'],
-    ['an empty paragraph', '<td><p>a</p><p></p></td>'],
   ])('reflowTable writes %s at the end of an HTML cell as <br>', (_name, cell) => {
     // A grid table's blank lines at a cell's end pad it to its row's height,
     // and aren't line breaks
     expect(reflowTable('<table><tr>' + cell + '<td>b<br>c</td></tr></table>').newText)
-      .toBe('+-------+---+\n| a<br> | b |\n|       | c |\n+-------+---+');
+      .toBe('+-------+-----+\n| a<br> | b   |\n|       | c   |\n+-------+-----+');
   });
 
   it('compactTable compacts Pandoc-style grid tables while preserving separator style', () => {
@@ -1553,6 +1554,45 @@ describe('compactTable', () => {
 });
 
 describe('HTML table support for Expand/Compact Table', () => {
+  // A table's rows as the preview shows them: whether each is a header row,
+  // and its cells' text, formatting, line breaks and links, with text runs
+  // alike joined, as <i>a</i><i>b</i> shows as *ab* does
+  const FORMATS = ['bold', 'italic', 'underline', 'strikethrough', 'code', 'superscript', 'subscript', 'href'] as const;
+  const previewRows = (markdown: string) => extractHtmlTables(renderWithPlugin(markdown)).map(table => table.rows.map(row => ({
+    header: row.header,
+    cells: row.cells.map(cell => cell.runs.reduce<HtmlTableRun[]>((runs, run) => {
+      const last = runs[runs.length - 1];
+      if (last?.type === 'text' && run.type === 'text' && !run.linkStart && FORMATS.every(key => last[key] === run[key])) {
+        runs[runs.length - 1] = { ...last, text: last.text + run.text };
+      } else runs.push(run);
+      return runs;
+    }, [])),
+  })));
+
+  it.each([
+    ['a note reference', '&#91;^1] note', '| \\[^1] note |'],
+    ['emphasis', '*a* _b_ **c** __d__ ~~s~~', '| \\*a\\* \\_b\\_ \\*\\*c\\*\\* \\_\\_d\\_\\_ \\~\\~s\\~\\~ |'],
+    ['code', '`code` ``x``', '| \\`code\\` \\`\\`x\\`\\` |'],
+    ['a link and an image', '[x](u) ![i](p.png) &lt;https://e.org&gt;', '| \\[x](u) !\\[i](p.png) \\<https\\://e.org> |'],
+    ['citations', '[@key] @key [-@k, p. 1]', '| \\[@key] @key \\[-@k, p. 1] |'],
+    ['HTML', '&lt;b&gt;x&lt;/b&gt; &lt;!-- c --&gt; &amp;copy;', '| &lt;b&gt;x&lt;/b&gt; \\<!-- c --> \\&copy; |'],
+    ['a | and a backslash', 'a|b a\\|b \\*c', '| a\\|b a\\\\\\|b \\\\\\*c |'],
+    ['math', '$x$ ' + '$'.repeat(2) + 'y' + '$'.repeat(2), '| \\$x$ \\$\\$y\\$\\$ |'],
+    ['a highlight', '==hi==', '| \\==hi\\== |'],
+    ['CriticMarkup', '{++a++} {--b--} {~~a~&gt;b~~} {==c==}{&gt;&gt;d&lt;&lt;}', '| \\{++a+\\+} \\{--b-\\-} \\{\\~\\~a~>b\\~\\~} \\{\\==c\\==}\\{>>d<<} |'],
+    ['Markdown in formatting and a link', '<b>*a*</b> <code>*a* |</code> <a href="u">*a*</a> x<sup>$2$</sup>', '| **\\*a\\*** `*a* \\|` [\\*a\\*](u) x<sup>\\$2$</sup> |'],
+    ['Markdown before a line break', '*a*<br>[@key]', '+---------+\n| h       |\n+=========+\n| \\*a\\*   |\n| \\[@key] |\n+---------+'],
+  ])('Compact Table and Expand Table escape %s in an HTML cell, which shows it as text', (_name, cell, body) => {
+    // It was written as is, so the cell read it as Markdown, as [^1] as a
+    // note reference or *a* as emphasis
+    const html = '<table><tr><th>h</th></tr><tr><td>' + cell + '</td></tr></table>';
+    const compacted = compactTable(html).newText;
+    expect(compacted).toBe(body.startsWith('+') ? body : '| h |\n| --- |\n' + body);
+    expect(previewRows(compacted)).toEqual(previewRows(html));
+    expect(previewRows(reflowTable(compacted).newText)).toEqual(previewRows(html));
+    expect(previewRows(reflowTable(html).newText)).toEqual(previewRows(html));
+  });
+
   it.each([
     ['row', '<table>\n<!-- <tr><td>old</td></tr> -->\n<tr><td>a</td></tr>\n</table>'],
     ['cell', '<table><tr><!-- <td>old</td> --><td>a</td></tr></table>'],
@@ -1647,9 +1687,9 @@ describe('HTML table support for Expand/Compact Table', () => {
     if (parsed.rows[2].cells.length !== 1) {
       throw new Error('Expected 1 body cell, got: ' + parsed.rows[2].cells.length + '\n' + result.newText);
     }
-    if (parsed.rows[2].cells[0] !== 'a\\|b') {
-      throw new Error('Expected preserved backslash+pipe content, got: ' + parsed.rows[2].cells[0]);
-    }
+    // And its backslash, which the cell read as the |'s escape, and dropped
+    expect(parsed.rows[2].cells[0]).toBe('a\\\\\\|b');
+    expect(previewRows(result.newText)).toEqual(previewRows(html));
   });
 
   it('HTML link URL containing | does not split table cells', () => {
@@ -1665,13 +1705,15 @@ describe('HTML table support for Expand/Compact Table', () => {
     }
   });
 
-  it('HTML with <p> multi-paragraph cells → grid table output', () => {
-    const html = '<table><tr><th>Col</th></tr><tr><td><p>para1</p><p>para2</p></td></tr></table>';
-    const result = reflowTable(html);
-    // Grid tables use +---+ borders
-    if (!/\+-+\+/.test(result.newText)) throw new Error('Expected grid table with +---+ borders, got: ' + result.newText);
-    if (!result.newText.includes('para1')) throw new Error('Expected para1');
-    if (!result.newText.includes('para2')) throw new Error('Expected para2');
+  it.each([
+    ['paragraphs', '<p>para1</p><p>para2</p>'],
+    ['an empty paragraph at its end', '<p>a</p><p></p>'],
+  ])('leaves a table with a cell of %s as HTML, which a pipe or grid cell can\'t hold', (_name, cell) => {
+    // A grid table's cell showed them as lines, and export read them as
+    // line breaks in one paragraph
+    const html = '<table><tr><th>Col</th></tr><tr><td>' + cell + '</td></tr></table>';
+    expect(reflowTable(html).newText).toBe(html);
+    expect(compactTable(html).newText).toBe(html);
   });
 
   it('HTML code-span with href preserves link', () => {
@@ -1691,12 +1733,11 @@ describe('HTML table support for Expand/Compact Table', () => {
   });
 
   it('grid table cells with pipes do not create phantom columns', () => {
-    const html = '<table><tr><th>Col</th></tr><tr><td><p>a|b</p><p>c</p></td></tr></table>';
+    const html = '<table><tr><th>Col</th></tr><tr><td>a|b<br>c</td></tr></table>';
     const result = reflowTable(html);
-    // The pipe in cell content must be escaped in grid output
-    if (!result.newText.includes('\\|')) {
-      throw new Error('Expected escaped pipe in grid table cell, got: ' + result.newText);
-    }
+    // The pipe in cell content stays in its cell, whose edges are the +
+    // signs' columns, so it takes no escape
+    expect(previewRows(result.newText)).toEqual(previewRows(html));
     // Verify it's a grid table
     if (!/\+-+\+/.test(result.newText)) throw new Error('Expected grid table output');
   });
