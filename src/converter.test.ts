@@ -9450,6 +9450,23 @@ describe('Track changes (CriticMarkup)', () => {
       expect(xml).toContain('<w:t>x$a$</w:t>');
     });
 
+    test('keeps inline math after a citation without keys on the old side of a substitution in a comment\'s range in ID syntax', async () => {
+      // The substitution, which now forms there, wrote the citation's digit
+      // before the equation's $, which then didn't open it
+      const content: ContentItem[] = [
+        { type: 'para' } as any,
+        { type: 'citation', text: '1', commentIds: new Set(['c1']), pandocKeys: [], revision: delRev },
+        { type: 'math', latex: 'z', display: false, commentIds: new Set(['c1']), revision: delRev },
+        { type: 'text', text: 'new', commentIds: new Set(['c1']), formatting: DEFAULT_FORMATTING, revision: addRev },
+      ];
+      const comments = new Map([['c1', { author: 'R', text: 'review', date: '' } as any]]);
+      const md = buildMarkdown(content, comments, { alwaysUseCommentIds: true });
+      expect(md).toContain('~>new~~}');
+      const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string');
+      expect(xml).toContain('<m:oMath>');
+      expect(xml).toContain('<w:delText>1</w:delText>');
+    });
+
     test('keeps the tracked mark of a paragraph whose deletion before it follows one in a comment\'s range', async () => {
       // The deletion and the insertion after the mark didn't pair, and the
       // break opened the insertion's span, which export moves it out of
