@@ -1734,6 +1734,35 @@ describe('Ordered list numbering', () => {
     expect(await roundTripWith(md, templateDocx)).toBe(md);
   });
 
+  // A level override that holds a w:lvl with a start of its own, or none
+  const overrideLvl = (start: string) => '<w:lvlOverride w:ilvl="0"><w:lvl w:ilvl="0">' + start
+    + '<w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/></w:lvl></w:lvlOverride>';
+
+  test.each([
+    ['a start of its own', '<w:start w:val="7"/>'],
+    ['no start', ''],
+  ])('numbers a list as its abstract numbering starts it where an instance\'s level override holds a w:lvl with %s', async (_name, start) => {
+    // ECMA-376 Part 1 §17.9.9 and §17.9.6 have the w:lvl replace the
+    // level, its start too, or 0 where it has none, as docx4j and
+    // LibreOffice read it, but Word ignores a w:start, as a w:lvlRestart,
+    // in a level override's w:lvl ([MS-OI29500] 2.1.292 b and 2.1.282 b),
+    // and import writes the numbers Word shows
+    const md = '1. a\n2. b';
+    expect(await wordList('<w:num w:numId="6"><w:abstractNumId w:val="1"/>' + overrideLvl(start) + '</w:num>', [[6, 0, 'a'], [6, 0, 'b']])).toBe(md);
+    // And export reads a template's the same way, so a list at the
+    // abstract numbering's start shares the instance, and one at the
+    // override's start gets its own
+    const templateDocx = await templateWithNumbering(numbering => numbering.replace(/(<w:num w:numId="2"[^>]*><w:abstractNumId w:val="1"\/>)/,
+      (instance: string) => instance + overrideLvl(start)));
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    expect(numIdsOf(await documentXml(docx))).toEqual(['2', '2']);
+    expect(await roundTripWith(md, templateDocx)).toBe(md);
+    const seven = '7. a\n8. b';
+    const { docx: own } = await convertMdToDocx(seven, { templateDocx });
+    expect(numIdsOf(await documentXml(own))).not.toContain('2');
+    expect(await roundTripWith(seven, templateDocx)).toBe(seven);
+  });
+
   test('shares the instance with an empty level override in a template with a list that starts at 0', async () => {
     // Word starts it at 0 there, which import read as the level's start
     const templateDocx = await templateWithNumbering(numbering => withLevelStart(0, 3)(numbering)
