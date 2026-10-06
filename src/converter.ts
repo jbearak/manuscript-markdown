@@ -10340,6 +10340,154 @@ function alertGlyphForType(alertType: GfmAlertType): string | undefined {
   return undefined;
 }
 
+/**
+ * A comment Word put on an alert's label and on its text after it, as on
+ * the whole paragraph, starts after the label, which import takes off (see
+ * stripAlertLeadPrefix), as the alert's marker stands for it, rather than
+ * keep it as text, which export would show after the label it writes. It
+ * starts after the line break export writes after the label, and the space
+ * after that where the text doesn't go on the marker's line, too, so that
+ * its start doesn't come before them, which stripAlertLeadPrefix takes off
+ * with the label, or keeps with it where the label stays, as where a
+ * comment's marker goes before it. A comment whose range is open from the
+ * paragraph before keeps the label, as its marker goes before the alert's,
+ * and closing it there would keep the label from coming off. As for a task
+ * item's box (see markTaskListItems), a comment on the label alone, or a
+ * tracked change to it, stays on its text, and so does one where the
+ * separator isn't as export writes it, plain, with no formatting, link,
+ * tracked change or comment's range of no width in it, or where a comment
+ * on it ends with it or starts on it. Only at an alert's start, as
+ * buildMarkdown finds it, where the label is, and before buildMarkdown
+ * merges runs and finds the comments' ranges' ends, which keep the items
+ * they end in. Returns `content`, or a copy with the changes.
+ */
+function startCommentsAfterAlertLabels(content: ContentItem[], inlineByGroup: Map<number, boolean> | null | undefined): ContentItem[] {
+  // The items that go in place of each item changed, by its index
+  const changed = new Map<number, ContentItem[]>();
+  let splitAtTables: Set<string> | undefined;
+  // The alert paragraph just before, which an alert of its type goes on from
+  let prev: ParaItem | undefined;
+  for (let i = 0; i < content.length; i++) {
+    const item = content[i];
+    if (!isStructuralBoundaryItem(item)) continue;
+    const para = item.type === 'para' && item.alertType && item.blockquoteLevel && !item.listMeta && !item.headingLevel && !item.isCodeBlock
+      ? item : undefined;
+    const goesOn = !!para && !!prev && prev.blockquoteLevel === para.blockquoteLevel && prev.alertType === para.alertType
+      && (prev.blockquoteGroupIndex === undefined || para.blockquoteGroupIndex === undefined || prev.blockquoteGroupIndex === para.blockquoteGroupIndex);
+    prev = para;
+    if (!para?.alertType || goesOn) continue;
+    const label = content[i + 1];
+    const glyph = alertGlyphForType(para.alertType);
+    // A linked label stays, as stripAlertLeadPrefix takes off no link
+    if (!glyph || label?.type !== 'text' || label.revision || label.href !== undefined || label.commentIds.size === 0
+        || label.text !== glyph + ' ' + gfmAlertTitle(para.alertType)) continue;
+    const { bold, ...others } = label.formatting;
+    if (!bold || Object.values(others).some(Boolean)) continue;
+    const open = commentIdsBefore(content, i, splitAtTables ??= commentIdsSplitAtTables(content));
+    if ([...label.commentIds].every(id => open.has(id))) continue;
+    // The items the line break and space are in, and how much of each, each
+    // plain text, as export writes them, which stripAlertLeadPrefix takes
+    // off with the label
+    type TextItem = Extract<ContentItem, { type: 'text' }>;
+    const lead = inlineByGroup?.get(para.blockquoteGroupIndex ?? -1) === true ? '\\\n' : '\\\n ';
+    let taken = 0;
+    const takes: number[] = [];
+    let plain = true;
+    for (let j = i + 2; taken < lead.length && content[j]?.type === 'text'; j++) {
+      const text = content[j] as TextItem;
+      let k = 0;
+      while (k < text.text.length && taken < lead.length && text.text[k] === lead[taken]) { k++; taken++; }
+      // The text, where it starts with no space
+      if (k === 0 && text.text !== '') break;
+      // Not an empty item, where a comment's range starts or ends between
+      // the label and the text, nor one with formatting, a link or a tracked
+      // change, which the label keeps as text, as Word shows it
+      if (k === 0 || text.revision || text.href !== undefined || text.link !== undefined || hasFormatting(text.formatting)) {
+        plain = false;
+        break;
+      }
+      takes.push(k);
+      if (k < text.text.length) break;
+    }
+    // The space is the text's where it isn't there
+    if (!plain || taken < 2) continue;
+    // The item after the separator, in the last item it's in or past it,
+    // past the empty items where comments' ranges start or end, as one of
+    // no width does: the text a comment goes on over
+    const separator = takes.map((_take, k) => content[i + 2 + k] as TextItem);
+    const last = separator[separator.length - 1];
+    let next = i + 2 + takes.length - (takes[takes.length - 1] < last.text.length ? 1 : 0);
+    while (content[next]?.type === 'text' && (content[next] as TextItem).text === '') next++;
+    const after = content[next];
+    // The label's comments go on in the text after the separator, and so
+    // does each comment on the separator, which would otherwise lose the
+    // text it's on, as one Word put on the line break alone, or one that
+    // ends with the separator. And each comment on the separator is on the
+    // label too: one that starts on the separator, which keeps the label as
+    // text, keeps its start there (see stripAlertLeadPrefix)
+    if (!after || !('commentIds' in after)
+        || ![label, ...separator].every(text => [...text.commentIds].every(id => after.commentIds?.has(id)))
+        || separator.some(text => [...text.commentIds].some(id => !label.commentIds.has(id)))) continue;
+    const stayOpen = (ids: Set<string>) => new Set([...ids].filter(id => open.has(id)));
+    changed.set(i + 1, [{ ...label, commentIds: stayOpen(label.commentIds) }]);
+    takes.forEach((take, k) => {
+      const text = separator[k];
+      // The separator apart from the text it's in, which keeps its comments
+      const separatorPart: ContentItem = { ...text, text: text.text.slice(0, take), commentIds: stayOpen(text.commentIds) };
+      changed.set(i + 2 + k, take === text.text.length ? [separatorPart] : [separatorPart, { ...text, text: text.text.slice(take) }]);
+    });
+  }
+  return changed.size === 0 ? content : content.flatMap((item, k) => changed.get(k) ?? [item]);
+}
+
+/** Whether `item` holds the ID markers of the comments on it, as import
+ *  writes them: text but a code block's, inline math, display math outside
+ *  a table's cell (`inTable`), which is a block of its own that they go
+ *  around, a citation, a note's reference and an image. A code block, a
+ *  display equation in a cell and an HTML comment can't hold them, so a
+ *  range starts and ends in the text around them. */
+function holdsCommentMarkers(item: ContentItem, inCodeBlock: boolean, inTable: boolean): boolean {
+  return item.type === 'text' ? !inCodeBlock
+    : item.type === 'math' ? !item.display || !inTable
+      : item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'image';
+}
+
+/** The comments whose ranges import writes in parts at a table, one in each
+ *  paragraph, rather than keep them open from one paragraph to the next:
+ *  those on an item in a table's cell that holds their markers (see
+ *  holdsCommentMarkers), as a cell can't hold a range that goes on. A
+ *  range over a table whose cells hold none of it goes on past it. */
+function commentIdsSplitAtTables(content: ContentItem[]): Set<string> {
+  const ids = new Set<string>();
+  let inCodeBlock = false;
+  const visit = (items: ContentItem[], inTable: boolean) => {
+    for (const item of items) {
+      if (item.type === 'para') {
+        inCodeBlock = !!item.isCodeBlock;
+      } else if (item.type === 'table') {
+        for (const row of item.rows) for (const cell of row.cells) for (const para of cell.paragraphs) visit(para, true);
+      } else if (inTable && 'commentIds' in item && holdsCommentMarkers(item, inCodeBlock, true)) {
+        for (const id of item.commentIds ?? []) ids.add(id);
+      }
+    }
+  };
+  visit(content, false);
+  return ids;
+}
+
+/** The comments whose ranges are open where the content before `index`
+ *  ends: those of its last item, past paragraphs and other structure with
+ *  no text, as a thematic break, an empty list item or a table, but those
+ *  import writes in parts at a table, `splitAtTables` (see
+ *  commentIdsSplitAtTables), each part with its own markers. */
+function commentIdsBefore(content: ContentItem[], index: number, splitAtTables: Set<string>): Set<string> {
+  for (let k = index - 1; k >= 0; k--) {
+    const item = content[k];
+    if ('commentIds' in item) return new Set([...item.commentIds ?? []].filter(id => !splitAtTables.has(id)));
+  }
+  return new Set();
+}
+
 function paragraphStartsWithExportedAlertLead(
   content: ContentItem[],
   paraIndex: number,
@@ -11165,9 +11313,11 @@ export function buildMarkdown(
   let listWordLevels: number[] = [];
   // paragraphLinePrefix is declared further down
   // A quote paragraph's own lines take its prefix in the main loop below
-  const mergedContent = mergeConsecutiveRuns(joinTrackedParagraphBreaks(content, marks, (para, opening) => (
+  const joinedContent = joinTrackedParagraphBreaks(content, marks, (para, opening) => (
     opening && prefixesQuoteLines(opening) ? '' : paragraphLinePrefix(para)
-  )));
+  ));
+  const mergedContent = mergeConsecutiveRuns(options?.calloutLabels === false ? joinedContent
+    : startCommentsAfterAlertLabels(joinedContent, options?.blockquoteAlertInlineByGroup));
 
   // Build 1-indexed comment ID remap (order of first appearance in document)
   const commentIdRemap = new Map<string, string>();
@@ -11300,7 +11450,7 @@ export function buildMarkdown(
   function collectCommentSpans(items: ContentItem[]): void {
     const paragraphOf = new Map<string, number>();
     const spanning = new Set<string>();
-    const inTable = new Set<string>();
+    const inTable = commentIdsSplitAtTables(items);
     let paragraph = 0;
     let inCodeBlock = false;
     const visit = (list: ContentItem[], table: boolean) => {
@@ -11321,9 +11471,7 @@ export function buildMarkdown(
         // A display equation outside a table is a block of its own, which
         // ID markers go around
         const displayBlock = item.type === 'math' && item.display && !table;
-        const marked = item.type === 'text' ? !inCodeBlock
-          : item.type === 'math' ? !item.display || displayBlock
-            : item.type === 'citation' || item.type === 'footnote_ref' || item.type === 'image';
+        const marked = holdsCommentMarkers(item, inCodeBlock, table);
         if (displayBlock) paragraph++;
         // A tracked break joinTrackedParagraphBreaks put in the text ends a
         // paragraph too, where text after it goes on in the next, as a
@@ -11342,7 +11490,6 @@ export function buildMarkdown(
             const first = paragraphOf.get(id);
             if (first === undefined) paragraphOf.set(id, paragraph);
             else if (first !== paragraph) spanning.add(id);
-            if (table) inTable.add(id);
             lastCommentItem.set(id, item);
           }
         }
