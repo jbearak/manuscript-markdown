@@ -7307,7 +7307,11 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
     row.cells.some(cell => (cell.colspan && cell.colspan > 1) || (cell.rowspan && cell.rowspan > 1))
   );
 
-  const hasHeaderRow = token.rows.some(row => row.header);
+  // tblLook's firstRow, which import reads as a header first row, goes only
+  // on a table whose first row is one: a <th> row after a <td> row is the
+  // only header row. Word repeats only leading header rows, but a later
+  // row's tblHeader stays in the file
+  const firstRowIsHeader = !!token.rows[0]?.header;
 
   // Resolve border style: default is 'horizontal'
   const borderStyle = fo?.tableBorders ?? 'horizontal';
@@ -7344,7 +7348,7 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
     : '<w:tblW w:w="0" w:type="auto"/>';
   // tblPr element order: tblW before tblBorders (Word normalizes out-of-order).
   // Omit default left/right cell margins (108 dxa) — Word strips these as defaults.
-  xml += '<w:tblPr>' + tblW + tblBorders + tblLayout + '<w:tblCellMar><w:top w:w="36" w:type="dxa"/><w:bottom w:w="36" w:type="dxa"/></w:tblCellMar>' + (hasHeaderRow ? '<w:tblLook w:val="0020" w:firstRow="1"/>' : '') + '</w:tblPr>';
+  xml += '<w:tblPr>' + tblW + tblBorders + tblLayout + '<w:tblCellMar><w:top w:w="36" w:type="dxa"/><w:bottom w:w="36" w:type="dxa"/></w:tblCellMar>' + (firstRowIsHeader ? '<w:tblLook w:val="0020" w:firstRow="1"/>' : '') + '</w:tblPr>';
 
   // Emit tblGrid (required when widths or spans are present).
   // Include w:w in dxa on each gridCol so Word Online can size columns correctly;
