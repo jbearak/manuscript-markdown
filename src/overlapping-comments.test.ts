@@ -554,7 +554,7 @@ describe('Overlapping comments: round-trip', () => {
 
   test.each([
     ['of two colors', '{====a=={red}==b====}'],
-    ['of another color after', '{====a====b=={red}==}'],
+    ['of another color after', '{====a=={yellow}==b=={red}==}'],
     ['with text between them', '{====a== b ==c====}'],
     ['after text', '{==a ==b====}'],
   ])('keeps highlights side by side in a comment\'s text %s', async (_name, anchor) => {

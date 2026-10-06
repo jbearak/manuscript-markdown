@@ -111,9 +111,9 @@ describe('a highlight read back', () => {
     const xml = await zip.file('word/document.xml')!.async('string');
     zip.file('word/document.xml', xml.replace('>a = b<', '>a == b<').replace('>c = d<', '>c == d<'));
     const back = await imported(await zip.generateAsync({ type: 'uint8array' }));
-    // In highlights split at the ==, which the space before them goes
-    // outside of, as next to any highlight's ==
-    expect(back).toBe('Seen ==x== ==`a =`=={yellow}==`= b`=={yellow}== y[^1]== and ==`c =`=={yellow}==`= d`=={yellow} on.\n\n[^1]: Note.');
+    // In highlights split at the ==, each with its color, whose } keeps
+    // their == apart, as next to any highlight's ==
+    expect(back).toBe('Seen ==x =={yellow}==`a =`=={yellow}==`= b`=={yellow}== y[^1]== and ==`c =`=={yellow}==`= d`=={yellow} on.\n\n[^1]: Note.');
     expect(await imported((await exportParts(back)).docx)).toBe(back);
   });
 

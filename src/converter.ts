@@ -968,9 +968,10 @@ const endsLine = (text: string): boolean => text.endsWith('\n') || /\n[> \t]*[\u
  * can start. Code is literal, and doesn't come here. Where export reads
  * a citation, as `rawTags` says, the positions in the Markdown of its keys
  * and locators, which export reads as they are, go in it, and a tag in a
- * prefix has its < escaped.
+ * prefix has its < escaped. Where the text's = go as references
+ * (`equalsAsReferences`, see markedFormatting), linkify reads them so.
  */
-function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter, rawTags?: Set<number>, beforeMath = false): string {
+function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter, rawTags?: Set<number>, beforeMath = false, equalsAsReferences = false): string {
   const escaped = new Set<number>();
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
@@ -1159,20 +1160,23 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
   // too, as one Markdown keeps raw or one written as references, &lt; and
   // &gt;, which are tokens of their own, so a < or > is a space here: in
   // https://e.com1.<span> linkify finds no URL, but it links https://e.com1
-  // in https://e.com1. before the tag.
+  // in https://e.com1. before the tag. So is an = written as &#61;, without
+  // its escape: linkify finds no address in x@y.com=, but links x@y.com in
+  // x@y.com&#61;.
   if (/[:@]/.test(text)) {
     let markdown = '';
     const from = new Map<number, number>();
     for (let k = 0; k < text.length; k++) {
-      if (escaped.has(k)) markdown += '\\';
+      const reference = equalsAsReferences && text[k] === '=';
+      if (escaped.has(k) && !reference) markdown += '\\';
       from.set(markdown.length, k);
-      markdown += text[k] === '<' || text[k] === '>' ? ' ' : text[k];
+      markdown += text[k] === '<' || text[k] === '>' || reference ? ' ' : text[k];
     }
     const colonsIn = (markdown: string) => [...linkifyMatches(markdown).map(link => link.schema.endsWith(':') && link.schema !== 'mailto:' ? link.index + link.schema.length - 1 : markdown.indexOf('@', link.index)), ...linkifiedColons(markdown)];
     const colons = colonsIn(markdown);
     // An = at the end before another, as a highlight's ==, which
-    // resolveEmphasis escapes there, so it ends the text linkify reads, as
-    // in x@y.com\===a==
+    // resolveEmphasis writes as a reference there, so it ends the text
+    // linkify reads, as an escape does, as in x@y.com&#61;==a==
     if (after?.first === '=' && /(?:^|[^\\])(?:\\\\)*=$/.test(markdown)) {
       colons.push(...colonsIn(markdown.slice(0, -1) + '\\=').filter(colon => colon < markdown.length - 1));
     }
@@ -2335,7 +2339,10 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
     : ['', '', result, ''];
   // Not a tag in a citation's keys, which export reads as they are
   const keys = new Set<number>();
-  let core = escapeSensitiveHtmlLikeTags(escapeMarkdownChars(edges[2], lineStart && !delimited, after, keys, !delimited && !!after?.mathFirst), keys);
+  // An = that could join a highlight's closing ==, which no backslash
+  // keeps from it, goes as a reference (below)
+  const references = fmt.highlight && /==|=\s*$/.test(text);
+  let core = escapeSensitiveHtmlLikeTags(escapeMarkdownChars(edges[2], lineStart && !delimited, after, keys, !delimited && !!after?.mathFirst, references), keys);
   // A ~ at the edge of struck text would join the ~~ around it, which
   // reads ~~~a~~ as ~ and struck a, where nothing comes between them, as a
   // highlight does inside them, but not one around them (`highlightOuter`)
@@ -2350,10 +2357,9 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
   const htmlBlock = !delimited && blockStart && !result.includes('\\\n') && isHtmlBlock(result.replace(/^ {1,3}(?=<)/, '')) && after?.first === '';
   result = htmlBlock ? result : escaped;
 
-  // An = that could join a highlight's closing ==, which no backslash
-  // keeps from it, as a reference
-  // The backslash of an escaped =, not one of an escaped backslash's
-  if (fmt.highlight && /==|=\s*$/.test(text)) result = result.replace(/((?:\\\\)*)\\?=/g, (_m, pairs: string) => pairs + '&#61;');
+  // An = as a reference, without the backslash of an escaped =, not one of
+  // an escaped backslash's
+  if (references) result = result.replace(/((?:\\\\)*)\\?=/g, (_m, pairs: string) => pairs + '&#61;');
   return wrapFormatting(result, fmt, highlightOuter);
 }
 
@@ -2522,7 +2528,8 @@ const EMPHASIS_OPEN = { '**': '\u0001', '*': '\u0002', '~~': '\u0003' } as const
 const EMPHASIS_CLOSE = '\u0004';
 /** The marks wrapHighlight puts after a highlight's opening == and before
  *  its closing one, so that resolveEmphasis can tell an = of the text
- *  before it, which would run into its ==, from another's closing == */
+ *  before it, which would run into its ==, from another's closing ==,
+ *  which gets its color there */
 const HIGHLIGHT_OPEN = '\u0005';
 const HIGHLIGHT_CLOSE = '\u0006';
 /** The marks of a highlight that joins its neighbour's (see joinHighlights) */
@@ -2585,23 +2592,13 @@ function resolveEmphasis(markdown: string): string {
   // kept it (see resolveSide)
   if (!markdown.includes(EMPHASIS_CLOSE) && !markdown.includes(HIGHLIGHT_OPEN) && !markdown.includes(HIGHLIGHT_JOIN_OPEN)
     && !markdown.includes(HIGHLIGHT_CLOSE)) return markdown;
-  // Whitespace at a highlight's edge goes outside it, as before it held it,
-  // next to an = outside it, as of the text, another highlight's == or a
-  // comment's ==}, which navigation and the grammar read with the
-  // highlight's own, so ==a ====b=={red} as no highlight. Not all of it,
-  // which would leave none. From where the whitespace starts, so each is
-  // read once.
-  markdown = joinHighlights(markdown)
-    // eslint-disable-next-line no-control-regex
-    .replace(/(?<=[^\s\u0005])([^\S\n]+)\u0006==(?==)/g, (_m, space: string) => '\u0006==' + space)
-    // eslint-disable-next-line no-control-regex
-    .replace(/(?<==)==\u0005([^\S\n]+)(?=[^\s\u0006])/g, (_m, space: string) => space + '==\u0005')
-    // Whitespace a highlight holds alone next to another's ==, as in
-    // ==  ====b=={red}, goes without it, as before, where navigation and the
-    // grammar would read no highlight, the other's either
-    // eslint-disable-next-line no-control-regex
-    .replace(/(?<==)==\u0005([^\S\n]+)\u0006==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?|==\u0005([^\S\n]+)\u0006==(?==)/g,
-      (_m, before: string | undefined, after: string | undefined) => before ?? after ?? '');
+  // A highlight of the default color right before another's == gets its
+  // color, whose } keeps their == apart, as in ==a =={yellow}==b=={red}.
+  // Navigation and the grammar read ==a ====b=={red} as no highlight. The
+  // text's = before one is a reference (below). A comment's {== or ==}
+  // next to one needs neither, as they read the comment's range whole.
+  // eslint-disable-next-line no-control-regex
+  markdown = joinHighlights(markdown).replace(/\u0006==(?===\u0005)/g, '\u0006=={yellow}');
   const closeAt = new Map<number, number>();
   const opens: number[] = [];
   for (let i = 0; i < markdown.length; i++) {
@@ -2666,15 +2663,17 @@ function resolveEmphasis(markdown: string): string {
       from = i + 1 + (closer ? closer.delimiter.length : 0);
     } else if (code === 5) {
       // The text's = before a highlight's == would open it a character
-      // early, unless escaped: a===b== highlights =b. Another's closing ==
-      // doesn't, as the highlight before closes there first, nor does a
-      // comment's {==, which its range starts after.
+      // early, as a===b== highlights =b. Escaped, as in a\===b==, it keeps
+      // navigation and the grammar from reading the highlight, so it's a
+      // reference, a&#61;==b==, with no backslash where escaped, as after
+      // another highlight (see escapeAfterHighlight). A comment's {== stays,
+      // as its range starts after it.
       const start = i - 2;
       let slashes = 0;
       while (markdown[start - 2 - slashes] === '\\') slashes++;
-      const delimiter = markdown[start - 2] === '=' && (markdown[start - 3] === HIGHLIGHT_CLOSE || markdown[start - 3] === '{');
+      const delimiter = markdown[start - 2] === '=' && markdown[start - 3] === '{';
       const before = markdown.slice(from, start);
-      parts.push(before.endsWith('=') && slashes % 2 === 0 && !delimiter ? before.slice(0, -1) + '\\=' : before);
+      parts.push(before.endsWith('=') && !delimiter ? before.slice(0, -1 - slashes % 2) + '&#61;' : before);
       parts.push('==');
       from = i + 1;
     } else if (code === 6) {
@@ -6041,8 +6040,7 @@ function resolveSide(markdown: string): string {
   const close = /[\u0006\u000F](==(?:\{[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\})?)$/.exec(markdown.slice(0, closesStart(markdown)))?.[1];
   if (!close) return resolved;
   const end = closesStart(resolved);
-  // Unless resolving dropped the highlight, as of whitespace alone
-  return resolved.endsWith(close, end) ? resolved.slice(0, end - close.length) + HIGHLIGHT_CLOSE + resolved.slice(end - close.length) : resolved;
+  return resolved.slice(0, end - close.length) + HIGHLIGHT_CLOSE + resolved.slice(end - close.length);
 }
 
 /** Where the closes of emphasis and the tags of formatting at the end of
@@ -6062,15 +6060,6 @@ function closesStart(markdown: string): number {
  *  the first ~> and ends at the first ~~}. */
 function substitutionHolds(oldText: string, newText: string): boolean {
   return !oldText.includes('~>') && !(oldText + '~>' + newText).includes('~~}');
-}
-
-/** Whether resolving a side's emphasis (`side`, before resolveEmphasis)
- *  moves whitespace out of a highlight next to an = outside it, or drops a
- *  highlight that holds only whitespace there. The side's items in spans of
- *  their own keep it, as appendRevised starts a span at the seam. */
-function sideMovesHighlightedSpace(side: string): boolean {
-  // eslint-disable-next-line no-control-regex
-  return /[^\S\n]\u0006==(?==)|(?<==)==\u0005[^\S\n]/.test(joinHighlights(side));
 }
 
 /** Render a CriticMarkup substitution `{~~old~>new~~}` when a deletion and
@@ -6140,12 +6129,14 @@ function renderSubstitutionRun(
     isSubstitutionItem(item)
     && item.revision?.type === type && item.revision.author === revision.author && item.revision.date === revision.date
     && eligible(item);
-  // One side's items, with highlight groups in one highlight
-  const sideText = (from: number, to: number) => {
+  // One side's items, with highlight groups in one highlight, and where
+  // each item's or group's Markdown starts in it (`starts`)
+  const sideText = (from: number, to: number, starts: number[] = []) => {
     let text = '';
     let mathEnd = -1;
     for (let j = from; j < to;) {
       const item = segment[j] as SubstitutionItem;
+      starts[j - from] = text.length;
       // A link of several runs stays one link, as outside a substitution
       const link = item.type === 'text' ? linkGroup(segment, j, to, item.commentIds) : undefined;
       if (link) {
@@ -6181,28 +6172,36 @@ function renderSubstitutionRun(
   while (k < end && side(segment[k], 'addition')) k++;
   const additions = k - start - deletions;
   if (deletions === 0 || additions === 0 || deletions + additions <= 2) return undefined;
-  const oldSide = sideText(start, start + deletions);
+  const starts: number[] = [];
+  const oldSide = sideText(start, start + deletions, starts);
   const newSide = sideText(start + deletions, k);
-  // Not where a side holds a run of a link, which linkGroup leaves to the
-  // substitution, and which in a span of its own can lose its link, as a
-  // line break does, or read as an image's text after a !
-  const linked = segment.slice(start, k).some(item => item.type === 'text' && !!item.href);
-  if (!linked && (sideMovesHighlightedSpace(oldSide) || sideMovesHighlightedSpace(newSide))) {
-    // The rest of the deletions go in spans too, rather than build sides
-    // from each, which would take time in the square of them
-    substitutionlessRuns.set(segment, { from: start, to: start + deletions, end });
+  // Where the sides can't be written, neither can those of a later start
+  // in the deletions whose old side still holds what keeps them from it, or
+  // of any where that's in the new side. Those starts go in spans too,
+  // rather than build sides from each, which would take time in the square
+  // of the deletions.
+  const declineTo = (to: number) => {
+    if (to > start + 1) substitutionlessRuns.set(segment, { from: start, to, end });
     return undefined;
-  }
+  };
   // Resolved apart, before the check (see tryRenderSubstitution)
   const oldText = resolveSide(oldSide);
   const newText = resolveSide(newSide);
-  if (!oldText || !newText) return undefined;
-  if (!substitutionHolds(oldText, newText)) return undefined;
+  if (!newText || newText.includes('~~}') || !oldText) return declineTo(start + deletions);
+  if (!substitutionHolds(oldText, newText)) {
+    // To the item the side's last ~> or ~~} starts in, as written before
+    // resolving, which doesn't write one where there was none
+    const at = Math.max(oldSide.lastIndexOf('~>'), oldSide.lastIndexOf('~~}'));
+    let item = starts.length - 1;
+    while (item > 0 && (starts[item] === undefined || starts[item] > at)) item--;
+    return declineTo(at === -1 ? start : start + item + 1);
+  }
   // Two inline equations in a row on one side would run their dollar signs
-  // together and read as one, where spans of their own keep them apart
-  for (let j = start + 1; j < k; j++) {
+  // together and read as one, where spans of their own keep them apart. To
+  // the first of the last two on the old side.
+  for (let j = k - 1; j > start; j--) {
     const [a, b] = [segment[j - 1], segment[j]];
-    if (j !== start + deletions && a.type === 'math' && !a.display && b.type === 'math' && !b.display) return undefined;
+    if (j !== start + deletions && a.type === 'math' && !a.display && b.type === 'math' && !b.display) return declineTo(j > start + deletions ? start + deletions : j);
   }
   return { text: '{~~' + oldText + '~>' + newText + '~~}', nextIndex: k };
 }
