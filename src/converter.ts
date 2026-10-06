@@ -245,6 +245,11 @@ const HTML_LIKE_TAG_AT = new RegExp(HTML_LIKE_TAG_RE.source, 'y');
 // an HTML table's cell, which it reads as HTML (see renderHtmlTable)
 let readsMarkdown = true;
 
+/** A run's line break as export reads it there */
+function lineBreakText(): string {
+  return readsMarkdown ? '\\\n' : '<br>';
+}
+
 /** `text` with the tags export reads as formatting or a line break written
  *  as text, but for one at a position in `raw`, which export reads as it is,
  *  as in a citation's keys (see escapeMarkdownChars) */
@@ -2162,11 +2167,11 @@ function markedFormatting(text: string, fmt: RunFormatting, lineStart = false, a
 /** A run's text and formatting as HTML, as renderHtmlCellParagraph writes
  *  them, for a cell's paragraph it can't write, whose escapes export would
  *  read as text, as it would a line break's backslash. Its tags go as
- *  wrapFormatting writes delimiters: emphasis's inside the whitespace at
- *  the edges of what they hold, and a highlight's ==, as text, which has no
- *  tag, around the rest where it joins its neighbours' (`joins`), with the
- *  whitespace inside, which joinHighlights, keepHtmlCellSpaces and
- *  citationSeparator read there. A brace, a ~, a backtick, and an = next
+ *  wrapFormatting writes delimiters: bold's and italic's inside the
+ *  whitespace at the edges of what they hold, and a highlight's ==, as
+ *  text, which has no tag, around the rest where it joins its neighbours'
+ *  (`joins`), with the whitespace inside, which joinHighlights,
+ *  keepHtmlCellSpaces and citationSeparator read there. A brace, a ~, a backtick, and an = next
  *  to another or at the run's edge, or any in a highlight, which the
  *  grammar and navigation would read as CriticMarkup, strikethrough, code,
  *  or a highlight with the == around it, or no highlight, are references. */
@@ -2193,7 +2198,8 @@ function htmlCellRun(text: string, fmt: RunFormatting, joins = false): string {
   else if (fmt.subscript) html = '<sub>' + html + '</sub>';
   if (fmt.highlight && !joins) wrap(breaks, core => wrapHighlight(core, markdownHighlightColor(fmt)));
   if (fmt.underline) html = '<u>' + html + '</u>';
-  if (fmt.strikethrough) wrap(blank, core => '<s>' + core + '</s>');
+  // Around the whitespace, which Word shows struck, as Markdown can't
+  if (fmt.strikethrough) html = '<s>' + html + '</s>';
   if (fmt.italic) wrap(blank, core => '<i>' + core + '</i>');
   if (fmt.bold) wrap(blank, core => '<b>' + core + '</b>');
   if (fmt.highlight && joins) wrap(breaks, core => wrapHighlight(core, markdownHighlightColor(fmt), true));
@@ -6311,7 +6317,7 @@ function linkGroup(
   // The item at k as Markdown in the link's text, which reads the runs
   // `after` it as the rest of the text before the link's ](url), as a link
   // of one run does
-  const itemText = (k: number, after: RunsAfter): string => items[k].text === '\\\n' ? items[k].text
+  const itemText = (k: number, after: RunsAfter): string => items[k].text === '\\\n' ? lineBreakText()
     : markedFormatting(items[k].text, items[k].formatting, false, after.linkTo(href));
   let text = '';
   let span: RevisionSpan | undefined;
@@ -6628,7 +6634,7 @@ function renderInlineRange(
     // because the backslash must be the final character on its line. A
     // tracked change's delimiters can, as {--\\\n--}.
     if (item.text === '\\\n') {
-      [out, lastSpan] = appendRevised(out, '\\\n', item, lastSpan);
+      [out, lastSpan] = appendRevised(out, lineBreakText(), item, lastSpan);
       i++;
       continue;
     }
@@ -6905,7 +6911,7 @@ function renderInlineRangeWithIds(
     // because the backslash must be the final character on its line. A
     // tracked change's delimiters can, as {--\\\n--}.
     if (item.text === '\\\n') {
-      [out, lastSpan] = appendRevised(out, '\\\n', item, lastSpan);
+      [out, lastSpan] = appendRevised(out, lineBreakText(), item, lastSpan);
       i++;
       continue;
     }

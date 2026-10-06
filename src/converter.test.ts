@@ -6038,6 +6038,31 @@ describe('Word text that reads as Markdown', () => {
     expect(cell).toBe(expected);
   });
 
+  test.each([
+    ['at the cell\'s start', [['\\\n', {}]], '↵{++x++}'],
+    ['in bold after text', [['a', {}], ['\\\n', { bold: true }]], 'a↵{++x++}'],
+  ])('keeps a line break in a run of its own %s in an HTML table\'s cell that holds what HTML can\'t', async (_name, runs, expected) => {
+    // It went as Markdown's backslash, which came back as text
+    const items = (runs as [string, Partial<RunFormatting>][]).map(([text, formatting]): ContentItem =>
+      ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting } }));
+    const { text: cell } = await fallbackCell([...items, insertedRun]);
+    expect(cell).toBe(expected);
+  });
+
+  test('keeps the strikethrough of the spaces at the edges of a run in an HTML table\'s cell that holds what HTML can\'t', async () => {
+    // They went outside its tags, as Markdown's delimiters keep them
+    const { markdown } = await fallbackCell([
+      { type: 'text', text: 'a', commentIds: new Set(), formatting: DEFAULT_FORMATTING },
+      { type: 'text', text: ' b\t', commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, strikethrough: true } },
+      insertedRun,
+    ]);
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    const cell = xml.slice(xml.indexOf('<w:tc>'), xml.indexOf('</w:tc>'));
+    const struck = [...cell.matchAll(/<w:r>(?:(?!<\/w:r>)[\s\S])*?<w:strike\/>(?:(?!<\/w:r>)[\s\S])*?<\/w:r>/g)]
+      .map(run => run[0].replace(/<w:tab\/>/g, '\t').replace(/<[^>]+>/g, '')).join('');
+    expect(struck).toBe(' b\t');
+  });
+
   test.each(['[@a](b)', '[-@a](b)', '[@a]{.underline}', '[@a][b]'])('writes %s with the citation export reads in it', async (text) => {
     // Its [ was escaped as a link's, so a citation whose key is missing,
     // which export writes as its text, came back as text, and stayed text
