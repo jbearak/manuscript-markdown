@@ -6618,6 +6618,23 @@ describe('HTML table cells', () => {
     expect(markdown).toContain('    <th>\n      <p>y</p>\n    </th>');
   });
 
+  test('keeps a table\'s header row after a body row the one header row, from Word and from Markdown', async () => {
+    // Export marked the first row as the header's look, which import read
+    // as a header row, so the body row before the header became one
+    const cell = (text: string) => '<w:tc><w:p><w:r><w:t>' + text + '</w:t></w:r></w:p></w:tc>';
+    const xml = '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl>'
+      + '<w:tr>' + cell('a') + '</w:tr><w:tr><w:trPr><w:tblHeader/></w:trPr>' + cell('x') + '</w:tr><w:tr>' + cell('b') + '</w:tr></w:tbl></w:body></w:document>';
+    const markdown = strip((await convertDocx(await buildSyntheticDocx(xml))).markdown);
+    expect(markdown).toBe('<table>\n  <tr>\n    <td>\n      <p>a</p>\n    </td>\n  </tr>\n  <tr>\n    <th>\n      <p>x</p>\n    </th>\n  </tr>\n'
+      + '  <tr>\n    <td>\n      <p>b</p>\n    </td>\n  </tr>\n</table>');
+    const docx = (await convertMdToDocx(markdown)).docx;
+    const exported = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(strip((await convertDocx(docx)).markdown)).toBe(markdown);
+    // Word repeats only leading header rows, but keeps a later one's tblHeader
+    expect(exported.split('<w:tr>').slice(1).map(row => row.includes('<w:tblHeader/>'))).toEqual([false, true, false]);
+    expect(exported).not.toContain('w:firstRow');
+  });
+
   test.each([
     ['a pipe table', {}],
     ['a grid table', { pipeTableMaxLineWidth: 5 }],
