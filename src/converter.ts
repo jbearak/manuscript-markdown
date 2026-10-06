@@ -5857,6 +5857,15 @@ function substitutionHolds(oldText: string, newText: string): boolean {
   return !oldText.includes('~>') && !(oldText + '~>' + newText).includes('~~}');
 }
 
+/** Whether resolving a side's emphasis (`side`, before resolveEmphasis)
+ *  moves whitespace out of a highlight next to an = outside it, or drops a
+ *  highlight that holds only whitespace there. The side's items in spans of
+ *  their own keep it, as appendRevised starts a span at the seam. */
+function sideMovesHighlightedSpace(side: string): boolean {
+  // eslint-disable-next-line no-control-regex
+  return /[^\S\n]\u0006==(?==)|(?<==)==\u0005[^\S\n]/.test(joinHighlights(side));
+}
+
 /** Render a CriticMarkup substitution `{~~old~>new~~}` when a deletion and
  *  an addition are adjacent with matching author/date. The two can differ in
  *  type, as when export writes a deleted citation as its [@key] text.
@@ -5962,9 +5971,21 @@ function renderSubstitutionRun(
   while (k < end && side(segment[k], 'addition')) k++;
   const additions = k - start - deletions;
   if (deletions === 0 || additions === 0 || deletions + additions <= 2) return undefined;
+  const oldSide = sideText(start, start + deletions);
+  const newSide = sideText(start + deletions, k);
+  // Not where a side holds a run of a link, which linkGroup leaves to the
+  // substitution, and which in a span of its own can lose its link, as a
+  // line break does, or read as an image's text after a !
+  const linked = segment.slice(start, k).some(item => item.type === 'text' && !!item.href);
+  if (!linked && (sideMovesHighlightedSpace(oldSide) || sideMovesHighlightedSpace(newSide))) {
+    // The rest of the deletions go in spans too, rather than build sides
+    // from each, which would take time in the square of them
+    substitutionlessRuns.set(segment, { from: start, to: start + deletions, end });
+    return undefined;
+  }
   // Resolved apart, before the check (see tryRenderSubstitution)
-  const oldText = resolveSide(sideText(start, start + deletions));
-  const newText = resolveSide(sideText(start + deletions, k));
+  const oldText = resolveSide(oldSide);
+  const newText = resolveSide(newSide);
   if (!oldText || !newText) return undefined;
   if (!substitutionHolds(oldText, newText)) return undefined;
   // Two inline equations in a row on one side would run their dollar signs

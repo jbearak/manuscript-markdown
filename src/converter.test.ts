@@ -10992,6 +10992,57 @@ describe('Highlights across runs', () => {
     expect(await roundTrip(md)).toBe(md);
   });
 
+  const tracked = (tag: 'ins' | 'del', runs: string) => '<w:' + tag + ' w:id="' + (tag === 'del' ? 1 : 2) + '" w:author="A" w:date="2026-01-01T00:00:00Z">'
+    + (tag === 'del' ? runs.replace(/w:t\b/g, 'w:delText') : runs) + '</w:' + tag + '>';
+
+  test.each([
+    ['an = before it on the old side', tracked('del', plain('=') + highlighted(' ')) + tracked('ins', plain('new')), '{--\\=--}{--== ==--}{++new++}\n'],
+    ['an = before it on the new side', tracked('del', plain('old')) + tracked('ins', plain('=') + highlighted(' ') + plain('new')), '{--old--}{++=++}{++== ==new++}\n'],
+    ['an = before a tab', tracked('del', plain('old')) + tracked('ins', plain('=') + highlighted('\t') + plain('new')), '{--old--}{++=++}{++==\t==new++}\n'],
+    ['an = before it and text', tracked('del', plain('old')) + tracked('ins', plain('=') + highlighted(' y')), '{--old--}{++=++}{++== y==++}\n'],
+    ['another color\'s highlight after it', tracked('del', plain('old')) + tracked('ins', highlighted('y ') + highlighted('z', '', 'red')), '{--old--}{++==y ==++}{++==z=={red}++}\n'],
+    ['another color\'s highlight before it', tracked('del', plain('old')) + tracked('ins', highlighted('y') + highlighted(' z', '', 'red')), '{--old--}{++==y==++}{++== z=={red}++}\n'],
+  ])('keeps the highlight of whitespace on a side of a substitution next to %s', async (_name, runs, md) => {
+    // The side's whitespace went out of its highlight, or with it, as
+    // {~~= ~>new~~}, where spans of their own keep the = apart
+    expect(await fromWord(runs)).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([['new', 'addition'], ['old', 'deletion']] as const)('writes many deletions before a highlighted space after an = on the %s side in linear time', (_side, type) => {
+    // Each start in the deletions built its sides again, which each declined
+    const item = (text: string, revision: 'addition' | 'deletion', formatting: Partial<RunFormatting> = {}) => (
+      { type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting }, revision: { type: revision, author: 'A', date: '' } });
+    const items = [
+      ...Array.from({ length: 32000 }, (_, k) => item('d', 'deletion', { bold: k % 2 === 1 })),
+      item('=', type), item(' ', type, { highlight: true }), item('n', 'addition'),
+    ];
+    const start = performance.now();
+    expect(buildMarkdown(items as ContentItem[], new Map())).toEndWith('{' + (type === 'addition' ? '++' : '--') + '== ==' + (type === 'addition' ? 'n++}' : '--}{++n++}'));
+    expect(performance.now() - start).toBeLessThan(3000);
+  });
+
+  test.each([
+    ['a line break of a link', [['a', undefined, {}, true], ['\\\n', 'deletion', {}, true], ['=', 'addition'], [' ', 'addition', { highlight: true }], ['n', 'addition']], '[a](https://e.com){~~[\\\n](https://e.com)~>'],
+    ['a link after a !', [['!'], ['=', 'deletion', {}, true], [' ', 'deletion', { highlight: true }, true], ['n', 'addition', {}, true], ['x', 'addition']], '!{~~['],
+  ] as const)('keeps a substitution with %s on a side by a highlighted space next to an =', (_name, runs, part) => {
+    // In spans of their own, the break went outside the link, and the link
+    // after the ! read as an image
+    const items = runs.map(([text, revision, formatting, linked]: readonly [string, ('addition' | 'deletion')?, Partial<RunFormatting>?, boolean?]) => ({
+      type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...formatting },
+      ...(revision ? { revision: { type: revision, author: 'A', date: '' } } : {}), ...(linked ? { href: 'https://e.com', link: 1 } : {}),
+    }));
+    expect(buildMarkdown(items as ContentItem[], new Map())).toContain(part);
+  });
+
+  test.each([
+    ['text\'s = after it', tracked('del', plain('old')) + tracked('ins', highlighted('y ') + plain('=')), '{~~old~>==y ==\\=~~}\n'],
+    ['text between it and an =', tracked('del', plain('old')) + tracked('ins', plain('=x') + highlighted(' y')), '{~~old~>=x== y==~~}\n'],
+  ])('writes a substitution with a highlighted space next to %s', async (_name, runs, md) => {
+    expect(await fromWord(runs)).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
   test('keeps a highlight\'s edge space in a comment beside another color\'s', async () => {
     const md = 'P {====a== ==  =={red}==}{>>c<<} Q\n';
     expect(await roundTrip(md)).toBe(md);
