@@ -99,6 +99,8 @@ The `<w:vanish/>` run property makes the text invisible in Word's UI, and a zero
 
 During import, the converter detects vanish-styled runs whose text starts with `U+200B` followed by `<!--`. These are emitted as `html_comment` content items and rendered back as raw `<!-- ... -->` syntax. If a Word user annotated the region containing the hidden comment, the associated Word comment is preserved using CriticMarkup or ID-based syntax.
 
+Export reads math, a highlight, a code span and a citation's key across a comment, as it does across text: `$a<!-- x$ -->` is math. So the text before a comment is escaped as it would be before the comment's text: Word's `cost $` before a comment `<!-- x$ -->` comes back as `cost \$<!-- x$ -->`, and `==a` before `<!-- x== -->` as `\==a<!-- x== -->`. Emphasis doesn't pair across a comment. A link's text reads past one, as markdown-it reads a link's label past inline HTML, so a `]` in a comment closes no link: `[a<!-- ] -->](b)` is a link to `b`, and Word's `[a` before that comment and `](b)` comes back as `\[a<!-- ] -->](b)`.
+
 ### Inert Zones
 
 HTML comment delimiters inside code spans, fenced code blocks, LaTeX math, or CriticMarkup regions are treated as literal text by the Markdown parser and are not affected by this mechanism.

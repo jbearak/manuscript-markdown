@@ -635,6 +635,10 @@ function blockSyntaxAt(text: string, start: number, end: number): number | undef
 interface TextIndex {
   text: string;
   closers: number[];
+  /** The ]s outside a comment's text, which a link's text can close at, as
+   *  markdown-it reads its label past a comment, though a citation's key
+   *  ends at one in it */
+  linkClosers: number[];
   dollarRuns: Array<{ start: number; length: number }>;
   dollarStarts: number[];
   nextSingle: number[];
@@ -656,9 +660,10 @@ interface TextIndex {
 
 /** `text`'s index, where a run of dollar signs ends at each of `bounds`,
  *  the starts of runs, between which formatting's or a span's delimiters
- *  can come, with note references and citations at `bracketed`, and the
- *  last == that isn't in it at `laterEquals` */
-function indexText(text: string, bounds: ReadonlySet<number> = new Set(), bracketed: number[] = [], laterEquals = -1): TextIndex {
+ *  can come, with note references and citations at `bracketed`, the last
+ *  == that isn't in it at `laterEquals`, and comments from each even one
+ *  of `comments` to the next */
+function indexText(text: string, bounds: ReadonlySet<number> = new Set(), bracketed: number[] = [], laterEquals = -1, comments: number[] = []): TextIndex {
   const closers: number[] = [];
   const dollarRuns: Array<{ start: number; length: number }> = [];
   const equals: number[] = [];
@@ -684,7 +689,8 @@ function indexText(text: string, bounds: ReadonlySet<number> = new Set(), bracke
     nextSingle[k] = dollarRuns[k].length === 1 ? k : nextSingle[k + 1];
     nextDouble[k] = dollarRuns[k].length > 1 ? k : nextDouble[k + 1];
   }
-  return { text, closers, dollarRuns, dollarStarts: dollarRuns.map(run => run.start), nextSingle, nextDouble, equals, laterEquals, ats, semicolons, openers, bracketed };
+  const linkClosers = comments.length === 0 ? closers : closers.filter(at => lowerBound(comments, at + 1) % 2 === 0);
+  return { text, closers, linkClosers, dollarRuns, dollarStarts: dollarRuns.map(run => run.start), nextSingle, nextDouble, equals, laterEquals, ats, semicolons, openers, bracketed };
 }
 
 /** The first of `sorted` at or after `value` */
@@ -782,14 +788,15 @@ export class RunsAfter {
       || lowerBound(this.index.equals, this.from) < this.index.equals.length;
   }
 
-  /** The character after the nth ], from 0: '' at the end, and undefined
-   *  without an nth */
+  /** The character after the nth ] a link's text can close at, from 0: ''
+   *  at the end, and undefined without an nth */
   afterCloser(n: number): string | undefined {
     for (let k = 0; k < this.prefix.length; k++) {
       if (this.prefix[k] === ']' && n-- === 0) return this.prefix[k + 1] ?? this.index.text[this.from] ?? '';
     }
-    const k = lowerBound(this.index.closers, this.from) + n;
-    return k < this.index.closers.length ? this.index.text[this.index.closers[k] + 1] ?? '' : undefined;
+    const { linkClosers } = this.index;
+    const k = lowerBound(linkClosers, this.from) + n;
+    return k < linkClosers.length ? this.index.text[linkClosers[k] + 1] ?? '' : undefined;
   }
 
   /** The dollar signs, with what is between them as \u0001, as far as any
@@ -7028,18 +7035,21 @@ function runsAfter(segment: ContentItem[], start: number, end: number): RunsAfte
     while (first > 0 && !endsInlineRange(segment[first - 1]) && !isInParagraphMath(segment[first - 1])) first--;
     const offsets: number[] = [];
     const bracketed: number[] = [];
+    // Where each comment's text starts and ends
+    const comments: number[] = [];
     let text = '';
     for (let k = first; k < end; k++) {
       offsets.push(text.length);
       const item = segment[k];
       if (item.type === 'footnote_ref' || item.type === 'citation') bracketed.push(text.length);
       text += indexedText(item);
+      if (item.type === 'html_comment') comments.push(offsets[offsets.length - 1], text.length);
     }
     offsets.push(text.length);
     const marks = laterEqualsAfter.get(segment);
     let laterEquals = -1;
     for (let k = first; k < end; k++) if (marks?.has(k)) laterEquals = offsets[k + 1 - first];
-    byEnd.set(end, cached = { length: segment.length, first, offsets, index: indexText(text, new Set(offsets), bracketed, laterEquals), items: segment.slice(first, end) });
+    byEnd.set(end, cached = { length: segment.length, first, offsets, index: indexText(text, new Set(offsets), bracketed, laterEquals, comments), items: segment.slice(first, end) });
   }
   return new RunsAfter(cached.index, cached.offsets[start - cached.first], '', false,
     { offsets: cached.offsets, items: cached.items, at: start - cached.first });
@@ -7053,6 +7063,10 @@ function indexedText(item: ContentItem): string {
     const latex = item.latex.includes('==') ? '==' : '\uFFFC';
     return item.display ? '$' + '$' + latex + '$' + '$' : '$' + latex + '$';
   }
+  // An HTML comment's text, which export reads math, a highlight, code and
+  // a citation's key across, as in $<!-- x$ -->, though not emphasis, nor
+  // a link's text (see TextIndex.linkClosers)
+  if (item.type === 'html_comment') return item.text;
   if (item.type !== 'text') return '\uFFFC';
   // A link's text in its brackets, whose ] closes a citation before it
   // and whose URL's $ closes math, even where it's written as its URL
