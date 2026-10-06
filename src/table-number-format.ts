@@ -815,10 +815,11 @@ function firstOverlappingRange(ranges: SourceRange[], start: number): number {
 
 /** How many of the characters a named reference reads as, `value`, are the
  *  rest of it after a name read in part, as text: 4 of £123; for &pound123;,
- *  which the browser reads by &pound, a legacy name, or all but the & where
- *  it reads no name, as &foo; is text, and none for one read whole */
+ *  or 4 of £1234 for &pound1234, which the browser reads by &pound, a
+ *  legacy name, or all but the & where it reads no name, as &foo; is text,
+ *  and none for one read whole */
 function unreadLength(reference: string, value: string): number {
-	if (reference[1] === '#' || !value.endsWith(';') || value === ';') return 0;
+	if (reference[1] === '#') return 0;
 	let read = 1;
 	while (!reference.endsWith(value.slice(read))) read++;
 	return value.length - read;

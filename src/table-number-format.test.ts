@@ -523,6 +523,15 @@ describe('table number formatting', () => {
 		expect(cells).toEqual(['\u00a3123.00;', '\u00a57.00;', '\u00a31\u202f234.00;']);
 	});
 
+	test('reads a currency sign written by a legacy name without its ; as the browser does', () => {
+		// HTML reads &pound without its ;, so £7, but &pound7 was text, in
+		// which 7 was no number. The name gets its ; where an edit is to the
+		// rest, as where a ; follows it
+		const html = '<table><tr><td>&pound7</td><td>&pound 1234.5</td><td>&pound1234.5</td></tr></table>';
+		expect(formatTableNumbers(html, { digits: 2, digitGrouping: 'comma' }).output)
+			.toBe('<table><tr><td>&pound7.00</td><td>&pound 1,234.50</td><td>&pound;1,234.50</td></tr></table>');
+	});
+
 	test('keeps surviving digits in their original HTML runs when grouping is removed', () => {
 		const html = '<table><tr><td><b>1</b>&nbsp;<i>234</i>.50</td></tr></table>';
 		const output = formatTableNumbers(html, { digitGrouping: 'none', decimalMark: 'midpoint' }).output;

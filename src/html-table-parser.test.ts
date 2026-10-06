@@ -195,6 +195,12 @@ describe('HTML table cell paragraphs', () => {
     expect(runs('<a href="x&notit;y&not;z&copy;">t&notit;</a>')).toEqual([{ type: 'text', text: 't\u00acit;', href: 'x&notit;y\u00acz\u00a9', linkStart: true }]);
   });
 
+  test('reads a legacy name without its ; as the browser does, in text and in an attribute', () => {
+    // HTML reads &copy and &lt without the ;, but in an attribute not before
+    // a letter, a digit or an =, so a query's &copy=2 stays
+    expect(runs('<a href="?a=1&copy=2&b&lt">t&copy x&ltb</a>')).toEqual([{ type: 'text', text: 't\u00a9 x<b', href: '?a=1&copy=2&b<', linkStart: true }]);
+  });
+
   test('reads a reference once, so the text one writes stays text', () => {
     // &#38; made an & of the next reference, which read as one too
     expect(runs('&#38;#x80; &#38;#128; &amp;#128;')).toEqual([{ type: 'text', text: '&#x80; &#128; &#128;' }]);

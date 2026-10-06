@@ -5936,6 +5936,78 @@ describe('Character references in HTML', () => {
   });
 
   it.each([
+    ['&copy ', '\u00a9 '], ['&copyx', '\u00a9x'], ['&COPY ', '\u00a9 '], ['&notin ', '\u00acin '], ['&ltx', '<x'],
+    ['&frac12x', '\u00bdx'], ['&amp ', '& '],
+    // No legacy name starts them, so the browser reads them only with a ;
+    ['&hellip ', '&hellip '], ['&Copy ', '&Copy '],
+  ])('reads %s in an HTML cell by a legacy name without its ;, as the browser does, in export, import and a second trip', async (reference, shown) => {
+    // HTML reads about a hundred of its older names, as &copy, without the
+    // ;, in text, by the longest such name the letters start with, which
+    // export read only with it, so Word showed &copy as it was written
+    const { convertDocx } = await import('./converter');
+    const html = '<table><tr><th>h</th></tr><tr><td>a' + reference + 'b</td></tr></table>';
+    expect(await wordCell(html)).toBe('a' + shown + 'b');
+    const imported = (await convertDocx((await convertMdToDocx(html)).docx)).markdown;
+    expect(await wordCell(imported)).toBe('a' + shown + 'b');
+    expect(await wordCell((await convertDocx((await convertMdToDocx(imported)).docx)).markdown)).toBe('a' + shown + 'b');
+    const compacted = (await import('./formatting')).compactTable(html).newText;
+    expect(await previewCell(compacted)).toBe('a' + shown + 'b');
+    expect(await wordCell(compacted)).toBe('a' + shown + 'b');
+  });
+
+  it('reads a legacy name without its ; in an <img>\'s src or alt as the browser does in an attribute', () => {
+    // Read where what follows it isn't a letter, a digit or an =
+    const image = parseMd('<img src="a&copy.png" alt="a&copy b &copy=x &copyx &copy-x">').flatMap(token => token.runs ?? []).find(run => run.type === 'image');
+    expect(image?.imageSrc).toBe('a\u00a9.png');
+    expect(image?.imageAlt).toBe('a\u00a9 b &copy=x &copyx \u00a9-x');
+  });
+
+  // Hundreds of digits, which the entities package's numeric reading took
+  // as a number past JavaScript's, and threw on, as it found 0 times it
+  // not a number
+  const zeros = '0'.repeat(309);
+  const longReferences: [string, string, string][] = [
+    ['decimal with leading zeros', '&#' + zeros + '65;', 'A'],
+    ['decimal with leading zeros without its ;', '&#' + zeros + '65 ', 'A '],
+    ['hexadecimal with leading zeros', '&#x' + zeros + '41;', 'A'],
+    ['hexadecimal with leading zeros without its ;', '&#X' + zeros + '41 ', 'A '],
+    ['Windows-1252\'s with leading zeros', '&#' + zeros + '128;', '\u20ac'],
+    ['decimal past U+10FFFF', '&#' + '9'.repeat(400) + ';', '\uFFFD'],
+    ['decimal past U+10FFFF without its ;', '&#' + '9'.repeat(400) + ' ', '\uFFFD '],
+    ['hexadecimal past U+10FFFF', '&#x' + 'F'.repeat(300) + ';', '\uFFFD'],
+    ['hexadecimal past U+10FFFF without its ;', '&#x' + 'f'.repeat(300) + ' ', '\uFFFD '],
+    ['past U+10FFFF with leading zeros', '&#' + zeros + '1114112;', '\uFFFD'],
+  ];
+
+  it.each(longReferences)('reads a numeric reference of hundreds of digits, %s, in an HTML cell as the browser does, in Word and in Compact Table', async (_name, reference, shown) => {
+    // Leading zeros don't count, and a number past U+10FFFF is U+FFFD
+    // (https://html.spec.whatwg.org/multipage/parsing.html#numeric-character-reference-end-state)
+    const html = '<table><tr><th>h</th></tr><tr><td>a' + reference + 'b</td></tr></table>';
+    expect(await wordCell(html)).toBe('a' + shown + 'b');
+    const compacted = (await import('./formatting')).compactTable(html).newText;
+    expect(await previewCell(compacted)).toBe('a' + shown + 'b');
+    expect(await wordCell(compacted)).toBe('a' + shown + 'b');
+  });
+
+  it.each(longReferences)('formats the values of an HTML table with a numeric reference of hundreds of digits, %s', async (_name, reference) => {
+    const { formatTableNumbers } = await import('./table-number-format');
+    const html = (value: string) => '<table><tr><td>' + reference + '</td><td>' + value + '</td></tr></table>';
+    expect(formatTableNumbers(html('1234.5'), { digits: 2 }).output).toBe(html('1234.50'));
+  });
+
+  it('formats a value after a $ written as a numeric reference with hundreds of leading zeros', async () => {
+    const { formatTableNumbers } = await import('./table-number-format');
+    const html = (value: string) => '<table><tr><td>&#' + zeros + '36;' + value + '</td><td>&#x' + zeros + '24;' + value + '</td></tr></table>';
+    expect(formatTableNumbers(html('1234.5'), { digits: 2 }).output).toBe(html('1234.50'));
+  });
+
+  it.each(longReferences)('reads a numeric reference of hundreds of digits, %s, in an <img>\'s src and alt', (_name, reference, shown) => {
+    const image = parseMd('<img src="a' + reference + '.png" alt="a' + reference + 'b">').flatMap(token => token.runs ?? []).find(run => run.type === 'image');
+    expect(image?.imageSrc).toBe('a' + shown + '.png');
+    expect(image?.imageAlt).toBe('a' + shown + 'b');
+  });
+
+  it.each([
     ['a block of its own', '<img src="a&#128;.png" alt="&#128; &#x110000; &#150;">'],
     ['a paragraph', 'x <img src="a&#128;.png" alt="&#128; &#x110000; &#150;"> y'],
   ])('reads an <img>\'s alt and src in %s as the browser does', (_name, md) => {
@@ -5961,6 +6033,13 @@ describe('Character references in HTML', () => {
     const image = parseMd('<img src="cover&notit;.png" alt="a&notit;b &not; &notin;">').flatMap(token => token.runs ?? []).find(run => run.type === 'image');
     expect(image?.imageSrc).toBe('cover&notit;.png');
     expect(image?.imageAlt).toBe('a&notit;b \u00ac \u2209');
+  });
+
+  it('reads a legacy name without its ; in Markdown as text, as markdown-it does, in the preview and in Word', async () => {
+    // CommonMark reads a name only with its ;, so only HTML reads &copy b as © b
+    const md = '| h |\n| --- |\n| a&copy b &amp c |';
+    expect(await previewCell(md)).toBe('a&copy b &amp c');
+    expect(await wordCell(md)).toBe('a&copy b &amp c');
   });
 
   it.each([['&#128;'], ['&#150;'], ['&#0;']])('reads %s in Markdown as markdown-it does, in the preview and in Word', async (reference) => {
