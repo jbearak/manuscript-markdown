@@ -8,13 +8,16 @@ import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './ima
 import { keepParagraphEdgeWhitespace } from './html-entities';
 import htmlBlockNames from 'markdown-it/lib/common/html_blocks.mjs';
 import { HTML_OPEN_CLOSE_TAG_RE, HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
-import { isMdAsciiPunct, isPunctChar, isWhiteSpace } from 'markdown-it/lib/common/utils.mjs';
+import { isMdAsciiPunct, isPunctChar, isWhiteSpace, unescapeAll } from 'markdown-it/lib/common/utils.mjs';
 import { computeCodeRegions, computeMarkdownRegions, isInsideCodeRegion } from './code-regions';
 import { findDollarMathAt } from './math-delimiters';
-import { getDisplayWidth, readGridTableCells, type TableAlign } from './grid-table-preprocess';
+import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { citationEndInText, compareNoteLabels, customStyleId, linkifiedColons, linkifiedText, linkifyMatches, startsHtmlBlock } from './md-to-docx';
+import { citationEndInText, compareNoteLabels, customStyleId, directiveRest, htmlBlocksIn, linkifiedColons, linkifiedText, linkifyMatches, readsAsParagraph, startsHtmlBlock } from './md-to-docx';
+import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
+import { tableContentsFingerprint, tableFirstRowText } from './table-metadata';
+import { htmlPieceAt } from './html-table-parser';
 import { publicStyleNameForZoteroId, zoteroStyleIdForName } from './csl-loader';
 import { extractZoteroKey } from './zotero-link';
 import { DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
@@ -2805,6 +2808,28 @@ export async function extractTableDecimalMarkMapping(data: Uint8Array | JSZip): 
 
 export async function extractTableDigitGroupingMapping(data: Uint8Array | JSZip): Promise<Map<string, string> | null> {
   return extractIdMappingFromCustomXml(data, 'MANUSCRIPT_TABLE_DIGIT_GROUPINGS');
+}
+
+/** Each HTML table's HTML before and after it in its block, which Word
+ *  doesn't show, and its first row's text and its contents when export
+ *  wrote it (see tableFirstRow and tableContentsFingerprint), the count of
+ *  tables alike before it, its scope, and the count of tables alike export
+ *  wrote in all */
+export async function extractTableHtmlAroundMapping(data: Uint8Array | JSZip): Promise<Map<string, [string, string, string, string, string, string, string]> | null> {
+  const json = await extractChunkedCustomProp(data, 'MANUSCRIPT_TABLE_HTML_AROUND');
+  if (!json) return null;
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (!parsed || typeof parsed !== 'object') return null;
+    const mapping = new Map<string, [string, string, string, string, string, string, string]>();
+    for (const [index, around] of Object.entries(parsed)) {
+      if (Array.isArray(around) && around.length === 7 && around.every(part => typeof part === 'string')
+        && (around[0] || around[1])) mapping.set(index, [around[0], around[1], around[2], around[3], around[4], around[5], around[6]]);
+    }
+    return mapping.size > 0 ? mapping : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function extractEmbedDirectiveMapping(data: Uint8Array | JSZip): Promise<Map<string, string> | null> {
@@ -6951,11 +6976,15 @@ function htmlCellsHoldTable(table: { rows: TableRow[] }): boolean {
     cell.paragraphs.every(para => renderHtmlCellParagraph(para) !== undefined)));
 }
 
-function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comment>, indent: string = '  ', renderOpts?: RenderOpts, extraAttrs: string = ''): string {
+function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comment>, indent: string = '  ', renderOpts?: RenderOpts, extraAttrs: string = '', around?: readonly string[]): string {
+  // A block that starts as a comment, <pre> or the like ends on the line its
+  // end is on, as the --> before the table, so the table goes on that line
+  let oneLine = /^[ \t]{0,3}(?:<(?:script|pre|style|textarea)(?=[\s>]|$)|<!--|<\?|<![A-Za-z]|<!\[CDATA\[)/i.test(around?.[0] ?? '');
   const i1 = indent;  // tr level
   const i2 = indent + indent;  // td/th level
   const i3 = indent + indent + indent;  // content level
-  const lines: string[] = ['<table' + extraAttrs + '>'];
+  // The HTML around the table in its block, as it was, on the table's lines
+  const lines: string[] = [(around?.[0] ?? '') + '<table' + extraAttrs + '>'];
   const deferredAll: string[] = [];
   for (let rowIdx = 0; rowIdx < table.rows.length; rowIdx++) {
     const row = table.rows[rowIdx];
@@ -6996,13 +7025,70 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
     }
     lines.push(i1 + '</tr>');
   }
-  lines.push('</table>');
+  // But a line end in a cell, as in its comment, would end the block there,
+  // where its end is before it or in the table, so the HTML before the
+  // table goes as blocks of its own, as it does around a table in another
+  // format, and the table starts one; and neither goes where that can't be
+  // read as it was. A block whose end is after the table, as a <pre>'s
+  // around it, goes on over the line end.
+  let after = around?.[1] ?? '';
+  const ends = oneLine ? htmlBlockEndMarker((around?.[0] ?? '').trimStart()) : undefined;
+  if (ends && !ends.test(lines.join('') + after)) {
+    // And where the block's end was in a cell, as a </pre> or ?> there,
+    // which goes as the cell is written, the block would go on over the
+    // text after the table, so the HTML around it goes, and the table is
+    // written as one with none
+    lines[0] = lines[0].slice((around?.[0] ?? '').length);
+    after = '';
+    oneLine = false;
+  } else if (oneLine && lines.slice(1).some(line => /[\r\n]/.test(line))
+    && (!ends || ends.test(around?.[0] ?? '') || lines.slice(1).some(line => ends.test(line)))) {
+    const before = detachedTableHtml(around?.[0] ?? '', renderOpts?.breaks);
+    lines[0] = (before ? before + '\n\n' : '') + lines[0].slice((around?.[0] ?? '').length);
+    if (before === null) after = '';
+  }
+  lines.push('</table>' + after);
   // Comment bodies go after the table, as in a pipe table: a blank line in
   // one would end the table's HTML
-  return lines.join('\n') + (deferredAll.length > 0 ? '\n\n' + deferredAll.join('\n') : '');
+  return (oneLine ? lines.map((line, k) => k > 0 ? line.trimStart() : line).join('') : lines.join('\n'))
+    + (deferredAll.length > 0 ? '\n\n' + deferredAll.join('\n') : '');
 }
 
-type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem>; htmlCells?: boolean };
+/** The keys of the HTML around tables export wrote, by the scope, first
+ *  row and text of the table each was written with and the count of tables
+ *  alike before it (`nth`), the count of tables alike export wrote
+ *  (`written`), and those alike that export wrote all with the same HTML
+ *  around them (`same`), which renderTable looks a table up by, once for
+ *  each mapping, as reading them all for each table took time in the
+ *  square of their number */
+type TableHtmlAroundIndex = { nth: Map<string, string[]>; written: Map<string, number>; same: Set<string> };
+const tableHtmlAroundIndexes = new WeakMap<Map<string, [string, string, string, string, string, string, string]>, TableHtmlAroundIndex>();
+function tableHtmlAroundIndex(mapping: Map<string, [string, string, string, string, string, string, string]>): TableHtmlAroundIndex {
+  let index = tableHtmlAroundIndexes.get(mapping);
+  if (!index) {
+    index = { nth: new Map(), written: new Map(), same: new Set() };
+    // Each one's HTML, or null where they differ, and their count
+    const around = new Map<string, string | null>();
+    const counts = new Map<string, number>();
+    for (const [key, entry] of mapping) {
+      const id = entry[5] + '\n' + entry[2] + '\n' + entry[3];
+      const known = index.nth.get(id + '\n' + entry[4]);
+      if (known) known.push(key);
+      else index.nth.set(id + '\n' + entry[4], [key]);
+      index.written.set(id, Number(entry[6]));
+      const html = JSON.stringify([entry[0], entry[1]]);
+      const seen = around.get(id);
+      around.set(id, seen === undefined || seen === html ? html : null);
+      counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+    // But for one written with none
+    for (const [id, html] of around) if (html !== null && counts.get(id) === index.written.get(id)) index.same.add(id);
+    tableHtmlAroundIndexes.set(mapping, index);
+  }
+  return index;
+}
+
+type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]>; usedTableHtmlAround?: Set<string>; tablesAlike?: Map<string, number>; tablesAlikeRendered?: Map<string, number>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; breaks?: boolean; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem>; htmlCells?: boolean };
 
 /**
  * Try to render a table as a GFM pipe table. Returns null if the table is
@@ -7507,6 +7593,310 @@ function pushWithHoistedPrefix(output: string[], directivePrefix: string, body: 
   output.push('\n' + body);
 }
 
+const tableCellText = (cell: TableRow['cells'][number]): string =>
+  cell.paragraphs.flat().map(item => item.type === 'text' ? item.text : '').join('');
+
+/** A table's first row's text, as export finds it (see tableFirstRowText) */
+function tableFirstRow(rows: TableRow[]): string {
+  return tableFirstRowText((rows[0]?.cells ?? []).map(tableCellText));
+}
+
+/** A table's text, as export finds it (see tableContentsFingerprint) */
+function tableContents(rows: TableRow[]): string {
+  return tableContentsFingerprint(rows.map(row => row.cells.map(tableCellText)));
+}
+
+/** A table's first row and text, which tables alike in both share */
+function tableIdentity(rows: TableRow[]): string {
+  return tableFirstRow(rows) + '\n' + tableContents(rows);
+}
+
+const CHARACTER_REFERENCE_AT = /&(?:#\d{1,7}|#[xX][\da-fA-F]{1,6}|[A-Za-z][A-Za-z\d]{1,31});/y;
+
+/** Lines of the HTML around a table, one after another, as Markdown text
+ *  that reads as it did in the table's block: their tags, comments and
+ *  character references, as markdown-it reads them, which can go on across
+ *  lines, as they are, and the rest escaped, with each line's $ or [ as the
+ *  lines after can close it, with no indent, which HTML runs together with
+ *  the line end before, nor whitespace at a line's end, which would make a
+ *  line break, but in a tag or comment over lines, as in an attribute's
+ *  value, which keeps it. A citation's [, as any with an @ before its ], is escaped
+ *  too, and what it holds as text, which escapeMarkdownChars keeps as a
+ *  citation, as export writes one whose key is missing as its text, but
+ *  which the HTML held as text. It's a \0 while the rest is escaped, which
+ *  no Markdown holds, as markdown-it replaces one. Where a line end is a
+ *  line break (`breaks`), as with breaks: true, the lines go on one, with a
+ *  space between, as HTML reads a line end, but those in a tag or comment. */
+function htmlLinesAsText(lines: string[], breaks = false): string[] {
+  const text = lines.join('\n');
+  // Each of those as a character the lines don't hold while the rest is
+  // escaped, so a $ or * pairs across them as Markdown reads it
+  let code = 0xE000;
+  while (text.includes(String.fromCharCode(code))) code++;
+  const mark = String.fromCharCode(code);
+  const raws: string[] = [];
+  let plain = '';
+  let from = 0;
+  for (let i = 0; i < text.length; i++) {
+    const at = text[i] === '<' ? HTML_TAG_AT : text[i] === '&' ? CHARACTER_REFERENCE_AT : undefined;
+    if (!at) continue;
+    at.lastIndex = i;
+    const raw = at.exec(text)?.[0];
+    if (!raw) continue;
+    plain += text.slice(from, i) + mark;
+    raws.push(raw);
+    from = i + raw.length;
+    i = from - 1;
+  }
+  plain += text.slice(from);
+  plain = plain.split('\n').map(line => line.replace(/^[ \t]+|[ \t]+$/g, '')).join('\n');
+  if (breaks) plain = plain.replace(/\n/g, ' ');
+  // From the right, whether an @ comes before the next ], as looking on
+  // from each [ took time in the square of their number
+  const chars = plain.split('');
+  for (let i = chars.length - 1, at = false; i >= 0; i--) {
+    if (chars[i] === '[' && at) chars[i] = '\0';
+    else if (chars[i] === ']') at = false;
+    else if (chars[i] === '@') at = true;
+  }
+  const masked = chars.join('');
+  // The lines after each, from the line end before them
+  const index = indexText(masked);
+  let end = -1;
+  const escaped = masked.split('\n').map(line => {
+    end += line.length + 1;
+    return escapeMarkdownChars(line, true, new RunsAfter(index, Math.min(end, masked.length))).replace(/\0/g, '\\[');
+  });
+  // A \ before one of them, which escapeMarkdownChars leaves, as it escapes
+  // no character it doesn't see, but which would escape its < or &. A line
+  // that would read as the Sources heading of a bibliography Word holds as
+  // text, which import drops with all after it, starts with a reference, and
+  // one that would read as a grid table's border, with the lines between
+  // as its rows, as one indented as code was, with a \.
+  return escaped.join('\n').split(mark).map((part, k) => (k < raws.length && part.endsWith('\\') ? part + '\\' : part) + (raws[k] ?? ''))
+    .join('').split('\n').map(line => SOURCES_HEADING_RE.test(line) ? line.replace('S', '&#83;') : GRID_TABLE_SEPARATOR_RE.test(line) ? '\\' + line : line);
+}
+
+/** For each line of the HTML around a table, read as the browser read it
+ *  in the table's block, whether it starts in a comment (`inComment`), and
+ *  where on it an element whose text keeps its whitespace, as a <pre>'s,
+ *  starts that goes on past it, or -1 (`preformatted`): on a line of text,
+ *  its lines would be a paragraph's, with their indents gone. Such an
+ *  element ends Markdown's HTML block at the first line with an end of one,
+ *  as in a comment, which the browser read as none, or past the HTML, as
+ *  for a <pre> around the table, which reads no more as it was
+ *  (`unreadable`). */
+function detachedHtmlLines(lines: string[]): { inComment: boolean[]; preformatted: number[]; unreadable: boolean } {
+  const text = lines.join('\n');
+  const starts: number[] = [];
+  for (let k = 0, at = 0; k < lines.length; at += lines[k++].length + 1) starts.push(at);
+  const lineOf = (at: number) => {
+    let [low, high] = [0, starts.length - 1];
+    while (low < high) {
+      const mid = (low + high + 1) >> 1;
+      if (starts[mid] <= at) low = mid;
+      else high = mid - 1;
+    }
+    return low;
+  };
+  const inComment = lines.map(() => false);
+  const preformatted = lines.map(() => -1);
+  // Each end of such an element as Markdown reads them, in its text
+  const ends = [...text.matchAll(new RegExp(HTML_BLOCKS_WITH_END[0][1].source, 'gi'))].map(match => match.index);
+  let nextEnd = 0;
+  const start = new RegExp(HTML_BLOCKS_WITH_END[0][0].source.replace(/^\^/, ''), 'iy');
+  let unreadable = false;
+  // Where an open <pre> starts, which the browser ends at its end tag, as
+  // it reads no other element's text as no HTML
+  let pre = -1;
+  // Whether Markdown ends such an element from `from`, which the browser
+  // ends at `to`, or never, on the line the browser does
+  const endsAlike = (from: number, to: number | undefined) => {
+    while (nextEnd < ends.length && ends[nextEnd] < from) nextEnd++;
+    return to !== undefined && nextEnd < ends.length && lineOf(ends[nextEnd]) === lineOf(to - 1);
+  };
+  // One that starts at `from` after text on its line and ends at `to` on
+  // another starts a line of its own
+  const ownLine = (from: number, to: number) => {
+    const line = lineOf(from);
+    if (preformatted[line] === -1 && lineOf(to - 1) > line && /\S/.test(text.slice(starts[line], from))) preformatted[line] = from - starts[line];
+  };
+  for (let i = 0; i < text.length;) {
+    const piece = htmlPieceAt(text, i);
+    start.lastIndex = i;
+    if (piece.kind === 'comment') {
+      for (let k = lineOf(i) + 1; k < starts.length && starts[k] < piece.end; k++) inComment[k] = true;
+    } else if (pre >= 0) {
+      if (piece.kind === 'tag' && /^<\/pre[\s>]/i.test(text.slice(i, piece.end))) {
+        if (!endsAlike(pre, piece.end)) unreadable = true;
+        ownLine(pre, piece.end);
+        pre = -1;
+      }
+    } else if (start.test(text)) {
+      if (/^<pre/i.test(text.slice(i, i + 4))) pre = i;
+      else if (piece.rest || !endsAlike(i, piece.end)) unreadable = true;
+      else ownLine(i, piece.end);
+    }
+    i = piece.end;
+  }
+  return { inComment, preformatted, unreadable: unreadable || pre >= 0 };
+}
+
+/** HTML from a table's block with each comment ending where the browser
+ *  read its end, as Markdown does, which a block of its own or a line of
+ *  text would read on past, over the table: one the browser ended at a --!>
+ *  ends at a --> instead, one whose text ends in a -, as at a --->, which
+ *  inline Markdown reads as none, gets a space before its end, and one with
+ *  no end, which ran to the end of the block, gets one. An <!-- in an
+ *  element whose text is no HTML, as a <textarea>'s, starts none. */
+function withMarkdownCommentEnds(html: string): string {
+  let out = '';
+  let from = 0;
+  for (let i = 0; i < html.length;) {
+    const piece = htmlPieceAt(html, i);
+    if (piece.kind === 'comment' && piece.rest) return out + html.slice(from).replace(/\s*$/, ' -->');
+    // But an empty one, <!--> or <!--->, which both read alike
+    if (piece.kind === 'comment' && !html.startsWith('<!-->', i) && !html.startsWith('<!--->', i)) {
+      const end = piece.end - (html.startsWith('--!>', piece.end - 4) ? 4 : 3);
+      const dash = end > i + 4 && html[end - 1] === '-';
+      if (dash || end === piece.end - 4) {
+        out += html.slice(from, end) + (dash ? ' ' : '') + '-->';
+        from = piece.end;
+      }
+    }
+    i = piece.end;
+  }
+  return out + html.slice(from);
+}
+
+/** The end of the HTML block that `line` starts, where it ends at a marker,
+ *  as a comment does at its --> */
+function htmlBlockEndMarker(line: string): RegExp | undefined {
+  return HTML_BLOCKS_WITH_END.find(([start]) => start.test(line))?.[1] ?? (HTML_BLOCK_IN_PARAGRAPH[1].test(line) ? /-->/ : undefined);
+}
+
+/** Where the HTML block that starts at `lines[k]` ends, after its last
+ *  line, as markdown-it reads one, or -1 where none does: a line of one
+ *  tag starts none after a line of a paragraph (`inParagraph`). A line
+ *  indented as code starts one too, as the browser read its tag. */
+function htmlBlockEnd(lines: string[], k: number, inParagraph: boolean): number {
+  const text = lines[k].trimStart();
+  const ends = htmlBlockEndMarker(text);
+  if (ends) {
+    for (let m = k; m < lines.length; m++) if (ends.test(lines[m])) return m + 1;
+    return lines.length;
+  }
+  if (!HTML_BLOCK_IN_PARAGRAPH[5].test(text) && (inParagraph || !HTML_TAG_LINE.test(text))) return -1;
+  let m = k + 1;
+  while (m < lines.length && /\S/.test(lines[m])) m++;
+  return m;
+}
+
+/** The HTML around a table as blocks of their own, as it goes around one in
+ *  another format, which Markdown reads as it read none of the table's
+ *  block: its HTML blocks as they are, and its other lines as text, as
+ *  # Source would be a heading. A comment export would read as a directive,
+ *  as <!-- table-font-size: 11 --> or a line of an embed's, which none of
+ *  them was in the table's block, goes, but for the text a style's goes
+ *  around on its line, and the end of a comment an embed's line is in.
+ *  Each line reads as it does in what's written, in order, in which a line
+ *  of text is a paragraph's, after which a line of one tag starts no block,
+ *  and a paragraph's lines go on one where a line end is a line break
+ *  (`breaks`). Null where it reads no more as it was, as a block that ends
+ *  at a marker without one, which would go on over the table (see
+ *  detachedHtmlLines), or a paragraph of a Sources line. */
+function detachedTableHtml(html: string, breaks = false): string | undefined | null {
+  const lines = withMarkdownCommentEnds(html).split('\n');
+  const { inComment, preformatted, unreadable } = detachedHtmlLines(lines);
+  if (unreadable) return null;
+  const out: string[] = [];
+  // The lines of text since the last that isn't, which escape together
+  let texts: string[] = [];
+  // A paragraph that would read as the Sources heading of a bibliography
+  // Word holds as text, which import drops with all after it, as Word's
+  // paragraph does, whatever the Markdown wrote it as: its text, with its
+  // character references read, its comments and tags gone, as an empty
+  // one's would be on the next round trip, and its lines run together
+  let sources = false;
+  // Or of lines a comment or tag goes on over, which aren't escaped, where
+  // one starts a block, as # Heading would, which ends the paragraph there
+  // and shows what the comment hid
+  let unread = false;
+  const endTexts = () => {
+    const shown = unescapeAll(texts.join('\n').replace(/<!--[\s\S]*?-->|<[^>]*>/g, '').replace(/\\/g, '\\\\'));
+    if (SOURCES_HEADING_RE.test(shown.replace(/\s+/g, ' ').trim())) sources = true;
+    const text = htmlLinesAsText(texts, breaks);
+    if (texts.length > 1 && !readsAsParagraph(text.join('\n'))) unread = true;
+    if (texts.length > 0) out.push(...text);
+    texts = [];
+  };
+  let inParagraph = false;
+  for (let k = 0; k < lines.length; k++) {
+    const line = lines[k];
+    // A comment a line of text starts goes on in it, whatever its lines
+    // start with
+    const end = /\S/.test(line) && !(inComment[k] && texts.length > 0) ? htmlBlockEnd(lines, k, inParagraph) : -1;
+    if (end === -1) {
+      // An embed's line goes, as export would add its table, but for the end
+      // of a comment it's in, which would go on over the table without it
+      if (parseEmbedDirective(line)) {
+        if (inComment[k]) texts.push(line.slice(line.indexOf('-->')));
+        continue;
+      }
+      // Which starts a line of its own, an HTML block to its end
+      if (preformatted[k] > 0) {
+        texts.push(line.slice(0, preformatted[k]));
+        lines[k] = line.slice(preformatted[k]);
+        inComment[k] = false;
+        preformatted[k--] = -1;
+        inParagraph = true;
+        continue;
+      }
+      if (/\S/.test(line)) texts.push(line);
+      else {
+        endTexts();
+        // One blank line between blocks, but those in a block as they are
+        if (out.length > 0 && out[out.length - 1] !== '') out.push('');
+      }
+      inParagraph = /\S/.test(line);
+      continue;
+    }
+    endTexts();
+    // A block that ends at a marker on its last line before a <pre> there
+    // does, as a comment before one, goes there, and the <pre> starts one
+    // of its own, as its lines would be text after the block, with their
+    // indents gone
+    const marker = htmlBlockEndMarker(line.trimStart());
+    const split = !!marker && preformatted[end - 1] > 0;
+    const block = lines.slice(k, end);
+    if (split) block[block.length - 1] = block[block.length - 1].slice(0, preformatted[end - 1]);
+    if (marker && !marker.test(block[block.length - 1])) return null;
+    const rest = directiveRest(block.join('\n'));
+    if (rest === undefined) {
+      // With its indent as code gone
+      if (/^(?: {0,3}\t| {4})/.test(block[0])) block[0] = block[0].trimStart();
+      for (let m = 0; m < block.length; m++) {
+        if (!parseEmbedDirective(block[m])) out.push(block[m]);
+        else if (inComment[k + m]) out.push(block[m].slice(block[m].indexOf('-->')));
+      }
+      inParagraph = false;
+    } else if (/\S/.test(rest)) {
+      // Text, as the lines of text after it in its paragraph are
+      texts.push(...rest.split('\n'));
+      inParagraph = true;
+    }
+    k = end - 1;
+    if (split) {
+      lines[k] = lines[k].slice(preformatted[k]);
+      inComment[k] = false;
+      preformatted[k--] = -1;
+    }
+  }
+  endTexts();
+  if (sources || unread) return null;
+  return out.join('\n').trim() || undefined;
+}
+
 function renderTableOrFallback(
   item: { rows: TableRow[] },
   comments: Map<string, Comment>,
@@ -7514,7 +7904,8 @@ function renderTableOrFallback(
   renderOpts?: RenderOpts,
   storedFormat?: string,
   tableIndex?: number,
-): { directivePrefix: string; body: string } {
+  scope = '',
+): { directivePrefix: string; body: string; before?: string; after?: string } {
   // A cell holds no range that goes on past it, and a range open around the
   // table, with no item in it, stays open for the text after. A cell's
   // comments are the browser's where the table was HTML.
@@ -7539,13 +7930,56 @@ function renderTableOrFallback(
     if (isLandscapeTable) htmlFontAttrs += ' data-orientation="landscape"';
     if (isPortraitTable) htmlFontAttrs += ' data-orientation="portrait"';
   }
-  const r = (body: string) => ({ directivePrefix: fontPrefix, body });
+  // The HTML around an HTML table in its block: the one export wrote with
+  // the table, as the tables' indices shift where Word added or deleted one
+  // before it, found by the table's first row and text and the count of
+  // tables alike in both before it in the body or its note (`scope`), each
+  // once; or else, where Word edited the table, the one at its index, if
+  // its first row is the table's and the table it was written with, alike
+  // in both, isn't still there. It goes around a table in another format as
+  // blocks of their own, before its directives.
+  const firstRow = tableFirstRow(item.rows);
+  const contents = tableContents(item.rows);
+  const alikeBefore = renderOpts?.tablesAlikeRendered?.get(scope + '\n' + firstRow + '\n' + contents) ?? 0;
+  renderOpts?.tablesAlikeRendered?.set(scope + '\n' + firstRow + '\n' + contents, alikeBefore + 1);
+  const mapping = renderOpts?.tableHtmlAroundMapping;
+  const unused = (key: string | undefined) => key !== undefined && !renderOpts?.usedTableHtmlAround?.has(key)
+    && mapping?.get(key)?.[2] === firstRow && mapping.get(key)?.[5] === scope;
+  const edited = (key: string) => (renderOpts?.tablesAlike?.get(scope + '\n' + mapping!.get(key)![2] + '\n' + mapping!.get(key)![3]) ?? 0)
+    <= Number(mapping!.get(key)![4]);
+  const own = tableIndex !== undefined && unused(String(tableIndex)) && edited(String(tableIndex)) ? String(tableIndex) : undefined;
+  // Where there are more tables alike than export wrote, as where Word
+  // edited one to be alike another, which of them was written with the
+  // HTML is unknown: one whose own isn't still there takes that, one at
+  // the index of one written alike that, and the others none, as HTML
+  // that goes with another table is worse than none. Where there are
+  // fewer, as where Word deleted one, which went is unknown too: the
+  // others take the HTML by their order only where export wrote the same
+  // around all, and none otherwise.
+  const index = mapping && tableHtmlAroundIndex(mapping);
+  const identity = scope + '\n' + firstRow + '\n' + contents;
+  const count = renderOpts?.tablesAlike?.get(identity) ?? 0;
+  const extra = !!index && count > (index.written.get(identity) ?? 0);
+  const fewer = !!index && count < (index.written.get(identity) ?? 0) && !index.same.has(identity);
+  const at = tableIndex !== undefined ? mapping?.get(String(tableIndex)) : undefined;
+  const atIndex = at && at[5] + '\n' + at[2] + '\n' + at[3] === identity && unused(String(tableIndex)) ? String(tableIndex) : undefined;
+  const aroundKey = index && (extra ? own ?? atIndex : fewer ? undefined : index.nth.get(identity + '\n' + alikeBefore)?.find(unused) ?? own);
+  const around = aroundKey !== undefined ? mapping?.get(aroundKey) : undefined;
+  if (aroundKey !== undefined) renderOpts?.usedTableHtmlAround?.add(aroundKey);
+  const r = (body: string) => {
+    // Neither, where one can't be read as it was, as a <pre> before the
+    // table and its end after it
+    let before = around && detachedTableHtml(around[0], renderOpts?.breaks);
+    let after = around && detachedTableHtml(around[1], renderOpts?.breaks);
+    if (before === null || after === null) before = after = undefined;
+    return { directivePrefix: fontPrefix, body, ...(before ? { before } : {}), ...(after ? { after } : {}) };
+  };
   const rHtml = (body: string) => ({ directivePrefix: '', body });
   // If the original format was HTML or font value is comment-unsafe, emit HTML
   // directly. A table that holds what HTML cells can't goes on as if it had
   // no stored format, to a format that can, unless it needs HTML.
   if ((storedFormat === 'html' && htmlCellsHoldTable(item)) || forceHtmlTable) {
-    return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs));
+    return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs, around));
   }
   // Parse stored grid source column widths for this table
   const gridSrcWidthsStr = tableIndex !== undefined ? renderOpts?.gridSourceColWidthsMapping?.get(String(tableIndex)) : undefined;
@@ -7560,7 +7994,7 @@ function renderTableOrFallback(
   if (storedFormat === 'grid') {
     const gridResult = tryRenderGridTable(item, comments, renderOpts, undefined, gridSrcWidths);
     if (gridResult !== null) return r(gridResult);
-    return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs));
+    return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs, around));
   }
   // When the original was a pipe table, skip the width check to preserve format
   const pipeMax = storedFormat === 'pipe' ? Infinity : (options?.pipeTableMaxLineWidth ?? 120);
@@ -7581,7 +8015,7 @@ function renderTableOrFallback(
     const gridResult = tryRenderGridTable(item, comments, renderOpts, undefined, gridSrcWidths);
     if (gridResult !== null) return r(gridResult);
   }
-  return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs));
+  return rHtml(renderHtmlTable(item, comments, options?.tableIndent, renderOpts, htmlFontAttrs, around));
 }
 
 const PARAGRAPH_CONTENT_ELEMENTS = new Set([
@@ -8439,7 +8873,7 @@ function joinSpansAtTrackedBreaks(markdown: string, marks: TrackedBreakMarks): s
 export function buildMarkdown(
   content: ContentItem[],
   comments: Map<string, Comment>,
-  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, { label: string; body: ContentItem[]; noteKind: 'footnote' | 'endnote' }>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string },
+  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, { label: string; body: ContentItem[]; noteKind: 'footnote' | 'endnote' }>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]> | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string; breaks?: boolean },
 ): string {
   let breakMarks: TrackedBreakMarks | undefined;
   const marks = () => breakMarks ??= trackedBreakMarks([content, [...comments.values()], options]);
@@ -8689,9 +9123,28 @@ export function buildMarkdown(
   for (const entry of noteEntries) detectGlobalOverlaps(entry.body);
 
   const noteLabels = options?.notes?.assignedLabels;
+  // How many tables the body and each note have with each first row and
+  // text, which the HTML export wrote around one goes to no other while
+  // it's there (see renderTableOrFallback): those the body and then the
+  // notes render, by their indices, but one written as its embed directive,
+  // which export doesn't count. A note's are by its key, as export's are.
+  const noteScopes = new Map([...options?.notes?.map ?? []].map(([key, entry]) => [entry, key]));
+  const tablesAlike = new Map<string, number>();
+  if (options?.tableHtmlAroundMapping) {
+    let index = 0;
+    for (const [scope, items] of [['', mergedContent] as const, ...noteEntries.map(entry => [noteScopes.get(entry) ?? '', entry.body] as const)]) {
+      for (const item of items) {
+        if (item.type !== 'table') continue;
+        const key = scope + '\n' + tableIdentity(item.rows);
+        if (!options.embedDirectiveMapping?.get(String(index))) tablesAlike.set(key, (tablesAlike.get(key) ?? 0) + 1);
+        index++;
+      }
+    }
+  }
   const renderOpts = {
     alwaysUseCommentIds: options?.alwaysUseCommentIds,
     timezone: options?.timezone,
+    breaks: options?.breaks,
     commentIdRemap,
     forceIdCommentIds,
     emittedIdCommentBodies,
@@ -8709,6 +9162,10 @@ export function buildMarkdown(
     tableDigitsMapping: options?.tableDigitsMapping ?? undefined,
     tableDecimalMarkMapping: options?.tableDecimalMarkMapping ?? undefined,
     tableDigitGroupingMapping: options?.tableDigitGroupingMapping ?? undefined,
+    tableHtmlAroundMapping: options?.tableHtmlAroundMapping ?? undefined,
+    usedTableHtmlAround: new Set<string>(),
+    tablesAlike,
+    tablesAlikeRendered: new Map<string, number>(),
     landscapeTableIndices: options?.landscapeTableIndices ?? undefined,
     portraitTableIndices: options?.portraitTableIndices ?? undefined,
     embedDirectiveMapping: options?.embedDirectiveMapping ?? undefined,
@@ -9761,7 +10218,12 @@ export function buildMarkdown(
       }
       const storedFormat = renderOpts?.tableFormatMapping?.get(String(tableIndex));
       const tableResult = renderTableOrFallback(item, comments, options, renderOpts, storedFormat, tableIndex);
-      pushWithHoistedPrefix(output, tableResult.directivePrefix, tableResult.body);
+      if (tableResult.before) {
+        output.push(tableResult.before + '\n\n' + tableResult.directivePrefix + tableResult.body);
+      } else {
+        pushWithHoistedPrefix(output, tableResult.directivePrefix, tableResult.body);
+      }
+      if (tableResult.after) output.push('\n\n' + tableResult.after);
       tableIndex++;
       endListContext();
       lastAlertParagraphKey = undefined;
@@ -10120,12 +10582,14 @@ export function buildMarkdown(
             continue;
           } else {
             const noteStoredFormat = noteRenderOpts?.tableFormatMapping?.get(String(tableIndex));
-            const noteTableResult = renderTableOrFallback(item, comments, options, noteRenderOpts, noteStoredFormat, tableIndex);
+            const noteTableResult = renderTableOrFallback(item, comments, options, noteRenderOpts, noteStoredFormat, tableIndex, noteScopes.get(entry));
+            if (noteTableResult.before) bodyParts.push(noteTableResult.before);
             if (noteTableResult.directivePrefix) {
               bodyParts.push(noteTableResult.directivePrefix.replace(/\n+$/, '') + '\n' + noteTableResult.body);
             } else {
               bodyParts.push(noteTableResult.body);
             }
+            if (noteTableResult.after) bodyParts.push(noteTableResult.after);
           }
           tableIndex++;
           partStart = bi + 1;
@@ -10682,6 +11146,7 @@ export async function convertDocx(
     tableDigitsMapping,
     tableDecimalMarkMapping,
     tableDigitGroupingMapping,
+    tableHtmlAroundMapping,
     storedPipeTableMaxLineWidth,
     storedGridTableMaxLineWidth,
     storedListIndent,
@@ -10738,6 +11203,7 @@ export async function convertDocx(
     tableDigitsMapping: extractTableDigitsMapping(zip),
     tableDecimalMarkMapping: extractTableDecimalMarkMapping(zip),
     tableDigitGroupingMapping: extractTableDigitGroupingMapping(zip),
+    tableHtmlAroundMapping: extractTableHtmlAroundMapping(zip),
     storedPipeTableMaxLineWidth: extractPipeTableMaxLineWidth(zip),
     storedGridTableMaxLineWidth: extractGridTableMaxLineWidth(zip),
     storedListIndent: extractListIndent(zip),
@@ -11018,6 +11484,9 @@ export async function convertDocx(
     tableIndent: options?.tableIndent,
     // Comment dates in the offset the frontmatter will declare, which export reads them in
     timezone: storedSettings?.timezone,
+    // Whether a line end is a line break, as in what the HTML around a
+    // table is written as
+    breaks: storedSettings?.breaks,
     alwaysUseCommentIds: options?.alwaysUseCommentIds,
     pipeTableMaxLineWidth: resolvedPipeTableMaxLineWidth,
     gridTableMaxLineWidth: resolvedGridTableMaxLineWidth,
@@ -11040,6 +11509,7 @@ export async function convertDocx(
     tableDigitsMapping,
     tableDecimalMarkMapping,
     tableDigitGroupingMapping,
+    tableHtmlAroundMapping,
     landscapeTableIndices: landscapeTableMapping,
     portraitTableIndices: portraitTableMapping,
     embedDirectiveMapping,
@@ -11049,18 +11519,29 @@ export async function convertDocx(
     sentinelGaps: sentinelGapMapping,
   });
 
-  // Strip Sources section if present (fallback for docs without ZOTERO_BIBL field codes)
+  // Strip Sources section if present (fallback for docs without ZOTERO_BIBL field codes):
+  // from a line not indented, as in a note, or in an HTML block, as the
+  // HTML around a table is
   if (!zoteroBiblData) {
     const lines = markdown.split('\n');
-    const sourcesIdx = lines.findIndex(l => SOURCES_HEADING_RE.test(l.trim()));
+    let inHtml: Set<number> | undefined;
+    const sourcesIdx = lines.findIndex((l, k) => SOURCES_HEADING_RE.test(l) && !(inHtml ??= new Set(htmlBlocksIn(markdown)
+      .flatMap(block => Array.from({ length: block.end - block.start }, (_, n) => block.start + n)))).has(k));
     if (sourcesIdx >= 0) {
       markdown = lines.slice(0, sourcesIdx).join('\n');
     }
   }
 
   // Strip trailing <!-- references --> marker when bibliography is at the end of the
-  // document (default position) so we don't inject a marker that wasn't in the original.
-  markdown = markdown.replace(/\n*<!--\s*references\s*-->\s*$/, '');
+  // document (default position) so we don't inject a marker that wasn't in the original:
+  // a block of its own, after a blank line, as import writes it, not one in the block
+  // of a line before it, as the HTML around a table is, which a comment that
+  // the marker ends can go on in past a blank line.
+  const referencesMarker = /(?:^|\n\n+)<!--\s*references\s*-->\s*$/.exec(markdown);
+  if (referencesMarker) {
+    const line = markdown.slice(0, referencesMarker.index + referencesMarker[0].indexOf('<!--')).split('\n').length - 1;
+    if (!htmlBlocksIn(markdown).some(block => block.start < line && line < block.end)) markdown = markdown.slice(0, referencesMarker.index);
+  }
 
   // Prepend YAML frontmatter if title or Zotero prefs were found
   const fm: Frontmatter = {};

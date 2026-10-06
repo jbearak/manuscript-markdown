@@ -81,6 +81,8 @@ function makeState(): DocxGenState {
     tableDigits: new Map(),
     tableDecimalMarks: new Map(),
     tableDigitGroupings: new Map(),
+    tableHtmlAround: new Map(),
+    tablesAlike: new Map(),
     tableRunRPrExtra: '',
     landscapeTables: new Set(),
     portraitTables: new Set(),

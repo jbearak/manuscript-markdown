@@ -104,7 +104,7 @@ const TAG_AT = new RegExp(HTML_TAG, 'y');
  *  none; a tag; or else text, to the next <, or a < that starts none. One
  *  with no end is `rest`, which runs to the end, past the end tag of what
  *  holds it, which the browser ends there. */
-function htmlPieceAt(html: string, at: number): { end: number; kind: 'comment' | 'raw' | 'tag' | 'text'; rest?: true } {
+export function htmlPieceAt(html: string, at: number): { end: number; kind: 'comment' | 'raw' | 'tag' | 'text'; rest?: true } {
   if (html[at] !== '<') {
     const next = html.indexOf('<', at + 1);
     return { end: next === -1 ? html.length : next, kind: 'text' };

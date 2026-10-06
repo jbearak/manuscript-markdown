@@ -64,3 +64,28 @@ export function parseHtmlTableCellSourceKind(raw: string | undefined): HtmlTable
     ? raw as HtmlTableCellSourceKind
     : undefined;
 }
+
+/** A cell's text as export and import of the HTML around an HTML table
+ *  both find it: with no line break, which import reads as a backslash and
+ *  a line end, as it reads one in Word's text, and spaces run together */
+const identityCellText = (text: string): string => text.replace(/\\\n/g, '').replace(/\s+/g, ' ').trim();
+
+/** A table's first row, as both find it: its cells' count and each one's
+ *  text, apart as no cell's text can be, as a | can be in one */
+export function tableFirstRowText(cells: string[]): string {
+  return cells.length + ':' + cells.map(identityCellText).join('\u001f');
+}
+
+/** Which table's text the rows' cells' `rows` are, as both find it: each
+ *  cell's text, row by row, but for the empty cells at a row's end, as Word
+ *  pads a short row with, hashed */
+export function tableContentsFingerprint(rows: string[][]): string {
+  const text = rows.map(cells => {
+    const texts = cells.map(identityCellText);
+    while (texts.length > 0 && !texts[texts.length - 1]) texts.pop();
+    return texts.join('\u001f');
+  }).join('\u001e');
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 0x01000193);
+  return text.length + ':' + (hash >>> 0).toString(16);
+}

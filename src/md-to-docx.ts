@@ -11,7 +11,7 @@ import { isAbsolute, join, resolve } from 'path';
 import { parseBibtex, BibtexEntry } from './bibtex-parser';
 import { parseFrontmatter, maskFrontmatter, serializeFrontmatter, Frontmatter, noteTypeToNumber, type ColorScheme, type CustomStyleDef, parseColWidths, expandColWidths, colWidthsToPct } from './frontmatter';
 import { formatTableNumbers, parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping, type TableDigits, type TableDecimalMark, type TableDigitGrouping } from './table-number-format';
-import type { TableNumberFormat } from './table-metadata';
+import { tableContentsFingerprint, tableFirstRowText, type TableNumberFormat } from './table-metadata';
 import { alertColorsByScheme, getDefaultColorScheme } from './alert-colors';
 import { ZoteroBiblData, zoteroStyleFullId } from './converter';
 import { isGfmDisallowedRawHtml, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from './gfm';
@@ -28,6 +28,17 @@ export { extractHtmlTables } from './html-table-parser';
 // --- Orientation sentinel regexes (hoisted for cache-friendliness in the token loop) ---
 const ORIENTATION_OPEN_RE = /^<!--\s*(landscape|portrait)\s*-->$/i;
 const ORIENTATION_CLOSE_RE = /^<!--\s*\/(landscape|portrait)\s*-->$/i;
+// The other directives a comment alone in a paragraph is (see directiveRest)
+const TABLE_FONT_SIZE_RE = /^<!--\s*table-font-size:\s*(\d+(?:\.\d+)?)\s*-->$/;
+const TABLE_FONT_RE = /^<!--\s*table-font:\s*(.+?)\s*-->$/;
+const TABLE_ORIENTATION_RE = /^<!--\s*table-orientation:\s*(landscape|portrait)\s*-->$/i;
+const TABLE_COL_WIDTHS_RE = /^<!--\s*table-col-widths:\s*(.+?)\s*-->$/;
+const TABLE_NUMBER_FORMAT_RE = /^<!--\s*table-(digits|decimal-mark|digit-grouping):\s*(.+?)\s*-->$/i;
+const REFERENCES_RE = /^<!--\s*(?:references|bibliography)\s*-->$/i;
+const INDENT_RE = /^<!--\s*(no-indent|indent)\s*-->$/i;
+const INLINE_STYLE_RE = /^<!--\s*style:\s*(.+?)\s*-->([\s\S]*?)<!--\s*\/style\s*-->$/i;
+const STYLE_OPEN_RE = /^<!--\s*style:\s*(.+?)\s*-->$/i;
+const STYLE_CLOSE_RE = /^<!--\s*\/style\s*-->$/i;
 const IMAGE_DIMENSION_ATTR_RE = '(\\d+(?:\\.\\d+)?|\\.\\d+)\\s*(px|in|cm|mm|pt|pc)?';
 
 // --- Implementation notes ---
@@ -123,6 +134,7 @@ export interface MdToken {
   tableDigits?: TableDigits;
   tableDecimalMark?: TableDecimalMark;
   tableDigitGrouping?: TableDigitGrouping;
+  tableHtmlAround?: [string, string]; // the HTML before and after an HTML table in its block, which Word doesn't show
   gridSourceColWidths?: number[]; // column char-widths inferred from +---+---+ source; persisted for round-trip fidelity and Word Online layout
   criticParaMark?: 'addition' | 'deletion'; // paragraph mark revision: a heading promoted from a full-paragraph {++### ...++} / {--### ...--} span, or a block split at a paragraph break inside a revision
   criticParaMarkRun?: MdRun; // the revision whose paragraph break ends this block; supplies author and date (default: the first run)
@@ -274,7 +286,7 @@ import { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup, findMatchin
 import { splitCriticMarkupInMath, type CriticMathPart } from './critic-math';
 import { findDollarMathAt } from './math-delimiters';
 import { CITATION_ITEM_START_RE, citationEnd, citationPrefixText } from './citation-syntax';
-import { wrapBareLatexEnvironments } from './latex-env-preprocess';
+import { DISPLAY_MATH_ENVIRONMENTS, wrapBareLatexEnvironments } from './latex-env-preprocess';
 export { PARA_PLACEHOLDER, LINE_PLACEHOLDER, preprocessCriticMarkup };
 
 // Custom inline rules
@@ -681,6 +693,43 @@ export function linkifiedText(address: string, email: boolean): string {
 export function startsHtmlBlock(text: string): boolean {
   citationTextMd ??= createMarkdownIt();
   return citationTextMd.parse(text, {})[0]?.type === 'html_block';
+}
+
+/** What of a comment, a block of its own, export doesn't read as a
+ *  directive, where it reads it as one: the text a style's goes around on
+ *  its line, as in <!-- style: Title -->Text<!-- /style -->, or else none.
+ *  Undefined where it reads it as none, as a table's with a value it
+ *  doesn't read (see parseMd). */
+export function directiveRest(comment: string): string | undefined {
+  const text = comment.trim();
+  const inlineStyle = INLINE_STYLE_RE.exec(text);
+  if (inlineStyle) return inlineStyle[2];
+  const fontSize = TABLE_FONT_SIZE_RE.exec(text);
+  const font = TABLE_FONT_RE.exec(text);
+  const colWidths = TABLE_COL_WIDTHS_RE.exec(text);
+  const format = TABLE_NUMBER_FORMAT_RE.exec(text);
+  const reads = fontSize ? parseFloat(fontSize[1]) > 0 && isFinite(parseFloat(fontSize[1]))
+    : font ? !!font[1].trim()
+    : colWidths ? parseColWidths(colWidths[1]) !== undefined
+    : format ? (format[1].toLowerCase() === 'digits' ? parseTableDigits(format[2])
+      : format[1].toLowerCase() === 'decimal-mark' ? parseTableDecimalMark(format[2]) : parseTableDigitGrouping(format[2])) !== undefined
+    : [ORIENTATION_OPEN_RE, ORIENTATION_CLOSE_RE, TABLE_ORIENTATION_RE, REFERENCES_RE, INDENT_RE, STYLE_OPEN_RE, STYLE_CLOSE_RE].some(re => re.test(text));
+  return reads ? '' : undefined;
+}
+
+/** Whether export reads Markdown `text` as one paragraph over all its lines */
+export function readsAsParagraph(text: string): boolean {
+  citationTextMd ??= createMarkdownIt();
+  const tokens = citationTextMd.parse(text, {});
+  return tokens.length === 3 && tokens[0].type === 'paragraph_open' && tokens[0].map?.[1] === text.split('\n').length;
+}
+
+/** The HTML blocks export reads in Markdown `text`, not in a quote or list:
+ *  each one's lines, from `start` to before `end`, and its text */
+export function htmlBlocksIn(text: string): Array<{ start: number; end: number; content: string }> {
+  citationTextMd ??= createMarkdownIt();
+  return citationTextMd.parse(text, {}).flatMap(token => token.type === 'html_block' && token.level === 0 && token.map
+    ? [{ start: token.map[0], end: token.map[1], content: token.content }] : []);
 }
 
 function citationRule(state: StateInline, silent: boolean): boolean {
@@ -1908,6 +1957,24 @@ function startsAdjacentList(item: MdToken, prevTopOrdered: boolean | undefined):
     && (!!item.ordered !== prevTopOrdered || (!!item.ordered && !!item.listStart));
 }
 
+/** Marks each HTML block in `tokens` that a bare LaTeX environment in
+ *  `text` was wrapped in as display math (`meta.wrappedLatex`), which the
+ *  block's text can't tell from dollar signs the Markdown has: by the lines
+ *  of `text` wrapped with a mark at the start of each, which are the parsed
+ *  text's (`lineCount` of them), or else by any line that starts as one */
+function markWrappedLatexBlocks(tokens: Token[], text: string, lineCount: number): void {
+  let code = 0xF8FF;
+  while (text.includes(String.fromCharCode(code))) code--;
+  const mark = String.fromCharCode(code);
+  const lines = preprocessCriticMarkup(wrapBareLatexEnvironments(text, mark)).split('\n');
+  for (const token of tokens) {
+    if (token.type !== 'html_block' || !token.map) continue;
+    const wraps = lines.length === lineCount ? lines.slice(token.map[0], token.map[1]).some(line => line.includes(mark))
+      : [...token.content.matchAll(/^[ ]{0,3}\$\$\\begin\{([a-zA-Z*]+)\}/gm)].some(match => DISPLAY_MATH_ENVIRONMENTS.has(match[1]));
+    if (wraps) token.meta = { ...token.meta, wrappedLatex: true };
+  }
+}
+
 /**
  * `tableNumberFormat` is the table number formatting `markdown` got, if it
  * changed anything, so that `originalText` can get it too: quote spacing
@@ -1928,6 +1995,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
   const env: { references?: Record<string, unknown>; documentLinkDefinitions?: Record<string, unknown> } =
     linkDefinitions ? { documentLinkDefinitions: linkDefinitions } : {};
   const tokens = md.parse(processed, env);
+  if (wrapped !== deLazified) markWrappedLatexBlocks(tokens, deLazified, processed.split('\n').length);
 
   const processedLines = processed.split('\n');
   // Number formatting can widen a table's cells past their padding, so
@@ -2027,8 +2095,8 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
     const run = result[i].runs[0];
     if (run.type !== 'html_comment') continue;
     const text = run.text.trim();
-    const fontSizeMatch = text.match(/^<!--\s*table-font-size:\s*(\d+(?:\.\d+)?)\s*-->$/);
-    const fontMatch = text.match(/^<!--\s*table-font:\s*(.+?)\s*-->$/);
+    const fontSizeMatch = text.match(TABLE_FONT_SIZE_RE);
+    const fontMatch = text.match(TABLE_FONT_RE);
     if (!fontSizeMatch && !fontMatch) continue;
     // Look for the next table token, skipping intervening HTML comment paragraphs.
     // Note: sentinel comments (landscape/portrait/references/bibliography) are still
@@ -2067,7 +2135,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
     const run = result[i].runs[0];
     if (run.type !== 'html_comment') continue;
     const text = run.text.trim();
-    const orientMatch = text.match(/^<!--\s*table-orientation:\s*(landscape|portrait)\s*-->$/i);
+    const orientMatch = text.match(TABLE_ORIENTATION_RE);
     if (!orientMatch) continue;
     // Forward scan: skip HTML comment paragraphs to find the table token.
     // Sentinel post-processing has not yet run, so sentinels are still plain
@@ -2091,7 +2159,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
     const run = result[i].runs[0];
     if (run.type !== 'html_comment') continue;
     const text = run.text.trim();
-    const cwMatch = text.match(/^<!--\s*table-col-widths:\s*(.+?)\s*-->$/);
+    const cwMatch = text.match(TABLE_COL_WIDTHS_RE);
     if (!cwMatch) continue;
     // Forward scan: skip HTML comment paragraphs to find the table token.
     // Sentinel post-processing has not yet run, so sentinels are still plain
@@ -2117,7 +2185,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
   for (let i = result.length - 1; i >= 0; i--) {
     if (result[i].type !== 'paragraph' || result[i].runs.length !== 1 || result[i].runs[0].type !== 'html_comment') continue;
     const text = result[i].runs[0].text.trim();
-    const match = text.match(/^<!--\s*table-(digits|decimal-mark|digit-grouping):\s*(.+?)\s*-->$/i);
+    const match = text.match(TABLE_NUMBER_FORMAT_RE);
     if (!match) continue;
     let target = i + 1;
     while (target < result.length && result[target].type === 'paragraph'
@@ -2266,7 +2334,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
       if (result[i].type !== 'paragraph' || result[i].runs.length !== 1) continue;
       const run = result[i].runs[0];
       if (run.type !== 'html_comment') continue;
-      if (!/^<!--\s*(?:references|bibliography)\s*-->$/i.test(run.text.trim())) continue;
+      if (!REFERENCES_RE.test(run.text.trim())) continue;
       if (markerCount === 0) {
         result.splice(i, 1, { type: 'paragraph', runs: [], bibliographyMarker: true });
       } else {
@@ -2284,7 +2352,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
     const run = result[i].runs[0];
     if (run.type !== 'html_comment') continue;
     const text = run.text.trim();
-    const indentMatch = text.match(/^<!--\s*(no-indent|indent)\s*-->$/i);
+    const indentMatch = text.match(INDENT_RE);
     if (!indentMatch) continue;
     const override = indentMatch[1].toLowerCase() as 'indent' | 'no-indent';
     // Forward scan: skip HTML comment paragraphs to find the next content paragraph
@@ -2328,7 +2396,7 @@ function applyCustomStyleSentinels(tokens: MdToken[], warnings?: string[], refer
     const text = run.text.trim();
 
     // Single-line inline style: <!-- style: X -->content<!-- /style -->
-    const inlineMatch = text.match(/^<!--\s*style:\s*(.+?)\s*-->([\s\S]*?)<!--\s*\/style\s*-->$/i);
+    const inlineMatch = text.match(INLINE_STYLE_RE);
     if (inlineMatch) {
       if (activeStyle && warnings) {
         warnings.push('Nested <!-- style: --> directives are not supported; outer style "' + activeStyle + '" closed implicitly.');
@@ -2359,7 +2427,7 @@ function applyCustomStyleSentinels(tokens: MdToken[], warnings?: string[], refer
       continue;
     }
 
-    const openMatch = text.match(/^<!--\s*style:\s*(.+?)\s*-->$/i);
+    const openMatch = text.match(STYLE_OPEN_RE);
     if (openMatch) {
       if (activeStyle && warnings) {
         warnings.push('Nested <!-- style: --> directives are not supported; outer style "' + activeStyle + '" closed implicitly.');
@@ -2369,7 +2437,7 @@ function applyCustomStyleSentinels(tokens: MdToken[], warnings?: string[], refer
       sentinel.blankLinesAfter = tokens[i].blankLinesAfter;
       tokens.splice(i, 1, sentinel);
       activeStyle = openMatch[1];
-    } else if (/^<!--\s*\/style\s*-->$/i.test(text)) {
+    } else if (STYLE_CLOSE_RE.test(text)) {
       if (activeStyle) {
         const sentinel: MdToken = { type: 'paragraph', runs: [], customStyleClose: true };
         sentinel.blankLinesBefore = tokens[i].blankLinesBefore;
@@ -2676,6 +2744,37 @@ function codeBlockLines(run: MdRun): MdRun[] {
   ];
 }
 
+const HTML_AROUND_TABLE_WARNING = 'HTML around a table in its HTML block not shown in Word (kept in the Markdown on round-trip).';
+const LATEX_HTML_AROUND_TABLES_WARNING = 'HTML around a table in an HTML block with a LaTeX environment dropped during conversion (not supported). Move the environment out of the block for round-trip fidelity.';
+const SHARED_HTML_AROUND_TABLES_WARNING = 'HTML around tables in one <pre> or similar HTML block dropped during conversion (not supported). Give each table a block of its own for round-trip fidelity.';
+
+/** The text of each cell of each row of a table generateTable wrote, as
+ *  import reads it (see tableCellText in converter.ts): its runs' text,
+ *  shown or deleted, as a tracked change's, with a tab, non-breaking or
+ *  optional hyphen as the character Word's element for it is, but not a
+ *  hidden run's, as an HTML comment's, or a field's, as a citation's, which
+ *  import reads as what they are, and no cell that goes on a merge above */
+function wordTableTexts(xml: string): string[][] {
+  return [...xml.matchAll(/<w:tr(?:\s[^>]*)?>([\s\S]*?)<\/w:tr>/g)].map(row => [...row[1].matchAll(/<w:tc(?:\s[^>]*)?>([\s\S]*?)<\/w:tc>/g)]
+    .filter(cell => !/<w:vMerge\/>/.test(cell[1]))
+    .map(cell => {
+      let text = '';
+      let fields = 0;
+      for (const run of cell[1].matchAll(/<w:r(?:\s[^>]*)?>([\s\S]*?)<\/w:r>/g)) {
+        // The element, as text can't hold a <, which its attribute's can
+        const fieldChar = /<w:fldChar\s[^>]*w:fldCharType="(begin|end)"/.exec(run[1])?.[1];
+        if (fieldChar === 'begin') fields++;
+        else if (fieldChar === 'end') fields = Math.max(0, fields - 1);
+        else if (fields === 0 && !run[1].includes('<w:vanish/>')) {
+          for (const piece of run[1].matchAll(/<w:(t|delText)(?:\s[^>]*)?>([^<]*)<\/w:\1>|<w:(tab|noBreakHyphen|softHyphen)\/>/g)) {
+            text += piece[3] ? { tab: '\t', noBreakHyphen: '\u2011', softHyphen: '\u00AD' }[piece[3]] : decodeHtmlEntities(piece[2]);
+          }
+        }
+      }
+      return text;
+    }));
+}
+
 function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel = 0, warnings?: string[], sourceLines?: string[]): MdToken[] {
   const result: MdToken[] = [];
   let i = 0;
@@ -2901,7 +3000,9 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
           i++;
           break;
         }
-        if (/^<!--[\s\S]*?-->\s*$/.test(htmlContent.trim())) {
+        // Not a block that starts and ends with a comment but holds a table
+        // outside them, as import writes the HTML around a table on its lines
+        if (/^<!--[\s\S]*?-->\s*$/.test(htmlContent.trim()) && !extractHtmlTables(htmlContent).some(meta => meta.rows.length > 0)) {
           // Compute blank lines before this HTML comment using token.map
           const thisStart = token.map?.[0] ?? 0;
           // Find previous token's end line — scan backwards through markdown-it tokens
@@ -2974,9 +3075,27 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
               : { type: 'hardbreak' as const, text: '\n' }),
           });
         } else {
-          const htmlTables = extractHtmlTables(htmlContent);
-          if (htmlTables.some(meta => meta.rows.length > 0)) {
-            for (const meta of htmlTables) {
+          // A table whose rows are all in comments, which nothing of shows,
+          // is HTML around a table that shows, as the rest of the block is
+          const allTables = extractHtmlTables(htmlContent);
+          const htmlTables = allTables.filter(meta => meta.rows.length > 0);
+          // A <pre> or the like before the first table, which only its end
+          // ends, that goes on past it holds the tables after too, which
+          // import can't keep it around where Word puts text between them or
+          // one leaves HTML, as the start would go on over that: the HTML
+          // around them goes
+          const opener = /^[ \t]*<(?:(script|pre|style|textarea)(?=[\s>]|$)|(!--)|(\?)|(!\[CDATA\[)|![A-Za-z])/i.exec(htmlContent);
+          const openerEnd = !opener ? undefined : opener[1] ? new RegExp('</' + opener[1] + '>', 'i') : opener[2] ? /-->/ : opener[3] ? /\?>/ : opener[4] ? /\]\]>/ : />/;
+          const sharedOpener = htmlTables.length > 1 && !!openerEnd && !openerEnd.test(htmlContent.slice(0, htmlTables[0].start));
+          if (sharedOpener) warnings?.push(SHARED_HTML_AROUND_TABLES_WARNING);
+          // So does a LaTeX environment at a line's start, which parseMd
+          // wrapped in two dollar signs each side as display math, with its
+          // blank lines gone, before the block was read, which the Markdown
+          // didn't hold (see markWrappedLatexBlocks)
+          const wrappedLatex = !!token.meta?.wrappedLatex;
+          if (wrappedLatex) warnings?.push(LATEX_HTML_AROUND_TABLES_WARNING);
+          if (htmlTables.length > 0) {
+            for (const [k, meta] of htmlTables.entries()) {
               // A comment between rows or cells hides them, as the preview
               // does, but Word's table can't hold it
               if (meta.comments) warnings?.push('Comment between an HTML table\'s rows or cells dropped during conversion (not supported). Move it outside the table for round-trip fidelity.');
@@ -2998,6 +3117,16 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
                 if (meta.decimalMark) tableToken.tableDecimalMark = meta.decimalMark;
                 if (meta.digitGrouping) tableToken.tableDigitGrouping = meta.digitGrouping;
                 if (meta.embedIdx !== undefined) tableToken.embedIdx = meta.embedIdx;
+                // The rest of the block, as a caption in a <p> or a <div>
+                // around the table, which Word doesn't show, goes with the
+                // table it's next to, as an image's goes with it: the HTML
+                // before the first table, but the indent of the table's
+                // line, and after each to the next, but the line end and
+                // indent before that. Import writes it as it was, with the
+                // HTML on the table's lines on them, as it may end a block.
+                const before = k === 0 ? htmlContent.slice(0, meta.start).replace(/(^|\n)[ \t]*$/, '$1') : '';
+                const after = htmlContent.slice(meta.end, htmlTables[k + 1]?.start).replace(/\s+$/, '');
+                if (/\S/.test(before + after) && !sharedOpener && !wrappedLatex) tableToken.tableHtmlAround = [/\S/.test(before) ? before : '', /\S/.test(after) ? after : ''];
                 result.push(tableToken);
               }
             }
@@ -3008,7 +3137,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
             // preview shows nothing of, but Word's table can't hold, and
             // hidden, would lose the rest of the block, and make a comment
             // that reads as a directive one.
-            if (htmlTables.length > 0) warnings?.push('HTML table whose rows are all in comments exported as text (not supported). Move the comments outside the table for round-trip fidelity.');
+            if (allTables.length > 0) warnings?.push('HTML table whose rows are all in comments exported as text (not supported). Move the comments outside the table for round-trip fidelity.');
             result.push({
               type: 'paragraph',
               runs: [{ type: 'text', text: htmlContent.replace(/\n$/, '') }]
@@ -3935,6 +4064,8 @@ export interface DocxGenState {
   tableDigits: Map<number, string>;
   tableDecimalMarks: Map<number, string>;
   tableDigitGroupings: Map<number, string>;
+  tableHtmlAround: Map<number, [string, string, string, string, string, string, string]>; // table index -> the HTML before and after it in its block, its first row and contents, the count of tables alike in both before it, its note's kind and ID, or '' in the body, and the count of tables alike in both export wrote in all
+  tablesAlike: Map<string, number>; // a table's note, first row and contents -> the tables so far with all three
   fontOverrides?: FontOverrides;       // document-level font overrides for table default resolution
   listIndent: 'tab' | 'spaces'; // indentation style for nested list items
   consecutiveReplyParaIds: Set<string>; // parent paraIds whose replies were in consecutive format
@@ -3993,6 +4124,26 @@ function recordTableMetadata(token: MdToken, state: DocxGenState): void {
   if (token.tableDigits !== undefined) state.tableDigits.set(tableIndex, String(token.tableDigits));
   if (token.tableDecimalMark) state.tableDecimalMarks.set(tableIndex, token.tableDecimalMark);
   if (token.tableDigitGrouping) state.tableDigitGroupings.set(tableIndex, token.tableDigitGrouping);
+  if (token.tableHtmlAround && !state.warnings.includes(HTML_AROUND_TABLE_WARNING)) state.warnings.push(HTML_AROUND_TABLE_WARNING);
+}
+
+/** Records the HTML around a table in its block with the table's identity,
+ *  which import finds the table by, to put the HTML back with no other, as
+ *  one Word added or deleted would shift the tables' indices: its first
+ *  row, as its cells' count and text, its text, as the Word table `xml`
+ *  holds it, and the count of tables alike in both before it in the body
+ *  or its note (`scope`), which import counts too, but for one it writes as
+ *  its embed directive, whose HTML it doesn't write either, and, once all
+ *  are written, the count of them all */
+function recordTableIdentity(token: MdToken, xml: string, state: DocxGenState, scope: string): void {
+  const texts = wordTableTexts(xml);
+  const firstRow = tableFirstRowText(texts[0] ?? []);
+  const contents = tableContentsFingerprint(texts);
+  const key = scope + '\n' + firstRow + '\n' + contents;
+  const alikeBefore = state.tablesAlike.get(key) ?? 0;
+  if (token.embedIdx !== undefined && token.embedIdx < state.embedDirectives.length) return;
+  state.tablesAlike.set(key, alikeBefore + 1);
+  if (token.tableHtmlAround) state.tableHtmlAround.set(state.tableIndex, [...token.tableHtmlAround, firstRow, contents, String(alikeBefore), scope, '']);
 }
 
 interface CommentEntry {
@@ -7035,6 +7186,45 @@ export function generateParagraph(token: MdToken, state: DocxGenState, options?:
   return xml;
 }
 
+/** A table's grid columns, as its cells and their spans fill them, and the
+ *  columns rowspan cells from previous rows occupy, at least one */
+function tableGridColumns(rows: MdTableRow[]): number {
+  let totalCols = 0;
+  const simMerge = new Map<number, { remaining: number; colspan: number }>();
+  for (const row of rows) {
+    let gridCol = 0;
+    let ci = 0;
+    // Walk the grid for this row, skipping columns occupied by rowspan continuations
+    while (ci < row.cells.length) {
+      // Skip columns occupied by pending vertical merges
+      let pending = simMerge.get(gridCol);
+      while (pending && pending.remaining > 0) {
+        pending.remaining--;
+        if (pending.remaining === 0) simMerge.delete(gridCol);
+        gridCol += pending.colspan;
+        pending = simMerge.get(gridCol);
+      }
+      const cell = row.cells[ci++];
+      const cs = cell.colspan || 1;
+      const rs = cell.rowspan || 1;
+      if (rs > 1) {
+        simMerge.set(gridCol, { remaining: rs - 1, colspan: cs });
+      }
+      gridCol += cs;
+    }
+    // Skip any trailing columns still occupied by merges
+    let pending = simMerge.get(gridCol);
+    while (pending && pending.remaining > 0) {
+      pending.remaining--;
+      if (pending.remaining === 0) simMerge.delete(gridCol);
+      gridCol += pending.colspan;
+      pending = simMerge.get(gridCol);
+    }
+    if (gridCol > totalCols) totalCols = gridCol;
+  }
+  return totalCols || 1;
+}
+
 export function generateTable(token: MdToken, state: DocxGenState, options?: MdToDocxOptions, bibEntries?: Map<string, BibtexEntry>, citeprocEngine?: CiteprocEngine): string {
   if (!token.rows) return '';
 
@@ -7075,42 +7265,7 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
 
   // Compute total grid columns by simulating grid occupancy (accounts for
   // columns implicitly occupied by rowspan cells from previous rows).
-  let totalCols = 0;
-  {
-    const simMerge = new Map<number, { remaining: number; colspan: number }>();
-    for (const row of token.rows) {
-      let gridCol = 0;
-      let ci = 0;
-      // Walk the grid for this row, skipping columns occupied by rowspan continuations
-      while (ci < row.cells.length) {
-        // Skip columns occupied by pending vertical merges
-        let pending = simMerge.get(gridCol);
-        while (pending && pending.remaining > 0) {
-          pending.remaining--;
-          if (pending.remaining === 0) simMerge.delete(gridCol);
-          gridCol += pending.colspan;
-          pending = simMerge.get(gridCol);
-        }
-        const cell = row.cells[ci++];
-        const cs = cell.colspan || 1;
-        const rs = cell.rowspan || 1;
-        if (rs > 1) {
-          simMerge.set(gridCol, { remaining: rs - 1, colspan: cs });
-        }
-        gridCol += cs;
-      }
-      // Skip any trailing columns still occupied by merges
-      let pending = simMerge.get(gridCol);
-      while (pending && pending.remaining > 0) {
-        pending.remaining--;
-        if (pending.remaining === 0) simMerge.delete(gridCol);
-        gridCol += pending.colspan;
-        pending = simMerge.get(gridCol);
-      }
-      if (gridCol > totalCols) totalCols = gridCol;
-    }
-  }
-  if (totalCols === 0) totalCols = 1;
+  const totalCols = tableGridColumns(token.rows);
 
   // Compute page text width in dxa for gridCol w:w attributes (required for Word Online).
   // Use landscape page width (pgSz.h) when the table lives in a landscape section or
@@ -7821,21 +7976,26 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     else if (token.type !== 'list_item' && !token.listContinuation) lastTopItem = undefined;
     if (token.type === 'table') {
       recordTableMetadata(token, state);
+      const table = () => {
+        const xml = generateTable(token, state, options, bibEntries, citeprocEngine);
+        recordTableIdentity(token, xml, state, '');
+        return xml;
+      };
       // Table-only landscape: wrap with section breaks (skip if already in fence-based landscape)
       if (token.tableOrientation === 'landscape' && !state.inLandscapeSection && !state.inPortraitSection) {
         state.landscapeTables.add(state.tableIndex);
         emitPortraitBreak();
-        body += generateTable(token, state, options, bibEntries, citeprocEngine);
+        body += table();
         emitLandscapeBreak();
       } else if (token.tableOrientation === 'portrait' && !state.inPortraitSection && !state.inLandscapeSection) {
         // Table-only portrait: wrap with portrait section breaks
         state.portraitTables.add(state.tableIndex);
         emitPortraitBreak();
-        body += generateTable(token, state, options, bibEntries, citeprocEngine);
+        body += table();
         state.portraitBreakOrdinals.add(state.sectionBreakOrdinal);
         emitPortraitBreak();
       } else {
-        body += generateTable(token, state, options, bibEntries, citeprocEngine);
+        body += table();
       }
       // Record embed directive for round-trip if this table came from an embed
       if (token.embedIdx !== undefined && token.embedIdx < state.embedDirectives.length) {
@@ -8232,6 +8392,8 @@ export async function convertMdToDocx(
     tableDigits: new Map(),
     tableDecimalMarks: new Map(),
     tableDigitGroupings: new Map(),
+    tableHtmlAround: new Map(),
+    tablesAlike: new Map(),
     pipeTableAligned: new Map(),
     gridSourceColWidths: new Map(),
     fontOverrides,
@@ -8434,6 +8596,8 @@ export async function convertMdToDocx(
     const selfRefTag = state.notesMode === 'endnotes' ? 'w:endnoteRef' : 'w:footnoteRef';
     const pStyle = state.notesMode === 'endnotes' ? 'EndnoteText' : 'FootnoteText';
     const refStyle = state.notesMode === 'endnotes' ? 'EndnoteReference' : 'FootnoteReference';
+    // The note's key on import, which counts the tables alike in it
+    const tableScope = (state.notesMode === 'endnotes' ? 'endnote' : 'footnote') + ':' + noteId;
     let bodyXml = '';
     const paragraphPPr = '<w:pPr><w:pStyle w:val="' + pStyle + '"/></w:pPr>';
     // If this footnote is cross-referenced, wrap the self-ref run in a bookmark
@@ -8477,7 +8641,9 @@ export async function convertMdToDocx(
         if (t.type === 'table') {
           recordTableMetadata(t, state);
           bodyXml += '<w:p>' + paragraphPPr + selfRefRun + '</w:p>';
-          bodyXml += generateTable(t, state, options, bibEntries, citeprocEngine);
+          const xml = generateTable(t, state, options, bibEntries, citeprocEngine);
+          recordTableIdentity(t, xml, state, tableScope);
+          bodyXml += xml;
           if (t.embedIdx !== undefined && t.embedIdx < state.embedDirectives.length) {
             state.embedDirectiveMap.set(state.tableIndex, t.embedIdx + '\t' + state.embedDirectives[t.embedIdx]);
           }
@@ -8496,7 +8662,9 @@ export async function convertMdToDocx(
       } else {
         if (t.type === 'table') {
           recordTableMetadata(t, state);
-          bodyXml += generateTable(t, state, options, bibEntries, citeprocEngine);
+          const xml = generateTable(t, state, options, bibEntries, citeprocEngine);
+          recordTableIdentity(t, xml, state, tableScope);
+          bodyXml += xml;
           if (t.embedIdx !== undefined && t.embedIdx < state.embedDirectives.length) {
             state.embedDirectiveMap.set(state.tableIndex, t.embedIdx + '\t' + state.embedDirectives[t.embedIdx]);
           }
@@ -8716,6 +8884,11 @@ export async function convertMdToDocx(
   customProps.push(...imageFormatProps(state.imageFormats));
   customProps.push(...noteImageFormatProps(state.noteImageFormats));
   customProps.push(...tableFormatProps(state.tableFormats));
+  if (state.tableHtmlAround.size > 0) {
+    // The count of tables alike export wrote in all, which is known only now
+    for (const around of state.tableHtmlAround.values()) around[6] = String(state.tablesAlike.get(around[5] + '\n' + around[2] + '\n' + around[3]) ?? 0);
+    customProps.push(...chunkCustomProps('MANUSCRIPT_TABLE_HTML_AROUND_', JSON.stringify(Object.fromEntries(state.tableHtmlAround))));
+  }
   customProps.push(...pipeTableAlignedProps(state.pipeTableAligned));
   customProps.push(...gridSourceColWidthsProps(state.gridSourceColWidths));
   customProps.push(...tableFontSizeProps(state.tableFontSizes, fontOverrides?.tableSizeHp));
