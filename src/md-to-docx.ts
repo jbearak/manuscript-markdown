@@ -4093,21 +4093,37 @@ function landscapeSectPrXml(pgSz: PageSize, margins: string, rsid?: string): str
     '<w:cols w:space="720"/></w:sectPr>';
 }
 
-/** A sectPr with the template's page number format, and, if it is the
- *  first written, its page number start, headers and footers: the sections
- *  after it take them from it */
-function withTemplateSectPr(sectPr: string, state: DocxGenState): string {
-  if (!state.templateSections) return sectPr;
-  const first = !state.wroteSectPr;
-  state.wroteSectPr = true;
-  return withTemplateSection(sectPr, state.templateSections, first);
+/** The body and its closing sectPr with the template's page number format
+ *  on each section, and its page number start, headers and footers on the
+ *  first, in the body's order: the sections after it take them from it */
+function withTemplateSectPrs(body: string, closingSectPr: string, sections?: TemplateSections): { body: string; closingSectPr: string } {
+  if (!sections) return { body, closingSectPr };
+  let first = true;
+  const withTemplate = (sectPr: string): string => {
+    const decorated = withTemplateSection(sectPr, sections, first);
+    first = false;
+    return decorated;
+  };
+  body = body.replace(/<w:sectPr\b[\s\S]*?<\/w:sectPr>/g, withTemplate);
+  return { body, closingSectPr: withTemplate(closingSectPr) };
+}
+
+/** Build the final body-level sectPr of a section a fence ends: the
+ *  template's, if any, with its page turned to the fence's orientation, or
+ *  else one of its own */
+function fencedBodySectPrXml(landscape: boolean, pgSz: PageSize, margins: string, templateSectPr?: string, rsid?: string): string {
+  const fencePgSz = landscape ? '<w:pgSz w:w="' + pgSz.h + '" w:h="' + pgSz.w + '" w:orient="landscape"/>' : '<w:pgSz w:w="' + pgSz.w + '" w:h="' + pgSz.h + '"/>';
+  if (templateSectPr && /<w:pgSz\b[^>]*\/>/.test(templateSectPr)) return templateSectPr.replace(/<w:pgSz\b[^>]*\/>/, () => fencePgSz);
+  return '<w:sectPr' + (rsid ? ' w:rsidR="' + rsid + '"' : '') + '>' + fencePgSz +
+    '<w:pgMar ' + margins + '/>' +
+    '<w:cols w:space="720"/></w:sectPr>';
 }
 
 /** Build the final body-level sectPr (no <w:type>, direct child of <w:body>). */
 function bodyClosingSectPrXml(pgSz: PageSize, margins: string, templateSectPr?: string, rsid?: string): string {
   // If we have a template sectPr, reuse it as-is to preserve any additional
   // properties (columns, etc.). It comes without its headers, footers and
-  // page numbering, which withTemplateSectPr gives it
+  // page numbering, which withTemplateSectPrs gives it
   if (templateSectPr) return templateSectPr;
   return '<w:sectPr' + (rsid ? ' w:rsidR="' + rsid + '"' : '') + '><w:pgSz w:w="' + pgSz.w + '" w:h="' + pgSz.h + '"/>' +
     '<w:pgMar ' + margins + '/>' +
@@ -4187,7 +4203,6 @@ export interface DocxGenState {
   templatePageSection?: number; // the last section's ordinal, the number of breaks before it, where it takes the template's landscape page, which no fence set
   templateSectPr?: string;      // trailing <w:sectPr> from template document.xml
   templateSections?: TemplateSections; // the template's, whose headers, footers and page numbering the sectPrs written take
-  wroteSectPr?: boolean; // whether a sectPr was written, after which none starts the document
   pipeTableAligned: Map<number, boolean>; // table index -> whether pipe table was column-aligned
   gridSourceColWidths: Map<number, number[]>; // table index -> original grid table column char-widths
   sentinelGaps: Record<string, number>; // before-gap for landscape/portrait sentinels (e.g. "pc0" → blankLinesBefore for first portrait_close)
@@ -8145,13 +8160,16 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   const pgSz = parseTemplatePgSz(state.templateSectPr);
   const margins = parseTemplateMargins(state.templateSectPr);
 
+  // The section break paragraphs, each empty but for its section's properties
+  const portraitBreak = '<w:p><w:pPr>' + portraitSectPrXml(pgSz, margins, state.rsid) + '</w:pPr></w:p>';
+  const landscapeBreak = '<w:p><w:pPr>' + landscapeSectPrXml(pgSz, margins, state.rsid) + '</w:pPr></w:p>';
   // Helper: emit a portrait section break paragraph and increment ordinal
   function emitPortraitBreak(): void {
-    body += '<w:p><w:pPr>' + withTemplateSectPr(portraitSectPrXml(pgSz, margins, state.rsid), state) + '</w:pPr></w:p>';
+    body += portraitBreak;
     state.sectionBreakOrdinal++;
   }
   function emitLandscapeBreak(): void {
-    body += '<w:p><w:pPr>' + withTemplateSectPr(landscapeSectPrXml(pgSz, margins, state.rsid), state) + '</w:pPr></w:p>';
+    body += landscapeBreak;
     state.sectionBreakOrdinal++;
   }
 
@@ -8480,15 +8498,29 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   // Store sentinel gap metadata on state for custom property emission
   state.sentinelGaps = sentinelGaps;
 
-  // Append body-closing sectPr (preserves template page layout)
-  const bodySectPr = bodyClosingSectPrXml(pgSz, margins, state.templateSectPr, state.rsid);
-  // Import reads the last section's orientation from these properties, so
-  // where they're a template's landscape page, which no fence set, a custom
-  // property says so, by the number of breaks before the section
-  if (state.sectionBreakOrdinal > 0 && bodySectPr === state.templateSectPr && isLandscapeSectPr(bodySectPr)) {
+  // Append body-closing sectPr (preserves template page layout). A section
+  // that ends the document, with nothing after its break, has the body's
+  // properties, as Word writes the last section's, and no break, which
+  // would leave the last section empty, a blank last page, with the page
+  // turned to its fence's orientation where the template's isn't. Not where
+  // the section is empty, whose break is all it has, nor where it's the only
+  // one, whose orientation import reads as the page's (see
+  // extractDocumentContent in converter.ts).
+  let closingSectPr = bodyClosingSectPrXml(pgSz, margins, state.templateSectPr, state.rsid);
+  const lastBreak = body.endsWith(landscapeBreak) ? landscapeBreak : body.endsWith(portraitBreak) ? portraitBreak : undefined;
+  const beforeLastBreak = lastBreak && body.slice(0, body.length - lastBreak.length);
+  const breakEnd = '</w:sectPr></w:pPr></w:p>';
+  if (lastBreak && beforeLastBreak && beforeLastBreak.includes(breakEnd) && !beforeLastBreak.endsWith(breakEnd)) {
+    body = beforeLastBreak;
+    const landscape = lastBreak === landscapeBreak;
+    if (landscape || isLandscapeSectPr(closingSectPr)) closingSectPr = fencedBodySectPrXml(landscape, pgSz, margins, state.templateSectPr, state.rsid);
+  } else if (state.sectionBreakOrdinal > 0 && state.templateSectPr && isLandscapeSectPr(closingSectPr)) {
+    // Import reads the last section's orientation from these properties, so
+    // where they're a template's landscape page, which no fence set, a custom
+    // property says so, by the number of breaks before the section
     state.templatePageSection = state.sectionBreakOrdinal;
   }
-  const closingSectPr = withTemplateSectPr(bodySectPr, state);
+  ({ body, closingSectPr } = withTemplateSectPrs(body, closingSectPr, state.templateSections));
 
   return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
     '<w:document xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wpi="http://schemas.microsoft.com/office/word/2010/wordprocessingInk" xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" mc:Ignorable="w14 w15 wp14">\n' +

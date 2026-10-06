@@ -233,6 +233,16 @@ describe('a template\'s headers and footers', () => {
     expect(await sectionHeaders(docx)).toEqual(['portrait titlePg ' + ALL_HEADERS, 'landscape', 'portrait']);
   });
 
+  it('go in the first section where it is a bibliography\'s own, before a section that starts the document', async () => {
+    // Export writes the bibliography's section break after the sections
+    // after it, once it knows the bibliography lists something
+    const md = '---\ncsl: apa\n---\n<!-- references -->\n\n<!-- landscape -->\n\nWide [@key1].\n\n<!-- /landscape -->\n\nAfter\n';
+    const bibtex = '@article{key1, author={Smith, John}, title={Title}, journal={J}, year={2020}}';
+    const { docx } = await convertMdToDocx(md, { templateDocx: await headerTemplate(), bibtex });
+    expect(await packageProblems(docx)).toEqual([]);
+    expect(await sectionHeaders(docx)).toEqual(['portrait titlePg ' + ALL_HEADERS, 'landscape', 'portrait']);
+  });
+
   it('take the last section\'s, each as that section shows it, and the first\'s title page', async () => {
     const { docx } = await convertMdToDocx('Hello', { templateDocx: await headerTemplate({ landscapeLast: true }) });
     expect(await packageProblems(docx)).toEqual([]);

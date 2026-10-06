@@ -4941,6 +4941,15 @@ describe('landscape sections', () => {
       expect(state.landscapeTables.has(0)).toBe(true);
     });
 
+    it('turns the template\'s page for a landscape section that ends the document, and keeps the rest of its properties', () => {
+      // The section's properties are the body's, with no break after it
+      const state = makeState();
+      state.templateSectPr = '<w:sectPr><w:headerReference w:type="default" r:id="rId99"/><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1000" w:right="1000" w:bottom="1000" w:left="1000" w:header="700" w:footer="700" w:gutter="0"/><w:cols w:space="720"/></w:sectPr>';
+      const xml = generateDocumentXml(parseMd('A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->'), state);
+      expect(xml.slice(xml.lastIndexOf('<w:sectPr'))).toStartWith('<w:sectPr><w:headerReference w:type="default" r:id="rId99"/><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/><w:pgMar w:top="1000"');
+      expect(xml.match(/w:orient="landscape"/g)).toHaveLength(1);
+    });
+
     it('preserves template sectPr as body closing', () => {
       const tokens: MdToken[] = [{ type: 'paragraph', runs: [{ type: 'text', text: 'Test' }] }];
       const state = makeState();
@@ -5127,36 +5136,38 @@ describe('portrait sections', () => {
 
     it('does not emit blank page between landscape close and portrait open', () => {
       const tokens: MdToken[] = [
+        { type: 'paragraph', runs: [{ type: 'text', text: 'Before' }] },
         { type: 'paragraph', runs: [], landscapeOpen: true },
         { type: 'paragraph', runs: [{ type: 'text', text: 'Landscape' }] },
         { type: 'paragraph', runs: [], landscapeClose: true },
         { type: 'paragraph', runs: [], portraitOpen: true },
         { type: 'paragraph', runs: [{ type: 'text', text: 'Portrait' }] },
         { type: 'paragraph', runs: [], portraitClose: true },
+        { type: 'paragraph', runs: [{ type: 'text', text: 'After' }] },
       ];
       const state = makeState();
       const xml = generateDocumentXml(tokens, state);
-      // 2 breaks: landscapeClose landscape break (skip portraitOpen), portraitClose portrait break.
-      // The landscape section opens the document, so it needs no break before it.
+      // 3 breaks: landscapeOpen portrait break, landscapeClose landscape break (skip portraitOpen), portraitClose portrait break
       const nextPageCount = (xml.match(/<w:type w:val="nextPage"\/>/g) || []).length;
-      expect(nextPageCount).toBe(2);
+      expect(nextPageCount).toBe(3);
     });
 
     it('does not emit blank page between portrait close and landscape open', () => {
       const tokens: MdToken[] = [
+        { type: 'paragraph', runs: [{ type: 'text', text: 'Before' }] },
         { type: 'paragraph', runs: [], portraitOpen: true },
         { type: 'paragraph', runs: [{ type: 'text', text: 'Portrait' }] },
         { type: 'paragraph', runs: [], portraitClose: true },
         { type: 'paragraph', runs: [], landscapeOpen: true },
         { type: 'paragraph', runs: [{ type: 'text', text: 'Landscape' }] },
         { type: 'paragraph', runs: [], landscapeClose: true },
+        { type: 'paragraph', runs: [{ type: 'text', text: 'After' }] },
       ];
       const state = makeState();
       const xml = generateDocumentXml(tokens, state);
-      // 2 breaks: portraitClose portrait break (skip landscapeOpen), landscapeClose landscape break.
-      // The portrait section opens the document, so it needs no break before it.
+      // 3 breaks: portraitOpen portrait break, portraitClose portrait break (skip landscapeOpen), landscapeClose landscape break
       const nextPageCount = (xml.match(/<w:type w:val="nextPage"\/>/g) || []).length;
-      expect(nextPageCount).toBe(2);
+      expect(nextPageCount).toBe(3);
     });
 
     it('emits section breaks for table-only portrait', () => {

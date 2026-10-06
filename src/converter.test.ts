@@ -13168,8 +13168,28 @@ describe('A section at the start of the document', () => {
 
 describe('A section at the end of the document', () => {
   const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  const documentXml = async (docx: Uint8Array) => (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
   const landscapeSectPr = '<w:sectPr><w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/><w:cols w:space="720"/></w:sectPr>';
   const portraitSectPr = '<w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/><w:cols w:space="720"/></w:sectPr>';
+
+  test.each([
+    ['a landscape section', 'A.\n\n<!-- landscape -->\n\nText.\n\n<!-- /landscape -->\n', true],
+    ['a portrait section', 'A.\n\n<!-- portrait -->\n\nText.\n\n<!-- /portrait -->\n', false],
+    ['a landscape section after another', 'A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n<!-- landscape -->\n\nC.\n\n<!-- /landscape -->\n', true],
+    ['a landscape section of a table alone', 'A.\n\n<!-- landscape -->\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n<!-- /landscape -->\n', true],
+    ['a table with its own landscape section', 'A.\n\n<!-- table-orientation: landscape -->\n| a | b |\n| --- | --- |\n| 1 | 2 |\n', true],
+    ['a table with its own portrait section', 'A.\n\n<!-- table-orientation: portrait -->\n| a | b |\n| --- | --- |\n| 1 | 2 |\n', false],
+  ])('gives %s the body\'s properties, with no break after it', async (_, md, landscape) => {
+    // Its break was the document's last paragraph, which left the last
+    // section, the body's, empty
+    const { docx } = await convertMdToDocx(md);
+    const xml = await documentXml(docx);
+    expect(xml).not.toMatch(/<\/w:sectPr><\/w:pPr><\/w:p>\s*<w:sectPr\b/);
+    expect(xml.slice(xml.lastIndexOf('<w:sectPr')).includes('w:orient="landscape"')).toBe(landscape);
+    const md1 = (await convertDocx(docx)).markdown;
+    expect(strip(md1)).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(md1)).docx)).markdown).toBe(md1);
+  });
 
   test('reads a Word document whose last section is landscape, which has the body\'s properties', async () => {
     // As Word writes one: the section before ends at its last paragraph, and
@@ -13182,7 +13202,22 @@ describe('A section at the end of the document', () => {
     zip.remove('docProps/custom.xml');
     const md1 = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
     expect(md1).toBe('A.\n\n<!-- landscape -->\nB.\n\n<!-- /landscape -->\n');
+    // And back to Word, the body's properties are the section's, as Word's were
+    const xml2 = await documentXml((await convertMdToDocx(md1)).docx);
+    expect(xml2.slice(xml2.lastIndexOf('<w:sectPr'))).toContain('w:orient="landscape"');
     expect(strip((await convertDocx((await convertMdToDocx(md1)).docx)).markdown)).toBe(md1);
+  });
+
+  test('keeps the break of a landscape section that is all of the document', async () => {
+    // Import reads the body's properties of a document of one section as its
+    // page's, a template's, with no fences
+    const md = '<!-- landscape -->\n\nText.\n\n<!-- /landscape -->\n';
+    const { docx } = await convertMdToDocx(md);
+    const xml = await documentXml(docx);
+    expect(xml).toContain('w:orient="landscape"');
+    expect(xml.slice(xml.lastIndexOf('<w:sectPr'))).not.toContain('w:orient="landscape"');
+    const md1 = (await convertDocx(docx)).markdown;
+    expect(strip(md1)).toBe(md);
   });
 
   test('reads a document of one section as its page, with no fences, as a landscape template\'s', async () => {
@@ -13210,6 +13245,21 @@ describe('A section at the end of the document', () => {
       // though the Markdown hadn't
       const templateDocx = await landscapeTemplate();
       const md1 = (await convertDocx((await convertMdToDocx(md, { templateDocx })).docx)).markdown;
+      expect(strip(md1)).toBe(md);
+      expect((await convertDocx((await convertMdToDocx(md1, { templateDocx })).docx)).markdown).toBe(md1);
+    });
+
+    test('turns the template\'s page for a portrait section that ends the document', async () => {
+      // Export gave the section the template's landscape page, which import
+      // read back as a landscape section
+      const templateDocx = await landscapeTemplate();
+      const md = 'A.\n\n<!-- portrait -->\n\nB.\n\n<!-- /portrait -->\n';
+      const { docx } = await convertMdToDocx(md, { templateDocx });
+      const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      const bodySectPr = xml.slice(xml.lastIndexOf('<w:sectPr'));
+      expect(bodySectPr).toContain('<w:pgSz w:w="12240" w:h="15840"/>');
+      expect(xml.slice(xml.indexOf('B.'))).not.toContain('</w:sectPr></w:pPr>');
+      const md1 = (await convertDocx(docx)).markdown;
       expect(strip(md1)).toBe(md);
       expect((await convertDocx((await convertMdToDocx(md1, { templateDocx })).docx)).markdown).toBe(md1);
     });
