@@ -12928,6 +12928,25 @@ describe('Highlights across runs', () => {
     expect(await roundTrip(md)).toBe(md);
   });
 
+  test.each([
+    ['text', highlightedNote + highlighted('a='), '==[^1]a&#61;=='],
+    ['an = alone', highlightedNote + highlighted('='), '==[^1]&#61;=='],
+    ['text with a backslash', highlightedNote + highlighted('a\\='), '==[^1]a\\\\&#61;=='],
+    ['text of another color', highlightedNote.replace('yellow', 'red') + highlighted('a=', '', 'red'), '==[^1]a&#61;=={red}'],
+    ['text after an equation', highlighted('b') + '<m:oMath><m:r><m:t>q</m:t></m:r></m:oMath>' + highlighted('a=') + plain(' ') + highlightedNote, '==&#98;$q$&#97;&#61;== ==[^1]=='],
+    ['text before an equation', highlightedNote + highlighted('a=') + '<m:oMath><m:r><m:t>q</m:t></m:r></m:oMath>', '==[^1]a&#61;==$q$'],
+    ['text in an insertion', tracked('ins', highlightedNote + highlighted('a=')), '{++==[^1]a&#61;==++}'],
+    ['text before =b', highlightedNote + highlighted('a=') + plain('=b'), '==[^1]a&#61;==\\=b'],
+  ])('keeps the highlight of %s that ends in = after a note reference', async (_name, runs, md) => {
+    // The = ran into the highlight's closing ==, as in ==[^1]a===, which
+    // export read as the highlight's closer, and the = after it without it
+    const docx = await withNoteIn(runs);
+    const withNote = md + '\n\n[^1]: N\n';
+    expect(await markdownOf(docx)).toBe(withNote);
+    expect(await shownRuns((await convertMdToDocx(withNote)).docx)).toEqual(await shownRuns(docx));
+    expect(await roundTrip(withNote)).toBe(withNote);
+  });
+
   test('writes a long run in a tracked change\'s highlight that its span can\'t hold whole in linear time', () => {
     // Each group the span held in it was found from the run's whole length
     const deleted = { type: 'deletion', author: 'A', date: '' } as const;
@@ -12948,6 +12967,29 @@ describe('Highlights across runs', () => {
     };
     const small = time(400);
     expect(time(800) / small).toBeLessThan(3);
+  });
+
+  test('writes the = that ends a highlight after a note reference and many backslashes in linear time', () => {
+    // A regex found the backslashes before the = from each of them in turn,
+    // and past some thousands of them gave up, which left the = as it was
+    const highlight = { ...DEFAULT_FORMATTING, highlight: true };
+    const time = (n: number) => {
+      const items = Array.from({ length: 5 }, (_, k) => [{ type: 'para' },
+        { type: 'footnote_ref', noteId: String(k + 1), noteKind: 'footnote', commentIds: new Set(), formatting: highlight },
+        { type: 'text', text: '\\'.repeat(n) + 'a=', commentIds: new Set(), formatting: highlight }]).flat();
+      let fastest = Infinity;
+      for (let run = 0; run < 3; run++) {
+        const start = performance.now();
+        const markdown = buildMarkdown(items as ContentItem[], new Map());
+        fastest = Math.min(fastest, performance.now() - start);
+        expect(markdown.endsWith('a&#61;==')).toBe(true);
+      }
+      return fastest;
+    };
+    const small = time(4000);
+    expect(time(8000) / small).toBeLessThan(3);
+    // Where the regex gave up
+    time(16000);
   });
 
   test('reads a highlighted run of many line breaks in linear time', async () => {

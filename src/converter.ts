@@ -6284,6 +6284,17 @@ function renderHighlightGroup(
       inner += (g === start ? '' : citationSeparator(inner, item)) + citationText(item);
     }
   }
+  // An = that ends its text would run into the highlight's closing ==, as
+  // in ==[^1]a===, which reads as ==[^1]a== and an = without the highlight,
+  // so it's a reference, as in a highlight of text alone (see
+  // markedFormatting), without the backslash of an escaped =: an odd one of
+  // the backslashes before it. They're counted back from the end, as a
+  // regex would try them from each backslash before it in turn.
+  if (inner.endsWith('=')) {
+    let backslashes = 0;
+    while (inner[inner.length - 2 - backslashes] === '\\') backslashes++;
+    inner = inner.slice(0, inner.length - 1 - backslashes % 2) + '&#61;';
+  }
   return lead + wrapHighlight(inner, highlightColorOf(segment[start]));
 }
 
