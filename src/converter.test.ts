@@ -5421,6 +5421,13 @@ describe('Word text that reads as Markdown', () => {
     return strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
   };
   const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+  /** The Markdown for Word's text `text` in a paragraph, and the whole, in
+   *  a document whose next paragraph cites `cited`, whose keys export notes
+   *  as missing at its end, so import knows them (see knownCitationKeys) */
+  const importCited = async (text: string, cited = text) => {
+    const markdown = await importText('A.\n\nP XX Q.\n\nB ' + cited + '.', text);
+    return { line: markdown.split('\n\n')[1], markdown };
+  };
   /** The text of each paragraph of md's export, and whether any is more than text */
   const exported = async (md: string, part = 'word/document.xml') => {
     const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file(part)!.async('string');
@@ -5713,14 +5720,43 @@ describe('Word text that reads as Markdown', () => {
 
   test.each([
     'snake_case_name', 'C:\\Users\\x', 'costs $5 and $10', 'a == b', 'x < y > z', 'AT&T', '[sic]', 'see [1].', '#hashtag', 'a - b',
-    '1.5 times', '50% off', '~a~', 'e.g. [@key]',
+    '1.5 times', '50% off', '~a~',
+  ])('writes %s as it is', async (text) => {
+    expect(await importText('A.\n\nP XX Q.\n\nB.', text)).toBe('A.\n\nP ' + text + ' Q.\n\nB.\n');
+  });
+
+  test.each([
+    'e.g. [@key]',
     // A citation's locator, which export writes as it is
     '[@missing, _p_]', '[-@smith, p. 2; see @jones]',
     // A citation through a [, which export reads to the ], $x$ and all; a
     // backslash would go into its key, and another each round trip
     '[@[$x$]', '[@a[$x$] b',
-  ])('writes %s as it is', async (text) => {
-    expect(await importText('A.\n\nP XX Q.\n\nB.', text)).toBe('A.\n\nP ' + text + ' Q.\n\nB.\n');
+  ])('writes %s, as export writes a citation whose key is missing, as it is', async (text) => {
+    const { line, markdown } = await importCited(text);
+    expect(line).toBe('P ' + text + ' Q.');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['[@key]', '\\[@key]'], ['e.g. [@key]', 'e.g. \\[@key]'], ['[see @a, p. 2; @b]', '\\[see @a, p. 2; @b]'], ['[@key](b)', '\\[@key](b)'],
+  ])('escapes %s, Word\'s text of a key export doesn\'t know', async (text, md) => {
+    // Export took it for a citation whose key is missing, and added a
+    // paragraph that noted it
+    const markdown = await importText('A.\n\nP XX Q.\n\nB.', text);
+    expect(markdown).toBe('A.\n\nP ' + md + ' Q.\n\nB.\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps Word\'s text of a citation whose key the bibliography has a citation', async () => {
+    // As export writes a deleted citation
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\nP XX Q.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace('XX', '[@smith2020]'));
+    const docx = await zip.generateAsync({ type: 'uint8array' });
+    expect(strip((await convertDocx(docx)).markdown)).toBe('A.\n\nP \\[@smith2020] Q.\n');
+    const existingBibtex = '@article{smith2020, author = {Smith, J.}, title = {T}, year = {2020}}';
+    expect(strip((await convertDocx(docx, undefined, { existingBibtex })).markdown)).toBe('A.\n\nP [@smith2020] Q.\n');
   });
 
   test('keeps dollar signs around formatted text in a comment\'s range as text', async () => {
@@ -5925,12 +5961,17 @@ describe('Word text that reads as Markdown', () => {
   });
 
   test('reads a long run of citations for tags in linear time', () => {
-    // Each citation's search for a < read the run to its end
-    const start = performance.now();
-    expect(wrapWithFormatting('[@a] '.repeat(300000), DEFAULT_FORMATTING)).toBe('[@a] '.repeat(300000));
-    // Some 300 ms here, near two seconds on a slower runner, and four
-    // seconds here read to the end for each citation
-    expect(performance.now() - start).toBeLessThan(3000);
+    // Each citation's search for a < read the run to its end. Four times
+    // the citations take about four times as long, not sixteen, however
+    // fast the machine is.
+    const time = (n: number) => {
+      const text = '[@a] '.repeat(n);
+      const start = performance.now();
+      expect(buildMarkdown([{ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING }], new Map(), { citationKeys: new Set(['a']) })).toBe(text);
+      return performance.now() - start;
+    };
+    const small = time(50000);
+    expect(time(200000) / small).toBeLessThan(8);
   });
 
   test('escapes a long run of [ in linear time', () => {
@@ -5942,8 +5983,8 @@ describe('Word text that reads as Markdown', () => {
 
   test('writes the keys of a citation as they are', async () => {
     // A key's _ took a backslash, which went in the key
-    const markdown = await importText('A.\n\nP XX Q.\n\nB.', '[@_smith] and [see @smith_, p. 5]');
-    expect(markdown).toBe('A.\n\nP [@_smith] and [see @smith_, p. 5] Q.\n\nB.\n');
+    const { line } = await importCited('[@_smith] and [see @smith_, p. 5]', '[@_smith; @smith_]');
+    expect(line).toBe('P [@_smith] and [see @smith_, p. 5] Q.');
   });
 
   test.each([
@@ -5963,17 +6004,18 @@ describe('Word text that reads as Markdown', () => {
   ])('writes the tag in %s as it is', async (text, key) => {
     // It was a reference, as for Word's text, which export, as it reads a
     // citation's keys as they are, read as keys, at its ;
-    const markdown = await importText('A.\n\nP XX Q.\n\nB.', text);
-    expect(markdown).toBe('A.\n\nP ' + text + ' Q.\n\nB.\n');
-    expect(await roundTrip(markdown)).toBe(markdown + '\nCitation data for @' + key + ' was not found in the bibliography file.\n');
+    const { line, markdown } = await importCited(text);
+    expect(line).toBe('P ' + text + ' Q.');
+    expect(markdown).toEndWith('\nCitation data for @' + key + ' was not found in the bibliography file.\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
   });
 
   test.each([
     ['[@a; <b>see</b> @b]', '[@a; \\<b>see\\</b> @b]'], ['[@a; s<br>e @b]', '[@a; s\\<br>e @b]'],
   ])('writes the tag in the prefix of %s with its < escaped', async (text, md) => {
     // It was a reference, whose ; export took for the end of an item
-    const markdown = await importText('A.\n\nP XX Q.\n\nB.', text);
-    expect(markdown).toBe('A.\n\nP ' + md + ' Q.\n\nB.\n');
+    const { line, markdown } = await importCited(text, '[@a; @b]');
+    expect(line).toBe('P ' + md + ' Q.');
     expect((await exported(markdown)).text[1]).toBe('P ' + text + ' Q.');
   });
 
@@ -6275,9 +6317,9 @@ describe('Word text that reads as Markdown', () => {
     // Its [ was escaped as a link's, so a citation whose key is missing,
     // which export writes as its text, came back as text, and stayed text
     // once the bibliography had the key
-    const markdown = await importText('A.\n\nP XX Q.\n\nB.', text);
-    expect(markdown).toBe('A.\n\nP ' + text + ' Q.\n\nB.\n');
-    expect(await roundTrip(markdown)).toBe(markdown + '\nCitation data for @a was not found in the bibliography file.\n');
+    const { line, markdown } = await importCited(text, '[@a]');
+    expect(line).toBe('P ' + text + ' Q.');
+    expect(await roundTrip(markdown)).toBe(markdown);
   });
 
   test('writes a line start of formatted text as it is', async () => {

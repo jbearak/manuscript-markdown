@@ -245,6 +245,37 @@ const HTML_LIKE_TAG_AT = new RegExp(HTML_LIKE_TAG_RE.source, 'y');
 // an HTML table's cell, which it reads as HTML (see renderHtmlTable)
 let readsMarkdown = true;
 
+// The keys export knows of: those of the document's citations and its
+// bibliography, and those whose citation data it found missing, as the
+// notes it writes at the document's end say, as "Citation data for @a was
+// not found in the bibliography file.". It writes a citation of them as its
+// text where it can't write the citation, as for a missing key or in a
+// deletion, so that text, as [@a], stays a citation (see citationKnown)
+let knownCitationKeys: ReadonlySet<string> = new Set();
+
+const MISSING_CITATION_NOTE_RE = /^Citation data for @(.+) was not found in the bibliography file\.$/;
+
+/** The keys of the notes of missing citation data in `content`: a
+ *  paragraph of plain text alone, as export writes one */
+function missingCitationKeys(content: ContentItem[]): Set<string> {
+  const keys = new Set<string>();
+  let text: string | undefined;
+  const end = () => {
+    const note = text !== undefined ? MISSING_CITATION_NOTE_RE.exec(text) : null;
+    if (note) keys.add(note[1]);
+  };
+  for (const item of content) {
+    if (item.type === 'para') {
+      end();
+      text = '';
+    } else if (text !== undefined) {
+      text = item.type === 'text' && !item.href && !item.revision && !hasFormatting(item.formatting) ? text + item.text : undefined;
+    }
+  }
+  end();
+  return keys;
+}
+
 /** A run's line break as export reads it there */
 function lineBreakText(): string {
   return readsMarkdown ? '\\\n' : '<br>';
@@ -828,6 +859,22 @@ function citationKeyRanges(text: string, open: number, close: number): Array<[nu
     + (locators.get(key) ? ', ' + locators.get(key) : '')).join('; ') + ']' === text.slice(open, close + 1) ? raw : undefined;
 }
 
+/** Whether a key of the citation from the [ at `open` to the ] at `close`
+ *  in `text` is one export knows (see knownCitationKeys), so it may have
+ *  written the citation as its text. Word's own text that reads as a
+ *  citation of another key export would take for one, and note missing,
+ *  so it's text. */
+function citationKnown(text: string, open: number, close: number): boolean {
+  return text.slice(open + 1, close).split(';').some(part => {
+    const item = part.trim();
+    const start = /(^|\s)-?@/.exec(item);
+    if (!start) return false;
+    const rest = item.slice(start.index + start[0].length).trim();
+    const comma = rest.indexOf(',');
+    return knownCitationKeys.has(comma === -1 ? rest : rest.slice(0, comma).trim());
+  });
+}
+
 /** A tracked break's end mark (see joinTrackedParagraphBreaks): a
  *  private-use character after a line end and the next line's prefix, a
  *  quote's markers or a list's indent. One of the document's own there
@@ -952,7 +999,7 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
     // With no [ before its ], so each citation's text is read once, nor a
     // ! before it, which makes it an image's
     else if (close !== undefined && (inner === -1 || inner > close) && text[i - 1] !== '!' && /^-?@/.test(text.slice(i + 1, i + 3))
-      && citationEndInText(text, i) === close && citationKeyRanges(text, i, close)) opens = false;
+      && citationEndInText(text, i) === close && citationKeyRanges(text, i, close) && citationKnown(text, i, close)) opens = false;
     else if (close !== undefined) opens = '([{'.includes(text[close + 1] ?? (after?.first || ' '));
     else if (!after) opens = true;
     else {
@@ -993,7 +1040,7 @@ function escapeMarkdownChars(text: string, lineStart = false, after?: RunsAfter,
     if (open !== -1 && open < close && !/^-?@/.test(text.slice(i + 1, i + 3))) continue;
     if (citationEndInText(text, i) !== close) continue;
     const raw = citationKeyRanges(text, i, close);
-    if (!raw) {
+    if (!raw || !citationKnown(text, i, close)) {
       escaped.add(i);
       continue;
     }
@@ -9201,10 +9248,11 @@ function joinSpansAtTrackedBreaks(markdown: string, marks: TrackedBreakMarks): s
 export function buildMarkdown(
   content: ContentItem[],
   comments: Map<string, Comment>,
-  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, { label: string; body: ContentItem[]; noteKind: 'footnote' | 'endnote' }>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]> | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string; breaks?: boolean },
+  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, { label: string; body: ContentItem[]; noteKind: 'footnote' | 'endnote' }>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]> | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string; breaks?: boolean; citationKeys?: ReadonlySet<string> },
 ): string {
   let breakMarks: TrackedBreakMarks | undefined;
   trackedBreakStart = undefined;
+  knownCitationKeys = new Set([...options?.citationKeys ?? [], ...missingCitationKeys(content)]);
   const marks = () => {
     if (!breakMarks) trackedBreakStart = (breakMarks = trackedBreakMarks([content, [...comments.values()], options])).start;
     return breakMarks;
@@ -10958,6 +11006,7 @@ export function buildMarkdown(
   }
 
   trackedBreakStart = undefined;
+  knownCitationKeys = new Set();
   return breakMarks ? joinSpansAtTrackedBreaks(output.join(''), breakMarks) : output.join('');
 }
 
@@ -11837,6 +11886,14 @@ export async function convertDocx(
     // Whether a line end is a line break, as in what the HTML around a
     // table is written as
     breaks: storedSettings?.breaks,
+    // The keys export can cite, from the document's citations and the
+    // bibliography it would read, which may be in Word's text of a citation
+    // export couldn't write, as a deleted one
+    citationKeys: new Set([
+      ...keyMap.values(),
+      ...storedBibData ? parseBibtex(storedBibData).keys() : [],
+      ...options?.existingBibtex ? parseBibtex(options.existingBibtex).keys() : [],
+    ]),
     alwaysUseCommentIds: options?.alwaysUseCommentIds,
     pipeTableMaxLineWidth: resolvedPipeTableMaxLineWidth,
     gridTableMaxLineWidth: resolvedGridTableMaxLineWidth,
