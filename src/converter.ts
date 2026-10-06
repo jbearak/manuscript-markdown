@@ -5773,9 +5773,11 @@ const BARE_LINK_CONTEXT = 1000;
  * counts as a link, as it is before one that's bare, which its address
  * would run into. A span a link is in ends the text after it, and its
  * opener the text before it. The pass reads up to a space on either side,
- * so it takes time in the length of the text.
+ * so it takes time in the length of the text. In a table's cell (`cell`),
+ * a grid table's line is trimmed, so the spaces and tabs before a line
+ * break are written as references (see gridLineBeforeBreak).
  */
-function resolveBareLinks(markdown: string): string {
+function resolveBareLinks(markdown: string, cell = false): string {
   if (!markdown.includes(BARE_LINK)) return markdown;
   // Text, then each link's Markdown, address and closer, and the text after it
   const parts = markdown.split(BARE_LINK);
@@ -5806,11 +5808,16 @@ function resolveBareLinks(markdown: string): string {
     // with them too: linkify reads a URL on into &nbsp; after it, and links
     // no address but a URL with // after one
     const edgeBefore = k === 0 && /^\s+$/.test(before);
-    const edgeAfter = k === count - 1 && /^\s+$/.test(after);
+    // And in a cell, the spaces and tabs before a line break, which a grid
+    // table's line writes as references
+    const lineEnd = cell ? /^[ \t]+(?=\\\n)/.exec(after)?.[0] : undefined;
+    // The text after it as written, where that differs
+    const written = k === count - 1 && /^\s+$/.test(after) ? keepParagraphEdgeWhitespace(address + after, false, true).slice(address.length)
+      : lineEnd !== undefined ? gridLineBeforeBreak(address + lineEnd).slice(address.length) + '\n' : undefined;
     const readsBack = (lead: string) => head !== undefined && bareLinkReadsBack(lead, address, closer, head, lineStart)
-      && (!edgeBefore && !edgeAfter || bareLinkReadsBack(
+      && (!edgeBefore && written === undefined || bareLinkReadsBack(
         edgeBefore ? keepParagraphEdgeWhitespace(lead + address, true, false).slice(0, -address.length) : lead, address, closer,
-        edgeAfter ? keepParagraphEdgeWhitespace(address + after, false, true).slice(address.length) : head, lineStart));
+        written ?? head, lineStart));
     if (bang !== undefined && readsBack(bang)) {
       chosen[k] = address;
       parts[4 * k] = bang;
@@ -7500,7 +7507,7 @@ function renderInlineRange(
     }
     i++;
   }
-  return { text: resolveBareLinks(resolveEmphasis(joinRevisedSpans(out))), nextIndex: i, deferredComments: [] };
+  return { text: resolveBareLinks(resolveEmphasis(joinRevisedSpans(out)), opts?.cell), nextIndex: i, deferredComments: [] };
 }
 
 /** Render inline content using ID-based comment syntax ({#id}...{/id}).
@@ -7817,7 +7824,7 @@ function renderInlineRangeWithIds(
     return a.remappedId.localeCompare(b.remappedId);
   });
 
-  return { text: resolveBareLinks(resolveEmphasis(joinRevisedSpans(out))), nextIndex: i, deferredComments: deferred.map(d => d.body) };
+  return { text: resolveBareLinks(resolveEmphasis(joinRevisedSpans(out)), opts?.cell), nextIndex: i, deferredComments: deferred.map(d => d.body) };
 }
 
 /**

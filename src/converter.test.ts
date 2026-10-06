@@ -4920,6 +4920,21 @@ describe('Bare links', () => {
     expect(await roundTrip(md)).toBe(expected + '\n');
   });
 
+  test('writes a link next to a space that ends a line in a grid table\'s cell in link syntax', async () => {
+    // A grid cell's lines are trimmed, so the space before the line break
+    // went as a reference, which linkify read the URL on into, as
+    // https://e.com/a&#32
+    const grid = (link: string) => {
+      const line = '| ' + link + '&#32; |';
+      const border = '+' + '-'.repeat(line.length - 2) + '+';
+      const row = (text: string) => '| ' + text.padEnd(line.length - 4) + ' |';
+      return [border, row('h'), border.replace(/-/g, '='), line, row('x'), border].join('\n');
+    };
+    const expected = grid('[https\\://e.com/a](https://e.com/a)');
+    expect(await roundTrip(grid('[https://e.com/a](https://e.com/a)'))).toBe(expected + '\n');
+    expect(await roundTrip(expected)).toBe(expected + '\n');
+  });
+
   test.each([
     ['a percent-encoded space', '[https://e.com/a%20b](https://e.com/a%20b)', '[https\\://e.com/a%20b](https://e.com/a%20b)'],
     ['punycode', '[https://xn--bcher-kva.de](https://xn--bcher-kva.de)', '[https\\://xn--bcher-kva.de](https://xn--bcher-kva.de)'],

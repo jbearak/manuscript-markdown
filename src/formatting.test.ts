@@ -1665,7 +1665,9 @@ describe('HTML table support for Expand/Compact Table', () => {
     ['a no-break space before an email address', '&nbsp;<a href="mailto:a@b.org">a@b.org</a>', '| &nbsp;[a\\@b.org](mailto:a@b.org) |'],
     ['a no-break space after a URL on a cell\'s last line', 'x<br><a href="https://e.org/a">https://e.org/a</a>&nbsp;',
       '+-------------------------------------------+\n| h                                         |\n+===========================================+\n| x                                         |\n| [https\\://e.org/a](https://e.org/a)&nbsp; |\n+-------------------------------------------+'],
-  ])('Compact Table and Expand Table keep a link to its address in link syntax with %s at an HTML cell\'s edge', (_name, cell, body) => {
+    ['a space before a line break after a URL', '<a href="https://e.org/a">https://e.org/a</a> <br>x',
+      '+------------------------------------------+\n| h                                        |\n+==========================================+\n| [https\\://e.org/a](https://e.org/a)&#32; |\n| x                                        |\n+------------------------------------------+'],
+  ])('Compact Table and Expand Table keep a link to its address in link syntax with %s at the edge of an HTML cell or its line', (_name, cell, body) => {
     // Bare, the address was written before the cell's edge was, as a
     // reference, which linkify read a URL on into, as https://e.org/a&nbsp,
     // and after which it linked no email address
