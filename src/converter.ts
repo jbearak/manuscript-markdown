@@ -8565,8 +8565,12 @@ const HTML_COMMENT_RE = /^<!--[\s\S]*?-->$/;
  * Insert a directive prefix + body into the output array, hoisting the prefix
  * above any immediately-preceding HTML comment entries so that table directives
  * appear above user sentinel comments (preserving original document order).
+ * The directives are a block of their own, after a blank line, and the
+ * comments keep the gaps their metadata gave them: the first comment's, which
+ * export measured from the directives above it, goes between them and it.
+ * `startGap` is that gap for a comment first in the document.
  */
-function pushWithHoistedPrefix(output: string[], directivePrefix: string, body: string): void {
+function pushWithHoistedPrefix(output: string[], directivePrefix: string, body: string, startGap?: number): void {
   if (!directivePrefix) {
     output.push(body);
     return;
@@ -8584,11 +8588,28 @@ function pushWithHoistedPrefix(output: string[], directivePrefix: string, body: 
     break;
   }
   const commentBlock = output.splice(scanIdx);
-  const userComments = commentBlock.filter(e => !/^\s*$/.test(e));
-  const combined = directivePrefix.replace(/\n+$/, '')
-    + (userComments.length > 0 ? '\n' + userComments.join('\n') : '');
-  output.push(combined);
-  output.push('\n' + body);
+  const directives = directivePrefix.replace(/\n+$/, '');
+  if (commentBlock.length === 0) {
+    output.push(directives);
+    output.push('\n' + body);
+    return;
+  }
+  // The line ends before the first comment, as its gap set them
+  let gap = 0;
+  while (output.length > 0) {
+    const last = output[output.length - 1];
+    const text = last.replace(/\n+$/, '');
+    gap += last.length - text.length;
+    if (text) {
+      output[output.length - 1] = text;
+      break;
+    }
+    output.pop();
+  }
+  if (output.length > 0) output.push('\n\n');
+  else if (startGap !== undefined) gap = startGap + 1;
+  output.push(directives, '\n'.repeat(Math.max(gap, 1)), ...commentBlock);
+  output.push((commentBlock[commentBlock.length - 1].endsWith('\n') ? '' : '\n') + body);
 }
 
 const tableCellText = (cell: TableRow['cells'][number]): string =>
@@ -10504,6 +10525,9 @@ export function buildMarkdown(
   const htmlCommentAfterGaps = options?.htmlCommentAfterGaps;
   let htmlCommentIndex = 0;
   let lastRenderedHtmlCommentIndex: number | undefined;
+  // The gap a comment first in the document had, which there's nothing to
+  // put before, but which directives hoisted above it go before
+  let documentStartCommentGap: number | undefined;
   // The line end or spaces an HTML table's HTML ended with before the next
   // table in its block, which that one goes on from as the next item (see
   // renderTableOrFallback)
@@ -11299,7 +11323,7 @@ export function buildMarkdown(
         const tabPos = rawEmbedValue.indexOf('\t');
         const embedDirective = tabPos >= 0 ? rawEmbedValue.substring(tabPos + 1) : rawEmbedValue;
         const { fontPrefix: embedPrefix } = buildTableDirectivePrefix(renderOpts, tableIndex);
-        pushWithHoistedPrefix(output, embedPrefix, embedDirective);
+        pushWithHoistedPrefix(output, embedPrefix, embedDirective, documentStartCommentGap);
         tableIndex++;
         i++;
         // Skip subsequent tables from the same embed occurrence (same raw stored value).
@@ -11348,7 +11372,7 @@ export function buildMarkdown(
       if (tableResult.before) {
         output.push(tableResult.before + '\n\n' + tableResult.directivePrefix + tableResult.body);
       } else {
-        pushWithHoistedPrefix(output, tableResult.directivePrefix, tableResult.body);
+        pushWithHoistedPrefix(output, tableResult.directivePrefix, tableResult.body, documentStartCommentGap);
       }
       if (tableResult.after) output.push('\n\n' + tableResult.after);
       lastTableJoin = tableResult.join;
@@ -11369,6 +11393,8 @@ export function buildMarkdown(
     // So is one in a quote, list item or heading, after the line's prefix,
     // which export doesn't count among them (annotateHtmlCommentIndices)
     if (item.type === 'html_comment' && !pendingAlertPrefixStrip && !paragraphNested && !paragraphHeading) {
+      // A blank line, where export stored none
+      if (output.length === 0) documentStartCommentGap = htmlCommentGaps?.get(htmlCommentIndex) ?? 1;
       if (output.length > 0) {
         if (incomingSep !== null) {
           output.push(incomingSep);
