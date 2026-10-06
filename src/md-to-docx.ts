@@ -2821,8 +2821,9 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
       case 'ordered_list_open': {
         const listClose = findClosingToken(tokens, i, token.type.replace('_open', '_close'));
         const currentLevel = listLevel + 1;
+        // A start of 0 too, which reads as false
         const startAttr = token.attrGet('start');
-        const listStart = startAttr ? parseInt(startAttr, 10) : undefined;
+        const listStart = startAttr !== null ? parseInt(startAttr, 10) : undefined;
         const listItems = extractListItems(tokens.slice(i + 1, listClose), token.type === 'ordered_list_open', currentLevel, warnings, listStart, sourceLines);
         result.push(...listItems);
         i = listClose + 1;
@@ -3661,7 +3662,7 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
           const subClose = findClosingToken(itemTokens, j, itemTokens[j].type.replace('_open', '_close'));
           const subOrdered = itemTokens[j].type === 'ordered_list_open';
           const subStartAttr = itemTokens[j].attrGet('start');
-          const subStart = subStartAttr ? parseInt(subStartAttr, 10) : undefined;
+          const subStart = subStartAttr !== null ? parseInt(subStartAttr, 10) : undefined;
           childSegments.push({
             startIndex: itemTokens[j].map?.[0] ?? j,
             order: childSegmentOrder++,
