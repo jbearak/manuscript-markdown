@@ -10381,6 +10381,20 @@ describe('Track changes (CriticMarkup)', () => {
       expect(again).toBe(imported);
     });
 
+    test.each([
+      ['after a quote', 'x\n\n> quote\n\nbody\n', ['quote'], 'del', 'x\n\n> quote{--\n>\n> --}\n\nbody\n'],
+      ['of a quote inserted whole', 'x\n\n> {++quote++}\n\nbody\n', ['quote'], 'ins', 'x\n\n> {++quote\n>\n> ++}\n\nbody\n'],
+      ['before a quote', 'body\n\n> quote\n', ['body'], 'ins', 'body{++\n\n++}\n\n> quote\n'],
+      ['after an alert', '> [!NOTE]\n> note\n\nbody\n', ['note'], 'del', '> [!NOTE]\n> note{--\n>\n> --}\n\nbody\n'],
+      ['between quotes', '> a\n>\n> > b\n\nz\n', ['a', 'b'], 'del', '> a{--\n>\n> --}\n> > b{--\n> >\n> > --}\n\nz\n'],
+    ] as const)('keeps a tracked paragraph mark %s, past the spacer export pads the quote with', async (_name, md, texts, type, expected) => {
+      // The mark was the spacer's break's, which import drops
+      const { imported, before, after, again } = await tripTrackedMarks(md, [...texts], type);
+      expect(imported).toBe(expected);
+      expect(after).toEqual(before);
+      expect(again).toBe(imported);
+    });
+
     test('writes many tracked marks in linear time', () => {
       // Each read the content on its sides through all the others, moved
       // all the content after it, and read all the Markdown before it

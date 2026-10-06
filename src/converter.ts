@@ -5127,7 +5127,14 @@ export async function extractDocumentContent(
             // Keep a structural-only boundary so adjacent same-type alerts remain
             // separate even when generated labels are disabled. Table cells cannot
             // contain alert groups, and their nested content bypasses top-level cleanup.
-            if (!inTableCell) target.push({ type: 'para', isBlockquoteSpacer: true });
+            if (!inTableCell) {
+              target.push({ type: 'para', isBlockquoteSpacer: true });
+              // A tracked mark before it is the break before the paragraph
+              // after it, as export pads a quote with it
+              if (precedingMark?.target === target && precedingMark.end === target.length - 1) {
+                trackedParaMark = { ...precedingMark, end: target.length };
+              }
+            }
             continue;
           }
           if (isSectionBreakHandled) {
