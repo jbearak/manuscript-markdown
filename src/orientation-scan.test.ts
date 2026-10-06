@@ -213,6 +213,19 @@ describe('scanOrientationDirectives', () => {
       expect(warnings).toContain('Orientation directive inside a note ignored (not supported). Move it outside the note for round-trip fidelity.');
     });
 
+    it.each([
+      ['an opener alone', 'Text[^1]\n\n[^1]: Note.\n\n    <!-- landscape -->\n'],
+      ['an opener on its first line', 'Text[^1]\n\n[^1]: <!-- landscape -->\n'],
+      ['a close alone', 'Text[^1]\n\n[^1]: Note.\n\n    <!-- /portrait -->\n'],
+      ['an opener nested in another', 'Text[^1]\n\n[^1]: Note.\n\n    <!-- landscape -->\n\n    <!-- portrait -->\n'],
+    ])('warns of %s in a note once, as ignored', async (_, text) => {
+      // Export read the note's body as a document of its own, and warned of
+      // an opener there as unclosed too, at a line of the note's
+      const { convertMdToDocx } = await import('./md-to-docx');
+      const { warnings } = await convertMdToDocx(text);
+      expect(warnings).toEqual(['Orientation directive inside a note ignored (not supported). Move it outside the note for round-trip fidelity.']);
+    });
+
     it('reads a note\'s indented code as code', () => {
       expect(scanOrientationDirectives('Text[^1]\n\n[^1]: Note.\n\n        <!-- landscape -->\n')).toEqual([]);
     });

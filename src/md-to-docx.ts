@@ -2088,7 +2088,7 @@ function markWrappedLatexBlocks(tokens: Token[], text: string, lineCount: number
  * `linkDefinitions` are the document's, which a note body parsed on its own
  * resolves its reference links and images with, after its own definitions.
  */
-export function parseMd(markdown: string, warnings?: string[], breaks = false, originalText?: string, tableNumberFormat?: TableNumberFormat, linkDefinitions?: Record<string, unknown>, unformatted?: string): MdToken[] {
+export function parseMd(markdown: string, warnings?: string[], breaks = false, originalText?: string, tableNumberFormat?: TableNumberFormat, linkDefinitions?: Record<string, unknown>, unformatted?: string, inNote = false): MdToken[] {
   const md = createMarkdownIt();
   // Grid tables, quotes without lazy continuation, and bare LaTeX
   // environments, as the orientation scan reads them too
@@ -2320,8 +2320,10 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
 
   // Pre-scan: warn on unclosed/orphaned/nested/crossed orientation directives with line numbers.
   // When originalText is provided (from convertMdToDocx), scan that so line numbers match the
-  // user's file rather than the stripped body passed to parseMd.
-  if (warnings) {
+  // user's file rather than the stripped body passed to parseMd. Not in a note's body, whose
+  // directives the document's scan reads as the note's, which pair with none, and whose
+  // lines it counted from the note's start.
+  if (warnings && !inNote) {
     const scanText = originalText ?? markdown;
     const findings = scanOrientationDirectives(scanText);
     if (findings.length > 0) {
@@ -2779,9 +2781,12 @@ const NOTE_BLOCK_WARNINGS: Partial<Record<MdToken['type'], string>> = {
 };
 const EMPTY_NOTE_CODE_WARNING = 'Empty code block inside a note dropped during conversion';
 // A note has no sections, so an orientation directive does nothing in one,
-// and wrote an empty paragraph
+// and wrote an empty paragraph. A close with nothing open stays a comment,
+// but does nothing either.
 const NOTE_ORIENTATION_WARNING = 'Orientation directive inside a note ignored';
 const isOrientationDirective = (token: MdToken): boolean => !!(token.landscapeOpen || token.landscapeClose || token.portraitOpen || token.portraitClose);
+const isOrphanedOrientationClose = (token: MdToken): boolean => token.type === 'paragraph' && token.runs.length === 1
+  && token.runs[0].type === 'html_comment' && ORIENTATION_CLOSE_RE.test(token.runs[0].text.trim());
 const isBlank = (text: string): boolean => !/[^ \t\n]/.test(text.replace(NOT_XML_CHARACTER, ''));
 const isEmptyCodeBlock = (token: MdToken): boolean => token.type === 'code_block' && token.runs.every(run => isBlank(run.text));
 
@@ -8965,7 +8970,7 @@ export async function convertMdToDocx(
     const label = noteQueue[k];
     const warnings: string[] = [];
     const noteBody = parseMd(footnoteDefs.get(label)!, warnings, frontmatter.breaks ?? false, undefined, undefined, linkDefinitionsOf.get(tokens),
-      unformattedNotes.get(label));
+      unformattedNotes.get(label), true);
     applyCustomStyleSentinels(noteBody, warnings);
     parsedNotes.set(label, { tokens: noteBody, warnings });
     for (const item of reachedIn(noteBody)) {
@@ -8987,7 +8992,7 @@ export async function convertMdToDocx(
     const { tokens: bodyTokens, warnings: parseWarnings } = parsedNotes.get(label)!;
     state.warnings.push(...parseWarnings);
     const noteWarnings = new Set(bodyTokens.map(t => isEmptyCodeBlock(t) ? EMPTY_NOTE_CODE_WARNING
-      : isOrientationDirective(t) ? NOTE_ORIENTATION_WARNING : NOTE_BLOCK_WARNINGS[t.type]));
+      : isOrientationDirective(t) || isOrphanedOrientationClose(t) ? NOTE_ORIENTATION_WARNING : NOTE_BLOCK_WARNINGS[t.type]));
     for (const warning of noteWarnings) {
       if (warning) state.warnings.push(warning + ' (not supported). Move it outside the note for round-trip fidelity.');
     }
