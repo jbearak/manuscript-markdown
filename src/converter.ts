@@ -6148,22 +6148,23 @@ function highlightColorOf(item: ContentItem): string | undefined {
  * export doesn't highlight. It needs a reference, citation or equation:
  * highlighted text alone keeps its own markers. renderHighlightGroup writes
  * it in one highlight, ==a[^1] b==, rather than one per item, ==a==[^1]== b==.
+ * It ends where the span of its revision holds it (see heldGroupEnd).
  */
 function highlightGroupEnd(segment: ContentItem[], start: number, end: number, commentIds: Set<string>): number {
   const first = segment[start];
   const color = highlightColorOf(first);
   if (!color || first.type === 'math' || !isSubstitutionItem(first)) return start;
   // An == in an item would close the highlight, even in code or an equation
-  const source = (item: SubstitutionItem) =>
-    item.type === 'text' ? item.text : item.type === 'math' ? item.latex
-      : item.type === 'citation' ? item.pandocKeys.join('; ') : '';
   const joins = (item: ContentItem) =>
     (item.type === 'text' || item.type === 'citation' || item.type === 'footnote_ref' || (item.type === 'math' && !item.display))
     && revisionsEqual(item.revision, first.revision) && commentSetsEqual(item.commentIds, commentIds)
-    && !(item.type === 'text' && item.href) && !source(item).includes('==');
+    && !(item.type === 'text' && item.href) && !groupItemSource(item).includes('==');
   if (!joins(first)) return start;
   const groupless = grouplessRuns.get(segment);
   if (groupless && groupless.from < start && start < groupless.to) return start;
+  const kept = heldGroups.get(segment);
+  const held = kept?.length === segment.length ? kept.byEnd.get(end)?.get(start) : undefined;
+  if (held !== undefined) return held;
   let groupEnd = start + 1;
   let j = start + 1;
   for (; j < end && joins(segment[j]); j++) {
@@ -6172,7 +6173,9 @@ function highlightGroupEnd(segment: ContentItem[], start: number, end: number, c
     if (highlightColorOf(segment[j]) !== color || codeSpansMeet(segment[j - 1], segment[j])) break;
     groupEnd = j + 1;
   }
-  if (segment.slice(start, groupEnd).some(item => item.type !== 'text')) return groupEnd;
+  if (segment.slice(start, groupEnd).some(item => item.type !== 'text')) {
+    return first.revision ? heldGroupEnd(segment, start, groupEnd, end, first.revision) : groupEnd;
+  }
   // The run ends at j, unless `end` cut it short, as it does before a piece
   // of code that meets the one before it
   const next = segment[j];
@@ -6186,6 +6189,75 @@ function highlightGroupEnd(segment: ContentItem[], start: number, end: number, c
  *  that none starts later in it either, which keeps import linear in a long
  *  highlight of text alone. */
 const grouplessRuns = new WeakMap<ContentItem[], { from: number; to: number }>();
+
+/** The text of an item of a highlight group that Markdown keeps as it is,
+ *  in code, an equation or a citation's keys, and text's own */
+function groupItemSource(item: SubstitutionItem): string {
+  return item.type === 'text' ? item.text : item.type === 'math' ? item.latex
+    : item.type === 'citation' ? item.pandocKeys.join('; ') : '';
+}
+
+/**
+ * Where a highlight group from `start`, which nothing else ends before
+ * `end` (highlightGroupEnd), ends in the range of runs ending at `rangeEnd`
+ * so that the span of its `revision` holds it (see revisionSpanHolds), or
+ * `start` where no group does: code, an equation or a citation with the
+ * span's closer in its text puts the group on one side of a substitution,
+ * which can't hold a ~~}, as a struck } can write, or a ~> on its old side.
+ * A span that can't hold the items to `end` whole holds them in groups,
+ * each as long as it can hold, found by doubling one and then halving the
+ * difference, in time of the items' length times its log, and the text
+ * alone of one as no group, whose items go in spans of their own. They're
+ * kept, by item, for calls from the items after, so they stay as first
+ * found. A struck } last in a group reads as ~~}, but before a letter as
+ * <s>}</s>, so a span can hold a group that it can't hold some of: a group
+ * after the first may end sooner than it could. An item the span can't
+ * hold alone goes alone.
+ */
+function heldGroupEnd(segment: ContentItem[], start: number, end: number, rangeEnd: number, revision: RevisionInfo): number {
+  const closer = revision.type === 'addition' ? '++}' : '--}';
+  if (!segment.slice(start, end).some(item => groupItemSource(item as SubstitutionItem).includes(closer))) return end;
+  // A group ends after an item that isn't an equation (highlightGroupEnd)
+  const ends: number[] = [];
+  for (let k = start + 1; k <= end; k++) if (segment[k - 1].type !== 'math') ends.push(k);
+  const holds = (from: number, at: number) => revisionSpanHolds(renderHighlightGroup(segment, from, ends[at], rangeEnd, ''), revision);
+  if (holds(start, ends.length - 1)) return end;
+  let kept = heldGroups.get(segment);
+  if (kept?.length !== segment.length) heldGroups.set(segment, kept = { length: segment.length, byEnd: new Map() });
+  let groups = kept.byEnd.get(rangeEnd);
+  if (!groups) kept.byEnd.set(rangeEnd, groups = new Map());
+  const keep = (k: number, groupEnd: number) => { if (!groups.has(k)) groups.set(k, groupEnd); };
+  for (let from = start, first = 0; from < end;) {
+    while (ends[first] <= from) first++;
+    // An equation starts no group
+    if (segment[from].type === 'math') {
+      keep(from, from++);
+      continue;
+    }
+    let held = first - 1;
+    let failed = -1;
+    for (let step = 1; failed < 0; step *= 2) {
+      const at = Math.min(held + step, ends.length - 1);
+      if (!holds(from, at)) failed = at;
+      else if (at === ends.length - 1) break;
+      else held = at;
+    }
+    while (failed - held > 1) {
+      const mid = (held + failed) >> 1;
+      if (holds(from, mid)) held = mid;
+      else failed = mid;
+    }
+    const groupEnd = failed < 0 ? end : ends[Math.max(held, first)];
+    if (segment.slice(from, groupEnd).some(item => item.type !== 'text')) keep(from, groupEnd);
+    else for (let k = from; k < groupEnd; k++) keep(k, k);
+    from = groupEnd;
+  }
+  return groups.get(start)!;
+}
+
+/** Per segment, as long as it was, and range's end, by item, where
+ *  heldGroupEnd ends a group from it in items its span can't hold whole */
+const heldGroups = new WeakMap<ContentItem[], { length: number; byEnd: Map<number, Map<number, number>> }>();
 
 /** The highlight group from `start` to `end` (highlightGroupEnd) as
  *  Markdown, after `precedingMarkdown`, which ends with the span `last`, in
