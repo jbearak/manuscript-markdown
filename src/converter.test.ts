@@ -13025,6 +13025,25 @@ describe('Landscape section round-trip', () => {
     expect((await convertDocx((await convertMdToDocx(md1)).docx)).markdown).toBe(md1);
   });
 
+  test.each([
+    ['after a landscape fence', 'A\n\n<!-- landscape -->\n\nB\n\n<!-- /landscape -->\n\n<!-- table-orientation: landscape -->\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nD\n'],
+    ['before a landscape fence', 'A\n\n<!-- table-orientation: landscape -->\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n<!-- landscape -->\n\nC\n\n<!-- /landscape -->\n\nD\n'],
+    ['between landscape fences', 'A\n\n<!-- landscape -->\n\nB\n\n<!-- /landscape -->\n\n<!-- table-orientation: landscape -->\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n<!-- landscape -->\n\nC\n\n<!-- /landscape -->\n\nD\n'],
+    ['after another', 'A\n\n<!-- table-orientation: landscape -->\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n<!-- table-orientation: portrait -->\n| c | d |\n| --- | --- |\n| 3 | 4 |\n\nD\n'],
+    ['after a portrait fence', 'A\n\n<!-- portrait -->\n\nB\n\n<!-- /portrait -->\n\n<!-- table-orientation: portrait -->\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nD\n'],
+  ])('puts no empty section around a table with its own section %s', async (_, md) => {
+    // Its section's breaks went on either side of it, as if the sections
+    // next to it ended and started on the paragraphs around it, which left
+    // an empty section, a blank page, between them
+    const { docx } = await convertMdToDocx(md);
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml).not.toMatch(/<\/w:sectPr><\/w:pPr><\/w:p><w:p\b[^>]*><w:pPr><w:sectPr\b/);
+    const strip = (s: string) => s.replace(/^---\n[\s\S]*?\n---\n/, '');
+    const md1 = (await convertDocx(docx)).markdown;
+    expect(strip(md1)).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(md1)).docx)).markdown).toBe(md1);
+  });
+
   test('landscape DOCX section produces body sectPr with page dimensions', async () => {
     const md = '<!-- landscape -->\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n<!-- /landscape -->';
     const { docx } = await convertMdToDocx(md);

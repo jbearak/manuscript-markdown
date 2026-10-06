@@ -8225,7 +8225,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     } else if (!token.listContinuation) {
       openListOrdered.length = 0;
     }
-    // Any close sentinel directly preceding any open sentinel skips the open's break
+    // Any close sentinel, or table with its own section, directly preceding any
+    // open sentinel, or such a table, skips the open's break
     // to avoid an empty intermediate section that renders as a blank page.
     const prevWasClose: boolean = !!preserveCloseForNextToken;
     preserveCloseForNextToken = false;
@@ -8374,19 +8375,24 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         recordTableIdentity(token, xml, state, '');
         return (body.endsWith('</w:tbl>') ? '<w:p/>' : '') + xml;
       };
-      // Table-only landscape: wrap with section breaks (skip if already in fence-based landscape)
+      // Table-only landscape: wrap with section breaks (skip if already in fence-based landscape).
+      // Its section is one as a fence's is, so a section that ends right
+      // before it ends the one before it, and the next one starts right after
+      // it, with no empty section, a blank page, between them.
       if (token.tableOrientation === 'landscape' && !state.inLandscapeSection && !state.inPortraitSection) {
         state.landscapeTables.add(state.tableIndex);
-        emitPortraitBreak();
+        if (!prevWasClose) emitPortraitBreak();
         body += table();
         emitLandscapeBreak();
+        preserveCloseForNextToken = true;
       } else if (token.tableOrientation === 'portrait' && !state.inPortraitSection && !state.inLandscapeSection) {
         // Table-only portrait: wrap with portrait section breaks
         state.portraitTables.add(state.tableIndex);
-        emitPortraitBreak();
+        if (!prevWasClose) emitPortraitBreak();
         body += table();
         state.portraitBreakOrdinals.add(state.sectionBreakOrdinal);
         emitPortraitBreak();
+        preserveCloseForNextToken = true;
       } else {
         body += table();
       }

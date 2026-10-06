@@ -299,7 +299,7 @@ For a single table, use the `data-orientation` attribute or a comment directive:
 - Orientation sections produce OOXML section breaks. The page size is derived from the template document if available, defaulting to US Letter. The template's headers, footers and page number format continue through them, and the page numbers count on through them.
 - Sections are preserved through DOCX round-trips.
 - **Nested fences**: An opening fence inside an already-open block of the same type is treated as a close followed by an open (a section break) and produces a warning.
-- **Consecutive fences**: Transitions between orientation sections (or consecutive sections of the same type) do not produce blank intermediate pages. For example, `<!-- /landscape --><!-- portrait -->` transitions directly without an empty page in between.
+- **Consecutive fences**: Transitions between orientation sections (or consecutive sections of the same type) do not produce blank intermediate pages. For example, `<!-- /landscape --><!-- portrait -->` transitions directly without an empty page in between. A table with its own orientation, from `data-orientation` or a `table-orientation` directive, is a section here too, so one right after a fence, before one, or after another such table starts or ends its section with no empty page either.
 
 #### Embedded Tables
 
