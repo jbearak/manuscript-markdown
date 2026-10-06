@@ -10886,8 +10886,19 @@ describe('A quote after another at its level', () => {
     // as one
     const once = strip((await convertDocx(await edited(md, edit))).markdown);
     expect(once).toBe(expected);
-    const xml = await (await JSZip.loadAsync((await convertMdToDocx(once)).docx)).file('word/document.xml')!.async('string');
-    expect(xml).toMatch(/<w:t>A<\/w:t><\/w:r><\/w:p>/);
+    expect(strip((await convertDocx((await convertMdToDocx(once)).docx)).markdown)).toBe(once);
+  });
+
+  test('keeps an empty paragraph between two quotes through the next trip', async () => {
+    // Export wrote the two quotes Markdown has for it as one, with no empty
+    // paragraph between
+    const quote = (text: string) => '<w:p><w:pPr><w:pStyle w:val="GitHubBlockquote"/></w:pPr><w:r><w:t>' + text + '</w:t></w:r></w:p>';
+    const once = strip((await convertDocx(await buildSyntheticDocx(wrapDocumentXml(quote('A') + '<w:p/>' + quote('B'))))).markdown);
+    expect(once).toBe('> A\n\n> B\n');
+    const docx = (await convertMdToDocx(once)).docx;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml).toMatch(/<w:t>A<\/w:t><\/w:r><\/w:p>(?:<w:p\b[^>]*><w:pPr><w:pBdr>(?:(?!<\/w:p>).)*<\/w:p>)<w:p\b[^>]*><w:pPr><w:spacing w:after="0"\/><\/w:pPr><\/w:p>/);
+    expect(strip((await convertDocx(docx)).markdown)).toBe(once);
   });
 
   test.each([
