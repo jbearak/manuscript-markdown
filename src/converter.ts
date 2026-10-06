@@ -497,12 +497,14 @@ interface TextIndex {
   ats: number[];
   semicolons: number[];
   openers: number[];
+  /** Where each note reference is, whose [^1] ends a citation before it */
+  notes: number[];
 }
 
 /** `text`'s index, where a run of dollar signs ends at each of `bounds`,
  *  the starts of runs, between which formatting's or a span's delimiters
- *  can come */
-function indexText(text: string, bounds: ReadonlySet<number> = new Set()): TextIndex {
+ *  can come, with note references at `notes` */
+function indexText(text: string, bounds: ReadonlySet<number> = new Set(), notes: number[] = []): TextIndex {
   const closers: number[] = [];
   const dollarRuns: Array<{ start: number; length: number }> = [];
   const equals: number[] = [];
@@ -528,7 +530,7 @@ function indexText(text: string, bounds: ReadonlySet<number> = new Set()): TextI
     nextSingle[k] = dollarRuns[k].length === 1 ? k : nextSingle[k + 1];
     nextDouble[k] = dollarRuns[k].length > 1 ? k : nextDouble[k + 1];
   }
-  return { text, closers, dollarRuns, dollarStarts: dollarRuns.map(run => run.start), nextSingle, nextDouble, equals, ats, semicolons, openers };
+  return { text, closers, dollarRuns, dollarStarts: dollarRuns.map(run => run.start), nextSingle, nextDouble, equals, ats, semicolons, openers, notes };
 }
 
 /** The first of `sorted` at or after `value` */
@@ -665,11 +667,15 @@ export class RunsAfter {
    *  the brackets but not both, as in [see **x @a]**, or one its first
    *  item ends in, as in [see **x; y** @a]: export reads a prefix whose
    *  formatting closes in it, as in [see *x* @a], as text. With no @ for a
-   *  key, or a [ before the ], it reads none. */
+   *  key, or a [ before the ], it reads none. A note reference's [^1] is
+   *  one with a [ before its ], which ends the citation of keys first, as
+   *  in [@a[^1], taking the reference. */
   citationTakesDelimiters(keyFirst: boolean): boolean {
     if (!this.runs || this.prefix) return false;
-    const { closers, ats, openers, semicolons } = this.index;
+    const { closers, ats, openers, semicolons, notes } = this.index;
     const c = lowerBound(closers, this.from);
+    const n = lowerBound(notes, this.from);
+    if (n < notes.length && (c >= closers.length || notes[n] < closers[c])) return keyFirst;
     if (c >= closers.length) return false;
     if (keyFirst) return true;
     const close = closers[c];
@@ -6194,10 +6200,12 @@ function runsAfter(segment: ContentItem[], start: number, end: number): RunsAfte
     let first = Math.min(start, end);
     while (first > 0 && !endsInlineRange(segment[first - 1])) first--;
     const offsets: number[] = [];
+    const notes: number[] = [];
     let text = '';
     for (let k = first; k < end; k++) {
       offsets.push(text.length);
       const item = segment[k];
+      if (item.type === 'footnote_ref') notes.push(text.length);
       if (item.type !== 'text') {
         text += item.type === 'math' ? (item.display ? '$' + '$\uFFFC$' + '$' : '$\uFFFC$') : '\uFFFC';
         continue;
@@ -6212,7 +6220,7 @@ function runsAfter(segment: ContentItem[], start: number, end: number): RunsAfte
       text += item.formatting.highlight ? '==' + run + '==' : run;
     }
     offsets.push(text.length);
-    byEnd.set(end, cached = { length: segment.length, first, offsets, index: indexText(text, new Set(offsets)), items: segment.slice(first, end) });
+    byEnd.set(end, cached = { length: segment.length, first, offsets, index: indexText(text, new Set(offsets), notes), items: segment.slice(first, end) });
   }
   return new RunsAfter(cached.index, cached.offsets[start - cached.first], '', false,
     { offsets: cached.offsets, items: cached.items, at: start - cached.first });

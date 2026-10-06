@@ -10868,6 +10868,33 @@ describe('Markdown across Word runs', () => {
   });
 
   test.each([
+    ['', {}, 'q \\[@key[^1] z'],
+    [' in bold', { bold: true }, 'q **\\[@key**[^1] z'],
+    [' underlined', { underline: true }, 'q <u>\\[@key</u>[^1] z'],
+  ])('keeps the [ of text that starts a citation before a note reference%s as text', (_name, formatting, md) => {
+    // The reference's ] closed the citation, which took the reference
+    const run = (text: string, f: Partial<RunFormatting> = {}): ContentItem => ({ type: 'text', text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, ...f } });
+    const notes = { map: new Map([['footnote:1', { label: '1', body: [{ type: 'para' } as ContentItem, run('N')], noteKind: 'footnote' as const }]]), assignedLabels: new Map([['footnote:1', '1']]) };
+    const out = buildMarkdown([{ type: 'para' } as ContentItem, run('q '), run('[@key', formatting), { type: 'footnote_ref', noteId: '1', noteKind: 'footnote', commentIds: new Set() } as ContentItem, run(' z')], new Map(), { notes });
+    expect(out.split('\n\n[^1]:')[0]).toBe(md);
+  });
+
+  test('keeps a note reference after text that starts a citation', async () => {
+    const markdown = 'q \\[@key[^1] z\n\n[^1]: N\n';
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    expect(xml).toContain('<w:footnoteReference');
+    expect(xml).toContain('[@key');
+  });
+
+  test('keeps the [ of text that starts an image around a note reference as text', () => {
+    // Read as its ], the reference's left the [ before it unescaped
+    const run = (text: string): ContentItem => ({ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING });
+    const notes = { map: new Map([['footnote:1', { label: '1', body: [{ type: 'para' } as ContentItem, run('N')], noteKind: 'footnote' as const }]]), assignedLabels: new Map([['footnote:1', '1']]) };
+    const out = buildMarkdown([{ type: 'para' } as ContentItem, run('![text'), { type: 'footnote_ref', noteId: '1', noteKind: 'footnote', commentIds: new Set() } as ContentItem, run('](image.png)')], new Map(), { notes });
+    expect(out.split('\n\n[^1]:')[0]).toBe('!\\[text[^1]](image.png)');
+  });
+
+  test.each([
     // A prefix whose formatting closes in it, which export reads as text
     '[see *x* @a]\n', '[x **y** @a] and [see `c` @b]\n', '[see {++x++} @a]\n', '{==[see *x* @a]==}{>>c<<}\n',
     // A host its delimiters end
