@@ -530,10 +530,10 @@ export function activate(context: vscode.ExtensionContext) {
 	// Register table formatting commands
 	context.subscriptions.push(
 		vscode.commands.registerCommand('manuscript-markdown.reflowTable', () =>
-			applyTableFormatting((text) => formatting.reflowTable(text))
+			applyTableFormatting((text, separatorIndex) => formatting.reflowTable(text, separatorIndex))
 		),
 		vscode.commands.registerCommand('manuscript-markdown.compactTable', () =>
-			applyTableFormatting((text) => formatting.compactTable(text))
+			applyTableFormatting((text, separatorIndex) => formatting.compactTable(text, separatorIndex))
 		)
 	);
 
@@ -1350,11 +1350,17 @@ function applyLineBasedFormatting(formatter: (text: string) => formatting.TextTr
  * If no selection: detects table boundaries by looking for empty lines above and below
  * @param formatter - Function that takes text and returns a TextTransformation
  */
-function applyTableFormatting(formatter: (text: string) => formatting.TextTransformation): void {
+function applyTableFormatting(formatter: (text: string, separatorIndex: number | undefined) => formatting.TextTransformation): void {
 	const editor = vscode.window.activeTextEditor;
 	if (!editor) {
 		return;
 	}
+
+	// The document's tables, read once for all selections, which find their
+	// separators in them
+	const lines: string[] = [];
+	for (let line = 0; line < editor.document.lineCount; line++) lines.push(editor.document.lineAt(line).text);
+	const tables = formatting.documentTables(lines);
 
 	editor.edit(editBuilder => {
 		for (const selection of editor.selections) {
@@ -1397,7 +1403,8 @@ function applyTableFormatting(formatter: (text: string) => formatting.TextTransf
 			);
 			
 			const text = editor.document.getText(fullLineRange);
-			const transformation = formatter(text);
+			// The table's separator, found from its rows around the selection
+			const transformation = formatter(text, formatting.tableSeparatorIndex(tables, lines, startLine, endLine));
 			editBuilder.replace(fullLineRange, transformation.newText);
 		}
 	});

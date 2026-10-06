@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import * as fc from 'fast-check';
-import { wrapSelection, wrapLines, wrapLinesNumbered, formatHeading, highlightAndComment, wrapCodeBlock, substituteAndComment, additionAndComment, deletionAndComment, reflowTable, compactTable, parseTable, isTableRow } from './formatting';
+import { wrapSelection, wrapLines, wrapLinesNumbered, formatHeading, highlightAndComment, wrapCodeBlock, substituteAndComment, additionAndComment, deletionAndComment, reflowTable, compactTable, parseTable, isTableRow, tableSeparatorIndex, documentTables } from './formatting';
 
 describe('Formatting Module Property Tests', () => {
   
@@ -900,6 +900,90 @@ describe('Table Formatting Unit Tests', () => {
     if (parsed.rows.length !== 2) {
       throw new Error(`Expected 2 rows, got ${parsed.rows.length}`);
     }
+  });
+
+  it.each([
+    // Property 2's counterexample, whose row Expand Table wrote as | --- |
+    ['a row of dashes and colons after the separator', '|  |\n| --- |\n| -:- |', '|     |\n| --- |\n| -:- |', '| |\n| --- |\n| -:- |'],
+    ['such a row with other cells', '| a | b |\n| --- | --- |\n| --- | :-: |', '| a   | b   |\n| --- | --- |\n| --- | :-: |', '| a | b |\n| --- | --- |\n| --- | :-: |'],
+    // Whose :-: centered the column
+    ['a header of dashes and colons', '| :-: |\n| --- |\n| abcdef |', '| :-:    |\n| ------ |\n| abcdef |', '| :-: |\n| --- |\n| abcdef |'],
+  ])('keeps %s as text, as the preview and export read it', (_name, input, expanded, compacted) => {
+    expect(reflowTable(input).newText).toBe(expanded);
+    expect(compactTable(input).newText).toBe(compacted);
+    expect(reflowTable(expanded).newText).toBe(expanded);
+    expect(compactTable(expanded).newText).toBe(compacted);
+  });
+
+  /** The separator of a selection from `start` to `end` of `lines`, as Expand
+   * Table and Compact Table find it */
+  const separatorOf = (lines: string[], start: number, end: number) => tableSeparatorIndex(documentTables(lines), lines, start, end);
+
+  it('takes a first row of dashes and colons for the separator where the text starts at it', () => {
+    // As a selection from the separator down does
+    expect(reflowTable('| --- |\n| abcdef |').newText).toBe('| ------ |\n| abcdef |');
+    expect(reflowTable('| :-- |\n| abcdef |').newText).toBe('| :----- |\n| abcdef |');
+  });
+
+  it.each([
+    ['from the separator', ['| h |', '| ------------ |', '| --- |', '| abcdef |'], 1, 3, 0],
+    ['from the header', ['| h |', '| --- |', '| --- |'], 0, 2, 1],
+    ['from a row after the separator', ['| h |', '| --- |', '| --- |', '| a |'], 2, 3, -1],
+    ['from a blank line before the header', ['', '| h |', '| --- |'], 0, 2, 1],
+    ['from a paragraph\'s line before the header', ['| p |', '| h |', '| --- |', '| a |'], 1, 3, 1],
+    // No table: parseTable takes the first row, as before
+    ['from a separator with no header before it', ['| --- |', '| a |'], 0, 1, undefined],
+    ['from the header of a table after another', ['| h |', '| --- |', '', '| a |', '| --- |'], 3, 4, 1],
+    // A separator of other cells than the line before it is a paragraph's text
+    ['after a paragraph\'s lines of other cells', ['| p | q |', '| --- |', '| h |', '| --- |', '| a |'], 2, 4, 1],
+    ['ending at a paragraph\'s line before the header', ['| --- |', '| h |', '| --- |'], 0, 1, -1],
+    // A separator's cells are dashes with a colon at either end alone
+    ['after a paragraph\'s line and a row of dashes with a colon inside', ['| paragraph |', '| -:- |', '| h |', '| --- |', '| a |'], 2, 4, 1],
+    ['of the separator alone, after a header without outer pipes', ['h | q', '| --- | --- |', '| --- | --- |', '| a | b |'], 1, 1, 0],
+    ['after a header that ends in an escaped pipe', ['| a | b\\|', '| --- | --- |', '| x | y |'], 1, 2, 0],
+    ['after an indented code block of a table', ['    | c |', '    | --- |', '| h |', '| --- |', '| a |'], 2, 4, 1],
+    // Whose lines markdown-it reads as the comment's, after CriticMarkup's
+    // preprocessing, as the preview and export do
+    ['after a CriticMarkup comment of a table\'s lines', ['{>>e.g.', '| x |', '| --- |', '<<}', '| h |', '| --- |', '| a |'], 4, 6, 1],
+    ['after a CriticMarkup comment of a blank line and a table\'s lines', ['{>>e.g.', '', '| x |', '| --- |', '<<}', '| h |', '| --- |', '| a |'], 5, 7, 1],
+  ] as const)('tableSeparatorIndex finds the separator of a selection %s in the table around it', (_name, lines, start, end, expected) => {
+    expect(separatorOf([...lines], start, end)).toBe(expected);
+  });
+
+  it('compacts a table after a CriticMarkup comment of a table\'s lines with its own separator', () => {
+    // It took the comment's lines for the table's start, and the selection
+    // for one after its separator, so it left the long separator as it was
+    const lines = ['{>>e.g.', '| x |', '| --- |', '<<}', '| h |', '| ------------ |', '| a |'];
+    const text = lines.slice(4).join('\n');
+    const index = separatorOf(lines, 4, 6);
+    expect(compactTable(text, index).newText).toBe('| h |\n| --- |\n| a |');
+    expect(reflowTable(text, index).newText).toBe('| h |\n| --- |\n| a |');
+  });
+
+  it('keeps a selection from the separator whose next row is of dashes too as the table around it has it', () => {
+    // It took the row after the separator for it, and the separator for text
+    const lines = ['| header |', '| ------------ |', '| --- |', '| abcdef |'];
+    const text = lines.slice(1).join('\n');
+    const index = separatorOf(lines, 1, 3);
+    expect(compactTable(text, index).newText).toBe('| --- |\n| --- |\n| abcdef |');
+    expect(reflowTable(text, index).newText).toBe('| ------ |\n| ---    |\n| abcdef |');
+  });
+
+  it('compacts a table after a paragraph\'s lines of other cells with its own separator', () => {
+    // It took the paragraph's | --- | for the separator, and padded the
+    // table's own as a row with an empty cell, which made it a paragraph
+    const lines = ['| p | q |', '| --- |', '| h |', '| --- |', '| a | b |'];
+    const text = lines.slice(2).join('\n');
+    const index = separatorOf(lines, 2, 4);
+    expect(compactTable(text, index).newText).toBe('| h | |\n| --- | --- |\n| a | b |');
+  });
+
+  it('keeps a selection from a row after the separator as text, whatever its rows', () => {
+    const lines = ['| h |', '| --- |', '| :-: |', '| abcdef |'];
+    const text = lines.slice(2).join('\n');
+    const index = separatorOf(lines, 2, 3);
+    expect(compactTable(text, index).newText).toBe('| :-: |\n| abcdef |');
+    expect(reflowTable(text, index).newText).toBe('| :-:    |\n| abcdef |');
   });
 });
 
