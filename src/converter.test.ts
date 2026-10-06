@@ -3148,14 +3148,18 @@ describe('wrapWithFormatting', () => {
     expect(wrapWithFormatting(' Mark ', { ...DEFAULT_FORMATTING, highlight: true })).toBe('== Mark ==');
     expect(wrapWithFormatting(' Mark ', { ...DEFAULT_FORMATTING, highlight: true, highlightColor: 'green' })).toBe('== Mark =={green}');
     expect(wrapWithFormatting('   ', { ...DEFAULT_FORMATTING, highlight: true, highlightColor: 'green' })).toBe('==   =={green}');
-    expect(wrapWithFormatting('a\\\n', { ...DEFAULT_FORMATTING, highlight: true })).toBe('==a==\\\n');
-    // And strikethrough's, which Word shows too, in <s>, as ~~ can't close
-    // after whitespace, but not line breaks
+    // And its line breaks, which Word highlights too
+    expect(wrapWithFormatting('a\\\n', { ...DEFAULT_FORMATTING, highlight: true })).toBe('==a\\\n==');
+    expect(wrapWithFormatting('\\\n', { ...DEFAULT_FORMATTING, highlight: true })).toBe('==\\\n==');
+    // And strikethrough's, which Word shows too, and its line breaks', in
+    // <s>, as ~~ can't close after whitespace or a line's start
     expect(wrapWithFormatting('Strike ', { ...DEFAULT_FORMATTING, strikethrough: true })).toBe('<s>Strike </s>');
     expect(wrapWithFormatting(' Strike', { ...DEFAULT_FORMATTING, strikethrough: true })).toBe('<s> Strike</s>');
     expect(wrapWithFormatting('   ', { ...DEFAULT_FORMATTING, strikethrough: true })).toBe('<s>   </s>');
-    expect(wrapWithFormatting('a \\\n', { ...DEFAULT_FORMATTING, strikethrough: true })).toBe('<s>a </s>\\\n');
-    expect(wrapWithFormatting('a\\\n', { ...DEFAULT_FORMATTING, strikethrough: true })).toBe('~~a~~\\\n');
+    expect(wrapWithFormatting('a \\\n', { ...DEFAULT_FORMATTING, strikethrough: true })).toBe('<s>a \\\n</s>');
+    expect(wrapWithFormatting('a\\\n', { ...DEFAULT_FORMATTING, strikethrough: true })).toBe('<s>a\\\n</s>');
+    expect(wrapWithFormatting('\\\na', { ...DEFAULT_FORMATTING, strikethrough: true })).toBe('<s>\\\na</s>');
+    expect(wrapWithFormatting('a\\\nb', { ...DEFAULT_FORMATTING, strikethrough: true })).toBe('~~a\\\nb~~');
     expect(wrapWithFormatting('Strike ', { ...DEFAULT_FORMATTING, strikethrough: true, bold: true })).toBe('**<s>Strike </s>**');
   });
 
@@ -12396,15 +12400,27 @@ describe('Highlights across runs', () => {
 
   test.each([
     ['a } at its start', [run('Seen '), run('}x', { highlight: true }), citation({ highlight: true })], 'Seen ==\\}x [@doe2020]=='],
-    ['a { at its end before a line break', [run('Seen '), citation({ highlight: true }), run('a{\\\n', { highlight: true }), run('b')], 'Seen ==[@doe2020]a\\{==\\\nb'],
-    ['a { after an escaped backslash at its end before a line break', [run('Seen '), citation({ highlight: true }), run('a\\{\\\n', { highlight: true }), run('b')], 'Seen ==[@doe2020]a\\\\\\{==\\\nb'],
   ])('escapes %s in a highlight of a citation and text', async (_name, items, md) => {
-    // Which read with the highlight's == as CriticMarkup's ==} or {==, as in
-    // ==[@doe2020]a{==, which export read as no highlight. The line break,
-    // which the text holds, kept its end from escaping the {.
+    // Which read with the highlight's == as CriticMarkup's ==}, as in
+    // ==}x [@doe2020]==, which export read as no highlight
     const markdown = buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim();
     expect(markdown).toBe(md);
     expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '')).toStartWith(md + '\n');
+  });
+
+  test.each([
+    ['a {', [run('Seen '), citation({ highlight: true }), run('a{\\\n', { highlight: true }), run('b')], 'Seen ==[@doe2020]a{\\\n==b', 'Seen ==[@doe2020]a\\{\\\n==b'],
+    ['a { after an escaped backslash', [run('Seen '), citation({ highlight: true }), run('a\\{\\\n', { highlight: true }), run('b')], 'Seen ==[@doe2020]a\\\\{\\\n==b', 'Seen ==[@doe2020]a\\\\\\{\\\n==b'],
+  ])('keeps %s before a line break at the end of a highlight of a citation and text in it', async (_name, items, md, back) => {
+    // The highlight holds the line break, which Word highlights, so its ==
+    // comes after it, not after the {, where the two read as {==. Export
+    // writes the break in a run of its own, after which the { ends a run's
+    // text, which escapes it.
+    const markdown = buildMarkdown([{ type: 'para' }, ...items] as ContentItem[], new Map()).trim();
+    expect(markdown).toBe(md);
+    const trip = async (text: string) => (await convertDocx((await convertMdToDocx(text)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(await trip(markdown)).toStartWith(back + '\n');
+    expect(await trip(back)).toStartWith(back + '\n');
   });
 
   test.each([
@@ -13082,5 +13098,80 @@ describe('Links of more than one run', () => {
       + '</Relationships>';
     const result = await convertDocx(await buildSyntheticDocx(xml, { 'word/_rels/document.xml.rels': rels }));
     expect(result.markdown).toBe('[a *b\\\nc*](https://e.com)\n');
+  });
+});
+
+describe('Formatting Word shows on whitespace', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n/, '');
+  const HL = '<w:highlight w:val="yellow"/>', U = '<w:u w:val="single"/>', S = '<w:strike/>';
+  /** A run of `content`, where ^ is a line break, | a tab and the rest text */
+  const run = (content: string, rPr = '') => '<w:r>' + (rPr ? '<w:rPr>' + rPr + '</w:rPr>' : '')
+    + content.split(/([\^|])/).filter(Boolean).map(c => c === '^' ? '<w:br/>' : c === '|' ? '<w:tab/>' : '<w:t xml:space="preserve">' + c + '</w:t>').join('') + '</w:r>';
+  const revision = (tag: 'ins' | 'del', runs: string) => '<w:' + tag + ' w:id="90" w:author="A" w:date="2024-01-01T00:00:00Z">'
+    + (tag === 'del' ? runs.replace(/<(\/?)w:t\b/g, '<$1w:delText') : runs) + '</w:' + tag + '>';
+  /** The document export makes of `md`, with its run of XX as `runs` */
+  const withRuns = async (runs: string, md = 'XX') => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace(/<w:r>(?:(?!<w:r>).)*?<w:t[^>]*>XX<\/w:t><\/w:r>/s, runs);
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    return zip.generateAsync({ type: 'uint8array' });
+  };
+  /** The body's text, a line break as ⏎ and a tab as →, in pieces of the
+   *  formatting Word shows on them, and its tracked changes */
+  const shown = async (docx: Uint8Array) => {
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const body = xml.slice(xml.indexOf('<w:body>'), xml.lastIndexOf('<w:sectPr'));
+    const pieces: string[] = [];
+    for (const [, tag, inner] of body.matchAll(/<(\/?w:(?:ins|del|p))\b[^>]*>|<w:r>([\s\S]*?)<\/w:r>/g)) {
+      if (tag) { pieces.push('<' + tag.replace('w:', '') + '>'); continue; }
+      const format = (inner.match(/<w:(?:u|strike|highlight|rStyle)\b[^>]*>/g) ?? []).filter(p => !p.includes('CommentReference')).join('');
+      const text = inner.replace(/<w:rPr>[\s\S]*?<\/w:rPr>/, '').replace(/<w:br\/>/g, '⏎').replace(/<w:tab\/>/g, '→').replace(/<[^>]+>/g, '');
+      const last = pieces.length - 1;
+      if (pieces[last]?.startsWith(format + '|')) pieces[last] += text;
+      else if (text) pieces.push(format + '|' + text);
+    }
+    return pieces;
+  };
+  /** Word's runs to Markdown and back, which holds what Word showed */
+  const roundTrip = async (runs: string, md: string, template = 'XX') => {
+    const docx = await withRuns(runs, template);
+    const markdown = strip((await convertDocx(docx)).markdown);
+    expect(markdown).toBe(md + '\n');
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect(await shown(again)).toEqual(await shown(docx));
+    expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
+  };
+
+  test.each([
+    ['underlined, alone', run('x') + run('^', U) + run('y'), 'x<u>\\\n</u>y'],
+    ['underlined, alone at the paragraph\'s end', run('x') + run('^', U), 'x<u>\\\n</u>'],
+    ['struck, at a run\'s end', run('x') + run('a^', S) + run('y'), 'x<s>a\\\n</s>y'],
+    ['struck, at a run\'s start', run('x') + run('^a', S) + run('y'), 'x<s>\\\na</s>y'],
+    ['struck, alone', run('x') + run('^', S) + run('y'), 'x<s>\\\n</s>y'],
+    ['struck, at the paragraph\'s end', run('x') + run('a^', S), 'x<s>a\\\n</s>'],
+    ['highlighted, at a run\'s end', run('x') + run('a^', HL) + run('y'), 'x==a\\\n==y'],
+    ['highlighted, at a run\'s start', run('x') + run('^a', HL) + run('y'), 'x==\\\na==y'],
+    ['highlighted, alone', run('x') + run('^', HL) + run('y'), 'x==\\\n==y'],
+    ['highlighted red, alone', run('x') + run('^', '<w:highlight w:val="red"/>') + run('y'), 'x==\\\n=={red}y'],
+    ['highlighted, at the paragraph\'s start', run('^a', HL) + run('y'), '==\\\na==y'],
+    ['highlighted, in bold', run('x') + run('a^', '<w:b/>' + HL) + run('y'), 'x<b>==a\\\n==</b>y'],
+    ['highlighted, between highlighted runs of other formatting', run('x ') + run('a', '<w:b/>' + HL) + run('^', HL) + run('c', '<w:i/>' + HL) + run(' y'), 'x ==**a**\\\n*c*== y'],
+    // Where == alone on the last line would read as a heading's underline
+    ['highlighted, at the paragraph\'s end', run('x') + run('a^', HL), 'x==a<br>=='],
+    ['highlighted, alone at the paragraph\'s end', run('x') + run('^', HL), 'x==<br>=='],
+    ['highlighted, in a tracked insertion', run('x') + revision('ins', run('a^', HL)) + run('y'), 'x{++==a\\\n==++}y'],
+    ['highlighted, in a tracked deletion', run('x') + revision('del', run('a^', HL)) + run('y'), 'x{--==a\\\n==--}y'],
+    ['struck, alone in a tracked insertion', run('x') + revision('ins', run('^', S)) + run('y'), 'x{++<s>\\\n</s>++}y'],
+  ])('keeps the formatting of a line break %s', async (_name, runs, md) => {
+    // The break went outside the formatting, where Word showed it on it
+    await roundTrip(runs, md);
+  });
+
+  test('writes <br> before the == of a highlight that ends the text before an equation', async () => {
+    // == alone on the line before it read as a heading's underline
+    const md = 'x==a<br>==\n$$\nE\n$$\n';
+    expect(strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown)).toBe(md);
   });
 });
