@@ -13,7 +13,7 @@ import { computeCodeRegions, computeMarkdownRegions, isInsideCodeRegion } from '
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { citationEndInText, compareNoteLabels, customStyleId, directiveRest, htmlBlocksIn, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, readsAsParagraph, readsCommentsInline, startsHtmlBlock } from './md-to-docx';
+import { blocksAsRead, citationEndInText, compareNoteLabels, customStyleId, directiveRest, htmlBlocksIn, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, startsHtmlBlock } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { matchTables, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
@@ -9073,6 +9073,62 @@ function htmlLinesAsText(lines: string[]): string[] {
     .join('').split('\n').map(line => SOURCES_HEADING_RE.test(line) ? line.replace('S', '&#83;') : GRID_TABLE_SEPARATOR_RE.test(line) ? '\\' + line : line);
 }
 
+/** A paragraph's Markdown as import writes the paragraph export makes of it
+ *  in Word, as the next round trip would: a tag that formats its text, as
+ *  <b>, as Markdown's emphasis, where that reads as it, a <br> as a line
+ *  break, a character reference as its character, where it needs none, and
+ *  a tag export shows as text that would read as one that formats, as
+ *  <b class="x">, escaped. A citation's brackets stay escaped, as the HTML
+ *  held them as text, though import writes Word's text of one whose key
+ *  the document cites as a citation. As it is where it holds what this
+ *  doesn't make, as a line end in a tag export shows as text, or one a
+ *  reference, as &#13;, gives, which Markdown would read as a line end, or
+ *  where export wouldn't read what this makes as it reads the paragraph, as
+ *  a line break before a comment, which would start an HTML block. */
+function asImportedParagraph(markdown: string): string {
+  const tokens = parseMd(markdown);
+  if (tokens.length !== 1 || tokens[0].type !== 'paragraph') return markdown;
+  const items: ContentItem[] = [];
+  let link = 0;
+  for (const run of tokens[0].runs) {
+    const formatting: RunFormatting = {
+      ...DEFAULT_FORMATTING, bold: !!run.bold, italic: !!run.italic, underline: !!run.underline,
+      strikethrough: !!run.strikethrough, superscript: !!run.superscript, subscript: !!run.subscript,
+    };
+    if (run.linkStart) link++;
+    const href = run.href !== undefined ? { href: run.href, link } : {};
+    // A line break as import reads Word's
+    if (run.type === 'hardbreak') items.push({ type: 'text', text: '\\\n', commentIds: new Set(), formatting, ...href });
+    else if (run.type === 'text' && !run.code && !run.highlight && !/[\r\n]/.test(run.text)) {
+      items.push({ type: 'text', text: run.text, commentIds: new Set(), formatting, ...href });
+    } else if (run.type === 'html_comment') items.push({ type: 'html_comment', text: run.text, commentIds: new Set() });
+    // As import reads one export hid between zero-width spaces, which it
+    // couldn't embed
+    else if (run.type === 'image' && run.imageSource !== undefined) {
+      items.push({ type: 'image', rId: '', src: '', alt: '', widthPx: 0, heightPx: 0, commentIds: new Set(), markdown: run.imageSource + '\u200B' });
+    } else return markdown;
+  }
+  if (items.length === 0) return markdown;
+  // As buildMarkdown writes a paragraph's text, with a line break at its
+  // end as <br>, as Markdown, though around a table in an HTML cell, and
+  // with no key known, so a citation's brackets are text's
+  const [outerReadsMarkdown, outerKeys, outerNoted] = [readsMarkdown, knownCitationKeys, citationsNoted];
+  readsMarkdown = true;
+  knownCitationKeys = new Set();
+  citationsNoted = true;
+  try {
+    const text = renderInlineRange(mergeConsecutiveRuns(items), 0, new Map(), { stopBeforeDisplayMath: true }).text;
+    const imported = keepParagraphWhitespace(text.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + '<br>'), true, true);
+    // Only where export reads it as it reads the paragraph: a comment on the
+    // line after a line break starts an HTML block, which ends the paragraph
+    return JSON.stringify(blocksAsRead(imported)) === JSON.stringify(blocksAsRead(markdown)) ? imported : markdown;
+  } finally {
+    readsMarkdown = outerReadsMarkdown;
+    knownCitationKeys = outerKeys;
+    citationsNoted = outerNoted;
+  }
+}
+
 /** For each line of the HTML around a table, read as the browser read it
  *  in the table's block, whether it starts in a comment (`inComment`), and
  *  where on it an element whose text keeps its whitespace, as a <pre>'s,
@@ -9197,7 +9253,9 @@ function htmlBlockEnd(lines: string[], k: number, inParagraph: boolean): number 
  *  around on its line, and the end of a comment an embed's line is in.
  *  Each line reads as it does in what's written, in order, in which a line
  *  of text is a paragraph's, after which a line of one tag starts no block,
- *  and a paragraph's lines go on one (see htmlLinesAsText). Null where it reads no more as it was, as a block that ends
+ *  and a paragraph's lines go on one (see htmlLinesAsText). A paragraph
+ *  goes as the next round trip would write it (see asImportedParagraph),
+ *  and a blank line between blocks, but next to a comment. Null where it reads no more as it was, as a block that ends
  *  at a marker without one, which would go on over the table (see
  *  detachedHtmlLines), or a paragraph of a Sources line. */
 function detachedTableHtml(html: string): string | undefined | null {
@@ -9217,12 +9275,23 @@ function detachedTableHtml(html: string): string | undefined | null {
   // one starts a block, as # Heading would, which ends the paragraph there
   // and shows what the comment hid
   let unread = false;
+  // What `out` ends with: a paragraph of text, an HTML block or a comment.
+  // The next round trip writes a blank line between each and the next, as
+  // between Word's paragraphs, but next to a comment, whose lines before
+  // and after export keeps.
+  let last: 'text' | 'html' | 'comment' | undefined;
+  const push = (lines: string[], kind: 'text' | 'html' | 'comment') => {
+    if (lines.length === 0) return;
+    if (kind !== 'comment' && last !== undefined && last !== 'comment' && out[out.length - 1] !== '') out.push('');
+    out.push(...lines);
+    last = kind;
+  };
   const endTexts = () => {
     const shown = unescapeAll(texts.join('\n').replace(/<!--[\s\S]*?-->|<[^>]*>/g, '').replace(/\\/g, '\\\\'));
     if (SOURCES_HEADING_RE.test(shown.replace(/\s+/g, ' ').trim())) sources = true;
     const text = htmlLinesAsText(texts);
     if (texts.length > 1 && !readsAsParagraph(text.join('\n'))) unread = true;
-    if (texts.length > 0) out.push(...text);
+    if (texts.length > 0) push(asImportedParagraph(text.join('\n')).split('\n'), 'text');
     texts = [];
   };
   let inParagraph = false;
@@ -9256,7 +9325,6 @@ function detachedTableHtml(html: string): string | undefined | null {
       inParagraph = /\S/.test(line);
       continue;
     }
-    endTexts();
     // A block that ends at a marker on its last line before a <pre> there
     // does, as a comment before one, goes there, and the <pre> starts one
     // of its own, as its lines would be text after the block, with their
@@ -9268,12 +9336,18 @@ function detachedTableHtml(html: string): string | undefined | null {
     if (marker && !marker.test(block[block.length - 1])) return null;
     const rest = directiveRest(block.join('\n'));
     if (rest === undefined) {
+      // A block ends the text before it, but a directive, which goes, as
+      // the paragraph it was in in Word, so the text on either side, which
+      // export read with it as the table's block's, goes on as one
+      endTexts();
       // With its indent as code gone
       if (/^(?: {0,3}\t| {4})/.test(block[0])) block[0] = block[0].trimStart();
+      const kept: string[] = [];
       for (let m = 0; m < block.length; m++) {
-        if (!parseEmbedDirective(block[m])) out.push(block[m]);
-        else if (inComment[k + m]) out.push(block[m].slice(block[m].indexOf('-->')));
+        if (!parseEmbedDirective(block[m])) kept.push(block[m]);
+        else if (inComment[k + m]) kept.push(block[m].slice(block[m].indexOf('-->')));
       }
+      push(kept, block[0].trimStart().startsWith('<!--') ? 'comment' : 'html');
       inParagraph = false;
     } else if (/\S/.test(rest)) {
       // Text, as the lines of text after it in its paragraph are

@@ -784,6 +784,22 @@ export function readsCommentsInline(text: string, payloads: string[], merge = fa
     || merge && read.join('') === payloads.join('');
 }
 
+/** The blocks export reads in Markdown `markdown`, each with its kind and
+ *  its runs, those of text next to each other formatted alike joined, as
+ *  Word shows them: what the Markdown gives Word, to compare Markdown by */
+export function blocksAsRead(markdown: string): Array<Pick<MdToken, 'type' | 'level' | 'taskChecked' | 'alertType' | 'runs'>> {
+  const format = (run: MdRun) => JSON.stringify({ ...run, text: '' }, (_key, value: unknown) => value instanceof Map || value instanceof Set ? [...value] : value);
+  return parseMd(markdown).map(({ type, level, taskChecked, alertType, runs }) => ({
+    type, level, taskChecked, alertType,
+    runs: runs.reduce<MdRun[]>((joined, run) => {
+      const last = joined[joined.length - 1];
+      if (last?.type === 'text' && run.type === 'text' && format(last) === format(run)) joined[joined.length - 1] = { ...last, text: last.text + run.text };
+      else joined.push(run);
+      return joined;
+    }, []),
+  }));
+}
+
 /** The HTML blocks export reads in Markdown `text`, not in a quote or list:
  *  each one's lines, from `start` to before `end`, and its text */
 export function htmlBlocksIn(text: string): Array<{ start: number; end: number; content: string }> {
