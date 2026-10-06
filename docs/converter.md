@@ -165,6 +165,7 @@ If output files already exist, you'll be prompted to replace, choose a new name,
 
 - **Complex nested tables**: nested `<table>` elements inside cells are not supported
 - **Task-list round-trip normalization**: task list items are exported with deterministic checkbox prefixes in DOCX output. Import reads a `☐` or `☒` at the start of a list item, or of a paragraph indented the way export indents a bulleted task item, back as a task item. Exact original marker spelling (`[x]` vs `[X]`) is not preserved
+- **Empty paragraphs**: Markdown reads any number of blank lines between two blocks as one, so import writes Word's empty paragraphs there as the blank line between them, and the next export has none. Before a quote, import writes a blank line for each, which export keeps in a custom property, and in a table cell written as HTML each is a `<p></p>`. A list item with no text stays an item, as `2. `
 - **Disallowed raw HTML handling**: disallowed tags from the GitHub Flavored Markdown extension set (`title`, `textarea`, `style`, `xmp`, `iframe`, `noembed`, `noframes`, `script`, `plaintext`) are treated as literal text rather than executable/rendered HTML in parsing/preview paths
 
 ### Comment Boundary Expansion in Code Runs

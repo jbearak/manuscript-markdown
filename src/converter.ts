@@ -9374,7 +9374,8 @@ function codeBlockFence(content: ContentItem[], start: number, lang: string): { 
  * plain paragraph after it fills that paragraph with its text; a heading,
  * list item or rule has a para item of its own, which the empty one would add blank
  * lines before, so the empty one goes. An empty paragraph of another shape,
- * as a Word user adds, stays.
+ * as a Word user adds, stays, and buildMarkdown writes it as the blank line
+ * before the block.
  */
 function dropCodeBlockSeparators(content: ContentItem[]): void {
   let afterCodeBlock = false;
@@ -10807,6 +10808,16 @@ export function buildMarkdown(
           blockquotePreContentBlankLines?.has(nextPara.blockquoteGroupIndex)
         ) {
           i++;
+          continue;
+        }
+        // Before a block that writes the blank line before it, as a list
+        // item, a heading, a code block, a title or a rule, empty paragraphs
+        // are that blank line, as before a paragraph, whose text goes on from
+        // them: export reads more blank lines as one, so the next trip would
+        // drop them. A tracked mark before one is in the text before it (see
+        // joinTrackedParagraphBreaks)
+        if (nextPara && (nextPara.listMeta || nextPara.headingLevel || nextPara.isCodeBlock || nextPara.isTitle || nextPara.horizontalRule)) {
+          i = nextStructuralIdx;
           continue;
         }
       }
