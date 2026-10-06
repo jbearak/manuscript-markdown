@@ -11675,6 +11675,24 @@ describe('CriticMarkup over a line break in raw inline HTML', () => {
   });
 });
 
+describe('CriticMarkup over a line break in source export keeps as it is', () => {
+  const roundTrip = async (md: string, bibtex?: string) =>
+    (await convertDocx((await convertMdToDocx(md, bibtex ? { bibtex } : undefined)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+  const bibtex = '@article{smith2020,\n  author = {Smith, Jane},\n  title = {T},\n  journal = {J},\n  year = {2020},\n}';
+
+  test.each([
+    ['the alt text of an image export can\'t embed', '![a {++x\ny++}](missing.png)\n'],
+    ['the alt text of an image with attributes', '![a {--x\ny--}](missing.png){width=10}\n'],
+    ['a citation\'s locator', 'A [@smith2020, p. {++1\n2++}] b.\n'],
+  ])('keeps the line break of CriticMarkup in %s', async (_name, md) => {
+    // Export took the source with the placeholders written for the line
+    // breaks in it, which went in Word, and import wrote them out
+    const { docx } = await convertMdToDocx(md, { bibtex });
+    expect(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).not.toContain('\uE000');
+    expect(await roundTrip(md, bibtex)).toBe(md);
+  });
+});
+
 describe('Track changes (CriticMarkup)', () => {
   const AUTHOR = 'Test Author';
   const DATE = '2024-01-15T10:30:00Z';

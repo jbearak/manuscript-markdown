@@ -221,7 +221,9 @@ export interface MdRun {
 function imageMarkdownSource(token: ManuscriptToken, alt: string, attrs: string | undefined): string {
   const src = token.attrGet?.('src') || '';
   const title = token.attrGet?.('title');
-  const source: string = token.meta?.source ?? '![' + alt.replace(/[\\[\]]/g, c => '\\' + c) + ']('
+  // With the line breaks of CriticMarkup in it, which the source slice
+  // has as the placeholders preprocessCriticMarkup wrote
+  const source: string = token.meta?.source !== undefined ? restoreCriticLineBreaks(token.meta.source) : '![' + alt.replace(/[\\[\]]/g, c => '\\' + c) + ']('
     + (/[\s()<>]/.test(src) ? '<' + src + '>' : src)
     + (title ? ' "' + title.replace(/["\\]/g, c => '\\' + c) + '"' : '') + ')';
   return source + (attrs !== undefined ? '{' + attrs + '}' : '');
@@ -797,7 +799,8 @@ function citationRule(state: StateInline, silent: boolean): boolean {
   if (start + 2 >= max) return false;
   const endPos = citationEnd(state, start);
   if (endPos === -1) return false;
-  const rawContent = state.src.slice(start + 1, endPos);
+  // With the line breaks of CriticMarkup in it, as in a comment's body
+  const rawContent = restoreCriticLineBreaks(state.src.slice(start + 1, endPos));
 
   if (!silent) {
     const token = pushManuscriptToken(state, 'citation', '', 0);
