@@ -1441,6 +1441,41 @@ describe('Ordered list numbering', () => {
     expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('1. a\n2. b');
   });
 
+  // A document of [numId, ilvl, text] list paragraphs, numId 0 for a plain
+  // one, with instances of the numbered lists' numbering added
+  const wordList = async (instances: string, paragraphs: [number, number, string][]) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('1. a')).docx);
+    const numbering = await zip.file('word/numbering.xml')!.async('string');
+    zip.file('word/numbering.xml', numbering.replace('</w:numbering>', instances + '</w:numbering>'));
+    const body = paragraphs.map(([numId, ilvl, text]) => '<w:p>' + (numId > 0
+      ? '<w:pPr><w:numPr><w:ilvl w:val="' + ilvl + '"/><w:numId w:val="' + numId + '"/></w:numPr></w:pPr>' : '')
+      + '<w:r><w:t>' + text + '</w:t></w:r></w:p>').join('');
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<w:body>[\s\S]*?(?=<w:sectPr)/, () => '<w:body>' + body));
+    return strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+  };
+  const instance = (numId: number, starts: [number, number][] = []) => '<w:num w:numId="' + numId + '"><w:abstractNumId w:val="1"/>'
+    + starts.map(([ilvl, start]) => '<w:lvlOverride w:ilvl="' + ilvl + '"><w:startOverride w:val="' + start + '"/></w:lvlOverride>').join('')
+    + '</w:num>';
+
+  test.each([
+    // ECMA-376 Part 1 §17.9.26's example: numId 6 starts the count over for numId 5 too
+    ['an instance after another', instance(5) + instance(6, [[0, 1]]), [5, 5, 6, 5], '1. a\n2. b\n\n<!-- -->\n\n1. c\n2. d'],
+    ['an instance before another', instance(6, [[0, 1]]) + instance(5), [6, 5, 5], '1. a\n2. b\n3. c'],
+    // Its start applies once, at its first paragraph, as Word numbers it
+    ['an instance used again', instance(6, [[0, 7]]), [2, 6, 2, 6], '1. a\n\n<!-- -->\n\n7. b\n8. c\n9. d'],
+  ])('numbers the instances of one list as one count: %s', async (_name, instances, numIds, md) => {
+    expect(await wordList(instances, numIds.map((numId, i): [number, number, string] => [numId, 0, 'abcd'[i]]))).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('starts a level over at an instance\'s first paragraph at it, after its paragraphs at another', async () => {
+    // [MS-DOC] 2.4.6.4 looks for the override at the paragraphs at its level
+    const md = '1. a\n\n   7. x\n   8. y';
+    expect(await wordList(instance(6, [[1, 7]]), [[6, 0, 'a'], [6, 1, 'x'], [6, 1, 'y']])).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
   test('replaces a template\'s start override written as an element pair', async () => {
     const templateDocx = await templateWithNumbering(numbering => numbering.replace(
       /(<w:num w:numId="2"[^>]*><w:abstractNumId w:val="1"\/>)/,

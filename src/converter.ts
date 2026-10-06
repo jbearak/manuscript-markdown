@@ -1714,35 +1714,33 @@ export interface WordListCounter {
 
 /**
  * Counts list paragraphs as Word numbers them. The instances of an abstract
- * numbering share its count, so a list goes on across the paragraphs between
- * its parts, even in two w:num elements, except at a level an instance
- * overrides the start of: that level counts on its own, from that start. A
- * level starts over after any higher level.
+ * numbering share one count, so a list goes on across the paragraphs between
+ * its parts, even in two w:num elements, and an instance's start override
+ * starts that count over for all of them: ECMA-376 Part 1 §17.9.26 numbers
+ * numIds 5, 5, 6, 5, where 6 starts level 0 over at 1, as 1, 2, 1, 2. An
+ * override applies once, at the instance's first paragraph at its level, as
+ * [MS-DOC] 2.4.6.4 has it (step 10, which only paragraphs at the level
+ * reach), and as docx4j and LibreOffice apply it; later paragraphs of the
+ * instance at that level go on. A level starts
+ * over after any higher level ([MS-OI29500] 2.1.282).
  */
 export function wordListCounter(defs: NumberingDefs, instances: NumberingInstances): WordListCounter {
-  // abstractNumId → the shared count by level, and each instance's own;
-  // `deep` holds the counts with a level under the top one, for the next
-  // higher level to start over, without going through every instance
-  const lists = new Map<string, { shared: number[]; own: Map<string, number[]>; deep: Set<number[]>; restartsAfterBreak: boolean }>();
+  // abstractNumId → its count by level; numId:level where an instance has
+  // had a paragraph at a level, which used its start override there
+  const lists = new Map<string, { levels: number[]; restartsAfterBreak: boolean }>();
+  const used = new Set<string>();
   const count = (numId: string, ilvl: number): { number: number; starts: boolean } | undefined => {
     const instance = instances.get(numId);
     if (!instance) return undefined;
     let list = lists.get(instance.abstractNumId);
-    if (!list) lists.set(instance.abstractNumId, list = { shared: [], own: new Map(), deep: new Set(), restartsAfterBreak: false });
+    if (!list) lists.set(instance.abstractNumId, list = { levels: [], restartsAfterBreak: false });
     if (instance.restartsAfterBreak) list.restartsAfterBreak = true;
-    const override = instance.overrides.get(String(ilvl));
-    let levels = list.shared;
-    if (override !== undefined) {
-      levels = list.own.get(numId) ?? [];
-      list.own.set(numId, levels);
-    }
-    const starts = levels[ilvl] === undefined;
+    const override = used.has(numId + ':' + ilvl) ? undefined : instance.overrides.get(String(ilvl));
+    used.add(numId + ':' + ilvl);
+    const { levels } = list;
+    const starts = levels[ilvl] === undefined || override !== undefined;
     levels[ilvl] = starts ? override ?? defs.get(numId)?.get(String(ilvl))?.start ?? 1 : levels[ilvl] + 1;
-    for (const deeper of list.deep) {
-      if (deeper.length > ilvl + 1) deeper.length = ilvl + 1;
-      if (deeper.length <= 1) list.deep.delete(deeper);
-    }
-    if (levels.length > 1) list.deep.add(levels);
+    levels.length = ilvl + 1;
     return { number: levels[ilvl], starts };
   };
   return Object.assign(count, {
