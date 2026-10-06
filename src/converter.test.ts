@@ -41,6 +41,8 @@ import { keepParagraphEdgeWhitespace } from './html-entities';
 import { extractAllDecorationRanges } from './highlight-colors';
 
 const fixturesDir = join(__dirname, '..', 'test', 'fixtures');
+/** The space export puts after a note's mark, as Word does */
+const NOTE_SEPARATOR = '<w:r><w:t xml:space="preserve"> </w:t></w:r>';
 const sampleData = new Uint8Array(readFileSync(join(fixturesDir, 'sample.docx')));
 const formattingSampleData = new Uint8Array(readFileSync(join(fixturesDir, 'formatting_sample.docx')));
 // tables.docx is generated from markdown in beforeAll below (no committed binary)
@@ -5865,7 +5867,9 @@ describe('Word text that reads as Markdown', () => {
   /** The text of each paragraph of md's export, and whether any is more than text */
   const exported = async (md: string, part = 'word/document.xml') => {
     const xml = await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file(part)!.async('string');
-    const body = part === 'word/document.xml' ? xml.slice(xml.indexOf('<w:body>'), xml.indexOf('<w:sectPr')) : xml;
+    // Less the space export puts after a note's mark, as Word does
+    const body = part === 'word/document.xml' ? xml.slice(xml.indexOf('<w:body>'), xml.indexOf('<w:sectPr'))
+      : xml.replace(/(<w:(?:footnote|endnote)Ref\/><\/w:r>)<w:r><w:t xml:space="preserve"> <\/w:t><\/w:r>/g, '$1');
     const text = [...body.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)]
       .map(p => p[0].replace(/<w:br\/>/g, '\n').replace(/<[^>]+>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'))
       .filter(Boolean);
@@ -8803,10 +8807,12 @@ describe('Table alignment', () => {
 
 describe('Whitespace at the edges of a paragraph', () => {
   const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
-  /** The Markdown of md's export, with the text XX in part replaced by text */
+  /** The Markdown of md's export, with the text XX in part replaced by
+   *  text, and the space export puts after a note's mark before it too, as
+   *  text holds what Word puts there */
   const withText = async (md: string, part: string, text: string) => {
     const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
-    const xml = await zip.file(part)!.async('string');
+    const xml = (await zip.file(part)!.async('string')).replace(NOTE_SEPARATOR + '<w:r><w:t>XX</w:t></w:r>', '<w:r><w:t>XX</w:t></w:r>');
     zip.file(part, xml.replace('<w:t>XX</w:t>', '<w:t xml:space="preserve">' + text + '</w:t>'));
     return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
   };
@@ -9011,10 +9017,44 @@ describe('Whitespace at the edges of a paragraph', () => {
     const zip = await JSZip.loadAsync((await convertMdToDocx('T.[^1]\n\n[^1]: XX')).docx);
     const xml = await zip.file('word/footnotes.xml')!.async('string');
     const run = (t: string) => t === '\t' ? '<w:r><w:tab/></w:r>' : '<w:r><w:t xml:space="preserve">' + t + '</w:t></w:r>';
-    const edited = xml.replace('<w:r><w:t>XX</w:t></w:r>', run(separator) + run(text));
+    const edited = xml.replace(NOTE_SEPARATOR + '<w:r><w:t>XX</w:t></w:r>', run(separator) + run(text));
     expect(edited).not.toBe(xml);
     zip.file('word/footnotes.xml', edited);
     expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown).toBe(expected);
+  });
+
+  test.each([
+    ['text', 'A.', 'footnotes'],
+    ['code', '`c` A.', 'footnotes'],
+    ['formatting', '**b** A.', 'footnotes'],
+    ['an insertion', '{++A.++}', 'footnotes'],
+    ['a comment', '{==A.==}{>>c<<}', 'footnotes'],
+    ['an equation', '$x$ A.', 'footnotes'],
+    ['text, in an endnote', 'A.', 'endnotes'],
+  ])('writes the space Word puts after a note\'s mark before %s', async (_name, text, notes) => {
+    // Export put none before text that didn't start with whitespace, so a
+    // note's mark and its text went to Word as no note of Word's has them
+    const front = notes === 'endnotes' ? '---\nnotes: endnotes\n---\n\n' : '';
+    const md = front + 'T.[^1]\n\n[^1]: ' + text + '\n';
+    const { docx } = await convertMdToDocx(md);
+    const xml = await (await JSZip.loadAsync(docx)).file('word/' + notes + '.xml')!.async('string');
+    expect(xml).toContain((notes === 'endnotes' ? '<w:endnoteRef/>' : '<w:footnoteRef/>') + '</w:r>' + NOTE_SEPARATOR);
+    expect((await convertDocx(docx)).markdown).toBe(md);
+  });
+
+  test('writes a note as Word writes it back as it was', async () => {
+    // Word puts a run of a space after the note's mark, which went, so Word
+    // got the note's text right after the mark
+    const zip = await JSZip.loadAsync((await convertMdToDocx('T.[^1]\n\n[^1]: XX')).docx);
+    const xml = await zip.file('word/footnotes.xml')!.async('string');
+    const word = xml.replace(NOTE_SEPARATOR + '<w:r><w:t>XX</w:t></w:r>', NOTE_SEPARATOR + '<w:r><w:t>A note.</w:t></w:r>');
+    expect(word).not.toBe(xml);
+    zip.file('word/footnotes.xml', word);
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toBe('T.[^1]\n\n[^1]: A note.\n');
+    const again = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/footnotes.xml')!.async('string');
+    const note = (part: string) => /<w:footnote w:id="1">[\s\S]*?<\/w:footnote>/.exec(part)![0].replace(/ w14:\w+="[^"]*"| w:rsid\w*="[^"]*"/g, '');
+    expect(note(again)).toBe(note(word));
   });
 
   test.each([
@@ -9029,7 +9069,7 @@ describe('Whitespace at the edges of a paragraph', () => {
     const zip = await JSZip.loadAsync((await convertMdToDocx('T.[^1]\n\n[^1]: XX\n\n    YY')).docx);
     const xml = await zip.file('word/footnotes.xml')!.async('string');
     const run = (t: string) => t === '\t' ? '<w:r><w:tab/></w:r>' : t === '' ? '' : '<w:r><w:t xml:space="preserve">' + t.replace('\t', '</w:t><w:tab/><w:t>') + '</w:t></w:r>';
-    const edited = xml.replace('<w:r><w:t>XX</w:t></w:r>', run(first)).replace('<w:r><w:t>YY</w:t></w:r>', run(text));
+    const edited = xml.replace(NOTE_SEPARATOR + '<w:r><w:t>XX</w:t></w:r>', run(first)).replace('<w:r><w:t>YY</w:t></w:r>', run(text));
     expect(edited).not.toContain('XX');
     expect(edited).not.toContain('YY');
     zip.file('word/footnotes.xml', edited);
@@ -9061,7 +9101,7 @@ describe('Whitespace at the edges of a paragraph', () => {
     };
     const run = (t: string) => t === '' ? '' : '<w:r><w:t xml:space="preserve">' + t.replace('\t', '</w:t><w:tab/><w:t>') + '</w:t></w:r>';
     expect(xml).toMatch(markRun);
-    const edited = xml.replace(markRun, marks[mark]).replace('<w:r><w:t>XX</w:t></w:r>', run(first)).replace('<w:r><w:t>YY</w:t></w:r>', run(text));
+    const edited = xml.replace(markRun, marks[mark]).replace(NOTE_SEPARATOR + '<w:r><w:t>XX</w:t></w:r>', run(first)).replace('<w:r><w:t>YY</w:t></w:r>', run(text));
     expect(edited).not.toContain('XX');
     expect(edited).not.toContain('YY');
     zip.file(part, edited);
@@ -9089,7 +9129,7 @@ describe('Whitespace at the edges of a paragraph', () => {
     const style = notes === 'endnotes' ? 'EndnoteText' : 'FootnoteText';
     const tag = notes === 'endnotes' ? 'w:endnoteRef' : 'w:footnoteRef';
     const mark = how === 'comment' ? '' : '<w:rPr><w:' + how + ' w:id="91" w:author="A" w:date="2024-01-01T00:00:00Z"/></w:rPr>';
-    let edited = xml.replace(new RegExp('<w:pPr><w:pStyle w:val="' + style + '"/></w:pPr>(<w:r><w:rPr><w:rStyle w:val="\\w+"/></w:rPr><' + tag + '/></w:r>)<w:r><w:t>XX</w:t></w:r>'),
+    let edited = xml.replace(new RegExp('<w:pPr><w:pStyle w:val="' + style + '"/></w:pPr>(<w:r><w:rPr><w:rStyle w:val="\\w+"/></w:rPr><' + tag + '/></w:r>)' + NOTE_SEPARATOR + '<w:r><w:t>XX</w:t></w:r>'),
       '<w:pPr><w:pStyle w:val="' + style + '"/>' + mark + '</w:pPr>$1<w:r><w:t xml:space="preserve"> </w:t></w:r>' + (how === 'comment' ? '<w:commentRangeStart w:id="0"/>' : ''));
     if (how === 'comment') edited = edited.replace(/<w:commentRangeStart w:id="0"\/>(?=(?:(?!<\/w:p>).)*<w:t>B)/, '');
     expect(edited).not.toContain('XX');
@@ -9833,7 +9873,8 @@ describe('Blocks a note can\'t hold', () => {
     const xml = await (await JSZip.loadAsync(docx)).file('word/footnotes.xml')!.async('string');
     const body = /<w:footnote [^>]*w:id="1"[^>]*>([\s\S]*?)<\/w:footnote>/.exec(xml)![1];
     const paragraphs = [...body.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map(p => p[0].replace(/<w:pPr>[\s\S]*?<\/w:pPr>|<w:rPr>[\s\S]*?<\/w:rPr>/g, '').replace(/<[^>]+>/g, ''));
-    expect(paragraphs).toEqual(['A.', 'B.']);
+    // The first after the space after the note's mark
+    expect(paragraphs).toEqual([' A.', 'B.']);
   });
 
   test.each([
@@ -10125,7 +10166,7 @@ describe('Code block round-trip', () => {
     const zip = await JSZip.loadAsync((await convertMdToDocx('Text.[^a]\n\n[^a]: XX\n')).docx);
     const xml = await zip.file('word/footnotes.xml')!.async('string');
     const edited = xml.replace('<w:pStyle w:val="FootnoteText"/>', '<w:pStyle w:val="CodeBlock"/>')
-      .replace('<w:t>XX</w:t>', '<w:t xml:space="preserve"> x = 1</w:t>');
+      .replace(NOTE_SEPARATOR + '<w:r><w:t>XX</w:t></w:r>', '<w:r><w:t xml:space="preserve"> x = 1</w:t></w:r>');
     expect(edited).toContain('CodeBlock');
     zip.file('word/footnotes.xml', edited);
     expect((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)

@@ -685,6 +685,8 @@ This has a footnote[^1] and a named one[^my-note].
     Second paragraph of the named footnote.
 ```
 
+In Word, a note's text follows its mark and a space, as Word writes a note. Import takes off the space or tab right after the mark, and no other whitespace the note's text starts with, so a note that starts with spaces keeps them, as `[^1]: &#32;&#32;a`.
+
 A note holds paragraphs, display equations, tables and code blocks. Export warns of each block a note can't hold: a list, quote or heading exports as the note's paragraphs, a horizontal rule or empty code block is dropped, and an orientation directive is ignored, as a note has no sections. An alert's text goes without its marker, and an empty list item, heading or alert is no paragraph.
 
 The `notes` frontmatter field controls whether footnotes or endnotes are generated in the DOCX output. Default is `footnotes`. Only `endnotes` needs to be specified explicitly:
