@@ -3509,6 +3509,9 @@ describe('buildMarkdown', () => {
               case 'superscript': delimiter = '<sup>'; break;
               case 'subscript': delimiter = '<sub>'; break;
             }
+            // Strikethrough with whitespace at its edges is in <s>, which
+            // holds it, as ~~ can't
+            if (format === 'strikethrough' && linkText.includes('<s>')) continue;
             if (delimiter && (format !== 'subscript' || !formatting.superscript)) {
               expect(linkText).toContain(delimiter);
             }
@@ -3517,6 +3520,16 @@ describe('buildMarkdown', () => {
       ),
       { numRuns: 100 }
     );
+  });
+
+  test('keeps the strikethrough of whitespace at the edge of a link\'s text', async () => {
+    const content: ContentItem[] = [{
+      type: 'text', text: ' *', commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, strikethrough: true }, href: 'https://e.com',
+    }];
+    const markdown = buildMarkdown(content, new Map());
+    expect(markdown.trim()).toBe('[<s> \\*</s>](https://e.com)');
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    expect(xml).toMatch(/<w:strike\/>[\s\S]*?<w:t xml:space="preserve"> \*<\/w:t>/);
   });
 
   test('text without href outputs as plain text (unresolvable hyperlink fallback)', () => {
