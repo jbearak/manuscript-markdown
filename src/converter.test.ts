@@ -2067,6 +2067,41 @@ describe('Where Word list numbering comes from', () => {
     expect(await roundTrip(md)).toBe(md);
   });
 
+  // Instance 5 of the bullet list (abstract numbering 0) or the numbered one
+  // (1), with a level override of level 0 that has `override` in it
+  const overriding = (abstractNumId: number, override: string) => (xml: string) => xml.replace('</w:numbering>',
+    () => '<w:num w:numId="5"><w:abstractNumId w:val="' + abstractNumId + '"/><w:lvlOverride w:ilvl="0">' + override + '</w:lvlOverride></w:num></w:numbering>');
+  const lvl = (numFmt: string, start = 1) => '<w:lvl w:ilvl="0"><w:start w:val="' + start + '"/><w:numFmt w:val="' + numFmt + '"/><w:lvlText w:val="'
+    + (numFmt === 'bullet' ? '•' : '%1.') + '"/><w:lvlJc w:val="left"/></w:lvl>';
+
+  test.each([
+    ['bullets in a numbered list', overriding(1, lvl('bullet')), '- a\n- b'],
+    ['numbers in a bullet list', overriding(0, lvl('decimal')), '1. a\n2. b'],
+    // Word ignores a level override's w:start ([MS-OI29500] 2.1.292 b)
+    ['numbers in a bullet list from a start Word ignores', overriding(0, lvl('decimal', 5)), '1. a\n2. b'],
+    ['numbers in a bullet list from its start override', overriding(0, '<w:startOverride w:val="4"/>' + lvl('decimal')), '4. a\n5. b'],
+  ])('reads a level as its instance\'s level override formats it: %s', async (_name, numbering, md) => {
+    expect(await imported([[numPr(5, 0), 'a'], [numPr(5, 0), 'b']], { numbering })).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('keeps the format of a level that only an instance\'s level override formats for the abstract numbering\'s other instances', async () => {
+    const md = '1. a\n2. b';
+    expect(await imported([[numPr(2, 0), 'a'], [numPr(2, 0), 'b']], { numbering: overriding(1, lvl('bullet')) })).toBe(md);
+  });
+
+  test.each([
+    ['a format', '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/>' + pStyle('Other') + '<w:lvlText w:val="%1."/><w:lvlJc w:val="left"/></w:lvl>'],
+    ['no format', '<w:lvl w:ilvl="0">' + pStyle('Other') + '</w:lvl>'],
+  ])('numbers a paragraph of a style an instance\'s level override links the level to, with %s', async (_name, override) => {
+    // The override's link in place of the abstract numbering's, as docx4j reads it
+    const styles = withStyles(paragraphStyle('Other', numPr(5)));
+    const numbering = (xml: string) => overriding(1, override)(linkedToListNumber(xml));
+    const md = '1. a\n2. b';
+    expect(await imported([[pStyle('Other'), 'a'], [pStyle('Other'), 'b']], { styles, numbering })).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
   test('keeps a heading its style numbers a heading, which Word counts in its list', async () => {
     const styles = (xml: string) => xml.replace(/(<w:style [^>]*w:styleId="Heading1">[^]*?<w:pPr>)/, (match: string) => match + numPr(2));
     const md = '# H\n\n2. a';

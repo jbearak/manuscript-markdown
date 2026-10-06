@@ -1980,6 +1980,22 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
           startOverrides.get(numId)!.set(ilvl, startVal);
         }
       }
+      // A w:lvl there formats the level for this instance alone (ECMA-376
+      // Part 1 §17.9.5), as LibreOffice and docx4j read it. Word ignores its
+      // w:start and w:lvlRestart ([MS-OI29500] 2.1.292 b, 2.1.282 b), so
+      // its format and the paragraph style it links the level to, as docx4j
+      // reads the link, are all that count here. Where it gives neither,
+      // the level keeps the abstract numbering's, as LibreOffice merges it
+      const lvl = lvlOverride.find(child => child['w:lvl'] !== undefined);
+      const lvlChildren = lvl ? asXmlNodes(lvl['w:lvl']) : [];
+      const numFmt = lvlChildren.find(child => child['w:numFmt'] !== undefined);
+      const style = lvlChildren.find(child => child['w:pStyle'] !== undefined);
+      const levels = numberingDefs.get(numId);
+      const level = levels?.get(ilvl);
+      const type = numFmt ? (getAttr(numFmt, 'val') === 'bullet' ? 'bullet' : 'ordered') : level?.type;
+      if (levels && type && (numFmt || style)) {
+        numberingDefs.set(numId, new Map(levels).set(ilvl, { ...level, type, ...(style ? { style: getAttr(style, 'val') } : {}) }));
+      }
     }
   }
 
