@@ -207,6 +207,64 @@ describe('HTML table cell paragraphs', () => {
   });
 });
 
+describe('A <pre> in an HTML table\'s cell', () => {
+  // Its whitespace ran together, as other text's, so it lost its lines
+  const runs = (cell: string) => extractHtmlTables('<table><tr><td>' + cell + '</td></tr></table>')[0].rows[0].cells[0].runs;
+  const lineBreak = { type: 'softbreak', text: '\n' };
+
+  test.each([
+    ['its lines', '<pre>a\n# b</pre>', [{ type: 'text', text: 'a' }, lineBreak, { type: 'text', text: '# b' }]],
+    ['its spaces and tabs', '<pre>  a  b\n\tc </pre>', [{ type: 'text', text: '  a  b' }, lineBreak, { type: 'text', text: '\tc ' }]],
+    ['a line feed by reference', '<pre>a&#10;b</pre>', [{ type: 'text', text: 'a' }, lineBreak, { type: 'text', text: 'b' }]],
+    ['code\'s lines', '<pre><code>a\n  b</code></pre>', [{ type: 'text', text: 'a', code: true }, { ...lineBreak, code: true }, { type: 'text', text: '  b', code: true }]],
+    ['a line break and a line end', '<pre>a<br>\nb</pre>', [{ type: 'text', text: 'a' }, lineBreak, lineBreak, { type: 'text', text: 'b' }]],
+    ['formatting across a line end', '<pre><b>a\nb</b></pre>', [{ type: 'text', text: 'a', bold: true }, { ...lineBreak, bold: true }, { type: 'text', text: 'b', bold: true }]],
+    // Which HTML's parser reads as a line feed
+    ['a carriage return and line feed', '<pre>a\r\nb</pre>', [{ type: 'text', text: 'a' }, lineBreak, { type: 'text', text: 'b' }]],
+    ['a carriage return', '<pre>a\rb</pre>', [{ type: 'text', text: 'a' }, lineBreak, { type: 'text', text: 'b' }]],
+    // Whose carriage return a browser shows as nothing
+    ['a carriage return and line feed by reference', '<pre>a&#13;&#10;b</pre>', [{ type: 'text', text: 'a' }, lineBreak, { type: 'text', text: 'b' }]],
+    ['a carriage return and line feed by hexadecimal reference', '<pre>a&#x0D;&#xa;b</pre>', [{ type: 'text', text: 'a' }, lineBreak, { type: 'text', text: 'b' }]],
+  ])('keeps %s', (_name, cell, expected) => {
+    expect(runs(cell)).toEqual(expected);
+  });
+
+  test.each([
+    ['a line feed after its start tag, which HTML drops', '<pre>\na</pre>', [{ type: 'text', text: 'a' }]],
+    ['a carriage return and line feed after its start tag, which HTML drops', '<pre>\r\na</pre>', [{ type: 'text', text: 'a' }]],
+    // Which a browser shows as nothing, and HTML drops no line feed after
+    ['a carriage return by reference, which shows nothing', '<pre>a&#13;b&#xd;</pre>', [{ type: 'text', text: 'ab' }]],
+    // Which HTML reads without its ; too, and which went in Word's text
+    ['a carriage return by reference without its ;', '<pre>a&#13b&#xD c&#0013&#10;d</pre>', [{ type: 'text', text: 'ab c' }, lineBreak, { type: 'text', text: 'd' }]],
+    ['references to other characters that start as a carriage return\'s does', '<pre>&#130 &#xDb &#13;3</pre>', [{ type: 'text', text: '\u201A \u00DB 3' }]],
+    ['a carriage return and line feed by reference after its start tag', '<pre>&#13;&#10;a</pre>', [lineBreak, { type: 'text', text: 'a' }]],
+    ['one after a comment, which HTML keeps', '<pre><!-- c -->\na</pre>', [{ type: 'html_comment', text: '<!-- c -->' }, lineBreak, { type: 'text', text: 'a' }]],
+    ['two after its start tag', '<pre>&#10;&#10;a</pre>', [lineBreak, { type: 'text', text: 'a' }]],
+    ['a line feed at its end, which shows nothing', '<pre>a\n</pre>', [{ type: 'text', text: 'a' }]],
+    ['two at its end, the first of which ends a line', '<pre>a\n&#10;</pre>', [{ type: 'text', text: 'a' }, lineBreak]],
+    ['a line feed at its end before a comment', '<pre>a\n<!-- c --></pre>', [{ type: 'text', text: 'a' }, { type: 'html_comment', text: '<!-- c -->' }]],
+    ['a line break at its end, which shows nothing', '<pre>a<br></pre>', [{ type: 'text', text: 'a' }]],
+    ['a line break and a line feed at its end, the first of which ends a line', '<pre>a<br>\n</pre>', [{ type: 'text', text: 'a' }, lineBreak]],
+    // Whose parts joined where the carriage return's reference went, as
+    // &#10; and &nbsp;
+    ['a carriage return by reference between the parts of others, which stay apart', '<pre>&&#13;#10;x &n&#13;bsp;</pre>', [{ type: 'text', text: '&#10;x &nbsp;' }]],
+  ])('reads %s', (_name, cell, expected) => {
+    expect(runs(cell)).toEqual(expected);
+  });
+
+  test('starts a paragraph of its own, as a block', () => {
+    expect(runs('x <pre>a\nb</pre> y')).toEqual([
+      { type: 'text', text: 'x' },
+      { type: 'paragraph', text: '\n\n' },
+      { type: 'text', text: 'a' },
+      lineBreak,
+      { type: 'text', text: 'b' },
+      { type: 'paragraph', text: '\n\n' },
+      { type: 'text', text: 'y' },
+    ]);
+  });
+});
+
 describe('HTML table cell alignment', () => {
   test.each([
     ['an align attribute', '<td align="center">a</td>', 'center'],
