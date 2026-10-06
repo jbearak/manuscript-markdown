@@ -344,6 +344,13 @@ function syntaxText(markdown: string): string {
   return readsMarkdown ? markdown : htmlLineCharacters(markdown).join('');
 }
 
+/** A run of a line break alone as Markdown, in a link of its own where it's
+ *  a link's, as where it's all of the link's runs or a comment's range
+ *  leaves it out of the rest, which keeps it in the hyperlink */
+function lineBreakRun(item: { href?: string }): string {
+  return item.href ? markdownLink(lineBreakText(), item.href) : lineBreakText();
+}
+
 /** `text` with the tags export reads as formatting or a line break written
  *  as text, but for one at a position in `raw`, which export reads as it is,
  *  as in a citation's keys (see escapeMarkdownChars) */
@@ -5514,13 +5521,14 @@ function canonicalizeDisplayMathLatex(latex: string): string {
  *  there, so it goes on one side of a substitution with nothing on the
  *  other, which export reads as a change of that side alone, unless it has
  *  a substitution's delimiters too, where code comes in pieces (see
- *  codePiecesInRevision). A bare link's choice holds the closer it's read
- *  before (see bareLinkChoice), which isn't text. */
+ *  codePiecesInRevision), as written once its emphasis resolves, where a
+ *  struck } or > reads as ~~} or ~~>. A bare link's choice holds the
+ *  closer it's read before (see bareLinkChoice), which isn't text. */
 function wrapWithRevision(text: string, rev?: RevisionInfo): string {
   if (!rev) return text;
   const holds = (closer: string) => text.includes(closer) && text.split(BARE_LINK + closer + BARE_LINK).join(BARE_LINK).includes(closer);
-  if (rev.type === 'addition') return holds('++}') && substitutionHolds('', text) ? '{~~~>' + text + '~~}' : `{++${text}++}`;
-  if (rev.type === 'deletion') return holds('--}') && substitutionHolds(text, '') ? '{~~' + text + '~>~~}' : `{--${text}--}`;
+  if (rev.type === 'addition') return holds('++}') && substitutionHolds('', resolveEmphasis(text)) ? '{~~~>' + text + '~~}' : `{++${text}++}`;
+  if (rev.type === 'deletion') return holds('--}') && substitutionHolds(resolveEmphasis(text), '') ? '{~~' + text + '~>~~}' : `{--${text}--}`;
   return text;
 }
 
@@ -5532,8 +5540,8 @@ function wrapWithRevision(text: string, rev?: RevisionInfo): string {
  *  its own, as in {--`a-`--}{--`-}b~>c`--}, which export reads as runs of
  *  the change side by side, and import joins again. */
 function codePiecesInRevision(text: string, rev: RevisionInfo): string[] {
+  if (revisionSpanHolds(text, rev)) return [text];
   const closer = rev.type === 'addition' ? '++}' : '--}';
-  if (!text.includes(closer) || (rev.type === 'addition' ? substitutionHolds('', text) : substitutionHolds(text, ''))) return [text];
   const pieces: string[] = [];
   let from = 0;
   for (let at = text.indexOf(closer); at !== -1; at = text.indexOf(closer, at + closer.length)) {
@@ -5542,6 +5550,17 @@ function codePiecesInRevision(text: string, rev: RevisionInfo): string[] {
   }
   pieces.push(text.slice(from));
   return pieces;
+}
+
+/** Whether the span of `rev` that wrapWithRevision writes around `text`,
+ *  which holds no bare link's choice, holds it whole: a closer of the span
+ *  in the text ends it there, and the substitution with nothing on its
+ *  other side that holds one can't hold a ~> on its old side or a ~~},
+ *  as written once the text's emphasis resolves */
+function revisionSpanHolds(text: string, rev: RevisionInfo): boolean {
+  if (!text.includes(rev.type === 'addition' ? '++}' : '--}')) return true;
+  const resolved = resolveEmphasis(text);
+  return rev.type === 'addition' ? substitutionHolds('', resolved) : substitutionHolds(resolved, '');
 }
 
 type InlineRevisionItem = Extract<ContentItem, { type: 'text' | 'citation' | 'math' | 'footnote_ref' | 'image' }>;
@@ -6467,11 +6486,14 @@ function renderSubstitutionRun(
   return { text: '{~~' + oldText + '~>' + newText + '~~}', nextIndex: k };
 }
 
-/** Whether `a` and `b`, side by side, are code formatted alike, as the
- *  pieces of code a span can't hold whole are (see codePiecesInRevision),
- *  whose backticks would run together with nothing between them */
+/** Whether `a` and `b`, side by side, are code formatted alike, in no
+ *  link or in one, as the pieces of code a span can't hold whole are (see
+ *  codePiecesInRevision), whose backticks would run together with nothing
+ *  between them. A line break, which a link keeps apart from a line after
+ *  it that would start a block (see mergeConsecutiveRuns), has none. */
 function codeSpansMeet(a: ContentItem, b: ContentItem): boolean {
-  return a.type === 'text' && b.type === 'text' && a.formatting.code && !a.href && !b.href && formattingEquals(a.formatting, b.formatting);
+  return a.type === 'text' && b.type === 'text' && a.formatting.code && a.href === b.href && a.link === b.link
+    && a.text !== '\\\n' && b.text !== '\\\n' && formattingEquals(a.formatting, b.formatting);
 }
 
 /**
@@ -6504,7 +6526,8 @@ function keylessCitationRun(item: ContentItem): ContentItem {
 /** Joins runs that read as one, formatted alike, and in Markdown
  *  (`markdown`), code and the line breaks beside it (see breaksJoinCode).
  *  Where export reads Markdown, code in a tracked change that no span of it
- *  can hold goes in runs of its pieces (see codePiecesInRevision). */
+ *  can hold goes in runs of its pieces (see codePiecesInRevision), in a
+ *  link too, whose text then holds a span of each (see linkGroup). */
 function mergeConsecutiveRuns(items: ContentItem[], markdown = readsMarkdown): ContentItem[] {
   const content = items.map(keylessCitationRun);
   const merged: ContentItem[] = [];
@@ -6547,7 +6570,7 @@ function mergeConsecutiveRuns(items: ContentItem[], markdown = readsMarkdown): C
       j++;
     }
 
-    const pieces = readsMarkdown && item.revision && formatting.code && item.href === undefined
+    const pieces = readsMarkdown && item.revision && formatting.code
       ? codePiecesInRevision(mergedText, item.revision) : [mergedText];
     for (const text of pieces) {
       merged.push({
@@ -6924,7 +6947,10 @@ const startsBlock = (item: ContentItem | undefined): boolean =>
  * comments `commentIds`, as one Markdown link around them, but not the next
  * hyperlink's, though it goes to the same place, so [a **b** c](u)
  * and a link with a line break in it stay one link. A revision of the whole
- * link goes around it, from `item`'s, and one of part of it inside it.
+ * link goes around it, from `item`'s, and one of part of it inside it, as
+ * a deletion at its end does where its insertion comes after the link,
+ * which Word keeps out of the hyperlink, and each run's of one of all of it
+ * where no span around it holds its text.
  * Its emphasis is left marked, for the range's resolveEmphasis, which reads
  * the runs around the link too. Undefined where the link is one run.
  */
@@ -6940,16 +6966,17 @@ function linkGroup(
   };
   const items: Array<ContentItem & { type: 'text' }> = [];
   for (let next = first; next; next = inLink(start + items.length)!) {
+    items.push(next);
     if (next.text === '\\\n') {
       // A line of the link that would start a block, which Markdown reads
-      // before the link, starts a link of its own after the break
+      // before the link, starts a link of its own after the break, which
+      // ends this one, so the line starts with its ](url)
       let line = '';
-      for (let i = start + items.length + 1, item = inLink(i); item && item.text !== '\\\n'; item = inLink(++i)) {
+      for (let i = start + items.length, item = inLink(i); item && item.text !== '\\\n'; item = inLink(++i)) {
         line += wrapWithFormatting(item.text, item.formatting);
       }
       if (startsBlockLine(line)) break;
     }
-    items.push(next);
     // A tag a run leaves open, which the runs after could close, as bold
     // <span a=" before ">, would read as HTML across the formatting's
     // delimiters between them in one link's text, so the link ends after
@@ -6958,32 +6985,28 @@ function linkGroup(
     if (OPEN_TAG_AT_END_RE.test(next.text)) break;
   }
   if (items.length < 2) return undefined;
-  // A substitution the group would cut, of deletions, and insertions or
-  // not, at its end and an insertion of the same author and time after a
-  // split or the link's end, is left to renderSubstitutionRun after the runs
-  // before it, as a span of either side could hold no --} or ++} in code,
-  // as {~~ can
-  const last = items[items.length - 1]?.revision;
-  if (last) {
-    const ofLast = (item: ContentItem | undefined, type: RevisionInfo['type']) =>
-      isSubstitutionItem(item) && item.revision?.type === type && item.revision.author === last.author && item.revision.date === last.date;
-    let from = items.length;
-    while (from > 0 && ofLast(items[from - 1], 'addition')) from--;
-    const additions = from;
-    while (from > 0 && ofLast(items[from - 1], 'deletion')) from--;
-    let k = start + items.length;
-    // More deletions can come after deletions, before the insertion
-    if (additions === items.length && k < end && ofLast(segment[k], 'deletion')) k = Math.min(revisionRunEnd(segment, k), end);
-    if (from < additions && k < end && ofLast(segment[k], 'addition')) items.splice(from);
-  }
-  if (items.length < 2) return undefined;
   const href = first.href;
-  const whole = items.every(item => revisionsEqual(item.revision, first.revision));
   // The item at k as Markdown in the link's text, which reads the runs
   // `after` it as the rest of the text before the link's ](url), as a link
-  // of one run does
-  const itemText = (k: number, after: RunsAfter): string => items[k].text === '\\\n' ? lineBreakText()
+  // of one run does. A line break goes in the formatting Word shows on it
+  // (see showsOnBreak), as outside a link.
+  const itemText = (k: number, after: RunsAfter): string => items[k].text === '\\\n' && !showsOnBreak(items[k].formatting) ? lineBreakText()
     : markedFormatting(items[k].text, items[k].formatting, false, after.linkTo(href));
+  // A revision of the whole link goes around it, but where its span would
+  // end at its closer in the link's code, and a substitution with nothing
+  // on its other side can't hold the link either, as one whose old side
+  // has a ~>, each run's goes inside the link, as for one of part of it.
+  // So does it where pieces of code meet, whose backticks would run
+  // together in one span.
+  if (items.every((item, k) => revisionsEqual(item.revision, first.revision) && (k === 0 || !codeSpansMeet(items[k - 1], item)))) {
+    let markdown = '';
+    for (let k = 0; k < items.length; k++) markdown += itemText(k, runsAfter(segment, start + k + 1, end));
+    const link = markdownLink(markdown, href);
+    if (!first.revision || revisionSpanHolds(link, first.revision)) {
+      // How a span of the whole link joins others, by each of its runs
+      return { text: link, end: start + items.length, item: first, join: combinedSpanJoin(items) };
+    }
+  }
   let text = '';
   let span: RevisionSpan | undefined;
   // Where the deletions end that a substitution was tried from, which the
@@ -6996,7 +7019,7 @@ function linkGroup(
     // Deletions and then insertions of one author and time, a substitution
     // of its sides, each whole, as renderSubstitutionRun writes one
     const revision = item.revision;
-    if (!whole && revision?.type === 'deletion' && k >= triedUntil) {
+    if (revision?.type === 'deletion' && k >= triedUntil) {
       const side = (j: number, type: RevisionInfo['type']) => j < items.length && items[j].revision?.type === type
         && items[j].revision!.author === revision.author && items[j].revision!.date === revision.date;
       let additions = k;
@@ -7004,16 +7027,30 @@ function linkGroup(
       let sideEnd = additions;
       while (side(sideEnd, 'addition')) sideEnd++;
       triedUntil = additions;
+      // Pieces of code a span can't hold whole (see codePiecesInRevision)
+      // side by side on one side would run their backticks together, as in
+      // renderSubstitutionRun, so the starts up to the first of the last two
+      // on the old side, or all of them where those are on the new side,
+      // aren't tried, rather than build sides from each
+      let meet = sideEnd > additions ? sideEnd - 1 : k;
+      while (meet > k && (meet === additions || !codeSpansMeet(items[meet - 1], items[meet]))) meet--;
+      if (meet > k) triedUntil = Math.min(meet, additions);
       // Each side reads apart, its runs after each of its runs alone, and
-      // resolves apart (see tryRenderSubstitution)
-      const sideText = (from: number, to: number) => {
+      // resolves apart (see tryRenderSubstitution), and where each of its
+      // runs starts in it before resolving (`starts`)
+      const sideMarkdown = (from: number, to: number, starts: number[] = []) => {
         const sideItems = items.slice(from, to);
         let markdown = '';
-        for (let j = from; j < to; j++) markdown += itemText(j, runsAfter(sideItems, j - from + 1, sideItems.length));
-        return resolveEmphasis(markdown);
+        for (let j = from; j < to; j++) {
+          starts.push(markdown.length);
+          markdown += itemText(j, runsAfter(sideItems, j - from + 1, sideItems.length));
+        }
+        return markdown;
       };
-      const oldText = sideEnd > additions ? sideText(k, additions) : '';
-      const newText = oldText ? sideText(additions, sideEnd) : '';
+      const starts: number[] = [];
+      const oldSide = sideEnd > additions && meet === k ? sideMarkdown(k, additions, starts) : '';
+      const oldText = resolveEmphasis(oldSide);
+      const newText = oldText ? resolveEmphasis(sideMarkdown(additions, sideEnd)) : '';
       if (oldText && newText && substitutionHolds(oldText, newText)) {
         text += '{~~' + oldText + '~>' + newText + '~~}';
         span = undefined;
@@ -7021,24 +7058,32 @@ function linkGroup(
         continue;
       }
       // As renderSubstitutionRun's callers do, from a later start, where the
-      // insertions' side has no ~~}, after a deletion of strikethrough or a
-      // ~, as the ~> or ~~} of the deletions' side, as a struck }'s, starts
-      // with a ~. Dropping another leaves the rest of the side as it was.
+      // insertions' side has no ~~}: past the run the deletions' side's last
+      // ~> or ~~} starts in, as written before resolving, which every start
+      // before holds, as dropping a run leaves the rest of the side as it
+      // was, as renderSubstitutionRun declines them, rather than build the
+      // side again from each. Where resolving wrote it, as of a struck >a,
+      // after a deletion of strikethrough or a ~, as the ~> or ~~} of the
+      // side, as a struck }'s, starts with a ~.
       if (oldText && newText && !newText.includes('~~}')) {
+        const at = Math.max(oldSide.lastIndexOf('~>'), oldSide.lastIndexOf('~~}'));
         let retry = k + 1;
-        while (retry < additions && !items[retry - 1].formatting.strikethrough && !items[retry - 1].text.includes('~')) retry++;
+        if (at !== -1) {
+          let run = starts.length - 1;
+          while (run > 0 && starts[run] > at) run--;
+          retry = k + run + 1;
+        } else {
+          while (retry < additions && !items[retry - 1].formatting.strikethrough && !items[retry - 1].text.includes('~')) retry++;
+        }
         triedUntil = retry;
       }
     }
-    const markdown = itemText(k, runsAfter(segment, start + k + 1, end));
-    if (whole) text += markdown;
-    else [text, span] = appendRevised(text, markdown, item, span);
+    [text, span] = appendRevised(text, itemText(k, runsAfter(segment, start + k + 1, end)), item, span);
   }
   return {
-    text: markdownLink(whole ? text : joinRevisedSpans(text), href),
+    text: markdownLink(joinRevisedSpans(text), href),
     end: start + items.length,
-    item: whole ? first : { ...first, revision: undefined },
-    // How a span of the whole link joins others, by each of its runs
+    item: { ...first, revision: undefined },
     join: combinedSpanJoin(items),
   };
 }
@@ -7046,24 +7091,6 @@ function linkGroup(
 /** A tag that the text leaves open at its end, whose quoted values, the
  *  last's unclosed, can hold a < or > */
 const OPEN_TAG_AT_END_RE = /<\/?[A-Za-z][A-Za-z0-9-]*(?:\s(?:[^<>"']|"[^"]*"|'[^']*')*(?:"[^"]*|'[^']*)?)?$/;
-
-/** Per segment, where the run of items of one revision that each index is
- *  in ends, which linkGroup reads past a link for the rest of a
- *  substitution, as reading it for each link would take time in the square
- *  of the links */
-const revisionRunEnds = new WeakMap<ContentItem[], { length: number; ends: Map<number, number> }>();
-
-function revisionRunEnd(segment: ContentItem[], start: number): number {
-  let cached = revisionRunEnds.get(segment);
-  if (!cached || cached.length !== segment.length) revisionRunEnds.set(segment, cached = { length: segment.length, ends: new Map() });
-  const known = cached.ends.get(start);
-  if (known !== undefined) return known;
-  const revision = isSubstitutionItem(segment[start]) ? (segment[start] as SubstitutionItem).revision : undefined;
-  let k = start + 1;
-  while (k < segment.length && isSubstitutionItem(segment[k]) && revisionsEqual((segment[k] as SubstitutionItem).revision, revision)) k++;
-  for (let j = start; j < k; j++) cached.ends.set(j, k);
-  return k;
-}
 
 /** Whether a link of several runs starts at `start` with tracked changes in
  *  part of it, which linkGroup writes inside its text */
@@ -7295,9 +7322,9 @@ function renderInlineRange(
     // whose closer after a line's start doesn't close it. A tracked change's
     // delimiters can, as {--\\\n--}, and the formatting Word shows on a
     // break, a highlight, an underline or a strikethrough, as ==\\\n==
-    // (see showsOnBreak).
+    // (see showsOnBreak), and a link's brackets.
     if (item.text === '\\\n' && !showsOnBreak(item.formatting)) {
-      [out, lastSpan] = appendRevised(out, lineBreakText(), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, lineBreakRun(item), item, lastSpan);
       i++;
       continue;
     }
@@ -7588,9 +7615,9 @@ function renderInlineRangeWithIds(
     // whose closer after a line's start doesn't close it. A tracked change's
     // delimiters can, as {--\\\n--}, and the formatting Word shows on a
     // break, a highlight, an underline or a strikethrough, as ==\\\n==
-    // (see showsOnBreak).
+    // (see showsOnBreak), and a link's brackets.
     if (item.text === '\\\n' && !showsOnBreak(item.formatting)) {
-      [out, lastSpan] = appendRevised(out, lineBreakText(), item, lastSpan);
+      [out, lastSpan] = appendRevised(out, lineBreakRun(item), item, lastSpan);
       i++;
       continue;
     }
@@ -7662,9 +7689,11 @@ function renderInlineRangeWithIds(
  */
 function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
   type TextItem = Extract<ContentItem, { type: 'text' }>;
-  // The paragraph's text, with each line break as null, but one in
-  // formatting Word shows on it, which goes in that (see showsOnBreak)
-  const pieces: Array<{ text: string; item: TextItem; html: string; raw?: boolean; br?: boolean } | null> = [];
+  type TextPiece = { text: string; item: TextItem; html: string; raw?: boolean; br?: boolean };
+  // The paragraph's text, with each line break as the item it's in, but
+  // one in formatting Word shows on it, which goes in that as a piece of
+  // its own (`br`, see showsOnBreak)
+  const pieces: Array<TextPiece | { lineBreak: TextItem }> = [];
   // A comment Word split, as one; and comments the browser ended at a --!>,
   // which Word joined in one hidden run, as inline Markdown would read them
   // as one (see readHiddenText)
@@ -7682,7 +7711,7 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
     }
     if (item.type !== 'text' || item.revision || item.commentIds.size > 0 || item.formatting.highlight) return undefined;
     item.text.split('\\\n').forEach((text, k) => {
-      if (k > 0) pieces.push(showsOnBreak(item.formatting) ? { text: '', item, html: '<br>', br: true } : null);
+      if (k > 0) pieces.push(showsOnBreak(item.formatting) ? { text: '', item, html: '<br>', br: true } : { lineBreak: item });
       if (text) pieces.push({ text, item, html: '' });
     });
   }
@@ -7690,8 +7719,8 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
   // line keeps can straddle two pieces
   for (let k = 0; k < pieces.length; k++) {
     let end = k;
-    while (end < pieces.length && pieces[end] !== null && !pieces[end]!.br) end++;
-    const line = pieces.slice(k, end) as Array<{ text: string; item: TextItem; html: string; raw?: boolean }>;
+    while (end < pieces.length && !('lineBreak' in pieces[end]) && !(pieces[end] as TextPiece).br) end++;
+    const line = pieces.slice(k, end) as TextPiece[];
     const characters = htmlLineCharacters(line.map(piece => piece.text).join(''));
     let at = 0;
     for (const piece of line) {
@@ -7707,22 +7736,46 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
   const closeTo = (depth: number) => {
     while (open.length > depth) html += '</' + /^<(\w+)/.exec(open.pop()!)![1] + '>';
   };
-  let breaks = 0;
+  const linkTag = (href: string) => '<a href="' + escapeHtmlAttr(href) + '">';
+  // How many of the tags open a piece of `tags` keeps
+  const kept = (tags: string[]) => {
+    let depth = 0;
+    while (depth < open.length && depth < tags.length && open[depth] === tags[depth]) depth++;
+    return depth;
+  };
+  // The line breaks before a piece, which go after the tags it doesn't keep
+  // close and before its own open, but in the link they're in, as Word's
+  // hyperlink holds them, and out of any other
+  let breaks: TextItem[] = [];
+  const writeBreaks = (tags: string[]) => {
+    for (const item of breaks) {
+      const link = item.href !== undefined ? linkTag(item.href) : undefined;
+      if (link !== undefined && open[0] === link) closeTo(Math.max(1, kept(tags)));
+      else {
+        closeTo(link === undefined && !open[0]?.startsWith('<a ') ? kept(tags) : 0);
+        if (link !== undefined) {
+          html += link;
+          open = [link];
+        }
+      }
+      html += '<br>';
+    }
+    breaks = [];
+  };
   pieces.forEach(piece => {
-    if (piece === null) {
-      breaks++;
+    if ('lineBreak' in piece) {
+      breaks.push(piece.lineBreak);
       return;
     }
-    const lineBreaks = breaks;
-    breaks = 0;
     // A comment goes in the formatting around it
     if (piece.raw) {
-      html += '<br>'.repeat(lineBreaks) + piece.html;
+      writeBreaks(open);
+      html += piece.html;
       return;
     }
     const fmt = piece.item.formatting;
     const tags = [
-      ...(piece.item.href ? ['<a href="' + escapeHtmlAttr(piece.item.href) + '">'] : []),
+      ...(piece.item.href ? [linkTag(piece.item.href)] : []),
       ...(fmt.bold ? ['<b>'] : []),
       ...(fmt.italic ? ['<i>'] : []),
       ...(fmt.strikethrough ? ['<s>'] : []),
@@ -7730,14 +7783,15 @@ function renderHtmlCellParagraph(items: ContentItem[]): string | undefined {
       ...(fmt.superscript ? ['<sup>'] : fmt.subscript ? ['<sub>'] : []),
       ...(fmt.code ? ['<code>'] : []),
     ];
-    let kept = 0;
-    while (kept < open.length && kept < tags.length && open[kept] === tags[kept]) kept++;
-    closeTo(kept);
-    html += '<br>'.repeat(lineBreaks) + tags.slice(kept).join('') + piece.html;
+    writeBreaks(tags);
+    const depth = kept(tags);
+    closeTo(depth);
+    html += tags.slice(depth).join('') + piece.html;
     open = tags;
   });
+  writeBreaks([]);
   closeTo(0);
-  return html + '<br>'.repeat(breaks);
+  return html;
 }
 
 /** A line of a cell's text as HTML, a string for each of its characters.

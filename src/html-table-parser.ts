@@ -20,7 +20,7 @@ export interface HtmlTableRun {
   code?: boolean;
   superscript?: boolean;
   subscript?: boolean;
-  href?: string;
+  href?: string; // the <a> a text run or line break is in
   linkStart?: true; // the first run of an <a>, which a run of one before to the same place doesn't join
 }
 
@@ -405,8 +405,10 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
     if (tag === 'br') {
       startContent();
       // In the formatting around it, as text, which Word shows on it, as an
-      // underline, as export reads a line break in Markdown
-      pushRun({ type: 'softbreak', text: '\n', ...formatting() });
+      // underline, as export reads a line break in Markdown, and in an <a>,
+      // the link's, as Word's hyperlink holds it
+      pushRun({ type: 'softbreak', text: '\n', ...formatting(), ...(href ? { href } : {}), ...(href && linkStart ? { linkStart: true as const } : {}) });
+      linkStart = false;
     } else if (tag === 'b' || tag === 'strong') {
       bold = !isClose;
     } else if (tag === 'i' || tag === 'em') {
