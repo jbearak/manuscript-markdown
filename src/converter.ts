@@ -493,6 +493,9 @@ interface TextIndex {
   nextDouble: number[];
   /** Where each run of two or more = starts */
   equals: number[];
+  /** Where the last comment's body with == in it goes, after the runs
+   *  before it in their Markdown block, or -1 */
+  bodyEquals: number;
   /** Where each @, ; and [ is */
   ats: number[];
   semicolons: number[];
@@ -503,8 +506,9 @@ interface TextIndex {
 
 /** `text`'s index, where a run of dollar signs ends at each of `bounds`,
  *  the starts of runs, between which formatting's or a span's delimiters
- *  can come, with note references at `notes` */
-function indexText(text: string, bounds: ReadonlySet<number> = new Set(), notes: number[] = []): TextIndex {
+ *  can come, with note references at `notes`, and the last comment's body
+ *  with == in it at `bodyEquals` */
+function indexText(text: string, bounds: ReadonlySet<number> = new Set(), notes: number[] = [], bodyEquals = -1): TextIndex {
   const closers: number[] = [];
   const dollarRuns: Array<{ start: number; length: number }> = [];
   const equals: number[] = [];
@@ -530,7 +534,7 @@ function indexText(text: string, bounds: ReadonlySet<number> = new Set(), notes:
     nextSingle[k] = dollarRuns[k].length === 1 ? k : nextSingle[k + 1];
     nextDouble[k] = dollarRuns[k].length > 1 ? k : nextDouble[k + 1];
   }
-  return { text, closers, dollarRuns, dollarStarts: dollarRuns.map(run => run.start), nextSingle, nextDouble, equals, ats, semicolons, openers, notes };
+  return { text, closers, dollarRuns, dollarStarts: dollarRuns.map(run => run.start), nextSingle, nextDouble, equals, bodyEquals, ats, semicolons, openers, notes };
 }
 
 /** The first of `sorted` at or after `value` */
@@ -620,9 +624,11 @@ export class RunsAfter {
     return item?.type === 'math' && !item.display;
   }
 
-  /** Whether two = are next to each other, which can close a highlight */
+  /** Whether two = are next to each other, which can close a highlight, in
+   *  these or a comment's body after them in their block */
   get hasEquals(): boolean {
-    return this.prefix.includes('==') || lowerBound(this.index.equals, this.from) < this.index.equals.length;
+    return this.prefix.includes('==') || this.from <= this.index.bodyEquals
+      || lowerBound(this.index.equals, this.from) < this.index.equals.length;
   }
 
   /** The character after the nth ], from 0: '' at the end, and undefined
@@ -6260,10 +6266,46 @@ function runsAfter(segment: ContentItem[], start: number, end: number): RunsAfte
       text += item.formatting.highlight ? '==' + run + '==' : run;
     }
     offsets.push(text.length);
-    byEnd.set(end, cached = { length: segment.length, first, offsets, index: indexText(text, new Set(offsets), notes), items: segment.slice(first, end) });
+    const marks = bodyEqualsAfter.get(segment);
+    let bodyEquals = -1;
+    for (let k = first; k < end; k++) if (marks?.has(k)) bodyEquals = offsets[k + 1 - first];
+    byEnd.set(end, cached = { length: segment.length, first, offsets, index: indexText(text, new Set(offsets), notes, bodyEquals), items: segment.slice(first, end) });
   }
   return new RunsAfter(cached.index, cached.offsets[start - cached.first], '', false,
     { offsets: cached.offsets, items: cached.items, at: start - cached.first });
+}
+
+/** Per segment, the indexes of the items a comment's body with == in it
+ *  goes after in their Markdown block, which renderInlineRange marks before
+ *  it writes their runs: export reads a highlight from an == to the next,
+ *  which can be in a body, as it reads the body's {>> as no syntax there */
+const bodyEqualsAfter = new WeakMap<ContentItem[], Set<number>>();
+
+/** Per comment, whether its body has == in it, read once for all the
+ *  paragraphs of its range, which keeps import linear in a long body over
+ *  many */
+const bodyHasEquals = new WeakMap<Comment, boolean>();
+
+/** Marks the items of a segment from `start` to `end` that the bodies of
+ *  their comments with == in them go after: the last of each range, or,
+ *  where ID syntax puts the bodies after the text (`deferred`), the last of
+ *  all, wherever the ranges end */
+function markBodyEquals(segment: ContentItem[], start: number, end: number, comments: Map<string, Comment>, deferred: boolean): void {
+  let marks = bodyEqualsAfter.get(segment);
+  for (let k = start; k < end; k++) {
+    const item = segment[k];
+    const next = segment[k + 1];
+    for (const id of 'commentIds' in item ? item.commentIds ?? [] : []) {
+      if (k + 1 < end && 'commentIds' in next && next.commentIds?.has(id)) continue;
+      const comment = comments.get(id);
+      if (!comment) continue;
+      let has = bodyHasEquals.get(comment);
+      if (has === undefined) bodyHasEquals.set(comment, has = formatCommentBody(id, comment).includes('=='));
+      if (!has) continue;
+      if (!marks) bodyEqualsAfter.set(segment, marks = new Set());
+      marks.add(deferred ? end - 1 : k);
+    }
+  }
 }
 
 /** Whether an inline range stops before `item`, as at a paragraph's end */
@@ -6520,6 +6562,8 @@ function renderInlineRange(
     item.commentIds && [...item.commentIds].some(id => forceIdCommentIds.has(id))
   ));
   const useIds = renderOpts?.alwaysUseCommentIds || hasForcedIdCommentInSegment || hasOverlappingComments(segment.slice(startIndex, segmentEnd));
+  // Where the bodies go, whose == an == in the runs before them pairs with
+  markBodyEquals(segment, startIndex, segmentEnd, comments, !!useIds);
 
   if (useIds) {
     return renderInlineRangeWithIds(segment, startIndex, comments, opts, renderOpts?.commentIdRemap, renderOpts?.emittedIdCommentBodies, renderOpts?.noteLabels, renderOpts?.imageFormatMapping, renderOpts?.timezone, renderOpts?.openIdComments, renderOpts?.lastCommentItem);

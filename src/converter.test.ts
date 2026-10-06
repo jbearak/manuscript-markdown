@@ -5796,6 +5796,41 @@ describe('Word text that reads as Markdown', () => {
     expect(await roundTrip(markdown)).toBe(markdown);
   });
 
+  test.each([
+    ['after it, as a point comment\'s', 'XX{>>x==y<<}', 'a\\==b{>>x==y<<}', 'a==b'],
+    ['after a range after it', 'XX {==c==}{>>x==y<<}', 'a\\==b {==c==}{>>x==y<<}', 'a==b c'],
+    ['on a line after it, in ID syntax', '{#1}c{#2}XX{/1}d{/2}\n{#1>>p<<}\n{#2>>x==y<<}', '{#1}c{#2}a\\==b{/1}d{/2}\n{#1>>p<<}\n{#2>>x==y<<}', 'ca==bd'],
+    ['on a line after it, in ID syntax, from a range before it', '{#1}c{#2}d{/1}e{/2} XX\n{#1>>x==y<<}\n{#2>>p<<}', '{#1}c{#2}d{/1}e{/2} a\\==b\n{#1>>x==y<<}\n{#2>>p<<}', 'cde a==b'],
+    ['before it', 'P{>>x==y<<} XX', 'P{>>x==y<<} a==b', 'P a==b'],
+  ])('keeps text\'s == as text where a comment\'s body with == in it goes %s', async (_name, md, expected, text) => {
+    // Export read a highlight from the text's == to the body's, which took
+    // the body's {>> for text and lost the comment, as the text's == read
+    // the runs after it alone. ID syntax writes the bodies after all the
+    // text. A body's own == opens none, as its {>> reads first.
+    const markdown = await importText('A.\n\n' + md + '\n\nB.', 'a==b');
+    expect(markdown).toBe('A.\n\n' + expected + '\n\nB.\n');
+    expect((await exported(markdown)).text).toEqual(['A.', text, 'B.']);
+    const zip = await JSZip.loadAsync((await convertMdToDocx(markdown)).docx);
+    expect(await zip.file('word/document.xml')!.async('string')).not.toContain('<w:highlight');
+    expect(await zip.file('word/comments.xml')?.async('string')).toContain('x==y');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('reads a long comment body for == once over the many paragraphs of its range', () => {
+    // Each paragraph the range ended in would read the body. Four times the
+    // paragraphs and body take about four times as long, not sixteen,
+    // however fast the machine is.
+    const time = (n: number) => {
+      const body = 'c'.repeat(40 * n) + '==';
+      const items = Array.from({ length: n }, () => [{ type: 'para' }, { type: 'text', text: 'a==b', commentIds: new Set(['0']), formatting: DEFAULT_FORMATTING }]).flat();
+      const start = performance.now();
+      expect(buildMarkdown(items as ContentItem[], new Map([['0', { author: 'A', text: body, date: '' }]]))).toEndWith('a\\==b{/1}\n{#1>>@A | ' + body + '<<}');
+      return performance.now() - start;
+    };
+    const small = time(10000);
+    expect(time(40000) / small).toBeLessThan(8);
+  });
+
   test('escapes bold text with math in it for the syntax in its paragraph alone', async () => {
     // It read the runs after it to the end of the document, so a == in a
     // later paragraph escaped one in it, as a highlight's text did
