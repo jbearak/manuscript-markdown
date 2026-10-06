@@ -7226,6 +7226,21 @@ function htmlLineCharacters(line: string): string[] {
       : c === ' ' && (i < lead || line[i - 1] === ' ') ? '&#32;' : c);
 }
 
+/** An equation in an HTML table's cell as a run of its Markdown, which the
+ *  cell exports as text, with its line ends as line breaks, as a newline
+ *  there would read as a space, and a blank line would end the table */
+function mathCellRun(item: ContentItem): ContentItem {
+  if (item.type !== 'math') return item;
+  const markdown = item.display ? MATH_FENCE + '\n' + item.latex + '\n' + MATH_FENCE : '$' + item.latex + '$';
+  return {
+    type: 'text',
+    text: markdown.replace(/\r\n?|\n/g, '\\\n'),
+    commentIds: item.commentIds ?? new Set(),
+    formatting: DEFAULT_FORMATTING,
+    ...(item.revision ? { revision: item.revision } : {}),
+  };
+}
+
 /** Whether every cell of a table takes HTML (see renderHtmlCellParagraph) */
 function htmlCellsHoldTable(table: { rows: TableRow[] }): boolean {
   return table.rows.every(row => row.cells.every(cell =>
@@ -7265,16 +7280,20 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
           continue;
         }
         // In a table only HTML holds, such as one with merged cells, the
-        // rest exports as literal text, and its runs as HTML
+        // rest exports as literal text, and its runs as HTML, an equation's
+        // too, whose < would read as a tag's
         const outerReadsMarkdown = readsMarkdown;
         readsMarkdown = false;
         let rendered: ReturnType<typeof renderInlineSegment>;
         try {
-          rendered = renderInlineSegment(items, comments, renderOpts, undefined, true);
+          rendered = renderInlineSegment(mergeConsecutiveRuns(items.map(mathCellRun), false), comments, renderOpts, undefined, true);
         } finally {
           readsMarkdown = outerReadsMarkdown;
         }
-        lines.push(i3 + '<p>' + keepParagraphWhitespace(keepHtmlCellSpaces(rendered.text), true, true) + '</p>');
+        // But not a blank line, as in an HTML comment, which would end the
+        // table's HTML block there, so the lines around it join
+        const text = rendered.text.replace(/(?:\r\n?|\n)[ \t]*(?=\r|\n)/g, '');
+        lines.push(i3 + '<p>' + keepParagraphWhitespace(keepHtmlCellSpaces(text), true, true) + '</p>');
         deferredAll.push(...rendered.deferredComments);
       }
       lines.push(i2 + '</' + tag + '>');

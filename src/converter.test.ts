@@ -6660,6 +6660,40 @@ describe('HTML table cells', () => {
     expect(paragraphs).toEqual(['a', '{++b++}']);
     expect(cell).not.toContain('<w:ins');
   });
+
+  // A table only HTML holds, whose cell, which HTML can't hold, has `items`
+  const htmlOnlyTables: Array<[string, (items: ContentItem[]) => ContentItem[]]> = [
+    ['a cell of paragraphs', items => [{ type: 'table', rows: [
+      { isHeader: false, cells: [{ paragraphs: [items, [cellText('c')]] }] },
+    ] }] as unknown as ContentItem[]],
+    ['merged cells', items => [{ type: 'table', rows: [
+      { isHeader: false, cells: [{ paragraphs: [[cellText('m')]], colspan: 2 }] },
+      { isHeader: false, cells: [{ paragraphs: [items] }, { paragraphs: [[cellText('c')]] }] },
+    ] }] as unknown as ContentItem[]],
+  ];
+
+  test.each(htmlOnlyTables)('writes a comment with a blank line in a cell of a table with %s without it', async (_name, table) => {
+    // The blank line ended the table's HTML block, and export read the rest
+    // of the table as text
+    const markdown = buildMarkdown(table([cellText('a '), { type: 'html_comment', text: '<!-- x\n\ny -->', commentIds: new Set() }, cellText(' b')]), new Map());
+    expect(markdown).toContain('      <p>a <!-- x\ny -->&#32;b</p>');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each(htmlOnlyTables)('escapes an equation in a cell of a table with %s, which exports it as text', async (_name, table) => {
+    // Export read its <b> as a tag, which dropped the b and made the text
+    // after it bold
+    const markdown = buildMarkdown(table([cellText('p '), { type: 'math', latex: 'a<b>c', display: false, commentIds: new Set() }, cellText(' q')]), new Map());
+    expect(markdown).toContain('      <p>p $a&lt;b&gt;c$ q</p>');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('writes a display equation of lines in a cell of a table only HTML holds with line breaks', async () => {
+    // HTML read its line ends as spaces, and the blank line ended the table
+    const markdown = buildMarkdown(htmlOnlyTables[0][1]([{ type: 'math', latex: 'a \\\\\n\nb', display: true, inParagraph: true, commentIds: new Set() } as ContentItem]), new Map());
+    expect(markdown).toContain('      <p>' + '$'.repeat(2) + '<br>a \\\\<br><br>b<br>' + '$'.repeat(2) + '</p>');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
 });
 
 describe('HTML around a table in its block', () => {
