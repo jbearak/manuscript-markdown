@@ -696,6 +696,13 @@ export function startsHtmlBlock(text: string): boolean {
   return citationTextMd.parse(text, {})[0]?.type === 'html_block';
 }
 
+/** Whether export reads an HTML block's text as line breaks, alone or after
+ *  comments, not as text, without the spaces before them */
+export function isLineBreakBlock(content: string): boolean {
+  const text = content.trim();
+  return /^(?:<br\s*\/?>\s*)+$/i.test(text) || /^(?:<!--(?:(?!-->)[\s\S])*-->)+(?:<br\s*\/?>)+$/i.test(text);
+}
+
 /** What of a comment, a block of its own, export doesn't read as a
  *  directive, where it reads it as one: the text a style's goes around on
  *  its line, as in <!-- style: Title -->Text<!-- /style -->, or else none.
@@ -3115,7 +3122,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
               runs: [{ type: 'text', text: htmlContent.replace(/\n$/, '') }]
             });
           }
-        } else if (/^(?:<br\s*\/?>\s*)+$/i.test(htmlContent.trim()) || /^(?:<!--(?:(?!-->)[\s\S])*-->)+(?:<br\s*\/?>)+$/i.test(htmlContent.trim())) {
+        } else if (isLineBreakBlock(htmlContent)) {
           // Line breaks alone, as import writes a paragraph that is one,
           // which markdown-it reads as a block, not a paragraph's text, or
           // after comments, as import writes a paragraph of comments a line

@@ -6044,6 +6044,35 @@ describe('Line breaks a backslash can\'t hold', () => {
     expect(await exportedText(md)).toBe('a⏎  ');
   });
 
+  const hidden = '<w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr>';
+  test.each([
+    ['a space before one that ends a paragraph', 'XX', r(t(' ') + '<w:br/>'), '&#32;<br>'],
+    ['spaces before one that ends a paragraph', 'XX', r(t('   ') + '<w:br/>'), '&#32;&#32;&#32;<br>'],
+    ['a space and a comment before one that ends a paragraph', 'XX', r(t(' ')) + r(t('​&lt;!-- c --&gt;'), hidden) + r('<w:br/>'), '&#32;<!-- c --><br>'],
+    ['a space before one that ends a quote\'s paragraph', '> XX', r(t(' ') + '<w:br/>'), '> &#32;<br>'],
+    ['a space before one that ends an item\'s paragraph after its first', '- a\n\n  XX', r(t(' ') + '<w:br/>'), '- a\n\n  &#32;<br>'],
+    ['a tab before one that ends a paragraph', 'XX', r('<w:tab/><w:br/>'), '&#9;<br>'],
+    ['a space before one with text after', 'XX', r(t(' ') + '<w:br/>' + t('b')), '&#32;\\\nb'],
+    ['spaces between two', 'XX', r(t('a') + '<w:br/>' + t('  ') + '<w:br/>'), 'a\\\n&#32;&#32;<br>'],
+    ['a space before one that ends a list item', '- XX', r(t(' ') + '<w:br/>'), '- &#32;<br>'],
+    ['a space before one that ends a heading', '# XX', r(t(' ') + '<w:br/>'), '# &#32;<br>'],
+    ['a space before one that ends a table\'s cell', '| a |\n| --- |\n| XX |', r(t(' ') + '<w:br/>'), '| a |\n| --- |\n| &#32;<br> |'],
+  ])('keeps %s', async (_name, source, runs, md) => {
+    // Raw before a <br>, alone or after comments, the spaces were an HTML
+    // block's indent, which export drops, as it reads the block as line breaks
+    const texts = async (docx: Uint8Array) => [...(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string'))
+      .matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map(p => p[0].replace(/<w:br\/>/g, '⏎').replace(/<w:tab\/>/g, '\t').replace(/<[^>]+>/g, ''));
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\n' + source + '\n\nB.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace(/<w:r>(?:(?!<w:r>)[\s\S])*?>XX<\/w:t><\/w:r>/, runs);
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    const docx = await zip.generateAsync({ type: 'uint8array' });
+    const md1 = (await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(md1).toBe('A.\n\n' + md + '\n\nB.\n');
+    expect(await texts((await convertMdToDocx(md1)).docx)).toEqual(await texts(docx));
+  });
+
   test('keeps one in inline code between the code on each side', async () => {
     // Inside the code span, the \ was code, and the line end a space
     const md = await imported(p(r(t('a') + '<w:br/>' + t('b'), code)));
