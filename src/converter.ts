@@ -5800,11 +5800,22 @@ function resolveBareLinks(markdown: string): string {
     // tracked break's end mark, a private-use character (see
     // trackedBreakMarks)
     const lineStart = (k === 0 ? /(?:^|[\n\uE000-\uF8FF])[ \t]+$/ : /[\n\uE000-\uF8FF][ \t]+$/).test(before);
-    if (head !== undefined && bang !== undefined && bareLinkReadsBack(bang, address, closer, head, lineStart)) {
+    // Whitespace that is all the text before the first link or after the
+    // last, which keepParagraphWhitespace writes as references where it
+    // starts or ends a paragraph or a cell, so the address must read back
+    // with them too: linkify reads a URL on into &nbsp; after it, and links
+    // no address but a URL with // after one
+    const edgeBefore = k === 0 && /^\s+$/.test(before);
+    const edgeAfter = k === count - 1 && /^\s+$/.test(after);
+    const readsBack = (lead: string) => head !== undefined && bareLinkReadsBack(lead, address, closer, head, lineStart)
+      && (!edgeBefore && !edgeAfter || bareLinkReadsBack(
+        edgeBefore ? keepParagraphEdgeWhitespace(lead + address, true, false).slice(0, -address.length) : lead, address, closer,
+        edgeAfter ? keepParagraphEdgeWhitespace(address + after, false, true).slice(address.length) : head, lineStart));
+    if (bang !== undefined && readsBack(bang)) {
       chosen[k] = address;
       parts[4 * k] = bang;
     } else {
-      chosen[k] = head !== undefined && bareLinkReadsBack(before, address, closer, head, lineStart) ? address : link;
+      chosen[k] = readsBack(before) ? address : link;
     }
   }
   const out: string[] = [parts[0]];

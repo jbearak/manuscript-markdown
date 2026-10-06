@@ -1660,6 +1660,24 @@ describe('HTML table support for Expand/Compact Table', () => {
   });
 
   it.each([
+    ['a no-break space after a URL', '<a href="https://e.org/a">https://e.org/a</a>&nbsp;', '| [https\\://e.org/a](https://e.org/a)&nbsp; |'],
+    ['an ideographic space after a URL', '<a href="https://e.org/a">https://e.org/a</a>&#12288;', '| [https\\://e.org/a](https://e.org/a)&#12288; |'],
+    ['a no-break space before an email address', '&nbsp;<a href="mailto:a@b.org">a@b.org</a>', '| &nbsp;[a\\@b.org](mailto:a@b.org) |'],
+    ['a no-break space after a URL on a cell\'s last line', 'x<br><a href="https://e.org/a">https://e.org/a</a>&nbsp;',
+      '+-------------------------------------------+\n| h                                         |\n+===========================================+\n| x                                         |\n| [https\\://e.org/a](https://e.org/a)&nbsp; |\n+-------------------------------------------+'],
+  ])('Compact Table and Expand Table keep a link to its address in link syntax with %s at an HTML cell\'s edge', (_name, cell, body) => {
+    // Bare, the address was written before the cell's edge was, as a
+    // reference, which linkify read a URL on into, as https://e.org/a&nbsp,
+    // and after which it linked no email address
+    const html = '<table><tr><th>h</th></tr><tr><td>' + cell + '</td></tr></table>';
+    const compacted = compactTable(html).newText;
+    expect(compacted).toBe(body.startsWith('+') ? body : '| h |\n| --- |\n' + body);
+    expect(previewRows(compacted)).toEqual(previewRows(html));
+    expect(previewRows(reflowTable(compacted).newText)).toEqual(previewRows(html));
+    expect(previewRows(reflowTable(html).newText)).toEqual(previewRows(html));
+  });
+
+  it.each([
     ['row', '<table>\n<!-- <tr><td>old</td></tr> -->\n<tr><td>a</td></tr>\n</table>'],
     ['cell', '<table><tr><!-- <td>old</td> --><td>a</td></tr></table>'],
     ['rows alone', '<table><!-- <tr><td>old</td></tr> --></table>'],
