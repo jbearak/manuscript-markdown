@@ -10410,6 +10410,24 @@ describe('Track changes (CriticMarkup)', () => {
       expect(again).toBe(imported);
     });
 
+    test.each([
+      ['before a paragraph', '# Head\n\nBody\n', ['Head'], 'del', '# Head{--\n\n--}Body\n'],
+      ['with a change before a paragraph', '# Head{++er++}\n\nBody\n', ['Head'], 'ins', '# Head{++er\n\n++}Body\n'],
+      ['before a paragraph with a change', '# Head\n\n{--Old--} body\n', ['Head'], 'del', '# Head{--\n\n--}{--Old--} body\n'],
+      ['with a comment', '# {==Head==}{>>c<<}\n\nBody\n', ['Head'], 'ins', '# {==Head==}{>>c<<}{++\n\n++}Body\n'],
+      ['before a line break', '# Head\n\nBody\\\nmore\n', ['Head'], 'del', '# Head{--\n\n--}Body<br>more\n'],
+      ['before a list item', '# Head\n\n- item\n', ['Head'], 'del', '# Head{--\n\n--}\n\n- item\n'],
+      ['before a heading', '# Head\n\n## Sub\n', ['Head'], 'ins', '# Head{++\n\n++}\n\n## Sub\n'],
+      ['at the end of the document', 'a\n\n## Head\n', ['Head'], 'del', 'a\n\n## Head{--\n\n--}\n'],
+      ['all in its revision', '{--# Head--}\n\nBody\n', ['Head'], 'del', '{--# Head--}\n\nBody\n'],
+    ] as const)('keeps the tracked mark of a heading %s', async (_name, md, texts, type, expected) => {
+      // It went where the heading's text wasn't all in the mark's revision
+      const { imported, before, after, again } = await tripTrackedMarks(md, [...texts], type);
+      expect(imported).toBe(expected);
+      expect(after).toEqual(before);
+      expect(again).toBe(imported);
+    });
+
     test('keeps the tracked mark of a note\'s last paragraph', async () => {
       // No paragraph after it took it as the break before it
       const zip = await JSZip.loadAsync((await convertMdToDocx('x[^1]\n\n[^1]: a\n\n    b\n')).docx);
