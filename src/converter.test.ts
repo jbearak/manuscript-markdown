@@ -1419,6 +1419,21 @@ describe('Ordered list numbering', () => {
   });
 
   test.each([
+    ['a list', '1. a\n2. b'],
+    ['a list and its sublist', '1. a\n2. b\n   1. x\n   2. y'],
+    ['a sublist under a bullet', '- a\n  1. x\n  2. y'],
+  ])('reads %s whose levels have no w:numFmt as numbered, as Word does', async (_name, md) => {
+    // A level's format is decimal where none is given, and it read such a
+    // level as no list's, so its paragraphs lost their numbers
+    const { docx } = await convertMdToDocx(md);
+    const zip = await JSZip.loadAsync(docx);
+    const numbering = await zip.file('word/numbering.xml')!.async('string');
+    expect(numbering).toContain('<w:numFmt w:val="decimal"/>');
+    zip.file('word/numbering.xml', numbering.replace(/<w:numFmt w:val="decimal"\/>/g, ''));
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(md);
+  });
+
+  test.each([
     ['landscape', '<!-- landscape -->\n\n1. a\n\n<!-- /landscape -->\n\n1. b'],
     ['portrait', '1. a\n\n<!-- portrait -->\n\n1. b\n\n<!-- /portrait -->'],
   ])('needs nothing between lists a %s section keeps apart', async (_name, md) => {
