@@ -1722,7 +1722,12 @@ export interface WordListCounter {
  * [MS-DOC] 2.4.6.4 has it (step 10, which only paragraphs at the level
  * reach), and as docx4j and LibreOffice apply it; later paragraphs of the
  * instance at that level go on. A level starts
- * over after any higher level ([MS-OI29500] 2.1.282).
+ * over after any higher level ([MS-OI29500] 2.1.282). A higher level with no
+ * count, as before a list's first paragraph at it, counts from its start
+ * there, or the instance's override for it, as if a paragraph had used it,
+ * so that its next paragraph is one more: Word numbers a list of 1.1, 1.2
+ * and a top-level item as 1.1, 1.2, 2, where the instance starts both
+ * levels at 1 (tdf#153104).
  */
 export function wordListCounter(defs: NumberingDefs, instances: NumberingInstances): WordListCounter {
   // abstractNumId → its count by level; numId:level where an instance has
@@ -1735,11 +1740,17 @@ export function wordListCounter(defs: NumberingDefs, instances: NumberingInstanc
     let list = lists.get(instance.abstractNumId);
     if (!list) lists.set(instance.abstractNumId, list = { levels: [], restartsAfterBreak: false });
     if (instance.restartsAfterBreak) list.restartsAfterBreak = true;
-    const override = used.has(numId + ':' + ilvl) ? undefined : instance.overrides.get(String(ilvl));
-    used.add(numId + ':' + ilvl);
+    const override = (level: number) => used.has(numId + ':' + level) ? undefined : instance.overrides.get(String(level));
+    const start = (level: number) => override(level) ?? defs.get(numId)?.get(String(level))?.start ?? 1;
     const { levels } = list;
-    const starts = levels[ilvl] === undefined || override !== undefined;
-    levels[ilvl] = starts ? override ?? defs.get(numId)?.get(String(ilvl))?.start ?? 1 : levels[ilvl] + 1;
+    for (let level = 0; level < ilvl; level++) {
+      if (levels[level] !== undefined) continue;
+      levels[level] = start(level);
+      used.add(numId + ':' + level);
+    }
+    const starts = levels[ilvl] === undefined || override(ilvl) !== undefined;
+    levels[ilvl] = starts ? start(ilvl) : levels[ilvl] + 1;
+    used.add(numId + ':' + ilvl);
     levels.length = ilvl + 1;
     return { number: levels[ilvl], starts };
   };
@@ -1967,8 +1978,11 @@ export function parseListMeta(pPrChildren: XmlNode[], numberingDefs: NumberingDe
   const def = levels.get(ilvl);
   if (!def) return undefined;
 
+  // Word won't open a file that defines a level above 8 ([MS-OI29500] on
+  // Part 1 §17.9.6), so a paragraph at one has none it numbers by, and
+  // counting the levels up to it would take as long as the level is high
   const level = parseInt(ilvl, 10);
-  if (isNaN(level) || level < 0) return undefined;
+  if (isNaN(level) || level < 0 || level > 8) return undefined;
 
   const startNumber = numberingStartOverrides?.get(numId)?.get(ilvl);
   const counted = countListItem?.(numId, level);

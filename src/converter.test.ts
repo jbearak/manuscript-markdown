@@ -1476,6 +1476,17 @@ describe('Ordered list numbering', () => {
     expect(await roundTrip(md)).toBe(md);
   });
 
+  test.each([
+    // Word numbers a list of 1.1 and a top-level item as 1.1, 2
+    ['its start', '', '- a\n  1. b\n\n2. c'],
+    // As tdf#153104's document has it
+    ['an instance\'s override at its first paragraph', instance(6, [[0, 4], [1, 1]]), '- a\n  1. b\n\n5. c'],
+  ])('counts a level that a list starts under from %s', async (_name, instances, md) => {
+    const numId = instances ? 6 : 2;
+    expect(await wordList(instances, [[1, 0, 'a'], [numId, 1, 'b'], [numId, 0, 'c']])).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
   test('replaces a template\'s start override written as an element pair', async () => {
     const templateDocx = await templateWithNumbering(numbering => numbering.replace(
       /(<w:num w:numId="2"[^>]*><w:abstractNumId w:val="1"\/>)/,
@@ -1831,6 +1842,17 @@ describe('List levels Word skips', () => {
     expect(await stable(await atLevels(md, levels))).toBe(md);
   });
 
+  test('numbers no paragraph at a level above 8, however high', async () => {
+    const zip = await JSZip.loadAsync(await atLevels('1. a\n   1. b\n2. c\n', [0, 1000000000, 0]));
+    const numbering = await zip.file('word/numbering.xml')!.async('string');
+    zip.file('word/numbering.xml', numbering.replace(/(<w:abstractNum w:abstractNumId="1"[^>]*>[\s\S]*?)(<\/w:abstractNum>)/, (_match, levels: string, end: string) =>
+      levels + '<w:lvl w:ilvl="1000000000"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>' + end));
+    const markdown = await imported(await zip.generateAsync({ type: 'uint8array' }));
+    // As Word numbers it, if it opens the file, with no level of its own
+    expect(markdown).toBe('1. a\n\nb\n\n2. c\n');
+    expect(await imported((await convertMdToDocx(markdown)).docx)).toBe(markdown);
+  });
+
   test.each([
     ['from 0 to 2', '- a\n  - b\n  - c\n- d\n', [0, 2, 2, 0]],
     ['from 0 to 3', '- a\n  - b\n  - c\n- d\n', [0, 3, 3, 0]],
@@ -1857,10 +1879,11 @@ describe('List levels Word skips', () => {
   });
 
   test('keeps the number Word shows an item after a level it skipped', async () => {
-    // Word numbers it from 1 at its own level, where Markdown would go on
-    // from the items at the level it skipped, which nest at the same depth
+    // Word numbers it at its own level, which the item under it counted from
+    // 1, where Markdown would go on from the items at the level it skipped,
+    // which nest at the same depth
     const markdown = await stable(await atLevels('1. a\n   1. b\n   2. c\n   3. d\n', [0, 2, 2, 1]));
-    expect(markdown).toBe('1. a\n   1. b\n   2. c\n\n   <!-- -->\n\n   1. d\n');
+    expect(markdown).toBe('1. a\n   1. b\n   2. c\n\n   <!-- -->\n\n   2. d\n');
   });
 
   test.each([
