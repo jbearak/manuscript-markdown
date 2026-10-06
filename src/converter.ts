@@ -11630,7 +11630,8 @@ export function buildMarkdown(
     // &#9;<!-- c -->a, whose block would show them as text, and since export
     // puts a block of comments' indent in the first one's hidden run. Not
     // where that run held it, with the paragraph's comments' runs all it
-    // holds, as export wrote them, nor before a comment a paragraph would
+    // holds, as export wrote them, but for spaces and tabs Word put after
+    // them, which export trims, nor before a comment a paragraph would
     // read as text, as one with a blank line in it, which only the block
     // holds, or as more than it, as one that ends in ---> with the next.
     const indent = ownLine && atStart ? /^[ \t]+(?=<)/.exec(textOut)?.[0] ?? '' : '';
@@ -11656,10 +11657,11 @@ export function buildMarkdown(
     // split one, which a paragraph would show, the block keeps hidden in
     // its run, with the rest of the paragraph, where that's spaces and tabs
     // and the block is the comments' (see annotateHtmlCommentIndices)
-    const hidesText = /\S/.test(outsideComments(payloads.join('')))
-      && items.every(item => item.type === 'html_comment' || item.type === 'text' && /^[ \t]*$/.test(item.text))
+    const commentsAlone = items.every(item => item.type === 'html_comment' || item.type === 'text' && /^[ \t]*$/.test(item.text));
+    const hidesText = /\S/.test(outsideComments(payloads.join(''))) && commentsAlone
       && /^<!--[\s\S]*?-->\s*$/.test(textOut.trim());
-    const inline = () => !hidesText && (isLineBreakBlock(textOut) || /^[ \t]*<!--/.test(textOut) && !items.every(item => item.type === 'html_comment'))
+    const runHoldsIndent = commentsAlone && items[0]?.type === 'html_comment' && /^[ \t]/.test(items[0].text);
+    const inline = () => !hidesText && (isLineBreakBlock(textOut) || /^[ \t]*<!--/.test(textOut) && !runHoldsIndent)
       && readsCommentsInline(referenced, payloads, !blockKeepsRuns);
     // Whitespace alone before an equation in the paragraph keeps the space
     // export wrote for its line end as it is, which the math branch takes

@@ -2948,6 +2948,8 @@ describe('HTML comment blank line round-trip', () => {
     ['a tab after it', hidden('<!-- a -->') + visible('<w:tab/>'), true],
     ['a space between it and another', hidden('<!-- a -->') + space + hidden('<!-- z -->'), true],
     ['spaces around one only a block holds', space + hidden('<!-- a\n\nz -->') + space, true],
+    // Whose indent export put in its run
+    ['an indent in its run and a space after it', hidden(' <!-- a -->') + space, true],
     // Which import writes as a reference, before which export reads a paragraph
     ['a space before it', space + hidden('<!-- a -->'), false],
     ['text after it', hidden('<!-- a -->') + visible('<w:t>x</w:t>'), false],
@@ -2968,6 +2970,23 @@ describe('HTML comment blank line round-trip', () => {
     expect(tokens.filter(token => token.htmlCommentIndex !== undefined).length).toBe(counts ? 3 : 2);
     // And the ones after it keep their blank lines where import counts it too
     expect(markdown.endsWith('\n\n\n<!-- b -->\n\n\n\n<!-- c -->\n\nB.\n')).toBe(counts);
+  });
+
+  test.each([
+    ['a space', space, ' '],
+    ['a tab', visible('<w:tab/>'), '\t'],
+  ])('keeps the indent export put in a comment\'s hidden run there with %s Word put after the run', async (_name, after, whitespace) => {
+    // The paragraph's runs held more than its comments, so import wrote the
+    // indent as a reference, which export showed
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\n <!-- a -->\n\nB.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const edited = xml.replace(/<w:r><w:rPr><w:vanish\/>(?:(?!<w:r>)[\s\S])*?&lt;!-- a --&gt;<\/w:t><\/w:r>/, run => run + after);
+    expect(edited).not.toBe(xml);
+    zip.file('word/document.xml', edited);
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown.replace(/^---\n[\s\S]*?\n---\n?/, '');
+    expect(markdown).toBe('A.\n\n <!-- a -->' + whitespace + '\n\nB.\n');
+    const exported = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    expect(exported).toContain('\u200B &lt;!-- a --&gt;');
   });
 
   const start = '<w:commentRangeStart w:id="0"/>';
