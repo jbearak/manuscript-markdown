@@ -891,3 +891,194 @@ describe('empty run and paragraph properties', () => {
     expect(extractStyleBlock(styles, 'Heading4')).not.toContain('<w:rPr');
   });
 });
+
+describe('heading and title styles based on another style', () => {
+  const doc = '---\ntitle: Title\n---\n\n# One\n\n## Two\n\n### Three\n';
+  const heading = (level: number, inner: string) => ['Heading' + level, '<w:name w:val="heading ' + level + '"/>' + inner] as [string, string];
+
+  /** Export's own Word file with the given styles' content replaced, a style
+   *  ID of rPrDefault or pPrDefault giving the document defaults' properties */
+  async function withStyles(...replaced: Array<[string, string]>): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(doc)).docx);
+    let styles = await zip.file('word/styles.xml')!.async('string');
+    for (const [id, inner] of replaced) {
+      const defaults = /^(r|p)PrDefault$/.exec(id);
+      if (defaults) {
+        styles = styles.replace(new RegExp('(<w:' + id + '>)(?:<w:' + defaults[1] + 'Pr>[\\s\\S]*?</w:' + defaults[1] + 'Pr>)?'),
+          (_match, open: string) => open + '<w:' + defaults[1] + 'Pr>' + inner + '</w:' + defaults[1] + 'Pr>');
+        continue;
+      }
+      styles = styles.replace(new RegExp('(<w:style\\b[^>]*w:styleId="' + id + '"[^>]*>)[\\s\\S]*?(</w:style>)'),
+        (_match, open: string, close: string) => open + inner + close);
+    }
+    zip.file('word/styles.xml', styles);
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  // A style inherits what it doesn't set from the style it's based on, so an
+  // empty or missing rPr or pPr means inherit, not normal
+  it.each([
+    ['no rPr, based on a bold heading', [heading(2, '<w:basedOn w:val="Heading1"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr>')], undefined, undefined],
+    ['an rPr without bold, based on a bold heading', [heading(2, '<w:basedOn w:val="Heading1"/><w:rPr><w:color w:val="FF0000"/></w:rPr>')], undefined, undefined],
+    ['bold turned off, based on a bold heading', [heading(2, '<w:basedOn w:val="Heading1"/><w:rPr><w:b w:val="0"/></w:rPr>')], ['bold', 'normal', 'bold'], undefined],
+    ['no rPr or pPr, based on an italic, centered heading',
+      [heading(1, '<w:basedOn w:val="Normal"/><w:pPr><w:jc w:val="center"/><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:i/></w:rPr>'), heading(2, '<w:basedOn w:val="Heading1"/>')],
+      ['italic-center', 'italic-center', 'bold'], undefined],
+    ['no rPr, based on Normal', [heading(2, '<w:basedOn w:val="Normal"/>')], ['bold', 'normal', 'bold'], undefined],
+    ['a title with no rPr, based on a bold heading', [['Title', '<w:name w:val="Title"/><w:basedOn w:val="Heading1"/>']], undefined, ['bold']],
+    ['styles based on each other', [heading(1, '<w:basedOn w:val="Heading2"/>'), heading(2, '<w:basedOn w:val="Heading1"/>')], ['normal', 'normal', 'bold'], undefined],
+  ] as Array<[string, Array<[string, string]>, string[] | undefined, string[] | undefined]>)('%s reads back as the style shows', async (_name, replaced, headerFontStyle, titleFontStyle) => {
+    const { convertDocx } = await import('./converter');
+    const { markdown } = await convertDocx(await withStyles(...replaced));
+    const { metadata } = parseFrontmatter(markdown);
+    expect(metadata.headerFontStyle).toEqual(headerFontStyle);
+    expect(metadata.titleFontStyle).toEqual(titleFontStyle);
+    // Without the template, export gives each style what it showed
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  // A style's own toggle property, such as bold, decides it rather than
+  // toggling what its base gives (see inheritedStyle in converter.ts); caps
+  // win over small caps; and the document defaults are the base of all
+  it.each([
+    ['bold set again on a bold heading\'s', [heading(2, '<w:basedOn w:val="Heading1"/><w:rPr><w:b/></w:rPr>')], undefined, undefined],
+    ['bold set again on a bold title\'s base and its base', [heading(1, '<w:basedOn w:val="Normal"/><w:rPr><w:b/></w:rPr>'),
+      heading(2, '<w:basedOn w:val="Heading1"/><w:rPr><w:b/></w:rPr>'), ['Title', '<w:name w:val="Title"/><w:basedOn w:val="Heading2"/><w:rPr><w:b/></w:rPr>']],
+    undefined, ['bold']],
+    ['small caps on an all caps heading', [heading(1, '<w:basedOn w:val="Normal"/><w:rPr><w:caps/></w:rPr>'), heading(2, '<w:basedOn w:val="Heading1"/><w:rPr><w:smallCaps/></w:rPr>')],
+      ['allcaps', 'allcaps', 'bold'], undefined],
+    ['small caps beside all caps', [heading(2, '<w:basedOn w:val="Normal"/><w:rPr><w:b/><w:smallCaps/><w:caps/></w:rPr>')], ['bold', 'bold-allcaps', 'bold'], undefined],
+    ['bold from the document defaults', [['rPrDefault', '<w:b/><w:sz w:val="24"/>'], heading(2, '<w:basedOn w:val="Normal"/>')], undefined, ['bold']],
+    ['centering and italic from the document defaults', [['pPrDefault', '<w:jc w:val="center"/>'], ['rPrDefault', '<w:i/>'], heading(2, '<w:basedOn w:val="Normal"/><w:rPr><w:b/></w:rPr>')],
+      ['bold-italic-center'], ['italic-center']],
+    ['bold the style turns off over the document defaults', [['rPrDefault', '<w:b/>'], heading(2, '<w:basedOn w:val="Normal"/><w:rPr><w:b w:val="0"/></w:rPr>')],
+      ['bold', 'normal', 'bold'], ['bold']],
+    // An element with a closing tag means what a self-closing one does
+    ['bold from Normal, as <w:b></w:b>', [['Normal', '<w:name w:val="Normal"/><w:qFormat/><w:rPr><w:b></w:b></w:rPr>'], heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr>')],
+      undefined, ['bold']],
+    ['bold turned off with a closing tag', [heading(2, '<w:basedOn w:val="Heading1"/><w:rPr><w:b w:val="0"></w:b></w:rPr>')], ['bold', 'normal', 'bold'], undefined],
+    ['centering from Normal, with a closing tag', [['Normal', '<w:name w:val="Normal"/><w:qFormat/><w:pPr><w:jc w:val="center"></w:jc></w:pPr>']], ['bold-center'], ['center']],
+    // A tracked change's record of what a style was isn't what Word shows
+    ['a heading with a tracked change\'s record of the italic and centering it had',
+      [heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/><w:pPrChange w:id="1" w:author="A"><w:pPr><w:jc w:val="center"/></w:pPr></w:pPrChange></w:pPr>' +
+        '<w:rPr><w:b/><w:rPrChange w:id="2" w:author="A"><w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr>')], undefined, undefined],
+    ['the document defaults with a tracked change\'s record of the italic and centering they had',
+      [['pPrDefault', '<w:pPrChange w:id="1" w:author="A"><w:pPr><w:jc w:val="center"/></w:pPr></w:pPrChange>'],
+        ['rPrDefault', '<w:rPrChange w:id="2" w:author="A"><w:rPr><w:i/></w:rPr></w:rPrChange>'], heading(2, '<w:basedOn w:val="Normal"/><w:rPr><w:b/></w:rPr>')], undefined, undefined],
+    ['no rPr, based on a bold heading through a w:basedOn with a line break', [heading(2, '<w:basedOn\n  w:val="Heading1"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr>')], undefined, undefined],
+  ] as Array<[string, Array<[string, string]>, string[] | undefined, string[] | undefined]>)('%s reads back as Word shows it', async (_name, replaced, headerFontStyle, titleFontStyle) => {
+    const { convertDocx } = await import('./converter');
+    const { markdown } = await convertDocx(await withStyles(...replaced));
+    const { metadata } = parseFrontmatter(markdown);
+    expect(metadata.headerFontStyle).toEqual(headerFontStyle);
+    expect(metadata.titleFontStyle).toEqual(titleFontStyle);
+    const again = (await convertMdToDocx(markdown)).docx;
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  // Export keeps a template style's reset of what its base turns on
+  it.each([
+    ['italic', [['Normal', '<w:name w:val="Normal"/><w:qFormat/><w:rPr><w:i/></w:rPr>'],
+      heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:i w:val="0"/></w:rPr>')]],
+    ['centering', [['Normal', '<w:name w:val="Normal"/><w:qFormat/><w:pPr><w:jc w:val="center"/></w:pPr>'],
+      heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:jc w:val="left"/><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/></w:rPr>')]],
+  ] as Array<[string, Array<[string, string]>]>)('a heading that turns off the %s its base turns on keeps that with the document as its template', async (_name, replaced) => {
+    const { convertDocx } = await import('./converter');
+    const original = await withStyles(...replaced);
+    const { markdown } = await convertDocx(original);
+    const again = (await convertMdToDocx(markdown, { templateDocx: original })).docx;
+    const stylesOf = async (docx: Uint8Array) => (await JSZip.loadAsync(docx)).file('word/styles.xml')!.async('string');
+    expect(extractStyleBlock(await stylesOf(again), 'Heading2')).toBe(extractStyleBlock(await stylesOf(original), 'Heading2'));
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  // Export writes a title's font style on its runs too, over the Title
+  // style's, and its centering on its paragraph, which Word shows
+  it.each([
+    ['italic its style inherits, turned off on its runs', [['Normal', '<w:name w:val="Normal"/><w:qFormat/><w:rPr><w:i/></w:rPr>'],
+      ['Title', '<w:name w:val="Title"/><w:basedOn w:val="Normal"/>']], ['T'], ['bold']],
+    ['each of two titles', [], ['A', 'B'], ['bold', 'italic']],
+    ['the centering of each of two titles', [], ['A', 'B'], ['center', 'normal']],
+  ] as Array<[string, Array<[string, string]>, string[], string[]]>)('a title\'s font style on its runs and paragraph reads back: %s', async (_name, replaced, title, titleFontStyle) => {
+    const { convertDocx } = await import('./converter');
+    const templateDocx = await withStyles(...replaced);
+    const md = '---\n' + title.map(line => 'title: ' + line + '\n').join('') + 'title-font-style: [' + titleFontStyle.join(', ') + ']\n---\n\nText.\n';
+    const docx = (await convertMdToDocx(md, { templateDocx })).docx;
+    const { metadata } = parseFrontmatter((await convertDocx(docx)).markdown);
+    expect([metadata.title, metadata.titleFontStyle]).toEqual([title, titleFontStyle]);
+  });
+
+  // A title's style by the ID the document gives it, as Word does in German
+  it('a title\'s font style on its runs reads back where the document gives the Title style another ID', async () => {
+    const { convertDocx } = await import('./converter');
+    const zip = await JSZip.loadAsync((await convertMdToDocx('---\ntitle: A\ntitle: B\ntitle-font-style: [bold, italic]\n---\n\nText.\n')).docx);
+    for (const part of ['word/styles.xml', 'word/document.xml']) {
+      zip.file(part, (await zip.file(part)!.async('string')).split('w:styleId="Title"').join('w:styleId="Titel"').split('<w:pStyle w:val="Title"/>').join('<w:pStyle w:val="Titel"/>'));
+    }
+    const { metadata } = parseFrontmatter((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect([metadata.title, metadata.titleFontStyle]).toEqual([['A', 'B'], ['bold', 'italic']]);
+  });
+
+  // A tracked change keeps what a title's runs and paragraph had before it,
+  // which Word doesn't show
+  it.each([
+    ['bold a run had', '<w:r><w:t>T</w:t>', '<w:r><w:rPr><w:rPrChange w:id="90" w:author="A" w:date="2026-01-01T00:00:00Z"><w:rPr><w:b/></w:rPr></w:rPrChange></w:rPr><w:t>T</w:t>'],
+    ['centering the paragraph had', '<w:pStyle w:val="Title"/>', '<w:pStyle w:val="Title"/><w:pPrChange w:id="91" w:author="A" w:date="2026-01-01T00:00:00Z"><w:pPr><w:jc w:val="center"/></w:pPr></w:pPrChange>'],
+  ])('a title\'s font style leaves out the %s before a tracked change', async (_name, from, to) => {
+    const { convertDocx } = await import('./converter');
+    const zip = await JSZip.loadAsync((await convertMdToDocx('---\ntitle: T\n---\n\nText.\n')).docx);
+    const documentXml = await zip.file('word/document.xml')!.async('string');
+    expect(documentXml).toContain(from);
+    zip.file('word/document.xml', documentXml.replace(from, () => to));
+    const { metadata } = parseFrontmatter((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect([metadata.title, metadata.titleFontStyle]).toEqual([['T'], undefined]);
+  });
+
+  // A paragraph that was a title, whose tracked change records the Title
+  // style it had, isn't one
+  it('a title\'s font style comes from the title, not an empty paragraph before it that was one', async () => {
+    const { convertDocx } = await import('./converter');
+    const zip = await JSZip.loadAsync((await convertMdToDocx('---\ntitle: T\ntitle-font-style: center\n---\n\nText.\n')).docx);
+    const documentXml = await zip.file('word/document.xml')!.async('string');
+    expect(documentXml).toContain('<w:body>');
+    zip.file('word/document.xml', documentXml.replace('<w:body>', () => '<w:body><w:p><w:pPr><w:jc w:val="left"/>' +
+      '<w:pPrChange w:id="92" w:author="A" w:date="2026-01-01T00:00:00Z"><w:pPr><w:pStyle w:val="Title"/></w:pPr></w:pPrChange></w:pPr></w:p>'));
+    const { markdown } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    const { metadata } = parseFrontmatter(markdown);
+    expect([metadata.title, metadata.titleFontStyle]).toEqual([['T'], ['center']]);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  // An empty paragraph that only carries a section break isn't a title,
+  // though it has the Title style, as import leaves it out
+  it('a title\'s font style comes from the title, not a section break\'s empty paragraph of the Title style before it', async () => {
+    const { convertDocx } = await import('./converter');
+    const zip = await JSZip.loadAsync((await convertMdToDocx('---\ntitle: T\ntitle-font-style: bold\n---\n\nText.\n')).docx);
+    const documentXml = await zip.file('word/document.xml')!.async('string');
+    expect(documentXml).toContain('<w:body>');
+    zip.file('word/document.xml', documentXml.replace('<w:body>', () => '<w:body><w:p><w:pPr><w:pStyle w:val="Title"/><w:jc w:val="center"/>' +
+      '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr></w:p>'));
+    const { markdown } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    const { metadata } = parseFrontmatter(markdown);
+    expect([metadata.title, metadata.titleFontStyle]).toEqual([['T'], ['bold']]);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  it('a heading\'s own off goes in schema order among what its font style turns on', async () => {
+    const { convertDocx } = await import('./converter');
+    const original = await withStyles(['Normal', '<w:name w:val="Normal"/><w:qFormat/><w:rPr><w:i/></w:rPr>'],
+      heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:i w:val="0"/></w:rPr>'));
+    const docx = (await convertMdToDocx('---\nheader-font-style: [bold, bold-underline]\n---\n\n# One\n\n## Two\n', { templateDocx: original })).docx;
+    const styles = await (await JSZip.loadAsync(docx)).file('word/styles.xml')!.async('string');
+    expect(extractStyleBlock(styles, 'Heading2')).toContain('<w:rPr><w:b/><w:i w:val="0"/><w:u w:val="single"/></w:rPr>');
+    expect(parseFrontmatter((await convertDocx(docx)).markdown).metadata.headerFontStyle?.[1]).toBe('bold-underline');
+  });
+
+  it('a heading based on a bold heading stays bold without the template', async () => {
+    const { convertDocx } = await import('./converter');
+    const { markdown } = await convertDocx(await withStyles(heading(2, '<w:basedOn w:val="Heading1"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr>')));
+    const styles = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/styles.xml')!.async('string');
+    expect(extractStyleBlock(styles, 'Heading2')).toContain('<w:b/>');
+  });
+});

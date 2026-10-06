@@ -5120,8 +5120,10 @@ export function applyFontOverridesToTemplate(
       const pPrMatch = /(<w:pPr\b[^>]*>)([\s\S]*?)(<\/w:pPr>)/.exec(innerContent);
       if (pPrMatch) {
         let pPrContent = pPrMatch[2];
-        // Remove any existing w:jc element, then insert before outlineLvl (schema order: spacing → ind → jc → outlineLvl)
-        pPrContent = pPrContent.replace(/<w:jc\b[^>]*(?:\/>|><\/w:jc>)/g, '');
+        // Remove any existing w:jc element, then insert before outlineLvl (schema order: spacing → ind → jc → outlineLvl).
+        // A font style that isn't centered keeps one that doesn't center,
+        // which may undo the centering of the style's base
+        pPrContent = pPrContent.replace(/<w:jc\b[^>]*(?:\/>|><\/w:jc>)/g, jc => !wantsCenter && !/\bw:val="center"/.test(jc) ? jc : '');
         if (wantsCenter) {
           const outlineLvlIdx = pPrContent.indexOf('<w:outlineLvl');
           if (outlineLvlIdx !== -1) {
@@ -5179,22 +5181,28 @@ export function applyFontOverridesToTemplate(
 
       // Apply font-style overrides (bold, italic, underline) for headings and title
       if (fontStyleOverride !== undefined) {
-        // Remove existing b, i, u, smallCaps, caps elements (all toggle forms: self-closing, with attributes, open+close)
-        rPrContent = rPrContent.replace(/<w:b\b[^>]*(?:\/>|><\/w:b>)/g, '');
-        rPrContent = rPrContent.replace(/<w:i\b[^>]*(?:\/>|><\/w:i>)/g, '');
-        rPrContent = rPrContent.replace(/<w:u\b[^>]*(?:\/>|><\/w:u>)/g, '');
-        rPrContent = rPrContent.replace(/<w:smallCaps\b[^>]*(?:\/>|><\/w:smallCaps>)/g, '');
-        rPrContent = rPrContent.replace(/<w:caps\b[^>]*(?:\/>|><\/w:caps>)/g, '');
-        // Add new style elements at the start
-        let styleEls = '';
-        if (fontStyleOverride !== 'normal') {
-          if (fontStyleOverride.includes('bold')) styleEls += '<w:b/>';
-          if (fontStyleOverride.includes('italic')) styleEls += '<w:i/>';
-          if (fontStyleOverride.includes('underline')) styleEls += '<w:u w:val="single"/>';
-          if (fontStyleOverride.includes('smallcaps')) styleEls += '<w:smallCaps/>';
-          else if (fontStyleOverride.includes('allcaps')) styleEls += '<w:caps/>';
+        // Remove existing b, i, u, smallCaps, caps elements (all toggle forms: self-closing, with attributes, open+close),
+        // noting one that turns off what the font style leaves out, which may
+        // undo what the style's base turns on, to write again in order
+        const on: Record<string, string> = { 'w:b': '<w:b/>', 'w:i': '<w:i/>', 'w:u': '<w:u w:val="single"/>', 'w:smallCaps': '<w:smallCaps/>', 'w:caps': '<w:caps/>' };
+        const wanted = (tag: string) => tag === 'w:b' ? fontStyleOverride.includes('bold')
+          : tag === 'w:i' ? fontStyleOverride.includes('italic')
+          : tag === 'w:u' ? fontStyleOverride.includes('underline')
+          : tag === 'w:smallCaps' ? fontStyleOverride.includes('smallcaps')
+          : fontStyleOverride.includes('allcaps') && !fontStyleOverride.includes('smallcaps');
+        const turnsOff = (tag: string, element: string) => {
+          const val = /\bw:val="([^"]*)"/.exec(element)?.[1];
+          return tag === 'w:u' ? val === 'none' : val === '0' || val === 'false' || val === 'off';
+        };
+        const ownOff = new Map<string, string>();
+        for (const tag of Object.keys(on)) {
+          rPrContent = rPrContent.replace(new RegExp('<' + tag + '\\b[^>]*(?:/>|></' + tag + '>)', 'g'), element => {
+            if (!wanted(tag) && turnsOff(tag, element)) ownOff.set(tag, element);
+            return '';
+          });
         }
-        rPrContent = styleEls + rPrContent;
+        // Add new style elements at the start
+        rPrContent = Object.keys(on).map(tag => wanted(tag) ? on[tag] : ownOff.get(tag) ?? '').join('') + rPrContent;
       }
 
       // An rPr that held only what the style override removed goes with it
