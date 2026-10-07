@@ -13832,6 +13832,33 @@ describe('Portrait section round-trip', () => {
     expect(result.markdown).toContain('Portrait content');
   });
 
+  test('ends a section and starts the next with no empty one between where a closing fence and an opening one are on lines of their own, one after the other', async () => {
+    const md = 'A.\n\n<!-- landscape -->\n\nW.\n\n<!-- /landscape -->\n<!-- portrait -->\n\nP.\n\n<!-- /portrait -->\n\nB.\n';
+    const { docx } = await convertMdToDocx(md);
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const body = xml.slice(xml.indexOf('<w:body>'), xml.lastIndexOf('<w:sectPr'));
+    // Each section's text, and its page's orientation
+    expect(body.split(/<w:sectPr\b[\s\S]*?<\/w:sectPr>/).map(section => [...section.matchAll(/<w:t\b[^>]*>([^<]*)/g)].map(m => m[1]).join(''))).toEqual(['A.', 'W.', 'P.', 'B.']);
+    expect([...xml.matchAll(/<w:pgSz\b[^>]*>/g)].map(m => m[0].includes('landscape'))).toEqual([false, true, false, false]);
+    const md1 = (await convertDocx(docx)).markdown;
+    expect(md1).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(md1)).docx)).markdown).toBe(md1);
+  });
+
+  test('keeps two directives on one line as the comment they are, hidden, which starts and ends no section', async () => {
+    // Each directive is a comment on a line of its own; two on one line are
+    // one comment, as the language server reads them too
+    const md = 'A.\n\n<!-- /landscape --><!-- portrait -->\n\nB.\n';
+    const { docx, warnings } = await convertMdToDocx(md);
+    expect(warnings).toEqual([]);
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml).not.toMatch(/<w:pPr><w:sectPr\b/);
+    expect(xml).toMatch(/<w:vanish\/>[\s\S]*?&lt;!-- \/landscape --&gt;&lt;!-- portrait --&gt;/);
+    const md1 = (await convertDocx(docx)).markdown;
+    expect(md1).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(md1)).docx)).markdown).toBe(md1);
+  });
+
   test('mixed portrait then landscape round-trips correctly', async () => {
     const md = '<!-- portrait -->\n\nPortrait content\n\n<!-- /portrait -->\n\n<!-- landscape -->\n\nLandscape content\n\n<!-- /landscape -->';
     const { docx } = await convertMdToDocx(md);
