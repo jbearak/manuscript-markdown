@@ -303,6 +303,276 @@ describe('image-roundtrip properties', () => {
     }
   });
 
+  it('uses the wider writable width in a table\'s own landscape section', async () => {
+    // An image in the table took the width of a portrait page's text
+    const { convertMdToDocx } = await import('./md-to-docx');
+    const JSZip = (await import('jszip')).default;
+
+    const { dir, cleanup } = setupTempImage();
+    try {
+      const md = 'A.\n\n<!-- table-orientation: landscape -->\n| h |\n| --- |\n| ![wide figure](test.png){width=1200 height=600} |\n\nB.\n';
+      const { docx } = await convertMdToDocx(md, { sourceDir: dir });
+      const zip = await JSZip.loadAsync(docx);
+      const documentXml = await zip.file('word/document.xml')!.async('string');
+
+      // Landscape Letter with 1-inch margins has 9 inches = 864 px of writable width.
+      expect(documentXml).toContain('<wp:extent cx="8229600" cy="4114800"/>');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it.each([
+    ['a landscape section', 'of equal width', '<w:cols w:num="2" w:space="720"/>', 'Intro.\n\n<!-- landscape -->\n\n![wide figure](test.png){width=1200 height=600}\n\n<!-- /landscape -->\n\nEnd.\n', 408],
+    ['the body', 'of equal width', '<w:cols w:num="2" w:space="720"/>', '![wide figure](test.png){width=1200 height=600}\n', 288],
+    ['the body', 'each of its own width', '<w:cols w:num="2" w:space="720" w:equalWidth="0"><w:col w:w="5760" w:space="720"/><w:col w:w="2880"/></w:cols>', '![wide figure](test.png){width=1200 height=600}\n', 192],
+    // Word reads columns as of equal width where w:equalWidth isn't given
+    // ([MS-OI29500] Part 1 Section 17.6.4, b), whatever widths they're given
+    ['the body', 'of equal width where it gives each a width but not that they are not equal', '<w:cols w:num="2" w:space="720"><w:col w:w="5760" w:space="720"/><w:col w:w="2880"/></w:cols>', '![wide figure](test.png){width=1200 height=600}\n', 288],
+    // Which says off as Word reads it, with XML's white space around it,
+    // and was read as on, so the image took the width of the page's text
+    ['the body', 'each of its own width, not equal written with white space around it', '<w:cols w:equalWidth=" false "><w:col w:w="4320" w:space="720"/><w:col w:w="4320"/></w:cols>', '![wide figure](test.png){width=1200 height=600}\n', 288],
+    ['a landscape section', 'of equal width, under another prefix for their namespace', '<localw:cols localw:num="2" localw:space="720"/>', 'Intro.\n\n<!-- landscape -->\n\n![wide figure](test.png){width=1200 height=600}\n\n<!-- /landscape -->\n\nEnd.\n', 408],
+    ['a table\'s own landscape section', 'of equal width', '<w:cols w:num="2" w:space="720"/>', 'Intro.\n\n<!-- table-orientation: landscape -->\n| h |\n| --- |\n| ![wide figure](test.png){width=1200 height=600} |\n\nEnd.\n', 408],
+  ])('fits an oversized image in %s to the narrowest of the template\'s columns %s', async (_, __, cols, md, width) => {
+    // An image took the width of the page's text, which two columns share,
+    // so it ran over its column
+    const { convertMdToDocx } = await import('./md-to-docx');
+    const { convertDocx } = await import('./converter');
+    const JSZip = (await import('jszip')).default;
+    const fs = require('fs');
+    const path = require('path');
+
+    const template = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await template.file('word/document.xml')!.async('string');
+    template.file('word/document.xml', xml.replace(/<w:cols\b[^>]*\/>/, () => cols)
+      .replace(/<w:sectPr\b(?![\s\S]*<w:sectPr\b)/, open => open + ' xmlns:localw="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'));
+    const templateDocx = await template.generateAsync({ type: 'uint8array' });
+    const { dir, cleanup } = setupTempImage();
+    try {
+      const { docx } = await convertMdToDocx(md, { sourceDir: dir, templateDocx });
+      const documentXml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      // 1 px = 9525 EMU
+      expect(documentXml).toContain('<wp:extent cx="' + width * 9525 + '" cy="' + width / 2 * 9525 + '"/>');
+      const result = await convertDocx(docx);
+      expect(result.markdown).toContain('{width=' + width + ' height=' + width / 2 + '}');
+      for (const [name, bytes] of result.images ?? []) {
+        fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
+        fs.writeFileSync(path.join(dir, name), bytes);
+      }
+      const again = await convertMdToDocx(result.markdown, { sourceDir: dir, templateDocx });
+      expect((await convertDocx(again.docx)).markdown).toBe(result.markdown);
+    } finally {
+      cleanup();
+    }
+  });
+
+  const wideFigure = '![wide figure](test.png){width=1200 height=600}';
+  it.each([
+    ['the only section', 'one column', '', wideFigure + '\n', 864],
+    ['the only section', 'two columns', '<w:cols w:num="2" w:space="720"/>', wideFigure + '\n', 408],
+    // Their space in inches, which reads as none by its number alone
+    ['the only section', 'two columns half an inch apart', '<w:cols w:num="2" w:space="0.5in"/>', wideFigure + '\n', 408],
+    ['the last section, after a fence', 'one column', '', 'Intro.\n\n<!-- landscape -->\n\nW.\n\n<!-- /landscape -->\n\n' + wideFigure + '\n', 864],
+    ['the last section, after a table of its own orientation', 'one column', '', 'Intro.\n\n<!-- table-orientation: portrait -->\n| h |\n| --- |\n| x |\n\n' + wideFigure + '\n', 864],
+    // A break gives the section it ends an upright page
+    ['a section before a fence', 'one column', '', wideFigure + '\n\n<!-- landscape -->\n\nW.\n\n<!-- /landscape -->\n\nEnd.\n', 624],
+    ['a table of its own portrait orientation', 'one column', '', 'Intro.\n\n<!-- table-orientation: portrait -->\n| h |\n| --- |\n| ' + wideFigure + ' |\n', 624],
+    // Which can't hold them, so it has one
+    ['a portrait section', 'two columns too far apart for its upright page', '<w:cols w:num="2" w:space="9600"/>', 'Intro.\n\n<!-- portrait -->\n\n' + wideFigure + '\n\n<!-- /portrait -->\n\nEnd.\n', 624],
+    // Which it scales down to fit
+    ['a portrait section', 'one column of its own width, the landscape text\'s', '<w:cols w:num="1" w:space="720" w:equalWidth="0"><w:col w:w="12960"/></w:cols>', 'Intro.\n\n<!-- portrait -->\n\n' + wideFigure + '\n\n<!-- /portrait -->\n\nEnd.\n', 624],
+  ])('fits an oversized image in %s, under a landscape template of %s, to the page that section has', async (_, __, cols, md, width) => {
+    // The last section keeps the template's page, on its side, but an image
+    // took the width of an upright page's text
+    const { convertMdToDocx } = await import('./md-to-docx');
+    const { convertDocx } = await import('./converter');
+    const JSZip = (await import('jszip')).default;
+    const fs = require('fs');
+    const path = require('path');
+
+    const template = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await template.file('word/document.xml')!.async('string');
+    template.file('word/document.xml', xml.replace(/<w:pgSz\b[^>]*\/>/, '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>')
+      .replace(/<w:cols\b[^>]*\/>/, match => cols || match));
+    const templateDocx = await template.generateAsync({ type: 'uint8array' });
+    const { dir, cleanup } = setupTempImage();
+    try {
+      const { docx } = await convertMdToDocx(md, { sourceDir: dir, templateDocx });
+      const documentXml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      // Landscape Letter with 1-inch margins has 864 px of writable width,
+      // or 408 for each of two columns 720 twips apart, and Letter upright 624.
+      // 1 px = 9525 EMU
+      expect(documentXml).toContain('<wp:extent cx="' + width * 9525 + '" cy="' + width / 2 * 9525 + '"/>');
+      const result = await convertDocx(docx);
+      expect(result.markdown).toContain('{width=' + width + ' height=' + width / 2 + '}');
+      for (const [name, bytes] of result.images ?? []) {
+        fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
+        fs.writeFileSync(path.join(dir, name), bytes);
+      }
+      const again = await convertMdToDocx(result.markdown, { sourceDir: dir, templateDocx });
+      expect((await convertDocx(again.docx)).markdown).toBe(result.markdown);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it.each([
+    ['one column', '<w:cols w:space="720"/>', 528],
+    ['two columns 720 twips apart', '<w:cols w:num="2" w:space="720"/>', 240],
+    // Which add up to 9900 twips with the space between, scaled to fit
+    ['columns of their own widths, 6000 and 3000 twips, 900 apart, that it scales down', '<w:cols w:num="2" w:space="720" w:equalWidth="0"><w:col w:w="6000" w:space="900"/><w:col w:w="3000"/></w:cols>', 160],
+  ])('fits an oversized image to the narrowest column of the text a template\'s binding gutter leaves, in %s', async (_, cols, width) => {
+    // The text's width took no account of the gutter, so an image ran
+    // into it, and columns of their own widths were scaled to fit the
+    // text and the gutter both
+    const { convertMdToDocx } = await import('./md-to-docx');
+    const { convertDocx } = await import('./converter');
+    const JSZip = (await import('jszip')).default;
+    const fs = require('fs');
+    const path = require('path');
+
+    const template = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await template.file('word/document.xml')!.async('string');
+    template.file('word/document.xml', xml.replace(/<w:cols\b[^>]*\/>/, () => cols).replace(/w:gutter="0"/, 'w:gutter="1440"'));
+    const templateDocx = await template.generateAsync({ type: 'uint8array' });
+    const { dir, cleanup } = setupTempImage();
+    try {
+      const { docx } = await convertMdToDocx(wideFigure + '\n', { sourceDir: dir, templateDocx });
+      const documentXml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      expect(documentXml).toContain('w:gutter="1440"');
+      // Letter's text, with one-inch margins and an inch of gutter, is 528
+      // px wide, 7920 twips. 1 px = 9525 EMU
+      expect(documentXml).toContain('<wp:extent cx="' + width * 9525 + '" cy="' + width / 2 * 9525 + '"/>');
+      const result = await convertDocx(docx);
+      expect(result.markdown).toContain('{width=' + width + ' height=' + width / 2 + '}');
+      for (const [name, bytes] of result.images ?? []) {
+        fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
+        fs.writeFileSync(path.join(dir, name), bytes);
+      }
+      const again = await convertMdToDocx(result.markdown, { sourceDir: dir, templateDocx });
+      expect((await convertDocx(again.docx)).markdown).toBe(result.markdown);
+    } finally {
+      cleanup();
+    }
+  });
+
+  const twoColumns = '<w:cols w:num="2" w:space="720"/>';
+  it.each([
+    ['a footnote', 'a template of two columns', 'one column of their own', false, twoColumns, '<w15:footnoteColumns w:val="1"/>', '', 'A[^1].\n\n', 624],
+    ['a footnote', 'a template of two columns', 'none of their own', false, twoColumns, '', '', 'A[^1].\n\n', 288],
+    // Word lays endnotes out in the section's columns
+    ['an endnote', 'a template of two columns', 'one column of their own', false, twoColumns, '<w15:footnoteColumns w:val="1"/>', '---\nnotes: endnotes\n---\n', 'A[^1].\n\n', 288],
+    // Whose columns are one, 720 twips apart, as they're too far apart for
+    // its upright page
+    ['a footnote in a portrait section', 'a landscape template of two columns 9600 twips apart', 'two columns of their own', true, '<w:cols w:num="2" w:space="9600"/>', '<w15:footnoteColumns w:val="2"/>', '',
+      'Intro.\n\n<!-- portrait -->\n\nA[^1].\n\n<!-- /portrait -->\n\nEnd.\n\n', 288],
+  ])('fits an oversized image in %s, under %s whose footnotes have %s, to the width the note has', async (_, __, ___, landscape, cols, footnoteColumns, front, body, width) => {
+    // A footnote's image took the section's columns' width, where Word
+    // lays footnotes out in one column of their own, the text's; and two
+    // of them took the template's columns' space, not that of the columns
+    // the section has, so they took the whole text, 624 px, where each is
+    // 288
+    const { convertMdToDocx } = await import('./md-to-docx');
+    const { convertDocx } = await import('./converter');
+    const JSZip = (await import('jszip')).default;
+    const fs = require('fs');
+    const path = require('path');
+
+    const template = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await template.file('word/document.xml')!.async('string');
+    template.file('word/document.xml', xml.replace(/<w:cols\b[^>]*\/>/, () => cols)
+      .replace(/<w:pgSz\b[^>]*\/>/, page => landscape ? '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>' : page)
+      .replace(/<\/w:sectPr>(?![\s\S]*<\/w:sectPr>)/, end => footnoteColumns + end));
+    const templateDocx = await template.generateAsync({ type: 'uint8array' });
+    const md = front + body + '[^1]: ' + wideFigure + '\n';
+    const { dir, cleanup } = setupTempImage();
+    try {
+      const { docx } = await convertMdToDocx(md, { sourceDir: dir, templateDocx });
+      const notesXml = await (await JSZip.loadAsync(docx)).file(front ? 'word/endnotes.xml' : 'word/footnotes.xml')!.async('string');
+      // Letter's text is 624 px wide, or 288 for each of two columns 720
+      // twips apart. 1 px = 9525 EMU
+      expect(notesXml).toContain('<wp:extent cx="' + width * 9525 + '" cy="' + width / 2 * 9525 + '"/>');
+      const result = await convertDocx(docx);
+      expect(result.markdown).toContain('{width=' + width + ' height=' + width / 2 + '}');
+      for (const [name, bytes] of result.images ?? []) {
+        fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
+        fs.writeFileSync(path.join(dir, name), bytes);
+      }
+      const again = await convertMdToDocx(result.markdown, { sourceDir: dir, templateDocx });
+      expect((await convertDocx(again.docx)).markdown).toBe(result.markdown);
+    } finally {
+      cleanup();
+    }
+  });
+
+  const fenceAfter = '\n\n<!-- landscape -->\n\nW.\n\n<!-- /landscape -->\n\nEnd.\n\n';
+  it.each([
+    ['a footnote', 'a section before a fence', true, 'A[^1].' + fenceAfter, 624],
+    ['a footnote', 'the last section', true, 'A.\n\n<!-- landscape -->\n\nW.\n\n<!-- /landscape -->\n\nEnd[^1].\n\n', 864],
+    ['a footnote', 'a landscape section, without a template,', false, 'A.\n\n<!-- landscape -->\n\nW[^1].\n\n<!-- /landscape -->\n\nEnd.\n\n', 864],
+    ['a footnote', 'a section before a fence, without a template,', false, 'A[^1].' + fenceAfter, 624],
+    // Word puts endnotes at the document's end, in the last section
+    ['an endnote', 'a section before a fence', true, '---\nnotes: endnotes\n---\nA[^1].' + fenceAfter, 864],
+  ])('fits an oversized image in %s whose reference is in %s to the page the note is on', async (_, __, landscapeTemplate, md, width) => {
+    // A note took the orientation of the section export wrote last, so a
+    // footnote on an upright page ran over it under a landscape template,
+    // and one on a landscape page took an upright page's width
+    const { convertMdToDocx } = await import('./md-to-docx');
+    const { convertDocx } = await import('./converter');
+    const JSZip = (await import('jszip')).default;
+    const fs = require('fs');
+    const path = require('path');
+
+    const template = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await template.file('word/document.xml')!.async('string');
+    template.file('word/document.xml', xml.replace(/<w:pgSz\b[^>]*\/>/, '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>'));
+    const options = landscapeTemplate ? { templateDocx: await template.generateAsync({ type: 'uint8array' }) } : {};
+    const { dir, cleanup } = setupTempImage();
+    try {
+      const { docx } = await convertMdToDocx(md + '[^1]: ' + wideFigure + '\n', { sourceDir: dir, ...options });
+      const zip = await JSZip.loadAsync(docx);
+      const notesXml = await zip.file(md.includes('endnotes') ? 'word/endnotes.xml' : 'word/footnotes.xml')!.async('string');
+      // 1 px = 9525 EMU
+      expect(notesXml).toContain('<wp:extent cx="' + width * 9525 + '" cy="' + width / 2 * 9525 + '"/>');
+      const result = await convertDocx(docx);
+      expect(result.markdown).toContain('{width=' + width + ' height=' + width / 2 + '}');
+      for (const [name, bytes] of result.images ?? []) {
+        fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
+        fs.writeFileSync(path.join(dir, name), bytes);
+      }
+      const again = await convertMdToDocx(result.markdown, { sourceDir: dir, ...options });
+      expect((await convertDocx(again.docx)).markdown).toBe(result.markdown);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('fits an oversized image in an endnote to the last section\'s page where the template puts endnotes at each section\'s end, as the export doesn\'t', async () => {
+    // Export writes settings of its own, without the template's endnote
+    // position, and a section's own, which its breaks take, is ignored
+    // (ECMA-376 Part 1 §17.11.22), so its endnotes are at the document's end
+    const { convertMdToDocx } = await import('./md-to-docx');
+    const JSZip = (await import('jszip')).default;
+    const template = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await template.file('word/document.xml')!.async('string');
+    template.file('word/document.xml', xml.replace(/<w:pgSz\b[^>]*\/>/, '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>')
+      .replace(/(<w:sectPr\b[^>]*>)(?![\s\S]*<w:sectPr\b)/, open => open + '<w:endnotePr><w:pos w:val="sectEnd"/></w:endnotePr>'));
+    const settings = await template.file('word/settings.xml')!.async('string');
+    template.file('word/settings.xml', settings.replace('</w:settings>', '<w:endnotePr><w:pos w:val="sectEnd"/></w:endnotePr></w:settings>'));
+    const templateDocx = await template.generateAsync({ type: 'uint8array' });
+    const { dir, cleanup } = setupTempImage();
+    try {
+      const { docx } = await convertMdToDocx('---\nnotes: endnotes\n---\nA[^1].' + fenceAfter + '[^1]: ' + wideFigure + '\n', { sourceDir: dir, templateDocx });
+      const zip = await JSZip.loadAsync(docx);
+      expect(await zip.file('word/settings.xml')!.async('string')).not.toContain('<w:pos ');
+      // 1 px = 9525 EMU
+      expect(await zip.file('word/endnotes.xml')!.async('string')).toContain('<wp:extent cx="' + 864 * 9525 + '" cy="' + 432 * 9525 + '"/>');
+    } finally {
+      cleanup();
+    }
+  });
+
   // Feature: image-roundtrip, Property 3: Alt text roundtrip
   it('P3: alt text survives MD→DOCX→MD roundtrip', async () => {
     const { convertMdToDocx } = await import('./md-to-docx');

@@ -7,7 +7,7 @@ import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
 import { keepParagraphEdgeWhitespace } from './html-entities';
 import { styleFinder } from './style-element';
-import { replaceXmlElements, xmlAttribute, xmlElement, xmlInteger, xmlOn, xmlStartTag } from './xml-elements';
+import { replaceXmlElements, universalMeasure, xmlAttribute, xmlElement, xmlInteger, xmlNumber, xmlOn, xmlStartTag, xmlTwips } from './xml-elements';
 import htmlBlockNames from 'markdown-it/lib/common/html_blocks.mjs';
 import { HTML_OPEN_CLOSE_TAG_RE, HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import { isMdAsciiPunct, isPunctChar, isWhiteSpace, unescapeAll } from 'markdown-it/lib/common/utils.mjs';
@@ -16619,60 +16619,10 @@ function xmlElementAttribute(xml: string, name: string, attribute: string): stri
   return element && xmlAttribute(element.tag, attribute);
 }
 
-/** A whole number an attribute holds, as an xsd:unsignedLong's: digits,
- *  with leading zeros, a plus sign before them and whitespace around them,
- *  as a schema's number may have */
-function xmlNumber(value: string | undefined): number | undefined {
-  return value !== undefined && /^[ \t\r\n]*\+?\d+[ \t\r\n]*$/.test(value) ? Number(value) : undefined;
-}
-
-// A universal measure (ST_UniversalMeasure): a decimal number and its unit,
-// as 8.5in, with digits before any point, a minus sign where it may have
-// one, and no whitespace around it, as it's a string's pattern
-const UNIVERSAL_MEASURE = /^(-?)(\d+)(?:\.(\d+))?(mm|cm|in|pt|pc|pi)$/;
-
-// Twips in each unit of a universal measure, as a fraction: a pica, pc or
-// pi, is 12 points, an inch 72, and a centimeter 1/2.54 of an inch
-const TWIPS_PER_UNIT: Record<string, readonly [bigint, bigint]> = {
-  in: [1440n, 1n], pt: [20n, 1n], pc: [240n, 1n], pi: [240n, 1n], cm: [144000n, 254n], mm: [14400n, 254n],
-};
-
 // Half-points in each unit of a universal measure Word reads a size in: a
 // point, but not an inch, a centimeter or a millimeter, whose size Word
 // ignores, nor a pica, which it isn't known to read (see xmlHalfPoints)
 const HALF_POINTS_PER_UNIT: Record<string, readonly [bigint, bigint]> = { pt: [2n, 1n] };
-
-/**
- * A universal measure's size in `perUnit`'s units, as twips, from a unit
- * `perUnit` has, or undefined from another, or with a minus sign where it's
- * not `signed`, as an ST_PositiveUniversalMeasure has none. Word rounds a
- * size in centimeters or millimeters to the nearest twip, and in the other
- * units down, as 0.99pt to 19 twips, so this does too, by its digits'
- * value, not a float's, so 0.3in is 432 twips, not 431. A negative one is
- * the negative of the one without its minus sign, as the schema means it.
- */
-function universalMeasure(value: string, signed: boolean, perUnit: Record<string, readonly [bigint, bigint]>): number | undefined {
-  const match = UNIVERSAL_MEASURE.exec(value);
-  const ratio = match ? perUnit[match[4]] : undefined;
-  if (!match || !ratio || match[1] && !signed) return undefined;
-  const fraction = match[3] ?? '';
-  const numerator = BigInt(match[2] + fraction) * ratio[0];
-  const denominator = 10n ** BigInt(fraction.length) * ratio[1];
-  const nearest = match[4] === 'cm' || match[4] === 'mm';
-  const size = Number(nearest ? (2n * numerator + denominator) / (2n * denominator) : numerator / denominator);
-  return match[1] && size ? -size : size;
-}
-
-/** A length in twips an attribute holds, as an ST_TwipsMeasure's: a whole
- *  number of twips (see xmlNumber), as 360, or a universal measure, as 18pt
- *  or 0.25in, the twips it is (see universalMeasure), or, `signed`, as an
- *  ST_SignedTwipsMeasure's, either with a minus sign (see xmlInteger). Every
- *  reader of a page's size, an indent or a paragraph's spacing goes through
- *  this, so a length reads as one in any unit, as Word reads it. */
-function xmlTwips(value: string | undefined, signed = false): number | undefined {
-  if (value === undefined) return undefined;
-  return (signed ? xmlInteger(value) : xmlNumber(value)) ?? universalMeasure(value, signed, TWIPS_PER_UNIT);
-}
 
 /** An ID an attribute holds as hex digits, as a paragraph's w14:paraId,
  *  which a comment's reply finds its parent by in commentsExtended.xml, in

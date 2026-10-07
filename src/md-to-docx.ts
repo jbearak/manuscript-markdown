@@ -21,7 +21,7 @@ import { preprocessGridTables, preprocessGridTablesWithSourceMap, gridColumnAlig
 import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
 import { styleFinder } from './style-element';
-import { replaceXmlElements, xmlAttribute, xmlElement, xmlInteger, xmlStartTag, xmlStartTags } from './xml-elements';
+import { replaceXmlElements, xmlAttribute, xmlElement, xmlInteger, xmlOn, xmlStartTag, xmlStartTags, xmlTwips } from './xml-elements';
 import { cellParagraphMarkAt, extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
 import { decodeHtmlAttribute } from './html-entities';
 import { matchCriticHeadingPrefix } from './critic-markup';
@@ -30,7 +30,7 @@ import { styleFence } from './style-fence';
 export { commentsEnd, isLineBreakBlock } from './html-blocks';
 import { preprocessBlocks } from './block-preprocess';
 import { maxOf, pushAll } from './arrays';
-import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, relatedPartPath, type TemplateSections } from './template-sections';
+import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, relatedPartPath, templateLayoutRecord, TEMPLATE_LAYOUT_PROPERTY, type LayoutEntry, type TemplateSections } from './template-sections';
 import { EXPORT_CONTEXT, EXPORT_IGNORABLE, EXPORT_NAMESPACES, MARKUP_COMPATIBILITY, WORDPROCESSINGML, attributeNamed, attributesOf, buildOrdered, childrenOf, contextIn, effectiveSectPr, elementsIn, isElement, isNamed, mapProperties, moved, nameOf, parseOrdered, scopeIn, sectPrPropertyOf, sectPrRank, type Context, type Scope, type XmlNode } from './scoped-xml';
 export { preprocessGridTables } from './grid-table-preprocess';
 export { extractHtmlTables } from './html-table-parser';
@@ -4751,22 +4751,120 @@ const DEFAULT_MARGINS = 'w:top="1440" w:right="1440" w:bottom="1440" w:left="144
 
 interface PageSize { w: number; h: number }
 
-/** Return the writable width of the current section in CSS pixels (96 px/in). */
+/** Whether the current section's page is on its side: a landscape
+ *  section's, or the last section's, which keeps the template's own page
+ *  (see bodyClosingSectPrXml), where that's landscape. A section a break
+ *  ends before a fence has an upright page (see sectionBreakSectPrXml). A
+ *  note's is the page it's on (see noteSectionLandscape). */
+function sectionIsLandscape(state: DocxGenState): boolean {
+  if (state.noteSectionLandscape !== undefined) return state.noteSectionLandscape;
+  return state.inLandscapeSection || !state.inPortraitSection && !!state.inLastSection
+    && !!state.templateSectPr && isLandscapeSectPr(state.templateSectPr);
+}
+
+/** Return the writable width of the current section in CSS pixels (96 px/in):
+ *  its narrowest column's, as each section has the template's columns, or a
+ *  footnote's column's (see writableWidthTwips). */
 function pageContentWidthPx(state: DocxGenState): number {
   const pgSz = parseTemplatePgSz(state.templateSectPr);
   const margins = parseTemplateMargins(state.templateSectPr);
-  const left = parseInt(margins.match(/w:left="(\d+)"/)?.[1] ?? '1440', 10);
-  const right = parseInt(margins.match(/w:right="(\d+)"/)?.[1] ?? '1440', 10);
-  const pageWidthTwips = state.inLandscapeSection ? pgSz.h : pgSz.w;
+  const pageWidthTwips = sectionIsLandscape(state) ? pgSz.h : pgSz.w;
   // 1 inch = 1440 twips = 96 CSS pixels.
-  return Math.max(1, (pageWidthTwips - left - right) / 15);
+  return Math.max(1, writableWidthTwips(state, textWidthTwips(pageWidthTwips, margins)) / 15);
 }
+
+// Word's narrowest column, half an inch, in twips
+const NARROWEST_COLUMN = 720;
 
 /** An element, as a sectPr's child, with the scope it's in */
 type InScope = { node: XmlNode; scope: Scope };
 
 /** An element's attribute in WordprocessingML's namespace, whatever its prefix */
 const wAttributeOf = ({ node, scope }: InScope, local: string) => attributeNamed(node, scope, WORDPROCESSINGML, local);
+
+/**
+ * A sectPr's w:cols as a section of a text width, in twips, has them, and
+ * the width of its narrowest column. Its columns are of their own widths,
+ * those its w:col children give, where w:equalWidth is off, and else of
+ * equal width, as Word reads a w:cols with no w:equalWidth ([MS-OI29500]
+ * Part 1 Section 17.6.4, b): the text width shared by w:num columns
+ * w:space apart, one and 720 if not given (ECMA-376 Part 1 §17.6.4). They
+ * stay as they are where they fit. Columns of their own widths, with the
+ * spaces after them, that add up to more than the text, as a landscape
+ * template's can on an upright page, are scaled down to it. Where columns
+ * would be narrower than Word's narrowest, as equal ones far apart for a
+ * landscape page can be on an upright one, the section has one column.
+ * The w:cols is as Word reads it (see resolvedSectPr), with no
+ * alternatives in it.
+ */
+function fitColumns(cols: InScope, textWidth: number): { cols: InScope; narrowest: number } {
+  const one = { cols: { node: ONE_COLUMN, scope: EXPORT_NAMESPACES }, narrowest: textWidth };
+  const twips = (col: InScope, name: string) => Math.max(0, xmlTwips(wAttributeOf(col, name)) ?? 0);
+  const own = elementsIn(cols.node, cols.scope).filter(col => sectPrPropertyOf(col.node, col.scope) === 'col');
+  const equalWidth = wAttributeOf(cols, 'equalWidth');
+  if (own.length > 0 && equalWidth !== undefined && !xmlOn(equalWidth)) {
+    // The space after each column but the last, which has none
+    const total = own.reduce((sum, col, i) => sum + twips(col, 'w') + (i < own.length - 1 ? twips(col, 'space') : 0), 0);
+    const scale = Math.min(1, textWidth / total);
+    const narrowest = own.reduce((least, col) => Math.min(least, Math.floor(twips(col, 'w') * scale)), Infinity);
+    if (narrowest < NARROWEST_COLUMN) return one;
+    if (scale === 1) return { cols, narrowest };
+    // Each scaled in twips, whatever the template's unit
+    const scaled = (col: XmlNode, scope: Scope): XmlNode => {
+      const attributes = { ...col[':@'] };
+      for (const { key, namespace, local, value } of attributesOf(col, scope)) {
+        if (namespace !== undefined && WORDPROCESSINGML.has(namespace) && (local === 'w' || local === 'space')) attributes[key] = String(Math.floor((xmlTwips(value) ?? 0) * scale));
+      }
+      return { ...col, ':@': attributes };
+    };
+    const inner = scopeIn(cols.node, cols.scope);
+    return { cols: { node: { ...cols.node, [nameOf(cols.node)]: childrenOf(cols.node).map(child => sectPrPropertyOf(child, inner) === 'col' ? scaled(child, inner) : child) }, scope: cols.scope }, narrowest };
+  }
+  const num = Math.max(1, parseInt(wAttributeOf(cols, 'num') ?? '', 10) || 1);
+  const narrowest = (textWidth - (num - 1) * (xmlTwips(wAttributeOf(cols, 'space')) ?? 720)) / num;
+  return num === 1 || narrowest >= NARROWEST_COLUMN ? { cols, narrowest } : one;
+}
+
+/** The columns a section of a text width, in twips, has of a sectPr's own
+ *  w:cols, as Word reads them, fitted to it (see fitColumns), and the
+ *  width of the narrowest, or one column, the text's width, where it has
+ *  none */
+function sectionColumns(sectPrXml: string | undefined, textWidth: number): { cols: InScope; narrowest: number } {
+  const cols = sectPrPropertyIn(sectPrXml, 'cols');
+  return cols ? fitColumns(cols, textWidth) : { cols: { node: ONE_COLUMN, scope: EXPORT_NAMESPACES }, narrowest: textWidth };
+}
+
+// The namespace of Word 2013's extensions to WordprocessingML, w15
+const W15 = 'http://schemas.microsoft.com/office/word/2012/wordml';
+
+/** The width, in twips, of what's written in a section of a text width,
+ *  from the columns the section has (see sectionColumns): its narrowest
+ *  column, or, in a footnote, where the template lays footnotes out in
+ *  columns of their own, w15:footnoteColumns, one of those, equal, as far
+ *  apart as the section's columns are, or the text width where they'd be
+ *  narrower than Word's narrowest. Endnotes are in the section's columns */
+function writableWidthTwips(state: DocxGenState, textWidth: number): number {
+  const { cols, narrowest } = sectionColumns(state.templateSectPr, textWidth);
+  const sectPr = state.inNoteBody && state.notesMode !== 'endnotes' && state.templateSectPr ? resolvedSectPr(state.templateSectPr) : undefined;
+  const footnoteColumns = sectPr && elementsIn(sectPr, EXPORT_NAMESPACES).find(child => isNamed(child.node, child.scope, W15, 'footnoteColumns'));
+  const num = footnoteColumns ? parseInt(wAttributeOf(footnoteColumns, 'val') ?? '', 10) : NaN;
+  // None, or 0, is as many as the section's
+  if (!(num >= 1)) return narrowest;
+  const footnoteColumn = (textWidth - (num - 1) * (xmlTwips(wAttributeOf(cols, 'space')) ?? 720)) / num;
+  return num === 1 || footnoteColumn >= NARROWEST_COLUMN ? footnoteColumn : textWidth;
+}
+
+/** The width of a page's text between the margins given, in twips, and
+ *  without the binding gutter they give, none by default, which Word adds
+ *  beside the left margin, or the right one, as w:rtlGutter has it, but
+ *  never at the top, as only the template's settings, which export doesn't
+ *  take, can put it (w:gutterAtTop) */
+function textWidthTwips(pageWidth: number, margins: string): number {
+  // As export's document reads them
+  const pgMar = parseOrdered('<w:pgMar ' + margins + '/>')?.[0];
+  const margin = (side: string, otherwise: number) => xmlTwips(pgMar && attributeNamed(pgMar, EXPORT_NAMESPACES, WORDPROCESSINGML, side)) ?? otherwise;
+  return pageWidth - margin('left', 1440) - margin('right', 1440) - Math.max(0, margin('gutter', 0));
+}
 
 /** A sectPr's own section property, by its local name, as Word reads it
  *  (see resolvedSectPr), with the scope it's in: its child, not an
@@ -4777,16 +4875,14 @@ function sectPrPropertyIn(sectPrXml: string | undefined, property: string): InSc
   return sectPr && elementsIn(sectPr, EXPORT_NAMESPACES).find(child => sectPrPropertyOf(child.node, child.scope) === property);
 }
 
-/** A measure given in twips, as a number alone */
-const digitsOf = (value: string | undefined) => value !== undefined && /^\d+$/.test(value) ? parseInt(value, 10) : undefined;
-
 /** Parse w:pgSz from a sectPr XML string, defaulting to US Letter portrait.
  *  Its own page (see sectPrPropertyIn). */
 export function parseTemplatePgSz(sectPrXml: string | undefined): PageSize {
   const pgSz = sectPrPropertyIn(sectPrXml, 'pgSz');
   if (!pgSz) return { w: DEFAULT_PAGE_W, h: DEFAULT_PAGE_H };
-  const w = digitsOf(wAttributeOf(pgSz, 'w')) ?? DEFAULT_PAGE_W;
-  const h = digitsOf(wAttributeOf(pgSz, 'h')) ?? DEFAULT_PAGE_H;
+  // In any unit a measure can give
+  const w = xmlTwips(wAttributeOf(pgSz, 'w')) ?? DEFAULT_PAGE_W;
+  const h = xmlTwips(wAttributeOf(pgSz, 'h')) ?? DEFAULT_PAGE_H;
   // Normalize to portrait (smaller value = width)
   return w <= h ? { w, h } : { w: h, h: w };
 }
@@ -4796,8 +4892,8 @@ export function parseTemplatePgSz(sectPrXml: string | undefined): PageSize {
 function isLandscapeSectPr(sectPrXml: string): boolean {
   const pgSz = sectPrPropertyIn(sectPrXml, 'pgSz');
   if (!pgSz) return false;
-  const w = digitsOf(wAttributeOf(pgSz, 'w')) ?? 0;
-  const h = digitsOf(wAttributeOf(pgSz, 'h')) ?? 0;
+  const w = xmlTwips(wAttributeOf(pgSz, 'w')) ?? 0;
+  const h = xmlTwips(wAttributeOf(pgSz, 'h')) ?? 0;
   return wAttributeOf(pgSz, 'orient') === 'landscape' || w > 0 && h > 0 && w > h;
 }
 
@@ -4854,6 +4950,21 @@ const NOT_COPIED = new Set(['type', 'pgSz', 'headerReference', 'footerReference'
 const BEFORE_TYPE = new Set(['headerReference', 'footerReference', 'footnotePr', 'endnotePr']);
 /** Whether CT_SectPr puts a section property after another */
 const isAfter = (property: string, other: string) => sectPrRank(property) > sectPrRank(other);
+// One column, as Word writes it
+const ONE_COLUMN: XmlNode = parseOrdered('<w:cols w:space="720"/>')![0];
+
+/** A sectPr's children with their columns fitted to this section's text
+ *  width (see fitColumns), or with one column where they have none, which
+ *  Word would add on open, marking the document changed (see dirty-flag
+ *  invariant 11), before the children CT_SectPr puts after it */
+function fittingColumns(children: InScope[], textWidth: number): XmlNode[] {
+  const columns = children.findIndex(child => sectPrPropertyOf(child.node, child.scope) === 'cols');
+  if (columns !== -1) return children.map((child, i) => i === columns ? fitColumns(child, textWidth).cols.node : child.node);
+  const at = children.findIndex(child => isAfter(sectPrPropertyOf(child.node, child.scope), 'cols'));
+  const nodes = children.map(child => child.node);
+  return at === -1 ? [...nodes, ONE_COLUMN] : [...nodes.slice(0, at), ONE_COLUMN, ...nodes.slice(at)];
+}
+
 /**
  * Build the sectPr of a section break, which ends a section on a new page,
  * the fence's orientation. With a template, it has the template's own
@@ -4876,14 +4987,8 @@ function sectionBreakSectPrXml(landscape: boolean, pgSz: PageSize, margins: stri
     // The margins export fits the section's content to, one inch, where the
     // template has none of its own, right after the page, as CT_SectPr has them
     const pageMargins = copied.some(child => property(child) === 'pgMar') ? '' : '<w:pgMar ' + margins + '/>';
-    const after = copied.filter(child => !BEFORE_TYPE.has(property(child))).map(child => child.node);
-    // And one column, as Word writes it, where the template gives none,
-    // which Word would add on open, marking the document changed (see
-    // dirty-flag invariant 11), before the children CT_SectPr puts after it
-    if (!copied.some(child => property(child) === 'cols')) {
-      const at = after.findIndex(child => isAfter(sectPrPropertyOf(child, scopeIn(sectPr, EXPORT_NAMESPACES)), 'cols'));
-      after.splice(at === -1 ? after.length : at, 0, parseOrdered('<w:cols w:space="720"/>')![0]);
-    }
+    // And columns that fit
+    const after = fittingColumns(copied.filter(child => !BEFORE_TYPE.has(property(child))), textWidthTwips(landscape ? pgSz.h : pgSz.w, margins));
     return open + buildOrdered(copied.filter(child => BEFORE_TYPE.has(property(child))).map(child => child.node)) + '<w:type w:val="nextPage"/>' + page + pageMargins +
       buildOrdered(after) + '</w:sectPr>';
   }
@@ -4910,10 +5015,10 @@ function withTemplateSectPrs(body: string, closingSectPr: string, sections?: Tem
 /** Build the final body-level sectPr of a section a fence ends: the
  *  template's, as Word reads it (see resolvedSectPr), with its page turned
  *  to the fence's orientation, in place of its own w:pgSz, or where
- *  CT_SectPr puts one, as its other properties stay, or else one of its
- *  own. Not an extension's page that Word ignores, nor one in a tracked
- *  change's old properties, w:sectPrChange, last, which hold a w:sectPr of
- *  their own. */
+ *  CT_SectPr puts one, as its other properties stay, but for columns,
+ *  fitted to the turned page (see fitColumns), or else one of its own. Not
+ *  an extension's page that Word ignores, nor one in a tracked change's old
+ *  properties, w:sectPrChange, last, which hold a w:sectPr of their own. */
 function fencedBodySectPrXml(landscape: boolean, pgSz: PageSize, margins: string, templateSectPr?: string, rsid?: string): string {
   const fencePgSz = landscape ? '<w:pgSz w:w="' + pgSz.h + '" w:h="' + pgSz.w + '" w:orient="landscape"/>' : '<w:pgSz w:w="' + pgSz.w + '" w:h="' + pgSz.h + '"/>';
   const sectPr = templateSectPr ? resolvedSectPr(templateSectPr) : undefined;
@@ -4924,7 +5029,10 @@ function fencedBodySectPrXml(landscape: boolean, pgSz: PageSize, margins: string
     const page = children.findIndex(child => property(child) === 'pgSz');
     const after = children.findIndex(child => isAfter(property(child), 'pgSz'));
     const at = after === -1 ? children.length : after;
-    return buildOrdered([{ ...sectPr, [nameOf(sectPr)]: page !== -1 ? children.map((child, i) => i === page ? turned : child) : [...children.slice(0, at), turned, ...children.slice(at)] }]);
+    const withPage = page !== -1 ? children.map((child, i) => i === page ? turned : child) : [...children.slice(0, at), turned, ...children.slice(at)];
+    // Its columns fitted to the turned page
+    const textWidth = textWidthTwips(landscape ? pgSz.h : pgSz.w, margins);
+    return buildOrdered([{ ...sectPr, [nameOf(sectPr)]: withPage.map(child => property(child) === 'cols' ? fitColumns({ node: child, scope }, textWidth).cols.node : child) }]);
   }
   return '<w:sectPr' + (rsid ? ' w:rsidR="' + rsid + '"' : '') + '>' + fencePgSz +
     '<w:pgMar ' + margins + '/>' +
@@ -5030,14 +5138,19 @@ export interface DocxGenState {
   portraitTables: Set<number>;  // table indices that have data-orientation="portrait"
   inLandscapeSection: boolean;  // tracks current landscape state during generation
   inPortraitSection: boolean;   // tracks current portrait fence state during generation
+  inLastSection?: boolean;      // whether the section being written is the last, which keeps the template's page (see sectionIsLandscape)
+  lastSectionLandscape?: boolean; // whether the last section's page, the body's own properties', is on its side
+  noteLandscape?: Map<string, boolean>; // whether the page of each note's owning reference is on its side, by label
   noteNumbering?: NoteNumbering; // how Word numbers the notes (see noteNumberingOf)
   noteNumbers?: Map<number, string>; // the number Word shows for each note the body references, by ID, which a reference again shows (see noteNumbersIn)
+  noteSectionLandscape?: boolean; // while a note is written, whether the page it's on is on its side: a footnote's owning reference's, or an endnote's, at the document's end, the last section's
   sectionBreakOrdinal: number;  // counter for paragraph-level sectPr emissions (for portrait round-trip)
   portraitBreakOrdinals: Set<number>; // ordinals of portrait-fence close section breaks
   referencesBeforeSections?: number[]; // ordinals of the breaks ending the sections a references marker before their opening fence is written at the start of
   hiddenBeforeSections?: Map<number, number>; // the hidden paragraphs before a section's opening fence written at its start, by the ordinal of the break that ends it
   hiddenAfterSections?: Map<number, number>; // the hidden paragraphs after the last fenced section's closing fence written at its end, by the ordinal of the break that ends it
   templatePageSection?: number; // the last section's ordinal, the number of breaks before it, where it takes the template's landscape page, which no fence set
+  templateLayout?: LayoutEntry[]; // the last section's layout, its break type, page and columns, as export wrote it and as the template had it, where export changed it, which a later export that takes this one as its template puts back
   templateSectPr?: string;      // trailing <w:sectPr> from template document.xml
   templateSections?: TemplateSections; // the template's, whose headers, footers and page numbering the sectPrs written take
   pipeTableAligned: Map<number, boolean>; // table index -> whether pipe table was column-aligned
@@ -8119,6 +8232,7 @@ function noteReferenceXml(label: string, state: DocxGenState, revision?: 'additi
   const rPr = '<w:rPr>' + orderRPr('<w:rStyle w:val="' + refStyleName + '"/>' + extraRPr + noteExtraRPr) + '</w:rPr>';
   if (owns) {
     owned.add(label);
+    (state.noteLandscape ??= new Map()).set(label, sectionIsLandscape(state));
     const tag = state.notesMode === 'endnotes' ? 'w:endnoteReference' : 'w:footnoteReference';
     return '<w:r>' + rPr + '<' + tag + ' w:id="' + noteId + '"/></w:r>';
   }
@@ -10054,7 +10168,14 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   const openListOrdered: boolean[] = [];
   // Whether the last top-level list item, while its list is open, is ordered
   let lastTopItem: { ordered: boolean } | undefined;
+  // The last block that can start a section with a break, a fence's opener
+  // or a table of its own orientation, after which the last section is
+  let lastSectionStart = -1;
   for (const [ti, token] of tokens.entries()) {
+    if (token.landscapeOpen || token.portraitOpen || token.type === 'table' && token.tableOrientation) lastSectionStart = ti;
+  }
+  for (const [ti, token] of tokens.entries()) {
+    state.inLastSection = ti > lastSectionStart;
     // A paragraph of comment bodies only registers them: Word gets no
     // paragraph, and the blocks around it meet as if it weren't there
     if (omitsCommentBodies(ti, prevToken)) {
@@ -10369,7 +10490,10 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         if (!prevWasClose) emitPortraitBreak();
         else if (biblFirst) emitBiblBreak();
         if (hiddenBefore > 0) hiddenBeforeSections.set(state.sectionBreakOrdinal, hiddenBefore);
+        // Its cells' images fit its landscape page
+        state.inLandscapeSection = true;
         body += table();
+        state.inLandscapeSection = false;
         emitLandscapeBreak();
         preserveCloseForNextToken = true;
       } else if (token.tableOrientation === 'portrait' && !state.inPortraitSection && !state.inLandscapeSection) {
@@ -10570,6 +10694,13 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   // a tracked change's old properties keep theirs. Not where the section is
   // empty, after a break that ends the document.
   if (body.includes(breakEnd) && !body.endsWith(breakEnd)) closingSectPr = nextPageSectPrXml(closingSectPr);
+  // What of the template's own last section that changed, its page turned
+  // for a final fence and its columns fitted to it, or its break type, a
+  // custom property records, so that an export that takes this one as its
+  // template lays its sections out with the template's own, as this one
+  // does, not with what this one fitted to its last section
+  if (state.templateSectPr) state.templateLayout = templateLayoutRecord(state.templateSectPr, closingSectPr);
+  state.lastSectionLandscape = isLandscapeSectPr(closingSectPr);
   ({ body, closingSectPr } = withTemplateSectPrs(body, closingSectPr, state.templateSections));
   // Each reference again to a note shows the number Word gives the note,
   // which the notes, written after, show too (see withNoteNumbers)
@@ -11216,6 +11347,13 @@ export async function convertMdToDocx(
     const marked = state.footnoteCrossRefLabels.has(label);
     const selfRefRun = marked ? bookmarkedSelfRef(unmarkedSelfRefRun, noteId, state) : unmarkedSelfRefRun;
     const savedCustomStyle = state.activeCustomStyle;
+    // Its images and tables fit the page it's on: a footnote's, its owning
+    // reference's, and an endnote's, at the document's end, the last
+    // section's. Endnotes go at each section's end only where the document's
+    // settings say so, w:endnotePr's w:pos, which a section's properties
+    // can't (ECMA-376 Part 1 §17.11.22: there "it shall be ignored"), and
+    // export's settings (see settingsXml) don't, whatever the template's do
+    state.noteSectionLandscape = (state.notesMode === 'endnotes' ? undefined : state.noteLandscape?.get(label)) ?? !!state.lastSectionLandscape;
     let isFirstContent = true;
     let afterCodeBlock = false;
     for (let ti = 0; ti < noteTokens.length; ti++) {
@@ -11295,6 +11433,7 @@ export async function convertMdToDocx(
     state.footnoteEntries.push(entry);
     if (!marked) unmarkedNotes.push({ label, noteId, entry, selfRefRun });
   }
+  state.noteSectionLandscape = undefined;
   for (const label of footnoteDefs.keys()) {
     if (!madeNotes.has(label)) state.warnings.push(`Footnote definition [^${label}] has no matching reference in the document.`);
   }
@@ -11553,6 +11692,7 @@ export async function convertMdToDocx(
     if (state.templatePageSection !== undefined) {
       pushAll(customProps, chunkCustomProps('MANUSCRIPT_TEMPLATE_PAGE_SECTIONS_', JSON.stringify([state.templatePageSection])));
     }
+    if (state.templateLayout?.length) pushAll(customProps, chunkCustomProps(TEMPLATE_LAYOUT_PROPERTY, JSON.stringify(state.templateLayout)));
     pushAll(customProps, listIndentProps(state));
     pushAll(customProps, consecutiveReplyProps(state));
     pushAll(customProps, htmlCommentGapProps(state.htmlCommentGaps));

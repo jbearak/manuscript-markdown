@@ -5796,6 +5796,73 @@ describe('landscape sections', () => {
       expect(sectPrs[sectPrs.length - 1]).toBe('<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>' + letterMargins + '<w:cols w:space="720"/>');
     });
 
+    it.each([
+      ['a portrait section in the middle', 'A.\n\n<!-- portrait -->\n\nB.\n\n<!-- /portrait -->\n\nC.', 'break'],
+      ['a portrait section that ends the document', 'A.\n\n<!-- portrait -->\n\nB.\n\n<!-- /portrait -->', 'body'],
+    ])('gives %s one column where a landscape template\'s, far apart, leave none on its upright page', (_, md, where) => {
+      // The section took the template's two columns 9600 twips apart, which
+      // Letter's upright text, 9360 wide, can't hold
+      const state = makeState();
+      state.templateSectPr = '<w:sectPr><w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>' + letterMargins + '<w:cols w:num="2" w:space="9600"/><w:docGrid w:linePitch="360"/></w:sectPr>';
+      const xml = generateDocumentXml(parseMd(md), state);
+      const sectPrs = [...xml.matchAll(/<w:sectPr\b[^>]*>([\s\S]*?)<\/w:sectPr>/g)].map(match => match[1]);
+      const portrait = where === 'break' ? sectPrs[1] : sectPrs[sectPrs.length - 1];
+      expect(portrait).toContain('<w:pgSz w:w="12240" w:h="15840"/>');
+      expect(portrait).toContain(letterMargins + '<w:cols w:space="720"/><w:docGrid w:linePitch="360"/>');
+      // The landscape ones keep the template's, which fit
+      for (const sectPr of sectPrs.filter(sectPr => sectPr.includes('w:orient="landscape"'))) expect(sectPr).toContain('<w:cols w:num="2" w:space="9600"/>');
+    });
+
+    it.each([
+      ['two columns of equal width far apart, the choice in markup compatibility\'s alternatives whose fallback Word reads', alternatives('<w:cols w:num="2" w:space="720"/>', '<w:cols w:num="2" w:space="9600"/>', 'x'), '<w:cols w:space="720"/>'],
+      ['three columns of equal width, which leave each less than half an inch', '<w:cols w:num="3" w:space="4000"/>', '<w:cols w:space="720"/>'],
+      ['one column of its own width, the landscape text\'s', '<w:cols w:num="1" w:space="720" w:equalWidth="0"><w:col w:w="12960"/></w:cols>',
+        '<w:cols w:num="1" w:space="720" w:equalWidth="0"><w:col w:w="9360"/></w:cols>'],
+      ['two columns of their own widths, which fill the landscape text', '<w:cols w:num="2" w:space="720" w:equalWidth="0"><w:col w:w="6120" w:space="720"/><w:col w:w="6120"/></w:cols>',
+        '<w:cols w:num="2" w:space="720" w:equalWidth="0"><w:col w:w="4420" w:space="520"/><w:col w:w="4420"/></w:cols>'],
+      ['two columns of their own widths, the narrower of which, scaled, is less than half an inch', '<w:cols w:num="2" w:space="720" w:equalWidth="0"><w:col w:w="900" w:space="720"/><w:col w:w="11340"/></w:cols>',
+        '<w:cols w:space="720"/>'],
+      ['one column of its own width, in inches', '<w:cols w:num="1" w:space="0.5in" w:equalWidth="0"><w:col w:w="9in"/></w:cols>',
+        '<w:cols w:num="1" w:space="0.5in" w:equalWidth="0"><w:col w:w="9360"/></w:cols>'],
+      // Guards: columns that fit
+      ['three columns of equal width, which fit', '<w:cols w:num="3" w:space="720"/>', '<w:cols w:num="3" w:space="720"/>'],
+      ['two columns of their own widths, which fit', '<w:cols w:num="2" w:space="720" w:equalWidth="0"><w:col w:w="4000" w:space="720"/><w:col w:w="4000"/></w:cols>',
+        '<w:cols w:num="2" w:space="720" w:equalWidth="0"><w:col w:w="4000" w:space="720"/><w:col w:w="4000"/></w:cols>'],
+    ])('fits to the upright page of a portrait section a landscape template\'s %s', (_, cols, fitted) => {
+      // The section kept the template's columns, which Letter's upright
+      // text, 9360 twips wide, can't hold, or the fallback's, where the
+      // choice's fit, or columns narrower than Word makes them
+      const state = makeState();
+      state.templateSectPr = '<w:sectPr><w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>' + letterMargins + cols + '<w:docGrid w:linePitch="360"/></w:sectPr>';
+      for (const md of ['A.\n\n<!-- portrait -->\n\nB.\n\n<!-- /portrait -->\n\nC.', 'A.\n\n<!-- portrait -->\n\nB.\n\n<!-- /portrait -->']) {
+        const xml = generateDocumentXml(parseMd(md), state);
+        const sectPrs = [...xml.matchAll(/<w:sectPr\b[^>]*>([\s\S]*?)<\/w:sectPr>/g)].map(match => match[1]);
+        const upright = sectPrs.filter(sectPr => sectPr.includes('<w:pgSz w:w="12240" w:h="15840"/>'));
+        expect(upright.length).toBeGreaterThan(0);
+        for (const sectPr of upright) expect(sectPr).toContain(letterMargins + fitted + '<w:docGrid w:linePitch="360"/>');
+      }
+    });
+
+    it.each([
+      ['millimetres, as A4', '<w:pgSz w:w="210mm" w:h="297mm"/>', '<w:pgSz w:w="11906" w:h="16838"/>', '<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>'],
+      ['centimetres, as A5', '<w:pgSz w:w="14.8cm" w:h="21cm"/>', '<w:pgSz w:w="8391" w:h="11906"/>', '<w:pgSz w:w="11906" w:h="8391" w:orient="landscape"/>'],
+      ['inches, as Legal', '<w:pgSz w:w="8.5in" w:h="14in"/>', '<w:pgSz w:w="12240" w:h="20160"/>', '<w:pgSz w:w="20160" w:h="12240" w:orient="landscape"/>'],
+      ['points, as Legal', '<w:pgSz w:w="612pt" w:h="1008pt"/>', '<w:pgSz w:w="12240" w:h="20160"/>', '<w:pgSz w:w="20160" w:h="12240" w:orient="landscape"/>'],
+      // As Word reads them, as import does: down to a whole twip from
+      // points, where a twip was rounded to the nearest, and a number with
+      // a plus sign, which was read as none
+      ['points and a fraction of a twip, as Legal', '<w:pgSz w:w="612.04pt" w:h="1008.04pt"/>', '<w:pgSz w:w="12240" w:h="20160"/>', '<w:pgSz w:w="20160" w:h="12240" w:orient="landscape"/>'],
+      ['a number with a plus sign, as Legal', '<w:pgSz w:w="+12240" w:h="+20160"/>', '<w:pgSz w:w="12240" w:h="20160"/>', '<w:pgSz w:w="20160" w:h="12240" w:orient="landscape"/>'],
+    ])('gives each section break the template\'s page, measured in %s, in twips', (_, page, upright, turned) => {
+      // A break read a measure with a unit as none, and gave its section
+      // Letter's page
+      const state = makeState();
+      state.templateSectPr = '<w:sectPr>' + page + letterMargins + '<w:cols w:space="720"/></w:sectPr>';
+      const xml = generateDocumentXml(parseMd('A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n\nC.'), state);
+      const breaks = [...xml.matchAll(/<w:pPr><w:sectPr\b[^>]*>([\s\S]*?)<\/w:sectPr><\/w:pPr>/g)].map(match => match[1]);
+      expect(breaks).toEqual(['<w:type w:val="nextPage"/>' + upright + letterMargins + '<w:cols w:space="720"/>', '<w:type w:val="nextPage"/>' + turned + letterMargins + '<w:cols w:space="720"/>']);
+    });
+
     it('preserves template sectPr as body closing', () => {
       const tokens: MdToken[] = [{ type: 'paragraph', runs: [{ type: 'text', text: 'Test' }] }];
       const state = makeState();
