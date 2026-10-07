@@ -6396,3 +6396,32 @@ describe('Character references in HTML', () => {
     expect(await wordCell(md)).toBe('a\uFFFDb');
   });
 });
+
+describe('Blank lines before list items', () => {
+  it('records the items of a long loose list in linear time', async () => {
+    // Each item copied the places of all those before it, which took time
+    // in the square of their number. Four times the items take about four
+    // times as long, not sixteen. The fastest of five runs of each, by
+    // turns, which a pause for garbage collection slows neither more than
+    // the other.
+    const { recordListBlankLine } = await import('./md-to-docx');
+    const record = (n: number) => () => {
+      const blankLines = new Map<number, number[]>();
+      for (let place = 1; place <= n; place++) recordListBlankLine(blankLines, 0, place);
+      return blankLines;
+    };
+    const time = (work: () => unknown) => {
+      const start = performance.now();
+      work();
+      return performance.now() - start;
+    };
+    let small = Infinity;
+    let large = Infinity;
+    for (let k = 0; k < 5; k++) {
+      large = Math.min(large, time(record(40000)));
+      small = Math.min(small, time(record(10000)));
+    }
+    expect(record(3)().get(0)).toEqual([1, 2, 3]);
+    expect(large / small).toBeLessThan(8);
+  }, 60000);
+});

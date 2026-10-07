@@ -1350,7 +1350,7 @@ describe('Ordered list numbering', () => {
     expect((await convertMdToDocx('- parent\n\n  <!-- c -->')).warnings).toEqual([]);
     const bullets = '1. parent\n   - a\n\n   <!-- -->\n\n   - b';
     expect((await convertMdToDocx(bullets)).warnings).toEqual([]);
-    expect(await roundTrip(bullets)).toBe('1. parent\n   - a\n\n   <!-- -->\n   - b');
+    expect(await roundTrip(bullets)).toBe(bullets);
   });
 
   test.each([
@@ -2541,6 +2541,397 @@ describe('Lists nested in lists of the other kind', () => {
     // A blank line ends an item that starts with one, and the sublist came out of it
     expect(await roundTrip(md)).toBe(md);
     expect(await roundTrip(await roundTrip(md))).toBe(md);
+  });
+});
+
+describe('Loose lists', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+
+  test.each([
+    ['between items', '- a\n\n- b\n'],
+    ['between numbered items', '1. a\n\n2. b\n\n3. c\n'],
+    ['between two of three items', '- a\n\n- b\n- c\n'],
+    ['after a sublist', '- a\n  - b\n\n- c\n'],
+    ['after a paragraph in a sublist\'s item', '1. a\n   1. b\n\n      c\n\n2. d\n'],
+    ['after a paragraph in the item before', '- a\n\n  b\n\n- c\n'],
+    ['before a sublist', '- a\n\n  - b\n- c\n'],
+    ['before a sublist in the only item', '- a\n\n  - b\n'],
+    ['between a sublist\'s items', '- a\n  - b\n\n  - c\n- d\n'],
+    ['between sublists of two types', '- a\n  1. b\n\n  - c\n- d\n'],
+    ['between sublists of two types, after a deeper one', '- a\n  1. b\n     - c\n\n  - d\n- e\n'],
+    ['in a list, and not in the list after it', '- a\n\n- b\n\np\n\n- c\n- d\n'],
+    ['in a list with an indent override', '<!-- indent -->\n- a\n\n- b\n'],
+    ['after a list that starts over', '1. a\n\n<!-- -->\n\n1. b\n\n2. c\n'],
+    ['between task items', '- [ ] a\n\n- [x] b\n'],
+  ])('keeps a blank line %s', async (_name, md) => {
+    // Word has nothing for it, and the list came back tight, whose items'
+    // text Markdown doesn't put in paragraphs
+    expect(await roundTrip(md)).toBe(md);
+    expect(await roundTrip(await roundTrip(md))).toBe(md);
+  });
+
+  test.each([
+    ['spaces', ' ', '- a\n\n- b\n'],
+    ['a tab', '\t', '- a\n\n- b\n'],
+    ['a no-break space', ' ', '- a\n- b\n'],
+    ['an ideographic space', '　', '- a\n- b\n'],
+  ])('reads a line of %s between items as Markdown does', async (_name, line, expected) => {
+    // A line of whitespace but spaces and tabs isn't blank, but goes on in
+    // the item's paragraph, which leaves the list tight
+    const markdown = await roundTrip('- a\n' + line + '\n- b\n');
+    expect(markdown).toBe(expected);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['with', '- a\n\n  > q\n\n- b\n'],
+    ['without', '- a\n\n  > q\n- b\n'],
+  ])('keeps an item after a quote in the item before %s a blank line', async (_name, md) => {
+    // The quote's own record has the blank lines after it, as the parsed
+    // text has one before the item either way
+    expect(await roundTrip(md)).toBe(md);
+    expect(await roundTrip(await roundTrip(md))).toBe(md);
+  });
+
+  test('reads a loose list Word took items from', async () => {
+    // Blank lines before items that are gone go nowhere
+    const zip = await JSZip.loadAsync((await convertMdToDocx('- a\n\n- b\n\n- c\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const last = /<w:p [^>]*>(?:(?!<\/w:p>).)*<w:t>c<\/w:t>(?:(?!<\/w:p>).)*<\/w:p>/;
+    expect(xml).toMatch(last);
+    zip.file('word/document.xml', xml.replace(last, ''));
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toBe('- a\n\n- b\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  /** The Markdown import writes for the export of start + md, with the
+   *  first paragraph in style numbered, as Word numbers one whose style a
+   *  template gives a list */
+  const afterNumbered = async (start: string, style: string, md: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(start + md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const pStyle = '<w:pStyle w:val="' + style + '"/>';
+    const numbered = xml.replace(pStyle, () => pStyle + '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>');
+    expect(numbered).not.toBe(xml);
+    zip.file('word/document.xml', numbered);
+    return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+  };
+  const numberedKinds: [string, string, string][] = [
+    ['heading', '# H\n\n', 'Heading1'],
+    ['code block', '```\ncode\n```\n\n', 'CodeBlock'],
+    ['title', '---\ntitle: T\n---\n\n', 'Title'],
+  ];
+
+  test.each(numberedKinds)('keeps the blank lines of the lists after a %s Word numbered where they were', async (_name, start, style) => {
+    // Counted as a list block, which export doesn't count it as, it moved
+    // the records of the lists after it to the list before, which came back
+    // loose, and the loose one tight
+    const md = 'p\n\n- a\n- b\n\nq\n\n- c\n\n- d\n';
+    expect(await afterNumbered(start, style, md)).toEndWith('\n' + md);
+  });
+
+  test.each(numberedKinds)('keeps the indent override of the list after a %s Word numbered on that list', async (_name, start, style) => {
+    // The override went to the list before, as the blank lines did
+    const md = 'p\n\n- a\n\nq\n\n<!-- no-indent -->\n- c\n';
+    expect(await afterNumbered(start, style, md)).toEndWith('\n' + md);
+  });
+
+  test.each([
+    ['a sublist of the other type after a quote in an item', '- a\n  - b\n\n    > q\n\n  1. c\n  2. d\n\ntext\n\n- x\n\n- y\n'],
+    ['an item after a sublist of the other type after a quote in an item', '- a\n  - b\n\n    > q\n\n  1. c\n- d\n  - e\n\n    - f\n  - g\n'],
+  ])('keeps the blank lines of the lists after %s where they were', async (_name, md) => {
+    // Export wrote empty paragraphs after the quote, at which import ends a
+    // list block, but counted the list after them in the block before, so
+    // the records of the lists after it went to the list before. Then, in
+    // the block after them, import counted the first item at the top level
+    // as one of the other type than none, which starts another
+    expect(await roundTrip(md)).toBe(md);
+    expect(await roundTrip(await roundTrip(md))).toBe(md);
+  });
+
+  /** A template whose default paragraph style numbers its paragraphs */
+  const normalNumbered = async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('1. a')).docx);
+    const styles = await zip.file('word/styles.xml')!.async('string');
+    const numbered = styles.replace(/<w:style [^>]*w:default="1"[^>]*w:styleId="Normal">[^]*?<w:pPr>/,
+      (match: string) => match + '<w:numPr><w:numId w:val="2"/></w:numPr>');
+    expect(numbered).not.toBe(styles);
+    zip.file('word/styles.xml', numbered);
+    return zip.generateAsync({ type: 'uint8array' });
+  };
+
+  test('keeps the blank lines of the lists after paragraphs a template numbers where they were', async () => {
+    // Import counted the paragraphs Word numbers as items, which export
+    // wrote as paragraphs, so the records of the lists after them went to
+    // the list before, which came back loose, and the loose one tight
+    const templateDocx = await normalNumbered();
+    const md = 'intro\n\n# H\n\n- a\n- b\n\n# J\n\n- c\n\n- d\n';
+    const markdown = (await convertDocx((await convertMdToDocx(md, { templateDocx })).docx)).markdown;
+    expect(markdown).toBe('1. intro\n\n# H\n\n- a\n- b\n\n# J\n\n- c\n\n- d\n');
+  });
+
+  test.each([
+    ['a paragraph', '- a\n\n  cont\n- b\n- c\n\n# H\n\n- x\n\n- y\n', '- a\n\n1. cont\n\n- b\n- c\n\n# H\n\n- x\n\n- y\n'],
+    ['a quote', '- a\n\n  > q\n- b\n- c\n\n# H\n\n- x\n\n- y\n', '- a\n\n1. q\n\n- b\n- c\n\n# H\n\n- x\n\n- y\n'],
+  ])('keeps the blank lines of the lists after %s in an item that a template numbers where they were', async (_name, md, expected) => {
+    // Which import reads as an item of its own, at which it ends the list's
+    // block, where export went on with it, so the records of the items
+    // after it went to the block before
+    const templateDocx = await normalNumbered();
+    const markdown = (await convertDocx((await convertMdToDocx(md, { templateDocx })).docx)).markdown;
+    expect(markdown).toBe(expected);
+    expect((await convertDocx((await convertMdToDocx(markdown, { templateDocx })).docx)).markdown).toBe(expected);
+  });
+
+  test.each([
+    ['before bullets', '- [ ] a\n- b\n- c\n\n# H\n\n- x\n\n- y\n', '1. [ ] a\n\n- b\n- c\n\n# H\n\n- x\n\n- y\n'],
+    ['between bullets', '- b\n- [ ] a\n- c\n\n# H\n\n- x\n\n- y\n', '- b\n\n1. [ ] a\n\n- c\n\n# H\n\n- x\n\n- y\n'],
+    ['in a sublist', '- b\n  - [ ] a\n- c\n\n# H\n\n- x\n\n- y\n', '- b\n\n1. [ ] a\n\n- c\n\n# H\n\n- x\n\n- y\n'],
+    ['after numbers and a blank line', '1. x\n\n- [ ] a\n\n# H\n\n- x\n\n- y\n', '1. x\n2. [ ] a\n\n# H\n\n- x\n\n- y\n'],
+  ])('keeps the blank lines of the lists after a task item %s that a template numbers where they were', async (_name, md, expected) => {
+    // A bulleted task item takes no numbering, so Word numbers it by the
+    // default style, and import reads it as a numbered item, where export
+    // counted it as a bullet, in the block of the bullets around it, or not
+    // in the block of the numbers before it, so the records of the items
+    // after it went to another block
+    const templateDocx = await normalNumbered();
+    const markdown = (await convertDocx((await convertMdToDocx(md, { templateDocx })).docx)).markdown;
+    expect(markdown).toBe(expected);
+    expect((await convertDocx((await convertMdToDocx(markdown, { templateDocx })).docx)).markdown).toBe(expected);
+  });
+
+  /** A template whose default paragraph style numbers its paragraphs by an
+   *  instance of its own, numId 9: of the abstract numbering numbers take,
+   *  which starts its first level over (`restart`) or not (`on`), or of an
+   *  abstract numbering of its own (`own`) */
+  const normalNumberedApart = async (kind: 'restart' | 'on' | 'own') => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('1. a')).docx);
+    const styles = await zip.file('word/styles.xml')!.async('string');
+    let numbering = await zip.file('word/numbering.xml')!.async('string');
+    const decimal = /<w:num w:numId="2"[^>]*>\s*<w:abstractNumId w:val="(\d+)"/.exec(numbering)![1];
+    let abstract = decimal;
+    if (kind === 'own') {
+      const definition = new RegExp('<w:abstractNum w:abstractNumId="' + decimal + '"[^]*?</w:abstractNum>').exec(numbering)![0];
+      numbering = numbering.replace(definition, definition + definition.replace('w:abstractNumId="' + decimal + '"', 'w:abstractNumId="77"'));
+      abstract = '77';
+    }
+    const override = kind === 'restart' ? '<w:lvlOverride w:ilvl="0"><w:startOverride w:val="1"/></w:lvlOverride>' : '';
+    zip.file('word/numbering.xml', numbering.replace('</w:numbering>', '<w:num w:numId="9"><w:abstractNumId w:val="' + abstract + '"/>' + override + '</w:num></w:numbering>'));
+    const numbered = styles.replace(/<w:style [^>]*w:default="1"[^>]*w:styleId="Normal">[^]*?<w:pPr>/,
+      (match: string) => match + '<w:numPr><w:numId w:val="9"/></w:numPr>');
+    expect(numbered).not.toBe(styles);
+    zip.file('word/styles.xml', numbered);
+    return zip.generateAsync({ type: 'uint8array' });
+  };
+
+  const afterNumbers = '1. a\n- [ ] b\n\n# H\n\n<!-- indent -->\n- c\n';
+  const tasksAfterNumbers = '1. a\n- [ ] b\n- [ ] c\n\n- [ ] d\n\n# H\n\n- x\n\n- y\n';
+  test.each([
+    ['with a start override', 'restart', afterNumbers, '1. a\n\n<!-- -->\n\n1. [ ] b\n\n# H\n\n<!-- indent -->\n- c\n'],
+    ['of an abstract numbering of its own', 'own', afterNumbers, '1. a\n\n<!-- -->\n\n1. [ ] b\n\n# H\n\n<!-- indent -->\n- c\n'],
+    ['that goes on with the numbers', 'on', afterNumbers, '1. a\n2. [ ] b\n\n# H\n\n<!-- indent -->\n- c\n'],
+    ['with a start override, before more', 'restart', tasksAfterNumbers, '1. a\n\n<!-- -->\n\n1. [ ] b\n2. [ ] c\n\n3. [ ] d\n\n# H\n\n- x\n\n- y\n'],
+    ['of an abstract numbering of its own, before more', 'own', tasksAfterNumbers, '1. a\n\n<!-- -->\n\n1. [ ] b\n2. [ ] c\n\n3. [ ] d\n\n# H\n\n- x\n\n- y\n'],
+    ['that goes on with the numbers, before more', 'on', tasksAfterNumbers, '1. a\n2. [ ] b\n3. [ ] c\n\n4. [ ] d\n\n# H\n\n- x\n\n- y\n'],
+    ['with a start override, after a blank line', 'restart', '1. a\n\n- [ ] b\n\n# H\n\n- x\n\n- y\n', '1. a\n\n<!-- -->\n\n1. [ ] b\n\n# H\n\n- x\n\n- y\n'],
+    ['with a start override, after an indent directive', 'restart', '1. a\n\n<!-- indent -->\n- [ ] b\n- [ ] c\n\n# H\n\n- x\n\n- y\n', '1. a\n\n<!-- -->\n\n<!-- indent -->\n1. [ ] b\n2. [ ] c\n\n# H\n\n- x\n\n- y\n'],
+    ['with a start override, in a sublist', 'restart', '1. a\n   - [ ] b\n   - [ ] c\n\n2. d\n\n# H\n\n- x\n\n- y\n', '1. a\n\n<!-- -->\n\n1. [ ] b\n2. [ ] c\n\n3. d\n\n# H\n\n- x\n\n- y\n'],
+  ] as const)('keeps the records of the lists after a task item after numbers that a template numbers by an instance %s', async (_name, kind, md, expected) => {
+    // Where Word starts the style's numbering over at the task item, which
+    // the paragraphs before it say, import reads it in a list block of its
+    // own, where export counted it in the block of the numbers before it,
+    // so the records of the items after it went to the block before
+    const templateDocx = await normalNumberedApart(kind);
+    const markdown = (await convertDocx((await convertMdToDocx(md, { templateDocx })).docx)).markdown;
+    expect(markdown).toBe(expected);
+    // The next trip numbers the hidden paragraph between two lists, which
+    // the style numbers, as an empty item, as on main
+    if (!expected.includes('<!-- -->')) {
+      expect((await convertDocx((await convertMdToDocx(markdown, { templateDocx })).docx)).markdown).toBe(expected);
+    }
+  });
+
+  /** A template whose default paragraph style bullets its paragraphs, and
+   *  whose Heading 1 style turns numbering off */
+  const normalBulleted = async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('1. a')).docx);
+    const styles = await zip.file('word/styles.xml')!.async('string');
+    const numbering = await zip.file('word/numbering.xml')!.async('string');
+    const bulletAbstract = /<w:abstractNum w:abstractNumId="(\d+)"(?:(?!<\/w:abstractNum>)[^])*?<w:numFmt w:val="bullet"/.exec(numbering)![1];
+    const bullet = new RegExp('<w:num w:numId="(\\d+)"[^>]*>\\s*<w:abstractNumId w:val="' + bulletAbstract + '"').exec(numbering)![1];
+    const bulleted = styles.replace(/<w:style [^>]*w:default="1"[^>]*w:styleId="Normal">[^]*?<w:pPr>/,
+      (match: string) => match + '<w:numPr><w:numId w:val="' + bullet + '"/></w:numPr>')
+      .replace(/<w:style [^>]*w:styleId="Heading1"[^>]*>[^]*?<w:pPr>/, (match: string) => match + '<w:numPr><w:numId w:val="0"/></w:numPr>');
+    expect(bulleted).not.toBe(styles);
+    zip.file('word/styles.xml', bulleted);
+    return zip.generateAsync({ type: 'uint8array' });
+  };
+
+  test.each([
+    ['an indent directive', '- a\n\n  \u2610 p\n- b\n\n# H\n\n<!-- indent -->\n- x\n\n- y\n', '- a\n- [ ] p\n- b\n\n# H\n\n<!-- indent -->\n- x\n\n- y\n'],
+    ['a blank line', '- a\n\n  \u2610 p\n\n- b\n\n# H\n\n- x\n\n- y\n', '- a\n- [ ] p\n\n- b\n\n# H\n\n- x\n\n- y\n'],
+  ])('keeps %s of the lists after a paragraph in an item that starts with a box a template numbers', async (_name, md, expected) => {
+    // Import reads the paragraph, which the template numbers, as a task
+    // item, in the block of the item before, where export, which counted
+    // the blocks by its own rules, ended the block there, so the records of
+    // the items after it went to the next block. Export now reads the
+    // blocks from its document where a template's styles number paragraphs
+    const templateDocx = await normalBulleted();
+    const markdown = (await convertDocx((await convertMdToDocx(md, { templateDocx })).docx)).markdown;
+    expect(markdown).toBe(expected);
+    expect((await convertDocx((await convertMdToDocx(markdown, { templateDocx })).docx)).markdown).toBe(expected);
+  });
+
+  test.each([
+    ['an indent directive', '- a\n\n  [@doe2020t]\u2610 p\n- b\n\n# H\n\n<!-- indent -->\n- x\n\n- y\n', '- a\n- [@doe2020t]\u2610 p\n- b\n\n# H\n\n<!-- indent -->\n- x\n\n- y\n'],
+    ['a blank line', '- a\n\n  [@doe2020t]\u2610 p\n\n- b\n\n# H\n\n- x\n\n- y\n', '- a\n- [@doe2020t]\u2610 p\n- b\n\n# H\n\n- x\n\n- y\n'],
+  ])('keeps %s of the lists after a paragraph in an item that a template numbers, which starts with a citation and then a box', async (_name, md, expected) => {
+    // Export read its document back with no citations, so the box started
+    // the paragraph, which import then read as a task item, in the block of
+    // the item before, where convertDocx, which reads the citation first,
+    // ends the block there, so the records of the lists after it went to
+    // the block before. The read-back now reads the finished document with
+    // convertDocx's inputs
+    const templateDocx = await normalBulleted();
+    const bibtex = '@book{doe2020t,\n  author = {Doe, J},\n  title = {{T}},\n  year = {2020},\n}\n';
+    const first = await convertDocx((await convertMdToDocx(md, { templateDocx, bibtex })).docx);
+    expect(first.markdown.replace(/^---\n[^]*?\n---\n\n/, '')).toBe(expected);
+    const second = await convertDocx((await convertMdToDocx(first.markdown, { templateDocx, bibtex: first.bibtex })).docx);
+    expect(second.markdown).toBe(first.markdown);
+  });
+
+  /** A template whose List Bullet style numbers its paragraphs, so export
+   *  reads its list blocks back from its document */
+  const listBulletNumbered = async () => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('1. a')).docx);
+    const styles = await zip.file('word/styles.xml')!.async('string');
+    zip.file('word/styles.xml', styles.replace('</w:styles>', '<w:style w:type="paragraph" w:styleId="ListBullet"><w:name w:val="List Bullet"/><w:basedOn w:val="Normal"/><w:pPr><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr></w:style></w:styles>'));
+    return zip.generateAsync({ type: 'uint8array' });
+  };
+
+  /** The names of the parts of `docx`, in the package's order, and those
+   *  that say what custom properties it has, or that it has none */
+  const propertyParts = async (docx: Uint8Array) => {
+    const zip = await JSZip.loadAsync(docx);
+    return { names: Object.keys(zip.files), parts: await Promise.all(['docProps/custom.xml', '[Content_Types].xml', '_rels/.rels'].map(path => zip.file(path)?.async('string'))) };
+  };
+
+  test.each([
+    ['no list records', '- a\n- b\n\np\n', false],
+    ['no list records, with other custom properties', '```js\nx\n```\n\n- a\n- b\n', false],
+    ['a blank line', '- a\n\n- b\n', true],
+    ['an indent directive', '<!-- indent -->\n- a\n- b\n', true],
+    ['a blank line, with other custom properties', '```js\nx\n```\n\n- a\n\n- b\n', true],
+  ])('writes the custom properties, and the parts that say there are any, as without reading the document back, where that gives %s', async (_name, md, records) => {
+    // Export reads its finished document back where a template's styles
+    // number paragraphs, and writes custom.xml again with the records of
+    // the lists it reads, or takes it out where there are none, and the
+    // content types and package relationships where there were none
+    // before. Their bytes, and the package's order, are those of an export
+    // with a template that numbers no paragraph, which counts the lists
+    // itself and writes them once
+    const { names, parts } = await propertyParts((await convertMdToDocx(md, { templateDocx: await listBulletNumbered() })).docx);
+    const once = await propertyParts((await convertMdToDocx(md, { templateDocx: (await convertMdToDocx('1. a')).docx })).docx);
+    expect(parts).toEqual(once.parts);
+    expect(names).toEqual(once.names);
+    expect(parts[0]?.includes('MANUSCRIPT_LIST_') ?? false).toBe(records);
+    if (records) {
+      expect(parts[1]).toContain('/docProps/custom.xml');
+      expect(parts[2]).toContain('custom-properties');
+    }
+  });
+
+  test.each([
+    ['portrait', '- a\n\n<!-- portrait -->\n\n- b\n\n<!-- /portrait -->\n\n<!-- indent -->\n- c\n\n- d\n'],
+    ['landscape', '- a\n\n<!-- landscape -->\n\n- b\n\n<!-- /landscape -->\n\n<!-- indent -->\n- c\n\n- d\n'],
+  ])('keeps the indent directive and blank line of a list after a %s section where a template\'s style numbers paragraphs', async (_name, md) => {
+    // Export read its document back without the record of which sections
+    // are portrait, so import's reading there had no fences between the
+    // lists, which it read as one, and the directive and blank line went to
+    // places in it, where convertDocx has three lists
+    const templateDocx = await listBulletNumbered();
+    const markdown = (await convertDocx((await convertMdToDocx(md, { templateDocx })).docx)).markdown;
+    expect(markdown.replace(/^---\n[^]*?\n---\n\n/, '')).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(markdown, { templateDocx })).docx)).markdown).toBe(markdown);
+  });
+
+  const listsBeside = [
+    ['bullets', '- a\n\n* b\n* c\n', '- a\n- b\n- c\n'],
+    ['bullets after a sublist', '- a\n  - x\n\n* b\n', '- a\n  - x\n- b\n'],
+    ['loose bullets', '- a\n- b\n\n* c\n\n* d\n', '- a\n- b\n- c\n\n- d\n'],
+    ['numbers', '1. a\n\n1) b\n', '1. a\n\n<!-- -->\n\n1. b\n'],
+  ];
+  test.each([
+    ...listsBeside.map(([name, md, expected]) => [name, '', md, expected]),
+    ...listsBeside.map(([name, md, expected]) => [name, ', where a template\'s style numbers paragraphs', md, expected]),
+  ])('keeps no blank line before a list of %s right after another, which Word has as one%s', async (_name, where, md, expected) => {
+    // The blank line before the second list, which makes neither loose,
+    // went to its first item's place in the list Word has, which made that
+    // loose. Numbers start over, so Word has two lists there
+    const templateDocx = where ? await listBulletNumbered() : undefined;
+    const trip = async (text: string) => (await convertDocx((await convertMdToDocx(text, { templateDocx })).docx)).markdown.replace(/^---\n[^]*?\n---\n\n/, '');
+    const markdown = await trip(md);
+    expect(markdown).toBe(expected);
+    expect(await trip(markdown)).toBe(expected);
+  });
+
+  /** A template whose default paragraph style numbers its paragraphs, but
+   *  not its quote style */
+  const quotesUnnumbered = async () => {
+    const zip = await JSZip.loadAsync(await normalNumbered());
+    const styles = await zip.file('word/styles.xml')!.async('string');
+    const unnumbered = styles.replace(/<w:style [^>]*w:styleId="GitHubBlockquote"[^>]*>[^]*?<w:pPr>/, (match: string) => match + '<w:numPr><w:numId w:val="0"/></w:numPr>');
+    expect(unnumbered).not.toBe(styles);
+    zip.file('word/styles.xml', unnumbered);
+    return zip.generateAsync({ type: 'uint8array' });
+  };
+
+  test.each([
+    ['blank line', '- a\n\n  > q\n- b\n- c\n\n# H\n\n- x\n\n- y\n'],
+    ['indent override', '- a\n\n  > q\n\n- b\n- c\n\n# H\n\n<!-- indent -->\n- x\n- y\n'],
+  ])('keeps the %s of the list after a quote in an item where a template numbers paragraphs but not quotes', async (_name, md) => {
+    // Export took the spacers around the quote, which have no style, for
+    // paragraphs the template numbers, and ended the list's block at the
+    // quote, where import, which drops them, went on with it, so the
+    // records of the lists after it went to the block before
+    const templateDocx = await quotesUnnumbered();
+    const markdown = (await convertDocx((await convertMdToDocx(md, { templateDocx })).docx)).markdown;
+    expect(markdown).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(markdown, { templateDocx })).docx)).markdown).toBe(md);
+  });
+
+  test('keeps the blank lines of the list after a quote after a paragraph a template numbers in an item', async () => {
+    // At the paragraph, which Word numbers, the block ends, but export went
+    // on with it at the quote, so the item after the quote took its places
+    // from the block before. Not through a second trip, where the quote is
+    // in a numbered item before bullets, and the empty paragraphs export
+    // writes after it the template numbers too
+    const templateDocx = await quotesUnnumbered();
+    const markdown = (await convertDocx((await convertMdToDocx('- a\n\n  p\n\n  > q\n- b\n\n  - c\n', { templateDocx })).docx)).markdown;
+    expect(markdown).toBe('- a\n\n1. p\n\n   > q\n\n- b\n\n  - c\n');
+  });
+
+  const styled = '---\nstyles:\n  box:\n    font-style: italic\n---\n\n';
+
+  test.each([
+    ['blank line', '- c\n\n- d\n'],
+    ['indent override', '<!-- indent -->\n- c\n- d\n\np\n'],
+  ])('keeps the %s of a list after a style block that starts with a list right after another', async (_name, last) => {
+    // Export counted the lists on either side of the style fence as two
+    // blocks, and import, which has no boundary there, as one, so the
+    // records of the lists after them went to the list before
+    const markdown = await roundTrip(styled + '- a\n\n<!-- style: box -->\n- b\n\nstyled\n<!-- /style -->\n\n' + last);
+    expect(markdown).toEndWith('\n<!-- /style -->\n\n' + last);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps a list tight that a blank line after a style fence starts', async () => {
+    // A list of its own in Markdown, which the blank line doesn't make
+    // loose, though import joins it to the list before the fence
+    const markdown = await roundTrip(styled + '- a\n\n<!-- style: box -->\n\n- b\n\nstyled\n<!-- /style -->\n');
+    expect(markdown).toStartWith(styled + '- a\n- b\n\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
   });
 });
 
@@ -12199,7 +12590,7 @@ describe('Whitespace at the edges of a paragraph', () => {
       ['deleted', 'A.\n\nXX\n\nB.', 'word/document.xml', ownMarkOf('A\\.'), '$1<w:pPr>' + rPr('del') + '</w:pPr>$2',
         '<w:r><w:tab/></w:r>', 'A.{--\n\n--}&#9;\n\nB.\n'],
       ['deleted, in a list item', '- a\n\n  XX\n\n- b', 'word/document.xml', markOf('a'), '$1' + rPr('del') + '$2', spaces,
-        '- a{--\n\n  --}&#32;&#32;\n- b\n'],
+        '- a{--\n\n  --}&#32;&#32;\n\n- b\n'],
       ['deleted with its text', 'A.\n\nXX\n\nB.', 'word/document.xml', /(<w:p [^>]*>)<w:r><w:t>A\.<\/w:t><\/w:r>/,
         '$1<w:pPr>' + rPr('del') + '</w:pPr><w:del w:id="92" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r><w:delText>A.</w:delText></w:r></w:del>',
         spaces, '{--A.\n\n--}&#32;&#32;\n\nB.\n'],
