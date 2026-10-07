@@ -13,7 +13,7 @@ import { computeCodeRegions, computeMarkdownRegions, isInsideCodeRegion } from '
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, htmlBlocksIn, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, showsAsText, startsHtmlBlock } from './md-to-docx';
+import { blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, showsAsText, startsHtmlBlock } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { matchTables, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
@@ -4341,12 +4341,25 @@ function pictureMarkdown(item: ContentItem & { type: 'image' }, imageFormatMappi
       + (item.widthPx > 0 ? ' width="' + item.widthPx + '"' : '')
       + (item.heightPx > 0 ? ' height="' + item.heightPx + '"' : '') + '>');
   }
+  const safeAlt = imageLabelMarkdown(item);
+  const size = [...(item.widthPx > 0 ? ['width=' + item.widthPx] : []), ...(item.heightPx > 0 ? ['height=' + item.heightPx] : [])];
+  return syntaxText('![' + safeAlt + '](' + formatHrefForMarkdown(item.src) + ')' + (size.length ? '{' + size.join(' ') + '}' : ''));
+}
+
+/** An image's alt text as its Markdown has it in its brackets: Word's as
+ *  pictureMarkdown writes it, or as an image export couldn't embed has it,
+ *  which is none in an <img>. Its label is balanced, as ![a[b]c](x)'s
+ *  a[b]c, and one export can't read is all of its Markdown. */
+function imageLabelMarkdown(item: ContentItem & { type: 'image' }): string {
+  if (item.markdown !== undefined) {
+    if (!item.markdown.startsWith('![')) return '';
+    const end = imageLabelEnd(item.markdown);
+    return end < 0 ? item.markdown : item.markdown.slice(2, end);
+  }
   // In an HTML table's cell, which export reads as HTML, the image's
   // Markdown is text (see syntaxText), whose alt text takes no escapes but
   // those of a \ and a ], as it took before
-  const safeAlt = readsMarkdown ? imageAltMarkdown(item.alt) : item.alt.replace(/\\/g, '\\\\').replace(/\]/g, '\\]');
-  const size = [...(item.widthPx > 0 ? ['width=' + item.widthPx] : []), ...(item.heightPx > 0 ? ['height=' + item.heightPx] : [])];
-  return syntaxText('![' + safeAlt + '](' + formatHrefForMarkdown(item.src) + ')' + (size.length ? '{' + size.join(' ') + '}' : ''));
+  return readsMarkdown ? imageAltMarkdown(item.alt) : item.alt.replace(/\\/g, '\\\\').replace(/\]/g, '\\]');
 }
 
 function unembeddedImageMarkdown(markdown: string): string {
@@ -6611,8 +6624,8 @@ function endsWithBackslash(segment: ContentItem[], index: number): boolean {
  * revision, and the span it now ends with. The text joins `last` instead of
  * opening a span of its own when `last` ends `out`, records the same revision,
  * and both items and the seam between them allow it (spanJoin, canJoinSpans),
- * so a Word revision that runs across a citation, an equation or a formatting
- * change stays one span: {++in month $t$, conditional++}.
+ * so a Word revision that runs across a citation, an equation, an image or a
+ * formatting change stays one span: {++in month $t$, conditional++}.
  */
 function appendRevised(
   out: string, text: string, item: InlineRevisionItem, last: RevisionSpan | undefined, itemJoin = spanJoin(item),
@@ -6626,8 +6639,9 @@ function appendRevised(
     text !== '' && join !== 'never' && before.join !== 'never'
     // A delimiter of the text's own could pair with one of its kind in the
     // other span, but for in an HTML table's cell, where text's is a
-    // reference or text (see canJoinSpans)
-    && (!readsMarkdown || disjoint(literal, before.kinds) && disjoint(before.literal, kinds))
+    // reference or text (see canJoinSpans). An escaped backtick after one
+    // still closes it.
+    && (!readsMarkdown || disjoint(literal, before.kinds) && disjoint(before.literal, delimiterKinds(text, true)))
     && (join === 'space' || before.join === 'space'
       ? /\s/.test(before.lastChar) || /^\s/.test(text)
       : canJoinSpans(before.lastChar, text) || canJoinAtHighlight(before, text));
@@ -6655,12 +6669,16 @@ const DELIMITER_KINDS: Record<string, string> = {
   '`': '`', '$': '$', '[': '[', ']': '[', '<': '<', '>': '<', '*': '*', '_': '_', '~': '~', '=': '=', '^': '^', '{': '{', '}': '{',
 };
 
-/** The kinds of delimiter in `markdown`, past backslash escapes. */
-function delimiterKinds(markdown: string): Set<string> {
+/** The kinds of delimiter in `markdown`, past backslash escapes, but for
+ *  an escaped backtick where `closers`: it can't open code, but it closes
+ *  code a backtick before it opens, as in ![a`b](x)c\` from a to c\ */
+function delimiterKinds(markdown: string, closers = false): Set<string> {
   const kinds = new Set<string>();
   for (let i = 0; i < markdown.length; i++) {
-    if (markdown[i] === '\\') i++;
-    else if (DELIMITER_KINDS[markdown[i]]) kinds.add(DELIMITER_KINDS[markdown[i]]);
+    if (markdown[i] === '\\') {
+      if (closers && markdown[i + 1] === '`') kinds.add('`');
+      i++;
+    } else if (DELIMITER_KINDS[markdown[i]]) kinds.add(DELIMITER_KINDS[markdown[i]]);
   }
   return kinds;
 }
@@ -6675,8 +6693,8 @@ function delimiterKinds(markdown: string): Set<string> {
  * backtick, which Markdown reads before math. Text whose & would read with
  * the other span's text as an entity, as &am and p; would, keeps apart from
  * it (appendRevised). A bare URL or email joins only across whitespace,
- * since linkify finds one only between boundaries. Images and display math
- * keep their own spans.
+ * since linkify finds one only between boundaries. An image keeps its alt
+ * text's delimiters, and display math keeps its own span.
  */
 function spanJoin(item: InlineRevisionItem): { join: SpanJoin; literal: Set<string> } {
   switch (item.type) {
@@ -6694,8 +6712,11 @@ function spanJoin(item: InlineRevisionItem): { join: SpanJoin; literal: Set<stri
       return { join: item.display ? 'never' : 'seam', literal: new Set(item.latex.includes('`') ? ['`'] : []) };
     case 'footnote_ref':
       return { join: 'seam', literal: new Set() };
-    default:
-      return { join: 'never', literal: new Set() };
+    case 'image':
+      // Its alt text's own delimiters, as a backtick, which can pair with
+      // one in the other span past its ], as Markdown reads a code span
+      // before the brackets around it
+      return { join: 'seam', literal: delimiterKinds(imageLabelMarkdown(item)) };
   }
 }
 
@@ -6734,6 +6755,10 @@ function canJoinSpans(beforeEnd: string, after: string): boolean {
   // [ after one of those, a link's ), code or math, which make nothing more
   // of either, as a ! before [ makes an image and a ] a reference
   if (a === ')' && /[\p{L}\p{N}[*_]/u.test(b) || b === '[' && /[\p{L}\p{N})*_`$]/u.test(a)) return true;
+  // An image's ![ or <img after a letter, a digit, a link's or an image's )
+  // or an image's size's }, and a letter or digit after that }, which make
+  // nothing more of either
+  if (/^(?:!\[|<img[\s>])/i.test(after) && /[\p{L}\p{N})}]/u.test(a) || a === '}' && /[\p{L}\p{N}]/u.test(b)) return true;
   return (/[\])$*`]/.test(a) && /[.,;:!?)]/.test(b)) || (/[(\-/]/.test(a) && /[[$*`]/.test(b));
 }
 

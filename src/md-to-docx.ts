@@ -659,6 +659,14 @@ export function citationEndInText(text: string, start: number): number {
   return citationEnd({ src: text, md: citationTextMd, env: {} }, start);
 }
 
+/** The ] that ends the label of the image Markdown `markdown` starts with,
+ *  at its ![, as export reads one, past brackets it nests and a ] in its
+ *  code, or -1 */
+export function imageLabelEnd(markdown: string): number {
+  const md = citationTextMd ??= createMarkdownIt();
+  return md.helpers.parseLinkLabel(new md.inline.State(markdown, md, {}, []), 1, false);
+}
+
 // linkify-it searches what's left of a text after each link it finds from
 // its start, for a scheme and for an email address, and each search can run
 // to the end, so text of many links took time quadratic in its length, as a
