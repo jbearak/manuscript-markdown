@@ -2935,8 +2935,17 @@ function resolveEmphasis(markdown: string, track?: { positions: number[]; resolv
   return parts.join('');
 }
 
+/** A link's or image's destination as Markdown reads it back as `href`: a \
+ *  that would escape the character after it, as in a UNC path's \\server,
+ *  or the ) or > that ends the destination, and an & that would start a
+ *  character reference, as markdown-it's unescapeAll reads one, numbers of
+ *  up to eight digits included, which Markdown decodes, are escaped. In <>, where
+ *  spaces, parentheses or brackets, or a < at its start, put it, so are a <
+ *  and a >, which would end it. */
 function formatHrefForMarkdown(href: string): string {
-  return /[()\[\]\s]/.test(href) ? `<${href}>` : href;
+  const escaped = href.replace(/\\(?=[!-\/:-@[-`{-~]|$)/g, '\\\\')
+    .replace(/&(?=[A-Za-z#][A-Za-z\d]{1,31};)/g, '\\&');
+  return /[()[\]\s]|^</.test(href) ? '<' + escaped.replace(/[<>]/g, c => '\\' + c) + '>' : escaped;
 }
 
 /** A link of Markdown `text` to `href`, with a @ that starts the text,
