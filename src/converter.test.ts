@@ -9918,6 +9918,29 @@ describe('Whitespace at the edges of a paragraph', () => {
   });
 
   test.each([
+    ['from before the mark', 'T.[^1]\n\n[^1]: {==A b.==}{>>@A (2024-01-15 10:30) | c<<}\n', 'mark', 'text'],
+    ['from the space after the mark', 'T.[^1]\n\n[^1]: {==A b.==}{>>@A (2024-01-15 10:30) | c<<}\n', 'space', 'text'],
+    ['from before the mark, over two paragraphs', 'T.[^1]\n\n[^1]: {#1}A.\n\n    B.{/1}\n    {#1>>@A (2024-01-15 10:30) | c<<}\n', 'mark', 'text'],
+    ['on the mark alone', 'T.[^1]\n\n[^1]: {>>@A (2024-01-15 10:30) | c<<}A b.\n', 'mark', 'mark'],
+  ])('leaves out the space after a note\'s mark in a comment\'s range %s', async (_name, md, start, end) => {
+    // The range kept the space, as text's, so Word showed it after the one
+    // export writes there; a comment on the mark alone kept it after the
+    // comment
+    const exported = md.includes('{==') || md.includes('{#1}') ? md : md.replace('{>>@A (2024-01-15 10:30) | c<<}A', '{==A==}{>>@A (2024-01-15 10:30) | c<<}');
+    const zip = await JSZip.loadAsync((await convertMdToDocx(exported)).docx);
+    const xml = await zip.file('word/footnotes.xml')!.async('string');
+    const mark = '<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteRef/></w:r>';
+    expect(xml).toContain(mark + NOTE_SEPARATOR + '<w:commentRangeStart w:id="0"/>');
+    let edited = xml.replace(NOTE_SEPARATOR + '<w:commentRangeStart w:id="0"/>', NOTE_SEPARATOR)
+      .replace(mark + NOTE_SEPARATOR, start === 'mark' ? '<w:commentRangeStart w:id="0"/>' + mark + NOTE_SEPARATOR : mark + '<w:commentRangeStart w:id="0"/>' + NOTE_SEPARATOR);
+    if (end === 'mark') edited = edited.replace('<w:commentRangeEnd w:id="0"/>', '').replace(mark, mark + '<w:commentRangeEnd w:id="0"/>');
+    zip.file('word/footnotes.xml', edited);
+    const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(markdown).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  test.each([
     ['text', 'A.', 'footnotes'],
     ['code', '`c` A.', 'footnotes'],
     ['formatting', '**b** A.', 'footnotes'],

@@ -4290,16 +4290,22 @@ function parseNoteBody(
           // the mark's, where that left nothing, nor any where there's no
           // mark. One a change, a comment's range or formatting is written
           // around stays, as text's, but not where a Word user made the
-          // mark's paragraph code.
+          // mark's paragraph code, nor in the range of a comment that goes
+          // on over the text after it, as one on the whole note does, which
+          // then starts at that text, nor after a comment on the mark alone,
+          // which then comes before it.
           if (isCodeBlock && !markBefore && skippedSelfRef) {
             const first = target.slice(lenBeforeContent).find(walked => walked.type !== 'text' || walked.text !== '');
             if (first?.type === 'text') first.text = first.text.replace(/^[ \t]/, '');
           } else if (!isCodeBlock && !markBefore && afterMark !== undefined) {
             let at = afterMark;
-            const empty = (item: ContentItem | undefined) => item?.type === 'text' && item.text === '' && item.commentIds.size === 0;
+            const empty = (item: ContentItem | undefined) => item?.type === 'text' && item.text === '' && !item.revision;
             while (empty(target[at])) at++;
             const first = target[at];
-            if (first && isPlainText(first) && /^[ \t]/.test(first.text)) {
+            const next = first?.type === 'text' && first.text.length === 1 ? target[at + 1] : first;
+            const goesOn = (item: Extract<ContentItem, { type: 'text' }>) => [...item.commentIds]
+              .every(id => next !== undefined && 'commentIds' in next && !!next.commentIds?.has(id));
+            if (first?.type === 'text' && /^[ \t]/.test(first.text) && isPlainText({ ...first, commentIds: new Set() }) && goesOn(first)) {
               // Empty, it holds the place of a tracked mark (see trackedParaMark)
               if (first.text.length === 1 && !paraMarkRevision) target.splice(at, 1);
               else target[at] = { ...first, text: first.text.slice(1) };
