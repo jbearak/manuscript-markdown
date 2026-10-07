@@ -3,6 +3,10 @@ import * as fc from 'fast-check';
 import { parseBibtex, serializeBibtex, BibtexEntry } from './bibtex-parser';
 
 describe('BibTeX Parser Property Tests', () => {
+  // A field's whitespace as BibTeX reads it: a run of it one space, and
+  // none at either end
+  const asBibtexReadsIt = (s: string) => s.replace(/[ \t\r\n\f]+/g, ' ').replace(/^ | $/g, '');
+
   /**
    * Property 1 (Fault Condition): For any string s containing no braces,
    * parsing @article{k, title = {{s}}} yields s as the stored title.
@@ -19,7 +23,7 @@ describe('BibTeX Parser Property Tests', () => {
         const bibtex = '@article{k, title = {{' + s + '}}}';
         const result = parseBibtex(bibtex);
         const stored = result.get('k')?.fields.get('title');
-        const expected = s.normalize('NFC');
+        const expected = asBibtexReadsIt(s).normalize('NFC');
         if (stored !== expected) {
           throw new Error('Expected "' + expected + '" but got "' + stored + '"');
         }
@@ -45,7 +49,7 @@ describe('BibTeX Parser Property Tests', () => {
         const bibtex = '@article{k, title = {' + s + '}}';
         const result = parseBibtex(bibtex);
         const stored = result.get('k')?.fields.get('title');
-        const expected = s.normalize('NFC');
+        const expected = asBibtexReadsIt(s).normalize('NFC');
         if (stored !== expected) {
           throw new Error('Expected "' + expected + '" but got "' + stored + '"');
         }
@@ -67,7 +71,7 @@ describe('BibTeX Parser Property Tests', () => {
         { minKeys: 1, maxKeys: 5 }
       ).map(obj => new Map(Object.entries(obj).map(([fieldName, value]) => [
         fieldName,
-        fieldName === 'doi' ? value : value.normalize('NFC'),
+        fieldName === 'doi' ? value : asBibtexReadsIt(value).normalize('NFC'),
       ]))),
       zoteroKey: fc.option(fc.string({ minLength: 1, maxLength: 10 }).filter(s => 
         !s.includes('}') && !s.includes('"') && !s.includes('{') && !s.includes('\\')

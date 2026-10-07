@@ -413,6 +413,45 @@ describe('BibTeX TeX accent decoding', () => {
   });
 });
 
+describe('BibTeX field whitespace', () => {
+  // A value wrapped across lines kept its line end and indentation, which
+  // citeproc writes as no-break spaces, so the bibliography showed a gap
+  const field = (name: string, value: string) => parseBibtex('@article{k,\n  ' + name + ' = ' + value + '\n}').get('k')?.fields.get(name);
+
+  it.each([
+    ['a line end and indentation', '{A long title that\n           wraps}', 'A long title that wraps'],
+    ['a carriage return and line feed', '{A long title that\r\n\twraps}', 'A long title that wraps'],
+    ['runs of spaces and tabs', '{A  long\t\ttitle}', 'A long title'],
+    ['whitespace at the edges', '{ A title\n  }', 'A title'],
+    ['a quoted value', '"A long title that\n           wraps"', 'A long title that wraps'],
+    ['spaces around protecting braces', '{ {RNA} }', 'RNA'],
+    ['spaces inside protecting braces', '{{ RNA }}', 'RNA'],
+    ['an accent over a line end', '{Fran\\c\n    cois}', 'François'],
+  ])('reads %s as one space, or none at an edge', (_name, value, expected) => {
+    expect(field('title', value)).toBe(expected);
+  });
+
+  it('reads an author list wrapped across lines', () => {
+    expect(field('author', '{Doe, Jane and\n    Roe, Rick}')).toBe('Doe, Jane and Roe, Rick');
+  });
+
+  it('keeps a no-break space written as itself', () => {
+    expect(field('title', '{A\u00A0\n  B}')).toBe('A\u00A0 B');
+    expect(field('title', '{\u00A0A }')).toBe('\u00A0A');
+  });
+
+  it('keeps a note\'s line ends, which citeproc reads a line at a time', () => {
+    expect(field('note', '{original-date: 1850\n    PMID:  123\n}')).toBe('original-date: 1850\nPMID: 123');
+  });
+
+  it.each([
+    ['url', '{https://example.org/a\n    b}', 'https://example.org/a\n    b'],
+    ['doi', '{ 10.1234/abc }', ' 10.1234/abc '],
+  ])('leaves %s, which is verbatim, as it is', (name, value, expected) => {
+    expect(field(name, value)).toBe(expected);
+  });
+});
+
 describe('mergeBibtex line endings', () => {
   it('splices each entry using its own line ending, not the file majority', () => {
     // A mixed-ending file must not have its minority-convention entries

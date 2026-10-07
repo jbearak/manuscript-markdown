@@ -667,6 +667,8 @@ Each entry contains standard BibTeX fields:
 - `author`, `title`, `journal`/`booktitle`, `year`, `volume`, `number`, `pages`
 - `doi`, `url`, `publisher`, `edition`, `abstract`
 
+A field's whitespace reads as BibTeX reads it: each run of spaces, tabs and line ends is one space, with none at either end, so a value wrapped across lines reads as one line. A `note` keeps its line ends, as Zotero keeps its Extra field there, which citeproc reads a line at a time (`original-date: 1850`). `doi`, `url`, `isbn`, `issn` and `file` stay as written.
+
 When exported from Zotero via DOCX import, entries also include identity fields for roundtrip reconstruction:
 
 - `zotero-key` — the Zotero item key
