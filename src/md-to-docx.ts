@@ -216,6 +216,7 @@ export interface MdRun {
   imageHeight?: number;
   imageSyntax?: 'md' | 'html';
   imageSource?: string;     // the image as written, which export hides in the text when it can't embed the image
+  linkRId?: string;         // for an image in a link: the relationship of the link, which its drawing clicks to too, as Word writes a linked picture
 }
 
 /** An image's Markdown: as written, or for a reference, inline, with its
@@ -3466,6 +3467,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
               imageHeight: height,
               imageSyntax: 'html',
               imageSource: html,
+              href: currentHref,
             });
           } else {
             // Preserve malformed <img> tags as literal text
@@ -3667,6 +3669,7 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
           imageHeight: height,
           imageSyntax: 'md',
           imageSource: imageMarkdownSource(token, alt, attrs),
+          href: currentHref,
         });
         break;
       }
@@ -6400,7 +6403,13 @@ function formatCriticInnerRuns(runs: MdRun[] | undefined, outer: MdRun, forced: 
         : run);
       continue;
     }
-    if (run.type === 'math' || run.type === 'image' || isCommentMarkerRun(run)) {
+    if (run.type === 'image') {
+      // In the link around it, as text is
+      const href = run.href || outer.href || forced.href;
+      formatted.push(href ? { ...run, href } : run);
+      continue;
+    }
+    if (run.type === 'math' || isCommentMarkerRun(run)) {
       formatted.push(run);
       continue;
     }
@@ -6558,7 +6567,7 @@ function generateDeletedCriticContent(
       continue;
     }
     if (run.type === 'image') {
-      emit(imageRunXml(run, state, options, true));
+      emit(imageRunXml(run, state, options, true), run);
       continue;
     }
     if (run.type === 'citation') {
@@ -6681,8 +6690,8 @@ function insertionXml(insertedXml: string, author: string, dateAttr: string, sta
   return trackedChangeXml('w:ins', insertedXml, HYPERLINK_RE, author, dateAttr, state);
 }
 
-/** The runs a link's hyperlink holds: its text, line breaks and tracked changes */
-const LINK_RUN_TYPES = new Set<MdRun['type']>(['text', 'softbreak', 'hardbreak', 'critic_add', 'critic_del', 'critic_sub']);
+/** The runs a link's hyperlink holds: its text, line breaks, images and tracked changes */
+const LINK_RUN_TYPES = new Set<MdRun['type']>(['text', 'softbreak', 'hardbreak', 'image', 'critic_add', 'critic_del', 'critic_sub']);
 
 /** Whether a run's tracked change holds a link to somewhere other than `href` */
 function holdsOtherLink(run: MdRun, href: string): boolean {
@@ -6707,6 +6716,7 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
         && !holdsOtherLink(inputRuns[end], run.href)) end++;
       const withoutLink = (linkRun: MdRun): MdRun => ({
         ...linkRun, href: undefined,
+        ...(linkRun.type === 'image' ? { linkRId: hyperlinkRelationshipId(run.href!, state) } : {}),
         ...(linkRun.innerRuns ? { innerRuns: linkRun.innerRuns.map(withoutLink) } : {}),
         ...(linkRun.oldRuns ? { oldRuns: linkRun.oldRuns.map(withoutLink) } : {}),
         ...(linkRun.newRuns ? { newRuns: linkRun.newRuns.map(withoutLink) } : {}),
@@ -7084,10 +7094,14 @@ function imageRunXml(run: MdRun, state: DocxGenState, options: MdToDocxOptions |
   const cx = pixelsToEmu(width);
   const cy = pixelsToEmu(height);
   const docPrId = state.nextImageDocPrId++;
+  // A linked picture clicks to its link, which the hyperlink around its run
+  // holds too, as Word writes one
+  const linkRId = run.linkRId ?? (run.href ? hyperlinkRelationshipId(run.href, state) : undefined);
   return '<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">'
     + '<wp:extent cx="' + cx + '" cy="' + cy + '"/>'
     + '<wp:effectExtent l="0" t="0" r="0" b="0"/>'
-    + '<wp:docPr id="' + docPrId + '" name="' + escapeXml(src) + '" descr="' + escapeXml(alt) + '"/>'
+    + '<wp:docPr id="' + docPrId + '" name="' + escapeXml(src) + '" descr="' + escapeXml(alt) + '"'
+    + (linkRId ? '><a:hlinkClick xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" r:id="' + linkRId + '"/></wp:docPr>' : '/>')
     + '<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
     + '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
     + '<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">'

@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeAll } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import fc from 'fast-check';
 import JSZip from 'jszip';
 import { readFileSync } from 'fs';
@@ -14327,6 +14327,94 @@ describe('round-trip regression: image path preservation', () => {
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('round-trip regression: linked images', () => {
+  // Minimal 1x1 white PNG (67 bytes)
+  const TINY_PNG = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQI12NgAAIABQAB' +
+    'Nl7BcQAAAABJRU5ErkJggg==', 'base64');
+  const tmpDir = join(require('os').tmpdir(), 'mms-test-linked-img-' + Date.now());
+  const IMG = '![alt](image.png){width=100 height=100}';
+  const URL = 'https://example.com/';
+  const withoutFrontmatter = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+
+  beforeAll(() => {
+    const { mkdirSync, writeFileSync } = require('fs');
+    mkdirSync(tmpDir, { recursive: true });
+    writeFileSync(join(tmpDir, 'image.png'), TINY_PNG);
+  });
+  afterAll(() => require('fs').rmSync(tmpDir, { recursive: true, force: true }));
+
+  const toWord = async (md: string) => (await convertMdToDocx(md, { sourceDir: tmpDir })).docx;
+  const toMarkdown = async (docx: Uint8Array) => (await convertDocx(docx)).markdown;
+
+  /** Word from `md` with `edit` made to its document and its relationships */
+  async function edited(md: string, edit: (xml: string) => string): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync(await toWord(md));
+    zip.file('word/document.xml', edit(await zip.file('word/document.xml')!.async('string')));
+    const rels = 'word/_rels/document.xml.rels';
+    zip.file(rels, (await zip.file(rels)!.async('string')).replace('</Relationships>',
+      '<Relationship Id="rId90" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://w.example/" TargetMode="External"/></Relationships>'));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  test('writes a linked image in its hyperlink, with its docPr clicking to the link, as Word does', async () => {
+    // Export wrote the image outside the hyperlink, which held nothing
+    const zip = await JSZip.loadAsync(await toWord('[' + IMG + '](' + URL + ')'));
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const rId = /<w:hyperlink r:id="(rId\d+)"><w:r><w:drawing>/.exec(xml)?.[1];
+    expect(rId).toBeDefined();
+    expect(xml).toContain('<a:hlinkClick xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" r:id="' + rId + '"/></wp:docPr>');
+    expect(await zip.file('word/_rels/document.xml.rels')!.async('string')).toContain('Id="' + rId + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="' + URL + '"');
+  });
+
+  test.each([
+    ['a linked image', '[' + IMG + '](' + URL + ')'],
+    ['an image with text in a link', '[see ' + IMG + ' here](' + URL + ')'],
+    ['an image that starts a link with text', '[' + IMG + ' caption](' + URL + ')'],
+    ['an image after bold text in a link', '[**see** ' + IMG + '](' + URL + ')'],
+    ['two images in one link', '[' + IMG + IMG + '](' + URL + ')'],
+    ['two linked images', '[' + IMG + '](' + URL + ') [' + IMG + '](' + URL + ')'],
+    ['an HTML image in a link', '[<img src="image.png" alt="alt" width="100" height="100">](' + URL + ')'],
+    ['an image export can\'t embed in a link', '[![alt](missing.png)](' + URL + ')'],
+    ['an inserted image in a link', '[see {++' + IMG + '++} here](' + URL + ')'],
+    ['a deleted image in a link', '[see {--' + IMG + '--} here](' + URL + ')'],
+    ['an inserted linked image', '{++[' + IMG + '](' + URL + ')++}'],
+    ['a linked image in a comment\'s range', '{==[' + IMG + '](' + URL + ')==}{>>@A (2024-01-15 10:30) | c<<}'],
+    ['a linked image after a !', 'Wow\\![' + IMG + '](' + URL + ')'],
+    ['a linked image in a list item', '- [' + IMG + '](' + URL + ')'],
+    ['a linked image in a heading', '# H [' + IMG + '](' + URL + ')'],
+    ['a linked image in a table\'s cell', '| a |\n| --- |\n| [' + IMG + '](' + URL + ') |'],
+    ['a linked image in a note', 'T[^1]\n\n[^1]: N [' + IMG + '](' + URL + ').'],
+    // Whose escape import dropped, as it read no $ in the image's link
+    ['a $ before a linked image whose link has one', '\\$cost [' + IMG + '](' + URL + '$)'],
+    ['a $ before a linked HTML image whose link has one', '\\$cost [<img src="image.png" alt="alt" width="100" height="100">](' + URL + '$)'],
+    ['a $ before a linked image export can\'t embed whose link has one', '\\$cost [![alt](missing.png)](' + URL + '$)'],
+    ['a $ before an inserted linked image whose link has one', '\\$cost {++[' + IMG + '](' + URL + '$)++}'],
+  ])('keeps %s', async (_name, md) => {
+    // Import wrote the image without its link, and the text of the link
+    // around it in a link of each side, [see ](u)![alt](image.png)[ here](u)
+    const once = await toMarkdown(await toWord(md));
+    expect(withoutFrontmatter(once)).toBe(md + '\n');
+    expect(await toMarkdown(await toWord(once))).toBe(once);
+  });
+
+  test('keeps the link of an image in a comment\'s range in a link, as of text there', async () => {
+    const once = await toMarkdown(await toWord('[see {==' + IMG + '==}{>>@A (2024-01-15 10:30) | c<<} here](' + URL + ')'));
+    expect(withoutFrontmatter(once)).toBe('[see ](' + URL + '){==[' + IMG + '](' + URL + ')==}{>>@A (2024-01-15 10:30) | c<<}[ here](' + URL + ')\n');
+    expect(await toMarkdown(await toWord(once))).toBe(once);
+  });
+
+  test.each([
+    ['whose docPr alone clicks to a link', (xml: string) => xml.replace(/(<wp:docPr [^>]*?)\/>/, '$1><a:hlinkClick xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" r:id="rId90"/></wp:docPr>')],
+    ['in a hyperlink of its own', (xml: string) => xml.replace(/(<w:r><w:drawing>.*?<\/w:drawing><\/w:r>)/, '<w:hyperlink r:id="rId90">$1</w:hyperlink>')],
+  ])('reads an image %s as a linked image', async (_name, edit) => {
+    // Import read neither
+    const once = await toMarkdown(await edited('See ' + IMG + ' here.', edit));
+    expect(withoutFrontmatter(once)).toBe('See [' + IMG + '](https://w.example/) here.\n');
+    expect(await toMarkdown(await toWord(once))).toBe(once);
   });
 });
 
