@@ -13151,6 +13151,37 @@ describe('Landscape section round-trip', () => {
   });
 });
 
+describe('A template whose section properties have a tracked change', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  test('gives the sections export adds the page and margins of the template\'s own properties, not the change\'s old ones', async () => {
+    // Where the template had no page or margins of its own, its section
+    // breaks took the old properties' A3 page and narrow margins
+    const zip = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const at = xml.lastIndexOf('<w:sectPr');
+    const sectPr = xml.slice(at, xml.indexOf('</w:sectPr>', at));
+    const old = '<w:sectPrChange w:id="1" w:author="A" w:date="2024-01-01T00:00:00Z"><w:sectPr><w:pgSz w:w="16838" w:h="23811"/>'
+      + '<w:pgMar w:top="360" w:right="360" w:bottom="360" w:left="360" w:header="360" w:footer="360" w:gutter="0"/></w:sectPr></w:sectPrChange>';
+    zip.file('word/document.xml', xml.slice(0, at) + sectPr.replace(/<w:pgSz\b[^>]*\/>/, '').replace(/<w:pgMar\b[^>]*\/>/, '') + old + xml.slice(at + sectPr.length));
+    let templateDocx = await zip.generateAsync({ type: 'uint8array' });
+    const md = 'A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n\nC.\n';
+    const markdown: string[] = [];
+    // With the template, and again with the export as the template
+    for (let trip = 0; trip < 2; trip++) {
+      const { docx } = await convertMdToDocx(trip ? markdown[0] : md, { templateDocx });
+      const out = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+      const breaks = [...out.matchAll(/<w:pPr><w:sectPr\b[^>]*>([\s\S]*?)<\/w:sectPr><\/w:pPr>/g)].map(match => match[1]);
+      expect(breaks.map(sectPr => /<w:pgSz\b[^>]*\/>/.exec(sectPr)?.[0])).toEqual(['<w:pgSz w:w="12240" w:h="15840"/>', '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>']);
+      expect(breaks.every(sectPr => sectPr.includes('<w:pgMar w:top="1440"'))).toBe(true);
+      expect(out).toContain(old + '</w:sectPr>');
+      markdown.push((await convertDocx(docx)).markdown);
+      templateDocx = docx;
+    }
+    expect(strip(markdown[0])).toBe(md);
+    expect(markdown[1]).toBe(markdown[0]);
+  });
+});
+
 describe('A section at the start of the document', () => {
   const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
   const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
