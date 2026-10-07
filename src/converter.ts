@@ -1631,6 +1631,9 @@ interface NoteBodyContext {
 export interface TableRow {
   isHeader: boolean;
   cells: TableCell[];
+  // The change Word tracks the row's insertion or deletion with, which its
+  // cells' text is in (see rowRevision)
+  revision?: RevisionInfo;
 }
 export interface TableCell {
   paragraphs: ContentItem[][];
@@ -5388,7 +5391,7 @@ function parseNoteBody(
         } else if (key === 'w:tbl' && context && !inTableCell) {
           const markBefore = trackedParaMark;
           const tblChildren = asXmlNodes(node[key]);
-          const rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; marks?: (RevisionInfo | undefined)[]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> }> = [];
+          const rawRows: Parameters<typeof computeRowspans>[0] = [];
           const firstRowHeaderByLook = tableHasFirstRowHeader(tblChildren);
           // Where each cell is, for its table style's parts
           const look = tableLook(tblChildren);
@@ -5396,6 +5399,8 @@ function parseNoteBody(
           const columnCount = tableColumnCount(tblChildren);
           for (const tr of tblChildren.filter((c) => c['w:tr'] !== undefined)) {
             const trChildren = asXmlNodes(tr['w:tr']);
+            const ownChange = rowRevision(trChildren);
+            const rowChange = ownChange ?? currentRevision;
             const cells: Array<{ paragraphs: ContentItem[][]; marks?: (RevisionInfo | undefined)[]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> = [];
             for (const tc of trChildren.filter((c) => c['w:tc'] !== undefined)) {
               const tcChildren = asXmlNodes(tc['w:tc']);
@@ -5416,11 +5421,11 @@ function parseNoteBody(
                 }
               }
               const cellItems: ContentItem[] = [];
-              walkNoteBody(tcChildren, currentFormatting, cellItems, true, currentRevision);
+              walkNoteBody(tcChildren, currentFormatting, cellItems, true, rowChange);
               cells.push({ paragraphs: splitCellParagraphs(cellItems), ...cellParagraphMarks(cellItems), colspan, vMergeType, align: cellAlignment(tcChildren, context.styleLayouts, tableStyleId(tblChildren, context.styleLayouts),
                 { row: rawRows.length, rows: rowCount, col: cells.reduce((n, cell) => n + cell.colspan, 0), span: colspan, cols: columnCount, look }) });
             }
-            rawRows.push({ isHeader: rowHasHeaderProp(trChildren), cells });
+            rawRows.push({ isHeader: rowHasHeaderProp(trChildren), cells, ...(ownChange ? { revision: ownChange } : {}) });
           }
           if (firstRowHeaderByLook && rawRows.length > 0) {
             rawRows[0].isHeader = true;
@@ -6149,13 +6154,24 @@ function rowHasHeaderProp(trChildren: XmlNode[]): boolean {
   return val === '1' || val === 'true' || val === 'on';
 }
 
+/** The change Word tracks a table row's insertion or deletion with, which
+ *  its cells' text is in, though Word may not track their runs too, as
+ *  export reads a row whose cells' text is all in one (see rowRevision in
+ *  md-to-docx) */
+function rowRevision(trChildren: XmlNode[]): RevisionInfo | undefined {
+  const trPrNode = trChildren.find((c) => c['w:trPr'] !== undefined);
+  const change = trPrNode && asXmlNodes(trPrNode['w:trPr']).find(c => c['w:ins'] !== undefined || c['w:del'] !== undefined);
+  if (!change) return undefined;
+  return { type: change['w:ins'] !== undefined ? 'addition' : 'deletion', author: getAttr(change, 'author'), date: getAttr(change, 'date') };
+}
+
 /**
  * Convert raw rows (with vMerge annotations) into clean TableRows with numeric rowspan.
  * Continuation cells (vMerge without val="restart") are removed and the originating
  * cell's rowspan is set to the total number of merged rows.
  */
 export function computeRowspans(
-  rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; marks?: (RevisionInfo | undefined)[]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> }>
+  rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; marks?: (RevisionInfo | undefined)[]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }>; revision?: RevisionInfo }>
 ): TableRow[] {
   // Build a 2D grid: grid[rowIdx][gridCol] = reference to the raw cell
   const numRows = rawRows.length;
@@ -6224,7 +6240,7 @@ export function computeRowspans(
       if (rs && rs > 1) cell.rowspan = rs;
       cells.push(cell);
     }
-    result.push({ isHeader: rawRows[r].isHeader, cells });
+    result.push({ isHeader: rawRows[r].isHeader, cells, ...(rawRows[r].revision ? { revision: rawRows[r].revision } : {}) });
   }
 
   return result;
@@ -6591,7 +6607,7 @@ export async function extractDocumentContent(
         } else if (key === 'w:tbl' && !inTableCell) {
           const markBefore = trackedParaMark;
           const tblChildren = asXmlNodes(node[key]);
-          const rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; marks?: (RevisionInfo | undefined)[]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> }> = [];
+          const rawRows: Parameters<typeof computeRowspans>[0] = [];
           const firstRowHeaderByLook = tableHasFirstRowHeader(tblChildren);
           // Where each cell is, for its table style's parts
           const look = tableLook(tblChildren);
@@ -6599,6 +6615,8 @@ export async function extractDocumentContent(
           const columnCount = tableColumnCount(tblChildren);
           for (const tr of tblChildren.filter((c) => c['w:tr'] !== undefined)) {
             const trChildren = asXmlNodes(tr['w:tr']);
+            const ownChange = rowRevision(trChildren);
+            const rowChange = ownChange ?? currentRevision;
             const cells: Array<{ paragraphs: ContentItem[][]; marks?: (RevisionInfo | undefined)[]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> = [];
             for (const tc of trChildren.filter((c) => c['w:tc'] !== undefined)) {
               const tcChildren = asXmlNodes(tc['w:tc']);
@@ -6620,11 +6638,11 @@ export async function extractDocumentContent(
                 }
               }
               const cellItems: ContentItem[] = [];
-              walk(tcChildren, currentFormatting, cellItems, true, currentRevision);
+              walk(tcChildren, currentFormatting, cellItems, true, rowChange);
               cells.push({ paragraphs: splitCellParagraphs(cellItems), ...cellParagraphMarks(cellItems), colspan, vMergeType, align: cellAlignment(tcChildren, styleLayouts, tableStyleId(tblChildren, styleLayouts),
                 { row: rawRows.length, rows: rowCount, col: cells.reduce((n, cell) => n + cell.colspan, 0), span: colspan, cols: columnCount, look }) });
             }
-            rawRows.push({ isHeader: rowHasHeaderProp(trChildren), cells });
+            rawRows.push({ isHeader: rowHasHeaderProp(trChildren), cells, ...(ownChange ? { revision: ownChange } : {}) });
           }
           if (firstRowHeaderByLook && rawRows.length > 0) {
             rawRows[0].isHeader = true;
@@ -9761,7 +9779,13 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
       if (cell.align) attrs += ' align="' + cell.align + '"';
       lines.push(i2 + '<' + tag + attrs + '>');
       const paragraphs: string[] = [];
-      for (const para of cell.paragraphs) {
+      for (const cellPara of cell.paragraphs) {
+        // Without the change Word tracks the row with, which HTML cells
+        // can't hold, as their CriticMarkup exports as text, so the row's
+        // text comes in untracked, as a change to the text alone would,
+        // where the table is HTML, as for its merged cells or a font no
+        // directive can hold (see renderTableOrFallback)
+        const para = row.revision ? cellPara.map(item => 'revision' in item && item.revision === row.revision ? { ...item, revision: undefined } : item) : cellPara;
         // Export makes a header cell bold, as for a pipe table
         const runs = rawLineEndsAsBreaks(para);
         const items = mergeConsecutiveRuns(withoutHiddenCommentSpace(row.isHeader

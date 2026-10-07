@@ -7656,6 +7656,89 @@ function withParagraphMarkRevision(pPr: string, revision: string): string {
 }
 
 /**
+ * What Word shows of a table row's cells as export writes them (`xml`),
+ * each part by the tracked change it's in, the innermost where one is in
+ * another, as a deletion in an insertion: its kind, `ins` or `del`, or ''
+ * for none, and the change's attributes. A part is text but whitespace, a
+ * deletion's too, a drawing, a symbol, a non-breaking hyphen, a note's
+ * reference, an equation's text but whitespace, and a character an
+ * equation's structure draws: a fraction's bar, a radical, a bar, a box,
+ * an accent's, an operator's or a group's character, or a delimiter, but
+ * not an empty one, as `\left.\right.`'s. Not a hidden run's text, as of
+ * an image export can't embed, which it hides in the text, nor a tab or a
+ * line break, which show no more than spaces, nor a paragraph mark's
+ * change, a comment's range or its reference, nor a field's instruction.
+ */
+function shownChanges(xml: string): { kind: string; attrs: string }[] {
+  const shown: { kind: string; attrs: string }[] = [];
+  const open: string[] = [];
+  const changes: { kind: string; attrs: string }[] = [];
+  const runs: { hidden: boolean }[] = [];
+  // Equations' structures whose characters are in their properties
+  const structures: { tag: string; change: { kind: string; attrs: string }; chars: Map<string, string> }[] = [];
+  const none = { kind: '', attrs: '' };
+  const show = () => { if (!runs[runs.length - 1]?.hidden) shown.push(changes[changes.length - 1] ?? none); };
+  const val = (attrs: string) => /\s[wm]:val="([^"]*)"/.exec(attrs)?.[1];
+  for (const match of xml.matchAll(/<(\/?)([\w:]+)([^>]*?)(\/?)>|([^<]+)/g)) {
+    const [, closing, tag, attrs, selfClosing, text] = match;
+    if (text !== undefined) {
+      const parent = open[open.length - 1];
+      if ((parent === 'w:t' || parent === 'w:delText' || parent === 'm:t') && /\S/.test(text)) show();
+      continue;
+    }
+    if (closing) {
+      open.pop();
+      if (tag === 'w:ins' || tag === 'w:del') changes.pop();
+      else if (tag === 'w:r' || tag === 'm:r') runs.pop();
+      else if (structures[structures.length - 1]?.tag === tag) {
+        const { change, chars } = structures.pop()!;
+        const draws = tag === 'm:f' ? chars.get('m:type') !== 'noBar'
+          : tag === 'm:d' ? (chars.get('m:begChr') ?? '(') !== '' || (chars.get('m:endChr') ?? ')') !== ''
+            : chars.get('m:chr') !== '';
+        if (draws) shown.push(change);
+      }
+      continue;
+    }
+    if (tag === 'w:vanish' && open[open.length - 1] === 'w:rPr' && /^[wm]:r$/.test(open[open.length - 2] ?? '')
+        && !['0', 'false', 'off'].includes(val(attrs) ?? '')) {
+      runs[runs.length - 1].hidden = true;
+    } else if (['w:drawing', 'w:pict', 'w:object', 'w:sym', 'w:noBreakHyphen', 'w:footnoteReference', 'w:endnoteReference',
+      'm:rad', 'm:bar', 'm:borderBox'].includes(tag)) {
+      show();
+    } else if (['m:type', 'm:chr', 'm:begChr', 'm:endChr'].includes(tag) && structures.length > 0) {
+      structures[structures.length - 1].chars.set(tag, val(attrs) ?? '');
+    }
+    if (selfClosing) continue;
+    open.push(tag);
+    if (tag === 'w:ins' || tag === 'w:del') changes.push({ kind: tag.slice(2), attrs });
+    else if (tag === 'w:r' || tag === 'm:r') runs.push({ hidden: false });
+    else if (['m:f', 'm:d', 'm:acc', 'm:nary', 'm:groupChr'].includes(tag)) {
+      structures.push({ tag, change: changes[changes.length - 1] ?? none, chars: new Map() });
+    }
+  }
+  return shown;
+}
+
+/**
+ * The w:ins or w:del that tracks a table row as inserted or deleted, or '':
+ * where all that Word shows of its cells as export writes them (`cellsXml`,
+ * see shownChanges) is in insertions, or all in deletions, with the first
+ * change's author and date. Whitespace and comments outside the changes
+ * don't count, as a comment's anchor around one, `{=={++c++}==}`, as import
+ * writes a row Word tracks so. Accepting or rejecting the change then takes
+ * the row or keeps it, whole, where with its cells' text alone it left an
+ * empty row. A row where nothing shows, as an empty one, isn't tracked, as
+ * rejecting it would delete a row with nothing to see.
+ */
+function rowRevision(cellsXml: string, state: DocxGenState): string {
+  const shown = shownChanges(cellsXml);
+  const kind = shown[0]?.kind;
+  if (!kind || shown.some(part => part.kind !== kind)) return '';
+  const attrs = ['author', 'date'].map(name => new RegExp('\\sw:' + name + '="[^"]*"').exec(shown[0].attrs)?.[0] ?? '').join('');
+  return '<w:' + kind + ' w:id="' + (state.commentId++) + '"' + attrs + '/>';
+}
+
+/**
  * A paragraph's runs without the spaces and line breaks around comment
  * bodies ({#id>>...<<}) at either end of a line, which Word would show: the
  * spaces between such bodies and the text beside them, and the line ends
@@ -8344,10 +8427,8 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
     const horizontalCellBorders = isLastHeaderRow
       ? '<w:tcBorders><w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/></w:tcBorders>'
       : '';
-    xml += '<w:tr>';
-    if (row.header) {
-      xml += '<w:trPr><w:tblHeader/></w:trPr>';
-    }
+    // The row's cells, which its own change goes by (see rowRevision)
+    let cellsXml = '';
     let cellIdx = 0;
     let gridCol = 0;
 
@@ -8369,7 +8450,7 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
         tcPr += '<w:vMerge/>';
         if (horizontalCellBorders) tcPr += horizontalCellBorders;
         tcPr += '</w:tcPr>';
-        xml += '<w:tc>' + tcPr + '<w:p/></w:tc>';
+        cellsXml += '<w:tc>' + tcPr + '<w:p/></w:tc>';
         pending.remaining--;
         if (pending.remaining === 0) mergeMap.delete(gridCol);
         gridCol += pending.colspan;
@@ -8380,9 +8461,9 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
       if (cellIdx >= row.cells.length) {
         // Pad with empty cells if row is short
         if (colWidthPcts && gridCol < colWidthPcts.length) {
-          xml += '<w:tc><w:tcPr><w:tcW w:w="' + colWidthPcts[gridCol] + '" w:type="pct"/></w:tcPr><w:p/></w:tc>';
+          cellsXml += '<w:tc><w:tcPr><w:tcW w:w="' + colWidthPcts[gridCol] + '" w:type="pct"/></w:tcPr><w:p/></w:tc>';
         } else {
-          xml += '<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr><w:p/></w:tc>';
+          cellsXml += '<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr><w:p/></w:tc>';
         }
         gridCol++;
         continue;
@@ -8415,7 +8496,7 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
         mergeMap.set(gridCol, { remaining: rs - 1, colspan: cs });
       }
 
-      xml += '<w:tc>' + tcPr;
+      cellsXml += '<w:tc>' + tcPr;
       // Auto-bold header cells to match Word's default table header styling.
       // Word applies bold to header rows via table styles; we reproduce that here.
       const cellRuns = withoutCommentBodyLines(row.header ? cell.runs.map(boldHeaderRun) : cell.runs);
@@ -8432,13 +8513,15 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
         }
         // With its mark tracked where the break after it is (see htmlCellRuns)
         const mark = run.cellParagraphMark ? paragraphMarkRevision({ type: 'paragraph', runs: [], criticParaMark: run.cellParagraphMark }, state, options) : '';
-        xml += '<w:p>' + withParagraphMarkRevision(cellPPr, mark) + generateRuns(paragraphRuns, state, options, bibEntries, citeprocEngine) + '</w:p>';
+        cellsXml += '<w:p>' + withParagraphMarkRevision(cellPPr, mark) + generateRuns(paragraphRuns, state, options, bibEntries, citeprocEngine) + '</w:p>';
         paragraphRuns = [];
       }
-      xml += '</w:tc>';
+      cellsXml += '</w:tc>';
       gridCol += cs;
     }
-    xml += '</w:tr>';
+    // A row's own change goes after the rest of its properties
+    const revision = rowRevision(cellsXml, state);
+    xml += '<w:tr>' + (row.header || revision ? '<w:trPr>' + (row.header ? '<w:tblHeader/>' : '') + revision + '</w:trPr>' : '') + cellsXml + '</w:tr>';
   }
 
   state.tableRunRPrExtra = prevRunRPrExtra;
