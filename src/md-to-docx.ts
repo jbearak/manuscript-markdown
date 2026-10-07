@@ -20,7 +20,7 @@ import { pixelsToEmu, isSupportedImageFormat, getImageContentType, readImageDime
 import { preprocessGridTables, gridColumnAlign, getDisplayWidth, GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData, type TableAlign } from './grid-table-preprocess';
 import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
-import { extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
+import { cellParagraphMarkAt, extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
 import { decodeHtmlAttribute } from './html-entities';
 import { matchCriticHeadingPrefix } from './critic-markup';
 import { commentsEnd, htmlBlockKind, listItemHtmlBlock } from './html-blocks';
@@ -174,6 +174,7 @@ export interface MdRun {
   criticParagraphBreak?: true; // first of two softbreaks representing a blank line inside a Critic payload
   linkStart?: true; // first run of a link, where a hyperlink starts though the run before goes to the same place
   cellParagraphBreak?: true; // hardbreak between two of an HTML table cell's paragraphs, which generateTable splits on
+  cellParagraphMark?: 'addition' | 'deletion'; // for a cellParagraphBreak: the revision that tracks the mark of the paragraph it ends (see htmlCellRuns)
   newline?: true; // hardbreak a newline made, in breaks mode or a grid table's cell, which a line of comment bodies drops as a softbreak
   htmlBreak?: true; // hardbreak an HTML <br> made, which ends no line of the source, so no alert's marker starts a line after it
   type: 'text' | 'critic_add' | 'critic_del' | 'critic_sub' | 'critic_highlight' | 'critic_comment' | 'citation' | 'math' | 'softbreak' | 'hardbreak' | 'comment_range_start' | 'comment_range_end' | 'comment_body_with_id' | 'footnote_ref' | 'html_comment' | 'image';
@@ -259,11 +260,35 @@ function mapHtmlTableRunToMdRun(run: HtmlTableRun): MdRun {
   };
 }
 
+/**
+ * An HTML cell's runs, with each break between its paragraphs that a span
+ * of CriticMarkup holds alone, its opener ending the paragraph's text and
+ * its closer starting the next's, as import writes a tracked paragraph mark
+ * in a cell, `<p>a{++</p><p>++}b</p>`, as a break whose paragraph's mark the
+ * span's kind tracks, where the HTML writes them as they are. Other
+ * CriticMarkup in a cell is text, and so are delimiters with a character
+ * reference in them, as `&#123;++`, which import writes for text.
+ */
+function htmlCellRuns(runs: HtmlTableRun[]): MdRun[] {
+  const mapped = runs.map(mapHtmlTableRunToMdRun);
+  // The text the span's delimiters were all of
+  const emptied = new Set<MdRun>();
+  for (let i = 1; i + 1 < mapped.length; i++) {
+    const mark = cellParagraphMarkAt(runs, i);
+    if (!mark) continue;
+    mapped[i - 1] = { ...mapped[i - 1], text: mapped[i - 1].text.slice(0, -mark.opener.length) };
+    mapped[i + 1] = { ...mapped[i + 1], text: mapped[i + 1].text.slice(mark.closer.length) };
+    mapped[i] = { ...mapped[i], cellParagraphMark: mark.type };
+    for (const run of [mapped[i - 1], mapped[i + 1]]) if (run.text === '') emptied.add(run);
+  }
+  return mapped.filter(run => !emptied.has(run));
+}
+
 function mapHtmlTableRowsToMdTableRows(rows: HtmlTableRow[]): MdTableRow[] {
   return rows.map(row => ({
     header: row.header,
     cells: row.cells.map(cell => ({
-      runs: cell.runs.map(mapHtmlTableRunToMdRun),
+      runs: htmlCellRuns(cell.runs),
       ...(cell.colspan && cell.colspan > 1 ? { colspan: cell.colspan } : {}),
       ...(cell.rowspan && cell.rowspan > 1 ? { rowspan: cell.rowspan } : {}),
       ...(cell.align ? { align: cell.align } : {}),
@@ -8314,7 +8339,9 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
           paragraphRuns.push(run);
           continue;
         }
-        xml += '<w:p>' + cellPPr + generateRuns(paragraphRuns, state, options, bibEntries, citeprocEngine) + '</w:p>';
+        // With its mark tracked where the break after it is (see htmlCellRuns)
+        const mark = run.cellParagraphMark ? paragraphMarkRevision({ type: 'paragraph', runs: [], criticParaMark: run.cellParagraphMark }, state, options) : '';
+        xml += '<w:p>' + withParagraphMarkRevision(cellPPr, mark) + generateRuns(paragraphRuns, state, options, bibEntries, citeprocEngine) + '</w:p>';
         paragraphRuns = [];
       }
       xml += '</w:tc>';

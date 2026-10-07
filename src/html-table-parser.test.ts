@@ -186,24 +186,33 @@ describe('HTML table cell paragraphs', () => {
   });
 
   test('keeps whitespace written as references, which HTML neither collapses nor trims', () => {
-    expect(runs('<p>&#9;a &#32;b&nbsp;</p>')).toEqual([{ type: 'text', text: '\ta  b ' }]);
+    expect(runs('<p>&#9;a &#32;b&nbsp;</p>')).toEqual([{ type: 'text', text: '\ta  b ', html: '&#9;a &#32;b&nbsp;' }]);
   });
 
   test('reads a named reference in an attribute only by a whole name, as the browser does', () => {
     // href read &notit; as ¬it;, by &not, which HTML reads without its ; in
     // text, but not in an attribute, where a letter follows it
-    expect(runs('<a href="x&notit;y&not;z&copy;">t&notit;</a>')).toEqual([{ type: 'text', text: 't\u00acit;', href: 'x&notit;y\u00acz\u00a9', linkStart: true }]);
+    expect(runs('<a href="x&notit;y&not;z&copy;">t&notit;</a>')).toEqual([{ type: 'text', text: 't\u00acit;', html: 't&notit;', href: 'x&notit;y\u00acz\u00a9', linkStart: true }]);
   });
 
   test('reads a legacy name without its ; as the browser does, in text and in an attribute', () => {
     // HTML reads &copy and &lt without the ;, but in an attribute not before
     // a letter, a digit or an =, so a query's &copy=2 stays
-    expect(runs('<a href="?a=1&copy=2&b&lt">t&copy x&ltb</a>')).toEqual([{ type: 'text', text: 't\u00a9 x<b', href: '?a=1&copy=2&b<', linkStart: true }]);
+    expect(runs('<a href="?a=1&copy=2&b&lt">t&copy x&ltb</a>')).toEqual([{ type: 'text', text: 't\u00a9 x<b', html: 't&copy x&ltb', href: '?a=1&copy=2&b<', linkStart: true }]);
+  });
+
+  test('keeps a text run\'s HTML where a reference makes it differ from its text', () => {
+    // Which export reads a tracked mark's span in, as text where it has one
+    expect(runs('<p>a&#123;++</p><p>++}b</p>')).toEqual([
+      { type: 'text', text: 'a{++', html: 'a&#123;++' },
+      { type: 'paragraph', text: '\n\n' },
+      { type: 'text', text: '++}b' },
+    ]);
   });
 
   test('reads a reference once, so the text one writes stays text', () => {
     // &#38; made an & of the next reference, which read as one too
-    expect(runs('&#38;#x80; &#38;#128; &amp;#128;')).toEqual([{ type: 'text', text: '&#x80; &#128; &#128;' }]);
+    expect(runs('&#38;#x80; &#38;#128; &amp;#128;')).toEqual([{ type: 'text', text: '&#x80; &#128; &#128;', html: '&#38;#x80; &#38;#128; &amp;#128;' }]);
   });
 });
 
