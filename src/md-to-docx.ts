@@ -4041,10 +4041,18 @@ function pageContentWidthPx(state: DocxGenState): number {
   return Math.max(1, (pageWidthTwips - left - right) / 15);
 }
 
-/** Parse w:pgSz from a sectPr XML string, defaulting to US Letter portrait. */
+/** A sectPr's own properties, before its last child, w:sectPrChange, a
+ *  tracked change's old properties, which hold a w:sectPr of their own */
+function ownSectPrXml(sectPrXml: string): string {
+  const change = sectPrXml.indexOf('<w:sectPrChange');
+  return change === -1 ? sectPrXml : sectPrXml.slice(0, change);
+}
+
+/** Parse w:pgSz from a sectPr XML string, defaulting to US Letter portrait.
+ *  Its own page, not a tracked change's old one. */
 export function parseTemplatePgSz(sectPrXml: string | undefined): PageSize {
   if (!sectPrXml) return { w: DEFAULT_PAGE_W, h: DEFAULT_PAGE_H };
-  const m = sectPrXml.match(/<w:pgSz\b([^/>]*)\/?>/);
+  const m = ownSectPrXml(sectPrXml).match(/<w:pgSz\b([^/>]*)\/?>/);
   if (!m) return { w: DEFAULT_PAGE_W, h: DEFAULT_PAGE_H };
   const wMatch = m[1].match(/w:w="(\d+)"/);
   const hMatch = m[1].match(/w:h="(\d+)"/);
@@ -4052,13 +4060,6 @@ export function parseTemplatePgSz(sectPrXml: string | undefined): PageSize {
   const h = hMatch ? parseInt(hMatch[1], 10) : DEFAULT_PAGE_H;
   // Normalize to portrait (smaller value = width)
   return w <= h ? { w, h } : { w: h, h: w };
-}
-
-/** A sectPr's own properties, before its last child, w:sectPrChange, a
- *  tracked change's old properties, which hold a w:sectPr of their own */
-function ownSectPrXml(sectPrXml: string): string {
-  const change = sectPrXml.indexOf('<w:sectPrChange');
-  return change === -1 ? sectPrXml : sectPrXml.slice(0, change);
 }
 
 /** Whether a sectPr's page is landscape, as import reads it: turned, or
@@ -4071,10 +4072,11 @@ function isLandscapeSectPr(sectPrXml: string): boolean {
   return /w:orient="landscape"/.test(m[1]) || w > 0 && h > 0 && w > h;
 }
 
-/** Parse w:pgMar from a sectPr XML string, returning the raw attribute string. */
+/** Parse w:pgMar from a sectPr XML string, returning the raw attribute
+ *  string. Its own margins, not a tracked change's old ones. */
 function parseTemplateMargins(sectPrXml: string | undefined): string {
   if (!sectPrXml) return DEFAULT_MARGINS;
-  const m = sectPrXml.match(/<w:pgMar\b([^/>]*)\/?>/);
+  const m = ownSectPrXml(sectPrXml).match(/<w:pgMar\b([^/>]*)\/?>/);
   if (!m) return DEFAULT_MARGINS;
   // Return the raw attributes
   return m[1].trim();

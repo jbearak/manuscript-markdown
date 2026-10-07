@@ -4842,6 +4842,26 @@ describe('landscape sections', () => {
       const sectPr = '<w:sectPr><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/></w:sectPr>';
       expect(parseTemplatePgSz(sectPr)).toEqual({ w: 11906, h: 16838 });
     });
+
+    it.each([
+      ['no page or margins of its own', ''],
+      ['a page and margins of its own', '<w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="360" w:footer="360" w:gutter="0"/>'],
+    ])('gives the sections a template with %s and a tracked change\'s old ones has its own page and margins, not the old ones', (_, own) => {
+      // A section break took the old properties' page and margins, where the
+      // template had none of its own
+      const state = makeState();
+      state.templateSectPr = '<w:sectPr>' + own + '<w:cols w:space="720"/><w:sectPrChange w:id="1" w:author="A" w:date="2024-01-01T00:00:00Z"><w:sectPr>'
+        + '<w:pgSz w:w="15840" w:h="24480"/><w:pgMar w:top="100" w:right="100" w:bottom="100" w:left="100" w:header="100" w:footer="100" w:gutter="0"/></w:sectPr></w:sectPrChange></w:sectPr>';
+      expect(parseTemplatePgSz(state.templateSectPr)).toEqual(own ? { w: 11906, h: 16838 } : { w: 12240, h: 15840 });
+      const xml = generateDocumentXml(parseMd('A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->\n\nC.'), state);
+      const breaks = [...xml.matchAll(/<w:pPr><w:sectPr\b[^>]*>([\s\S]*?)<\/w:sectPr><\/w:pPr>/g)].map(match => match[1]);
+      expect(breaks).toHaveLength(2);
+      for (const sectPr of breaks) {
+        expect(sectPr).not.toContain('24480');
+        expect(sectPr).not.toContain('w:top="100"');
+        expect(sectPr).toContain(own ? 'w:top="720"' : 'w:top="1440"');
+      }
+    });
   });
 
   describe('generateDocumentXml', () => {
