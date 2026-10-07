@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'bun:test';
-import { generateCitation, orderRPr, generateCitationId, generateMathXml, escapeXml, generateMissingKeysXml, htmlToOoxmlRuns, generateFallbackText, bibliographyEntryAsShown, createCiteprocEngine, renderBibliography, renderCitationText } from './md-to-docx-citations';
+import JSZip from 'jszip';
+import { generateCitation, orderRPr, generateCitationId, generateMathXml, escapeXml, generateMissingKeysXml, htmlToOoxmlRuns, generateFallbackText, bibliographyEntryAsShown, createCiteprocEngine, renderBibliography, renderCitationText, textElements } from './md-to-docx-citations';
 import { BibtexEntry, parseBibtex } from './bibtex-parser';
-import { parseMd, type MdRun } from './md-to-docx';
+import { parseMd, convertMdToDocx, type MdRun } from './md-to-docx';
 
 /** Extract and parse the CSL_CITATION JSON from a Zotero field code XML string. */
 function extractCsl(xml: string) {
@@ -622,6 +623,37 @@ describe('bibliographyEntryAsShown', () => {
 
   it('keeps a non-breaking space, which HTML shows', () => {
     expect(runs('<div class="csl-entry">A\u00A0 \u00A0 B</div>')).toBe('<w:r><w:t>A\u00A0 \u00A0 B</w:t></w:r>');
+  });
+});
+
+describe('htmlToOoxmlRuns formatting citeproc writes', () => {
+  // citeproc turns off an outer element's formatting with a span inside it
+  const t = (rPr: string, text: string) => '<w:r>' + (rPr ? '<w:rPr>' + rPr + '</w:rPr>' : '') + textElements(text) + '</w:r>';
+
+  it.each([
+    ['normal text in italic', '<i>a <span style="font-style:normal;">b</span> c</i>', t('<w:i/>', 'a ') + t('', 'b') + t('<w:i/>', ' c')],
+    ['italic in italic', '<i>a <i>b</i> c</i>', t('<w:i/>', 'a ') + t('<w:i/>', 'b') + t('<w:i/>', ' c')],
+    ['oblique', '<em>a</em>', t('<w:i/>', 'a')],
+    ['normal weight in bold', '<b>a <span style="font-weight:normal;">b</span></b>', t('<w:b/>', 'a ') + t('', 'b')],
+    ['normal small caps in small caps', '<span style="font-variant:small-caps;">a <span style="font-variant:normal;">b</span> c</span>',
+      t('<w:smallCaps/>', 'a ') + t('', 'b') + t('<w:smallCaps/>', ' c')],
+    ['an underline', '<span style="text-decoration:underline;">a</span>', t('<w:u w:val="single"/>', 'a')],
+    ['no underline in an underline', '<span style="text-decoration:underline;">a <span style="text-decoration:none;">b</span></span>',
+      t('<w:u w:val="single"/>', 'a ') + t('', 'b')],
+    ['the baseline in a superscript', '<sup>a<span style="baseline">b</span></sup>', t('<w:vertAlign w:val="superscript"/>', 'a') + t('', 'b')],
+    ['the baseline in a subscript', '<sub>a<span style="baseline">b</span></sub>', t('<w:vertAlign w:val="subscript"/>', 'a') + t('', 'b')],
+    ['italic in normal text in italic', '<i>a <span style="font-style:normal;">b <i>c</i></span></i>', t('<w:i/>', 'a ') + t('', 'b ') + t('<w:i/>', 'c')],
+  ])('writes %s', (_name, html, expected) => {
+    expect(htmlToOoxmlRuns(html)).toBe(expected);
+  });
+
+  it('writes a title in an italic title as roman, as citeproc formats it', async () => {
+    const bibtex = '@book{b,\n  author = {Smith, Sam},\n  title = {The <i>Origin</i> of Species},\n  publisher = {Press},\n  year = {2019}\n}\n';
+    const { docx } = await convertMdToDocx('A [@b].\n', { bibtex });
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const entry = xml.match(/<w:pStyle w:val="Bibliography"\/>.*?<\/w:p>/)![0];
+    expect(entry).toContain('<w:r><w:t>Origin</w:t></w:r>');
+    expect(entry).toContain('<w:r><w:rPr><w:i/></w:rPr><w:t xml:space="preserve"> of Species</w:t></w:r>');
   });
 });
 

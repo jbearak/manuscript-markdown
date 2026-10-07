@@ -149,27 +149,60 @@ export function orderRPr(children: string): string {
   return elements.sort((a, b) => rank(a) - rank(b)).join('');
 }
 
+/** The formatting citeproc's HTML sets, as htmlToOoxmlRuns writes it */
+interface HtmlRunFormat {
+  italic?: boolean;
+  bold?: boolean;
+  underline?: boolean;
+  smallCaps?: boolean;
+  vertAlign?: 'superscript' | 'subscript' | 'baseline';
+}
+
+// The elements citeproc writes for formatting (CSL.Output.Formats.html):
+// <em> is oblique, and the rest it writes as a span's style
+const HTML_ELEMENT_FORMATS: Readonly<Record<string, HtmlRunFormat>> = {
+  i: { italic: true }, em: { italic: true }, b: { bold: true },
+  sup: { vertAlign: 'superscript' }, sub: { vertAlign: 'subscript' },
+};
+
+/** What a span's style sets: a declaration citeproc writes, as
+ *  `font-style:normal;`, which turns off the italic of an element around
+ *  it, or `baseline` alone, which it writes for vertical-align="baseline" */
+function spanFormat(attrs: string): HtmlRunFormat {
+  const format: HtmlRunFormat = {};
+  const style = /\bstyle\s*=\s*"([^"]*)"/i.exec(attrs);
+  for (const declaration of (style?.[1] ?? '').split(';')) {
+    const [property, value = ''] = declaration.split(':').map(part => part.trim().toLowerCase());
+    if (property === 'baseline' && !value) format.vertAlign = 'baseline';
+    else if (property === 'font-style') format.italic = value === 'italic' || value === 'oblique';
+    else if (property === 'font-weight') format.bold = value === 'bold';
+    else if (property === 'font-variant') format.smallCaps = value === 'small-caps';
+    else if (property === 'text-decoration') format.underline = value === 'underline';
+  }
+  return format;
+}
+
 /**
  * Convert citeproc HTML output (e.g. `<i>1</i>`) to OOXML runs with
- * proper formatting.  Handles `<i>`, `<b>`, `<sup>`, `<sub>`,
- * `<span style="...small-caps...">`, and `<br>`, as Word's line break.
+ * proper formatting: that of `<i>`, `<em>`, `<b>`, `<sup>`, `<sub>`, and a
+ * `<span>`'s style, small caps, underline, and the `:normal`, `none` and
+ * `baseline` ones, each of which turns off for what it holds what an
+ * element around it turned on, as in an italic title within an italic one,
+ * and `<br>`, as Word's line break.
  */
 export function htmlToOoxmlRuns(html: string, extraRPr?: string): string {
-  const runs: { text: string; italic: boolean; bold: boolean; sup: boolean; sub: boolean; smallCaps: boolean; lineBreak?: true }[] = [];
+  const runs: { text: string; format: HtmlRunFormat; lineBreak?: true }[] = [];
+  // The elements open, each with what it sets, the inner over the outer
+  const open: { name: string; format: HtmlRunFormat }[] = [];
+  const format = (): HtmlRunFormat => Object.assign({}, ...open.map(element => element.format));
 
   let pos = 0;
   let currentText = '';
-  let italic = false;
-  let bold = false;
-  let sup = false;
-  let sub = false;
-  let smallCapsDepth = 0;
-  let spanDepth = 0;
 
   while (pos < html.length) {
     if (html[pos] === '<') {
       if (currentText) {
-        runs.push({ text: currentText, italic, bold, sup, sub, smallCaps: smallCapsDepth > 0 });
+        runs.push({ text: currentText, format: format() });
         currentText = '';
       }
 
@@ -179,25 +212,20 @@ export function htmlToOoxmlRuns(html: string, extraRPr?: string): string {
         break;
       }
 
-      const tag = html.slice(pos + 1, tagEnd).trim();
-
-      if (tag === 'i') italic = true;
-      else if (tag === '/i') italic = false;
-      else if (tag === 'b') bold = true;
-      else if (tag === '/b') bold = false;
-      else if (tag === 'sup') sup = true;
-      else if (tag === '/sup') sup = false;
-      else if (tag === 'sub') sub = true;
-      else if (tag === '/sub') sub = false;
-      else if (tag.startsWith('span')) {
-        spanDepth++;
-        if (tag.includes('small-caps')) smallCapsDepth = spanDepth;
+      const tag = /^(\/?)([A-Za-z][\w-]*)([\s\S]*)$/.exec(html.slice(pos + 1, tagEnd).trim());
+      if (tag) {
+        const name = tag[2].toLowerCase();
+        // A line break, an element with no end, which sets nothing
+        if (name === 'br' && !tag[1] && /^\s*\/?$/.test(tag[3])) {
+          runs.push({ text: '', format: {}, lineBreak: true });
+        } else if (tag[1]) {
+          // The end of the last element of that name, and of any left open in it
+          const at = open.map(element => element.name).lastIndexOf(name);
+          if (at >= 0) open.length = at;
+        } else if (!tag[3].endsWith('/')) {
+          open.push({ name, format: name === 'span' ? spanFormat(tag[3]) : HTML_ELEMENT_FORMATS[name] ?? {} });
+        }
       }
-      else if (tag === '/span') {
-        if (spanDepth === smallCapsDepth) smallCapsDepth = 0;
-        spanDepth = Math.max(0, spanDepth - 1);
-      }
-      else if (/^br\s*\/?$/i.test(tag)) runs.push({ text: '', italic, bold, sup, sub, smallCaps: false, lineBreak: true });
 
       pos = tagEnd + 1;
     } else {
@@ -207,21 +235,21 @@ export function htmlToOoxmlRuns(html: string, extraRPr?: string): string {
   }
 
   if (currentText) {
-    runs.push({ text: currentText, italic, bold, sup, sub, smallCaps: smallCapsDepth > 0 });
+    runs.push({ text: currentText, format: format() });
   }
 
-  return runs.map(run => {
-    if (run.lineBreak) return '<w:r><w:br/></w:r>';
+  return runs.map(({ text, format: run, lineBreak }) => {
+    if (lineBreak) return '<w:r><w:br/></w:r>';
     const rPr: string[] = [];
     if (run.italic) rPr.push('<w:i/>');
     if (run.bold) rPr.push('<w:b/>');
-    if (run.sup) rPr.push('<w:vertAlign w:val="superscript"/>');
-    if (run.sub) rPr.push('<w:vertAlign w:val="subscript"/>');
+    if (run.underline) rPr.push('<w:u w:val="single"/>');
+    if (run.vertAlign === 'superscript' || run.vertAlign === 'subscript') rPr.push('<w:vertAlign w:val="' + run.vertAlign + '"/>');
     if (run.smallCaps) rPr.push('<w:smallCaps/>');
     if (extraRPr) rPr.push(extraRPr);
 
     const rPrXml = rPr.length > 0 ? '<w:rPr>' + orderRPr(rPr.join('')) + '</w:rPr>' : '';
-    return '<w:r>' + rPrXml + textElements(decodeHtmlEntities(run.text)) + '</w:r>';
+    return '<w:r>' + rPrXml + textElements(decodeHtmlEntities(text)) + '</w:r>';
   }).join('');
 }
 
