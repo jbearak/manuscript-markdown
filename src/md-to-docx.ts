@@ -13,7 +13,7 @@ import { parseFrontmatter, maskFrontmatter, serializeFrontmatter, Frontmatter, n
 import { formatTableNumbers, parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping, type TableDigits, type TableDecimalMark, type TableDigitGrouping } from './table-number-format';
 import { paragraphStartFingerprint, tableContentsFingerprint, tableFirstRowText, tableIdentity, type TableIdentity, type TableNumberFormat } from './table-metadata';
 import { alertColorsByScheme, getDefaultColorScheme } from './alert-colors';
-import { imageAltMarkdown, type ListMeta, type UnnumberedListParagraph, listPlacesOf, styleListMeta, ZoteroBiblData, zoteroStyleFullId } from './converter';
+import { imageAltMarkdown, type ListMeta, type UnnumberedListParagraph, listPlacesOf, runContentShows, styleListMeta, ZoteroBiblData, zoteroStyleFullId } from './converter';
 import { isGfmDisallowedRawHtml, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from './gfm';
 import { scanOrientationDirectives } from './orientation-scan';
 import { pixelsToEmu, isSupportedImageFormat, getImageContentType, readImageDimensions, computeMissingDimension, IMAGE_WARNINGS, parseImageDimension } from './image-utils';
@@ -8192,14 +8192,16 @@ function withParagraphMarkRevision(pPr: string, revision: string): string {
  * each part by the tracked change it's in, the innermost where one is in
  * another, as a deletion in an insertion: its kind, `ins` or `del`, or ''
  * for none, and the change's attributes. A part is text but whitespace, a
- * deletion's too, a drawing, a symbol, a non-breaking hyphen, a note's
- * reference, an equation's text but whitespace, and a character an
+ * deletion's too, a symbol, the rest of a run's content that shows
+ * something, as a drawing, a non-breaking hyphen or a note's reference,
+ * but not a tab or a line break, which show no more than spaces, a
+ * comment's reference or a field's instruction (see runContentShows in
+ * converter), an equation's text but whitespace, and a character an
  * equation's structure draws: a fraction's bar, a radical, a bar, a box,
  * an accent's, an operator's or a group's character, or a delimiter, but
  * not an empty one, as `\left.\right.`'s. Not a hidden run's text, as of
- * an image export can't embed, which it hides in the text, nor a tab or a
- * line break, which show no more than spaces, nor a paragraph mark's
- * change, a comment's range or its reference, nor a field's instruction.
+ * an image export can't embed, which it hides in the text, nor a paragraph
+ * mark's change or a comment's range.
  */
 function shownChanges(xml: string): { kind: string; attrs: string }[] {
   const shown: { kind: string; attrs: string }[] = [];
@@ -8234,8 +8236,7 @@ function shownChanges(xml: string): { kind: string; attrs: string }[] {
     if (tag === 'w:vanish' && open[open.length - 1] === 'w:rPr' && /^[wm]:r$/.test(open[open.length - 2] ?? '')
         && !['0', 'false', 'off'].includes(val(attrs) ?? '')) {
       runs[runs.length - 1].hidden = true;
-    } else if (['w:drawing', 'w:pict', 'w:object', 'w:sym', 'w:noBreakHyphen', 'w:footnoteReference', 'w:endnoteReference',
-      'm:rad', 'm:bar', 'm:borderBox'].includes(tag)) {
+    } else if (['w:sym', 'm:rad', 'm:bar', 'm:borderBox'].includes(tag) || runContentShows(tag)) {
       show();
     } else if (['m:type', 'm:chr', 'm:begChr', 'm:endChr'].includes(tag) && structures.length > 0) {
       structures[structures.length - 1].chars.set(tag, val(attrs) ?? '');

@@ -12023,14 +12023,22 @@ describe('Table alignment', () => {
     expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('| a | b | c |\n| :---: | ---: | --- |\n| 1 | 2 | 3 |\n');
   });
 
-  test('reads a column\'s alignment from the default table style', async () => {
+  test.each([
+    ['a style the document makes the default', '| :---: | :---: |', (styles: string) => styles
+      .replace(/<w:style w:type="table" w:default="1" w:styleId="TableNormal">/, '<w:style w:type="table" w:styleId="TableNormal">')
+      .replace('</w:styles>', '<w:style w:type="table" w:default="1" w:styleId="Centered"><w:name w:val="Centered"/><w:pPr><w:jc w:val="center"/></w:pPr></w:style></w:styles>')],
+    // Word ignores the elements of TableNormal (MS-OI29500, Part 1
+    // 17.7.4.17), so its alignment isn't the table's
+    ['TableNormal, whose properties Word ignores', '| --- | --- |', (styles: string) =>
+      styles.replace(/(w:styleId="TableNormal">[\s\S]*?)<w:tblPr>/, (_m, before) => before + '<w:pPr><w:jc w:val="center"/></w:pPr><w:tblPr>')],
+  ])('reads a column\'s alignment from the default table style, %s', async (_name, separator, edit) => {
     // A table without a style of its own takes the default one
     const zip = await JSZip.loadAsync((await convertMdToDocx('| a | b |\n| --- | --- |\n| 1 | 2 |')).docx);
     const styles = await zip.file('word/styles.xml')!.async('string');
-    const centered = styles.replace(/(w:styleId="TableNormal">[\s\S]*?)<w:tblPr>/, (_m, before) => before + '<w:pPr><w:jc w:val="center"/></w:pPr><w:tblPr>');
+    const centered = edit(styles);
     expect(centered).not.toBe(styles);
     zip.file('word/styles.xml', centered);
-    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('| a | b |\n| :---: | :---: |\n| 1 | 2 |\n');
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('| a | b |\n' + separator + '\n| 1 | 2 |\n');
   });
 
   /** md's import, with styles added to styles.xml, Normal centered or not, and the table's tblPr and cells' paragraphs changed */

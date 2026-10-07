@@ -16,7 +16,7 @@ import { criticPayloadRanges } from './critic-markup';
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, showsAsText, startsHtmlBlock, withoutSpaceOutsideComments } from './md-to-docx';
+import { blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, withoutSpaceOutsideComments } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { matchTables, paragraphStartFingerprint, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
@@ -1550,6 +1550,9 @@ interface StructuralListContext {
   markerWidth?: number;
 }
 
+/** A table, and the size Word shows its text in (see tableTextSize) */
+type TableItem = { type: 'table'; rows: TableRow[]; textSize?: TableTextSize };
+
 export type ContentItem =
   | {
       type: 'text';
@@ -1563,7 +1566,7 @@ export type ContentItem =
   // lineStart: the citation starts the paragraph after a tracked break,
   // which some views of the change join to the text before it
   | { type: 'citation'; text: string; commentIds: Set<string>; pandocKeys: string[]; revision?: RevisionInfo; formatting?: RunFormatting; lineStart?: boolean }
-  | { type: 'table'; rows: TableRow[] }
+  | TableItem
   | {
       type: 'para';
       headingLevel?: number;   // 1–6 if heading, undefined otherwise
@@ -1662,18 +1665,32 @@ function cellParagraphs(nodes: XmlNode[]): XmlNode[] {
       .flatMap(key => cellParagraphs(asXmlNodes(node[key]))));
 }
 
-/** A paragraph's alignment and direction, where something sets them */
-interface ParagraphLayout { jc?: string; bidi?: boolean }
+/** A style's own properties in styles.xml: its w:pPr's children and its
+ *  w:rPr's, its base's ID, and a table style's for parts of a table, by
+ *  each w:tblStylePr's type, and how many rows and columns a band of it
+ *  takes, where it sets them */
+interface StyleProperties {
+  pPr: XmlNode[];
+  rPr: XmlNode[];
+  basedOn: string;
+  parts: Map<string, { pPr: XmlNode[]; rPr: XmlNode[] }>;
+  rowBand?: number;
+  colBand?: number;
+}
 
-/** The alignment and direction styles.xml gives paragraphs: each style's,
- *  its own or its base's, the document's defaults, and which paragraph and
- *  table styles are the defaults */
+/** The styles of a type, by ID, and by ID lowercased, as Word matches a
+ *  style's ID whatever its case (see styleById) */
+interface StylesById { byId: Map<string, StyleProperties>; byLowerId: Map<string, StyleProperties> }
+
+/** The styles in styles.xml whose properties import reads through the
+ *  style hierarchy (see styledProperty): each paragraph, character and
+ *  table style's, by its type, the document's defaults, from
+ *  w:docDefaults, and which paragraph and table styles are the defaults */
 export interface StyleLayouts {
-  styles: Map<string, ParagraphLayout>;
-  /** A table style's layouts for parts of a table, by tblStylePr type, and
-   *  how many rows and columns a band takes */
-  tables: Map<string, { parts: Map<string, ParagraphLayout>; rowBand: number; colBand: number }>;
-  defaults: ParagraphLayout;
+  paragraph: StylesById;
+  character: StylesById;
+  table: StylesById;
+  defaults: { pPr: XmlNode[]; rPr: XmlNode[] };
   defaultParagraphStyle?: string;
   defaultTableStyle?: string;
   /** The ID import reads a built-in paragraph style by, as `Heading1`, for
@@ -1724,86 +1741,102 @@ function useBuiltInStyleIds(nodes: XmlNode[], ids: Map<string, string> | undefin
   }
 }
 
-/** A pPr's alignment and direction, where it sets them */
-function paragraphLayout(pPrChildren: XmlNode[]): ParagraphLayout {
-  const jc = pPrChildren.find(c => c['w:jc'] !== undefined);
-  const bidi = pPrChildren.some(c => c['w:bidi'] !== undefined);
-  return { ...(jc ? { jc: getAttr(jc, 'val') } : {}), ...(bidi ? { bidi: isToggleOn(pPrChildren, 'w:bidi') } : {}) };
+// The styles whose elements Word ignores, by their IDs, lowercased, as it
+// matches a style's ID whatever its case: their properties, their base and
+// all, so a paragraph, run or style that names one, or is based on one,
+// takes nothing from it (MS-OI29500, Part 1 17.7.4.17, style, note a)
+const STYLES_WORD_IGNORES = new Set(['nolist', 'defaultparagraphfont', 'tablenormal']);
+
+/** A w:style element's children as Word reads them, which every reader of
+ *  styles.xml's parsed styles in import takes them by, as the frontmatter's
+ *  reader of its text does its own way (see extractFontOverridesFromStyles):
+ *  none for a style whose elements Word ignores (see STYLES_WORD_IGNORES) */
+function styleChildren(node: XmlNode): XmlNode[] {
+  return STYLES_WORD_IGNORES.has(getAttr(node, 'styleId').toLowerCase()) ? [] : asXmlNodes(node['w:style']);
 }
 
-/** Read styles.xml's paragraph alignment and direction */
+/** Read styles.xml's styles' properties, and which are the defaults */
 export async function parseStyleLayouts(zip: JSZip): Promise<StyleLayouts> {
   const parsed = await readZipXml(zip, 'word/styles.xml');
-  const layouts: StyleLayouts = { styles: new Map(), tables: new Map(), defaults: {} };
+  const byType = (): StylesById => ({ byId: new Map(), byLowerId: new Map() });
+  const layouts: StyleLayouts = { paragraph: byType(), character: byType(), table: byType(), defaults: { pPr: [], rPr: [] } };
   if (!parsed) return layouts;
-  const pPrOf = (children: XmlNode[]) => {
-    const pPr = children.find(c => c['w:pPr'] !== undefined);
-    return pPr ? asXmlNodes(pPr['w:pPr']) : [];
+  // The children of the element `tag` among `children`, or none
+  const childrenOf = (children: XmlNode[], tag: string) => {
+    const node = children.find(c => c[tag] !== undefined);
+    return node ? asXmlNodes(node[tag]) : [];
   };
   const pPrDefault = findAllDeep(parsed, 'w:pPrDefault')[0];
-  if (pPrDefault) layouts.defaults = paragraphLayout(pPrOf(asXmlNodes(pPrDefault['w:pPrDefault'])));
-  const own = new Map<string, { layout: ParagraphLayout; basedOn: string; parts: Map<string, ParagraphLayout>; rowBand?: number; colBand?: number }>();
+  if (pPrDefault) layouts.defaults.pPr = childrenOf(asXmlNodes(pPrDefault['w:pPrDefault']), 'w:pPr');
+  const rPrDefault = findAllDeep(parsed, 'w:rPrDefault')[0];
+  if (rPrDefault) layouts.defaults.rPr = childrenOf(asXmlNodes(rPrDefault['w:rPrDefault']), 'w:rPr');
   // The ID each built-in paragraph style is read by, by the document's
   const builtIn = new Map<string, string>();
-  // The document's paragraph styles' IDs, lowercased, as Word matches them
-  const paragraphIds = new Set<string>();
   for (const node of findAllDeep(parsed, 'w:style')) {
-    const children = asXmlNodes(node['w:style']);
+    const children = styleChildren(node);
     const id = getAttr(node, 'styleId');
-    // A style without a type is a paragraph style
-    const paragraph = (getAttr(node, 'type') || 'paragraph') === 'paragraph';
-    if (paragraph) paragraphIds.add(id.toLowerCase());
-    const basedOn = children.find(c => c['w:basedOn'] !== undefined);
-    const parts = new Map(children.filter(c => c['w:tblStylePr'] !== undefined)
-      .map(c => [getAttr(c, 'type'), paragraphLayout(pPrOf(asXmlNodes(c['w:tblStylePr'])))]));
-    const tblPr = children.find(c => c['w:tblPr'] !== undefined);
-    const band = (name: string) => {
-      const size = tblPr && asXmlNodes(tblPr['w:tblPr']).find(c => c[name] !== undefined);
+    // A style without a type is a paragraph style, which can be the default
+    const type = getAttr(node, 'type') || 'paragraph';
+    const styles = type === 'paragraph' || type === 'character' || type === 'table' ? layouts[type] : undefined;
+    if (!styles) continue;
+    const name = children.find(c => c['w:name'] !== undefined);
+    const builtInId = type === 'paragraph' && name ? BUILT_IN_PARAGRAPH_STYLES.get(getAttr(name, 'val').toLowerCase()) : undefined;
+    if (builtInId && builtInId.toLowerCase() !== id.toLowerCase()) builtIn.set(id, builtInId);
+    const tblPr = childrenOf(children, 'w:tblPr');
+    const band = (tag: string) => {
+      const size = tblPr.find(c => c[tag] !== undefined);
       return size ? parseInt(getAttr(size, 'val'), 10) || undefined : undefined;
     };
-    const name = children.find(c => c['w:name'] !== undefined);
-    const builtInId = paragraph && name ? BUILT_IN_PARAGRAPH_STYLES.get(getAttr(name, 'val').toLowerCase()) : undefined;
-    if (builtInId && builtInId.toLowerCase() !== id.toLowerCase()) builtIn.set(id, builtInId);
-    own.set(id, {
-      layout: paragraphLayout(pPrOf(children)), basedOn: basedOn ? getAttr(basedOn, 'val') : '',
-      parts, rowBand: band('w:tblStyleRowBandSize'), colBand: band('w:tblStyleColBandSize'),
-    });
-    if (['1', 'true', 'on'].includes(getAttr(node, 'default'))) {
-      if (getAttr(node, 'type') === 'paragraph') layouts.defaultParagraphStyle ??= id;
-      else if (getAttr(node, 'type') === 'table') layouts.defaultTableStyle ??= id;
+    const style: StyleProperties = {
+      pPr: childrenOf(children, 'w:pPr'), rPr: childrenOf(children, 'w:rPr'),
+      basedOn: getAttr(children.find(c => c['w:basedOn'] !== undefined), 'val'),
+      parts: new Map(children.filter(c => c['w:tblStylePr'] !== undefined).map(c => [getAttr(c, 'type'),
+        { pPr: childrenOf(asXmlNodes(c['w:tblStylePr']), 'w:pPr'), rPr: childrenOf(asXmlNodes(c['w:tblStylePr']), 'w:rPr') }])),
+      rowBand: band('w:tblStyleRowBandSize'), colBand: band('w:tblStyleColBandSize'),
+    };
+    if (!styles.byId.has(id)) styles.byId.set(id, style);
+    if (!styles.byLowerId.has(id.toLowerCase())) styles.byLowerId.set(id.toLowerCase(), style);
+    if (xmlOn(getAttr(node, 'default'))) {
+      if (type === 'paragraph') layouts.defaultParagraphStyle ??= id;
+      else if (type === 'table') layouts.defaultTableStyle ??= id;
     }
   }
-  const resolve = (id: string, seen: Set<string>): ParagraphLayout => {
-    const style = own.get(id);
-    if (!style || seen.has(id)) return {};
-    seen.add(id);
-    return { ...resolve(style.basedOn, seen), ...style.layout };
-  };
-  for (const id of own.keys()) layouts.styles.set(id, resolve(id, new Set()));
   // A built-in style's ID, where no paragraph style of the document has it,
-  // as a character style may, goes for the style; its layout stays under
-  // its own (see documentStyleId)
+  // as a character style may, goes for the style; its properties stay
+  // under its own (see documentStyleId)
   for (const [id, builtInId] of builtIn) {
-    if (!paragraphIds.has(builtInId.toLowerCase())) (layouts.builtInIds ??= new Map()).set(id, builtInId);
+    if (!layouts.paragraph.byLowerId.has(builtInId.toLowerCase())) (layouts.builtInIds ??= new Map()).set(id, builtInId);
   }
-  // A table style's parts, each its own or its base's
-  const resolveTable = (id: string, seen: Set<string>): { parts: Map<string, ParagraphLayout>; rowBand: number; colBand: number } => {
-    const style = own.get(id);
-    if (!style || seen.has(id)) return { parts: new Map(), rowBand: 1, colBand: 1 };
-    seen.add(id);
-    const base = resolveTable(style.basedOn, seen);
-    const parts = new Map(base.parts);
-    for (const [type, layout] of style.parts) parts.set(type, { ...parts.get(type), ...layout });
-    return { parts, rowBand: style.rowBand ?? base.rowBand, colBand: style.colBand ?? base.colBand };
-  };
-  for (const id of own.keys()) layouts.tables.set(id, resolveTable(id, new Set()));
   return layouts;
+}
+
+/** A style of a type by its ID, or else one whose ID differs only in case */
+function styleById(styles: StylesById, id: string | undefined): StyleProperties | undefined {
+  return id ? styles.byId.get(id) ?? styles.byLowerId.get(id.toLowerCase()) : undefined;
+}
+
+/** A style and its bases, each once, nearest first, as Word reads a
+ *  style's own properties before its base's */
+function styleChain(styles: StylesById, style: StyleProperties | undefined): StyleProperties[] {
+  const chain: StyleProperties[] = [];
+  for (; style && !chain.includes(style); style = styleById(styles, style.basedOn)) chain.push(style);
+  return chain;
+}
+
+/** The value `read` finds first in `properties`, each a w:pPr's or w:rPr's
+ *  children, or none where something has none */
+function firstValue<T>(properties: (XmlNode[] | undefined)[], read: (properties: XmlNode[]) => T | undefined): T | undefined {
+  for (const children of properties) {
+    const value = children && read(children);
+    if (value !== undefined) return value;
+  }
+  return undefined;
 }
 
 /** Where a cell is in its table, and which of the table style's parts the
  *  table turns on */
-interface CellPlace { row: number; rows: number; col: number; span: number; cols: number; look: TableLook }
-interface TableLook { firstRow: boolean; lastRow: boolean; firstColumn: boolean; lastColumn: boolean; noHBand: boolean; noVBand: boolean }
+export interface CellPlace { row: number; rows: number; col: number; span: number; cols: number; look: TableLook }
+export interface TableLook { firstRow: boolean; lastRow: boolean; firstColumn: boolean; lastColumn: boolean; noHBand: boolean; noVBand: boolean }
 
 /** How many grid columns a table has, from its tblGrid, or else its widest row */
 function tableColumnCount(tblChildren: XmlNode[]): number {
@@ -1825,7 +1858,7 @@ function tableLook(tblChildren: XmlNode[]): TableLook {
   const bits = parseInt(getAttr(look, 'val') || '0', 16) || 0;
   const flag = (name: string, bit: number) => {
     const value = getAttr(look, name);
-    return value ? ['1', 'true', 'on'].includes(value) : (bits & bit) !== 0;
+    return value ? xmlOn(value) : (bits & bit) !== 0;
   };
   return {
     firstRow: flag('firstRow', 0x20), lastRow: flag('lastRow', 0x40), firstColumn: flag('firstColumn', 0x80),
@@ -1833,13 +1866,11 @@ function tableLook(tblChildren: XmlNode[]): TableLook {
   };
 }
 
-/** A table style's layout for a cell: the whole table's, then its bands',
- *  its first or last column's and row's, and its corner's, each over the
- *  last, as Word applies them */
-function tableStyleLayout(layouts: StyleLayouts | undefined, style: string, place?: CellPlace): ParagraphLayout {
-  const table = layouts?.tables.get(style);
-  const layout: ParagraphLayout = { ...layouts?.styles.get(style), ...table?.parts.get('wholeTable') };
-  if (!table || !place) return layout;
+/** The parts of a table style a cell takes, by tblStylePr type, as Word
+ *  applies them over the whole table's, each over the last: its bands', a
+ *  band taking `rowBand` rows or `colBand` columns, its first or last
+ *  column's and row's, and its corner's */
+function cellParts(place: CellPlace, rowBand: number, colBand: number): string[] {
   const { row, rows, col, span, cols, look } = place;
   const firstRow = look.firstRow && row === 0;
   const lastRow = look.lastRow && row === rows - 1;
@@ -1847,10 +1878,10 @@ function tableStyleLayout(layouts: StyleLayouts | undefined, style: string, plac
   const lastCol = look.lastColumn && col + span >= cols;
   const parts: string[] = [];
   if (!look.noVBand && !firstCol && !lastCol) {
-    parts.push(Math.floor((col - (look.firstColumn ? 1 : 0)) / table.colBand) % 2 === 0 ? 'band1Vert' : 'band2Vert');
+    parts.push(Math.floor((col - (look.firstColumn ? 1 : 0)) / colBand) % 2 === 0 ? 'band1Vert' : 'band2Vert');
   }
   if (!look.noHBand && !firstRow && !lastRow) {
-    parts.push(Math.floor((row - (look.firstRow ? 1 : 0)) / table.rowBand) % 2 === 0 ? 'band1Horz' : 'band2Horz');
+    parts.push(Math.floor((row - (look.firstRow ? 1 : 0)) / rowBand) % 2 === 0 ? 'band1Horz' : 'band2Horz');
   }
   if (firstCol) parts.push('firstCol');
   if (lastCol) parts.push('lastCol');
@@ -1860,8 +1891,7 @@ function tableStyleLayout(layouts: StyleLayouts | undefined, style: string, plac
   if (firstRow && lastCol) parts.push('neCell');
   if (lastRow && firstCol) parts.push('swCell');
   if (lastRow && lastCol) parts.push('seCell');
-  for (const part of parts) Object.assign(layout, table.parts.get(part));
-  return layout;
+  return parts;
 }
 
 /** A table's style, from its tblPr, or the default table style */
@@ -1871,36 +1901,115 @@ function tableStyleId(tblChildren: XmlNode[], layouts?: StyleLayouts): string {
   return style ? getAttr(style, 'val') : layouts?.defaultTableStyle ?? '';
 }
 
-/** A Word cell's alignment, its paragraphs' when they all share one. A
- *  paragraph's own setting comes first, then its style's, which takes in
- *  the default paragraph style only through its base, the table's style's
- *  for where the cell is, the default paragraph style's where it has no
- *  other, and the document's defaults, as Word reads them. Left from a
- *  style is what Word does with none, so only a paragraph's own left aligns
- *  its column. In a right-to-left paragraph only center counts, as start
- *  and end, and what left and right mean there, turn around. */
+/** Where a paragraph is, for the styles Word formats it and its runs by:
+ *  the style it names, by the document's ID (see documentStyleId), its
+ *  table's style, where it's in a table (see tableStyleId), and where its
+ *  cell is in the table, where that's known */
+export interface StyledParagraph { style?: string; tableStyle?: string; place?: CellPlace }
+
+/** A level of the style hierarchy (see styledProperty) */
+export type StyleLevel = 'own' | 'character' | 'paragraph' | 'table' | 'defaultParagraph' | 'defaults';
+
+/** A property's value, where a level of the style hierarchy sets it, and
+ *  the level, or neither where none does */
+export interface StyledValue<T> { value?: T; from?: StyleLevel }
+
+/** The paragraph style a paragraph naming `id` takes of its own: the
+ *  style of that ID, or of one differing only in case, but none where
+ *  that's the default paragraph style, or where styles.xml has no such
+ *  style, which Word reads as the default */
+function ownParagraphStyle(layouts: StyleLayouts, id: string | undefined): StyleProperties | undefined {
+  const style = styleById(layouts.paragraph, id);
+  return style && style !== styleById(layouts.paragraph, layouts.defaultParagraphStyle) ? style : undefined;
+}
+
+/**
+ * A paragraph's or a run's property as Word formats it with it, as `read`
+ * finds it in a w:pPr's children or a w:rPr's (`kind`), its own (`own`)
+ * or else from the style hierarchy, and the level it's from. Word applies
+ * the levels in this order, each over the last (ECMA-376 Part 1, 17.7.2):
+ * the document's defaults, the table style, a numbering's level, the
+ * paragraph style, the character style, a run's, and the paragraph's or
+ * run's own. A paragraph that names no style of its own (see
+ * ownParagraphStyle) takes the default paragraph style, which in a table
+ * goes under the table style, not over it, as Word applies it, and as
+ * LibreOffice reads it; one that names its own takes the default only
+ * where its style is based on it. Each style's value is its own, or else
+ * its base's (see styleChain). A table style's is its parts' for where the
+ * cell is (see cellParts), then its whole table's, then its own. A
+ * numbering's level this doesn't read: its w:rPr formats its number, not
+ * the paragraph's text, and Word's lists set no more than indents and
+ * tabs in its w:pPr. A table without a style of its own, or with one
+ * styles.xml doesn't have, takes the default table style, as a paragraph
+ * the default paragraph style. Undefined, as unknown, where there are no
+ * styles to read (`layouts`), or a run names a character style styles.xml
+ * doesn't have, or a part of the table style sets the property for cells
+ * of a place the paragraph's isn't known to be or not to be.
+ */
+export function styledProperty<T>(layouts: StyleLayouts | undefined, kind: 'pPr' | 'rPr', own: XmlNode[], paragraph: StyledParagraph,
+  read: (properties: XmlNode[]) => T | undefined): StyledValue<T> | undefined {
+  const value = read(own);
+  if (value !== undefined) return { value, from: 'own' };
+  if (!layouts) return undefined;
+  const found = <V>(value: V | undefined, from: StyleLevel) => value === undefined ? undefined : { value, from };
+  if (kind === 'rPr') {
+    const id = getAttr(own.find(c => c['w:rStyle'] !== undefined), 'val');
+    const character = styleById(layouts.character, id);
+    if (id && !character) return undefined;
+    const value = found(firstValue(styleChain(layouts.character, character).map(style => style.rPr), read), 'character');
+    if (value) return value;
+  }
+  const style = ownParagraphStyle(layouts, paragraph.style);
+  const styled = found(firstValue(styleChain(layouts.paragraph, style).map(style => style[kind]), read), 'paragraph');
+  if (styled) return styled;
+  if (paragraph.tableStyle !== undefined) {
+    const table = styleChain(layouts.table, styleById(layouts.table, paragraph.tableStyle) ?? styleById(layouts.table, layouts.defaultTableStyle));
+    // A part's value, its own or else its base's
+    const part = (type: string) => firstValue(table.map(style => style.parts.get(type)?.[kind]), read);
+    let parts: string[] = [];
+    if (paragraph.place) {
+      const band = (size: 'rowBand' | 'colBand') => table.find(style => style[size] !== undefined)?.[size] ?? 1;
+      parts = cellParts(paragraph.place, band('rowBand'), band('colBand')).reverse();
+    } else if (table.some(style => [...style.parts].some(([type, properties]) => type !== 'wholeTable' && read(properties[kind]) !== undefined))) {
+      return undefined;
+    }
+    for (const type of [...parts, 'wholeTable']) {
+      const value = found(part(type), 'table');
+      if (value) return value;
+    }
+    const whole = found(firstValue(table.map(style => style[kind]), read), 'table');
+    if (whole) return whole;
+  }
+  if (!style) {
+    const defaultStyle = styleById(layouts.paragraph, layouts.defaultParagraphStyle);
+    const value = found(firstValue(styleChain(layouts.paragraph, defaultStyle).map(style => style[kind]), read), 'defaultParagraph');
+    if (value) return value;
+  }
+  return found(read(layouts.defaults[kind]), 'defaults') ?? {};
+}
+
+/** A Word cell's alignment, its paragraphs' when they all share one, each
+ *  paragraph's own or else its styles' (see styledProperty), by where the
+ *  cell is in its table. Left from a style is what Word does with none, so
+ *  only a paragraph's own left aligns its column. In a right-to-left
+ *  paragraph only center counts, as start and end, and what left and
+ *  right mean there, turn around. */
 function cellAlignment(tcChildren: XmlNode[], layouts?: StyleLayouts, tableStyle = '', place?: CellPlace): TableAlign | undefined {
   const aligns = new Set<TableAlign | undefined>();
-  const fromStyle = (id: string | undefined) => (id && layouts?.styles.get(id)) || {};
-  const fromTable = tableStyleLayout(layouts, tableStyle, place);
+  const readJc = (pPr: XmlNode[]) => {
+    const jc = pPr.find(c => c['w:jc'] !== undefined);
+    return jc ? getAttr(jc, 'val') : undefined;
+  };
   for (const p of cellParagraphs(tcChildren)) {
     const pPr = asXmlNodes(p['w:p']).find(c => c['w:pPr'] !== undefined);
     const pPrChildren = pPr ? asXmlNodes(pPr['w:pPr']) : [];
     const pStyle = pPrChildren.find(c => c['w:pStyle'] !== undefined);
-    const styleId = pStyle ? documentStyleId(pStyle) : '';
-    // A style styles.xml doesn't have is the default, as Word reads it
-    const isDefault = !styleId || styleId === layouts?.defaultParagraphStyle || !layouts?.styles.has(styleId);
-    const own = paragraphLayout(pPrChildren);
-    const layout: ParagraphLayout = {
-      ...layouts?.defaults,
-      ...(isDefault ? fromStyle(layouts?.defaultParagraphStyle) : {}),
-      ...fromTable,
-      ...(isDefault ? {} : fromStyle(styleId)),
-      ...own,
-    };
-    const val = layout.jc ?? '';
-    aligns.add(val === 'center' ? 'center' : layout.bidi ? undefined
-      : val === 'right' || val === 'end' ? 'right' : (val === 'left' || val === 'start') && own.jc !== undefined ? 'left' : undefined);
+    const paragraph: StyledParagraph = { style: pStyle ? documentStyleId(pStyle) : undefined, tableStyle, place };
+    const jc = styledProperty(layouts, 'pPr', pPrChildren, paragraph, readJc);
+    const bidi = styledProperty(layouts, 'pPr', pPrChildren, paragraph, pPr => toggleIn(pPr, 'w:bidi'));
+    const val = jc?.value ?? '';
+    aligns.add(val === 'center' ? 'center' : bidi?.value ? undefined
+      : val === 'right' || val === 'end' ? 'right' : (val === 'left' || val === 'start') && jc?.from === 'own' ? 'left' : undefined);
   }
   return aligns.size === 1 ? [...aligns][0] : undefined;
 }
@@ -2153,12 +2262,12 @@ async function parseStyleNumbering(zip: JSZip): Promise<StyleNumbering> {
   if (!parsed) return numbering;
   const own = new Map<string, { reference?: NumberingReference; basedOn: string }>();
   for (const node of findAllDeep(parsed, 'w:style')) {
-    const children = asXmlNodes(node['w:style']);
+    const children = styleChildren(node);
     const id = getAttr(node, 'styleId');
     const pPr = children.find(c => c['w:pPr'] !== undefined);
     const basedOn = children.find(c => c['w:basedOn'] !== undefined);
     own.set(id, { reference: pPr ? numberingReference(asXmlNodes(pPr['w:pPr'])) : undefined, basedOn: basedOn ? getAttr(basedOn, 'val') : '' });
-    if (getAttr(node, 'type') === 'paragraph' && ['1', 'true', 'on'].includes(getAttr(node, 'default'))) numbering.defaultStyle ??= id;
+    if (getAttr(node, 'type') === 'paragraph' && xmlOn(getAttr(node, 'default'))) numbering.defaultStyle ??= id;
   }
   const resolve = (id: string, seen: Set<string>): StyleNumberingEntry => {
     const style = own.get(id);
@@ -2191,7 +2300,7 @@ export async function parseNumberingDefinitions(zip: JSZip): Promise<{ defs: Num
     if (abstractNum.length === 0) continue;
 
     const abstractNumId = getAttr(node, 'abstractNumId');
-    if (['1', 'true', 'on'].includes(String(node[':@']?.['@_w15:restartNumberingAfterBreak'] ?? ''))) restartingAfterBreak.add(abstractNumId);
+    if (xmlOn(String(node[':@']?.['@_w15:restartNumberingAfterBreak'] ?? ''))) restartingAfterBreak.add(abstractNumId);
     const numStyleLink = abstractNum.find(child => child['w:numStyleLink'] !== undefined);
     if (numStyleLink) numStyleLinks.set(abstractNumId, getAttr(numStyleLink, 'val'));
     const styleLink = abstractNum.find(child => child['w:styleLink'] !== undefined);
@@ -2605,6 +2714,35 @@ function symbolCharacter(node: XmlNode): string | undefined {
 const RUN_CHARACTERS: Record<string, string> = {
   'w:tab': '\t', 'w:noBreakHyphen': '\u2011', 'w:softHyphen': '\u00AD',
 };
+
+/**
+ * What Word shows for each element of a run's content but its text and a
+ * symbol (ECMA-376 Part 1, 17.3.3), which shows its own character in its
+ * own font: the characters it shows in the run's font and size, as a tab's
+ * or a line break's, or none, as a field's instruction, a comment's
+ * reference or a page break Word laid out; null for characters this doesn't
+ * read, as a note reference's mark, the notes' numbering's, as `1`, `i` or
+ * `*`, or a page number's or a date's; or 'object' for what Word draws in
+ * no font or size, as a picture. What isn't here, as a phonetic guide
+ * (w:ruby), whose text has sizes of its own, or alternate content, which
+ * Word shows one choice of, this can't tell.
+ */
+export const RUN_CONTENT: Record<string, string | null | 'object'> = {
+  ...RUN_CHARACTERS, 'w:ptab': '\t', 'w:br': '\n', 'w:cr': '\n',
+  'w:fldChar': '', 'w:instrText': '', 'w:delInstrText': '', 'w:commentReference': '', 'w:annotationRef': '', 'w:lastRenderedPageBreak': '',
+  'w:footnoteReference': null, 'w:endnoteReference': null, 'w:footnoteRef': null, 'w:endnoteRef': null, 'w:pgNum': null,
+  'w:dayShort': null, 'w:dayLong': null, 'w:monthShort': null, 'w:monthLong': null, 'w:yearShort': null, 'w:yearLong': null,
+  'w:drawing': 'object', 'w:pict': 'object', 'w:object': 'object', 'w:contentPart': 'object', 'w:separator': 'object', 'w:continuationSeparator': 'object',
+};
+
+/** Whether an element of a run's content shows something (see
+ *  RUN_CONTENT): a character but whitespace, as a tab's or a line break's,
+ *  which show no more than spaces, or an optional hyphen, which shows only
+ *  where a line breaks at it, characters this doesn't read, or a picture */
+export function runContentShows(tag: string): boolean {
+  const content = RUN_CONTENT[tag];
+  return content === null || content === 'object' || content !== undefined && /[^\s\u00AD]/.test(content);
+}
 
 /** A run's children with each w:tab, non-breaking hyphen, optional hyphen
  *  or Symbol font character as the text of its character, and a carriage
@@ -3050,7 +3188,14 @@ export function isToggleOn(children: XmlNode[], tagName: string): boolean {
   
   const val = getAttr(element, 'val');
   if (!val) return true; // present with no w:val attribute → true
-  return val === 'true' || val === '1' || val === 'on';
+  return xmlOn(val);
+}
+
+/** Whether an attribute's value is on, as an ST_OnOff's: true, 1 or on,
+ *  and not false, 0 or off. Every on or off value import reads, an
+ *  element's w:val (see isToggleOn) or an attribute's, goes through this. */
+function xmlOn(value: string | undefined): boolean {
+  return value === 'true' || value === '1' || value === 'on';
 }
 
 /** Parse run properties and return RunFormatting */
@@ -3064,13 +3209,13 @@ export function parseRunProperties(
   const bElement = rPrChildren.find(child => child['w:b'] !== undefined);
   if (bElement) {
     const val = getAttr(bElement, 'val');
-    formatting.bold = !val || val === 'true' || val === '1' || val === 'on';
+    formatting.bold = !val || xmlOn(val);
   }
 
   const iElement = rPrChildren.find(child => child['w:i'] !== undefined);
   if (iElement) {
     const val = getAttr(iElement, 'val');
-    formatting.italic = !val || val === 'true' || val === '1' || val === 'on';
+    formatting.italic = !val || xmlOn(val);
   }
 
   // strikethrough: w:strike or w:dstrike (double strikethrough) — both map to ~~
@@ -3078,10 +3223,10 @@ export function parseRunProperties(
   const dstrikeElement = rPrChildren.find(child => child['w:dstrike'] !== undefined);
   if (strikeElement) {
     const val = getAttr(strikeElement, 'val');
-    formatting.strikethrough = !val || val === 'true' || val === '1' || val === 'on';
+    formatting.strikethrough = !val || xmlOn(val);
   } else if (dstrikeElement) {
     const val = getAttr(dstrikeElement, 'val');
-    formatting.strikethrough = !val || val === 'true' || val === '1' || val === 'on';
+    formatting.strikethrough = !val || xmlOn(val);
   }
   
   // underline: w:u with w:val ≠ "none"
@@ -5557,7 +5702,7 @@ function parseNoteBody(
           if (rows.length > 0) {
             // As in extractDocumentContent: a tracked mark before the table
             if (markBefore?.target === target && markBefore.end === target.length) target.push({ type: 'para', breakRevision: markBefore.revision });
-            target.push({ type: 'table', rows });
+            target.push({ type: 'table', rows, textSize: tableTextSize(tblChildren, context.styleLayouts) });
           } else {
             trackedParaMark = markBefore;
           }
@@ -6262,19 +6407,14 @@ function tableHasFirstRowHeader(tblChildren: XmlNode[]): boolean {
   const tblPrChildren = asXmlNodes(tblPrNode['w:tblPr']);
   const tblLookNode = tblPrChildren.find((c) => c['w:tblLook'] !== undefined);
   if (!tblLookNode) return false;
-  const firstRow = getAttr(tblLookNode, 'firstRow');
-  return firstRow === '1' || firstRow === 'true' || firstRow === 'on';
+  return xmlOn(getAttr(tblLookNode, 'firstRow'));
 }
 
 function rowHasHeaderProp(trChildren: XmlNode[]): boolean {
   const trPrNode = trChildren.find((c) => c['w:trPr'] !== undefined);
   if (!trPrNode) return false;
   const trPrChildren = asXmlNodes(trPrNode['w:trPr']);
-  const tblHeaderNode = trPrChildren.find((c) => c['w:tblHeader'] !== undefined);
-  if (!tblHeaderNode) return false;
-  const val = getAttr(tblHeaderNode, 'val');
-  if (!val) return true;
-  return val === '1' || val === 'true' || val === 'on';
+  return isToggleOn(trPrChildren, 'w:tblHeader');
 }
 
 /** The change Word tracks a table row's insertion or deletion with, which
@@ -6286,6 +6426,229 @@ function rowRevision(trChildren: XmlNode[]): RevisionInfo | undefined {
   const change = trPrNode && asXmlNodes(trPrNode['w:trPr']).find(c => c['w:ins'] !== undefined || c['w:del'] !== undefined);
   if (!change) return undefined;
   return { type: change['w:ins'] !== undefined ? 'addition' : 'deletion', author: getAttr(change, 'author'), date: getAttr(change, 'date') };
+}
+
+/** A run of a table's text Word shows: its properties and its text, as a
+ *  symbol's, by its character, whether it also shows characters import
+ *  can't tell (`unread`, see RUN_CONTENT), and its paragraph's style, by
+ *  the document's ID, where it sets one */
+type ShownRun = { rPrChildren: XmlNode[]; text: string; unread?: boolean; paragraphStyle?: string };
+
+/** A setting Word shows a run's text with, as its size (`value`), and
+ *  whether the run takes it from the table paragraph style, as the
+ *  document's for tables, rather than having it of its own (`inherited`) */
+interface ShownSetting<T> { value: T; inherited: boolean }
+
+/** The setting all of `settings` are, which is inherited where all of
+ *  them take it from the style, and of the table's own where any has it of
+ *  its own, as Word shows it all the same, or undefined where they're more
+ *  than one, or any is unknown, or there are none */
+function oneSetting<T>(settings: Iterable<ShownSetting<T> | undefined>): ShownSetting<T> | undefined {
+  let one: ShownSetting<T> | undefined;
+  for (const setting of settings) {
+    if (!setting || one && setting.value !== one.value) return undefined;
+    one = { value: setting.value, inherited: (one?.inherited ?? true) && setting.inherited };
+  }
+  return one;
+}
+
+// What Word shows nothing for in a table, at any level of it: its
+// elements' properties, as a paragraph's (w:pPr), whose w:rPr is its mark's,
+// and the markup of a range, as a bookmark's, a comment's or a tracked
+// move's (ECMA-376 Part 1, 17.13)
+const TABLE_SHOWS_NOTHING = new Set(['w:tblPr', 'w:tblGrid', 'w:trPr', 'w:tblPrEx', 'w:tcPr', 'w:pPr',
+  'w:sdtPr', 'w:sdtEndPr', 'w:customXmlPr', 'w:smartTagPr', 'w:fldData',
+  'w:bookmarkStart', 'w:bookmarkEnd', 'w:commentRangeStart', 'w:commentRangeEnd', 'w:proofErr', 'w:permStart', 'w:permEnd',
+  'w:moveFromRangeStart', 'w:moveFromRangeEnd', 'w:moveToRangeStart', 'w:moveToRangeEnd',
+  'w:customXmlInsRangeStart', 'w:customXmlInsRangeEnd', 'w:customXmlDelRangeStart', 'w:customXmlDelRangeEnd',
+  'w:customXmlMoveFromRangeStart', 'w:customXmlMoveFromRangeEnd', 'w:customXmlMoveToRangeStart', 'w:customXmlMoveToRangeEnd']);
+
+/** A level of a table, which the walk of its runs reads the elements of
+ *  (see TABLE_CONTENT) */
+type TableLevel = 'table' | 'row' | 'cell' | 'paragraph';
+
+// The elements the walk of a table's runs goes into at each level of it
+// (see tableRunsSetting), by the level of what they hold: the table's rows,
+// a row's cells, a cell's paragraphs, a custom XML element's or a content
+// control's at any level, and a paragraph's runs in a link, a tracked
+// change, a smart tag, a simple field or a direction's override, which
+// show their runs as they are
+const TABLE_CONTENT: Record<TableLevel, Record<string, TableLevel>> = {
+  table: { 'w:tr': 'row', 'w:customXml': 'table', 'w:sdt': 'table', 'w:sdtContent': 'table' },
+  row: { 'w:tc': 'cell', 'w:customXml': 'row', 'w:sdt': 'row', 'w:sdtContent': 'row' },
+  cell: { 'w:p': 'paragraph', 'w:customXml': 'cell', 'w:sdt': 'cell', 'w:sdtContent': 'cell' },
+  paragraph: Object.fromEntries(['w:hyperlink', 'w:ins', 'w:del', 'w:moveFrom', 'w:moveTo', 'w:smartTag', 'w:customXml', 'w:sdt', 'w:sdtContent',
+    'w:fldSimple', 'w:dir', 'w:bdo'].map(tag => [tag, 'paragraph'])),
+};
+
+/** Whether any of `nodes` is a run, or holds one */
+function holdsRun(nodes: XmlNode[]): boolean {
+  return nodes.some(node => Object.keys(node).some(key => key === 'w:r' || key === 'm:r'
+    || key !== ':@' && Array.isArray(node[key]) && holdsRun(asXmlNodes(node[key]))));
+}
+
+/**
+ * What a table's runs of text Word shows set, read from each one by
+ * `read`, as Word sets a size or font on each run of the text it's set
+ * for, and export on each of a table's with one of its own (see
+ * generateTable in md-to-docx): a w:r's text, a deletion's too, the
+ * characters of its other content, as a tab, a line break or a note
+ * reference's mark (see RUN_CONTENT), or its symbol, but not what Word
+ * draws in no font or size, as a picture, nor a hidden run's, as an HTML
+ * comment's, which Word doesn't show. The one they all show (see
+ * oneSetting), or undefined where they show more than one, or `read` can't
+ * tell one, or there's no text, or the table has anything this doesn't
+ * read all of. It reads only the elements it knows the text of: the
+ * table's rows, cells and paragraphs, the runs in a paragraph and the
+ * elements that show their runs as they are (see TABLE_CONTENT), and the
+ * content of a run in RUN_CONTENT, past what shows nothing (see
+ * TABLE_SHOWS_NOTHING). Anything else, as an equation, whose parts have
+ * sizes and fonts of their own, as a radical's or a delimiter's, a table
+ * in a cell, whose runs take its own style, a phonetic guide, alternate
+ * content, which Word shows one choice of, a picture with runs, as a text
+ * box, or an element this doesn't know, it can't tell.
+ */
+function tableRunsSetting<T>(tblChildren: XmlNode[], read: (run: ShownRun) => ShownSetting<T> | undefined): ShownSetting<T> | undefined {
+  const settings: (ShownSetting<T> | undefined)[] = [];
+  const visit = (nodes: XmlNode[], level: TableLevel, paragraphStyle?: string) => {
+    for (const node of nodes) {
+      for (const key of Object.keys(node)) {
+        if (key === ':@' || !Array.isArray(node[key]) || TABLE_SHOWS_NOTHING.has(key)) continue;
+        const children = asXmlNodes(node[key]);
+        const inner = Object.hasOwn(TABLE_CONTENT[level], key) ? TABLE_CONTENT[level][key] : undefined;
+        if (key === 'w:p' && inner) {
+          const pPr = children.find(c => c['w:pPr'] !== undefined);
+          const pStyle = pPr && asXmlNodes(pPr['w:pPr']).find(c => c['w:pStyle'] !== undefined);
+          visit(children, inner, pStyle ? documentStyleId(pStyle) : undefined);
+          continue;
+        }
+        if (inner) {
+          visit(children, inner, paragraphStyle);
+          continue;
+        }
+        if (key !== 'w:r' || level !== 'paragraph') {
+          settings.push(undefined);
+          continue;
+        }
+        const rPr = children.find(c => c['w:rPr'] !== undefined);
+        const rPrChildren = rPr ? asXmlNodes(rPr['w:rPr']) : [];
+        if (isToggleOn(rPrChildren, 'w:vanish')) continue;
+        let unread = false;
+        let unknown = false;
+        const text = children.map(child => {
+          const tag = Object.keys(child).find(name => name !== ':@') ?? '';
+          if (tag === 'w:t' || tag === 'w:delText') return nodeText(asXmlNodes(child[tag]));
+          if (tag === 'w:rPr' || tag === 'w:sym' || tag === '#text') return '';
+          const content = RUN_CONTENT[tag];
+          if (content === undefined || content === 'object' && holdsRun(asXmlNodes(child[tag]))) unknown = true;
+          if (content === null) unread = true;
+          return content === undefined || content === null || content === 'object' ? '' : content;
+        }).join('');
+        if (unknown) settings.push(undefined);
+        else if (text !== '' || unread) settings.push(read({ rPrChildren, text, unread, paragraphStyle }));
+        for (const symbol of children.filter(c => c['w:sym'] !== undefined)) {
+          settings.push(read({ rPrChildren, text: String.fromCodePoint(parseInt(getAttr(symbol, 'char'), 16) || 0xF020), paragraphStyle }));
+        }
+      }
+    }
+  };
+  visit(tblChildren, 'table');
+  return oneSetting(settings);
+}
+
+/** A run property Word shows a run of a table's text with, as `read`
+ *  finds it in a w:rPr, and the level of the style hierarchy it's from
+ *  (see styledProperty), in a table of the style `tableStyle`, for a cell
+ *  whose place the run's isn't known to be */
+function runProperty<T>(layouts: StyleLayouts | undefined, run: ShownRun, tableStyle: string,
+  read: (rPr: XmlNode[]) => T | undefined): StyledValue<T> | undefined {
+  return styledProperty(layouts, 'rPr', run.rPrChildren, { style: run.paragraphStyle, tableStyle }, read);
+}
+
+/** Whether a run's setting from the level `from` of the style hierarchy
+ *  (see styledProperty) is the table paragraph style's, as export writes
+ *  the document's for tables: the style's own or its base's, or the
+ *  document's default under it, where the run's paragraph's style of its
+ *  own (see ownParagraphStyle) is the table paragraph style */
+function fromTableParagraphStyle(layouts: StyleLayouts | undefined, run: ShownRun, from: StyleLevel | undefined): boolean {
+  return (from === 'paragraph' || from === 'defaults') && isTableParagraphStyle(run.paragraphStyle)
+    && !!layouts && ownParagraphStyle(layouts, run.paragraphStyle) !== undefined;
+}
+
+/** A toggle in a w:rPr, where it has it (see isToggleOn) */
+function toggleIn(rPr: XmlNode[], tag: string): boolean | undefined {
+  return rPr.some(c => c[tag] !== undefined) ? isToggleOn(rPr, tag) : undefined;
+}
+
+/** Whether Word shows a run's text in its complex script size: where the
+ *  run is marked right-to-left or complex script, by its own w:rtl or w:cs
+ *  or a style's (see styledProperty), whatever its characters, as Arabic or
+ *  Hebrew, which it shows in its size for the rest where nothing marks it
+ *  so (MS-OI29500, Part 1 17.3.2.39, szCs). Undefined where a mark is
+ *  unknown. */
+function runInComplexScript(run: ShownRun, layouts: StyleLayouts | undefined, tableStyle: string): boolean | undefined {
+  const marks = ['w:cs', 'w:rtl'].map(tag => runProperty(layouts, run, tableStyle, rPr => toggleIn(rPr, tag)));
+  return marks.some(mark => !mark) ? undefined : marks.some(mark => !!mark!.value);
+}
+
+/**
+ * Whether a style may hide a run Word shows: where the run's own w:vanish
+ * doesn't show it, as its own goes before a style's, and a style turns
+ * w:vanish on, as a paragraph, character or table style's, or the
+ * document's default, or where that's unknown (see styledProperty). A style's
+ * w:vanish is a toggle, which another style of another kind may turn off
+ * again (ECMA-376 Part 1, 17.7.3), so one turned on may hide the run, but
+ * one turned off, as `<w:vanish w:val="0"/>`, hides nothing, by its value
+ * (see toggleIn).
+ */
+function mayBeHidden(run: ShownRun, layouts: StyleLayouts | undefined, tableStyle: string): boolean {
+  if (toggleIn(run.rPrChildren, 'w:vanish') === false) return false;
+  const hidden = runProperty(layouts, run, tableStyle, rPr => toggleIn(rPr, 'w:vanish') || undefined);
+  return !hidden || hidden.value === true;
+}
+
+/** The size Word shows a table's text in, in half-points, and whether it
+ *  takes it from the table paragraph style, as the document's size for
+ *  tables, rather than its runs */
+interface TableTextSize { hp: number; inherited: boolean }
+
+/** Whether a paragraph's style, by the document's ID for it, is the table
+ *  paragraph style export writes, whatever its case */
+function isTableParagraphStyle(id: string | undefined): boolean {
+  return id?.toLowerCase() === 'tableparagraph';
+}
+
+/**
+ * The size Word shows a table's text in, where all of it is in one and
+ * import can tell it (see tableRunsSetting): a run's w:szCs where it's
+ * marked complex script, and else its w:sz (see runInComplexScript). A run's
+ * own size, or else the one it takes from the table paragraph style, as
+ * the paragraph's style, or its base or the document's default (see
+ * fromTableParagraphStyle), which is `inherited` where all the text takes it. Unknown
+ * where any run's is: one a style may hide (see mayBeHidden), one whose
+ * size or mark is unknown, as a size that's no number of half-points
+ * import reads (see xmlHalfPoints), one with a
+ * character style's size, or another paragraph style's, which a table's
+ * directive doesn't stand for, or with none at all. Sizes are compared as
+ * numbers, as 14 and 014 are one.
+ */
+function tableTextSize(tblChildren: XmlNode[], layouts: StyleLayouts | undefined): TableTextSize | undefined {
+  const tableStyle = tableStyleId(tblChildren, layouts);
+  const sizeOf = (run: ShownRun): ShownSetting<number> | undefined => {
+    const complex = runInComplexScript(run, layouts, tableStyle);
+    if (mayBeHidden(run, layouts, tableStyle) || complex === undefined) return undefined;
+    const tag = complex ? 'w:szCs' : 'w:sz';
+    // A size, or null for one import can't read
+    const size = runProperty(layouts, run, tableStyle, rPr => {
+      const set = rPr.find(c => c[tag] !== undefined);
+      return set ? xmlHalfPoints(getAttr(set, 'val')) ?? null : undefined;
+    });
+    if (!size?.value) return undefined;
+    if (size.from === 'own') return { value: size.value, inherited: false };
+    return fromTableParagraphStyle(layouts, run, size.from) ? { value: size.value, inherited: true } : undefined;
+  };
+  const size = tableRunsSetting(tblChildren, sizeOf);
+  return size ? { hp: size.value, inherited: size.inherited } : undefined;
 }
 
 /**
@@ -6779,7 +7142,7 @@ export async function extractDocumentContent(
             // paragraph before it (see joinTrackedParagraphBreaks), which an
             // empty paragraph takes, as one before the table would
             if (markBefore?.target === target && markBefore.end === target.length) target.push({ type: 'para', breakRevision: markBefore.revision });
-            target.push({ type: 'table', rows });
+            target.push({ type: 'table', rows, textSize: tableTextSize(tblChildren, styleLayouts) });
           } else {
             trackedParaMark = markBefore;
           }
@@ -10133,7 +10496,7 @@ function tableHtmlAroundIndex(mapping: Map<string, [string, string, string, stri
   return index;
 }
 
-type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]>; tablesWrittenAt?: (number | undefined)[]; usedTableHtmlAround?: Set<string>; tablesAlike?: Map<string, number>; tablesAlikeRendered?: Map<string, number>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; breaks?: boolean; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem>; htmlCells?: boolean; cellRangeComments?: Set<string>; aroundTable?: { open: Set<string>; lastItems?: Map<string, ContentItem> } };
+type RenderOpts = { alwaysUseCommentIds?: boolean; commentIdRemap?: Map<string, string>; forceIdCommentIds?: Set<string>; emittedIdCommentBodies?: Set<string>; noteLabels?: Map<string, string>; imageFormatMapping?: Map<string, string>; noteImageFormatMapping?: Map<string, string>; tableFormatMapping?: Map<string, string>; pipeTableAlignedMapping?: Map<string, string>; gridSourceColWidthsMapping?: Map<string, string>; tableFontSizeMapping?: Map<string, string>; tableFontMapping?: Map<string, string>; tableColWidthsMapping?: Map<string, string>; tableDigitsMapping?: Map<string, string>; tableDecimalMarkMapping?: Map<string, string>; tableDigitGroupingMapping?: Map<string, string>; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]>; tablesWrittenAt?: (number | undefined)[]; usedTableHtmlAround?: Set<string>; tablesAlike?: Map<string, number>; tablesAlikeRendered?: Map<string, number>; landscapeTableIndices?: Set<number>; portraitTableIndices?: Set<number>; embedDirectiveMapping?: Map<string, string>; timezone?: string; breaks?: boolean; openIdComments?: Set<string>; lastCommentItem?: Map<string, ContentItem>; htmlCells?: boolean; cellRangeComments?: Set<string>; aroundTable?: { open: Set<string>; lastItems?: Map<string, ContentItem> }; tableSizeHp?: number };
 
 /**
  * The ranges of comments over more than one paragraph (see
@@ -10482,8 +10845,8 @@ function gridHoldsTableShape(rows: TableRow[]): boolean {
  * written as its embed directive, which leaves its cells out. The table at
  * `tableIndex` among those the body and then the notes render.
  */
-function cellsTakeNoRanges(rows: TableRow[], renderOpts: RenderOpts, tableIndex: number): boolean {
-  return !gridHoldsTableShape(rows) || buildTableDirectivePrefix(renderOpts, tableIndex).commentUnsafeFont
+function cellsTakeNoRanges(table: TableItem, renderOpts: RenderOpts, tableIndex: number): boolean {
+  return !gridHoldsTableShape(table.rows) || buildTableDirectivePrefix(renderOpts, tableIndex, { textSize: table.textSize }).commentUnsafeFont
     || !!renderOpts.embedDirectiveMapping?.get(String(tableIndex));
 }
 
@@ -10712,16 +11075,40 @@ export function markdownTable(rows: TableRow[], kind: 'pipe' | 'grid'): string |
  * Build the comment-style directive prefix for a table (font-size, font, col-widths, orientation).
  * Returns the prefix string and a flag indicating whether a font value is comment-unsafe.
  */
+/**
+ * A table's own font size, in points, for its directive: the one export
+ * stored where it's the size Word shows the table's text in (`textSize`,
+ * see tableTextSize), or where import can't tell that size, as where Word
+ * shows more than one, for which Markdown has no directive, as for part of
+ * a table. Else the size Word shows, set on its runs, which holds where
+ * the document's size for tables changes, as a directive does, the
+ * document's too, but none where the text takes the table paragraph
+ * style's and that's the document's size for tables, which export gives
+ * it again.
+ */
+function tableFontSize(renderOpts: RenderOpts, tableIndex: number, textSize: TableTextSize | undefined): string | undefined {
+  const stored = renderOpts.tableFontSizeMapping?.get(String(tableIndex));
+  if (!textSize || stored !== undefined && Math.round(Number(stored) * 2) === textSize.hp) return stored;
+  return textSize.inherited && textSize.hp === renderOpts.tableSizeHp ? undefined : String(textSize.hp / 2);
+}
+
+/** What Word shows a table's text in, which its directives are for (see
+ *  tableTextSize), each where import can tell it, which every caller of
+ *  buildTableDirectivePrefix passes, an embed's too, so none falls back to
+ *  what export stored where Word shows another */
+interface TableShown { textSize: TableTextSize | undefined }
+
 function buildTableDirectivePrefix(
   renderOpts: RenderOpts | undefined,
   tableIndex: number | undefined,
+  shown: TableShown,
 ): { fontPrefix: string; commentUnsafeFont: boolean } {
   let fontPrefix = '';
   let commentUnsafeFont = false;
   const isLandscapeTable = tableIndex !== undefined && renderOpts?.landscapeTableIndices?.has(tableIndex);
   const isPortraitTable = tableIndex !== undefined && renderOpts?.portraitTableIndices?.has(tableIndex);
   if (tableIndex !== undefined && renderOpts) {
-    const fontSize = renderOpts.tableFontSizeMapping?.get(String(tableIndex));
+    const fontSize = tableFontSize(renderOpts, tableIndex, shown.textSize);
     const font = renderOpts.tableFontMapping?.get(String(tableIndex));
     if (fontSize) fontPrefix += '<!-- table-font-size: ' + fontSize + ' -->\n';
     if (font) {
@@ -11185,7 +11572,7 @@ function detachedTableHtml(html: string): string | undefined | null {
 }
 
 function renderTableOrFallback(
-  item: { rows: TableRow[] },
+  item: { rows: TableRow[]; textSize?: TableTextSize },
   comments: Map<string, Comment>,
   options?: { pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; tableIndent?: string },
   renderOpts?: RenderOpts,
@@ -11193,12 +11580,12 @@ function renderTableOrFallback(
   tableIndex?: number,
   scope = '',
 ): { directivePrefix: string; body: string; before?: string; after?: string; join?: string } {
-  const { fontPrefix, commentUnsafeFont: forceHtmlTable } = buildTableDirectivePrefix(renderOpts, tableIndex);
+  const { fontPrefix, commentUnsafeFont: forceHtmlTable } = buildTableDirectivePrefix(renderOpts, tableIndex, { textSize: item.textSize });
   let htmlFontAttrs = '';
   const isLandscapeTable = tableIndex !== undefined && renderOpts?.landscapeTableIndices?.has(tableIndex);
   const isPortraitTable = tableIndex !== undefined && renderOpts?.portraitTableIndices?.has(tableIndex);
   if (tableIndex !== undefined && renderOpts) {
-    const fontSize = renderOpts.tableFontSizeMapping?.get(String(tableIndex));
+    const fontSize = tableFontSize(renderOpts, tableIndex, item.textSize);
     const font = renderOpts.tableFontMapping?.get(String(tableIndex));
     if (fontSize) htmlFontAttrs += ' data-font-size="' + escapeHtmlAttr(fontSize) + '"';
     if (font) htmlFontAttrs += ' data-font="' + escapeHtmlAttr(font) + '"';
@@ -11811,7 +12198,7 @@ function alertGlyphForType(alertType: GfmAlertType): string | undefined {
  * commentIdsSplitAtTables).
  */
 function startCommentsAfterAlertLabels(content: ContentItem[], inlineByGroup: Map<number, boolean> | null | undefined,
-  takesNoRanges: (rows: TableRow[], index: number) => boolean): ContentItem[] {
+  takesNoRanges: (table: TableItem, index: number) => boolean): ContentItem[] {
   // The items that go in place of each item changed, by its index
   const changed = new Map<number, ContentItem[]>();
   let splitAtTables: Set<string> | undefined;
@@ -11911,7 +12298,7 @@ function holdsCommentMarkers(item: ContentItem, inCodeBlock: boolean, inTable: b
  *  as its range can't end there. A range from the text before such a table
  *  to the text after it goes on over it, as one through the cells of a
  *  table that holds it does. */
-function commentIdsSplitAtTables(content: ContentItem[], takesNoRanges: (rows: TableRow[], index: number) => boolean, firstIndex = 0): Set<string> {
+function commentIdsSplitAtTables(content: ContentItem[], takesNoRanges: (table: TableItem, index: number) => boolean, firstIndex = 0): Set<string> {
   // Whether each comment's first item and its last are in such a table
   const ends = new Map<string, [boolean, boolean]>();
   let inCodeBlock = false;
@@ -11921,7 +12308,7 @@ function commentIdsSplitAtTables(content: ContentItem[], takesNoRanges: (rows: T
       if (item.type === 'para') {
         inCodeBlock = !!item.isCodeBlock;
       } else if (item.type === 'table') {
-        const html = inTable ? noRanges || !gridHoldsTableShape(item.rows) : takesNoRanges(item.rows, index++);
+        const html = inTable ? noRanges || !gridHoldsTableShape(item.rows) : takesNoRanges(item, index++);
         for (const row of item.rows) for (const cell of row.cells) for (const para of cell.paragraphs) visit(para, true, html);
       } else if ('commentIds' in item && holdsCommentMarkers(item, inCodeBlock, inTable)) {
         for (const id of item.commentIds ?? []) ends.set(id, [ends.get(id)?.[0] ?? noRanges, noRanges]);
@@ -12923,7 +13310,7 @@ function popLeast(heap: number[]): number {
 export function buildMarkdown(
   content: ContentItem[],
   comments: Map<string, Comment>,
-  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, NoteEntry>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; noteCodeBlockStarts?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; blockquoteAlertMarkerAloneGroups?: Set<number> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]> | null; tableIdentities?: TableIdentity[] | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string; breaks?: boolean; citationKeys?: ReadonlySet<string> },
+  options?: { tableIndent?: string; alwaysUseCommentIds?: boolean; pipeTableMaxLineWidth?: number; gridTableMaxLineWidth?: number; commentIdMapping?: Map<string, string> | null; notes?: { map: Map<string, NoteEntry>; assignedLabels: Map<string, string> }; codeBlockLangs?: Map<string, string> | null; noteCodeBlockStarts?: Map<string, string> | null; blockquoteGaps?: Map<number, number> | null; blockquotePreContentBlankLines?: Map<number, number> | null; blockquotePostContentBlankLines?: Map<number, number> | null; blockquoteAlertInlineByGroup?: Map<number, boolean> | null; blockquoteAlertMarkerAloneGroups?: Set<number> | null; calloutLabels?: boolean | null; imageFormatMapping?: Map<string, string> | null; noteImageFormatMapping?: Map<string, string> | null; tableFormatMapping?: Map<string, string> | null; pipeTableAlignedMapping?: Map<string, string> | null; gridSourceColWidthsMapping?: Map<string, string> | null; tableFontSizeMapping?: Map<string, string> | null; tableSizeHp?: number; tableFontMapping?: Map<string, string> | null; tableColWidthsMapping?: Map<string, string> | null; tableDigitsMapping?: Map<string, string> | null; tableDecimalMarkMapping?: Map<string, string> | null; tableDigitGroupingMapping?: Map<string, string> | null; tableHtmlAroundMapping?: Map<string, [string, string, string, string, string, string, string]> | null; tableIdentities?: TableIdentity[] | null; landscapeTableIndices?: Set<number> | null; portraitTableIndices?: Set<number> | null; listIndent?: 'tab' | 'spaces'; htmlCommentGaps?: Map<number, number> | null; htmlCommentAfterGaps?: Map<number, number> | null; sentinelGaps?: Record<string, number> | null; embedDirectiveMapping?: Map<string, string> | null; timezone?: string; breaks?: boolean; citationKeys?: ReadonlySet<string> },
 ): string {
   let breakMarks: TrackedBreakMarks | undefined;
   trackedBreakStart = undefined;
@@ -13023,7 +13410,7 @@ export function buildMarkdown(
     tableColWidthsMapping: settingsRead(options?.tableColWidthsMapping),
     embedDirectiveMapping,
   };
-  const takesNoRanges = (rows: TableRow[], index: number) => cellsTakeNoRanges(rows, rangeSettings, index);
+  const takesNoRanges = (table: TableItem, index: number) => cellsTakeNoRanges(table, rangeSettings, index);
   const mergedContent = mergeConsecutiveRuns(withoutHiddenCommentSpace(options?.calloutLabels === false ? joinedContent
     : startCommentsAfterAlertLabels(joinedContent, options?.blockquoteAlertInlineByGroup, takesNoRanges)));
 
@@ -13382,6 +13769,7 @@ export function buildMarkdown(
     pipeTableAlignedMapping: settingsRead(options?.pipeTableAlignedMapping),
     gridSourceColWidthsMapping: settingsRead(options?.gridSourceColWidthsMapping),
     tableFontSizeMapping: settingsRead(options?.tableFontSizeMapping),
+    tableSizeHp: options?.tableSizeHp,
     tableFontMapping: settingsRead(options?.tableFontMapping),
     tableColWidthsMapping: settingsRead(options?.tableColWidthsMapping),
     tableDigitsMapping: settingsRead(options?.tableDigitsMapping),
@@ -14569,7 +14957,9 @@ export function buildMarkdown(
         // separate embed occurrences that share the same directive text.
         const tabPos = rawEmbedValue.indexOf('\t');
         const embedDirective = tabPos >= 0 ? rawEmbedValue.substring(tabPos + 1) : rawEmbedValue;
-        const { fontPrefix: embedPrefix } = buildTableDirectivePrefix(renderOpts, tableIndex);
+        // As export gives the directive to the embed's first table only,
+        // where the embed has more than one, as a Markdown file's
+        const { fontPrefix: embedPrefix } = buildTableDirectivePrefix(renderOpts, tableIndex, { textSize: item.textSize });
         pushWithHoistedPrefix(output, embedPrefix, embedDirective, documentStartCommentGap);
         tableIndex++;
         i++;
@@ -15159,7 +15549,8 @@ export function buildMarkdown(
           if (noteRawEmbedValue) {
             const noteTabPos = noteRawEmbedValue.indexOf('\t');
             const noteEmbedDirective = noteTabPos >= 0 ? noteRawEmbedValue.substring(noteTabPos + 1) : noteRawEmbedValue;
-            const { fontPrefix: noteEmbedPrefix } = buildTableDirectivePrefix(noteRenderOpts, tableIndex);
+            // As export gives the directive to the embed's first table only
+            const { fontPrefix: noteEmbedPrefix } = buildTableDirectivePrefix(noteRenderOpts, tableIndex, { textSize: item.textSize });
             bodyParts.push(noteEmbedPrefix + noteEmbedDirective);
             tableIndex++;
             bi++;
@@ -15597,15 +15988,19 @@ function xmlElementAttribute(xml: string, name: string, attribute: string): stri
   return element && xmlAttribute(element.tag, attribute);
 }
 
-/** A whole number an attribute holds, as a size in half-points, with the
- *  whitespace a schema's number may have around it */
+/** A whole number an attribute holds, as an xsd:unsignedLong's, as twips:
+ *  digits, with leading zeros, a plus sign before them and whitespace
+ *  around them, as a schema's number may have */
 function xmlNumber(value: string | undefined): number | undefined {
-  return value !== undefined && /^\s*\d+\s*$/.test(value) ? Number(value) : undefined;
+  return value !== undefined && /^[ \t\r\n]*\+?\d+[ \t\r\n]*$/.test(value) ? Number(value) : undefined;
 }
 
-/** Whether an attribute's value is on, as an ST_OnOff's: true, 1 or on */
-function xmlOn(value: string | undefined): boolean {
-  return value === 'true' || value === '1' || value === 'on';
+/** A size in half-points, as an ST_HpsMeasure, a w:sz's or w:szCs's, holds
+ *  it: a whole number (see xmlNumber), as 14 or 014, but not a universal
+ *  measure, as 7pt, which import doesn't read. Every reader of a run's or
+ *  a style's size goes through this, so equal sizes read as one. */
+function xmlHalfPoints(value: string | undefined): number | undefined {
+  return xmlNumber(value);
 }
 
 /**
@@ -15621,10 +16016,12 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   const documentIds = new Map<string, string>();
   for (const [id, builtInId] of opts?.builtInIds ?? []) if (!documentIds.has(builtInId)) documentIds.set(builtInId, id);
 
-  // Each w:style element: its start tag and all of it
+  // Each w:style element: its start tag and all of it, but its start tag
+  // alone for a style whose elements Word ignores (see styleChildren)
   const styleElements: { tag: string; block: string }[] = [];
   for (let style = xmlElement(stylesXml, 'w:style'); style; style = xmlElement(stylesXml, 'w:style', style.end)) {
-    styleElements.push({ tag: style.tag, block: stylesXml.slice(style.start, style.end) });
+    const ignored = STYLES_WORD_IGNORES.has((xmlAttribute(style.tag, 'w:styleId') ?? '').toLowerCase());
+    styleElements.push({ tag: style.tag, block: ignored ? style.tag : stylesXml.slice(style.start, style.end) });
   }
 
   /** The w:style element of the paragraph style `id`, by the document's ID
@@ -15656,7 +16053,7 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   }
 
   function extractSizeHp(rpr: string): number | undefined {
-    return xmlNumber(xmlElementAttribute(rpr, 'w:sz', 'w:val'));
+    return xmlHalfPoints(xmlElementAttribute(rpr, 'w:sz', 'w:val'));
   }
 
   function isXmlToggleOn(rpr: string, tag: string): boolean {
@@ -16406,7 +16803,15 @@ export async function convertDocx(
   const titleParagraphs: string[] = [];
   const titleLines = extractTitleLines(docContent, titleParagraphs);
 
+  // The heading, title, body and table fonts and sizes the frontmatter
+  // takes from styles.xml
+  const stylesXml = await readZipText(zip, 'word/styles.xml');
+  const fontFields = stylesXml !== undefined ? extractFontOverridesFromStyles(stylesXml, { explicitTableFontSize, builtInIds: styleLayouts.builtInIds, titleParagraphs }) : {};
   let markdown = buildMarkdown(docContent, comments, {
+    // The size export gives a table's text with none of its own, by the
+    // frontmatter, which a table whose text takes it from the table
+    // paragraph style takes no directive for
+    tableSizeHp: resolveFontOverrides(fontFields).tableSizeHp,
     tableIndent: options?.tableIndent,
     // Comment dates in the offset the frontmatter will declare, which export reads them in
     timezone: storedSettings?.timezone,
@@ -16500,11 +16905,7 @@ export async function convertDocx(
   // fields that weren't in the original. Without one, import writes comment
   // dates in the system timezone, and normalizeToUtcIso reads them back in it.
   // Extract heading/title font overrides from styles.xml for round-trip
-  const stylesStr = await readZipText(zip, 'word/styles.xml');
-  if (stylesStr !== undefined) {
-    const fontFields = extractFontOverridesFromStyles(stylesStr, { explicitTableFontSize, builtInIds: styleLayouts.builtInIds, titleParagraphs });
-    Object.assign(fm, fontFields);
-  }
+  Object.assign(fm, fontFields);
   // Restore custom styles from custom property (primary source)
   if (storedCustomStyles) {
     fm.styles = storedCustomStyles;

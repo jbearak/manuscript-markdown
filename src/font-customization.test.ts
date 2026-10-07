@@ -776,6 +776,520 @@ describe('Font customization unit tests', () => {
       expect(once).toBe(markdown);
       expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
     });
+
+    describe('a size Word set on a table', () => {
+      // Word sets the size on each of the table's runs, where its text is
+      // all selected, or on the runs of the text it is
+      // and then the table's XML as `edit` makes it
+      const sizedInWord = async (markdown: string, halfPoints: number, runs = Infinity, edit = (table: string) => table,
+        sz = '<w:sz w:val="' + halfPoints + '"/><w:szCs w:val="' + halfPoints + '"/>') => {
+        const JSZip = (await import('jszip')).default;
+        const zip = await JSZip.loadAsync((await convertMdToDocx(markdown)).docx);
+        const xml = await zip.file('word/document.xml')!.async('string');
+        let sized = 0;
+        const edited = xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, table => edit(table
+          .replace(/<w:r>(?:<w:rPr>([\s\S]*?)<\/w:rPr>)?/g, (run, rPr: string | undefined) => sized++ >= runs ? run
+            : '<w:r><w:rPr>' + (rPr ?? '').replace(/<w:sz w:val="\d+"\/><w:szCs w:val="\d+"\/>/, '') + sz + '</w:rPr>')));
+        expect(edited).not.toBe(xml);
+        zip.file('word/document.xml', edited);
+        return zip.generateAsync({ type: 'uint8array' });
+      };
+      const tableSizes = async (markdown: string) => {
+        const JSZip = (await import('jszip')).default;
+        const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+        return [...new Set([...xml.matchAll(/<w:r><w:rPr>(?:(?!<\/w:rPr>)[\s\S])*?<w:sz w:val="(\d+)"/g)].map(m => m[1]))];
+      };
+      const TABLE = '| A | B |\n| --- | --- |\n| 1 | 2 |\n';
+
+      it.each([
+        ['one of its own', '<!-- table-font-size: 11 -->\n' + TABLE, 14, '<!-- table-font-size: 7 -->\n' + TABLE, ['14']],
+        ['none of its own', TABLE, 14, '<!-- table-font-size: 7 -->\n' + TABLE, ['14']],
+        ['one of its own, to the document\'s', '<!-- table-font-size: 11 -->\n' + TABLE, 18, '<!-- table-font-size: 9 -->\n' + TABLE, []],
+        ['none of its own, to the document\'s', TABLE, 18, '<!-- table-font-size: 9 -->\n' + TABLE, []],
+        ['one of its own, to a half point', TABLE, 21, '<!-- table-font-size: 10.5 -->\n' + TABLE, ['21']],
+      ])('writes the size Word shows on a table with %s', async (_name, markdown, halfPoints, expected, sizes) => {
+        // The table took the size export stored, or none, as Word's was lost
+        const { convertDocx } = await import('./converter');
+        const converted = (await convertDocx(await sizedInWord(markdown, halfPoints))).markdown;
+        expect(parseFrontmatter(converted).body).toBe(expected);
+        expect(await tableSizes(converted)).toEqual(sizes);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it.each([
+        ['with a leading zero', '014'],
+        ['with whitespace around it', ' 14 '],
+        ['with a plus sign', '+14'],
+      ])('writes the size Word set on a table where a run spells it %s', async (_name, spelled) => {
+        // Each run's size compared as text, so 14 and 014, both 7 points,
+        // read as two sizes, and the table kept the size Word took off
+        const { convertDocx } = await import('./converter');
+        const converted = (await convertDocx(await sizedInWord('<!-- table-font-size: 11 -->\n' + TABLE, 14, Infinity, table => {
+          const edited = table.replace('<w:sz w:val="14"/><w:szCs w:val="14"/>', '<w:sz w:val="' + spelled + '"/><w:szCs w:val="' + spelled + '"/>');
+          expect(edited).not.toBe(table);
+          return edited;
+        }))).markdown;
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font-size: 7 -->\n' + TABLE);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it.each([
+        ['as a universal measure, which import doesn\'t read', '7pt'],
+        ['as no number', 'x'],
+      ])('keeps the size of its own where a run of a table Word set another on has its size %s', async (_name, spelled) => {
+        // What the size Word shows is can't be told
+        const { convertDocx } = await import('./converter');
+        const converted = (await convertDocx(await sizedInWord('<!-- table-font-size: 11 -->\n' + TABLE, 14, Infinity, table => {
+          const edited = table.replace('<w:sz w:val="14"/><w:szCs w:val="14"/>', '<w:sz w:val="' + spelled + '"/><w:szCs w:val="' + spelled + '"/>');
+          expect(edited).not.toBe(table);
+          return edited;
+        }))).markdown;
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font-size: 11 -->\n' + TABLE);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it('reads the body font size of a style that spells it with a plus sign', async () => {
+        // An ST_HpsMeasure is an xsd:unsignedLong, which may have one, as
+        // the table's runs' sizes may
+        const JSZip = (await import('jszip')).default;
+        const { convertDocx } = await import('./converter');
+        const zip = await JSZip.loadAsync((await convertMdToDocx('---\nfont-size: 15\n---\n\nText.\n')).docx);
+        const styles = await zip.file('word/styles.xml')!.async('string');
+        const edited = styles.replace('<w:sz w:val="30"/>', '<w:sz w:val="+30"/>');
+        expect(edited).not.toBe(styles);
+        zip.file('word/styles.xml', edited);
+        const converted = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+        expect(parseFrontmatter(converted).metadata.fontSize).toBe(15);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it('keeps the size of its own where Word set another on some of its text', async () => {
+        // Markdown has no size for part of a table
+        const { convertDocx } = await import('./converter');
+        const converted = (await convertDocx(await sizedInWord('<!-- table-font-size: 11 -->\n' + TABLE, 14, 1))).markdown;
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font-size: 11 -->\n' + TABLE);
+      });
+
+      it('writes the size Word shows on a table where it set it on some of the text and the rest takes it from the style', async () => {
+        // All of it shows in 9 points, the table paragraph style's, but some
+        // had it of its own, so it read as two settings
+        const { convertDocx } = await import('./converter');
+        const sized = await sizedInWord('<!-- table-font-size: 11 -->\n' + TABLE, 18, 1, table => {
+          const edited = table.replace(/<w:sz w:val="22"\/><w:szCs w:val="22"\/>/g, '');
+          expect(edited).not.toBe(table);
+          return edited;
+        });
+        const converted = (await convertDocx(sized)).markdown;
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font-size: 9 -->\n' + TABLE);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      const EQUATION ='<!-- table-font-size: 11 -->\n| A | B |\n| --- | --- |\n| $x$ | 2 |\n';
+      it.each([
+        ['set none on an equation', EQUATION, Infinity, (table: string) => table],
+        ['set none on a symbol', '<!-- table-font-size: 11 -->\n' + TABLE, Infinity,
+          (table: string) => table.replace(/<\/w:p><\/w:tc><\/w:tr><\/w:tbl>$/, '<w:r><w:sym w:font="Wingdings" w:char="F04A"/></w:r>$&')],
+        ['set another on text it shows, though it has a vanish turned off', '<!-- table-font-size: 11 -->\n' + TABLE, 1,
+          (table: string) => table.replace(/(<w:r><w:rPr>(?:<w:b\/>)?)<w:sz w:val="22"/g, '$1<w:vanish w:val="0"/><w:sz w:val="22"')],
+      ])('keeps the size of its own where Word %s', async (_name, markdown, runs, edit) => {
+        // Its text in another size, which an equation, a symbol or a run
+        // with w:vanish off is, went unread
+        const { convertDocx } = await import('./converter');
+        const converted = (await convertDocx(await sizedInWord(markdown, 14, runs, edit))).markdown;
+        expect(parseFrontmatter(converted).body).toBe(markdown);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it('keeps a size of its own on a table whose text is all equations', async () => {
+        // Export sets no size on an equation, which read as the document's
+        const { convertDocx } = await import('./converter');
+        const markdown = '<!-- table-font-size: 7 -->\n| $a$ | $b$ |\n| --- | --- |\n| $x$ | $y$ |\n';
+        const converted = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+        expect(parseFrontmatter(converted).body).toBe(markdown);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it.each([
+        ['a non-breaking hyphen', '<w:noBreakHyphen/>'],
+        ['an optional hyphen', '<w:softHyphen/>'],
+        ['a tab', '<w:tab/>'],
+      ])('keeps the size of its own where Word set another on all of its text but %s', async (_name, character) => {
+        // Import writes it as a character of the text, whose size went
+        // unread: here between the 2 and a 3 after it, in its own size
+        const { convertDocx } = await import('./converter');
+        const sized = await sizedInWord('<!-- table-font-size: 11 -->\n' + TABLE, 14, Infinity,
+          table => table.replace(/<w:t>2<\/w:t><\/w:r>/, '$&<w:r><w:rPr><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr>' + character
+            + '</w:r><w:r><w:rPr><w:sz w:val="14"/><w:szCs w:val="14"/></w:rPr><w:t>3</w:t></w:r>'));
+        const converted = (await convertDocx(sized)).markdown;
+        expect(parseFrontmatter(converted).body).toStartWith('<!-- table-font-size: 11 -->\n| A | B |');
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it.each([
+        ['a note\'s reference', '| A | B |\n| --- | --- |\n| 1[^n] | 2 |\n\n[^n]: Note.\n',
+          (table: string) => table.replace(/(<w:rStyle w:val="FootnoteReference"\/>)<w:sz w:val="14"\/><w:szCs w:val="14"\/>/, '$1<w:sz w:val="22"/><w:szCs w:val="22"/>')],
+        ['a line break', '| A | B |\n| --- | --- |\n| 1 | 2<br>3 |\n',
+          (table: string) => table.replace(/<w:sz w:val="14"\/><w:szCs w:val="14"\/>(<\/w:rPr><w:br\/>)/, '<w:sz w:val="22"/><w:szCs w:val="22"/>$1')],
+      ])('keeps the size of its own where Word set another on all of its text but %s, which shows in its own', async (_name, table, edit) => {
+        // A run with no text went unread, though Word shows it in its size
+        const { convertDocx } = await import('./converter');
+        const markdown = '<!-- table-font-size: 11 -->\n' + table;
+        const converted = (await convertDocx(await sizedInWord(markdown, 14, Infinity, sized => {
+          const edited = edit(sized);
+          expect(edited).not.toBe(sized);
+          return edited;
+        }))).markdown;
+        expect(parseFrontmatter(converted).body).toBe(markdown);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      const SIZED = (halfPoints: number) => '<w:rPr><w:sz w:val="' + halfPoints + '"/><w:szCs w:val="' + halfPoints + '"/></w:rPr>';
+      // A table's XML with content after the run of its 2, in its paragraph,
+      // or after that paragraph, in its cell
+      const inParagraph = (content: string) => (table: string) => table.replace(/<w:t>2<\/w:t><\/w:r>/, (run: string) => run + content);
+      const inCell = (content: string) => (table: string) => table.replace(/<w:t>2<\/w:t><\/w:r><\/w:p>/, (paragraph: string) => paragraph + content);
+      it.each([
+        ['a phonetic guide, whose base is in its own', inParagraph('<w:r><w:ruby><w:rubyPr><w:hps w:val="11"/><w:hpsBaseText w:val="22"/></w:rubyPr>'
+          + '<w:rt><w:r>' + SIZED(11) + '<w:t>x</w:t></w:r></w:rt><w:rubyBase><w:r>' + SIZED(22) + '<w:t>3</w:t></w:r></w:rubyBase></w:ruby></w:r>')],
+        ['alternate content in a run in its own', inParagraph('<w:r>' + SIZED(22) + '<mc:AlternateContent><mc:Choice Requires="w14"><w:t>3</w:t></mc:Choice>'
+          + '<mc:Fallback><w:t>3</w:t></mc:Fallback></mc:AlternateContent></w:r>')],
+        ['alternate content in a paragraph, whose choice Word shows import can\'t tell', inParagraph('<mc:AlternateContent><mc:Choice Requires="w14"><w:r>' + SIZED(14)
+          + '<w:t>3</w:t></w:r></mc:Choice><mc:Fallback><w:r>' + SIZED(14) + '<w:t>3</w:t></w:r></mc:Fallback></mc:AlternateContent>')],
+        ['a text box, whose text is in its own', inParagraph('<w:r>' + SIZED(14) + '<w:drawing><wp:inline><a:graphic><a:graphicData><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r>'
+          + SIZED(22) + '<w:t>3</w:t></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>')],
+        ['an equation whose radical is in its own', inParagraph('<m:oMath><m:rad><m:radPr><m:degHide m:val="1"/><m:ctrlPr>' + SIZED(22) + '</m:ctrlPr></m:radPr>'
+          + '<m:deg/><m:e><m:r>' + SIZED(14) + '<m:t>x</m:t></m:r></m:e></m:rad></m:oMath>')],
+        ['an equation of delimiters alone, as `$\\left(\\right)$`, in their own', inParagraph('<m:oMath><m:d><m:dPr><m:ctrlPr>' + SIZED(22) + '</m:ctrlPr></m:dPr><m:e/></m:d></m:oMath>')],
+        ['an equation of its own paragraph', inCell('<w:p><m:oMathPara><m:oMath><m:r>' + SIZED(14) + '<m:t>x</m:t></m:r></m:oMath></m:oMathPara></w:p>')],
+        ['a table in a cell, whose runs take its own style', inCell('<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="0" w:type="auto"/></w:tblPr>'
+          + '<w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="1000" w:type="dxa"/></w:tcPr>'
+          + '<w:p><w:r>' + SIZED(14) + '<w:t>3</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>')],
+        ['runs in an element import doesn\'t know', inParagraph('<w:unknown><w:r>' + SIZED(14) + '<w:t>3</w:t></w:r></w:unknown>')],
+        ['an element import doesn\'t know', inParagraph('<w:unknown/>')],
+      ])('keeps the size of its own where Word set another on a table with %s', async (_name, edit) => {
+        // The walk of the table's runs read what it didn't know as showing
+        // nothing, or as both of alternate content's choices, and an
+        // equation's runs or a table's in a cell as the table's own
+        const { convertDocx } = await import('./converter');
+        const markdown = '<!-- table-font-size: 11 -->\n' + TABLE;
+        const sized = await sizedInWord(markdown, 14, Infinity, table => {
+          const edited = edit(table);
+          expect(edited).not.toBe(table);
+          return edited;
+        });
+        const converted = (await convertDocx(sized)).markdown;
+        expect(parseFrontmatter(converted).body).toMatch(/^(?:<!-- table-font-size: 11 -->\n\| A \| B \||<table data-font-size="11")/);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it('writes the size Word set on a table with a bookmark, a spelling mark, a content control and a link around its runs, which show them as they are', async () => {
+        // What the walk of its runs knows shows nothing, or its runs as they
+        // are, which a run's size goes through
+        const { convertDocx } = await import('./converter');
+        const sized = await sizedInWord('<!-- table-font-size: 11 -->\n' + TABLE, 14, Infinity, table => {
+          const edited = table.replace(/<w:r><w:rPr>(?:(?!<\/w:r>)[\s\S])*?<w:t>1<\/w:t><\/w:r>/, (run: string) => '<w:bookmarkStart w:id="0" w:name="_GoBack"/>'
+            + '<w:proofErr w:type="spellStart"/><w:sdt><w:sdtPr><w:rPr><w:sz w:val="48"/></w:rPr></w:sdtPr><w:sdtContent><w:hyperlink w:anchor="_GoBack">' + run
+            + '</w:hyperlink></w:sdtContent></w:sdt><w:proofErr w:type="spellEnd"/><w:bookmarkEnd w:id="0"/>');
+          expect(edited).not.toBe(table);
+          return edited;
+        });
+        const converted = (await convertDocx(sized)).markdown;
+        expect(parseFrontmatter(converted).body).toStartWith('<!-- table-font-size: 7 -->\n| A | B |');
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it('writes the size Word set on a table with a field and a comment, whose code and reference show nothing', async () => {
+        const { convertDocx } = await import('./converter');
+        const table = '| A | B |\n| --- | --- |\n| {==1==}{>>note<<} | 2 |\n';
+        const field = ['<w:fldChar w:fldCharType="begin"/>', '<w:instrText xml:space="preserve"> PAGE </w:instrText>', '<w:fldChar w:fldCharType="separate"/>',
+          '<w:lastRenderedPageBreak/><w:t>3</w:t>', '<w:fldChar w:fldCharType="end"/>'].map(content => '<w:r>' + SIZED(14) + content + '</w:r>').join('');
+        const sized = await sizedInWord('<!-- table-font-size: 11 -->\n' + table, 14, Infinity, xml => {
+          expect(xml).toContain('<w:commentReference');
+          return xml.replace(/<w:t>2<\/w:t><\/w:r>/, (run: string) => run + field);
+        });
+        const converted = (await convertDocx(sized)).markdown;
+        expect(parseFrontmatter(converted).body).toStartWith('<!-- table-font-size: 7 -->\n| A | B |');
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it('writes the size Word set on a table with a note\'s reference, on its mark too', async () => {
+        // The mark's characters, which this doesn't read, show in the size
+        // Word set for either kind of character
+        const { convertDocx } = await import('./converter');
+        const table = '| A | B |\n| --- | --- |\n| 1[^n] | 2 |\n\n[^n]: Note.\n';
+        const converted = (await convertDocx(await sizedInWord('<!-- table-font-size: 11 -->\n' + table, 14))).markdown;
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font-size: 7 -->\n' + table);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it('keeps the size of its own where Word set another on a table\'s equations too, whose parts may show in their own', async () => {
+        // An equation's runs read as the table's text, though Word shows a
+        // radical or a delimiter in the size of its own properties
+        const { convertDocx } = await import('./converter');
+        const sized = await sizedInWord(EQUATION, 14, Infinity, table => table.replace(/<m:r>/g, '<m:r><w:rPr><w:sz w:val="14"/><w:szCs w:val="14"/></w:rPr>'));
+        const converted = (await convertDocx(sized)).markdown;
+        expect(parseFrontmatter(converted).body).toBe(EQUATION);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it.each([
+        ['text it marks complex script, in its complex script size', TABLE, '<w:cs/>', '11'],
+        ['text of a complex script it marks right-to-left, in its complex script size', '| א | ב |\n| --- | --- |\n| ג | ד |\n', '<w:rtl/>', '11'],
+        ['text of a complex script it doesn\'t mark so, in its size for the rest', '| א | ב |\n| --- | --- |\n| ג | ד |\n', '', '7'],
+        ['text of a complex script it marks neither right-to-left nor complex script, in its size for the rest', '| א | ב |\n| --- | --- |\n| ג | ד |\n',
+          '<w:cs w:val="0"/><w:rtl w:val="0"/>', '7'],
+      ])('writes the size Word shows on a table\'s %s', async (_name, table, marks, size) => {
+        // Word shows a run's text in its w:szCs where the run is marked
+        // right-to-left or complex script, and else in its w:sz, whatever
+        // its characters (MS-OI29500, Part 1 17.3.2.39), but a complex
+        // script's characters were read as in its w:szCs
+        const { convertDocx } = await import('./converter');
+        const sized = await sizedInWord('<!-- table-font-size: 9 -->\n' + table, 14, Infinity, undefined, marks + '<w:sz w:val="14"/><w:szCs w:val="22"/>');
+        const converted = (await convertDocx(sized)).markdown;
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font-size: ' + size + ' -->\n' + table);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it('keeps a size of its own, the document\'s, where the style sets it with more whitespace', async () => {
+        // The document's size for tables went unread, so it seemed another
+        const JSZip = (await import('jszip')).default;
+        const { convertDocx } = await import('./converter');
+        const markdown = '---\ntable-font-size: 8\n---\n<!-- table-font-size: 8 -->\n' + TABLE;
+        const zip = await JSZip.loadAsync((await convertMdToDocx(markdown)).docx);
+        const styles = await zip.file('word/styles.xml')!.async('string');
+        const spaced = styles.replace(/(<w:style\b[^>]*w:styleId="TableParagraph"[\s\S]*?)<w:sz w:val="16"\/>/, '$1<w:sz  w:val="16"/>');
+        expect(spaced).not.toBe(styles);
+        zip.file('word/styles.xml', spaced);
+        const converted = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font-size: 8 -->\n' + TABLE);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      /** markdown's export, with the table's XML as `table` makes it and
+       *  styles.xml as `styles` does, read back */
+      const editedInWord = async (markdown: string, table: (xml: string) => string, styles: (xml: string) => string) => {
+        const JSZip = (await import('jszip')).default;
+        const { convertDocx } = await import('./converter');
+        const zip = await JSZip.loadAsync((await convertMdToDocx(markdown)).docx);
+        const documentXml = await zip.file('word/document.xml')!.async('string');
+        const stylesXml = await zip.file('word/styles.xml')!.async('string');
+        const [editedDocument, editedStyles] = [documentXml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, table), styles(stylesXml)];
+        expect(editedDocument).not.toBe(documentXml);
+        expect(editedStyles).not.toBe(stylesXml);
+        zip.file('word/document.xml', editedDocument);
+        zip.file('word/styles.xml', editedStyles);
+        return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+      };
+      const withoutSizes = (table: string) => table.replace(/<w:sz w:val="\d+"\/><w:szCs w:val="\d+"\/>/g, '');
+      const tableParagraph = /(<w:style\b[^>]*w:styleId="TableParagraph"[^>]*>)([\s\S]*?)(<\/w:style>)/;
+      const HEBREW = '| \u05d0 | \u05d1 |\n| --- | --- |\n| \u05d2 | \u05d3 |\n';
+      it.each([
+        ['a size the table paragraph style takes from its base', '<!-- table-font-size: 7 -->\n' + TABLE, withoutSizes,
+          (styles: string) => styles.replace(tableParagraph, (_style, open: string, body: string, close: string) => open
+            + body.replace(/<w:basedOn w:val="[^"]*"\/>/, '<w:basedOn w:val="TableBase"/>').replace(/<w:sz w:val="\d+"\/><w:szCs w:val="\d+"\/>/, '') + close)
+            .replace('</w:styles>', '<w:style w:type="paragraph" w:styleId="TableBase"><w:name w:val="Table Base"/><w:rPr><w:sz w:val="14"/><w:szCs w:val="14"/></w:rPr></w:style></w:styles>'),
+          '<!-- table-font-size: 7 -->\n' + TABLE],
+        ['a character style its runs name in another case', '<!-- table-font-size: 7 -->\n' + TABLE,
+          (table: string) => withoutSizes(table).replace(/<w:r><w:rPr>/g, '$&<w:rStyle w:val="smalltext"/>'),
+          (styles: string) => styles.replace('</w:styles>', '<w:style w:type="character" w:styleId="SmallText"><w:name w:val="Small Text"/><w:rPr><w:sz w:val="14"/><w:szCs w:val="14"/></w:rPr></w:style></w:styles>'),
+          '<!-- table-font-size: 7 -->\n' + TABLE],
+        ['the complex script size, as a character style marks its runs right-to-left', '<!-- table-font-size: 8 -->\n' + TABLE,
+          (table: string) => withoutSizes(table).replace(/<w:r><w:rPr>/g, '$&<w:rStyle w:val="RightToLeft"/><w:sz w:val="14"/><w:szCs w:val="22"/>'),
+          (styles: string) => styles.replace('</w:styles>', '<w:style w:type="character" w:styleId="RightToLeft"><w:name w:val="Right To Left"/><w:rPr><w:rtl/></w:rPr></w:style></w:styles>'),
+          '<!-- table-font-size: 11 -->\n' + TABLE],
+        ['the table paragraph style\'s complex script size, for text of a complex script it marks right-to-left', '<!-- table-font-size: 11 -->\n' + HEBREW,
+          (table: string) => withoutSizes(table).replace(/<w:r><w:rPr>/g, '$&<w:rtl/>'),
+          (styles: string) => styles.replace(tableParagraph, (_style, open: string, body: string, close: string) => open + body.replace(/<w:szCs w:val="\d+"\/>/, '<w:szCs w:val="22"/>') + close),
+          '<!-- table-font-size: 11 -->\n' + HEBREW],
+      ])('writes the size Word shows on a table whose text takes %s', async (_name, markdown, table, styles, expected) => {
+        // Text with no size of its own seemed to take the document's size
+        // for tables, and a run's size the one its own marks gave it
+        const { convertDocx } = await import('./converter');
+        const converted = await editedInWord(markdown, table, styles);
+        expect(parseFrontmatter(converted).body).toBe(expected);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it('writes the size Word shows on a table whose text takes it from a style where a tracked change took the table paragraph style\'s size off', async () => {
+        // The size the change records the style had was read as the document's
+        // for tables, though the frontmatter has none, so export gives the
+        // table another
+        const JSZip = (await import('jszip')).default;
+        const { convertDocx } = await import('./converter');
+        const zip = await JSZip.loadAsync((await convertMdToDocx(TABLE)).docx);
+        const styles = await zip.file('word/styles.xml')!.async('string');
+        const changed = styles.replace(/(<w:style\b[^>]*w:styleId="TableParagraph"[\s\S]*?<w:rPr>)<w:sz w:val="18"\/><w:szCs w:val="18"\/>/,
+          (_style, before: string) => before + '<w:rPrChange w:id="90" w:author="A" w:date="2024-01-01T00:00:00Z"><w:rPr><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:rPrChange>');
+        expect(changed).not.toBe(styles);
+        zip.file('word/styles.xml', changed);
+        expect(await zip.file('word/document.xml')!.async('string')).not.toMatch(/<w:r><w:rPr>(?:(?!<\/w:rPr>)[\s\S])*?<w:sz /);
+        const converted = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+        // Normal's 11 points, which the style is based on
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font-size: 11 -->\n' + TABLE);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it('keeps a size of its own, the document\'s, where a character style has the table paragraph style\'s ID', async () => {
+        // A paragraph takes no character style, but its size was read as the
+        // document's for tables, so the table's seemed another
+        const JSZip = (await import('jszip')).default;
+        const { convertDocx } = await import('./converter');
+        const markdown = '---\ntable-font-size: 8\n---\n<!-- table-font-size: 8 -->\n' + TABLE;
+        const zip = await JSZip.loadAsync((await convertMdToDocx(markdown)).docx);
+        const styles = await zip.file('word/styles.xml')!.async('string');
+        const character = '<w:style w:type="character" w:styleId="TableParagraph"><w:name w:val="Table Paragraph Char"/><w:rPr><w:sz w:val="48"/></w:rPr></w:style>';
+        const added = styles.replace(/<w:style\b[^>]*w:styleId="TableParagraph"/, character + '$&');
+        expect(added).not.toBe(styles);
+        zip.file('word/styles.xml', added);
+        const converted = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font-size: 8 -->\n' + TABLE);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it.each([
+        ['a paragraph style', '<!-- table-font-size: 7 -->\n', ['14'],
+          (table: string) => table.replace(/<w:pStyle w:val="TableParagraph"\/>/g, '<w:pStyle w:val="SmallTable"/>')],
+        ['a character style', '<!-- table-font-size: 7 -->\n', ['14'],
+          (table: string) => table.replace(/<w:r><w:rPr>/g, '$&<w:rStyle w:val="SmallText"/>')],
+        ['a character style that sets none, the document\'s', '', [],
+          (table: string) => table.replace(/<w:r><w:rPr>/g, '$&<w:rStyle w:val="Plain"/>')],
+      ])('writes the size of a table whose text takes it from %s', async (_name, directive, sizes, edit) => {
+        // Text with no size of its own in another style than the table
+        // paragraph style's isn't in the document's
+        const JSZip = (await import('jszip')).default;
+        const { convertDocx } = await import('./converter');
+        const zip = await JSZip.loadAsync((await convertMdToDocx('<!-- table-font-size: 7 -->\n' + TABLE)).docx);
+        const xml = await zip.file('word/document.xml')!.async('string');
+        const edited = xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/, table => edit(table.replace(/<w:sz w:val="14"\/><w:szCs w:val="14"\/>/g, '')));
+        expect(edited).not.toContain('w:val="14"');
+        zip.file('word/document.xml', edited);
+        const styles = await zip.file('word/styles.xml')!.async('string');
+        zip.file('word/styles.xml', styles.replace('</w:styles>', '<w:style w:type="paragraph" w:customStyle="1" w:styleId="SmallTable">'
+          + '<w:name w:val="Small Table"/><w:basedOn w:val="TableParagraph"/><w:rPr><w:sz w:val="14"/><w:szCs w:val="14"/></w:rPr></w:style>'
+          + '<w:style w:type="character" w:customStyle="1" w:styleId="SmallText"><w:name w:val="Small Text"/><w:rPr><w:sz w:val="14"/><w:szCs w:val="14"/></w:rPr></w:style>'
+          + '<w:style w:type="character" w:customStyle="1" w:styleId="Plain"><w:name w:val="Plain"/><w:rPr><w:i w:val="0"/></w:rPr></w:style></w:styles>'));
+        const converted = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+        expect(parseFrontmatter(converted).body).toBe(directive + TABLE);
+        expect(await tableSizes(converted)).toEqual(sizes);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      /** styles.xml with `rPr` in the style `id` */
+      const withRunProperties = (id: string, rPr: string) => (styles: string) =>
+        styles.replace(new RegExp('(<w:style\\b[^>]*w:styleId="' + id + '"[^>]*>)([\\s\\S]*?)(</w:style>)'),
+          (_style, open: string, body: string, close: string) => open + body + '<w:rPr>' + rPr + '</w:rPr>' + close);
+      it.each([
+        ['marks complex script', 'DefaultParagraphFont', '<w:cs/>'],
+        ['marks right-to-left', 'DefaultParagraphFont', '<w:rtl/>'],
+        ['marks complex script, named in another case', 'defaultparagraphfont', '<w:cs/>'],
+      ])('keeps the size Word shows on a table whose runs name the default paragraph font, a style whose properties Word ignores, that %s', async (_name, rStyle, marks) => {
+        // Word ignores the elements of DefaultParagraphFont, NoList and
+        // TableNormal (MS-OI29500, Part 1 17.7.4.17), but the mark read as
+        // the runs', so they seemed to show their complex script size
+        const { convertDocx } = await import('./converter');
+        const markdown = '<!-- table-font-size: 7 -->\n' + TABLE;
+        const converted = await editedInWord(markdown,
+          table => withoutSizes(table).replace(/<w:r><w:rPr>/g, '$&<w:rStyle w:val="' + rStyle + '"/><w:sz w:val="14"/><w:szCs w:val="22"/>'),
+          withRunProperties('DefaultParagraphFont', marks));
+        expect(parseFrontmatter(converted).body).toBe(markdown);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      // The table's runs at 7 points, as Word sets them all
+      const resized = (table: string) => table.replace(/<w:sz w:val="22"\/><w:szCs w:val="22"\/>/g, '<w:sz w:val="14"/><w:szCs w:val="14"/>');
+      /** styles.xml with `element` first in the table paragraph style's run properties */
+      const inTableParagraph = (element: string) => (styles: string) => styles.replace(tableParagraph,
+        (_style, open: string, body: string, close: string) => open + body.replace('<w:rPr>', '<w:rPr>' + element) + close);
+      it.each([
+        ['the table paragraph style turns off, by 0', resized, inTableParagraph('<w:vanish w:val="0"/>'), '7'],
+        ['the table paragraph style turns off, by false', resized, inTableParagraph('<w:vanish w:val="false"/>'), '7'],
+        ['the table paragraph style turns off, by off', resized, inTableParagraph('<w:vanish w:val="off"/>'), '7'],
+        ['a character style turns off', (table: string) => resized(table).replace(/<w:r><w:rPr>/g, '$&<w:rStyle w:val="Shown"/>'),
+          (styles: string) => styles.replace('</w:styles>', '<w:style w:type="character" w:styleId="Shown"><w:name w:val="Shown"/><w:rPr><w:vanish w:val="0"/></w:rPr></w:style></w:styles>'), '7'],
+        // Which may hide it, so the size Word shows is unknown
+        ['the table paragraph style turns on', resized, inTableParagraph('<w:vanish/>'), '11'],
+      ])('writes the size Word set on a table whose text\'s hidden property %s', async (_name, table, styles, size) => {
+        // A style's w:vanish read as on by its presence alone, though its
+        // value turned it off, so the text seemed hidden and the size
+        // unknown, and the table kept the size Word took off
+        const { convertDocx } = await import('./converter');
+        const converted = await editedInWord('<!-- table-font-size: 11 -->\n' + TABLE, table, styles);
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font-size: ' + size + ' -->\n' + TABLE);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      /** The table's paragraphs without a style, as the default paragraph
+       *  style's, and its runs at 7 points, or 11 where they're marked
+       *  complex script, by `tblPr`, if given, in its tblPr */
+      const defaultStyled = (tblPr = '') => (table: string) => withoutSizes(table).replace('<w:tblPr>', '<w:tblPr>' + tblPr)
+        .replace(/<w:pStyle w:val="TableParagraph"\/>/g, '').replace(/<w:r><w:rPr>/g, '$&<w:sz w:val="14"/><w:szCs w:val="22"/>');
+      /** styles.xml with `element` first in Normal's run properties, and
+       *  Normal's start tag as `tag` makes it */
+      const inNormal = (element: string, tag = (open: string) => open) => (styles: string) =>
+        styles.replace(/(<w:style\b[^>]*w:styleId="Normal"[^>]*>)([\s\S]*?)(<\/w:style>)/,
+          (_style, open: string, body: string, close: string) => tag(open) + body.replace('<w:rPr>', '<w:rPr>' + element) + close);
+      it.each([
+        // Normal's mark read before the table style's, as though Normal
+        // came after it, though the table style's comes after the default
+        // paragraph style's
+        ['a table style marks right-to-left over the default paragraph style\'s mark', defaultStyled('<w:tblStyle w:val="RightToLeft"/>'),
+          (styles: string) => inNormal('<w:rtl w:val="0"/>')(styles)
+            .replace('</w:styles>', '<w:style w:type="table" w:styleId="RightToLeft"><w:name w:val="Right To Left"/><w:rPr><w:rtl/></w:rPr></w:style></w:styles>')],
+        // A style without a w:type is a paragraph style, but the default
+        // was read only where its w:type said so
+        ['the default paragraph style, which has no type, marks right-to-left', defaultStyled(),
+          inNormal('<w:rtl/>', open => open.replace(' w:type="paragraph"', ''))],
+      ])('keeps the size Word shows on a table whose paragraphs are the default paragraph style\'s, where %s', async (_name, table, styles) => {
+        // The runs seemed to show their size for the rest, 7 points, and not
+        // their complex script size, 11 points
+        const { convertDocx } = await import('./converter');
+        const markdown = '<!-- table-font-size: 11 -->\n' + TABLE;
+        const converted = await editedInWord(markdown, table, styles);
+        expect(parseFrontmatter(converted).body).toBe(markdown);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      it('writes the size Word set on a table of the default table style, whose properties Word ignores', async () => {
+        // A mark in TableNormal, which Word ignores, read as the table
+        // style's, which may set it by where the cell is, so the size
+        // seemed unknown
+        const { convertDocx } = await import('./converter');
+        const converted = await editedInWord('<!-- table-font-size: 11 -->\n' + TABLE,
+          table => withoutSizes(table).replace(/<w:r><w:rPr>/g, '$&<w:sz w:val="14"/><w:szCs w:val="22"/>'), withRunProperties('TableNormal', '<w:rtl/>'));
+        expect(parseFrontmatter(converted).body).toBe('<!-- table-font-size: 7 -->\n' + TABLE);
+        expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
+      });
+
+      // An embed's files: a CSV of one table, and Markdown of two
+      const EMBEDS = {
+        readFile: (path: string) => new TextEncoder().encode(path.endsWith('.md')
+          ? '| H | I |\n| --- | --- |\n| a | b |\n\nText.\n\n| J | K |\n| --- | --- |\n| c | d |\n' : 'H,I\na,b\n'),
+        resolveRelative: (_base: string, relative: string) => relative,
+      };
+      const EMBED_OPTIONS = { embedResolver: EMBEDS, documentPath: '/doc/paper.md' };
+      it.each([
+        ['a CSV', '<!-- table-font-size: 11 -->\n<!-- embed: t.csv headers=1 -->\n', Infinity, '7'],
+        ['a CSV in a note', 'A[^1].\n\n[^1]: Note.\n\n    <!-- table-font-size: 11 -->\n    <!-- embed: t.csv headers=1 -->\n', Infinity, '7'],
+        // Export gives the directive to the first table only
+        ['a file of two tables, on the first, which the directive is for', '<!-- table-font-size: 11 -->\n<!-- embed: two.md -->\n', 1, '7'],
+      ])('writes the size Word set on the table of %s embedded with a size of its own', async (_name, markdown, tables, size) => {
+        // An embed's directive took the size export stored, as its table's
+        // size went unread
+        const JSZip = (await import('jszip')).default;
+        const { convertDocx } = await import('./converter');
+        const zip = await JSZip.loadAsync((await convertMdToDocx(markdown, EMBED_OPTIONS)).docx);
+        let resized = 0;
+        for (const part of ['word/document.xml', 'word/footnotes.xml']) {
+          const xml = await zip.file(part)?.async('string');
+          if (xml !== undefined) zip.file(part, xml.replace(/<w:tbl>[\s\S]*?<\/w:tbl>/g, table => resized++ >= tables ? table
+            : table.replace(/<w:sz w:val="\d+"\/><w:szCs w:val="\d+"\/>/g, '<w:sz w:val="14"/><w:szCs w:val="14"/>')));
+        }
+        expect(resized).toBeGreaterThan(0);
+        const converted = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+        expect(converted).toBe(markdown.replace('table-font-size: 11', 'table-font-size: ' + size));
+        expect((await convertDocx((await convertMdToDocx(converted, EMBED_OPTIONS)).docx)).markdown).toBe(converted);
+      });
+    });
   });
 
   // ---------------------------------------------------------------
@@ -975,6 +1489,27 @@ describe('styles with attributes spelled other ways', () => {
     expect([metadata.font, metadata.fontSize, metadata.headerFont, metadata.headerFontSize, metadata.headerFontStyle, metadata.titleFont, metadata.titleFontSize,
       metadata.tableFont, metadata.tableFontSize, metadata.codeFont, metadata.codeFontSize, metadata.styles?.pullquote]).toEqual(['Georgia', 12, ['Verdana'], [20],
       ['italic-underline-center'], ['Palatino'], [30], 'Courier New', 8, 'Menlo', 9, { font: 'Garamond', fontSize: 13, spacingBefore: 6, spacingAfter: 12, paragraphIndent: 0.5 }]);
+  });
+});
+
+describe('styles whose elements Word ignores', () => {
+  it('reads no custom style from a style with the ID of one, as NoList', async () => {
+    // Word ignores the elements of NoList, DefaultParagraphFont and
+    // TableNormal (MS-OI29500, Part 1 17.7.4.17), its name and properties
+    // too, but the frontmatter read the custom style's font and size
+    const { convertDocx } = await import('./converter');
+    const markdown = '---\nstyles:\n  pullquote:\n    font: Garamond\n    font-size: 13\n---\n\n<!-- style: pullquote -->\n\nStyled text.\n\n<!-- /style -->\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(markdown)).docx);
+    // Without the copy of custom styles export keeps, so they come from styles.xml
+    zip.remove('docProps/custom.xml');
+    const styles = await zip.file('word/styles.xml')!.async('string');
+    const id = /<w:style\b[^>]*w:styleId="([^"]+)"[^>]*>\s*<w:name w:val="Custom: pullquote"/.exec(styles)![1];
+    const renamed = (xml: string) => xml.split('w:styleId="NoList"').join('w:styleId="NoListOther"').split('"' + id + '"').join('"NoList"');
+    zip.file('word/styles.xml', renamed(styles));
+    zip.file('word/document.xml', renamed(await zip.file('word/document.xml')!.async('string')));
+    const converted = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    expect(parseFrontmatter(converted).metadata.styles).toBeUndefined();
+    expect((await convertDocx((await convertMdToDocx(converted)).docx)).markdown).toBe(converted);
   });
 });
 
