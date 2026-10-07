@@ -13,7 +13,7 @@ import { computeCodeRegions, computeMarkdownRegions, isInsideCodeRegion } from '
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { blocksAsRead, citationEndInText, compareNoteLabels, customStyleId, directiveRest, htmlBlocksIn, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, startsHtmlBlock } from './md-to-docx';
+import { blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, customStyleId, directiveRest, htmlBlocksIn, isLineBreakBlock, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, startsHtmlBlock } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { matchTables, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
@@ -515,10 +515,24 @@ const HARD_BREAK_AT_END = /(?<!\\)((?:\\\\)*)\\\n$/;
 // underline (see wrapHighlight)
 const HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END = /(?<!\\)((?:\\\\)*)\\\n(==[ \t]*)$/;
 const HARD_BREAKS_AT_END = /(?<!\\)((?:\\\\)*)(?:\\\n)+$/;
-// HTML comments that start a paragraph's text, after its indent, each with
-// the spaces and tabs after it, and the line breaks after them that end it,
-// with the spaces and tabs between them
-const COMMENTS_BEFORE_BREAKS = /^([ \t]*(?:<!--(?:(?!-->)[\s\S])*-->[ \t]*)+)((?:\\\n[ \t]*)*\\\n)$/;
+/** HTML comments that start a paragraph's text, after its indent, each with
+ *  the spaces and tabs after it, and the line breaks after them that end it,
+ *  with the spaces and tabs between them: the two, where they're all of it.
+ *  Found as commentsEnd finds the comments, as the regex this was ran many
+ *  times slower past some tens of thousands of a comment's characters. */
+function commentsBeforeBreaks(text: string): [string, string] | undefined {
+  if (!text.endsWith('\\\n')) return undefined;
+  let start = 0;
+  while (text[start] === ' ' || text[start] === '\t') start++;
+  const end = commentsEnd(text, start);
+  if (end === start) return undefined;
+  for (let at = end; text.startsWith('\\\n', at);) {
+    at += 2;
+    if (at === text.length) return [text.slice(0, end), text.slice(end)];
+    while (text[at] === ' ' || text[at] === '\t') at++;
+  }
+  return undefined;
+}
 
 /** The column a line's text ends at, as Markdown counts them, a tab going
  *  on to the next stop, every four columns */
@@ -11962,8 +11976,8 @@ export function buildMarkdown(
       // After comments alone, which start an HTML block, a \ and line end
       // are the block's text, so each line break is <br>, which export
       // reads there (see isLineBreakBlock)
-      const comments = COMMENTS_BEFORE_BREAKS.exec(textOut);
-      textOut = comments ? comments[1] + comments[2].replace(/\\\n/g, '<br>')
+      const comments = commentsBeforeBreaks(textOut);
+      textOut = comments ? comments[0] + comments[1].replace(/\\\n/g, '<br>')
         : textOut.replace(HARD_BREAK_AT_END, (_m, backslashes: string) => backslashes + '<br>');
     }
     // A line break before the == of a highlight that ends the text is <br>
@@ -12003,7 +12017,7 @@ export function buildMarkdown(
     // A block of comments and line breaks gives back runs that are each one
     // comment, as export splits it at each one's first -->, so a paragraph
     // mustn't merge those; others, as Word split, it may
-    const blockKeepsRuns = isLineBreakBlock(textOut) && payloads.every(payload => /^<!--(?:(?!-->)[\s\S])*-->$/.test(payload));
+    const blockKeepsRuns = isLineBreakBlock(textOut) && payloads.every(payload => payload.startsWith('<!--') && payload.indexOf('-->', 4) === payload.length - 3);
     // Text the runs hold outside their comments, read together as Word may
     // split one, which a paragraph would show, the block keeps hidden in
     // its run, with the rest of the paragraph, where that's spaces and tabs

@@ -6,8 +6,23 @@ import { isGfmDisallowedRawHtml } from './gfm';
 import { GRID_TABLE_PLACEHOLDER_PREFIX } from './grid-table-preprocess';
 import { extractHtmlTables } from './html-table-parser';
 
-// HTML comments, each with the spaces and tabs after it, from a block's start
-export const COMMENTS_AT_START_RE = /^(?:<!--(?:(?!-->)[\s\S])*-->[ \t]*)*/;
+/**
+ * Where the HTML comments that start at `start` in `text` end, each to its
+ * first --> after its <!--, with the spaces and tabs after it, or `start`
+ * where none does. Found by indexOf, as a regex's repeat of a comment's
+ * characters, as (?:(?!-->)[\s\S])*, keeps a place to go back to for each,
+ * and past some tens of thousands ran many times slower.
+ */
+export function commentsEnd(text: string, start = 0): number {
+  let end = start;
+  while (text.startsWith('<!--', end)) {
+    const close = text.indexOf('-->', end + 4);
+    if (close === -1) break;
+    end = close + 3;
+    while (text[end] === ' ' || text[end] === '\t') end++;
+  }
+  return end;
+}
 
 /** Whether export reads an HTML block's text as line breaks, alone or after
  *  comments, with the spaces and tabs after each comment and between the
@@ -15,8 +30,8 @@ export const COMMENTS_AT_START_RE = /^(?:<!--(?:(?!-->)[\s\S])*-->[ \t]*)*/;
 export function isLineBreakBlock(content: string): boolean {
   const text = content.trim();
   if (/^(?:<br\s*\/?>\s*)+$/i.test(text)) return true;
-  const comments = COMMENTS_AT_START_RE.exec(text)![0];
-  return comments !== '' && /^<br\s*\/?>(?:[ \t]*<br\s*\/?>)*$/i.test(text.slice(comments.length));
+  const end = commentsEnd(text);
+  return end > 0 && /^<br\s*\/?>(?:[ \t]*<br\s*\/?>)*$/i.test(text.slice(end));
 }
 
 export type HtmlBlockKind = 'grid' | 'comment' | 'raw' | 'image' | 'breaks' | 'tables' | 'text';

@@ -23,8 +23,8 @@ import { LATENT_STYLES } from './latent-styles';
 import { extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
 import { decodeHtmlAttribute } from './html-entities';
 import { matchCriticHeadingPrefix } from './critic-markup';
-import { COMMENTS_AT_START_RE, htmlBlockKind, listItemHtmlBlock } from './html-blocks';
-export { isLineBreakBlock } from './html-blocks';
+import { commentsEnd, htmlBlockKind, listItemHtmlBlock } from './html-blocks';
+export { commentsEnd, isLineBreakBlock } from './html-blocks';
 import { preprocessBlocks } from './block-preprocess';
 import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, type TemplateSections } from './template-sections';
 export { preprocessGridTables } from './grid-table-preprocess';
@@ -3160,9 +3160,20 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
           // line breaks alone.
           const indent = /^[ \t]*/.exec(htmlContent)![0];
           const text = htmlContent.trim();
-          const parts = COMMENTS_AT_START_RE.exec(text)![0]
-            ? text.match(/<!--(?:(?!-->)[\s\S])*-->|<br\s*\/?>|[ \t]+/gi)!
-            : text.match(/<br\s*\/?>/gi)!;
+          // Each comment, and the spaces and tabs after it, as commentsEnd
+          // finds them, then the line breaks and those between them
+          const end = commentsEnd(text);
+          const parts: string[] = [];
+          for (let at = 0; at < end;) {
+            let next = at;
+            if (text.startsWith('<!--', at)) next = text.indexOf('-->', at + 4) + 3;
+            else while (text[next] === ' ' || text[next] === '\t') next++;
+            parts.push(text.slice(at, next));
+            at = next;
+          }
+          // One at a time, as a spread into push passes each as an
+          // argument, which overflowed the stack past about 120,000 in Node
+          for (const part of text.slice(end).match(end > 0 ? /<br\s*\/?>|[ \t]+/gi : /<br\s*\/?>/gi)!) parts.push(part);
           result.push({
             type: 'paragraph',
             runs: [
