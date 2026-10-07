@@ -6003,9 +6003,12 @@ const BARE_LINK_CONTEXT = 1000;
  * opener the text before it. The pass reads up to a space on either side,
  * so it takes time in the length of the text. In a table's cell (`cell`),
  * a grid table's line is trimmed, so the spaces and tabs before a line
- * break are written as references (see gridLineBeforeBreak).
+ * break are written as references (see gridLineBeforeBreak). Before an
+ * equation in the paragraph (`beforeMath`), the spaces that end the text
+ * are written as beforeParagraphMath writes them, as references, which
+ * linkify reads on into after the last link's address and what ends it.
  */
-function resolveBareLinks(markdown: string, cell = false): string {
+function resolveBareLinks(markdown: string, cell = false, beforeMath = false): string {
   if (!markdown.includes(BARE_LINK)) return markdown;
   // Text, then each link's Markdown, address and closer, and the text after it
   const parts = markdown.split(BARE_LINK);
@@ -6039,8 +6042,12 @@ function resolveBareLinks(markdown: string, cell = false): string {
     // And in a cell, the spaces and tabs before a line break, which a grid
     // table's line writes as references
     const lineEnd = cell ? /^[ \t]+(?=\\\n)/.exec(after)?.[0] : undefined;
-    // The text after it as written, where that differs
-    const written = k === count - 1 && /^\s+$/.test(after) ? keepParagraphEdgeWhitespace(address + after, false, true).slice(address.length)
+    // The text after it as written, where that differs: whitespace alone
+    // at the paragraph's end, and before an equation in the paragraph, text
+    // with no space in it before the spaces that end it too
+    const ending = k === count - 1 && (beforeMath ? /^\S*\s+$/ : /^\s+$/).test(after)
+      ? keepParagraphEdgeWhitespace(address + after, false, true) : undefined;
+    const written = ending !== undefined ? (beforeMath ? beforeParagraphMath(ending) : ending).slice(address.length)
       : lineEnd !== undefined ? gridLineBeforeBreak(address + lineEnd).slice(address.length) + '\n' : undefined;
     const readsBack = (lead: string) => head !== undefined && bareLinkReadsBack(lead, address, closer, head, lineStart)
       && (!edgeBefore && written === undefined || bareLinkReadsBack(
@@ -7854,7 +7861,7 @@ function renderInlineRange(
     }
     i++;
   }
-  return { text: resolveBareLinks(resolveEmphasis(joinRevisedSpans(out)), opts?.cell), nextIndex: i, deferredComments: [] };
+  return { text: resolveBareLinks(resolveEmphasis(joinRevisedSpans(out)), opts?.cell, !opts?.heading && isInParagraphMath(segment[i])), nextIndex: i, deferredComments: [] };
 }
 
 /** Render inline content using ID-based comment syntax ({#id}...{/id}).
@@ -8092,7 +8099,7 @@ function renderInlineRangeWithIds(
     return a.remappedId.localeCompare(b.remappedId);
   });
 
-  return { text: resolveBareLinks(resolveEmphasis(joinRevisedSpans(out)), opts?.cell), nextIndex: i, deferredComments: deferred.map(d => d.body) };
+  return { text: resolveBareLinks(resolveEmphasis(joinRevisedSpans(out)), opts?.cell, !opts?.heading && isInParagraphMath(segment[i])), nextIndex: i, deferredComments: deferred.map(d => d.body) };
 }
 
 /**
@@ -10337,6 +10344,26 @@ function afterTrackedBreakSpan(text: string, at: number, marks: TrackedBreakMark
   return text[k - 1] === marks.alone;
 }
 
+/** A paragraph's text before an equation it goes on in, on the next line,
+ *  without the space export wrote for the text's line end, and with the
+ *  spaces before that, which Word shows before the equation, but Markdown
+ *  would drop before the line end, one, or read as a line break, two, as
+ *  references, and a backslash before them, which would escape the line
+ *  end, escaped. The space alone, with no text before it, stays, which
+ *  the math branch takes off, as it writes the equation on the line after,
+ *  and so does the text of an HTML block, which would show references and
+ *  a backslash's escape as text, as withoutEndSpaces leaves it. */
+function beforeParagraphMath(text: string): string {
+  if (!text.endsWith(' ') || /^ +$/.test(text)) return text;
+  const end = text.length - 1;
+  let space = end;
+  while (space > 0 && text[space - 1] === ' ') space--;
+  if (text.includes('<') && isInsideCodeRegion(Math.max(space - 1, 0), computeMarkdownRegions(text, { includeCode: false, html: 'all' }).htmlRegions)) return text;
+  let slashes = 0;
+  while (slashes < space && text[space - 1 - slashes] === '\\') slashes++;
+  return text.slice(0, space) + (slashes % 2 === 1 ? '\\' : '') + '&#32;'.repeat(end - space);
+}
+
 /** Markdown with each tracked break from joinTrackedParagraphBreaks inside
  *  the spans before and after it, as in {++**a**\n\nmore++} rather than
  *  {++**a**++}{++\n\n++}{++more++}, and the spaces and tabs the span has at
@@ -11965,6 +11992,7 @@ export function buildMarkdown(
         ? htmlIndent + keepParagraphWhitespace(textOut.slice(htmlIndent.length), true, atEnd)
         : referenced;
     if (atEnd && !isInParagraphMath(next)) textOut = withoutEndSpaces(textOut);
+    if (mathFollows) textOut = beforeParagraphMath(textOut);
     // Track standalone HTML comment paragraphs for gap metadata and keep the
     // blank lines a para item wrote before them, where export reads what
     // import wrote as one: a block that starts and ends with a comment, as
@@ -12165,7 +12193,7 @@ export function buildMarkdown(
           .replace(HARD_BREAK_BEFORE_HIGHLIGHT_CLOSE_AT_END, (_m, backslashes: string, close: string) => backslashes + '<br>' + close);
         const atStart = partStart === 0 || isMarkdownBlockEdge(bodyMerged[partStart - 1]);
         return beforeMath && /^[ \t]* $/.test(broken) ? keepParagraphWhitespace(broken.slice(0, -1), atStart, true) + ' '
-          : beforeMath ? keepParagraphWhitespace(broken, atStart, true)
+          : beforeMath ? beforeParagraphMath(keepParagraphWhitespace(broken, atStart, true))
             : withoutEndSpaces(keepParagraphWhitespace(broken, atStart, true));
       };
       // The part that holds the paragraph's text and display math so far,
