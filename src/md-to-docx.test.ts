@@ -4941,6 +4941,43 @@ describe('landscape sections', () => {
       expect(state.landscapeTables.has(0)).toBe(true);
     });
 
+    it('turns the template\'s page for a landscape section that ends the document, and keeps the rest of its properties', () => {
+      // The section's properties are the body's, with no break after it
+      const state = makeState();
+      state.templateSectPr = '<w:sectPr><w:headerReference w:type="default" r:id="rId99"/><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1000" w:right="1000" w:bottom="1000" w:left="1000" w:header="700" w:footer="700" w:gutter="0"/><w:cols w:space="720"/></w:sectPr>';
+      const xml = generateDocumentXml(parseMd('A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->'), state);
+      expect(xml.slice(xml.lastIndexOf('<w:sectPr'))).toStartWith('<w:sectPr><w:headerReference w:type="default" r:id="rId99"/><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/><w:pgMar w:top="1000"');
+      expect(xml.match(/w:orient="landscape"/g)).toHaveLength(1);
+    });
+
+    it.each([
+      ['a page size with a closing tag', '<w:pgSz w:w="11906" w:h="16838"></w:pgSz>', ''],
+      ['no page size', '', ''],
+      ['no page size but in a tracked change\'s old properties', '', '<w:sectPrChange w:id="1" w:author="A" w:date="2024-01-01T00:00:00Z"><w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr></w:sectPrChange>'],
+    ])('turns the page of a template with %s for a landscape section that ends the document, and keeps the rest of its properties', (_, page, change) => {
+      // The template's properties were left out for a page of its own
+      const state = makeState();
+      state.templateSectPr = '<w:sectPr><w:headerReference w:type="default" r:id="rId99"/>' + page + '<w:pgMar w:top="1000" w:right="1000" w:bottom="1000" w:left="1000" w:header="700" w:footer="700" w:gutter="0"/><w:pgNumType w:start="5"/><w:cols w:num="2" w:space="720"/>' + change + '</w:sectPr>';
+      const xml = generateDocumentXml(parseMd('A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->'), state);
+      // The page's size is the template's, or else the default
+      const bodySectPr = xml.slice(xml.lastIndexOf('<w:sectPr>', xml.lastIndexOf('<w:headerReference')));
+      expect(bodySectPr.replace(/<w:pgSz w:w="\d+" w:h="\d+" w:orient="landscape"\/>/, '<pgSz/>')).toStartWith('<w:sectPr><w:headerReference w:type="default" r:id="rId99"/><pgSz/>'
+        + '<w:pgMar w:top="1000" w:right="1000" w:bottom="1000" w:left="1000" w:header="700" w:footer="700" w:gutter="0"/><w:pgNumType w:start="5"/><w:cols w:num="2" w:space="720"/>' + change + '</w:sectPr>');
+    });
+
+    it.each([
+      ['no attributes', '<w:sectPr/>', '<w:sectPr>'],
+      ['attributes', '<w:sectPr w:rsidR="00AB12CD"/>', '<w:sectPr w:rsidR="00AB12CD">'],
+    ])('turns the page of a template whose properties are an empty element with %s for a landscape section that ends the document', (_, sectPr, open) => {
+      // The page went inside the element's tag, which has no closing tag
+      // to go before
+      const state = makeState();
+      state.templateSectPr = sectPr;
+      const xml = generateDocumentXml(parseMd('A.\n\n<!-- landscape -->\n\nB.\n\n<!-- /landscape -->'), state);
+      expect(xml.slice(xml.lastIndexOf('<w:sectPr'))).toStartWith(open + '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/></w:sectPr>\n</w:body>');
+      expect(XMLValidator.validate(xml)).toBe(true);
+    });
+
     it('preserves template sectPr as body closing', () => {
       const tokens: MdToken[] = [{ type: 'paragraph', runs: [{ type: 'text', text: 'Test' }] }];
       const state = makeState();
@@ -5127,12 +5164,14 @@ describe('portrait sections', () => {
 
     it('does not emit blank page between landscape close and portrait open', () => {
       const tokens: MdToken[] = [
+        { type: 'paragraph', runs: [{ type: 'text', text: 'Before' }] },
         { type: 'paragraph', runs: [], landscapeOpen: true },
         { type: 'paragraph', runs: [{ type: 'text', text: 'Landscape' }] },
         { type: 'paragraph', runs: [], landscapeClose: true },
         { type: 'paragraph', runs: [], portraitOpen: true },
         { type: 'paragraph', runs: [{ type: 'text', text: 'Portrait' }] },
         { type: 'paragraph', runs: [], portraitClose: true },
+        { type: 'paragraph', runs: [{ type: 'text', text: 'After' }] },
       ];
       const state = makeState();
       const xml = generateDocumentXml(tokens, state);
@@ -5143,12 +5182,14 @@ describe('portrait sections', () => {
 
     it('does not emit blank page between portrait close and landscape open', () => {
       const tokens: MdToken[] = [
+        { type: 'paragraph', runs: [{ type: 'text', text: 'Before' }] },
         { type: 'paragraph', runs: [], portraitOpen: true },
         { type: 'paragraph', runs: [{ type: 'text', text: 'Portrait' }] },
         { type: 'paragraph', runs: [], portraitClose: true },
         { type: 'paragraph', runs: [], landscapeOpen: true },
         { type: 'paragraph', runs: [{ type: 'text', text: 'Landscape' }] },
         { type: 'paragraph', runs: [], landscapeClose: true },
+        { type: 'paragraph', runs: [{ type: 'text', text: 'After' }] },
       ];
       const state = makeState();
       const xml = generateDocumentXml(tokens, state);

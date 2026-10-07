@@ -119,6 +119,9 @@ export interface GridTableSourceMapEntry {
 export interface GridTablePreprocessResult {
   output: string;
   sourceMap: GridTableSourceMapEntry[];
+  /** For each line of `output`, the line of the Markdown it comes from: a
+   *  placeholder's, and the blank lines around it, the table's first */
+  lines: number[];
 }
 
 /**
@@ -138,6 +141,8 @@ export function preprocessGridTablesWithSourceMap(markdown: string): GridTablePr
   let inputOffset = 0;
   for (const line of lines) { lineOffsets.push(inputOffset); inputOffset += line.length + 1; }
   const result: string[] = [];
+  const sourceLines: number[] = [];
+  const push = (line: string, from: number) => { result.push(line); sourceLines.push(from); };
   const replacements: Array<{ resultIndex: number; sourceStart: number; sourceEnd: number }> = [];
   let i = 0;
   let fenceChar: '`' | '~' | null = null;
@@ -162,12 +167,12 @@ export function preprocessGridTablesWithSourceMap(markdown: string): GridTablePr
         fenceChar = null;
         fenceLen = 0;
       }
-      result.push(lines[i]);
+      push(lines[i], i);
       i++;
       continue;
     }
     if (fenceChar) {
-      result.push(lines[i]);
+      push(lines[i], i);
       i++;
       continue;
     }
@@ -196,27 +201,27 @@ export function preprocessGridTablesWithSourceMap(markdown: string): GridTablePr
           // Ensure blank lines around the placeholder so markdown-it treats
           // it as an html_block (Type 2: HTML comment).
           if (result.length > 0 && result[result.length - 1].trim() !== '') {
-            result.push('');
+            push('', start);
           }
           const placeholder = GRID_TABLE_PLACEHOLDER_PREFIX + encoded + ' -->';
           const resultIndex = result.length;
-          result.push(placeholder);
+          push(placeholder, start);
           replacements.push({
             resultIndex,
             sourceStart: lineOffsets[start],
             sourceEnd: lineOffsets[start] + tableLines.join('\n').length,
           });
-          result.push('');
+          push('', start);
           continue;
         }
       }
 
       // Not a valid grid table — emit lines as-is
       for (let j = start; j < i; j++) {
-        result.push(lines[j]);
+        push(lines[j], j);
       }
     } else {
-      result.push(lines[i]);
+      push(lines[i], i);
       i++;
     }
   }
@@ -231,7 +236,7 @@ export function preprocessGridTablesWithSourceMap(markdown: string): GridTablePr
     const outputEnd = outputStart + result[replacement.resultIndex].length;
     sourceMap.push({ outputStart, outputEnd, sourceStart: replacement.sourceStart, sourceEnd: replacement.sourceEnd });
   }
-  return { output, sourceMap };
+  return { output, sourceMap, lines: sourceLines };
 }
 
 /** A grid table's line by characters, with each one's display column and

@@ -3335,7 +3335,12 @@ export async function extractPortraitTableMapping(data: Uint8Array | JSZip): Pro
 }
 
 export async function extractPortraitBreakOrdinals(data: Uint8Array | JSZip): Promise<Set<number> | null> {
-  const json = await extractChunkedCustomProp(data, 'MANUSCRIPT_PORTRAIT_BREAKS_');
+  return extractBreakOrdinals(data, 'MANUSCRIPT_PORTRAIT_BREAKS_');
+}
+
+/** The section breaks' ordinals the custom property `prefix` lists */
+async function extractBreakOrdinals(data: Uint8Array | JSZip, prefix: string): Promise<Set<number> | null> {
+  const json = await extractChunkedCustomProp(data, prefix);
   if (!json) return null;
   try {
     const arr = JSON.parse(json);
@@ -4938,6 +4943,10 @@ export async function extractDocumentContent(
     /** The image files the conversion writes, which the notes' images share */
     imageFiles?: ImageFiles;
     portraitBreakOrdinals?: Set<number>;
+    /** The sections, by the ordinal of the break that ends each, a references marker before their opening fence starts */
+    referencesBeforeSections?: Set<number>;
+    /** The last section, by the number of breaks before it, where its landscape page is the template's, which no fence set */
+    templatePageSections?: Set<number>;
     customStyles?: Record<string, CustomStyleDef>;
     /** Bookmark name → "noteKind:noteId" for resolving NOTEREF cross-reference fields. */
     footnoteCrossRefMap?: Map<string, string>;
@@ -5009,6 +5018,8 @@ export async function extractDocumentContent(
   let sectionBreakOrdinal = 0; // counter for paragraph-level sectPr occurrences
   let afterSectionBreak = false; // the last paragraph ended a section
   const portraitBreakOrdinals = options?.portraitBreakOrdinals;
+  const referencesBeforeSections = options?.referencesBeforeSections;
+  const templatePageSections = options?.templatePageSections;
   // The tracked mark before the empty carrier that ended the section before,
   // which Markdown drops, unless this section's fence puts its opener there
   let markBeforeSection: RevisionInfo | undefined;
@@ -5017,19 +5028,39 @@ export async function extractDocumentContent(
   // opener would leave it on the line of. Display math and HTML comments
   // write their own line breaks. The mark before the section goes before
   // the opener, as the break that ends the paragraph before (see
-  // joinTrackedParagraphBreaks), on an empty paragraph.
-  const endSection = (target: ContentItem[], fence: 'landscape' | 'portrait' | undefined): void => {
+  // joinTrackedParagraphBreaks), on an empty paragraph. A references marker
+  // export wrote at the start of the section, as it had nothing to list,
+  // goes between that mark and the opener, where it came before the
+  // opener, as a custom property says.
+  const endSection = (target: ContentItem[], fence: 'landscape' | 'portrait' | undefined, ordinal = sectionBreakOrdinal - 1): void => {
     const markBefore = markBeforeSection;
     markBeforeSection = undefined;
     if (fence) {
-      const first = target[sectionStartIndex];
+      const marker = target[sectionStartIndex]?.type === 'para' ? sectionStartIndex + 1 : sectionStartIndex;
+      const at = referencesBeforeSections?.has(ordinal) && target[marker]?.type === 'bibliography_marker' ? marker + 1 : sectionStartIndex;
+      const first = target[at];
       const opener: ContentItem = { type: fence === 'landscape' ? 'landscape_open' : 'portrait_open' };
-      target.splice(sectionStartIndex, 0, ...(markBefore ? [{ type: 'para', breakRevision: markBefore } as ContentItem] : []),
+      target.splice(at, 0,
         ...(first && !isStructuralBoundaryItem(first) && !(first.type === 'math' && first.display) && first.type !== 'html_comment'
           ? [opener, { type: 'para' } as ContentItem] : [opener]));
+      if (markBefore) target.splice(sectionStartIndex, 0, { type: 'para', breakRevision: markBefore });
       target.push({ type: fence === 'landscape' ? 'landscape_close' : 'portrait_close' });
     }
     sectionStartIndex = target.length;
+  };
+  // The fence of the section whose properties, `sectPrChildren`, are its
+  // break's, the `ordinal`th, or the body's: landscape where its page is,
+  // and portrait where export wrote a portrait fence's break
+  const sectionFenceOf = (sectPrChildren: XmlNode[], ordinal: number): 'landscape' | 'portrait' | undefined => {
+    const pgSzNode = sectPrChildren.find((c) => c['w:pgSz'] !== undefined);
+    let isLandscapeSect = false;
+    if (pgSzNode) {
+      const orient = getAttr(pgSzNode, 'orient');
+      const w = parseInt(getAttr(pgSzNode, 'w') || '0', 10);
+      const h = parseInt(getAttr(pgSzNode, 'h') || '0', 10);
+      isLandscapeSect = orient === 'landscape' || (w > 0 && h > 0 && w > h);
+    }
+    return isLandscapeSect ? 'landscape' : portraitBreakOrdinals?.has(ordinal) ? 'portrait' : undefined;
   };
 
   function endComment(id: string, target: ContentItem[]): void {
@@ -5361,17 +5392,7 @@ export async function extractDocumentContent(
               if (sectPrNode && !inTableCell) {
                 const currentOrdinal = sectionBreakOrdinal++;
                 afterSectionBreak = true;
-                const sectPrChildren = asXmlNodes(sectPrNode['w:sectPr']);
-                const pgSzNode = sectPrChildren.find((c) => c['w:pgSz'] !== undefined);
-                let isLandscapeSect = false;
-                if (pgSzNode) {
-                  const orient = getAttr(pgSzNode, 'orient');
-                  const w = parseInt(getAttr(pgSzNode, 'w') || '0', 10);
-                  const h = parseInt(getAttr(pgSzNode, 'h') || '0', 10);
-                  isLandscapeSect = orient === 'landscape' || (w > 0 && h > 0 && w > h);
-                }
-                const fence = isLandscapeSect ? 'landscape' as const
-                  : portraitBreakOrdinals?.has(currentOrdinal) ? 'portrait' as const : undefined;
+                const fence = sectionFenceOf(asXmlNodes(sectPrNode['w:sectPr']), currentOrdinal);
                 if (paragraphCarriesContent(paraChildren)) {
                   // Word attaches the break to the section's last paragraph
                   // when nothing else carries it: read that paragraph as any
@@ -5665,6 +5686,19 @@ export async function extractDocumentContent(
   // goes on an empty one, as an empty paragraph after it would take it
   if (trackedParaMark?.target === content && trackedParaMark.end === content.length) {
     content.push({ type: 'para', breakRevision: trackedParaMark.revision });
+  }
+  // The last section's properties are the body's own, after its paragraphs,
+  // as Word writes a document that ends with a landscape section. Not a
+  // document of one section, whose orientation is its page's, as a
+  // template's, which no fence sets, nor a last section export gave a
+  // template's landscape page, as a custom property says, by the number of
+  // breaks before it, so one after a break Word adds is read as its page is.
+  const documentNode = asXmlNodes(parsed).find(node => node['w:document'] !== undefined);
+  const bodyNode = documentNode && asXmlNodes(documentNode['w:document']).find(node => node['w:body'] !== undefined);
+  const bodySectPr = bodyNode && asXmlNodes(bodyNode['w:body']).find(node => node['w:sectPr'] !== undefined);
+  if (bodySectPr && sectionBreakOrdinal > 0 && content.length > sectionStartIndex) {
+    const fence = templatePageSections?.has(sectionBreakOrdinal) ? undefined : sectionFenceOf(asXmlNodes(bodySectPr['w:sectPr']), sectionBreakOrdinal);
+    endSection(content, fence, sectionBreakOrdinal);
   }
   return { content, zoteroBiblData, imageEntries: imageFiles.entries.length > 0 ? imageFiles.entries : undefined, leadingBlankParagraphs };
 }
@@ -11341,11 +11375,10 @@ export function buildMarkdown(
     }
 
     if (item.type === 'landscape_open') {
-      const gapKey = 'lo' + sentinelLoIdx;
-      sentinelLoIdx++;
       // Check if this is a single-table landscape section (table-only, no title/notes).
       // If the custom property says so, suppress the fences and let the table's
-      // data-orientation attribute handle it instead.
+      // data-orientation attribute handle it instead. Export numbers only the
+      // fences' gaps, so such a section takes no number.
       if (renderOpts?.landscapeTableIndices?.has(tableIndex)) {
         // Peek ahead: landscape_open → table → landscape_close
         const nextItem = i + 1 < mergedContent.length ? mergedContent[i + 1] : undefined;
@@ -11358,6 +11391,8 @@ export function buildMarkdown(
           continue;
         }
       }
+      const gapKey = 'lo' + sentinelLoIdx;
+      sentinelLoIdx++;
       if (emitSentinelSep(gapKey)) {
         // gap metadata handled it
       } else if (incomingSep !== null) {
@@ -11373,13 +11408,13 @@ export function buildMarkdown(
       continue;
     }
     if (item.type === 'landscape_close') {
-      const gapKey = 'lc' + sentinelLcIdx;
-      sentinelLcIdx++;
       if (skipNextLandscapeClose) {
         skipNextLandscapeClose = false;
         i++;
         continue;
       }
+      const gapKey = 'lc' + sentinelLcIdx;
+      sentinelLcIdx++;
       if (emitSentinelSep(gapKey)) {
         // gap metadata handled it
       } else if (incomingSep !== null) {
@@ -11396,8 +11431,6 @@ export function buildMarkdown(
     }
 
     if (item.type === 'portrait_open') {
-      const gapKey = 'po' + sentinelPoIdx;
-      sentinelPoIdx++;
       if (renderOpts?.portraitTableIndices?.has(tableIndex)) {
         const nextItem = i + 1 < mergedContent.length ? mergedContent[i + 1] : undefined;
         const afterTable = i + 2 < mergedContent.length ? mergedContent[i + 2] : undefined;
@@ -11407,6 +11440,8 @@ export function buildMarkdown(
           continue;
         }
       }
+      const gapKey = 'po' + sentinelPoIdx;
+      sentinelPoIdx++;
       if (emitSentinelSep(gapKey)) {
         // gap metadata handled it
       } else if (incomingSep !== null) {
@@ -11422,13 +11457,13 @@ export function buildMarkdown(
       continue;
     }
     if (item.type === 'portrait_close') {
-      const gapKey = 'pc' + sentinelPcIdx;
-      sentinelPcIdx++;
       if (skipNextPortraitClose) {
         skipNextPortraitClose = false;
         i++;
         continue;
       }
+      const gapKey = 'pc' + sentinelPcIdx;
+      sentinelPcIdx++;
       if (emitSentinelSep(gapKey)) {
         // gap metadata handled it
       } else if (incomingSep !== null) {
@@ -12688,6 +12723,8 @@ export async function convertDocx(
     landscapeTableMapping,
     portraitTableMapping,
     portraitBreaks,
+    referencesBeforeSections,
+    templatePageSections,
     explicitTableFontSize,
     storedFieldOrder,
     htmlCommentAfterGapMapping,
@@ -12749,6 +12786,8 @@ export async function convertDocx(
     landscapeTableMapping: extractLandscapeTableMapping(zip),
     portraitTableMapping: extractPortraitTableMapping(zip),
     portraitBreaks: extractPortraitBreakOrdinals(zip),
+    referencesBeforeSections: extractBreakOrdinals(zip, 'MANUSCRIPT_REFERENCES_BEFORE_SECTIONS_'),
+    templatePageSections: extractBreakOrdinals(zip, 'MANUSCRIPT_TEMPLATE_PAGE_SECTIONS_'),
     explicitTableFontSize: extractExplicitTableFontSize(zip),
     storedFieldOrder: extractFrontmatterFieldOrder(zip),
     htmlCommentAfterGapMapping: extractHtmlCommentAfterGapMapping(zip),
@@ -12826,7 +12865,7 @@ export async function convertDocx(
   const fnContext: NoteBodyContext = { relationshipMap: fnRelsMerged, images: { relationships: fnRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: footnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts };
   const enContext: NoteBodyContext = { relationshipMap: enRelsMerged, images: { relationships: enRelsParsed.images, folder: imageFolder, files: imageFiles }, zoteroCitations: endnoteCitations, keyMap, numberingDefs, numberingStartOverrides, format, replyIds, commentBodies, styleLayouts };
 
-  const { content: docContent, zoteroBiblData, leadingBlankParagraphs } = await extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, relationshipMap: docRels, replyIds, commentBodies, imageRelationships: imageRels, imageFolder: options?.imageFolder, imageFiles, portraitBreakOrdinals: portraitBreaks ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined, styleLayouts });
+  const { content: docContent, zoteroBiblData, leadingBlankParagraphs } = await extractDocumentContent(zip, zoteroCitations, keyMap, { numberingDefs, numberingStartOverrides, numberingInstances, relationshipMap: docRels, replyIds, commentBodies, imageRelationships: imageRels, imageFolder: options?.imageFolder, imageFiles, portraitBreakOrdinals: portraitBreaks ?? undefined, referencesBeforeSections: referencesBeforeSections ?? undefined, templatePageSections: templatePageSections ?? undefined, customStyles: storedCustomStyles ?? undefined, footnoteCrossRefMap: footnoteCrossRefMapping ?? undefined, styleLayouts });
   // The notes the document references, in its order, which are the ones it
   // shows; their images take names after its own, footnotes' first
   const refOrder = noteReferences(docContent);

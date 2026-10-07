@@ -28,7 +28,8 @@ const blockParser = new MarkdownIt();
 const htmlBlockParser = new MarkdownIt({ html: true });
 const HTML_COMMENT_ONLY_RE = /^<!--[\s\S]*?-->\s*$/;
 
-function computeLineStarts(text: string): number[] {
+/** The offset of each line's start: after a line feed or carriage return, alone or both */
+export function computeLineStarts(text: string): number[] {
 	const lineStarts = [0];
 	for (let pos = 0; pos < text.length; pos++) {
 		const char = text.charCodeAt(pos);

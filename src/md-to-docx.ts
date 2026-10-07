@@ -23,6 +23,9 @@ import { LATENT_STYLES } from './latent-styles';
 import { extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
 import { decodeHtmlAttribute } from './html-entities';
 import { matchCriticHeadingPrefix } from './critic-markup';
+import { COMMENTS_AT_START_RE, htmlBlockKind, listItemHtmlBlock } from './html-blocks';
+export { isLineBreakBlock } from './html-blocks';
+import { preprocessBlocks } from './block-preprocess';
 import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, type TemplateSections } from './template-sections';
 export { preprocessGridTables } from './grid-table-preprocess';
 export { extractHtmlTables } from './html-table-parser';
@@ -90,6 +93,9 @@ const IMAGE_DIMENSION_ATTR_RE = '(\\d+(?:\\.\\d+)?|\\.\\d+)\\s*(px|in|cm|mm|pt|p
 
 // Placeholder for deferred bibliography insertion (NUL bytes cannot appear in valid XML)
 const BIBL_PLACEHOLDER = '\x00MANUSCRIPT_BIBL_MARKER\x00';
+// Placeholder for the break that gives a bibliography between two sections a
+// section of its own, written only where the bibliography shows something
+const BIBL_BREAK_PLACEHOLDER = '\x00MANUSCRIPT_BIBL_BREAK\x00';
 
 // Types for the parsed token stream
 export type TableFormat = 'pipe' | 'html' | 'grid';
@@ -697,19 +703,6 @@ export function linkifiedText(address: string, email: boolean): string {
 export function startsHtmlBlock(text: string): boolean {
   citationTextMd ??= createMarkdownIt();
   return citationTextMd.parse(text, {})[0]?.type === 'html_block';
-}
-
-// HTML comments, each with the spaces and tabs after it, from a block's start
-const COMMENTS_AT_START_RE = /^(?:<!--(?:(?!-->)[\s\S])*-->[ \t]*)*/;
-
-/** Whether export reads an HTML block's text as line breaks, alone or after
- *  comments, with the spaces and tabs after each comment and between the
- *  breaks after them, not as text, with the spaces before them as text */
-export function isLineBreakBlock(content: string): boolean {
-  const text = content.trim();
-  if (/^(?:<br\s*\/?>\s*)+$/i.test(text)) return true;
-  const comments = COMMENTS_AT_START_RE.exec(text)![0];
-  return comments !== '' && /^<br\s*\/?>(?:[ \t]*<br\s*\/?>)*$/i.test(text.slice(comments.length));
 }
 
 /** What of a comment, a block of its own, export doesn't read as a
@@ -1720,6 +1713,13 @@ export function portraitBreakProps(portraitBreakOrdinals: Set<number>): CustomPr
   return chunkCustomProps('MANUSCRIPT_PORTRAIT_BREAKS_', JSON.stringify([...portraitBreakOrdinals]));
 }
 
+/** The sections, by the ordinal of the break that ends each, a references
+ *  marker before their opening fence is written at the start of */
+export function referencesBeforeSectionsProps(ordinals: number[] | undefined): CustomPropEntry[] {
+  if (!ordinals?.length) return [];
+  return chunkCustomProps('MANUSCRIPT_REFERENCES_BEFORE_SECTIONS_', JSON.stringify(ordinals));
+}
+
 export function embedDirectiveProps(mapping: Map<number, string>): CustomPropEntry[] {
   if (mapping.size === 0) return [];
   const obj: Record<string, string> = {};
@@ -2091,15 +2091,11 @@ function markWrappedLatexBlocks(tokens: Token[], text: string, lineCount: number
  * `linkDefinitions` are the document's, which a note body parsed on its own
  * resolves its reference links and images with, after its own definitions.
  */
-export function parseMd(markdown: string, warnings?: string[], breaks = false, originalText?: string, tableNumberFormat?: TableNumberFormat, linkDefinitions?: Record<string, unknown>, unformatted?: string): MdToken[] {
+export function parseMd(markdown: string, warnings?: string[], breaks = false, originalText?: string, tableNumberFormat?: TableNumberFormat, linkDefinitions?: Record<string, unknown>, unformatted?: string, inNote = false): MdToken[] {
   const md = createMarkdownIt();
-  // Preserve explicit source semantics for blockquotes by disabling markdown-it
-  // lazy continuation behavior (where a non-`>` line can be absorbed into a
-  // preceding blockquote paragraph). For roundtrip fidelity we treat a missing
-  // `>` as a hard blockquote boundary
-  const gridProcessed = preprocessGridTables(markdown);
-  const deLazified = deLazifyBlockquotes(gridProcessed);
-  const wrapped = wrapBareLatexEnvironments(deLazified);
+  // Grid tables, quotes without lazy continuation, and bare LaTeX
+  // environments, as the orientation scan reads them too
+  const { deLazified, output: wrapped } = preprocessBlocks(markdown);
   const processed = preprocessCriticMarkup(wrapped);
   const env: { references?: Record<string, unknown>; documentLinkDefinitions?: Record<string, unknown> } =
     linkDefinitions ? { documentLinkDefinitions: linkDefinitions } : {};
@@ -2111,7 +2107,7 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
   // whether a table's columns line up reads its lines from before it,
   // `unformatted`, which differ from these in cell text alone
   const unformattedLines = unformatted === undefined ? undefined
-    : preprocessCriticMarkup(wrapBareLatexEnvironments(deLazifyBlockquotes(preprocessGridTables(unformatted)))).split('\n');
+    : preprocessCriticMarkup(preprocessBlocks(unformatted).output).split('\n');
   const sourceLines = unformattedLines?.length === processedLines.length ? unformattedLines : processedLines;
   const result = splitCriticParagraphs(splitCriticDisplayMathParagraphs(convertTokens(tokens, 0, 0, warnings, sourceLines)));
   annotateBlockquoteBoundaries(result);
@@ -2327,8 +2323,10 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
 
   // Pre-scan: warn on unclosed/orphaned/nested/crossed orientation directives with line numbers.
   // When originalText is provided (from convertMdToDocx), scan that so line numbers match the
-  // user's file rather than the stripped body passed to parseMd.
-  if (warnings) {
+  // user's file rather than the stripped body passed to parseMd. Not in a note's body, whose
+  // directives the document's scan reads as the note's, which pair with none, and whose
+  // lines it counted from the note's start.
+  if (warnings && !inNote) {
     const scanText = originalText ?? markdown;
     const findings = scanOrientationDirectives(scanText);
     if (findings.length > 0) {
@@ -2365,6 +2363,11 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
             break;
           case 'unclosed':
             warnings.push('Unclosed <!-- ' + f.directiveName + ' --> (opened near line ' + line + ') \u2014 no matching <!-- /' + f.directiveName + ' --> found.');
+            break;
+          // A list item's, which extractListItems drops, and a note's, which
+          // the note's body ignores, each with a warning of its own
+          case 'list-item':
+          case 'note':
             break;
         }
       }
@@ -2566,67 +2569,6 @@ function applyCustomStyleSentinels(tokens: MdToken[], warnings?: string[], refer
     }
   }
 }
-
-function deLazifyBlockquotes(markdown: string): string {
-  const lines = markdown.split('\n');
-  const out: string[] = [];
-  let inBlockquoteRun = false;
-  let fenceChar: '`' | '~' | null = null;
-  let fenceLen = 0;
-
-  for (const line of lines) {
-    const fenceMatch = line.match(/^ {0,3}([`~]{3,})/);
-    if (fenceMatch) {
-      const run = fenceMatch[1];
-      const runChar = run[0] as '`' | '~';
-      // Invariant: de-lazification must not inject blank lines inside fenced
-      // code blocks, or code content roundtrip fidelity is corrupted.
-      if (!fenceChar) {
-        if (inBlockquoteRun) {
-          out.push('');
-          inBlockquoteRun = false;
-        }
-        fenceChar = runChar;
-        fenceLen = run.length;
-      } else if (runChar === fenceChar && run.length >= fenceLen) {
-        fenceChar = null;
-        fenceLen = 0;
-      }
-      out.push(line);
-      continue;
-    }
-    if (fenceChar) {
-      out.push(line);
-      continue;
-    }
-    const isBlank = line.trim() === '';
-    const isBlockquoteLine = /^ {0,3}>/.test(line);
-
-    if (isBlockquoteLine) {
-      inBlockquoteRun = true;
-      out.push(line);
-      continue;
-    }
-
-    if (isBlank) {
-      inBlockquoteRun = false;
-      out.push(line);
-      continue;
-    }
-
-    if (inBlockquoteRun) {
-      // Insert a blank line to end the previous blockquote before this
-      // non-blank, non-`>` line.
-      out.push('');
-      inBlockquoteRun = false;
-    }
-
-    out.push(line);
-  }
-
-  return out.join('\n');
-}
-
 
 /**
  * Whether runs[r] can hold a task's box or an alert's marker, as GFM reads
@@ -2842,9 +2784,12 @@ const NOTE_BLOCK_WARNINGS: Partial<Record<MdToken['type'], string>> = {
 };
 const EMPTY_NOTE_CODE_WARNING = 'Empty code block inside a note dropped during conversion';
 // A note has no sections, so an orientation directive does nothing in one,
-// and wrote an empty paragraph
+// and wrote an empty paragraph. A close with nothing open stays a comment,
+// but does nothing either.
 const NOTE_ORIENTATION_WARNING = 'Orientation directive inside a note ignored';
 const isOrientationDirective = (token: MdToken): boolean => !!(token.landscapeOpen || token.landscapeClose || token.portraitOpen || token.portraitClose);
+const isOrphanedOrientationClose = (token: MdToken): boolean => token.type === 'paragraph' && token.runs.length === 1
+  && token.runs[0].type === 'html_comment' && ORIENTATION_CLOSE_RE.test(token.runs[0].text.trim());
 const isBlank = (text: string): boolean => !/[^ \t\n]/.test(text.replace(NOT_XML_CHARACTER, ''));
 const isEmptyCodeBlock = (token: MdToken): boolean => token.type === 'code_block' && token.runs.every(run => isBlank(run.text));
 
@@ -3087,7 +3032,9 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
       
       case 'html_block': {
         const htmlContent = token.content || '';
-        if (htmlContent.trim().startsWith(GRID_TABLE_PLACEHOLDER_PREFIX)) {
+        // What the block is, as the orientation scan reads it too
+        const kind = htmlBlockKind(htmlContent);
+        if (kind === 'grid') {
           const b64 = htmlContent.trim().slice(GRID_TABLE_PLACEHOLDER_PREFIX.length, -4); // strip prefix and ' -->'
           try {
             const jsonStr = Buffer.from(b64, 'base64').toString();
@@ -3123,7 +3070,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
         }
         // Not a block that starts and ends with a comment but holds a table
         // outside them, as import writes the HTML around a table on its lines
-        if (/^<!--[\s\S]*?-->\s*$/.test(htmlContent.trim()) && !extractHtmlTables(htmlContent).some(meta => meta.rows.length > 0)) {
+        if (kind === 'comment') {
           // Compute blank lines before this HTML comment using token.map
           const thisStart = token.map?.[0] ?? 0;
           // Find previous token's end line — scan backwards through markdown-it tokens
@@ -3153,12 +3100,12 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
             blankLinesAfter: blankLinesAfterVal,
             runs: [{ type: 'html_comment' as const, text: htmlContent.replace(/\n$/, '') }]
           });
-        } else if (isGfmDisallowedRawHtml(htmlContent)) {
+        } else if (kind === 'raw') {
           result.push({
             type: 'paragraph',
             runs: [{ type: 'text', text: htmlContent.replace(/\n$/, '') }]
           });
-        } else if (/^<img\s/i.test(htmlContent.trim())) {
+        } else if (kind === 'image') {
           const srcMatch = htmlContent.match(/src\s*=\s*["']([^"']+)["']/);
           const altMatch = htmlContent.match(/alt\s*=\s*["']([^"']*?)["']/);
           const width = parseHtmlImageDimension(htmlContent, 'width');
@@ -3184,7 +3131,7 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
               runs: [{ type: 'text', text: htmlContent.replace(/\n$/, '') }]
             });
           }
-        } else if (isLineBreakBlock(htmlContent)) {
+        } else if (kind === 'breaks') {
           // Line breaks alone, as import writes a paragraph that is one,
           // which markdown-it reads as a block, not a paragraph's text, or
           // after comments, as import writes a paragraph of comments a line
@@ -3801,29 +3748,22 @@ function extractListItems(tokens: ManuscriptToken[], ordered: boolean, level: nu
           runs = processInlineChildren([itemTokens[j]]);
           foundFirstParagraph = true;
         } else if (itemTokens[j].type === 'html_block') {
-          // An empty comment between two numbered sublists, as import writes
-          // it where Word starts the second over, which its numbering keeps
-          if (/^\s*<!--\s*-->\s*$/.test(itemTokens[j].content)
-            && itemTokens[j - 1]?.type === 'ordered_list_close' && itemTokens[j + 1]?.type === 'ordered_list_open') continue;
           // An HTML block, as at the top level, the item's first paragraph if
           // it comes first, as in - <div>a</div>, which kept nothing, and a
           // continuation after a quote or sublist before it otherwise. So is
           // a comment, hidden, and a block one starts, as
           // <!-- c --><div>a</div>, as text, which export dropped with the
           // rest of the block, but not a comment after the item's text that
-          // reads as a directive, which the item can't hold. Not a block that
-          // only its end ends, as a <pre> its </pre>, a comment its --> or a
-          // processing instruction its ?>, without its end and with more of
-          // the item after it, which markdown-it ended at a blank line in the
-          // item. Not a table, which an item can't hold.
-          const blocks = convertTokens([itemTokens[j]], 0, 0, warnings, sourceLines);
+          // reads as a directive, which the item can't hold. Not a block
+          // listItemHtmlBlock drops, which the orientation scan reads the
+          // same way, so a block after it can still be the item's text.
+          let blocks: MdToken[] = [];
+          const fate = listItemHtmlBlock(itemTokens, j, () => (blocks = convertTokens([itemTokens[j]], 0, 0, warnings, sourceLines)).some(block => block.type !== 'paragraph'));
+          if (fate === 'skipped') continue;
           const first = !foundFirstParagraph && childSegments.length === 0 && blocks.length === 1;
           const directive = !first && blocks.length === 1 && blocks[0].runs.length === 1 && blocks[0].runs[0].type === 'html_comment'
             && directiveRest(blocks[0].runs[0].text) !== undefined;
-          // A comment's end can take the dashes of its start, as in <!-->
-          const raw = /^\s*<(?:(script|pre|style|textarea)(?=[\s>]|$)|(\?)|(!\[CDATA\[)|(!(?=--))|![A-Za-z])/i.exec(itemTokens[j].content);
-          const end = raw?.[1] ? new RegExp('</' + raw[1] + '>', 'i') : raw?.[2] ? /\?>/ : raw?.[3] ? /\]\]>/ : raw?.[4] ? /-->/ : />/;
-          if ((raw && j < itemTokens.length - 1 && !end.test(itemTokens[j].content.slice(raw[0].length))) || blocks.some(block => block.type !== 'paragraph') || directive) {
+          if (fate === 'dropped' || directive) {
             warnings?.push(droppedListBlockWarning('HTML block'));
           } else if (first) {
             runs = blocks[0].runs;
@@ -4114,6 +4054,23 @@ export function parseTemplatePgSz(sectPrXml: string | undefined): PageSize {
   return w <= h ? { w, h } : { w: h, h: w };
 }
 
+/** A sectPr's own properties, before its last child, w:sectPrChange, a
+ *  tracked change's old properties, which hold a w:sectPr of their own */
+function ownSectPrXml(sectPrXml: string): string {
+  const change = sectPrXml.indexOf('<w:sectPrChange');
+  return change === -1 ? sectPrXml : sectPrXml.slice(0, change);
+}
+
+/** Whether a sectPr's page is landscape, as import reads it: turned, or
+ *  wider than it's tall. Its own page, not a tracked change's old one */
+function isLandscapeSectPr(sectPrXml: string): boolean {
+  const m = ownSectPrXml(sectPrXml).match(/<w:pgSz\b([^/>]*)\/?>/);
+  if (!m) return false;
+  const w = parseInt(m[1].match(/w:w="(\d+)"/)?.[1] ?? '0', 10);
+  const h = parseInt(m[1].match(/w:h="(\d+)"/)?.[1] ?? '0', 10);
+  return /w:orient="landscape"/.test(m[1]) || w > 0 && h > 0 && w > h;
+}
+
 /** Parse w:pgMar from a sectPr XML string, returning the raw attribute string. */
 function parseTemplateMargins(sectPrXml: string | undefined): string {
   if (!sectPrXml) return DEFAULT_MARGINS;
@@ -4140,21 +4097,55 @@ function landscapeSectPrXml(pgSz: PageSize, margins: string, rsid?: string): str
     '<w:cols w:space="720"/></w:sectPr>';
 }
 
-/** A sectPr with the template's page number format, and, if it is the
- *  first written, its page number start, headers and footers: the sections
- *  after it take them from it */
-function withTemplateSectPr(sectPr: string, state: DocxGenState): string {
-  if (!state.templateSections) return sectPr;
-  const first = !state.wroteSectPr;
-  state.wroteSectPr = true;
-  return withTemplateSection(sectPr, state.templateSections, first);
+/** The body and its closing sectPr with the template's page number format
+ *  on each section, and its page number start, headers and footers on the
+ *  first, in the body's order: the sections after it take them from it */
+function withTemplateSectPrs(body: string, closingSectPr: string, sections?: TemplateSections): { body: string; closingSectPr: string } {
+  if (!sections) return { body, closingSectPr };
+  let first = true;
+  const withTemplate = (sectPr: string): string => {
+    const decorated = withTemplateSection(sectPr, sections, first);
+    first = false;
+    return decorated;
+  };
+  body = body.replace(/<w:sectPr\b[\s\S]*?<\/w:sectPr>/g, withTemplate);
+  return { body, closingSectPr: withTemplate(closingSectPr) };
+}
+
+// A sectPr's page size, written as an empty element or with a closing tag
+const PG_SZ_RE = /<w:pgSz\b[^>]*?(?:\/>|>[\s\S]*?<\/w:pgSz>)/;
+// The first of a sectPr's children CT_SectPr puts after w:pgSz
+const AFTER_PG_SZ_RE = /<w:(?:pgMar|paperSrc|pgBorders|lnNumType|pgNumType|cols|formProt|vAlign|noEndnote|titlePg|textDirection|bidi|rtlGutter|docGrid|printerSettings|sectPrChange)\b/;
+
+/** Build the final body-level sectPr of a section a fence ends: the
+ *  template's, if any, with its page turned to the fence's orientation, in
+ *  place of its w:pgSz, or where CT_SectPr puts one, as its other
+ *  properties stay, or else one of its own. Not in a tracked change's old
+ *  properties, w:sectPrChange, last, which hold a w:sectPr of their own. A
+ *  template's with no properties, an empty element, gets a closing tag for
+ *  the page to go before. */
+function fencedBodySectPrXml(landscape: boolean, pgSz: PageSize, margins: string, templateSectPr?: string, rsid?: string): string {
+  const fencePgSz = landscape ? '<w:pgSz w:w="' + pgSz.h + '" w:h="' + pgSz.w + '" w:orient="landscape"/>' : '<w:pgSz w:w="' + pgSz.w + '" w:h="' + pgSz.h + '"/>';
+  if (templateSectPr) {
+    templateSectPr = templateSectPr.replace(/^(<w:sectPr\b[^>]*?)\/>$/, (_, open: string) => open + '></w:sectPr>');
+    const change = templateSectPr.indexOf('<w:sectPrChange');
+    const own = change === -1 ? templateSectPr.slice(0, templateSectPr.lastIndexOf('</w:sectPr>')) : templateSectPr.slice(0, change);
+    const page = PG_SZ_RE.exec(own);
+    if (page) return own.slice(0, page.index) + fencePgSz + templateSectPr.slice(page.index + page[0].length);
+    const after = own.search(AFTER_PG_SZ_RE);
+    const at = after === -1 ? own.length : after;
+    return templateSectPr.slice(0, at) + fencePgSz + templateSectPr.slice(at);
+  }
+  return '<w:sectPr' + (rsid ? ' w:rsidR="' + rsid + '"' : '') + '>' + fencePgSz +
+    '<w:pgMar ' + margins + '/>' +
+    '<w:cols w:space="720"/></w:sectPr>';
 }
 
 /** Build the final body-level sectPr (no <w:type>, direct child of <w:body>). */
 function bodyClosingSectPrXml(pgSz: PageSize, margins: string, templateSectPr?: string, rsid?: string): string {
   // If we have a template sectPr, reuse it as-is to preserve any additional
   // properties (columns, etc.). It comes without its headers, footers and
-  // page numbering, which withTemplateSectPr gives it
+  // page numbering, which withTemplateSectPrs gives it
   if (templateSectPr) return templateSectPr;
   return '<w:sectPr' + (rsid ? ' w:rsidR="' + rsid + '"' : '') + '><w:pgSz w:w="' + pgSz.w + '" w:h="' + pgSz.h + '"/>' +
     '<w:pgMar ' + margins + '/>' +
@@ -4230,9 +4221,10 @@ export interface DocxGenState {
   inPortraitSection: boolean;   // tracks current portrait fence state during generation
   sectionBreakOrdinal: number;  // counter for paragraph-level sectPr emissions (for portrait round-trip)
   portraitBreakOrdinals: Set<number>; // ordinals of portrait-fence close section breaks
+  referencesBeforeSections?: number[]; // ordinals of the breaks ending the sections a references marker before their opening fence is written at the start of
+  templatePageSection?: number; // the last section's ordinal, the number of breaks before it, where it takes the template's landscape page, which no fence set
   templateSectPr?: string;      // trailing <w:sectPr> from template document.xml
   templateSections?: TemplateSections; // the template's, whose headers, footers and page numbering the sectPrs written take
-  wroteSectPr?: boolean; // whether a sectPr was written, after which none starts the document
   pipeTableAligned: Map<number, boolean>; // table index -> whether pipe table was column-aligned
   gridSourceColWidths: Map<number, number[]>; // table index -> original grid table column char-widths
   sentinelGaps: Record<string, number>; // before-gap for landscape/portrait sentinels (e.g. "pc0" → blankLinesBefore for first portrait_close)
@@ -8190,18 +8182,34 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   const pgSz = parseTemplatePgSz(state.templateSectPr);
   const margins = parseTemplateMargins(state.templateSectPr);
 
+  // The section break paragraphs, each empty but for its section's properties
+  const portraitBreak = '<w:p><w:pPr>' + portraitSectPrXml(pgSz, margins, state.rsid) + '</w:pPr></w:p>';
+  const landscapeBreak = '<w:p><w:pPr>' + landscapeSectPrXml(pgSz, margins, state.rsid) + '</w:pPr></w:p>';
   // Helper: emit a portrait section break paragraph and increment ordinal
   function emitPortraitBreak(): void {
-    body += '<w:p><w:pPr>' + withTemplateSectPr(portraitSectPrXml(pgSz, margins, state.rsid), state) + '</w:pPr></w:p>';
+    body += portraitBreak;
     state.sectionBreakOrdinal++;
   }
   function emitLandscapeBreak(): void {
-    body += '<w:p><w:pPr>' + withTemplateSectPr(landscapeSectPrXml(pgSz, margins, state.rsid), state) + '</w:pPr></w:p>';
+    body += landscapeBreak;
     state.sectionBreakOrdinal++;
   }
 
   let prevToken: MdToken | undefined;
-  let preserveCloseForNextToken = false;
+  // The document's start, before a title, starts a section as a close does,
+  // so a section that opens the document needs no break before it, which
+  // would end an empty section, a blank first page
+  let preserveCloseForNextToken = body === '';
+  // Whether a bibliography marker is all that's written since a section
+  // ended, before the next section starts
+  let biblAtSectionStart = false;
+  // The ordinals the breaks would have that give such a bibliography its own
+  // section, where it shows something, the next break's
+  const biblBreakOrdinals: number[] = [];
+  const emitBiblBreak = (): void => {
+    body += BIBL_BREAK_PLACEHOLDER;
+    biblBreakOrdinals.push(state.sectionBreakOrdinal);
+  };
   // Track before-gap for each sentinel type (sequential index → blankLinesBefore)
   let sentinelLoIdx = 0, sentinelLcIdx = 0, sentinelPoIdx = 0, sentinelPcIdx = 0;
   let sentinelCsoIdx = 0, sentinelCscIdx = 0;
@@ -8229,18 +8237,27 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     } else if (!token.listContinuation) {
       openListOrdered.length = 0;
     }
-    // Any close sentinel directly preceding any open sentinel skips the open's break
+    // Any close sentinel, or table with its own section, directly preceding any
+    // open sentinel, or such a table, skips the open's break
     // to avoid an empty intermediate section that renders as a blank page.
     const prevWasClose: boolean = !!preserveCloseForNextToken;
     preserveCloseForNextToken = false;
+    const biblFirst = biblAtSectionStart;
+    biblAtSectionStart = false;
 
     // Bibliography marker: emit placeholder that will be replaced after the loop
-    // once all citedKeys have been collected.
-    // Preserve close-sentinel status across the marker for the
-    // consecutive-section-block invariant (e.g. <!-- /landscape --><!-- references --><!-- landscape -->).
+    // once all citedKeys have been collected. Between two sections, as in
+    // <!-- /landscape --><!-- references --><!-- landscape -->, a bibliography
+    // that shows something gets a section of its own, as other content there
+    // does, so it isn't in the second. One with nothing to list, an empty
+    // field, which Word shows nothing of, gets none, which would be a blank
+    // page: the next section starts with it, as before the close-sentinel
+    // status preserved across it, and a custom property puts the marker
+    // back before the section's opening fence on import.
     if (token.bibliographyMarker) {
       body += BIBL_PLACEHOLDER;
       preserveCloseForNextToken = !!prevWasClose;
+      biblAtSectionStart = prevWasClose && !state.inLandscapeSection && !state.inPortraitSection;
       if (prevToken?.type === 'heading') state.afterHeading = true;
       prevToken = undefined;
       continue;
@@ -8262,6 +8279,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       sentinelCsoIdx++;
       state.activeCustomStyle = token.customStyleOpen;
       preserveCloseForNextToken = !!prevWasClose;
+      biblAtSectionStart = biblFirst;
       if (prevToken?.type === 'heading') state.afterHeading = true;
       prevToken = undefined;
       continue;
@@ -8273,6 +8291,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       state.activeCustomStyle = undefined;
       // Not a section boundary — just thread close-status through (unlike landscapeClose/portraitClose which set true)
       preserveCloseForNextToken = !!prevWasClose;
+      biblAtSectionStart = biblFirst;
       if (prevToken?.type === 'heading') state.afterHeading = true;
       prevToken = undefined;
       continue;
@@ -8285,6 +8304,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       sentinelLoIdx++;
       if (!prevWasClose) {
         emitPortraitBreak();
+      } else if (biblFirst) {
+        emitBiblBreak();
       }
       state.inLandscapeSection = true;
       preserveCloseForNextToken = !!prevWasClose;
@@ -8312,6 +8333,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       sentinelPoIdx++;
       if (!prevWasClose) {
         emitPortraitBreak();
+      } else if (biblFirst) {
+        emitBiblBreak();
       }
       state.inPortraitSection = true;
       preserveCloseForNextToken = !!prevWasClose;
@@ -8378,19 +8401,26 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         recordTableIdentity(token, xml, state, '');
         return (body.endsWith('</w:tbl>') ? '<w:p/>' : '') + xml;
       };
-      // Table-only landscape: wrap with section breaks (skip if already in fence-based landscape)
+      // Table-only landscape: wrap with section breaks (skip if already in fence-based landscape).
+      // Its section is one as a fence's is, so a section that ends right
+      // before it ends the one before it, and the next one starts right after
+      // it, with no empty section, a blank page, between them.
       if (token.tableOrientation === 'landscape' && !state.inLandscapeSection && !state.inPortraitSection) {
         state.landscapeTables.add(state.tableIndex);
-        emitPortraitBreak();
+        if (!prevWasClose) emitPortraitBreak();
+        else if (biblFirst) emitBiblBreak();
         body += table();
         emitLandscapeBreak();
+        preserveCloseForNextToken = true;
       } else if (token.tableOrientation === 'portrait' && !state.inPortraitSection && !state.inLandscapeSection) {
         // Table-only portrait: wrap with portrait section breaks
         state.portraitTables.add(state.tableIndex);
-        emitPortraitBreak();
+        if (!prevWasClose) emitPortraitBreak();
+        else if (biblFirst) emitBiblBreak();
         body += table();
         state.portraitBreakOrdinals.add(state.sectionBreakOrdinal);
         emitPortraitBreak();
+        preserveCloseForNextToken = true;
       } else {
         body += table();
       }
@@ -8462,6 +8492,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     || hasBiblMarker && !body.endsWith(BIBL_PLACEHOLDER)) {
     biblXml += generateBibliographyXml(citeprocEngine, options?.zoteroBiblData, frontmatter?.bibliographyHangingIndent);
   }
+  // An empty field is one hidden paragraph, which Word shows nothing of
+  const biblShows = biblXml !== '' && !biblXml.startsWith('<w:p>' + HIDDEN_PARAGRAPH_PPR) || state.missingKeys.size > 0;
   if (state.missingKeys.size > 0) {
     biblXml += generateMissingKeysXml([...state.missingKeys]);
   }
@@ -8470,12 +8502,55 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   } else {
     body += biblXml;
   }
+  // A bibliography between two sections that shows something ends a section
+  // of its own, which moves each break after it on by one. One that doesn't
+  // starts the next section, which import reads back before its fence.
+  if (biblBreakOrdinals.length > 0) {
+    if (biblShows) {
+      body = body.split(BIBL_BREAK_PLACEHOLDER).join('<w:p><w:pPr>' + portraitSectPrXml(pgSz, margins, state.rsid) + '</w:pPr></w:p>');
+      const portraitBreakOrdinals = [...state.portraitBreakOrdinals];
+      state.portraitBreakOrdinals.clear();
+      for (const ordinal of portraitBreakOrdinals) state.portraitBreakOrdinals.add(ordinal + biblBreakOrdinals.filter(b => b <= ordinal).length);
+      // And they count among the breaks, which number the last section
+      state.sectionBreakOrdinal += biblBreakOrdinals.length;
+    } else {
+      body = body.split(BIBL_BREAK_PLACEHOLDER).join('');
+      state.referencesBeforeSections = biblBreakOrdinals;
+    }
+  }
 
   // Store sentinel gap metadata on state for custom property emission
   state.sentinelGaps = sentinelGaps;
 
-  // Append body-closing sectPr (preserves template page layout)
-  const closingSectPr = withTemplateSectPr(bodyClosingSectPrXml(pgSz, margins, state.templateSectPr, state.rsid), state);
+  // Append body-closing sectPr (preserves template page layout). A section
+  // that ends the document, with nothing after its break, has the body's
+  // properties, as Word writes the last section's, and no break, which
+  // would leave the last section empty, a blank last page. Its page is
+  // turned to its fence's orientation where the template's isn't, and it
+  // starts on a new page, as its break did, where the template's last
+  // section starts on the same page, or an odd or even one: the template's
+  // w:type becomes nextPage in its place, and no w:type is a new page
+  // already, as a tracked change's old properties keep theirs. Not where
+  // the section is empty, whose break is all it has, nor where it's the
+  // only one, whose orientation import reads as the page's (see
+  // extractDocumentContent in converter.ts).
+  let closingSectPr = bodyClosingSectPrXml(pgSz, margins, state.templateSectPr, state.rsid);
+  const lastBreak = body.endsWith(landscapeBreak) ? landscapeBreak : body.endsWith(portraitBreak) ? portraitBreak : undefined;
+  const beforeLastBreak = lastBreak && body.slice(0, body.length - lastBreak.length);
+  const breakEnd = '</w:sectPr></w:pPr></w:p>';
+  if (lastBreak && beforeLastBreak && beforeLastBreak.includes(breakEnd) && !beforeLastBreak.endsWith(breakEnd)) {
+    body = beforeLastBreak;
+    const landscape = lastBreak === landscapeBreak;
+    if (landscape || isLandscapeSectPr(closingSectPr)) closingSectPr = fencedBodySectPrXml(landscape, pgSz, margins, state.templateSectPr, state.rsid);
+    const own = ownSectPrXml(closingSectPr);
+    closingSectPr = own.replace(/<w:type\b[^>]*?(?:\/>|>[\s\S]*?<\/w:type>)/, () => '<w:type w:val="nextPage"/>') + closingSectPr.slice(own.length);
+  } else if (state.sectionBreakOrdinal > 0 && state.templateSectPr && isLandscapeSectPr(closingSectPr)) {
+    // Import reads the last section's orientation from these properties, so
+    // where they're a template's landscape page, which no fence set, a custom
+    // property says so, by the number of breaks before the section
+    state.templatePageSection = state.sectionBreakOrdinal;
+  }
+  ({ body, closingSectPr } = withTemplateSectPrs(body, closingSectPr, state.templateSections));
 
   return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
     '<w:document xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wpi="http://schemas.microsoft.com/office/word/2010/wordprocessingInk" xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" mc:Ignorable="w14 w15 wp14">\n' +
@@ -8540,8 +8615,7 @@ export async function convertMdToDocx(
     const marked = lines.map((line, k) => NOTE_LINE.test(line)
       ? (BARE_NOTE_LINE.test(line) ? line.replace(/(?:\+\+|--|~~|==|<<)\}/g, close => close.slice(0, 2)) : line.trimEnd()) + mark + k + mark
       : line);
-    const parsed = md.parse(preprocessCriticMarkup(wrapBareLatexEnvironments(deLazifyBlockquotes(preprocessGridTables(
-      extractFootnoteDefinitions(marked.join('\n')).cleaned)))), {});
+    const parsed = md.parse(preprocessCriticMarkup(preprocessBlocks(extractFootnoteDefinitions(marked.join('\n')).cleaned).output), {});
     notes = new Set(parsed.flatMap((token, t) => {
       if (token.type !== 'paragraph_open' || token.level !== 0 || !token.map || token.map[1] - token.map[0] !== 1) return [];
       // The line alone
@@ -8983,7 +9057,7 @@ export async function convertMdToDocx(
     const label = noteQueue[k];
     const warnings: string[] = [];
     const noteBody = parseMd(footnoteDefs.get(label)!, warnings, frontmatter.breaks ?? false, undefined, undefined, linkDefinitionsOf.get(tokens),
-      unformattedNotes.get(label));
+      unformattedNotes.get(label), true);
     applyCustomStyleSentinels(noteBody, warnings);
     parsedNotes.set(label, { tokens: noteBody, warnings });
     for (const item of reachedIn(noteBody)) {
@@ -9005,7 +9079,7 @@ export async function convertMdToDocx(
     const { tokens: bodyTokens, warnings: parseWarnings } = parsedNotes.get(label)!;
     state.warnings.push(...parseWarnings);
     const noteWarnings = new Set(bodyTokens.map(t => isEmptyCodeBlock(t) ? EMPTY_NOTE_CODE_WARNING
-      : isOrientationDirective(t) ? NOTE_ORIENTATION_WARNING : NOTE_BLOCK_WARNINGS[t.type]));
+      : isOrientationDirective(t) || isOrphanedOrientationClose(t) ? NOTE_ORIENTATION_WARNING : NOTE_BLOCK_WARNINGS[t.type]));
     for (const warning of noteWarnings) {
       if (warning) state.warnings.push(warning + ' (not supported). Move it outside the note for round-trip fidelity.');
     }
@@ -9340,6 +9414,10 @@ export async function convertMdToDocx(
   customProps.push(...landscapeTableProps(state.landscapeTables));
   customProps.push(...portraitTableProps(state.portraitTables));
   customProps.push(...portraitBreakProps(state.portraitBreakOrdinals));
+  customProps.push(...referencesBeforeSectionsProps(state.referencesBeforeSections));
+  if (state.templatePageSection !== undefined) {
+    customProps.push(...chunkCustomProps('MANUSCRIPT_TEMPLATE_PAGE_SECTIONS_', JSON.stringify([state.templatePageSection])));
+  }
   customProps.push(...listIndentProps(state));
   customProps.push(...consecutiveReplyProps(state));
   customProps.push(...htmlCommentGapProps(state.htmlCommentGaps));

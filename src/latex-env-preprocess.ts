@@ -145,20 +145,55 @@ function overlapsAnyZone(start: number, end: number, zones: Zone[]): boolean {
  * markdown-it doesn't split them into separate paragraphs.
  */
 export function wrapBareLatexEnvironments(text: string, mark = ''): string {
+	const replacements = latexReplacements(text);
+	if (replacements.length === 0) return text;
+
+	// Apply right-to-left to preserve offsets
+	let result = text;
+	for (let i = replacements.length - 1; i >= 0; i--) {
+		const r = replacements[i];
+		result = result.slice(0, r.start) + mark + r.replacement + result.slice(r.end);
+	}
+
+	return result;
+}
+
+/**
+ * `wrapBareLatexEnvironments(text)`, with the line of `text` each of its
+ * lines comes from: all but the blank lines it collapses in a block.
+ */
+export function wrapBareLatexEnvironmentsWithLines(text: string): { output: string; lines: number[] } {
+	const lineStarts = [0];
+	for (let i = text.indexOf('\n'); i !== -1; i = text.indexOf('\n', i + 1)) lineStarts.push(i + 1);
+	const replacements = latexReplacements(text);
+	const lines: number[] = [];
+	let k = 0;
+	for (let line = 0; line < lineStarts.length; line++) {
+		const start = lineStarts[line], end = line + 1 < lineStarts.length ? lineStarts[line + 1] - 1 : text.length;
+		while (k < replacements.length && replacements[k].end <= start) k++;
+		// A blank line strictly inside a block, which \n{2,} collapses
+		if (start === end && k < replacements.length && start > replacements[k].start && end < replacements[k].end) continue;
+		lines.push(line);
+	}
+	return { output: wrapBareLatexEnvironments(text), lines };
+}
+
+interface Replacement {
+	start: number;
+	end: number;
+	replacement: string;
+}
+
+/** The bare environments of `text`, each with its block wrapped, in order */
+function latexReplacements(text: string): Replacement[] {
 	// Fast path: no \begin{ means nothing to do
-	if (!text.includes('\\begin{')) return text;
+	if (!text.includes('\\begin{')) return [];
 
 	const inertZones = computeInertZones(text);
 
 	// Find bare \begin{env} at start of line (up to 3 spaces indent)
 	const beginRe = /^([ ]{0,3})\\begin\{([a-zA-Z*]+)\}/gm;
 	let match: RegExpExecArray | null;
-
-	interface Replacement {
-		start: number;
-		end: number;
-		replacement: string;
-	}
 	const replacements: Replacement[] = [];
 
 	while ((match = beginRe.exec(text)) !== null) {
@@ -193,14 +228,5 @@ export function wrapBareLatexEnvironments(text: string, mark = ''): string {
 		});
 	}
 
-	if (replacements.length === 0) return text;
-
-	// Apply right-to-left to preserve offsets
-	let result = text;
-	for (let i = replacements.length - 1; i >= 0; i--) {
-		const r = replacements[i];
-		result = result.slice(0, r.start) + mark + r.replacement + result.slice(r.end);
-	}
-
-	return result;
+	return replacements;
 }
