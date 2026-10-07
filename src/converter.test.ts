@@ -7679,7 +7679,7 @@ describe('Word text that reads as Markdown', () => {
     const time = (n: number) => {
       const text = '[@a] '.repeat(n);
       const start = performance.now();
-      expect(buildMarkdown([{ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING }], new Map(), { citationKeys: new Set(['a']) })).toBe(text);
+      expect(buildMarkdown([{ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING }], new Map(), { citationKeys: new Set(['a']) })).toBe(text.trimEnd());
       return performance.now() - start;
     };
     const small = time(50000);
@@ -10008,14 +10008,80 @@ describe('Whitespace at the edges of a paragraph', () => {
   });
 
   test.each([
-    ['a space', 'end\u00a0 ', 'A.\n\nend&nbsp; \n\nB.\n'],
-    ['a tab', 'end\u00a0\t', 'A.\n\nend&nbsp;\t\n\nB.\n'],
-  ])('keeps a no-break space at the end of a paragraph before %s', async (_name, text, expected) => {
+    ['a space', 'end\u00a0 '],
+    ['a tab', 'end\u00a0\t'],
+  ])('keeps a no-break space at the end of a paragraph before %s', async (_name, text) => {
     // Markdown trims the space or tab, which Word doesn't show, and the
-    // no-break space with it
+    // no-break space with it. Import leaves out the space or tab, which it
+    // wrote as it was, and the next round trip dropped.
     const markdown = await withText('A.\n\nXX\n\nB.', 'word/document.xml', text);
-    expect(markdown).toBe(expected);
-    expect(await roundTrip(markdown)).toBe('A.\n\nend&nbsp;\n\nB.\n');
+    expect(markdown).toBe('A.\n\nend&nbsp;\n\nB.\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['a paragraph', 'A.\n\nXX\n\nB.', 'word/document.xml', 'A.\n\nend\n\nB.\n'],
+    ['a quote', '> XX', 'word/document.xml', '> end\n'],
+    ['a list item', '- XX\n- b', 'word/document.xml', '- end\n- b\n'],
+    ['a heading', '# XX', 'word/document.xml', '# end\n'],
+    ['a note', 'T.[^1]\n\n[^1]: XX', 'word/footnotes.xml', 'T.[^1]\n\n[^1]: end\n'],
+  ])('leaves out the spaces and tabs at the end of %s', async (_name, md, part, expected) => {
+    // Import wrote them as they were, which the next round trip dropped
+    for (const text of ['end ', 'end\t', 'end \t  ']) {
+      const markdown = await withText(md, part, text);
+      expect(markdown).toBe(expected);
+      expect(await roundTrip(markdown)).toBe(markdown);
+    }
+  });
+
+  test.each([
+    ['', 'A.\n\nend\n\nB.\n'],
+    ['&#32;', 'A.\n\nend\n\nB.\n'],
+    ['&#9;&#32;', 'A.\n\nend\n\nB.\n'],
+    ['&nbsp;&#32;', 'A.\n\nend&nbsp;\n\nB.\n'],
+  ])('reads end%s at the end of a paragraph as Markdown does, once', async (end, expected) => {
+    // Export wrote the spaces and tabs, which import wrote as they were
+    expect(await roundTrip('A.\n\nend' + end + '\n\nB.\n')).toBe(expected);
+    expect(await roundTrip(expected)).toBe(expected);
+  });
+
+  /** The text of each paragraph of part, with a line break as \n */
+  const paragraphs = async (docx: Uint8Array, part: string) => {
+    const xml = await (await JSZip.loadAsync(docx)).file(part)!.async('string');
+    return [...xml.matchAll(/<w:p[ >](?:(?!<\/w:p>).)*<\/w:p>/g)]
+      .map(([p]) => [...p.matchAll(/<w:t(?: [^>]*)?>([^<]*)<|<w:br\/>/g)].map(m => m[1] ?? '\n').join(''))
+      .filter(text => text !== '');
+  };
+
+  test.each([
+    ['the body', 'A {#1}b {#2}c{/1} d{/2} XX\n{#1>>@A (2024-01-15 10:30) | one<<}\n{#2>>@B (2024-01-15 10:30) | two<<}\n', 'word/document.xml'],
+    ['a note', 'T.[^1]\n\n[^1]: A {#1}b {#2}c{/1} d{/2} XX\n    {#1>>@A (2024-01-15 10:30) | one<<}\n    {#2>>@B (2024-01-15 10:30) | two<<}\n', 'word/footnotes.xml'],
+  ])('writes no line break for the spaces that end a paragraph before comments\' bodies in %s', async (_name, md, part) => {
+    // Two spaces at the end of the line before the bodies' made a line
+    // break, which export wrote at the paragraph's end, and a backslash
+    // before them, which was text, too
+    for (const [text, kept] of [['e  ', 'e'], ['e\t\t', 'e'], ['e\\  ', 'e\\\\']]) {
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+      const xml = await zip.file(part)!.async('string');
+      const edited = xml.replace(/<w:t(?: xml:space="preserve")?>([^<]*)XX<\/w:t>/, (_m, before: string) => '<w:t xml:space="preserve">' + before + text + '</w:t>');
+      expect(edited).not.toBe(xml);
+      zip.file(part, edited);
+      const markdown = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+      expect(markdown).toBe(md.replace('XX', kept));
+      const docx = (await convertMdToDocx(markdown)).docx;
+      // After the space export puts after a note's mark
+      expect((await paragraphs(docx, part)).map(p => p.trimStart()).filter(p => p.startsWith('A b'))).toEqual(['A b c d ' + text.trimEnd()]);
+      expect((await convertDocx(docx)).markdown).toBe(markdown);
+    }
+  });
+
+  test('leaves the backslash before the spaces at the end of an HTML block a later line starts as it is', async () => {
+    // A comment after a line break starts an HTML block on its line, which
+    // keeps its text as it is, so a backslash escaped there was two in Word
+    const markdown = await roundTrip('a<br><!-- c -->b\\\\&#32;&#32;\n');
+    const text = (await paragraphs((await convertMdToDocx(markdown)).docx, 'word/document.xml')).join('\n');
+    expect(text).toContain('b\\');
+    expect(text).not.toContain('b\\\\');
   });
 
   test.each([

@@ -283,7 +283,7 @@ describe('Overlapping comments: docx-to-md (buildMarkdown)', () => {
 
     const result = buildMarkdown(content as any, comments);
     // Not closed at the end of the first paragraph and opened again
-    expect(result).toContain('{#1}p1 \n\n{#2}p2{/1}{/2}');
+    expect(result).toContain('{#1}p1\n\n{#2}p2{/1}{/2}');
     expect((result.match(/\{#1\}/g) || []).length).toBe(1);
     expect(result).toContain('{#1>>@alice | note A<<}');
     expect(result).toContain('{#2>>@bob | note B<<}');
