@@ -940,6 +940,8 @@ In this example, comment 1 refers to `paragraph. This is the`.
 
 On DOCX import, ranges that end at the same place end in the order they start, as `{#1}a {#2}b{/1}{/2}`, whatever IDs Word gave the comments, which keeps them the same through the next round trip.
 
+An ID can have more than one range. DOCX import writes a comment that goes from a paragraph into a table so, with a range in each paragraph and each cell, as `{#1}Before.{/1}` and `| {#1}a{/1} | b |`, since a cell can't hold a range that goes on past it. Word takes one range for each comment, so export writes one, from the ID's first start to its last end.
+
 #### ID Format
 
 IDs use `[a-zA-Z0-9_-]+` — alphanumeric characters, hyphens, and underscores. No spaces. The DOCX-to-Markdown converter generates numeric IDs; users may write descriptive IDs like `intro-note`.

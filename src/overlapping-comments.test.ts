@@ -642,6 +642,54 @@ describe('Overlapping comments: ranges that end together', () => {
   });
 });
 
+describe('Overlapping comments: one ID in more than one range', () => {
+  /** Word's body's comment markers and text in order, each comment numbered
+   *  by where it first comes */
+  async function markers(docx: Uint8Array): Promise<string[]> {
+    const JSZip = (await import('jszip')).default;
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const order: string[] = [];
+    return [...xml.matchAll(/<w:comment(RangeStart|RangeEnd|Reference) w:id="(\d+)"\/>|<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(([, kind, id, text]) => {
+      if (!kind) return text;
+      if (!order.includes(id)) order.push(id);
+      return kind + ' ' + order.indexOf(id);
+    });
+  }
+
+  test.each([
+    ['in two paragraphs', '{#1}a{/1}\n\n{#1}b{/1}\n{#1>>@A | note<<}'],
+    ['in one paragraph', '{#1}a{/1} x {#1}b{/1}\n{#1>>@A | note<<}'],
+    ['in a paragraph and a table\'s cell', '{#1}a{/1}\n{#1>>@A | note<<}\n\n| {#1}b{/1} | c |\n| --- | --- |\n| 1 | 2 |'],
+  ])('exports a comment whose ID has a range %s as one range, from its first start to its last end', async (_name, md) => {
+    // Export wrote each range with the comment's ID, which Word allows once
+    const xml = (await markers((await convertMdToDocx(md)).docx)).join(' ');
+    expect(xml).toMatch(/^RangeStart 0 a .*b RangeEnd 0 Reference 0/);
+    expect(xml.match(/Range(?:Start|End) 0|Reference 0/g)).toEqual(['RangeStart 0', 'RangeEnd 0', 'Reference 0']);
+  });
+
+  test('keeps a comment from a paragraph into a table\'s cell one range, around another comment', async () => {
+    // Import writes the comment in a range of each paragraph and cell, as a
+    // cell can't hold one that goes on past it. Export wrote three ranges
+    // with one ID, which Word takes once.
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync((await convertMdToDocx('Before.\n\nZ {==z==}{>>@A (2024-01-15 10:30) | c<<}\n\n| a | b |\n| --- | --- |\n| 1 | 2 |')).docx);
+    const ref = '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="90"/></w:r>';
+    zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string'))
+      .replace(/(<w:r>(?:(?!<\/w:r>).)*<w:t>Before\.<\/w:t><\/w:r>)/, '<w:commentRangeStart w:id="90"/>$1')
+      .replace(/(<w:r>(?:(?!<\/w:r>).)*<w:t>a<\/w:t><\/w:r>)/, '$1<w:commentRangeEnd w:id="90"/>' + ref));
+    zip.file('word/comments.xml', (await zip.file('word/comments.xml')!.async('string'))
+      .replace('</w:comments>', '<w:comment w:id="90" w:author="B" w:date="2024-02-01T09:00:00Z"><w:p><w:r><w:t>new</w:t></w:r></w:p></w:comment></w:comments>'));
+    const docx = await zip.generateAsync({ type: 'uint8array' });
+    const once = (await convertDocx(docx)).markdown;
+    expect(once).toContain('{#1}Before.{/1}\n{#1>>@B ');
+    expect(once).toContain('{#1}Z {#2}z{/1}{/2}');
+    expect(once).toContain('| {#1}a{/1} | b |');
+    const again = (await convertMdToDocx(once)).docx;
+    expect(await markers(again)).toEqual(await markers(docx));
+    expect((await convertDocx(again)).markdown).toBe(once);
+  });
+});
+
 describe('Overlapping comments: where the bodies go', () => {
   const seen = 'Seen {#1}a {#2}b{/1} c{/2} on.';
   const bodies = '{#1>>one<<}\n{#2>>two<<}';

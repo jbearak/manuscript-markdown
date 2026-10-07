@@ -196,6 +196,7 @@ export interface MdRun {
   date?: string;            // for comments/revisions
   commentText?: string;     // for critic_comment: the comment body
   commentId?: string;       // for comment_range_start/end/body_with_id
+  innerRangeMarker?: true;  // for comment_range_start/end: inside the one range Word gets for its ID's ranges (see prescanCommentIds)
   reservedCommentId?: number; // for critic_highlight: its comment's ID, if prescanCommentIds gave it one
   footnoteLabel?: string;   // for footnote_ref: the [^label] label
   replies?: Array<{author?: string; date?: string; text: string; parentReply?: number}>; // nested replies for comment_body_with_id; parentReply: the index of the reply this one replies to
@@ -6877,6 +6878,8 @@ export function generateRuns(inputRuns: MdRun[], state: DocxGenState, options?: 
       xml += run.mathParts
         ? generateTrackedMathXml(run.mathParts, revisionWrapper(run, state, options), state.warnings, !!run.display)
         : generateMathXml(run.text, !!run.display, state.warnings);
+    } else if ((run.type === 'comment_range_start' || run.type === 'comment_range_end') && run.innerRangeMarker) {
+      continue;
     } else if (run.type === 'comment_range_start') {
       const mdId = run.commentId || '';
       let numericId = state.commentIdMap.get(mdId);
@@ -8110,6 +8113,32 @@ function prescanCommentIds(tokens: MdToken[], state: DocxGenState): void {
         }
       }
     }
+  }
+  // Word takes a comment's ID in one range, so an ID with more than one, as
+  // import writes a comment that reaches into a table in a range of each
+  // paragraph and cell, gets one from its first start to its last end
+  const markers = new Map<string, MdRun[]>();
+  const collectMarkers = (runs: MdRun[] = []) => {
+    for (const run of runs) {
+      if (run.type === 'comment_range_start' || run.type === 'comment_range_end') {
+        const mdId = run.commentId || '';
+        const seen = markers.get(mdId);
+        if (seen) seen.push(run);
+        else markers.set(mdId, [run]);
+      }
+      collectMarkers(run.innerRuns);
+      collectMarkers(run.oldRuns);
+      collectMarkers(run.newRuns);
+    }
+  };
+  for (const token of tokens) {
+    collectMarkers(token.runs);
+    for (const row of token.rows ?? []) for (const cell of row.cells) collectMarkers(cell.runs);
+  }
+  for (const runs of markers.values()) {
+    const first = runs.find(run => run.type === 'comment_range_start');
+    const last = [...runs].reverse().find(run => run.type === 'comment_range_end');
+    for (const run of runs) if (run !== first && run !== last) run.innerRangeMarker = true;
   }
 }
 
