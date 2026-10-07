@@ -645,6 +645,23 @@ describe('Font customization unit tests', () => {
       const converted = await convertDocx(result.docx);
       expect(converted.markdown).toContain("table-font: O'Brien Sans");
     });
+
+    const html = (attribute: string) => '<table ' + attribute + '>\n  <tr>\n    <td>\n      <p>A</p>\n    </td>\n  </tr>\n</table>\n';
+    it.each([
+      ['a pipe table\'s font size, the automatic size, 2pt under the body\'s', '<!-- table-font-size: 9 -->\n| A |\n| --- |\n| 1 |\n'],
+      ['a pipe table\'s font size, the frontmatter\'s', '---\ntable-font-size: 8\n---\n\n<!-- table-font-size: 8 -->\n| A |\n| --- |\n| 1 |\n'],
+      ['a pipe table\'s font, the frontmatter\'s', '---\ntable-font: Arial\n---\n\n<!-- table-font: Arial -->\n| A |\n| --- |\n| 1 |\n'],
+      ['a pipe table\'s column widths, the frontmatter\'s', '---\ntable-col-widths: 30 70\n---\n\n<!-- table-col-widths: 30 70 -->\n| A | B |\n| --- | --- |\n| 1 | 2 |\n'],
+      ['an HTML table\'s font size, the automatic size', html('data-font-size="9"')],
+      ['an HTML table\'s font, the frontmatter\'s', '---\ntable-font: Arial\n---\n\n' + html('data-font="Arial"')],
+    ])('keeps %s, as the table keeps it if the document\'s changes', async (_, markdown) => {
+      // Export kept a table's own value only where it differed from the
+      // document's, so import left the table without it
+      const { convertDocx } = await import('./converter');
+      const once = (await convertDocx((await convertMdToDocx(markdown)).docx)).markdown;
+      expect(once).toBe(markdown);
+      expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+    });
   });
 
   // ---------------------------------------------------------------
