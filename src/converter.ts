@@ -6,6 +6,7 @@ import { FRONTMATTER_OPENING_RE, Frontmatter, NotesMode, parseFrontmatter, seria
 import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType } from './gfm';
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
 import { keepParagraphEdgeWhitespace } from './html-entities';
+import { findStyleElement } from './style-element';
 import htmlBlockNames from 'markdown-it/lib/common/html_blocks.mjs';
 import { HTML_OPEN_CLOSE_TAG_RE, HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import { isMdAsciiPunct, isPunctChar, isWhiteSpace, unescapeAll } from 'markdown-it/lib/common/utils.mjs';
@@ -15266,43 +15267,13 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   const documentIds = new Map<string, string>();
   for (const [id, builtInId] of opts?.builtInIds ?? []) if (!documentIds.has(builtInId)) documentIds.set(builtInId, id);
 
-  /** Where the next w:style element starts from `from`, or -1, with any
-   *  whitespace before its first attribute */
-  function nextStyleStart(from: number): number {
-    const start = /<w:style\s/g;
-    start.lastIndex = from;
-    return start.exec(stylesXml)?.index ?? -1;
-  }
-
-  /** The w:style element of the paragraph style `id`, or of the document's
-   *  ID for it, or else of one whose ID differs only in case, as Word
-   *  matches a style's ID whatever its case, as `heading1`, but not of
-   *  another type, which a paragraph doesn't take, as a character style
-   *  `Normal`. With `anyType`, as for a custom style, which can be a
-   *  character style, the style of the ID itself is of any type. As Word
-   *  shows it, without a tracked change's record (see withoutFormatChanges) */
+  /** The w:style element of the paragraph style `id`, by the document's ID
+   *  for a built-in style, of any type with `anyType` (see
+   *  findStyleElement), as Word shows it, without a tracked change's record
+   *  (see withoutFormatChanges) */
   function styleBlock(id: string, anyType = false): string | null {
-    const styleId = documentIds.get(id) ?? id;
-    let caseless: string | null = null;
-    let searchFrom = 0;
-    while (true) {
-      const idx = nextStyleStart(searchFrom);
-      if (idx === -1) return caseless;
-      // A style written as <w:style .../> is its tag alone, and the next
-      // </w:style> closes another
-      const tagEnd = stylesXml.indexOf('>', idx) + 1;
-      if (tagEnd === 0) return caseless;
-      const empty = stylesXml[tagEnd - 2] === '/';
-      const closeTag = empty ? tagEnd : stylesXml.indexOf('</w:style>', tagEnd);
-      if (closeTag === -1) return caseless;
-      const block = stylesXml.substring(idx, empty ? tagEnd : closeTag + '</w:style>'.length);
-      const tag = block.slice(0, tagEnd - idx);
-      // A style without a type is a paragraph style
-      const paragraph = (/\sw:type\s*=\s*"([^"]*)"/.exec(tag)?.[1] ?? 'paragraph') === 'paragraph';
-      if (block.includes('w:styleId="' + styleId + '"') && (paragraph || anyType)) return withoutFormatChanges(block);
-      caseless ??= paragraph && /\sw:styleId\s*=\s*"([^"]*)"/.exec(tag)?.[1].toLowerCase() === styleId.toLowerCase() ? withoutFormatChanges(block) : null;
-      searchFrom = idx + block.length;
-    }
+    const found = findStyleElement(stylesXml, id, documentIds, anyType);
+    return found ? withoutFormatChanges(found.element) : null;
   }
 
   // Helper: a style block's style-level rPr, or '' for none

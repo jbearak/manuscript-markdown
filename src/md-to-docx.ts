@@ -20,6 +20,7 @@ import { pixelsToEmu, isSupportedImageFormat, getImageContentType, readImageDime
 import { preprocessGridTables, gridColumnAlign, getDisplayWidth, GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData, type TableAlign } from './grid-table-preprocess';
 import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
+import { findStyleElement } from './style-element';
 import { cellParagraphMarkAt, extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
 import { decodeHtmlAttribute } from './html-entities';
 import { matchCriticHeadingPrefix } from './critic-markup';
@@ -5238,6 +5239,68 @@ function extractNormalStyleSizeHp(stylesXml: string, ids = templateStyleIds(styl
   return szMatch ? parseInt(szMatch[1], 10) : undefined;
 }
 
+/**
+ * `stylesXml` without the w:sz or w:szCs of each of `styleIds` that its base
+ * gives it already, which Word strips (dirty-flag invariant #5), as for a
+ * Heading 4 at Normal's size. A style's base is the nearest along its
+ * w:basedOn that sets the size, or else the document defaults, or else
+ * Word's 10pt, without a tracked change's record of what one was
+ * (w:rPrChange), which Word doesn't show. Each style is found as import
+ * finds it (see findStyleElement), by `ids`, the template's IDs for the
+ * built-in styles (see templateStyleIds). A style based on none, or on one
+ * whose w:basedOn comes back around, is left as it is. Leaving a size out
+ * changes no style's size, so the order of `styleIds` doesn't matter.
+ */
+function withoutInheritedSizes(stylesXml: string, styleIds: string[], ids: Map<string, string>): string {
+  // A style's own rPr, not one in its pPr
+  const ownRPr = (block: string) => /<w:rPr\b[^>]*>[\s\S]*?<\/w:rPr>/.exec(block.replace(/<w:pPr\b[^>]*>[\s\S]*?<\/w:pPr>/, ''))?.[0] ?? '';
+  const live = (part: string) => part.replace(/<w:(rPrChange|pPrChange)\b[^>]*?(?:\/>|>[\s\S]*?<\/w:\1>)/g, '');
+  const basedOn = (block: string) => /<w:basedOn\b[^>]*\bw:val\s*=\s*"([^"]*)"/.exec(block)?.[1];
+  const sizeIn = (rPr: string, tag: string) => new RegExp('<' + tag + '\\b[^>]*\\bw:val\\s*=\\s*"(\\d+)"').exec(rPr)?.[1];
+  const defaults = /<w:rPrDefault>\s*<w:rPr>[\s\S]*?<\/w:rPr>/.exec(live(stylesXml))?.[0] ?? '';
+  let xml = stylesXml;
+  // The styles along a style's w:basedOn in `xml`, nearest first, or
+  // undefined where they come back around, each known by where it is
+  const bases = (style: { at: number; element: string }) => {
+    const chain: string[] = [];
+    const seen = new Set([style.at]);
+    for (let id = basedOn(style.element); id !== undefined;) {
+      const base = findStyleElement(xml, id, ids);
+      if (base === undefined) break;
+      if (seen.has(base.at)) return undefined;
+      seen.add(base.at);
+      chain.push(base.element);
+      id = basedOn(base.element);
+    }
+    return chain;
+  };
+  const inherited = (chain: string[], tag: string) => {
+    for (const base of chain) {
+      const size = sizeIn(ownRPr(live(base)), tag);
+      if (size !== undefined) return size;
+    }
+    return sizeIn(defaults, tag) ?? '20';
+  };
+  for (const styleId of styleIds) {
+    const style = findStyleElement(xml, styleId, ids);
+    if (style === undefined || basedOn(style.element) === undefined) continue;
+    const chain = bases(style);
+    if (chain === undefined) continue;
+    const block = style.element;
+    const rPr = ownRPr(block);
+    let content = rPr;
+    for (const tag of ['w:sz', 'w:szCs']) {
+      if (sizeIn(rPr, tag) === inherited(chain, tag)) content = content.replace(new RegExp('<' + tag + '\\b[^>]*/>'), '');
+    }
+    if (content === rPr) continue;
+    // An rPr left empty goes too
+    if (/^<w:rPr\b[^>]*>\s*<\/w:rPr>$/.test(content)) content = '';
+    const rPrAt = block.lastIndexOf(rPr);
+    xml = xml.slice(0, style.at) + block.slice(0, rPrAt) + content + block.slice(rPrAt + rPr.length) + xml.slice(style.at + block.length);
+  }
+  return xml;
+}
+
 export function applyFontOverridesToTemplate(
   stylesXmlBytes: Uint8Array,
   overrides: FontOverrides,
@@ -5281,6 +5344,8 @@ export function applyFontOverridesToTemplate(
 
   // Collect all style IDs we want to modify
   const allTargetIds = new Set([...BODY_STYLE_IDS, ...CODE_STYLE_IDS, ...TABLE_STYLE_IDS]);
+  // The headings and title given a size, which goes where their base gives it
+  const sizedStyleIds: string[] = [];
 
   for (const styleId of allTargetIds) {
     // Find the <w:style ...w:styleId="ID"...> ... </w:style> block, by the
@@ -5335,6 +5400,7 @@ export function applyFontOverridesToTemplate(
 
     // Nothing to do for this style
     if (font === undefined && sizeHp === undefined && fontStyleOverride === undefined) continue;
+    if (sizeHp !== undefined && (isHeading || isTitle)) sizedStyleIds.push(styleId);
 
     // Build the replacement fragments
     const rFontsEl = font !== undefined
@@ -5497,7 +5563,8 @@ export function applyFontOverridesToTemplate(
     }
   }
 
-  return xml;
+  // Last, as a heading may be based on a custom style the frontmatter defines
+  return withoutInheritedSizes(xml, sizedStyleIds, ids);
 }
 
 /** Map from alert style ID → GfmAlertType for template color patching. */
