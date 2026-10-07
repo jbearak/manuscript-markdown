@@ -151,11 +151,11 @@ export function orderRPr(children: string): string {
 
 /**
  * Convert citeproc HTML output (e.g. `<i>1</i>`) to OOXML runs with
- * proper formatting.  Handles `<i>`, `<b>`, `<sup>`, `<sub>`, and
- * `<span style="...small-caps...">`.
+ * proper formatting.  Handles `<i>`, `<b>`, `<sup>`, `<sub>`,
+ * `<span style="...small-caps...">`, and `<br>`, as Word's line break.
  */
 export function htmlToOoxmlRuns(html: string, extraRPr?: string): string {
-  const runs: { text: string; italic: boolean; bold: boolean; sup: boolean; sub: boolean; smallCaps: boolean }[] = [];
+  const runs: { text: string; italic: boolean; bold: boolean; sup: boolean; sub: boolean; smallCaps: boolean; lineBreak?: true }[] = [];
 
   let pos = 0;
   let currentText = '';
@@ -197,6 +197,7 @@ export function htmlToOoxmlRuns(html: string, extraRPr?: string): string {
         if (spanDepth === smallCapsDepth) smallCapsDepth = 0;
         spanDepth = Math.max(0, spanDepth - 1);
       }
+      else if (/^br\s*\/?$/i.test(tag)) runs.push({ text: '', italic, bold, sup, sub, smallCaps: false, lineBreak: true });
 
       pos = tagEnd + 1;
     } else {
@@ -210,6 +211,7 @@ export function htmlToOoxmlRuns(html: string, extraRPr?: string): string {
   }
 
   return runs.map(run => {
+    if (run.lineBreak) return '<w:r><w:br/></w:r>';
     const rPr: string[] = [];
     if (run.italic) rPr.push('<w:i/>');
     if (run.bold) rPr.push('<w:b/>');
@@ -825,6 +827,59 @@ export function generateFallbackText(keys: string[], entries: Map<string, Bibtex
  *  hidden mark, as of a paragraph of HTML comments alone (see generateParagraph) */
 export const HIDDEN_PARAGRAPH_PPR = '<w:pPr><w:spacing w:after="0" w:line="1" w:lineRule="exact"/><w:rPr><w:vanish/><w:color w:val="FFFFFF"/></w:rPr></w:pPr>';
 
+// The whitespace HTML runs together into one space as it lays out text,
+// which a non-breaking space is not
+const HTML_WHITESPACE = /[ \t\n\r\f]+/g;
+
+/**
+ * A bibliography entry's HTML, from citeproc, as a browser shows it, for
+ * htmlToOoxmlRuns. Its whitespace runs together into one space, and is none
+ * at a line's start or end, so the line ends and indentation citeproc writes
+ * around its divs show nothing. Each div is a line of its own, after a line
+ * break, but for the text after a number in the left margin (csl-left-margin,
+ * of a style with second-field-align), which sits beside it after a tab, as
+ * Zotero writes it in Word.
+ */
+export function bibliographyEntryAsShown(html: string): string {
+  const parts: string[] = [];
+  const divs: string[] = [];  // the classes of the divs open
+  let lineStart = true;       // whether the line has no text yet
+  let spaceAt = -1;           // the part whose text ends in a space, which is the line's last so far
+  let breakAt = -1;           // where the line ended, before the next line's text
+  let beside = false;         // whether the next line's text sits beside a number in the margin
+  for (const part of html.split(/(<[^>]*>)/)) {
+    if (!part) continue;
+    const div = /^<(\/?)div\b(?:[^>]*?\bclass\s*=\s*"([^"]*)")?/i.exec(part);
+    if (div) {
+      // The line ends, and so does the space at its end
+      if (spaceAt >= 0) parts[spaceAt] = parts[spaceAt].slice(0, -1);
+      spaceAt = -1;
+      let closed: string | undefined;
+      if (div[1]) closed = divs.pop();
+      else divs.push(div[2] ?? '');
+      if (!lineStart) {
+        breakAt = parts.length;
+        beside = closed === 'csl-left-margin';
+      }
+      lineStart = true;
+      parts.push(part);
+    } else if (part.startsWith('<')) {
+      parts.push(part);
+    } else {
+      let text = part.replace(HTML_WHITESPACE, ' ');
+      if (lineStart || spaceAt >= 0) text = text.replace(/^ /, '');
+      if (!text) continue;
+      if (breakAt >= 0) parts.splice(breakAt, 0, beside ? '\t' : '<br>');
+      breakAt = -1;
+      lineStart = false;
+      parts.push(text);
+      spaceAt = text.endsWith(' ') ? parts.length - 1 : -1;
+    }
+  }
+  if (spaceAt >= 0) parts[spaceAt] = parts[spaceAt].slice(0, -1);
+  return parts.join('');
+}
+
 /**
  * Generate OOXML for a ZOTERO_BIBL field code with rendered bibliography.
  * Without an engine, the field is empty, and marks the bibliography's place.
@@ -849,7 +904,7 @@ export function generateBibliographyXml(
       const trimmed = entry.trim();
       if (trimmed) {
         const bibPPr = hangingIndent !== false ? '<w:pPr><w:pStyle w:val="Bibliography"/></w:pPr>' : '';
-        bibParagraphs += '<w:p>' + bibPPr + htmlToOoxmlRuns(trimmed) + '</w:p>';
+        bibParagraphs += '<w:p>' + bibPPr + htmlToOoxmlRuns(bibliographyEntryAsShown(trimmed)) + '</w:p>';
       }
     }
   }

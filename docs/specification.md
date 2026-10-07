@@ -473,6 +473,8 @@ Both directives are consumed during parsing (they do not appear in the DOCX) and
 
 The `bibliography-hanging-indent` field controls whether bibliography entries use a hanging indent. When `true` (default), bibliography entries are formatted with a 0.5-inch hanging indent and single-line spacing, regardless of the document's line spacing setting.
 
+Export writes each entry's text as a browser shows the HTML citeproc formats it as: whitespace runs together into one space, and there is none at the entry's edges. In a style that puts each entry's number in the margin (one with `second-field-align`, such as `ieee` or `vancouver`), a tab follows the number, as Zotero writes it in Word, so the text starts at the hanging indent. A part of an entry that a style puts on a line of its own starts after a line break.
+
 ```yaml
 ---
 bibliography-hanging-indent: false

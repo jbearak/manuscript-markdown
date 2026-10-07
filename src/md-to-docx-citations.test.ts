@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { generateCitation, orderRPr, generateCitationId, generateMathXml, escapeXml, generateMissingKeysXml, htmlToOoxmlRuns, generateFallbackText } from './md-to-docx-citations';
+import { generateCitation, orderRPr, generateCitationId, generateMathXml, escapeXml, generateMissingKeysXml, htmlToOoxmlRuns, generateFallbackText, bibliographyEntryAsShown } from './md-to-docx-citations';
 import { BibtexEntry, parseBibtex } from './bibtex-parser';
 import { parseMd, type MdRun } from './md-to-docx';
 
@@ -571,6 +571,32 @@ describe('htmlToOoxmlRuns', () => {
     expect(result).toContain('<w:i/>');
     expect(result).toContain('<w:vertAlign w:val="superscript"/>');
     expect(result).toContain('<w:t>text</w:t>');
+  });
+});
+
+describe('bibliographyEntryAsShown', () => {
+  // As citeproc writes an entry, and HTML lays it out
+  const runs = (html: string) => htmlToOoxmlRuns(bibliographyEntryAsShown(html));
+
+  it('writes a number in the margin, and the text beside it after a tab', () => {
+    expect(runs('  <div class="csl-entry">\n    <div class="csl-left-margin">1. </div><div class="csl-right-inline">Doe J. <i>Title</i>.</div>\n  </div>\n'))
+      .toBe('<w:r><w:t>1.</w:t><w:tab/></w:r><w:r><w:t xml:space="preserve">Doe J. </w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t>Title</w:t></w:r><w:r><w:t>.</w:t></w:r>');
+  });
+
+  it.each([
+    ['a block', '  <div class="csl-entry">Doe J. Title.\n\n    <div class="csl-block">A note.</div>\n</div>\n'],
+    ['an indented line', '  <div class="csl-entry">Doe J. Title.<div class="csl-indent">A note.</div>\n  </div>\n'],
+  ])('writes %s on a line of its own', (_name, html) => {
+    expect(runs(html)).toBe('<w:r><w:t>Doe J. Title.</w:t></w:r><w:r><w:br/></w:r><w:r><w:t>A note.</w:t></w:r>');
+  });
+
+  it('runs whitespace together into one space, across formatting', () => {
+    expect(runs('<div class="csl-entry">A <i> B\t</i>\n C </div>'))
+      .toBe('<w:r><w:t xml:space="preserve">A </w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t xml:space="preserve">B </w:t></w:r><w:r><w:t>C</w:t></w:r>');
+  });
+
+  it('keeps a non-breaking space, which HTML shows', () => {
+    expect(runs('<div class="csl-entry">A\u00A0 \u00A0 B</div>')).toBe('<w:r><w:t>A\u00A0 \u00A0 B</w:t></w:r>');
   });
 });
 
