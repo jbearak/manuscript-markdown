@@ -3649,7 +3649,10 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
         const encodedSrc = token.attrGet?.('src') || '';
         let src = encodedSrc;
         try { src = decodeURIComponent(encodedSrc); } catch { /* Keep malformed escapes literal. */ }
-        const alt = token.children?.map(child => child.content || '').join('') || '';
+        // Its text, a soft break a space as in a paragraph and a hard break
+        // a line break
+        const alt = token.children?.map(child => child.type === 'softbreak' ? ' '
+          : child.type === 'hardbreak' ? '\n' : child.content || '').join('') || '';
         let width: number | undefined;
         let height: number | undefined;
         let attrs: string | undefined;
@@ -7138,7 +7141,10 @@ function imageRunXml(run: MdRun, state: DocxGenState, options: MdToDocxOptions |
   return '<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">'
     + '<wp:extent cx="' + cx + '" cy="' + cy + '"/>'
     + '<wp:effectExtent l="0" t="0" r="0" b="0"/>'
-    + '<wp:docPr id="' + docPrId + '" name="' + escapeXml(src) + '" descr="' + escapeXml(alt) + '"'
+    // A tab or line break in the alt text as a reference, which a reader
+    // otherwise takes for a space in an attribute
+    + '<wp:docPr id="' + docPrId + '" name="' + escapeXml(src) + '" descr="'
+    + escapeXml(alt).replace(/[\t\n\r]/g, c => '&#x' + c.charCodeAt(0).toString(16).toUpperCase() + ';') + '"'
     + (linkRId ? '><a:hlinkClick xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" r:id="' + linkRId + '"/></wp:docPr>' : '/>')
     + '<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
     + '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
