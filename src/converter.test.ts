@@ -9178,7 +9178,7 @@ describe('HTML around a table in its block', () => {
     ['comments that read as no directive', '<div>\n<!-- TODO: check -->\n', '\n<!-- Source: World Bank -->\n</div>\n',
       '<div>\n<!-- TODO: check -->\n\n', '\n\n<!-- Source: World Bank -->\n</div>\n'],
     ['text that would read as Markdown', '<div>\n', '\n# Source\n{++Source++} *x* [^1]\n</div>\n',
-      '<div>\n\n', '\n\n\\# Source \\{++Source+\\+} \\*x\\* \\[^1]\n</div>\n'],
+      '<div>\n\n', '\n\n\\# Source \\{++Source+\\+} \\*x\\* \\[^1]\n\n</div>\n'],
     // A line of one tag doesn't start a block after text
     ['a line of one tag after text', '', '\n# Source\n<span>\n*x*\n',
       '', '\n\n\\# Source <span> \\*x\\*\n'],
@@ -9192,14 +9192,14 @@ describe('HTML around a table in its block', () => {
     // bibliography holds its key
     ['a citation as text', '', '\nSource [@smith2020; -@doe, p. 2] *x* [see @doe]\n', '', '\n\nSource \\[@smith2020; -@doe, p. 2] \\*x\\* \\[see @doe]\n'],
     // Which pair across one, which read as math
-    ['dollar signs around a character reference', '', '\nSource $x &amp; y$ and *a <b>b</b> c*\n', '', '\n\nSource \\$x &amp; y$ and \\*a <b>b</b> c\\*\n'],
+    ['dollar signs around a character reference', '', '\nSource $x &amp; y$ and *a <b>b</b> c*\n', '', '\n\nSource \\$x & y$ and \\*a **b** c\\*\n'],
     // Which went on across its lines, and the spaces at a line's end, which
     // HTML runs together, but which made a line break
     ['a comment, dollar signs and spaces at a line\'s end across lines', '', '\nSource <!-- hidden\nsecret --> $a\nb$ and  \ncontinued\n', '',
       '\n\nSource <!-- hidden\nsecret --> \\$a b$ and continued\n'],
     // Which escaped the reference or tag after it
     ['a backslash before a character reference or a tag', '', '\nSource\\&amp; and a\\\\<b>b</b>\n', '',
-      '\n\nSource\\\\&amp; and a\\\\\\\\<b>b</b>\n'],
+      '\n\nSource\\\\& and a\\\\\\\\**b**\n'],
     // Which the browser ended at a --!>, or at the end of the block, but
     // which, a block of their own, read on over the table
     ['comments the browser ends where Markdown reads no end', '<!-- cap --!>', ' <!-- open\n', '<!-- cap -->\n\n', '\n\n<!-- open -->\n'],
@@ -9207,7 +9207,7 @@ describe('HTML around a table in its block', () => {
     ['a comment the browser ends after a -', '', '\nSource <!-- secret ---> rest\n', '', '\n\nSource <!-- secret - --> rest\n'],
     // Which got an end, as a comment the browser read
     ['an <!-- in an element whose text is no HTML', '', '\n<textarea>a <!-- b --!> c</textarea>\n<textarea>literal <!-- here</textarea>\n', '',
-      '\n\n<textarea>a <!-- b --!> c</textarea>\n<textarea>literal <!-- here</textarea>\n'],
+      '\n\n<textarea>a <!-- b --!> c</textarea>\n\n<textarea>literal <!-- here</textarea>\n'],
     // Which export reads as no directive, but which went as one
     ['comments with a value no table directive reads', '', '\nSource\n<!-- table-digits: TBD -->\n<!-- table-col-widths: TBD -->\n', '',
       '\n\nSource\n<!-- table-digits: TBD -->\n<!-- table-col-widths: TBD -->\n'],
@@ -9215,8 +9215,8 @@ describe('HTML around a table in its block', () => {
     // import dropped with all after it
     ['a line that would read as a Sources heading', '', '\nSources\nWorld Bank\n\nAfter.\n', '', '\n\nSources World Bank\n\nAfter.\n'],
     // Whose lines a paragraph's lost their indents
-    ['a <pre> that goes on past a line of text', '', '\nSource <pre>if ready:\n    run()\n</pre> done\n', '', '\n\nSource\n<pre>if ready:\n    run()\n</pre> done\n'],
-    ['a <pre> on a line of text that ends on it', '', '\nSource <pre>a</pre> <b>b</b>\n', '', '\n\nSource <pre>a</pre> <b>b</b>\n'],
+    ['a <pre> that goes on past a line of text', '', '\nSource <pre>if ready:\n    run()\n</pre> done\n', '', '\n\nSource\n\n<pre>if ready:\n    run()\n</pre> done\n'],
+    ['a <pre> on a line of text that ends on it', '', '\nSource <pre>a</pre> <b>b</b>\n', '', '\n\nSource <pre>a</pre> **b**\n'],
     // Whose spaces at the start of a line in it went, as a line's, which
     // changed where the link goes
     ['a tag whose attribute goes on over lines', '', '\nSource <a href="docs/a\n    b">link</a>\n', '', '\n\nSource <a href="docs/a\n    b">link</a>\n'],
@@ -9227,6 +9227,23 @@ describe('HTML around a table in its block', () => {
     ['a <pre> on a line of text in a comment', '', '\nSource <!-- a\nb <pre> -->\nc\n', '', '\n\nSource <!-- a\nb <pre> --> c\n'],
     // Which went as one, as between blocks
     ['blank lines in a <pre>', '<pre>a\n\n\nb</pre>', '', '<pre>a\n\n\nb</pre>\n\n', '\n'],
+    // Which the next round trip wrote as import writes Word's paragraph:
+    // formatting as Markdown's, but where it has none, a tag with attributes
+    // as the text Word shows, a character reference as its character, and
+    // a line break as Markdown's
+    ['tags that format text', '', '\nSource <b>b</b> <i>i</i> <s>s</s> <u>u</u> <sup>2</sup>\n', '', '\n\nSource **b** *i* ~~s~~ <u>u</u> <sup>2</sup>\n'],
+    ['a tag that formats text with attributes', '', '\nSource <b class="x">b</b>\n', '', '\n\nSource &lt;b class="x"&gt;b&lt;/b&gt;\n'],
+    ['character references', '', '\nSource &amp; &copy; &#xA9; &lt;b&gt;\n', '', '\n\nSource & © © &lt;b&gt;\n'],
+    ['a <br>', '', '\nSource <br> text\n', '', '\n\nSource \\\n&#32;text\n'],
+    // Which the next round trip wrote after a blank line, as it does each
+    // of Word's paragraphs, but next to a comment
+    ['an HTML block after text', '', '\nSource text\n<div>x</div>\n', '', '\n\nSource text\n\n<div>x</div>\n'],
+    ['text after a block that ends at a marker', '', '\n<pre>a</pre>\nSource text\n', '', '\n\n<pre>a</pre>\n\nSource text\n'],
+    ['a comment between lines of text', '', '\nSource <b>b</b>\n<!-- c -->\nmore\n', '', '\n\nSource **b**\n<!-- c -->\nmore\n'],
+    // Which went, as the paragraph it was in in Word, so the text on each
+    // side, which export read with it, goes on as one
+    ['formatting over a directive between lines of text', '', '\nSource <b>a\n<!-- table-font-size: 11 -->\nb</b>\n', '', '\n\nSource **a b**\n'],
+    ['text on each side of a section\'s directive', '', '\nSource a\n<!-- landscape -->\nb\n', '', '\n\nSource a b\n'],
   ])('keeps %s around a table that leaves HTML, as it read', async (_name, beforeHtml, afterHtml, beforeMd, afterMd) => {
     // A comment that reads as no directive went, as one that does, and text
     // read as Markdown, as # Source as a heading
@@ -9235,8 +9252,60 @@ describe('HTML around a table in its block', () => {
     const tracked = xml.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>');
     expect(tracked).not.toBe(xml);
     zip.file('word/document.xml', tracked);
-    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    const imported = (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+    const markdown = strip(imported);
     expect(markdown).toBe(beforeMd + '+----------+-----+\n| {++XX++} | b   |\n+----------+-----+' + afterMd);
+    // The next round trip, which read it as Markdown and wrote what Word
+    // made of it, changes nothing
+    expect(await roundTrip(imported)).toBe(markdown);
+  });
+
+  /** The Markdown import writes of the document export makes of `md` with
+   *  its XX tracked as an insertion, which takes its table out of HTML */
+  const withTrackedCell = async (md: string, bibtex?: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md, { bibtex })).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const tracked = xml.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>');
+    expect(tracked).not.toBe(xml);
+    zip.file('word/document.xml', tracked);
+    return (await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown;
+  };
+
+  test('keeps a citation around a table that leaves HTML as text, where the document cites its key', async () => {
+    // The key, which the document cites, kept it a citation, as import
+    // writes Word's text of one, which the next export made a field. That
+    // import still reads Word's text as a citation, as it does any of a key
+    // the document cites (see citationKnown).
+    const bibtex = '@article{foo,\n  author = {Foo, A.},\n  title = {T},\n  year = {2020}\n}\n';
+    const imported = await withTrackedCell('See [@foo].\n\n<table><tr><td>XX</td><td>b</td></tr></table>\nSource [@foo]\n', bibtex);
+    expect(strip(imported)).toBe('See [@foo].\n\n+----------+-----+\n| {++XX++} | b   |\n+----------+-----+\n\nSource \\[@foo]\n');
+    const again = await (await JSZip.loadAsync((await convertMdToDocx(imported, { bibtex })).docx)).file('word/document.xml')!.async('string');
+    expect(again.match(/ZOTERO_ITEM/g)).toHaveLength(1);
+  });
+
+  test('keeps a carriage return\'s reference around a table that leaves HTML as one', async () => {
+    // Written as the character, which the next export read as a line end,
+    // after which # Heading was a heading
+    const markdown = strip(await withTrackedCell('<table><tr><td>XX</td><td>b</td></tr></table>\nSource &#13;# Heading <b>b</b>\n'));
+    expect(markdown).toBe('+----------+-----+\n| {++XX++} | b   |\n+----------+-----+\n\nSource &#13;# Heading <b>b</b>\n');
+  });
+
+  test.each([
+    ['a comment', 'Source <br><!-- c --> rest', 'Source <br><!-- c --> rest', 'Source ⏎ rest'],
+    ['a heading\'s marker', 'Source <br># rest', 'Source \\\n\\# rest', 'Source ⏎# rest'],
+    ['a list item\'s marker', 'Source <br>- rest', 'Source \\\n\\- rest', 'Source ⏎- rest'],
+    ['an HTML block\'s tag', 'Source <br><div>x</div>', 'Source \\\n\\<div>x</div>', 'Source ⏎<div>x</div>'],
+  ])('keeps a line break before %s in a paragraph around a table that leaves HTML', async (_name, after, text, shown) => {
+    // As a line end, a comment after it started an HTML block, which ended
+    // the paragraph, whose line break the next export wrote as a \, and
+    // which showed the comment
+    const markdown = strip(await withTrackedCell('<table><tr><td>XX</td><td>b</td></tr></table>\n' + after + '\n'));
+    expect(markdown).toBe('+----------+-----+\n| {++XX++} | b   |\n+----------+-----+\n\n' + text + '\n');
+    const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+    const paragraphs = [...xml.slice(xml.lastIndexOf('</w:tbl>')).matchAll(/<w:p[ >](?:(?!<\/w:p>).)*<\/w:p>/g)].map(([p]) => [...p.matchAll(/<w:r>((?:(?!<\/w:r>).)*)<\/w:r>/g)]
+      .filter(([, run]) => !run.includes('<w:vanish/>')).map(([, run]) => [...run.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>|<w:br\/>/g)].map(([t, s]) => s ?? (t === '<w:br/>' ? '⏎' : '')).join('')).join(''))
+      .filter(p => p !== '');
+    expect(paragraphs).toEqual([shown.replace(/</g, '&lt;').replace(/>/g, '&gt;')]);
   });
 
   test.each([
