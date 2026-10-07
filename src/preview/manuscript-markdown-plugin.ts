@@ -478,7 +478,9 @@ function isEntirelyCriticKind(children: Token[], criticType: 'addition' | 'delet
 }
 
 function isVisibleInlineToken(token: Token, content = token.content): boolean {
-  if (token.nesting !== 0 || token.type === 'softbreak' || token.type === 'hardbreak') return false;
+  // A range's marker, which writes nothing, or only a span's tag (see
+  // commentRangeSpansRule)
+  if (token.nesting !== 0 || token.type === 'softbreak' || token.type === 'hardbreak' || token.type === 'manuscript_markdown_range_marker') return false;
   if (token.type === 'text' || token.type === 'html_inline') return content.trim().length > 0;
   return true;
 }
@@ -593,6 +595,9 @@ function splitCriticHeadingSource(
 interface CriticHeadingChildSplit {
   segments: Token[][];
   boundaries: CriticHeadingBoundary[];
+  // How many wrappers each segment opens again at its start, those open at
+  // the break before it
+  reopened: number[];
 }
 
 type ActiveInlineWrapper =
@@ -614,6 +619,43 @@ function rawHtmlTag(token: Token): { kind: 'open' | 'close'; tag: string } | und
   return VOID_HTML_TAGS.has(tag) ? undefined : { kind: 'open', tag };
 }
 
+/** Whether a token is the start or end of a range's span (see
+ *  commentRangeSpansRule) */
+function isRangeSpan(token: Token): boolean {
+  return token.type === 'manuscript_markdown_comment_range_open' || token.type === 'manuscript_markdown_comment_range_close';
+}
+
+/**
+ * What an inline token does to the elements open around the tokens after
+ * it, for the rules that close and open them again where a paragraph break
+ * (see splitInlineChildrenAtCriticBreaks) or an element's end (see
+ * nestCrossedElements) comes inside them: opens one, as a token that nests
+ * or a raw HTML start tag but a void element's (see rawHtmlTag), or closes
+ * one that `closes` matches, by its type or tag, and a range's span by its
+ * ID too, or neither.
+ */
+function inlineWrapperStep(token: Token):
+  { kind: 'open'; wrapper: ActiveInlineWrapper } | { kind: 'close'; closes: (wrapper: ActiveInlineWrapper) => boolean } | undefined {
+  if (token.nesting === 1) return { kind: 'open', wrapper: { kind: 'token', open: token } };
+  if (token.nesting === -1) {
+    const openType = token.type.replace(/_close$/, '_open');
+    return { kind: 'close', closes: wrapper => wrapper.kind === 'token' && wrapper.open.type === openType
+      && (!isRangeSpan(token) || wrapper.open.meta?.id === token.meta?.id) };
+  }
+  const htmlTag = rawHtmlTag(token);
+  if (htmlTag?.kind === 'open') return { kind: 'open', wrapper: { kind: 'html', open: token, tag: htmlTag.tag } };
+  if (htmlTag?.kind === 'close') return { kind: 'close', closes: wrapper => wrapper.kind === 'html' && wrapper.tag === htmlTag.tag };
+  return undefined;
+}
+
+/** The index in `stack` of the nearest element `closes` matches (see
+ *  inlineWrapperStep), or -1 */
+function closedWrapperIndex(stack: ActiveInlineWrapper[], closes: (wrapper: ActiveInlineWrapper) => boolean): number {
+  let at = stack.length - 1;
+  while (at >= 0 && !closes(stack[at])) at--;
+  return at;
+}
+
 function closeActiveWrapper(state: StateCore, wrapper: ActiveInlineWrapper): Token {
   if (wrapper.kind === 'token') return closeTokenFor(state, wrapper.open);
   const close = cloneInlineToken(state, wrapper.open);
@@ -631,6 +673,7 @@ function splitInlineChildrenAtCriticBreaks(state: StateCore, inline: Token, isHe
   const segments: Token[][] = [];
   const boundaries: CriticHeadingBoundary[] = [];
   const openStack: ActiveInlineWrapper[] = [];
+  const reopened = [0];
   let segment: Token[] = [];
   let splitFirstLineBreak = isHeading;
   let afterParagraphBreak = false;
@@ -654,6 +697,7 @@ function splitInlineChildrenAtCriticBreaks(state: StateCore, inline: Token, isHe
       }
       segments.push(segment);
       segment = openStack.map(wrapper => reopenActiveWrapper(state, wrapper));
+      reopened.push(openStack.length);
       boundaries.push({
         kind: isParagraphBreak ? 'paragraph' : 'line',
         sourceOffset: typeof sourceOffset === 'number' ? sourceOffset : undefined,
@@ -668,22 +712,18 @@ function splitInlineChildrenAtCriticBreaks(state: StateCore, inline: Token, isHe
 
     afterParagraphBreak = false;
     segment.push(token);
-    if (token.nesting === 1) {
-      openStack.push({ kind: 'token', open: token });
-    } else if (token.nesting === -1) {
-      openStack.pop();
-    } else {
-      const htmlTag = rawHtmlTag(token);
-      if (htmlTag?.kind === 'open') {
-        openStack.push({ kind: 'html', open: token, tag: htmlTag.tag });
-      } else if (htmlTag?.kind === 'close') {
-        const active = openStack[openStack.length - 1];
-        if (active?.kind === 'html' && active.tag === htmlTag.tag) openStack.pop();
-      }
+    // An element's end closes its own start, which the next segment opens
+    // again only while it's open, whatever opened inside it
+    const step = inlineWrapperStep(token);
+    if (step?.kind === 'open') {
+      openStack.push(step.wrapper);
+    } else if (step?.kind === 'close') {
+      const at = closedWrapperIndex(openStack, step.closes);
+      if (at !== -1) openStack.splice(at, 1);
     }
   }
   segments.push(segment);
-  return { segments, boundaries };
+  return { segments, boundaries, reopened };
 }
 
 /** Exclude wrapper and break tokens when deciding whether a segment is blank padding. */
@@ -729,6 +769,42 @@ function createCriticBlockSegment(
   blockInline.content = sourceSegment.content;
   blockInline.children = children;
   return [blockOpen, blockInline, blockClose];
+}
+
+/**
+ * Each range's start or end, as Pass 2 of associateCommentsRule paired them,
+ * in a segment createCriticBlockSegment omits, as the blank lines of
+ * `{++{#1}a` and a blank line before `b` and another before `{/1}++}` make
+ * one, moved to a segment it keeps, where the range covers the same text: a
+ * start to the start of the kept segment after it, after the wrappers it
+ * opens again, as the start was in them, and an end, or a range that starts
+ * and ends in the segments omitted between two kept ones, which covers no
+ * text, to the end of the kept segment before it, after the wrappers it
+ * closes, as the span opens again before them in the paragraph after (see
+ * commentRangeSpansRule). Where no segment is kept on that side, to the
+ * other. As the segment went with its markers, a range lost its end, so its
+ * span ended with its start's paragraph, or its start, so it had none.
+ */
+function keepRangeMarkers(segments: Token[][], kept: boolean[], reopened: number[]): void {
+  const paired = (token: Token) => token.type === 'manuscript_markdown_range_marker'
+    && (token.meta?.commentText !== undefined || token.meta?.start !== undefined);
+  // The last kept segment before the omitted ones
+  let before = -1;
+  for (let index = 0; index < segments.length;) {
+    if (kept[index]) {
+      before = index++;
+      continue;
+    }
+    // The omitted segments from here, and the kept one after them
+    let after = index;
+    while (after < segments.length && !kept[after]) after++;
+    const markers = segments.slice(index, after).flat().filter(paired);
+    const omitted = new Set(markers);
+    const forward = markers.filter(marker => marker.meta.type === 'start' && !omitted.has(marker.meta.end));
+    if (after < segments.length) segments[after].splice(reopened[after], 0, ...(before === -1 ? markers : forward));
+    if (before !== -1) segments[before].push(...(after < segments.length ? markers.filter(marker => !forward.includes(marker)) : markers));
+    index = after;
+  }
 }
 
 function promoteCriticHeadingsRule(state: StateCore): void {
@@ -777,6 +853,7 @@ function splitCriticBlocksRule(state: StateCore): void {
     const lineMap = getPreviewEnvironment(state).lineMap;
     const originalStart = inline.map ? (lineMap?.remap(inline.map[0]) ?? inline.map[0]) : 0;
     const headingTokens: [Token, Token, Token] = [headingOpen, inline, headingClose];
+    keepRangeMarkers(childSegments, childSegments.map((children, segmentIndex) => (isHeading && segmentIndex === 0) || hasVisibleInlineContent(children)), childSplit.reopened);
     for (let segmentIndex = 0; segmentIndex < childSegments.length; segmentIndex++) {
       const segment = createCriticBlockSegment(
         state,
@@ -1541,7 +1618,7 @@ function findMatchingOpenIdx(tokens: Token[], closeIdx: number): number {
  * Runs after inline parsing to post-process the token stream.
  *
  * Pass 1: Build a map of comment ID → comment text
- * Pass 2: Transform range markers ({#id}/{/id}) into comment range open/close tokens
+ * Pass 2: Pair range markers ({#id}/{/id}) into ranges, which commentRangeSpansRule writes as spans
  * Pass 3: Process inline comments — associate with preceding CriticMarkup elements or create indicators
  */
 function associateCommentsRule(state: StateCore): void {
@@ -1556,27 +1633,47 @@ function associateCommentsRule(state: StateCore): void {
     }
   }
 
-  // Pass 2: Transform range markers with matching comments into comment range open/close
+  // Pass 2: Pair range markers with matching comments into ranges. An end
+  // ends the range of its ID that started last before it, in its paragraph
+  // or table cell or an earlier one, and one where none is open writes
+  // nothing. A marker in a comment's body, which Pass 3 takes out with the
+  // body, is its text, not a range's start or end. Each range's markers stay
+  // markers, which the rules that split a paragraph, as an alert's quote or
+  // a CriticMarkup paragraph break does, move as they do text, until
+  // commentRangeSpansRule writes the spans.
+  // The range markers outside comments' bodies
+  const rangeMarkers = (children: Token[]): Set<Token> => {
+    const markers = new Set<Token>();
+    let depth = 0;
+    for (const child of children) {
+      if (child.type === 'manuscript_markdown_comment_open') depth++;
+      else if (child.type === 'manuscript_markdown_comment_close') depth = Math.max(0, depth - 1);
+      else if (depth === 0 && child.type === 'manuscript_markdown_range_marker' && child.meta?.id) markers.add(child);
+    }
+    return markers;
+  };
+  // The starts of ranges with no end yet, in the order they started
+  const started: Token[] = [];
   for (const blockToken of state.tokens) {
     if (blockToken.type !== 'inline' || !blockToken.children) continue;
-    for (const child of blockToken.children) {
-      if (child.type === 'manuscript_markdown_range_marker' && child.meta?.id) {
-        const commentText = commentIdMap.get(child.meta.id);
-        if (commentText !== undefined) {
-          if (child.meta.type === 'start') {
-            child.type = 'manuscript_markdown_comment_range_open';
-            child.tag = 'span';
-            child.nesting = 1;
-            child.attrSet('class', 'manuscript-markdown-comment-range');
-            child.attrSet('data-comment', commentText);
-          } else if (child.meta.type === 'end') {
-            child.type = 'manuscript_markdown_comment_range_close';
-            child.tag = 'span';
-            child.nesting = -1;
-          }
-        }
+    const markers = rangeMarkers(blockToken.children);
+    blockToken.children = blockToken.children.filter(child => {
+      if (!markers.has(child)) return true;
+      const commentText = commentIdMap.get(child.meta.id);
+      if (commentText === undefined) return true;
+      if (child.meta.type === 'start') {
+        child.meta = { ...child.meta, commentText };
+        started.push(child);
+        return true;
       }
-    }
+      let at = started.length - 1;
+      while (at >= 0 && started[at].meta.id !== child.meta.id) at--;
+      if (at === -1) return false;
+      const [start] = started.splice(at, 1);
+      start.meta.end = child;
+      child.meta = { ...child.meta, start };
+      return true;
+    });
   }
 
   // Pass 3: Process inline comments — associate with preceding elements or create indicators
@@ -1647,6 +1744,132 @@ function associateCommentsRule(state: StateCore): void {
 
     blockToken.children = newChildren;
   }
+}
+
+/**
+ * Core rule that writes each range Pass 2 of associateCommentsRule paired as
+ * a span in each paragraph or table cell it covers: a range that goes on
+ * past its paragraph or cell, to a later one, closes its span at the end of
+ * each and opens one at the start of each after it, up to its end, as the
+ * browser ends a span the first cell's end closes, so the cells after it
+ * lost the highlight. A range with no end ends with its own paragraph or
+ * cell. It runs after the rules that split a paragraph, as an alert's quote
+ * or a CriticMarkup paragraph break does, so a span opens again at the start
+ * of each paragraph they make, as at any other. Then the elements a span
+ * crosses nest (see nestCrossedElements), and each token takes its level
+ * (see withLevels).
+ */
+function commentRangeSpansRule(state: StateCore): void {
+  // A range's start or end, as Pass 2 paired them
+  const inRange = (token: Token) => token.type === 'manuscript_markdown_range_marker'
+    && (token.meta?.commentText !== undefined || token.meta?.start !== undefined);
+  // The ends still in the document, but for any a rule dropped with its paragraph
+  const ends = new Set<Token>();
+  for (const blockToken of state.tokens) {
+    for (const child of blockToken.type === 'inline' && blockToken.children ? blockToken.children : []) {
+      if (inRange(child) && child.meta.type === 'end') ends.add(child);
+    }
+  }
+  const spanOpen = (start: Token) => {
+    const open = new state.Token('manuscript_markdown_comment_range_open', 'span', 1);
+    open.attrSet('class', 'manuscript-markdown-comment-range');
+    open.attrSet('data-comment', start.meta.commentText);
+    open.meta = { id: start.meta.id, type: 'start' };
+    return open;
+  };
+  const spanClose = (start: Token) => {
+    const close = new state.Token('manuscript_markdown_comment_range_close', 'span', -1);
+    close.meta = { id: start.meta.id, type: 'end' };
+    return close;
+  };
+  // The starts of the ranges open from an earlier paragraph or cell, in the
+  // order they started
+  let active: Token[] = [];
+  for (const blockToken of state.tokens) {
+    if (blockToken.type !== 'inline' || !blockToken.children) continue;
+    // The starts of the ranges whose span is open here
+    const open = [...active];
+    const children = active.map(spanOpen);
+    for (const child of blockToken.children) {
+      if (!inRange(child)) {
+        children.push(child);
+      } else if (child.meta.type === 'start') {
+        open.push(child);
+        if (ends.has(child.meta.end)) active.push(child);
+        children.push(spanOpen(child));
+      } else {
+        const at = open.indexOf(child.meta.start);
+        if (at === -1) continue;
+        open.splice(at, 1);
+        active = active.filter(start => start !== child.meta.start);
+        children.push(spanClose(child.meta.start));
+      }
+    }
+    for (const start of open.reverse()) children.push(spanClose(start));
+    blockToken.children = withLevels(nestCrossedElements(children, state));
+  }
+}
+
+/**
+ * Inline tokens with the level markdown-it's inline parser gives each, by
+ * the elements open around it, as the ones a rule writes have none: linkify,
+ * which runs after, skips a link's text from its end back to the first
+ * token at the link's level, so a span's end inside the link stopped it
+ * there, the text before read as outside the link, and a URL in it became
+ * a link in the link.
+ */
+function withLevels(children: Token[]): Token[] {
+  let level = 0;
+  for (const child of children) {
+    if (child.nesting === -1) level--;
+    child.level = level;
+    if (child.nesting === 1) level++;
+  }
+  return children;
+}
+
+/**
+ * An inline token's children with no element ending inside another that
+ * started after it, where either is a range's span: a span, which can end
+ * inside a tracked change, emphasis or raw HTML, as `{--b{/1} c--}` or
+ * `<sup>b{/1} c</sup>`, or start in one that ends inside it, or one
+ * reopened at the start of a paragraph or cell (see commentRangeSpansRule)
+ * that ends in one, or another range's span, as the browser would end the
+ * inner one there, so the text after it lost its formatting. The elements
+ * inside the one that ends end before it and open again after it. What
+ * counts as an element, and which start an end closes, is
+ * inlineWrapperStep's, as for a CriticMarkup paragraph break. Elements that
+ * cross with no range's span among them, as raw HTML around emphasis's end
+ * in `**a <sup>b** c</sup>`, are the author's, which the preview writes as
+ * Markdown does.
+ */
+function nestCrossedElements(children: Token[], state: StateCore): Token[] {
+  const out: Token[] = [];
+  const stack: ActiveInlineWrapper[] = [];
+  for (const child of children) {
+    out.push(child);
+    const step = inlineWrapperStep(child);
+    if (step?.kind === 'open') stack.push(step.wrapper);
+    if (step?.kind !== 'close') continue;
+    const at = closedWrapperIndex(stack, step.closes);
+    if (at === -1) continue;
+    const inside = stack.splice(at + 1);
+    stack.pop();
+    if (!isRangeSpan(child) && !inside.some(wrapper => isRangeSpan(wrapper.open))) {
+      // As written, the elements inside still open
+      stack.push(...inside);
+      continue;
+    }
+    out.pop();
+    for (const wrapper of [...inside].reverse()) out.push(closeActiveWrapper(state, wrapper));
+    out.push(child);
+    for (const wrapper of inside) {
+      const reopened = reopenActiveWrapper(state, wrapper);
+      out.push(reopened);
+      stack.push({ ...wrapper, open: reopened });
+    }
+  }
+  return out;
 }
 
 /** Inline rule that converts the paragraph placeholder back into line breaks in the token stream. */
@@ -1996,6 +2219,9 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
       tokens.splice(ci, 1, divClose);
     }
   });
+
+  // Comment ranges' spans, after the rules that split a paragraph
+  md.core.ruler.after('manuscript_custom_style_wrap', 'manuscript_markdown_comment_range_spans', commentRangeSpansRule);
 
   // Inject a hidden marker element so the preview script can apply the color scheme
   // class to alert elements (needed because VS Code's built-in GFM alert renderer

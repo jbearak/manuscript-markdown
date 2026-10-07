@@ -10,6 +10,7 @@ import {
   stripHtmlTags,
   hasNoSpecialSyntax,
   renderWithPlugin,
+  renderLikePreview,
   SIMPLE_CRITIC_TYPES,
   type CriticType,
 } from '../test-helpers';
@@ -1763,22 +1764,205 @@ describe('Comment association in preview', () => {
 
   describe('ID-based comment ranges', () => {
     it('should create comment range span with data-comment for ID-based comments', () => {
-      const output = renderWithPlugin('{#1}text{/1}{#1>>comment<<}');
+      const output = renderLikePreview('{#1}text{/1}{#1>>comment<<}');
       expect(output).toContain('manuscript-markdown-comment-range');
       expect(output).toContain('data-comment="comment"');
       expect(output).toContain('>text</span>');
     });
 
     it('should leave range markers without matching comment as empty renders', () => {
-      const output = renderWithPlugin('{#1}text{/1}');
+      const output = renderLikePreview('{#1}text{/1}');
       expect(output).not.toContain('manuscript-markdown-comment-range');
       expect(output).toContain('text');
     });
 
     it('should handle multiple ID-based ranges independently', () => {
-      const output = renderWithPlugin('{#a}alpha{/a}{#b}beta{/b}{#a>>note-a<<}{#b>>note-b<<}');
+      const output = renderLikePreview('{#a}alpha{/a}{#b}beta{/b}{#a>>note-a<<}{#b>>note-b<<}');
       expect(output).toContain('data-comment="note-a"');
       expect(output).toContain('data-comment="note-b"');
+    });
+
+    // The browser closes a span its cell or paragraph closes, so the cells or
+    // paragraphs after it lost the highlight
+    const range = (text: string, comment: string) => '<span class="manuscript-markdown-comment-range" data-comment="' + comment + '">' + text + '</span>';
+    it.each([
+      ['table cells', '| a | b |\n| --- | --- |\n| {#1}c | d{/1} |\n\n{#1>>note<<}', ['<td>' + range('c', 'note') + '</td>', '<td>' + range('d', 'note') + '</td>']],
+      ['paragraphs', '{#1}a\n\nb\n\nc{/1}{#1>>note<<}', ['<p>' + range('a', 'note') + '</p>', '<p>' + range('b', 'note') + '</p>', '<p>' + range('c', 'note') + '</p>']],
+      ['paragraphs and cells', 'a {#1}b\n\n| c | d |\n| --- | --- |\n| e | f{/1} g |\n\n{#1>>note<<}', ['<p>a ' + range('b', 'note') + '</p>', '<th>' + range('c', 'note') + '</th>', '<td>' + range('f', 'note') + ' g</td>']],
+    ])('should write a span in each of the %s a range covers', (_, markdown, parts) => {
+      const output = renderLikePreview(markdown);
+      for (const part of parts) expect(output).toContain(part);
+      // As many spans open as close, past those every render writes
+      const count = (html: string, text: string) => html.split(text).length - 1;
+      expect(count(output, '<span') - count(output, '</span>')).toBe(count(renderLikePreview('x'), '<span') - count(renderLikePreview('x'), '</span>'));
+    });
+
+    it('should end a range with no end after its paragraph at its paragraph', () => {
+      const output = renderLikePreview('{#1}a\n\nb\n\n{#1>>note<<}');
+      expect(output).toContain('<p>' + range('a', 'note') + '</p>');
+      expect(output).toContain('<p>b</p>');
+    });
+
+    /** Whether no element of the HTML ends inside another that started after it */
+    const nested = (html: string) => {
+      const open: string[] = [];
+      for (const [, closing, tag] of html.matchAll(/<(\/?)(span|del|ins|mark|em|strong|a|p|td|th|sup)\b[^>]*>/g)) {
+        if (!closing) open.push(tag);
+        else if (open.pop() !== tag) return false;
+      }
+      return open.length === 0;
+    };
+    const DEL = '<del class="manuscript-markdown-deletion">';
+    it.each([
+      ['ends in a tracked change in the paragraph after the one it started in', '{#1}a\n\n{--b{/1} c--}\n\n{#1>>note<<}',
+        '<p>' + range(DEL + 'b</del>', 'note') + DEL + ' c</del></p>'],
+      ['starts in a tracked change that ends inside it', '{--a {#1}b--} c{/1}{#1>>note<<}',
+        DEL + 'a ' + range('b', 'note') + '</del>' + range(' c', 'note')],
+      ['ends inside another range that started inside it', '{#1}a {#2}b{/1} c{/2}{#1>>one<<}{#2>>two<<}',
+        range('a ' + range('b', 'two'), 'one') + range(' c', 'two')],
+      ['ends in emphasis in a table\'s cell after the one it started in', '| a | b |\n| --- | --- |\n| {#1}c | **d{/1} e** |\n\n{#1>>note<<}',
+        '<td>' + range('<strong>d</strong>', 'note') + '<strong> e</strong></td>'],
+      ['ends in raw HTML in the paragraph after the one it started in', '{#1}a\n\n<sup>b{/1} c</sup>{#1>>note<<}',
+        '<p>' + range('<sup>b</sup>', 'note') + '<sup> c</sup></p>'],
+      ['ends in raw HTML in the paragraph it started in', '{#1}a <sup>b{/1} c</sup>{#1>>note<<}',
+        '<p>' + range('a <sup>b</sup>', 'note') + '<sup> c</sup></p>'],
+      ['starts in raw HTML that ends inside it', '<sup>a {#1}b</sup> c{/1}{#1>>note<<}',
+        '<p><sup>a ' + range('b', 'note') + '</sup>' + range(' c', 'note') + '</p>'],
+    ])('should nest the elements a range crosses where it %s', (_, markdown, part) => {
+      // The browser ended the element the span started outside of with the
+      // span, so the text after it lost its formatting
+      const output = renderLikePreview(markdown);
+      expect(output).toContain(part);
+      expect(nested(output)).toBe(true);
+    });
+
+    it.each([
+      ['an alert', '{#1}a\n\n> [!NOTE]\n> b{/1}\n\n{#1>>note<<}', 'markdown-alert-note', '[!NOTE]', '<p>' + range('\nb', 'note') + '</p>'],
+      ['a task item', '{#1}a\n\n- [ ] b{/1}\n\n{#1>>note<<}', 'task-list-item-checkbox', '[ ]', ' ' + range('b', 'note') + '</li>'],
+    ])('should keep the marker of %s a range goes on into', (_, markdown, kept, marker, part) => {
+      // The span opened again before the marker kept it from being read
+      const output = renderLikePreview(markdown);
+      expect(output).toContain(kept);
+      expect(output).not.toContain(marker);
+      expect(output).toContain(part);
+    });
+
+    it('should leave raw HTML that crosses emphasis, with no range, as it\'s written', () => {
+      // As Markdown writes it, which the browser reads as it would anywhere
+      expect(renderLikePreview('**a <sup>b** c</sup>')).toContain('<p><strong>a <sup>b</strong> c</sup></p>');
+      expect(renderLikePreview('<sup>a **b</sup> c**')).toContain('<p><sup>a <strong>b</sup> c</strong></p>');
+    });
+
+    it('should close and open again raw HTML a tracked change\'s paragraph break comes inside, around emphasis it crosses', () => {
+      // The end of the emphasis took the raw HTML's start off the open
+      // elements, so the break closed the emphasis again and not the HTML
+      const output = renderLikePreview('{++**a <sup>b** c\n\nd</sup>++}');
+      expect(output).toContain('<p><ins class="manuscript-markdown-addition"><strong>a <sup>b</strong> c</sup></ins></p>');
+      expect(output).toContain('<p><ins class="manuscript-markdown-addition"><sup>d</sup></ins></p>');
+    });
+
+    it.each([
+      ['alerts of a quote, with no blank line between them,', '{#1}a\n\n> [!NOTE]\n> b\n> [!TIP]\n> c{/1}\n\n{#1>>note<<}',
+        ['<p>' + range('\nb', 'note') + '</p></blockquote>', '<p>' + range('\nc', 'note') + '</p></blockquote>']],
+      ['paragraphs of a tracked change', '{#1}a {++b\n\nc++} d{/1}{#1>>note<<}',
+        ['<p>' + range('a <ins class="manuscript-markdown-addition">b</ins>', 'note') + '</p>', '<p>' + range('<ins class="manuscript-markdown-addition">c</ins> d', 'note') + '</p>']],
+    ])('should write a span in each of the %s that a range goes on into', (_, markdown, parts) => {
+      // The span opened again before the alerts' quote was split read as text
+      // before the first alert, in a quote of its own, and the alerts'
+      // paragraphs had none
+      const output = renderLikePreview(markdown);
+      for (const part of parts) expect(output).toContain(part);
+      expect(output).not.toContain('<blockquote><p>');
+      expect(nested(output)).toBe(true);
+    });
+
+    it('should take a range\'s marker in a comment\'s body as its text', () => {
+      // The body's {/1} ended the range, and the real end, with no span open,
+      // wrote nothing, so the span had no end
+      const output = renderLikePreview('{#1}a {#1>>use {/1} to close the range<<} b{/1}');
+      expect(output).toContain('<p>' + range('a  b', 'use {/1} to close the range') + '</p>');
+    });
+
+    it('should write nothing for a range end with no span open', () => {
+      const output = renderLikePreview('{#1}a{/1}\n\nb{/1}{#1>>note<<}');
+      expect(output).toContain('<p>' + range('a', 'note') + '</p>');
+      expect(output).toContain('<p>b</p>');
+    });
+
+    it('should leave a URL a range covers in a link\'s text as text, with linkify on, as the preview has it', () => {
+      // The range's span had no level, so linkify took the text in it for
+      // text outside the link and linked the URL, a link in a link (see
+      // renderLikePreview)
+      const output = renderLikePreview('[a {#1}example.org{/1}](https://host.test){#1>>note<<}');
+      expect(output).toContain('<p><a href="https://host.test">a ' + range('example.org', 'note') + '</a></p>');
+      expect(output).not.toContain('http://example.org');
+    });
+
+    const INS = '<ins class="manuscript-markdown-addition">';
+    it.each([
+      ['end', '{++{#1}a\n\nb\n\n{/1}++}{#1>>note<<}', ['<p>' + INS + range('a', 'note') + '</ins>', '<p>' + range(INS + 'b</ins>', 'note') + '</p>']],
+      ['start', '{++a\n\n{#1}\n\nb{/1}++}{#1>>note<<}', ['<p>' + INS + 'a</ins></p>', '<p>' + INS + range('b', 'note') + '</ins></p>']],
+    ])('should keep a range\'s %s in a tracked change\'s paragraph of its own', (_, markdown, parts) => {
+      // The paragraph, which shows nothing, was left out with the marker, so
+      // the range ended with the paragraph it started in, or had no span
+      const output = renderLikePreview(markdown);
+      for (const part of parts) expect(output).toContain(part);
+      expect(nested(output)).toBe(true);
+    });
+
+    /** The text each range's spans cover in the HTML, by its comment, with no whitespace */
+    const highlighted = (html: string) => {
+      const covered = new Map<string, string>();
+      const open: (string | undefined)[] = [];
+      for (const [, closing, tag, attributes, text] of html.matchAll(/<(\/?)([a-z]+)\b([^>]*)>|([^<]+)/g)) {
+        if (text !== undefined) {
+          for (const comment of new Set(open)) if (comment !== undefined) covered.set(comment, (covered.get(comment) ?? '') + text.replace(/\s/g, ''));
+        } else if (closing) {
+          open.pop();
+        } else if (!/\/$/.test(attributes) && !['br', 'hr', 'img', 'input'].includes(tag)) {
+          open.push(/manuscript-markdown-comment-range/.test(attributes) ? /data-comment="([^"]*)"/.exec(attributes)?.[1] : undefined);
+        }
+      }
+      return covered;
+    };
+    it('should cover the text between a range\'s markers in a tracked change\'s paragraphs, wherever its blank lines put them', () => {
+      // A paragraph of a tracked change with nothing but a range's marker was
+      // left out with it, so the range lost its end or its start
+      const part = fc.oneof(
+        fc.constantFrom('\n\n', '\n\n\n', ' '),
+        fc.constantFrom(...'abcdefgh'.split('')),
+      );
+      fc.assert(fc.property(
+        fc.constantFrom('++', '--'),
+        fc.array(part, { minLength: 1, maxLength: 8 }).map(parts => ['x '].concat(parts, [' y'])),
+        fc.array(fc.nat(), { minLength: 4, maxLength: 4 }),
+        (kind, parts, at) => {
+          // Each range's start and end among the parts, after the first, the
+          // text before the tracked change, and before the last, after it
+          const slots = parts.length - 1;
+          const ranges = [1, 2].map(id => {
+            const [start, end] = [at[id * 2 - 2] % slots, at[id * 2 - 1] % slots].sort((one, other) => one - other);
+            return { id, start: start + 1, end: end + 1 };
+          });
+          let markdown = '';
+          const expected = new Map<string, string>();
+          for (let index = 0; index < parts.length; index++) {
+            for (const range of ranges) if (range.end === index && range.start < index) markdown += '{/' + range.id + '}';
+            for (const range of ranges) if (range.start === index) markdown += '{#' + range.id + '}' + (range.end === index ? '{/' + range.id + '}' : '');
+            if (index === 1) markdown += '{' + kind;
+            markdown += parts[index];
+            if (index === parts.length - 2) markdown += kind + '}';
+            for (const range of ranges) {
+              if (index >= range.start && index < range.end) expected.set('n' + range.id, (expected.get('n' + range.id) ?? '') + parts[index].replace(/\s/g, ''));
+            }
+          }
+          markdown += '{#1>>n1<<}{#2>>n2<<}';
+          const covered = highlighted(renderLikePreview(markdown));
+          for (const range of ranges) {
+            expect([markdown, covered.get('n' + range.id) ?? '']).toEqual([markdown, expected.get('n' + range.id) ?? '']);
+          }
+        },
+      ), { numRuns: 300 });
     });
   });
 
