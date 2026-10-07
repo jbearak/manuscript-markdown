@@ -15568,6 +15568,61 @@ describe('An & in a tracked change', () => {
   });
 });
 
+describe('Link targets with characters Markdown reads as syntax', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+  const xmlAttr = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const fromXmlAttr = (text: string) => text.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+  /** The Markdown import writes for a link Word has to `target`, the target
+   *  export gives Word for that Markdown, and the Markdown of that */
+  const roundTrip = async (target: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('See [site](https://e.com/z) now.')).docx);
+    const rels = await zip.file('word/_rels/document.xml.rels')!.async('string');
+    expect(rels).toContain('Target="https://e.com/z"');
+    zip.file('word/_rels/document.xml.rels', rels.replace('Target="https://e.com/z"', 'Target="' + xmlAttr(target) + '"'));
+    const first = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    const { docx } = await convertMdToDocx(first);
+    const exported = await (await JSZip.loadAsync(docx)).file('word/_rels/document.xml.rels')!.async('string');
+    const exportedTarget = /Type="[^"]*\/hyperlink" Target="([^"]*)"/.exec(exported)?.[1];
+    return { first, target: exportedTarget === undefined ? undefined : fromXmlAttr(exportedTarget), again: strip((await convertDocx(docx)).markdown) };
+  };
+
+  test.each([
+    ['a UNC path, whose \\ escapes the one after it', '\\\\server\\share\\a.docx', '[site](\\\\\\server\\share\\a.docx)'],
+    ['a \\ at its end, which escapes the )', 'https://e.com/a\\', '[site](https://e.com/a\\\\)'],
+    ['a \\ before a parenthesis', 'https://e.com/a\\(b', '[site](<https://e.com/a\\\\(b>)'],
+    ['a named character reference', 'https://e.com/?a=1&amp;b=2', '[site](https://e.com/?a=1\\&amp;b=2)'],
+    ['a numeric character reference', 'https://e.com/&#38;x', '[site](https://e.com/\\&#38;x)'],
+    ['a numeric character reference of eight digits', 'https://e.com/&#00000038;x', '[site](https://e.com/\\&#00000038;x)'],
+    ['a hexadecimal character reference of eight digits', 'https://e.com/&#x00000026;x', '[site](https://e.com/\\&#x00000026;x)'],
+    ['a < at its start', '<x>', '[site](<\\<x\\>>)'],
+    ['a < where a space puts it in <>', 'https://e.com/a b<c', '[site](<https://e.com/a b\\<c>)'],
+  ])('keeps %s', async (_name, target, link) => {
+    const result = await roundTrip(target);
+    expect(result.first).toBe('See ' + link + ' now.\n');
+    // Export's markdown-it encodes the characters a URL can't hold, as it does
+    // any URL's, which is the same address
+    expect(result.target === undefined ? undefined : decodeURIComponent(result.target)).toBe(target);
+  });
+
+  test.each([
+    'https://e.com/?a=1&amp;b=2',
+    'https://e.com/&#38;x',
+    'https://e.com/&#00000038;x',
+    'https://e.com/&#x00000026;x',
+  ])('reads back a link to %j as it wrote it', async (target) => {
+    const result = await roundTrip(target);
+    expect(result.again).toBe(result.first);
+  });
+
+  test.each([
+    ['a \\ before a letter', 'https://e.com/a\\b', '[site](https://e.com/a\\b)'],
+    ['an & that starts no reference', 'https://e.com/a&b', '[site](https://e.com/a&b)'],
+    ['a < after its start', 'https://e.com/a<b', '[site](https://e.com/a<b)'],
+  ])('writes a target with %s as it is', async (_name, target, link) => {
+    expect((await roundTrip(target)).first).toBe('See ' + link + ' now.\n');
+  });
+});
+
 describe('Links of more than one run', () => {
   const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
   // The line breaks of a document's body that are in no hyperlink
