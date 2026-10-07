@@ -4352,6 +4352,48 @@ function unembeddedImageMarkdown(markdown: string): string {
   return markdown.endsWith('\u200B') ? markdown.slice(0, -1) : markdown;
 }
 
+/** A hyperlink's target: its address, with `location`, a place in what the
+ *  address is of, as its fragment, as a w:hyperlink's w:anchor or a HYPERLINK
+ *  field's \l gives one. Undefined with no address, for a link to a bookmark
+ *  in the document alone, whose text import keeps as text. */
+function hyperlinkTarget(address: string | undefined, location: string): string | undefined {
+  return address && location && !address.includes('#') ? address + '#' + location : address || undefined;
+}
+
+/** The switches of a HYPERLINK field that take the argument after them:
+ *  its own \l, a location, \o, a tip, and \t, a frame, and the general
+ *  switches every field may have, \* for a format, \# for a number's and \@
+ *  for a date's. Its \m, \n and \h, and the general \!, take none. */
+const FIELD_SWITCHES_WITH_ARGUMENT = new Set(['l', 'o', 't', '*', '#', '@']);
+
+/** The target of a HYPERLINK field, from its instruction, as hyperlinkTarget
+ *  gives one, or undefined for any other field. Its address is its first
+ *  argument that no switch takes. A switch is a \ and the character after it,
+ *  outside quotes, but for a \\, which is a backslash, as Word writes one in
+ *  an argument, quoted or not, as `C:\\Docs` or `\\\\server`. In quotes, a \
+ *  escapes the character after it, and out of them, a \ or a ". */
+function hyperlinkFieldTarget(instruction: string): string | undefined {
+  // Each argument, and whether it's quoted, and each switch
+  const tokens: Array<{ switchName: string } | { text: string; quoted: boolean }> = [...instruction.matchAll(/"((?:[^"\\]|\\.)*)"?|\\([^\s\\])|((?:[^\s"\\]|\\\\)(?:[^\s"\\]|\\[^\s])*\\?)/g)].map(match =>
+    match[2] !== undefined ? { switchName: match[2].toLowerCase() }
+      : match[1] !== undefined ? { text: match[1].replace(/\\(.)/g, '$1'), quoted: true }
+        : { text: (match[3] ?? '').replace(/\\([\\"])/g, '$1'), quoted: false });
+  const [name] = tokens;
+  if (!name || !('text' in name) || name.quoted || name.text.toUpperCase() !== 'HYPERLINK') return undefined;
+  let address: string | undefined;
+  let location = '';
+  for (let k = 1; k < tokens.length; k++) {
+    const token = tokens[k];
+    const argument = tokens[k + 1];
+    if ('text' in token) address ??= token.text;
+    else if (FIELD_SWITCHES_WITH_ARGUMENT.has(token.switchName) && argument && 'text' in argument) {
+      if (token.switchName === 'l') location = argument.text;
+      k++;
+    }
+  }
+  return hyperlinkTarget(address, location);
+}
+
 const FIELD_RUN_KEYS = new Set([':@', 'w:rPr', 'w:fldChar', 'w:instrText', 'w:delInstrText', 'w:lastRenderedPageBreak']);
 
 /** The mark readHiddenRun leaves for hidden text in a run with a field's
@@ -4411,7 +4453,8 @@ function parseNoteBody(
   // citation's or cross-reference's result, which end with the field
   const resultEnds: string[] = [];
   // As in extractDocumentContent: a NOTEREF field's note, which its number
-  // shows, and the instruction of a deleted field, read only for that
+  // shows, and the instruction of a deleted field, read only for that and
+  // for a HYPERLINK field
   let noterefInfo: { noteId: string; noteKind: 'footnote' | 'endnote' } | undefined;
   // Its number, which the reference stands for: whether any of it shows,
   // whether any of it is hidden, and the revisions its runs are in, where
@@ -4425,6 +4468,10 @@ function parseNoteBody(
   // Each w:hyperlink's number, which its text keeps
   let currentLink = 0;
   let linkCount = 0;
+  // The HYPERLINK fields whose results the walk is in, each with how many
+  // fields deep it is and the link outside it, which its end gives back
+  const linkFields: Array<{ depth: number; href: string | undefined; link: number }> = [];
+  let fieldDepth = 0;
   // As in extractDocumentContent: a tracked paragraph mark, for breakRevision
   let trackedParaMark: { revision: RevisionInfo; target: ContentItem[]; end: number } | undefined;
   // As in extractDocumentContent: the comments whose ranges are open, but
@@ -4483,6 +4530,7 @@ function parseNoteBody(
             // A field with no end, whose result's comments end
             for (const id of resultEnds.splice(0)) endComment(id, target);
             inField = true;
+            fieldDepth++;
             fieldShows.begin();
             fieldInstrParts = [];
             deletedInstrParts = [];
@@ -4493,7 +4541,13 @@ function parseNoteBody(
           } else if (fldType === 'separate') {
             if (inField) {
               const instrText = fieldInstrParts.join('');
-              if (instrText.includes('ZOTERO_ITEM')) {
+              const linkTarget = hyperlinkFieldTarget(instrText || deletedInstrParts.join(''));
+              if (linkTarget !== undefined) {
+                // Its result is a link, as a w:hyperlink's runs are
+                linkFields.push({ depth: fieldDepth, href: currentHref, link: currentLink });
+                currentHref = linkTarget;
+                currentLink = ++linkCount;
+              } else if (instrText.includes('ZOTERO_ITEM')) {
                 inCitationField = true;
                 currentCitation = context.zoteroCitations[cCounter.idx++];
                 citationTextParts = [];
@@ -4504,6 +4558,8 @@ function parseNoteBody(
               }
             }
           } else if (fldType === 'end') {
+            if (linkFields[linkFields.length - 1]?.depth === fieldDepth) ({ href: currentHref, link: currentLink } = linkFields.pop()!);
+            fieldDepth = Math.max(0, fieldDepth - 1);
             // Not where Word shows nothing of its number, all hidden
             if (noterefInfo && fieldShows.shows() && (noterefNumber.shown || !noterefNumber.hidden)) {
               const [first, ...rest] = noterefNumber.revisions;
@@ -4546,11 +4602,13 @@ function parseNoteBody(
           }
 
         // --- Hyperlinks ---
-        } else if (key === 'w:hyperlink' && context) {
+        } else if ((key === 'w:hyperlink' || key === 'w:fldSimple' && hyperlinkFieldTarget(getAttr(node, 'instr')) !== undefined) && context) {
+          // A w:hyperlink, or a HYPERLINK field Word wrote whole, whose runs are its result
           const rId = node?.[':@']?.['@_r:id'] ?? getAttr(node, 'id');
           const prevHref = currentHref;
           const prevLink = currentLink;
-          currentHref = context.relationshipMap.get(rId);
+          currentHref = key === 'w:fldSimple' ? hyperlinkFieldTarget(getAttr(node, 'instr'))
+            : hyperlinkTarget(context.relationshipMap.get(rId), getAttr(node, 'anchor'));
           currentLink = ++linkCount;
           if (Array.isArray(node[key])) { walkNoteBody(node[key], currentFormatting, target, inTableCell, currentRevision); }
           currentHref = prevHref;
@@ -5459,8 +5517,8 @@ export async function extractDocumentContent(
   // renderer keeps (see renderHighlightGroup)
   let fieldFormatting: RunFormatting | undefined;
   const fieldShows = fieldVisibility();
-  // A deleted field's instruction, read only for NOTEREF: zoteroCitations
-  // counts the w:instrText ones alone
+  // A deleted field's instruction, read only for NOTEREF and HYPERLINK:
+  // zoteroCitations counts the w:instrText ones alone
   let deletedInstrParts: string[] = [];
   // The comments whose ranges end in a citation's or cross-reference's
   // result, which import writes no text of, so they end with the field, on
@@ -5472,6 +5530,10 @@ export async function extractDocumentContent(
   // Each w:hyperlink's number, which its text keeps
   let currentLink = 0;
   let linkCount = 0;
+  // The HYPERLINK fields whose results the walk is in, each with how many
+  // fields deep it is and the link outside it, which its end gives back
+  const linkFields: Array<{ depth: number; href: string | undefined; link: number }> = [];
+  let fieldDepth = 0;
   let zoteroBiblData: ZoteroBiblData | undefined;
   // Set after a paragraph whose mark is tracked: where its content ended,
   // so the next paragraph's para item can record the revision as breakRevision.
@@ -5606,6 +5668,7 @@ export async function extractDocumentContent(
             // A field with no end, whose result's comments end
             for (const id of resultEnds.splice(0)) endComment(id, target);
             inField = true;
+            fieldDepth++;
             fieldShows.begin();
             fieldInstrParts = [];
             fieldFormatting = undefined;
@@ -5619,7 +5682,13 @@ export async function extractDocumentContent(
             if (inField) {
               const instrText = fieldInstrParts.join('');
               const deletedInstrText = deletedInstrParts.join('');
-              if (instrText.includes('ZOTERO_ITEM')) {
+              const linkTarget = hyperlinkFieldTarget(instrText || deletedInstrText);
+              if (linkTarget !== undefined) {
+                // Its result is a link, as a w:hyperlink's runs are
+                linkFields.push({ depth: fieldDepth, href: currentHref, link: currentLink });
+                currentHref = linkTarget;
+                currentLink = ++linkCount;
+              } else if (instrText.includes('ZOTERO_ITEM')) {
                 inCitationField = true;
                 currentCitation = zoteroCitations[citationIdx++];
                 citationTextParts = [];
@@ -5647,6 +5716,8 @@ export async function extractDocumentContent(
               }
             }
           } else if (fldType === 'end') {
+            if (linkFields[linkFields.length - 1]?.depth === fieldDepth) ({ href: currentHref, link: currentLink } = linkFields.pop()!);
+            fieldDepth = Math.max(0, fieldDepth - 1);
             const shows = fieldShows.shows();
             // Not where Word shows nothing of its number, all hidden, and in
             // the revision its number is in, where the field's end isn't
@@ -5715,11 +5786,13 @@ export async function extractDocumentContent(
           if (noteId && noteId !== '0' && noteId !== '-1') {
             target.push({ type: 'footnote_ref', noteId, noteKind: 'endnote', commentIds: new Set(activeComments), ...(currentRevision ? { revision: currentRevision } : {}), ...highlightOnly(currentFormatting) });
           }
-        } else if (key === 'w:hyperlink') {
+        } else if (key === 'w:hyperlink' || key === 'w:fldSimple' && hyperlinkFieldTarget(getAttr(node, 'instr')) !== undefined) {
+          // A w:hyperlink, or a HYPERLINK field Word wrote whole, whose runs are its result
           const rId = node?.[':@']?.['@_r:id'] ?? getAttr(node, 'id');
           const prevHref = currentHref;
           const prevLink = currentLink;
-          currentHref = relationshipMap.get(rId);
+          currentHref = key === 'w:fldSimple' ? hyperlinkFieldTarget(getAttr(node, 'instr'))
+            : hyperlinkTarget(relationshipMap.get(rId), getAttr(node, 'anchor'));
           currentLink = ++linkCount;
           if (Array.isArray(node[key])) { walk(node[key], currentFormatting, target, inTableCell, currentRevision); }
           currentHref = prevHref;
