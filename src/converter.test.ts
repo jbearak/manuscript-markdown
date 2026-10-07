@@ -6260,6 +6260,42 @@ describe('Comments in notes', () => {
   });
 });
 
+describe('Comments on a field\'s result', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+  const bibtex = '@article{smith2020,\n  author = {Smith, Jane},\n  title = {T},\n  journal = {J},\n  year = {2020},\n}';
+  const C = '{>>@Ann (2024-02-01 09:00) | note<<}';
+  const fields = [
+    ['a citation', 'A {==[@smith2020]==}' + C + ' b.\n', 'word/document.xml'],
+    ['a citation in a note', 'T.[^1]\n\n[^1]: A {==[@smith2020]==}' + C + ' b.\n', 'word/footnotes.xml'],
+    ['a cross-reference to a note', 'T[^1] U{==[^1]==}' + C + ' b.\n\n[^1]: B.\n', 'word/document.xml'],
+  ] as const;
+  const ranges = [
+    ['on its result alone', true, true],
+    ['from before it to its result', false, true],
+    ['from its result on', true, false],
+  ] as const;
+
+  test.each(fields.flatMap(([field, md, part]) => ranges.map(([range, startIn, endIn]) => [range, field, md, part, startIn, endIn] as const)))(
+    'keeps a comment Word put %s on %s', async (_range, _field, md, part, startInResult, endInResult) => {
+      // A range that ended in the result, which import writes no text of,
+      // ended before the citation or reference, which lost the comment
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md, { bibtex })).docx);
+      const xml = await zip.file(part)!.async('string');
+      const separate = /<w:r>(?:(?!<\/w:r>).)*<w:fldChar w:fldCharType="separate"\/><\/w:r>/.exec(xml)![0];
+      const end = /<w:r>(?:(?!<\/w:r>).)*<w:fldChar w:fldCharType="end"\/><\/w:r>/.exec(xml)![0];
+      let edited = xml;
+      if (startInResult) edited = edited.replace('<w:commentRangeStart w:id="0"/>', '').replace(separate, separate + '<w:commentRangeStart w:id="0"/>');
+      if (endInResult) edited = edited.replace('<w:commentRangeEnd w:id="0"/>', '').replace(end, '<w:commentRangeEnd w:id="0"/>' + end);
+      expect(edited).toMatch(startInResult ? /separate"\/><\/w:r><w:commentRangeStart/ : /<w:commentRangeStart w:id="0"\/><w:r>(?:(?!<\/w:r>).)*begin/);
+      expect(edited).toMatch(endInResult ? /<w:commentRangeEnd w:id="0"\/><w:r>(?:(?!<\/w:r>).)*end"/ : /end"\/><\/w:r><w:commentRangeEnd/);
+      zip.file(part, edited);
+      const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+      expect(markdown).toBe(md);
+      const again = (await convertMdToDocx(markdown, { bibtex })).docx;
+      expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
+    });
+});
+
 describe('A comment comments.xml has no body for', () => {
   const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
   const body = (text: string, who = 'A') => '{>>@' + who + ' (2024-01-15 10:30) | ' + text + '<<}';

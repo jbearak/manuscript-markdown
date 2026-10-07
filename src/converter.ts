@@ -4025,6 +4025,9 @@ function parseNoteBody(
   let currentCitation: ZoteroCitation | undefined;
   let citationTextParts: string[] = [];
   let fieldFormatting: RunFormatting | undefined;
+  // As in extractDocumentContent: the comments whose ranges end in a
+  // citation's result, which end with the field
+  const resultEnds: string[] = [];
   const fieldShows = fieldVisibility();
   const cCounter = citationCounter ?? { idx: 0 };
   let currentHref: string | undefined;
@@ -4038,6 +4041,18 @@ function parseNoteBody(
   const activeComments = new Set<string>();
   const commentStartTargetIndex = new Map<string, { target: ContentItem[]; index: number }>();
   const hasRange = (id: string) => !context?.replyIds?.has(id) && (!context?.commentBodies || context.commentBodies.has(id));
+
+  function endComment(id: string, target: ContentItem[]): void {
+    const startInfo = commentStartTargetIndex.get(id);
+    if (startInfo?.target === target
+        && !target.slice(startInfo.index).some(item => 'commentIds' in item && item.commentIds?.has(id))) {
+      // Zero-width comment range: emit a synthetic empty text item,
+      // without formatting, which would write code's `` as text
+      target.push({ type: 'text', text: '', formatting: DEFAULT_FORMATTING, commentIds: new Set(activeComments), href: undefined });
+    }
+    commentStartTargetIndex.delete(id);
+    activeComments.delete(id);
+  }
 
   function walkNoteBody(
     nodes: XmlNode[],
@@ -4062,15 +4077,8 @@ function parseNoteBody(
         } else if (key === 'w:commentRangeEnd') {
           const id = getAttr(node, 'id');
           if (hasRange(id)) {
-            const startInfo = commentStartTargetIndex.get(id);
-            if (startInfo?.target === target
-                && !target.slice(startInfo.index).some(item => 'commentIds' in item && item.commentIds?.has(id))) {
-              // Zero-width comment range: emit a synthetic empty text item,
-              // without formatting, which would write code's `` as text
-              target.push({ type: 'text', text: '', formatting: DEFAULT_FORMATTING, commentIds: new Set(activeComments), href: undefined });
-            }
-            commentStartTargetIndex.delete(id);
-            activeComments.delete(id);
+            if (inCitationField && currentCitation) resultEnds.push(id);
+            else endComment(id, target);
           }
         } else if (key in REVISION_ELEMENTS) {
           const author = getAttr(node, 'author');
@@ -4080,6 +4088,7 @@ function parseNoteBody(
         } else if (key === 'w:fldChar' && context) {
           const fldType = getAttr(node, 'fldCharType');
           if (fldType === 'begin') {
+            for (const id of resultEnds.splice(0)) endComment(id, target);
             inField = true;
             fieldShows.begin();
             fieldInstrParts = [];
@@ -4106,6 +4115,7 @@ function parseNoteBody(
                 ...highlightOnly(fieldFormatting),
               });
             }
+            for (const id of resultEnds.splice(0)) endComment(id, target);
             inField = false;
             inCitationField = false;
             currentCitation = undefined;
@@ -4351,6 +4361,7 @@ function parseNoteBody(
   }
 
   walkNoteBody(noteChildren);
+  for (const id of resultEnds.splice(0)) endComment(id, content);
   // As in extractDocumentContent: the last paragraph's tracked mark
   if (trackedParaMark?.target === content && trackedParaMark.end === content.length) {
     content.push({ type: 'para', breakRevision: trackedParaMark.revision });
@@ -4974,6 +4985,10 @@ export async function extractDocumentContent(
   // A deleted field's instruction, read only for NOTEREF: zoteroCitations
   // counts the w:instrText ones alone
   let deletedInstrParts: string[] = [];
+  // The comments whose ranges end in a citation's or cross-reference's
+  // result, which import writes no text of, so they end with the field, on
+  // the citation or reference, rather than before it, on nothing
+  const resultEnds: string[] = [];
   let currentCitation: ZoteroCitation | undefined;
   let citationTextParts: string[] = [];
   let currentHref: string | undefined;
@@ -5017,6 +5032,28 @@ export async function extractDocumentContent(
     sectionStartIndex = target.length;
   };
 
+  function endComment(id: string, target: ContentItem[]): void {
+    // Check if any content item was created with this comment ID
+    const startInfo = commentStartTargetIndex.get(id);
+    if (startInfo && startInfo.target === target) {
+      let found = false;
+      for (let ci = startInfo.index; ci < target.length; ci++) {
+        const item = target[ci];
+        if ('commentIds' in item && item.commentIds?.has(id)) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        // Zero-width comment range: emit a synthetic empty text item,
+        // without formatting, which would write code's `` as text
+        target.push({ type: 'text', text: '', formatting: DEFAULT_FORMATTING, commentIds: new Set(activeComments), href: undefined });
+      }
+    }
+    commentStartTargetIndex.delete(id);
+    activeComments.delete(id);
+  }
+
   function walk(
     nodes: XmlNode[],
     currentFormatting: RunFormatting = DEFAULT_FORMATTING,
@@ -5031,6 +5068,8 @@ export async function extractDocumentContent(
         if (key === 'w:fldChar') {
           const fldType = getAttr(node, 'fldCharType');
           if (fldType === 'begin') {
+            // A field with no end, whose result's comments end
+            for (const id of resultEnds.splice(0)) endComment(id, target);
             inField = true;
             fieldShows.begin();
             fieldInstrParts = [];
@@ -5109,6 +5148,7 @@ export async function extractDocumentContent(
             if (inBibliographyField && shows) {
               target.push({ type: 'bibliography_marker' });
             }
+            for (const id of resultEnds.splice(0)) endComment(id, target);
             inField = false;
             inCitationField = false;
             inBibliographyField = false;
@@ -5134,25 +5174,8 @@ export async function extractDocumentContent(
         } else if (key === 'w:commentRangeEnd') {
           const id = getAttr(node, 'id');
           if (hasRange(id)) {
-            // Check if any content item was created with this comment ID
-            const startInfo = commentStartTargetIndex.get(id);
-            if (startInfo && startInfo.target === target) {
-              let found = false;
-              for (let ci = startInfo.index; ci < target.length; ci++) {
-                const item = target[ci];
-                if ('commentIds' in item && item.commentIds?.has(id)) {
-                  found = true;
-                  break;
-                }
-              }
-              if (!found) {
-                // Zero-width comment range: emit a synthetic empty text item,
-                // without formatting, which would write code's `` as text
-                target.push({ type: 'text', text: '', formatting: DEFAULT_FORMATTING, commentIds: new Set(activeComments), href: undefined });
-              }
-            }
-            commentStartTargetIndex.delete(id);
-            activeComments.delete(id);
+            if ((inCitationField && currentCitation) || (inNoterefField && noterefInfo)) resultEnds.push(id);
+            else endComment(id, target);
           }
         } else if (key === 'w:footnoteReference') {
           const noteId = getAttr(node, 'id');
@@ -5637,6 +5660,7 @@ export async function extractDocumentContent(
   }
 
   walk(parsed);
+  for (const id of resultEnds.splice(0)) endComment(id, content);
   // The last paragraph's tracked mark, which no paragraph after it takes,
   // goes on an empty one, as an empty paragraph after it would take it
   if (trackedParaMark?.target === content && trackedParaMark.end === content.length) {
