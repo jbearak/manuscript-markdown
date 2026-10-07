@@ -1316,6 +1316,7 @@
   "dependencies": {
     "@jbearak/dta-parser": "^0.1.1",
     "citeproc": "^2.4.63",
+    "entities": "^4.5.0",
     "fast-xml-parser": "^5.5.7",
     "jszip": "^3.10.1",
     "markdown-it": "^14.1.1",

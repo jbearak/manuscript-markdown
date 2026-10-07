@@ -1,61 +1,59 @@
-import { unescapeAll } from 'markdown-it/lib/common/utils.mjs';
+import { decodeHTML, decodeHTMLAttribute } from 'entities';
 
-/** A numeric character reference in HTML: its digits, decimal, or
- *  hexadecimal after an x or X, and the ; after them, which the browser
- *  reads one without too, as &#128 */
-export const HTML_NUMERIC_REFERENCE = '&#(?:[0-9]+|[xX][0-9a-fA-F]+);?';
+// HTML's character references, as the browser reads them, and so the preview
+// of an HTML block or table, by HTML's tokenizer's rules (the character
+// reference states,
+// https://html.spec.whatwg.org/multipage/parsing.html#character-reference-state),
+// which the entities package, markdown-it's, follows:
+// - A numeric one, decimal, or hexadecimal after an x or X, with its ; or
+//   without, as &#128. One from 0x80 to 0x9F is Windows-1252's character, as
+//   &#128; is €, but for the five it has none for, as &#129;, which stay as
+//   they are, and one to no character is U+FFFD, as &#0;, a surrogate or
+//   one past U+10FFFF (the numeric character reference end state).
+// - A named one, by the longest of HTML's names its letters and digits
+//   start, with its ; or, for about a hundred older names, without it, so
+//   &copy b is © b and &notit; is ¬it;, by &not (the named character
+//   reference state). In an attribute's value, a name without its ; before
+//   a letter, a digit or an = stays as it is, as a URL's query &copy=2 does.
+// Markdown reads one in its own text otherwise, as markdown-it does, by
+// CommonMark's rules, which take a name only with its ; and make U+FFFD of
+// a control character's number, as of &#128;.
 
-// The characters of Windows-1252 at 0x80 to 0x9F, which the browser reads
-// a numeric reference to one of as, as pages in that encoding meant, as
-// &#128; as €, but for the five it has none for, which stay as they are
-const WINDOWS_1252 = new Map([
-	[0x80, 0x20ac], [0x82, 0x201a], [0x83, 0x0192], [0x84, 0x201e], [0x85, 0x2026], [0x86, 0x2020], [0x87, 0x2021],
-	[0x88, 0x02c6], [0x89, 0x2030], [0x8a, 0x0160], [0x8b, 0x2039], [0x8c, 0x0152], [0x8e, 0x017d], [0x91, 0x2018],
-	[0x92, 0x2019], [0x93, 0x201c], [0x94, 0x201d], [0x95, 0x2022], [0x96, 0x2013], [0x97, 0x2014], [0x98, 0x02dc],
-	[0x99, 0x2122], [0x9a, 0x0161], [0x9b, 0x203a], [0x9c, 0x0153], [0x9e, 0x017e], [0x9f, 0x0178],
-]);
+/** A character reference in HTML, as the browser finds one: a numeric one,
+ *  with its ; or without, or an & and the letters and digits after it, and
+ *  a ; after them, which the browser reads by the longest name they start */
+export const HTML_CHARACTER_REFERENCE = '&#(?:[0-9]+|[xX][0-9a-fA-F]+);?|&[A-Za-z][A-Za-z0-9]*;?';
 
-/**
- * The character a numeric character reference in HTML is, as the browser
- * reads it, and so the preview of an HTML block or table, without allowing
- * malformed input to throw: U+FFFD for one to no character, as &#0;, a
- * surrogate or one past U+10FFFF, and Windows-1252's for one from 0x80 to
- * 0x9F, as &#128; for €. Markdown reads one in its own text otherwise, as
- * markdown-it does, which makes U+FFFD of any control character's.
- */
-export function decodeHtmlNumericReference(reference: string): string {
-	const hex = reference[2] === 'x' || reference[2] === 'X';
-	const codePoint = Number.parseInt(reference.slice(hex ? 3 : 2), hex ? 16 : 10);
-	if (!(codePoint > 0 && codePoint <= 0x10ffff) || (codePoint >= 0xd800 && codePoint <= 0xdfff)) return '\ufffd';
-	return String.fromCodePoint(WINDOWS_1252.get(codePoint) ?? codePoint);
+// A numeric reference's digits, decimal, or hexadecimal after an x or X
+const NUMERIC_DIGITS_RE = /&#(?:([0-9]+)|([xX])([0-9a-fA-F]+))/g;
+
+/** `text` with each numeric reference's digits as few as read the same, which
+ *  the entities package can take as a number, as it reads hundreds of digits
+ *  as past JavaScript's, so as no number, and throws: without its leading
+ *  zeros, which don't count, and as one just past U+10FFFF where the rest
+ *  would be past it, as the browser reads any such number as U+FFFD (the
+ *  numeric character reference end state) */
+function withBoundedNumbers(text: string): string {
+	if (!text.includes('&#')) return text;
+	return text.replace(NUMERIC_DIGITS_RE, (reference: string, decimal: string | undefined, x: string | undefined, hex: string | undefined) => {
+		const digits = (decimal ?? hex ?? '').replace(/^0+(?=.)/, '');
+		// Seven digits are fewer than the package's numbers hold, in either base
+		if (digits.length <= 7) return '&#' + (x ?? '') + digits;
+		return '&#' + (x ?? '') + (decimal === undefined ? '110000' : '1114112');
+	});
 }
 
-/** A character reference in HTML: a numeric one, or a named one, as &copy;,
- *  with its ; */
-export const HTML_CHARACTER_REFERENCE = HTML_NUMERIC_REFERENCE + '|&[A-Za-z][A-Za-z0-9]{1,31};';
-const REFERENCE_RE = new RegExp(HTML_CHARACTER_REFERENCE, 'g');
-
-/** HTML's text, or an attribute's value, with its character references read
- *  as the browser reads them, a named one by any of HTML's names, as &copy;
- *  for ©, as markdown-it reads one, in one pass, so that &#38;#128; is
- *  &#128;, as text */
+/** HTML's text with its character references read as the browser reads
+ *  them, in one pass, so that &#38;#128; is &#128;, as text */
 export function decodeHtmlCharacterReferences(text: string): string {
-	return text.replace(REFERENCE_RE, reference => reference[1] === '#' ? decodeHtmlNumericReference(reference) : unescapeAll(reference));
+	return decodeHTML(withBoundedNumbers(text));
 }
 
 /** An attribute's value with its character references read as the browser
- *  reads them there, where a named one is read only by a whole name: &notit;
- *  is ¬it; in text, as HTML reads &not, a legacy name, without its ;, but
- *  in an attribute, where a letter or digit follows that name, it stays as
- *  it is, as in src="cover&notit;.png" */
+ *  reads them there, where a name without its ; before a letter, a digit or
+ *  an = stays as it is, as in src="cover&notit;.png" or href="?a&copy=2" */
 export function decodeHtmlAttribute(value: string): string {
-	return value.replace(REFERENCE_RE, reference => {
-		if (reference[1] === '#') return decodeHtmlNumericReference(reference);
-		const decoded = unescapeAll(reference);
-		// What follows a name read in part is the rest of the reference, to its
-		// ;, which a whole one's character is only as &semi;
-		return decoded.endsWith(';') && decoded !== ';' ? reference : decoded;
-	});
+	return decodeHTMLAttribute(withBoundedNumbers(value));
 }
 
 // The whitespace besides spaces and tabs that markdown-it trims from a
