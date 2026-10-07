@@ -10,6 +10,7 @@ import {
   PARA_PLACEHOLDER,
   LINE_PLACEHOLDER,
   criticBreaksEndLinks,
+  criticBreaksInRawHtml,
   findMatchingClose,
   hasCriticBreak,
   iterateCriticBreaks,
@@ -1761,6 +1762,7 @@ export function manuscriptMarkdownPlugin(md: ManuscriptMarkdownIt): void {
   md.use(imagePathsWithSpaces);
   md.use(codeSpansOfSpaces);
   md.use(criticBreaksEndLinks);
+  md.use(criticBreaksInRawHtml);
   // Standalone markdown-it consumers (including unit tests) do not load VS
   // Code's math extension. Keep CriticMarkup-in-math output readable there;
   // VS Code's KaTeX renderer wins when it is already registered or loads later.

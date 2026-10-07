@@ -773,7 +773,8 @@ export function parseAuthors(authorString: string): CiteprocName[] {
 function parseLocator(locator: string): { locator: string; label: string } {
   const trimmed = locator.trim();
   if (trimmed.startsWith('p.') || trimmed.startsWith('pp.')) {
-    const pageMatch = trimmed.match(/^pp?\.\s*(.+)$/);
+    // Over a line break too, after which the page's text goes on
+    const pageMatch = trimmed.match(/^pp?\.\s*([\s\S]+)$/);
     if (pageMatch) {
       return { locator: pageMatch[1], label: 'page' };
     }

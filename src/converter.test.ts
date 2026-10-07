@@ -11637,6 +11637,93 @@ describe('Inline code round-trip', () => {
 // Track changes (CriticMarkup)
 // ---------------------------------------------------------------------------
 
+describe('CriticMarkup over a line break in raw inline HTML', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+
+  test.each([
+    ['an insertion in a comment', 'z <!-- {++x\ny++} -->\n'],
+    ['a deletion in a comment', 'z <!-- {--x\ny--} -->\n'],
+    ['a substitution in a comment', 'z <!-- {~~x\ny~>w~~} -->\n'],
+    ['a highlight in a comment', 'z <!-- {==x\ny==} -->\n'],
+    ['a comment in a comment', 'z <!-- {>>x\ny<<} -->\n'],
+    ['a comment\'s body in a comment', 'z <!-- {#1>>x\ny<<} -->\n'],
+    ['a paragraph break in a comment', 'z <!-- {++x\n\ny++} -->\n'],
+    ['an insertion after a line in a comment', 'z <!-- a\n{++x\ny++} -->\n'],
+    ['insertions in two comments', 'z <!-- {++x\ny++} --> w <!-- {--p\nq--} -->\n'],
+    ['an insertion in a comment in a list item', '- z <!-- {++x\ny++} -->\n'],
+    ['an insertion in a comment in a quote', '> z <!-- {++x\n> y++} -->\n'],
+    ['an insertion in a comment in a heading', '# h <!-- {++x\ny++} -->\n'],
+    ['an insertion in a tag\'s attribute', 'z <span title="{++x\ny++}">q</span>\n'],
+  ])('keeps the line break of %s', async (_name, md) => {
+    // Export read it as the placeholder the CriticMarkup's line breaks
+    // were written as before markdown-it read the text, which went in the
+    // hidden run, and import wrote it out as text
+    const { docx } = await convertMdToDocx(md);
+    expect(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).not.toContain('\uE000');
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('keeps the line break of an insertion in a comment in a note', async () => {
+    const md = 'a[^1]\n\n[^1]: z <!-- {++x\n    y++} -->\n';
+    const { docx } = await convertMdToDocx(md);
+    expect(await (await JSZip.loadAsync(docx)).file('word/footnotes.xml')!.async('string')).not.toContain('\uE000');
+    // On the lines after the definition's, as import writes a note whose
+    // first paragraph is over more than one line
+    const once = await roundTrip(md);
+    expect(once).toBe('a[^1]\n\n[^1]:\n\n    z <!-- {++x\n    y++} -->\n');
+    expect(await roundTrip(once)).toBe(once);
+  });
+});
+
+describe('CriticMarkup over a line break in source export keeps as it is', () => {
+  const roundTrip = async (md: string, bibtex?: string) =>
+    (await convertDocx((await convertMdToDocx(md, bibtex ? { bibtex } : undefined)).docx)).markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+  const bibtex = '@article{smith2020,\n  author = {Smith, Jane},\n  title = {T},\n  journal = {J},\n  year = {2020},\n}';
+
+  test.each([
+    ['the alt text of an image export can\'t embed', '![a {++x\ny++}](missing.png)\n'],
+    ['the alt text of an image with attributes', '![a {--x\ny--}](missing.png){width=10}\n'],
+    ['a citation\'s locator', 'A [@smith2020, p. {++1\n2++}] b.\n'],
+  ])('keeps the line break of CriticMarkup in %s', async (_name, md) => {
+    // Export took the source with the placeholders written for the line
+    // breaks in it, which went in Word, and import wrote them out
+    const { docx } = await convertMdToDocx(md, { bibtex });
+    expect(await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string')).not.toContain('\uE000');
+    expect(await roundTrip(md, bibtex)).toBe(md);
+  });
+});
+
+describe('CriticMarkup over a line break in a link\'s destination', () => {
+  const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+
+  test.each([
+    ['in angle brackets', '[a](<u{++x\ny++}>)\n', '\\[a](<u{++x y++}>)\n'],
+    ['of a reference', '[a][r]\n\n[r]: u{++x\ny++}\n', '\\[a][r]\n\n\\[r]: u{++x y++}\n'],
+    ['of an autolink', 'z <http://e.com/{++x\ny++}>\n', 'z <http://e.com/{++x y++}>\n'],
+    ['of an image', '![a](p{++x\ny++}.png)\n', '!\\[a](p{++x y++}.png)\n'],
+  ])('reads a destination %s with it as text, as Markdown reads one with a line end', async (_name, md, expected) => {
+    // Read as a link to a URL with the placeholder the line break was
+    // written as in it, which went to Word, and import wrote out
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    for (const part of ['word/document.xml', 'word/_rels/document.xml.rels']) {
+      const xml = await zip.file(part)!.async('string');
+      expect(xml).not.toContain('\uE000');
+      expect(xml).not.toContain('%EE%80%80');
+    }
+    const once = await roundTrip(md);
+    expect(once).toBe(expected);
+    expect(await roundTrip(once)).toBe(once);
+  });
+
+  test('keeps a link to a URL with the private-use character a placeholder starts with', async () => {
+    // Read as text, as one with a placeholder in it
+    const md = '[a](doc%EE%80%80.md)\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    expect(await zip.file('word/_rels/document.xml.rels')!.async('string')).toContain('Target="doc%EE%80%80.md"');
+    expect(await roundTrip(md)).toBe(md);
+  });
+});
+
 describe('Track changes (CriticMarkup)', () => {
   const AUTHOR = 'Test Author';
   const DATE = '2024-01-15T10:30:00Z';

@@ -700,6 +700,41 @@ describe('GFM behavior in preview plugin', () => {
   });
 
   it.each([
+    ['a comment', 'z <!-- {++x\ny++} -->', 'z <!-- {++x\ny++} -->'],
+    ['a comment, with a paragraph break', 'z <!-- {--x\n\ny--} -->', 'z <!-- {--x\n\ny--} -->'],
+    ['a tag\'s attribute', 'z <span title="{++x\ny++}">q</span>', '<span title="{++x\ny++}">'],
+    ['a link\'s title', '[a](u "t {++x\ny++}")', '<a href="u" title="t {++x\ny++}">'],
+    ['an image\'s title', '![a](p.png "t {++x\ny++}")', 'title="t {++x\ny++}"'],
+  ])('writes the line break of CriticMarkup in %s, not its placeholder', (_name, md, html) => {
+    // Raw HTML kept the placeholder the line break was written as before
+    // markdown-it read the text
+    const output = renderWithPlugin(md);
+    expect(output).toContain(html);
+    expect(output).not.toContain('\uE000');
+  });
+
+  it.each([
+    ['a link', 'encoded', '[a](doc%EE%80%80.md)', '<a href="doc%EE%80%80.md">a</a>'],
+    ['a link', 'as it is', '[a](doc\uE000.md)', '<a href="doc%EE%80%80.md">a</a>'],
+    ['an image', 'encoded', '![a](p%EE%80%80.png)', 'src="p%EE%80%80.png"'],
+    ['an autolink', 'encoded', 'z <http://e.com/%EE%80%80>', '<a href="http://e.com/%EE%80%80">'],
+  ])('keeps %s whose URL holds the private-use character a placeholder starts with, %s', (_name, _form, md, html) => {
+    // Read as text, as one with a placeholder in it
+    expect(renderWithPlugin(md)).toContain(html);
+  });
+
+  it.each([
+    ['in angle brackets', '[a](<u{++x\ny++}>)'],
+    ['of an autolink', 'z <http://e.com/{++x\ny++}>'],
+  ])('reads a link\'s destination with CriticMarkup over a line break %s as text', (_name, md) => {
+    // As a link to a URL with the placeholder the line break was written as
+    const output = renderWithPlugin(md);
+    expect(output).not.toContain('%EE%80%80');
+    expect(output).not.toContain('\uE000');
+    expect(output).toContain('<ins');
+  });
+
+  it.each([
     ['- `[ ] a`', '<code>[ ] a</code>'], ['- **[ ] a**', '<strong>[ ] a</strong>'], ['- [[ ] a](https://e.com)', '>[ ] a</a>'],
     ['> **[!NOTE]**', '<strong>[!NOTE]</strong>'], ['> a\n> **[!TIP]**', '<strong>[!TIP]</strong>'],
     ['- first\n\n  [ ] second', '[ ] second'],

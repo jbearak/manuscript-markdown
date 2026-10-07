@@ -1,4 +1,5 @@
 import type MarkdownIt from 'markdown-it';
+import type Token from 'markdown-it/lib/token.mjs';
 import { type CodeRegion, computeMarkdownRegions, isInsideCodeRegion, mergeRegions } from './code-regions';
 import { computeDollarMathRegions, isEscapedAt } from './math-delimiters';
 
@@ -13,8 +14,11 @@ const CRITIC_BREAK_PLACEHOLDER_RE = new RegExp(CRITIC_BREAK_SENTINEL + '(?:PARA|
 /** End a link linkify finds at a break preprocessCriticMarkup wrote as a
  * placeholder, as at the line end it stands for. Its letters, as any but a
  * space, went on a URL before it, so https://e.com{++a, a line break and
- * b++} took the markup in. Preview and Word export must install the same
- * rule. */
+ * b++} took the markup in. Nor is a destination or an autolink with one in
+ * it a link's, as with the line end, which none holds, where markdown-it
+ * read [a](<u{++x, a line break and y++}>) as a link to a URL with the
+ * placeholder in it. A title, which may go over a line end, has the line
+ * end back. Preview and Word export must install the same rule. */
 export function criticBreaksEndLinks(md: MarkdownIt): void {
   const linkify = md.linkify;
   const spaced = (text: string) => text.includes(CRITIC_BREAK_SENTINEL)
@@ -24,6 +28,36 @@ export function criticBreaksEndLinks(md: MarkdownIt): void {
   linkify.test = text => test.call(linkify, spaced(text));
   linkify.match = text => match.call(linkify, spaced(text));
   linkify.matchAtStart = text => matchAtStart.call(linkify, spaced(text));
+  // A placeholder, as it is or as normalizeLink encodes it before
+  // validateLink reads it, but not the sentinel alone, which a URL may hold
+  const placeholderIn = new RegExp([CRITIC_BREAK_SENTINEL, encodeURI(CRITIC_BREAK_SENTINEL)]
+    .map(sentinel => sentinel + '(?:PARA|LINE)' + sentinel).join('|'));
+  const validateLink = md.validateLink;
+  md.validateLink = url => !placeholderIn.test(url) && validateLink.call(md, url);
+  const restoreTitles = (tokens: readonly Token[]) => {
+    for (const token of tokens) {
+      const title = token.type === 'link_open' || token.type === 'image' ? token.attrGet('title') : null;
+      if (title) token.attrSet('title', restoreCriticLineBreaks(title));
+      if (token.children) restoreTitles(token.children);
+    }
+  };
+  md.core.ruler.after('inline', 'critic_breaks_in_link_titles', state => restoreTitles(state.tokens));
+}
+
+/** Put back the line breaks preprocessCriticMarkup wrote as placeholders
+ * in CriticMarkup's text in raw inline HTML, as in a comment, z <!-- {++x,
+ * a line break and y++} -->, or a tag's attribute, which hold the text as
+ * it is, and which kept the placeholders, where Word export hid them in the
+ * comment's run and the preview wrote them in its HTML. Preview and Word
+ * export must install the same rule. */
+export function criticBreaksInRawHtml(md: MarkdownIt): void {
+  const restore = (tokens: readonly Token[]) => {
+    for (const token of tokens) {
+      if (token.type === 'html_inline') token.content = restoreCriticLineBreaks(token.content);
+      if (token.children) restore(token.children);
+    }
+  };
+  md.core.ruler.after('inline', 'critic_breaks_in_raw_html', state => restore(state.tokens));
 }
 
 export type CriticBreakKind = 'line' | 'paragraph';
