@@ -5348,6 +5348,9 @@ export async function extractDocumentContent(
   let inBibliographyField = false;
   let inNoterefField = false;
   let noterefInfo: { noteId: string; noteKind: 'footnote' | 'endnote' } | undefined;
+  // As in parseNoteBody: the NOTEREF field's number, which the reference
+  // stands for, and which it shows or is hidden and the revisions it's in
+  let noterefNumber: { shown: boolean; hidden: boolean; revisions: (RevisionInfo | undefined)[] } = { shown: false, hidden: false, revisions: [] };
   let fieldInstrParts: string[] = [];
   // The highlight on a citation's or cross-reference's result, which the
   // renderer keeps (see renderHighlightGroup)
@@ -5492,7 +5495,9 @@ export async function extractDocumentContent(
       for (const key of Object.keys(node)) {
         if (key === ':@') { continue; }
 
-        if (key === 'w:fldChar') {
+        if (key === HIDDEN_TEXT) {
+          if (inNoterefField) noterefNumber.hidden = true;
+        } else if (key === 'w:fldChar') {
           const fldType = getAttr(node, 'fldCharType');
           if (fldType === 'begin') {
             // A field with no end, whose result's comments end
@@ -5506,6 +5511,7 @@ export async function extractDocumentContent(
             inBibliographyField = false;
             inNoterefField = false;
             noterefInfo = undefined;
+            noterefNumber = { shown: false, hidden: false, revisions: [] };
           } else if (fldType === 'separate') {
             if (inField) {
               const instrText = fieldInstrParts.join('');
@@ -5539,13 +5545,17 @@ export async function extractDocumentContent(
             }
           } else if (fldType === 'end') {
             const shows = fieldShows.shows();
-            if (inNoterefField && noterefInfo && shows) {
+            // Not where Word shows nothing of its number, all hidden, and in
+            // the revision its number is in, where the field's end isn't
+            if (inNoterefField && noterefInfo && shows && (noterefNumber.shown || !noterefNumber.hidden)) {
+              const [first, ...rest] = noterefNumber.revisions;
+              const revision = currentRevision ?? (first && rest.every(other => other && revisionsEqual(other, first)) ? first : undefined);
               target.push({
                 type: 'footnote_ref',
                 noteId: noterefInfo.noteId,
                 noteKind: noterefInfo.noteKind,
                 commentIds: new Set(activeComments),
-                ...(currentRevision ? { revision: currentRevision } : {}),
+                ...(revision ? { revision } : {}),
                 ...highlightOnly(fieldFormatting),
               });
             }
@@ -5676,6 +5686,12 @@ export async function extractDocumentContent(
           }
 
           const walked = readHiddenRun(runChildren, rPrChildren, target, activeComments, currentRevision, currentHref ? { href: currentHref, link: currentLink } : undefined);
+          // A hidden run of a cross-reference's number, which goes unread;
+          // one with a field's characters marks its text (see HIDDEN_TEXT)
+          if (walked.length === 0 && inNoterefField && runChildren.some(child => (child['w:t'] ?? child['w:delText']) !== undefined
+              && nodeText(asXmlNodes(child['w:t'] ?? child['w:delText'])) !== '')) {
+            noterefNumber.hidden = true;
+          }
           fieldShows.run(runChildren, walked);
           walk(walked, runFormatting, target, inTableCell, currentRevision);
         } else if (key === 'w:br') {
@@ -5698,8 +5714,12 @@ export async function extractDocumentContent(
           const text = nodeText(asXmlNodes(node[key]));
           if (text) {
             if (inCitationField || inNoterefField) fieldFormatting ??= currentFormatting;
-            if (inBibliographyField || inNoterefField) {
-              // Skip display text inside ZOTERO_BIBL / NOTEREF fields
+            if (inNoterefField) {
+              // The note's number, which its reference is
+              noterefNumber.shown = true;
+              noterefNumber.revisions.push(currentRevision);
+            } else if (inBibliographyField) {
+              // Skip display text inside ZOTERO_BIBL fields
             } else if (inCitationField) {
               citationTextParts.push(text);
             } else {

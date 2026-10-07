@@ -11550,6 +11550,60 @@ describe('DOCX footnote cross-reference import', () => {
     // The display text "1" should NOT appear — it's from the unresolved NOTEREF field
     expect(result.markdown.trim()).toBe('Before after');
   });
+
+  describe('A cross-reference whose number Word changed', () => {
+    const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+    const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+    const md = 'T[^1] U[^1] V.\n\n[^1]: N.\n';
+    /** md's export, with `edit` applied to its cross-reference's number, read back */
+    const withNumber = async (edit: (run: string) => string) => {
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+      const xml = await zip.file('word/document.xml')!.async('string');
+      // The number, between the field's separate and its end
+      const number = /fldCharType="separate"\/><\/w:r>(<w:r>(?:(?!<\/w:r>).)*<\/w:r>)<w:r>(?:(?!<\/w:r>).)*fldCharType="end"/.exec(xml)![1];
+      expect(edit(number)).not.toBe(number);
+      zip.file('word/document.xml', xml.replace(number, edit(number)));
+      return strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    };
+
+    test('leaves out a cross-reference whose number is hidden', async () => {
+      // The field showed, as its begin wasn't hidden, though Word shows
+      // nothing of it
+      expect(await withNumber(run => run.replace('<w:rPr>', '<w:rPr><w:vanish/>'))).toBe('T[^1] U V.\n\n[^1]: N.\n');
+    });
+
+    test.each([
+      ['the separator', 'separate'],
+      ['the separator and the end', 'both'],
+      ['the end', 'end'],
+    ] as const)('leaves out a cross-reference whose number is hidden in one run with %s', async (_name, parts) => {
+      // Where the separator was in the number's run, the walk read the
+      // number before it knew the field was a cross-reference
+      const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+      const xml = await zip.file('word/document.xml')!.async('string');
+      zip.file('word/document.xml', hideNumberInFieldRun(xml, parts));
+      expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe('T[^1] U V.\n\n[^1]: N.\n');
+    });
+
+    test.each([
+      ['an insertion', 'ins', 'T[^1] U{++[^1]++} V.\n\n[^1]: N.\n'],
+      ['a deletion', 'del', 'T[^1] U{--[^1]--} V.\n\n[^1]: N.\n'],
+    ])('keeps %s Word tracked on a cross-reference\'s number alone', async (_name, type, expected) => {
+      // The field's end, outside the change, took no revision, so the
+      // reference lost it
+      const markdown = await withNumber(run => '<w:' + type + ' w:id="90" w:author="Ann" w:date="2024-02-01T09:00:00Z">'
+        + (type === 'del' ? run.replace(/<w:t>/g, '<w:delText>').replace(/<\/w:t>/g, '</w:delText>') : run) + '</w:' + type + '>');
+      expect(markdown).toBe(expected);
+      expect(await roundTrip(markdown)).toBe(markdown);
+    });
+
+    test('keeps a cross-reference whose number Word updated with tracking on as it was', async () => {
+      // The old number deleted and the new one inserted are the same reference
+      expect(await withNumber(run => '<w:del w:id="90" w:author="Ann" w:date="2024-02-01T09:00:00Z">'
+        + run.replace('<w:t>1</w:t>', '<w:delText>2</w:delText>') + '</w:del>'
+        + '<w:ins w:id="91" w:author="Ann" w:date="2024-02-01T09:00:00Z">' + run + '</w:ins>')).toBe(md);
+    });
+  });
 });
 
 describe('parseBlockquoteLevel', () => {

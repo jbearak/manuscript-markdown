@@ -715,7 +715,7 @@ DOCX import writes the notes in the order of their labels, numbered labels by va
 
 A reference inside a highlight, `==as reported.[^1]==`, keeps its note too, and comes back from Word inside the highlight. See [Markdown in a highlight](#markdown-in-a-highlight).
 
-A reference can sit inside a tracked change. `{++as reported.[^1]++}` exports as a note inserted with its text, and `{--as reported.[^1]--}` as one deleted with it. When a label has more than one reference, Word's note belongs to one of them and the others cross-reference it. A reference outside any tracked change gets the note when there is one, so accepting or rejecting a change never takes the note from a reference that stays.
+A reference can sit inside a tracked change. `{++as reported.[^1]++}` exports as a note inserted with its text, and `{--as reported.[^1]--}` as one deleted with it. When a label has more than one reference, Word's note belongs to one of them and the others cross-reference it. A reference outside any tracked change gets the note when there is one, so accepting or rejecting a change never takes the note from a reference that stays. On DOCX import, a cross-reference stands for the number Word shows for it: one whose number Word tracked as an insertion or a deletion comes back in that change, as `{++[^1]++}`, and one whose number is hidden, which Word shows nothing of, is left out. A number Word updated with tracking on, the old one deleted and the new one inserted, is the same reference, and comes back as it was.
 
 ## LaTeX Equations
 
