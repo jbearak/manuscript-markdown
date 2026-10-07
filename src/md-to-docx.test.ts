@@ -2499,6 +2499,16 @@ describe('CriticMarkup OOXML generation', () => {
     }
   });
 
+  it('tracks a change in place that is all of a \\text{}, which is an empty run without it', () => {
+    // Word shows an empty run as nothing, so rejecting {++x++} in \text{}
+    // gives what \text{} does
+    for (const md of ['$\\text{{++x++}}$', '$\\text{{--x--}}$', '$\\text{{++ ++}}$', '$\\text{{++x++}} + 1$']) {
+      const result = generateParagraph(parseMd(md)[0], createState(), { authorName: 'Default' });
+      expect(result.match(/<w:(?:ins|del) /g)).toHaveLength(1);
+      expect(result).not.toContain('<m:t></m:t>');
+    }
+  });
+
   it('writes CriticMarkup inside a display equation as tracked runs in it', () => {
     const fence = '$'.repeat(2);
     const result = generateParagraph(parseMd(fence + '\na {++b++} c\n' + fence)[0], createState(), { authorName: 'Default' });

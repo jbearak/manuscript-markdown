@@ -625,6 +625,21 @@ describe('spaces Word keeps in an equation', () => {
     expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
   });
 
+  // Without the change, the \text{} is an empty run, which Word shows as nothing
+  test.each([
+    ['a space', '$\\text{{++ ++}}$', '<w:ins w:id="0" w:author="Unknown">' + '<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t xml:space="preserve"> </m:t></m:r>' + '</w:ins>', '${++\\text{ }++}$'],
+    ['a space before more of the equation', '$\\text{{++ ++}} + 1$', '<w:ins w:id="0" w:author="Unknown">' + '<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t xml:space="preserve"> </m:t></m:r>' + '</w:ins>', '${++\\text{ }++} + 1$'],
+    ['a letter before more of the equation', '$\\text{{++x++}} + 1$', '<w:ins w:id="0" w:author="Unknown">' + '<m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>x</m:t></m:r>' + '</w:ins>', '${++\\mathrm{x}++} + 1$'],
+  ])('a change that is all of a \\text{} is tracked in place: %s', async (_name, md, expected, readBack) => {
+    const docx = (await convertMdToDocx(md + '\n')).docx;
+    const xml = await equationXml(docx);
+    expect(xml).toContain(expected);
+    expect(xml).not.toContain('<w:del');
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(markdown).toBe(readBack + '\n');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
   const ins = (runs: string) => '<w:ins w:id="0" w:author="A" w:date="2026-01-01T00:00:00Z">' + runs + '</w:ins>';
   const del = (runs: string) => '<w:del w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z">' + runs + '</w:del>';
   test.each([

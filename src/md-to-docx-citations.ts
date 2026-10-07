@@ -1054,10 +1054,11 @@ function equationViewOmml(latex: string, warnings?: string[]): string {
 }
 
 /** `omml` with adjacent runs of the same properties joined, which Word shows
- *  the same way as one run. */
+ *  the same way as one run, and without empty runs, which Word shows as
+ *  nothing, as \text{} writes one where a change fills it. */
 function joinedRuns(omml: string): string {
   const pair = /<m:r>((?:<m:rPr>(?:(?!<\/m:rPr>)[\s\S])*<\/m:rPr>)?)<m:t>([^<]*)<\/m:t><\/m:r><m:r>\1<m:t>/g;
-  let joined = omml.replace(/ xml:space="preserve"/g, '');
+  let joined = omml.replace(/ xml:space="preserve"/g, '').replace(/<m:r>(?:<m:rPr>(?:(?!<\/m:rPr>)[\s\S])*<\/m:rPr>)?<m:t><\/m:t><\/m:r>/g, '');
   for (let previous = ''; joined !== previous;) {
     previous = joined;
     joined = joined.replace(pair, (_match, props: string, text: string) => '<m:r>' + props + '<m:t>' + text);
