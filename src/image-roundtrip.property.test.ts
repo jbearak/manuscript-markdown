@@ -482,4 +482,54 @@ describe('image-roundtrip properties', () => {
       cleanup();
     }
   });
+
+  describe('Alt text Word gives an image', () => {
+    const xmlAttr = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+      .replace(/[\t\n\r]/g, c => '&#' + c.charCodeAt(0) + ';');
+    const fromXmlAttr = (text: string) => text.replace(/&#x([\da-f]+);/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+      .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(+code)).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+    const body = (markdown: string) => markdown.replace(/^---\n[\s\S]*?\n---\n\n?/, '');
+
+    /** The Markdown import writes for an image whose alt text Word has as
+     *  `alt`, the alt text export gives it back, and the Markdown of that */
+    async function altRoundTrip(alt: string) {
+      const { convertMdToDocx } = await import('./md-to-docx');
+      const { convertDocx } = await import('./converter');
+      const JSZip = (await import('jszip')).default;
+      const { dir, cleanup } = setupTempImage();
+      try {
+        const { docx } = await convertMdToDocx('![x](test.png){width=100 height=100}', { sourceDir: dir });
+        const zip = await JSZip.loadAsync(docx);
+        const xml = await zip.file('word/document.xml')!.async('string');
+        zip.file('word/document.xml', xml.replace(/descr="[^"]*"/, 'descr="' + xmlAttr(alt) + '"'));
+        const first = body((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+        const second = await convertMdToDocx(first, { sourceDir: dir });
+        const exported = await (await JSZip.loadAsync(second.docx)).file('word/document.xml')!.async('string');
+        const descr = /descr="([^"]*)"/.exec(exported)?.[1];
+        return { first, alt: descr === undefined ? undefined : fromXmlAttr(descr), again: body((await convertDocx(second.docx)).markdown) };
+      } finally {
+        cleanup();
+      }
+    }
+
+    it.each([
+      'a [b] c', 'a [ b', 'a ] b', '[a](b)', '[x]{.mark}', '[@smith2020]', 'a [^1]',
+      '*b*', '_b_', '`x`', '~~s~~', '==h==', '{==a==}', '{++a++}', '{>>c<<}',
+      'a &amp; b', 'x $y$ z', '$x$', '<https://e.com>', 'a\\*b', 'line1\nline2',
+      '<b>x</b>', '<b title="*">x</b>', '<span class="_x_">y</span>', 'a <!-- c --> b', 'a\\<b',
+      'a\\\nb', 'a\\\\\nb', 'a\\\r\nb', '$a\nb$',
+    ])('keeps alt text %j as Word has it', async (alt) => {
+      const result = await altRoundTrip(alt);
+      expect(result.alt).toBe(alt);
+      expect(result.again).toBe(result.first);
+    });
+
+    it.each([
+      'Figure 1: sales (2020).', 'snake_case', 'A & B', '$5 and $6', 'a = b', '# not a heading', 'a\\b', 'a > b',
+    ])('writes alt text %j that reads as it is with no escapes', async (alt) => {
+      const result = await altRoundTrip(alt);
+      expect(result.first).toBe('![' + alt + '](test.png){width=100 height=100}\n');
+      expect(result.alt).toBe(alt);
+    });
+  });
 });

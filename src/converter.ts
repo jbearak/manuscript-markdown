@@ -4201,6 +4201,38 @@ function readHiddenText(runText: string, target: ContentItem[], activeComments: 
  *  is, as a ZWSP and !, which the next hidden run in the same place goes on */
 const pendingHiddenText = new WeakMap<ContentItem[], { text: string; at: number }>();
 
+/** What follows an image's alt text, as escapeMarkdownChars reads it: a link's
+ *  ], which markdown-it reads the text before alone */
+const IMAGE_ALT_AFTER = new RunsAfter(indexText(''), 0, '', true);
+
+/** Alt text as Markdown that export reads back as it: text, as a link's
+ *  is, every bracket escaped, as export reads the alt text as Markdown on its
+ *  own and keeps only its text. A < is escaped, as export would keep a tag's
+ *  or comment's Markdown as it is, escapes and all, and a line break, which
+ *  would be a soft break's space there, goes as a reference. Each goes in as
+ *  a character the text doesn't have, which escapeMarkdownChars reads as text
+ *  that is no space, as the reference is, and a \ before one, which it
+ *  leaves alone, as no punctuation follows, is escaped after. */
+function imageAltMarkdown(alt: string): string {
+  const stands = new Map<string, string>();
+  let next = 0xE000;
+  const standIn = (markdown: string) => {
+    while (alt.includes(String.fromCharCode(next))) next++;
+    const c = String.fromCharCode(next++);
+    stands.set(c, markdown);
+    return c;
+  };
+  const lt = standIn('\\<');
+  const lf = standIn('&#10;');
+  const cr = standIn('&#13;');
+  const escaped = escapeMarkdownChars(alt.replace(/[<\n\r]/g, c => c === '<' ? lt : c === '\n' ? lf : cr), false, IMAGE_ALT_AFTER);
+  return escaped.replace(/(\\*)([\uE000-\uF8FF])/g, (match, backslashes: string, c: string) => {
+    const markdown = stands.get(c);
+    if (markdown === undefined) return match;
+    return backslashes + (backslashes.length % 2 === 1 ? '\\' : '') + markdown;
+  });
+}
+
 /** The Markdown of an image export couldn't embed, without its closing ZWSP */
 /** An image's Markdown: its own, as an embed wrote it, an <img> tag where
  *  it came from one, or else ![alt](src) with its size, as export reads it
@@ -4218,7 +4250,10 @@ function pictureMarkdown(item: ContentItem & { type: 'image' }, imageFormatMappi
       + (item.widthPx > 0 ? ' width="' + item.widthPx + '"' : '')
       + (item.heightPx > 0 ? ' height="' + item.heightPx + '"' : '') + '>');
   }
-  const safeAlt = item.alt.replace(/\\/g, '\\\\').replace(/\]/g, '\\]');
+  // In an HTML table's cell, which export reads as HTML, the image's
+  // Markdown is text (see syntaxText), whose alt text takes no escapes but
+  // those of a \ and a ], as it took before
+  const safeAlt = readsMarkdown ? imageAltMarkdown(item.alt) : item.alt.replace(/\\/g, '\\\\').replace(/\]/g, '\\]');
   const size = [...(item.widthPx > 0 ? ['width=' + item.widthPx] : []), ...(item.heightPx > 0 ? ['height=' + item.heightPx] : [])];
   return syntaxText('![' + safeAlt + '](' + formatHrefForMarkdown(item.src) + ')' + (size.length ? '{' + size.join(' ') + '}' : ''));
 }
