@@ -148,7 +148,7 @@ Manuscript Markdown provides per-table directives and document defaults for cont
 | `table-decimal-mark` | ✓ | ✓ | `data-decimal-mark` | `source`, point, comma, or midpoint |
 | `table-digit-grouping` | ✓ | ✓ | `data-digit-grouping` | Three-digit groups; spaces are nonbreaking |
 
-Per-table directives override frontmatter defaults for that table only. For pipe and grid tables, place an HTML comment before the table (`<!-- table-font-size: 9 -->`). For HTML tables, use `data-` attributes on the `<table>` element (`data-font-size="9"`). Multiple directives can precede the same table.
+Per-table directives override frontmatter defaults for that table only. For pipe and grid tables, place an HTML comment before the table (`<!-- table-font-size: 9 -->`). For HTML tables, use `data-` attributes on the `<table>` element (`data-font-size="9"`). Multiple directives can precede the same table. A table keeps its own directive or attribute through a DOCX round trip even where its value is the document's, such as `<!-- table-font-size: 9 -->` with the automatic 9pt, so it still holds if the document's changes.
 
 Priority (highest to lowest): per-table override → frontmatter default → built-in default.
 
@@ -226,7 +226,7 @@ The `table-col-widths` frontmatter field controls column width ratios for all ta
 
 **Priority** (highest to lowest): per-table override → frontmatter default → auto (Word default).
 
-Per-table overrides and frontmatter defaults are preserved through DOCX round-trips.
+Per-table overrides and frontmatter defaults are preserved through DOCX round-trips, a per-table override even where it's the frontmatter's.
 
 ### Page Orientation Sections
 

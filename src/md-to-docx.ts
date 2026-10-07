@@ -1658,31 +1658,27 @@ export function tableFormatProps(tableFormats: Map<number, TableFormat>): Custom
   return chunkCustomProps('MANUSCRIPT_TABLE_FORMATS_', JSON.stringify(mapping));
 }
 
-export function tableFontSizeProps(sizes: Map<number, number>, defaultSizeHp?: number): CustomPropEntry[] {
-  // Only store entries where per-table value differs from document-level default
+// A table's own font size, font and column widths, from its directive or
+// data- attribute, each kept where it's the document's too, as the table
+// keeps it if the document's changes
+
+export function tableFontSizeProps(sizes: Map<number, number>): CustomPropEntry[] {
   const mapping: Record<string, string> = {};
-  for (const [idx, pt] of sizes) {
-    const hp = Math.round(pt * 2);
-    if (hp !== defaultSizeHp) mapping[String(idx)] = String(pt);
-  }
+  for (const [idx, pt] of sizes) mapping[String(idx)] = String(pt);
   if (Object.keys(mapping).length === 0) return [];
   return chunkCustomProps('MANUSCRIPT_TABLE_FONT_SIZES_', JSON.stringify(mapping));
 }
 
-export function tableFontProps(fonts: Map<number, string>, defaultFont?: string): CustomPropEntry[] {
+export function tableFontProps(fonts: Map<number, string>): CustomPropEntry[] {
   const mapping: Record<string, string> = {};
-  for (const [idx, font] of fonts) {
-    if (font !== defaultFont) mapping[String(idx)] = font;
-  }
+  for (const [idx, font] of fonts) mapping[String(idx)] = font;
   if (Object.keys(mapping).length === 0) return [];
   return chunkCustomProps('MANUSCRIPT_TABLE_FONTS_', JSON.stringify(mapping));
 }
 
-export function tableColWidthsProps(colWidths: Map<number, string>, defaultColWidths?: string): CustomPropEntry[] {
+export function tableColWidthsProps(colWidths: Map<number, string>): CustomPropEntry[] {
   const mapping: Record<string, string> = {};
-  for (const [idx, val] of colWidths) {
-    if (val !== defaultColWidths) mapping[String(idx)] = val;
-  }
+  for (const [idx, val] of colWidths) mapping[String(idx)] = val;
   if (Object.keys(mapping).length === 0) return [];
   return chunkCustomProps('MANUSCRIPT_TABLE_COL_WIDTHS_', JSON.stringify(mapping));
 }
@@ -9404,12 +9400,12 @@ export async function convertMdToDocx(
   }
   customProps.push(...pipeTableAlignedProps(state.pipeTableAligned));
   customProps.push(...gridSourceColWidthsProps(state.gridSourceColWidths));
-  customProps.push(...tableFontSizeProps(state.tableFontSizes, fontOverrides?.tableSizeHp));
-  customProps.push(...tableFontProps(state.tableFonts, fontOverrides?.tableFont));
+  customProps.push(...tableFontSizeProps(state.tableFontSizes));
+  customProps.push(...tableFontProps(state.tableFonts));
+  customProps.push(...tableColWidthsProps(state.tableColWidths));
   const defaultColWidthsStr = fontOverrides?.tableColWidths
     ? (typeof fontOverrides.tableColWidths === 'string' ? fontOverrides.tableColWidths : fontOverrides.tableColWidths.join(' '))
     : undefined;
-  customProps.push(...tableColWidthsProps(state.tableColWidths, defaultColWidthsStr));
   customProps.push(...tableNumberFormatProps('MANUSCRIPT_TABLE_DIGITS_', state.tableDigits));
   customProps.push(...tableNumberFormatProps('MANUSCRIPT_TABLE_DECIMAL_MARKS_', state.tableDecimalMarks));
   customProps.push(...tableNumberFormatProps('MANUSCRIPT_TABLE_DIGIT_GROUPINGS_', state.tableDigitGroupings));
