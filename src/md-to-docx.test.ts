@@ -5894,3 +5894,79 @@ describe('Comments a paragraph reads inline', () => {
     expect(growth(run(4000), run(16000))).toBeLessThan(8);
   }, 60000);
 });
+
+describe('Character references in HTML', () => {
+  // A table's body cell's text in Word, and in the preview, as markdown-it
+  // writes a Markdown table
+  const wordCell = async (md: string) => {
+    const zip = await (await import('jszip')).default.loadAsync((await convertMdToDocx(md)).docx);
+    const row = [...(await zip.file('word/document.xml')!.async('string')).matchAll(/<w:tr\b[\s\S]*?<\/w:tr>/g)][1][0];
+    return unescape([...row.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g)].map(m => m[1]).join(''));
+  };
+  const previewCell = async (md: string) => unescape(/<td>([^<]*)<\/td>/.exec((await import('./test-helpers')).renderWithPlugin(md))![1]);
+  const unescape = (xml: string) => xml.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+
+  it.each([
+    ['&#128;', '€'], ['&#x80;', '€'], ['&#X9F;', 'Ÿ'], ['&#150;', '–'], ['&#153;', '™'], ['&#128', '€'],
+    ['&#129;', '\u0081'], ['&#0;', '\uFFFD'], ['&#xD800;', '\uFFFD'], ['&#x110000;', '\uFFFD'],
+  ])('reads %s in an HTML cell as the browser does, in Word and in Compact Table', async (reference, shown) => {
+    // What the browser shows, as the preview of the HTML does: HTML reads a
+    // numeric reference from 0x80 to 0x9F as Windows-1252's character, but
+    // for the five it has none for, as &#129;, and one to no character as
+    // U+FFFD, and one without its ; or with an X too. Export read &#128; as
+    // U+0080, which Word showed as nothing, and Compact Table wrote it so.
+    const html = '<table><tr><th>h</th></tr><tr><td>a' + reference + 'b</td></tr></table>';
+    expect(await wordCell(html)).toBe('a' + shown + 'b');
+    const compacted = (await import('./formatting')).compactTable(html).newText;
+    expect(await previewCell(compacted)).toBe('a' + shown + 'b');
+    expect(await wordCell(compacted)).toBe('a' + shown + 'b');
+  });
+
+  it.each([
+    ['&copy;', '©'], ['&mdash;', '—'], ['&euro;', '€'], ['&frac12;', '½'], ['&AMP;', '&'], ['&nbsp;', '\u00a0'],
+    ['&NBSP;', '&NBSP;'], ['&nosuch;', '&nosuch;'],
+  ])('reads %s in an HTML cell by HTML\'s names, as the browser does, in Word and in Compact Table', async (reference, shown) => {
+    // Export read only &nbsp;, &lt;, &gt;, &quot;, &apos; and &amp;, so Word
+    // showed &copy; as it was written
+    const html = '<table><tr><th>h</th></tr><tr><td>a' + reference + 'b</td></tr></table>';
+    expect(await wordCell(html)).toBe('a' + shown + 'b');
+    const compacted = (await import('./formatting')).compactTable(html).newText;
+    expect(await previewCell(compacted)).toBe('a' + shown + 'b');
+    expect(await wordCell(compacted)).toBe('a' + shown + 'b');
+  });
+
+  it.each([
+    ['a block of its own', '<img src="a&#128;.png" alt="&#128; &#x110000; &#150;">'],
+    ['a paragraph', 'x <img src="a&#128;.png" alt="&#128; &#x110000; &#150;"> y'],
+  ])('reads an <img>\'s alt and src in %s as the browser does', (_name, md) => {
+    // Export read &#128; as U+0080, and threw on &#x110000;
+    const image = parseMd(md).flatMap(token => token.runs ?? []).find(run => run.type === 'image');
+    expect(image?.imageAlt).toBe('€ \uFFFD –');
+    expect(image?.imageSrc).toBe('a€.png');
+  });
+
+  it('reads a line end written as a reference in an HTML cell as whitespace HTML collapses, however it is written', async () => {
+    // &NewLine; and &#10 without its ; were line ends in the cell's text,
+    // which Compact Table made a grid table's lines of, as line breaks
+    const html = '<table><tr><th>h</th></tr><tr><td>a&NewLine;b&#10c&#XA;d&#13e &#0010; f&#100;g</td></tr></table>';
+    expect(await wordCell(html)).toBe('a b c d e fdg');
+    const compacted = (await import('./formatting')).compactTable(html).newText;
+    expect(compacted.split('\n')).toHaveLength(3);
+    expect(await previewCell(compacted)).toBe('a b c d e fdg');
+    expect(await wordCell(compacted)).toBe('a b c d e fdg');
+  });
+
+  it('reads a named reference in an <img>\'s src or alt only by a whole name, as the browser does in an attribute', () => {
+    // &notit; read as ¬it;, by &not, which HTML reads without its ; in text
+    const image = parseMd('<img src="cover&notit;.png" alt="a&notit;b &not; &notin;">').flatMap(token => token.runs ?? []).find(run => run.type === 'image');
+    expect(image?.imageSrc).toBe('cover&notit;.png');
+    expect(image?.imageAlt).toBe('a&notit;b \u00ac \u2209');
+  });
+
+  it.each([['&#128;'], ['&#150;'], ['&#0;']])('reads %s in Markdown as markdown-it does, in the preview and in Word', async (reference) => {
+    // Markdown's own text isn't HTML, so U+FFFD for a control character's
+    const md = '| h |\n| --- |\n| a' + reference + 'b |';
+    expect(await previewCell(md)).toBe('a\uFFFDb');
+    expect(await wordCell(md)).toBe('a\uFFFDb');
+  });
+});

@@ -481,6 +481,48 @@ describe('table number formatting', () => {
 		expect(formatTableNumbers(narrow, { digits: 1 }).output).toContain('1\u202f234.5');
 	});
 
+	test('reads a currency sign written as a numeric reference as the browser does', () => {
+		// &#128; read as U+0080, before which the value was no number, though
+		// the browser shows it as €, as it does &#128 with no ;
+		const html = '<table><tr><td>&#128;1234.5</td><td>&#128 7</td></tr></table>';
+		expect(formatTableNumbers(html, { digits: 2 }).output).toBe('<table><tr><td>&#128;1234.50</td><td>&#128 7.00</td></tr></table>');
+	});
+
+	test('ends a numeric reference without its ; that a value\'s edit would run on into digits', () => {
+		// Dropping the space made &#x31234 and &#49234, which the browser reads
+		// as U+31234 and U+C052
+		const html = (a: string, b: string, c: string) => '<table><tr><td>' + a + '</td><td>' + b + '</td><td>' + c + '</td></tr></table>';
+		expect(formatTableNumbers(html('&#x31 234.5', '&#49 234.5', '&#49'), { digitGrouping: 'none', digits: 2 }).output)
+			.toBe(html('&#x31;234.50', '&#49;234.50', '&#49.00'));
+	});
+
+	test('reads a currency sign written by its name as the browser does', () => {
+		// Only &nbsp;, &lt;, &gt;, &quot;, &apos; and &amp; were read, so
+		// &euro; was text, before which the value was no number
+		const html = '<table><tr><td>&euro;1234.5</td><td>&pound;7</td></tr></table>';
+		expect(formatTableNumbers(html, { digits: 2 }).output).toBe('<table><tr><td>&euro;1234.50</td><td>&pound;7.00</td></tr></table>');
+	});
+
+	test('edits the digits after a name read in part where they are, before the reference\'s ;', () => {
+		// The browser reads &pound123; as £123;, &pound, a legacy name, and the
+		// rest as text, which had each character at the reference's end, so
+		// .00 went after the ; to show £123;.00
+		const html = '<table><tr><td>&pound123;</td><td>&yen7;</td></tr></table>';
+		expect(formatTableNumbers(html, { digits: 2 }).output).toBe('<table><tr><td>&pound;123.00;</td><td>&yen;7.00;</td></tr></table>');
+	});
+
+	test('ends a name read in part with its ; where it edits the digits after the name, which export reads as the browser does', async () => {
+		// The browser reads &pound123.00; as £123.00;, by &pound, but a
+		// named reference needs its ; right after the name, or the . kept it
+		// from being one, to export, which wrote it as it was
+		const table = '<table><tr><td>&pound123;</td><td>&yen7;</td><td>&pound1234;</td></tr></table>';
+		const markdown = '---\ntable-digits: 2\ntable-digit-grouping: thin-space\n---\n\n' + table + '\n';
+		const JSZip = (await import('jszip')).default;
+		const xml = await (await JSZip.loadAsync((await convertMdToDocx(markdown)).docx)).file('word/document.xml')!.async('string');
+		const cells = [...xml.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(match => match[1]);
+		expect(cells).toEqual(['\u00a3123.00;', '\u00a57.00;', '\u00a31\u202f234.00;']);
+	});
+
 	test('keeps surviving digits in their original HTML runs when grouping is removed', () => {
 		const html = '<table><tr><td><b>1</b>&nbsp;<i>234</i>.50</td></tr></table>';
 		const output = formatTableNumbers(html, { digitGrouping: 'none', decimalMark: 'midpoint' }).output;

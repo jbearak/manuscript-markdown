@@ -1778,6 +1778,25 @@ describe('HTML table support for Expand/Compact Table', () => {
     expect(previewRows(result.newText)).toEqual(previewRows(html));
   });
 
+  it('Compact Table writes the punctuation an HTML cell holds as text, as a character reference writes it', async () => {
+    // &ast;a&ast; read as *a*, which the cell wrote as it was, as emphasis,
+    // and &grave; as code
+    const html = '<table><tr><th>h</th></tr><tr><td>&ast;a&ast; &grave;b&grave; &lowbar;c&lowbar; &lsqb;@k&rsqb; &dollar;d&dollar; '
+      + '&equals;&equals;e&equals;&equals; &lcub;++f++&rcub; &bsol;&ast;g&bsol;. &amp;copy; &lt;i&gt;h&lt;/i&gt;</td></tr></table>';
+    const { renderWithPlugin } = await import('./test-helpers');
+    const cell = /<td>([\s\S]*?)<\/td>/.exec(renderWithPlugin(compactTable(html).newText))![1];
+    expect(cell).toBe('*a* `b` _c_ [@k] $d$ ==e== {++f++} \\*g\\. &amp;copy; &lt;i&gt;h&lt;/i&gt;');
+  });
+
+  it.each(['<i>a</i><i>&ast;b</i>', '<i>a</i><i>*b</i>', '<b>a</b><b>&ast;b</b>'])('Compact Table keeps the * of %s, runs of one emphasis, as text', async (cell) => {
+    // Written run by run, as *a**\*b*, the cell read a**b*
+    const html = '<table><tr><th>h</th></tr><tr><td>' + cell + '</td></tr></table>';
+    const { renderWithPlugin } = await import('./test-helpers');
+    const shown = (md: string) => /<td>([\s\S]*?)<\/td>/.exec(renderWithPlugin(md))![1];
+    expect(shown(compactTable(html).newText)).toBe(cell.startsWith('<b>') ? '<strong>a*b</strong>' : '<em>a*b</em>');
+    expect(shown(reflowTable(html).newText)).toBe(shown(compactTable(html).newText));
+  });
+
   it('HTML link URL containing | does not split table cells', () => {
     const html = '<table><tr><th>Col</th></tr><tr><td><a href=\"https://example.com/A|B\">x</a></td></tr></table>';
     const result = reflowTable(html);

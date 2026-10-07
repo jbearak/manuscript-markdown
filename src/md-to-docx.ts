@@ -21,6 +21,7 @@ import { preprocessGridTables, gridColumnAlign, getDisplayWidth, GRID_TABLE_PLAC
 import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
 import { extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
+import { decodeHtmlAttribute } from './html-entities';
 import { matchCriticHeadingPrefix } from './critic-markup';
 import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, type TemplateSections } from './template-sections';
 export { preprocessGridTables } from './grid-table-preprocess';
@@ -43,7 +44,9 @@ const STYLE_CLOSE_RE = /^<!--\s*\/style\s*-->$/i;
 const IMAGE_DIMENSION_ATTR_RE = '(\\d+(?:\\.\\d+)?|\\.\\d+)\\s*(px|in|cm|mm|pt|pc)?';
 
 // --- Implementation notes ---
-// - decodeHtmlEntities(): decode &amp; after other named entities to avoid over-decoding
+// - decodeXmlText(): decode &amp; after other named entities to avoid over-decoding;
+//   HTML's own references, as an <img>'s alt's, read as the browser reads
+//   them (see decodeHtmlAttribute)
 // - Numeric entities: use String.fromCodePoint() not String.fromCharCode() for
 //   supplementary-plane chars
 // - CriticMarkup recursive formatting: parse inner payloads with markdown-it
@@ -2884,7 +2887,7 @@ function wordTableTexts(xml: string): string[][] {
         else if (fieldChar === 'end') fields = Math.max(0, fields - 1);
         else if (fields === 0 && !run[1].includes('<w:vanish/>')) {
           for (const piece of run[1].matchAll(/<w:(t|delText)(?:\s[^>]*)?>([^<]*)<\/w:\1>|<w:(tab|noBreakHyphen|softHyphen)\/>/g)) {
-            text += piece[3] ? { tab: '\t', noBreakHyphen: '\u2011', softHyphen: '\u00AD' }[piece[3]] : decodeHtmlEntities(piece[2]);
+            text += piece[3] ? { tab: '\t', noBreakHyphen: '\u2011', softHyphen: '\u00AD' }[piece[3]] : decodeXmlText(piece[2]);
           }
         }
       }
@@ -3166,8 +3169,8 @@ function convertTokens(tokens: ManuscriptToken[], listLevel = 0, blockquoteLevel
               runs: [{
                 type: 'image' as const,
                 text: '',
-                imageSrc: decodeHtmlEntities(srcMatch[1]),
-                imageAlt: altMatch ? decodeHtmlEntities(altMatch[1]) : '',
+                imageSrc: decodeHtmlAttribute(srcMatch[1]),
+                imageAlt: altMatch ? decodeHtmlAttribute(altMatch[1]) : '',
                 imageWidth: width,
                 imageHeight: height,
                 imageSyntax: 'html' as const,
@@ -3475,8 +3478,8 @@ function processInlineChildren(tokens: ManuscriptToken[]): MdRun[] {
             runs.push({
               type: 'image',
               text: '',
-              imageSrc: decodeHtmlEntities(srcMatch[1]),
-              imageAlt: altMatch ? decodeHtmlEntities(altMatch[1]) : '',
+              imageSrc: decodeHtmlAttribute(srcMatch[1]),
+              imageAlt: altMatch ? decodeHtmlAttribute(altMatch[1]) : '',
               imageWidth: width,
               imageHeight: height,
               imageSyntax: 'html',
@@ -3949,7 +3952,8 @@ function extractTableCells(tokens: ManuscriptToken[]): MdTableCell[] {
 }
 
 
-function decodeHtmlEntities(text: string): string {
+/** Word's XML text with its references read, as XML reads them */
+function decodeXmlText(text: string): string {
   return text
     .replace(/&#(\d+);/g, (_m, code) => String.fromCodePoint(Number(code)))
     .replace(/&#x([0-9a-fA-F]+);/g, (_m, hex) => String.fromCodePoint(parseInt(hex, 16)))

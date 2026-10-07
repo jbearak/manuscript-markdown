@@ -1,4 +1,4 @@
-import { decodeNumericHtmlEntity } from './html-entities';
+import { decodeHtmlAttribute, decodeHtmlCharacterReferences as decodeHtmlEntities } from './html-entities';
 import {
   parseHtmlTableCellSourceKind,
   parseTableDigits,
@@ -181,7 +181,7 @@ export function extractHtmlTables(html: string): HtmlTableMeta[] {
       const fontMatch = attrs.match(/data-font\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"]+))/i);
       const fontVal = fontMatch ? (fontMatch[1] ?? fontMatch[2] ?? fontMatch[3]) : undefined;
       if (fontVal) {
-        const normalized = decodeHtmlEntities(fontVal).trim().replace(/\s+/g, ' ');
+        const normalized = decodeHtmlAttribute(fontVal).trim().replace(/\s+/g, ' ');
         if (normalized) meta.font = normalized;
       }
       // data-orientation: "landscape" or "portrait"
@@ -286,7 +286,7 @@ function extractAttr(attrs: string, name: string): string | undefined {
   for (const match of attrs.matchAll(/([^\s"'>\/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g)) {
     if (match[1].toLowerCase() !== name.toLowerCase()) continue;
     const value = match[2] ?? match[3] ?? match[4];
-    return value === undefined ? undefined : decodeHtmlEntities(value);
+    return value === undefined ? undefined : decodeHtmlAttribute(value);
   }
   return undefined;
 }
@@ -295,10 +295,11 @@ function extractAttr(attrs: string, name: string): string | undefined {
  * A cell's source text with its whitespace collapsed, as HTML lays it out.
  * A space or tab written as a character reference stays, since import
  * writes them for whitespace a cell would otherwise lose; a line break so
- * written is the end of a line like any other.
+ * written is the end of a line like any other, however it's written, as
+ * &#10;, &#xA, without its ;, as the browser reads one, or &NewLine;.
  */
 function collapseHtmlWhitespace(rawText: string): string {
-  return rawText.replace(/&#(?:0*1[03]|x0*[ad]);/gi, ' ').replace(/[ \t\r\n]+/g, ' ');
+  return rawText.replace(/&#(?:0*1[03](?![0-9])|[xX]0*[aAdD](?![0-9a-fA-F]));?|&NewLine;/g, ' ').replace(/[ \t\r\n]+/g, ' ');
 }
 
 function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
@@ -426,7 +427,7 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
     } else if (tag === 'a') {
       if (!isClose) {
         const hrefMatch = attrs.match(/href\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
-        href = hrefMatch ? decodeHtmlEntities(hrefMatch[1] ?? hrefMatch[2]) : undefined;
+        href = hrefMatch ? decodeHtmlAttribute(hrefMatch[1] ?? hrefMatch[2]) : undefined;
         linkStart = true;
       } else {
         href = undefined;
@@ -475,17 +476,4 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
   }
 
   return runs;
-}
-
-function decodeHtmlEntities(text: string): string {
-  return text
-    .replace(/&#(\d+);/g, (entity, code) => decodeNumericHtmlEntity(entity, code, 10))
-    .replace(/&#x([0-9a-fA-F]+);/g, (entity, hex) => decodeNumericHtmlEntity(entity, hex, 16))
-    .replace(/&nbsp;/g, '\u00a0')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&apos;/g, "'")
-    .replace(/&amp;/g, '&');
 }
