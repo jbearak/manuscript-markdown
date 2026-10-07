@@ -1931,6 +1931,185 @@ describe('Empty Word paragraphs before a block', () => {
   });
 });
 
+describe('Where Word list numbering comes from', () => {
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+  // The Markdown of a document of [pPr, text] paragraphs, with `styles` and
+  // `numbering` edited. Export's numbering numbers with instance 1 a bullet
+  // list and with instance 2 a numbered one
+  const imported = async (paragraphs: [string, string][], { styles = (xml: string) => xml, numbering = (xml: string) => xml } = {}) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('1. a')).docx);
+    zip.file('word/numbering.xml', numbering(await zip.file('word/numbering.xml')!.async('string')));
+    zip.file('word/styles.xml', styles(await zip.file('word/styles.xml')!.async('string')));
+    const body = paragraphs.map(([pPr, text]) => '<w:p>' + (pPr ? '<w:pPr>' + pPr + '</w:pPr>' : '') + '<w:r><w:t>' + text + '</w:t></w:r></w:p>').join('');
+    const xml = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', xml.replace(/<w:body>[\s\S]*?(?=<w:sectPr)/, () => '<w:body>' + body));
+    return strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+  };
+  const numPr = (numId: number, ilvl?: number) => '<w:numPr>' + (ilvl === undefined ? '' : '<w:ilvl w:val="' + ilvl + '"/>') + '<w:numId w:val="' + numId + '"/></w:numPr>';
+
+  test.each([
+    ['bulleted', 1, '- a\n- b'],
+    ['numbered', 2, '1. a\n2. b'],
+  ])('reads a %s paragraph whose numbering gives no level at level 0', async (_name, numId, md) => {
+    expect(await imported([[numPr(numId), 'a'], [numPr(numId), 'b']])).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  const withStyles = (...styles: string[]) => (xml: string) => xml.replace('</w:styles>', () => styles.join('') + '</w:styles>');
+  const paragraphStyle = (id: string, pPr: string, basedOn?: string) => '<w:style w:type="paragraph" w:styleId="' + id + '"><w:name w:val="' + id + '"/>'
+    + (basedOn ? '<w:basedOn w:val="' + basedOn + '"/>' : '') + '<w:pPr>' + pPr + '</w:pPr></w:style>';
+  const pStyle = (id: string) => '<w:pStyle w:val="' + id + '"/>';
+  const ilvlOnly = (ilvl: number) => '<w:numPr><w:ilvl w:val="' + ilvl + '"/></w:numPr>';
+  // Word's List Bullet and List Number, which give a list and no level, and
+  // a style that gives a level alone and its base's list
+  const listStyles = withStyles(paragraphStyle('ListBullet', numPr(1)), paragraphStyle('ListNumber', numPr(2)),
+    paragraphStyle('ListNumberLevel1', ilvlOnly(1), 'ListNumber'));
+
+  test.each([
+    ['bullets', [[pStyle('ListBullet'), 'a'], [pStyle('ListBullet'), 'b']], '- a\n- b'],
+    ['numbers', [[pStyle('ListNumber'), 'a'], [pStyle('ListNumber'), 'b']], '1. a\n2. b'],
+    ['a level its own and its base\'s list', [[pStyle('ListNumber'), 'a'], [pStyle('ListNumberLevel1'), 'x'], [pStyle('ListNumber'), 'b']], '1. a\n   1. x\n2. b'],
+    ['a level the paragraph gives', [[pStyle('ListNumber'), 'a'], [pStyle('ListNumber') + ilvlOnly(1), 'x']], '1. a\n   1. x'],
+    ['a list the paragraph gives', [[pStyle('ListNumber'), 'a'], [pStyle('ListNumber') + numPr(1), 'b']], '1. a\n\n- b'],
+  ])('numbers a paragraph as its style has it: %s', async (_name, paragraphs, md) => {
+    expect(await imported(paragraphs as [string, string][], { styles: listStyles })).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('counts a paragraph its style numbers with the others of its list, as Word shows them', async () => {
+    const md = '1. a\n2. b\n\nP.\n\n3. c';
+    expect(await imported([[pStyle('ListNumber'), 'a'], [numPr(2, 0), 'b'], ['', 'P.'], [pStyle('ListNumber'), 'c']], { styles: listStyles })).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('takes a style\'s numbering away where a paragraph\'s numId is 0', async () => {
+    // ECMA-376 Part 1 §17.9.18
+    const md = '1. a\n\nP.\n\n2. b';
+    expect(await imported([[pStyle('ListNumber'), 'a'], [pStyle('ListNumber') + numPr(0), 'P.'], [pStyle('ListNumber'), 'b']], { styles: listStyles })).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('numbers a paragraph with no style as the default paragraph style does', async () => {
+    // As Word numbers them, which docx4j measured
+    const styles = (xml: string) => xml.replace(/<w:style [^>]*w:default="1"[^>]*w:styleId="Normal">[^]*?<w:pPr>/, (match: string) => match + numPr(2));
+    const md = '1. a\n2. b\n3. c';
+    expect(await imported([['', 'a'], ['<w:jc w:val="left"/>', 'b'], [pStyle('Missing'), 'c']], { styles })).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  // Level 0 of the numbered list linked to List Number, as Word links it
+  const linkedToListNumber = (xml: string) => xml.replace(/(<w:abstractNum w:abstractNumId="1"[^]*?<w:numFmt w:val="decimal"\/>)/, (match: string) => match + pStyle('ListNumber'));
+
+  test.each([
+    // Word numbers nothing there, nor counts it, as docx4j measured it
+    ['another style', [paragraphStyle('Other', numPr(2))], 'Other', '1. a\n\nx\n\n2. b'],
+    ['a style based on its own', [paragraphStyle('Derived', '', 'ListNumber')], 'Derived', '1. a\n2. x\n3. b'],
+  ])('numbers a paragraph at a level linked to %s as Word does', async (_name, defs, xStyle, md) => {
+    const paragraphs: [string, string][] = [[pStyle('ListNumber'), 'a'], [pStyle(xStyle), 'x'], [pStyle('ListNumber'), 'b']];
+    expect(await imported(paragraphs, { styles: (xml: string) => withStyles(...defs)(listStyles(xml)), numbering: linkedToListNumber })).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  // Levels 0 and 1 of the numbered list linked to ListTop and ListChild,
+  // whose numbering gives no level
+  const linkedLevels = (xml: string) => xml
+    .replace(/(<w:abstractNum w:abstractNumId="1"[^]*?<w:numFmt [^>]*\/>)/, (match: string) => match + pStyle('ListTop'))
+    .replace(/(<w:abstractNum w:abstractNumId="1"[^]*?<w:lvl w:ilvl="1"[^]*?<w:numFmt [^>]*\/>)/, (match: string) => match + pStyle('ListChild'));
+
+  test.each([
+    ['a style that gives its list', [paragraphStyle('ListChild', numPr(2))], pStyle('ListChild'), '1. a\n   1. x\n2. b'],
+    ['a style whose base gives its list', [paragraphStyle('ListChild', '', 'ListTop')], pStyle('ListChild'), '1. a\n   1. x\n2. b'],
+    ['a base of its style', [paragraphStyle('ListChild', numPr(2)), paragraphStyle('Derived', '', 'ListChild')], pStyle('Derived'), '1. a\n   1. x\n2. b'],
+    ['a paragraph that gives its list', [paragraphStyle('ListChild', '')], pStyle('ListChild') + numPr(2), '1. a\n   1. x\n2. b'],
+    // A level the style gives comes first, as Word reads it ([MS-OI29500]
+    // 2.1.50), and Word numbers nothing at one linked to another style
+    ['a style that gives a level linked to another', [paragraphStyle('ListChild', numPr(2, 0))], pStyle('ListChild'), '1. a\n\nx\n\n2. b'],
+  ])('numbers a paragraph whose numbering gives no level at the level linked to its style: %s', async (_name, defs, xPPr, md) => {
+    // ECMA-376 Part 1 §17.9.23, whose example is such a style
+    const paragraphs: [string, string][] = [[pStyle('ListTop'), 'a'], [xPPr, 'x'], [pStyle('ListTop'), 'b']];
+    const styles = withStyles(paragraphStyle('ListTop', numPr(2)), ...defs);
+    expect(await imported(paragraphs, { styles, numbering: linkedLevels })).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('numbers a paragraph whose own numbering gives a level linked to another style', async () => {
+    const md = '1. a\n2. x';
+    expect(await imported([[pStyle('ListNumber'), 'a'], [numPr(2, 0), 'x']], { styles: listStyles, numbering: linkedToListNumber })).toBe(md);
+  });
+
+  // A list style, as Word's built-in multilevel lists are: abstract
+  // numberings 8 and 9 link to it (w:numStyleLink), with instances 5 and 6.
+  // Its definition is the numbered list's abstract numbering, which the
+  // numbering style's instance or the definition's w:styleLink gives
+  const listStyle = (via: 'instance' | 'styleLink') => ({
+    styles: withStyles(via === 'instance' ? '<w:style w:type="numbering" w:styleId="MyList"><w:name w:val="MyList"/><w:pPr>' + numPr(2) + '</w:pPr></w:style>' : ''),
+    numbering: (xml: string) => xml
+      .replace(/(<w:abstractNum w:abstractNumId="1"[^>]*>)/, (match: string) => match + (via === 'styleLink' ? '<w:styleLink w:val="MyList"/>' : ''))
+      .replace('<w:num ', () => [8, 9].map(id => '<w:abstractNum w:abstractNumId="' + id + '"><w:multiLevelType w:val="multilevel"/><w:numStyleLink w:val="MyList"/></w:abstractNum>').join('') + '<w:num ')
+      .replace('</w:numbering>', () => '<w:num w:numId="5"><w:abstractNumId w:val="8"/></w:num><w:num w:numId="6"><w:abstractNumId w:val="9"/></w:num></w:numbering>'),
+  });
+
+  test.each(['instance', 'styleLink'] as const)('numbers a list that links to a list style by its definition, found by its %s', async (via) => {
+    const md = '1. a\n2. b\n   1. x';
+    expect(await imported([[numPr(5, 0), 'a'], [numPr(5, 0), 'b'], [numPr(5, 1), 'x']], listStyle(via))).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    // Word numbers them 1 2, 1 2, 3, as docx4j measured it
+    ['and its definition\'s', 2, '1. a\n2. b\n\n<!-- -->\n\n1. x\n2. y\n3. c'],
+    // As docx4j counts them, which nothing measured
+    ['and another that links to it', 6, '1. a\n2. b\n\n<!-- -->\n\n1. x\n2. y\n3. c'],
+  ])('counts a list that links to a list style apart from the style\'s other lists: %s', async (_name, other, md) => {
+    const paragraphs: [string, string][] = [[numPr(other, 0), 'a'], [numPr(other, 0), 'b'], [numPr(5, 0), 'x'], [numPr(5, 0), 'y'], [numPr(other, 0), 'c']];
+    expect(await imported(paragraphs, listStyle('instance'))).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  // Instance 5 of the bullet list (abstract numbering 0) or the numbered one
+  // (1), with a level override of level 0 that has `override` in it
+  const overriding = (abstractNumId: number, override: string) => (xml: string) => xml.replace('</w:numbering>',
+    () => '<w:num w:numId="5"><w:abstractNumId w:val="' + abstractNumId + '"/><w:lvlOverride w:ilvl="0">' + override + '</w:lvlOverride></w:num></w:numbering>');
+  const lvl = (numFmt: string, start = 1) => '<w:lvl w:ilvl="0"><w:start w:val="' + start + '"/><w:numFmt w:val="' + numFmt + '"/><w:lvlText w:val="'
+    + (numFmt === 'bullet' ? '•' : '%1.') + '"/><w:lvlJc w:val="left"/></w:lvl>';
+
+  test.each([
+    ['bullets in a numbered list', overriding(1, lvl('bullet')), '- a\n- b'],
+    ['numbers in a bullet list', overriding(0, lvl('decimal')), '1. a\n2. b'],
+    // Word ignores a level override's w:start ([MS-OI29500] 2.1.292 b)
+    ['numbers in a bullet list from a start Word ignores', overriding(0, lvl('decimal', 5)), '1. a\n2. b'],
+    ['numbers in a bullet list from its start override', overriding(0, '<w:startOverride w:val="4"/>' + lvl('decimal')), '4. a\n5. b'],
+  ])('reads a level as its instance\'s level override formats it: %s', async (_name, numbering, md) => {
+    expect(await imported([[numPr(5, 0), 'a'], [numPr(5, 0), 'b']], { numbering })).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('keeps the format of a level that only an instance\'s level override formats for the abstract numbering\'s other instances', async () => {
+    const md = '1. a\n2. b';
+    expect(await imported([[numPr(2, 0), 'a'], [numPr(2, 0), 'b']], { numbering: overriding(1, lvl('bullet')) })).toBe(md);
+  });
+
+  test.each([
+    ['a format', '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/>' + pStyle('Other') + '<w:lvlText w:val="%1."/><w:lvlJc w:val="left"/></w:lvl>'],
+    ['no format', '<w:lvl w:ilvl="0">' + pStyle('Other') + '</w:lvl>'],
+  ])('numbers a paragraph of a style an instance\'s level override links the level to, with %s', async (_name, override) => {
+    // The override's link in place of the abstract numbering's, as docx4j reads it
+    const styles = withStyles(paragraphStyle('Other', numPr(5)));
+    const numbering = (xml: string) => overriding(1, override)(linkedToListNumber(xml));
+    const md = '1. a\n2. b';
+    expect(await imported([[pStyle('Other'), 'a'], [pStyle('Other'), 'b']], { styles, numbering })).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test('keeps a heading its style numbers a heading, which Word counts in its list', async () => {
+    const styles = (xml: string) => xml.replace(/(<w:style [^>]*w:styleId="Heading1">[^]*?<w:pPr>)/, (match: string) => match + numPr(2));
+    const md = '# H\n\n2. a';
+    expect(await imported([[pStyle('Heading1'), 'H'], [numPr(2, 0), 'a']], { styles })).toBe(md);
+    expect(await roundTrip(md)).toBe(md);
+  });
+});
+
 describe('HTML blocks in list items', () => {
   const roundTrip = async (md: string) => (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
 
