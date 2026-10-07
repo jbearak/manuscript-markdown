@@ -8069,9 +8069,10 @@ function prescanCommentIds(tokens: MdToken[], state: DocxGenState): void {
   const prescanRuns = (runs: MdRun[] = []) => {
     runs.forEach((run, i) => {
       // A {==...==} anchor's comment gets its ID before the ID ranges in its
-      // text, as it starts first. Import closes ranges that end together in
-      // ID order, so with their IDs the other way round, the order of their
-      // {/id} markers flipped on each round trip.
+      // text, as it starts first. Import starts ranges that start together in
+      // ID order, and ends those that end together in the order they
+      // started, so with their IDs the other way round, the order of their
+      // markers flipped on each round trip.
       if (run.type === 'critic_highlight' && runs[i + 1]?.type === 'critic_comment' && hasIdRange(run.innerRuns)) {
         run.reservedCommentId = state.commentId++;
       }

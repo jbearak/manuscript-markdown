@@ -938,6 +938,8 @@ sentence of a paragraph.{/2}
 
 In this example, comment 1 refers to `paragraph. This is the`.
 
+On DOCX import, ranges that end at the same place end in the order they start, as `{#1}a {#2}b{/1}{/2}`, whatever IDs Word gave the comments, which keeps them the same through the next round trip.
+
 #### ID Format
 
 IDs use `[a-zA-Z0-9_-]+` — alphanumeric characters, hyphens, and underscores. No spaces. The DOCX-to-Markdown converter generates numeric IDs; users may write descriptive IDs like `intro-note`.

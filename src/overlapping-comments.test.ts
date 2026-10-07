@@ -602,6 +602,46 @@ describe('Overlapping comments: round-trip', () => {
   });
 });
 
+describe('Overlapping comments: ranges that end together', () => {
+  const F = '$' + '$';
+  const bodies = '\n{#1>>one<<}\n{#2>>two<<}';
+
+  /** Word from `md` with its two comments' IDs the other way round, as Word
+   *  numbers comments in the order they're added, so one added later can
+   *  start first */
+  async function renumbered(md: string): Promise<Uint8Array> {
+    const JSZip = (await import('jszip')).default;
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const other = (id: string) => String(1 - Number(id));
+    for (const part of ['word/document.xml', 'word/comments.xml', 'word/footnotes.xml']) {
+      const xml = await zip.file(part)?.async('string');
+      if (xml) zip.file(part, xml.replace(/(<w:comment(?:RangeStart|RangeEnd|Reference)? w:id=")([01])"/g, (_m, el, id) => el + other(id) + '"'));
+    }
+    // The Markdown IDs go with their comments
+    const custom = await zip.file('docProps/custom.xml')!.async('string');
+    zip.file('docProps/custom.xml', custom.replace(/"([01])":/g, (_m, id) => '"' + other(id) + '":'));
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  test.each([
+    ['in a paragraph', '{#1}a {#2}b{/1}{/2}' + bodies],
+    ['with one from the paragraph before', '{#1}a\n\nb {#2}c{/1}{/2}' + bodies],
+    ['after an inline equation', '{#1}a {#2}$x${/1}{/2}' + bodies],
+    ['after a display equation', '{#1}a\n\n{#2}' + F + '\nx\n' + F + '{/1}{/2}' + bodies],
+    ['after a note\'s reference', '{#1}a {#2}b[^1]{/1}{/2}' + bodies + '\n\n[^1]: N.'],
+    ['after an image', '{#1}a {#2}![i](x.png){/1}{/2}' + bodies],
+    ['in a table\'s cell', '| h |\n| --- |\n| {#1}a {#2}b{/1}{/2} |\n' + bodies],
+    ['in a note', 'T[^1].\n\n[^1]: {#1}a {#2}b{/1}{/2}\n    {#1>>one<<}\n    {#2>>two<<}'],
+  ])('keeps two comments that end together %s in the order they start, whatever their IDs in Word', async (_name, md) => {
+    // Import ended them in the order of Word's IDs, {/2}{/1} here, and
+    // export numbers them in the order they start, so the next trip
+    // ended them the other way round
+    const once = (await convertDocx(await renumbered(md))).markdown;
+    expect(once.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(md + '\n');
+    expect((await convertDocx((await convertMdToDocx(once)).docx)).markdown).toBe(once);
+  });
+});
+
 describe('Overlapping comments: where the bodies go', () => {
   const seen = 'Seen {#1}a {#2}b{/1} c{/2} on.';
   const bodies = '{#1>>one<<}\n{#2>>two<<}';

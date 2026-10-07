@@ -7874,20 +7874,20 @@ function renderInlineRangeWithIds(
   }
 
   // Ends the comments open that aren't `currentIds` and starts those of
-  // them that aren't open, as before each item
+  // them that aren't open, as before each item. prevCommentIds keeps the
+  // order they opened in, which those that end together end in: export
+  // numbers comments in the order they open, and import reads ranges that
+  // end together by number, so another order wouldn't come back
   function enterComments(currentIds: Set<string>): void {
-    for (const cid of [...prevCommentIds].sort()) {
+    for (const cid of prevCommentIds) {
       if (!currentIds.has(cid)) {
         out += `{/${remap(cid)}}`;
         collectBody(cid);
       }
     }
-    for (const cid of [...currentIds].sort()) {
-      if (!prevCommentIds.has(cid)) {
-        out += `{#${remap(cid)}}`;
-      }
-    }
-    prevCommentIds = new Set(currentIds);
+    const opening = [...currentIds].sort().filter(cid => !prevCommentIds.has(cid));
+    for (const cid of opening) out += `{#${remap(cid)}}`;
+    prevCommentIds = new Set([...prevCommentIds].filter(cid => currentIds.has(cid)).concat(opening));
   }
 
   while (i < segment.length) {
@@ -7931,18 +7931,7 @@ function renderInlineRangeWithIds(
     const highlightEnd = 'commentIds' in item ? highlightGroupEnd(segment, i, segmentEnd, item.commentIds) : i;
     if (highlightEnd > i && 'commentIds' in item) {
       const currentIds = item.commentIds;
-      for (const cid of [...prevCommentIds].sort()) {
-        if (!currentIds.has(cid)) {
-          out += `{/${remap(cid)}}`;
-          collectBody(cid);
-        }
-      }
-      for (const cid of [...currentIds].sort()) {
-        if (!prevCommentIds.has(cid)) {
-          out += `{#${remap(cid)}}`;
-        }
-      }
-      prevCommentIds = new Set(currentIds);
+      enterComments(currentIds);
       [out, lastSpan] = appendHighlightGroup(out, segment, i, highlightEnd, segmentEnd, lastSpan, noteLabels);
       i = highlightEnd;
       continue;
@@ -7950,18 +7939,7 @@ function renderInlineRangeWithIds(
 
     if (item.type === 'citation') {
       const currentIds = item.commentIds;
-      for (const cid of [...prevCommentIds].sort()) {
-        if (!currentIds.has(cid)) {
-          out += `{/${remap(cid)}}`;
-          collectBody(cid);
-        }
-      }
-      for (const cid of [...currentIds].sort()) {
-        if (!prevCommentIds.has(cid)) {
-          out += `{#${remap(cid)}}`;
-        }
-      }
-      prevCommentIds = new Set(currentIds);
+      enterComments(currentIds);
 
       const citeText = citationSeparator(out, item, lastSpan) + citationText(item);
       [out, lastSpan] = appendRevised(out, citeText, item, lastSpan);
@@ -7971,18 +7949,7 @@ function renderInlineRangeWithIds(
 
     if (item.type === 'math') {
       const currentIds = item.commentIds;
-      for (const cid of [...prevCommentIds].sort()) {
-        if (!currentIds.has(cid)) {
-          out += `{/${remap(cid)}}`;
-          collectBody(cid);
-        }
-      }
-      for (const cid of [...currentIds].sort()) {
-        if (!prevCommentIds.has(cid)) {
-          out += `{#${remap(cid)}}`;
-        }
-      }
-      prevCommentIds = new Set(currentIds);
+      enterComments(currentIds);
 
       const mathText = item.display ? MATH_FENCE + '\n' + item.latex + '\n' + MATH_FENCE : '$' + item.latex + '$';
       if (item.display) out += wrapWithRevision(mathText, item.revision);
@@ -7996,18 +7963,7 @@ function renderInlineRangeWithIds(
 
     if (item.type === 'footnote_ref') {
       const currentIds = item.commentIds;
-      for (const cid of [...prevCommentIds].sort()) {
-        if (!currentIds.has(cid)) {
-          out += `{/${remap(cid)}}`;
-          collectBody(cid);
-        }
-      }
-      for (const cid of [...currentIds].sort()) {
-        if (!prevCommentIds.has(cid)) {
-          out += `{#${remap(cid)}}`;
-        }
-      }
-      prevCommentIds = new Set(currentIds);
+      enterComments(currentIds);
       [out, lastSpan] = appendRevised(out, footnoteRefText(item, noteLabels), item, lastSpan);
       i++;
       continue;
@@ -8016,18 +7972,7 @@ function renderInlineRangeWithIds(
     // image: emit with comment ID tracking
     if (item.type === 'image') {
       const currentIds = item.commentIds;
-      for (const cid of [...prevCommentIds].sort()) {
-        if (!currentIds.has(cid)) {
-          out += `{/${remap(cid)}}`;
-          collectBody(cid);
-        }
-      }
-      for (const cid of [...currentIds].sort()) {
-        if (!prevCommentIds.has(cid)) {
-          out += `{#${remap(cid)}}`;
-        }
-      }
-      prevCommentIds = new Set(currentIds);
+      enterComments(currentIds);
       const imgText = imageMarkdown(item, imageFormatMapping);
       [out, lastSpan] = appendRevised(out, imgText, item, lastSpan);
       i++;
@@ -8037,18 +7982,7 @@ function renderInlineRangeWithIds(
     // html_comment: emit raw <!-- ... --> with comment ID tracking
     if (item.type === 'html_comment') {
       const currentIds = item.commentIds;
-      for (const cid of [...prevCommentIds].sort()) {
-        if (!currentIds.has(cid)) {
-          out += `{/${remap(cid)}}`;
-          collectBody(cid);
-        }
-      }
-      for (const cid of [...currentIds].sort()) {
-        if (!prevCommentIds.has(cid)) {
-          out += `{#${remap(cid)}}`;
-        }
-      }
-      prevCommentIds = new Set(currentIds);
+      enterComments(currentIds);
       out += markdownComment(item.text, segment[i + 1]?.type === 'html_comment', opts?.cell);
       i++;
       continue;
@@ -8061,20 +7995,7 @@ function renderInlineRangeWithIds(
 
     const currentIds = item.commentIds;
 
-    for (const cid of [...prevCommentIds].sort()) {
-      if (!currentIds.has(cid)) {
-        out += `{/${remap(cid)}}`;
-        collectBody(cid);
-      }
-    }
-
-    for (const cid of [...currentIds].sort()) {
-      if (!prevCommentIds.has(cid)) {
-        out += `{#${remap(cid)}}`;
-      }
-    }
-
-    prevCommentIds = new Set(currentIds);
+    enterComments(currentIds);
 
     const link = linkGroup(segment, i, segmentEnd, currentIds);
     if (link) {
@@ -8130,7 +8051,7 @@ function renderInlineRangeWithIds(
   // later paragraph
   openIdComments?.clear();
   const rendered = new Set(segment.slice(startIndex, i));
-  for (const cid of [...prevCommentIds].sort()) {
+  for (const cid of prevCommentIds) {
     const last = lastCommentItem?.get(cid);
     if (last && !rendered.has(last)) {
       openIdComments?.add(cid);
@@ -10693,8 +10614,11 @@ export function buildMarkdown(
    *  and close after them, unless the range goes on; and the bodies of
    *  those that close. */
   function displayMathWithComments(block: string, item: ContentItem): { block: string; bodies: string[] } {
-    const ids = [...('commentIds' in item ? item.commentIds ?? [] : [])].sort();
+    const over = [...('commentIds' in item ? item.commentIds ?? [] : [])];
     const open = renderOpts.openIdComments;
+    // Those open from the text before in the order they opened, which those
+    // that end together end in (see enterComments in renderInlineRangeWithIds)
+    const ids = [...open].filter(id => over.includes(id)).concat(over.filter(id => !open.has(id)).sort());
     const remap = (id: string) => commentIdRemap.get(id) ?? id;
     let before = '';
     let after = '';
