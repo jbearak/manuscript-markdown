@@ -1165,10 +1165,10 @@ function ommlChildrenToLatex(children: XmlNode[]): string {
     const next = trackedChange(children[i + 1]);
     // A substitution needs one author and time, as tryRenderSubstitution in converter.ts requires
     if (change.type === 'w:del' && next?.type === 'w:ins' && next.author === change.author && next.date === change.date) {
-      contents = [ommlChildrenToLatex(change.children), ommlChildrenToLatex(next.children)];
+      contents = [trackedChangeLatex(change.children), trackedChangeLatex(next.children)];
       i++;
     } else {
-      contents = change.type === 'w:ins' ? ['', ommlChildrenToLatex(change.children)] : [ommlChildrenToLatex(change.children), ''];
+      contents = change.type === 'w:ins' ? ['', trackedChangeLatex(change.children)] : [trackedChangeLatex(change.children), ''];
     }
     const [oldLatex, newLatex] = contents;
     const markup = oldLatex && newLatex ? '{~~' + oldLatex + '~>' + newLatex + '~~}'
@@ -1185,6 +1185,21 @@ function ommlChildrenToLatex(children: XmlNode[]): string {
     markupEndsInCommand = contents.some(latex => /\\[A-Za-z]+$/.test(latex));
   }
   return result;
+}
+
+/** The LaTeX of a tracked change's content, or '' where it is only runs of
+ *  whitespace without xml:space="preserve", which Word drops and so shows as no
+ *  change. Export writes one so for the padding of a change such as
+ *  {++ \! ++}, whose command Word has no form for (see keepWhitespaceChanges
+ *  in latex-to-omml.ts). */
+function trackedChangeLatex(children: XmlNode[]): string {
+  const runs = children.filter(child => child['#text'] === undefined || String(child['#text']).trim());
+  const dropped = runs.length > 0 && runs.every(run => run['m:r'] !== undefined && asXmlNodes(run['m:r']).every(part => {
+    if (part['m:t'] === undefined) return part['m:rPr'] !== undefined || part['w:rPr'] !== undefined || (part['#text'] !== undefined && !String(part['#text']).trim());
+    const attrs = (part[':@'] ?? {}) as Record<string, string | undefined>;
+    return attrs['@_xml:space'] !== 'preserve' && /^[ \t\r\n]*$/.test(extractText(asXmlNodes(part['m:t'])));
+  }));
+  return dropped ? '' : ommlChildrenToLatex(children);
 }
 
 /** A w:ins or w:del inside an equation: Word's record of an edit to it, which

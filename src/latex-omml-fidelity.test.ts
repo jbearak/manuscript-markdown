@@ -608,16 +608,41 @@ describe('spaces Word keeps in an equation', () => {
     expect((await convertDocx(again)).markdown).toBe(markdown);
   });
 
-  // Word has no form for these, so the change comes back as its padding
+  // Word has no form for these, so the change is only its padding, which
+  // Word drops, and comes back as none, as Word shows it
   test.each([
-    ['a negative thin space', '$a{++ \\! ++}b$'],
-    ['a command Word ignores', '$a{-- \\displaystyle --}b$'],
-  ])('the whitespace around a command that gives nothing in a change is the source\'s, which Word drops: %s', async (_name, md) => {
+    ['a negative thin space', '$a{++ \\! ++}b$', '$ab$'],
+    ['a command Word ignores', '$a{-- \\displaystyle --}b$', '$ab$'],
+    ['the deletion of a substitution', '$a{~~ \\! ~>x~~}b$', '$a{++x++}b$'],
+  ])('the whitespace around a command that gives nothing in a change is the source\'s, which Word drops: %s', async (_name, md, back) => {
     const docx = (await convertMdToDocx(md + '\n')).docx;
     const xml = await equationXml(docx);
     const unmarked = md.replace(/\{(\+\+|--)(.*?)\1\}/, (_change, _mark, content: string) => content);
-    expect(xml.replace(/<\/?w:(?:ins|del)\b[^>]*>/g, '')).toBe(await equationXml((await convertMdToDocx(unmarked + '\n')).docx));
+    if (unmarked !== md) expect(xml.replace(/<\/?w:(?:ins|del)\b[^>]*>/g, '')).toBe(await equationXml((await convertMdToDocx(unmarked + '\n')).docx));
     expect(xml).not.toContain('xml:space');
+    const markdown = (await convertDocx(docx)).markdown;
+    expect(markdown).toBe(back + '\n');
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  const ins = (runs: string) => '<w:ins w:id="0" w:author="A" w:date="2026-01-01T00:00:00Z">' + runs + '</w:ins>';
+  const del = (runs: string) => '<w:del w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z">' + runs + '</w:del>';
+  test.each([
+    ['an insertion of a space', run('a') + ins(run(' ')) + run('b'), 'ab'],
+    ['a deletion of spaces in runs of their own', run('a') + del(run(' ') + run('  ')) + run('b'), 'ab'],
+    ['a styled space', run('a') + ins(styled(' ')) + run('b'), 'ab'],
+    ['the deletion of a substitution', run('a') + del(run(' ')) + ins(run('x')) + run('b'), 'a{++x++}b'],
+    ['the insertion of a substitution', run('a') + del(run('x')) + ins(run(' ')) + run('b'), 'a{--x--}b'],
+  ])('a change in Word of only whitespace without xml:space="preserve", which Word drops, reads as none: %s', (_name, omml, latex) => {
+    expect(importOmml(omml)).toBe(latex);
+  });
+
+  test.each([
+    ['a space Word keeps', run('a') + ins(kept(' ')) + run('b'), 'a{++ ++}b'],
+    ['a space beside a character', run('a') + ins(run(' ') + run('x')) + run('b'), 'a{++ x++}b'],
+    ['a space that isn\'t whitespace to Word, an em space', run('a') + ins(run('\u2003')) + run('b'), 'a{++\u2003++}b'],
+  ])('a change in Word with more than whitespace it drops reads back: %s', (_name, omml, latex) => {
+    expect(importOmml(omml)).toBe(latex);
   });
 
   test('an equation replaced by only a space that Word keeps, such as an em space, goes without xml:space="preserve"', async () => {

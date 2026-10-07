@@ -25,7 +25,9 @@ as deleted and `+c` as inserted. These fragments render as equation content in
 the preview and become tracked math revisions when exported to Word. A change
 of only whitespace, as in `$a{++ ++}b$`, keeps its whitespace in Word, so Word
 keeps the change. The whitespace around a command, as in
-`$a{++ \quad ++}b$`, is the source's, which Word ignores, as LaTeX does.
+`$a{++ \quad ++}b$`, is the source's, which Word ignores, as LaTeX does. Where
+Word has no form for the command, as in `$a{++ \! ++}b$`, Word shows no change,
+and the change doesn't come back on import.
 
 ## Quick Examples
 
