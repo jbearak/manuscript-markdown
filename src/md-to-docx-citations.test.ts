@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { generateCitation, orderRPr, generateCitationId, generateMathXml, escapeXml, generateMissingKeysXml, htmlToOoxmlRuns, generateFallbackText, bibliographyEntryAsShown } from './md-to-docx-citations';
+import { generateCitation, orderRPr, generateCitationId, generateMathXml, escapeXml, generateMissingKeysXml, htmlToOoxmlRuns, generateFallbackText, bibliographyEntryAsShown, createCiteprocEngine, renderBibliography, renderCitationText } from './md-to-docx-citations';
 import { BibtexEntry, parseBibtex } from './bibtex-parser';
 import { parseMd, type MdRun } from './md-to-docx';
 
@@ -890,6 +890,21 @@ describe('citation prefixes', () => {
     const prefixes = ['e.g.,', 'cf.'];
     expect(generateFallbackText(['smith2020', 'doe2021'], makeEntries(), undefined, new Set(['doe2021']), prefixes))
       .toBe('(e.g., Smith 2020; cf. 2021)');
+  });
+});
+
+describe('a BibTeX field wrapped across lines', () => {
+  // Its line end and indentation went to citeproc, which wrote them as
+  // no-break spaces, a gap in the bibliography and in a note's citation
+  const bibtex = '@book{b,\n  author = {Smith,\n    Sam},\n  title = {A long title that\n           wraps onto a second line},\n  publisher = {Press},\n  year = {2019}\n}\n';
+
+  it.each(['apa', 'chicago-notes-bibliography'])('shows one space in %s', style => {
+    const engine = createCiteprocEngine(parseBibtex(bibtex), style)!;
+    engine.updateItems(['b']);
+    const entry = renderBibliography(engine)!.entries[0];
+    expect(entry).toMatch(/that wraps/i);
+    expect(entry).not.toContain('\u00A0');
+    expect(renderCitationText(engine, ['b'])).not.toContain('\u00A0');
   });
 });
 

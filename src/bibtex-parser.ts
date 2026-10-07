@@ -1,5 +1,5 @@
 // --- Implementation notes ---
-// - Verbatim fields bypass brace stripping, TeX decoding, NFC normalization, and serialization escaping.
+// - Verbatim fields bypass whitespace collapsing, brace stripping, TeX decoding, NFC normalization, and serialization escaping.
 // - TeX decoding is intentionally limited to standard text accents; unknown commands remain literal.
 // - Non-command braces remain intact; braces owned by recognized accent expressions are consumed.
 // - Entry scanning: count consecutive preceding backslashes before `"` to detect quote-state correctly.
@@ -267,6 +267,19 @@ function decodeBibtexText(input: string): string {
   return output.normalize('NFC');
 }
 
+/** A field's whitespace as BibTeX reads it: each run of spaces, tabs and
+ *  line ends one space, and none at either end, so a value wrapped across
+ *  lines reads as one line, not with its indentation. A no-break space
+ *  written as itself stays. A note keeps its line ends, though not the
+ *  spaces around them: Zotero keeps its Extra field there, which citeproc
+ *  reads a line at a time, as `original-date: 1850`. */
+function collapseBibtexWhitespace(fieldName: string, value: string): string {
+  if (fieldName === 'note') {
+    return value.split(/\r\n?|\n/).map(line => line.replace(/[ \t\f]+/g, ' ').replace(/^ | $/g, '')).join('\n').replace(/^\n+|\n+$/g, '');
+  }
+  return value.replace(/[ \t\r\n\f]+/g, ' ').replace(/^ | $/g, '');
+}
+
 function decodeBibtexFieldValue(
   fieldName: string,
   value: string,
@@ -274,9 +287,12 @@ function decodeBibtexFieldValue(
 ): string {
   if (VERBATIM_BIBTEX_FIELDS.has(fieldName)) return value;
 
+  // Before the braces around the value come off, and again after, as their
+  // text has its own edges, as in {{ Title }}
+  const collapsed = collapseBibtexWhitespace(fieldName, value);
   const semanticValue = braceDelimited && !AUTHOR_FIELDS.has(fieldName)
-    ? stripOuterBraces(value)
-    : value;
+    ? collapseBibtexWhitespace(fieldName, stripOuterBraces(collapsed))
+    : collapsed;
   return decodeBibtexText(semanticValue);
 }
 
