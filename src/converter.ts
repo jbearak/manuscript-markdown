@@ -7,7 +7,7 @@ import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
 import { keepParagraphEdgeWhitespace } from './html-entities';
 import { findStyleElement } from './style-element';
-import { xmlAttribute, xmlElement, xmlOn, xmlStartTag } from './xml-elements';
+import { replaceXmlElements, xmlAttribute, xmlElement, xmlOn, xmlStartTag } from './xml-elements';
 import htmlBlockNames from 'markdown-it/lib/common/html_blocks.mjs';
 import { HTML_OPEN_CLOSE_TAG_RE, HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
 import { isMdAsciiPunct, isPunctChar, isWhiteSpace, unescapeAll } from 'markdown-it/lib/common/utils.mjs';
@@ -1758,8 +1758,9 @@ function styleChildren(node: XmlNode): XmlNode[] {
 
 /** Whether Word ignores the w:style element `element`, its properties and
  *  its base (see STYLES_WORD_IGNORES), as styleChildren reads it: for the
- *  readers of a style's text along its w:basedOn, import's and export's
- *  (see withoutInheritedSizes in md-to-docx.ts), which then stop there */
+ *  readers of a style's text along its w:basedOn, import's, which stops
+ *  there, and export's, which leaves a style whose chain reaches one as it
+ *  is (see withoutInheritedSizes in md-to-docx.ts) */
 export function wordIgnoresStyle(element: string): boolean {
   const tag = xmlStartTag(element, 'w:style')?.tag;
   return STYLES_WORD_IGNORES.has((tag === undefined ? '' : xmlAttribute(tag, 'w:styleId') ?? '').toLowerCase());
@@ -16216,8 +16217,9 @@ async function allNamed<T extends Record<string, PromiseLike<unknown>>>(promises
 const FONT_STYLE_TOGGLES = ['w:b', 'w:i', 'w:u', 'w:smallCaps', 'w:caps'];
 
 /** Properties without a tracked change's record of what they were before
- *  (w:rPrChange, w:pPrChange), which Word doesn't show */
-const withoutFormatChanges = (xml: string) => xml.replace(/<w:(rPrChange|pPrChange)\b[^>]*?(?:\/>|>[\s\S]*?<\/w:\1>)/g, '');
+ *  (w:rPrChange, w:pPrChange), which Word doesn't show, each read as an XML
+ *  parser reads it (see replaceXmlElements) */
+const withoutFormatChanges = (xml: string) => replaceXmlElements(xml, ['w:rPrChange', 'w:pPrChange'], () => '');
 
 /** An attribute of the first element `name` in `xml` (see xmlStartTag and
  *  xmlAttribute) */
@@ -16319,8 +16321,9 @@ function xmlNumberId(value: string): string {
  *  in points, as 7pt, rounded down to a half-point, as Word reads it, so
  *  7.4pt is 14 (see universalMeasure), but not one in another unit, which
  *  Word ignores or isn't known to read. Every reader of a run's or a
- *  style's size goes through this, so equal sizes read as one. */
-function xmlHalfPoints(value: string | undefined): number | undefined {
+ *  style's size, import's and export's (see withoutInheritedSizes in
+ *  md-to-docx.ts), goes through this, so equal sizes read as one. */
+export function xmlHalfPoints(value: string | undefined): number | undefined {
   if (value === undefined) return undefined;
   return xmlNumber(value) ?? universalMeasure(value, false, HALF_POINTS_PER_UNIT);
 }

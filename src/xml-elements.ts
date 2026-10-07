@@ -57,3 +57,22 @@ export function xmlAttribute(tag: string, name: string): string | undefined {
 export function xmlOn(value: string | undefined): boolean {
   return value === 'true' || value === '1' || value === 'on';
 }
+
+/** `xml` with each element of `names` (see xmlElement) as `replace` gives
+ *  it, from its XML and its name, as a tracked change's record (w:rPrChange,
+ *  w:pPrChange) set aside or left out. Each is read from where the one
+ *  before ends, so one inside another goes with it, and one with no end
+ *  stays as it is. */
+export function replaceXmlElements(xml: string, names: string[], replace: (element: string, name: string) => string): string {
+  const starts = new RegExp('<(' + names.join('|') + ')(?=[\\s/>])', 'g');
+  let out = '';
+  let at = 0;
+  for (let found = starts.exec(xml); found; found = starts.exec(xml)) {
+    const element = xmlElement(xml, found[1], found.index);
+    if (element === undefined || element.start !== found.index) continue;
+    out += xml.slice(at, element.start) + replace(xml.slice(element.start, element.end), found[1]);
+    at = element.end;
+    starts.lastIndex = element.end;
+  }
+  return out + xml.slice(at);
+}
