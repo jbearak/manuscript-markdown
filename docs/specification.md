@@ -232,6 +232,8 @@ The `table-col-widths` frontmatter field controls column width ratios for all ta
 
 **Priority** (highest to lowest): per-table override → frontmatter default → auto (Word default).
 
+A table with set widths spans its column: the width of its section's text, between its margins and any binding gutter, or the narrowest of the template's columns, which each section takes, fitted to that text, or, in a footnote, one of the footnotes' own columns, where the template gives them some. Without set widths, the table's grid, which Word Online sizes it by, divides that same width, while Word itself sizes the table to its content.
+
 Per-table overrides and frontmatter defaults are preserved through DOCX round-trips, a per-table override even where it's the frontmatter's.
 
 ### Page Orientation Sections

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'bun:test';
 import JSZip from 'jszip';
 import * as fc from 'fast-check';
 import { XMLValidator } from 'fast-xml-parser';
+import fc from 'fast-check';
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -706,6 +707,207 @@ async function pageNumbering(docx: Uint8Array): Promise<string[]> {
     return !pgNumType || /<w:pgMar\b[^>]*\/><w:pgNumType\b[^>]*\/><w:cols\b/.test(sectPr) ? pgNumType : 'out of place: ' + pgNumType;
   });
 }
+
+// The children of CT_SectPr in its order (ECMA-376 Part 1 §17.6.17), the
+// references, any of up to six, first
+const SECT_PR_ORDER = ['headerReference', 'footnotePr', 'endnotePr', 'type', 'pgSz', 'pgMar', 'paperSrc', 'pgBorders', 'lnNumType', 'pgNumType', 'cols',
+  'formProt', 'vAlign', 'noEndnote', 'titlePg', 'textDirection', 'bidi', 'rtlGutter', 'docGrid', 'printerSettings', 'sectPrChange'];
+// Word's narrowest column, in twips
+const NARROWEST_COLUMN = 720;
+/** An element's children, each whole, as a sectPr's */
+function childrenOf(element: string): string[] {
+  const children: string[] = [];
+  let depth = 0, start = 0;
+  const inner = element.replace(/^<[^>]*>/, '').replace(/<\/[^>]+>$/, '');
+  for (const m of inner.matchAll(/<(\/?)([\w.:-]+)\b[^>]*?(\/?)>/g)) {
+    if (m[1]) { if (--depth === 0) children.push(inner.slice(start, m.index! + m[0].length)); }
+    else if (m[3]) { if (depth === 0) children.push(m[0]); }
+    else if (depth++ === 0) start = m.index!;
+  }
+  return children;
+}
+/** A sectPr's children as a consumer reads them that takes, of markup
+ *  compatibility's alternatives, and of those in them, or in its columns,
+ *  `branch`, or, where it's Word, the choice where it needs w14, which Word
+ *  understands, and else the fallback */
+function readAs(sectPr: string, branch: 'mc:Choice' | 'mc:Fallback' | 'Word'): string[] {
+  const flatten = (children: string[]): string[] => children.flatMap(child => {
+    if (child.startsWith('<w:cols') && child.includes('<mc:AlternateContent')) return [/^<[^>]*>/.exec(child)![0] + flatten(childrenOf(child)).join('') + '</w:cols>'];
+    if (!child.startsWith('<mc:AlternateContent')) return [child];
+    const branches = childrenOf(child);
+    const taken = branch !== 'Word' ? branch : branches.some(b => b.startsWith('<mc:Choice Requires="w14"')) ? 'mc:Choice' : 'mc:Fallback';
+    const chosen = branches.find(b => b.startsWith('<' + taken));
+    return chosen ? flatten(childrenOf(chosen)) : [];
+  });
+  return flatten(childrenOf(sectPr));
+}
+const attributeOf = (element: string | undefined, name: string) => element ? new RegExp('\\sw:' + name + '="([^"]*)"').exec(element)?.[1] : undefined;
+// Twips in the units a measure can give
+const TWIPS_PER: Record<string, number> = { mm: 1440 / 25.4, cm: 1440 / 2.54, in: 1440, pt: 20, pc: 240, pi: 240 };
+/** A measure in twips, or in one of those units, in twips */
+const twips = (value: string | undefined) => {
+  const m = /^(-?\d+(?:\.\d+)?)(mm|cm|in|pt|pc|pi)?$/.exec(value ?? '');
+  return m ? Math.round(Number(m[1]) * (m[2] ? TWIPS_PER[m[2]] : 1)) : undefined;
+};
+/** The width of the text of a section whose properties are `read`, and of
+ *  its narrowest column, and what's wrong with its columns: one narrower
+ *  than Word makes them, or columns of their own widths, with the spaces
+ *  after them, wider than the text */
+function columnsOf(read: string[]): { text: number; narrowest: number; problem?: string } {
+  const pgSz = read.find(child => child.startsWith('<w:pgSz')), pgMar = read.find(child => child.startsWith('<w:pgMar')), cols = read.find(child => child.startsWith('<w:cols'));
+  const text = (twips(attributeOf(pgSz, 'w')) ?? 12240) - (twips(attributeOf(pgMar, 'left')) ?? 1440) - (twips(attributeOf(pgMar, 'right')) ?? 1440);
+  if (cols && /^(?:0|false|off)$/.test(attributeOf(cols, 'equalWidth') ?? '')) {
+    const own = [...cols.matchAll(/<w:col\b[^>]*>/g)].map(([col]) => col);
+    const widths = own.map(col => twips(attributeOf(col, 'w')) ?? 0);
+    const total = own.reduce((sum, col, i) => sum + widths[i] + (i < own.length - 1 ? twips(attributeOf(col, 'space')) ?? 0 : 0), 0);
+    const narrowest = Math.min(...widths);
+    return { text, narrowest, problem: narrowest < NARROWEST_COLUMN ? 'a column ' + narrowest + ' wide' : total > text ? 'columns ' + total + ' wide in ' + text : undefined };
+  }
+  if (!cols) return { text, narrowest: text };
+  const num = Number(attributeOf(cols, 'num') ?? 1), space = twips(attributeOf(cols, 'space')) ?? 720;
+  const narrowest = (text - (num - 1) * space) / num;
+  return { text, narrowest, problem: num > 1 && narrowest < NARROWEST_COLUMN ? num + ' columns ' + space + ' apart in ' + text : undefined };
+}
+/** What's wrong with a sectPr as each of markup compatibility's
+ *  alternatives in it reads: a child out of CT_SectPr's order or twice, or
+ *  columns that don't fit (see columnsOf) */
+function sectPrProblems(sectPr: string): string[] {
+  const problems: string[] = [];
+  for (const branch of ['mc:Choice', 'mc:Fallback'] as const) {
+    const read = readAs(sectPr, branch);
+    let last = -1;
+    for (const child of read) {
+      const name = /^<w:(\w+)/.exec(child)?.[1] ?? child;
+      const rank = SECT_PR_ORDER.indexOf(name === 'footerReference' ? 'headerReference' : name);
+      if (rank === -1) problems.push(branch + ': ' + name + ' is no section property');
+      else if (rank < last || rank === last && rank !== 0) problems.push(branch + ': ' + name + ' out of order or twice');
+      last = Math.max(last, rank);
+    }
+    const { problem } = columnsOf(read);
+    if (problem) problems.push(branch + ': ' + problem);
+  }
+  return problems;
+}
+
+describe('a template\'s section properties, in each section export writes', () => {
+  // A template's properties in CT_SectPr's order, each as markup
+  // compatibility's choice and fallback would have it, where they hold it
+  // Columns, their measures each in twips or in points, as `measure` writes them
+  type Columns = { num: number; space?: number } | Array<{ width: number; space: number }>;
+  const equalColumns = fc.record({ num: fc.integer({ min: 1, max: 3 }), space: fc.option(fc.constantFrom(0, 360, 720, 4000, 9600, 12000), { nil: undefined }) });
+  const ownColumns = fc.array(fc.record({ width: fc.integer({ min: 500, max: 13000 }), space: fc.constantFrom(0, 360, 720) }), { minLength: 1, maxLength: 3 });
+  const columns = fc.option(fc.oneof<fc.Arbitrary<Columns>[]>(equalColumns, ownColumns), { nil: undefined });
+  // Columns of their own widths can be held in alternatives in the columns
+  const colsXml = (columns: Columns, measure: (twips: number) => string, held: boolean) => {
+    if (!Array.isArray(columns)) return '<w:cols w:num="' + columns.num + '"' + (columns.space === undefined ? '' : ' w:space="' + measure(columns.space) + '"') + '/>';
+    const own = columns.map(({ width, space }, i) => '<w:col w:w="' + measure(width) + '"' + (i < columns.length - 1 ? ' w:space="' + measure(space) + '"' : '') + '/>').join('');
+    return '<w:cols w:num="' + columns.length + '" w:space="720" w:equalWidth="0">'
+      + (held ? '<mc:AlternateContent><mc:Choice Requires="w14">' + own + '</mc:Choice><mc:Fallback>' + own + '</mc:Fallback></mc:AlternateContent>' : own) + '</w:cols>';
+  };
+  const property = (xml: string) => fc.option(fc.constant(xml), { nil: undefined });
+  const template = fc.record({
+    landscape: fc.boolean(),
+    left: fc.constantFrom(720, 1440, 2160),
+    right: fc.constantFrom(720, 1440, 2160),
+    footnotePr: property('<w:footnotePr><w:numFmt w:val="lowerRoman"/></w:footnotePr>'),
+    endnotePr: property('<w:endnotePr><w:numFmt w:val="upperRoman"/></w:endnotePr>'),
+    pgMar: fc.boolean(),
+    paperSrc: property('<w:paperSrc w:first="1" w:other="1"/>'),
+    pgBorders: property('<w:pgBorders><w:top w:val="single" w:sz="4" w:space="24" w:color="auto"/></w:pgBorders>'),
+    lnNumType: property('<w:lnNumType w:countBy="1"/>'),
+    pgNumType: property('<w:pgNumType w:fmt="lowerRoman"/>'),
+    cols: columns,
+    // The fallback's own columns, where they differ
+    fallbackCols: columns,
+    formProt: property('<w:formProt w:val="0"/>'),
+    vAlign: property('<w:vAlign w:val="center"/>'),
+    noEndnote: property('<w:noEndnote/>'),
+    titlePg: property('<w:titlePg/>'),
+    textDirection: property('<w:textDirection w:val="lrTb"/>'),
+    bidi: property('<w:bidi w:val="0"/>'),
+    docGrid: property('<w:docGrid w:linePitch="360"/>'),
+    // Whether each property starts a run of them of its own, whether each
+    // run is held in alternatives, whether Word reads its choice, which
+    // needs w14, or its fallback, as its choice needs another namespace,
+    // and whether those alternatives are in a choice's of their own
+    starts: fc.array(fc.boolean(), { minLength: 20, maxLength: 20 }),
+    held: fc.array(fc.boolean(), { minLength: 20, maxLength: 20 }),
+    read: fc.array(fc.boolean(), { minLength: 20, maxLength: 20 }),
+    nested: fc.array(fc.boolean(), { minLength: 20, maxLength: 20 }),
+    // Whether margins are in inches, and columns in points
+    units: fc.boolean(),
+    // And whether columns of their own widths are in alternatives in them
+    heldColumns: fc.boolean(),
+  }).map(t => {
+    const inches = (twips: number) => t.units ? twips / 1440 + 'in' : String(twips);
+    const points = (twips: number) => t.units ? twips / 20 + 'pt' : String(twips);
+    const margins = '<w:pgMar w:top="1440" w:right="' + inches(t.right) + '" w:bottom="1440" w:left="' + inches(t.left) + '" w:header="720" w:footer="720" w:gutter="0"/>';
+    const page = t.landscape ? '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>' : '<w:pgSz w:w="12240" w:h="15840"/>';
+    const properties: Array<[string, string]> = [t.footnotePr, t.endnotePr, page, t.pgMar ? margins : undefined, t.paperSrc, t.pgBorders, t.lnNumType, t.pgNumType]
+      .filter((xml): xml is string => xml !== undefined).map(xml => [xml, xml]);
+    if (t.cols) properties.push([colsXml(t.cols, points, t.heldColumns), colsXml(t.fallbackCols ?? t.cols, points, t.heldColumns)]);
+    for (const xml of [t.formProt, t.vAlign, t.noEndnote, t.titlePg, t.textDirection, t.bidi, t.docGrid]) if (xml) properties.push([xml, xml]);
+    const runs: Array<Array<[string, string]>> = [];
+    properties.forEach((p, i) => i > 0 && !t.starts[i] ? runs[runs.length - 1].push(p) : runs.push([p]));
+    return '<w:sectPr>' + runs.map((run, i) => {
+      const [choice, fallback] = [0, 1].map(side => run.map(p => p[side]).join(''));
+      if (!t.held[i]) return choice;
+      const alternatives = '<mc:AlternateContent><mc:Choice Requires="' + (t.read[i] ? 'w14"' : 'x" xmlns:x="urn:example:x"') + '>' + choice + '</mc:Choice><mc:Fallback>' + fallback + '</mc:Fallback></mc:AlternateContent>';
+      return t.nested[i] ? '<mc:AlternateContent><mc:Choice Requires="w14">' + alternatives + '</mc:Choice><mc:Fallback>' + fallback + '</mc:Fallback></mc:AlternateContent>' : alternatives;
+    }).join('') + '</w:sectPr>';
+  })
+    // As Word lets a template be: its columns fit its own page
+    .filter(sectPr => sectPrProblems(sectPr).length === 0);
+  const figure = '![f](f.png){width=1200 height=600}';
+  const table = '| a | b |\n| --- | --- |\n| 1 | 2 |';
+  const documents = [
+    'P ' + figure + '\n\n' + table + '\n\n<!-- landscape -->\n\n' + figure + '\n\n' + table + '\n\n<!-- /landscape -->\n\n<!-- portrait -->\n\n' + figure + '\n\n' + table
+      + '\n\n<!-- /portrait -->\n\n<!-- table-orientation: landscape -->\n' + table + '\n\nEnd ' + figure + '\n',
+    'P.\n\n<!-- portrait -->\n\n' + figure + '\n\n' + table + '\n\n<!-- /portrait -->\n',
+    'P.\n\n<!-- landscape -->\n\n' + figure + '\n\n' + table + '\n\n<!-- /landscape -->\n',
+  ];
+
+  it('keep CT_SectPr\'s order, each once, and columns that fit, and size their tables and images to fit them', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'template-sections-'));
+    try {
+      writeFileSync(join(dir, 'f.png'), PNG);
+      const base = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+      const baseXml = await base.file('word/document.xml')!.async('string');
+      await fc.assert(fc.asyncProperty(template, async sectPr => {
+        base.file('word/document.xml', baseXml.replace(/<w:sectPr\b(?![\s\S]*<w:sectPr\b)[\s\S]*<\/w:sectPr>/, () => sectPr));
+        const templateDocx = await base.generateAsync({ type: 'uint8array' });
+        for (const md of documents) {
+          const { docx } = await convertMdToDocx(md, { templateDocx, sourceDir: dir });
+          const xml = (await textOf(await JSZip.loadAsync(docx), 'word/document.xml'))!;
+          expect(XMLValidator.validate(xml)).toBe(true);
+          // Each section's content, before its properties, and those
+          let from = 0;
+          for (const match of xml.matchAll(/<w:sectPr\b[^>]*>(?:(?!<w:sectPr\b)[\s\S])*?<\/w:sectPr>/g)) {
+            const [own] = match, content = xml.slice(from, match.index);
+            from = match.index! + own.length;
+            expect(sectPrProblems(own)).toEqual([]);
+            // A section export adds has what Word reads of alternatives
+            if (xml.startsWith('</w:pPr>', from)) expect(own).not.toContain('mc:AlternateContent');
+            // Its tables span the narrowest column Word shows, and its
+            // images fit it, to within rounding
+            const { narrowest } = columnsOf(readAs(own, 'Word'));
+            for (const [, grid] of content.matchAll(/<w:tblGrid>([\s\S]*?)<\/w:tblGrid>/g)) {
+              const widths = [...grid.matchAll(/<w:gridCol w:w="(-?\d+)"/g)].map(([, width]) => Number(width));
+              for (const width of widths) expect(width).toBeGreaterThan(0);
+              expect(widths.reduce((sum, width) => sum + width, 0)).toBeLessThanOrEqual(narrowest + widths.length);
+            }
+            for (const [, cx, cy] of content.matchAll(/<wp:extent cx="(-?\d+)" cy="(-?\d+)"/g)) {
+              expect(Math.min(Number(cx), Number(cy))).toBeGreaterThan(0);
+              expect(Number(cx)).toBeLessThanOrEqual((narrowest / 15 + 1) * 9525);
+            }
+          }
+        }
+      }), { numRuns: 100 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30000);
+});
 
 describe('a template\'s page numbering', () => {
   /** A template whose sections' page numbering is `pgNumType` */

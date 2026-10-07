@@ -1620,6 +1620,168 @@ describe('generateTable', () => {
     expect(result).not.toContain('<w:vMerge');
   });
 
+  const pipeTable = '| a | b |\n| --- | --- |\n| 1 | 2 |';
+  const htmlTable = '<table><tr><th>a</th><th>b</th></tr><tr><td>1</td><td>2</td></tr></table>';
+  it.each([
+    ['a pipe table', 'equal', pipeTable, 4320],
+    ['a pipe table in a landscape section', 'equal', '<!-- landscape -->\n\n' + pipeTable + '\n\n<!-- /landscape -->', 6120],
+    ['a pipe table of its own landscape orientation', 'equal', '<!-- table-orientation: landscape -->\n' + pipeTable, 6120],
+    ['a pipe table of set column widths', 'equal', '<!-- table-col-widths: 1 3 -->\n' + pipeTable, 4320],
+    ['a grid table', 'equal', '+-----+----------+\n| a   | b        |\n+=====+==========+\n| 1   | 2        |\n+-----+----------+', 4320],
+    ['an HTML table', 'equal', htmlTable, 4320],
+    ['an HTML table with a colspan', 'equal', '<table><tr><th colspan="2">a</th></tr><tr><td>1</td><td>2</td></tr></table>', 4320],
+    ['an HTML table in a landscape section', 'equal', '<!-- landscape -->\n\n' + htmlTable + '\n\n<!-- /landscape -->', 6120],
+    ['a pipe table', 'unequal', pipeTable, 2880],
+  ])('sizes the grid of %s to the narrowest of the template\'s %s columns', async (_name, kind, md, width) => {
+    // Its grid took the width of the page's text, which two columns share,
+    // which Word Online, which reads the grid, showed running over the
+    // column. Letter's text is 9360 twips wide, or 12960 on its side, and
+    // two columns 720 apart each have 4320, or 6120.
+    const cols = kind === 'equal' ? '<w:cols w:num="2" w:space="720"/>'
+      : '<w:cols w:num="2" w:space="720" w:equalWidth="0"><w:col w:w="5760" w:space="720"/><w:col w:w="2880"/></w:cols>';
+    const JSZip = (await import('jszip')).default;
+    const template = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await template.file('word/document.xml')!.async('string');
+    template.file('word/document.xml', xml.replace(/<w:cols\b[^>]*\/>/, () => cols));
+    const templateDocx = await template.generateAsync({ type: 'uint8array' });
+    const { docx } = await convertMdToDocx('P.\n\n' + md + '\n\nQ.\n', { templateDocx });
+    const documentXml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const grid = /<w:tblGrid>([\s\S]*?)<\/w:tblGrid>/.exec(documentXml)![1];
+    const widths = [...grid.matchAll(/<w:gridCol w:w="(\d+)"\/>/g)].map(match => Number(match[1]));
+    expect(widths.length).toBe(2);
+    // To within a twip of each column's rounding
+    expect(Math.abs(widths[0] + widths[1] - width)).toBeLessThanOrEqual(1);
+  });
+
+  const letterMargins = '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>';
+  it.each([
+    ['two columns half an inch apart', '<w:pgSz w:w="12240" w:h="15840"/>' + letterMargins + '<w:cols w:num="2" w:space="0.5in"/>', 4320],
+    ['two columns of their own widths in inches and points', '<w:pgSz w:w="12240" w:h="15840"/>' + letterMargins
+      + '<w:cols w:num="2" w:space="720" w:equalWidth="0"><w:col w:w="4in" w:space="36pt"/><w:col w:w="2in"/></w:cols>', 2880],
+    // Which says off as Word reads it, with XML's white space around it
+    ['two columns of their own widths, not equal written with white space around it', '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>' + letterMargins
+      + '<w:cols w:equalWidth=" 0 "><w:col w:w="4320" w:space="720"/><w:col w:w="4320"/></w:cols>', 4320],
+    ['an A4 page in millimetres', '<w:pgSz w:w="210mm" w:h="297mm"/>' + letterMargins + '<w:cols w:space="720"/>', 9026],
+    ['margins in inches', '<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1in" w:right="1in" w:bottom="1in" w:left="1.5in" w:header="0.5in" w:footer="0.5in" w:gutter="0"/><w:cols w:space="720"/>', 8640],
+    // Which Word reads as their choice's alternatives' fallback, two columns
+    ['columns in markup compatibility\'s alternatives in a choice\'s', '<w:pgSz w:w="12240" w:h="15840"/>' + letterMargins
+      + '<mc:AlternateContent><mc:Choice Requires="w14"><mc:AlternateContent><mc:Choice Requires="x" xmlns:x="urn:example:x"><w:cols w:num="3" w:space="720"/></mc:Choice>'
+      + '<mc:Fallback><w:cols w:num="2" w:space="720"/></mc:Fallback></mc:AlternateContent></mc:Choice><mc:Fallback><w:cols w:space="720"/></mc:Fallback></mc:AlternateContent>', 4320],
+    ['margins of two inches in markup compatibility\'s alternatives whose choice declares the namespace it needs', '<w:pgSz w:w="12240" w:h="15840"/>'
+      + '<mc:AlternateContent><mc:Choice xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" Requires="w14">'
+      + '<w:pgMar w:top="1440" w:right="2880" w:bottom="1440" w:left="2880" w:header="720" w:footer="720" w:gutter="0"/></mc:Choice>'
+      + '<mc:Fallback>' + letterMargins + '</mc:Fallback></mc:AlternateContent><w:cols w:space="720"/>', 6480],
+    ['columns of their own widths in markup compatibility\'s alternatives in the columns', '<w:pgSz w:w="12240" w:h="15840"/>' + letterMargins
+      + '<w:cols w:num="2" w:space="720" w:equalWidth="0"><mc:AlternateContent><mc:Choice Requires="w14"><w:col w:w="4320" w:space="720"/><w:col w:w="4320"/></mc:Choice>'
+      + '<mc:Fallback><w:col w:w="4320" w:space="720"/><w:col w:w="4320"/></mc:Fallback></mc:AlternateContent></w:cols>', 4320],
+    // Beside the left margin, which Letter's text, 9360 twips between
+    // one-inch margins, gives up to it
+    ['a binding gutter of an inch', '<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="1440"/>'
+      + '<w:cols w:space="720"/>', 7920],
+    // Which add up to 9900 with the space between, more than the text,
+    // scaled down by a fifth
+    ['a binding gutter of an inch and columns of their own widths it scales down', '<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="1in"/>'
+      + '<w:cols w:num="2" w:space="720" w:equalWidth="0"><w:col w:w="6000" w:space="900"/><w:col w:w="3000"/></w:cols>', 2400],
+  ])('sizes the grid of a table to the narrowest column of a template whose section properties have %s', (_, children, width) => {
+    // A measure with a unit read as none, or as its number alone, so the
+    // grid took the space between columns as none, or Letter's page, or
+    // one-inch margins; columns in alternatives in alternatives as none;
+    // margins out of a choice, with its declaration on them, as one-inch
+    // ones; columns in alternatives in the columns as both alternatives'
+    // columns, four, each a quarter of the text; and a binding gutter as
+    // part of the text
+    const state = makeState();
+    state.templateSectPr = '<w:sectPr>' + children + '</w:sectPr>';
+    const xml = generateDocumentXml(parseMd('P.\n\n' + pipeTable + '\n\nQ.'), state);
+    const widths = [.../<w:tblGrid>([\s\S]*?)<\/w:tblGrid>/.exec(xml)![1].matchAll(/<w:gridCol w:w="(\d+)"\/>/g)].map(match => Number(match[1]));
+    expect(widths.length).toBe(2);
+    // To within a twip of each column's rounding
+    expect(Math.abs(widths[0] + widths[1] - width)).toBeLessThanOrEqual(1);
+  });
+
+  it.each([
+    ['the only section', 'one column', '', 'P.\n\n' + pipeTable + '\n', 12960],
+    ['the only section', 'two columns', '<w:cols w:num="2" w:space="720"/>', 'P.\n\n' + pipeTable + '\n', 6120],
+    ['the last section, after a fence', 'one column', '', 'P.\n\n<!-- landscape -->\n\nW.\n\n<!-- /landscape -->\n\n' + pipeTable + '\n', 12960],
+    // A break gives the section it ends an upright page
+    ['a section before a fence', 'one column', '', pipeTable + '\n\n<!-- landscape -->\n\nW.\n\n<!-- /landscape -->\n\nQ.\n', 9360],
+    ['a table\'s own portrait section', 'one column', '', 'P.\n\n<!-- table-orientation: portrait -->\n' + pipeTable + '\n', 9360],
+    // Which can't hold them, so it has one
+    ['a portrait section', 'two columns too far apart for its upright page', '<w:cols w:num="2" w:space="9600"/>', 'P.\n\n<!-- portrait -->\n\n' + pipeTable + '\n\n<!-- /portrait -->\n\nQ.\n', 9360],
+    // Which it scales down to fit
+    ['a portrait section', 'one column of its own width, the landscape text\'s', '<w:cols w:num="1" w:space="720" w:equalWidth="0"><w:col w:w="12960"/></w:cols>', 'P.\n\n<!-- portrait -->\n\n' + pipeTable + '\n\n<!-- /portrait -->\n\nQ.\n', 9360],
+  ])('sizes the grid of a table in %s, under a landscape template of %s, to the page that section has', async (_name, _cols, cols, md, width) => {
+    // The last section keeps the template's page, on its side, but the grid
+    // took the width of an upright page's text. Letter's text is 9360 twips
+    // wide, or 12960 on its side, which two columns 720 apart share as 6120
+    // each.
+    const JSZip = (await import('jszip')).default;
+    const template = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await template.file('word/document.xml')!.async('string');
+    template.file('word/document.xml', xml.replace(/<w:pgSz\b[^>]*\/>/, '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>')
+      .replace(/<w:cols\b[^>]*\/>/, match => cols || match));
+    const templateDocx = await template.generateAsync({ type: 'uint8array' });
+    const { docx } = await convertMdToDocx(md, { templateDocx });
+    const documentXml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    const grid = /<w:tblGrid>([\s\S]*?)<\/w:tblGrid>/.exec(documentXml)![1];
+    const widths = [...grid.matchAll(/<w:gridCol w:w="(\d+)"\/>/g)].map(match => Number(match[1]));
+    expect(widths.length).toBe(2);
+    // To within a twip of each column's rounding
+    expect(Math.abs(widths[0] + widths[1] - width)).toBeLessThanOrEqual(1);
+  });
+
+  const noteTable = '[^1]: Note.\n\n    ' + pipeTable.replace(/\n/g, '\n    ') + '\n';
+  it.each([
+    ['a section before a fence', true, 'A[^1].\n\n<!-- landscape -->\n\nW.\n\n<!-- /landscape -->\n\nEnd.\n\n' + noteTable, 9360],
+    ['the last section', true, 'A.\n\n<!-- landscape -->\n\nW.\n\n<!-- /landscape -->\n\nEnd[^1].\n\n' + noteTable, 12960],
+    ['a landscape section, without a template,', false, 'A.\n\n<!-- landscape -->\n\nW[^1].\n\n<!-- /landscape -->\n\nEnd.\n\n' + noteTable, 12960],
+  ])('sizes the grid of a table in a footnote whose reference is in %s to the page the note is on', async (_name, landscapeTemplate, md, width) => {
+    // A note took the orientation of the section export wrote last, so its
+    // table's grid ran over an upright page under a landscape template, and
+    // took an upright page's width on a landscape one
+    const JSZip = (await import('jszip')).default;
+    const template = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await template.file('word/document.xml')!.async('string');
+    template.file('word/document.xml', xml.replace(/<w:pgSz\b[^>]*\/>/, '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>'));
+    const options = landscapeTemplate ? { templateDocx: await template.generateAsync({ type: 'uint8array' }) } : {};
+    const { docx } = await convertMdToDocx(md, options);
+    const footnotesXml = await (await JSZip.loadAsync(docx)).file('word/footnotes.xml')!.async('string');
+    const grid = /<w:tblGrid>([\s\S]*?)<\/w:tblGrid>/.exec(footnotesXml)![1];
+    const widths = [...grid.matchAll(/<w:gridCol w:w="(\d+)"\/>/g)].map(match => Number(match[1]));
+    expect(widths.length).toBe(2);
+    expect(Math.abs(widths[0] + widths[1] - width)).toBeLessThanOrEqual(1);
+  });
+
+  const twoColumns = '<w:cols w:num="2" w:space="720"/>';
+  it.each([
+    ['a footnote', 'a template of two columns', 'one column of their own', false, twoColumns, '<w15:footnoteColumns w:val="1"/>', '', 'A[^1].\n\n', 9360],
+    ['a footnote', 'a template of two columns', 'none of their own', false, twoColumns, '', '', 'A[^1].\n\n', 4320],
+    // Word lays endnotes out in the section's columns
+    ['an endnote', 'a template of two columns', 'one column of their own', false, twoColumns, '<w15:footnoteColumns w:val="1"/>', '---\nnotes: endnotes\n---\n', 'A[^1].\n\n', 4320],
+    // Whose columns are one, 720 twips apart, as they're too far apart for
+    // its upright page
+    ['a footnote in a portrait section', 'a landscape template of two columns 9600 twips apart', 'two columns of their own', true, '<w:cols w:num="2" w:space="9600"/>', '<w15:footnoteColumns w:val="2"/>', '',
+      'Intro.\n\n<!-- portrait -->\n\nA[^1].\n\n<!-- /portrait -->\n\nEnd.\n\n', 4320],
+  ])('sizes the grid of a table in %s, under %s whose footnotes have %s, to the width the note has', async (_, __, ___, landscape, cols, footnoteColumns, front, body, width) => {
+    // A footnote's table took the section's columns' width, where Word
+    // lays footnotes out in one column of their own, the text's; and two
+    // of them took the template's columns' space, not that of the columns
+    // the section has, so they took the whole text, 9360 twips, where each
+    // is 4320
+    const JSZip = (await import('jszip')).default;
+    const template = await JSZip.loadAsync((await convertMdToDocx('x')).docx);
+    const xml = await template.file('word/document.xml')!.async('string');
+    template.file('word/document.xml', xml.replace(/<w:cols\b[^>]*\/>/, () => cols)
+      .replace(/<w:pgSz\b[^>]*\/>/, page => landscape ? '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>' : page)
+      .replace(/<\/w:sectPr>(?![\s\S]*<\/w:sectPr>)/, end => footnoteColumns + end));
+    const { docx } = await convertMdToDocx(front + body + noteTable, { templateDocx: await template.generateAsync({ type: 'uint8array' }) });
+    const notesXml = await (await JSZip.loadAsync(docx)).file(front ? 'word/endnotes.xml' : 'word/footnotes.xml')!.async('string');
+    const grid = /<w:tblGrid>([\s\S]*?)<\/w:tblGrid>/.exec(notesXml)![1];
+    const widths = [...grid.matchAll(/<w:gridCol w:w="(\d+)"\/>/g)].map(match => Number(match[1]));
+    expect(widths.length).toBe(2);
+    expect(Math.abs(widths[0] + widths[1] - width)).toBeLessThanOrEqual(1);
+  });
+
   it('renders hyperlinks in table cells', () => {
     const state = makeState();
     const rows: MdTableRow[] = [

@@ -18089,17 +18089,20 @@ describe('A template\'s section properties on the sections export adds', () => {
   };
   const endsPortrait = 'A.\n\n<!-- landscape -->\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\n<!-- /landscape -->\n\n<!-- portrait -->\n\nB.\n\n<!-- /portrait -->\n';
   test.each([
-    ['columns of their own widths, which it scales down', '<w:cols w:num="2" w:space="720" w:equalWidth="0"><w:col w:w="5760" w:space="720"/><w:col w:w="6480"/></w:cols>'],
-    ['two columns too far apart for it, which it makes one', '<w:cols w:num="2" w:space="9600"/>'],
-  ])('lays out the sections export adds alike where the export it wrote, ending in a portrait section, is the template, under a landscape template of %s', async (_, cols) => {
+    ['columns of their own widths, which it scales down', '<w:cols w:num="2" w:space="720" w:equalWidth="0"><w:col w:w="5760" w:space="720"/><w:col w:w="6480"/></w:cols>',
+      '<w:gridCol w:w="2880"/><w:gridCol w:w="2880"/>'],
+    ['two columns too far apart for it, which it makes one', '<w:cols w:num="2" w:space="9600"/>', '<w:gridCol w:w="840"/><w:gridCol w:w="840"/>'],
+  ])('lays out the sections export adds alike where the export it wrote, ending in a portrait section, is the template, under a landscape template of %s', async (_, cols, grid) => {
     // The last section's columns, fitted to its upright page, were what
     // the export, as a template, gave as its own, so the landscape section
     // had them too, narrower, or one column
     const templateDocx = await landscapeTemplate(cols);
     const first = (await convertMdToDocx(endsPortrait, { templateDocx })).docx;
     const layout = await layoutOf(first);
-    // The landscape section has the template's columns
+    // The landscape section has the template's columns, and its table's
+    // grid the narrower one
     expect(layout.sections[1]).toContain(cols);
+    expect(layout.grids).toEqual(['<w:tblGrid>' + grid + '</w:tblGrid>']);
     const second = (await convertMdToDocx(endsPortrait, { templateDocx: first })).docx;
     expect(await layoutOf(second)).toEqual(layout);
     const third = (await convertMdToDocx(endsPortrait, { templateDocx: second })).docx;

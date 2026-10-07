@@ -9492,19 +9492,19 @@ export function generateTable(token: MdToken, state: DocxGenState, options?: MdT
   // columns implicitly occupied by rowspan cells from previous rows).
   const totalCols = tableGridColumns(token.rows);
 
-  // Compute page text width in dxa for gridCol w:w attributes (required for Word Online).
-  // Use landscape page width (pgSz.h) when the table lives in a landscape section or
-  // carries a per-table landscape orientation, otherwise use portrait width (pgSz.w).
+  // Compute the table's width in dxa for gridCol w:w attributes (required for Word Online):
+  // the page's text width, or the narrowest of the template's columns, which each section
+  // takes (see pageContentWidthPx). Use landscape page width (pgSz.h) when the table lives
+  // in a section whose page is on its side (see sectionIsLandscape) or carries a per-table
+  // landscape orientation, otherwise use portrait width (pgSz.w).
   const pgSz = parseTemplatePgSz(state.templateSectPr);
   const marginsStr = parseTemplateMargins(state.templateSectPr);
-  const leftMarginDxa = parseInt(marginsStr.match(/w:left="(\d+)"/)?.[1] ?? '1440', 10);
-  const rightMarginDxa = parseInt(marginsStr.match(/w:right="(\d+)"/)?.[1] ?? '1440', 10);
   // Mirror the guard in generateDocumentXml: table-only landscape orientation is only
   // active when NOT already inside a portrait fence (in that case no landscape section
   // break is emitted, so the table renders in portrait context).
-  const isLandscape = state.inLandscapeSection ||
+  const isLandscape = sectionIsLandscape(state) ||
     (token.tableOrientation === 'landscape' && !state.inPortraitSection);
-  const textWidthDxa = (isLandscape ? pgSz.h : pgSz.w) - leftMarginDxa - rightMarginDxa;
+  const textWidthDxa = writableWidthTwips(state, textWidthTwips(isLandscape ? pgSz.h : pgSz.w, marginsStr));
 
   // Resolve column widths.
   // colWidthPcts: set when user explicitly specifies table-col-widths — drives tblW pct,
