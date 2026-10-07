@@ -1452,6 +1452,52 @@ export interface StyleLayouts {
   defaults: ParagraphLayout;
   defaultParagraphStyle?: string;
   defaultTableStyle?: string;
+  /** The ID import reads a built-in paragraph style by, as `Heading1`, for
+   *  each style the document gives another, by its name (see
+   *  BUILT_IN_PARAGRAPH_STYLES) */
+  builtInIds?: Map<string, string>;
+}
+
+/** The built-in paragraph styles import reads by their IDs, in the text or
+ *  in styles.xml (see extractFontOverridesFromStyles), by their names in
+ *  styles.xml, lowercased. Word gives a built-in style an ID from its name
+ *  in the language it runs in, as `berschrift1` for German's Überschrift 1
+ *  and `Standard` for Normal, but keeps its English name, `heading 1`, in
+ *  w:name. */
+const BUILT_IN_PARAGRAPH_STYLES = new Map<string, string>([
+  ['normal', 'Normal'],
+  ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map(level => ['heading ' + level, 'Heading' + level] as [string, string]),
+  ['title', 'Title'], ['quote', 'Quote'], ['intense quote', 'IntenseQuote'],
+]);
+
+/** The document's own ID of each w:pStyle useBuiltInStyleIds gave a
+ *  built-in style's, by which styles.xml gives the style's layout */
+const documentStyleIds = new WeakMap<XmlNode, string>();
+
+/** A paragraph's style's ID in the document, as styles.xml has it */
+function documentStyleId(pStyle: XmlNode): string {
+  return documentStyleIds.get(pStyle) ?? getAttr(pStyle, 'val');
+}
+
+/** Gives each paragraph of a built-in style the ID import reads it by, in
+ *  place of the document's, which documentStyleId keeps (see
+ *  StyleLayouts.builtInIds) */
+function useBuiltInStyleIds(nodes: XmlNode[], ids: Map<string, string> | undefined): void {
+  if (!ids?.size) return;
+  for (const node of nodes) {
+    for (const key of Object.keys(node)) {
+      const value = node[key];
+      if (key === 'w:pStyle') {
+        const id = node[':@']?.['@_w:val'];
+        if (typeof id === 'string' && ids.has(id)) {
+          documentStyleIds.set(node, id);
+          node[':@']!['@_w:val'] = ids.get(id);
+        }
+      } else if (key !== ':@' && Array.isArray(value)) {
+        useBuiltInStyleIds(value, ids);
+      }
+    }
+  }
 }
 
 /** A pPr's alignment and direction, where it sets them */
@@ -1473,6 +1519,8 @@ export async function parseStyleLayouts(zip: JSZip): Promise<StyleLayouts> {
   const pPrDefault = findAllDeep(parsed, 'w:pPrDefault')[0];
   if (pPrDefault) layouts.defaults = paragraphLayout(pPrOf(asXmlNodes(pPrDefault['w:pPrDefault'])));
   const own = new Map<string, { layout: ParagraphLayout; basedOn: string; parts: Map<string, ParagraphLayout>; rowBand?: number; colBand?: number }>();
+  // The ID each built-in paragraph style is read by, by the document's
+  const builtIn = new Map<string, string>();
   for (const node of findAllDeep(parsed, 'w:style')) {
     const children = asXmlNodes(node['w:style']);
     const id = getAttr(node, 'styleId');
@@ -1484,6 +1532,9 @@ export async function parseStyleLayouts(zip: JSZip): Promise<StyleLayouts> {
       const size = tblPr && asXmlNodes(tblPr['w:tblPr']).find(c => c[name] !== undefined);
       return size ? parseInt(getAttr(size, 'val'), 10) || undefined : undefined;
     };
+    const name = children.find(c => c['w:name'] !== undefined);
+    const builtInId = getAttr(node, 'type') === 'paragraph' && name ? BUILT_IN_PARAGRAPH_STYLES.get(getAttr(name, 'val').toLowerCase()) : undefined;
+    if (builtInId && builtInId.toLowerCase() !== id.toLowerCase()) builtIn.set(id, builtInId);
     own.set(id, {
       layout: paragraphLayout(pPrOf(children)), basedOn: basedOn ? getAttr(basedOn, 'val') : '',
       parts, rowBand: band('w:tblStyleRowBandSize'), colBand: band('w:tblStyleColBandSize'),
@@ -1500,6 +1551,12 @@ export async function parseStyleLayouts(zip: JSZip): Promise<StyleLayouts> {
     return { ...resolve(style.basedOn, seen), ...style.layout };
   };
   for (const id of own.keys()) layouts.styles.set(id, resolve(id, new Set()));
+  // A built-in style's ID, where no style of the document has it, goes for
+  // the style; its layout stays under its own (see documentStyleId)
+  const ids = new Set([...own.keys()].map(id => id.toLowerCase()));
+  for (const [id, builtInId] of builtIn) {
+    if (!ids.has(builtInId.toLowerCase())) (layouts.builtInIds ??= new Map()).set(id, builtInId);
+  }
   // A table style's parts, each its own or its base's
   const resolveTable = (id: string, seen: Set<string>): { parts: Map<string, ParagraphLayout>; rowBand: number; colBand: number } => {
     const style = own.get(id);
@@ -1601,7 +1658,7 @@ function cellAlignment(tcChildren: XmlNode[], layouts?: StyleLayouts, tableStyle
     const pPr = asXmlNodes(p['w:p']).find(c => c['w:pPr'] !== undefined);
     const pPrChildren = pPr ? asXmlNodes(pPr['w:pPr']) : [];
     const pStyle = pPrChildren.find(c => c['w:pStyle'] !== undefined);
-    const styleId = pStyle ? getAttr(pStyle, 'val') : '';
+    const styleId = pStyle ? documentStyleId(pStyle) : '';
     // A style styles.xml doesn't have is the default, as Word reads it
     const isDefault = !styleId || styleId === layouts?.defaultParagraphStyle || !layouts?.styles.has(styleId);
     const own = paragraphLayout(pPrChildren);
@@ -2124,7 +2181,7 @@ export function parseListMeta(pPrChildren: XmlNode[], numberingDefs: NumberingDe
   // The paragraph's style, or the default where it names none or one
   // styles.xml doesn't have, as Word reads it
   const pStyle = pPrChildren.find(child => child['w:pStyle'] !== undefined);
-  const style = (pStyle ? styleNumbering?.styles.get(getAttr(pStyle, 'val')) : undefined)
+  const style = (pStyle ? styleNumbering?.styles.get(documentStyleId(pStyle)) : undefined)
     ?? styleNumbering?.styles.get(styleNumbering.defaultStyle ?? '');
   // The paragraph's own numId and ilvl come before its style's, each by
   // itself, as a numId alone puts it in another list at its style's level,
@@ -5081,6 +5138,7 @@ export async function extractDocumentContent(
   const imageRelMap = options?.imageRelationships ?? new Map<string, string>();
   const imageFolder = options?.imageFolder ?? '';
   const styleLayouts = options?.styleLayouts ?? await parseStyleLayouts(zip);
+  useBuiltInStyleIds(parsed, styleLayouts.builtInIds);
   const imageFiles: ImageFiles = options?.imageFiles ?? { entries: [], filenames: new Map() };
 
   // Build a lookup: instrText index -> ZoteroCitation (in order of appearance)
@@ -12541,11 +12599,16 @@ async function allNamed<T extends Record<string, PromiseLike<unknown>>>(promises
 // Main conversion
 
 /** Extract heading/title font properties from word/styles.xml for round-trip. */
-function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTableFontSize?: boolean }): Partial<Frontmatter> {
+function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTableFontSize?: boolean; builtInIds?: Map<string, string> }): Partial<Frontmatter> {
   const result: Partial<Frontmatter> = {};
+  // The document's ID of each built-in style it gives another, by the ID
+  // this reads it by (see StyleLayouts.builtInIds)
+  const documentIds = new Map<string, string>();
+  for (const [id, builtInId] of opts?.builtInIds ?? []) if (!documentIds.has(builtInId)) documentIds.set(builtInId, id);
 
   // Helper: find a style block by styleId and extract rPr content
-  function getStyleRPr(styleId: string): string | null {
+  function getStyleRPr(id: string): string | null {
+    const styleId = documentIds.get(id) ?? id;
     let searchFrom = 0;
     while (true) {
       const idx = stylesXml.indexOf('<w:style ', searchFrom);
@@ -12613,7 +12676,8 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   }
 
   /** Extract pPr content from a style block. */
-  function getStylePPr(styleId: string): string | null {
+  function getStylePPr(id: string): string | null {
+    const styleId = documentIds.get(id) ?? id;
     let searchFrom = 0;
     while (true) {
       const idx = stylesXml.indexOf('<w:style ', searchFrom);
@@ -13286,7 +13350,7 @@ export async function convertDocx(
   const stylesFile = zip.file('word/styles.xml');
   if (stylesFile) {
     const stylesStr = await stylesFile.async('string');
-    const fontFields = extractFontOverridesFromStyles(stylesStr, { explicitTableFontSize });
+    const fontFields = extractFontOverridesFromStyles(stylesStr, { explicitTableFontSize, builtInIds: styleLayouts.builtInIds });
     Object.assign(fm, fontFields);
   }
   // Restore custom styles from custom property (primary source)
