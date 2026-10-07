@@ -6627,13 +6627,13 @@ export async function extractDocumentContent(
               const prevItem = targetLenBeforePara > 0 ? target[targetLenBeforePara - 1] : undefined;
               // One that takes the tracked mark of an empty one before
               // keeps its item, which holds the break (see
-              // joinTrackedParagraphBreaks), and so does a cell's, either of
-              // whose marks is tracked, which its table shows
+              // joinTrackedParagraphBreaks), and so does each of a cell's,
+              // which its table writes as a paragraph of its own (see
+              // splitCellParagraphs), with its tracked mark
               if (
                 !paraItem.breakRevision &&
-                !paraItem.paraMarkRevision &&
+                !inTableCell &&
                 prevItem?.type === 'para' &&
-                !prevItem.paraMarkRevision &&
                 prevItem.emptyParagraphCount !== undefined &&
                 !prevItem.headingLevel &&
                 !prevItem.listMeta &&
