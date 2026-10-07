@@ -20,7 +20,7 @@ import { pixelsToEmu, isSupportedImageFormat, getImageContentType, readImageDime
 import { preprocessGridTables, preprocessGridTablesWithSourceMap, gridColumnAlign, getDisplayWidth, GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData, type TableAlign } from './grid-table-preprocess';
 import { preprocessEmbedsTracked } from './embed-preprocess';
 import { LATENT_STYLES } from './latent-styles';
-import { findStyleElement } from './style-element';
+import { styleFinder } from './style-element';
 import { replaceXmlElements, xmlAttribute, xmlElement, xmlStartTag } from './xml-elements';
 import { cellParagraphMarkAt, extractHtmlTables, type HtmlTableRow, type HtmlTableRun } from './html-table-parser';
 import { decodeHtmlAttribute } from './html-entities';
@@ -5608,6 +5608,10 @@ function withoutInheritedSizes(stylesXml: string, styleIds: string[], ids: Map<s
   const docDefaults = live(xmlElement(stylesXml, 'w:docDefaults')?.content ?? '');
   const defaults = xmlElement(xmlElement(docDefaults, 'w:rPrDefault')?.content ?? '', 'w:rPr')?.content ?? '';
   let xml = stylesXml;
+  // The styles of `xml`, read once for each time it changes (see
+  // styleFinder), so that a long chain, among many styles, takes time in
+  // proportion to them
+  let find = styleFinder(xml);
   // The styles along a style's w:basedOn in `xml`, nearest first, or
   // undefined where they come back around, each known by where it is, or
   // reach one Word ignores
@@ -5615,7 +5619,7 @@ function withoutInheritedSizes(stylesXml: string, styleIds: string[], ids: Map<s
     const chain: string[] = [];
     const seen = new Set([style.at]);
     for (let id = basedOn(style.element); id !== undefined;) {
-      const base = findStyleElement(xml, id, ids);
+      const base = find(id, ids);
       if (base === undefined) break;
       if (seen.has(base.at) || wordIgnoresStyle(base.element)) return undefined;
       seen.add(base.at);
@@ -5632,7 +5636,7 @@ function withoutInheritedSizes(stylesXml: string, styleIds: string[], ids: Map<s
     return sizeIn(defaults, tag) ?? 20;
   };
   for (const styleId of styleIds) {
-    const style = findStyleElement(xml, styleId, ids);
+    const style = find(styleId, ids);
     if (style === undefined || basedOn(style.element) === undefined) continue;
     const chain = bases(style);
     if (chain === undefined) continue;
@@ -5649,8 +5653,24 @@ function withoutInheritedSizes(stylesXml: string, styleIds: string[], ids: Map<s
     // An rPr left empty goes too, and one with what's left keeps its tags
     const written = /^\s*$/.test(content) ? '' : rPr.tag + content + block.slice(rPr.start + rPr.tag.length + rPr.content.length, rPr.end);
     xml = xml.slice(0, style.at) + records.restore(block.slice(0, rPr.start) + written + block.slice(rPr.end)) + xml.slice(style.at + style.element.length);
+    find = styleFinder(xml);
   }
   return xml;
+}
+
+/**
+ * A style's w:rFonts with `font` for Latin text, its w:ascii and w:hAnsi,
+ * which a frontmatter font sets, in place of a theme font there
+ * (w:asciiTheme, w:hAnsiTheme), which Word would show over it (ECMA-376
+ * Part 1 §17.3.2.26). What it names for other scripts, as w:eastAsia or
+ * w:cstheme, and its w:hint, stay as they were.
+ */
+function rFontsWithFont(rFonts: string, font: string): string {
+  // Each attribute as written, read as xmlAttribute reads it
+  const others = [...rFonts.matchAll(/\s([^\s=/>]+)\s*=\s*("[^"]*"|'[^']*')/g)]
+    .filter(([, name]) => !['w:ascii', 'w:hAnsi', 'w:asciiTheme', 'w:hAnsiTheme'].includes(name))
+    .map(([, name, value]) => ' ' + name + '=' + value).join('');
+  return '<w:rFonts w:ascii="' + escapeXml(font) + '" w:hAnsi="' + escapeXml(font) + '"' + others + '/>';
 }
 
 /**
@@ -5724,12 +5744,12 @@ function templateWithFontOverrides(
   // a heading's font style goes by; and without a tracked change's record of
   // what it was, which Word doesn't show (w:rPrChange, w:pPrChange)
   const withoutFormatChanges = (part: string) => part.replace(/<w:(rPrChange|pPrChange)\b[^>]*?(?:\/>|>[\s\S]*?<\/w:\1>)/g, '');
-  const templateXml = xml;
+  const findTemplateStyle = styleFinder(xml);
   const builtInIds = new Map([...ids].map(([builtInId, id]) => [id, builtInId]));
   const templateStyles = new Map<string, { id: string; block: string } | undefined>();
   const templateStyle = (id: string) => {
     if (!templateStyles.has(id)) {
-      const found = findStyleElement(templateXml, id, ids);
+      const found = findTemplateStyle(id, ids);
       const ownId = found ? xmlAttribute(xmlStartTag(found.element, 'w:style')?.tag ?? '', 'w:styleId') ?? id : id;
       templateStyles.set(id, found && { id: builtInIds.get(ownId) ?? ownId, block: withoutFormatChanges(found.element) });
     }
@@ -5897,10 +5917,14 @@ function templateWithFontOverrides(
       const [ownRPr, rPrRecord] = splitRecord(rPrMatch[2], 'rPrChange');
       let rPrContent = ownRPr;
 
-      if (rFontsEl !== undefined) {
-        // Replace existing w:rFonts or insert at start of rPr content
-        if (/<w:rFonts\b[^/]*\/>/.test(rPrContent)) {
-          rPrContent = rPrContent.replace(/<w:rFonts\b[^/]*\/>/, () => rFontsEl);
+      if (font !== undefined && rFontsEl !== undefined) {
+        // Set the font in an existing w:rFonts, keeping what it names for
+        // other scripts, or insert one at start of rPr content
+        // Read as an XML parser reads it, whatever its values hold (see
+        // xmlElement)
+        const rFonts = xmlElement(rPrContent, 'w:rFonts');
+        if (rFonts !== undefined) {
+          rPrContent = rPrContent.slice(0, rFonts.start) + rFontsWithFont(rFonts.tag, font) + rPrContent.slice(rFonts.end);
         } else {
           rPrContent = rFontsEl + rPrContent;
         }

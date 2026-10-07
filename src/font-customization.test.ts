@@ -11,6 +11,7 @@ import {
   type FontOverrides,
 } from './md-to-docx';
 import { parseFrontmatter, serializeFrontmatter } from './frontmatter';
+import { fastestRunAsync } from './test-timing';
 import { extractHtmlTables } from './html-table-parser';
 
 // Helper: extract a <w:style ...styleId="X"...>...</w:style> block from styles XML
@@ -1550,8 +1551,11 @@ describe('Font customization unit tests', () => {
       it.each([
         ['with whitespace around an attribute\'s =, which the frontmatter reads as the document\'s font for tables, so the table has no directive',
           DOCUMENT + '<!-- table-font: Georgia -->\n' + TABLE, '<w:rFonts w:ascii = "Courier New" w:hAnsi = "Courier New"/>', TABLE],
-        ['with a theme\'s for the rest, which its ASCII text doesn\'t take, so the table has no directive',
-          DOCUMENT + TABLE, '<w:rFonts w:ascii="Courier New" w:hAnsiTheme="minorHAnsi"/>', TABLE],
+        // The style shows the rest in another font, which the frontmatter's
+        // would set too, so it gives none, and the table, whose text is ASCII,
+        // gets the font it shows as its own
+        ['with a theme\'s for the rest, which its ASCII text doesn\'t take, so the frontmatter gives none and the table has a directive',
+          DOCUMENT + TABLE, '<w:rFonts w:ascii="Courier New" w:hAnsiTheme="minorHAnsi"/>', '<!-- table-font: Courier New -->\n' + TABLE],
         ['as its East Asian font too, for Chinese text, which export doesn\'t set a table\'s font as, so the table keeps having no directive',
           DOCUMENT + CHINESE, '<w:rFonts w:ascii="Courier New" w:hAnsi="Courier New" w:eastAsia="Courier New"/>', CHINESE],
       ])('writes the font of a table whose text takes the table paragraph style\'s, %s', async (_name, markdown, rFonts, expected) => {
@@ -2374,11 +2378,17 @@ describe('heading and title styles based on another style', () => {
   const heading = (level: number, inner: string) => ['Heading' + level, '<w:name w:val="heading ' + level + '"/>' + inner] as [string, string];
 
   /** Export's own Word file with the given styles' content replaced, a style
-   *  ID of rPrDefault or pPrDefault giving the document defaults' properties */
+   *  ID of rPrDefault or pPrDefault giving the document defaults' properties,
+   *  and one of majorFont or minorFont the theme font's Latin typeface */
   async function withStyles(...replaced: Array<[string, string]>): Promise<Uint8Array> {
     const zip = await JSZip.loadAsync((await convertMdToDocx(doc)).docx);
     let styles = await zip.file('word/styles.xml')!.async('string');
     for (const [id, inner] of replaced) {
+      if (id === 'majorFont' || id === 'minorFont') {
+        const theme = await zip.file('word/theme/theme1.xml')!.async('string');
+        zip.file('word/theme/theme1.xml', theme.replace(new RegExp('(<a:' + id + '><a:latin typeface=")[^"]*'), (_match, open: string) => open + inner));
+        continue;
+      }
       const defaults = /^(r|p)PrDefault$/.exec(id);
       if (defaults) {
         styles = styles.replace(new RegExp('(<w:' + id + '>)(?:<w:' + defaults[1] + 'Pr>[\\s\\S]*?</w:' + defaults[1] + 'Pr>)?'),
@@ -2605,12 +2615,12 @@ describe('heading and title styles based on another style', () => {
     ['a title\'s size from the heading it\'s based on',
       [heading(1, '<w:basedOn w:val="Normal"/><w:rPr><w:b/><w:sz w:val="40"/></w:rPr>'), ['Title', '<w:name w:val="Title"/><w:basedOn w:val="Heading1"/>']],
       { headerFontSize: [20, 13, 12, 11, 10, 9], titleFontSize: [20], titleFontStyle: ['bold'] }],
-    // A theme font has no name here, and reads as the body's
+    // A theme font goes by its name in the theme, export's here
     ['a theme font on a heading based on one with a font',
       [['Normal', '<w:name w:val="Normal"/><w:rPr><w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/><w:sz w:val="22"/></w:rPr>'],
         heading(1, '<w:basedOn w:val="Normal"/><w:rPr><w:b/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr>'),
         heading(2, '<w:basedOn w:val="Heading1"/><w:rPr><w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/></w:rPr>')],
-      { font: 'Georgia', headerFont: ['Arial', 'Georgia'], headerFontSize: [11, 11, 12, 11, 10, 9] }],
+      { font: 'Georgia', headerFont: ['Arial', 'Calibri Light', 'Georgia'], headerFontSize: [11, 11, 12, 11, 10, 9] }],
     // A heading whose font has no name here takes the one export gives a
     // heading without one, so the others keep their places
     ['a font from a base that isn\'t a heading, beside the body\'s theme font',
@@ -2628,6 +2638,28 @@ describe('heading and title styles based on another style', () => {
       [['Normal', '<w:name w:val="Normal"/><w:rPr><w:rFonts w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"/><w:sz w:val="22"/></w:rPr>'],
         heading(1, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="32"/></w:rPr>')],
       { headerFont: ['Arial', 'Calibri'] }],
+    // A theme font, which Word shows over a w:ascii beside it, goes by its
+    // name in the theme where the frontmatter needs a font for the heading
+    ['a theme font in a theme of its own, beside a named font',
+      [['majorFont', 'Aptos Display'], ['minorFont', 'Aptos'],
+        heading(1, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/><w:sz w:val="32"/></w:rPr>'),
+        heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="26"/></w:rPr>')],
+      { headerFont: ['Aptos Display', 'Arial', 'Aptos'] }],
+    ['a w:ascii beside a w:asciiTheme, which Word shows instead',
+      [heading(1, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="Cambria" w:hAnsi="Cambria" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/><w:sz w:val="32"/></w:rPr>'),
+        heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="26"/></w:rPr>')],
+      { headerFont: ['Calibri Light', 'Arial', 'Calibri'] }],
+    ['theme fonts alone, as Word\'s own headings have them',
+      [heading(1, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/><w:sz w:val="32"/></w:rPr>'),
+        heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="Cambria" w:hAnsi="Cambria" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/><w:sz w:val="26"/></w:rPr>')],
+      {}],
+    // A font named as the body's on one heading is a named font, so the
+    // others show theirs, a theme font with a font named beside it too
+    ['a font named as the body\'s, beside a theme font with a font named beside it',
+      [['majorFont', 'Cambria'],
+        heading(1, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="32"/></w:rPr>'),
+        heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="Cambria" w:hAnsi="Cambria" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/><w:sz w:val="26"/></w:rPr>')],
+      { headerFont: ['Calibri', 'Cambria', 'Calibri'] }],
     // w:basedOn may have any whitespace before w:val
     ['a size from a heading named across a line break',
       [heading(1, '<w:basedOn w:val="Normal"/><w:rPr><w:b/><w:sz w:val="40"/></w:rPr>'), heading(2, '<w:basedOn\n  w:val="Heading1"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr>')],
@@ -2847,6 +2879,432 @@ describe('heading and title styles based on another style', () => {
       const { markdown } = await convertDocx((await convertMdToDocx(md)).docx);
       expect(markdown.slice(0, markdown.indexOf('\n---\n', 4) + 5)).toBe('---\n' + fields + '\n---\n');
     });
+
+  // A font named beside a theme font, as an older Word writes, is the theme
+  // font's typeface, which Word shows, for the body and code as for a heading
+  const beside = (font: string, theme: string) => '<w:rFonts w:ascii="' + font + '" w:hAnsi="' + font + '" w:asciiTheme="' + theme + '" w:hAnsiTheme="' + theme + '"/>';
+  it.each([
+    ['the body', [['minorFont', 'Georgia'], ['Normal', '<w:name w:val="Normal"/><w:rPr>' + beside('Georgia', 'minorHAnsi') + '<w:sz w:val="22"/></w:rPr>']], { font: 'Georgia' }],
+    ['the body, where the theme gives another', [['minorFont', 'Aptos'], ['Normal', '<w:name w:val="Normal"/><w:rPr>' + beside('Georgia', 'minorHAnsi') + '<w:sz w:val="22"/></w:rPr>']], { font: 'Aptos' }],
+    ['code', [['majorFont', 'Courier New'], ['CodeBlock', '<w:name w:val="Code Block"/><w:basedOn w:val="Normal"/><w:rPr>' + beside('Courier New', 'majorHAnsi') + '<w:sz w:val="20"/></w:rPr>']], { codeFont: 'Courier New' }],
+  ] as Array<[string, Array<[string, string]>, { font?: string; codeFont?: string }]>)('a font named beside a theme font reads back as the theme\'s for %s', async (_name, replaced, expected) => {
+    const { convertDocx } = await import('./converter');
+    const { markdown } = await convertDocx(await withStyles(...replaced));
+    const { metadata } = parseFrontmatter(markdown);
+    expect({ font: metadata.font, codeFont: metadata.codeFont }).toEqual(expected);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  // Export gives tables the body font where they have none of their own, so
+  // with font, a table style in a theme font gets that font by its typeface
+  // and a table font it takes from the style it's based on, as Word shows it
+  const themeNormal: [string, string] = ['Normal', '<w:name w:val="Normal"/><w:rPr>' + beside('Calibri', 'minorHAnsi') + '<w:sz w:val="22"/></w:rPr>'];
+  const quoteIn = (rFonts: string): [string, string] => ['Quote', '<w:name w:val="Quote"/><w:basedOn w:val="Normal"/><w:rPr>' + rFonts + '</w:rPr>'];
+  // A base that isn't one of the body's styles, which export gives font
+  const bibliographyIn = (rFonts: string): [string, string] => ['Bibliography', '<w:name w:val="Bibliography"/><w:basedOn w:val="Normal"/><w:rPr>' + rFonts + '</w:rPr>'];
+  it.each([
+    ['a theme font of their own, beside a body font from the theme',
+      [themeNormal, ['TableParagraph', '<w:name w:val="Table Paragraph"/><w:basedOn w:val="Normal"/><w:rPr><w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/><w:sz w:val="18"/></w:rPr>']],
+      ['Aptos', 'Aptos Display']],
+    ['a theme font from the style they\'re based on, beside a body font from the theme',
+      [themeNormal, bibliographyIn('<w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/>'),
+        ['TableParagraph', '<w:name w:val="Table Paragraph"/><w:basedOn w:val="Bibliography"/><w:rPr><w:sz w:val="18"/></w:rPr>']],
+      ['Aptos', 'Aptos Display']],
+    ['a theme font from the style they\'re based on, with no rPr of their own',
+      [themeNormal, bibliographyIn('<w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/>'),
+        ['TableParagraph', '<w:name w:val="Table Paragraph"/><w:basedOn w:val="Bibliography"/>']],
+      ['Aptos', 'Aptos Display']],
+    ['a named font from the style they\'re based on',
+      [quoteIn('<w:rFonts w:ascii="Georgia" w:hAnsi="Georgia"/>'), ['TableParagraph', '<w:name w:val="Table Paragraph"/><w:basedOn w:val="Quote"/><w:rPr><w:sz w:val="18"/></w:rPr>']],
+      [undefined, 'Georgia']],
+  ] as Array<[string, Array<[string, string]>, [string | undefined, string]]>)('tables keep the font they show: %s', async (_name, replaced, [font, tableFont]) => {
+    const { convertDocx } = await import('./converter');
+    const original = await withStyles(['majorFont', 'Aptos Display'], ['minorFont', 'Aptos'], ...replaced);
+    const { markdown } = await convertDocx(original);
+    const { metadata } = parseFrontmatter(markdown);
+    expect([metadata.font, metadata.tableFont]).toEqual([font, tableFont]);
+    for (const templateDocx of [undefined, original]) {
+      const again = (await convertMdToDocx(markdown, { templateDocx })).docx;
+      const styles = await (await JSZip.loadAsync(again)).file('word/styles.xml')!.async('string');
+      expect(extractStyleBlock(styles, 'TableParagraph')).toContain('w:ascii="' + tableFont + '"');
+      expect((await convertDocx(again)).markdown).toBe(markdown);
+    }
+  });
+
+  // Export gives font to the body's styles, quotes and notes among them, so
+  // import gives it only where export with the document as its template
+  // would change no style's font but Normal's
+  const stylesPart = async (docx: Uint8Array) => (await JSZip.loadAsync(docx)).file('word/styles.xml')!.async('string');
+  const named = (font: string) => '<w:rFonts w:ascii="' + font + '" w:hAnsi="' + font + '"/>';
+  const georgiaNormal: [string, string] = ['Normal', '<w:name w:val="Normal"/><w:rPr>' + named('Georgia') + '<w:sz w:val="22"/></w:rPr>'];
+  it.each([
+    ['a body font from the theme, beside a quote and notes in fonts of their own', themeNormal, true, undefined, '<w:rPr>'],
+    ['a named body font, beside a quote and notes in fonts of their own', georgiaNormal, true, undefined, '<w:rPr>'],
+    // Read as an XML parser reads them, as with the namespace declared there
+    ['a named body font, beside a quote and notes in fonts of their own in run properties with attributes', georgiaNormal, true, undefined,
+      '<w:rPr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'],
+    // Where they take the body's font, it's given
+    ['a body font from the theme, beside a quote and notes in it', themeNormal, false, 'Aptos', '<w:rPr>'],
+    // Export gives the font to accented Latin text too (w:hAnsi), which a
+    // quote that takes the body's shows in another theme font
+    ['a body font from the theme, whose accented Latin text is in another', ['Normal', '<w:name w:val="Normal"/><w:rPr><w:rFonts w:ascii="Georgia" w:hAnsi="Georgia" w:asciiTheme="minorHAnsi" w:hAnsiTheme="majorHAnsi"/><w:sz w:val="22"/></w:rPr>'], false, undefined, '<w:rPr>'],
+  ] as Array<[string, [string, string], boolean, string | undefined, string]>)('import gives font only where export with the document as its template keeps the others\' fonts: %s', async (_name, normal, ownFonts, font, rPr) => {
+    const { convertDocx } = await import('./converter');
+    // The quote's and the notes' run properties start with `rPr`
+    const quote: [string, string] = ['Quote', '<w:name w:val="Quote"/><w:basedOn w:val="Normal"/>' + rPr + (ownFonts ? named('Garamond') : '') + '<w:i/></w:rPr>'];
+    const notes = ['FootnoteText', 'EndnoteText'].map((id): [string, string] =>
+      [id, '<w:name w:val="' + (id === 'FootnoteText' ? 'footnote text' : 'endnote text') + '"/><w:basedOn w:val="Normal"/>' + rPr + (ownFonts ? named('Times New Roman') : '') + '<w:sz w:val="20"/></w:rPr>']);
+    const original = await withStyles(['minorFont', 'Aptos'], normal, quote, ...notes);
+    const { markdown } = await convertDocx(original);
+    expect(parseFrontmatter(markdown).metadata.font).toBe(font);
+    const again = (await convertMdToDocx(markdown, { templateDocx: original })).docx;
+    const fontOf = (styles: string, id: string) => /<w:rFonts\b[^>]*>/.exec(extractStyleBlock(styles, id) ?? '')?.[0];
+    for (const id of ['Normal', 'Quote', 'FootnoteText', 'EndnoteText']) {
+      expect([id, fontOf(await stylesPart(again), id)]).toEqual([id, font === undefined ? fontOf(await stylesPart(original), id) : named(font)]);
+    }
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  // Where import gives no font, export gives the title, tables and a custom
+  // style without a font of their own Calibri without a template, not the
+  // font of Normal they're based on, so they get that font of their own
+  it('the title, tables and a custom style keep the font they show from Normal where import gives no font', async () => {
+    const { convertDocx } = await import('./converter');
+    const zip = await JSZip.loadAsync(await withStyles(georgiaNormal,
+      ['Quote', '<w:name w:val="Quote"/><w:basedOn w:val="Normal"/><w:rPr>' + named('Garamond') + '<w:i/></w:rPr>'],
+      ['Title', '<w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:rPr><w:sz w:val="56"/></w:rPr>'],
+      ['TableParagraph', '<w:name w:val="Table Paragraph"/><w:basedOn w:val="Normal"/><w:rPr><w:sz w:val="18"/></w:rPr>']));
+    // A custom style naming Normal's font, one taking it with an rPr of its
+    // own, and one with none
+    const custom = (id: string, name: string, rPr: string) => '<w:style w:type="paragraph" w:customStyle="1" w:styleId="' + id + '"><w:name w:val="Custom: ' + name + '"/><w:basedOn w:val="Normal"/>' + rPr + '</w:style>';
+    const customStyles = custom('MsCustomPullquote', 'pullquote', '<w:rPr>' + named('Georgia') + '</w:rPr>')
+      + custom('MsCustomEpigraph', 'epigraph', '<w:rPr><w:i/></w:rPr>') + custom('MsCustomAside', 'aside', '');
+    zip.file('word/styles.xml', (await zip.file('word/styles.xml')!.async('string')).replace('</w:styles>', customStyles + '</w:styles>'));
+    const original = await zip.generateAsync({ type: 'uint8array' });
+    const { markdown } = await convertDocx(original);
+    const { metadata } = parseFrontmatter(markdown);
+    expect([metadata.font, metadata.titleFont, metadata.tableFont]).toEqual([undefined, ['Georgia'], 'Georgia']);
+    expect(['pullquote', 'epigraph', 'aside'].map(name => metadata.styles?.[name]?.font)).toEqual(['Georgia', 'Georgia', 'Georgia']);
+    for (const templateDocx of [undefined, original]) {
+      const again = (await convertMdToDocx(markdown, { templateDocx })).docx;
+      const exported = await stylesPart(again);
+      for (const id of ['Title', 'TableParagraph', 'MsCustomPullquote', 'MsCustomEpigraph', 'MsCustomAside']) {
+        expect([id, /<w:rFonts\b[^>]*>/.exec(extractStyleBlock(exported, id) ?? '')?.[0]]).toEqual([id, named('Georgia')]);
+      }
+      expect((await convertDocx(again)).markdown).toBe(markdown);
+    }
+  });
+
+  // A custom style the frontmatter defines without a font shows the body's,
+  // which export gives it, so where import leaves font out, the style the
+  // document records gets the font it shows from Normal
+  it('a stored custom style without a font keeps the body\'s where import gives no font', async () => {
+    const { convertDocx } = await import('./converter');
+    const md = '---\nfont: Georgia\nstyles:\n  pullquote:\n    font-style: italic\n---\n\n> Quoted.\n\n<!-- style: pullquote -->\n\nPulled.\n\n<!-- /style -->\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    // The quote in a font of its own, which export with font would change
+    const styles = (await zip.file('word/styles.xml')!.async('string')).replace(/(<w:style\b[^>]*w:styleId="Quote"[^>]*>[\s\S]*?<w:rPr>)(?:<w:rFonts\b[^>]*\/>)?/, (_match, open: string) => open + named('Garamond'));
+    expect(extractStyleBlock(styles, 'Quote')).toContain(named('Garamond'));
+    zip.file('word/styles.xml', styles);
+    const original = await zip.generateAsync({ type: 'uint8array' });
+    const { markdown } = await convertDocx(original);
+    const { metadata } = parseFrontmatter(markdown);
+    expect([metadata.font, metadata.styles?.pullquote]).toEqual([undefined, { font: 'Georgia', fontStyle: 'italic' }]);
+    for (const templateDocx of [undefined, original]) {
+      const again = (await convertMdToDocx(markdown, { templateDocx })).docx;
+      expect(/<w:rFonts\b[^>]*>/.exec(extractStyleBlock(await stylesPart(again), 'MsCustomPullquote') ?? '')?.[0]).toBe(named('Georgia'));
+      expect((await convertDocx(again)).markdown).toBe(markdown);
+    }
+  });
+
+  // A stored custom style without a font gets the one it shows unless
+  // import gives that font as the body's, which export would give it: where
+  // import gives another, as Normal's theme font, Aptos, beside the Calibri
+  // named in it, which the custom style names, and where it gives none, as
+  // for Normal's theme font, Calibri, beside the Georgia named in it, which
+  // the custom style names, where export would give it Calibri
+  it.each([
+    ['another body font', 'Aptos', 'Calibri', 'Aptos'],
+    ['no body font', 'Calibri', 'Georgia', undefined],
+  ])('a stored custom style without a font keeps the one it shows where import gives %s', async (_name, themeFont, namedFont, font) => {
+    const { convertDocx } = await import('./converter');
+    const md = '---\nstyles:\n  pullquote:\n    font-style: italic\n---\n\n<!-- style: pullquote -->\n\nPulled.\n\n<!-- /style -->\n';
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const withRFonts = (xml: string, id: string, rFonts: string) => xml.replace(new RegExp('(<w:style\\b[^>]*w:styleId="' + id + '"[^>]*>[\\s\\S]*?<w:rPr>)(?:<w:rFonts\\b[^>]*\\/>)?'),
+      (_match, open: string) => open + rFonts);
+    const styles = withRFonts(withRFonts(await zip.file('word/styles.xml')!.async('string'), 'Normal',
+      '<w:rFonts w:ascii="' + namedFont + '" w:hAnsi="' + namedFont + '" w:asciiTheme="minorHAnsi" w:hAnsiTheme="minorHAnsi"/>'), 'MsCustomPullquote', named(namedFont));
+    expect(extractStyleBlock(styles, 'MsCustomPullquote')).toContain(named(namedFont));
+    zip.file('word/styles.xml', styles);
+    const theme = await zip.file('word/theme/theme1.xml')!.async('string');
+    zip.file('word/theme/theme1.xml', theme.replace(/(<a:minorFont><a:latin typeface=")[^"]*/, (_match, open: string) => open + themeFont));
+    const original = await zip.generateAsync({ type: 'uint8array' });
+    const { markdown } = await convertDocx(original);
+    const { metadata } = parseFrontmatter(markdown);
+    expect([metadata.font, metadata.styles?.pullquote]).toEqual([font, { font: namedFont, fontStyle: 'italic' }]);
+    for (const templateDocx of [undefined, original]) {
+      const again = (await convertMdToDocx(markdown, { templateDocx })).docx;
+      expect(/<w:rFonts\b[^>]*>/.exec(extractStyleBlock(await stylesPart(again), 'MsCustomPullquote') ?? '')?.[0]).toBe(named(namedFont));
+      expect((await convertDocx(again)).markdown).toBe(markdown);
+    }
+  });
+
+  // Import gives font where export with it gives each style what export
+  // without it gives, so that what the other keys change counts for none:
+  // here header-font gives Heading 2, in a theme font the theme names no
+  // typeface for, the font export gives a heading without one
+  it('import gives font where another key changes a style\'s font', async () => {
+    const { convertDocx } = await import('./converter');
+    const original = await withStyles(['majorFont', ''], georgiaNormal,
+      heading(1, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/>' + named('Arial') + '<w:sz w:val="32"/></w:rPr>'),
+      heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/><w:sz w:val="26"/></w:rPr>'));
+    const { markdown } = await convertDocx(original);
+    const { metadata } = parseFrontmatter(markdown);
+    expect([metadata.font, metadata.headerFont]).toEqual(['Georgia', ['Arial', 'Georgia']]);
+    const again = (await convertMdToDocx(markdown, { templateDocx: original })).docx;
+    const fonts = async (docx: Uint8Array) => /<w:rFonts\b[^>]*>/.exec(extractStyleBlock(await stylesPart(docx), 'Normal') ?? '')?.[0];
+    expect(await fonts(again)).toBe(await fonts(original));
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  // A font key sets a style's font for ASCII text and the rest of Latin text
+  // alike (w:ascii and w:hAnsi), so import gives none for a style that shows
+  // them in two, and export with the document as its template keeps both
+  it.each([
+    ['a heading, in two theme fonts beside a heading in Calibri', [
+      heading(1, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="minorHAnsi"/><w:sz w:val="32"/></w:rPr>'),
+      heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/>' + named('Calibri') + '<w:sz w:val="26"/></w:rPr>')], 'Heading1', 'headerFont'],
+    ['the title', [['Title', '<w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:rPr><w:rFonts w:ascii="Georgia" w:hAnsi="Garamond"/><w:sz w:val="56"/></w:rPr>']], 'Title', 'titleFont'],
+    ['tables', [['TableParagraph', '<w:name w:val="Table Paragraph"/><w:basedOn w:val="Normal"/><w:rPr><w:rFonts w:ascii="Georgia" w:hAnsi="Garamond"/><w:sz w:val="18"/></w:rPr>']], 'TableParagraph', 'tableFont'],
+    // Beside a body font, which export with it then keeps
+    ['code, beside a body in Georgia', [georgiaNormal, ['CodeBlock', '<w:name w:val="Code Block"/><w:basedOn w:val="Normal"/><w:rPr><w:rFonts w:ascii="Courier New" w:hAnsi="Consolas"/><w:sz w:val="20"/></w:rPr>']], 'CodeBlock', 'codeFont'],
+  ] as Array<[string, Array<[string, string]>, string, 'headerFont' | 'titleFont' | 'tableFont' | 'codeFont']>)('%s, showing ASCII text and the rest in two fonts, gets no font key', async (_name, replaced, id, key) => {
+    const { convertDocx } = await import('./converter');
+    const original = await withStyles(['majorFont', 'Cambria'], ['minorFont', 'Calibri'], ...replaced);
+    const { markdown } = await convertDocx(original);
+    const { metadata } = parseFrontmatter(markdown);
+    expect(metadata[key]).toBeUndefined();
+    if (key === 'codeFont') expect(metadata.font).toBe('Georgia');
+    const again = (await convertMdToDocx(markdown, { templateDocx: original })).docx;
+    const fonts = async (docx: Uint8Array) => /<w:rFonts\b[^>]*>/.exec(extractStyleBlock(await stylesPart(docx), id) ?? '')?.[0];
+    expect(await fonts(again)).toBe(await fonts(original));
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  // Export gives code-font to code blocks and inline code alike (CodeBlock
+  // and CodeChar), so import gives a code block's theme font, by its
+  // typeface, only where inline code shows it too, and else none, as main,
+  // which read the font named beside it, gave none
+  it.each([
+    ['inline code in the font named beside it', named('Consolas'), undefined],
+    ['inline code in the same theme font', '<w:rFonts w:ascii="Consolas" w:hAnsi="Consolas" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/>', 'Courier New'],
+    ['inline code naming that font', named('Courier New'), 'Courier New'],
+  ])('a code block in a theme font beside another font named gets code-font only with %s', async (_name, codeCharFonts, codeFont) => {
+    const { convertDocx } = await import('./converter');
+    const original = await withStyles(['majorFont', 'Courier New'],
+      ['CodeBlock', '<w:name w:val="Code Block"/><w:basedOn w:val="Normal"/><w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/><w:sz w:val="20"/></w:rPr>'],
+      ['CodeChar', '<w:name w:val="Code Char"/><w:rPr>' + codeCharFonts + '</w:rPr>']);
+    const { markdown } = await convertDocx(original);
+    expect(parseFrontmatter(markdown).metadata.codeFont).toBe(codeFont);
+    // With the document as its template, inline code keeps the font it shows
+    const again = (await convertMdToDocx(markdown, { templateDocx: original })).docx;
+    const fontOf = async (docx: Uint8Array, id: string) => /<w:rFonts\b[^>]*>/.exec(extractStyleBlock(await stylesPart(docx), id) ?? '')?.[0];
+    expect(await fontOf(again, 'CodeChar')).toBe(codeFont === undefined ? await fontOf(original, 'CodeChar') : named(codeFont));
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  // Word ignores a NoList style's properties and its base, as a paragraph
+  // style too, so a heading based on one shows the document defaults'
+  // fonts, not the two its w:rFonts names, which import's check of the
+  // fonts export gives (see fontKeepsOtherStyles) reads so too
+  it('a heading based on a paragraph style NoList in two fonts keeps font and header-font', async () => {
+    const { convertDocx } = await import('./converter');
+    const zip = await JSZip.loadAsync(await withStyles(['minorFont', 'Calibri'], georgiaNormal,
+      heading(1, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/>' + named('Arial') + '<w:sz w:val="32"/></w:rPr>'),
+      heading(2, '<w:basedOn w:val="NoList"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:sz w:val="26"/></w:rPr>')));
+    const styles = await zip.file('word/styles.xml')!.async('string');
+    const noList = styles.replace(/<w:style\b[^>]*w:styleId="NoList"[^>]*>[\s\S]*?<\/w:style>/, () => '<w:style w:type="paragraph" w:styleId="NoList"><w:name w:val="No List"/>'
+      + '<w:rPr><w:rFonts w:ascii="Verdana" w:hAnsi="Garamond"/></w:rPr></w:style>');
+    expect(noList).toContain('<w:style w:type="paragraph" w:styleId="NoList">');
+    zip.file('word/styles.xml', noList);
+    const original = await zip.generateAsync({ type: 'uint8array' });
+    const { markdown } = await convertDocx(original);
+    const { metadata } = parseFrontmatter(markdown);
+    // Heading 2 in the theme's Calibri, from the document defaults
+    expect([metadata.font, metadata.headerFont]).toEqual(['Georgia', ['Arial', 'Calibri', 'Georgia']]);
+    // Without a template, each heading keeps the font it shows
+    const again = (await convertMdToDocx(markdown)).docx;
+    const fontOf = async (docx: Uint8Array, id: string) => /<w:rFonts\b[^>]*>/.exec(extractStyleBlock(await stylesPart(docx), id) ?? '')?.[0];
+    expect([await fontOf(again, 'Normal'), await fontOf(again, 'Heading1'), await fontOf(again, 'Heading2')]).toEqual([named('Georgia'), named('Arial'), named('Calibri')]);
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+  });
+
+  // Each style is found by its ID, from the styles read once
+  it('import checks the fonts of a document of many styles in linear time', async () => {
+    const { convertDocx } = await import('./converter');
+    const zip = await JSZip.loadAsync(await withStyles(['Normal', '<w:name w:val="Normal"/><w:rPr>' + named('Georgia') + '<w:sz w:val="22"/></w:rPr>']));
+    const styles = await zip.file('word/styles.xml')!.async('string');
+    const time = async (count: number) => {
+      // Each based on Normal, whose font they show
+      const added = Array.from({ length: count }, (_, k) => '<w:style w:type="paragraph" w:styleId="S' + k + '"><w:name w:val="s' + k + '"/><w:basedOn w:val="Normal"/></w:style>').join('');
+      zip.file('word/styles.xml', styles.replace('</w:styles>', added + '</w:styles>'));
+      const docx = await zip.generateAsync({ type: 'uint8array' });
+      let fastest = Infinity;
+      for (let k = 0; k < 3; k++) {
+        const start = performance.now();
+        expect(parseFrontmatter((await convertDocx(docx)).markdown).metadata.font).toBe('Georgia');
+        fastest = Math.min(fastest, performance.now() - start);
+      }
+      return fastest;
+    };
+    await time(250);
+    const small = await time(1000);
+    expect(await time(4000) / small).toBeLessThan(8);
+  }, 30000);
+
+  // Each style along a heading's w:basedOn is found from the styles read
+  // once, for export with a template and for import, which checks the fonts
+  // export would give its styles, among many styles and along a long chain
+  it.each(['export with it as its template', 'import'])('%s takes time in proportion to a document of many styles and a long chain of them', async (way) => {
+    const { convertDocx } = await import('./converter');
+    const zip = await JSZip.loadAsync((await convertMdToDocx('# One\n\n## Two\n')).docx);
+    const styles = await zip.file('word/styles.xml')!.async('string');
+    const md = '---\nfont: Georgia\nheader-font-size: [16, 12]\n---\n\n# One\n\n## Two\n';
+    const time = async (count: number) => {
+      // Styles based on Normal, and a quarter as many more, each based on
+      // the one before, the last of which Heading 2 is based on
+      const chain = Math.floor(count / 4);
+      const unrelated = Array.from({ length: count }, (_, k) => '<w:style w:type="paragraph" w:styleId="U' + k + '"><w:name w:val="u' + k + '"/><w:basedOn w:val="Normal"/></w:style>').join('');
+      const linked = Array.from({ length: chain }, (_, k) => '<w:style w:type="paragraph" w:styleId="C' + k + '"><w:name w:val="c' + k + '"/><w:basedOn w:val="' + (k === 0 ? 'Normal' : 'C' + (k - 1)) + '"/></w:style>').join('');
+      const edited = styles.replace(/(<w:style\b[^>]*w:styleId="Heading2"[^>]*>[\s\S]*?<w:basedOn w:val=")[^"]*"/, (_match, before: string) => before + 'C' + (chain - 1) + '"')
+        .replace('</w:styles>', () => unrelated + linked + '</w:styles>');
+      expect(edited).toContain('<w:basedOn w:val="C' + (chain - 1) + '"/>');
+      zip.file('word/styles.xml', edited);
+      const templateDocx = await zip.generateAsync({ type: 'uint8array' });
+      if (way === 'import') {
+        const { docx } = await convertMdToDocx(md, { templateDocx });
+        return fastestRunAsync(async () => expect(parseFrontmatter((await convertDocx(docx)).markdown).metadata.headerFontSize).toEqual([16, 12]));
+      }
+      return fastestRunAsync(async () => expect(extractStyleBlock(await stylesPart((await convertMdToDocx(md, { templateDocx })).docx), 'Heading2')).toContain('<w:sz w:val="24"/>'));
+    };
+    await time(250);
+    const small = await time(1000);
+    expect(await time(4000) / small).toBeLessThan(8);
+  }, 60000);
+
+  // Export's font is the Latin text's, w:ascii and w:hAnsi, in place of a
+  // theme font there, and leaves what a style names for other scripts
+  it('a heading\'s font for East Asian text stays where export gives it header-font', async () => {
+    const { convertDocx } = await import('./converter');
+    const original = await withStyles(['majorFont', 'Aptos Display'],
+      heading(1, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:rFonts w:asciiTheme="majorHAnsi" w:eastAsia="SimSun" w:hAnsiTheme="majorHAnsi" w:cstheme="majorBidi"/><w:sz w:val="32"/></w:rPr>'),
+      heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="26"/></w:rPr>'));
+    const { markdown } = await convertDocx(original);
+    expect(parseFrontmatter(markdown).metadata.headerFont).toEqual(['Aptos Display', 'Calibri']);
+    const again = (await convertMdToDocx(markdown, { templateDocx: original })).docx;
+    const heading1 = extractStyleBlock(await stylesPart(again), 'Heading1');
+    expect(/<w:rFonts\b[^>]*>/.exec(heading1 ?? '')?.[0]).toBe('<w:rFonts w:ascii="Aptos Display" w:hAnsi="Aptos Display" w:eastAsia="SimSun" w:cstheme="majorBidi"/>');
+    expect((await convertDocx(again)).markdown).toBe(markdown);
+    expect(extractStyleBlock(await stylesPart((await convertMdToDocx(markdown, { templateDocx: again })).docx), 'Heading1')).toBe(heading1);
+  });
+
+  // Its w:rFonts is read as an XML parser reads it, a > in a value too
+  it('a heading whose w:rFonts holds a > in a value gets header-font in it', async () => {
+    const { convertDocx } = await import('./converter');
+    const original = await withStyles(heading(1, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="Calibri" w:eastAsia="A > B" w:hAnsi="Calibri"/><w:sz w:val="32"/></w:rPr>'));
+    const md = '---\nheader-font: Georgia\n---\n\n# One\n';
+    const docx = (await convertMdToDocx(md, { templateDocx: original })).docx;
+    const heading1 = extractStyleBlock(await stylesPart(docx), 'Heading1') ?? '';
+    expect(heading1.match(/<w:rFonts\b/g)).toHaveLength(1);
+    expect(heading1).toContain('<w:rFonts w:ascii="Georgia" w:hAnsi="Georgia" w:eastAsia="A > B"/>');
+    const { markdown } = await convertDocx(docx);
+    expect(parseFrontmatter(markdown).metadata.headerFont).toEqual(['Georgia']);
+    expect(extractStyleBlock(await stylesPart((await convertMdToDocx(markdown, { templateDocx: docx })).docx), 'Heading1')).toBe(heading1);
+  });
+
+  // Export gives font to a heading or title without a font of its own, so
+  // with font, one in a theme font gets that font by its typeface
+  it('headings and a title in a theme font keep it beside a body font from the theme', async () => {
+    const { convertDocx } = await import('./converter');
+    const theme = (font: string) => '<w:rFonts w:asciiTheme="' + font + '" w:hAnsiTheme="' + font + '"/>';
+    const { markdown } = await convertDocx(await withStyles(['majorFont', 'Aptos Display'], ['minorFont', 'Aptos'],
+      ['Normal', '<w:name w:val="Normal"/><w:rPr>' + beside('Calibri', 'minorHAnsi') + '<w:sz w:val="22"/></w:rPr>'],
+      heading(1, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/>' + theme('majorHAnsi') + '<w:sz w:val="32"/></w:rPr>'),
+      ['Title', '<w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:rPr>' + theme('majorHAnsi') + '<w:sz w:val="56"/></w:rPr>']));
+    const { metadata } = parseFrontmatter(markdown);
+    expect([metadata.font, metadata.headerFont, metadata.titleFont]).toEqual(['Aptos', ['Aptos Display', 'Aptos'], ['Aptos Display']]);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  // A theme is XML whose DrawingML elements may have any prefix or none,
+  // and the document's relationships name its part
+  const themePath = 'word/theme/theme1.xml';
+  it.each([
+    ['its font element declares a namespace', (theme: string) => theme.replace('<a:majorFont>', '<a:majorFont xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">')],
+    ['its elements are in the default namespace', (theme: string) => theme.replace(/<(\/?)a:/g, (_match, slash: string) => '<' + slash).replace('xmlns:a=', 'xmlns=')],
+    ['its elements have another prefix', (theme: string) => theme.replace(/<(\/?)a:/g, (_match, slash: string) => '<' + slash + 'd:').replace('xmlns:a=', 'xmlns:d=')],
+    ['its typefaces are in single quotes', (theme: string) => theme.replace(/typeface="([^"]*)"/g, (_match, typeface: string) => 'typeface=\'' + typeface + '\'')],
+    ['its typeface holds character references', (theme: string) => theme.replace('typeface="Aptos Display"', 'typeface="&#x41;p&#116;os Display"')],
+    ['its part has a name of its own, which the document\'s relationship gives', (theme: string) => theme, 'word/theme/custom.xml'],
+  ] as Array<[string, (theme: string) => string, string?]>)('a theme font reads by its typeface where %s', async (_name, edit, path = themePath) => {
+    const { convertDocx } = await import('./converter');
+    const zip = await JSZip.loadAsync(await withStyles(['majorFont', 'Aptos Display'],
+      heading(1, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/><w:sz w:val="32"/></w:rPr>'),
+      heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="26"/></w:rPr>')));
+    const theme = await zip.file(themePath)!.async('string');
+    if (path === themePath) expect(edit(theme)).not.toBe(theme);
+    zip.remove(themePath);
+    zip.file(path, edit(theme));
+    for (const part of ['word/_rels/document.xml.rels', '[Content_Types].xml']) {
+      const xml = await zip.file(part)!.async('string');
+      expect(xml).toContain(themePath.slice(5));
+      zip.file(part, xml.split(themePath.slice(5)).join(path.slice(5)));
+    }
+    const { markdown } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    expect(parseFrontmatter(markdown).metadata.headerFont).toEqual(['Aptos Display', 'Arial', 'Calibri']);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  // XML allows any number of references, as &apos; in a link's target
+  it('a theme font reads by its typeface where the document\'s relationships hold many references', async () => {
+    const { convertDocx } = await import('./converter');
+    const zip = await JSZip.loadAsync(await withStyles(['majorFont', 'Aptos Display'],
+      heading(1, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/><w:sz w:val="32"/></w:rPr>'),
+      heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="26"/></w:rPr>')));
+    const rels = await zip.file('word/_rels/document.xml.rels')!.async('string');
+    expect(rels).toContain('</Relationships>');
+    zip.file('word/_rels/document.xml.rels', rels.replace('</Relationships>', () => '<Relationship Id="rId900" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" ' +
+      'Target="https://example.com/' + '&apos;'.repeat(1500) + '" TargetMode="External"/></Relationships>'));
+    const { markdown } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    expect(parseFrontmatter(markdown).metadata.headerFont).toEqual(['Aptos Display', 'Arial', 'Calibri']);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  // A part may be in UTF-16, which its BOM and declaration say
+  it('a theme font reads by its typeface from a theme in UTF-16', async () => {
+    const { convertDocx } = await import('./converter');
+    const zip = await JSZip.loadAsync(await withStyles(['majorFont', 'Aptos Display'],
+      heading(1, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:rPr><w:b/><w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/><w:sz w:val="32"/></w:rPr>'),
+      heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="26"/></w:rPr>')));
+    const theme = (await zip.file('word/theme/theme1.xml')!.async('string'))
+      .replace(/^(<\?xml\b[^>]*?\sencoding=")[^"]*/, (_match, open: string) => open + 'UTF-16');
+    expect(theme).toMatch(/^<\?xml\b[^>]*encoding="UTF-16"/);
+    zip.file('word/theme/theme1.xml', new Uint8Array([0xFF, 0xFE, ...Buffer.from(theme, 'utf16le')]));
+    const { markdown } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    expect(parseFrontmatter(markdown).metadata.headerFont).toEqual(['Aptos Display', 'Arial', 'Calibri']);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(markdown);
+  });
+
+  it('a heading whose w:ascii Word sets aside for its theme font keeps its style with the document as its template', async () => {
+    const { convertDocx } = await import('./converter');
+    const original = await withStyles(heading(2, '<w:basedOn w:val="Normal"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:rPr><w:b/>' +
+      '<w:rFonts w:ascii="Cambria" w:hAnsi="Cambria" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr>'));
+    const { markdown } = await convertDocx(original);
+    expect(parseFrontmatter(markdown).metadata.headerFont).toBeUndefined();
+    const again = (await convertMdToDocx(markdown, { templateDocx: original })).docx;
+    const stylesOf = async (docx: Uint8Array) => (await JSZip.loadAsync(docx)).file('word/styles.xml')!.async('string');
+    expect(extractStyleBlock(await stylesOf(again), 'Heading2')).toBe(extractStyleBlock(await stylesOf(original), 'Heading2'));
+  });
 
   it('a heading based on a bold heading stays bold without the template', async () => {
     const { convertDocx } = await import('./converter');

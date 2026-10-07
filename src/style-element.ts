@@ -22,6 +22,8 @@ import { xmlAttribute, xmlElement } from './xml-elements';
  * closes another.
  */
 export function findStyleElement(stylesXml: string, id: string, ids: Map<string, string>, anyType = false): { at: number; element: string } | undefined {
+  // Read up to the style, for one lookup; what looks up many reads them all
+  // once (see styleFinder)
   const styleId = ids.get(id) ?? id;
   let caseless: { at: number; element: string } | undefined;
   for (let style = xmlElement(stylesXml, 'w:style'); style; style = xmlElement(stylesXml, 'w:style', style.end)) {
@@ -33,4 +35,33 @@ export function findStyleElement(stylesXml: string, id: string, ids: Map<string,
     caseless ??= paragraph && ownId?.toLowerCase() === styleId.toLowerCase() ? found : undefined;
   }
   return caseless;
+}
+
+/**
+ * A finder of the styles of `stylesXml` as findStyleElement finds them,
+ * which reads them once, for what looks up many, as each style along a
+ * style's w:basedOn. It finds them as `stylesXml` is, so what changes the
+ * styles takes another.
+ */
+export function styleFinder(stylesXml: string): (id: string, ids: Map<string, string>, anyType?: boolean) => { at: number; element: string } | undefined {
+  // Each style by its ID, in their order, and the first paragraph style by
+  // its ID in lower case
+  const byId = new Map<string, Array<{ at: number; element: string; paragraph: boolean }>>();
+  const byCaselessId = new Map<string, { at: number; element: string }>();
+  for (let style = xmlElement(stylesXml, 'w:style'); style; style = xmlElement(stylesXml, 'w:style', style.end)) {
+    // A style without a type is a paragraph style
+    const paragraph = (xmlAttribute(style.tag, 'w:type') ?? 'paragraph') === 'paragraph';
+    const id = xmlAttribute(style.tag, 'w:styleId');
+    if (id === undefined) continue;
+    const found = { at: style.start, element: stylesXml.slice(style.start, style.end) };
+    const styles = byId.get(id) ?? [];
+    styles.push({ ...found, paragraph });
+    byId.set(id, styles);
+    if (paragraph && !byCaselessId.has(id.toLowerCase())) byCaselessId.set(id.toLowerCase(), found);
+  }
+  return (id, ids, anyType = false) => {
+    const styleId = ids.get(id) ?? id;
+    const style = byId.get(styleId)?.find(({ paragraph }) => paragraph || anyType);
+    return style !== undefined ? { at: style.at, element: style.element } : byCaselessId.get(styleId.toLowerCase());
+  };
 }

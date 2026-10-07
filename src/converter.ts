@@ -6,7 +6,7 @@ import { FRONTMATTER_OPENING_RE, Frontmatter, NotesMode, parseFrontmatter, seria
 import { gfmAlertTitle, parseGfmAlertMarker, toGfmAlertMarker, type GfmAlertType } from './gfm';
 import { emuToPixels, isSupportedImageFormat, resolveImageFilename } from './image-utils';
 import { keepParagraphEdgeWhitespace } from './html-entities';
-import { findStyleElement } from './style-element';
+import { styleFinder } from './style-element';
 import { replaceXmlElements, xmlAttribute, xmlElement, xmlOn, xmlStartTag } from './xml-elements';
 import htmlBlockNames from 'markdown-it/lib/common/html_blocks.mjs';
 import { HTML_OPEN_CLOSE_TAG_RE, HTML_TAG_RE } from 'markdown-it/lib/common/html_re.mjs';
@@ -16,7 +16,7 @@ import { criticPayloadRanges } from './critic-markup';
 import { findDollarMathAt } from './math-delimiters';
 import { getDisplayWidth, GRID_TABLE_SEPARATOR_RE, readGridTableCells, type TableAlign } from './grid-table-preprocess';
 import { escapeBibtexText, parseBibtex, parseBibtexWithRaw, mergeBibtex } from './bibtex-parser';
-import { blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, TABLE_FONT_SLOTS, tableTextDefaultFont, THEME_MINOR_FONT, withoutSpaceOutsideComments } from './md-to-docx';
+import { applyFontOverridesToTemplate, blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, countsForIndent, customStyleId, directiveRest, htmlBlocksIn, imageLabelEnd, isLineBreakBlock, itemDropsComment, linkifiedColons, linkifiedText, linkifyMatches, outsideComments, parseMd, readsAsParagraph, readsCommentsInline, resolveFontOverrides, showsAsText, startsHtmlBlock, TABLE_FONT_SLOTS, tableTextDefaultFont, THEME_MINOR_FONT, withoutSpaceOutsideComments } from './md-to-docx';
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { matchTables, paragraphStartFingerprint, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
@@ -25,7 +25,7 @@ import { publicStyleNameForZoteroId, zoteroStyleIdForName } from './csl-loader';
 import { extractZoteroKey } from './zotero-link';
 import { DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
 import { maxOf, pushAll, spliceAll } from './arrays';
-import { decodeXml } from './template-sections';
+import { asUtf8, decodeXml, parsePart, relatedPartPath, XML_ENTITIES } from './template-sections';
 
 // --- Implementation notes ---
 // Table parsing:
@@ -2088,18 +2088,8 @@ const parserOptions = {
   preserveOrder: true,
   trimValues: false,
   parseTagValue: false,
-  processEntities: {
-    enabled: true,
-    // fast-xml-parser counts every &quot;, &lt;, &gt; and &apos; toward
-    // maxTotalExpansions, and a long manuscript passes any fixed count (Zotero
-    // field codes are full of &quot;). Leaving it uncapped is safe because no
-    // expansion can grow the text: standard entities replace 4+ characters with
-    // one, and maxEntitySize holds DOCTYPE entities (which Word never writes) to
-    // one character in place of a reference of at least three.
-    maxTotalExpansions: Infinity,
-    maxEntitySize: 1,
-    maxExpandedLength: 1000000,
-  },
+  // Uncapped, and safe (see XML_ENTITIES)
+  processEntities: XML_ENTITIES,
 };
 
 /** XML of what the parser read, as a title paragraph's (see ContentItem's titleXml) */
@@ -16329,12 +16319,74 @@ export function xmlHalfPoints(value: string | undefined): number | undefined {
 }
 
 /**
+ * The typefaces a theme gives its major and minor fonts (a:fontScheme), by
+ * the font and script, as `majorFont latin`. The theme is parsed as a
+ * package part is (see parsePart), its elements found by their local names
+ * along the path the schema gives them, as DrawingML's elements may have any
+ * prefix or none, and its typefaces with their character references read,
+ * as `&#x41;ptos`.
+ */
+function themeTypefaces(themeXml: string | undefined): Map<string, string> {
+  const typefaces = new Map<string, string>();
+  if (!themeXml) return typefaces;
+  const parsed = parsePart(themeXml);
+  const child = (node: unknown, name: string): unknown => {
+    const value = node !== null && typeof node === 'object' ? (node as Record<string, unknown>)[name] : undefined;
+    return Array.isArray(value) ? value[0] : value;
+  };
+  const scheme = child(child(child(parsed, 'theme'), 'themeElements'), 'fontScheme');
+  for (const font of ['majorFont', 'minorFont']) {
+    for (const script of ['latin', 'ea', 'cs']) {
+      const typeface = child(child(child(scheme, font), script), '@_typeface');
+      if (typeof typeface === 'string' && typeface) typefaces.set(font + ' ' + script, typeface);
+    }
+  }
+  return typefaces;
+}
+
+/** What extractFontOverridesFromStyles reads styles with: `withoutBodyFont`
+ *  gives no font (see fontKeepsOtherStyles), and `fontsShown` takes the
+ *  fonts each style shows Latin text in, by its ID, in place of the fields */
+interface FontFieldOptions {
+  explicitTableFontSize?: boolean;
+  builtInIds?: Map<string, string>;
+  titleParagraphs?: string[];
+  themeXml?: string;
+  withoutBodyFont?: boolean;
+  fontsShown?: Map<string, string>;
+}
+
+/**
+ * Whether `font`, among the font fields import read from the styles of
+ * `stylesXml`, `fields`, leaves the fonts each style shows Latin text in as
+ * they are, in each attribute that export's font sets, where export gives
+ * the styles the fields with the document as its template (see
+ * applyFontOverridesToTemplate). That's export with the fields and without
+ * `font` giving each style the same fonts, so that what the other fields
+ * change, as `code-font` a code style's, counts for none. Export gives
+ * `font` to the body's styles, quotes and notes among them, which no key
+ * gives a font of their own, so where one shows another, export with `font`
+ * would replace it. That holds for Normal too, where it shows accented
+ * letters (w:hAnsi) in a font other than its ASCII text's.
+ */
+function fontKeepsOtherStyles(stylesXml: string, fields: Partial<Frontmatter>, opts: FontFieldOptions): boolean {
+  const fontsShown = (others: Partial<Frontmatter>) => {
+    const exported = applyFontOverridesToTemplate(new TextEncoder().encode(asUtf8(stylesXml)), resolveFontOverrides(others as Frontmatter));
+    const fonts = new Map<string, string>();
+    extractFontOverridesFromStyles(exported, { ...opts, fontsShown: fonts });
+    return fonts;
+  };
+  const after = fontsShown(fields);
+  return [...fontsShown({ ...fields, font: undefined })].every(([id, fonts]) => after.get(id) === fonts);
+}
+
+/**
  * Extract heading/title font properties from word/styles.xml for round-trip.
  * Each element and attribute as an XML parser reads it (see xmlElement and
  * xmlAttribute), so a style written with whitespace around an attribute's =,
  * or in single quotes, reads as it does in double quotes.
  */
-function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTableFontSize?: boolean; builtInIds?: Map<string, string>; titleParagraphs?: string[] }): Partial<Frontmatter> {
+function extractFontOverridesFromStyles(stylesXml: string, opts?: FontFieldOptions): Partial<Frontmatter> {
   const result: Partial<Frontmatter> = {};
   // The document's ID of each built-in style it gives another, by the ID
   // this reads it by (see StyleLayouts.builtInIds)
@@ -16352,10 +16404,16 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   /** The w:style element of the paragraph style `id`, by the document's ID
    *  for a built-in style, of any type with `anyType` (see
    *  findStyleElement), as Word shows it, without a tracked change's record
-   *  (see withoutFormatChanges) */
+   *  (see withoutFormatChanges), each read once */
+  const findStyle = styleFinder(stylesXml);
+  const styleBlocks = new Map<string, string | null>();
   function styleBlock(id: string, anyType = false): string | null {
-    const found = findStyleElement(stylesXml, id, documentIds, anyType);
-    return found ? withoutFormatChanges(found.element) : null;
+    const key = (anyType ? 'any ' : 'paragraph ') + id;
+    if (!styleBlocks.has(key)) {
+      const found = findStyle(id, documentIds, anyType);
+      styleBlocks.set(key, found ? withoutFormatChanges(found.element) : null);
+    }
+    return styleBlocks.get(key)!;
   }
 
   // Helper: a style block's style-level rPr, or '' for none
@@ -16373,8 +16431,35 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
     return block === null ? null : blockRPr(block);
   }
 
+  /**
+   * The font an rPr's w:rFonts names for Latin text, its w:ascii. Where it
+   * has a w:asciiTheme too, Word shows that theme font instead (ECMA-376
+   * Part 1 §17.3.2.26), so the font is the theme font's typeface (see
+   * themeFont), or the w:ascii where the theme names none. A theme font
+   * alone names none, so that a document in Word's own theme fonts reads
+   * back without one.
+   */
   function extractFont(rpr: string): string | undefined {
-    return xmlElementAttribute(rpr, 'w:rFonts', 'w:ascii') || undefined;
+    const rFonts = xmlStartTag(rpr, 'w:rFonts')?.tag ?? '';
+    const ascii = xmlAttribute(rFonts, 'w:ascii') || undefined;
+    return ascii && (themeFont(rFonts) ?? ascii);
+  }
+
+  const typefaces = themeTypefaces(opts?.themeXml);
+  /**
+   * The theme font a w:rFonts's w:asciiTheme names, by its typeface in the
+   * document's theme: the major font's or the minor's, its Latin typeface
+   * for majorHAnsi and majorAscii, its East Asian one for majorEastAsia and
+   * its complex script one for majorBidi.
+   */
+  function themeFont(rFonts: string): string | undefined {
+    const theme = xmlAttribute(rFonts, 'w:asciiTheme');
+    return theme === undefined ? undefined : themeTypeface(theme);
+  }
+  function themeTypeface(theme: string): string | undefined {
+    const font = /^(major|minor)(Ascii|HAnsi|EastAsia|Bidi)$/.exec(theme);
+    if (!font) return undefined;
+    return typefaces.get(font[1] + 'Font ' + (font[2] === 'EastAsia' ? 'ea' : font[2] === 'Bidi' ? 'cs' : 'latin'));
   }
 
   function extractSizeHp(rpr: string): number | undefined {
@@ -16447,7 +16532,8 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
    * size anywhere, Word shows 10pt. A font is the w:ascii of the nearest
    * w:rFonts that sets w:ascii or w:asciiTheme; a theme font, which Word
    * shows over a w:ascii beside it (ECMA-376 Part 1 §17.3.2.26), has no name
-   * here, so it's undefined, as is a style styles.xml doesn't have.
+   * here, so it's undefined, unless `withTheme`, which gives its name in the
+   * theme (see themeFont). A style styles.xml doesn't have has neither.
    */
   function inheritedSizeHp(styleId: string): number | undefined {
     const chain = styleChain(styleId, true);
@@ -16458,13 +16544,85 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
     }
     return 20;
   }
-  function inheritedFont(styleId: string): string | undefined {
+  function inheritedFont(styleId: string, withTheme = false): string | undefined {
     for (const rpr of [...styleChain(styleId, true).map(blockRPr), defaultRPr]) {
       const rFonts = xmlStartTag(rpr, 'w:rFonts')?.tag ?? '';
-      if (xmlAttribute(rFonts, 'w:asciiTheme') !== undefined) return undefined;
-      if (xmlAttribute(rFonts, 'w:ascii') !== undefined) return extractFont(rpr);
+      if (xmlAttribute(rFonts, 'w:asciiTheme') !== undefined) return withTheme ? themeFont(rFonts) ?? extractFont(rFonts) : undefined;
+      if (xmlAttribute(rFonts, 'w:ascii') !== undefined) return extractFont(rFonts);
     }
     return undefined;
+  }
+
+  /**
+   * The fonts a w:rFonts gives Latin text, in the attributes export's font
+   * sets (see rFontsWithFont in md-to-docx.ts): w:ascii's, for ASCII text,
+   * and w:hAnsi's, for the rest, as accented letters, each undefined where
+   * it sets neither. A theme font (w:asciiTheme, w:hAnsiTheme), which Word
+   * shows over a font named beside it (ECMA-376 Part 1 §17.3.2.26), goes by
+   * its typeface in the theme (see themeTypeface), or else by the font
+   * named beside it, or else by its own name.
+   */
+  function latinFonts(rFonts: string): Array<string | undefined> {
+    return ['ascii', 'hAnsi'].map(slot => {
+      const theme = xmlAttribute(rFonts, 'w:' + slot + 'Theme');
+      const named = xmlAttribute(rFonts, 'w:' + slot);
+      return theme === undefined ? named : themeTypeface(theme) ?? named ?? 'theme ' + theme;
+    });
+  }
+  /**
+   * The fonts a style shows Latin text in (see latinFonts), each from the
+   * nearest style along its w:basedOn that sets it, or else the document
+   * defaults, each style's read once, from the fonts of the style it's based
+   * on, which may be based on another in turn. The chain ends at a style
+   * Word ignores, which gives nothing, its base neither, as styleChain
+   * reads it as Word does (see wordIgnoresStyle).
+   */
+  const latinFontsOfStyle = new Map<string, Array<string | undefined>>();
+  const defaultLatinFonts = latinFonts(xmlStartTag(defaultRPr, 'w:rFonts')?.tag ?? '');
+  function latinFontsShown(styleId: string): Array<string | undefined> {
+    // The styles along the chain to one already read, nearest first
+    const chain: Array<[string, string]> = [];
+    const seen = new Set<string>();
+    let base: Array<string | undefined> | undefined;
+    let comesBack = false;
+    for (let id: string | undefined = styleId; id !== undefined;) {
+      base = latinFontsOfStyle.get(id);
+      if (base !== undefined) break;
+      if (seen.has(id)) {
+        comesBack = true;
+        break;
+      }
+      seen.add(id);
+      const block = styleBlock(id);
+      if (block === null || wordIgnoresStyle(block)) break;
+      chain.push([id, xmlStartTag(blockRPr(block), 'w:rFonts')?.tag ?? '']);
+      id = xmlElementAttribute(block, 'w:basedOn', 'w:val');
+    }
+    let fonts = base ?? defaultLatinFonts;
+    for (const [id, rFonts] of chain.reverse()) {
+      fonts = latinFonts(rFonts).map((font, slot) => font ?? fonts[slot]);
+      // A chain that comes back around is read from where it starts, as
+      // styleChain reads it, so its fonts are this style's alone
+      if (!comesBack) latinFontsOfStyle.set(id, fonts);
+    }
+    return fonts;
+  }
+
+  /** Whether a style shows Latin text in one font, for ASCII text and the
+   *  rest, as accented letters (see latinFontsShown). A font key sets both, so export giving a style one that shows two would
+   *  change its accented letters' font */
+  const oneLatinFont = (styleId: string) => {
+    const [ascii, hAnsi] = latinFontsShown(styleId);
+    return ascii === hAnsi;
+  };
+
+  // The fonts each style shows, by the style's ID (see fontKeepsOtherStyles)
+  if (opts?.fontsShown) {
+    for (const { tag } of styleElements) {
+      const id = xmlAttribute(tag, 'w:styleId');
+      if (id !== undefined) opts.fontsShown.set(id, latinFontsShown(id).join('\n'));
+    }
+    return result;
   }
 
   /**
@@ -16537,6 +16695,14 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   // Emit body font/fontSize when they differ from Word defaults
   if (bodyFont && bodyFont !== THEME_MINOR_FONT) result.font = bodyFont;
   if (bodySizeHp !== undefined && bodySizeHp !== 22) result.fontSize = bodySizeHp / 2;
+  // None where giving it would change other styles' fonts (see
+  // fontKeepsOtherStyles)
+  if (opts?.withoutBodyFont) delete result.font;
+  // The font export gives a heading, the title or tables without one of
+  // their own: the body's it's given, or else Calibri, its theme's, as it
+  // gives them without a template, so each style's font is compared with
+  // that, not with Normal's where the body's isn't given
+  const unsetFont = result.font ?? 'Calibri';
 
   // Default heading sizes in half-points
   const defaultHp: Record<string, number> = {
@@ -16545,6 +16711,7 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   const ids = ['Heading1', 'Heading2', 'Heading3', 'Heading4', 'Heading5', 'Heading6'];
 
   const fonts: (string | undefined)[] = [];
+  const shownFonts: (string | undefined)[] = [];
   const sizes: (number | undefined)[] = [];
   const styles: (string | undefined)[] = [];
 
@@ -16552,10 +16719,12 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
     const rpr = getStyleRPr(id);
     if (rpr !== null) {
       fonts.push(inheritedFont(id));
+      shownFonts.push(inheritedFont(id, true));
       sizes.push(inheritedSizeHp(id));
       styles.push(inheritedStyle(id));
     } else {
       fonts.push(undefined);
+      shownFonts.push(undefined);
       sizes.push(undefined);
       styles.push(undefined);
     }
@@ -16574,13 +16743,17 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
     return arr.slice(0, end);
   }
 
-  // headerFont: emit if any heading font differs from the one export gives a
-  // heading without one: the body's, or else Calibri, its theme's. A heading
-  // whose font has no name here, as a theme font has none, takes that one
-  // too, which keeps the others in their places
-  const unsetFont = result.font ?? 'Calibri';
-  const hFonts = fonts.map(f => f ?? unsetFont);
-  if (hFonts.some(f => f !== unsetFont)) result.headerFont = trimTrailing(hFonts);
+  // headerFont: emit where some heading has a font named in styles.xml, or
+  // there's a body font, which export gives a heading without one, and some
+  // heading shows a font other than the one export gives it: the body's, or
+  // else Calibri, its theme's. Each heading then gets the font it shows, a
+  // theme font by its name in the theme, or else that one, which keeps them
+  // in their places. A theme font alone, without a body font, adds none, so
+  // that a document in Word's own theme fonts reads back without one. None
+  // where a heading shows its ASCII text and the rest in two fonts (see
+  // oneLatinFont), which a font of export's would make one
+  const hFonts = shownFonts.map(f => f ?? unsetFont);
+  if ((fonts.some(f => f !== undefined) || result.font !== undefined) && hFonts.some(f => f !== unsetFont) && ids.every(id => getStyleRPr(id) === null || oneLatinFont(id))) result.headerFont = trimTrailing(hFonts);
 
   // headerFontSize: emit if any heading shows a size other than the one export
   // would give it. Fill undefined entries with that size to preserve
@@ -16600,8 +16773,10 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   // Title extraction
   const titleRpr = getStyleRPr('Title');
   if (titleRpr !== null) {
-    const tFont = inheritedFont('Title');
-    if (tFont && tFont !== bodyFont) result.titleFont = [tFont];
+    // With a body font, which export gives a title without one, the font it
+    // shows, a theme font too
+    const tFont = inheritedFont('Title', result.font !== undefined);
+    if (tFont && tFont !== unsetFont && oneLatinFont('Title')) result.titleFont = [tFont];
     const tSizeHp = inheritedSizeHp('Title');
     if (tSizeHp !== undefined && tSizeHp !== exportedSizeHp(56)) result.titleFontSize = [tSizeHp / 2];
     // Each title's, or else the style's
@@ -16611,9 +16786,12 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
 
   // TableParagraph extraction
   const tableRpr = getStyleRPr('TableParagraph');
-  if (tableRpr) {
-    const tblFont = extractFont(tableRpr);
-    if (tblFont && tblFont !== bodyFont) result.tableFont = tblFont;
+  if (tableRpr !== null) {
+    // The font it shows, which may come from the style it's based on, and
+    // with a body font, which export would give tables in its place, a
+    // theme font too, by its typeface, as for the title
+    const tblFont = inheritedFont('TableParagraph', result.font !== undefined);
+    if (tblFont && tblFont !== unsetFont && oneLatinFont('TableParagraph')) result.tableFont = tblFont;
     const tblSizeHp = extractSizeHp(tableRpr);
     if (tblSizeHp !== undefined) {
       const bsHp = bodySizeHp ?? 22;
@@ -16632,7 +16810,15 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   const codeRpr = getStyleRPr('CodeBlock');
   if (codeRpr) {
     const codeFont = extractFont(codeRpr);
-    if (codeFont && codeFont !== 'Consolas') result.codeFont = codeFont;
+    // Export gives code-font to inline code too (CodeChar), so a theme
+    // font, by its typeface, where main read the font named beside it, is
+    // given only where inline code, if any, shows it in all Latin text too
+    // (see latinFonts), and else none, as main gave
+    const namedCodeFont = xmlAttribute(xmlStartTag(codeRpr, 'w:rFonts')?.tag ?? '', 'w:ascii');
+    const codeCharRpr = getStyleRPr('CodeChar', true);
+    const inlineCodeShows = codeFont === namedCodeFont || codeCharRpr === null
+      || latinFonts(xmlStartTag(codeCharRpr, 'w:rFonts')?.tag ?? '').every(font => font === codeFont);
+    if (codeFont && codeFont !== 'Consolas' && oneLatinFont('CodeBlock') && inlineCodeShows) result.codeFont = codeFont;
     const codeSizeHp = extractSizeHp(codeRpr);
     const inferredHp = bodySizeHp !== undefined && bodySizeHp !== 22 ? Math.max(1, bodySizeHp - 2) : 20;
     if (codeSizeHp !== undefined && codeSizeHp !== inferredHp) result.codeFontSize = codeSizeHp / 2;
@@ -16649,9 +16835,14 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
     const def: CustomStyleDef = {};
     // A custom style can be a character style
     const csRpr = getStyleRPr(csStyleId, true);
+    // The font it shows: its own, or else, for a paragraph style, one it
+    // takes along its w:basedOn, as from Normal, with or without an rPr of
+    // its own. Export builds it again on Normal, and gives one without a
+    // font the body's: the one it's given, or else Calibri, without a
+    // template, and with the document as its template, Normal's
+    const f = (csRpr ? extractFont(csRpr) : undefined) ?? (styleBlock(csStyleId) !== null ? inheritedFont(csStyleId, result.font !== undefined) : undefined);
+    if (f && (f !== unsetFont || f !== bodyFont)) def.font = f;
     if (csRpr) {
-      const f = extractFont(csRpr);
-      if (f && f !== bodyFont) def.font = f;
       const s = extractSizeHp(csRpr);
       if (s !== undefined) def.fontSize = s / 2;
       const st = extractStyle(csRpr, getStylePPr(csStyleId, true));
@@ -17211,9 +17402,23 @@ export async function convertDocx(
   const titleLines = extractTitleLines(docContent, titleParagraphs);
 
   // The heading, title, body and table fonts and sizes the frontmatter
-  // takes from styles.xml
+  // takes from styles.xml, with the font Normal shows where `font` is left
+  // out for it, and the custom styles as their styles have them
   const stylesXml = await readZipText(zip, 'word/styles.xml');
-  const fontFields = stylesXml !== undefined ? extractFontOverridesFromStyles(stylesXml, { explicitTableFontSize, builtInIds: styleLayouts.builtInIds, titleParagraphs }) : {};
+  let fontFields: Partial<Frontmatter> = {};
+  if (stylesXml !== undefined) {
+    // The theme the document's relationship names, in the encoding its BOM
+    // or declaration names
+    const themePath = await relatedPartPath(zip, 'word/document.xml', 'theme');
+    const themeXml = themePath === undefined ? undefined : await readZipText(zip, themePath);
+    const fontOptions = { explicitTableFontSize, builtInIds: styleLayouts.builtInIds, titleParagraphs, themeXml };
+    fontFields = extractFontOverridesFromStyles(stylesXml, fontOptions);
+    // Export gives font to the body's styles, so it's given only where that
+    // changes no other style's font, as without one before
+    if (fontFields.font !== undefined && !fontKeepsOtherStyles(stylesXml, fontFields, fontOptions)) {
+      fontFields = extractFontOverridesFromStyles(stylesXml, { ...fontOptions, withoutBodyFont: true });
+    }
+  }
   // And the size and font export gives a table's text with none of its
   // own, by them, the font the theme's where they have none (see
   // tableTextDefaultFont), which a table whose text takes them from the
@@ -17316,9 +17521,17 @@ export async function convertDocx(
   // dates in the system timezone, and normalizeToUtcIso reads them back in it.
   // Extract heading/title font overrides from styles.xml for round-trip
   Object.assign(fm, fontFields);
-  // Restore custom styles from custom property (primary source)
+  // Restore custom styles from custom property (primary source). One
+  // without a font gets the one it shows, as read from its style, unless
+  // that's the font import gives the body, which export gives it: where
+  // import gives none, export gives it Calibri without a template, and
+  // where it gives another, as Normal's theme font beside the font named in
+  // it, which the style names, that one
   if (storedCustomStyles) {
-    fm.styles = storedCustomStyles;
+    fm.styles = Object.fromEntries(Object.entries(storedCustomStyles).map(([name, def]) => {
+      const shown = fontFields.styles?.[name]?.font;
+      return [name, def.font === undefined && shown !== undefined && shown !== fontFields.font ? { ...def, font: shown } : def];
+    }));
   }
   if (codeBlockStyling) {
     const bg = codeBlockStyling.get('bg');
