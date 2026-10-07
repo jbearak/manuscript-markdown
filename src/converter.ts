@@ -12544,11 +12544,19 @@ async function allNamed<T extends Record<string, PromiseLike<unknown>>>(promises
 function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTableFontSize?: boolean }): Partial<Frontmatter> {
   const result: Partial<Frontmatter> = {};
 
+  /** Where the next w:style element starts from `from`, or -1, with any
+   *  whitespace before its first attribute */
+  function nextStyleStart(from: number): number {
+    const start = /<w:style\s/g;
+    start.lastIndex = from;
+    return start.exec(stylesXml)?.index ?? -1;
+  }
+
   // Helper: find a style block by styleId and extract rPr content
   function getStyleRPr(styleId: string): string | null {
     let searchFrom = 0;
     while (true) {
-      const idx = stylesXml.indexOf('<w:style ', searchFrom);
+      const idx = nextStyleStart(searchFrom);
       if (idx === -1) return null;
       const closeTag = stylesXml.indexOf('</w:style>', idx);
       if (closeTag === -1) return null;
@@ -12582,7 +12590,7 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   }
 
   function extractSizeHp(rpr: string): number | undefined {
-    const v = extractAttr(rpr, '<w:sz w:val="');
+    const v = /<w:sz\b[^>]*?\sw:val="(\d+)"/.exec(rpr)?.[1];
     return v ? Number(v) : undefined;
   }
 
@@ -12604,11 +12612,12 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
     if (isXmlToggleOn(rpr, 'w:b')) parts.push('bold');
     if (isXmlToggleOn(rpr, 'w:i')) parts.push('italic');
     // Underline: bare <w:u/> or any w:val except "none"
-    if (rpr.includes('<w:u/>') || (rpr.includes('<w:u ') && !rpr.includes('w:val="none"'))) parts.push('underline');
+    const underline = /<w:u\b[^>]*>/.exec(rpr)?.[0];
+    if (underline && !/\sw:val="none"/.test(underline)) parts.push('underline');
     if (isXmlToggleOn(rpr, 'w:smallCaps')) parts.push('smallcaps');
     if (isXmlToggleOn(rpr, 'w:caps')) parts.push('allcaps');
     // Center alignment from pPr (paragraph-level property)
-    if (ppr && ppr.includes('<w:jc w:val="center"/>')) parts.push('center');
+    if (ppr && /<w:jc\b[^>]*?\sw:val="center"/.test(ppr)) parts.push('center');
     return parts.length > 0 ? parts.join('-') : 'normal';
   }
 
@@ -12616,7 +12625,7 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
   function getStylePPr(styleId: string): string | null {
     let searchFrom = 0;
     while (true) {
-      const idx = stylesXml.indexOf('<w:style ', searchFrom);
+      const idx = nextStyleStart(searchFrom);
       if (idx === -1) return null;
       const closeTag = stylesXml.indexOf('</w:style>', idx);
       if (closeTag === -1) return null;
@@ -12738,7 +12747,7 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
     const idx = stylesXml.indexOf('w:customStyle="1"', csSearchPos);
     if (idx === -1) break;
     // Find enclosing <w:style> block
-    const styleStart = stylesXml.lastIndexOf('<w:style ', idx);
+    const styleStart = [...stylesXml.slice(0, idx).matchAll(/<w:style\s/g)].pop()?.index ?? -1;
     const styleEnd = stylesXml.indexOf('</w:style>', idx);
     if (styleStart === -1 || styleEnd === -1) { csSearchPos = idx + 17; continue; }
     const block = stylesXml.substring(styleStart, styleEnd + '</w:style>'.length);
