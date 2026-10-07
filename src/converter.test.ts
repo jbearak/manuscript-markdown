@@ -13554,6 +13554,55 @@ describe('Landscape section round-trip', () => {
     expect((await convertDocx((await convertMdToDocx(md1, { bibtex })).docx)).markdown).toBe(md1);
   });
 
+  const landscapeFence = (text: string) => '<!-- landscape -->\n\n' + text + '\n\n<!-- /landscape -->';
+  const portraitFence = (text: string) => '<!-- portrait -->\n\n' + text + '\n\n<!-- /portrait -->';
+  const tableOfItsOwn = '| a | b |\n| --- | --- |\n| 1 | 2 |';
+  test.each([
+    ['between two sections', 'A\n\n' + landscapeFence('B') + '\n\n<!-- a note -->\n\n' + landscapeFence('C') + '\n\nD\n',
+      'A\n\n' + landscapeFence('B') + '\n\n' + landscapeFence('C') + '\n\nD\n'],
+    ['between two sections, a directive that applies to nothing and an orphaned closing fence among them', 'A\n\n' + landscapeFence('B') + '\n\n<!-- a note -->\n\n<!-- indent -->\n\n<!-- /portrait -->\n\n' + portraitFence('C') + '\n\nD\n',
+      'A\n\n' + landscapeFence('B') + '\n\n' + portraitFence('C') + '\n\nD\n'],
+    ['between two sections, around a references marker with nothing to list', 'A\n\n' + landscapeFence('B') + '\n\n<!-- a note -->\n\n<!-- references -->\n\n<!-- another -->\n\n' + landscapeFence('C') + '\n\nD\n',
+      'A\n\n' + landscapeFence('B') + '\n\n<!-- references -->\n\n' + landscapeFence('C') + '\n\nD\n'],
+    ['between a section and a table with its own', 'A\n\n' + landscapeFence('B') + '\n\n<!-- table-orientation: landscape -->\n\n<!-- a note -->\n\n' + tableOfItsOwn + '\n\nD\n',
+      'A\n\n' + landscapeFence('B') + '\n\n<!-- table-orientation: landscape -->\n' + tableOfItsOwn + '\n\nD\n'],
+    ['before the first section, at the document\'s start', '<!-- a note -->\n\n' + landscapeFence('B') + '\n\nD\n',
+      landscapeFence('B') + '\n\nD\n'],
+    ['before the first section, a directive that applies to nothing among them', '<!-- a note -->\n\n<!-- table-font-size: 9 -->\n\n' + portraitFence('B') + '\n\nD\n',
+      portraitFence('B') + '\n\nD\n'],
+    ['after the last section, at the document\'s end', 'A\n\n' + landscapeFence('B') + '\n\n<!-- a note -->\n',
+      'A\n\n' + landscapeFence('B') + '\n'],
+    ['after the last section, a directive that applies to nothing among them', 'A\n\n' + portraitFence('B') + '\n\n<!-- a note -->\n\n<!-- indent -->\n',
+      'A\n\n' + portraitFence('B') + '\n'],
+    ['before, between and after sections', '<!-- a note -->\n\n' + landscapeFence('B') + '\n\n<!-- another -->\n\n' + portraitFence('C') + '\n\n<!-- a third -->\n',
+      landscapeFence('B') + '\n\n' + portraitFence('C') + '\n'],
+    // The tracked mark of the paragraph before them, which the first one's
+    // paragraph took, stays before the closing fence
+    ['after the last section, whose last paragraph\'s mark is deleted', 'A\n\n' + landscapeFence('B{--\n\n--}') + '\n\n<!-- a note -->\n\n<!-- another -->\n',
+      'A\n\n' + landscapeFence('B{--\n\n--}') + '\n'],
+    ['after the last section, whose last paragraph\'s mark is inserted', 'A\n\n' + landscapeFence('B{++\n\n++}') + '\n\n<!-- a note -->\n',
+      'A\n\n' + landscapeFence('B{++\n\n++}') + '\n'],
+    ['after the last section, a portrait one, whose last paragraph\'s mark is deleted', 'A\n\n' + portraitFence('B{--\n\n--}') + '\n\n<!-- a note -->\n',
+      'A\n\n' + portraitFence('B{--\n\n--}') + '\n'],
+  ])('gives hidden comments alone %s no section of their own', async (_, md, withoutComments) => {
+    // A section of them alone showed nothing, a blank page. They start the
+    // section after them, or end the last one, and a custom property puts
+    // them back outside its fences.
+    const xmlOf = async (md: string) => (await (await JSZip.loadAsync((await convertMdToDocx(md)).docx)).file('word/document.xml')!.async('string'));
+    const xml = await xmlOf(md);
+    const breaks = (xml: string) => (xml.match(/<\/w:sectPr><\/w:pPr>/g) ?? []).length;
+    expect(breaks(xml)).toBe(breaks(await xmlOf(withoutComments)));
+    // Each section shows something
+    const body = xml.slice(xml.indexOf('<w:body>'), xml.lastIndexOf('<w:sectPr'));
+    for (const section of body.split(/<w:sectPr\b[\s\S]*?<\/w:sectPr><\/w:pPr><\/w:p>/)) {
+      expect(section.split('</w:p>').some(paragraph => /<w:t[ >]|<w:tbl>/.test(paragraph) && !paragraph.includes('<w:vanish/>'))).toBe(true);
+    }
+    const strip = (s: string) => s.replace(/^---\n[\s\S]*?\n---\n/, '');
+    const md1 = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+    expect(strip(md1)).toBe(md);
+    expect((await convertDocx((await convertMdToDocx(md1)).docx)).markdown).toBe(md1);
+  });
+
   test('landscape DOCX section produces body sectPr with page dimensions', async () => {
     const md = '<!-- landscape -->\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n<!-- /landscape -->';
     const { docx } = await convertMdToDocx(md);

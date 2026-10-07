@@ -1736,6 +1736,15 @@ export function referencesBeforeSectionsProps(ordinals: number[] | undefined): C
   return chunkCustomProps('MANUSCRIPT_REFERENCES_BEFORE_SECTIONS_', JSON.stringify(ordinals));
 }
 
+/** The hidden paragraphs export writes in a section, by the ordinal of the
+ *  break that ends it, as many as each has: those at its start that come
+ *  before its opening fence, or those at its end that come after its
+ *  closing fence */
+export function hiddenOutsideSectionsProps(prefix: string, counts: Map<number, number> | undefined): CustomPropEntry[] {
+  if (!counts?.size) return [];
+  return chunkCustomProps(prefix, JSON.stringify(Object.fromEntries(counts)));
+}
+
 export function embedDirectiveProps(mapping: Map<number, string>): CustomPropEntry[] {
   if (mapping.size === 0) return [];
   const obj: Record<string, string> = {};
@@ -4240,6 +4249,8 @@ export interface DocxGenState {
   sectionBreakOrdinal: number;  // counter for paragraph-level sectPr emissions (for portrait round-trip)
   portraitBreakOrdinals: Set<number>; // ordinals of portrait-fence close section breaks
   referencesBeforeSections?: number[]; // ordinals of the breaks ending the sections a references marker before their opening fence is written at the start of
+  hiddenBeforeSections?: Map<number, number>; // the hidden paragraphs before a section's opening fence written at its start, by the ordinal of the break that ends it
+  hiddenAfterSections?: Map<number, number>; // the hidden paragraphs after the last fenced section's closing fence written at its end, by the ordinal of the break that ends it
   templatePageSection?: number; // the last section's ordinal, the number of breaks before it, where it takes the template's landscape page, which no fence set
   templateSectPr?: string;      // trailing <w:sectPr> from template document.xml
   templateSections?: TemplateSections; // the template's, whose headers, footers and page numbering the sectPrs written take
@@ -7277,6 +7288,12 @@ function holdsOnlyCommentBodies(token: MdToken): boolean {
     && withoutCommentBodyLines(token.runs).every(run => run.type === 'comment_body_with_id');
 }
 
+/** Whether a paragraph is comments alone, as `<!-- a note -->` or a
+ *  directive that applies to nothing, which Word gets hidden. */
+function isHiddenParagraph(token: MdToken): boolean {
+  return token.type === 'paragraph' && token.runs.length > 0 && token.runs.every(r => r.type === 'html_comment');
+}
+
 /** Whether a paragraph holds only comment bodies, which generateDocumentXml
  *  registers without writing the paragraph. */
 function isCommentBodyParagraph(token: MdToken): boolean {
@@ -8228,6 +8245,14 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     body += BIBL_BREAK_PLACEHOLDER;
     biblBreakOrdinals.push(state.sectionBreakOrdinal);
   };
+  // The hidden paragraphs, comments alone, written since a section ended,
+  // with nothing else, and the XML of those written since anything else
+  // was. A section that starts after them starts with them, as a custom
+  // property records, so they get no section of their own, which would show
+  // nothing, a blank page
+  let hiddenAtSectionStart = 0;
+  let hiddenXml: string[] = [];
+  const hiddenBeforeSections = new Map<number, number>();
   // Track before-gap for each sentinel type (sequential index → blankLinesBefore)
   let sentinelLoIdx = 0, sentinelLcIdx = 0, sentinelPoIdx = 0, sentinelPcIdx = 0;
   let sentinelCsoIdx = 0, sentinelCscIdx = 0;
@@ -8262,6 +8287,10 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
     preserveCloseForNextToken = false;
     const biblFirst = biblAtSectionStart;
     biblAtSectionStart = false;
+    const hiddenBefore = hiddenAtSectionStart;
+    const hiddenXmlBefore = hiddenXml;
+    hiddenAtSectionStart = 0;
+    hiddenXml = [];
 
     // Bibliography marker: emit placeholder that will be replaced after the loop
     // once all citedKeys have been collected. Between two sections, as in
@@ -8276,6 +8305,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       body += BIBL_PLACEHOLDER;
       preserveCloseForNextToken = !!prevWasClose;
       biblAtSectionStart = prevWasClose && !state.inLandscapeSection && !state.inPortraitSection;
+      hiddenAtSectionStart = hiddenBefore;
       if (prevToken?.type === 'heading') state.afterHeading = true;
       prevToken = undefined;
       continue;
@@ -8288,6 +8318,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       if (frontmatter?.styles && !frontmatter.styles[token.customStyleOpen]) {
         state.warnings.push('Custom style "' + token.customStyleOpen + '" used in <!-- style: --> directive but not declared in frontmatter styles.');
         preserveCloseForNextToken = !!prevWasClose;
+        hiddenAtSectionStart = hiddenBefore;
+        hiddenXml = hiddenXmlBefore;
         if (prevToken?.type === 'heading') state.afterHeading = true;
         prevToken = undefined;
         continue;
@@ -8298,6 +8330,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       state.activeCustomStyle = token.customStyleOpen;
       preserveCloseForNextToken = !!prevWasClose;
       biblAtSectionStart = biblFirst;
+      hiddenAtSectionStart = hiddenBefore;
+      hiddenXml = hiddenXmlBefore;
       if (prevToken?.type === 'heading') state.afterHeading = true;
       prevToken = undefined;
       continue;
@@ -8310,6 +8344,8 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       // Not a section boundary — just thread close-status through (unlike landscapeClose/portraitClose which set true)
       preserveCloseForNextToken = !!prevWasClose;
       biblAtSectionStart = biblFirst;
+      hiddenAtSectionStart = hiddenBefore;
+      hiddenXml = hiddenXmlBefore;
       if (prevToken?.type === 'heading') state.afterHeading = true;
       prevToken = undefined;
       continue;
@@ -8325,6 +8361,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       } else if (biblFirst) {
         emitBiblBreak();
       }
+      if (hiddenBefore > 0) hiddenBeforeSections.set(state.sectionBreakOrdinal, hiddenBefore);
       state.inLandscapeSection = true;
       preserveCloseForNextToken = !!prevWasClose;
       if (prevToken?.type === 'heading') state.afterHeading = true;
@@ -8354,6 +8391,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       } else if (biblFirst) {
         emitBiblBreak();
       }
+      if (hiddenBefore > 0) hiddenBeforeSections.set(state.sectionBreakOrdinal, hiddenBefore);
       state.inPortraitSection = true;
       preserveCloseForNextToken = !!prevWasClose;
       if (prevToken?.type === 'heading') state.afterHeading = true;
@@ -8427,6 +8465,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         state.landscapeTables.add(state.tableIndex);
         if (!prevWasClose) emitPortraitBreak();
         else if (biblFirst) emitBiblBreak();
+        if (hiddenBefore > 0) hiddenBeforeSections.set(state.sectionBreakOrdinal, hiddenBefore);
         body += table();
         emitLandscapeBreak();
         preserveCloseForNextToken = true;
@@ -8435,6 +8474,7 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         state.portraitTables.add(state.tableIndex);
         if (!prevWasClose) emitPortraitBreak();
         else if (biblFirst) emitBiblBreak();
+        if (hiddenBefore > 0) hiddenBeforeSections.set(state.sectionBreakOrdinal, hiddenBefore);
         body += table();
         state.portraitBreakOrdinals.add(state.sectionBreakOrdinal);
         emitPortraitBreak();
@@ -8461,6 +8501,15 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
         state.bodyParagraphIndex++;
       }
       body += paragraphXml;
+      // A hidden paragraph after a section ends, with nothing else since,
+      // leaves the next section to start before it. Not one in a list, nor
+      // one in a style block, which import reads by its style.
+      if (prevWasClose && isHiddenParagraph(token) && !token.listContinuation && !state.activeCustomStyle) {
+        preserveCloseForNextToken = true;
+        biblAtSectionStart = biblFirst;
+        hiddenAtSectionStart = hiddenBefore + 1;
+        hiddenXml = [...hiddenXmlBefore, paragraphXml];
+      }
     }
     // An empty paragraph in a list ends it on import, so before more of the
     // list, a quote in a list item keeps its spacing in the metadata alone.
@@ -8531,11 +8580,17 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
       for (const ordinal of portraitBreakOrdinals) state.portraitBreakOrdinals.add(ordinal + biblBreakOrdinals.filter(b => b <= ordinal).length);
       // And they count among the breaks, which number the last section
       state.sectionBreakOrdinal += biblBreakOrdinals.length;
+      // Hidden paragraphs before such a bibliography are in its section
+      const hiddenBefore = [...hiddenBeforeSections].filter(([ordinal]) => !biblBreakOrdinals.includes(ordinal));
+      hiddenBeforeSections.clear();
+      for (const [ordinal, count] of hiddenBefore) hiddenBeforeSections.set(ordinal + biblBreakOrdinals.filter(b => b <= ordinal).length, count);
     } else {
       body = body.split(BIBL_BREAK_PLACEHOLDER).join('');
       state.referencesBeforeSections = biblBreakOrdinals;
     }
   }
+
+  state.hiddenBeforeSections = hiddenBeforeSections;
 
   // Store sentinel gap metadata on state for custom property emission
   state.sentinelGaps = sentinelGaps;
@@ -8551,13 +8606,18 @@ export function generateDocumentXml(tokens: MdToken[], state: DocxGenState, opti
   // already, as a tracked change's old properties keep theirs. Not where
   // the section is empty, whose break is all it has, nor where it's the
   // only one, whose orientation import reads as the page's (see
-  // extractDocumentContent in converter.ts).
+  // extractDocumentContent in converter.ts). Hidden paragraphs alone after
+  // its break, which would be all the last section has, a blank last page,
+  // go before it, at the end of its section, as a custom property records.
   let closingSectPr = bodyClosingSectPrXml(pgSz, margins, state.templateSectPr, state.rsid);
-  const lastBreak = body.endsWith(landscapeBreak) ? landscapeBreak : body.endsWith(portraitBreak) ? portraitBreak : undefined;
-  const beforeLastBreak = lastBreak && body.slice(0, body.length - lastBreak.length);
+  const hiddenTail = preserveCloseForNextToken && body.endsWith(hiddenXml.join('')) ? hiddenXml.join('') : '';
+  const beforeTail = body.slice(0, body.length - hiddenTail.length);
+  const lastBreak = beforeTail.endsWith(landscapeBreak) ? landscapeBreak : beforeTail.endsWith(portraitBreak) ? portraitBreak : undefined;
+  const beforeLastBreak = lastBreak && beforeTail.slice(0, beforeTail.length - lastBreak.length);
   const breakEnd = '</w:sectPr></w:pPr></w:p>';
   if (lastBreak && beforeLastBreak && beforeLastBreak.includes(breakEnd) && !beforeLastBreak.endsWith(breakEnd)) {
-    body = beforeLastBreak;
+    body = beforeLastBreak + hiddenTail;
+    if (hiddenTail) state.hiddenAfterSections = new Map([[state.sectionBreakOrdinal - 1, hiddenXml.length]]);
     const landscape = lastBreak === landscapeBreak;
     if (landscape || isLandscapeSectPr(closingSectPr)) closingSectPr = fencedBodySectPrXml(landscape, pgSz, margins, state.templateSectPr, state.rsid);
     const own = ownSectPrXml(closingSectPr);
@@ -9433,6 +9493,8 @@ export async function convertMdToDocx(
   customProps.push(...portraitTableProps(state.portraitTables));
   customProps.push(...portraitBreakProps(state.portraitBreakOrdinals));
   customProps.push(...referencesBeforeSectionsProps(state.referencesBeforeSections));
+  customProps.push(...hiddenOutsideSectionsProps('MANUSCRIPT_HIDDEN_BEFORE_SECTIONS_', state.hiddenBeforeSections));
+  customProps.push(...hiddenOutsideSectionsProps('MANUSCRIPT_HIDDEN_AFTER_SECTIONS_', state.hiddenAfterSections));
   if (state.templatePageSection !== undefined) {
     customProps.push(...chunkCustomProps('MANUSCRIPT_TEMPLATE_PAGE_SECTIONS_', JSON.stringify([state.templatePageSection])));
   }
