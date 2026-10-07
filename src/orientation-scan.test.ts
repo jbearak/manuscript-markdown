@@ -73,6 +73,13 @@ describe('scanOrientationDirectives', () => {
     expect(scanOrientationDirectives(text)).toEqual([]);
   });
 
+  it('reads two directives on one line as one comment, as export does', () => {
+    expect(scanOrientationDirectives('A\n\n<!-- /landscape --><!-- portrait -->\n\nB')).toEqual([]);
+    // So the fences around it pair as though it weren't there
+    const text = '<!-- landscape -->\nA\n<!-- /landscape --><!-- portrait -->\nB\n<!-- /landscape -->';
+    expect(scanOrientationDirectives(text)).toEqual([]);
+  });
+
   it('ignores inline directives (non-standalone)', () => {
     const text = 'Text <!-- landscape --> more text';
     expect(scanOrientationDirectives(text)).toEqual([]);
