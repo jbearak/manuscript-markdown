@@ -1010,7 +1010,10 @@ describe("Property 7: Size and heading proportional scaling", () => {
             }
             const szVal = extractSzVal(block);
             const defaultHp = defaultHeadingSizesHp[styleId];
-            const expected = Math.round((defaultHp / 22) * bodySizeHp);
+            // A heading takes Normal's size where it sets none, so a size
+            // the same as Normal's is left out (dirty-flag invariant #5)
+            const scaled = Math.round((defaultHp / 22) * bodySizeHp);
+            const expected = scaled === bodySizeHp ? null : scaled;
             if (szVal !== expected) {
               throw new Error(
                 styleId +

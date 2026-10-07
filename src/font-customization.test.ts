@@ -1237,6 +1237,22 @@ describe('heading and title styles based on another style', () => {
     expect((await convertDocx(again)).markdown).toBe(markdown);
   });
 
+  // Word strips a size a style would take from Normal anyway
+  it.each([
+    ['header-font-size: [16, 16, 12, 11, 10, 9]', 'Heading4'],
+    ['font-size: 12', 'Heading4'],
+    ['font-size: 10\nheader-font-size: [16, 10]', 'Heading2'],
+    ['title: T\ntitle-font-size: 11', 'Title'],
+  ])('export writes no size a style takes from Normal: %s', async (fields, id) => {
+    const { convertDocx } = await import('./converter');
+    const docx = (await convertMdToDocx('---\n' + fields + '\n---\n\n# One\n\n## Two\n\n#### Four\n')).docx;
+    const styles = await (await JSZip.loadAsync(docx)).file('word/styles.xml')!.async('string');
+    expect(extractStyleBlock(styles, id)).toMatch(/^<w:style\b/);
+    expect(extractStyleBlock(styles, id)).not.toMatch(/<w:sz\b|<w:rPr><\/w:rPr>/);
+    const { markdown } = await convertDocx(docx);
+    expect(markdown.slice(0, markdown.indexOf('\n---\n', 4) + 5)).toBe('---\n' + fields + '\n---\n');
+  });
+
   it.each(['font-size: 12', 'font-size: 10\ntitle: T', 'font: Georgia\nfont-size: 13\nheader-font-size: [20, 16]'])(
     'a body font size, which export scales the headings and title by, adds no size for them: %s', async (fields) => {
       const { convertDocx } = await import('./converter');

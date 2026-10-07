@@ -5771,6 +5771,9 @@ export function stylesXml(overrides?: FontOverrides, codeBlockConfig?: CodeBlock
     ? szPair(overrides.bodySizeHp)
     : szPair(22);
   const normalRpr = '<w:rPr>' + bodyFontStr + normalSz + '</w:rPr>\n';
+  // A heading's or the title's size, but not one it takes from Normal anyway,
+  // which is redundant and Word strips — see dirty-flag invariant #5
+  const sizeOverNormal = (hp: number | null | undefined) => hp && hp !== (overrides?.bodySizeHp || 22) ? szPair(hp) : '';
 
   // Heading helper: per-heading font/style/size overrides with defaults.
   // Pass null for defaultHp when the size matches the base style (Normal) to
@@ -5779,9 +5782,7 @@ export function stylesXml(overrides?: FontOverrides, codeBlockConfig?: CodeBlock
     const font = overrides?.headingFonts?.get(styleId)
       ? rFonts(overrides.headingFonts.get(styleId)!)
       : bodyFontStr;
-    const sz = overrides?.headingSizesHp?.has(styleId)
-      ? szPair(overrides.headingSizesHp.get(styleId)!)
-      : (defaultHp !== null ? szPair(defaultHp) : '');
+    const sz = sizeOverNormal(overrides?.headingSizesHp?.get(styleId) ?? defaultHp);
     const style = overrides?.headingStyles?.get(styleId);
     let styleStr: string;
     if (style === 'normal') {
@@ -5838,11 +5839,7 @@ export function stylesXml(overrides?: FontOverrides, codeBlockConfig?: CodeBlock
   const titleFont = overrides?.titleFonts?.[0]
     ? rFonts(overrides.titleFonts[0])
     : bodyFontStr;
-  const titleSz = overrides?.titleSizesHp?.[0]
-    ? szPair(overrides.titleSizesHp[0])
-    : overrides?.headingSizesHp?.has('Title')
-      ? szPair(overrides.headingSizesHp.get('Title')!)
-      : szPair(56);
+  const titleSz = sizeOverNormal(overrides?.titleSizesHp?.[0] || overrides?.headingSizesHp?.get('Title') || 56);
   let titleStyleStr = '';
   const titleStyle0 = overrides?.titleStyles?.[0];
   if (titleStyle0 === 'normal') {
@@ -5854,7 +5851,8 @@ export function stylesXml(overrides?: FontOverrides, codeBlockConfig?: CodeBlock
     if (titleStyle0.includes('smallcaps')) titleStyleStr += '<w:smallCaps/>';
     else if (titleStyle0.includes('allcaps')) titleStyleStr += '<w:caps/>';
   }
-  const titleRpr = '<w:rPr>' + titleStyleStr + titleFont + titleSz + '</w:rPr>\n';
+  const titleRprInner = titleStyleStr + titleFont + titleSz;
+  const titleRpr = titleRprInner ? '<w:rPr>' + titleRprInner + '</w:rPr>\n' : '';
 
   // FootnoteText: body font + size from heading map or default 20hp
   const footnoteSz = overrides?.headingSizesHp?.has('FootnoteText')
