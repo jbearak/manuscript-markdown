@@ -31,7 +31,7 @@ export { commentsEnd, isLineBreakBlock } from './html-blocks';
 import { preprocessBlocks } from './block-preprocess';
 import { maxOf, pushAll } from './arrays';
 import { readTemplateSections, withTemplateSection, addTemplateSectionParts, withRelationshipIds, decodeXml, asUtf8, relatedPartPath, type TemplateSections } from './template-sections';
-import { EXPORT_IGNORABLE, EXPORT_NAMESPACES } from './scoped-xml';
+import { EXPORT_CONTEXT, EXPORT_IGNORABLE, EXPORT_NAMESPACES, buildOrdered, childrenOf, contextIn, effectiveSectPr, isElement, moved, nameOf, parseOrdered, sectPrPropertyOf } from './scoped-xml';
 export { preprocessGridTables } from './grid-table-preprocess';
 export { extractHtmlTables } from './html-table-parser';
 
@@ -4793,14 +4793,23 @@ function isLandscapeSectPr(sectPrXml: string): boolean {
   return /w:orient="landscape"/.test(m[1]) || w > 0 && h > 0 && w > h;
 }
 
-/** Parse w:pgMar from a sectPr XML string, returning the raw attribute
- *  string. Its own margins, not a tracked change's old ones. */
+/** The attributes of a sectPr's margins, w:pgMar, as Word reads them (see
+ *  effectiveSectPr), to write on margins of export's document, under
+ *  export's prefixes, with the declarations and markup compatibility
+ *  settings they use where the sectPr has them (see moved), as an
+ *  extension's attribute that only the sectPr declares and makes
+ *  ignorable. Its own margins, not a tracked change's old ones. */
 function parseTemplateMargins(sectPrXml: string | undefined): string {
-  if (!sectPrXml) return DEFAULT_MARGINS;
-  const m = ownSectPrXml(sectPrXml).match(/<w:pgMar\b([^/>]*)\/?>/);
-  if (!m) return DEFAULT_MARGINS;
-  // Return the raw attributes
-  return m[1].trim();
+  const parsed = sectPrXml ? parseOrdered(sectPrXml)?.find(isElement) : undefined;
+  if (!parsed) return DEFAULT_MARGINS;
+  const sectPr = effectiveSectPr(parsed, EXPORT_CONTEXT), inside = contextIn(sectPr, EXPORT_CONTEXT);
+  const pgMar = childrenOf(sectPr).find(child => isElement(child) && sectPrPropertyOf(child, inside.scope) === 'pgMar');
+  if (!pgMar) return DEFAULT_MARGINS;
+  const margins = moved(pgMar, inside, EXPORT_CONTEXT);
+  // Its attributes as the builder writes them, between its name and the
+  // end of its empty tag
+  const built = buildOrdered([{ [nameOf(margins)]: [], ':@': margins[':@'] }]);
+  return built.slice(('<' + nameOf(margins)).length, -'/>'.length).trim();
 }
 
 /** Build a portrait sectPr XML element for section breaks. */
