@@ -4704,6 +4704,84 @@ describe('A Word comment on an HTML comment', () => {
     expect(await paragraphs(exported)).toEqual(['A.', comment + '{>>@A (2024-01-15 10:30) | note<<}', 'B z.']);
   });
 
+  test.each([
+    ['a blank line', 'XX', lines('<!-- a', '', 'b -->'), '<!-- a\n\nb -->\n\n{>>@A (2024-01-15 10:30) | one\ntwo<<}', '[<!-- a\n\nb -->]'],
+    ['another before it on its line, out of its range', 'XX', hidden('<!-- x -->') + 'START' + hidden('<!-- a -->'),
+      '<!-- x --><!-- a -->\n\n{>>@A (2024-01-15 10:30) | one\ntwo<<}', '[<!-- x --><!-- a -->]'],
+    ['a blank line, in a quote', '> XX', lines('<!-- a', '', 'b -->'), '> <!-- a\n>\n> b -->\n>\n> {>>@A (2024-01-15 10:30) | one\n> two<<}', '[<!-- a\n\nb -->]'],
+    // With the item's indent, which keeps it in the item, on its first line
+    // alone, as the rest are the comment's
+    ['a blank line, in a list item', '- XX', lines('<!-- a', '', 'b -->'), '- <!-- a\n  \n  b -->\n\n  {>>@A (2024-01-15 10:30) | one\ntwo<<}', '[<!-- a\n\nb -->]'],
+    ['a blank line, in an ordered list item', '1. XX', lines('<!-- a', '', 'b -->'), '1. <!-- a\n   \n   b -->\n\n   {>>@A (2024-01-15 10:30) | one\ntwo<<}', '[<!-- a\n\nb -->]'],
+    ['a blank line, in a nested list item', '- x\n\n  - XX', lines('<!-- a', '', 'b -->'), '- x\n\n  - <!-- a\n    \n    b -->\n\n    {>>@A (2024-01-15 10:30) | one\ntwo<<}', '[<!-- a\n\nb -->]'],
+  ])('puts one whose text has lines on a comment with %s, which a paragraph can\'t hold, in a paragraph of its own after its HTML block', async (_name, template, runs, md, shown) => {
+    // After the block's --> on its line, the comment's line end ended the
+    // block, and the rest of the comment was a paragraph of its own, which
+    // the next import wrote after a blank line. The block showed the
+    // comment's first line as text. In a paragraph of its own, it's a
+    // comment on no text, and the HTML comment stays hidden
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\n' + template + '\n\nB {==z==}{>>@A (2024-01-15 10:30) | one\ntwo<<}.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const reference = /<w:r>(?:(?!<w:r>)[\s\S])*?<w:commentReference w:id="0"\/><\/w:r>/.exec(xml)![0];
+    const edited = xml.replace(start, '').replace(end, '').replace(reference, '')
+      .replace(/<w:r>(?:(?!<w:r>)[\s\S])*?>XX<\/w:t><\/w:r>/, (runs.includes('START') ? runs.replace('START', start) : start + runs) + end + reference);
+    expect(edited).toContain(reference);
+    zip.file('word/document.xml', edited);
+    const md1 = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    const exported = (await convertMdToDocx(md1)).docx;
+    expect(strip((await convertDocx(exported)).markdown)).toBe(md1);
+    expect(md1).toBe('A.\n\n' + md + '\n\nB z.\n');
+    // But for the empty paragraphs around a quote
+    expect((await paragraphs(exported)).filter(p => p !== '' && p !== 'x')).toEqual(['A.', shown, '«»†', 'B z.']);
+    // The comment's text as it was, with no indent before its second line
+    expect(await (await JSZip.loadAsync(exported)).file('word/comments.xml')!.async('string')).toMatch(/>one<\/w:t>(?:(?!two)[\s\S])*<w:br\/>(?:(?!two)[\s\S])*>two</);
+  });
+
+  test('puts a blank line after the paragraph of one whose text has lines, after an HTML block the next paragraph had none after', async () => {
+    // A line end alone after the comment's paragraph joined the next
+    // paragraph to it, which export showed after a space, and the next
+    // import wrote on its line
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\n<!-- a\n\nb -->\nB {==z==}{>>@A (2024-01-15 10:30) | one\ntwo<<}.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const reference = /<w:r>(?:(?!<w:r>)[\s\S])*?<w:commentReference w:id="0"\/><\/w:r>/.exec(xml)![0];
+    const edited = xml.replace(start, '').replace(end, '').replace(reference, '')
+      .replace(/<w:r><w:rPr><w:vanish\/>(?:(?!<w:r>)[\s\S])*?&lt;!-- a(?:(?!<w:r>)[\s\S])*?<\/w:r>(?:<w:r><w:rPr><w:vanish\/>(?:(?!<w:r>)[\s\S])*?<\/w:r>)*/, runs => start + runs + end + reference);
+    expect(edited).toContain(start);
+    zip.file('word/document.xml', edited);
+    const md1 = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(md1).toBe('A.\n\n<!-- a\n\nb -->\n\n{>>@A (2024-01-15 10:30) | one\ntwo<<}\n\nB z.\n');
+    const exported = (await convertMdToDocx(md1)).docx;
+    expect((await paragraphs(exported)).filter(p => p !== '')).toEqual(['A.', '[<!-- a\n\nb -->]', '«»†', 'B z.']);
+    expect(strip((await convertDocx(exported)).markdown)).toBe(md1);
+  });
+
+  test.each([
+    // Whose \ would end the block's last line after it, which export read
+    // as the block's text, with the text after the break a paragraph of
+    // its own
+    ['a line break and text after it in its paragraph', lines('<!-- a', '', 'b -->') + 'END<w:r><w:br/></w:r><w:r><w:t xml:space="preserve">after</w:t></w:r>',
+      '<!-- a\n\nb -->{>>@A (2024-01-15 10:30) | one\ntwo<<}\\\nafter'],
+    // Which, alone in its paragraph, export read as the directive, as a
+    // bibliography or a landscape section
+    ['a comment that starts as a directive does', lines('<!-- references', '', '-->'), '<!-- references\n\n-->{>>@A (2024-01-15 10:30) | one\ntwo<<}'],
+    ['a comment that starts as a section\'s directive does', lines('<!-- landscape', '', '-->'), '<!-- landscape\n\n-->{>>@A (2024-01-15 10:30) | one\ntwo<<}'],
+  ])('leaves one whose text has lines on a comment that a paragraph can\'t hold on its HTML block\'s line, as before, with %s', async (_name, runs, md) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A.\n\nXX\n\nB {==z==}{>>@A (2024-01-15 10:30) | one\ntwo<<}.')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const reference = /<w:r>(?:(?!<w:r>)[\s\S])*?<w:commentReference w:id="0"\/><\/w:r>/.exec(xml)![0];
+    const edited = xml.replace(start, '').replace(end, '').replace(reference, '')
+      .replace(/<w:r>(?:(?!<w:r>)[\s\S])*?>XX<\/w:t><\/w:r>/, start + (runs.includes('END') ? runs.replace('END', end + reference) : runs + end + reference));
+    expect(edited).toContain(reference);
+    zip.file('word/document.xml', edited);
+    const md1 = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(md1).toBe('A.\n\n' + md + '\n\nB z.\n');
+    const docx = (await convertMdToDocx(md1)).docx;
+    const document = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(await paragraphs(docx)).not.toContain('after');
+    expect(document).not.toContain('ZOTERO_BIBL');
+    expect(document).not.toMatch(/<w:pPr>(?:(?!<\/w:pPr>)[\s\S])*<w:sectPr\b/);
+  });
+
   test('leaves one on a comment before another on its line that a paragraph doesn\'t read whole, as they were', async () => {
     // A paragraph reads <!-- b ---> as text, which ID syntax around the
     // first showed, where their HTML block held both hidden

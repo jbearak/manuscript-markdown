@@ -9913,6 +9913,24 @@ function renderInlineRange(
   // The HTML block a comment at the paragraph's start began, while the
   // Markdown is in it (see beginsHtmlBlock)
   const htmlBlock: HtmlBlock = { open: false, closed: false, from: 0 };
+  // The comments that go in a paragraph of their own after this one, where
+  // its HTML block can't hold them (see where a hidden comment's go)
+  const deferred: string[] = [];
+  // Where the segment holds a hidden comment that starts as a directive
+  // does, and the last of its runs with a line break, read once, where a
+  // hidden comment's Word comment might go after the paragraph
+  let deferBounds: { directive: boolean; lastBreak: number } | undefined;
+  const mayDefer = (at: number): boolean => {
+    if (!deferBounds) {
+      deferBounds = { directive: false, lastBreak: -1 };
+      for (let k = startIndex; k < segmentEnd; k++) {
+        const item = segment[k];
+        if (item.type === 'html_comment' && holdsDirective(item.text)) deferBounds.directive = true;
+        else if (item.type === 'text' && /[\r\n]/.test(item.text)) deferBounds.lastBreak = k;
+      }
+    }
+    return !deferBounds.directive && deferBounds.lastBreak < at;
+  };
   let i = startIndex;
 
   // Determine if we should use ID-based syntax for this inline segment only
@@ -10042,7 +10060,30 @@ function renderInlineRange(
         for (const cid of [...item.commentIds].sort()) {
           const c = comments.get(cid);
           if (!c) { continue; }
-          out += syntaxText(formatCommentBody(cid, c, renderOpts?.timezone));
+          const markdown = syntaxText(formatCommentBody(cid, c, renderOpts?.timezone));
+          // In the HTML block, which ends with the line its --> is on, a
+          // line end in the comment, of its text or a reply's, would end the
+          // block there: the block showed the comment's first line as text,
+          // and the rest was a paragraph of its own, which the next import
+          // wrote after a blank line. It goes in a paragraph of its own after
+          // this one, as a comment on no text, which keeps it a Word comment
+          // and the HTML comment hidden: after a blank line on the lines
+          // the paragraph's bodies go on, and in a list item with the item's
+          // indent, which a quote's prefix takes the place of (see
+          // deferredComments in buildMarkdown), and a blank line after it.
+          // But not where a line break follows in the paragraph, whose \ would
+          // end the block's line, which export reads as the block's text,
+          // nor where a hidden comment in it starts as a directive does,
+          // which the block, alone in its paragraph, would be read as (see
+          // holdsDirective): it goes on the block's line, as before
+          if (htmlBlock.open && /[\r\n]/.test(markdown) && mayDefer(i)) {
+            // On its first line alone, as CriticMarkup's preprocessing reads
+            // the comment's line ends before the list's lines, so an indent
+            // after them would be the comment's text
+            deferred.push('\n' + (opts?.listLinePrefix ?? '') + markdown);
+          } else {
+            out += markdown;
+          }
         }
       }
       i++;
@@ -10209,7 +10250,7 @@ function renderInlineRange(
     }
     i++;
   }
-  return { text: withRawLineEnds(resolveBareLinks(resolveEmphasis(joinRevisedSpans(out)), opts?.cell, !opts?.heading && isInParagraphMath(segment[i]))), nextIndex: i, deferredComments: [] };
+  return { text: withRawLineEnds(resolveBareLinks(resolveEmphasis(joinRevisedSpans(out)), opts?.cell, !opts?.heading && isInParagraphMath(segment[i]))), nextIndex: i, deferredComments: deferred };
 }
 
 /** Render inline content using ID-based comment syntax ({#id}...{/id}).
@@ -15812,7 +15853,11 @@ function buildMarkdownOnce(
       // none, as in a\n<!-- c -->\nb, but for a comment's own line before
       // it, whose HTML block ends there, and one after it, which starts one
       const paragraph = /^[ \t]*\{#/.test(textOut);
-      lastHtmlCommentIsParagraph = paragraph;
+      // So does a paragraph of a Word comment's body after the block, which
+      // its HTML block couldn't hold (see where renderInlineRange defers a
+      // hidden comment's), as a line end alone would join the next
+      // paragraph to it
+      lastHtmlCommentIsParagraph = paragraph || rendered.deferredComments.some(body => body.startsWith('\n'));
       // A blank line, where export stored none
       if (output.length === 0) documentStartCommentGap = htmlCommentGaps?.get(htmlCommentIndex) ?? 1;
       if (output.length > 0) {
