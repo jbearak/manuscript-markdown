@@ -2997,9 +2997,10 @@ const SHARED_HTML_AROUND_TABLES_WARNING = 'HTML around tables in one <pre> or si
 /** The text of each cell of each row of a table generateTable wrote, as
  *  import reads it (see tableCellText in converter.ts): its runs' text,
  *  shown or deleted, as a tracked change's, with a tab, non-breaking or
- *  optional hyphen as the character Word's element for it is, but not a
- *  hidden run's, as an HTML comment's, or a field's, as a citation's, which
- *  import reads as what they are, and no cell that goes on a merge above */
+ *  optional hyphen as the character Word's element for it is, and a line
+ *  feed in the text as the space Word shows, but not a hidden run's, as an
+ *  HTML comment's, or a field's, as a citation's, which import reads as
+ *  what they are, and no cell that goes on a merge above */
 function wordTableTexts(xml: string): string[][] {
   return [...xml.matchAll(/<w:tr(?:\s[^>]*)?>([\s\S]*?)<\/w:tr>/g)].map(row => [...row[1].matchAll(/<w:tc(?:\s[^>]*)?>([\s\S]*?)<\/w:tc>/g)]
     .filter(cell => !/<w:vMerge\/>/.test(cell[1]))
@@ -3018,7 +3019,7 @@ function wordText(xml: string): string {
     else if (fieldChar === 'end') fields = Math.max(0, fields - 1);
     else if (fields === 0 && !run[1].includes('<w:vanish/>')) {
       for (const piece of run[1].matchAll(/<w:(t|delText)(?:\s[^>]*)?>([^<]*)<\/w:\1>|<w:(tab|noBreakHyphen|softHyphen)\/>/g)) {
-        text += piece[3] ? { tab: '\t', noBreakHyphen: '\u2011', softHyphen: '\u00AD' }[piece[3]] : decodeXmlText(piece[2]);
+        text += piece[3] ? { tab: '\t', noBreakHyphen: '\u2011', softHyphen: '\u00AD' }[piece[3]] : decodeXmlText(piece[2]).replace(/\r\n?|\n/g, ' ');
       }
     }
   }

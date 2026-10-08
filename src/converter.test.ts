@@ -4791,10 +4791,12 @@ describe('Numeric character references in Word\'s XML', () => {
     expect(markdown).not.toContain('&#x25CF;');
   });
 
-  test('reads a carriage return as one, which the line ends XML reads as line feeds aren\'t', async () => {
-    // Decoded before parsing, it became a line feed with them
+  test('reads a carriage return as one, which the line ends XML reads as line feeds aren\'t, and in Word\'s text as the space Word shows', async () => {
+    // Decoded before parsing, it became a line feed with them. Word shows
+    // either in its text as a space, and a carriage return and line feed
+    // as one (see readLineFeedsAsWordShows)
     const { docx } = await convertMdToDocx('PLACEHOLDER');
-    expect(await importWith(docx, 'word/document.xml', 'PLACEHOLDER', 'a&#13;b&#xd;&#10;c&#38;#13;')).toBe('a\rb\r\nc\\&#13;\n');
+    expect(await importWith(docx, 'word/document.xml', 'PLACEHOLDER', 'a&#13;b&#xd;&#10;c&#38;#13;')).toBe('a b c\\&#13;\n');
   });
 
   test('reads them in an attribute, as a link\'s target', async () => {
@@ -12202,6 +12204,380 @@ describe('Whitespace at the edges of a paragraph', () => {
     const markdown = await withText(md, part, '  ');
     expect(markdown).toBe(expected);
     expect(await roundTrip(markdown)).toBe(markdown);
+  });
+});
+
+describe('Line feeds in Word\'s text', () => {
+  // Word writes a line's end as w:br or w:cr, and shows a line feed or
+  // carriage return that another tool writes in w:t as a space. Import
+  // wrote one as a line's end, with the next line's start not escaped, so
+  // export read a # there as a heading, and two as a paragraph's end
+  const strip = (md: string) => md.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  const roundTrip = async (md: string) => strip((await convertDocx((await convertMdToDocx(md)).docx)).markdown);
+  /** The Markdown of md's export, with the text XX in part, shown or
+   *  deleted, replaced by text, as XML */
+  const withText = async (md: string, part: string, text: string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file(part)!.async('string');
+    expect(xml).toMatch(/<w:(t|delText)>XX<\/w:\1>/);
+    zip.file(part, xml.replace(/<w:(t|delText)>XX<\/w:\1>/, (_m, tag: string) => '<w:' + tag + ' xml:space="preserve">' + text + '</w:' + tag + '>'));
+    return strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+  };
+
+  test.each([
+    ['a paragraph', 'A.\n\nXX\n\nB.', 'word/document.xml', 'A.\n\na # b\n\nB.\n'],
+    ['a list item', '- XX\n- c', 'word/document.xml', '- a # b\n- c\n'],
+    ['a note', 'T.[^1]\n\n[^1]: XX', 'word/footnotes.xml', 'T.[^1]\n\n[^1]: a # b\n'],
+    ['a pipe table\'s cell', '| h |\n| --- |\n| XX |', 'word/document.xml', '| h |\n| --- |\n| a # b |\n'],
+    ['an HTML table\'s cell', '<table><tr><td><p>c</p><p>XX</p></td></tr></table>', 'word/document.xml',
+      '<table>\n  <tr>\n    <td>\n      <p>c</p>\n      <p>a # b</p>\n    </td>\n  </tr>\n</table>\n'],
+    ['a comment', 'A {==c==}{>>XX<<}.', 'word/comments.xml', 'A {==c==}{>>a # b<<}.\n'],
+    ['a deletion', 'A {--XX--}.', 'word/document.xml', 'A {--a # b--}.\n'],
+  ])('reads a line feed in Word\'s text in %s as a space', async (_name, md, part, expected) => {
+    const markdown = await withText(md, part, 'a\n# b');
+    expect(markdown).toBe(expected);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    // Which XML reads as a line feed
+    ['a carriage return and line feed', '\r\n'],
+    ['a carriage return', '\r'],
+    // Which XML reads as themselves
+    ['a line feed by reference', '&#10;'],
+    ['a carriage return by reference', '&#13;'],
+    ['a carriage return and line feed by reference', '&#13;&#10;'],
+  ])('reads %s in Word\'s XML as one space', async (_name, lineEnd) => {
+    expect(await withText('A.\n\nXX\n\nB.', 'word/document.xml', 'a' + lineEnd + '# b')).toBe('A.\n\na # b\n\nB.\n');
+  });
+
+  test('reads two line feeds as two spaces, in one paragraph', async () => {
+    const markdown = await withText('A.\n\nXX\n\nB.', 'word/document.xml', 'a\n\nb');
+    expect(markdown).toBe('A.\n\na  b\n\nB.\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('writes no line break for one where breaks is on', async () => {
+    // A soft break, which breaks makes a line break of Word's
+    const markdown = await withText('A.\n\nXX\n\nB.', 'word/document.xml', 'a\nb');
+    const { docx } = await convertMdToDocx('---\nbreaks: true\n---\n\n' + markdown);
+    const xml = await (await JSZip.loadAsync(docx)).file('word/document.xml')!.async('string');
+    expect(xml).toContain('a b');
+    expect(xml).not.toContain('<w:br/>');
+  });
+
+  // Which export writes for a tag in Markdown over lines, as an attribute's
+  test.each([
+    ['a paragraph', 'A.\n\nXX\n\nB.', 'word/document.xml', 'A.\n\nz <span title="x\ny">q\n\nB.\n'],
+    ['a list item', '- XX\n- c', 'word/document.xml', '- z <span title="x\ny">q\n- c\n'],
+    ['a note', 'T.[^1]\n\n[^1]: XX', 'word/footnotes.xml', 'T.[^1]\n\n[^1]:\n\n    z <span title="x\n    y">q\n'],
+  ])('keeps a line feed in a tag import writes raw in %s', async (_name, md, part, expected) => {
+    const markdown = await withText(md, part, 'z &lt;span title="x\ny"&gt;q');
+    expect(markdown).toBe(expected);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  // Whose line feed read as a space where import read the tag's text in
+  // parts, as Word's text holds a tab or a hyphen of its own between them,
+  // or a deletion's text, which it read on its own
+  test.each([
+    ['a tab', 'A <span title="a\tb\nc">x</span> B\n'],
+    ['a non-breaking hyphen', 'A <span title="a\u2011b\nc">x</span> B\n'],
+    ['an optional hyphen', 'A <span title="a\u00ADb\nc">x</span> B\n'],
+    ['a deletion', 'A {--<span title="a\nb">x</span>--} B\n'],
+    ['a substitution\'s old text', 'A {~~<span title="a\nb">x</span>~>y~~} B\n'],
+    ['a deletion with a tab', 'A {--<span title="a\tb\nc">x</span>--} B\n'],
+  ])('keeps a line feed in a tag with %s', async (_name, md) => {
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    ['runs alike', '<w:r><w:t xml:space="preserve">&lt;span title="a</w:t></w:r><w:r><w:t xml:space="preserve">\nb"&gt;</w:t></w:r>', 'A <span title="a\nb">x</span> B\n'],
+    ['runs a deletion holds', '<w:del w:id="9" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r><w:delText xml:space="preserve">&lt;span title="a</w:delText></w:r><w:r><w:delText xml:space="preserve">\nb"&gt;</w:delText></w:r></w:del>', 'A {--<span title="a\nb">--}x</span> B\n'],
+    // Which read as two line feeds, a blank line in the tag, which ended
+    // its paragraph
+    ['runs alike, a carriage return and line feed between them', '<w:r><w:t xml:space="preserve">&lt;span title="a&#13;</w:t></w:r><w:r><w:t xml:space="preserve">&#10;b"&gt;</w:t></w:r>', 'A <span title="a\nb">x</span> B\n'],
+    // Which import writes in parts, with the line feed in text between,
+    // where Markdown reads a space
+    ['runs formatted apart, which import writes in parts', '<w:r><w:t xml:space="preserve">&lt;span title="a</w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t xml:space="preserve">\nb"&gt;</w:t></w:r>', 'A <span title="a <i>b"></i>x</span> B\n', false],
+    // Around a line feed alone in bold or italic, which import writes as it
+    // is, with no delimiters, as it does the whitespace at their edges
+    ['runs alike around a line feed in bold', '<w:r><w:t xml:space="preserve">&lt;span title="a</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">\n</w:t></w:r><w:r><w:t xml:space="preserve">b"&gt;</w:t></w:r>', 'A <span title="a\nb">x</span> B\n'],
+    ['runs alike around a line feed in italic', '<w:r><w:t xml:space="preserve">&lt;span title="a</w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t xml:space="preserve">\n</w:t></w:r><w:r><w:t xml:space="preserve">b"&gt;</w:t></w:r>', 'A <span title="a\nb">x</span> B\n'],
+    ['runs alike around spaces and a line feed in bold italic', '<w:r><w:t xml:space="preserve">&lt;span title="a</w:t></w:r><w:r><w:rPr><w:b/><w:i/></w:rPr><w:t xml:space="preserve"> \n </w:t></w:r><w:r><w:t xml:space="preserve">b"&gt;</w:t></w:r>', 'A <span title="a \n b">x</span> B\n'],
+    // But not one struck, which import writes in <s>, which the attribute
+    // holds as text
+    ['runs alike around a line feed struck, which import writes in parts', '<w:r><w:t xml:space="preserve">&lt;span title="a</w:t></w:r><w:r><w:rPr><w:strike/></w:rPr><w:t xml:space="preserve">\n</w:t></w:r><w:r><w:t xml:space="preserve">b"&gt;</w:t></w:r>', 'A <span title="a<s> </s>b">x</span> B\n', false],
+  ])('reads a line feed in a tag Word splits over %s as import writes the tag', async (_name, runs, expected, stable = true) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A <span title="a\nb">x</span> B\n')).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    const tag = /<w:r><w:t>&lt;span title="a\nb"&gt;<\/w:t><\/w:r>/;
+    expect(xml).toMatch(tag);
+    zip.file('word/document.xml', xml.replace(tag, runs));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe(expected);
+    // Not the italic's tag in the attribute, which the next round trip
+    // writes as text, as it does on main
+    if (stable) expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['a heading', '# XX', 'word/document.xml', '&lt;span title="x\ny"&gt;q', '# <span title="x y">q\n'],
+    ['a pipe table\'s cell', '| h |\n| --- |\n| XX |', 'word/document.xml', '&lt;span title="x\ny"&gt;q', '| h |\n| --- |\n| <span title="x y">q |\n'],
+    ['code', 'A `XX` b', 'word/document.xml', '&lt;span title="x\ny"&gt;q', 'A `<span title="x y">q` b\n'],
+    ['a tag import writes as text', 'A.\n\nXX', 'word/document.xml', 'z &lt;b class="x\ny"&gt;q', 'A.\n\nz &lt;b class="x y"&gt;q\n'],
+  ])('reads a line feed in a tag in %s as a space', async (_name, md, part, text, expected) => {
+    const markdown = await withText(md, part, text);
+    expect(markdown).toBe(expected);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('reads the line feeds of a paragraph an HTML block starts but doesn\'t hold whole as spaces', async () => {
+    // The blank line ended the block, and # b was a heading after it
+    const markdown = await withText('A.\n\nXX\n\nB.', 'word/document.xml', '&lt;div&gt;\n\n# b');
+    expect(markdown).toBe('A.\n\n<div>  # b\n\nB.\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['line feeds', '\n'],
+    ['carriage returns by reference', '&#13;'],
+    ['carriage returns and line feeds by reference', '&#13;&#10;'],
+  ])('keeps the line ends of a paragraph that is an HTML block, as export writes one, as line feeds: %s', async (_name, lineEnd) => {
+    // Markdown reads it by its lines, which are raw
+    const markdown = await withText('A.\n\nXX\n\nB.', 'word/document.xml', ['&lt;pre&gt;', 'a', '', '# b', '&lt;/pre&gt;'].join(lineEnd));
+    expect(markdown).toBe('A.\n\n<pre>\na\n\n# b\n</pre>\n\nB.\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['a tab', '<pre\tclass="c">\na\n\n# b\n</pre>\n'],
+    ['a non-breaking hyphen', '<pre title="a\u2011b">\na\n\n# b\n</pre>\n'],
+    ['an optional hyphen', '<pre title="a\u00ADb">\na\n\n# b\n</pre>\n'],
+  ])('keeps the line ends of an HTML block with %s, which export writes as Word\'s element for it', async (_name, md) => {
+    // Read without the tab, <preclass="c"> started no block
+    expect(await roundTrip(md)).toBe(md);
+  });
+
+  test.each([
+    ['a line feed at its end', '&lt;div&gt;&#10;x&#10;&lt;/div&gt;&#10;{>>c<<}\n', '\\<div>&#10;x&#10;</div>&#10;{>>c<<}\n'],
+    ['two comments after it', '&lt;div&gt;&#10;x&#10;&lt;/div&gt;{>>c<<}{>>d<<}\n', '\\<div>&#10;x&#10;</div>{>>c<<}{>>d<<}\n'],
+    ['a quote', '> &lt;div&gt;&#10;x&#10;&lt;/div&gt;{>>c<<}\n', '> \\<div>&#10;x&#10;</div>{>>c<<}\n'],
+    ['a note', 'A[^1]\n\n[^1]: &lt;div&gt;&#10;x&#10;&lt;/div&gt;{>>c<<}\n', 'A[^1]\n\n[^1]: \\<div>&#10;x&#10;</div>{>>c<<}\n'],
+    // Not where something else keeps the text from being the block, which
+    // writes its line feeds as spaces
+    ['a comment inside it', '&lt;div&gt;{>>c<<}&#10;x&#10;&lt;/div&gt;\n', '\\<div>{>>c<<} x </div>\n'],
+    ['a comment\'s range on it', '{==&lt;div&gt;&#10;x&#10;&lt;/div&gt;==}{>>c<<}\n', '{==<div> x </div>==}{>>c<<}\n'],
+    ['a note\'s mark after it', '&lt;div&gt;&#10;x&#10;&lt;/div&gt;[^1]\n\n[^1]: n\n', '\\<div> x </div>[^1]\n\n[^1]: n\n'],
+  ])('reads the line feeds of an HTML block that a comment comes after as import writes the block, as text: %s', async (_name, md, expected) => {
+    // As references, which are no line's end, and which Markdown shows as
+    // Word does, as spaces, where the comment's point keeps the text from
+    // being the block (see htmlBlockText)
+    expect(await roundTrip(md)).toBe(expected);
+    expect(await roundTrip(expected)).toBe(expected);
+  });
+
+  /** The Markdown of a paragraph of `runs` between two others, in md's
+   *  export, with the comments `comments` */
+  const withRuns = async (runs: string, pPr = '', md = 'A.\n\nXX\n\nB.', comments = '') => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    expect(xml).toContain('<w:r><w:t>XX</w:t></w:r>');
+    zip.file('word/document.xml', xml.replace(/<w:p( [^>]*)?><w:r><w:t>XX<\/w:t><\/w:r>/, (_m, attrs?: string) => '<w:p' + (attrs ?? '') + '>' + pPr + runs));
+    if (comments) zip.file('word/comments.xml', '<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' + comments + '</w:comments>');
+    return strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+  };
+  const run = (text: string, rPr = '') => '<w:r>' + rPr + '<w:t xml:space="preserve">' + text + '</w:t></w:r>';
+
+  // A carriage return a w:t ends and the line feed the next starts read as
+  // two line ends, where in one w:t they are one
+  test.each([
+    ['runs alike', run('a&#13;') + run('&#10;# b'), 'A.\n\na # b\n\nB.\n'],
+    ['runs formatted apart', run('a&#13;', '<w:rPr><w:i/></w:rPr>') + run('&#10;# b'), 'A.\n\n*a* # b\n\nB.\n'],
+    ['an HTML block\'s runs', run('&lt;pre&gt;&#13;') + run('&#10;a&#13;') + run('&#10;&#13;') + run('&#10;# b&#13;') + run('&#10;&lt;/pre&gt;'), 'A.\n\n<pre>\na\n\n# b\n</pre>\n\nB.\n'],
+  ])('reads a carriage return and line feed split between %s as one line end', async (_name, runs, expected) => {
+    const markdown = await withRuns(runs);
+    expect(markdown).toBe(expected);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  const DEL = (text: string) => '<w:del w:id="9" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r><w:delText xml:space="preserve">' + text + '</w:delText></w:r></w:del>';
+  const INS = (text: string) => '<w:ins w:id="8" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r><w:t xml:space="preserve">' + text + '</w:t></w:r></w:ins>';
+  /** Markdown's text with all its changes accepted, or rejected */
+  const accepted = (md: string) => md.replace(/\{\+\+([\s\S]*?)\+\+\}/g, '$1').replace(/\{--[\s\S]*?--\}/g, '');
+  const rejected = (md: string) => md.replace(/\{\+\+[\s\S]*?\+\+\}/g, '').replace(/\{--([\s\S]*?)--\}/g, '$1');
+
+  // Read as one line end in the second, the untracked line feed went, so
+  // accepting the deletion left AB
+  test.each([
+    ['a deleted carriage return and a line feed', run('A') + DEL('&#13;') + run('&#10;B'), 'A B', 'A  B'],
+    ['a carriage return and a deleted line feed', run('A&#13;') + DEL('&#10;') + run('B'), 'A B', 'A  B'],
+    ['an inserted carriage return and a line feed', run('A') + INS('&#13;') + run('&#10;B'), 'A  B', 'A B'],
+    ['an inserted carriage return and a deleted line feed', run('A') + INS('&#13;') + DEL('&#10;') + run('B'), 'A B', 'A B'],
+    // Which are one line end, deleted
+    ['a deletion\'s carriage return and line feed', run('A') + '<w:del w:id="9" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r><w:delText xml:space="preserve">&#13;</w:delText></w:r><w:r><w:delText xml:space="preserve">&#10;</w:delText></w:r></w:del>' + run('B'), 'AB', 'A B'],
+  ])('reads %s, tracked apart, as two line ends', async (_name, runs, accept, reject) => {
+    const markdown = await withRuns(runs);
+    const text = markdown.replace(/^A\.\n\n|\n\nB\.\n$/g, '');
+    expect([accepted(text), rejected(text)]).toEqual([accept, reject]);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('reads a carriage return in a comment\'s range and a line feed after it as two line ends', async () => {
+    const markdown = await withRuns(run('A') + '<w:commentRangeStart w:id="0"/>' + run('x&#13;') + '<w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>' + run('&#10;B'),
+      '', undefined, '<w:comment w:id="0" w:author="A" w:date="2024-01-01T00:00:00Z"><w:p><w:r><w:t>c</w:t></w:r></w:p></w:comment>');
+    expect(markdown.replace(/\{[=>][^]*?[=<]\}/g, m => m.startsWith('{==') ? m.slice(3, -3) : '')).toBe('A.\n\nAx  B\n\nB.\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['runs alike', run('a&#13;') + run('&#10;b'), 'a b'],
+    ['runs with a line break of Word\'s between', run('a&#13;') + '<w:r><w:br/></w:r>' + run('&#10;b'), 'a \n b'],
+  ])('reads a carriage return and line feed split between a comment\'s %s as one line end', async (_name, runs, expected) => {
+    // A comment's text was read run by run, so the two were two spaces
+    const zip = await JSZip.loadAsync((await convertMdToDocx('A {==c==}{>>XX<<}.')).docx);
+    const xml = await zip.file('word/comments.xml')!.async('string');
+    const text = /<w:r>(?:(?!<\/w:r>).)*<w:t>XX<\/w:t><\/w:r>/;
+    expect(xml).toMatch(text);
+    zip.file('word/comments.xml', xml.replace(text, runs));
+    const markdown = strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+    expect(markdown).toBe('A {==c==}{>>' + expected + '<<}.\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['a line break of Word\'s', run('&lt;div&gt;\nx') + '<w:r><w:br/></w:r>' + run('y\n# y\n&lt;/div&gt;'), '', undefined, ''],
+    ['a carriage return of Word\'s', run('&lt;div&gt;\nx') + '<w:r><w:cr/></w:r>' + run('y\n# y\n&lt;/div&gt;'), '', undefined, ''],
+    ['bold text', run('&lt;div&gt;\nx\n# y', '<w:rPr><w:b/></w:rPr>') + run('\n&lt;/div&gt;'), '', undefined, ''],
+    ['a bold paragraph mark', run('&lt;div&gt;\nx\n# y\n&lt;/div&gt;'), '<w:pPr><w:rPr><w:b/></w:rPr></w:pPr>', undefined, ''],
+    ['a heading\'s style', run('&lt;div&gt;\nx\n# y\n&lt;/div&gt;'), '<w:pPr><w:pStyle w:val="Heading1"/></w:pPr>', undefined, ''],
+    ['its start hidden', run('&lt;div&gt;', '<w:rPr><w:vanish/></w:rPr>') + run('\nx\n# y\n&lt;/div&gt;'), '', undefined, ''],
+    ['an HTML comment, hidden', run('&lt;div&gt;\nx') + run('\u200B&lt;!-- c --&gt;', '<w:rPr><w:vanish/></w:rPr>') + run('\n# y\n&lt;/div&gt;'), '', undefined, ''],
+    ['a comment', run('&lt;div&gt;\nx') + '<w:commentRangeStart w:id="0"/>' + run('\n# y') + '<w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>'
+      + run('\n&lt;/div&gt;'), '', undefined, '<w:comment w:id="0" w:author="A" w:date="2024-01-01T00:00:00Z"><w:p><w:r><w:t>c</w:t></w:r></w:p></w:comment>'],
+    ['a reference to a note', run('&lt;div&gt;\nx') + '<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="1"/></w:r>' + run('\n# y\n&lt;/div&gt;'), '',
+      'A[^1].\n\n[^1]: N.\n\nXX\n\nB.', ''],
+    // Unlike a note's own mark, which import leaves out
+    ['a reference to a note before it', '<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="1"/></w:r>' + run('&lt;div&gt;\nx\n# y\n&lt;/div&gt;'), '',
+      'A[^1].\n\n[^1]: N.\n\nXX\n\nB.', ''],
+  ])('reads the line feeds of a paragraph like an HTML block with %s as spaces', async (_name, runs, pPr, md, comments) => {
+    // Its text isn't the block import writes as it is, but a line feed it
+    // kept still ended a line, which read # y as a heading
+    const markdown = await withRuns(runs, pPr, md, comments);
+    expect(markdown).not.toMatch(/\n# y/);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['a tab', '<w:r><w:t>&lt;pre</w:t><w:tab/><w:t xml:space="preserve">class="c"&gt;\na\n\n# b\n&lt;/pre&gt;</w:t></w:r>', '<pre\tclass="c">'],
+    ['a symbol', '<w:r><w:t>&lt;pre title="</w:t><w:sym w:font="Symbol" w:char="F061"/><w:t xml:space="preserve">"&gt;\na\n\n# b\n&lt;/pre&gt;</w:t></w:r>', '<pre title="\u03B1">'],
+    ['Word\'s marks around it', '<w:proofErr w:type="spellStart"/><w:bookmarkStart w:id="0" w:name="_GoBack"/>' + run('&lt;pre&gt;\na\n\n# b\n&lt;/pre&gt;')
+      + '<w:bookmarkEnd w:id="0"/><w:proofErr w:type="spellEnd"/>', '<pre>'],
+  ])('keeps the line feeds of an HTML block with %s', async (_name, runs, start) => {
+    const markdown = await withRuns(runs);
+    expect(markdown).toBe('A.\n\n' + start + '\na\n\n# b\n</pre>\n\nB.\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['a line feed', '\n'],
+    ['a carriage return by reference', '&#13;'],
+  ])('keeps the line feeds of an HTML block with %s at its end', async (_name, lineEnd) => {
+    // Which markdown-it reads as no line, so the block held all but one
+    const markdown = await withText('A.\n\nXX\n\nB.', 'word/document.xml', '&lt;pre&gt;\na\n\n# b\n&lt;/pre&gt;' + lineEnd);
+    expect(markdown).toBe('A.\n\n<pre>\na\n\n# b\n</pre>\n\nB.\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps the line feed of an HTML block that a symbol of Word\'s follows at its end', async () => {
+    const markdown = await withRuns(run('&lt;div&gt;\na\n') + '<w:r><w:sym w:font="Symbol" w:char="F061"/></w:r>');
+    expect(markdown).toBe('A.\n\n<div>\na\n\u03B1\n\nB.\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('keeps the line feeds of an HTML block whose text turns off the bold of its paragraph mark', async () => {
+    // Import reads the run as the plain text it is, so the block is raw
+    const markdown = await withRuns(run('&lt;pre&gt;\na\n\n# b\n&lt;/pre&gt;', '<w:rPr><w:b w:val="0"/></w:rPr>'), '<w:pPr><w:rPr><w:b/></w:rPr></w:pPr>');
+    expect(markdown).toBe('A.\n\n<pre>\na\n\n# b\n</pre>\n\nB.\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['a content control', '<w:sdt><w:sdtPr><w:alias w:val="x"/><w:rPr><w:b/></w:rPr></w:sdtPr><w:sdtEndPr><w:rPr><w:b/></w:rPr></w:sdtEndPr><w:sdtContent>', '</w:sdtContent></w:sdt>'],
+    ['a smart tag', '<w:smartTag w:uri="urn:x" w:element="y"><w:smartTagPr><w:attr w:name="a" w:val="b"/></w:smartTagPr>', '</w:smartTag>'],
+    ['custom XML', '<w:customXml w:uri="urn:x" w:element="y"><w:customXmlPr><w:attr w:name="a" w:val="b"/></w:customXmlPr>', '</w:customXml>'],
+  ])('keeps the line feeds of an HTML block in %s, which import reads through', async (_name, open, close) => {
+    const markdown = await withRuns(open + run('&lt;pre&gt;\na\n\n# b\n&lt;/pre&gt;') + close);
+    expect(markdown).toBe('A.\n\n<pre>\na\n\n# b\n</pre>\n\nB.\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['an empty bold run', run('&lt;pre&gt;\na\n\n# b') + '<w:r><w:rPr><w:b/></w:rPr></w:r>' + run('\n&lt;/pre&gt;')],
+    ['a page break', run('&lt;pre&gt;\na\n\n# b') + '<w:r><w:br w:type="page"/></w:r>' + run('\n&lt;/pre&gt;')],
+    ['a range of editing permission', '<w:permStart w:id="0" w:edGrp="everyone"/>' + run('&lt;pre&gt;\na\n\n# b\n&lt;/pre&gt;') + '<w:permEnd w:id="0"/>'],
+  ])('keeps the line feeds of an HTML block with %s, of which import writes nothing', async (_name, runs) => {
+    // Its eligibility read Word's XML, not the text import writes
+    const markdown = await withRuns(runs);
+    expect(markdown).toBe('A.\n\n<pre>\na\n\n# b\n</pre>\n\nB.\n');
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  test('reads the line feeds of an HTML block in a content control with bold text as spaces', async () => {
+    const markdown = await withRuns('<w:sdt><w:sdtContent>' + run('&lt;div&gt;\nx\n# y', '<w:rPr><w:b/></w:rPr>') + run('\n&lt;/div&gt;') + '</w:sdtContent></w:sdt>');
+    expect(markdown).not.toMatch(/\n# y/);
+    expect(await roundTrip(markdown)).toBe(markdown);
+  });
+
+  const NOTE_BLOCK = 'T.[^1]\n\n[^1]:\n\n    <pre>\n    a\n    \n    # b\n    </pre>\n';
+
+  test.each([
+    ['a footnote', ''],
+    ['an endnote', '---\nnotes: endnotes\n---\n\n'],
+  ])('keeps the line feeds of an HTML block that starts %s', async (_name, front) => {
+    // Export puts the note's mark before it, in its paragraph, which import
+    // leaves out, but which kept it from reading as the block
+    const trip = async (md: string) => (await roundTrip(front + md)).replace(/^\n/, '');
+    const markdown = await trip('T.[^1]\n\n[^1]: <pre>\n    a\n\n    # b\n    </pre>\n');
+    expect(markdown).toBe(NOTE_BLOCK);
+    expect(await trip(markdown)).toBe(markdown);
+  });
+
+  test.each([
+    ['space', '<w:r><w:t xml:space="preserve"> </w:t></w:r>'],
+    ['tab', '<w:r><w:tab/></w:r>'],
+  ])('keeps the line feeds of an HTML block after a note\'s mark and the %s Word puts after it', async (_name, after) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(NOTE_BLOCK)).docx);
+    const xml = await zip.file('word/footnotes.xml')!.async('string');
+    // Export's own space after the mark, which this replaces
+    const mark = '<w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> </w:t></w:r>';
+    expect(xml).toContain(mark);
+    zip.file('word/footnotes.xml', xml.replace(mark, '<w:footnoteRef/></w:r>' + after));
+    expect(strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown)).toBe(NOTE_BLOCK);
+  });
+
+  /** The Markdown of NOTE_BLOCK's export with its note's XML changed by `change` */
+  const withNote = async (change: (xml: string) => string) => {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(NOTE_BLOCK)).docx);
+    const xml = await zip.file('word/footnotes.xml')!.async('string');
+    const changed = change(xml);
+    expect(changed).not.toBe(xml);
+    zip.file('word/footnotes.xml', changed);
+    return strip((await convertDocx(await zip.generateAsync({ type: 'uint8array' }))).markdown);
+  };
+
+  test.each([
+    ['space', '<w:t xml:space="preserve"> </w:t>'],
+    ['tab', '<w:tab/>'],
+  ])('keeps the line feeds of an HTML block after a note\'s mark with the %s Word puts after it in its run', async (_name, after) => {
+    // Import leaves out both, but the mark's run read as holding more
+    const markdown = await withNote(xml => xml.replace('<w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> </w:t></w:r>', '<w:footnoteRef/>' + after + '</w:r>'));
+    expect(markdown).toBe(NOTE_BLOCK);
+  });
+
+  test.each(['Heading1', 'Title'])('keeps the line feeds of an HTML block in a note in the style %s, which a note\'s paragraph doesn\'t read', async style => {
+    const markdown = await withNote(xml => xml.replace('<w:pStyle w:val="FootnoteText"/>', '<w:pStyle w:val="' + style + '"/>'));
+    expect(markdown).toBe(NOTE_BLOCK);
   });
 });
 
