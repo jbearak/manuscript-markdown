@@ -5515,8 +5515,10 @@ describe('Built-in styles Word names in another language', () => {
 
   test('reads the fonts of the body, headings and title from their styles, which Word named in German, as from those Word named in English', async () => {
     const font = (name: string, size: number) => '<w:rPr><w:rFonts w:ascii="' + name + '" w:hAnsi="' + name + '"/><w:sz w:val="' + size + '"/></w:rPr>';
-    const frontmatter = async ([normal, heading, title]: string[]) => {
-      const style = (id: string, name: string, rPr: string, isDefault = false) => '<w:style w:type="paragraph"' + (isDefault ? ' w:default="1"' : '')
+    /** The frontmatter of a document whose styles have the IDs `normal`,
+     *  `heading` and `title`, each after `before` */
+    const frontmatter = async ([normal, heading, title]: string[], before = '') => {
+      const style = (id: string, name: string, rPr: string, isDefault = false) => before + '<w:style w:type="paragraph"' + (isDefault ? ' w:default="1"' : '')
         + ' w:styleId="' + id + '"><w:name w:val="' + name + '"/>' + rPr + '</w:style>';
       const md = (await convertDocx(await buildSyntheticDocx(wrapDocumentXml(paragraph(title, 'My Title') + paragraph(heading, 'Alpha')
         + '<w:p><w:r><w:t>Text.</w:t></w:r></w:p>'), {
@@ -5531,6 +5533,46 @@ describe('Built-in styles Word names in another language', () => {
     expect(english).toContain('header-font: [Arial, Georgia]\n');
     expect(english).toContain('title-font: Verdana\n');
     expect(await frontmatter(['Standard', 'berschrift1', 'Titel'])).toBe(english);
+    // Word matches style IDs whatever their case, as import does a
+    // paragraph's, and their fonts were none of these settings
+    expect(await frontmatter(['normal', 'heading1', 'title'])).toBe(english);
+    // A style written as <w:style .../>, which the next </w:style> doesn't
+    // close, before each, where import read each style to the next one's
+    // end, and found none of these by its ID's case
+    const empty = '<w:style w:type="character" w:styleId="Empty"/>';
+    expect(await frontmatter(['Normal', 'Heading1', 'Title'], empty)).toBe(english);
+    expect(await frontmatter(['Standard', 'berschrift1', 'Titel'], empty)).toBe(english);
+    expect(await frontmatter(['normal', 'heading1', 'title'], empty)).toBe(english);
+  });
+
+  /** The Markdown of a document of a heading in `heading` and text with no
+   *  style, under styles.xml's `styles` */
+  const withStyles = async (heading: string, styles: string) => (await convertDocx(await buildSyntheticDocx(
+    wrapDocumentXml(paragraph(heading, 'Alpha') + '<w:p><w:r><w:t>Text.</w:t></w:r></w:p>'), {
+      'word/styles.xml': '<?xml version="1.0"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' + styles + '</w:styles>',
+    }))).markdown;
+  const font = (name: string, size: number) => '<w:rPr><w:rFonts w:ascii="' + name + '" w:hAnsi="' + name + '"/><w:sz w:val="' + size + '"/></w:rPr>';
+
+  test('reads no font from a character style whose ID is Normal\'s but for its case', async () => {
+    // A paragraph takes no character style, but import read its font as the
+    // body's
+    const md = await withStyles('Heading1', '<w:style w:type="paragraph" w:default="1" w:styleId="Body"><w:name w:val="Body"/>' + font('Georgia', 22) + '</w:style>'
+      + '<w:style w:type="character" w:styleId="normal"><w:name w:val="Shout"/>' + font('Impact', 48) + '</w:style>');
+    expect(md).not.toContain('Impact');
+    expect(md).not.toContain('font-size: 24');
+  });
+
+  test('reads the paragraph styles named Normal and heading 1 as those, where character styles have their English IDs', async () => {
+    // A character style with the built-in style's ID kept import from
+    // reading the paragraph style by its name, so it read the character
+    // style's font as the body's, and the heading as text
+    const md = await withStyles('berschrift1', '<w:style w:type="paragraph" w:default="1" w:styleId="Standard"><w:name w:val="Normal"/>' + font('Georgia', 24) + '</w:style>'
+      + '<w:style w:type="character" w:styleId="Normal"><w:name w:val="Normal Char"/>' + font('Impact', 48) + '</w:style>'
+      + '<w:style w:type="paragraph" w:styleId="berschrift1"><w:name w:val="heading 1"/><w:basedOn w:val="Standard"/>' + font('Arial', 36) + '</w:style>'
+      + '<w:style w:type="character" w:styleId="Heading1"><w:name w:val="Heading 1 Char"/></w:style>');
+    expect(md).toContain('font: Georgia\n');
+    expect(md).not.toContain('Impact');
+    expect(strip(md)).toBe('# Alpha\n\nText.\n');
   });
 });
 
