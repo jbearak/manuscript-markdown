@@ -275,7 +275,15 @@ function decodeBibtexText(input: string): string {
  *  reads a line at a time, as `original-date: 1850`. */
 function collapseBibtexWhitespace(fieldName: string, value: string): string {
   if (fieldName === 'note') {
-    return value.split(/\r\n?|\n/).map(line => line.replace(/[ \t\f]+/g, ' ').replace(/^ | $/g, '')).join('\n').replace(/^\n+|\n+$/g, '');
+    // Without its blank lines at its edges, which go from the lines rather
+    // than by a regex for the line ends there, which read the rest of a run
+    // of them again from each one in it
+    const lines = value.split(/\r\n?|\n/).map(line => line.replace(/[ \t\f]+/g, ' ').replace(/^ | $/g, ''));
+    let start = 0;
+    let end = lines.length;
+    while (start < end && lines[start] === '') start++;
+    while (end > start && lines[end - 1] === '') end--;
+    return lines.slice(start, end).join('\n');
   }
   return value.replace(/[ \t\r\n\f]+/g, ' ').replace(/^ | $/g, '');
 }
