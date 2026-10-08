@@ -2111,7 +2111,7 @@ function markWrappedLatexBlocks(tokens: Token[], text: string, lineCount: number
  * `linkDefinitions` are the document's, which a note body parsed on its own
  * resolves its reference links and images with, after its own definitions.
  */
-export function parseMd(markdown: string, warnings?: string[], breaks = false, originalText?: string, tableNumberFormat?: TableNumberFormat, linkDefinitions?: Record<string, unknown>, unformatted?: string, inNote = false): MdToken[] {
+export function parseMd(markdown: string, warnings?: string[], breaks = false, originalText?: string, tableNumberFormat?: TableNumberFormat, linkDefinitions?: Record<string, unknown>, unformatted?: string, inNote = false, bodyStartLine = 0): MdToken[] {
   const md = createMarkdownIt();
   // Grid tables, quotes without lazy continuation, and bare LaTeX
   // environments, as the orientation scan reads them too
@@ -2200,9 +2200,10 @@ export function parseMd(markdown: string, warnings?: string[], breaks = false, o
       }
       if (commentLine < 0) continue;
       const commentEndLine = commentLine + commentLines.length - 1;
-      // Count blank lines before: scan backwards from commentLine
+      // Count blank lines before: scan backwards from commentLine, to the
+      // body's start (see bodyStartLine)
       let beforeCount = 0;
-      for (let li = commentLine - 1; li >= 0; li--) {
+      for (let li = commentLine - 1; li >= bodyStartLine; li--) {
         if (origLines[li].trim() === '') beforeCount++;
         else break;
       }
@@ -8750,8 +8751,16 @@ export async function convertMdToDocx(
 		footnoteDefs.set(label, noteNumberResult.output);
 		parseWarnings.push(...noteNumberResult.warnings);
 	}
+  // The line the body starts on, after the frontmatter and the blank lines
+  // after it, which frontmatterBlankLines holds. The masked frontmatter's
+  // lines read as blank, which a comment or fence that starts the body
+  // counted in the blank lines before it: import puts those nowhere at the
+  // document's start, but between two fences where it writes another first
+  const bodyStartLine = hadFrontmatter
+    ? (markdown.slice(0, markdown.length - body.length) + (body.match(/^(?:\r?\n)*/) ?? [''])[0]).split('\n').length - 1
+    : 0;
   const tokens = parseMd(bodyForParsing, parseWarnings, frontmatter.breaks ?? false, maskFrontmatter(markdown),
-    numbersFormatted ? tableNumberFormat : undefined, undefined, numbersFormatted ? unformattedBody : undefined);
+    numbersFormatted ? tableNumberFormat : undefined, undefined, numbersFormatted ? unformattedBody : undefined, false, bodyStartLine);
 
   // Number quote groups and collect the source spacing parseMd recorded on them
   annotateBlockquoteGroupIndices(tokens);

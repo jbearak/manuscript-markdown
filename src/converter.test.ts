@@ -3452,7 +3452,36 @@ describe('Sentinel gap round-trip', () => {
   });
 
   test.each([
-    ['all of a style block', '<!-- style: quote -->\n<!-- a -->\n<!-- /style -->\n\nB.\n'],
+    ['with no frontmatter', ''],
+    ['after frontmatter', '---\ntitle: T\n---\n\n'],
+    ['after frontmatter and blank lines', '---\ntitle: T\n---\n\n\n\n'],
+  ])('puts no blank lines between a style block and a landscape section that start the body, %s, where import writes the landscape fence first', async (_name, frontmatter) => {
+    // The style fence's gap counted the frontmatter's lines, which import
+    // puts nowhere at the document's start, but between the fences once
+    // the landscape fence goes first
+    const md = frontmatter + '<!-- style: quote -->\n<!-- landscape -->\nWide.\n<!-- /landscape -->\n<!-- /style -->\n';
+    const expected = frontmatter + '<!-- landscape -->\n<!-- style: quote -->\nWide.\n<!-- /style -->\n<!-- /landscape -->\n';
+    const markdown = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+    expect(markdown).toBe(expected);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(expected);
+  });
+
+  test.each([
+    ['with no frontmatter', ''],
+    ['after frontmatter', '---\ntitle: T\n---\n\n'],
+  ])('puts no blank lines between a comment that starts the body and the table directive import puts above it, %s', async (_name, frontmatter) => {
+    // The comment's gap counted the frontmatter's lines, which import put
+    // between the directive and the comment
+    const table = '| a | b |\n| --- | --- |\n| 1 | 2 |\n';
+    const md = frontmatter + '<!-- c -->\n\n<!-- table-col-widths: 2 1 -->\n' + table;
+    const expected = frontmatter + '<!-- table-col-widths: 2 1 -->\n<!-- c -->\n\n' + table;
+    const markdown = (await convertDocx((await convertMdToDocx(md)).docx)).markdown;
+    expect(markdown).toBe(expected);
+    expect((await convertDocx((await convertMdToDocx(markdown)).docx)).markdown).toBe(expected);
+  });
+
+  test.each([
+    ['all of a style block','<!-- style: quote -->\n<!-- a -->\n<!-- /style -->\n\nB.\n'],
     ['all of a style block, after blank lines', '<!-- style: quote -->\n\n\n<!-- a -->\n<!-- /style -->\n\nB.\n'],
     ['all of a style block with another', 'A.\n\n<!-- style: quote -->\n<!-- a -->\n<!-- b -->\n<!-- /style -->\n\nB.\n'],
     ['at the start of a style block', 'A.\n\n<!-- style: quote -->\n<!-- a -->\n\nText.\n<!-- /style -->\n\nB.\n'],
