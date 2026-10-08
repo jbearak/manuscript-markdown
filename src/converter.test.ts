@@ -12889,6 +12889,134 @@ describe('An empty paragraph whose mark is tracked', () => {
   });
 });
 
+describe('A table cell\'s paragraph whose mark is tracked', () => {
+  /** md's export, with each of part's paragraphs of XX alone, or with the
+   *  text emptied, given its mark in a revision of `type` */
+  async function tracked(md: string, part: string, type: 'ins' | 'del', empty = false): Promise<Uint8Array> {
+    const zip = await JSZip.loadAsync((await convertMdToDocx(md)).docx);
+    let id = 90;
+    const xml = (await zip.file(part)!.async('string')).replace(/(<w:p\b[^>]*>)<w:pPr>((?:(?!<\/w:pPr>).)*)<\/w:pPr>(<w:r>(?:<w:rPr>(?:(?!<\/w:rPr>).)*<\/w:rPr>)?<w:t>XX<\/w:t><\/w:r>)<\/w:p>/g,
+      (_m, open: string, pPr: string, run: string) => open + '<w:pPr>' + pPr + '<w:rPr><w:' + type + ' w:id="' + id++ + '" w:author="A" w:date="2024-01-01T00:00:00Z"/></w:rPr></w:pPr>' + (empty ? '' : run) + '</w:p>');
+    expect(id).toBeGreaterThan(90);
+    zip.file(part, xml);
+    return zip.generateAsync({ type: 'uint8array' });
+  }
+
+  /** Each of part's paragraphs: the revision its mark is in, and its text */
+  async function paragraphs(docx: Uint8Array, part: string): Promise<string[]> {
+    const xml = await (await JSZip.loadAsync(docx)).file(part)!.async('string');
+    return [...xml.matchAll(/<w:p\b[^>]*>(?:(?!<\/w:p>).)*<\/w:p>/g)].map(([p]) => {
+      const mark = /<w:pPr>(?:(?!<\/w:pPr>).)*<w:rPr>(?:(?!<\/w:rPr>).)*<w:(ins|del)\b/.exec(p)?.[1];
+      return (mark ? mark + ' ' : '') + JSON.stringify([...p.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map(t => t[1]).join(''));
+    });
+  }
+
+  /** An HTML table, as import writes one, whose body cell holds `cell`'s
+   *  paragraphs */
+  const table = (...cell: string[]) => '<table>\n  <tr>\n    <th>\n      <p>h</p>\n    </th>\n  </tr>\n  <tr>\n    <td>\n'
+    + cell.map(p => '      <p>' + p + '</p>\n').join('') + '    </td>\n  </tr>\n</table>';
+
+  test.each([
+    ['inserted', table('XX', 'b'), 'ins', false, table('XX{++', '++}b')],
+    ['deleted', table('XX', 'b'), 'del', false, table('XX{--', '--}b')],
+    ['inserted, after bold text', table('<b>XX</b>', 'b'), 'ins', false, table('<b>XX</b>{++', '++}b')],
+    ['inserted, twice', table('XX', 'XX', 'b'), 'ins', false, table('XX{++', '++}XX{++', '++}b')],
+    ['inserted, before the last of three', table('a', 'XX', 'b'), 'ins', false, table('a', 'XX{++', '++}b')],
+    ['inserted, on an empty one', table('a', 'XX', 'b'), 'ins', true, table('a', '{++', '++}b')],
+    ['deleted, on two empty ones', table('a', 'XX', 'XX', 'b'), 'del', true, table('a', '{--', '--}{--', '--}b')],
+    ['inserted, in a header cell', '<table>\n  <tr>\n    <th>\n      <p>XX</p>\n      <p>b</p>\n    </th>\n  </tr>\n  <tr>\n    <td>\n      <p>d</p>\n    </td>\n  </tr>\n</table>', 'ins', false,
+      '<table>\n  <tr>\n    <th>\n      <p>XX{++</p>\n      <p>++}b</p>\n    </th>\n  </tr>\n  <tr>\n    <td>\n      <p>d</p>\n    </td>\n  </tr>\n</table>'],
+  ])('keeps one whose mark is %s', async (_name, md, type, empty, expected) => {
+    // Import read no tracked mark in a cell, so the HTML table's cell came
+    // back with its paragraphs and no change
+    await roundTrips(md, 'word/document.xml', type as 'ins' | 'del', empty as boolean, expected);
+  });
+
+  test('keeps one in a note\'s table', async () => {
+    const md = 'T[^1]\n\n[^1]: a\n\n' + table('XX', 'b').replace(/^/gm, '    ');
+    const expected = 'T[^1]\n\n[^1]: a\n\n' + table('XX{++', '++}b').replace(/^/gm, '    ');
+    await roundTrips(md, 'word/footnotes.xml', 'ins', false, expected);
+  });
+
+  test.each([
+    ['an opener with no closer after it', table('a{++', 'b'), ['"h"', '"a{++"', '"b"']],
+    ['a closer with no opener before it', table('a', '++}b'), ['"h"', '"a"', '"++}b"']],
+    ['a span in one paragraph', table('a{++b++}', 'c'), ['"h"', '"a{++b++}"', '"c"']],
+    ['spans of two kinds', table('a{++', '--}b'), ['"h"', '"a{++"', '"--}b"']],
+    // Which export read as a span, past the references
+    ['an opener and a closer written with references', table('a&#123;++', '++&#125;b'), ['"h"', '"a{++"', '"++}b"']],
+    ['an opener whose { is a reference', table('a&#123;++', '++}b'), ['"h"', '"a{++"', '"++}b"']],
+    ['an opener whose + is a reference', table('a{&#43;+', '++}b'), ['"h"', '"a{++"', '"++}b"']],
+    ['a closer whose } is a reference', table('a{++', '++&#125;b'), ['"h"', '"a{++"', '"++}b"']],
+    // Whose text the parser reads its references in before its lines, so
+    // that as the HTML writes it isn't known
+    ['an opener in a <pre>', table('a').replace('<p>a</p>', '<pre>a{++</pre><p>++}b</p>'), ['"h"', '"a{++"', '"++}b"']],
+    ['an opener in a <pre> whose { is a reference', table('a').replace('<p>a</p>', '<pre>a&#123;++</pre><p>++}b</p>'), ['"h"', '"a{++"', '"++}b"']],
+  ])('exports %s in a cell as text', async (_name, md, expected) => {
+    expect(await paragraphs((await convertMdToDocx(md)).docx, 'word/document.xml')).toEqual(expected);
+  });
+
+  test.each([
+    ['of an insertion', ['aXX', 'YYb'], '++', false, table('a&#123;++', '++}b')],
+    ['of a deletion', ['aXX', 'YYb'], '--', false, table('a&#123;--', '--}b')],
+    ['in bold', ['<b>aXX</b>', '<b>YYb</b>'], '++', false, table('<b>a&#123;++</b>', '<b>++}b</b>')],
+    ['in a link', ['<a href="https://e.com/">aXX</a>', 'YYb'], '++', false, table('<a href="https://e.com/">a&#123;++</a>', '++}b')],
+    ['around a tracked mark', ['aXX', 'YYb'], '++', true, table('a&#123;++{++', '++}++}b')],
+  ])('keeps text in a cell that reads as the span of a mark %s as text', async (_name, cell, kind, mark, expected) => {
+    // Import wrote it as it is, which export read as a tracked mark
+    const zip = await JSZip.loadAsync((await convertMdToDocx(table(...cell as string[]))).docx);
+    let xml = (await zip.file('word/document.xml')!.async('string')).replace('XX', '{' + kind).replace('YY', kind + '}');
+    if (mark) {
+      xml = xml.replace(/(<w:p\b[^>]*><w:pPr>(?:(?!<\/w:pPr>).)*)(<\/w:pPr>(?:(?!<\/w:p>).)*\{\+\+<\/w:t>)/,
+        '$1<w:rPr><w:ins w:id="90" w:author="A" w:date="2024-01-01T00:00:00Z"/></w:rPr>$2');
+    }
+    zip.file('word/document.xml', xml);
+    const docx = await zip.generateAsync({ type: 'uint8array' });
+    const once = (await convertDocx(docx)).markdown;
+    expect(once.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(expected + '\n');
+    const again = (await convertMdToDocx(once)).docx;
+    expect(await paragraphs(again, 'word/document.xml')).toEqual(await paragraphs(docx, 'word/document.xml'));
+    expect((await convertDocx(again)).markdown).toBe(once);
+  });
+
+  test.each([
+    ['a space after an insertion\'s opener', '<w:r><w:t xml:space="preserve">a{++ </w:t></w:r>', '++}b'],
+    ['a space after a deletion\'s opener', '<w:r><w:t xml:space="preserve">a{-- </w:t></w:r>', '--}b'],
+    ['a space in a run of its own', '<w:r><w:t>a{++</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve"> </w:t></w:r>', '++}b'],
+    ['a space before the closer', '<w:r><w:t xml:space="preserve">a{++</w:t></w:r>', ' ++}b'],
+    ['a link of a space whose address holds the opener', '<w:r><w:t>a{++</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+      + '<w:r><w:instrText xml:space="preserve"> HYPERLINK "https://e.com/{++" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+      + '<w:r><w:t xml:space="preserve"> </w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>', '++}b'],
+  ])('keeps text in a cell that reads as the span of a mark past %s as text', async (_name, runs, next) => {
+    // The cell's HTML drops whitespace at a paragraph's edge, after which
+    // export read the delimiters as a tracked mark, where import's check
+    // for them read the whitespace
+    const zip = await JSZip.loadAsync((await convertMdToDocx(table('aXX', 'YYb'))).docx);
+    zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string'))
+      .replace('<w:r><w:t>aXX</w:t></w:r>', runs).replace('<w:t>YYb</w:t>', '<w:t xml:space="preserve">' + next + '</w:t>'));
+    const docx = await zip.generateAsync({ type: 'uint8array' });
+    const once = (await convertDocx(docx)).markdown;
+    const again = (await convertMdToDocx(once)).docx;
+    // With the whitespace at the paragraph's end, which import writes as
+    // &#32; (see Tables)
+    expect(await paragraphs(again, 'word/document.xml')).toEqual(await paragraphs(docx, 'word/document.xml'));
+    const twice = (await convertDocx(again)).markdown;
+    expect((await convertDocx((await convertMdToDocx(twice)).docx)).markdown).toBe(twice);
+  });
+
+  /** That md's export with its marks tracked imports as `expected`, which
+   *  exports to its paragraphs and marks in part again, and imports as
+   *  itself */
+  async function roundTrips(md: string, part: string, type: 'ins' | 'del', empty: boolean, expected: string) {
+    const docx = await tracked(md, part, type, empty);
+    const once = (await convertDocx(docx)).markdown;
+    expect(once.replace(/^---\n[\s\S]*?\n---\n\n?/, '')).toBe(expected + '\n');
+    const again = (await convertMdToDocx(once)).docx;
+    expect(await paragraphs(again, part)).toEqual(await paragraphs(docx, part));
+    expect((await convertDocx(again)).markdown).toBe(once);
+  }
+});
+
 describe('DOCX footnote cross-reference import', () => {
   function wrapCustomPropsXml(props: Record<string, string>): string {
     let xml = '<?xml version="1.0"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">';

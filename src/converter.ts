@@ -17,7 +17,7 @@ import { blocksAsRead, citationEndInText, commentsEnd, compareNoteLabels, counts
 import { parseEmbedDirective } from './embed-preprocess';
 import { parseTableDigits, parseTableDecimalMark, parseTableDigitGrouping } from './table-number-format';
 import { matchTables, paragraphStartFingerprint, tableContentsFingerprint, tableFirstRowText, tableIdentity as tableIdentityOf, type TableIdentity } from './table-metadata';
-import { htmlPieceAt } from './html-table-parser';
+import { cellParagraphMarkAt, htmlPieceAt, parseHtmlCellRuns } from './html-table-parser';
 import { publicStyleNameForZoteroId, zoteroStyleIdForName } from './csl-loader';
 import { extractZoteroKey } from './zotero-link';
 import { DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
@@ -1614,6 +1614,9 @@ export interface TableRow {
 }
 export interface TableCell {
   paragraphs: ContentItem[][];
+  // Each paragraph's tracked mark, where one is, which renderHtmlTable
+  // writes before the paragraph after it in the cell
+  marks?: (RevisionInfo | undefined)[];
   colspan?: number;
   rowspan?: number;
   align?: TableAlign;
@@ -5026,7 +5029,7 @@ function parseNoteBody(
         } else if (key === 'w:tbl' && context && !inTableCell) {
           const markBefore = trackedParaMark;
           const tblChildren = asXmlNodes(node[key]);
-          const rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> }> = [];
+          const rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; marks?: (RevisionInfo | undefined)[]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> }> = [];
           const firstRowHeaderByLook = tableHasFirstRowHeader(tblChildren);
           // Where each cell is, for its table style's parts
           const look = tableLook(tblChildren);
@@ -5034,7 +5037,7 @@ function parseNoteBody(
           const columnCount = tableColumnCount(tblChildren);
           for (const tr of tblChildren.filter((c) => c['w:tr'] !== undefined)) {
             const trChildren = asXmlNodes(tr['w:tr']);
-            const cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> = [];
+            const cells: Array<{ paragraphs: ContentItem[][]; marks?: (RevisionInfo | undefined)[]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> = [];
             for (const tc of trChildren.filter((c) => c['w:tc'] !== undefined)) {
               const tcChildren = asXmlNodes(tc['w:tc']);
               let colspan = 1;
@@ -5055,7 +5058,7 @@ function parseNoteBody(
               }
               const cellItems: ContentItem[] = [];
               walkNoteBody(tcChildren, currentFormatting, cellItems, true, currentRevision);
-              cells.push({ paragraphs: splitCellParagraphs(cellItems), colspan, vMergeType, align: cellAlignment(tcChildren, context.styleLayouts, tableStyleId(tblChildren, context.styleLayouts),
+              cells.push({ paragraphs: splitCellParagraphs(cellItems), ...cellParagraphMarks(cellItems), colspan, vMergeType, align: cellAlignment(tcChildren, context.styleLayouts, tableStyleId(tblChildren, context.styleLayouts),
                 { row: rawRows.length, rows: rowCount, col: cells.reduce((n, cell) => n + cell.colspan, 0), span: colspan, cols: columnCount, look }) });
             }
             rawRows.push({ isHeader: rowHasHeaderProp(trChildren), cells });
@@ -5181,6 +5184,8 @@ function parseNoteBody(
             const paraItem: ContentItem = { type: 'para' };
             if (trackedBreak) paraItem.breakRevision = precedingMark.revision;
             if (isCodeBlock) paraItem.isCodeBlock = true;
+            // A cell's tracked mark, for its table (see cellParagraphMarks)
+            if (inTableCell && paraMarkRevision) paraItem.paraMarkRevision = paraMarkRevision;
             target.push(paraItem);
           }
           const lenBeforeContent = target.length;
@@ -5755,6 +5760,13 @@ function splitCellParagraphs(cellContent: ContentItem[]): ContentItem[][] {
   return paragraphs;
 }
 
+/** The tracked marks of a cell's paragraphs, each paragraph's on its item
+ *  (see splitCellParagraphs), if any is */
+function cellParagraphMarks(cellContent: ContentItem[]): { marks?: (RevisionInfo | undefined)[] } {
+  const marks = cellContent.flatMap(item => item.type === 'para' ? [item.paraMarkRevision] : []);
+  return marks.some(mark => mark) ? { marks } : {};
+}
+
 function tableHasFirstRowHeader(tblChildren: XmlNode[]): boolean {
   const tblPrNode = tblChildren.find((c) => c['w:tblPr'] !== undefined);
   if (!tblPrNode) return false;
@@ -5782,7 +5794,7 @@ function rowHasHeaderProp(trChildren: XmlNode[]): boolean {
  * cell's rowspan is set to the total number of merged rows.
  */
 export function computeRowspans(
-  rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> }>
+  rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; marks?: (RevisionInfo | undefined)[]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> }>
 ): TableRow[] {
   // Build a 2D grid: grid[rowIdx][gridCol] = reference to the raw cell
   const numRows = rawRows.length;
@@ -5844,6 +5856,7 @@ export function computeRowspans(
       if (continuationCells.has(r + ',' + ci)) continue;
       const raw = rawRows[r].cells[ci];
       const cell: TableCell = { paragraphs: raw.paragraphs };
+      if (raw.marks) cell.marks = raw.marks;
       if (raw.colspan > 1) cell.colspan = raw.colspan;
       if (raw.align) cell.align = raw.align;
       const rs = rowspanMap.get(r + ',' + ci);
@@ -6217,7 +6230,7 @@ export async function extractDocumentContent(
         } else if (key === 'w:tbl' && !inTableCell) {
           const markBefore = trackedParaMark;
           const tblChildren = asXmlNodes(node[key]);
-          const rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> }> = [];
+          const rawRows: Array<{ isHeader: boolean; cells: Array<{ paragraphs: ContentItem[][]; marks?: (RevisionInfo | undefined)[]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> }> = [];
           const firstRowHeaderByLook = tableHasFirstRowHeader(tblChildren);
           // Where each cell is, for its table style's parts
           const look = tableLook(tblChildren);
@@ -6225,7 +6238,7 @@ export async function extractDocumentContent(
           const columnCount = tableColumnCount(tblChildren);
           for (const tr of tblChildren.filter((c) => c['w:tr'] !== undefined)) {
             const trChildren = asXmlNodes(tr['w:tr']);
-            const cells: Array<{ paragraphs: ContentItem[][]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> = [];
+            const cells: Array<{ paragraphs: ContentItem[][]; marks?: (RevisionInfo | undefined)[]; colspan: number; vMergeType?: 'restart' | 'continue'; align?: TableAlign }> = [];
             for (const tc of trChildren.filter((c) => c['w:tc'] !== undefined)) {
               const tcChildren = asXmlNodes(tc['w:tc']);
               // Parse cell properties
@@ -6247,7 +6260,7 @@ export async function extractDocumentContent(
               }
               const cellItems: ContentItem[] = [];
               walk(tcChildren, currentFormatting, cellItems, true, currentRevision);
-              cells.push({ paragraphs: splitCellParagraphs(cellItems), colspan, vMergeType, align: cellAlignment(tcChildren, styleLayouts, tableStyleId(tblChildren, styleLayouts),
+              cells.push({ paragraphs: splitCellParagraphs(cellItems), ...cellParagraphMarks(cellItems), colspan, vMergeType, align: cellAlignment(tcChildren, styleLayouts, tableStyleId(tblChildren, styleLayouts),
                 { row: rawRows.length, rows: rowCount, col: cells.reduce((n, cell) => n + cell.colspan, 0), span: colspan, cols: columnCount, look }) });
             }
             rawRows.push({ isHeader: rowHasHeaderProp(trChildren), cells });
@@ -6546,7 +6559,8 @@ export async function extractDocumentContent(
             if (unnumberedListLevel !== undefined && !headingLevel && !isTitle && !blockquoteLevel && !isCodeBlock && !generatedListContinuation && !customStyle) {
               paraItem.unnumberedListLevel = unnumberedListLevel;
             }
-            if (paraMarkRevision && headingLevel) paraItem.paraMarkRevision = paraMarkRevision;
+            // And a cell's, for its table (see cellParagraphMarks)
+            if (paraMarkRevision && (headingLevel || inTableCell)) paraItem.paraMarkRevision = paraMarkRevision;
             if (takesMarkBefore) {
               paraItem.breakRevision = precedingMark!.revision;
               // A list item, a heading or code never joins it (see
@@ -6613,10 +6627,13 @@ export async function extractDocumentContent(
               const prevItem = targetLenBeforePara > 0 ? target[targetLenBeforePara - 1] : undefined;
               // One that takes the tracked mark of an empty one before
               // keeps its item, which holds the break (see
-              // joinTrackedParagraphBreaks)
+              // joinTrackedParagraphBreaks), and so does a cell's, either of
+              // whose marks is tracked, which its table shows
               if (
                 !paraItem.breakRevision &&
+                !paraItem.paraMarkRevision &&
                 prevItem?.type === 'para' &&
+                !prevItem.paraMarkRevision &&
                 prevItem.emptyParagraphCount !== undefined &&
                 !prevItem.headingLevel &&
                 !prevItem.listMeta &&
@@ -9235,6 +9252,21 @@ function htmlCellsHoldTable(table: { rows: TableRow[] }): boolean {
     cell.paragraphs.every(para => renderHtmlCellParagraph(para) !== undefined)));
 }
 
+/** Where the last `opener` is in the text of `html`, past its tags,
+ *  comments and raw text, as a link's address can hold one, or -1 */
+function lastTextIndexOf(html: string, opener: string): number {
+  let found = -1;
+  for (let at = 0; at < html.length;) {
+    const piece = htmlPieceAt(html, at);
+    if (piece.kind === 'text') {
+      const k = html.slice(at, piece.end).lastIndexOf(opener);
+      if (k !== -1) found = at + k;
+    }
+    at = piece.end;
+  }
+  return found;
+}
+
 /** The start of an HTML block before a table that ends on the line its end
  *  marker is on, as a comment's or a <pre>'s, so the table goes on that line
  *  (see renderHtmlTable) */
@@ -9260,6 +9292,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
       if (cell.rowspan && cell.rowspan > 1) attrs += ' rowspan="' + cell.rowspan + '"';
       if (cell.align) attrs += ' align="' + cell.align + '"';
       lines.push(i2 + '<' + tag + attrs + '>');
+      const paragraphs: string[] = [];
       for (const para of cell.paragraphs) {
         // Export makes a header cell bold, as for a pipe table
         const items = mergeConsecutiveRuns(withoutHiddenCommentSpace(row.isHeader
@@ -9269,7 +9302,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
           : para), false);
         const html = renderHtmlCellParagraph(items);
         if (html !== undefined) {
-          lines.push(i3 + '<p>' + html + '</p>');
+          paragraphs.push(html);
           continue;
         }
         // In a table only HTML holds, such as one with merged cells, the
@@ -9286,9 +9319,37 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
         // But not a blank line, as in an HTML comment, which would end the
         // table's HTML block there, so the lines around it join
         const text = rendered.text.replace(/(?:\r\n?|\n)[ \t]*(?=\r|\n)/g, '');
-        lines.push(i3 + '<p>' + keepParagraphWhitespace(keepHtmlCellSpaces(text), true, true) + '</p>');
+        paragraphs.push(keepParagraphWhitespace(keepHtmlCellSpaces(text), true, true));
         pushAll(deferredAll, rendered.deferredComments);
       }
+      // Text that ends a paragraph as the span of a tracked mark below
+      // opens, before text that starts the next as the span closes, has a
+      // reference for its {, which export reads as text. Export reads the
+      // cell's HTML for them so, past its tags and the whitespace a
+      // paragraph's edges lose, as this does (see cellParagraphMarkAt).
+      if (paragraphs.length > 1 && paragraphs.some(html => html.includes('{++') || html.includes('{--'))) {
+        const runs = parseHtmlCellRuns('<p>' + paragraphs.join('</p><p>') + '</p>');
+        // Each paragraph run is the break after one more of the paragraphs
+        for (let i = 0, k = 0; i < runs.length; i++) {
+          if (runs[i].type !== 'paragraph') continue;
+          const mark = cellParagraphMarkAt(runs, i);
+          const at = mark ? lastTextIndexOf(paragraphs[k], mark.opener) : -1;
+          if (at !== -1) paragraphs[k] = paragraphs[k].slice(0, at) + '&#123;' + paragraphs[k].slice(at + 1);
+          k++;
+        }
+      }
+      // A paragraph's tracked mark is a span of the break after it alone, its
+      // opener at the paragraph's end and its closer at the next one's
+      // start, as a blank line in a span is outside a table (see
+      // joinTrackedParagraphBreaks), and as export reads it in a cell's
+      // HTML. The last's, which no paragraph after it shows, goes.
+      for (let k = 0; k + 1 < paragraphs.length; k++) {
+        const mark = cell.marks?.[k];
+        if (!mark) continue;
+        paragraphs[k] += mark.type === 'addition' ? '{++' : '{--';
+        paragraphs[k + 1] = (mark.type === 'addition' ? '++}' : '--}') + paragraphs[k + 1];
+      }
+      for (const html of paragraphs) lines.push(i3 + '<p>' + html + '</p>');
       lines.push(i2 + '</' + tag + '>');
     }
     lines.push(i1 + '</tr>');

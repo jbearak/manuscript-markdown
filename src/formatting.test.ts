@@ -1572,11 +1572,12 @@ describe('compactTable', () => {
 describe('HTML table support for Expand/Compact Table', () => {
   // A table's rows as the preview shows them: whether each is a header row,
   // and its cells' text, formatting, line breaks and links, with text runs
-  // alike joined, as <i>a</i><i>b</i> shows as *ab* does
+  // alike joined, as <i>a</i><i>b</i> shows as *ab* does, but not the HTML
+  // of their text, which the preview doesn't show
   const FORMATS = ['bold', 'italic', 'underline', 'strikethrough', 'code', 'superscript', 'subscript', 'href'] as const;
   const previewRows = (markdown: string) => extractHtmlTables(renderWithPlugin(markdown)).map(table => table.rows.map(row => ({
     header: row.header,
-    cells: row.cells.map(cell => cell.runs.reduce<HtmlTableRun[]>((runs, run) => {
+    cells: row.cells.map(cell => cell.runs.map(run => ({ ...run, html: undefined })).reduce<HtmlTableRun[]>((runs, run) => {
       const last = runs[runs.length - 1];
       if (last?.type === 'text' && run.type === 'text' && !run.linkStart && FORMATS.every(key => last[key] === run[key])) {
         runs[runs.length - 1] = { ...last, text: last.text + run.text };

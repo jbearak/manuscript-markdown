@@ -13,6 +13,7 @@ import {
 export interface HtmlTableRun {
   type: 'text' | 'softbreak' | 'hardbreak' | 'paragraph' | 'html_comment'; // paragraph: the gap between two of a cell's <p>s
   text: string;
+  html?: string; // a text run's text as the HTML writes it, where a character reference makes the two differ, but for a <pre>'s
   bold?: boolean;
   italic?: boolean;
   underline?: boolean;
@@ -307,7 +308,34 @@ function collapseHtmlWhitespace(rawText: string): string {
 // with its ; or without, where its number ends, as in &#13b, but not &#130
 const CARRIAGE_RETURN_REFERENCE = /&#(?:0*13(?![0-9])|x0*d(?![0-9a-f]));?/i;
 
-function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
+/** The runs of a <pre>'s text, whose references parseHtmlCellRuns reads
+ *  before it splits its lines, so their text as the HTML writes it isn't
+ *  known (see HtmlTableRun.html) */
+const preformattedRuns = new WeakSet<HtmlTableRun>();
+
+/** The spans of CriticMarkup a break between two of a cell's paragraphs
+ *  reads as a tracked mark in, by their delimiters */
+const CELL_MARK_SPANS = [['{++', '++}', 'addition'], ['{--', '--}', 'deletion']] as const;
+
+/**
+ * The tracked paragraph mark the break between two of a cell's paragraphs at
+ * `runs[i]` reads as, if any: where the text before it ends with a span's
+ * opener and the text after starts with its closer, as the HTML writes them,
+ * not with a character reference in them, past the whitespace the cell's
+ * paragraphs lose at their edges (see parseHtmlCellRuns), and not in code
+ * or a <pre>, whose text is as it is. Export reads the mark so, and import
+ * checks the text it writes with it.
+ */
+export function cellParagraphMarkAt(runs: HtmlTableRun[], i: number): { opener: string; closer: string; type: 'addition' | 'deletion' } | undefined {
+  const [before, after] = [runs[i - 1], runs[i + 1]];
+  if (runs[i]?.type !== 'paragraph' || before?.type !== 'text' || after?.type !== 'text' || before.code || after.code
+    || preformattedRuns.has(before) || preformattedRuns.has(after)) return undefined;
+  const span = CELL_MARK_SPANS.find(([opener, closer]) => before.text.endsWith(opener) && after.text.startsWith(closer)
+    && (before.html ?? before.text).endsWith(opener) && (after.html ?? after.text).startsWith(closer));
+  return span && { opener: span[0], closer: span[1], type: span[2] };
+}
+
+export function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
   const runs: HtmlTableRun[] = [];
   let bold = false;
   let italic = false;
@@ -415,6 +443,7 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
       // As HTML, as the cell's other text, whose references are read last
       const run: HtmlTableRun = { type: 'text', text: line.replace(/&/g, '&amp;'), ...formatting(), ...(href ? { href } : {}), ...(href && linkStart ? { linkStart: true as const } : {}) };
       preformatted.add(run);
+      preformattedRuns.add(run);
       pushRun(run);
       linkStart = false;
     });
@@ -523,7 +552,10 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
     }
   }
   for (const run of runs) {
-    if (run.type === 'text') run.text = decodeHtmlEntities(run.text);
+    if (run.type !== 'text') continue;
+    const text = decodeHtmlEntities(run.text);
+    if (text !== run.text && !preformatted.has(run)) run.html = run.text;
+    run.text = text;
   }
 
   // Keep shape stable for callers expecting at least one run per cell.
