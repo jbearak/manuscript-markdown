@@ -8750,6 +8750,23 @@ describe('HTML table cells', () => {
   });
 
   test.each([
+    ['a <pre>', '      <pre>\na\n# b\n</pre>', '      <p>a<br># b</p>'],
+    ['the spaces and tabs of a <pre>', '      <pre>  a  b\n\tc</pre>', '      <p>&#32;&#32;a &#32;b<br>&#9;c</p>'],
+    ['code in a <pre>', '      <pre><code>a\n  b</code></pre>', '      <p><code>a<br>&#32;&#32;b</code></p>'],
+    ['a <pre> between text', '      x<pre>a\nb</pre>y', '      <p>x</p>\n      <p>a<br>b</p>\n      <p>y</p>'],
+    ['a <pre> whose second line end at its end ends a line', '      <pre>a\n&#10;</pre>', '      <p>a<br></p>'],
+    ['a line break before a line end in a <pre>', '      <pre>a<br>\nb</pre>', '      <p>a<br><br>b</p>'],
+    // Whose carriage return went in Word's text, which Word shows as a space
+    ['a <pre> with a carriage return and line feed by reference', '      <pre>a&#13;&#10;b</pre>', '      <p>a<br>b</p>'],
+    ['a <pre> with a carriage return by reference, which shows nothing', '      <pre>a&#13;b</pre>', '      <p>ab</p>'],
+    ['a <pre> with carriage returns by reference without their ;', '      <pre>a&#13b&#xD c</pre>', '      <p>ab c</p>'],
+  ])('keeps the lines and spaces of %s, as HTML shows them', async (_name, cell, expected) => {
+    // Its whitespace ran together, as other text's, so it lost its lines
+    expect(await roundTrip(table(cell))).toBe(table(expected));
+    expect(await roundTrip(table(expected))).toBe(table(expected));
+  });
+
+  test.each([
     ['at a link\'s end', '      <p>x <a href="https://e.com">a<br></a>y</p>', 0],
     ['at a link\'s start', '      <p>x<a href="https://e.com"><br>a</a> y</p>', 0],
     ['in a link', '      <p>x <a href="https://e.com">a<br>b</a> y</p>', 0],

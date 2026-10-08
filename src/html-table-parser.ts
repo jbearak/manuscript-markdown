@@ -302,6 +302,11 @@ function collapseHtmlWhitespace(rawText: string): string {
   return rawText.replace(/&#(?:0*1[03](?![0-9])|[xX]0*[aAdD](?![0-9a-fA-F]));?|&NewLine;/g, ' ').replace(/[ \t\r\n]+/g, ' ');
 }
 
+// A carriage return by reference, which HTML's parser reads after it reads
+// one written as itself as a line feed, and which a browser shows as nothing,
+// with its ; or without, where its number ends, as in &#13b, but not &#130
+const CARRIAGE_RETURN_REFERENCE = /&#(?:0*13(?![0-9])|x0*d(?![0-9a-f]));?/i;
+
 function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
   const runs: HtmlTableRun[] = [];
   let bold = false;
@@ -324,6 +329,13 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
   let atParagraphStart = true;
   // A <br> at the end of a <p>, which stays, unlike one at the end of a cell
   const closedBreaks = new Set<HtmlTableRun>();
+  // In a <pre>, whose text keeps its whitespace, which doesn't collapse or
+  // trim, as code's doesn't, and whose line feeds end its lines; and right
+  // after its start tag, where HTML drops a line feed
+  let pre = false;
+  let preStart = false;
+  const preformatted = new Set<HtmlTableRun>();
+  const keepsWhitespace = (run: HtmlTableRun | undefined) => !!run && (!!run.code || preformatted.has(run));
   // The index of the last run that shows, before any comments after it,
   // which don't, kept as each run is added, as a cell can hold many comments
   let shown = -1;
@@ -334,7 +346,7 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
   const startParagraph = () => {
     if (paragraphs > 0) {
       const last = runs[shown];
-      if (last?.type === 'text' && !last.code) {
+      if (last?.type === 'text' && !keepsWhitespace(last)) {
         last.text = last.text.replace(/[ \t\r\n]+$/, '');
         if (!last.text) runs.splice(shown, 1);
       }
@@ -358,11 +370,15 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
     ...(subscript ? { subscript } : {}),
   });
   const emitText = (rawText: string) => {
+    if (pre) {
+      emitPreformatted(rawText);
+      return;
+    }
     let text = code ? rawText : collapseHtmlWhitespace(rawText);
     // Whitespace runs together with a space the text before ends with, as
     // HTML has it, past tags and comments, which show nothing
     const before = runs[shown];
-    if (!code && (paragraphClosed || atParagraphStart || before?.type === 'softbreak' || before?.type === 'text' && !before.code && before.text.endsWith(' '))) {
+    if (!code && (paragraphClosed || atParagraphStart || before?.type === 'softbreak' || before?.type === 'text' && !keepsWhitespace(before) && before.text.endsWith(' '))) {
       text = text.replace(/^ /, '');
     }
     if (!text) return;
@@ -374,6 +390,34 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
       ...(href && linkStart ? { linkStart: true as const } : {}),
     });
     linkStart = false;
+  };
+  // A line break, in the formatting around it, as text, which Word shows on
+  // it, as an underline, as export reads a line break in Markdown, and in an
+  // <a>, the link's, as Word's hyperlink holds it
+  const pushLineBreak = () => {
+    startContent();
+    pushRun({ type: 'softbreak', text: '\n', ...formatting(), ...(href ? { href } : {}), ...(href && linkStart ? { linkStart: true as const } : {}) });
+    linkStart = false;
+  };
+  const emitPreformatted = (rawText: string) => {
+    // Its references read apart where a carriage return's goes, so the text
+    // around it can't join into one, as &&#13;#10; would into &#10;, and
+    // its line feeds, as characters or references, end its lines
+    const pieces = rawText.replace(/\r\n?/g, '\n').split(CARRIAGE_RETURN_REFERENCE);
+    const text = pieces.map(piece => decodeHtmlEntities(piece)).join('');
+    // HTML drops a line feed right after the start tag, but not one after a
+    // carriage return there
+    const lines = (preStart && pieces[0] && text.startsWith('\n') ? text.slice(1) : text).split('\n');
+    lines.forEach((line, i) => {
+      if (i > 0) pushLineBreak();
+      if (!line) return;
+      startContent();
+      // As HTML, as the cell's other text, whose references are read last
+      const run: HtmlTableRun = { type: 'text', text: line.replace(/&/g, '&amp;'), ...formatting(), ...(href ? { href } : {}), ...(href && linkStart ? { linkStart: true as const } : {}) };
+      preformatted.add(run);
+      pushRun(run);
+      linkStart = false;
+    });
   };
 
   // Tokenize the HTML into tags, comments, and text segments. A tag's
@@ -387,6 +431,7 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
     // Emit any text before this tag
     if (match.index > lastIndex) emitText(cellHtml.slice(lastIndex, match.index));
     lastIndex = match.index + match[0].length;
+    preStart = false;
 
     // A comment, which the browser hides, as Word's export of it does. It
     // goes in the paragraph before it, or else the one after it, as it
@@ -404,12 +449,7 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
     const attrs = match[5];
 
     if (tag === 'br') {
-      startContent();
-      // In the formatting around it, as text, which Word shows on it, as an
-      // underline, as export reads a line break in Markdown, and in an <a>,
-      // the link's, as Word's hyperlink holds it
-      pushRun({ type: 'softbreak', text: '\n', ...formatting(), ...(href ? { href } : {}), ...(href && linkStart ? { linkStart: true as const } : {}) });
-      linkStart = false;
+      pushLineBreak();
     } else if (tag === 'b' || tag === 'strong') {
       bold = !isClose;
     } else if (tag === 'i' || tag === 'em') {
@@ -439,6 +479,22 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
         if (last?.type === 'softbreak') closedBreaks.add(last);
         paragraphClosed = true;
       }
+    } else if (tag === 'pre') {
+      // A block, as a <p> is, whose last line break, by <br> or line feed,
+      // shows nothing, as it starts no line with anything on it. One before
+      // it stays, as one at a <p>'s end does.
+      if (!isClose) {
+        startParagraph();
+        preStart = true;
+      } else {
+        if (runs[shown]?.type === 'softbreak') {
+          runs.splice(shown--, 1);
+          while (shown >= 0 && runs[shown].type === 'html_comment') shown--;
+        }
+        if (runs[shown]?.type === 'softbreak') closedBreaks.add(runs[shown]);
+        paragraphClosed = true;
+      }
+      pre = !isClose;
     }
   }
 
@@ -451,7 +507,7 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
   if (runs.length > 0) {
     const k = runs.findIndex(run => run.type !== 'html_comment');
     const first = runs[k];
-    if (first?.type === 'text' && !first.code) {
+    if (first?.type === 'text' && !keepsWhitespace(first)) {
       first.text = first.text.replace(/^[ \t\r\n]+/, '');
       if (!first.text) runs.splice(k, 1);
     }
@@ -461,7 +517,7 @@ function parseHtmlCellRuns(cellHtml: string): HtmlTableRun[] {
     while (k >= 0 && runs[k].type === 'html_comment') k--;
     const last = runs[k];
     if (last?.type === 'softbreak' && !closedBreaks.has(last)) runs.splice(k, 1);
-    else if (last?.type === 'text' && !last.code) {
+    else if (last?.type === 'text' && !keepsWhitespace(last)) {
       last.text = last.text.replace(/[ \t\r\n]+$/, '');
       if (!last.text) runs.splice(k, 1);
     }

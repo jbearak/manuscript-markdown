@@ -761,14 +761,19 @@ function convertHtmlTable(text: string, pad: boolean): string | null {
   let headerEnd = 0;
   while (headerEnd < cells.length && tables[0].rows[headerEnd].header) headerEnd++;
   const isBreak = (item: ContentItem) => item.type === 'text' && item.text === '\\\n';
-  const lined = cells.some(row => row.some(cell => {
-    const items = cell.paragraphs[0];
+  // A cell's items before the line breaks at its end
+  const beforeEndBreaks = (items: ContentItem[]) => {
     let end = items.length;
     while (end > 0 && isBreak(items[end - 1])) end--;
-    return items.slice(0, end).some(isBreak);
-  }));
+    return items.slice(0, end);
+  };
+  const lined = cells.some(row => row.some(cell => beforeEndBreaks(cell.paragraphs[0]).some(isBreak)));
+  // Two line breaks in a row before a cell's last text, a blank line in a
+  // grid table's cell, whose preview shows one line break for them, as of a
+  // <pre> with a blank line, which a pipe table holds as <br><br>
+  const blankLine = cells.some(row => row.some(cell => beforeEndBreaks(cell.paragraphs[0]).some((item, k, items) => isBreak(item) && isBreak(items[k + 1]))));
   const pipe = () => headerEnd > 1 ? null : markdownTable(cells.map((row, ri) => ({ isHeader: ri === 0, cells: row })), 'pipe');
-  const grid = () => markdownTable(cells.map((row, ri) => ({ isHeader: ri < headerEnd, cells: row })), 'grid');
+  const grid = () => blankLine ? null : markdownTable(cells.map((row, ri) => ({ isHeader: ri < headerEnd, cells: row })), 'grid');
   const markdown = lined ? grid() ?? pipe() : pipe() ?? grid();
   if (markdown === null) return null;
   // Padded as Expand Table pads a pipe table, as a grid table is

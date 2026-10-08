@@ -580,6 +580,22 @@ describe('grid table support for Expand Table and Compact Table', () => {
       .toBe('+-------+-----+\n| a<br> | b   |\n|       | c   |\n+-------+-----+');
   });
 
+  it.each([
+    ['a <pre>', '<pre><code>a&#10;&#10;b</code></pre>', '`a`<br><br>`b`'],
+    ['line breaks', 'a<br><br>b', 'a<br><br>b'],
+  ])('writes an HTML table whose cell has a blank line in %s as a pipe table, whose preview shows it', (_name, cell, expected) => {
+    // A grid table's, whose preview shows one line break for the two
+    const input = '<table><tr><th>h</th></tr><tr><td>' + cell + '</td></tr></table>';
+    expect(compactTable(input).newText).toBe('| h |\n| --- |\n| ' + expected + ' |');
+    expect(reflowTable(input).newText).toBe(reflowTable('| h |\n| --- |\n| ' + expected + ' |').newText);
+  });
+
+  it('leaves an HTML table whose cell has a blank line as it is, where a pipe table can\'t hold its header rows', () => {
+    const input = '<table><tr><th>h</th></tr><tr><th>i</th></tr><tr><td><pre><code>a&#10;&#10;b</code></pre></td></tr></table>';
+    expect(reflowTable(input).newText).toBe(input);
+    expect(compactTable(input).newText).toBe(input);
+  });
+
   it('compactTable compacts Pandoc-style grid tables while preserving separator style', () => {
     const input = [
       '+------------+-------+',
