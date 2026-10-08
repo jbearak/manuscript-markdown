@@ -857,7 +857,8 @@ export function withoutSpaceOutsideComments(text: string): string {
   return kept + text.slice(at).replace(/^\s+$/, '');
 }
 
-/** Whether export reads Markdown `text` as one paragraph whose HTML
+/** Whether export reads Markdown `text` as one paragraph, or with `heading`
+ *  one heading, whose HTML
  *  comments are those inline Markdown reads in each of `payloads`, the
  *  comments' hidden runs, read alone, as in &#32;<!-- a --><!-- b -->c with
  *  one run of both, or, where runs may merge (`merge`), whose comments hold
@@ -865,10 +866,10 @@ export function withoutSpaceOutsideComments(text: string): string {
  *  it that Word split from it. Not as text, as a comment with a blank line
  *  in it, nor where a comment takes in text between runs, as one that ends
  *  in ---> does a space before the next run */
-export function readsCommentsInline(text: string, payloads: string[], merge = false): boolean {
+export function readsCommentsInline(text: string, payloads: string[], merge = false, heading = false): boolean {
   const md = citationTextMd ??= createMarkdownIt();
   const tokens = md.parse(text, {});
-  if (tokens.length !== 3 || tokens[0].type !== 'paragraph_open' || tokens[0].map?.[1] !== text.split('\n').length) return false;
+  if (tokens.length !== 3 || tokens[0].type !== (heading ? 'heading_open' : 'paragraph_open') || tokens[0].map?.[1] !== text.split('\n').length) return false;
   const comments = (children: Token[] | null) => (children ?? [])
     .filter(child => child.type === 'html_inline' && child.content.startsWith('<!--')).map(child => child.content);
   const read = comments(tokens[1].children);
