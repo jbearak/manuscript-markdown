@@ -6013,6 +6013,33 @@ describe('Characters XML can\'t hold', () => {
     const { docx } = await convertMdToDocx('b', { templateDocx: await template.generateAsync({ type: 'uint8array' }) });
     expect(await (await JSZip.loadAsync(docx)).file('word/theme/theme1.xml')!.async('uint8array')).toEqual(utf16);
   });
+
+  // Export changes a template's styles, which it reads in the encoding they
+  // declare and writes in UTF-8, which their declaration then says. A
+  // template Normal of 12pt sizes the tables, and a table at that size
+  // needs no size of its own
+  it.each(['font-size: 13', 'header-font-size: 20', 'line-spacing: double', ''])('exports with a template whose styles are in UTF-16 as with them in UTF-8: %s', async (fields) => {
+    const JSZip = (await import('jszip')).default;
+    const { convertDocx } = await import('./converter');
+    const template = await JSZip.loadAsync((await convertMdToDocx('---\nfont-size: 12\n---\n\n# a')).docx);
+    const styles = await template.file('word/styles.xml')!.async('string');
+    expect(styles).toMatch(/^<\?xml\b[^>]*\sencoding="UTF-8"/);
+    const md = (fields ? '---\n' + fields + '\n---\n\n' : '') + '# b\n\ntext\n\n<!-- table-font-size: 10 -->\n\n| h |\n|---|\n| c |\n';
+    const exported = async (part: string | Uint8Array) => {
+      template.file('word/styles.xml', part);
+      return (await convertMdToDocx(md, { templateDocx: await template.generateAsync({ type: 'uint8array' }) })).docx;
+    };
+    const expected = await exported(styles);
+    const docx = await exported(new Uint8Array([0xFF, 0xFE, ...Buffer.from(styles.replace('encoding="UTF-8"', 'encoding="UTF-16"'), 'utf16le')]));
+    // Each export gives its paragraphs IDs of their own
+    const parts = async (file: Uint8Array) => {
+      const zip = await JSZip.loadAsync(file);
+      return Promise.all(['word/styles.xml', 'word/document.xml'].map(async path =>
+        (await zip.file(path)!.async('string')).replace(/ (?:w14:paraId|w14:textId|w:rsid\w*)="[^"]*"/g, '')));
+    };
+    expect(await parts(docx)).toEqual(await parts(expected));
+    expect((await convertDocx(docx)).markdown).toBe((await convertDocx(expected)).markdown);
+  });
 });
 
 describe('Line breaks in tracked changes and comments', () => {

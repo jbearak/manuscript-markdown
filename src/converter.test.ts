@@ -19561,3 +19561,36 @@ describe('HTML blocks Word shows as text', () => {
     expect(strip((await convertDocx(again)).markdown)).toBe(markdown);
   });
 });
+
+// A part may be in another encoding than UTF-8, as UTF-16, which some tools
+// write, and its BOM or declaration says which
+describe('Parts in the encoding they declare', () => {
+  const md = '---\ntitle: Café\nfont-size: 12\nheader-font: Georgia\n---\n\n# Überschrift\n\nNaïve text, a comment{>>@Zoë | très bien<<} and a note.[^1]\n\n[^1]: Á note.\n';
+  const declaring = (xml: string, encoding: string) => xml.replace(/^(<\?xml\b[^>]*?\sencoding=")[^"]*/, (_match, open: string) => open + encoding);
+  const utf16le = (text: string) => new Uint8Array(Buffer.from(text, 'utf16le'));
+  const swapped = (bytes: Uint8Array) => bytes.map((_byte, i) => bytes[i ^ 1]);
+  const latin1 = (text: string) => {
+    expect(text).not.toMatch(/[^\u0000-ÿ]/);
+    return Uint8Array.from(text, ch => ch.charCodeAt(0));
+  };
+
+  test.each([
+    ['UTF-16 with its BOM', (xml: string) => new Uint8Array([0xFF, 0xFE, ...utf16le(declaring(xml, 'UTF-16'))])],
+    ['UTF-16 big-endian without a BOM', (xml: string) => swapped(utf16le(declaring(xml, 'UTF-16')))],
+    ['ISO-8859-1, which its declaration names', (xml: string) => latin1(declaring(xml, 'ISO-8859-1'))],
+  ])('a document whose XML parts are in %s reads as it does in UTF-8', async (_name, encode) => {
+    const { docx } = await convertMdToDocx(md);
+    const expected = (await convertDocx(docx)).markdown;
+    expect(expected).toContain('font-size: 12');
+    const zip = await JSZip.loadAsync(docx);
+    const parts = Object.keys(zip.files).filter(path => /\.(?:xml|rels)$/.test(path));
+    expect(parts).toEqual(expect.arrayContaining(['word/document.xml', 'word/styles.xml']));
+    for (const path of parts) {
+      const xml = await zip.file(path)!.async('string');
+      expect(xml).toMatch(/^<\?xml\b[^>]*\sencoding="UTF-8"/);
+      zip.file(path, encode(xml));
+    }
+    const { markdown } = await convertDocx(await zip.generateAsync({ type: 'uint8array' }));
+    expect(markdown).toBe(expected);
+  });
+});
