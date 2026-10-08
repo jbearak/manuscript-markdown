@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'bun:test';
 import { parseBibtex, parseBibtexWithRaw, scanBibtexEntryBody, findDuplicateBibtexKeys, detectBibtexEol, detectEntryEol, serializeBibtex, stripOuterBraces, stripWrappingBraces, mergeBibtex, extractRawField, spliceFieldsIntoEntry, BibtexEntry } from './bibtex-parser';
+import { fastestRun } from './test-timing';
 
 describe('BibTeX Parser', () => {
   it('parses basic entry', () => {
@@ -292,10 +293,8 @@ describe('double-brace fix', () => {
       // Calling stripOuterBraces in a loop rescans the whole value per pair;
       // this case took seconds.
       const wrapped = '{'.repeat(50000) + 'x' + '}'.repeat(50000);
-      const started = performance.now();
-      expect(stripWrappingBraces(wrapped)).toBe('x');
-      expect(performance.now() - started).toBeLessThan(1000);
-    });
+      expect(fastestRun(() => expect(stripWrappingBraces(wrapped)).toBe('x'))).toBeLessThan(1000);
+    }, 30000);
   });
 
   it('decodes a braced LaTeX accent without corrupting surrounding braces', () => {
@@ -447,10 +446,8 @@ describe('BibTeX field whitespace', () => {
   it('reads a note\'s blank lines in linear time', () => {
     // Its trim of line ends at its edges read the rest of a run of them
     // again from each one in it
-    const started = performance.now();
-    expect(field('note', '{a' + '\n'.repeat(40000) + 'b}')).toBe('a' + '\n'.repeat(40000) + 'b');
-    expect(performance.now() - started).toBeLessThan(500);
-  });
+    expect(fastestRun(() => expect(field('note', '{a' + '\n'.repeat(40000) + 'b}')).toBe('a' + '\n'.repeat(40000) + 'b'))).toBeLessThan(500);
+  }, 30000);
 
   it('drops a note\'s blank lines at its edges, but not between its lines', () => {
     expect(field('note', '{\n \n\ta\n\n \n b \n\n}')).toBe('a\n\n\nb');

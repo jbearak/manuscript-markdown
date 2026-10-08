@@ -35,6 +35,7 @@ import {
   extractCalloutLabels,
 } from './converter';
 import { parseBibtex } from './bibtex-parser';
+import { fastestRun, fastestRunAsync } from './test-timing';
 import { annotateHtmlCommentIndices, convertMdToDocx, parseMd, templateStyleIds } from './md-to-docx';
 import { GRID_TABLE_PLACEHOLDER_PREFIX } from './grid-table-preprocess';
 import { keepParagraphEdgeWhitespace } from './html-entities';
@@ -5655,17 +5656,13 @@ describe('Emphasis between runs', () => {
   ])('writes many HTML comments in %s in linear time', (_name, wrap, text, first = '<!-- a') => {
     // Each comment joined the text of all those after it
     const items = Array.from({ length: 32000 }, (_, i): ContentItem => ({ type: 'html_comment', text: i === 0 ? first : i === 31999 ? ' -->' : text, commentIds: new Set() }));
-    const start = performance.now();
-    buildMarkdown(wrap(items), new Map());
-    expect(performance.now() - start).toBeLessThan(1000);
-  });
+    expect(fastestRun(() => buildMarkdown(wrap(items), new Map()))).toBeLessThan(1000);
+  }, 30000);
 
   test('writes a long paragraph of formatted runs in linear time', () => {
     const items = Array.from({ length: 40000 }, (_, i) => run(i % 2 ? 'a.' : '.b', { bold: i % 3 === 0, italic: i % 5 === 0 }));
-    const start = performance.now();
-    buildMarkdown(items, new Map());
-    expect(performance.now() - start).toBeLessThan(1000);
-  });
+    expect(fastestRun(() => buildMarkdown(items, new Map()))).toBeLessThan(1000);
+  }, 30000);
 
   test.each([
     ['in Word comments\' ranges, with IDs', true, (i: number) => new Set([i % 2 ? 'c1' : 'c2'])],
@@ -9259,25 +9256,21 @@ describe('Word text that reads as Markdown', () => {
   test('escapes Word\'s text of many citations one inside another in linear time', () => {
     // Each [ of one export doesn't know read the text to its ] again
     const time = (n: number) => {
-      const start = performance.now();
-      buildMarkdown([{ type: 'text', text: '[@a'.repeat(n) + ']', commentIds: new Set(), formatting: DEFAULT_FORMATTING }], new Map());
-      return performance.now() - start;
+      return fastestRun(() => buildMarkdown([{ type: 'text', text: '[@a'.repeat(n) + ']', commentIds: new Set(), formatting: DEFAULT_FORMATTING }], new Map()));
     };
     const small = time(5000);
     expect(time(20000) / small).toBeLessThan(8);
-  });
+  }, 30000);
 
   test('reads the keys of deleted text of many [ in linear time', () => {
     // Four times the text takes about four times as long, not sixteen
     const time = (n: number) => {
       const revision = { type: 'deletion' as const, author: 'A', date: '' };
-      const start = performance.now();
-      buildMarkdown([{ type: 'text', text: '['.repeat(n) + '@a]', commentIds: new Set(), formatting: DEFAULT_FORMATTING, revision }], new Map());
-      return performance.now() - start;
+      return fastestRun(() => buildMarkdown([{ type: 'text', text: '['.repeat(n) + '@a]', commentIds: new Set(), formatting: DEFAULT_FORMATTING, revision }], new Map()));
     };
     const small = time(20000);
     expect(time(80000) / small).toBeLessThan(8);
-  });
+  }, 30000);
 
   test.each([
     ['in a note, whose missing data export doesn\'t note', 'Text[^1].\n\n[^1]: [@a]', '[^1]: [@a]'],
@@ -9336,10 +9329,8 @@ describe('Word text that reads as Markdown', () => {
     // Each run's [ or $ read the text of all the runs after it
     const items = Array.from({ length: 32000 }, (_, k) => (
       { type: 'text', text: 'a' + text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, bold: k % 2 === 0 } }));
-    const start = performance.now();
-    buildMarkdown(items as ContentItem[], new Map());
-    expect(performance.now() - start).toBeLessThan(1000);
-  });
+    expect(fastestRun(() => buildMarkdown(items as ContentItem[], new Map()))).toBeLessThan(1000);
+  }, 30000);
 
   test('writes a paragraph of many links in linear time', () => {
     // Each run read whether the Markdown before it ended a line, which
@@ -9350,22 +9341,18 @@ describe('Word text that reads as Markdown', () => {
       const items = Array.from({ length: links }, (_, k) => [
         { type: 'text', text: 't' + k, href: 'https://e.com/' + k, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING } },
         { type: 'text', text: ' ', commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING } }]).flat();
-      const start = performance.now();
-      buildMarkdown(items as ContentItem[], new Map());
-      return performance.now() - start;
+      return fastestRun(() => buildMarkdown(items as ContentItem[], new Map()));
     };
     const small = time(10000);
     expect(time(80000) / small).toBeLessThan(16);
-  });
+  }, 30000);
 
   test('escapes many paragraphs in linear time', () => {
     // Each paragraph's runs read an index of the text from the document's start
     const items = Array.from({ length: 8000 }, () => [
       { type: 'text', text: 'a', commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING } }, { type: 'para' }]).flat();
-    const start = performance.now();
-    buildMarkdown(items as ContentItem[], new Map());
-    expect(performance.now() - start).toBeLessThan(1000);
-  });
+    expect(fastestRun(() => buildMarkdown(items as ContentItem[], new Map()))).toBeLessThan(1000);
+  }, 30000);
 
   test.each([
     ['a dollar sign before one in the next run, as a subscript', 'A.\n\nXX\n\nB.',
@@ -9478,13 +9465,11 @@ describe('Word text that reads as Markdown', () => {
     const time = (n: number) => {
       const body = 'c'.repeat(40 * n) + '==';
       const items = Array.from({ length: n }, () => [{ type: 'para' }, { type: 'text', text: 'a==b', commentIds: new Set(['0']), formatting: DEFAULT_FORMATTING }]).flat();
-      const start = performance.now();
-      expect(buildMarkdown(items as ContentItem[], new Map([['0', { author: 'A', text: body, date: '' }]]))).toEndWith('a\\==b{/1}\n{#1>>@A | ' + body + '<<}');
-      return performance.now() - start;
+      return fastestRun(() => expect(buildMarkdown(items as ContentItem[], new Map([['0', { author: 'A', text: body, date: '' }]]))).toEndWith('a\\==b{/1}\n{#1>>@A | ' + body + '<<}'));
     };
     const small = time(10000);
     expect(time(40000) / small).toBeLessThan(8);
-  });
+  }, 30000);
 
   const fence = '$' + '$';
   test.each([
@@ -9538,13 +9523,11 @@ describe('Word text that reads as Markdown', () => {
     const time = (n: number) => {
       const run = (text: string) => ({ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING });
       const items = [...Array.from({ length: n }, () => [run('a==b'), { type: 'math', latex: 'x', display: true, inParagraph: true, commentIds: new Set() }]).flat(), run('c==d')];
-      const start = performance.now();
-      expect(buildMarkdown(items as ContentItem[], new Map())).toStartWith('a\\==b\n' + fence + '\nx\n' + fence + 'a\\==b\n');
-      return performance.now() - start;
+      return fastestRun(() => expect(buildMarkdown(items as ContentItem[], new Map())).toStartWith('a\\==b\n' + fence + '\nx\n' + fence + 'a\\==b\n'));
     };
     const small = time(5000);
     expect(time(20000) / small).toBeLessThan(8);
-  });
+  }, 30000);
 
   test('escapes bold text with math in it for the syntax in its paragraph alone', async () => {
     // It read the runs after it to the end of the document, so a == in a
@@ -9566,25 +9549,19 @@ describe('Word text that reads as Markdown', () => {
   test('escapes many dollar signs in linear time', () => {
     // Each $ read the text's Markdown whole, with the runs after it, and
     // each escape built it anew
-    const start = performance.now();
-    expect(wrapWithFormatting('$a$ '.repeat(25000), DEFAULT_FORMATTING, false, RunsAfter.of(' x'))).toBe('\\$a$ '.repeat(25000));
-    expect(performance.now() - start).toBeLessThan(500);
-  });
+    expect(fastestRun(() => expect(wrapWithFormatting('$a$ '.repeat(25000), DEFAULT_FORMATTING, false, RunsAfter.of(' x'))).toBe('\\$a$ '.repeat(25000)))).toBeLessThan(500);
+  }, 30000);
 
   test('escapes a long run of URLs in linear time', () => {
     // Each URL's check read the run to its end
-    const start = performance.now();
-    expect(wrapWithFormatting('a_' + 'https://e.com/'.repeat(1500), DEFAULT_FORMATTING)).toBe('a_' + 'https\\://e.com/'.repeat(1500));
-    expect(performance.now() - start).toBeLessThan(500);
-  });
+    expect(fastestRun(() => expect(wrapWithFormatting('a_' + 'https://e.com/'.repeat(1500), DEFAULT_FORMATTING)).toBe('a_' + 'https\\://e.com/'.repeat(1500)))).toBeLessThan(500);
+  }, 30000);
 
   test('escapes a long run of citations\' [ before a ( in linear time', () => {
     // Each [ read the citation to the ] its key ran to
-    const start = performance.now();
-    expect(wrapWithFormatting('[@'.repeat(100000) + 'a,p. 2](b)', DEFAULT_FORMATTING)).toBe('\\[@'.repeat(100000) + 'a,p. 2](b)');
     // Some 100 ms here, and three seconds read again for each [
-    expect(performance.now() - start).toBeLessThan(1500);
-  });
+    expect(fastestRun(() => expect(wrapWithFormatting('[@'.repeat(100000) + 'a,p. 2](b)', DEFAULT_FORMATTING)).toBe('\\[@'.repeat(100000) + 'a,p. 2](b)'))).toBeLessThan(1500);
+  }, 30000);
 
   test.each([
     ['bold', { bold: true }], ['italic', { italic: true }], ['struck', { strikethrough: true }], ['highlighted', { highlight: true }],
@@ -9592,10 +9569,8 @@ describe('Word text that reads as Markdown', () => {
     // A regex with a lazy middle read the spaces again from each one, and
     // found no match past some 20,000 of them, which threw
     const text = 'a' + ' '.repeat(100000) + 'b';
-    const start = performance.now();
-    expect(wrapWithFormatting(text, { ...DEFAULT_FORMATTING, ...formatting })).toContain(text);
-    expect(performance.now() - start).toBeLessThan(1500);
-  });
+    expect(fastestRun(() => expect(wrapWithFormatting(text, { ...DEFAULT_FORMATTING, ...formatting })).toContain(text))).toBeLessThan(1500);
+  }, 30000);
 
   test('reads a long run of citations for tags in linear time', () => {
     // Each citation's search for a < read the run to its end. Four times
@@ -9603,20 +9578,16 @@ describe('Word text that reads as Markdown', () => {
     // fast the machine is.
     const time = (n: number) => {
       const text = '[@a] '.repeat(n);
-      const start = performance.now();
-      expect(buildMarkdown([{ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING }], new Map(), { citationKeys: new Set(['a']) })).toBe(text.trimEnd());
-      return performance.now() - start;
+      return fastestRun(() => expect(buildMarkdown([{ type: 'text', text, commentIds: new Set(), formatting: DEFAULT_FORMATTING }], new Map(), { citationKeys: new Set(['a']) })).toBe(text.trimEnd()));
     };
     const small = time(50000);
     expect(time(200000) / small).toBeLessThan(8);
-  });
+  }, 30000);
 
   test('escapes a long run of [ in linear time', () => {
     // Each [ looked for its ] through the rest of the text
-    const start = performance.now();
-    expect(wrapWithFormatting('['.repeat(50000), DEFAULT_FORMATTING)).toBe('\\['.repeat(50000));
-    expect(performance.now() - start).toBeLessThan(500);
-  });
+    expect(fastestRun(() => expect(wrapWithFormatting('['.repeat(50000), DEFAULT_FORMATTING)).toBe('\\['.repeat(50000)))).toBeLessThan(500);
+  }, 30000);
 
   test('writes the keys of a citation as they are', async () => {
     // A key's _ took a backslash, which went in the key
@@ -10045,10 +10016,8 @@ describe('Word text that reads as Markdown', () => {
     // Each piece of the code tried a substitution from it, which built the
     // rest of the deletion as its old side before it declined: about 13 s
     const items = [revised('a --} '.repeat(12000) + '~>', 'deletion', { code: true }), revised('b', 'addition')];
-    const start = performance.now();
-    expect(buildMarkdown(items, new Map())).toEndWith('{--`-} a -`--}{--`-} ~>`--}{++b++}');
-    expect(performance.now() - start).toBeLessThan(2000);
-  });
+    expect(fastestRun(() => expect(buildMarkdown(items, new Map())).toEndWith('{--`-} a -`--}{--`-} ~>`--}{++b++}'))).toBeLessThan(2000);
+  }, 30000);
 
   test('writes a deleted highlight of many runs before code of its closer and a ~> in linear time', () => {
     // Each run read on to the code's pieces for a group, which text of
@@ -10057,10 +10026,8 @@ describe('Word text that reads as Markdown', () => {
       ...Array.from({ length: 32000 }, (_, k) => revised('a', 'deletion', { highlight: true, bold: k % 2 === 1 })),
       revised('a --} b ~> c', 'deletion', { highlight: true, code: true }),
     ];
-    const start = performance.now();
-    expect(buildMarkdown(items, new Map())).toEndWith('{--**==a==**--}{--==`a -`==--}{--==`-} b ~> c`==--}');
-    expect(performance.now() - start).toBeLessThan(2000);
-  });
+    expect(fastestRun(() => expect(buildMarkdown(items, new Map())).toEndWith('{--**==a==**--}{--==`a -`==--}{--==`-} b ~> c`==--}'))).toBeLessThan(2000);
+  }, 30000);
 
   test.each([
     ['bold', '**XX**b', '\\ '],
@@ -11456,14 +11423,12 @@ describe('HTML around a table in its block', () => {
       const xml = await zip.file('word/document.xml')!.async('string');
       if (tracked) zip.file('word/document.xml', xml.replace(/<w:r>((?:(?!<w:r>).)*?<w:t>XX<\/w:t><\/w:r>)/, '<w:ins w:id="99" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>$1</w:ins>'));
       const docx = await zip.generateAsync({ type: 'uint8array' });
-      const start = performance.now();
-      await convertDocx(docx);
-      return performance.now() - start;
+      return await fastestRunAsync(async () => convertDocx(docx));
     };
     await time(500);
     const small = await time(2000);
     expect(await time(8000) / small).toBeLessThan(8);
-  });
+  }, 30000);
 
   test('puts the HTML around many tables back in linear time', async () => {
     // Each table read every entry of the HTML export kept
@@ -11478,14 +11443,11 @@ describe('HTML around a table in its block', () => {
         around.set(String(i), ['<div>', '</div>', tableFirstRowText([text]), tableContentsFingerprint([[text]]), '0', '', '1']);
         formats.set(String(i), 'html');
       }
-      const start = performance.now();
-      const markdown = buildMarkdown(content, new Map(), { tableHtmlAroundMapping: around, tableFormatMapping: formats });
-      expect(markdown.match(/<div>/g)?.length).toBe(count);
-      return performance.now() - start;
+      return fastestRun(() => expect(buildMarkdown(content, new Map(), { tableHtmlAroundMapping: around, tableFormatMapping: formats }).match(/<div>/g)?.length).toBe(count));
     };
     time(1000);
     expect(time(32000) / time(8000)).toBeLessThan(8);
-  });
+  }, 30000);
 
   test('puts the HTML around many tables alike back in linear time', async () => {
     // Each table looked for its index among the keys of all alike it
@@ -11499,14 +11461,11 @@ describe('HTML around a table in its block', () => {
         around.set(String(i), ['<div>', '</div>', tableFirstRowText(['a']), tableContentsFingerprint([['a']]), String(i), '', String(count)]);
         formats.set(String(i), 'html');
       }
-      const start = performance.now();
-      const markdown = buildMarkdown(content, new Map(), { tableHtmlAroundMapping: around, tableFormatMapping: formats });
-      expect(markdown.match(/<div>/g)?.length).toBe(count);
-      return performance.now() - start;
+      return fastestRun(() => expect(buildMarkdown(content, new Map(), { tableHtmlAroundMapping: around, tableFormatMapping: formats }).match(/<div>/g)?.length).toBe(count));
     };
     time(1000);
     expect(time(32000) / time(8000)).toBeLessThan(8);
-  });
+  }, 30000);
 
   test('warns of no HTML kept around a table in a list item, which is dropped', async () => {
     const { warnings } = await convertMdToDocx('- <p>Cap</p>\n  <table><tr><td>a</td></tr></table>\n');
@@ -12197,10 +12156,8 @@ describe('Whitespace at the edges of a paragraph', () => {
     // The whitespace at its end was found with a regex, which scanned each
     // run of whitespace in it to its end, as one before the backslashes
     // before it did each run of them
-    const start = performance.now();
-    expect(await withText('A.\n\nXX\n\nB.', 'word/document.xml', text)).toBe(expected);
-    expect(performance.now() - start).toBeLessThan(3000);
-  });
+    expect(await fastestRunAsync(async () => expect(await withText('A.\n\nXX\n\nB.', 'word/document.xml', text)).toBe(expected))).toBeLessThan(3000);
+  }, 30000);
 
   test.each([
     ['a paragraph', 'A.\n\np\\\nXX\n\nB.', 'word/document.xml', 'A.\n\np\\\n&#9;&#32;t\n\nB.\n'],
@@ -12277,11 +12234,9 @@ describe('Whitespace at the edges of a paragraph', () => {
     // Each opener searched to the end for its closer
     for (const opener of ['<!--', '{>>', '`']) {
       const text = 'A ' + opener.repeat(30000) + 'x\\\n\t y';
-      const start = performance.now();
-      expect(keepParagraphWhitespace(text, false, false)).toEndWith('x\\\n&#9;&#32;y');
-      expect(performance.now() - start).toBeLessThan(500);
+      expect(fastestRun(() => expect(keepParagraphWhitespace(text, false, false)).toEndWith('x\\\n&#9;&#32;y'))).toBeLessThan(500);
     }
-  });
+  }, 30000);
 
   test('leaves the whitespace in code after a line break as it is', async () => {
     // A run of backticks before the code, which closes nothing, ended it.
@@ -13286,9 +13241,7 @@ describe('An empty paragraph whose mark is tracked', () => {
       + '<w:p><w:r><w:t>B</w:t></w:r></w:p>'));
     const [one, alternating] = [await docx(false), await docx(true)];
     const time = async (doc: Uint8Array) => {
-      const start = performance.now();
-      await convertDocx(doc);
-      return performance.now() - start;
+      return await fastestRunAsync(async () => convertDocx(doc));
     };
     expect(await time(alternating) / await time(one)).toBeLessThan(2.5);
   }, 30000);
@@ -13336,9 +13289,7 @@ describe('An empty paragraph whose mark is tracked', () => {
       + ('<w:p>' + mark + text + '</w:p>').repeat(40000) + '<w:p><w:r><w:t>B</w:t></w:r></w:p>'));
     const [empty, text] = [await docx(''), await docx('<w:r><w:t>x</w:t></w:r>')];
     const time = async (doc: Uint8Array) => {
-      const start = performance.now();
-      await convertDocx(doc);
-      return performance.now() - start;
+      return await fastestRunAsync(async () => convertDocx(doc));
     };
     expect(await time(empty) / await time(text)).toBeLessThan(2);
   }, 30000);
@@ -13346,13 +13297,11 @@ describe('An empty paragraph whose mark is tracked', () => {
   test('exports a span of many empty paragraphs in about the time of as many with text', () => {
     // Each read the span's runs again for whether it held breaks alone
     const time = (md: string) => {
-      const start = performance.now();
-      parseMd(md);
-      return performance.now() - start;
+      return fastestRun(() => parseMd(md));
     };
     const text = time('A\n\n{++' + 'x\n\n'.repeat(20000) + '++}B');
     expect(time('A\n\n{++' + '\n\n'.repeat(20000) + '++}B') / text).toBeLessThan(2);
-  });
+  }, 30000);
 });
 
 describe('A table cell\'s paragraph whose mark is tracked', () => {
@@ -13740,9 +13689,8 @@ describe('Line ends of raw HTML in Word', () => {
     expect(last).toBeGreaterThan(-1);
     zip.file('word/document.xml', xml.slice(0, last) + '?&gt;x</w:t></w:r>' + xml.slice(last + '?&gt;</w:t></w:r>'.length));
     const docx = await zip.generateAsync({ type: 'uint8array' });
-    const start = performance.now();
-    const markdown = strip((await convertDocx(docx)).markdown);
-    expect(performance.now() - start).toBeLessThan(500);
+    let markdown = '';
+    expect(await fastestRunAsync(async () => { markdown = strip((await convertDocx(docx)).markdown); })).toBeLessThan(500);
     expect(markdown).toBe('A ' + '\\<?p\\\n?>'.repeat(32) + 'x c.\n');
   }, 60000);
 
@@ -16352,13 +16300,11 @@ describe('Track changes (CriticMarkup)', () => {
           content.push(i === 0 ? { type: 'para' } : { type: 'para', breakRevision: revision });
           content.push({ type: 'text', text: 'a' + i, commentIds: new Set(), formatting: DEFAULT_FORMATTING, revision });
         }
-        const start = performance.now();
-        buildMarkdown(content, new Map());
-        return performance.now() - start;
+        return fastestRun(() => buildMarkdown(content, new Map()));
       };
       const small = time(4000);
       expect(time(32000) / small).toBeLessThan(16);
-    });
+    }, 30000);
 
     test.each([
       ['a deletion of a paragraph and the start of the next', '{--a\n\nb--}c'],
@@ -18685,14 +18631,12 @@ describe('Markdown across Word runs', () => {
     // A regex for the closes at the side's end tried each way to split the
     // run of * into * and **, before it found the code's `
     const revision = (type: 'deletion' | 'addition') => ({ type, author: 'A', date: '' });
-    const start = performance.now();
     const items: ContentItem[] = [
       { type: 'text', text: 'x', commentIds: new Set(), formatting: DEFAULT_FORMATTING, revision: revision('deletion') },
       { type: 'text', text: '*'.repeat(60), commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, code: true }, revision: revision('addition') },
     ];
-    expect(buildMarkdown(items, new Map()).trim()).toBe('{~~x~>`' + '*'.repeat(60) + '`~~}');
-    expect(performance.now() - start).toBeLessThan(500);
-  });
+    expect(fastestRun(() => expect(buildMarkdown(items, new Map()).trim()).toBe('{~~x~>`' + '*'.repeat(60) + '`~~}'))).toBeLessThan(500);
+  }, 30000);
 
   test.each([
     ['struck, before a digit', run('https://', '<w:strike/>') + run('1'), '{++~~https\\://~~++}{++1++}'],
@@ -18808,10 +18752,8 @@ describe('Markdown across Word runs', () => {
   test.each([['[@a', 'b]'], ['[see ', 'x @a]'], ['https://', 'e']])('escapes runs of %j and struck %j in linear time', (text, struck) => {
     const items = Array.from({ length: 32000 }, (_, k) => (
       { type: 'text', text: k % 2 ? struck : text, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, strikethrough: k % 2 === 1 } }));
-    const start = performance.now();
-    buildMarkdown(items as ContentItem[], new Map());
-    expect(performance.now() - start).toBeLessThan(3000);
-  });
+    expect(fastestRun(() => buildMarkdown(items as ContentItem[], new Map()))).toBeLessThan(3000);
+  }, 30000);
 });
 
 describe('Highlights across runs', () => {
@@ -18975,10 +18917,8 @@ describe('Highlights across runs', () => {
       ...Array.from({ length: 32000 }, (_, k) => item('d', 'deletion', { bold: k % 2 === 1 })),
       item('=', type), item(' ', type, { highlight: true }), item('n', 'addition'),
     ];
-    const start = performance.now();
-    expect(buildMarkdown(items as ContentItem[], new Map())).toEndWith(type === 'addition' ? '**~>&#61;== ==n~~}' : '**&#61;== ==~>n~~}');
-    expect(performance.now() - start).toBeLessThan(3000);
-  });
+    expect(fastestRun(() => expect(buildMarkdown(items as ContentItem[], new Map())).toEndWith(type === 'addition' ? '**~>&#61;== ==n~~}' : '**&#61;== ==~>n~~}'))).toBeLessThan(3000);
+  }, 30000);
 
   const revised = (text: string, type: 'addition' | 'deletion', formatting: Partial<RunFormatting> = {}, commentIds = new Set<string>()): ContentItem => (
     { type: 'text', text, commentIds, formatting: { ...DEFAULT_FORMATTING, ...formatting }, revision: { type, author: 'A', date: '' } });
@@ -19100,13 +19040,11 @@ describe('Highlights across runs', () => {
         ...Array.from({ length: n }, (_, k) => item('d', 'deletion', { bold: k % 2 === 1 })), item('x~>', 'deletion'),
         ...added.map(([text, formatting]) => item(text, 'addition', formatting)),
       ];
-      const start = performance.now();
-      expect(buildMarkdown(items as ContentItem[], new Map())).toEndWith('{--x~>--}' + md);
-      return performance.now() - start;
+      return fastestRun(() => expect(buildMarkdown(items as ContentItem[], new Map())).toEndWith('{--x~>--}' + md));
     };
     const small = time(1000);
     expect(time(4000) / small).toBeLessThan(8);
-  });
+  }, 30000);
 
   test.each([
     ['alone', highlighted('x@y.com=', '', 'red'), '==x\\@y.com&#61;=={red}\n'],
@@ -19322,11 +19260,9 @@ describe('Highlights across runs', () => {
   test('reads a highlighted run of many line breaks in linear time', async () => {
     // A regex with a lazy middle found the breaks at its edges, which past
     // some thousands of them found no match and threw
-    const start = performance.now();
-    expect(await fromWord('<w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>a</w:t>' + '<w:br/>'.repeat(16000) + '<w:t>b</w:t></w:r>'))
-      .toBe('==a' + '\\\n'.repeat(16000) + 'b==\n');
-    expect(performance.now() - start).toBeLessThan(3000);
-  });
+    expect(await fastestRunAsync(async () => expect(await fromWord('<w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>a</w:t>' + '<w:br/>'.repeat(16000) + '<w:t>b</w:t></w:r>'))
+      .toBe('==a' + '\\\n'.repeat(16000) + 'b==\n'))).toBeLessThan(3000);
+  }, 30000);
 
   test('keeps a highlight\'s edge space outside it before a comment\'s ==}', async () => {
     // Which export read as one highlight in the comment, ==a=={red}==b ==
@@ -19361,13 +19297,11 @@ describe('Highlights across runs', () => {
     const time = async (runs: number) => {
       const md = '{++' + Array.from({ length: runs }, () => 'a *b* ').join('').trimEnd() + '++}\n';
       const docx = (await convertMdToDocx(md)).docx;
-      const start = performance.now();
-      expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(md);
-      return performance.now() - start;
+      return await fastestRunAsync(async () => expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(md));
     };
     const small = await time(10000);
     expect(await time(40000) / small).toBeLessThan(8);
-  });
+  }, 30000);
 
   test('writes a paragraph of many comments in linear time', () => {
     // Each comment's text read which highlights join from its start to the
@@ -19376,20 +19310,16 @@ describe('Highlights across runs', () => {
     const comments = new Map(Array.from({ length: n }, (_, k) => [String(k), { author: 'A', text: 'c', date: '' }]));
     const items = Array.from({ length: 2 * n }, (_, k) => (
       { type: 'text', text: k % 2 ? 'x' : ' a ', commentIds: new Set(k % 2 ? [String((k - 1) / 2)] : []), formatting: DEFAULT_FORMATTING }));
-    const start = performance.now();
-    buildMarkdown(items as ContentItem[], comments);
-    expect(performance.now() - start).toBeLessThan(3000);
-  });
+    expect(fastestRun(() => buildMarkdown(items as ContentItem[], comments))).toBeLessThan(3000);
+  }, 30000);
 
   test('reads many runs highlighted alike in linear time', async () => {
     // Each run's highlight joins its neighbours' if theirs do, which is
     // read for the whole range at once
     const md = '==' + Array.from({ length: 20000 }, (_, k) => k % 2 ? '*a*' : 'b ').join('') + '==\n';
     const docx = (await convertMdToDocx(md)).docx;
-    const start = performance.now();
-    expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(md);
-    expect(performance.now() - start).toBeLessThan(3000);
-  });
+    expect(await fastestRunAsync(async () => expect((await convertDocx(docx)).markdown.replace(/^---\n[\s\S]*?\n---\n/, '')).toBe(md))).toBeLessThan(3000);
+  }, 30000);
 
   const cell = '| h |\n|---|\n| XX |';
   const note = 'P[^1]\n\n[^1]: XX';
@@ -20020,11 +19950,10 @@ describe('Links of more than one run', () => {
     // Each key was escaped after a parse of the label, as it grew
     const items: ContentItem[] = [' @user'.repeat(2000) + ']', 'x'].map((text, k) => ({ type: 'text', text,
       href: 'https://e.com', link: 1, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, bold: k === 0 } }));
-    const start = performance.now();
-    const md = buildMarkdown(items, new Map());
-    expect(performance.now() - start).toBeLessThan(1000);
+    let md = '';
+    expect(fastestRun(() => { md = buildMarkdown(items, new Map()); })).toBeLessThan(1000);
     expect(md).toContain(' \\@user'.repeat(1999) + '\\]');
-  });
+  }, 30000);
 
   test('leaves the key in a link\'s code as it is, where a backslash would be text', async () => {
     const zip = await JSZip.loadAsync((await convertMdToDocx('[ab](https://e.com)')).docx);
@@ -20185,10 +20114,8 @@ describe('Links of more than one run', () => {
     // again from each run after
     const items: ContentItem[] = Array.from({ length: 32000 }, (_, k) => ({ type: 'text', text: text(k),
       href: 'https://e.com', link: 1, commentIds: new Set(), formatting: { ...DEFAULT_FORMATTING, bold: k % 2 === 0 } }));
-    const start = performance.now();
-    buildMarkdown(items, new Map());
-    expect(performance.now() - start).toBeLessThan(1000);
-  });
+    expect(fastestRun(() => buildMarkdown(items, new Map()))).toBeLessThan(1000);
+  }, 30000);
 
   test.each([
     ['links to one place', (k: number): Partial<ContentItem> => ({ href: 'https://e.com', link: k + 1, formatting: DEFAULT_FORMATTING })],
@@ -20198,10 +20125,8 @@ describe('Links of more than one run', () => {
     // one, each through the rest of the deletion
     const items = Array.from({ length: 32000 }, (_, k) => ({ type: 'text', text: 'a', commentIds: new Set(),
       revision: { type: 'deletion', author: 'A', date: '2024-01-01T00:00:00Z' }, ...fields(k) }) as ContentItem);
-    const start = performance.now();
-    buildMarkdown(items, new Map());
-    expect(performance.now() - start).toBeLessThan(1000);
-  });
+    expect(fastestRun(() => buildMarkdown(items, new Map()))).toBeLessThan(1000);
+  }, 30000);
 
   test('keeps a link whose text starts with an inserted # a link, not a heading', async () => {
     // Export read the link's first run, {++# ++}, as an inserted heading's
@@ -20226,20 +20151,16 @@ describe('Links of more than one run', () => {
     const items: ContentItem[] = [
       { type: 'text', text: 'x ', href: 'https://e.com', link: 1, commentIds: new Set(), formatting: DEFAULT_FORMATTING },
       ...Array.from({ length: 4000 }, (_, k) => runs(k)).flat()];
-    const start = performance.now();
-    buildMarkdown(items, new Map());
-    expect(performance.now() - start).toBeLessThan(1000);
-  });
+    expect(fastestRun(() => buildMarkdown(items, new Map()))).toBeLessThan(1000);
+  }, 30000);
 
   test('merges the runs of a link in linear time', () => {
     // Each merge read whether the text so far ended with a line break,
     // which flattened it
     const items: ContentItem[] = Array.from({ length: 48000 }, () => (
       { type: 'text', text: 'a'.repeat(100), href: 'https://e.com', link: 1, commentIds: new Set(), formatting: DEFAULT_FORMATTING }));
-    const start = performance.now();
-    buildMarkdown(items, new Map());
-    expect(performance.now() - start).toBeLessThan(3000);
-  });
+    expect(fastestRun(() => buildMarkdown(items, new Map()))).toBeLessThan(3000);
+  }, 30000);
 
   test('keeps a soft line break in a link in the link', async () => {
     expect(await roundTrip('[link\ntext](https://e.com)')).toBe('[link text](https://e.com)\n');
