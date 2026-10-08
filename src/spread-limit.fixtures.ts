@@ -99,6 +99,9 @@ export const SPREAD_LIMIT_CASES: Record<string, (n: number) => Promise<string> |
   'the comments on an equation text follows': async n =>
     String(count(await roundTrip('a ' + repeat(n, i => '{#' + i + '}') + MATH_FENCE + 'x' + MATH_FENCE + repeat(n, i => '{/' + i + '}') + ' text\n' + repeat(n, i => '{#' + i + '>>c<<}', '\n') + '\n', true), /\{#\d+>>/g)),
   'the comments in a note': async n => String(count(await roundTrip('T.[^1]\n\n[^1]: ' + comments(n) + '\n', true), /\{#\d+>>/g)),
+  // Which import reaches the notes they reference by, from the document's
+  'the references in a note': async n => String(count(await roundTrip('T.[^a]\n\n[^a]: N' + repeat(n, i => '[^b' + i + ']') + '.\n'
+    + repeat(n, i => '\n[^b' + i + ']: B.\n')), /^\[\^[^\]]+\]: /gm)),
   'the comments in a note before its next paragraph': async n => String(count(await roundTrip('T.[^1]\n\n[^1]: ' + comments(n) + '\n\n    b\n', true), /\{#\d+>>/g)),
   'the comments in a note before its code': async n => String(count(await roundTrip('T.[^1]\n\n[^1]: ' + comments(n) + '\n\n    ```\n    x\n    ```\n', true), /\{#\d+>>/g)),
   'the comments in a note before its equation': async n => String(count(await roundTrip('T.[^1]\n\n[^1]: ' + comments(n) + '\n    ' + MATH_FENCE + 'x' + MATH_FENCE + '\n', true), /\{#\d+>>/g)),
