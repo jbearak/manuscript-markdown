@@ -4735,9 +4735,122 @@ const TABLE_STYLE_IDS = new Set(['TableParagraph']);
  * style's <w:rPr> section. Styles not present in the template are
  * silently skipped.
  */
+/** The built-in styles export refers to by their English IDs, by their names
+ *  in styles.xml, lowercased, which Word keeps in English whatever the
+ *  language it gives a style's ID in, and their types: the reference marks'
+ *  are character styles (see templateStyleIds) */
+const BUILT_IN_STYLES = new Map<string, { name: string; type: string }>([
+  ...[
+    ['Normal', 'normal'],
+    ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map(level => ['Heading' + level, 'heading ' + level]),
+    ['Title', 'title'], ['Quote', 'quote'], ['IntenseQuote', 'intense quote'],
+    ['FootnoteText', 'footnote text'], ['EndnoteText', 'endnote text'], ['Bibliography', 'bibliography'],
+  ].map(([id, name]) => [id, { name, type: 'paragraph' }] as [string, { name: string; type: string }]),
+  ...[
+    ['FootnoteReference', 'footnote reference'], ['EndnoteReference', 'endnote reference'],
+    ['CommentReference', 'annotation reference'],
+  ].map(([id, name]) => [id, { name, type: 'character' }] as [string, { name: string; type: string }]),
+]);
+
+/**
+ * A template's own ID for each built-in style export refers to by its
+ * English ID, where the template gives the style another: Word in another
+ * language gives a built-in style an ID from the name it shows, as
+ * `berschrift1` for German's Überschrift 1, and `Standard` for Normal, but
+ * keeps its English name, `heading 1`, in w:name. Export refers to the
+ * template's style by the template's ID, so Word shows a heading as one.
+ * Where the template has a style of the English ID, or of one that differs
+ * only in case, as Word matches style IDs, that one is the style, as import
+ * reads it (see parseStyleLayouts in converter.ts). A template whose styles
+ * have the English IDs gives none. Only a style of the built-in style's
+ * type is it, as Word reads a w:pStyle only of a paragraph style and a
+ * w:rStyle only of a character style.
+ */
+export function templateStyleIds(stylesXml: string | undefined): Map<string, string> {
+  const ids = new Map<string, string>();
+  if (!stylesXml) return ids;
+  let parsed: OrderedXmlNode[];
+  try {
+    // Each w:style element on its own, as XML reads it, so one written as
+    // <w:style .../> ends there; its IDs as styles.xml writes them, which
+    // export writes back
+    parsed = new XMLParser({ ...templateXmlOptions, processEntities: false }).parse(stylesXml) as OrderedXmlNode[];
+  } catch {
+    return ids;
+  }
+  // The template's styles, by their types and IDs, and by their types and
+  // names, lowercased
+  const byId = new Map<string, string>();
+  const byName = new Map<string, string>();
+  for (const style of childNodes(parsed.find(n => 'w:styles' in n), 'w:styles')) {
+    const id = style[':@']?.['@_w:styleId'];
+    if (!('w:style' in style) || !id) continue;
+    // A style without a type is a paragraph style
+    const type = style[':@']?.['@_w:type'] ?? 'paragraph';
+    if (!byId.has(type + ' ' + id.toLowerCase())) byId.set(type + ' ' + id.toLowerCase(), id);
+    const name = childNodes(style, 'w:style').find(n => 'w:name' in n)?.[':@']?.['@_w:val']?.toLowerCase();
+    if (name !== undefined && !byName.has(type + ' ' + name)) byName.set(type + ' ' + name, id);
+  }
+  for (const [builtInId, { name, type }] of BUILT_IN_STYLES) {
+    const id = byId.get(type + ' ' + builtInId.toLowerCase()) ?? byName.get(type + ' ' + name);
+    if (id !== undefined && id !== builtInId) ids.set(builtInId, id);
+  }
+  return ids;
+}
+
+/** The type of style each element that refers to a style by its ID refers
+ *  to, by the type of the style it's in, where it's in one: a style's base
+ *  and next style are of its type, and the style it's linked to of the
+ *  other, a paragraph style's a character style and a character style's a
+ *  paragraph style */
+const STYLE_REFERENCE_TYPES: Record<string, (owner: string | undefined) => string | undefined> = {
+  pStyle: () => 'paragraph',
+  rStyle: () => 'character',
+  tblStyle: () => 'table',
+  basedOn: owner => owner,
+  next: owner => owner,
+  link: owner => owner === 'paragraph' ? 'character' : owner === 'character' ? 'paragraph' : undefined,
+};
+
+/** `xml` with each reference to a built-in style by its English ID by the
+ *  template's ID for the style instead (see templateStyleIds), where it
+ *  refers to a style of the built-in style's type: a paragraph's, run's or
+ *  table's style, and a style's base, next style and link. One to another
+ *  style of the English ID, as a character style `Normal` beside the
+ *  paragraph style `Standard` named Normal, stays. */
+function withTemplateStyleIds(xml: string, ids: Map<string, string>): string {
+  if (ids.size === 0) return xml;
+  // The type of the style the tags read so far are in, each tag on its own,
+  // so that one written as <w:style .../> holds none
+  let owner: string | undefined;
+  return xml.replace(/<w:style\b([^>]*)>|<\/w:style>|(<w:(pStyle|rStyle|tblStyle|basedOn|next|link)\s+w:val=")([^"]*)(")/g,
+    (match, styleAttrs: string | undefined, open: string | undefined, element: string, id: string, close: string) => {
+      if (styleAttrs !== undefined) {
+        // A style without a type is a paragraph style
+        owner = styleAttrs.endsWith('/') ? undefined : /\sw:type\s*=\s*"([^"]*)"/.exec(styleAttrs)?.[1] ?? 'paragraph';
+        return match;
+      }
+      if (open === undefined) {
+        owner = undefined;
+        return match;
+      }
+      const type = STYLE_REFERENCE_TYPES[element](owner);
+      return ids.has(id) && type !== undefined && BUILT_IN_STYLES.get(id)?.type === type ? open + ids.get(id) + close : match;
+    });
+}
+
+/** The w:style element of the style `id` in `stylesXml`, by the template's
+ *  ID for a built-in style (see templateStyleIds), where it has a body: one
+ *  written as <w:style .../> has none, and the next </w:style> closes
+ *  another */
+function templateStyleRegex(id: string, ids: Map<string, string>, flags = ''): RegExp {
+  const styleId = (ids.get(id) ?? id).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp('(<w:style\\b[^>]*\\bw:styleId="' + styleId + '"[^>]*(?<!/)>)([\\s\\S]*?)(</w:style>)', flags);
+}
+
 /** Extract the Normal style's font size (in half-points) from styles XML. */
-function extractNormalStyleSizeHp(stylesXml: string): number | undefined {
-  const normalMatch = /<w:style\b[^>]*\bw:styleId="Normal"[^>]*>[\s\S]*?<\/w:style>/.exec(stylesXml);
+function extractNormalStyleSizeHp(stylesXml: string, ids = templateStyleIds(stylesXml)): number | undefined {
+  const normalMatch = templateStyleRegex('Normal', ids).exec(stylesXml);
   if (!normalMatch) return undefined;
   const szMatch = /<w:sz\s+w:val="(\d+)"/.exec(normalMatch[0]);
   return szMatch ? parseInt(szMatch[1], 10) : undefined;
@@ -4749,10 +4862,12 @@ export function applyFontOverridesToTemplate(
   customStyles?: Record<string, import('./frontmatter').CustomStyleDef>
 ): string {
   let xml = new TextDecoder('utf-8').decode(stylesXmlBytes);
+  // The template's IDs for the built-in styles, which its styles are found by
+  const ids = templateStyleIds(xml);
 
   // Recompute auto-shrink from template's Normal style size when no explicit font-size
   if (overrides.tableSizeFromDefault) {
-    const templateBodyHp = extractNormalStyleSizeHp(xml);
+    const templateBodyHp = extractNormalStyleSizeHp(xml, ids);
     if (templateBodyHp !== undefined) {
       overrides.tableSizeHp = Math.max(1, templateBodyHp - 4);
     }
@@ -4785,11 +4900,9 @@ export function applyFontOverridesToTemplate(
   const allTargetIds = new Set([...BODY_STYLE_IDS, ...CODE_STYLE_IDS, ...TABLE_STYLE_IDS]);
 
   for (const styleId of allTargetIds) {
-    // Find the <w:style ...w:styleId="ID"...> ... </w:style> block
-    const styleRegex = new RegExp(
-      '(<w:style\\b[^>]*\\bw:styleId="' + styleId + '"[^>]*>)([\\s\\S]*?)(</w:style>)'
-    );
-    const styleMatch = styleRegex.exec(xml);
+    // Find the <w:style ...w:styleId="ID"...> ... </w:style> block, by the
+    // template's ID for a built-in style
+    const styleMatch = templateStyleRegex(styleId, ids).exec(xml);
     if (!styleMatch) continue; // style not in template — skip silently
 
     const openTag = styleMatch[1];
@@ -4955,7 +5068,7 @@ export function applyFontOverridesToTemplate(
   // Inject custom styles before </w:styles>
   if (customStyles) {
     // Derive bodyFontStr from template's Normal style for custom style inheritance
-    const normalMatch = xml.match(/<w:style\b[^>]*w:styleId="Normal"[^>]*>[\s\S]*?<\/w:style>/);
+    const normalMatch = xml.match(templateStyleRegex('Normal', ids));
     let bodyFontStr = '';
     if (normalMatch) {
       const rFontsMatch = normalMatch[0].match(/<w:rFonts\s+[^>]*w:ascii="([^"]+)"[^>]*>/);
@@ -4999,10 +5112,11 @@ const ALERT_STYLE_ID_TO_TYPE: Record<string, GfmAlertType> = {
 function applyLineSpacingToTemplate(xml: string, lineSpacingFm: string | number | undefined, indentMode: boolean, bibliographyHangingIndent: boolean | undefined): string {
   const lsTwips = resolveLineSpacingTwips(lineSpacingFm);
   const afterVal = indentMode ? '0' : '200';
+  // The template's IDs for the built-in styles, which its styles are found by
+  const ids = templateStyleIds(xml);
 
   // Patch Normal style's w:spacing
-  const normalRegex = /(<w:style\b[^>]*\bw:styleId="Normal"[^>]*>)([\s\S]*?)(<\/w:style>)/;
-  const normalMatch = normalRegex.exec(xml);
+  const normalMatch = templateStyleRegex('Normal', ids).exec(xml);
   if (normalMatch) {
     let inner = normalMatch[2];
     const spacingRegex = /<w:spacing\b[^/]*\/>/;
@@ -5042,7 +5156,7 @@ function applyLineSpacingToTemplate(xml: string, lineSpacingFm: string | number 
   }
 
   // Inject or patch Bibliography style
-  if (!xml.includes('w:styleId="Bibliography"')) {
+  if (!xml.includes('w:styleId="' + (ids.get('Bibliography') ?? 'Bibliography') + '"')) {
     const bibStyle = '<w:style w:type="paragraph" w:styleId="Bibliography">' +
       '<w:name w:val="Bibliography"/>' +
       '<w:basedOn w:val="Normal"/>' +
@@ -5053,8 +5167,7 @@ function applyLineSpacingToTemplate(xml: string, lineSpacingFm: string | number 
     xml = xml.replace('</w:styles>', bibStyle + '</w:styles>');
   } else {
     // Template already defines Bibliography — merge w:left/w:hanging into its w:ind
-    const bibRegex = /(<w:style\b[^>]*\bw:styleId="Bibliography"[^>]*>)([\s\S]*?)(<\/w:style>)/;
-    const bibMatch = bibRegex.exec(xml);
+    const bibMatch = templateStyleRegex('Bibliography', ids).exec(xml);
     if (bibMatch) {
       let inner = bibMatch[2];
       const wantHanging = bibliographyHangingIndent !== false;
@@ -9054,6 +9167,9 @@ export async function convertMdToDocx(
   const templateNumbering = templateParts?.has('word/numbering.xml')
     ? withRelationshipIds(decodeXml(templateParts.get('word/numbering.xml')!), templateSections?.numberingRels?.ids) : undefined;
   const templateStyles = templateParts?.has('word/styles.xml') ? decodeXml(templateParts.get('word/styles.xml')!) : undefined;
+  // The template's own IDs for the built-in styles the parts refer to, as
+  // Word in another language gives them (see templateStyleIds)
+  const templateIds = templateStyleIds(templateStyles);
   const numIdsInUse = templateNumIdsInUse(templateStyles, templateSections?.numIds);
   const listNumbering = listNumIds(templateNumbering, templateStyles, numIdsInUse);
 
@@ -9526,7 +9642,7 @@ export async function convertMdToDocx(
 
   const JSZip = (await import('jszip')).default;
   const zip = new JSZip();
-  zip.file('word/document.xml', injectParaIds(finalDocumentXml, state));
+  zip.file('word/document.xml', withTemplateStyleIds(injectParaIds(finalDocumentXml, state), templateIds));
 
   // Use template styles if available, otherwise default; apply font/color overrides when present
   if (templateParts?.has('word/styles.xml') && fontOverrides) {
@@ -9537,11 +9653,12 @@ export async function convertMdToDocx(
     );
     mutated = applyLineSpacingToTemplate(mutated, frontmatter.lineSpacing, state.indentMode, frontmatter.bibliographyHangingIndent);
     mutated = applyAlertColorsToTemplate(mutated, effectiveColors);
-    zip.file('word/styles.xml', ensureListContinuationStyle(mutated));
+    // The styles export adds to the template's are based on its Normal
+    zip.file('word/styles.xml', withTemplateStyleIds(ensureListContinuationStyle(mutated), templateIds));
   } else if (templateParts?.has('word/styles.xml')) {
     let decoded = new TextDecoder('utf-8').decode(templateParts.get('word/styles.xml')!);
     decoded = applyLineSpacingToTemplate(decoded, frontmatter.lineSpacing, state.indentMode, frontmatter.bibliographyHangingIndent);
-    zip.file('word/styles.xml', ensureListContinuationStyle(applyAlertColorsToTemplate(decoded, effectiveColors)));
+    zip.file('word/styles.xml', withTemplateStyleIds(ensureListContinuationStyle(applyAlertColorsToTemplate(decoded, effectiveColors)), templateIds));
   } else {
     zip.file('word/styles.xml', stylesXml(fontOverrides, codeBlockConfig, effectiveColors, frontmatter.styles, frontmatter.lineSpacing, state.indentMode, frontmatter.bibliographyHangingIndent));
   }
@@ -9580,7 +9697,7 @@ export async function convertMdToDocx(
   }
 
   if (state.hasComments) {
-    zip.file('word/comments.xml', commentsXml(state.comments));
+    zip.file('word/comments.xml', withTemplateStyleIds(commentsXml(state.comments), templateIds));
     if (hasCommentsExtended) {
       zip.file('word/commentsExtended.xml', commentsExtendedXml(state.comments));
     }
@@ -9600,10 +9717,10 @@ export async function convertMdToDocx(
   state.footnoteEntries.sort((a, b) => a.id - b.id);
 
   if (hasNotes) {
-    zip.file('word/footnotes.xml', injectParaIds(footnotesXml(
-      state.hasFootnotes ? state.footnoteEntries : []), state));
-    zip.file('word/endnotes.xml', injectParaIds(endnotesXml(
-      state.hasEndnotes ? state.footnoteEntries : []), state));
+    zip.file('word/footnotes.xml', withTemplateStyleIds(injectParaIds(footnotesXml(
+      state.hasFootnotes ? state.footnoteEntries : []), state), templateIds));
+    zip.file('word/endnotes.xml', withTemplateStyleIds(injectParaIds(endnotesXml(
+      state.hasEndnotes ? state.footnoteEntries : []), state), templateIds));
   }
 
   // Generate footnotes/endnotes .rels file for hyperlinks/images scoped to the notes part

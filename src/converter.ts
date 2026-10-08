@@ -1624,9 +1624,14 @@ export async function parseStyleLayouts(zip: JSZip): Promise<StyleLayouts> {
   const own = new Map<string, { layout: ParagraphLayout; basedOn: string; parts: Map<string, ParagraphLayout>; rowBand?: number; colBand?: number }>();
   // The ID each built-in paragraph style is read by, by the document's
   const builtIn = new Map<string, string>();
+  // The document's paragraph styles' IDs, lowercased, as Word matches them
+  const paragraphIds = new Set<string>();
   for (const node of findAllDeep(parsed, 'w:style')) {
     const children = asXmlNodes(node['w:style']);
     const id = getAttr(node, 'styleId');
+    // A style without a type is a paragraph style
+    const paragraph = (getAttr(node, 'type') || 'paragraph') === 'paragraph';
+    if (paragraph) paragraphIds.add(id.toLowerCase());
     const basedOn = children.find(c => c['w:basedOn'] !== undefined);
     const parts = new Map(children.filter(c => c['w:tblStylePr'] !== undefined)
       .map(c => [getAttr(c, 'type'), paragraphLayout(pPrOf(asXmlNodes(c['w:tblStylePr'])))]));
@@ -1636,7 +1641,7 @@ export async function parseStyleLayouts(zip: JSZip): Promise<StyleLayouts> {
       return size ? parseInt(getAttr(size, 'val'), 10) || undefined : undefined;
     };
     const name = children.find(c => c['w:name'] !== undefined);
-    const builtInId = getAttr(node, 'type') === 'paragraph' && name ? BUILT_IN_PARAGRAPH_STYLES.get(getAttr(name, 'val').toLowerCase()) : undefined;
+    const builtInId = paragraph && name ? BUILT_IN_PARAGRAPH_STYLES.get(getAttr(name, 'val').toLowerCase()) : undefined;
     if (builtInId && builtInId.toLowerCase() !== id.toLowerCase()) builtIn.set(id, builtInId);
     own.set(id, {
       layout: paragraphLayout(pPrOf(children)), basedOn: basedOn ? getAttr(basedOn, 'val') : '',
@@ -1654,11 +1659,11 @@ export async function parseStyleLayouts(zip: JSZip): Promise<StyleLayouts> {
     return { ...resolve(style.basedOn, seen), ...style.layout };
   };
   for (const id of own.keys()) layouts.styles.set(id, resolve(id, new Set()));
-  // A built-in style's ID, where no style of the document has it, goes for
-  // the style; its layout stays under its own (see documentStyleId)
-  const ids = new Set([...own.keys()].map(id => id.toLowerCase()));
+  // A built-in style's ID, where no paragraph style of the document has it,
+  // as a character style may, goes for the style; its layout stays under
+  // its own (see documentStyleId)
   for (const [id, builtInId] of builtIn) {
-    if (!ids.has(builtInId.toLowerCase())) (layouts.builtInIds ??= new Map()).set(id, builtInId);
+    if (!paragraphIds.has(builtInId.toLowerCase())) (layouts.builtInIds ??= new Map()).set(id, builtInId);
   }
   // A table style's parts, each its own or its base's
   const resolveTable = (id: string, seen: Set<string>): { parts: Map<string, ParagraphLayout>; rowBand: number; colBand: number } => {
@@ -13383,26 +13388,44 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
     return start.exec(stylesXml)?.index ?? -1;
   }
 
-  // Helper: find a style block by styleId and extract rPr content
-  function getStyleRPr(id: string): string | null {
+  /** The w:style element of the style `id`, or of the document's ID for
+   *  it, or else of a paragraph style whose ID differs only in case, as Word
+   *  matches a style's ID whatever its case, as `heading1`, but not of
+   *  another type, which a paragraph doesn't take */
+  function styleBlock(id: string): string | null {
     const styleId = documentIds.get(id) ?? id;
+    let caseless: string | null = null;
     let searchFrom = 0;
     while (true) {
       const idx = nextStyleStart(searchFrom);
-      if (idx === -1) return null;
-      const closeTag = stylesXml.indexOf('</w:style>', idx);
-      if (closeTag === -1) return null;
-      const block = stylesXml.substring(idx, closeTag + '</w:style>'.length);
-      if (block.includes('w:styleId="' + styleId + '"')) {
-        // Skip past pPr to find style-level rPr
-        const pPrEnd = block.indexOf('</w:pPr>');
-        const rPrStart = block.indexOf('<w:rPr>', pPrEnd !== -1 ? pPrEnd : 0);
-        const rPrEnd = block.indexOf('</w:rPr>', rPrStart !== -1 ? rPrStart : 0);
-        if (rPrStart !== -1 && rPrEnd !== -1) return block.substring(rPrStart, rPrEnd + '</w:rPr>'.length);
-        return null;
-      }
-      searchFrom = closeTag + '</w:style>'.length;
+      if (idx === -1) return caseless;
+      // A style written as <w:style .../> is its tag alone, and the next
+      // </w:style> closes another
+      const tagEnd = stylesXml.indexOf('>', idx) + 1;
+      if (tagEnd === 0) return caseless;
+      const empty = stylesXml[tagEnd - 2] === '/';
+      const closeTag = empty ? tagEnd : stylesXml.indexOf('</w:style>', tagEnd);
+      if (closeTag === -1) return caseless;
+      const block = stylesXml.substring(idx, empty ? tagEnd : closeTag + '</w:style>'.length);
+      if (block.includes('w:styleId="' + styleId + '"')) return block;
+      const tag = block.slice(0, tagEnd - idx);
+      // A style without a type is a paragraph style
+      caseless ??= /\sw:styleId\s*=\s*"([^"]*)"/.exec(tag)?.[1].toLowerCase() === styleId.toLowerCase()
+        && (/\sw:type\s*=\s*"([^"]*)"/.exec(tag)?.[1] ?? 'paragraph') === 'paragraph' ? block : null;
+      searchFrom = idx + block.length;
     }
+  }
+
+  // Helper: find a style block by styleId and extract rPr content
+  function getStyleRPr(id: string): string | null {
+    const block = styleBlock(id);
+    if (block === null) return null;
+    // Skip past pPr to find style-level rPr
+    const pPrEnd = block.indexOf('</w:pPr>');
+    const rPrStart = block.indexOf('<w:rPr>', pPrEnd !== -1 ? pPrEnd : 0);
+    const rPrEnd = block.indexOf('</w:rPr>', rPrStart !== -1 ? rPrStart : 0);
+    if (rPrStart !== -1 && rPrEnd !== -1) return block.substring(rPrStart, rPrEnd + '</w:rPr>'.length);
+    return null;
   }
 
   function extractAttr(rpr: string, prefix: string): string | null {
@@ -13455,22 +13478,12 @@ function extractFontOverridesFromStyles(stylesXml: string, opts?: { explicitTabl
 
   /** Extract pPr content from a style block. */
   function getStylePPr(id: string): string | null {
-    const styleId = documentIds.get(id) ?? id;
-    let searchFrom = 0;
-    while (true) {
-      const idx = nextStyleStart(searchFrom);
-      if (idx === -1) return null;
-      const closeTag = stylesXml.indexOf('</w:style>', idx);
-      if (closeTag === -1) return null;
-      const block = stylesXml.substring(idx, closeTag + '</w:style>'.length);
-      if (block.includes('w:styleId="' + styleId + '"')) {
-        const pPrStart = block.indexOf('<w:pPr');
-        const pPrEnd = block.indexOf('</w:pPr>');
-        if (pPrStart !== -1 && pPrEnd !== -1) return block.substring(pPrStart, pPrEnd + '</w:pPr>'.length);
-        return null;
-      }
-      searchFrom = closeTag + '</w:style>'.length;
-    }
+    const block = styleBlock(id);
+    if (block === null) return null;
+    const pPrStart = block.indexOf('<w:pPr');
+    const pPrEnd = block.indexOf('</w:pPr>');
+    if (pPrStart !== -1 && pPrEnd !== -1) return block.substring(pPrStart, pPrEnd + '</w:pPr>'.length);
+    return null;
   }
 
   // Extract Normal (body) font for comparison
