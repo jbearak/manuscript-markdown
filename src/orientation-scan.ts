@@ -4,6 +4,7 @@ import { computeLineStarts } from './code-regions';
 import { LINE_PLACEHOLDER, PARA_PLACEHOLDER, preprocessCriticMarkup } from './critic-markup';
 import { htmlBlockKind, listItemHtmlBlock } from './html-blocks';
 import { preprocessBlocks } from './block-preprocess';
+import { pushAll } from './arrays';
 
 export interface OrientationDiagnostic {
   /** list-item: in a list item, which export drops it from; note: in a
@@ -174,7 +175,7 @@ function directivesOf(text: string): Directive[] {
   const directives = blockDirectives(body, text, line => lineStarts[line] ?? text.length, false);
   for (const noteBody of notes) {
     const source = noteBody.map(({ line, skip }) => lines[line].slice(skip)).join('\n');
-    directives.push(...blockDirectives(source, text, k => (lineStarts[noteBody[k].line] ?? text.length) + noteBody[k].skip, true));
+    pushAll(directives, blockDirectives(source, text, k => (lineStarts[noteBody[k].line] ?? text.length) + noteBody[k].skip, true));
   }
   return directives;
 }

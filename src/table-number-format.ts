@@ -1,6 +1,7 @@
 import { GRID_TABLE_PLACEHOLDER_PREFIX, type GridTableData } from './grid-table-preprocess';
 import type { HtmlTableCellSource } from './html-table-parser';
 import { computeCodeRegions } from './code-regions';
+import { pushAll } from './arrays';
 import { decodeHtmlAttribute, decodeHtmlCharacterReferences, HTML_CHARACTER_REFERENCE } from './html-entities';
 import { isGfmDisallowedRawHtml } from './gfm';
 import {
@@ -1128,7 +1129,7 @@ function formatSingleIndexedTable(table: IndexedHtmlTable, source: string, baseF
 			const formatted = segments.length === 1 ? formatTypedCell(cellSource, segment.text, effective, warnings)
 				: formatTextCell(segment.text, effective, warnings);
 			if (formatted !== segment.text) {
-				edits.push(...terminateReferencesBefore(source, segment, planHtmlVisibleChange(segment, formatted, index.stats)));
+				pushAll(edits, terminateReferencesBefore(source, segment, planHtmlVisibleChange(segment, formatted, index.stats)));
 			}
 		}
 	}

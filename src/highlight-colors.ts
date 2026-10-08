@@ -1,4 +1,5 @@
 import { findMatchingClose } from './critic-markup';
+import { overlapsCodeRegion, type CodeRegion } from './code-regions';
 
 // --- Implementation notes ---
 // - ==text=={color} is unambiguous with CriticMarkup {==text==} (brace is before ==, not after)
@@ -768,4 +769,30 @@ export function extractAllDecorationRanges(text: string, defaultColor: string): 
     substitutionOld, substitutionNew,
     highlightDelimiters, commentDelimiters,
   };
+}
+
+/**
+ * Drops the ranges of `all` that overlap `codeRegions`, inline code spans
+ * and fenced code blocks, which show no decorations, as the editor does
+ * before it decorates them. Each array keeps its identity, and items are
+ * kept one at a time, not spread into splice(), as a document's comments
+ * or revisions can number more than a call takes arguments.
+ */
+export function dropRangesInCode(all: AllDecorationRanges, codeRegions: readonly CodeRegion[]): void {
+  if (codeRegions.length === 0) return;
+  const keep = (r: { start: number; end: number }) => !overlapsCodeRegion(r.start, r.end, codeRegions);
+  for (const [key, ranges] of all.highlights) {
+    const filtered = ranges.filter(keep);
+    if (filtered.length === 0) {
+      all.highlights.delete(key);
+    } else if (filtered.length !== ranges.length) {
+      all.highlights.set(key, filtered);
+    }
+  }
+  for (const ranges of [all.comments, all.additions, all.deletions, all.additionDelimiters, all.deletionDelimiters,
+    all.substitutionDelimiters, all.substitutionOld, all.substitutionNew, all.highlightDelimiters, all.commentDelimiters]) {
+    let kept = 0;
+    for (const range of ranges) if (keep(range)) ranges[kept++] = range;
+    ranges.length = kept;
+  }
 }

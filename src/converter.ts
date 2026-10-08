@@ -21,6 +21,7 @@ import { htmlPieceAt } from './html-table-parser';
 import { publicStyleNameForZoteroId, zoteroStyleIdForName } from './csl-loader';
 import { extractZoteroKey } from './zotero-link';
 import { DISPLAY_MATH_ENVIRONMENTS } from './latex-env-preprocess';
+import { maxOf, pushAll, spliceAll } from './arrays';
 
 // --- Implementation notes ---
 // Table parsing:
@@ -1622,12 +1623,12 @@ function tableColumnCount(tblChildren: XmlNode[]): number {
   const grid = tblChildren.find(c => c['w:tblGrid'] !== undefined);
   const gridCols = grid ? asXmlNodes(grid['w:tblGrid']).filter(c => c['w:gridCol'] !== undefined).length : 0;
   if (gridCols > 0) return gridCols;
-  return Math.max(0, ...tblChildren.filter(c => c['w:tr'] !== undefined).map(tr => asXmlNodes(tr['w:tr'])
+  return maxOf(tblChildren.filter(c => c['w:tr'] !== undefined).map(tr => asXmlNodes(tr['w:tr'])
     .filter(c => c['w:tc'] !== undefined).reduce((n, tc) => {
       const tcPr = asXmlNodes(tc['w:tc']).find(c => c['w:tcPr'] !== undefined);
       const span = tcPr && asXmlNodes(tcPr['w:tcPr']).find(c => c['w:gridSpan'] !== undefined);
       return n + (span ? parseInt(getAttr(span, 'val'), 10) || 1 : 1);
-    }, 0)));
+    }, 0)), 0);
 }
 
 /** A table's tblLook, from its attributes or else its w:val's bits */
@@ -2319,7 +2320,7 @@ function findAllDeep(nodes: XmlNode[], tagName: string, depth = 0, maxDepth = 50
     if (node[tagName] !== undefined) { results.push(node); }
     for (const key of Object.keys(node)) {
       if (key !== ':@' && Array.isArray(node[key])) {
-        results.push(...findAllDeep(node[key], tagName, depth + 1, maxDepth));
+        pushAll(results, findAllDeep(node[key], tagName, depth + 1, maxDepth));
       }
     }
   }
@@ -8464,7 +8465,7 @@ function renderHtmlTable(table: { rows: TableRow[] }, comments: Map<string, Comm
         // table's HTML block there, so the lines around it join
         const text = rendered.text.replace(/(?:\r\n?|\n)[ \t]*(?=\r|\n)/g, '');
         lines.push(i3 + '<p>' + keepParagraphWhitespace(keepHtmlCellSpaces(text), true, true) + '</p>');
-        deferredAll.push(...rendered.deferredComments);
+        pushAll(deferredAll, rendered.deferredComments);
       }
       lines.push(i2 + '</' + tag + '>');
     }
@@ -8556,7 +8557,7 @@ function tryRenderPipeTable(table: { rows: TableRow[] }, maxLineWidth: number, c
     }
   }
 
-  const numCols = Math.max(...rows.map(r => r.cells.length));
+  const numCols = maxOf(rows.map(r => r.cells.length));
 
   // GFM pipe tables have exactly one header row (the first), which export
   // makes the Word table's header, in bold. Bail out if the DOCX marks no
@@ -8683,7 +8684,7 @@ function tryRenderPipeTable(table: { rows: TableRow[] }, maxLineWidth: number, c
   // header signal, the first row is promoted — an accepted round-trip trade-off.
   const headerCells = rendered[0];
   lines.push(formatPipeRow(headerCells));
-  for (const c of headerCells) deferredAll.push(...c.deferred);
+  for (const c of headerCells) pushAll(deferredAll, c.deferred);
 
   if (colWidths) {
     let sep = '|';
@@ -8698,7 +8699,7 @@ function tryRenderPipeTable(table: { rows: TableRow[] }, maxLineWidth: number, c
   for (let i = 1; i < rendered.length; i++) {
     const rowCells = rendered[i];
     lines.push(formatPipeRow(rowCells));
-    for (const c of rowCells) deferredAll.push(...c.deferred);
+    for (const c of rowCells) pushAll(deferredAll, c.deferred);
   }
 
   let result = lines.join('\n');
@@ -8799,7 +8800,7 @@ function tryRenderGridTable(
   const firstBody = rows.findIndex(r => !r.isHeader);
   if (firstBody !== -1 && rows.slice(firstBody).some(r => r.isHeader)) return null;
 
-  const numCols = Math.max(...rows.map(r => r.cells.length));
+  const numCols = maxOf(rows.map(r => r.cells.length));
 
   // Snapshot emittedIdCommentBodies for rollback
   const emittedSnapshot = renderOpts?.emittedIdCommentBodies
@@ -8834,8 +8835,8 @@ function tryRenderGridTable(
         // backslash is redundant. A line of an equation or a comment, which
         // ends in no break's backslash, as an odd run of them, stays as it is.
         const paraLines = keepParagraphWhitespace(r.text, true, true).split('\n');
-        cellLines.push(...paraLines.map((l, k) => k < paraLines.length - 1 && /(?<!\\)(?:\\\\)*\\$/.test(l) ? gridLineBeforeBreak(l.slice(0, -1)) : l));
-        cellDeferred.push(...r.deferredComments);
+        pushAll(cellLines, paraLines.map((l, k) => k < paraLines.length - 1 && /(?<!\\)(?:\\\\)*\\$/.test(l) ? gridLineBeforeBreak(l.slice(0, -1)) : l));
+        pushAll(cellDeferred, r.deferredComments);
       }
       // A line break at the cell's end is <br> there, as the blank line after
       // it would pad the cell to its row's height. One before spaces and tabs
@@ -9082,7 +9083,8 @@ function pushWithHoistedPrefix(output: string[], directivePrefix: string, body: 
   }
   if (output.length > 0) output.push('\n\n');
   else if (startGap !== undefined) gap = startGap + 1;
-  output.push(directives, '\n'.repeat(Math.max(gap, 1)), ...commentBlock);
+  output.push(directives, '\n'.repeat(Math.max(gap, 1)));
+  pushAll(output, commentBlock);
   output.push((commentBlock[commentBlock.length - 1].endsWith('\n') ? '' : '\n') + body);
 }
 
@@ -9569,7 +9571,7 @@ function renderTableOrFallback(
   const gridSrcWidthsStr = tableIndex !== undefined ? renderOpts?.gridSourceColWidthsMapping?.get(String(tableIndex)) : undefined;
   let gridSrcWidths = gridSrcWidthsStr ? gridSrcWidthsStr.split(',').map(Number) : undefined;
   if (gridSrcWidths) {
-    const numCols = item.rows.length > 0 ? Math.max(...item.rows.map(r => r.cells.length)) : 0;
+    const numCols = item.rows.length > 0 ? maxOf(item.rows.map(r => r.cells.length)) : 0;
     if (gridSrcWidths.length !== numCols || !gridSrcWidths.every(w => Number.isFinite(w) && w >= 0)) {
       gridSrcWidths = undefined;
     }
@@ -10468,7 +10470,7 @@ function joinTrackedParagraphBreaks(content: ContentItem[], marks: () => Tracked
     const barrier: ContentItem[] = alone && joins ? [{ type: 'text', text: '', commentIds: new Set(commentIds), formatting: DEFAULT_FORMATTING }] : [];
     // A comment's reference before it stays there, outside its span
     const points = content.slice(last + 1, k);
-    joined.push(...(alone ? [...points, item, ...barrier] : [item, ...points]));
+    pushAll(joined, alone ? [...points, item, ...barrier] : [item, ...points]);
     // The paragraph after a break that ends its own stays
     copied = joins ? k + 1 : k;
     if (!joins) continue;
@@ -12011,7 +12013,7 @@ export function buildMarkdown(
       const next = mergedContent[i + 1];
       const textFollows = next !== undefined && (next.type === 'text' || next.type === 'citation'
         || next.type === 'footnote_ref' || next.type === 'image' || (next.type === 'math' && !next.display));
-      if (textFollows) pendingEquationBodies.push(...commented.bodies);
+      if (textFollows) pushAll(pendingEquationBodies, commented.bodies);
       const revisedMathBlock = [commented.block, ...(textFollows ? [] : commented.bodies)].join('\n');
       if (displayMathContainer) {
         output.push(revisedMathBlock.split('\n').map(line => displayMathContainer.prefix + line).join('\n'));
@@ -12141,7 +12143,7 @@ export function buildMarkdown(
     // indent's columns are counted on the line it's on
     if (output.length > 0 && incomingSep !== null) output.push(incomingSep);
 
-    rendered.deferredComments.unshift(...pendingEquationBodies.splice(0));
+    spliceAll(rendered.deferredComments, 0, 0, pendingEquationBodies.splice(0));
     let textOut = rendered.text;
     // With the label hidden, export writes neither it nor the line end after
     // the marker, so all of the text is the alert's (see hidesAlertLabel)
@@ -12448,7 +12450,7 @@ export function buildMarkdown(
       let paragraphBodies: string[] = [];
       const endParagraph = () => {
         if (paragraphBodies.length === 0 || bodyParts.length === 0) return;
-        (partBodies[bodyParts.length - 1] ??= []).push(...paragraphBodies);
+        pushAll(partBodies[bodyParts.length - 1] ??= [], paragraphBodies);
         paragraphBodies = [];
       };
       let partStart = 0;
@@ -12504,7 +12506,7 @@ export function buildMarkdown(
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
             pushInline(inlinePart(part.text));
-            paragraphBodies.push(...part.deferredComments);
+            pushAll(paragraphBodies, part.deferredComments);
           }
           endParagraph();
           paragraphPart = undefined;
@@ -12520,7 +12522,7 @@ export function buildMarkdown(
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
             pushInline(inlinePart(part.text));
-            paragraphBodies.push(...part.deferredComments);
+            pushAll(paragraphBodies, part.deferredComments);
           }
           endParagraph();
           partStart = bi + 1;
@@ -12530,7 +12532,7 @@ export function buildMarkdown(
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
             pushInline(inlinePart(part.text, !!item.inParagraph));
-            paragraphBodies.push(...part.deferredComments);
+            pushAll(paragraphBodies, part.deferredComments);
           }
           const mathBlock = MATH_FENCE + '\n' + canonicalizeDisplayMathLatex(item.latex) + '\n' + MATH_FENCE;
           const commented = displayMathWithComments(item.revision ? wrapWithRevision(mathBlock, item.revision) : mathBlock, item);
@@ -12544,14 +12546,14 @@ export function buildMarkdown(
             bodyParts.push(commented.block);
             paragraphPart = item.inParagraph ? bodyParts.length - 1 : undefined;
           }
-          paragraphBodies.push(...commented.bodies);
+          pushAll(paragraphBodies, commented.bodies);
           partStart = bi + 1;
         } else if (item.type === 'table') {
           // Flush preceding inline content
           if (bi > partStart) {
             const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
             pushInline(inlinePart(part.text));
-            paragraphBodies.push(...part.deferredComments);
+            pushAll(paragraphBodies, part.deferredComments);
           }
           endParagraph();
           paragraphPart = undefined;
@@ -12620,7 +12622,7 @@ export function buildMarkdown(
       if (partStart < bodyMerged.length) {
         const part = renderInlineRange(bodyMerged, partStart, comments, { stopBeforeDisplayMath: true }, noteRenderOpts);
         pushInline(inlinePart(part.text));
-        paragraphBodies.push(...part.deferredComments);
+        pushAll(paragraphBodies, part.deferredComments);
       }
       if (bodyParts.length === 0) {
         bodyParts.push('');

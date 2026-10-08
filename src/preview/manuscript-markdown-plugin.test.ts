@@ -230,6 +230,30 @@ describe('Manuscript Markdown Plugin Property Tests', () => {
         expect(html).toContain('markdown-alert-' + type + ' color-scheme-guttmacher');
       }
     });
+
+    it('renders many quotes of two alerts in linear time', () => {
+      // Each quote's alerts replace its tokens, which moved all the tokens
+      // after them in the document, and a copy of those for each made four
+      // times the quotes take about thirteen times as long
+      const md = new MarkdownIt({ html: true });
+      md.use(manuscriptMarkdownPlugin);
+      const quotes = (n: number) => '> [!NOTE]\n> a\n> [!TIP]\n> b\n\n'.repeat(n);
+      expect(md.render(quotes(3)).match(/class="markdown-alert markdown-alert-(?:note|tip)/g)).toHaveLength(6);
+      const time = (text: string) => {
+        const start = performance.now();
+        md.render(text);
+        return performance.now() - start;
+      };
+      // The fastest of five runs of each, by turns
+      const [small, large] = [quotes(2000), quotes(8000)];
+      let smallTime = Infinity;
+      let largeTime = Infinity;
+      for (let k = 0; k < 5; k++) {
+        largeTime = Math.min(largeTime, time(large));
+        smallTime = Math.min(smallTime, time(small));
+      }
+      expect(largeTime / smallTime).toBeLessThan(8);
+    }, 60000);
   });
 
   // Property 1: Manuscript Markdown pattern transformation (genuine property-based tests)

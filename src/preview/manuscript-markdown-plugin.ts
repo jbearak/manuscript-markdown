@@ -22,6 +22,7 @@ import {
 import { GRID_TABLE_PLACEHOLDER_PREFIX, gridColumnAlign } from '../grid-table-preprocess';
 import { preprocessGridTablesWithMap, wrapBareLatexEnvironmentsWithMap, preprocessCriticMarkupWithMap } from './preprocess-with-map';
 import { LineMap } from './line-map';
+import { pushAll, spliceAll } from '../arrays';
 import { preprocessEmbedsWithMap, type EmbedResolver, type EmbedOptions } from '../embed-preprocess';
 import { isGfmDisallowedRawHtml, escapeHtmlText, parseTaskListMarker, parseGfmAlertMarker, gfmAlertTitle, type GfmAlertType } from '../gfm';
 import { parseFrontmatter, type ColorScheme } from '../frontmatter';
@@ -96,7 +97,35 @@ function holdsMarker(children: Token[], c: number, afterBreak = false): boolean 
 }
 
 function alertBlockquoteRule(state: StateCore): void {
+  // Each top-level quote's tokens on their own, so a splice in one moves
+  // that quote's tokens after it, not all of the document's
   const tokens = state.tokens;
+  const out: Token[] = [];
+  for (let i = 0; i < tokens.length;) {
+    if (tokens[i].type !== 'blockquote_open') {
+      out.push(tokens[i++]);
+      continue;
+    }
+    let depth = 0;
+    let end = i;
+    do {
+      if (tokens[end].type === 'blockquote_open') depth++;
+      else if (tokens[end].type === 'blockquote_close') depth--;
+      end++;
+    } while (depth > 0 && end < tokens.length);
+    const quote = tokens.slice(i, end);
+    splitAlertsInQuote(state, quote);
+    pushAll(out, quote);
+    i = end;
+  }
+  tokens.length = 0;
+  pushAll(tokens, out);
+}
+
+/** Alerts in `tokens`, those of one top-level quote, marked on their quotes,
+ *  with each of more than one in a quote or a paragraph in a quote of its
+ *  own */
+function splitAlertsInQuote(state: StateCore, tokens: Token[]): void {
   let i = 0;
   while (i < tokens.length) {
     if (tokens[i].type !== 'blockquote_open') { i++; continue; }
@@ -173,7 +202,7 @@ function alertBlockquoteRule(state: StateCore): void {
       }
       // Replace paragraph_open/inline/paragraph_close with expanded groups
       const removeCount = pCloseIdx - pOpenIdx + 1;
-      tokens.splice(pOpenIdx, removeCount, ...replacement);
+      spliceAll(tokens, pOpenIdx, removeCount, replacement);
       closeIdx += replacement.length - removeCount;
       // Re-scan from current position
       j = pOpenIdx - 1;
@@ -289,7 +318,7 @@ function alertBlockquoteRule(state: StateCore): void {
     }
 
     // Replace original blockquote_open...blockquote_close with rebuilt
-    tokens.splice(i, closeIdx - i + 1, ...rebuilt);
+    spliceAll(tokens, i, closeIdx - i + 1, rebuilt);
     // Don't increment i — re-process from same position since rebuilt tokens
     // are already annotated and won't match the hits scan again
     i += rebuilt.length;
